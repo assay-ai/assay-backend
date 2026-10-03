@@ -1,0 +1,95 @@
+import { validateConfig } from '@shared/utils/validate-config';
+import { registerAs } from '@nestjs/config';
+import { IsBoolean, IsEnum, IsNotEmpty, IsNumber, IsString, IsOptional } from 'class-validator';
+
+enum EEnvironment {
+  Local = 'local',
+  Development = 'development',
+  Production = 'production',
+}
+
+enum EServiceType {
+  API = 'api',
+  WEBSOCKET = 'websocket',
+  SCHEDULER = 'scheduler',
+  ALL = 'all',
+  API_AND_SCHEDULER = 'api_and_scheduler',
+  API_AND_WEBSOCKET = 'api_and_websocket',
+  WORKER = 'worker',
+  SCHEDULER_AND_WORKER = 'scheduler_and_worker',
+  /** The x402 SVM facilitator (`/verify` `/settle` `/supported`) — its own
+   *  service type so the fee-payer signer never shares a process with the
+   *  API. */
+  FACILITATOR = 'facilitator',
+  /** The MCP server — its own scaling unit: the Streamable HTTP transport
+   *  is stateless per request, so it scales purely on agent traffic. */
+  MCP = 'mcp',
+}
+
+class AppEnvVariables {
+  @IsEnum(EEnvironment)
+  @IsNotEmpty()
+  @IsString()
+  NODE_ENV: EEnvironment;
+
+  @IsEnum(EServiceType)
+  @IsNotEmpty()
+  @IsString()
+  SERVICE_TYPE: EServiceType;
+
+  @IsNumber()
+  @IsNotEmpty()
+  TYPEORM_CACHE_TTL_MULTIPLIER: number;
+
+  @IsBoolean()
+  @IsNotEmpty()
+  TYPEORM_CACHE_ENABLED: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  HTTP_CACHE_ENABLED?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  BROWSER_CACHE_ENABLED?: boolean;
+
+  @IsBoolean()
+  @IsOptional()
+  CDN_CACHE_ENABLED?: boolean;
+}
+
+const appConfig = registerAs('app', () => {
+  validateConfig(process.env, AppEnvVariables);
+
+  return {
+    nodeEnv: process.env.NODE_ENV,
+    serviceType: process.env.SERVICE_TYPE,
+    api: {
+      port: parseInt(process.env.API_PORT, 10),
+      typeormCacheEnabled: process.env.TYPEORM_CACHE_ENABLED === 'true',
+      typeormCacheTtlMultiplier: parseInt(process.env.TYPEORM_CACHE_TTL_MULTIPLIER, 10),
+      httpCacheEnabled: process.env.HTTP_CACHE_ENABLED !== 'false',
+      browserCacheEnabled: process.env.BROWSER_CACHE_ENABLED !== 'false',
+      cdnCacheEnabled: process.env.CDN_CACHE_ENABLED !== 'false',
+    },
+    websocket: {
+      port: parseInt(process.env.WEBSOCKET_PORT, 10),
+    },
+    worker: {
+      port: parseInt(process.env.WORKER_PORT, 10),
+      concurrency: parseInt(process.env.WORKER_CONCURRENCY || '4', 10),
+    },
+    scheduler: {
+      port: parseInt(process.env.SCHEDULER_PORT, 10),
+      enabled: process.env.SCHEDULER_ENABLED !== 'false',
+    },
+    facilitator: {
+      port: parseInt(process.env.FACILITATOR_PORT || '3100', 10),
+    },
+    mcp: {
+      port: parseInt(process.env.MCP_PORT || '3200', 10),
+    },
+  };
+});
+
+export { EEnvironment, EServiceType, appConfig };

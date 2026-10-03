@@ -1,0 +1,43 @@
+import { Injectable } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+
+import { BindingTestRunEntity } from '../entities/binding-test-run.entity';
+import { OrganizationScopedRepository } from './organization-scoped.repository';
+
+/**
+ * `binding_test_runs`.
+ *
+ * Organization-scoped throughout: a tester run belongs to the provider who ran
+ * it, the publish gate reads only their own, and nothing about a sandbox call
+ * is another tenant's business.
+ */
+@Injectable()
+export class BindingTestRunRepository extends OrganizationScopedRepository<BindingTestRunEntity> {
+  constructor(@InjectDataSource('postgres') dataSource: DataSource) {
+    super(BindingTestRunEntity, dataSource);
+  }
+
+  /**
+   * The newest run for one binding **at one revision**, or `null`.
+   *
+   * The revision is part of the key, not a filter applied afterwards, because
+   * that is exactly what the publish gate is asking: not "has this binding
+   * ever passed" but "has *what I am about to publish* passed". A run against
+   * revision 3 says nothing about revision 4, and the difference between those
+   * two questions is a mapping edited after the tester went green.
+   */
+  async findLatestForRevision(
+    organizationId: string,
+    bindingId: string,
+    mappingVersion: number,
+  ): Promise<BindingTestRunEntity | null> {
+    const rows = await this.find({
+      where: { organizationId, bindingId, mappingVersion },
+      order: { createdAt: 'DESC' },
+      take: 1,
+    });
+
+    return rows[0] ?? null;
+  }
+}

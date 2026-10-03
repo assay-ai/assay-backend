@@ -1,0 +1,35 @@
+{
+  "moduleFileExtensions": [
+    "js",
+    "json",
+    "ts"
+  ],
+  "rootDir": ".",
+  "testEnvironment": "node",
+  "testRegex": "test/unit/.*\\.spec\\.ts$",
+  "transform": {
+    "^.+\\.(t|j)s$": "ts-jest"
+  },
+  "moduleNameMapper": {
+    "^@shared/(.*)$": "<rootDir>/../src/shared/$1",
+    "^@config/(.*)$": "<rootDir>/../src/config/$1",
+    "^@constants/(.*)$": "<rootDir>/../src/shared/constants/$1",
+    "^@database/(.*)$": "<rootDir>/../src/database/$1",
+    "^@modules/(.*)$": "<rootDir>/../src/modules/$1",
+    "^@providers/(.*)$": "<rootDir>/../src/providers/$1",
+    "^@decorators/(.*)$": "<rootDir>/../src/shared/decorators/$1",
+    "^@exceptions/(.*)$": "<rootDir>/../src/shared/exceptions/$1",
+    "^@filters/(.*)$": "<rootDir>/../src/shared/filters/$1",
+    "^@utils/(.*)$": "<rootDir>/../src/shared/utils/$1",
+    "^@bootstrap/(.*)$": "<rootDir>/../src/bootstrap/$1",
+    "^@schedule/(.*)$": "<rootDir>/../src/modules/_examples/schedule/$1",
+    "^@websocket/(.*)$": "<rootDir>/../src/websocket/$1"
+  },
+  "collectCoverageFrom": [
+    "src/**/*.(t|j)s"
+  ],
+  "coverageDirectory": "../coverage",
+  "setupFiles": [
+    "<rootDir>/setup-env.ts"
+  ]
+}

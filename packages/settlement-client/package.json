@@ -1,0 +1,28 @@
+{
+  "name": "@x402/settlement-client",
+  "version": "1.0.0",
+  "description": "Generated @solana/kit client for the x402 settlement program. Do not hand-edit src/generated.",
+  "private": true,
+  "license": "SEE LICENSE IN ../../LICENSE",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "files": [
+    "dist",
+    "idl"
+  ],
+  "scripts": {
+    "generate": "node scripts/generate.mjs",
+    "check:generated": "node scripts/check-generated.mjs",
+    "build": "tsc -p tsconfig.json"
+  },
+  "dependencies": {
+    "@solana/kit": "^7.0.0",
+    "@solana/program-client-core": "^7.1.0"
+  },
+  "devDependencies": {
+    "@codama/nodes-from-anchor": "^1.5.4",
+    "@codama/renderers-js": "^2.3.1",
+    "codama": "^1.10.1",
+    "typescript": "^5.7.2"
+  }
+}

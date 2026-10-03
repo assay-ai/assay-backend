@@ -1,0 +1,41 @@
+# What must not reach a build context.
+#
+# The Dockerfile's development stage runs `COPY . .`, so everything not listed
+# here is in the image layer that stage produces — readable with
+# `docker history` / `docker save` whether or not the final stage copies it.
+
+# Environment files. This repo's own `.env.example` ships
+# `EXAMPLES_ENABLED=true` and `DIAGNOSTICS_ENABLED=true`, and a `.env` copied
+# from it sets both in a container whose NODE_ENV is production — `dotenv` does
+# not override a variable that is already set, but it does set one that is not.
+# `scripts/deploy/check-examples-disabled.mjs` requires this rule to exist.
+#
+# A `.env` also holds the facilitator's fee-payer key and the database password,
+# and a secret in an image layer is one
+# that has to be rotated rather than deleted.
+.env
+.env.*
+!.env.example
+
+# Keys, in every form the repo's .gitignore knows about.
+*.devnet.json
+.keys/
+**/*.keypair.json
+
+# Build output — rebuilt inside the image, and stale copies shadow it.
+dist
+packages/*/dist
+node_modules
+packages/*/node_modules
+
+# Local state and tooling that has no meaning in an image.
+.git
+.github
+coverage
+.nyc_output
+*.log
+.DS_Store
+.idea
+.vscode
+docker-compose.yml
+Dockerfile

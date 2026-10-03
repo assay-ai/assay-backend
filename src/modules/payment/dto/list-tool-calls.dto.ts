@@ -1,0 +1,80 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsEnum, IsOptional, IsUUID } from 'class-validator';
+
+import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
+import { VerdictStatus } from '@modules/verification/domain/verdict';
+import { TransformToArray } from '@decorators/transform-to-array.decorator';
+import { ListQueryDto } from '@shared/api';
+
+import { PaymentIntentStatus } from '../ports/payment.types';
+
+/**
+ * `GET /api/v1/tool-calls` — the call list every buyer screen opens
+ * with. `payment_intents` LEFT JOIN `verification_records`.
+ *
+ * `status` and `verdict` are arrays — repeated values within one filter are
+ * OR'd, per `backend/docs/api-list-contract.md`. `toolId` / `providerId` stay
+ * scalar: a screen filtering "this tool" or "this provider" names exactly one.
+ */
+export class ListToolCallsQueryDto extends ListQueryDto {
+  @ApiPropertyOptional({ enum: PaymentIntentStatus, isArray: true })
+  @IsOptional()
+  @IsEnum(PaymentIntentStatus, { each: true })
+  @TransformToArray()
+  status?: PaymentIntentStatus[];
+
+  @ApiPropertyOptional({ description: 'Tool id, exact match' })
+  @IsOptional()
+  @IsUUID()
+  toolId?: string;
+
+  @ApiPropertyOptional({ description: 'Provider id, exact match' })
+  @IsOptional()
+  @IsUUID()
+  providerId?: string;
+
+  @ApiPropertyOptional({
+    enum: VerdictStatus,
+    isArray: true,
+    description: 'Only calls whose verification record carries one of these verdicts',
+  })
+  @IsOptional()
+  @IsEnum(VerdictStatus, { each: true })
+  @TransformToArray()
+  verdict?: VerdictStatus[];
+}
+
+/** One row of the call list, and the shape `GET /tool-calls/:intentId` returns for one. */
+export class ToolCallDto {
+  @ApiProperty({ description: 'The payment intent id' })
+  intentId: string;
+
+  @ApiProperty()
+  toolId: string;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Null until the router has picked one' })
+  providerId: string | null;
+
+  @ApiProperty({ description: 'One of PaymentIntentStatus' })
+  status: PaymentIntentStatus;
+
+  @ApiProperty({ type: MoneyDto, description: 'What the call is listed at' })
+  price: MoneyDto;
+
+  @ApiProperty({
+    type: MoneyDto,
+    description:
+      'What the agent actually paid — zero until SETTLED, always present even when equal',
+  })
+  charged: MoneyDto;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    enum: VerdictStatus,
+    description: 'Null until verification has judged this call',
+  })
+  verdict: VerdictStatus | null;
+
+  @ApiProperty()
+  createdAt: Date;
+}

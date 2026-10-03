@@ -1,0 +1,316 @@
+import { Inject, Injectable, Logger } from '@nestjs/common';
+import { encodeFunctionData, getAddress, isAddress } from 'viem';
+
+import { SettlementErrors } from '@modules/settlement/errors/settlement.errors';
+import { EscrowIntentKind } from '@modules/settlement/ports/escrow-intent-builder.port';
+import {
+  RelayedEscrowIntent,
+  RelayedEscrowIntentPort,
+  RelayedEscrowSubmission,
+} from '@modules/settlement/ports/relayed-escrow-intent.port';
+
+import { ChainErrors } from '../errors/chains.errors';
+import { AccountId, ChainId, parseAccountId, toAccountId } from '../ports/caip.types';
+import { evmErrorName, revertDataOf } from './abi/error-selectors';
+import { X402_ESCROW_ABI } from './abi/x402.abi';
+import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
+import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
+
+/**
+ * One read call, and **no send**.
+ *
+ * The same structural guarantee `EvmEscrowIntentBuilder` and
+ * `EvmGasGrantService` make with their own narrow client interfaces: a class
+ * that cannot reach `sendRawTransaction` cannot acquire the capability by
+ * accident, and a reviewer does not have to establish that nobody did. The send
+ * is {@link EvmRelayerPort.sendCall}'s, which queues nonces, decodes reverts and
+ * watches the float.
+ */
+export interface EvmRelayedIntentClient {
+  estimateGas(args: {
+    account: `0x${string}`;
+    to: `0x${string}`;
+    data: `0x${string}`;
+    value: bigint;
+  }): Promise<bigint>;
+}
+
+/** Every amount argument on `X402Escrow` is a `uint64`. */
+const MAX_UINT64 = 2n ** 64n - 1n;
+
+/** `r || s || v`, 65 bytes. The same shape `EvmVoucherRedeemer` demands. */
+const SECP256K1_SIGNATURE_RE = /^0x[0-9a-fA-F]{130}$/;
+
+/**
+ * The gas a relayed `*BySig` call may cost, measured and then bounded.
+ *
+ * assay-evm's `docs/gas.md` has no figure for either door; the numbers that
+ * exist are live measurements — **65,536** for
+ * `setLimitsBySig` and **65,638** for `requestWithdrawBySig`, both on a fork of
+ * 46630 against the real deployment. This ceiling is 4.5× the larger of them.
+ *
+ * It is not a budget handed to the relayer — the estimate is, with a 20 %
+ * margin. It is the point at which a relayed request is refused rather than
+ * paid for, and it exists because **the per-request gas cost is the unit the
+ * rate limit is denominated in**: "10 submissions an hour" bounds nothing
+ * unless a submission has a known worst case. A call that estimates above this
+ * is a call against a contract shaped differently from the one these numbers
+ * were taken on, and the right answer to that is to stop rather than to pay
+ * whatever it comes to.
+ */
+export const EVM_RELAYED_INTENT_MAX_GAS = 300_000n;
+
+/**
+ * `RelayedEscrowIntentPort` on `eip155` — **the buyer signs, the relayer
+ * sends**, and this is the verb that was missing.
+ *
+ * The platform issues an EIP-712 request, a wallet signs it, and this class
+ * takes the signature back and relays it. `EvmRelayerPort.sendCall` is
+ * otherwise used only by the voucher batch and `sendValue` only by the gas
+ * grant; this is the one production path that encodes the `*BySig`
+ * functions.
+ *
+ * ## What this class decides, and what it deliberately does not
+ *
+ * **The signature is the authority for what happens; the session is the
+ * authority for whether we pay for it.** The contract already refuses a wrong
+ * signer (`SignerIsNotBuyer`), a replay (`BadNonce`), a malleable `s`
+ * (`MalleableSignature`) and a stale deadline (`SignatureExpired`) — all four
+ * proved live — so none of them is re-implemented here. There is no `ecrecover`
+ * in this file and there must not be one: a second opinion about a signature is
+ * a second thing that can disagree with the chain, and the chain wins.
+ *
+ * What is decided here is whose gas is spent, in two steps:
+ *
+ * 1. **The call is encoded from fields, never forwarded.** The request carries
+ *    an amount, a pair of limits, a nonce and a deadline; the `to` is the
+ *    deployment's escrow and the function is picked by a `switch` on a kind that
+ *    cannot be `WITHDRAW`. No caller-supplied bytes choose the target or the
+ *    selector, so the relayer gains no capability it did not already have.
+ * 2. **A pre-flight `eth_estimateGas` from the relayer's own address.** It
+ *    executes the call in the same context the send will, so every refusal the
+ *    chain would make arrives here — for the price of one RPC round trip instead
+ *    of a reverted transaction's gas. It also returns the gas, so the pre-flight
+ *    and the budget are one call rather than two.
+ *
+ * The `buyer` the call names comes from {@link RelayedEscrowIntent.account},
+ * which is the session's own account. `WithdrawalService` refuses a body naming
+ * anybody else before reaching this class; encoding from the session here is
+ * what makes that refusal a second line rather than the only one.
+ *
+ * ## A revert is not a 500
+ *
+ * Both the pre-flight and the send map revert data through the shared
+ * `evmErrorName` table, so a buyer is told `BadNonce` or `SignatureExpired`
+ * rather than handed a decode failure. `transactionHash` on the refusal is what
+ * separates "caught before it cost anything" from "state moved between the
+ * pre-flight and the send"; the second is rare and is the one that costs the
+ * relayer money, so it is logged as well as reported.
+ */
+@Injectable()
+export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort {
+  private readonly logger = new Logger(EvmRelayedEscrowIntentSubmitter.name);
+
+  constructor(
+    @Inject(EVM_RPC_CLIENTS)
+    private readonly clients: ReadonlyMap<ChainId, EvmRelayedIntentClient>,
+    @Inject(EVM_DEPLOYMENTS) private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
+    @Inject(EVM_RELAYER) private readonly relayer: EvmRelayerPort,
+  ) {}
+
+  async submit(intent: RelayedEscrowIntent): Promise<RelayedEscrowSubmission> {
+    const { chainId, address: buyer } = this.parse(intent.account);
+    const deployment = this.deployment(chainId);
+    const to = getAddress(deployment.escrow);
+
+    const data = this.encode(intent, buyer);
+    const relayer = parseAccountId(await this.relayer.address(chainId)).address as `0x${string}`;
+
+    const gasLimit = await this.preflight(chainId, relayer, to, data);
+
+    const result = await this.relayer.sendCall({
+      chainId,
+      to: toAccountId(chainId, to),
+      data,
+      gasLimit,
+      purpose: `${intent.kind} bySig nonce=${intent.nonce}`,
+    });
+
+    if (result.status !== 'SUCCESS') {
+      // The pre-flight passed and the send still reverted, so state moved between
+      // the two — a block mined, or a load balancer answering from two nodes at
+      // different heights. This is the branch that costs real gas, so it is
+      // logged as well as reported.
+      this.logger.warn(
+        `a relayed ${intent.kind} for ${intent.account} passed pre-flight and then reverted ` +
+          `with ${result.revertReason ?? 'an unreadable reason'} at ${result.hash}`,
+      );
+      throw SettlementErrors.relayedIntentRefused({
+        reason: result.revertReason,
+        transactionHash: result.hash,
+      });
+    }
+
+    return {
+      transactionHash: result.hash,
+      blockNumber: result.blockNumber.toString(),
+      gasUsed: result.gasUsed.toString(),
+    };
+  }
+
+  // ── Internals ────────────────────────────────────────────────────────────
+
+  /**
+   * The calldata, built from **validated fields** against this repository's own
+   * vendored ABI.
+   *
+   * The `switch` is exhaustive over a kind that cannot be `WITHDRAW` — the
+   * union excludes it at the type level, because `withdraw()` is
+   * `msg.sender`-only and there is no `withdrawBySig` in the contract, in
+   * `X402_ESCROW_ABI` or in the deployed bytecode (checked against a live
+   * deployment). A `default:` branch here would be a place for one to appear.
+   */
+  private encode(intent: RelayedEscrowIntent, buyer: `0x${string}`): `0x${string}` {
+    const signature = this.signature(intent.signature);
+    const nonce = this.uint64(intent.nonce, 'nonce');
+    const deadline = this.uint64(intent.deadline, 'deadline');
+
+    switch (intent.kind) {
+      case EscrowIntentKind.SET_LIMITS:
+        return encodeFunctionData({
+          abi: X402_ESCROW_ABI,
+          functionName: 'setLimitsBySig',
+          args: [
+            buyer,
+            this.uint64(intent.maxVoucherAmount, 'maxVoucherAmount'),
+            this.uint64(intent.maxPerWindow, 'maxPerWindow'),
+            nonce,
+            deadline,
+            signature,
+          ],
+        });
+
+      case EscrowIntentKind.REQUEST_WITHDRAW:
+        return encodeFunctionData({
+          abi: X402_ESCROW_ABI,
+          functionName: 'requestWithdrawBySig',
+          args: [buyer, this.uint64(intent.amount, 'amount'), nonce, deadline, signature],
+        });
+    }
+  }
+
+  /**
+   * `eth_estimateGas` **from the relayer's own address**, which is both the
+   * pre-flight and the budget.
+   *
+   * From the relayer's address rather than from the buyer's because that is who
+   * will send it: `*BySig` reads the authority out of the signature and not out
+   * of `msg.sender`, so the two differ in nothing the contract checks — but an
+   * estimate taken from an address that will not be the sender is an estimate of
+   * a different transaction, and the day that stops being true it should fail
+   * here rather than on chain.
+   *
+   * Every revert the chain would make arrives as a throw, and the refusal it
+   * becomes carries **no transaction hash** — because nothing was sent, and
+   * nothing was paid for. That is the whole griefing bound on invalid requests:
+   * a signature that is expired, replayed, malleated or somebody else's costs
+   * one RPC round trip, never gas.
+   *
+   * Anything that is not revert data — a transport failure, a node that is down
+   * — propagates untouched, for the reason `estimateWithdrawGas` gives next
+   * door: mapping everything here would answer "the chain refused you" to an
+   * outage, which is a wrong answer that reads like an actionable one.
+   */
+  private async preflight(
+    chainId: ChainId,
+    relayer: `0x${string}`,
+    to: `0x${string}`,
+    data: `0x${string}`,
+  ): Promise<bigint> {
+    let estimate: bigint;
+    try {
+      estimate = await this.client(chainId).estimateGas({ account: relayer, to, data, value: 0n });
+    } catch (error) {
+      const revertData = revertDataOf(error);
+      if (revertData === null) {
+        throw error;
+      }
+      throw SettlementErrors.relayedIntentRefused({ reason: evmErrorName(revertData) });
+    }
+
+    // 20 % margin, for the reason the builder gives at its own: an estimate is a
+    // floor rather than an answer, and a transaction that runs out of gas has
+    // still spent it.
+    const gasLimit = (estimate * 12n) / 10n;
+    if (gasLimit > EVM_RELAYED_INTENT_MAX_GAS) {
+      throw SettlementErrors.relayedIntentRefused({
+        reason:
+          `the call estimates at ${gasLimit} gas, above the ${EVM_RELAYED_INTENT_MAX_GAS} ` +
+          `ceiling a relayed request is allowed to cost`,
+      });
+    }
+    return gasLimit;
+  }
+
+  /**
+   * The reading door, applying EIP-55 **strictly** — the same check every other
+   * entry point on this chain got after the adapter's own was measured
+   * repairing a broken checksum. Here a repaired address would be a call
+   * encoded for somebody nobody verified, paid for by the platform.
+   */
+  private parse(account: AccountId): { chainId: ChainId; address: `0x${string}` } {
+    const parsed = parseAccountId(account);
+    if (!this.deployments.has(parsed.chainId)) {
+      throw ChainErrors.unsupportedChain({ chainId: parsed.chainId });
+    }
+    if (!isAddress(parsed.address, { strict: true })) {
+      throw ChainErrors.invalidAddress({ chainId: parsed.chainId, address: parsed.address });
+    }
+    return { chainId: parsed.chainId, address: getAddress(parsed.address) };
+  }
+
+  private signature(value: string): `0x${string}` {
+    if (!SECP256K1_SIGNATURE_RE.test(value)) {
+      throw SettlementErrors.relayedIntentMalformed({
+        reason: 'the signature is not 65 bytes of hex (r || s || v)',
+      });
+    }
+    return value as `0x${string}`;
+  }
+
+  /**
+   * Every amount argument on `X402Escrow` is a `uint64`, and these arrive from
+   * an HTTP body rather than from `Money`.
+   *
+   * Out of range would otherwise throw inside viem's encoder with a message
+   * about a word, at a point where the caller can no longer tell which field it
+   * was — and a 400 naming the field is what a console can act on.
+   */
+  private uint64(value: bigint, field: string): bigint {
+    if (value < 0n || value > MAX_UINT64) {
+      throw SettlementErrors.relayedIntentMalformed({
+        reason: `${field} does not fit the uint64 the escrow declares`,
+      });
+    }
+    return value;
+  }
+
+  private deployment(chainId: ChainId): EvmDeployment {
+    const deployment = this.deployments.get(chainId);
+    if (!deployment) {
+      throw ChainErrors.unsupportedChain({ chainId });
+    }
+    return deployment;
+  }
+
+  private client(chainId: ChainId): EvmRelayedIntentClient {
+    const client = this.clients.get(chainId);
+    if (!client) {
+      throw ChainErrors.programNotConfigured({
+        what: `a JSON-RPC client for ${chainId}`,
+        variable: 'EVM_RPC_URLS',
+      });
+    }
+    return client;
+  }
+}

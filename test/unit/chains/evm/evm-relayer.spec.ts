@@ -1,0 +1,344 @@
+import { parseTransaction } from 'viem';
+import { privateKeyToAccount } from 'viem/accounts';
+
+import { Alert, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
+
+import { CHAIN_IDS, ChainId, toAccountId } from '@modules/chains/ports/caip.types';
+import { EvmRelayClient, EvmRelayer } from '@modules/chains/evm/evm-relayer.service';
+import { EvmValueTransfer } from '@modules/chains/evm/ports/evm-relayer.port';
+
+/**
+ * The relayer EOA: it sends transactions, it never signs a user's, and it
+ * can never move USDG.
+ *
+ * ## What the assertions are made against
+ *
+ * The stub captures the **serialized** transaction and every assertion decodes
+ * it with viem's `parseTransaction` — a different code path from the one that
+ * built it. Capturing the object before signing would assert that the relayer
+ * passed its own arguments along, which is true of any implementation
+ * including one that then signs something else.
+ */
+const TESTNET = CHAIN_IDS.ROBINHOOD_TESTNET;
+const RELAYER_KEY = '0x4c0883a69102937d6231471b5dbb6204fe5129617082792ae468d01a3f362318';
+const RELAYER_ADDRESS = '0x2c7536E3605D9C16a7a3D7b1898e529396a65c23';
+const ESCROW = '0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec';
+const CALLDATA = '0xa9059cbb0000000000000000000000000000000000000000000000000000000000000001';
+
+/** `EscrowInsufficient()`, from `Errors.sol` by way of the selector table. */
+const ESCROW_INSUFFICIENT = '0x71de3750';
+
+describe('EvmRelayer', () => {
+  it('is the account the key implies, in CAIP-10', async () => {
+    const { relayer } = build();
+
+    await expect(relayer.address(TESTNET)).resolves.toBe(toAccountId(TESTNET, RELAYER_ADDRESS));
+    // The independent source: the same key, through viem's own derivation.
+    expect(privateKeyToAccount(RELAYER_KEY).address).toBe(RELAYER_ADDRESS);
+  });
+
+  it('sends the calldata it was given, to the address it was given', async () => {
+    const { relayer, node } = build();
+
+    const result = await relayer.sendCall({
+      chainId: TESTNET,
+      to: toAccountId(TESTNET, ESCROW),
+      data: CALLDATA,
+      gasLimit: 250_000n,
+      purpose: 'redeem',
+    });
+
+    expect(result.status).toBe('SUCCESS');
+    const [tx] = node.decoded();
+    expect(tx.to?.toLowerCase()).toBe(ESCROW.toLowerCase());
+    expect(tx.data).toBe(CALLDATA);
+    expect(tx.gas).toBe(250_000n);
+    expect(tx.value ?? 0n).toBe(0n);
+    // The chain id is IN the signed payload (EIP-155), so a transaction signed
+    // for the wrong chain cannot be replayed onto this one.
+    expect(tx.chainId).toBe(46630);
+  });
+
+  it('signs EIP-1559 and never a legacy gasPrice', async () => {
+    const { relayer, node } = build();
+
+    await relayer.sendCall(call());
+
+    const [tx] = node.decoded();
+    expect(tx.type).toBe('eip1559');
+    expect(tx.maxFeePerGas).toBe(node.fees.maxFeePerGas);
+    expect(tx.maxPriorityFeePerGas).toBe(node.fees.maxPriorityFeePerGas);
+    expect(tx).not.toHaveProperty('gasPrice');
+  });
+
+  it('reads the nonce once per send and does not reuse a stale one', async () => {
+    // Two sends in a row must use n and n+1. A relayer that cached the nonce —
+    // across a process restart, or across a failed send — produces a
+    // REPLACEMENT transaction rather than a second one, which silently drops a
+    // redemption while reporting a hash.
+    const { relayer, node } = build();
+
+    await relayer.sendCall(call());
+    await relayer.sendCall(call());
+
+    expect(node.decoded().map((tx) => tx.nonce)).toEqual([7, 8]);
+    expect(node.nonceReads).toBe(2);
+  });
+
+  it('serialises concurrent sends so two redemptions cannot draw one nonce', async () => {
+    // The failure this prevents is not hypothetical: the batch job and the gas
+    // grant both send, and `getTransactionCount` is a round trip. Without a
+    // per-chain queue both reads return 7, both transactions are signed with
+    // nonce 7, and the second replaces the first in the mempool.
+    const { relayer, node } = build({ nonceLatencyTicks: 3 });
+
+    await Promise.all([relayer.sendCall(call()), relayer.sendCall(call())]);
+
+    expect(
+      node
+        .decoded()
+        .map((tx) => tx.nonce)
+        .sort(),
+    ).toEqual([7, 8]);
+  });
+
+  it('reports a revert by its Errors.sol NAME, not as a success', async () => {
+    const { relayer, node } = build();
+    node.revertWith(ESCROW_INSUFFICIENT);
+
+    const result = await relayer.sendCall(call());
+
+    expect(result).toEqual(
+      expect.objectContaining({ status: 'REVERTED', revertReason: 'EscrowInsufficient' }),
+    );
+  });
+
+  it('names an unrecognised revert rather than reporting SUCCESS', async () => {
+    // The control. `revertReason: null` on a REVERTED result would let a caller
+    // treat "we do not know why it failed" as "it did not fail".
+    const { relayer, node } = build();
+    node.revertWith('0xdeadbeef');
+
+    const result = await relayer.sendCall(call());
+
+    expect(result.status).toBe('REVERTED');
+    expect(result.revertReason).toBe('UNKNOWN_REVERT:0xdeadbeef');
+  });
+
+  it('is still REVERTED when the revert data cannot be recovered at all', async () => {
+    // A node that will not re-run the call — pruned state, a rate limit — must
+    // not turn a reverted transaction into a successful one. The reason
+    // degrades; the status does not.
+    const { relayer, node } = build();
+    node.revertWith(null);
+
+    const result = await relayer.sendCall(call());
+
+    expect(result.status).toBe('REVERTED');
+    expect(result.revertReason).toBe('UNKNOWN_REVERT:none');
+  });
+
+  it('sends value with no calldata at all', async () => {
+    const { relayer, node } = build();
+
+    await relayer.sendValue({
+      chainId: TESTNET,
+      to: toAccountId(TESTNET, ESCROW),
+      wei: 1_000_000_000_000_000n,
+      purpose: 'gas grant',
+    });
+
+    const [tx] = node.decoded();
+    expect(tx.value).toBe(1_000_000_000_000_000n);
+    // Empty, not "the calldata of the last call" and not undefined-as-anything.
+    expect(tx.data === undefined || tx.data === '0x').toBe(true);
+    expect(tx.gas).toBe(21_000n);
+  });
+
+  it('sendValue has no way to carry calldata', () => {
+    // Structural, and the reason the relayer's value transfers are safe. If somebody adds a `data`
+    // field to `EvmValueTransfer`, this fails — and it is the only thing that
+    // would, because a widened type compiles everywhere.
+    const transfer: EvmValueTransfer = {
+      chainId: TESTNET,
+      to: toAccountId(TESTNET, ESCROW),
+      wei: 1n,
+      purpose: 'x',
+    };
+
+    expect(Object.keys(transfer).sort()).toEqual(['chainId', 'purpose', 'to', 'wei']);
+  });
+
+  it('refuses a chain it holds no key for, before touching the network', async () => {
+    const { relayer, node } = build({ keys: [] });
+
+    await expect(relayer.sendCall(call())).rejects.toThrow(/EVM_RELAYER_KEYS/);
+    expect(node.sent).toHaveLength(0);
+  });
+
+  it('refuses to send to a different chain than the one it was asked for', async () => {
+    // `to` is CAIP-10 and carries its own chain. A mismatch means somebody
+    // built the call from two sources, and sending it anyway puts the platform's
+    // gas behind an address that was never checked on this chain.
+    const { relayer, node } = build();
+
+    await expect(
+      relayer.sendCall({ ...call(), to: toAccountId(CHAIN_IDS.ROBINHOOD_MAINNET, ESCROW) }),
+    ).rejects.toThrow(/eip155:4663/);
+    expect(node.sent).toHaveLength(0);
+  });
+
+  it('warns once when the float is low, and not at all when it is not', async () => {
+    // The float is the whole loss budget, so it has to be visible before it is
+    // empty — and `ONCE_PER_INCIDENT`, because an empty relayer otherwise
+    // produces one alert per attempted send, which is how a channel gets muted.
+    const { relayer, node, alerts } = build({ lowWaterMarkWei: 10n ** 16n });
+    node.balance = 10n ** 15n;
+
+    await relayer.sendCall(call());
+
+    expect(alerts.emitted).toHaveLength(1);
+    expect(alerts.emitted[0]).toEqual(
+      expect.objectContaining({
+        severity: AlertSeverity.WARN,
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: TESTNET,
+      }),
+    );
+  });
+
+  it('stays quiet while the float is above the mark', async () => {
+    const { relayer, node, alerts } = build({ lowWaterMarkWei: 10n ** 16n });
+    node.balance = 10n ** 17n;
+
+    await relayer.sendCall(call());
+
+    expect(alerts.emitted).toHaveLength(0);
+  });
+
+  it('exposes no method that could return key material', () => {
+    // The same reflective check `signer-port.contract.ts` makes, for the same
+    // reason: TypeScript is erased at runtime, and what leaks is a method
+    // somebody added to a class.
+    const { relayer } = build();
+    const surface = [
+      ...Object.getOwnPropertyNames(relayer),
+      ...Object.getOwnPropertyNames(Object.getPrototypeOf(relayer)),
+    ];
+
+    for (const forbidden of [
+      'exportKey',
+      'export',
+      'getSecret',
+      'getPrivateKey',
+      'privateKey',
+      'secretKey',
+      'seed',
+      'keyMaterial',
+      'account',
+      'accounts',
+    ]) {
+      expect(surface).not.toContain(forbidden);
+    }
+  });
+});
+
+// ── Fixtures ─────────────────────────────────────────────────────────────────
+
+function call() {
+  return {
+    chainId: TESTNET,
+    to: toAccountId(TESTNET, ESCROW),
+    data: CALLDATA as `0x${string}`,
+    gasLimit: 250_000n,
+    purpose: 'redeem',
+  };
+}
+
+/** A node that behaves like one: the pending count moves when a tx is sent. */
+class FakeNode implements EvmRelayClient {
+  readonly sent: `0x${string}`[] = [];
+  readonly fees = { maxFeePerGas: 1_500_000_000n, maxPriorityFeePerGas: 100_000_000n };
+
+  nonceReads = 0;
+  balance = 10n ** 18n;
+
+  private pending = 7;
+  private reverting: { data: `0x${string}` | null } | null = null;
+
+  constructor(private readonly nonceLatencyTicks = 0) {}
+
+  revertWith(data: string | null): void {
+    this.reverting = { data: data as `0x${string}` | null };
+  }
+
+  decoded() {
+    return this.sent.map((raw) => parseTransaction(raw));
+  }
+
+  async getTransactionCount(): Promise<number> {
+    this.nonceReads += 1;
+    for (let i = 0; i < this.nonceLatencyTicks; i += 1) {
+      await Promise.resolve();
+    }
+    return this.pending;
+  }
+
+  async getBalance(): Promise<bigint> {
+    return this.balance;
+  }
+
+  async estimateFeesPerGas() {
+    return this.fees;
+  }
+
+  async sendRawTransaction(args: { serializedTransaction: `0x${string}` }): Promise<`0x${string}`> {
+    this.sent.push(args.serializedTransaction);
+    this.pending += 1;
+    return `0x${'ab'.repeat(32)}`;
+  }
+
+  async waitForTransactionReceipt() {
+    return {
+      status: (this.reverting ? 'reverted' : 'success') as 'success' | 'reverted',
+      gasUsed: 123_456n,
+      blockNumber: 999n,
+    };
+  }
+
+  async call(): Promise<unknown> {
+    if (!this.reverting) {
+      return '0x';
+    }
+    // What the sanctioned transport throws for an `eth_call` revert.
+    throw Object.assign(new Error('EVM RPC eth_call failed: code 3'), {
+      data: this.reverting.data,
+    });
+  }
+}
+
+class FakeAlerts implements AlertPort {
+  readonly emitted: Alert[] = [];
+
+  async emit(alert: Alert): Promise<void> {
+    this.emitted.push(alert);
+  }
+}
+
+function build(
+  options: {
+    keys?: readonly { chainId: ChainId; secretKey: `0x${string}` }[];
+    lowWaterMarkWei?: bigint;
+    nonceLatencyTicks?: number;
+  } = {},
+) {
+  const node = new FakeNode(options.nonceLatencyTicks ?? 0);
+  const alerts = new FakeAlerts();
+  const relayer = new EvmRelayer(
+    new Map<ChainId, EvmRelayClient>([[TESTNET, node]]),
+    options.keys ?? [{ chainId: TESTNET, secretKey: RELAYER_KEY }],
+    alerts,
+    options.lowWaterMarkWei ?? 0n,
+  );
+  return { relayer, node, alerts };
+}

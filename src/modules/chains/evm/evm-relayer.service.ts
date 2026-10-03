@@ -1,0 +1,318 @@
+import { PrivateKeyAccount, privateKeyToAccount } from 'viem/accounts';
+
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
+import { Inject, Injectable } from '@nestjs/common';
+
+import { ChainErrors } from '../errors/chains.errors';
+import { AccountId, ChainId, parseAccountId, parseChainId } from '../ports/caip.types';
+import { evmErrorName, revertDataOf } from './abi/error-selectors';
+import {
+  EVM_RELAYER_KEYS_ENV,
+  EVM_RELAYER_KEY_SOURCES,
+  EvmRelayerKeySource,
+} from './evm-relayer-key-source';
+import {
+  EvmRelayResult,
+  EvmRelayedCall,
+  EvmRelayerPort,
+  EvmValueTransfer,
+} from './ports/evm-relayer.port';
+
+/**
+ * The write half of a JSON-RPC client, declared structurally so a test can
+ * supply one.
+ *
+ * Separate from `EvmReadClient` (the adapter's) rather than a superset of it:
+ * the adapter is read-only by construction and giving it a `sendRawTransaction`
+ * — even one it never calls — makes that a property of the code review rather
+ * than of the type.
+ */
+export interface EvmRelayClient {
+  getTransactionCount(args: { address: `0x${string}`; blockTag: 'pending' }): Promise<number>;
+  getBalance(args: { address: `0x${string}` }): Promise<bigint>;
+  estimateFeesPerGas(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>;
+  sendRawTransaction(args: { serializedTransaction: `0x${string}` }): Promise<`0x${string}`>;
+  waitForTransactionReceipt(args: { hash: `0x${string}` }): Promise<{
+    status: 'success' | 'reverted';
+    gasUsed: bigint;
+    blockNumber: bigint;
+  }>;
+  call(args: {
+    account?: `0x${string}`;
+    to: `0x${string}`;
+    data: `0x${string}`;
+    blockNumber?: bigint;
+  }): Promise<unknown>;
+}
+
+/** How little ETH is too little, when nothing says otherwise. */
+export const DEFAULT_RELAYER_LOW_WATER_MARK_WEI = 5_000_000_000_000_000n; // 0.005 ETH
+
+/**
+ * The relayer EOA, and the only thing in this codebase that signs and
+ * sends an EVM transaction of its own. (`EvmFacilitator` also broadcasts, but
+ * only bytes a buyer signed — it holds no key and cannot author one.)
+ *
+ * Read `ports/evm-relayer.port.ts` first: the argument for why a leak of this
+ * key costs the ETH float and nothing else lives there, beside the type it
+ * justifies.
+ *
+ * ## The key, and what this class does to earn holding it
+ *
+ * `EVM_RELAYER_KEYS` is read once at boot and **deleted from `process.env`**,
+ * through the same `takeOnceFromEnv` the verifier keys go through. The scalars
+ * are turned into viem accounts in the constructor and the source buffers are
+ * blanked; there is no method that returns one, and there is no field on this
+ * object that holds one — `#accounts` is a true private field, so nothing that
+ * walks the object finds it.
+ *
+ * What it cannot do, and says so: hold the material non-extractably. viem's
+ * account keeps the scalar. A KMS closes that and nothing at this layer can.
+ *
+ * ## Nonces
+ *
+ * Read per send, at `blockTag: 'pending'`, and **serialised per chain** through
+ * an in-process promise chain. Both halves are load-bearing:
+ *
+ * - a cached nonce survives a failed send and produces a *replacement*
+ *   transaction rather than a second one, which drops a redemption while
+ *   returning a hash;
+ * - two concurrent sends both read the same pending count, sign the same nonce,
+ *   and the second replaces the first in the mempool. The batch job and the gas
+ *   grant both send, so this is a real interleaving and not a thought
+ *   experiment.
+ *
+ * The queue is per chain because nonces are per chain per account; one global
+ * queue would serialise 46630 behind 4663 for no reason.
+ *
+ * ## Reverts
+ *
+ * A receipt says `reverted` and nothing else — the reason is not in it. So the
+ * call is re-run with `eth_call` at the receipt's block, the revert data is
+ * mapped through `evmErrorName`, and the result carries the `Errors.sol` name.
+ * When the data cannot be recovered the reason degrades to
+ * `UNKNOWN_REVERT:none`; **the status never does.**
+ */
+@Injectable()
+export class EvmRelayer implements EvmRelayerPort {
+  readonly name = 'evm-relayer-eoa';
+
+  /** `chainId` → the account. A `#private` field: not an own property. */
+  readonly #accounts: ReadonlyMap<ChainId, PrivateKeyAccount>;
+
+  /** `chainId` → the tail of that chain's send queue. */
+  private readonly queues = new Map<ChainId, Promise<unknown>>();
+
+  constructor(
+    private readonly clients: ReadonlyMap<ChainId, EvmRelayClient>,
+    @Inject(EVM_RELAYER_KEY_SOURCES) sources: readonly EvmRelayerKeySource[],
+    @Inject(ALERT_PORT) private readonly alerts: AlertPort,
+    private readonly lowWaterMarkWei: bigint = DEFAULT_RELAYER_LOW_WATER_MARK_WEI,
+  ) {
+    this.#accounts = new Map(
+      sources.map((source) => [source.chainId, privateKeyToAccount(source.secretKey)] as const),
+    );
+  }
+
+  async address(chainId: ChainId): Promise<AccountId> {
+    return this.accountId(chainId);
+  }
+
+  async balanceWei(chainId: ChainId): Promise<bigint> {
+    return this.clientFor(chainId).getBalance({ address: this.accountFor(chainId).address });
+  }
+
+  async sendCall(call: EvmRelayedCall): Promise<EvmRelayResult> {
+    const to = this.addressOnChain(call.chainId, call.to);
+    return this.send(call.chainId, { to, data: call.data, value: 0n, gas: call.gasLimit });
+  }
+
+  async sendValue(transfer: EvmValueTransfer): Promise<EvmRelayResult> {
+    const to = this.addressOnChain(transfer.chainId, transfer.to);
+    // `data` is absent, not empty-and-overwritable, and `gas` is the intrinsic
+    // cost of a transfer to an account. There is nothing here to fill in.
+    return this.send(transfer.chainId, { to, value: transfer.wei, gas: 21_000n });
+  }
+
+  // ── Internals ────────────────────────────────────────────────────────────
+
+  /**
+   * One send, queued behind every other send on the same chain.
+   *
+   * The queue tail is replaced before awaiting, so a rejected send does not
+   * poison the chain for every send after it — `catch` on the tail, not on the
+   * caller's promise.
+   */
+  private send(
+    chainId: ChainId,
+    tx: { to: `0x${string}`; data?: `0x${string}`; value: bigint; gas: bigint },
+  ): Promise<EvmRelayResult> {
+    const previous = this.queues.get(chainId) ?? Promise.resolve();
+    const result = previous.then(
+      () => this.sendNow(chainId, tx),
+      () => this.sendNow(chainId, tx),
+    );
+    this.queues.set(
+      chainId,
+      result.catch(() => undefined),
+    );
+    return result;
+  }
+
+  private async sendNow(
+    chainId: ChainId,
+    tx: { to: `0x${string}`; data?: `0x${string}`; value: bigint; gas: bigint },
+  ): Promise<EvmRelayResult> {
+    const client = this.clientFor(chainId);
+    const account = this.accountFor(chainId);
+
+    const [nonce, fees] = await Promise.all([
+      client.getTransactionCount({ address: account.address, blockTag: 'pending' }),
+      client.estimateFeesPerGas(),
+    ]);
+
+    const serializedTransaction = (await account.signTransaction({
+      chainId: Number(parseChainId(chainId).reference),
+      nonce,
+      to: tx.to,
+      value: tx.value,
+      // Present only for a call. `sendValue` never reaches this branch with
+      // anything, which is the type's guarantee rather than this line's.
+      ...(tx.data === undefined ? {} : { data: tx.data }),
+      gas: tx.gas,
+      maxFeePerGas: fees.maxFeePerGas,
+      maxPriorityFeePerGas: fees.maxPriorityFeePerGas,
+      type: 'eip1559',
+    })) as `0x${string}`;
+
+    const hash = await client.sendRawTransaction({ serializedTransaction });
+    const receipt = await client.waitForTransactionReceipt({ hash });
+
+    // After the send, not before: the float is being reported, and reporting it
+    // must not be able to stop a redemption that was going to work.
+    await this.warnIfFloatLow(chainId);
+
+    if (receipt.status === 'success') {
+      return {
+        hash,
+        status: 'SUCCESS',
+        revertReason: null,
+        gasUsed: receipt.gasUsed,
+        blockNumber: receipt.blockNumber,
+      };
+    }
+
+    return {
+      hash,
+      status: 'REVERTED',
+      revertReason: evmErrorName(
+        await this.revertDataFor(client, account.address, tx, receipt.blockNumber),
+      ),
+      gasUsed: receipt.gasUsed,
+      blockNumber: receipt.blockNumber,
+    };
+  }
+
+  /**
+   * Re-run the call at the block that reverted, to learn why.
+   *
+   * A receipt carries no reason, so this is the only route to one. Every
+   * failure of the re-run — a pruned node, a rate limit, a call that now
+   * succeeds because state moved — is `null`, which `evmErrorName` renders as
+   * `UNKNOWN_REVERT:none`. The status is decided by the receipt and is not
+   * touched here: a reason we could not recover must never become a success.
+   */
+  private async revertDataFor(
+    client: EvmRelayClient,
+    from: `0x${string}`,
+    tx: { to: `0x${string}`; data?: `0x${string}` },
+    blockNumber: bigint,
+  ): Promise<string | null> {
+    try {
+      await client.call({ account: from, to: tx.to, data: tx.data ?? '0x', blockNumber });
+      return null;
+    } catch (error) {
+      return revertDataOf(error);
+    }
+  }
+
+  /**
+   * The float is the whole loss budget, so it has to be visible before it is
+   * empty.
+   *
+   * `ONCE_PER_INCIDENT`: an empty relayer otherwise produces one alert per
+   * attempted send, which is how a channel gets muted — and a muted channel
+   * costs every other alert on it its audience.
+   */
+  private async warnIfFloatLow(chainId: ChainId): Promise<void> {
+    if (this.lowWaterMarkWei <= 0n) {
+      return;
+    }
+    const balance = await this.balanceWei(chainId);
+    if (balance >= this.lowWaterMarkWei) {
+      return;
+    }
+    await this.alerts.emit({
+      severity: AlertSeverity.WARN,
+      name: 'evm_relayer_float_low',
+      summary: `The EVM relayer's ETH float on ${chainId} is below its low-water mark`,
+      details: {
+        chainId,
+        // Strings: a wei figure does not fit a double, and `Number(balance)`
+        // would round the one number this alert exists to report.
+        balanceWei: balance.toString(),
+        lowWaterMarkWei: this.lowWaterMarkWei.toString(),
+        relayer: this.accountFor(chainId).address,
+      },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      // The chain id ALONE. `SuppressingAlertSink` keys on
+      // `name:dedupeKey`, so the old `evm_relayer_float_low:${chainId}` put the
+      // name in twice — harmless on its own, but `EvmRelayerFloatMonitor` emits
+      // the same alert name for the same condition on the same chain from its
+      // 5-minute pass, and two spellings of the key are two suppression buckets
+      // for one incident. One condition, one bucket.
+      dedupeKey: chainId,
+    });
+  }
+
+  /**
+   * The `to` address, checked against the chain the caller named.
+   *
+   * `to` is CAIP-10 and carries its own chain, so a mismatch means the call was
+   * assembled from two sources. Sending it anyway puts the platform's gas behind
+   * an address nobody checked on this chain.
+   */
+  private addressOnChain(chainId: ChainId, to: AccountId): `0x${string}` {
+    const parsed = parseAccountId(to);
+    if (parsed.chainId !== chainId) {
+      throw ChainErrors.invalidAccountId({ value: `${to} is not on ${chainId}` });
+    }
+    return parsed.address as `0x${string}`;
+  }
+
+  private accountId(chainId: ChainId): AccountId {
+    return `${chainId}:${this.accountFor(chainId).address}` as AccountId;
+  }
+
+  private accountFor(chainId: ChainId): PrivateKeyAccount {
+    const account = this.#accounts.get(chainId);
+    if (!account) {
+      throw ChainErrors.programNotConfigured({
+        what: `a relayer key for ${chainId}`,
+        variable: EVM_RELAYER_KEYS_ENV,
+      });
+    }
+    return account;
+  }
+
+  private clientFor(chainId: ChainId): EvmRelayClient {
+    const client = this.clients.get(chainId);
+    if (!client) {
+      throw ChainErrors.programNotConfigured({
+        what: `a JSON-RPC client for ${chainId}`,
+        variable: 'EVM_RPC_URLS',
+      });
+    }
+    return client;
+  }
+}

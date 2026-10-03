@@ -1,0 +1,471 @@
+{
+  "_comment": [
+    "The demo catalogue for the MCP server (TOOL_CATALOGUE_SEED_FILE).",
+    "Two real tools against two real public endpoints, so the loop is exercised",
+    "end to end against providers that have never heard of x402 — which is a",
+    "core product claim and cannot be demonstrated against a mock.",
+    "Tool and provider ids are uuids because payment_intents.tool_id and",
+    "provider_id are uuid columns.",
+    "The launch catalogue replaces this, and the tool_bindings table (edited",
+    "through the binding editor) replaces the file itself.",
+    "assetId must be the asset THIS deployment holds: on devnet that is",
+    "SOLANA_DEVNET_USDC_MINT, or 4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+    "when it is unset. A mismatch is refused at boot by loadToolCatalogue —",
+    "without that check it presents as every funded agent being told it has",
+    "insufficient funds."
+  ],
+  "tools": [
+    {
+      "id": "06399979-f8b8-4c9e-a9b1-bd2a5924d442",
+      "name": "get_weather",
+      "description": "Current temperature at a latitude/longitude, from a meteorological forecast model. Use for present conditions at a known point. Not for forecasts, not for place names — resolve a place to coordinates first, and not for historical observations.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "latitude",
+          "longitude"
+        ],
+        "properties": {
+          "latitude": {
+            "type": "number"
+          },
+          "longitude": {
+            "type": "number"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "temperatureC",
+          "observedAt"
+        ],
+        "properties": {
+          "temperatureC": {
+            "type": "number"
+          },
+          "observedAt": {
+            "type": "string"
+          }
+        }
+      },
+      "verificationPolicyId": "policy-default",
+      "tier": "VERIFIED"
+    },
+    {
+      "id": "a4b9882a-9bc1-4d64-807a-27c0b93daf0a",
+      "name": "get_usd_eur_rate",
+      "description": "The latest USD to EUR reference exchange rate published by the European Central Bank, with the date it was published for. Use for converting amounts at a reference rate. Not a tradeable quote, and not intraday.",
+      "inputSchema": {
+        "type": "object",
+        "properties": {}
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "rate",
+          "publishedFor"
+        ],
+        "properties": {
+          "rate": {
+            "type": "number"
+          },
+          "publishedFor": {
+            "type": "string"
+          }
+        }
+      },
+      "verificationPolicyId": "policy-default",
+      "tier": "UNVERIFIED"
+    },
+    {
+      "id": "ad39dccc-aff2-54c1-b383-62e0ff392570",
+      "name": "geocode_place",
+      "description": "Resolve a place name to coordinates. Returns the best matches, each with latitude, longitude and country. Use this before any tool that needs a point rather than a name. Not a reverse geocoder — it will not turn coordinates back into a place — and not an address validator.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "name"
+        ],
+        "properties": {
+          "name": {
+            "type": "string"
+          },
+          "count": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "results"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "name",
+                "latitude",
+                "longitude",
+                "countryCode"
+              ],
+              "properties": {
+                "name": {
+                  "type": "string"
+                },
+                "latitude": {
+                  "type": "number"
+                },
+                "longitude": {
+                  "type": "number"
+                },
+                "countryCode": {
+                  "type": "string"
+                },
+                "admin1": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "verificationPolicyId": "geocode_place.default",
+      "tier": "VERIFIED"
+    },
+    {
+      "id": "d0f8062b-79ab-5517-b1c8-39481c885e7a",
+      "name": "get_token_market",
+      "description": "Current USD market data for one or more crypto assets by CoinGecko id — price, market capitalisation, maximum supply and the time the figures were last refreshed. Use for a reference price and market size. Not a tradeable quote, not an order book, and not a historical series.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "ids"
+        ],
+        "properties": {
+          "ids": {
+            "type": "string"
+          },
+          "vsCurrency": {
+            "type": "string"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "markets"
+        ],
+        "properties": {
+          "markets": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "id",
+                "symbol",
+                "priceUsd",
+                "marketCap",
+                "imageUrl",
+                "observedAt"
+              ],
+              "properties": {
+                "id": {
+                  "type": "string"
+                },
+                "symbol": {
+                  "type": "string"
+                },
+                "priceUsd": {
+                  "type": "number"
+                },
+                "marketCap": {
+                  "type": "number"
+                },
+                "maxSupply": {
+                  "type": "number",
+                  "nullable": true
+                },
+                "imageUrl": {
+                  "type": "string"
+                },
+                "observedAt": {
+                  "type": "string"
+                }
+              }
+            }
+          }
+        }
+      },
+      "verificationPolicyId": "get_token_market.default",
+      "tier": "VERIFIED"
+    },
+    {
+      "id": "b08a92cf-7050-57b3-b17e-1ac61ec0ab19",
+      "name": "solana_get_balance",
+      "description": "The SOL balance of a Solana mainnet account, in lamports, with the slot the reading was taken at. Use to check funding before building a transaction. Not for SPL token balances, and not for devnet or testnet accounts.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "address"
+        ],
+        "properties": {
+          "address": {
+            "type": "string"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "lamports",
+          "slot"
+        ],
+        "properties": {
+          "lamports": {
+            "type": "number"
+          },
+          "slot": {
+            "type": "number"
+          }
+        }
+      },
+      "verificationPolicyId": "solana_get_balance.default",
+      "tier": "VERIFIED"
+    },
+    {
+      "id": "abae704e-0a56-5674-9074-6c7bfc25fad1",
+      "name": "extract_page_text",
+      "description": "Fetch a public web page and return its main text with the navigation and boilerplate stripped, plus the resolved source URL and the token count of the extract. Use when a model needs to read a page it already has a link to. Not a search tool, and not for pages behind a login or a paywall.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "url"
+        ],
+        "properties": {
+          "url": {
+            "type": "string"
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "content",
+          "sourceUrl",
+          "tokens"
+        ],
+        "properties": {
+          "title": {
+            "type": "string"
+          },
+          "content": {
+            "type": "string"
+          },
+          "sourceUrl": {
+            "type": "string"
+          },
+          "tokens": {
+            "type": "number"
+          }
+        }
+      },
+      "verificationPolicyId": "extract_page_text.default",
+      "tier": "VERIFIED"
+    },
+    {
+      "id": "8fa77325-86d3-5e4a-8c6f-6ec85ccf0b33",
+      "name": "search_wikipedia",
+      "description": "Search English Wikipedia and return the best-matching articles with a highlighted snippet, plus how many articles matched in total. Use to find an article worth reading. Not a general web search, and a snippet is not an answer — fetch the article for that.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "results",
+          "totalHits"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "title",
+                "pageId",
+                "wordCount",
+                "snippet"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "pageId": {
+                  "type": "number"
+                },
+                "wordCount": {
+                  "type": "number"
+                },
+                "snippet": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "totalHits": {
+            "type": "number"
+          }
+        }
+      },
+      "verificationPolicyId": "search_wikipedia.default",
+      "tier": "VERIFIED"
+    },
+    {
+      "id": "294afca7-be7c-59d0-a4d2-f7c994c39c45",
+      "name": "search_wikipedia_demo_broken",
+      "description": "DEMO FIXTURE — DO NOT CALL. A deliberately faulty implementation of search_wikipedia used by the public /demo page to show a call being refused payment. Every result it returns carries the same pageId, so it fails this platform's own quality rules by construction and is never charged. It answers no real question and is useless for any task. Use search_wikipedia instead.",
+      "inputSchema": {
+        "type": "object",
+        "required": [
+          "query"
+        ],
+        "properties": {
+          "query": {
+            "type": "string"
+          },
+          "limit": {
+            "type": "integer",
+            "minimum": 1,
+            "maximum": 10
+          }
+        }
+      },
+      "outputSchema": {
+        "type": "object",
+        "required": [
+          "results",
+          "totalHits"
+        ],
+        "properties": {
+          "results": {
+            "type": "array",
+            "items": {
+              "type": "object",
+              "required": [
+                "title",
+                "pageId",
+                "wordCount",
+                "snippet"
+              ],
+              "properties": {
+                "title": {
+                  "type": "string"
+                },
+                "pageId": {
+                  "type": "number"
+                },
+                "wordCount": {
+                  "type": "number"
+                },
+                "snippet": {
+                  "type": "string"
+                }
+              }
+            }
+          },
+          "totalHits": {
+            "type": "number"
+          }
+        }
+      },
+      "verificationPolicyId": "search_wikipedia_demo_broken.default",
+      "tier": "UNVERIFIED"
+    }
+  ],
+  "bindings": [
+    {
+      "id": "e0a26a0d-8f27-4e5d-9a3e-2f1a5f0b7c11",
+      "toolId": "06399979-f8b8-4c9e-a9b1-bd2a5924d442",
+      "providerId": "a965eec3-ad93-4257-bf9b-e172361ee56c",
+      "endpoint": "https://api.open-meteo.com",
+      "requestMapping": {
+        "method": "GET",
+        "path": "/v1/forecast",
+        "query": {
+          "latitude": "$.latitude",
+          "longitude": "$.longitude",
+          "current": "temperature_2m"
+        }
+      },
+      "responseMapping": {
+        "temperatureC": {
+          "$path": "$.current.temperature_2m"
+        },
+        "observedAt": {
+          "$path": "$.current.time"
+        }
+      },
+      "pricingMode": "PAID",
+      "priceAmount": "10000",
+      "assetId": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/token:AiUqZiWkX3FBjULeRwPi73kC9raWdSnYmn5uQhk6SVP7",
+      "settlementChains": ["solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"],
+      "freeQuotaPerAgent": null,
+      "freeDailyBudget": null,
+      "slaFailureRate": 0.02,
+      "timeoutMs": 10000,
+      "status": "ACTIVE",
+      "version": 1
+    },
+    {
+      "id": "b71f4b62-3a1d-4d0e-9b6a-6c2b1f7d3e22",
+      "toolId": "a4b9882a-9bc1-4d64-807a-27c0b93daf0a",
+      "providerId": "eca7b08a-e143-44f5-b1ce-28b1a3a0ef41",
+      "endpoint": "https://api.frankfurter.dev",
+      "requestMapping": {
+        "method": "GET",
+        "path": "/v1/latest",
+        "query": {
+          "base": "USD",
+          "symbols": "EUR"
+        }
+      },
+      "responseMapping": {
+        "rate": {
+          "$path": "$.rates.EUR"
+        },
+        "publishedFor": {
+          "$path": "$.date"
+        }
+      },
+      "pricingMode": "PAID",
+      "priceAmount": "5000",
+      "assetId": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/token:AiUqZiWkX3FBjULeRwPi73kC9raWdSnYmn5uQhk6SVP7",
+      "settlementChains": ["solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1"],
+      "freeQuotaPerAgent": null,
+      "freeDailyBudget": null,
+      "slaFailureRate": 0.02,
+      "timeoutMs": 10000,
+      "status": "ACTIVE",
+      "version": 1
+    }
+  ]
+}

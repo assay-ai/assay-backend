@@ -1,0 +1,85 @@
+# compiled output
+/dist
+/node_modules
+
+# Logs
+logs
+*.log
+npm-debug.log*
+pnpm-debug.log*
+yarn-debug.log*
+yarn-error.log*
+lerna-debug.log*
+
+# OS
+.DS_Store
+
+# Tests
+/coverage
+/.nyc_output
+
+# IDEs and editors
+/.idea
+.project
+.classpath
+.c9/
+*.launch
+.settings/
+*.sublime-workspace
+
+# IDE - VSCode
+.vscode/*
+!.vscode/settings.json
+!.vscode/tasks.json
+!.vscode/launch.json
+!.vscode/extensions.json
+
+# Environment — every .env file except the committed example
+.env
+.env.*
+!.env.example
+
+# Database
+*.db
+*.sqlite
+*.sqlite3
+
+# Solana keypairs — a keypair file IS the private key, and a devnet key that
+# leaks is still a key someone can grind history for once the same generation
+# script is pointed at mainnet. The scripts regenerate anything missing.
+#
+# `scripts/devnet/.keys/` carries its own `.gitignore` containing `*`, which
+# ignores that file too — so a fresh clone has no `.keys/` and no ignore rule
+# in it, and the first run of the script would recreate the directory with
+# nothing protecting it. The rule has to live here, where it survives a clone.
+*.devnet.json
+.keys/
+/scripts/**/*.keypair.json
+#
+# `.devnet/` is `yarn devnet:stake-accounts`'s default --out-dir: two provider
+# keypairs that own real devnet stake accounts. Matched at any depth rather than
+# anchored, because --out-dir moves it and an ignore rule that only covers the
+# default is the one that is not there on the day it matters.
+.devnet/
+
+# `AcceptanceReport.writeToDisk()` (scripts/devnet/lib/acceptance-report.ts) —
+# one timestamped run report per `yarn devnet:acceptance` invocation, written
+# to the working directory. Evidence for a human to read after a run, not a
+# source file.
+/devnet-acceptance-*.json
+
+# Generated OpenAPI document (yarn openapi:export)
+/openapi.yaml
+
+# Keys and certificates
+*.pem
+*.key
+**/target/deploy/*.json
+
+# Misc
+.data
+/files
+
+# git worktrees
+.worktrees/
+.local/

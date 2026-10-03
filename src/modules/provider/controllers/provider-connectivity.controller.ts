@@ -1,0 +1,105 @@
+import { Body, Controller, Get, Param, Post, Put, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
+
+import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+
+import {
+  CheckConnectivityBodyDto,
+  CheckConnectivityResponseDto,
+  DeclareEndpointBodyDto,
+} from '../dto/check-connectivity.dto';
+import { GetEgressIpsResponseDto } from '../dto/get-egress-ips.dto';
+import { GetProviderVerificationResponseDto } from '../dto/get-provider-verification.dto';
+import { ProviderConnectivityService } from '../services/provider-connectivity.service';
+import { ProviderVerificationService } from '../services/provider-verification.service';
+
+/**
+ * The connectivity check and egress-IP publication, and the `verified` label's
+ * read side.
+ *
+ * A separate controller from `provider.controller.ts` (`@Controller('providers
+ * /me')`) rather than an addition to it, so the two concerns stay
+ * independent.
+ *
+ * ## Route ordering
+ *
+ * Nest/Express match by method **and** path shape, not just prefix, so
+ * `GET providers/egress-ips` (one static segment) and
+ * `GET providers/:providerId/verification` (two segments, the second a
+ * literal) never actually collide — different segment counts rule it out
+ * regardless of declaration order. `egress-ips` is still declared first, so
+ * that stays true even if `verification` is ever renamed to a bare
+ * `:providerId` with no second segment, which *would* shadow a one-segment
+ * literal declared after it. Declaring the literal route first is the form
+ * that stays correct under that future edit; relying on segment-count being
+ * permanent is not.
+ */
+@ApiTags('Provider')
+@ApiBearerAuth()
+@UseGuards(SessionAuthGuard)
+@Controller('providers')
+export class ProviderConnectivityController {
+  constructor(
+    private readonly connectivity: ProviderConnectivityService,
+    private readonly verification: ProviderVerificationService,
+  ) {}
+
+  @Post('me/connectivity-check')
+  @ApiOperation({
+    summary:
+      'Probe an endpoint from the platform egress IPs — "Check we can reach it". Never saves.',
+  })
+  @ApiResponse({
+    status: 200,
+    type: CheckConnectivityResponseDto,
+    description:
+      'Always 200, including UNREACHABLE and BLOCKED outcomes — the result is the payload.',
+  })
+  @ApiResponse({ status: 400, description: 'No endpoint given and none saved on the provider row' })
+  async checkConnectivity(
+    @CurrentSession() session: McpSession,
+    @Body() body: CheckConnectivityBodyDto,
+  ): Promise<CheckConnectivityResponseDto> {
+    const result = await this.connectivity.check(session.organizationId, body.endpoint);
+    return { ...result };
+  }
+
+  @Put('me/endpoint')
+  @ApiOperation({
+    summary:
+      'Declare and save the registration-time endpoint — rejected on the spot if unreachable',
+  })
+  @ApiResponse({ status: 200, type: CheckConnectivityResponseDto })
+  @ApiResponse({
+    status: 400,
+    description: 'The connectivity check did not come back REACHABLE — nothing was saved',
+  })
+  async declareEndpoint(
+    @CurrentSession() session: McpSession,
+    @Body() body: DeclareEndpointBodyDto,
+  ): Promise<CheckConnectivityResponseDto> {
+    const result = await this.connectivity.declareEndpoint(session.organizationId, body.endpoint);
+    return { ...result, saved: true };
+  }
+
+  @Get('egress-ips')
+  @ApiOperation({ summary: 'The fixed egress IPs to allowlist, if this deployment has any' })
+  @ApiResponse({ status: 200, type: GetEgressIpsResponseDto })
+  async getEgressIps(): Promise<GetEgressIpsResponseDto> {
+    return { egressIps: this.connectivity.egressIps() };
+  }
+
+  @Get(':providerId/verification')
+  @ApiOperation({
+    summary: 'The `verified` label for a catalogue listing — informational, not a gate',
+  })
+  @ApiParam({ name: 'providerId', description: 'Same value as the provider organization id' })
+  @ApiResponse({ status: 200, type: GetProviderVerificationResponseDto })
+  @ApiResponse({ status: 404, description: 'No provider with this id' })
+  async getVerification(
+    @Param('providerId') providerId: string,
+  ): Promise<GetProviderVerificationResponseDto> {
+    return this.verification.getVerification(providerId);
+  }
+}

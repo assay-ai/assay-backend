@@ -1,0 +1,124 @@
+import { parseAbi } from 'viem';
+
+/**
+ * The parts of `X402Escrow` this backend calls or decodes.
+ *
+ * Hand-written from assay-evm's `src/X402Escrow.sol` rather than generated, and
+ * deliberately partial: a vendored 200 kB artifact is surface nobody reviews,
+ * and every entry below is one somebody had to justify.
+ * `abi-selectors.spec.ts` pins each signature to the selector the compiler
+ * produced, each return type to the shape the compiler declared, and refuses
+ * any entry that is not pinned.
+ *
+ * Three shapes to note:
+ *
+ * - `escrowOf` returns the whole twelve-field `Escrow` STRUCT. The mapping is
+ *   `internal` and has no generated getter, so there is no narrower read.
+ * - `redeemVoucherBatch` returns nothing and is **atomic**: one bad voucher
+ *   reverts all 64. There is no partial success to handle.
+ * - There is no `withdrawBySig`, by design. `withdraw()` is
+ *   `msg.sender`-only, pays `msg.sender`, and takes no destination.
+ *
+ * `depositWithPermit2` exists on chain and is deliberately not vendored: the
+ * deposit path built here is `approve` + `depositFor`.
+ */
+export const X402_ESCROW_ABI = parseAbi([
+  'struct Voucher { address payer; address provider; uint64 amount; bytes32 resourceHash; bytes32 requestHash; uint64 seq; uint64 issuedAt; uint64 expiresAt; }',
+  'struct Escrow { uint128 balance; uint64 seqHigh; uint64 authNonce; uint64 maxVoucherAmount; uint64 maxPerWindow; uint64 spentInWindow; uint64 windowStartedAt; uint64 withdrawRequested; uint64 withdrawAvailableAt; uint128 totalRedeemed; uint128 totalWithdrawn; uint128 totalFunded; }',
+  'function DOMAIN_SEPARATOR() view returns (bytes32)',
+  /**
+   * One of `EvmVaultService.assertVaultControl`'s three reads. The
+   * settlement token the escrow was initialised with, so a vault balance is
+   * never published in a denomination the contract does not actually hold.
+   *
+   * `CONFIG()`, `STAKE()` and `PERMIT2()` are the same shape and are
+   * deliberately NOT vendored beside it: nothing reads them, and an ABI entry
+   * is a call site waiting to exist.
+   */
+  'function ASSET() view returns (address)',
+  'function escrowOf(address buyer) view returns (Escrow)',
+  'function totalEscrowed() view returns (uint128)',
+  'function deposit(uint64 amount)',
+  'function depositFor(address buyer, uint64 amount)',
+  'function redeemVoucher(Voucher v, bytes sig)',
+  'function redeemVoucherBatch(Voucher[] vs, bytes[] sigs)',
+  'function setLimits(uint64 maxVoucherAmount, uint64 maxPerWindow)',
+  'function setLimitsBySig(address buyer, uint64 maxVoucherAmount, uint64 maxPerWindow, uint64 nonce, uint64 deadline, bytes sig)',
+  'function requestWithdraw(uint64 amount)',
+  'function requestWithdrawBySig(address buyer, uint64 amount, uint64 nonce, uint64 deadline, bytes sig)',
+  'function withdraw()',
+  'event Deposited(address indexed buyer, address indexed funder, uint64 amount, uint128 balance)',
+  'event VoucherRedeemed(address indexed payer, address indexed provider, bytes32 requestHash, bytes32 resourceHash, uint64 amount, uint64 fee, uint64 seq, uint16 takeRateBps, uint64 spentInWindow)',
+  'event WithdrawRequested(address indexed buyer, uint64 amount, uint64 availableAt)',
+  'event EscrowWithdrawn(address indexed buyer, uint64 requested, uint64 amount)',
+  'event EscrowLimitsSet(address indexed buyer, uint64 maxVoucherAmount, uint64 maxPerWindow)',
+]);
+
+/**
+ * `X402Config`, read-only.
+ *
+ * **Nothing in this backend writes to it.** `updateConfig`, `setPaused`,
+ * `registerVerifier` and `revokeVerifier` are the admin Ledger's, run by a
+ * human, and are deliberately absent so that no call site can reach for one —
+ * an ABI entry is a call site waiting to exist, and `abi-selectors.spec.ts`
+ * fails if any of them appears.
+ *
+ * `updateConfig` also has no compare-and-swap. That is safe only because the
+ * admin is one key, and *"read `params()` in the same block you sign from"* is
+ * **not** a defence: it appears nowhere here and must not.
+ */
+export const X402_CONFIG_ABI = parseAbi([
+  'struct ParamSet { address treasury; address redeemer; uint64 unbondingPeriodSeconds; uint64 minimumStake; uint64 penaltyAmount; uint64 verifierDailyCap; uint16 takeRateBps; uint16 slashAgentBps; uint16 slashPlatformBps; uint16 slashCapBps; }',
+  'struct VerifierKey { uint64 registeredAt; uint64 expiresAt; uint64 revokedAt; bool registered; bool revoked; }',
+  'function params() view returns (ParamSet)',
+  'function paused() view returns (bool)',
+  'function admin() view returns (address)',
+  'function slashProviderBps() view returns (uint16)',
+  'function canSign(address verifier) view returns (bool)',
+  'function verifierExpiry(address verifier) view returns (uint64)',
+  'function verifierKey(address verifier) view returns (VerifierKey)',
+]);
+
+/**
+ * `X402Stake`, read-only here.
+ *
+ * The four slash-lifecycle writes (`proposeSlash`, `executeSlash`,
+ * `cancelSlash`, `expireSlash`) are not called from here and are absent for
+ * the same reason as the config writes.
+ *
+ * `ProviderStake` carries a `uint64 __gap` at position 7 that IS on the wire,
+ * and `SlashRecord` carries two (`uint32 __gap`, `uint32 __gap2`). Decode them,
+ * ignore them, never renumber around them: they are what keeps the field after
+ * them at the offset the deployed bytecode writes.
+ */
+export const X402_STAKE_ABI = parseAbi([
+  'struct ProviderStake { uint128 bonded; uint64 unbonding; uint64 unbondingStartedAt; uint64 slashedInWindow; uint64 slashWindowStartedAt; uint64 pendingSlash; uint64 __gap; uint128 totalDeposited; uint128 totalWithdrawn; uint128 totalSlashed; }',
+  'struct SlashRecord { address provider; uint8 status; uint64 penalty; address beneficiary; uint64 proposedAt; uint32 __gap; address verifier; uint64 executableAt; uint32 __gap2; uint64 reserved; uint64 capAllowance; uint64 applied; uint64 executedAt; bytes32 policy; }',
+  'function stakeOf(address provider) view returns (ProviderStake)',
+  'function bondedOf(address provider) view returns (uint64)',
+  'function withdrawableOf(address provider) view returns (uint64)',
+  'function slashRecordOf(bytes32 requestId) view returns (SlashRecord)',
+  'function DOMAIN_SEPARATOR() view returns (bytes32)',
+  // The provider's own doors — built by `EvmStakeIntentBuilder`, never sent by
+  // this process.
+  'function depositStake(uint64 amount)',
+  'function depositStakeFor(address provider, uint64 amount)',
+  'function requestUnstake(uint64 amount)',
+  'function withdrawStake(uint64 amount)',
+  'event StakeDeposited(address indexed provider, address indexed funder, uint64 amount, uint128 bonded)',
+]);
+
+/**
+ * Only what a deposit path needs.
+ *
+ * USDG has neither EIP-2612 nor EIP-3009 — measured (`docs/chain-facts.md` in
+ * assay-evm): `DOMAIN_SEPARATOR()`, `nonces()` and `authorizationState()` all revert —
+ * so there is no permit to vendor and the first deposit of a buyer's life
+ * cannot be gasless.
+ */
+export const ERC20_ABI = parseAbi([
+  'function decimals() view returns (uint8)',
+  'function balanceOf(address owner) view returns (uint256)',
+  'function allowance(address owner, address spender) view returns (uint256)',
+  'function approve(address spender, uint256 amount) returns (bool)',
+]);

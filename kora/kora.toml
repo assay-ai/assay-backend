@@ -1,0 +1,72 @@
+# Kora policy — the second layer beneath our application checks.
+#
+# `X402SvmVerifierService` (src/modules/chains/facilitator/verification/)
+# already refuses anything outside the exact-SVM static-path layout before this
+# facilitator ever calls Kora's `signAndSendTransaction`. This file is Kora's
+# OWN, independent enforcement of the same boundary — allowed programs, the one
+# allowed token, and a lamport ceiling — so a bug in our verifier cannot turn
+# into an unbounded fee-payer drain. Two layers, deliberately not one.
+#
+# This is the devnet configuration, matched to the six SVM `exact` rules the
+# verifier enforces (src/modules/chains/facilitator/verification/rules/). For mainnet, swap the USDC
+# mint for EPjFWdd5AufqSSqeM2qN1xzybapC8G4wEGGkZwyTDt1v and `price_source` for
+# "Jupiter" (see the comment below).
+
+[validation]
+# Two Compute Budget instructions (base fee ~5000 lamports/signature, priority
+# fee capped by our own rule 3 at 5 micro-lamports/CU * ≤1,400,000 CU = 7,000
+# lamports) plus signature fees for up to 3 signers leaves generous headroom
+# at 100,000 lamports (0.0001 SOL) per transaction. Anything above that is not
+# a static-path x402 payment — it is something else, and Kora should refuse it
+# regardless of what our own verifier concluded.
+max_allowed_lamports = 100_000
+
+# Fee payer + payer (+ an optional multisig authority) — never more than 3 on
+# the static path our verifier accepts (rule 2, instruction-layout.rule.ts).
+max_signatures = 3
+
+# Exactly the programs the static-path `exact` layout can contain
+# (instruction-layout.rule.ts): two Compute Budget instructions, one
+# `TransferChecked` against the SPL Token program, and up to four trailing
+# Lighthouse/Memo instructions. No System program, no arbitrary CPI target —
+# a transaction naming any other program is not one of ours.
+allowed_programs = [
+  "ComputeBudget111111111111111111111111111111", # Compute Budget
+  "TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5DA",  # SPL Token (classic) — USDC lives here
+  "MemoSq4gqABAXKb96qnH8TysNcWxMyWCqXgDLGmfcHr",  # SPL Memo v2 — the intent-id binding
+  "L2TExMFKdjpN9kozasaurPirfHy9P8sbXoAN1qA3S95",  # Lighthouse — Phantom/Solflare assertions
+]
+
+# Devnet USDC is the asset `getAssetMetadata()`
+# (src/modules/chains/ports/asset-registry.ts) recognises for this network by
+# default. Kora refuses to start with an empty list (kora-lib's
+# `Config::validate`), so this is also a floor: at least one token must be
+# allowed for Kora to boot.
+#
+# The list must contain every mint a deployment can actually present. That is
+# not always the default: `SOLANA_DEVNET_USDC_MINT` overrides the devnet mint
+# (typically with a self-minted 6-decimal test token, because Circle's devnet
+# faucet cannot be used programmatically). If you set that override, add the
+# same mint here — nothing compares this list against the environment, and a
+# missing entry shows up only as Kora refusing to sign.
+allowed_tokens = [
+  "4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU", # USDC (devnet) — the code default
+  # "<your SOLANA_DEVNET_USDC_MINT>",            # add when the override is set
+]
+
+# We never use Kora's SPL-denominated fee payment feature — the `TransferChecked`
+# in the transaction *is* the payment, from the agent's balance to the vault.
+# Nothing pays Kora directly in SPL tokens.
+allowed_spl_paid_tokens = []
+
+disallowed_accounts = []
+
+# "Mock" avoids a live-price dependency for a devnet facilitator that never
+# actually needs to price a swap. Mainnet should set this to "Jupiter" once
+# `allowed_spl_paid_tokens` is non-empty and fee estimation needs a real price.
+price_source = "Mock"
+
+[kora]
+# Requests per second, enforced by Kora's own `RateLimitLayer` — a coarse
+# circuit breaker independent of anything the facilitator process does.
+rate_limit = 100

@@ -1,0 +1,513 @@
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+
+import {
+  PaymentIntentRepository,
+  RedeemableIntent,
+} from '@database/postgres/repositories/payment-intent.repository';
+import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
+import { LedgerAccountId, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
+import { LedgerService } from '@modules/ledger/services/ledger.service';
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
+import { MoneyUtil } from '@shared/utils/money.util';
+
+import {
+  MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+  VOUCHER_REDEMPTION_ALERTS,
+  VOUCHER_REDEMPTION_BATCH,
+} from '../constants/voucher-redemption.constants';
+import { PaymentIntentStatus, PaymentRail } from '../ports/payment.types';
+import {
+  RedeemOutcome,
+  RedeemOutcomeKind,
+  RedeemVoucherRequest,
+  VOUCHER_REDEEMER,
+  VoucherRedeemerPort,
+} from '../ports/voucher-redeemer.port';
+import { PaymentIntentService } from './payment-intent.service';
+
+/**
+ * The `chainTxRef` a platform-absorbed `PROVIDER_CREDIT` carries.
+ *
+ * There is no transaction — that is the whole point of the entry — and a NULL
+ * would be indistinguishable from a credit whose signature somebody forgot to
+ * record. The program's own name for the refusal is appended, so one `grep`
+ * over the journal answers both *how much has the platform absorbed* and *why*.
+ */
+export const PLATFORM_ABSORBED_TX_REF_PREFIX = 'platform_absorbed:';
+
+/**
+ * Turns each passed rail-B hold into money that has actually moved.
+ *
+ * ## Why this exists at all
+ *
+ * Under the escrow, a verdict does not move money. `PaymentIntentService.resolve`
+ * marks a rail-B intent `SETTLED` and leaves its hold OPEN, because the buyer's
+ * money is in the buyer's own escrow and only `redeem_voucher` can debit it.
+ * This is the one caller that retires such a hold, and it does so only after a
+ * transaction has confirmed and only while naming its signature.
+ *
+ * ## Ascending `seq`, per buyer, and it is now load-bearing
+ *
+ * The settlement program admits a voucher on `seq > escrow.seq_high` and
+ * nothing else. There is no replay bitmap and no out-of-order window: **a lower
+ * seq that lands after a higher one is dead, permanently.** Redeeming seq 40
+ * before seq 7 does not delay seq 7, it destroys it — the call was served, the
+ * buyer keeps their money, and the platform pays the provider out of its own funds.
+ *
+ * Two rules keep that from happening, and both are in this file:
+ *
+ * - the batch is ordered `(agent_account, voucher_seq)` ascending, by the
+ *   repository's own query, so a buyer's oldest voucher is always reached
+ *   first; and
+ * - a buyer whose voucher did **not** land in this pass has the rest of their
+ *   vouchers skipped ({@link run}). Submitting the next one would advance
+ *   `seq_high` past the one still being retried and turn a transient failure
+ *   into a permanent loss.
+ *
+ * Skipping costs at most one tick of latency for that buyer and nothing at all
+ * for every other buyer in the batch, because the skip is per account.
+ *
+ * ## Who bears an unredeemable voucher: neither party
+ *
+ * The backend prevents an out-of-order redemption and must still handle it.
+ * When `VoucherSeqNotIncreasing` comes back, the hold is **released** — the
+ * buyer keeps their money — and the provider is credited anyway, out of the
+ * platform's own funds. That direction is safe and it is the incentive to keep
+ * verification fast: the party that can make redemption slow is the only party
+ * that pays for it.
+ *
+ * The credit is written **before** the release, and the order is not
+ * cosmetic — see {@link absorb}.
+ */
+@Injectable()
+export class VoucherRedemptionService {
+  private readonly logger = new Logger(VoucherRedemptionService.name);
+
+  constructor(
+    private readonly payments: PaymentIntentRepository,
+    private readonly intents: PaymentIntentService,
+    private readonly ledger: LedgerService,
+    @Inject(VOUCHER_REDEEMER) private readonly redeemer: VoucherRedeemerPort,
+    @Inject(ALERT_PORT) private readonly alerts: AlertPort,
+    /** Injected so a test can age a hold without waiting 37 minutes. */
+    @Optional() private readonly now: () => number = () => Date.now(),
+  ) {}
+
+  /**
+   * One pass over the passed-but-unredeemed holds of `asset`.
+   *
+   * Never throws: a redemption pass that rejects is logged by Nest and then
+   * forgotten, and the holds it did not reach would sit until the next tick
+   * with nothing saying why.
+   */
+  async run(asset: AssetId): Promise<void> {
+    const pending = await this.payments.findAwaitingRedemption(
+      asset,
+      PaymentIntentStatus.SETTLED,
+      PaymentRail.RAIL_B_VOUCHER,
+      VOUCHER_REDEMPTION_BATCH,
+    );
+
+    if (pending.length === 0) {
+      return;
+    }
+
+    // Buyers whose current voucher did not land. Every later seq of theirs in
+    // this batch is skipped — see the class comment: submitting it would
+    // advance `seq_high` past the one still being retried and kill it outright.
+    // A throw counts as "did not land" for the same reason a `RETRY` does: this
+    // process does not know whether the transaction reached the chain.
+    const blocked = new Set<string>();
+
+    // `maxBatchSize` is the CHAIN's answer, not a policy of this service:
+    // Solana's `redeem_voucher` takes one voucher and there is no room in a
+    // transaction for a second, so `1` runs the loop below unchanged and
+    // Solana's behaviour is byte-identical to what it has always been.
+    if (this.redeemer.maxBatchSize > 1) {
+      return this.runBatched(pending, blocked);
+    }
+
+    for (const row of pending) {
+      if (blocked.has(row.agentAccount)) {
+        this.logger.log(
+          `Intent ${row.id} (seq ${row.voucherSeq}) is held back this pass: an earlier voucher ` +
+            `for ${row.agentAccount} has not been redeemed, and redeeming this one would make ` +
+            `that one unredeemable for ever`,
+        );
+        continue;
+      }
+
+      let stop = false;
+      try {
+        const landed = await this.redeemOne(row);
+        stop = landed.stop;
+        if (!landed.settled) {
+          blocked.add(row.agentAccount);
+        }
+      } catch (error) {
+        // One hold's failure must not cost the rest of the pass. The row keeps
+        // its open hold and the next tick finds it again.
+        blocked.add(row.agentAccount);
+        this.logger.error(
+          `Redemption of intent ${row.id} (seq ${row.voucherSeq}) threw past its own ` +
+            `handling: ${describe(error)}`,
+        );
+      }
+      if (stop) {
+        return;
+      }
+    }
+  }
+
+  /**
+   * `stop` ends the whole pass; `settled` says whether this buyer's seq is
+   * finished with — redeemed or absorbed — so the next one of theirs may go.
+   */
+  private async redeemOne(row: RedeemableIntent): Promise<{ stop: boolean; settled: boolean }> {
+    const request = this.toRequest(row);
+    if (!request) {
+      // `settled: false` — this seq is never going to be redeemed, and the
+      // buyer's later vouchers must not step over it while a human decides
+      // what to do with the hold.
+      return { stop: false, settled: false };
+    }
+
+    const outcome = await this.redeemer.redeem(request.request);
+    return this.applyOutcome(row, request.issuedAt, outcome);
+  }
+
+  /**
+   * One pass, in batches of `maxBatchSize`, **one row per payer per batch**.
+   *
+   * Rows arrive ordered `(agent_account ASC, voucher_seq ASC)`, so the FIRST row
+   * per payer is that payer's lowest unredeemed seq — exactly the one that must
+   * land before any later one of theirs. Taking one per payer therefore
+   * satisfies the ordering rule and `redeemVoucherBatch`'s no-duplicates rule at
+   * once: the same payer twice in one batch reverts the batch, because the first
+   * copy already advanced `seqHigh`.
+   *
+   * The rows a batch could not carry are not dropped — they are carried into the
+   * next one, and a payer who was blocked is skipped from then on.
+   */
+  private async runBatched(
+    pending: readonly RedeemableIntent[],
+    blocked: Set<string>,
+  ): Promise<void> {
+    let queue: readonly RedeemableIntent[] = pending;
+
+    while (queue.length > 0) {
+      const batch: { row: RedeemableIntent; request: RedeemVoucherRequest; issuedAt: number }[] =
+        [];
+      const seen = new Set<string>();
+      const carried: RedeemableIntent[] = [];
+
+      for (const row of queue) {
+        if (blocked.has(row.agentAccount)) {
+          this.logger.log(
+            `Intent ${row.id} (seq ${row.voucherSeq}) is held back this pass: an earlier voucher ` +
+              `for ${row.agentAccount} has not been redeemed, and redeeming this one would make ` +
+              `that one unredeemable for ever`,
+          );
+          continue;
+        }
+        if (batch.length >= this.redeemer.maxBatchSize || seen.has(row.agentAccount)) {
+          carried.push(row);
+          continue;
+        }
+
+        const built = this.toRequest(row);
+        if (!built) {
+          // Nothing will ever redeem it, and the buyer's later vouchers must
+          // not step over it while a human decides what to do with the hold.
+          blocked.add(row.agentAccount);
+          continue;
+        }
+
+        seen.add(row.agentAccount);
+        batch.push({ row, request: built.request, issuedAt: built.issuedAt });
+      }
+
+      if (batch.length === 0) {
+        return;
+      }
+
+      let outcomes: readonly RedeemOutcome[];
+      try {
+        outcomes = await this.redeemer.redeemBatch(batch.map((entry) => entry.request));
+      } catch (error) {
+        // One batch's failure must not cost the rest of the pass, and this
+        // process does not know whether the transaction reached the chain — so
+        // every payer in it is blocked and their holds stay open.
+        for (const entry of batch) {
+          blocked.add(entry.row.agentAccount);
+        }
+        this.logger.error(
+          `A redemption batch of ${batch.length} threw past its own handling: ${describe(error)}`,
+        );
+        return;
+      }
+
+      // Positional, and matched by index alone: a redemption carries no id the
+      // chain echoes back. A short array means the rest were not attempted —
+      // `SolanaVoucherRedeemer.redeemBatch` stops at a pass-ending outcome — so
+      // those payers are blocked rather than assumed settled.
+      for (const [index, entry] of batch.entries()) {
+        const outcome = outcomes[index];
+        if (!outcome) {
+          blocked.add(entry.row.agentAccount);
+          continue;
+        }
+
+        let landed: { stop: boolean; settled: boolean };
+        try {
+          landed = await this.applyOutcome(entry.row, entry.issuedAt, outcome);
+        } catch (error) {
+          blocked.add(entry.row.agentAccount);
+          this.logger.error(
+            `Redemption of intent ${entry.row.id} (seq ${entry.row.voucherSeq}) threw past its ` +
+              `own handling: ${describe(error)}`,
+          );
+          continue;
+        }
+
+        if (!landed.settled) {
+          blocked.add(entry.row.agentAccount);
+        }
+        if (landed.stop) {
+          return;
+        }
+      }
+
+      queue = carried;
+    }
+  }
+
+  /**
+   * The nine signed fields, or `null` for a row nothing can redeem.
+   *
+   * Shared by the per-row pass and the batch pass so the two cannot disagree
+   * about what is redeemable or about which bytes go on the wire.
+   */
+  private toRequest(
+    row: RedeemableIntent,
+  ): { request: RedeemVoucherRequest; issuedAt: number } | null {
+    if (!row.providerAccount || !row.providerId || !row.voucherResourceHash) {
+      // Refused before anything is built. `redeem_voucher` derives the
+      // provider's earnings account from the provider key, and the 239 signed
+      // bytes carry the resource hash — a row missing either would submit a
+      // transaction that pays nobody, or 239 bytes the buyer never signed.
+      // Both are permanent, so this is logged rather than retried quietly.
+      this.logger.error(
+        `Intent ${row.id} awaits redemption but is missing ` +
+          `${!row.providerAccount || !row.providerId ? 'a provider' : 'its resource hash'}. ` +
+          `Nothing will redeem it; release the hold by hand.`,
+      );
+      return null;
+    }
+
+    const issuedAt = row.voucherIssuedAt === null ? null : Number(row.voucherIssuedAt);
+    if (issuedAt === null) {
+      this.logger.error(
+        `Intent ${row.id} awaits redemption but has no voucher issued_at. Nothing will ` +
+          `redeem it; release the hold by hand.`,
+      );
+      return null;
+    }
+
+    return {
+      issuedAt,
+      request: {
+        payer: row.agentAccount as AccountId,
+        provider: row.providerAccount as AccountId,
+        amount: MoneyUtil.of(row.priceAmount, row.assetId as AssetId, row.decimals),
+        asset: row.assetId as AssetId,
+        resourceHash: row.voucherResourceHash,
+        requestHash: row.requestHash,
+        seq: row.voucherSeq,
+        issuedAt,
+        expiresAt: Math.floor(row.expiresAt.getTime() / 1000),
+        signature: row.voucherSignature,
+      },
+    };
+  }
+
+  /**
+   * What one outcome does to one hold. Unchanged from the per-row pass, and
+   * shared with the batch pass so a batched redemption and a single one cannot
+   * treat the same verdict differently.
+   */
+  private async applyOutcome(
+    row: RedeemableIntent,
+    issuedAt: number,
+    outcome: RedeemOutcome,
+  ): Promise<{ stop: boolean; settled: boolean }> {
+    switch (outcome.kind) {
+      case RedeemOutcomeKind.REDEEMED:
+        // `signature` may be null for a transaction this process submitted and
+        // did not observe confirming. The hold must still be retired, and the
+        // honest ref names the seq rather than inventing a signature.
+        await this.intents.commitRedeemedHold(
+          row.organizationId,
+          row.id,
+          outcome.signature ?? `unobserved:seq=${row.voucherSeq}`,
+        );
+        return { stop: false, settled: true };
+
+      case RedeemOutcomeKind.RETRY:
+        await this.warnIfOverdue(row, issuedAt, outcome.programError);
+        // Not settled: this buyer's later vouchers wait a tick. See the class
+        // comment — going ahead of a retryable seq makes it unredeemable.
+        return { stop: false, settled: false };
+
+      case RedeemOutcomeKind.UNREDEEMABLE:
+        await this.absorb(row, outcome.programError);
+        // Settled, in the only sense this loop cares about: the hold is closed
+        // and nothing will ever redeem this seq, so it cannot be stepped over.
+        return { stop: false, settled: true };
+
+      case RedeemOutcomeKind.PAUSED:
+        // Every remaining hold would be refused identically, and each attempt
+        // costs a transaction fee. Stop; the next tick finds them all.
+        this.logger.warn(
+          `redeem_voucher is paused on chain — stopping this pass after intent ${row.id}. ` +
+            `${VOUCHER_REDEMPTION_BATCH} holds are waiting on the pause being lifted.`,
+        );
+        return { stop: true, settled: false };
+
+      case RedeemOutcomeKind.MISCONFIGURED:
+        // Same stop as `PAUSED` and for the same arithmetic — every remaining
+        // hold is refused identically — but this one does not lift by itself,
+        // so it pages instead of logging.
+        await this.reportMisconfiguration(row, outcome.programError);
+        return { stop: true, settled: false };
+    }
+  }
+
+  /**
+   * The buyer keeps the money and the provider is paid anyway.
+   *
+   * **The credit comes first and the release second, and the order is what
+   * makes a crash between them recoverable.** `findAwaitingRedemption` selects
+   * on `hold_released_at IS NULL`, so releasing first would take the row out of
+   * the queue — and a crash before the credit would leave the provider unpaid
+   * with nothing left to find them by. Credit first, and a crash leaves the row
+   * exactly where the next pass looks; the partial unique index on
+   * `(organization_id, intent_id, entry_type)` for `PROVIDER_CREDIT` is what
+   * stops the retry paying twice.
+   */
+  private async absorb(row: RedeemableIntent, programError: string | null): Promise<void> {
+    const asset = row.assetId as AssetId;
+    const providerAmount = MoneyUtil.of(row.providerAmount, asset, row.decimals);
+
+    await this.ledger.appendNow({
+      organizationId: row.providerId as string,
+      accountId: row.providerAccount as LedgerAccountId,
+      entryType: LedgerEntryType.PROVIDER_CREDIT,
+      money: providerAmount,
+      intentId: row.id,
+      chainTxRef: `${PLATFORM_ABSORBED_TX_REF_PREFIX}${programError ?? 'unknown'}`,
+    });
+
+    await this.intents.releaseHold({
+      organizationId: row.organizationId,
+      id: row.id,
+      holdId: row.holdId,
+    });
+
+    await this.alerts.emit({
+      severity: AlertSeverity.CRITICAL,
+      name: VOUCHER_REDEMPTION_ALERTS.UNREDEEMABLE,
+      summary:
+        `A voucher can never be redeemed (${programError ?? 'unknown refusal'}) — the buyer ` +
+        `keeps ${MoneyUtil.format(providerAmount)} and the platform pays the provider`,
+      details: {
+        intentId: row.id,
+        buyer: row.agentAccount,
+        provider: row.providerAccount ?? 'unknown',
+        seq: row.voucherSeq,
+        absorbed: MoneyUtil.format(providerAmount),
+        programError: programError ?? 'none',
+      },
+      aggregation: AlertAggregation.PER_EVENT,
+    });
+  }
+
+  /**
+   * This deployment is not the program's redeemer, so nothing will redeem.
+   *
+   * `ONCE_PER_INCIDENT` on a fixed key: the condition holds for every hold on
+   * every pass until an admin moves `Config.redeemer` or this process is
+   * re-pointed, and one page is the whole signal. Per-event would be one page
+   * per scheduler tick for as long as the fault stands.
+   */
+  private async reportMisconfiguration(
+    row: RedeemableIntent,
+    programError: string | null,
+  ): Promise<void> {
+    this.logger.error(
+      `redeem_voucher refuses this deployment (${programError ?? 'Config.redeemer mismatch'}) — ` +
+        `stopping the pass at intent ${row.id}. NO voucher can be redeemed until ` +
+        `Config.redeemer names the key this process pays with; every rail-B hold stays open ` +
+        `and starts costing the platform once it outlives the redemption window.`,
+    );
+
+    await this.alerts.emit({
+      severity: AlertSeverity.CRITICAL,
+      name: VOUCHER_REDEMPTION_ALERTS.MISCONFIGURED,
+      summary:
+        `redeem_voucher is refused for the whole deployment ` +
+        `(${programError ?? 'Config.redeemer mismatch'}) — no voucher can be redeemed until ` +
+        `Config.redeemer matches this process's fee payer`,
+      details: {
+        intentId: row.id,
+        buyer: row.agentAccount,
+        seq: row.voucherSeq,
+        programError: programError ?? 'none',
+      },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: VOUCHER_REDEMPTION_ALERTS.MISCONFIGURED,
+    });
+  }
+
+  /**
+   * Overdue holds need an alert.
+   *
+   * Counted from `issued_at` rather than from the intent's own timestamps,
+   * because `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` is the chain's window and the
+   * chain counts from the signed field. Once past it the next pass will come
+   * back `VoucherExpired` and the platform pays — so this fires *before* the
+   * loss, not after it.
+   */
+  private async warnIfOverdue(
+    row: RedeemableIntent,
+    issuedAt: number,
+    programError: string | null,
+  ): Promise<void> {
+    const ageSeconds = Math.floor(this.now() / 1000) - issuedAt;
+    if (ageSeconds <= MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS) {
+      return;
+    }
+
+    await this.alerts.emit({
+      severity: AlertSeverity.WARN,
+      name: VOUCHER_REDEMPTION_ALERTS.OVERDUE,
+      summary:
+        `A rail-B hold is ${ageSeconds}s old and still not redeemed — past the ` +
+        `${MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS}s the program will still accept`,
+      details: {
+        intentId: row.id,
+        buyer: row.agentAccount,
+        seq: row.voucherSeq,
+        ageSeconds,
+        deadlineSeconds: MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+        lastRefusal: programError ?? 'none',
+      },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: row.id,
+    });
+  }
+}
+
+function describe(error: unknown): string {
+  return error instanceof Error ? error.message : String(error);
+}

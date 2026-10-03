@@ -1,0 +1,27 @@
+{
+  "a965eec3-ad93-4257-bf9b-e172361ee56c": {
+    "providerId": "a965eec3-ad93-4257-bf9b-e172361ee56c",
+    "status": "ACTIVE",
+    "tier": "ESTABLISHED",
+    "stats": {
+      "availabilityRate": 0.998,
+      "paidQualityRate": 0.982,
+      "p50LatencyMs": 180,
+      "p95LatencyMs": 420,
+      "callsServed": 50000,
+      "upheldSlashes": 0
+    }
+  },
+  "eca7b08a-e143-44f5-b1ce-28b1a3a0ef41": {
+    "providerId": "eca7b08a-e143-44f5-b1ce-28b1a3a0ef41",
+    "status": "ACTIVE",
+    "tier": "NEW",
+    "stats": {
+      "availabilityRate": 0.99,
+      "paidQualityRate": 0.95,
+      "p95LatencyMs": 700,
+      "callsServed": 400,
+      "upheldSlashes": 0
+    }
+  }
+}

@@ -1,0 +1,513 @@
+import { randomUUID } from 'node:crypto';
+
+import { Inject, Injectable, Logger } from '@nestjs/common';
+
+import { BindingTestRunEntity } from '@database/postgres/entities/binding-test-run.entity';
+import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
+import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
+import {
+  Classification,
+  ProviderResponse,
+  ResponseBodyKind,
+  ResponseClass,
+  classifyResponse,
+} from '@modules/tool/domain/classification';
+import {
+  JsonObject,
+  JsonValue,
+  MappingFault,
+  UpstreamRequest,
+  mapRequest,
+  mapResponse,
+  mappingFaultOf,
+} from '@modules/tool/domain/mapping';
+import { BINDING_INVOKER, BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
+import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
+import { Tool, ToolBinding } from '@modules/tool/ports/tool.types';
+import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
+import { PolicyMode, VerificationPolicy } from '@modules/verification/domain/policy.types';
+import { StageResult } from '@modules/verification/domain/stage';
+import { creditsProvider, isProviderAtFault } from '@modules/verification/domain/verdict';
+import { verify } from '@modules/verification/domain/engine';
+import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
+import { AppError } from '@shared/errors/app-errors';
+
+import { BindingTestReportDto } from '../dto/test-tool-binding.dto';
+import {
+  BINDING_TEST_LAYERS,
+  BindingTestLayer,
+  BindingTestLayerResult,
+  BindingTestLayerStatus,
+  BindingTestOutcome,
+  BindingTestPolicySource,
+  BindingTestReport,
+  BindingTestUpstreamView,
+  BindingTestVerificationView,
+} from '../ports/binding-test.types';
+import { ProviderErrors } from '../errors/provider.errors';
+import { BindingEditorService } from './binding-editor.service';
+
+/** Enough of a body to debug a mapping, not enough to fill a `jsonb` column with a page. */
+const RAW_BODY_LIMIT = 32 * 1024;
+
+/**
+ * The mapping tester.
+ *
+ * > *"The most important screen in the whole console: make a REAL call to the
+ * > provider's endpoint in a sandbox, charging nobody, then show three things —
+ * > the raw response, the result after mapping, AND WHAT EACH CHECK LAYER thinks
+ * > of that result, using exactly the layers production will run. A tester that
+ * > shows only the raw response is not enough, and will turn every later failure
+ * > into an email argument."*
+ *
+ * Everything below follows from the last sentence. A tester that showed only
+ * the raw body would leave a provider unable to see the difference between "my
+ * endpoint is fine and your check is wrong" and "my endpoint returns a field
+ * your contract calls required" — and that difference, discovered for the first
+ * time on the day money is withheld, is the email argument a tester exists to prevent.
+ *
+ * ## It runs production's layers, not copies of them
+ *
+ * ```text
+ * mapRequest          the mapping function the invoker itself calls
+ * BINDING_INVOKER     the router's invoker, the same instance the router holds
+ * classifyResponse    the response classifier, same default policy as the router
+ * mapResponse         the mapping engine again, against the tool's own outputSchema
+ * verify              the deterministic verification engine, on this tool's stored policy
+ * ```
+ *
+ * Not one of these is re-implemented here. This class sequences them, records
+ * what each concluded, and stops at the first that failed — which is also
+ * exactly what `ProviderRouterService` does with the same five, and the reason
+ * a green tester run means something.
+ *
+ * ## It costs nobody anything
+ *
+ * No payment intent, no hold, no ledger entry, no settlement — the tester never
+ * touches `payment`, `ledger` or `settlement`, and a test asserts the balances
+ * are byte-identical before and after a run. The provider pays for their own
+ * upstream compute, which is the same thing a `curl` would cost them.
+ *
+ * The one trace it leaves is deliberate: the call carries a real
+ * `X-X402-Call-Id` (non-optional on `BindingInvocation`) and the run is
+ * recorded against it, so a provider who finds that id in their own access log
+ * can resolve it. An id with no record on our side is precisely the
+ * reconciliation hole the call id exists to close.
+ */
+@Injectable()
+export class BindingMappingTesterService {
+  private readonly logger = new Logger(BindingMappingTesterService.name);
+
+  constructor(
+    private readonly editor: BindingEditorService,
+    private readonly runs: BindingTestRunRepository,
+    @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
+    @Inject(BINDING_INVOKER) private readonly invoker: BindingInvokerPort,
+    private readonly policies: DecisionPolicyService,
+  ) {}
+
+  async run(
+    organizationId: string,
+    subject: string,
+    bindingId: string,
+    input: JsonObject,
+  ): Promise<BindingTestReportDto> {
+    const row = await this.editor.loadEditable(organizationId, bindingId);
+    const tool = await this.catalogue.findTool(row.toolId);
+    if (!tool) {
+      throw ProviderErrors.bindingToolUnknown({ toolId: row.toolId });
+    }
+
+    const binding = toToolBinding(row);
+    const callId = randomUUID();
+    const report = await this.execute(tool, binding, input, callId);
+
+    await this.record(organizationId, subject, row, input, report);
+
+    return {
+      ...report,
+      mappingVersion: row.mappingVersion,
+      request: report.request && {
+        ...report.request,
+        headerNames: [...report.request.headerNames],
+      },
+      layers: report.layers.map((layer) => ({ ...layer })),
+      ranAt: new Date(),
+    };
+  }
+
+  /**
+   * The five layers, in order, stopping at the first failure.
+   *
+   * Written as a straight sequence rather than a pipeline abstraction: there
+   * are five of them, they are not uniform, and the reader who most needs this
+   * file is a provider-support engineer comparing it against
+   * `ProviderRouterService.attempt` line by line.
+   */
+  private async execute(
+    tool: Tool,
+    binding: ToolBinding,
+    input: JsonObject,
+    callId: string,
+  ): Promise<BindingTestReport> {
+    const layers = new LayerLog();
+    const context = { toolId: tool.id, bindingId: binding.id, providerId: binding.providerId };
+
+    // ---- 1. REQUEST_MAPPING -------------------------------------------------
+    // Run here as well as inside the invoker. It is pure and deterministic, so
+    // the second evaluation cannot differ from the first; what it buys is the
+    // *request view* — a provider staring at a 404 needs to see the URL we
+    // built — and a failure reported at this layer rather than as a dial that
+    // never happened.
+    let upstreamRequest: UpstreamRequest;
+    try {
+      upstreamRequest = mapRequest(binding.requestMapping, input, {
+        inputSchema: tool.inputSchema,
+        context,
+      });
+      layers.passed(BindingTestLayer.REQUEST_MAPPING);
+    } catch (error) {
+      layers.failed(BindingTestLayer.REQUEST_MAPPING, error);
+      return layers.report(callId, { request: null });
+    }
+
+    const request = {
+      method: upstreamRequest.method,
+      url: buildUrl(binding.endpoint, upstreamRequest),
+      // Names only — a mapping must never carry a secret, and this report is
+      // stored. See `BindingTestRequestView`.
+      headerNames: Object.keys(upstreamRequest.headers),
+      body: upstreamRequest.body ?? null,
+    };
+
+    // ---- 2. UPSTREAM --------------------------------------------------------
+    const startedAt = Date.now();
+    const response = await this.invoker.invoke({
+      tool,
+      binding,
+      input,
+      callId,
+      timeoutMs: binding.timeoutMs,
+    });
+    const latencyMs = Date.now() - startedAt;
+    const upstream = toUpstreamView(response, latencyMs);
+
+    if (response.transportError) {
+      layers.fail(
+        BindingTestLayer.UPSTREAM,
+        response.transportError.kind,
+        response.transportError.detail ?? 'The endpoint could not be reached.',
+        null,
+      );
+      return layers.report(callId, { request, upstream });
+    }
+    layers.passed(BindingTestLayer.UPSTREAM);
+
+    // ---- 3. CLASSIFICATION --------------------------------------------------
+    // Same call the router makes, defaults and all. The classifier still has no policy
+    // storage, so `{ toolId }` is the whole policy in production too — a
+    // tester that invented one here would grade a response by rules no live
+    // call is judged against.
+    const classification = classifyResponse(response, { toolId: tool.id }, { nowMs: Date.now() });
+
+    if (classification.responseClass !== ResponseClass.DATA_RESULT) {
+      layers.fail(
+        BindingTestLayer.CLASSIFICATION,
+        classification.reason,
+        `Classified ${classification.responseClass}: ${classification.reason}. ` +
+          `A live call would not have reached verification.`,
+        null,
+      );
+      return layers.report(callId, { request, upstream, classification });
+    }
+    layers.passed(BindingTestLayer.CLASSIFICATION);
+
+    // ---- 4. RESPONSE_MAPPING ------------------------------------------------
+    if (response.body.kind !== ResponseBodyKind.JSON) {
+      // Unreachable through the classifier's body gate, which sends a
+      // non-JSON body to `SYSTEM_ERROR` above. Stated rather than assumed,
+      // because the alternative is a `TypeError` in a console screen.
+      layers.fail(
+        BindingTestLayer.RESPONSE_MAPPING,
+        'body_not_json',
+        'The response body was not JSON, so there is nothing to map.',
+        MappingFault.PROVIDER,
+      );
+      return layers.report(callId, { request, upstream, classification });
+    }
+
+    let mapped: JsonValue;
+    try {
+      mapped = mapResponse(binding.responseMapping, response.body.value, {
+        outputSchema: tool.outputSchema,
+        context,
+      });
+      layers.passed(BindingTestLayer.RESPONSE_MAPPING);
+    } catch (error) {
+      layers.failed(BindingTestLayer.RESPONSE_MAPPING, error);
+      return layers.report(callId, { request, upstream, classification });
+    }
+
+    // ---- 5. VERIFICATION ----------------------------------------------------
+    const verification = await this.verifyMapped(tool, mapped, input);
+    const verdict = verification.verdict;
+
+    if (verdict !== null && isProviderAtFault(verdict)) {
+      layers.fail(
+        BindingTestLayer.VERIFICATION,
+        firstFailingStageCode(verification.stages) ?? verdict,
+        firstFailingStageDetail(verification.stages) ?? `Verification returned ${verdict}.`,
+        MappingFault.PROVIDER,
+      );
+    } else if (verdict !== null && creditsProvider(verdict)) {
+      layers.passed(BindingTestLayer.VERIFICATION);
+    } else {
+      // `MISAPPLIED`, `DEGRADED`, `SKIPPED` — never the provider's fault, and
+      // never a pass either. A publish gate that read one of these as green
+      // would be letting a binding live on a check that did not conclude.
+      layers.inconclusive(
+        BindingTestLayer.VERIFICATION,
+        verdict ?? 'not_evaluated',
+        `Verification did not reach a judgement (${verdict ?? 'no verdict'}).`,
+      );
+    }
+
+    return layers.report(callId, { request, upstream, classification, mapped, verification });
+  }
+
+  /**
+   * The verification stages, on the policy this tool's live traffic is judged
+   * by — or, when there is none, on the tool's own `outputSchema` and said so.
+   *
+   * `resolveForTraffic` is the aggregator's own resolver, so a policy in
+   * `SHADOW`, or one a kill switch has withdrawn, is seen here exactly as a
+   * live call would see it.
+   */
+  private async verifyMapped(
+    tool: Tool,
+    mapped: JsonValue,
+    input: JsonObject,
+  ): Promise<BindingTestVerificationView> {
+    const resolved = await this.policies.resolveForTraffic(tool.id);
+    const stored = resolved?.verificationPolicy ?? null;
+    const policy = stored ?? schemaOnlyPolicy(tool);
+
+    const verdict = verify({
+      // No payment intent exists — a tester run is not a call anybody paid
+      // for. The engine only carries this through onto the verdict.
+      intentId: `test:${tool.id}`,
+      policy,
+      outputSchema: tool.outputSchema,
+      response: mapped,
+      request: input,
+      evaluatedAt: new Date(),
+    });
+
+    return {
+      policySource: stored
+        ? BindingTestPolicySource.STORED_POLICY
+        : BindingTestPolicySource.TOOL_SCHEMA_ONLY,
+      policyId: stored ? stored.id : null,
+      policyVersion: stored ? stored.version : null,
+      stages: verdict.stages,
+      verdict: verdict.status,
+    };
+  }
+
+  private async record(
+    organizationId: string,
+    subject: string,
+    row: ToolBindingEntity,
+    input: JsonObject,
+    report: BindingTestReport,
+  ): Promise<void> {
+    const entity = new BindingTestRunEntity();
+    entity.organizationId = organizationId;
+    entity.bindingId = row.id;
+    entity.mappingVersion = row.mappingVersion;
+    entity.callId = report.callId;
+    entity.outcome = report.outcome;
+    entity.failedLayer = report.failedLayer;
+    entity.sampleInput = input;
+    entity.report = report;
+    entity.ranBy = subject;
+
+    await this.runs.save(entity);
+    this.logger.log(
+      `Tester run ${report.outcome} for binding ${row.id} revision ${row.mappingVersion}`,
+    );
+  }
+}
+
+/**
+ * Collects one result per layer and enforces the two rules the vocabulary
+ * exists for: a layer after a failure is `NOT_REACHED`, and there is exactly
+ * one way to say "passed".
+ */
+class LayerLog {
+  private readonly results = new Map<BindingTestLayer, BindingTestLayerResult>();
+  private failedLayer: BindingTestLayer | null = null;
+
+  passed(layer: BindingTestLayer): void {
+    this.results.set(layer, {
+      layer,
+      status: BindingTestLayerStatus.PASSED,
+      code: null,
+      detail: null,
+      fault: null,
+    });
+  }
+
+  fail(layer: BindingTestLayer, code: string, detail: string, fault: MappingFault | null): void {
+    this.results.set(layer, { layer, status: BindingTestLayerStatus.FAILED, code, detail, fault });
+    this.failedLayer ??= layer;
+  }
+
+  inconclusive(layer: BindingTestLayer, code: string, detail: string): void {
+    this.results.set(layer, {
+      layer,
+      status: BindingTestLayerStatus.INCONCLUSIVE,
+      code,
+      detail,
+      fault: null,
+    });
+
+    // Recorded as the layer that stopped the run being green, exactly like a
+    // failure. `failed_layer` answers "where did this stop", not "whose fault
+    // was it" — and `chk_binding_test_runs_failure_is_located` requires an
+    // answer whenever the outcome is not `PASSED`.
+    this.failedLayer ??= layer;
+  }
+
+  /** A thrown `AppError` from the mapping engine, unpacked into a layer result. */
+  failed(layer: BindingTestLayer, error: unknown): void {
+    const appError = error instanceof AppError ? error : null;
+    if (!appError) throw error;
+
+    // The message already carries the pointer — every mapping error factory
+    // interpolates it — so it is not appended a second time.
+    this.fail(layer, appError.errorCode, appError.message, mappingFaultOf(error));
+  }
+
+  report(
+    callId: string,
+    parts: {
+      request?: BindingTestReport['request'];
+      upstream?: BindingTestUpstreamView;
+      classification?: Classification;
+      mapped?: JsonValue;
+      verification?: BindingTestVerificationView;
+    },
+  ): BindingTestReport {
+    const layers = BINDING_TEST_LAYERS.map(
+      (layer) =>
+        this.results.get(layer) ?? {
+          layer,
+          status: BindingTestLayerStatus.NOT_REACHED,
+          code: null,
+          detail: 'Checks stop at the first failure.',
+          fault: null,
+        },
+    );
+
+    const green = layers.every((layer) => layer.status === BindingTestLayerStatus.PASSED);
+
+    return {
+      callId,
+      outcome: green ? BindingTestOutcome.PASSED : BindingTestOutcome.FAILED,
+      failedLayer: this.failedLayer,
+      layers,
+      request: parts.request ?? null,
+      upstream: parts.upstream ?? null,
+      classification: parts.classification ?? null,
+      mapped: parts.mapped ?? null,
+      verification: parts.verification ?? null,
+    };
+  }
+}
+
+/**
+ * The stand-in policy for a tool with none registered.
+ *
+ * Schema and nothing else: no rules, and a threshold an empty rule set clears
+ * (`decideScore` scores 1 when nothing applied). It is **not** presented as a
+ * policy — `BindingTestPolicySource.TOOL_SCHEMA_ONLY` says so on the report —
+ * because production would settle such a call unverified, which makes this run
+ * stricter than production rather than equal to it. Stricter is the right
+ * direction for a gate; pretending otherwise is not.
+ */
+function schemaOnlyPolicy(tool: Tool): VerificationPolicy {
+  return {
+    id: `tool-schema:${tool.id}`,
+    toolId: tool.id,
+    version: 0,
+    rules: [],
+    passThreshold: 1,
+    mode: PolicyMode.ACTIVE,
+  };
+}
+
+function toUpstreamView(response: ProviderResponse, latencyMs: number): BindingTestUpstreamView {
+  const raw = rawBodyOf(response);
+
+  return {
+    status: response.status,
+    latencyMs,
+    rawBody: raw === null ? null : raw.slice(0, RAW_BODY_LIMIT),
+    rawBodyTruncated: raw !== null && raw.length > RAW_BODY_LIMIT,
+    contentType: response.headers?.['content-type'] ?? null,
+    transportError: response.transportError
+      ? { kind: response.transportError.kind, detail: response.transportError.detail ?? null }
+      : null,
+  };
+}
+
+/**
+ * The bytes, as the provider would recognise them.
+ *
+ * A JSON body is re-serialised rather than carried as an object: the tester's
+ * first panel is *the raw response*, and an object in that panel is already an
+ * interpretation — it has lost key order, duplicate keys and whatever the
+ * provider's serialiser actually emitted.
+ */
+function rawBodyOf(response: ProviderResponse): string | null {
+  switch (response.body.kind) {
+    case ResponseBodyKind.JSON:
+      return JSON.stringify(response.body.value);
+    case ResponseBodyKind.NON_JSON:
+      // The bytes exactly as they arrived — an HTML error page is the single
+      // most useful thing this panel ever shows a provider.
+      return response.body.raw;
+    default:
+      return null;
+  }
+}
+
+function firstFailingStageCode(stages: readonly StageResult[]): string | null {
+  return stages.find((stage) => stage.code !== null)?.code ?? null;
+}
+
+function firstFailingStageDetail(stages: readonly StageResult[]): string | null {
+  return stages.find((stage) => stage.detail !== null && stage.code !== null)?.detail ?? null;
+}
+
+/**
+ * `binding.endpoint` + the mapped path and query.
+ *
+ * Duplicated from `EgressBindingInvoker`'s private `buildUrl` rather than
+ * exported from it: this copy exists only to *show* a provider the URL, and
+ * exporting the invoker's would make a display concern part of the call path's
+ * contract. The two are asserted equal by the tester's own test, which reads
+ * the URL the fixture server actually received.
+ */
+function buildUrl(endpoint: string, upstream: UpstreamRequest): string {
+  const base = endpoint.replace(/\/+$/, '');
+  const path = upstream.path ? `/${upstream.path.replace(/^\/+/, '')}` : '';
+  const url = new URL(`${base}${path}`);
+
+  for (const [name, value] of Object.entries(upstream.query)) {
+    url.searchParams.set(name, value);
+  }
+
+  return url.href;
+}

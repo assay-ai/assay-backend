@@ -1,0 +1,4 @@
+# Compiled output. The *generated source* under src/generated is committed --
+# see scripts/generate.mjs for why -- but its build product is not.
+/dist
+/node_modules

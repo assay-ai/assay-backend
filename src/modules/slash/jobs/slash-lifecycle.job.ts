@@ -1,0 +1,247 @@
+import { Injectable, Logger } from '@nestjs/common';
+import { Cron, CronExpression } from '@nestjs/schedule';
+
+import { ArbitrationService } from '../services/arbitration.service';
+import { SlashExecutionService } from '../services/slash-execution.service';
+import { SlashProposalService } from '../services/slash-proposal.service';
+
+/**
+ * The six clocks, on a tick.
+ *
+ * Modelled on `SlaWindowSweepJob`, including the try/catch: a throw out of a
+ * `@Cron` handler is an unhandled rejection that takes the scheduler process
+ * down, and the next pass would never run. On this job that failure mode is
+ * particularly bad — the pass that stops running is the one that overturns
+ * cases we failed to decide, so a crash here would silently convert our own
+ * missed deadlines into upheld penalties.
+ *
+ * Each of the six is a separate try/catch for the same reason: an RPC outage
+ * that stops execution must not stop the two sweepers, and the sweeper that
+ * *costs the platform money* must be the least stoppable thing in the file.
+ *
+ * ## Order within one tick
+ *
+ * `sweepUndisputed` → `sweepPlatformMisses` → `proposeDue` → `executeDue` →
+ * `sweepAdminCancels` → `reconcileExecuting`, and the order is load-bearing,
+ * not cosmetic:
+ *
+ * - The sweepers run first because either can change what is due for the
+ *   chain steps below them on the very same tick: a case `sweepUndisputed`
+ *   upholds becomes something `proposeDue` should see now, not next minute.
+ * - `proposeDue` before `executeDue`: a case upheld this tick has to reach the
+ *   chain — start its 72h clock — before anything looks for it there. The
+ *   on-chain clock starts as early as it honestly can, which is the point of
+ *   running the parallel clock at all.
+ * - `reconcileExecuting` last, because it is cleanup for a crashed submit and
+ *   must never delay a live judgement to do it.
+ *
+ * ## Why every minute, and not less often
+ *
+ * The two sweepers act on deadlines measured in days, so a minute of latency is
+ * irrelevant to correctness. What a short tick buys is that the queue an
+ * operator is looking at agrees with the database they are about to write to:
+ * a case that timed out four minutes ago and still shows as workable is a case
+ * somebody will spend fifteen minutes deciding before losing the write.
+ *
+ * - `sweepAdminCancels` after `executeDue`: it reads on-chain records, and
+ *   reading them before the execute pass has finished moving them would mirror
+ *   a state that is one instant out of date.
+ *
+ * ## Why the chain steps live here and not in their own job
+ *
+ * They are strictly ordered against the two sweepers — a case upheld by
+ * `sweepUndisputed` must reach the chain on the same tick — and they have no
+ * cadence of their own: both are one-shot per row, driven by a column. A second
+ * `@Cron` class would need its own copy of the try/catch discipline above and
+ * would double the per-minute round-trips to say the same thing. The design
+ * spec calls this `SlashExecutionJob`; the difference is a file boundary and
+ * the reason to keep it here is that these five steps have to agree about
+ * order.
+ */
+@Injectable()
+export class SlashLifecycleJob {
+  private readonly logger = new Logger(SlashLifecycleJob.name);
+
+  constructor(
+    private readonly proposals: SlashProposalService,
+    private readonly execution: SlashExecutionService,
+    private readonly arbitration: ArbitrationService,
+  ) {}
+
+  @Cron(CronExpression.EVERY_MINUTE)
+  async handleTick(): Promise<void> {
+    await this.sweepUndisputed();
+    await this.sweepPlatformMisses();
+    // Before `executeDue`, so a case upheld by the sweep above reaches the
+    // chain on the same tick that decided it. The on-chain 72h starts as early
+    // as it honestly can, which is the whole point of the parallel clock.
+    await this.proposeDue();
+    await this.executeDue();
+    // After `executeDue` and before the reconcile: a case whose admin cancel
+    // landed this tick should have its mirror caught up before anything reasons
+    // about parked rows, and running it earlier would have it read records the
+    // execute pass is about to move.
+    await this.sweepAdminCancels();
+    // Last. Cleanup for a crashed submit, and it must never delay a live
+    // judgement to do it.
+    await this.reconcileExecuting();
+  }
+
+  private async sweepUndisputed(): Promise<void> {
+    try {
+      await this.proposals.sweepUndisputed();
+    } catch (error) {
+      this.logger.error(
+        `Undisputed sweep aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async sweepPlatformMisses(): Promise<void> {
+    try {
+      const overturned = await this.proposals.sweepPlatformMisses();
+      if (overturned.length === 0) return;
+
+      // `warn`, not `log`. Every row is a case we were resourced to work and
+      // did not. The platform-miss rule puts this deadline on us precisely so
+      // that missing it is visible rather than absorbed, and a log line at
+      // `info` is absorbed.
+      this.logger.warn(
+        `${overturned.length} case(s) auto-overturned because we missed our own deadline.`,
+      );
+
+      // The chain does not know we missed a deadline. Until it is told the
+      // reservation stands and `execute_slash` stays open to anybody once
+      // `executable_at` passes — which, on a case the platform itself failed to
+      // work, is the worst possible moment for a stranger to be able to take a
+      // provider's stake.
+      //
+      // This only *records* the request: `cancel_slash` is signed
+      // by `Config.admin`, and {@link sweepAdminCancels} below is what carries
+      // it through — or expires the record itself once its seven-day grace has
+      // run, so a request nobody signs still releases the provider's capital.
+      //
+      // Guarded per row for the reason the steps are guarded separately: one
+      // unreadable case must not hold every other provider's released capital.
+      for (const row of overturned) {
+        try {
+          await this.execution.requestAdminCancel(row.organizationId, row.id, 'AUTO_PLATFORM_MISS');
+        } catch (error) {
+          this.logger.error(
+            `requesting the chain cancellation for ${row.id} failed: ` +
+              `${error instanceof Error ? error.message : String(error)}`,
+          );
+        }
+      }
+    } catch (error) {
+      this.logger.error(
+        `Platform-miss sweep aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * The cases waiting on the settlement admin's `cancel_slash`.
+   *
+   * Two ends, and only one of them needs a human. Either the admin signed and
+   * the mirror catches up, or nobody did and the record's seven-day grace has
+   * run, at which point the permissionless `expire_slash` releases the
+   * reservation without anybody's permission. `waiting` is the healthy middle,
+   * logged only when something else moved so a quiet queue stays quiet.
+   */
+  private async sweepAdminCancels(): Promise<void> {
+    try {
+      const { mirrored, expired, waiting } = await this.execution.sweepAdminCancels();
+      if (mirrored > 0 || expired > 0) {
+        // `warn` on `expired`: a record reaped by this platform is one the
+        // settlement admin never got to inside seven days, which is a process
+        // failure even though the provider is made whole by it.
+        this.logger.warn(
+          `Admin-cancel sweep: ${mirrored} mirrored, ${expired} expired, ${waiting} still waiting.`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Admin-cancel sweep aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async proposeDue(): Promise<void> {
+    try {
+      const { proposed, refused, failed } = await this.execution.proposeDue();
+      if (proposed > 0 || refused > 0 || failed > 0) {
+        this.logger.log(
+          `Chain proposal pass: ${proposed} proposed, ${refused} refused, ${failed} failed.`,
+        );
+      }
+    } catch (error) {
+      // Includes the "no executor configured" case, which is the normal state
+      // of a deployment with no settlement program id. Logged at `debug` there
+      // would hide a real outage; logged at `error` here it is noisy on an
+      // unconfigured environment — so the service throws a message that names
+      // the configuration, and this line carries it verbatim.
+      this.logger.error(
+        `Chain proposal pass aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async executeDue(): Promise<void> {
+    try {
+      const { executed, voided, failed } = await this.execution.executeDue();
+      if (executed > 0 || voided > 0 || failed > 0) {
+        this.logger.log(
+          `Slash execution pass: ${executed} executed, ${voided} voided, ${failed} failed.`,
+        );
+      }
+    } catch (error) {
+      // Includes the "no executor configured" case, which is the normal state
+      // of a deployment with no settlement program id. Logged at `debug` there
+      // would hide a real outage; logged at `error` here it is noisy on an
+      // unconfigured environment — so the service throws a message that names
+      // the configuration, and this line carries it verbatim.
+      this.logger.error(
+        `Slash execution pass aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
+   * Cleanup for a submit that crashed mid-flight, plus a park an earlier
+   * version left behind. `reconcileExecuting`'s three counters, read against
+   * its current body (`slash-execution.service.ts`):
+   *
+   * - `recovered`: the row is now terminally `EXECUTED` with the ledger
+   *   credited. Two different starting shapes land here — an `EXECUTING` row
+   *   whose transaction turns out to have landed despite the process that
+   *   sent it dying before it could record that (the lost-CAS recovery), and
+   *   a park (`chain_status='EXECUTED'`, `executed_at IS NULL`) that this pass
+   *   finally completes. Either way the provider has already been charged on
+   *   chain; this is bookkeeping catching up to money that already moved.
+   * - `returned`: the on-chain record shows no execution (`PENDING` or
+   *   absent). The judgement is still alive, so the row goes back to `UPHELD`
+   *   with its claim released for the next `executeDue` to pick up.
+   * - `voided`: the on-chain record reads `CANCELLED` — a verifier withdrew
+   *   the judgement, or it was reaped after its grace ran out. The reservation
+   *   is released and the case can never execute.
+   */
+  private async reconcileExecuting(): Promise<void> {
+    try {
+      const { recovered, returned, voided } = await this.execution.reconcileExecuting();
+      if (recovered > 0 || returned > 0 || voided > 0) {
+        // `warn`: every row here is a case whose submitting process died
+        // mid-transaction, or a park nothing else reconciles. Recoverable, and
+        // worth knowing how often.
+        this.logger.warn(
+          `Execution reconcile pass: ${recovered} confirmed executed, ${returned} requeued, ` +
+            `${voided} voided.`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Execution reconcile pass aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+}

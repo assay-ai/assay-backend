@@ -1,0 +1,191 @@
+import { NestFactory } from '@nestjs/core';
+import { ValidationPipe, VersioningType } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import { SwaggerModule, DocumentBuilder, SwaggerCustomOptions } from '@nestjs/swagger';
+import { Reflector } from '@nestjs/core';
+import { AppApiModule } from './app.module';
+import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
+import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
+import { HttpCacheInterceptor } from '@shared/interceptors/http-cache.interceptor';
+import { LoggingInterceptor } from '@shared/interceptors/logging.interceptor';
+import { CacheHeaderInterceptor } from '@shared/interceptors/cache-header.interceptor';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { SingleFlightService } from '@shared/services/single-flight.service';
+import { SingleFlightInterceptor } from '@shared/interceptors/single-flight.interceptor';
+import { StructuredLogger } from '@shared/observability';
+
+async function bootstrapApi() {
+  const app = await NestFactory.create(AppApiModule, {
+    logger: new StructuredLogger(),
+  });
+  const configService = app.get(ConfigService);
+
+  // Get config
+  const port = configService.get<number>('app.api.port');
+
+  // Global prefix
+  app.setGlobalPrefix('api');
+  app.enableVersioning({
+    type: VersioningType.URI, // /api/v1/..., /api/v2/...
+    defaultVersion: '1', // Default v1
+  });
+
+  // CORS
+  //
+  // `exposedHeaders` is not decoration. A cross-origin browser client can read
+  // only the seven CORS-safelisted response headers unless the server names the
+  // rest, so without this list `GET /providers/me/calls/export` reaches the
+  // console as a CSV body with no metadata: `X-X402-Export-Row-Count`,
+  // `X-X402-Export-Total-Matching`, `X-X402-Export-Truncated` and even the
+  // filename in `Content-Disposition` are silently dropped by the browser, with
+  // no error anywhere.
+  //
+  // The three `X-X402-Export-*` headers are `docs/api-list-contract.md`'s
+  // no-silent-caps rule applied to a response the JSON envelope cannot wrap —
+  // they are the only way the export says how many rows it returned and whether
+  // it hit its cap. A client that cannot read `X-X402-Export-Truncated` has to
+  // either show nothing or assume `false`, and assuming `false` tells a provider
+  // their financial export is complete on exactly the evidence that it might not
+  // be. That is the failure mode this list exists to prevent.
+  //
+  // Nothing else on this surface needs adding. `Content-Type`, `Cache-Control`,
+  // `Pragma` and `Expires` — the other headers any handler here sets — are
+  // already safelisted. `CDN-Cache-Control` and `Vary` are instructions to
+  // intermediaries and no browser client reads them.
+  //
+  // `src/bootstrap/mcp/main.ts` sets its own list for the Streamable HTTP
+  // session headers; the two services expose different things and neither list
+  // is the other's.
+  app.enableCors({
+    origin: '*',
+    credentials: true,
+    exposedHeaders: [
+      'Content-Disposition',
+      'X-X402-Export-Total-Matching',
+      'X-X402-Export-Row-Count',
+      'X-X402-Export-Truncated',
+    ],
+  });
+
+  // Validation
+  app.useGlobalPipes(
+    new ValidationPipe({
+      whitelist: true,
+      transform: true,
+      forbidNonWhitelisted: true,
+    }),
+  );
+
+  // Global filter — exactly one, deliberately. AllExceptionsFilter catches
+  // every exception and emits the single ErrorResponse shape. A second filter
+  // registered here would take precedence for its own exception type and
+  // reintroduce the two-shape problem it replaced.
+  app.useGlobalFilters(new AllExceptionsFilter());
+
+  // Global interceptors
+  const reflector = app.get(Reflector);
+  const configServiceInstance = app.get(ConfigService);
+
+  app.useGlobalInterceptors(
+    new LoggingInterceptor(),
+    new TransformInterceptor(reflector),
+    new CacheHeaderInterceptor(reflector, configServiceInstance),
+    new SingleFlightInterceptor(reflector, app.get(SingleFlightService)),
+    new HttpCacheInterceptor(app.get(CacheService), reflector, configServiceInstance),
+  );
+
+  // Swagger
+  //
+  // The description below is the contract a client author needs before reading
+  // any single endpoint — how to page, how to sort, what an error looks like,
+  // and why a resource that exists can answer 404. Putting it here rather than
+  // repeating it on 40 `@ApiOperation`s means there is one copy to keep true.
+  const config = new DocumentBuilder()
+    .setTitle('GoAssay.AI API')
+    .setDescription(
+      [
+        'REST surface for the GoAssay.AI buyer and provider dashboards.',
+        '',
+        '### Responses',
+        'Success bodies are wrapped: `{ data, statusCode, message }`.',
+        'Failures use one shape and only one:',
+        '```json',
+        '{ "success": false, "error": { "code": "PAYMENT_INTENT_NOT_FOUND",',
+        '  "message": "…", "statusCode": 404, "path": "…", "timestamp": "…" } }',
+        '```',
+        '',
+        '### Pagination — cursor, everywhere',
+        'Every list endpoint takes `cursor`, `limit` (1–100, default 25), `sort`,',
+        '`order` (`asc`/`desc`), `from`, `to`, `search`, and returns',
+        '`{ items, pageInfo: { nextCursor, hasMore } }`.',
+        '',
+        'Cursors are **opaque** — pass back `pageInfo.nextCursor` verbatim. Do not',
+        'construct or parse them. A cursor is bound to the ordering it was taken',
+        'under, so changing `sort` or `order` mid-pagination returns',
+        '`API_INVALID_CURSOR` rather than a silently mis-paged result.',
+        '',
+        '`nextCursor: null` is the only end-of-list signal. A short page does not',
+        'mean the end — filters are applied before the limit.',
+        '',
+        'There is no total count on a page. Totals come from the summary endpoints',
+        '(`/receipts/summary`), which aggregate server-side and state their window.',
+        '',
+        '### Time windows',
+        '`from` / `to` are half-open — `[from, to)` — so adjacent windows partition',
+        'rather than overlap. All timestamps are ISO-8601 UTC.',
+        '',
+        '### Money',
+        'Always `{ amount, asset, decimals }`, where `amount` is atomic units as a',
+        'decimal **string**. Never a float, never a bare number.',
+        '',
+        '### Authorisation, and why you may see a 404 for something that exists',
+        'Send `Authorization: Bearer <session token>`. Every request is scoped to',
+        'the organization behind that token; `organizationId` is never accepted as',
+        'a parameter.',
+        '',
+        'Asking for another organization’s resource id returns **404, not 403**.',
+        'A 403 would confirm the resource exists, which lets an id be enumerated',
+        'from the status code alone. From the caller’s tenant, 404 is also true.',
+      ].join('\n'),
+    )
+    .setVersion('1.0')
+    .addBearerAuth({
+      type: 'http',
+      scheme: 'bearer',
+      description:
+        'Session token. Resolved through `McpSessionPort` — the same credential MCP uses.',
+    })
+    .addServer(`http://localhost:${port}`, 'Local')
+    .build();
+
+  const customOptions: SwaggerCustomOptions = {
+    swaggerOptions: {
+      persistAuthorization: true,
+      // Endpoints are grouped by tag and collapsed; the surface is wide enough
+      // that an expanded default renders as an unreadable wall.
+      docExpansion: 'none',
+      filter: true,
+      tagsSorter: 'alpha',
+      operationsSorter: 'alpha',
+    },
+    customSiteTitle: 'GoAssay.AI API',
+  };
+
+  const document = SwaggerModule.createDocument(app, config);
+  SwaggerModule.setup('api/docs', app, document, customOptions);
+
+  await app.listen(port);
+
+  const bullBoardEnabled = configService.get<boolean>('bullboard.enabled');
+  const bullBoardPath = configService.get<string>('bullboard.path');
+  const bullBoardLine = bullBoardEnabled
+    ? `\n  🐂 Bull Board: http://localhost:${port}/api${bullBoardPath}`
+    : '';
+
+  console.log(`
+  🚀 [API SERVER] Application is running on: http://localhost:${port}
+  📚 Swagger documentation: http://localhost:${port}/api/docs${bullBoardLine}
+  `);
+}
+
+export { bootstrapApi };

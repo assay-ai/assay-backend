@@ -1,0 +1,752 @@
+{
+  "_comment": [
+    "Demo verification + decision policies for the seeded tools.",
+    "",
+    "Read this before trusting anything it produces:",
+    "",
+    "The promote gate is a CHECK constraint precisely so no code path could",
+    "route around it, and that leaves one sharp gap —",
+    "the gate's evidence numbers are TYPED IN BY A HUMAN, because nothing in the",
+    "system counts shadow calls or labels false positives yet. This file types",
+    "them in. It is a DEV SEED and it is exactly that bypass, used",
+    "deliberately and in one place, so that the receipt has a",
+    "real ACTIVE policy to name instead of rendering 'no policy configured' for",
+    "every call.",
+    "",
+    "It is not wired into any service. It runs only when a human runs",
+    "`yarn mcp:policies`, against a local database, and the approver is a",
+    "literal string that says so. Receipts turning verification_records into",
+    "counted shadow calls is what makes the gate mechanical; until then the",
+    "four-eyes rule is procedural and this file is the proof of that.",
+    "",
+    "toolId values must match scripts/mcp/seed/catalogue.json.",
+    "",
+    "The rules are deliberately weak — a temperature band and a freshness",
+    "window a healthy provider always clears. A demo seed that struck real",
+    "public providers on ordinary responses would be teaching the wrong lesson",
+    "about what the engine is for. To watch a FAIL, narrow `max` on the",
+    "temperature rule and call the tool.",
+    "",
+    "Weights are not an even split. The stage scores passedWeight over",
+    "consideredWeight against passThreshold — see",
+    "src/modules/verification/domain/stages/deterministic-stage.ts — so a single",
+    "failing rule of weight w scores 1 − w, and at a 0.7 threshold a rule",
+    "weighted 0.30 or less can NEVER fail its policy on its own (0.30 lands on",
+    "0.70 exactly, and the comparison is >=). What a rule is worth is therefore",
+    "a judgement about how badly its violation ruins the answer: a stale price",
+    "condemns the call, a malformed logo URL does not. Each rule's _comment says",
+    "which side of that line it is on and why."
+  ],
+  "policies": [
+    {
+      "toolId": "06399979-f8b8-4c9e-a9b1-bd2a5924d442",
+      "toolName": "get_weather",
+      "verificationPolicy": {
+        "id": "get_weather.default",
+        "version": 1,
+        "passThreshold": 0.7,
+        "mode": "ACTIVE",
+        "rules": [
+          {
+            "id": "temperature_in_physical_range",
+            "type": "VALUE_RANGE",
+            "path": "$.temperatureC",
+            "weight": 0.5,
+            "min": -95,
+            "max": 60,
+            "_comment": "The recorded extremes on Earth, rounded outward. A band that fails an honest reading is a false positive, and this rule exists to catch a sensor returning 9999 or a unit mix-up, not to grade the weather."
+          },
+          {
+            "id": "observation_is_recent",
+            "type": "FRESHNESS",
+            "path": "$.observedAt",
+            "weight": 0.5,
+            "maxAgeMs": 10800000,
+            "futureToleranceMs": 300000,
+            "_comment": "Three hours. Forecast models publish hourly and a provider's clock may run fast; the five-minute future tolerance is skew, not a defect."
+          }
+        ],
+        "semantic": {
+          "enabled": false
+        },
+        "crossCheck": {
+          "enabled": false
+        }
+      },
+      "decisionPolicy": {
+        "id": "get_weather.default",
+        "verifiers": [
+          {
+            "verifierId": "schema",
+            "label": "Response shape"
+          },
+          {
+            "verifierId": "rules",
+            "label": "Deterministic rules"
+          }
+        ],
+        "clauses": [
+          {
+            "when": "MISAPPLIED_AT_LEAST",
+            "count": 1,
+            "then": "MISAPPLIED",
+            "label": "One of our checks did not fit this response, so the call was not charged and the provider was not struck."
+          },
+          {
+            "when": "VERIFIER_FAILED",
+            "verifierId": "schema",
+            "then": "FAIL",
+            "label": "The response did not match the shape this tool promises."
+          },
+          {
+            "when": "FAILURES_AT_LEAST",
+            "count": 1,
+            "then": "FAIL",
+            "label": "The response did not satisfy this tool's quality rules."
+          },
+          {
+            "when": "VOTES_BELOW",
+            "count": 1,
+            "then": "DEGRADED",
+            "label": "Too few checks completed to judge this response."
+          }
+        ],
+        "otherwise": "PASS"
+      }
+    },
+    {
+      "toolId": "a4b9882a-9bc1-4d64-807a-27c0b93daf0a",
+      "toolName": "get_usd_eur_rate",
+      "verificationPolicy": {
+        "id": "get_usd_eur_rate.default",
+        "version": 1,
+        "passThreshold": 0.7,
+        "mode": "ACTIVE",
+        "rules": [
+          {
+            "id": "rate_in_plausible_band",
+            "type": "VALUE_RANGE",
+            "path": "$.rate",
+            "weight": 1,
+            "min": 0.5,
+            "max": 2,
+            "_comment": "USD/EUR has never left this band. Wide on purpose: the rule is here to catch a zero, a null coerced to a number, or a rate quoted the other way up."
+          }
+        ],
+        "semantic": {
+          "enabled": false
+        },
+        "crossCheck": {
+          "enabled": false
+        }
+      },
+      "decisionPolicy": {
+        "id": "get_usd_eur_rate.default",
+        "verifiers": [
+          {
+            "verifierId": "schema",
+            "label": "Response shape"
+          },
+          {
+            "verifierId": "rules",
+            "label": "Deterministic rules"
+          }
+        ],
+        "clauses": [
+          {
+            "when": "MISAPPLIED_AT_LEAST",
+            "count": 1,
+            "then": "MISAPPLIED",
+            "label": "One of our checks did not fit this response, so the call was not charged and the provider was not struck."
+          },
+          {
+            "when": "VERIFIER_FAILED",
+            "verifierId": "schema",
+            "then": "FAIL",
+            "label": "The response did not match the shape this tool promises."
+          },
+          {
+            "when": "FAILURES_AT_LEAST",
+            "count": 1,
+            "then": "FAIL",
+            "label": "The published rate was outside any plausible band."
+          },
+          {
+            "when": "VOTES_BELOW",
+            "count": 1,
+            "then": "DEGRADED",
+            "label": "Too few checks completed to judge this response."
+          }
+        ],
+        "otherwise": "PASS"
+      }
+    },
+    {
+      "toolId": "ad39dccc-aff2-54c1-b383-62e0ff392570",
+      "toolName": "geocode_place",
+      "_comment": [
+        "No length rule and no uniqueness rule, both on purpose.",
+        "",
+        "Uniqueness is out because two genuinely different places share a name —",
+        "there are dozens of Springfields, and an honest upstream returning all of",
+        "them would be struck for telling the truth.",
+        "",
+        "A length rule is out because 'no such place' is a legitimate answer.",
+        "Measured 2026-08-25: open-meteo signals it by omitting `results`",
+        "entirely, which the mapping already turns into a void rather than a",
+        "strike. Adding MIN_ARRAY_LENGTH here would buy nothing and put a whole",
+        "class of correct responses one mapping change away from a strike."
+      ],
+      "verificationPolicy": {
+        "id": "geocode_place.default",
+        "version": 1,
+        "passThreshold": 0.7,
+        "mode": "ACTIVE",
+        "rules": [
+          {
+            "id": "fields_present",
+            "type": "REQUIRED_FIELDS",
+            "path": "$.results[*]",
+            "weight": 0.34,
+            "fields": [
+              "name",
+              "latitude",
+              "longitude",
+              "countryCode"
+            ],
+            "_comment": "A match with no coordinates is not a geocode. This catches the upstream that returns a name row it could not resolve, and the mapping that silently drops a field after an upstream rename — the agent gets a place it cannot point at."
+          },
+          {
+            "id": "latitude_in_range",
+            "type": "VALUE_RANGE",
+            "path": "$.results[*].latitude",
+            "weight": 0.33,
+            "min": -90,
+            "max": 90,
+            "_comment": "The whole planet, so no honest reading can fail it. It catches the coordinates swapped round — a longitude landing in the latitude field is out of band past 90 for most of the world — and a null coerced to a number."
+          },
+          {
+            "id": "longitude_in_range",
+            "type": "VALUE_RANGE",
+            "path": "$.results[*].longitude",
+            "weight": 0.33,
+            "min": -180,
+            "max": 180,
+            "_comment": "The other half of the pair. Wide for the same reason: it exists to catch a projected metre value or a degrees-times-1e7 integer arriving where degrees were promised, not to grade the fix."
+          }
+        ],
+        "semantic": {
+          "enabled": false
+        },
+        "crossCheck": {
+          "enabled": false
+        }
+      },
+      "decisionPolicy": {
+        "id": "geocode_place.default",
+        "verifiers": [
+          {
+            "verifierId": "schema",
+            "label": "Response shape"
+          },
+          {
+            "verifierId": "rules",
+            "label": "Deterministic rules"
+          }
+        ],
+        "clauses": [
+          {
+            "when": "MISAPPLIED_AT_LEAST",
+            "count": 1,
+            "then": "MISAPPLIED",
+            "label": "One of our checks did not fit this response, so the call was not charged and the provider was not struck."
+          },
+          {
+            "when": "VERIFIER_FAILED",
+            "verifierId": "schema",
+            "then": "FAIL",
+            "label": "The response did not match the shape this tool promises."
+          },
+          {
+            "when": "FAILURES_AT_LEAST",
+            "count": 1,
+            "then": "FAIL",
+            "label": "The response did not satisfy this tool's quality rules."
+          },
+          {
+            "when": "VOTES_BELOW",
+            "count": 1,
+            "then": "DEGRADED",
+            "label": "Too few checks completed to judge this response."
+          }
+        ],
+        "otherwise": "PASS"
+      }
+    },
+    {
+      "toolId": "d0f8062b-79ab-5517-b1c8-39481c885e7a",
+      "toolName": "get_token_market",
+      "verificationPolicy": {
+        "id": "get_token_market.default",
+        "version": 1,
+        "passThreshold": 0.7,
+        "mode": "ACTIVE",
+        "rules": [
+          {
+            "id": "min_one_market",
+            "type": "MIN_ARRAY_LENGTH",
+            "path": "$.markets",
+            "weight": 0.1,
+            "min": 1,
+            "_comment": "One is the floor, and an empty collection does not fail this rule at all — an unknown CoinGecko id is a legitimate empty answer and routes to the empty-result policy. Weighted low because the interesting failure here is a wrong price, not a short list."
+          },
+          {
+            "id": "price_is_positive",
+            "type": "VALUE_RANGE",
+            "path": "$.markets[*].priceUsd",
+            "weight": 0.35,
+            "min": 1e-06,
+            "_comment": "A zero price is the failure that costs an agent money: it is what a missing field coerced to a number looks like, and an agent sizing a trade on it would size it infinite. The floor is a millionth of a cent so that the cheapest real memecoin still clears. No ceiling — a token can be worth anything."
+          },
+          {
+            "id": "figures_are_recent",
+            "type": "FRESHNESS",
+            "path": "$.markets[*].observedAt",
+            "weight": 0.35,
+            "maxAgeMs": 1800000,
+            "futureToleranceMs": 300000,
+            "_comment": "Thirty minutes, not five: CoinGecko's free tier refreshes on its own schedule and lags, so a five-minute band would strike an honest provider for the upstream's cadence — exactly the false positive the engine exists to avoid. A price stale by half an hour is still a wrong answer to charge for, which is why this one is over the line. The five-minute future tolerance is clock skew, not a defect."
+          },
+          {
+            "id": "image_is_a_url",
+            "type": "VALID_URL",
+            "path": "$.markets[*].imageUrl",
+            "weight": 0.1,
+            "_comment": "Deliberately below the line. A malformed logo URL does not make the price wrong, and no agent trades on an icon; failing the call for it would refund the caller and strike the provider over a broken image. Worth checking, not worth condemning — 0.10 can never fail this policy on its own."
+          },
+          {
+            "id": "ids_distinct",
+            "type": "NO_DUPLICATES",
+            "path": "$.markets[*].id",
+            "weight": 0.1,
+            "_comment": "One row per asset. A repeated id is the shape of a paginated fetch that looped, and it would make an agent summing market caps double-count — but the prices themselves are still right, so it warns rather than condemns."
+          }
+        ],
+        "semantic": {
+          "enabled": false
+        },
+        "crossCheck": {
+          "enabled": false
+        }
+      },
+      "decisionPolicy": {
+        "id": "get_token_market.default",
+        "verifiers": [
+          {
+            "verifierId": "schema",
+            "label": "Response shape"
+          },
+          {
+            "verifierId": "rules",
+            "label": "Deterministic rules"
+          }
+        ],
+        "clauses": [
+          {
+            "when": "MISAPPLIED_AT_LEAST",
+            "count": 1,
+            "then": "MISAPPLIED",
+            "label": "One of our checks did not fit this response, so the call was not charged and the provider was not struck."
+          },
+          {
+            "when": "VERIFIER_FAILED",
+            "verifierId": "schema",
+            "then": "FAIL",
+            "label": "The response did not match the shape this tool promises."
+          },
+          {
+            "when": "FAILURES_AT_LEAST",
+            "count": 1,
+            "then": "FAIL",
+            "label": "The response did not satisfy this tool's quality rules."
+          },
+          {
+            "when": "VOTES_BELOW",
+            "count": 1,
+            "then": "DEGRADED",
+            "label": "Too few checks completed to judge this response."
+          }
+        ],
+        "otherwise": "PASS"
+      }
+    },
+    {
+      "toolId": "b08a92cf-7050-57b3-b17e-1ac61ec0ab19",
+      "toolName": "solana_get_balance",
+      "verificationPolicy": {
+        "id": "solana_get_balance.default",
+        "version": 1,
+        "passThreshold": 0.7,
+        "mode": "ACTIVE",
+        "rules": [
+          {
+            "id": "fields_present",
+            "type": "REQUIRED_FIELDS",
+            "path": "$",
+            "weight": 0.34,
+            "fields": [
+              "lamports",
+              "slot"
+            ],
+            "_comment": "A balance without the slot it was read at is unusable: the agent cannot tell a current reading from a cached one, and an RPC node that answered from behind a fork looks identical to one that did not."
+          },
+          {
+            "id": "balance_not_negative",
+            "type": "VALUE_RANGE",
+            "path": "$.lamports",
+            "weight": 0.33,
+            "min": 0,
+            "_comment": "No account has ever held less than nothing. A negative here means a signed-integer wrap or a subtraction the mapping did on its own, and an agent that reads it will conclude the payer cannot fund a transaction it could in fact fund. No ceiling: the supply grows."
+          },
+          {
+            "id": "slot_is_plausible",
+            "type": "VALUE_RANGE",
+            "path": "$.slot",
+            "weight": 0.33,
+            "min": 300000000,
+            "_comment": "A floor and no ceiling, because mainnet slots only ever rise — a ceiling written today becomes a false positive the week the chain passes it. The floor is far behind the live head and catches the answer that is not a mainnet slot at all: a devnet reading, a block height, a zero."
+          }
+        ],
+        "semantic": {
+          "enabled": false
+        },
+        "crossCheck": {
+          "enabled": false
+        }
+      },
+      "decisionPolicy": {
+        "id": "solana_get_balance.default",
+        "verifiers": [
+          {
+            "verifierId": "schema",
+            "label": "Response shape"
+          },
+          {
+            "verifierId": "rules",
+            "label": "Deterministic rules"
+          }
+        ],
+        "clauses": [
+          {
+            "when": "MISAPPLIED_AT_LEAST",
+            "count": 1,
+            "then": "MISAPPLIED",
+            "label": "One of our checks did not fit this response, so the call was not charged and the provider was not struck."
+          },
+          {
+            "when": "VERIFIER_FAILED",
+            "verifierId": "schema",
+            "then": "FAIL",
+            "label": "The response did not match the shape this tool promises."
+          },
+          {
+            "when": "FAILURES_AT_LEAST",
+            "count": 1,
+            "then": "FAIL",
+            "label": "The response did not satisfy this tool's quality rules."
+          },
+          {
+            "when": "VOTES_BELOW",
+            "count": 1,
+            "then": "DEGRADED",
+            "label": "Too few checks completed to judge this response."
+          }
+        ],
+        "otherwise": "PASS"
+      }
+    },
+    {
+      "toolId": "abae704e-0a56-5674-9074-6c7bfc25fad1",
+      "toolName": "extract_page_text",
+      "verificationPolicy": {
+        "id": "extract_page_text.default",
+        "version": 1,
+        "passThreshold": 0.7,
+        "mode": "ACTIVE",
+        "rules": [
+          {
+            "id": "fields_present",
+            "type": "REQUIRED_FIELDS",
+            "path": "$",
+            "weight": 0.34,
+            "fields": [
+              "content",
+              "sourceUrl"
+            ],
+            "_comment": "The extract and the page it came from. Without the source the agent cannot cite or re-fetch what it just read, and an extractor that followed a redirect to somewhere else is indistinguishable from one that did not."
+          },
+          {
+            "id": "source_is_a_url",
+            "type": "VALID_URL",
+            "path": "$.sourceUrl",
+            "weight": 0.33,
+            "_comment": "Over the line here, unlike the logo URL on get_token_market, because this URL is the provenance of the text: an agent that quotes the extract cites this. A path fragment, an error string or an empty value leaves the quote unattributable."
+          },
+          {
+            "id": "extract_is_not_empty",
+            "type": "VALUE_RANGE",
+            "path": "$.tokens",
+            "weight": 0.33,
+            "min": 1,
+            "_comment": "Zero tokens is the failure this tool has: a 200 that carries a cookie wall, a JS shell or a boilerplate strip that took the article with it. The caller paid for text and received none, which is the clearest refund case in the catalogue."
+          }
+        ],
+        "semantic": {
+          "enabled": false
+        },
+        "crossCheck": {
+          "enabled": false
+        }
+      },
+      "decisionPolicy": {
+        "id": "extract_page_text.default",
+        "verifiers": [
+          {
+            "verifierId": "schema",
+            "label": "Response shape"
+          },
+          {
+            "verifierId": "rules",
+            "label": "Deterministic rules"
+          }
+        ],
+        "clauses": [
+          {
+            "when": "MISAPPLIED_AT_LEAST",
+            "count": 1,
+            "then": "MISAPPLIED",
+            "label": "One of our checks did not fit this response, so the call was not charged and the provider was not struck."
+          },
+          {
+            "when": "VERIFIER_FAILED",
+            "verifierId": "schema",
+            "then": "FAIL",
+            "label": "The response did not match the shape this tool promises."
+          },
+          {
+            "when": "FAILURES_AT_LEAST",
+            "count": 1,
+            "then": "FAIL",
+            "label": "The response did not satisfy this tool's quality rules."
+          },
+          {
+            "when": "VOTES_BELOW",
+            "count": 1,
+            "then": "DEGRADED",
+            "label": "Too few checks completed to judge this response."
+          }
+        ],
+        "otherwise": "PASS"
+      }
+    },
+    {
+      "toolId": "8fa77325-86d3-5e4a-8c6f-6ec85ccf0b33",
+      "toolName": "search_wikipedia",
+      "verificationPolicy": {
+        "id": "search_wikipedia.default",
+        "version": 1,
+        "passThreshold": 0.7,
+        "mode": "ACTIVE",
+        "rules": [
+          {
+            "id": "min_one_result",
+            "type": "MIN_ARRAY_LENGTH",
+            "path": "$.results",
+            "weight": 0.1,
+            "min": 1,
+            "_comment": "A search that matches nothing is a real answer, not a defect, and an empty collection routes to the empty-result policy rather than failing here. The rule earns its place only against a collection that resolved to something unreadable, so it is weighted accordingly."
+          },
+          {
+            "id": "fields_present",
+            "type": "REQUIRED_FIELDS",
+            "path": "$.results[*]",
+            "weight": 0.35,
+            "fields": [
+              "title",
+              "pageId"
+            ],
+            "_comment": "A result the agent cannot open is not a search result. The pageId is how it fetches the article; a row with a title and no id sends the agent back to a second search it already paid to avoid."
+          },
+          {
+            "id": "ids_distinct",
+            "type": "NO_DUPLICATES",
+            "path": "$.results[*].pageId",
+            "weight": 0.35,
+            "_comment": "Over the line here, unlike the same rule on get_token_market, because the product of this tool IS the list: the same article repeated five times is a five-result response with one result in it, and the caller paid for breadth."
+          },
+          {
+            "id": "wordcount_not_negative",
+            "type": "VALUE_RANGE",
+            "path": "$.results[*].wordCount",
+            "weight": 0.2,
+            "min": 0,
+            "_comment": "Deliberately below the line. An odd word count does not make a search result wrong — the title and the id are what the agent acts on — so a stub reported as -1 by a mis-parse should not refund the caller and strike the provider. At 0.20 it cannot fail this policy alone, by design."
+          }
+        ],
+        "semantic": {
+          "enabled": false
+        },
+        "crossCheck": {
+          "enabled": false
+        }
+      },
+      "decisionPolicy": {
+        "id": "search_wikipedia.default",
+        "verifiers": [
+          {
+            "verifierId": "schema",
+            "label": "Response shape"
+          },
+          {
+            "verifierId": "rules",
+            "label": "Deterministic rules"
+          }
+        ],
+        "clauses": [
+          {
+            "when": "MISAPPLIED_AT_LEAST",
+            "count": 1,
+            "then": "MISAPPLIED",
+            "label": "One of our checks did not fit this response, so the call was not charged and the provider was not struck."
+          },
+          {
+            "when": "VERIFIER_FAILED",
+            "verifierId": "schema",
+            "then": "FAIL",
+            "label": "The response did not match the shape this tool promises."
+          },
+          {
+            "when": "FAILURES_AT_LEAST",
+            "count": 1,
+            "then": "FAIL",
+            "label": "The response did not satisfy this tool's quality rules."
+          },
+          {
+            "when": "VOTES_BELOW",
+            "count": 1,
+            "then": "DEGRADED",
+            "label": "Too few checks completed to judge this response."
+          }
+        ],
+        "otherwise": "PASS"
+      }
+    },
+    {
+      "toolId": "294afca7-be7c-59d0-a4d2-f7c994c39c45",
+      "toolName": "search_wikipedia_demo_broken",
+      "verificationPolicy": {
+        "id": "search_wikipedia_demo_broken.default",
+        "version": 1,
+        "passThreshold": 0.7,
+        "mode": "ACTIVE",
+        "rules": [
+          {
+            "id": "min_one_result",
+            "type": "MIN_ARRAY_LENGTH",
+            "path": "$.results",
+            "weight": 0.1,
+            "min": 1,
+            "_comment": "A search that matches nothing is a real answer, not a defect, and an empty collection routes to the empty-result policy rather than failing here. The rule earns its place only against a collection that resolved to something unreadable, so it is weighted accordingly."
+          },
+          {
+            "id": "fields_present",
+            "type": "REQUIRED_FIELDS",
+            "path": "$.results[*]",
+            "weight": 0.35,
+            "fields": [
+              "title",
+              "pageId"
+            ],
+            "_comment": "A result the agent cannot open is not a search result. The pageId is how it fetches the article; a row with a title and no id sends the agent back to a second search it already paid to avoid."
+          },
+          {
+            "id": "ids_distinct",
+            "type": "NO_DUPLICATES",
+            "path": "$.results[*].pageId",
+            "weight": 0.35,
+            "_comment": "Over the line here, unlike the same rule on get_token_market, because the product of this tool IS the list: the same article repeated five times is a five-result response with one result in it, and the caller paid for breadth."
+          },
+          {
+            "id": "wordcount_not_negative",
+            "type": "VALUE_RANGE",
+            "path": "$.results[*].wordCount",
+            "weight": 0.2,
+            "min": 0,
+            "_comment": "Deliberately below the line. An odd word count does not make a search result wrong — the title and the id are what the agent acts on — so a stub reported as -1 by a mis-parse should not refund the caller and strike the provider. At 0.20 it cannot fail this policy alone, by design."
+          }
+        ],
+        "semantic": {
+          "enabled": false
+        },
+        "crossCheck": {
+          "enabled": false
+        }
+      },
+      "decisionPolicy": {
+        "id": "search_wikipedia_demo_broken.default",
+        "verifiers": [
+          {
+            "verifierId": "schema",
+            "label": "Response shape"
+          },
+          {
+            "verifierId": "rules",
+            "label": "Deterministic rules"
+          }
+        ],
+        "clauses": [
+          {
+            "when": "MISAPPLIED_AT_LEAST",
+            "count": 1,
+            "then": "MISAPPLIED",
+            "label": "One of our checks did not fit this response, so the call was not charged and the provider was not struck."
+          },
+          {
+            "when": "VERIFIER_FAILED",
+            "verifierId": "schema",
+            "then": "FAIL",
+            "label": "The response did not match the shape this tool promises."
+          },
+          {
+            "when": "FAILURES_AT_LEAST",
+            "count": 1,
+            "then": "FAIL",
+            "label": "The response did not satisfy this tool's quality rules."
+          },
+          {
+            "when": "VOTES_BELOW",
+            "count": 1,
+            "then": "DEGRADED",
+            "label": "Too few checks completed to judge this response."
+          }
+        ],
+        "otherwise": "PASS"
+      },
+      "_comment": [
+        "The live demo's broken half. A byte-for-byte copy of search_wikipedia.default's four",
+        "rules, weights and threshold — copied rather than shared BECAUSE a policy is",
+        "resolved by tool (DecisionPolicyService.resolveForTraffic(toolId)), so a",
+        "second tool needs its own row or it judges nothing and settles UNVERIFIED.",
+        "",
+        "Keep the weights identical to the original. The demo's whole claim is that",
+        "the SAME checks that pass on the healthy binding fail on this one, and a",
+        "policy tuned to make failing easier would be staging the result the page",
+        "exists to prove is real.",
+        "",
+        "mode ACTIVE is load-bearing: effectiveConsequence() gives a SHADOW policy",
+        "the PASS consequence regardless of verdict, so a shadow copy here would",
+        "read 'FAIL, and charged anyway' on the page."
+      ]
+    }
+  ]
+}

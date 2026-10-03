@@ -1,0 +1,89 @@
+import { Controller, Get, Param, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+
+import { SessionAuthGuard } from '@shared/auth';
+
+import {
+  CatalogueProviderDetailDto,
+  CatalogueProviderListDto,
+  CatalogueToolListDto,
+  GetCatalogueProviderParamsDto,
+} from '../dto/get-catalogue.dto';
+import { CatalogueService } from '../services/catalogue.service';
+
+/**
+ * The buyer's catalogue.
+ *
+ * ## Why `/catalogue/*` and not `GET /providers`
+ *
+ * `providers/*` is the **seller** surface: every route under it means "the
+ * caller's own provider record", and the one route that forgot to scope —
+ * `GET /providers/me/tool-bindings/catalogue` — answers any session at all,
+ * which is a bug waiting to be fixed rather than a precedent to build on.
+ * Hanging the buyer's market on the same prefix would make "whose provider is
+ * this?" a question you answer by reading the handler.
+ *
+ * So the read model gets its own prefix, and the prefix says what it is: this
+ * is the shop window, it is identical for every caller, and nothing under it is
+ * about the caller at all.
+ *
+ * ## No `@CurrentSession()`, anywhere in this file
+ *
+ * The guard is on the controller — an unauthenticated catalogue is a separate
+ * decision nobody has taken — but no handler reads the session, because no
+ * answer depends on who is asking. Taking a session parameter only to ignore it
+ * reads as an oversight; not taking one is the claim.
+ *
+ * ## Unpaged
+ *
+ * Same decision, and the same reason, as `ToolCataloguePort.listTools()` and
+ * `GET /tools`: the market is tens of rows, and a cursor with nothing behind it
+ * is an API that changes twice. When the port gains paging, so does this.
+ */
+@ApiTags('Catalogue')
+@ApiBearerAuth()
+@UseGuards(SessionAuthGuard)
+@Controller('catalogue')
+export class CatalogueController {
+  constructor(private readonly catalogue: CatalogueService) {}
+
+  @Get('providers')
+  @ApiOperation({
+    summary:
+      'Every provider serving traffic, with the stake they have at risk and the quality we ' +
+      'have measured on them. Platform-wide, identical for every caller.',
+  })
+  @ApiResponse({ status: 200, type: CatalogueProviderListDto })
+  async listProviders(): Promise<CatalogueProviderListDto> {
+    return this.catalogue.listProviders();
+  }
+
+  @Get('tools')
+  @ApiOperation({
+    summary:
+      'Every tool at least one provider serves, with how many serve it, the market floor and ' +
+      'the price a call would actually be held for.',
+  })
+  @ApiResponse({ status: 200, type: CatalogueToolListDto })
+  async listTools(): Promise<CatalogueToolListDto> {
+    return this.catalogue.listTools();
+  }
+
+  /**
+   * Declared **after** the two literal routes above so that neither is swallowed
+   * by the parameter. Nest matches in declaration order, and
+   * `GET /catalogue/tools` resolving to "the provider whose id is `tools`" is a
+   * `400 providerId must be a UUID` about an id the caller never sent — the
+   * exact trap `ProviderToolBindingsController` records at the top of its own
+   * file.
+   */
+  @Get('providers/:providerId')
+  @ApiOperation({ summary: 'One provider, and what they serve right now' })
+  @ApiResponse({ status: 200, type: CatalogueProviderDetailDto })
+  @ApiResponse({ status: 404, description: 'No such provider. Never 403 — that would confirm it.' })
+  async getProvider(
+    @Param() params: GetCatalogueProviderParamsDto,
+  ): Promise<CatalogueProviderDetailDto> {
+    return this.catalogue.getProvider(params.providerId);
+  }
+}

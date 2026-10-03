@@ -1,0 +1,124 @@
+import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
+import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
+import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
+
+import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+
+const ORGANIZATION_ID = '11111111-1111-4111-8111-111111111111';
+const ACCOUNT: AccountId = toAccountId(
+  CHAIN_IDS.SOLANA_DEVNET,
+  'BuyerAccount111111111111111111111111111111',
+);
+
+/**
+ * The two addresses the mirror row holds, chosen to be **unmistakable for each
+ * other**. A fixture where both carried the same value — or two values that
+ * differ only in a suffix — would let the pair be swapped and still pass, which
+ * is how the swap survived until now.
+ */
+const ESCROW_ACCOUNT_ID = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:TheEscrowAccountItself11111';
+const ESCROW_ASSET_ACCOUNT_ID =
+  'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:WhereTheBalanceActuallySits';
+
+function buildService(
+  allocated: {
+    seq: string;
+    escrowAccountId: string;
+    escrowAssetAccountId: string;
+  } | null,
+) {
+  const escrows = {
+    allocateSeq: jest.fn().mockResolvedValue(allocated),
+    bumpNextSeqTo: jest.fn().mockResolvedValue(0),
+  };
+  const cache = { get: jest.fn(), set: jest.fn() };
+
+  return {
+    escrows,
+    service: new EscrowSeqService(escrows as never, cache as never),
+  };
+}
+
+describe('EscrowSeqService.allocate', () => {
+  /**
+   * The multichain rename of the two columns this reads turned an identity copy
+   * into a translation between two same-typed string fields. Nothing pinned it:
+   * swapping the pair left the whole suite green.
+   *
+   * The consequence is the worst placement available. `GET /escrow/next-seq`
+   * hands the buyer the address they sign as the voucher's `pay_to`; a swapped
+   * pair means the buyer signs the escrow's **asset account** as `pay_to`, the
+   * platform serves the call, and `redeem_voucher` refuses it on chain minutes
+   * later — money held, call served, nothing collected. That is precisely the
+   * failure `buyer-escrow.repository.ts` spends a paragraph warning about two
+   * functions away.
+   */
+  it('answers with the escrow account as pay_to and the asset account as the balance holder', async () => {
+    const { service } = buildService({
+      seq: '7',
+      escrowAccountId: ESCROW_ACCOUNT_ID,
+      escrowAssetAccountId: ESCROW_ASSET_ACCOUNT_ID,
+    });
+
+    const next = await service.allocate(ORGANIZATION_ID, ACCOUNT);
+
+    // Field by field, and both directions: `toEqual` alone would pass a swap
+    // if the two fixtures were ever made equal.
+    expect(next.seq).toBe('7');
+    expect(next.escrowPda).toBe(ESCROW_ACCOUNT_ID);
+    expect(next.escrowTokenAccount).toBe(ESCROW_ASSET_ACCOUNT_ID);
+    expect(next.escrowPda).not.toBe(ESCROW_ASSET_ACCOUNT_ID);
+    expect(next.escrowTokenAccount).not.toBe(ESCROW_ACCOUNT_ID);
+  });
+
+  describe('against the chain’s own high-water mark', () => {
+    // Lean v3 admits `seq > seq_high` and nothing else, so a number at or below
+    // the chain's is dead on arrival — refused AFTER the call it paid for was
+    // served. The chain is the authority; `next_seq` is only our record of it.
+    const allocated = {
+      seq: '8',
+      escrowAccountId: ESCROW_ACCOUNT_ID,
+      escrowAssetAccountId: ESCROW_ASSET_ACCOUNT_ID,
+    };
+
+    it('raises next_seq past seq_high BEFORE allocating', async () => {
+      const { service, escrows } = buildService(allocated);
+
+      await service.allocate(ORGANIZATION_ID, ACCOUNT, 7n);
+
+      expect(escrows.bumpNextSeqTo).toHaveBeenCalledWith(ORGANIZATION_ID, ACCOUNT, 8n);
+      expect(escrows.bumpNextSeqTo.mock.invocationCallOrder[0]).toBeLessThan(
+        escrows.allocateSeq.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('does not touch next_seq when the chain has not been read', async () => {
+      const { service, escrows } = buildService(allocated);
+
+      await service.allocate(ORGANIZATION_ID, ACCOUNT);
+
+      expect(escrows.bumpNextSeqTo).not.toHaveBeenCalled();
+    });
+  });
+
+  it('refuses with PAYMENT_ESCROW_NOT_OPEN when the buyer has no mirror row', async () => {
+    const { service } = buildService(null);
+
+    await expectErrorCodeAsync(
+      () => service.allocate(ORGANIZATION_ID, ACCOUNT),
+      PaymentErrorCode.PAYMENT_ESCROW_NOT_OPEN,
+    );
+  });
+
+  it('allocates against the caller’s own organization and account', async () => {
+    const { service, escrows } = buildService({
+      seq: '1',
+      escrowAccountId: ESCROW_ACCOUNT_ID,
+      escrowAssetAccountId: ESCROW_ASSET_ACCOUNT_ID,
+    });
+
+    await service.allocate(ORGANIZATION_ID, ACCOUNT);
+
+    expect(escrows.allocateSeq).toHaveBeenCalledWith(ORGANIZATION_ID, ACCOUNT);
+  });
+});
