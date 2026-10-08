@@ -337,7 +337,7 @@ export interface WeightedCandidate {
  *
  * Weighted sampling needs a random draw, and a router that called
  * `Math.random()` directly could not be tested for distribution against a known
- * sequence, nor replayed. Production binds `Math.random`.
+ * sequence, nor replayed. Production binds a CSPRNG draw (`cryptoRandom`).
  */
 export type RoutingRandom = () => number;
 

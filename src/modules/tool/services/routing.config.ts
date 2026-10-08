@@ -1,3 +1,5 @@
+import { randomBytes } from 'node:crypto';
+
 import { MinimumStakeByChain, ScoreWeights } from '../domain/routing/routing.types';
 import { DEFAULT_SCORE_WEIGHTS } from '../domain/routing/score';
 import { MAX_PROVIDER_SHARE } from '../domain/routing/weights';
@@ -56,8 +58,21 @@ export interface RouterConfig {
 /** DI token for the bound {@link RouterConfig}. */
 export const ROUTER_CONFIG = 'ROUTER_CONFIG';
 
-/** DI token for the router's source of randomness. Production binds `Math.random`. */
+/** DI token for the router's source of randomness. Production binds {@link cryptoRandom}. */
 export const ROUTING_RANDOM = 'ROUTING_RANDOM';
+
+/**
+ * A uniform draw on `[0, 1)` from the OS CSPRNG.
+ *
+ * The draw decides which provider earns a call, so it is an economic input:
+ * `Math.random` is a seeded xorshift whose state can be recovered from enough
+ * observed outputs, which would let a provider predict — and time its
+ * availability around — the split. 48 bits is the full precision a double
+ * carries below 1 without rounding up to it.
+ */
+export function cryptoRandom(): number {
+  return randomBytes(6).readUIntBE(0, 6) / 2 ** 48;
+}
 
 /** The parts of {@link RouterConfig} that are not deployment-specific. */
 export const DEFAULT_ROUTER_TUNING = Object.freeze({
