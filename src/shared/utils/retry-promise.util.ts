@@ -1,3 +1,5 @@
+import { randomInt } from 'node:crypto';
+
 import { RETRYABLE_ERROR_CODES } from '@database/postgres/repositories/abstract.repository';
 
 export async function executeWithRetry<T>(fn: () => Promise<T>, maxRetries = 3): Promise<T> {
@@ -12,7 +14,7 @@ export async function executeWithRetry<T>(fn: () => Promise<T>, maxRetries = 3):
         throw error;
       }
 
-      const delay = Math.min(1000 * Math.pow(2, attempt), 5000) + Math.random() * 1000;
+      const delay = Math.min(1000 * Math.pow(2, attempt), 5000) + randomInt(1000);
       await new Promise((resolve) => setTimeout(resolve, delay));
     }
   }
