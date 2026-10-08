@@ -300,7 +300,7 @@ async function main(): Promise<void> {
     console.error('');
     console.error('REFUSING: TREASURY_ADMIN_WALLET is not set.');
     console.error('');
-    console.error('Set it to the base58 address of the wallet that will be the multisig\'s only');
+    console.error("Set it to the base58 address of the wallet that will be the multisig's only");
     console.error('member. The operator keypair must be that wallet.');
     process.exit(1);
   }
@@ -312,7 +312,7 @@ async function main(): Promise<void> {
     console.error(`  got        ${operator.address}`);
     console.error(`  from       ${operatorPath}`);
     console.error('');
-    console.error('That wallet is the multisig\'s only member, its config authority and the');
+    console.error("That wallet is the multisig's only member, its config authority and the");
     console.error('rent payer. Creating the multisig with any other key produces a treasury');
     console.error('this platform cannot spend from — and there is no way to undo it.');
     console.error('');
@@ -322,8 +322,7 @@ async function main(): Promise<void> {
   const adminPubkey = new PublicKey(ADMIN_WALLET);
 
   // ── 2. the create key ─────────────────────────────────────────────────────
-  const createKeyPath =
-    options.createKeyPath ?? join(options.outDir, 'treasury-create-key.json');
+  const createKeyPath = options.createKeyPath ?? join(options.outDir, 'treasury-create-key.json');
   const createKey = await loadOrGenerateCreateKey(createKeyPath, options.execute);
 
   console.log('');
@@ -349,7 +348,9 @@ async function main(): Promise<void> {
     derived = await deriveAddresses(createKey.address, options.vaultIndex);
     if (derived.multisigPda !== derived.multisigPdaFromBackendSeeds) {
       console.error('');
-      console.error('REFUSING: the SDK and squads-vault.constants.ts derive DIFFERENT multisig PDAs.');
+      console.error(
+        'REFUSING: the SDK and squads-vault.constants.ts derive DIFFERENT multisig PDAs.',
+      );
       console.error(`  @sqds/multisig            ${derived.multisigPda}`);
       console.error(`  squads-vault.constants.ts ${derived.multisigPdaFromBackendSeeds}`);
       process.exit(1);
@@ -369,17 +370,16 @@ async function main(): Promise<void> {
     console.log(`  for mint  ${derived.usdcMint}  (${ASSET_IDS.USDC_SOLANA_DEVNET})`);
     console.log('');
     console.log('            both PDAs derived twice — once by @sqds/multisig, once by');
-    console.log('            squads-vault.constants.ts\'s own seeds — and they agree.');
+    console.log("            squads-vault.constants.ts's own seeds — and they agree.");
   }
 
   // ── 4. what the chain already has ─────────────────────────────────────────
   const programConfig = await readProgramConfig(sender);
-  const existingMultisig = derived
-    ? await readMultisig(sender, derived.multisigPda)
-    : null;
+  const existingMultisig = derived ? await readMultisig(sender, derived.multisigPda) : null;
   const vaultAtaExists = derived ? await accountExists(sender, derived.vaultAta) : false;
-  const operatorLamports = await withRetry('read operator balance', async () =>
-    (await sender.rpc.getBalance(operator.address).send()).value,
+  const operatorLamports = await withRetry(
+    'read operator balance',
+    async () => (await sender.rpc.getBalance(operator.address).send()).value,
   );
 
   console.log('');
@@ -564,9 +564,7 @@ async function main(): Promise<void> {
   console.log(
     `  https://explorer.solana.com/address/${derived.multisigPda}?cluster=devnet  (multisig)`,
   );
-  console.log(
-    `  https://explorer.solana.com/address/${derived.vaultPda}?cluster=devnet  (vault)`,
-  );
+  console.log(`  https://explorer.solana.com/address/${derived.vaultPda}?cluster=devnet  (vault)`);
 
   console.log('');
   printEnvLines(createKey.address, options.vaultIndex, true);
@@ -892,7 +890,9 @@ async function withRetry<T>(label: string, action: () => Promise<T>): Promise<T>
       lastError = error;
       if (attempt < RETRY_ATTEMPTS) {
         const delay = RETRY_BASE_MS * 2 ** (attempt - 1);
-        console.log(`  [429 ] ${label} — rate limited, retrying in ${delay}ms (${attempt}/${RETRY_ATTEMPTS - 1})`);
+        console.log(
+          `  [429 ] ${label} — rate limited, retrying in ${delay}ms (${attempt}/${RETRY_ATTEMPTS - 1})`,
+        );
         await new Promise((done) => setTimeout(done, delay));
       }
     }
