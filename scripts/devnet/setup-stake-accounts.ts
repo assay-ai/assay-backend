@@ -82,7 +82,7 @@ import { loadMinimumStakeParameters } from '@modules/provider/services/provider-
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { createSender, loadKeypairSigner, Sender } from '../settlement/lib/sender';
-import { solanaConfig } from './lib/solana-cli';
+import { solanaBin, solanaConfig } from './lib/solana-cli';
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
 
@@ -695,7 +695,13 @@ async function loadFixtures(
       // the exact 64-byte JSON array `loadKeypairSigner`, `spl-token` and
       // `solana` all read, and the CLI is already a dependency of every other
       // devnet script here.
-      execFileSync('solana-keygen', ['new', '--no-bip39-passphrase', '-s', '-o', keypairPath]);
+      execFileSync(solanaBin('solana-keygen'), [
+        'new',
+        '--no-bip39-passphrase',
+        '-s',
+        '-o',
+        keypairPath,
+      ]);
       console.log(`generated  ${keypairPath}`);
     }
     fixtures.push({

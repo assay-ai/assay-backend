@@ -510,10 +510,18 @@ function mint(keyId: string, seedHex?: string): MintedKey {
  * means the drill exercises the tool an operator actually uses.
  */
 function registryCli(args: readonly string[]): void {
-  const output = execFileSync('yarn', ['--silent', 'verifier:registry', ...args], {
-    encoding: 'utf8',
-    env: process.env,
-  });
+  // The yarn that launched this drill, run by the current node — never
+  // whichever `yarn` happens to be first on PATH, since the subprocess inherits
+  // the operator's keys through the environment.
+  const yarnPath = process.env.npm_execpath;
+  if (!yarnPath) {
+    throw new Error('Run the drill through yarn (`yarn verifier:rotation-drill`).');
+  }
+  const output = execFileSync(
+    process.execPath,
+    [yarnPath, '--silent', 'verifier:registry', ...args],
+    { encoding: 'utf8', env: process.env },
+  );
   console.log(
     output
       .split('\n')
