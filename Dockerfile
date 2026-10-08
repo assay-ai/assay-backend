@@ -38,5 +38,10 @@ RUN yarn install --production
 COPY --from=development /app/packages/settlement-client/dist ./packages/settlement-client/dist
 COPY --from=development /app/dist ./dist
 
+# Drop root before anything runs. The app writes nothing under /app at runtime,
+# so the root-owned files above only need to be readable; `node` (uid 1000) is
+# the unprivileged user the base image ships for exactly this.
+USER node
+
 ENTRYPOINT ["yarn"]
 CMD ["start:prod"]
