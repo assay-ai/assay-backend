@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
@@ -362,7 +364,7 @@ export class BindingCeilingService {
     // Unique per call. Two calls in the same millisecond are ordinary under
     // load, and a plain timestamp member would silently overwrite one of them —
     // undercounting exactly when the count matters.
-    const member = `${now}:${Math.random().toString(36).slice(2, 10)}`;
+    const member = `${now}:${randomUUID()}`;
 
     try {
       const replies = await this.redis
