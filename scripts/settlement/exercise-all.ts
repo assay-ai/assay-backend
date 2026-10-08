@@ -84,6 +84,7 @@ import {
   slashAttestationMessage,
 } from '@x402/settlement-client';
 
+import { solanaBin } from '../devnet/lib/solana-cli';
 import { createSender, loadKeypairSigner } from './lib/sender';
 
 const DAY = 86_400;
@@ -258,12 +259,12 @@ function clusterUrl(cluster: string): string {
 }
 
 function cli(args: readonly string[], url: string): string {
-  return execFileSync('solana', [...args, '-u', url], { encoding: 'utf8' });
+  return execFileSync(solanaBin('solana'), [...args, '-u', url], { encoding: 'utf8' });
 }
 
 function splToken(args: readonly string[], url: string): any {
   return JSON.parse(
-    execFileSync('spl-token', [...args, '-u', url, '--output', 'json'], {
+    execFileSync(solanaBin('spl-token'), [...args, '-u', url, '--output', 'json'], {
       encoding: 'utf8',
       maxBuffer: 10 * 1024 * 1024,
     }),
@@ -284,7 +285,7 @@ async function main(): Promise<void> {
 
   const adminPath =
     process.env.SOLANA_ADMIN_KEYPAIR ??
-    execFileSync('solana', ['config', 'get'], { encoding: 'utf8' })
+    execFileSync(solanaBin('solana'), ['config', 'get'], { encoding: 'utf8' })
       .split('\n')
       .find((line) => line.startsWith('Keypair Path:'))!
       .replace('Keypair Path:', '')
@@ -301,7 +302,13 @@ async function main(): Promise<void> {
   // the separation of powers that keeps the platform from moving a provider's
   // stake, and would be invisible if one key did everything here.
   const providerPath = join(mkdtempSync(join(tmpdir(), 'x402-exercise-')), 'provider.json');
-  execFileSync('solana-keygen', ['new', '--no-bip39-passphrase', '-s', '-o', providerPath]);
+  execFileSync(solanaBin('solana-keygen'), [
+    'new',
+    '--no-bip39-passphrase',
+    '-s',
+    '-o',
+    providerPath,
+  ]);
   const provider = await loadKeypairSigner(providerPath);
   const agent = await freshKeypair();
   const treasuryAddress = await freshKeypair();
@@ -787,7 +794,7 @@ async function main(): Promise<void> {
 
   async function freshKeypair(): Promise<Address> {
     const path = join(mkdtempSync(join(tmpdir(), 'x402-agent-')), 'agent.json');
-    execFileSync('solana-keygen', ['new', '--no-bip39-passphrase', '-s', '-o', path]);
+    execFileSync(solanaBin('solana-keygen'), ['new', '--no-bip39-passphrase', '-s', '-o', path]);
     const signer = await loadKeypairSigner(path);
     return signer.address;
   }

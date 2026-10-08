@@ -102,7 +102,7 @@ import {
 } from '@modules/chains/solana/squads-vault.constants';
 
 import { createSender, loadKeypairSigner, Sender } from '../settlement/lib/sender';
-import { solanaConfig } from './lib/solana-cli';
+import { solanaBin, solanaConfig } from './lib/solana-cli';
 
 /**
  * The wallet that will be the multisig's only member, from
@@ -681,7 +681,7 @@ async function loadOrGenerateCreateKey(
   // `solana-keygen` rather than a hand-rolled ed25519 generation: it writes the
   // exact 64-byte JSON array `loadKeypairSigner`, `spl-token` and `solana` all
   // read, and the CLI is already a dependency of every other devnet script here.
-  execFileSync('solana-keygen', ['new', '--no-bip39-passphrase', '-s', '-o', path]);
+  execFileSync(solanaBin('solana-keygen'), ['new', '--no-bip39-passphrase', '-s', '-o', path]);
   console.log('');
   console.log(`generated   ${path}`);
   console.log('            WRITTEN TO DISK BEFORE ANY TRANSACTION IS SENT. Back it up:');
