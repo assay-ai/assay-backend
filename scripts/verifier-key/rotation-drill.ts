@@ -263,7 +263,10 @@ async function signAndVerify(
   console.log(`verifies       ${verified}`);
   console.log(`journal row    ${result.journalId}`);
 
-  assert(result.keyId === expected.keyId, `expected ${expected.keyId}, signed with ${result.keyId}`);
+  assert(
+    result.keyId === expected.keyId,
+    `expected ${expected.keyId}, signed with ${result.keyId}`,
+  );
   assert(verified, 'the signature did not verify against the reported public key');
   return { payload, signature: result.signature };
 }
@@ -289,7 +292,11 @@ async function proveRevokedKeyIsRefused(
   // The signature the revoked key made in phase 2 is still cryptographically
   // valid — so what refuses it downstream is the allowlist, not the maths.
   // Stating both halves keeps the proof honest.
-  const stillVerifies = await verify(oldKey.publicKey, signedBefore.signature, signedBefore.payload);
+  const stillVerifies = await verify(
+    oldKey.publicKey,
+    signedBefore.signature,
+    signedBefore.payload,
+  );
   console.log(`the pre-revocation signature still verifies cryptographically: ${stillVerifies}`);
 
   const entry = await registry.lookup(DRILL_CHAIN_ID, oldKey.publicKey);
@@ -411,9 +418,11 @@ function proveContainment(
   app: INestApplicationContext,
   signed: { payload: Uint8Array; signature: Uint8Array },
 ): void {
-  console.log(`process.env.VERIFIER_SIGNING_KEYS after boot: ${
-    process.env.VERIFIER_SIGNING_KEYS === undefined ? 'undefined (deleted)' : 'STILL PRESENT'
-  }`);
+  console.log(
+    `process.env.VERIFIER_SIGNING_KEYS after boot: ${
+      process.env.VERIFIER_SIGNING_KEYS === undefined ? 'undefined (deleted)' : 'STILL PRESENT'
+    }`,
+  );
   assert(
     process.env.VERIFIER_SIGNING_KEYS === undefined,
     'the key material survived boot in process.env',
@@ -501,11 +510,10 @@ function mint(keyId: string, seedHex?: string): MintedKey {
  * means the drill exercises the tool an operator actually uses.
  */
 function registryCli(args: readonly string[]): void {
-  const output = execFileSync(
-    'yarn',
-    ['--silent', 'verifier:registry', ...args],
-    { encoding: 'utf8', env: process.env },
-  );
+  const output = execFileSync('yarn', ['--silent', 'verifier:registry', ...args], {
+    encoding: 'utf8',
+    env: process.env,
+  });
   console.log(
     output
       .split('\n')

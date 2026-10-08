@@ -48,13 +48,7 @@ import { mkdtempSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 
-import {
-  Address,
-  address,
-  getAddressDecoder,
-  Instruction,
-  KeyPairSigner,
-} from '@solana/kit';
+import { Address, address, getAddressDecoder, Instruction, KeyPairSigner } from '@solana/kit';
 import { Ed25519Program, TransactionInstruction } from '@solana/web3.js';
 import { findAssociatedTokenPda, TOKEN_PROGRAM_ADDRESS } from '@solana-program/token';
 import {
@@ -334,7 +328,9 @@ async function main(): Promise<void> {
     : setupMint(url, adminPath);
   console.log(
     `mint       ${mint}` +
-      (existingConfig.exists ? '  (from the existing Config — not this run’s choice)' : '  (created)'),
+      (existingConfig.exists
+        ? '  (from the existing Config — not this run’s choice)'
+        : '  (created)'),
   );
 
   const providerAta = await ata(mint, provider.address);
@@ -437,7 +433,11 @@ async function main(): Promise<void> {
   // 4 ─ open_stake  (provider signs)
   await step(
     'open_stake',
-    () => getOpenStakeInstructionAsync({ payer: admin, provider: provider.address }, { programAddress }),
+    () =>
+      getOpenStakeInstructionAsync(
+        { payer: admin, provider: provider.address },
+        { programAddress },
+      ),
     send,
   );
 
@@ -670,11 +670,7 @@ async function main(): Promise<void> {
   // 13 ─ request_unstake  (provider signs)
   await step(
     'request_unstake',
-    () =>
-      getRequestUnstakeInstructionAsync(
-        { provider, amount: 20n * UNIT },
-        { programAddress },
-      ),
+    () => getRequestUnstakeInstructionAsync({ provider, amount: 20n * UNIT }, { programAddress }),
     sendAs(provider),
   );
 
@@ -712,7 +708,9 @@ async function main(): Promise<void> {
   const stake = await fetchMaybeProviderStake(sender.rpc, stakePda);
 
   if (config.exists) {
-    console.log(`config      admin=${config.data.admin} unbonding=${config.data.unbondingPeriodSeconds}s`);
+    console.log(
+      `config      admin=${config.data.admin} unbonding=${config.data.unbondingPeriodSeconds}s`,
+    );
     console.log(
       `            staked=${config.data.totalStaked} deposited=${config.data.totalDeposited} ` +
         `withdrawn=${config.data.totalWithdrawn} slashed=${config.data.totalSlashed}`,
@@ -760,7 +758,9 @@ async function main(): Promise<void> {
   const refused = results.filter((r) => r.outcome === 'refused').length;
 
   console.log('');
-  console.log(`${results.length} instructions: ${landed} landed, ${refused} refused by a program rule, ${failed.length} failed`);
+  console.log(
+    `${results.length} instructions: ${landed} landed, ${refused} refused by a program rule, ${failed.length} failed`,
+  );
 
   if (failed.length > 0) {
     console.log('');
@@ -857,6 +857,6 @@ function requestId(text: string): Uint8Array {
 }
 
 main().catch((error: unknown) => {
-  console.error(error instanceof Error ? error.stack ?? error.message : error);
+  console.error(error instanceof Error ? (error.stack ?? error.message) : error);
   process.exit(1);
 });

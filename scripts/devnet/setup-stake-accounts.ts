@@ -377,7 +377,7 @@ async function main(): Promise<void> {
     'note       the floor is only the FLAT half of the bar. The router enforces\n' +
       `           max(floor, ${parameters.priceMultiple}× price) PER BINDING, so any binding priced\n` +
       `           above ${token(floorAtomic / BigInt(parameters.priceMultiple), mint.data.decimals)} raises its own minimum above this floor.\n` +
-      "           Price the checked binding at or below that, or raise --above.",
+      '           Price the checked binding at or below that, or raise --above.',
   );
 
   // ── 3. the two provider keypairs ──────────────────────────────────────────
@@ -612,9 +612,7 @@ async function main(): Promise<void> {
   // `OnChainProviderStakeSource` derives the PDA from, so until these are on the
   // two provider rows the chain source cannot answer for either of them and both
   // are excluded — which is the vacuous pass this script exists to prevent.
-  console.log(
-    "  Apply these for the stake-gate check — set each provider's enrolment",
-  );
+  console.log("  Apply these for the stake-gate check — set each provider's enrolment");
   console.log('  (POST /providers/me/stake-authority, or the column directly) and run at');
   console.log('  PROVIDER_STAKE_SOURCE_MODE=chain:');
   console.log('');
