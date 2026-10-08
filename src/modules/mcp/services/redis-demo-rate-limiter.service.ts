@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
 import Redis from 'ioredis';
 
@@ -57,7 +59,7 @@ export class RedisDemoRateLimiter implements OnModuleDestroy {
         .zremrangebyscore(key, '-inf', now - this.limits.windowMs)
         // A unique member per attempt: two calls in the same millisecond must
         // count as two, and a plain timestamp member would collapse them.
-        .zadd(key, now, `${now}:${Math.random().toString(36).slice(2, 10)}`)
+        .zadd(key, now, `${now}:${randomUUID()}`)
         .zcard(key)
         .pexpire(key, this.limits.windowMs)
         .exec();

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Inject, Injectable, OnModuleDestroy } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
@@ -58,7 +60,7 @@ export class RedisSigningRateLimiter implements OnModuleDestroy {
     // Unique per attempt. Two signatures in the same millisecond are ordinary
     // under load, and a plain timestamp member would silently overwrite one of
     // them — undercounting exactly when the count matters.
-    const member = `${now}:${Math.random().toString(36).slice(2, 10)}`;
+    const member = `${now}:${randomUUID()}`;
 
     const scopes = [
       // Narrowest first: `decideSigningRate` names the first breached scope, and

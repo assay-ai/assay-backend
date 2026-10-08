@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Inject, Injectable } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
@@ -90,7 +92,7 @@ export class RelayedIntentRateLimiter {
     // Unique per attempt. Two submissions in the same millisecond are ordinary
     // under load, and a plain timestamp member would silently overwrite one of
     // them — undercounting exactly when the count matters.
-    const member = `${now}:${Math.random().toString(36).slice(2, 10)}`;
+    const member = `${now}:${randomUUID()}`;
 
     const scopes = [
       // Narrowest first: `decideRelayedIntentRate` names the first breached
