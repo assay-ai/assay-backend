@@ -24,6 +24,7 @@ import {
   DEFAULT_ROUTER_TUNING,
   ROUTER_CONFIG,
   ROUTING_RANDOM,
+  cryptoRandom,
   RouterConfig,
 } from './services/routing.config';
 
@@ -129,7 +130,7 @@ import {
 
     // Production randomness. Bound rather than called directly so that the
     // traffic split is a testable claim — see `pickWeighted`.
-    { provide: ROUTING_RANDOM, useValue: () => Math.random() },
+    { provide: ROUTING_RANDOM, useValue: cryptoRandom },
 
     ProviderRouterService,
   ],

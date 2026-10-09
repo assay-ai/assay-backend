@@ -82,7 +82,7 @@ import { loadMinimumStakeParameters } from '@modules/provider/services/provider-
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { createSender, loadKeypairSigner, Sender } from '../settlement/lib/sender';
-import { solanaConfig } from './lib/solana-cli';
+import { solanaBin, solanaConfig } from './lib/solana-cli';
 
 const LAMPORTS_PER_SOL = 1_000_000_000n;
 
@@ -377,7 +377,7 @@ async function main(): Promise<void> {
     'note       the floor is only the FLAT half of the bar. The router enforces\n' +
       `           max(floor, ${parameters.priceMultiple}× price) PER BINDING, so any binding priced\n` +
       `           above ${token(floorAtomic / BigInt(parameters.priceMultiple), mint.data.decimals)} raises its own minimum above this floor.\n` +
-      "           Price the checked binding at or below that, or raise --above.",
+      '           Price the checked binding at or below that, or raise --above.',
   );
 
   // ── 3. the two provider keypairs ──────────────────────────────────────────
@@ -612,9 +612,7 @@ async function main(): Promise<void> {
   // `OnChainProviderStakeSource` derives the PDA from, so until these are on the
   // two provider rows the chain source cannot answer for either of them and both
   // are excluded — which is the vacuous pass this script exists to prevent.
-  console.log(
-    "  Apply these for the stake-gate check — set each provider's enrolment",
-  );
+  console.log("  Apply these for the stake-gate check — set each provider's enrolment");
   console.log('  (POST /providers/me/stake-authority, or the column directly) and run at');
   console.log('  PROVIDER_STAKE_SOURCE_MODE=chain:');
   console.log('');
@@ -697,7 +695,13 @@ async function loadFixtures(
       // the exact 64-byte JSON array `loadKeypairSigner`, `spl-token` and
       // `solana` all read, and the CLI is already a dependency of every other
       // devnet script here.
-      execFileSync('solana-keygen', ['new', '--no-bip39-passphrase', '-s', '-o', keypairPath]);
+      execFileSync(solanaBin('solana-keygen'), [
+        'new',
+        '--no-bip39-passphrase',
+        '-s',
+        '-o',
+        keypairPath,
+      ]);
       console.log(`generated  ${keypairPath}`);
     }
     fixtures.push({

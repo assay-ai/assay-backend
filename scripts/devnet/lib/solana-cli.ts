@@ -12,9 +12,47 @@
  * no CLI exists for either.
  */
 import { execFileSync } from 'node:child_process';
+import { existsSync } from 'node:fs';
+import { homedir } from 'node:os';
+import { isAbsolute, join } from 'node:path';
+
+export type SolanaBinary = 'solana' | 'spl-token' | 'solana-keygen';
+
+/**
+ * Absolute path of a Solana CLI binary, resolved without consulting `PATH`.
+ *
+ * These scripts hold keypairs and sign real transactions, so a `solana` that
+ * resolves to whatever is first on `PATH` — a writable `./node_modules/.bin`,
+ * a stray directory a tool prepended — would run with that keypair in reach.
+ * The binary is looked up instead in `SOLANA_BIN_DIR` when set (it must be
+ * absolute), otherwise in the installer's default location followed by the
+ * system package-manager directories.
+ */
+export function solanaBin(name: SolanaBinary): string {
+  const override = process.env.SOLANA_BIN_DIR;
+  if (override !== undefined && !isAbsolute(override)) {
+    throw new Error(`SOLANA_BIN_DIR must be an absolute path, got: ${override}`);
+  }
+  const dirs = override
+    ? [override]
+    : [
+        join(homedir(), '.local/share/solana/install/active_release/bin'),
+        '/opt/homebrew/bin',
+        '/usr/local/bin',
+        '/usr/bin',
+      ];
+  for (const dir of dirs) {
+    const candidate = join(dir, name);
+    if (existsSync(candidate)) return candidate;
+  }
+  throw new Error(
+    `\`${name}\` not found in ${dirs.join(', ')}. ` +
+      'Set SOLANA_BIN_DIR to the absolute directory that holds the Solana CLI.',
+  );
+}
 
 export function solanaConfig(): { keypairPath: string; rpcUrl: string } {
-  const output = execFileSync('solana', ['config', 'get'], { encoding: 'utf8' });
+  const output = execFileSync(solanaBin('solana'), ['config', 'get'], { encoding: 'utf8' });
   const keypairPath = matchLine(output, /Keypair Path:\s*(\S+)/);
   const rpcUrl = matchLine(output, /RPC URL:\s*(\S+)/);
   if (!keypairPath || !rpcUrl) {
@@ -29,7 +67,7 @@ function matchLine(output: string, pattern: RegExp): string | null {
 }
 
 export function splToken(args: readonly string[]): unknown {
-  const output = execFileSync('spl-token', [...args, '--output', 'json'], {
+  const output = execFileSync(solanaBin('spl-token'), [...args, '--output', 'json'], {
     encoding: 'utf8',
     maxBuffer: 10 * 1024 * 1024,
   });
@@ -37,7 +75,7 @@ export function splToken(args: readonly string[]): unknown {
 }
 
 export function solanaBalanceSol(pubkey: string): number {
-  const output = execFileSync('solana', ['balance', pubkey], { encoding: 'utf8' });
+  const output = execFileSync(solanaBin('solana'), ['balance', pubkey], { encoding: 'utf8' });
   const match = /^([\d.]+)\s+SOL/.exec(output.trim());
   return match ? Number(match[1]) : 0;
 }
