@@ -21,7 +21,7 @@ export class LinkWalletResponseDto {
   @ApiProperty({
     description: 'The linked CAIP-10 account, or null while none is linked.',
     nullable: true,
-    example: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:45bt7r8bDWm7JRtQwfWFb9GvTAfFw5rtXpAEm2LhUXLt',
+    example: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:6dauQmUxQCWRyDtQyczEk4rkmtjHEdh9kP82x8B6zeD4',
   })
   account!: string | null;
 

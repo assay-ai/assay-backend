@@ -140,7 +140,7 @@ describe('verifier keys, one ACTIVE per chain', () => {
     await expect(
       insertKey({
         keyId: 'bad',
-        chainId: '35errHuYW3D5EztWJsZM3eK3kimUiMFrqAuUu92k5hMr:',
+        chainId: 'C8LfCLA7ZYwwVpvtkkDf96Af9cNx2pQFMJ4tBArxY3N5:',
         state: 'PENDING',
       }),
     ).rejects.toThrow(/chk_verifier_signing_keys_chain_id/);

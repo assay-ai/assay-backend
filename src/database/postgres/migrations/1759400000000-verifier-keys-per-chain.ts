@@ -39,7 +39,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `split_part(chain_address, ':', 1) || ':' || split_part(chain_address, ':', 2)`,
  * on the belief that `chain_address` is CAIP-10. **It is not.** Measured on the
  * live table: every value is a bare base58 address
- * (`35errHuYW3D5EztWJsZM3eK3kimUiMFrqAuUu92k5hMr`), and `split_part` on a
+ * (`C8LfCLA7ZYwwVpvtkkDf96Af9cNx2pQFMJ4tBArxY3N5`), and `split_part` on a
  * string with no colon returns the whole string and then an empty string — so
  * that expression yields `35errHu…:`, 45 characters, which fits `varchar(64)`
  * and is accepted silently by `SET NOT NULL`. Eighteen rows would have been

@@ -37,7 +37,7 @@ const SOLANA_BUYER: AccountId = toAccountId(SOLANA, 'AgentAccount111111111111111
 const EVM_BUYER: AccountId = toAccountId(EVM, '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc');
 
 const SOLANA_ESCROW: AccountId = toAccountId(SOLANA, 'EscrowTokenAccount1111111111111111111111111');
-const EVM_ESCROW: AccountId = toAccountId(EVM, '0x041475c8Dd7C9bdc5829E33899Ed08A7635154A9');
+const EVM_ESCROW: AccountId = toAccountId(EVM, '0x2ed26485593B512d87616a2625d2C0f7721cfF10');
 
 function fakeOpener(escrow: AccountId, signature: string | null): EscrowOpenerPort {
   return {
@@ -115,7 +115,7 @@ const SOLANA_ANSWER: DepositRequirements = {
   namespace: 'solana',
   chainId: SOLANA,
   payTo: 'EscrowTokenAccount1111111111111111111111111',
-  asset: 'AiUqZiWkX3FBjULeRwPi73kC9raWdSnYmn5uQhk6SVP7',
+  asset: 'FG5sGnv611t2nWGK5hVw5WE5hv1HLfx7SwLCtjbuj9xR',
   amount: '5000000',
   decimals: 6,
   feePayer: 'FacilitatorFeePayer1111111111111111111111111',
@@ -127,9 +127,9 @@ const SOLANA_ANSWER: DepositRequirements = {
 const EVM_ANSWER: DepositRequirements = {
   namespace: 'eip155',
   chainId: EVM,
-  contract: '0x041475c8Dd7C9bdc5829E33899Ed08A7635154A9',
+  contract: '0x2ed26485593B512d87616a2625d2C0f7721cfF10',
   method: 'depositFor(address,uint64)',
-  spender: '0x041475c8Dd7C9bdc5829E33899Ed08A7635154A9',
+  spender: '0x2ed26485593B512d87616a2625d2C0f7721cfF10',
   buyer: '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc',
   asset: '0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec',
   amount: '5000000',

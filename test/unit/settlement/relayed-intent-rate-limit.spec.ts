@@ -17,7 +17,7 @@ import { RelayedIntentRateLimiter } from '@modules/settlement/services/relayed-i
  */
 const ACCOUNT: AccountId = toAccountId(
   CHAIN_IDS.ROBINHOOD_TESTNET,
-  '0x7FD9A17dE9fd64b35081FbAbaa9f3bb85e59F8d1',
+  '0x1b89caB90cbc71bBFad47E45707D17787cf91dD1',
 );
 const ORG = '7e3a94c1-5b62-4d08-9f37-2c81e6a0b5d4';
 
