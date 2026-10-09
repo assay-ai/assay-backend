@@ -1,6 +1,6 @@
 import { parseFaucetArgs } from '../../../scripts/devnet/lib/faucet-args';
 
-const KEY = '45bt7r8bDWm7JRtQwfWFb9GvTAfFw5rtXpAEm2LhUXLt';
+const KEY = '6dauQmUxQCWRyDtQyczEk4rkmtjHEdh9kP82x8B6zeD4';
 
 describe('parseFaucetArgs', () => {
   it('reads a recipient and a target balance in whole tokens', () => {

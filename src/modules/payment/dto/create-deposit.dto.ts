@@ -215,7 +215,7 @@ export class EvmDepositRequirementsDto {
       'The escrow contract to **call**, chain-native and checksummed. This is NOT a transfer ' +
       'destination: sending tokens to it with a plain ERC-20 `transfer` moves them and credits ' +
       'nobody, and there is no way to recover them afterwards.',
-    example: '0x041475c8Dd7C9bdc5829E33899Ed08A7635154A9',
+    example: '0x2ed26485593B512d87616a2625d2C0f7721cfF10',
   })
   readonly contract!: string;
 
@@ -239,7 +239,7 @@ export class EvmDepositRequirementsDto {
       'contract today, and carried separately from `contract` because "who I approve" and "who ' +
       'I call" are one address by construction rather than by definition — a Permit2 path ' +
       'changes the first and not the second.',
-    example: '0x041475c8Dd7C9bdc5829E33899Ed08A7635154A9',
+    example: '0x2ed26485593B512d87616a2625d2C0f7721cfF10',
   })
   readonly spender!: string;
 

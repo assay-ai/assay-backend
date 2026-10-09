@@ -5,8 +5,8 @@ const PATH = '~/.x402-keys/devnet-operator.json';
 // Real base58 addresses, not placeholders: the function builds a PublicKey
 // from `mint`, so a fixture that cannot be one would force the production
 // code to tolerate garbage it should reject.
-const MINT = 'AiUqZiWkX3FBjULeRwPi73kC9raWdSnYmn5uQhk6SVP7';
-const OPERATOR = '45bt7r8bDWm7JRtQwfWFb9GvTAfFw5rtXpAEm2LhUXLt';
+const MINT = 'FG5sGnv611t2nWGK5hVw5WE5hv1HLfx7SwLCtjbuj9xR';
+const OPERATOR = '6dauQmUxQCWRyDtQyczEk4rkmtjHEdh9kP82x8B6zeD4';
 const SOMEBODY_ELSE = 'DVjo3Ubyy95ktGhzbAopkaGAmWPUsE6kpdpb4So1sRVt';
 const conn = (value: unknown) =>
   ({ getParsedAccountInfo: async () => ({ value }) }) as unknown as Connection;

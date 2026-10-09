@@ -19,8 +19,8 @@ import {
 } from '@x402/settlement-client';
 
 const PROGRAM = address('DbHEzzA6CwKRY9xLGSzDgqei7VmnHpF6YociozaN8qFR');
-const PAYER = address('2A61cbkTCjQ4v3mRRGMrrhEiVWNNAQ16xtRPLeJrkWFn');
-const PAY_TO = address('JAzvmAPo8QK7qSPVsL85uL2ciE65NmdJCiDpiwyCDnDC');
+const PAYER = address('9xGuGHFYb4KysmNbZpvHEUJYwxC8zwFhP1GT2apAyCjj');
+const PAY_TO = address('AmZv6ZumyEsHtD29eZ6gzNHB7X7ai3eyuy5pRXqo19Df');
 const PROVIDER = address('9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM');
 
 function fields(overrides: Partial<Parameters<typeof voucherMessage>[0]> = {}) {

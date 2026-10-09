@@ -65,7 +65,7 @@ export class SubmitSetLimitsBodyDto {
       "The `buyer` inside the signed message. Must be this session's own account — a request " +
       'naming anybody else is refused 403 `SETTLEMENT_RELAYED_INTENT_FOR_ANOTHER_BUYER`, because the ' +
       "platform pays the gas and will not pay it for somebody else's signature.",
-    example: '0x7FD9A17dE9fd64b35081FbAbaa9f3bb85e59F8d1',
+    example: '0x1b89caB90cbc71bBFad47E45707D17787cf91dD1',
   })
   @IsString()
   @Matches(ADDRESS, { message: 'buyer must be a 20-byte 0x address' })
@@ -135,7 +135,7 @@ export class SubmitSetLimitsBodyDto {
 export class SubmitRequestWithdrawBodyDto {
   @ApiProperty({
     description: "The `buyer` inside the signed message. Must be this session's own account.",
-    example: '0x7FD9A17dE9fd64b35081FbAbaa9f3bb85e59F8d1',
+    example: '0x1b89caB90cbc71bBFad47E45707D17787cf91dD1',
   })
   @IsString()
   @Matches(ADDRESS, { message: 'buyer must be a 20-byte 0x address' })

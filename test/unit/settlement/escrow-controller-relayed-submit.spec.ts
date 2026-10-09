@@ -36,7 +36,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
  */
 
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
-const BUYER_ADDRESS = '0x7FD9A17dE9fd64b35081FbAbaa9f3bb85e59F8d1';
+const BUYER_ADDRESS = '0x1b89caB90cbc71bBFad47E45707D17787cf91dD1';
 const BUYER: AccountId = toAccountId(CHAIN, BUYER_ADDRESS);
 const SOMEONE_ELSE = '0x14dC79964da2C08b23698B3D3cc7Ca32193d9955';
 const ASSET = `${CHAIN}/erc20:0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec` as AssetId;

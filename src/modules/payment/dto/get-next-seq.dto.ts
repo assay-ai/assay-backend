@@ -17,7 +17,7 @@ export class GetNextSeqResponseDto {
   seq: string;
 
   @ApiProperty({
-    example: '2A61cbkTCjQ4v3mRRGMrrhEiVWNNAQ16xtRPLeJrkWFn',
+    example: '9xGuGHFYb4KysmNbZpvHEUJYwxC8zwFhP1GT2apAyCjj',
     description:
       "Put this in the voucher's `pay_to`; the program compares it against the escrow it " +
       'derives from your own pubkey.',
@@ -25,7 +25,7 @@ export class GetNextSeqResponseDto {
   payTo: string;
 
   @ApiProperty({
-    example: 'JAzvmAPo8QK7qSPVsL85uL2ciE65NmdJCiDpiwyCDnDC',
+    example: 'AmZv6ZumyEsHtD29eZ6gzNHB7X7ai3eyuy5pRXqo19Df',
     description: 'The escrow ATA the balance actually sits in.',
   })
   escrowTokenAccount: string;
