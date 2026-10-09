@@ -3,14 +3,14 @@
     "providerId": "a965eec3-ad93-4257-bf9b-e172361ee56c",
     "chainId": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
     "amount": "500000000",
-    "asset": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/token:AiUqZiWkX3FBjULeRwPi73kC9raWdSnYmn5uQhk6SVP7",
+    "asset": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/token:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
     "decimals": 6
   },
   {
     "providerId": "eca7b08a-e143-44f5-b1ce-28b1a3a0ef41",
     "chainId": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1",
     "amount": "200000000",
-    "asset": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/token:AiUqZiWkX3FBjULeRwPi73kC9raWdSnYmn5uQhk6SVP7",
+    "asset": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/token:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
     "decimals": 6
   }
 ]
