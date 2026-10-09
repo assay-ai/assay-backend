@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
@@ -350,7 +352,7 @@ export class FreeQuotaService {
   private async incrPlatformRate(agentId: string): Promise<void> {
     const key = this.platformRateKey(agentId);
     const now = Date.now();
-    const member = `${now}:${Math.random().toString(36).slice(2, 10)}`;
+    const member = `${now}:${randomUUID()}`;
     const windowMs = this.rateWindowMs();
 
     try {
