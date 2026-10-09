@@ -372,7 +372,9 @@ function assertAssetIsCurrent(): void {
   // object key cannot hold. Every entry for this provider is checked, not the
   // first: an entry on a second chain in a stale asset would fail exactly the
   // same way and is exactly as invisible.
-  const stakes = JSON.parse(readFileSync(join(SEED_DIR, 'stakes.json'), 'utf8')) as readonly {
+  const stakes = JSON.parse(
+    readFileSync(process.env.PROVIDER_STAKE_SEED_FILE ?? join(SEED_DIR, 'stakes.json'), 'utf8'),
+  ) as readonly {
     providerId: string;
     chainId: string;
     asset: string;
@@ -593,7 +595,13 @@ function testReport(
   callId: string,
   passed: boolean,
 ): Record<string, unknown> {
-  const layers = ['REQUEST_MAPPING', 'UPSTREAM', 'CLASSIFICATION', 'RESPONSE_MAPPING', 'VERIFICATION'];
+  const layers = [
+    'REQUEST_MAPPING',
+    'UPSTREAM',
+    'CLASSIFICATION',
+    'RESPONSE_MAPPING',
+    'VERIFICATION',
+  ];
   const failedAt = passed ? -1 : layers.indexOf('RESPONSE_MAPPING');
 
   return {
@@ -738,8 +746,7 @@ function planCalls(buyerCount: number): CallPlan[] {
       // The PAUSED binding served traffic until it was paused two days ago —
       // which is what makes its earnings history non-empty and its recent
       // history empty, exactly as a paused binding's should be.
-      const binding =
-        step % 4 === 3 && dayOffset > 2 ? BINDINGS[1] : BINDINGS[0];
+      const binding = step % 4 === 3 && dayOffset > 2 ? BINDINGS[1] : BINDINGS[0];
 
       plans.push({
         dayOffset,
@@ -816,8 +823,7 @@ async function seedOneCall(
   bindingRow: ToolBindingEntity,
 ): Promise<void> {
   const buyer = input.buyers[plan.buyerIndex];
-  const price =
-    plan.callClass === PaymentIntentCallClass.FREE ? 0n : plan.binding.priceAmount;
+  const price = plan.callClass === PaymentIntentCallClass.FREE ? 0n : plan.binding.priceAmount;
   const platformFee = (price * PLATFORM_FEE_BPS) / 10_000n;
   const at = daysAgo(plan.dayOffset, plan.dayOffset === 0 ? 1 : 3 + (plan.buyerIndex % 8));
 
@@ -871,8 +877,7 @@ async function seedOneCall(
       {
         ...payee,
         reason: 'demo seed: the reservation expired before the provider answered',
-        classification:
-          plan.shape === CallShape.EXPIRED_SYSTEM ? 'SYSTEM_ERROR' : 'REQUEST_ERROR',
+        classification: plan.shape === CallShape.EXPIRED_SYSTEM ? 'SYSTEM_ERROR' : 'REQUEST_ERROR',
       },
     );
     await backdate(input.dataSource, intent.id, at);
@@ -1060,8 +1065,7 @@ async function seedPayouts(
       continue;
     }
 
-    const chainTxRef =
-      plan.status === 'PENDING' ? null : `demo_squads_proposal_${plan.weeksAgo}`;
+    const chainTxRef = plan.status === 'PENDING' ? null : `demo_squads_proposal_${plan.weeksAgo}`;
 
     const batchId = uuidFromLabel(`demo:payout-batch:${plan.weeksAgo}`);
 
@@ -1139,7 +1143,8 @@ async function report(dataSource: DataSource): Promise<void> {
 
   log('');
   log(`intents across ${days[0].days} UTC days`);
-  for (const row of rows) log(`  ${row.status.padEnd(20)} ${row.call_class.padEnd(12)} ${row.calls}`);
+  for (const row of rows)
+    log(`  ${row.status.padEnd(20)} ${row.call_class.padEnd(12)} ${row.calls}`);
   log('verdicts');
   for (const row of verdicts) log(`  ${row.verdict.padEnd(20)} ${row.calls}`);
 }
