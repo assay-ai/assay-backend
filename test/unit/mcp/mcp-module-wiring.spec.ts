@@ -1,6 +1,8 @@
 import { Global, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import { Test } from '@nestjs/testing';
+import { TypeOrmModule, getDataSourceToken } from '@nestjs/typeorm';
 import type Redis from 'ioredis';
 
 import { NotificationChannelRepository } from '@database/postgres/repositories/notification-channel.repository';
@@ -37,8 +39,11 @@ import {
   KILL_SWITCH_SUBSCRIBER,
 } from '@modules/verification/services/redis-policy-kill-switch.service';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
+import { PostgresModule } from '@database/postgres/postgres.module';
 import { McpApiModule } from '@modules/mcp/mcp-api.module';
 import { PublicDemoService } from '@modules/mcp/services/public-demo.service';
+import { DEMO_RATE_REDIS } from '@modules/mcp/services/redis-demo-rate-limiter.service';
+import { SIGNING_RATE_REDIS } from '@modules/verification/signing/signing.constants';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
 
@@ -243,6 +248,7 @@ describe('McpModule wiring', () => {
     // while it is still alive.
     const killSwitchRedis = app.get<Redis>(KILL_SWITCH_REDIS);
     const killSwitchSubscriber = app.get<Redis>(KILL_SWITCH_SUBSCRIBER);
+    const signingRateRedis = app.get<Redis>(SIGNING_RATE_REDIS, { strict: false });
 
     try {
       expect(app.get(McpServerFactory)).toBeInstanceOf(McpServerFactory);
@@ -262,7 +268,11 @@ describe('McpModule wiring', () => {
       // this close the two connections the service itself never does (see
       // the class comment).
       await app.close().catch(() => undefined);
-      await Promise.allSettled([killSwitchRedis.quit(), killSwitchSubscriber.quit()]);
+      await Promise.allSettled([
+        killSwitchRedis.quit(),
+        killSwitchSubscriber.quit(),
+        signingRateRedis.quit(),
+      ]);
     }
   });
 });
@@ -280,14 +290,59 @@ describe('McpModule wiring', () => {
  *
  * A DI edge is only ever proved by building the container.
  */
+/** Every repository `PostgresModule` exports, and its `DataSource`, as inert stubs. */
+const POSTGRES_REPOSITORIES = (Reflect.getMetadata('exports', PostgresModule) as unknown[]).filter(
+  (token): token is new (...args: never[]) => unknown =>
+    typeof token === 'function' && token !== TypeOrmModule,
+);
+
+@Global()
+@Module({
+  providers: [
+    ...POSTGRES_REPOSITORIES.map((token) => ({ provide: token, useValue: {} })),
+    { provide: getDataSourceToken('postgres'), useValue: {} },
+  ],
+  exports: [...POSTGRES_REPOSITORIES, getDataSourceToken('postgres')],
+})
+class StubPostgresModule {}
+
 describe('McpApiModule wiring', () => {
   jest.setTimeout(30_000);
 
+  // Unset, each of these refuses at boot and the test would pass on that
+  // refusal without resolving anything.
+  const BOOT_ENV: Readonly<Record<string, string>> = {
+    ENABLED_CHAINS: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+    DEMO_MCP_TOKEN: 'mcp_wiring_demo_token',
+    DEMO_ORGANIZATION_ID: '00000000-0000-4000-8000-000000000001',
+  };
+  const savedEnv: Record<string, string | undefined> = {};
+  beforeAll(() => {
+    for (const [key, value] of Object.entries(BOOT_ENV)) {
+      savedEnv[key] = process.env[key];
+      process.env[key] = value;
+    }
+  });
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
   it('resolves PublicDemoService, including the ENABLED_CHAINS it injects', async () => {
-    const app = await NestFactory.createApplicationContext(McpApiWiringHarnessModule, {
-      logger: false,
-      abortOnError: false,
-    }).catch((error: unknown) => error as Error);
+    // `McpApiModule` imports `PostgresModule`, whose `TypeOrmModule.forRootAsync`
+    // connects at boot and retries for ~30 s. Under a harness with no database
+    // config that retry outlived the test, and on a machine with a Postgres on
+    // :5432 its lazy `require('pgpass')` ran after Jest had torn the module
+    // registry down — `TypeError: pgPass is not a function`, reported against
+    // whichever suite happened to be running. Swapped for stubs of every
+    // repository it exports: the claim is that the tokens resolve.
+    const app = await Test.createTestingModule({ imports: [McpApiWiringHarnessModule] })
+      .overrideModule(PostgresModule)
+      .useModule(StubPostgresModule)
+      .compile()
+      .catch((error: unknown) => error as Error);
 
     if (app instanceof Error) {
       // Infrastructure being unreachable is not this test's business; a DI
@@ -307,8 +362,20 @@ describe('McpApiModule wiring', () => {
       expect(app.get(PublicDemoService)).toBeInstanceOf(PublicDemoService);
       expect(app.get<readonly ChainId[]>(ENABLED_CHAINS).length).toBeGreaterThan(0);
     } finally {
+      // Compiled, never initialised: the clients were constructed but no
+      // lifecycle hook ran, so they are dropped rather than asked to unsubscribe.
+      // Every ioredis client the graph builds, or its reconnect loop keeps the
+      // Jest worker alive after the last assertion.
+      killSwitchRedis.disconnect();
+      killSwitchSubscriber.disconnect();
+      for (const token of [SIGNING_RATE_REDIS, DEMO_RATE_REDIS]) {
+        try {
+          app.get<Redis>(token, { strict: false }).disconnect();
+        } catch {
+          // Not part of this graph.
+        }
+      }
       await app.close().catch(() => undefined);
-      await Promise.allSettled([killSwitchRedis.quit(), killSwitchSubscriber.quit()]);
     }
   });
 });
