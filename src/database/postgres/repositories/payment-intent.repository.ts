@@ -110,6 +110,20 @@ export const AWAITING_REDEMPTION_SQL =
   `(intent.rail = 'RAIL_B_VOUCHER' AND intent.hold_id IS NOT NULL ` +
   `AND intent.hold_released_at IS NULL)`;
 
+/**
+ * Read on a `SETTLED` intent: the provider has been credited — its hold was
+ * committed, which is exactly when `PROVIDER_CREDIT` is written (rail A inline
+ * in `PaymentIntentService.resolve`, rail B in `commitRedeemedHold` once
+ * `redeem_voucher` lands). Every "earned" figure filters on this, so it
+ * matches the earnings ledger by construction.
+ *
+ * Strictly narrower than `NOT` {@link AWAITING_REDEMPTION_SQL}: it also
+ * leaves out a `SETTLED` row with no hold at all, or a rail-A row whose
+ * commit failed after the status moved (see `resolve`'s "What a failure
+ * leaves behind") — neither credited anyone.
+ */
+export const CREDITED_SQL = `(intent.hold_id IS NOT NULL AND intent.hold_released_at IS NOT NULL)`;
+
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
   readonly id: string;
@@ -230,8 +244,10 @@ export const SPEND_COUNTING_STATUSES: readonly string[] = Object.freeze([
   SETTLED_STATUS,
 ]);
 
-/** One agent's spend-so-far in one asset, split at the UTC day and UTC month boundary. */
+/** One agent's spend-so-far in one asset, split at the UTC hour, day and month boundary. */
 export interface AgentSpendTotals {
+  /** `Σ price_amount` since the top of the UTC hour — `max_spend_per_hour`. */
+  readonly thisHour: bigint;
   /** `Σ price_amount` since {@link utcDayStart} — `spend-policy`'s daily-cap check. */
   readonly today: bigint;
   /** `Σ price_amount` since {@link utcMonthStart} — the monthly-cap check. */
@@ -536,14 +552,15 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * `Σ price_amount` for one agent, in one asset, split at the UTC day and UTC
-   * month boundary in a single pass (the spend-policy cap check).
+   * `Σ price_amount` for one agent, in one asset, split at the UTC hour, day
+   * and month boundary in a single pass (the spend-policy `max_spend_per_hour`
+   * and daily/monthly cap checks).
    *
-   * One query rather than two: `monthStart` is always `<= dayStart`, so
+   * One query rather than three: `monthStart <= dayStart <= hourStart`, so
    * filtering the `WHERE` to `created_at >= :monthStart` already selects
-   * every row either total needs, and the two `SUM(CASE …)` projections split
-   * that one scan into "today" and "this month" without reading the table
-   * twice. See {@link SPEND_COUNTING_STATUSES} for which statuses count as
+   * every row any total needs, and the `SUM(CASE …)` projections split that
+   * one scan into "this hour", "today" and "this month" without reading the
+   * table twice. See {@link SPEND_COUNTING_STATUSES} for which statuses count as
    * spend and why.
    *
    * Scoped to one `assetId` on purpose: a `spend_policies` row denominates
@@ -556,11 +573,16 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
     organizationId: string,
     agentId: string,
     assetId: string,
+    hourStart: Date,
     dayStart: Date,
     monthStart: Date,
   ): Promise<AgentSpendTotals> {
     const row = await this.createQueryBuilder('intent')
       .select(
+        'COALESCE(SUM(CASE WHEN intent.createdAt >= :hourStart THEN intent.priceAmount ELSE 0 END), 0)',
+        'thisHour',
+      )
+      .addSelect(
         'COALESCE(SUM(CASE WHEN intent.createdAt >= :dayStart THEN intent.priceAmount ELSE 0 END), 0)',
         'today',
       )
@@ -576,10 +598,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.status IN (:...statuses)', { statuses: SPEND_COUNTING_STATUSES })
       .andWhere('intent.createdAt >= :monthStart', { monthStart })
-      .setParameters({ dayStart })
-      .getRawOne<{ today: string; thisMonth: string }>();
+      .setParameters({ hourStart, dayStart })
+      .getRawOne<{ thisHour: string; today: string; thisMonth: string }>();
 
     return {
+      thisHour: BigInt(row?.thisHour ?? '0'),
       today: BigInt(row?.today ?? '0'),
       thisMonth: BigInt(row?.thisMonth ?? '0'),
     };

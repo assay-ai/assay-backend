@@ -5,10 +5,11 @@ import { Money } from '@modules/chains/ports/money.types';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { MoneyUtil } from '@shared/utils/money.util';
 
-import { utcDayStart, utcMonthStart } from '../domain/spend-window.util';
+import { utcDayStart, utcHourStart, utcMonthStart } from '../domain/spend-window.util';
 
 /** What an agent has spent so far, denominated in the policy's own asset. */
 export interface AgentSpendUsage {
+  readonly spendThisHour: Money;
   readonly spendToday: Money;
   readonly spendThisMonth: Money;
 }
@@ -30,8 +31,8 @@ export class SpendUsageService {
   constructor(private readonly intents: PaymentIntentRepository) {}
 
   /**
-   * `Σ` price over today and over this calendar month (both UTC), in
-   * `assetId`. Neither period includes the call this is being checked
+   * `Σ` price over this hour, today and this calendar month (all UTC), in
+   * `assetId`. No period includes the call this is being checked
    * *before* — the caller adds the pending call's price on top of these to
    * decide whether it would breach a cap.
    */
@@ -46,11 +47,13 @@ export class SpendUsageService {
       organizationId,
       agentId,
       assetId,
+      utcHourStart(now),
       utcDayStart(now),
       utcMonthStart(now),
     );
 
     return {
+      spendThisHour: MoneyUtil.of(totals.thisHour, assetId, decimals),
       spendToday: MoneyUtil.of(totals.today, assetId, decimals),
       spendThisMonth: MoneyUtil.of(totals.thisMonth, assetId, decimals),
     };

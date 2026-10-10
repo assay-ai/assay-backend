@@ -1,6 +1,9 @@
 import { ConfigService } from '@nestjs/config';
 
-import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import {
+  CREDITED_SQL,
+  PaymentIntentRepository,
+} from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderPayoutRepository } from '@database/postgres/repositories/provider-payout.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { ApiErrorCode } from '@shared/api';
@@ -262,6 +265,21 @@ describe('ProviderReconciliationService — rail B awaiting redemption', () => {
     expect(result.gross).toEqual({ amount: '1000', asset: USDC, decimals: 6 });
     expect(result.net).toEqual({ amount: '900', asset: USDC, decimals: 6 });
     expect(result.callCount).toBe(4);
+  });
+});
+
+describe('ProviderReconciliationService — money figures count committed holds only', () => {
+  // Same rule as earnings: gross / take / net must match the PROVIDER_CREDIT
+  // ledger, which is written exactly when a SETTLED intent's hold is committed.
+  it('sums credited, providerAmount and platformFee only over SETTLED intents whose hold was committed', async () => {
+    const { service, groupsFake } = build([]);
+
+    await service.getReconciliation(PROVIDER, WINDOW);
+
+    for (const alias of ['credited', 'providerAmount', 'platformFee']) {
+      const expr = groupsFake.selects.find((s) => s.alias === alias)?.expr ?? '';
+      expect(expr).toContain(CREDITED_SQL);
+    }
   });
 });
 

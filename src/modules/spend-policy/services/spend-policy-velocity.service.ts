@@ -1,28 +1,33 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
-import { Money } from '@modules/chains/ports/money.types';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
-import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
   DUPLICATE_REQUEST_THRESHOLD,
   DUPLICATE_REQUEST_WINDOW_MS,
 } from '../constants/spend-policy-defaults.constants';
 
-/** The two count-based velocity ceilings, plus the one amount-based one. */
+/**
+ * The two count-based velocity ceilings.
+ *
+ * `spend_policies.max_spend_per_hour` is deliberately not here: it bounds
+ * money, and money is only spent once a hold is opened or settled, so it is
+ * measured from `payment_intents` by `SpendPolicyEnforcementService` (see
+ * `SpendUsageService`), not from a counter bumped on every attempt — an
+ * attempt counter cannot be told that a call was later voided or refunded.
+ */
 export interface VelocityLimits {
   /** `spend_policies.max_calls_per_minute`. `null` = unlimited. */
   readonly maxCallsPerMinute: number | null;
   /** `spend_policies.max_calls_per_hour`. `null` = unlimited. */
   readonly maxCallsPerHour: number | null;
-  /** `spend_policies.max_spend_per_hour`. `null` = unlimited. */
-  readonly maxSpendPerHour: Money | null;
 }
 
 export enum VelocityViolationKind {
   CALLS_PER_MINUTE = 'CALLS_PER_MINUTE',
   CALLS_PER_HOUR = 'CALLS_PER_HOUR',
+  /** Raised by `SpendPolicyEnforcementService` from `payment_intents`, never by {@link SpendPolicyVelocityService.consume}. */
   SPEND_PER_HOUR = 'SPEND_PER_HOUR',
   DUPLICATE_REQUEST = 'DUPLICATE_REQUEST',
   /** Redis could not be reached — see the class doc on which way this fails. */
@@ -46,14 +51,12 @@ export interface VelocityViolation {
 export interface VelocityUsage {
   readonly callsThisMinute: number | null;
   readonly callsThisHour: number | null;
-  readonly spendThisHour: bigint | null;
   /** `false` when Redis could not be read — the caller renders "—", not a wrong zero. */
   readonly readable: boolean;
 }
 
 const CALLS_PER_MINUTE_WINDOW_MS = 60_000;
 const CALLS_PER_HOUR_WINDOW_MS = 60 * 60_000;
-const SPEND_PER_HOUR_WINDOW_MS = 60 * 60_000;
 
 /** How long an incident's "already notified" flag survives once set. */
 const INCIDENT_SUPPRESSION_SECONDS = 60 * 60;
@@ -63,7 +66,8 @@ const KEY_PREFIX = 'spend-policy:velocity:';
 /**
  * The gateway's velocity layer, in Redis.
  *
- * Four independent counters per agent, all fixed-window (period baked into
+ * Three independent counters per agent (calls/minute, calls/hour,
+ * duplicate-hash), all fixed-window (period baked into
  * the key, one `INCR`/`INCRBY` plus a refreshed `EXPIRE`), not sliding sets
  * like `BindingCeilingService`'s rps window or `RedisSigningRateLimiter`'s
  * signing rate:
@@ -96,6 +100,13 @@ const KEY_PREFIX = 'spend-policy:velocity:';
  * unconditionally and decides *after*, exactly the order
  * `RedisSigningRateLimiter.observe` documents: *"the increment happens before
  * the decision, and the caller decides on the post-increment count."*
+ *
+ * That reasoning is about attempts, so it covers only the attempt counters.
+ * Money per hour is not counted here: an attempt that is refused, voided or
+ * refunded spent nothing, and a counter that summed every attempt's price
+ * locked agents out after a run of voided calls with nothing spent. Spend per
+ * hour is read from `payment_intents` like the daily cap (see
+ * `SpendPolicyEnforcementService`).
  *
  * ## This class fails CLOSED
  *
@@ -137,7 +148,6 @@ export class SpendPolicyVelocityService {
   async consume(
     agentId: string,
     requestHash: string,
-    price: Money,
     limits: VelocityLimits,
   ): Promise<VelocityViolation | null> {
     const now = Date.now();
@@ -145,7 +155,6 @@ export class SpendPolicyVelocityService {
     let counts: {
       callsThisMinute: number;
       callsThisHour: number;
-      spendThisHour: bigint;
       duplicateCount: number;
     };
 
@@ -159,10 +168,6 @@ export class SpendPolicyVelocityService {
       const callsHrKey = this.callsHrKey(agentId, now);
       pipeline.incr(callsHrKey);
       pipeline.pexpire(callsHrKey, CALLS_PER_HOUR_WINDOW_MS + GRACE_MS);
-
-      const spendHrKey = this.spendHrKey(agentId, now);
-      pipeline.incrby(spendHrKey, MoneyUtil.toAtomic(price).toString());
-      pipeline.pexpire(spendHrKey, SPEND_PER_HOUR_WINDOW_MS + GRACE_MS);
 
       const dupKey = this.duplicateKey(agentId, requestHash, now);
       pipeline.incr(dupKey);
@@ -179,11 +184,7 @@ export class SpendPolicyVelocityService {
       counts = {
         callsThisMinute: readCount(replies, 0),
         callsThisHour: readCount(replies, 2),
-        // `bigint`, never routed through `Number` — a spend accumulator can
-        // exceed `Number.MAX_SAFE_INTEGER` for an 18-decimal asset well before
-        // it exceeds what Redis's own 64-bit `INCRBY` can hold.
-        spendThisHour: readBigInt(replies, 4),
-        duplicateCount: readCount(replies, 6),
+        duplicateCount: readCount(replies, 4),
       };
     } catch (error) {
       this.logger.warn(
@@ -209,16 +210,6 @@ export class SpendPolicyVelocityService {
       };
     }
 
-    if (
-      limits.maxSpendPerHour &&
-      counts.spendThisHour > MoneyUtil.toAtomic(limits.maxSpendPerHour)
-    ) {
-      return {
-        kind: VelocityViolationKind.SPEND_PER_HOUR,
-        retryAfterSeconds: secondsRemainingInWindow(SPEND_PER_HOUR_WINDOW_MS, now),
-      };
-    }
-
     if (counts.duplicateCount >= DUPLICATE_REQUEST_THRESHOLD) {
       const freshAnomaly = await this.claimIncidentNotification(agentId, requestHash);
       return {
@@ -240,22 +231,20 @@ export class SpendPolicyVelocityService {
   async read(agentId: string): Promise<VelocityUsage> {
     const now = Date.now();
     try {
-      const [callsMin, callsHr, spendHr] = await Promise.all([
+      const [callsMin, callsHr] = await Promise.all([
         this.redis.get(this.callsMinKey(agentId, now)),
         this.redis.get(this.callsHrKey(agentId, now)),
-        this.redis.get(this.spendHrKey(agentId, now)),
       ]);
       return {
         callsThisMinute: Number(callsMin ?? '0'),
         callsThisHour: Number(callsHr ?? '0'),
-        spendThisHour: BigInt(spendHr ?? '0'),
         readable: true,
       };
     } catch (error) {
       this.logger.warn(
         `agent ${agentId}: velocity usage unreadable for display. ${describe(error)}`,
       );
-      return { callsThisMinute: null, callsThisHour: null, spendThisHour: null, readable: false };
+      return { callsThisMinute: null, callsThisHour: null, readable: false };
     }
   }
 
@@ -300,10 +289,6 @@ export class SpendPolicyVelocityService {
     return `${KEY_PREFIX}calls-hr:${agentId}:${bucket(now, CALLS_PER_HOUR_WINDOW_MS)}`;
   }
 
-  private spendHrKey(agentId: string, now: number): string {
-    return `${KEY_PREFIX}spend-hr:${agentId}:${bucket(now, SPEND_PER_HOUR_WINDOW_MS)}`;
-  }
-
   private duplicateKey(agentId: string, requestHash: string, now: number): string {
     return `${KEY_PREFIX}dup:${agentId}:${requestHash}:${bucket(now, DUPLICATE_REQUEST_WINDOW_MS)}`;
   }
@@ -339,13 +324,6 @@ function readCount(replies: Array<[Error | null, unknown]>, index: number): numb
   const [error, value] = replies[index];
   if (error) throw error;
   return Number(value);
-}
-
-/** Same as {@link readCount}, but as a `bigint` — for the money accumulator. */
-function readBigInt(replies: Array<[Error | null, unknown]>, index: number): bigint {
-  const [error, value] = replies[index];
-  if (error) throw error;
-  return BigInt(value as string | number);
 }
 
 function describe(error: unknown): string {

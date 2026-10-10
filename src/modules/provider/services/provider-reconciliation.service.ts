@@ -5,6 +5,7 @@ import { ConfigService } from '@nestjs/config';
 
 import {
   AWAITING_REDEMPTION_SQL,
+  CREDITED_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderPayoutRepository } from '@database/postgres/repositories/provider-payout.repository';
@@ -280,16 +281,21 @@ export class ProviderReconciliationService {
       .addSelect('intent.decimals', 'decimals')
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
       .addSelect('COUNT(*)', 'calls')
+      // Money only for committed holds (`CREDITED_SQL`), the same rule as
+      // `ProviderEarningsService`, so gross / take / net match `PROVIDER_CREDIT`.
       .addSelect(
-        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus THEN intent.priceAmount ELSE 0 END), 0)`,
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND ${CREDITED_SQL} ` +
+          `THEN intent.priceAmount ELSE 0 END), 0)`,
         'credited',
       )
       .addSelect(
-        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus THEN intent.providerAmount ELSE 0 END), 0)`,
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND ${CREDITED_SQL} ` +
+          `THEN intent.providerAmount ELSE 0 END), 0)`,
         'providerAmount',
       )
       .addSelect(
-        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus THEN intent.platformFee ELSE 0 END), 0)`,
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND ${CREDITED_SQL} ` +
+          `THEN intent.platformFee ELSE 0 END), 0)`,
         'platformFee',
       )
       .where('intent.organizationId IS NOT NULL')

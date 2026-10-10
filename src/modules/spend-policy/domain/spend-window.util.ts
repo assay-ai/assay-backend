@@ -1,5 +1,5 @@
 /**
- * UTC calendar boundaries for the daily and monthly caps.
+ * UTC calendar boundaries for the hourly spend ceiling and the daily and monthly caps.
  *
  * Same rule as `BindingCeilingService`'s `utcDayKey` and
  * `PaymentIntentRepository`'s `CREATED_AT_UTC_DAY`: a cap that reset on the
@@ -16,6 +16,12 @@
  * comparing to an instant, which is exactly the distinction that file draws
  * between `CREATED_AT` and `CREATED_AT_UTC_DAY`.
  */
+
+/** The top of `now`'s UTC hour — the window `max_spend_per_hour` is measured in. */
+export function utcHourStart(now: Date): Date {
+  const hourMs = 60 * 60_000;
+  return new Date(Math.floor(now.getTime() / hourMs) * hourMs);
+}
 
 /** Midnight UTC on `now`'s calendar day. */
 export function utcDayStart(now: Date): Date {

@@ -19,7 +19,7 @@ import {
   SPEND_POLICY_DOLLAR_DEFAULTS,
   SPEND_POLICY_VELOCITY_DEFAULTS,
 } from '../constants/spend-policy-defaults.constants';
-import { utcNextDayStart, utcNextMonthStart } from '../domain/spend-window.util';
+import { utcHourStart, utcNextDayStart, utcNextMonthStart } from '../domain/spend-window.util';
 import { SpendUsageService } from './spend-usage.service';
 import { SpendPolicyVelocityService, VelocityViolationKind } from './spend-policy-velocity.service';
 
@@ -52,7 +52,8 @@ export interface AssertCallAllowedInput {
  *  2. tool on the allowlist?       → MCP_TOOL_NOT_ALLOWED        (not retryable)
  *  3. per-call ceiling?            → MCP_SPEND_LIMIT_EXCEEDED    (not retryable)
  *  3b. above requireApprovalAbove? → MCP_APPROVAL_REQUIRED       (not retryable)
- *  4. velocity (min/hr/spend/dup)  → MCP_VELOCITY_LIMIT_EXCEEDED (retryable)
+ *  4. velocity (min/hr/dup)        → MCP_VELOCITY_LIMIT_EXCEEDED (retryable)
+ *  4b. spend/hour                  → MCP_VELOCITY_LIMIT_EXCEEDED (retryable)
  *  5. daily / monthly cap?         → MCP_SPEND_LIMIT_EXCEEDED    (not retryable)
  *  6. (never blocks) 50/80/100% alert bands → `spend.threshold_crossed`
  * ```
@@ -81,6 +82,15 @@ export interface AssertCallAllowedInput {
  * per-call check is a comparison against a field already on `policy`, the
  * velocity check is Redis, the period caps are a `payment_intents` query.
  * Cheapest and most specific first.
+ *
+ * **Spend/hour is measured like the period caps, not like the attempt
+ * counters.** It is the same `payment_intents` read (open holds + `SETTLED`,
+ * `SPEND_COUNTING_STATUSES`) split at the top of the UTC hour, so a call that
+ * was refused, voided or refunded never counts toward it — the attempt
+ * counters in Redis cannot be told a call was later voided, and summing every
+ * attempt's price there locked agents out after a run of voided calls with
+ * nothing spent. It is still reported as a velocity violation (`retryable`,
+ * `retryAfter` = the end of the hour), which is what it has always been.
  *
  * **Alert bands last, and never blocking.** *"An alert never blocks a
  * call."* They can only be evaluated once the call is known to be allowed —
@@ -213,14 +223,10 @@ export class SpendPolicyEnforcementService {
       }
     }
 
-    // 4. Velocity — calls/minute, calls/hour, spend/hour, duplicate-hash.
-    const violation = await this.velocity.consume(agentId, requestHash, price, {
+    // 4. Velocity — calls/minute, calls/hour, duplicate-hash (attempts).
+    const violation = await this.velocity.consume(agentId, requestHash, {
       maxCallsPerMinute: policy.maxCallsPerMinute,
       maxCallsPerHour: policy.maxCallsPerHour,
-      maxSpendPerHour:
-        sameAsset && policy.maxSpendPerHour !== null
-          ? MoneyUtil.of(policy.maxSpendPerHour, policy.assetId as AssetId, policy.decimals)
-          : null,
     });
 
     if (violation) {
@@ -233,10 +239,13 @@ export class SpendPolicyEnforcementService {
       });
     }
 
-    // 5. Daily / monthly cap.
+    // 4b + 5. Spend/hour and the daily / monthly cap — money held or settled.
     let spendToday: Money | null = null;
     let spendThisMonth: Money | null = null;
-    if (sameAsset && (policy.dailyCap !== null || policy.monthlyCap !== null)) {
+    if (
+      sameAsset &&
+      (policy.maxSpendPerHour !== null || policy.dailyCap !== null || policy.monthlyCap !== null)
+    ) {
       const usage = await this.usage.spendSoFar(
         organizationId,
         agentId,
@@ -245,6 +254,23 @@ export class SpendPolicyEnforcementService {
       );
       spendToday = usage.spendToday;
       spendThisMonth = usage.spendThisMonth;
+
+      if (policy.maxSpendPerHour !== null) {
+        const ceiling = MoneyUtil.of(
+          policy.maxSpendPerHour,
+          policy.assetId as AssetId,
+          policy.decimals,
+        );
+        if (MoneyUtil.greaterThan(MoneyUtil.add(usage.spendThisHour, price), ceiling)) {
+          const now = new Date();
+          throw McpErrors.velocityLimitExceeded({
+            reason: VelocityViolationKind.SPEND_PER_HOUR,
+            retryAfter: Math.ceil(
+              (utcHourStart(now).getTime() + 60 * 60_000 - now.getTime()) / 1_000,
+            ),
+          });
+        }
+      }
 
       if (policy.dailyCap !== null) {
         const cap = MoneyUtil.of(policy.dailyCap, policy.assetId as AssetId, policy.decimals);
