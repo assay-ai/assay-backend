@@ -192,12 +192,10 @@ async function run(phase: string): Promise<E6Result> {
 
     // ── 4. Finality credits the ledger ────────────────────────────────────
     const deadline = Date.now() + FINALITY_TIMEOUT_MS;
-    let promoted = 0;
     for (;;) {
       const summary = await finality.promotePendingDeposits(50);
       await ledger.flush();
       console.log(`  finality pass: ${json(summary)}`);
-      promoted += summary.confirmed;
       if (summary.rejected > 0) {
         return {
           outcome: 'FAILED',
@@ -206,7 +204,9 @@ async function run(phase: string): Promise<E6Result> {
           unproven: null,
         };
       }
-      if (promoted > 0 && summary.skipped === 0) break;
+      // Nothing left waiting: every candidate was confirmed, or there were none to begin with
+      // (a re-run after the deposit already reached finality).
+      if (summary.skipped === 0) break;
       if (Date.now() > deadline) {
         return {
           outcome: 'FAILED',
