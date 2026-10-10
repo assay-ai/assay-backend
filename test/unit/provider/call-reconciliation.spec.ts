@@ -37,6 +37,21 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
       expected: CallReconciliationClass.PAID_CREDITED,
     },
     {
+      name: 'PAID + SETTLED on rail B, voucher not yet redeemed → PAID_AWAITING_REDEMPTION',
+      input: { callClass: 'PAID', status: 'SETTLED', awaitingRedemption: true },
+      expected: CallReconciliationClass.PAID_AWAITING_REDEMPTION,
+    },
+    {
+      name: 'PAID + SETTLED on rail B, redeemed → PAID_CREDITED',
+      input: { callClass: 'PAID', status: 'SETTLED', awaitingRedemption: false },
+      expected: CallReconciliationClass.PAID_CREDITED,
+    },
+    {
+      name: 'an open hold on a VERIFYING intent is still PENDING',
+      input: { callClass: 'PAID', status: 'VERIFYING', awaitingRedemption: true },
+      expected: CallReconciliationClass.PENDING,
+    },
+    {
       name: 'PAID + REFUNDED → PAID_UNCREDITED (verification FAIL)',
       input: { callClass: 'PAID', status: 'REFUNDED' },
       expected: CallReconciliationClass.PAID_UNCREDITED,
@@ -134,7 +149,7 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
     );
   });
 
-  it('is total: every declared class is reachable, and CALL_RECONCILIATION_CLASSES lists all nine', () => {
+  it('is total: every declared class is reachable, and CALL_RECONCILIATION_CLASSES lists all ten', () => {
     const reached = new Set(CASES.map((c) => c.expected));
     for (const member of Object.values(CallReconciliationClass)) {
       expect(reached.has(member)).toBe(true);

@@ -26,6 +26,7 @@ interface GroupRow {
   credited: string;
   providerAmount: string;
   platformFee: string;
+  awaitingRedemption?: boolean;
 }
 
 interface BatchRow {
@@ -106,16 +107,17 @@ describe('ProviderReconciliationService — scoping', () => {
 });
 
 describe('ProviderReconciliationService — every class present, exhaustive by construction', () => {
-  it('lists all nine classes at a real zero for an empty window', async () => {
+  it('lists all ten classes at a real zero for an empty window', async () => {
     const { service } = build([]);
 
     const result = await service.getReconciliation(PROVIDER, WINDOW);
 
-    expect(result.classBreakdown).toHaveLength(9);
+    expect(result.classBreakdown).toHaveLength(10);
     const classes = result.classBreakdown.map((r) => r.class).sort();
     expect(classes).toEqual(
       [
         CallReconciliationClass.PAID_CREDITED,
+        CallReconciliationClass.PAID_AWAITING_REDEMPTION,
         CallReconciliationClass.PAID_UNCREDITED,
         CallReconciliationClass.FREE,
         CallReconciliationClass.TEST,
@@ -225,6 +227,41 @@ describe('ProviderReconciliationService — classification agrees with the share
     expect(result.gross).toEqual({ amount: '2010', asset: USDC, decimals: 6 });
     expect(result.platformTake).toEqual({ amount: '201', asset: USDC, decimals: 6 });
     expect(result.net).toEqual({ amount: '1809', asset: USDC, decimals: 6 });
+  });
+});
+
+describe('ProviderReconciliationService — rail B awaiting redemption', () => {
+  it('counts a settled, unredeemed group apart and keeps it out of gross, take and net', async () => {
+    const rows: GroupRow[] = [
+      group({
+        callClass: 'PAID',
+        status: 'SETTLED',
+        calls: '3',
+        credited: '3000',
+        providerAmount: '2700',
+        platformFee: '300',
+        awaitingRedemption: true,
+      }),
+      group({
+        callClass: 'PAID',
+        status: 'SETTLED',
+        calls: '1',
+        credited: '1000',
+        providerAmount: '900',
+        platformFee: '100',
+        awaitingRedemption: false,
+      }),
+    ];
+    const { service } = build(rows);
+
+    const result = await service.getReconciliation(PROVIDER, WINDOW);
+    const breakdown = result.classBreakdown;
+
+    expect(classOf(breakdown, CallReconciliationClass.PAID_AWAITING_REDEMPTION).calls).toBe(3);
+    expect(classOf(breakdown, CallReconciliationClass.PAID_CREDITED).calls).toBe(1);
+    expect(result.gross).toEqual({ amount: '1000', asset: USDC, decimals: 6 });
+    expect(result.net).toEqual({ amount: '900', asset: USDC, decimals: 6 });
+    expect(result.callCount).toBe(4);
   });
 });
 

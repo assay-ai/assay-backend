@@ -1,6 +1,9 @@
 import { Injectable } from '@nestjs/common';
 
-import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import {
+  AWAITING_REDEMPTION_SQL,
+  PaymentIntentRepository,
+} from '@database/postgres/repositories/payment-intent.repository';
 import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
 import { ApiErrors } from '@shared/api';
@@ -73,6 +76,9 @@ export class ProviderEarningsService {
 
     const groupExpr = query.groupBy === ProviderEarningsGroupBy.DAY ? DAY_EXPR : 'intent.toolId';
 
+    // Earned means credited: a rail-B call is credited when `redeem_voucher`
+    // lands, not when the verdict settles it (`AWAITING_REDEMPTION_SQL`), so the
+    // figure matches the earnings ledger and the per-call export.
     const qb = this.intents
       .createQueryBuilder('intent')
       .select(groupExpr, 'key')
@@ -80,11 +86,13 @@ export class ProviderEarningsService {
       .addSelect('intent.decimals', 'decimals')
       .addSelect('COUNT(*)', 'calls')
       .addSelect(
-        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus THEN intent.providerAmount ELSE 0 END), 0)`,
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND NOT ${AWAITING_REDEMPTION_SQL} ` +
+          `THEN intent.providerAmount ELSE 0 END), 0)`,
         'earned',
       )
       .addSelect(
-        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus THEN intent.platformFee ELSE 0 END), 0)`,
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND NOT ${AWAITING_REDEMPTION_SQL} ` +
+          `THEN intent.platformFee ELSE 0 END), 0)`,
         'platformFee',
       )
       .addSelect(

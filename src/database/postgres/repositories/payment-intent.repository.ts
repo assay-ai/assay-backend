@@ -101,6 +101,15 @@ const REFUNDED_STATUS = 'REFUNDED';
  * opaque string here, and the CHECK constraint in the migration is the real
  * authority.
  */
+/**
+ * A rail-B intent whose hold is still open. `resolve()` leaves it open on
+ * `SETTLED` and only `commitRedeemedHold` — after `redeem_voucher` lands —
+ * retires it and writes `PROVIDER_CREDIT`.
+ */
+export const AWAITING_REDEMPTION_SQL =
+  `(intent.rail = 'RAIL_B_VOUCHER' AND intent.hold_id IS NOT NULL ` +
+  `AND intent.hold_released_at IS NULL)`;
+
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
   readonly id: string;
@@ -117,6 +126,8 @@ export interface CallExportRow {
   readonly priceAmount: string;
   readonly providerAmount: string;
   readonly platformFee: string;
+  /** Rail B, hold still open: settled by the verdict, not yet redeemed on chain. */
+  readonly awaitingRedemption: boolean;
   readonly createdAt: Date;
 }
 
@@ -714,6 +725,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.priceAmount', 'priceAmount')
       .addSelect('intent.providerAmount', 'providerAmount')
       .addSelect('intent.platformFee', 'platformFee')
+      .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
       .addSelect('intent.createdAt', 'createdAt');
 
     if (after) {
@@ -742,12 +754,14 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         priceAmount: string;
         providerAmount: string;
         platformFee: string;
+        awaitingRedemption: boolean | string;
         createdAt: Date;
       }>();
 
     return rows.map((row) => ({
       ...row,
       decimals: Number(row.decimals),
+      awaitingRedemption: row.awaitingRedemption === true || row.awaitingRedemption === 'true',
     }));
   }
 
