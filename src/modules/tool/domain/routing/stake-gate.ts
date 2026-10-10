@@ -6,6 +6,7 @@ import { PricingMode } from '../../ports/tool.types';
 import {
   Ineligible,
   IneligibilityReason,
+  MinimumStakeByChain,
   MinimumStakeParameters,
   RoutingCandidate,
 } from './routing.types';
@@ -185,6 +186,39 @@ export function evaluateStakeGate(
   }
 
   return { passed: true, minimum };
+}
+
+/**
+ * The stake gate on one chain, against **that chain's** floor.
+ *
+ * The one place a floor is picked out of the per-chain map, shared by the
+ * router (`filterEligible`) and the publish gate (`BindingPublishService`). The
+ * publish gate used to be handed a single floor — the first enabled chain's —
+ * and compared every binding against it, so a Solana binding on a deployment
+ * listing an EVM chain first failed `STAKE_ASSET_MISMATCH` at publish while the
+ * router served it. Resolving the floor here, for both, is what keeps "may
+ * this go live" and "may this take this call" one answer.
+ *
+ * A chain with no floor is refused rather than defaulted: admitting it on some
+ * other chain's floor would compare a price against a number that was never
+ * about it. The detail says "configured", not "unknown", so a reader is not
+ * sent looking for an RPC outage.
+ */
+export function evaluateStakeGateOnChain(
+  candidate: RoutingCandidate,
+  chainId: ChainId,
+  minimumStakeByChain: MinimumStakeByChain,
+): StakeGateVerdict {
+  const parameters = minimumStakeByChain.get(chainId);
+  if (!parameters) {
+    return {
+      passed: false,
+      reason: IneligibilityReason.STAKE_UNKNOWN,
+      detail: `no minimum stake is configured for ${chainId}`,
+    };
+  }
+
+  return evaluateStakeGate(candidate, chainId, parameters);
 }
 
 /** The gate's verdict as an {@link Ineligible}, for the rejection list. */

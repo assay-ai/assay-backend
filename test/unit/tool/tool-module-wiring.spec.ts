@@ -26,6 +26,7 @@ import { ProviderChainEnrolmentRepository } from '@database/postgres/repositorie
 import { ALERT_PORT } from '@shared/alerting';
 import { ProviderStakeGraceRepository } from '@database/postgres/repositories/provider-stake-grace.repository';
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
@@ -77,6 +78,8 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 @Module({
   providers: [
     { provide: ToolBindingRepository, useValue: { findByTool: async () => [] } },
+    // `DatabaseToolCatalogue` reads published revisions from `binding_versions`.
+    { provide: BindingVersionRepository, useValue: { find: async () => [] } },
     // `ChainsModule` imports `EvmModule`, whose `EvmGasGrantService`
     // writes the gas-grant ledger. Another `@Global` `PostgresModule` repository,
     // stubbed on the same terms as the four above.
@@ -122,6 +125,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
   ],
   exports: [
     ToolBindingRepository,
+    BindingVersionRepository,
     EvmGasGrantRepository,
     ProviderRepository,
     ProviderStakeGraceRepository,

@@ -183,7 +183,7 @@ describe('BindingPublishService — the chain the payout gate is asked about', (
       runs,
       stakes,
       registry,
-      stakeParameters(input.assetId),
+      new Map([[chainIdOf(input.assetId), stakeParameters(input.assetId)]]),
       {} as unknown as DataSource,
     );
 
@@ -302,7 +302,7 @@ describe('BindingPublishService — the chain the payout gate is asked about', (
       runs,
       stakes,
       registry,
-      stakeParameters(MAINNET_ASSET),
+      new Map([[MAINNET, stakeParameters(MAINNET_ASSET)]]),
       {} as unknown as DataSource,
     );
 
@@ -350,7 +350,7 @@ describe('BindingPublishService — the chain the payout gate is asked about', (
       {
         findRoutingStates: jest.fn().mockResolvedValue(new Map()),
       } as unknown as ProviderRegistryPort,
-      stakeParameters(MAINNET_ASSET),
+      new Map([[MAINNET, stakeParameters(MAINNET_ASSET)]]),
       {} as unknown as DataSource,
     );
 

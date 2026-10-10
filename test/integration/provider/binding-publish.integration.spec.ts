@@ -329,12 +329,14 @@ describe('binding editor → mapping tester → publish gate', () => {
       check.requirements.find((r) => r.requirement === PublishRequirement.TESTER_RUN)?.code,
     ).toBe('tester_never_run');
 
-    // Traffic is still served by revision 1 in the meantime — the live row did
-    // not move.
+    // Traffic is still served by revision 1 in the meantime: the catalogue
+    // serves the published snapshot, not the draft on the row. (This used to
+    // assert `version` 2 — the untested draft — under the same comment.)
     const routable = await context.catalogue.findBindings(TOOL.id);
     const mine = routable.find((entry) => entry.providerId === context.organizationId);
     expect(mine?.status).toBe(BindingStatus.ACTIVE);
-    expect(mine?.version).toBe(2);
+    expect(mine?.version).toBe(1);
+    expect(JSON.stringify(mine?.responseMapping)).not.toContain('$.data.other');
 
     // Re-testing the new revision reopens the gate. The endpoint has no
     // `$.data.other`, so this run is red — and the gate says so for the right

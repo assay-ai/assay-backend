@@ -7,11 +7,11 @@ import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.enti
 import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { PayoutGateVerdict, evaluatePayoutGate } from '@modules/tool/domain/routing/payout-gate';
-import { StakeGateVerdict, evaluateStakeGate } from '@modules/tool/domain/routing/stake-gate';
 import {
-  MinimumStakeParameters,
-  RoutingCandidate,
-} from '@modules/tool/domain/routing/routing.types';
+  StakeGateVerdict,
+  evaluateStakeGateOnChain,
+} from '@modules/tool/domain/routing/stake-gate';
+import { MinimumStakeByChain, RoutingCandidate } from '@modules/tool/domain/routing/routing.types';
 import { BindingStatus } from '@modules/tool/ports/tool.types';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
 
@@ -33,7 +33,7 @@ import {
 } from '../ports/provider-stake.port';
 import { ProviderStatus, ProviderTier } from '../ports/provider.types';
 import { BindingEditorService, toSavedDto } from './binding-editor.service';
-import { PROVIDER_MINIMUM_STAKE_PARAMETERS } from './provider-stake.service';
+import { PROVIDER_MINIMUM_STAKE_BY_CHAIN } from './provider-stake.service';
 
 /**
  * The publish gate. *"An open door still has a step."*
@@ -57,8 +57,10 @@ import { PROVIDER_MINIMUM_STAKE_PARAMETERS } from './provider-stake.service';
  *
  * ## Publishing is two writes and they are one transaction
  *
- * The row moves to `ACTIVE` with `published_version = mapping_version`, and the
- * matching `binding_versions` snapshot is stamped `published_at`/`published_by`.
+ * The row moves to `ACTIVE` (a `PAUSED` row stays paused) with
+ * `published_version = mapping_version`, and the matching `binding_versions`
+ * snapshot is stamped `published_at`/`published_by`. The router serves the
+ * published snapshot, not the row's draft fields — see `toServedToolBindings`.
  * Either both happen or neither: a live binding whose revision has no
  * publication record is a call nobody can later prove the terms of, which is
  * the whole reason the snapshot table exists.
@@ -72,7 +74,11 @@ export class BindingPublishService {
     private readonly runs: BindingTestRunRepository,
     @Inject(PROVIDER_STAKE_SOURCE) private readonly stakes: ProviderStakePort,
     @Inject(PROVIDER_REGISTRY) private readonly registry: ProviderRegistryPort,
-    @Inject(PROVIDER_MINIMUM_STAKE_PARAMETERS) private readonly parameters: MinimumStakeParameters,
+    // Per chain, the same map `ROUTER_CONFIG` gates on. A single floor here
+    // was the first enabled chain's, which refused every binding settling on
+    // any other chain with `STAKE_ASSET_MISMATCH`.
+    @Inject(PROVIDER_MINIMUM_STAKE_BY_CHAIN)
+    private readonly minimumStakeByChain: MinimumStakeByChain,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
   ) {}
 
@@ -95,7 +101,12 @@ export class BindingPublishService {
   ): Promise<PublishedToolBindingDto> {
     const row = await this.editor.loadEditable(organizationId, bindingId);
 
-    if (row.status === BindingStatus.ACTIVE && row.publishedVersion === row.mappingVersion) {
+    // `PAUSED` too: publishing does not resume (see below), so republishing the
+    // revision a paused binding already holds would change nothing.
+    if (
+      (row.status === BindingStatus.ACTIVE || row.status === BindingStatus.PAUSED) &&
+      row.publishedVersion === row.mappingVersion
+    ) {
       throw ProviderErrors.bindingAlreadyPublished({
         bindingId,
         mappingVersion: row.mappingVersion,
@@ -117,7 +128,15 @@ export class BindingPublishService {
 
     const publishedAt = new Date();
     const saved = await this.dataSource.transaction(async (manager) => {
-      row.status = BindingStatus.ACTIVE;
+      // **Publishing is not resuming.** A `PAUSED` binding takes the new
+      // revision and stays paused, with its `pause_reason`/`paused_at` intact,
+      // until its provider resumes it — the pause is their hand on their
+      // traffic, and a publish is a statement about terms, not about traffic.
+      // Setting `ACTIVE` here while the pause fields stood was a 500 from
+      // `chk_tool_bindings_pause_attributed`.
+      if (row.status !== BindingStatus.PAUSED) {
+        row.status = BindingStatus.ACTIVE;
+      }
       row.publishedVersion = row.mappingVersion;
       row.publishedAt = publishedAt;
 
@@ -185,7 +204,10 @@ export class BindingPublishService {
       // `test/unit/provider/binding-publish-chain.spec.ts`: hardcoding a chain
       // here passed the entire unit tree before that file existed.
       payoutByChain.set(chainId, evaluatePayoutGate(candidate, chainId));
-      stakeByChain.set(chainId, evaluateStakeGate(candidate, chainId, this.parameters));
+      stakeByChain.set(
+        chainId,
+        evaluateStakeGateOnChain(candidate, chainId, this.minimumStakeByChain),
+      );
     }
 
     return evaluatePublishGate({
