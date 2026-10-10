@@ -1,4 +1,5 @@
 import { ApiProperty } from '@nestjs/swagger';
+import { IsUUID } from 'class-validator';
 
 import { ProviderVerificationDto } from './provider-shared.dto';
 
@@ -18,4 +19,10 @@ export class GetProviderVerificationResponseDto {
 
   @ApiProperty({ type: ProviderVerificationDto })
   verification: ProviderVerificationDto;
+}
+
+export class GetProviderVerificationParamsDto {
+  @ApiProperty({ description: 'The provider id — same value as the provider organization id.' })
+  @IsUUID()
+  providerId: string;
 }

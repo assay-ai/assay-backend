@@ -10,7 +10,10 @@ import {
   DeclareEndpointBodyDto,
 } from '../dto/check-connectivity.dto';
 import { GetEgressIpsResponseDto } from '../dto/get-egress-ips.dto';
-import { GetProviderVerificationResponseDto } from '../dto/get-provider-verification.dto';
+import {
+  GetProviderVerificationParamsDto,
+  GetProviderVerificationResponseDto,
+} from '../dto/get-provider-verification.dto';
 import { ProviderConnectivityService } from '../services/provider-connectivity.service';
 import { ProviderVerificationService } from '../services/provider-verification.service';
 
@@ -96,10 +99,11 @@ export class ProviderConnectivityController {
   })
   @ApiParam({ name: 'providerId', description: 'Same value as the provider organization id' })
   @ApiResponse({ status: 200, type: GetProviderVerificationResponseDto })
+  @ApiResponse({ status: 400, description: 'providerId is not a UUID' })
   @ApiResponse({ status: 404, description: 'No provider with this id' })
   async getVerification(
-    @Param('providerId') providerId: string,
+    @Param() params: GetProviderVerificationParamsDto,
   ): Promise<GetProviderVerificationResponseDto> {
-    return this.verification.getVerification(providerId);
+    return this.verification.getVerification(params.providerId);
   }
 }
