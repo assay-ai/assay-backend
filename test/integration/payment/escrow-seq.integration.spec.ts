@@ -1,12 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { AccountId } from '@modules/chains/ports/caip.types';
-import {
-  ESCROW_SEQ_ALERTS,
-  VOUCHER_MAX_IN_FLIGHT,
-} from '@modules/payment/constants/escrow-seq.constants';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
-import { AlertSeverity } from '@shared/alerting';
 
 import {
   EscrowSeqTestContext,
@@ -76,42 +71,21 @@ describe('EscrowSeqService against Postgres', () => {
       seq: '1',
       escrowPda: `escrow-${account.slice(-8)}`,
       escrowTokenAccount: `escrow-ata-${account.slice(-8)}`,
-      maxInFlight: VOUCHER_MAX_IN_FLIGHT,
-      inFlight: 0,
     });
   });
 
-  it('refuses at the 512th unsettled call and admits again once one settles', async () => {
+  it('admits a call however far the allocator is ahead of the oldest unsettled voucher', async () => {
+    // The program admits `seq > seq_high` and nothing else, so the old 512-call
+    // in-flight ceiling has nothing left to protect and must not refuse.
     await context.openEscrow(context.organizationId, account);
     await context.seedOpenIntent(context.organizationId, account, 1n);
     await context.setNextSeq(account, 513n);
-    await context.clearGapCache(account);
-
-    await expectErrorCodeAsync(
-      () => context.service.allocate(context.organizationId, account),
-      PaymentErrorCode.PAYMENT_TOO_MANY_IN_FLIGHT,
-    );
-
-    await context.settleIntent(account, 1n);
     await context.clearGapCache(account);
 
     await expect(context.service.allocate(context.organizationId, account)).resolves.toMatchObject({
       seq: '513',
     });
-  });
-
-  it('does not burn a sequence number on a refused call', async () => {
-    // The gate is checked before the allocation. Allocating and then refusing
-    // would walk `next_seq` forward on every 429, so a client retrying in a
-    // loop would widen the very gap that caused the refusal.
-    await context.openEscrow(context.organizationId, account);
-    await context.seedOpenIntent(context.organizationId, account, 1n);
-    await context.setNextSeq(account, 513n);
-    await context.clearGapCache(account);
-
-    await context.service.allocate(context.organizationId, account).catch(() => undefined);
-
-    expect(await context.readNextSeq(account)).toBe(513n);
+    expect(await context.readNextSeq(account)).toBe(514n);
   });
 
   it('an issued but unused sequence number does not wedge the window', async () => {
@@ -144,7 +118,7 @@ describe('EscrowSeqService against Postgres', () => {
       // matches both, advances both counters, and returns whichever row
       // Postgres produced first. The buyer would sign a voucher naming one
       // row's escrow PDA with a `seq` drawn from the other row's counter, and
-      // `realignTo` could never converge because it would fight itself across
+      // the chain-ahead raise could never converge because it would fight itself across
       // the two.
       await context.openEscrow(context.organizationId, account);
 
@@ -180,49 +154,24 @@ describe('EscrowSeqService against Postgres', () => {
     });
   });
 
-  it('counts an escrow the account shares with a second organization', async () => {
-    // The escrow PDA is derived from the pubkey alone, so a second tenant's
-    // in-flight voucher occupies the same on-chain window. Scoping the pending
-    // minimum by organization would under-report the gap and let the platform
-    // issue past the chain's `VoucherSeqJump` bound.
-    const otherOrganization = context.organizationId;
-    await context.openEscrow(otherOrganization, account);
-    await context.seedOpenIntent(otherOrganization, account, 1n);
-    await context.clearGapCache(account);
-
-    await context.reset();
-    await context.setNextSeq(account, 513n);
-    await context.clearGapCache(account);
-
-    await expectErrorCodeAsync(
-      () => context.service.allocate(otherOrganization, account),
-      PaymentErrorCode.PAYMENT_TOO_MANY_IN_FLIGHT,
-    );
-  });
-
-  describe('realigning to a chain that has moved past the allocator', () => {
-    it('raises next_seq past seq_high and pages a human once', async () => {
+  describe('raising the allocator past a chain that has moved ahead of it', () => {
+    it('allocates past seq_high when the chain is ahead', async () => {
       await context.openEscrow(context.organizationId, account);
 
-      const realigned = await context.service.realignTo(context.organizationId, account, 900n);
-
-      expect(realigned).toBe(true);
-      expect(await context.readNextSeq(account)).toBe(901n);
-      expect(context.alerts.emitted).toHaveLength(1);
-      expect(context.alerts.emitted[0]).toMatchObject({
-        name: ESCROW_SEQ_ALERTS.REALIGNED,
-        severity: AlertSeverity.WARN,
-        dedupeKey: account,
-      });
+      await expect(
+        context.service.allocate(context.organizationId, account, 900n),
+      ).resolves.toMatchObject({ seq: '901' });
+      expect(await context.readNextSeq(account)).toBe(902n);
     });
 
-    it('is a no-op, and silent, when the allocator is already ahead', async () => {
+    it('never rewinds the allocator when it is already ahead of the chain', async () => {
       await context.openEscrow(context.organizationId, account);
       await context.setNextSeq(account, 1_000n);
 
-      expect(await context.service.realignTo(context.organizationId, account, 900n)).toBe(false);
-      expect(await context.readNextSeq(account)).toBe(1_000n);
-      expect(context.alerts.emitted).toHaveLength(0);
+      await expect(
+        context.service.allocate(context.organizationId, account, 900n),
+      ).resolves.toMatchObject({ seq: '1000' });
+      expect(await context.readNextSeq(account)).toBe(1_001n);
     });
   });
 

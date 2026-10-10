@@ -22,7 +22,6 @@ import { BindingTrafficControls1757200000000 } from '@database/postgres/migratio
 import { NotificationsLimitsAndFreeTier1757500000000 } from '@database/postgres/migrations/1757500000000-notifications-limits-and-free-tier';
 import { SettledIntentsNamePayee1758100000000 } from '@database/postgres/migrations/1758100000000-settled-intents-name-payee';
 import { BuyerEscrowsAndVoucherSeq1759100000000 } from '@database/postgres/migrations/1759100000000-buyer-escrows-and-voucher-seq';
-import { VoucherRedemptionFields1759100000002 } from '@database/postgres/migrations/1759100000002-voucher-redemption-fields';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hold.repository';
@@ -53,6 +52,7 @@ import {
   ensureTestDatabase,
   testConnectionOptions,
   uuidFromLabel,
+  BuyerEscrowAccountColumnsSlice1759300000000,
 } from './test-database';
 
 loadEnv();
@@ -128,13 +128,6 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       CreateLedger1755100000000,
       CreatePaymentIntents1755200000000,
       AddVoucherNonce1755300000000,
-      // `payment_intents.voucher_signature` / `voucher_resource_hash` /
-      // `voucher_issued_at`. `PaymentIntentEntity` maps all three and TypeORM
-      // names every mapped column in its INSERT, so without this migration
-      // every write of an intent in this context dies with
-      // `column "voucher_signature" ... does not exist` — which names a column
-      // and not the missing migration.
-      VoucherRedemptionFields1759100000002,
       // This context used to run WITHOUT it, and the omission hid a
       // defect. `provider_id` and `provider_account` stayed `NOT NULL` here
       // while production had dropped both, so an intent with no payee could not
@@ -189,6 +182,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // that omits this migration fails on the column rather than on its
       // subject — which is exactly how it shipped: no context listed it.
       VoucherRedemptionFields1759100000002,
+      BuyerEscrowAccountColumnsSlice1759300000000,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',

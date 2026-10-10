@@ -133,6 +133,13 @@ describe('per-call export reconciles against the provider earnings ledger', () =
             PaymentIntentStatus.SETTLED,
             { reason: 'verification passed' },
           );
+          // Rail B: `resolve()` leaves the hold open on SETTLED and the provider is credited only
+          // once `redeem_voucher` lands, so the earnings ledger is read after the redemption.
+          await context.intents.commitRedeemedHold(
+            context.organizationId,
+            intent.id,
+            `redeem-${intent.id}`,
+          );
         } else if (step.refund) {
           await context.intents.resolve(
             context.organizationId,

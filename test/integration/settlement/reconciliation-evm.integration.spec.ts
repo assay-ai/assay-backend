@@ -2,7 +2,7 @@ import { pad, toHex } from 'viem';
 
 import { EvmVaultClient, EvmVaultService } from '@modules/chains/evm/evm-vault.service';
 import { createSanctionedEvmClient } from '@modules/chains/evm/sanctioned-evm-rpc';
-import { EvmDeployment } from '@modules/chains/evm/evm.constants';
+import { EvmDeployment, MULTICALL3_ADDRESS } from '@modules/chains/evm/evm.constants';
 import { buildNamespaceVaultPort } from '@modules/chains/multiplex/namespace-vault.port';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS, ChainId, toAccountId } from '@modules/chains/ports/caip.types';
@@ -93,10 +93,13 @@ function evmClient(): EvmVaultClient {
     },
   } as unknown as EgressHttpClient;
 
-  return createSanctionedEvmClient(
-    'https://rpc.testnet.chain.robinhood.example',
-    egress,
-  ) as unknown as EvmVaultClient;
+  return createSanctionedEvmClient('https://rpc.testnet.chain.robinhood.example', egress, {
+    id: 46630,
+    name: 'eip155:46630',
+    nativeCurrency: { name: 'Ether', symbol: 'ETH', decimals: 18 },
+    rpcUrls: { default: { http: [] } },
+    contracts: { multicall3: { address: MULTICALL3_ADDRESS } },
+  }) as unknown as EvmVaultClient;
 }
 
 /**

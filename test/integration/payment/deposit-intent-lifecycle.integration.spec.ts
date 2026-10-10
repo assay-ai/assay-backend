@@ -196,8 +196,11 @@ describe('Deposit intent lifecycle — real Postgres, real ledger, faked chain',
     await ctx.ledger.flush();
     expect(await ctx.pending(agent)).toBe(500_000n);
 
-    // A reorg dropped it — the re-check at `finalized` commitment now finds nothing.
-    (ctx.adapter.observeTransfer as jest.Mock).mockResolvedValueOnce(null);
+    // A reorg dropped it — the re-check finds nothing at `finalized` commitment, nor at the
+    // default one. `null` at `finalized` alone only means "not final yet" and stays queued.
+    (ctx.adapter.observeTransfer as jest.Mock)
+      .mockResolvedValueOnce(null)
+      .mockResolvedValueOnce(null);
 
     const report = await ctx.finality.promotePendingDeposits(50);
     expect(report.rejected).toBeGreaterThanOrEqual(1);

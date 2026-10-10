@@ -140,7 +140,7 @@ export async function createVoucherTestContext(): Promise<VoucherTestContext> {
 
   const escrows = new BuyerEscrowRepository(payment.dataSource);
   const alerts = new RecordingAlertPort();
-  const seqs = new EscrowSeqService(escrows, cache, alerts);
+  const seqs = new EscrowSeqService(escrows, cache);
   const vouchers = new VoucherService(payment.intents, registry, seqs);
 
   /** Stands in for the allocator behind `GET /escrow/next-seq`. */
