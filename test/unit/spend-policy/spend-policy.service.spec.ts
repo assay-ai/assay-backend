@@ -295,7 +295,7 @@ describe('SpendPolicyService.patch', () => {
     });
   });
 
-  it('defaults changedBy to the agent identity when the caller does not supply one', async () => {
+  it('records the session agent as changedBy', async () => {
     const { service, tx } = build({ findOneResults: [null, null] });
 
     await service.patch(ORG, AGENT, { assetId: USDC, decimals: DECIMALS });
@@ -303,7 +303,7 @@ describe('SpendPolicyService.patch', () => {
     expect(tx.insertValues?.changedBy).toBe(`agent:${AGENT}`);
   });
 
-  it('honours an explicit changedBy', async () => {
+  it('ignores a changedBy the caller supplies — the actor comes from the session', async () => {
     const { service, tx } = build({ findOneResults: [null, null] });
 
     await service.patch(ORG, AGENT, {
@@ -312,7 +312,7 @@ describe('SpendPolicyService.patch', () => {
       changedBy: 'operator@example.com',
     });
 
-    expect(tx.insertValues?.changedBy).toBe('operator@example.com');
+    expect(tx.insertValues?.changedBy).toBe(`agent:${AGENT}`);
   });
 
   it('raises SPEND_POLICY_CONCURRENT_MODIFICATION when the supersede loses the race', async () => {

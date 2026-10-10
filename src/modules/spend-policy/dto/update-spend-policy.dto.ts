@@ -123,12 +123,16 @@ export class UpdateSpendPolicyDto {
   changeReason?: string;
 
   /**
-   * Who made the change. Optional stand-in: this session type (`McpSession`)
-   * identifies an agent credential, not a human dashboard operator, and the
-   * platform has no separate human-actor session yet. Defaults
-   * to `agent:<agentId>` when omitted — see `SpendPolicyService.patch`.
+   * Ignored. Accepted so an older client that still sends it is not refused,
+   * but the audit trail's actor comes from the authenticated session
+   * (`agent:<agentId>`), never from the request body — a caller-chosen value
+   * would let anyone write any name into the policy history.
    */
-  @ApiPropertyOptional({ maxLength: 128 })
+  @ApiPropertyOptional({
+    maxLength: 128,
+    deprecated: true,
+    description: 'Ignored; set from the session.',
+  })
   @IsOptional()
   @IsString()
   @MaxLength(128)
