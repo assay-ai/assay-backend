@@ -499,15 +499,18 @@ export class DepositService {
     chainId: ChainId,
     asset: AssetId,
   ): Promise<RequirementDeps> {
+    // Resolved FIRST, so a chain this deployment does not enable is refused
+    // with `CHAIN_UNSUPPORTED` before anything touches it. `ESCROW_OPENER`
+    // dispatches on the namespace alone, so opening the escrow first would
+    // submit `open_escrow` to a disabled chain and only then refuse.
+    const adapter = this.registry.resolve(chainId);
     const escrow = await this.ensureEscrow(organizationId, account, asset);
     // Asked of the adapter, never branched on the namespace here — the whole
     // point of `ChainAdapter` is that this service does not know what a chain
     // is. On a chain with no fee-payer separation the read is SKIPPED rather
     // than attempted-and-tolerated: an unreachable facilitator must still be a
     // 502 on Solana, and a `try/catch` here would have swallowed that.
-    const feePayer = this.registry.resolve(chainId).requiresFeePayer
-      ? await this.facilitator.getFeePayer(chainId)
-      : null;
+    const feePayer = adapter.requiresFeePayer ? await this.facilitator.getFeePayer(chainId) : null;
     return { escrowTokenAccount: escrow.escrowTokenAccount, feePayer };
   }
 
