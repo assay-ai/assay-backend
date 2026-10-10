@@ -472,6 +472,15 @@ describe('McpToolCallService — the paid call loop', () => {
     expect(intent.rail).toBe(PaymentRail.RAIL_A_PER_CALL);
   });
 
+  it('keeps 10% by default, the take rate the provider terms state', async () => {
+    const { calls, intents } = harness({ 'binding-provider-a': () => Promise.resolve(ok()) });
+
+    await calls.call(SESSION, 'Search the web', ARGS);
+
+    expect(intents.only.platformFee.amount).toBe(usdc('0.005').amount);
+    expect(intents.only.providerAmount.amount).toBe(usdc('0.045').amount);
+  });
+
   // ── Outcomes that earn no charge ──────────────────────────────────────────
 
   /**
