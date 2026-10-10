@@ -461,22 +461,84 @@ const runE4: K3Step = async (c) => {
   };
 };
 
-const runE5: K3Step = async (c) =>
-  notRunWithoutDeployment(
-    c.id,
-    'no zero-ETH buyer has ever been funded on a chain. The gas grant and the relayer float ' +
-      'floor are both unit-proved against fakes only; this stays a MAINNET BLOCKER ' +
-      'until this step runs. Note also that nothing in the backend CALLS grantWithdrawGas — it ' +
-      'has no production caller at all.',
-  );
+/**
+ * Runs one of the live-deployment scripts and maps its single `<PREFIX>_RESULT {json}` line onto
+ * a criterion result. Anything else is FAILED with its tail, as for E2.
+ */
+function runLiveScript(
+  c: K3Criterion,
+  script: string,
+  args: readonly string[],
+  prefix: string,
+): K3Result {
+  const run = sh('yarn', ['-s', script, ...args], BACKEND_DIR);
+  const line = run.out.split('\n').find((l) => l.startsWith(`${prefix} `));
+  if (!line) {
+    return {
+      id: c.id,
+      outcome: K3Outcome.FAILED,
+      evidence: `yarn ${script} exited ${run.code} with no ${prefix} line; tail: ${run.out.slice(-600)}`,
+      unproven: null,
+    };
+  }
+  const result = JSON.parse(line.slice(prefix.length + 1)) as {
+    outcome: 'PASSED' | 'FAILED' | 'NOT_RUN';
+    evidence: string;
+    unproven: string | null;
+  };
+  const outcome =
+    result.outcome === 'PASSED' && run.code === 0
+      ? K3Outcome.PASSED
+      : result.outcome === 'NOT_RUN'
+        ? K3Outcome.NOT_RUN
+        : K3Outcome.FAILED;
+  return { id: c.id, outcome, evidence: result.evidence, unproven: result.unproven };
+}
 
-const runE6: K3Step = async (c) =>
-  notRunWithoutDeployment(
-    c.id,
-    'the reconciler has never read a live 46630 escrow. EvmVaultService and the VAULT_PORT ' +
-      'multiplexer are unit- and integration-tested against a stub RPC transport; nothing has ' +
-      'read a real deployed contract.',
-  );
+/**
+ * E5 on the live deployment: `yarn testnet:e5 auto`. The exit is held for an hour on chain, so
+ * one invocation either opens the request (NOT_RUN, with when it matures) or completes the
+ * zero-ETH withdraw through the platform's gas grant (PASSED or FAILED).
+ */
+const runE5: K3Step = async (c) => {
+  if (deploymentStatus(46630) !== 'deployed') {
+    return notRunWithoutDeployment(
+      c.id,
+      'no zero-ETH buyer has withdrawn on a deployed X402Escrow through the gas grant.',
+    );
+  }
+  if (!process.env.TESTNET_E5_BUYER_KEY || !process.env.TESTNET_E5_FUNDER_KEY) {
+    return {
+      id: c.id,
+      outcome: K3Outcome.NOT_RUN,
+      evidence: 'TESTNET_E5_BUYER_KEY / TESTNET_E5_FUNDER_KEY are not set',
+      unproven:
+        'no zero-ETH exit ran in this invocation. Source a buyer key that has never held ETH and ' +
+        'a funder key that can credit its escrow (both kept outside the repo), then re-run.',
+    };
+  }
+  return runLiveScript(c, 'testnet:e5', ['auto'], 'E5_RESULT');
+};
+
+/**
+ * E6 on the live deployment: `yarn testnet:e6 reconcile` — finality, then one reconciler pass
+ * against the live escrow, which must come back OK with no findings. The deposit that gives the
+ * ledger something to agree with is `yarn testnet:e6 deposit`, run beforehand.
+ */
+const runE6: K3Step = async (c) => {
+  if (deploymentStatus(46630) !== 'deployed') {
+    return notRunWithoutDeployment(c.id, 'the reconciler has never read a live 46630 escrow.');
+  }
+  if (!process.env.TESTNET_E6_BUYER_KEY || !process.env.TESTNET_E6_ORGANIZATION_ID) {
+    return {
+      id: c.id,
+      outcome: K3Outcome.NOT_RUN,
+      evidence: 'TESTNET_E6_BUYER_KEY / TESTNET_E6_ORGANIZATION_ID are not set',
+      unproven: 'the reconciler did not run against the live escrow in this invocation.',
+    };
+  }
+  return runLiveScript(c, 'testnet:e6', ['reconcile'], 'E6_RESULT');
+};
 
 /** `ENABLED_CHAINS` without `eip155:46630`. */
 const runE7: K3Step = async (c) => enabledChainsCriterion(c, 'eip155');
@@ -587,14 +649,16 @@ export const STEPS: Readonly<Record<string, K3Step>> = {
  */
 function printDevnetSuiteCoverage(): void {
   console.log('');
-  console.log("  Informational — the SOLANA devnet suite's own coverage (not one of the 12 criteria):");
+  console.log(
+    "  Informational — the SOLANA devnet suite's own coverage (not one of the 12 criteria):",
+  );
   console.log(
     '    3 of its 9 required bullets have no step. Deliberately report-only: S1 requires',
   );
   console.log(
     '    `devnet:acceptance` to pass UNCHANGED, so this does not fail the run. The gap is',
   );
-  console.log('    real. The three with no step are the devnet suite\'s bullets 3, 8 and 9 — and');
+  console.log("    real. The three with no step are the devnet suite's bullets 3, 8 and 9 — and");
   console.log('    9 ("upstream down, stake untouched") is one of the two most important.');
 }
 
