@@ -87,6 +87,16 @@ export class NotificationDeliverProcessor extends QueueProcessorBase<Notificatio
 
     await this.markOutcome(organizationId, deliveryId, result);
 
+    // A sender that could not deliver is what the publisher's `attempts: 3` +
+    // backoff is for. Returning normally here completed the job and the retry
+    // never ran; the row already reads FAILED with this attempt counted, and a
+    // later attempt that delivers overwrites it.
+    if (!result.delivered) {
+      throw new Error(
+        `Delivery ${deliveryId} via ${channel} failed: ${result.error ?? 'no reason given'}`,
+      );
+    }
+
     // Ordered after the delivery row is written, and guarded, because this is
     // the only place a *clock* starts from a delivery. An observer that
     // threw before `markOutcome` would leave the row unwritten and the job
