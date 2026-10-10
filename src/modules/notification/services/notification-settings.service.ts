@@ -46,7 +46,8 @@ export class NotificationSettingsService {
   /**
    * `IN_APP` is refused before this runs — see the controller. Upserts on
    * `(organizationId, channel)`: a destination is configured once per channel,
-   * never twice.
+   * never twice. A blank or `null` destination is refused: every non-`IN_APP`
+   * channel needs one, and `undefined` keeps the stored one.
    */
   async upsertChannel(
     organizationId: string,
@@ -58,8 +59,13 @@ export class NotificationSettingsService {
       (row) => row.channel === channel,
     );
 
+    const provided = destination === undefined ? undefined : (destination?.trim() ?? '');
+    if (provided === '' || (provided === undefined && !existing?.destination)) {
+      throw NotificationErrors.destinationRequired({ channel });
+    }
+
     if (existing) {
-      const nextDestination = destination === undefined ? existing.destination : destination;
+      const nextDestination = provided === undefined ? existing.destination : provided;
       // Changing the destination invalidates any prior verification —
       // `NotificationChannelEntity`'s own class comment: "`updated_at >
       // verified_at` is a re-verify."
@@ -86,12 +92,12 @@ export class NotificationSettingsService {
       id,
       organizationId,
       channel,
-      destination: destination ?? null,
+      destination: provided as string,
       enabled,
       verifiedAt: null,
     });
 
-    return { id, channel, destination: destination ?? null, enabled, verifiedAt: null, createdAt };
+    return { id, channel, destination: provided as string, enabled, verifiedAt: null, createdAt };
   }
 
   async listPreferences(organizationId: string): Promise<NotificationPreferenceDto[]> {
