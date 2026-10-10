@@ -163,6 +163,16 @@ export class FakeIntents {
 
   constructor(private readonly ledger: FakeLedger) {}
 
+  /** `PaymentIntentService.isVoucherSeqUsed` — the up-front replay read. */
+  async isVoucherSeqUsed(organizationId: string, account: string, seq: string): Promise<boolean> {
+    return [...this.rows.values()].some(
+      (row) =>
+        row.organizationId === organizationId &&
+        row.agentAccount === account &&
+        row.voucherSeq === seq,
+    );
+  }
+
   create(input: CreatePaymentIntentInput): Promise<PaymentIntent> {
     const id = `intent-${++this.sequence}`;
     const intent: PaymentIntent = {

@@ -42,7 +42,7 @@ import { buildFreeQuotaErrorContext } from '@modules/free-tier/services/free-quo
 import { FreeQuotaService } from '@modules/free-tier/services/free-quota.service';
 import { ToolCallRecordWriter } from '@modules/free-tier/services/tool-call-record-writer.service';
 import { SpendPolicyEnforcementService } from '@modules/spend-policy/services/spend-policy-enforcement.service';
-import { ToolErrors } from '@modules/tool/errors/tool.errors';
+import { ToolErrorCode, ToolErrors } from '@modules/tool/errors/tool.errors';
 import { PricingMode, Tool } from '@modules/tool/ports/tool.types';
 import { BindingCallCounterService } from '@modules/tool/services/binding-call-counter.service';
 import {
@@ -51,10 +51,12 @@ import {
   ToolQuote,
 } from '@modules/tool/services/provider-router.service';
 import { VerificationSettlementService } from '@modules/verification/services/verification-settlement.service';
+import { AppError } from '@shared/errors/app-errors';
 import { BaseError } from '@shared/errors/base.error';
 import { MoneyUtil } from '@utils/money.util';
 
 import {
+  MCP_ALL_PROVIDERS_FAILED_REASON,
   MCP_FORWARDED_REASON,
   MCP_FORWARDED_TO_VERIFICATION_REASON,
   MCP_SCHEMA_CONTRACT_VIOLATION_REASON,
@@ -689,15 +691,19 @@ export class McpToolCallService {
     callId: string,
   ): Promise<McpCallOutcome> {
     const startedAt = Date.now();
-    const routed = await this.router.route({
-      toolId: tool.id,
-      input: args,
-      callId,
-      // A FREE call collects nothing, so a standing withdrawal cannot leave the
-      // platform short on it: `withdrawingChains` is empty here on purpose, and
-      // this path deliberately does not read the escrow.
-      context: routingContextOf(session, this.enabledChains, []),
-    });
+    const routed = await this.router
+      .route({
+        toolId: tool.id,
+        input: args,
+        callId,
+        // A FREE call collects nothing, so a standing withdrawal cannot leave the
+        // platform short on it: `withdrawingChains` is empty here on purpose, and
+        // this path deliberately does not read the escrow.
+        context: routingContextOf(session, this.enabledChains, []),
+      })
+      .catch((error: unknown) => {
+        throw agentFacing(error, null);
+      });
     const latencyMs = Date.now() - startedAt;
 
     // Written for every classified attempt, `REQUEST_ERROR` included: the
@@ -753,6 +759,7 @@ export class McpToolCallService {
       // price: this call was not charged, and a receipt is the one document an
       // agent reads to find out what it paid.
       charged: MoneyUtil.of('0', quoted.asset, quoted.decimals),
+      held: MoneyUtil.of('0', quoted.asset, quoted.decimals),
       status: null,
       toolId: tool.id,
       providerId: routed.providerId,
@@ -825,12 +832,27 @@ export class McpToolCallService {
         },
       });
     } catch (error) {
-      // No provider outcome exists — nothing was routable, or everything
-      // routable failed. Either way the agent is charged nothing, and the void
-      // names no provider because none of them produced this.
-      await this.void(session, intent, { reason: MCP_UNROUTABLE_REASON });
+      // Everything routable was dialled and answered SYSTEM_ERROR. The agent
+      // is charged nothing, and the void records what happened — the class and
+      // the last binding and provider tried — rather than claiming the call
+      // never reached one. The agent gets the intent id to open the receipt.
+      const tried = lastAttemptOf(error);
+      if (tried) {
+        const voided = await this.void(session, intent, {
+          reason: MCP_ALL_PROVIDERS_FAILED_REASON,
+          providerId: tried.providerId,
+          bindingId: tried.bindingId,
+          classification: tried.responseClass,
+        });
+        throw agentFacing(error, voided.id);
+      }
 
-      throw error;
+      // No provider outcome exists — nothing was routable, or the deadline ran
+      // out before anything was dialled. The agent is charged nothing, and the
+      // void names no provider because none of them produced this.
+      const voided = await this.void(session, intent, { reason: MCP_UNROUTABLE_REASON });
+
+      throw agentFacing(error, voided.id);
     }
 
     const { classification } = routed;
@@ -876,18 +898,18 @@ export class McpToolCallService {
     }
 
     const resolved = await this.resolveDataResult(session, intent, routed, args);
+    const zero = MoneyUtil.zero(resolved.price.asset, resolved.price.decimals);
     const receipt: McpReceipt = {
       intentId: resolved.id,
-      // What the agent was **charged**, which on a voided intent is nothing.
-      // `resolved.price` is what the call was quoted at, and the two agree on
-      // every path except `voidUnpayable`'s, where the hold was released
-      // and no ledger entry names the agent. A receipt is the agent's record of
-      // a purchase; one that reports a price for a call it did not pay for is
-      // wrong in the way that matters most to the agent.
-      charged:
-        resolved.status === PaymentIntentStatus.VOIDED
-          ? MoneyUtil.zero(resolved.price.asset, resolved.price.decimals)
-          : resolved.price,
+      // What the agent was **charged**: the price only once the intent is
+      // SETTLED. Before the verdict (`VERIFYING`) the price is only held, and a
+      // DATA_FAIL refunds it; on `REFUNDED` and `VOIDED` it was released. A
+      // receipt is the agent's record of a purchase; one that reports a charge
+      // that has not happened, or never will, is wrong in the way that matters
+      // most to the agent.
+      charged: resolved.status === PaymentIntentStatus.SETTLED ? resolved.price : zero,
+      // What is reserved against the agent's balance pending the verdict.
+      held: isAwaitingVerdict(resolved.status) ? resolved.price : zero,
       status: resolved.status,
       toolId: tool.id,
       // Read back off the row rather than off `routed`, so the receipt cannot
@@ -1172,6 +1194,49 @@ export class McpToolCallService {
   }
 }
 
+/** What `ProviderRouterService` attaches to `TOOL_ALL_BINDINGS_FAILED`. */
+interface RouterLastAttempt {
+  readonly bindingId: string;
+  readonly providerId: string;
+  readonly responseClass: ResponseClass;
+}
+
+function isAllBindingsFailed(error: unknown): error is AppError<[Record<string, any>?]> {
+  return error instanceof AppError && error.errorCode === ToolErrorCode.TOOL_ALL_BINDINGS_FAILED;
+}
+
+function lastAttemptOf(error: unknown): RouterLastAttempt | null {
+  if (!isAllBindingsFailed(error)) return null;
+  const last = error.context?.lastAttempt as RouterLastAttempt | undefined;
+  return last ?? null;
+}
+
+/**
+ * The router's `TOOL_ALL_BINDINGS_FAILED` as the agent should see it: with the
+ * intent id, so it can open the receipt, and without `lastAttempt`. The MCP
+ * server spreads an error's context onto `x402/error`, and which binding was
+ * tried is routing detail the receipt deliberately leaves out (see
+ * `McpReceipt.providerId`). Any other error passes through untouched.
+ */
+function agentFacing(error: unknown, intentId: string | null): unknown {
+  if (!isAllBindingsFailed(error)) return error;
+  const context: Record<string, unknown> = { ...error.context };
+  delete context.lastAttempt;
+  return ToolErrors.allBindingsFailed({
+    ...context,
+    ...(intentId ? { intentId } : {}),
+  });
+}
+
+/** The price is reserved, not charged or released yet. */
+function isAwaitingVerdict(status: PaymentIntentStatus): boolean {
+  return (
+    status === PaymentIntentStatus.FUNDS_SECURED ||
+    status === PaymentIntentStatus.PROVIDER_EXECUTING ||
+    status === PaymentIntentStatus.VERIFYING
+  );
+}
+
 // ---------------------------------------------------------------------------
 // Types
 // ---------------------------------------------------------------------------
@@ -1304,7 +1369,14 @@ export interface McpReceipt {
    * than no type. Every consumer must handle the free case.
    */
   readonly intentId: string | null;
+  /** The price once the intent is `SETTLED`; zero before the verdict and when refunded or voided. */
   readonly charged: Money;
+  /**
+   * The price while it is reserved and the verdict is still out (`VERIFYING`);
+   * zero once it is charged or released. `charged + held` is never more than
+   * the price.
+   */
+  readonly held: Money;
   /**
    * `VERIFYING` for the common case — a `DATA_RESULT` that passed the tool's
    * `outputSchema` has been handed to the asynchronous verification worker

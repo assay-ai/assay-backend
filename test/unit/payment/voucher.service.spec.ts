@@ -204,9 +204,26 @@ describe('VoucherService', () => {
 
       await expectRejectedWith(
         harness.service.redeem(input),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH,
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
       );
       expect(harness.intents.created).toHaveLength(1);
+    });
+
+    // E2E (EVM run, E3): the replay used to pass the issued-seq check and be
+    // refused only by the unique index, as "sequence 3 was not issued to this
+    // account" — the opposite of what happened. It is refused up front now,
+    // before the insert, and the message says the seq was already used.
+    it('refuses a replay up front as already used, with a message that says so', async () => {
+      const { input } = harness.voucherFor();
+      await harness.service.redeem(input);
+      const attemptedInserts = harness.intents.createAttempts;
+
+      const replay = harness.service.redeem(input);
+      await expectRejectedWith(replay, PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED);
+      await expect(harness.service.redeem(input)).rejects.toThrow(
+        `Voucher sequence ${input.signed.voucher.seq} was already used`,
+      );
+      expect(harness.intents.createAttempts).toBe(attemptedInserts);
     });
 
     it('records the seq on the intent — the durable index refuses the replay on its own', async () => {
@@ -215,7 +232,7 @@ describe('VoucherService', () => {
 
       await expectRejectedWith(
         harness.service.redeem(input),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH,
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
       );
       expect(harness.intents.created[0].voucherSeq).toBe(input.signed.voucher.seq);
     });
@@ -347,7 +364,7 @@ describe('VoucherService', () => {
       expect(outcomes).toEqual(['fulfilled', 'rejected']);
 
       const loser = (first.status === 'rejected' ? first : second) as PromiseRejectedResult;
-      expect(loser.reason.errorCode).toBe(PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH);
+      expect(loser.reason.errorCode).toBe(PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED);
 
       // The half that matters: one intent, one hold, one charge.
       expect(harness.intents.created).toHaveLength(1);
@@ -621,7 +638,7 @@ describe('VoucherService', () => {
       expect(harness.intents.created).toHaveLength(1);
       await expectRejectedWith(
         harness.service.redeem(input),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH,
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
       );
     });
   });

@@ -17,8 +17,8 @@
  *    `intentId` (BullMQ redelivers at least once) is caught as a no-op before
  *    any counter moves.
  * 2. `uq_sla_windows_open` — two workers racing to open the first window for
- *    a binding both attempt the insert; the loser reads the winner's row
- *    instead of failing.
+ *    a (binding, asset) both attempt the insert; the loser reads the winner's
+ *    row instead of failing.
  * 3. `uq_sla_strikes_window` — the backstop under `closeIfOpen`'s
  *    compare-and-swap, in case two passes ever raced past it anyway.
  */
@@ -207,7 +207,12 @@ export class SlaWindowService implements SlaWindowPoster {
     toolId: string,
     assetId: string,
   ): Promise<SlaWindowEntity> {
-    const existing = await this.windows.findOpenForBinding(organizationId, bindingId);
+    // Per (binding, asset): a binding that changed its settlement asset keeps
+    // the old asset's window open (the sweep closes it on age) and opens a new
+    // one, so totals and any penalty stay in one currency. Closing the old one
+    // on the switch instead would let a provider reset a failing sample by
+    // flipping assets.
+    const existing = await this.windows.findOpenForBinding(organizationId, bindingId, assetId);
     if (existing) {
       return existing;
     }
@@ -276,7 +281,7 @@ export class SlaWindowService implements SlaWindowPoster {
       this.logger.debug(
         `Lost the race to open an SLA window for binding ${bindingId}; reading the winner's row.`,
       );
-      const raced = await this.windows.findOpenForBinding(organizationId, bindingId);
+      const raced = await this.windows.findOpenForBinding(organizationId, bindingId, assetId);
       if (!raced) {
         // The unique violation says a row exists; if it is gone by the time we
         // re-read, something outside this class's control removed it.

@@ -211,11 +211,11 @@ export class ProviderRouterService {
       // needed: reserving is a network round trip and the budget can run out
       // inside it.
       if (deadline - Date.now() <= 0) {
-        throw ToolErrors.allBindingsFailed({
-          toolId: request.toolId,
-          attempts: attempts.length,
-          detail: `total deadline of ${this.config.totalDeadlineMs}ms spent`,
-        });
+        throw allBindingsFailed(
+          request.toolId,
+          attempts,
+          `total deadline of ${this.config.totalDeadlineMs}ms spent`,
+        );
       }
 
       const {
@@ -237,11 +237,11 @@ export class ProviderRouterService {
           throw unroutable(request.toolId, rejected, routing);
         }
 
-        throw ToolErrors.allBindingsFailed({
-          toolId: request.toolId,
-          attempts: attempts.length,
-          detail: 'failover exhausted every remaining provider',
-        });
+        throw allBindingsFailed(
+          request.toolId,
+          attempts,
+          'failover exhausted every remaining provider',
+        );
       }
 
       const binding = selection.candidate.binding;
@@ -251,11 +251,11 @@ export class ProviderRouterService {
       settlementChain = settlementChainOf.get(binding.id);
       const remainingMs = deadline - Date.now();
       if (remainingMs <= 0) {
-        throw ToolErrors.allBindingsFailed({
-          toolId: request.toolId,
-          attempts: attempts.length,
-          detail: `total deadline of ${this.config.totalDeadlineMs}ms spent`,
-        });
+        throw allBindingsFailed(
+          request.toolId,
+          attempts,
+          `total deadline of ${this.config.totalDeadlineMs}ms spent`,
+        );
       }
 
       // The attempt never gets more than what is left of the request's total
@@ -316,11 +316,11 @@ export class ProviderRouterService {
       excluded.add(binding.providerId);
     }
 
-    throw ToolErrors.allBindingsFailed({
-      toolId: request.toolId,
-      attempts: attempts.length,
-      detail: `attempt cap of ${this.config.maxAttempts} reached`,
-    });
+    throw allBindingsFailed(
+      request.toolId,
+      attempts,
+      `attempt cap of ${this.config.maxAttempts} reached`,
+    );
   }
 
   /**
@@ -848,6 +848,32 @@ export interface ToolCallRequest {
 }
 
 /** One binding attempt, kept for the receipt and for the alert. */
+/**
+ * `TOOL_ALL_BINDINGS_FAILED`, carrying the last classified attempt.
+ *
+ * Every attempt behind this error was dialled and answered `SYSTEM_ERROR`, so
+ * the caller is not looking at a call that "never reached" a provider: it can
+ * void the intent with that class and name what was tried. `lastAttempt` is
+ * `undefined` when the deadline ran out before anything was dialled. It is the
+ * caller's to read and strip — the binding id is routing detail, not something
+ * the agent-facing error carries.
+ */
+function allBindingsFailed(toolId: string, attempts: readonly RoutingAttempt[], detail: string) {
+  const last = attempts[attempts.length - 1];
+  return ToolErrors.allBindingsFailed({
+    toolId,
+    attempts: attempts.length,
+    detail,
+    lastAttempt: last
+      ? {
+          bindingId: last.bindingId,
+          providerId: last.providerId,
+          responseClass: last.classification.responseClass,
+        }
+      : undefined,
+  });
+}
+
 export interface RoutingAttempt {
   readonly bindingId: string;
   readonly providerId: string;

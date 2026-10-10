@@ -139,9 +139,9 @@ export class FakeEscrowSeqService {
  * `create` reproduces the one behaviour that matters here:
  * `uq_payment_intents_account_voucher_seq` refuses a second intent for an
  * `(account, seq)` pair already recorded, and raises
- * `PAYMENT_VOUCHER_SEQ_MISMATCH` when it does — exactly what
+ * `PAYMENT_VOUCHER_SEQ_ALREADY_USED` when it does — exactly what
  * `PaymentIntentService.create`'s own unique-violation branch does for the
- * real index.
+ * real index. `isVoucherSeqUsed` is the up-front read of the same rows.
  */
 export class InMemoryIntentWriter {
   readonly created: PaymentIntent[] = [];
@@ -152,7 +152,19 @@ export class InMemoryIntentWriter {
   /** Set by a test that wants `secureFunds` to fail. */
   failSecureWith?: Error;
 
+  /** How many times `create` was reached, refused or not. */
+  createAttempts = 0;
+
+  async isVoucherSeqUsed(
+    _organizationId: string,
+    account: AccountId,
+    seq: string,
+  ): Promise<boolean> {
+    return this.seqKeys.has(`${account}#${seq}`);
+  }
+
   async create(input: CreatePaymentIntentInput): Promise<PaymentIntent> {
+    this.createAttempts += 1;
     if (this.failInsertWith) {
       throw this.failInsertWith;
     }
@@ -162,7 +174,7 @@ export class InMemoryIntentWriter {
     // point two concurrent calls actually arbitrate at.
     const key = input.voucherSeq ? `${input.agentAccount}#${input.voucherSeq}` : null;
     if (key && this.seqKeys.has(key)) {
-      throw PaymentErrors.voucherSeqMismatch({
+      throw PaymentErrors.voucherSeqAlreadyUsed({
         account: input.agentAccount,
         actual: input.voucherSeq,
       });

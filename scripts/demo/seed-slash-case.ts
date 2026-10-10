@@ -298,7 +298,7 @@ async function main(): Promise<void> {
   // ── The five quiet windows ────────────────────────────────────────────────
 
   for (const [index, failures] of QUIET_WINDOW_FAILURES.entries()) {
-    const open = await windows.findOpenForBinding(organizationId, bindingId);
+    const open = await windows.findOpenForBinding(organizationId, bindingId, assetId);
     const alreadyFailed = open?.failedCalls ?? 0;
     const alreadyVerified = open?.verifiedCalls ?? 0;
     // The console seed leaves an open window with failing calls already in it.
@@ -352,7 +352,7 @@ async function main(): Promise<void> {
     calls: preEditCalls,
   });
 
-  const subject = await windows.findOpenForBinding(organizationId, bindingId);
+  const subject = await windows.findOpenForBinding(organizationId, bindingId, assetId);
   if (!subject) {
     throw new Error('The subject window closed early; nothing left to attribute an edit to.');
   }

@@ -209,13 +209,20 @@ export class ProviderReconciliationService {
           continue;
         }
 
-        const credited = BigInt(row.credited);
+        // A class row's `credited` is what reached the provider — net of the
+        // platform fee, so PAID_CREDITED's "settled to you" matches
+        // PROVIDER_CREDIT and the chain. The gross price only feeds `gross`.
+        // All three parsed before anything moves, so a corrupt group lands in
+        // `unexplained` whole rather than half-counted.
+        const priceAmount = BigInt(row.credited);
+        const providerAmount = BigInt(row.providerAmount);
+        const platformFee = BigInt(row.platformFee);
         bucket.calls += calls;
-        bucket.credited += credited;
+        bucket.credited += providerAmount;
 
-        grossAmount += credited;
-        netAmount += BigInt(row.providerAmount);
-        platformTakeAmount += BigInt(row.platformFee);
+        grossAmount += priceAmount;
+        netAmount += providerAmount;
+        platformTakeAmount += platformFee;
       } catch {
         // `classifyForReconciliation` is total (see its own doc comment) —
         // this branch should be unreachable — so a group that lands here is

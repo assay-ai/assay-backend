@@ -229,6 +229,14 @@ function receiptPayload(receipt: McpReceipt): Record<string, unknown> {
       // that they are the same number.
       display: displayPrice(receipt.charged),
     },
+    // Beside `charged`, not folded into it: before the verdict the price is
+    // reserved, and an agent reading "charged" for a call a DATA_FAIL refunds
+    // a second later would be reading something that never happened.
+    held: {
+      amount: receipt.held.amount,
+      asset: receipt.held.asset,
+      display: displayPrice(receipt.held),
+    },
     status: receipt.status,
     toolId: receipt.toolId,
     providerId: receipt.providerId,

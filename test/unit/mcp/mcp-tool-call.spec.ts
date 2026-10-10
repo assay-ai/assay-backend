@@ -1,9 +1,11 @@
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
+import { MCP_UNROUTABLE_REASON } from '@modules/mcp/constants/mcp.constants';
 import { ResponseClass } from '@modules/tool/domain/classification';
 import { PricingMode } from '@modules/tool/ports/tool.types';
 import { McpFailureCode } from '@modules/mcp/services/mcp-tool-call.service';
 import { PaymentIntentStatus, PaymentRail } from '@modules/payment/ports/payment.types';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
+import { AppError } from '@shared/errors/app-errors';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import {
@@ -63,7 +65,11 @@ describe('McpToolCallService — the paid call loop', () => {
     if (outcome.kind !== 'RESULT') return;
 
     expect(outcome.output).toEqual({ answer: 'forty-two' });
-    expect(outcome.receipt.charged.amount).toBe(usdc('0.05').amount);
+    // E2E (EVM run, E4): before the verdict the price is held, not charged —
+    // a DATA_FAIL refunds it a second later, and the agent must not be holding
+    // a receipt that says "charged" for that call.
+    expect(outcome.receipt.charged.amount).toBe('0');
+    expect(outcome.receipt.held.amount).toBe(usdc('0.05').amount);
     expect(outcome.receipt.classification).toBe(ResponseClass.DATA_RESULT);
     expect(outcome.receipt.providerId).toBe('provider-a');
     // Nobody has judged this call yet. The receipt says so.
@@ -428,33 +434,50 @@ describe('McpToolCallService — the paid call loop', () => {
   });
 
   /**
-   * Failover exhausted every provider, so the router threw and the intent is
-   * voided naming nobody — no provider, and therefore no binding.
+   * Failover exhausted every provider: the router threw, and the intent is
+   * voided. E2E (EVM run, E2): it used to be voided as "the call never reached
+   * one", with no classification and no binding, although every binding was
+   * dialled and answered SYSTEM_ERROR — and the agent's error carried no intent
+   * id to open the receipt with.
    *
-   * Both bindings *were* dialled, and neither is counted. That is the rule
-   * holding rather than an omission: the count is defined off the row, the row
-   * records who served, and nobody served this call. The error runs in the
-   * direction the counter is allowed to be wrong in — the bindings look newer
-   * than they are and keep exploration traffic they have not yet spent.
+   * The row now records what happened: SYSTEM_ERROR, and the last binding and
+   * provider tried. The counter follows the row, as on every other void path,
+   * so the one binding the row names is counted and the others are not.
    */
-  it('counts nothing when every binding failed and the intent names none', async () => {
-    const { calls, intents, bindingCalls } = buildMcpHarness({
+  it('voids as SYSTEM_ERROR naming the last binding tried, and hands the agent the intent id', async () => {
+    const invoker = new ScriptedInvoker({
+      'binding-provider-a': () => Promise.resolve(status(500)),
+      'binding-provider-b': () => Promise.resolve(status(500)),
+    });
+    const { calls, intents, bindingCalls, ledger } = buildMcpHarness({
       bindings: [buildBinding('provider-a'), buildBinding('provider-b')],
       providers: [buildProvider('provider-a'), buildProvider('provider-b')],
-      invoker: new ScriptedInvoker({
-        'binding-provider-a': () => Promise.resolve(status(500)),
-        'binding-provider-b': () => Promise.resolve(status(500)),
-      }),
+      invoker,
       random: () => 0,
     });
 
-    await expectErrorCodeAsync(
-      () => calls.call(SESSION, 'Search the web', ARGS),
-      'TOOL_ALL_BINDINGS_FAILED',
-    );
+    const error = await calls
+      .call(SESSION, 'Search the web', ARGS)
+      .then(() => null)
+      .catch((e: AppError) => e);
 
-    expect(intents.only.bindingId).toBeNull();
-    expect(bindingCalls.recorded).toEqual([]);
+    expect(error?.errorCode).toBe('TOOL_ALL_BINDINGS_FAILED');
+    expect(invoker.bindingIds).toHaveLength(2);
+    const last = invoker.invocations[invoker.invocations.length - 1].binding;
+
+    const intent = intents.only;
+    expect(intent.status).toBe(PaymentIntentStatus.VOIDED);
+    expect(intent.classification).toBe(ResponseClass.SYSTEM_ERROR);
+    expect(intent.bindingId).toBe(last.id);
+    expect(intent.providerId).toBe(last.providerId);
+    expect(intent.statusReason).not.toBe(MCP_UNROUTABLE_REASON);
+    expect(ledger.kinds).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
+    expect(bindingCalls.recorded).toEqual([last.id]);
+
+    // The agent can open the receipt; the binding stays the platform's.
+    expect(error?.context).toMatchObject({ intentId: intent.id });
+    expect(error?.context).not.toHaveProperty('lastAttempt');
+    expect(JSON.stringify(error?.context)).not.toContain(last.id);
   });
 
   it('charges the quoted price and splits the platform fee out of it', async () => {

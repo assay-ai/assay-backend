@@ -175,6 +175,14 @@ export const MCP_VOIDED_REASON = 'mcp: provider outcome was not a DATA_RESULT';
 export const MCP_UNROUTABLE_REASON = 'mcp: no provider outcome — the call never reached one';
 
 /**
+ * Written when failover exhausted every provider and each one dialled answered
+ * `SYSTEM_ERROR`. Its own reason rather than {@link MCP_UNROUTABLE_REASON}: the
+ * call did reach providers, and the row names the last one tried.
+ */
+export const MCP_ALL_PROVIDERS_FAILED_REASON =
+  'mcp: voided — every provider tried returned SYSTEM_ERROR';
+
+/**
  * Written on `PROVIDER_EXECUTING → VOIDED` when the call was served correctly
  * but by a provider the platform cannot pay.
  *

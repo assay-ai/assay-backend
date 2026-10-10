@@ -245,7 +245,7 @@ export async function seedSlaWindowCalls(
     // the id is reused for the rest of this run's calls, whether or not the
     // window is still open by the time they land.
     if (windowId === null) {
-      const open = await deps.windows.findOpenForBinding(organizationId, bindingId);
+      const open = await deps.windows.findOpenForBinding(organizationId, bindingId, assetId);
       if (open) {
         windowId = open.id;
       }
