@@ -54,6 +54,7 @@
     "testnet:e2-mcp": "ts-node -r tsconfig-paths/register scripts/testnet/e2-mcp-rail-b.ts",
     "testnet:e5": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/testnet/e5-zero-eth-withdraw.ts",
     "testnet:e6": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/testnet/e6-reconcile.ts",
+    "testnet:isolation": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/testnet/chain-isolation.ts",
     "devnet:deposit": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/devnet/deposit.ts",
     "devnet:init-config": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/devnet/initialize-config.ts",
     "devnet:create-vault": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/devnet/create-treasury-vault.ts",
