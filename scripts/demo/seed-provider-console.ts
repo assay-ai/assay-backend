@@ -832,14 +832,17 @@ async function seedOneCall(
     agentId: buyer.agentId,
     agentAccount: buyer.agentAccount,
     toolId: plan.binding.toolId,
-    rail: PaymentRail.RAIL_B_VOUCHER,
+    // Rail A: the demo buyers' Solana accounts are placeholders with no
+    // escrow behind them, and a rail-B hold only credits the provider once a
+    // voucher is redeemed on chain — which never happens here. Rail A commits
+    // at SETTLED, which is what the payout step below needs in the ledger.
+    rail: PaymentRail.RAIL_A_PER_CALL,
     callId,
     callClass: plan.callClass,
     price: MoneyUtil.of(price, ASSET, DECIMALS),
     platformFee: MoneyUtil.of(platformFee, ASSET, DECIMALS),
     requestHash: `sha256:${sha256(callId)}`,
     chainId: CHAIN,
-    voucherNonce: sha256(`nonce:${callId}`).slice(0, 32),
   });
 
   if (price === 0n) {
