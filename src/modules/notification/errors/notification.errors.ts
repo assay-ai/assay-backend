@@ -7,6 +7,7 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
 export enum NotificationErrorCode {
   NOTIFICATION_NONSUPPRESSIBLE_EVENT = 'NOTIFICATION_NONSUPPRESSIBLE_EVENT',
   NOTIFICATION_NOT_FOUND = 'NOTIFICATION_NOT_FOUND',
+  NOTIFICATION_DESTINATION_REQUIRED = 'NOTIFICATION_DESTINATION_REQUIRED',
 }
 
 export type NotificationErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -33,5 +34,17 @@ export const NotificationErrors = createDomainErrorFactory('NOTIFICATION', {
     statusCode: 404,
     message: (context?: Record<string, any>) =>
       `Notification not found${context?.id ? ` with id: ${context.id}` : ''}`,
+  },
+  /**
+   * Every non-`IN_APP` channel needs a destination
+   * (`chk_notification_channels_destination`), so a blank or `null` one is
+   * refused here instead of surfacing as a constraint violation. Turning a
+   * channel off is `enabled: false`, not a cleared destination.
+   */
+  destinationRequired: {
+    code: NotificationErrorCode.NOTIFICATION_DESTINATION_REQUIRED,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `${context?.channel ?? 'This channel'} needs a destination — to stop receiving it, disable the channel instead of clearing the destination`,
   },
 });
