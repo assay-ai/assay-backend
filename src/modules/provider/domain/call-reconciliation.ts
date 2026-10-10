@@ -177,6 +177,10 @@ function classifyTerminalError(classification: ResponseClassValue): CallReconcil
   // that reuses this function against an *unscoped* intent (no such caller
   // exists today) gets a value that is honestly a guess rather than one that
   // looks exactly like a real `SYSTEM_ERROR`.
+  //
+  // It is also where a `DATA_RESULT` the 24-hour hold backstop expired lands:
+  // the provider answered, the platform's worker never resolved the call, so
+  // it is our failure — no charge, no strike — which is what `SYSTEM_ERROR` says.
   return CallReconciliationClass.SYSTEM_ERROR;
 }
 
