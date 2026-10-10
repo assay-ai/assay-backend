@@ -1,4 +1,4 @@
-import { DynamicModule } from '@nestjs/common';
+import { DynamicModule, Module } from '@nestjs/common';
 import { BullBoardModule } from '@bull-board/nestjs';
 import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
 
@@ -23,7 +23,18 @@ import { BullMQAdapter } from '@bull-board/api/bullMQAdapter';
  *   // {feature}-api.module.ts
  *   imports: [FeatureModule, registerQueueOnBoard(MyQueue.X)]
  */
+@Module({})
+class QueueBoardDisabledModule {}
+
 export function registerQueueOnBoard(queueName: string): DynamicModule {
+  // The board root is mounted only when `BULLBOARD_ENABLED=true` (see
+  // `AppApiModule`). Without it `forFeature` cannot resolve
+  // `bull_board_instance` and the api process dies at boot, so a feature
+  // module that registers a queue must contribute nothing instead.
+  if (process.env.BULLBOARD_ENABLED !== 'true') {
+    return { module: QueueBoardDisabledModule };
+  }
+
   return BullBoardModule.forFeature({
     name: queueName,
     adapter: BullMQAdapter,
