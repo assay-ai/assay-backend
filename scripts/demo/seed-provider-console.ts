@@ -678,6 +678,10 @@ function fundableBuyers(): readonly Buyer[] {
   return DEMO_CREDENTIALS.filter(
     (credential) =>
       credential.fundable &&
+      // The seed's money is one Solana asset. Crediting it to an eip155
+      // account writes a ledger row for an asset that chain does not hold,
+      // and every balance read for that account then fails.
+      credential.agentAccount.startsWith(`${CHAIN}:`) &&
       credential.organizationId !== PROVIDER_ORG &&
       credential.organizationId !== UNREGISTERED_ORG,
   ).map((credential) => ({
