@@ -163,6 +163,36 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — allowlist', () => 
   });
 });
 
+describe('SpendPolicyEnforcementService.assertCallAllowed — approval threshold', () => {
+  it('3b. permits a call at the threshold and refuses one above it, before velocity', async () => {
+    const { service, velocity } = build({
+      findLive: jest
+        .fn()
+        .mockResolvedValue(policyRow({ perCallMax: null, requireApprovalAbove: '2000000' })),
+    });
+
+    await expect(service.assertCallAllowed(input({ price: money('2000000') }))).resolves.toBe(3);
+    (velocity.consume as jest.Mock).mockClear();
+
+    const code = await errorCodeOf(() =>
+      service.assertCallAllowed(input({ price: money('2000001') })),
+    );
+
+    expect(code).toBe(McpErrorCode.MCP_APPROVAL_REQUIRED);
+    expect(velocity.consume).not.toHaveBeenCalled();
+  });
+
+  it('a null threshold never asks for approval', async () => {
+    const { service } = build({
+      findLive: jest
+        .fn()
+        .mockResolvedValue(policyRow({ perCallMax: null, requireApprovalAbove: null })),
+    });
+
+    await expect(service.assertCallAllowed(input({ price: money('9000000') }))).resolves.toBe(3);
+  });
+});
+
 describe('SpendPolicyEnforcementService.assertCallAllowed — per-call ceiling', () => {
   it('3. permits a call exactly at the ceiling and refuses one unit above it', async () => {
     const { service } = build({

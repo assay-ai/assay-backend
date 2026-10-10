@@ -51,6 +51,7 @@ export interface AssertCallAllowedInput {
  *  1. paused?                      → MCP_POLICY_AGENT_PAUSED     (not retryable)
  *  2. tool on the allowlist?       → MCP_TOOL_NOT_ALLOWED        (not retryable)
  *  3. per-call ceiling?            → MCP_SPEND_LIMIT_EXCEEDED    (not retryable)
+ *  3b. above requireApprovalAbove? → MCP_APPROVAL_REQUIRED       (not retryable)
  *  4. velocity (min/hr/spend/dup)  → MCP_VELOCITY_LIMIT_EXCEEDED (retryable)
  *  5. daily / monthly cap?         → MCP_SPEND_LIMIT_EXCEEDED    (not retryable)
  *  6. (never blocks) 50/80/100% alert bands → `spend.threshold_crossed`
@@ -195,6 +196,20 @@ export class SpendPolicyEnforcementService {
           limit: limit.amount,
           asset: limit.asset,
         });
+      }
+    }
+
+    // 3b. Approval threshold. There is no approval flow to ask, so a call above
+    // it is refused: an approval nobody can give resolves to DENY, never ALLOW.
+    // Before velocity, like the per-call ceiling, so a refused call is not counted.
+    if (sameAsset && policy.requireApprovalAbove !== null) {
+      const threshold = MoneyUtil.of(
+        policy.requireApprovalAbove,
+        policy.assetId as AssetId,
+        policy.decimals,
+      );
+      if (MoneyUtil.greaterThan(price, threshold)) {
+        throw McpErrors.approvalRequired({ threshold: threshold.amount, asset: threshold.asset });
       }
     }
 

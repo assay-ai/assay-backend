@@ -27,6 +27,12 @@ export enum McpErrorCode {
    */
   MCP_POLICY_AGENT_PAUSED = 'MCP_POLICY_AGENT_PAUSED',
   /**
+   * The price is above the policy's `requireApprovalAbove`. There is no
+   * approval flow yet, so such a call is refused rather than let through: an
+   * approval that cannot be asked for must resolve to DENY, never ALLOW.
+   */
+  MCP_APPROVAL_REQUIRED = 'MCP_APPROVAL_REQUIRED',
+  /**
    * Calls/minute, calls/hour, spend/hour or a duplicate
    * request hash. The UI calls this `VELOCITY_LIMIT_EXCEEDED`; the `MCP_`
    * prefix is this catalogue's own convention, not a different situation.
@@ -103,6 +109,15 @@ export const McpErrors = createDomainErrorFactory('MCP', {
     code: McpErrorCode.MCP_POLICY_AGENT_PAUSED,
     statusCode: 403,
     message: (_context?: Record<string, any>) => `A human has paused this agent's paid calls`,
+  },
+  /** See `McpErrorCode.MCP_APPROVAL_REQUIRED`. */
+  approvalRequired: {
+    code: McpErrorCode.MCP_APPROVAL_REQUIRED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `This call costs more than the agent's approval threshold` +
+      `${context?.threshold ? ` (${context.threshold})` : ''}. Approvals are not available yet, ` +
+      `so it was refused; raise or clear requireApprovalAbove to allow it.`,
   },
   /** Velocity. See `McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED`. */
   velocityLimitExceeded: {
