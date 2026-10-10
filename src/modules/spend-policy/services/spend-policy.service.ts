@@ -172,7 +172,8 @@ export class SpendPolicyService {
         base?.requireApprovalAbove ?? null,
       ),
       paused: patch.paused ?? base?.paused ?? false,
-      changedBy: patch.changedBy ?? `agent:${agentId}`,
+      // From the session, never the body: see `UpdateSpendPolicyDto.changedBy`.
+      changedBy: `agent:${agentId}`,
       changeReason: patch.changeReason ?? null,
       supersededAt: null,
     };
