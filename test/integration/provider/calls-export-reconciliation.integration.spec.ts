@@ -96,6 +96,13 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
         PaymentIntentStatus.VERIFYING,
         PaymentIntentStatus.SETTLED,
       );
+      // Rail B: credited once `redeem_voucher` lands, which is when the export
+      // and the earnings report both count it.
+      await context.intents.commitRedeemedHold(
+        context.organizationId,
+        verifying.id,
+        `redeem-${verifying.id}`,
+      );
     }
 
     // One uncredited (verification FAIL → REFUNDED).
@@ -191,6 +198,13 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
         verifying.id,
         PaymentIntentStatus.VERIFYING,
         PaymentIntentStatus.SETTLED,
+      );
+      // Rail B: credited once `redeem_voucher` lands, which is when the export
+      // and the earnings report both count it.
+      await context.intents.commitRedeemedHold(
+        context.organizationId,
+        verifying.id,
+        `redeem-${verifying.id}`,
       );
     }
 

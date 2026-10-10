@@ -3,7 +3,10 @@ import { createHash } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
-import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import {
+  AWAITING_REDEMPTION_SQL,
+  PaymentIntentRepository,
+} from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderPayoutRepository } from '@database/postgres/repositories/provider-payout.repository';
 import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
 import {
@@ -33,6 +36,8 @@ interface ReconciliationGroupRow {
   readonly classification: string | null;
   readonly asset: string;
   readonly decimals: string;
+  /** Rail B, hold still open — Postgres returns a boolean, some drivers a string. */
+  readonly awaitingRedemption: boolean | string;
   readonly calls: string;
   /** `Σ price_amount` over this group's `SETTLED` rows. */
   readonly credited: string;
@@ -72,6 +77,8 @@ interface ClassAccumulator {
  */
 const CLASS_NOTES: Record<CallReconciliationClass, string> = {
   [CallReconciliationClass.PAID_CREDITED]: 'settled to you',
+  [CallReconciliationClass.PAID_AWAITING_REDEMPTION]:
+    'passed — credited once the voucher is redeemed on chain',
   [CallReconciliationClass.PAID_UNCREDITED]: 'verification found FAIL — not credited, see verdicts',
   [CallReconciliationClass.FREE]: 'relay path, no payment machinery',
   [CallReconciliationClass.TEST]: 'your own dry runs — charges nobody',
@@ -180,16 +187,26 @@ export class ProviderReconciliationService {
       callCount += calls;
 
       try {
+        const awaitingRedemption =
+          row.awaitingRedemption === true || row.awaitingRedemption === 'true';
         const cls = classifyForReconciliation({
           callClass: row.callClass as CallClassValue,
           status: row.status as IntentStatusValue,
           classification: row.classification as ResponseClassValue,
+          awaitingRedemption,
         });
         // `CALL_RECONCILIATION_CLASSES` pre-seeds every member above, so this
         // lookup cannot miss for any value `classifyForReconciliation` can
         // actually return — defensive, not a real branch.
         const bucket = buckets.get(cls);
         if (!bucket) throw new Error(`unmapped reconciliation class: ${cls}`);
+
+        // Not credited yet: counted as calls, kept out of every settled figure
+        // until the redemption lands and the earnings ledger holds the credit.
+        if (cls === CallReconciliationClass.PAID_AWAITING_REDEMPTION) {
+          bucket.calls += calls;
+          continue;
+        }
 
         const credited = BigInt(row.credited);
         bucket.calls += calls;
@@ -261,6 +278,7 @@ export class ProviderReconciliationService {
       .addSelect('intent.classification', 'classification')
       .addSelect('intent.assetId', 'asset')
       .addSelect('intent.decimals', 'decimals')
+      .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
       .addSelect('COUNT(*)', 'calls')
       .addSelect(
         `COALESCE(SUM(CASE WHEN intent.status = :settledStatus THEN intent.priceAmount ELSE 0 END), 0)`,
@@ -290,6 +308,7 @@ export class ProviderReconciliationService {
       .addGroupBy('intent.classification')
       .addGroupBy('intent.assetId')
       .addGroupBy('intent.decimals')
+      .addGroupBy(AWAITING_REDEMPTION_SQL)
       .getRawMany<ReconciliationGroupRow>();
   }
 

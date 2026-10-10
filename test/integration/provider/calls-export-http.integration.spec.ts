@@ -155,7 +155,9 @@ describe('GET /providers/me/calls/export — real HTTP', () => {
     );
     // The comma-and-quote-bearing reason round-trips correctly (RFC 4180).
     expect(lines[1]).toContain('"a ""quoted"" reason, with a comma"');
-    expect(lines[1]).toContain('PAID_CREDITED');
+    // A rail-B intent the verdict settled but no redemption has retired yet: not
+    // credited, so not PAID_CREDITED.
+    expect(lines[1]).toContain('PAID_AWAITING_REDEMPTION');
 
     console.log('First lines of the downloaded CSV:\n' + lines.slice(0, 3).join('\n'));
   });

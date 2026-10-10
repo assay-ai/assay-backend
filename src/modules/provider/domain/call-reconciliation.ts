@@ -67,6 +67,13 @@ export type ResponseClassValue = 'DATA_RESULT' | 'SYSTEM_ERROR' | 'REQUEST_ERROR
 export enum CallReconciliationClass {
   /** Verified, or not sampled — the provider was credited. */
   PAID_CREDITED = 'PAID_CREDITED',
+  /**
+   * Rail B: verified and `SETTLED`, but `redeem_voucher` has not landed, so the
+   * provider has not been credited yet. Reported apart from `PAID_CREDITED` so
+   * the export never claims a credit the earnings ledger does not hold, and a
+   * redemption that never lands stays visible rather than reading as paid.
+   */
+  PAID_AWAITING_REDEMPTION = 'PAID_AWAITING_REDEMPTION',
   /** A `DATA_RESULT` that verification found `FAIL` — not credited, a strike recorded. */
   PAID_UNCREDITED = 'PAID_UNCREDITED',
   /** The relay path — no payment machinery ever ran, regardless of what `status` says. */
@@ -94,6 +101,11 @@ export interface CallReconciliationCandidate {
   readonly status: IntentStatusValue;
   /** The response class recorded on the intent, or `null` if no attempt was ever made. */
   readonly classification: ResponseClassValue;
+  /**
+   * A rail-B intent whose hold is still open: settled by the verdict, not yet
+   * redeemed on chain. Optional; absent means not awaiting.
+   */
+  readonly awaitingRedemption?: boolean;
   /**
    * Whether this call was excluded from its SLA window (griefing
    * attribution). Optional; absent means not excluded. Kept as a real
@@ -128,7 +140,9 @@ export function classifyForReconciliation(
 
   switch (candidate.status) {
     case 'SETTLED':
-      return CallReconciliationClass.PAID_CREDITED;
+      return candidate.awaitingRedemption
+        ? CallReconciliationClass.PAID_AWAITING_REDEMPTION
+        : CallReconciliationClass.PAID_CREDITED;
     case 'REFUNDED':
       return CallReconciliationClass.PAID_UNCREDITED;
     case 'VOIDED':

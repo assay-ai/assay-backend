@@ -181,6 +181,7 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
       | 'VOIDED'
       | 'EXPIRED',
     classification: row.classification as 'DATA_RESULT' | 'SYSTEM_ERROR' | 'REQUEST_ERROR' | null,
+    awaitingRedemption: row.awaitingRedemption,
   });
 
   return [
