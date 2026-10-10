@@ -1,4 +1,7 @@
-import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import {
+  CREDITED_SQL,
+  PaymentIntentRepository,
+} from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { ApiErrorCode } from '@shared/api';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
@@ -188,5 +191,25 @@ describe('ProviderEarningsService — invalid range', () => {
         }),
       ProviderErrorCode.PROVIDER_INVALID_TIME_RANGE,
     );
+  });
+});
+
+describe('ProviderEarningsService — earned means credited (committed hold)', () => {
+  // A SETTLED intent only carries a PROVIDER_CREDIT once its hold is committed:
+  // rail A inline in `resolve()`, rail B when `redeem_voucher` lands. A SETTLED
+  // row with no hold, or whose hold is still open, is not money the provider
+  // holds, so earnings must not count it — or they disagree with the ledger.
+  it('sums earned and platformFee only over SETTLED intents whose hold was committed', async () => {
+    const { service, fake } = build([]);
+
+    await service.getEarnings(PROVIDER, { ...WINDOW, groupBy: ProviderEarningsGroupBy.TOOL });
+
+    for (const alias of ['earned', 'platformFee']) {
+      const expr = fake.selects.find((s) => s.alias === alias)?.expr ?? '';
+      expect(expr).toContain(CREDITED_SQL);
+      expect(expr).toMatch(/:settledStatus/);
+    }
+    expect(CREDITED_SQL).toMatch(/hold_id IS NOT NULL/);
+    expect(CREDITED_SQL).toMatch(/hold_released_at IS NOT NULL/);
   });
 });

@@ -59,7 +59,7 @@ function policyRow(overrides: Partial<SpendPolicyEntity> = {}): SpendPolicyEntit
 }
 
 function zeroUsage(): AgentSpendUsage {
-  return { spendToday: money('0'), spendThisMonth: money('0') };
+  return { spendThisHour: money('0'), spendToday: money('0'), spendThisMonth: money('0') };
 }
 
 function build(options: {
@@ -186,7 +186,9 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — approval threshold
     const { service } = build({
       findLive: jest
         .fn()
-        .mockResolvedValue(policyRow({ perCallMax: null, requireApprovalAbove: null })),
+        .mockResolvedValue(
+          policyRow({ perCallMax: null, requireApprovalAbove: null, maxSpendPerHour: null }),
+        ),
     });
 
     await expect(service.assertCallAllowed(input({ price: money('9000000') }))).resolves.toBe(3);
@@ -273,11 +275,69 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — velocity', () => {
   });
 });
 
+describe('SpendPolicyEnforcementService.assertCallAllowed — spend/hour', () => {
+  // Spend/hour is read from the same spend-counting intents as the daily cap
+  // (open holds + SETTLED), not from a counter bumped on every attempt: a call
+  // that was voided or refunded never reaches `spendThisHour`, so it cannot
+  // lock the agent out. The Redis layer only counts attempts.
+  const hourlyOnly = policyRow({
+    dailyCap: null,
+    monthlyCap: null,
+    maxSpendPerHour: '5000000',
+  });
+
+  it('permits a call when the hour so far holds only voided calls (spendThisHour is 0)', async () => {
+    const { service, velocity } = build({
+      findLive: jest.fn().mockResolvedValue(hourlyOnly),
+      spendSoFar: jest.fn().mockResolvedValue(zeroUsage()),
+    });
+
+    await expect(service.assertCallAllowed(input({ price: money('100000') }))).resolves.toBe(3);
+    // The attempt counters get no money limit — spend is not theirs to track.
+    expect(velocity.consume).toHaveBeenCalledWith(
+      AGENT,
+      HASH,
+      expect.not.objectContaining({ maxSpendPerHour: expect.anything() }),
+    );
+  });
+
+  it('refuses with SPEND_PER_HOUR when settled/held spend this hour plus this call exceeds the ceiling', async () => {
+    const { service } = build({
+      findLive: jest.fn().mockResolvedValue(hourlyOnly),
+      spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('4950000'),
+        spendToday: money('4950000'),
+        spendThisMonth: money('4950000'),
+      }),
+    });
+
+    const context = await contextOf(() =>
+      service.assertCallAllowed(input({ price: money('100000') })),
+    );
+    expect(context?.reason).toBe(VelocityViolationKind.SPEND_PER_HOUR);
+    expect(context?.retryAfter).toEqual(expect.any(Number));
+  });
+
+  it('permits spend that lands exactly on the hourly ceiling', async () => {
+    const { service } = build({
+      findLive: jest.fn().mockResolvedValue(hourlyOnly),
+      spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('4900000'),
+        spendToday: money('4900000'),
+        spendThisMonth: money('4900000'),
+      }),
+    });
+
+    await expect(service.assertCallAllowed(input({ price: money('100000') }))).resolves.toBe(3);
+  });
+});
+
 describe('SpendPolicyEnforcementService.assertCallAllowed — daily / monthly caps', () => {
   it('5. permits spend that lands exactly on the daily cap and refuses one unit past it, carrying resetsAt', async () => {
     const { service } = build({
       findLive: jest.fn().mockResolvedValue(policyRow({ dailyCap: '1000000', monthlyCap: null })),
       spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('0'),
         spendToday: money('900000'),
         spendThisMonth: money('900000'),
       }),
@@ -290,6 +350,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — daily / monthly ca
     const { service: service2 } = build({
       findLive: jest.fn().mockResolvedValue(policyRow({ dailyCap: '1000000', monthlyCap: null })),
       spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('0'),
         spendToday: money('900001'),
         spendThisMonth: money('900001'),
       }),
@@ -306,6 +367,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — daily / monthly ca
     const { service } = build({
       findLive: jest.fn().mockResolvedValue(policyRow({ dailyCap: null, monthlyCap: '1000000' })),
       spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('0'),
         spendToday: money('0'),
         spendThisMonth: money('999999'),
       }),
@@ -321,6 +383,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — alert bands (never
     const { service, notify } = build({
       findLive: jest.fn().mockResolvedValue(policyRow({ dailyCap: '1000000', monthlyCap: null })),
       spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('0'),
         spendToday: money('750000'), // 75% before this call
         spendThisMonth: money('750000'),
       }),
@@ -342,6 +405,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — alert bands (never
     const { service, notify } = build({
       findLive: jest.fn().mockResolvedValue(policyRow({ dailyCap: '1000000', monthlyCap: null })),
       spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('0'),
         spendToday: money('850000'), // already past 80%
         spendThisMonth: money('850000'),
       }),
@@ -358,6 +422,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — alert bands (never
     const { service } = build({
       findLive: jest.fn().mockResolvedValue(policyRow({ dailyCap: '1000000', monthlyCap: null })),
       spendSoFar: jest.fn().mockResolvedValue({
+        spendThisHour: money('0'),
         spendToday: money('750000'),
         spendThisMonth: money('750000'),
       }),

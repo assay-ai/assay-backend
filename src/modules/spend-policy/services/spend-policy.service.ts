@@ -111,10 +111,7 @@ export class SpendPolicyService {
     return {
       spendToday: toMoneyDto(spend.spendToday),
       spendThisMonth: toMoneyDto(spend.spendThisMonth),
-      spendThisHour:
-        velocityUsage.readable && velocityUsage.spendThisHour !== null
-          ? toMoneyDto(MoneyUtil.of(velocityUsage.spendThisHour, asset, policy.decimals))
-          : null,
+      spendThisHour: toMoneyDto(spend.spendThisHour),
       callsThisMinute: velocityUsage.readable ? velocityUsage.callsThisMinute : null,
       callsThisHour: velocityUsage.readable ? velocityUsage.callsThisHour : null,
       usageReadable: velocityUsage.readable,

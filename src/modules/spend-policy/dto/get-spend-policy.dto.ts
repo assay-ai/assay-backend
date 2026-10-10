@@ -12,10 +12,12 @@ export enum SpendPolicyScope {
  * Live usage, next to the ceilings on {@link SpendPolicyDto}. Two
  * sources, kept distinct rather than merged into one number:
  *
- * - `spendToday` / `spendThisMonth` come from `payment_intents` (real,
- *   durable spend — see `SpendUsageService`).
- * - `spendThisHour` / `callsThisMinute` / `callsThisHour` come from the same
- *   Redis counters `SpendPolicyEnforcementService`'s velocity check reads
+ * - `spendThisHour` / `spendToday` / `spendThisMonth` come from
+ *   `payment_intents` (money held or settled — see `SpendUsageService`), the
+ *   same read the spend/hour ceiling and the daily/monthly caps enforce
+ *   against, so a voided or refunded call never shows here.
+ * - `callsThisMinute` / `callsThisHour` come from the same Redis attempt
+ *   counters `SpendPolicyEnforcementService`'s velocity check reads
  *   (see `SpendPolicyVelocityService.read`), so the number on this screen and
  *   the number a call was actually refused against can never disagree.
  */
@@ -29,7 +31,9 @@ export class SpendPolicyUsageDto {
   @ApiProperty({
     type: MoneyDto,
     nullable: true,
-    description: '`null` when the velocity counters could not be read (`usageReadable: false`)',
+    description:
+      'Money held or settled since the top of the UTC hour. Read from payment_intents, so ' +
+      'it does not depend on `usageReadable`; kept nullable for compatibility',
   })
   spendThisHour: MoneyDto | null;
 
@@ -42,7 +46,7 @@ export class SpendPolicyUsageDto {
   @ApiProperty({
     description:
       'Same `chainReadable`-style escape hatch the capital screen uses: `false` means Redis ' +
-      'could not be read, so the three fields above are `null` rather than a wrong zero',
+      'could not be read, so `callsThisMinute`/`callsThisHour` are `null` rather than a wrong zero',
   })
   usageReadable: boolean;
 }

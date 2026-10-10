@@ -1,7 +1,5 @@
 import type { Redis } from 'ioredis';
 
-import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
-import { Money } from '@modules/chains/ports/money.types';
 import {
   SpendPolicyVelocityService,
   VelocityLimits,
@@ -11,18 +9,12 @@ import { DUPLICATE_REQUEST_THRESHOLD } from '@modules/spend-policy/constants/spe
 
 import { FakeRedis } from './helpers/fake-redis';
 
-const ASSET = ASSET_IDS.USDC_SOLANA_DEVNET;
 const AGENT = 'agent-1';
 const HASH = 'sha256:' + 'a'.repeat(64);
-
-function price(amount: string): Money {
-  return { amount, asset: ASSET, decimals: 6 };
-}
 
 const UNLIMITED: VelocityLimits = {
   maxCallsPerMinute: null,
   maxCallsPerHour: null,
-  maxSpendPerHour: null,
 };
 
 let redis: FakeRedis;
@@ -47,11 +39,11 @@ describe('SpendPolicyVelocityService.consume — calls/minute', () => {
     const limits: VelocityLimits = { ...UNLIMITED, maxCallsPerMinute: 3 };
 
     for (let i = 0; i < 3; i++) {
-      const result = await velocity.consume(AGENT, `${HASH}-${i}`, price('1'), limits);
+      const result = await velocity.consume(AGENT, `${HASH}-${i}`, limits);
       expect(result).toBeNull();
     }
 
-    const fourth = await velocity.consume(AGENT, `${HASH}-4`, price('1'), limits);
+    const fourth = await velocity.consume(AGENT, `${HASH}-4`, limits);
     expect(fourth?.kind).toBe(VelocityViolationKind.CALLS_PER_MINUTE);
     expect(fourth?.retryAfterSeconds).toBeGreaterThan(0);
   });
@@ -69,7 +61,7 @@ describe('SpendPolicyVelocityService.consume — calls/minute', () => {
 
     for (let attempt = 1; attempt <= 100; attempt++) {
       // Same request hash every time — this genuinely is one retry loop.
-      const result = await velocity.consume(AGENT, HASH, price('1'), limits);
+      const result = await velocity.consume(AGENT, HASH, limits);
       if (result) {
         blockedCount += 1;
         if (firstBlockedAt === null) firstBlockedAt = attempt;
@@ -99,7 +91,7 @@ describe('SpendPolicyVelocityService.consume — calls/minute', () => {
   it("a distinct request hash is not throttled by another hash's duplicate count, only by the shared per-minute ceiling", async () => {
     const limits: VelocityLimits = { ...UNLIMITED, maxCallsPerMinute: 200 };
     for (let i = 0; i < DUPLICATE_REQUEST_THRESHOLD - 1; i++) {
-      const result = await velocity.consume(AGENT, `${HASH}-distinct-${i}`, price('1'), limits);
+      const result = await velocity.consume(AGENT, `${HASH}-distinct-${i}`, limits);
       expect(result).toBeNull();
     }
   });
@@ -109,23 +101,23 @@ describe('SpendPolicyVelocityService.consume — calls/hour', () => {
   it('permits up to the limit and refuses the call that exceeds it', async () => {
     const limits: VelocityLimits = { ...UNLIMITED, maxCallsPerHour: 2 };
 
-    expect(await velocity.consume(AGENT, `${HASH}-a`, price('1'), limits)).toBeNull();
-    expect(await velocity.consume(AGENT, `${HASH}-b`, price('1'), limits)).toBeNull();
+    expect(await velocity.consume(AGENT, `${HASH}-a`, limits)).toBeNull();
+    expect(await velocity.consume(AGENT, `${HASH}-b`, limits)).toBeNull();
 
-    const third = await velocity.consume(AGENT, `${HASH}-c`, price('1'), limits);
+    const third = await velocity.consume(AGENT, `${HASH}-c`, limits);
     expect(third?.kind).toBe(VelocityViolationKind.CALLS_PER_HOUR);
   });
 });
 
-describe('SpendPolicyVelocityService.consume — spend/hour', () => {
-  it('permits spend up to the ceiling and refuses the call that would exceed it', async () => {
-    const limits: VelocityLimits = { ...UNLIMITED, maxSpendPerHour: price('100') };
-
-    expect(await velocity.consume(AGENT, `${HASH}-a`, price('60'), limits)).toBeNull();
-    expect(await velocity.consume(AGENT, `${HASH}-b`, price('40'), limits)).toBeNull();
-
-    const third = await velocity.consume(AGENT, `${HASH}-c`, price('1'), limits);
-    expect(third?.kind).toBe(VelocityViolationKind.SPEND_PER_HOUR);
+describe('SpendPolicyVelocityService.consume — no money counter', () => {
+  // Spend/hour is decided from payment_intents (held + settled) by the
+  // enforcement service. Counting price here, per attempt, made voided and
+  // refunded calls lock the agent out with nothing spent.
+  it('keeps no spend accumulator for attempts', async () => {
+    for (let i = 0; i < 10; i++) {
+      expect(await velocity.consume(AGENT, `${HASH}-${i}`, UNLIMITED)).toBeNull();
+    }
+    expect([...redis.strings.keys()].some((key) => key.includes('spend-hr'))).toBe(false);
   });
 });
 
@@ -133,7 +125,7 @@ describe('SpendPolicyVelocityService.consume — duplicate-request detection', (
   it(`fires once at the ${DUPLICATE_REQUEST_THRESHOLD}th identical hash and suppresses the notification after that`, async () => {
     const results = [];
     for (let i = 0; i < DUPLICATE_REQUEST_THRESHOLD + 3; i++) {
-      results.push(await velocity.consume(AGENT, HASH, price('1'), UNLIMITED));
+      results.push(await velocity.consume(AGENT, HASH, UNLIMITED));
     }
 
     // Every attempt before the threshold is permitted.
@@ -154,7 +146,7 @@ describe('SpendPolicyVelocityService.consume — Redis unavailable', () => {
   it('fails CLOSED: reports UNAVAILABLE rather than permitting the call', async () => {
     redis.down = true;
 
-    const result = await velocity.consume(AGENT, HASH, price('1'), {
+    const result = await velocity.consume(AGENT, HASH, {
       ...UNLIMITED,
       maxCallsPerMinute: 60,
     });
@@ -166,8 +158,8 @@ describe('SpendPolicyVelocityService.consume — Redis unavailable', () => {
 
 describe('SpendPolicyVelocityService.read', () => {
   it('reports the same counters consume() wrote, without incrementing them', async () => {
-    await velocity.consume(AGENT, `${HASH}-a`, price('30'), UNLIMITED);
-    await velocity.consume(AGENT, `${HASH}-b`, price('20'), UNLIMITED);
+    await velocity.consume(AGENT, `${HASH}-a`, UNLIMITED);
+    await velocity.consume(AGENT, `${HASH}-b`, UNLIMITED);
 
     const before = redis.commands.length;
     const usage = await velocity.read(AGENT);
@@ -176,11 +168,10 @@ describe('SpendPolicyVelocityService.read', () => {
     expect(usage).toEqual({
       callsThisMinute: 2,
       callsThisHour: 2,
-      spendThisHour: 50n,
       readable: true,
     });
-    // Three GETs, no INCR — a display read must never itself count as a call.
-    expect(after - before).toBe(3);
+    // Two GETs, no INCR — a display read must never itself count as a call.
+    expect(after - before).toBe(2);
     expect(redis.commands.slice(before).every((c) => c.startsWith('get '))).toBe(true);
   });
 
@@ -192,7 +183,6 @@ describe('SpendPolicyVelocityService.read', () => {
     expect(usage).toEqual({
       callsThisMinute: null,
       callsThisHour: null,
-      spendThisHour: null,
       readable: false,
     });
   });
