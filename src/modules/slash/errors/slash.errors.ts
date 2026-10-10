@@ -15,6 +15,7 @@ export enum SlashErrorCode {
   SLASH_INVALID_REASON_CODE = 'SLASH_INVALID_REASON_CODE',
   SLASH_SECOND_SIGNATURE_REQUIRED = 'SLASH_SECOND_SIGNATURE_REQUIRED',
   SLASH_SECOND_SIGNATURE_NOT_PENDING = 'SLASH_SECOND_SIGNATURE_NOT_PENDING',
+  SLASH_SECOND_READER_MUST_DIFFER = 'SLASH_SECOND_READER_MUST_DIFFER',
   SLASH_RECALCULATION_EXCEEDS_ORIGINAL = 'SLASH_RECALCULATION_EXCEEDS_ORIGINAL',
   SLASH_TIMELOCK_NOT_ELAPSED = 'SLASH_TIMELOCK_NOT_ELAPSED',
   SLASH_EXTENSION_EXCEEDS_CHAIN_TIMELOCK = 'SLASH_EXTENSION_EXCEEDS_CHAIN_TIMELOCK',
@@ -110,6 +111,19 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     code: SlashErrorCode.SLASH_SECOND_SIGNATURE_REQUIRED,
     statusCode: 409,
     message: () => 'This decision needs a second signature before it binds',
+  },
+  /**
+   * One person cannot hold both seats of a two-person case. Refused up front so
+   * `chk_slash_proposals_second_is_a_different_person` never has to.
+   */
+  secondReaderMustDiffer: {
+    code: SlashErrorCode.SLASH_SECOND_READER_MUST_DIFFER,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      context?.role === 'objector'
+        ? 'You objected to the earlier decision on this case, so you cannot decide it yourself; ' +
+          'it needs a different reader'
+        : 'You made this decision, so you cannot countersign it; a different operator must sign or object',
   },
   secondSignatureNotPending: {
     code: SlashErrorCode.SLASH_SECOND_SIGNATURE_NOT_PENDING,

@@ -385,7 +385,38 @@ describe('ArbitrationService', () => {
 
       await expect(
         ctx.service.second(ADJUDICATOR as never, 'org_1', 'p1', 'SIGNED', 'agreed with myself'),
-      ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_SECOND_SIGNATURE_REQUIRED });
+      ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_SECOND_READER_MUST_DIFFER });
+    });
+
+    it('refuses a decision from the operator who objected, before the database does', async () => {
+      const ctx = build();
+      seedDisputed(ctx, '1');
+      await ctx.service.decide(ADJUDICATOR as never, 'org_1', 'p1', {
+        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+        reasonCodes: ['MAPPING_REGRESSION'],
+        note: NOTE,
+      });
+      await ctx.service.second(SECOND as never, 'org_1', 'p1', 'OBJECTED', 'predates the change');
+
+      await expect(
+        ctx.service.decide(SECOND as never, 'org_1', 'p1', {
+          outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+          reasonCodes: ['MAPPING_REGRESSION'],
+          note: NOTE,
+        }),
+      ).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_SECOND_READER_MUST_DIFFER,
+        statusCode: 409,
+      });
+      expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.UNDER_REVIEW);
+
+      // A third reader (or the original decider) may still decide.
+      await ctx.service.decide(ADJUDICATOR as never, 'org_1', 'p1', {
+        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+        reasonCodes: ['MAPPING_REGRESSION'],
+        note: NOTE,
+      });
+      expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.AWAITING_SECOND);
     });
 
     /**
@@ -602,7 +633,14 @@ describe('ArbitrationService', () => {
 
       await ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE);
 
-      expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.CANCELLED);
+      const row = ctx.proposals.rows.get('p1')!;
+      expect(row.status).toBe(SlashProposalStatus.CANCELLED);
+      // The DB requires `(resolution_kind = 'ADJUDICATOR') = (outcome IS NOT NULL)`
+      // and `(resolved_at IS NULL) = (resolution_kind IS NULL)`: a suspension has
+      // no outcome, so it may be neither ADJUDICATOR nor carry a resolvedAt.
+      expect(row.outcome ?? null).toBeNull();
+      expect(row.resolutionKind ?? null).toBeNull();
+      expect(row.resolvedAt ?? null).toBeNull();
       expect(ctx.overrides.performed).toEqual([{ code: 'S-1', reason: NOTE }]);
     });
   });

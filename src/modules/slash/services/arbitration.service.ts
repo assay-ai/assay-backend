@@ -281,6 +281,14 @@ export class ArbitrationService {
       throw SlashErrors.invalidTransition({ from, to: 'a decision' });
     }
 
+    // An objection keeps `seconded_by_operator_id` on the row (the third reader
+    // needs to know who objected), so the objector deciding the same case would
+    // trip `chk_slash_proposals_second_is_a_different_person`. Refused here with
+    // a domain error instead.
+    if (proposal.secondedByOperatorId && proposal.secondedByOperatorId === operator.operatorId) {
+      throw SlashErrors.secondReaderMustDiffer({ role: 'objector' });
+    }
+
     if (!reasonCodesAreValid(input.outcome, input.reasonCodes)) {
       throw SlashErrors.invalidReasonCode({
         outcome: input.outcome,
@@ -446,7 +454,7 @@ export class ArbitrationService {
       throw SlashErrors.secondSignatureNotPending({ status: proposal.status });
     }
     if (proposal.decidedByOperatorId === operator.operatorId) {
-      throw SlashErrors.secondSignatureRequired();
+      throw SlashErrors.secondReaderMustDiffer({ role: 'decider' });
     }
 
     /*
@@ -662,10 +670,19 @@ export class ArbitrationService {
           [from],
           {
             status: SlashProposalStatus.CANCELLED,
-            resolutionKind: ResolutionKind.ADJUDICATOR,
-            resolvedAt: now,
+            /*
+              A suspension is not a judgement, so it writes no outcome — and
+              `chk_slash_proposals_outcome_needs_adjudicator` then forbids
+              `ADJUDICATOR`. The other non-adjudicator kinds are all automatic,
+              and `chk_slash_proposals_resolution_is_whole` ties `resolvedAt` to
+              the kind, so both stay null: the case is closed by `status`, and the
+              `S-1` register entry names the human. `decidedByOperatorId` is left
+              alone too — overwriting it could collide with a recorded second
+              reader.
+            */
+            resolutionKind: null,
+            resolvedAt: null,
             outcome: null,
-            decidedByOperatorId: operator.operatorId,
           },
         );
         if (affected === 0) {
