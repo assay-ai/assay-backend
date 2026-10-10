@@ -211,9 +211,12 @@ const VOID_ERRORS: ReadonlySet<string> = new Set([
   'PenaltyExceedsMaximum',
   'MissingBeneficiary',
   'StatusDoesNotSlash',
-  'AttestationExpired',
-  'AttestationNotYetValid',
-  'InvalidAttestationWindow',
+  // NOT `AttestationExpired`, `AttestationNotYetValid` or
+  // `InvalidAttestationWindow`. Those are about the SIGNATURE's validity window,
+  // not the judgement: a slow send or a clock skew expires a signature that the
+  // next attempt simply signs afresh. Voiding on them closed sound cases, and a
+  // delayed transaction carrying the old signature could still land behind
+  // the closed case. They fall through to TRANSIENT.
   'MissingVerifierSignature',
 ]);
 
@@ -263,8 +266,26 @@ export function chainErrorName(error: unknown): string | null {
   if (!(error instanceof AppError) || error.errorCode !== ChainErrorCode.CHAIN_TRANSACTION_FAILED) {
     return null;
   }
+  const evmName = error.context?.programErrorName;
+  if (typeof evmName === 'string' && EVM_PROGRAM_ERROR_NAME.test(evmName)) {
+    return evmName;
+  }
   return settlementErrorName(error.context?.customErrorCode as number | null | undefined);
 }
+
+/**
+ * An `Errors.sol` name as `EvmSlashExecutor` reports it in
+ * `context.programErrorName`.
+ *
+ * EVM custom errors are zero-argument and arrive as a 4-byte selector, which
+ * `evmErrorName` maps to the declared name — there is no number to resolve,
+ * so the name itself travels. The Solidity names mirror the Anchor ones
+ * (`VerifierRevoked`, `SlashCapExceeded`, …), so the WAIT and VOID sets below
+ * classify both chains with one vocabulary. `UNKNOWN_REVERT:0x…` and
+ * `UNKNOWN_REVERT:none` deliberately do NOT match: an unnamed revert is
+ * classified exactly like a program that never spoke — transient.
+ */
+const EVM_PROGRAM_ERROR_NAME = /^[A-Z][A-Za-z0-9]*$/;
 
 /**
  * What to do about a failed chain call: retry it, park it, or close the case.

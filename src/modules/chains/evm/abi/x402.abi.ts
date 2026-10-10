@@ -83,8 +83,10 @@ export const X402_CONFIG_ABI = parseAbi([
  * `X402Stake`, read-only here.
  *
  * The four slash-lifecycle writes (`proposeSlash`, `executeSlash`,
- * `cancelSlash`, `expireSlash`) are not called from here and are absent for
- * the same reason as the config writes.
+ * `cancelSlash`, `expireSlash`) are NOT in this constant. They live in
+ * {@link X402_STAKE_SLASH_ABI}, which only `EvmSlashExecutor` imports
+ * (`abi-selectors.spec.ts` enforces both halves), so a stake reader or an
+ * intent builder cannot reach for one.
  *
  * `ProviderStake` carries a `uint64 __gap` at position 7 that IS on the wire,
  * and `SlashRecord` carries two (`uint32 __gap`, `uint32 __gap2`). Decode them,
@@ -106,6 +108,44 @@ export const X402_STAKE_ABI = parseAbi([
   'function requestUnstake(uint64 amount)',
   'function withdrawStake(uint64 amount)',
   'event StakeDeposited(address indexed provider, address indexed funder, uint64 amount, uint128 bonded)',
+]);
+
+/**
+ * The slash lifecycle on `X402Stake`, for `EvmSlashExecutor` and nothing else.
+ *
+ * - `proposeSlash` is authorised by the **verifier's signature** over the
+ *   `SlashAttestation`, never by `msg.sender`: the platform cannot slash
+ *   without an attestation a registered verifier key signed, because the
+ *   contract recovers the signer and calls `CONFIG.assertCanSign` itself.
+ * - `executeSlash` and `expireSlash` are permissionless; every amount and the
+ *   beneficiary are read off the record frozen at proposal.
+ * - `cancelSlash` is `CONFIG.admin()`-only. It is vendored to ENCODE the
+ *   unsigned calldata handed to the admin, and is never sent by this process.
+ *
+ * The events are decoded off receipts to learn what a batched call did — a
+ * `Multicall3` receipt carries no per-call return data.
+ */
+export const X402_STAKE_SLASH_ABI = parseAbi([
+  'struct SlashAttestation { bytes32 requestId; address provider; address beneficiary; uint8 status; uint64 penalty; bytes32 policy; uint64 issuedAt; uint64 expiresAt; }',
+  'function proposeSlash(SlashAttestation a, bytes sig)',
+  'function executeSlash(bytes32 requestId)',
+  'function expireSlash(bytes32 requestId)',
+  'function cancelSlash(bytes32 requestId)',
+  'event SlashProposed(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 reserved, uint64 capAllowance, uint64 pendingSlash, uint64 proposedAt, uint64 executableAt)',
+  'event SlashExecuted(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 applied, uint64 agentAmount, uint64 platformAmount, uint64 providerAmount, uint16 slashAgentBps, uint16 slashPlatformBps, uint64 released, uint64 pendingSlash, uint128 bonded, uint64 unbonding, uint64 executedAt, uint64 proposedAt)',
+  'event SlashCancelled(bytes32 indexed requestId, address indexed provider, uint8 reason, uint64 released, uint64 pendingSlash, uint64 cancelledAt)',
+]);
+
+/**
+ * `Multicall3.aggregate3` — the one batching door. Each call carries
+ * `allowFailure: true`, so one refused judgement does not revert the others;
+ * the per-call result is learned by simulating the batch first (`eth_call`
+ * returns the `Result[]`) and confirmed afterwards from the receipt's events.
+ */
+export const MULTICALL3_ABI = parseAbi([
+  'struct Call3 { address target; bool allowFailure; bytes callData; }',
+  'struct Result { bool success; bytes returnData; }',
+  'function aggregate3(Call3[] calls) payable returns (Result[] returnData)',
 ]);
 
 /**

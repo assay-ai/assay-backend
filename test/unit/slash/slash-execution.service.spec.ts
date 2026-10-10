@@ -21,6 +21,7 @@ import {
   SlashProposalResult,
   SlashCancelIntent,
   SlashRecordSnapshot,
+  oneByOne,
 } from '@modules/slash/ports/slash-executor.port';
 import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
 import {
@@ -140,6 +141,14 @@ class FakeExecutor implements SlashExecutorPort {
       platformAmountMinor: ((BigInt(this.appliedMinor) * 3000n) / 10000n).toString(),
       executedAt: new Date('2026-08-13T09:15:00Z'),
     };
+  }
+
+  async proposeBatch(requests: readonly SlashProposalRequest[]) {
+    return oneByOne(requests, (request) => this.propose(request));
+  }
+
+  async executeBatch(requests: readonly SlashExecutionRequest[]) {
+    return oneByOne(requests, (request) => this.executeProposal(request));
   }
 }
 
@@ -1115,6 +1124,8 @@ describe('proposeDue', () => {
 
     expect(executor.proposed).toEqual([
       {
+        // The chain off the proposal's own asset — what the multiplexer routes on.
+        chainId: CHAIN_IDS.SOLANA_DEVNET,
         requestId: requestIdOf('p1'),
         // The address the provider proved control of, not `providerId`.
         provider: 'StakeAuth9999',
@@ -2589,7 +2600,7 @@ describe('buildCancelIntent', () => {
 
     expect(intent.transaction).toBe('unsigned_cancel_1');
     expect(executor.cancelBuilds).toEqual([
-      { requestId: requestIdOf('p1'), provider: 'StakeAuth9999' },
+      { chainId: CHAIN_IDS.SOLANA_DEVNET, requestId: requestIdOf('p1'), provider: 'StakeAuth9999' },
     ]);
     // The case moves when the record leaves `Pending`, never because somebody
     // was handed a transaction.
@@ -2647,7 +2658,9 @@ describe('sweepAdminCancels', () => {
       expired: 1,
       waiting: 0,
     });
-    expect(executor.expired).toEqual([{ requestId: requestIdOf('p1'), provider: 'StakeAuth9999' }]);
+    expect(executor.expired).toEqual([
+      { chainId: CHAIN_IDS.SOLANA_DEVNET, requestId: requestIdOf('p1'), provider: 'StakeAuth9999' },
+    ]);
     expect(proposals.rows.get('p1')!.chainStatus).toBe('CANCELLED');
     expect(events.kinds()).toContain('CHAIN_CANCELLED');
   });
@@ -3165,5 +3178,30 @@ describe('the fleet sweep asks for the chain reservation to be released too', ()
       expect(proposals.rows.get(id)!.status).toBe(SlashProposalStatus.OVERTURNED);
       expect(proposals.rows.get(id)!.chainStatus).toBe('CANCEL_REQUESTED');
     }
+  });
+});
+
+describe('review fix S2-3 — no single-beneficiary slash on EVM', () => {
+  const EVM_USDG = 'eip155:46630/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3';
+
+  it('refuses to propose an EVM case through the single path, even with a stamped beneficiary', async () => {
+    // An older row may carry the escrow contract (the old "vault") as its
+    // beneficiary. On EVM that address credits nobody; the case must not be
+    // signed for at all until a call-level rule exists.
+    const { service, proposals, executor } = build();
+    proposals.seed(
+      proposable({
+        id: 'p1',
+        assetId: EVM_USDG,
+        windowId: null,
+        beneficiaryAccount: 'eip155:46630:0x1D26000000000000000000000000000000000f41',
+      }),
+    );
+
+    const result = await service.proposeDue(NOW);
+
+    expect(executor.proposed).toHaveLength(0);
+    expect(result.proposed).toBe(0);
+    expect(proposals.rows.get('p1')!.chainLastError).toBe('SLASH_BENEFICIARY_UNSUPPORTED');
   });
 });

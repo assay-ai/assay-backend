@@ -38,6 +38,13 @@ import { EvmVerifierRegistryService } from './evm-verifier-registry.service';
 import { EvmVaultService } from './evm-vault.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
 import {
+  DEFAULT_EVM_EXECUTE_DEFER_LIMIT_MS,
+  DEFAULT_EVM_SLASH_BATCH_SIZE,
+  EvmSlashExecutor,
+} from './evm-slash-executor.service';
+import { ModuleRef } from '@nestjs/core';
+import { VerifierSigningService } from '@modules/verification/signing/services/verifier-signing.service';
+import {
   EVM_DEPLOYMENTS,
   EVM_RPC_CLIENTS,
   EvmDeployment,
@@ -272,6 +279,37 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_RELAYER, ALERT_PORT],
     },
     {
+      /**
+       * The eip155 half of `SLASH_EXECUTOR` (multiplexed in `ChainsModule`).
+       * Signs through `VerifierSigningService`, resolved via `ModuleRef` at
+       * call time exactly like `SolanaSlashExecutor`; sends through the relayer
+       * EOA, which is never the authority — the attestation is.
+       *
+       * Batching through `Multicall3` is per chain and opt-in: a deployment
+       * entry with `multicall3` set batches, one without sends one transaction
+       * per judgement. `EVM_SLASH_BATCH_SIZE` bounds a batch (default 20).
+       */
+      provide: EvmSlashExecutor,
+      useFactory: (
+        clients: never,
+        deployments: ReadonlyMap<ChainId, EvmDeployment>,
+        relayer: never,
+        moduleRef: ModuleRef,
+        config: ConfigService,
+      ) =>
+        new EvmSlashExecutor(clients, deployments, relayer, moduleRef, VerifierSigningService, {
+          now: () => Date.now(),
+          batchSize: readBatchSize(config.get<string>(EVM_SLASH_BATCH_SIZE_ENV)),
+          executeDeferLimitMs: DEFAULT_EVM_EXECUTE_DEFER_LIMIT_MS,
+          multicall: new Map(
+            [...deployments]
+              .filter(([, deployment]) => deployment.multicall3)
+              .map(([chainId, deployment]) => [chainId, deployment.multicall3 as `0x${string}`]),
+          ),
+        }),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_RELAYER, ModuleRef, ConfigService],
+    },
+    {
       provide: EvmVerifierRegistryService,
       useFactory: (clients: never, deployments: never) =>
         new EvmVerifierRegistryService(clients, deployments),
@@ -333,6 +371,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmEscrowIntentBuilder,
     EvmRelayedEscrowIntentSubmitter,
     EvmVoucherRedeemer,
+    EvmSlashExecutor,
     EvmVerifierRegistryService,
     EvmVaultService,
     EvmGasGrantService,
@@ -464,8 +503,19 @@ function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
     }
   }
 
+  // Optional: the Multicall3 the slash executor batches through on this chain.
+  // Absent means one transaction per judgement.
+  const multicall3 = record.multicall3;
+  if (multicall3 !== undefined && (typeof multicall3 !== 'string' || !ADDRESS.test(multicall3))) {
+    throw ChainErrors.configValueInvalid({
+      variable: `${EVM_DEPLOYMENTS_ENV}[${chainId}].multicall3`,
+      accepted: 'a 20-byte 0x address of Multicall3 on this chain, or absent to send singly',
+    });
+  }
+
   return {
     chainId,
+    ...(multicall3 ? { multicall3: multicall3 as `0x${string}` } : {}),
     config: record.config as `0x${string}`,
     stake: record.stake as `0x${string}`,
     escrow: record.escrow as `0x${string}`,
@@ -473,6 +523,21 @@ function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
     escrowImplementation: record.escrowImplementation as `0x${string}`,
     admin: record.admin as `0x${string}`,
   };
+}
+
+export const EVM_SLASH_BATCH_SIZE_ENV = 'EVM_SLASH_BATCH_SIZE';
+
+/** `EVM_SLASH_BATCH_SIZE`: 1–100, default {@link DEFAULT_EVM_SLASH_BATCH_SIZE}. */
+function readBatchSize(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_EVM_SLASH_BATCH_SIZE;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1 || value > 100) {
+    throw ChainErrors.configValueInvalid({
+      variable: EVM_SLASH_BATCH_SIZE_ENV,
+      accepted: 'a whole number of judgements per Multicall3 batch, 1 to 100',
+    });
+  }
+  return value;
 }
 
 /** The relayer's own float floor. Optional — the relayer has its own default. */

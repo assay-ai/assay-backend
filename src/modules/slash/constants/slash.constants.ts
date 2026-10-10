@@ -158,3 +158,41 @@ function assertClocksFit(config: SlashConfig): void {
       'Config.slash_delay_seconds (floor MIN_SLASH_DELAY_SECONDS = 72h).',
   );
 }
+
+/** DI token: {@link ProRataSlashConfig}. */
+export const SLASH_PRORATA_CONFIG = 'SLASH_PRORATA_CONFIG';
+
+/**
+ * The two dials of the per-agent, on-chain split. Separate from
+ * {@link SlashConfig} so the clocks' fit check stays about clocks.
+ */
+export interface ProRataSlashConfig {
+  /**
+   * `SLASH_PRORATA_DUST_REPORT_MINOR` (default `0` = off). A part whose 60%
+   * would be below this is kept and REPORTED (logged) — never dropped or
+   * redistributed by this setting. (A part the contract can never split at
+   * all, below 2 units at 60/30, is always left out and its share re-split
+   * among the other agents; see `planProRataSlash`.)
+   */
+  readonly dustReportBelowMinor: bigint;
+  /**
+   * `SLASH_PRORATA_STRAGGLER_MAX_ATTEMPTS` (default 6 — one hour of stale-claim
+   * retries). A part that still cannot be proposed after this many attempts,
+   * while its siblings stand on chain, is given up on (REFUSED, with the
+   * reason) so the case can proceed instead of waiting for ever.
+   */
+  readonly stragglerMaxAttempts: number;
+  /**
+   * `SLASH_PRORATA_STRAGGLER_DEADLINE_HOURS` (default 24). A straggler is also
+   * given up on once its siblings' earliest door is this close.
+   */
+  readonly stragglerDeadlineMs: number;
+}
+
+export function loadProRataSlashConfig(): ProRataSlashConfig {
+  return {
+    dustReportBelowMinor: BigInt(readMinor('SLASH_PRORATA_DUST_REPORT_MINOR', '0')),
+    stragglerMaxAttempts: readInt('SLASH_PRORATA_STRAGGLER_MAX_ATTEMPTS', 6),
+    stragglerDeadlineMs: readInt('SLASH_PRORATA_STRAGGLER_DEADLINE_HOURS', 24) * HOUR_MS,
+  };
+}

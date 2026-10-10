@@ -1,4 +1,11 @@
-import { AccountId, AssetId, chainIdOf, parseAccountId } from '@modules/chains/ports/caip.types';
+import {
+  AccountId,
+  AssetId,
+  ChainNamespace,
+  chainIdOf,
+  namespaceOf,
+  parseAccountId,
+} from '@modules/chains/ports/caip.types';
 import { isSolanaTransaction } from '@modules/chains/ports/unsigned-chain-transaction';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
@@ -26,6 +33,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import { SlashBeneficiaryService } from './slash-beneficiary.service';
 import { SlashCompensationService } from './slash-compensation.service';
+import { SlashPartsService } from './slash-parts.service';
 import { SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
 import { SLASH_PROPOSAL_SUBJECT_TYPE } from '../constants/slash-subject.constants';
 import { ArbitrationOutcome, OUTCOME_CONSEQUENCE, ResolutionKind } from '../domain/arbitration';
@@ -229,6 +237,10 @@ export class SlashExecutionService {
     @Optional()
     @Inject(STAKE_INTENT_BUILDER)
     private readonly stakeIntents: StakeIntentBuilderPort | null = null,
+    // Window-level EVM cases — one attestation per harmed agent. Optional
+    // for the same structural reason as the executor; absent, every case takes
+    // the single-judgement path it always has.
+    @Optional() private readonly parts: SlashPartsService | null = null,
   ) {}
 
   /**
@@ -387,7 +399,7 @@ export class SlashExecutionService {
             // `'transport'` stands for every failure the program did not name —
             // an RPC error, an expired blockhash, a confirmation timeout, or a
             // local refusal before anything was ever sent.
-            { chainLastError: chainErrorName(error) ?? 'transport' },
+            { chainLastError: chainErrorName(error) ?? localRefusalName(error) ?? 'transport' },
           );
           this.logger.error(
             `propose_slash failed for proposal ${proposal.id}`,
@@ -442,30 +454,12 @@ export class SlashExecutionService {
       throw SlashErrors.notExecuted({ status: 'no slash executor is configured' });
     }
 
-    // Resolved and persisted BEFORE anything is signed, because `beneficiary` is
-    // a field of the signed attestation: a row that learned it afterwards could
-    // not say who the judgement it authorised actually named.
-    const beneficiaryAccount =
-      proposal.beneficiaryAccount ?? (await this.resolveBeneficiary(proposal));
-    if (!beneficiaryAccount) {
-      // Deliberately a throw and not a void. A composition with no resolver
-      // cannot name who the compensating share is owed to, which is a fact
-      // about this process rather than about the judgement — the case stays
-      // live and a scheduler that has the resolver picks it up.
-      throw SlashErrors.noBeneficiary();
-    }
-
-    const result = await this.executor.propose({
-      requestId: proposal.chainRequestId,
-      // The provider's **stake authority**, not their id: the port hands this
-      // straight to `address()`, which throws on a uuid.
-      provider: await this.stakeAuthorityOf(proposal),
-      // The column is CAIP-10; the port takes the bare base58 address.
-      beneficiary: bareAddress(beneficiaryAccount),
-      penaltyMinor: proposal.penaltyAmount,
-      policy: proposal.toolId,
-      responseClass: 'dataFail',
-    });
+    const result = this.parts?.appliesTo(proposal)
+      ? // A window-level EVM case: one attestation per harmed agent, each
+        // naming that agent as beneficiary, proposed in one batch. The case
+        // row carries no single beneficiary; its parts do.
+        await this.parts.propose(proposal, await this.stakeAuthorityOf(proposal))
+      : await this.proposeSingle(proposal);
 
     const mirrored = CHAIN_STATUS_FOR_RECORD[result.status];
 
@@ -614,6 +608,66 @@ export class SlashExecutionService {
     }
 
     return mirrored;
+  }
+
+  /** The one-judgement path: one beneficiary on the row, one record on chain. */
+  private async proposeSingle(proposal: SlashProposalEntity) {
+    if (!this.executor) {
+      throw SlashErrors.notExecuted({ status: 'no slash executor is configured' });
+    }
+    // EVM has no single-beneficiary rule. The only EVM path is the pro-rata
+    // one; a case that reaches here on eip155 (call-level, or an older row
+    // whose stamped beneficiary may be the escrow contract — which credits
+    // nobody) is refused before anything is signed, whatever the row says.
+    if (namespaceOf(proposal.assetId as AssetId) === ChainNamespace.EIP155) {
+      throw SlashErrors.beneficiaryUnsupported({
+        chainId: chainIdOf(proposal.assetId as AssetId),
+        reason: 'EVM cases are paid pro rata per window; no call-level beneficiary rule exists',
+      });
+    }
+    // Resolved and persisted BEFORE anything is signed, because `beneficiary` is
+    // a field of the signed attestation: a row that learned it afterwards could
+    // not say who the judgement it authorised actually named.
+    const beneficiaryAccount =
+      proposal.beneficiaryAccount ?? (await this.resolveBeneficiary(proposal));
+    if (!beneficiaryAccount) {
+      // Deliberately a throw and not a void. A composition with no resolver
+      // cannot name who the compensating share is owed to, which is a fact
+      // about this process rather than about the judgement — the case stays
+      // live and a scheduler that has the resolver picks it up.
+      throw SlashErrors.noBeneficiary();
+    }
+
+    return this.executor.propose({
+      chainId: chainIdOf(proposal.assetId as AssetId),
+      requestId: proposal.chainRequestId,
+      // The provider's **stake authority**, not their id: the port hands this
+      // straight to `address()`, which throws on a uuid.
+      provider: await this.stakeAuthorityOf(proposal),
+      // The column is CAIP-10; the port takes the bare address.
+      beneficiary: bareAddress(beneficiaryAccount),
+      penaltyMinor: proposal.penaltyAmount,
+      policy: proposal.toolId,
+      responseClass: 'dataFail',
+    });
+  }
+
+  /**
+   * What the chain says this case's judgement is — one record, or the fold of
+   * a partitioned case's per-agent records. Every recovery path reads through
+   * this, so a partitioned case is reconciled exactly like a single one.
+   */
+  private async readCaseRecord(proposal: SlashProposalEntity): Promise<SlashRecordSnapshot | null> {
+    const provider = await this.stakeAuthorityOf(proposal);
+    if (this.parts?.appliesTo(proposal)) return this.parts.readRecord(proposal, provider);
+    if (!this.executor) {
+      throw SlashErrors.notExecuted({ status: 'no slash executor is configured' });
+    }
+    return this.executor.readRecord(
+      proposal.chainRequestId,
+      provider,
+      chainIdOf(proposal.assetId as AssetId),
+    );
   }
 
   /**
@@ -867,6 +921,7 @@ export class SlashExecutionService {
     let executed = 0;
     let voided = 0;
     let failed = 0;
+    const batch: { proposal: SlashProposalEntity; provider: string }[] = [];
 
     for (const candidate of due) {
       const proposal = await this.proposals.findOneScoped(candidate.organizationId, candidate.id);
@@ -912,112 +967,182 @@ export class SlashExecutionService {
           continue;
         }
 
-        const took = await this.executeOne(proposal, now);
-        if (took) executed += 1;
-      } catch (error) {
-        // Classified from the error itself, never from a name parsed out of a
-        // message, and the name is resolved from the numeric code against the
-        // vendored IDL — the program's error enum is not append-only.
-        const name = chainErrorName(error);
-        const kind = classifyChainFailure(error);
-
-        if (kind === ChainFailureKind.VOID && !EXECUTE_MUST_READ_THE_RECORD.has(name ?? '')) {
-          try {
-            await this.voidCase(
-              proposal,
-              {
-                // NOT `REFUSED`. The record is sitting on chain in `Pending`
-                // and stays there until somebody expires it; `REFUSED` is
-                // documented as "no record exists and none will", which would
-                // be a lie about a record that plainly does. What the mirror
-                // says about the record is unchanged by our failing to spend
-                // it — only `chain_last_error` learns anything.
-                status: proposal.chainStatus as ChainProposalStatus,
-                lastError: name ?? 'unknown',
-              },
-              `the settlement program refused to execute it (${name ?? 'unnamed refusal'})`,
-            );
-            // Counted whether or not `voidCase` won its CAS — the counting
-            // rule in this method's header.
-            voided += 1;
-          } catch (voidError) {
-            // `voidCase` guards everything after its own transition, so only
-            // the transition itself can reach here — which means nothing
-            // committed and the case is untouched. Count it retryable, and
-            // above all do not end the pass: one provider's database blip must
-            // not hold every other provider's harmed agent out of their
-            // compensation.
-            failed += 1;
-            this.logger.error(
-              `slash proposal ${proposal.id} could not be voided after a permanent refusal`,
-              voidError instanceof Error ? voidError.stack : String(voidError),
-            );
-          }
+        if (this.parts?.appliesTo(proposal)) {
+          // Partitioned: claimed now, executed below in ONE batch with every
+          // other due case's parts.
+          const claim = await this.claimForExecution(proposal, now);
+          if (claim) batch.push(claim);
           continue;
         }
 
-        failed += 1;
+        const took = await this.executeOne(proposal, now);
+        if (took) executed += 1;
+      } catch (error) {
+        if ((await this.recordExecuteFailure(proposal, error, now)) === 'voided') voided += 1;
+        else failed += 1;
+      }
+    }
 
-        // The one distinction this catch turns on, and it decides whether a
-        // provider can be told their penalty was cancelled when it was taken.
-        //
-        // A **named** custom program error means the settlement program ran and
-        // reverted the transaction: nothing moved, the record is still exactly
-        // as it was, and the case is safe to put back in the queue for the next
-        // tick. The caps that produce most of these — the per-key and
-        // per-provider 24h windows — drain continuously, so a later tick really
-        // can pay what this one could not.
-        //
-        // **No name** means the program never spoke: an RPC failure, an expired
-        // blockhash, a confirmation timeout. The transaction may have landed.
-        // Returning the case to `UPHELD` there would have the next tick
-        // re-submit, collect `SlashNotPending` from a record that is now
-        // `Executed`, and — before `EXECUTE_MUST_READ_THE_RECORD` above — close
-        // the case as cancelled. So the row stays `EXECUTING` with its claim
-        // standing, which is precisely the state `reconcileExecuting` exists to
-        // resolve by reading the record instead of guessing.
-        const programSpoke = name !== null && !EXECUTE_MUST_READ_THE_RECORD.has(name);
-
-        // Guarded for the same reason the VOID branch above is, and it is the
-        // same rule: a database blip on one provider's row must not end the
-        // pass and hold every other provider's harmed agent out of their
-        // compensation. Both writes here are recoverable without it — a failed
-        // return to `UPHELD` leaves the row `EXECUTING` and claimed, which the
-        // reconciler resolves by reading the record, and a failed
-        // `chain_last_error` loses a diagnostic.
+    if (batch.length > 0 && this.parts) {
+      let outcomes: Map<string, { ok: boolean; result?: SlashExecutionResult; error?: unknown }>;
+      try {
+        outcomes = await this.parts.executeMany(batch);
+      } catch (error) {
+        // Nothing is known about any of them; the transport rule applies to
+        // all — they stay EXECUTING and the reconciler reads their records.
+        outcomes = new Map(batch.map((entry) => [entry.proposal.id, { ok: false, error }]));
+      }
+      for (const { proposal } of batch) {
+        const outcome = outcomes.get(proposal.id) ?? {
+          ok: false,
+          error: SlashErrors.notExecuted({ status: 'the batch returned no outcome for the case' }),
+        };
         try {
-          if (programSpoke) {
-            await this.proposals.transitionIfIn(
-              proposal.organizationId,
-              proposal.id,
-              [SlashProposalStatus.EXECUTING],
-              { status: SlashProposalStatus.UPHELD, chainClaimedAt: null },
-            );
+          if (outcome.ok && outcome.result) {
+            await this.completeExecution(proposal, outcome.result, [SlashProposalStatus.EXECUTING]);
+            await this.compensate(proposal, outcome.result);
+            executed += 1;
+            continue;
           }
-
-          await this.proposals.update(
-            { organizationId: proposal.organizationId, id: proposal.id },
-            // The program's own name, or `'transport'` for every failure it did
-            // not name — including a local refusal before anything was sent.
-            { chainLastError: name ?? 'transport' },
-          );
-        } catch (writeError) {
-          this.logger.error(
-            `slash proposal ${proposal.id} failed to execute AND could not be marked; it stays ` +
-              `${programSpoke ? 'EXECUTING for the reconciler' : 'as it was'}`,
-            writeError instanceof Error ? writeError.stack : String(writeError),
-          );
+          throw outcome.error;
+        } catch (error) {
+          if ((await this.recordExecuteFailure(proposal, error, now)) === 'voided') voided += 1;
+          else failed += 1;
         }
-
-        this.warnIfGraceIsRunningOut(proposal, now, name);
-        this.logger.error(
-          `execute_slash failed for proposal ${proposal.id}`,
-          error instanceof Error ? error.stack : String(error),
-        );
       }
     }
 
     return { executed, voided, failed };
+  }
+
+  /**
+   * What a failed execution means for its case — the one rule, shared by the
+   * single path and the partitioned batch. See the long comments inside: a
+   * permanent refusal voids the case unless the record must be read first; a
+   * named program refusal returns it to `UPHELD`; anything unnamed leaves it
+   * `EXECUTING` for the reconciler, because the transaction may have landed.
+   */
+  private async recordExecuteFailure(
+    proposal: SlashProposalEntity,
+    error: unknown,
+    now: Date,
+  ): Promise<'voided' | 'failed'> {
+    // Classified from the error itself, never from a name parsed out of a
+    // message, and the name is resolved from the numeric code against the
+    // vendored IDL — the program's error enum is not append-only.
+    const name = chainErrorName(error);
+    const kind = classifyChainFailure(error);
+
+    if (kind === ChainFailureKind.VOID && !EXECUTE_MUST_READ_THE_RECORD.has(name ?? '')) {
+      try {
+        await this.voidCase(
+          proposal,
+          {
+            // NOT `REFUSED`. The record is sitting on chain in `Pending`
+            // and stays there until somebody expires it; `REFUSED` is
+            // documented as "no record exists and none will", which would
+            // be a lie about a record that plainly does. What the mirror
+            // says about the record is unchanged by our failing to spend
+            // it — only `chain_last_error` learns anything.
+            status: proposal.chainStatus as ChainProposalStatus,
+            lastError: name ?? 'unknown',
+          },
+          `the settlement program refused to execute it (${name ?? 'unnamed refusal'})`,
+        );
+        // Counted whether or not `voidCase` won its CAS — the counting
+        // rule in this method's header.
+        return 'voided';
+      } catch (voidError) {
+        // `voidCase` guards everything after its own transition, so only
+        // the transition itself can reach here — which means nothing
+        // committed and the case is untouched. Count it retryable, and
+        // above all do not end the pass: one provider's database blip must
+        // not hold every other provider's harmed agent out of their
+        // compensation.
+        this.logger.error(
+          `slash proposal ${proposal.id} could not be voided after a permanent refusal`,
+          voidError instanceof Error ? voidError.stack : String(voidError),
+        );
+        return 'failed';
+      }
+    }
+
+    // The one distinction this catch turns on, and it decides whether a
+    // provider can be told their penalty was cancelled when it was taken.
+    //
+    // A **named** custom program error means the settlement program ran and
+    // reverted the transaction: nothing moved, the record is still exactly
+    // as it was, and the case is safe to put back in the queue for the next
+    // tick. The caps that produce most of these — the per-key and
+    // per-provider 24h windows — drain continuously, so a later tick really
+    // can pay what this one could not.
+    //
+    // **No name** means the program never spoke: an RPC failure, an expired
+    // blockhash, a confirmation timeout. The transaction may have landed.
+    // Returning the case to `UPHELD` there would have the next tick
+    // re-submit, collect `SlashNotPending` from a record that is now
+    // `Executed`, and — before `EXECUTE_MUST_READ_THE_RECORD` above — close
+    // the case as cancelled. So the row stays `EXECUTING` with its claim
+    // standing, which is precisely the state `reconcileExecuting` exists to
+    // resolve by reading the record instead of guessing.
+    const programSpoke = name !== null && !EXECUTE_MUST_READ_THE_RECORD.has(name);
+
+    // Guarded for the same reason the VOID branch above is, and it is the
+    // same rule: a database blip on one provider's row must not end the
+    // pass and hold every other provider's harmed agent out of their
+    // compensation. Both writes here are recoverable without it — a failed
+    // return to `UPHELD` leaves the row `EXECUTING` and claimed, which the
+    // reconciler resolves by reading the record, and a failed
+    // `chain_last_error` loses a diagnostic.
+    try {
+      if (programSpoke) {
+        await this.proposals.transitionIfIn(
+          proposal.organizationId,
+          proposal.id,
+          [SlashProposalStatus.EXECUTING],
+          { status: SlashProposalStatus.UPHELD, chainClaimedAt: null },
+        );
+      }
+
+      await this.proposals.update(
+        { organizationId: proposal.organizationId, id: proposal.id },
+        // The program's own name, or `'transport'` for every failure it did
+        // not name — including a local refusal before anything was sent.
+        { chainLastError: name ?? 'transport' },
+      );
+    } catch (writeError) {
+      this.logger.error(
+        `slash proposal ${proposal.id} failed to execute AND could not be marked; it stays ` +
+          `${programSpoke ? 'EXECUTING for the reconciler' : 'as it was'}`,
+        writeError instanceof Error ? writeError.stack : String(writeError),
+      );
+    }
+
+    this.warnIfGraceIsRunningOut(proposal, now, name);
+    this.logger.error(
+      `execute_slash failed for proposal ${proposal.id}`,
+      error instanceof Error ? error.stack : String(error),
+    );
+    return 'failed';
+  }
+
+  /**
+   * `UPHELD → EXECUTING` for a partitioned case, after the checks that can
+   * fail without touching the chain — the same claim `executeOne` takes, for
+   * the same reasons. `null` when another replica holds it.
+   */
+  private async claimForExecution(
+    proposal: SlashProposalEntity,
+    now: Date,
+  ): Promise<{ proposal: SlashProposalEntity; provider: string } | null> {
+    const provider = await this.stakeAuthorityOf(proposal);
+    const claimed = await this.proposals.transitionIfIn(
+      proposal.organizationId,
+      proposal.id,
+      [SlashProposalStatus.UPHELD],
+      { status: SlashProposalStatus.EXECUTING, chainClaimedAt: now },
+    );
+    return claimed === 0 ? null : { proposal, provider };
   }
 
   /**
@@ -1116,10 +1241,7 @@ export class SlashExecutionService {
       const inFlight = caseStatus === SlashProposalStatus.EXECUTING;
 
       try {
-        const record = await this.executor.readRecord(
-          proposal.chainRequestId,
-          await this.stakeAuthorityOf(proposal),
-        );
+        const record = await this.readCaseRecord(proposal);
 
         if (record?.status === 'EXECUTED') {
           const result = {
@@ -1219,7 +1341,39 @@ export class SlashExecutionService {
       }
     }
 
+    await this.sweepStrandedParts();
+
     return { recovered, returned, voided };
+  }
+
+  /**
+   * A partitioned case can close as EXECUTED with a part still PENDING on
+   * chain — a dead part (revoked key) whose `expireSlash` failed or was not
+   * allowed yet. Its reservation holds the provider's stake, so the reconcile
+   * pass revisits it every tick until the chain releases it. Never throws.
+   */
+  private async sweepStrandedParts(): Promise<void> {
+    if (!this.parts) return;
+    try {
+      const rows = await this.parts.findCasesWithStrandedParts(this.config.sweepBatchSize);
+      const cases: { proposal: SlashProposalEntity; provider: string }[] = [];
+      for (const row of rows) {
+        const proposal = await this.proposals.findOneScoped(row.organizationId, row.proposalId);
+        if (proposal) cases.push({ proposal, provider: await this.stakeAuthorityOf(proposal) });
+      }
+      if (cases.length === 0) return;
+      const swept = await this.parts.sweepStrandedParts(cases);
+      if (swept.expired > 0 || swept.waiting > 0) {
+        this.logger.warn(
+          `stranded slash parts: ${swept.expired} expired, ${swept.waiting} still holding stake`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        'sweeping stranded slash parts failed',
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 
   /**
@@ -1321,7 +1475,13 @@ export class SlashExecutionService {
     if (!proposal) {
       throw SlashErrors.proposalNotFound({ proposalId });
     }
+    if (this.parts?.appliesTo(proposal)) {
+      // One part's cancel per request: the case stays CANCEL_REQUESTED until
+      // every part has left Pending, so the next request hands out the next.
+      return this.parts.buildCancel(proposal, await this.stakeAuthorityOf(proposal));
+    }
     return this.executor.buildCancel({
+      chainId: chainIdOf(proposal.assetId as AssetId),
       requestId: proposal.chainRequestId,
       // The provider's **stake authority**, not their id: the port hands this
       // straight to `address()`, which throws on a uuid.
@@ -1411,10 +1571,13 @@ export class SlashExecutionService {
 
     let result: SlashCancelResult;
     try {
-      result = await this.executor.expire({
-        requestId: proposal.chainRequestId,
-        provider: await this.stakeAuthorityOf(proposal),
-      });
+      result = this.parts?.appliesTo(proposal)
+        ? await this.parts.expire(proposal, await this.stakeAuthorityOf(proposal))
+        : await this.executor.expire({
+            chainId: chainIdOf(proposal.assetId as AssetId),
+            requestId: proposal.chainRequestId,
+            provider: await this.stakeAuthorityOf(proposal),
+          });
     } catch (error) {
       const name = chainErrorName(error);
       // `SlashNotExpired` means the chain's clock disagrees with this one —
@@ -1512,10 +1675,7 @@ export class SlashExecutionService {
     try {
       let record: SlashRecordSnapshot | null = null;
       try {
-        record = await this.executor.readRecord(
-          proposal.chainRequestId,
-          await this.stakeAuthorityOf(proposal),
-        );
+        record = await this.readCaseRecord(proposal);
       } catch (error) {
         this.logger.error(
           `slash proposal ${proposal.id} refused cancel_slash with SlashNotPending and its ` +
@@ -2097,6 +2257,7 @@ export class SlashExecutionService {
     // from this call: `execute_slash` reads every one of them off the
     // `SlashRecord` and consults the submitter about nothing but the fee.
     const result = await this.executor.executeProposal({
+      chainId: chainIdOf(proposal.assetId as AssetId),
       requestId: proposal.chainRequestId,
       provider,
       // The column is CAIP-10; the port takes a bare base58 address and calls
@@ -2270,6 +2431,17 @@ export class SlashExecutionService {
     result: SlashExecutionResult,
   ): Promise<void> {
     if (!this.compensation) return;
+
+    // Paid on chain, straight to each harmed agent's own account, by the
+    // contract. Booking a ledger credit too would pay them twice, out of a
+    // vault that never received the money.
+    if (this.parts?.appliesTo(proposal)) {
+      this.logger.log(
+        `slash case ${proposal.id}: ${result.agentAmountMinor} paid on chain to the harmed ` +
+          `agents directly; nothing is booked to the ledger`,
+      );
+      return;
+    }
 
     try {
       const credited = await this.compensation.distribute({
@@ -2729,4 +2901,16 @@ export class SlashExecutionService {
 function bareAddress(account: string): string {
   const segments = account.split(':');
   return segments[segments.length - 1];
+}
+
+/**
+ * A refusal this platform raised before anything reached the chain, by its
+ * own code (`SLASH_NO_HARMED_AGENTS`, …), so `chain_last_error` says why a
+ * case is not being proposed instead of the catch-all `'transport'`. Still
+ * retried: these are facts about the window or the deployment, and a human
+ * decides what to do about them.
+ */
+function localRefusalName(error: unknown): string | null {
+  const code = (error as { errorCode?: unknown })?.errorCode;
+  return typeof code === 'string' && code.startsWith('SLASH_') ? code.slice(0, 64) : null;
 }

@@ -129,8 +129,10 @@ describe('the settlement error table agrees with the IDL', () => {
     // five names out of VOID (`SlashNotExecuted`, `SlashAlreadyReversed`,
     // `MissingProvider`, `ProviderMismatch` and `PenaltyExceedsContract`, the
     // last renamed to `PenaltyExceedsMaximum`) and added
-    // `SlashExecutionWindowClosed`.
-    expect(byKind(ChainFailureKind.VOID)).toHaveLength(12);
+    // `SlashExecutionWindowClosed`. The G7 review took three more out
+    // (`AttestationExpired`, `AttestationNotYetValid`, `InvalidAttestationWindow`):
+    // they are about a signature's lifetime and are re-signed on retry.
+    expect(byKind(ChainFailureKind.VOID)).toHaveLength(9);
     expect(byKind(ChainFailureKind.WAIT)).toHaveLength(5);
     for (const name of [...byKind(ChainFailureKind.VOID), ...byKind(ChainFailureKind.WAIT)]) {
       expect(declared.has(name)).toBe(true);
@@ -140,7 +142,7 @@ describe('the settlement error table agrees with the IDL', () => {
     // default correctly retries rather than guessing at. Counted as the
     // remainder, so appending a variant lands here without a hand edit and
     // moving one out of VOID or WAIT still fails the two lines above.
-    expect(byKind(ChainFailureKind.TRANSIENT)).toHaveLength(idl.errors.length - 12 - 5);
+    expect(byKind(ChainFailureKind.TRANSIENT)).toHaveLength(idl.errors.length - 9 - 5);
   });
 });
 
@@ -330,9 +332,8 @@ describe('classifyChainFailure', () => {
       'PenaltyExceedsMaximum',
       'MissingBeneficiary',
       'StatusDoesNotSlash',
-      'AttestationExpired',
-      'AttestationNotYetValid',
-      'InvalidAttestationWindow',
+      // The attestation-window refusals are no longer here: see the block at
+      // the end of this file — they are TRANSIENT, re-signed on retry.
       'MissingVerifierSignature',
     ]) {
       expect(classifyChainFailure(refusalNamed(name))).toBe(ChainFailureKind.VOID);
@@ -373,4 +374,52 @@ describe('classifyChainFailure', () => {
     expect(chainErrorName(unrelated)).toBeNull();
     expect(classifyChainFailure(unrelated)).toBe(ChainFailureKind.TRANSIENT);
   });
+});
+
+describe('chainErrorName — EVM program errors', () => {
+  // Imported lazily so this block reads on its own.
+  const { ChainErrors } = jest.requireActual('@modules/chains/errors/chains.errors');
+  const outcome = jest.requireActual('@modules/slash/domain/chain-slash-outcome');
+
+  const evmRevert = (programErrorName: string) =>
+    ChainErrors.transactionFailed({
+      instruction: 'executeSlash',
+      reason: programErrorName,
+      customErrorCode: null,
+      programErrorName,
+    });
+
+  it('names an Errors.sol revert and classifies it with the shared vocabulary', () => {
+    expect(outcome.chainErrorName(evmRevert('VerifierRevoked'))).toBe('VerifierRevoked');
+    expect(outcome.classifyChainFailure(evmRevert('VerifierRevoked'))).toBe(
+      outcome.ChainFailureKind.VOID,
+    );
+    expect(outcome.classifyChainFailure(evmRevert('SlashCapExceeded'))).toBe(
+      outcome.ChainFailureKind.WAIT,
+    );
+  });
+
+  it('treats an unrecognised revert as a program that never spoke', () => {
+    expect(outcome.chainErrorName(evmRevert('UNKNOWN_REVERT:0xdeadbeef'))).toBeNull();
+    expect(outcome.classifyChainFailure(evmRevert('UNKNOWN_REVERT:none'))).toBe(
+      outcome.ChainFailureKind.TRANSIENT,
+    );
+  });
+});
+
+describe('attestation-window refusals are retried with a fresh signature, never voided', () => {
+  const { ChainErrors } = jest.requireActual('@modules/chains/errors/chains.errors');
+  const outcome = jest.requireActual('@modules/slash/domain/chain-slash-outcome');
+
+  it.each(['AttestationExpired', 'AttestationNotYetValid', 'InvalidAttestationWindow'])(
+    '%s is TRANSIENT: it is about the signature, not the judgement',
+    (name) => {
+      const error = ChainErrors.transactionFailed({
+        reason: name,
+        customErrorCode: null,
+        programErrorName: name,
+      });
+      expect(outcome.classifyChainFailure(error)).toBe(outcome.ChainFailureKind.TRANSIENT);
+    },
+  );
 });

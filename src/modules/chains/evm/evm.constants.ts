@@ -103,6 +103,13 @@ export interface EvmDeployment {
    * assay-evm.
    */
   readonly admin: `0x${string}`;
+  /**
+   * `Multicall3` on this chain, when the slash executor may batch through it.
+   * Optional and per chain: absent means one transaction per judgement.
+   * (`MULTICALL3_ADDRESS` below is what viem's batched READS assume; batching
+   * WRITES is opted into here, explicitly.)
+   */
+  readonly multicall3?: `0x${string}`;
 }
 
 /** DI token: `ReadonlyMap<ChainId, EvmDeployment>`. */

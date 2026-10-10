@@ -40,7 +40,13 @@ import {
   WITHDRAW_GAS_GRANT,
   WithdrawGasGrantPort,
 } from '@modules/settlement/ports/withdraw-gas-grant.port';
-import { SLASH_EXECUTOR } from '@modules/slash/ports/slash-executor.port';
+import { SLASH_EXECUTOR, SlashExecutorPort } from '@modules/slash/ports/slash-executor.port';
+import { SLASH_CAPS_READER } from '@modules/slash/ports/slash-caps-reader.port';
+import { EvmSlashExecutor } from './evm/evm-slash-executor.service';
+import {
+  NamespaceSlashCapsReader,
+  NamespaceSlashExecutor,
+} from './multiplex/namespace-slash-executor';
 import {
   VERIFIER_REGISTRY,
   VerifierRegistryPort,
@@ -428,7 +434,29 @@ import {
     // empty). The failure mode where that lookup finds nothing is loud, at the
     // first call, in whichever process has no business signing.
     SolanaSlashExecutor,
-    { provide: SLASH_EXECUTOR, useExisting: SolanaSlashExecutor },
+    // Chain-dispatched, not a global override: each request carries its
+    // `chainId` and reaches the executor of that namespace. eip155 is
+    // `EvmSlashExecutor` (X402Stake, batched through Multicall3 where
+    // configured); solana is unchanged.
+    {
+      provide: SLASH_EXECUTOR,
+      useFactory: (solana: SolanaSlashExecutor, evm: EvmSlashExecutor) =>
+        new NamespaceSlashExecutor(
+          new Map<string, SlashExecutorPort>([
+            [ChainNamespace.SOLANA, solana],
+            [ChainNamespace.EIP155, evm],
+          ]),
+        ),
+      inject: [SolanaSlashExecutor, EvmSlashExecutor],
+    },
+    // The live caps a pro-rata plan is scaled to. eip155 only: the per-agent
+    // split is an EVM path, and a Solana request is refused CHAIN_UNSUPPORTED.
+    {
+      provide: SLASH_CAPS_READER,
+      useFactory: (evm: EvmSlashExecutor) =>
+        new NamespaceSlashCapsReader(new Map([[ChainNamespace.EIP155, evm]])),
+      inject: [EvmSlashExecutor],
+    },
 
     // The buyer's own escrow doors, compiled but never signed.
     // `now` is `Date.now` in production; tests fix it to avoid a real clock.
@@ -556,6 +584,7 @@ import {
     ESCROW_BALANCE_READER,
     STAKE_INTENT_BUILDER,
     SLASH_EXECUTOR,
+    SLASH_CAPS_READER,
     VOUCHER_REDEEMER,
     ESCROW_OPENER,
     ESCROW_INTENT_BUILDER,

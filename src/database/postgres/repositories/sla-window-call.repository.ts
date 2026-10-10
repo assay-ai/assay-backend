@@ -123,6 +123,38 @@ export class SlaWindowCallRepository extends OrganizationScopedRepository<SlaWin
       .addGroupBy('intent.agent_account')
       .getRawMany<AgentWindowSpend>();
   }
+
+  /**
+   * What each agent's DATA_FAIL calls in one window were priced at — the
+   * weight of the pro-rata, on-chain compensation (`slash/domain/prorata-slash.ts`).
+   *
+   * Differs from {@link sumSpendByAgent} on purpose, and both are right for
+   * their rule: the ledger split divides an agent share already in the vault
+   * by *spend*, while the on-chain pro-rata rule pays the agents that were
+   * **harmed**, weighted by the price of the calls that harmed them.
+   * `counted_as_failure` is the SLA numerator — the DATA_FAIL verdicts; a
+   * SYSTEM_ERROR or REQUEST_ERROR never posts a window row at all.
+   *
+   * `asset_id` is filtered so a window that once mixed assets (E1) can only
+   * weigh calls priced in the asset the penalty is denominated in. The agent
+   * comes off `payment_intents.agent_account` (CAIP-10, the payer's own
+   * account) for the reason {@link sumSpendByAgent} documents.
+   */
+  async sumFailedPriceByAgent(windowId: string, assetId: string): Promise<AgentWindowSpend[]> {
+    return this.manager
+      .createQueryBuilder(SlaWindowCallEntity, 'call')
+      .innerJoin(PaymentIntentEntity, 'intent', 'intent.id = call.intentId')
+      .select('intent.organization_id', 'organizationId')
+      .addSelect('intent.agent_account', 'agentAccount')
+      .addSelect('SUM(call.price_amount)', 'spend')
+      .where('call.windowId = :windowId', { windowId })
+      .andWhere('call.countedAsFailure = true')
+      .andWhere('call.assetId = :assetId', { assetId })
+      .groupBy('intent.organization_id')
+      .addGroupBy('intent.agent_account')
+      .orderBy('intent.agent_account', 'ASC')
+      .getRawMany<AgentWindowSpend>();
+  }
 }
 
 /** One agent's total spend inside a window — see {@link SlaWindowCallRepository.sumSpendByAgent}. */
