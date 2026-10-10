@@ -8,11 +8,13 @@ import {
 import {
   PAYMENT_INTENT_EXPIRY_REASON,
   PAYMENT_INTENT_EXPIRY_SWEEP_BATCH,
+  PAYMENT_INTENT_HOLD_BACKSTOP_REASON,
   PAYMENT_INTENT_HOLD_REPAIR_REASON,
 } from '../constants/payment-intent.constants';
 import {
   HoldEffect,
   PAYMENT_INTENT_EXPIRABLE_STATUSES,
+  PAYMENT_INTENT_HOLD_BACKSTOP_STATUSES,
   findPaymentIntentTransition,
 } from '../domain/payment-intent-transitions';
 import { PaymentIntentStatus } from '../ports/payment.types';
@@ -23,6 +25,8 @@ export interface PaymentIntentSweepReport {
   readonly expired: number;
   /** Holds actually returned to the agent — releases that were a no-op are not counted. */
   readonly holdsReleased: number;
+  /** Intents a worker never resolved, expired by the 24-hour hold backstop. */
+  readonly backstopped: number;
   /** Holds returned by the repair pass, i.e. left open by an earlier pass that died. */
   readonly repaired: number;
   /** Intents this pass could not finish. They are retried on the next one. */
@@ -83,7 +87,7 @@ export class PaymentIntentExpiryService {
 
     for (const candidate of due) {
       try {
-        const released = await this.expire(candidate);
+        const released = await this.expire(candidate, PAYMENT_INTENT_EXPIRY_REASON);
         expired += 1;
         holdsReleased += released ? 1 : 0;
       } catch (error) {
@@ -94,16 +98,41 @@ export class PaymentIntentExpiryService {
       }
     }
 
+    // The 24-hour backstop: calls a worker took and never resolved. A worker
+    // that resolves first wins the compare-and-set and this candidate fails
+    // here with PAYMENT_INVALID_STATE_TRANSITION, which is counted, not retried.
+    let backstopped = 0;
+    const stuck = await this.intents.findDueForHoldBackstop(
+      now,
+      PAYMENT_INTENT_HOLD_BACKSTOP_STATUSES,
+      limit,
+    );
+    for (const candidate of stuck) {
+      try {
+        const released = await this.expire(candidate, PAYMENT_INTENT_HOLD_BACKSTOP_REASON);
+        backstopped += 1;
+        holdsReleased += released ? 1 : 0;
+        this.logger.warn(
+          `Intent ${candidate.id}: ${PAYMENT_INTENT_HOLD_BACKSTOP_REASON} (was ${candidate.status})`,
+        );
+      } catch (error) {
+        failed += 1;
+        this.logger.error(
+          `Intent ${candidate.id}: hold backstop failed from ${candidate.status}. ${describe(error)}`,
+        );
+      }
+    }
+
     const { repaired, repairFailures } = await this.repair(limit);
 
-    if (expired || repaired || failed || repairFailures) {
+    if (expired || backstopped || repaired || failed || repairFailures) {
       this.logger.log(
-        `Expiry sweep: ${expired} expired, ${holdsReleased} holds released, ` +
-          `${repaired} repaired, ${failed + repairFailures} failed`,
+        `Expiry sweep: ${expired} expired, ${backstopped} backstopped, ` +
+          `${holdsReleased} holds released, ${repaired} repaired, ${failed + repairFailures} failed`,
       );
     }
 
-    return { expired, holdsReleased, repaired, failed: failed + repairFailures };
+    return { expired, backstopped, holdsReleased, repaired, failed: failed + repairFailures };
   }
 
   /**
@@ -113,7 +142,7 @@ export class PaymentIntentExpiryService {
    * `CREATED` intent never opened one, and the rule for that edge says so
    * (`HoldEffect.NONE`) rather than the sweep inferring it from a null column.
    */
-  private async expire(candidate: DuePaymentIntent): Promise<boolean> {
+  private async expire(candidate: DuePaymentIntent, reason: string): Promise<boolean> {
     const from = candidate.status as PaymentIntentStatus;
 
     await this.paymentIntents.transition(
@@ -121,7 +150,7 @@ export class PaymentIntentExpiryService {
       candidate.id,
       from,
       PaymentIntentStatus.EXPIRED,
-      { reason: PAYMENT_INTENT_EXPIRY_REASON },
+      { reason },
     );
 
     const rule = findPaymentIntentTransition(from, PaymentIntentStatus.EXPIRED);

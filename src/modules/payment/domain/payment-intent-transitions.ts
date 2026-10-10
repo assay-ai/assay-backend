@@ -19,6 +19,8 @@ export enum PaymentIntentTrigger {
   VERIFICATION_PASS = 'VERIFICATION_PASS',
   VERIFICATION_FAIL = 'VERIFICATION_FAIL',
   EXPIRY_SWEEP = 'EXPIRY_SWEEP',
+  /** The ledger hold outlived its 24-hour deadline with the call still unresolved. */
+  HOLD_BACKSTOP = 'HOLD_BACKSTOP',
 }
 
 /** What the ledger must do to the intent's hold when an edge is taken. */
@@ -64,12 +66,14 @@ export interface PaymentIntentTransitionRule {
  * under that worker would release money for a call that is about to return
  * data.
  *
- * The intended design covers those two states with a *second* backstop — the
- * 24-hour hold expiry, releasing in the agent's favour if the worker dies.
- * **That backstop is not implemented.** `ledger_holds.expires_at` is written
- * and read by nothing; there is one mechanism, not two, and the window this
- * table leaves open is genuinely open. The design is the target; this comment
- * is the current state.
+ * Those two states have a *second* backstop instead: the 24-hour hold expiry
+ * (`HOLD_BACKSTOP`), which releases in the agent's favour when the worker
+ * died and never resolved the call. It acts only once `ledger_holds.expires_at`
+ * has passed, never on the five-minute intent deadline, and the move is a
+ * compare-and-set: a worker that resolves the call first wins, and one that
+ * arrives after the backstop loses with `PAYMENT_INVALID_STATE_TRANSITION`.
+ * A rail-B voucher stops being redeemable on chain within about 37 minutes of
+ * issue, so a call 24 hours old can no longer be paid out from the escrow.
  */
 export const PAYMENT_INTENT_TRANSITIONS: readonly PaymentIntentTransitionRule[] = [
   {
@@ -128,6 +132,19 @@ export const PAYMENT_INTENT_TRANSITIONS: readonly PaymentIntentTransitionRule[] 
     triggers: [PaymentIntentTrigger.VERIFICATION_FAIL],
     holdEffect: HoldEffect.RELEASE,
   },
+  {
+    // The 24-hour hold backstop: the worker never answered. No charge, no strike.
+    from: PaymentIntentStatus.PROVIDER_EXECUTING,
+    to: PaymentIntentStatus.EXPIRED,
+    triggers: [PaymentIntentTrigger.HOLD_BACKSTOP],
+    holdEffect: HoldEffect.RELEASE,
+  },
+  {
+    from: PaymentIntentStatus.VERIFYING,
+    to: PaymentIntentStatus.EXPIRED,
+    triggers: [PaymentIntentTrigger.HOLD_BACKSTOP],
+    holdEffect: HoldEffect.RELEASE,
+  },
 ];
 
 const TRANSITION_INDEX: ReadonlyMap<string, PaymentIntentTransitionRule> = new Map(
@@ -165,10 +182,24 @@ export const PAYMENT_INTENT_TERMINAL_STATUSES: readonly PaymentIntentStatus[] = 
   PaymentIntentStatus,
 ).filter((status) => PAYMENT_INTENT_ALLOWED_TARGETS[status].length === 0);
 
-/** The states the expiry sweep may act on — exactly those with an `EXPIRED` edge. */
-export const PAYMENT_INTENT_EXPIRABLE_STATUSES: readonly PaymentIntentStatus[] = Object.values(
-  PaymentIntentStatus,
-).filter((status) => PAYMENT_INTENT_ALLOWED_TARGETS[status].includes(PaymentIntentStatus.EXPIRED));
+/** The states with an `EXPIRED` edge `trigger` may take. */
+function statusesExpirableBy(trigger: PaymentIntentTrigger): readonly PaymentIntentStatus[] {
+  return PAYMENT_INTENT_TRANSITIONS.filter(
+    (rule) => rule.to === PaymentIntentStatus.EXPIRED && rule.triggers.includes(trigger),
+  ).map((rule) => rule.from);
+}
+
+/**
+ * The states the five-minute expiry sweep may act on — those whose `EXPIRED`
+ * edge is an `EXPIRY_SWEEP`. Not every `EXPIRED` edge: the backstop's edges
+ * leave states another worker owns, and must never be taken on the short clock.
+ */
+export const PAYMENT_INTENT_EXPIRABLE_STATUSES: readonly PaymentIntentStatus[] =
+  statusesExpirableBy(PaymentIntentTrigger.EXPIRY_SWEEP);
+
+/** The states the 24-hour hold backstop may act on. */
+export const PAYMENT_INTENT_HOLD_BACKSTOP_STATUSES: readonly PaymentIntentStatus[] =
+  statusesExpirableBy(PaymentIntentTrigger.HOLD_BACKSTOP);
 
 export function isTerminalPaymentIntentStatus(status: PaymentIntentStatus): boolean {
   return PAYMENT_INTENT_TERMINAL_STATUSES.includes(status);

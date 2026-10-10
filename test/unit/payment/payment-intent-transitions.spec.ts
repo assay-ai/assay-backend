@@ -2,6 +2,7 @@ import {
   HoldEffect,
   PAYMENT_INTENT_ALLOWED_TARGETS,
   PAYMENT_INTENT_EXPIRABLE_STATUSES,
+  PAYMENT_INTENT_HOLD_BACKSTOP_STATUSES,
   PAYMENT_INTENT_TERMINAL_STATUSES,
   PAYMENT_INTENT_TRANSITIONS,
   PaymentIntentTrigger,
@@ -89,6 +90,20 @@ const VALID_EDGES: ReadonlyArray<{
     holdEffect: HoldEffect.RELEASE,
     why: 'FAIL — same money as VOIDED, but this one is a strike against the provider',
   },
+  {
+    from: PaymentIntentStatus.PROVIDER_EXECUTING,
+    to: PaymentIntentStatus.EXPIRED,
+    triggers: [PaymentIntentTrigger.HOLD_BACKSTOP],
+    holdEffect: HoldEffect.RELEASE,
+    why: 'the 24h hold backstop — the worker never answered, the agent gets the money back',
+  },
+  {
+    from: PaymentIntentStatus.VERIFYING,
+    to: PaymentIntentStatus.EXPIRED,
+    triggers: [PaymentIntentTrigger.HOLD_BACKSTOP],
+    holdEffect: HoldEffect.RELEASE,
+    why: 'the 24h hold backstop — verification never resolved the call',
+  },
 ];
 
 describe('payment intent transition table — every valid edge', () => {
@@ -167,23 +182,14 @@ describe('payment intent transition table — edges that must be refused', () =>
     );
   });
 
-  it('VERIFYING → EXPIRED would let the sweep release money for a call still being verified', () => {
-    expectErrorCode(
-      () =>
-        requirePaymentIntentTransition(PaymentIntentStatus.VERIFYING, PaymentIntentStatus.EXPIRED),
-      PaymentErrorCode.PAYMENT_INVALID_STATE_TRANSITION,
-    );
-  });
-
-  it('PROVIDER_EXECUTING → EXPIRED would expire an in-flight call out from under its worker', () => {
-    expectErrorCode(
-      () =>
-        requirePaymentIntentTransition(
-          PaymentIntentStatus.PROVIDER_EXECUTING,
-          PaymentIntentStatus.EXPIRED,
-        ),
-      PaymentErrorCode.PAYMENT_INVALID_STATE_TRANSITION,
-    );
+  it('VERIFYING → EXPIRED and PROVIDER_EXECUTING → EXPIRED belong to the hold backstop alone', () => {
+    // The five-minute sweep must never take them: it would release money for
+    // a call another worker still owns. Only the 24-hour backstop may.
+    for (const from of [PaymentIntentStatus.VERIFYING, PaymentIntentStatus.PROVIDER_EXECUTING]) {
+      expect(findPaymentIntentTransition(from, PaymentIntentStatus.EXPIRED)?.triggers).toEqual([
+        PaymentIntentTrigger.HOLD_BACKSTOP,
+      ]);
+    }
   });
 
   it('VOIDED → PROVIDER_EXECUTING would resurrect a terminal intent', () => {
@@ -265,7 +271,7 @@ describe('payment intent transition table — what the table derives', () => {
     expect(PAYMENT_INTENT_ALLOWED_TARGETS[status]).toEqual([]);
   });
 
-  it('the expirable states are exactly those with an EXPIRED edge', () => {
+  it('the expirable states are exactly those with an EXPIRY_SWEEP edge to EXPIRED', () => {
     expect([...PAYMENT_INTENT_EXPIRABLE_STATUSES].sort()).toEqual([
       PaymentIntentStatus.CREATED,
       PaymentIntentStatus.FUNDS_SECURED,
@@ -275,6 +281,10 @@ describe('payment intent transition table — what the table derives', () => {
   it('PROVIDER_EXECUTING and VERIFYING are not expirable — the 24h hold backstop covers them', () => {
     expect(PAYMENT_INTENT_EXPIRABLE_STATUSES).not.toContain(PaymentIntentStatus.PROVIDER_EXECUTING);
     expect(PAYMENT_INTENT_EXPIRABLE_STATUSES).not.toContain(PaymentIntentStatus.VERIFYING);
+    expect([...PAYMENT_INTENT_HOLD_BACKSTOP_STATUSES].sort()).toEqual([
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+      PaymentIntentStatus.VERIFYING,
+    ]);
   });
 
   it('allowed targets agree with the table for every status', () => {

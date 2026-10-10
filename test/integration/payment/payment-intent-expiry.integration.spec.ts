@@ -143,6 +143,65 @@ describe('payment intent expiry sweep — holds always expire in the agent’s f
     expect(after.status).toBe(PaymentIntentStatus.VERIFYING);
   });
 
+  /** Moves the intent's ledger hold past its own 24-hour deadline. */
+  async function holdDeadlinePassed(intentId: string): Promise<void> {
+    await context.dataSource.query(
+      `UPDATE ledger_holds SET expires_at = now() - interval '1 minute' WHERE intent_id = $1`,
+      [intentId],
+    );
+  }
+
+  it('the 24h hold backstop releases a VERIFYING intent nobody resolved', async () => {
+    const secured = await overdueSecuredIntent('backstop-verifying');
+    await context.intents.transition(
+      context.organizationId,
+      secured.id,
+      PaymentIntentStatus.FUNDS_SECURED,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+    );
+    await context.intents.transition(
+      context.organizationId,
+      secured.id,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+      PaymentIntentStatus.VERIFYING,
+    );
+    await holdDeadlinePassed(secured.id);
+
+    const report = await context.expiry.sweep();
+
+    expect(report).toMatchObject({ backstopped: 1, holdsReleased: 1, failed: 0 });
+    const after = await context.intents.findById(context.organizationId, secured.id);
+    expect(after.status).toBe(PaymentIntentStatus.EXPIRED);
+    expect(await context.held(secured.agentAccount)).toBe(0n);
+    expect(await context.available(secured.agentAccount)).toBe(5_000_000n);
+
+    // A worker that answers after the backstop loses the compare-and-set.
+    await expect(
+      context.intents.resolve(
+        context.organizationId,
+        secured.id,
+        PaymentIntentStatus.VERIFYING,
+        PaymentIntentStatus.SETTLED,
+      ),
+    ).rejects.toMatchObject({ errorCode: 'PAYMENT_INVALID_STATE_TRANSITION' });
+  });
+
+  it('the 24h hold backstop releases a PROVIDER_EXECUTING intent whose worker died', async () => {
+    const secured = await overdueSecuredIntent('backstop-executing');
+    await context.intents.transition(
+      context.organizationId,
+      secured.id,
+      PaymentIntentStatus.FUNDS_SECURED,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+    );
+    await holdDeadlinePassed(secured.id);
+
+    const report = await context.expiry.sweep();
+
+    expect(report).toMatchObject({ backstopped: 1, holdsReleased: 1 });
+    expect(await context.held(secured.agentAccount)).toBe(0n);
+  });
+
   it('a second pass releases nothing more — the balance is restored once', async () => {
     const secured = await overdueSecuredIntent('sweep-twice');
     await context.expiry.sweep();

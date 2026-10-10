@@ -197,8 +197,10 @@ describe('payment intent state machine against Postgres', () => {
       expect(refunded.verificationVerdict).toBe('FAIL');
     });
 
-    it('the eight edges exercised above are the whole table', () => {
-      expect(PAYMENT_INTENT_TRANSITIONS).toHaveLength(8);
+    it('the eight edges exercised above, plus the two hold-backstop edges, are the whole table', () => {
+      // The two `HOLD_BACKSTOP` edges are taken for real in
+      // `payment-intent-expiry.integration.spec.ts`.
+      expect(PAYMENT_INTENT_TRANSITIONS).toHaveLength(10);
     });
   });
 
@@ -300,23 +302,6 @@ describe('payment intent state machine against Postgres', () => {
       expect(code).toBe(PaymentErrorCode.PAYMENT_INVALID_STATE_TRANSITION);
       const after = await context.intents.findById(context.organizationId, intent.id);
       expect(after.status).toBe(PaymentIntentStatus.REFUNDED);
-    });
-
-    it('VERIFYING → EXPIRED — the sweep may not take an intent being verified', async () => {
-      const intent = await driveTo('bad-verifying-expired', PaymentIntentStatus.VERIFYING);
-
-      const code = await codeOfRejection(() =>
-        context.intents.transition(
-          context.organizationId,
-          intent.id,
-          PaymentIntentStatus.VERIFYING,
-          PaymentIntentStatus.EXPIRED,
-        ),
-      );
-
-      expect(code).toBe(PaymentErrorCode.PAYMENT_INVALID_STATE_TRANSITION);
-      const after = await context.intents.findById(context.organizationId, intent.id);
-      expect(after.status).toBe(PaymentIntentStatus.VERIFYING);
     });
 
     it('VOIDED → PROVIDER_EXECUTING — resurrecting a terminal intent', async () => {

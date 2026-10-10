@@ -3,33 +3,22 @@ import { CronExpression } from '@nestjs/schedule';
 /**
  * How long an intent may sit unresolved before the sweep expires it.
  *
- * Five minutes from creation. The intended design makes it the middle of three
- * bounds — the voucher signature
- * rejects a stale voucher above it, and the ledger hold's own 24-hour expiry
- * catches anything that gets past both. In this codebase there are **two**
- * bounds, not three: the third is unimplemented, so this sweep is the last one
- * that actually runs. See {@link PAYMENT_INTENT_HOLD_TTL_MS}.
+ * Five minutes from creation, and only for intents that never got moving
+ * (`CREATED`, `FUNDS_SECURED`). The middle of three bounds: the voucher
+ * signature rejects a stale voucher above it, and the ledger hold's own
+ * 24-hour expiry ({@link PAYMENT_INTENT_HOLD_TTL_MS}) catches a call a worker
+ * took and never resolved.
  */
 export const PAYMENT_INTENT_TTL_MS = 5 * 60 * 1000;
 
 /**
- * The deadline stamped on the hold — **which nothing enforces.**
+ * The deadline stamped on the hold, and the backstop that enforces it.
  *
- * The intended design makes this the backstop that releases an agent's funds
- * if the verification worker crashes and never resumes, so that holds always
- * expire in the agent's favour. That is the target, not the current state.
- *
- * What actually happens: the value reaches `ledger_holds.expires_at` via
- * `LedgerHoldService.createHold`, is mapped into a DTO, and is read by nothing
- * else. No cron sweeps holds by expiry; `PaymentIntentExpiryService`'s repair
- * pass is gated on `status = EXPIRED`, so it never sees a hold left open by a
- * terminal intent. Funds stranded this way stay stranded until somebody
- * releases the hold by hand.
- *
- * It is kept, and kept at 24 hours, because it is the deadline a sweeper will
- * read when one is written — deleting it would delete the only record of what
- * the window is meant to be. **Do not cite it as a guarantee.** Anything
- * relying on funds coming back needs to release them itself.
+ * `LedgerHoldService.createHold` writes it to `ledger_holds.expires_at`. When
+ * it passes with the intent still `PROVIDER_EXECUTING` or `VERIFYING` — the
+ * worker died and never answered — `PaymentIntentExpiryService` moves the
+ * intent to `EXPIRED` and releases the hold, so a hold always expires in the
+ * agent's favour.
  */
 export const PAYMENT_INTENT_HOLD_TTL_MS = 24 * 60 * 60 * 1000;
 
@@ -48,6 +37,10 @@ export const PAYMENT_INTENT_EXPIRY_SWEEP_BATCH = 200;
 /** Written to `status_reason` so the row itself says who moved it and why. */
 export const PAYMENT_INTENT_EXPIRY_REASON =
   'expiry sweep: expiresAt elapsed before the call reached a terminal state';
+
+/** Written when the 24-hour hold backstop expired an intent a worker never resolved. */
+export const PAYMENT_INTENT_HOLD_BACKSTOP_REASON =
+  'hold backstop: the 24-hour hold deadline passed before the call was resolved';
 
 /** Written when a sweep expired the intent but the hold release did not land. */
 export const PAYMENT_INTENT_HOLD_REPAIR_REASON =

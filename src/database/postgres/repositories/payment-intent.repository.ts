@@ -295,6 +295,29 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
+   * Intents a worker took and never resolved, whose ledger hold has passed its
+   * own deadline (`ledger_holds.expires_at`, 24 hours) while still `OPEN`.
+   *
+   * The 24-hour backstop's candidates. Cross-tenant like the other sweep
+   * reads, oldest deadline first, bounded by `limit`.
+   */
+  async findDueForHoldBackstop(
+    now: Date,
+    statuses: readonly string[],
+    limit: number,
+  ): Promise<DuePaymentIntent[]> {
+    return this.selectSweepCandidates()
+      .innerJoin('ledger_holds', 'hold', 'hold.id = intent.hold_id')
+      .where('intent.status IN (:...statuses)', { statuses })
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(`hold.status = 'OPEN'`)
+      .andWhere('hold.expires_at < :now', { now })
+      .orderBy('hold.expires_at', 'ASC')
+      .limit(limit)
+      .getRawMany<DuePaymentIntent>();
+  }
+
+  /**
    * Intents already expired whose hold was never released.
    *
    * The repair half of the sweep. A pass that expires an intent and then dies
