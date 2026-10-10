@@ -286,6 +286,20 @@ describe('DepositService.createDeposit', () => {
     );
   });
 
+  it('refuses a chain this deployment does not enable before opening an escrow on it', async () => {
+    const harness = buildHarness({ escrowExists: false });
+    (harness.registry.resolve as jest.Mock).mockImplementation((chainId: ChainId) => {
+      throw ChainErrors.unsupportedChain({ chainId });
+    });
+
+    await expectErrorCodeAsync(
+      () => harness.service.createDeposit(input()),
+      ChainErrorCode.CHAIN_UNSUPPORTED,
+    );
+    expect(harness.opener.open).not.toHaveBeenCalled();
+    expect(harness.repo.rows.size).toBe(0);
+  });
+
   it('does not open a second escrow for a buyer who already has one', async () => {
     const harness = buildHarness({ escrowExists: true });
     await harness.service.createDeposit(input());
