@@ -731,7 +731,9 @@ interface RestorationBasis {
  * every row reads `ON_DECISION`.
  */
 function restorationBasisFor(proposal: SlashProposalEntity): RestorationBasis | null {
-  if (!proposal.resolvedAt) return null;
+  // `S-1` closes a case without a resolution (no kind, no `resolvedAt`); it is
+  // settled, not pending.
+  if (!proposal.resolvedAt && proposal.status !== 'CANCELLED') return null;
 
   if (proposal.outcome) {
     const consequence = OUTCOME_CONSEQUENCE[proposal.outcome as ArbitrationOutcome];

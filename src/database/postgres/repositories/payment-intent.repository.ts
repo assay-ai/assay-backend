@@ -636,6 +636,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .groupBy(groupExpression)
       .addGroupBy('intent.assetId')
       .addGroupBy('intent.decimals')
+      // Without an ORDER BY, Postgres returns groups in hash order, so a daily
+      // series came back shuffled. Every key is a string (an ISO date for
+      // `day`), so ascending is chronological for `day` and stable for the rest.
+      .orderBy(groupExpression, 'ASC')
+      .addOrderBy('intent.assetId', 'ASC')
       .getRawMany<{
         key: string;
         asset: string;
@@ -683,7 +688,10 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       case ReceiptsSummaryGroupBy.TOOL:
         return 'intent.toolId';
       case ReceiptsSummaryGroupBy.PROVIDER:
-        return "COALESCE(intent.providerId::text, 'unassigned')";
+        // The column, not the property: TypeORM only rewrites `alias.property` when
+        // a delimiter follows, and `::text` is not one, so `intent.providerId`
+        // reached Postgres verbatim ("column intent.providerid does not exist").
+        return "COALESCE(intent.provider_id::text, 'unassigned')";
       case ReceiptsSummaryGroupBy.DAY:
         return `to_char(${CREATED_AT_UTC_DAY}, 'YYYY-MM-DD')`;
       case ReceiptsSummaryGroupBy.STATUS:
