@@ -357,6 +357,101 @@ describe('BindingEditorService.create — what gets stored', () => {
   });
 });
 
+describe('BindingEditorService — a charging mode needs a price above zero', () => {
+  it.each([PricingMode.PAID, PricingMode.FREEMIUM])(
+    'refuses a %s create at price 0, and writes nothing',
+    async (pricingMode) => {
+      const { service, written } = build();
+
+      await expectErrorCodeAsync(
+        () => service.create(PROVIDER, SUBJECT, body({ pricingMode, priceAmount: '0' })),
+        ProviderErrorCode.PROVIDER_BINDING_PRICE_NOT_POSITIVE,
+      );
+      expect(written).toEqual([]);
+    },
+  );
+
+  it('refuses a zero-padded zero as well', async () => {
+    const { service } = build();
+
+    await expectErrorCodeAsync(
+      () => service.create(PROVIDER, SUBJECT, body({ priceAmount: '000' })),
+      ProviderErrorCode.PROVIDER_BINDING_PRICE_NOT_POSITIVE,
+    );
+  });
+
+  it('refuses a PATCH that sets the price to 0 on a PAID binding', async () => {
+    const { service, written } = build(row());
+
+    await expectErrorCodeAsync(
+      () => service.update(PROVIDER, SUBJECT, row().id, { priceAmount: '0' }),
+      ProviderErrorCode.PROVIDER_BINDING_PRICE_NOT_POSITIVE,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('refuses a PATCH that only switches the mode to PAID while the stored price is 0', async () => {
+    const { service } = build(row({ pricingMode: PricingMode.FREE, priceAmount: '0' }));
+
+    await expectErrorCodeAsync(
+      () => service.update(PROVIDER, SUBJECT, row().id, { pricingMode: PricingMode.PAID }),
+      ProviderErrorCode.PROVIDER_BINDING_PRICE_NOT_POSITIVE,
+    );
+  });
+
+  it('accepts mode PAID together with a positive price, and price 0 on FREE', async () => {
+    const { service } = build(row({ pricingMode: PricingMode.FREE, priceAmount: '0' }));
+    const saved = await service.update(PROVIDER, SUBJECT, row().id, {
+      pricingMode: PricingMode.PAID,
+      priceAmount: '1',
+    });
+    expect(saved.pricingMode).toBe(PricingMode.PAID);
+
+    const free = build(row());
+    await expect(
+      free.service.update(PROVIDER, SUBJECT, row().id, {
+        pricingMode: PricingMode.FREE,
+        priceAmount: '0',
+      }),
+    ).resolves.toBeDefined();
+  });
+});
+
+describe('BindingEditorService — free-tier limits the API can return exactly', () => {
+  it('refuses a freeDailyBudget above Number.MAX_SAFE_INTEGER on create and update', async () => {
+    const tooLarge = '9007199254740993';
+    const { service, written } = build(row());
+
+    await expectErrorCodeAsync(
+      () => service.create(PROVIDER, SUBJECT, body({ freeDailyBudget: tooLarge })),
+      ProviderErrorCode.PROVIDER_BINDING_FREE_LIMIT_TOO_LARGE,
+    );
+    await expectErrorCodeAsync(
+      () => service.update(PROVIDER, SUBJECT, row().id, { freeDailyBudget: tooLarge }),
+      ProviderErrorCode.PROVIDER_BINDING_FREE_LIMIT_TOO_LARGE,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('accepts Number.MAX_SAFE_INTEGER itself', async () => {
+    const { service } = build(row());
+
+    const saved = await service.update(PROVIDER, SUBJECT, row().id, {
+      freeDailyBudget: String(Number.MAX_SAFE_INTEGER),
+    });
+    expect(saved.freeDailyBudget).toBe(Number.MAX_SAFE_INTEGER);
+  });
+
+  it('refuses a freeQuotaPerAgent beyond the int column', async () => {
+    expect(
+      await invalidProperties(UpdateToolBindingBodyDto, { freeQuotaPerAgent: 2_147_483_648 }),
+    ).toEqual(['freeQuotaPerAgent']);
+    expect(
+      await invalidProperties(UpdateToolBindingBodyDto, { freeQuotaPerAgent: 2_147_483_647 }),
+    ).toEqual([]);
+  });
+});
+
 describe('BindingEditorService.update — which edits raise the revision', () => {
   it('raises the revision and snapshots when the response mapping changes', async () => {
     const { service, written } = build(row());
