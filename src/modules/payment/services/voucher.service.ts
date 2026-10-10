@@ -385,8 +385,8 @@ export class VoucherService {
    *
    * `wasIssued` is stateless with respect to *use*: it stays `true` for a seq
    * this backend has already spent. That is deliberate — it answers "could
-   * this seq ever be valid", and "has it already been spent" is exactly the
-   * question `record()`'s durable insert answers next.
+   * this seq ever be valid". "Has it already been spent" is read next from the
+   * intents themselves, and `record()`'s durable insert is the final word.
    */
   private async assertIssuedSeq(voucher: Voucher, input: RedeemVoucherInput): Promise<void> {
     const issued = await this.seqs.wasIssued(
@@ -396,6 +396,21 @@ export class VoucherService {
     );
     if (!issued) {
       throw PaymentErrors.voucherSeqMismatch({
+        account: input.agentAccount,
+        actual: voucher.seq,
+      });
+    }
+
+    // A sequential replay is refused here, by name, rather than left to the
+    // unique index in `record()` — which still arbitrates a concurrent one,
+    // with the same error.
+    const used = await this.intents.isVoucherSeqUsed(
+      input.organizationId,
+      input.agentAccount,
+      voucher.seq,
+    );
+    if (used) {
+      throw PaymentErrors.voucherSeqAlreadyUsed({
         account: input.agentAccount,
         actual: voucher.seq,
       });
@@ -413,8 +428,8 @@ export class VoucherService {
    * branch existed only to give a Redis reservation back, and there is no
    * reservation any more. A unique-index violation on the seq is not a
    * transient failure to recover from — `PaymentIntentService.create` already
-   * turns it into `PAYMENT_VOUCHER_SEQ_MISMATCH`, which is exactly the answer
-   * a genuine replay deserves, and any other failure simply propagates with
+   * turns it into `PAYMENT_VOUCHER_SEQ_ALREADY_USED`, which is exactly the
+   * answer a genuine replay deserves, and any other failure simply propagates with
    * nothing to undo.
    */
   private async record(voucher: Voucher, input: RedeemVoucherInput): Promise<PaymentIntent> {

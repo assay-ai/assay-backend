@@ -55,6 +55,7 @@ export enum PaymentErrorCode {
   PAYMENT_ESCROW_ACCOUNT_CLAIMED = 'PAYMENT_ESCROW_ACCOUNT_CLAIMED',
   PAYMENT_ESCROW_BALANCE_UNAVAILABLE = 'PAYMENT_ESCROW_BALANCE_UNAVAILABLE',
   PAYMENT_VOUCHER_SEQ_MISMATCH = 'PAYMENT_VOUCHER_SEQ_MISMATCH',
+  PAYMENT_VOUCHER_SEQ_ALREADY_USED = 'PAYMENT_VOUCHER_SEQ_ALREADY_USED',
   PAYMENT_WITHDRAWAL_PENDING = 'PAYMENT_WITHDRAWAL_PENDING',
 }
 
@@ -480,6 +481,20 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `Voucher sequence ${context?.actual ?? 'unknown'} was not issued to this account` +
       `${context?.expected ? ` (expected ${context.expected})` : ''}`,
+  },
+
+  /**
+   * The seq was issued to this account and an earlier call already spent it —
+   * a replay. Distinct from {@link voucherSeqMismatch}, which says the seq was
+   * never handed out: a client told "not issued" goes looking for a bug in its
+   * seq bookkeeping, while this one needs only a fresh voucher.
+   */
+  voucherSeqAlreadyUsed: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Voucher sequence ${context?.actual ?? 'unknown'} was already used for an earlier call ` +
+      `on this account; a voucher pays for one call, sign a new one with a fresh sequence`,
   },
 
   /**

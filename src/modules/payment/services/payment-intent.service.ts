@@ -146,13 +146,13 @@ export class PaymentIntentService {
         throw PaymentErrors.voucherNonceReplayed({ nonce: row.voucherNonce });
       }
       // Voucher v2's replay guard: `VoucherService.assertIssuedSeq` already
-      // confirmed the seq was issued to this account before this insert ran,
-      // so a collision here means a second call reached the insert for the
-      // same `(account, seq)` first — a genuine concurrent replay, not a
-      // fast-path miss (there is no fast path any more; see
-      // `voucher-nonce.store.ts`'s deletion).
+      // confirmed the seq was issued to this account and not yet used before
+      // this insert ran, so a collision here means a second call reached the
+      // insert for the same `(account, seq)` first — a genuine concurrent
+      // replay. The seq WAS issued, so this is "already used", never
+      // "not issued".
       if (violation.constraint === VOUCHER_SEQ_CONSTRAINT) {
-        throw PaymentErrors.voucherSeqMismatch({
+        throw PaymentErrors.voucherSeqAlreadyUsed({
           account: row.agentAccount,
           actual: row.voucherSeq,
         });
@@ -164,6 +164,16 @@ export class PaymentIntentService {
     }
 
     return this.findById(input.organizationId, row.id as string);
+  }
+
+  /**
+   * Whether an intent already spent this voucher `seq` for `account` — the
+   * up-front replay read. `uq_payment_intents_account_voucher_seq` in
+   * {@link create} stays the guarantee; this only lets a sequential replay be
+   * refused with the right reason before anything is written.
+   */
+  async isVoucherSeqUsed(organizationId: string, account: string, seq: string): Promise<boolean> {
+    return this.intents.existsBy({ organizationId, agentAccount: account, voucherSeq: seq });
   }
 
   async findById(organizationId: string, intentId: string): Promise<PaymentIntent> {

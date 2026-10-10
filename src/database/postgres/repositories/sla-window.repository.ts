@@ -59,17 +59,20 @@ export class SlaWindowRepository extends OrganizationScopedRepository<SlaWindowE
   }
 
   /**
-   * The binding's current window, if one is open.
+   * The binding's open window in one settlement asset, if there is one.
    *
    * `uq_sla_windows_open` guarantees at most one row answers this per
-   * binding — the read half of the race `postCall` resolves on the write
-   * side.
+   * (binding, asset) — the read half of the race `postCall` resolves on the
+   * write side. Per asset because a window sums `price_amount` into
+   * `total_call_amount` and prices its penalty in `asset_id`: a binding that
+   * moves from one asset to another must not add two currencies together.
    */
   async findOpenForBinding(
     organizationId: string,
     bindingId: string,
+    assetId: string,
   ): Promise<SlaWindowEntity | null> {
-    return this.findOneBy({ organizationId, bindingId, status: OPEN });
+    return this.findOneBy({ organizationId, bindingId, assetId, status: OPEN });
   }
 
   /**

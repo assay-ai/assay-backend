@@ -171,7 +171,7 @@ export class ProviderSlaWindowsService {
     }
 
     const [openWindow, closedAggregate, peerRows] = await Promise.all([
-      this.windows.findOpenForBinding(organizationId, bindingId),
+      this.windows.findOpenForBinding(organizationId, bindingId, binding.assetId),
       this.closedAggregateForBinding(organizationId, bindingId),
       this.peerRowsForTool(binding.toolId),
     ]);

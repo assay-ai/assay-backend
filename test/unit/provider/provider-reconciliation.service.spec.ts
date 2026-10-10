@@ -233,6 +233,38 @@ describe('ProviderReconciliationService — classification agrees with the share
   });
 });
 
+describe('ProviderReconciliationService — "settled to you" is net of the platform fee', () => {
+  // E2E (EVM run, E7): 2 PASS calls at 100000 with a 10% take. The provider
+  // received 180000 on chain and in the ledger; the PAID_CREDITED row said
+  // "settled to you" 200000, the gross price.
+  it('reports PAID_CREDITED credited as Σ provider_amount, and the class rows sum to net', async () => {
+    const { service } = build([
+      group({
+        callClass: 'PAID',
+        status: 'SETTLED',
+        calls: '2',
+        credited: '200000',
+        providerAmount: '180000',
+        platformFee: '20000',
+      }),
+    ]);
+
+    const result = await service.getReconciliation(PROVIDER, WINDOW);
+    const paid = classOf(result.classBreakdown, CallReconciliationClass.PAID_CREDITED);
+
+    expect(paid.note).toBe('settled to you');
+    expect(paid.credited).toEqual({ amount: '180000', asset: USDC, decimals: 6 });
+    expect(result.gross).toEqual({ amount: '200000', asset: USDC, decimals: 6 });
+    expect(result.platformTake).toEqual({ amount: '20000', asset: USDC, decimals: 6 });
+    expect(result.net).toEqual({ amount: '180000', asset: USDC, decimals: 6 });
+    const sumOfRows = result.classBreakdown.reduce(
+      (total, row) => total + BigInt(row.credited?.amount ?? '0'),
+      0n,
+    );
+    expect(sumOfRows.toString()).toBe(result.net?.amount);
+  });
+});
+
 describe('ProviderReconciliationService — rail B awaiting redemption', () => {
   it('counts a settled, unredeemed group apart and keeps it out of gross, take and net', async () => {
     const rows: GroupRow[] = [

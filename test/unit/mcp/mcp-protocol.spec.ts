@@ -85,7 +85,13 @@ describe('MCP protocol surface, through the reference client', () => {
     // receipt says `VERIFYING`, which is the truth.
     expect(receipt.status).toBe(PaymentIntentStatus.VERIFYING);
     expect(receipt.providerId).toBe('provider-a');
+    // Held, not charged: nothing is charged until the verdict settles it.
     expect(receipt.charged).toEqual({
+      amount: '0',
+      asset: usdc('0.05').asset,
+      display: '$0',
+    });
+    expect(receipt.held).toEqual({
       amount: usdc('0.05').amount,
       asset: usdc('0.05').asset,
       // The same string `tools/list` quoted, not a second rendering of it.
@@ -172,6 +178,8 @@ describe('MCP protocol surface, through the reference client', () => {
     expect(outageResult._meta?.[X402_ERROR]).toMatchObject({
       code: 'TOOL_ALL_BINDINGS_FAILED',
       retryable: true,
+      // So the agent can open the receipt of the voided call.
+      intentId: expect.any(String),
     });
     expect(rejectedResult._meta?.[X402_ERROR]).toMatchObject({
       code: 'PROVIDER_REQUEST_ERROR',

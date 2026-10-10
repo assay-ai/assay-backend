@@ -280,6 +280,13 @@ describe('ProviderRouterService', () => {
       expect(error?.message).toContain('failover exhausted every remaining provider');
       // Each provider tried exactly once. No hanging, no loop.
       expect(invoker.providerIds).toEqual([A, B]);
+      // The classified attempt is kept for the caller, so the voided intent can
+      // say SYSTEM_ERROR and name what was tried rather than "never reached one".
+      expect(error?.context?.lastAttempt).toEqual({
+        bindingId: invoker.bindingIds[1],
+        providerId: B,
+        responseClass: 'SYSTEM_ERROR',
+      });
     });
 
     it('stops at the attempt cap even when providers remain', async () => {

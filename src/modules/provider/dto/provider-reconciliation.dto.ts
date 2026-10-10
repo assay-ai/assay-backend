@@ -61,7 +61,8 @@ export class ReconciliationClassRowDto {
     type: MoneyDto,
     nullable: true,
     description:
-      'Σ price_amount over this class’s SETTLED rows — what counted toward `gross` below. ' +
+      'Σ provider_amount over this class’s SETTLED rows — what reached the provider, net of ' +
+      'the platform fee; the rows sum to `net` below. ' +
       '`null` only when the whole window has no resolvable asset (see `asset` on the response).',
   })
   credited: MoneyDto | null;
@@ -154,7 +155,9 @@ export class GetProviderReconciliationResponseDto {
   @ApiProperty({
     type: MoneyDto,
     nullable: true,
-    description: 'Σ `credited` across every class — what was billed for this window',
+    description:
+      'Σ price_amount over the SETTLED rows — what was billed for this window ' +
+      '(`net + platformTake`)',
   })
   gross: MoneyDto | null;
 

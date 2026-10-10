@@ -55,11 +55,12 @@ class FakeSlaWindows {
     this.rows.set(row.id, { ...row });
   }
 
-  async findOpenForBinding(organizationId: string, bindingId: string) {
+  async findOpenForBinding(organizationId: string, bindingId: string, assetId?: string) {
     for (const row of this.rows.values()) {
       if (
         row.organizationId === organizationId &&
         row.bindingId === bindingId &&
+        (assetId === undefined || row.assetId === assetId) &&
         row.status === 'OPEN'
       ) {
         return { ...row };
@@ -84,6 +85,7 @@ class FakeSlaWindows {
         if (
           row.organizationId === values.organizationId &&
           row.bindingId === values.bindingId &&
+          row.assetId === values.assetId &&
           row.status === 'OPEN'
         ) {
           throw uniqueViolation('uq_sla_windows_open');
@@ -469,6 +471,31 @@ describe('SlaWindowService.postCall', () => {
     const window = [...windows.rows.values()][0];
     expect(window.totalCalls).toBe(2);
     expect(window.verifiedCalls).toBe(2);
+  });
+
+  /**
+   * A binding that changes its settlement asset (Solana USDC -> USDG on an EVM
+   * chain) must not pour the new asset's calls into the old asset's window:
+   * `total_call_amount` would sum two currencies and a breach would be priced
+   * in the wrong one. Each asset gets its own window, and switching back finds
+   * the old one still open rather than a fresh, reset sample.
+   */
+  it('a binding that changes asset opens a separate window per asset; totals never mix', async () => {
+    const { service, windows } = harness();
+    const USDG = 'eip155:46630/erc20:0xusdg';
+
+    await service.postCall(callInput({ intentId: 'usdc-1', priceAmount: '600000' }));
+    await service.postCall(callInput({ intentId: 'usdg-1', assetId: USDG, priceAmount: '100000' }));
+    await service.postCall(callInput({ intentId: 'usdg-2', assetId: USDG, priceAmount: '100000' }));
+    await service.postCall(callInput({ intentId: 'usdc-late', priceAmount: '600000' }));
+
+    const rows = [...windows.rows.values()];
+    expect(rows).toHaveLength(2);
+    const usdc = rows.find((row) => row.assetId === ASSET)!;
+    const usdg = rows.find((row) => row.assetId === USDG)!;
+    expect(usdc).toMatchObject({ status: 'OPEN', totalCalls: 2, totalCallAmount: '1200000' });
+    expect(usdg).toMatchObject({ status: 'OPEN', totalCalls: 2, totalCallAmount: '200000' });
+    expect(usdg.sequence).not.toBe(usdc.sequence);
   });
 
   it('a warning level is stamped exactly once under concurrent posts crossing the same band', async () => {

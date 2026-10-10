@@ -90,13 +90,13 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
   });
 
   describe('replay', () => {
-    it('refuses the second presentation, from the unique index alone', async () => {
+    it('refuses the second presentation as already used', async () => {
       const input = context.voucherFor();
       await context.vouchers.redeem(input);
 
       await expectErrorCodeAsync(
         () => context.vouchers.redeem(input),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH,
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
       );
 
       // And exactly one intent exists for that seq, so exactly one hold was
@@ -130,7 +130,7 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
 
       expect(results.filter((result) => result.status === 'fulfilled')).toHaveLength(1);
       const loser = results.find((result) => result.status === 'rejected') as PromiseRejectedResult;
-      expect(loser.reason.errorCode).toBe(PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH);
+      expect(loser.reason.errorCode).toBe(PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED);
 
       expect(await countIntentsWithSeq(context.payer, input.signed.voucher.seq)).toBe(1);
       // One hold, not two: the loser never reached the ledger.
@@ -228,7 +228,7 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
       // Still spent.
       await expectErrorCodeAsync(
         () => context.vouchers.redeem(input),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH,
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
       );
     });
 
@@ -354,7 +354,7 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
 
       await expectErrorCodeAsync(
         () => create('shared-seq-b', '42'),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH,
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
       );
     });
   });
@@ -371,7 +371,7 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
 
         await expectErrorCodeAsync(
           () => broke.vouchers.redeem(input),
-          PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH,
+          PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
         );
       } finally {
         await broke.close();
