@@ -21,6 +21,9 @@ import { PricingMode } from '@modules/tool/ports/tool.types';
 
 import { ToolBindingDetailDto } from './get-tool-bindings.dto';
 
+/** `free_quota_per_agent` is an `int` column; anything above would be a 500 at the insert. */
+const INT4_MAX = 2_147_483_647;
+
 /**
  * `POST` / `PATCH /providers/me/tool-bindings` — the binding editor.
  *
@@ -131,6 +134,7 @@ export class SaveToolBindingBodyDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(INT4_MAX)
   freeQuotaPerAgent?: number | null;
 
   @ApiPropertyOptional({ nullable: true, description: 'Daily free spend cap, in minor units.' })
@@ -266,6 +270,7 @@ export class UpdateToolBindingBodyDto {
   @IsOptional()
   @IsInt()
   @Min(0)
+  @Max(INT4_MAX)
   freeQuotaPerAgent?: number | null;
 
   @ApiPropertyOptional({ nullable: true })

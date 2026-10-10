@@ -93,6 +93,16 @@ export class SettlementAssetDto {
   @ApiProperty({ description: 'CAIP-19 asset id — what `assetId` on a binding must be.' })
   assetId: string;
 
+  @ApiProperty({
+    description:
+      'CAIP-2 chain this asset settles on. A binding priced in it can only be offered on ' +
+      'this chain, so a provider with no active enrolment there is refused with ' +
+      '`PROVIDER_BINDING_CHAIN_NOT_ENROLLED` — the console can compare it with the ' +
+      'chains in `GET /providers/me/stake` and warn before submit.',
+    example: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+  })
+  chainId: string;
+
   @ApiProperty({ example: 'USDC' })
   symbol: string;
 
