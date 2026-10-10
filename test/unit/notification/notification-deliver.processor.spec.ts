@@ -93,9 +93,16 @@ describe('NotificationDeliverProcessor — the delivery observer', () => {
     build();
     sender.send.mockResolvedValue({ delivered: false, error: 'smtp refused' });
 
-    await processor.process(job());
+    await processor.process(job()).catch(() => undefined);
 
     expect(observer.onDelivered).not.toHaveBeenCalled();
+  });
+
+  it('fails the job when the send failed, so the queue retries it', async () => {
+    build();
+    sender.send.mockResolvedValue({ delivered: false, error: 'smtp refused' });
+
+    await expect(processor.process(job())).rejects.toThrow(/smtp refused/);
   });
 
   it('does NOT tell the observer when the notification names no subject', async () => {
