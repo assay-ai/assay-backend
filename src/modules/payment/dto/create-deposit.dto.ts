@@ -256,7 +256,7 @@ export class EvmDepositRequirementsDto {
       'The bare ERC-20 token address, chain-native — this is the contract `approve` is called ' +
       'on. Not CAIP-19: it goes into a contract call, which knows nothing about CAIP. On ' +
       '`eip155:46630` this is USDG, not USDC.',
-    example: '0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec',
+    example: '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac',
   })
   readonly asset!: string;
 

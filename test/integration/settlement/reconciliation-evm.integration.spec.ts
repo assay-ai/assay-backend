@@ -37,7 +37,7 @@ const DEPLOYMENT: EvmDeployment = {
   config: CONFIG_PROXY,
   stake: '0x2222222222222222222222222222222222222222',
   escrow: ESCROW_PROXY,
-  asset: '0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec',
+  asset: '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac',
   escrowImplementation: ESCROW_IMPLEMENTATION,
   admin: ADMIN,
 };

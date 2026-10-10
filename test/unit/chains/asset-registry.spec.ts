@@ -82,19 +82,73 @@ describe('asset-registry — SOLANA_DEVNET_USDC_MINT override', () => {
   });
 });
 
+describe('asset-registry — ROBINHOOD_TESTNET_USDG_ADDRESS', () => {
+  const ORIGINAL_ENV = { ...process.env };
+  const TOKEN = '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac';
+
+  afterEach(() => {
+    process.env = { ...ORIGINAL_ENV };
+  });
+
+  async function reimport(): Promise<{
+    registry: typeof import('@modules/chains/ports/asset-registry');
+    metadata: typeof import('@modules/chains/chain-metadata');
+  }> {
+    jest.resetModules();
+    return {
+      registry: await import('@modules/chains/ports/asset-registry'),
+      metadata: await import('@modules/chains/chain-metadata'),
+    };
+  }
+
+  it('registers no testnet token and refuses to boot eip155:46630 when unset', async () => {
+    delete process.env.ROBINHOOD_TESTNET_USDG_ADDRESS;
+
+    const { registry, metadata } = await reimport();
+
+    expect(registry.ASSET_IDS.USDG_ROBINHOOD_TESTNET).toBeNull();
+    expect(registry.settlementAssetsOn(CHAIN_IDS.ROBINHOOD_TESTNET)).toEqual([]);
+    expect(() => metadata.assertChainMetadata([CHAIN_IDS.ROBINHOOD_TESTNET])).toThrow(
+      /ROBINHOOD_TESTNET_USDG_ADDRESS/,
+    );
+    expect(() => metadata.assertChainMetadata([CHAIN_IDS.SOLANA_DEVNET])).not.toThrow();
+  });
+
+  it('registers the configured token and boots eip155:46630 when set', async () => {
+    process.env.ROBINHOOD_TESTNET_USDG_ADDRESS = TOKEN;
+
+    const { registry, metadata } = await reimport();
+
+    expect(registry.ASSET_IDS.USDG_ROBINHOOD_TESTNET).toBe(
+      `${CHAIN_IDS.ROBINHOOD_TESTNET}/erc20:${TOKEN}`,
+    );
+    expect(() => metadata.assertChainMetadata([CHAIN_IDS.ROBINHOOD_TESTNET])).not.toThrow();
+  });
+
+  it('refuses a value that is not a 20-byte address', async () => {
+    process.env.ROBINHOOD_TESTNET_USDG_ADDRESS = '0x1234';
+
+    let thrown: unknown;
+    try {
+      await reimport();
+    } catch (error) {
+      thrown = error;
+    }
+
+    expect((thrown as { errorCode?: string }).errorCode).toBe(
+      ChainErrorCode.CHAIN_CONFIG_VALUE_INVALID,
+    );
+  });
+});
+
 /**
  * USDG on Robinhood Chain, and the mainnet row that deliberately does not
- * exist.
- *
- * Every value here was measured read-only against the public RPC on 2026-09-07
- * with the pinned Foundry build and is recorded in `docs/chain-facts.md` in
- * assay-evm. The point of the suite is the asymmetry: testnet is registered because it
- * was measured, mainnet is absent because the same probe came back empty.
+ * exist. The testnet address is the fixture `test/setup-env.ts` pins.
  */
 describe('asset-registry — USDG on Robinhood Chain', () => {
-  const TESTNET_USDG = '0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec';
+  const TESTNET_USDG = '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac';
 
-  it('registers testnet USDG at the measured address, 6 dp and pegged', () => {
+  it('registers testnet USDG at the configured address, 6 dp and pegged', () => {
     const metadata = getAssetMetadata(ASSET_IDS.USDG_ROBINHOOD_TESTNET);
 
     expect(metadata).toEqual({

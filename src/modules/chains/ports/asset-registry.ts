@@ -48,22 +48,38 @@ function resolveDevnetUsdcMint(): string {
 const USDC_SOLANA_DEVNET = `${CHAIN_IDS.SOLANA_DEVNET}/token:${resolveDevnetUsdcMint()}` as AssetId;
 
 /**
- * USDG on Robinhood Chain **testnet**, measured 2026-09-07 against the public
- * RPC with the pinned Foundry build (`docs/chain-facts.md` in assay-evm):
- * `symbol() == "USDG"`, `name() == "USDG"`, `decimals() == 6`, no EIP-2612
- * (`DOMAIN_SEPARATOR()` and `nonces()` both revert) and no EIP-3009
- * (`authorizationState()` reverts).
+ * The settlement token on Robinhood Chain **testnet**, from
+ * `ROBINHOOD_TESTNET_USDG_ADDRESS` — typically a 6-decimal mock USD the
+ * deployment controls. It must be the same address as the `asset` field of the
+ * `eip155:46630` entry in `EVM_DEPLOYMENTS`.
  *
- * **There is deliberately no mainnet row.** `cast code` at this same address on
- * 4663 returns `0x` — the empty-code answer, with an 11,306-byte reply from
- * testnet as the control proving the probe itself works — so the mainnet USDG
- * address is unresolved and must come from `docs.robinhood.com` or the
- * operator. Writing a guess here would be a number a later reader mistakes for
- * a measurement, and `assertChainMetadata` refusing `eip155:4663` at boot is
- * the correct behaviour until it is filled in. Do not copy this address across.
+ * There is no default. Unset, the asset is simply not registered, and
+ * `assertChainMetadata` refuses to boot a process that enables `eip155:46630`
+ * and names this variable. Read **once**, at module load, for the same reason
+ * as `SOLANA_DEVNET_USDC_MINT` above.
+ *
+ * **There is deliberately no mainnet row.** The mainnet USDG address is
+ * unresolved and must come from `docs.robinhood.com` or the operator, and
+ * `assertChainMetadata` refusing `eip155:4663` at boot is the correct
+ * behaviour until it is filled in.
  */
-const USDG_ROBINHOOD_TESTNET =
-  `${CHAIN_IDS.ROBINHOOD_TESTNET}/erc20:0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec` as AssetId;
+export const ROBINHOOD_TESTNET_USDG_ENV = 'ROBINHOOD_TESTNET_USDG_ADDRESS';
+
+function resolveRobinhoodTestnetUsdg(): AssetId | null {
+  const value = process.env[ROBINHOOD_TESTNET_USDG_ENV]?.trim();
+  if (!value) {
+    return null;
+  }
+  if (!/^0x[0-9a-fA-F]{40}$/.test(value)) {
+    throw ChainErrors.configValueInvalid({
+      variable: ROBINHOOD_TESTNET_USDG_ENV,
+      accepted: 'a 0x-prefixed 20-byte ERC-20 address',
+    });
+  }
+  return `${CHAIN_IDS.ROBINHOOD_TESTNET}/erc20:${value}` as AssetId;
+}
+
+const USDG_ROBINHOOD_TESTNET = resolveRobinhoodTestnetUsdg();
 
 export const ASSET_IDS = {
   USDC_SOLANA_MAINNET,
@@ -86,13 +102,15 @@ const REGISTRY: Readonly<Record<string, AssetMetadata>> = {
     chainId: CHAIN_IDS.SOLANA_DEVNET,
     peg: 'USD-1:1',
   },
-  [USDG_ROBINHOOD_TESTNET]: {
-    assetId: USDG_ROBINHOOD_TESTNET,
-    symbol: 'USDG',
-    decimals: 6,
-    chainId: CHAIN_IDS.ROBINHOOD_TESTNET,
-    peg: 'USD-1:1',
-  },
+  ...(USDG_ROBINHOOD_TESTNET && {
+    [USDG_ROBINHOOD_TESTNET]: {
+      assetId: USDG_ROBINHOOD_TESTNET,
+      symbol: 'USDG',
+      decimals: 6,
+      chainId: CHAIN_IDS.ROBINHOOD_TESTNET,
+      peg: 'USD-1:1',
+    },
+  }),
 };
 
 export function getAssetMetadata(asset: AssetId): AssetMetadata {
@@ -122,7 +140,9 @@ export function isRegisteredAsset(asset: AssetId): boolean {
  * a chain with two settlement assets would be a chain that can be half frozen.
  */
 export function settlementAssetsOn(chainId: ChainId): AssetId[] {
-  return Object.values(ASSET_IDS).filter((asset) => REGISTRY[asset]?.chainId === chainId);
+  return Object.values(ASSET_IDS).filter(
+    (asset): asset is AssetId => asset !== null && REGISTRY[asset]?.chainId === chainId,
+  );
 }
 
 export function registeredAssets(): readonly AssetMetadata[] {

@@ -4,6 +4,7 @@ import {
   getAssetMetadata,
   isRegisteredAsset,
   registeredAssets,
+  ROBINHOOD_TESTNET_USDG_ENV,
 } from './ports/asset-registry';
 import { AssetId, CHAIN_IDS, ChainId, chainIdOf } from './ports/caip.types';
 import { ENABLED_CHAINS_ENV } from './enabled-chains';
@@ -76,18 +77,21 @@ const CHAIN_METADATA: Readonly<Record<string, ChainMetadata>> = {
     rails: ['A', 'B'],
   },
   // `eip155:4663` — Robinhood Chain MAINNET — is absent on purpose, and the
-  // absence is load-bearing. assay-evm's `docs/chain-facts.md` measured `cast code`
-  // at the testnet USDG address on 4663 and got `0x`; the mainnet token address
-  // is unknown, so no settlement asset can honestly be named for it and
-  // `assertChainMetadata` refuses the chain at boot. Do not add a row here by
-  // copying the testnet address — that turns a measured gap into a number the
-  // next reader trusts.
-  [CHAIN_IDS.ROBINHOOD_TESTNET]: {
-    displayName: 'Robinhood Chain testnet',
-    explorerBaseUrl: 'https://explorer.testnet.chain.robinhood.com',
-    settlementAsset: ASSET_IDS.USDG_ROBINHOOD_TESTNET,
-    rails: ['B'],
-  },
+  // absence is load-bearing: the mainnet token address is unknown, so no
+  // settlement asset can honestly be named for it and `assertChainMetadata`
+  // refuses the chain at boot.
+  //
+  // The testnet row exists only once `ROBINHOOD_TESTNET_USDG_ADDRESS` names its
+  // settlement token (asset-registry.ts); `assertChainMetadata` names that
+  // variable when the chain is enabled without it.
+  ...(ASSET_IDS.USDG_ROBINHOOD_TESTNET && {
+    [CHAIN_IDS.ROBINHOOD_TESTNET]: {
+      displayName: 'Robinhood Chain testnet',
+      explorerBaseUrl: 'https://explorer.testnet.chain.robinhood.com',
+      settlementAsset: ASSET_IDS.USDG_ROBINHOOD_TESTNET,
+      rails: ['B'] as const,
+    },
+  }),
 };
 
 /** The chains this table can describe. Not the enabled list — see the file comment. */
@@ -145,6 +149,13 @@ export function chainMetadata(chainId: ChainId): ChainMetadata {
  * not the first entry that failed.
  */
 export function assertChainMetadata(enabled: readonly ChainId[]): void {
+  if (enabled.includes(CHAIN_IDS.ROBINHOOD_TESTNET) && !ASSET_IDS.USDG_ROBINHOOD_TESTNET) {
+    throw ChainErrors.configValueInvalid({
+      variable: ROBINHOOD_TESTNET_USDG_ENV,
+      accepted: `the settlement token address, required while ${CHAIN_IDS.ROBINHOOD_TESTNET} is enabled`,
+    });
+  }
+
   const undescribed = enabled.filter((chainId) => !CHAIN_METADATA[chainId]);
   if (undescribed.length > 0) {
     throw ChainErrors.enabledChainsInvalid({
