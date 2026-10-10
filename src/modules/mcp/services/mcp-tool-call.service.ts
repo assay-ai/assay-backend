@@ -12,6 +12,7 @@ import {
 } from '@modules/ledger/ports/escrow-balance-reader.port';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { VOUCHER_MAX_TTL_SECONDS } from '@modules/payment/constants/voucher.constants';
+import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 import {
   RequestCall,
   computeRequestHash,
@@ -200,6 +201,26 @@ export class McpToolCallService {
       // `FREEMIUM` exhausted — *"fall through to the paid path"*, which is the
       // entire commercial point of the mode and must require no
       // reconfiguration from the agent. Execution simply continues below.
+    }
+
+    // ── The buyer's chain ─────────────────────────────────────────────────
+    //
+    // The quote is deliberately NOT narrowed to the buyer's chains (see
+    // `requireQuote`), so its price may be in an asset no provider on the
+    // buyer's chain charges. Funds are secured against that price before the
+    // router runs, so a buyer whose chain no routable binding settles on would
+    // otherwise be told `PAYMENT_INSUFFICIENT_FUNDS` (or fail on an asset
+    // mismatch) for a call that was never payable from where they are. The
+    // router would refuse it with `PAYMENT_NO_SETTLEABLE_CHAIN`; this says the
+    // same thing before an intent or a hold exists.
+    if (!quote.settlementChains.includes(session.chainId)) {
+      throw PaymentErrors.noSettleableChain({
+        tool: tool.id,
+        buyerChains: [session.chainId],
+        toolChains: [...quote.settlementChains],
+        priceMinor: price.amount,
+        decimals: price.decimals,
+      });
     }
 
     // ── The rail fork ─────────────────────────────────────────────────────
