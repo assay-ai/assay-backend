@@ -84,9 +84,11 @@ describe('NotificationService — aggregation rules', () => {
     });
 
     await service.notify(req);
-    await service.notify(req);
+    const second = await service.notify(req);
 
     expect(notifications.insert).toHaveBeenCalledTimes(1);
+    // An outcome, not `undefined` — callers read `deliveredNow` off it.
+    expect(second).toEqual({ deliveredNow: false });
   });
 
   it('ONCE treats a different dedupeKey as a different window', async () => {
