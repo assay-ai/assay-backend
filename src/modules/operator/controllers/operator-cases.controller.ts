@@ -1,4 +1,14 @@
-import { Body, Controller, Get, Param, Post, Query, Req, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+  Req,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 
@@ -93,7 +103,7 @@ export class OperatorCasesController {
 
   @Get('cases/:proposalId')
   @ApiOperation({ summary: 'The full case brief for one proposal' })
-  async getCase(@Param('proposalId') proposalId: string) {
+  async getCase(@Param('proposalId', ParseUUIDPipe) proposalId: string) {
     return this.cases.brief(proposalId);
   }
 
@@ -110,7 +120,7 @@ export class OperatorCasesController {
   @ApiOperation({ summary: 'Assign this case to yourself' })
   async claim(
     @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId') proposalId: string,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
   ) {
     return this.cases.claim(operator, proposalId);
   }
@@ -130,7 +140,7 @@ export class OperatorCasesController {
   @ApiResponse({ status: 422, description: 'Reason code invalid for the chosen outcome' })
   async decide(
     @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId') proposalId: string,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: DecideCaseBodyDto,
     @Req() request: Request,
   ) {
@@ -144,7 +154,7 @@ export class OperatorCasesController {
   @ApiOperation({ summary: 'Countersign or object to another adjudicator’s decision' })
   async second(
     @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId') proposalId: string,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: SecondSignatureBodyDto,
     @Req() request: Request,
   ) {
@@ -158,7 +168,7 @@ export class OperatorCasesController {
   @ApiOperation({ summary: 'Suspend a pending proposal' })
   async suspend(
     @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId') proposalId: string,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: SuspendProposalBodyDto,
     @Req() request: Request,
   ) {
@@ -181,7 +191,7 @@ export class OperatorCasesController {
   @ApiOperation({ summary: 'Extend the provider’s deadline to object' })
   async extendDeadline(
     @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId') proposalId: string,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: ExtendDeadlineBodyDto,
     @Req() request: Request,
   ) {
@@ -204,7 +214,7 @@ export class OperatorCasesController {
   @ApiResponse({ status: 422, description: 'This outcome does not generalise' })
   async sweep(
     @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId') proposalId: string,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: OpenFleetSweepBodyDto,
     @Req() request: Request,
   ): Promise<FleetSweepDto> {
@@ -230,7 +240,7 @@ export class OperatorCasesController {
   @ApiResponse({ status: 409, description: 'Never executed, or already compensated' })
   @ApiResponse({ status: 503, description: 'No settlement program to build against' })
   async compensationIntent(
-    @Param('proposalId') proposalId: string,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
   ): Promise<CompensationIntentDto> {
     return this.cases.compensationIntent(proposalId);
   }
@@ -249,7 +259,7 @@ export class OperatorCasesController {
   @ApiResponse({ status: 409, description: 'Never executed, already compensated, or unconfirmed' })
   async compensated(
     @CurrentOperator() operator: OperatorSession,
-    @Param('proposalId') proposalId: string,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: CompensatedBodyDto,
     @Req() request: Request,
   ) {
@@ -273,7 +283,9 @@ export class OperatorCasesController {
   @ApiOperation({ summary: "Build the settlement admin's unsigned cancel_slash" })
   @ApiResponse({ status: 201, type: CancelIntentDto })
   @ApiResponse({ status: 503, description: 'No settlement program to build against' })
-  async cancelIntent(@Param('proposalId') proposalId: string): Promise<CancelIntentDto> {
+  async cancelIntent(
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
+  ): Promise<CancelIntentDto> {
     return this.cases.cancelIntent(proposalId);
   }
 }

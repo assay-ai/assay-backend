@@ -1,4 +1,4 @@
-import { Body, Controller, Param, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Param, ParseUUIDPipe, Post, Req, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 
@@ -37,7 +37,7 @@ export class OperatorProvidersController {
   @ApiResponse({ status: 404, description: 'No such provider' })
   async setVerification(
     @CurrentOperator() operator: OperatorSession,
-    @Param('providerId') providerId: string,
+    @Param('providerId', ParseUUIDPipe) providerId: string,
     @Body() body: VerifyProviderBodyDto,
     @Req() request: Request,
   ) {

@@ -1,4 +1,4 @@
-import { Body, Controller, Get, Param, Post, Req } from '@nestjs/common';
+import { Body, Controller, Get, Param, ParseUUIDPipe, Post, Req } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Request } from 'express';
 
@@ -116,7 +116,9 @@ export class PublicDemoController {
       'outside the demo organization returns 404.',
   })
   @ApiResponse({ status: 200, type: DemoVerdictResponseDto })
-  async verdict(@Param('intentId') intentId: string): Promise<DemoVerdictResponseDto> {
+  async verdict(
+    @Param('intentId', ParseUUIDPipe) intentId: string,
+  ): Promise<DemoVerdictResponseDto> {
     return (await this.verdicts.read(intentId)) as unknown as DemoVerdictResponseDto;
   }
 }
