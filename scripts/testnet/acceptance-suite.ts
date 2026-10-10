@@ -285,7 +285,10 @@ const runS3: K3Step = async (c) => {
 };
 
 /** `ENABLED_CHAINS` listing only mainnet. Same shape as E7 and the same honest gap. */
-const runS4: K3Step = async (c) => enabledChainsCriterion(c, 'solana');
+const runS4: K3Step = async (c) =>
+  process.env.ISOLATION_TARGETS_FILE
+    ? runLiveScript(c, 'testnet:isolation', [c.id], 'ISOLATION_RESULT')
+    : enabledChainsCriterion(c, 'solana');
 
 /** The Foundry suite plus the three accounting invariants. */
 const runE1: K3Step = async (c) => {
@@ -541,7 +544,10 @@ const runE6: K3Step = async (c) => {
 };
 
 /** `ENABLED_CHAINS` without `eip155:46630`. */
-const runE7: K3Step = async (c) => enabledChainsCriterion(c, 'eip155');
+const runE7: K3Step = async (c) =>
+  process.env.ISOLATION_TARGETS_FILE
+    ? runLiveScript(c, 'testnet:isolation', [c.id], 'ISOLATION_RESULT')
+    : enabledChainsCriterion(c, 'eip155');
 
 /**
  * Both `S4` and `E7` are the same question asked of the two namespaces, and both get the same
@@ -594,6 +600,9 @@ async function enabledChainsCriterion(c: K3Criterion, namespace: string): Promis
 
 /** The negative test for chain isolation. */
 const runE8: K3Step = async (c) => {
+  if (process.env.ISOLATION_TARGETS_FILE) {
+    return runLiveScript(c, 'testnet:isolation', [c.id], 'ISOLATION_RESULT');
+  }
   const run = sh(
     'npx',
     ['jest', '--config', './test/jest-unit.json', 'test/unit/tool/routing-chains.spec.ts'],
