@@ -560,6 +560,30 @@ describe('McpToolCallService — the paid call loop', () => {
     expect(intents.rows.size).toBe(0);
   });
 
+  it('refuses a buyer whose chain no routable binding settles on, before any intent or hold', async () => {
+    // The quote is priced across every enabled chain; the buyer pays from one.
+    // Securing funds against a price on another chain would answer
+    // PAYMENT_INSUFFICIENT_FUNDS for a call that was never payable from here.
+    const { calls, ledger, intents } = harness({
+      'binding-provider-a': () => {
+        throw new Error('the provider must never be called');
+      },
+    });
+    const elsewhere = {
+      ...SESSION,
+      chainId: CHAIN_IDS.SOLANA_MAINNET,
+      agentAccount: `${CHAIN_IDS.SOLANA_MAINNET}:AgentOnAnotherChain11111111111111111` as AccountId,
+    };
+
+    await expectErrorCodeAsync(
+      () => calls.call(elsewhere, 'Search the web', ARGS),
+      'PAYMENT_NO_SETTLEABLE_CHAIN',
+    );
+
+    expect(ledger.kinds).toEqual([]);
+    expect(intents.rows.size).toBe(0);
+  });
+
   // ── Refused before any money moves ────────────────────────────────────────
 
   it('refuses an unknown tool without creating an intent', async () => {
