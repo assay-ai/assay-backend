@@ -1,5 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Client } from 'pg';
+import { MigrationInterface, QueryRunner } from 'typeorm';
 
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AssetId } from '@modules/chains/ports/caip.types';
@@ -75,4 +76,35 @@ export function uuidFromLabel(label: string): string {
     ((parseInt(hash.slice(16, 17), 16) & 0x3) | 0x8).toString(16) + hash.slice(17, 20),
     hash.slice(20, 32),
   ].join('-');
+}
+
+/**
+ * The `buyer_escrows` slice of `WidenSignatureAndAccountColumns1759300000000`.
+ *
+ * That migration also widens columns on `slash_proposals`, `verifier_signing_keys`
+ * and `agents`, none of which a payment-only harness creates, so it cannot run
+ * here as a whole. `BuyerEscrowEntity` maps the renamed columns, so without this
+ * every write to `buyer_escrows` fails on `escrow_account_id` rather than on the
+ * thing under test.
+ */
+export class BuyerEscrowAccountColumnsSlice1759300000000 implements MigrationInterface {
+  name = 'BuyerEscrowAccountColumnsSlice1759300000000';
+
+  public async up(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query(
+      `ALTER TABLE "buyer_escrows" RENAME COLUMN "escrow_pda" TO "escrow_account_id"`,
+    );
+    await queryRunner.query(
+      `ALTER TABLE "buyer_escrows" RENAME COLUMN "escrow_token_account" TO "escrow_asset_account_id"`,
+    );
+    await queryRunner.query(`
+      ALTER TABLE "buyer_escrows"
+        ALTER COLUMN "escrow_account_id"       TYPE character varying(256),
+        ALTER COLUMN "escrow_asset_account_id" TYPE character varying(256)
+    `);
+  }
+
+  public async down(): Promise<void> {
+    // Test databases are dropped, never rolled back.
+  }
 }

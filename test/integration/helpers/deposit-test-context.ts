@@ -84,8 +84,10 @@ export function fakeAdapter(overrides: Partial<ChainAdapter> = {}): ChainAdapter
     getVaultAccount: jest.fn(),
     getVaultBalance: jest.fn(),
     buildPayoutProofMessage: jest.fn(),
+    payoutProofTypedData: jest.fn().mockReturnValue(null),
     verifyPayoutProofSignature: jest.fn(),
     buildStakeAuthorityMessage: jest.fn(),
+    stakeAuthorityTypedData: jest.fn().mockReturnValue(null),
     verifyStakeAuthoritySignature: jest.fn(),
     ...overrides,
   };
@@ -209,7 +211,6 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
     getVaultBalance: jest.fn(),
     getVaultBalanceAt: jest.fn(),
     assertVaultControl: jest.fn().mockResolvedValue(undefined),
-    sweepFees: jest.fn().mockResolvedValue(null),
   };
 
   // The escrow, not the pooled vault, is where a deposit lands.

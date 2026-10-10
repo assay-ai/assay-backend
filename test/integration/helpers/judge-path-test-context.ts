@@ -25,7 +25,6 @@ import { CreateApiSurfaceTables1756000000000 } from '@database/postgres/migratio
 import { NotificationsLimitsAndFreeTier1757500000000 } from '@database/postgres/migrations/1757500000000-notifications-limits-and-free-tier';
 import { SettledIntentsNamePayee1758100000000 } from '@database/postgres/migrations/1758100000000-settled-intents-name-payee';
 import { BuyerEscrowsAndVoucherSeq1759100000000 } from '@database/postgres/migrations/1759100000000-buyer-escrows-and-voucher-seq';
-import { VoucherRedemptionFields1759100000002 } from '@database/postgres/migrations/1759100000002-voucher-redemption-fields';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { EvidenceBodyRepository } from '@database/postgres/repositories/evidence-body.repository';
 import { EvidencePackRepository } from '@database/postgres/repositories/evidence-pack.repository';
@@ -145,13 +144,6 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
       CreateLedger1755100000000,
       CreatePaymentIntents1755200000000,
       AddVoucherNonce1755300000000,
-      // `payment_intents.voucher_signature` / `voucher_resource_hash` /
-      // `voucher_issued_at`. `PaymentIntentEntity` maps all three and TypeORM
-      // names every mapped column in its INSERT, so without this migration
-      // every write of an intent in this context dies with
-      // `column "voucher_signature" ... does not exist` — which names a column
-      // and not the missing migration.
-      VoucherRedemptionFields1759100000002,
       RoutedPaymentIntents1755600000000,
       CreateVerificationPolicies1755700000000,
       CreateVerificationRecords1755800000000,

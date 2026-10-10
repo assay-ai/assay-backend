@@ -18,7 +18,6 @@ import { BindingTrafficControls1757200000000 } from '@database/postgres/migratio
 import { NotificationsLimitsAndFreeTier1757500000000 } from '@database/postgres/migrations/1757500000000-notifications-limits-and-free-tier';
 import { SettledIntentsNamePayee1758100000000 } from '@database/postgres/migrations/1758100000000-settled-intents-name-payee';
 import { BuyerEscrowsAndVoucherSeq1759100000000 } from '@database/postgres/migrations/1759100000000-buyer-escrows-and-voucher-seq';
-import { VoucherRedemptionFields1759100000002 } from '@database/postgres/migrations/1759100000002-voucher-redemption-fields';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hold.repository';
@@ -129,13 +128,6 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
       CreateLedger1755100000000,
       CreatePaymentIntents1755200000000,
       AddVoucherNonce1755300000000,
-      // `payment_intents.voucher_signature` / `voucher_resource_hash` /
-      // `voucher_issued_at`. `PaymentIntentEntity` maps all three and TypeORM
-      // names every mapped column in its INSERT, so without this migration
-      // every write of an intent in this context dies with
-      // `column "voucher_signature" ... does not exist` — which names a column
-      // and not the missing migration.
-      VoucherRedemptionFields1759100000002,
       // The routed-intents migration made `provider_id` nullable and added the two CHECKs that keep
       // the payee columns honest. Without it every intent here would have to
       // name a provider before the router had run, which is not the shape the

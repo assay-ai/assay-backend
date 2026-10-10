@@ -16,7 +16,6 @@ import { RoutedPaymentIntents1755600000000 } from '@database/postgres/migrations
 import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migrations/1755900000000-timestamptz-timestamps';
 import { CallIdAndCallClass1756800000000 } from '@database/postgres/migrations/1756800000000-call-id-and-call-class';
 import { BuyerEscrowsAndVoucherSeq1759100000000 } from '@database/postgres/migrations/1759100000000-buyer-escrows-and-voucher-seq';
-import { VoucherRedemptionFields1759100000002 } from '@database/postgres/migrations/1759100000002-voucher-redemption-fields';
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
 import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { ESCROW_SEQ_GAP_CACHE_KEY } from '@modules/payment/constants/escrow-seq.constants';
@@ -29,6 +28,7 @@ import {
   USDC_ASSET,
   ensureTestDatabase,
   testConnectionOptions,
+  BuyerEscrowAccountColumnsSlice1759300000000,
 } from './test-database';
 
 loadEnv();
@@ -100,13 +100,6 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
       CreateLedger1755100000000,
       CreatePaymentIntents1755200000000,
       AddVoucherNonce1755300000000,
-      // `payment_intents.voucher_signature` / `voucher_resource_hash` /
-      // `voucher_issued_at`. `PaymentIntentEntity` maps all three and TypeORM
-      // names every mapped column in its INSERT, so without this migration
-      // every write of an intent in this context dies with
-      // `column "voucher_signature" ... does not exist` — which names a column
-      // and not the missing migration.
-      VoucherRedemptionFields1759100000002,
       RoutedPaymentIntents1755600000000,
       TimestamptzTimestamps1755900000000,
       CallIdAndCallClass1756800000000,
@@ -117,6 +110,7 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
       // that omits this migration fails on the column rather than on its
       // subject — which is exactly how it shipped: no context listed it.
       VoucherRedemptionFields1759100000002,
+      BuyerEscrowAccountColumnsSlice1759300000000,
     ],
     synchronize: false,
     logging: process.env.ESCROW_SEQ_TEST_LOGGING === 'true',
@@ -136,7 +130,7 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
 
   const escrows = new BuyerEscrowRepository(dataSource);
   const alerts = new RecordingAlertPort();
-  const service = new EscrowSeqService(escrows, new CacheService(redis), alerts);
+  const service = new EscrowSeqService(escrows, new CacheService(redis));
 
   const context: EscrowSeqTestContext = {
     service,
