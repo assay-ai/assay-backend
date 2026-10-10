@@ -61,6 +61,7 @@
  * reach it.
  */
 
+import { DEFAULT_PLATFORM_FEE_BPS } from '@modules/mcp/services/mcp-pricing.config';
 import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
@@ -122,8 +123,8 @@ const ASSET: AssetId = ASSET_IDS.USDC_SOLANA_DEVNET;
 const DECIMALS = 6;
 const CHAIN: ChainId = CHAIN_IDS.SOLANA_DEVNET;
 
-/** `PLATFORM_FEE_BPS` in `.env`. Restated so the split satisfies `chk_payment_intents_fee_split`. */
-const PLATFORM_FEE_BPS = 2000n;
+/** `PLATFORM_FEE_BPS` from the env, falling back to the platform default, so the seeded split matches what live calls charge. */
+const PLATFORM_FEE_BPS = BigInt(process.env.PLATFORM_FEE_BPS || DEFAULT_PLATFORM_FEE_BPS);
 
 /** What every buyer agent is topped up to before the calls run. 500 USDC. */
 const BUYER_TARGET_BALANCE = 500_000_000n;
