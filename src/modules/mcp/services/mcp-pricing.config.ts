@@ -9,7 +9,9 @@ export interface McpPricingConfig {
   /**
    * Basis points of the quoted price retained by the platform.
    *
-   * Configurable through `PLATFORM_FEE_BPS`; the code default is 2000 (20%).
+   * Configurable through `PLATFORM_FEE_BPS`; the code default is 1000 (10%),
+   * the take rate the provider terms, the operator economics view and the EVM
+   * escrow's `takeRateBps` all state.
    * The same rate applies to every tier, because a rate per tier is a decision
    * nobody has taken. The fee is on the intent, on the receipt, and greppable.
    */
@@ -19,5 +21,5 @@ export interface McpPricingConfig {
 /** DI token for the bound {@link McpPricingConfig}. */
 export const MCP_PRICING = 'MCP_PRICING';
 
-/** 20%, the code default for the platform fee. Configurable via `PLATFORM_FEE_BPS`. */
-export const DEFAULT_PLATFORM_FEE_BPS = 2000;
+/** 10%, the code default for the platform fee. Configurable via `PLATFORM_FEE_BPS`. */
+export const DEFAULT_PLATFORM_FEE_BPS = 1000;
