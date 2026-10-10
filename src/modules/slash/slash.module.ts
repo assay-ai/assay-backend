@@ -16,13 +16,19 @@ import {
   loadMinimumStakeParameters,
 } from '@modules/provider/services/provider-stake.service';
 
-import { SLASH_CONFIG, loadSlashConfig } from './constants/slash.constants';
+import {
+  SLASH_CONFIG,
+  SLASH_PRORATA_CONFIG,
+  loadProRataSlashConfig,
+  loadSlashConfig,
+} from './constants/slash.constants';
 import { ProviderSlashProposalsController } from './controllers/provider-slash-proposals.controller';
 import { ArbitrationService } from './services/arbitration.service';
 import { SlashCaseService } from './services/slash-case.service';
 import { SlashBeneficiaryService } from './services/slash-beneficiary.service';
 import { SlashCompensationService } from './services/slash-compensation.service';
 import { SlashExecutionService } from './services/slash-execution.service';
+import { SlashPartsService } from './services/slash-parts.service';
 import { SlashProposalService } from './services/slash-proposal.service';
 
 /**
@@ -70,6 +76,7 @@ import { SlashProposalService } from './services/slash-proposal.service';
   controllers: [ProviderSlashProposalsController],
   providers: [
     { provide: SLASH_CONFIG, useFactory: loadSlashConfig },
+    { provide: SLASH_PRORATA_CONFIG, useFactory: loadProRataSlashConfig },
     // `ProviderStakeService` is provided here rather than imported, because it
     // lives in `ProviderApiModule` — the provider domain's *HTTP* module — and
     // importing that would pull the whole provider controller surface into the
@@ -103,6 +110,7 @@ import { SlashProposalService } from './services/slash-proposal.service';
     SlashBeneficiaryService,
     // Writes SLASH_DISTRIBUTION and raises the agent-side notification.
     SlashCompensationService,
+    SlashPartsService,
     SlashExecutionService,
   ],
   exports: [SlashProposalService, SlashCaseService, ArbitrationService, SlashExecutionService],

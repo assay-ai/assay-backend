@@ -1,11 +1,15 @@
-import { AbiParameter, toFunctionSelector } from 'viem';
+import { execSync } from 'node:child_process';
+
+import { AbiParameter, toEventSelector, toFunctionSelector } from 'viem';
 
 import { EVM_ERROR_BY_SELECTOR, evmErrorName } from '@modules/chains/evm/abi/error-selectors';
 import {
   ERC20_ABI,
   X402_CONFIG_ABI,
   X402_ESCROW_ABI,
+  MULTICALL3_ABI,
   X402_STAKE_ABI,
+  X402_STAKE_SLASH_ABI,
 } from '@modules/chains/evm/abi/x402.abi';
 
 /**
@@ -131,10 +135,37 @@ const ERC20_PINS: readonly Pin[] = [
   ['0x095ea7b3', 'approve(address spender,uint256 amount)', '(bool)'],
 ];
 
+/**
+ * The slash lifecycle and the batching door — vendored separately from
+ * `X402_STAKE_ABI` so only `EvmSlashExecutor` can reach them. Selectors from
+ * `abiFunctions` in assay-evm's `deployments/46630.json`, agreeing with
+ * `cast sig`; `aggregate3` from `cast sig 'aggregate3((address,bool,bytes)[])'`.
+ */
+const STAKE_SLASH_PINS: readonly Pin[] = [
+  [
+    '0x1dae0660',
+    'proposeSlash((bytes32,address,address,uint8,uint64,bytes32,uint64,uint64),bytes)',
+    '()',
+  ],
+  ['0xb850cdf7', 'executeSlash(bytes32)', '()'],
+  ['0xb46940b6', 'expireSlash(bytes32)', '()'],
+  ['0xa91e3b8e', 'cancelSlash(bytes32)', '()'],
+];
+
+const MULTICALL3_PINS: readonly Pin[] = [
+  [
+    '0x82ad56cb',
+    'aggregate3((address,bool,bytes)[])',
+    '((bool success,bytes returnData)[] returnData)',
+  ],
+];
+
 const SUITES = [
   ['escrow', X402_ESCROW_ABI, ESCROW_PINS],
   ['config', X402_CONFIG_ABI, CONFIG_PINS],
   ['stake', X402_STAKE_ABI, STAKE_PINS],
+  ['stake-slash', X402_STAKE_SLASH_ABI, STAKE_SLASH_PINS],
+  ['multicall3', MULTICALL3_ABI, MULTICALL3_PINS],
   ['erc20', ERC20_ABI, ERC20_PINS],
 ] as const;
 
@@ -201,6 +232,35 @@ describe('the vendored ABI matches the compiled contracts', () => {
         expect({ signature, outputs: bySelector.get(selector) }).toEqual({ signature, outputs });
       }
     });
+  });
+
+  it('pins the slash events by topic, as cast computed them', () => {
+    const topics = new Map(
+      X402_STAKE_SLASH_ABI.filter((entry) => entry.type === 'event').map(
+        (entry) => [entry.name, toEventSelector(entry)] as const,
+      ),
+    );
+    expect(Object.fromEntries(topics)).toEqual({
+      SlashProposed: '0x89a06db4f05c4eb0313f470e883eeec82e71b9526b56332373ea25030ac52457',
+      SlashExecuted: '0x796048ad6bc167288173ac09bbc37852a68c771d44255cf3f9f3c9181d1c8025',
+      SlashCancelled: '0xd49e8d4811b1f1cee769ed651b311fedc3dee19890a75297949c7316de37ac08',
+    });
+  });
+
+  it('lets only the slash executor import the slash ABI', () => {
+    // An ABI entry is a call site waiting to exist. The slash writes are
+    // reachable from exactly one class.
+    const hits = execSync(`grep -rl "X402_STAKE_SLASH_ABI" src`, {
+      cwd: `${__dirname}/../../../..`,
+      encoding: 'utf8',
+    })
+      .trim()
+      .split('\n')
+      .sort();
+    expect(hits).toEqual([
+      'src/modules/chains/evm/abi/x402.abi.ts',
+      'src/modules/chains/evm/evm-slash-executor.service.ts',
+    ]);
   });
 
   it('vendors no writer the admin ledger owns, by name', () => {

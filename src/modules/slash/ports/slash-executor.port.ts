@@ -55,15 +55,22 @@
  * asked for, and these types make forgetting to do that a compile error.
  */
 
-import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
+import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 
 /** What `propose_slash` needs, minus the parts only the signer knows. */
 export interface SlashProposalRequest {
+  /**
+   * The chain the judgement is made on — CAIP-2, from the proposal's own
+   * `asset_id`. Required because the port is multiplexed by namespace and an
+   * EVM address names an account on every EVM chain at once: without it a
+   * judgement for 46630 could be submitted to 4663.
+   */
+  readonly chainId: ChainId;
   /** 32 bytes, lower-case hex. The chain's replay lock, and ours. */
   readonly requestId: string;
-  /** The provider's stake authority, as a base58 address. */
+  /** The provider's stake authority, as the chain's bare address. */
   readonly provider: string;
-  /** Who receives the 60%. A base58 address. */
+  /** Who receives the 60%. The chain's bare address. */
   readonly beneficiary: string;
   /** Minor units of the staked asset. Uncapped; the program applies the caps. */
   readonly penaltyMinor: string;
@@ -143,7 +150,14 @@ export interface SlashProposalResult {
  * it against the record's own field.
  */
 export interface SlashExecutionRequest {
+  readonly chainId: ChainId;
   readonly requestId: string;
+  /**
+   * Requests sharing a group (one case) execute together or not at all when
+   * the chain's remaining windows would take less than reserved from any of
+   * them — see `EvmSlashExecutor.executeBatch`. Absent: its own group.
+   */
+  readonly atomicGroup?: string;
   readonly provider: string;
   readonly beneficiary: string;
 }
@@ -188,6 +202,7 @@ export interface SlashExecutionResult {
  * longer execute.
  */
 export interface SlashCancelRequest {
+  readonly chainId: ChainId;
   readonly requestId: string;
   readonly provider: string;
 }
@@ -208,13 +223,18 @@ export interface SlashCancelResult {
  * the record leave `Pending`, never on the strength of having built this.
  */
 export interface SlashCancelIntent {
-  /** Base64 wire bytes, **unsigned**. */
+  /**
+   * **Unsigned.** Solana: base64 wire bytes. EVM: the `cancelSlash(requestId)`
+   * calldata, `0x`-hex, for the admin's wallet to send to {@link to}.
+   */
   readonly transaction: string;
+  /** EVM only: the contract the calldata is addressed to (the `X402Stake` proxy). */
+  readonly to?: string;
   /** `Config.admin` — the only account that may sign it, and its fee payer. */
   readonly admin: string;
   readonly requestId: string;
   readonly provider: string;
-  /** The blockhash the transaction is bound to — a wallet showing an expiry needs it. */
+  /** The blockhash the transaction is bound to — a wallet showing an expiry needs it. Empty on EVM. */
   readonly blockhash: string;
   /** Decimal string: `lastValidBlockHeight` is a `u64` and JSON has no such number. */
   readonly lastValidBlockHeight: string;
@@ -264,7 +284,55 @@ export interface SlashCompensationIntent {
   readonly depositor: string;
 }
 
+/**
+ * One request's outcome inside a batch: what the single door would have
+ * returned, or what it would have thrown. Never dropped — a batch of N answers
+ * with N outcomes, in request order.
+ */
+export type SlashBatchOutcome<T> =
+  | { readonly ok: true; readonly result: T; readonly error?: undefined }
+  | { readonly ok: false; readonly error: unknown; readonly result?: undefined };
+
+/**
+ * The batch doors for a namespace that has no batching: each request through
+ * the single door, in order, each failure captured rather than thrown. Strictly
+ * sequential — a fee payer's transactions are not to be raced.
+ */
+export async function oneByOne<Request, Result>(
+  requests: readonly Request[],
+  door: (request: Request) => Promise<Result>,
+): Promise<SlashBatchOutcome<Result>[]> {
+  const outcomes: SlashBatchOutcome<Result>[] = [];
+  for (const request of requests) {
+    try {
+      outcomes.push({ ok: true, result: await door(request) });
+    } catch (error) {
+      outcomes.push({ ok: false, error });
+    }
+  }
+  return outcomes;
+}
+
 export interface SlashExecutorPort {
+  /**
+   * {@link propose} for many judgements, in as few transactions as the chain
+   * allows. Outcome `i` is what `propose(requests[i])` would have returned or
+   * thrown — including adoption of a record already on chain.
+   *
+   * On EVM this is one `Multicall3.aggregate3` per chunk (`proposeSlash` is
+   * authorised by the verifier's signature, not by `msg.sender`, so the
+   * multicall contract may carry it). A namespace that cannot batch answers by
+   * calling the single door once per request.
+   */
+  proposeBatch(
+    requests: readonly SlashProposalRequest[],
+  ): Promise<readonly SlashBatchOutcome<SlashProposalResult>[]>;
+
+  /** {@link executeProposal} for many judgements — the same contract as {@link proposeBatch}. */
+  executeBatch(
+    requests: readonly SlashExecutionRequest[],
+  ): Promise<readonly SlashBatchOutcome<SlashExecutionResult>[]>;
+
   /**
    * Phase one: build the attestation, have a registered verifier sign it,
    * submit `propose_slash`, and report the clock the chain started.
@@ -353,7 +421,11 @@ export interface SlashExecutorPort {
    * *before* they decide anything, and "we never proposed" and "the proposal
    * failed" are the same observation from here.
    */
-  readRecord(requestId: string, provider: string): Promise<SlashRecordSnapshot | null>;
+  readRecord(
+    requestId: string,
+    provider: string,
+    chainId: ChainId,
+  ): Promise<SlashRecordSnapshot | null>;
 
   /**
    * `Config.treasury`, as CAIP-10 — the address the program pays the

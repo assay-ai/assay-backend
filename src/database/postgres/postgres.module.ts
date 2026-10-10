@@ -85,6 +85,7 @@ import { ToolRequestEntity } from './entities/tool-request.entity';
 import { OrganizationEntity } from './entities/organization.entity';
 import { AgentEntity } from './entities/agent.entity';
 import { SlashProposalEventEntity } from './entities/slash-proposal-event.entity';
+import { SlashProposalPartEntity } from './entities/slash-proposal-part.entity';
 import { OverrideLogEntryEntity } from './entities/override-log-entry.entity';
 import { FleetSweepEntity } from './entities/fleet-sweep.entity';
 import { SlashProposalRepository } from './repositories/slash-proposal.repository';
@@ -92,6 +93,7 @@ import { ToolRequestRepository } from './repositories/tool-request.repository';
 import { OrganizationRepository } from './repositories/organization.repository';
 import { AgentRepository } from './repositories/agent.repository';
 import { SlashProposalEventRepository } from './repositories/slash-proposal-event.repository';
+import { SlashProposalPartRepository } from './repositories/slash-proposal-part.repository';
 import { OverrideLogEntryRepository } from './repositories/override-log-entry.repository';
 import { FleetSweepRepository } from './repositories/fleet-sweep.repository';
 // The case brief's cross-entity reads; no entity of its own.
@@ -139,6 +141,7 @@ const entities = [
   SlashProposalEntity,
   ToolRequestEntity,
   SlashProposalEventEntity,
+  SlashProposalPartEntity,
   OverrideLogEntryEntity,
   FleetSweepEntity,
   OperatorEntity,
@@ -186,6 +189,7 @@ const repositories = [
   SlashProposalRepository,
   ToolRequestRepository,
   SlashProposalEventRepository,
+  SlashProposalPartRepository,
   OverrideLogEntryRepository,
   FleetSweepRepository,
   OperatorRepository,

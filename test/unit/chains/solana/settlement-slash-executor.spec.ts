@@ -411,6 +411,7 @@ function build(
 }
 
 const PROPOSE_REQUEST: SlashProposalRequest = {
+  chainId: SOLANA_CHAIN,
   requestId: REQUEST_ID,
   provider: PROVIDER,
   beneficiary: BENEFICIARY,
@@ -420,12 +421,13 @@ const PROPOSE_REQUEST: SlashProposalRequest = {
 };
 
 const EXECUTE_REQUEST = {
+  chainId: SOLANA_CHAIN,
   requestId: REQUEST_ID,
   provider: PROVIDER,
   beneficiary: BENEFICIARY,
 };
 
-const CANCEL_REQUEST = { requestId: REQUEST_ID, provider: PROVIDER };
+const CANCEL_REQUEST = { chainId: SOLANA_CHAIN, requestId: REQUEST_ID, provider: PROVIDER };
 
 describe('SolanaSlashExecutor', () => {
   describe('propose (propose_slash)', () => {

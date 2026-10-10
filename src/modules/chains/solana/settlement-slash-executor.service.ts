@@ -56,12 +56,14 @@ import {
 
 import {
   SlashCancelIntent,
+  SlashBatchOutcome,
   SlashCancelRequest,
   SlashCancelResult,
   SlashExecutionRequest,
   SlashExecutionResult,
   SlashExecutorPort,
   SlashProposalRequest,
+  oneByOne,
   SlashProposalResult,
   SlashRecordSnapshot,
 } from '@modules/slash/ports/slash-executor.port';
@@ -627,14 +629,39 @@ export class SolanaSlashExecutor implements SlashExecutorPort {
   }
 
   /**
+   * No batching on Solana: one `propose_slash` per request, in order. The
+   * pro-rata per-agent split is an EVM path; a Solana window still names the
+   * vault and is one request, so this is a batch of one in practice.
+   */
+  async proposeBatch(
+    requests: readonly SlashProposalRequest[],
+  ): Promise<readonly SlashBatchOutcome<SlashProposalResult>[]> {
+    return oneByOne(requests, (request) => this.propose(request));
+  }
+
+  async executeBatch(
+    requests: readonly SlashExecutionRequest[],
+  ): Promise<readonly SlashBatchOutcome<SlashExecutionResult>[]> {
+    return oneByOne(requests, (request) => this.executeProposal(request));
+  }
+
+  /**
    * What the chain says about one judgement, or `null` when there is no record.
    *
    * One account read, not two: the "does it exist" question and the "what does
    * it say" question are answered by the same `getAccountInfo`. Asking twice
    * would double the RPC cost of every sweep tick and — worse — open a window in
    * which the two answers describe different states of the account.
+   *
+   * `_chainId` is accepted for the port and not consulted: this class serves
+   * exactly one Solana cluster (`SOLANA_CHAIN_ID`), and the multiplexer has
+   * already routed on the namespace.
    */
-  async readRecord(requestId: string, provider: string): Promise<SlashRecordSnapshot | null> {
+  async readRecord(
+    requestId: string,
+    provider: string,
+    _chainId?: ChainId,
+  ): Promise<SlashRecordSnapshot | null> {
     const programAddress = address(this.requireProgramId());
     const [slashRecordPda] = await findSlashRecordPda(
       { requestId: parseRequestId(requestId) },

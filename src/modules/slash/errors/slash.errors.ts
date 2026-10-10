@@ -29,6 +29,10 @@ export enum SlashErrorCode {
   SLASH_CHAIN_UNAVAILABLE = 'SLASH_CHAIN_UNAVAILABLE',
   /** The signature offered as a compensation does not show the deposit it claims. */
   SLASH_COMPENSATION_NOT_CONFIRMED = 'SLASH_COMPENSATION_NOT_CONFIRMED',
+  /** A pro-rata window case found no agent with a priced DATA_FAIL call to compensate. */
+  SLASH_NO_HARMED_AGENTS = 'SLASH_NO_HARMED_AGENTS',
+  /** A case whose beneficiary cannot be named on this chain (e.g. the EVM vault). */
+  SLASH_BENEFICIARY_UNSUPPORTED = 'SLASH_BENEFICIARY_UNSUPPORTED',
 }
 
 export type SlashErrorCodesArePrefixed = AssertDomainErrorCodes<'SLASH', `${SlashErrorCode}`>;
@@ -328,5 +332,30 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
       'The settlement vault and the economics treasury are the same account ' +
       `${context?.address ? `(${context.address}) ` : ''}` +
       'so no penalty can be paid: the slash instruction would be given one account twice.',
+  },
+  /**
+   * Nothing to propose: no agent in the window had a DATA_FAIL call with a
+   * price, or every share was reduced to nothing by the on-chain caps. Left
+   * for a human rather than voided — the provider still breached its SLA.
+   */
+  noHarmedAgents: {
+    code: SlashErrorCode.SLASH_NO_HARMED_AGENTS,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Window ${context?.windowId ?? ''} has no harmed agent to compensate on chain` +
+      `${context?.reason ? `: ${context.reason}` : ''}`,
+  },
+  /**
+   * On EVM the "vault" is the `X402Escrow` contract, and an ERC-20 transfer
+   * into it credits nobody — naming it as a beneficiary would burn the agent
+   * share. EVM window cases are paid pro rata to the agents instead; a case
+   * with no window (call-level) has no EVM beneficiary rule yet.
+   */
+  beneficiaryUnsupported: {
+    code: SlashErrorCode.SLASH_BENEFICIARY_UNSUPPORTED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `No beneficiary can be named for this case on ${context?.chainId ?? 'this chain'}` +
+      `${context?.reason ? `: ${context.reason}` : ''}`,
   },
 });

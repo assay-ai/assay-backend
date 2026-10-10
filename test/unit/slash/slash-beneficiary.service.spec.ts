@@ -90,3 +90,18 @@ describe('SlashBeneficiaryService', () => {
     });
   });
 });
+
+describe('SlashBeneficiaryService on EVM', () => {
+  it('refuses to name the escrow contract — a transfer into it credits nobody', async () => {
+    const vault = { assertVaultControl: jest.fn(), getVaultOwner: jest.fn() };
+    const subject = new SlashBeneficiaryService(vault as never, {} as never);
+
+    const error = await subject
+      .resolve('eip155:46630/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3' as never)
+      .catch((caught) => caught);
+
+    expect(error.errorCode).toBe('SLASH_BENEFICIARY_UNSUPPORTED');
+    expect(vault.assertVaultControl).not.toHaveBeenCalled();
+    expect(vault.getVaultOwner).not.toHaveBeenCalled();
+  });
+});

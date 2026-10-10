@@ -1,6 +1,12 @@
 import { Inject, Injectable } from '@nestjs/common';
 
-import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
+import {
+  AccountId,
+  AssetId,
+  ChainNamespace,
+  chainIdOf,
+  namespaceOf,
+} from '@modules/chains/ports/caip.types';
 import { VAULT_PORT, VaultPort } from '@modules/chains/ports/vault.port';
 
 import { SlashErrors } from '../errors/slash.errors';
@@ -59,6 +65,20 @@ export class SlashBeneficiaryService {
    * unexplained shortfall weeks later rather than as an error here.
    */
   async resolve(asset: AssetId): Promise<AccountId> {
+    // On EVM the "vault" is the `X402Escrow` contract, and a plain ERC-20
+    // transfer into it credits nobody (`test_donationsDoNotBecomeAnybodysBalance`
+    // in assay-evm) — naming it would burn the agent share. EVM window cases
+    // are paid pro rata to the harmed agents by `SlashPartsService` and never
+    // reach here; anything else on EVM has no beneficiary rule, and says so.
+    if (namespaceOf(asset) === ChainNamespace.EIP155) {
+      throw SlashErrors.beneficiaryUnsupported({
+        chainId: chainIdOf(asset),
+        reason:
+          'the EVM vault is the escrow contract, which cannot credit a transfer; only ' +
+          'window-level cases (paid pro rata to the agents) can slash on EVM',
+      });
+    }
+
     await this.vault.assertVaultControl(asset);
 
     const [owner, treasury] = await Promise.all([
