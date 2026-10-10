@@ -405,9 +405,12 @@ export class DepositService {
     // that says SETTLED with no matching ledger entry is a worse failure than
     // the reverse (the chain-side reconciler repairs an orphaned deposit; there
     // is no repair for a credited balance nobody can find the intent for).
-    // Bufferable per `LEDGER_ENTRY_EFFECTS[DEPOSIT_PENDING]` — only `pending`
-    // moves, so this can never overdraw anything and is safe to batch.
-    this.ledger.append({
+    // Written now, not through the buffered writer, although
+    // `LEDGER_ENTRY_EFFECTS[DEPOSIT_PENDING]` would allow batching: the console
+    // refetches `GET /balances` the moment this response lands, and a buffered
+    // entry was still unflushed then — the buyer read an empty ledger beside a
+    // deposit already marked SETTLED. One write per deposit; nothing to batch.
+    await this.ledger.appendNow({
       organizationId,
       accountId: intent.agentAccount,
       entryType: LedgerEntryType.DEPOSIT_PENDING,
