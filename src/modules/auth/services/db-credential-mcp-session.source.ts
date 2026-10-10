@@ -45,10 +45,10 @@ const SUSPENDED = 'SUSPENDED';
  * call is charged to, and the one honest source for that is the row a wallet
  * was actually linked to, not anything a caller-controlled artefact carries.
  * The join is `AgentRepository.findById(credential.agentId)`, done as two
- * queries rather than one because **there is no FK** between the two tables
- * — `AgentCredentialsService.create`'s own docstring says why: the very
- * first credential for a brand-new agent is created before an `agents` row
- * exists at all. So the join can miss, and a miss is treated exactly like an
+ * queries rather than one because **there is no FK** between the two tables.
+ * `AgentCredentialsService.create` refuses an agent that does not exist, but
+ * rows minted before that check (or by scripts) can still name one, so the
+ * join can miss, and a miss is treated exactly like an
  * unknown token (`MCP_CREDENTIAL_INVALID`), never a 404 — a 404 would let an
  * id be used to probe whether it exists. The same refusal covers the rarer
  * case of a credential naming an agent that exists but belongs to a

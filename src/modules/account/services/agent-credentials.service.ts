@@ -3,6 +3,7 @@ import { randomBytes } from 'node:crypto';
 
 import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 import { digestToken } from '@shared/crypto/token-digest';
 
@@ -52,7 +53,10 @@ const CREDENTIALS_LIST: ListSpec = {
  */
 @Injectable()
 export class AgentCredentialsService {
-  constructor(private readonly credentials: AgentCredentialRepository) {}
+  constructor(
+    private readonly credentials: AgentCredentialRepository,
+    private readonly agents: AgentRepository,
+  ) {}
 
   async list(
     organizationId: string,
@@ -71,17 +75,21 @@ export class AgentCredentialsService {
   }
 
   /**
-   * There is no `agents` table to validate `agentId` against (see
-   * `AgentsService`), so this does not — and cannot — check that `agentId`
-   * names a pre-existing agent. That is deliberate for the onboarding flow:
-   * the very first credential for a brand-new agent is
-   * created before anything else about that agent exists anywhere.
+   * Refuses an `agentId` that is not one of this organization's agents
+   * (`ACCOUNT_AGENT_NOT_FOUND`, 404 either way). `DbCredentialMcpSessionSource`
+   * already rejects a token whose agent is missing or in another organization,
+   * so minting one would only hand back a secret that can never authenticate.
    */
   async create(
     organizationId: string,
     agentId: string,
     body: CreateAgentCredentialBodyDto,
   ): Promise<CreateAgentCredentialResponseDto> {
+    const agent = await this.agents.findById(agentId);
+    if (!agent || agent.organizationId !== organizationId) {
+      throw AccountErrors.agentNotFound({ agentId });
+    }
+
     const token = generateToken();
 
     const entity = this.credentials.create({

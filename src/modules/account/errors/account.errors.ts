@@ -5,13 +5,13 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  * audit log, agents, and agent credentials.
  *
  * The audit log has no write endpoint (it is append-only, read through this
- * module only) and agents have no lookup-shaped error at all — there is no
- * `agents` table, so an unrecognised `agentId` is not a 404, it is a filter
- * that matches nothing. See `AgentsService` / `AgentCredentialsService`.
+ * module only). Listing under an unrecognised `agentId` is a filter that
+ * matches nothing; minting a credential for one is a 404.
  */
 export enum AccountErrorCode {
   ACCOUNT_NOTIFICATION_NOT_FOUND = 'ACCOUNT_NOTIFICATION_NOT_FOUND',
   ACCOUNT_CREDENTIAL_NOT_FOUND = 'ACCOUNT_CREDENTIAL_NOT_FOUND',
+  ACCOUNT_AGENT_NOT_FOUND = 'ACCOUNT_AGENT_NOT_FOUND',
 }
 
 export type AccountErrorCodesArePrefixed = AssertDomainErrorCodes<'ACCOUNT', `${AccountErrorCode}`>;
@@ -35,5 +35,12 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
     statusCode: 404,
     message: (context?: Record<string, any>) =>
       `Agent credential not found${context?.id ? ` with id: ${context.id}` : ''}`,
+  },
+  /** No such agent, or one in another organization — indistinguishable on purpose. */
+  agentNotFound: {
+    code: AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
+    statusCode: 404,
+    message: (context?: Record<string, any>) =>
+      `Agent not found${context?.agentId ? ` with id: ${context.agentId}` : ''}`,
   },
 });

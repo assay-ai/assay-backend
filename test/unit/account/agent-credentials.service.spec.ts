@@ -46,8 +46,14 @@ function buildHarness(rows: ReturnType<typeof credentialRow>[] = []) {
     update: jest.fn().mockResolvedValue({ affected: 1 }),
   };
 
-  const service = new AgentCredentialsService(credentials as any);
-  return { service, fake, credentials };
+  const agents = {
+    findById: jest.fn(async (id: string) =>
+      id === AGENT_ID ? { id, organizationId: ORGANIZATION_ID } : null,
+    ),
+  };
+
+  const service = new AgentCredentialsService(credentials as any, agents as any);
+  return { service, fake, credentials, agents };
 }
 
 describe('AgentCredentialsService.list', () => {
@@ -85,6 +91,30 @@ describe('AgentCredentialsService.list', () => {
 });
 
 describe('AgentCredentialsService.create', () => {
+  it('refuses an agent that does not exist, before minting anything', async () => {
+    const { service, credentials } = buildHarness();
+
+    await expectErrorCodeAsync(
+      () => service.create(ORGANIZATION_ID, OTHER_AGENT_ID, { name: 'orphan' }),
+      AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
+    );
+    expect(credentials.save).not.toHaveBeenCalled();
+  });
+
+  it("refuses another organization's agent with the same 404", async () => {
+    const { service, credentials, agents } = buildHarness();
+    agents.findById.mockResolvedValueOnce({
+      id: AGENT_ID,
+      organizationId: '99999999-9999-9999-9999-999999999999',
+    });
+
+    await expectErrorCodeAsync(
+      () => service.create(ORGANIZATION_ID, AGENT_ID, { name: 'cross-tenant' }),
+      AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
+    );
+    expect(credentials.save).not.toHaveBeenCalled();
+  });
+
   it('returns the full token exactly once and stores only its hash', async () => {
     const { service, credentials } = buildHarness();
 
