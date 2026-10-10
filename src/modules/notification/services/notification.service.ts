@@ -98,7 +98,9 @@ export class NotificationService implements NotificationPort {
       this.logger.debug(
         `${request.event} suppressed for org ${request.organizationId} (dedupeKey=${request.dedupeKey ?? '(none)'})`,
       );
-      return;
+      // An outcome, never `undefined`: callers read `deliveredNow` off it, and
+      // `SlashProposalService` does so on the path that starts the response clock.
+      return { deliveredNow: false };
     }
 
     // Step 3 — the one durable row.
