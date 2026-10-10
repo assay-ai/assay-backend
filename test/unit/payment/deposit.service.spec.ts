@@ -112,7 +112,7 @@ function buildHarness(overrides?: {
   };
 }
 
-const amount = () => MoneyUtil.of(1_000_000n, USDC, 6);
+const amount = () => MoneyUtil.of(5_000_000n, USDC, 6);
 
 function input() {
   return {
@@ -151,7 +151,7 @@ describe('DepositService.createDeposit', () => {
     const { service, repo, adapter } = buildHarness();
 
     await expectErrorCodeAsync(
-      () => service.createDeposit({ ...input(), amount: MoneyUtil.of(1_000_000n, wrong, 6) }),
+      () => service.createDeposit({ ...input(), amount: MoneyUtil.of(5_000_000n, wrong, 6) }),
       PaymentErrorCode.PAYMENT_DEPOSIT_ASSET_NOT_SETTLEMENT_ASSET,
     );
 
@@ -173,7 +173,7 @@ describe('DepositService.createDeposit', () => {
       ...input(),
       agentAccount: EVM_AGENT_ACCOUNT,
       chainId: CHAIN_IDS.ROBINHOOD_TESTNET,
-      amount: MoneyUtil.of(1_000_000n, ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6),
+      amount: MoneyUtil.of(5_000_000n, ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6),
     });
 
     expect(intent.status).toBe(DepositIntentStatus.CREATED);
@@ -286,6 +286,22 @@ describe('DepositService.createDeposit', () => {
     );
   });
 
+  it('refuses a deposit under the $5 minimum before opening an escrow, and admits exactly $5', async () => {
+    const harness = buildHarness({ escrowExists: false });
+
+    await expectErrorCodeAsync(
+      () =>
+        harness.service.createDeposit({ ...input(), amount: MoneyUtil.of(4_999_999n, USDC, 6) }),
+      PaymentErrorCode.PAYMENT_DEPOSIT_BELOW_MINIMUM,
+    );
+    expect(harness.opener.open).not.toHaveBeenCalled();
+    expect(harness.repo.rows.size).toBe(0);
+
+    await expect(
+      harness.service.createDeposit({ ...input(), amount: MoneyUtil.of(5_000_000n, USDC, 6) }),
+    ).resolves.toBeDefined();
+  });
+
   it('refuses a chain this deployment does not enable before opening an escrow on it', async () => {
     const harness = buildHarness({ escrowExists: false });
     (harness.registry.resolve as jest.Mock).mockImplementation((chainId: ChainId) => {
@@ -351,7 +367,7 @@ describe('DepositService.createDeposit', () => {
 
 describe('DepositService.settleDeposit — happy path', () => {
   it('verifies, settles, observes the transfer, credits the ledger once, and reaches SETTLED', async () => {
-    const observed = { amount: '1000000', asset: USDC, decimals: 6 };
+    const observed = { amount: '5000000', asset: USDC, decimals: 6 };
     const adapter = fakeChainAdapter({
       observeTransfer: jest.fn().mockResolvedValue(observed),
       extractSettledAmount: jest.fn().mockReturnValue(amount()),
@@ -374,7 +390,7 @@ describe('DepositService.settleDeposit — happy path', () => {
     const settled = await service.settleDeposit(ORGANIZATION_ID, intent.id, dummyPayload());
 
     expect(settled.status).toBe(DepositIntentStatus.SETTLED);
-    expect(settled.settledAmount?.amount).toBe('1000000');
+    expect(settled.settledAmount?.amount).toBe('5000000');
     expect(settled.chainTxRef).toBe(TX_SIG);
     expect(ledger.append).toHaveBeenCalledTimes(1);
     expect(ledger.append).toHaveBeenCalledWith(
@@ -390,7 +406,7 @@ describe('DepositService.settleDeposit — happy path', () => {
     // only `payTo` left the adapter comparing `depositFor`'s buyer against the
     // contract — every real deposit refused with "credits a different buyer".
     const adapter = fakeChainAdapter({
-      observeTransfer: jest.fn().mockResolvedValue({ amount: '1000000', asset: USDC, decimals: 6 }),
+      observeTransfer: jest.fn().mockResolvedValue({ amount: '5000000', asset: USDC, decimals: 6 }),
       extractSettledAmount: jest.fn().mockReturnValue(amount()),
     });
     const facilitator = fakeFacilitator({
@@ -484,7 +500,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
       extractSettledAmount: jest.fn().mockImplementation(() => {
         throw ChainErrors.settledAmountBelowIntent({
           intentId: 'x',
-          expected: '1000000',
+          expected: '5000000',
           actual: '500000',
         });
       }),
@@ -528,7 +544,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
   it('non-USDC mint: the observed transfer is of a different SPL mint', async () => {
     const adapter = fakeChainAdapter({
       observeTransfer: jest.fn().mockResolvedValue({
-        amount: '1000000',
+        amount: '5000000',
         asset: ASSET_IDS.USDC_SOLANA_MAINNET,
         decimals: 6,
       }),
@@ -649,7 +665,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
 
   it('replayed settle: settling an already-SETTLED intent is a no-op, and credits once, not twice', async () => {
     const adapter = fakeChainAdapter({
-      observeTransfer: jest.fn().mockResolvedValue({ amount: '1000000', asset: USDC, decimals: 6 }),
+      observeTransfer: jest.fn().mockResolvedValue({ amount: '5000000', asset: USDC, decimals: 6 }),
       extractSettledAmount: jest.fn().mockReturnValue(amount()),
     });
     const facilitator = fakeFacilitator({
@@ -750,7 +766,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
         .fn()
         .mockResolvedValueOnce(null)
         .mockResolvedValueOnce(null)
-        .mockResolvedValue({ amount: '1000000', asset: USDC, decimals: 6 });
+        .mockResolvedValue({ amount: '5000000', asset: USDC, decimals: 6 });
       const adapter = fakeChainAdapter({
         observeTransfer,
         extractSettledAmount: jest.fn().mockReturnValue(amount()),
@@ -786,7 +802,7 @@ describe('DepositService.settleDeposit — required failure paths', () => {
 */
 describe('DepositService.settleDepositByBroadcast — the buyer sent it themselves', () => {
   const TX_HASH = `0x${'ab'.repeat(32)}` as TxRef;
-  const observed = { amount: '1000000', asset: USDC, decimals: 6 };
+  const observed = { amount: '5000000', asset: USDC, decimals: 6 };
 
   async function createdIntent(harness: ReturnType<typeof buildHarness>) {
     const { intent } = await harness.service.createDeposit(input());

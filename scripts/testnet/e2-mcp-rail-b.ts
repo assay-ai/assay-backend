@@ -26,7 +26,7 @@
  * ```bash
  * set -a; . path/to/e2-buyer.env; set +a
  * E2_MCP_URL=https://mcp.example.com/mcp E2_API_URL=https://api.example.com/api/v1 \
- *   E2_MCP_TOKEN=x402_sk_live_… E2_DEPOSIT_ATOMIC=1000000 yarn testnet:e2-mcp
+ *   E2_MCP_TOKEN=x402_sk_live_… E2_DEPOSIT_ATOMIC=5000000 yarn testnet:e2-mcp
  * ```
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
@@ -83,7 +83,9 @@ interface VoucherRequirement {
 function requiredEndpoint(name: string, example: string): string {
   const value = process.env[name];
   if (!value) {
-    console.error(`${name} is not set. Point it at the deployment under test, e.g. ${name}=${example}`);
+    console.error(
+      `${name} is not set. Point it at the deployment under test, e.g. ${name}=${example}`,
+    );
     process.exit(1);
   }
   return value;

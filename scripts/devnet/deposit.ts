@@ -44,9 +44,10 @@ import { solanaConfig, solanaBalanceSol } from './lib/solana-cli';
 import { setupSquadsVault } from './lib/squads-setup';
 
 const SOLANA_DEVNET = CHAIN_IDS.SOLANA_DEVNET;
-const DEPOSIT_AMOUNT_ATOMIC = 1_000_000n; // 1.000000 token
+const DEPOSIT_AMOUNT_ATOMIC = 5_000_000n; // 5.000000 token — the platform minimum
 const USER_TARGET_BALANCE_ATOMIC = 5_000_000n; // keep the user well-funded across re-runs
-const EXPLORER_URL = (signature: string) => `https://explorer.solana.com/tx/${signature}?cluster=devnet`;
+const EXPLORER_URL = (signature: string) =>
+  `https://explorer.solana.com/tx/${signature}?cluster=devnet`;
 
 function section(title: string): void {
   console.log(`\n=== ${title} ===`);
@@ -54,18 +55,24 @@ function section(title: string): void {
 
 async function main(): Promise<void> {
   const { keypairPath, rpcUrl } = solanaConfig();
-  const payer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(keypairPath, 'utf8'))));
+  const payer = Keypair.fromSecretKey(
+    Uint8Array.from(JSON.parse(readFileSync(keypairPath, 'utf8'))),
+  );
   const connection = new Connection(rpcUrl, 'confirmed');
 
   section('1. Devnet user wallet');
   const userKeypair = loadOrCreateKeypair('devnet-user');
   const userPubkey = userKeypair.publicKey;
   console.log(`user address:        ${userPubkey.toBase58()}`);
-  console.log(`user SOL balance:    ${solanaBalanceSol(userPubkey.toBase58())} SOL (expected: 0 — the user never pays gas)`);
+  console.log(
+    `user SOL balance:    ${solanaBalanceSol(userPubkey.toBase58())} SOL (expected: 0 — the user never pays gas)`,
+  );
 
   section('2. Devnet USDC-standin mint + user funding');
   const mintResult = await setupDevnetMint(userPubkey.toBase58(), USER_TARGET_BALANCE_ATOMIC);
-  console.log(`mint:                ${mintResult.mint} ${mintResult.created ? '(created this run)' : '(reused)'}`);
+  console.log(
+    `mint:                ${mintResult.mint} ${mintResult.created ? '(created this run)' : '(reused)'}`,
+  );
   console.log(`user ATA:            ${mintResult.userAta}`);
   console.log(`minted this run:     ${mintResult.mintedThisRun.toString()} atomic units`);
   console.log(`user token balance:  ${mintResult.userBalanceAtomic.toString()} atomic units`);
@@ -74,12 +81,16 @@ async function main(): Promise<void> {
   const mintPubkey = new PublicKey(mintResult.mint);
   const squads = await setupSquadsVault(connection, payer, mintPubkey);
   console.log(`multisig create_key: ${squads.createKey.toBase58()}`);
-  console.log(`multisig PDA:        ${squads.multisigPda.toBase58()} ${squads.multisigCreated ? '(created this run)' : '(reused)'}`);
+  console.log(
+    `multisig PDA:        ${squads.multisigPda.toBase58()} ${squads.multisigCreated ? '(created this run)' : '(reused)'}`,
+  );
   if (squads.multisigCreateSignature) {
     console.log(`  tx: ${EXPLORER_URL(squads.multisigCreateSignature)}`);
   }
   console.log(`vault PDA:           ${squads.vaultPda.toBase58()}`);
-  console.log(`vault USDC ATA:      ${squads.vaultAta.toBase58()} ${squads.vaultAtaCreated ? '(created this run)' : '(reused)'}`);
+  console.log(
+    `vault USDC ATA:      ${squads.vaultAta.toBase58()} ${squads.vaultAtaCreated ? '(created this run)' : '(reused)'}`,
+  );
   if (squads.vaultAtaCreateSignature) {
     console.log(`  tx: ${EXPLORER_URL(squads.vaultAtaCreateSignature)}`);
   }
@@ -126,7 +137,9 @@ async function main(): Promise<void> {
     const agentAccount = toAccountId(SOLANA_DEVNET, userPubkey.toBase58());
 
     const before = await ledger.getBalance(demo.organizationId, agentAccount, asset);
-    const journalBefore = await ledger.readJournal(demo.organizationId, { accountId: agentAccount });
+    const journalBefore = await ledger.readJournal(demo.organizationId, {
+      accountId: agentAccount,
+    });
     console.log(`organizationId:      ${demo.organizationId}`);
     console.log(`agent ledger account:${agentAccount}`);
     console.log(
@@ -134,7 +147,9 @@ async function main(): Promise<void> {
     );
     console.log(`journal entries before: ${journalBefore.length}`);
     for (const entry of journalBefore.slice(-5)) {
-      console.log(`  [${entry.seq}] ${entry.entryType} ${entry.money.amount} tx=${entry.chainTxRef ?? '-'}`);
+      console.log(
+        `  [${entry.seq}] ${entry.entryType} ${entry.money.amount} tx=${entry.chainTxRef ?? '-'}`,
+      );
     }
 
     section('5. Deposit intent + x402 payload');
@@ -175,7 +190,9 @@ async function main(): Promise<void> {
         feePayer: address(feePayer),
         memo: intent.id,
       });
-      console.log(`built partially-signed legacy transaction (base64, ${payload.transactionBase64.length} chars)`);
+      console.log(
+        `built partially-signed legacy transaction (base64, ${payload.transactionBase64.length} chars)`,
+      );
 
       section('6. Settle through the facilitator');
       const settled = await depositService.settleDeposit(demo.organizationId, intent.id, {
@@ -214,7 +231,9 @@ async function main(): Promise<void> {
       console.log(`pending delta:       ${pendingDelta.toString()} (expected: ${observedAmount})`);
 
       if (pendingDelta.toString() !== observedAmount) {
-        console.error('ASSERTION FAILED: ledger pending delta does not equal the observed on-chain amount');
+        console.error(
+          'ASSERTION FAILED: ledger pending delta does not equal the observed on-chain amount',
+        );
         exitCode = 1;
       } else {
         console.log('ASSERTION PASSED: ledger pending delta equals the observed on-chain amount.');
