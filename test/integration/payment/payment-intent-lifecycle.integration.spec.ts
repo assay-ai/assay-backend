@@ -197,10 +197,11 @@ describe('payment intent state machine against Postgres', () => {
       expect(refunded.verificationVerdict).toBe('FAIL');
     });
 
-    it('the eight edges exercised above, plus the two hold-backstop edges, are the whole table', () => {
+    it('the eight edges exercised above, plus the hold-backstop and void edges, are the whole table', () => {
       // The two `HOLD_BACKSTOP` edges are taken for real in
-      // `payment-intent-expiry.integration.spec.ts`.
-      expect(PAYMENT_INTENT_TRANSITIONS).toHaveLength(10);
+      // `payment-intent-expiry.integration.spec.ts`; VERIFYING → VOIDED by the
+      // verification worker's VOID verdicts.
+      expect(PAYMENT_INTENT_TRANSITIONS).toHaveLength(11);
     });
   });
 

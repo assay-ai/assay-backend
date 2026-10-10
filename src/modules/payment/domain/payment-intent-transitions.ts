@@ -18,6 +18,8 @@ export enum PaymentIntentTrigger {
   RESPONSE_REQUEST_ERROR = 'RESPONSE_REQUEST_ERROR',
   VERIFICATION_PASS = 'VERIFICATION_PASS',
   VERIFICATION_FAIL = 'VERIFICATION_FAIL',
+  /** A verdict that charges nobody and blames nobody (`MISAPPLIED`, …). */
+  VERIFICATION_VOID = 'VERIFICATION_VOID',
   EXPIRY_SWEEP = 'EXPIRY_SWEEP',
   /** The ledger hold outlived its 24-hour deadline with the call still unresolved. */
   HOLD_BACKSTOP = 'HOLD_BACKSTOP',
@@ -130,6 +132,14 @@ export const PAYMENT_INTENT_TRANSITIONS: readonly PaymentIntentTransitionRule[] 
     from: PaymentIntentStatus.VERIFYING,
     to: PaymentIntentStatus.REFUNDED,
     triggers: [PaymentIntentTrigger.VERIFICATION_FAIL],
+    holdEffect: HoldEffect.RELEASE,
+  },
+  {
+    // Verified, but the check did not fit the call (`MISAPPLIED`): the agent is
+    // made whole like REFUNDED, and unlike REFUNDED nobody is blamed.
+    from: PaymentIntentStatus.VERIFYING,
+    to: PaymentIntentStatus.VOIDED,
+    triggers: [PaymentIntentTrigger.VERIFICATION_VOID],
     holdEffect: HoldEffect.RELEASE,
   },
   {
