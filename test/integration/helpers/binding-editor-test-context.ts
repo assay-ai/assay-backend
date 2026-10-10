@@ -295,7 +295,7 @@ export async function createBindingEditorTestContext(
     new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource),
   );
 
-  const catalogue = new DatabaseToolCatalogue({ tools: [TOOL], bindings: [] }, bindings);
+  const catalogue = new DatabaseToolCatalogue({ tools: [TOOL], bindings: [] }, bindings, versions);
   const stakes = new MutableStakeSource();
 
   // No policy is registered for any tool yet, which is also what production
@@ -323,7 +323,7 @@ export async function createBindingEditorTestContext(
     runs,
     stakes,
     new DbProviderRegistry(providers, new DbChainEnrolmentSource(chainEnrolments, NO_ALERTS)),
-    MINIMUM_STAKE,
+    new Map([[STAKE_CHAIN, MINIMUM_STAKE]]),
     dataSource,
   );
 

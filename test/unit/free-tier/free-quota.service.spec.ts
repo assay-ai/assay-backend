@@ -331,3 +331,39 @@ describe('FreeQuotaService — consume()', () => {
     expect(keys.some((key) => key.includes('b1'))).toBe(true);
   });
 });
+
+describe('FreeQuotaService — bindings at their published revision', () => {
+  // A live PAID binding whose unpublished draft says FREE is still PAID on the
+  // wire (`toServedToolBindings`), so it must not be counted as free supply.
+  it('does not treat a live PAID binding with a FREE draft as a free binding', async () => {
+    const { service, versions } = buildFreeQuotaHarness({}, [
+      buildBindingRow('b1', { mappingVersion: 2, publishedVersion: 1 }),
+    ]);
+    versions.setRows([
+      {
+        organizationId: 'provider-b1',
+        bindingId: 'b1',
+        mappingVersion: 1,
+        endpoint: 'https://b1.example.com/api',
+        requestMapping: { method: 'POST', path: '/search', body: {} },
+        responseMapping: {},
+        pricingMode: PricingMode.PAID,
+        priceAmount: '50000',
+        assetId: buildBindingRow('b1').assetId,
+        timeoutMs: 5_000,
+      },
+    ]);
+
+    await expect(service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID)).resolves.toBeNull();
+  });
+
+  it('still counts a FREE binding at its published revision', async () => {
+    const { service } = buildFreeQuotaHarness({}, [
+      buildBindingRow('b1', { mappingVersion: 1, publishedVersion: 1 }),
+    ]);
+
+    await expect(
+      service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID),
+    ).resolves.not.toBeNull();
+  });
+});

@@ -27,6 +27,7 @@ import { EgressHttpClient } from '@shared/network/egress/egress-http.client';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { McpModule } from '@modules/mcp/mcp.module';
 import { MCP_SESSION_SOURCE } from '@modules/mcp/ports/mcp-session.port';
@@ -120,6 +121,8 @@ import { ChainId } from '@modules/chains/ports/caip.types';
 @Module({
   providers: [
     { provide: ToolBindingRepository, useValue: { findByTool: async () => [] } },
+    // `DatabaseToolCatalogue` reads published revisions from `binding_versions`.
+    { provide: BindingVersionRepository, useValue: { find: async () => [] } },
     // `ChainsModule` imports `EvmModule`, whose `EvmGasGrantService`
     // writes the EVM gas-grant ledger. Another `@Global` `PostgresModule` repository,
     // stubbed on the same terms as the four above.
@@ -177,6 +180,7 @@ import { ChainId } from '@modules/chains/ports/caip.types';
   ],
   exports: [
     ToolBindingRepository,
+    BindingVersionRepository,
     EvmGasGrantRepository,
     ProviderRepository,
     PaymentIntentRepository,

@@ -3,9 +3,10 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
-import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
+import { toServedToolBindings } from '@modules/tool/services/database-tool-catalogue';
 import { BindingStatus, PricingMode, ToolBinding } from '@modules/tool/ports/tool.types';
 import {
   NOTIFICATION_PORT,
@@ -182,6 +183,7 @@ export class FreeQuotaService {
     private readonly bindings: ToolBindingRepository,
     @Inject(FREE_QUOTA_CONFIG) private readonly config: FreeQuotaConfig,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
+    private readonly versions: BindingVersionRepository,
   ) {}
 
   // ── check — pure, no Redis writes ─────────────────────────────────────────
@@ -498,15 +500,14 @@ export class FreeQuotaService {
 
   /** Every `ACTIVE` `FREE`/`FREEMIUM` binding behind the tool, as the domain type. */
   private async freeBindings(toolId: string): Promise<readonly ToolBinding[]> {
+    // At the published revision, as the router sees it: a live PAID binding
+    // whose draft says FREE is not a free binding until it is published.
     const rows = await this.bindings.findByTool(toolId);
-    return rows
-      .map(toToolBinding)
-      .filter(
-        (binding) =>
-          binding.status === BindingStatus.ACTIVE &&
-          (binding.pricingMode === PricingMode.FREE ||
-            binding.pricingMode === PricingMode.FREEMIUM),
-      );
+    return (await toServedToolBindings(rows, this.versions)).filter(
+      (binding) =>
+        binding.status === BindingStatus.ACTIVE &&
+        (binding.pricingMode === PricingMode.FREE || binding.pricingMode === PricingMode.FREEMIUM),
+    );
   }
 
   // ── shared read-through / increment machinery ─────────────────────────────

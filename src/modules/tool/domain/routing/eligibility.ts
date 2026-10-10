@@ -5,7 +5,7 @@ import { BindingStatus } from '../../ports/tool.types';
 import { chooseSettlementChain, settleableChains } from './chain-gate';
 import { chainsWithheldForWithdrawal } from './withdraw-gate';
 import { evaluatePayoutGate } from './payout-gate';
-import { evaluateStakeGate, toIneligible } from './stake-gate';
+import { evaluateStakeGateOnChain, toIneligible } from './stake-gate';
 import {
   EligibilityResult,
   Ineligible,
@@ -220,29 +220,14 @@ export function filterEligible(
       continue;
     }
 
-    // The floor for the chain this call settles on. Resolved here, once,
-    // and handed to the gate — the gate takes a `MinimumStakeParameters` and
-    // not the map, so it cannot be handed a map and quietly read the wrong
-    // entry out of it.
-    //
-    // A chain with no floor is refused rather than defaulted. The
-    // `ROUTER_CONFIG` factory makes this unreachable for any chain in
-    // `ENABLED_CHAINS` by throwing at boot, so reaching it means a binding is
-    // priced on a chain the deployment does not offer — and admitting it on
-    // some other chain's floor would compare a price against a number that was
-    // never about it. The detail says "configured", not "unknown", so a reader
-    // is not sent looking for an RPC outage.
-    const parameters = minimumStakeByChain.get(settlementChain);
-    if (!parameters) {
-      rejected.push({
-        candidate,
-        reason: IneligibilityReason.STAKE_UNKNOWN,
-        detail: `no minimum stake is configured for ${settlementChain}`,
-      });
-      continue;
-    }
-
-    const gate = evaluateStakeGate(candidate, settlementChain, parameters);
+    // The floor for the chain this call settles on, resolved by the same
+    // function the publish gate calls — so a binding cannot publish against
+    // one chain's floor and route against another's. A chain with no floor is
+    // refused (`STAKE_UNKNOWN`) rather than defaulted; the `ROUTER_CONFIG`
+    // factory makes that unreachable for any chain in `ENABLED_CHAINS` by
+    // throwing at boot, so reaching it means a binding is priced on a chain the
+    // deployment does not offer.
+    const gate = evaluateStakeGateOnChain(candidate, settlementChain, minimumStakeByChain);
     if (gate.passed === false) {
       rejected.push(toIneligible(candidate, gate));
       continue;

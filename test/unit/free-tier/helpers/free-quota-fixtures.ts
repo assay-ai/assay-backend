@@ -1,5 +1,6 @@
 import type { Redis } from 'ioredis';
 
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
 import { FreeQuotaConfig } from '@modules/free-tier/config/free-quota.config';
@@ -142,6 +143,33 @@ export class FakeToolBindingRepository {
   }
 }
 
+/**
+ * `BindingVersionRepository.find`, over an array — the published snapshots
+ * `toServedToolBindings` reads for a row whose draft has moved past them.
+ */
+export class FakeBindingVersionRepository {
+  constructor(private rows: Array<Record<string, unknown>> = []) {}
+
+  find(options: {
+    where: Array<{ organizationId: string; bindingId: string; mappingVersion: number }>;
+  }): Promise<Array<Record<string, unknown>>> {
+    return Promise.resolve(
+      this.rows.filter((row) =>
+        options.where.some(
+          (w) =>
+            w.organizationId === row.organizationId &&
+            w.bindingId === row.bindingId &&
+            w.mappingVersion === row.mappingVersion,
+        ),
+      ),
+    );
+  }
+
+  setRows(rows: Array<Record<string, unknown>>): void {
+    this.rows = rows;
+  }
+}
+
 /** `NotificationPort`, recording every call rather than sending anything. */
 export class FakeNotificationPort implements NotificationPort {
   readonly notified: NotificationRequest[] = [];
@@ -168,6 +196,7 @@ export interface FreeQuotaHarness {
   readonly records: FakeToolCallRecordRepository;
   readonly bindings: FakeToolBindingRepository;
   readonly notifications: FakeNotificationPort;
+  readonly versions: FakeBindingVersionRepository;
   readonly service: FreeQuotaService;
 }
 
@@ -179,6 +208,7 @@ export function buildFreeQuotaHarness(
   const records = new FakeToolCallRecordRepository();
   const bindings = new FakeToolBindingRepository(bindingRows);
   const notifications = new FakeNotificationPort();
+  const versions = new FakeBindingVersionRepository();
   const config: FreeQuotaConfig = { ...DEFAULT_TEST_CONFIG, ...overrides };
 
   const service = new FreeQuotaService(
@@ -187,7 +217,8 @@ export function buildFreeQuotaHarness(
     bindings as unknown as ToolBindingRepository,
     config,
     notifications,
+    versions as unknown as BindingVersionRepository,
   );
 
-  return { redis, records, bindings, notifications, service };
+  return { redis, records, bindings, notifications, versions, service };
 }

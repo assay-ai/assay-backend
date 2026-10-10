@@ -1,6 +1,8 @@
 import { Inject, Injectable } from '@nestjs/common';
 
+import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 
@@ -41,6 +43,7 @@ export class DatabaseToolCatalogue implements ToolCataloguePort {
   constructor(
     @Inject(TOOL_CATALOGUE_SNAPSHOT) snapshot: ToolCatalogueSnapshot,
     private readonly bindings: ToolBindingRepository,
+    private readonly versions: BindingVersionRepository,
   ) {
     this.tools = new Map(snapshot.tools.map((tool) => [tool.id, tool]));
   }
@@ -60,12 +63,15 @@ export class DatabaseToolCatalogue implements ToolCataloguePort {
    * one answer is how a binding a provider paused in the console keeps taking
    * traffic because a seed file still lists it, and the seed's `bindings` array
    * is now only read by tests that construct `InMemoryToolCatalogue` directly.
+   *
+   * Each binding is offered **at its published revision** — see
+   * {@link toServedToolBindings}.
    */
   async findBindings(toolId: string): Promise<readonly ToolBinding[]> {
     if (!this.tools.has(toolId)) return [];
 
     const rows = await this.bindings.findByTool(toolId);
-    return rows.map(toToolBinding);
+    return toServedToolBindings(rows, this.versions);
   }
 }
 
@@ -109,5 +115,104 @@ export function toToolBinding(row: ToolBindingEntity): ToolBinding {
     timeoutMs: row.timeoutMs,
     status: row.status as BindingStatus,
     version: row.mappingVersion,
+  };
+}
+
+/**
+ * `tool_bindings` rows → the domain type **as traffic is served**: at the
+ * published revision, not at whatever the row holds now.
+ *
+ * A draft and a live binding are the same row. Editing a published binding
+ * raises `mapping_version` and leaves `published_version` behind, and the
+ * product rule is that calls keep being served by the published revision until
+ * the provider publishes again — the publish gate (a green tester run at *this*
+ * revision, payout, stake) is the only door onto the wire, and it must guard
+ * every revision, not just the first. Mapping the row's current fields straight
+ * through served an untested edit the moment it was saved, and a pause → edit →
+ * resume did the same.
+ *
+ * So when the two versions differ, the versioned fields the snapshot records —
+ * endpoint, both mappings, pricing mode, price, asset, timeout — and the
+ * `version` a verdict cites are taken from the published `binding_versions`
+ * row. The rest is the row's own and deliberately so: status, the ceilings, the
+ * free-tier figures and `slaFailureRate` are outside the revision by design
+ * (`VERSIONED_FIELDS` in `binding-editor.service.ts`). `settlementChains` is in
+ * the revision but has no snapshot column yet, so it stays the row's; an edit
+ * to it is gated at write time by the editor's enrolment and stake checks.
+ *
+ * One query for every drifted row, scoped per row by its own organization —
+ * no new cross-tenant read. A published revision with no snapshot is a repair
+ * script or a bug, and it fails closed: the binding is not offered as `ACTIVE`,
+ * because the only terms left to serve are the unpublished ones.
+ */
+export async function toServedToolBindings(
+  rows: readonly ToolBindingEntity[],
+  versions: BindingVersionRepository,
+): Promise<ToolBinding[]> {
+  const drifted = rows.filter(hasUnpublishedRevision);
+  const snapshots =
+    drifted.length === 0
+      ? []
+      : await versions.find({
+          where: drifted.map((row) => ({
+            organizationId: row.organizationId,
+            bindingId: row.id,
+            mappingVersion: row.publishedVersion as number,
+          })),
+        });
+
+  const byRevision = new Map(
+    snapshots.map((snapshot) => [
+      revisionKey(snapshot.bindingId, snapshot.mappingVersion),
+      snapshot,
+    ]),
+  );
+
+  return rows.map((row) =>
+    hasUnpublishedRevision(row)
+      ? toServedToolBinding(
+          row,
+          byRevision.get(revisionKey(row.id, row.publishedVersion as number)) ?? null,
+        )
+      : toToolBinding(row),
+  );
+}
+
+/**
+ * `== null`, not `=== null`: this project compiles with `strictNullChecks: false`,
+ * and a row built without the field must read as never-published rather than
+ * as drifted.
+ */
+function hasUnpublishedRevision(row: ToolBindingEntity): boolean {
+  return row.publishedVersion != null && row.publishedVersion !== row.mappingVersion;
+}
+
+function revisionKey(bindingId: string, mappingVersion: number): string {
+  return `${bindingId}:${mappingVersion}`;
+}
+
+function toServedToolBinding(
+  row: ToolBindingEntity,
+  published: BindingVersionEntity | null,
+): ToolBinding {
+  const binding = toToolBinding(row);
+
+  if (!published) {
+    return {
+      ...binding,
+      status: binding.status === BindingStatus.ACTIVE ? BindingStatus.DRAFT : binding.status,
+    };
+  }
+
+  return {
+    ...binding,
+    endpoint: published.endpoint,
+    requestMapping: published.requestMapping,
+    responseMapping: published.responseMapping,
+    pricingMode: published.pricingMode as PricingMode,
+    priceAmount: published.priceAmount,
+    assetId: published.assetId as AssetId,
+    timeoutMs: published.timeoutMs,
+    version: published.mappingVersion,
   };
 }
