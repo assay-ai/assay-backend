@@ -28,6 +28,7 @@ import {
 import { assertDepositAssetIsSettlementAsset } from '../domain/deposit-asset';
 import { throwForX402InvalidReason } from '../domain/x402-error-mapping';
 import { PaymentErrors } from '../errors/payment.errors';
+import { DEPOSIT_MINIMUM_USD } from '../constants/deposit-intent.constants';
 import {
   CreateDepositIntentInput,
   DepositIntent,
@@ -125,6 +126,13 @@ export class DepositService {
    */
   async createDeposit(input: CreateDepositInput): Promise<CreateDepositResult> {
     assertDepositAssetIsSettlementAsset(input.chainId, input.amount.asset);
+    const minimum = 10n ** BigInt(input.amount.decimals) * BigInt(DEPOSIT_MINIMUM_USD);
+    if (BigInt(input.amount.amount) < minimum) {
+      throw PaymentErrors.depositBelowMinimum({
+        minimumUsd: DEPOSIT_MINIMUM_USD,
+        minimum: minimum.toString(),
+      });
+    }
 
     const deps = await this.resolveRequirementDeps(
       input.organizationId,

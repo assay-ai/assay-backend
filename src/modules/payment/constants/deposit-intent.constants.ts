@@ -88,3 +88,12 @@ export const DEPOSIT_WATCH_DEBOUNCE_MS = 1_000;
  * `DEPOSIT_WATCH_DEBOUNCE_MS` above.
  */
 export const DEPOSIT_WATCH_CHAIN_ID = 'DEPOSIT_WATCH_CHAIN_ID';
+
+/**
+ * The smallest deposit, in US dollars. The console has always refused below
+ * this ("Minimum $5.00"); the API now does too, so a script or a direct call
+ * cannot open an escrow and pay a deposit's network cost for cents. Settlement
+ * assets are pegged USD-1:1 (`assertChainMetadata`), so the atomic minimum is
+ * this many whole units of the asset.
+ */
+export const DEPOSIT_MINIMUM_USD = 5;

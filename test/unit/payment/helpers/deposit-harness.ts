@@ -169,7 +169,7 @@ export function fakeChainAdapter(overrides: Partial<ChainAdapter> = {}): ChainAd
         Promise.resolve({
           scheme: 'exact' as const,
           network: CHAIN_IDS.SOLANA_DEVNET,
-          amount: '1000000',
+          amount: '5000000',
           asset: '4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU',
           payTo: parseAccountId(input.payTo).address,
           resource: 'deposit:test',

@@ -28,6 +28,7 @@ export enum PaymentErrorCode {
   PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE = 'PAYMENT_DEPOSIT_REQUIREMENTS_INCOMPLETE',
   PAYMENT_DEPOSIT_CHAIN_REQUIRED = 'PAYMENT_DEPOSIT_CHAIN_REQUIRED',
   PAYMENT_DEPOSIT_ACCOUNT_NOT_LINKED = 'PAYMENT_DEPOSIT_ACCOUNT_NOT_LINKED',
+  PAYMENT_DEPOSIT_BELOW_MINIMUM = 'PAYMENT_DEPOSIT_BELOW_MINIMUM',
 
   // ── The x402 error mapping — the `X402_INVALID_REASON` vocabulary,
   //    mapped exactly as the reference table specifies. The SVM-specific
@@ -237,6 +238,13 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
    * reason for one outcome — "you cannot deposit on that" — instead of two
    * spellings of it a client has to tell apart.
    */
+  depositBelowMinimum: {
+    code: PaymentErrorCode.PAYMENT_DEPOSIT_BELOW_MINIMUM,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `A deposit must be at least ${context?.minimumUsd ?? 5} USD` +
+      `${context?.minimum ? ` (${context.minimum} atomic units)` : ''}`,
+  },
   depositAccountNotLinked: {
     code: PaymentErrorCode.PAYMENT_DEPOSIT_ACCOUNT_NOT_LINKED,
     statusCode: 409,
