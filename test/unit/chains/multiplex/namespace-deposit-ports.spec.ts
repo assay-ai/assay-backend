@@ -131,7 +131,7 @@ const EVM_ANSWER: DepositRequirements = {
   method: 'depositFor(address,uint64)',
   spender: '0x2ed26485593B512d87616a2625d2C0f7721cfF10',
   buyer: '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc',
-  asset: '0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec',
+  asset: '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac',
   amount: '5000000',
   decimals: 6,
   plainTransferCreditsNobody: true,

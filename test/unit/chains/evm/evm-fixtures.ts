@@ -23,7 +23,7 @@ const ADDRESSES: Readonly<Record<string, Omit<EvmDeployment, 'chainId'>>> = {
     stake: '0x2222222222222222222222222222222222222222',
     escrow: '0x3333333333333333333333333333333333333333',
     /** The real measured testnet USDG (assay-evm `docs/chain-facts.md`). */
-    asset: '0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec',
+    asset: '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac',
     /**
      * Distinct from `escrow` for the same reason every other pair here is: the
      * proxy and the implementation behind it are the two halves of the ERC-1967

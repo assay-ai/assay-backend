@@ -29,7 +29,7 @@ const DEPLOYMENTS = JSON.stringify({
     config: '0x1111111111111111111111111111111111111111',
     stake: '0x2222222222222222222222222222222222222222',
     escrow: '0x3333333333333333333333333333333333333333',
-    asset: '0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec',
+    asset: '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac',
     // The two `assertVaultControl` compares the live chain against.
     escrowImplementation: '0x8888888888888888888888888888888888888888',
     admin: '0x9999999999999999999999999999999999999999',
@@ -176,7 +176,7 @@ describe('two chains, enabled together', () => {
             config: '0x1111111111111111111111111111111111111111',
             stake: '0x2222222222222222222222222222222222222222',
             escrow: '0x3333333333333333333333333333333333333333',
-            asset: '0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec',
+            asset: '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac',
           },
         }),
         EVM_RPC_URLS: JSON.stringify({

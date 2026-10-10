@@ -39,7 +39,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
 const BUYER: AccountId = toAccountId(CHAIN, '0x5B38Da6a701c568545dCfcB03FcB875f56beddC4');
 const ATTACKER = '0x000000000000000000000000000000000000dEaD';
-const ASSET = `${CHAIN}/erc20:0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec` as AssetId;
+const ASSET = `${CHAIN}/erc20:0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac` as AssetId;
 
 const SESSION: McpSession = {
   credentialId: 'cred-1',

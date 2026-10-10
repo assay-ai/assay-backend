@@ -793,7 +793,7 @@ describe('ReconciliationService — the slot the vault was read at', () => {
  */
 describe('ReconciliationService — the escrow walk is scoped to the asset', () => {
   it('never hands another chain’s escrow accounts to the reader', async () => {
-    const EVM = 'eip155:46630/erc20:0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec' as AssetId;
+    const EVM = 'eip155:46630/erc20:0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac' as AssetId;
     const solanaAccount =
       'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:8ZaUV8QFrwR8SHoMSjXyVBuVsv7i2Aabk4eV9Ucj9KmP' as AccountId;
 

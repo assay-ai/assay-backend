@@ -215,7 +215,7 @@ describe('EvmChainAdapter payment requirements', () => {
     expect(requirements.payTo).toBe(BUYER);
     expect(requirements.payTo).not.toBe(DEPLOYMENT.escrow);
     expect(requirements.network).toBe(TESTNET);
-    expect(requirements.asset).toBe('0x915Ef7c9F9f80a69e3BE47A38EE0Bb47607103ec');
+    expect(requirements.asset).toBe('0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac');
     expect(requirements.amount).toBe('10000');
     expect(requirements.maxTimeoutSeconds).toBeGreaterThan(0);
   });

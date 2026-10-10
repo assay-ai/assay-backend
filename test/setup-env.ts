@@ -14,3 +14,7 @@
  * test whose subject is dependency injection.
  */
 import '../src/load-env';
+
+// The Robinhood testnet settlement token has no default in the registry; the
+// suite pins a fixture address so it never depends on a local `.env`.
+process.env.ROBINHOOD_TESTNET_USDG_ADDRESS = '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac';
