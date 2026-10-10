@@ -2,6 +2,7 @@ import { ConfigService } from '@nestjs/config';
 
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
+import { chainIdOf } from '@modules/chains/ports/caip.types';
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { ProviderToolBindingsController } from '@modules/provider/controllers/provider-tool-bindings.controller';
 import { ProviderToolBindingsService } from '@modules/provider/services/provider-tool-bindings.service';
@@ -140,6 +141,7 @@ describe('ProviderToolBindingsService.getCatalogue — the settlement asset', ()
 
     expect(result.settlementAsset).toEqual({
       assetId: ASSET_IDS.USDC_SOLANA_MAINNET,
+      chainId: chainIdOf(ASSET_IDS.USDC_SOLANA_MAINNET),
       symbol: 'USDC',
       decimals: 6,
     });
@@ -152,6 +154,7 @@ describe('ProviderToolBindingsService.getCatalogue — the settlement asset', ()
 
     expect(result.settlementAsset).toEqual({
       assetId: ASSET_IDS.USDC_SOLANA_DEVNET,
+      chainId: chainIdOf(ASSET_IDS.USDC_SOLANA_DEVNET),
       symbol: 'USDC',
       decimals: 6,
     });

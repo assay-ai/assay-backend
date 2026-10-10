@@ -195,6 +195,8 @@ export class BindingEditorService {
     // one fact: an asset the platform does not know has no decimals, and a
     // price with no scale is not a price.
     assertKnownAsset(body.assetId);
+    assertFreeLimitsRepresentable(body.freeDailyBudget);
+    assertPriceMatchesMode(body.pricingMode, body.priceAmount);
 
     const row = new ToolBindingEntity();
     row.organizationId = organizationId;
@@ -304,6 +306,10 @@ export class BindingEditorService {
     if (body.maxRps !== undefined) row.maxRps = body.maxRps;
     if (body.maxDailyCalls !== undefined) row.maxDailyCalls = body.maxDailyCalls;
     if (row.pricingMode === PricingMode.FREE) row.priceAmount = '0';
+    // After the merge, so `{ pricingMode: 'PAID' }` against a stored zero and
+    // `{ priceAmount: '0' }` against a stored PAID are both caught.
+    assertFreeLimitsRepresentable(body.freeDailyBudget);
+    assertPriceMatchesMode(row.pricingMode as PricingMode, row.priceAmount);
 
     // Answered against what was read, not against what the caller sent: a
     // `PATCH` that re-sends the same endpoint is not an edit, and treating it
@@ -547,3 +553,20 @@ function snapshotOf(row: ToolBindingEntity, authoredBy: string): BindingVersionE
  * until someone writes a real body here.
  */
 export const toSavedDto: (row: ToolBindingEntity) => SavedToolBindingDto = toDetailDto;
+
+/** `FREE` is the only mode allowed to cost nothing; `PAID` and `FREEMIUM` both charge past the free tier. */
+function assertPriceMatchesMode(pricingMode: PricingMode, priceAmount: string): void {
+  if (pricingMode !== PricingMode.FREE && BigInt(priceAmount) <= 0n) {
+    throw ProviderErrors.bindingPriceNotPositive({ pricingMode });
+  }
+}
+
+/** The read side returns the budget as a JSON number, so it must survive `Number()` exactly. */
+function assertFreeLimitsRepresentable(freeDailyBudget: string | null | undefined): void {
+  if (freeDailyBudget != null && BigInt(freeDailyBudget) > BigInt(Number.MAX_SAFE_INTEGER)) {
+    throw ProviderErrors.bindingFreeLimitTooLarge({
+      field: 'freeDailyBudget',
+      max: String(Number.MAX_SAFE_INTEGER),
+    });
+  }
+}

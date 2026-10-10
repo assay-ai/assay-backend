@@ -207,6 +207,9 @@ export enum ProviderErrorCode {
   PROVIDER_BINDING_CHAIN_STAKE_BELOW_MINIMUM = 'PROVIDER_BINDING_CHAIN_STAKE_BELOW_MINIMUM',
   /** A chain this deployment does not offer at all. 400. */
   PROVIDER_BINDING_CHAIN_NOT_ENABLED = 'PROVIDER_BINDING_CHAIN_NOT_ENABLED',
+  /** A non-FREE binding priced at zero, or a free-tier limit beyond what a number can carry. 400. */
+  PROVIDER_BINDING_PRICE_NOT_POSITIVE = 'PROVIDER_BINDING_PRICE_NOT_POSITIVE',
+  PROVIDER_BINDING_FREE_LIMIT_TOO_LARGE = 'PROVIDER_BINDING_FREE_LIMIT_TOO_LARGE',
   /** `GET /providers/me/sla-windows/:windowId/evidence` — `windowId` does not decode to a window. */
   PROVIDER_SLA_WINDOW_NOT_FOUND = 'PROVIDER_SLA_WINDOW_NOT_FOUND',
   /** `from` is not strictly before `to` on a report endpoint (traffic, quality, earnings). */
@@ -605,6 +608,33 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `${context?.chainId ?? '?'} is not offered by this deployment. ` +
       `Available: ${context?.enabled ?? '(none)'}.`,
+  },
+
+  /**
+   * `PAID`, or the paid tier of a `FREEMIUM`, at a price of zero.
+   *
+   * A zero price on a mode that charges is a binding that settles nothing while
+   * looking paid; `FREE` is the honest spelling of that.
+   */
+  bindingPriceNotPositive: {
+    code: ProviderErrorCode.PROVIDER_BINDING_PRICE_NOT_POSITIVE,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `A ${context?.pricingMode ?? 'priced'} binding needs a price above zero. ` +
+      `Use pricingMode FREE for a binding that costs nothing.`,
+  },
+
+  /**
+   * A free-tier limit the read side cannot return exactly: the API reports both
+   * as JSON numbers, so anything above `Number.MAX_SAFE_INTEGER` would be stored
+   * correctly and read back rounded.
+   */
+  bindingFreeLimitTooLarge: {
+    code: ProviderErrorCode.PROVIDER_BINDING_FREE_LIMIT_TOO_LARGE,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `${context?.field ?? 'The free-tier limit'} is too large: the maximum is ` +
+      `${context?.max ?? String(Number.MAX_SAFE_INTEGER)}.`,
   },
 
   slaWindowNotFound: {

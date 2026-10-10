@@ -3,7 +3,7 @@ import { ConfigService } from '@nestjs/config';
 
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
-import { AssetId } from '@modules/chains/ports/caip.types';
+import { AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { platformAssetFrom } from '@modules/chains/platform-asset';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
@@ -103,6 +103,7 @@ export class ProviderToolBindingsService {
       tools: tools.map(toCatalogueToolDto),
       settlementAsset: {
         assetId: metadata.assetId,
+        chainId: chainIdOf(metadata.assetId),
         symbol: metadata.symbol,
         decimals: metadata.decimals,
       },
