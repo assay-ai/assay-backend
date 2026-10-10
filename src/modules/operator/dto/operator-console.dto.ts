@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { Type } from 'class-transformer';
+import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
   ArrayNotEmpty,
@@ -272,23 +272,35 @@ export class ListOverrideLogQueryDto extends ListQueryDto {
   q?: string;
 }
 
+/**
+ * A query-string boolean. `@Type(() => Boolean)` is `Boolean(value)`, which reads
+ * `'false'` as `true`; anything other than `'true'`/`'false'` is left for
+ * `@IsBoolean` to refuse.
+ */
+const QueryBoolean = () =>
+  Transform(({ value }: { value: unknown }) => {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return value;
+  });
+
 export class ListQueueQueryDto extends ListQueryDto {
   @ApiPropertyOptional({ description: 'Only cases assigned to the calling operator' })
   @IsOptional()
   @IsBoolean()
-  @Type(() => Boolean)
+  @QueryBoolean()
   mine?: boolean;
 
   @ApiPropertyOptional({ description: 'Only cases with no owner' })
   @IsOptional()
   @IsBoolean()
-  @Type(() => Boolean)
+  @QueryBoolean()
   unassigned?: boolean;
 
   @ApiPropertyOptional({ description: 'Only cases past our own deadline' })
   @IsOptional()
   @IsBoolean()
-  @Type(() => Boolean)
+  @QueryBoolean()
   overdue?: boolean;
 
   @ApiPropertyOptional({ description: 'Group by a suspected root cause — decide once' })
