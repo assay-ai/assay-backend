@@ -224,6 +224,50 @@ describe('SpendPolicyService.patch', () => {
     });
   });
 
+  it("keeps the organization default's caps on an agent's first override that omits them", async () => {
+    // The console's Pause/Resume sends `{ paused }` and nothing else. Inheriting
+    // only the asset here wrote an agent row with every cap null — uncapped.
+    const orgDefault = policyRow({
+      agentId: null,
+      assetId: USDC,
+      decimals: DECIMALS,
+      perCallMax: '500000',
+      dailyCap: '10000000',
+      monthlyCap: '100000000',
+      maxSpendPerHour: '5000000',
+      maxCallsPerMinute: 60,
+      requireApprovalAbove: '2000000',
+    });
+    const { service, tx } = build({ findOneResults: [null, orgDefault] });
+
+    await service.patch(ORG, AGENT, { paused: true });
+
+    expect(tx.insertValues).toMatchObject({
+      policyVersion: 1,
+      paused: true,
+      perCallMax: '500000',
+      dailyCap: '10000000',
+      monthlyCap: '100000000',
+      maxSpendPerHour: '5000000',
+      maxCallsPerMinute: 60,
+      requireApprovalAbove: '2000000',
+    });
+  });
+
+  it('still clears an inherited cap when the first override names it null', async () => {
+    const orgDefault = policyRow({
+      agentId: null,
+      assetId: USDC,
+      decimals: DECIMALS,
+      dailyCap: '10000000',
+    });
+    const { service, tx } = build({ findOneResults: [null, orgDefault] });
+
+    await service.patch(ORG, AGENT, { dailyCap: null });
+
+    expect(tx.insertValues).toMatchObject({ dailyCap: null });
+  });
+
   it('supersedes the existing agent-scoped row and increments its version', async () => {
     const current = policyRow({ policyVersion: 3, dailyCap: '10000000' });
     const { service, tx } = build({ findOneResults: [current] });

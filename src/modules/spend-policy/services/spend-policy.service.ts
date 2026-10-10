@@ -127,10 +127,12 @@ export class SpendPolicyService {
    * organization default.
    *
    * Every field the caller omits keeps the value of the row being replaced;
-   * an explicit `null` clears it. The first version at a scope has nothing to
-   * inherit from except the organization default (for the asset only, so a
-   * brand-new agent override starts denominated the same way the org is), and
-   * if neither exists the caller must name `assetId`/`decimals` itself.
+   * an explicit `null` clears it. The first version at a scope inherits every
+   * field from the organization default. Inheriting only the asset turned the
+   * first override into an uncapped policy: `PATCH {paused: false}` — what the
+   * console's Pause/Resume sends — replaced the org's per-call, daily and
+   * monthly caps with nulls. If neither row exists the caller must name
+   * `assetId`/`decimals` itself.
    */
   async patch(
     organizationId: string,
@@ -158,21 +160,18 @@ export class SpendPolicyService {
       policyVersion: (current?.policyVersion ?? 0) + 1,
       assetId,
       decimals,
-      perCallMax: resolveNullable(patch.perCallMax, current?.perCallMax ?? null),
-      dailyCap: resolveNullable(patch.dailyCap, current?.dailyCap ?? null),
-      monthlyCap: resolveNullable(patch.monthlyCap, current?.monthlyCap ?? null),
-      maxCallsPerHour: resolveNullable(patch.maxCallsPerHour, current?.maxCallsPerHour ?? null),
-      maxCallsPerMinute: resolveNullable(
-        patch.maxCallsPerMinute,
-        current?.maxCallsPerMinute ?? null,
-      ),
-      maxSpendPerHour: resolveNullable(patch.maxSpendPerHour, current?.maxSpendPerHour ?? null),
-      allowedTools: resolveNullable(patch.allowedTools, current?.allowedTools ?? null),
+      perCallMax: resolveNullable(patch.perCallMax, base?.perCallMax ?? null),
+      dailyCap: resolveNullable(patch.dailyCap, base?.dailyCap ?? null),
+      monthlyCap: resolveNullable(patch.monthlyCap, base?.monthlyCap ?? null),
+      maxCallsPerHour: resolveNullable(patch.maxCallsPerHour, base?.maxCallsPerHour ?? null),
+      maxCallsPerMinute: resolveNullable(patch.maxCallsPerMinute, base?.maxCallsPerMinute ?? null),
+      maxSpendPerHour: resolveNullable(patch.maxSpendPerHour, base?.maxSpendPerHour ?? null),
+      allowedTools: resolveNullable(patch.allowedTools, base?.allowedTools ?? null),
       requireApprovalAbove: resolveNullable(
         patch.requireApprovalAbove,
-        current?.requireApprovalAbove ?? null,
+        base?.requireApprovalAbove ?? null,
       ),
-      paused: patch.paused ?? current?.paused ?? false,
+      paused: patch.paused ?? base?.paused ?? false,
       changedBy: patch.changedBy ?? `agent:${agentId}`,
       changeReason: patch.changeReason ?? null,
       supersededAt: null,
