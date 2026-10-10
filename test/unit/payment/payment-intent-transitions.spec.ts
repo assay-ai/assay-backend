@@ -91,6 +91,13 @@ const VALID_EDGES: ReadonlyArray<{
     why: 'FAIL — same money as VOIDED, but this one is a strike against the provider',
   },
   {
+    from: PaymentIntentStatus.VERIFYING,
+    to: PaymentIntentStatus.VOIDED,
+    triggers: [PaymentIntentTrigger.VERIFICATION_VOID],
+    holdEffect: HoldEffect.RELEASE,
+    why: 'MISAPPLIED and other VOID verdicts — the agent is made whole and nobody is blamed',
+  },
+  {
     from: PaymentIntentStatus.PROVIDER_EXECUTING,
     to: PaymentIntentStatus.EXPIRED,
     triggers: [PaymentIntentTrigger.HOLD_BACKSTOP],

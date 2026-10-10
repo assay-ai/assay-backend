@@ -112,6 +112,7 @@ const VERIFICATION_RECORD_INTENT_CONSTRAINT = 'uq_verification_records_intent';
 
 const VERIFICATION_SETTLED_REASON = 'verification: judged and settled by the worker';
 const VERIFICATION_REFUNDED_REASON = 'verification: judged and refunded by the worker';
+const VERIFICATION_VOIDED_REASON = 'verification: judged void by the worker — no charge, no strike';
 
 /**
  * Written when `decide()` returned `null` — a tool with no decision policy at
@@ -417,10 +418,14 @@ export class VerificationSettlementService {
     record: VerificationRecordEntity,
     outcome: VerdictOutcome,
   ): Promise<void> {
+    // VOID is not REFUND: same money back to the agent, but no provider fault,
+    // so it lands on VOIDED and is bucketed as the platform's or nobody's.
     const to =
       outcome === VerdictOutcome.SETTLE
         ? PaymentIntentStatus.SETTLED
-        : PaymentIntentStatus.REFUNDED;
+        : outcome === VerdictOutcome.VOID
+          ? PaymentIntentStatus.VOIDED
+          : PaymentIntentStatus.REFUNDED;
 
     try {
       await this.intents.resolve(
@@ -432,7 +437,9 @@ export class VerificationSettlementService {
           reason:
             to === PaymentIntentStatus.SETTLED
               ? VERIFICATION_SETTLED_REASON
-              : VERIFICATION_REFUNDED_REASON,
+              : to === PaymentIntentStatus.VOIDED
+                ? VERIFICATION_VOIDED_REASON
+                : VERIFICATION_REFUNDED_REASON,
           verificationVerdict: record.verdictStatus ?? undefined,
           ...(to === PaymentIntentStatus.SETTLED ? { settledAmount: intent.price } : {}),
         },
@@ -503,8 +510,8 @@ export class VerificationSettlementService {
 
     // **The intent's own status decides, not the verdict.** They agree on every
     // path that exists today — a record only exists once the intent reached
-    // `VERIFYING`, and the only edges out of `VERIFYING` are the two this
-    // worker takes — but "they agree" is a claim about the current call graph,
+    // `VERIFYING`, and the edges out of it are the three this worker takes
+    // plus the hold backstop — but "they agree" is a claim about the current call graph,
     // and this method runs precisely when the current call graph did not
     // finish. `payment_intents.status` is what the transition table binds a
     // `holdEffect` to, so reading the effect from anywhere else means the money
@@ -520,8 +527,8 @@ export class VerificationSettlementService {
       // nobody decided to take.
       this.logger.error(
         `Intent ${intent.id}: hold ${intent.holdId} is open on status ${intent.status}, which is ` +
-          `not reachable from VERIFYING. Not repairing, and NOTHING else will — ` +
-          `ledger_holds.expires_at has no reader. Release this hold by hand.`,
+          `not reachable from VERIFYING. Not repairing; the 24-hour hold backstop does not ` +
+          `cover a terminal intent either. Release this hold by hand.`,
       );
       return;
     }

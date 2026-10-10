@@ -594,6 +594,19 @@ describe('VerificationSettlementService.judgeAndSettle', () => {
     expect(theRecord(records).state).toBe(VerificationRecordState.SETTLED);
   });
 
+  it('2b. a MISAPPLIED (VOID) verdict voids the intent — the hold is released, nobody is blamed', async () => {
+    const { service, ledger, intents, records, decide } = harness();
+    intents.seed(baseIntent());
+    records.seedPending(INTENT_ID);
+    decide.mockResolvedValue(verificationOutcome(VerdictStatus.MISAPPLIED, VerdictOutcome.VOID));
+
+    await service.judgeAndSettle(ORG, INTENT_ID);
+
+    expect(intents.rows.get(INTENT_ID)?.status).toBe(PaymentIntentStatus.VOIDED);
+    expect(ledger.appliedReleases).toBe(1);
+    expect(ledger.appliedCommits).toBe(0);
+  });
+
   it('3. crash between judge and settle: re-run does not call decide() again, and the hold resolves exactly once', async () => {
     const { service, ledger, intents, records, decide } = harness();
     intents.seed(baseIntent());
@@ -649,6 +662,7 @@ describe('VerificationSettlementService.judgeAndSettle', () => {
     const matrix: readonly [VerdictStatus, VerdictOutcome, PaymentIntentStatus][] = [
       [VerdictStatus.PASS, VerdictOutcome.SETTLE, PaymentIntentStatus.SETTLED],
       [VerdictStatus.FAIL, VerdictOutcome.REFUND, PaymentIntentStatus.REFUNDED],
+      [VerdictStatus.MISAPPLIED, VerdictOutcome.VOID, PaymentIntentStatus.VOIDED],
     ];
 
     for (const [status, outcome, expectedIntentStatus] of matrix) {
@@ -795,28 +809,27 @@ describe('VerificationSettlementService.judgeAndSettle', () => {
     expect(intents.rows.get(INTENT_ID)?.holdReleasedAt).not.toBeNull();
   });
 
-  it('refuses to repair a hold left open on a status verification cannot have produced', async () => {
+  it('repairs a hold left open on VOIDED, which a VOID verdict now reaches from VERIFYING', async () => {
     const { service, ledger, intents, records } = harness();
-    // `VOIDED` is reachable from `PROVIDER_EXECUTING`, never from `VERIFYING`.
-    // An open hold here was not put there by this worker, so guessing a
-    // direction would either hand back money another edge meant to take or
-    // take money nobody decided to take. The 24h expiry is the backstop.
+    // `VERIFYING → VOIDED` is the MISAPPLIED edge; its declared effect is
+    // RELEASE, so a worker that died after the status change is repaired in
+    // the agent's favour, from the table rather than from the verdict.
     intents.seed(baseIntent({ status: PaymentIntentStatus.VOIDED, holdReleasedAt: null }));
     records.seedPending(INTENT_ID, {
       state: VerificationRecordState.JUDGED,
-      verdictStatus: VerdictStatus.PASS,
+      verdictStatus: VerdictStatus.MISAPPLIED,
       decisionPolicyId: 'decision-1',
       decisionPolicyVersion: 1,
       evaluatedAt: new Date(),
       stages: [],
-      settlementOutcome: VerdictOutcome.SETTLE,
+      settlementOutcome: VerdictOutcome.VOID,
     });
 
     await service.judgeAndSettle(ORG, INTENT_ID);
 
     expect(ledger.appliedCommits).toBe(0);
-    expect(ledger.appliedReleases).toBe(0);
-    expect(intents.rows.get(INTENT_ID)?.holdReleasedAt).toBeNull();
+    expect(ledger.appliedReleases).toBe(1);
+    expect(intents.rows.get(INTENT_ID)?.holdReleasedAt).not.toBeNull();
   });
 
   it('drops the wakeup when no record exists, without throwing', async () => {
