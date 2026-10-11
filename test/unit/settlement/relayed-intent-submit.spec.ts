@@ -15,6 +15,7 @@ import { WithdrawalService } from '@modules/settlement/services/withdrawal.servi
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { generateSigner } from '../chains/evm/evm-fixtures';
+import { guardOver } from './helpers/unsettled-guard';
 
 /**
  * `WithdrawalService.submitRelayedIntent` — **whose gas is spent**, which is
@@ -125,6 +126,7 @@ function build(options: { frozen?: boolean; admit?: jest.Mock; submit?: jest.Moc
     { grantWithdrawGas: jest.fn() } as never,
     { submit } as never,
     { admit } as never,
+    guardOver().guard,
   );
 
   return { service, submit, admit, isFrozen, get, calls };
@@ -225,7 +227,9 @@ describe('the order of the three controls', () => {
 
     await submitAs(service, ALICE.account, ALICE.address, signSetLimits(ALICE));
 
-    expect(calls).toEqual(['admit', 'submit', 'escrows.get']);
+    // The first read is BUG-D1-07's: the escrow's standing limits, to tell
+    // whether this change lowers them below what unsettled payments need.
+    expect(calls).toEqual(['escrows.get', 'admit', 'submit', 'escrows.get']);
   });
 
   it('submits nothing when the budget is spent', async () => {

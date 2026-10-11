@@ -12,6 +12,7 @@ import {
 } from './services/relayed-intent-rate-limiter.service';
 import { ReconciliationService } from './services/reconciliation.service';
 import { TreasuryVaultService } from './services/treasury-vault.service';
+import { UnsettledVoucherGuard } from './services/unsettled-voucher-guard.service';
 import { WithdrawalService } from './services/withdrawal.service';
 
 /**
@@ -54,6 +55,7 @@ import { WithdrawalService } from './services/withdrawal.service';
     EscrowAccountService,
     WithdrawalService,
     EscrowDelegationService,
+    UnsettledVoucherGuard,
     /**
      * How much of the relayer's gas one buyer may spend in an hour.
      *

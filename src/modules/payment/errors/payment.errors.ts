@@ -68,6 +68,8 @@ export enum PaymentErrorCode {
   // ── The payer's own on-chain escrow limits (`setLimits`), which bind every
   //    voucher, delegate-signed or not.
   PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED = 'PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED',
+  /** The payer is tightening its caps right now; retry shortly (BUG-D1-07). */
+  PAYMENT_VOUCHER_ADMISSION_PAUSED = 'PAYMENT_VOUCHER_ADMISSION_PAUSED',
 }
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
@@ -159,6 +161,21 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `${context?.limit ? ` (${context.limit}` : ''}` +
       `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
       `${context?.limit ? ')' : ''}; nothing was charged`,
+  },
+  /**
+   * The payer is relaying a change that tightens its caps (its escrow limits,
+   * or a delegate's caps, expiry or authority), and a voucher admitted now
+   * could be one the new caps refuse at redemption (BUG-D1-07). Nothing was
+   * charged and the voucher's seq is not spent; the same call can be retried
+   * once the change has landed, usually within seconds.
+   */
+  voucherAdmissionPaused: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `The payer is changing its payment limits right now, so no payment is accepted until the ` +
+      `change lands${context?.retryAfterSeconds ? ` (retry in about ${context.retryAfterSeconds} s)` : ''}; ` +
+      `nothing was charged`,
   },
   /**
    * The voucher was signed by an authorised delegate that is not the delegate

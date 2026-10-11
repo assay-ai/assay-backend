@@ -45,6 +45,8 @@ export enum SettlementErrorCode {
   SETTLEMENT_DELEGATION_INVALID = 'SETTLEMENT_DELEGATION_INVALID',
   /** A revocation of a delegate that is not authorised (never was, or already revoked). */
   SETTLEMENT_DELEGATION_NOT_ACTIVE = 'SETTLEMENT_DELEGATION_NOT_ACTIVE',
+  /** Lowering these caps now would leave served, unredeemed vouchers unredeemable (BUG-D1-07). */
+  SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK = 'SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK',
   // ── Boot-time configuration of the public reserves page ─────────────────
   SETTLEMENT_PUBLIC_RESERVES_ASSET_INVALID = 'SETTLEMENT_PUBLIC_RESERVES_ASSET_INVALID',
   SETTLEMENT_PUBLIC_RESERVES_ASSET_NOT_ENABLED = 'SETTLEMENT_PUBLIC_RESERVES_ASSET_NOT_ENABLED',
@@ -343,6 +345,24 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
     message: (context?: Record<string, any>) =>
       `${context?.delegate ?? 'This delegate'} is not authorised on this escrow, so there is ` +
       `nothing to revoke`,
+  },
+  /**
+   * The new caps are below what payments already served and not yet redeemed
+   * need, so the chain would refuse them at redemption and the provider would
+   * go unpaid (BUG-D1-07). Refused BEFORE anything is signed or relayed, unless
+   * the request says `acknowledgeUnsettled: true`; they usually settle within a
+   * minute, after which the same change goes through.
+   */
+  unsettledVouchersAtRisk: {
+    code: SettlementErrorCode.SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `${context?.count ?? 'Some'} payment${context?.count === 1 ? ' is' : 's are'} still being ` +
+      `settled${context?.amount ? ` (${context.amount})` : ''}, and this change would leave the ` +
+      `chain unable to redeem ${context?.count === 1 ? 'it' : 'them'}` +
+      `${context?.reasons ? ` (${context.reasons})` : ''}. Wait until ` +
+      `${context?.count === 1 ? 'it settles' : 'they settle'}, usually under a minute, or send ` +
+      `the change again with acknowledgeUnsettled to accept that. Nothing was submitted.`,
   },
 
   // ── Public reserves page ─────────────────────────────────────────────────

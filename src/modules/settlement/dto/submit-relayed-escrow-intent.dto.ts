@@ -1,5 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsBoolean, IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 
 import { EscrowIntentKind } from '../ports/escrow-intent-builder.port';
 import { GetEscrowResponseDto } from './get-escrow.dto';
@@ -123,6 +123,16 @@ export class SubmitSetLimitsBodyDto {
   @IsString()
   @Matches(SIGNATURE, { message: 'signature must be 65 bytes of hex (r || s || v)' })
   signature: string;
+
+  @ApiPropertyOptional({
+    description:
+      'BUG-D1-07. True accepts that this change lowers a cap below what payments still being ' +
+      'settled need, so the chain will refuse them and their providers go unpaid by the chain. ' +
+      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  acknowledgeUnsettled?: boolean;
 }
 
 /**

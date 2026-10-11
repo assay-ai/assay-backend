@@ -61,7 +61,8 @@ describe('payment_intents.voucher_delegate — the delegate’s in-flight vouche
             delegateSince: since,
           },
           (totals) => {
-            seen = totals;
+            // The sums only; `pausedUntil` is BUG-D1-07's, covered in voucher-unsettled.
+            seen = { escrow: totals.escrow, delegate: totals.delegate };
             throw new Error('probe only');
           },
         ),
