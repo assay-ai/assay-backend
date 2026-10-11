@@ -465,6 +465,9 @@ export class McpToolCallService {
         platformFee: this.platformFee(price),
         chainId: session.chainId,
         boundDelegate: session.delegateAccount ?? null,
+        // The same read as the withdraw gate above: the escrow's own limits
+        // bind this voucher at redemption, so they are applied before serving.
+        escrow: reading,
       });
     } catch (error) {
       if (!isInsufficientBalance(error)) throw error;

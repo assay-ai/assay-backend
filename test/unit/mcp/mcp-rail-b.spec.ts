@@ -245,6 +245,25 @@ describe('rail B over MCP', () => {
       expect(h.ledger.events).toHaveLength(0);
     });
 
+    /**
+     * REGRESSION (BUG-D1-03): the escrow's own per-voucher limit binds at
+     * redemption; a call above it was served and then refused on chain.
+     */
+    it('refuses a voucher above the escrow’s own per-voucher limit, before any provider is dialled', async () => {
+      const h = harness();
+      h.escrow.withdrawRequested = 0n;
+      h.escrow.maxVoucherAmount = BigInt(PRICE.amount) - 1n;
+      const requirement = await requirementOf(h);
+
+      await expect(
+        h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement)),
+      ).rejects.toMatchObject({
+        errorCode: PaymentErrorCode.PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED,
+      });
+      expect(h.invoker.invocations).toHaveLength(0);
+      expect(h.ledger.events).toHaveLength(0);
+    });
+
     it('refuses a voucher for different arguments', async () => {
       const h = harness();
       const requirement = await requirementOf(h);

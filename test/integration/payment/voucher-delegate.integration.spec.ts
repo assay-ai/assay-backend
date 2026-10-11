@@ -1,16 +1,19 @@
 import { randomUUID } from 'node:crypto';
 
-import { ReceiptsSummaryGroupBy } from '@database/postgres/repositories/payment-intent.repository';
+import {
+  OpenVoucherTotals,
+  ReceiptsSummaryGroupBy,
+} from '@database/postgres/repositories/payment-intent.repository';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 
 import { PaymentTestContext, createPaymentTestContext } from '../helpers/payment-test-context';
 
 /**
- * Agent payment delegation, against Postgres: the delegate's vouchers that hold
- * money and have not reached the chain yet are what the delegate's on-chain
- * window cannot see, and `VoucherService` adds them before serving a
- * delegate-signed call. The sum must count exactly those — by payer, by
- * delegate, with an open hold — and nothing else.
+ * Agent payment delegation, against Postgres: the vouchers that have not
+ * reached the chain yet are what the escrow's and the delegate's on-chain
+ * windows cannot see, and `VoucherService` adds them before serving a call.
+ * The admission read must count exactly those — by payer, by delegate — and
+ * nothing else.
  */
 describe('payment_intents.voucher_delegate — the delegate’s in-flight vouchers', () => {
   let context: PaymentTestContext;
@@ -27,7 +30,7 @@ describe('payment_intents.voucher_delegate — the delegate’s in-flight vouche
     await context.reset();
   });
 
-  it('sums the open holds a delegate signed for a payer, and only those', async () => {
+  it('counts, per payer and per delegate, every voucher the chain has not counted yet', async () => {
     // Unique per run: the sum is deliberately ACROSS organizations (the window
     // is the payer account's on chain), so a rotated organization id does not
     // isolate one run's rows from the last one's.
@@ -39,6 +42,32 @@ describe('payment_intents.voucher_delegate — the delegate’s in-flight vouche
     const asset = context.usdc(0n).asset;
     await context.fund(payer, 10_000_000n);
     await context.fund(otherPayer, 10_000_000n);
+
+    /** What an admission for (payer, delegate) reads, with nothing written. */
+    const open = async (
+      who: typeof payer,
+      signer: string | null,
+      since: Date = new Date(),
+    ): Promise<OpenVoucherTotals> => {
+      let seen: OpenVoucherTotals | undefined;
+      await expect(
+        context.repository.insertAdmittedVoucherIntent(
+          { organizationId: context.organizationId },
+          {
+            payer: who,
+            assetId: asset,
+            delegate: signer,
+            escrowSince: since,
+            delegateSince: since,
+          },
+          (totals) => {
+            seen = totals;
+            throw new Error('probe only');
+          },
+        ),
+      ).rejects.toThrow('probe only');
+      return seen as OpenVoucherTotals;
+    };
 
     const secured = async (
       label: string,
@@ -54,25 +83,36 @@ describe('payment_intents.voucher_delegate — the delegate’s in-flight vouche
     await secured('c', payer, otherDelegate); // another delegate of the same payer
     await secured('d', payer, null); // the payer's own voucher
     await secured('e', otherPayer, delegate); // the same key, another payer
-    await context.createIntent('f', { agentAccount: payer, voucherDelegate: delegate }); // no hold yet
+    // In flight: admitted, funds not secured yet. It holds its place.
+    const f = await context.createIntent('f', { agentAccount: payer, voucherDelegate: delegate });
 
     expect(a.status).toBe(PaymentIntentStatus.FUNDS_SECURED);
     expect(a.voucherDelegate).toBe(delegate);
-    expect(await context.intents.sumOpenDelegateVouchers(payer, delegate, asset)).toBe(2_000_000n);
+    expect(await open(payer, delegate)).toEqual({ escrow: 5_000_000n, delegate: 3_000_000n });
+    expect(await open(payer, otherDelegate)).toEqual({ escrow: 5_000_000n, delegate: 1_000_000n });
+    expect(await open(payer, null)).toEqual({ escrow: 5_000_000n, delegate: 0n });
+    expect(await open(otherPayer, delegate)).toEqual({ escrow: 1_000_000n, delegate: 1_000_000n });
 
-    // Redeemed on chain: the redemption job closes the hold, and from then on
-    // the chain's own window carries the amount.
+    // A CREATED intent whose funds could not be secured gives its place back.
+    await context.intents.abandonUnsecuredVoucher(context.organizationId, f.id);
+    expect(await open(payer, delegate)).toEqual({ escrow: 4_000_000n, delegate: 2_000_000n });
+
+    // Redeemed on chain: the redemption job closes the hold of a SETTLED
+    // intent. A chain read taken BEFORE that cannot contain it, so it still
+    // counts; a read after it does, so it no longer does.
+    const before = new Date(Date.now() - 60_000);
     await context.dataSource.query(
-      `UPDATE "payment_intents" SET "hold_released_at" = now() WHERE "id" = $1`,
+      `UPDATE "payment_intents" SET "status" = 'SETTLED', "hold_released_at" = now() WHERE "id" = $1`,
       [a.id],
     );
-    expect(await context.intents.sumOpenDelegateVouchers(payer, delegate, asset)).toBe(1_000_000n);
-    expect(await context.intents.sumOpenDelegateVouchers(payer, otherDelegate, asset)).toBe(
-      1_000_000n,
-    );
-    expect(await context.intents.sumOpenDelegateVouchers(otherPayer, delegate, asset)).toBe(
-      1_000_000n,
-    );
+    expect(await open(payer, delegate, before)).toEqual({
+      escrow: 4_000_000n,
+      delegate: 2_000_000n,
+    });
+    expect(await open(payer, delegate, new Date(Date.now() + 1_000))).toEqual({
+      escrow: 3_000_000n,
+      delegate: 1_000_000n,
+    });
   });
 
   it('reads back the delegate it stored, and null for a payer-signed voucher', async () => {

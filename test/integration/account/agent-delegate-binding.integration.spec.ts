@@ -215,7 +215,14 @@ describe('agent_credentials.delegate_account — binding a credential to its del
    * last is no more legitimate than the other — while a revoked row is left be.
    */
   it('unbinds every live holder of a key bound twice before the unique index', async () => {
-    await dataSource.undoLastMigration({ transaction: 'all' });
+    // Back to before the unique index, however many migrations came after it.
+    for (;;) {
+      const [last] = (await dataSource.query(
+        `SELECT "name" FROM "migrations" ORDER BY "timestamp" DESC, "id" DESC LIMIT 1`,
+      )) as Array<{ name: string }>;
+      await dataSource.undoLastMigration({ transaction: 'all' });
+      if (last?.name === 'AgentCredentialDelegateUnique1759600000002') break;
+    }
     const key = `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`;
     const early = await credential();
     const late = await credential();
