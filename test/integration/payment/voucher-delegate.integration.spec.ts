@@ -146,4 +146,40 @@ describe('payment_intents.voucher_delegate — the delegate’s in-flight vouche
     const calls = Object.fromEntries(rows.map((row) => [row.key, row.calls]));
     expect(calls).toEqual({ [agentId]: 3, [otherAgentId]: 1 });
   });
+
+  /**
+   * U02: two credentials of ONE agent hold two delegate keys (two machines,
+   * two grants) and were one group under `groupBy=agent`. `groupBy=credential`
+   * splits them; a row written before `credential_id` existed falls back to
+   * its agent.
+   */
+  it('splits one agent’s spend by the credential that made each call (groupBy=credential)', async () => {
+    const agentId = context.id('agent-with-two-credentials');
+    const first = randomUUID();
+    const second = randomUUID();
+    await context.createIntent('m', { agentId, credentialId: first });
+    await context.createIntent('n', { agentId, credentialId: first });
+    await context.createIntent('o', { agentId, credentialId: second });
+    await context.createIntent('p', { agentId }); // before the column: no credential
+
+    const now = Date.now();
+    const period = { from: new Date(now - 3_600_000), to: new Date(now + 3_600_000) };
+    const byCredential = Object.fromEntries(
+      (
+        await context.repository.summarizeReceipts(
+          context.organizationId,
+          ReceiptsSummaryGroupBy.CREDENTIAL,
+          period,
+        )
+      ).map((row) => [row.key, row.calls]),
+    );
+    expect(byCredential).toEqual({ [first]: 2, [second]: 1, [`agent:${agentId}`]: 1 });
+
+    const byAgent = await context.repository.summarizeReceipts(
+      context.organizationId,
+      ReceiptsSummaryGroupBy.AGENT,
+      period,
+    );
+    expect(byAgent.map((row) => [row.key, row.calls])).toEqual([[agentId, 4]]);
+  });
 });

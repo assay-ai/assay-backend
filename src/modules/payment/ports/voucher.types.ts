@@ -83,6 +83,9 @@ export interface RedeemVoucherInput {
    */
   readonly boundDelegate?: AccountId | null;
 
+  /** The agent credential that made the call, recorded on the intent. */
+  readonly credentialId?: string | null;
+
   /**
    * The payer's escrow as the caller read it off the chain for THIS call, or
    * null when no escrow is open. Its own limits (`maxVoucherAmount`,

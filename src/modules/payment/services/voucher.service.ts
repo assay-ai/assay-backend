@@ -636,6 +636,7 @@ export class VoucherService {
         // The delegate whose on-chain window this voucher will count against, so
         // the next delegate-signed call sees it before it reaches the chain.
         voucherDelegate: delegate,
+        credentialId: input.credentialId ?? null,
         // No idempotency key on this path, deliberately. The seq *is* rail B's
         // idempotency key, and it is stricter: a replayed voucher is refused
         // rather than answered with the original intent, which is what the

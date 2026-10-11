@@ -1,5 +1,6 @@
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
+import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
@@ -273,6 +274,7 @@ export async function createBindingEditorTestContext(
       // (agent payment delegation).
       VoucherDelegate1759600000000,
       VoucherAdmissionIndex1759600000003,
+      PaymentIntentCredential1759600000004,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',

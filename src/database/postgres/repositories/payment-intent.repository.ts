@@ -73,6 +73,13 @@ export enum ReceiptsSummaryGroupBy {
    * call an agent paid for with its delegate key is attributed to that agent.
    */
   AGENT = 'agent',
+  /**
+   * `payment_intents.credential_id`: the agent CREDENTIAL that made the call.
+   * Two credentials of one agent hold two delegate keys, so they are two
+   * groups here. A row written before the column has no credential and is
+   * keyed `agent:<agent id>` instead.
+   */
+  CREDENTIAL = 'credential',
 }
 
 /** One row of a summary grouping, still in atomic units. */
@@ -861,6 +868,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         return "COALESCE(intent.verificationVerdict, 'UNVERIFIED')";
       case ReceiptsSummaryGroupBy.AGENT:
         return 'intent.agentId';
+      case ReceiptsSummaryGroupBy.CREDENTIAL:
+        // Columns, not properties, for the reason `PROVIDER` gives.
+        return "COALESCE(intent.credential_id::text, 'agent:' || intent.agent_id::text)";
     }
   }
 
