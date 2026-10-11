@@ -3,6 +3,7 @@ import {
   DEFAULT_RELAYED_INTENT_RATE_LIMITS,
   RelayedIntentRateLimits,
   decideRelayedIntentRate,
+  relayedIntentRetryAt,
 } from '@modules/settlement/domain/relayed-intent-rate-limit';
 import { RelayedIntentRateLimiter } from '@modules/settlement/services/relayed-intent-rate-limiter.service';
 
@@ -34,11 +35,11 @@ function caught(error: unknown): { code?: string; status?: number; message: stri
 
 /**
  * A Redis stand-in that counts the way the real one does: a sorted set per key,
- * the window trimmed by score, and `zcard` AFTER the insert.
+ * the window trimmed by score, and `zrange` AFTER the insert.
  *
  * Written rather than mocked to a fixed number, because the property under test
- * is that the count INCLUDES the attempt being decided — a `zcard` stub
- * returning a constant would pass whether or not it did.
+ * is that the count INCLUDES the attempt being decided — a stub returning a
+ * constant would pass whether or not it did.
  */
 function fakeRedis(options: { failOn?: 'exec' | 'throw' | 'null' } = {}) {
   const sets = new Map<string, { score: number; member: string }[]>();
@@ -47,7 +48,7 @@ function fakeRedis(options: { failOn?: 'exec' | 'throw' | 'null' } = {}) {
     sets,
     multi() {
       const ops: (() => void)[] = [];
-      const reads: (() => number)[] = [];
+      const reads: (() => unknown)[] = [];
       const order: ('write' | 'read')[] = [];
       const api = {
         zremrangebyscore(key: string, _min: string, max: number) {
@@ -67,8 +68,12 @@ function fakeRedis(options: { failOn?: 'exec' | 'throw' | 'null' } = {}) {
           order.push('write');
           return api;
         },
-        zcard(key: string) {
-          reads.push(() => (sets.get(key) ?? []).length);
+        zrange(key: string) {
+          reads.push(() =>
+            [...(sets.get(key) ?? [])]
+              .sort((a, b) => a.score - b.score)
+              .map((entry) => entry.member),
+          );
           order.push('read');
           return api;
         },
@@ -148,6 +153,16 @@ describe('decideRelayedIntentRate', () => {
   });
 });
 
+describe('relayedIntentRetryAt', () => {
+  it('is null while there is room, and the instant the right attempt leaves the window', () => {
+    expect(relayedIntentRetryAt([1000, 2000], 3, 60)).toBeNull();
+    // Three in the window against a limit of three: the oldest has to leave.
+    expect(relayedIntentRetryAt([3000, 1000, 2000], 3, 60)).toBe(61_000);
+    // Five against three (refusals count too): the third-oldest has to leave.
+    expect(relayedIntentRetryAt([1000, 2000, 3000, 4000, 5000], 3, 60)).toBe(63_000);
+  });
+});
+
 describe('RelayedIntentRateLimiter, counting', () => {
   it('admits up to the per-account ceiling and refuses the one after it', async () => {
     const service = limiter(fakeRedis());
@@ -159,7 +174,52 @@ describe('RelayedIntentRateLimiter, counting', () => {
     const error = await service.admit(ACCOUNT, ORG).catch((e: unknown) => e);
     expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_RATE_LIMITED');
     expect(caught(error).status).toBe(429);
-    expect(caught(error).message).toContain(`account:${ACCOUNT}`);
+  });
+
+  /**
+   * REGRESSION (BUG-D1-06): the refusal read "Too many relayed escrow requests
+   * for account:eip155:46630:0x18…: 11 in the last 3600 seconds against a limit
+   * of 10" — a raw CAIP string, seconds, and no word on when to retry.
+   */
+  it('says, in words, when the next request will be admitted — and no raw account string', async () => {
+    const redis = fakeRedis();
+    const service = limiter(redis);
+    const key = `settlement:relayed-intent:rate:account:${ACCOUNT}`;
+    const oldest = Date.now() - 1_800_000; // half an hour ago
+    redis.sets.set(
+      key,
+      [0, 1, 2].map((n) => ({ score: oldest + n * 1000, member: `${oldest + n * 1000}:m${n}` })),
+    );
+
+    const error = await service.assertRoom(ACCOUNT, ORG).catch((e: unknown) => e);
+
+    expect(caught(error).code).toBe('SETTLEMENT_RELAYED_INTENT_RATE_LIMITED');
+    expect(caught(error).message).toBe(
+      'You have reached the limit of 3 escrow changes the platform relays for this account ' +
+        'per hour. Nothing was submitted. You can make the next one from ' +
+        `${new Date(oldest + 3_600_000).toISOString()}.`,
+    );
+    expect(caught(error).message).not.toContain('eip155:');
+  });
+
+  it('checks the budget before anything is signed, without spending it', async () => {
+    const redis = fakeRedis();
+    const service = limiter(redis);
+    const key = `settlement:relayed-intent:rate:account:${ACCOUNT}`;
+
+    for (let i = 0; i < LIMITS.perAccount - 1; i += 1) {
+      await service.admit(ACCOUNT, ORG);
+    }
+    // One left: the pre-check passes, as often as it is asked, and records nothing.
+    await expect(service.assertRoom(ACCOUNT, ORG)).resolves.toBeUndefined();
+    await expect(service.assertRoom(ACCOUNT, ORG)).resolves.toBeUndefined();
+    expect(redis.sets.get(key)).toHaveLength(LIMITS.perAccount - 1);
+
+    await service.admit(ACCOUNT, ORG);
+    // None left: the pre-check now refuses, before a wallet prompt.
+    await expect(service.assertRoom(ACCOUNT, ORG)).rejects.toMatchObject({
+      errorCode: 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED',
+    });
   });
 
   /**

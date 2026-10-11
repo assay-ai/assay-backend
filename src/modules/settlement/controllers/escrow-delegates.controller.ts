@@ -64,16 +64,24 @@ export class EscrowDelegatesController {
   @ApiOperation({ summary: 'Build the AuthorizeDelegate request the payer signs' })
   @ApiResponse({ status: 201, type: DelegateIntentResponseDto })
   @ApiResponse({ status: 400, description: 'SETTLEMENT_DELEGATION_INVALID' })
+  @ApiResponse({
+    status: 429,
+    description: 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED — before anything is signed',
+  })
   async authorizeIntent(
     @CurrentSession() session: McpSession,
     @Body() body: CreateDelegateIntentBodyDto,
   ): Promise<DelegateIntentResponseDto> {
-    const transaction = await this.delegation.authorizeIntent(session.agentAccount, {
-      delegate: delegateOn(session.agentAccount, body.delegate),
-      maxVoucherAmount: BigInt(body.maxVoucherAmount),
-      maxPerWindow: BigInt(body.maxPerWindow),
-      validUntil: BigInt(body.validUntil),
-    });
+    const transaction = await this.delegation.authorizeIntent(
+      session.organizationId,
+      session.agentAccount,
+      {
+        delegate: delegateOn(session.agentAccount, body.delegate),
+        maxVoucherAmount: BigInt(body.maxVoucherAmount),
+        maxPerWindow: BigInt(body.maxPerWindow),
+        validUntil: BigInt(body.validUntil),
+      },
+    );
     return {
       kind: EscrowDelegationKind.AUTHORIZE_DELEGATE,
       account: session.agentAccount,
@@ -118,11 +126,19 @@ export class EscrowDelegatesController {
   @ApiOperation({ summary: 'Build the RevokeDelegate request the payer signs' })
   @ApiResponse({ status: 201, type: DelegateIntentResponseDto })
   @ApiResponse({ status: 409, description: 'SETTLEMENT_DELEGATION_NOT_ACTIVE' })
+  @ApiResponse({
+    status: 429,
+    description: 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED — before anything is signed',
+  })
   async revokeIntent(
     @CurrentSession() session: McpSession,
     @Body() body: CreateRevokeDelegateIntentBodyDto,
   ): Promise<DelegateIntentResponseDto> {
-    const transaction = await this.delegation.revokeIntent(session.agentAccount, body.delegate);
+    const transaction = await this.delegation.revokeIntent(
+      session.organizationId,
+      session.agentAccount,
+      body.delegate,
+    );
     return {
       kind: EscrowDelegationKind.REVOKE_DELEGATE,
       account: session.agentAccount,

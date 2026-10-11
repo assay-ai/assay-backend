@@ -60,24 +60,30 @@ export interface RelayedIntentRateLimits {
  * Chosen from what a buyer can legitimately produce, not from a published
  * figure — there is none.
  *
- * A buyer lowers their voucher ceiling when they change how they spend, and
- * starts an exit when they leave. Both are human-paced actions measured in
- * *per month*, not per hour. Ten an hour is roughly two orders of magnitude
- * above that and still four orders below what a script would do, which is the
- * whole value of the gap: anything inside it is a config change, anything
- * outside it is not a busy afternoon.
+ * Twenty an hour per account (BUG-D1-06; it was ten). The relayed doors are no
+ * longer only the human-paced brake and exit: agent payment delegation added
+ * authorise, edit and revoke, and a person setting an agent up in one sitting
+ * does limits + authorise + an edit or two + a revoke, and retries a step when
+ * they mistype — each a relayed write, and a refused one still counts. Ten made
+ * that sitting hit the wall (the e2e run did, in under an hour). Twenty leaves
+ * room for it and is still three orders below what a script would do, which is
+ * the whole value of the gap. The organization ceiling stays at fifty.
  *
  * The cost of being wrong is asymmetric and is why the numbers sit where they
- * do. Too low and a legitimate buyer is told to wait an hour before lowering a
- * ceiling — annoying, visible, and it costs nobody any money, since `withdraw()`
- * itself never passes through this route. Too high and the relayer's float
- * drains: at the 300,000-gas ceiling a relayed request may cost, `perAccount:
- * 10` bounds one buyer at 3,000,000 gas an hour, which at 0.1 gwei is
- * 0.0003 ETH — under 1 % of the ≤ 0.05 ETH float the port targets.
+ * do. Too low and a legitimate buyer is told to wait before lowering a ceiling
+ * or revoking an agent — annoying, visible, and it costs nobody any money,
+ * since `withdraw()` itself never passes through this route. Too high and the
+ * relayer's float drains: at the 300,000-gas ceiling a relayed request may
+ * cost, `perAccount: 20` bounds one buyer at 6,000,000 gas an hour, which at
+ * 0.1 gwei is 0.0006 ETH — about 1 % of the ≤ 0.05 ETH float the port targets.
+ *
+ * The intent routes check the budget BEFORE the payer is asked to sign
+ * (`RelayedIntentRateLimiter.assertRoom`), so being at the ceiling never costs
+ * a wallet prompt.
  */
 export const DEFAULT_RELAYED_INTENT_RATE_LIMITS: RelayedIntentRateLimits = Object.freeze({
   windowSeconds: 3600,
-  perAccount: 10,
+  perAccount: 20,
   perOrganization: 50,
 });
 
@@ -112,4 +118,23 @@ export function decideRelayedIntentRate(
   observations: readonly RelayedIntentObservation[],
 ): RelayedIntentObservation | null {
   return observations.find((observation) => observation.observed > observation.limit) ?? null;
+}
+
+/**
+ * When the next relayed request will be admitted, in epoch milliseconds, given
+ * the instants of the attempts still in the window (any order) — or `null` when
+ * there is room now.
+ *
+ * Room means fewer than `limit` attempts in the window. With `n >= limit`, the
+ * window has to drop the `n - limit + 1` oldest, so the next request is
+ * admitted when the `(n - limit)`-th oldest (0-based) leaves the window.
+ */
+export function relayedIntentRetryAt(
+  attemptsMs: readonly number[],
+  limit: number,
+  windowSeconds: number,
+): number | null {
+  if (attemptsMs.length < limit) return null;
+  const sorted = [...attemptsMs].sort((a, b) => a - b);
+  return sorted[sorted.length - limit] + windowSeconds * 1000;
 }

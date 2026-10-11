@@ -51,11 +51,26 @@ export class EscrowDelegationService {
     return this.escrows.assetFor(account);
   }
 
-  authorizeIntent(account: AccountId, terms: DelegationTerms): Promise<UnsignedChainTransaction> {
+  /**
+   * The two intents refuse when the relay budget is spent BEFORE building, so
+   * the payer is never asked to sign a request the relay will then refuse
+   * (BUG-D1-06).
+   */
+  async authorizeIntent(
+    organizationId: string,
+    account: AccountId,
+    terms: DelegationTerms,
+  ): Promise<UnsignedChainTransaction> {
+    await this.withdrawals.assertRelayRoom(organizationId, account);
     return this.delegation.authorizeIntent(account, terms);
   }
 
-  revokeIntent(account: AccountId, delegate: string): Promise<UnsignedChainTransaction> {
+  async revokeIntent(
+    organizationId: string,
+    account: AccountId,
+    delegate: string,
+  ): Promise<UnsignedChainTransaction> {
+    await this.withdrawals.assertRelayRoom(organizationId, account);
     return this.delegation.revokeIntent(account, delegateOn(account, delegate));
   }
 
