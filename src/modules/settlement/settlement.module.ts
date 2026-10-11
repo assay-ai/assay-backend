@@ -1,3 +1,4 @@
+import { EscrowDelegationService } from './services/escrow-delegation.service';
 import { Module } from '@nestjs/common';
 
 import { ChainsModule } from '@modules/chains/chains.module';
@@ -52,6 +53,7 @@ import { WithdrawalService } from './services/withdrawal.service';
     ReconciliationService,
     EscrowAccountService,
     WithdrawalService,
+    EscrowDelegationService,
     /**
      * How much of the relayer's gas one buyer may spend in an hour.
      *
@@ -64,6 +66,12 @@ import { WithdrawalService } from './services/withdrawal.service';
     { provide: RELAYED_INTENT_RATE_LIMITS, useValue: DEFAULT_RELAYED_INTENT_RATE_LIMITS },
     RelayedIntentRateLimiter,
   ],
-  exports: [TreasuryVaultService, ReconciliationService, EscrowAccountService, WithdrawalService],
+  exports: [
+    TreasuryVaultService,
+    ReconciliationService,
+    EscrowAccountService,
+    WithdrawalService,
+    EscrowDelegationService,
+  ],
 })
 export class SettlementModule {}

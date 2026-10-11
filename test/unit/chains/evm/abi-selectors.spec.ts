@@ -4,6 +4,7 @@ import { AbiParameter, toEventSelector, toFunctionSelector } from 'viem';
 
 import { EVM_ERROR_BY_SELECTOR, evmErrorName } from '@modules/chains/evm/abi/error-selectors';
 import {
+  ERC1271_ABI,
   ERC20_ABI,
   X402_CONFIG_ABI,
   X402_ESCROW_ABI,
@@ -25,7 +26,7 @@ import {
  *   `evm/out/<Contract>.sol/<Contract>.json`;
  * - the argument and return shapes come from the `abi` array of the same files,
  *   rendered to canonical form;
- * - the 71 error selectors come from `cast sig '<Name>()'` on the pinned
+ * - the 83 error selectors come from `cast sig '<Name>()'` on the pinned
  *   Foundry build (1.2.1-nightly, commit `7e68208e`), which is a **different
  *   keccak implementation from viem's** — so the comparison is a pin and not a
  *   restatement of the derivation.
@@ -77,6 +78,25 @@ const ESCROW_PINS: readonly Pin[] = [
   ['0x2a1561f5', 'requestWithdraw(uint64)', '()'],
   ['0x4129519f', 'requestWithdrawBySig(address,uint64,uint64,uint64,bytes)', '()'],
   ['0x3ccfd60b', 'withdraw()', '()'],
+  // Agent payment delegation — `cast sig` on the pinned build, agreeing with
+  // `.methodIdentifiers` of the delegation branch's artifact.
+  [
+    '0x628da527',
+    'delegationOf(address,address)',
+    '((uint64 maxVoucherAmount,uint64 maxPerWindow,uint64 spentInWindow,uint64 windowStartedAt,uint64 validUntil,uint32 listPosition,bool revoked))',
+  ],
+  ['0x7de5b8ed', 'delegatesOf(address)', '(address[])'],
+  [
+    '0x2365427e',
+    'authorizeDelegateBySig(address,address,uint64,uint64,uint64,uint64,uint64,bytes)',
+    '()',
+  ],
+  ['0x7aac242e', 'revokeDelegateBySig(address,address,uint64,uint64,bytes)', '()'],
+];
+
+/** EIP-1271's one function, `cast sig 'isValidSignature(bytes32,bytes)'`. */
+const ERC1271_PINS: readonly Pin[] = [
+  ['0x1626ba7e', 'isValidSignature(bytes32,bytes)', '(bytes4)'],
 ];
 
 const CONFIG_PINS: readonly Pin[] = [
@@ -167,6 +187,7 @@ const SUITES = [
   ['stake-slash', X402_STAKE_SLASH_ABI, STAKE_SLASH_PINS],
   ['multicall3', MULTICALL3_ABI, MULTICALL3_PINS],
   ['erc20', ERC20_ABI, ERC20_PINS],
+  ['erc1271', ERC1271_ABI, ERC1271_PINS],
 ] as const;
 
 /**
@@ -292,11 +313,11 @@ describe('the vendored ABI matches the compiled contracts', () => {
  * Every `error X();` in `assay-evm/src/Errors.sol`, name and selector.
  *
  * The names were extracted mechanically from the Solidity
- * (`grep -oE '^\s*error\s+([A-Za-z0-9_]+)\s*\(\s*\)\s*;'` → 71 hits, and the
+ * (`grep -oE '^\s*error\s+([A-Za-z0-9_]+)\s*\(\s*\)\s*;'` → 83 hits, and the
  * complementary grep for a non-zero-argument error returned nothing). Each
  * selector is `cast sig '<Name>()'` on the pinned Foundry build.
  *
- * All 71 are pinned rather than a sample: pinning four leaves 67 names free to
+ * All 83 are pinned rather than a sample: pinning four leaves 79 names free to
  * be misspelled, and a misspelled name produces a selector that no revert will
  * ever carry — so the table reports `UNKNOWN_REVERT` for a refusal it was
  * written to name, and no test notices.
@@ -373,12 +394,24 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0xb3b45102', 'SlashNotYetExecutable'],
   ['0xa0057580', 'SlashExecutionWindowClosed'],
   ['0x15fbdbc2', 'SlashNotExpired'],
+  ['0xeaad2a76', 'DelegateIsPayer'],
+  ['0xf188d51a', 'DelegateCapsInvalid'],
+  ['0x6a8b28b6', 'DelegateCapsExceedEscrowLimits'],
+  ['0xede89bb7', 'DelegateValidUntilInvalid'],
+  ['0xea843156', 'DelegationUnchanged'],
+  ['0x13925a11', 'DelegateNotActive'],
+  ['0x8c390496', 'TooManyDelegates'],
+  ['0xa8a8247b', 'DelegateIsRevoked'],
+  ['0x157f584a', 'DelegateIsExpired'],
+  ['0x1ebdc3dd', 'DelegateVoucherExceedsPerCallLimit'],
+  ['0x3ae67490', 'DelegateWindowLimitExceeded'],
+  ['0x98877a9a', 'WalletCheckUnderfunded'],
 ];
 
 describe('the Errors.sol selector table', () => {
   it('has one entry per declared error and no collisions', () => {
-    expect(EVM_ERROR_BY_SELECTOR.size).toBe(71);
-    expect(ERROR_PINS).toHaveLength(71);
+    expect(EVM_ERROR_BY_SELECTOR.size).toBe(83);
+    expect(ERROR_PINS).toHaveLength(83);
   });
 
   it.each(ERROR_PINS)('%s decodes to %s', (selector, name) => {
@@ -396,7 +429,7 @@ describe('the Errors.sol selector table', () => {
   it('names an unrecognised selector rather than swallowing it', () => {
     // The non-vacuity control. Without it, `evmErrorName = () => 'NotRedeemer'`
     // passes every case above that happens to be NotRedeemer, and a constant
-    // that returned any single pinned name would pass one of the 71.
+    // that returned any single pinned name would pass one of the 83.
     expect(evmErrorName('0xdeadbeef')).toBe('UNKNOWN_REVERT:0xdeadbeef');
     expect(evmErrorName('0xDEADBEEF')).toBe('UNKNOWN_REVERT:0xdeadbeef');
     expect(evmErrorName(null)).toBe('UNKNOWN_REVERT:none');

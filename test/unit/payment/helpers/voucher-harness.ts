@@ -163,6 +163,18 @@ export class InMemoryIntentWriter {
     return this.seqKeys.has(`${account}#${seq}`);
   }
 
+  /** Every intent this fake created is holding money: none has been redeemed. */
+  async sumOpenDelegateVouchers(payer: string, delegate: string, assetId: string): Promise<bigint> {
+    return this.created
+      .filter(
+        (intent) =>
+          intent.agentAccount === payer &&
+          intent.voucherDelegate === delegate &&
+          intent.price.asset === assetId,
+      )
+      .reduce((total, intent) => total + BigInt(intent.price.amount), 0n);
+  }
+
   async create(input: CreatePaymentIntentInput): Promise<PaymentIntent> {
     this.createAttempts += 1;
     if (this.failInsertWith) {
@@ -212,6 +224,7 @@ export class InMemoryIntentWriter {
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,
       voucherIssuedAt: input.voucherIssuedAt ?? null,
+      voucherDelegate: input.voucherDelegate ?? null,
       holdId: null,
       holdReleasedAt: null,
       classification: null,

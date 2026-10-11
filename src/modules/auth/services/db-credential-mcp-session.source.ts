@@ -136,6 +136,7 @@ export class DbCredentialMcpSessionSource implements McpSessionPort {
       chainId: agent.chainId as ChainId,
       label: agent.label,
       callerKind: McpCallerKind.AGENT,
+      delegateAccount: (credential.delegateAccount as AccountId | null) ?? null,
     };
   }
 }

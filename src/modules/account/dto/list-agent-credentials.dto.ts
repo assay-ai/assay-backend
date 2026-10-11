@@ -40,6 +40,18 @@ export class AgentCredentialDto {
   })
   rotatedFromId: string | null;
 
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'CAIP-10 of the delegate key this credential proved it holds and signs vouchers with ' +
+      '(agent payment delegation), or null. Spending also needs the payer to authorise the key ' +
+      'on chain (`/escrow/delegates`).',
+  })
+  delegateAccount: string | null;
+
+  @ApiPropertyOptional({ nullable: true })
+  delegateBoundAt: Date | null;
+
   @ApiProperty()
   createdAt: Date;
 }

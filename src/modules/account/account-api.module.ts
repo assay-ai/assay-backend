@@ -4,6 +4,7 @@ import { McpModule } from '@modules/mcp/mcp.module';
 
 import { AccountModule } from './account.module';
 import { AgentCredentialsController } from './controllers/agent-credentials.controller';
+import { AgentDelegateController } from './controllers/agent-delegate.controller';
 import { AgentsController } from './controllers/agents.controller';
 import { AuditLogController } from './controllers/audit-log.controller';
 import { NotificationsController } from './controllers/notifications.controller';
@@ -22,6 +23,7 @@ import { NotificationsController } from './controllers/notifications.controller'
     AuditLogController,
     AgentsController,
     AgentCredentialsController,
+    AgentDelegateController,
   ],
   exports: [AccountModule],
 })

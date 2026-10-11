@@ -3,6 +3,12 @@ import { encodeFunctionData, getAddress, isAddress, TypedDataDomain } from 'viem
 
 import { SettlementErrors } from '@modules/settlement/errors/settlement.errors';
 import {
+  DelegationTerms,
+  EscrowDelegation,
+  EscrowDelegationPort,
+  EscrowDelegationStatus,
+} from '@modules/settlement/ports/escrow-delegation.port';
+import {
   EscrowIntentBuilderPort,
   EscrowIntentKind,
   EscrowIntentRequest,
@@ -11,13 +17,23 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import { ChainErrors } from '../errors/chains.errors';
 import { getAssetMetadata } from '../ports/asset-registry';
-import { AccountId, AssetId, ChainId, parseAccountId, toAssetId } from '../ports/caip.types';
+import {
+  AccountId,
+  AssetId,
+  ChainId,
+  parseAccountId,
+  toAccountId,
+  toAssetId,
+} from '../ports/caip.types';
 import { EscrowLimits } from '../ports/escrow.types';
 import { Eip712Domain, UnsignedChainTransaction } from '../ports/unsigned-chain-transaction';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { X402_ESCROW_ABI } from './abi/x402.abi';
 import { evmDomain } from './eip712/domain';
+import { authorizeDelegateTypedData, revokeDelegateTypedData } from './eip712/delegation';
 import { requestWithdrawTypedData, setLimitsTypedData } from './eip712/escrow-control';
+import { decayWindow } from './evm-voucher-prevalidation';
+import { isRevert } from './evm-voucher-authority';
 import { EVM_CONSTANTS, EvmDeployment } from './evm.constants';
 
 /**
@@ -26,6 +42,8 @@ import { EVM_CONSTANTS, EvmDeployment } from './evm.constants';
  */
 export interface EvmEscrowRead {
   readonly authNonce: bigint;
+  readonly maxVoucherAmount?: bigint;
+  readonly maxPerWindow?: bigint;
   readonly withdrawRequested: bigint;
   readonly withdrawAvailableAt: bigint;
 }
@@ -64,6 +82,17 @@ export interface EvmEscrowIntentClient {
 
 /** Every amount argument on `X402Escrow` is a `uint64`. */
 const MAX_UINT64 = 2n ** 64n - 1n;
+
+/** `X402Escrow.Delegation`, as `delegationOf` returns it. */
+interface EvmDelegationRead {
+  readonly maxVoucherAmount: bigint;
+  readonly maxPerWindow: bigint;
+  readonly spentInWindow: bigint;
+  readonly windowStartedAt: bigint;
+  readonly validUntil: bigint;
+  readonly listPosition: number;
+  readonly revoked: boolean;
+}
 
 /**
  * How much of a `*BySig` deadline must still be usable when it is issued.
@@ -136,7 +165,7 @@ export const EVM_RELAYED_DEADLINE_MIN_WINDOW_SECONDS = 60;
  * where it is real — on the withdraw path, as "nothing was requested".
  */
 @Injectable()
-export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort {
+export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDelegationPort {
   /**
    * **The wall clock is back, and it may never produce a value the contract
    * reads.**
@@ -246,6 +275,197 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort {
   }
 
   // ── The two signature requests ───────────────────────────────────────────
+
+  // ── Agent payment delegation ───────────────────────────────────────────
+
+  /**
+   * The `AuthorizeDelegate` the payer signs, at the escrow's `authNonce` and a
+   * chain-clock deadline, exactly like `SetLimits`.
+   *
+   * Every rule `X402Escrow._authorizeDelegate` will apply is checked here first
+   * so a payer is never asked to sign something the chain refuses: the
+   * delegate is an address on the payer's chain and not the payer, both caps
+   * are non-zero with the per-call cap inside the window cap, neither cap
+   * exceeds the escrow's OWN current ceiling, and `validUntil` is in the future
+   * by the chain's clock and at most `MAX_DELEGATION_LIFETIME_SECONDS` out. The
+   * chain re-checks all of it; this is the diagnosis, the chain is the rule.
+   */
+  async authorizeIntent(
+    account: AccountId,
+    terms: DelegationTerms,
+  ): Promise<UnsignedChainTransaction> {
+    const { chainId, address: payer } = this.parse(account);
+    const deployment = this.deployment(chainId);
+    const delegate = this.delegateOn(chainId, payer, terms.delegate);
+    const maxVoucherAmount = this.uint64(terms.maxVoucherAmount, 'maxVoucherAmount');
+    const maxPerWindow = this.uint64(terms.maxPerWindow, 'maxPerWindow');
+    const validUntil = this.uint64(terms.validUntil, 'validUntil');
+
+    if (maxVoucherAmount === 0n || maxPerWindow === 0n || maxVoucherAmount > maxPerWindow) {
+      throw SettlementErrors.delegationInvalid({
+        reason:
+          'DelegateCapsInvalid — both caps must be above zero and the per-voucher cap may not ' +
+          'exceed the per-window cap',
+      });
+    }
+
+    const [escrow, chainSeconds] = await Promise.all([
+      this.readEscrow(chainId, deployment, payer),
+      this.chainSeconds(chainId),
+    ]);
+    if (
+      maxVoucherAmount > (escrow.maxVoucherAmount ?? 0n) ||
+      maxPerWindow > (escrow.maxPerWindow ?? 0n)
+    ) {
+      throw SettlementErrors.delegationInvalid({
+        reason:
+          `DelegateCapsExceedEscrowLimits — the escrow allows ${escrow.maxVoucherAmount ?? 0n} ` +
+          `per voucher and ${escrow.maxPerWindow ?? 0n} per window; set the escrow limits first`,
+      });
+    }
+    if (
+      validUntil <= chainSeconds ||
+      validUntil - chainSeconds > BigInt(EVM_CONSTANTS.MAX_DELEGATION_LIFETIME_SECONDS)
+    ) {
+      throw SettlementErrors.delegationInvalid({
+        reason:
+          'DelegateValidUntilInvalid — validUntil must be in the future and at most ' +
+          `${EVM_CONSTANTS.MAX_DELEGATION_LIFETIME_SECONDS / 86_400} days out`,
+      });
+    }
+
+    const typed = authorizeDelegateTypedData(
+      {
+        payer,
+        delegate,
+        maxVoucherAmount,
+        maxPerWindow,
+        validUntil,
+        nonce: escrow.authNonce,
+        deadline: this.deadline(chainId, chainSeconds),
+      },
+      this.domain(chainId, deployment),
+    );
+    return this.asTypedDataIntent(chainId, typed);
+  }
+
+  /** The `RevokeDelegate` the payer signs. Refused when there is nothing to revoke. */
+  async revokeIntent(
+    account: AccountId,
+    delegateAccount: AccountId,
+  ): Promise<UnsignedChainTransaction> {
+    const { chainId, address: payer } = this.parse(account);
+    const deployment = this.deployment(chainId);
+    const delegate = this.delegateOn(chainId, payer, delegateAccount);
+
+    const [escrow, chainSeconds, delegation] = await Promise.all([
+      this.readEscrow(chainId, deployment, payer),
+      this.chainSeconds(chainId),
+      this.readDelegation(chainId, deployment, payer, delegate),
+    ]);
+    if (delegation.listPosition === 0) {
+      throw SettlementErrors.delegationNotActive({ delegate: delegateAccount });
+    }
+
+    const typed = revokeDelegateTypedData(
+      { payer, delegate, nonce: escrow.authNonce, deadline: this.deadline(chainId, chainSeconds) },
+      this.domain(chainId, deployment),
+    );
+    return this.asTypedDataIntent(chainId, typed);
+  }
+
+  /**
+   * The payer's standing delegates, from the chain: `delegatesOf` (authorised
+   * and not revoked, an expired one included until revoked), then each one's
+   * `delegationOf`, with its window decayed by the chain's clock.
+   */
+  async list(account: AccountId): Promise<readonly EscrowDelegation[]> {
+    const { chainId, address: payer } = this.parse(account);
+    const deployment = this.deployment(chainId);
+    const client = this.client(chainId);
+    const [delegates, chainSeconds] = await Promise.all([
+      (
+        client.readContract({
+          address: getAddress(deployment.escrow),
+          abi: X402_ESCROW_ABI,
+          functionName: 'delegatesOf',
+          args: [payer],
+        }) as Promise<readonly `0x${string}`[]>
+      ).catch((error: unknown) => {
+        // An escrow not yet upgraded has no `delegatesOf`: it has no delegates,
+        // exactly as the voucher authority reads it (review S3-18). An outage
+        // is still an error.
+        if (isRevert(error)) return [] as readonly `0x${string}`[];
+        throw error;
+      }),
+      this.chainSeconds(chainId),
+    ]);
+    const records = await Promise.all(
+      delegates.map((delegate) => this.readDelegation(chainId, deployment, payer, delegate)),
+    );
+    return delegates.map((delegate, i) => {
+      const record = records[i];
+      return {
+        delegate: toAccountId(chainId, getAddress(delegate)),
+        maxVoucherAmount: record.maxVoucherAmount,
+        maxPerWindow: record.maxPerWindow,
+        spentInWindow: decayWindow({
+          spentInWindow: record.spentInWindow,
+          windowStartedAt: Number(record.windowStartedAt),
+          nowSeconds: Number(chainSeconds),
+        }),
+        validUntil: record.validUntil,
+        status:
+          chainSeconds > record.validUntil
+            ? EscrowDelegationStatus.EXPIRED
+            : EscrowDelegationStatus.ACTIVE,
+      };
+    });
+  }
+
+  private delegateOn(
+    chainId: ChainId,
+    payer: `0x${string}`,
+    delegateAccount: AccountId,
+  ): `0x${string}` {
+    let parsed: { chainId: ChainId; address: string };
+    try {
+      parsed = parseAccountId(delegateAccount);
+    } catch {
+      throw SettlementErrors.delegationInvalid({ reason: 'the delegate is not a CAIP-10 account' });
+    }
+    if (parsed.chainId !== chainId || !isAddress(parsed.address, { strict: false })) {
+      throw SettlementErrors.delegationInvalid({
+        reason: `the delegate must be an address on ${chainId}`,
+      });
+    }
+    const delegate = getAddress(parsed.address);
+    if (delegate === payer) {
+      throw SettlementErrors.delegationInvalid({
+        reason: 'DelegateIsPayer — the payer’s own key already signs',
+      });
+    }
+    if (delegate === '0x0000000000000000000000000000000000000000') {
+      throw SettlementErrors.delegationInvalid({
+        reason: 'ZeroAddress — the delegate is the zero address',
+      });
+    }
+    return delegate;
+  }
+
+  private async readDelegation(
+    chainId: ChainId,
+    deployment: EvmDeployment,
+    payer: `0x${string}`,
+    delegate: `0x${string}`,
+  ): Promise<EvmDelegationRead> {
+    return (await this.client(chainId).readContract({
+      address: getAddress(deployment.escrow),
+      abi: X402_ESCROW_ABI,
+      functionName: 'delegationOf',
+      args: [payer, delegate],
+    })) as EvmDelegationRead;
+  }
 
   private setLimits(
     chainId: ChainId,

@@ -40,6 +40,11 @@ export enum SettlementErrorCode {
   SETTLEMENT_RELAYED_INTENT_RATE_LIMITED = 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED',
   /** The submission budget could not be counted, so nothing was submitted. */
   SETTLEMENT_RELAYED_INTENT_UNAVAILABLE = 'SETTLEMENT_RELAYED_INTENT_UNAVAILABLE',
+  // ── Agent payment delegation ─────────────────────────────────────────────
+  /** A delegation request the escrow would refuse: bad delegate, caps or horizon. */
+  SETTLEMENT_DELEGATION_INVALID = 'SETTLEMENT_DELEGATION_INVALID',
+  /** A revocation of a delegate that is not authorised (never was, or already revoked). */
+  SETTLEMENT_DELEGATION_NOT_ACTIVE = 'SETTLEMENT_DELEGATION_NOT_ACTIVE',
   // ── Boot-time configuration of the public reserves page ─────────────────
   SETTLEMENT_PUBLIC_RESERVES_ASSET_INVALID = 'SETTLEMENT_PUBLIC_RESERVES_ASSET_INVALID',
   SETTLEMENT_PUBLIC_RESERVES_ASSET_NOT_ENABLED = 'SETTLEMENT_PUBLIC_RESERVES_ASSET_NOT_ENABLED',
@@ -313,6 +318,30 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
     message: () =>
       `The relayed-submission budget could not be counted, so nothing was submitted. The ` +
       `signature is still valid until its deadline; try again`,
+  },
+
+  // ── Agent payment delegation ─────────────────────────────────────────────
+
+  /**
+   * A delegation the escrow would refuse, caught before the payer is asked to
+   * sign: the delegate is not an address on the payer's chain or is the payer
+   * itself, a cap is zero or above the escrow's own ceiling (set the escrow
+   * limits first), or `validUntil` is not in the future or is more than a year
+   * out. `reason` names which, in the contract's own terms.
+   */
+  delegationInvalid: {
+    code: SettlementErrorCode.SETTLEMENT_DELEGATION_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `This delegation cannot be authorised${context?.reason ? `: ${context.reason}` : ''}`,
+  },
+  /** Nothing to revoke: the delegate is not authorised on this escrow. */
+  delegationNotActive: {
+    code: SettlementErrorCode.SETTLEMENT_DELEGATION_NOT_ACTIVE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `${context?.delegate ?? 'This delegate'} is not authorised on this escrow, so there is ` +
+      `nothing to revoke`,
   },
 
   // ── Public reserves page ─────────────────────────────────────────────────

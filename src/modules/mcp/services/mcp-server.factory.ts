@@ -1,3 +1,4 @@
+import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { Injectable, Logger } from '@nestjs/common';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -298,4 +299,8 @@ const RETRYABLE_CODES: ReadonlySet<string> = new Set<string>([
   // one is `retryable: true`, unlike a cap or a pause, which are not — see
   // `McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED`.
   McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED,
+  // The chain state behind a voucher's authority (a delegate's grant, a
+  // wallet's EIP-1271 answer) could not be read. Nothing was charged; the read
+  // is retried on the next call.
+  ChainErrorCode.CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE,
 ]);

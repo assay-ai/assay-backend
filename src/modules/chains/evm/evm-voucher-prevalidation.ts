@@ -22,6 +22,20 @@ export interface PrevalidationState {
   /** `bondedOf(provider)` — **`bonded` alone**, never `bonded + unbonding`. */
   readonly providerBonded: bigint;
   readonly minimumStake: bigint;
+  /**
+   * The signing delegate's on-chain grant (`delegationOf(payer, delegate)`),
+   * when the voucher was signed by a delegate; absent for the payer's own key.
+   */
+  readonly delegation?: PrevalidationDelegation | null;
+}
+
+export interface PrevalidationDelegation {
+  readonly maxVoucherAmount: bigint;
+  readonly maxPerWindow: bigint;
+  readonly spentInWindow: bigint;
+  readonly windowStartedAt: number;
+  readonly validUntil: bigint;
+  readonly revoked: boolean;
 }
 
 /**
@@ -118,9 +132,30 @@ export function prevalidateVoucher(voucher: EvmVoucher, state: PrevalidationStat
   if (voucher.seq === 0n) return 'VoucherSeqZero';
   if (voucher.seq <= state.seqHigh) return 'VoucherSeqNotIncreasing';
 
+  // The authority, where `_voucherAuthority` decides it (agent payment
+  // delegation): a delegate-signed voucher needs a live grant at THIS block.
+  const delegation = state.delegation ?? null;
+  if (delegation !== null) {
+    if (delegation.validUntil === 0n) return 'SignerIsNotPayer';
+    if (delegation.revoked) return 'DelegateIsRevoked';
+    if (BigInt(state.nowSeconds) > delegation.validUntil) return 'DelegateIsExpired';
+  }
+
   if (voucher.amount > state.maxVoucherAmount) return 'VoucherExceedsPerCallLimit';
   const carried = decayWindow(state);
   if (carried + voucher.amount > state.maxPerWindow) return 'EscrowWindowLimitExceeded';
+
+  if (delegation !== null) {
+    if (voucher.amount > delegation.maxVoucherAmount) return 'DelegateVoucherExceedsPerCallLimit';
+    const delegateCarried = decayWindow({
+      spentInWindow: delegation.spentInWindow,
+      windowStartedAt: delegation.windowStartedAt,
+      nowSeconds: state.nowSeconds,
+    });
+    if (delegateCarried + voucher.amount > delegation.maxPerWindow) {
+      return 'DelegateWindowLimitExceeded';
+    }
+  }
 
   if (state.providerBonded < state.minimumStake) return 'ProviderBelowMinimumStake';
   if (state.balance < voucher.amount) return 'EscrowInsufficient';

@@ -38,6 +38,7 @@ export enum ChainErrorCode {
   CHAIN_RAIL_NOT_OFFERED = 'CHAIN_RAIL_NOT_OFFERED',
   CHAIN_CONFIG_VALUE_INVALID = 'CHAIN_CONFIG_VALUE_INVALID',
   CHAIN_LATEST_BLOCK_STALE = 'CHAIN_LATEST_BLOCK_STALE',
+  CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE = 'CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE',
 }
 
 export type ChainErrorCodesArePrefixed = AssertDomainErrorCodes<'CHAIN', `${ChainErrorCode}`>;
@@ -428,5 +429,20 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
           : ''
       }` +
       `${context?.minimumSeconds !== undefined ? ` of a required ${context.minimumSeconds}s` : ''}`,
+  },
+  /**
+   * The chain state a voucher's authority depends on (the payer's code, a
+   * delegate's on-chain grant, a wallet's EIP-1271 answer) could not be read.
+   *
+   * **Fail closed**: the voucher is refused, not assumed good, because the only
+   * thing standing between an unreadable delegation and a served call is this
+   * read. `503` and retryable — the remedy is another attempt.
+   */
+  voucherAuthorityUnavailable: {
+    code: ChainErrorCode.CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `The chain state that decides who may sign this voucher could not be read` +
+      `${context?.what ? ` (${context.what})` : ''}; nothing was charged — try again`,
   },
 });

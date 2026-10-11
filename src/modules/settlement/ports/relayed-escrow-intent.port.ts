@@ -1,5 +1,6 @@
 import { AccountId } from '@modules/chains/ports/caip.types';
 
+import { EscrowDelegationKind } from './escrow-delegation.port';
 import { EscrowIntentKind } from './escrow-intent-builder.port';
 
 /**
@@ -16,7 +17,9 @@ import { EscrowIntentKind } from './escrow-intent-builder.port';
  */
 export type RelayedEscrowIntentKind =
   | EscrowIntentKind.SET_LIMITS
-  | EscrowIntentKind.REQUEST_WITHDRAW;
+  | EscrowIntentKind.REQUEST_WITHDRAW
+  | EscrowDelegationKind.AUTHORIZE_DELEGATE
+  | EscrowDelegationKind.REVOKE_DELEGATE;
 
 interface RelayedEscrowIntentBase {
   /**
@@ -48,7 +51,30 @@ export interface RelayedRequestWithdrawIntent extends RelayedEscrowIntentBase {
   readonly amount: bigint;
 }
 
-export type RelayedEscrowIntent = RelayedSetLimitsIntent | RelayedRequestWithdrawIntent;
+/**
+ * Agent payment delegation: the payer authorises a DELEGATE key to sign
+ * vouchers within caps until `validUntil` (`authorizeDelegateBySig`).
+ * `delegate` is a bare 0x address, as signed.
+ */
+export interface RelayedAuthorizeDelegateIntent extends RelayedEscrowIntentBase {
+  readonly kind: EscrowDelegationKind.AUTHORIZE_DELEGATE;
+  readonly delegate: string;
+  readonly maxVoucherAmount: bigint;
+  readonly maxPerWindow: bigint;
+  readonly validUntil: bigint;
+}
+
+/** The payer withdraws a delegate's authority (`revokeDelegateBySig`). */
+export interface RelayedRevokeDelegateIntent extends RelayedEscrowIntentBase {
+  readonly kind: EscrowDelegationKind.REVOKE_DELEGATE;
+  readonly delegate: string;
+}
+
+export type RelayedEscrowIntent =
+  | RelayedSetLimitsIntent
+  | RelayedRequestWithdrawIntent
+  | RelayedAuthorizeDelegateIntent
+  | RelayedRevokeDelegateIntent;
 
 /**
  * Everything a relayed request carries **except** who it is for.
@@ -66,7 +92,9 @@ export type RelayedEscrowIntent = RelayedSetLimitsIntent | RelayedRequestWithdra
  */
 export type RelayedEscrowIntentFields =
   | Omit<RelayedSetLimitsIntent, 'account'>
-  | Omit<RelayedRequestWithdrawIntent, 'account'>;
+  | Omit<RelayedRequestWithdrawIntent, 'account'>
+  | Omit<RelayedAuthorizeDelegateIntent, 'account'>
+  | Omit<RelayedRevokeDelegateIntent, 'account'>;
 
 /** What landed, as the chain reported it. Every figure is a decimal string. */
 export interface RelayedEscrowSubmission {

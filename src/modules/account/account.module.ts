@@ -1,6 +1,9 @@
 import { Module } from '@nestjs/common';
 
+import { ChainsModule } from '@modules/chains/chains.module';
+
 import { AgentCredentialsService } from './services/agent-credentials.service';
+import { AgentDelegateService } from './services/agent-delegate.service';
 import { AgentsService } from './services/agents.service';
 import { AuditLogService } from './services/audit-log.service';
 import { NotificationsService } from './services/notifications.service';
@@ -18,7 +21,20 @@ import { NotificationsService } from './services/notifications.service';
  * pattern as `PaymentModule`.
  */
 @Module({
-  providers: [NotificationsService, AuditLogService, AgentsService, AgentCredentialsService],
-  exports: [NotificationsService, AuditLogService, AgentsService, AgentCredentialsService],
+  imports: [ChainsModule],
+  providers: [
+    NotificationsService,
+    AuditLogService,
+    AgentsService,
+    AgentCredentialsService,
+    AgentDelegateService,
+  ],
+  exports: [
+    NotificationsService,
+    AuditLogService,
+    AgentsService,
+    AgentCredentialsService,
+    AgentDelegateService,
+  ],
 })
 export class AccountModule {}

@@ -27,6 +27,15 @@ import {
   toAccountId,
 } from '../ports/caip.types';
 import { ChainAdapter } from '../ports/chain-adapter.port';
+import {
+  DelegateBindingChallenge,
+  DelegateBindingTypedData,
+} from '../ports/delegate-binding.types';
+import {
+  VoucherAuthorityAnswer,
+  VoucherAuthorityOptions,
+  VoucherAuthorityRefusal,
+} from '../ports/voucher-authority.types';
 import { Money } from '../ports/money.types';
 import { PayoutProofChallenge, ProofTypedData } from '../ports/payout-proof.types';
 import { StakeAuthorityChallenge } from '../ports/stake-authority.types';
@@ -52,7 +61,14 @@ import {
   stakeAuthorityTypedData,
   toProofMessage,
 } from './evm-proofs';
+import { EvmVoucherAuthority } from './evm-voucher-authority';
 import { recoverEvmSigner } from './secp256k1-recover';
+import {
+  delegateBindingDomain,
+  delegateBindingTypedData,
+  DelegateBindingMessage,
+  hashDelegateBinding,
+} from './evm-proofs';
 
 /** x402 scheme name on eip155. Same word as SVM; the RAIL is what differs. */
 export const EVM_PAYMENT_SCHEME = 'exact';
@@ -112,6 +128,8 @@ export interface EvmReadClient {
     functionName: string;
     args: readonly unknown[];
   }): Promise<unknown>;
+  /** The voucher authority asks whether a payer has code (EIP-1271). */
+  getCode?(args: { address: `0x${string}` }): Promise<`0x${string}` | undefined>;
 }
 
 export interface EvmLog {
@@ -562,6 +580,101 @@ export class EvmChainAdapter implements ChainAdapter {
     return recoverEvmSigner(digest, signature) === getAddress(address);
   }
 
+  /**
+   * `X402Escrow._voucherAuthority`, off chain — see `EvmVoucherAuthority`.
+   *
+   * The digest is the same one {@link verifyVoucherSignature} checks, built by
+   * the same conversion, and the same `payTo` rule applies: a voucher aimed at
+   * anything but this deployment's escrow is refused before any read.
+   */
+  async authorizeVoucherSigner(
+    voucher: Voucher,
+    signature: string,
+    nowSeconds: number,
+    options?: VoucherAuthorityOptions,
+  ): Promise<VoucherAuthorityAnswer> {
+    const { chainId, address } = this.parseAccountId(voucher.payer);
+    const escrow = getAddress(this.deploymentFor(chainId).escrow);
+    let digest: `0x${string}`;
+    try {
+      if (getAddress(parseAccountId(voucher.payTo).address) !== escrow) {
+        return { kind: 'REFUSED', reason: VoucherAuthorityRefusal.NOT_PAYER, signer: null };
+      }
+      digest = hashVoucher(...this.voucherTypedDataArgs(voucher, chainId));
+    } catch {
+      return { kind: 'REFUSED', reason: VoucherAuthorityRefusal.NOT_PAYER, signer: null };
+    }
+    return this.voucherAuthority(chainId, escrow).authorize(
+      getAddress(address),
+      digest,
+      signature,
+      nowSeconds,
+      options,
+    );
+  }
+
+  private readonly authorities = new Map<ChainId, EvmVoucherAuthority>();
+
+  /** One per chain, so its short-lived read cache is shared by every call. */
+  private voucherAuthority(chainId: ChainId, escrow: `0x${string}`): EvmVoucherAuthority {
+    let authority = this.authorities.get(chainId);
+    if (!authority) {
+      const client = this.clients.get(chainId);
+      if (!client) {
+        throw ChainErrors.programNotConfigured({
+          what: `a JSON-RPC client for ${chainId}`,
+          variable: 'EVM_RPC_URLS',
+        });
+      }
+      authority = new EvmVoucherAuthority(chainId, client, escrow);
+      this.authorities.set(chainId, authority);
+    }
+    return authority;
+  }
+
+  // ── Delegate binding proof ───────────────────────────────────────────────
+
+  delegateBindingTypedData(challenge: DelegateBindingChallenge): DelegateBindingTypedData {
+    const { chainId, address } = this.parseAccountId(challenge.delegate);
+    this.deploymentFor(chainId);
+    const typed = delegateBindingTypedData(
+      toDelegateBindingMessage(challenge, getAddress(address)),
+      delegateBindingDomain(chainId),
+    );
+    return {
+      domain: {
+        name: String(typed.domain.name),
+        version: String(typed.domain.version),
+        chainId: String(typed.domain.chainId),
+      },
+      types: typed.types,
+      primaryType: typed.primaryType,
+      message: {
+        delegate: typed.message.delegate,
+        credentialId: typed.message.credentialId,
+        nonce: typed.message.nonce,
+        expiresAt: typed.message.expiresAt.toString(),
+      },
+    };
+  }
+
+  verifyDelegateBindingSignature(challenge: DelegateBindingChallenge, signature: string): boolean {
+    let digest: `0x${string}`;
+    let delegate: `0x${string}`;
+    try {
+      const { chainId, address } = this.parseAccountId(challenge.delegate);
+      delegate = getAddress(address);
+      this.deploymentFor(chainId);
+      digest = hashDelegateBinding(
+        toDelegateBindingMessage(challenge, delegate),
+        delegateBindingDomain(chainId),
+      );
+    } catch {
+      return false;
+    }
+    return recoverEvmSigner(digest, signature) === delegate;
+  }
+
   // ── Payout proof ─────────────────────────────────────────────────────────
 
   buildPayoutProofMessage(challenge: PayoutProofChallenge): Uint8Array {
@@ -947,5 +1060,17 @@ function toProofTypedData(typed: {
       nonce: typed.message.nonce,
       expiresAt: typed.message.expiresAt.toString(),
     },
+  };
+}
+
+function toDelegateBindingMessage(
+  challenge: DelegateBindingChallenge,
+  delegate: `0x${string}`,
+): DelegateBindingMessage {
+  return {
+    delegate,
+    credentialId: challenge.credentialId,
+    nonce: challenge.nonce,
+    expiresAt: BigInt(challenge.expiresAt),
   };
 }

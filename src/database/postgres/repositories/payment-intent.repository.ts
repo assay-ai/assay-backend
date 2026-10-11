@@ -179,6 +179,8 @@ export interface RedeemableIntent {
   readonly voucherSignature: string;
   readonly voucherResourceHash: string | null;
   readonly voucherIssuedAt: string | null;
+  /** The delegate that signed, or null — see `PaymentIntentEntity.voucherDelegate`. */
+  readonly voucherDelegate: string | null;
   readonly expiresAt: Date;
   readonly holdId: string;
   readonly providerId: string | null;
@@ -479,6 +481,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.voucherSignature', 'voucherSignature')
       .addSelect('intent.voucherResourceHash', 'voucherResourceHash')
       .addSelect('intent.voucherIssuedAt', 'voucherIssuedAt')
+      .addSelect('intent.voucherDelegate', 'voucherDelegate')
       .addSelect('intent.expiresAt', 'expiresAt')
       .addSelect('intent.holdId', 'holdId')
       .addSelect('intent.providerId', 'providerId')
@@ -496,6 +499,34 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addOrderBy('intent.voucherSeq', 'ASC')
       .limit(limit)
       .getRawMany<RedeemableIntent>();
+  }
+
+  /**
+   * `Σ price_amount` of the rail-B vouchers a DELEGATE signed for a payer that
+   * are holding money and not yet redeemed: an open hold (`FUNDS_SECURED`,
+   * `PROVIDER_EXECUTING`, `VERIFYING`) or a `SETTLED` intent whose hold the
+   * redemption job has not closed. `idx_payment_intents_voucher_delegate_open`
+   * covers it.
+   *
+   * **Deliberately cross-organization**, like {@link findAwaitingRedemption}:
+   * the window this protects is the payer account's on chain, and two tenants'
+   * agents can spend from one account. `organizationId IS NOT NULL` satisfies
+   * the scope guard on purpose; only a sum leaves this method.
+   */
+  async sumOpenDelegateVouchers(payer: string, delegate: string, assetId: string): Promise<bigint> {
+    const row = await this.createQueryBuilder('intent')
+      .select('COALESCE(SUM(intent.priceAmount), 0)::text', 'total')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.agentAccount = :payer', { payer })
+      .andWhere('intent.voucherDelegate = :delegate', { delegate })
+      .andWhere('intent.assetId = :assetId', { assetId })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('intent.status IN (:...statuses)', {
+        statuses: [...OPEN_HOLD_STATUSES, 'SETTLED'],
+      })
+      .getRawOne<{ total: string }>();
+    return BigInt(row?.total ?? '0');
   }
 
   private selectSweepCandidates(): SelectQueryBuilder<PaymentIntentEntity> {

@@ -74,4 +74,11 @@ export interface RedeemVoucherInput {
   readonly chainId: ChainId;
 
   readonly idempotencyKey?: string | null;
+
+  /**
+   * The DELEGATE key bound to the calling agent credential (CAIP-10), or null.
+   * A voucher signed by a delegate is accepted only from the credential that
+   * proved possession of that key.
+   */
+  readonly boundDelegate?: AccountId | null;
 }

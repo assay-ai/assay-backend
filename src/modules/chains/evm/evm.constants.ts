@@ -47,6 +47,13 @@ export const EVM_CONSTANTS = {
    * would settle.
    */
   SLASH_WINDOW_SECONDS: 86_400,
+  /**
+   * `Constants.sol` — `MAX_DELEGATION_LIFETIME_SECONDS = 365 * 86_400`. The
+   * longest horizon one delegate authorisation may carry.
+   */
+  MAX_DELEGATION_LIFETIME_SECONDS: 31_536_000,
+  /** `Constants.sol` — `MAX_DELEGATES_PER_PAYER = 16`. Revoking frees a place. */
+  MAX_DELEGATES_PER_PAYER: 16,
 } as const;
 
 /**

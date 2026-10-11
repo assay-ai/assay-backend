@@ -121,6 +121,7 @@ export class PaymentIntentService {
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,
       voucherIssuedAt: input.voucherIssuedAt === undefined ? null : String(input.voucherIssuedAt),
+      voucherDelegate: input.voucherDelegate ?? null,
       holdId: null,
       holdReleasedAt: null,
       classification: null,
@@ -172,6 +173,16 @@ export class PaymentIntentService {
    * {@link create} stays the guarantee; this only lets a sequential replay be
    * refused with the right reason before anything is written.
    */
+  /**
+   * `Σ price` of the rail-B vouchers `delegate` signed for `payer` that hold
+   * money and have not been redeemed on chain yet — what the delegate's
+   * on-chain window does not know about. Across organizations, because the
+   * window is the PAYER's account's on chain, not a tenant's.
+   */
+  async sumOpenDelegateVouchers(payer: string, delegate: string, assetId: string): Promise<bigint> {
+    return this.intents.sumOpenDelegateVouchers(payer, delegate, assetId);
+  }
+
   async isVoucherSeqUsed(organizationId: string, account: string, seq: string): Promise<boolean> {
     return this.intents.existsBy({ organizationId, agentAccount: account, voucherSeq: seq });
   }
@@ -561,6 +572,7 @@ export function toPaymentIntent(row: PaymentIntentEntity): PaymentIntent {
     voucherSignature: row.voucherSignature ?? null,
     voucherResourceHash: row.voucherResourceHash ?? null,
     voucherIssuedAt: row.voucherIssuedAt === null ? null : Number(row.voucherIssuedAt),
+    voucherDelegate: row.voucherDelegate ?? null,
     holdId: row.holdId,
     holdReleasedAt: row.holdReleasedAt,
     classification: row.classification,

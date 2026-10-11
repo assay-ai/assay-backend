@@ -153,6 +153,8 @@ export class AgentCredentialsService {
       expiresAt: entity.expiresAt,
       revokedAt: entity.revokedAt,
       rotatedFromId: entity.rotatedFromId,
+      delegateAccount: entity.delegateAccount ?? null,
+      delegateBoundAt: entity.delegateBoundAt ?? null,
       createdAt: entity.createdAt,
     };
   }

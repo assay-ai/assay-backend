@@ -1,3 +1,4 @@
+import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
@@ -267,6 +268,9 @@ export async function createBindingEditorTestContext(
       // context writes fails on a column that does not exist. The column is
       // NOT NULL with a non-empty CHECK, so the fixture bodies name a chain.
       ToolBindingSettlementChains1759300000004,
+      // `payment_intents.voucher_delegate`, which `PaymentIntentEntity` maps
+      // (agent payment delegation).
+      VoucherDelegate1759600000000,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',

@@ -1,4 +1,4 @@
-import { decodeFunctionData, getAddress } from 'viem';
+import { decodeFunctionData, getAddress, toFunctionSelector } from 'viem';
 
 import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
 import { EvmReaderClient } from '@modules/chains/evm/evm-escrow-balance-reader.service';
@@ -100,6 +100,14 @@ interface ChainState {
   bonded: bigint;
   /** Per payer ADDRESS (lower case). Anything absent uses `HEALTHY_ESCROW`. */
   escrows: Record<string, Record<string, bigint>>;
+  /** `payer:delegate` (lower case) → the delegate's grant. */
+  delegations: Record<string, Record<string, unknown>>;
+  /** What an `eth_call` of the redemption answers: null = it would settle. */
+  simulateRevert: string | null;
+  /** Every simulated function, in order. */
+  simulated: string[];
+  /** The `eth_call` itself fails (an outage, no revert data). */
+  simulateOutage: boolean;
 }
 
 function harness(overrides: Partial<ChainState> = {}) {
@@ -109,6 +117,10 @@ function harness(overrides: Partial<ChainState> = {}) {
     minimumStake: 50_000_000n,
     bonded: 50_000_000n,
     escrows: {},
+    delegations: {},
+    simulateRevert: null,
+    simulated: [],
+    simulateOutage: false,
     ...overrides,
   };
 
@@ -124,6 +136,29 @@ function harness(overrides: Partial<ChainState> = {}) {
       }
       case 'bondedOf':
         return state.bonded;
+      case 'delegationOf': {
+        const key = `${String(args[0]).toLowerCase()}:${String(args[1]).toLowerCase()}`;
+        return {
+          maxVoucherAmount: 0n,
+          maxPerWindow: 0n,
+          spentInWindow: 0n,
+          windowStartedAt: 0n,
+          validUntil: 0n,
+          listPosition: 0,
+          revoked: false,
+          ...(state.delegations[key] ?? {}),
+        };
+      }
+      case 'redeemVoucher':
+      case 'redeemVoucherBatch':
+        state.simulated.push(functionName);
+        if (state.simulateOutage) throw new Error('fetch failed');
+        if (state.simulateRevert !== null) {
+          throw Object.assign(new Error('execution reverted'), {
+            data: toFunctionSelector(`${state.simulateRevert}()`),
+          });
+        }
+        return undefined;
       default:
         throw new Error(`unexpected read of ${functionName}`);
     }
@@ -364,6 +399,11 @@ describe('EvmVoucherRedeemer', () => {
     ['VoucherSeqNotIncreasing', RedeemOutcomeKind.UNREDEEMABLE],
     ['SignerIsNotPayer', RedeemOutcomeKind.UNREDEEMABLE],
     ['MalleableSignature', RedeemOutcomeKind.UNREDEEMABLE],
+    ['DelegateWindowLimitExceeded', RedeemOutcomeKind.RETRY],
+    ['WalletCheckUnderfunded', RedeemOutcomeKind.RETRY],
+    ['DelegateVoucherExceedsPerCallLimit', RedeemOutcomeKind.UNREDEEMABLE],
+    ['DelegateIsRevoked', RedeemOutcomeKind.UNREDEEMABLE],
+    ['DelegateIsExpired', RedeemOutcomeKind.UNREDEEMABLE],
     ['EscrowInsufficient', RedeemOutcomeKind.RETRY],
     ['VoucherNotYetValid', RedeemOutcomeKind.RETRY],
     ['ProviderBelowMinimumStake', RedeemOutcomeKind.RETRY],
@@ -495,5 +535,106 @@ describe('EvmVoucherRedeemer', () => {
     await expect(redeemer.redeem(request(0, { signature: 'not-hex' }))).rejects.toThrow(
       /signature/i,
     );
+  });
+
+  // ── Review S2-2: nothing the chain would refuse is ever broadcast ─────────
+
+  describe('simulates before every broadcast', () => {
+    it('does not broadcast a batch the chain would refuse; it goes to the singles, which simulate too', async () => {
+      const { redeemer, sendCall, state } = harness({ simulateRevert: 'SignerIsNotPayer' });
+      const outcomes = await redeemer.redeemBatch([request(0), request(1)]);
+      expect(sendCall).not.toHaveBeenCalled();
+      expect(state.simulated).toEqual(['redeemVoucherBatch', 'redeemVoucher', 'redeemVoucher']);
+      expect(outcomes.map((o) => o.kind)).toEqual([
+        RedeemOutcomeKind.UNREDEEMABLE,
+        RedeemOutcomeKind.UNREDEEMABLE,
+      ]);
+    });
+
+    it('does not broadcast a single redemption the chain would refuse', async () => {
+      const { redeemer, sendCall } = harness({ simulateRevert: 'DelegateIsRevoked' });
+      const outcome = await redeemer.redeem(request(0));
+      expect(sendCall).not.toHaveBeenCalled();
+      expect(outcome).toMatchObject({
+        kind: RedeemOutcomeKind.UNREDEEMABLE,
+        programError: 'DelegateIsRevoked',
+      });
+    });
+
+    it('simulates with the redeemer as sender and the gas it will send', async () => {
+      const { redeemer, sendCall, state } = harness();
+      await redeemer.redeem(request(0));
+      expect(state.simulated).toEqual(['redeemVoucher']);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+    });
+
+    it('sends nothing when the simulation cannot be answered (an outage, not a revert)', async () => {
+      const { redeemer, sendCall } = harness({ simulateOutage: true });
+      await expect(redeemer.redeem(request(0))).rejects.toThrow('fetch failed');
+      expect(sendCall).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('pre-validates a delegate-signed voucher against the delegate’s grant', () => {
+    const DELEGATE = '0x5555555555555555555555555555555555555555';
+    const grantKey = (index: number) => `${payerAddress(index).toLowerCase()}:${DELEGATE}`;
+    const live = {
+      maxVoucherAmount: 2_000_000n,
+      maxPerWindow: 5_000_000n,
+      validUntil: BigInt(NOW + 3600),
+      listPosition: 1,
+    };
+
+    it.each([
+      ['revoked', { ...live, revoked: true }, 'DelegateIsRevoked', RedeemOutcomeKind.UNREDEEMABLE],
+      [
+        'lapsed',
+        { ...live, validUntil: BigInt(NOW - 1) },
+        'DelegateIsExpired',
+        RedeemOutcomeKind.UNREDEEMABLE,
+      ],
+      ['never authorised', { validUntil: 0n }, 'SignerIsNotPayer', RedeemOutcomeKind.UNREDEEMABLE],
+      [
+        'over its per-voucher cap',
+        { ...live, maxVoucherAmount: 999_999n },
+        'DelegateVoucherExceedsPerCallLimit',
+        RedeemOutcomeKind.UNREDEEMABLE,
+      ],
+      [
+        'over its window',
+        { ...live, spentInWindow: 4_500_000n, windowStartedAt: BigInt(NOW) },
+        'DelegateWindowLimitExceeded',
+        RedeemOutcomeKind.RETRY,
+      ],
+    ])('a %s delegate is refused before anything is sent', async (_name, grant, error, kind) => {
+      const { redeemer, sendCall, state } = harness();
+      state.delegations[grantKey(0)] = grant;
+      const outcome = await redeemer.redeem(
+        request(0, { delegate: toAccountId(TESTNET, getAddress(DELEGATE)) }),
+      );
+      expect(outcome).toMatchObject({ kind, programError: error });
+      expect(sendCall).not.toHaveBeenCalled();
+      expect(state.simulated).toEqual([]);
+    });
+
+    it('batches a live delegate’s voucher, and keeps a revoked one out of the batch', async () => {
+      const { redeemer, sendCall, state } = harness();
+      state.delegations[grantKey(0)] = live;
+      state.delegations[grantKey(1)] = { ...live, revoked: true };
+      const outcomes = await redeemer.redeemBatch([
+        request(0, { delegate: toAccountId(TESTNET, getAddress(DELEGATE)) }),
+        request(1, { delegate: toAccountId(TESTNET, getAddress(DELEGATE)) }),
+        request(2),
+      ]);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+      const call = sendCall.mock.calls[0][0];
+      const decoded = decodeFunctionData({ abi: X402_ESCROW_ABI, data: call.data });
+      expect((decoded.args as unknown as unknown[][])[0]).toHaveLength(2);
+      expect(outcomes.map((o) => o.kind)).toEqual([
+        RedeemOutcomeKind.REDEEMED,
+        RedeemOutcomeKind.UNREDEEMABLE,
+        RedeemOutcomeKind.REDEEMED,
+      ]);
+    });
   });
 });

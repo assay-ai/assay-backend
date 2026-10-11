@@ -36,6 +36,8 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
     ['VOUCHER_MAX_LIFETIME_SECONDS', 300],
     ['CLOCK_SKEW_TOLERANCE_SECONDS', 120],
     ['SLASH_WINDOW_SECONDS', 86_400],
+    ['MAX_DELEGATION_LIFETIME_SECONDS', 365 * 86_400],
+    ['MAX_DELEGATES_PER_PAYER', 16],
   ])('%s is %i', (name, value) => {
     expect(EVM_CONSTANTS[name as keyof typeof EVM_CONSTANTS]).toBe(value);
   });
@@ -46,6 +48,8 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
     // nobody checked reaches a redeem call.
     expect(Object.keys(EVM_CONSTANTS).sort()).toEqual([
       'CLOCK_SKEW_TOLERANCE_SECONDS',
+      'MAX_DELEGATES_PER_PAYER',
+      'MAX_DELEGATION_LIFETIME_SECONDS',
       'MAX_REDEEM_BATCH',
       'MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS',
       'REDEEM_GRACE_SECONDS',
