@@ -69,6 +69,7 @@ function buildHarness(overrides?: {
   /** The relayed submit half, recorded in the same `calls` array. */
   submit?: jest.Mock;
   admit?: jest.Mock;
+  assertRoom?: jest.Mock;
 }) {
   /*
     Every call this service makes, in one array, in the order it made them.
@@ -126,6 +127,11 @@ function buildHarness(overrides?: {
       jest.fn(async () => {
         calls.push('relayedRate.admit');
       }),
+    assertRoom:
+      overrides?.assertRoom ??
+      jest.fn(async () => {
+        calls.push('relayedRate.assertRoom');
+      }),
   };
 
   const service = new WithdrawalService(
@@ -161,6 +167,47 @@ describe('WithdrawalService.buildIntent — delegation', () => {
     });
     expect(result.transaction).toBe(TRANSACTION);
     expect(escrows.get).toHaveBeenCalledWith(ORG, ACCOUNT, USDC);
+  });
+});
+
+/**
+ * REGRESSION (BUG-D1-06): a relayed request (EIP-712, the platform sends it)
+ * was refused for the relay budget only AFTER the payer had signed it.
+ */
+describe('WithdrawalService.buildIntent — the relay budget, before the signature', () => {
+  const typed = { namespace: 'eip155', kind: 'typed-data', relayed: true };
+
+  it('refuses a relayed request when the budget is spent, and grants nothing', async () => {
+    const limited = Object.assign(new Error('limit'), {
+      errorCode: 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED',
+    });
+    const { service, escrows } = buildHarness({
+      buildIntent: jest.fn(async () => typed),
+      assertRoom: jest.fn(async () => {
+        throw limited;
+      }),
+    });
+
+    await expect(
+      service.buildIntent(ORG, ACCOUNT, USDC, {
+        kind: EscrowIntentKind.SET_LIMITS,
+        amount: null,
+        limits: { maxVoucherAmount: 1n, maxPerWindow: 2n },
+        destination: null,
+      }),
+    ).rejects.toBe(limited);
+    expect(escrows.get).not.toHaveBeenCalled();
+  });
+
+  it('does not consult the relay budget for a transaction the buyer sends', async () => {
+    const { service, relayedRate } = buildHarness();
+    await service.buildIntent(ORG, ACCOUNT, USDC, {
+      kind: EscrowIntentKind.SET_LIMITS,
+      amount: null,
+      limits: { maxVoucherAmount: 1n, maxPerWindow: 2n },
+      destination: null,
+    });
+    expect(relayedRate.assertRoom).not.toHaveBeenCalled();
   });
 });
 

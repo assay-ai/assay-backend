@@ -296,9 +296,10 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
     code: SettlementErrorCode.SETTLEMENT_RELAYED_INTENT_RATE_LIMITED,
     statusCode: 429,
     message: (context?: Record<string, any>) =>
-      `Too many relayed escrow requests${context?.scope ? ` for ${context.scope}` : ''}: ` +
-      `${context?.observed ?? '?'} in the last ${context?.windowSeconds ?? '?'} seconds against ` +
-      `a limit of ${context?.limit ?? '?'}`,
+      `You have reached the limit of ${context?.limit ?? '?'} escrow changes the platform ` +
+      `relays for ${context?.scope === 'organization' ? 'your organization' : 'this account'} ` +
+      `per ${describeWindow(context?.windowSeconds)}. Nothing was submitted.` +
+      (context?.retryAt ? ` You can make the next one from ${context.retryAt}.` : ''),
   },
   /**
    * The budget could not be counted, so **nothing was submitted**.
@@ -377,3 +378,10 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
       `(${context?.enabled ?? ''})`,
   },
 });
+
+/** `3600` → "hour", `86400` → "day", anything else in minutes. */
+function describeWindow(seconds: unknown): string {
+  if (seconds === 3600) return 'hour';
+  if (seconds === 86_400) return 'day';
+  return typeof seconds === 'number' ? `${Math.round(seconds / 60)} minutes` : 'window';
+}

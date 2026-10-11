@@ -151,6 +151,12 @@ export class WithdrawalService {
       destination: input.destination,
     });
 
+    // A relayed request (EIP-712, the platform sends it) is refused here, before
+    // the payer is asked to sign, when the relay budget is spent (BUG-D1-06).
+    if (transaction.kind === 'typed-data') {
+      await this.assertRelayRoom(organizationId, account);
+    }
+
     /*
       The gas grant, and **only after the bytes exist**.
 
@@ -262,6 +268,16 @@ export class WithdrawalService {
     );
 
     return { submission, escrow };
+  }
+
+  /**
+   * Refuses when the next relayed submission for this account would be
+   * rate limited, so a route that builds something to sign can say so before
+   * the wallet prompt (BUG-D1-06). Records nothing; `submitRelayedIntent` is
+   * still where the budget is spent and enforced.
+   */
+  async assertRelayRoom(organizationId: string, account: AccountId): Promise<void> {
+    await this.relayedRate.assertRoom(account, organizationId);
   }
 
   /**
