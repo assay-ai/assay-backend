@@ -211,6 +211,38 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
     });
   });
 
+  /**
+   * REGRESSION (BUG-D1-07): while the payer relays a change that tightens its
+   * caps, a voucher admitted under the old caps could be stranded by the new
+   * ones. The admission is paused for that moment: refused by name, nothing
+   * reserved, and the same voucher goes through once the pause is over.
+   */
+  describe('while the payer tightens its caps', () => {
+    it('refuses a voucher retryably, reserves nothing, and admits the same one afterwards', async () => {
+      chain.grant(payer.address, delegate.address);
+      const call = input(delegate, { escrow: escrow() });
+      intents.pausedUntil = new Date(Date.now() + 10_000);
+      await expect(service.redeem(call)).rejects.toMatchObject({
+        errorCode: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
+        statusCode: 503,
+      });
+      expect(intents.created).toHaveLength(0);
+
+      intents.pausedUntil = null;
+      await expect(service.redeem(call)).resolves.toMatchObject({
+        status: PaymentIntentStatus.FUNDS_SECURED,
+      });
+    });
+
+    it("pauses the payer's own key too, when the escrow's limits are what is being lowered", async () => {
+      intents.pausedUntil = new Date(Date.now() + 10_000);
+      await rejects(
+        service.redeem(input(payer, { escrow: escrow() })),
+        PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
+      );
+    });
+  });
+
   describe('(b) an authorised delegate', () => {
     it('redeems a delegate-signed voucher within its caps and records the delegate', async () => {
       chain.grant(payer.address, delegate.address);

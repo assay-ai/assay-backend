@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, IsNull, SelectQueryBuilder } from 'typeorm';
+import { DataSource, EntityManager, IsNull, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
+import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
 
@@ -287,7 +288,54 @@ export interface OpenVoucherTotals {
   readonly escrow: bigint;
   /** The signing delegate's vouchers only: what the delegate's window does not know. */
   readonly delegate: bigint;
+  /**
+   * Set while a change that tightens the payer's caps is being relayed
+   * (BUG-D1-07): no voucher is admitted until then. See
+   * {@link PaymentIntentRepository.holdVoucherAdmission}.
+   */
+  readonly pausedUntil?: Date | null;
 }
+
+/** Whose not-yet-redeemed vouchers {@link PaymentIntentRepository.unsettledVouchers} counts. */
+export interface UnsettledVoucherScope {
+  /** The payer account (`payment_intents.agent_account`). */
+  readonly payer: string;
+  readonly assetId: string;
+  /** Only this delegate's vouchers (CAIP-10, any case); omitted for every voucher of the payer. */
+  readonly delegate?: string | null;
+  /** When the chain counter this is set beside was read (minus a lag margin). */
+  readonly since: Date;
+}
+
+/**
+ * The payer's vouchers the platform has accepted and the chain has not
+ * redeemed yet (BUG-D1-07): what a change to the caps must leave room for.
+ */
+export interface UnsettledVoucherTotals {
+  readonly count: number;
+  /** `Σ price_amount`. */
+  readonly total: bigint;
+  /** The largest single one: what a per-voucher cap must still allow. */
+  readonly largest: bigint;
+  /** The last instant the chain still redeems one of them (`expires_at` + grace), or null. */
+  readonly redeemableUntil: Date | null;
+  /**
+   * `Σ price_amount` redeemed at or after `since`: what a counter read at
+   * `since` may not contain yet. Counted twice in the overlap, the safe side.
+   */
+  readonly redeemedSince: bigint;
+}
+
+/**
+ * A rail-B intent the chain has not redeemed and still can: in flight
+ * (`CREATED`, not expired) or served with its hold open, and not past the
+ * chain's redemption grace — past that it is lost already, whatever the caps.
+ */
+const UNSETTLED_VOUCHER_SQL =
+  `(("status" = 'CREATED' AND "hold_id" IS NULL AND "expires_at" > now())` +
+  ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "status" IN (` +
+  [...OPEN_HOLD_STATUSES, SETTLED_STATUS].map((status) => `'${status}'`).join(', ') +
+  `) AND "expires_at" > now() - interval '${REDEEM_GRACE_SECONDS} seconds'))`;
 
 /**
  * A rail-B intent the chain's window counter cannot contain yet, given the
@@ -621,12 +669,76 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
           scope.delegateSince ?? scope.escrowSince,
         ],
       )) as Array<{ escrow: string; delegate: string }>;
+      const [pause] = (await manager.query(
+        `SELECT "paused_until" FROM "voucher_admission_pauses"
+          WHERE "payer_account" = $1 AND "paused_until" > now()`,
+        [scope.payer],
+      )) as Array<{ paused_until: Date }>;
       admit({
         escrow: BigInt(totals?.escrow ?? '0'),
         delegate: scope.delegate === null ? 0n : BigInt(totals?.delegate ?? '0'),
+        pausedUntil: pause ? new Date(pause.paused_until) : null,
       });
       await manager.insert(PaymentIntentEntity, row);
     });
+  }
+
+  /**
+   * The payer's vouchers the chain has not redeemed yet, and those it redeemed
+   * at or after `scope.since` (BUG-D1-07). Read without the admission lock: a
+   * figure to show and to warn on. The check that must not race an admission
+   * is {@link holdVoucherAdmission}.
+   */
+  async unsettledVouchers(scope: UnsettledVoucherScope): Promise<UnsettledVoucherTotals> {
+    return readUnsettledVouchers(this.manager, scope);
+  }
+
+  /**
+   * Pauses the payer's rail-B admission until `until` and reads what is still
+   * unsettled, in one transaction under the payer's admission lock
+   * (BUG-D1-07).
+   *
+   * A voucher admission either committed before this (and is in the totals
+   * returned) or runs after it (and sees the pause and is refused): there is no
+   * third case, because both take `voucher-admission:<payer>`. So a caller that
+   * checks the totals, then relays a change that tightens the caps, cannot
+   * strand a voucher admitted in between under the old caps. `paused_until`
+   * only moves later here; {@link resumeVoucherAdmission} sets it.
+   */
+  async holdVoucherAdmission(
+    payer: string,
+    until: Date,
+    scopes: readonly UnsettledVoucherScope[],
+  ): Promise<UnsettledVoucherTotals[]> {
+    return this.manager.transaction(async (manager) => {
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+        `voucher-admission:${payer}`,
+      ]);
+      await manager.query(
+        `INSERT INTO "voucher_admission_pauses" ("payer_account", "paused_until", "updated_at")
+         VALUES ($1, $2, now())
+         ON CONFLICT ("payer_account") DO UPDATE
+           SET "paused_until" = GREATEST("voucher_admission_pauses"."paused_until", EXCLUDED."paused_until"),
+               "updated_at" = now()`,
+        [payer, until],
+      );
+      const totals: UnsettledVoucherTotals[] = [];
+      for (const scope of scopes) totals.push(await readUnsettledVouchers(manager, scope));
+      return totals;
+    });
+  }
+
+  /**
+   * Sets when the payer's admission pause ends: now, to lift it, or a short
+   * margin after a tightening landed, so a voucher whose chain read predates
+   * the landing is not admitted against the old caps.
+   */
+  async resumeVoucherAdmission(payer: string, at: Date): Promise<void> {
+    await this.manager.query(
+      `UPDATE "voucher_admission_pauses" SET "paused_until" = $2, "updated_at" = now()
+        WHERE "payer_account" = $1`,
+      [payer, at],
+    );
   }
 
   /**
@@ -998,4 +1110,45 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
     return qb;
   }
+}
+
+async function readUnsettledVouchers(
+  manager: EntityManager,
+  scope: UnsettledVoucherScope,
+): Promise<UnsettledVoucherTotals> {
+  const byDelegate = scope.delegate ? ` AND lower("voucher_delegate") = lower($4)` : '';
+  const [row] = (await manager.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE ${UNSETTLED_VOUCHER_SQL})::int AS "count",
+       COALESCE(SUM("price_amount") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}), 0)::text AS "total",
+       COALESCE(MAX("price_amount") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}), 0)::text AS "largest",
+       MAX("expires_at") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}) AS "latestExpiry",
+       COALESCE(SUM("price_amount") FILTER (
+         WHERE "status" = '${SETTLED_STATUS}' AND "hold_released_at" >= $3::timestamptz
+       ), 0)::text AS "redeemedSince"
+     FROM "payment_intents"
+     WHERE "organization_id" IS NOT NULL
+       AND "agent_account" = $1
+       AND "asset_id" = $2
+       AND "rail" = 'RAIL_B_VOUCHER'
+       AND ("hold_released_at" IS NULL OR "hold_released_at" >= $3::timestamptz)${byDelegate}`,
+    scope.delegate
+      ? [scope.payer, scope.assetId, scope.since, scope.delegate]
+      : [scope.payer, scope.assetId, scope.since],
+  )) as Array<{
+    count: number;
+    total: string;
+    largest: string;
+    latestExpiry: Date | null;
+    redeemedSince: string;
+  }>;
+  const latest = row?.latestExpiry ? new Date(row.latestExpiry) : null;
+  return {
+    count: Number(row?.count ?? 0),
+    total: BigInt(row?.total ?? '0'),
+    largest: BigInt(row?.largest ?? '0'),
+    redeemableUntil:
+      latest === null ? null : new Date(latest.getTime() + REDEEM_GRACE_SECONDS * 1000),
+    redeemedSince: BigInt(row?.redeemedSince ?? '0'),
+  };
 }

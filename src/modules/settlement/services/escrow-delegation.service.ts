@@ -4,9 +4,16 @@ import { AccountId, AssetId, parseAccountId, toAccountId } from '@modules/chains
 import { UnsignedChainTransaction } from '@modules/chains/ports/unsigned-chain-transaction';
 
 import {
+  LoweredCaps,
+  loweredCaps,
+  lowersAnything,
+  UnsettledVouchers,
+} from '../domain/unsettled-vouchers';
+import {
   DelegationTerms,
   ESCROW_DELEGATION,
   EscrowDelegation,
+  EscrowDelegationKind,
   EscrowDelegationPort,
 } from '../ports/escrow-delegation.port';
 import {
@@ -14,7 +21,13 @@ import {
   RelayedEscrowSubmission,
 } from '../ports/relayed-escrow-intent.port';
 import { EscrowAccountService } from './escrow-account.service';
+import { UnsettledScope, UnsettledVoucherGuard } from './unsettled-voucher-guard.service';
 import { WithdrawalService } from './withdrawal.service';
+
+/** A standing delegation, with the payments it signed that the chain has not redeemed yet. */
+export interface EscrowDelegationWithUnsettled extends EscrowDelegation {
+  readonly unsettled: UnsettledVouchers;
+}
 
 export interface RelayedDelegationResult {
   readonly submission: RelayedEscrowSubmission;
@@ -24,7 +37,7 @@ export interface RelayedDelegationResult {
    * submission is what happened — a failed follow-up read must not turn a
    * landed authorisation or revocation into an error (review S3-12).
    */
-  readonly delegates: readonly EscrowDelegation[] | null;
+  readonly delegates: readonly EscrowDelegationWithUnsettled[] | null;
 }
 
 /**
@@ -45,6 +58,7 @@ export class EscrowDelegationService {
     @Inject(ESCROW_DELEGATION) private readonly delegation: EscrowDelegationPort,
     private readonly withdrawals: WithdrawalService,
     private readonly escrows: EscrowAccountService,
+    private readonly unsettled: UnsettledVoucherGuard,
   ) {}
 
   assetFor(account: AccountId): Promise<AssetId> {
@@ -60,8 +74,16 @@ export class EscrowDelegationService {
     organizationId: string,
     account: AccountId,
     terms: DelegationTerms,
+    acknowledgeUnsettled = false,
   ): Promise<UnsignedChainTransaction> {
     await this.withdrawals.assertRelayRoom(organizationId, account);
+    // Lowering a cap below what the delegate's served, unredeemed payments need
+    // strands them (BUG-D1-07): refused here, before the wallet is asked.
+    const { scope, lowered } = await this.standing(account, terms);
+    if (lowersAnything(lowered)) {
+      const unsettled = await this.unsettled.read(scope);
+      this.unsettled.assertNotStranding(unsettled, lowered, scope.asset, acknowledgeUnsettled);
+    }
     return this.delegation.authorizeIntent(account, terms);
   }
 
@@ -74,8 +96,25 @@ export class EscrowDelegationService {
     return this.delegation.revokeIntent(account, delegateOn(account, delegate));
   }
 
-  list(account: AccountId): Promise<readonly EscrowDelegation[]> {
-    return this.delegation.list(account);
+  /** The standing delegations, each with its unsettled payments (BUG-D1-07). */
+  async list(account: AccountId): Promise<readonly EscrowDelegationWithUnsettled[]> {
+    const readAt = new Date();
+    const [delegates, asset] = await Promise.all([
+      this.delegation.list(account),
+      this.escrows.assetFor(account),
+    ]);
+    return Promise.all(
+      delegates.map(async (d) => ({
+        ...d,
+        unsettled: await this.unsettled.read({
+          payer: account,
+          asset,
+          delegate: d.delegate,
+          carried: d.spentInWindow,
+          readAt,
+        }),
+      })),
+    );
   }
 
   async submit(
@@ -83,18 +122,51 @@ export class EscrowDelegationService {
     account: AccountId,
     claimedPayer: string,
     intent: RelayedEscrowIntentFields,
+    acknowledgeUnsettled = false,
   ): Promise<RelayedDelegationResult> {
     const asset = await this.escrows.assetFor(account);
-    const { submission } = await this.withdrawals.submitRelayedIntent(
-      organizationId,
-      account,
-      asset,
-      claimedPayer,
-      intent,
-    );
-    let delegates: readonly EscrowDelegation[] | null;
+    const relay = () =>
+      this.withdrawals.submitRelayedIntent(organizationId, account, asset, claimedPayer, intent);
+    // The last check, under a pause on the payer's admission so no voucher is
+    // admitted under the old caps while the new ones are relayed (BUG-D1-07).
+    // A revocation is never refused for it — revoking is the brake, and its
+    // in-flight risk is accepted — but it is relayed under the pause too.
+    let submission;
+    if (
+      intent.kind === EscrowDelegationKind.AUTHORIZE_DELEGATE ||
+      intent.kind === EscrowDelegationKind.REVOKE_DELEGATE
+    ) {
+      const delegate = delegateOn(account, intent.delegate);
+      // A revocation lowers everything and needs no read of the grant first: a
+      // chain read that fails must not stand between the payer and its brake.
+      const { scope, lowered } =
+        intent.kind === EscrowDelegationKind.AUTHORIZE_DELEGATE
+          ? await this.standing(
+              account,
+              {
+                delegate,
+                maxVoucherAmount: intent.maxVoucherAmount,
+                maxPerWindow: intent.maxPerWindow,
+                validUntil: intent.validUntil,
+              },
+              asset,
+            )
+          : {
+              scope: { payer: account, asset, delegate, carried: 0n, readAt: new Date() },
+              lowered: { revoked: true },
+            };
+      ({ submission } = await this.unsettled.relayTightening({
+        scope,
+        lowered,
+        acknowledged: intent.kind === EscrowDelegationKind.REVOKE_DELEGATE || acknowledgeUnsettled,
+        relay,
+      }));
+    } else {
+      ({ submission } = await relay());
+    }
+    let delegates: readonly EscrowDelegationWithUnsettled[] | null;
     try {
-      delegates = await this.delegation.list(account);
+      delegates = await this.list(account);
     } catch (error) {
       this.logger.warn(
         `relayed ${intent.kind} for ${account} landed at ${submission.transactionHash}; the ` +
@@ -103,6 +175,33 @@ export class EscrowDelegationService {
       delegates = null;
     }
     return { submission, asset, delegates };
+  }
+
+  /**
+   * The delegate's grant as the chain holds it now, and which of its caps
+   * `change` lowers (BUG-D1-07). A key with no standing grant lowers nothing.
+   */
+  private async standing(
+    account: AccountId,
+    change: DelegationTerms,
+    knownAsset?: AssetId,
+  ): Promise<{ scope: UnsettledScope; lowered: LoweredCaps }> {
+    const readAt = new Date();
+    const [delegates, asset] = await Promise.all([
+      this.delegation.list(account),
+      knownAsset ? Promise.resolve(knownAsset) : this.escrows.assetFor(account),
+    ]);
+    const wanted = parseAccountId(change.delegate).address.toLowerCase();
+    const current =
+      delegates.find((d) => parseAccountId(d.delegate).address.toLowerCase() === wanted) ?? null;
+    const scope: UnsettledScope = {
+      payer: account,
+      asset,
+      delegate: current?.delegate ?? change.delegate,
+      carried: current?.spentInWindow ?? 0n,
+      readAt,
+    };
+    return { scope, lowered: current === null ? {} : loweredCaps(current, change) };
   }
 }
 

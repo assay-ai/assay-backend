@@ -1,5 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsString, Matches, MaxLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsBoolean, IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 
 import {
   UnsignedChainTransactionDto,
@@ -8,6 +8,7 @@ import {
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
 import { EscrowDelegationKind, EscrowDelegationStatus } from '../ports/escrow-delegation.port';
+import { UnsettledVouchersDto } from './get-escrow.dto';
 
 /**
  * Agent payment delegation — the relayed `AuthorizeDelegate` / `RevokeDelegate`
@@ -72,6 +73,16 @@ export class CreateDelegateIntentBodyDto {
   @MaxLength(UINT64_MAX_DIGITS)
   @Matches(UINT64_STRING, { message: 'validUntil must be a decimal integer string' })
   validUntil: string;
+
+  @ApiPropertyOptional({
+    description:
+      'BUG-D1-07. True accepts that this change lowers a cap below what payments still being ' +
+      'settled need, so the chain will refuse them and their providers go unpaid by the chain. ' +
+      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  acknowledgeUnsettled?: boolean;
 }
 
 /** `POST /escrow/delegates` — the issued `AuthorizeDelegate` message, echoed back, plus the signature. */
@@ -131,6 +142,16 @@ export class SubmitAuthorizeDelegateBodyDto {
   @IsString()
   @Matches(SIGNATURE, { message: 'signature must be 65 bytes of hex (r || s || v)' })
   signature: string;
+
+  @ApiPropertyOptional({
+    description:
+      'BUG-D1-07. True accepts that this change lowers a cap below what payments still being ' +
+      'settled need, so the chain will refuse them and their providers go unpaid by the chain. ' +
+      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  acknowledgeUnsettled?: boolean;
 }
 
 /** `POST /escrow/delegates/revoke-intent` */
@@ -193,6 +214,14 @@ export class EscrowDelegateDto {
 
   @ApiProperty({ enum: EscrowDelegationStatus })
   status: EscrowDelegationStatus;
+
+  @ApiProperty({
+    type: UnsettledVouchersDto,
+    description:
+      'Payments this key signed that the chain has not redeemed yet (BUG-D1-07). Lowering a ' +
+      'cap below what they need, or revoking, leaves them unredeemable.',
+  })
+  unsettled: UnsettledVouchersDto;
 }
 
 /** `GET /escrow/delegates` — read from the chain, never from this backend's memory. */

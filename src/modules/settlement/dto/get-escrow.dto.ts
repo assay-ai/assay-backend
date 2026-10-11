@@ -1,6 +1,10 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
+import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
+import { AssetId } from '@modules/chains/ports/caip.types';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
+
+import { UnsettledVouchers } from '../domain/unsettled-vouchers';
 
 /**
  * `GET /escrow` — everything a console needs to
@@ -159,4 +163,65 @@ export class GetEscrowResponseDto {
       'to take (`chainReadable: false`).',
   })
   observedAt: string | null;
+}
+
+/**
+ * Payments the platform served and the chain has not redeemed yet (BUG-D1-07):
+ * what a lowered cap must still leave room for.
+ */
+export class UnsettledVouchersDto {
+  @ApiProperty({ description: 'How many payments are still being settled.' })
+  count: number;
+
+  @ApiProperty({ type: MoneyDto, description: 'Their sum.' })
+  amount: MoneyDto;
+
+  @ApiProperty({
+    type: MoneyDto,
+    description: 'The largest single one: a per-payment cap below it strands it.',
+  })
+  largest: MoneyDto;
+
+  @ApiProperty({
+    type: MoneyDto,
+    description:
+      "What the 24-hour cap must hold for all of them to redeem: the chain's decayed counter " +
+      'plus these payments. A window cap below it strands some of them.',
+  })
+  windowNeeds: MoneyDto;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'ISO-8601. The last instant the chain still redeems one of them; an expiry before it ' +
+      'strands it. `null` when there are none.',
+  })
+  redeemableUntil: string | null;
+}
+
+/** `GET /escrow/unsettled` */
+export class GetEscrowUnsettledResponseDto {
+  @ApiProperty({ description: "This buyer's CAIP-10 account." })
+  account: string;
+
+  @ApiPropertyOptional({
+    type: UnsettledVouchersDto,
+    nullable: true,
+    description:
+      "Every signer's payments (the payer's own key and every delegate's) beside the escrow's " +
+      'own window. `null` when the chain could not be read: unknown, not none.',
+  })
+  unsettled: UnsettledVouchersDto | null;
+}
+
+export function toUnsettledDto(u: UnsettledVouchers, asset: AssetId): UnsettledVouchersDto {
+  const { decimals } = getAssetMetadata(asset);
+  const money = (amount: bigint) => ({ amount: amount.toString(), asset, decimals });
+  return {
+    count: u.count,
+    amount: money(u.total),
+    largest: money(u.largest),
+    windowNeeds: money(u.windowNeeds),
+    redeemableUntil: u.redeemableUntil === null ? null : u.redeemableUntil.toISOString(),
+  };
 }

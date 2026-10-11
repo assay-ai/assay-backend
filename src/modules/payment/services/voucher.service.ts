@@ -703,6 +703,18 @@ export class VoucherService {
         delegateSince: delegation === null ? null : lagged(delegation.readAt),
       },
       admit: (open) => {
+        // A change tightening the payer's caps is being relayed (BUG-D1-07):
+        // admitting under the caps that are about to go could strand this one.
+        // Refused before the insert, so nothing is reserved and the seq stays
+        // free for the retry.
+        if (open.pausedUntil) {
+          throw PaymentErrors.voucherAdmissionPaused({
+            retryAfterSeconds: Math.max(
+              1,
+              Math.ceil((open.pausedUntil.getTime() - Date.now()) / 1000),
+            ),
+          });
+        }
         if (escrow !== null) {
           const used = escrowCarried + open.escrow;
           if (used + amount > escrow.maxPerWindow) {

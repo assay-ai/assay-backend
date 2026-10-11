@@ -1,6 +1,7 @@
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
+import { VoucherAdmissionPause1759600000005 } from '@database/postgres/migrations/1759600000005-voucher-admission-pause';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
@@ -171,6 +172,8 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
       VoucherDelegate1759600000000,
       VoucherAdmissionIndex1759600000003,
       PaymentIntentCredential1759600000004,
+      // `voucher_admission_pauses`, which the voucher admission reads (BUG-D1-07).
+      VoucherAdmissionPause1759600000005,
     ],
     synchronize: false,
     logging: process.env.WITHHELD_TEST_LOGGING === 'true',

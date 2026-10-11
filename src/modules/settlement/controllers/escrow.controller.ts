@@ -19,7 +19,11 @@ import {
   WithdrawBodyDto,
   WithdrawGasGrantDto,
 } from '../dto/create-escrow-intent.dto';
-import { GetEscrowResponseDto } from '../dto/get-escrow.dto';
+import {
+  GetEscrowResponseDto,
+  GetEscrowUnsettledResponseDto,
+  toUnsettledDto,
+} from '../dto/get-escrow.dto';
 import {
   RelayedEscrowIntentResponseDto,
   SubmitRequestWithdrawBodyDto,
@@ -141,6 +145,28 @@ export class EscrowController {
   }
 
   /**
+   * `GET /escrow/unsettled` — the payments the platform served and the chain
+   * has not redeemed yet, beside the escrow's own window (BUG-D1-07). A console
+   * shows them before the buyer lowers a limit, and polls this while waiting
+   * for them to settle.
+   */
+  @Get('unsettled')
+  @ApiOperation({ summary: "The payer's payments still being settled on chain" })
+  @ApiResponse({ status: 200, type: GetEscrowUnsettledResponseDto })
+  async unsettled(@CurrentSession() session: McpSession): Promise<GetEscrowUnsettledResponseDto> {
+    const asset = await this.escrows.assetFor(session.agentAccount);
+    const unsettled = await this.withdrawals.unsettledVouchers(
+      session.organizationId,
+      session.agentAccount,
+      asset,
+    );
+    return {
+      account: session.agentAccount,
+      unsettled: unsettled === null ? null : toUnsettledDto(unsettled, asset),
+    };
+  }
+
+  /**
    * `POST /escrow/limits-intent` — the buyer's brake.
    *
    * **`0` means refuse every redeem, not "unlimited"** — a console that got
@@ -169,7 +195,13 @@ export class EscrowController {
       session.organizationId,
       session.agentAccount,
       asset,
-      { kind: EscrowIntentKind.SET_LIMITS, amount: null, limits, destination: null },
+      {
+        kind: EscrowIntentKind.SET_LIMITS,
+        amount: null,
+        limits,
+        destination: null,
+        acknowledgeUnsettled: body.acknowledgeUnsettled === true,
+      },
     );
 
     return toResponseDto(EscrowIntentKind.SET_LIMITS, session.agentAccount, result);
@@ -259,6 +291,7 @@ export class EscrowController {
         deadline: BigInt(body.deadline),
         signature: body.signature,
       },
+      body.acknowledgeUnsettled === true,
     );
 
     return toRelayedResponseDto(EscrowIntentKind.SET_LIMITS, session.agentAccount, result);

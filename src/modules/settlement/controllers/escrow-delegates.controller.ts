@@ -20,10 +20,12 @@ import {
   SubmitAuthorizeDelegateBodyDto,
   SubmitRevokeDelegateBodyDto,
 } from '../dto/escrow-delegates.dto';
-import { EscrowDelegation, EscrowDelegationKind } from '../ports/escrow-delegation.port';
+import { toUnsettledDto } from '../dto/get-escrow.dto';
+import { EscrowDelegationKind } from '../ports/escrow-delegation.port';
 import {
   delegateOn,
   EscrowDelegationService,
+  EscrowDelegationWithUnsettled,
   RelayedDelegationResult,
 } from '../services/escrow-delegation.service';
 
@@ -65,6 +67,12 @@ export class EscrowDelegatesController {
   @ApiResponse({ status: 201, type: DelegateIntentResponseDto })
   @ApiResponse({ status: 400, description: 'SETTLEMENT_DELEGATION_INVALID' })
   @ApiResponse({
+    status: 409,
+    description:
+      'SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK — the new caps would strand payments still being ' +
+      'settled; send acknowledgeUnsettled to accept it',
+  })
+  @ApiResponse({
     status: 429,
     description: 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED — before anything is signed',
   })
@@ -81,6 +89,7 @@ export class EscrowDelegatesController {
         maxPerWindow: BigInt(body.maxPerWindow),
         validUntil: BigInt(body.validUntil),
       },
+      body.acknowledgeUnsettled === true,
     );
     return {
       kind: EscrowDelegationKind.AUTHORIZE_DELEGATE,
@@ -117,6 +126,7 @@ export class EscrowDelegatesController {
         deadline: BigInt(body.deadline),
         signature: body.signature,
       },
+      body.acknowledgeUnsettled === true,
     );
     return toRelayedDto(EscrowDelegationKind.AUTHORIZE_DELEGATE, session.agentAccount, result);
   }
@@ -170,7 +180,7 @@ export class EscrowDelegatesController {
   }
 }
 
-function toDto(d: EscrowDelegation, asset: AssetId): EscrowDelegateDto {
+function toDto(d: EscrowDelegationWithUnsettled, asset: AssetId): EscrowDelegateDto {
   const { decimals } = getAssetMetadata(asset);
   const money = (amount: bigint) => ({ amount: amount.toString(), asset, decimals });
   return {
@@ -180,6 +190,7 @@ function toDto(d: EscrowDelegation, asset: AssetId): EscrowDelegateDto {
     spentInWindow: money(d.spentInWindow),
     validUntil: new Date(Number(d.validUntil) * 1000).toISOString(),
     status: d.status,
+    unsettled: toUnsettledDto(d.unsettled, asset),
   };
 }
 
