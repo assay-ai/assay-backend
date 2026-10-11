@@ -181,7 +181,12 @@ export class EscrowController {
    * Starts the clock the program freezes at `now + Config.withdraw_delay_seconds`.
    * `amount: "0"` cancels a standing request.
    */
+  // Withdrawing is the buyer taking money back out of the escrow its agent
+  // spends from — a person's decision, like the limits. The chain still wants
+  // the buyer's signature (or `msg.sender`); refusing the agent's credential
+  // keeps the API from building or relaying any step of it on the agent's word.
   @Post('withdrawals/request-intent')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: "Build the buyer's own request_withdraw transaction" })
   @ApiResponse({ status: 201, type: CreateEscrowIntentResponseDto })
   @ApiResponse({
@@ -273,6 +278,7 @@ export class EscrowController {
    * the contract, and nothing on this controller will ever send it for them.
    */
   @Post('withdrawals/request')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: "Relay the buyer's signed request_withdraw request" })
   @ApiResponse({ status: 201, type: RelayedEscrowIntentResponseDto })
   @ApiResponse({ status: 400, description: RELAYED_MALFORMED_DESCRIPTION })
@@ -314,6 +320,7 @@ export class EscrowController {
    * fee to be told something `GET /escrow` already knows.
    */
   @Post('withdrawals/intent')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: "Build the buyer's own withdraw transaction" })
   @ApiResponse({ status: 201, type: CreateEscrowIntentResponseDto })
   @ApiResponse({
