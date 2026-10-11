@@ -41,4 +41,47 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
       .where('credential.token_hash = :tokenHash', { tokenHash })
       .getOne();
   }
+
+  /**
+   * The OTHER credentials — in any tenant — that hold `delegate` as their bound
+   * key and are neither revoked nor deleted (expired ones included; the caller
+   * decides what an expired holder means). A deliberate cross-tenant read, like
+   * {@link findByTokenHash}: a delegate key is one key platform-wide, and
+   * `uq_agent_credentials_delegate_live` enforces it across tenants, so the
+   * check in front of that index has to look across them too. Compared
+   * case-insensitively, as the index is.
+   */
+  async findOtherDelegateHolders(
+    delegate: string,
+    exceptCredentialId: string,
+  ): Promise<AgentCredentialEntity[]> {
+    return this.manager
+      .createQueryBuilder(AgentCredentialEntity, 'credential')
+      .where('lower(credential.delegate_account) = lower(:delegate)', { delegate })
+      .andWhere('credential.id <> :exceptCredentialId', { exceptCredentialId })
+      .andWhere('credential.revoked_at IS NULL')
+      .andWhere('credential.deleted_at IS NULL')
+      .getMany();
+  }
+
+  /**
+   * Clears `delegate` from credentials that can no longer authenticate because
+   * they EXPIRED (not revoked — a revoked row is outside the unique index
+   * already). An expired credential's binding is dead weight: nobody can use
+   * it, and leaving it would hold the key hostage under
+   * `uq_agent_credentials_delegate_live`. Cross-tenant for the same reason as
+   * {@link findOtherDelegateHolders}.
+   */
+  async releaseDelegateFromExpired(delegate: string, exceptCredentialId: string): Promise<void> {
+    await this.manager
+      .createQueryBuilder()
+      .update(AgentCredentialEntity)
+      .set({ delegateAccount: null, delegateBoundAt: null })
+      .where('lower(delegate_account) = lower(:delegate)', { delegate })
+      .andWhere('id <> :exceptCredentialId', { exceptCredentialId })
+      .andWhere('revoked_at IS NULL')
+      .andWhere('deleted_at IS NULL')
+      .andWhere('expires_at IS NOT NULL AND expires_at <= now()')
+      .execute();
+  }
 }

@@ -3,6 +3,7 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 import Redis from 'ioredis';
 
+import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { AccountId } from '@modules/chains/ports/caip.types';
@@ -23,6 +24,9 @@ export const DELEGATE_CHALLENGE_TTL_SECONDS = 300;
  */
 const challengeKey = (credentialId: string) => `agent-delegate-challenge:${credentialId}`;
 
+/** One live credential per delegate key, platform-wide (migration 1759600000002). */
+export const DELEGATE_LIVE_CONSTRAINT = 'uq_agent_credentials_delegate_live';
+
 interface StoredChallenge extends DelegateBindingChallenge {
   readonly organizationId: string;
   readonly challengeId: string;
@@ -41,6 +45,10 @@ interface StoredChallenge extends DelegateBindingChallenge {
  * The binding grants nothing on chain. Spending needs the PAYER's on-chain
  * authorisation of the key (`/escrow/delegates`, a human act); a bound key the
  * payer never authorised signs vouchers the chain — and this backend — refuse.
+ *
+ * A key is bound to ONE live credential platform-wide: binding a key another
+ * live credential holds is refused (`ACCOUNT_DELEGATE_ALREADY_BOUND`), so what
+ * a key spends is one agent's and revoking that credential ends it.
  *
  * Challenges live in Redis with a TTL, one per credential (a new one replaces
  * the last), and are consumed with `GETDEL`, so one is good for one attempt; a
@@ -130,11 +138,40 @@ export class AgentDelegateService {
       throw AccountErrors.delegateSignatureInvalid({ delegate: stored.delegate });
     }
 
-    const boundAt = new Date();
-    await this.credentials.update(
-      { organizationId: session.organizationId, id: session.credentialId },
-      { delegateAccount: stored.delegate as AccountId, delegateBoundAt: boundAt },
+    // One key, one live credential (D1-S03). Checked only AFTER the proof of
+    // possession, so the answer "bound elsewhere" is given to the key's holder
+    // alone and cannot be used to probe which keys are in use. An EXPIRED holder
+    // can authenticate nobody, so its binding is released rather than allowed
+    // to hold the key hostage; a live one refuses. The unique index behind this
+    // decides a race between two binds of the same key.
+    await this.credentials.releaseDelegateFromExpired(stored.delegate, session.credentialId);
+    const holders = await this.credentials.findOtherDelegateHolders(
+      stored.delegate,
+      session.credentialId,
     );
+    if (holders.length > 0) {
+      throw AccountErrors.delegateAlreadyBound({ delegate: stored.delegate });
+    }
+
+    const boundAt = new Date();
+    try {
+      await this.credentials.update(
+        { organizationId: session.organizationId, id: session.credentialId },
+        { delegateAccount: stored.delegate as AccountId, delegateBoundAt: boundAt },
+      );
+    } catch (error) {
+      const violation = error as {
+        code?: string;
+        constraint?: string;
+        driverError?: { code?: string; constraint?: string };
+      };
+      const code = violation?.code ?? violation?.driverError?.code;
+      const constraint = violation?.constraint ?? violation?.driverError?.constraint;
+      if (code === UNIQUE_VIOLATION_CODE && constraint === DELEGATE_LIVE_CONSTRAINT) {
+        throw AccountErrors.delegateAlreadyBound({ delegate: stored.delegate });
+      }
+      throw error;
+    }
     return {
       credentialId: session.credentialId,
       delegate: stored.delegate,
