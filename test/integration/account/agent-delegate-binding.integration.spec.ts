@@ -3,7 +3,7 @@ import { join } from 'node:path';
 
 import Redis from 'ioredis';
 import { DataSource } from 'typeorm';
-import { privateKeyToAccount } from 'viem/accounts';
+import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
@@ -33,7 +33,12 @@ describe('agent_credentials.delegate_account — binding a credential to its del
   let credentials: AgentCredentialRepository;
   const organizationId = randomUUID();
   const agentId = randomUUID();
-  const delegateKey = privateKeyToAccount(`0x${'d1'.repeat(32)}`);
+  // A fresh key per test: the database outlives a run, and a key is bound to one
+  // live credential platform-wide, so a fixed key would collide with the last run.
+  let delegateKey = privateKeyToAccount(generatePrivateKey());
+  beforeEach(() => {
+    delegateKey = privateKeyToAccount(generatePrivateKey());
+  });
 
   beforeAll(async () => {
     await ensureTestDatabase(DATABASE);
@@ -123,6 +128,85 @@ describe('agent_credentials.delegate_account — binding a credential to its del
         errorCode: 'ACCOUNT_DELEGATE_CHALLENGE_INVALID',
       },
     );
+  });
+
+  /** D1-S03: one key, one live credential, across organizations. */
+  it('refuses to bind a key another live credential holds, in any organization', async () => {
+    const first = await credential();
+    const c1 = await service.challenge(session(first), delegateKey.address);
+    await service.bind(session(first), c1.challengeId, await sign(c1.typedData));
+
+    const otherOrg = randomUUID();
+    const second = randomUUID();
+    await dataSource.query(
+      `INSERT INTO "agent_credentials" ("id", "organization_id", "agent_id", "name", "prefix", "token_hash", "scopes") ` +
+        `VALUES ($1, $2, $3, 'other agent', 'x402_sk_live_test', $4, '{}')`,
+      [second, otherOrg, randomUUID(), `hash-${second}`],
+    );
+    const s2 = { ...session(second), organizationId: otherOrg };
+    const c2 = await service.challenge(s2, delegateKey.address);
+    await expect(service.bind(s2, c2.challengeId, await sign(c2.typedData))).rejects.toMatchObject({
+      errorCode: 'ACCOUNT_DELEGATE_ALREADY_BOUND',
+    });
+    const [row] = await dataSource.query(
+      `SELECT "delegate_account" FROM "agent_credentials" WHERE "id" = $1`,
+      [second],
+    );
+    expect(row.delegate_account).toBeNull();
+
+    // The index refuses a direct duplicate too, whatever the case.
+    await expect(
+      dataSource.query(
+        `UPDATE "agent_credentials" SET "delegate_account" = lower($2), "delegate_bound_at" = now() WHERE "id" = $1`,
+        [second, `${CHAIN}:${delegateKey.address}`],
+      ),
+    ).rejects.toThrow(/uq_agent_credentials_delegate_live/);
+
+    // Once the holder is revoked, the key can move.
+    await dataSource.query(
+      `UPDATE "agent_credentials" SET "revoked_at" = now(), "revoked_by" = 'test' WHERE "id" = $1`,
+      [first],
+    );
+    const c3 = await service.challenge(s2, delegateKey.address);
+    await expect(service.bind(s2, c3.challengeId, await sign(c3.typedData))).resolves.toMatchObject(
+      {
+        delegate: `${CHAIN}:${delegateKey.address}`,
+      },
+    );
+  });
+
+  it('releases an expired holder of the key', async () => {
+    const expired = await credential();
+    await dataSource.query(
+      `UPDATE "agent_credentials" SET "delegate_account" = $2, "delegate_bound_at" = now(), "expires_at" = now() - interval '1 minute' WHERE "id" = $1`,
+      [expired, `${CHAIN}:0x${'7'.repeat(40)}`],
+    );
+    const key = privateKeyToAccount(generatePrivateKey());
+    // Re-point the expired row at THIS key, then bind it elsewhere.
+    await dataSource.query(
+      `UPDATE "agent_credentials" SET "delegate_account" = $2 WHERE "id" = $1`,
+      [expired, `${CHAIN}:${key.address}`],
+    );
+    const live = await credential();
+    const c = await service.challenge(session(live), key.address);
+    const typed = c.typedData as {
+      domain: { name: string; version: string; chainId: string };
+      types: Record<string, { name: string; type: string }[]>;
+      primaryType: string;
+      message: Record<string, string>;
+    };
+    const signature = await key.signTypedData({
+      domain: { ...typed.domain, chainId: Number(typed.domain.chainId) },
+      types: typed.types,
+      primaryType: typed.primaryType,
+      message: typed.message,
+    } as never);
+    await expect(service.bind(session(live), c.challengeId, signature)).resolves.toBeDefined();
+    const [row] = await dataSource.query(
+      `SELECT "delegate_account" FROM "agent_credentials" WHERE "id" = $1`,
+      [expired],
+    );
+    expect(row.delegate_account).toBeNull();
   });
 
   it('keeps the account and the instant together, by CHECK', async () => {

@@ -25,11 +25,15 @@ class FakeRedis {
   }
 }
 
+interface FakeRow {
+  delegateAccount: string | null;
+  delegateBoundAt: Date | null;
+  revokedAt?: Date | null;
+  expiresAt?: Date | null;
+}
+
 class FakeCredentials {
-  readonly rows = new Map<
-    string,
-    { delegateAccount: string | null; delegateBoundAt: Date | null }
-  >();
+  readonly rows = new Map<string, FakeRow>();
   updates: { criteria: unknown; patch: unknown }[] = [];
   async findOneBy({ id }: { id: string }) {
     return this.rows.get(id) ?? null;
@@ -39,7 +43,26 @@ class FakeCredentials {
     patch: { delegateAccount: string; delegateBoundAt: Date },
   ) {
     this.updates.push({ criteria, patch });
-    this.rows.set(criteria.id, patch);
+    this.rows.set(criteria.id, { ...this.rows.get(criteria.id), ...patch });
+  }
+  /** Mirrors the repository: other, not revoked, same key case-insensitively. */
+  private holders(delegate: string, except: string) {
+    return [...this.rows.entries()].filter(
+      ([id, row]) =>
+        id !== except &&
+        !row.revokedAt &&
+        row.delegateAccount?.toLowerCase() === delegate.toLowerCase(),
+    );
+  }
+  async findOtherDelegateHolders(delegate: string, except: string) {
+    return this.holders(delegate, except).map(([id, row]) => ({ id, ...row }));
+  }
+  async releaseDelegateFromExpired(delegate: string, except: string) {
+    for (const [id, row] of this.holders(delegate, except)) {
+      if (row.expiresAt && row.expiresAt.getTime() <= Date.now()) {
+        this.rows.set(id, { ...row, delegateAccount: null, delegateBoundAt: null });
+      }
+    }
   }
 }
 
@@ -73,6 +96,25 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
       redis as never,
     );
   });
+
+  async function signWith(
+    challenge: Awaited<ReturnType<AgentDelegateService['challenge']>>,
+    signer = delegateKey,
+  ) {
+    const typed = challenge.typedData as {
+      domain: { name: string; version: string; chainId: string };
+      types: Record<string, { name: string; type: string }[]>;
+      primaryType: string;
+      message: Record<string, string>;
+    };
+    const signature = await signer.signTypedData({
+      domain: { ...typed.domain, chainId: Number(typed.domain.chainId) },
+      types: typed.types,
+      primaryType: typed.primaryType,
+      message: typed.message,
+    } as never);
+    return { challenge, signature };
+  }
 
   async function signChallenge(signer = delegateKey, s = session()) {
     const challenge = await service.challenge(s, delegateKey.address.toLowerCase());
@@ -172,6 +214,103 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
     );
     await expect(service.bind(session(), challenge.challengeId, signature)).rejects.toMatchObject({
       errorCode: 'ACCOUNT_DELEGATE_CHALLENGE_INVALID',
+    });
+  });
+
+  /** D1-S03: one key, one live credential — across agents and organizations. */
+  describe('a key already bound to another credential', () => {
+    const delegate = `${CHAIN}:${delegateKey.address}`;
+
+    it('refuses to bind it to a second live credential, and binds nothing', async () => {
+      credentials.rows.set('cred-other', {
+        delegateAccount: delegate,
+        delegateBoundAt: new Date(),
+      });
+      const s = session({ credentialId: 'cred-2', organizationId: 'org-2' });
+      const challenge = await service.challenge(s, delegateKey.address);
+      const { signature } = await signWith(challenge);
+      await expect(service.bind(s, challenge.challengeId, signature)).rejects.toMatchObject({
+        errorCode: 'ACCOUNT_DELEGATE_ALREADY_BOUND',
+        statusCode: 409,
+      });
+      expect(credentials.updates).toHaveLength(0);
+      expect(credentials.rows.get('cred-other')?.delegateAccount).toBe(delegate);
+    });
+
+    it('compares the key case-insensitively', async () => {
+      credentials.rows.set('cred-other', {
+        delegateAccount: delegate.toLowerCase(),
+        delegateBoundAt: new Date(),
+      });
+      const { challenge, signature } = await signChallenge();
+      await expect(service.bind(session(), challenge.challengeId, signature)).rejects.toMatchObject(
+        {
+          errorCode: 'ACCOUNT_DELEGATE_ALREADY_BOUND',
+        },
+      );
+    });
+
+    it('still lets the holder re-bind its own key', async () => {
+      credentials.rows.set('cred-1', { delegateAccount: delegate, delegateBoundAt: new Date(0) });
+      const { challenge, signature } = await signChallenge();
+      await expect(
+        service.bind(session(), challenge.challengeId, signature),
+      ).resolves.toMatchObject({
+        delegate,
+      });
+    });
+
+    it('is not blocked by a REVOKED holder', async () => {
+      credentials.rows.set('cred-other', {
+        delegateAccount: delegate,
+        delegateBoundAt: new Date(),
+        revokedAt: new Date(),
+      });
+      const { challenge, signature } = await signChallenge();
+      await expect(
+        service.bind(session(), challenge.challengeId, signature),
+      ).resolves.toBeDefined();
+    });
+
+    it('releases an EXPIRED holder and binds', async () => {
+      credentials.rows.set('cred-other', {
+        delegateAccount: delegate,
+        delegateBoundAt: new Date(),
+        expiresAt: new Date(Date.now() - 1000),
+      });
+      const { challenge, signature } = await signChallenge();
+      await expect(
+        service.bind(session(), challenge.challengeId, signature),
+      ).resolves.toBeDefined();
+      expect(credentials.rows.get('cred-other')?.delegateAccount).toBeNull();
+    });
+
+    it('answers a lost race on the unique index as ALREADY_BOUND', async () => {
+      credentials.update = async () => {
+        throw Object.assign(new Error('duplicate key'), {
+          code: '23505',
+          constraint: 'uq_agent_credentials_delegate_live',
+        });
+      };
+      const { challenge, signature } = await signChallenge();
+      await expect(service.bind(session(), challenge.challengeId, signature)).rejects.toMatchObject(
+        {
+          errorCode: 'ACCOUNT_DELEGATE_ALREADY_BOUND',
+        },
+      );
+    });
+
+    it('checks only after the proof: a wrong key learns nothing', async () => {
+      credentials.rows.set('cred-other', {
+        delegateAccount: delegate,
+        delegateBoundAt: new Date(),
+      });
+      const { challenge, signature } = await signChallenge(otherKey);
+      await expect(service.bind(session(), challenge.challengeId, signature)).rejects.toMatchObject(
+        {
+          errorCode: 'ACCOUNT_DELEGATE_SIGNATURE_INVALID',
+        },
+      );
     });
   });
 

@@ -17,6 +17,7 @@ export enum AccountErrorCode {
   ACCOUNT_DELEGATE_BINDING_UNSUPPORTED = 'ACCOUNT_DELEGATE_BINDING_UNSUPPORTED',
   ACCOUNT_DELEGATE_CHALLENGE_INVALID = 'ACCOUNT_DELEGATE_CHALLENGE_INVALID',
   ACCOUNT_DELEGATE_SIGNATURE_INVALID = 'ACCOUNT_DELEGATE_SIGNATURE_INVALID',
+  ACCOUNT_DELEGATE_ALREADY_BOUND = 'ACCOUNT_DELEGATE_ALREADY_BOUND',
 }
 
 export type AccountErrorCodesArePrefixed = AssertDomainErrorCodes<'ACCOUNT', `${AccountErrorCode}`>;
@@ -81,5 +82,19 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
       `The signature was not made by the delegate key${
         context?.delegate ? ` ${context.delegate}` : ''
       }; nothing was bound`,
+  },
+  /**
+   * The key is already bound to ANOTHER live agent credential (in any
+   * organization). A delegate key belongs to one credential, so what it spent
+   * is attributable to one agent and revoking that credential ends it. Which
+   * credential holds it is not said: it may be another tenant's.
+   */
+  delegateAlreadyBound: {
+    code: AccountErrorCode.ACCOUNT_DELEGATE_ALREADY_BOUND,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The delegate key${
+        context?.delegate ? ` ${context.delegate}` : ''
+      } is already bound to another agent credential; nothing was bound. Revoke that credential, or bind a key of this agent's own`,
   },
 });
