@@ -189,6 +189,26 @@ describe('decayWindow', () => {
     expect(decayWindow({ spentInWindow: 3n, windowStartedAt: 0, nowSeconds: 43_200 })).toBe(2n);
   });
 
+  it('reproduces the live delegate counter after three 0.10 vouchers (299988, not 300000)', () => {
+    // DelegateVoucherRedeemed on eip155:46630 for seq 5, 6, 7 (block times
+    // 1791767941, …944, …948): spentInWindow 100000, 199997, 299988. The window
+    // drains between redemptions, so three 100000 vouchers never sum to 300000.
+    const afterSeq6 =
+      decayWindow({
+        spentInWindow: 100_000n,
+        windowStartedAt: 1_791_767_941,
+        nowSeconds: 1_791_767_944,
+      }) + 100_000n;
+    expect(afterSeq6).toBe(199_997n);
+    const afterSeq7 =
+      decayWindow({
+        spentInWindow: afterSeq6,
+        windowStartedAt: 1_791_767_944,
+        nowSeconds: 1_791_767_948,
+      }) + 100_000n;
+    expect(afterSeq7).toBe(299_988n);
+  });
+
   it('does not overflow on a uint64 counter across a full window', () => {
     const max = 2n ** 64n - 1n;
     expect(
