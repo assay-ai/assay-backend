@@ -3,7 +3,9 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
 import { AgentCredentialsController } from '@modules/account/controllers/agent-credentials.controller';
+import { NotificationsController } from '@modules/account/controllers/notifications.controller';
 import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
+import { NotificationsService } from '@modules/account/services/notifications.service';
 import { AuthErrorCode } from '@modules/auth/errors/auth.errors';
 import { CHAIN_IDS, AccountId } from '@modules/chains/ports/caip.types';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
@@ -74,7 +76,15 @@ describe('human-only control writes', () => {
     listPreferences: jest.fn(async () => []),
     upsertPreferences: jest.fn(),
   };
-  const escrows = { assetFor: jest.fn() };
+  // The feed the owner reads to watch its agent. An agent that could mark it
+  // read could clear the badge on the very alert that names it.
+  const feed = {
+    list: jest.fn(async () => ({ items: [], nextCursor: null })),
+    unreadCount: jest.fn(async () => ({ count: 0 })),
+    markRead: jest.fn(),
+    markAllRead: jest.fn(),
+  };
+  const escrows = { assetFor: jest.fn(), getForConsole: jest.fn(async () => ({})) };
   const withdrawals = { buildIntent: jest.fn(), submitRelayedIntent: jest.fn() };
   // Agent payment delegation: the payer's control over what its agent may
   // spend. Every route, the read included, is the person's and never the agent's.
@@ -92,6 +102,7 @@ describe('human-only control writes', () => {
         SpendPolicyController,
         AgentCredentialsController,
         NotificationSettingsController,
+        NotificationsController,
         EscrowController,
         EscrowDelegatesController,
       ],
@@ -100,6 +111,7 @@ describe('human-only control writes', () => {
         { provide: SpendPolicyService, useValue: spendPolicy },
         { provide: AgentCredentialsService, useValue: credentials },
         { provide: NotificationSettingsService, useValue: notifications },
+        { provide: NotificationsService, useValue: feed },
         { provide: EscrowAccountService, useValue: escrows },
         { provide: WithdrawalService, useValue: withdrawals },
         { provide: EscrowDelegationService, useValue: delegation },
@@ -130,8 +142,15 @@ describe('human-only control writes', () => {
     },
     { method: 'put', path: '/notification-channels/EMAIL' },
     { method: 'put', path: '/notification-preferences' },
+    { method: 'patch', path: '/notifications/44444444-4444-4444-8444-444444444444/read' },
+    { method: 'post', path: '/notifications/read-all' },
     { method: 'post', path: '/escrow/limits-intent' },
     { method: 'post', path: '/escrow/limits' },
+    // D1-S01: the buyer's own withdrawal. The chain still wants the buyer's
+    // signature, but the agent must not even get the API to build or relay it.
+    { method: 'post', path: '/escrow/withdrawals/request-intent' },
+    { method: 'post', path: '/escrow/withdrawals/request' },
+    { method: 'post', path: '/escrow/withdrawals/intent' },
     { method: 'post', path: '/escrow/delegates/intent' },
     { method: 'post', path: '/escrow/delegates' },
     { method: 'post', path: '/escrow/delegates/revoke-intent' },
@@ -155,6 +174,7 @@ describe('human-only control writes', () => {
         spendPolicy,
         credentials,
         notifications,
+        feed,
         escrows,
         withdrawals,
         delegation,
@@ -186,6 +206,9 @@ describe('human-only control writes', () => {
     `/agents/${AGENT_ID}/credentials`,
     '/notification-channels',
     '/notification-preferences',
+    '/notifications',
+    '/notifications/unread-count',
+    '/escrow',
   ])('GET %s still answers an agent credential', async (path) => {
     const res = await request(app.getHttpServer())
       .get(path)
