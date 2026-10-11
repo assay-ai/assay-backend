@@ -1,5 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
+import { ReceiptsSummaryGroupBy } from '@database/postgres/repositories/payment-intent.repository';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 
 import { PaymentTestContext, createPaymentTestContext } from '../helpers/payment-test-context';
@@ -84,5 +85,25 @@ describe('payment_intents.voucher_delegate — the delegate’s in-flight vouche
     expect(
       (await context.intents.findById(context.organizationId, withoutDelegate.id)).voucherDelegate,
     ).toBeNull();
+  });
+
+  it('groups a delegate-signed call under the agent whose credential made it (GET /receipts/summary groupBy=agent)', async () => {
+    const agentId = context.id('agent-with-delegate');
+    const otherAgentId = context.id('agent-without-delegate');
+    const delegate = context.account('delegate');
+    await context.createIntent('i', { agentId, voucherDelegate: delegate });
+    await context.createIntent('j', { agentId, voucherDelegate: delegate });
+    await context.createIntent('k', { agentId }); // the payer's own voucher, same agent
+    await context.createIntent('l', { agentId: otherAgentId });
+
+    const now = Date.now();
+    const rows = await context.repository.summarizeReceipts(
+      context.organizationId,
+      ReceiptsSummaryGroupBy.AGENT,
+      { from: new Date(now - 3_600_000), to: new Date(now + 3_600_000) },
+    );
+
+    const calls = Object.fromEntries(rows.map((row) => [row.key, row.calls]));
+    expect(calls).toEqual({ [agentId]: 3, [otherAgentId]: 1 });
   });
 });

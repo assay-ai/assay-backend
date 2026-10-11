@@ -68,11 +68,16 @@ export enum ReceiptsSummaryGroupBy {
   DAY = 'day',
   STATUS = 'status',
   VERDICT = 'verdict',
+  /**
+   * `payment_intents.agent_id`: the agent whose credential made the call, so a
+   * call an agent paid for with its delegate key is attributed to that agent.
+   */
+  AGENT = 'agent',
 }
 
 /** One row of a summary grouping, still in atomic units. */
 export interface ReceiptsSummaryRow {
-  /** The group's label — a tool id, a provider id, a day, a status, a verdict. */
+  /** The group's label — a tool id, a provider id, a day, a status, a verdict, an agent id. */
   readonly key: string;
   readonly asset: string;
   readonly decimals: number;
@@ -752,6 +757,8 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         return 'intent.status';
       case ReceiptsSummaryGroupBy.VERDICT:
         return "COALESCE(intent.verificationVerdict, 'UNVERIFIED')";
+      case ReceiptsSummaryGroupBy.AGENT:
+        return 'intent.agentId';
     }
   }
 

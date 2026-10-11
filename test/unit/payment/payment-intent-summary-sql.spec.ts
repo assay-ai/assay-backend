@@ -54,6 +54,11 @@ describe('PaymentIntentRepository.summarizeReceipts SQL', () => {
     expect(sql).toContain('intent.provider_id::text');
   });
 
+  it('groups by the agent_id column, so calls an agent credential paid for attribute to that agent', async () => {
+    const sql = await renderedSql(ReceiptsSummaryGroupBy.AGENT);
+    expect(sql).toMatch(/GROUP BY "intent"\."agent_id"/);
+  });
+
   it('orders every grouping by its key so a daily series is chronological', async () => {
     const sql = await renderedSql(ReceiptsSummaryGroupBy.DAY);
     expect(sql).toMatch(/ORDER BY to_char\(.*'YYYY-MM-DD'\) ASC/);
