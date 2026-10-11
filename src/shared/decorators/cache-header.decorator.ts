@@ -74,7 +74,12 @@ export interface CacheHeaderOptions {
 }
 
 /**
- * Set Cache-Control headers with SWR support
+ * Opt a GET route in to browser (and, if public, CDN) caching.
+ *
+ * Without this decorator a GET is sent `private, no-cache`: the browser always
+ * revalidates and never paints a stale body. Add it only to a route whose data
+ * may be shown out of date for the declared window — never to a per-tenant or
+ * money-bearing read that the console refetches after a write.
  * @param options - Cache header configuration
  * @example
  * ```typescript
