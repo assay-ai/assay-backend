@@ -65,7 +65,7 @@ import {
   MCP_VOIDED_REASON,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
-import { McpSession } from '../ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '../ports/mcp-session.port';
 import { McpCatalogueService } from './mcp-catalogue.service';
 import { MCP_PRICING, McpPricingConfig } from './mcp-pricing.config';
 
@@ -281,6 +281,8 @@ export class McpToolCallService {
       organizationId: session.organizationId,
       agentId: session.agentId,
       agentAccount: session.agentAccount,
+      // Which of the agent's credentials paid — two credentials are two keys.
+      credentialId: credentialOf(session),
       // No provider yet, and none can be named: the router picks one below and
       // failover may change it. Nor the payout account, nor the binding, for
       // exactly the same reason and at exactly the same grain. All three are
@@ -465,6 +467,7 @@ export class McpToolCallService {
         platformFee: this.platformFee(price),
         chainId: session.chainId,
         boundDelegate: session.delegateAccount ?? null,
+        credentialId: credentialOf(session),
         // The same read as the withdraw gate above: the escrow's own limits
         // bind this voucher at redemption, so they are applied before serving.
         escrow: reading,
@@ -1531,4 +1534,13 @@ export function delegationHint(session: McpSession): string {
 
 function namespaceOf(chainId: ChainId): string {
   return chainId.split(':')[0];
+}
+
+/**
+ * The agent credential behind the session (`agent_credentials.id`), or null
+ * for a person's or a config session, whose `credentialId` names no stored
+ * credential.
+ */
+function credentialOf(session: McpSession): string | null {
+  return session.callerKind === McpCallerKind.AGENT ? session.credentialId : null;
 }

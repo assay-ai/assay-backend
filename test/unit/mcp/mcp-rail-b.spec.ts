@@ -11,7 +11,7 @@ import {
   X402_RECEIPT,
   X402_VOUCHER,
 } from '@modules/mcp/constants/mcp.constants';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
   McpFailureCode,
   VoucherRequirement,
@@ -195,6 +195,29 @@ describe('rail B over MCP', () => {
       });
       expect(h.ledger.events[0]).toMatchObject({ kind: 'HOLD_CREATE', money: PRICE });
       expect(h.invoker.providerIds).toEqual(['provider-a']);
+    });
+
+    it('records which agent credential paid, and none for a config session (U02)', async () => {
+      const h = harness();
+      const agentSession: McpSession = {
+        ...RAIL_B_SESSION,
+        callerKind: McpCallerKind.AGENT,
+        credentialId: '0f5e7c2a-8d3b-4c1e-9a6f-2b7d4e8c1a90',
+      };
+      const requirement = await (async () => {
+        const outcome = await h.calls.call(agentSession, TOOL_NAME, ARGS, {
+          rail: PaymentRail.RAIL_B_VOUCHER,
+          voucher: null,
+        });
+        if (outcome.kind !== 'ERROR') throw new Error('expected a payment requirement');
+        return outcome.detail.paymentRequired as VoucherRequirement;
+      })();
+      await h.calls.call(agentSession, TOOL_NAME, ARGS, paying(requirement));
+      expect(h.intents.only.credentialId).toBe('0f5e7c2a-8d3b-4c1e-9a6f-2b7d4e8c1a90');
+
+      const config = harness();
+      await config.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(await requirementOf(config)));
+      expect(config.intents.only.credentialId ?? null).toBeNull();
     });
 
     it('is still a charge the spend policy sees, against the voucher request hash', async () => {

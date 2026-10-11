@@ -213,6 +213,8 @@ export class FakeIntents {
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,
       voucherIssuedAt: input.voucherIssuedAt ?? null,
+      voucherDelegate: input.voucherDelegate ?? null,
+      credentialId: input.credentialId ?? null,
       holdId: null,
       holdReleasedAt: null,
       classification: null,

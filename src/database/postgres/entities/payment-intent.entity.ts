@@ -242,6 +242,15 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   @Column({ name: 'voucher_delegate', type: 'varchar', length: 256, nullable: true })
   voucherDelegate: string | null;
 
+  /**
+   * The agent credential that made the call, when the caller had one (the MCP
+   * path). Several credentials of one agent are several delegate keys, so
+   * spend is split by it as well as by agent. Null on rows written before the
+   * column, and on paths with no credential.
+   */
+  @Column({ name: 'credential_id', type: 'uuid', nullable: true })
+  credentialId: string | null;
+
   /** The ledger hold reserving `price_amount`, opened at `FUNDS_SECURED`. */
   @Column({ name: 'hold_id', type: 'uuid', nullable: true })
   holdId: string | null;

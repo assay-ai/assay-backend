@@ -1,5 +1,6 @@
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
+import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
 import { randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { Redis } from 'ioredis';
@@ -117,6 +118,7 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
       // (agent payment delegation).
       VoucherDelegate1759600000000,
       VoucherAdmissionIndex1759600000003,
+      PaymentIntentCredential1759600000004,
     ],
     synchronize: false,
     logging: process.env.ESCROW_SEQ_TEST_LOGGING === 'true',

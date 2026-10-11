@@ -1,5 +1,6 @@
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
+import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
@@ -189,6 +190,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // (agent payment delegation).
       VoucherDelegate1759600000000,
       VoucherAdmissionIndex1759600000003,
+      PaymentIntentCredential1759600000004,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',
