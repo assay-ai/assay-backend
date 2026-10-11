@@ -309,9 +309,10 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
       });
     }
 
-    const [escrow, chainSeconds] = await Promise.all([
+    const [escrow, chainSeconds, current] = await Promise.all([
       this.readEscrow(chainId, deployment, payer),
       this.chainSeconds(chainId),
+      this.readDelegation(chainId, deployment, payer, delegate),
     ]);
     if (
       maxVoucherAmount > (escrow.maxVoucherAmount ?? 0n) ||
@@ -331,6 +332,21 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
         reason:
           'DelegateValidUntilInvalid — validUntil must be in the future and at most ' +
           `${EVM_CONSTANTS.MAX_DELEGATION_LIFETIME_SECONDS / 86_400} days out`,
+      });
+    }
+
+    // Re-authorising a standing grant UPDATES it (`DelegateUpdated`, the
+    // window counter kept) — the "Edit limits" path (BUG-D1-04). The one
+    // re-authorisation the chain refuses is an identical one.
+    if (
+      current.listPosition !== 0 &&
+      !current.revoked &&
+      current.maxVoucherAmount === maxVoucherAmount &&
+      current.maxPerWindow === maxPerWindow &&
+      current.validUntil === validUntil
+    ) {
+      throw SettlementErrors.delegationInvalid({
+        reason: 'DelegationUnchanged — this key already holds exactly these caps and expiry',
       });
     }
 

@@ -91,7 +91,7 @@ const TERMS = {
 
 describe('agent payment delegation — the relayed EVM doors', () => {
   describe('EvmEscrowIntentBuilder.authorizeIntent', () => {
-    const builder = builderWith({ escrowOf: () => ARMED_ESCROW });
+    const builder = builderWith({ escrowOf: () => ARMED_ESCROW, delegationOf: () => NO_GRANT });
 
     it('issues AuthorizeDelegate at the escrow’s authNonce, on the chain’s clock, relayed', async () => {
       const tx = (await builder.authorizeIntent(PAYER_ACCOUNT, TERMS)) as Eip155TypedDataRequest;
@@ -171,11 +171,41 @@ describe('agent payment delegation — the relayed EVM doors', () => {
     it('refuses on an unarmed escrow, telling the payer to set limits first', async () => {
       const unarmed = builderWith({
         escrowOf: () => ({ ...ARMED_ESCROW, maxVoucherAmount: 0n, maxPerWindow: 0n }),
+        delegationOf: () => NO_GRANT,
       });
       await expect(unarmed.authorizeIntent(PAYER_ACCOUNT, TERMS)).rejects.toMatchObject({
         errorCode: 'SETTLEMENT_DELEGATION_INVALID',
         message: expect.stringContaining('set the escrow limits first'),
       });
+    });
+
+    /**
+     * "Edit limits" (BUG-D1-04) re-authorises the same key: the contract
+     * UPDATES a standing grant (`DelegateUpdated`, window counter kept) and
+     * refuses only an identical one (`DelegationUnchanged`), which is refused
+     * here first so the payer is not asked to sign it.
+     */
+    it('builds an update of a standing grant, and refuses an identical one', async () => {
+      const standing = {
+        ...NO_GRANT,
+        maxVoucherAmount: TERMS.maxVoucherAmount,
+        maxPerWindow: TERMS.maxPerWindow,
+        validUntil: TERMS.validUntil,
+        spentInWindow: 1_049_681n,
+        listPosition: 1,
+      };
+      const editing = builderWith({ escrowOf: () => ARMED_ESCROW, delegationOf: () => standing });
+
+      await expect(editing.authorizeIntent(PAYER_ACCOUNT, TERMS)).rejects.toMatchObject({
+        errorCode: 'SETTLEMENT_DELEGATION_INVALID',
+        message: expect.stringContaining('DelegationUnchanged'),
+      });
+      const tx = (await editing.authorizeIntent(PAYER_ACCOUNT, {
+        ...TERMS,
+        maxVoucherAmount: 50_000n,
+      })) as Eip155TypedDataRequest;
+      expect(tx.primaryType).toBe('AuthorizeDelegate');
+      expect(tx.message).toMatchObject({ maxVoucherAmount: 50_000n, nonce: 3n });
     });
   });
 
