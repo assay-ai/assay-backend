@@ -34,6 +34,7 @@ export enum AuthErrorCode {
   AUTH_WALLET_NOT_LINKED = 'AUTH_WALLET_NOT_LINKED',
   AUTH_PROVISIONING_FAILED = 'AUTH_PROVISIONING_FAILED',
   AUTH_IDENTITY_PROVIDER_UNAVAILABLE = 'AUTH_IDENTITY_PROVIDER_UNAVAILABLE',
+  AUTH_HUMAN_SESSION_REQUIRED = 'AUTH_HUMAN_SESSION_REQUIRED',
 }
 
 export type AuthErrorCodesArePrefixed = AssertDomainErrorCodes<'AUTH', `${AuthErrorCode}`>;
@@ -93,6 +94,21 @@ export const AuthErrors = createDomainErrorFactory('AUTH', {
    * than a 401 so that an outage at the identity provider reads as an outage
    * in the dashboard instead of as a credential-stuffing wave.
    */
+  /**
+   * A genuine agent machine credential on a route that changes the controls
+   * over that agent — its spend policy, its credentials, where its alerts go.
+   *
+   * 403, not 401: the credential is valid and re-authenticating with it will
+   * not help. The limits exist to bound the agent, so the agent holding the
+   * bearer token must not be able to lift them; a person signed in to the
+   * dashboard makes these changes.
+   */
+  humanSessionRequired: {
+    code: AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED,
+    statusCode: 403,
+    message: () => 'This change needs a signed-in user; an agent credential cannot make it',
+  },
+
   identityProviderUnavailable: {
     code: AuthErrorCode.AUTH_IDENTITY_PROVIDER_UNAVAILABLE,
     statusCode: 503,

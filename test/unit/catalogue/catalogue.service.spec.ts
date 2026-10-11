@@ -654,6 +654,27 @@ describe('GET /catalogue/tools', () => {
     }
   });
 
+  it('lists every other tool when one tool’s quote throws (BUG-J-BUY-05)', async () => {
+    // One tool's catalogue defect is that tool's alone. A single
+    // `Promise.all` turned it into a 500 for the whole shop.
+    const { service, router } = build({
+      bindings: [binding(), binding({ toolId: RATE.id })],
+    });
+    (router.quote as jest.Mock).mockImplementation(async (toolId: string) => {
+      if (toolId === RATE.id) throw new Error('catalogue defect');
+      return quote();
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools.find((tool) => tool.id === WEATHER.id)).toMatchObject({ routable: true });
+    expect(tools.find((tool) => tool.id === RATE.id)).toMatchObject({
+      routable: false,
+      price: null,
+      settlementChains: null,
+    });
+  });
+
   /** `quote()` does not consume a ceiling token, so browsing cannot exhaust a provider. */
   it('quotes each listed tool exactly once', async () => {
     const { service, router } = build({

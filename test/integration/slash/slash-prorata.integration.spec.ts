@@ -410,4 +410,40 @@ describe('pro-rata EVM slash, against a real database', () => {
     expect(after.map((part) => part.chainStatus)).toEqual(['EXECUTED', 'CANCELLED', 'CANCELLED']);
     for (const part of after.slice(1)) expect(chain.record(part.chainRequestId)?.status).toBe(3);
   });
+
+  // Re-review residual 2: a straggler given up while its tx was in flight is paid when it lands.
+  it('executes a REFUSED straggler whose record landed late, and the case records it', async () => {
+    const seeded = await seedWindow(250_001n);
+    await services.execution.proposeDue(nowOf());
+    const proposal = await load(seeded);
+    const parts = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    chain.now += BigInt(73 * 3600);
+
+    // The case executed while one part was given up on (its record landed later).
+    await dataSource.query(
+      `UPDATE slash_proposal_parts SET chain_status = 'REFUSED', chain_last_error = 'Straggler:transport'
+        WHERE id = $1`,
+      [parts[2].id],
+    );
+    expect((await services.execution.executeDue(nowOf())).executed).toBe(1);
+    expect((await load(seeded)).appliedAmount).toBe('200001');
+    expect(chain.record(parts[2].chainRequestId)?.status).toBe(1);
+
+    await services.execution.reconcileExecuting(nowOf());
+
+    const after = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    expect(after.map((part) => part.chainStatus)).toEqual(['EXECUTED', 'EXECUTED', 'EXECUTED']);
+    expect(chain.record(parts[2].chainRequestId)?.status).toBe(2);
+    expect(chain.balanceOf(C.split(':')[2])).toBe(30_000n);
+    expect(await load(seeded)).toMatchObject({ appliedAmount: '250001', platformAmount: '75000' });
+  });
 });

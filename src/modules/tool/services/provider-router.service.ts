@@ -53,6 +53,7 @@ import {
   StakeGateVerdict,
   WeightedCandidate,
   applyStakeGrace,
+  chooseSettlementChain,
   settleableChains,
   computeWeights,
   filterEligible,
@@ -408,18 +409,21 @@ export class ProviderRouterService {
 
     const weighted = computeWeights(scoreCandidates(eligible, this.config.weights));
 
+    // The union over the routable set, for the caller to render against the
+    // buyer's own chains. A quote is NOT filtered by them: a tool the
+    // buyer cannot pay for must be SHOWN, marked as settling elsewhere —
+    // hiding it makes the platform look like it lacks the tool.
+    const settlementChains = [
+      ...new Set(eligible.flatMap((candidate) => settleableChains(candidate, context))),
+    ];
+    const priced = pricedOnQuotedChain(eligible, settlementChains, context);
+
     return {
       tool,
-      price: dearestPrice(eligible),
-      pricingMode: quotedPricingMode(eligible),
+      price: dearestPrice(priced),
+      pricingMode: quotedPricingMode(priced),
       routableBindings: eligible.length,
-      // The union over the routable set, for the caller to render against the
-      // buyer's own chains. A quote is NOT filtered by them: a tool the
-      // buyer cannot pay for must be SHOWN, marked as settling elsewhere —
-      // hiding it makes the platform look like it lacks the tool.
-      settlementChains: [
-        ...new Set(eligible.flatMap((candidate) => settleableChains(candidate, context))),
-      ],
+      settlementChains,
       p95LatencyMs: weightedMean(weighted, (c) => c.provider.stats.p95LatencyMs),
       qualityRate: weightedMean(weighted, (c) =>
         c.binding.pricingMode === PricingMode.FREE
@@ -898,7 +902,11 @@ export interface RoutingAttempt {
  */
 export interface ToolQuote {
   readonly tool: Tool;
-  /** The dearest eligible binding's price — the worst case the agent is held for. */
+  /**
+   * The dearest price among the eligible bindings that settle on the chain
+   * this buyer's call would settle on — the worst case the agent is held for,
+   * in that chain's asset. See `pricedOnQuotedChain`.
+   */
   readonly price: Money | null;
   /** `FREE` only when every eligible binding is free; otherwise the paid mode. */
   readonly pricingMode: PricingMode | null;
@@ -1087,14 +1095,50 @@ function failedResponse(error: unknown): ProviderResponse {
 }
 
 /**
+ * The bindings a quote prices from: those that settle on the chain the
+ * buyer's own call would settle on.
+ *
+ * A tool sold on two chains is normally sold in two assets — USDC on Solana,
+ * USDG on an EVM chain — and those prices cannot be compared or merged. They
+ * do not need to be: a call settles on ONE chain, and `route()` narrows to
+ * that chain's bindings before it draws. So the quote picks that same chain
+ * with `chooseSettlementChain` (the buyer's default when a routable binding
+ * settles there, otherwise the first enabled chain that has one) and prices
+ * the worst case among the bindings that settle on it. A buyer on a chain the
+ * tool does not settle on is still quoted — the price of where it does settle
+ * — and `settlementChains` tells it so.
+ *
+ * Every eligible candidate has at least one settleable chain (`filterEligible`
+ * refuses one with none), so `settlementChains` is non-empty here; the guard
+ * keeps the function total rather than throwing from `chooseSettlementChain`.
+ */
+function pricedOnQuotedChain(
+  eligible: readonly RoutingCandidate[],
+  settlementChains: readonly ChainId[],
+  context: RoutingContext,
+): readonly RoutingCandidate[] {
+  if (settlementChains.length === 0) return eligible;
+
+  const chain = chooseSettlementChain(
+    settlementChains,
+    context.defaultChainId,
+    context.enabledChains,
+  );
+  return eligible.filter((candidate) => settleableChains(candidate, context).includes(chain));
+}
+
+/**
  * The dearest eligible binding, as `Money`.
  *
- * Every binding of one tool must be priced in one asset — comparing `"1000"` of
+ * Every binding a buyer on one chain could be charged by must be priced in one
+ * asset (bindings on different chains are separated beforehand by
+ * {@link pricedOnQuotedChain}) — comparing `"1000"` of
  * a 6-decimal stablecoin against `"1000"` of a 9-decimal token is not a
  * comparison, and converting between them needs an FX source the platform
- * deliberately does not have (`STAKE_ASSET_MISMATCH`). A mixed-asset
- * tool is a catalogue error, so it is refused rather than quoted from the
- * subset that happens to agree.
+ * deliberately does not have (`STAKE_ASSET_MISMATCH`). Two assets on ONE
+ * chain are a catalogue error, so they are refused rather than quoted from the
+ * subset that happens to agree — and the refusal is this tool's alone, because
+ * every catalogue caller quotes each tool in isolation.
  */
 function dearestPrice(eligible: readonly RoutingCandidate[]): Money {
   const first = eligible[0].binding;
@@ -1106,7 +1150,8 @@ function dearestPrice(eligible: readonly RoutingCandidate[]): Money {
         toolId: first.toolId,
         reason:
           `bindings are priced in more than one asset ` +
-          `(${first.assetId} and ${binding.assetId}); a tool has one price or none`,
+          `(${first.assetId} and ${binding.assetId}) on one settlement chain; ` +
+          `a tool has one price per chain or none`,
       });
     }
     if (BigInt(binding.priceAmount) > BigInt(dearest.priceAmount)) dearest = binding;
@@ -1297,14 +1342,16 @@ function dedupe(keys: readonly ProviderChainStakeKey[]): ProviderChainStakeKey[]
  * and is filtered out rather than compared, because "fund the other chain with
  * $0" is not an instruction.
  *
- * Every binding of one tool must be priced in one asset — `dearestPrice` above
- * refuses a mixed-asset tool outright — so the comparison here is between two
- * amounts of the same asset. It goes through `MoneyUtil`, which throws
- * `MONEY_ASSET_MISMATCH` rather than picking, so the day that stops being true
- * this fails loudly instead of returning the larger of two incomparable
- * numbers.
+ * A tool sold on several chains is normally priced in several assets (one per
+ * chain), and two amounts of different assets have no "larger". When the
+ * rejected bindings disagree on asset there is no single figure to quote, so
+ * the answer is `null` — the message still names the chains — rather than a
+ * number in one asset presented as covering bindings priced in another.
  */
 function dearestRejectedPrice(rejected: readonly Ineligible[]): Money | null {
+  const assets = new Set(rejected.map(({ candidate }) => candidate.binding.assetId));
+  if (assets.size > 1) return null;
+
   return rejected
     .map(({ candidate }) => candidate.binding)
     .filter(

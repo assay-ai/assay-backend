@@ -262,6 +262,18 @@ export interface SlashRecordSnapshot {
   readonly executedAt: Date | null;
   /** `null` unless the judgement was cancelled or expired. */
   readonly cancelledAt: Date | null;
+  /**
+   * The signed terms, where the chain's record keeps them (EVM does; the
+   * Solana snapshot leaves them absent). What `slashRecordMismatch` judges.
+   */
+  readonly beneficiary?: string;
+  /** 32-byte hex of the signed policy. */
+  readonly policy?: string;
+  readonly verifier?: string;
+  /** Whether `CONFIG.canSign(verifier)` holds now — the expiry door and rotation both read it. */
+  readonly verifierCanSign?: boolean;
+  /** This platform's own key, or one the chain still allows to sign. */
+  readonly verifierAccepted?: boolean;
 }
 
 /**

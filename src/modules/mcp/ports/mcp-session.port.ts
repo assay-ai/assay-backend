@@ -33,6 +33,32 @@ export interface McpSession {
 
   /** Human label for logs and the dashboard. Never authorisation. */
   readonly label: string | null;
+
+  /**
+   * What kind of credential this is — a person, or a machine acting for one.
+   *
+   * Set by the source that resolved the token and never read from the
+   * request. Every source maps to one session shape, so without this no route
+   * could tell a human's dashboard session from the agent's own bearer token,
+   * and an agent could rewrite the limits that exist to bound it. Routes that
+   * change those controls refuse {@link McpCallerKind.AGENT} with
+   * `HumanSessionGuard`.
+   */
+  readonly callerKind: McpCallerKind;
+}
+
+/** Who presented the credential behind an {@link McpSession}. */
+export enum McpCallerKind {
+  /** A Privy access token — a person signed in to the dashboard. */
+  HUMAN = 'HUMAN',
+  /** An agent machine credential (`x402_sk_live_…`, `agent_credentials`). */
+  AGENT = 'AGENT',
+  /**
+   * A token from `MCP_CREDENTIALS_FILE`. The config file stands in for the
+   * human login it predates — tests, local stacks and `yarn demo:seed` drive
+   * the dashboard with these — so it is treated as a human session.
+   */
+  CONFIG = 'CONFIG',
 }
 
 /**

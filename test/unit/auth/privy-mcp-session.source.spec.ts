@@ -1,3 +1,4 @@
+import { McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { AgentProvisioningService } from '@modules/auth/services/agent-provisioning.service';
 import { PrivyJwksCache } from '@modules/auth/services/privy-jwks.cache';
@@ -78,6 +79,8 @@ describe('PrivyMcpSessionSource — the token names an identity, the rows name e
       agentAccount: ACCOUNT,
       chainId: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
       label: 'dan@example.com',
+      // a Privy login is a person
+      callerKind: McpCallerKind.HUMAN,
     });
   });
 

@@ -21,7 +21,7 @@ import {
   PAYOUT_PROOF_MESSAGE_VERSION,
   STAKE_AUTHORITY_MESSAGE_VERSION,
 } from '@modules/chains/solana/solana.constants';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import {
   OnChainStake,
@@ -74,6 +74,7 @@ function session(overrides: Partial<McpSession> = {}): McpSession {
     agentAccount: `${SOLANA_MAINNET}:11111111111111111111111111111112` as AccountId,
     chainId: SOLANA_MAINNET,
     label: null,
+    callerKind: McpCallerKind.CONFIG,
     ...overrides,
   };
 }

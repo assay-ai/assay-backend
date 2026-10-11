@@ -1,3 +1,4 @@
+import { McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
@@ -128,6 +129,8 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
       agentAccount: ACCOUNT,
       chainId: CHAIN,
       label: 'ci-deploy',
+      // a machine credential is never a person (BUG-J-BUY-07)
+      callerKind: McpCallerKind.AGENT,
     });
   });
 

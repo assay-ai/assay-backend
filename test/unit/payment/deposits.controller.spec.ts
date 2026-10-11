@@ -1,7 +1,7 @@
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, ChainId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { PaymentRequirements } from '@modules/chains/ports/x402.types';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { DepositsController } from '@modules/payment/controllers/deposits.controller';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { DepositRequirementsBuilderPort } from '@modules/payment/ports/deposit-requirements.port';
@@ -50,6 +50,7 @@ function session(overrides?: Partial<McpSession>): McpSession {
     agentAccount: AGENT_ACCOUNT,
     chainId: SOLANA_DEVNET,
     label: 'buyer',
+    callerKind: McpCallerKind.CONFIG,
     ...overrides,
   };
 }

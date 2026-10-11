@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
@@ -23,7 +23,7 @@ import {
 } from '@modules/provider/ports/provider-stake.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { Tool } from '@modules/tool/ports/tool.types';
-import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
+import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
 
 import {
@@ -70,6 +70,8 @@ import {
  */
 @Injectable()
 export class CatalogueService {
+  private readonly logger = new Logger(CatalogueService.name);
+
   constructor(
     private readonly bindings: ToolBindingRepository,
     private readonly providers: ProviderRepository,
@@ -199,8 +201,26 @@ export class CatalogueService {
       // management. The refusal comes from the CALL path.
       withdrawingChains: [],
     };
+    // Each quote is isolated: one tool's failure (a catalogue defect in its
+    // bindings, a stake read that failed) shows that tool as unroutable, with
+    // the reason, and never takes the rest of the shop down with it.
     const quotes = await Promise.all(
-      listed.map((tool: Tool) => this.router.quote(tool.id, quoteContext)),
+      listed.map((tool: Tool) =>
+        this.router.quote(tool.id, quoteContext).catch((error: unknown): ToolQuote => {
+          const reason = error instanceof Error ? error.message : String(error);
+          this.logger.warn(`${tool.name} (${tool.id}): quote failed — ${reason}`);
+          return {
+            tool,
+            price: null,
+            pricingMode: null,
+            routableBindings: 0,
+            settlementChains: [],
+            p95LatencyMs: null,
+            qualityRate: null,
+            unroutableReason: reason,
+          };
+        }),
+      ),
     );
 
     const tools = listed.map((tool: Tool, index): CatalogueToolDto => {

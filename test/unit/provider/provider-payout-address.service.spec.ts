@@ -14,7 +14,7 @@ import { PayoutProofChallenge } from '@modules/chains/ports/payout-proof.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import { SolanaChainAdapter, SolanaRpcClient } from '@modules/chains/solana/solana-chain.adapter';
 import { PAYOUT_PROOF_MESSAGE_VERSION } from '@modules/chains/solana/solana.constants';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { ChainEnrolmentStatus } from '@modules/provider/ports/chain-enrolment.port';
 import { ProviderPayoutAddressService } from '@modules/provider/services/provider-payout-address.service';
@@ -42,6 +42,7 @@ function session(overrides: Partial<McpSession> = {}): McpSession {
     agentAccount: `${SOLANA_MAINNET}:11111111111111111111111111111112` as AccountId,
     chainId: SOLANA_MAINNET,
     label: null,
+    callerKind: McpCallerKind.CONFIG,
     ...overrides,
   };
 }

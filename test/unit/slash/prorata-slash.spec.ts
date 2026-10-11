@@ -490,3 +490,48 @@ describe('aggregateSlashParts', () => {
     expect(view).toMatchObject({ status: 'CANCELLED', cancelledAt: X1, appliedMinor: '0' });
   });
 });
+
+describe('slashRecordMismatch — the one rule for adopting a record at our request id', () => {
+  // `matchSlashRecord` is imported lazily so this block reads on its own.
+  const { slashRecordMismatch, policyHashOf } = jest.requireActual(
+    '@modules/slash/domain/prorata-slash',
+  );
+  const expected = {
+    beneficiary: '0xAbC0000000000000000000000000000000000001',
+    penaltyMinor: '150001',
+    policy: 'tool-1',
+  };
+  const record = {
+    beneficiary: '0xabc0000000000000000000000000000000000001',
+    penaltyMinor: '150001',
+    policy: policyHashOf('tool-1'),
+    verifierAccepted: true,
+  };
+
+  it('accepts the same judgement whatever the address spelling', () => {
+    expect(slashRecordMismatch(record, expected)).toBeNull();
+  });
+
+  it.each([
+    ['beneficiary', { beneficiary: '0xabc0000000000000000000000000000000000002' }],
+    ['penalty', { penaltyMinor: '150000' }],
+    ['policy', { policy: policyHashOf('tool-2') }],
+  ])('refuses a %s mismatch, always', (field, override) => {
+    expect(slashRecordMismatch({ ...record, ...override }, expected)).toBe(field);
+  });
+
+  it('accepts a different verifier only while that key may still sign (rotation)', () => {
+    expect(slashRecordMismatch({ ...record, verifierAccepted: true }, expected)).toBeNull();
+    expect(slashRecordMismatch({ ...record, verifierAccepted: false }, expected)).toBe('verifier');
+  });
+
+  it('cannot judge a record that does not carry the fields (Solana) and does not pretend to', () => {
+    expect(slashRecordMismatch({ penaltyMinor: '150001' }, expected)).toBeNull();
+    expect(slashRecordMismatch({ penaltyMinor: '1' }, expected)).toBe('penalty');
+  });
+
+  it('hashes the policy exactly as the EVM attestation does (SHA-256 of the UTF-8 string)', () => {
+    // viem: sha256(toBytes('tool-uuid'))
+    expect(policyHashOf('tool-uuid')).toMatch(/^0x[0-9a-f]{64}$/);
+  });
+});

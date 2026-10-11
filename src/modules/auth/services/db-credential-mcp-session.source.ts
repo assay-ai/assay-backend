@@ -6,7 +6,7 @@ import { AgentRepository } from '@database/postgres/repositories/agent.repositor
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { AGENT_CREDENTIAL_TOKEN_PREFIX } from '@modules/account/constants/agent-credential-token.constants';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
-import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 import { digestToken } from '@shared/crypto/token-digest';
 
 import { AuthErrors } from '../errors/auth.errors';
@@ -135,6 +135,7 @@ export class DbCredentialMcpSessionSource implements McpSessionPort {
       agentAccount: agent.primaryAccountId as AccountId,
       chainId: agent.chainId as ChainId,
       label: agent.label,
+      callerKind: McpCallerKind.AGENT,
     };
   }
 }

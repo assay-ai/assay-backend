@@ -376,7 +376,8 @@ describe('SlashPartsService.executeMany', () => {
     one.executor.executeFails.set(agent(1).split(':')[2], revert('SlashNotPending'));
     one.executor.records.set(one.parts.rows[0].chainRequestId, {
       status: 'EXECUTED',
-      penaltyMinor: '200',
+      // The part's own penalty (the case's 300 on one agent): the same judgement.
+      penaltyMinor: '300',
       appliedMinor: '200',
       agentAmountMinor: '120',
       platformAmountMinor: '60',
@@ -411,7 +412,7 @@ describe('review fixes — SlashPartsService', () => {
   it('re-reads slashRecordOf before marking a part REFUSED, and adopts what is there', async () => {
     const { service, proposal, executor, parts } = build([[agent(1), '200']]);
     executor.proposeFails.set(agent(1).split(':')[2], revert('PenaltyExceedsMaximum'));
-    executor.recordFor = (requestId) => (requestId ? pendingRecord('200') : null);
+    executor.recordFor = (requestId) => (requestId ? pendingRecord('300') : null);
 
     const result = await service.propose(proposal, '0xprovider');
 
@@ -496,11 +497,85 @@ describe('review fixes — SlashPartsService', () => {
       platformAmount: '60',
       executedAt: X0,
     });
-    executor.records.set(parts.rows[1].chainRequestId, pendingRecord('100'));
+    // Dead: its verifier key was revoked, so it can never execute — and that
+    // is exactly what makes expireSlash allowed now.
+    executor.records.set(parts.rows[1].chainRequestId, {
+      ...pendingRecord('100'),
+      verifierCanSign: false,
+    });
+    executor.executeFails.set(agent(2).split(':')[2], revert('VerifierRevoked'));
 
-    const swept = await service.sweepStrandedParts([{ proposal, provider: '0xprovider' }]);
+    const swept = await service.sweepStrandedParts([{ proposal, provider: '0xprovider' }], X0);
 
-    expect(swept).toEqual({ expired: 1, waiting: 0 });
+    expect(swept).toMatchObject({ expired: 1, waiting: 0 });
     expect(parts.rows[1].chainStatus).toBe('CANCELLED');
+  });
+
+  // Residual 1: one match rule for every record read back.
+  it('refuses to mirror a record at our request id whose terms differ', async () => {
+    const { service, proposal, executor, parts } = build([[agent(1), '200']]);
+    executor.proposeFails.set(agent(1).split(':')[2], new Error('rpc timeout'));
+    executor.recordFor = () => ({ ...pendingRecord('999'), beneficiary: agent(1).split(':')[2] });
+
+    await service.propose(proposal, '0xprovider', T0).catch(() => undefined);
+
+    expect(parts.rows[0].chainStatus).toBe('REFUSED');
+    expect(parts.rows[0].chainLastError).toBe('RecordMismatch:penalty');
+  });
+
+  // Residual 2: a straggler given up while its tx was in flight is executed when it lands.
+  it('executes a REFUSED straggler whose record landed later and is due', async () => {
+    const { service, proposal, executor, parts } = build([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    await service.propose(proposal, '0xprovider');
+    Object.assign(parts.rows[0], {
+      chainStatus: 'EXECUTED',
+      appliedAmount: '200',
+      agentAmount: '120',
+      platformAmount: '60',
+      executedAt: X0,
+    });
+    Object.assign(parts.rows[1], { chainStatus: 'REFUSED', chainLastError: 'Straggler:transport' });
+    executor.records.set(parts.rows[1].chainRequestId, {
+      ...pendingRecord('100'),
+      verifierCanSign: true,
+    });
+
+    const swept = await service.sweepStrandedParts([{ proposal, provider: '0xprovider' }], X0);
+
+    expect(swept).toMatchObject({ executed: 1, expired: 0 });
+    expect(parts.rows[1].chainStatus).toBe('EXECUTED');
+    expect(executor.expired).toHaveLength(0);
+  });
+
+  // Residual 4: no expireSlash before it can succeed, and no noise.
+  it('does not try to expire a pending part before the chain would allow it', async () => {
+    const { service, proposal, executor, parts } = build([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    await service.propose(proposal, '0xprovider');
+    Object.assign(parts.rows[0], {
+      chainStatus: 'EXECUTED',
+      appliedAmount: '200',
+      agentAmount: '120',
+      platformAmount: '60',
+      executedAt: X0,
+    });
+    // Live key, door not open yet: neither executable nor expirable.
+    executor.records.set(parts.rows[1].chainRequestId, {
+      ...pendingRecord('100'),
+      verifierCanSign: true,
+    });
+    const before = new Date(X0.getTime() - 3_600_000);
+
+    const swept = await service.sweepStrandedParts([{ proposal, provider: '0xprovider' }], before);
+
+    expect(swept).toMatchObject({ expired: 0, executed: 0, waiting: 1 });
+    expect(executor.expired).toHaveLength(0);
+    expect(executor.executeRequests).toHaveLength(0);
+    expect(parts.rows[1].chainLastError).toBeNull();
   });
 });
