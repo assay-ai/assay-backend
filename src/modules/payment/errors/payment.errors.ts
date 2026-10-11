@@ -64,6 +64,10 @@ export enum PaymentErrorCode {
   PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED = 'PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED',
   PAYMENT_VOUCHER_DELEGATE_NOT_BOUND = 'PAYMENT_VOUCHER_DELEGATE_NOT_BOUND',
   PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED = 'PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED',
+
+  // ── The payer's own on-chain escrow limits (`setLimits`), which bind every
+  //    voucher, delegate-signed or not.
+  PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED = 'PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED',
 }
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
@@ -134,6 +138,24 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     statusCode: 403,
     message: (context?: Record<string, any>) =>
       `This voucher exceeds what the payer authorised its delegate to spend` +
+      `${context?.limit ? ` (${context.limit}` : ''}` +
+      `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
+      `${context?.limit ? ')' : ''}; nothing was charged`,
+  },
+  /**
+   * A voucher the payer's OWN escrow limits would refuse at redemption: above
+   * the escrow's per-voucher limit, or beyond its rolling window once every
+   * voucher accepted and not yet on chain is counted. The escrow's limits bind
+   * a delegate on top of the delegate's own caps, and the payer's own key too.
+   * Refused before the call is served (BUG-D1-03): lowering the limit is the
+   * buyer's brake, and a served call the chain refuses is a provider working
+   * for nothing.
+   */
+  voucherEscrowLimitExceeded: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `This voucher exceeds the payer's own escrow limit` +
       `${context?.limit ? ` (${context.limit}` : ''}` +
       `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
       `${context?.limit ? ')' : ''}; nothing was charged`,

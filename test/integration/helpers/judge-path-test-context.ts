@@ -1,4 +1,5 @@
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
+import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
@@ -175,6 +176,7 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
       // `payment_intents.voucher_delegate`, which `PaymentIntentEntity` maps
       // (agent payment delegation).
       VoucherDelegate1759600000000,
+      VoucherAdmissionIndex1759600000003,
     ],
     synchronize: false,
     logging: false,

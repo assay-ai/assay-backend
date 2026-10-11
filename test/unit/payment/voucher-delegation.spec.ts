@@ -7,6 +7,7 @@ import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
+import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.port';
 import { computeRequestHash } from '@modules/payment/domain/request-hash';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
@@ -131,6 +132,7 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
       boundDelegate?: AccountId | null;
       expiresIn?: number;
       payerAccount?: AccountId;
+      escrow?: EscrowChainBalance | null;
     } = {},
   ): RedeemVoucherInput {
     const now = Math.floor(Date.now() / 1000);
@@ -176,6 +178,23 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
       platformFee: usdg(amount / 10n),
       chainId: CHAIN,
       boundDelegate: opts.boundDelegate === undefined ? delegate.account : opts.boundDelegate,
+      escrow: opts.escrow,
+    };
+  }
+
+  /** The payer's escrow as the MCP path reads it for the call (limits 1 / 10). */
+  function escrow(overrides: Partial<EscrowChainBalance> = {}): EscrowChainBalance {
+    return {
+      balance: usdg(100_000_000n),
+      seqHigh: 0n,
+      withdrawRequested: 0n,
+      withdrawAvailableAt: 0,
+      maxVoucherAmount: 1_000_000n,
+      maxPerWindow: 10_000_000n,
+      spentInWindow: 0n,
+      windowStartedAt: 0,
+      observedAt: new Date(),
+      ...overrides,
     };
   }
 
@@ -325,6 +344,77 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
       const lifted = { ...input(delegate), agentAccount: generateSigner(CHAIN).account };
       await rejects(service.redeem(lifted), PaymentErrorCode.PAYMENT_VOUCHER_BINDING_MISMATCH);
       expect(chain.delegationReads).toBe(0);
+    });
+  });
+
+  /**
+   * REGRESSION (BUG-D1-03). The escrow's own limits (`setLimits`) bind every
+   * voucher at redemption, on top of a delegate's caps. With the escrow at 0.05
+   * per voucher and the delegate at 0.5, a 0.10 voucher used to be SERVED and
+   * then refused by the chain (`VoucherExceedsPerCallLimit`) until the buyer
+   * raised the limit again.
+   */
+  describe('the escrow’s own limits bind on top of the delegate’s caps', () => {
+    it('refuses a delegate voucher above the escrow’s per-voucher limit, before serving', async () => {
+      chain.grant(payer.address, delegate.address, {
+        maxVoucherAmount: 500_000n,
+        maxPerWindow: 2_000_000n,
+      });
+      await rejects(
+        service.redeem(
+          input(delegate, { amount: 100_000n, escrow: escrow({ maxVoucherAmount: 50_000n }) }),
+        ),
+        PaymentErrorCode.PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED,
+      );
+      expect(intents.created).toHaveLength(0);
+      await expect(
+        service.redeem(
+          input(delegate, { amount: 50_000n, escrow: escrow({ maxVoucherAmount: 50_000n }) }),
+        ),
+      ).resolves.toBeDefined();
+    });
+
+    it('refuses the payer’s own voucher above the escrow’s per-voucher limit too', async () => {
+      await rejects(
+        service.redeem(
+          input(payer, { amount: 100_000n, escrow: escrow({ maxVoucherAmount: 50_000n }) }),
+        ),
+        PaymentErrorCode.PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED,
+      );
+    });
+
+    it('applies the escrow’s window: its decayed counter plus every voucher not yet on chain', async () => {
+      chain.grant(payer.address, delegate.address, { maxPerWindow: 10_000_000n });
+      const now = Math.floor(Date.now() / 1000);
+      // 0.6 on chain, anchored in the future of this clock so it does not decay.
+      const reading = escrow({
+        maxPerWindow: 1_000_000n,
+        spentInWindow: 600_000n,
+        windowStartedAt: now + 60,
+      });
+      await service.redeem(input(payer, { amount: 200_000n, escrow: reading }));
+      await rejects(
+        service.redeem(input(delegate, { amount: 200_001n, escrow: reading })),
+        PaymentErrorCode.PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED,
+      );
+      await expect(
+        service.redeem(input(delegate, { amount: 200_000n, escrow: reading })),
+      ).resolves.toBeDefined();
+    });
+
+    it('gives the window back when the funds could not be secured', async () => {
+      intents.failSecureWith = new Error('ledger said no');
+      await expect(
+        service.redeem(
+          input(payer, { amount: 1_000_000n, escrow: escrow({ maxPerWindow: 1_000_000n }) }),
+        ),
+      ).rejects.toThrow('ledger said no');
+      intents.failSecureWith = undefined;
+      await expect(
+        service.redeem(
+          input(payer, { amount: 1_000_000n, escrow: escrow({ maxPerWindow: 1_000_000n }) }),
+        ),
+      ).resolves.toBeDefined();
     });
   });
 

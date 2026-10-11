@@ -1,6 +1,7 @@
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
+import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.port';
 
 import { RequestCall } from '../domain/request-hash';
 
@@ -81,4 +82,14 @@ export interface RedeemVoucherInput {
    * proved possession of that key.
    */
   readonly boundDelegate?: AccountId | null;
+
+  /**
+   * The payer's escrow as the caller read it off the chain for THIS call, or
+   * null when no escrow is open. Its own limits (`maxVoucherAmount`,
+   * `maxPerWindow` and the window counter) bind every voucher at redemption,
+   * so they are applied before the call is served (BUG-D1-03); `observedAt` is
+   * what makes the window count exact (BUG-D1-02). Omitted, they are not
+   * pre-checked.
+   */
+  readonly escrow?: EscrowChainBalance | null;
 }

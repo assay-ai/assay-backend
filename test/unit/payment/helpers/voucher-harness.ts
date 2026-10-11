@@ -17,7 +17,10 @@ import {
 } from '@modules/payment/ports/payment.types';
 import { RedeemVoucherInput, SignedVoucher } from '@modules/payment/ports/voucher.types';
 import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
-import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
+import {
+  PaymentIntentService,
+  VoucherAdmission,
+} from '@modules/payment/services/payment-intent.service';
 import { VoucherService } from '@modules/payment/services/voucher.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -163,22 +166,46 @@ export class InMemoryIntentWriter {
     return this.seqKeys.has(`${account}#${seq}`);
   }
 
-  /** Every intent this fake created is holding money: none has been redeemed. */
-  async sumOpenDelegateVouchers(payer: string, delegate: string, assetId: string): Promise<bigint> {
-    return this.created
-      .filter(
-        (intent) =>
-          intent.agentAccount === payer &&
-          intent.voucherDelegate === delegate &&
-          intent.price.asset === assetId,
-      )
-      .reduce((total, intent) => total + BigInt(intent.price.amount), 0n);
+  /** Intents `abandonUnsecuredVoucher` took out of the window count. */
+  readonly abandoned = new Set<string>();
+
+  /**
+   * Every intent this fake created and did not abandon is holding money: none
+   * has been redeemed. The admission runs synchronously with the push below,
+   * as the real one runs under the payer's lock with the insert.
+   */
+  private openTotals(scope: VoucherAdmission['scope']): { escrow: bigint; delegate: bigint } {
+    const open = this.created.filter(
+      (intent) =>
+        intent.agentAccount === scope.payer &&
+        intent.price.asset === scope.assetId &&
+        !this.abandoned.has(intent.id),
+    );
+    const sum = (rows: PaymentIntent[]) =>
+      rows.reduce((total, intent) => total + BigInt(intent.price.amount), 0n);
+    return {
+      escrow: sum(open),
+      delegate:
+        scope.delegate === null
+          ? 0n
+          : sum(open.filter((intent) => intent.voucherDelegate === scope.delegate)),
+    };
   }
 
-  async create(input: CreatePaymentIntentInput): Promise<PaymentIntent> {
+  async abandonUnsecuredVoucher(_organizationId: string, intentId: string): Promise<void> {
+    this.abandoned.add(intentId);
+  }
+
+  async create(
+    input: CreatePaymentIntentInput,
+    admission?: VoucherAdmission,
+  ): Promise<PaymentIntent> {
     this.createAttempts += 1;
     if (this.failInsertWith) {
       throw this.failInsertWith;
+    }
+    if (admission) {
+      admission.admit(this.openTotals(admission.scope));
     }
 
     // No `await` between the check and the claim — see the class comment on
