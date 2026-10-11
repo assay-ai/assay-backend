@@ -289,11 +289,28 @@ export interface OpenVoucherTotals {
   /** The signing delegate's vouchers only: what the delegate's window does not know. */
   readonly delegate: bigint;
   /**
-   * Set while a change that tightens the payer's caps is being relayed
-   * (BUG-D1-07): no voucher is admitted until then. See
+   * Set while a change that tightens caps this voucher is redeemed under is
+   * being relayed, or landed too recently for this admission's chain read to
+   * have seen it (BUG-D1-07): no voucher is admitted then. The seconds until a
+   * retry can pass, on the database's clock. See
    * {@link PaymentIntentRepository.holdVoucherAdmission}.
    */
-  readonly pausedUntil?: Date | null;
+  readonly pausedFor?: number | null;
+}
+
+/** What {@link PaymentIntentRepository.holdVoucherAdmission} pauses, and for how long. */
+export interface VoucherAdmissionHold {
+  readonly payer: string;
+  /**
+   * The delegate whose grant is changed: only its vouchers are paused, since a
+   * change to its grant cannot strand any other signer's. `null` for a change
+   * of the escrow's own limits, which pauses every voucher of the payer.
+   */
+  readonly delegate: string | null;
+  /** The pause lasts at least this long from now (the database's clock). */
+  readonly holdSeconds: number;
+  /** ...and never ends before this instant (unix seconds), e.g. the signed request's deadline. */
+  readonly notBeforeEpochSeconds?: number | null;
 }
 
 /** Whose not-yet-redeemed vouchers {@link PaymentIntentRepository.unsettledVouchers} counts. */
@@ -341,6 +358,9 @@ const UNSETTLED_VOUCHER_SQL =
  * A rail-B intent the chain's window counter cannot contain yet, given the
  * instant (`$n`) the counter was read. See `insertAdmittedVoucherIntent`.
  */
+/** The earlier of two instants. */
+const earliest = (a: Date, b: Date): Date => (a.getTime() <= b.getTime() ? a : b);
+
 const OPEN_VOUCHER_SQL = (since: string): string =>
   `(("status" = 'CREATED' AND "hold_id" IS NULL AND "expires_at" > now())` +
   ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "status" IN (` +
@@ -669,15 +689,28 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
           scope.delegateSince ?? scope.escrowSince,
         ],
       )) as Array<{ escrow: string; delegate: string }>;
+      // Any live pause over this voucher (BUG-D1-07): one per tightening, the
+      // payer's own (`delegate IS NULL`) or this delegate's. Live while its
+      // relay is pending, and after it landed for as long as this admission's
+      // chain read (`$4`, already lagged) predates the landing — the read saw
+      // the OLD caps, however late this insert comes.
       const [pause] = (await manager.query(
-        `SELECT "paused_until" FROM "voucher_admission_pauses"
-          WHERE "payer_account" = $1 AND "paused_until" > now()`,
-        [scope.payer],
-      )) as Array<{ paused_until: Date }>;
+        `SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM (MAX("paused_until") - now()))))::int AS "paused_for"
+           FROM "voucher_admission_pauses"
+          WHERE "payer_account" = $1
+            AND ("delegate" IS NULL OR ($2::text IS NOT NULL AND lower("delegate") = lower($2::text)))
+            AND ("paused_until" > now() OR ("landed_at" IS NOT NULL AND "landed_at" > $3::timestamptz))
+         HAVING COUNT(*) > 0`,
+        [
+          scope.payer,
+          scope.delegate,
+          earliest(scope.escrowSince, scope.delegateSince ?? scope.escrowSince),
+        ],
+      )) as Array<{ paused_for: number }>;
       admit({
         escrow: BigInt(totals?.escrow ?? '0'),
         delegate: scope.delegate === null ? 0n : BigInt(totals?.delegate ?? '0'),
-        pausedUntil: pause ? new Date(pause.paused_until) : null,
+        pausedFor: pause ? Number(pause.paused_for) : null,
       });
       await manager.insert(PaymentIntentEntity, row);
     });
@@ -694,51 +727,89 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * Pauses the payer's rail-B admission until `until` and reads what is still
-   * unsettled, in one transaction under the payer's admission lock
-   * (BUG-D1-07).
+   * Takes ONE pause on the payer's rail-B admission (or one delegate's) and
+   * reads what is still unsettled, in one transaction under the payer's
+   * admission lock (BUG-D1-07). Returns the pause's id, which only its own
+   * relay ends ({@link landVoucherAdmissionPause},
+   * {@link releaseVoucherAdmissionPause}).
    *
    * A voucher admission either committed before this (and is in the totals
    * returned) or runs after it (and sees the pause and is refused): there is no
    * third case, because both take `voucher-admission:<payer>`. So a caller that
    * checks the totals, then relays a change that tightens the caps, cannot
-   * strand a voucher admitted in between under the old caps. `paused_until`
-   * only moves later here; {@link resumeVoucherAdmission} sets it.
+   * strand a voucher admitted in between under the old caps. Two tightenings of
+   * one payer hold two rows: neither can end the other's.
+   *
+   * Every instant is the database's clock, the same one the admission compares
+   * it with.
    */
   async holdVoucherAdmission(
-    payer: string,
-    until: Date,
+    hold: VoucherAdmissionHold,
     scopes: readonly UnsettledVoucherScope[],
-  ): Promise<UnsettledVoucherTotals[]> {
+  ): Promise<{ pauseId: string; totals: UnsettledVoucherTotals[] }> {
     return this.manager.transaction(async (manager) => {
       await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
-        `voucher-admission:${payer}`,
+        `voucher-admission:${hold.payer}`,
       ]);
+      // Old rows are inert; tidy them up while the lock is held anyway.
       await manager.query(
-        `INSERT INTO "voucher_admission_pauses" ("payer_account", "paused_until", "updated_at")
-         VALUES ($1, $2, now())
-         ON CONFLICT ("payer_account") DO UPDATE
-           SET "paused_until" = GREATEST("voucher_admission_pauses"."paused_until", EXCLUDED."paused_until"),
-               "updated_at" = now()`,
-        [payer, until],
+        `DELETE FROM "voucher_admission_pauses"
+          WHERE "payer_account" = $1 AND "paused_until" < now() - interval '1 hour'`,
+        [hold.payer],
       );
+      const [row] = (await manager.query(
+        `INSERT INTO "voucher_admission_pauses" ("payer_account", "delegate", "paused_until")
+         VALUES ($1, $2, GREATEST(now() + make_interval(secs => $3::double precision),
+                                  COALESCE(to_timestamp($4::double precision), '-infinity'::timestamptz)))
+         RETURNING "id"`,
+        [hold.payer, hold.delegate, hold.holdSeconds, hold.notBeforeEpochSeconds ?? null],
+      )) as Array<{ id: string }>;
       const totals: UnsettledVoucherTotals[] = [];
       for (const scope of scopes) totals.push(await readUnsettledVouchers(manager, scope));
-      return totals;
+      return { pauseId: row.id, totals };
     });
   }
 
   /**
-   * Sets when the payer's admission pause ends: now, to lift it, or a short
-   * margin after a tightening landed, so a voucher whose chain read predates
-   * the landing is not admitted against the old caps.
+   * The pause's relay landed: it ends `settleSeconds` from now, and any
+   * admission whose chain read predates the landing (by the admission's own
+   * lag margin) stays refused — see {@link insertAdmittedVoucherIntent}.
    */
-  async resumeVoucherAdmission(payer: string, at: Date): Promise<void> {
+  async landVoucherAdmissionPause(pauseId: string, settleSeconds: number): Promise<void> {
     await this.manager.query(
-      `UPDATE "voucher_admission_pauses" SET "paused_until" = $2, "updated_at" = now()
-        WHERE "payer_account" = $1`,
-      [payer, at],
+      `UPDATE "voucher_admission_pauses"
+          SET "landed_at" = now(), "paused_until" = now() + make_interval(secs => $2::double precision)
+        WHERE "id" = $1`,
+      [pauseId, settleSeconds],
     );
+  }
+
+  /** The pause's relay was refused by name: nothing landed, so its pause goes now. */
+  async releaseVoucherAdmissionPause(pauseId: string): Promise<void> {
+    await this.manager.query(`DELETE FROM "voucher_admission_pauses" WHERE "id" = $1`, [pauseId]);
+  }
+
+  /**
+   * Throws unless `voucher_admission_pauses` has its per-request shape
+   * (migration `VoucherAdmissionPausePerRequest1759600000006`). Every locked
+   * voucher admission reads it, so an API started before the migration would
+   * refuse every rail-B payment with a SQL error; this says so at boot instead.
+   * A database with no `payment_intents` at all (nothing migrated, nothing to
+   * admit against) is not this case and is left alone.
+   */
+  async assertAdmissionPauseSchema(): Promise<void> {
+    const [row] = (await this.manager.query(
+      `SELECT to_regclass('payment_intents') IS NOT NULL AS "intents",
+              (SELECT COUNT(*)::int FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'voucher_admission_pauses'
+                  AND column_name IN ('id', 'delegate', 'landed_at')) AS "columns"`,
+    )) as Array<{ intents: boolean; columns: number }>;
+    if (row?.intents && Number(row.columns) !== 3) {
+      throw new Error(
+        'voucher_admission_pauses is missing or has its old shape: run the migrations ' +
+          '(VoucherAdmissionPausePerRequest1759600000006) before starting the API',
+      );
+    }
   }
 
   /**

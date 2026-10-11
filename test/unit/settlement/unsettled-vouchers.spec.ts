@@ -6,10 +6,15 @@ import {
   strandedBy,
   UnsettledVouchers,
 } from '@modules/settlement/domain/unsettled-vouchers';
+import { VOUCHER_ADMISSION_CHAIN_LAG_MS } from '@modules/payment/constants/voucher.constants';
 import {
-  TIGHTENING_ADMISSION_HOLD_MS,
+  tighteningHoldMs,
   TIGHTENING_ADMISSION_SETTLE_MS,
 } from '@modules/settlement/services/unsettled-voucher-guard.service';
+import {
+  DEFAULT_EVM_RELAYER_TIMING,
+  relayedSendBudgetMs,
+} from '@modules/chains/evm/evm-relayer-timing';
 
 import { guardOver } from './helpers/unsettled-guard';
 
@@ -123,6 +128,20 @@ describe('UnsettledVoucherGuard', () => {
     ).not.toThrow();
   });
 
+  /** The signed request's deadline: chain now + 300 s, as the intent builder sets it. */
+  const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 300);
+  const holdOf = (repository: ReturnType<typeof guardOver>['repository'], call = 0) =>
+    (
+      repository.holdVoucherAdmission.mock.calls[call] as unknown as [
+        {
+          payer: string;
+          delegate: string | null;
+          holdSeconds: number;
+          notBeforeEpochSeconds: number;
+        },
+      ]
+    )[0];
+
   it('relays a stranding change only when acknowledged, and pauses admission around it', async () => {
     const { guard, repository } = guardOver(totals);
     const relay = jest.fn(async () => 'landed');
@@ -132,79 +151,189 @@ describe('UnsettledVoucherGuard', () => {
         scope,
         lowered: { maxPerWindow: 2_000_000n },
         acknowledged: false,
+        deadline: deadline(),
         relay,
       }),
     ).rejects.toMatchObject({ errorCode: 'SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK' });
     expect(relay).not.toHaveBeenCalled();
-    // The pause was taken for the check and lifted at once: nothing landed.
+    // The pause was taken for the check and released at once: nothing landed.
     expect(repository.holdVoucherAdmission).toHaveBeenCalledTimes(1);
-    const [, liftedAt] = repository.resumeVoucherAdmission.mock.calls[0] as unknown as [
-      string,
-      Date,
-    ];
-    expect(liftedAt.getTime()).toBeLessThanOrEqual(Date.now());
+    expect(repository.releaseVoucherAdmissionPause).toHaveBeenCalledWith('pause-1');
 
-    const before = Date.now();
     await expect(
       guard.relayTightening({
         scope,
         lowered: { maxPerWindow: 2_000_000n },
         acknowledged: true,
+        deadline: deadline(),
         relay,
       }),
     ).resolves.toBe('landed');
-    const [payer, until] = repository.holdVoucherAdmission.mock.calls[1] as unknown as [
-      string,
-      Date,
-    ];
-    expect(payer).toBe(PAYER);
-    expect(until.getTime()).toBeGreaterThanOrEqual(before + TIGHTENING_ADMISSION_HOLD_MS);
-    // After landing the pause runs a little longer, for reads taken before it.
-    const [, resumeAt] = repository.resumeVoucherAdmission.mock.calls[1] as unknown as [
-      string,
-      Date,
-    ];
-    expect(resumeAt.getTime()).toBeGreaterThanOrEqual(before + TIGHTENING_ADMISSION_SETTLE_MS);
+    expect(holdOf(repository, 1).payer).toBe(PAYER);
+    // After landing the pause runs on for the chain-lag margin, on the DB clock.
+    expect(repository.landVoucherAdmissionPause).toHaveBeenCalledWith(
+      'pause-2',
+      TIGHTENING_ADMISSION_SETTLE_MS / 1000,
+    );
   });
 
-  it('leaves the pause to run out when the relay ended without a definite answer', async () => {
+  /**
+   * REGRESSION (review finding 1): a second request of the same payer, refused
+   * by name, used to end the FIRST one's pause while it was still in flight.
+   * Each request now ends only its own pause.
+   */
+  it('a refused second tightening ends only its own pause, never the one still in flight', async () => {
+    const { guard, repository } = guardOver(totals);
+    let land!: () => void;
+    const first = guard.relayTightening({
+      scope,
+      lowered: { maxPerWindow: 2_000_000n },
+      acknowledged: true,
+      deadline: deadline(),
+      relay: () => new Promise<string>((resolve) => (land = () => resolve('landed'))),
+    });
+    await new Promise((resolve) => setImmediate(resolve));
+
+    await expect(
+      guard.relayTightening({
+        scope,
+        lowered: { maxPerWindow: 1_000_000n },
+        acknowledged: true,
+        deadline: deadline(),
+        relay: async () => {
+          throw Object.assign(new Error('rate limited'), {
+            errorCode: 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED',
+          });
+        },
+      }),
+    ).rejects.toThrow('rate limited');
+    expect(repository.releaseVoucherAdmissionPause.mock.calls).toEqual([['pause-2']]);
+    expect(repository.landVoucherAdmissionPause).not.toHaveBeenCalled();
+
+    land();
+    await first;
+    expect(repository.landVoucherAdmissionPause.mock.calls).toEqual([
+      ['pause-1', TIGHTENING_ADMISSION_SETTLE_MS / 1000],
+    ]);
+    expect(repository.releaseVoucherAdmissionPause).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * REGRESSION (review finding 2): the pause was a fixed 120 s, shorter than
+   * the relayer's own receipt timeout (180 s) plus its queue. It now lasts at
+   * least the relayer's whole send budget from config, and never ends before
+   * the signed request's deadline.
+   */
+  it('holds the pause for the relayer’s whole send budget from config, and until the deadline', async () => {
+    const { guard, repository } = guardOver(totals, {
+      EVM_RELAYER_RECEIPT_TIMEOUT_MS: '200000',
+      EVM_RELAYER_MAX_QUEUE_WAIT_MS: '90000',
+    });
+    const signedDeadline = deadline();
+    await guard.relayTightening({
+      scope,
+      lowered: { maxPerWindow: 2_000_000n },
+      acknowledged: true,
+      deadline: signedDeadline,
+      relay: async () => 'landed',
+    });
+    const hold = holdOf(repository);
+    expect(hold.holdSeconds * 1000).toBeGreaterThanOrEqual(200_000 + 90_000);
+    expect(hold.holdSeconds * 1000).toBe(
+      tighteningHoldMs({ receiptTimeoutMs: 200_000, maxQueueWaitMs: 90_000 }),
+    );
+    expect(hold.notBeforeEpochSeconds).toBe(
+      Number(signedDeadline) + VOUCHER_ADMISSION_CHAIN_LAG_MS / 1000,
+    );
+    // With no config, viem's 180 s receipt timeout plus the default queue bound.
+    expect(tighteningHoldMs(DEFAULT_EVM_RELAYER_TIMING)).toBeGreaterThan(
+      relayedSendBudgetMs(DEFAULT_EVM_RELAYER_TIMING),
+    );
+    expect(relayedSendBudgetMs(DEFAULT_EVM_RELAYER_TIMING)).toBeGreaterThanOrEqual(180_000);
+  });
+
+  /** REGRESSION (review finding 3): 15 s after landing was shorter than the 30 s chain lag. */
+  it('keeps admission paused for at least the admission’s chain-lag margin after landing', () => {
+    expect(TIGHTENING_ADMISSION_SETTLE_MS).toBeGreaterThanOrEqual(VOUCHER_ADMISSION_CHAIN_LAG_MS);
+  });
+
+  /** Review finding 6: a delegate's change pauses that delegate only; the escrow's, the payer. */
+  it('pauses only the delegate for a change of its grant, and the whole payer for the escrow', async () => {
+    const { guard, repository } = guardOver(totals);
+    const relay = async () => 'landed';
+    await guard.relayTightening({
+      scope,
+      lowered: { revoked: true },
+      acknowledged: true,
+      deadline: deadline(),
+      relay,
+    });
+    await guard.relayTightening({
+      scope: { ...scope, delegate: null },
+      lowered: { maxPerWindow: 1n },
+      acknowledged: true,
+      deadline: deadline(),
+      relay,
+    });
+    expect(holdOf(repository, 0).delegate).toBe(DELEGATE);
+    expect(holdOf(repository, 1).delegate).toBeNull();
+  });
+
+  it('leaves the pause to run its full length when the relay ended without a definite answer', async () => {
     const { guard, repository } = guardOver(totals);
     await expect(
       guard.relayTightening({
         scope,
         lowered: { revoked: true },
         acknowledged: true,
+        deadline: deadline(),
         relay: async () => {
           throw new Error('receipt timeout');
         },
       }),
     ).rejects.toThrow('receipt timeout');
-    expect(repository.resumeVoucherAdmission).not.toHaveBeenCalled();
+    expect(repository.landVoucherAdmissionPause).not.toHaveBeenCalled();
+    expect(repository.releaseVoucherAdmissionPause).not.toHaveBeenCalled();
   });
 
-  it('lifts the pause at once when the relay refused by name', async () => {
-    const { guard, repository } = guardOver(totals);
-    const refused = Object.assign(new Error('BadNonce'), {
-      errorCode: 'SETTLEMENT_RELAYED_INTENT_REFUSED',
-    });
-    await expect(
-      guard.relayTightening({
-        scope,
-        lowered: { revoked: true },
-        acknowledged: true,
-        relay: async () => {
-          throw refused;
-        },
-      }),
-    ).rejects.toBe(refused);
-    expect(repository.resumeVoucherAdmission).toHaveBeenCalledTimes(1);
-  });
+  it.each(['SETTLEMENT_RELAYED_INTENT_REFUSED', 'CHAIN_RELAY_NOT_SENT'])(
+    'releases the pause at once when the relay ended %s (nothing landed)',
+    async (errorCode) => {
+      const { guard, repository } = guardOver(totals);
+      const refused = Object.assign(new Error(errorCode), { errorCode });
+      await expect(
+        guard.relayTightening({
+          scope,
+          lowered: { revoked: true },
+          acknowledged: true,
+          deadline: deadline(),
+          relay: async () => {
+            throw refused;
+          },
+        }),
+      ).rejects.toBe(refused);
+      expect(repository.releaseVoucherAdmissionPause).toHaveBeenCalledWith('pause-1');
+    },
+  );
 
   it('relays a change that lowers nothing without pausing anyone', async () => {
     const { guard, repository } = guardOver(totals);
     await expect(
-      guard.relayTightening({ scope, lowered: {}, acknowledged: false, relay: async () => 'ok' }),
+      guard.relayTightening({
+        scope,
+        lowered: {},
+        acknowledged: false,
+        deadline: deadline(),
+        relay: async () => 'ok',
+      }),
     ).resolves.toBe('ok');
     expect(repository.holdVoucherAdmission).not.toHaveBeenCalled();
+  });
+
+  /** Review finding 13: an API started before the migration would refuse every voucher. */
+  it('checks the pause table’s shape at boot', async () => {
+    const { guard, repository } = guardOver(totals);
+    repository.assertAdmissionPauseSchema.mockRejectedValueOnce(new Error('run the migrations'));
+    await expect(guard.onApplicationBootstrap()).rejects.toThrow('run the migrations');
   });
 });

@@ -13,7 +13,7 @@ import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { AppError } from '@shared/errors/app-errors';
 import { BaseError } from '@shared/errors/base.error';
 
-import { PaymentErrors } from '@modules/payment/errors/payment.errors';
+import { PaymentErrorCode, PaymentErrors } from '@modules/payment/errors/payment.errors';
 import { PaymentRail } from '@modules/payment/ports/payment.types';
 
 import {
@@ -303,4 +303,8 @@ const RETRYABLE_CODES: ReadonlySet<string> = new Set<string>([
   // wallet's EIP-1271 answer) could not be read. Nothing was charged; the read
   // is retried on the next call.
   ChainErrorCode.CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE,
+  // The payer is relaying a change that tightens its caps (BUG-D1-07). Nothing
+  // was charged and the seq is not spent; the same call passes once the change
+  // has landed. The error carries `retryAfter` (seconds).
+  PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
 ]);

@@ -221,21 +221,23 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
     it('refuses a voucher retryably, reserves nothing, and admits the same one afterwards', async () => {
       chain.grant(payer.address, delegate.address);
       const call = input(delegate, { escrow: escrow() });
-      intents.pausedUntil = new Date(Date.now() + 10_000);
+      intents.pausedFor = 10;
       await expect(service.redeem(call)).rejects.toMatchObject({
         errorCode: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
         statusCode: 503,
+        // The MCP error carries it as `retryAfter`, like velocity (review finding 4).
+        context: { retryAfter: 10 },
       });
       expect(intents.created).toHaveLength(0);
 
-      intents.pausedUntil = null;
+      intents.pausedFor = null;
       await expect(service.redeem(call)).resolves.toMatchObject({
         status: PaymentIntentStatus.FUNDS_SECURED,
       });
     });
 
     it("pauses the payer's own key too, when the escrow's limits are what is being lowered", async () => {
-      intents.pausedUntil = new Date(Date.now() + 10_000);
+      intents.pausedFor = 10;
       await rejects(
         service.redeem(input(payer, { escrow: escrow() })),
         PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,

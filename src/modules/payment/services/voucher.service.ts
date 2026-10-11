@@ -707,13 +707,10 @@ export class VoucherService {
         // admitting under the caps that are about to go could strand this one.
         // Refused before the insert, so nothing is reserved and the seq stays
         // free for the retry.
-        if (open.pausedUntil) {
-          throw PaymentErrors.voucherAdmissionPaused({
-            retryAfterSeconds: Math.max(
-              1,
-              Math.ceil((open.pausedUntil.getTime() - Date.now()) / 1000),
-            ),
-          });
+        if (open.pausedFor) {
+          // `retryAfter` (seconds), the key the MCP error already carries for
+          // velocity, so an agent paces itself the same way for both.
+          throw PaymentErrors.voucherAdmissionPaused({ retryAfter: open.pausedFor });
         }
         if (escrow !== null) {
           const used = escrowCarried + open.escrow;

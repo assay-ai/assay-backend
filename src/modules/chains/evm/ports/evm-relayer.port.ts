@@ -57,6 +57,12 @@ export interface EvmRelayedCall {
   readonly gasLimit: bigint;
   /** For the journal and the alert. Never used to choose behaviour. */
   readonly purpose: string;
+  /**
+   * Give the send up, unsent, when it waited in the chain's queue longer than
+   * the relayer's `maxQueueWaitMs` (`ChainErrors.relayNotSent`). For a caller
+   * that must bound how long the outcome can stay unknown (`evm-relayer-timing.ts`).
+   */
+  readonly boundQueueWait?: boolean;
 }
 
 /** A bare value transfer. NOTE THE ABSENCE OF A CALLDATA FIELD. */

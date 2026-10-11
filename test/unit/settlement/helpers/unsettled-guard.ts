@@ -11,13 +11,24 @@ export const NO_UNSETTLED_TOTALS: UnsettledVoucherTotals = {
 
 /**
  * The real guard over a stand-in for `payment_intents` (BUG-D1-07): `totals`
- * is what every read answers, and the calls are recorded.
+ * is what every read answers, and the calls are recorded. Each hold gets its
+ * own pause id (`pause-1`, `pause-2`, ...), as the table's rows do.
  */
-export function guardOver(totals: UnsettledVoucherTotals = NO_UNSETTLED_TOTALS) {
+export function guardOver(
+  totals: UnsettledVoucherTotals = NO_UNSETTLED_TOTALS,
+  config?: Record<string, string>,
+) {
+  let holds = 0;
   const repository = {
     unsettledVouchers: jest.fn(async () => totals),
-    holdVoucherAdmission: jest.fn(async () => [totals]),
-    resumeVoucherAdmission: jest.fn(async () => undefined),
+    holdVoucherAdmission: jest.fn(async () => ({ pauseId: `pause-${++holds}`, totals: [totals] })),
+    landVoucherAdmissionPause: jest.fn(async () => undefined),
+    releaseVoucherAdmissionPause: jest.fn(async () => undefined),
+    assertAdmissionPauseSchema: jest.fn(async () => undefined),
   };
-  return { guard: new UnsettledVoucherGuard(repository as never), repository };
+  const configService = config ? { get: (key: string) => config[key] } : undefined;
+  return {
+    guard: new UnsettledVoucherGuard(repository as never, configService as never),
+    repository,
+  };
 }

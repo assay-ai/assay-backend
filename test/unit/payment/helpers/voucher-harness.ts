@@ -158,8 +158,8 @@ export class InMemoryIntentWriter {
   /** How many times `create` was reached, refused or not. */
   createAttempts = 0;
 
-  /** Set by a test: the payer's admission is paused until then (BUG-D1-07). */
-  pausedUntil: Date | null = null;
+  /** Set by a test: the payer's admission is paused for that many seconds (BUG-D1-07). */
+  pausedFor: number | null = null;
 
   async isVoucherSeqUsed(
     _organizationId: string,
@@ -208,7 +208,7 @@ export class InMemoryIntentWriter {
       throw this.failInsertWith;
     }
     if (admission) {
-      admission.admit({ ...this.openTotals(admission.scope), pausedUntil: this.pausedUntil });
+      admission.admit({ ...this.openTotals(admission.scope), pausedFor: this.pausedFor });
     }
 
     // No `await` between the check and the claim — see the class comment on

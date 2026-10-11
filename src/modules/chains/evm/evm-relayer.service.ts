@@ -11,6 +11,7 @@ import {
   EVM_RELAYER_KEY_SOURCES,
   EvmRelayerKeySource,
 } from './evm-relayer-key-source';
+import { DEFAULT_EVM_RELAYER_TIMING, EvmRelayerTiming } from './evm-relayer-timing';
 import {
   EvmRelayResult,
   EvmRelayedCall,
@@ -32,7 +33,7 @@ export interface EvmRelayClient {
   getBalance(args: { address: `0x${string}` }): Promise<bigint>;
   estimateFeesPerGas(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>;
   sendRawTransaction(args: { serializedTransaction: `0x${string}` }): Promise<`0x${string}`>;
-  waitForTransactionReceipt(args: { hash: `0x${string}` }): Promise<{
+  waitForTransactionReceipt(args: { hash: `0x${string}`; timeout?: number }): Promise<{
     status: 'success' | 'reverted';
     gasUsed: bigint;
     blockNumber: bigint;
@@ -108,6 +109,7 @@ export class EvmRelayer implements EvmRelayerPort {
     @Inject(EVM_RELAYER_KEY_SOURCES) sources: readonly EvmRelayerKeySource[],
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     private readonly lowWaterMarkWei: bigint = DEFAULT_RELAYER_LOW_WATER_MARK_WEI,
+    private readonly timing: EvmRelayerTiming = DEFAULT_EVM_RELAYER_TIMING,
   ) {
     this.#accounts = new Map(
       sources.map((source) => [source.chainId, privateKeyToAccount(source.secretKey)] as const),
@@ -124,7 +126,11 @@ export class EvmRelayer implements EvmRelayerPort {
 
   async sendCall(call: EvmRelayedCall): Promise<EvmRelayResult> {
     const to = this.addressOnChain(call.chainId, call.to);
-    return this.send(call.chainId, { to, data: call.data, value: 0n, gas: call.gasLimit });
+    return this.send(
+      call.chainId,
+      { to, data: call.data, value: 0n, gas: call.gasLimit },
+      call.boundQueueWait ? Date.now() + this.timing.maxQueueWaitMs : null,
+    );
   }
 
   async sendValue(transfer: EvmValueTransfer): Promise<EvmRelayResult> {
@@ -146,12 +152,19 @@ export class EvmRelayer implements EvmRelayerPort {
   private send(
     chainId: ChainId,
     tx: { to: `0x${string}`; data?: `0x${string}`; value: bigint; gas: bigint },
+    /** Epoch ms after which this send is given up unsent, or null to wait its turn however long. */
+    sendBy: number | null = null,
   ): Promise<EvmRelayResult> {
     const previous = this.queues.get(chainId) ?? Promise.resolve();
-    const result = previous.then(
-      () => this.sendNow(chainId, tx),
-      () => this.sendNow(chainId, tx),
-    );
+    const queuedAt = Date.now();
+    const turn = () => {
+      if (sendBy !== null && Date.now() > sendBy) {
+        // Nothing signed, nothing broadcast: a definite "did not happen".
+        throw ChainErrors.relayNotSent({ waitedMs: Date.now() - queuedAt });
+      }
+      return this.sendNow(chainId, tx);
+    };
+    const result = previous.then(turn, turn);
     this.queues.set(
       chainId,
       result.catch(() => undefined),
@@ -186,7 +199,11 @@ export class EvmRelayer implements EvmRelayerPort {
     })) as `0x${string}`;
 
     const hash = await client.sendRawTransaction({ serializedTransaction });
-    const receipt = await client.waitForTransactionReceipt({ hash });
+    // An explicit timeout, the one `relayedSendBudgetMs` counts on.
+    const receipt = await client.waitForTransactionReceipt({
+      hash,
+      timeout: this.timing.receiptTimeoutMs,
+    });
 
     // After the send, not before: the float is being reported, and reporting it
     // must not be able to stop a redemption that was going to work.

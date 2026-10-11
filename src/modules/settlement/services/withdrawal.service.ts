@@ -308,6 +308,7 @@ export class WithdrawalService {
         scope: check.scope,
         lowered: check.lowered,
         acknowledged: acknowledgeUnsettled,
+        deadline: intent.deadline,
         relay,
       });
     } else {
