@@ -85,6 +85,9 @@ describe('AgentCredentialsService.list', () => {
       'expiresAt',
       'revokedAt',
       'rotatedFromId',
+      // Agent payment delegation: the delegate key this credential proved it holds.
+      'delegateAccount',
+      'delegateBoundAt',
       'createdAt',
     ]);
   });

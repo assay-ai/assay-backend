@@ -15,7 +15,9 @@ import {
 } from '@modules/mcp/ports/mcp-session.port';
 import { NotificationSettingsController } from '@modules/notification/controllers/notification-settings.controller';
 import { NotificationSettingsService } from '@modules/notification/services/notification-settings.service';
+import { EscrowDelegatesController } from '@modules/settlement/controllers/escrow-delegates.controller';
 import { EscrowController } from '@modules/settlement/controllers/escrow.controller';
+import { EscrowDelegationService } from '@modules/settlement/services/escrow-delegation.service';
 import { EscrowAccountService } from '@modules/settlement/services/escrow-account.service';
 import { WithdrawalService } from '@modules/settlement/services/withdrawal.service';
 import { SpendPolicyController } from '@modules/spend-policy/controllers/spend-policy.controller';
@@ -74,6 +76,15 @@ describe('human-only control writes', () => {
   };
   const escrows = { assetFor: jest.fn() };
   const withdrawals = { buildIntent: jest.fn(), submitRelayedIntent: jest.fn() };
+  // Agent payment delegation: the payer's control over what its agent may
+  // spend. Every route, the read included, is the person's and never the agent's.
+  const delegation = {
+    assetFor: jest.fn(),
+    authorizeIntent: jest.fn(),
+    revokeIntent: jest.fn(),
+    list: jest.fn(async () => []),
+    submit: jest.fn(),
+  };
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -82,6 +93,7 @@ describe('human-only control writes', () => {
         AgentCredentialsController,
         NotificationSettingsController,
         EscrowController,
+        EscrowDelegatesController,
       ],
       providers: [
         { provide: MCP_SESSION_SOURCE, useValue: sessions },
@@ -90,6 +102,7 @@ describe('human-only control writes', () => {
         { provide: NotificationSettingsService, useValue: notifications },
         { provide: EscrowAccountService, useValue: escrows },
         { provide: WithdrawalService, useValue: withdrawals },
+        { provide: EscrowDelegationService, useValue: delegation },
       ],
     }).compile();
 
@@ -119,6 +132,10 @@ describe('human-only control writes', () => {
     { method: 'put', path: '/notification-preferences' },
     { method: 'post', path: '/escrow/limits-intent' },
     { method: 'post', path: '/escrow/limits' },
+    { method: 'post', path: '/escrow/delegates/intent' },
+    { method: 'post', path: '/escrow/delegates' },
+    { method: 'post', path: '/escrow/delegates/revoke-intent' },
+    { method: 'post', path: '/escrow/delegates/revoke' },
   ];
 
   const send = (method: string, path: string, token: string) =>
@@ -134,7 +151,14 @@ describe('human-only control writes', () => {
 
       expect(res.status).toBe(403);
       expect(JSON.stringify(res.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
-      for (const service of [spendPolicy, credentials, notifications, escrows, withdrawals]) {
+      for (const service of [
+        spendPolicy,
+        credentials,
+        notifications,
+        escrows,
+        withdrawals,
+        delegation,
+      ]) {
         for (const fn of Object.values(service)) expect(fn).not.toHaveBeenCalled();
       }
     },
@@ -168,6 +192,16 @@ describe('human-only control writes', () => {
       .set('Authorization', 'Bearer token-agent');
 
     expect(res.status).toBe(200);
+  });
+
+  it('GET /escrow/delegates refuses an agent credential: the delegations are the payer’s', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/escrow/delegates')
+      .set('Authorization', 'Bearer token-agent');
+
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
+    expect(delegation.list).not.toHaveBeenCalled();
   });
 
   it('still refuses an unknown token with 401, before the human check', async () => {

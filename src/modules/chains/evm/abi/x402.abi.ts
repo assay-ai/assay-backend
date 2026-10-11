@@ -24,6 +24,7 @@ import { parseAbi } from 'viem';
  */
 export const X402_ESCROW_ABI = parseAbi([
   'struct Voucher { address payer; address provider; uint64 amount; bytes32 resourceHash; bytes32 requestHash; uint64 seq; uint64 issuedAt; uint64 expiresAt; }',
+  'struct Delegation { uint64 maxVoucherAmount; uint64 maxPerWindow; uint64 spentInWindow; uint64 windowStartedAt; uint64 validUntil; uint32 listPosition; bool revoked; }',
   'struct Escrow { uint128 balance; uint64 seqHigh; uint64 authNonce; uint64 maxVoucherAmount; uint64 maxPerWindow; uint64 spentInWindow; uint64 windowStartedAt; uint64 withdrawRequested; uint64 withdrawAvailableAt; uint128 totalRedeemed; uint128 totalWithdrawn; uint128 totalFunded; }',
   'function DOMAIN_SEPARATOR() view returns (bytes32)',
   /**
@@ -47,6 +48,18 @@ export const X402_ESCROW_ABI = parseAbi([
   'function requestWithdraw(uint64 amount)',
   'function requestWithdrawBySig(address buyer, uint64 amount, uint64 nonce, uint64 deadline, bytes sig)',
   'function withdraw()',
+  /**
+   * Agent payment delegation. The two READS are how the backend mirrors the
+   * contract's voucher rule off chain (a delegate's record, with its caps and
+   * its own window) and lists a payer's delegates; the two `…BySig` writes are
+   * the relayed doors a payer without gas signs for. The direct
+   * `authorizeDelegate`/`revokeDelegate` are the payer's own and are not
+   * vendored: nothing here may send them.
+   */
+  'function delegationOf(address payer, address delegate) view returns (Delegation)',
+  'function delegatesOf(address payer) view returns (address[])',
+  'function authorizeDelegateBySig(address payer, address delegate, uint64 maxVoucherAmount, uint64 maxPerWindow, uint64 validUntil, uint64 nonce, uint64 deadline, bytes sig)',
+  'function revokeDelegateBySig(address payer, address delegate, uint64 nonce, uint64 deadline, bytes sig)',
   'event Deposited(address indexed buyer, address indexed funder, uint64 amount, uint128 balance)',
   'event VoucherRedeemed(address indexed payer, address indexed provider, bytes32 requestHash, bytes32 resourceHash, uint64 amount, uint64 fee, uint64 seq, uint16 takeRateBps, uint64 spentInWindow)',
   'event WithdrawRequested(address indexed buyer, uint64 amount, uint64 availableAt)',
@@ -146,6 +159,15 @@ export const MULTICALL3_ABI = parseAbi([
   'struct Call3 { address target; bool allowFailure; bytes callData; }',
   'struct Result { bool success; bytes returnData; }',
   'function aggregate3(Call3[] calls) payable returns (Result[] returnData)',
+]);
+
+/**
+ * EIP-1271, the one call a contract-wallet payer answers: the third branch of
+ * `X402Escrow`'s voucher rule, mirrored off chain with an `eth_call`. The
+ * magic value is the selector itself, `0x1626ba7e`.
+ */
+export const ERC1271_ABI = parseAbi([
+  'function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)',
 ]);
 
 /**

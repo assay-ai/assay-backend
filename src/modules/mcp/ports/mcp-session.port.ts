@@ -45,6 +45,14 @@ export interface McpSession {
    * `HumanSessionGuard`.
    */
   readonly callerKind: McpCallerKind;
+
+  /**
+   * The DELEGATE key bound to this agent credential (CAIP-10), once the agent
+   * proved it holds it — agent payment delegation on eip155. A rail-B voucher
+   * signed by a delegate is accepted only from the credential bound to that
+   * key, and PAYMENT_REQUIRED names it. Absent or null for every other source.
+   */
+  readonly delegateAccount?: AccountId | null;
 }
 
 /** Who presented the credential behind an {@link McpSession}. */

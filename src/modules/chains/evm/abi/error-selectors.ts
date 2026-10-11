@@ -92,6 +92,19 @@ const NAMES: readonly string[] = [
   'SlashNotYetExecutable',
   'SlashExecutionWindowClosed',
   'SlashNotExpired',
+  // Agent payment delegation (EVM only).
+  'DelegateIsPayer',
+  'DelegateCapsInvalid',
+  'DelegateCapsExceedEscrowLimits',
+  'DelegateValidUntilInvalid',
+  'DelegationUnchanged',
+  'DelegateNotActive',
+  'TooManyDelegates',
+  'DelegateIsRevoked',
+  'DelegateIsExpired',
+  'DelegateVoucherExceedsPerCallLimit',
+  'DelegateWindowLimitExceeded',
+  'WalletCheckUnderfunded',
 ];
 
 /** 4-byte selector (lower-case, `0x`-prefixed) → the `Errors.sol` name. */

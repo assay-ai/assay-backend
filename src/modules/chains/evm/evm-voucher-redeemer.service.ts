@@ -16,7 +16,13 @@ import { X402_CONFIG_ABI, X402_ESCROW_ABI, X402_STAKE_ABI } from './abi/x402.abi
 import { EvmVoucher } from './eip712/voucher';
 import { EVM_CONSTANTS, EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
-import { PrevalidationState, prevalidateVoucher } from './evm-voucher-prevalidation';
+import {
+  PrevalidationDelegation,
+  PrevalidationState,
+  prevalidateVoucher,
+} from './evm-voucher-prevalidation';
+import { isRevert } from './evm-voucher-authority';
+import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
 
 /**
@@ -94,6 +100,12 @@ const UNREDEEMABLE: ReadonlySet<string> = new Set([
   'InvalidSignature',
   'MalleableSignature',
   'BadSignatureV',
+  // Agent payment delegation. Only a NEW grant by the payer revives any of
+  // these, and the payer then decides afresh; retrying until the voucher's
+  // deadline only re-broadcasts a known refusal (review S2-2).
+  'DelegateIsRevoked',
+  'DelegateIsExpired',
+  'DelegateVoucherExceedsPerCallLimit',
 ]);
 
 /**
@@ -107,6 +119,12 @@ const RETRYABLE: ReadonlySet<string> = new Set([
   'VoucherExceedsPerCallLimit',
   'ProviderBelowMinimumStake',
   'VoucherNotYetValid',
+  // A delegate's window decays. Pre-validation and the simulation before every
+  // send keep the retry from costing gas: nothing is broadcast until it fits.
+  'DelegateWindowLimitExceeded',
+  // The submitter's own gas limit was short of what a payer's EIP-1271 check
+  // needs; nothing about the voucher is wrong.
+  'WalletCheckUnderfunded',
 ]);
 
 /** `r || s || v`, 65 bytes. */
@@ -189,13 +207,22 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       return this.outcomeFor(refusal, null);
     }
 
+    // Simulated with the redeemer as sender and the gas it will be sent with,
+    // so a refusal pre-validation cannot see — the signature, a wallet's answer —
+    // costs an `eth_call` and never a mined revert (review S2-2).
+    const args = [voucher, this.signatureOf(request)] as const;
+    const simulated = await this.simulate(chainId, 'redeemVoucher', args, gasFor(1));
+    if (simulated !== null) {
+      return this.outcomeFor(simulated, null);
+    }
+
     const result = await this.relayer.sendCall({
       chainId,
       to: this.escrowAccount(chainId),
       data: encodeFunctionData({
         abi: X402_ESCROW_ABI,
         functionName: 'redeemVoucher',
-        args: [voucher, this.signatureOf(request)],
+        args,
       }),
       gasLimit: gasFor(1),
       purpose: `redeemVoucher seq=${request.seq}`,
@@ -232,6 +259,31 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       .filter((index) => refusals[index] === null);
     if (admissible.length === 0) {
       return refusals.map((name) => this.outcomeFor(name, null));
+    }
+
+    // SIMULATE the batch first, with the gas it will be sent with. A batch the
+    // chain would refuse is never broadcast: it goes straight to the singles,
+    // each of which simulates again (review S2-2).
+    const batchArgs = [
+      admissible.map((i) => vouchers[i]),
+      admissible.map((i) => signatures[i]),
+    ] as const;
+    const simulated = await this.simulate(
+      chainId,
+      'redeemVoucherBatch',
+      batchArgs,
+      gasFor(admissible.length),
+    );
+    if (simulated !== null) {
+      this.logger.warn(
+        `A redemption batch of ${admissible.length} would revert with ${simulated}; ` +
+          `nothing was broadcast — redeeming the items singly`,
+      );
+      const outcomes: RedeemOutcome[] = refusals.map((name) => this.outcomeFor(name, null));
+      for (const index of admissible) {
+        outcomes[index] = await this.redeem(requests[index]);
+      }
+      return outcomes;
     }
 
     const result = await this.relayer.sendCall({
@@ -272,6 +324,42 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
+
+  /**
+   * `eth_call` of the exact redemption, FROM the redeemer and WITH the gas it
+   * will be sent with. `null` when it would succeed; otherwise the refusal's
+   * `Errors.sol` name (`UNKNOWN_REVERT:…` when it has none, e.g. out of gas). An
+   * RPC that cannot answer throws: nothing is sent on a guess.
+   */
+  private async simulate(
+    chainId: ChainId,
+    functionName: 'redeemVoucher' | 'redeemVoucherBatch',
+    args: readonly unknown[],
+    gas: bigint,
+  ): Promise<string | null> {
+    const relayer = getAddress(parseAccountId(await this.relayer.address(chainId)).address);
+    try {
+      await this.client(chainId).readContract({
+        address: getAddress(this.deployment(chainId).escrow),
+        abi: X402_ESCROW_ABI,
+        functionName,
+        args,
+        account: relayer,
+        gas,
+      } as Parameters<EvmReaderClient['readContract']>[0]);
+      return null;
+    } catch (error) {
+      const data = revertDataOf(error);
+      if (data !== null) return evmErrorName(data);
+      if (
+        isRevert(error) ||
+        /out of gas|execution reverted|gas required exceeds/i.test(messageOf(error))
+      ) {
+        return 'UNKNOWN_REVERT:none';
+      }
+      throw error;
+    }
+  }
 
   /**
    * `msg.sender`, `paused()`, every payer's escrow and every provider's bonded
@@ -335,6 +423,43 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       getAddress(parseAccountId(relayerAddress).address) === getAddress(params.redeemer);
     const nowSeconds = Math.floor(this.config.now() / 1000);
 
+    const delegated = requests
+      .map((request, index) => ({ request, index }))
+      .filter(({ request }) => request.delegate);
+    const grants = new Map<number, PrevalidationDelegation>();
+    if (delegated.length > 0) {
+      const reads = await client.multicall({
+        contracts: delegated.map(({ request }) => ({
+          address: getAddress(deployment.escrow),
+          abi: X402_ESCROW_ABI,
+          functionName: 'delegationOf',
+          args: [
+            this.addressOf(request.payer, chainId),
+            this.addressOf(request.delegate as AccountId, chainId),
+          ] as readonly unknown[],
+        })),
+        allowFailure: false,
+      });
+      delegated.forEach(({ index }, i) => {
+        const grant = reads[i] as {
+          maxVoucherAmount: bigint;
+          maxPerWindow: bigint;
+          spentInWindow: bigint;
+          windowStartedAt: bigint;
+          validUntil: bigint;
+          revoked: boolean;
+        };
+        grants.set(index, {
+          maxVoucherAmount: grant.maxVoucherAmount,
+          maxPerWindow: grant.maxPerWindow,
+          spentInWindow: grant.spentInWindow,
+          windowStartedAt: Number(grant.windowStartedAt),
+          validUntil: grant.validUntil,
+          revoked: grant.revoked,
+        });
+      });
+    }
+
     return requests.map((_, index) => {
       const escrow = results[2 + index] as {
         balance: bigint;
@@ -357,6 +482,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
         balance: escrow.balance,
         providerBonded: bonded,
         minimumStake: params.minimumStake,
+        delegation: grants.get(index) ?? null,
       };
     });
   }
@@ -545,4 +671,15 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
 
 function gasFor(vouchers: number): bigint {
   return EVM_REDEEM_BATCH_BASE_GAS + EVM_REDEEM_PER_VOUCHER_GAS * BigInt(vouchers);
+}
+
+function messageOf(error: unknown): string {
+  let current: unknown = error;
+  const parts: string[] = [];
+  for (let depth = 0; depth < 5 && current; depth += 1) {
+    const message = (current as { message?: unknown }).message;
+    if (typeof message === 'string') parts.push(message);
+    current = (current as { cause?: unknown }).cause;
+  }
+  return parts.join(' | ');
 }

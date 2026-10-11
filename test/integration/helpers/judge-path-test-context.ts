@@ -1,3 +1,4 @@
+import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
@@ -171,6 +172,9 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
       // that omits this migration fails on the column rather than on its
       // subject — which is exactly how it shipped: no context listed it.
       VoucherRedemptionFields1759100000002,
+      // `payment_intents.voucher_delegate`, which `PaymentIntentEntity` maps
+      // (agent payment delegation).
+      VoucherDelegate1759600000000,
     ],
     synchronize: false,
     logging: false,

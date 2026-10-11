@@ -57,6 +57,13 @@ export enum PaymentErrorCode {
   PAYMENT_VOUCHER_SEQ_MISMATCH = 'PAYMENT_VOUCHER_SEQ_MISMATCH',
   PAYMENT_VOUCHER_SEQ_ALREADY_USED = 'PAYMENT_VOUCHER_SEQ_ALREADY_USED',
   PAYMENT_WITHDRAWAL_PENDING = 'PAYMENT_WITHDRAWAL_PENDING',
+
+  // ── Agent payment delegation: a voucher signed by a DELEGATE key the payer
+  //    authorised on chain, instead of by the payer's own key.
+  PAYMENT_VOUCHER_DELEGATE_INACTIVE = 'PAYMENT_VOUCHER_DELEGATE_INACTIVE',
+  PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED = 'PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED',
+  PAYMENT_VOUCHER_DELEGATE_NOT_BOUND = 'PAYMENT_VOUCHER_DELEGATE_NOT_BOUND',
+  PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED = 'PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED',
 }
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
@@ -99,6 +106,68 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `Idempotency key already used for a different request` +
       `${context?.idempotencyKey ? `: ${context.idempotencyKey}` : ''}`,
+  },
+  /**
+   * The voucher was signed by a delegate the payer authorised on chain, and
+   * that delegate is no longer active: revoked by the payer, or past its
+   * `validUntil`. Nothing was charged. The payer re-authorises the agent (or the
+   * agent signs with a key that is still authorised).
+   */
+  voucherDelegateInactive: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_INACTIVE,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `The delegate key that signed this voucher is ${
+        context?.reason === 'DELEGATE_EXPIRED' ? 'past its authorisation' : 'revoked'
+      }${context?.delegate ? ` (${context.delegate})` : ''}` +
+      `${context?.payer ? ` for payer ${context.payer}` : ''}; nothing was charged`,
+  },
+  /**
+   * A delegate-signed voucher the delegate's own on-chain caps would refuse at
+   * redemption: above its per-voucher cap, beyond its rolling window once the
+   * delegate's in-flight vouchers are counted, or outliving the authorisation.
+   * Refused here, before the call is served, so no provider works for a voucher
+   * the chain will not honour.
+   */
+  voucherDelegateLimitExceeded: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `This voucher exceeds what the payer authorised its delegate to spend` +
+      `${context?.limit ? ` (${context.limit}` : ''}` +
+      `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
+      `${context?.limit ? ')' : ''}; nothing was charged`,
+  },
+  /**
+   * The voucher was signed by an authorised delegate that is not the delegate
+   * bound to the calling agent credential. Delegation is per agent: a
+   * credential spends only through the key it proved it holds.
+   */
+  voucherDelegateNotBound: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_NOT_BOUND,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `The voucher was signed by delegate ${context?.delegate ?? 'unknown'}, which is not the ` +
+      `delegate key bound to this agent credential` +
+      `${context?.bound ? ` (${context.bound})` : ' (none is bound)'}; nothing was charged`,
+  },
+  /**
+   * Only the payer's EIP-1271 smart wallet could have authorised this voucher,
+   * and the platform does not SERVE a call on that answer: nothing on chain
+   * binds a wallet's `isValidSignature` between the moment it is asked and the
+   * redemption, so a wallet could say yes to the check and no at redemption and
+   * be served for free (review S2-4). The contract still accepts EIP-1271; the
+   * platform will too once a voucher can be secured before the call is served.
+   * The payer's own key (an EIP-7702 account's) and an authorised delegate key
+   * are accepted.
+   */
+  voucherWalletSignatureUnsupported: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `Smart-wallet (EIP-1271) voucher signatures are not accepted for served calls` +
+      `${context?.payer ? ` (payer ${context.payer})` : ''}; sign with the payer's own key or ` +
+      `with a delegate key the payer authorised on chain. Nothing was charged`,
   },
   voucherSignatureInvalid: {
     code: PaymentErrorCode.PAYMENT_VOUCHER_SIGNATURE_INVALID,

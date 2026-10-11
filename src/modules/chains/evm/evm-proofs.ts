@@ -93,3 +93,55 @@ export function toProofMessage(
     expiresAt: BigInt(challenge.expiresAt),
   };
 }
+
+/**
+ * Agent payment delegation: the agent proves it holds a delegate key by signing
+ * this with it. Not a `ProofMessage` — its subject is a CREDENTIAL, not an
+ * organization's account — and its own primary type, so no proof collected for
+ * a payout address or a stake account can be replayed as one.
+ */
+export const DELEGATE_BINDING_TYPES = {
+  DelegateBinding: [
+    { name: 'delegate', type: 'address' },
+    { name: 'credentialId', type: 'string' },
+    { name: 'nonce', type: 'string' },
+    { name: 'expiresAt', type: 'uint64' },
+  ],
+} as const;
+
+export interface DelegateBindingMessage {
+  readonly delegate: `0x${string}`;
+  readonly credentialId: string;
+  readonly nonce: string;
+  readonly expiresAt: bigint;
+}
+
+export function delegateBindingTypedData(message: DelegateBindingMessage, domain: TypedDataDomain) {
+  return {
+    domain,
+    types: DELEGATE_BINDING_TYPES,
+    primaryType: 'DelegateBinding' as const,
+    message,
+  };
+}
+
+/**
+ * The binding proof's own EIP-712 domain: NOT the escrow's. It is an off-chain,
+ * login-style message, and signing it under the money contract's domain would
+ * turn a stored binding signature into an on-chain authorisation the day a
+ * contract type of the same name and shape existed there (review S3-14). No
+ * `verifyingContract`: nothing on chain verifies it.
+ */
+export const DELEGATE_BINDING_DOMAIN_NAME = 'GoAssay Agent Binding';
+export const DELEGATE_BINDING_DOMAIN_VERSION = '1';
+
+export function delegateBindingDomain(chainId: string): TypedDataDomain {
+  return {
+    name: DELEGATE_BINDING_DOMAIN_NAME,
+    version: DELEGATE_BINDING_DOMAIN_VERSION,
+    chainId: Number(chainId.split(':')[1]),
+  };
+}
+
+export const hashDelegateBinding = (m: DelegateBindingMessage, d: TypedDataDomain): `0x${string}` =>
+  hashTypedData(delegateBindingTypedData(m, d));

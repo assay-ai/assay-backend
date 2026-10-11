@@ -1,3 +1,4 @@
+import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
@@ -183,6 +184,9 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // subject — which is exactly how it shipped: no context listed it.
       VoucherRedemptionFields1759100000002,
       BuyerEscrowAccountColumnsSlice1759300000000,
+      // `payment_intents.voucher_delegate`, which `PaymentIntentEntity` maps
+      // (agent payment delegation).
+      VoucherDelegate1759600000000,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',

@@ -131,7 +131,27 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
       label: 'ci-deploy',
       // a machine credential is never a person (BUG-J-BUY-07)
       callerKind: McpCallerKind.AGENT,
+      // No delegate key bound to this credential yet.
+      delegateAccount: null,
     });
+  });
+
+  it('carries the delegate key the credential proved it holds, so the MCP session knows its signer', async () => {
+    const { source, credentials, agents } = build();
+    seedLinkedAgent(agents);
+    const delegate = `${CHAIN}:0x5555555555555555555555555555555555555555`;
+    credentials.seed(
+      buildCredential({
+        id: 'cred-43',
+        tokenHash: digestToken(TOKEN),
+        delegateAccount: delegate,
+        delegateBoundAt: new Date(),
+      }),
+    );
+
+    const session = await source.resolve(TOKEN);
+
+    expect(session.delegateAccount).toBe(delegate);
   });
 
   it('stamps last_used_at with organizationId in the update criteria', async () => {

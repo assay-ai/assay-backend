@@ -1,0 +1,375 @@
+import { randomUUID } from 'node:crypto';
+
+import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
+import { ERC1271_MAGIC_VALUE } from '@modules/chains/evm/evm-voucher-authority';
+import { EvmChainAdapter } from '@modules/chains/evm/evm-chain.adapter';
+import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
+import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
+import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
+import { Voucher } from '@modules/chains/ports/x402.types';
+import { computeRequestHash } from '@modules/payment/domain/request-hash';
+import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
+import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
+import { RedeemVoucherInput } from '@modules/payment/ports/voucher.types';
+import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
+import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
+import { VoucherService } from '@modules/payment/services/voucher.service';
+import { MoneyUtil } from '@shared/utils/money.util';
+
+import { deployment, EvmSigner, generateSigner } from '../chains/evm/evm-fixtures';
+import { FakeEscrowSeqService, InMemoryIntentWriter } from './helpers/voucher-harness';
+
+const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
+const USDG = ASSET_IDS.USDG_ROBINHOOD_TESTNET;
+const DEPLOYMENT = deployment(CHAIN);
+const ESCROW = `${CHAIN}:${DEPLOYMENT.escrow}` as AccountId;
+const PROVIDER = `${CHAIN}:0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2` as AccountId;
+const RESOURCE = '/mcp/tools/get_weather';
+const usdg = (atomic: bigint) => MoneyUtil.of(atomic, USDG, 6);
+
+interface Grant {
+  maxVoucherAmount: bigint;
+  maxPerWindow: bigint;
+  spentInWindow: bigint;
+  windowStartedAt: bigint;
+  validUntil: bigint;
+  listPosition: number;
+  revoked: boolean;
+}
+
+/** The chain, as the adapter reads it: delegation records, code, a wallet. */
+class FakeEvmChain {
+  grants = new Map<string, Grant>();
+  code = new Set<string>();
+  walletAccepts = false;
+  delegationReads = 0;
+
+  async getCode({ address }: { address: `0x${string}` }) {
+    return this.code.has(address.toLowerCase()) ? ('0x6080' as const) : undefined;
+  }
+
+  async readContract(args: { functionName: string; args: readonly unknown[] }): Promise<unknown> {
+    if (args.functionName === 'delegationOf') {
+      this.delegationReads += 1;
+      const [payer, delegate] = args.args as string[];
+      return (
+        this.grants.get(`${payer.toLowerCase()}:${delegate.toLowerCase()}`) ?? {
+          maxVoucherAmount: 0n,
+          maxPerWindow: 0n,
+          spentInWindow: 0n,
+          windowStartedAt: 0n,
+          validUntil: 0n,
+          listPosition: 0,
+          revoked: false,
+        }
+      );
+    }
+    if (args.functionName === 'isValidSignature') {
+      return this.walletAccepts ? ERC1271_MAGIC_VALUE : '0xffffffff';
+    }
+    throw new Error(`unexpected read ${args.functionName}`);
+  }
+
+  grant(payer: string, delegate: string, grant: Partial<Grant> = {}): void {
+    const now = BigInt(Math.floor(Date.now() / 1000));
+    this.grants.set(`${payer.toLowerCase()}:${delegate.toLowerCase()}`, {
+      maxVoucherAmount: 400_000n,
+      maxPerWindow: 1_000_000n,
+      spentInWindow: 0n,
+      windowStartedAt: 0n,
+      validUntil: now + 86_400n,
+      listPosition: 1,
+      revoked: false,
+      ...grant,
+    });
+  }
+}
+
+/**
+ * Rail-B voucher redemption with AGENT PAYMENT DELEGATION, end to end through
+ * the real `EvmChainAdapter` and real secp256k1 keys: the payer is a Privy
+ * embedded wallet whose key never leaves Privy; its agent holds a DELEGATE key
+ * the payer authorised on chain; the voucher is signed by the delegate.
+ *
+ * The rule under test is the contract's (`X402Escrow._voucherAuthority`):
+ * payer key → active delegate within its own caps → EIP-1271, read from chain
+ * state, failing closed — plus the platform's one addition, that the delegate
+ * must be the one bound to the calling credential.
+ */
+describe('VoucherService — agent payment delegation (eip155)', () => {
+  let chain: FakeEvmChain;
+  let intents: InMemoryIntentWriter;
+  let seqs: FakeEscrowSeqService;
+  let service: VoucherService;
+  let payer: EvmSigner;
+  let delegate: EvmSigner;
+  let adapter: EvmChainAdapter;
+  const organizationId = randomUUID();
+
+  beforeEach(() => {
+    chain = new FakeEvmChain();
+    adapter = new EvmChainAdapter(
+      new Map([[CHAIN, chain as never]]),
+      new Map([[CHAIN, DEPLOYMENT]]),
+      [CHAIN],
+    );
+    intents = new InMemoryIntentWriter();
+    seqs = new FakeEscrowSeqService();
+    service = new VoucherService(
+      intents as unknown as PaymentIntentService,
+      new ChainAdapterRegistry([adapter], [CHAIN]),
+      seqs as unknown as EscrowSeqService,
+    );
+    payer = generateSigner(CHAIN);
+    delegate = generateSigner(CHAIN);
+  });
+
+  function input(
+    signer: EvmSigner,
+    opts: {
+      amount?: bigint;
+      boundDelegate?: AccountId | null;
+      expiresIn?: number;
+      payerAccount?: AccountId;
+    } = {},
+  ): RedeemVoucherInput {
+    const now = Math.floor(Date.now() / 1000);
+    const amount = opts.amount ?? 100_000n;
+    const payerAccount = opts.payerAccount ?? payer.account;
+    const call = {
+      method: 'POST',
+      path: RESOURCE,
+      query: {},
+      body: { latitude: 10.8, longitude: 106.6 },
+    };
+    const toolId = '11111111-1111-4111-8111-111111111111';
+    const providerId = '22222222-2222-4222-8222-222222222222';
+    const voucher: Voucher = {
+      payer: payerAccount,
+      payTo: ESCROW,
+      provider: PROVIDER,
+      amount: usdg(amount),
+      resource: RESOURCE,
+      requestHash: computeRequestHash({
+        ...call,
+        toolId,
+        providerId,
+        amount: amount.toString(),
+        asset: USDG,
+      }),
+      seq: seqs.advance().toString(),
+      issuedAt: now - 5,
+      expiresAt: now + (opts.expiresIn ?? 240),
+    };
+    return {
+      organizationId,
+      signed: { voucher, signature: signer.sign(adapter.buildVoucherMessage(voucher)) },
+      call,
+      agentId: randomUUID(),
+      agentAccount: payerAccount,
+      providerId,
+      providerAccount: PROVIDER,
+      toolId,
+      resource: RESOURCE,
+      escrowPda: ESCROW,
+      price: usdg(amount),
+      platformFee: usdg(amount / 10n),
+      chainId: CHAIN,
+      boundDelegate: opts.boundDelegate === undefined ? delegate.account : opts.boundDelegate,
+    };
+  }
+
+  const rejects = async (promise: Promise<unknown>, code: PaymentErrorCode | string) => {
+    await expect(promise).rejects.toMatchObject({ errorCode: code });
+  };
+
+  describe('(a) the payer’s own key — unchanged', () => {
+    it('redeems, records no delegate, and reads nothing from the chain', async () => {
+      const intent = await service.redeem(input(payer));
+      expect(intent.status).toBe(PaymentIntentStatus.FUNDS_SECURED);
+      expect(intents.created[0].voucherDelegate).toBeNull();
+      expect(chain.delegationReads).toBe(0);
+    });
+  });
+
+  describe('(b) an authorised delegate', () => {
+    it('redeems a delegate-signed voucher within its caps and records the delegate', async () => {
+      chain.grant(payer.address, delegate.address);
+      const intent = await service.redeem(input(delegate));
+      expect(intent.status).toBe(PaymentIntentStatus.FUNDS_SECURED);
+      expect(intents.created[0].voucherDelegate).toBe(delegate.account);
+    });
+
+    it('refuses a key the payer never authorised as an invalid signature', async () => {
+      await rejects(
+        service.redeem(input(delegate)),
+        PaymentErrorCode.PAYMENT_VOUCHER_SIGNATURE_INVALID,
+      );
+      expect(intents.created).toHaveLength(0);
+    });
+
+    it('refuses a revoked delegate by name', async () => {
+      chain.grant(payer.address, delegate.address, { revoked: true });
+      await rejects(
+        service.redeem(input(delegate)),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_INACTIVE,
+      );
+    });
+
+    it('refuses a lapsed delegate by name', async () => {
+      chain.grant(payer.address, delegate.address, {
+        validUntil: BigInt(Math.floor(Date.now() / 1000) - 1),
+      });
+      await rejects(
+        service.redeem(input(delegate)),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_INACTIVE,
+      );
+    });
+
+    /**
+     * REGRESSION (review S2-1). The delegation used to have to outlive only
+     * `expiresAt`; the chain checks `validUntil` at the REDEMPTION block, which
+     * the cron reaches after settlement, inside the 1,800 s grace. This is the
+     * reviewer's proof, which passed before the fix — accepted — and must now be
+     * refused.
+     */
+    it('refuses a delegate voucher whose expiresAt == validUntil (the chain would refuse it inside the grace)', async () => {
+      const now = Math.floor(Date.now() / 1000);
+      chain.grant(payer.address, delegate.address, { validUntil: BigInt(now + 240) });
+      await rejects(
+        service.redeem(input(delegate, { expiresIn: 240 })),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+      );
+      expect(intents.created).toHaveLength(0);
+    });
+
+    it('requires the delegation to cover the whole redeemable life: expiresAt + grace, to the second', async () => {
+      const now = Math.floor(Date.now() / 1000);
+      const expiresAt = now + 240;
+      const grace = EVM_CONSTANTS.REDEEM_GRACE_SECONDS;
+      chain.grant(payer.address, delegate.address, { validUntil: BigInt(expiresAt + grace - 1) });
+      await rejects(
+        service.redeem(input(delegate, { expiresIn: 240 })),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+      );
+      chain.grant(payer.address, delegate.address, { validUntil: BigInt(expiresAt + grace) });
+      await expect(service.redeem(input(delegate, { expiresIn: 240 }))).resolves.toBeDefined();
+    });
+
+    it('refuses a delegation that would lapse before the voucher does', async () => {
+      chain.grant(payer.address, delegate.address, {
+        validUntil: BigInt(Math.floor(Date.now() / 1000) + 60),
+      });
+      await rejects(
+        service.redeem(input(delegate, { expiresIn: 240 })),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+      );
+    });
+
+    it('applies the per-voucher cap, admitting its own value', async () => {
+      chain.grant(payer.address, delegate.address);
+      await rejects(
+        service.redeem(input(delegate, { amount: 400_001n })),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+      );
+      await expect(service.redeem(input(delegate, { amount: 400_000n }))).resolves.toBeDefined();
+    });
+
+    it('counts the chain’s window AND the delegate’s vouchers not yet on chain', async () => {
+      // 300k already redeemed on chain (half-decayed from 600k), so 700k remain;
+      // two 300k vouchers in flight leave 100k.
+      const now = Math.floor(Date.now() / 1000);
+      chain.grant(payer.address, delegate.address, {
+        spentInWindow: 600_000n,
+        windowStartedAt: BigInt(now - EVM_CONSTANTS.SLASH_WINDOW_SECONDS / 2),
+      });
+      await service.redeem(input(delegate, { amount: 300_000n }));
+      await service.redeem(input(delegate, { amount: 300_000n }));
+      await rejects(
+        service.redeem(input(delegate, { amount: 100_001n })),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+      );
+      await expect(service.redeem(input(delegate, { amount: 100_000n }))).resolves.toBeDefined();
+    });
+
+    it('does not count the payer’s own vouchers against the delegate’s window', async () => {
+      chain.grant(payer.address, delegate.address, { maxPerWindow: 400_000n });
+      await service.redeem(input(payer, { amount: 400_000n }));
+      await expect(service.redeem(input(delegate, { amount: 400_000n }))).resolves.toBeDefined();
+    });
+
+    it('accepts a delegate only from the credential bound to it', async () => {
+      chain.grant(payer.address, delegate.address);
+      const other = generateSigner(CHAIN);
+      await rejects(
+        service.redeem(input(delegate, { boundDelegate: null })),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_NOT_BOUND,
+      );
+      await rejects(
+        service.redeem(input(delegate, { boundDelegate: other.account })),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_NOT_BOUND,
+      );
+    });
+
+    it('never lets one payer’s delegate spend another payer’s escrow', async () => {
+      const victim = generateSigner(CHAIN);
+      chain.grant(payer.address, delegate.address);
+      await rejects(
+        service.redeem(input(delegate, { payerAccount: victim.account })),
+        PaymentErrorCode.PAYMENT_VOUCHER_SIGNATURE_INVALID,
+      );
+    });
+
+    it('still refuses a voucher lifted from another agent before reading the chain', async () => {
+      chain.grant(payer.address, delegate.address);
+      const lifted = { ...input(delegate), agentAccount: generateSigner(CHAIN).account };
+      await rejects(service.redeem(lifted), PaymentErrorCode.PAYMENT_VOUCHER_BINDING_MISMATCH);
+      expect(chain.delegationReads).toBe(0);
+    });
+  });
+
+  /**
+   * REGRESSION (review S2-4). The platform used to serve a call on a wallet's
+   * `isValidSignature` answer, which nothing binds until redemption — a wallet
+   * could say yes to the check and no at redemption and be served for free. It
+   * is refused now, and the wallet is not even asked.
+   */
+  describe('(c) the payer’s EIP-1271 wallet is NOT served on', () => {
+    it.each([true, false])(
+      'refuses a wallet-authorised voucher (wallet would answer %p) without asking the wallet',
+      async (accepts) => {
+        const wallet = generateSigner(CHAIN);
+        chain.code.add(wallet.address.toLowerCase());
+        chain.walletAccepts = accepts;
+        const asked = jest.spyOn(chain, 'readContract');
+        await rejects(
+          service.redeem(input(generateSigner(CHAIN), { payerAccount: wallet.account })),
+          PaymentErrorCode.PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED,
+        );
+        expect(
+          asked.mock.calls.filter(([args]) => args.functionName === 'isValidSignature'),
+        ).toHaveLength(0);
+        expect(intents.created).toHaveLength(0);
+      },
+    );
+
+    it('still serves a contract-wallet payer through an authorised delegate key', async () => {
+      const wallet = generateSigner(CHAIN);
+      chain.code.add(wallet.address.toLowerCase());
+      chain.grant(wallet.address, delegate.address);
+      await expect(
+        service.redeem(input(delegate, { payerAccount: wallet.account })),
+      ).resolves.toBeDefined();
+    });
+  });
+
+  describe('fail closed', () => {
+    it('refuses, and charges nothing, when the delegation cannot be read', async () => {
+      chain.readContract = async () => {
+        throw Object.assign(new Error('fetch failed'), { name: 'HttpRequestError' });
+      };
+      await rejects(service.redeem(input(delegate)), 'CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE');
+      expect(intents.created).toHaveLength(0);
+    });
+  });
+});

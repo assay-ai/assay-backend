@@ -232,6 +232,16 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   @Column({ name: 'voucher_issued_at', type: 'bigint', nullable: true })
   voucherIssuedAt: string | null;
 
+  /**
+   * The DELEGATE key that signed this rail-B voucher (CAIP-10), when it was not
+   * the payer: agent payment delegation, `X402Escrow.authorizeDelegate`. NULL
+   * when the payer's own key or the payer's EIP-1271 wallet authorised it. Read
+   * to add a delegate's in-flight vouchers to its on-chain window before a
+   * call is served.
+   */
+  @Column({ name: 'voucher_delegate', type: 'varchar', length: 256, nullable: true })
+  voucherDelegate: string | null;
+
   /** The ledger hold reserving `price_amount`, opened at `FUNDS_SECURED`. */
   @Column({ name: 'hold_id', type: 'uuid', nullable: true })
   holdId: string | null;

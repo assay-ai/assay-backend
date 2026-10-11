@@ -3,7 +3,17 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { assertRailOffered } from '@modules/chains/chain-metadata';
-import { chainIdOf, isAccountId } from '@modules/chains/ports/caip.types';
+import {
+  AccountId,
+  chainIdOf,
+  isAccountId,
+  parseAccountId,
+} from '@modules/chains/ports/caip.types';
+import {
+  VoucherAuthorityKind,
+  VoucherAuthorityRefusal,
+  VoucherDelegationTerms,
+} from '@modules/chains/ports/voucher-authority.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -65,7 +75,10 @@ const MAX_RESOURCE_LENGTH = 512;
  *   1  shape          — is this even a voucher?          cheap, no I/O
  *   2  expiry/window   — is it still alive, and sane?     cheap, no I/O
  *   3  binding        — does it authorise this call?     cheap, one sha256
- *   4  signature      — did the payer really sign it?    ~50µs of ed25519
+ *   4  signature      — did the payer authorise it?      ~50µs; chain reads
+ *                       (its own key, an on-chain        only when the payer's
+ *                       delegate within caps, or its     own key did not sign
+ *                       EIP-1271 wallet)
  *   5  seq issued     — did we hand this number out?     one Postgres read
  *   6  intent insert  — record it, durably               one Postgres write
  * ```
@@ -105,10 +118,10 @@ export class VoucherService {
     this.assertWellFormed(voucher);
     this.assertUnexpired(voucher, now);
     this.assertAuthorisesCall(voucher, input);
-    this.assertSignedByPayer(voucher, signature, input);
+    const delegate = await this.assertAuthorisedByPayer(voucher, signature, input, now);
     await this.assertIssuedSeq(voucher, input);
 
-    return this.record(voucher, input);
+    return this.record(voucher, input, delegate);
   }
 
   // ── 1. Shape ─────────────────────────────────────────────────────────────
@@ -346,26 +359,143 @@ export class VoucherService {
   // ── 4. Signature ─────────────────────────────────────────────────────────
 
   /**
-   * The signer is `voucher.payer` — the account inside the signed message, and
-   * by then already checked to be the authenticated caller.
+   * The voucher must be authorised by `voucher.payer` — the account inside the
+   * signed message, by then already checked to be the authenticated caller —
+   * under the CHAIN's rule, which this mirrors exactly
+   * (`X402Escrow._voucherAuthority`):
+   *
+   *   (a) the payer's own key signed it — checked first, synchronously, with no
+   *       I/O, exactly as before delegation existed;
+   *   (b) a DELEGATE key the payer authorised on chain signed it, the delegate is
+   *       not revoked or lapsed, and the voucher fits the delegate's own caps;
+   *   (c) the payer has code and its EIP-1271 wallet accepts the signature —
+   *       which the chain accepts, and the platform does NOT serve on (see
+   *       `voucherWalletSignatureUnsupported`, review S2-4).
+   *
+   * (b) is answered by the chain adapter from CHAIN STATE and fails closed. Returns the delegate for (b), null otherwise, and the delegate is
+   * recorded on the intent.
    *
    * Verifying against a signer taken from anywhere else, a header or a request
    * field, would let an attacker present someone else's voucher alongside their
-   * own key and have it pass.
+   * own key and have it pass — which is why the delegate is never something the
+   * caller names: it is whoever the signature recovers to, and only the chain
+   * says whether that key may sign for this payer.
    */
-  private assertSignedByPayer(
+  private async assertAuthorisedByPayer(
     voucher: Voucher,
     signature: string,
     input: RedeemVoucherInput,
-  ): void {
+    now: number,
+  ): Promise<AccountId | null> {
     const adapter = this.chains.resolve(input.chainId);
 
     if (typeof signature !== 'string' || signature.length === 0) {
       throw PaymentErrors.voucherSignatureInvalid({ payer: voucher.payer });
     }
 
-    if (!adapter.verifyVoucherSignature(voucher, signature, voucher.payer)) {
+    // (a)
+    if (adapter.verifyVoucherSignature(voucher, signature, voucher.payer)) {
+      return null;
+    }
+    if (typeof adapter.authorizeVoucherSigner !== 'function') {
       throw PaymentErrors.voucherSignatureInvalid({ payer: voucher.payer });
+    }
+
+    // Path (c) is not asked at all: see `voucherWalletSignatureUnsupported`.
+    const answer = await adapter.authorizeVoucherSigner(voucher, signature, now, {
+      allowErc1271: false,
+    });
+    switch (answer.kind) {
+      case VoucherAuthorityKind.PAYER:
+        return null;
+      case VoucherAuthorityKind.ERC1271:
+        // Unreachable with `allowErc1271: false`; refused rather than trusted if
+        // an adapter ever answers it anyway.
+        throw PaymentErrors.voucherWalletSignatureUnsupported({ payer: voucher.payer });
+      case VoucherAuthorityKind.DELEGATE:
+        await this.assertWithinDelegation(voucher, input, answer.delegate, answer.terms);
+        return answer.delegate;
+      case 'REFUSED':
+        if (answer.reason === VoucherAuthorityRefusal.ERC1271_NOT_ACCEPTED) {
+          throw PaymentErrors.voucherWalletSignatureUnsupported({ payer: voucher.payer });
+        }
+        if (
+          answer.reason === VoucherAuthorityRefusal.DELEGATE_REVOKED ||
+          answer.reason === VoucherAuthorityRefusal.DELEGATE_EXPIRED
+        ) {
+          throw PaymentErrors.voucherDelegateInactive({
+            payer: voucher.payer,
+            delegate: answer.signer,
+            reason: answer.reason,
+          });
+        }
+        throw PaymentErrors.voucherSignatureInvalid({ payer: voucher.payer });
+    }
+  }
+
+  /**
+   * (b)'s caps, which the chain will apply at redemption and which therefore
+   * have to hold BEFORE the call is served — a voucher the chain will refuse is
+   * a provider working for nothing.
+   *
+   * - The signer must be the delegate bound to THIS agent credential: an agent
+   *   spends only through the key it proved it holds.
+   * - The delegation must outlive the voucher's whole REDEEMABLE life:
+   *   `validUntil >= expiresAt + redeemGrace`. The chain checks `validUntil` at
+   *   the redemption block, and the redemption job runs after settlement — any
+   *   time up to the grace after `expiresAt`. A delegation that lapses inside
+   *   that grace is a served call refused at redemption (review S2-1), so the
+   *   margin is the latest instant the chain would still redeem.
+   * - `amount <= maxVoucherAmount`, the delegate's per-voucher cap.
+   * - The delegate's window: the chain's counter (decayed to now) plus the
+   *   delegate's vouchers that hold money and have not reached the chain yet,
+   *   plus this one, must fit `maxPerWindow`.
+   *
+   * The escrow's own ceilings bind a delegate as well; they are the chain's to
+   * apply, exactly as for the payer's own vouchers.
+   */
+  private async assertWithinDelegation(
+    voucher: Voucher,
+    input: RedeemVoucherInput,
+    delegate: AccountId,
+    terms: VoucherDelegationTerms,
+  ): Promise<void> {
+    const bound = input.boundDelegate ?? null;
+    if (bound === null || !sameAccount(bound, delegate)) {
+      throw PaymentErrors.voucherDelegateNotBound({ delegate, bound });
+    }
+
+    if (voucher.expiresAt + terms.redeemGraceSeconds > terms.validUntil) {
+      throw PaymentErrors.voucherDelegateLimitExceeded({
+        limit: 'validUntil',
+        allowed:
+          `a voucher expiring by ` +
+          new Date((terms.validUntil - terms.redeemGraceSeconds) * 1000).toISOString() +
+          ` (the delegation ends ${new Date(terms.validUntil * 1000).toISOString()} and the ` +
+          `chain redeems up to ${terms.redeemGraceSeconds}s after a voucher expires)`,
+      });
+    }
+
+    const amount = BigInt(voucher.amount.amount);
+    if (amount > terms.maxVoucherAmount) {
+      throw PaymentErrors.voucherDelegateLimitExceeded({
+        limit: 'maxVoucherAmount',
+        allowed: terms.maxVoucherAmount.toString(),
+      });
+    }
+
+    const pending = await this.intents.sumOpenDelegateVouchers(
+      voucher.payer,
+      delegate,
+      voucher.amount.asset,
+    );
+    const used = terms.carriedInWindow + pending;
+    if (used + amount > terms.maxPerWindow) {
+      const left = terms.maxPerWindow > used ? terms.maxPerWindow - used : 0n;
+      throw PaymentErrors.voucherDelegateLimitExceeded({
+        limit: 'maxPerWindow',
+        allowed: left.toString(),
+      });
     }
   }
 
@@ -432,7 +562,11 @@ export class VoucherService {
    * answer a genuine replay deserves, and any other failure simply propagates with
    * nothing to undo.
    */
-  private async record(voucher: Voucher, input: RedeemVoucherInput): Promise<PaymentIntent> {
+  private async record(
+    voucher: Voucher,
+    input: RedeemVoucherInput,
+    delegate: AccountId | null,
+  ): Promise<PaymentIntent> {
     assertRailOffered(input.chainId, railName(PaymentRail.RAIL_B_VOUCHER));
 
     const intent = await this.intents.create({
@@ -473,6 +607,9 @@ export class VoucherService {
       voucherSignature: input.signed.signature,
       voucherResourceHash: this.chains.resolve(input.chainId).voucherResourceHash(voucher.resource),
       voucherIssuedAt: voucher.issuedAt,
+      // The delegate whose on-chain window this voucher will count against, so
+      // the next delegate-signed call sees it before it reaches the chain.
+      voucherDelegate: delegate,
       // No idempotency key on this path, deliberately. The seq *is* rail B's
       // idempotency key, and it is stricter: a replayed voucher is refused
       // rather than answered with the original intent, which is what the
@@ -493,4 +630,13 @@ export class VoucherService {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** One account, compared on its chain and its address case-insensitively. */
+function sameAccount(a: AccountId, b: AccountId): boolean {
+  const left = parseAccountId(a);
+  const right = parseAccountId(b);
+  return (
+    left.chainId === right.chainId && left.address.toLowerCase() === right.address.toLowerCase()
+  );
 }
