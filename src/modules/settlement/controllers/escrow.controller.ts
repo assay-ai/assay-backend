@@ -9,7 +9,7 @@ import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { AccountId, toAccountId } from '@modules/chains/ports/caip.types';
 import { EscrowLimits } from '@modules/chains/ports/escrow.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
@@ -147,7 +147,11 @@ export class EscrowController {
    * this backwards would tell a buyer they were unprotected while in fact no
    * call of theirs could be paid at all.
    */
+  // The on-chain limits are the buyer's brake on its agent. The chain still
+  // demands the wallet's signature; refusing the agent's credential here
+  // keeps the API from even building or relaying the change for it.
   @Post('limits-intent')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: "Build the buyer's own set_escrow_limits transaction" })
   @ApiResponse({ status: 201, type: CreateEscrowIntentResponseDto })
   @ApiResponse({ status: 503, description: ESCROW_CHAIN_UNREADABLE_DESCRIPTION })
@@ -223,6 +227,7 @@ export class EscrowController {
    * this body can choose the target contract or the function.
    */
   @Post('limits')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: "Relay the buyer's signed set_escrow_limits request" })
   @ApiResponse({ status: 201, type: RelayedEscrowIntentResponseDto })
   @ApiResponse({ status: 400, description: RELAYED_MALFORMED_DESCRIPTION })

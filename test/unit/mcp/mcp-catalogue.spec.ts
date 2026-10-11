@@ -19,10 +19,15 @@ import { BindingStatus, PricingMode, ToolTier } from '@modules/tool/ports/tool.t
 import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 
+import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
+import { MoneyUtil } from '@utils/money.util';
+
 import {
+  MINIMUM_STAKE_BY_CHAIN,
   ScriptedInvoker,
   buildBinding,
   buildProvider,
+  buildRouter,
   buildTool,
   usdc,
 } from '../tool/helpers/routing-fixtures';
@@ -444,5 +449,107 @@ describe('McpCatalogueService — where a tool settles', () => {
     (descriptor.annotations[X402_SETTLEMENT_CHAINS] as string[]).push('eip155:1');
 
     expect(quote.settlementChains).toEqual(['solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1']);
+  });
+});
+
+/**
+ * One tool sold on two chains, in two assets (BUG-J-BUY-05).
+ *
+ * Each viewer is shown the price of the bindings on ITS chain, and the tool
+ * carries both chains in `x402/settlementChains`. Before, the two assets met
+ * in one quote, it threw, and the throw took down `tools/list` for every
+ * agent on the platform.
+ */
+describe('McpCatalogueService — a tool sold on two chains', () => {
+  const SOLANA = CHAIN_IDS.SOLANA_DEVNET;
+  const EVM = CHAIN_IDS.ROBINHOOD_TESTNET;
+  const USDG = ASSET_IDS.USDG_ROBINHOOD_TESTNET!;
+  const usdg = (atomic: string) => MoneyUtil.of(atomic, USDG, 6);
+
+  function twoChainCatalogue(): McpCatalogueService {
+    const tool = buildTool();
+    const bindings = [
+      buildBinding('sol', { priceAmount: '250000' }),
+      buildBinding('evm', { priceAmount: '100000', assetId: USDG, settlementChains: [EVM] }),
+    ];
+    const { router } = buildRouter({
+      tool,
+      bindings,
+      providers: [
+        buildProvider('sol'),
+        buildProvider('evm', {
+          payoutAccountByChain: new Map([
+            [EVM, `${EVM}:0x00000000000000000000000000000000000000aa` as never],
+          ]),
+        }),
+      ],
+      stakes: { sol: usdc(1000) },
+      stakesByChain: { [`evm|${EVM}`]: usdg('1000000000') },
+      invoker: new ScriptedInvoker({}),
+      config: {
+        minimumStakeByChain: new Map([
+          [SOLANA, MINIMUM_STAKE_BY_CHAIN.get(SOLANA)],
+          [EVM, { floor: usdg('50000000'), priceMultiple: 1000 }],
+        ]) as never,
+      },
+    });
+
+    return new McpCatalogueService(
+      new InMemoryToolCatalogue({ tools: [tool], bindings }),
+      router,
+      new FakeFreeQuota() as unknown as FreeQuotaService,
+      [SOLANA, EVM],
+    );
+  }
+
+  const viewerOn = (chainId: ChainId) => ({ organizationId: 'org', agentId: 'agent', chainId });
+
+  it('shows an EVM buyer the USDG price', async () => {
+    const [descriptor] = await twoChainCatalogue().listTools(viewerOn(EVM));
+
+    expect(descriptor.annotations[X402_PRICE]).toMatchObject({ amount: '100000', asset: USDG });
+    expect([...(descriptor.annotations[X402_SETTLEMENT_CHAINS] as string[])].sort()).toEqual(
+      [SOLANA, EVM].sort(),
+    );
+  });
+
+  it('shows a Solana buyer the USDC price', async () => {
+    const [descriptor] = await twoChainCatalogue().listTools(viewerOn(SOLANA));
+
+    expect(descriptor.annotations[X402_PRICE]).toMatchObject({
+      amount: '250000',
+      asset: ASSET_IDS.USDC_SOLANA_DEVNET,
+    });
+  });
+});
+
+describe('McpCatalogueService — one tool cannot break the list', () => {
+  it('omits a tool whose quote throws and lists the others', async () => {
+    const good = buildTool({ id: 'good', name: 'good' });
+    const bad = buildTool({ id: 'bad', name: 'bad' });
+    const quoteOf = (toolId: string): Promise<ToolQuote> =>
+      toolId === 'bad'
+        ? Promise.reject(new Error('catalogue defect'))
+        : Promise.resolve({
+            tool: good,
+            price: usdc('0.05'),
+            pricingMode: PricingMode.PAID,
+            routableBindings: 1,
+            settlementChains: [CHAIN_IDS.SOLANA_DEVNET],
+            p95LatencyMs: null,
+            qualityRate: null,
+            unroutableReason: null,
+          });
+
+    const catalogue = new McpCatalogueService(
+      new InMemoryToolCatalogue({ tools: [bad, good], bindings: [] }),
+      { quote: quoteOf } as unknown as ProviderRouterService,
+      new FakeFreeQuota() as unknown as FreeQuotaService,
+      [CHAIN_IDS.SOLANA_DEVNET],
+    );
+
+    const listed = await catalogue.listTools();
+
+    expect(listed.map((descriptor) => descriptor.name)).toEqual(['good']);
   });
 });

@@ -7,7 +7,7 @@ import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { digestToken } from '@shared/crypto/token-digest';
 
 import { McpErrors } from '../errors/mcp.errors';
-import { McpSession, McpSessionPort } from '../ports/mcp-session.port';
+import { McpCallerKind, McpSession, McpSessionPort } from '../ports/mcp-session.port';
 
 /**
  * MCP credentials, from configuration.
@@ -98,6 +98,7 @@ export class ConfigMcpSessionSource implements McpSessionPort {
       agentAccount: record.agentAccount,
       chainId: record.chainId,
       label: record.label ?? null,
+      callerKind: McpCallerKind.CONFIG,
     });
   }
 

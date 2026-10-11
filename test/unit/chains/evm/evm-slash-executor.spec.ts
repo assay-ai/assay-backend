@@ -518,6 +518,28 @@ describe('review fixes — EvmSlashExecutor', () => {
     expect(error.errorCode).toBe(ChainErrorCode.CHAIN_PAYLOAD_MALFORMED);
   });
 
+  it('adopts a record signed by a rotated key the chain still allows', async () => {
+    const { chain, executor } = build();
+    await executor.propose(proposal(1, '100000'));
+    const rotated = '0x7777777777777777777777777777777777777777';
+    Object.assign(chain.record(requestId(1))!, { verifier: rotated });
+    chain.alsoRegistered.add(getAddress(rotated));
+
+    await expect(executor.propose(proposal(1, '100000'))).resolves.toMatchObject({ adopted: true });
+  });
+
+  it('reports the signed terms on readRecord, so the parts service can judge them', async () => {
+    const { executor } = build();
+    await executor.propose(proposal(1, '100000'));
+    await expect(executor.readRecord(requestId(1), PROVIDER, CHAIN)).resolves.toMatchObject({
+      beneficiary: getAddress(AGENTS[1]),
+      policy: sha256(toBytes('tool-uuid')),
+      verifier: VERIFIER,
+      verifierCanSign: true,
+      verifierAccepted: true,
+    });
+  });
+
   // S3(1): one chunk's RPC failure must not fail the others or lose a row.
   it('isolates a chunk whose simulation RPC fails, retrying its rows singly', async () => {
     const { chain, executor } = build({ batchSize: 2 });
@@ -599,6 +621,34 @@ describe('review fixes — EvmSlashExecutor', () => {
       for (const n of [3, 4]) expect(chain.record(requestId(n))?.status).toBe(1);
       // Nothing that executed was cut.
       for (const n of [1, 2]) expect(chain.record(requestId(n))?.applied).toBe(4_000_000n);
+    });
+
+    it('holds back a newer case on the same provider behind a deferred one — no starvation', async () => {
+      const built = build();
+      built.chain.params = { ...built.chain.params, penaltyAmount: 10_000_000n };
+      await built.executor.proposeBatch([
+        proposal(1, '4000000', AGENTS[1]), // G1
+        proposal(2, '8000000', AGENTS[2]), // G2: would be cut
+        proposal(3, '1000000', AGENTS[3]), // G3: small, would fit once G2 is out
+      ]);
+      built.chain.now += 72n * 3600n;
+      const stake = built.chain.state.stakes.get(getAddress(PROVIDER))!;
+      stake.slashedInWindow = 10_000_000n;
+      stake.slashWindowStartedAt = built.chain.now;
+
+      const outcomes = await built.executor.executeBatch(
+        [1, 2, 3].map((n) => ({
+          chainId: CHAIN,
+          requestId: requestId(n),
+          provider: PROVIDER,
+          beneficiary: AGENTS[n],
+          atomicGroup: `G${n}`,
+        })),
+      );
+
+      expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, false, false]);
+      expect(chainErrorName(outcomes[2].error)).toBe('SlashCapExceeded');
+      expect(built.chain.record(requestId(3))?.status).toBe(1);
     });
 
     it('executes the deferred case in full once the window has decayed', async () => {

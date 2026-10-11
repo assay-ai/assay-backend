@@ -2,7 +2,7 @@ import { Body, Controller, Get, Param, Put, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 
 import {
   NotificationChannelDto,
@@ -39,7 +39,10 @@ export class NotificationSettingsController {
     return this.settings.listChannels(session.organizationId);
   }
 
+  // Where alerts go, and which are sent, is how a person watches the agent;
+  // the agent must not be able to redirect or mute them.
   @Put('notification-channels/:channel')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Configure (or reconfigure) one channel destination' })
   @ApiResponse({ status: 200, type: NotificationChannelDto })
   async upsertChannel(
@@ -80,6 +83,7 @@ export class NotificationSettingsController {
   }
 
   @Put('notification-preferences')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Bulk-upsert event/channel preferences' })
   @ApiResponse({ status: 200, type: [NotificationPreferenceDto] })
   @ApiResponse({ status: 400, description: 'A `nonSuppressible` event was disabled' })

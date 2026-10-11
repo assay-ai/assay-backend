@@ -11,7 +11,7 @@ import {
   EscrowChainBalance,
 } from '@modules/ledger/ports/escrow-balance-reader.port';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { McpCatalogueService } from '@modules/mcp/services/mcp-catalogue.service';
 import { McpToolCallService } from '@modules/mcp/services/mcp-tool-call.service';
 import { DEFAULT_PLATFORM_FEE_BPS } from '@modules/mcp/services/mcp-pricing.config';
@@ -73,6 +73,7 @@ export const SESSION: McpSession = Object.freeze({
   agentAccount: AGENT_ACCOUNT,
   chainId: CHAIN_ID,
   label: 'test agent',
+  callerKind: McpCallerKind.CONFIG,
 });
 
 // ---------------------------------------------------------------------------

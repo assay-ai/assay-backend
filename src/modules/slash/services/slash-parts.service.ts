@@ -22,6 +22,7 @@ import {
 } from '../domain/chain-slash-outcome';
 import {
   aggregateSlashParts,
+  slashRecordMismatch,
   findDustParts,
   HarmedAgentWeight,
   minimumSplittablePenalty,
@@ -45,6 +46,12 @@ import {
   SlashRecordSnapshot,
   SlashRecordStatus,
 } from '../ports/slash-executor.port';
+
+/**
+ * `SLASH_EXECUTION_GRACE_SECONDS` (7 days) — after `executableAt + grace` a
+ * record can only be expired. Mirrored, as `SlashExecutionService` does.
+ */
+const SLASH_EXECUTION_GRACE_MS_FOR_PARTS = 7 * 24 * 60 * 60 * 1000;
 
 /** One case handed to {@link SlashPartsService.executeMany}. */
 export interface PartitionedCase {
@@ -144,14 +151,21 @@ export class SlashPartsService {
         const part = todo[index];
         if (outcome.ok) {
           signature ||= outcome.result.signature;
-          await this.mirrorProposal(part, outcome.result, provider, chainId);
+          await this.mirrorProposal(part, proposal, outcome.result, provider, chainId);
           continue;
         }
         const name = chainErrorName(outcome.error);
         // Before any refusal is believed, ask the chain. A record at this
         // request id — from a slow earlier send, or a stranger relaying our
         // own attestation — IS the judgement, whatever this attempt was told.
-        if (await this.adoptFromChain(part, provider, chainId)) continue;
+        const found = await this.adoptFromChain(part, proposal, provider, chainId);
+        if (found === 'adopted') continue;
+        if (found === 'mismatch') {
+          // Our request id is taken by a different judgement: nothing we sign
+          // can land there. Already REFUSED with the reason by `readMatching`.
+          refusal ??= outcome.error;
+          continue;
+        }
 
         if (classifyChainFailure(outcome.error) === ChainFailureKind.VOID) {
           // Refused for good. Its siblings go on; the agent's share is not
@@ -231,15 +245,53 @@ export class SlashPartsService {
   /** Mirror a record already at the part's request id. `true` when there was one. */
   private async adoptFromChain(
     part: SlashProposalPartEntity,
+    proposal: SlashProposalEntity,
     provider: string,
     chainId: ChainId,
-  ): Promise<boolean> {
-    const record = await this.executor
-      .readRecord(part.chainRequestId, provider, chainId)
-      .catch(() => null);
-    if (!record) return false;
+  ): Promise<'adopted' | 'mismatch' | 'absent'> {
+    let mismatched = false;
+    const record = await this.readMatching(part, proposal, provider, chainId, () => {
+      mismatched = true;
+    }).catch(() => null);
+    if (mismatched) return 'mismatch';
+    if (!record) return 'absent';
     await this.mirrorRecord(part, record);
-    return true;
+    return 'adopted';
+  }
+
+  /**
+   * The record at a part's request id — but only if it IS this part's
+   * judgement, by the one rule `slashRecordMismatch` states (beneficiary,
+   * penalty and policy must match; a different verifier only while it may
+   * still sign). A record with other terms is somebody else's: the part is
+   * marked REFUSED (`RecordMismatch:<field>`), loudly, and `null` returned so
+   * nothing is mirrored, executed or expired on the strength of it.
+   */
+  private async readMatching(
+    part: SlashProposalPartEntity,
+    proposal: SlashProposalEntity,
+    provider: string,
+    chainId: ChainId,
+    onMismatch?: () => void,
+  ): Promise<SlashRecordSnapshot | null> {
+    const record = await this.executor.readRecord(part.chainRequestId, provider, chainId);
+    if (!record) return null;
+    const mismatch = slashRecordMismatch(record, {
+      beneficiary: parseAccountId(part.beneficiaryAccount).address,
+      penaltyMinor: part.penaltyAmount,
+      policy: proposal.toolId,
+    });
+    if (!mismatch) return record;
+    onMismatch?.();
+    await this.parts.updatePart(part.organizationId, part.id, {
+      chainStatus: 'REFUSED',
+      chainLastError: `RecordMismatch:${mismatch}`,
+    });
+    this.logger.error(
+      `slash part ${part.chainRequestId} (case ${proposal.id}): the record at this request id ` +
+        `carries a different ${mismatch}; it is not this judgement and is left alone`,
+    );
+    return null;
   }
 
   /**
@@ -364,6 +416,7 @@ export class SlashPartsService {
 
   private async mirrorProposal(
     part: SlashProposalPartEntity,
+    proposal: SlashProposalEntity,
     result: SlashProposalResult,
     provider: string,
     chainId: ChainId,
@@ -380,7 +433,7 @@ export class SlashPartsService {
       return;
     }
     // Adopted a record that already left Pending: read it whole.
-    const record = await this.executor.readRecord(part.chainRequestId, provider, chainId);
+    const record = await this.readMatching(part, proposal, provider, chainId);
     if (record) await this.mirrorRecord(part, record);
   }
 
@@ -463,9 +516,12 @@ export class SlashPartsService {
           (outcome.error as { errorCode?: string })?.errorCode === 'CHAIN_SLASH_RECORD_NOT_FOUND';
         if (name === 'SlashNotPending' || notFound) {
           // Somebody else moved it. Only the record can say which way.
-          const snapshot = await this.executor
-            .readRecord(part.chainRequestId, item.case.provider, item.chainId)
-            .catch(() => null);
+          const snapshot = await this.readMatching(
+            part,
+            item.case.proposal,
+            item.case.provider,
+            item.chainId,
+          ).catch(() => null);
           if (snapshot && snapshot.status !== 'PENDING') {
             await this.mirrorRecord(part, snapshot);
             continue;
@@ -611,7 +667,7 @@ export class SlashPartsService {
       // of one attempt, and a slow transaction can still land behind it. Only
       // the two terminal on-chain states are skipped.
       if (['EXECUTED', 'CANCELLED'].includes(part.chainStatus)) continue;
-      const snapshot = await this.executor.readRecord(part.chainRequestId, provider, chainId);
+      const snapshot = await this.readMatching(part, proposal, provider, chainId);
       if (snapshot) await this.mirrorRecord(part, snapshot);
     }
     const reloaded = await this.parts.findForEpoch(
@@ -688,11 +744,20 @@ export class SlashPartsService {
   }
 
   /**
-   * Parts still PENDING on chain beside a case that has already executed —
-   * the reservation an `expireSlash` that failed (or could not run yet) left
-   * holding the provider's stake. Each is re-read and, when the chain allows
-   * (verifier revoked, or the grace has run), expired. Never throws for one
-   * part's sake.
+   * The parts of an already-executed case that are not settled on chain, and
+   * what to do about each — revisited by the reconcile pass every tick.
+   *
+   * - A part still PENDING, or a REFUSED straggler whose in-flight
+   *   transaction landed after it was given up on, is re-read (by the one
+   *   match rule). A live, due record is EXECUTED — it is money the agent is
+   *   owed, not a reservation to release. All of a case's due parts go in one
+   *   batch, as one atomic group.
+   * - A record that can never execute (its verifier may no longer sign, or the
+   *   grace has run) is EXPIRED, which releases the provider's stake.
+   * - Anything else — not yet due, not yet expirable — is left alone, with no
+   *   transaction attempted and nothing written: it is simply early.
+   *
+   * Never throws for one part's sake.
    */
   /** The cases {@link sweepStrandedParts} should visit. */
   findCasesWithStrandedParts(limit: number) {
@@ -701,9 +766,13 @@ export class SlashPartsService {
 
   async sweepStrandedParts(
     cases: readonly PartitionedCase[],
-  ): Promise<{ expired: number; waiting: number }> {
+    now: Date = new Date(),
+  ): Promise<{ expired: number; executed: number; waiting: number; executedCases: string[] }> {
     let expired = 0;
+    let executed = 0;
     let waiting = 0;
+    const executedCases = new Set<string>();
+
     for (const { proposal, provider } of cases) {
       const chainId = chainIdOf(proposal.assetId as AssetId);
       const parts = await this.parts.findForEpoch(
@@ -712,24 +781,45 @@ export class SlashPartsService {
         proposal.chainEpoch,
       );
       if (!parts.some((part) => part.chainStatus === 'EXECUTED')) continue;
-      for (const part of parts.filter((row) => row.chainStatus === 'PENDING')) {
+
+      const due: SlashProposalPartEntity[] = [];
+      for (const part of parts.filter((row) => ['PENDING', 'REFUSED'].includes(row.chainStatus))) {
         try {
-          const record = await this.executor.readRecord(part.chainRequestId, provider, chainId);
-          if (record && record.status !== 'PENDING') {
+          const record = await this.readMatching(part, proposal, provider, chainId);
+          if (!record) continue; // never landed (a refusal that stands), or not ours
+          if (record.status !== 'PENDING') {
             await this.mirrorRecord(part, record);
             continue;
           }
-          const result = await this.executor.expire({
-            chainId,
-            requestId: part.chainRequestId,
-            provider,
-          });
-          await this.parts.updatePart(part.organizationId, part.id, {
-            chainStatus: 'CANCELLED',
-            cancelledAt: result.cancelledAt,
-            chainLastError: null,
-          });
-          expired += 1;
+          if (part.chainStatus === 'REFUSED') {
+            // A straggler's late transaction landed: it is a live judgement again.
+            await this.mirrorRecord(part, record);
+            this.logger.warn(
+              `slash part ${part.chainRequestId} (case ${proposal.id}) was given up on but its ` +
+                `record landed later; it is PENDING again`,
+            );
+          }
+          const doorOpen = now.getTime() >= record.executableAt.getTime();
+          const graceOver =
+            now.getTime() >= record.executableAt.getTime() + SLASH_EXECUTION_GRACE_MS_FOR_PARTS;
+          const keyGone = record.verifierCanSign === false;
+          if (doorOpen && !graceOver && !keyGone) {
+            due.push(part);
+          } else if (keyGone || graceOver) {
+            const result = await this.executor.expire({
+              chainId,
+              requestId: part.chainRequestId,
+              provider,
+            });
+            await this.parts.updatePart(part.organizationId, part.id, {
+              chainStatus: 'CANCELLED',
+              cancelledAt: result.cancelledAt,
+              chainLastError: null,
+            });
+            expired += 1;
+          } else {
+            waiting += 1; // early: nothing to send, nothing to write
+          }
         } catch (error) {
           waiting += 1;
           await this.parts
@@ -739,8 +829,42 @@ export class SlashPartsService {
             .catch(() => undefined);
         }
       }
+
+      if (due.length === 0) continue;
+      const outcomes = await this.executor.executeBatch(
+        due.map((part) => ({
+          chainId,
+          requestId: part.chainRequestId,
+          provider,
+          beneficiary: parseAccountId(part.beneficiaryAccount).address,
+          atomicGroup: proposal.id,
+        })),
+      );
+      for (const [index, outcome] of outcomes.entries()) {
+        const part = due[index];
+        if (outcome.ok && outcome.result) {
+          await this.parts.updatePart(part.organizationId, part.id, {
+            chainStatus: 'EXECUTED',
+            appliedAmount: outcome.result.appliedMinor,
+            agentAmount: outcome.result.agentAmountMinor,
+            platformAmount: outcome.result.platformAmountMinor,
+            executedAt: outcome.result.executedAt,
+            executionSignature: outcome.result.signature,
+            chainLastError: null,
+          });
+          executed += 1;
+          executedCases.add(proposal.id);
+        } else {
+          waiting += 1;
+          await this.parts
+            .updatePart(part.organizationId, part.id, {
+              chainLastError: chainErrorName(outcome.error) ?? 'transport',
+            })
+            .catch(() => undefined);
+        }
+      }
     }
-    return { expired, waiting };
+    return { expired, executed, waiting, executedCases: [...executedCases] };
   }
 
   // ── shared ──────────────────────────────────────────────────────────────

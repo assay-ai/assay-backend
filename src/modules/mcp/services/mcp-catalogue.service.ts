@@ -82,19 +82,35 @@ export class McpCatalogueService {
     // `defaultChainId` is still the viewer's own, so rule 1 of
     // `chooseSettlementChain` answers the
     // same chain a real call from this agent would settle on.
+    //
+    // **One tool's failure is that tool's alone.** A quote can throw — a
+    // catalogue defect in one tool's bindings, an unregistered asset, a stake
+    // read that failed — and a single `Promise.all` turned any of those into
+    // `-32603` for the whole list, for every agent on the platform. A tool
+    // whose quote throws has no honest price, so it is omitted exactly like a
+    // tool with no routable supply, and the failure is logged for whoever owns
+    // it. Its own `tools/call` still reports the real error.
     const quotes = await Promise.all(
       tools.map((tool) =>
-        this.router.quote(tool.id, {
-          payerChains: this.enabledChains,
-          defaultChainId: viewer?.chainId ?? null,
-          enabledChains: this.enabledChains,
-          // A catalogue is not an offer to be paid. A tool
-          // must be SHOWN rather than hidden when the reader cannot pay for it,
-          // and a standing withdrawal is the buyer's cash management — hiding a
-          // tool for it would make the listing flicker as they move money in and
-          // out. The refusal, when it comes, comes from the CALL path.
-          withdrawingChains: [],
-        }),
+        this.router
+          .quote(tool.id, {
+            payerChains: this.enabledChains,
+            defaultChainId: viewer?.chainId ?? null,
+            enabledChains: this.enabledChains,
+            // A catalogue is not an offer to be paid. A tool
+            // must be SHOWN rather than hidden when the reader cannot pay for it,
+            // and a standing withdrawal is the buyer's cash management — hiding a
+            // tool for it would make the listing flicker as they move money in and
+            // out. The refusal, when it comes, comes from the CALL path.
+            withdrawingChains: [],
+          })
+          .catch((error: unknown): null => {
+            this.logger.warn(
+              `${tool.name} (${tool.id}): omitted from tools/list — quote failed: ` +
+                (error instanceof Error ? error.message : String(error)),
+            );
+            return null;
+          }),
       ),
     );
 

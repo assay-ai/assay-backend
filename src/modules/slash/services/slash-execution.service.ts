@@ -1341,7 +1341,7 @@ export class SlashExecutionService {
       }
     }
 
-    await this.sweepStrandedParts();
+    await this.sweepStrandedParts(now);
 
     return { recovered, returned, voided };
   }
@@ -1352,7 +1352,7 @@ export class SlashExecutionService {
    * allowed yet. Its reservation holds the provider's stake, so the reconcile
    * pass revisits it every tick until the chain releases it. Never throws.
    */
-  private async sweepStrandedParts(): Promise<void> {
+  private async sweepStrandedParts(now: Date): Promise<void> {
     if (!this.parts) return;
     try {
       const rows = await this.parts.findCasesWithStrandedParts(this.config.sweepBatchSize);
@@ -1362,10 +1362,27 @@ export class SlashExecutionService {
         if (proposal) cases.push({ proposal, provider: await this.stakeAuthorityOf(proposal) });
       }
       if (cases.length === 0) return;
-      const swept = await this.parts.sweepStrandedParts(cases);
-      if (swept.expired > 0 || swept.waiting > 0) {
+      // The pass's own clock: the same instant every other decision this tick
+      // is made against.
+      const swept = await this.parts.sweepStrandedParts(cases, now);
+      // A late part paid now: the closed case's money columns follow the chain.
+      for (const id of swept.executedCases) {
+        const entry = cases.find((candidate) => candidate.proposal.id === id);
+        if (!entry) continue;
+        const view = await this.parts.readRecord(entry.proposal, entry.provider);
+        if (!view) continue;
+        await this.proposals.update(
+          { organizationId: entry.proposal.organizationId, id },
+          { appliedAmount: view.appliedMinor, platformAmount: view.platformAmountMinor },
+        );
         this.logger.warn(
-          `stranded slash parts: ${swept.expired} expired, ${swept.waiting} still holding stake`,
+          `slash case ${id}: a late part executed; the case now records ${view.appliedMinor} applied`,
+        );
+      }
+      if (swept.expired > 0 || swept.executed > 0) {
+        this.logger.warn(
+          `stranded slash parts: ${swept.executed} executed, ${swept.expired} expired, ` +
+            `${swept.waiting} not yet due`,
         );
       }
     } catch (error) {

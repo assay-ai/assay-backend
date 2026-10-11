@@ -14,6 +14,7 @@ import { BindingStatus } from '@modules/tool/ports/tool.types';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { AppError } from '@shared/errors/app-errors';
+import { MoneyUtil } from '@utils/money.util';
 
 import {
   MINIMUM_STAKE_BY_CHAIN,
@@ -760,5 +761,95 @@ describe('quote reports chains rather than hiding tools', () => {
     });
 
     expect(quote?.settlementChains).toEqual([DEVNET]);
+  });
+});
+
+/**
+ * One tool, two chains, two assets — the normal shape of a two-chain
+ * marketplace (BUG-J-BUY-05).
+ *
+ * A Solana provider sells the tool in USDC and an EVM provider sells it in
+ * USDG. Those two prices are not comparable and do not need to be: a buyer
+ * pays on ONE chain, so it is quoted the price of the bindings that settle
+ * there and routed among them. Throwing "priced in more than one asset" here
+ * took `tools/list` down for every agent on the platform.
+ */
+describe('a tool sold on two chains in two assets', () => {
+  const EVM = CHAIN_IDS.ROBINHOOD_TESTNET;
+  const USDG = ASSET_IDS.USDG_ROBINHOOD_TESTNET!;
+  const EVM_PAYOUT = `${EVM}:0x00000000000000000000000000000000000000aa` as never;
+  const usdg = (atomic: string) => MoneyUtil.of(atomic, USDG, 6);
+
+  const twoChains = () =>
+    buildRouter({
+      bindings: [
+        // Solana devnet, USDC 0.25.
+        buildBinding('sol', { priceAmount: '250000' }),
+        // Robinhood testnet, USDG 0.10.
+        buildBinding('evm', { priceAmount: '100000', assetId: USDG, settlementChains: [EVM] }),
+      ],
+      providers: [
+        buildProvider('sol'),
+        buildProvider('evm', { payoutAccountByChain: new Map([[EVM, EVM_PAYOUT]]) }),
+      ],
+      stakes: { sol: usdc(1000) },
+      stakesByChain: { [`evm|${EVM}`]: usdg('1000000000') },
+      invoker: new ScriptedInvoker({
+        'binding-evm': async () => ok(),
+        'binding-sol': async () => ok(),
+      }),
+      config: {
+        // Each chain keeps its own floor, in its own asset.
+        minimumStakeByChain: new Map([
+          [DEVNET, MINIMUM_STAKE_BY_CHAIN.get(DEVNET)],
+          [EVM, { floor: usdg('50000000'), priceMultiple: 1000 }],
+        ]) as never,
+      },
+    });
+
+  const buyerOn = (chainId: typeof DEVNET | typeof EVM | null): RoutingContext => ({
+    payerChains: [DEVNET, EVM],
+    enabledChains: [DEVNET, EVM],
+    defaultChainId: chainId,
+    withdrawingChains: [],
+  });
+
+  it('quotes an EVM buyer the USDG price of the EVM binding', async () => {
+    const quote = await twoChains().router.quote(TOOL_ID, buyerOn(EVM));
+
+    expect(quote?.price).toMatchObject({ amount: '100000', asset: USDG });
+    expect([...(quote?.settlementChains ?? [])].sort()).toEqual([DEVNET, EVM].sort());
+  });
+
+  it('quotes a Solana buyer the USDC price of the Solana binding', async () => {
+    const quote = await twoChains().router.quote(TOOL_ID, buyerOn(DEVNET));
+
+    expect(quote?.price).toMatchObject({ amount: '250000', asset: ASSET_IDS.USDC_SOLANA_DEVNET });
+    expect([...(quote?.settlementChains ?? [])].sort()).toEqual([DEVNET, EVM].sort());
+  });
+
+  it('quotes a buyer with no chain on the first enabled chain, not as an error', async () => {
+    const quote = await twoChains().router.quote(TOOL_ID, buyerOn(null));
+
+    expect(quote?.price).toMatchObject({ asset: ASSET_IDS.USDC_SOLANA_DEVNET });
+  });
+
+  it('routes an EVM buyer to the EVM binding and a Solana buyer to the Solana one', async () => {
+    const harness = twoChains();
+    const call = (chainId: typeof DEVNET | typeof EVM) =>
+      harness.router.route({
+        toolId: TOOL_ID,
+        callId: `call-${chainId}`,
+        input: { query: 'x' },
+        context: { ...buyerOn(chainId), payerChains: [chainId] },
+      });
+
+    const evm = await call(EVM);
+    expect(evm.binding.id).toBe('binding-evm');
+    expect(evm.settlementChain).toBe(EVM);
+
+    const sol = await call(DEVNET);
+    expect(sol.binding.id).toBe('binding-sol');
+    expect(sol.settlementChain).toBe(DEVNET);
   });
 });

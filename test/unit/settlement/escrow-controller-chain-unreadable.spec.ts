@@ -1,6 +1,6 @@
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { EscrowController } from '@modules/settlement/controllers/escrow.controller';
 import {
   SettlementErrorCode,
@@ -57,6 +57,7 @@ const SESSION: McpSession = {
   agentAccount: BUYER,
   chainId: CHAIN,
   label: null,
+  callerKind: McpCallerKind.CONFIG,
 };
 
 /** What `EscrowAccountService.assetFor` raises once the chain cannot be read. */

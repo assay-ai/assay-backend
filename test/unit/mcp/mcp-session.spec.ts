@@ -1,4 +1,5 @@
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
+import { McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
 import {
   ConfigMcpSessionSource,
   McpCredentialSnapshot,
@@ -38,6 +39,8 @@ describe('ConfigMcpSessionSource — the token decides whose balance is spent', 
       agentAccount: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/agent-1',
       chainId: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
       label: 'research bot',
+      // a config demo token stands in for a person
+      callerKind: McpCallerKind.CONFIG,
     });
   });
 

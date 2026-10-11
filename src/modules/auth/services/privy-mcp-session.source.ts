@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
-import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 
 import { AuthErrors } from '../errors/auth.errors';
 import { AgentProvisioningService } from './agent-provisioning.service';
@@ -90,6 +90,7 @@ export class PrivyMcpSessionSource implements McpSessionPort {
       agentAccount: agent.primaryAccountId as AccountId,
       chainId: agent.chainId as ChainId,
       label: agent.label,
+      callerKind: McpCallerKind.HUMAN,
     };
   }
 }

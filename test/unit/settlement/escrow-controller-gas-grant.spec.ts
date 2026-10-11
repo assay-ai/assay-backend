@@ -1,5 +1,5 @@
 import { AccountId, AssetId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { EscrowController } from '@modules/settlement/controllers/escrow.controller';
 import { EscrowIntentKind } from '@modules/settlement/ports/escrow-intent-builder.port';
 import {
@@ -48,6 +48,7 @@ const SESSION: McpSession = {
   agentAccount: BUYER,
   chainId: CHAIN,
   label: null,
+  callerKind: McpCallerKind.CONFIG,
 };
 
 const GRANTED_WEI = 7_200_000_000_000n;

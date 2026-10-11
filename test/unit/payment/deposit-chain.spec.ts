@@ -1,5 +1,5 @@
 import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
   LinkedAccount,
   resolveDepositChain,
@@ -102,6 +102,7 @@ describe('sessionAccounts', () => {
       agentAccount: DEVNET_ACCOUNT,
       chainId: DEVNET,
       label: 'buyer',
+      callerKind: McpCallerKind.CONFIG,
     };
 
     expect(sessionAccounts(session)).toEqual([{ chainId: DEVNET, accountId: DEVNET_ACCOUNT }]);

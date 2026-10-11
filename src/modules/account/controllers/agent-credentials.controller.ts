@@ -13,7 +13,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 
 import { AgentIdParamDto } from '../dto/agent-id-param.dto';
 import {
@@ -54,7 +54,10 @@ export class AgentCredentialsController {
     return this.credentials.list(session.organizationId, params.agentId, query);
   }
 
+  // Minting and revoking machine tokens is a person's act: an agent that
+  // could mint itself a fresh token could outlive its own revocation.
   @Post()
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Create a credential — the secret is returned exactly once' })
   @ApiResponse({
     status: 201,
@@ -70,6 +73,7 @@ export class AgentCredentialsController {
   }
 
   @Delete(':id')
+  @UseGuards(HumanSessionGuard)
   @HttpCode(204)
   @ApiOperation({ summary: 'Revoke a credential — sets revoked_at, never deletes the row' })
   @ApiResponse({ status: 204, description: 'Revoked' })

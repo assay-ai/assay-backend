@@ -424,3 +424,67 @@ function compareStrings(left: string, right: string): number {
   if (left === right) return 0;
   return left < right ? -1 : 1;
 }
+
+/**
+ * The 32-byte `policy` field the EVM attestation signs: SHA-256 of the policy
+ * string's UTF-8 bytes (the Solana executor signs the same mapping).
+ */
+export function policyHashOf(policy: string): `0x${string}` {
+  return `0x${createHash('sha256').update(policy, 'utf8').digest('hex')}`;
+}
+
+/** The signed terms a record carries, as far as its chain stores them. */
+export interface SlashRecordTerms {
+  /** Bare address. Absent on a chain whose snapshot does not carry it. */
+  readonly beneficiary?: string;
+  readonly penaltyMinor: string;
+  /** 32-byte hex. Absent when not carried. */
+  readonly policy?: string;
+  /**
+   * Whether the record's verifier is acceptable: this platform's own key, or
+   * — key rotation — a key the chain still allows to sign. Absent when the
+   * chain cannot say.
+   */
+  readonly verifierAccepted?: boolean;
+}
+
+/**
+ * THE one rule for treating a record found at one of our request ids as our
+ * judgement — used by the executor before adopting on propose and by the
+ * parts service before mirroring anything it reads back.
+ *
+ * Refused, always: a different beneficiary, penalty or policy. Those are what
+ * the verifier signed for this agent; a record with other terms at our id is
+ * somebody else's judgement, and adopting it would pay the wrong amount or
+ * the wrong account under our name. A different verifier is accepted only
+ * while that key may still sign on chain — a rotation — because a revoked
+ * key's record can never execute.
+ *
+ * Returns the first mismatching field, or `null`. Fields a chain's snapshot
+ * does not carry are not judged (Solana's record has no policy string to
+ * compare against here).
+ */
+export function slashRecordMismatch(
+  record: SlashRecordTerms,
+  expected: {
+    readonly beneficiary: string;
+    readonly penaltyMinor: string;
+    readonly policy: string;
+  },
+): 'beneficiary' | 'penalty' | 'policy' | 'verifier' | null {
+  if (
+    record.beneficiary !== undefined &&
+    record.beneficiary.toLowerCase() !== expected.beneficiary.toLowerCase()
+  ) {
+    return 'beneficiary';
+  }
+  if (BigInt(record.penaltyMinor) !== BigInt(expected.penaltyMinor)) return 'penalty';
+  if (
+    record.policy !== undefined &&
+    record.policy.toLowerCase() !== policyHashOf(expected.policy).toLowerCase()
+  ) {
+    return 'policy';
+  }
+  if (record.verifierAccepted === false) return 'verifier';
+  return null;
+}

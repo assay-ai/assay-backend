@@ -60,25 +60,35 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
   }
 
   /**
-   * Cases (cross-tenant, like the other sweeps) that are closed as executed
-   * while a part of their current epoch still stands PENDING on chain — a
-   * reservation an `expireSlash` did not release.
+   * Cases (cross-tenant, like the other sweeps) closed as executed while a
+   * part of their current epoch is not settled: still PENDING on chain (a
+   * reservation an `expireSlash` did not release, or a part not yet paid), or
+   * recently REFUSED (a straggler whose transaction may have landed late).
    */
   async findCasesWithStrandedParts(
     limit: number,
   ): Promise<{ organizationId: string; proposalId: string }[]> {
-    return this.manager
-      .createQueryBuilder(SlashProposalPartEntity, 'part')
-      .innerJoin('slash_proposals', 'proposal', 'proposal.id = part.proposal_id')
-      .select('part.organization_id', 'organizationId')
-      .addSelect('part.proposal_id', 'proposalId')
-      .where(`part.chain_status = 'PENDING'`)
-      .andWhere('part.chain_epoch = proposal.chain_epoch')
-      .andWhere(`proposal.status IN ('EXECUTED', 'REVERSED')`)
-      .groupBy('part.organization_id')
-      .addGroupBy('part.proposal_id')
-      .limit(limit)
-      .getRawMany();
+    return (
+      this.manager
+        .createQueryBuilder(SlashProposalPartEntity, 'part')
+        .innerJoin('slash_proposals', 'proposal', 'proposal.id = part.proposal_id')
+        .select('part.organization_id', 'organizationId')
+        .addSelect('part.proposal_id', 'proposalId')
+        // PENDING: a reservation still standing. REFUSED, recently: a straggler
+        // given up on while its transaction was in flight. An attestation is
+        // valid for 10 minutes, so nothing can land a day after the refusal —
+        // older refusals stand and are not re-read for ever.
+        .where(
+          `(part.chain_status = 'PENDING'
+          OR (part.chain_status = 'REFUSED' AND part.updated_at > now() - interval '1 day'))`,
+        )
+        .andWhere('part.chain_epoch = proposal.chain_epoch')
+        .andWhere(`proposal.status IN ('EXECUTED', 'REVERSED')`)
+        .groupBy('part.organization_id')
+        .addGroupBy('part.proposal_id')
+        .limit(limit)
+        .getRawMany()
+    );
   }
 
   async updatePart(

@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Patch, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
@@ -28,11 +28,15 @@ export class SpendPolicyController {
     return this.spendPolicy.get(session.organizationId, session.agentId);
   }
 
+  // The agent's own credential may READ its limits (it needs them to plan),
+  // never write them: the policy exists to bound the agent.
   @Patch()
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({
     summary: "Write a new version of the session's agent policy (append-only)",
   })
   @ApiResponse({ status: 200, description: 'The new live policy', type: SpendPolicyDto })
+  @ApiResponse({ status: 403, description: 'AUTH_HUMAN_SESSION_REQUIRED — an agent credential' })
   async patch(
     @CurrentSession() session: McpSession,
     @Body() body: UpdateSpendPolicyDto,

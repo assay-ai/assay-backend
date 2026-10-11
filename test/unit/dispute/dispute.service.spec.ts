@@ -8,7 +8,7 @@ import { DisputeState, DisputeSubjectType } from '@modules/dispute/dto/dispute.d
 import { ListDisputesQueryDto } from '@modules/dispute/dto/list-disputes.dto';
 import { CreateDisputeBodyDto } from '@modules/dispute/dto/create-dispute.dto';
 import { DisputeService } from '@modules/dispute/services/dispute.service';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { SortDirection } from '@shared/api';
 
 import { fakeQueryBuilder } from './helpers/fake-query-builder';
@@ -26,6 +26,7 @@ const SESSION: McpSession = {
   agentAccount: 'solana:mainnet:agent' as any,
   chainId: 'solana:mainnet' as any,
   label: null,
+  callerKind: McpCallerKind.CONFIG,
 };
 
 function buildDispute(overrides: Partial<DisputeEntity> = {}): DisputeEntity {

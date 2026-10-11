@@ -3,7 +3,7 @@ import { ProviderConnectivityCheckRepository } from '@database/postgres/reposito
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { ProviderPayoutChallengeRepository } from '@database/postgres/repositories/provider-payout-challenge.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import {
   ConnectivityOutcome,
@@ -40,6 +40,7 @@ const SESSION: McpSession = {
   agentAccount: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp:acct' as any,
   chainId: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' as any,
   label: null,
+  callerKind: McpCallerKind.CONFIG,
 };
 
 function acceptedTermsInput(overrides: Partial<Record<string, unknown>> = {}) {

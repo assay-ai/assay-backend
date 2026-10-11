@@ -13,8 +13,9 @@ import { CacheHeaderInterceptor } from '@shared/interceptors/cache-header.interc
 
 import { SessionAuthGuard } from '@shared/auth';
 import {
-  McpSession,
   MCP_SESSION_SOURCE,
+  McpCallerKind,
+  McpSession,
   McpSessionPort,
 } from '@modules/mcp/ports/mcp-session.port';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
@@ -46,6 +47,7 @@ describe('GET /providers/me/calls/export — real HTTP', () => {
       agentAccount: context.account('http-export-agent'),
       chainId: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' as never,
       label: 'export test',
+      callerKind: McpCallerKind.CONFIG,
     };
 
     const sessionSource: McpSessionPort = {

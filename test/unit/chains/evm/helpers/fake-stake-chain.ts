@@ -124,6 +124,8 @@ export class FakeStakeChain {
   now = 1_791_700_000n;
   verifier: `0x${string}`;
   revoked = false;
+  /** Further keys `CONFIG.canSign` accepts (a rotation). `revoked` overrides all. */
+  readonly alsoRegistered = new Set<string>();
   params = {
     treasury: TREASURY,
     redeemer: RELAYER,
@@ -266,6 +268,10 @@ export class FakeStakeChain {
   private read(address: string, functionName: string, args: readonly unknown[]): unknown {
     if (functionName === 'params') return { ...this.params };
     if (functionName === 'admin') return ADMIN;
+    if (functionName === 'canSign') {
+      const key = getAddress(args[0] as string);
+      return !this.revoked && (key === this.verifier || this.alsoRegistered.has(key));
+    }
     if (functionName === 'stakeOf') {
       const stake = this.state.stakes.get(getAddress(args[0] as string)) ?? {
         bonded: 0n,

@@ -35,6 +35,7 @@ import {
   SlashRecordSnapshot,
 } from '@modules/slash/ports/slash-executor.port';
 import { SlashCaps, SlashCapsReaderPort } from '@modules/slash/ports/slash-caps-reader.port';
+import { slashRecordMismatch } from '@modules/slash/domain/prorata-slash';
 import { SigningRequesterType } from '@modules/verification/signing/domain/signing-journal';
 
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
@@ -274,7 +275,36 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
       executableAt: secondsToDate(record.executableAt),
       executedAt: record.executedAt === 0n ? null : secondsToDate(record.executedAt),
       cancelledAt: null,
+      beneficiary: getAddress(record.beneficiary),
+      policy: record.policy,
+      verifier: getAddress(record.verifier),
+      ...(await this.verifierStanding(chainId, record.verifier)),
     };
+  }
+
+  /**
+   * Whether a record's verifier may still sign (`CONFIG.canSign`) and whether
+   * it is acceptable as ours: this platform's own key, or a key the chain
+   * still allows — a rotation. A process with no signer cannot claim the key
+   * as its own and answers on `canSign` alone.
+   */
+  private async verifierStanding(
+    chainId: ChainId,
+    verifier: string,
+  ): Promise<{ verifierCanSign: boolean; verifierAccepted: boolean }> {
+    const verifierCanSign = (await this.client(chainId).readContract({
+      address: this.deployment(chainId).config,
+      abi: X402_CONFIG_ABI,
+      functionName: 'canSign',
+      args: [getAddress(verifier)],
+    })) as boolean;
+    let ours = false;
+    try {
+      ours = (await this.verifierAddress(chainId)) === getAddress(verifier);
+    } catch {
+      ours = false;
+    }
+    return { verifierCanSign, verifierAccepted: ours || verifierCanSign };
   }
 
   // ── Phase one ───────────────────────────────────────────────────────────
@@ -537,15 +567,21 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
         }
 
         const truncated = new Set<string>();
+        const keysOf = new Map<number, { provider: string; verifier: string | null }>();
         remaining.forEach((index, position) => {
           const executed = results[position * 2];
           const read = results[position * 2 + 1];
-          if (!executed?.success || !read?.success) return;
+          if (!read?.success) return;
           const record = decodeFunctionResult({
             abi: X402_STAKE_ABI,
             functionName: 'slashRecordOf',
             data: read.returnData,
-          }) as { applied: bigint; reserved: bigint; executableAt: bigint };
+          }) as { applied: bigint; reserved: bigint; executableAt: bigint; verifier: string };
+          keysOf.set(index, {
+            provider: requests[index].provider.toLowerCase(),
+            verifier: record.verifier ? record.verifier.toLowerCase() : null,
+          });
+          if (!executed?.success) return;
           if (BigInt(record.applied) >= BigInt(record.reserved)) return;
           const overdue =
             this.config.now() >=
@@ -553,6 +589,33 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
           if (!overdue) truncated.add(groupOf(index));
         });
         if (truncated.size === 0) break;
+
+        // No starvation. A newer group that shares a provider window or a
+        // verifier key with a deferred one is held back too — otherwise the
+        // capacity freed by deferring the older case is taken by the newer
+        // ones, every tick, and the older case never executes.
+        const blockedProviders = new Set<string>();
+        const blockedVerifiers = new Set<string>();
+        let firstDeferred = Number.POSITIVE_INFINITY;
+        remaining.forEach((index, position) => {
+          if (!truncated.has(groupOf(index))) return;
+          firstDeferred = Math.min(firstDeferred, position);
+          const keys = keysOf.get(index);
+          if (keys) {
+            blockedProviders.add(keys.provider);
+            if (keys.verifier) blockedVerifiers.add(keys.verifier);
+          }
+        });
+        remaining.forEach((index, position) => {
+          if (position <= firstDeferred) return;
+          const keys = keysOf.get(index);
+          const shares =
+            blockedProviders.has(requests[index].provider.toLowerCase()) ||
+            (keys?.verifier !== null &&
+              keys?.verifier !== undefined &&
+              blockedVerifiers.has(keys.verifier));
+          if (shares) truncated.add(groupOf(index));
+        });
 
         for (const index of remaining) {
           if (!truncated.has(groupOf(index))) continue;
@@ -931,17 +994,21 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
     if (!record) return null;
     this.assertRecordProvider(record, request.provider, request.requestId);
     // The same request id carrying a different judgement is not ours to
-    // adopt: every signed field the record keeps must match what we would sign.
-    const mismatch =
-      getAddress(record.beneficiary) !== this.address(request.beneficiary, 'beneficiary')
-        ? 'beneficiary'
-        : record.penalty !== parseMinorUnits(request.penaltyMinor)
-          ? 'penalty'
-          : record.policy.toLowerCase() !== sha256(toBytes(request.policy)).toLowerCase()
-            ? 'policy'
-            : getAddress(record.verifier) !== (await this.verifierAddress(request.chainId))
-              ? 'verifier'
-              : null;
+    // adopt. ONE rule, shared with the parts service: `slashRecordMismatch`.
+    const mismatch = slashRecordMismatch(
+      {
+        beneficiary: record.beneficiary,
+        penaltyMinor: record.penalty.toString(),
+        policy: record.policy,
+        verifierAccepted: (await this.verifierStanding(request.chainId, record.verifier))
+          .verifierAccepted,
+      },
+      {
+        beneficiary: this.address(request.beneficiary, 'beneficiary'),
+        penaltyMinor: request.penaltyMinor,
+        policy: request.policy,
+      },
+    );
     if (mismatch) {
       throw ChainErrors.payloadMalformed({
         reason: `slash record ${request.requestId} carries a different ${mismatch}; not adopting it`,
