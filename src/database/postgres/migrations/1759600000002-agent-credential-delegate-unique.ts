@@ -15,19 +15,21 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * releases an expired holder's binding before it binds.
  *
  * Duplicates that exist before the index (only possible while this rule was
- * missing) keep the EARLIEST binding, the credential that held the key first,
- * and the later ones are unbound.
+ * missing) are ALL unbound: no column says which holder is the legitimate one
+ * (`delegate_bound_at` is moved by every re-bind, so "earliest wins" would
+ * keep whichever agent did not re-bind last), and an unbound agent simply
+ * binds again with a fresh proof. The payer's on-chain grant is untouched.
  */
 export class AgentCredentialDelegateUnique1759600000002 implements MigrationInterface {
   name = 'AgentCredentialDelegateUnique1759600000002';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(
-      `UPDATE "agent_credentials" c SET "delegate_account" = NULL, "delegate_bound_at" = NULL ` +
-        `FROM (SELECT "id", row_number() OVER (PARTITION BY lower("delegate_account") ` +
-        `ORDER BY "delegate_bound_at", "id") AS rn FROM "agent_credentials" ` +
-        `WHERE "delegate_account" IS NOT NULL AND "revoked_at" IS NULL AND "deleted_at" IS NULL) d ` +
-        `WHERE c."id" = d."id" AND d.rn > 1`,
+      `UPDATE "agent_credentials" SET "delegate_account" = NULL, "delegate_bound_at" = NULL ` +
+        `WHERE "revoked_at" IS NULL AND "deleted_at" IS NULL AND lower("delegate_account") IN (` +
+        `SELECT lower("delegate_account") FROM "agent_credentials" ` +
+        `WHERE "delegate_account" IS NOT NULL AND "revoked_at" IS NULL AND "deleted_at" IS NULL ` +
+        `GROUP BY lower("delegate_account") HAVING count(*) > 1)`,
     );
     await queryRunner.query(
       `CREATE UNIQUE INDEX "uq_agent_credentials_delegate_live" ON "agent_credentials" ` +

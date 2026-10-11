@@ -209,6 +209,41 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     expect(row.delegate_account).toBeNull();
   });
 
+  /**
+   * Migration 1759600000002 on a database that already has duplicates (only
+   * possible before it): EVERY live holder is unbound — the one that re-bound
+   * last is no more legitimate than the other — while a revoked row is left be.
+   */
+  it('unbinds every live holder of a key bound twice before the unique index', async () => {
+    await dataSource.undoLastMigration({ transaction: 'all' });
+    const key = `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`;
+    const early = await credential();
+    const late = await credential();
+    const revoked = await credential();
+    await dataSource.query(
+      `UPDATE "agent_credentials" SET "delegate_account" = $2, "delegate_bound_at" = now() - interval '1 hour' WHERE "id" = $1`,
+      [early, key],
+    );
+    await dataSource.query(
+      `UPDATE "agent_credentials" SET "delegate_account" = lower($2), "delegate_bound_at" = now() WHERE "id" = $1`,
+      [late, key],
+    );
+    await dataSource.query(
+      `UPDATE "agent_credentials" SET "delegate_account" = $2, "delegate_bound_at" = now(), "revoked_at" = now(), "revoked_by" = 'test' WHERE "id" = $1`,
+      [revoked, key],
+    );
+    await dataSource.runMigrations({ transaction: 'all' });
+
+    const rows: { id: string; delegate_account: string | null }[] = await dataSource.query(
+      `SELECT "id", "delegate_account" FROM "agent_credentials" WHERE "id" = ANY($1)`,
+      [[early, late, revoked]],
+    );
+    const byId = Object.fromEntries(rows.map((r) => [r.id, r.delegate_account]));
+    expect(byId[early]).toBeNull();
+    expect(byId[late]).toBeNull();
+    expect(byId[revoked]).toBe(key);
+  });
+
   it('keeps the account and the instant together, by CHECK', async () => {
     const id = await credential();
     await expect(
