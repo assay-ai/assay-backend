@@ -85,7 +85,11 @@ describe('human-only control writes', () => {
     markAllRead: jest.fn(),
   };
   const escrows = { assetFor: jest.fn(), getForConsole: jest.fn(async () => ({})) };
-  const withdrawals = { buildIntent: jest.fn(), submitRelayedIntent: jest.fn() };
+  const withdrawals = {
+    buildIntent: jest.fn(),
+    submitRelayedIntent: jest.fn(),
+    unsettledVouchers: jest.fn(async () => null),
+  };
   // Agent payment delegation: the payer's control over what its agent may
   // spend. Every route, the read included, is the person's and never the agent's.
   const delegation = {
@@ -225,6 +229,21 @@ describe('human-only control writes', () => {
     expect(res.status).toBe(403);
     expect(JSON.stringify(res.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
     expect(delegation.list).not.toHaveBeenCalled();
+  });
+
+  it('GET /escrow/unsettled refuses an agent credential and answers the payer (review S3-12)', async () => {
+    const agent = await request(app.getHttpServer())
+      .get('/escrow/unsettled')
+      .set('Authorization', 'Bearer token-agent');
+    expect(agent.status).toBe(403);
+    expect(JSON.stringify(agent.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
+    expect(withdrawals.unsettledVouchers).not.toHaveBeenCalled();
+
+    const human = await request(app.getHttpServer())
+      .get('/escrow/unsettled')
+      .set('Authorization', 'Bearer token-human');
+    expect(human.status).toBe(200);
+    expect(withdrawals.unsettledVouchers).toHaveBeenCalledTimes(1);
   });
 
   it('still refuses an unknown token with 401, before the human check', async () => {

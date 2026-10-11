@@ -26,6 +26,7 @@ import {
 } from './evm-gas-grant.service';
 import { EvmRelayedEscrowIntentSubmitter } from './evm-relayed-escrow-intent.service';
 import { EvmRelayer } from './evm-relayer.service';
+import { readEvmRelayerTiming } from './evm-relayer-timing';
 import { EVM_RELAYER } from './ports/evm-relayer.port';
 import {
   EVM_RELAYER_KEY_SOURCES,
@@ -194,6 +195,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
           sources,
           alerts,
           readOptionalWei(config.get<string>(EVM_RELAYER_FLOAT_LOW_WATER_ENV)),
+          readEvmRelayerTiming((key) => config.get<string>(key)),
         ),
       inject: [EVM_RPC_CLIENTS, EVM_RELAYER_KEY_SOURCES, ALERT_PORT, ConfigService],
     },

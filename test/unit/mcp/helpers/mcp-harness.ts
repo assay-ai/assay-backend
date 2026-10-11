@@ -22,7 +22,10 @@ import {
   PaymentIntentTransitionContext,
   PaymentRail,
 } from '@modules/payment/ports/payment.types';
-import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
+import {
+  PaymentIntentService,
+  VoucherAdmission,
+} from '@modules/payment/services/payment-intent.service';
 import { CreatePaymentIntentInput } from '@modules/payment/ports/payment.types';
 import {
   ToolCallRecordInput,
@@ -182,7 +185,13 @@ export class FakeIntents {
     );
   }
 
-  create(input: CreatePaymentIntentInput): Promise<PaymentIntent> {
+  /** Set by a test: the payer's voucher admission is paused for that many seconds (BUG-D1-07). */
+  pausedFor: number | null = null;
+
+  create(input: CreatePaymentIntentInput, admission?: VoucherAdmission): Promise<PaymentIntent> {
+    if (admission && this.pausedFor !== null) {
+      admission.admit({ escrow: 0n, delegate: 0n, pausedFor: this.pausedFor });
+    }
     const id = `intent-${++this.sequence}`;
     const intent: PaymentIntent = {
       id,

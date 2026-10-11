@@ -39,6 +39,7 @@ export enum ChainErrorCode {
   CHAIN_CONFIG_VALUE_INVALID = 'CHAIN_CONFIG_VALUE_INVALID',
   CHAIN_LATEST_BLOCK_STALE = 'CHAIN_LATEST_BLOCK_STALE',
   CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE = 'CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE',
+  CHAIN_RELAY_NOT_SENT = 'CHAIN_RELAY_NOT_SENT',
 }
 
 export type ChainErrorCodesArePrefixed = AssertDomainErrorCodes<'CHAIN', `${ChainErrorCode}`>;
@@ -444,5 +445,17 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
     message: (context?: Record<string, any>) =>
       `The chain state that decides who may sign this voucher could not be read` +
       `${context?.what ? ` (${context.what})` : ''}; nothing was charged — try again`,
+  },
+  /**
+   * A relayed send that bounds its queue wait waited longer than that behind
+   * the chain's other sends, and was given up BEFORE anything was signed or
+   * broadcast (BUG-D1-07 review). A definite outcome: nothing can land.
+   */
+  relayNotSent: {
+    code: ChainErrorCode.CHAIN_RELAY_NOT_SENT,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `The relayer was busy for longer than ${context?.waitedMs ?? 'its limit'} ms, so this ` +
+      `request was not sent; nothing changed on chain — try again shortly`,
   },
 });

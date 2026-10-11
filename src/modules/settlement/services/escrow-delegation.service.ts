@@ -127,10 +127,12 @@ export class EscrowDelegationService {
     const asset = await this.escrows.assetFor(account);
     const relay = () =>
       this.withdrawals.submitRelayedIntent(organizationId, account, asset, claimedPayer, intent);
-    // The last check, under a pause on the payer's admission so no voucher is
-    // admitted under the old caps while the new ones are relayed (BUG-D1-07).
-    // A revocation is never refused for it — revoking is the brake, and its
-    // in-flight risk is accepted — but it is relayed under the pause too.
+    // The last check, under a pause on this delegate's admission so none of
+    // its vouchers is admitted under the old caps while the new ones are
+    // relayed (BUG-D1-07). Only this delegate's: a change to its grant cannot
+    // strand the payer's own vouchers or another delegate's. A revocation is
+    // never refused for it — revoking is the brake, and its in-flight risk is
+    // accepted — but it is relayed under the pause too.
     let submission;
     if (
       intent.kind === EscrowDelegationKind.AUTHORIZE_DELEGATE ||
@@ -159,6 +161,7 @@ export class EscrowDelegationService {
         scope,
         lowered,
         acknowledged: intent.kind === EscrowDelegationKind.REVOKE_DELEGATE || acknowledgeUnsettled,
+        deadline: intent.deadline,
         relay,
       }));
     } else {

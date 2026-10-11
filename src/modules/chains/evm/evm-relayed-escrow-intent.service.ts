@@ -135,6 +135,10 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       data,
       gasLimit,
       purpose: `${intent.kind} bySig nonce=${intent.nonce}`,
+      // A relayed tightening keeps the payer's voucher admission paused until
+      // its outcome is known, so the time it may wait behind other sends is
+      // bounded (BUG-D1-07 review): past it, it is given up unsent.
+      boundQueueWait: true,
     });
 
     if (result.status !== 'SUCCESS') {

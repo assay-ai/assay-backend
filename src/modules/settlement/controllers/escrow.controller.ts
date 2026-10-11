@@ -149,7 +149,12 @@ export class EscrowController {
    * has not redeemed yet, beside the escrow's own window (BUG-D1-07). A console
    * shows them before the buyer lowers a limit, and polls this while waiting
    * for them to settle.
+   *
+   * The payer's own (HUMAN) session only, like `GET /escrow/delegates`: an
+   * agent has no use for the payer-wide figures, and each read costs a chain
+   * read.
    */
+  @UseGuards(HumanSessionGuard)
   @Get('unsettled')
   @ApiOperation({ summary: "The payer's payments still being settled on chain" })
   @ApiResponse({ status: 200, type: GetEscrowUnsettledResponseDto })

@@ -355,6 +355,43 @@ describe('rail B over MCP', () => {
       return { ...h, client };
     }
 
+    /**
+     * REGRESSION (BUG-D1-07 review, finding 4): the admission pause while the
+     * payer tightens its caps is retryable — nothing was charged and the seq is
+     * not spent — but the MCP error said `retryable: false`, so an agent gave
+     * up the task every time its payer edited a cap.
+     */
+    it('marks PAYMENT_VOUCHER_ADMISSION_PAUSED retryable, with a retryAfter hint', async () => {
+      const { client, intents, escrow } = await connect();
+      escrow.withdrawRequested = 0n;
+      const refused = (await client.callTool({
+        name: TOOL_NAME,
+        arguments: ARGS,
+        _meta: { [X402_RAIL]: 'B' },
+      })) as CallToolResult;
+      const requirement = refused._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
+      intents.pausedFor = 7;
+
+      const paused = (await client.callTool({
+        name: TOOL_NAME,
+        arguments: ARGS,
+        _meta: {
+          [X402_VOUCHER]: {
+            voucher: voucherFor(requirement),
+            signature: fakeVoucherSignature(requirement.payer),
+            providerId: requirement.providerId,
+          },
+        },
+      })) as CallToolResult;
+
+      expect(paused.isError).toBe(true);
+      expect(paused._meta?.[X402_ERROR]).toMatchObject({
+        code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
+        retryable: true,
+        retryAfter: 7,
+      });
+    });
+
     it('carries the requirement in _meta[x402/paymentRequired] and takes the voucher back in _meta', async () => {
       const { client, intents } = await connect();
 

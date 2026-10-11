@@ -174,7 +174,7 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     statusCode: 503,
     message: (context?: Record<string, any>) =>
       `The payer is changing its payment limits right now, so no payment is accepted until the ` +
-      `change lands${context?.retryAfterSeconds ? ` (retry in about ${context.retryAfterSeconds} s)` : ''}; ` +
+      `change lands${context?.retryAfter ? ` (retry in about ${context.retryAfter} s)` : ''}; ` +
       `nothing was charged`,
   },
   /**

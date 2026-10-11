@@ -14,7 +14,11 @@ import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
 import { VoucherService } from '@modules/payment/services/voucher.service';
 import { EscrowDelegationStatus } from '@modules/settlement/ports/escrow-delegation.port';
 import { EscrowDelegationService } from '@modules/settlement/services/escrow-delegation.service';
-import { UnsettledVoucherGuard } from '@modules/settlement/services/unsettled-voucher-guard.service';
+import { DEFAULT_EVM_RELAYER_TIMING } from '@modules/chains/evm/evm-relayer-timing';
+import {
+  tighteningHoldMs,
+  UnsettledVoucherGuard,
+} from '@modules/settlement/services/unsettled-voucher-guard.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { deployment, EvmSigner, generateSigner } from '../../unit/chains/evm/evm-fixtures';
@@ -31,6 +35,10 @@ const usdg = (atomic: bigint) => MoneyUtil.of(atomic, USDG, 6);
 /** The delegation records the adapter reads (`delegationOf`), and nothing else. */
 class FakeEvmChain {
   grants = new Map<string, Record<string, unknown>>();
+  /** Set by a test: every `delegationOf` read waits for this first (a barrier). */
+  gate: Promise<void> | null = null;
+  /** How many reads are waiting at the gate. */
+  waiting = 0;
 
   async getCode() {
     return undefined;
@@ -38,6 +46,10 @@ class FakeEvmChain {
 
   async readContract(args: { functionName: string; args: readonly unknown[] }): Promise<unknown> {
     if (args.functionName !== 'delegationOf') throw new Error(`unexpected ${args.functionName}`);
+    if (this.gate) {
+      this.waiting += 1;
+      await this.gate;
+    }
     const [payer, delegate] = args.args as string[];
     return (
       this.grants.get(`${payer.toLowerCase()}:${delegate.toLowerCase()}`) ?? {
@@ -265,47 +277,209 @@ describe('Lowering caps with vouchers in flight (BUG-D1-07)', () => {
     expect(listed.unsettled).toMatchObject({ count: 1, total: 100_000n, windowNeeds: 2_370_000n });
   });
 
-  it('admits no voucher while a tightening is relayed, and admits again once it is lifted', async () => {
+  /** The signed request's deadline: chain now + 300 s, as the intent builder sets it. */
+  const deadline = () => BigInt(Math.floor(Date.now() / 1000) + 300);
+
+  /** Moves every pause of the payer back in time, as if `seconds` had passed. */
+  async function age(seconds: number): Promise<void> {
+    await context.dataSource.query(
+      `UPDATE "voucher_admission_pauses"
+          SET "paused_until" = "paused_until" - make_interval(secs => $2),
+              "landed_at" = "landed_at" - make_interval(secs => $2)
+        WHERE "payer_account" = $1`,
+      [payer.account, seconds],
+    );
+  }
+
+  const paused = { errorCode: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED };
+
+  it('admits no voucher while a tightening is relayed, nor for the chain-lag margin after it lands', async () => {
     grant(500_000n, 10_000_000n);
     let during: unknown;
     await guard.relayTightening({
       scope: delegateScope(),
       lowered: { maxPerWindow: 9_000_000n },
       acknowledged: false,
+      deadline: deadline(),
       relay: async () => {
         during = await service.redeem(input(delegate, 100_000n)).catch((error: unknown) => error);
       },
     });
-    expect(during).toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED });
+    expect(during).toMatchObject(paused);
     // Still paused for the settle margin after the landing...
-    await expect(service.redeem(input(delegate, 100_000n))).rejects.toMatchObject({
-      errorCode: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
-    });
-    // ...and admitting again once it ends.
-    await context.repository.resumeVoucherAdmission(payer.account, new Date());
+    await expect(service.redeem(input(delegate, 100_000n))).rejects.toMatchObject(paused);
+    // ...and admitting again once it has passed, for a read taken after it.
+    await age(31);
     await expect(service.redeem(input(delegate, 100_000n))).resolves.toBeDefined();
   });
 
+  /**
+   * REGRESSION (review finding 1): request B of the same payer, refused by
+   * name, used to set the payer's one `paused_until` to now while request A was
+   * still being relayed. Each request now holds and ends its own row.
+   */
+  it('a second tightening refused by name leaves the first one’s pause in force', async () => {
+    grant(500_000n, 10_000_000n);
+    let landA!: () => void;
+    const a = guard.relayTightening({
+      scope: delegateScope(),
+      lowered: { maxPerWindow: 9_000_000n },
+      acknowledged: true,
+      deadline: deadline(),
+      relay: () => new Promise<void>((resolve) => (landA = resolve)),
+    });
+    while (!landA) await new Promise((resolve) => setImmediate(resolve));
+
+    await expect(
+      guard.relayTightening({
+        scope: delegateScope(),
+        lowered: { maxPerWindow: 8_000_000n },
+        acknowledged: true,
+        deadline: deadline(),
+        relay: async () => {
+          throw Object.assign(new Error('rate limited'), {
+            errorCode: 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED',
+          });
+        },
+      }),
+    ).rejects.toThrow('rate limited');
+    await expect(service.redeem(input(delegate, 100_000n))).rejects.toMatchObject(paused);
+
+    landA();
+    await a;
+    await expect(service.redeem(input(delegate, 100_000n))).rejects.toMatchObject(paused);
+  });
+
+  /**
+   * REGRESSION (review finding 2): the pause was a fixed 120 s, so a relay
+   * still queued or waiting for its receipt at 121 s let vouchers in under the
+   * old caps. A pending relay's pause now lasts at least the relayer's whole
+   * send budget, and never ends before the signed request's deadline.
+   */
+  it('keeps the pause of a pending relay past 120 s, for the relayer’s budget and the deadline', async () => {
+    grant(500_000n, 10_000_000n);
+    let land!: () => void;
+    const signedDeadline = BigInt(Math.floor(Date.now() / 1000) + 600);
+    const pending = guard.relayTightening({
+      scope: delegateScope(),
+      lowered: { maxPerWindow: 9_000_000n },
+      acknowledged: true,
+      deadline: signedDeadline,
+      relay: () => new Promise<void>((resolve) => (land = resolve)),
+    });
+    while (!land) await new Promise((resolve) => setImmediate(resolve));
+
+    const [row] = (await context.dataSource.query(
+      `SELECT EXTRACT(EPOCH FROM ("paused_until" - now()))::int AS "left",
+              EXTRACT(EPOCH FROM "paused_until")::bigint AS "until"
+         FROM "voucher_admission_pauses" WHERE "payer_account" = $1`,
+      [payer.account],
+    )) as Array<{ left: number; until: string }>;
+    expect(row.left).toBeGreaterThanOrEqual(
+      Math.floor(tighteningHoldMs(DEFAULT_EVM_RELAYER_TIMING) / 1000) - 2,
+    );
+    expect(Number(row.until)).toBeGreaterThanOrEqual(Number(signedDeadline) + 30);
+    // 121 s into the relay, as the review's proof had it: still paused.
+    await age(121);
+    await expect(service.redeem(input(delegate, 100_000n))).rejects.toMatchObject(paused);
+
+    land();
+    await pending;
+  });
+
+  /**
+   * REGRESSION (review finding 3): the pause was compared with the INSERT
+   * time, so a voucher whose chain read predated the landing (old caps) was
+   * admitted once the 15 s margin had passed. It is now compared with the
+   * admission's own chain read.
+   */
+  it('refuses a voucher whose chain read predates the landing, however late its insert', async () => {
+    grant(500_000n, 10_000_000n);
+    await guard.relayTightening({
+      scope: { ...delegateScope(), delegate: null },
+      lowered: { maxPerWindow: 9_000_000n },
+      acknowledged: true,
+      deadline: deadline(),
+      relay: async () => undefined,
+    });
+    await age(40); // landed 40 s ago; its 30 s margin has run out
+    const stale = escrow({ observedAt: new Date(Date.now() - 45_000) }); // read before the landing
+    await expect(service.redeem(input(payer, 100_000n, stale))).rejects.toMatchObject(paused);
+    await expect(service.redeem(input(payer, 100_000n))).resolves.toBeDefined();
+  });
+
+  /** Review finding 6: a delegate's change pauses that delegate; the escrow's, everyone. */
+  it('pauses only the delegate for a change of its grant, and every signer for the escrow’s limits', async () => {
+    grant(500_000n, 10_000_000n);
+    let land!: () => void;
+    const delegateChange = guard.relayTightening({
+      scope: delegateScope(),
+      lowered: { revoked: true },
+      acknowledged: true,
+      deadline: deadline(),
+      relay: () => new Promise<void>((resolve) => (land = resolve)),
+    });
+    while (!land) await new Promise((resolve) => setImmediate(resolve));
+    await expect(service.redeem(input(delegate, 100_000n))).rejects.toMatchObject(paused);
+    await expect(service.redeem(input(payer, 100_000n))).resolves.toBeDefined();
+    land();
+    await delegateChange;
+
+    let landLimits!: () => void;
+    const limitsChange = guard.relayTightening({
+      scope: { ...delegateScope(), delegate: null },
+      lowered: { maxPerWindow: 9_000_000n },
+      acknowledged: true,
+      deadline: deadline(),
+      relay: () => new Promise<void>((resolve) => (landLimits = resolve)),
+    });
+    while (!landLimits) await new Promise((resolve) => setImmediate(resolve));
+    await expect(service.redeem(input(payer, 100_000n))).rejects.toMatchObject(paused);
+    landLimits();
+    await limitsChange;
+  });
+
+  /**
+   * Review finding 7: every voucher racing the check is either in its count or
+   * refused by the pause — with a barrier, so BOTH branches run every time
+   * (the old version also passed with 8 = 8 or 0 = 0).
+   */
   it('every voucher racing the check is either in its count or refused by the pause', async () => {
     grant(500_000n, 100_000_000n);
-    const racing = Array.from({ length: 8 }, () => service.redeem(input(delegate, 100_000n)));
-    const [totals] = await context.repository.holdVoucherAdmission(
-      payer.account,
-      new Date(Date.now() + 60_000),
+    let open!: () => void;
+    chain.gate = new Promise<void>((resolve) => (open = resolve));
+    const early = Array.from({ length: 4 }, () => service.redeem(input(delegate, 100_000n)));
+    while (chain.waiting < 4) await new Promise((resolve) => setImmediate(resolve));
+    open();
+    await Promise.all(early); // admitted before the hold
+    let openLate!: () => void;
+    chain.gate = new Promise<void>((resolve) => (openLate = resolve));
+    const late = Array.from({ length: 4 }, () => service.redeem(input(delegate, 100_000n)));
+    while (chain.waiting < 8) await new Promise((resolve) => setImmediate(resolve));
+
+    const { pauseId, totals } = await context.repository.holdVoucherAdmission(
+      { payer: payer.account, delegate: delegate.account, holdSeconds: 60 },
       [{ payer: payer.account, assetId: USDG, delegate: delegate.account, since: new Date() }],
     );
-    const results = await Promise.allSettled(racing);
+    openLate(); // read before the hold committed, inserting after it
+    const results = await Promise.allSettled([...early, ...late]);
     const admitted = results.filter((result) => result.status === 'fulfilled');
     const refused = results
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
       .map((result) => (result.reason as { errorCode?: string }).errorCode);
 
+    expect(admitted.length).toBeGreaterThan(0);
+    expect(refused.length).toBeGreaterThan(0);
     expect(
       refused.every((code) => code === PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED),
     ).toBe(true);
-    // An admitted voucher may still be securing its funds (CREATED) when the
-    // check reads: it is counted all the same, which is the point.
-    expect(totals.count).toBe(admitted.length);
-    await context.repository.resumeVoucherAdmission(payer.account, new Date());
+    expect(totals[0].count).toBe(admitted.length);
+    await context.repository.releaseVoucherAdmissionPause(pauseId);
+    chain.gate = null;
+  });
+
+  /** Review finding 13: the boot check passes on a migrated database. */
+  it('finds the pause table in its per-request shape', async () => {
+    await expect(guard.onApplicationBootstrap()).resolves.toBeUndefined();
   });
 });
