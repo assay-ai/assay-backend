@@ -57,6 +57,16 @@ describe('AuditLogService.list', () => {
     expect(fake.wheres).toContainEqual({ sql, params: { [param]: value } });
   });
 
+  it('filters on search across actor, action and resource (BUG-R2-B4-02)', async () => {
+    const { service, fake } = buildHarness();
+    await service.list(ORGANIZATION_ID, baseQuery({ search: 'zzz' }));
+
+    const where = fake.wheres.find((w) => w.params.search === '%zzz%');
+    expect(where?.sql).toMatch(/entry\.actorId ILIKE :search/);
+    expect(where?.sql).toMatch(/entry\.action ILIKE :search/);
+    expect(where?.sql).toMatch(/entry\.resourceId ILIKE :search/);
+  });
+
   it('maps every column onto the wire DTO', async () => {
     const { service } = buildHarness([entryRow()]);
     const page = await service.list(ORGANIZATION_ID, baseQuery());
