@@ -1,13 +1,19 @@
 import { Module } from '@nestjs/common';
+import { ConfigService } from '@nestjs/config';
+import Redis from 'ioredis';
 
 import { ChainsModule } from '@modules/chains/chains.module';
 import { FeePayerSignerModule } from '@modules/chains/facilitator/signing/fee-payer-signer.module';
 import { McpModule } from '@modules/mcp/mcp.module';
+import { RedisDemoRateLimiter } from '@modules/mcp/services/redis-demo-rate-limiter.service';
+
+import { NEXT_SEQ_RATE_LIMITER, NEXT_SEQ_RATE_LIMITS } from './constants/escrow-seq.constants';
 
 import { DepositsController } from './controllers/deposits.controller';
 import { EscrowController } from './controllers/escrow.controller';
 import { ToolCallsController } from './controllers/tool-calls.controller';
 import { PaymentModule } from './payment.module';
+import { NextSeqService } from './services/next-seq.service';
 
 /**
  * API-side payment module — imported only by `AppApiModule`.
@@ -41,6 +47,26 @@ import { PaymentModule } from './payment.module';
 @Module({
   imports: [PaymentModule, McpModule, ChainsModule, FeePayerSignerModule],
   controllers: [ToolCallsController, DepositsController, EscrowController],
+  providers: [
+    NextSeqService,
+    {
+      // `GET /escrow/next-seq`'s throttle (review S2-2): the demo's sliding
+      // window under its own keys, on its own connection for the reason
+      // `mcp-api.module.ts` gives (it must not queue behind cache traffic).
+      provide: NEXT_SEQ_RATE_LIMITER,
+      inject: [ConfigService],
+      useFactory: (config: ConfigService) =>
+        new RedisDemoRateLimiter(
+          new Redis(config.get<string>('redis.url') as string, {
+            password: config.get<string>('redis.password') || undefined,
+            maxRetriesPerRequest: 1,
+            enableReadyCheck: true,
+          }),
+          NEXT_SEQ_RATE_LIMITS,
+          'escrow:next-seq:rate:',
+        ),
+    },
+  ],
   exports: [PaymentModule],
 })
 export class PaymentApiModule {}

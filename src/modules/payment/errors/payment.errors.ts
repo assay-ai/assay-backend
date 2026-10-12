@@ -57,6 +57,7 @@ export enum PaymentErrorCode {
   PAYMENT_VOUCHER_SEQ_MISMATCH = 'PAYMENT_VOUCHER_SEQ_MISMATCH',
   PAYMENT_VOUCHER_SEQ_ALREADY_USED = 'PAYMENT_VOUCHER_SEQ_ALREADY_USED',
   PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE = 'PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE',
+  PAYMENT_NEXT_SEQ_RATE_LIMITED = 'PAYMENT_NEXT_SEQ_RATE_LIMITED',
   PAYMENT_WITHDRAWAL_PENDING = 'PAYMENT_WITHDRAWAL_PENDING',
 
   // ── Agent payment delegation: a voucher signed by a DELEGATE key the payer
@@ -602,6 +603,20 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `Voucher sequence ${context?.seq ?? 'unknown'} is more than ${context?.maxGap ?? 'the allowed gap'} ` +
       `above the escrow's on-chain sequence${context?.seqHigh !== undefined ? ` (${context.seqHigh})` : ''}; ` +
       `the chain would refuse it at redemption, so nothing was charged`,
+  },
+
+  /**
+   * `GET /escrow/next-seq` called too often by one agent credential. Each call
+   * advances the payer's counter, so the route is throttled (review S2-2).
+   */
+  nextSeqRateLimited: {
+    code: PaymentErrorCode.PAYMENT_NEXT_SEQ_RATE_LIMITED,
+    statusCode: 429,
+    message: (context?: Record<string, any>) =>
+      `Too many sequence numbers requested by this credential` +
+      `${context?.limit ? ` (at most ${context.limit} per ${context.windowSeconds}s)` : ''}` +
+      `${context?.reason === 'COUNTER_UNAVAILABLE' ? '; the rate counter is unavailable' : ''}. ` +
+      `Try again shortly.`,
   },
 
   /**

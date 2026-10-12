@@ -166,6 +166,9 @@ export class InMemoryIntentWriter {
   /** Set by a test: the payer's admission is paused for that many seconds (BUG-D1-07). */
   pausedFor: number | null = null;
 
+  /** Set by a test: `buyer_escrows.next_seq` as the admission re-reads it under the lock (S2-2). */
+  nextSeq: bigint | null = null;
+
   async isVoucherSeqUsed(
     _organizationId: string,
     account: AccountId,
@@ -213,7 +216,11 @@ export class InMemoryIntentWriter {
       throw this.failInsertWith;
     }
     if (admission) {
-      admission.admit({ ...this.openTotals(admission.scope), pausedFor: this.pausedFor });
+      admission.admit({
+        ...this.openTotals(admission.scope),
+        pausedFor: this.pausedFor,
+        nextSeq: this.nextSeq,
+      });
     }
 
     // No `await` between the check and the claim — see the class comment on

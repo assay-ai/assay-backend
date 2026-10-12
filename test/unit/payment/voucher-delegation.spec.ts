@@ -243,6 +243,25 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
     });
   });
 
+  /**
+   * REGRESSION (review S2-2): a seq rewind between the up-front `wasIssued`
+   * read and the locked insert makes this seq not issued any more. The
+   * admission re-reads `next_seq` under the payer's lock and refuses it.
+   */
+  describe('after a seq rewind', () => {
+    it('refuses a voucher whose seq is at or above next_seq as re-read under the lock', async () => {
+      const call = input(payer, { escrow: escrow() });
+      intents.nextSeq = BigInt(call.signed.voucher.seq);
+      await rejects(service.redeem(call), PaymentErrorCode.PAYMENT_VOUCHER_SEQ_MISMATCH);
+      expect(intents.created).toHaveLength(0);
+
+      intents.nextSeq = BigInt(call.signed.voucher.seq) + 1n;
+      await expect(service.redeem(call)).resolves.toMatchObject({
+        status: PaymentIntentStatus.FUNDS_SECURED,
+      });
+    });
+  });
+
   describe('(b) an authorised delegate', () => {
     it('redeems a delegate-signed voucher within its caps and records the delegate', async () => {
       chain.grant(payer.address, delegate.address);

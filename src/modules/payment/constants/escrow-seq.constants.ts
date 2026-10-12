@@ -56,3 +56,17 @@ export const ESCROW_SEQ_GAP_CACHE_TTL_MS = 2_000;
 
 export const ESCROW_SEQ_GAP_CACHE_KEY = (account: string): string =>
   `escrow:seq:oldest-pending:${account}`;
+
+/**
+ * `GET /escrow/next-seq` per agent credential (review S2-2): each call advances
+ * the payer's counter, so the route is throttled with the same sliding window
+ * the public demo uses (`RedisDemoRateLimiter`, fails closed). Two a second on
+ * average is far above what an agent signing its own vouchers needs.
+ */
+export const NEXT_SEQ_RATE_LIMITS = Object.freeze({
+  perAddressPerWindow: 120,
+  windowMs: 60_000,
+});
+
+/** DI token: the `RedisDemoRateLimiter` instance behind {@link NEXT_SEQ_RATE_LIMITS}. */
+export const NEXT_SEQ_RATE_LIMITER = Symbol('NEXT_SEQ_RATE_LIMITER');
