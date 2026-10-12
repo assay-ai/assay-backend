@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
 
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
@@ -13,14 +13,18 @@ import {
   EVM_RELAYER_FLOAT_LOW_WEI,
   EVM_RELAYER_FLOAT_MARKS,
   EvmRelayerFloatMarks,
+  EvmSendingKey,
+  floatDedupeKey,
 } from './evm-relayer-float.constants';
-import { EVM_RELAYER_KEYS_ENV } from './evm-relayer-key-source';
-import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
+import { EVM_REDEEMER_KEYS_ENV, EVM_RELAYER_KEYS_ENV } from './evm-relayer-key-source';
+import { EVM_REDEEMER, EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
 
 export type FloatLevel = 'OK' | 'LOW' | 'CRITICAL' | 'UNREADABLE' | 'NO_RELAYER';
 
 export interface FloatReading {
   readonly chainId: ChainId;
+  /** Whose float: the relayer's, or the redeemer's. */
+  readonly key: EvmSendingKey;
   /**
    * `null` only when the relayer has no key for this chain, which is a
    * misconfiguration in the process that sends — see {@link check}. That case
@@ -30,7 +34,10 @@ export interface FloatReading {
   /** `null` means UNREADABLE or NO_RELAYER, which is not "zero" and not "fine". */
   readonly wei: bigint | null;
   readonly level: FloatLevel;
-  /** `floor(wei / perGrantMaxWei)`, or `null` when there is no balance to divide. */
+  /**
+   * `floor(wei / perGrantMaxWei)`, or `null` when there is no balance to divide.
+   * Always `null` for the redeemer, which funds no grant.
+   */
   readonly withdrawsRemaining: number | null;
 }
 
@@ -74,10 +81,11 @@ export interface FloatCheckOptions {
  *
  * ## Why the float matters beyond one buyer
  *
- * It pays for REDEMPTIONS too. A grant that empties it stops every provider
- * getting paid, which is a worse failure than one buyer waiting — which is why
- * the grant's own check refuses rather than borrows, and why `CRITICAL` here
- * says which of the two is about to stop.
+ * It pays for relayed buyer requests and slash sends too, so a grant that
+ * empties it stops more than one buyer's withdrawal — which is why the grant's
+ * own check refuses rather than borrows, and why `CRITICAL` here says what is
+ * about to stop. Redemptions are paid by the REDEEMER's float, a separate key
+ * (see "Two keys" below).
  *
  * ## Every pass says what it read, including the quiet ones
  *
@@ -93,6 +101,14 @@ export interface FloatCheckOptions {
  * its own alert and its own dedupe key. Two chains' floats are two independent
  * budgets held by two different keys; a total would report a healthy figure
  * while one chain's relayer was empty.
+ *
+ * ## Two keys
+ *
+ * The redeemer (`EVM_REDEEMER_KEYS`) pays the gas of every redemption and is a
+ * different key from the relayer, so it has a float of its own. When wired, it
+ * is read after the relayer on each chain, against the same marks, with the
+ * same alert names and `details.key: 'redeemer'`, and its own dedupe key
+ * (`floatDedupeKey`), so one key running dry never silences the other's page.
  */
 @Injectable()
 export class EvmRelayerFloatMonitor {
@@ -109,6 +125,8 @@ export class EvmRelayerFloatMonitor {
      * boot, which is how a mark stops meaning anything.
      */
     @Inject(EVM_RELAYER_FLOAT_MARKS) private readonly marks: EvmRelayerFloatMarks | null,
+    /** Optional so a test (or a process without the redeemer wired) reads the relayer alone. */
+    @Optional() @Inject(EVM_REDEEMER) private readonly redeemer: EvmRelayerPort | null = null,
   ) {}
 
   /**
@@ -158,7 +176,7 @@ export class EvmRelayerFloatMonitor {
     const summary = readings
       .map(
         (reading) =>
-          `${reading.chainId}=${reading.level}` +
+          `${reading.chainId}${reading.key === 'redeemer' ? '[redeemer]' : ''}=${reading.level}` +
           `(${reading.wei === null ? 'no balance' : `${reading.wei} wei`}, ` +
           `${reading.withdrawsRemaining ?? '?'} withdraws left)`,
       )
@@ -179,7 +197,10 @@ export class EvmRelayerFloatMonitor {
     // scheduler's rather than the enabled list's, and the test that proves this
     // never sums the chains reads that order.
     for (const chainId of chains) {
-      readings.push(await this.readOne(chainId, marks));
+      readings.push(await this.readOne(this.relayer, 'relayer', chainId, marks));
+      if (this.redeemer) {
+        readings.push(await this.readOne(this.redeemer, 'redeemer', chainId, marks));
+      }
     }
     return readings;
   }
@@ -204,10 +225,16 @@ export class EvmRelayerFloatMonitor {
     return this.marks;
   }
 
-  private async readOne(chainId: ChainId, marks: EvmRelayerFloatMarks): Promise<FloatReading> {
+  private async readOne(
+    port: EvmRelayerPort,
+    key: EvmSendingKey,
+    chainId: ChainId,
+    marks: EvmRelayerFloatMarks,
+  ): Promise<FloatReading> {
+    const dedupeKey = floatDedupeKey(chainId, key);
     let address: AccountId;
     try {
-      address = await this.relayer.address(chainId);
+      address = await port.address(chainId);
     } catch (error) {
       // No key for this chain. In the API that is a supported read-only
       // deployment; in the SCHEDULER — the only process that registers this
@@ -223,47 +250,58 @@ export class EvmRelayerFloatMonitor {
       // existed. So the read is skipped, because there is nothing to read, and
       // the alert says which of the two it is.
       this.logger.error(
-        `no relayer account on ${chainId}: ${error instanceof Error ? error.message : String(error)}`,
+        `no ${key} account on ${chainId}: ${error instanceof Error ? error.message : String(error)}`,
       );
       await this.emit({
         severity: AlertSeverity.WARN,
         name: EVM_RELAYER_FLOAT_ALERTS.NO_RELAYER,
         summary:
-          `This process has no relayer key for ${chainId}, so it can neither redeem vouchers ` +
-          `nor fund a withdraw gas grant on it`,
+          key === 'relayer'
+            ? `This process has no relayer key for ${chainId}, so it can neither relay buyer ` +
+              `requests nor fund a withdraw gas grant on it`
+            : `This process has no redeemer key for ${chainId}, so it cannot redeem vouchers on it`,
         details: {
           chainId,
+          key,
           // No error message, for `UNREADABLE`'s reason one branch down: a
           // configuration failure on this path names the variable it wanted,
           // and the variable is the one holding key material.
-          relayer: '(no relayer account on this chain)',
-          variable: EVM_RELAYER_KEYS_ENV,
+          [key]: `(no ${key} account on this chain)`,
+          variable: key === 'relayer' ? EVM_RELAYER_KEYS_ENV : EVM_REDEEMER_KEYS_ENV,
         },
         aggregation: AlertAggregation.ONCE_PER_INCIDENT,
-        dedupeKey: chainId,
+        dedupeKey,
       });
-      return { chainId, address: null, wei: null, level: 'NO_RELAYER', withdrawsRemaining: null };
+      return {
+        chainId,
+        key,
+        address: null,
+        wei: null,
+        level: 'NO_RELAYER',
+        withdrawsRemaining: null,
+      };
     }
 
     let wei: bigint;
     try {
-      wei = await this.relayer.balanceWei(chainId);
+      wei = await port.balanceWei(chainId);
     } catch (error) {
       // NOT zero, and not fine. A monitor that swallows an RPC error goes quiet
       // exactly when the chain is unhealthy, and both wrong answers page
       // somebody — so the defect would never show up in the alert VOLUME, only
       // in the alert TEXT, at 3am, being about the wrong incident.
       this.logger.error(
-        `the relayer float on ${chainId} could not be read: ` +
+        `the ${key} float on ${chainId} could not be read: ` +
           `${error instanceof Error ? error.message : String(error)}`,
       );
       await this.emit({
         severity: AlertSeverity.WARN,
         name: EVM_RELAYER_FLOAT_ALERTS.UNREADABLE,
-        summary: `The EVM relayer's ETH float on ${chainId} could not be read`,
+        summary: `The EVM ${key}'s ETH float on ${chainId} could not be read`,
         details: {
           chainId,
-          relayer: address,
+          key,
+          [key]: address,
           // The error MESSAGE is deliberately absent: an RPC failure quotes the
           // URL it failed against, and an RPC URL on this platform can carry an
           // API key in its path, where structural redaction cannot see it. It
@@ -271,15 +309,17 @@ export class EvmRelayerFloatMonitor {
           balanceWei: '(unreadable)',
         },
         aggregation: AlertAggregation.ONCE_PER_INCIDENT,
-        dedupeKey: chainId,
+        dedupeKey,
       });
-      return { chainId, address, wei: null, level: 'UNREADABLE', withdrawsRemaining: null };
+      return { chainId, key, address, wei: null, level: 'UNREADABLE', withdrawsRemaining: null };
     }
 
-    const withdrawsRemaining = Number(wei / marks.perGrantMaxWei);
+    // The redeemer funds no grant, so a grant count is meaningless for it.
+    const withdrawsRemaining = key === 'relayer' ? Number(wei / marks.perGrantMaxWei) : null;
     const common = {
       chainId,
-      relayer: address,
+      key,
+      [key]: address,
       balanceWei: wei.toString(),
       lowMarkWei: marks.lowWei.toString(),
       criticalMarkWei: marks.criticalWei.toString(),
@@ -293,35 +333,39 @@ export class EvmRelayerFloatMonitor {
       await this.emit({
         severity: AlertSeverity.CRITICAL,
         name: EVM_RELAYER_FLOAT_ALERTS.CRITICAL,
-        summary: `The EVM relayer's ETH float on ${chainId} is at or below its critical mark`,
+        summary: `The EVM ${key}'s ETH float on ${chainId} is at or below its critical mark`,
         details: {
           ...common,
           // In this order, because voucher redemption is the expensive one:
           // calls have been served and cannot be collected.
           stops:
-            'voucher redemption stops first (calls served, uncollectable), then the withdraw ' +
-            'gas grant. withdraw() and withdrawStake() are msg.sender-only and never ' +
-            'pause-gated — do NOT setPaused because the float is dry.',
+            key === 'relayer'
+              ? 'relayed buyer requests and slash sends stop, then the withdraw gas grant. ' +
+                'withdraw() and withdrawStake() are msg.sender-only and never pause-gated — ' +
+                'do NOT setPaused because the float is dry.'
+              : 'voucher redemption stops (calls served, uncollectable). withdraw() and ' +
+                'withdrawStake() are msg.sender-only and never pause-gated — do NOT setPaused ' +
+                'because the float is dry.',
         },
         aggregation: AlertAggregation.ONCE_PER_INCIDENT,
-        dedupeKey: chainId,
+        dedupeKey,
       });
-      return { chainId, address, wei, level: 'CRITICAL', withdrawsRemaining };
+      return { chainId, key, address, wei, level: 'CRITICAL', withdrawsRemaining };
     }
 
     if (wei <= marks.lowWei) {
       await this.emit({
         severity: AlertSeverity.WARN,
         name: EVM_RELAYER_FLOAT_ALERTS.LOW,
-        summary: `The EVM relayer's ETH float on ${chainId} is at or below its low mark`,
+        summary: `The EVM ${key}'s ETH float on ${chainId} is at or below its low mark`,
         details: common,
         aggregation: AlertAggregation.ONCE_PER_INCIDENT,
-        dedupeKey: chainId,
+        dedupeKey,
       });
-      return { chainId, address, wei, level: 'LOW', withdrawsRemaining };
+      return { chainId, key, address, wei, level: 'LOW', withdrawsRemaining };
     }
 
-    return { chainId, address, wei, level: 'OK', withdrawsRemaining };
+    return { chainId, key, address, wei, level: 'OK', withdrawsRemaining };
   }
 
   /**

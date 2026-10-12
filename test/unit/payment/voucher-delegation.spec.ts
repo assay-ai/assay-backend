@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
-import { ERC1271_MAGIC_VALUE } from '@modules/chains/evm/evm-voucher-authority';
 import { EvmChainAdapter } from '@modules/chains/evm/evm-chain.adapter';
 import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
@@ -12,6 +11,7 @@ import { computeRequestHash } from '@modules/payment/domain/request-hash';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import { RedeemVoucherInput } from '@modules/payment/ports/voucher.types';
+import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.constants';
 import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
 import { VoucherService } from '@modules/payment/services/voucher.service';
@@ -38,16 +38,14 @@ interface Grant {
   revoked: boolean;
 }
 
-/** The chain, as the adapter reads it: delegation records, code, a wallet. */
+/** The EIP-1271 magic value: what a wallet that "accepts" would answer. */
+const ERC1271_MAGIC_VALUE = '0x1626ba7e';
+
+/** The chain, as the adapter reads it: delegation records, and a wallet nobody should ask. */
 class FakeEvmChain {
   grants = new Map<string, Grant>();
-  code = new Set<string>();
   walletAccepts = false;
   delegationReads = 0;
-
-  async getCode({ address }: { address: `0x${string}` }) {
-    return this.code.has(address.toLowerCase()) ? ('0x6080' as const) : undefined;
-  }
 
   async readContract(args: { functionName: string; args: readonly unknown[] }): Promise<unknown> {
     if (args.functionName === 'delegationOf') {
@@ -93,8 +91,8 @@ class FakeEvmChain {
  * the payer authorised on chain; the voucher is signed by the delegate.
  *
  * The rule under test is the contract's (`X402Escrow._voucherAuthority`):
- * payer key → active delegate within its own caps → EIP-1271, read from chain
- * state, failing closed — plus the platform's one addition, that the delegate
+ * payer key → active delegate within its own caps (and nothing else: no
+ * EIP-1271, assay-evm D-18), read from chain state, failing closed — plus the platform's one addition, that the delegate
  * must be the one bound to the calling credential.
  */
 describe('VoucherService — agent payment delegation (eip155)', () => {
@@ -453,22 +451,21 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
   });
 
   /**
-   * REGRESSION (review S2-4). The platform used to serve a call on a wallet's
-   * `isValidSignature` answer, which nothing binds until redemption — a wallet
-   * could say yes to the check and no at redemption and be served for free. It
-   * is refused now, and the wallet is not even asked.
+   * There is no wallet path at all: the contract removed its EIP-1271 branch
+   * (assay-evm D-18), so neither the chain nor the platform accepts a voucher on
+   * a wallet's `isValidSignature`. A contract-wallet payer authorises a
+   * delegate instead.
    */
-  describe('(c) the payer’s EIP-1271 wallet is NOT served on', () => {
+  describe('no EIP-1271 wallet path', () => {
     it.each([true, false])(
-      'refuses a wallet-authorised voucher (wallet would answer %p) without asking the wallet',
+      'refuses a voucher only a wallet could vouch for (wallet would answer %p), without asking it',
       async (accepts) => {
         const wallet = generateSigner(CHAIN);
-        chain.code.add(wallet.address.toLowerCase());
         chain.walletAccepts = accepts;
         const asked = jest.spyOn(chain, 'readContract');
         await rejects(
           service.redeem(input(generateSigner(CHAIN), { payerAccount: wallet.account })),
-          PaymentErrorCode.PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED,
+          PaymentErrorCode.PAYMENT_VOUCHER_SIGNATURE_INVALID,
         );
         expect(
           asked.mock.calls.filter(([args]) => args.functionName === 'isValidSignature'),
@@ -479,11 +476,35 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
 
     it('still serves a contract-wallet payer through an authorised delegate key', async () => {
       const wallet = generateSigner(CHAIN);
-      chain.code.add(wallet.address.toLowerCase());
       chain.grant(wallet.address, delegate.address);
       await expect(
         service.redeem(input(delegate, { payerAccount: wallet.account })),
       ).resolves.toBeDefined();
+    });
+  });
+
+  describe('the chain’s seq jump cap (X402Escrow.MAX_SEQ_GAP) at admission', () => {
+    const GAP = BigInt(VOUCHER_MAX_SEQ_GAP);
+
+    it('admits a seq exactly MAX_SEQ_GAP above the escrow’s seqHigh', async () => {
+      seqs.jumpTo(GAP + 2n);
+      await expect(
+        service.redeem(input(payer, { escrow: escrow({ seqHigh: 2n }) })),
+      ).resolves.toBeDefined();
+    });
+
+    it('refuses one above it before recording, even though the seq was issued', async () => {
+      seqs.jumpTo(GAP + 2n);
+      await rejects(
+        service.redeem(input(payer, { escrow: escrow({ seqHigh: 1n }) })),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE,
+      );
+      expect(intents.created).toHaveLength(0);
+    });
+
+    it('applies no cap when the call did not read the escrow', async () => {
+      seqs.jumpTo(GAP + 2n);
+      await expect(service.redeem(input(payer))).resolves.toBeDefined();
     });
   });
 

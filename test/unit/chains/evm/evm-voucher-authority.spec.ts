@@ -2,8 +2,6 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { keccak256, toBytes } from 'viem';
 
 import {
-  ERC1271_MAGIC_VALUE,
-  EVM_PAYER_CODE_CACHE_MAX_ENTRIES,
   EvmVoucherAuthority,
   EvmVoucherAuthorityClient,
   isRevert,
@@ -73,17 +71,13 @@ function outage(): Error {
   return Object.assign(new Error('call failed'), { name: 'CallExecutionError', cause: inner });
 }
 
+/** The EIP-1271 magic value. A wallet answering it must still not authorise anything. */
+const ERC1271_MAGIC_VALUE = '0x1626ba7e';
+
 class FakeChain implements EvmVoucherAuthorityClient {
   grants = new Map<string, Grant>();
-  code = new Map<string, `0x${string}`>();
-  wallet: 'magic' | 'other' | 'revert' | 'outage' = 'other';
   delegationFails: 'revert' | 'outage' | null = null;
-  reads = { delegationOf: 0, getCode: 0, isValidSignature: 0 };
-
-  async getCode({ address }: { address: `0x${string}` }) {
-    this.reads.getCode += 1;
-    return this.code.get(address.toLowerCase()) ?? undefined;
-  }
+  reads = { delegationOf: 0, isValidSignature: 0 };
 
   async readContract(args: {
     address: `0x${string}`;
@@ -99,10 +93,10 @@ class FakeChain implements EvmVoucherAuthorityClient {
       return this.grants.get(`${payer.toLowerCase()}:${delegate.toLowerCase()}`) ?? NONE;
     }
     if (args.functionName === 'isValidSignature') {
+      // Only reachable if an EIP-1271 branch came back. Counted, and answered
+      // with the magic value, so such a regression would ACCEPT and fail loudly.
       this.reads.isValidSignature += 1;
-      if (this.wallet === 'revert') throw revertError();
-      if (this.wallet === 'outage') throw outage();
-      return this.wallet === 'magic' ? ERC1271_MAGIC_VALUE : '0xffffffff';
+      return ERC1271_MAGIC_VALUE;
     }
     throw new Error(`unexpected ${args.functionName}`);
   }
@@ -114,20 +108,18 @@ class FakeChain implements EvmVoucherAuthorityClient {
 
 describe('EvmVoucherAuthority — X402Escrow._voucherAuthority, off chain', () => {
   let chain: FakeChain;
-  let clockMs: number;
   let authority: EvmVoucherAuthority;
 
   beforeEach(() => {
     chain = new FakeChain();
-    clockMs = NOW * 1000;
-    authority = new EvmVoucherAuthority(CHAIN, chain, ESCROW, { nowMs: () => clockMs });
+    authority = new EvmVoucherAuthority(CHAIN, chain, ESCROW);
   });
 
   describe('(a) the payer’s own key', () => {
     it('is PAYER, and costs no chain read at all', async () => {
       const answer = await authority.authorize(payerKey.address, DIGEST, await sign(payerKey), NOW);
       expect(answer).toEqual({ kind: VoucherAuthorityKind.PAYER });
-      expect(chain.reads).toEqual({ delegationOf: 0, getCode: 0, isValidSignature: 0 });
+      expect(chain.reads).toEqual({ delegationOf: 0, isValidSignature: 0 });
     });
   });
 
@@ -239,98 +231,38 @@ describe('EvmVoucherAuthority — X402Escrow._voucherAuthority, off chain', () =
     });
   });
 
-  describe('(c) the payer’s EIP-1271 wallet', () => {
-    beforeEach(() => {
-      chain.code.set(WALLET, '0x6080');
-    });
-
-    it('is ERC1271 when the wallet answers the magic value', async () => {
-      chain.wallet = 'magic';
+  describe('no EIP-1271 branch (assay-evm D-18)', () => {
+    it('refuses a contract-wallet payer’s signature by a key it never authorised, and never asks the wallet', async () => {
+      // The chain has no wallet branch any more, so a wallet that would answer
+      // the magic value authorises nothing: the voucher is NOT_PAYER.
       expect(await authority.authorize(WALLET, DIGEST, await sign(strangerKey), NOW)).toEqual({
-        kind: VoucherAuthorityKind.ERC1271,
-      });
-    });
-
-    it.each(['other', 'revert'] as const)(
-      'refuses when the wallet answers %s, as SignatureChecker does',
-      async (mode) => {
-        chain.wallet = mode;
-        expect(
-          await authority.authorize(WALLET, DIGEST, await sign(strangerKey), NOW),
-        ).toMatchObject({
-          kind: 'REFUSED',
-          reason: VoucherAuthorityRefusal.NOT_PAYER,
-        });
-      },
-    );
-
-    it('fails CLOSED when the wallet cannot be asked', async () => {
-      chain.wallet = 'outage';
-      await expect(
-        authority.authorize(WALLET, DIGEST, await sign(strangerKey), NOW),
-      ).rejects.toMatchObject({ errorCode: 'CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE' });
-    });
-
-    it('with allowErc1271: false, names the wallet path and never asks the wallet', async () => {
-      chain.wallet = 'magic';
-      expect(
-        await authority.authorize(WALLET, DIGEST, await sign(strangerKey), NOW, {
-          allowErc1271: false,
-        }),
-      ).toEqual({
         kind: 'REFUSED',
-        reason: VoucherAuthorityRefusal.ERC1271_NOT_ACCEPTED,
+        reason: VoucherAuthorityRefusal.NOT_PAYER,
         signer: toAccountId(CHAIN, strangerKey.address),
       });
-      expect(chain.reads.isValidSignature).toBe(0);
+      expect(chain.reads).toEqual({ delegationOf: 1, isValidSignature: 0 });
     });
 
-    it('with allowErc1271: false, still accepts the payer’s own key and an active delegate', async () => {
+    it('accepts a delegate a contract-wallet payer authorised — the route that replaces it', async () => {
       chain.grant(WALLET, delegateKey.address, ACTIVE);
-      expect(
-        (
-          await authority.authorize(WALLET, DIGEST, await sign(delegateKey), NOW, {
-            allowErc1271: false,
-          })
-        ).kind,
-      ).toBe(VoucherAuthorityKind.DELEGATE);
-    });
-
-    it('is never asked for a payer without code', async () => {
-      chain.wallet = 'magic';
-      expect(
-        await authority.authorize(strangerKey.address, DIGEST, await sign(delegateKey), NOW),
-      ).toMatchObject({ kind: 'REFUSED' });
+      expect((await authority.authorize(WALLET, DIGEST, await sign(delegateKey), NOW)).kind).toBe(
+        VoucherAuthorityKind.DELEGATE,
+      );
       expect(chain.reads.isValidSignature).toBe(0);
     });
 
-    it('falls through to the wallet for a revoked delegate, and keeps the revocation as the reason', async () => {
+    it('keeps a revoked delegate’s revocation as the reason, with nothing to fall through to', async () => {
       chain.grant(WALLET, delegateKey.address, { ...ACTIVE, revoked: true });
-      chain.wallet = 'other';
-      expect(await authority.authorize(WALLET, DIGEST, await sign(delegateKey), NOW)).toMatchObject(
-        {
-          kind: 'REFUSED',
-          reason: VoucherAuthorityRefusal.DELEGATE_REVOKED,
-        },
-      );
-      chain.wallet = 'magic';
       expect(await authority.authorize(WALLET, DIGEST, await sign(delegateKey), NOW)).toEqual({
-        kind: VoucherAuthorityKind.ERC1271,
+        kind: 'REFUSED',
+        reason: VoucherAuthorityRefusal.DELEGATE_REVOKED,
+        signer: toAccountId(CHAIN, delegateKey.address),
       });
+      expect(chain.reads.isValidSignature).toBe(0);
     });
 
-    it('fails CLOSED when the payer’s code cannot be read', async () => {
-      const noCode = new EvmVoucherAuthority(
-        CHAIN,
-        {
-          readContract: chain.readContract.bind(chain),
-          getCode: async () => Promise.reject(outage()),
-        },
-        ESCROW,
-      );
-      await expect(
-        noCode.authorize(WALLET, DIGEST, await sign(strangerKey), NOW),
-      ).rejects.toMatchObject({ errorCode: 'CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE' });
+    it('offers only the two signer kinds the contract accepts', () => {
+      expect(Object.values(VoucherAuthorityKind).sort()).toEqual(['DELEGATE', 'PAYER']);
     });
   });
 
@@ -338,14 +270,12 @@ describe('EvmVoucherAuthority — X402Escrow._voucherAuthority, off chain', () =
     it.each(['', '0x', '0x1234', `0x${'00'.repeat(64)}`, `0x${'00'.repeat(66)}`])(
       'refuses %p without a single read',
       async (signature) => {
-        chain.code.set(WALLET, '0x6080');
-        chain.wallet = 'magic';
         expect(await authority.authorize(WALLET, DIGEST, signature, NOW)).toEqual({
           kind: 'REFUSED',
           reason: VoucherAuthorityRefusal.NOT_PAYER,
           signer: null,
         });
-        expect(chain.reads).toEqual({ delegationOf: 0, getCode: 0, isValidSignature: 0 });
+        expect(chain.reads).toEqual({ delegationOf: 0, isValidSignature: 0 });
       },
     );
 
@@ -359,19 +289,6 @@ describe('EvmVoucherAuthority — X402Escrow._voucherAuthority, off chain', () =
         kind: 'REFUSED',
         signer: null,
       });
-    });
-  });
-
-  describe('the payer-code cache', () => {
-    it('is bounded: the oldest payer is dropped once the bound is reached (review S3-7)', async () => {
-      const sig = await sign(strangerKey);
-      for (let i = 0; i <= EVM_PAYER_CODE_CACHE_MAX_ENTRIES; i += 1) {
-        const payer = `0x${i.toString(16).padStart(40, '0')}` as `0x${string}`;
-        await authority.authorize(payer, DIGEST, sig, NOW, { allowErc1271: false });
-      }
-      const before = chain.reads.getCode;
-      await authority.authorize(`0x${'0'.repeat(40)}`, DIGEST, sig, NOW, { allowErc1271: false });
-      expect(chain.reads.getCode).toBe(before + 1);
     });
   });
 

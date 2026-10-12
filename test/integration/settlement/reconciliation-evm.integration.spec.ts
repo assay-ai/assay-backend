@@ -30,6 +30,7 @@ const ESCROW_PROXY = '0x3333333333333333333333333333333333333333';
 const CONFIG_PROXY = '0x1111111111111111111111111111111111111111';
 const ESCROW_IMPLEMENTATION = '0x8888888888888888888888888888888888888888';
 const ADMIN = '0x9999999999999999999999999999999999999999';
+const OWNER = '0x7777777777777777777777777777777777777777';
 const OTHER_IMPLEMENTATION = '0x00000000000000000000000000000000DeaDBeef';
 
 const DEPLOYMENT: EvmDeployment = {
@@ -40,6 +41,7 @@ const DEPLOYMENT: EvmDeployment = {
   asset: '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac',
   escrowImplementation: ESCROW_IMPLEMENTATION,
   admin: ADMIN,
+  owner: OWNER,
 };
 
 const BUYER = toAccountId(EVM_CHAIN, '0x5B38Da6a701c568545dCfcB03FcB875f56beddC4');
@@ -49,7 +51,12 @@ const SOLANA_VAULT: AccountId = toAccountId(
 );
 const BLOCK = 116_313_808n;
 
-const SELECTOR = { admin: '0xf851a440', ASSET: '0x4800d97f', balanceOf: '0x70a08231' } as const;
+const SELECTOR = {
+  admin: '0xf851a440',
+  owner: '0x8da5cb5b',
+  ASSET: '0x4800d97f',
+  balanceOf: '0x70a08231',
+} as const;
 
 /** The mutable chain a test sets up before it reconciles. */
 const evmRpc = {
@@ -76,6 +83,7 @@ function evmClient(): EvmVaultClient {
         if (method === 'eth_call') {
           const selector = (params?.[0] as { data: string }).data.slice(0, 10);
           if (selector === SELECTOR.admin) return pad(ADMIN, { size: 32 });
+          if (selector === SELECTOR.owner) return pad(OWNER, { size: 32 });
           if (selector === SELECTOR.ASSET) return pad(DEPLOYMENT.asset, { size: 32 });
           if (selector === SELECTOR.balanceOf) return toHex(evmRpc.escrowBalance, { size: 32 });
         }

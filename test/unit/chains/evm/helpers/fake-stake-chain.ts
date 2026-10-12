@@ -48,6 +48,7 @@ export const CONFIG = '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43' as const;
 export const MULTICALL = '0xcA11bde05977b3631167028862bE2a173976CA11' as const;
 export const TREASURY = '0x4246bee428758e8215bA587717d48B8Ef0130388' as const;
 export const ADMIN = '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32' as const;
+export const OWNER = '0x7777777777777777777777777777777777777777' as const;
 export const RELAYER = '0x24A2c5823204150fe1bdc5Ce378A704788B345DB' as const;
 
 export const DEPLOYMENT: EvmDeployment = {
@@ -58,6 +59,7 @@ export const DEPLOYMENT: EvmDeployment = {
   asset: '0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3',
   escrowImplementation: '0x1111111111111111111111111111111111111111',
   admin: ADMIN,
+  owner: OWNER,
   multicall3: MULTICALL,
 };
 
@@ -268,6 +270,7 @@ export class FakeStakeChain {
   private read(address: string, functionName: string, args: readonly unknown[]): unknown {
     if (functionName === 'params') return { ...this.params };
     if (functionName === 'admin') return ADMIN;
+    if (functionName === 'owner') return OWNER;
     if (functionName === 'canSign') {
       const key = getAddress(args[0] as string);
       return !this.revoked && (key === this.verifier || this.alsoRegistered.has(key));

@@ -121,6 +121,11 @@ export class FakeEscrowSeqService {
     return this.issuedHighWater;
   }
 
+  /** Make the NEXT `advance()` return `seq`, as if everything below it had been issued. */
+  jumpTo(seq: bigint): void {
+    this.issuedHighWater = seq - 1n;
+  }
+
   async wasIssued(_organizationId: string, _account: AccountId, seq: bigint): Promise<boolean> {
     // Interleaves two concurrent `redeem()` calls at this point, the same way
     // the deleted `VoucherNonceStore`'s `reserve` used to — see

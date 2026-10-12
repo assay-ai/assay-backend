@@ -1,4 +1,5 @@
 import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
+import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.constants';
 
 /**
  * The constants copied out of `assay-evm/src/Constants.sol`.
@@ -21,6 +22,13 @@ import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
  * 147: uint256 internal constant MAX_REDEEM_BATCH = 64;
  * ```
  *
+ * and, on 2026-10-13 after D-17/D-18:
+ *
+ * ```
+ * 152: uint64 internal constant MAX_SEQ_GAP = 1_000_000;
+ * 172: uint64 internal constant MAX_SIGNATURE_LIFETIME_SECONDS = 3600;
+ * ```
+ *
  * **State the limit rather than overstate the check.** This suite cannot catch
  * the Solidity moving; the deployment-record comparison is what does that.
  * What it does catch is the other direction, which is the one that happens:
@@ -38,6 +46,8 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
     ['SLASH_WINDOW_SECONDS', 86_400],
     ['MAX_DELEGATION_LIFETIME_SECONDS', 365 * 86_400],
     ['MAX_DELEGATES_PER_PAYER', 16],
+    ['MAX_SEQ_GAP', 1_000_000],
+    ['MAX_SIGNATURE_LIFETIME_SECONDS', 3_600],
   ])('%s is %i', (name, value) => {
     expect(EVM_CONSTANTS[name as keyof typeof EVM_CONSTANTS]).toBe(value);
   });
@@ -51,12 +61,30 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
       'MAX_DELEGATES_PER_PAYER',
       'MAX_DELEGATION_LIFETIME_SECONDS',
       'MAX_REDEEM_BATCH',
+      'MAX_SEQ_GAP',
+      'MAX_SIGNATURE_LIFETIME_SECONDS',
       'MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS',
       'REDEEM_GRACE_SECONDS',
       'SLASH_WINDOW_SECONDS',
       'VOUCHER_MAX_LIFETIME_SECONDS',
       'WITHDRAW_DELAY_SECONDS',
     ]);
+  });
+
+  it('the payment domain issues and admits against the SAME seq gap the contract enforces', () => {
+    // Issue (`EscrowSeqService.allocate`) and admission (`VoucherService`)
+    // read `VOUCHER_MAX_SEQ_GAP`; the redemption pre-validator reads
+    // `EVM_CONSTANTS.MAX_SEQ_GAP`. Two copies would drift.
+    expect(VOUCHER_MAX_SEQ_GAP).toBe(EVM_CONSTANTS.MAX_SEQ_GAP);
+    expect(VOUCHER_MAX_SEQ_GAP).toBe(1_000_000);
+  });
+
+  it('the backend signs relayed deadlines well inside the signature lifetime cap', () => {
+    // `*BySig` deadlines are chain time + VOUCHER_MAX_LIFETIME_SECONDS; the
+    // contract refuses more than MAX_SIGNATURE_LIFETIME_SECONDS ahead.
+    expect(EVM_CONSTANTS.VOUCHER_MAX_LIFETIME_SECONDS).toBeLessThan(
+      EVM_CONSTANTS.MAX_SIGNATURE_LIFETIME_SECONDS,
+    );
   });
 
   it('the derived redeemable life is the sum of its three parts', () => {

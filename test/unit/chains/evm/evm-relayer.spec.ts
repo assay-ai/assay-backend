@@ -4,7 +4,12 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { Alert, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
 import { CHAIN_IDS, ChainId, toAccountId } from '@modules/chains/ports/caip.types';
-import { EvmRelayClient, EvmRelayer } from '@modules/chains/evm/evm-relayer.service';
+import {
+  EVM_REDEEMER_IDENTITY,
+  EvmRelayClient,
+  EvmRelayer,
+  EvmSenderIdentity,
+} from '@modules/chains/evm/evm-relayer.service';
 import { EvmValueTransfer } from '@modules/chains/evm/ports/evm-relayer.port';
 import {
   DEFAULT_EVM_RELAYER_RECEIPT_TIMEOUT_MS,
@@ -179,6 +184,45 @@ describe('EvmRelayer', () => {
 
     await expect(relayer.sendCall(call())).rejects.toThrow(/EVM_RELAYER_KEYS/);
     expect(node.sent).toHaveLength(0);
+  });
+
+  it('is the relayer by default: its name and its missing-key error say so', async () => {
+    const { relayer } = build({ keys: [] });
+
+    expect(relayer.name).toBe('evm-relayer-eoa');
+    await expect(relayer.address(TESTNET)).rejects.toThrow(/relayer key/);
+  });
+
+  it('as the REDEEMER, names EVM_REDEEMER_KEYS — never EVM_RELAYER_KEYS — when it has no key', async () => {
+    const { relayer, node } = build({ keys: [], identity: EVM_REDEEMER_IDENTITY });
+
+    expect(relayer.name).toBe('evm-redeemer-eoa');
+    const error = await relayer.sendCall(call()).then(
+      () => null,
+      (caught: Error) => caught,
+    );
+    expect(error.message).toContain('EVM_REDEEMER_KEYS');
+    expect(error.message).not.toContain('EVM_RELAYER_KEYS');
+    expect(node.sent).toHaveLength(0);
+  });
+
+  it('as the REDEEMER, raises its low-float alert in its own bucket, naming the key', async () => {
+    // One condition per KEY: the relayer's bucket is the bare chain id, and the
+    // redeemer's must differ, or one key running dry silences the other's page.
+    const { relayer, node, alerts } = build({
+      lowWaterMarkWei: 10n ** 16n,
+      identity: EVM_REDEEMER_IDENTITY,
+    });
+    node.balance = 10n ** 15n;
+
+    await relayer.sendCall(call());
+
+    expect(alerts.emitted).toHaveLength(1);
+    expect(alerts.emitted[0].dedupeKey).toBe(`${TESTNET}:redeemer`);
+    expect(alerts.emitted[0].details).toEqual(
+      expect.objectContaining({ key: 'redeemer', redeemer: RELAYER_ADDRESS }),
+    );
+    expect(alerts.emitted[0].summary).toContain('redeemer');
   });
 
   it('refuses to send to a different chain than the one it was asked for', async () => {
@@ -390,6 +434,7 @@ function build(
     lowWaterMarkWei?: bigint;
     nonceLatencyTicks?: number;
     timing?: EvmRelayerTiming;
+    identity?: EvmSenderIdentity;
   } = {},
 ) {
   const node = new FakeNode(options.nonceLatencyTicks ?? 0);
@@ -400,6 +445,7 @@ function build(
     alerts,
     options.lowWaterMarkWei ?? 0n,
     options.timing,
+    options.identity,
   );
   return { relayer, node, alerts };
 }

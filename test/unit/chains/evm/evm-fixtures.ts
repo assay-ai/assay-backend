@@ -32,6 +32,7 @@ const ADDRESSES: Readonly<Record<string, Omit<EvmDeployment, 'chainId'>>> = {
      */
     escrowImplementation: '0x8888888888888888888888888888888888888888',
     admin: '0x9999999999999999999999999999999999999999',
+    owner: '0x7777777777777777777777777777777777777777',
   },
   [CHAIN_IDS.BASE_SEPOLIA]: {
     config: '0x4444444444444444444444444444444444444444',
@@ -40,6 +41,7 @@ const ADDRESSES: Readonly<Record<string, Omit<EvmDeployment, 'chainId'>>> = {
     asset: '0x7777777777777777777777777777777777777777',
     escrowImplementation: '0xaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
     admin: '0xbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    owner: '0xcccccccccccccccccccccccccccccccccccccccc',
   },
 };
 

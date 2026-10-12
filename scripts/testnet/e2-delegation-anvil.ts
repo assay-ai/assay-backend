@@ -80,6 +80,8 @@ const DEPLOYMENT: EvmDeployment = {
   asset: '0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3',
   escrowImplementation: '0x0000000000000000000000000000000000000000',
   admin: '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32',
+  // Not read here: nothing in this script runs the vault-control check.
+  owner: '0x0000000000000000000000000000000000000000',
   multicall3: MULTICALL3,
 } as EvmDeployment;
 /** The real testnet provider, already bonded above the stake floor. */
@@ -353,7 +355,7 @@ async function main(): Promise<void> {
     requestHash: `sha256:${'ab'.repeat(32)}`,
     seq,
     maxTimeoutSeconds: 300,
-    signers: ['payer', 'delegate', 'erc1271'],
+    signers: ['payer', 'delegate'],
     delegate: delegateAccount,
   });
   const voucherFor = async (signer: typeof delegate, seq: string, amount: bigint) => {

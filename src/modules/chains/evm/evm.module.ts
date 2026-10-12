@@ -25,12 +25,15 @@ import {
   parseGasGrantCaps,
 } from './evm-gas-grant.service';
 import { EvmRelayedEscrowIntentSubmitter } from './evm-relayed-escrow-intent.service';
-import { EvmRelayer } from './evm-relayer.service';
+import { EVM_REDEEMER_IDENTITY, EVM_RELAYER_IDENTITY, EvmRelayer } from './evm-relayer.service';
 import { readEvmRelayerTiming } from './evm-relayer-timing';
-import { EVM_RELAYER } from './ports/evm-relayer.port';
+import { EVM_REDEEMER, EVM_RELAYER } from './ports/evm-relayer.port';
 import {
+  EVM_REDEEMER_KEYS_ENV,
+  EVM_REDEEMER_KEY_SOURCES,
   EVM_RELAYER_KEY_SOURCES,
   EvmRelayerKeySource,
+  assertDistinctRedeemerKeys,
   takeEvmRelayerKeys,
 } from './evm-relayer-key-source';
 import { DEFAULT_EVM_PARAMS_TTL_MS, EvmStakeReader } from './evm-stake-reader.service';
@@ -183,6 +186,28 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       useFactory: (): readonly EvmRelayerKeySource[] => takeEvmRelayerKeys(process.env),
     },
     {
+      /**
+       * The REDEEMER's key(s) — `Config.params().redeemer` — read once and
+       * deleted from `process.env`, exactly like the relayer's, and likewise
+       * not required to cover the enabled chains: a process that never redeems
+       * holds no redeemer key, and `EvmVoucherRedeemer` fails loudly at its
+       * first send instead.
+       *
+       * The boot DOES refuse one thing: a chain whose redeemer key is the
+       * relayer key. The relayer carries buyer-signed requests and has no
+       * on-chain role; the redeemer is the only sender `redeemVoucher[Batch]`
+       * accepts. One key in both places makes a leak of either the leak of
+       * both.
+       */
+      provide: EVM_REDEEMER_KEY_SOURCES,
+      useFactory: (relayer: readonly EvmRelayerKeySource[]): readonly EvmRelayerKeySource[] => {
+        const redeemer = takeEvmRelayerKeys(process.env, EVM_REDEEMER_KEYS_ENV);
+        assertDistinctRedeemerKeys(relayer, redeemer);
+        return redeemer;
+      },
+      inject: [EVM_RELAYER_KEY_SOURCES],
+    },
+    {
       provide: EvmRelayer,
       useFactory: (
         clients: ReadonlyMap<ChainId, never>,
@@ -196,13 +221,37 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
           alerts,
           readOptionalWei(config.get<string>(EVM_RELAYER_FLOAT_LOW_WATER_ENV)),
           readEvmRelayerTiming((key) => config.get<string>(key)),
+          EVM_RELAYER_IDENTITY,
         ),
       inject: [EVM_RPC_CLIENTS, EVM_RELAYER_KEY_SOURCES, ALERT_PORT, ConfigService],
     },
-    // The token, for the two consumers that hold the PORT rather than the class
-    // — `EvmVoucherRedeemer` and `EvmGasGrantService`. Neither may reach a
-    // `sendRawTransaction`, and the port is what says so.
+    // The token, for the consumers that hold the PORT rather than the class —
+    // `EvmGasGrantService`, `EvmRelayedEscrowIntentSubmitter`, the slash
+    // executor and the float monitor. None may reach a `sendRawTransaction`,
+    // and the port is what says so.
     { provide: EVM_RELAYER, useExisting: EvmRelayer },
+    {
+      /**
+       * A second `EvmRelayer`, holding the REDEEMER key. Only
+       * `EvmVoucherRedeemer` (and the float monitor, read-only) receives it.
+       */
+      provide: EVM_REDEEMER,
+      useFactory: (
+        clients: ReadonlyMap<ChainId, never>,
+        sources: readonly EvmRelayerKeySource[],
+        alerts: AlertPort,
+        config: ConfigService,
+      ) =>
+        new EvmRelayer(
+          clients,
+          sources,
+          alerts,
+          readOptionalWei(config.get<string>(EVM_RELAYER_FLOAT_LOW_WATER_ENV)),
+          readEvmRelayerTiming((key) => config.get<string>(key)),
+          EVM_REDEEMER_IDENTITY,
+        ),
+      inject: [EVM_RPC_CLIENTS, EVM_REDEEMER_KEY_SOURCES, ALERT_PORT, ConfigService],
+    },
 
     {
       provide: EvmChainAdapter,
@@ -276,9 +325,11 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     },
     {
       provide: EvmVoucherRedeemer,
-      useFactory: (clients: never, deployments: never, relayer: never, alerts: never) =>
-        new EvmVoucherRedeemer(clients, deployments, relayer, alerts, { now: () => Date.now() }),
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_RELAYER, ALERT_PORT],
+      useFactory: (clients: never, deployments: never, redeemer: never, alerts: never) =>
+        new EvmVoucherRedeemer(clients, deployments, redeemer, alerts, { now: () => Date.now() }),
+      // The REDEEMER, not the relayer: `redeemVoucher[Batch]` accepts only
+      // `Config.params().redeemer` as sender.
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_REDEEMER, ALERT_PORT],
     },
     {
       /**
@@ -380,6 +431,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmFacilitator,
     EvmRelayer,
     EVM_RELAYER,
+    EVM_REDEEMER,
     EVM_DEPLOYMENTS,
     EVM_RPC_CLIENTS,
   ],
@@ -475,32 +527,41 @@ function readRpcUrl(value: unknown, chainId: ChainId): string {
 const ADDRESS = /^0x[0-9a-fA-F]{40}$/;
 
 /**
- * The three proxies, the token, the escrow implementation and the admin — all
- * six required and all six address-shaped.
+ * The three proxies, the token, the escrow implementation, the admin and the
+ * owner — all seven required and all seven address-shaped.
  *
- * `escrowImplementation` and `admin` are in the record for
+ * `escrowImplementation`, `admin` and `owner` are in the record for
  * `EvmVaultService.assertVaultControl`, and they are **required rather than
  * optional** deliberately. An optional expectation is one a control check
- * cannot fail against: a deployment that omitted them would reconcile with two
- * of its three control reads silently skipped, and would look exactly like one
- * that passed all three. Both are public addresses, both are in
+ * cannot fail against: a deployment that omitted them would reconcile with
+ * some of its control reads silently skipped, and would look exactly like one
+ * that passed them all. All are public addresses in
  * `deployments/<chainId>.json` in assay-evm, so requiring them costs one line
- * of configuration.
+ * of configuration each.
  */
 function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
   const record = value as Record<string, unknown>;
-  const fields = ['config', 'stake', 'escrow', 'asset', 'escrowImplementation', 'admin'] as const;
+  const fields = [
+    'config',
+    'stake',
+    'escrow',
+    'asset',
+    'escrowImplementation',
+    'admin',
+    'owner',
+  ] as const;
 
   for (const field of fields) {
     if (typeof record?.[field] !== 'string' || !ADDRESS.test(record[field] as string)) {
       throw ChainErrors.configValueInvalid({
         variable: `${EVM_DEPLOYMENTS_ENV}[${chainId}].${field}`,
         accepted:
-          'a 20-byte 0x address for each of config, stake, escrow, asset, escrowImplementation ' +
-          'and admin. config/stake/escrow are the PROXY addresses, which are what an EIP-712 ' +
-          'verifyingContract names and what does not move across an upgrade; ' +
+          'a 20-byte 0x address for each of config, stake, escrow, asset, escrowImplementation, ' +
+          'admin and owner. config/stake/escrow are the PROXY addresses, which are what an ' +
+          'EIP-712 verifyingContract names and what does not move across an upgrade; ' +
           'escrowImplementation is the address behind the escrow proxy and DOES move on every ' +
-          'upgrade; admin is X402Config.admin, which is also the upgrade authority',
+          'upgrade; admin is X402Config.admin, the operational key; owner is ' +
+          'X402Config.owner(), the upgrade authority of all three contracts',
       });
     }
   }
@@ -524,6 +585,7 @@ function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
     asset: record.asset as `0x${string}`,
     escrowImplementation: record.escrowImplementation as `0x${string}`,
     admin: record.admin as `0x${string}`,
+    owner: record.owner as `0x${string}`,
   };
 }
 

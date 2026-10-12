@@ -1,4 +1,5 @@
 import { EvmVoucher } from '@modules/chains/evm/eip712/voucher';
+import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 import {
   decayWindow,
   PrevalidationState,
@@ -112,6 +113,30 @@ describe('prevalidateVoucher', () => {
     // job that reports the other one sends the operator to the wrong screen.
     const both = { ...GOOD, seq: 1n, amount: STATE.maxVoucherAmount + 1n };
     expect(prevalidateVoucher(both, STATE)).toBe('VoucherSeqNotIncreasing');
+  });
+
+  describe('the seq jump cap (D-17: seq <= seqHigh + MAX_SEQ_GAP)', () => {
+    const gap = BigInt(EVM_CONSTANTS.MAX_SEQ_GAP);
+
+    it('accepts a seq exactly MAX_SEQ_GAP above seqHigh, the chain boundary', () => {
+      expect(prevalidateVoucher({ ...GOOD, seq: STATE.seqHigh + gap }, STATE)).toBeNull();
+    });
+
+    it('names VoucherSeqGapTooLarge one above it', () => {
+      expect(prevalidateVoucher({ ...GOOD, seq: STATE.seqHigh + gap + 1n }, STATE)).toBe(
+        'VoucherSeqGapTooLarge',
+      );
+    });
+
+    it('comes right after VoucherSeqNotIncreasing and before the spending checks', () => {
+      // Too far ahead AND over the per-call limit: the chain reports the gap.
+      const both = { ...GOOD, seq: STATE.seqHigh + gap + 1n, amount: STATE.maxVoucherAmount + 1n };
+      expect(prevalidateVoucher(both, STATE)).toBe('VoucherSeqGapTooLarge');
+      // And a stale seq is still VoucherSeqNotIncreasing, never a gap.
+      expect(prevalidateVoucher({ ...GOOD, seq: STATE.seqHigh }, STATE)).toBe(
+        'VoucherSeqNotIncreasing',
+      );
+    });
   });
 
   it('checks the stake floor BEFORE the balance', () => {

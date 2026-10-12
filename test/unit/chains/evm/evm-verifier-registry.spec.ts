@@ -19,7 +19,7 @@ import { RegisteredVerifierStatus } from '@modules/verification/signing/ports/ve
  *   `registered`. They mean different things to an operator.
  * - **the address derivation drops the `0x04` prefix.** Hashing it too yields a
  *   perfectly well-formed address belonging to nobody, and the failure surfaces
- *   as `SignerIsNotVerifier` against a key that was fine.
+ *   as `VerifierNotRegistered` against a key that was fine.
  */
 const TESTNET = CHAIN_IDS.ROBINHOOD_TESTNET;
 const CONFIG = '0x1111111111111111111111111111111111111111' as const;
@@ -193,6 +193,7 @@ function build(key?: OnChainKey) {
     // Both are fields of `EvmDeployment`; neither is read on this path.
     escrowImplementation: '0x8888888888888888888888888888888888888888',
     admin: '0x9999999999999999999999999999999999999999',
+    owner: '0x7777777777777777777777777777777777777777',
   };
   const registry = new EvmVerifierRegistryService(
     new Map<ChainId, EvmReadClient>([[TESTNET, client]]),

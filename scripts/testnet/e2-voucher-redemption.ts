@@ -12,7 +12,8 @@
  *   embedded key cannot be exported. It pays its own gas for `approve`, `deposit` and
  *   `setLimits`, exactly as a real buyer does. The key lives outside the repo.
  * - **The platform is the platform's own code**: `EvmVoucherRedeemer`, resolved out of the real
- *   Nest graph and sending through the real `EvmRelayer` with the configured relayer key. The
+ *   Nest graph and sending through the real `EvmRelayer` with the configured REDEEMER key
+ *   (`EVM_REDEEMER_KEYS`, never the relayer's). The
  *   script never builds or sends a `redeemVoucher` itself — a redemption the script sent would
  *   prove the contract, which the fork suite already does, and not the platform.
  * - **The provider** is whoever `TESTNET_E2_PROVIDER` names (required; there is no default
@@ -273,7 +274,7 @@ async function run(): Promise<E2Result> {
     [seq === voucher.seq, `event seq ${seq} === voucher seq ${voucher.seq}`],
     [
       getAddress(receipt.from) === getAddress(params.redeemer),
-      `sent by the configured redeemer ${params.redeemer}, i.e. the platform's relayer`,
+      `sent by the configured redeemer ${params.redeemer}, i.e. the platform's redeemer key`,
     ],
   ];
   const failed = checks.filter(([ok]) => !ok).map(([, what]) => what);

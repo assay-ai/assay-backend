@@ -9,7 +9,8 @@
  * otherwise       ->  VoucherSeqNotIncreasing
  * ```
  *
- * So **gaps are free and unbounded**. A seq that is allocated and never becomes
+ * So **gaps are free** — unbounded on Solana, bounded on eip155 by
+ * {@link VOUCHER_MAX_SEQ_GAP}. A seq that is allocated and never becomes
  * a voucher costs nothing, a buyer may be a million calls ahead of their last
  * redemption, and there is no in-flight ceiling to police: the four rules the
  * 8,192-bit window used to enforce collapse to one, and the two the backend
@@ -22,6 +23,24 @@
  * serialises per buyer. That rule lives in `VoucherRedemptionService`, and it is
  * the whole of what replaced this file's arithmetic.
  */
+
+/**
+ * The widest jump a voucher's seq may take past the escrow's on-chain
+ * `seqHigh`: mirrors `X402Escrow`'s `MAX_SEQ_GAP` (assay-evm
+ * `Constants.sol`, D-17), which refuses `seq > seqHigh + MAX_SEQ_GAP` with
+ * `VoucherSeqGapTooLarge`. So on eip155 gaps are free but **bounded**.
+ *
+ * Applied by the backend when it knows the on-chain `seqHigh` — at issue
+ * (`EscrowSeqService.allocate`) and at admission
+ * (`VoucherService.assertIssuedSeq`) — so a seq the chain would refuse is never
+ * handed out or served on. A chain with no cap (the Solana program) loses
+ * nothing: no honest buyer is a million calls ahead of their last redemption.
+ *
+ * Lives in the payment domain so both payment and chain code can import it;
+ * `EVM_CONSTANTS.MAX_SEQ_GAP` is this value, and `constants-pin.spec.ts` pins
+ * it to the contract's literal.
+ */
+export const VOUCHER_MAX_SEQ_GAP = 1_000_000;
 
 /**
  * How long `oldest_pending_seq` may be served from Redis.

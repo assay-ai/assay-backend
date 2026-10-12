@@ -33,7 +33,7 @@ import {
 } from '../ports/payment.types';
 import { RedeemVoucherInput } from '../ports/voucher.types';
 import { decayVoucherWindow } from '../domain/voucher-window';
-import { EscrowSeqService } from './escrow-seq.service';
+import { EscrowSeqService, assertWithinSeqGap } from './escrow-seq.service';
 import { PaymentIntentService, VoucherAdmission } from './payment-intent.service';
 
 /**
@@ -86,9 +86,8 @@ const MAX_RESOURCE_LENGTH = 512;
  *   2  expiry/window   — is it still alive, and sane?     cheap, no I/O
  *   3  binding        — does it authorise this call?     cheap, one sha256
  *   4  signature      — did the payer authorise it?      ~50µs; chain reads
- *                       (its own key, an on-chain        only when the payer's
- *                       delegate within caps, or its     own key did not sign
- *                       EIP-1271 wallet)
+ *                       (its own key, or an on-chain     only when the payer's
+ *                       delegate within caps)            own key did not sign
  *   4b escrow limit   — the payer's own per-voucher      no I/O (the caller's
  *                       limit                             escrow read)
  *   5  seq issued     — did we hand this number out?     one Postgres read
@@ -382,10 +381,10 @@ export class VoucherService {
    *   (a) the payer's own key signed it — checked first, synchronously, with no
    *       I/O, exactly as before delegation existed;
    *   (b) a DELEGATE key the payer authorised on chain signed it, the delegate is
-   *       not revoked or lapsed, and the voucher fits the delegate's own caps;
-   *   (c) the payer has code and its EIP-1271 wallet accepts the signature —
-   *       which the chain accepts, and the platform does NOT serve on (see
-   *       `voucherWalletSignatureUnsupported`, review S2-4).
+   *       not revoked or lapsed, and the voucher fits the delegate's own caps.
+   *
+   * There is no third path: the contract has no EIP-1271 branch (assay-evm
+   * D-18), so a contract-wallet payer authorises a delegate instead.
    *
    * (b) is answered by the chain adapter from CHAIN STATE and fails closed.
    * Returns the delegate and its terms for (b), null otherwise; the delegate is
@@ -418,27 +417,17 @@ export class VoucherService {
       throw PaymentErrors.voucherSignatureInvalid({ payer: voucher.payer });
     }
 
-    // Path (c) is not asked at all: see `voucherWalletSignatureUnsupported`.
     // `readAt` is taken BEFORE the read: the delegate's counter it returns can
     // contain no redemption confirmed after this instant.
     const readAt = new Date();
-    const answer = await adapter.authorizeVoucherSigner(voucher, signature, now, {
-      allowErc1271: false,
-    });
+    const answer = await adapter.authorizeVoucherSigner(voucher, signature, now);
     switch (answer.kind) {
       case VoucherAuthorityKind.PAYER:
         return null;
-      case VoucherAuthorityKind.ERC1271:
-        // Unreachable with `allowErc1271: false`; refused rather than trusted if
-        // an adapter ever answers it anyway.
-        throw PaymentErrors.voucherWalletSignatureUnsupported({ payer: voucher.payer });
       case VoucherAuthorityKind.DELEGATE:
         this.assertWithinDelegation(voucher, input, answer.delegate, answer.terms);
         return { delegate: answer.delegate, terms: answer.terms, readAt };
       case 'REFUSED':
-        if (answer.reason === VoucherAuthorityRefusal.ERC1271_NOT_ACCEPTED) {
-          throw PaymentErrors.voucherWalletSignatureUnsupported({ payer: voucher.payer });
-        }
         if (
           answer.reason === VoucherAuthorityRefusal.DELEGATE_REVOKED ||
           answer.reason === VoucherAuthorityRefusal.DELEGATE_EXPIRED
@@ -552,6 +541,13 @@ export class VoucherService {
         account: input.agentAccount,
         actual: voucher.seq,
       });
+    }
+
+    // The chain's seq jump cap (`X402Escrow.MAX_SEQ_GAP`), when this call read
+    // the escrow: a voucher the chain would refuse with `VoucherSeqGapTooLarge`
+    // is not served on, even though this backend issued its seq.
+    if (input.escrow) {
+      assertWithinSeqGap(BigInt(voucher.seq), input.escrow.seqHigh, input.agentAccount);
     }
 
     // A sequential replay is refused here, by name, rather than left to the

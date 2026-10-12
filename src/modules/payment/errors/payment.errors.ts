@@ -56,6 +56,7 @@ export enum PaymentErrorCode {
   PAYMENT_ESCROW_BALANCE_UNAVAILABLE = 'PAYMENT_ESCROW_BALANCE_UNAVAILABLE',
   PAYMENT_VOUCHER_SEQ_MISMATCH = 'PAYMENT_VOUCHER_SEQ_MISMATCH',
   PAYMENT_VOUCHER_SEQ_ALREADY_USED = 'PAYMENT_VOUCHER_SEQ_ALREADY_USED',
+  PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE = 'PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE',
   PAYMENT_WITHDRAWAL_PENDING = 'PAYMENT_WITHDRAWAL_PENDING',
 
   // ── Agent payment delegation: a voucher signed by a DELEGATE key the payer
@@ -63,7 +64,6 @@ export enum PaymentErrorCode {
   PAYMENT_VOUCHER_DELEGATE_INACTIVE = 'PAYMENT_VOUCHER_DELEGATE_INACTIVE',
   PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED = 'PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED',
   PAYMENT_VOUCHER_DELEGATE_NOT_BOUND = 'PAYMENT_VOUCHER_DELEGATE_NOT_BOUND',
-  PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED = 'PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED',
 
   // ── The payer's own on-chain escrow limits (`setLimits`), which bind every
   //    voucher, delegate-signed or not.
@@ -189,24 +189,6 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `The voucher was signed by delegate ${context?.delegate ?? 'unknown'}, which is not the ` +
       `delegate key bound to this agent credential` +
       `${context?.bound ? ` (${context.bound})` : ' (none is bound)'}; nothing was charged`,
-  },
-  /**
-   * Only the payer's EIP-1271 smart wallet could have authorised this voucher,
-   * and the platform does not SERVE a call on that answer: nothing on chain
-   * binds a wallet's `isValidSignature` between the moment it is asked and the
-   * redemption, so a wallet could say yes to the check and no at redemption and
-   * be served for free (review S2-4). The contract still accepts EIP-1271; the
-   * platform will too once a voucher can be secured before the call is served.
-   * The payer's own key (an EIP-7702 account's) and an authorised delegate key
-   * are accepted.
-   */
-  voucherWalletSignatureUnsupported: {
-    code: PaymentErrorCode.PAYMENT_VOUCHER_WALLET_SIGNATURE_UNSUPPORTED,
-    statusCode: 403,
-    message: (context?: Record<string, any>) =>
-      `Smart-wallet (EIP-1271) voucher signatures are not accepted for served calls` +
-      `${context?.payer ? ` (payer ${context.payer})` : ''}; sign with the payer's own key or ` +
-      `with a delegate key the payer authorised on chain. Nothing was charged`,
   },
   voucherSignatureInvalid: {
     code: PaymentErrorCode.PAYMENT_VOUCHER_SIGNATURE_INVALID,
@@ -603,6 +585,23 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `Voucher sequence ${context?.actual ?? 'unknown'} was already used for an earlier call ` +
       `on this account; a voucher pays for one call, sign a new one with a fresh sequence`,
+  },
+
+  /**
+   * The seq is more than `MAX_SEQ_GAP` above the escrow's on-chain `seqHigh`.
+   * `X402Escrow` refuses such a voucher at redemption (`VoucherSeqGapTooLarge`),
+   * so it is neither issued nor admitted: a call served on it could never be
+   * collected. Only reachable when the backend's seq bookkeeping has run far
+   * ahead of the chain; the buyer's next voucher after redemptions catch up is
+   * fine.
+   */
+  voucherSeqGapTooLarge: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Voucher sequence ${context?.seq ?? 'unknown'} is more than ${context?.maxGap ?? 'the allowed gap'} ` +
+      `above the escrow's on-chain sequence${context?.seqHigh !== undefined ? ` (${context.seqHigh})` : ''}; ` +
+      `the chain would refuse it at redemption, so nothing was charged`,
   },
 
   /**

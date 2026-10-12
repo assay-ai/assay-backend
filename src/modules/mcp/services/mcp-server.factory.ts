@@ -299,8 +299,8 @@ const RETRYABLE_CODES: ReadonlySet<string> = new Set<string>([
   // one is `retryable: true`, unlike a cap or a pause, which are not — see
   // `McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED`.
   McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED,
-  // The chain state behind a voucher's authority (a delegate's grant, a
-  // wallet's EIP-1271 answer) could not be read. Nothing was charged; the read
+  // The chain state behind a voucher's authority (a delegate's grant) could
+  // not be read. Nothing was charged; the read
   // is retried on the next call.
   ChainErrorCode.CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE,
   // The payer is relaying a change that tightens its caps (BUG-D1-07). Nothing

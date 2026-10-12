@@ -50,6 +50,20 @@ export const EVM_RELAYER_FLOAT_ALERTS = {
   NO_RELAYER: 'evm_relayer_float_no_relayer',
 } as const;
 
+/** Which of the two sending keys a float reading or alert is about. */
+export type EvmSendingKey = 'relayer' | 'redeemer';
+
+/**
+ * The alert dedupe key for one key's float on one chain. The relayer keeps the
+ * bare chain id it always had; the redeemer's is suffixed, so the two floats
+ * are two suppression buckets — one key running dry must not silence the
+ * other's page. Shared by `EvmRelayer` and `EvmRelayerFloatMonitor`, which
+ * emit the same alert for the same condition.
+ */
+export function floatDedupeKey(chainId: string, key: EvmSendingKey): string {
+  return key === 'relayer' ? chainId : `${chainId}:redeemer`;
+}
+
 export interface EvmRelayerFloatMarks {
   readonly lowWei: bigint;
   readonly criticalWei: bigint;
@@ -67,9 +81,10 @@ const DECIMAL_WEI = /^[0-9]+$/;
 /**
  * The two marks and the grant cap, with **no defaults**.
  *
- * An unwatched float is worse than a process that refuses to start: the grant
- * and the redeemer both spend from it, and the first symptom of an unset mark
- * is a provider who was never paid. Same rule and same reason as
+ * An unwatched float is worse than a process that refuses to start: the grant,
+ * relayed buyer requests and slash sends spend the relayer's, redemptions spend
+ * the redeemer's (the monitor watches both against these marks), and the first
+ * symptom of an unset mark is a request nobody could send. Same rule and same reason as
  * `parseGasGrantCaps`, which refuses the same way one file over.
  *
  * No error message quotes the value it failed to parse (`docs/architecture.md`

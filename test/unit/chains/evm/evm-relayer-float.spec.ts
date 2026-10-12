@@ -54,6 +54,7 @@ interface BuildOptions {
   readonly criticalWei?: string;
   readonly perGrantMaxWei?: string;
   readonly enabled?: readonly ChainId[];
+  readonly redeemer?: FakeRelayer;
 }
 
 describe('EvmRelayerFloatMonitor', () => {
@@ -71,6 +72,7 @@ describe('EvmRelayerFloatMonitor', () => {
       alerts as unknown as AlertPort,
       options.enabled ?? [TESTNET],
       marks,
+      options.redeemer ?? null,
     );
   }
 
@@ -122,10 +124,12 @@ describe('EvmRelayerFloatMonitor', () => {
       }),
     );
     const [alert] = alerts.emit.mock.calls[0];
-    // "what stops" is the decision the person paged has to make. Redemption first —
-    // calls already served that cannot be collected — then the gas grant.
-    expect(alert.details.stops).toContain('redemption');
+    // "what stops" is the decision the person paged has to make. The relayer
+    // pays for relayed requests and the gas grant; redemptions are the
+    // redeemer's float, and a separate alert.
+    expect(alert.details.stops).toContain('relayed buyer requests');
     expect(alert.details.stops).toContain('gas grant');
+    expect(alert.details.key).toBe('relayer');
   });
 
   it('treats an unreadable balance as UNREADABLE, never as healthy', async () => {
@@ -233,6 +237,69 @@ describe('EvmRelayerFloatMonitor', () => {
     expect(alerts.emit).toHaveBeenCalledWith(
       expect.objectContaining({ name: EVM_RELAYER_FLOAT_ALERTS.UNREADABLE }),
     );
+  });
+
+  describe('the redeemer key’s float', () => {
+    const REDEEMER_ADDRESS = '0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2';
+    let redeemer: FakeRelayer;
+
+    beforeEach(() => {
+      redeemer = new FakeRelayer();
+      redeemer.addressFor.mockImplementation(async (chainId) =>
+        toAccountId(chainId, REDEEMER_ADDRESS),
+      );
+    });
+
+    it('reads it after the relayer on each chain, and reports it under its own key', async () => {
+      relayer.balanceWei.mockResolvedValue(LOW_WEI * 2n);
+      redeemer.balanceWei.mockResolvedValue(LOW_WEI * 2n);
+
+      const readings = await buildMonitor({ redeemer, enabled: [TESTNET, MAINNET] }).check();
+
+      expect(readings.map((r) => `${r.chainId}/${r.key}`)).toEqual([
+        'eip155:46630/relayer',
+        'eip155:46630/redeemer',
+        'eip155:4663/relayer',
+        'eip155:4663/redeemer',
+      ]);
+      // It funds no grant, so it has no grant count.
+      expect(readings.filter((r) => r.key === 'redeemer').map((r) => r.withdrawsRemaining)).toEqual(
+        [null, null],
+      );
+    });
+
+    it('alerts on a low redeemer float in its OWN bucket, naming the key, while the relayer is fine', async () => {
+      relayer.balanceWei.mockResolvedValue(LOW_WEI * 2n);
+      redeemer.balanceWei.mockResolvedValue(CRITICAL_WEI);
+
+      await buildMonitor({ redeemer }).check();
+
+      expect(alerts.emit).toHaveBeenCalledTimes(1);
+      const [alert] = alerts.emit.mock.calls[0];
+      expect(alert).toMatchObject({
+        name: EVM_RELAYER_FLOAT_ALERTS.CRITICAL,
+        dedupeKey: 'eip155:46630:redeemer',
+        details: expect.objectContaining({ key: 'redeemer', redeemer: expect.any(String) }),
+      });
+      expect(alert.summary).toContain('redeemer');
+      expect(alert.details.stops).toContain('voucher redemption');
+    });
+
+    it('names EVM_REDEEMER_KEYS when this process holds no redeemer key', async () => {
+      relayer.balanceWei.mockResolvedValue(LOW_WEI * 2n);
+      redeemer.addressFor.mockRejectedValue(new Error('no redeemer key'));
+
+      const readings = await buildMonitor({ redeemer }).check();
+
+      expect(readings[1]).toMatchObject({ key: 'redeemer', level: 'NO_RELAYER' });
+      expect(alerts.emit).toHaveBeenCalledWith(
+        expect.objectContaining({
+          name: EVM_RELAYER_FLOAT_ALERTS.NO_RELAYER,
+          dedupeKey: 'eip155:46630:redeemer',
+          details: expect.objectContaining({ variable: 'EVM_REDEEMER_KEYS' }),
+        }),
+      );
+    });
   });
 
   it('logs one line per cron pass even when the float is healthy and nothing alerts', async () => {

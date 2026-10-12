@@ -4,7 +4,6 @@ import { AbiParameter, toEventSelector, toFunctionSelector } from 'viem';
 
 import { EVM_ERROR_BY_SELECTOR, evmErrorName } from '@modules/chains/evm/abi/error-selectors';
 import {
-  ERC1271_ABI,
   ERC20_ABI,
   X402_CONFIG_ABI,
   X402_ESCROW_ABI,
@@ -26,7 +25,8 @@ import {
  *   `evm/out/<Contract>.sol/<Contract>.json`;
  * - the argument and return shapes come from the `abi` array of the same files,
  *   rendered to canonical form;
- * - the 83 error selectors come from `cast sig '<Name>()'` on the pinned
+ * - the 83 error selectors (81 from `Errors.sol`, two from OpenZeppelin's
+ *   `Ownable`) come from `cast sig '<Name>()'` on the pinned
  *   Foundry build (1.2.1-nightly, commit `7e68208e`), which is a **different
  *   keccak implementation from viem's** — so the comparison is a pin and not a
  *   restatement of the derivation.
@@ -94,11 +94,6 @@ const ESCROW_PINS: readonly Pin[] = [
   ['0x7aac242e', 'revokeDelegateBySig(address,address,uint64,uint64,bytes)', '()'],
 ];
 
-/** EIP-1271's one function, `cast sig 'isValidSignature(bytes32,bytes)'`. */
-const ERC1271_PINS: readonly Pin[] = [
-  ['0x1626ba7e', 'isValidSignature(bytes32,bytes)', '(bytes4)'],
-];
-
 const CONFIG_PINS: readonly Pin[] = [
   [
     '0xcff0ab96',
@@ -107,9 +102,12 @@ const CONFIG_PINS: readonly Pin[] = [
   ],
   ['0x5c975abb', 'paused()', '(bool)'],
   ['0xf851a440', 'admin()', '(address)'],
+  // The D-17 owner role (OpenZeppelin `Ownable2StepUpgradeable`): `cast sig
+  // 'owner()'` and `cast sig 'pendingOwner()'`. Reads only.
+  ['0x8da5cb5b', 'owner()', '(address)'],
+  ['0xe30c3978', 'pendingOwner()', '(address)'],
   ['0x5a6d11bb', 'slashProviderBps()', '(uint16)'],
   ['0x7ef30520', 'canSign(address)', '(bool)'],
-  ['0x7e0625bd', 'verifierExpiry(address)', '(uint64)'],
   [
     '0x4d44b5b7',
     'verifierKey(address)',
@@ -187,7 +185,6 @@ const SUITES = [
   ['stake-slash', X402_STAKE_SLASH_ABI, STAKE_SLASH_PINS],
   ['multicall3', MULTICALL3_ABI, MULTICALL3_PINS],
   ['erc20', ERC20_ABI, ERC20_PINS],
-  ['erc1271', ERC1271_ABI, ERC1271_PINS],
 ] as const;
 
 /**
@@ -300,6 +297,12 @@ describe('the vendored ABI matches the compiled contracts', () => {
       'cancelSlash',
       'expireSlash',
       'upgradeToAndCall',
+      // The OWNER's doors (D-17). The owner is a cold key held by a human.
+      'setAdmin',
+      'transferOwnership',
+      'acceptOwnership',
+      'renounceOwnership',
+      'initializeV2',
     ]) {
       expect({ forbidden, vendored: names.includes(forbidden) }).toEqual({
         forbidden,
@@ -310,14 +313,15 @@ describe('the vendored ABI matches the compiled contracts', () => {
 });
 
 /**
- * Every `error X();` in `assay-evm/src/Errors.sol`, name and selector.
+ * Every `error X();` in `assay-evm/src/Errors.sol`, name and selector, plus
+ * the two OpenZeppelin Ownable errors `X402Config` raises.
  *
  * The names were extracted mechanically from the Solidity
- * (`grep -oE '^\s*error\s+([A-Za-z0-9_]+)\s*\(\s*\)\s*;'` → 83 hits, and the
- * complementary grep for a non-zero-argument error returned nothing). Each
- * selector is `cast sig '<Name>()'` on the pinned Foundry build.
+ * (`grep '^error' src/Errors.sol` → 81 hits, every one zero-argument) on
+ * 2026-10-13, after D-17/D-18. Each selector is `cast sig '<Name>()'` on the
+ * pinned Foundry build (1.2.1-nightly).
  *
- * All 83 are pinned rather than a sample: pinning four leaves 79 names free to
+ * All are pinned rather than a sample: pinning four leaves the rest free to
  * be misspelled, and a misspelled name produces a selector that no revert will
  * ever carry — so the table reports `UNKNOWN_REVERT` for a refusal it was
  * written to name, and no test notices.
@@ -325,13 +329,14 @@ describe('the vendored ABI matches the compiled contracts', () => {
 const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0x1f2a2005', 'ZeroAmount'],
   ['0xd92e233d', 'ZeroAddress'],
-  ['0x679346bc', 'AmountExceedsUint64'],
   ['0x9d565d4e', 'MathOverflow'],
   ['0x8dd279dd', 'ProgramPaused'],
   ['0x7bfa4b9f', 'NotAdmin'],
   ['0xb5eba9f0', 'InvalidAdmin'],
   ['0x1b4f6bbd', 'NotRedeemer'],
-  ['0x472e017e', 'NotBuyer'],
+  ['0x30cd7471', 'NotOwner'],
+  ['0x2fab92ca', 'OwnershipCannotBeRenounced'],
+  ['0x894b22ee', 'AdminChangeRequiresOwner'],
   ['0xa7d220e4', 'InvalidTakeRateBps'],
   ['0xc2700054', 'InvalidSplitBps'],
   ['0x68629813', 'InvalidSlashCapBps'],
@@ -351,12 +356,13 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0xf0ad0d09', 'MalleableSignature'],
   ['0xd38922ec', 'BadSignatureV'],
   ['0x790b2b9f', 'SignerIsNotPayer'],
-  ['0xff20078c', 'SignerIsNotVerifier'],
   ['0xd6ce2e7a', 'SignerIsNotBuyer'],
   ['0x0819bdcd', 'SignatureExpired'],
+  ['0x98edbdd3', 'SignatureDeadlineTooFar'],
   ['0x4bd574ec', 'BadNonce'],
   ['0x517f98f0', 'VoucherSeqZero'],
   ['0x7b2de8e8', 'VoucherSeqNotIncreasing'],
+  ['0xfe1f88bd', 'VoucherSeqGapTooLarge'],
   ['0x157fd87e', 'VoucherExpired'],
   ['0x7ec15438', 'VoucherNotYetValid'],
   ['0x322f3b91', 'InvalidVoucherWindow'],
@@ -365,18 +371,26 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0x8a9e6923', 'EscrowWindowLimitExceeded'],
   ['0x71de3750', 'EscrowInsufficient'],
   ['0x6b4ea0bb', 'EscrowLimitsUnchanged'],
-  ['0xd64c40ff', 'EscrowLimitsRequireBuyer'],
   ['0x43ead8fa', 'ProviderBelowMinimumStake'],
   ['0x0b7d62e2', 'BatchTooLarge'],
   ['0x17e37b5c', 'BatchLengthMismatch'],
   ['0xc2e5347d', 'EmptyBatch'],
+  ['0xeaad2a76', 'DelegateIsPayer'],
+  ['0xf188d51a', 'DelegateCapsInvalid'],
+  ['0x6a8b28b6', 'DelegateCapsExceedEscrowLimits'],
+  ['0xede89bb7', 'DelegateValidUntilInvalid'],
+  ['0xea843156', 'DelegationUnchanged'],
+  ['0x13925a11', 'DelegateNotActive'],
+  ['0x8c390496', 'TooManyDelegates'],
+  ['0xa8a8247b', 'DelegateIsRevoked'],
+  ['0x157f584a', 'DelegateIsExpired'],
+  ['0x1ebdc3dd', 'DelegateVoucherExceedsPerCallLimit'],
+  ['0x3ae67490', 'DelegateWindowLimitExceeded'],
   ['0x27aa2f48', 'WithdrawNotYetAvailable'],
   ['0x37c59471', 'NoWithdrawRequested'],
   ['0x4e0ff329', 'WithdrawDelayTooShort'],
   ['0xb0a6ea29', 'TransferAmountMismatch'],
-  ['0x6f8a66c9', 'Permit2NotConfigured'],
   ['0xedd6fe2b', 'AssetDecimalsNotSix'],
-  ['0x88b36cc1', 'DestinationIsVault'],
   ['0x51e7d130', 'InsufficientBondedStake'],
   ['0xaf6311b4', 'InsufficientUnbondingStake'],
   ['0xb6c7f82e', 'UnbondingPeriodNotElapsed'],
@@ -394,22 +408,16 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0xb3b45102', 'SlashNotYetExecutable'],
   ['0xa0057580', 'SlashExecutionWindowClosed'],
   ['0x15fbdbc2', 'SlashNotExpired'],
-  ['0xeaad2a76', 'DelegateIsPayer'],
-  ['0xf188d51a', 'DelegateCapsInvalid'],
-  ['0x6a8b28b6', 'DelegateCapsExceedEscrowLimits'],
-  ['0xede89bb7', 'DelegateValidUntilInvalid'],
-  ['0xea843156', 'DelegationUnchanged'],
-  ['0x13925a11', 'DelegateNotActive'],
-  ['0x8c390496', 'TooManyDelegates'],
-  ['0xa8a8247b', 'DelegateIsRevoked'],
-  ['0x157f584a', 'DelegateIsExpired'],
-  ['0x1ebdc3dd', 'DelegateVoucherExceedsPerCallLimit'],
-  ['0x3ae67490', 'DelegateWindowLimitExceeded'],
-  ['0x98877a9a', 'WalletCheckUnderfunded'],
+  // OpenZeppelin `Ownable2StepUpgradeable`, raised by X402Config's owner doors
+  // (D-17). Parameterised: `cast sig 'OwnableUnauthorizedAccount(address)'`
+  // and `cast sig 'OwnableInvalidOwner(address)'`.
+  ['0x118cdaa7', 'OwnableUnauthorizedAccount'],
+  ['0x1e4fbdf7', 'OwnableInvalidOwner'],
 ];
 
 describe('the Errors.sol selector table', () => {
   it('has one entry per declared error and no collisions', () => {
+    // 81 from Errors.sol plus OpenZeppelin's two Ownable errors.
     expect(EVM_ERROR_BY_SELECTOR.size).toBe(83);
     expect(ERROR_PINS).toHaveLength(83);
   });

@@ -131,6 +131,10 @@ export function prevalidateVoucher(voucher: EvmVoucher, state: PrevalidationStat
 
   if (voucher.seq === 0n) return 'VoucherSeqZero';
   if (voucher.seq <= state.seqHigh) return 'VoucherSeqNotIncreasing';
+  // D-17's seq jump cap, right after the increasing check — the contract's order.
+  if (voucher.seq - state.seqHigh > BigInt(EVM_CONSTANTS.MAX_SEQ_GAP)) {
+    return 'VoucherSeqGapTooLarge';
+  }
 
   // The authority, where `_voucherAuthority` decides it (agent payment
   // delegation): a delegate-signed voucher needs a live grant at THIS block.

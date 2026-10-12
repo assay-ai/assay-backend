@@ -33,6 +33,7 @@ const DEPLOYMENT: EvmDeployment = {
   // Both are fields of `EvmDeployment`; neither is read on this path.
   escrowImplementation: '0x8888888888888888888888888888888888888888',
   admin: '0x9999999999999999999999999999999999999999',
+  owner: '0x7777777777777777777777777777777777777777',
 };
 
 const NOW_SECONDS = 1_800_000_000;

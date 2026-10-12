@@ -11,14 +11,14 @@ import { AccountId } from './caip.types';
  *   PAYER     an ECDSA signature by the voucher's `payer` itself;
  *   DELEGATE  an ECDSA signature by a key the payer authorised ON CHAIN
  *             (`authorizeDelegate[BySig]`), not revoked, not past
- *             `validUntil` — and whose own caps the caller must still apply;
- *   ERC1271   when the payer has code, its `isValidSignature(digest, sig)`
- *             answering `0x1626ba7e`.
+ *             `validUntil` — and whose own caps the caller must still apply.
+ *
+ * Nothing else. The contract has no EIP-1271 branch (assay-evm D-18): a
+ * contract-wallet payer authorises a delegate and lets the delegate sign.
  */
 export enum VoucherAuthorityKind {
   PAYER = 'PAYER',
   DELEGATE = 'DELEGATE',
-  ERC1271 = 'ERC1271',
 }
 
 /** Why nothing authorised the voucher. The most specific true reason. */
@@ -29,23 +29,6 @@ export enum VoucherAuthorityRefusal {
   DELEGATE_REVOKED = 'DELEGATE_REVOKED',
   /** A delegate past its `validUntil` signed it (`DelegateIsExpired`). */
   DELEGATE_EXPIRED = 'DELEGATE_EXPIRED',
-  /**
-   * The payer has code (a contract wallet or an EIP-7702 account) and only its
-   * EIP-1271 wallet could have authorised this voucher, but the caller asked
-   * for that path to be left out (`allowErc1271: false`). The chain would ask
-   * the wallet; a SERVING decision cannot rely on its answer — see
-   * `VoucherService`.
-   */
-  ERC1271_NOT_ACCEPTED = 'ERC1271_NOT_ACCEPTED',
-}
-
-/** How the caller wants the rule applied. */
-export interface VoucherAuthorityOptions {
-  /**
-   * Whether path (c), the payer's EIP-1271 wallet, may authorise the voucher.
-   * Default `true` (it is the chain's rule). Serving a call refuses it.
-   */
-  readonly allowErc1271?: boolean;
 }
 
 /**
@@ -69,7 +52,7 @@ export interface VoucherDelegationTerms {
 }
 
 export type VoucherAuthority =
-  | { readonly kind: VoucherAuthorityKind.PAYER | VoucherAuthorityKind.ERC1271 }
+  | { readonly kind: VoucherAuthorityKind.PAYER }
   | {
       readonly kind: VoucherAuthorityKind.DELEGATE;
       readonly delegate: AccountId;

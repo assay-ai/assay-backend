@@ -95,7 +95,7 @@ export const K3_CRITERIA: readonly K3Criterion[] = [
       // so it could be set or unset without changing anything. These are what E2 consumes.
       'TESTNET_E2_BUYER_KEY — a scripted buyer holding its own key and some ETH for gas',
       'a provider bonded at minimumStake (TESTNET_E2_PROVIDER)',
-      "EVM_RELAYER_KEYS holding the deployment's redeemer",
+      "EVM_REDEEMER_KEYS holding the deployment's redeemer (a different key from EVM_RELAYER_KEYS)",
     ],
   },
   {

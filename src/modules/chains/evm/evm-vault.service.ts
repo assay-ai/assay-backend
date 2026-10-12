@@ -67,28 +67,33 @@ export interface EvmVaultClient {
  * the shape of the thing. Neither costs a round trip: the answer is the
  * deployment record, and the record is what `assertVaultControl` checks.
  *
- * ## What "control" means here, and it is three reads
+ * ## What "control" means here, and it is four reads
  *
  * There is no program to ask. The question that carries the same weight is
- * *"is the code behind this address the code we deployed, and is the key that
- * can replace it the key we recorded?"* — so:
+ * *"is the code behind this address the code we deployed, and are the keys that
+ * can replace or re-parameterise it the keys we recorded?"* — so:
  *
  *   1. the ERC-1967 implementation slot equals `deployment.escrowImplementation`;
- *   2. `CONFIG.admin()` equals `deployment.admin`, which is ALSO the
- *      upgrade authority of all three contracts;
- *   3. `ASSET()` equals the asset being reconciled.
+ *   2. `CONFIG.owner()` equals `deployment.owner` — the UUPS upgrade authority
+ *      of all three contracts (assay-evm D-17);
+ *   3. `CONFIG.admin()` equals `deployment.admin` — the operational key
+ *      (pause, parameters, verifier registry), which the owner appoints and
+ *      which can NOT upgrade;
+ *   4. `ASSET()` equals the asset being reconciled.
  *
- * Any of the three failing is `CHAIN_VAULT_CONTROL_UNVERIFIED`, thrown at the
- * point of use and **naming which one**, because the three are three different
+ * Any of the four failing is `CHAIN_VAULT_CONTROL_UNVERIFIED`, thrown at the
+ * point of use and **naming which one**, because the four are four different
  * incidents with no overlapping remedy. `ReconciliationService.run` calls this
  * FIRST for the reason its own comment gives: a vault balance read from an
  * address whose control has not been proven is not evidence of anything, and it
  * would look authoritative in the stored row for ever.
  *
- * There is deliberately no fourth read of `CONFIG()` on the escrow. `CONFIG` is
+ * There is deliberately no read of `CONFIG()` on the escrow. `CONFIG` is
  * storage written once in `initialize` and never again, so the only way it can
- * move is an upgrade — which check 1 already refuses. A fourth read would be a
- * second spelling of the first.
+ * move is an upgrade — which check 1 already refuses. Another read would be a
+ * second spelling of the first. `pendingOwner()` is not checked either: a
+ * transfer in progress has not moved the authority, and `owner()` changes the
+ * moment it completes.
  *
  * ## Why no `balanceOf`-based solvency check appears here, and none may be added
  *
@@ -186,7 +191,22 @@ export class EvmVaultService implements VaultPort {
       });
     }
 
-    // 2. The key that can replace it.
+    // 2. The key that can replace it: the owner, the upgrade authority.
+    const owner = (await client.readContract({
+      address: getAddress(deployment.config),
+      abi: X402_CONFIG_ABI,
+      functionName: 'owner',
+    })) as `0x${string}`;
+    if (getAddress(owner) !== getAddress(deployment.owner)) {
+      throw ChainErrors.vaultControlUnverified({
+        reason:
+          `config ${deployment.config} reports owner ${owner}, not the ${deployment.owner} the ` +
+          `deployment record names — the upgrade authority of all three contracts moved ` +
+          `without being recorded`,
+      });
+    }
+
+    // 3. The operational key the owner appointed.
     const admin = (await client.readContract({
       address: getAddress(deployment.config),
       abi: X402_CONFIG_ABI,
@@ -196,12 +216,12 @@ export class EvmVaultService implements VaultPort {
       throw ChainErrors.vaultControlUnverified({
         reason:
           `config ${deployment.config} reports admin ${admin}, not the ${deployment.admin} the ` +
-          `deployment record names — that key is also the upgrade authority of all ` +
-          `three contracts`,
+          `deployment record names — the operational key (pause, parameters, verifier ` +
+          `registry) changed without being recorded`,
       });
     }
 
-    // 3. The denomination.
+    // 4. The denomination.
     const settled = (await client.readContract({
       address: escrow,
       abi: X402_ESCROW_ABI,
