@@ -32,9 +32,10 @@ export class GetProviderEarningsQueryDto {
 /**
  * One group's earnings figures, in atomic units of one asset.
  *
- * `earned` and `platformFee` are both `Σ` over `SETTLED` intents only —
+ * `earned` and `platformFee` are both `Σ` over credited `SETTLED` intents only —
  * `payment_intents.provider_amount` / `.platform_fee` respectively, which the
- * `provider_amount + platform_fee = price_amount` CHECK keeps in lockstep.
+ * `provider_amount + platform_fee = price_amount` CHECK keeps in lockstep —
+ * except that `platformFee` leaves out `absorbed` calls, which took no fee.
  * `withheld` is the earnings screen's "withheld itemised with reasons": `Σ
  * provider_amount` over intents that reached a terminal state paying the
  * provider nothing (`REFUNDED`, `VOIDED`, `EXPIRED`, restricted to intents that
@@ -72,6 +73,19 @@ export class ProviderEarningsFiguresDto {
 
   @ApiProperty({ description: 'Calls counted in `withheld`' })
   withheldCalls: number;
+
+  @ApiProperty({
+    type: MoneyDto,
+    nullable: true,
+    description:
+      'The part of `earned` credited from platform funds because the voucher could never be ' +
+      'redeemed (the buyer kept the money). Owed to the provider by the platform; it never ' +
+      'reached the provider wallet on chain. `null` — see `earned`.',
+  })
+  absorbed: MoneyDto | null;
+
+  @ApiProperty({ description: 'Calls counted in `absorbed`' })
+  absorbedCalls: number;
 }
 
 export class ProviderEarningsGroupDto extends ProviderEarningsFiguresDto {

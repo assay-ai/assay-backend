@@ -19,7 +19,11 @@ import {
   WithdrawBodyDto,
   WithdrawGasGrantDto,
 } from '../dto/create-escrow-intent.dto';
-import { GetEscrowResponseDto } from '../dto/get-escrow.dto';
+import {
+  GetEscrowResponseDto,
+  GetEscrowUnsettledResponseDto,
+  toUnsettledDto,
+} from '../dto/get-escrow.dto';
 import {
   RelayedEscrowIntentResponseDto,
   SubmitRequestWithdrawBodyDto,
@@ -141,6 +145,33 @@ export class EscrowController {
   }
 
   /**
+   * `GET /escrow/unsettled` — the payments the platform served and the chain
+   * has not redeemed yet, beside the escrow's own window (BUG-D1-07). A console
+   * shows them before the buyer lowers a limit, and polls this while waiting
+   * for them to settle.
+   *
+   * The payer's own (HUMAN) session only, like `GET /escrow/delegates`: an
+   * agent has no use for the payer-wide figures, and each read costs a chain
+   * read.
+   */
+  @UseGuards(HumanSessionGuard)
+  @Get('unsettled')
+  @ApiOperation({ summary: "The payer's payments still being settled on chain" })
+  @ApiResponse({ status: 200, type: GetEscrowUnsettledResponseDto })
+  async unsettled(@CurrentSession() session: McpSession): Promise<GetEscrowUnsettledResponseDto> {
+    const asset = await this.escrows.assetFor(session.agentAccount);
+    const unsettled = await this.withdrawals.unsettledVouchers(
+      session.organizationId,
+      session.agentAccount,
+      asset,
+    );
+    return {
+      account: session.agentAccount,
+      unsettled: unsettled === null ? null : toUnsettledDto(unsettled, asset),
+    };
+  }
+
+  /**
    * `POST /escrow/limits-intent` — the buyer's brake.
    *
    * **`0` means refuse every redeem, not "unlimited"** — a console that got
@@ -169,7 +200,13 @@ export class EscrowController {
       session.organizationId,
       session.agentAccount,
       asset,
-      { kind: EscrowIntentKind.SET_LIMITS, amount: null, limits, destination: null },
+      {
+        kind: EscrowIntentKind.SET_LIMITS,
+        amount: null,
+        limits,
+        destination: null,
+        acknowledgeUnsettled: body.acknowledgeUnsettled === true,
+      },
     );
 
     return toResponseDto(EscrowIntentKind.SET_LIMITS, session.agentAccount, result);
@@ -181,7 +218,12 @@ export class EscrowController {
    * Starts the clock the program freezes at `now + Config.withdraw_delay_seconds`.
    * `amount: "0"` cancels a standing request.
    */
+  // Withdrawing is the buyer taking money back out of the escrow its agent
+  // spends from — a person's decision, like the limits. The chain still wants
+  // the buyer's signature (or `msg.sender`); refusing the agent's credential
+  // keeps the API from building or relaying any step of it on the agent's word.
   @Post('withdrawals/request-intent')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: "Build the buyer's own request_withdraw transaction" })
   @ApiResponse({ status: 201, type: CreateEscrowIntentResponseDto })
   @ApiResponse({
@@ -254,6 +296,7 @@ export class EscrowController {
         deadline: BigInt(body.deadline),
         signature: body.signature,
       },
+      body.acknowledgeUnsettled === true,
     );
 
     return toRelayedResponseDto(EscrowIntentKind.SET_LIMITS, session.agentAccount, result);
@@ -273,6 +316,7 @@ export class EscrowController {
    * the contract, and nothing on this controller will ever send it for them.
    */
   @Post('withdrawals/request')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: "Relay the buyer's signed request_withdraw request" })
   @ApiResponse({ status: 201, type: RelayedEscrowIntentResponseDto })
   @ApiResponse({ status: 400, description: RELAYED_MALFORMED_DESCRIPTION })
@@ -314,6 +358,7 @@ export class EscrowController {
    * fee to be told something `GET /escrow` already knows.
    */
   @Post('withdrawals/intent')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: "Build the buyer's own withdraw transaction" })
   @ApiResponse({ status: 201, type: CreateEscrowIntentResponseDto })
   @ApiResponse({

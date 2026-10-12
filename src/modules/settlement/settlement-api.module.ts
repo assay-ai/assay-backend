@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { McpModule } from '@modules/mcp/mcp.module';
 
+import { EscrowDelegatesController } from './controllers/escrow-delegates.controller';
 import { EscrowController } from './controllers/escrow.controller';
 import { SettlementModule } from './settlement.module';
 
@@ -18,7 +19,7 @@ import { SettlementModule } from './settlement.module';
  */
 @Module({
   imports: [SettlementModule, McpModule],
-  controllers: [EscrowController],
+  controllers: [EscrowController, EscrowDelegatesController],
   exports: [SettlementModule],
 })
 export class SettlementApiModule {}

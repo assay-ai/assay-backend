@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 
 import { ListNotificationsQueryDto, NotificationDto } from '../dto/list-notifications.dto';
 import { NotificationIdParamDto } from '../dto/mark-notification-read.dto';
@@ -41,7 +41,12 @@ export class NotificationsController {
     return this.notifications.unreadCount(session.organizationId);
   }
 
+  // The feed is how the owner watches its agent. An agent credential that
+  // could mark it read could clear the alert that names it before anyone saw
+  // it, so reading is open and marking is the person's.
   @Patch(':id/read')
+  @UseGuards(HumanSessionGuard)
+  @ApiResponse({ status: 403, description: 'AUTH_HUMAN_SESSION_REQUIRED — an agent credential' })
   @ApiOperation({ summary: 'Mark one notification read' })
   @ApiResponse({ status: 200, description: 'The notification, now read', type: NotificationDto })
   @ApiResponse({ status: 404, description: 'No such notification in this organization' })
@@ -53,6 +58,8 @@ export class NotificationsController {
   }
 
   @Post('read-all')
+  @UseGuards(HumanSessionGuard)
+  @ApiResponse({ status: 403, description: 'AUTH_HUMAN_SESSION_REQUIRED — an agent credential' })
   @ApiOperation({ summary: 'Mark every unread notification read' })
   @ApiResponse({ status: 201, description: 'Done' })
   async markAllRead(@CurrentSession() session: McpSession): Promise<void> {

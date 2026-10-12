@@ -1,3 +1,4 @@
+import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { Injectable, Logger } from '@nestjs/common';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
@@ -12,7 +13,7 @@ import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { AppError } from '@shared/errors/app-errors';
 import { BaseError } from '@shared/errors/base.error';
 
-import { PaymentErrors } from '@modules/payment/errors/payment.errors';
+import { PaymentErrorCode, PaymentErrors } from '@modules/payment/errors/payment.errors';
 import { PaymentRail } from '@modules/payment/ports/payment.types';
 
 import {
@@ -298,4 +299,12 @@ const RETRYABLE_CODES: ReadonlySet<string> = new Set<string>([
   // one is `retryable: true`, unlike a cap or a pause, which are not — see
   // `McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED`.
   McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED,
+  // The chain state behind a voucher's authority (a delegate's grant) could
+  // not be read. Nothing was charged; the read
+  // is retried on the next call.
+  ChainErrorCode.CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE,
+  // The payer is relaying a change that tightens its caps (BUG-D1-07). Nothing
+  // was charged and the seq is not spent; the same call passes once the change
+  // has landed. The error carries `retryAfter` (seconds).
+  PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
 ]);

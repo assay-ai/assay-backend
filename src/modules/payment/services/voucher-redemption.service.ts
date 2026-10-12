@@ -327,6 +327,7 @@ export class VoucherRedemptionService {
         issuedAt,
         expiresAt: Math.floor(row.expiresAt.getTime() / 1000),
         signature: row.voucherSignature,
+        delegate: (row.voucherDelegate as AccountId | null) ?? null,
       },
     };
   }

@@ -11,6 +11,7 @@ import { SettlementErrorCode } from '@modules/settlement/errors/settlement.error
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { guardOver } from './helpers/unsettled-guard';
 
 const ORG = 'org-11111111-1111-4111-8111-111111111111';
 const USDC: AssetId =
@@ -69,6 +70,8 @@ function buildHarness(overrides?: {
   /** The relayed submit half, recorded in the same `calls` array. */
   submit?: jest.Mock;
   admit?: jest.Mock;
+  assertRoom?: jest.Mock;
+  guard?: ReturnType<typeof guardOver>['guard'];
 }) {
   /*
     Every call this service makes, in one array, in the order it made them.
@@ -126,6 +129,11 @@ function buildHarness(overrides?: {
       jest.fn(async () => {
         calls.push('relayedRate.admit');
       }),
+    assertRoom:
+      overrides?.assertRoom ??
+      jest.fn(async () => {
+        calls.push('relayedRate.assertRoom');
+      }),
   };
 
   const service = new WithdrawalService(
@@ -135,6 +143,7 @@ function buildHarness(overrides?: {
     gasGrants as never,
     relayed as never,
     relayedRate as never,
+    overrides?.guard ?? guardOver().guard,
   );
 
   return { service, builder, reconciliation, escrows, gasGrants, relayed, relayedRate, calls };
@@ -161,6 +170,47 @@ describe('WithdrawalService.buildIntent — delegation', () => {
     });
     expect(result.transaction).toBe(TRANSACTION);
     expect(escrows.get).toHaveBeenCalledWith(ORG, ACCOUNT, USDC);
+  });
+});
+
+/**
+ * REGRESSION (BUG-D1-06): a relayed request (EIP-712, the platform sends it)
+ * was refused for the relay budget only AFTER the payer had signed it.
+ */
+describe('WithdrawalService.buildIntent — the relay budget, before the signature', () => {
+  const typed = { namespace: 'eip155', kind: 'typed-data', relayed: true };
+
+  it('refuses a relayed request when the budget is spent, and grants nothing', async () => {
+    const limited = Object.assign(new Error('limit'), {
+      errorCode: 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED',
+    });
+    const { service, escrows } = buildHarness({
+      buildIntent: jest.fn(async () => typed),
+      assertRoom: jest.fn(async () => {
+        throw limited;
+      }),
+    });
+
+    await expect(
+      service.buildIntent(ORG, ACCOUNT, USDC, {
+        kind: EscrowIntentKind.SET_LIMITS,
+        amount: null,
+        limits: { maxVoucherAmount: 1n, maxPerWindow: 2n },
+        destination: null,
+      }),
+    ).rejects.toBe(limited);
+    expect(escrows.get).not.toHaveBeenCalled();
+  });
+
+  it('does not consult the relay budget for a transaction the buyer sends', async () => {
+    const { service, relayedRate } = buildHarness();
+    await service.buildIntent(ORG, ACCOUNT, USDC, {
+      kind: EscrowIntentKind.SET_LIMITS,
+      amount: null,
+      limits: { maxVoucherAmount: 1n, maxPerWindow: 2n },
+      destination: null,
+    });
+    expect(relayedRate.assertRoom).not.toHaveBeenCalled();
   });
 });
 
@@ -437,5 +487,83 @@ describe('WithdrawalService.buildIntent — the withdrawal gas grant', () => {
     expect(result.gasGrant).toEqual({ kind: 'UNAVAILABLE' });
     expect(result.transaction).toBe(TRANSACTION);
     expect(result.escrow).not.toBeNull();
+  });
+});
+
+/**
+ * REGRESSION (BUG-D1-07): lowering the escrow's OWN limits strands every
+ * signer's unredeemed vouchers just as lowering a delegate's does — the
+ * escrow's limits bind the payer's key and every delegate at redemption.
+ */
+describe('WithdrawalService — lowering escrow limits with payments in flight (BUG-D1-07)', () => {
+  const inFlight = {
+    count: 2,
+    total: 600_000n,
+    largest: 500_000n,
+    redeemableUntil: new Date(Date.now() + 30 * 60_000),
+    redeemedSince: 0n,
+  };
+  const standing = () =>
+    escrowState({
+      maxVoucherAmount: MoneyUtil.of(1_000_000n, USDC, 6),
+      maxPerWindow: MoneyUtil.of(10_000_000n, USDC, 6),
+      spentInWindow: MoneyUtil.of(2_000_000n, USDC, 6),
+      windowStartedAt: new Date().toISOString(),
+    });
+  const setLimits = (
+    maxVoucherAmount: bigint,
+    maxPerWindow: bigint,
+    acknowledgeUnsettled = false,
+  ) => ({
+    kind: EscrowIntentKind.SET_LIMITS,
+    amount: null,
+    limits: { maxVoucherAmount, maxPerWindow },
+    destination: null,
+    acknowledgeUnsettled,
+  });
+
+  it('refuses a per-payment limit below an unredeemed voucher, before building anything', async () => {
+    const { service, builder } = buildHarness({
+      guard: guardOver(inFlight).guard,
+      escrowGet: jest.fn(async () => standing()),
+      buildIntent: jest.fn(async () => TRANSACTION),
+    });
+    await expect(
+      service.buildIntent(ORG, ACCOUNT, USDC, setLimits(400_000n, 10_000_000n)),
+    ).rejects.toMatchObject({
+      errorCode: SettlementErrorCode.SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK,
+    });
+    expect(builder.buildIntent).toHaveBeenCalledTimes(1);
+  });
+
+  it('refuses a window below counter + in flight, and builds it when acknowledged', async () => {
+    const harness = () =>
+      buildHarness({
+        guard: guardOver(inFlight).guard,
+        escrowGet: jest.fn(async () => standing()),
+        buildIntent: jest.fn(async () => TRANSACTION),
+      });
+    await expect(
+      harness().service.buildIntent(ORG, ACCOUNT, USDC, setLimits(1_000_000n, 2_500_000n)),
+    ).rejects.toMatchObject({
+      errorCode: SettlementErrorCode.SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK,
+    });
+    await expect(
+      harness().service.buildIntent(ORG, ACCOUNT, USDC, setLimits(1_000_000n, 2_600_000n)),
+    ).resolves.toBeDefined();
+    await expect(
+      harness().service.buildIntent(ORG, ACCOUNT, USDC, setLimits(1_000_000n, 2_500_000n, true)),
+    ).resolves.toBeDefined();
+  });
+
+  it('never refuses a raise, whatever is in flight', async () => {
+    const { service } = buildHarness({
+      guard: guardOver({ ...inFlight, total: 50_000_000n }).guard,
+      escrowGet: jest.fn(async () => standing()),
+      buildIntent: jest.fn(async () => TRANSACTION),
+    });
+    await expect(
+      service.buildIntent(ORG, ACCOUNT, USDC, setLimits(2_000_000n, 20_000_000n)),
+    ).resolves.toBeDefined();
   });
 });

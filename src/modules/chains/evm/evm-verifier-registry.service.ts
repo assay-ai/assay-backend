@@ -62,7 +62,7 @@ export class EvmVerifierRegistryService implements VerifierRegistryPort {
    * `keccak` of `X || Y` — the key **without** its `0x04` prefix — last 20
    * bytes, checksummed. Hashing the prefix too is the classic off-by-one here
    * and it yields a perfectly well-formed address belonging to nobody, which
-   * then reads as `SignerIsNotVerifier` against a key that was fine.
+   * then reads as `VerifierNotRegistered` against a key that was fine.
    */
   addressOf(chainId: ChainId, publicKey: Uint8Array): string {
     this.assertEip155(chainId);

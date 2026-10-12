@@ -197,6 +197,87 @@ export class BuyerEscrowRepository extends OrganizationScopedRepository<BuyerEsc
   }
 
   /**
+   * Rewinds `next_seq` to `max(chainSeqHigh, highest recorded seq) + 1`, and
+   * returns the new value, or `null` when nothing moved (review S2-2).
+   *
+   * The way out for a payer whose counter ran more than `MAX_SEQ_GAP` ahead of
+   * the chain's `seqHigh` — unpaid allocations alone can do that, and then no
+   * seq this table issues is one the chain would accept, so nothing is
+   * redeemed and `seqHigh` never moves. A number that was issued but never
+   * recorded as an intent was never served on, so issuing it again costs
+   * nothing; a recorded one is never issued again.
+   *
+   * Why it cannot reissue a recorded or served seq:
+   *
+   * - It runs under the payer's admission lock (`voucher-admission:<payer>`,
+   *   the one `PaymentIntentRepository.insertAdmittedVoucherIntent` takes), and
+   *   the escrow row is locked `FOR UPDATE` before the `MAX` is read. No
+   *   admission can insert a higher seq between the read and the write.
+   * - The `MAX` is over every intent of the account, in every organization and
+   *   every state.
+   * - `trg_buyer_escrows_seq_monotonic` checks the same bound itself, and only
+   *   lets the value go down inside this transaction (`assay.seq_rewind`).
+   * - An admission that read the OLD counter (its seq now at or above the new
+   *   `next_seq`) is refused under the same lock, because the admission
+   *   re-reads `next_seq` there.
+   *
+   * Only lowers, never raises (`WHERE next_seq > target`), and only while the
+   * counter is still more than `maxGap` above `chainSeqHigh`, checked under the
+   * row lock, so concurrent callers rewind once and never re-issue the seqs
+   * handed out after that rewind.
+   */
+  async rewindNextSeq(
+    organizationId: string,
+    accountId: string,
+    chainSeqHigh: bigint,
+    maxGap: bigint,
+  ): Promise<bigint | null> {
+    return this.dataSource.transaction(async (manager) => {
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+        `voucher-admission:${accountId}`,
+      ]);
+      const lockSql = `
+        SELECT "next_seq"::text AS "next_seq" FROM "buyer_escrows"
+         WHERE "organization_id" = $1 AND "account_id" = $2
+         FOR UPDATE
+      `;
+      assertOrganizationScopedSql(lockSql, 'BuyerEscrowEntity.rewindNextSeq');
+      const [locked] = (await manager.query(lockSql, [organizationId, accountId])) as Array<{
+        next_seq: string;
+      }>;
+      // Re-checked under the row lock: a concurrent caller may have rewound it
+      // already, and rewinding again would re-issue the seqs handed out since.
+      if (!locked || BigInt(locked.next_seq) - chainSeqHigh <= maxGap) return null;
+
+      const [recorded] = (await manager.query(
+        `SELECT COALESCE(MAX("voucher_seq"), 0)::text AS max
+           FROM "payment_intents"
+          WHERE "agent_account" = $1 AND "voucher_seq" IS NOT NULL`,
+        [accountId],
+      )) as Array<{ max: string }>;
+      const highest = BigInt(recorded?.max ?? '0');
+      const target = (highest > chainSeqHigh ? highest : chainSeqHigh) + 1n;
+
+      await manager.query(`SELECT set_config('assay.seq_rewind', 'on', true)`);
+      const sql = `
+        UPDATE "buyer_escrows"
+           SET "next_seq" = $3::bigint,
+               "updated_at" = now()
+         WHERE "organization_id" = $1
+           AND "account_id" = $2
+           AND "next_seq" > $3::bigint
+     RETURNING "id"
+      `;
+      assertOrganizationScopedSql(sql, 'BuyerEscrowEntity.rewindNextSeq');
+      const moved = returnedRows<{ id: string }>(
+        await manager.query(sql, [organizationId, accountId, target.toString()]),
+      ).length;
+      await manager.query(`SELECT set_config('assay.seq_rewind', 'off', true)`);
+      return moved > 0 ? target : null;
+    });
+  }
+
+  /**
    * The oldest sequence number still awaiting a decision, across every
    * organization that shares this account.
    *

@@ -19,6 +19,7 @@ import {
 } from '@modules/tool/domain/mapping/mapping-validator';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { BindingStatus, PricingMode, Tool, ToolBinding } from '@modules/tool/ports/tool.types';
+import { canonicalJson } from '@shared/crypto/canonical-json';
 
 import {
   SaveToolBindingBodyDto,
@@ -265,6 +266,7 @@ export class BindingEditorService {
     // handing back a second, distinct instance, which is true of TypeORM today
     // and is not a property worth resting a revision number on.
     const before = versionedSnapshot(row);
+    const chainsBefore = JSON.stringify(row.settlementChains);
 
     if (body.requestMapping !== undefined) {
       row.requestMapping = inspectRequestMapping(body.requestMapping, {
@@ -330,13 +332,30 @@ export class BindingEditorService {
     }
 
     const changed = versionedSnapshot(row) !== before;
-    if (changed) {
-      row.mappingVersion += 1;
-    }
+    const chainsChanged = JSON.stringify(row.settlementChains) !== chainsBefore;
 
     const saved = await this.inTransaction(async (manager) => {
-      const updated = await manager.save(ToolBindingEntity, row);
+      let revised = false;
       if (changed) {
+        // An edit that lands back on the published terms is not a draft. It
+        // returns to the published revision, whose tester run is still green,
+        // instead of minting a revision that differs from it in nothing.
+        const published = chainsChanged ? null : await publishedRevision(manager, row);
+        if (published && sameTerms(row, published)) {
+          row.mappingVersion = published.mappingVersion;
+        } else {
+          // Past the highest stored revision, not `+ 1`: after a return to
+          // the published one, the abandoned draft's number is still taken.
+          const highest = await manager.maximum(BindingVersionEntity, 'mappingVersion', {
+            organizationId: row.organizationId,
+            bindingId: row.id,
+          });
+          row.mappingVersion = Math.max(highest ?? 0, row.mappingVersion) + 1;
+          revised = true;
+        }
+      }
+      const updated = await manager.save(ToolBindingEntity, row);
+      if (revised) {
         await manager.save(BindingVersionEntity, snapshotOf(updated, subject));
       }
       return updated;
@@ -496,6 +515,50 @@ export class BindingEditorService {
  */
 function versionedSnapshot(row: ToolBindingEntity): string {
   return JSON.stringify(VERSIONED_FIELDS.map((field) => row[field]));
+}
+
+/**
+ * The published revision's snapshot, when the row is a draft on top of one.
+ *
+ * `null` for a binding never published or already at its published revision:
+ * there is nothing to return to.
+ */
+async function publishedRevision(
+  manager: EntityManager,
+  row: ToolBindingEntity,
+): Promise<BindingVersionEntity | null> {
+  if (row.publishedVersion == null || row.publishedVersion === row.mappingVersion) {
+    return null;
+  }
+  return manager.findOne(BindingVersionEntity, {
+    where: {
+      organizationId: row.organizationId,
+      bindingId: row.id,
+      mappingVersion: row.publishedVersion,
+    },
+  });
+}
+
+/**
+ * Whether the row offers exactly the terms a snapshot recorded — every field
+ * {@link snapshotOf} copies. `canonicalJson`, because `jsonb` hands mappings
+ * back with its own key order.
+ *
+ * `settlementChains` has no snapshot column, so the caller only asks this when
+ * the edit left the chains alone.
+ */
+function sameTerms(row: ToolBindingEntity, snapshot: BindingVersionEntity): boolean {
+  const terms = (source: ToolBindingEntity | BindingVersionEntity) =>
+    canonicalJson([
+      source.endpoint,
+      source.requestMapping,
+      source.responseMapping,
+      source.pricingMode,
+      String(source.priceAmount),
+      source.assetId,
+      source.timeoutMs,
+    ]);
+  return terms(row) === terms(snapshot);
 }
 
 function assertKnownAsset(assetId: string): void {

@@ -11,7 +11,7 @@ import {
   X402_RECEIPT,
   X402_VOUCHER,
 } from '@modules/mcp/constants/mcp.constants';
-import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
   McpFailureCode,
   VoucherRequirement,
@@ -197,6 +197,29 @@ describe('rail B over MCP', () => {
       expect(h.invoker.providerIds).toEqual(['provider-a']);
     });
 
+    it('records which agent credential paid, and none for a config session (U02)', async () => {
+      const h = harness();
+      const agentSession: McpSession = {
+        ...RAIL_B_SESSION,
+        callerKind: McpCallerKind.AGENT,
+        credentialId: '0f5e7c2a-8d3b-4c1e-9a6f-2b7d4e8c1a90',
+      };
+      const requirement = await (async () => {
+        const outcome = await h.calls.call(agentSession, TOOL_NAME, ARGS, {
+          rail: PaymentRail.RAIL_B_VOUCHER,
+          voucher: null,
+        });
+        if (outcome.kind !== 'ERROR') throw new Error('expected a payment requirement');
+        return outcome.detail.paymentRequired as VoucherRequirement;
+      })();
+      await h.calls.call(agentSession, TOOL_NAME, ARGS, paying(requirement));
+      expect(h.intents.only.credentialId).toBe('0f5e7c2a-8d3b-4c1e-9a6f-2b7d4e8c1a90');
+
+      const config = harness();
+      await config.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(await requirementOf(config)));
+      expect(config.intents.only.credentialId ?? null).toBeNull();
+    });
+
     it('is still a charge the spend policy sees, against the voucher request hash', async () => {
       const h = harness();
       const requirement = await requirementOf(h);
@@ -241,6 +264,25 @@ describe('rail B over MCP', () => {
       await expect(
         h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement, cheap)),
       ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_BINDING_MISMATCH });
+      expect(h.invoker.invocations).toHaveLength(0);
+      expect(h.ledger.events).toHaveLength(0);
+    });
+
+    /**
+     * REGRESSION (BUG-D1-03): the escrow's own per-voucher limit binds at
+     * redemption; a call above it was served and then refused on chain.
+     */
+    it('refuses a voucher above the escrow’s own per-voucher limit, before any provider is dialled', async () => {
+      const h = harness();
+      h.escrow.withdrawRequested = 0n;
+      h.escrow.maxVoucherAmount = BigInt(PRICE.amount) - 1n;
+      const requirement = await requirementOf(h);
+
+      await expect(
+        h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement)),
+      ).rejects.toMatchObject({
+        errorCode: PaymentErrorCode.PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED,
+      });
       expect(h.invoker.invocations).toHaveLength(0);
       expect(h.ledger.events).toHaveLength(0);
     });
@@ -312,6 +354,43 @@ describe('rail B over MCP', () => {
       await Promise.all([server.connect(serverTransport), client.connect(clientTransport)]);
       return { ...h, client };
     }
+
+    /**
+     * REGRESSION (BUG-D1-07 review, finding 4): the admission pause while the
+     * payer tightens its caps is retryable — nothing was charged and the seq is
+     * not spent — but the MCP error said `retryable: false`, so an agent gave
+     * up the task every time its payer edited a cap.
+     */
+    it('marks PAYMENT_VOUCHER_ADMISSION_PAUSED retryable, with a retryAfter hint', async () => {
+      const { client, intents, escrow } = await connect();
+      escrow.withdrawRequested = 0n;
+      const refused = (await client.callTool({
+        name: TOOL_NAME,
+        arguments: ARGS,
+        _meta: { [X402_RAIL]: 'B' },
+      })) as CallToolResult;
+      const requirement = refused._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
+      intents.pausedFor = 7;
+
+      const paused = (await client.callTool({
+        name: TOOL_NAME,
+        arguments: ARGS,
+        _meta: {
+          [X402_VOUCHER]: {
+            voucher: voucherFor(requirement),
+            signature: fakeVoucherSignature(requirement.payer),
+            providerId: requirement.providerId,
+          },
+        },
+      })) as CallToolResult;
+
+      expect(paused.isError).toBe(true);
+      expect(paused._meta?.[X402_ERROR]).toMatchObject({
+        code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
+        retryable: true,
+        retryAfter: 7,
+      });
+    });
 
     it('carries the requirement in _meta[x402/paymentRequired] and takes the voucher back in _meta', async () => {
       const { client, intents } = await connect();

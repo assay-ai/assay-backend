@@ -40,6 +40,13 @@ export enum SettlementErrorCode {
   SETTLEMENT_RELAYED_INTENT_RATE_LIMITED = 'SETTLEMENT_RELAYED_INTENT_RATE_LIMITED',
   /** The submission budget could not be counted, so nothing was submitted. */
   SETTLEMENT_RELAYED_INTENT_UNAVAILABLE = 'SETTLEMENT_RELAYED_INTENT_UNAVAILABLE',
+  // ── Agent payment delegation ─────────────────────────────────────────────
+  /** A delegation request the escrow would refuse: bad delegate, caps or horizon. */
+  SETTLEMENT_DELEGATION_INVALID = 'SETTLEMENT_DELEGATION_INVALID',
+  /** A revocation of a delegate that is not authorised (never was, or already revoked). */
+  SETTLEMENT_DELEGATION_NOT_ACTIVE = 'SETTLEMENT_DELEGATION_NOT_ACTIVE',
+  /** Lowering these caps now would leave served, unredeemed vouchers unredeemable (BUG-D1-07). */
+  SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK = 'SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK',
   // ── Boot-time configuration of the public reserves page ─────────────────
   SETTLEMENT_PUBLIC_RESERVES_ASSET_INVALID = 'SETTLEMENT_PUBLIC_RESERVES_ASSET_INVALID',
   SETTLEMENT_PUBLIC_RESERVES_ASSET_NOT_ENABLED = 'SETTLEMENT_PUBLIC_RESERVES_ASSET_NOT_ENABLED',
@@ -291,9 +298,10 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
     code: SettlementErrorCode.SETTLEMENT_RELAYED_INTENT_RATE_LIMITED,
     statusCode: 429,
     message: (context?: Record<string, any>) =>
-      `Too many relayed escrow requests${context?.scope ? ` for ${context.scope}` : ''}: ` +
-      `${context?.observed ?? '?'} in the last ${context?.windowSeconds ?? '?'} seconds against ` +
-      `a limit of ${context?.limit ?? '?'}`,
+      `You have reached the limit of ${context?.limit ?? '?'} escrow changes the platform ` +
+      `relays for ${context?.scope === 'organization' ? 'your organization' : 'this account'} ` +
+      `per ${describeWindow(context?.windowSeconds)}. Nothing was submitted.` +
+      (context?.retryAt ? ` You can make the next one from ${context.retryAt}.` : ''),
   },
   /**
    * The budget could not be counted, so **nothing was submitted**.
@@ -313,6 +321,48 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
     message: () =>
       `The relayed-submission budget could not be counted, so nothing was submitted. The ` +
       `signature is still valid until its deadline; try again`,
+  },
+
+  // ── Agent payment delegation ─────────────────────────────────────────────
+
+  /**
+   * A delegation the escrow would refuse, caught before the payer is asked to
+   * sign: the delegate is not an address on the payer's chain or is the payer
+   * itself, a cap is zero or above the escrow's own ceiling (set the escrow
+   * limits first), or `validUntil` is not in the future or is more than a year
+   * out. `reason` names which, in the contract's own terms.
+   */
+  delegationInvalid: {
+    code: SettlementErrorCode.SETTLEMENT_DELEGATION_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `This delegation cannot be authorised${context?.reason ? `: ${context.reason}` : ''}`,
+  },
+  /** Nothing to revoke: the delegate is not authorised on this escrow. */
+  delegationNotActive: {
+    code: SettlementErrorCode.SETTLEMENT_DELEGATION_NOT_ACTIVE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `${context?.delegate ?? 'This delegate'} is not authorised on this escrow, so there is ` +
+      `nothing to revoke`,
+  },
+  /**
+   * The new caps are below what payments already served and not yet redeemed
+   * need, so the chain would refuse them at redemption and the provider would
+   * go unpaid (BUG-D1-07). Refused BEFORE anything is signed or relayed, unless
+   * the request says `acknowledgeUnsettled: true`; they usually settle within a
+   * minute, after which the same change goes through.
+   */
+  unsettledVouchersAtRisk: {
+    code: SettlementErrorCode.SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `${context?.count ?? 'Some'} payment${context?.count === 1 ? ' is' : 's are'} still being ` +
+      `settled${context?.amount ? ` (${context.amount})` : ''}, and this change would leave the ` +
+      `chain unable to redeem ${context?.count === 1 ? 'it' : 'them'}` +
+      `${context?.reasons ? ` (${context.reasons})` : ''}. Wait until ` +
+      `${context?.count === 1 ? 'it settles' : 'they settle'}, usually under a minute, or send ` +
+      `the change again with acknowledgeUnsettled to accept that. Nothing was submitted.`,
   },
 
   // ── Public reserves page ─────────────────────────────────────────────────
@@ -348,3 +398,10 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
       `(${context?.enabled ?? ''})`,
   },
 });
+
+/** `3600` → "hour", `86400` → "day", anything else in minutes. */
+function describeWindow(seconds: unknown): string {
+  if (seconds === 3600) return 'hour';
+  if (seconds === 86_400) return 'day';
+  return typeof seconds === 'number' ? `${Math.round(seconds / 60)} minutes` : 'window';
+}

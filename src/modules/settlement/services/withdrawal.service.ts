@@ -5,6 +5,9 @@ import { Money } from '@modules/chains/ports/money.types';
 import { EscrowLimits } from '@modules/chains/ports/escrow.types';
 import { UnsignedChainTransaction } from '@modules/chains/ports/unsigned-chain-transaction';
 
+import { decayVoucherWindow } from '@modules/payment/domain/voucher-window';
+
+import { loweredCaps, lowersAnything, UnsettledVouchers } from '../domain/unsettled-vouchers';
 import { SettlementErrors } from '../errors/settlement.errors';
 import {
   ESCROW_INTENT_BUILDER,
@@ -26,12 +29,18 @@ import {
 import { EscrowAccountService, EscrowState } from './escrow-account.service';
 import { ReconciliationService } from './reconciliation.service';
 import { RelayedIntentRateLimiter } from './relayed-intent-rate-limiter.service';
+import { UnsettledScope, UnsettledVoucherGuard } from './unsettled-voucher-guard.service';
 
 export interface EscrowIntentInput {
   readonly kind: EscrowIntentKind;
   readonly amount: Money | null;
   readonly limits: EscrowLimits | null;
   readonly destination: AccountId | null;
+  /**
+   * `SET_LIMITS` only: the buyer accepts that lowering the limits leaves
+   * payments still being settled unredeemable (BUG-D1-07).
+   */
+  readonly acknowledgeUnsettled?: boolean;
 }
 
 export interface EscrowIntentResult {
@@ -127,6 +136,7 @@ export class WithdrawalService {
      */
     @Inject(RELAYED_ESCROW_INTENT) private readonly relayed: RelayedEscrowIntentPort,
     private readonly relayedRate: RelayedIntentRateLimiter,
+    private readonly unsettled: UnsettledVoucherGuard,
   ) {}
 
   async buildIntent(
@@ -150,6 +160,31 @@ export class WithdrawalService {
       limits: input.limits,
       destination: input.destination,
     });
+
+    // A relayed request (EIP-712, the platform sends it) is refused here, before
+    // the payer is asked to sign, when the relay budget is spent (BUG-D1-06).
+    if (transaction.kind === 'typed-data') {
+      await this.assertRelayRoom(organizationId, account);
+    }
+
+    // Lowering the escrow's limits below what its served, unredeemed payments
+    // need strands them — every signer's, delegates' included (BUG-D1-07).
+    // Refused here, before the wallet is asked, unless acknowledged.
+    const before =
+      input.kind === EscrowIntentKind.SET_LIMITS
+        ? await this.escrows.get(organizationId, account, asset)
+        : null;
+    if (before !== null && input.limits !== null) {
+      const check = limitsCheck(account, asset, before, input.limits);
+      if (check !== null) {
+        this.unsettled.assertNotStranding(
+          await this.unsettled.read(check.scope),
+          check.lowered,
+          asset,
+          input.acknowledgeUnsettled === true,
+        );
+      }
+    }
 
     /*
       The gas grant, and **only after the bytes exist**.
@@ -189,7 +224,7 @@ export class WithdrawalService {
         ? await this.grantWithdrawGas(organizationId, account)
         : null;
 
-    const escrow = await this.escrows.get(organizationId, account, asset);
+    const escrow = before ?? (await this.escrows.get(organizationId, account, asset));
 
     return { transaction, escrow, gasGrant };
   }
@@ -244,6 +279,7 @@ export class WithdrawalService {
     asset: AssetId,
     claimedBuyer: string,
     intent: RelayedEscrowIntentFields,
+    acknowledgeUnsettled = false,
   ): Promise<RelayedEscrowIntentResult> {
     this.assertIsOwnAccount(account, claimedBuyer);
 
@@ -251,9 +287,33 @@ export class WithdrawalService {
       await this.assertNotFrozen(asset);
     }
 
-    await this.relayedRate.admit(account, organizationId);
+    const relay = async () => {
+      await this.relayedRate.admit(account, organizationId);
+      return this.relayed.submit({ ...intent, account } as RelayedEscrowIntent);
+    };
 
-    const submission = await this.relayed.submit({ ...intent, account } as RelayedEscrowIntent);
+    // Lowered limits are checked once more against the unsettled payments, and
+    // relayed under a pause on the payer's admission, so no voucher is admitted
+    // under the old limits in between (BUG-D1-07).
+    let submission: RelayedEscrowSubmission;
+    const check =
+      intent.kind === EscrowIntentKind.SET_LIMITS
+        ? limitsCheck(account, asset, await this.escrows.get(organizationId, account, asset), {
+            maxVoucherAmount: intent.maxVoucherAmount,
+            maxPerWindow: intent.maxPerWindow,
+          })
+        : null;
+    if (check !== null) {
+      submission = await this.unsettled.relayTightening({
+        scope: check.scope,
+        lowered: check.lowered,
+        acknowledged: acknowledgeUnsettled,
+        deadline: intent.deadline,
+        relay,
+      });
+    } else {
+      submission = await relay();
+    }
     const escrow = await this.escrows.get(organizationId, account, asset);
 
     this.logger.log(
@@ -262,6 +322,30 @@ export class WithdrawalService {
     );
 
     return { submission, escrow };
+  }
+
+  /**
+   * The payer's payments the chain has not redeemed yet, beside the escrow's
+   * own window (BUG-D1-07). `null` when the chain could not be read.
+   */
+  async unsettledVouchers(
+    organizationId: string,
+    account: AccountId,
+    asset: AssetId,
+  ): Promise<UnsettledVouchers | null> {
+    const escrow = await this.escrows.get(organizationId, account, asset);
+    const scope = escrowWindowScope(account, asset, escrow);
+    return scope === null ? null : this.unsettled.read(scope);
+  }
+
+  /**
+   * Refuses when the next relayed submission for this account would be
+   * rate limited, so a route that builds something to sign can say so before
+   * the wallet prompt (BUG-D1-06). Records nothing; `submitRelayedIntent` is
+   * still where the budget is spent and enforced.
+   */
+  async assertRelayRoom(organizationId: string, account: AccountId): Promise<void> {
+    await this.relayedRate.assertRoom(account, organizationId);
   }
 
   /**
@@ -326,4 +410,45 @@ export class WithdrawalService {
       throw SettlementErrors.withdrawalsFrozen({ asset });
     }
   }
+}
+
+/** The escrow's own window, as the chain last showed it; null when it could not be read. */
+function escrowWindowScope(
+  account: AccountId,
+  asset: AssetId,
+  escrow: EscrowState,
+): UnsettledScope | null {
+  if (!escrow.chainReadable || escrow.spentInWindow === null) return null;
+  const readAt = escrow.observedAt ? new Date(escrow.observedAt) : new Date();
+  const startedAt = escrow.windowStartedAt ? Date.parse(escrow.windowStartedAt) / 1000 : 0;
+  return {
+    payer: account,
+    asset,
+    delegate: null,
+    carried: decayVoucherWindow(
+      BigInt(escrow.spentInWindow.amount),
+      Math.floor(startedAt),
+      Math.floor(readAt.getTime() / 1000),
+      escrow.windowSeconds,
+    ),
+    readAt,
+  };
+}
+
+/**
+ * Which of the escrow's limits `next` lowers, and the window its unsettled
+ * payments land on. Null when nothing is lowered or the chain was not read.
+ */
+function limitsCheck(account: AccountId, asset: AssetId, escrow: EscrowState, next: EscrowLimits) {
+  if (escrow.maxVoucherAmount === null || escrow.maxPerWindow === null) return null;
+  const lowered = loweredCaps(
+    {
+      maxVoucherAmount: BigInt(escrow.maxVoucherAmount.amount),
+      maxPerWindow: BigInt(escrow.maxPerWindow.amount),
+    },
+    { maxVoucherAmount: next.maxVoucherAmount, maxPerWindow: next.maxPerWindow },
+  );
+  if (!lowersAnything(lowered)) return null;
+  const scope = escrowWindowScope(account, asset, escrow);
+  return scope === null ? null : { scope, lowered };
 }

@@ -3,7 +3,11 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
-import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import {
+  OpenVoucherTotals,
+  PaymentIntentRepository,
+  VoucherAdmissionScope,
+} from '@database/postgres/repositories/payment-intent.repository';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { LedgerAccountId, LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
@@ -45,6 +49,17 @@ const VOUCHER_NONCE_CONSTRAINT = 'idx_payment_intents_voucher_nonce';
 const VOUCHER_SEQ_CONSTRAINT = 'uq_payment_intents_account_voucher_seq';
 
 /**
+ * What a rail-B voucher's intent must fit before it is written: the scope of
+ * the vouchers the chain has not counted yet, and the check against them,
+ * which throws to refuse. Run under the payer's lock, atomically with the
+ * insert — see `PaymentIntentRepository.insertAdmittedVoucherIntent`.
+ */
+export interface VoucherAdmission {
+  readonly scope: VoucherAdmissionScope;
+  readonly admit: (open: OpenVoucherTotals) => void;
+}
+
+/**
  * The payment intent lifecycle.
  *
  * Two things are true of every method here and of nothing else in the domain:
@@ -79,7 +94,10 @@ export class PaymentIntentService {
    * collision, and it is refused rather than silently answered with the first
    * request's intent.
    */
-  async create(input: CreatePaymentIntentInput): Promise<PaymentIntent> {
+  async create(
+    input: CreatePaymentIntentInput,
+    admission?: VoucherAdmission,
+  ): Promise<PaymentIntent> {
     const providerAmount = MoneyUtil.subtract(input.price, input.platformFee);
 
     const row: Partial<PaymentIntentEntity> = {
@@ -121,6 +139,8 @@ export class PaymentIntentService {
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,
       voucherIssuedAt: input.voucherIssuedAt === undefined ? null : String(input.voucherIssuedAt),
+      voucherDelegate: input.voucherDelegate ?? null,
+      credentialId: input.credentialId ?? null,
       holdId: null,
       holdReleasedAt: null,
       classification: null,
@@ -128,7 +148,11 @@ export class PaymentIntentService {
     };
 
     try {
-      await this.intents.insert(row);
+      if (admission) {
+        await this.intents.insertAdmittedVoucherIntent(row, admission.scope, admission.admit);
+      } else {
+        await this.intents.insert(row);
+      }
     } catch (error) {
       const violation = error as { code?: string; constraint?: string };
       if (violation?.code !== UNIQUE_VIOLATION_CODE) {
@@ -174,6 +198,14 @@ export class PaymentIntentService {
    */
   async isVoucherSeqUsed(organizationId: string, account: string, seq: string): Promise<boolean> {
     return this.intents.existsBy({ organizationId, agentAccount: account, voucherSeq: seq });
+  }
+
+  /**
+   * A rail-B intent whose funds could not be secured stops reserving its place
+   * in the payer's windows (see `PaymentIntentRepository.insertAdmittedVoucherIntent`).
+   */
+  async abandonUnsecuredVoucher(organizationId: string, intentId: string): Promise<void> {
+    await this.intents.abandonUnsecuredVoucherIntent(organizationId, intentId);
   }
 
   async findById(organizationId: string, intentId: string): Promise<PaymentIntent> {
@@ -561,6 +593,8 @@ export function toPaymentIntent(row: PaymentIntentEntity): PaymentIntent {
     voucherSignature: row.voucherSignature ?? null,
     voucherResourceHash: row.voucherResourceHash ?? null,
     voucherIssuedAt: row.voucherIssuedAt === null ? null : Number(row.voucherIssuedAt),
+    voucherDelegate: row.voucherDelegate ?? null,
+    credentialId: row.credentialId ?? null,
     holdId: row.holdId,
     holdReleasedAt: row.holdReleasedAt,
     classification: row.classification,

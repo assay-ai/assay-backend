@@ -3,7 +3,9 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
 import { AgentCredentialsController } from '@modules/account/controllers/agent-credentials.controller';
+import { NotificationsController } from '@modules/account/controllers/notifications.controller';
 import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
+import { NotificationsService } from '@modules/account/services/notifications.service';
 import { AuthErrorCode } from '@modules/auth/errors/auth.errors';
 import { CHAIN_IDS, AccountId } from '@modules/chains/ports/caip.types';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
@@ -15,7 +17,9 @@ import {
 } from '@modules/mcp/ports/mcp-session.port';
 import { NotificationSettingsController } from '@modules/notification/controllers/notification-settings.controller';
 import { NotificationSettingsService } from '@modules/notification/services/notification-settings.service';
+import { EscrowDelegatesController } from '@modules/settlement/controllers/escrow-delegates.controller';
 import { EscrowController } from '@modules/settlement/controllers/escrow.controller';
+import { EscrowDelegationService } from '@modules/settlement/services/escrow-delegation.service';
 import { EscrowAccountService } from '@modules/settlement/services/escrow-account.service';
 import { WithdrawalService } from '@modules/settlement/services/withdrawal.service';
 import { SpendPolicyController } from '@modules/spend-policy/controllers/spend-policy.controller';
@@ -72,8 +76,29 @@ describe('human-only control writes', () => {
     listPreferences: jest.fn(async () => []),
     upsertPreferences: jest.fn(),
   };
-  const escrows = { assetFor: jest.fn() };
-  const withdrawals = { buildIntent: jest.fn(), submitRelayedIntent: jest.fn() };
+  // The feed the owner reads to watch its agent. An agent that could mark it
+  // read could clear the badge on the very alert that names it.
+  const feed = {
+    list: jest.fn(async () => ({ items: [], nextCursor: null })),
+    unreadCount: jest.fn(async () => ({ count: 0 })),
+    markRead: jest.fn(),
+    markAllRead: jest.fn(),
+  };
+  const escrows = { assetFor: jest.fn(), getForConsole: jest.fn(async () => ({})) };
+  const withdrawals = {
+    buildIntent: jest.fn(),
+    submitRelayedIntent: jest.fn(),
+    unsettledVouchers: jest.fn(async () => null),
+  };
+  // Agent payment delegation: the payer's control over what its agent may
+  // spend. Every route, the read included, is the person's and never the agent's.
+  const delegation = {
+    assetFor: jest.fn(),
+    authorizeIntent: jest.fn(),
+    revokeIntent: jest.fn(),
+    list: jest.fn(async () => []),
+    submit: jest.fn(),
+  };
 
   beforeAll(async () => {
     const moduleRef = await Test.createTestingModule({
@@ -81,15 +106,19 @@ describe('human-only control writes', () => {
         SpendPolicyController,
         AgentCredentialsController,
         NotificationSettingsController,
+        NotificationsController,
         EscrowController,
+        EscrowDelegatesController,
       ],
       providers: [
         { provide: MCP_SESSION_SOURCE, useValue: sessions },
         { provide: SpendPolicyService, useValue: spendPolicy },
         { provide: AgentCredentialsService, useValue: credentials },
         { provide: NotificationSettingsService, useValue: notifications },
+        { provide: NotificationsService, useValue: feed },
         { provide: EscrowAccountService, useValue: escrows },
         { provide: WithdrawalService, useValue: withdrawals },
+        { provide: EscrowDelegationService, useValue: delegation },
       ],
     }).compile();
 
@@ -117,8 +146,19 @@ describe('human-only control writes', () => {
     },
     { method: 'put', path: '/notification-channels/EMAIL' },
     { method: 'put', path: '/notification-preferences' },
+    { method: 'patch', path: '/notifications/44444444-4444-4444-8444-444444444444/read' },
+    { method: 'post', path: '/notifications/read-all' },
     { method: 'post', path: '/escrow/limits-intent' },
     { method: 'post', path: '/escrow/limits' },
+    // D1-S01: the buyer's own withdrawal. The chain still wants the buyer's
+    // signature, but the agent must not even get the API to build or relay it.
+    { method: 'post', path: '/escrow/withdrawals/request-intent' },
+    { method: 'post', path: '/escrow/withdrawals/request' },
+    { method: 'post', path: '/escrow/withdrawals/intent' },
+    { method: 'post', path: '/escrow/delegates/intent' },
+    { method: 'post', path: '/escrow/delegates' },
+    { method: 'post', path: '/escrow/delegates/revoke-intent' },
+    { method: 'post', path: '/escrow/delegates/revoke' },
   ];
 
   const send = (method: string, path: string, token: string) =>
@@ -134,7 +174,15 @@ describe('human-only control writes', () => {
 
       expect(res.status).toBe(403);
       expect(JSON.stringify(res.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
-      for (const service of [spendPolicy, credentials, notifications, escrows, withdrawals]) {
+      for (const service of [
+        spendPolicy,
+        credentials,
+        notifications,
+        feed,
+        escrows,
+        withdrawals,
+        delegation,
+      ]) {
         for (const fn of Object.values(service)) expect(fn).not.toHaveBeenCalled();
       }
     },
@@ -162,12 +210,40 @@ describe('human-only control writes', () => {
     `/agents/${AGENT_ID}/credentials`,
     '/notification-channels',
     '/notification-preferences',
+    '/notifications',
+    '/notifications/unread-count',
+    '/escrow',
   ])('GET %s still answers an agent credential', async (path) => {
     const res = await request(app.getHttpServer())
       .get(path)
       .set('Authorization', 'Bearer token-agent');
 
     expect(res.status).toBe(200);
+  });
+
+  it('GET /escrow/delegates refuses an agent credential: the delegations are the payer’s', async () => {
+    const res = await request(app.getHttpServer())
+      .get('/escrow/delegates')
+      .set('Authorization', 'Bearer token-agent');
+
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
+    expect(delegation.list).not.toHaveBeenCalled();
+  });
+
+  it('GET /escrow/unsettled refuses an agent credential and answers the payer (review S3-12)', async () => {
+    const agent = await request(app.getHttpServer())
+      .get('/escrow/unsettled')
+      .set('Authorization', 'Bearer token-agent');
+    expect(agent.status).toBe(403);
+    expect(JSON.stringify(agent.body)).toContain(AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED);
+    expect(withdrawals.unsettledVouchers).not.toHaveBeenCalled();
+
+    const human = await request(app.getHttpServer())
+      .get('/escrow/unsettled')
+      .set('Authorization', 'Bearer token-human');
+    expect(human.status).toBe(200);
+    expect(withdrawals.unsettledVouchers).toHaveBeenCalledTimes(1);
   });
 
   it('still refuses an unknown token with 401, before the human check', async () => {

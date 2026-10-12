@@ -25,7 +25,7 @@ import {
   RECONCILIATION_SURPLUS_TOLERANCE_UNITS,
   RECONCILIATION_WARN_ALERT_WINDOW_SECONDS,
 } from '../constants/reconciliation.constants';
-import { LedgerLiabilities, foldLiabilities } from '../domain/ledger-book';
+import { LedgerLiabilities, foldLiabilities, vaultLiabilities } from '../domain/ledger-book';
 import {
   ReconciliationFinding,
   ReconciliationFindingCode,
@@ -50,6 +50,10 @@ import {
  *                  + platform fees
  *      └── check 1 ──┘                     └──── check 2 ────┘
  * ```
+ *
+ * Check 1's provider and platform figures leave out what rail-B redemptions
+ * already paid out of the buyer's escrow (`vaultLiabilities`); check 2 keeps
+ * the journal's own fold, which still carries those credits as earnings.
  *
  * **Two comparisons, not one, because they fail differently.** Check 1 catches
  * value that left the vault without a journal entry, or a liability recorded
@@ -163,7 +167,10 @@ export class ReconciliationService {
     const { balance: vaultBalance, slot: vaultSlot } = await this.vault.getVaultBalanceAt(asset);
 
     const journal = await this.entries.sumByEntryType(asset);
-    const liabilities = foldLiabilities(journal.totals);
+    const books = foldLiabilities(journal.totals);
+    // What the vault must hold: rail-B redemptions already paid their
+    // credits and fees out of the buyer's escrow. See `vaultLiabilities`.
+    const liabilities = vaultLiabilities(books, await this.entries.sumPaidAtRedemption(asset));
 
     const snapshot = await this.balances.sumLiabilities(asset);
     const snapshotTotal = snapshot.available + snapshot.held + snapshot.pending;
@@ -175,8 +182,8 @@ export class ReconciliationService {
 
     const findings = [
       ...this.checkReserves(asset, decimals, vault, vaultAtomic, liabilities, difference),
-      ...this.checkSnapshot(decimals, asset, liabilities.total, snapshotTotal),
-      ...this.checkBooks(decimals, asset, liabilities),
+      ...this.checkSnapshot(decimals, asset, books.total, snapshotTotal),
+      ...this.checkBooks(decimals, asset, books),
       ...escrows.findings,
     ];
 

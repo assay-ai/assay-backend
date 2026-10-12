@@ -62,12 +62,26 @@ no-ops when no eip155 chain is enabled:
   refuses below it (`GasGrantRefusal.RELAYER_FLOAT_LOW`) and `EvmRelayerFloatMonitor` alerts on it
   — and it was previously called `EVM_RELAYER_FLOAT_LOW_WATER_WEI`. `EVM_RELAYER_FLOAT_CRITICAL_WEI`
   must be strictly below it. What an operator does when the float runs dry is in the assay-evm repository's deploy runbook.
-- `EVM_DEPLOYMENTS` — six addresses per chain: `config`, `stake`, `escrow`, `asset`,
-  `escrowImplementation`, `admin`. The last two are what `VaultPort.assertVaultControl` compares the
-  live chain against, and they are the two that **move**: `escrowImplementation` on every upgrade,
-  `admin` on every key rotation. Copy them from `deployments/<chainId>.json` in the assay-evm repository. An upgrade or a
-  rotation that does not update this variable stops the reconciler on its next pass — which is the
-  correct behaviour for a change nobody recorded.
+- `EVM_DEPLOYMENTS` — seven addresses per chain: `config`, `stake`, `escrow`, `asset`,
+  `escrowImplementation`, `admin`, `owner`. The last three are what `VaultPort.assertVaultControl`
+  compares the live chain against, and they are the ones that **move**: `escrowImplementation` on
+  every upgrade, `owner` (`X402Config.owner()`, the upgrade authority of all three contracts) on
+  every ownership transfer, `admin` (the operational key the owner appoints, not the upgrade
+  authority) on every appointment. Copy them from `deployments/<chainId>.json` in the assay-evm
+  repository. A change that does not update this variable stops the reconciler on its next pass —
+  which is the correct behaviour for a change nobody recorded.
+- `EVM_RELAYER_KEYS` and `EVM_REDEEMER_KEYS` — one `{ chainId, secretKey }` per chain each, read
+  once and deleted from the environment. The **redeemer** key is the address in
+  `Config.params().redeemer` and sends only `redeemVoucher[Batch]`; the **relayer** key has no
+  on-chain role and sends relayed buyer requests, the withdraw gas grant and slash calls. They must be
+  different keys: the boot refuses a chain where they are equal. Neither is required at boot; a
+  process that has to send without one fails at its first send. The vault-control check
+  (`assertVaultControl`, run first by every reconciler pass) also reads the live
+  `params().redeemer` and fails closed (`CHAIN_VAULT_CONTROL_UNVERIFIED`) unless the
+  `EVM_REDEEMER_KEYS` address equals it and the `EVM_RELAYER_KEYS` address does not. When rotating,
+  either `updateConfig` the redeemer to the new redeemer key's address, or move the key that is
+  already `params().redeemer` into `EVM_REDEEMER_KEYS` and give the relayer a new key (assay-evm
+  runbook §7.4). The same check logs a WARN while `pendingOwner()` is non-zero.
 
 ## What `ENABLED_CHAINS` also decides, and is easy to forget
 

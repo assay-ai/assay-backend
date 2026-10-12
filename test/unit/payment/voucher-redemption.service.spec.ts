@@ -54,6 +54,7 @@ function pending(seq: number, overrides: Partial<RedeemableIntent> = {}): Redeem
     voucherSignature: `signature-${seq}`,
     voucherResourceHash: `sha256:${'ab'.repeat(32)}`,
     voucherIssuedAt: String(NOW_SECONDS - 10),
+    voucherDelegate: null,
     expiresAt: new Date((NOW_SECONDS + 300) * 1000),
     holdId: randomUUID(),
     providerId: PROVIDER_ORG,
@@ -160,6 +161,18 @@ describe('VoucherRedemptionService.run', () => {
       signature: 'signature-7',
     });
     expect(redeemer.calls[0].amount.amount).toBe('1000000');
+  });
+
+  /** Review S2-2: the redeemer pre-validates the signing delegate's grant. */
+  it('carries the signing delegate to the redeemer, and null for the payer’s own voucher', async () => {
+    const delegate = `${CHAIN_IDS.SOLANA_DEVNET}:Delegate11111111111111111111111111111111111`;
+    const { service, redeemer } = build([pending(7, { voucherDelegate: delegate })]);
+    await service.run(USDC);
+    expect(redeemer.calls[0].delegate).toBe(delegate);
+
+    const plain = build([pending(8)]);
+    await plain.service.run(USDC);
+    expect(plain.redeemer.calls[0].delegate).toBeNull();
   });
 
   it('leaves a RETRY hold open for the next pass and retires nothing', async () => {

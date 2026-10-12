@@ -1,4 +1,5 @@
 import { EvmVoucher } from '@modules/chains/evm/eip712/voucher';
+import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 import {
   decayWindow,
   PrevalidationState,
@@ -114,6 +115,30 @@ describe('prevalidateVoucher', () => {
     expect(prevalidateVoucher(both, STATE)).toBe('VoucherSeqNotIncreasing');
   });
 
+  describe('the seq jump cap (D-17: seq <= seqHigh + MAX_SEQ_GAP)', () => {
+    const gap = BigInt(EVM_CONSTANTS.MAX_SEQ_GAP);
+
+    it('accepts a seq exactly MAX_SEQ_GAP above seqHigh, the chain boundary', () => {
+      expect(prevalidateVoucher({ ...GOOD, seq: STATE.seqHigh + gap }, STATE)).toBeNull();
+    });
+
+    it('names VoucherSeqGapTooLarge one above it', () => {
+      expect(prevalidateVoucher({ ...GOOD, seq: STATE.seqHigh + gap + 1n }, STATE)).toBe(
+        'VoucherSeqGapTooLarge',
+      );
+    });
+
+    it('comes right after VoucherSeqNotIncreasing and before the spending checks', () => {
+      // Too far ahead AND over the per-call limit: the chain reports the gap.
+      const both = { ...GOOD, seq: STATE.seqHigh + gap + 1n, amount: STATE.maxVoucherAmount + 1n };
+      expect(prevalidateVoucher(both, STATE)).toBe('VoucherSeqGapTooLarge');
+      // And a stale seq is still VoucherSeqNotIncreasing, never a gap.
+      expect(prevalidateVoucher({ ...GOOD, seq: STATE.seqHigh }, STATE)).toBe(
+        'VoucherSeqNotIncreasing',
+      );
+    });
+  });
+
   it('checks the stake floor BEFORE the balance', () => {
     // Divergence 4 puts ProviderBelowMinimumStake at the Anchor position, after
     // the spending limits and before the balance. A voucher that fails both
@@ -187,6 +212,26 @@ describe('decayWindow', () => {
     expect(decayWindow({ spentInWindow: 1n, windowStartedAt: 0, nowSeconds: 1 })).toBe(1n);
     // 3 * 43 200 / 86 400 = 1.5 → 2.
     expect(decayWindow({ spentInWindow: 3n, windowStartedAt: 0, nowSeconds: 43_200 })).toBe(2n);
+  });
+
+  it('reproduces the live delegate counter after three 0.10 vouchers (299988, not 300000)', () => {
+    // DelegateVoucherRedeemed on eip155:46630 for seq 5, 6, 7 (block times
+    // 1791767941, …944, …948): spentInWindow 100000, 199997, 299988. The window
+    // drains between redemptions, so three 100000 vouchers never sum to 300000.
+    const afterSeq6 =
+      decayWindow({
+        spentInWindow: 100_000n,
+        windowStartedAt: 1_791_767_941,
+        nowSeconds: 1_791_767_944,
+      }) + 100_000n;
+    expect(afterSeq6).toBe(199_997n);
+    const afterSeq7 =
+      decayWindow({
+        spentInWindow: afterSeq6,
+        windowStartedAt: 1_791_767_944,
+        nowSeconds: 1_791_767_948,
+      }) + 100_000n;
+    expect(afterSeq7).toBe(299_988n);
   });
 
   it('does not overflow on a uint64 counter across a full window', () => {

@@ -1,3 +1,9 @@
+import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
+import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
+import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
+import { VoucherAdmissionPause1759600000005 } from '@database/postgres/migrations/1759600000005-voucher-admission-pause';
+import { VoucherAdmissionPausePerRequest1759600000006 } from '@database/postgres/migrations/1759600000006-voucher-admission-pause-per-request';
+import { BuyerEscrowSeqRewind1759600000007 } from '@database/postgres/migrations/1759600000007-buyer-escrow-seq-rewind';
 import { randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { Redis } from 'ioredis';
@@ -111,6 +117,16 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
       // subject — which is exactly how it shipped: no context listed it.
       VoucherRedemptionFields1759100000002,
       BuyerEscrowAccountColumnsSlice1759300000000,
+      // `payment_intents.voucher_delegate`, which `PaymentIntentEntity` maps
+      // (agent payment delegation).
+      VoucherDelegate1759600000000,
+      VoucherAdmissionIndex1759600000003,
+      PaymentIntentCredential1759600000004,
+      // `voucher_admission_pauses`, which the voucher admission reads (BUG-D1-07).
+      VoucherAdmissionPause1759600000005,
+      VoucherAdmissionPausePerRequest1759600000006,
+      // The gated rewind of `next_seq` (review S2-2).
+      BuyerEscrowSeqRewind1759600000007,
     ],
     synchronize: false,
     logging: process.env.ESCROW_SEQ_TEST_LOGGING === 'true',
