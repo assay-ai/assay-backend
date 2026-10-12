@@ -137,6 +137,22 @@ export const AWAITING_REDEMPTION_SQL =
  */
 export const CREDITED_SQL = `(intent.hold_id IS NOT NULL AND intent.hold_released_at IS NOT NULL)`;
 
+/**
+ * Read on a credited intent: the credit came out of **platform** funds, not
+ * out of a redemption. `VoucherRedemptionService.absorb` writes it when a
+ * voucher can never be redeemed (`VoucherSeqNotIncreasing`, a revoked
+ * delegate, …): the buyer keeps the money, the provider is owed the
+ * `provider_amount` by the platform, and nothing moved on chain — so no
+ * platform fee was taken either. The literal is that service's
+ * `PLATFORM_ABSORBED_TX_REF_PREFIX`; the credit's `organization_id` is the
+ * provider's, which is what puts the probe on `idx_ledger_entries_intent_id`.
+ */
+export const PLATFORM_ABSORBED_SQL =
+  `EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
+  `WHERE absorbed.organization_id = intent.provider_id AND absorbed.intent_id = intent.id ` +
+  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
+  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')`;
+
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
   readonly id: string;

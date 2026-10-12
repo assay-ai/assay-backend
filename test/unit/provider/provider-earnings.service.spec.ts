@@ -1,5 +1,6 @@
 import {
   CREDITED_SQL,
+  PLATFORM_ABSORBED_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
@@ -7,6 +8,7 @@ import { ApiErrorCode } from '@shared/api';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { ProviderEarningsGroupBy } from '@modules/provider/dto/get-provider-earnings.dto';
 import { ProviderEarningsService } from '@modules/provider/services/provider-earnings.service';
+import { PLATFORM_ABSORBED_TX_REF_PREFIX } from '@modules/payment/services/voucher-redemption.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { fakeQueryBuilder } from './helpers/fake-query-builder';
@@ -24,6 +26,8 @@ interface Row {
   platformFee: string;
   withheld: string;
   withheldCalls: string;
+  absorbed: string;
+  absorbedCalls: string;
 }
 
 function row(overrides: Partial<Row>): Row {
@@ -36,6 +40,8 @@ function row(overrides: Partial<Row>): Row {
     platformFee: '0',
     withheld: '0',
     withheldCalls: '0',
+    absorbed: '0',
+    absorbedCalls: '0',
     ...overrides,
   };
 }
@@ -211,5 +217,52 @@ describe('ProviderEarningsService — earned means credited (committed hold)', (
     }
     expect(CREDITED_SQL).toMatch(/hold_id IS NOT NULL/);
     expect(CREDITED_SQL).toMatch(/hold_released_at IS NOT NULL/);
+  });
+});
+
+describe('ProviderEarningsService — a platform-absorbed credit is not a redemption', () => {
+  // BUG-J-POSTP-01: four served calls whose vouchers died (`DelegateIsRevoked`)
+  // were credited from platform funds and shown as "already in your wallet".
+  it('reports the absorbed slice of `earned` apart, and takes no fee on it', async () => {
+    const { service, fake } = build([
+      row({
+        calls: '51',
+        earned: '4590000',
+        platformFee: '470000',
+        absorbed: '360000',
+        absorbedCalls: '4',
+      }),
+    ]);
+
+    const earnings = await service.getEarnings(PROVIDER, {
+      ...WINDOW,
+      groupBy: ProviderEarningsGroupBy.TOOL,
+    });
+
+    expect(earnings.totals.earned.amount).toBe('4590000');
+    expect(earnings.totals.absorbed).toEqual({ amount: '360000', asset: USDC, decimals: 6 });
+    expect(earnings.totals.absorbedCalls).toBe(4);
+    expect(earnings.groups[0].absorbedCalls).toBe(4);
+
+    const expr = (alias: string) => fake.selects.find((s) => s.alias === alias)?.expr ?? '';
+    expect(expr('platformFee')).toContain(`NOT ${PLATFORM_ABSORBED_SQL}`);
+    expect(expr('absorbed')).toContain(CREDITED_SQL);
+    expect(expr('absorbed')).toContain(`AND ${PLATFORM_ABSORBED_SQL}`);
+    expect(expr('absorbedCalls')).toContain(PLATFORM_ABSORBED_SQL);
+    // The marker `VoucherRedemptionService.absorb` writes, on the provider's credit.
+    expect(PLATFORM_ABSORBED_SQL).toMatch(/'PROVIDER_CREDIT'/);
+    expect(PLATFORM_ABSORBED_SQL).toContain(`'${PLATFORM_ABSORBED_TX_REF_PREFIX}%'`);
+  });
+
+  it('is a null absorbed amount, and a zero count, for an empty undenominated window', async () => {
+    const { service } = build([]);
+
+    const earnings = await service.getEarnings(PROVIDER, {
+      ...WINDOW,
+      groupBy: ProviderEarningsGroupBy.DAY,
+    });
+
+    expect(earnings.totals.absorbed).toBeNull();
+    expect(earnings.totals.absorbedCalls).toBe(0);
   });
 });

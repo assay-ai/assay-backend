@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 
 import {
   CREDITED_SQL,
+  PLATFORM_ABSORBED_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
@@ -30,6 +31,8 @@ interface EarningsRow {
   readonly platformFee: string;
   readonly withheld: string;
   readonly withheldCalls: string;
+  readonly absorbed: string;
+  readonly absorbedCalls: string;
 }
 
 interface Figures {
@@ -38,6 +41,8 @@ interface Figures {
   readonly platformFee: bigint;
   readonly withheld: bigint;
   readonly withheldCalls: number;
+  readonly absorbed: bigint;
+  readonly absorbedCalls: number;
 }
 
 const ZERO_FIGURES: Figures = {
@@ -46,6 +51,8 @@ const ZERO_FIGURES: Figures = {
   platformFee: 0n,
   withheld: 0n,
   withheldCalls: 0,
+  absorbed: 0n,
+  absorbedCalls: 0,
 };
 
 /**
@@ -92,10 +99,26 @@ export class ProviderEarningsService {
           `THEN intent.providerAmount ELSE 0 END), 0)`,
         'earned',
       )
+      // An absorbed credit took no fee: no redemption ran, so nothing was
+      // split. Counting its nominal `platform_fee` here reported a take the
+      // `PLATFORM_FEE` journal never received.
       .addSelect(
         `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND ${CREDITED_SQL} ` +
-          `THEN intent.platformFee ELSE 0 END), 0)`,
+          `AND NOT ${PLATFORM_ABSORBED_SQL} THEN intent.platformFee ELSE 0 END), 0)`,
         'platformFee',
+      )
+      // The slice of `earned` the platform owes rather than the chain paid: a
+      // served call whose voucher could never be redeemed. It is in `earned`
+      // (the provider is credited) and NOT in the provider's wallet.
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND ${CREDITED_SQL} ` +
+          `AND ${PLATFORM_ABSORBED_SQL} THEN intent.providerAmount ELSE 0 END), 0)`,
+        'absorbed',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE intent.status = :settledStatus AND ${CREDITED_SQL} ` +
+          `AND ${PLATFORM_ABSORBED_SQL})`,
+        'absorbedCalls',
       )
       .addSelect(
         `COALESCE(SUM(CASE WHEN intent.status IN (:...withheldStatuses) AND intent.holdId IS NOT NULL ` +
@@ -170,6 +193,8 @@ function toFigures(row: EarningsRow): Figures {
     platformFee: BigInt(row.platformFee),
     withheld: BigInt(row.withheld),
     withheldCalls: Number(row.withheldCalls),
+    absorbed: BigInt(row.absorbed),
+    absorbedCalls: Number(row.absorbedCalls),
   };
 }
 
@@ -180,6 +205,8 @@ function addFigures(a: Figures, b: Figures): Figures {
     platformFee: a.platformFee + b.platformFee,
     withheld: a.withheld + b.withheld,
     withheldCalls: a.withheldCalls + b.withheldCalls,
+    absorbed: a.absorbed + b.absorbed,
+    absorbedCalls: a.absorbedCalls + b.absorbedCalls,
   };
 }
 
@@ -206,5 +233,7 @@ function toFiguresDto(
     platformFee: money(figures.platformFee),
     withheld: money(figures.withheld),
     withheldCalls: figures.withheldCalls,
+    absorbed: money(figures.absorbed),
+    absorbedCalls: figures.absorbedCalls,
   };
 }
