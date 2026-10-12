@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, IsString } from 'class-validator';
+import { IsOptional, IsString, MaxLength } from 'class-validator';
 
 import { ListQueryDto } from '@shared/api';
 
@@ -29,6 +29,14 @@ export class ListAuditLogQueryDto extends ListQueryDto {
   @IsOptional()
   @IsString()
   resourceId?: string;
+
+  @ApiPropertyOptional({
+    description: 'Substring match on actor id, action, resource type or resource id',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  search?: string;
 }
 
 export class AuditLogEntryDto {
