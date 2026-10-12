@@ -1,5 +1,5 @@
 import { DelegateBindingChallenge, DelegateBindingTypedData } from './delegate-binding.types';
-import { VoucherAuthorityAnswer, VoucherAuthorityOptions } from './voucher-authority.types';
+import { VoucherAuthorityAnswer } from './voucher-authority.types';
 import { AccountId, AssetId, ChainId, ChainNamespace } from './caip.types';
 import { Money } from './money.types';
 import { PayoutProofChallenge, ProofTypedData } from './payout-proof.types';
@@ -122,9 +122,9 @@ export interface ChainAdapter {
   buildVoucherMessage(voucher: Voucher): Uint8Array;
   verifyVoucherSignature(voucher: Voucher, signature: string, signer: AccountId): boolean;
   /**
-   * Who authorised this voucher, by the CHAIN's full rule — the payer's key,
-   * a delegate the payer authorised on chain, or the payer's EIP-1271 wallet —
-   * read from chain state and failing closed. See `voucher-authority.types.ts`.
+   * Who authorised this voucher, by the CHAIN's full rule — the payer's key
+   * or a delegate the payer authorised on chain — read from chain state and
+   * failing closed. See `voucher-authority.types.ts`.
    *
    * Optional: a chain with no delegation (Solana) has only the payer's key, and
    * {@link verifyVoucherSignature} already answers that. The payment domain
@@ -134,7 +134,6 @@ export interface ChainAdapter {
     voucher: Voucher,
     signature: string,
     nowSeconds: number,
-    options?: VoucherAuthorityOptions,
   ): Promise<VoucherAuthorityAnswer>;
   /**
    * `resource`'s hash exactly as this chain's voucher signs it, in the form

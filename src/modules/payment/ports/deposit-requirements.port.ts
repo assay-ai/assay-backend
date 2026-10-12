@@ -77,8 +77,9 @@ export type SolanaDepositRequirements = {
  *    escrow will pull against. {@link spender} is the escrow contract and is
  *    carried separately from {@link contract} because "who I approve" and "who
  *    I call" are one address today by construction, not by definition: a
- *    Permit2 path changes the first and not the second, and a client
- *    that had collapsed them would approve the wrong contract.
+ *    deposit routed through an allowance-holding contract would change the
+ *    first and not the second, and a client that had collapsed them would
+ *    approve the wrong contract.
  * 2. `depositFor(buyer, amount)` on {@link contract}.
  *
  * ## There is no blockhash, no fee payer and no memo

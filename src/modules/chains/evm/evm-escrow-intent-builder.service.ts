@@ -146,6 +146,13 @@ export const EVM_RELAYED_DEADLINE_MIN_WINDOW_SECONDS = 60;
  * signature that reverts `BadNonce`, and only when both doors are used — rare
  * enough to reach production.
  *
+ * Since assay-evm D-18 the DIRECT `setLimits` and `requestWithdraw` (and the
+ * delegation doors) consume it too: every payer decision advances it. So it is
+ * read fresh for every build and never cached, and a buyer who acts directly
+ * between build and submit turns the relayed request into a `BadNonce`, which
+ * is the intended outcome — a withheld signature cannot land after a later
+ * decision.
+ *
  * ## There is no `withdrawBySig`, and there must never be one
  *
  * `withdraw()` on chain is `msg.sender`-only, pays `msg.sender` and takes no

@@ -1,5 +1,6 @@
 import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
+import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.constants';
 import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
@@ -30,6 +31,8 @@ function buildService(
   const escrows = {
     allocateSeq: jest.fn().mockResolvedValue(allocated),
     bumpNextSeqTo: jest.fn().mockResolvedValue(0),
+    // The counter as it stands before allocating: the seq about to be handed out.
+    peekNextSeq: jest.fn().mockResolvedValue(allocated ? BigInt(allocated.seq) : null),
   };
   const cache = { get: jest.fn(), set: jest.fn() };
 
@@ -98,6 +101,51 @@ describe('EscrowSeqService.allocate', () => {
       await service.allocate(ORGANIZATION_ID, ACCOUNT);
 
       expect(escrows.bumpNextSeqTo).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the chain’s seq jump cap (X402Escrow.MAX_SEQ_GAP)', () => {
+    const GAP = BigInt(VOUCHER_MAX_SEQ_GAP);
+    const SEQ_HIGH = 7n;
+    const at = (seq: bigint) => ({
+      seq: seq.toString(),
+      escrowAccountId: ESCROW_ACCOUNT_ID,
+      escrowAssetAccountId: ESCROW_ASSET_ACCOUNT_ID,
+    });
+
+    it('issues a seq exactly MAX_SEQ_GAP above the chain’s seqHigh', async () => {
+      const { service } = buildService(at(SEQ_HIGH + GAP));
+
+      await expect(service.allocate(ORGANIZATION_ID, ACCOUNT, SEQ_HIGH)).resolves.toMatchObject({
+        seq: (SEQ_HIGH + GAP).toString(),
+      });
+    });
+
+    it('refuses one above it, BEFORE allocating, so the refusal does not push the counter on', async () => {
+      const { service, escrows } = buildService(at(SEQ_HIGH + GAP + 1n));
+
+      await expectErrorCodeAsync(
+        () => service.allocate(ORGANIZATION_ID, ACCOUNT, SEQ_HIGH),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE,
+      );
+      expect(escrows.allocateSeq).not.toHaveBeenCalled();
+    });
+
+    it('refuses an allocated seq over the cap even when the pre-check passed (a concurrent allocation)', async () => {
+      const { service, escrows } = buildService(at(SEQ_HIGH + GAP + 1n));
+      escrows.peekNextSeq.mockResolvedValue(SEQ_HIGH + GAP);
+
+      await expectErrorCodeAsync(
+        () => service.allocate(ORGANIZATION_ID, ACCOUNT, SEQ_HIGH),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE,
+      );
+    });
+
+    it('applies no cap when the chain has not been read', async () => {
+      const { service, escrows } = buildService(at(SEQ_HIGH + GAP + 1n));
+
+      await expect(service.allocate(ORGANIZATION_ID, ACCOUNT)).resolves.toBeDefined();
+      expect(escrows.peekNextSeq).not.toHaveBeenCalled();
     });
   });
 

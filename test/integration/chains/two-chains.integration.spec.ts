@@ -6,7 +6,13 @@ import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-g
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
-import { EVM_RELAYER, EvmRelayerPort } from '@modules/chains/evm/ports/evm-relayer.port';
+import {
+  EVM_REDEEMER,
+  EVM_RELAYER,
+  EvmRelayerPort,
+} from '@modules/chains/evm/ports/evm-relayer.port';
+import { EvmVoucherRedeemer } from '@modules/chains/evm/evm-voucher-redeemer.service';
+import { resetEnvSigningKeyCacheForTests } from '@modules/verification/signing/backends/env-key-source';
 import { ESCROW_BALANCE_READER } from '@modules/ledger/ports/escrow-balance-reader.port';
 import {
   VOUCHER_REDEEMER,
@@ -33,6 +39,7 @@ const DEPLOYMENTS = JSON.stringify({
     // The two `assertVaultControl` compares the live chain against.
     escrowImplementation: '0x8888888888888888888888888888888888888888',
     admin: '0x9999999999999999999999999999999999999999',
+    owner: '0x7777777777777777777777777777777777777777',
   },
 });
 const RPC_URLS = JSON.stringify({ [EVM]: 'https://rpc.testnet.chain.robinhood.example' });
@@ -95,6 +102,8 @@ describe('two chains, enabled together', () => {
       // One relayer key, so `address()` has something to answer with. A throwaway
       // scalar: it signs nothing here and reaches no chain.
       EVM_RELAYER_KEYS: JSON.stringify([{ chainId: EVM, secretKey: `0x${'11'.repeat(32)}` }]),
+      // And a DIFFERENT redeemer key: the boot refuses the two being equal.
+      EVM_REDEEMER_KEYS: JSON.stringify([{ chainId: EVM, secretKey: `0x${'22'.repeat(32)}` }]),
       SOLANA_ENABLED_CHAINS: undefined,
       ...overrides,
     });
@@ -199,6 +208,48 @@ describe('two chains, enabled together', () => {
     }
   });
 
+  it('redeems through the REDEEMER key, a different account from the relayer', async () => {
+    // Keys are taken once per process; start from a clean take so this case
+    // reads exactly the two variables `bootWith` sets.
+    resetEnvSigningKeyCacheForTests();
+    const app = await bootWith({ ENABLED_CHAINS: EVM });
+    try {
+      const relayer = app.get<EvmRelayerPort>(EVM_RELAYER);
+      const redeemer = app.get<EvmRelayerPort>(EVM_REDEEMER);
+      expect(relayer.name).toBe('evm-relayer-eoa');
+      expect(redeemer.name).toBe('evm-redeemer-eoa');
+      expect(await redeemer.address(EVM)).not.toBe(await relayer.address(EVM));
+      // The redeemer service holds the redeemer port, and only it.
+      const service = app.get(EvmVoucherRedeemer, { strict: false }) as unknown as {
+        redeemer: EvmRelayerPort;
+      };
+      expect(service.redeemer).toBe(redeemer);
+    } finally {
+      await app.close();
+      resetEnvSigningKeyCacheForTests();
+    }
+  });
+
+  it('refuses to boot when the redeemer key IS the relayer key, without printing it', async () => {
+    resetEnvSigningKeyCacheForTests();
+    const same = JSON.stringify([{ chainId: EVM, secretKey: `0x${'33'.repeat(32)}` }]);
+    try {
+      const error = await bootWith({
+        ENABLED_CHAINS: EVM,
+        EVM_RELAYER_KEYS: same,
+        EVM_REDEEMER_KEYS: same,
+      }).then(
+        () => null,
+        (caught: unknown) => caught as Error,
+      );
+      expect(error).toMatchObject({ errorCode: 'CHAIN_CONFIG_VALUE_INVALID' });
+      expect(error.message).toContain('EVM_REDEEMER_KEYS');
+      expect(error.message).not.toContain('33'.repeat(8));
+    } finally {
+      resetEnvSigningKeyCacheForTests();
+    }
+  });
+
   it('turning eip155 off leaves Solana entirely unaffected, and demands NO evm config', async () => {
     // The mirror, and the one that matters for every deployment running today:
     // a Solana-only process must boot with every EVM variable unset, including
@@ -208,6 +259,7 @@ describe('two chains, enabled together', () => {
       EVM_DEPLOYMENTS: undefined,
       EVM_RPC_URLS: undefined,
       EVM_RELAYER_KEYS: undefined,
+      EVM_REDEEMER_KEYS: undefined,
       EVM_RELAYER_GAS_GRANT_MAX_WEI: undefined,
       EVM_RELAYER_GAS_GRANT_DAILY_MAX_WEI: undefined,
       EVM_RELAYER_FLOAT_LOW_WEI: undefined,

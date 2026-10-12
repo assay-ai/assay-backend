@@ -31,11 +31,7 @@ import {
   DelegateBindingChallenge,
   DelegateBindingTypedData,
 } from '../ports/delegate-binding.types';
-import {
-  VoucherAuthorityAnswer,
-  VoucherAuthorityOptions,
-  VoucherAuthorityRefusal,
-} from '../ports/voucher-authority.types';
+import { VoucherAuthorityAnswer, VoucherAuthorityRefusal } from '../ports/voucher-authority.types';
 import { Money } from '../ports/money.types';
 import { PayoutProofChallenge, ProofTypedData } from '../ports/payout-proof.types';
 import { StakeAuthorityChallenge } from '../ports/stake-authority.types';
@@ -128,8 +124,6 @@ export interface EvmReadClient {
     functionName: string;
     args: readonly unknown[];
   }): Promise<unknown>;
-  /** The voucher authority asks whether a payer has code (EIP-1271). */
-  getCode?(args: { address: `0x${string}` }): Promise<`0x${string}` | undefined>;
 }
 
 export interface EvmLog {
@@ -591,7 +585,6 @@ export class EvmChainAdapter implements ChainAdapter {
     voucher: Voucher,
     signature: string,
     nowSeconds: number,
-    options?: VoucherAuthorityOptions,
   ): Promise<VoucherAuthorityAnswer> {
     const { chainId, address } = this.parseAccountId(voucher.payer);
     const escrow = getAddress(this.deploymentFor(chainId).escrow);
@@ -609,13 +602,12 @@ export class EvmChainAdapter implements ChainAdapter {
       digest,
       signature,
       nowSeconds,
-      options,
     );
   }
 
   private readonly authorities = new Map<ChainId, EvmVoucherAuthority>();
 
-  /** One per chain, so its short-lived read cache is shared by every call. */
+  /** One per chain. It holds no cache: every decision reads the chain. */
   private voucherAuthority(chainId: ChainId, escrow: `0x${string}`): EvmVoucherAuthority {
     let authority = this.authorities.get(chainId);
     if (!authority) {

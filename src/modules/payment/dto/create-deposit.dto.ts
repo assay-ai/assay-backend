@@ -237,8 +237,8 @@ export class EvmDepositRequirementsDto {
     description:
       'The address to `approve(spender, amount)` on `asset` before calling `method`. The escrow ' +
       'contract today, and carried separately from `contract` because "who I approve" and "who ' +
-      'I call" are one address by construction rather than by definition — a Permit2 path ' +
-      'changes the first and not the second.',
+      'I call" are one address by construction rather than by definition — a deposit routed ' +
+      'through an allowance-holding contract would change the first and not the second.',
     example: '0x2ed26485593B512d87616a2625d2C0f7721cfF10',
   })
   readonly spender!: string;

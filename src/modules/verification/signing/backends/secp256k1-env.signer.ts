@@ -199,7 +199,7 @@ function importKey(source: EvmSigningKeySource): LoadedKey {
  * The failure this catches is silent and expensive: a key that produces
  * signatures nobody can recover the right address from still *works*, in the
  * sense that `sign` returns 65 bytes. It would be discovered when the contract
- * answers `SignerIsNotVerifier` — during an incident, on the path that takes
+ * answers `VerifierNotRegistered` — during an incident, on the path that takes
  * money — rather than here, where it is a boot failure with a key id in it.
  */
 function assertKeyPairAgrees(keyId: string, scalar: Uint8Array, publicKey: Uint8Array): void {

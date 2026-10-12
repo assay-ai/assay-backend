@@ -29,7 +29,7 @@ import { secp256k1 } from '@noble/curves/secp256k1';
  *
  * There is no fourth step in which a default is chosen. A guessed `v` produces
  * a signature that recovers a stranger's address, and the chain answers
- * `SignerIsNotVerifier` for a key that was perfectly good — which sends the
+ * `VerifierNotRegistered` for a key that was perfectly good — which sends the
  * investigation to the registry instead of to this function.
  *
  * ## The identity compared is a public key, not an address

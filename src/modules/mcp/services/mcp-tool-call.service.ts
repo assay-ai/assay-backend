@@ -1341,9 +1341,8 @@ export interface VoucherRequirement {
    * eip155 only (agent payment delegation, x402-aligned): who may sign the
    * voucher. `payer` — the payer's own key; `delegate` — a key the payer
    * authorised on chain, within its own caps (`X402Escrow.authorizeDelegate`).
-   * Absent on Solana, where only the payer's key signs. `erc1271` (the payer's
-   * smart wallet) is accepted by the chain but not offered here: the platform
-   * does not serve a call on a wallet's answer (`VoucherService`).
+   * Absent on Solana, where only the payer's key signs. There is no third
+   * signer kind: the contract has no EIP-1271 branch (assay-evm D-18).
    */
   readonly signers?: readonly VoucherSigner[];
   /**
@@ -1508,9 +1507,8 @@ function routingContextOf(
 
 /**
  * The delegation half of a rail-B requirement on eip155: the voucher may be
- * signed by the payer's key, by a delegate the payer authorised on chain, or by
- * the payer's EIP-1271 wallet — and, when this credential has a bound delegate,
- * which key that is. Nothing on Solana, whose escrow has no delegation.
+ * signed by the payer's key or by a delegate the payer authorised on chain —
+ * and, when this credential has a bound delegate, which key that is. Nothing on Solana, whose escrow has no delegation.
  */
 export function delegationTerms(
   session: McpSession,

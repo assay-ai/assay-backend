@@ -23,7 +23,7 @@ import {
 } from './evm-voucher-prevalidation';
 import { isRevert } from './evm-voucher-authority';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
-import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
+import { EVM_REDEEMER, EvmRelayerPort } from './ports/evm-relayer.port';
 
 /**
  * The gas a redemption transaction is given, as `base + perVoucher × n`.
@@ -74,7 +74,6 @@ export interface EvmVoucherRedeemerConfig {
 const MISCONFIGURATION: ReadonlySet<string> = new Set([
   'NotRedeemer',
   'MissingRedeemer',
-  'Permit2NotConfigured',
   'AssetDecimalsNotSix',
   'EmptyBatch',
   'BatchTooLarge',
@@ -96,6 +95,10 @@ const UNREDEEMABLE: ReadonlySet<string> = new Set([
   'VoucherExpired',
   'VoucherSeqZero',
   'VoucherSeqNotIncreasing',
+  // The seq is more than MAX_SEQ_GAP above the payer's seqHigh. seqHigh only
+  // grows, so a later attempt can only stay refused or become
+  // VoucherSeqNotIncreasing — never settle on a different answer worth gas.
+  'VoucherSeqGapTooLarge',
   'SignerIsNotPayer',
   'InvalidSignature',
   'MalleableSignature',
@@ -122,9 +125,6 @@ const RETRYABLE: ReadonlySet<string> = new Set([
   // A delegate's window decays. Pre-validation and the simulation before every
   // send keep the retry from costing gas: nothing is broadcast until it fits.
   'DelegateWindowLimitExceeded',
-  // The submitter's own gas limit was short of what a payer's EIP-1271 check
-  // needs; nothing about the voucher is wrong.
-  'WalletCheckUnderfunded',
 ]);
 
 /** `r || s || v`, 65 bytes. */
@@ -174,7 +174,7 @@ const HASH_PREFIX = 'sha256:';
  *
  * ## Why a revert cannot say which item did it
  *
- * A revert is a bare 4-byte selector — every one of `Errors.sol`'s 71 errors is
+ * A revert is a bare 4-byte selector — every one of `Errors.sol`'s errors is
  * zero-argument — with no index in it. So when a batch reverts, the only thing
  * that makes progress is one transaction each. Re-submitting the batch would
  * fail identically, for ever.
@@ -189,7 +189,13 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
   constructor(
     private readonly clients: ReadonlyMap<ChainId, EvmReaderClient>,
     private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
-    @Inject(EVM_RELAYER) private readonly relayer: EvmRelayerPort,
+    /**
+     * The REDEEMER key's sender — `Config.params().redeemer` — and never the
+     * relayer that carries buyer-signed requests. Distinct keys (checked at
+     * boot), so a leaked relayer key cannot redeem and a leaked redeemer key
+     * cannot spend the gas-grant float.
+     */
+    @Inject(EVM_REDEEMER) private readonly redeemer: EvmRelayerPort,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     private readonly config: EvmVoucherRedeemerConfig,
   ) {}
@@ -216,7 +222,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       return this.outcomeFor(simulated, null);
     }
 
-    const result = await this.relayer.sendCall({
+    const result = await this.redeemer.sendCall({
       chainId,
       to: this.escrowAccount(chainId),
       data: encodeFunctionData({
@@ -286,7 +292,7 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       return outcomes;
     }
 
-    const result = await this.relayer.sendCall({
+    const result = await this.redeemer.sendCall({
       chainId,
       to: this.escrowAccount(chainId),
       data: encodeFunctionData({
@@ -337,14 +343,14 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     args: readonly unknown[],
     gas: bigint,
   ): Promise<string | null> {
-    const relayer = getAddress(parseAccountId(await this.relayer.address(chainId)).address);
+    const sender = getAddress(parseAccountId(await this.redeemer.address(chainId)).address);
     try {
       await this.client(chainId).readContract({
         address: getAddress(this.deployment(chainId).escrow),
         abi: X402_ESCROW_ABI,
         functionName,
         args,
-        account: relayer,
+        account: sender,
         gas,
       } as Parameters<EvmReaderClient['readContract']>[0]);
       return null;
@@ -382,8 +388,8 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     const payers = requests.map((request) => this.addressOf(request.payer, chainId));
     const providers = requests.map((request) => this.addressOf(request.provider, chainId));
 
-    const [relayerAddress, results] = await Promise.all([
-      this.relayer.address(chainId),
+    const [redeemerAddress, results] = await Promise.all([
+      this.redeemer.address(chainId),
       client.multicall({
         contracts: [
           { address: config, abi: X402_CONFIG_ABI, functionName: 'params', args: [] },
@@ -416,11 +422,11 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
 
     const params = results[0] as { redeemer: string; minimumStake: bigint };
     const paused = results[1] as boolean;
-    // The relayer's own address, compared against the key the contract accepts.
+    // The redeemer key's own address, compared against the key the contract accepts.
     // `NotRedeemer` is checked before `_redeem` runs at all, so this is the
     // first thing the pre-validator asks.
     const redeemerIsUs =
-      getAddress(parseAccountId(relayerAddress).address) === getAddress(params.redeemer);
+      getAddress(parseAccountId(redeemerAddress).address) === getAddress(params.redeemer);
     const nowSeconds = Math.floor(this.config.now() / 1000);
 
     const delegated = requests

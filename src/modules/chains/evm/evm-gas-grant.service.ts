@@ -222,9 +222,9 @@ function positiveWei(value: string | undefined, variable: string): bigint {
  *    RPC nodes at different heights answer the builder and this, and a faucet's
  *    controls may not be conditional on which caller reached it.
  * 3. **Two caps with no defaults** — see {@link parseGasGrantCaps}.
- * 4. **A relayer float floor.** The float pays for redemptions too, and a grant
- *    that empties it stops every provider getting paid — a worse failure than
- *    one buyer waiting.
+ * 4. **A relayer float floor.** The float pays for relayed buyer requests and
+ *    slash sends too, and a grant that empties it stops those — a worse failure
+ *    than one buyer waiting. (Redemptions are paid by the separate redeemer key.)
  * 5. **An alert on every grant**, not on a threshold. The float moving is the
  *    event; a threshold would make the first N invisible.
  * 6. **A durable reservation**, taken immediately before the send, so two

@@ -96,4 +96,17 @@ export interface EvmRelayerPort {
   sendValue(transfer: EvmValueTransfer): Promise<EvmRelayResult>;
 }
 
+/**
+ * DI token: the RELAYER — relays buyer-signed `*BySig` requests, funds the
+ * withdraw gas grant and sends the slash executor's calls. It holds no
+ * on-chain role.
+ */
 export const EVM_RELAYER = 'EVM_RELAYER';
+
+/**
+ * DI token: the REDEEMER — the key `Config.params().redeemer` names, and the
+ * only sender `redeemVoucher[Batch]` accepts. Same port as the relayer,
+ * different key (`EVM_REDEEMER_KEYS`), held only by `EvmVoucherRedeemer`. The
+ * boot refuses a deployment where the two keys are the same on any chain.
+ */
+export const EVM_REDEEMER = 'EVM_REDEEMER';

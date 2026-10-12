@@ -432,8 +432,8 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
       `${context?.minimumSeconds !== undefined ? ` of a required ${context.minimumSeconds}s` : ''}`,
   },
   /**
-   * The chain state a voucher's authority depends on (the payer's code, a
-   * delegate's on-chain grant, a wallet's EIP-1271 answer) could not be read.
+   * The chain state a voucher's authority depends on (a delegate's on-chain
+   * grant) could not be read.
    *
    * **Fail closed**: the voucher is refused, not assumed good, because the only
    * thing standing between an unreadable delegation and a served call is this

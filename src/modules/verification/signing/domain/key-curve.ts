@@ -27,7 +27,7 @@ import { VerificationErrors } from '../../errors/verification.errors';
  * and a `keyId` that the ed25519 backend happens to hold produces a 64-byte
  * ed25519 signature that is submitted to `ecrecover`, where it is not a
  * malformed signature — it is a well-formed one belonging to a stranger. The
- * chain answers `SignerIsNotVerifier`, and the investigation starts at the
+ * chain answers `VerifierNotRegistered`, and the investigation starts at the
  * registry rather than at the misrouted key.
  */
 export type SigningCurve = 'ed25519' | 'secp256k1';

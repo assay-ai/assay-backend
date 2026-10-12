@@ -60,17 +60,20 @@ const IMPL_SLOT = '0x360894a13ba1a3210667c828492db98dca3e2076cc3735a920a3ca505d3
 /** Function selectors, from `cast sig` on the pinned Foundry build. */
 const SELECTOR = {
   admin: '0xf851a440',
+  owner: '0x8da5cb5b',
   ASSET: '0x4800d97f',
   balanceOf: '0x70a08231',
 } as const;
 
 const OTHER_IMPLEMENTATION = '0x00000000000000000000000000000000DeaDBeef';
 const OTHER_ADMIN = '0x000000000000000000000000000000000000c0De';
+const OTHER_OWNER = '0x0000000000000000000000000000000000000Ba5';
 const OTHER_TOKEN = '0x000000000000000000000000000000000000BadA';
 
 interface ChainState {
   implementation: string;
   admin: string;
+  owner: string;
   asset: string;
   balance: bigint;
   blockNumber: bigint;
@@ -90,6 +93,7 @@ function chain(overrides: Partial<ChainState> = {}): {
   const state: ChainState = {
     implementation: DEPLOYMENT.escrowImplementation,
     admin: DEPLOYMENT.admin,
+    owner: DEPLOYMENT.owner,
     asset: DEPLOYMENT.asset,
     balance: 12_500_000n,
     blockNumber: 116_313_808n,
@@ -109,6 +113,7 @@ function chain(overrides: Partial<ChainState> = {}): {
       const { data } = params[0] as { to: string; data: string };
       const selector = data.slice(0, 10);
       if (selector === SELECTOR.admin) return pad(state.admin as `0x${string}`, { size: 32 });
+      if (selector === SELECTOR.owner) return pad(state.owner as `0x${string}`, { size: 32 });
       if (selector === SELECTOR.ASSET) return pad(state.asset as `0x${string}`, { size: 32 });
       if (selector === SELECTOR.balanceOf) return toHex(state.balance, { size: 32 });
     }
@@ -217,14 +222,30 @@ describe('EvmVaultService', () => {
     });
   });
 
-  it('refuses when config.admin() is not the admin the record names', async () => {
-    // By design the admin IS the upgrade authority of all three contracts, so
-    // an admin that moved without being recorded is an upgrade authority that
+  it('refuses when config.owner() is not the owner the record names', async () => {
+    // Since D-17 the OWNER is the upgrade authority of all three contracts, so
+    // an owner that moved without being recorded is an upgrade authority that
     // moved without being recorded.
+    const { vault } = vaultWith({ owner: OTHER_OWNER });
+
+    await expect(vault.assertVaultControl(USDG)).rejects.toMatchObject({
+      errorCode: 'CHAIN_VAULT_CONTROL_UNVERIFIED',
+      message: expect.stringContaining('upgrade authority'),
+    });
+  });
+
+  it('refuses when config.admin() is not the admin the record names', async () => {
+    // The admin is the operational key (pause, parameters, verifier registry),
+    // appointed by the owner. It is not the upgrade authority, and the message
+    // must not say it is.
     const { vault } = vaultWith({ admin: OTHER_ADMIN });
 
     await expect(vault.assertVaultControl(USDG)).rejects.toMatchObject({
       errorCode: 'CHAIN_VAULT_CONTROL_UNVERIFIED',
+      message: expect.stringContaining('operational key'),
+    });
+    await expect(vault.assertVaultControl(USDG)).rejects.toMatchObject({
+      message: expect.not.stringContaining('upgrade authority'),
     });
   });
 
@@ -236,22 +257,30 @@ describe('EvmVaultService', () => {
     });
   });
 
-  it('passes when all three agree — the positive control', async () => {
+  it('passes when all four agree — the positive control', async () => {
     const { vault, calls } = vaultWith();
 
     await expect(vault.assertVaultControl(USDG)).resolves.toBeUndefined();
-    // Three reads, and the positive control is what stops the three negatives
+    // Four reads, and the positive control is what stops the four negatives
     // above passing over a method that always threw.
-    expect(calls.map((c) => c.method)).toEqual(['eth_getStorageAt', 'eth_call', 'eth_call']);
+    expect(calls.map((c) => c.method)).toEqual([
+      'eth_getStorageAt',
+      'eth_call',
+      'eth_call',
+      'eth_call',
+    ]);
   });
 
-  it('names which of the three failed, because the remedies do not overlap', async () => {
+  it('names which of the four failed, because the remedies do not overlap', async () => {
     // A single "control unverified" tells an operator to stop and nothing else.
-    // An unrecorded upgrade, a moved admin key and a wrong token are three
-    // different incidents.
+    // An unrecorded upgrade, a moved owner, a moved admin key and a wrong token
+    // are four different incidents.
     await expect(
       vaultWith({ implementation: OTHER_IMPLEMENTATION }).vault.assertVaultControl(USDG),
     ).rejects.toMatchObject({ message: expect.stringContaining('implementation') });
+    await expect(
+      vaultWith({ owner: OTHER_OWNER }).vault.assertVaultControl(USDG),
+    ).rejects.toMatchObject({ message: expect.stringContaining('reports owner') });
     await expect(
       vaultWith({ admin: OTHER_ADMIN }).vault.assertVaultControl(USDG),
     ).rejects.toMatchObject({ message: expect.stringContaining('admin') });

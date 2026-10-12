@@ -19,8 +19,8 @@ import { parseAbi } from 'viem';
  * - There is no `withdrawBySig`, by design. `withdraw()` is
  *   `msg.sender`-only, pays `msg.sender`, and takes no destination.
  *
- * `depositWithPermit2` exists on chain and is deliberately not vendored: the
- * deposit path built here is `approve` + `depositFor`.
+ * The deposit path built here is `approve` + `depositFor`; the contract has no
+ * other deposit door (D-18 removed the Permit2 one).
  */
 export const X402_ESCROW_ABI = parseAbi([
   'struct Voucher { address payer; address provider; uint64 amount; bytes32 resourceHash; bytes32 requestHash; uint64 seq; uint64 issuedAt; uint64 expiresAt; }',
@@ -32,7 +32,7 @@ export const X402_ESCROW_ABI = parseAbi([
    * settlement token the escrow was initialised with, so a vault balance is
    * never published in a denomination the contract does not actually hold.
    *
-   * `CONFIG()`, `STAKE()` and `PERMIT2()` are the same shape and are
+   * `CONFIG()` and `STAKE()` are the same shape and are
    * deliberately NOT vendored beside it: nothing reads them, and an ABI entry
    * is a call site waiting to exist.
    */
@@ -71,10 +71,17 @@ export const X402_ESCROW_ABI = parseAbi([
  * `X402Config`, read-only.
  *
  * **Nothing in this backend writes to it.** `updateConfig`, `setPaused`,
- * `registerVerifier` and `revokeVerifier` are the admin Ledger's, run by a
- * human, and are deliberately absent so that no call site can reach for one —
- * an ABI entry is a call site waiting to exist, and `abi-selectors.spec.ts`
- * fails if any of them appears.
+ * `registerVerifier` and `revokeVerifier` are the ADMIN's; `setAdmin`,
+ * `transferOwnership`, `acceptOwnership`, `renounceOwnership` and
+ * `initializeV2` are the OWNER's (D-17). Both keys are held by humans, and
+ * every one of those writes is deliberately absent so that no call site can
+ * reach for one — an ABI entry is a call site waiting to exist, and
+ * `abi-selectors.spec.ts` fails if any of them appears.
+ *
+ * `owner()` is the UUPS upgrade authority of all three contracts and
+ * `pendingOwner()` is the incoming key of a two-step transfer in progress;
+ * `EvmVaultService.assertVaultControl` reads the first. `admin()` is the
+ * operational key and is NOT the upgrade authority.
  *
  * `updateConfig` also has no compare-and-swap. That is safe only because the
  * admin is one key, and *"read `params()` in the same block you sign from"* is
@@ -86,9 +93,10 @@ export const X402_CONFIG_ABI = parseAbi([
   'function params() view returns (ParamSet)',
   'function paused() view returns (bool)',
   'function admin() view returns (address)',
+  'function owner() view returns (address)',
+  'function pendingOwner() view returns (address)',
   'function slashProviderBps() view returns (uint16)',
   'function canSign(address verifier) view returns (bool)',
-  'function verifierExpiry(address verifier) view returns (uint64)',
   'function verifierKey(address verifier) view returns (VerifierKey)',
 ]);
 
@@ -159,15 +167,6 @@ export const MULTICALL3_ABI = parseAbi([
   'struct Call3 { address target; bool allowFailure; bytes callData; }',
   'struct Result { bool success; bytes returnData; }',
   'function aggregate3(Call3[] calls) payable returns (Result[] returnData)',
-]);
-
-/**
- * EIP-1271, the one call a contract-wallet payer answers: the third branch of
- * `X402Escrow`'s voucher rule, mirrored off chain with an `eth_call`. The
- * magic value is the selector itself, `0x1626ba7e`.
- */
-export const ERC1271_ABI = parseAbi([
-  'function isValidSignature(bytes32 hash, bytes signature) view returns (bytes4)',
 ]);
 
 /**

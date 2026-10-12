@@ -1,3 +1,5 @@
+import { privateKeyToAccount } from 'viem/accounts';
+
 import { takeOnceFromEnv } from '@modules/verification/signing/backends/env-key-source';
 
 import { ChainErrors } from '../errors/chains.errors';
@@ -9,6 +11,16 @@ export const EVM_RELAYER_KEYS_ENV = 'EVM_RELAYER_KEYS';
 /** DI token: `readonly EvmRelayerKeySource[]`, parsed once at boot. */
 export const EVM_RELAYER_KEY_SOURCES = 'EVM_RELAYER_KEY_SOURCES';
 
+/**
+ * The variable holding the REDEEMER EOA's key(s): the address in
+ * `Config.params().redeemer`. Same shape and same take-once handling as
+ * {@link EVM_RELAYER_KEYS_ENV}, and a different key on every chain.
+ */
+export const EVM_REDEEMER_KEYS_ENV = 'EVM_REDEEMER_KEYS';
+
+/** DI token: the redeemer's `readonly EvmRelayerKeySource[]`, parsed once at boot. */
+export const EVM_REDEEMER_KEY_SOURCES = 'EVM_REDEEMER_KEY_SOURCES';
+
 export interface EvmRelayerKeySource {
   readonly chainId: ChainId;
   /** The 32-byte secp256k1 scalar, `0x`-prefixed hex. Zeroed after the account loads. */
@@ -16,7 +28,8 @@ export interface EvmRelayerKeySource {
 }
 
 /**
- * Read `EVM_RELAYER_KEYS` and **remove it from `process.env`**.
+ * Read `EVM_RELAYER_KEYS` (or `variable`, e.g. `EVM_REDEEMER_KEYS`) and
+ * **remove it from `process.env`**.
  *
  * Goes through the same {@link takeOnceFromEnv} the verifier keys go through,
  * and that is the point rather than an economy: there is one deletion and one
@@ -108,4 +121,37 @@ function readScalar(entry: unknown, chainId: ChainId, variable: string): `0x${st
     });
   }
   return `0x${hex}`;
+}
+
+/**
+ * Refuse a deployment whose redeemer and relayer are the same key on any chain.
+ *
+ * The split is the point of having two variables: the relayer carries
+ * buyer-signed requests and holds no on-chain role, the redeemer is the one
+ * address `redeemVoucher[Batch]` accepts. One key in both places makes a leak
+ * of either the leak of both. Compared by derived ADDRESS, so a differently
+ * spelled scalar (case, `0x` prefix) cannot slip through, and the error names
+ * the chain and the variables, never a key or an address.
+ *
+ * A chain present in only one list is not a failure here: a missing key fails
+ * loudly at its first send, the same as before the split.
+ */
+export function assertDistinctRedeemerKeys(
+  relayer: readonly EvmRelayerKeySource[],
+  redeemer: readonly EvmRelayerKeySource[],
+): void {
+  const relayerByChain = new Map(relayer.map((source) => [source.chainId, source.secretKey]));
+  for (const source of redeemer) {
+    const relayerKey = relayerByChain.get(source.chainId);
+    if (relayerKey === undefined) continue;
+    if (privateKeyToAccount(relayerKey).address === privateKeyToAccount(source.secretKey).address) {
+      throw ChainErrors.configValueInvalid({
+        variable: EVM_REDEEMER_KEYS_ENV,
+        accepted:
+          `a redeemer key for ${source.chainId} that is NOT the ${EVM_RELAYER_KEYS_ENV} key for ` +
+          `the same chain. The redeemer is Config.params().redeemer; the relayer holds no ` +
+          `on-chain role and must be a different key`,
+      });
+    }
+  }
 }

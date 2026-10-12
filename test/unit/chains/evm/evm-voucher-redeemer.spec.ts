@@ -37,7 +37,8 @@ const TESTNET = CHAIN_IDS.ROBINHOOD_TESTNET;
 const DEPLOYMENT = deployment(TESTNET);
 const USDG = ASSET_IDS.USDG_ROBINHOOD_TESTNET;
 
-const RELAYER = '0x2c7536E3605D9C16a7a3D7b1898e529396a65c23';
+/** The redeemer key's address — `Config.params().redeemer`. */
+const REDEEMER = '0x2c7536E3605D9C16a7a3D7b1898e529396a65c23';
 const PROVIDER = '0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2';
 const NOW = 1_800_000_000;
 
@@ -63,7 +64,7 @@ const HEALTHY_ESCROW = {
 
 const PARAMS = {
   treasury: '0x000000000000000000000000000000000000dEaD',
-  redeemer: RELAYER,
+  redeemer: REDEEMER,
   unbondingPeriodSeconds: 1_209_600n,
   minimumStake: 50_000_000n,
   penaltyAmount: 1_000_000n,
@@ -106,6 +107,8 @@ interface ChainState {
   simulateRevert: string | null;
   /** Every simulated function, in order. */
   simulated: string[];
+  /** The `account` (msg.sender) every simulation was run from, in order. */
+  simulatedFrom: string[];
   /** The `eth_call` itself fails (an outage, no revert data). */
   simulateOutage: boolean;
 }
@@ -113,13 +116,14 @@ interface ChainState {
 function harness(overrides: Partial<ChainState> = {}) {
   const state: ChainState = {
     paused: false,
-    redeemer: RELAYER,
+    redeemer: REDEEMER,
     minimumStake: 50_000_000n,
     bonded: 50_000_000n,
     escrows: {},
     delegations: {},
     simulateRevert: null,
     simulated: [],
+    simulatedFrom: [],
     simulateOutage: false,
     ...overrides,
   };
@@ -165,7 +169,11 @@ function harness(overrides: Partial<ChainState> = {}) {
   };
 
   const client: EvmReaderClient = {
-    readContract: async (args) => answer(args.functionName, args.args),
+    readContract: async (args) => {
+      const from = (args as { account?: string }).account;
+      if (from !== undefined) state.simulatedFrom.push(from);
+      return answer(args.functionName, args.args);
+    },
     multicall: async (args) => args.contracts.map((c) => answer(c.functionName, c.args)),
   };
 
@@ -177,9 +185,9 @@ function harness(overrides: Partial<ChainState> = {}) {
     blockNumber: 1n,
   });
 
-  const relayer: EvmRelayerPort = {
-    name: 'fake-relayer',
-    address: async () => toAccountId(TESTNET, RELAYER),
+  const redeemerPort: EvmRelayerPort = {
+    name: 'fake-redeemer',
+    address: async () => toAccountId(TESTNET, REDEEMER),
     balanceWei: async () => 10n ** 18n,
     sendCall,
     sendValue: async (_transfer: EvmValueTransfer) => {
@@ -197,7 +205,7 @@ function harness(overrides: Partial<ChainState> = {}) {
   const redeemer = new EvmVoucherRedeemer(
     new Map<ChainId, EvmReaderClient>([[TESTNET, client]]),
     new Map([[TESTNET, DEPLOYMENT]]),
-    relayer,
+    redeemerPort,
     alerts,
     { now: () => NOW * 1000 },
   );
@@ -399,8 +407,8 @@ describe('EvmVoucherRedeemer', () => {
     ['VoucherSeqNotIncreasing', RedeemOutcomeKind.UNREDEEMABLE],
     ['SignerIsNotPayer', RedeemOutcomeKind.UNREDEEMABLE],
     ['MalleableSignature', RedeemOutcomeKind.UNREDEEMABLE],
+    ['VoucherSeqGapTooLarge', RedeemOutcomeKind.UNREDEEMABLE],
     ['DelegateWindowLimitExceeded', RedeemOutcomeKind.RETRY],
-    ['WalletCheckUnderfunded', RedeemOutcomeKind.RETRY],
     ['DelegateVoucherExceedsPerCallLimit', RedeemOutcomeKind.UNREDEEMABLE],
     ['DelegateIsRevoked', RedeemOutcomeKind.UNREDEEMABLE],
     ['DelegateIsExpired', RedeemOutcomeKind.UNREDEEMABLE],
@@ -424,6 +432,27 @@ describe('EvmVoucherRedeemer', () => {
     expect(outcome.signature).toBeNull();
   });
 
+  it('refuses a seq more than MAX_SEQ_GAP above seqHigh before simulating or sending', async () => {
+    const seqHigh = 5n;
+    const gap = BigInt(EVM_CONSTANTS.MAX_SEQ_GAP);
+    const { redeemer, sendCall, state } = harness({
+      escrows: { [payerAddress(0).toLowerCase()]: { seqHigh } },
+    });
+
+    const refused = await redeemer.redeem(request(0, { seq: (seqHigh + gap + 1n).toString() }));
+
+    expect(refused).toMatchObject({
+      kind: RedeemOutcomeKind.UNREDEEMABLE,
+      programError: 'VoucherSeqGapTooLarge',
+    });
+    expect(state.simulated).toEqual([]);
+    expect(sendCall).not.toHaveBeenCalled();
+
+    // Exactly the gap is the chain's own boundary, and settles.
+    const accepted = await redeemer.redeem(request(0, { seq: (seqHigh + gap).toString() }));
+    expect(accepted.kind).toBe(RedeemOutcomeKind.REDEEMED);
+  });
+
   it('reports PAUSED without sending, when the chain says paused', async () => {
     const { redeemer, sendCall } = harness({ paused: true });
 
@@ -433,7 +462,7 @@ describe('EvmVoucherRedeemer', () => {
     expect(sendCall).not.toHaveBeenCalled();
   });
 
-  it('reports MISCONFIGURED without sending, when the relayer is not the redeemer', async () => {
+  it('reports MISCONFIGURED without sending, when its key is not the configured redeemer', async () => {
     // `msg.sender != p.redeemer` refuses EVERY hold identically until an admin
     // acts. Retrying would burn a fee per hold per pass for ever; absorbing
     // would hand every buyer their money back for a one-transaction fix.
@@ -565,6 +594,9 @@ describe('EvmVoucherRedeemer', () => {
       const { redeemer, sendCall, state } = harness();
       await redeemer.redeem(request(0));
       expect(state.simulated).toEqual(['redeemVoucher']);
+      // `msg.sender` of the simulation is the REDEEMER port's account — the
+      // key that will send — never some other relayer.
+      expect(state.simulatedFrom).toEqual([REDEEMER]);
       expect(sendCall).toHaveBeenCalledTimes(1);
     });
 

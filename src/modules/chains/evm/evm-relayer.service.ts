@@ -7,10 +7,12 @@ import { ChainErrors } from '../errors/chains.errors';
 import { AccountId, ChainId, parseAccountId, parseChainId } from '../ports/caip.types';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import {
+  EVM_REDEEMER_KEYS_ENV,
   EVM_RELAYER_KEYS_ENV,
   EVM_RELAYER_KEY_SOURCES,
   EvmRelayerKeySource,
 } from './evm-relayer-key-source';
+import { EvmSendingKey, floatDedupeKey } from './evm-relayer-float.constants';
 import { DEFAULT_EVM_RELAYER_TIMING, EvmRelayerTiming } from './evm-relayer-timing';
 import {
   EvmRelayResult,
@@ -50,6 +52,30 @@ export interface EvmRelayClient {
 export const DEFAULT_RELAYER_LOW_WATER_MARK_WEI = 5_000_000_000_000_000n; // 0.005 ETH
 
 /**
+ * Which key an `EvmRelayer` instance holds: its port name, the variable its
+ * key came from (named in every "no key" error), and its role in alerts.
+ */
+export interface EvmSenderIdentity {
+  readonly name: string;
+  readonly keysVariable: string;
+  readonly key: EvmSendingKey;
+}
+
+/** The relayer: buyer-signed `*BySig` requests, gas grants, slash sends. No on-chain role. */
+export const EVM_RELAYER_IDENTITY: EvmSenderIdentity = {
+  name: 'evm-relayer-eoa',
+  keysVariable: EVM_RELAYER_KEYS_ENV,
+  key: 'relayer',
+};
+
+/** The redeemer: `Config.params().redeemer`, the only sender `redeemVoucher[Batch]` accepts. */
+export const EVM_REDEEMER_IDENTITY: EvmSenderIdentity = {
+  name: 'evm-redeemer-eoa',
+  keysVariable: EVM_REDEEMER_KEYS_ENV,
+  key: 'redeemer',
+};
+
+/**
  * The relayer EOA, and the only thing in this codebase that signs and
  * sends an EVM transaction of its own. (`EvmFacilitator` also broadcasts, but
  * only bytes a buyer signed — it holds no key and cannot author one.)
@@ -58,9 +84,16 @@ export const DEFAULT_RELAYER_LOW_WATER_MARK_WEI = 5_000_000_000_000_000n; // 0.0
  * key costs the ETH float and nothing else lives there, beside the type it
  * justifies.
  *
+ * ## Two instances, two keys
+ *
+ * The class is instantiated twice: the RELAYER (`EVM_RELAYER_KEYS`, no on-chain
+ * role) and the REDEEMER (`EVM_REDEEMER_KEYS`, the address in
+ * `Config.params().redeemer`), each with its own {@link EvmSenderIdentity}.
+ * `EvmModule` refuses to boot when the two keys are the same on a chain.
+ *
  * ## The key, and what this class does to earn holding it
  *
- * `EVM_RELAYER_KEYS` is read once at boot and **deleted from `process.env`**,
+ * The key variable is read once at boot and **deleted from `process.env`**,
  * through the same `takeOnceFromEnv` the verifier keys go through. The scalars
  * are turned into viem accounts in the constructor and the source buffers are
  * blanked; there is no method that returns one, and there is no field on this
@@ -79,8 +112,9 @@ export const DEFAULT_RELAYER_LOW_WATER_MARK_WEI = 5_000_000_000_000_000n; // 0.0
  *   transaction rather than a second one, which drops a redemption while
  *   returning a hash;
  * - two concurrent sends both read the same pending count, sign the same nonce,
- *   and the second replaces the first in the mempool. The batch job and the gas
- *   grant both send, so this is a real interleaving and not a thought
+ *   and the second replaces the first in the mempool. On the relayer, relayed
+ *   requests, slash sends and the gas grant all send; on the redeemer, single
+ *   and batch redemptions do — a real interleaving either way, not a thought
  *   experiment.
  *
  * The queue is per chain because nonces are per chain per account; one global
@@ -96,7 +130,7 @@ export const DEFAULT_RELAYER_LOW_WATER_MARK_WEI = 5_000_000_000_000_000n; // 0.0
  */
 @Injectable()
 export class EvmRelayer implements EvmRelayerPort {
-  readonly name = 'evm-relayer-eoa';
+  readonly name: string;
 
   /** `chainId` → the account. A `#private` field: not an own property. */
   readonly #accounts: ReadonlyMap<ChainId, PrivateKeyAccount>;
@@ -110,7 +144,9 @@ export class EvmRelayer implements EvmRelayerPort {
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     private readonly lowWaterMarkWei: bigint = DEFAULT_RELAYER_LOW_WATER_MARK_WEI,
     private readonly timing: EvmRelayerTiming = DEFAULT_EVM_RELAYER_TIMING,
+    private readonly identity: EvmSenderIdentity = EVM_RELAYER_IDENTITY,
   ) {
+    this.name = identity.name;
     this.#accounts = new Map(
       sources.map((source) => [source.chainId, privateKeyToAccount(source.secretKey)] as const),
     );
@@ -272,14 +308,15 @@ export class EvmRelayer implements EvmRelayerPort {
     await this.alerts.emit({
       severity: AlertSeverity.WARN,
       name: 'evm_relayer_float_low',
-      summary: `The EVM relayer's ETH float on ${chainId} is below its low-water mark`,
+      summary: `The EVM ${this.identity.key}'s ETH float on ${chainId} is below its low-water mark`,
       details: {
         chainId,
+        key: this.identity.key,
         // Strings: a wei figure does not fit a double, and `Number(balance)`
         // would round the one number this alert exists to report.
         balanceWei: balance.toString(),
         lowWaterMarkWei: this.lowWaterMarkWei.toString(),
-        relayer: this.accountFor(chainId).address,
+        [this.identity.key]: this.accountFor(chainId).address,
       },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       // The chain id ALONE. `SuppressingAlertSink` keys on
@@ -287,8 +324,9 @@ export class EvmRelayer implements EvmRelayerPort {
       // name in twice — harmless on its own, but `EvmRelayerFloatMonitor` emits
       // the same alert name for the same condition on the same chain from its
       // 5-minute pass, and two spellings of the key are two suppression buckets
-      // for one incident. One condition, one bucket.
-      dedupeKey: chainId,
+      // for one incident. One condition, one bucket — per KEY: the redeemer's
+      // float is a second condition with its own bucket (`floatDedupeKey`).
+      dedupeKey: floatDedupeKey(chainId, this.identity.key),
     });
   }
 
@@ -315,8 +353,8 @@ export class EvmRelayer implements EvmRelayerPort {
     const account = this.#accounts.get(chainId);
     if (!account) {
       throw ChainErrors.programNotConfigured({
-        what: `a relayer key for ${chainId}`,
-        variable: EVM_RELAYER_KEYS_ENV,
+        what: `a ${this.identity.key} key for ${chainId}`,
+        variable: this.identity.keysVariable,
       });
     }
     return account;

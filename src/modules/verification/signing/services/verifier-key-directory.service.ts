@@ -199,7 +199,7 @@ export class VerifierKeyDirectory {
    * choice. A directory row naming an EVM chain whose `keyId` the ed25519
    * backend happens to hold produces a 64-byte signature that `ecrecover`
    * does not read as malformed — it reads it as a well-formed signature
-   * belonging to a stranger, answers `SignerIsNotVerifier`, and sends the
+   * belonging to a stranger, answers `VerifierNotRegistered`, and sends the
    * investigation to the registry rather than to the misrouted key. The curve
    * is intrinsic to the handle, so this cannot be defeated by configuration.
    *

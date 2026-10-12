@@ -7,6 +7,7 @@ import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import {
   ESCROW_SEQ_GAP_CACHE_KEY,
   ESCROW_SEQ_GAP_CACHE_TTL_MS,
+  VOUCHER_MAX_SEQ_GAP,
 } from '../constants/escrow-seq.constants';
 import { PaymentErrors } from '../errors/payment.errors';
 
@@ -64,6 +65,12 @@ export class EscrowSeqService {
    * record, or it was restored from a backup — and a number at or below the
    * chain's is refused only AFTER the call it paid for was served. The raise is
    * monotonic (`bumpNextSeqTo`), so a stale read can never rewind the counter.
+   *
+   * With `chainSeqHigh` known, a seq more than {@link VOUCHER_MAX_SEQ_GAP} above
+   * it is refused (`voucherSeqGapTooLarge`): `X402Escrow` would refuse it at
+   * redemption. Checked against the counter BEFORE allocating, so a refusal
+   * does not push `next_seq` further ahead, and again on the allocated seq,
+   * which covers a concurrent allocation between the two reads.
    */
   async allocate(
     organizationId: string,
@@ -80,9 +87,17 @@ export class EscrowSeqService {
       }
     }
 
+    if (chainSeqHigh !== null) {
+      const next = await this.escrows.peekNextSeq(organizationId, account);
+      if (next !== null) assertWithinSeqGap(next, chainSeqHigh, account);
+    }
+
     const allocated = await this.escrows.allocateSeq(organizationId, account);
     if (!allocated) {
       throw PaymentErrors.escrowNotOpen({ account });
+    }
+    if (chainSeqHigh !== null) {
+      assertWithinSeqGap(BigInt(allocated.seq), chainSeqHigh, account);
     }
 
     return {
@@ -151,6 +166,21 @@ export class EscrowSeqService {
   /** Drops the cached minimum, so the next read recomputes it. */
   async invalidateGap(account: AccountId): Promise<void> {
     await this.cache.del(ESCROW_SEQ_GAP_CACHE_KEY(account)).catch(() => undefined);
+  }
+}
+
+/**
+ * `seq <= seqHigh + MAX_SEQ_GAP`, the chain's own rule (`VoucherSeqGapTooLarge`
+ * otherwise). Shared by issue and admission, so the two cannot disagree.
+ */
+export function assertWithinSeqGap(seq: bigint, seqHigh: bigint, account: AccountId): void {
+  if (seq - seqHigh > BigInt(VOUCHER_MAX_SEQ_GAP)) {
+    throw PaymentErrors.voucherSeqGapTooLarge({
+      account,
+      seq: seq.toString(),
+      seqHigh: seqHigh.toString(),
+      maxGap: VOUCHER_MAX_SEQ_GAP,
+    });
   }
 }
 
