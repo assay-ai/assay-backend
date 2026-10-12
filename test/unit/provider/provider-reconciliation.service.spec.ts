@@ -31,6 +31,7 @@ interface GroupRow {
   platformFee: string;
   awaitingRedemption?: boolean;
   platformAbsorbed?: boolean;
+  holdCommitted?: boolean;
 }
 
 interface BatchRow {
@@ -299,6 +300,19 @@ describe('ProviderReconciliationService — rail B awaiting redemption', () => {
     expect(result.gross).toEqual({ amount: '1000', asset: USDC, decimals: 6 });
     expect(result.net).toEqual({ amount: '900', asset: USDC, decimals: 6 });
     expect(result.callCount).toBe(4);
+  });
+
+  it('a settled group with no committed hold is PENDING and adds no money (BUG-R2-V3-03)', async () => {
+    const { service } = build([
+      group({ calls: '19460', holdCommitted: false }),
+      group({ calls: '27', credited: '6300', providerAmount: '5040', platformFee: '1260' }),
+    ]);
+
+    const result = await service.getReconciliation(PROVIDER, WINDOW);
+
+    expect(classOf(result.classBreakdown, CallReconciliationClass.PENDING).calls).toBe(19460);
+    expect(classOf(result.classBreakdown, CallReconciliationClass.PAID_CREDITED).calls).toBe(27);
+    expect(result.net).toEqual({ amount: '5040', asset: USDC, decimals: 6 });
   });
 
   it('a platform-absorbed group is its own class: credited to the provider, no fee taken', async () => {

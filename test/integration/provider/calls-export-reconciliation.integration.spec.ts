@@ -379,4 +379,34 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
     expect(total(8)).toBe(earnings.totals.earned?.amount);
     expect(earnings.totals.absorbed?.amount).toBe(absorbed.providerAmount.amount);
   });
+
+  it('a settled call nobody was credited for is PENDING, not PAID_CREDITED', async () => {
+    const PROVIDER_ID = context.id('uncredited:provider');
+    // SETTLED with no hold at all — the shape a bulk seed writes, and what a
+    // failed commit leaves behind. The earnings report credits nothing for it.
+    const intent = await context.createIntent('uncredited-1', {
+      providerId: PROVIDER_ID,
+      providerAccount: context.account('uncredited-provider'),
+    });
+    await context.dataSource.query(`UPDATE payment_intents SET status = 'SETTLED' WHERE id = $1`, [
+      intent.id,
+    ]);
+
+    const from = new Date(intent.createdAt.getTime() - 1_000).toISOString();
+    const to = new Date(intent.createdAt.getTime() + 1_000).toISOString();
+    const result = await exportService.prepare(PROVIDER_ID, { from, to });
+    const rows: Array<ReadonlyArray<string | number | null>> = [];
+    for await (const row of result.rows) rows.push(row);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0][5]).toBe(CallReconciliationClass.PENDING);
+    expect(rows[0][6]).toBe('settled, no credit recorded');
+
+    const earnings = await earningsService.getEarnings(PROVIDER_ID, {
+      from,
+      to,
+      groupBy: ProviderEarningsGroupBy.DAY,
+    });
+    expect(earnings.totals.earned?.amount ?? '0').toBe('0');
+  });
 });

@@ -62,6 +62,11 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
       expected: CallReconciliationClass.PAID_AWAITING_REDEMPTION,
     },
     {
+      name: 'PAID + SETTLED with no committed hold → PENDING, never PAID_CREDITED',
+      input: { callClass: 'PAID', status: 'SETTLED', credited: false },
+      expected: CallReconciliationClass.PENDING,
+    },
+    {
       name: 'an open hold on a VERIFYING intent is still PENDING',
       input: { callClass: 'PAID', status: 'VERIFYING', awaitingRedemption: true },
       expected: CallReconciliationClass.PENDING,

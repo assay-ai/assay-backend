@@ -42,6 +42,8 @@ interface ReconciliationGroupRow {
   readonly awaitingRedemption: boolean | string;
   /** Credited from platform funds — same driver caveat. */
   readonly platformAbsorbed: boolean | string;
+  /** `CREDITED_SQL`: the hold was committed — same driver caveat. */
+  readonly holdCommitted: boolean | string;
   readonly calls: string;
   /** `Σ price_amount` over this group's `SETTLED` rows. */
   readonly credited: string;
@@ -201,6 +203,7 @@ export class ProviderReconciliationService {
           classification: row.classification as ResponseClassValue,
           awaitingRedemption,
           platformAbsorbed: row.platformAbsorbed === true || row.platformAbsorbed === 'true',
+          credited: !(row.holdCommitted === false || row.holdCommitted === 'false'),
         });
         // `CALL_RECONCILIATION_CLASSES` pre-seeds every member above, so this
         // lookup cannot miss for any value `classifyForReconciliation` can
@@ -296,6 +299,7 @@ export class ProviderReconciliationService {
       .addSelect('intent.decimals', 'decimals')
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
       .addSelect(PLATFORM_ABSORBED_SQL, 'platformAbsorbed')
+      .addSelect(CREDITED_SQL, 'holdCommitted')
       .addSelect('COUNT(*)', 'calls')
       // Money only for committed holds (`CREDITED_SQL`), the same rule as
       // `ProviderEarningsService`, so gross / take / net match `PROVIDER_CREDIT`.
@@ -332,6 +336,7 @@ export class ProviderReconciliationService {
       .addGroupBy('intent.decimals')
       .addGroupBy(AWAITING_REDEMPTION_SQL)
       .addGroupBy(PLATFORM_ABSORBED_SQL)
+      .addGroupBy(CREDITED_SQL)
       .getRawMany<ReconciliationGroupRow>();
   }
 
