@@ -5,14 +5,14 @@ import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 
 import { GetNextSeqResponseDto } from '../dto/get-next-seq.dto';
-import { EscrowSeqService } from '../services/escrow-seq.service';
+import { NextSeqService } from '../services/next-seq.service';
 
 @ApiTags('Escrow')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
 @Controller('escrow')
 export class EscrowController {
-  constructor(private readonly seqs: EscrowSeqService) {}
+  constructor(private readonly nextSeqs: NextSeqService) {}
 
   /**
    * `GET /escrow/next-seq`.
@@ -38,6 +38,13 @@ export class EscrowController {
    * `payment_intents` row, and the chain admits a voucher on `seq > seq_high`
    * alone, so gaps are free and unbounded. `@HttpCacheTTL` is deliberately
    * absent; caching this would hand two calls the same number.
+   *
+   * **Throttled, and given the chain's `seqHigh` (review S2-2).** Unbounded
+   * calls could push the counter more than `MAX_SEQ_GAP` past the chain, where
+   * `X402Escrow` refuses every voucher. So each credential gets
+   * `NEXT_SEQ_RATE_LIMITS` (a sliding window in Redis that fails closed;
+   * see `NextSeqService`), and the allocation reads the escrow like the MCP path does, which
+   * applies the gap cap and rewinds a counter that is already past it.
    */
   @Get('next-seq')
   @ApiOperation({ summary: 'Issue the next voucher sequence number for this account' })
@@ -47,8 +54,14 @@ export class EscrowController {
     type: GetNextSeqResponseDto,
   })
   @ApiResponse({ status: 409, description: 'No escrow is open for this account' })
+  @ApiResponse({ status: 429, description: 'Too many sequence numbers requested' })
   async nextSeq(@CurrentSession() session: McpSession): Promise<GetNextSeqResponseDto> {
-    const next = await this.seqs.allocate(session.organizationId, session.agentAccount);
+    const next = await this.nextSeqs.issue(
+      session.organizationId,
+      session.agentAccount,
+      session.chainId,
+      session.credentialId,
+    );
 
     return {
       seq: next.seq,

@@ -296,6 +296,13 @@ export interface OpenVoucherTotals {
    * {@link PaymentIntentRepository.holdVoucherAdmission}.
    */
   readonly pausedFor?: number | null;
+  /**
+   * The payer's `buyer_escrows.next_seq`, read under the admission lock, or
+   * `null` with no escrow row. A voucher seq at or above it is not issued (any
+   * more): `BuyerEscrowRepository.rewindNextSeq` lowered the counter after the
+   * up-front `wasIssued` read, and the seq may be handed out again (S2-2).
+   */
+  readonly nextSeq?: bigint | null;
 }
 
 /** What {@link PaymentIntentRepository.holdVoucherAdmission} pauses, and for how long. */
@@ -707,10 +714,15 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
           earliest(scope.escrowSince, scope.delegateSince ?? scope.escrowSince),
         ],
       )) as Array<{ paused_for: number }>;
+      const [escrowRow] = (await manager.query(
+        `SELECT "next_seq"::text AS "next_seq" FROM "buyer_escrows" WHERE "account_id" = $1`,
+        [scope.payer],
+      )) as Array<{ next_seq: string }>;
       admit({
         escrow: BigInt(totals?.escrow ?? '0'),
         delegate: scope.delegate === null ? 0n : BigInt(totals?.delegate ?? '0'),
         pausedFor: pause ? Number(pause.paused_for) : null,
+        nextSeq: escrowRow ? BigInt(escrowRow.next_seq) : null,
       });
       await manager.insert(PaymentIntentEntity, row);
     });

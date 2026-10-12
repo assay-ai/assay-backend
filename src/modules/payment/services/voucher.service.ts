@@ -708,6 +708,18 @@ export class VoucherService {
           // velocity, so an agent paces itself the same way for both.
           throw PaymentErrors.voucherAdmissionPaused({ retryAfter: open.pausedFor });
         }
+        // Re-checked under the payer's lock: a seq rewind (S2-2) since the
+        // up-front `wasIssued` read means this seq is no longer issued.
+        if (
+          open.nextSeq !== undefined &&
+          open.nextSeq !== null &&
+          BigInt(voucher.seq) >= open.nextSeq
+        ) {
+          throw PaymentErrors.voucherSeqMismatch({
+            account: input.agentAccount,
+            actual: voucher.seq,
+          });
+        }
         if (escrow !== null) {
           const used = escrowCarried + open.escrow;
           if (used + amount > escrow.maxPerWindow) {
