@@ -1,5 +1,6 @@
 import { DataSource, EntityManager } from 'typeorm';
 
+import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
@@ -91,6 +92,7 @@ export function buildBindingEditorHarness(
 ): BindingEditorHarness {
   const tool = buildTool();
   const rows: ToolBindingEntity[] = [];
+  const versions: BindingVersionEntity[] = [];
 
   const manager = {
     save: jest.fn(async (entity: unknown, value: unknown) => {
@@ -103,7 +105,25 @@ export function buildBindingEditorHarness(
         if (!row.id) row.id = `binding-${rows.length + 1}`;
         if (!rows.includes(row)) rows.push(row);
       }
+      if ((entity as { name?: string })?.name === BindingVersionEntity.name) {
+        versions.push(value as BindingVersionEntity);
+      }
       return value;
+    }),
+    findOne: jest.fn(
+      async (
+        _entity: unknown,
+        { where }: { where: { bindingId: string; mappingVersion: number } },
+      ) =>
+        versions.find(
+          (version) =>
+            version.bindingId === where.bindingId &&
+            version.mappingVersion === where.mappingVersion,
+        ) ?? null,
+    ),
+    maximum: jest.fn(async (_entity: unknown, _column: string, where: { bindingId: string }) => {
+      const stored = versions.filter((version) => version.bindingId === where.bindingId);
+      return stored.length === 0 ? null : Math.max(...stored.map((v) => v.mappingVersion));
     }),
   } as unknown as EntityManager;
 

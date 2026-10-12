@@ -136,7 +136,10 @@ function row(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity {
   } as ToolBindingEntity;
 }
 
-function build(stored: ToolBindingEntity | null = null) {
+function build(
+  stored: ToolBindingEntity | null = null,
+  versions: readonly Partial<BindingVersionEntity>[] = [],
+) {
   const written: Array<{ entity: string; row: unknown }> = [];
 
   const manager = {
@@ -144,6 +147,16 @@ function build(stored: ToolBindingEntity | null = null) {
       written.push({ entity: (entity as { name: string }).name, row: value });
       return value;
     }),
+    // The stored `binding_versions` rows: `findOne` by revision, `maximum` over them.
+    findOne: jest.fn(
+      async (_entity: unknown, { where }: { where: { mappingVersion: number } }) =>
+        versions.find((version) => version.mappingVersion === where.mappingVersion) ?? null,
+    ),
+    maximum: jest.fn(async () =>
+      versions.length === 0
+        ? (stored?.mappingVersion ?? null)
+        : Math.max(...versions.map((version) => version.mappingVersion as number)),
+    ),
   };
 
   const dataSource = {
@@ -499,6 +512,69 @@ describe('BindingEditorService.update — which edits raise the revision', () =>
     });
 
     expect(saved.version).toBe(3);
+  });
+
+  describe('an edit that lands back on the published terms', () => {
+    /** Published at revision 1 (price 50000); the row is a draft at revision 2 (price 60000). */
+    const published: Partial<BindingVersionEntity> = {
+      mappingVersion: 1,
+      endpoint: row().endpoint,
+      // `jsonb` key order, deliberately not the row's own.
+      requestMapping: { path: '/search', body: { q: { $path: '$.query' } }, method: 'POST' },
+      responseMapping: row().responseMapping,
+      pricingMode: PricingMode.PAID,
+      priceAmount: '50000',
+      assetId: STAKE_ASSET,
+      timeoutMs: 8000,
+    } as Partial<BindingVersionEntity>;
+    const draft = () => row({ mappingVersion: 2, publishedVersion: 1, priceAmount: '60000' });
+    const versions = [published, { ...published, mappingVersion: 2, priceAmount: '60000' }];
+
+    it('returns to the published revision instead of minting a new one', async () => {
+      const { service, written } = build(draft(), versions);
+
+      const saved = await service.update(PROVIDER, SUBJECT, row().id, { priceAmount: '50000' });
+
+      expect(saved.version).toBe(1);
+      expect(saved.publishedVersion).toBe(1);
+      expect(saved.hasUnpublishedChanges).toBe(false);
+      // No snapshot: revision 1 already records these terms.
+      expect(written.map((entry) => entry.entity)).toEqual(['ToolBindingEntity']);
+    });
+
+    it('still drafts a new revision when the terms differ from the published ones', async () => {
+      const { service, written } = build(draft(), versions);
+
+      const saved = await service.update(PROVIDER, SUBJECT, row().id, { priceAmount: '70000' });
+
+      expect(saved.version).toBe(3);
+      expect(saved.hasUnpublishedChanges).toBe(true);
+      expect(written.map((entry) => entry.entity)).toEqual([
+        'ToolBindingEntity',
+        'BindingVersionEntity',
+      ]);
+    });
+
+    it('numbers the next edit past the abandoned draft, whose revision is still stored', async () => {
+      // Back at revision 1 after a return, with revision 2 already in `binding_versions`.
+      const { service } = build(row({ mappingVersion: 1, publishedVersion: 1 }), versions);
+
+      const saved = await service.update(PROVIDER, SUBJECT, row().id, { priceAmount: '70000' });
+
+      expect(saved.version).toBe(3);
+    });
+
+    it('does not return when the same edit also moves the settlement chains', async () => {
+      const { service } = build(draft(), versions);
+
+      const saved = await service.update(PROVIDER, SUBJECT, row().id, {
+        priceAmount: '50000',
+        settlementChains: [PAYOUT_CHAIN, CHAIN_IDS.SOLANA_MAINNET],
+      });
+
+      expect(saved.version).toBe(3);
+      expect(saved.hasUnpublishedChanges).toBe(true);
+    });
   });
 
   it('refuses to edit a SUSPENDED binding — that state is the platform’s, not the provider’s', async () => {
