@@ -1,3 +1,5 @@
+import { randomUUID } from 'crypto';
+
 import { pad, toHex } from 'viem';
 
 import { EvmVaultClient, EvmVaultService } from '@modules/chains/evm/evm-vault.service';
@@ -215,6 +217,61 @@ describe('ReconciliationService on eip155:46630', () => {
     // BEFORE it is written.
     expect(await context.runs.findLatest(USDG)).not.toBeNull();
     await expect(context.reconciliation.isFrozen(USDG)).resolves.toBe(true);
+  });
+
+  it('does not count what a redemption already paid out of the escrow as owed by it', async () => {
+    // A buyer deposits 20 USDG. Two 0.10 calls are served on rail B: one
+    // voucher is redeemed (the escrow pays 0.09 to the provider and 0.01 to the
+    // treasury, so it holds 19.90); the other can never be redeemed, the buyer
+    // keeps the money and the platform owes the provider 0.09.
+    const PROVIDER = toAccountId(EVM_CHAIN, '0xfB18f483E985F21c58fD97F69DE225aECA5Fc1c4');
+    const providerOrg = randomUUID();
+    const usdg = (atomic: bigint) => MoneyUtil.of(atomic, USDG, USDG_DECIMALS);
+    // No `payment_intents` in this harness's schema: the ledger keys on the id only.
+    const intent = async (): Promise<string> => randomUUID();
+
+    await fundUsdg(BUYER, 20_000_000n);
+    const hold = async (intentId: string) =>
+      context.ledger.createHold({
+        organizationId: context.organizationId,
+        accountId: BUYER as unknown as LedgerAccountId,
+        money: usdg(100_000n),
+        intentId,
+      });
+
+    const redeemed = await intent();
+    const redeemedHold = await hold(redeemed);
+    await context.ledger.commitHoldAndCredit(context.organizationId, redeemedHold.id, {
+      providerOrganizationId: providerOrg,
+      providerAccountId: PROVIDER as unknown as LedgerAccountId,
+      providerAmount: usdg(90_000n),
+      platformFee: usdg(10_000n),
+      intentId: redeemed,
+      chainTxRef: `0x${'ab'.repeat(32)}`,
+    });
+
+    const absorbed = await intent();
+    const absorbedHold = await hold(absorbed);
+    await context.ledger.appendNow({
+      organizationId: providerOrg,
+      accountId: PROVIDER as unknown as LedgerAccountId,
+      entryType: LedgerEntryType.PROVIDER_CREDIT,
+      money: usdg(90_000n),
+      intentId: absorbed,
+      chainTxRef: 'platform_absorbed:DelegateIsRevoked',
+    });
+    await context.ledger.releaseHold(context.organizationId, absorbedHold.id);
+
+    evmRpc.escrowBalance = 19_900_000n;
+    const report = await context.reconciliation.reconcile(USDG);
+
+    expect(report.agentLiabilitiesAtomic).toBe(19_900_000n);
+    // Only the absorbed credit: the redeemed one is in the provider's wallet.
+    expect(report.providerPayableAtomic).toBe(90_000n);
+    expect(report.platformFeesAtomic).toBe(0n);
+    expect(report.differenceAtomic).toBe(-90_000n);
+    // The snapshot still agrees with the journal's own fold.
+    expect(report.findings.map((f) => f.code)).toEqual([ReconciliationFindingCode.RESERVES_BREACH]);
   });
 
   it('freezes withdrawals on 46630 and LEAVES SOLANA ALONE', async () => {
