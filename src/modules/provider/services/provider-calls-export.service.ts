@@ -183,7 +183,10 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     classification: row.classification as 'DATA_RESULT' | 'SYSTEM_ERROR' | 'REQUEST_ERROR' | null,
     awaitingRedemption: row.awaitingRedemption,
     platformAbsorbed: row.absorbedReason !== null,
+    credited: row.credited,
   });
+  // SETTLED but classified PENDING: no credit was written for it.
+  const uncredited = row.status === 'SETTLED' && classification === CallReconciliationClass.PENDING;
   // Paid from platform funds: nothing was redeemed, so no fee was taken, and
   // the reason is the program error the redemption came back with.
   const absorbed = classification === CallReconciliationClass.PLATFORM_ABSORBED;
@@ -195,7 +198,11 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     row.toolId,
     row.status,
     classification,
-    absorbed ? row.absorbedReason : row.statusReason,
+    absorbed
+      ? row.absorbedReason
+      : uncredited
+        ? (row.statusReason ?? 'settled, no credit recorded')
+        : row.statusReason,
     row.verificationVerdict,
     row.providerAmount,
     absorbed ? '0' : row.platformFee,

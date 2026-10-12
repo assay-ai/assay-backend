@@ -116,6 +116,13 @@ export interface CallReconciliationCandidate {
   /** Credited from platform funds (`platform_absorbed:` credit). Optional; absent means not. */
   readonly platformAbsorbed?: boolean;
   /**
+   * Whether the `SETTLED` intent's hold was committed, which is when
+   * `PROVIDER_CREDIT` is written (`CREDITED_SQL`). Optional; absent means
+   * credited. `false` is a settled row nobody was credited for — no hold, or a
+   * commit that failed after the status moved.
+   */
+  readonly credited?: boolean;
+  /**
    * Whether this call was excluded from its SLA window (griefing
    * attribution). Optional; absent means not excluded. Kept as a real
    * parameter so that adding an exclusion source is a caller change, not a
@@ -150,6 +157,10 @@ export function classifyForReconciliation(
   switch (candidate.status) {
     case 'SETTLED':
       if (candidate.awaitingRedemption) return CallReconciliationClass.PAID_AWAITING_REDEMPTION;
+      // Settled with no credit behind it: the money side is unresolved, and
+      // calling it PAID_CREDITED would claim a credit the ledger does not hold
+      // (BUG-R2-V3-03). The earnings report counts it as neither earned nor withheld.
+      if (candidate.credited === false) return CallReconciliationClass.PENDING;
       return candidate.platformAbsorbed
         ? CallReconciliationClass.PLATFORM_ABSORBED
         : CallReconciliationClass.PAID_CREDITED;
