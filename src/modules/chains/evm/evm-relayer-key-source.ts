@@ -155,3 +155,15 @@ export function assertDistinctRedeemerKeys(
     }
   }
 }
+
+/**
+ * Per chain, the ADDRESS each key derives to. What `EvmVaultService` compares
+ * with the live `params().redeemer`; the key itself goes no further.
+ */
+export function keyAddressesByChain(
+  sources: readonly EvmRelayerKeySource[],
+): ReadonlyMap<ChainId, `0x${string}`> {
+  return new Map(
+    sources.map((source) => [source.chainId, privateKeyToAccount(source.secretKey).address]),
+  );
+}

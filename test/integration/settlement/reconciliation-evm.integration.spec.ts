@@ -86,6 +86,8 @@ function evmClient(): EvmVaultClient {
           if (selector === SELECTOR.owner) return pad(OWNER, { size: 32 });
           if (selector === SELECTOR.ASSET) return pad(DEPLOYMENT.asset, { size: 32 });
           if (selector === SELECTOR.balanceOf) return toHex(evmRpc.escrowBalance, { size: 32 });
+          // `pendingOwner()`: no transfer proposed (assertVaultControl warns on one).
+          if (selector === '0xe30c3978') return pad('0x', { size: 32 });
         }
         throw new Error(`unexpected JSON-RPC ${method}`);
       };

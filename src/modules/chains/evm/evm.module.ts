@@ -34,6 +34,7 @@ import {
   EVM_RELAYER_KEY_SOURCES,
   EvmRelayerKeySource,
   assertDistinctRedeemerKeys,
+  keyAddressesByChain,
   takeEvmRelayerKeys,
 } from './evm-relayer-key-source';
 import { DEFAULT_EVM_PARAMS_TTL_MS, EvmStakeReader } from './evm-stake-reader.service';
@@ -374,9 +375,22 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       // eip155 chain is enabled: constructing it dials nothing, and a
       // `useFactory` that returned `null` on a Solana-only deployment would put
       // the enabled-chains decision in two places.
+      //
+      // It also gets the ADDRESSES of this process's redeemer and relayer keys,
+      // so `assertVaultControl` can refuse a key split the chain does not
+      // honour (`params().redeemer` must be the redeemer key, never the relayer).
       provide: EvmVaultService,
-      useFactory: (clients: never, deployments: never) => new EvmVaultService(clients, deployments),
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS],
+      useFactory: (
+        clients: never,
+        deployments: never,
+        relayer: readonly EvmRelayerKeySource[],
+        redeemer: readonly EvmRelayerKeySource[],
+      ) =>
+        new EvmVaultService(clients, deployments, {
+          redeemer: keyAddressesByChain(redeemer),
+          relayer: keyAddressesByChain(relayer),
+        }),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_RELAYER_KEY_SOURCES, EVM_REDEEMER_KEY_SOURCES],
     },
 
     {

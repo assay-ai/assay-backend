@@ -75,7 +75,13 @@ no-ops when no eip155 chain is enabled:
   `Config.params().redeemer` and sends only `redeemVoucher[Batch]`; the **relayer** key has no
   on-chain role and sends relayed buyer requests, the withdraw gas grant and slash calls. They must be
   different keys: the boot refuses a chain where they are equal. Neither is required at boot; a
-  process that has to send without one fails at its first send.
+  process that has to send without one fails at its first send. The vault-control check
+  (`assertVaultControl`, run first by every reconciler pass) also reads the live
+  `params().redeemer` and fails closed (`CHAIN_VAULT_CONTROL_UNVERIFIED`) unless the
+  `EVM_REDEEMER_KEYS` address equals it and the `EVM_RELAYER_KEYS` address does not. When rotating,
+  either `updateConfig` the redeemer to the new redeemer key's address, or move the key that is
+  already `params().redeemer` into `EVM_REDEEMER_KEYS` and give the relayer a new key (assay-evm
+  runbook §7.4). The same check logs a WARN while `pendingOwner()` is non-zero.
 
 ## What `ENABLED_CHAINS` also decides, and is easy to forget
 
