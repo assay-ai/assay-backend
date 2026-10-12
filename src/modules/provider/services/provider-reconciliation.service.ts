@@ -6,6 +6,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   AWAITING_REDEMPTION_SQL,
   CREDITED_SQL,
+  PLATFORM_ABSORBED_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderPayoutRepository } from '@database/postgres/repositories/provider-payout.repository';
@@ -39,6 +40,8 @@ interface ReconciliationGroupRow {
   readonly decimals: string;
   /** Rail B, hold still open — Postgres returns a boolean, some drivers a string. */
   readonly awaitingRedemption: boolean | string;
+  /** Credited from platform funds — same driver caveat. */
+  readonly platformAbsorbed: boolean | string;
   readonly calls: string;
   /** `Σ price_amount` over this group's `SETTLED` rows. */
   readonly credited: string;
@@ -80,6 +83,8 @@ const CLASS_NOTES: Record<CallReconciliationClass, string> = {
   [CallReconciliationClass.PAID_CREDITED]: 'settled to you',
   [CallReconciliationClass.PAID_AWAITING_REDEMPTION]:
     'passed — credited once the voucher is redeemed on chain',
+  [CallReconciliationClass.PLATFORM_ABSORBED]:
+    'voucher could not be redeemed — owed to you by the platform, no fee taken',
   [CallReconciliationClass.PAID_UNCREDITED]: 'verification found FAIL — not credited, see verdicts',
   [CallReconciliationClass.FREE]: 'relay path, no payment machinery',
   [CallReconciliationClass.TEST]: 'your own dry runs — charges nobody',
@@ -195,6 +200,7 @@ export class ProviderReconciliationService {
           status: row.status as IntentStatusValue,
           classification: row.classification as ResponseClassValue,
           awaitingRedemption,
+          platformAbsorbed: row.platformAbsorbed === true || row.platformAbsorbed === 'true',
         });
         // `CALL_RECONCILIATION_CLASSES` pre-seeds every member above, so this
         // lookup cannot miss for any value `classifyForReconciliation` can
@@ -216,7 +222,9 @@ export class ProviderReconciliationService {
         // `unexplained` whole rather than half-counted.
         const priceAmount = BigInt(row.credited);
         const providerAmount = BigInt(row.providerAmount);
-        const platformFee = BigInt(row.platformFee);
+        // An absorbed call took no fee: nothing was redeemed.
+        const platformFee =
+          cls === CallReconciliationClass.PLATFORM_ABSORBED ? 0n : BigInt(row.platformFee);
         bucket.calls += calls;
         bucket.credited += providerAmount;
 
@@ -287,6 +295,7 @@ export class ProviderReconciliationService {
       .addSelect('intent.assetId', 'asset')
       .addSelect('intent.decimals', 'decimals')
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
+      .addSelect(PLATFORM_ABSORBED_SQL, 'platformAbsorbed')
       .addSelect('COUNT(*)', 'calls')
       // Money only for committed holds (`CREDITED_SQL`), the same rule as
       // `ProviderEarningsService`, so gross / take / net match `PROVIDER_CREDIT`.
@@ -322,6 +331,7 @@ export class ProviderReconciliationService {
       .addGroupBy('intent.assetId')
       .addGroupBy('intent.decimals')
       .addGroupBy(AWAITING_REDEMPTION_SQL)
+      .addGroupBy(PLATFORM_ABSORBED_SQL)
       .getRawMany<ReconciliationGroupRow>();
   }
 

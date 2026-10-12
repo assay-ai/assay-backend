@@ -182,7 +182,11 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
       | 'EXPIRED',
     classification: row.classification as 'DATA_RESULT' | 'SYSTEM_ERROR' | 'REQUEST_ERROR' | null,
     awaitingRedemption: row.awaitingRedemption,
+    platformAbsorbed: row.absorbedReason !== null,
   });
+  // Paid from platform funds: nothing was redeemed, so no fee was taken, and
+  // the reason is the program error the redemption came back with.
+  const absorbed = classification === CallReconciliationClass.PLATFORM_ABSORBED;
 
   return [
     row.callId,
@@ -191,10 +195,10 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     row.toolId,
     row.status,
     classification,
-    row.statusReason,
+    absorbed ? row.absorbedReason : row.statusReason,
     row.verificationVerdict,
     row.providerAmount,
-    row.platformFee,
+    absorbed ? '0' : row.platformFee,
     row.priceAmount,
     row.asset,
     row.decimals,
