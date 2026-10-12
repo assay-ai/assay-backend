@@ -1,3 +1,5 @@
+import { randomUUID } from 'crypto';
+
 import { pad, toHex } from 'viem';
 
 import { EvmVaultClient, EvmVaultService } from '@modules/chains/evm/evm-vault.service';
@@ -30,6 +32,7 @@ const ESCROW_PROXY = '0x3333333333333333333333333333333333333333';
 const CONFIG_PROXY = '0x1111111111111111111111111111111111111111';
 const ESCROW_IMPLEMENTATION = '0x8888888888888888888888888888888888888888';
 const ADMIN = '0x9999999999999999999999999999999999999999';
+const OWNER = '0x7777777777777777777777777777777777777777';
 const OTHER_IMPLEMENTATION = '0x00000000000000000000000000000000DeaDBeef';
 
 const DEPLOYMENT: EvmDeployment = {
@@ -40,6 +43,7 @@ const DEPLOYMENT: EvmDeployment = {
   asset: '0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac',
   escrowImplementation: ESCROW_IMPLEMENTATION,
   admin: ADMIN,
+  owner: OWNER,
 };
 
 const BUYER = toAccountId(EVM_CHAIN, '0x5B38Da6a701c568545dCfcB03FcB875f56beddC4');
@@ -49,7 +53,12 @@ const SOLANA_VAULT: AccountId = toAccountId(
 );
 const BLOCK = 116_313_808n;
 
-const SELECTOR = { admin: '0xf851a440', ASSET: '0x4800d97f', balanceOf: '0x70a08231' } as const;
+const SELECTOR = {
+  admin: '0xf851a440',
+  owner: '0x8da5cb5b',
+  ASSET: '0x4800d97f',
+  balanceOf: '0x70a08231',
+} as const;
 
 /** The mutable chain a test sets up before it reconciles. */
 const evmRpc = {
@@ -76,8 +85,11 @@ function evmClient(): EvmVaultClient {
         if (method === 'eth_call') {
           const selector = (params?.[0] as { data: string }).data.slice(0, 10);
           if (selector === SELECTOR.admin) return pad(ADMIN, { size: 32 });
+          if (selector === SELECTOR.owner) return pad(OWNER, { size: 32 });
           if (selector === SELECTOR.ASSET) return pad(DEPLOYMENT.asset, { size: 32 });
           if (selector === SELECTOR.balanceOf) return toHex(evmRpc.escrowBalance, { size: 32 });
+          // `pendingOwner()`: no transfer proposed (assertVaultControl warns on one).
+          if (selector === '0xe30c3978') return pad('0x', { size: 32 });
         }
         throw new Error(`unexpected JSON-RPC ${method}`);
       };
@@ -205,6 +217,61 @@ describe('ReconciliationService on eip155:46630', () => {
     // BEFORE it is written.
     expect(await context.runs.findLatest(USDG)).not.toBeNull();
     await expect(context.reconciliation.isFrozen(USDG)).resolves.toBe(true);
+  });
+
+  it('does not count what a redemption already paid out of the escrow as owed by it', async () => {
+    // A buyer deposits 20 USDG. Two 0.10 calls are served on rail B: one
+    // voucher is redeemed (the escrow pays 0.09 to the provider and 0.01 to the
+    // treasury, so it holds 19.90); the other can never be redeemed, the buyer
+    // keeps the money and the platform owes the provider 0.09.
+    const PROVIDER = toAccountId(EVM_CHAIN, '0xfB18f483E985F21c58fD97F69DE225aECA5Fc1c4');
+    const providerOrg = randomUUID();
+    const usdg = (atomic: bigint) => MoneyUtil.of(atomic, USDG, USDG_DECIMALS);
+    // No `payment_intents` in this harness's schema: the ledger keys on the id only.
+    const intent = async (): Promise<string> => randomUUID();
+
+    await fundUsdg(BUYER, 20_000_000n);
+    const hold = async (intentId: string) =>
+      context.ledger.createHold({
+        organizationId: context.organizationId,
+        accountId: BUYER as unknown as LedgerAccountId,
+        money: usdg(100_000n),
+        intentId,
+      });
+
+    const redeemed = await intent();
+    const redeemedHold = await hold(redeemed);
+    await context.ledger.commitHoldAndCredit(context.organizationId, redeemedHold.id, {
+      providerOrganizationId: providerOrg,
+      providerAccountId: PROVIDER as unknown as LedgerAccountId,
+      providerAmount: usdg(90_000n),
+      platformFee: usdg(10_000n),
+      intentId: redeemed,
+      chainTxRef: `0x${'ab'.repeat(32)}`,
+    });
+
+    const absorbed = await intent();
+    const absorbedHold = await hold(absorbed);
+    await context.ledger.appendNow({
+      organizationId: providerOrg,
+      accountId: PROVIDER as unknown as LedgerAccountId,
+      entryType: LedgerEntryType.PROVIDER_CREDIT,
+      money: usdg(90_000n),
+      intentId: absorbed,
+      chainTxRef: 'platform_absorbed:DelegateIsRevoked',
+    });
+    await context.ledger.releaseHold(context.organizationId, absorbedHold.id);
+
+    evmRpc.escrowBalance = 19_900_000n;
+    const report = await context.reconciliation.reconcile(USDG);
+
+    expect(report.agentLiabilitiesAtomic).toBe(19_900_000n);
+    // Only the absorbed credit: the redeemed one is in the provider's wallet.
+    expect(report.providerPayableAtomic).toBe(90_000n);
+    expect(report.platformFeesAtomic).toBe(0n);
+    expect(report.differenceAtomic).toBe(-90_000n);
+    // The snapshot still agrees with the journal's own fold.
+    expect(report.findings.map((f) => f.code)).toEqual([ReconciliationFindingCode.RESERVES_BREACH]);
   });
 
   it('freezes withdrawals on 46630 and LEAVES SOLANA ALONE', async () => {

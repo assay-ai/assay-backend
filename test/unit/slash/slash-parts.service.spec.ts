@@ -239,11 +239,11 @@ describe('SlashPartsService.propose', () => {
     ]);
     executor.proposeFails.set(agent(2).split(':')[2], new Error('rpc timeout'));
 
-    await expect(service.propose(proposal, '0xprovider')).rejects.toThrow('rpc timeout');
+    await expect(service.propose(proposal, '0xprovider', T0)).rejects.toThrow('rpc timeout');
     expect(parts.rows.map((row) => row.chainStatus)).toEqual(['PENDING', 'NONE']);
 
     executor.proposeFails.clear();
-    await service.propose(proposal, '0xprovider');
+    await service.propose(proposal, '0xprovider', T0);
     expect(executor.batches).toEqual([
       { kind: 'propose', size: 2 },
       { kind: 'propose', size: 1 },

@@ -35,7 +35,7 @@ describe('VerifierKeyDirectory.resolveSignableKey', () => {
   it('refuses an ed25519 key for an eip155 chain, naming both curves', async () => {
     // The gate. A 64-byte ed25519 signature is not malformed to `ecrecover` —
     // it reads as a well-formed signature belonging to a stranger, the contract
-    // answers `SignerIsNotVerifier`, and the investigation starts at the
+    // answers `VerifierNotRegistered`, and the investigation starts at the
     // registry instead of at the misrouted key.
     //
     // The fixture violates EXACTLY one thing: the row says EVM, the handle is

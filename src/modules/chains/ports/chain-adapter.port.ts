@@ -1,3 +1,5 @@
+import { DelegateBindingChallenge, DelegateBindingTypedData } from './delegate-binding.types';
+import { VoucherAuthorityAnswer } from './voucher-authority.types';
 import { AccountId, AssetId, ChainId, ChainNamespace } from './caip.types';
 import { Money } from './money.types';
 import { PayoutProofChallenge, ProofTypedData } from './payout-proof.types';
@@ -120,6 +122,20 @@ export interface ChainAdapter {
   buildVoucherMessage(voucher: Voucher): Uint8Array;
   verifyVoucherSignature(voucher: Voucher, signature: string, signer: AccountId): boolean;
   /**
+   * Who authorised this voucher, by the CHAIN's full rule — the payer's key
+   * or a delegate the payer authorised on chain — read from chain state and
+   * failing closed. See `voucher-authority.types.ts`.
+   *
+   * Optional: a chain with no delegation (Solana) has only the payer's key, and
+   * {@link verifyVoucherSignature} already answers that. The payment domain
+   * asks this only after the payer's own key did not verify.
+   */
+  authorizeVoucherSigner?(
+    voucher: Voucher,
+    signature: string,
+    nowSeconds: number,
+  ): Promise<VoucherAuthorityAnswer>;
+  /**
    * `resource`'s hash exactly as this chain's voucher signs it, in the form
    * this chain's redeemer takes back.
    *
@@ -187,6 +203,17 @@ export interface ChainAdapter {
     signature: string,
     signer: AccountId,
   ): boolean;
+
+  // ── Delegate binding proof (agent payment delegation) ────────────────────
+
+  /**
+   * The challenge an agent signs WITH ITS DELEGATE KEY to bind that key to its
+   * credential, as an EIP-712 request. Optional: only a chain whose escrow has
+   * voucher delegation (eip155) has anything to bind.
+   */
+  delegateBindingTypedData?(challenge: DelegateBindingChallenge): DelegateBindingTypedData;
+  /** Did the challenge's own `delegate` sign it? */
+  verifyDelegateBindingSignature?(challenge: DelegateBindingChallenge, signature: string): boolean;
 
   // ── Vault ────────────────────────────────────────────────────────────────
 

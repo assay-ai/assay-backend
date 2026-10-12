@@ -11,10 +11,17 @@ import {
 } from '@shared/decorators/cache-header.decorator';
 import { isCredentialed } from '@shared/auth/session-request.key';
 
+const WRITE_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
 /**
- * Interceptor that adds Cache-Control headers with SWR support
- * Optimized for Cloudflare CDN caching
- * Only applies to GET requests with 2xx status codes
+ * Interceptor that adds Cache-Control headers.
+ *
+ * - GET with `@CacheHeader(...)`: the declared directives (SWR, CDN TTLs),
+ *   downgraded to `private` for a credentialed request.
+ * - GET without one: `private, no-cache` — always revalidated, never stale.
+ *   See `setRevalidateHeaders`.
+ * - POST/PUT/PATCH/DELETE and `@NoCacheHeader()`: `no-store`.
+ * - Errors: `no-store`.
  */
 @Injectable()
 export class CacheHeaderInterceptor implements NestInterceptor {
@@ -35,6 +42,8 @@ export class CacheHeaderInterceptor implements NestInterceptor {
     cdnStaleWhileRevalidate: number | undefined;
     cdnStaleIfError: number | undefined;
   } = {
+    // Base for routes that opt in with `@CacheHeader`; a route without the
+    // decorator never sees these (see `setRevalidateHeaders`).
     maxAge: 10, // Browser: 10s fresh
     staleWhileRevalidate: 3600, // Browser: 1 hour stale
     staleIfError: 3600, // Browser: 1 hour if error
@@ -64,19 +73,33 @@ export class CacheHeaderInterceptor implements NestInterceptor {
       return next.handle();
     }
 
+    // A write's response is never a cacheable representation of anything.
+    // Set before the handler so it holds for `@Res()` routes too, and so a
+    // handler that knows better can still override it.
+    if (WRITE_METHODS.has(request.method)) {
+      this.setNoCacheHeaders(response);
+      return next.handle();
+    }
+
     // Only apply to GET requests
     if (request.method !== 'GET') {
       return next.handle();
     }
 
-    // Get cache header options from decorator
+    // Get cache header options from decorator. `hasMetadata` so that a bare
+    // `@CacheHeader()` still counts as an opt-in to the defaults below.
+    const optedIn = Reflect.hasMetadata(CACHE_HEADER_KEY, handler);
     const options = this.reflector.get<CacheHeaderOptions>(CACHE_HEADER_KEY, handler);
 
     return next.handle().pipe(
       tap((data) => {
         // Only set cache headers for successful responses (2xx) and non-error data
         if (this.shouldSetCacheHeaders(response, data)) {
-          this.setCacheHeaders(response, options, isCredentialed(request));
+          if (optedIn) {
+            this.setCacheHeaders(response, options, isCredentialed(request));
+          } else {
+            this.setRevalidateHeaders(response);
+          }
         } else if (this.isErrorResponse(response, data)) {
           // Explicitly set no-cache for error responses
           this.setNoCacheHeaders(response);
@@ -92,6 +115,48 @@ export class CacheHeaderInterceptor implements NestInterceptor {
   }
 
   /**
+   * The default for a GET that declares no `@CacheHeader`: `private, no-cache`.
+   *
+   * ## Why browser caching is opt-in
+   *
+   * Undecorated GETs used to inherit `defaultOptions` below —
+   * `max-age=10, stale-while-revalidate=3600` — which, once downgraded to
+   * `private` for a credentialed request, still let the browser answer a
+   * refetch from its own cache: inside 10s with the stored body, and for the
+   * next hour with the stored body once more while it revalidated in the
+   * background. The refetch every console screen fires right after a write
+   * (save endpoint, prove stake authority, publish a binding, set escrow
+   * limits) therefore received the pre-write body, and the UI showed a write
+   * that had succeeded as one that had not. That happened on four screens
+   * before it was fixed here instead of on each one (BUG-SYS-01).
+   *
+   * `no-cache` is not "do not store": the browser keeps the body and its
+   * `ETag` (Express sets a weak one on every JSON response) and revalidates
+   * with `If-None-Match` on every use, so an unchanged read costs a `304`, not
+   * a body — and a changed one is never painted stale. `private` and
+   * `CDN-Cache-Control: no-store` keep every shared cache out regardless of
+   * whether the request carried `Authorization`; a route that genuinely wants
+   * freshness or a CDN copy declares it with `@CacheHeader`, one route at a
+   * time — the same rule `HttpCacheInterceptor` applies to its server cache.
+   */
+  private setRevalidateHeaders(response: Response): void {
+    const browserCacheEnabled = this.configService.get<boolean>(
+      'app.api.browserCacheEnabled',
+      true,
+    );
+    response.setHeader(
+      'Cache-Control',
+      browserCacheEnabled ? 'private, no-cache' : 'no-store, no-cache, must-revalidate, max-age=0',
+    );
+    response.setHeader('CDN-Cache-Control', 'no-store');
+    if (!response.getHeader('Vary')) {
+      response.setHeader('Vary', 'Accept-Encoding, Authorization');
+    }
+  }
+
+  /**
+   * Headers for a route that opted in with `@CacheHeader`.
+   *
    * @param credentialed whether the request carried an `Authorization` header.
    *   A credentialed response is downgraded to `private` and kept out of CDNs
    *   — see the block below.
@@ -106,9 +171,9 @@ export class CacheHeaderInterceptor implements NestInterceptor {
     /**
      * A response to a credentialed request is `private`, always.
      *
-     * The default here is `public`, which is right for the catalogue and the
-     * proof-of-reserves endpoint and wrong for everything behind
-     * `SessionAuthGuard`. RFC 9111 §3.5 says a shared cache must *not* store a
+     * The default visibility of an opted-in route is `public`, which is right
+     * for the chain list and the proof-of-reserves endpoint and wrong for
+     * anything behind `SessionAuthGuard`. RFC 9111 §3.5 says a shared cache must *not* store a
      * response to a request carrying `Authorization` — unless the response
      * explicitly opts back in, and `public` is exactly that opt-in. So the
      * default was disabling the one protection that applies automatically to

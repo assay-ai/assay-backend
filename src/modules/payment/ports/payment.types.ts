@@ -200,6 +200,10 @@ export interface PaymentIntent {
   readonly voucherSignature: string | null;
   readonly voucherResourceHash: string | null;
   readonly voucherIssuedAt: number | null;
+  /** Rail B on eip155: the delegate that signed, when it was not the payer. */
+  readonly voucherDelegate?: string | null;
+  /** The agent credential that made the call, when there was one. */
+  readonly credentialId?: string | null;
 
   /** The ledger hold reserving `price`, opened at `FUNDS_SECURED`. */
   readonly holdId: string | null;
@@ -273,6 +277,10 @@ export interface CreatePaymentIntentInput {
   readonly voucherSignature?: string | null;
   readonly voucherResourceHash?: string | null;
   readonly voucherIssuedAt?: number | null;
+  /** The DELEGATE key that signed, when it was not the payer (CAIP-10). */
+  readonly voucherDelegate?: string | null;
+  /** The agent credential that made the call (the MCP session's), when there was one. */
+  readonly credentialId?: string | null;
   /** Defaults to `PAYMENT_INTENT_TTL_MS` from now. */
   readonly expiresAt?: Date;
   /**

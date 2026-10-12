@@ -65,7 +65,7 @@ import {
   MCP_VOIDED_REASON,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
-import { McpSession } from '../ports/mcp-session.port';
+import { McpCallerKind, McpSession } from '../ports/mcp-session.port';
 import { McpCatalogueService } from './mcp-catalogue.service';
 import { MCP_PRICING, McpPricingConfig } from './mcp-pricing.config';
 
@@ -281,6 +281,8 @@ export class McpToolCallService {
       organizationId: session.organizationId,
       agentId: session.agentId,
       agentAccount: session.agentAccount,
+      // Which of the agent's credentials paid — two credentials are two keys.
+      credentialId: credentialOf(session),
       // No provider yet, and none can be named: the router picks one below and
       // failover may change it. Nor the payout account, nor the binding, for
       // exactly the same reason and at exactly the same grain. All three are
@@ -423,6 +425,7 @@ export class McpToolCallService {
         requestHash,
         seq,
         maxTimeoutSeconds: VOUCHER_MAX_TTL_SECONDS,
+        ...delegationTerms(session),
       };
       return {
         kind: 'ERROR',
@@ -430,7 +433,8 @@ export class McpToolCallService {
         retryable: true,
         message:
           `${tool.name} is paid on rail B: sign the voucher in x402/paymentRequired and ` +
-          `call again with it in _meta["x402/voucher"]`,
+          `call again with it in _meta["x402/voucher"]` +
+          delegationHint(session),
         intentId: null,
         detail: { paymentRequired: requirement },
       };
@@ -462,6 +466,11 @@ export class McpToolCallService {
         price,
         platformFee: this.platformFee(price),
         chainId: session.chainId,
+        boundDelegate: session.delegateAccount ?? null,
+        credentialId: credentialOf(session),
+        // The same read as the withdraw gate above: the escrow's own limits
+        // bind this voucher at redemption, so they are applied before serving.
+        escrow: reading,
       });
     } catch (error) {
       if (!isInsufficientBalance(error)) throw error;
@@ -1328,7 +1337,23 @@ export interface VoucherRequirement {
   readonly requestHash: string;
   readonly seq: string;
   readonly maxTimeoutSeconds: number;
+  /**
+   * eip155 only (agent payment delegation, x402-aligned): who may sign the
+   * voucher. `payer` — the payer's own key; `delegate` — a key the payer
+   * authorised on chain, within its own caps (`X402Escrow.authorizeDelegate`).
+   * Absent on Solana, where only the payer's key signs. There is no third
+   * signer kind: the contract has no EIP-1271 branch (assay-evm D-18).
+   */
+  readonly signers?: readonly VoucherSigner[];
+  /**
+   * The delegate key bound to the calling agent credential (CAIP-10), or null
+   * when none is bound. A delegate-signed voucher is accepted only from the
+   * credential bound to that key.
+   */
+  readonly delegate?: AccountId | null;
 }
+
+export type VoucherSigner = 'payer' | 'delegate';
 
 /**
  * Which rail a paid call takes.
@@ -1478,4 +1503,42 @@ function routingContextOf(
     // `McpToolCallService.withdrawingChains`.
     withdrawingChains,
   };
+}
+
+/**
+ * The delegation half of a rail-B requirement on eip155: the voucher may be
+ * signed by the payer's key or by a delegate the payer authorised on chain —
+ * and, when this credential has a bound delegate, which key that is. Nothing on Solana, whose escrow has no delegation.
+ */
+export function delegationTerms(
+  session: McpSession,
+): Pick<VoucherRequirement, 'signers' | 'delegate'> | Record<string, never> {
+  if (namespaceOf(session.chainId) !== 'eip155') return {};
+  return {
+    signers: ['payer', 'delegate'],
+    delegate: session.delegateAccount ?? null,
+  };
+}
+
+export function delegationHint(session: McpSession): string {
+  if (namespaceOf(session.chainId) !== 'eip155') return '';
+  return session.delegateAccount
+    ? `. The payer (${session.agentAccount}) or the delegate key bound to this credential ` +
+        `(${session.delegateAccount}) may sign; a delegate signs within the caps the payer ` +
+        `authorised on chain`
+    : `. The payer (${session.agentAccount}) may sign, or a delegate key the payer authorised ` +
+        `on chain once it is bound to this credential (POST /agents/me/delegate)`;
+}
+
+function namespaceOf(chainId: ChainId): string {
+  return chainId.split(':')[0];
+}
+
+/**
+ * The agent credential behind the session (`agent_credentials.id`), or null
+ * for a person's or a config session, whose `credentialId` names no stored
+ * credential.
+ */
+function credentialOf(session: McpSession): string | null {
+  return session.callerKind === McpCallerKind.AGENT ? session.credentialId : null;
 }

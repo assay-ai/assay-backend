@@ -7,6 +7,7 @@ import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import {
   ESCROW_SEQ_GAP_CACHE_KEY,
   ESCROW_SEQ_GAP_CACHE_TTL_MS,
+  VOUCHER_MAX_SEQ_GAP,
 } from '../constants/escrow-seq.constants';
 import { PaymentErrors } from '../errors/payment.errors';
 
@@ -64,6 +65,16 @@ export class EscrowSeqService {
    * record, or it was restored from a backup — and a number at or below the
    * chain's is refused only AFTER the call it paid for was served. The raise is
    * monotonic (`bumpNextSeqTo`), so a stale read can never rewind the counter.
+   *
+   * With `chainSeqHigh` known, a seq more than {@link VOUCHER_MAX_SEQ_GAP} above
+   * it is one `X402Escrow` would refuse at redemption. When the counter is
+   * already past that gap — unpaid allocations alone can push it there, and
+   * then nothing can be redeemed to move `seqHigh` — it is REWOUND first to
+   * `max(seqHigh, highest recorded seq) + 1` (`BuyerEscrowRepository.rewindNextSeq`,
+   * under the payer's admission lock), so the payer recovers instead of being
+   * locked out (review S2-2). A seq that is still too far after that, or an
+   * allocated seq pushed over by a concurrent allocation, is refused
+   * (`voucherSeqGapTooLarge`).
    */
   async allocate(
     organizationId: string,
@@ -80,9 +91,32 @@ export class EscrowSeqService {
       }
     }
 
+    if (chainSeqHigh !== null) {
+      let next = await this.escrows.peekNextSeq(organizationId, account);
+      if (next !== null && next - chainSeqHigh > BigInt(VOUCHER_MAX_SEQ_GAP)) {
+        const rewound = await this.escrows.rewindNextSeq(
+          organizationId,
+          account,
+          chainSeqHigh,
+          BigInt(VOUCHER_MAX_SEQ_GAP),
+        );
+        if (rewound !== null) {
+          this.logger.warn(
+            `next_seq for ${account} was ${next}, more than ${VOUCHER_MAX_SEQ_GAP} above the ` +
+              `chain's seq_high ${chainSeqHigh}; rewound to ${rewound} (above every recorded seq)`,
+          );
+        }
+        next = await this.escrows.peekNextSeq(organizationId, account);
+      }
+      if (next !== null) assertWithinSeqGap(next, chainSeqHigh, account);
+    }
+
     const allocated = await this.escrows.allocateSeq(organizationId, account);
     if (!allocated) {
       throw PaymentErrors.escrowNotOpen({ account });
+    }
+    if (chainSeqHigh !== null) {
+      assertWithinSeqGap(BigInt(allocated.seq), chainSeqHigh, account);
     }
 
     return {
@@ -99,7 +133,9 @@ export class EscrowSeqService {
    * Built on `peekNextSeq` rather than a second table: `next_seq` is the
    * allocator's own high-water mark, so everything from `1` up to (but not
    * including) it has been handed out at some point, whether or not it was
-   * ever turned into a voucher. `seq >= 1n` excludes the sentinel `0` the
+   * ever turned into a voucher. After a rewind (see {@link allocate}) a number
+   * handed out before it and at or above the new `next_seq` reads as NOT
+   * issued until it is handed out again — the safe direction. `seq >= 1n` excludes the sentinel `0` the
    * chain uses for "never redeemed" (`BuyerEscrow.seqHigh`), which is not a
    * valid voucher seq — `open_escrow` and every voucher issuance starts at 1.
    *
@@ -151,6 +187,21 @@ export class EscrowSeqService {
   /** Drops the cached minimum, so the next read recomputes it. */
   async invalidateGap(account: AccountId): Promise<void> {
     await this.cache.del(ESCROW_SEQ_GAP_CACHE_KEY(account)).catch(() => undefined);
+  }
+}
+
+/**
+ * `seq <= seqHigh + MAX_SEQ_GAP`, the chain's own rule (`VoucherSeqGapTooLarge`
+ * otherwise). Shared by issue and admission, so the two cannot disagree.
+ */
+export function assertWithinSeqGap(seq: bigint, seqHigh: bigint, account: AccountId): void {
+  if (seq - seqHigh > BigInt(VOUCHER_MAX_SEQ_GAP)) {
+    throw PaymentErrors.voucherSeqGapTooLarge({
+      account,
+      seq: seq.toString(),
+      seqHigh: seqHigh.toString(),
+      maxGap: VOUCHER_MAX_SEQ_GAP,
+    });
   }
 }
 

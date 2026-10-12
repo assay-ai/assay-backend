@@ -11,6 +11,7 @@ import {
   RelayedIntentObservation,
   RelayedIntentRateLimits,
   decideRelayedIntentRate,
+  relayedIntentRetryAt,
 } from '../domain/relayed-intent-rate-limit';
 import { SettlementErrors } from '../errors/settlement.errors';
 
@@ -19,8 +20,16 @@ export const RELAYED_INTENT_RATE_LIMITS = 'RELAYED_INTENT_RATE_LIMITS';
 
 const KEY_PREFIX = 'settlement:relayed-intent:rate:';
 
-/** Four commands per scope; `zcard` is the third of them. */
+/** Four commands per scope when recording; `zrange` is the third of them. */
 const COMMANDS_PER_SCOPE = 4;
+
+/** Two commands per scope when only reading; `zrange` is the second of them. */
+const READ_COMMANDS_PER_SCOPE = 2;
+
+/** A scope's count, and the instants of the attempts in its window. */
+interface ScopeReading extends RelayedIntentObservation {
+  readonly attemptsMs: readonly number[];
+}
 
 /**
  * Counts relayed-submission attempts in a sliding window, in Redis.
@@ -69,16 +78,43 @@ export class RelayedIntentRateLimiter {
    * make the limit stop being one.
    */
   async admit(account: AccountId, organizationId: string): Promise<void> {
-    const observations = await this.observe(account, organizationId);
-    const breached = decideRelayedIntentRate(observations);
+    const readings = await this.observe(account, organizationId, true);
+    const breached = decideRelayedIntentRate(readings);
     if (breached) {
-      throw SettlementErrors.relayedIntentRateLimited({
-        scope: breached.scope,
-        observed: breached.observed,
-        limit: breached.limit,
-        windowSeconds: this.limits.windowSeconds,
-      });
+      throw this.limited(breached as ScopeReading);
     }
+  }
+
+  /**
+   * Refuses, WITHOUT recording anything, when the next {@link admit} would be
+   * refused — so the intent routes can say so before the payer is asked to sign
+   * (BUG-D1-06). Before this, the wallet prompt opened, the person signed, and
+   * only the relay said no.
+   *
+   * Advisory: two tabs can both pass it and one of them still meets
+   * {@link admit}'s refusal, which is the control. Fails closed like `admit`.
+   */
+  async assertRoom(account: AccountId, organizationId: string): Promise<void> {
+    const readings = await this.observe(account, organizationId, false);
+    // Room for one more means fewer than `limit` attempts in the window now.
+    const full = readings.find((reading) => reading.observed >= reading.limit);
+    if (full) {
+      throw this.limited(full);
+    }
+  }
+
+  private limited(reading: ScopeReading) {
+    const retryAt = relayedIntentRetryAt(
+      reading.attemptsMs,
+      reading.limit,
+      this.limits.windowSeconds,
+    );
+    return SettlementErrors.relayedIntentRateLimited({
+      scope: reading.scope.startsWith('organization:') ? 'organization' : 'account',
+      limit: reading.limit,
+      windowSeconds: this.limits.windowSeconds,
+      retryAt: retryAt === null ? undefined : new Date(retryAt).toISOString(),
+    });
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -86,7 +122,8 @@ export class RelayedIntentRateLimiter {
   private async observe(
     account: AccountId,
     organizationId: string,
-  ): Promise<readonly RelayedIntentObservation[]> {
+    record: boolean,
+  ): Promise<readonly ScopeReading[]> {
     const now = Date.now();
     const windowMs = this.limits.windowSeconds * 1000;
     // Unique per attempt. Two submissions in the same millisecond are ordinary
@@ -108,12 +145,18 @@ export class RelayedIntentRateLimiter {
       for (const { scope } of scopes) {
         const key = `${KEY_PREFIX}${scope}`;
         pipeline.zremrangebyscore(key, '-inf', now - windowMs);
-        pipeline.zadd(key, now, member);
-        pipeline.zcard(key);
-        // Refreshed on every write rather than set once, so a scope that keeps
-        // being used never expires mid-window and one that goes quiet is
-        // cleaned up.
-        pipeline.pexpire(key, windowMs);
+        if (record) {
+          pipeline.zadd(key, now, member);
+        }
+        // The members, not just the count: each starts with its instant, which
+        // is what says when the window frees up again.
+        pipeline.zrange(key, 0, -1);
+        if (record) {
+          // Refreshed on every write rather than set once, so a scope that
+          // keeps being used never expires mid-window and one that goes quiet
+          // is cleaned up.
+          pipeline.pexpire(key, windowMs);
+        }
       }
       replies = (await pipeline.exec()) as [Error | null, unknown][] | null;
     } catch {
@@ -127,12 +170,18 @@ export class RelayedIntentRateLimiter {
       throw SettlementErrors.relayedIntentUnavailable();
     }
 
+    const stride = record ? COMMANDS_PER_SCOPE : READ_COMMANDS_PER_SCOPE;
+    const offset = record ? 2 : 1;
     return scopes.map(({ scope, limit }, index) => {
-      const reply = replies?.[index * COMMANDS_PER_SCOPE + 2];
-      if (!reply || reply[0]) {
+      const reply = replies?.[index * stride + offset];
+      if (!reply || reply[0] || !Array.isArray(reply[1])) {
         throw SettlementErrors.relayedIntentUnavailable();
       }
-      return { scope, observed: Number(reply[1]), limit };
+      const members = reply[1] as string[];
+      const attemptsMs = members
+        .map((entry) => Number.parseInt(String(entry).split(':')[0], 10))
+        .filter((instant) => Number.isFinite(instant));
+      return { scope, observed: members.length, limit, attemptsMs };
     });
   }
 }

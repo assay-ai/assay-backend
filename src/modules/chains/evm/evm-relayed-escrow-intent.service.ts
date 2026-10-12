@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { encodeFunctionData, getAddress, isAddress } from 'viem';
 
 import { SettlementErrors } from '@modules/settlement/errors/settlement.errors';
+import { EscrowDelegationKind } from '@modules/settlement/ports/escrow-delegation.port';
 import { EscrowIntentKind } from '@modules/settlement/ports/escrow-intent-builder.port';
 import {
   RelayedEscrowIntent,
@@ -134,6 +135,10 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       data,
       gasLimit,
       purpose: `${intent.kind} bySig nonce=${intent.nonce}`,
+      // A relayed tightening keeps the payer's voucher admission paused until
+      // its outcome is known, so the time it may wait behind other sends is
+      // bounded (BUG-D1-07 review): past it, it is given up unsent.
+      boundQueueWait: true,
     });
 
     if (result.status !== 'SUCCESS') {
@@ -195,6 +200,31 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
           abi: X402_ESCROW_ABI,
           functionName: 'requestWithdrawBySig',
           args: [buyer, this.uint64(intent.amount, 'amount'), nonce, deadline, signature],
+        });
+
+      // Agent payment delegation. The delegate is inside the signed struct, so
+      // the relayer cannot point the payer's consent at a key of its own.
+      case EscrowDelegationKind.AUTHORIZE_DELEGATE:
+        return encodeFunctionData({
+          abi: X402_ESCROW_ABI,
+          functionName: 'authorizeDelegateBySig',
+          args: [
+            buyer,
+            this.address(intent.delegate, 'delegate'),
+            this.uint64(intent.maxVoucherAmount, 'maxVoucherAmount'),
+            this.uint64(intent.maxPerWindow, 'maxPerWindow'),
+            this.uint64(intent.validUntil, 'validUntil'),
+            nonce,
+            deadline,
+            signature,
+          ],
+        });
+
+      case EscrowDelegationKind.REVOKE_DELEGATE:
+        return encodeFunctionData({
+          abi: X402_ESCROW_ABI,
+          functionName: 'revokeDelegateBySig',
+          args: [buyer, this.address(intent.delegate, 'delegate'), nonce, deadline, signature],
         });
     }
   }
@@ -286,6 +316,15 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
    * about a word, at a point where the caller can no longer tell which field it
    * was — and a 400 naming the field is what a console can act on.
    */
+  private address(value: string, field: string): `0x${string}` {
+    if (!isAddress(value, { strict: false })) {
+      throw SettlementErrors.relayedIntentMalformed({
+        reason: `${field} is not a 20-byte address`,
+      });
+    }
+    return getAddress(value);
+  }
+
   private uint64(value: bigint, field: string): bigint {
     if (value < 0n || value > MAX_UINT64) {
       throw SettlementErrors.relayedIntentMalformed({

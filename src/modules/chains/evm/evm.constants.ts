@@ -1,3 +1,5 @@
+import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.constants';
+
 import { ChainId } from '../ports/caip.types';
 
 /**
@@ -47,6 +49,28 @@ export const EVM_CONSTANTS = {
    * would settle.
    */
   SLASH_WINDOW_SECONDS: 86_400,
+  /**
+   * `Constants.sol` — `MAX_DELEGATION_LIFETIME_SECONDS = 365 * 86_400`. The
+   * longest horizon one delegate authorisation may carry.
+   */
+  MAX_DELEGATION_LIFETIME_SECONDS: 31_536_000,
+  /** `Constants.sol` — `MAX_DELEGATES_PER_PAYER = 16`. Revoking frees a place. */
+  MAX_DELEGATES_PER_PAYER: 16,
+  /**
+   * `Constants.sol:152` — `MAX_SEQ_GAP = 1_000_000`. A redeemed voucher needs
+   * `seq <= seqHigh + MAX_SEQ_GAP`, else `VoucherSeqGapTooLarge` (D-17). The
+   * payment domain mirrors it as `VOUCHER_MAX_SEQ_GAP` so issuing and
+   * admission refuse the same seqs; `constants-pin.spec.ts` holds the two
+   * equal.
+   */
+  MAX_SEQ_GAP: VOUCHER_MAX_SEQ_GAP,
+  /**
+   * `Constants.sol:172` — `MAX_SIGNATURE_LIFETIME_SECONDS = 3600`. Every
+   * `*BySig` door refuses `deadline > block.timestamp + 3600`
+   * (`SignatureDeadlineTooFar`, D-18). The backend signs deadlines at chain
+   * time + `VOUCHER_MAX_LIFETIME_SECONDS` (300), well inside it.
+   */
+  MAX_SIGNATURE_LIFETIME_SECONDS: 3_600,
 } as const;
 
 /**
@@ -93,16 +117,28 @@ export interface EvmDeployment {
    */
   readonly escrowImplementation: `0x${string}`;
   /**
-   * `X402Config.admin` — the admin key **and** the upgrade authority of all
-   * three contracts.
+   * `X402Config.admin` — the OPERATIONAL key (`updateConfig`, `setPaused`, the
+   * verifier registry, `cancelSlash`). It is **not** the upgrade authority:
+   * since D-17 that is {@link owner}, and the owner appoints the admin.
    *
    * Recorded rather than read-and-trusted for the same reason as the
-   * implementation: an admin that moved without being recorded is an upgrade
-   * authority that moved without being recorded, and there is nothing else on
-   * chain that would say so. `deployments/<chainId>.json` → `admin` in
-   * assay-evm.
+   * implementation: an admin that moved without being recorded is a change of
+   * who can pause and re-parameterise the contracts that nobody recorded.
+   * `deployments/<chainId>.json` → `admin` in assay-evm.
    */
   readonly admin: `0x${string}`;
+  /**
+   * `X402Config.owner()` — the UUPS upgrade authority of all three contracts
+   * (the stake and escrow read `CONFIG.owner()` live) and the key that
+   * appoints the admin. Kept cold (Ledger or Safe), moves in two steps, can
+   * never be renounced (assay-evm D-17).
+   *
+   * Recorded for the same reason as {@link escrowImplementation}: an owner that
+   * moved without being recorded is an upgrade authority that moved without
+   * being recorded, and nothing else on chain would say so.
+   * `deployments/<chainId>.json` → `owner` in assay-evm.
+   */
+  readonly owner: `0x${string}`;
   /**
    * `Multicall3` on this chain, when the slash executor may batch through it.
    * Optional and per chain: absent means one transaction per judgement.

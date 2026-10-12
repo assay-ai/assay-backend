@@ -1,5 +1,6 @@
 import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
+import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.constants';
 import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
@@ -30,6 +31,9 @@ function buildService(
   const escrows = {
     allocateSeq: jest.fn().mockResolvedValue(allocated),
     bumpNextSeqTo: jest.fn().mockResolvedValue(0),
+    rewindNextSeq: jest.fn().mockResolvedValue(null),
+    // The counter as it stands before allocating: the seq about to be handed out.
+    peekNextSeq: jest.fn().mockResolvedValue(allocated ? BigInt(allocated.seq) : null),
   };
   const cache = { get: jest.fn(), set: jest.fn() };
 
@@ -101,6 +105,74 @@ describe('EscrowSeqService.allocate', () => {
     });
   });
 
+  describe('the chain’s seq jump cap (X402Escrow.MAX_SEQ_GAP)', () => {
+    const GAP = BigInt(VOUCHER_MAX_SEQ_GAP);
+    const SEQ_HIGH = 7n;
+    const at = (seq: bigint) => ({
+      seq: seq.toString(),
+      escrowAccountId: ESCROW_ACCOUNT_ID,
+      escrowAssetAccountId: ESCROW_ASSET_ACCOUNT_ID,
+    });
+
+    it('issues a seq exactly MAX_SEQ_GAP above the chain’s seqHigh', async () => {
+      const { service } = buildService(at(SEQ_HIGH + GAP));
+
+      await expect(service.allocate(ORGANIZATION_ID, ACCOUNT, SEQ_HIGH)).resolves.toMatchObject({
+        seq: (SEQ_HIGH + GAP).toString(),
+      });
+    });
+
+    it('refuses one above it when the rewind cannot help, BEFORE allocating', async () => {
+      // `rewindNextSeq` moved nothing: every seq up to the counter is recorded.
+      const { service, escrows } = buildService(at(SEQ_HIGH + GAP + 1n));
+
+      await expectErrorCodeAsync(
+        () => service.allocate(ORGANIZATION_ID, ACCOUNT, SEQ_HIGH),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE,
+      );
+      expect(escrows.rewindNextSeq).toHaveBeenCalledWith(ORGANIZATION_ID, ACCOUNT, SEQ_HIGH, GAP);
+      expect(escrows.allocateSeq).not.toHaveBeenCalled();
+    });
+
+    it('rewinds a counter past the gap, then allocates from the rewound value (S2-2)', async () => {
+      const { service, escrows } = buildService(at(SEQ_HIGH + 1n));
+      escrows.peekNextSeq
+        .mockResolvedValueOnce(SEQ_HIGH + GAP + 1n)
+        .mockResolvedValueOnce(SEQ_HIGH + 1n);
+      escrows.rewindNextSeq.mockResolvedValue(SEQ_HIGH + 1n);
+
+      await expect(service.allocate(ORGANIZATION_ID, ACCOUNT, SEQ_HIGH)).resolves.toMatchObject({
+        seq: (SEQ_HIGH + 1n).toString(),
+      });
+      expect(escrows.rewindNextSeq.mock.invocationCallOrder[0]).toBeLessThan(
+        escrows.allocateSeq.mock.invocationCallOrder[0],
+      );
+    });
+
+    it('does not rewind a counter within the gap', async () => {
+      const { service, escrows } = buildService(at(SEQ_HIGH + GAP));
+      await service.allocate(ORGANIZATION_ID, ACCOUNT, SEQ_HIGH);
+      expect(escrows.rewindNextSeq).not.toHaveBeenCalled();
+    });
+
+    it('refuses an allocated seq over the cap even when the pre-check passed (a concurrent allocation)', async () => {
+      const { service, escrows } = buildService(at(SEQ_HIGH + GAP + 1n));
+      escrows.peekNextSeq.mockResolvedValue(SEQ_HIGH + GAP);
+
+      await expectErrorCodeAsync(
+        () => service.allocate(ORGANIZATION_ID, ACCOUNT, SEQ_HIGH),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE,
+      );
+    });
+
+    it('applies no cap when the chain has not been read', async () => {
+      const { service, escrows } = buildService(at(SEQ_HIGH + GAP + 1n));
+
+      await expect(service.allocate(ORGANIZATION_ID, ACCOUNT)).resolves.toBeDefined();
+      expect(escrows.peekNextSeq).not.toHaveBeenCalled();
+    });
+  });
+
   it('refuses with PAYMENT_ESCROW_NOT_OPEN when the buyer has no mirror row', async () => {
     const { service } = buildService(null);
 
@@ -120,5 +192,82 @@ describe('EscrowSeqService.allocate', () => {
     await service.allocate(ORGANIZATION_ID, ACCOUNT);
 
     expect(escrows.allocateSeq).toHaveBeenCalledWith(ORGANIZATION_ID, ACCOUNT);
+  });
+});
+
+/**
+ * The review's S2-2 PoC (`seq-lockout.poc.ts`), kept as a regression test. It
+ * used to show every later allocation refused for ever once unpaid
+ * allocations ran the counter past `MAX_SEQ_GAP`. Now the allocator recovers.
+ *
+ * The in-memory repository models `rewindNextSeq` the way the SQL does:
+ * `max(chainSeqHigh, highest recorded seq) + 1`, lowering only.
+ */
+describe('regression: seq-gap lockout (review S2-2)', () => {
+  function fakeRepo(recorded: bigint[] = []) {
+    let nextSeq = 1n;
+    return {
+      get next() {
+        return nextSeq;
+      },
+      allocateSeq: async () => {
+        const seq = nextSeq;
+        nextSeq += 1n;
+        return { seq: seq.toString(), escrowAccountId: 'e', escrowAssetAccountId: 'a' };
+      },
+      bumpNextSeqTo: async (_o: string, _a: string, to: bigint) => {
+        if (nextSeq < to) {
+          nextSeq = to;
+          return 1;
+        }
+        return 0;
+      },
+      peekNextSeq: async () => nextSeq,
+      rewindNextSeq: async (_o: string, _a: string, seqHigh: bigint, gap: bigint) => {
+        if (nextSeq - seqHigh <= gap) return null;
+        const highest = recorded.reduce((a, b) => (b > a ? b : a), 0n);
+        const target = (highest > seqHigh ? highest : seqHigh) + 1n;
+        if (nextSeq > target) {
+          nextSeq = target;
+          return target;
+        }
+        return null;
+      },
+      jump: (n: bigint) => {
+        nextSeq += n;
+      },
+    };
+  }
+
+  it('recovers after 1,000,001 unpaid allocations instead of refusing for ever', async () => {
+    const repo = fakeRepo();
+    const svc = new EscrowSeqService(repo as never, { get: jest.fn(), set: jest.fn() } as never);
+    // 1,000,001 unpaid allocations through the controller path (fast-forwarded).
+    await svc.allocate(ORGANIZATION_ID, ACCOUNT);
+    repo.jump(1_000_000n);
+    expect(repo.next).toBe(1_000_002n);
+
+    // The chain never moved (seqHigh 0). Every later allocation succeeds.
+    const seqs: string[] = [];
+    for (let i = 0; i < 3; i++) seqs.push((await svc.allocate(ORGANIZATION_ID, ACCOUNT, 0n)).seq);
+    expect(seqs).toEqual(['1', '2', '3']);
+  });
+
+  it('never goes back to or below a recorded seq, nor the chain’s seqHigh', async () => {
+    const repo = fakeRepo([40n, 41n]);
+    const svc = new EscrowSeqService(repo as never, { get: jest.fn(), set: jest.fn() } as never);
+    repo.jump(2_000_000n);
+
+    await expect(svc.allocate(ORGANIZATION_ID, ACCOUNT, 10n)).resolves.toMatchObject({ seq: '42' });
+
+    const chainAhead = fakeRepo([40n]);
+    const svc2 = new EscrowSeqService(
+      chainAhead as never,
+      { get: jest.fn(), set: jest.fn() } as never,
+    );
+    chainAhead.jump(3_000_000n);
+    await expect(svc2.allocate(ORGANIZATION_ID, ACCOUNT, 500n)).resolves.toMatchObject({
+      seq: '501',
+    });
   });
 });

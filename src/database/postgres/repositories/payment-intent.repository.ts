@@ -1,8 +1,9 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, SelectQueryBuilder } from 'typeorm';
+import { DataSource, EntityManager, IsNull, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
+import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
 
@@ -68,11 +69,23 @@ export enum ReceiptsSummaryGroupBy {
   DAY = 'day',
   STATUS = 'status',
   VERDICT = 'verdict',
+  /**
+   * `payment_intents.agent_id`: the agent whose credential made the call, so a
+   * call an agent paid for with its delegate key is attributed to that agent.
+   */
+  AGENT = 'agent',
+  /**
+   * `payment_intents.credential_id`: the agent CREDENTIAL that made the call.
+   * Two credentials of one agent hold two delegate keys, so they are two
+   * groups here. A row written before the column has no credential and is
+   * keyed `agent:<agent id>` instead.
+   */
+  CREDENTIAL = 'credential',
 }
 
 /** One row of a summary grouping, still in atomic units. */
 export interface ReceiptsSummaryRow {
-  /** The group's label — a tool id, a provider id, a day, a status, a verdict. */
+  /** The group's label — a tool id, a provider id, a day, a status, a verdict, an agent id. */
   readonly key: string;
   readonly asset: string;
   readonly decimals: number;
@@ -123,6 +136,22 @@ export const AWAITING_REDEMPTION_SQL =
  * leaves behind") — neither credited anyone.
  */
 export const CREDITED_SQL = `(intent.hold_id IS NOT NULL AND intent.hold_released_at IS NOT NULL)`;
+
+/**
+ * Read on a credited intent: the credit came out of **platform** funds, not
+ * out of a redemption. `VoucherRedemptionService.absorb` writes it when a
+ * voucher can never be redeemed (`VoucherSeqNotIncreasing`, a revoked
+ * delegate, …): the buyer keeps the money, the provider is owed the
+ * `provider_amount` by the platform, and nothing moved on chain — so no
+ * platform fee was taken either. The literal is that service's
+ * `PLATFORM_ABSORBED_TX_REF_PREFIX`; the credit's `organization_id` is the
+ * provider's, which is what puts the probe on `idx_ledger_entries_intent_id`.
+ */
+export const PLATFORM_ABSORBED_SQL =
+  `EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
+  `WHERE absorbed.organization_id = intent.provider_id AND absorbed.intent_id = intent.id ` +
+  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
+  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')`;
 
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
@@ -179,6 +208,8 @@ export interface RedeemableIntent {
   readonly voucherSignature: string;
   readonly voucherResourceHash: string | null;
   readonly voucherIssuedAt: string | null;
+  /** The delegate that signed, or null — see `PaymentIntentEntity.voucherDelegate`. */
+  readonly voucherDelegate: string | null;
   readonly expiresAt: Date;
   readonly holdId: string;
   readonly providerId: string | null;
@@ -253,6 +284,112 @@ export interface AgentSpendTotals {
   /** `Σ price_amount` since {@link utcMonthStart} — the monthly-cap check. */
   readonly thisMonth: bigint;
 }
+
+/** Which payer's vouchers {@link PaymentIntentRepository.insertAdmittedVoucherIntent} counts. */
+export interface VoucherAdmissionScope {
+  /** The payer account (`payment_intents.agent_account`). */
+  readonly payer: string;
+  readonly assetId: string;
+  /** The signing delegate, or `null` for the payer's own key. */
+  readonly delegate: string | null;
+  /** When the escrow's counter was read off the chain (minus a lag margin). */
+  readonly escrowSince: Date;
+  /** When the delegate's counter was read off the chain (minus a lag margin). */
+  readonly delegateSince?: Date | null;
+}
+
+/** `Σ price_amount` of the vouchers the chain's counters do not hold yet. */
+export interface OpenVoucherTotals {
+  /** Every rail-B voucher of the payer: what the escrow's window does not know. */
+  readonly escrow: bigint;
+  /** The signing delegate's vouchers only: what the delegate's window does not know. */
+  readonly delegate: bigint;
+  /**
+   * Set while a change that tightens caps this voucher is redeemed under is
+   * being relayed, or landed too recently for this admission's chain read to
+   * have seen it (BUG-D1-07): no voucher is admitted then. The seconds until a
+   * retry can pass, on the database's clock. See
+   * {@link PaymentIntentRepository.holdVoucherAdmission}.
+   */
+  readonly pausedFor?: number | null;
+  /**
+   * The payer's `buyer_escrows.next_seq`, read under the admission lock, or
+   * `null` with no escrow row. A voucher seq at or above it is not issued (any
+   * more): `BuyerEscrowRepository.rewindNextSeq` lowered the counter after the
+   * up-front `wasIssued` read, and the seq may be handed out again (S2-2).
+   */
+  readonly nextSeq?: bigint | null;
+}
+
+/** What {@link PaymentIntentRepository.holdVoucherAdmission} pauses, and for how long. */
+export interface VoucherAdmissionHold {
+  readonly payer: string;
+  /**
+   * The delegate whose grant is changed: only its vouchers are paused, since a
+   * change to its grant cannot strand any other signer's. `null` for a change
+   * of the escrow's own limits, which pauses every voucher of the payer.
+   */
+  readonly delegate: string | null;
+  /** The pause lasts at least this long from now (the database's clock). */
+  readonly holdSeconds: number;
+  /** ...and never ends before this instant (unix seconds), e.g. the signed request's deadline. */
+  readonly notBeforeEpochSeconds?: number | null;
+}
+
+/** Whose not-yet-redeemed vouchers {@link PaymentIntentRepository.unsettledVouchers} counts. */
+export interface UnsettledVoucherScope {
+  /** The payer account (`payment_intents.agent_account`). */
+  readonly payer: string;
+  readonly assetId: string;
+  /** Only this delegate's vouchers (CAIP-10, any case); omitted for every voucher of the payer. */
+  readonly delegate?: string | null;
+  /** When the chain counter this is set beside was read (minus a lag margin). */
+  readonly since: Date;
+}
+
+/**
+ * The payer's vouchers the platform has accepted and the chain has not
+ * redeemed yet (BUG-D1-07): what a change to the caps must leave room for.
+ */
+export interface UnsettledVoucherTotals {
+  readonly count: number;
+  /** `Σ price_amount`. */
+  readonly total: bigint;
+  /** The largest single one: what a per-voucher cap must still allow. */
+  readonly largest: bigint;
+  /** The last instant the chain still redeems one of them (`expires_at` + grace), or null. */
+  readonly redeemableUntil: Date | null;
+  /**
+   * `Σ price_amount` redeemed at or after `since`: what a counter read at
+   * `since` may not contain yet. Counted twice in the overlap, the safe side.
+   */
+  readonly redeemedSince: bigint;
+}
+
+/**
+ * A rail-B intent the chain has not redeemed and still can: in flight
+ * (`CREATED`, not expired) or served with its hold open, and not past the
+ * chain's redemption grace — past that it is lost already, whatever the caps.
+ */
+const UNSETTLED_VOUCHER_SQL =
+  `(("status" = 'CREATED' AND "hold_id" IS NULL AND "expires_at" > now())` +
+  ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "status" IN (` +
+  [...OPEN_HOLD_STATUSES, SETTLED_STATUS].map((status) => `'${status}'`).join(', ') +
+  `) AND "expires_at" > now() - interval '${REDEEM_GRACE_SECONDS} seconds'))`;
+
+/**
+ * A rail-B intent the chain's window counter cannot contain yet, given the
+ * instant (`$n`) the counter was read. See `insertAdmittedVoucherIntent`.
+ */
+/** The earlier of two instants. */
+const earliest = (a: Date, b: Date): Date => (a.getTime() <= b.getTime() ? a : b);
+
+const OPEN_VOUCHER_SQL = (since: string): string =>
+  `(("status" = 'CREATED' AND "hold_id" IS NULL AND "expires_at" > now())` +
+  ` OR ("hold_id" IS NOT NULL AND "hold_released_at" IS NULL AND "status" IN (` +
+  [...OPEN_HOLD_STATUSES, SETTLED_STATUS].map((status) => `'${status}'`).join(', ') +
+  `))` +
+  ` OR ("status" = '${SETTLED_STATUS}' AND "hold_released_at" >= ${since}::timestamptz))`;
 
 @Injectable()
 export class PaymentIntentRepository extends OrganizationScopedRepository<PaymentIntentEntity> {
@@ -479,6 +616,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.voucherSignature', 'voucherSignature')
       .addSelect('intent.voucherResourceHash', 'voucherResourceHash')
       .addSelect('intent.voucherIssuedAt', 'voucherIssuedAt')
+      .addSelect('intent.voucherDelegate', 'voucherDelegate')
       .addSelect('intent.expiresAt', 'expiresAt')
       .addSelect('intent.holdId', 'holdId')
       .addSelect('intent.providerId', 'providerId')
@@ -496,6 +634,224 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addOrderBy('intent.voucherSeq', 'ASC')
       .limit(limit)
       .getRawMany<RedeemableIntent>();
+  }
+
+  /**
+   * Inserts a rail-B voucher's intent **only if it is admitted**, atomically
+   * with the read that admits it (BUG-D1-02).
+   *
+   * The escrow's window and a delegate's window are counters the CHAIN keeps,
+   * and they only learn about a voucher when it is redeemed — minutes after the
+   * call was served. So admitting a voucher means adding, to the chain's
+   * decayed counter, every voucher this platform has accepted and the chain has
+   * not counted yet. Read and insert as two statements, five concurrent calls
+   * all read the same total and all fit; four of them were then refused at
+   * redemption and the platform paid the providers.
+   *
+   * Here the two happen under `pg_advisory_xact_lock` keyed on the PAYER, in
+   * one transaction: the next admission for the same payer waits until this
+   * intent is committed, and its read then counts it. The lock is per payer,
+   * not per (payer, delegate), because the escrow's own window is the payer's
+   * and every delegate spends from it too. It is transaction scoped, so a
+   * refusal (`admit` throwing) or a constraint violation rolls back and
+   * releases it with nothing written. Nothing but these two statements runs
+   * under it — no RPC, no other connection — so it is held for milliseconds
+   * and cannot wait on the pool it is holding a connection from.
+   *
+   * What {@link OpenVoucherTotals} counts, per rail-B intent of the payer in
+   * the asset (across organizations: the window is the payer account's, and
+   * two tenants' agents can spend from one account):
+   *
+   * - **in flight**: `CREATED` and not yet expired — inserted by an admission
+   *   that is still securing its funds. This row IS the reservation; without
+   *   it, the gap between this insert and the hold is the same race again.
+   *   `VoucherService` expires a `CREATED` row whose funds could not be
+   *   secured, so a refused call does not keep its place.
+   * - **served, not on chain**: an open hold, or `SETTLED` with the hold the
+   *   redemption job has not closed.
+   * - **on chain after the chain was read**: `SETTLED` with the hold closed at
+   *   or after `since`. The counter the caller read cannot contain a
+   *   redemption that landed after the read, and the hold is closed only after
+   *   the redemption confirms — so a voucher redeemed in between is counted
+   *   here, not lost between the two numbers. (Before `since` it is in the
+   *   chain's counter; counting it twice in that overlap is the safe side.)
+   *
+   * `idx_payment_intents_voucher_admission` covers the read.
+   */
+  async insertAdmittedVoucherIntent(
+    row: QueryDeepPartialEntity<PaymentIntentEntity>,
+    scope: VoucherAdmissionScope,
+    admit: (open: OpenVoucherTotals) => void,
+  ): Promise<void> {
+    if (!row.organizationId) {
+      throw new Error(
+        'PaymentIntentRepository.insertAdmittedVoucherIntent: organizationId is required',
+      );
+    }
+    await this.manager.transaction(async (manager) => {
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+        `voucher-admission:${scope.payer}`,
+      ]);
+      const [totals] = (await manager.query(
+        `SELECT
+           COALESCE(SUM("price_amount") FILTER (WHERE ${OPEN_VOUCHER_SQL('$4')}), 0)::text AS "escrow",
+           COALESCE(SUM("price_amount") FILTER (
+             WHERE "voucher_delegate" = $3 AND ${OPEN_VOUCHER_SQL('$5')}
+           ), 0)::text AS "delegate"
+         FROM "payment_intents"
+         WHERE "organization_id" IS NOT NULL
+           AND "agent_account" = $1
+           AND "asset_id" = $2
+           AND "rail" = 'RAIL_B_VOUCHER'
+           AND ("hold_released_at" IS NULL OR "hold_released_at" >= LEAST($4::timestamptz, $5::timestamptz))`,
+        [
+          scope.payer,
+          scope.assetId,
+          scope.delegate,
+          scope.escrowSince,
+          scope.delegateSince ?? scope.escrowSince,
+        ],
+      )) as Array<{ escrow: string; delegate: string }>;
+      // Any live pause over this voucher (BUG-D1-07): one per tightening, the
+      // payer's own (`delegate IS NULL`) or this delegate's. Live while its
+      // relay is pending, and after it landed for as long as this admission's
+      // chain read (`$4`, already lagged) predates the landing — the read saw
+      // the OLD caps, however late this insert comes.
+      const [pause] = (await manager.query(
+        `SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM (MAX("paused_until") - now()))))::int AS "paused_for"
+           FROM "voucher_admission_pauses"
+          WHERE "payer_account" = $1
+            AND ("delegate" IS NULL OR ($2::text IS NOT NULL AND lower("delegate") = lower($2::text)))
+            AND ("paused_until" > now() OR ("landed_at" IS NOT NULL AND "landed_at" > $3::timestamptz))
+         HAVING COUNT(*) > 0`,
+        [
+          scope.payer,
+          scope.delegate,
+          earliest(scope.escrowSince, scope.delegateSince ?? scope.escrowSince),
+        ],
+      )) as Array<{ paused_for: number }>;
+      const [escrowRow] = (await manager.query(
+        `SELECT "next_seq"::text AS "next_seq" FROM "buyer_escrows" WHERE "account_id" = $1`,
+        [scope.payer],
+      )) as Array<{ next_seq: string }>;
+      admit({
+        escrow: BigInt(totals?.escrow ?? '0'),
+        delegate: scope.delegate === null ? 0n : BigInt(totals?.delegate ?? '0'),
+        pausedFor: pause ? Number(pause.paused_for) : null,
+        nextSeq: escrowRow ? BigInt(escrowRow.next_seq) : null,
+      });
+      await manager.insert(PaymentIntentEntity, row);
+    });
+  }
+
+  /**
+   * The payer's vouchers the chain has not redeemed yet, and those it redeemed
+   * at or after `scope.since` (BUG-D1-07). Read without the admission lock: a
+   * figure to show and to warn on. The check that must not race an admission
+   * is {@link holdVoucherAdmission}.
+   */
+  async unsettledVouchers(scope: UnsettledVoucherScope): Promise<UnsettledVoucherTotals> {
+    return readUnsettledVouchers(this.manager, scope);
+  }
+
+  /**
+   * Takes ONE pause on the payer's rail-B admission (or one delegate's) and
+   * reads what is still unsettled, in one transaction under the payer's
+   * admission lock (BUG-D1-07). Returns the pause's id, which only its own
+   * relay ends ({@link landVoucherAdmissionPause},
+   * {@link releaseVoucherAdmissionPause}).
+   *
+   * A voucher admission either committed before this (and is in the totals
+   * returned) or runs after it (and sees the pause and is refused): there is no
+   * third case, because both take `voucher-admission:<payer>`. So a caller that
+   * checks the totals, then relays a change that tightens the caps, cannot
+   * strand a voucher admitted in between under the old caps. Two tightenings of
+   * one payer hold two rows: neither can end the other's.
+   *
+   * Every instant is the database's clock, the same one the admission compares
+   * it with.
+   */
+  async holdVoucherAdmission(
+    hold: VoucherAdmissionHold,
+    scopes: readonly UnsettledVoucherScope[],
+  ): Promise<{ pauseId: string; totals: UnsettledVoucherTotals[] }> {
+    return this.manager.transaction(async (manager) => {
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+        `voucher-admission:${hold.payer}`,
+      ]);
+      // Old rows are inert; tidy them up while the lock is held anyway.
+      await manager.query(
+        `DELETE FROM "voucher_admission_pauses"
+          WHERE "payer_account" = $1 AND "paused_until" < now() - interval '1 hour'`,
+        [hold.payer],
+      );
+      const [row] = (await manager.query(
+        `INSERT INTO "voucher_admission_pauses" ("payer_account", "delegate", "paused_until")
+         VALUES ($1, $2, GREATEST(now() + make_interval(secs => $3::double precision),
+                                  COALESCE(to_timestamp($4::double precision), '-infinity'::timestamptz)))
+         RETURNING "id"`,
+        [hold.payer, hold.delegate, hold.holdSeconds, hold.notBeforeEpochSeconds ?? null],
+      )) as Array<{ id: string }>;
+      const totals: UnsettledVoucherTotals[] = [];
+      for (const scope of scopes) totals.push(await readUnsettledVouchers(manager, scope));
+      return { pauseId: row.id, totals };
+    });
+  }
+
+  /**
+   * The pause's relay landed: it ends `settleSeconds` from now, and any
+   * admission whose chain read predates the landing (by the admission's own
+   * lag margin) stays refused — see {@link insertAdmittedVoucherIntent}.
+   */
+  async landVoucherAdmissionPause(pauseId: string, settleSeconds: number): Promise<void> {
+    await this.manager.query(
+      `UPDATE "voucher_admission_pauses"
+          SET "landed_at" = now(), "paused_until" = now() + make_interval(secs => $2::double precision)
+        WHERE "id" = $1`,
+      [pauseId, settleSeconds],
+    );
+  }
+
+  /** The pause's relay was refused by name: nothing landed, so its pause goes now. */
+  async releaseVoucherAdmissionPause(pauseId: string): Promise<void> {
+    await this.manager.query(`DELETE FROM "voucher_admission_pauses" WHERE "id" = $1`, [pauseId]);
+  }
+
+  /**
+   * Throws unless `voucher_admission_pauses` has its per-request shape
+   * (migration `VoucherAdmissionPausePerRequest1759600000006`). Every locked
+   * voucher admission reads it, so an API started before the migration would
+   * refuse every rail-B payment with a SQL error; this says so at boot instead.
+   * A database with no `payment_intents` at all (nothing migrated, nothing to
+   * admit against) is not this case and is left alone.
+   */
+  async assertAdmissionPauseSchema(): Promise<void> {
+    const [row] = (await this.manager.query(
+      `SELECT to_regclass('payment_intents') IS NOT NULL AS "intents",
+              (SELECT COUNT(*)::int FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'voucher_admission_pauses'
+                  AND column_name IN ('id', 'delegate', 'landed_at')) AS "columns"`,
+    )) as Array<{ intents: boolean; columns: number }>;
+    if (row?.intents && Number(row.columns) !== 3) {
+      throw new Error(
+        'voucher_admission_pauses is missing or has its old shape: run the migrations ' +
+          '(VoucherAdmissionPausePerRequest1759600000006) before starting the API',
+      );
+    }
+  }
+
+  /**
+   * Takes a `CREATED` rail-B intent out of {@link insertAdmittedVoucherIntent}'s
+   * in-flight count when its funds could not be secured: its deadline moves to
+   * now, so the expiry sweep closes it on its next pass exactly as it would
+   * have at the voucher's own deadline. A row that has moved on, or has a hold,
+   * is left alone.
+   */
+  async abandonUnsecuredVoucherIntent(organizationId: string, id: string): Promise<void> {
+    await this.update(
+      { organizationId, id, status: 'CREATED', holdId: IsNull() },
+      { expiresAt: () => 'now()' },
+    );
   }
 
   private selectSweepCandidates(): SelectQueryBuilder<PaymentIntentEntity> {
@@ -721,6 +1077,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         return 'intent.status';
       case ReceiptsSummaryGroupBy.VERDICT:
         return "COALESCE(intent.verificationVerdict, 'UNVERIFIED')";
+      case ReceiptsSummaryGroupBy.AGENT:
+        return 'intent.agentId';
+      case ReceiptsSummaryGroupBy.CREDENTIAL:
+        // Columns, not properties, for the reason `PROVIDER` gives.
+        return "COALESCE(intent.credential_id::text, 'agent:' || intent.agent_id::text)";
     }
   }
 
@@ -848,4 +1209,45 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
     return qb;
   }
+}
+
+async function readUnsettledVouchers(
+  manager: EntityManager,
+  scope: UnsettledVoucherScope,
+): Promise<UnsettledVoucherTotals> {
+  const byDelegate = scope.delegate ? ` AND lower("voucher_delegate") = lower($4)` : '';
+  const [row] = (await manager.query(
+    `SELECT
+       COUNT(*) FILTER (WHERE ${UNSETTLED_VOUCHER_SQL})::int AS "count",
+       COALESCE(SUM("price_amount") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}), 0)::text AS "total",
+       COALESCE(MAX("price_amount") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}), 0)::text AS "largest",
+       MAX("expires_at") FILTER (WHERE ${UNSETTLED_VOUCHER_SQL}) AS "latestExpiry",
+       COALESCE(SUM("price_amount") FILTER (
+         WHERE "status" = '${SETTLED_STATUS}' AND "hold_released_at" >= $3::timestamptz
+       ), 0)::text AS "redeemedSince"
+     FROM "payment_intents"
+     WHERE "organization_id" IS NOT NULL
+       AND "agent_account" = $1
+       AND "asset_id" = $2
+       AND "rail" = 'RAIL_B_VOUCHER'
+       AND ("hold_released_at" IS NULL OR "hold_released_at" >= $3::timestamptz)${byDelegate}`,
+    scope.delegate
+      ? [scope.payer, scope.assetId, scope.since, scope.delegate]
+      : [scope.payer, scope.assetId, scope.since],
+  )) as Array<{
+    count: number;
+    total: string;
+    largest: string;
+    latestExpiry: Date | null;
+    redeemedSince: string;
+  }>;
+  const latest = row?.latestExpiry ? new Date(row.latestExpiry) : null;
+  return {
+    count: Number(row?.count ?? 0),
+    total: BigInt(row?.total ?? '0'),
+    largest: BigInt(row?.largest ?? '0'),
+    redeemableUntil:
+      latest === null ? null : new Date(latest.getTime() + REDEEM_GRACE_SECONDS * 1000),
+    redeemedSince: BigInt(row?.redeemedSince ?? '0'),
+  };
 }

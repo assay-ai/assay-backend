@@ -54,13 +54,20 @@ function fakeVault(balanceAtomic: bigint, overrides: Partial<VaultPort> = {}): V
   };
 }
 
-function fakeEntries(totals: Partial<Record<LedgerEntryType, bigint>>) {
+function fakeEntries(
+  totals: Partial<Record<LedgerEntryType, bigint>>,
+  paidAtRedemption: { providerCredits: bigint; platformFees: bigint } = {
+    providerCredits: 0n,
+    platformFees: 0n,
+  },
+) {
   return {
     sumByEntryType: jest.fn().mockResolvedValue({
       totals: new Map(Object.entries(totals)),
       entries: Object.keys(totals).length,
       organizationsAtLeast: 1,
     }),
+    sumPaidAtRedemption: jest.fn().mockResolvedValue(paidAtRedemption),
   } as unknown as LedgerEntryRepository;
 }
 
@@ -201,6 +208,7 @@ function build(options: {
   snapshot?: { available: bigint; held?: bigint; pending?: bigint };
   runs?: ReturnType<typeof fakeRuns>;
   escrows?: readonly EscrowFixture[];
+  paidAtRedemption?: { providerCredits: bigint; platformFees: bigint };
 }) {
   const alerts = new RecordingAlertSink();
   const runs = options.runs ?? fakeRuns();
@@ -213,7 +221,7 @@ function build(options: {
   const service = new ReconciliationService(
     options.vault ?? fakeVault(options.vaultBalance ?? 0n),
     alerts,
-    fakeEntries(journal),
+    fakeEntries(journal, options.paidAtRedemption),
     fakeBalances(snapshot.available, snapshot.held ?? 0n, snapshot.pending ?? 0n, escrows),
     runs,
     escrowReader,
@@ -231,6 +239,61 @@ const BUYER_B: AccountId = toAccountId(
   CHAIN_IDS.SOLANA_MAINNET,
   'Buyer2222222222222222222222222222222222222',
 );
+
+describe('ReconciliationService — a rail-B redemption pays out of the vault', () => {
+  // The buyer deposited 20.00 into the escrow, one 0.10 voucher was redeemed:
+  // the escrow sent 0.09 to the provider and 0.01 to the treasury, so it holds
+  // 19.90. The journal still books the 0.09 and 0.01 — as earnings.
+  const journal = {
+    [LedgerEntryType.DEPOSIT]: 20_000_000n,
+    [LedgerEntryType.HOLD_CREATE]: 100_000n,
+    [LedgerEntryType.HOLD_COMMIT]: 100_000n,
+    [LedgerEntryType.PROVIDER_CREDIT]: 90_000n,
+    [LedgerEntryType.PLATFORM_FEE]: 10_000n,
+  };
+
+  it('does not count redeemed credits and fees against the vault', async () => {
+    const { service, alerts } = build({
+      vaultBalance: 19_900_000n,
+      journal,
+      snapshot: { available: 20_000_000n },
+      paidAtRedemption: { providerCredits: 90_000n, platformFees: 10_000n },
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.findings).toEqual([]);
+    expect(alerts.emitted).toHaveLength(0);
+    expect(report.providerPayableAtomic).toBe(0n);
+    expect(report.platformFeesAtomic).toBe(0n);
+    expect(report.totalLiabilitiesAtomic).toBe(19_900_000n);
+    // The snapshot is still compared against the journal's own total, which
+    // carries the credits as the provider's and the platform's balances.
+    expect(report.snapshotLiabilitiesAtomic).toBe(20_000_000n);
+  });
+
+  it('still owes a platform-absorbed credit, which no redemption paid', async () => {
+    // A second 0.10 call whose voucher died: buyer released, provider credited
+    // 0.09 from platform funds. The escrow paid nothing for it.
+    const { service } = build({
+      vaultBalance: 19_900_000n,
+      journal: {
+        ...journal,
+        [LedgerEntryType.HOLD_CREATE]: 200_000n,
+        [LedgerEntryType.HOLD_RELEASE]: 100_000n,
+        [LedgerEntryType.PROVIDER_CREDIT]: 180_000n,
+      },
+      snapshot: { available: 20_090_000n },
+      paidAtRedemption: { providerCredits: 90_000n, platformFees: 10_000n },
+    });
+
+    const report = await service.reconcile(USDC);
+
+    expect(report.providerPayableAtomic).toBe(90_000n);
+    expect(report.differenceAtomic).toBe(-90_000n);
+    expect(report.findings.map((f) => f.code)).toEqual([ReconciliationFindingCode.RESERVES_BREACH]);
+  });
+});
 
 describe('ReconciliationService — a matched vault is silent', () => {
   it('reports OK, emits nothing, and still records the run', async () => {

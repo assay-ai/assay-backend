@@ -1,3 +1,8 @@
+import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
+import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
+import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
+import { VoucherAdmissionPause1759600000005 } from '@database/postgres/migrations/1759600000005-voucher-admission-pause';
+import { VoucherAdmissionPausePerRequest1759600000006 } from '@database/postgres/migrations/1759600000006-voucher-admission-pause-per-request';
 import { ConfigService } from '@nestjs/config';
 import { randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
@@ -267,6 +272,14 @@ export async function createBindingEditorTestContext(
       // context writes fails on a column that does not exist. The column is
       // NOT NULL with a non-empty CHECK, so the fixture bodies name a chain.
       ToolBindingSettlementChains1759300000004,
+      // `payment_intents.voucher_delegate`, which `PaymentIntentEntity` maps
+      // (agent payment delegation).
+      VoucherDelegate1759600000000,
+      VoucherAdmissionIndex1759600000003,
+      PaymentIntentCredential1759600000004,
+      // `voucher_admission_pauses`, which the voucher admission reads (BUG-D1-07).
+      VoucherAdmissionPause1759600000005,
+      VoucherAdmissionPausePerRequest1759600000006,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',

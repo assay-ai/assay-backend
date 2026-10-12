@@ -4,8 +4,18 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { Alert, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
 import { CHAIN_IDS, ChainId, toAccountId } from '@modules/chains/ports/caip.types';
-import { EvmRelayClient, EvmRelayer } from '@modules/chains/evm/evm-relayer.service';
+import {
+  EVM_REDEEMER_IDENTITY,
+  EvmRelayClient,
+  EvmRelayer,
+  EvmSenderIdentity,
+} from '@modules/chains/evm/evm-relayer.service';
 import { EvmValueTransfer } from '@modules/chains/evm/ports/evm-relayer.port';
+import {
+  DEFAULT_EVM_RELAYER_RECEIPT_TIMEOUT_MS,
+  EvmRelayerTiming,
+  readEvmRelayerTiming,
+} from '@modules/chains/evm/evm-relayer-timing';
 
 /**
  * The relayer EOA: it sends transactions, it never signs a user's, and it
@@ -176,6 +186,45 @@ describe('EvmRelayer', () => {
     expect(node.sent).toHaveLength(0);
   });
 
+  it('is the relayer by default: its name and its missing-key error say so', async () => {
+    const { relayer } = build({ keys: [] });
+
+    expect(relayer.name).toBe('evm-relayer-eoa');
+    await expect(relayer.address(TESTNET)).rejects.toThrow(/relayer key/);
+  });
+
+  it('as the REDEEMER, names EVM_REDEEMER_KEYS — never EVM_RELAYER_KEYS — when it has no key', async () => {
+    const { relayer, node } = build({ keys: [], identity: EVM_REDEEMER_IDENTITY });
+
+    expect(relayer.name).toBe('evm-redeemer-eoa');
+    const error = await relayer.sendCall(call()).then(
+      () => null,
+      (caught: Error) => caught,
+    );
+    expect(error.message).toContain('EVM_REDEEMER_KEYS');
+    expect(error.message).not.toContain('EVM_RELAYER_KEYS');
+    expect(node.sent).toHaveLength(0);
+  });
+
+  it('as the REDEEMER, raises its low-float alert in its own bucket, naming the key', async () => {
+    // One condition per KEY: the relayer's bucket is the bare chain id, and the
+    // redeemer's must differ, or one key running dry silences the other's page.
+    const { relayer, node, alerts } = build({
+      lowWaterMarkWei: 10n ** 16n,
+      identity: EVM_REDEEMER_IDENTITY,
+    });
+    node.balance = 10n ** 15n;
+
+    await relayer.sendCall(call());
+
+    expect(alerts.emitted).toHaveLength(1);
+    expect(alerts.emitted[0].dedupeKey).toBe(`${TESTNET}:redeemer`);
+    expect(alerts.emitted[0].details).toEqual(
+      expect.objectContaining({ key: 'redeemer', redeemer: RELAYER_ADDRESS }),
+    );
+    expect(alerts.emitted[0].summary).toContain('redeemer');
+  });
+
   it('refuses to send to a different chain than the one it was asked for', async () => {
     // `to` is CAIP-10 and carries its own chain. A mismatch means somebody
     // built the call from two sources, and sending it anyway puts the platform's
@@ -214,6 +263,54 @@ describe('EvmRelayer', () => {
     await relayer.sendCall(call());
 
     expect(alerts.emitted).toHaveLength(0);
+  });
+
+  /**
+   * BUG-D1-07 review, finding 2: the admission pause around a relayed
+   * tightening is computed from these two settings, so the relayer must obey
+   * exactly them — the receipt timeout passed to viem explicitly, and the queue
+   * wait bounded for a send that asks for it.
+   */
+  describe('timing (BUG-D1-07 review)', () => {
+    it('passes its receipt timeout to viem explicitly, from config or the default', async () => {
+      const configured = build({ timing: { receiptTimeoutMs: 42_000, maxQueueWaitMs: 1_000 } });
+      await configured.relayer.sendCall(call());
+      expect(configured.node.receiptWaits[0].timeout).toBe(42_000);
+
+      const defaulted = build();
+      await defaulted.relayer.sendCall(call());
+      expect(defaulted.node.receiptWaits[0].timeout).toBe(DEFAULT_EVM_RELAYER_RECEIPT_TIMEOUT_MS);
+    });
+
+    it('gives a bounded send up UNSENT when it waited in the queue past the bound', async () => {
+      const { relayer, node } = build({ timing: { receiptTimeoutMs: 10_000, maxQueueWaitMs: 50 } });
+      let release!: () => void;
+      node.receiptGate = new Promise<void>((resolve) => (release = resolve));
+      const ahead = relayer.sendCall(call());
+      const bounded = relayer.sendCall({ ...call(), boundQueueWait: true });
+      const unbounded = relayer.sendCall(call());
+      await new Promise((resolve) => setTimeout(resolve, 80));
+      release();
+      node.receiptGate = null;
+
+      await expect(ahead).resolves.toMatchObject({ status: 'SUCCESS' });
+      await expect(bounded).rejects.toMatchObject({ errorCode: 'CHAIN_RELAY_NOT_SENT' });
+      // Nothing was signed for it; the send behind it still goes.
+      await expect(unbounded).resolves.toMatchObject({ status: 'SUCCESS' });
+      expect(node.sent).toHaveLength(2);
+    });
+
+    it('reads both settings from config, and refuses a malformed one', () => {
+      const env: Record<string, string> = {
+        EVM_RELAYER_RECEIPT_TIMEOUT_MS: '90000',
+        EVM_RELAYER_MAX_QUEUE_WAIT_MS: '30000',
+      };
+      expect(readEvmRelayerTiming((key) => env[key])).toEqual({
+        receiptTimeoutMs: 90_000,
+        maxQueueWaitMs: 30_000,
+      });
+      expect(() => readEvmRelayerTiming(() => '-1')).toThrow('positive whole number');
+    });
   });
 
   it('exposes no method that could return key material', () => {
@@ -298,7 +395,13 @@ class FakeNode implements EvmRelayClient {
     return `0x${'ab'.repeat(32)}`;
   }
 
-  async waitForTransactionReceipt() {
+  readonly receiptWaits: Array<{ hash: string; timeout?: number }> = [];
+  /** Set by a test: the receipt arrives only when this resolves. */
+  receiptGate: Promise<void> | null = null;
+
+  async waitForTransactionReceipt(args: { hash: `0x${string}`; timeout?: number }) {
+    this.receiptWaits.push(args);
+    if (this.receiptGate) await this.receiptGate;
     return {
       status: (this.reverting ? 'reverted' : 'success') as 'success' | 'reverted',
       gasUsed: 123_456n,
@@ -330,6 +433,8 @@ function build(
     keys?: readonly { chainId: ChainId; secretKey: `0x${string}` }[];
     lowWaterMarkWei?: bigint;
     nonceLatencyTicks?: number;
+    timing?: EvmRelayerTiming;
+    identity?: EvmSenderIdentity;
   } = {},
 ) {
   const node = new FakeNode(options.nonceLatencyTicks ?? 0);
@@ -339,6 +444,8 @@ function build(
     options.keys ?? [{ chainId: TESTNET, secretKey: RELAYER_KEY }],
     alerts,
     options.lowWaterMarkWei ?? 0n,
+    options.timing,
+    options.identity,
   );
   return { relayer, node, alerts };
 }

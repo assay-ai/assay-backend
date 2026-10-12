@@ -1,6 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Inject, Injectable, Logger, OnModuleDestroy } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import Redis from 'ioredis';
 
 import {
@@ -12,6 +12,8 @@ import {
 
 export const DEMO_RATE_REDIS = Symbol('DEMO_RATE_REDIS');
 export const DEMO_RATE_LIMITS_TOKEN = Symbol('DEMO_RATE_LIMITS');
+/** The Redis key prefix, so a second route can reuse this window under its own keys. */
+export const DEMO_RATE_KEY_PREFIX = Symbol('DEMO_RATE_KEY_PREFIX');
 
 /**
  * The sliding window behind `decideDemoRate`.
@@ -40,6 +42,9 @@ export class RedisDemoRateLimiter implements OnModuleDestroy {
   constructor(
     @Inject(DEMO_RATE_REDIS) private readonly redis: Redis,
     @Inject(DEMO_RATE_LIMITS_TOKEN) private readonly limits: DemoRateLimits = DEMO_RATE_LIMITS,
+    @Optional()
+    @Inject(DEMO_RATE_KEY_PREFIX)
+    private readonly keyPrefix: string = 'demo:rate:',
   ) {}
 
   /**
@@ -50,7 +55,7 @@ export class RedisDemoRateLimiter implements OnModuleDestroy {
    */
   async take(address: string): Promise<DemoRateOutcome> {
     const now = Date.now();
-    const key = `demo:rate:${address}`;
+    const key = `${this.keyPrefix ?? 'demo:rate:'}${address}`;
 
     let used: number | null = null;
     try {

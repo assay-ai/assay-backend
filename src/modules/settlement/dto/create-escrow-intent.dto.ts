@@ -1,5 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
-import { IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsBoolean, IsNotEmpty, IsOptional, IsString, Matches, MaxLength } from 'class-validator';
 
 import {
   UnsignedChainTransactionDto,
@@ -38,6 +38,16 @@ export class SetEscrowLimitsBodyDto {
   @MaxLength(32)
   @Matches(/^\d+$/, { message: 'maxPerWindow must be a non-negative decimal integer string' })
   maxPerWindow: string;
+
+  @ApiPropertyOptional({
+    description:
+      'BUG-D1-07. True accepts that this change lowers a cap below what payments still being ' +
+      'settled need, so the chain will refuse them and their providers go unpaid by the chain. ' +
+      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`.',
+  })
+  @IsOptional()
+  @IsBoolean()
+  acknowledgeUnsettled?: boolean;
 }
 
 /**

@@ -29,6 +29,10 @@ import {
   VoucherRedeemerPort,
 } from '@modules/payment/ports/voucher-redeemer.port';
 import {
+  ESCROW_DELEGATION,
+  EscrowDelegationPort,
+} from '@modules/settlement/ports/escrow-delegation.port';
+import {
   ESCROW_INTENT_BUILDER,
   EscrowIntentBuilderPort,
 } from '@modules/settlement/ports/escrow-intent-builder.port';
@@ -77,6 +81,7 @@ import { ChainId, ChainNamespace, namespaceOf } from './ports/caip.types';
 import { ChainVerifierRegistry } from './multiplex/chain-verifier-registry';
 import { NamespaceEscrowBalanceReader } from './multiplex/namespace-escrow-balance-reader';
 import { NamespaceEscrowIntentBuilder } from './multiplex/namespace-escrow-intent-builder';
+import { NamespaceEscrowDelegation } from './multiplex/namespace-escrow-delegation';
 import { NamespaceRelayedEscrowIntent } from './multiplex/namespace-relayed-escrow-intent';
 import { NamespaceStakeReader } from './multiplex/namespace-stake-reader';
 import { NamespaceStakeIntentBuilder } from './multiplex/namespace-stake-intent-builder';
@@ -479,6 +484,21 @@ import {
 
     {
       /**
+       * Agent payment delegation — `eip155` only. The EVM intent builder is the
+       * implementation: it already holds the escrow read, the chain clock and
+       * the deadline freshness rule the delegation messages share with
+       * `SetLimits`.
+       */
+      provide: ESCROW_DELEGATION,
+      useFactory: (evm: EvmEscrowIntentBuilder) =>
+        new NamespaceEscrowDelegation(
+          new Map<string, EscrowDelegationPort>([[ChainNamespace.EIP155, evm]]),
+        ),
+      inject: [EvmEscrowIntentBuilder],
+    },
+
+    {
+      /**
        * The submit half of the relayed escrow intents.
        *
        * The mirror image of the entry below: `EvmRelayedEscrowIntentSubmitter`
@@ -588,6 +608,7 @@ import {
     VOUCHER_REDEEMER,
     ESCROW_OPENER,
     ESCROW_INTENT_BUILDER,
+    ESCROW_DELEGATION,
     RELAYED_ESCROW_INTENT,
     WITHDRAW_GAS_GRANT,
     DEPOSIT_REQUIREMENTS_BUILDER,

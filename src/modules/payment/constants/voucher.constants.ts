@@ -55,3 +55,22 @@ export const VOUCHER_SEQ_RE = /^(0|[1-9][0-9]{0,19})$/;
 
 /** Written to `status_reason` when a voucher creates the intent. */
 export const VOUCHER_REDEEMED_REASON = 'voucher redeemed; signature and sequence verified';
+
+/**
+ * How much earlier than a chain read a closed hold still counts as "not in the
+ * counter that read returned", in milliseconds (BUG-D1-02).
+ *
+ * A voucher's hold is closed only after its redemption confirms, so a hold
+ * closed after the read belongs to a redemption the read could not see. The
+ * margin covers an RPC node that answers a few blocks behind the one the
+ * redemption job heard the receipt from. Too wide only counts a just-redeemed
+ * voucher twice for this long, which is the safe side.
+ */
+export const VOUCHER_ADMISSION_CHAIN_LAG_MS = 30_000;
+
+/**
+ * The width of both escrow programs' rolling spend window, in seconds:
+ * `SLASH_WINDOW_SECONDS` in `Constants.sol` and in the Anchor program. Both
+ * windows (the escrow's and a delegate's) drain over it.
+ */
+export const VOUCHER_WINDOW_SECONDS = 86_400;

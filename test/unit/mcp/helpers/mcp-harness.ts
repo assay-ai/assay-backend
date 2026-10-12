@@ -22,7 +22,10 @@ import {
   PaymentIntentTransitionContext,
   PaymentRail,
 } from '@modules/payment/ports/payment.types';
-import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
+import {
+  PaymentIntentService,
+  VoucherAdmission,
+} from '@modules/payment/services/payment-intent.service';
 import { CreatePaymentIntentInput } from '@modules/payment/ports/payment.types';
 import {
   ToolCallRecordInput,
@@ -164,6 +167,14 @@ export class FakeIntents {
 
   constructor(private readonly ledger: FakeLedger) {}
 
+  /** Intents `VoucherService` took out of the window count (funds not secured). */
+  readonly abandoned: string[] = [];
+
+  /** `PaymentIntentService.abandonUnsecuredVoucher`. */
+  async abandonUnsecuredVoucher(_organizationId: string, intentId: string): Promise<void> {
+    this.abandoned.push(intentId);
+  }
+
   /** `PaymentIntentService.isVoucherSeqUsed` — the up-front replay read. */
   async isVoucherSeqUsed(organizationId: string, account: string, seq: string): Promise<boolean> {
     return [...this.rows.values()].some(
@@ -174,7 +185,13 @@ export class FakeIntents {
     );
   }
 
-  create(input: CreatePaymentIntentInput): Promise<PaymentIntent> {
+  /** Set by a test: the payer's voucher admission is paused for that many seconds (BUG-D1-07). */
+  pausedFor: number | null = null;
+
+  create(input: CreatePaymentIntentInput, admission?: VoucherAdmission): Promise<PaymentIntent> {
+    if (admission && this.pausedFor !== null) {
+      admission.admit({ escrow: 0n, delegate: 0n, pausedFor: this.pausedFor });
+    }
     const id = `intent-${++this.sequence}`;
     const intent: PaymentIntent = {
       id,
@@ -205,6 +222,8 @@ export class FakeIntents {
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,
       voucherIssuedAt: input.voucherIssuedAt ?? null,
+      voucherDelegate: input.voucherDelegate ?? null,
+      credentialId: input.credentialId ?? null,
       holdId: null,
       holdReleasedAt: null,
       classification: null,
@@ -458,6 +477,9 @@ export class FakeEscrowReader implements EscrowBalanceReaderPort {
   withdrawRequested: bigint | null = null;
   /** The chain's highest redeemed seq, when the escrow exists (`withdrawRequested !== null`). */
   seqHigh = 0n;
+  /** The escrow's own limits (`setLimits`); 1 / 10 in the token's units by default. */
+  maxVoucherAmount = 1_000_000n;
+  maxPerWindow = 10_000_000n;
   throws: Error | null = null;
   readonly reads: AccountId[] = [];
 
@@ -470,11 +492,11 @@ export class FakeEscrowReader implements EscrowBalanceReaderPort {
       seqHigh: this.seqHigh,
       withdrawRequested: this.withdrawRequested,
       withdrawAvailableAt: 0,
-      maxVoucherAmount: 0n,
-      maxPerWindow: 0n,
+      maxVoucherAmount: this.maxVoucherAmount,
+      maxPerWindow: this.maxPerWindow,
       spentInWindow: 0n,
       windowStartedAt: 0,
-      observedAt: new Date(0),
+      observedAt: new Date(),
     };
   }
 

@@ -17,7 +17,10 @@ import {
 } from '@modules/payment/ports/payment.types';
 import { RedeemVoucherInput, SignedVoucher } from '@modules/payment/ports/voucher.types';
 import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
-import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
+import {
+  PaymentIntentService,
+  VoucherAdmission,
+} from '@modules/payment/services/payment-intent.service';
 import { VoucherService } from '@modules/payment/services/voucher.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -118,6 +121,11 @@ export class FakeEscrowSeqService {
     return this.issuedHighWater;
   }
 
+  /** Make the NEXT `advance()` return `seq`, as if everything below it had been issued. */
+  jumpTo(seq: bigint): void {
+    this.issuedHighWater = seq - 1n;
+  }
+
   async wasIssued(_organizationId: string, _account: AccountId, seq: bigint): Promise<boolean> {
     // Interleaves two concurrent `redeem()` calls at this point, the same way
     // the deleted `VoucherNonceStore`'s `reserve` used to — see
@@ -155,6 +163,12 @@ export class InMemoryIntentWriter {
   /** How many times `create` was reached, refused or not. */
   createAttempts = 0;
 
+  /** Set by a test: the payer's admission is paused for that many seconds (BUG-D1-07). */
+  pausedFor: number | null = null;
+
+  /** Set by a test: `buyer_escrows.next_seq` as the admission re-reads it under the lock (S2-2). */
+  nextSeq: bigint | null = null;
+
   async isVoucherSeqUsed(
     _organizationId: string,
     account: AccountId,
@@ -163,10 +177,50 @@ export class InMemoryIntentWriter {
     return this.seqKeys.has(`${account}#${seq}`);
   }
 
-  async create(input: CreatePaymentIntentInput): Promise<PaymentIntent> {
+  /** Intents `abandonUnsecuredVoucher` took out of the window count. */
+  readonly abandoned = new Set<string>();
+
+  /**
+   * Every intent this fake created and did not abandon is holding money: none
+   * has been redeemed. The admission runs synchronously with the push below,
+   * as the real one runs under the payer's lock with the insert.
+   */
+  private openTotals(scope: VoucherAdmission['scope']): { escrow: bigint; delegate: bigint } {
+    const open = this.created.filter(
+      (intent) =>
+        intent.agentAccount === scope.payer &&
+        intent.price.asset === scope.assetId &&
+        !this.abandoned.has(intent.id),
+    );
+    const sum = (rows: PaymentIntent[]) =>
+      rows.reduce((total, intent) => total + BigInt(intent.price.amount), 0n);
+    return {
+      escrow: sum(open),
+      delegate:
+        scope.delegate === null
+          ? 0n
+          : sum(open.filter((intent) => intent.voucherDelegate === scope.delegate)),
+    };
+  }
+
+  async abandonUnsecuredVoucher(_organizationId: string, intentId: string): Promise<void> {
+    this.abandoned.add(intentId);
+  }
+
+  async create(
+    input: CreatePaymentIntentInput,
+    admission?: VoucherAdmission,
+  ): Promise<PaymentIntent> {
     this.createAttempts += 1;
     if (this.failInsertWith) {
       throw this.failInsertWith;
+    }
+    if (admission) {
+      admission.admit({
+        ...this.openTotals(admission.scope),
+        pausedFor: this.pausedFor,
+        nextSeq: this.nextSeq,
+      });
     }
 
     // No `await` between the check and the claim — see the class comment on
@@ -212,6 +266,7 @@ export class InMemoryIntentWriter {
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,
       voucherIssuedAt: input.voucherIssuedAt ?? null,
+      voucherDelegate: input.voucherDelegate ?? null,
       holdId: null,
       holdReleasedAt: null,
       classification: null,

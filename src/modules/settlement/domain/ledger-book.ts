@@ -154,3 +154,34 @@ export function foldLiabilities(totals: ReadonlyMap<string, bigint>): LedgerLiab
     total: agentLiabilities + providerPayable + platformFees,
   };
 }
+
+/**
+ * The liabilities **the vault itself** must cover: the journal's books less
+ * what rail-B redemptions already paid out of the buyer's escrow.
+ *
+ * A redemption is `HOLD_COMMIT` + `PROVIDER_CREDIT` + `PLATFORM_FEE`, which
+ * conserves the journal total — but on chain the escrow sent `amount − fee` to
+ * the provider and `fee` to the treasury in the same instruction, so the
+ * vault dropped by the full `amount`. Without this every redemption grew the
+ * journal's claim on the vault by exactly what had just left it — on EVM,
+ * where the escrow IS the vault, an ever-growing false shortfall that only a
+ * stray deposit was hiding.
+ *
+ * Only the reserve comparison uses this. The snapshot check and the
+ * negative-book check stay on the journal's own fold — `account_balances`
+ * still carries those credits, correctly, as the provider's and the
+ * platform's earnings.
+ */
+export function vaultLiabilities(
+  journal: LedgerLiabilities,
+  paidAtRedemption: { readonly providerCredits: bigint; readonly platformFees: bigint },
+): LedgerLiabilities {
+  const providerPayable = journal.providerPayable - paidAtRedemption.providerCredits;
+  const platformFees = journal.platformFees - paidAtRedemption.platformFees;
+  return {
+    ...journal,
+    providerPayable,
+    platformFees,
+    total: journal.agentLiabilities + providerPayable + platformFees,
+  };
+}

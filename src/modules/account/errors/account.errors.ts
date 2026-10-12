@@ -12,6 +12,12 @@ export enum AccountErrorCode {
   ACCOUNT_NOTIFICATION_NOT_FOUND = 'ACCOUNT_NOTIFICATION_NOT_FOUND',
   ACCOUNT_CREDENTIAL_NOT_FOUND = 'ACCOUNT_CREDENTIAL_NOT_FOUND',
   ACCOUNT_AGENT_NOT_FOUND = 'ACCOUNT_AGENT_NOT_FOUND',
+  // ── Agent payment delegation: binding a credential to its delegate key ──
+  ACCOUNT_DELEGATE_BINDING_AGENT_ONLY = 'ACCOUNT_DELEGATE_BINDING_AGENT_ONLY',
+  ACCOUNT_DELEGATE_BINDING_UNSUPPORTED = 'ACCOUNT_DELEGATE_BINDING_UNSUPPORTED',
+  ACCOUNT_DELEGATE_CHALLENGE_INVALID = 'ACCOUNT_DELEGATE_CHALLENGE_INVALID',
+  ACCOUNT_DELEGATE_SIGNATURE_INVALID = 'ACCOUNT_DELEGATE_SIGNATURE_INVALID',
+  ACCOUNT_DELEGATE_ALREADY_BOUND = 'ACCOUNT_DELEGATE_ALREADY_BOUND',
 }
 
 export type AccountErrorCodesArePrefixed = AssertDomainErrorCodes<'ACCOUNT', `${AccountErrorCode}`>;
@@ -42,5 +48,53 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
     statusCode: 404,
     message: (context?: Record<string, any>) =>
       `Agent not found${context?.agentId ? ` with id: ${context.agentId}` : ''}`,
+  },
+  /**
+   * Binding a delegate key is the AGENT's act, with its own credential: the
+   * binding is per credential, and only the machine holding the key can sign
+   * the proof. A person's session has no credential of its own to bind.
+   */
+  delegateBindingAgentOnly: {
+    code: AccountErrorCode.ACCOUNT_DELEGATE_BINDING_AGENT_ONLY,
+    statusCode: 403,
+    message: () =>
+      `Only an agent credential can bind a delegate key — call this with the agent's own token`,
+  },
+  /** The agent's chain has no voucher delegation (Solana). */
+  delegateBindingUnsupported: {
+    code: AccountErrorCode.ACCOUNT_DELEGATE_BINDING_UNSUPPORTED,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Voucher delegation is not available on ${context?.chainId ?? 'this chain'}`,
+  },
+  /** The challenge is unknown, already used, expired, or issued to another credential. */
+  delegateChallengeInvalid: {
+    code: AccountErrorCode.ACCOUNT_DELEGATE_CHALLENGE_INVALID,
+    statusCode: 400,
+    message: () =>
+      `The delegate challenge is unknown, used, expired or not this credential's — request a new one`,
+  },
+  /** The signature does not recover to the delegate the challenge names. */
+  delegateSignatureInvalid: {
+    code: AccountErrorCode.ACCOUNT_DELEGATE_SIGNATURE_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `The signature was not made by the delegate key${
+        context?.delegate ? ` ${context.delegate}` : ''
+      }; nothing was bound`,
+  },
+  /**
+   * The key is already bound to ANOTHER live agent credential (in any
+   * organization). A delegate key belongs to one credential, so what it spent
+   * is attributable to one agent and revoking that credential ends it. Which
+   * credential holds it is not said: it may be another tenant's.
+   */
+  delegateAlreadyBound: {
+    code: AccountErrorCode.ACCOUNT_DELEGATE_ALREADY_BOUND,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The delegate key${
+        context?.delegate ? ` ${context.delegate}` : ''
+      } is already bound to another agent credential; nothing was bound. Revoke that credential, or bind a key of this agent's own`,
   },
 });

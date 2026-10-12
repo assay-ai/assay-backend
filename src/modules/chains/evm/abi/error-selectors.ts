@@ -3,33 +3,32 @@ import { toFunctionSelector } from 'viem';
 /**
  * Every `error X();` in assay-evm's `src/Errors.sol`, by name.
  *
- * All 71 are **zero-argument** custom errors, so a revert arrives as a bare
+ * All 81 are **zero-argument** custom errors, so a revert arrives as a bare
  * 4-byte selector with nothing else in it — the only way to say what happened
  * is this table. `check-errors.sh` in `evm/` keeps the Solidity honest;
- * `abi-selectors.spec.ts` keeps this list in step by pinning all 71 names to
- * the selectors `cast sig` produced, which is a different keccak
- * implementation from the one below.
+ * `abi-selectors.spec.ts` keeps this list in step by pinning every name to the
+ * selector `cast sig` produced, which is a different keccak implementation from
+ * the one below.
  *
  * Order is the declaration order in `Errors.sol`, so a diff against the
- * Solidity reads straight down.
- *
- * Five of these have no producer on chain and are deliberately kept in
- * `Errors.sol` (assay-evm's `docs/divergences.md` table 2): `EscrowLimitsRequireBuyer`,
- * `DestinationIsVault`, `NotBuyer`, `SignerIsNotVerifier`,
- * `AmountExceedsUint64`. They are listed here too — a table that omits them
- * cannot report one if it ever fires, and "cannot happen" is a claim about
- * today's bytecode.
+ * Solidity reads straight down. D-18 removed seven errors with no producer
+ * left (`AmountExceedsUint64`, `NotBuyer`, `SignerIsNotVerifier`,
+ * `EscrowLimitsRequireBuyer`, `DestinationIsVault`, `WalletCheckUnderfunded`,
+ * `Permit2NotConfigured`); D-17/D-18 added `NotOwner`,
+ * `OwnershipCannotBeRenounced`, `AdminChangeRequiresOwner`,
+ * `VoucherSeqGapTooLarge` and `SignatureDeadlineTooFar`.
  */
 const NAMES: readonly string[] = [
   'ZeroAmount',
   'ZeroAddress',
-  'AmountExceedsUint64',
   'MathOverflow',
   'ProgramPaused',
   'NotAdmin',
   'InvalidAdmin',
   'NotRedeemer',
-  'NotBuyer',
+  'NotOwner',
+  'OwnershipCannotBeRenounced',
+  'AdminChangeRequiresOwner',
   'InvalidTakeRateBps',
   'InvalidSplitBps',
   'InvalidSlashCapBps',
@@ -49,12 +48,13 @@ const NAMES: readonly string[] = [
   'MalleableSignature',
   'BadSignatureV',
   'SignerIsNotPayer',
-  'SignerIsNotVerifier',
   'SignerIsNotBuyer',
   'SignatureExpired',
+  'SignatureDeadlineTooFar',
   'BadNonce',
   'VoucherSeqZero',
   'VoucherSeqNotIncreasing',
+  'VoucherSeqGapTooLarge',
   'VoucherExpired',
   'VoucherNotYetValid',
   'InvalidVoucherWindow',
@@ -63,18 +63,26 @@ const NAMES: readonly string[] = [
   'EscrowWindowLimitExceeded',
   'EscrowInsufficient',
   'EscrowLimitsUnchanged',
-  'EscrowLimitsRequireBuyer',
   'ProviderBelowMinimumStake',
   'BatchTooLarge',
   'BatchLengthMismatch',
   'EmptyBatch',
+  'DelegateIsPayer',
+  'DelegateCapsInvalid',
+  'DelegateCapsExceedEscrowLimits',
+  'DelegateValidUntilInvalid',
+  'DelegationUnchanged',
+  'DelegateNotActive',
+  'TooManyDelegates',
+  'DelegateIsRevoked',
+  'DelegateIsExpired',
+  'DelegateVoucherExceedsPerCallLimit',
+  'DelegateWindowLimitExceeded',
   'WithdrawNotYetAvailable',
   'NoWithdrawRequested',
   'WithdrawDelayTooShort',
   'TransferAmountMismatch',
-  'Permit2NotConfigured',
   'AssetDecimalsNotSix',
-  'DestinationIsVault',
   'InsufficientBondedStake',
   'InsufficientUnbondingStake',
   'UnbondingPeriodNotElapsed',
@@ -94,10 +102,27 @@ const NAMES: readonly string[] = [
   'SlashNotExpired',
 ];
 
-/** 4-byte selector (lower-case, `0x`-prefixed) → the `Errors.sol` name. */
-export const EVM_ERROR_BY_SELECTOR: ReadonlyMap<string, string> = new Map(
-  NAMES.map((name) => [toFunctionSelector(`${name}()`), name] as const),
-);
+/**
+ * OpenZeppelin's own errors that `X402Config`'s owner doors raise
+ * (`Ownable2StepUpgradeable`, D-17). Unlike `Errors.sol` these carry an
+ * argument, so the selector is over the full signature; the decoded name drops
+ * the argument, which a revert reason does not need. The backend calls none of
+ * those doors — they are here so a revert that carries one is named, not
+ * `UNKNOWN_REVERT`.
+ */
+const PARAMETERISED_SIGNATURES: readonly string[] = [
+  'OwnableUnauthorizedAccount(address)',
+  'OwnableInvalidOwner(address)',
+];
+
+/** 4-byte selector (lower-case, `0x`-prefixed) → the error's name. */
+export const EVM_ERROR_BY_SELECTOR: ReadonlyMap<string, string> = new Map([
+  ...NAMES.map((name) => [toFunctionSelector(`${name}()`), name] as const),
+  ...PARAMETERISED_SIGNATURES.map(
+    (signature) =>
+      [toFunctionSelector(signature), signature.slice(0, signature.indexOf('('))] as const,
+  ),
+]);
 
 /**
  * The `Errors.sol` name behind a revert, or `UNKNOWN_REVERT:…`. **Never null,

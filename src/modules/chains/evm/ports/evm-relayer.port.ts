@@ -57,6 +57,12 @@ export interface EvmRelayedCall {
   readonly gasLimit: bigint;
   /** For the journal and the alert. Never used to choose behaviour. */
   readonly purpose: string;
+  /**
+   * Give the send up, unsent, when it waited in the chain's queue longer than
+   * the relayer's `maxQueueWaitMs` (`ChainErrors.relayNotSent`). For a caller
+   * that must bound how long the outcome can stay unknown (`evm-relayer-timing.ts`).
+   */
+  readonly boundQueueWait?: boolean;
 }
 
 /** A bare value transfer. NOTE THE ABSENCE OF A CALLDATA FIELD. */
@@ -90,4 +96,17 @@ export interface EvmRelayerPort {
   sendValue(transfer: EvmValueTransfer): Promise<EvmRelayResult>;
 }
 
+/**
+ * DI token: the RELAYER — relays buyer-signed `*BySig` requests, funds the
+ * withdraw gas grant and sends the slash executor's calls. It holds no
+ * on-chain role.
+ */
 export const EVM_RELAYER = 'EVM_RELAYER';
+
+/**
+ * DI token: the REDEEMER — the key `Config.params().redeemer` names, and the
+ * only sender `redeemVoucher[Batch]` accepts. Same port as the relayer,
+ * different key (`EVM_REDEEMER_KEYS`), held only by `EvmVoucherRedeemer`. The
+ * boot refuses a deployment where the two keys are the same on any chain.
+ */
+export const EVM_REDEEMER = 'EVM_REDEEMER';

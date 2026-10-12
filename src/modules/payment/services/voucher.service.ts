@@ -3,11 +3,22 @@ import { Injectable, Logger } from '@nestjs/common';
 
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { assertRailOffered } from '@modules/chains/chain-metadata';
-import { chainIdOf, isAccountId } from '@modules/chains/ports/caip.types';
+import {
+  AccountId,
+  chainIdOf,
+  isAccountId,
+  parseAccountId,
+} from '@modules/chains/ports/caip.types';
+import {
+  VoucherAuthorityKind,
+  VoucherAuthorityRefusal,
+  VoucherDelegationTerms,
+} from '@modules/chains/ports/voucher-authority.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
+  VOUCHER_ADMISSION_CHAIN_LAG_MS,
   VOUCHER_CLOCK_SKEW_TOLERANCE_SECONDS,
   VOUCHER_MAX_TTL_SECONDS,
   VOUCHER_SEQ_RE,
@@ -21,8 +32,9 @@ import {
   railName,
 } from '../ports/payment.types';
 import { RedeemVoucherInput } from '../ports/voucher.types';
-import { EscrowSeqService } from './escrow-seq.service';
-import { PaymentIntentService } from './payment-intent.service';
+import { decayVoucherWindow } from '../domain/voucher-window';
+import { EscrowSeqService, assertWithinSeqGap } from './escrow-seq.service';
+import { PaymentIntentService, VoucherAdmission } from './payment-intent.service';
 
 /**
  * C0 and C1 control characters — anything that would break the line-separated
@@ -31,6 +43,14 @@ import { PaymentIntentService } from './payment-intent.service';
  */
 // eslint-disable-next-line no-control-regex
 const CONTROL_CHARACTERS_RE = /[\u0000-\u001f\u007f-\u009f]/;
+
+/** A delegate the chain says may sign for the payer, as read for this decision. */
+interface AdmittedDelegation {
+  readonly delegate: AccountId;
+  readonly terms: VoucherDelegationTerms;
+  /** Taken just before the chain read: no redemption after it is in `terms`. */
+  readonly readAt: Date;
+}
 
 /** A `resource` longer than this is not a resource identifier. */
 const MAX_RESOURCE_LENGTH = 512;
@@ -65,9 +85,15 @@ const MAX_RESOURCE_LENGTH = 512;
  *   1  shape          — is this even a voucher?          cheap, no I/O
  *   2  expiry/window   — is it still alive, and sane?     cheap, no I/O
  *   3  binding        — does it authorise this call?     cheap, one sha256
- *   4  signature      — did the payer really sign it?    ~50µs of ed25519
+ *   4  signature      — did the payer authorise it?      ~50µs; chain reads
+ *                       (its own key, or an on-chain     only when the payer's
+ *                       delegate within caps)            own key did not sign
+ *   4b escrow limit   — the payer's own per-voucher      no I/O (the caller's
+ *                       limit                             escrow read)
  *   5  seq issued     — did we hand this number out?     one Postgres read
- *   6  intent insert  — record it, durably               one Postgres write
+ *   6  intent insert  — record it, durably, if it fits   one Postgres
+ *                       the windows (escrow + delegate)   transaction, under
+ *                                                         the payer's lock
  * ```
  *
  * Expiry before signature is a security requirement: signature
@@ -105,10 +131,11 @@ export class VoucherService {
     this.assertWellFormed(voucher);
     this.assertUnexpired(voucher, now);
     this.assertAuthorisesCall(voucher, input);
-    this.assertSignedByPayer(voucher, signature, input);
+    const delegation = await this.assertAuthorisedByPayer(voucher, signature, input, now);
+    this.assertWithinEscrowLimit(voucher, input);
     await this.assertIssuedSeq(voucher, input);
 
-    return this.record(voucher, input);
+    return this.record(voucher, input, delegation);
   }
 
   // ── 1. Shape ─────────────────────────────────────────────────────────────
@@ -346,26 +373,141 @@ export class VoucherService {
   // ── 4. Signature ─────────────────────────────────────────────────────────
 
   /**
-   * The signer is `voucher.payer` — the account inside the signed message, and
-   * by then already checked to be the authenticated caller.
+   * The voucher must be authorised by `voucher.payer` — the account inside the
+   * signed message, by then already checked to be the authenticated caller —
+   * under the CHAIN's rule, which this mirrors exactly
+   * (`X402Escrow._voucherAuthority`):
+   *
+   *   (a) the payer's own key signed it — checked first, synchronously, with no
+   *       I/O, exactly as before delegation existed;
+   *   (b) a DELEGATE key the payer authorised on chain signed it, the delegate is
+   *       not revoked or lapsed, and the voucher fits the delegate's own caps.
+   *
+   * There is no third path: the contract has no EIP-1271 branch (assay-evm
+   * D-18), so a contract-wallet payer authorises a delegate instead.
+   *
+   * (b) is answered by the chain adapter from CHAIN STATE and fails closed.
+   * Returns the delegate and its terms for (b), null otherwise; the delegate is
+   * recorded on the intent, and its window is checked when the intent is
+   * written (see `record`).
    *
    * Verifying against a signer taken from anywhere else, a header or a request
    * field, would let an attacker present someone else's voucher alongside their
-   * own key and have it pass.
+   * own key and have it pass — which is why the delegate is never something the
+   * caller names: it is whoever the signature recovers to, and only the chain
+   * says whether that key may sign for this payer.
    */
-  private assertSignedByPayer(
+  private async assertAuthorisedByPayer(
     voucher: Voucher,
     signature: string,
     input: RedeemVoucherInput,
-  ): void {
+    now: number,
+  ): Promise<AdmittedDelegation | null> {
     const adapter = this.chains.resolve(input.chainId);
 
     if (typeof signature !== 'string' || signature.length === 0) {
       throw PaymentErrors.voucherSignatureInvalid({ payer: voucher.payer });
     }
 
-    if (!adapter.verifyVoucherSignature(voucher, signature, voucher.payer)) {
+    // (a)
+    if (adapter.verifyVoucherSignature(voucher, signature, voucher.payer)) {
+      return null;
+    }
+    if (typeof adapter.authorizeVoucherSigner !== 'function') {
       throw PaymentErrors.voucherSignatureInvalid({ payer: voucher.payer });
+    }
+
+    // `readAt` is taken BEFORE the read: the delegate's counter it returns can
+    // contain no redemption confirmed after this instant.
+    const readAt = new Date();
+    const answer = await adapter.authorizeVoucherSigner(voucher, signature, now);
+    switch (answer.kind) {
+      case VoucherAuthorityKind.PAYER:
+        return null;
+      case VoucherAuthorityKind.DELEGATE:
+        this.assertWithinDelegation(voucher, input, answer.delegate, answer.terms);
+        return { delegate: answer.delegate, terms: answer.terms, readAt };
+      case 'REFUSED':
+        if (
+          answer.reason === VoucherAuthorityRefusal.DELEGATE_REVOKED ||
+          answer.reason === VoucherAuthorityRefusal.DELEGATE_EXPIRED
+        ) {
+          throw PaymentErrors.voucherDelegateInactive({
+            payer: voucher.payer,
+            delegate: answer.signer,
+            reason: answer.reason,
+          });
+        }
+        throw PaymentErrors.voucherSignatureInvalid({ payer: voucher.payer });
+    }
+  }
+
+  /**
+   * (b)'s caps, which the chain will apply at redemption and which therefore
+   * have to hold BEFORE the call is served — a voucher the chain will refuse is
+   * a provider working for nothing.
+   *
+   * - The signer must be the delegate bound to THIS agent credential: an agent
+   *   spends only through the key it proved it holds.
+   * - The delegation must outlive the voucher's whole REDEEMABLE life:
+   *   `validUntil >= expiresAt + redeemGrace`. The chain checks `validUntil` at
+   *   the redemption block, and the redemption job runs after settlement — any
+   *   time up to the grace after `expiresAt`. A delegation that lapses inside
+   *   that grace is a served call refused at redemption (review S2-1), so the
+   *   margin is the latest instant the chain would still redeem.
+   * - `amount <= maxVoucherAmount`, the delegate's per-voucher cap.
+   *
+   * The delegate's WINDOW is checked in `record`, atomically with the insert
+   * (BUG-D1-02), and so are the escrow's own limits, which bind a delegate on
+   * top of its caps (BUG-D1-03).
+   */
+  private assertWithinDelegation(
+    voucher: Voucher,
+    input: RedeemVoucherInput,
+    delegate: AccountId,
+    terms: VoucherDelegationTerms,
+  ): void {
+    const bound = input.boundDelegate ?? null;
+    if (bound === null || !sameAccount(bound, delegate)) {
+      throw PaymentErrors.voucherDelegateNotBound({ delegate, bound });
+    }
+
+    if (voucher.expiresAt + terms.redeemGraceSeconds > terms.validUntil) {
+      throw PaymentErrors.voucherDelegateLimitExceeded({
+        limit: 'validUntil',
+        allowed:
+          `a voucher expiring by ` +
+          new Date((terms.validUntil - terms.redeemGraceSeconds) * 1000).toISOString() +
+          ` (the delegation ends ${new Date(terms.validUntil * 1000).toISOString()} and the ` +
+          `chain redeems up to ${terms.redeemGraceSeconds}s after a voucher expires)`,
+      });
+    }
+
+    const amount = BigInt(voucher.amount.amount);
+    if (amount > terms.maxVoucherAmount) {
+      throw PaymentErrors.voucherDelegateLimitExceeded({
+        limit: 'maxVoucherAmount',
+        allowed: terms.maxVoucherAmount.toString(),
+      });
+    }
+  }
+
+  /**
+   * The payer's OWN escrow per-voucher limit (`setLimits`), which the chain
+   * applies at redemption to every voucher, whoever signed it (BUG-D1-03).
+   * Checked against the escrow reading the caller made for this call; a caller
+   * that passes none (no escrow open) leaves it to the gates that refuse that.
+   *
+   * The escrow's window is checked in `record`, under the payer's lock.
+   */
+  private assertWithinEscrowLimit(voucher: Voucher, input: RedeemVoucherInput): void {
+    const escrow = input.escrow ?? null;
+    if (escrow === null) return;
+    if (BigInt(voucher.amount.amount) > escrow.maxVoucherAmount) {
+      throw PaymentErrors.voucherEscrowLimitExceeded({
+        limit: 'maxVoucherAmount',
+        allowed: escrow.maxVoucherAmount.toString(),
+      });
     }
   }
 
@@ -401,6 +543,13 @@ export class VoucherService {
       });
     }
 
+    // The chain's seq jump cap (`X402Escrow.MAX_SEQ_GAP`), when this call read
+    // the escrow: a voucher the chain would refuse with `VoucherSeqGapTooLarge`
+    // is not served on, even though this backend issued its seq.
+    if (input.escrow) {
+      assertWithinSeqGap(BigInt(voucher.seq), input.escrow.seqHigh, input.agentAccount);
+    }
+
     // A sequential replay is refused here, by name, rather than left to the
     // unique index in `record()` — which still arbitrates a concurrent one,
     // with the same error.
@@ -424,64 +573,174 @@ export class VoucherService {
    * `uq_payment_intents_account_voucher_seq` — and then reserves the price
    * against the agent's balance.
    *
-   * No try/catch and nothing to release on failure: v1's release-on-failure
-   * branch existed only to give a Redis reservation back, and there is no
-   * reservation any more. A unique-index violation on the seq is not a
-   * transient failure to recover from — `PaymentIntentService.create` already
-   * turns it into `PAYMENT_VOUCHER_SEQ_ALREADY_USED`, which is exactly the
-   * answer a genuine replay deserves, and any other failure simply propagates with
-   * nothing to undo.
+   * A unique-index violation on the seq is not a transient failure to recover
+   * from — `PaymentIntentService.create` already turns it into
+   * `PAYMENT_VOUCHER_SEQ_ALREADY_USED`, which is exactly the answer a genuine
+   * replay deserves. The one thing undone on failure is the window place: the
+   * `CREATED` row is the reservation the next admission counts (BUG-D1-02), so
+   * a voucher whose funds could not be secured gives it back at once.
    */
-  private async record(voucher: Voucher, input: RedeemVoucherInput): Promise<PaymentIntent> {
+  private async record(
+    voucher: Voucher,
+    input: RedeemVoucherInput,
+    delegation: AdmittedDelegation | null,
+  ): Promise<PaymentIntent> {
     assertRailOffered(input.chainId, railName(PaymentRail.RAIL_B_VOUCHER));
+    const delegate = delegation?.delegate ?? null;
 
-    const intent = await this.intents.create({
-      organizationId: input.organizationId,
-      agentId: input.agentId,
-      agentAccount: input.agentAccount,
-      providerId: input.providerId,
-      providerAccount: input.providerAccount,
-      toolId: input.toolId,
-      // The rail-B half of `assertRailOffered`'s two call sites. Both
-      // chains this deployment can enable offer rail B, so today this refuses
-      // nothing; it is here because the ASSERTION belongs at the site that
-      // chooses a rail, and a check that only exists on the rail that happens to
-      // be restricted is one nobody thinks to move when the restriction moves.
-      rail: PaymentRail.RAIL_B_VOUCHER,
-      // The call id is minted here rather than threaded in from a caller —
-      // this path has no router and no invoker in front of it yet (`redeem()`
-      // still has no caller), so there is no upstream request this value
-      // could be echoed onto today. It is still recorded, both because a call
-      // id is intrinsic to every payment intent (the column is `NOT NULL`) and
-      // so a future caller that dials `providerId` directly has something to
-      // send. Rail B always names a provider in the signed voucher itself, so
-      // this is always `PAID` — there is no `FREE` voucher.
-      callId: randomUUID(),
-      callClass: PaymentIntentCallClass.PAID,
-      price: input.price,
-      platformFee: input.platformFee,
-      requestHash: voucher.requestHash,
-      chainId: input.chainId,
-      voucherSeq: voucher.seq,
-      // The three fields `redeem_voucher` cannot reconstruct minutes later.
-      // The signature is the buyer's and no key here could produce it again;
-      // `resourceHash` hashes a `resource` string that a binding may since have
-      // changed; `issuedAt` is both a signed field and the instant the 2,220s
-      // redemption deadline runs from. The resource hash is the CHAIN's —
-      // sha256 on Solana, keccak256 on eip155 — because it is replayed as
-      // signed bytes and nothing recomputes it.
-      voucherSignature: input.signed.signature,
-      voucherResourceHash: this.chains.resolve(input.chainId).voucherResourceHash(voucher.resource),
-      voucherIssuedAt: voucher.issuedAt,
-      // No idempotency key on this path, deliberately. The seq *is* rail B's
-      // idempotency key, and it is stricter: a replayed voucher is refused
-      // rather than answered with the original intent, which is what the
-      // single-use requirement asks for. Carrying both would leave two unique
-      // indexes racing to report the same replay under different error codes.
-      expiresAt: new Date(voucher.expiresAt * 1000),
-    });
+    const intent = await this.intents.create(
+      {
+        organizationId: input.organizationId,
+        agentId: input.agentId,
+        agentAccount: input.agentAccount,
+        providerId: input.providerId,
+        providerAccount: input.providerAccount,
+        toolId: input.toolId,
+        // The rail-B half of `assertRailOffered`'s two call sites. Both
+        // chains this deployment can enable offer rail B, so today this refuses
+        // nothing; it is here because the ASSERTION belongs at the site that
+        // chooses a rail, and a check that only exists on the rail that happens to
+        // be restricted is one nobody thinks to move when the restriction moves.
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        // The call id is minted here rather than threaded in from a caller —
+        // this path has no router and no invoker in front of it yet (`redeem()`
+        // still has no caller), so there is no upstream request this value
+        // could be echoed onto today. It is still recorded, both because a call
+        // id is intrinsic to every payment intent (the column is `NOT NULL`) and
+        // so a future caller that dials `providerId` directly has something to
+        // send. Rail B always names a provider in the signed voucher itself, so
+        // this is always `PAID` — there is no `FREE` voucher.
+        callId: randomUUID(),
+        callClass: PaymentIntentCallClass.PAID,
+        price: input.price,
+        platformFee: input.platformFee,
+        requestHash: voucher.requestHash,
+        chainId: input.chainId,
+        voucherSeq: voucher.seq,
+        // The three fields `redeem_voucher` cannot reconstruct minutes later.
+        // The signature is the buyer's and no key here could produce it again;
+        // `resourceHash` hashes a `resource` string that a binding may since have
+        // changed; `issuedAt` is both a signed field and the instant the 2,220s
+        // redemption deadline runs from. The resource hash is the CHAIN's —
+        // sha256 on Solana, keccak256 on eip155 — because it is replayed as
+        // signed bytes and nothing recomputes it.
+        voucherSignature: input.signed.signature,
+        voucherResourceHash: this.chains
+          .resolve(input.chainId)
+          .voucherResourceHash(voucher.resource),
+        voucherIssuedAt: voucher.issuedAt,
+        // The delegate whose on-chain window this voucher will count against, so
+        // the next delegate-signed call sees it before it reaches the chain.
+        voucherDelegate: delegate,
+        credentialId: input.credentialId ?? null,
+        // No idempotency key on this path, deliberately. The seq *is* rail B's
+        // idempotency key, and it is stricter: a replayed voucher is refused
+        // rather than answered with the original intent, which is what the
+        // single-use requirement asks for. Carrying both would leave two unique
+        // indexes racing to report the same replay under different error codes.
+        expiresAt: new Date(voucher.expiresAt * 1000),
+      },
+      this.admission(voucher, input, delegation),
+    );
 
-    return this.intents.secureFunds(input.organizationId, intent.id);
+    try {
+      return await this.intents.secureFunds(input.organizationId, intent.id);
+    } catch (error) {
+      // Nothing was reserved: give the window back now rather than at the
+      // voucher's deadline. Best effort — the deadline still frees it.
+      await this.intents
+        .abandonUnsecuredVoucher(input.organizationId, intent.id)
+        .catch((abandonError: unknown) => {
+          this.logger.warn(
+            `Intent ${intent.id}: funds not secured and could not be taken out of the ` +
+              `window count; it frees at the voucher's deadline. ${describe(abandonError)}`,
+          );
+        });
+      throw error;
+    }
+  }
+
+  /**
+   * The windows this voucher must fit, checked under the payer's lock and
+   * atomically with the insert (BUG-D1-02): for each window, the chain's
+   * counter decayed to now, plus every voucher accepted that the chain has not
+   * counted yet (in flight, served and unredeemed, or redeemed after the
+   * counter was read), plus this one, must fit the cap.
+   *
+   * - The ESCROW's window (`maxPerWindow` from `setLimits`): every voucher of
+   *   the payer, the payer's own and every delegate's.
+   * - The DELEGATE's window, for a delegate-signed voucher: its own vouchers.
+   *
+   * Undefined when there is nothing to check (no escrow reading and no
+   * delegate), and the insert then takes no lock.
+   */
+  private admission(
+    voucher: Voucher,
+    input: RedeemVoucherInput,
+    delegation: AdmittedDelegation | null,
+  ): VoucherAdmission | undefined {
+    const escrow = input.escrow ?? null;
+    if (escrow === null && delegation === null) return undefined;
+
+    const nowSeconds = Math.floor(Date.now() / 1000);
+    const amount = BigInt(voucher.amount.amount);
+    const lagged = (at: Date) => new Date(at.getTime() - VOUCHER_ADMISSION_CHAIN_LAG_MS);
+    const escrowCarried =
+      escrow === null
+        ? 0n
+        : decayVoucherWindow(escrow.spentInWindow, escrow.windowStartedAt, nowSeconds);
+
+    return {
+      scope: {
+        payer: input.agentAccount,
+        assetId: voucher.amount.asset,
+        delegate: delegation?.delegate ?? null,
+        escrowSince: lagged(escrow?.observedAt ?? delegation?.readAt ?? new Date()),
+        delegateSince: delegation === null ? null : lagged(delegation.readAt),
+      },
+      admit: (open) => {
+        // A change tightening the payer's caps is being relayed (BUG-D1-07):
+        // admitting under the caps that are about to go could strand this one.
+        // Refused before the insert, so nothing is reserved and the seq stays
+        // free for the retry.
+        if (open.pausedFor) {
+          // `retryAfter` (seconds), the key the MCP error already carries for
+          // velocity, so an agent paces itself the same way for both.
+          throw PaymentErrors.voucherAdmissionPaused({ retryAfter: open.pausedFor });
+        }
+        // Re-checked under the payer's lock: a seq rewind (S2-2) since the
+        // up-front `wasIssued` read means this seq is no longer issued.
+        if (
+          open.nextSeq !== undefined &&
+          open.nextSeq !== null &&
+          BigInt(voucher.seq) >= open.nextSeq
+        ) {
+          throw PaymentErrors.voucherSeqMismatch({
+            account: input.agentAccount,
+            actual: voucher.seq,
+          });
+        }
+        if (escrow !== null) {
+          const used = escrowCarried + open.escrow;
+          if (used + amount > escrow.maxPerWindow) {
+            throw PaymentErrors.voucherEscrowLimitExceeded({
+              limit: 'maxPerWindow',
+              allowed: (escrow.maxPerWindow > used ? escrow.maxPerWindow - used : 0n).toString(),
+            });
+          }
+        }
+        if (delegation !== null) {
+          const used = delegation.terms.carriedInWindow + open.delegate;
+          if (used + amount > delegation.terms.maxPerWindow) {
+            const cap = delegation.terms.maxPerWindow;
+            throw PaymentErrors.voucherDelegateLimitExceeded({
+              limit: 'maxPerWindow',
+              allowed: (cap > used ? cap - used : 0n).toString(),
+            });
+          }
+        }
+      },
+    };
   }
 
   private assertEquals(field: string, actual: string, expected: string): void {
@@ -493,4 +752,13 @@ export class VoucherService {
 
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
+}
+
+/** One account, compared on its chain and its address case-insensitively. */
+function sameAccount(a: AccountId, b: AccountId): boolean {
+  const left = parseAccountId(a);
+  const right = parseAccountId(b);
+  return (
+    left.chainId === right.chainId && left.address.toLowerCase() === right.address.toLowerCase()
+  );
 }

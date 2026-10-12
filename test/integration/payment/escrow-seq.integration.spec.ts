@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { AccountId } from '@modules/chains/ports/caip.types';
+import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.constants';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 
 import {
@@ -107,6 +108,95 @@ describe('EscrowSeqService against Postgres', () => {
     await context.setNextSeq(account, 100n);
 
     await expect(context.setNextSeq(account, 99n)).rejects.toThrow(/next_seq may only increase/);
+  });
+
+  /**
+   * REGRESSION (review S2-2): unpaid allocations could push `next_seq` more
+   * than `MAX_SEQ_GAP` past the chain's `seqHigh`, after which every voucher
+   * issuance was refused for ever. The allocator now rewinds and recovers.
+   */
+  describe('recovering a counter past the chain’s seq gap', () => {
+    const GAP = BigInt(VOUCHER_MAX_SEQ_GAP);
+
+    it('rewinds to just above the highest recorded seq and allocates from there', async () => {
+      await context.openEscrow(context.organizationId, account);
+      for (const seq of [1n, 2n, 7n]) {
+        await context.seedOpenIntent(context.organizationId, account, seq);
+      }
+      await context.setNextSeq(account, GAP + 2n);
+
+      await expect(
+        context.service.allocate(context.organizationId, account, 0n),
+      ).resolves.toMatchObject({ seq: '8' });
+      expect(await context.readNextSeq(account)).toBe(9n);
+    });
+
+    it('rewinds to just above the chain’s seqHigh when that is higher', async () => {
+      await context.openEscrow(context.organizationId, account);
+      await context.seedOpenIntent(context.organizationId, account, 3n);
+      await context.setNextSeq(account, 50n + GAP + 1n);
+
+      await expect(
+        context.service.allocate(context.organizationId, account, 50n),
+      ).resolves.toMatchObject({ seq: '51' });
+    });
+
+    it('counts a recorded seq of another organization sharing the account', async () => {
+      await context.openEscrow(context.organizationId, account);
+      await context.seedOpenIntent(randomUUID(), account, 20n);
+      await context.setNextSeq(account, GAP + 5n);
+
+      await expect(
+        context.service.allocate(context.organizationId, account, 0n),
+      ).resolves.toMatchObject({ seq: '21' });
+    });
+
+    it('hands out unique seqs above every recorded one under concurrency', async () => {
+      await context.openEscrow(context.organizationId, account);
+      await context.seedOpenIntent(context.organizationId, account, 10n);
+      await context.setNextSeq(account, GAP + 100n);
+
+      const issued = await Promise.all(
+        Array.from({ length: 20 }, () =>
+          context.service.allocate(context.organizationId, account, 0n).then(
+            (next) => BigInt(next.seq),
+            () => null,
+          ),
+        ),
+      );
+      const seqs = issued.filter((seq): seq is bigint => seq !== null);
+      expect(seqs.length).toBeGreaterThan(0);
+      expect(new Set(seqs).size).toBe(seqs.length);
+      expect(seqs.every((seq) => seq > 10n && seq <= GAP)).toBe(true);
+    });
+
+    it('the database still refuses a rewind to or below a recorded seq, even inside the gate', async () => {
+      await context.openEscrow(context.organizationId, account);
+      await context.seedOpenIntent(context.organizationId, account, 9n);
+      await context.setNextSeq(account, 100n);
+
+      const lower = (to: bigint) =>
+        context.dataSource.transaction(async (manager) => {
+          await manager.query(`SELECT set_config('assay.seq_rewind', 'on', true)`);
+          await manager.query(
+            `UPDATE "buyer_escrows" SET "next_seq" = $2::bigint WHERE "account_id" = $1`,
+            [account, to.toString()],
+          );
+        });
+
+      await expect(lower(9n)).rejects.toThrow(/next_seq may only increase/);
+      await expect(lower(10n)).resolves.toBeUndefined();
+      expect(await context.readNextSeq(account)).toBe(10n);
+    });
+
+    it('does not rewind a counter within the gap', async () => {
+      await context.openEscrow(context.organizationId, account);
+      await context.setNextSeq(account, GAP + 1n);
+
+      await expect(
+        context.service.allocate(context.organizationId, account, 1n),
+      ).resolves.toMatchObject({ seq: (GAP + 1n).toString() });
+    });
   });
 
   describe('one escrow per account, enforced by the database', () => {

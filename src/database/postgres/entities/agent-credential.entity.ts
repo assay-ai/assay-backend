@@ -83,4 +83,15 @@ export class AgentCredentialEntity extends OrganizationScopedEntity {
   /** The credential this one replaced, if it was created by a rotation. */
   @Column({ name: 'rotated_from_id', type: 'uuid', nullable: true })
   rotatedFromId: string | null;
+
+  /**
+   * The DELEGATE key this credential signs rail-B vouchers with (CAIP-10), once
+   * the agent has proved it holds the key. It grants nothing on chain — the
+   * payer's on-chain authorisation of the key does — and is NULL until bound.
+   */
+  @Column({ name: 'delegate_account', type: 'varchar', length: 256, nullable: true })
+  delegateAccount: string | null;
+
+  @Column({ name: 'delegate_bound_at', type: 'timestamptz', nullable: true })
+  delegateBoundAt: Date | null;
 }

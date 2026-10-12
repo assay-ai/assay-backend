@@ -56,7 +56,21 @@ export enum PaymentErrorCode {
   PAYMENT_ESCROW_BALANCE_UNAVAILABLE = 'PAYMENT_ESCROW_BALANCE_UNAVAILABLE',
   PAYMENT_VOUCHER_SEQ_MISMATCH = 'PAYMENT_VOUCHER_SEQ_MISMATCH',
   PAYMENT_VOUCHER_SEQ_ALREADY_USED = 'PAYMENT_VOUCHER_SEQ_ALREADY_USED',
+  PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE = 'PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE',
+  PAYMENT_NEXT_SEQ_RATE_LIMITED = 'PAYMENT_NEXT_SEQ_RATE_LIMITED',
   PAYMENT_WITHDRAWAL_PENDING = 'PAYMENT_WITHDRAWAL_PENDING',
+
+  // ── Agent payment delegation: a voucher signed by a DELEGATE key the payer
+  //    authorised on chain, instead of by the payer's own key.
+  PAYMENT_VOUCHER_DELEGATE_INACTIVE = 'PAYMENT_VOUCHER_DELEGATE_INACTIVE',
+  PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED = 'PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED',
+  PAYMENT_VOUCHER_DELEGATE_NOT_BOUND = 'PAYMENT_VOUCHER_DELEGATE_NOT_BOUND',
+
+  // ── The payer's own on-chain escrow limits (`setLimits`), which bind every
+  //    voucher, delegate-signed or not.
+  PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED = 'PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED',
+  /** The payer is tightening its caps right now; retry shortly (BUG-D1-07). */
+  PAYMENT_VOUCHER_ADMISSION_PAUSED = 'PAYMENT_VOUCHER_ADMISSION_PAUSED',
 }
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
@@ -99,6 +113,83 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `Idempotency key already used for a different request` +
       `${context?.idempotencyKey ? `: ${context.idempotencyKey}` : ''}`,
+  },
+  /**
+   * The voucher was signed by a delegate the payer authorised on chain, and
+   * that delegate is no longer active: revoked by the payer, or past its
+   * `validUntil`. Nothing was charged. The payer re-authorises the agent (or the
+   * agent signs with a key that is still authorised).
+   */
+  voucherDelegateInactive: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_INACTIVE,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `The delegate key that signed this voucher is ${
+        context?.reason === 'DELEGATE_EXPIRED' ? 'past its authorisation' : 'revoked'
+      }${context?.delegate ? ` (${context.delegate})` : ''}` +
+      `${context?.payer ? ` for payer ${context.payer}` : ''}; nothing was charged`,
+  },
+  /**
+   * A delegate-signed voucher the delegate's own on-chain caps would refuse at
+   * redemption: above its per-voucher cap, beyond its rolling window once the
+   * delegate's in-flight vouchers are counted, or outliving the authorisation.
+   * Refused here, before the call is served, so no provider works for a voucher
+   * the chain will not honour.
+   */
+  voucherDelegateLimitExceeded: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `This voucher exceeds what the payer authorised its delegate to spend` +
+      `${context?.limit ? ` (${context.limit}` : ''}` +
+      `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
+      `${context?.limit ? ')' : ''}; nothing was charged`,
+  },
+  /**
+   * A voucher the payer's OWN escrow limits would refuse at redemption: above
+   * the escrow's per-voucher limit, or beyond its rolling window once every
+   * voucher accepted and not yet on chain is counted. The escrow's limits bind
+   * a delegate on top of the delegate's own caps, and the payer's own key too.
+   * Refused before the call is served (BUG-D1-03): lowering the limit is the
+   * buyer's brake, and a served call the chain refuses is a provider working
+   * for nothing.
+   */
+  voucherEscrowLimitExceeded: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `This voucher exceeds the payer's own escrow limit` +
+      `${context?.limit ? ` (${context.limit}` : ''}` +
+      `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
+      `${context?.limit ? ')' : ''}; nothing was charged`,
+  },
+  /**
+   * The payer is relaying a change that tightens its caps (its escrow limits,
+   * or a delegate's caps, expiry or authority), and a voucher admitted now
+   * could be one the new caps refuse at redemption (BUG-D1-07). Nothing was
+   * charged and the voucher's seq is not spent; the same call can be retried
+   * once the change has landed, usually within seconds.
+   */
+  voucherAdmissionPaused: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `The payer is changing its payment limits right now, so no payment is accepted until the ` +
+      `change lands${context?.retryAfter ? ` (retry in about ${context.retryAfter} s)` : ''}; ` +
+      `nothing was charged`,
+  },
+  /**
+   * The voucher was signed by an authorised delegate that is not the delegate
+   * bound to the calling agent credential. Delegation is per agent: a
+   * credential spends only through the key it proved it holds.
+   */
+  voucherDelegateNotBound: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_NOT_BOUND,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `The voucher was signed by delegate ${context?.delegate ?? 'unknown'}, which is not the ` +
+      `delegate key bound to this agent credential` +
+      `${context?.bound ? ` (${context.bound})` : ' (none is bound)'}; nothing was charged`,
   },
   voucherSignatureInvalid: {
     code: PaymentErrorCode.PAYMENT_VOUCHER_SIGNATURE_INVALID,
@@ -495,6 +586,37 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `Voucher sequence ${context?.actual ?? 'unknown'} was already used for an earlier call ` +
       `on this account; a voucher pays for one call, sign a new one with a fresh sequence`,
+  },
+
+  /**
+   * The seq is more than `MAX_SEQ_GAP` above the escrow's on-chain `seqHigh`.
+   * `X402Escrow` refuses such a voucher at redemption (`VoucherSeqGapTooLarge`),
+   * so it is neither issued nor admitted: a call served on it could never be
+   * collected. Only reachable when the backend's seq bookkeeping has run far
+   * ahead of the chain; the buyer's next voucher after redemptions catch up is
+   * fine.
+   */
+  voucherSeqGapTooLarge: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Voucher sequence ${context?.seq ?? 'unknown'} is more than ${context?.maxGap ?? 'the allowed gap'} ` +
+      `above the escrow's on-chain sequence${context?.seqHigh !== undefined ? ` (${context.seqHigh})` : ''}; ` +
+      `the chain would refuse it at redemption, so nothing was charged`,
+  },
+
+  /**
+   * `GET /escrow/next-seq` called too often by one agent credential. Each call
+   * advances the payer's counter, so the route is throttled (review S2-2).
+   */
+  nextSeqRateLimited: {
+    code: PaymentErrorCode.PAYMENT_NEXT_SEQ_RATE_LIMITED,
+    statusCode: 429,
+    message: (context?: Record<string, any>) =>
+      `Too many sequence numbers requested by this credential` +
+      `${context?.limit ? ` (at most ${context.limit} per ${context.windowSeconds}s)` : ''}` +
+      `${context?.reason === 'COUNTER_UNAVAILABLE' ? '; the rate counter is unavailable' : ''}. ` +
+      `Try again shortly.`,
   },
 
   /**
