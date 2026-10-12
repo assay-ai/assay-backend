@@ -4,6 +4,7 @@ import {
   EVM_RELAYER_KEYS_ENV,
   EvmRelayerKeySource,
   assertDistinctRedeemerKeys,
+  keyAddressesByChain,
   takeEvmRelayerKeys,
 } from '@modules/chains/evm/evm-relayer-key-source';
 import { resetEnvSigningKeyCacheForTests } from '@modules/verification/signing/backends/env-key-source';
@@ -181,6 +182,19 @@ describe('assertDistinctRedeemerKeys', () => {
         [{ chainId: CHAIN_IDS.ROBINHOOD_MAINNET, secretKey: `0x${SCALAR}` }],
       ),
     ).not.toThrow();
+  });
+});
+
+describe('keyAddressesByChain', () => {
+  it('maps each chain to the address its key derives to, and carries no key', () => {
+    const map = keyAddressesByChain([
+      { chainId: CHAIN_IDS.ROBINHOOD_TESTNET, secretKey: `0x${SCALAR}` },
+    ]);
+
+    // The well-known address of this test scalar.
+    expect(map.get(CHAIN_IDS.ROBINHOOD_TESTNET)).toBe('0x2c7536E3605D9C16a7a3D7b1898e529396a65c23');
+    expect(JSON.stringify([...map])).not.toContain(SCALAR.slice(0, 8));
+    expect(keyAddressesByChain([]).size).toBe(0);
   });
 });
 

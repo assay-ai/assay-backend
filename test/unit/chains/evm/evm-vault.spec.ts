@@ -1,4 +1,7 @@
-import { pad, toHex } from 'viem';
+import { Logger } from '@nestjs/common';
+import { encodeFunctionResult, pad, toFunctionSelector, toHex, zeroAddress } from 'viem';
+
+import { X402_CONFIG_ABI } from '@modules/chains/evm/abi/x402.abi';
 
 import { createSanctionedEvmClient } from '@modules/chains/evm/sanctioned-evm-rpc';
 import { EvmVaultClient, EvmVaultService } from '@modules/chains/evm/evm-vault.service';
@@ -63,7 +66,13 @@ const SELECTOR = {
   owner: '0x8da5cb5b',
   ASSET: '0x4800d97f',
   balanceOf: '0x70a08231',
+  pendingOwner: '0xe30c3978',
+  params: toFunctionSelector('params()'),
 } as const;
+
+/** The live `params().redeemer` on 46630 at the time of writing (the old relayer). */
+const LIVE_REDEEMER = '0x24A2c5823204150fe1bdc5Ce378A704788B345DB';
+const OTHER_KEY_ADDRESS = '0x000000000000000000000000000000000000bEEF';
 
 const OTHER_IMPLEMENTATION = '0x00000000000000000000000000000000DeaDBeef';
 const OTHER_ADMIN = '0x000000000000000000000000000000000000c0De';
@@ -77,6 +86,8 @@ interface ChainState {
   asset: string;
   balance: bigint;
   blockNumber: bigint;
+  pendingOwner: string;
+  redeemer: string;
   throwOnCall?: Error;
 }
 
@@ -97,6 +108,8 @@ function chain(overrides: Partial<ChainState> = {}): {
     asset: DEPLOYMENT.asset,
     balance: 12_500_000n,
     blockNumber: 116_313_808n,
+    pendingOwner: zeroAddress,
+    redeemer: LIVE_REDEEMER,
     ...overrides,
   };
   const calls: Call[] = [];
@@ -116,6 +129,27 @@ function chain(overrides: Partial<ChainState> = {}): {
       if (selector === SELECTOR.owner) return pad(state.owner as `0x${string}`, { size: 32 });
       if (selector === SELECTOR.ASSET) return pad(state.asset as `0x${string}`, { size: 32 });
       if (selector === SELECTOR.balanceOf) return toHex(state.balance, { size: 32 });
+      if (selector === SELECTOR.pendingOwner) {
+        return pad(state.pendingOwner as `0x${string}`, { size: 32 });
+      }
+      if (selector === SELECTOR.params) {
+        return encodeFunctionResult({
+          abi: X402_CONFIG_ABI,
+          functionName: 'params',
+          result: {
+            treasury: zeroAddress,
+            redeemer: state.redeemer as `0x${string}`,
+            unbondingPeriodSeconds: 0n,
+            minimumStake: 0n,
+            penaltyAmount: 0n,
+            verifierDailyCap: 0n,
+            takeRateBps: 0,
+            slashAgentBps: 0,
+            slashPlatformBps: 0,
+            slashCapBps: 0,
+          },
+        });
+      }
     }
     throw new Error(`unexpected JSON-RPC ${method} ${JSON.stringify(params)}`);
   };
@@ -150,12 +184,19 @@ function chain(overrides: Partial<ChainState> = {}): {
   };
 }
 
-function vaultWith(overrides: Partial<ChainState> = {}) {
+function vaultWith(
+  overrides: Partial<ChainState> = {},
+  keys: { redeemer?: `0x${string}`; relayer?: `0x${string}` } = {},
+) {
   const { client, calls } = chain(overrides);
   return {
     vault: new EvmVaultService(
       new Map<ChainId, EvmVaultClient>([[TESTNET, client]]),
       new Map([[TESTNET, DEPLOYMENT]]),
+      {
+        redeemer: new Map(keys.redeemer ? [[TESTNET, keys.redeemer]] : []),
+        relayer: new Map(keys.relayer ? [[TESTNET, keys.relayer]] : []),
+      },
     ),
     calls,
   };
@@ -263,12 +304,69 @@ describe('EvmVaultService', () => {
     await expect(vault.assertVaultControl(USDG)).resolves.toBeUndefined();
     // Four reads, and the positive control is what stops the four negatives
     // above passing over a method that always threw.
+    // (owner, admin, pendingOwner, ASSET; no key configured, so no params() read).
     expect(calls.map((c) => c.method)).toEqual([
       'eth_getStorageAt',
       'eth_call',
       'eth_call',
       'eth_call',
+      'eth_call',
     ]);
+  });
+
+  describe('a pending owner (review S3-4)', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    it('warns, and still passes, when pendingOwner() is set', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const { vault } = vaultWith({ pendingOwner: OTHER_OWNER });
+
+      await expect(vault.assertVaultControl(USDG)).resolves.toBeUndefined();
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('pending owner'));
+    });
+
+    it('does not warn when no transfer is proposed', async () => {
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      await vaultWith().vault.assertVaultControl(USDG);
+      expect(warn).not.toHaveBeenCalled();
+    });
+  });
+
+  describe('the redeemer pin against this process’s keys (review S2-3)', () => {
+    it('passes when the redeemer key is params().redeemer and the relayer key is not', async () => {
+      const { vault } = vaultWith({}, { redeemer: LIVE_REDEEMER, relayer: OTHER_KEY_ADDRESS });
+      await expect(vault.assertVaultControl(USDG)).resolves.toBeUndefined();
+    });
+
+    it('compares addresses case-insensitively', async () => {
+      const { vault } = vaultWith({}, { redeemer: LIVE_REDEEMER.toLowerCase() as `0x${string}` });
+      await expect(vault.assertVaultControl(USDG)).resolves.toBeUndefined();
+    });
+
+    it('refuses a redeemer key that is not params().redeemer (every redemption would fail)', async () => {
+      const { vault } = vaultWith({}, { redeemer: OTHER_KEY_ADDRESS });
+      await expect(vault.assertVaultControl(USDG)).rejects.toMatchObject({
+        errorCode: 'CHAIN_VAULT_CONTROL_UNVERIFIED',
+        message: expect.stringContaining('EVM_REDEEMER_KEYS'),
+      });
+    });
+
+    it('refuses a relayer key that IS params().redeemer (the split protects nothing)', async () => {
+      // Failure mode (a): the old key kept as the relayer, a new redeemer key added.
+      const { vault } = vaultWith({}, { redeemer: OTHER_KEY_ADDRESS, relayer: LIVE_REDEEMER });
+      await expect(vault.assertVaultControl(USDG)).rejects.toMatchObject({
+        errorCode: 'CHAIN_VAULT_CONTROL_UNVERIFIED',
+      });
+      await expect(
+        vaultWith({}, { relayer: LIVE_REDEEMER }).vault.assertVaultControl(USDG),
+      ).rejects.toMatchObject({ message: expect.stringContaining('EVM_RELAYER_KEYS') });
+    });
+
+    it('reads params() only when a key is configured here', async () => {
+      const { vault, calls } = vaultWith({}, { redeemer: LIVE_REDEEMER });
+      await vault.assertVaultControl(USDG);
+      expect(calls.filter((c) => c.method === 'eth_call')).toHaveLength(5);
+    });
   });
 
   it('names which of the four failed, because the remedies do not overlap', async () => {

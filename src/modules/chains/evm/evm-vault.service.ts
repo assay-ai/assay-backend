@@ -1,5 +1,5 @@
-import { Injectable } from '@nestjs/common';
-import { getAddress } from 'viem';
+import { Injectable, Logger } from '@nestjs/common';
+import { getAddress, zeroAddress } from 'viem';
 
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -19,6 +19,12 @@ import { Money } from '../ports/money.types';
 import { VaultPort } from '../ports/vault.port';
 import { ERC20_ABI, X402_CONFIG_ABI, X402_ESCROW_ABI } from './abi/x402.abi';
 import { EvmDeployment } from './evm.constants';
+
+/** Per chain, the derived addresses of this process's redeemer and relayer keys. */
+export interface EvmKeyAddresses {
+  readonly redeemer: ReadonlyMap<ChainId, `0x${string}`>;
+  readonly relayer: ReadonlyMap<ChainId, `0x${string}`>;
+}
 
 /**
  * `keccak256("eip1967.proxy.implementation") - 1` — where an ERC-1967 proxy
@@ -88,12 +94,22 @@ export interface EvmVaultClient {
  * address whose control has not been proven is not evidence of anything, and it
  * would look authoritative in the stored row for ever.
  *
+ * Then one more, about THIS process's keys rather than the contract:
+ *
+ *   5. `params().redeemer` is the address of this process's `EVM_REDEEMER_KEYS`
+ *      key for the chain, and is NOT the address of its `EVM_RELAYER_KEYS` key.
+ *      Each half is checked only when that key is configured here. Without it
+ *      the key split is unenforced: keeping the old key as the relayer and
+ *      adding a new redeemer key boots fine, refuses every redemption, and
+ *      leaves the hot relayer key as the on-chain redeemer.
+ *
  * There is deliberately no read of `CONFIG()` on the escrow. `CONFIG` is
  * storage written once in `initialize` and never again, so the only way it can
  * move is an upgrade — which check 1 already refuses. Another read would be a
- * second spelling of the first. `pendingOwner()` is not checked either: a
- * transfer in progress has not moved the authority, and `owner()` changes the
- * moment it completes.
+ * second spelling of the first. A non-zero `pendingOwner()` only WARNS: a
+ * transfer in progress has not moved the authority, and `owner()` changes (and
+ * check 2 fails) the moment it completes. The warning is there so a proposal
+ * nobody recorded is seen before it is accepted.
  *
  * ## Why no `balanceOf`-based solvency check appears here, and none may be added
  *
@@ -114,9 +130,13 @@ export interface EvmVaultClient {
  */
 @Injectable()
 export class EvmVaultService implements VaultPort {
+  private readonly logger = new Logger(EvmVaultService.name);
+
   constructor(
     private readonly clients: ReadonlyMap<ChainId, EvmVaultClient>,
     private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
+    /** Per chain, the ADDRESSES (never the keys) of this process's signing keys. Check 5. */
+    private readonly keyAddresses: EvmKeyAddresses = { redeemer: new Map(), relayer: new Map() },
   ) {}
 
   async getVaultOwner(asset: AssetId): Promise<AccountId> {
@@ -221,6 +241,11 @@ export class EvmVaultService implements VaultPort {
       });
     }
 
+    // A proposed owner nobody recorded is seen before it is accepted. Advisory:
+    // `owner()` above is the fail-closed check, so an unreadable
+    // `pendingOwner()` warns too and does not refuse.
+    await this.warnOnPendingOwner(client, deployment);
+
     // 4. The denomination.
     const settled = (await client.readContract({
       address: escrow,
@@ -234,9 +259,80 @@ export class EvmVaultService implements VaultPort {
           `reconciled`,
       });
     }
+
+    // 5. The redeemer pin against this process's own keys.
+    await this.assertRedeemerKeys(client, chainId, deployment);
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
+
+  private async warnOnPendingOwner(
+    client: EvmVaultClient,
+    deployment: EvmDeployment,
+  ): Promise<void> {
+    let pendingOwner: `0x${string}`;
+    try {
+      pendingOwner = (await client.readContract({
+        address: getAddress(deployment.config),
+        abi: X402_CONFIG_ABI,
+        functionName: 'pendingOwner',
+      })) as `0x${string}`;
+    } catch (error) {
+      this.logger.warn(
+        `could not read pendingOwner() on config ${deployment.config}: ` +
+          `${error instanceof Error ? error.message : String(error)}`,
+      );
+      return;
+    }
+    if (getAddress(pendingOwner) !== zeroAddress) {
+      this.logger.warn(
+        `config ${deployment.config} has a pending owner ${pendingOwner}: an ownership transfer ` +
+          `was proposed and is not accepted yet. If nobody planned it, the owner should ` +
+          `transferOwnership to itself (or the right key) before it is accepted`,
+      );
+    }
+  }
+
+  /**
+   * Check 5: `params().redeemer` equals this process's redeemer key address
+   * and differs from its relayer key address. The message names addresses,
+   * which are public, and the variables, never a key.
+   */
+  private async assertRedeemerKeys(
+    client: EvmVaultClient,
+    chainId: ChainId,
+    deployment: EvmDeployment,
+  ): Promise<void> {
+    const redeemerKey = this.keyAddresses.redeemer.get(chainId);
+    const relayerKey = this.keyAddresses.relayer.get(chainId);
+    if (redeemerKey === undefined && relayerKey === undefined) return;
+
+    const params = (await client.readContract({
+      address: getAddress(deployment.config),
+      abi: X402_CONFIG_ABI,
+      functionName: 'params',
+    })) as { redeemer: `0x${string}` };
+    const live = getAddress(params.redeemer);
+
+    if (redeemerKey !== undefined && getAddress(redeemerKey) !== live) {
+      throw ChainErrors.vaultControlUnverified({
+        reason:
+          `config ${deployment.config} pins redeemer ${live}, but the EVM_REDEEMER_KEYS key ` +
+          `for ${chainId} is ${getAddress(redeemerKey)} — every redemption would be refused. ` +
+          `Rotate params().redeemer with updateConfig, or put the key for ${live} in ` +
+          `EVM_REDEEMER_KEYS`,
+      });
+    }
+    if (relayerKey !== undefined && getAddress(relayerKey) === live) {
+      throw ChainErrors.vaultControlUnverified({
+        reason:
+          `config ${deployment.config} pins redeemer ${live}, which is the EVM_RELAYER_KEYS key ` +
+          `for ${chainId} — the hot relayer key can redeem, so the key split protects nothing. ` +
+          `Move that key to EVM_REDEEMER_KEYS and give the relayer a new key, or rotate ` +
+          `params().redeemer with updateConfig`,
+      });
+    }
+  }
 
   private escrowAccount(asset: AssetId): AccountId {
     const { chainId, deployment } = this.resolve(asset);
