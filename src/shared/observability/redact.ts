@@ -50,6 +50,7 @@ const FORBIDDEN_KEY_SUBSTRINGS = [
   'privatekey',
   'signingkey',
   'authorization',
+  'operatorapprover',
   'apikey',
   'cookie',
 ] as const;

@@ -6,6 +6,7 @@ import {
   OPERATOR_CREDENTIAL_SNAPSHOT,
   loadOperatorCredentials,
 } from './services/config-operator-session.source';
+import { OperatorAuthThrottle } from './services/operator-auth-throttle.service';
 import { OperatorService } from './services/operator.service';
 
 /**
@@ -28,8 +29,16 @@ import { OperatorService } from './services/operator.service';
     { provide: OPERATOR_CREDENTIAL_SNAPSHOT, useFactory: () => loadOperatorCredentials() },
     ConfigOperatorSessionSource,
     { provide: OPERATOR_SESSION_SOURCE, useExisting: ConfigOperatorSessionSource },
+    // Counts refused tokens per address for `OperatorAuthGuard`. Redis comes
+    // from the global `RedisCacheModule`.
+    OperatorAuthThrottle,
     OperatorService,
   ],
-  exports: [ConfigOperatorSessionSource, OPERATOR_SESSION_SOURCE, OperatorService],
+  exports: [
+    ConfigOperatorSessionSource,
+    OPERATOR_SESSION_SOURCE,
+    OperatorAuthThrottle,
+    OperatorService,
+  ],
 })
 export class OperatorIdentityModule {}

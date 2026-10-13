@@ -40,8 +40,22 @@ export interface OperatorCredentialRecord {
   readonly subject: string;
 }
 
-/** `token → { subject }`. Empty by default: no token is valid until one is configured. */
+/**
+ * `token → { subject }`, or `sha256:<hex digest of the token> → { subject }`.
+ * Empty by default: no token is valid until one is configured.
+ */
 export type OperatorCredentialSnapshot = Readonly<Record<string, OperatorCredentialRecord>>;
+
+/**
+ * A key with this prefix holds the token's SHA-256 digest (64 hex characters)
+ * instead of the token, so the file no longer stores a usable credential.
+ */
+export const OPERATOR_TOKEN_DIGEST_PREFIX = 'sha256:';
+
+/** A plaintext token shorter than this is refused at boot. */
+export const OPERATOR_TOKEN_MIN_LENGTH = 32;
+
+const SHA256_HEX = /^[0-9a-f]{64}$/i;
 
 export const EMPTY_OPERATOR_CREDENTIALS: OperatorCredentialSnapshot = Object.freeze({});
 
@@ -63,14 +77,57 @@ export function loadOperatorCredentials(
 ): OperatorCredentialSnapshot {
   if (!path) return EMPTY_OPERATOR_CREDENTIALS;
 
-  const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(readFileSync(path, 'utf8'));
+  } catch (error) {
+    if (error instanceof SyntaxError) {
+      // Node quotes part of the input in a JSON syntax error, and the input is
+      // a file of bearer tokens. The original error is dropped on purpose.
+      throw new Error('operator credentials file is not valid JSON');
+    }
+    throw error;
+  }
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(
       `OPERATOR_CREDENTIALS_FILE (${path}) must contain a JSON object of token → { subject }`,
     );
   }
 
+  assertCredentialKeys(Object.keys(parsed));
   return Object.freeze(parsed as OperatorCredentialSnapshot);
+}
+
+/**
+ * Refuse a weak or malformed credential key at boot.
+ *
+ * The messages name the entry by position only. A key is a token (or its
+ * digest), so it never goes into an error or a log line.
+ */
+function assertCredentialKeys(keys: readonly string[]): void {
+  keys.forEach((key, index) => {
+    const entry = `OPERATOR_CREDENTIALS_FILE entry ${index + 1}`;
+    if (key.startsWith(OPERATOR_TOKEN_DIGEST_PREFIX)) {
+      if (!SHA256_HEX.test(key.slice(OPERATOR_TOKEN_DIGEST_PREFIX.length))) {
+        throw new Error(
+          `${entry}: a "${OPERATOR_TOKEN_DIGEST_PREFIX}" key must be followed by 64 hex characters`,
+        );
+      }
+      return;
+    }
+    if (key.length < OPERATOR_TOKEN_MIN_LENGTH) {
+      throw new Error(
+        `${entry}: the operator token is shorter than ${OPERATOR_TOKEN_MIN_LENGTH} characters`,
+      );
+    }
+  });
+}
+
+/** The digest a snapshot key stands for: stored as is, or computed from a token. */
+function digestOfKey(key: string): string {
+  return key.startsWith(OPERATOR_TOKEN_DIGEST_PREFIX)
+    ? key.slice(OPERATOR_TOKEN_DIGEST_PREFIX.length).toLowerCase()
+    : digestToken(key);
 }
 
 @Injectable()
@@ -90,7 +147,7 @@ export class ConfigOperatorSessionSource implements OperatorSessionPort {
     private readonly operators: OperatorRepository,
   ) {
     this.byDigest = new Map(
-      Object.entries(snapshot).map(([token, record]) => [digestToken(token), record]),
+      Object.entries(snapshot).map(([key, record]) => [digestOfKey(key), record]),
     );
   }
 
