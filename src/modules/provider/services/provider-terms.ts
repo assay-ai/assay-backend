@@ -67,7 +67,6 @@ export function loadProviderTerms(config: ConfigService): ProviderTerms {
 
   // Presentation value only; the amount charged per call is `PLATFORM_FEE_BPS`.
   const takeRatePercent = config.get<string>('PROVIDER_TERMS_TAKE_RATE_PERCENT') ?? '10';
-  const payoutThresholdUsd = config.get<string>('PROVIDER_TERMS_PAYOUT_THRESHOLD_USD') ?? '10';
   const reserveHeldUsd = config.get<string>('PROVIDER_TERMS_RESERVE_HELD_USD') ?? '0.00';
   const clawback = config.get<string>('PROVIDER_TERMS_CLAWBACK') ?? 'never';
   const slashTrigger = config.get<string>('PROVIDER_TERMS_SLASH_TRIGGER') ?? 'DATA_FAIL only';
@@ -97,7 +96,9 @@ export function loadProviderTerms(config: ConfigService): ProviderTerms {
       {
         key: 'payouts',
         label: 'Payouts',
-        value: `hourly above $${payoutThresholdUsd}`,
+        // There is no payout batch: a provider is paid on chain when each
+        // call's voucher is redeemed, which is what every earnings screen says.
+        value: 'as each call settles',
         caption: 'on-chain and final',
       },
       {
