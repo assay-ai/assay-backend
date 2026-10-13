@@ -205,6 +205,11 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   - An arbiter's `cancelSlash(Batch)` (`SlashCancelled`) is mirrored at once:
     the part is `CANCELLED`, and the case closes as soon as nothing of it
     stands and nothing executed.
+- **WARN `evm_verifier_key_expiring`** (hourly): a verifier key that still has
+  open (`Pending` or `Disputed`) slash records expires within 45 days, or
+  already has. Records signed by an expired key can never execute, so rotate:
+  register a NEW key (`yarn verifier:registry`; an address is one-shot), switch
+  signing to it, and let the old key's records run out or be re-proposed.
 - **On the upgrade itself**, update `EVM_DEPLOYMENTS[...].escrowImplementation`
   in the same change: the vault-control check stops the reconciler on an
   implementation nobody recorded.

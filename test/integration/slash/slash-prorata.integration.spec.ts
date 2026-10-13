@@ -190,6 +190,11 @@ describe('pro-rata EVM slash, against a real database', () => {
         .sort(),
     );
 
+    // B5: the expiry monitor reads these, across tenants.
+    expect(
+      (await services.partsRepository.findOpenChainRecords(100)).map((row) => row.requestId).sort(),
+    ).toEqual(parts.map((part) => part.chainRequestId).sort());
+
     const proposal = await load(seeded);
     expect(proposal.chainStatus).toBe('PENDING');
     expect(proposal.chainReserved).toBe('250001');
