@@ -314,37 +314,186 @@ describe('OverrideLogService', () => {
       });
     });
 
-    /** A row that names no approver roles keeps the rule it always had. */
-    it('leaves the other two-person action (S-5) open to any second operator', async () => {
-      const { service, entries } = build();
+    /**
+     * Recording a compensation moves treasury money, so its checker has to be
+     * one of the roles that may record it — and has to be allowed that amount.
+     */
+    describe('the compensation approver (S-5)', () => {
+      const perform = (
+        service: OverrideLogService,
+        approver: Partial<typeof ADJUDICATOR>,
+        amountMinor: string | null = '5000000',
+      ) =>
+        service.perform(
+          {
+            code: 'S-5',
+            actor: LEAD,
+            approver: { ...ADJUDICATOR, ...approver },
+            amountMinor,
+            ...BASE,
+          },
+          async () => ({ value: null, before: {}, after: {} }),
+        );
 
-      await service.perform(
-        {
-          code: 'S-5',
-          actor: LEAD,
-          approver: { ...ADJUDICATOR, roles: [OperatorRole.POL] },
-          ...BASE,
+      it.each([[[OperatorRole.POL]], [[OperatorRole.ADJ]], [[OperatorRole.SRE]], [[]]])(
+        'refuses an approver holding %j',
+        async (roles) => {
+          const { service, dataSource } = build();
+
+          await expect(perform(service, { roles })).rejects.toMatchObject({
+            errorCode: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED,
+            statusCode: 403,
+            message: expect.stringContaining('ADJL, TRE'),
+          });
+          expect(dataSource.runner.started).toBe(false);
         },
-        async () => ({ value: null, before: {}, after: {} }),
       );
 
-      expect(entries.appended[0]).toMatchObject({
-        code: 'S-5',
-        approvalMode: ApprovalMode.TWO_PERSON,
-        approverOperatorId: 'op_1',
+      it.each([[[OperatorRole.TRE]], [[OperatorRole.ADJL]]])(
+        'accepts an approver holding %j',
+        async (roles) => {
+          const { service, entries } = build();
+
+          await perform(service, { roles });
+
+          expect(entries.appended[0]).toMatchObject({
+            code: 'S-5',
+            approvalMode: ApprovalMode.TWO_PERSON,
+            approverOperatorId: 'op_1',
+          });
+        },
+      );
+
+      it('refuses an approver whose authority limit is below the amount', async () => {
+        const { service, dataSource, entries } = build();
+
+        await expect(
+          perform(service, { roles: [OperatorRole.TRE], authorityLimitMinor: '4999999' }),
+        ).rejects.toMatchObject({
+          errorCode: OperatorErrorCode.OPERATOR_APPROVER_AUTHORITY_EXCEEDED,
+          statusCode: 403,
+          message: expect.stringContaining('4999999'),
+        });
+        expect(dataSource.runner.started).toBe(false);
+        expect(entries.appended).toEqual([]);
+      });
+
+      it.each(['5000000', null])('accepts an approver whose limit is %s', async (limit) => {
+        const { service, entries } = build();
+
+        await perform(service, { roles: [OperatorRole.TRE], authorityLimitMinor: limit });
+
+        expect(entries.appended).toHaveLength(1);
+      });
+
+      it('compares no limit when the action moves no money', async () => {
+        const { service, entries } = build();
+
+        await perform(service, { roles: [OperatorRole.TRE], authorityLimitMinor: '0' }, null);
+
+        expect(entries.appended).toHaveLength(1);
       });
     });
 
-    it('names approver roles on the fleet sweep row and on no other', () => {
+    /**
+     * `S-1` is single-person on the register and raised per occurrence: a
+     * suspension of a case a second person has confirmed, or is confirming,
+     * needs an adjudicator as its checker.
+     */
+    describe('a suspension raised to two-person (S-1)', () => {
+      const perform = (
+        service: OverrideLogService,
+        context: { approver?: typeof ADJUDICATOR | null; escalateToTwoPerson?: boolean },
+      ) =>
+        service.perform(
+          { code: 'S-1', actor: LEAD, amountMinor: '5000000', ...context, ...BASE },
+          async () => ({ value: null, before: {}, after: {} }),
+        );
+
+      it('stays single-person when it is not raised', async () => {
+        const { service, entries } = build();
+
+        await perform(service, {});
+
+        expect(entries.appended[0]).toMatchObject({
+          approvalMode: ApprovalMode.SINGLE,
+          approverOperatorId: null,
+        });
+      });
+
+      it('refuses with no approver', async () => {
+        const { service } = build();
+
+        await expect(perform(service, { escalateToTwoPerson: true })).rejects.toMatchObject({
+          errorCode: OperatorErrorCode.OPERATOR_SECOND_APPROVER_REQUIRED,
+        });
+      });
+
+      it('refuses the actor as their own approver', async () => {
+        const { service } = build();
+
+        await expect(
+          perform(service, { escalateToTwoPerson: true, approver: LEAD }),
+        ).rejects.toMatchObject({ errorCode: OperatorErrorCode.OPERATOR_SELF_APPROVAL_REFUSED });
+      });
+
+      it.each([[[OperatorRole.SRE]], [[OperatorRole.POL]], [[OperatorRole.TRE]]])(
+        'refuses an approver holding %j',
+        async (roles) => {
+          const { service } = build();
+
+          await expect(
+            perform(service, { escalateToTwoPerson: true, approver: { ...ADJUDICATOR, roles } }),
+          ).rejects.toMatchObject({
+            errorCode: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED,
+            message: expect.stringContaining('ADJ, ADJL'),
+          });
+        },
+      );
+
+      it('refuses an adjudicator whose authority limit is below the penalty', async () => {
+        const { service } = build();
+
+        await expect(
+          perform(service, {
+            escalateToTwoPerson: true,
+            approver: { ...ADJUDICATOR, authorityLimitMinor: '1' },
+          }),
+        ).rejects.toMatchObject({
+          errorCode: OperatorErrorCode.OPERATOR_APPROVER_AUTHORITY_EXCEEDED,
+        });
+      });
+
+      it('records the checker when an adjudicator within their limit approves', async () => {
+        const { service, entries } = build();
+
+        await perform(service, { escalateToTwoPerson: true, approver: ADJUDICATOR });
+
+        expect(entries.appended[0]).toMatchObject({
+          code: 'S-1',
+          approvalMode: ApprovalMode.TWO_PERSON,
+          approverOperatorId: 'op_1',
+        });
+      });
+    });
+
+    /**
+     * No two-person occurrence may be approvable by "any second token": every
+     * row that is two-person, or can be raised to it, names its approver roles.
+     */
+    it('names approver roles on every implemented row that can need an approver', () => {
       expect(OVERRIDE_REGISTER['S-11'].approverRoles).toEqual([
         OperatorRole.ADJ,
         OperatorRole.ADJL,
       ]);
+      expect(OVERRIDE_REGISTER['S-5'].approverRoles).toEqual([OperatorRole.ADJL, OperatorRole.TRE]);
+      expect(OVERRIDE_REGISTER['S-1'].approverRoles).toEqual([OperatorRole.ADJ, OperatorRole.ADJL]);
       expect(
         Object.values(OVERRIDE_REGISTER)
-          .filter((row) => row.approverRoles !== undefined)
+          .filter((row) => row.implemented && row.approval === ApprovalMode.TWO_PERSON)
+          .filter((row) => row.approverRoles === undefined)
           .map((row) => row.code),
-      ).toEqual(['S-11']);
+      ).toEqual([]);
     });
   });
 

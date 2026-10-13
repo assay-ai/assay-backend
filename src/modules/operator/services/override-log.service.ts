@@ -258,6 +258,23 @@ export class OverrideLogService {
           held: context.approver.roles,
         });
       }
+      // The same ceiling the actor is held to, for the same reason: a checker
+      // who could not have taken the action cannot approve it. Without this a
+      // zero-authority token is enough to make any amount "two-person".
+      const limit = context.approver.authorityLimitMinor;
+      const amount = context.amountMinor;
+      if (
+        limit !== null &&
+        amount !== null &&
+        amount !== undefined &&
+        BigInt(amount) > BigInt(limit)
+      ) {
+        throw OperatorErrors.approverAuthorityExceeded({
+          code: context.code,
+          limit,
+          requested: amount,
+        });
+      }
     }
 
     return required;

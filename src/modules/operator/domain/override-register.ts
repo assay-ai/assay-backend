@@ -84,7 +84,8 @@ export interface OverrideDefinition {
   /**
    * The roles the **second** identity must hold on a two-person occurrence —
    * at least one of them. Absent means the row names none, and any other
-   * active operator may approve.
+   * active operator may approve; every implemented row that is two-person, or
+   * can be raised to it, names them.
    */
   readonly approverRoles?: readonly OperatorRole[];
   readonly reversible: boolean;
@@ -102,7 +103,13 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     action: 'slash_proposal.suspended',
     label: 'Suspend a pending slash proposal (pre-attestation)',
     roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    // The floor. `ArbitrationService.suspend` raises an occurrence to
+    // TWO_PERSON when the case is `AWAITING_SECOND` or `UPHELD`: cancelling a
+    // penalty a second person has confirmed, or is confirming, is not one
+    // person's act. `approverRoles` applies to those occurrences — the checker
+    // must be able to read a case, which `SRE` cannot.
     approval: ApprovalMode.SINGLE,
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
     reversible: true,
     implemented: true,
   }),
@@ -113,6 +120,7 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     label: 'Cancel an attestation inside the timelock',
     roles: [OperatorRole.ADJL],
     approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJL],
     reversible: true,
     implemented: true,
   }),
@@ -137,6 +145,9 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     label: 'Reverse an executed slash',
     roles: [OperatorRole.ADJL, OperatorRole.TRE],
     approval: ApprovalMode.TWO_PERSON,
+    // The action's own roles: whoever checks a treasury payment being
+    // recorded must be somebody who could have recorded it.
+    approverRoles: [OperatorRole.ADJL, OperatorRole.TRE],
     // "No — on-chain" in the register. The reversal itself is a new
     // transaction, and there is no un-reversal: the program refuses a second
     // one with `SlashAlreadyReversed`.

@@ -128,9 +128,13 @@ export class OperatorCaseService {
     operator: OperatorSession,
     proposalId: string,
     body: SuspendProposalBodyDto,
+    request: Request,
     requestId: string | null,
   ) {
     const organizationId = await this.tenantOf(proposalId);
+    // Optional here: `S-1` needs an approver only from AWAITING_SECOND and
+    // UPHELD, which `ArbitrationService.suspend` decides on the row it reads.
+    const approver = await this.resolveOptionalApprover(request);
     return this.arbitration.suspend(
       operator,
       organizationId,
@@ -139,6 +143,7 @@ export class OperatorCaseService {
       body.note,
       body.ticketRef ?? null,
       requestId,
+      approver,
     );
   }
 
@@ -252,8 +257,9 @@ export class OperatorCaseService {
    *
    * This resolves *who* the checker is: an authenticated, active operator
    * (`sessions.resolve` refuses a suspended one) who is not the actor. Whether
-   * their **roles** qualify them is the register row's to say — `S-11` demands
-   * `ADJ` or `ADJL`, `S-5` names none — and `OverrideLogService` enforces it,
+   * their **roles** and **authority limit** qualify them is the register row's
+   * to say — `S-11` demands `ADJ` or `ADJL`, `S-5` `ADJL` or `TRE`, and the
+   * approver's limit must cover the amount — and `OverrideLogService` enforces it,
    * so the rule cannot differ between two routes citing one code.
    */
   private async resolveApprover(
@@ -271,6 +277,19 @@ export class OperatorCaseService {
       throw OperatorErrors.selfApprovalRefused({ code: 'two-person' });
     }
     return approver;
+  }
+
+  /**
+   * The checker's session when an `X-Operator-Approver` token was supplied,
+   * `null` when none was. An invalid token is still refused (401), and whether
+   * the occurrence needs a checker, and who qualifies, is the register's to say
+   * in `OverrideLogService`.
+   */
+  private async resolveOptionalApprover(request: Request): Promise<OperatorSession | null> {
+    const header = request.headers['x-operator-approver'];
+    const token = Array.isArray(header) ? header[0] : header;
+    if (!token) return null;
+    return this.sessions.resolve(token);
   }
 
   /**

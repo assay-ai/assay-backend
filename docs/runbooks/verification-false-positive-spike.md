@@ -97,6 +97,12 @@ cancel the same way an overturn does: `chain_status` goes from `PENDING` to `CAN
 Nothing is signed by this platform. The cancel still needs the settlement admin's signature, and it
 has a deadline — see step 4b. `EXECUTING` cases are refused (`SLASH_INVALID_TRANSITION`).
 
+**Who may suspend alone.** From `PROPOSED`, `DISPUTED` and `UNDER_REVIEW` one operator suspends.
+From `AWAITING_SECOND` and `UPHELD` a second person has confirmed the penalty or is confirming it,
+so the suspension is two-person: send a second operator's token in `X-Operator-Approver`. The
+approver must hold `ADJ` or `ADJL` and have an authority limit that covers the penalty; without one
+the request is refused with `409 OPERATOR_SECOND_APPROVER_REQUIRED`.
+
 ## 4. Compensate any slash that already executed — check `status`, not the clock
 
 The doc frames this as "still inside the 72h dispute timelock." In this codebase the 72h
@@ -131,11 +137,16 @@ the application layer. So the real branch is:
   Step 3 is **two-person** (override code `S-5`): the second operator's session token goes in the
   `X-Operator-Approver` header, and it must not be the same operator as the bearer token
   (`chk_override_log_entries_no_self_approval` refuses it at the database even if a client tried).
-  Step 1 is not — it builds and writes nothing. Any other active operator may be the `S-5` approver.
+  Step 1 is not — it builds and writes nothing. The `S-5` approver must hold `ADJL` or `TRE`, and
+  their own authority limit must cover the amount deposited.
 
   A **fleet sweep** (`POST /operator/cases/:proposalId/sweep`, override code `S-11`) is two-person
-  the same way, with one more rule: its second approver must hold `ADJ` or `ADJL`. Any other
-  approver is refused with `403 OPERATOR_APPROVER_ROLE_REQUIRED` and no sweep is opened.
+  the same way: its second approver must hold `ADJ` or `ADJL`.
+
+  For every two-person action the approver must be an active operator other than the actor, hold
+  one of the row's approver roles, and — when the action has an amount — have an authority limit at
+  or above it. Otherwise the request is refused before anything is written:
+  `403 OPERATOR_APPROVER_ROLE_REQUIRED` or `403 OPERATOR_APPROVER_AUTHORITY_EXCEEDED`.
 
 ## 4b. The standing on-chain record, when nobody has executed it
 
