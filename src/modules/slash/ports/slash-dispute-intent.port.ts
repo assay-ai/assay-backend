@@ -70,7 +70,8 @@ export interface SlashIdRefusal {
     | 'DisputeWindowClosed'
     | 'SlashNotDisputed'
     | 'ArbiterIsVerifier'
-    | 'DisputeTimedOut';
+    | 'DisputeTimedOut'
+    | 'SlashAlreadyDisputed';
   readonly detail: string;
 }
 

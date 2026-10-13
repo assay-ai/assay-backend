@@ -194,6 +194,21 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
       expect(late.refusals.map((r) => r.reason)).toEqual(['DisputeWindowClosed']);
     });
 
+    it('AUDIT E-9: refuses a record disputed once and upheld, before it reverts the batch', async () => {
+      const { chain, executor } = await upgraded();
+      chain.markDisputed(requestId(1));
+      chain.markUpheld(requestId(1), chain.now + 3600n); // Pending again, disputedAt kept
+      const built = await executor.buildDisputeBatch({
+        chainId: CHAIN,
+        provider: PROVIDER,
+        requestIds: [requestId(1), requestId(2)],
+      });
+      expect(built.call).toBeNull();
+      expect(built.refusals).toEqual([
+        expect.objectContaining({ requestId: requestId(1), reason: 'SlashAlreadyDisputed' }),
+      ]);
+    });
+
     it("measures the window against the record's executableAt, not a fixed 72 h", async () => {
       const { chain, executor } = build();
       chain.slashDelay = 600n;
