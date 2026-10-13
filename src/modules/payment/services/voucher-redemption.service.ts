@@ -8,8 +8,9 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import {
   PaymentIntentRepository,
   RedeemableIntent,
+  RedemptionExclusions,
 } from '@database/postgres/repositories/payment-intent.repository';
-import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { BlockedRole, BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
 import { LedgerAccountId, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
@@ -89,6 +90,8 @@ export const PLATFORM_ABSORBED_TX_REF_PREFIX = 'platform_absorbed:';
 @Injectable()
 export class VoucherRedemptionService {
   private readonly logger = new Logger(VoucherRedemptionService.name);
+  /** Payers already logged as held in this pass: one line per payer, not per row. */
+  private readonly loggedHolds = new Set<string>();
 
   constructor(
     private readonly payments: PaymentIntentRepository,
@@ -114,12 +117,18 @@ export class VoucherRedemptionService {
    * with nothing saying why.
    */
   async run(asset: AssetId): Promise<void> {
+    // The blocked parties are left out IN the query, before its LIMIT: held
+    // after it, 100 rows of one blocked payer at the head of the queue would
+    // fill every pass and starve every other buyer (audit E-1). The per-row
+    // check below stays as a second line for a block that lands mid-pass.
     const pending = await this.payments.findAwaitingRedemption(
       asset,
       PaymentIntentStatus.SETTLED,
       PaymentRail.RAIL_B_VOUCHER,
       VOUCHER_REDEMPTION_BATCH,
+      await this.exclusions(asset),
     );
+    this.loggedHolds.clear();
 
     if (pending.length === 0) {
       return;
@@ -314,11 +323,52 @@ export class VoucherRedemptionService {
    * organization or account, the provider or its payout account, or the
    * delegate that signed.
    *
-   * A held row is not refused, released or absorbed: it keeps its hold and is
-   * found again on the next pass, so lifting the block resumes it. The payer
-   * is added to `blocked` by the caller, so a later seq of theirs is not
+   * A held row is not refused, released or absorbed at once: it keeps its
+   * hold and is found again on the next pass after the block is lifted. The
+   * payer is added to `blocked` by the caller, so a later seq of theirs is not
    * redeemed over it — the same rule as a voucher that did not land.
+   *
+   * **A hold that outlasts the voucher's on-chain expiry is absorbed by the
+   * platform (owner decision, audit E-2).** The chain refuses a voucher after
+   * `expiresAt + REDEEM_GRACE_SECONDS` (about 35 minutes after the call) with
+   * `VoucherExpired`, so a block that lasts longer than that does not
+   * "resume": the next pass after the unblock meets `UNREDEEMABLE`, and
+   * {@link absorb} pays the provider out of the platform's own funds while the
+   * buyer is not charged (their hold is released). The platform bears that
+   * cost on purpose: it is the price of not moving money for a blocked party.
    */
+  /**
+   * What the queue leaves out this pass: every standing platform block, and
+   * the on-chain blocked accounts of this asset's chain (confirmed live).
+   */
+  private async exclusions(asset: AssetId): Promise<RedemptionExclusions> {
+    const organizationIds: string[] = [];
+    const walletKeys: string[] = [];
+    for (const hit of this.blocklist.list()) {
+      const key = subjectKey(hit.subjectKind, hit.subject);
+      if (!key) continue;
+      (hit.subjectKind === BlockSubjectKind.ORGANIZATION ? organizationIds : walletKeys).push(key);
+    }
+    let chainAccounts: readonly string[] = [];
+    if (this.chainState?.blockedAccounts) {
+      try {
+        chainAccounts = await this.chainState.blockedAccounts(asset.split('/')[0]);
+      } catch {
+        chainAccounts = [];
+      }
+    }
+    return { organizationIds, walletKeys, chainAccounts };
+  }
+
+  /** Log a held row once per payer per pass. */
+  private logHeld(row: RedeemableIntent, why: string): void {
+    if (this.loggedHolds.has(row.agentAccount)) return;
+    this.loggedHolds.add(row.agentAccount);
+    this.logger.warn(
+      `Intent ${row.id} (seq ${row.voucherSeq}) of ${row.agentAccount} is held back: ${why}`,
+    );
+  }
+
   private async held(row: RedeemableIntent): Promise<boolean> {
     return this.heldByBlock(row) || (await this.heldByChain(row));
   }
@@ -330,9 +380,11 @@ export class VoucherRedemptionService {
    *
    * Held before batching so one bad voucher does not revert the whole atomic
    * `redeemVoucherBatch` — the same hold as the platform's own blocklist: the
-   * row keeps its hold and resumes on the next pass after the unpause or
-   * unblock. The gate answers only on a LIVE confirmation of what the cache
-   * says, so a stale cache never holds a voucher the chain would redeem.
+   * row keeps its hold and is retried on the next pass after the unpause or
+   * unblock, and once past its on-chain expiry it is absorbed by the platform
+   * (the provider is paid, the buyer is not charged; see {@link held}). The
+   * gate answers only on a LIVE confirmation of what the cache says, so a
+   * stale cache never holds a voucher the chain would redeem.
    */
   private async heldByChain(row: RedeemableIntent): Promise<boolean> {
     if (!this.chainState) return false;
@@ -342,9 +394,9 @@ export class VoucherRedemptionService {
       { role: 'DELEGATE', account: row.voucherDelegate },
     ]);
     if (!reason) return false;
-    this.logger.warn(
-      `Intent ${row.id} (seq ${row.voucherSeq}) is held back: ${reason}. It keeps its hold and ` +
-        `resumes when the chain admits it again.`,
+    this.logHeld(
+      row,
+      `${reason}. It keeps its hold; past its on-chain expiry it is absorbed by the platform.`,
     );
     return true;
   }
@@ -362,10 +414,10 @@ export class VoucherRedemptionService {
       { role: BlockedRole.DELEGATE, kind: BlockSubjectKind.WALLET, subject: row.voucherDelegate },
     ]);
     if (!blocked) return false;
-    this.logger.warn(
-      `Intent ${row.id} (seq ${row.voucherSeq}) is held back: its ${blocked.role.toLowerCase()} ` +
-        `is blocked (block ${blocked.hit.blockId}). It keeps its hold and resumes when the ` +
-        `block is lifted.`,
+    this.logHeld(
+      row,
+      `its ${blocked.role.toLowerCase()} is blocked (block ${blocked.hit.blockId}). It keeps its ` +
+        `hold; past its on-chain expiry it is absorbed by the platform.`,
     );
     return true;
   }

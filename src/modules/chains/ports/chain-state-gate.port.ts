@@ -46,6 +46,14 @@ export interface ChainStateGatePort {
   assertActive(door: ChainDoor, parties: readonly ChainParty[]): Promise<void>;
   /** Why the chain would refuse right now (confirmed live), or `null`. Never throws. */
   holdReason(door: ChainDoor, parties: readonly ChainParty[]): Promise<string | null>;
+  /**
+   * Every account the cache says is blocked on `chainId`, CONFIRMED live, as
+   * lower-case CAIP-10. A failed live read leaves that address out (the hold
+   * rule: a hold can cost a voucher). `[]` for a chain with no blocklist.
+   * Never throws. The redemption queue leaves these parties out of its query,
+   * so a blocked party cannot fill a pass and starve every other buyer (E-1).
+   */
+  blockedAccounts?(chainId: string): Promise<readonly string[]>;
 }
 
 export const CHAIN_STATE_GATE = 'CHAIN_STATE_GATE';
