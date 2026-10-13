@@ -1,6 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId } from '@modules/chains/ports/caip.types';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 
@@ -50,6 +52,7 @@ export class EscrowSeqService {
   constructor(
     private readonly escrows: BuyerEscrowRepository,
     private readonly cache: CacheService,
+    private readonly blocklist: AccountBlocklistService,
   ) {}
 
   /**
@@ -81,6 +84,19 @@ export class EscrowSeqService {
     account: AccountId,
     chainSeqHigh: bigint | null = null,
   ): Promise<NextSeq> {
+    // A seq is the first half of a voucher: the buyer signs over it. Neither
+    // caller (`GET /escrow/next-seq`, rail B's `PAYMENT_REQUIRED`) hands one
+    // to a blocked account — the first is a read a blocked person's session
+    // may otherwise make.
+    this.blocklist.assertNotBlocked([
+      {
+        role: BlockedRole.ORGANIZATION,
+        kind: BlockSubjectKind.ORGANIZATION,
+        subject: organizationId,
+      },
+      { role: BlockedRole.PAYER, kind: BlockSubjectKind.WALLET, subject: account },
+    ]);
+
     if (chainSeqHigh !== null) {
       const moved = await this.escrows.bumpNextSeqTo(organizationId, account, chainSeqHigh + 1n);
       if (moved > 0) {

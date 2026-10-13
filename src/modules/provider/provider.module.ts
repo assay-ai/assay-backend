@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 
 import {
@@ -96,7 +97,7 @@ import { loadProviderRegistry, loadProviderStakes } from './services/provider-se
  * imported directly where it is actually used instead.
  */
 @Module({
-  imports: [ChainsModule],
+  imports: [ChainsModule, BlocklistModule],
   providers: [
     // Empty until an operator seeds them, via `PROVIDER_REGISTRY_SEED_FILE`
     // and `PROVIDER_STAKE_SEED_FILE`. A router with an empty registry refuses

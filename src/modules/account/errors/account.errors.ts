@@ -18,6 +18,8 @@ export enum AccountErrorCode {
   ACCOUNT_DELEGATE_CHALLENGE_INVALID = 'ACCOUNT_DELEGATE_CHALLENGE_INVALID',
   ACCOUNT_DELEGATE_SIGNATURE_INVALID = 'ACCOUNT_DELEGATE_SIGNATURE_INVALID',
   ACCOUNT_DELEGATE_ALREADY_BOUND = 'ACCOUNT_DELEGATE_ALREADY_BOUND',
+  // ── The account blocklist ──
+  ACCOUNT_BLOCKED = 'ACCOUNT_BLOCKED',
 }
 
 export type AccountErrorCodesArePrefixed = AssertDomainErrorCodes<'ACCOUNT', `${AccountErrorCode}`>;
@@ -96,5 +98,23 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
       `The delegate key${
         context?.delegate ? ` ${context.delegate}` : ''
       } is already bound to another agent credential; nothing was bound. Revoke that credential, or bind a key of this agent's own`,
+  },
+  /**
+   * A party to this request is on the account blocklist: a wallet that is the
+   * payer, payee, delegate or stake authority, or the provider serving the
+   * call. A blocked *organization's own* session is refused with
+   * `AUTH_ORGANIZATION_SUSPENDED` instead, the code the dashboard already
+   * handles.
+   *
+   * 403: the request is well formed and re-authenticating will not help. The
+   * context names the role (`PAYER`, `PAYEE`, …) and never the reason, which is
+   * the platform's internal note.
+   */
+  accountBlocked: {
+    code: AccountErrorCode.ACCOUNT_BLOCKED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `This account is blocked${context?.role ? ` (${String(context.role).toLowerCase()})` : ''}; ` +
+      'contact support',
   },
 });

@@ -8,6 +8,8 @@ import {
   PaymentIntentRepository,
   VoucherAdmissionScope,
 } from '@database/postgres/repositories/payment-intent.repository';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { LedgerAccountId, LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
@@ -75,6 +77,7 @@ export class PaymentIntentService {
     private readonly intents: PaymentIntentRepository,
     private readonly ledger: LedgerService,
     private readonly escrowGate: EscrowSpendGateService,
+    private readonly blocklist: AccountBlocklistService,
   ) {}
 
   /**
@@ -93,11 +96,33 @@ export class PaymentIntentService {
    * A key replayed against a *different* request is not a retry — it is a
    * collision, and it is refused rather than silently answered with the first
    * request's intent.
+   *
+   * **No intent names a blocked party.** Every new payment, on every rail,
+   * starts here, so this is the one place the account blocklist refuses the
+   * payer's organization and account, the provider and its payout account, and
+   * the voucher delegate. It is checked before the insert, so a refusal leaves
+   * nothing behind — not even the idempotency key.
    */
   async create(
     input: CreatePaymentIntentInput,
     admission?: VoucherAdmission,
   ): Promise<PaymentIntent> {
+    this.blocklist.assertNotBlocked([
+      {
+        role: BlockedRole.ORGANIZATION,
+        kind: BlockSubjectKind.ORGANIZATION,
+        subject: input.organizationId,
+      },
+      { role: BlockedRole.PAYER, kind: BlockSubjectKind.WALLET, subject: input.agentAccount },
+      {
+        role: BlockedRole.PROVIDER,
+        kind: BlockSubjectKind.ORGANIZATION,
+        subject: input.providerId,
+      },
+      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: input.providerAccount },
+      { role: BlockedRole.DELEGATE, kind: BlockSubjectKind.WALLET, subject: input.voucherDelegate },
+    ]);
+
     const providerAmount = MoneyUtil.subtract(input.price, input.platformFee);
 
     const row: Partial<PaymentIntentEntity> = {

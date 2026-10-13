@@ -356,6 +356,9 @@ describe('REST surface consistency', () => {
      * somebody adding it, which is the conversation this test exists to force.
      */
     const OPERATOR_SURFACE = new Set([
+      // `A-9`/`A-10`, the account blocklist. The subject of a block is never the
+      // caller, and a blocked tenant must not be the one who can lift it.
+      'modules/operator/controllers/operator-blocks.controller.ts',
       'modules/operator/controllers/operator-cases.controller.ts',
       'modules/operator/controllers/operator-override-log.controller.ts',
       // `V-7`, the only writer of `providers.verified`. Its subject is a

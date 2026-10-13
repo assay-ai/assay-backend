@@ -380,6 +380,46 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     reversible: true,
     implemented: false,
   }),
+  /**
+   * Block an organization or a wallet — the leaked-key response.
+   *
+   * Numbered after the access rows the register already enumerates (`A-8` is
+   * the prohibited one), not in a gap, so no code ever means two things.
+   *
+   * `ADJL`/`SRE`: the incident roles, the same pairing `S-1` uses for the other
+   * "stop it now" action. `SRE` is on call when a key leaks at 03:00; `ADJL` is
+   * who decides about an account in daylight. `SINGLE` because a block that
+   * waits for a second person is a block that lands after the money moved, and
+   * because it takes nobody's money — it is reversible by `A-10`.
+   */
+  'A-9': define({
+    code: 'A-9',
+    family: OverrideFamily.ACCESS,
+    action: 'account.blocked',
+    label: 'Block an organization or a wallet',
+    roles: [OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  /**
+   * Lift a block. The asymmetry with `A-9` is the point: blocking is cheap
+   * and fast because a wrong block costs an apology, while lifting the block
+   * of a leaked key costs whatever the key can then spend — so the second
+   * identity is demanded here and not there. The checker must be `ADJL`; the
+   * maker may be the `SRE` who blocked it.
+   */
+  'A-10': define({
+    code: 'A-10',
+    family: OverrideFamily.ACCESS,
+    action: 'account.unblocked',
+    label: 'Lift a block on an organization or a wallet',
+    roles: [OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJL],
+    reversible: true,
+    implemented: true,
+  }),
 });
 
 /** Every code, ordered by family then numerically — the console's own order. */

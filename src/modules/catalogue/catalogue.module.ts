@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { ToolModule } from '@modules/tool/tool.module';
@@ -24,7 +25,7 @@ import { CatalogueService } from './services/catalogue.service';
   // `ChainsModule` for `ENABLED_CHAINS` alone: this catalogue is anonymous, so
   // the `RoutingContext` it quotes with names every chain the deployment offers
   // rather than a buyer's.
-  imports: [ChainsModule, ToolModule, ProviderModule],
+  imports: [ChainsModule, ToolModule, ProviderModule, BlocklistModule],
   providers: [CatalogueService],
   exports: [CatalogueService],
 })

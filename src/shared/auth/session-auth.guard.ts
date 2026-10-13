@@ -1,6 +1,7 @@
 import { CanActivate, ExecutionContext, Inject, Injectable } from '@nestjs/common';
 import { Request } from 'express';
 
+import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
 import {
   MCP_SESSION_SOURCE,
   McpSession,
@@ -59,6 +60,14 @@ export interface RequestWithSession extends Request {
  * Fails closed: `McpSessionPort.resolve` throws (never returns a null
  * session) on a missing or unknown token, and that throw propagates through
  * this guard to `AllExceptionsFilter` unchanged.
+ *
+ * **A blocked account reads, and does nothing else.** The session source
+ * refuses a blocked machine credential outright and marks a blocked person's
+ * session (`McpSession.blocked`). Such a session passes here on `GET` and
+ * `HEAD` only — the dashboard can still show the account its own data and the
+ * block — and every other method is refused with the block's own code. A read
+ * that hands out something spendable (`GET /escrow/next-seq` issues a voucher
+ * seq) refuses again where it does so.
  */
 @Injectable()
 export class SessionAuthGuard implements CanActivate {
@@ -67,7 +76,13 @@ export class SessionAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestWithSession>();
     const session = await this.sessions.resolve(extractBearerToken(request));
+    if (session.blocked && !READ_METHODS.has(request.method.toUpperCase())) {
+      throw sessionBlockedError(session.blocked);
+    }
     request[SESSION_REQUEST_KEY] = session;
     return true;
   }
 }
+
+/** The methods a blocked person's session may still use. */
+const READ_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);

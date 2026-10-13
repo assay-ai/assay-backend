@@ -2,6 +2,7 @@ import { generateKeyPairSync, randomUUID, sign } from 'node:crypto';
 
 import { getBase58Decoder } from '@solana/kit';
 
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
@@ -23,6 +24,8 @@ import {
 } from '@modules/payment/services/payment-intent.service';
 import { VoucherService } from '@modules/payment/services/voucher.service';
 import { MoneyUtil } from '@shared/utils/money.util';
+
+import { noBlocks } from '../../helpers/blocklist';
 
 export const SOLANA_MAINNET = CHAIN_IDS.SOLANA_MAINNET;
 export const USDC = ASSET_IDS.USDC_SOLANA_MAINNET;
@@ -289,7 +292,9 @@ export class InMemoryIntentWriter {
   }
 }
 
-export function createVoucherHarness(): VoucherHarness {
+export function createVoucherHarness(
+  blocklist: AccountBlocklistService = noBlocks(),
+): VoucherHarness {
   const keyPair = generateKeyPairSync('ed25519');
   const rawPublicKey = keyPair.publicKey.export({ format: 'der', type: 'spki' }).subarray(12);
   const payer = `${SOLANA_MAINNET}:${getBase58Decoder().decode(rawPublicKey)}` as AccountId;
@@ -313,6 +318,7 @@ export function createVoucherHarness(): VoucherHarness {
     intents as unknown as PaymentIntentService,
     registry,
     seqs as unknown as EscrowSeqService,
+    blocklist,
   );
 
   const organizationId = randomUUID();

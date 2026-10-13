@@ -8,6 +8,10 @@ import {
 } from '@modules/provider/ports/chain-enrolment.port';
 import { ProviderStatus, ProviderTier } from '@modules/provider/ports/provider.types';
 import { DbProviderRegistry } from '@modules/provider/services/db-provider-registry';
+import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
+
+import { blocklistOf, noBlocks } from '../helpers/blocklist';
 
 /**
  * `DbProviderRegistry` since per-chain enrolments — the routing state is assembled from
@@ -62,7 +66,13 @@ describe('DbProviderRegistry', () => {
     return { organizationId, status: 'ACTIVE', tier: 'ESTABLISHED' };
   }
 
-  function build(options: { rows?: string[]; enrolments?: ChainEnrolment[] } = {}) {
+  function build(
+    options: {
+      rows?: string[];
+      enrolments?: ChainEnrolment[];
+      blocklist?: AccountBlocklistService;
+    } = {},
+  ) {
     const find = jest
       .fn()
       .mockResolvedValue((options.rows ?? [PROVIDER_A]).map((id) => providerRow(id)));
@@ -78,7 +88,11 @@ describe('DbProviderRegistry', () => {
     });
     const enrolments = { enrolmentsOf } as unknown as ChainEnrolmentPort;
 
-    return { registry: new DbProviderRegistry(providers, enrolments), find, enrolmentsOf };
+    return {
+      registry: new DbProviderRegistry(providers, enrolments, options.blocklist ?? noBlocks()),
+      find,
+      enrolmentsOf,
+    };
   }
 
   it('carries every ACTIVE enrolment onto the routing state, keyed by its chain', async () => {
@@ -258,5 +272,55 @@ describe('DbProviderRegistry', () => {
     // The chain is still known to be enrolled, which is the whole difference
     // between "withdrawn from this chain" and "never signed".
     expect(states.get(PROVIDER_A)?.payoutEnrolmentChains.has(DEVNET)).toBe(true);
+  });
+
+  describe('with the account blocklist', () => {
+    const BLOCKED = '5c0b3b4e-0d8a-4f6e-9a51-6f1d2b7c9e10';
+
+    it('reads a blocked provider as SUSPENDED, so routing refuses it with its own reason', async () => {
+      const { registry } = build({
+        rows: [BLOCKED, PROVIDER_A],
+        enrolments: [enrolment(BLOCKED, DEVNET), enrolment(PROVIDER_A, DEVNET)],
+        blocklist: blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: BLOCKED }),
+      });
+
+      const states = await registry.findRoutingStates([BLOCKED, PROVIDER_A]);
+
+      expect(states.get(BLOCKED)?.status).toBe(ProviderStatus.SUSPENDED);
+      expect(states.get(PROVIDER_A)?.status).toBe(ProviderStatus.ACTIVE);
+    });
+
+    it('drops a blocked payout wallet from the routable map, and only that chain', async () => {
+      const blockedPayout = address(DEVNET, 'leaked-payout');
+      const { registry } = build({
+        enrolments: [
+          enrolment(PROVIDER_A, DEVNET, { payoutAccountId: blockedPayout }),
+          enrolment(PROVIDER_A, MAINNET),
+        ],
+        blocklist: blocklistOf({ kind: BlockSubjectKind.WALLET, subject: blockedPayout }),
+      });
+
+      const state = (await registry.findRoutingStates([PROVIDER_A])).get(PROVIDER_A);
+
+      expect(state?.payoutAccountByChain.has(DEVNET)).toBe(false);
+      expect(state?.payoutAccountByChain.get(MAINNET)).toBe(
+        address(MAINNET, `payout-${PROVIDER_A}`),
+      );
+      expect(state?.status).toBe(ProviderStatus.ACTIVE);
+    });
+
+    it('blocks one key on every chain of its namespace', async () => {
+      const { registry } = build({
+        enrolments: [enrolment(PROVIDER_A, DEVNET), enrolment(PROVIDER_A, MAINNET)],
+        blocklist: blocklistOf({
+          kind: BlockSubjectKind.WALLET,
+          subject: address(DEVNET, `payout-${PROVIDER_A}`),
+        }),
+      });
+
+      const state = (await registry.findRoutingStates([PROVIDER_A])).get(PROVIDER_A);
+
+      expect(state?.payoutAccountByChain.size).toBe(0);
+    });
   });
 });

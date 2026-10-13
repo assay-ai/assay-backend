@@ -59,6 +59,7 @@ import {
   uuidFromLabel,
   BuyerEscrowAccountColumnsSlice1759300000000,
 } from './test-database';
+import { noBlocks } from '../../unit/helpers/blocklist';
 
 loadEnv();
 
@@ -225,7 +226,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
   );
 
   const repository = new PaymentIntentRepository(dataSource);
-  const intents = new PaymentIntentService(repository, ledger, DISABLED_ESCROW_GATE);
+  const intents = new PaymentIntentService(repository, ledger, DISABLED_ESCROW_GATE, noBlocks());
   const expiry = new PaymentIntentExpiryService(repository, intents);
 
   const context: PaymentTestContext = {

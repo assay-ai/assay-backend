@@ -15,6 +15,9 @@ import {
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
 import { Alert, AlertSeverity } from '@shared/alerting';
+import { BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
+
+import { blocklistOf, noBlocks } from '../helpers/blocklist';
 
 /**
  * `VoucherRedemptionService` — what happens to a rail-B hold after the verdict
@@ -103,7 +106,7 @@ class FakeAlerts {
   }
 }
 
-function build(rows: RedeemableIntent[]) {
+function build(rows: RedeemableIntent[], blocklist = noBlocks()) {
   const redeemer = new FakeRedeemer();
   const alerts = new FakeAlerts();
   const intents = {
@@ -119,6 +122,7 @@ function build(rows: RedeemableIntent[]) {
     ledger as never,
     redeemer as never,
     alerts as never,
+    blocklist,
     () => NOW_SECONDS * 1000,
   );
 
@@ -325,5 +329,66 @@ describe('VoucherRedemptionService.run', () => {
     // earnings account is derived from a provider the row does not name would
     // move a buyer's money to nobody.
     expect(redeemer.calls).toEqual([]);
+  });
+});
+
+describe('VoucherRedemptionService.run, with a party blocked', () => {
+  const PROVIDER_UUID = '33333333-3333-4333-8333-333333333333';
+
+  it('redeems nothing whose payer wallet is blocked, and keeps the hold open', async () => {
+    const { service, redeemer, intents } = build(
+      [pending(1), pending(2, { agentAccount: OTHER_BUYER })],
+      blocklistOf({ kind: BlockSubjectKind.WALLET, subject: BUYER }),
+    );
+
+    await service.run(USDC);
+
+    expect(redeemer.calls.map((call) => call.payer)).toEqual([OTHER_BUYER]);
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds a voucher whose provider is blocked, and the payer’s later seqs behind it', async () => {
+    const { service, redeemer } = build(
+      [pending(1, { providerId: PROVIDER_UUID }), pending(2), pending(3)],
+      blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: PROVIDER_UUID }),
+    );
+
+    await service.run(USDC);
+
+    // Redeeming seq 2 would make seq 1 unredeemable for ever.
+    expect(redeemer.calls).toEqual([]);
+  });
+
+  it('holds a voucher whose payee wallet or delegate is blocked', async () => {
+    const delegate = `${CHAIN_IDS.SOLANA_DEVNET}:DeLeGaTe1111111111111111111111111111111111`;
+    const payee = build(
+      [pending(1)],
+      blocklistOf({ kind: BlockSubjectKind.WALLET, subject: PROVIDER_ACCOUNT }),
+    );
+    await payee.service.run(USDC);
+    expect(payee.redeemer.calls).toEqual([]);
+
+    const signer = build(
+      [pending(1, { voucherDelegate: delegate })],
+      blocklistOf({ kind: BlockSubjectKind.WALLET, subject: delegate }),
+    );
+    await signer.service.run(USDC);
+    expect(signer.redeemer.calls).toEqual([]);
+  });
+
+  it('resumes once nothing is blocked', async () => {
+    const blocklist = blocklistOf({ kind: BlockSubjectKind.WALLET, subject: BUYER });
+    const { service, redeemer } = build([pending(1)], blocklist);
+    await service.run(USDC);
+    expect(redeemer.calls).toEqual([]);
+
+    await blocklist.applied({
+      kind: 'unblocked',
+      subjectKind: BlockSubjectKind.WALLET,
+      subjectKey: subjectKey(BlockSubjectKind.WALLET, BUYER) as string,
+    });
+    await service.run(USDC);
+    expect(redeemer.calls.map((call) => call.seq)).toEqual(['1']);
   });
 });

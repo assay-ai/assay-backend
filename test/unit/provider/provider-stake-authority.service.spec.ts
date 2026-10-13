@@ -30,6 +30,11 @@ import {
 import { ProviderStakeAuthorityService } from '@modules/provider/services/provider-stake-authority.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { AccountErrorCode } from '@modules/account/errors/account.errors';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
+
+import { blocklistOf, noBlocks } from '../helpers/blocklist';
 
 const SOLANA_MAINNET = CHAIN_IDS.SOLANA_MAINNET;
 const ORG = 'org-11111111-1111-4111-8111-111111111111';
@@ -215,6 +220,7 @@ function build(
     readerError?: Error;
     /** `null` = no enrolment on the proved account's chain (enrolment required). */
     enrolment?: null;
+    blocklist?: AccountBlocklistService;
   } = {},
 ) {
   const providers = {
@@ -295,6 +301,7 @@ function build(
     config,
     dataSource,
     reader,
+    options.blocklist ?? noBlocks(),
   );
   return { service, providers, enrolments, challenges, chains, dataSource, tx, reader };
 }
@@ -881,5 +888,24 @@ describe('ProviderStakeAuthorityService.prove — the old stake account must be 
     // noise in a sentence where `USDC` is the information.
     expect(message).toContain(CURRENT_AUTHORITY);
     expect(message).not.toContain('token:');
+  });
+});
+
+describe('ProviderStakeAuthorityService.prove, with the wallet blocked', () => {
+  it('refuses to make a blocked wallet a stake authority, before checking the signature', async () => {
+    const w = wallet();
+    const row = challengeRow({ accountId: w.account });
+    const { service, tx } = build({
+      challenge: row,
+      blocklist: blocklistOf({ kind: BlockSubjectKind.WALLET, subject: w.account }),
+    });
+
+    await expect(
+      service.prove(session(), { challengeId: row.id, signature: 'not-checked' }),
+    ).rejects.toMatchObject({
+      errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
+      context: { role: BlockedRole.STAKE_AUTHORITY },
+    });
+    expect(tx.calls).toHaveLength(0);
   });
 });

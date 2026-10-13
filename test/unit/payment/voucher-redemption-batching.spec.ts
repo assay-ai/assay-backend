@@ -10,6 +10,7 @@ import {
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
 import { Alert } from '@shared/alerting';
+import { noBlocks } from '../helpers/blocklist';
 
 /**
  * Batch forming — the half of batched voucher redemption that lives in the
@@ -113,6 +114,7 @@ function build(rows: RedeemableIntent[], maxBatchSize: number) {
     ledger as never,
     redeemer as never,
     alerts as never,
+    noBlocks(),
     () => NOW_SECONDS * 1000,
   );
 

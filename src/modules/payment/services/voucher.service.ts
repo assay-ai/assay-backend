@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { assertRailOffered } from '@modules/chains/chain-metadata';
 import {
@@ -114,6 +116,7 @@ export class VoucherService {
     private readonly intents: PaymentIntentService,
     private readonly chains: ChainAdapterRegistry,
     private readonly seqs: EscrowSeqService,
+    private readonly blocklist: AccountBlocklistService,
   ) {}
 
   /**
@@ -129,6 +132,15 @@ export class VoucherService {
     const now = Math.floor(Date.now() / 1000);
 
     this.assertWellFormed(voucher);
+    // Right after the shape check, and before the signature: it is an
+    // in-memory lookup, and a voucher naming a blocked wallet is refused
+    // whoever signed it. `record` → `PaymentIntentService.create` checks the
+    // session's own parties again; this covers the voucher's.
+    this.blocklist.assertNotBlocked([
+      { role: BlockedRole.PAYER, kind: BlockSubjectKind.WALLET, subject: voucher.payer },
+      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: voucher.payTo },
+      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: voucher.provider },
+    ]);
     this.assertUnexpired(voucher, now);
     this.assertAuthorisesCall(voucher, input);
     const delegation = await this.assertAuthorisedByPayer(voucher, signature, input, now);

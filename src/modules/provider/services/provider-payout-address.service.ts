@@ -9,6 +9,8 @@ import { ProviderChainEnrolmentEntity } from '@database/postgres/entities/provid
 import { ProviderPayoutChallengeEntity } from '@database/postgres/entities/provider-payout-challenge.entity';
 import { ProviderPayoutChallengeRepository } from '@database/postgres/repositories/provider-payout-challenge.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { AccountId, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { PayoutProofChallenge } from '@modules/chains/ports/payout-proof.types';
@@ -80,6 +82,7 @@ export class ProviderPayoutAddressService {
     private readonly chains: ChainAdapterRegistry,
     private readonly config: ConfigService,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    private readonly blocklist: AccountBlocklistService,
   ) {}
 
   /**
@@ -193,6 +196,10 @@ export class ProviderPayoutAddressService {
     //    is `account`, taken from `row.accountId`, so a signature from any
     //    other wallet fails here regardless of what the request claims.
     const account = row.accountId as AccountId;
+    // A blocked wallet cannot become an address the platform pays.
+    this.blocklist.assertNotBlocked([
+      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: account },
+    ]);
     const adapter = this.chains.resolve(chainIdOf(account));
     const challenge: PayoutProofChallenge = {
       account,
