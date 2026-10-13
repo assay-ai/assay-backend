@@ -1,6 +1,7 @@
 import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
 import { AccountErrorCode } from '@modules/account/errors/account.errors';
 import { SortDirection } from '@shared/api';
+import { digestToken } from '@shared/crypto/token-digest';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { fakeQueryBuilder } from './helpers/fake-query-builder';
@@ -9,6 +10,7 @@ const ORGANIZATION_ID = '11111111-1111-1111-1111-111111111111';
 const AGENT_ID = '22222222-2222-2222-2222-222222222222';
 const OTHER_AGENT_ID = '55555555-5555-5555-5555-555555555555';
 const CREDENTIAL_ID = '33333333-3333-3333-3333-333333333333';
+const ACTOR = { type: 'user' as const, id: 'cred-actor' };
 
 function baseQuery(overrides: Record<string, unknown> = {}) {
   return Object.assign({ limit: 25, order: SortDirection.DESC }, overrides) as any;
@@ -52,8 +54,26 @@ function buildHarness(rows: ReturnType<typeof credentialRow>[] = []) {
     ),
   };
 
-  const service = new AgentCredentialsService(credentials as any, agents as any);
-  return { service, fake, credentials, agents };
+  // The writes go through the transaction's manager; it forwards to the same
+  // spies the assertions below read.
+  const manager = {
+    save: jest.fn((_entity: unknown, row: Record<string, unknown>) => credentials.save(row)),
+    update: jest.fn((_entity: unknown, criteria: unknown, values: unknown) =>
+      (credentials.update as jest.Mock)(criteria, values),
+    ),
+  };
+  const dataSource = {
+    transaction: jest.fn(async (work: (m: unknown) => unknown) => work(manager)),
+  };
+  const audit = { record: jest.fn().mockResolvedValue(undefined) };
+
+  const service = new AgentCredentialsService(
+    credentials as any,
+    agents as any,
+    dataSource as any,
+    audit as any,
+  );
+  return { service, fake, credentials, agents, manager, dataSource, audit };
 }
 
 describe('AgentCredentialsService.list', () => {
@@ -98,7 +118,7 @@ describe('AgentCredentialsService.create', () => {
     const { service, credentials } = buildHarness();
 
     await expectErrorCodeAsync(
-      () => service.create(ORGANIZATION_ID, OTHER_AGENT_ID, { name: 'orphan' }),
+      () => service.create(ORGANIZATION_ID, OTHER_AGENT_ID, { name: 'orphan' }, ACTOR),
       AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
     );
     expect(credentials.save).not.toHaveBeenCalled();
@@ -112,7 +132,7 @@ describe('AgentCredentialsService.create', () => {
     });
 
     await expectErrorCodeAsync(
-      () => service.create(ORGANIZATION_ID, AGENT_ID, { name: 'cross-tenant' }),
+      () => service.create(ORGANIZATION_ID, AGENT_ID, { name: 'cross-tenant' }, ACTOR),
       AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
     );
     expect(credentials.save).not.toHaveBeenCalled();
@@ -121,7 +141,7 @@ describe('AgentCredentialsService.create', () => {
   it('returns the full token exactly once and stores only its hash', async () => {
     const { service, credentials } = buildHarness();
 
-    const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'CI deploy' });
+    const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'CI deploy' }, ACTOR);
 
     expect(response.token).toMatch(/^x402_sk_live_/);
     expect(response.token.startsWith(response.prefix)).toBe(true);
@@ -136,7 +156,7 @@ describe('AgentCredentialsService.create', () => {
 
   it('defaults scopes to an empty array and expiresAt to null', async () => {
     const { service } = buildHarness();
-    const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'no scopes' });
+    const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'no scopes' }, ACTOR);
 
     expect(response.scopes).toEqual([]);
     expect(response.expiresAt).toBeNull();
@@ -145,8 +165,8 @@ describe('AgentCredentialsService.create', () => {
   it('two credentials for the same agent get different tokens and different hashes', async () => {
     const { service, credentials } = buildHarness();
 
-    await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'one' });
-    await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'two' });
+    await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'one' }, ACTOR);
+    await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'two' }, ACTOR);
 
     const [first, second] = credentials.create.mock.calls.map((call) => call[0]);
     expect(first.tokenHash).not.toBe(second.tokenHash);
@@ -154,7 +174,7 @@ describe('AgentCredentialsService.create', () => {
 
   it('scopes the written row to the caller organization and named agent', async () => {
     const { service, credentials } = buildHarness();
-    await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'CI deploy' });
+    await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'CI deploy' }, ACTOR);
 
     const created = credentials.create.mock.calls[0][0];
     expect(created.organizationId).toBe(ORGANIZATION_ID);
@@ -168,7 +188,7 @@ describe('AgentCredentialsService.revoke', () => {
     credentials.findOneBy.mockResolvedValue(null);
 
     await expectErrorCodeAsync(
-      () => service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, 'cred-actor'),
+      () => service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR),
       AccountErrorCode.ACCOUNT_CREDENTIAL_NOT_FOUND,
     );
   });
@@ -178,7 +198,7 @@ describe('AgentCredentialsService.revoke', () => {
     credentials.findOneBy.mockResolvedValue(credentialRow({ agentId: OTHER_AGENT_ID }));
 
     await expectErrorCodeAsync(
-      () => service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, 'cred-actor'),
+      () => service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR),
       AccountErrorCode.ACCOUNT_CREDENTIAL_NOT_FOUND,
     );
     expect(credentials.update).not.toHaveBeenCalled();
@@ -188,7 +208,7 @@ describe('AgentCredentialsService.revoke', () => {
     const { service, credentials } = buildHarness();
     credentials.findOneBy.mockResolvedValue(credentialRow());
 
-    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, 'cred-actor');
+    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
 
     expect(credentials.update).toHaveBeenCalledWith(
       { organizationId: ORGANIZATION_ID, id: CREDENTIAL_ID },
@@ -202,8 +222,88 @@ describe('AgentCredentialsService.revoke', () => {
       credentialRow({ revokedAt: new Date('2026-08-01T00:00:00.000Z'), revokedBy: 'someone-else' }),
     );
 
-    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, 'cred-actor');
+    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
 
     expect(credentials.update).not.toHaveBeenCalled();
+  });
+});
+
+describe('AgentCredentialsService — audit log (BUG-R2-B4-01)', () => {
+  it('records credential.created in the transaction that saves the credential', async () => {
+    const { service, audit, manager, dataSource } = buildHarness();
+
+    const response = await service.create(
+      ORGANIZATION_ID,
+      AGENT_ID,
+      { name: 'CI deploy', scopes: ['tools:call'] },
+      ACTOR,
+    );
+
+    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(audit.record).toHaveBeenCalledWith(manager, {
+      organizationId: ORGANIZATION_ID,
+      actor: ACTOR,
+      action: 'credential.created',
+      resourceType: 'agent_credential',
+      resourceId: CREDENTIAL_ID,
+      before: null,
+      after: { agentId: AGENT_ID, name: 'CI deploy', scopes: ['tools:call'], expiresAt: null },
+    });
+
+    // Neither the token, its stored prefix nor its hash is in the entry.
+    const recorded = JSON.stringify(audit.record.mock.calls[0][1]);
+    expect(recorded).not.toContain(response.token);
+    expect(recorded).not.toContain(response.prefix);
+    expect(recorded).not.toContain(digestToken(response.token));
+  });
+
+  it('fails the create when the audit entry cannot be recorded', async () => {
+    const { service, audit } = buildHarness();
+    audit.record.mockRejectedValue(new Error('audit down'));
+
+    await expect(
+      service.create(ORGANIZATION_ID, AGENT_ID, { name: 'CI deploy' }, ACTOR),
+    ).rejects.toThrow('audit down');
+  });
+
+  it('records credential.revoked in the transaction that revokes it', async () => {
+    const { service, credentials, audit, manager } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow());
+
+    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
+
+    const revokedAt = (credentials.update.mock.calls[0][1] as { revokedAt: Date }).revokedAt;
+    expect(audit.record).toHaveBeenCalledWith(manager, {
+      organizationId: ORGANIZATION_ID,
+      actor: ACTOR,
+      action: 'credential.revoked',
+      resourceType: 'agent_credential',
+      resourceId: CREDENTIAL_ID,
+      before: { revokedAt: null },
+      after: { revokedAt: revokedAt.toISOString(), name: 'CI deploy' },
+    });
+    expect(JSON.stringify(audit.record.mock.calls[0][1])).not.toContain('deadbeef');
+  });
+
+  it('records nothing for a credential that was already revoked, or is not found', async () => {
+    const { service, credentials, audit } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow({ revokedAt: new Date() }));
+    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
+
+    credentials.findOneBy.mockResolvedValue(null);
+    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR).catch(() => undefined);
+
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('fails the revoke when the audit entry cannot be recorded', async () => {
+    const { service, credentials, audit } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow());
+    audit.record.mockRejectedValue(new Error('audit down'));
+
+    await expect(service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR)).rejects.toThrow(
+      'audit down',
+    );
   });
 });

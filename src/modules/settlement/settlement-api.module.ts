@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { McpModule } from '@modules/mcp/mcp.module';
+import { AuditLogModule } from '@shared/audit';
 
 import { EscrowDelegatesController } from './controllers/escrow-delegates.controller';
 import { EscrowController } from './controllers/escrow.controller';
@@ -18,7 +19,7 @@ import { SettlementModule } from './settlement.module';
  * same one every session-scoped route uses.
  */
 @Module({
-  imports: [SettlementModule, McpModule],
+  imports: [SettlementModule, McpModule, AuditLogModule],
   controllers: [EscrowController, EscrowDelegatesController],
   exports: [SettlementModule],
 })

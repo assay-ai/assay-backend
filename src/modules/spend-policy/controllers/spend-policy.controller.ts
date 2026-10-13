@@ -3,6 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
+import { auditActorOf } from '@shared/audit';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { SpendPolicyDto } from '../dto/get-spend-policy.dto';
@@ -41,7 +42,12 @@ export class SpendPolicyController {
     @CurrentSession() session: McpSession,
     @Body() body: UpdateSpendPolicyDto,
   ): Promise<SpendPolicyDto> {
-    return this.spendPolicy.patch(session.organizationId, session.agentId, body);
+    return this.spendPolicy.patch(
+      session.organizationId,
+      session.agentId,
+      body,
+      auditActorOf(session),
+    );
   }
 
   @Get('history')

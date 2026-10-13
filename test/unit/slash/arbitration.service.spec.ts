@@ -291,6 +291,72 @@ describe('ArbitrationService', () => {
       });
     });
 
+    /**
+     * The DTO refuses these first. The service refuses them again because it is
+     * the one that calls `BigInt()` and writes the penalty, and `BigInt('')` is
+     * `0n`: from DISPUTED an unchecked `''`, `'0'` or `'-5'` was written as the
+     * penalty and the case re-proposed on chain at that figure.
+     */
+    it.each(['', '0', '-5', '284.7', 'abc', ' 100', '0100', null, undefined])(
+      'refuses the recalculated amount %p before anything is written',
+      async (recalculatedAmount) => {
+        const ctx = build();
+        const dispute = seedDisputed(ctx, '2000000');
+
+        await expect(
+          ctx.service.decide(ADJUDICATOR as never, 'org_1', 'p1', {
+            outcome: ArbitrationOutcome.UPHELD_RECALCULATED,
+            reasonCodes: ['PRICE_BASIS_WRONG'],
+            note: NOTE,
+            recalculatedAmount,
+          }),
+        ).rejects.toMatchObject({
+          errorCode: SlashErrorCode.SLASH_RECALCULATED_AMOUNT_INVALID,
+          statusCode: 422,
+        });
+
+        const row = ctx.proposals.rows.get('p1')!;
+        expect(row.status).toBe(SlashProposalStatus.DISPUTED);
+        expect(row.penaltyAmount).toBe('2000000');
+        expect(dispute.state).toBe('OPEN');
+        expect(ctx.overrides.performed).toEqual([]);
+        expect(ctx.execution.reproposeCalls).toEqual([]);
+        expect(ctx.events.kinds()).toEqual([]);
+      },
+    );
+
+    it('says what the amount must be, not that a reason code is wrong', async () => {
+      const ctx = build();
+      seedDisputed(ctx, '2000000');
+
+      await expect(
+        ctx.service.decide(ADJUDICATOR as never, 'org_1', 'p1', {
+          outcome: ArbitrationOutcome.UPHELD_RECALCULATED,
+          reasonCodes: ['PRICE_BASIS_WRONG'],
+          note: NOTE,
+        }),
+      ).rejects.toMatchObject({
+        message:
+          'UPHELD_RECALCULATED needs a recalculated penalty: a positive whole number of minor ' +
+          'units, no more than the proposed 2000000',
+      });
+    });
+
+    /** "May not exceed": the console's own rule, so the two agree at the boundary. */
+    it('accepts a recalculation equal to the proposed amount', async () => {
+      const ctx = build();
+      seedDisputed(ctx, '2000000');
+
+      await ctx.service.decide(ADJUDICATOR as never, 'org_1', 'p1', {
+        outcome: ArbitrationOutcome.UPHELD_RECALCULATED,
+        reasonCodes: ['PRICE_BASIS_WRONG'],
+        note: NOTE,
+        recalculatedAmount: '2000000',
+      });
+
+      expect(ctx.proposals.rows.get('p1')!.penaltyAmount).toBe('2000000');
+    });
+
     it('accepts a recalculation below the proposed amount', async () => {
       const ctx = build();
       const dispute = seedDisputed(ctx, '2000000');
@@ -882,7 +948,124 @@ describe('ArbitrationService', () => {
 
       await expect(
         ctx.service.extendDeadline(ADJUDICATOR as never, 'org_1', 'p1', 24, 'S8_MORE', NOTE),
-      ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_PROPOSAL_NOT_DISPUTABLE });
+      ).rejects.toMatchObject({
+        // Not `SLASH_PROPOSAL_NOT_DISPUTABLE`: extending a deadline is not
+        // filing a dispute, and the operator is told which action was refused.
+        errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION,
+        statusCode: 409,
+        message: 'Cannot extend the deadline while the case is UPHELD; only while it is PROPOSED',
+      });
+      expect(ctx.overrides.performed).toEqual([]);
+    });
+  });
+
+  /**
+   * Taking ownership. Exempt from the override register, so the status check
+   * here is the only thing between a stray request and a resolved case.
+   */
+  describe('claiming a case', () => {
+    function seedInStatus(ctx: ReturnType<typeof build>, status: SlashProposalStatus) {
+      const dispute = seedDisputed(ctx);
+      ctx.proposals.rows.get('p1')!.status = status;
+      return dispute;
+    }
+
+    it('moves a DISPUTED case to UNDER_REVIEW and records the owner', async () => {
+      const ctx = build();
+      const dispute = seedDisputed(ctx);
+
+      const claimed = await ctx.service.claim(ADJUDICATOR as never, 'org_1', 'p1');
+
+      expect(claimed.status).toBe(SlashProposalStatus.UNDER_REVIEW);
+      expect(dispute.state).toBe('UNDER_REVIEW');
+      expect(dispute.assignedOperatorId).toBe('op_1');
+      expect(ctx.events.kinds()).toEqual(['ASSIGNED']);
+    });
+
+    it('changes the owner of a case already UNDER_REVIEW and nothing else', async () => {
+      const ctx = build();
+      const dispute = seedInStatus(ctx, SlashProposalStatus.UNDER_REVIEW);
+      dispute.state = 'UNDER_REVIEW';
+      dispute.assignedOperatorId = 'op_1';
+
+      const claimed = await ctx.service.claim(SECOND as never, 'org_1', 'p1');
+
+      expect(claimed.status).toBe(SlashProposalStatus.UNDER_REVIEW);
+      expect(dispute.state).toBe('UNDER_REVIEW');
+      expect(dispute.assignedOperatorId).toBe('op_2');
+      expect(ctx.proposals.transitions).toEqual([]);
+    });
+
+    it('changes only the owner while a decision awaits its second signature', async () => {
+      const ctx = build();
+      const dispute = seedDisputed(ctx, '9000000');
+      await ctx.service.decide(ADJUDICATOR as never, 'org_1', 'p1', {
+        outcome: ArbitrationOutcome.UPHELD,
+        reasonCodes: ['RATE_GENUINELY_EXCEEDED'],
+        note: NOTE,
+      });
+      const pending = { state: dispute.state, outcome: dispute.outcome };
+
+      const claimed = await ctx.service.claim(SECOND as never, 'org_1', 'p1');
+
+      expect(claimed.status).toBe(SlashProposalStatus.AWAITING_SECOND);
+      expect(claimed.decidedByOperatorId).toBe('op_1');
+      // The pending decision lives on the dispute row; a reclaim must not touch it.
+      expect({ state: dispute.state, outcome: dispute.outcome }).toEqual(pending);
+      expect(dispute.assignedOperatorId).toBe('op_2');
+    });
+
+    /**
+     * The defect: `claim` guarded only its DISPUTED branch, so on a resolved
+     * case it still rewrote the dispute to UNDER_REVIEW, replaced the owner and
+     * appended an ASSIGNED event — reopening the objection of a case that had
+     * been overturned, in the record the provider reads.
+     */
+    it.each([
+      SlashProposalStatus.PROPOSED,
+      SlashProposalStatus.UPHELD,
+      SlashProposalStatus.OVERTURNED,
+      SlashProposalStatus.EXECUTING,
+      SlashProposalStatus.EXECUTED,
+      SlashProposalStatus.REVERSED,
+      SlashProposalStatus.WAIVED,
+      SlashProposalStatus.CANCELLED,
+    ])('refuses a %s case and writes nothing', async (status) => {
+      const ctx = build();
+      const dispute = seedInStatus(ctx, status);
+      dispute.state = 'UPHELD';
+      dispute.assignedOperatorId = 'op_9';
+
+      await expect(ctx.service.claim(ADJUDICATOR as never, 'org_1', 'p1')).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION,
+        statusCode: 409,
+        message:
+          `Cannot claim the case while the case is ${status}; only while it is DISPUTED, ` +
+          `UNDER_REVIEW or AWAITING_SECOND`,
+      });
+
+      expect(ctx.proposals.rows.get('p1')!.status).toBe(status);
+      expect(dispute.state).toBe('UPHELD');
+      expect(dispute.assignedOperatorId).toBe('op_9');
+      expect(ctx.events.kinds()).toEqual([]);
+      expect(ctx.proposals.transitions).toEqual([]);
+    });
+
+    it('writes nothing when the case leaves DISPUTED between the read and the claim', async () => {
+      const ctx = build();
+      const dispute = seedDisputed(ctx);
+      const original = ctx.proposals.transitionIfIn.bind(ctx.proposals);
+      ctx.proposals.transitionIfIn = async (...args: Parameters<typeof original>) => {
+        ctx.proposals.rows.get('p1')!.status = SlashProposalStatus.OVERTURNED;
+        return original(...args);
+      };
+
+      await expect(ctx.service.claim(ADJUDICATOR as never, 'org_1', 'p1')).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION,
+      });
+      expect(dispute.state).toBe('OPEN');
+      expect(dispute.assignedOperatorId).toBeUndefined();
+      expect(ctx.events.kinds()).toEqual([]);
     });
   });
 });

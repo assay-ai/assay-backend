@@ -1,3 +1,4 @@
+import { AuditLogWriter } from '@shared/audit';
 import { AccountId, AssetId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { EscrowController } from '@modules/settlement/controllers/escrow.controller';
@@ -99,11 +100,13 @@ function build(result?: Partial<RelayedEscrowIntentResult>, reject?: Error) {
   );
   const assetFor = jest.fn(async () => ASSET);
 
+  const recordAfterCommit = jest.fn(async () => undefined);
   const controller = new EscrowController(
     { assetFor } as unknown as EscrowAccountService,
     { submitRelayedIntent } as unknown as WithdrawalService,
+    { recordAfterCommit } as unknown as AuditLogWriter,
   );
-  return { controller, submitRelayedIntent, assetFor };
+  return { controller, submitRelayedIntent, assetFor, recordAfterCommit };
 }
 
 const LIMITS_BODY = {
@@ -204,5 +207,43 @@ describe('POST /escrow/withdrawals/request', () => {
     await controller.submitRequestWithdraw(SESSION, { ...REQUEST_BODY, amount: '0' });
 
     expect(submitRelayedIntent.mock.calls[0][4]).toMatchObject({ amount: 0n });
+  });
+});
+
+describe('POST /escrow/limits — audit log (BUG-R2-B4-01)', () => {
+  it('records limit.updated once the relayed transaction has landed', async () => {
+    const { controller, recordAfterCommit } = build();
+
+    await controller.submitLimits(SESSION, LIMITS_BODY);
+
+    expect(recordAfterCommit).toHaveBeenCalledTimes(1);
+    expect(recordAfterCommit).toHaveBeenCalledWith({
+      organizationId: SESSION.organizationId,
+      actor: { type: 'user', id: SESSION.credentialId },
+      action: 'limit.updated',
+      resourceType: 'escrow',
+      resourceId: BUYER,
+      before: null,
+      after: {
+        maxVoucherAmount: '2500000',
+        maxPerWindow: '9000000',
+        transactionHash: '0x1e23e27f81ba84a1a27b0b58b3f4dc5049dd54016c734e94549f4951ecc3f6c9',
+      },
+    });
+    expect(JSON.stringify(recordAfterCommit.mock.calls)).not.toContain(SIGNATURE);
+  });
+
+  it('records nothing when the relay refused', async () => {
+    const { controller, submitRelayedIntent, recordAfterCommit } = build();
+    submitRelayedIntent.mockRejectedValueOnce(new Error('refused'));
+
+    await expect(controller.submitLimits(SESSION, LIMITS_BODY)).rejects.toThrow('refused');
+    expect(recordAfterCommit).not.toHaveBeenCalled();
+  });
+
+  it('does not record a withdrawal request — only limit changes are audited here', async () => {
+    const { controller, recordAfterCommit } = build();
+    await controller.submitRequestWithdraw(SESSION, REQUEST_BODY);
+    expect(recordAfterCommit).not.toHaveBeenCalled();
   });
 });

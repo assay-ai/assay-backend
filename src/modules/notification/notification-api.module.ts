@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { AuditLogModule } from '@shared/audit';
 import { McpModule } from '@modules/mcp/mcp.module';
 
 import { NotificationSettingsController } from './controllers/notification-settings.controller';
@@ -17,7 +18,7 @@ import { NotificationSettingsService } from './services/notification-settings.se
  * provides them globally.
  */
 @Module({
-  imports: [McpModule],
+  imports: [McpModule, AuditLogModule],
   controllers: [NotificationSettingsController],
   providers: [NotificationSettingsService],
   exports: [NotificationSettingsService],
