@@ -23,7 +23,7 @@ import { SlashExecutionService } from '@modules/slash/services/slash-execution.s
 import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp256k1-env.signer';
 
 import {
-  ADMIN,
+  FAKE_ARBITER,
   CHAIN,
   DEPLOYMENT,
   FakeStakeChain,
@@ -237,7 +237,7 @@ describe('suspending a case with a record standing on chain, against a real data
       seeded.organizationId,
       seeded.proposalId,
     );
-    expect(intent.admin).toBe(ADMIN);
+    expect(intent).toMatchObject({ admin: FAKE_ARBITER, signerRole: 'ARBITER' });
     expect(parts.map((part) => part.chainRequestId)).toContain(intent.requestId);
 
     // Requested and built — nothing was signed or sent, and the record stands.
@@ -304,7 +304,7 @@ describe('suspending a case with a record standing on chain, against a real data
       ).toHaveLength(1);
       await expect(
         services.execution.buildCancelIntent(seeded.organizationId, seeded.proposalId),
-      ).resolves.toMatchObject({ admin: ADMIN });
+      ).resolves.toMatchObject({ admin: FAKE_ARBITER });
     });
 
     it('does the same for an overturned case', async () => {
@@ -373,7 +373,7 @@ describe('suspending a case with a record standing on chain, against a real data
     expect(saved.chain_executable_at).not.toBeNull();
     await expect(
       services.execution.buildCancelIntent(seeded.organizationId, seeded.proposalId),
-    ).resolves.toMatchObject({ admin: ADMIN });
+    ).resolves.toMatchObject({ admin: FAKE_ARBITER });
   });
 
   it('records a third party executing the suspended case before the cancel was signed', async () => {
