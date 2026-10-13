@@ -1,3 +1,4 @@
+import { applyDecorators } from '@nestjs/common';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
@@ -9,14 +10,17 @@ import {
   IsIn,
   IsInt,
   IsISO8601,
+  IsNotEmpty,
   IsOptional,
   IsString,
   IsUrl,
   IsUUID,
   Length,
+  Matches,
   Max,
   MaxLength,
   Min,
+  ValidateIf,
   ValidateNested,
 } from 'class-validator';
 
@@ -277,6 +281,47 @@ export class ListOverrideLogQueryDto extends ListQueryDto {
  * `'false'` as `true`; anything other than `'true'`/`'false'` is left for
  * `@IsBoolean` to refuse.
  */
+/**
+ * Trim before validating, so what is checked is what is recorded.
+ *
+ * Every operator action writes its reason code and note to the override
+ * register. Without this a reason code of three spaces is "a string of at most
+ * 64 characters" and a note of twenty spaces meets a twenty-character minimum.
+ */
+const Trimmed = () =>
+  Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value));
+
+/** As {@link Trimmed}, for each member of a string array. */
+const TrimmedEach = () =>
+  Transform(({ value }: { value: unknown }) =>
+    Array.isArray(value)
+      ? value.map((item: unknown) => (typeof item === 'string' ? item.trim() : item))
+      : value,
+  );
+
+/**
+ * As {@link Trimmed}, for an optional reference: blank becomes absent, so an
+ * empty ticket reference is never recorded as though one had been given.
+ */
+const TrimmedOrAbsent = () =>
+  Transform(({ value }: { value: unknown }) => {
+    if (typeof value !== 'string') return value;
+    const trimmed = value.trim();
+    return trimmed === '' ? undefined : trimmed;
+  });
+
+/**
+ * A penalty in minor units: a positive whole number, digits only.
+ *
+ * No sign, no decimal point, no exponent, no leading zero and no surrounding
+ * space — the value is handed to `BigInt()` and written as the penalty, and
+ * `BigInt('')` is `0n` while `BigInt('284.7')` throws.
+ */
+const MINOR_UNITS_PATTERN = /^[1-9]\d{0,39}$/;
+
+/** The single reason code of an operator action: required, and not blank. */
+const ReasonCode = () => applyDecorators(Trimmed(), IsString(), IsNotEmpty(), MaxLength(64));
+
 const QueryBoolean = () =>
   Transform(({ value }: { value: unknown }) => {
     if (value === 'true') return true;
@@ -330,14 +375,17 @@ export class DecideCaseBodyDto {
     type: String,
     description: 'Reason codes, all of which must be valid for the chosen outcome',
   })
+  @TrimmedEach()
   @IsArray()
   @ArrayNotEmpty()
   @ArrayMaxSize(6)
   @IsString({ each: true })
+  @IsNotEmpty({ each: true })
   @MaxLength(64, { each: true })
   reasonCodes: string[];
 
   @ApiProperty({ minLength: 120, description: 'The reasoning, in the adjudicator’s own words' })
+  @Trimmed()
   @IsString()
   @Length(120, 4096)
   note: string;
@@ -346,25 +394,43 @@ export class DecideCaseBodyDto {
     description:
       'Names a suspected shared root cause, so sibling cases are decided once rather than N times',
   })
+  @TrimmedOrAbsent()
   @IsOptional()
   @IsString()
   @MaxLength(128)
   rootCauseKey?: string;
 
   @ApiPropertyOptional({ description: 'The ticket this was worked under' })
+  @TrimmedOrAbsent()
   @IsOptional()
   @IsString()
   @MaxLength(128)
   ticketRef?: string;
 
+  /**
+   * Required with `UPHELD_RECALCULATED`, and validated whenever it is sent.
+   *
+   * Refused here rather than in the service because the service's first use of
+   * it is `BigInt()`. The comparison against the original penalty needs the
+   * case and stays in `ArbitrationService.resolvePenalty`.
+   */
   @ApiPropertyOptional({
+    pattern: MINOR_UNITS_PATTERN.source,
     description:
-      'Only for UPHELD_RECALCULATED: the corrected penalty, in minor units. Must be ≤ the ' +
-      'original — an adjudication may reduce a penalty and may never raise one.',
+      'Required for UPHELD_RECALCULATED: the corrected penalty, in minor units — a positive ' +
+      'whole number, digits only. Must be ≤ the original: an adjudication may reduce a penalty ' +
+      'and may never raise one.',
   })
-  @IsOptional()
-  @IsString()
-  @MaxLength(40)
+  @ValidateIf(
+    (body: DecideCaseBodyDto) =>
+      body.outcome === ArbitrationOutcome.UPHELD_RECALCULATED ||
+      body.recalculatedAmount !== undefined,
+  )
+  @Matches(MINOR_UNITS_PATTERN, {
+    message:
+      'recalculatedAmount is required for UPHELD_RECALCULATED and must be a positive whole ' +
+      'number of minor units: digits only, no sign, decimal point or leading zero',
+  })
   recalculatedAmount?: string;
 }
 
@@ -375,6 +441,7 @@ export class SecondSignatureBodyDto {
   kind: 'SIGNED' | 'OBJECTED';
 
   @ApiProperty({ minLength: 20 })
+  @Trimmed()
   @IsString()
   @Length(20, 2048)
   note: string;
@@ -385,7 +452,9 @@ export class OpenFleetSweepBodyDto {
   @ApiProperty({
     description: 'What the affected cases have in common — a binding, mapping or policy version',
   })
+  @Trimmed()
   @IsString()
+  @IsNotEmpty()
   @MaxLength(128)
   defectKey: string;
 
@@ -396,13 +465,13 @@ export class OpenFleetSweepBodyDto {
   lookbackHours: number;
 
   @ApiProperty({ minLength: 120 })
+  @Trimmed()
   @IsString()
   @Length(120, 4096)
   note: string;
 
   @ApiProperty({ description: 'The reason code, from the source case’s outcome' })
-  @IsString()
-  @MaxLength(64)
+  @ReasonCode()
   reasonCode: string;
 }
 
@@ -445,16 +514,17 @@ export class FleetSweepDto {
 /** `S-1` and `S-2`: stop a proposal before anything is signed. */
 export class SuspendProposalBodyDto {
   @ApiProperty({ minLength: 20 })
+  @Trimmed()
   @IsString()
   @Length(20, 2048)
   note: string;
 
   @ApiProperty()
-  @IsString()
-  @MaxLength(64)
+  @ReasonCode()
   reasonCode: string;
 
   @ApiPropertyOptional()
+  @TrimmedOrAbsent()
   @IsOptional()
   @IsString()
   @MaxLength(128)
@@ -477,16 +547,17 @@ export class CompensatedBodyDto {
   signature: string;
 
   @ApiProperty({ minLength: 20 })
+  @Trimmed()
   @IsString()
   @Length(20, 2048)
   note: string;
 
   @ApiProperty()
-  @IsString()
-  @MaxLength(64)
+  @ReasonCode()
   reasonCode: string;
 
   @ApiPropertyOptional()
+  @TrimmedOrAbsent()
   @IsOptional()
   @IsString()
   @MaxLength(128)
@@ -541,13 +612,13 @@ export class ExtendDeadlineBodyDto {
   additionalHours: number;
 
   @ApiProperty({ minLength: 20 })
+  @Trimmed()
   @IsString()
   @Length(20, 2048)
   note: string;
 
   @ApiProperty()
-  @IsString()
-  @MaxLength(64)
+  @ReasonCode()
   reasonCode: string;
 }
 
@@ -575,7 +646,9 @@ export class VerifyProviderBodyDto {
   verified: boolean;
 
   @ApiProperty({ description: 'How it was checked, e.g. MANUAL_REVIEW' })
+  @Trimmed()
   @IsString()
+  @IsNotEmpty()
   @MaxLength(64)
   method: string;
 
@@ -604,16 +677,17 @@ export class VerifyProviderBodyDto {
   evidenceUrl?: string;
 
   @ApiProperty()
-  @IsString()
-  @MaxLength(64)
+  @ReasonCode()
   reasonCode: string;
 
   @ApiProperty({ minLength: 120 })
+  @Trimmed()
   @IsString()
   @Length(120, 4096)
   note: string;
 
   @ApiPropertyOptional()
+  @TrimmedOrAbsent()
   @IsOptional()
   @IsString()
   @MaxLength(128)
