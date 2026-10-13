@@ -51,6 +51,21 @@ export enum McpErrorCode {
 
 export type McpErrorCodesArePrefixed = AssertDomainErrorCodes<'MCP', `${McpErrorCode}`>;
 
+/**
+ * One code carries four different refusals; the sentence says which one, so an
+ * owner is not sent to raise a spend limit when the call was a duplicate. Keys
+ * are `VelocityViolationKind` values, kept as strings because the spend-policy
+ * module imports this file, not the other way round.
+ */
+const VELOCITY_REASON_TEXT: Record<string, string> = {
+  CALLS_PER_MINUTE: `The agent's calls-per-minute limit is used up`,
+  CALLS_PER_HOUR: `The agent's calls-per-hour limit is used up`,
+  SPEND_PER_HOUR: `The agent's spend-per-hour limit is used up`,
+  DUPLICATE_REQUEST:
+    `The same call (same tool, same arguments) was repeated too many times within one minute ` +
+    `and was refused as a duplicate`,
+};
+
 export const McpErrors = createDomainErrorFactory('MCP', {
   requestMalformed: {
     code: McpErrorCode.MCP_REQUEST_MALFORMED,
@@ -124,8 +139,10 @@ export const McpErrors = createDomainErrorFactory('MCP', {
     code: McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED,
     statusCode: 429,
     message: (context?: Record<string, any>) =>
-      `Call rate exceeded the agent's velocity limit` +
+      `${VELOCITY_REASON_TEXT[context?.reason] ?? `Call rate exceeded the agent's velocity limit`}` +
       `${context?.reason ? ` (${context.reason})` : ''}` +
+      `; ${context?.reason === 'DUPLICATE_REQUEST' ? 'no spend limit is used up and ' : ''}` +
+      `nothing was charged` +
       `${context?.retryAfter ? `, retry after ${context.retryAfter}s` : ''}`,
   },
   /** The tool allowlist. See `McpErrorCode.MCP_TOOL_NOT_ALLOWED`. */

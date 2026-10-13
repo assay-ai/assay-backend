@@ -47,6 +47,26 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
       expected: CallReconciliationClass.PAID_CREDITED,
     },
     {
+      name: 'PAID + SETTLED, credited from platform funds → PLATFORM_ABSORBED',
+      input: { callClass: 'PAID', status: 'SETTLED', platformAbsorbed: true },
+      expected: CallReconciliationClass.PLATFORM_ABSORBED,
+    },
+    {
+      name: 'an open hold wins over an absorbed flag → PAID_AWAITING_REDEMPTION',
+      input: {
+        callClass: 'PAID',
+        status: 'SETTLED',
+        awaitingRedemption: true,
+        platformAbsorbed: true,
+      },
+      expected: CallReconciliationClass.PAID_AWAITING_REDEMPTION,
+    },
+    {
+      name: 'PAID + SETTLED with no committed hold → PENDING, never PAID_CREDITED',
+      input: { callClass: 'PAID', status: 'SETTLED', credited: false },
+      expected: CallReconciliationClass.PENDING,
+    },
+    {
       name: 'an open hold on a VERIFYING intent is still PENDING',
       input: { callClass: 'PAID', status: 'VERIFYING', awaitingRedemption: true },
       expected: CallReconciliationClass.PENDING,
@@ -149,7 +169,7 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
     );
   });
 
-  it('is total: every declared class is reachable, and CALL_RECONCILIATION_CLASSES lists all ten', () => {
+  it('is total: every declared class is reachable, and CALL_RECONCILIATION_CLASSES lists all eleven', () => {
     const reached = new Set(CASES.map((c) => c.expected));
     for (const member of Object.values(CallReconciliationClass)) {
       expect(reached.has(member)).toBe(true);

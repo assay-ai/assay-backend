@@ -46,6 +46,15 @@ export class AuditLogService {
       qb.andWhere('entry.resourceId = :resourceId', { resourceId: query.resourceId });
     }
 
+    if (query.search) {
+      // The screen's one box: "Actor, object or id".
+      qb.andWhere(
+        '(entry.actorId ILIKE :search OR entry.action ILIKE :search ' +
+          'OR entry.resourceType ILIKE :search OR entry.resourceId ILIKE :search)',
+        { search: `%${query.search}%` },
+      );
+    }
+
     applyTimeWindow(qb, query, AUDIT_LOG_LIST);
 
     const page = await paginate(qb, query, AUDIT_LOG_LIST);

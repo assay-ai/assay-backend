@@ -30,6 +30,8 @@ interface GroupRow {
   providerAmount: string;
   platformFee: string;
   awaitingRedemption?: boolean;
+  platformAbsorbed?: boolean;
+  holdCommitted?: boolean;
 }
 
 interface BatchRow {
@@ -110,17 +112,18 @@ describe('ProviderReconciliationService — scoping', () => {
 });
 
 describe('ProviderReconciliationService — every class present, exhaustive by construction', () => {
-  it('lists all ten classes at a real zero for an empty window', async () => {
+  it('lists all eleven classes at a real zero for an empty window', async () => {
     const { service } = build([]);
 
     const result = await service.getReconciliation(PROVIDER, WINDOW);
 
-    expect(result.classBreakdown).toHaveLength(10);
+    expect(result.classBreakdown).toHaveLength(11);
     const classes = result.classBreakdown.map((r) => r.class).sort();
     expect(classes).toEqual(
       [
         CallReconciliationClass.PAID_CREDITED,
         CallReconciliationClass.PAID_AWAITING_REDEMPTION,
+        CallReconciliationClass.PLATFORM_ABSORBED,
         CallReconciliationClass.PAID_UNCREDITED,
         CallReconciliationClass.FREE,
         CallReconciliationClass.TEST,
@@ -297,6 +300,41 @@ describe('ProviderReconciliationService — rail B awaiting redemption', () => {
     expect(result.gross).toEqual({ amount: '1000', asset: USDC, decimals: 6 });
     expect(result.net).toEqual({ amount: '900', asset: USDC, decimals: 6 });
     expect(result.callCount).toBe(4);
+  });
+
+  it('a settled group with no committed hold is PENDING and adds no money (BUG-R2-V3-03)', async () => {
+    const { service } = build([
+      group({ calls: '19460', holdCommitted: false }),
+      group({ calls: '27', credited: '6300', providerAmount: '5040', platformFee: '1260' }),
+    ]);
+
+    const result = await service.getReconciliation(PROVIDER, WINDOW);
+
+    expect(classOf(result.classBreakdown, CallReconciliationClass.PENDING).calls).toBe(19460);
+    expect(classOf(result.classBreakdown, CallReconciliationClass.PAID_CREDITED).calls).toBe(27);
+    expect(result.net).toEqual({ amount: '5040', asset: USDC, decimals: 6 });
+  });
+
+  it('a platform-absorbed group is its own class: credited to the provider, no fee taken', async () => {
+    const { service } = build([
+      group({
+        calls: '4',
+        credited: '400',
+        providerAmount: '360',
+        platformFee: '40',
+        platformAbsorbed: true,
+      }),
+      group({ calls: '1', credited: '100', providerAmount: '90', platformFee: '10' }),
+    ]);
+
+    const result = await service.getReconciliation(PROVIDER, WINDOW);
+    const absorbed = classOf(result.classBreakdown, CallReconciliationClass.PLATFORM_ABSORBED);
+
+    expect(absorbed.calls).toBe(4);
+    expect(absorbed.credited).toEqual({ amount: '360', asset: USDC, decimals: 6 });
+    expect(classOf(result.classBreakdown, CallReconciliationClass.PAID_CREDITED).calls).toBe(1);
+    expect(result.platformTake).toEqual({ amount: '10', asset: USDC, decimals: 6 });
+    expect(result.net).toEqual({ amount: '450', asset: USDC, decimals: 6 });
   });
 });
 

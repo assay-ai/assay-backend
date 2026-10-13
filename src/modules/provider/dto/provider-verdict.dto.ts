@@ -159,6 +159,13 @@ export class ProviderVerdictListItemDto {
   })
   retentionState: 'RAW' | 'DIGESTED' | null;
 
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'When the raw bodies stop being kept (sealed_at + retention), or null unless retentionState is RAW',
+  })
+  bodiesExpireAt: Date | null;
+
   @ApiProperty()
   createdAt: Date;
 }

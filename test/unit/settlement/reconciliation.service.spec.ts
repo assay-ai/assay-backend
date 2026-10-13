@@ -117,14 +117,14 @@ function fakeBalances(
  * `buyer_escrows` in memory, keyset-paginated exactly as the real repository
  * is, so the walk's paging is exercised rather than assumed.
  */
-function fakeEscrowRepository(escrows: readonly EscrowFixture[]) {
+function fakeEscrowRepository(escrows: readonly EscrowFixture[], asset: AssetId = USDC) {
   const rows = escrows.map(
     (escrow, index) =>
       ({
         id: `escrow-${String(index).padStart(4, '0')}`,
         organizationId: 'org-1',
         accountId: escrow.account,
-        assetId: USDC,
+        assetId: asset,
         escrowAccountId: `Escrow${index}`,
         escrowAssetAccountId: `Ata${index}`,
         nextSeq: (escrow.nextSeq ?? 1n).toString(),
@@ -209,6 +209,7 @@ function build(options: {
   runs?: ReturnType<typeof fakeRuns>;
   escrows?: readonly EscrowFixture[];
   paidAtRedemption?: { providerCredits: bigint; platformFees: bigint };
+  asset?: AssetId;
 }) {
   const alerts = new RecordingAlertSink();
   const runs = options.runs ?? fakeRuns();
@@ -216,7 +217,7 @@ function build(options: {
   const snapshot = options.snapshot ?? { available: 0n };
   const escrows = options.escrows ?? [];
   const escrowReader = fakeEscrowReader(escrows);
-  const escrowRepository = fakeEscrowRepository(escrows);
+  const escrowRepository = fakeEscrowRepository(escrows, options.asset);
 
   const service = new ReconciliationService(
     options.vault ?? fakeVault(options.vaultBalance ?? 0n),
@@ -898,5 +899,54 @@ describe('ReconciliationService — the escrow walk is scoped to the asset', () 
     for (const [accounts] of readMany.mock.calls) {
       expect(accounts).not.toContain(solanaAccount);
     }
+  });
+});
+
+describe('ReconciliationService — where an EVM surplus sits', () => {
+  const EVM = 'eip155:46630/erc20:0x7E99c98e066032b2Ef5768ff18Ed090e1aB921ac' as AssetId;
+  const BUYER = toAccountId(
+    CHAIN_IDS.ROBINHOOD_TESTNET,
+    '0x18103e0000000000000000000000000000000001',
+  ) as AccountId;
+  // One known buyer escrow of 19.90, plus 10.00 a payer with no buyer_escrows
+  // row deposited straight into the contract.
+  const options = {
+    asset: EVM,
+    vaultBalance: 29_900_000n,
+    journal: { [LedgerEntryType.DEPOSIT]: 19_900_000n },
+    snapshot: { available: 19_900_000n },
+  };
+
+  it('names the part of the vault no mirrored buyer escrow holds, severity unchanged', async () => {
+    const { service } = build({
+      ...options,
+      escrows: [{ account: BUYER, chain: 19_900_000n, mirror: 19_900_000n }],
+    });
+
+    const report = await service.reconcile(EVM);
+    const surplus = report.findings.find(
+      (f) => f.code === ReconciliationFindingCode.UNEXPLAINED_SURPLUS,
+    );
+
+    expect(surplus?.severity).toBe(ReconciliationSeverity.WARN);
+    expect(surplus?.details).toMatchObject({
+      surplus: '10000000',
+      outsideBuyerEscrows: '10000000',
+    });
+    expect(surplus?.summary).toMatch(/outside every buyer escrow/);
+  });
+
+  it('says nothing about where it sits when an escrow could not be read', async () => {
+    const { service } = build({
+      ...options,
+      escrows: [{ account: BUYER, chain: 19_900_000n, unreadable: true }],
+    });
+
+    const report = await service.reconcile(EVM);
+    const surplus = report.findings.find(
+      (f) => f.code === ReconciliationFindingCode.UNEXPLAINED_SURPLUS,
+    );
+
+    expect(surplus?.details).not.toHaveProperty('outsideBuyerEscrows');
   });
 });

@@ -363,6 +363,19 @@ describe('ProviderVerdictService.list — DTO mapping', () => {
     expect(page.items[0].retentionState).toBe('RAW');
   });
 
+  it('bodiesExpireAt is the body row’s own expiry, not created_at + 72h (BUG-R2-V3-01)', async () => {
+    const expiresAt = new Date('2026-10-14T06:10:00.000Z');
+    const { service } = build({
+      records: [buildRecord({ id: 'r1' })],
+      packs: [buildPack({ id: 'p1', verdictId: 'r1' })],
+      bodies: [buildBody({ packId: 'p1', expiresAt })],
+    });
+
+    const page = await service.list(PROVIDER, listQuery());
+
+    expect(page.items[0].bodiesExpireAt).toEqual(expiresAt);
+  });
+
   it('retentionState is DIGESTED when the pack is sealed but its body has expired', async () => {
     const { service } = build({
       records: [buildRecord({ id: 'r1' })],

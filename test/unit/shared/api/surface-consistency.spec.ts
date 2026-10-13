@@ -146,6 +146,11 @@ const PUBLIC_SURFACE = new Map<string, number>([
   //    same set to any unauthenticated caller, so nothing here is disclosed
   //    that the protocol does not hand out first.
   ['modules/chains/controllers/chains.controller.ts', 1],
+  // `GET /public/features`. Two booleans — whether the two optional public
+  // pages above are registered on this deployment — so those pages ask here
+  // instead of calling a route that 404s. No row is read, nothing is keyed to
+  // a caller, and the readers are the same session-less pages.
+  ['bootstrap/api/public-features.controller.ts', 1],
 ]);
 
 /**
