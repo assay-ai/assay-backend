@@ -261,7 +261,6 @@ describe('PlatformHealthService — the EVM chain-state cache', () => {
         {
           chainId: 'eip155:46630',
           paused: true,
-          upgraded: true,
           arbiter: '0x5555555555555555555555555555555555555555',
           slashDelaySeconds: 600,
           cursorBlock: '100',
@@ -272,7 +271,6 @@ describe('PlatformHealthService — the EVM chain-state cache', () => {
         {
           chainId: 'eip155:4663',
           paused: false,
-          upgraded: false,
           arbiter: null,
           slashDelaySeconds: 259_200,
           cursorBlock: '5',
@@ -294,7 +292,6 @@ describe('PlatformHealthService — the EVM chain-state cache', () => {
       }),
       expect.objectContaining({
         chainId: 'eip155:4663',
-        upgraded: false,
         blockedCount: 0,
         stale: true,
       }),

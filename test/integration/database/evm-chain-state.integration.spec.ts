@@ -69,7 +69,6 @@ describe('EvmChainStateRepository, against a real database', () => {
     await repository.applyReconcile(
       CHAIN,
       {
-        upgraded: true,
         paused: false,
         arbiter: '0x5555555555555555555555555555555555555555',
         slashDelaySeconds: 600,
@@ -88,7 +87,6 @@ describe('EvmChainStateRepository, against a real database', () => {
     );
     expect(await repository.findBlocked()).toEqual([]);
     expect(await repository.findState(CHAIN)).toMatchObject({
-      upgraded: true,
       paused: false,
       slashDelaySeconds: 600,
       reconciledAt: NOW,

@@ -99,12 +99,10 @@ export const X402_CONFIG_ABI = parseAbi([
   'function canSign(address verifier) view returns (bool)',
   'function verifierKey(address verifier) view returns (VerifierKey)',
   /**
-   * The dispute upgrade's three reads (assay-evm D-19). **An old Config has
-   * none of them** and reverts with empty data, which is how
-   * `readConfigTerms` tells the two apart: `slashDelaySeconds()` reverting
-   * means the deployed Config predates the upgrade. `assertActive` is not
-   * vendored — it is the contract's own guard, and the backend reads the two
-   * facts it combines (`paused`, `blocked`) instead.
+   * The dispute upgrade's three reads (assay-evm D-19); the backend assumes
+   * the upgraded Config. `assertActive` is not vendored — it is the
+   * contract's own guard, and the backend reads the two facts it combines
+   * (`paused`, `blocked`) instead.
    */
   'function arbiter() view returns (address)',
   'function slashDelaySeconds() view returns (uint64)',
@@ -154,10 +152,8 @@ export const X402_CONFIG_ARBITER_ABI = parseAbi([
  * them at the offset the deployed bytecode writes.
  *
  * `SlashRecord.disputedAt` is the dispute upgrade's thirteenth field (D-19).
- * A Stake that predates the upgrade returns one word fewer, which this shape
- * cannot decode: read a record through `readSlashRecord` / `decodeSlashRecord`
- * (`evm-slash-record.ts`), which fall back to
- * {@link X402_STAKE_LEGACY_SLASH_RECORD_ABI}.
+ * Read a record through `readSlashRecord` / `decodeSlashRecord`
+ * (`evm-slash-record.ts`).
  */
 export const X402_STAKE_ABI = parseAbi([
   'struct ProviderStake { uint128 bonded; uint64 unbonding; uint64 unbondingStartedAt; uint64 slashedInWindow; uint64 slashWindowStartedAt; uint64 pendingSlash; uint64 __gap; uint128 totalDeposited; uint128 totalWithdrawn; uint128 totalSlashed; }',
@@ -174,16 +170,6 @@ export const X402_STAKE_ABI = parseAbi([
   'function requestUnstake(uint64 amount)',
   'function withdrawStake(uint64 amount)',
   'event StakeDeposited(address indexed provider, address indexed funder, uint64 amount, uint128 bonded)',
-]);
-
-/**
- * `slashRecordOf` as a Stake that predates the dispute upgrade returns it:
- * twelve fields (plus the two gaps), no `disputedAt`. Only `evm-slash-record.ts`
- * decodes with it, and only when the current shape does not fit the bytes.
- */
-export const X402_STAKE_LEGACY_SLASH_RECORD_ABI = parseAbi([
-  'struct SlashRecord { address provider; uint8 status; uint64 penalty; address beneficiary; uint64 proposedAt; uint32 __gap; address verifier; uint64 executableAt; uint32 __gap2; uint64 reserved; uint64 capAllowance; uint64 applied; uint64 executedAt; bytes32 policy; }',
-  'function slashRecordOf(bytes32 requestId) view returns (SlashRecord)',
 ]);
 
 /**
@@ -229,9 +215,7 @@ export const X402_STAKE_SLASH_ABI = parseAbi([
  * `SlashDisputed` and `SlashUpheld` to mirror a provider's on-chain dispute and
  * the arbiter's ruling onto the case. Kept apart from
  * {@link X402_STAKE_SLASH_ABI} so the slash WRITES stay reachable from the
- * slash executor only: this constant holds events and no function. A Stake
- * that predates the upgrade emits neither of the last two; reading for them
- * there finds nothing.
+ * slash executor only: this constant holds events and no function.
  */
 export const X402_SLASH_WATCH_EVENTS_ABI = parseAbi([
   'event SlashProposed(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 reserved, uint64 capAllowance, uint64 pendingSlash, uint64 proposedAt, uint64 executableAt)',

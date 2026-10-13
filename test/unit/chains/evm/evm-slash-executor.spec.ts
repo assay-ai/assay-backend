@@ -11,6 +11,7 @@ import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp2
 import {
   CHAIN,
   DEPLOYMENT,
+  FAKE_ARBITER,
   FakeStakeChain,
   MULTICALL,
   STAKE,
@@ -392,7 +393,7 @@ describe('EvmSlashExecutor — reads, cancel, expire, caps', () => {
     });
   });
 
-  it('builds the admin’s unsigned cancelSlash and sends nothing', async () => {
+  it('builds the arbiter’s unsigned cancelSlash and sends nothing', async () => {
     const { chain, executor } = build();
     await executor.propose(proposal(1));
     chain.sent.length = 0;
@@ -410,7 +411,7 @@ describe('EvmSlashExecutor — reads, cancel, expire, caps', () => {
       args: [`0x${requestId(1)}`],
     });
     expect(intent.to).toBe(STAKE);
-    expect(intent.admin).toBe(getAddress(DEPLOYMENT.admin));
+    expect(intent).toMatchObject({ admin: FAKE_ARBITER, signerRole: 'ARBITER' });
     expect(chain.sent).toHaveLength(0);
   });
 

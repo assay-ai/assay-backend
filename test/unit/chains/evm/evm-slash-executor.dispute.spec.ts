@@ -84,7 +84,6 @@ const ARBITER = '0x5555555555555555555555555555555555555555';
 
 async function upgraded() {
   const built = build();
-  built.chain.upgraded = true;
   built.chain.arbiter = ARBITER;
   await built.executor.propose(proposal(1));
   await built.executor.propose(proposal(2));
@@ -93,7 +92,7 @@ async function upgraded() {
 }
 
 describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
-  it('reads records from a Stake that predates the upgrade', async () => {
+  it('reads an undisputed record with disputedAt null', async () => {
     const { executor } = build();
     await executor.propose(proposal(1));
     await expect(executor.readRecord(requestId(1), PROVIDER, CHAIN)).resolves.toMatchObject({
@@ -102,15 +101,17 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
     });
   });
 
-  it("reads the live slash delay, and the old contract's own delay before the upgrade", async () => {
+  it('reads the live slash delay, and throws (never assumes 72 h) when it cannot', async () => {
     const { chain, executor } = build();
-    await expect(executor.slashDelaySeconds(CHAIN)).resolves.toBe(259_200);
-    chain.upgraded = true;
     chain.slashDelay = 600n;
     await expect(executor.slashDelaySeconds(CHAIN)).resolves.toBe(600);
+    chain.client.readContract = async () => {
+      throw new Error('EVM RPC eth_call failed: HTTP 503');
+    };
+    await expect(executor.slashDelaySeconds(CHAIN)).rejects.toThrow(/HTTP 503/);
   });
 
-  it('builds the cancel for the ARBITER when one is appointed, else for the admin', async () => {
+  it('builds the cancel for the ARBITER only, and refuses without one', async () => {
     const { chain, executor } = await upgraded();
     const arbiterIntent = await executor.buildCancel({
       chainId: CHAIN,
@@ -120,21 +121,10 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
     expect(arbiterIntent).toMatchObject({ admin: ARBITER, signerRole: 'ARBITER' });
 
     chain.arbiter = '0x0000000000000000000000000000000000000000';
-    const adminIntent = await executor.buildCancel({
-      chainId: CHAIN,
-      requestId: requestId(1),
-      provider: PROVIDER,
-    });
-    expect(adminIntent).toMatchObject({ admin: getAddress(DEPLOYMENT.admin), signerRole: 'ADMIN' });
-    expect(chain.sent).toHaveLength(0);
-  });
-
-  it('builds the old admin cancel against a Config that predates the upgrade', async () => {
-    const { executor } = build();
-    await executor.propose(proposal(1));
     await expect(
       executor.buildCancel({ chainId: CHAIN, requestId: requestId(1), provider: PROVIDER }),
-    ).resolves.toMatchObject({ admin: getAddress(DEPLOYMENT.admin), signerRole: 'ADMIN' });
+    ).rejects.toMatchObject({ errorCode: 'CHAIN_ARBITER_NOT_SET' });
+    expect(chain.sent).toHaveLength(0);
   });
 
   describe('disputeSlashBatch', () => {
@@ -197,7 +187,6 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
 
     it("measures the window against the record's executableAt, not a fixed 72 h", async () => {
       const { chain, executor } = build();
-      chain.upgraded = true;
       chain.slashDelay = 600n;
       await executor.propose(proposal(1));
       chain.now += 601n;
@@ -209,7 +198,7 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
       expect(built.refusals.map((r) => r.reason)).toEqual(['DisputeWindowClosed']);
     });
 
-    it('refuses an empty or oversize batch, and a chain without the upgrade', async () => {
+    it('refuses an empty or oversize batch', async () => {
       const { executor } = await upgraded();
       await expect(
         executor.buildDisputeBatch({ chainId: CHAIN, provider: PROVIDER, requestIds: [] }),
@@ -221,16 +210,6 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
           requestIds: Array.from({ length: 65 }, (_, i) => requestId(i + 1)),
         }),
       ).rejects.toMatchObject({ errorCode: 'CHAIN_PAYLOAD_MALFORMED' });
-
-      const old = build();
-      await old.executor.propose(proposal(1));
-      await expect(
-        old.executor.buildDisputeBatch({
-          chainId: CHAIN,
-          provider: PROVIDER,
-          requestIds: [requestId(1)],
-        }),
-      ).rejects.toMatchObject({ errorCode: 'CHAIN_DISPUTE_UPGRADE_ABSENT' });
     });
   });
 
@@ -282,7 +261,7 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
       expect(built.refusals.map((r) => r.reason)).toEqual(['ArbiterIsVerifier']);
     });
 
-    it('cancels pending and disputed records together; refuses an uphold with no arbiter', async () => {
+    it('cancels pending and disputed records together; refuses either ruling with no arbiter', async () => {
       const { chain, executor } = await upgraded();
       chain.markDisputed(requestId(1));
       const built = await executor.buildRulingBatch({
@@ -296,12 +275,9 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
       await expect(
         executor.buildRulingBatch({ chainId: CHAIN, ruling: 'UPHOLD', requestIds: [requestId(1)] }),
       ).rejects.toMatchObject({ errorCode: 'CHAIN_ARBITER_NOT_SET' });
-      const adminCancel = await executor.buildRulingBatch({
-        chainId: CHAIN,
-        ruling: 'CANCEL',
-        requestIds: [requestId(1)],
-      });
-      expect(adminCancel.call).toMatchObject({ signerRole: 'ADMIN' });
+      await expect(
+        executor.buildRulingBatch({ chainId: CHAIN, ruling: 'CANCEL', requestIds: [requestId(1)] }),
+      ).rejects.toMatchObject({ errorCode: 'CHAIN_ARBITER_NOT_SET' });
     });
   });
 

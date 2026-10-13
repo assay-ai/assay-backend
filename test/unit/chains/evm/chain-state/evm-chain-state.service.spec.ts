@@ -10,16 +10,13 @@ const BLOCKED = '0x2222222222222222222222222222222222222222';
 
 function build(options: {
   paused?: boolean;
-  upgraded?: boolean | null;
   blocked?: string[];
   live?: { paused?: boolean; blocked?: string[]; fails?: boolean };
 }) {
   const reads: string[] = [];
   const service = new EvmChainStateService(
     {
-      findAllStates: async () => [
-        { chainId: CHAIN, paused: options.paused ?? false, upgraded: options.upgraded ?? true },
-      ],
+      findAllStates: async () => [{ chainId: CHAIN, paused: options.paused ?? false }],
       findBlocked: async () =>
         (options.blocked ?? []).map((address) => ({ chainId: CHAIN, address })),
     } as never,
@@ -72,14 +69,14 @@ describe('EvmChainStateService — refuse early what the chain would refuse', ()
     expect(reads).toEqual(['paused']);
   });
 
-  it('lets a withdrawal through while paused on a Config that predates the upgrade', async () => {
-    // The old contracts never paused the exit; only deposits and redemption.
-    const { service } = build({ paused: true, upgraded: false });
+  it('a pause closes every door (the backend assumes the upgraded Config)', async () => {
+    const { service } = build({ paused: true });
     await service.refresh();
-    await expect(service.assertActive(ChainDoor.WITHDRAW, buyer())).resolves.toBeUndefined();
-    await expect(service.assertActive(ChainDoor.DEPOSIT, buyer())).rejects.toMatchObject({
-      errorCode: 'CHAIN_PROGRAM_PAUSED',
-    });
+    for (const door of Object.values(ChainDoor)) {
+      await expect(service.assertActive(door, buyer())).rejects.toMatchObject({
+        errorCode: 'CHAIN_PROGRAM_PAUSED',
+      });
+    }
   });
 
   it('refuses a blocked party by role, and ignores a non-EVM account', async () => {

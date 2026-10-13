@@ -43,7 +43,7 @@ export class SlashContractCallDto {
   @ApiProperty({ description: 'The only account the contract accepts this call from' })
   signer: string;
 
-  @ApiProperty({ enum: ['PROVIDER', 'ARBITER', 'ADMIN'] })
+  @ApiProperty({ enum: ['PROVIDER', 'ARBITER'] })
   signerRole: string;
 
   @ApiProperty({

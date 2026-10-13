@@ -15,7 +15,6 @@ const NOW = 1_800_000_000_000;
 interface FakeState {
   chainId: string;
   paused: boolean;
-  upgraded: boolean | null;
   arbiter: string | null;
   cursorBlock: string | null;
   caughtUpAt: Date | null;
@@ -26,13 +25,12 @@ function build(options: {
   head: bigint;
   logs?: Record<string, unknown>[];
   state?: Partial<FakeState>;
-  chain?: { paused?: boolean; upgraded?: boolean; blocked?: string[] };
+  chain?: { paused?: boolean; blocked?: string[] };
 }) {
   let state: FakeState | null = options.state
     ? {
         chainId: CHAIN,
         paused: false,
-        upgraded: null,
         arbiter: null,
         cursorBlock: null,
         caughtUpAt: null,
@@ -47,7 +45,6 @@ function build(options: {
     (state ??= {
       chainId: CHAIN,
       paused: false,
-      upgraded: null,
       arbiter: null,
       cursorBlock: null,
       caughtUpAt: null,
@@ -74,7 +71,7 @@ function build(options: {
     },
     applyReconcile: async (
       _chain: string,
-      terms: { paused: boolean; upgraded: boolean; arbiter: string | null },
+      terms: { paused: boolean; arbiter: string | null },
       corrections: { address: string; blocked: boolean }[],
       now: Date,
     ) => {
@@ -93,9 +90,6 @@ function build(options: {
     },
     readContract: async ({ functionName, args }: { functionName: string; args: unknown[] }) => {
       if (functionName === 'paused') return chain.paused ?? false;
-      if (chain.upgraded === false) {
-        throw Object.assign(new Error('reverted'), { name: 'ContractFunctionRevertedError' });
-      }
       if (functionName === 'slashDelaySeconds') return 600n;
       if (functionName === 'arbiter') return ARBITER;
       if (functionName === 'blocked') {
@@ -155,15 +149,9 @@ describe('EvmChainStateIndexer', () => {
     });
     blocked.set(VICTIM, false);
     await indexer.tick();
-    expect(state()).toMatchObject({ paused: true, upgraded: true, arbiter: ARBITER.toLowerCase() });
+    expect(state()).toMatchObject({ paused: true, arbiter: ARBITER.toLowerCase() });
     expect(blocked.get(VICTIM)).toBe(true);
     expect(alerts.map((alert) => alert.name)).toContain(EVM_CHAIN_STATE_ALERTS.DRIFT);
-  });
-
-  it('records an old Config as not upgraded and reads no blocklist', async () => {
-    const { indexer, state } = build({ head: 10n, chain: { upgraded: false } });
-    await indexer.tick();
-    expect(state()).toMatchObject({ upgraded: false, arbiter: null });
   });
 
   it('raises CRITICAL on ArbiterSet, SlashDelaySet and VerifierRegistered, WARN on an arbiter block', async () => {

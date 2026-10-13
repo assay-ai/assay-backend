@@ -12,7 +12,6 @@ import {
   X402_CONFIG_EVENTS_ABI,
   X402_SLASH_WATCH_EVENTS_ABI,
   X402_STAKE_ABI,
-  X402_STAKE_LEGACY_SLASH_RECORD_ABI,
   X402_STAKE_SLASH_ABI,
 } from '@modules/chains/evm/abi/x402.abi';
 
@@ -172,15 +171,6 @@ const ERC20_PINS: readonly Pin[] = [
  * `abiFunctions` in assay-evm's `deployments/46630.json`, agreeing with
  * `cast sig`; `aggregate3` from `cast sig 'aggregate3((address,bool,bytes)[])'`.
  */
-/** The pre-upgrade `slashRecordOf`, decoded only when the current shape does not fit. */
-const STAKE_LEGACY_PINS: readonly Pin[] = [
-  [
-    '0x8e00f4d1',
-    'slashRecordOf(bytes32)',
-    '((address provider,uint8 status,uint64 penalty,address beneficiary,uint64 proposedAt,uint32 __gap,address verifier,uint64 executableAt,uint32 __gap2,uint64 reserved,uint64 capAllowance,uint64 applied,uint64 executedAt,bytes32 policy))',
-  ],
-];
-
 const STAKE_SLASH_PINS: readonly Pin[] = [
   [
     '0x1dae0660',
@@ -211,7 +201,6 @@ const SUITES = [
   ['config', X402_CONFIG_ABI, CONFIG_PINS],
   ['config-arbiter', X402_CONFIG_ARBITER_ABI, CONFIG_ARBITER_PINS],
   ['stake', X402_STAKE_ABI, STAKE_PINS],
-  ['stake-legacy-record', X402_STAKE_LEGACY_SLASH_RECORD_ABI, STAKE_LEGACY_PINS],
   ['stake-slash', X402_STAKE_SLASH_ABI, STAKE_SLASH_PINS],
   ['multicall3', MULTICALL3_ABI, MULTICALL3_PINS],
   ['erc20', ERC20_ABI, ERC20_PINS],

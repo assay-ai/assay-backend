@@ -119,7 +119,6 @@ export class PlatformHealthService {
         return {
           chainId: state.chainId,
           paused: state.paused,
-          upgraded: state.upgraded,
           arbiter: state.arbiter,
           slashDelaySeconds: state.slashDelaySeconds,
           blockedCount: blocked.filter((row) => row.chainId === state.chainId).length,

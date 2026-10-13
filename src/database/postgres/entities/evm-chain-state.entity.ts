@@ -4,7 +4,7 @@ import { AbstractEntityWithoutSoftDelete } from './abstract.entity';
 
 /**
  * What one EVM chain's `X402Config` says about the pause and the dispute
- * upgrade, as `EvmChainStateIndexer` last read it — one row per chain.
+ * terms, as `EvmChainStateIndexer` last read it — one row per chain.
  *
  * A CACHE of the chain, never its authority: the contracts refuse what they
  * refuse whatever this row says. The backend reads it to refuse early, with a
@@ -26,10 +26,6 @@ export class EvmChainStateEntity extends AbstractEntityWithoutSoftDelete {
   /** `X402Config.paused`, from `PauseToggled` and the periodic `paused()` read. */
   @Column({ name: 'paused', type: 'boolean', default: false })
   paused: boolean;
-
-  /** Whether the Config has the dispute upgrade; `null` until first reconciled. */
-  @Column({ name: 'upgraded', type: 'boolean', nullable: true })
-  upgraded: boolean | null;
 
   /** `X402Config.arbiter()`, lower-case, or `null` for none. */
   @Column({ name: 'arbiter', type: 'varchar', length: 42, nullable: true })

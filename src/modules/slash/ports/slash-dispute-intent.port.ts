@@ -15,7 +15,8 @@
  *
  * No key this process holds can call these doors: `disputeSlash` is the
  * record's provider's, `upholdSlash` and `setBlocked(…, true)` the arbiter's,
- * `cancelSlash` the admin's or the arbiter's. A built intent changes nothing;
+ * `cancelSlash` the arbiter's (the admin's too on chain, but the backend
+ * builds it for the arbiter only). A built intent changes nothing;
  * the chain watcher sees the result when the person's transaction lands.
  */
 import { ChainId } from '@modules/chains/ports/caip.types';
@@ -23,8 +24,6 @@ import { ChainId } from '@modules/chains/ports/caip.types';
 /** What the Config says about the dispute upgrade on one chain, read live. */
 export interface SlashChainTerms {
   readonly chainId: ChainId;
-  /** False on a Config that predates the upgrade: no dispute, arbiter or blocklist. */
-  readonly upgraded: boolean;
   readonly paused: boolean;
   /** `X402Config.arbiter()`, checksummed, or `null` for none. */
   readonly arbiter: string | null;
@@ -35,7 +34,7 @@ export interface SlashChainTerms {
 }
 
 /** Who must sign a built call. */
-export type SlashCallSigner = 'PROVIDER' | 'ARBITER' | 'ADMIN';
+export type SlashCallSigner = 'PROVIDER' | 'ARBITER';
 
 /** One unsigned contract call: `to` + `data`, sent by `signer` with no value. */
 export interface SlashContractCall {
@@ -91,8 +90,8 @@ export interface SlashDisputeIntentPort {
   }): Promise<SlashBatchBuild>;
 
   /**
-   * `upholdSlashBatch(ids)` (arbiter only) or `cancelSlashBatch(ids)` (the
-   * arbiter when one is set, else the admin).
+   * `upholdSlashBatch(ids)` or `cancelSlashBatch(ids)`, both for the arbiter
+   * (`CHAIN_ARBITER_NOT_SET` when none is appointed).
    */
   buildRulingBatch(request: {
     readonly chainId: ChainId;

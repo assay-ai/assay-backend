@@ -7,21 +7,14 @@ import { ChainErrors } from '../../errors/chains.errors';
 import { ChainDoor, ChainParty, ChainStateGatePort } from '../../ports/chain-state-gate.port';
 import { ChainId, ChainNamespace, namespaceOf, parseAccountId } from '../../ports/caip.types';
 import { X402_CONFIG_ABI } from '../abi/x402.abi';
+import { checkConfigUpgraded } from '../evm-config-terms';
 import { EvmDeployment } from '../evm.constants';
 
 /** Default `EVM_CHAIN_STATE_POLL_MS`: how often every process re-reads the cache tables. */
 export const DEFAULT_EVM_CHAIN_STATE_POLL_MS = 15_000;
 
-/** The doors a Config that predates the dispute upgrade already pauses. */
-const PAUSED_BEFORE_UPGRADE: ReadonlySet<ChainDoor> = new Set([
-  ChainDoor.DEPOSIT,
-  ChainDoor.REDEEM,
-]);
-
 interface ChainSnapshot {
   readonly paused: boolean;
-  /** `null` until the indexer's first reconcile. */
-  readonly upgraded: boolean | null;
   readonly blocked: ReadonlySet<string>;
 }
 
@@ -44,10 +37,10 @@ export interface EvmChainStateClient {
  * copy. See `ChainStateGatePort` for why a cache answer that refuses is
  * confirmed against the chain first.
  *
- * Which doors close (assay-evm D-19): on an upgraded Config the pause closes
- * every door here and the blocklist closes them for a blocked party; on a
- * Config that predates the upgrade only deposits and redemption are paused
- * and there is no blocklist.
+ * Which doors close (assay-evm D-19): the pause closes every door here and
+ * the blocklist closes them for a blocked party. The backend assumes the
+ * upgraded contracts; at boot it logs one error per chain whose Config does
+ * not answer `arbiter()` ({@link checkConfigUpgraded}).
  */
 export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, OnModuleDestroy {
   private readonly logger = new Logger(EvmChainStateService.name);
@@ -63,6 +56,11 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
 
   async onModuleInit(): Promise<void> {
     if (this.deployments.size === 0) return;
+    // Not awaited: a slow node must not hold boot up for a log line.
+    for (const [chainId, deployment] of this.deployments) {
+      const client = this.clients.get(chainId);
+      if (client) void checkConfigUpgraded(client, deployment.config, chainId, this.logger);
+    }
     await this.refresh().catch((error: unknown) =>
       this.logger.error(`EVM chain state could not be loaded at boot: ${describe(error)}`),
     );
@@ -89,7 +87,6 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
     for (const state of states) {
       next.set(state.chainId, {
         paused: state.paused,
-        upgraded: state.upgraded,
         blocked: new Set(
           blocked.filter((row) => row.chainId === state.chainId).map((row) => row.address),
         ),
@@ -114,7 +111,7 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
 
   async blockedAccounts(chainId: string): Promise<readonly string[]> {
     const snapshot = this.chains.get(chainId);
-    if (!snapshot || snapshot.upgraded !== true || snapshot.blocked.size === 0) return [];
+    if (!snapshot || snapshot.blocked.size === 0) return [];
     const confirmed: string[] = [];
     for (const address of snapshot.blocked) {
       if (!isAddress(address, { strict: false })) continue;
@@ -146,8 +143,7 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
     for (const [chainId, members] of byChain) {
       const snapshot = this.chains.get(chainId);
       if (!snapshot) continue;
-      const pauseCloses = snapshot.upgraded === true || PAUSED_BEFORE_UPGRADE.has(door);
-      if (pauseCloses && snapshot.paused) {
+      if (snapshot.paused) {
         const live = await this.confirm(chainId, 'paused', [], mode);
         if (live) {
           return {
@@ -156,7 +152,6 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
           };
         }
       }
-      if (snapshot.upgraded !== true) continue;
       for (const member of members) {
         if (!snapshot.blocked.has(member.address.toLowerCase())) continue;
         const live = await this.confirm(chainId, 'blocked', [member.address], mode);
