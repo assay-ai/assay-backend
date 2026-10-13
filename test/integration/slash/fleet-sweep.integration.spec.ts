@@ -111,20 +111,20 @@ describe('fleet sweep, against a real database', () => {
   }
 
   /** A fresh case in `PROPOSED`, inside its response window. */
-  async function proposed() {
+  async function proposed(penalty = PENALTY) {
     return seedProRataCase(dataSource, {
       providerOrg: randomUUID(),
       stakeAuthority: STAKE_AUTHORITY,
       assetId: ASSET,
-      penalty: PENALTY,
+      penalty,
       agents: [{ account: AGENT, failed: [100_000n] }],
       proposedAt: new Date(Date.now() - 60 * 60 * 1000),
     });
   }
 
   /** A fresh case in `DISPUTED`, with a real objection on file. */
-  async function disputed() {
-    const seeded = await proposed();
+  async function disputed(penalty = PENALTY) {
+    const seeded = await proposed(penalty);
     const { dispute } = await arbitration.fileDispute(seeded.organizationId, seeded.proposalId, {
       claimType: DisputeClaimType.AGENT_GRIEFING,
       reason: 'one agent sent every failing call',
@@ -295,6 +295,57 @@ describe('fleet sweep, against a real database', () => {
       appliedCount: stored.applied_count,
       completedAt: stored.completed_at,
     });
+  });
+
+  // BUG-R11-O1-03: a swept case kept its dispute UNDER_REVIEW with the outcome
+  // it was overturned from, and the provider's case view reads that row.
+  it("closes each swept case's dispute with the sweep outcome", async () => {
+    const defect = freshDefect();
+    const seeded = await source(defect);
+    // Decided, waiting for the second signature: the dispute is UNDER_REVIEW.
+    // Above the materiality threshold, so an upheld decision needs a second.
+    const awaiting = await disputed(BigInt(TEST_SLASH_CONFIG.secondSignatureThresholdMinor));
+    await arbitration.decide(adjudicator, awaiting.organizationId, awaiting.proposalId, {
+      outcome: ArbitrationOutcome.UPHELD_RECALCULATED,
+      reasonCodes: ['EXCLUDED_CALLS_MISCOUNTED'],
+      note: NOTE,
+      recalculatedAmount: (PENALTY / 2n).toString(),
+    });
+    expect((await caseRow(awaiting.proposalId)).status).toBe('AWAITING_SECOND');
+    await setRootCause(awaiting.proposalId, defect);
+    // Fully decided: the dispute is already resolved, as REJECTED.
+    const closed = await upheld(defect);
+
+    await execution.openSweep(
+      lead,
+      adjudicator,
+      seeded.organizationId,
+      seeded.proposalId,
+      sweepInput(defect),
+    );
+
+    for (const swept of [awaiting, closed]) {
+      const dispute = await one<{
+        state: string;
+        outcome: string | null;
+        resolution_kind: string | null;
+        resolved_at: Date | null;
+        resolved_by: string | null;
+        seconded_by_operator_id: string | null;
+      }>(
+        `SELECT state, outcome, resolution_kind, resolved_at, resolved_by, seconded_by_operator_id
+           FROM disputes WHERE id = $1`,
+        [swept.disputeId],
+      );
+      expect(dispute).toMatchObject({
+        state: 'UPHELD',
+        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+        resolution_kind: 'ADJUDICATOR',
+        resolved_by: lead.subject,
+        seconded_by_operator_id: null,
+      });
+      expect(dispute.resolved_at).toBeInstanceOf(Date);
+    }
   });
 
   it('checks the authority limit against the summed penalties of the matched cases', async () => {

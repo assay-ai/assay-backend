@@ -320,7 +320,15 @@ export class FakeSlashProposals {
     from: Date,
     to: Date,
     limit: number,
-  ): Promise<Array<{ organizationId: string; id: string; status: string; penaltyAmount: string }>> {
+  ): Promise<
+    Array<{
+      organizationId: string;
+      id: string;
+      status: string;
+      penaltyAmount: string;
+      disputeId: string | null;
+    }>
+  > {
     return [...this.rows.values()]
       .filter(
         (row) =>
@@ -336,6 +344,7 @@ export class FakeSlashProposals {
         id: row.id,
         status: row.status,
         penaltyAmount: row.penaltyAmount,
+        disputeId: row.disputeId,
       }));
   }
 
