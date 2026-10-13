@@ -1,3 +1,4 @@
+import { AuditLogWriter } from '@shared/audit';
 import { type INestApplication, ValidationPipe } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
@@ -119,6 +120,7 @@ describe('human-only control writes', () => {
         { provide: EscrowAccountService, useValue: escrows },
         { provide: WithdrawalService, useValue: withdrawals },
         { provide: EscrowDelegationService, useValue: delegation },
+        { provide: AuditLogWriter, useValue: { recordAfterCommit: jest.fn() } },
       ],
     }).compile();
 

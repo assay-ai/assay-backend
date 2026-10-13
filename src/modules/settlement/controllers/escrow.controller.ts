@@ -9,6 +9,7 @@ import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { AccountId, toAccountId } from '@modules/chains/ports/caip.types';
 import { EscrowLimits } from '@modules/chains/ports/escrow.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { AuditLogWriter, auditActorOf } from '@shared/audit';
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -109,6 +110,7 @@ export class EscrowController {
   constructor(
     private readonly escrows: EscrowAccountService,
     private readonly withdrawals: WithdrawalService,
+    private readonly audit: AuditLogWriter,
   ) {}
 
   /**
@@ -298,6 +300,23 @@ export class EscrowController {
       },
       body.acknowledgeUnsettled === true,
     );
+
+    // The transaction has landed and there is no database transaction to join,
+    // so the entry is written after the fact; a failure is logged, not thrown.
+    // The signature is never part of it.
+    await this.audit.recordAfterCommit({
+      organizationId: session.organizationId,
+      actor: auditActorOf(session),
+      action: 'limit.updated',
+      resourceType: 'escrow',
+      resourceId: session.agentAccount,
+      before: null,
+      after: {
+        maxVoucherAmount: body.maxVoucherAmount,
+        maxPerWindow: body.maxPerWindow,
+        transactionHash: result.submission.transactionHash,
+      },
+    });
 
     return toRelayedResponseDto(EscrowIntentKind.SET_LIMITS, session.agentAccount, result);
   }
