@@ -109,7 +109,7 @@ describe('EscrowSeqService.allocate, with the payer blocked', () => {
 });
 
 describe('VoucherService.redeem, with a party blocked', () => {
-  it('refuses a voucher whose payer is blocked, before its signature is checked', async () => {
+  it('refuses a voucher whose payer is blocked, only AFTER its signature is checked', async () => {
     const blocklist = blocklistOf();
     const harness = createVoucherHarness(blocklist);
     addBlock(blocklist, { kind: BlockSubjectKind.WALLET, subject: harness.payer });
@@ -120,8 +120,33 @@ describe('VoucherService.redeem, with a party blocked', () => {
       errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
       context: { role: BlockedRole.PAYER },
     });
-    expect(verify).not.toHaveBeenCalled();
+    expect(verify).toHaveBeenCalled();
     expect(harness.intents.created).toHaveLength(0);
+  });
+
+  it('AUDIT E-10: is not a blocklist oracle — a bad signature on a blocked wallet says bad signature', async () => {
+    const blocklist = blocklistOf();
+    const harness = createVoucherHarness(blocklist);
+    addBlock(blocklist, { kind: BlockSubjectKind.WALLET, subject: harness.payer });
+    const { signed, input } = harness.voucherFor();
+    const forged = { ...input, signed: { voucher: signed.voucher, signature: '1'.repeat(88) } };
+
+    const refusal = await harness.service.redeem(forged).catch((error: unknown) => error);
+    expect(refusal).toMatchObject({ errorCode: expect.any(String) });
+    expect((refusal as { errorCode: string }).errorCode).not.toBe(AccountErrorCode.ACCOUNT_BLOCKED);
+  });
+
+  it('AUDIT E-10: a voucher naming someone else’s blocked wallet fails the session binding first', async () => {
+    const blocklist = blocklistOf({ kind: BlockSubjectKind.WALLET, subject: PROVIDER });
+    const harness = createVoucherHarness(blocklist);
+    const { signed, input } = harness.voucherFor();
+    // The session's payer is not the wallet the voucher names.
+    const probe = {
+      ...input,
+      signed: { ...signed, voucher: { ...signed.voucher, payer: PROVIDER } },
+    };
+    const refusal = await harness.service.redeem(probe as never).catch((error: unknown) => error);
+    expect((refusal as { errorCode: string }).errorCode).not.toBe(AccountErrorCode.ACCOUNT_BLOCKED);
   });
 
   it('refuses a voucher that pays a blocked provider account', async () => {
