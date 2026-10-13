@@ -1,17 +1,26 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
 import type { Redis } from 'ioredis';
 
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
+import {
+  SLASH_CHAIN_RULINGS,
+  SlashChainRulingsPort,
+} from '@modules/slash/ports/slash-chain-rulings.port';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import { ENABLED_CHAINS } from '../enabled-chains';
 import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
-import { X402_SLASH_PROPOSED_EVENT_ABI } from './abi/x402.abi';
+import { X402_SLASH_WATCH_EVENTS_ABI } from './abi/x402.abi';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
 
-/** Every two minutes. A rogue record cannot move money for 72 hours. */
+/**
+ * Every two minutes. A rogue record cannot move money before its
+ * `executableAt` — the chain's slash delay, which since the dispute upgrade
+ * the admin may set as low as ten minutes. The alert carries `executableAt`.
+ */
 export const EVM_SLASH_WATCH_CRON = '0 */2 * * * *';
 
 /** Most blocks one tick reads per chain; a backlog is caught up over later ticks. */
@@ -27,6 +36,7 @@ export const EVM_SLASH_WATCH_ALERTS = {
   UNKNOWN: 'slash_proposal_unknown',
   MISMATCH: 'slash_proposal_mismatch',
   UNREADABLE: 'slash_watch_unreadable',
+  UNKNOWN_RULING: 'slash_ruling_unknown',
 } as const;
 
 const CURSOR_PREFIX = 'evm:slash-watch:cursor:';
@@ -36,14 +46,19 @@ export interface EvmSlashWatchClient {
   getBlockNumber(args?: { cacheTime?: number }): Promise<bigint>;
   getContractEvents(args: {
     address: `0x${string}`;
-    abi: typeof X402_SLASH_PROPOSED_EVENT_ABI;
-    eventName: 'SlashProposed';
+    abi: typeof X402_SLASH_WATCH_EVENTS_ABI;
     fromBlock: bigint;
     toBlock: bigint;
   }): Promise<readonly SlashProposedLog[]>;
 }
 
+/**
+ * One decoded log of {@link X402_SLASH_WATCH_EVENTS_ABI}. `eventName` absent is
+ * read as `SlashProposed`, the only event an earlier version of this watcher
+ * asked for.
+ */
 export interface SlashProposedLog {
+  readonly eventName?: 'SlashProposed' | 'SlashDisputed' | 'SlashUpheld';
   readonly args: {
     readonly requestId?: `0x${string}`;
     readonly provider?: `0x${string}`;
@@ -51,6 +66,8 @@ export interface SlashProposedLog {
     readonly beneficiary?: `0x${string}`;
     readonly penalty?: bigint;
     readonly executableAt?: bigint;
+    readonly disputedAt?: bigint;
+    readonly arbiter?: `0x${string}`;
   };
   readonly transactionHash: `0x${string}` | null;
   readonly blockNumber: bigint | null;
@@ -74,6 +91,16 @@ export interface SlashWatchFinding {
  * penalty differs from the row, was not proposed by this backend's planner:
  * a CRITICAL alert, one per record.
  *
+ * ## The dispute upgrade's events (D-19)
+ *
+ * The same `eth_getLogs` also returns `SlashDisputed` (the provider froze a
+ * record) and `SlashUpheld` (the arbiter ruled against the provider). They
+ * are handed to the slash domain (`SLASH_CHAIN_RULINGS`), which mirrors them
+ * onto the case: `chain_status = DISPUTED`, the case into review, and on an
+ * uphold back to `PENDING` at the `executableAt` the EVENT carries. A dispute
+ * or ruling on a record nobody planned is a WARN — the proposal itself was
+ * already the CRITICAL. A Stake that predates the upgrade emits neither.
+ *
  * Read-only on chain: `eth_blockNumber` and `eth_getLogs`, nothing signed or
  * sent. The response is in `docs/runbooks/chains.md` ("Unknown slash record").
  *
@@ -92,6 +119,9 @@ export class EvmSlashProposalWatcher {
     private readonly parts: SlashProposalPartRepository,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis,
+    // Resolved at call time: the slash domain is composed beside this module
+    // in the scheduler, and a composition without it still alerts.
+    @Optional() private readonly moduleRef: ModuleRef | null = null,
   ) {}
 
   @Cron(EVM_SLASH_WATCH_CRON)
@@ -155,15 +185,21 @@ export class EvmSlashProposalWatcher {
       logs.push(
         ...(await client.getContractEvents({
           address: deployment.stake,
-          abi: X402_SLASH_PROPOSED_EVENT_ABI,
-          eventName: 'SlashProposed',
+          abi: X402_SLASH_WATCH_EVENTS_ABI,
           fromBlock: from,
           toBlock: to,
         })),
       );
     }
 
-    const findings = await this.compare(chainId, logs);
+    const proposed = logs.filter((log) => (log.eventName ?? 'SlashProposed') === 'SlashProposed');
+    const findings = await this.compare(chainId, proposed);
+    // A failure here throws before the cursor moves, so the range is re-read
+    // and the (idempotent) mirror is retried next tick.
+    await this.mirrorRulings(
+      chainId,
+      logs.filter((log) => log.eventName === 'SlashDisputed' || log.eventName === 'SlashUpheld'),
+    );
     // Only after the comparison and its alerts: a failure above re-reads the
     // same range next tick rather than skipping it.
     await this.writeCursor(chainId, end);
@@ -239,6 +275,65 @@ export class EvmSlashProposalWatcher {
       }
     }
     return findings;
+  }
+
+  private async mirrorRulings(chainId: ChainId, logs: readonly SlashProposedLog[]): Promise<void> {
+    if (logs.length === 0) return;
+    const rulings = this.rulings();
+    for (const log of logs) {
+      const requestId = log.args.requestId?.toLowerCase().replace(/^0x/, '');
+      if (!requestId) continue;
+      const executableAt = new Date(Number(log.args.executableAt ?? 0n) * 1000);
+      const transactionHash = log.transactionHash ?? null;
+      if (!rulings) {
+        this.logger.warn(
+          `${log.eventName} for ${requestId} on ${chainId} seen, but no slash domain is composed ` +
+            `in this process to mirror it`,
+        );
+        continue;
+      }
+      const known =
+        log.eventName === 'SlashDisputed'
+          ? await rulings.recordDisputed({
+              chainId,
+              requestId,
+              provider: log.args.provider ?? '',
+              disputedAt: new Date(Number(log.args.disputedAt ?? 0n) * 1000),
+              executableAt,
+              transactionHash,
+            })
+          : await rulings.recordUpheld({
+              chainId,
+              requestId,
+              arbiter: log.args.arbiter ?? '',
+              executableAt,
+              transactionHash,
+            });
+      if (!known) {
+        await this.alerts.emit({
+          severity: AlertSeverity.WARN,
+          name: EVM_SLASH_WATCH_ALERTS.UNKNOWN_RULING,
+          summary: `${log.eventName} on ${chainId} for a slash record this platform never planned`,
+          details: {
+            chainId,
+            requestId: `0x${requestId}`,
+            event: log.eventName,
+            transactionHash: transactionHash ?? '(unknown)',
+          },
+          aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+          dedupeKey: `${chainId}:${requestId}:${log.eventName}`,
+        });
+      }
+    }
+  }
+
+  private rulings(): SlashChainRulingsPort | null {
+    if (!this.moduleRef) return null;
+    try {
+      return this.moduleRef.get<SlashChainRulingsPort>(SLASH_CHAIN_RULINGS, { strict: false });
+    } catch {
+      return null;
+    }
   }
 
   private async readCursor(chainId: ChainId): Promise<bigint | null> {

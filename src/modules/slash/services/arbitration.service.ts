@@ -129,6 +129,58 @@ export class ArbitrationService {
       openedBy: string;
     },
   ): Promise<{ proposal: SlashProposalEntity; dispute: DisputeEntity }> {
+    return this.openDispute(organizationId, proposalId, input, null);
+  }
+
+  /**
+   * The provider disputed the case's on-chain record (`disputeSlash`, assay-evm
+   * D-19) while the case was still `PROPOSED`: the same objection as
+   * {@link fileDispute}, so the case moves into review and our decision clock
+   * starts. The chain already enforced its own window (`executableAt`), so
+   * the off-chain `respondByAt` is not re-checked — refusing here would leave a
+   * record frozen on chain behind a case nobody reviews. Returns `null` when
+   * the case is no longer `PROPOSED` or already has an objection.
+   */
+  async fileDisputeFromChain(
+    organizationId: string,
+    proposalId: string,
+    chain: { readonly requestId: string; readonly transactionHash: string | null },
+  ): Promise<SlashProposalEntity | null> {
+    const proposal = await this.lifecycle.require(organizationId, proposalId);
+    if (proposal.disputeId || proposal.status !== SlashProposalStatus.PROPOSED) return null;
+    try {
+      const { proposal: updated } = await this.openDispute(
+        organizationId,
+        proposalId,
+        {
+          claimType: DisputeClaimType.OTHER,
+          reason:
+            `Disputed on chain: the provider called disputeSlash on record ${chain.requestId}` +
+            `${chain.transactionHash ? ` (transaction ${chain.transactionHash})` : ''}.`,
+          evidence: [],
+          openedBy: 'chain:disputeSlash',
+        },
+        chain,
+      );
+      return updated;
+    } catch (error) {
+      // Lost a race with the undisputed sweep or a provider filing in-app.
+      if ((error as { errorCode?: string })?.errorCode?.startsWith('SLASH_')) return null;
+      throw error;
+    }
+  }
+
+  private async openDispute(
+    organizationId: string,
+    proposalId: string,
+    input: {
+      claimType: DisputeClaimType;
+      reason: string;
+      evidence: unknown[];
+      openedBy: string;
+    },
+    chain: { readonly requestId: string; readonly transactionHash: string | null } | null,
+  ): Promise<{ proposal: SlashProposalEntity; dispute: DisputeEntity }> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
 
     if (proposal.disputeId) {
@@ -141,7 +193,7 @@ export class ArbitrationService {
     // state" when the truth is "you were three hours late" produces a support
     // ticket instead of an understanding.
     const now = new Date();
-    if (proposal.respondByAt && proposal.respondByAt.getTime() < now.getTime()) {
+    if (!chain && proposal.respondByAt && proposal.respondByAt.getTime() < now.getTime()) {
       throw SlashErrors.responseWindowClosed({
         respondByAt: proposal.respondByAt.toISOString(),
       });
@@ -198,11 +250,14 @@ export class ArbitrationService {
       kind: 'DISPUTE_FILED',
       actorType: 'provider',
       actorId: input.openedBy,
-      summary: `Objection filed: ${input.claimType}`,
+      summary: chain
+        ? 'Objection filed on chain (disputeSlash); the case is in review'
+        : `Objection filed: ${input.claimType}`,
       detail: {
         disputeId: savedDispute.id,
         claimType: input.claimType,
         platformDueAt: platformDueAt.toISOString(),
+        ...(chain ? { onChain: true, requestId: chain.requestId } : {}),
       },
     });
 

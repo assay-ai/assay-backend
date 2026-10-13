@@ -76,6 +76,7 @@ export class FakeSlashProposals {
         chainProposalSignature: null,
         chainClaimedAt: null,
         chainLastError: null,
+        chainDisputedAt: null,
         penaltyAmount: '5000000',
         appliedAmount: null,
         // A real CAIP-19: `MoneyUtil.of` refuses anything else, and the
@@ -276,12 +277,25 @@ export class FakeSlashProposals {
       .map((row) => ({ organizationId: row.organizationId, id: row.id }));
   }
 
+  /** Mirrors `SlashProposalRepository.findChainDisputedBefore`. */
+  async findChainDisputedBefore(disputedBefore: Date, limit: number): Promise<ChainSweepRow[]> {
+    return [...this.rows.values()]
+      .filter(
+        (row) =>
+          row.chainStatus === 'DISPUTED' &&
+          row.chainDisputedAt !== null &&
+          row.chainDisputedAt.getTime() <= disputedBefore.getTime(),
+      )
+      .slice(0, limit)
+      .map((row) => ({ organizationId: row.organizationId, id: row.id }));
+  }
+
   /** Mirrors `SlashProposalRepository.findClosedStillPending` — see that method's SQL. */
   async findClosedStillPending(limit: number): Promise<ChainSweepRow[]> {
     return [...this.rows.values()]
       .filter(
         (row) =>
-          row.chainStatus === 'PENDING' &&
+          ['PENDING', 'DISPUTED'].includes(row.chainStatus) &&
           ['CANCELLED', 'OVERTURNED'].includes(row.status) &&
           row.resolutionKind !== 'AUTO_CHAIN_VOIDED',
       )

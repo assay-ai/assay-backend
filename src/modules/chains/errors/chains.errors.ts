@@ -40,6 +40,11 @@ export enum ChainErrorCode {
   CHAIN_LATEST_BLOCK_STALE = 'CHAIN_LATEST_BLOCK_STALE',
   CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE = 'CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE',
   CHAIN_RELAY_NOT_SENT = 'CHAIN_RELAY_NOT_SENT',
+  CHAIN_PROGRAM_PAUSED = 'CHAIN_PROGRAM_PAUSED',
+  CHAIN_ADDRESS_BLOCKED = 'CHAIN_ADDRESS_BLOCKED',
+  CHAIN_DISPUTE_UPGRADE_ABSENT = 'CHAIN_DISPUTE_UPGRADE_ABSENT',
+  CHAIN_ARBITER_NOT_SET = 'CHAIN_ARBITER_NOT_SET',
+  CHAIN_ADDRESS_ALREADY_BLOCKED = 'CHAIN_ADDRESS_ALREADY_BLOCKED',
 }
 
 export type ChainErrorCodesArePrefixed = AssertDomainErrorCodes<'CHAIN', `${ChainErrorCode}`>;
@@ -457,5 +462,67 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
     message: (context?: Record<string, any>) =>
       `The relayer was busy for longer than ${context?.waitedMs ?? 'its limit'} ms, so this ` +
       `request was not sent; nothing changed on chain — try again shortly`,
+  },
+  /**
+   * The settlement contracts are paused (`X402Config.paused`), and this door is
+   * one the pause closes — the contract would revert `ProgramPaused`.
+   *
+   * Since the dispute upgrade (D-19) the pause also closes the exits, the
+   * limits, delegate grants and every stake door; before it, only deposits,
+   * redemption and the slash doors. Nothing is lost: the balance stays where
+   * it is and the door reopens on unpause. `503` because it is temporary and
+   * the remedy is to wait.
+   */
+  programPaused: {
+    code: ChainErrorCode.CHAIN_PROGRAM_PAUSED,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `The settlement contracts are paused` +
+      `${context?.chainId ? ` on ${context.chainId}` : ''}` +
+      `${context?.door ? `, so ${String(context.door).toLowerCase().replace(/_/g, ' ')} is refused` : ''}` +
+      `; nothing was signed or sent, and it reopens when the pause lifts`,
+  },
+  /**
+   * A party to this action is on the ON-CHAIN blocklist (`X402Config.blocked`,
+   * D-19) — the contract would revert `AddressBlocked`. Distinct from the
+   * platform's own `ACCOUNT_BLOCKED`: this one is the chain's, set by the
+   * admin or the arbiter, and lifted only by the admin.
+   */
+  addressBlocked: {
+    code: ChainErrorCode.CHAIN_ADDRESS_BLOCKED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `The ${context?.role ? String(context.role).toLowerCase() : 'account'}` +
+      `${context?.account ? ` ${context.account}` : ''} is blocked on chain` +
+      `${context?.chainId ? ` (${context.chainId})` : ''}; the contract refuses it here. ` +
+      'A blocked address can still revoke a delegate and dispute a slash; nothing moves its funds',
+  },
+  /**
+   * The deployed `X402Config` or `X402Stake` predates the dispute upgrade, so
+   * the door asked for does not exist on this chain yet.
+   */
+  disputeUpgradeAbsent: {
+    code: ChainErrorCode.CHAIN_DISPUTE_UPGRADE_ABSENT,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The settlement contracts${context?.chainId ? ` on ${context.chainId}` : ''} do not have ` +
+      `the dispute upgrade yet${context?.what ? `, so ${context.what} is not available` : ''}`,
+  },
+  /** `X402Config.arbiter()` is `address(0)`: nobody can uphold a dispute or block. */
+  arbiterNotSet: {
+    code: ChainErrorCode.CHAIN_ARBITER_NOT_SET,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `No arbiter is appointed${context?.chainId ? ` on ${context.chainId}` : ''}` +
+      `${context?.what ? `, so ${context.what} cannot be built` : ''}; the admin appoints one ` +
+      'with setArbiter',
+  },
+  /** `setBlocked(account, true)` for an account the chain already blocks. */
+  addressAlreadyBlocked: {
+    code: ChainErrorCode.CHAIN_ADDRESS_ALREADY_BLOCKED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `${context?.account ?? 'The account'} is already blocked on chain` +
+      `${context?.chainId ? ` (${context.chainId})` : ''}`,
   },
 });

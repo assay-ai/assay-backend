@@ -14,7 +14,11 @@ import {
   parseAccountId,
 } from '@modules/chains/ports/caip.types';
 
-import { SLASH_PRORATA_CONFIG, ProRataSlashConfig } from '../constants/slash.constants';
+import {
+  DISPUTE_TIMEOUT_MS,
+  ProRataSlashConfig,
+  SLASH_PRORATA_CONFIG,
+} from '../constants/slash.constants';
 import {
   ChainFailureKind,
   chainErrorName,
@@ -599,7 +603,11 @@ export class SlashPartsService {
       proposal.chainEpoch,
     );
     const executed = parts.filter((part) => part.chainStatus === 'EXECUTED');
-    const pending = parts.filter((part) => part.chainStatus === 'PENDING');
+    // A DISPUTED part (D-19) holds the case exactly like a pending one: it is
+    // a standing reservation that may still be upheld and paid.
+    const pending = parts.filter(
+      (part) => part.chainStatus === 'PENDING' || part.chainStatus === 'DISPUTED',
+    );
     const livePending = pending.filter((part) => !deadParts.has(part.id));
 
     if (livePending.length > 0) {
@@ -725,7 +733,7 @@ export class SlashPartsService {
     let signature = '';
     let cancelledAt: Date | null = null;
     let failure: unknown = null;
-    for (const part of parts.filter((row) => row.chainStatus === 'PENDING')) {
+    for (const part of parts.filter((row) => ['PENDING', 'DISPUTED'].includes(row.chainStatus))) {
       try {
         const result = await this.executor.expire({
           chainId,
@@ -763,7 +771,8 @@ export class SlashPartsService {
       proposal.id,
       proposal.chainEpoch,
     );
-    const next = parts.find((part) => part.chainStatus === 'PENDING');
+    // `cancelSlash` takes a `Pending` or (D-19) a `Disputed` record.
+    const next = parts.find((part) => ['PENDING', 'DISPUTED'].includes(part.chainStatus));
     if (!next) {
       throw SlashErrors.chainUnavailable({
         proposalId: proposal.id,
@@ -813,10 +822,37 @@ export class SlashPartsService {
       if (!parts.some((part) => part.chainStatus === 'EXECUTED')) continue;
 
       const due: SlashProposalPartEntity[] = [];
-      for (const part of parts.filter((row) => ['PENDING', 'REFUSED'].includes(row.chainStatus))) {
+      for (const part of parts.filter((row) =>
+        ['PENDING', 'DISPUTED', 'REFUSED'].includes(row.chainStatus),
+      )) {
         try {
           const record = await this.readMatching(part, proposal, provider, chainId);
           if (!record) continue; // never landed (a refusal that stands), or not ours
+          if (record.status === 'DISPUTED') {
+            // D-19: no execution until the arbiter rules; expirable once the
+            // key is gone or `disputedAt + 30 d` has passed.
+            await this.mirrorRecord(part, record);
+            const timedOut =
+              record.disputedAt !== null &&
+              record.disputedAt !== undefined &&
+              now.getTime() >= record.disputedAt.getTime() + DISPUTE_TIMEOUT_MS;
+            if (record.verifierCanSign === false || timedOut) {
+              const result = await this.executor.expire({
+                chainId,
+                requestId: part.chainRequestId,
+                provider,
+              });
+              await this.parts.updatePart(part.organizationId, part.id, {
+                chainStatus: 'CANCELLED',
+                cancelledAt: result.cancelledAt,
+                chainLastError: null,
+              });
+              expired += 1;
+            } else {
+              waiting += 1;
+            }
+            continue;
+          }
           if (record.status !== 'PENDING') {
             await this.mirrorRecord(part, record);
             continue;
@@ -909,6 +945,8 @@ export class SlashPartsService {
       chainProposedAt: record.proposedAt,
       chainExecutableAt: record.executableAt,
       chainReserved: record.reservedMinor,
+      // D-19: kept after an uphold, as the record of the dispute.
+      ...(record.disputedAt ? { chainDisputedAt: record.disputedAt } : {}),
       ...(record.status === 'EXECUTED'
         ? {
             // Keep the receipt-derived amounts if the live path wrote them.
@@ -925,6 +963,7 @@ export class SlashPartsService {
 
 const STATUS_FOR_RECORD: Readonly<Record<SlashRecordStatus, SlashPartChainStatus>> = {
   PENDING: 'PENDING',
+  DISPUTED: 'DISPUTED',
   EXECUTED: 'EXECUTED',
   CANCELLED: 'CANCELLED',
 };
@@ -941,6 +980,7 @@ function toView(part: SlashProposalPartEntity): SlashPartView {
     executableAt: part.chainExecutableAt,
     executedAt: part.executedAt,
     cancelledAt: part.cancelledAt,
+    disputedAt: part.chainDisputedAt,
   };
 }
 

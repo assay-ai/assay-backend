@@ -49,14 +49,25 @@ import { EgressHttpClient, INTERNAL_EGRESS_POLICY } from '@shared/network/egress
  */
 export class EvmRpcError extends Error {
   readonly code: number;
-  /** The revert selector (and args), or `null`. Never anything the caller sent. */
-  readonly data: `0x${string}` | null;
+  /**
+   * The revert selector (and args), or absent. Never anything the caller sent.
+   *
+   * ABSENT rather than `null` when the node gave nothing usable: viem reads
+   * the first error in the chain that has a `data` key, and does
+   * `typeof data === 'object' ? data.data : data` — so a `null` there threw a
+   * `TypeError` out of every `readContract` that reverted with empty data
+   * (`0x`), which is exactly how a function the contract does not have reverts.
+   * Absent, viem reports `ContractFunctionRevertedError`, and a caller probing
+   * for a function an older contract lacks (`readConfigTerms`) can tell a
+   * revert from an outage.
+   */
+  readonly data?: `0x${string}`;
 
   constructor(message: string, details: { code: number; data: `0x${string}` | null }) {
     super(message);
     this.name = 'EvmRpcError';
     this.code = details.code;
-    this.data = details.data;
+    if (details.data !== null) this.data = details.data;
   }
 }
 

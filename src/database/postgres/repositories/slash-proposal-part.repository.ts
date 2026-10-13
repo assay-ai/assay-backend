@@ -29,6 +29,15 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
     });
   }
 
+  /**
+   * The part behind one on-chain request id, across every tenant — for the
+   * chain watcher, which reads `SlashDisputed` / `SlashUpheld` and has no
+   * tenant. The id is unique (`uq_slash_proposal_parts_request`).
+   */
+  async findOneByChainRequestId(chainRequestId: string): Promise<SlashProposalPartEntity | null> {
+    return this.findOne({ where: { chainRequestId } });
+  }
+
   /** One case's parts at one epoch, in agent order — the order they were planned in. */
   async findForEpoch(
     organizationId: string,
@@ -95,7 +104,7 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
         // valid for 10 minutes, so nothing can land a day after the refusal —
         // older refusals stand and are not re-read for ever.
         .where(
-          `(part.chain_status = 'PENDING'
+          `(part.chain_status IN ('PENDING', 'DISPUTED')
           OR (part.chain_status = 'REFUSED' AND part.updated_at > now() - interval '1 day'))`,
         )
         .andWhere('part.chain_epoch = proposal.chain_epoch')

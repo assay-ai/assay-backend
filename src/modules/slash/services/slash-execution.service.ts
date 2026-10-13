@@ -39,7 +39,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import { SlashBeneficiaryService } from './slash-beneficiary.service';
 import { SlashCompensationService } from './slash-compensation.service';
 import { SlashPartsService } from './slash-parts.service';
-import { SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
+import { DISPUTE_TIMEOUT_MS, SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
 import { SLASH_PROPOSAL_SUBJECT_TYPE } from '../constants/slash-subject.constants';
 import {
   ARBITRATION_STATE_MAP,
@@ -90,6 +90,7 @@ export const CHAIN_CLAIM_STALE_MS = 10 * 60 * 1000;
 const CHAIN_STATUS_FOR_RECORD: Readonly<Record<SlashRecordStatus, ChainProposalStatus>> =
   Object.freeze({
     PENDING: ChainProposalStatus.PENDING,
+    DISPUTED: ChainProposalStatus.DISPUTED,
     EXECUTED: ChainProposalStatus.EXECUTED,
     CANCELLED: ChainProposalStatus.CANCELLED,
   });
@@ -135,19 +136,19 @@ export const SLASH_EXECUTION_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 const GRACE_WARNING_MS = 6 * 24 * 60 * 60 * 1000;
 
 /**
- * `MIN_SLASH_DELAY_SECONDS` — the program's floor on `Config.slash_delay_seconds`,
- * mirrored. **A lower bound, not the value:** the configured delay may be
- * longer, never shorter.
- *
- * That one-sided guarantee is exactly what makes it usable without an RPC. A
- * record proposed now cannot become executable before `now + 72h`, whatever the
- * chain is configured to, so a promise that falls inside that window is one a
- * fresh proposal cannot outrun. Deliberately NOT `SlashConfig.timelockMs`:
- * that is a local environment variable and could be set *above* the chain's
- * delay, which would make the bound optimistic in the one direction that
- * matters.
+ * The Solana program's floor on `Config.slash_delay_seconds`, 72 h — used for
+ * a namespace whose executor cannot report its live delay. On EVM the delay
+ * is READ (`EvmSlashExecutor.slashDelaySeconds`); since the dispute upgrade
+ * the admin may set it as low as ten minutes, so no EVM path may assume 72 h.
  */
-const MIN_SLASH_DELAY_MS = 72 * 60 * 60 * 1000;
+const SOLANA_MIN_SLASH_DELAY_MS = 72 * 60 * 60 * 1000;
+
+/**
+ * `MIN_SLASH_DELAY_SECONDS` on EVM since the dispute upgrade (ten minutes) —
+ * the shortest delay an upgraded Config can hold, used only when the live
+ * value cannot be read.
+ */
+const EVM_MIN_SLASH_DELAY_MS = 10 * 60 * 1000;
 
 /**
  * `VOID` names that must **not** close the case on the *execute* path.
@@ -301,10 +302,13 @@ export class SlashExecutionService {
     let proposed = 0;
     let refused = 0;
     let failed = 0;
+    // The live delay per chain, read once per pass (see `slashDelayMs`).
+    const delays = new Map<string, number>();
 
     for (const candidate of due) {
       const proposal = await this.proposals.findOneScoped(candidate.organizationId, candidate.id);
       if (!proposal) continue;
+      const delayMs = await this.slashDelayMs(proposal, delays);
 
       // Proposing this case NOW would open the door before the promise closes.
       //
@@ -324,12 +328,12 @@ export class SlashExecutionService {
       //
       // Uncounted on purpose: the counters report what the chain did with a
       // judgement, and this one has deliberately not been shown to it yet.
-      if (this.proposingNowWouldOutrunThePromise(proposal, now)) {
+      if (this.proposingNowWouldOutrunThePromise(proposal, now, delayMs)) {
         this.logger.debug(
           `slash proposal ${proposal.id} is not being proposed yet: its promise to the provider ` +
             `runs to ${proposal.earliestExecutionAt.toISOString()} and a record written now ` +
             `could become executable by anyone from ` +
-            `${new Date(now.getTime() + MIN_SLASH_DELAY_MS).toISOString()}`,
+            `${new Date(now.getTime() + delayMs).toISOString()}`,
         );
         continue;
       }
@@ -457,8 +461,8 @@ export class SlashExecutionService {
    * Would a record written now become executable before the provider's deadline?
    *
    * Reads the row and a constant — no RPC, no `Config` fetch, no second query.
-   * {@link MIN_SLASH_DELAY_MS} is the program's floor on `slash_delay_seconds`,
-   * so `now + MIN_SLASH_DELAY_MS` is the earliest moment a record proposed on
+   * `delayMs` is the chain's live delay ({@link slashDelayMs}), so
+   * `now + delayMs` is the earliest moment a record proposed on
    * this tick could be spent by a stranger. If the promise runs past that, the
    * only honest answers are "do not write the record yet" or "break the
    * promise", and this picks the first.
@@ -475,8 +479,44 @@ export class SlashExecutionService {
    * older than anything computable from `now`. {@link proposeOne} checks the
    * returned `executableAt` for exactly that.
    */
-  private proposingNowWouldOutrunThePromise(proposal: SlashProposalEntity, now: Date): boolean {
-    return proposal.earliestExecutionAt.getTime() > now.getTime() + MIN_SLASH_DELAY_MS;
+  private proposingNowWouldOutrunThePromise(
+    proposal: SlashProposalEntity,
+    now: Date,
+    delayMs: number,
+  ): boolean {
+    return proposal.earliestExecutionAt.getTime() > now.getTime() + delayMs;
+  }
+
+  /**
+   * How long after a proposal made now its record becomes executable, read
+   * from the chain: on EVM `X402Config.slashDelaySeconds()` since the dispute
+   * upgrade (settable, 10 minutes at the least) and the old contract's own
+   * constant before it. Never assumed to be 72 hours on EVM. A namespace that
+   * cannot say (Solana) uses its program's floor. A failed read falls back to
+   * the SHORTEST delay the chain could have, which only ever defers a proposal.
+   */
+  private async slashDelayMs(
+    proposal: SlashProposalEntity,
+    cache: Map<string, number>,
+  ): Promise<number> {
+    const chainId = chainIdOf(proposal.assetId as AssetId);
+    const known = cache.get(chainId);
+    if (known !== undefined) return known;
+    let delayMs = SOLANA_MIN_SLASH_DELAY_MS;
+    try {
+      const seconds = await this.executor?.slashDelaySeconds?.(chainId);
+      if (typeof seconds === 'number') delayMs = seconds * 1000;
+    } catch (error) {
+      if (namespaceOf(proposal.assetId as AssetId) === ChainNamespace.EIP155) {
+        delayMs = EVM_MIN_SLASH_DELAY_MS;
+      }
+      this.logger.warn(
+        `the slash delay on ${chainId} could not be read; using ${delayMs / 1000}s for this pass ` +
+          `(${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+    cache.set(chainId, delayMs);
+    return delayMs;
   }
 
   /**
@@ -653,7 +693,7 @@ export class SlashExecutionService {
     // suspension or overturn then found `PROPOSING`, had nothing to cancel, and
     // the mirror above has just written `PENDING` on a row whose case is over.
     // Ask for the cancel now rather than leave it for the next tick's repair.
-    if (mirrored === ChainProposalStatus.PENDING) {
+    if (mirrored === ChainProposalStatus.PENDING || mirrored === ChainProposalStatus.DISPUTED) {
       await this.requestCancelIfClosed(proposal);
     }
 
@@ -928,6 +968,9 @@ export class SlashExecutionService {
     proposal: SlashProposalEntity,
     chainStatus: ChainProposalStatus,
   ): Date | null {
+    if (chainStatus === ChainProposalStatus.DISPUTED && proposal.chainDisputedAt) {
+      return new Date(proposal.chainDisputedAt.getTime() + DISPUTE_TIMEOUT_MS);
+    }
     if (chainStatus !== ChainProposalStatus.PENDING) return null;
     if (!proposal.chainExecutableAt) return null;
     return new Date(proposal.chainExecutableAt.getTime() + SLASH_EXECUTION_GRACE_MS);
@@ -1383,15 +1426,26 @@ export class SlashExecutionService {
           continue;
         }
 
-        if (!record || record.status === 'PENDING') {
+        if (!record || record.status === 'PENDING' || record.status === 'DISPUTED') {
           // Either the transaction never landed or it landed and failed. The
           // judgement is alive; put the case back in the queue and release the
-          // claim so the next `executeDue` can take it.
+          // claim so the next `executeDue` can take it. A record the provider
+          // DISPUTED (D-19) is alive too: the mirror says so, which keeps it
+          // out of the execute sweep until the arbiter's uphold lands.
           await this.proposals.transitionIfIn(
             proposal.organizationId,
             proposal.id,
             [SlashProposalStatus.EXECUTING],
-            { status: SlashProposalStatus.UPHELD, chainClaimedAt: null },
+            {
+              status: SlashProposalStatus.UPHELD,
+              chainClaimedAt: null,
+              ...(record?.status === 'DISPUTED'
+                ? {
+                    chainStatus: ChainProposalStatus.DISPUTED,
+                    chainDisputedAt: record.disputedAt ?? null,
+                  }
+                : {}),
+            },
           );
           returned += 1;
           continue;
@@ -1528,7 +1582,15 @@ export class SlashExecutionService {
     // `REFUSED` never wrote a record, `CANCELLED` released one, `EXECUTED`
     // spent it, and `CANCEL_REQUESTED` has already been asked for — asking
     // again would rewrite the same row and append a second identical event.
-    if (!proposal || proposal.chainStatus !== ChainProposalStatus.PENDING) return false;
+    // `DISPUTED` (D-19) is a standing reservation too, and `cancelSlash`
+    // accepts it.
+    if (
+      !proposal ||
+      (proposal.chainStatus !== ChainProposalStatus.PENDING &&
+        proposal.chainStatus !== ChainProposalStatus.DISPUTED)
+    ) {
+      return false;
+    }
 
     try {
       await this.proposals.update(
@@ -1555,7 +1617,8 @@ export class SlashExecutionService {
         actorId: null,
         summary:
           `The on-chain reservation is due to be released (${reason}); ` +
-          `waiting for the settlement admin to sign cancel_slash`,
+          `waiting for the arbiter (or, with none appointed, the settlement admin) to sign ` +
+          `cancel_slash`,
         detail: { reason, requestId: proposal.chainRequestId },
       });
     } catch (error) {
@@ -1682,10 +1745,16 @@ export class SlashExecutionService {
         // Still `Pending`. The expiry door opens seven days after the record
         // became executable — the program's own `SLASH_EXECUTION_GRACE_SECONDS`,
         // read from the client rather than retyped here.
-        const executableAt = proposal.chainExecutableAt;
+        // A record the provider disputed (D-19) expires on its own clock,
+        // `disputedAt + 30 d`, and not on the grace.
+        const expiresAt = proposal.chainDisputedAt
+          ? proposal.chainDisputedAt.getTime() + DISPUTE_TIMEOUT_MS
+          : proposal.chainExecutableAt
+            ? proposal.chainExecutableAt.getTime() + SLASH_EXECUTION_GRACE_MS
+            : null;
         if (
-          executableAt &&
-          now.getTime() >= executableAt.getTime() + SLASH_EXECUTION_GRACE_MS &&
+          expiresAt !== null &&
+          now.getTime() >= expiresAt &&
           (await this.expireAbandonedRecord(proposal))
         ) {
           expired += 1;
@@ -1702,6 +1771,42 @@ export class SlashExecutionService {
     }
 
     return { mirrored, expired, waiting };
+  }
+
+  /**
+   * Records the provider disputed on chain (D-19) that nobody ruled on within
+   * 30 days. `expireSlash` is then permissionless (`DisputeUnresolved`), so
+   * this platform reaps them and the provider's reservation is released; the
+   * judgement can never execute, so a case still open is closed. A record
+   * whose cancel is requested is left to `sweepAdminCancels`, which applies
+   * the same clock. Never throws.
+   */
+  async sweepUnresolvedDisputes(now: Date = new Date()): Promise<{ expired: number }> {
+    if (!this.executor) return { expired: 0 };
+    const rows = await this.proposals.findChainDisputedBefore(
+      new Date(now.getTime() - DISPUTE_TIMEOUT_MS),
+      this.config.sweepBatchSize,
+    );
+    let expired = 0;
+    for (const row of rows) {
+      try {
+        const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (!proposal || proposal.chainStatus !== ChainProposalStatus.DISPUTED) continue;
+        if (!(await this.expireAbandonedRecord(proposal))) continue;
+        expired += 1;
+        await this.voidCase(
+          proposal,
+          { status: ChainProposalStatus.CANCELLED, lastError: null, mirroredByCaller: true },
+          'the provider disputed it on chain and the arbiter did not rule within 30 days',
+        );
+      } catch (error) {
+        this.logger.error(
+          `slash proposal ${row.id}: the unresolved on-chain dispute could not be swept`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    }
+    return { expired };
   }
 
   /**
@@ -1757,11 +1862,14 @@ export class SlashExecutionService {
         actorType: 'system',
         actorId: null,
         summary:
-          'The on-chain reservation was reaped by expire_slash — the settlement admin did not ' +
-          'cancel it inside the seven-day grace',
+          result.reason === 'DISPUTE_UNRESOLVED'
+            ? 'The on-chain reservation was reaped by expire_slash — the dispute went unruled ' +
+              'for 30 days'
+            : 'The on-chain reservation was reaped by expire_slash — nobody cancelled it inside ' +
+              'the seven-day grace',
         detail: {
           signature: result.signature,
-          reason: 'EXPIRED',
+          reason: result.reason ?? 'EXPIRED',
           requestId: proposal.chainRequestId,
         },
       });
@@ -1851,6 +1959,15 @@ export class SlashExecutionService {
 
       if (record.status === 'EXECUTED') {
         await this.recordAnExecutionNobodyAskedFor(proposal, record, reason);
+        return false;
+      }
+
+      if (record.status === 'DISPUTED') {
+        // Still standing (D-19): the provider disputed it while the cancel
+        // waited. `cancelSlash` still takes it; the 30-day clock is noted.
+        if (record.disputedAt && !proposal.chainDisputedAt) {
+          await this.proposals.update(scope, { chainDisputedAt: record.disputedAt });
+        }
         return false;
       }
 
@@ -2179,7 +2296,13 @@ export class SlashExecutionService {
       // fresh epoch the first tick on which the door can land after the promise.
       // The old, larger record has already been cancelled, so nothing is
       // reserved in the meantime.
-      if (this.proposingNowWouldOutrunThePromise(refreshed, now)) {
+      if (
+        this.proposingNowWouldOutrunThePromise(
+          refreshed,
+          now,
+          await this.slashDelayMs(refreshed, new Map()),
+        )
+      ) {
         this.logger.log(
           `slash proposal ${proposalId} was re-proposed at its revised penalty but its promise ` +
             `runs to ${refreshed.earliestExecutionAt.toISOString()}; the fresh epoch is left for ` +

@@ -71,6 +71,26 @@ export const EVM_CONSTANTS = {
    * time + `VOUCHER_MAX_LIFETIME_SECONDS` (300), well inside it.
    */
   MAX_SIGNATURE_LIFETIME_SECONDS: 3_600,
+  /**
+   * `Constants.sol:182` — `MAX_SLASH_BATCH = 64` (D-19). `disputeSlashBatch`,
+   * `upholdSlashBatch` and `cancelSlashBatch` refuse more (`BatchTooLarge`)
+   * and an empty list (`EmptyBatch`).
+   */
+  MAX_SLASH_BATCH: 64,
+  /**
+   * `Constants.sol:56` — `DISPUTE_TIMEOUT_SECONDS = 30 * 86_400` (D-19). A
+   * `Disputed` record becomes `expireSlash`-able (`DisputeUnresolved`) at
+   * `disputedAt + this`; the 7-day execution grace no longer applies to it.
+   */
+  DISPUTE_TIMEOUT_SECONDS: 2_592_000,
+  /**
+   * `Constants.sol:40` — `SLASH_DELAY_SECONDS = 72 * 3600`. Since D-19 it is
+   * only the DEFAULT of `X402Config.slashDelaySeconds()`, and the delay a
+   * Config that predates the upgrade (which has no getter) still applies. The
+   * live delay is always read where the chain offers it; this is never assumed
+   * for an upgraded Config.
+   */
+  PRE_DISPUTE_SLASH_DELAY_SECONDS: 259_200,
 } as const;
 
 /**

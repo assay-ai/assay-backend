@@ -3,7 +3,7 @@ import { toFunctionSelector } from 'viem';
 /**
  * Every `error X();` in assay-evm's `src/Errors.sol`, by name.
  *
- * All 81 are **zero-argument** custom errors, so a revert arrives as a bare
+ * All 88 are **zero-argument** custom errors, so a revert arrives as a bare
  * 4-byte selector with nothing else in it — the only way to say what happened
  * is this table. `check-errors.sh` in `evm/` keeps the Solidity honest;
  * `abi-selectors.spec.ts` keeps this list in step by pinning every name to the
@@ -16,7 +16,10 @@ import { toFunctionSelector } from 'viem';
  * `EscrowLimitsRequireBuyer`, `DestinationIsVault`, `WalletCheckUnderfunded`,
  * `Permit2NotConfigured`); D-17/D-18 added `NotOwner`,
  * `OwnershipCannotBeRenounced`, `AdminChangeRequiresOwner`,
- * `VoucherSeqGapTooLarge` and `SignatureDeadlineTooFar`.
+ * `VoucherSeqGapTooLarge` and `SignatureDeadlineTooFar`. The dispute upgrade
+ * (D-19) appended seven: `NotSlashedProvider`, `DisputeWindowClosed`,
+ * `SlashNotDisputed`, `NotArbiter`, `ArbiterIsVerifier`, `AddressBlocked` and
+ * `InvalidSlashDelay`.
  */
 const NAMES: readonly string[] = [
   'ZeroAmount',
@@ -100,6 +103,14 @@ const NAMES: readonly string[] = [
   'SlashNotYetExecutable',
   'SlashExecutionWindowClosed',
   'SlashNotExpired',
+  // The dispute upgrade (D-19), appended in Errors.sol's order.
+  'NotSlashedProvider',
+  'DisputeWindowClosed',
+  'SlashNotDisputed',
+  'NotArbiter',
+  'ArbiterIsVerifier',
+  'AddressBlocked',
+  'InvalidSlashDelay',
 ];
 
 /**
