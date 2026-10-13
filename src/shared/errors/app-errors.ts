@@ -4,6 +4,14 @@ export interface ErrorDefinition<TArgs extends unknown[] = []> {
   code: string;
   message: (...args: TArgs) => string;
   statusCode: number;
+  /**
+   * The context keys that are safe to put on the wire, as `error.context`.
+   * Opt-in, per error, and reviewed: only data the caller already owns or
+   * supplied (their own request ids and why each was refused), never a block
+   * note, another tenant's data or an upstream fragment. Absent: no context
+   * leaves the process.
+   */
+  publicContext?: readonly string[];
 }
 
 export class AppError<TArgs extends unknown[] = []> extends BaseError {
@@ -24,10 +32,17 @@ export class AppError<TArgs extends unknown[] = []> extends BaseError {
    * Deliberately **not** in `toJSON()`, and therefore not on the wire. A
    * context is internal detail — ids, amounts, upstream fragments — and
    * `AllExceptionsFilter` returns `{ code, message, statusCode, path,
-   * timestamp }` and nothing else. This field is for a `catch` block, not for a
-   * caller.
+   * timestamp }` plus only the keys a definition declares in
+   * `publicContext`. This field is for a `catch` block, not for a caller.
    */
   public readonly context?: Readonly<Record<string, unknown>>;
+
+  /**
+   * The part of {@link context} the definition declares safe for the caller
+   * (`ErrorDefinition.publicContext`), or `undefined`. What
+   * `AllExceptionsFilter` puts on the wire as `error.context`.
+   */
+  public readonly publicContext?: Readonly<Record<string, unknown>>;
 
   constructor(definition: ErrorDefinition<TArgs>, ...args: TArgs) {
     const message = definition.message(...args);
@@ -35,6 +50,14 @@ export class AppError<TArgs extends unknown[] = []> extends BaseError {
 
     const [first] = args;
     this.context = isContextObject(first) ? Object.freeze({ ...first }) : undefined;
+    if (this.context && definition.publicContext && definition.publicContext.length > 0) {
+      const picked = Object.fromEntries(
+        definition.publicContext
+          .filter((key) => this.context?.[key] !== undefined)
+          .map((key) => [key, this.context?.[key]]),
+      );
+      this.publicContext = Object.keys(picked).length > 0 ? Object.freeze(picked) : undefined;
+    }
   }
 }
 

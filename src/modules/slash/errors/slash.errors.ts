@@ -442,6 +442,9 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
   chainBatchRefused: {
     code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,
     statusCode: 422,
+    // The caller's own ids and why each would revert: on the wire as
+    // `error.context`, so a client need not parse the message.
+    publicContext: ['functionName', 'refusals'],
     message: (context?: Record<string, any>) => {
       const refusals = (context?.refusals ?? []) as { requestId: string; reason: string }[];
       return (
