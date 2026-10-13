@@ -1,3 +1,4 @@
+import { AuditLogWriter } from '@shared/audit';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
@@ -104,7 +105,11 @@ function buildController(options?: { screen?: EscrowState }) {
   const buildIntent = jest.fn();
   const withdrawals = { buildIntent } as unknown as WithdrawalService;
 
-  return { controller: new EscrowController(escrows, withdrawals), escrows, buildIntent };
+  return {
+    controller: new EscrowController(escrows, withdrawals, {} as AuditLogWriter),
+    escrows,
+    buildIntent,
+  };
 }
 
 describe('the escrow routes when the settlement chain cannot be read', () => {

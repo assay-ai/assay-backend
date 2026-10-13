@@ -1,3 +1,4 @@
+import { AuditLogWriter } from '@shared/audit';
 import { AccountId, AssetId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { EscrowController } from '@modules/settlement/controllers/escrow.controller';
@@ -106,7 +107,10 @@ function buildController(gasGrant: WithdrawGasGrant | null) {
   const withdrawals = { buildIntent } as unknown as WithdrawalService;
   const escrows = { assetFor: jest.fn(async () => ASSET) } as unknown as EscrowAccountService;
 
-  return { controller: new EscrowController(escrows, withdrawals), buildIntent };
+  return {
+    controller: new EscrowController(escrows, withdrawals, {} as AuditLogWriter),
+    buildIntent,
+  };
 }
 
 describe('EscrowController — the withdrawal gas grant on the wire', () => {
