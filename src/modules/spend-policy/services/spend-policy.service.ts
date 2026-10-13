@@ -132,6 +132,10 @@ export class SpendPolicyService {
    * console's Pause/Resume sends — replaced the org's per-call, daily and
    * monthly caps with nulls. If neither row exists the caller must name
    * `assetId`/`decimals` itself.
+   *
+   * A request whose values equal the live version at this scope, with no
+   * `changeReason`, writes no version and no audit entry and returns the live
+   * policy unchanged.
    */
   async patch(
     organizationId: string,
@@ -177,6 +181,16 @@ export class SpendPolicyService {
       changeReason: patch.changeReason ?? null,
       supersededAt: null,
     };
+
+    // A request that restates the live policy changes nothing, so it writes
+    // nothing: an identical version and an audit entry whose only difference is
+    // the version number are noise in two histories people read. A reason is
+    // itself something to record, so a request that carries one still writes;
+    // and the first version at this scope always does, because it is what makes
+    // the agent's limits its own rather than the organization default's.
+    if (current && !values.changeReason && !decidesDifferently(current, values)) {
+      return toDto(current);
+    }
 
     const row = await this.writeVersion(organizationId, current, values, actor);
     return toDto(row);
@@ -279,6 +293,20 @@ const AUDITED_FIELDS = [
   'paused',
   'policyVersion',
 ] as const;
+
+/** Whether `values` would decide anything differently from the live `current`. */
+function decidesDifferently(
+  current: SpendPolicyEntity,
+  values: Partial<SpendPolicyEntity>,
+): boolean {
+  const pick = (row: Partial<SpendPolicyEntity>): Record<string, unknown> =>
+    Object.fromEntries(
+      (['assetId', 'decimals', ...AUDITED_FIELDS] as const)
+        .filter((field) => field !== 'policyVersion')
+        .map((field) => [field, row[field] ?? null]),
+    );
+  return Object.keys(changedFields(pick(current), pick(values)).after).length > 0;
+}
 
 /**
  * The changed fields only. A first version has no `before`, and its `after`

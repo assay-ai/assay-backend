@@ -151,6 +151,25 @@ describe('audit_log_entries — the writer and its call sites', () => {
     expect(paused.resourceId).toBe(live[0].id);
   });
 
+  it('spend policy: a request that changes nothing writes no version and no entry', async () => {
+    await policies.patch(
+      organizationId,
+      agentId,
+      { assetId: USDC_ASSET, decimals: 6, dailyCap: '1000000' },
+      actor,
+    );
+
+    const unchanged = await policies.patch(organizationId, agentId, { dailyCap: '1000000' }, actor);
+
+    expect(unchanged.policyVersion).toBe(1);
+    const rows = await dataSource.query(
+      `SELECT "policy_version", "superseded_at" FROM "spend_policies" WHERE "organization_id" = $1`,
+      [organizationId],
+    );
+    expect(rows).toEqual([{ policy_version: 1, superseded_at: null }]);
+    expect((await entries()).map((entry) => entry.action)).toEqual(['spend_policy.created']);
+  });
+
   it('spend policy: a failed audit write rolls the version back', async () => {
     await policies.patch(organizationId, agentId, { assetId: USDC_ASSET, decimals: 6 }, actor);
     jest.spyOn(writer, 'record').mockRejectedValueOnce(new Error('audit down'));
