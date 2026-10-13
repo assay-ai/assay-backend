@@ -91,6 +91,33 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
       .getRawMany();
   }
 
+  /**
+   * Every on-chain slash record this platform has standing (`PENDING` or
+   * `DISPUTED`), across tenants, with its asset: the current epoch's parts of
+   * partitioned cases and the single records of the others. For the
+   * verifier-key expiry monitor (follow-up B5), which reads each record's
+   * verifier from the chain.
+   */
+  async findOpenChainRecords(limit: number): Promise<{ requestId: string; assetId: string }[]> {
+    return (await this.manager.query(
+      `SELECT request_id AS "requestId", asset_id AS "assetId" FROM (
+         SELECT part.chain_request_id AS request_id, proposal.asset_id
+           FROM slash_proposal_parts part
+           JOIN slash_proposals proposal
+             ON proposal.id = part.proposal_id AND proposal.chain_epoch = part.chain_epoch
+          WHERE part.chain_status IN ('PENDING', 'DISPUTED')
+         UNION
+         SELECT proposal.chain_request_id, proposal.asset_id
+           FROM slash_proposals proposal
+          WHERE proposal.window_id IS NULL
+            AND proposal.chain_status IN ('PENDING', 'DISPUTED', 'CANCEL_REQUESTED')
+       ) open_records
+       WHERE asset_id LIKE 'eip155:%'
+       LIMIT $1`,
+      [limit],
+    )) as { requestId: string; assetId: string }[];
+  }
+
   /** One case's parts at one epoch, in agent order — the order they were planned in. */
   async findForEpoch(
     organizationId: string,
