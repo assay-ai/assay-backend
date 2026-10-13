@@ -33,6 +33,7 @@ import {
   SlashPartView,
   slashPartRequestId,
 } from '../domain/prorata-slash';
+import { planEvidenceMismatch } from '../domain/slash-plan-evidence';
 import { SlashErrors } from '../errors/slash.errors';
 import { SLASH_CAPS_READER, SlashCapsReaderPort } from '../ports/slash-caps-reader.port';
 import {
@@ -135,6 +136,8 @@ export class SlashPartsService {
     const stragglers: { part: SlashProposalPartEntity; attempts: number; reason: string }[] = [];
 
     if (todo.length > 0) {
+      // Review H-2: never sign a stored plan the evidence does not produce.
+      await this.assertPlanFollowsEvidence(proposal, chainId, parts);
       const outcomes = await this.executor.proposeBatch(
         todo.map((part) => ({
           chainId,
@@ -389,14 +392,41 @@ export class SlashPartsService {
     );
   }
 
+  /**
+   * Refuse (log, throw, sign nothing) when the case's stored parts are not the
+   * plan its evidence produces — see `planEvidenceMismatch`. Every part of the
+   * epoch is checked, not only the unsent ones, so a part that landed earlier
+   * still counts toward the sum and an edited row cannot be skipped past.
+   */
+  private async assertPlanFollowsEvidence(
+    proposal: SlashProposalEntity,
+    chainId: ChainId,
+    parts: readonly SlashProposalPartEntity[],
+  ): Promise<void> {
+    const weights = await this.harmedAgents(proposal, chainId, proposal.providerId);
+    const reason = planEvidenceMismatch({
+      casePenalty: BigInt(proposal.penaltyAmount),
+      evidence: new Map(weights.map((row) => [row.agentAccount, row.weight])),
+      parts,
+    });
+    if (!reason) return;
+    this.logger.error(
+      `slash case ${proposal.id}: refusing to sign; the stored plan does not match the ` +
+        `evidence: ${reason}`,
+    );
+    throw SlashErrors.planEvidenceMismatch({ proposalId: proposal.id, reason });
+  }
+
   /** The window's DATA_FAIL weight per agent, merged on the normalised account, on this chain only. */
   private async harmedAgents(
     proposal: SlashProposalEntity,
     chainId: ChainId,
+    providerId?: string,
   ): Promise<HarmedAgentWeight[]> {
     const rows = await this.windowCalls.sumFailedPriceByAgent(
       proposal.windowId as string,
       proposal.assetId,
+      providerId,
     );
     const merged = new Map<string, bigint>();
     for (const row of rows) {

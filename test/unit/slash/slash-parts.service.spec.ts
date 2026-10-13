@@ -579,3 +579,49 @@ describe('review fixes — SlashPartsService', () => {
     expect(parts.rows[1].chainLastError).toBeNull();
   });
 });
+
+describe('review H-2 — the stored plan is checked against the evidence before signing', () => {
+  async function tampered(edit: (part: SlashProposalPartEntity) => void) {
+    const ctx = build([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    // A plan stored by an earlier attempt that never reached the chain.
+    ctx.executor.proposeFails.set(agent(1).split(':')[2], revert('Transport'));
+    ctx.executor.proposeFails.set(agent(2).split(':')[2], revert('Transport'));
+    await ctx.service.propose(ctx.proposal, '0xprovider').catch(() => undefined);
+    ctx.executor.proposeFails.clear();
+    ctx.executor.batches.length = 0;
+    for (const row of ctx.parts.rows) row.chainStatus = 'NONE';
+    edit(ctx.parts.rows[0]);
+    return ctx;
+  }
+
+  it('signs nothing when a stored beneficiary was changed', async () => {
+    const ctx = await tampered((part) => {
+      part.beneficiaryAccount = agent(99);
+    });
+    await expect(ctx.service.propose(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_PLAN_EVIDENCE_MISMATCH,
+    });
+    expect(ctx.executor.batches).toEqual([]);
+  });
+
+  it('signs nothing when a stored penalty was raised', async () => {
+    const ctx = await tampered((part) => {
+      part.penaltyAmount = (BigInt(part.penaltyAmount) + 1n).toString();
+    });
+    await expect(ctx.service.propose(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_PLAN_EVIDENCE_MISMATCH,
+    });
+    expect(ctx.executor.batches).toEqual([]);
+  });
+
+  it('still signs an untouched stored plan', async () => {
+    const ctx = await tampered(() => undefined);
+    await expect(ctx.service.propose(ctx.proposal, '0xprovider')).resolves.toMatchObject({
+      status: 'PENDING',
+    });
+    expect(ctx.executor.batches).toEqual([{ kind: 'propose', size: 2 }]);
+  });
+});
