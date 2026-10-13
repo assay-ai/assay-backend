@@ -8,7 +8,6 @@ import {
 } from '@modules/tool/domain/routing';
 
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
-import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { AppError } from '@shared/errors/app-errors';
 
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
@@ -204,10 +203,12 @@ describe('a buyer with a standing withdrawal is not quoted on that chain', () =>
 
     // NOT `PAYMENT_NO_SETTLEABLE_CHAIN`. That error's one useful action is
     // "fund another chain", and this buyer has just asked for their money back
-    // from the only chain they have. The refusal names the reason instead.
-    expect(error?.errorCode).toBe(ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING);
-    expect(error?.errorCode).not.toBe(PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN);
-    expect(String(error?.context?.reason)).toContain(IneligibilityReason.BUYER_WITHDRAWING);
+    // from the only chain they have. And NOT `TOOL_NO_ELIGIBLE_BINDING`: the
+    // supply is fine, so the agent is told the real reason and who clears it.
+    expect(error?.errorCode).toBe(PaymentErrorCode.PAYMENT_WITHDRAWAL_PENDING);
+    expect(error?.context?.chains).toEqual([DEVNET]);
+    expect(error?.message).toMatch(/withdrawal is pending/i);
+    expect(error?.message).toMatch(/cancel or complete/i);
 
     expect(invoker.invocations).toHaveLength(0);
     // And no ceiling token was taken. Shedding debits a provider's declared
@@ -243,7 +244,7 @@ describe('tools/call reads the escrow and refuses a withdrawing buyer', () => {
     const { calls, intents } = mcp(escrow);
 
     await expect(calls.call(SESSION, 'Search the web', ARGS)).rejects.toMatchObject({
-      errorCode: ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING,
+      errorCode: PaymentErrorCode.PAYMENT_WITHDRAWAL_PENDING,
     });
 
     // The escrow was actually consulted, on the buyer's own account.
