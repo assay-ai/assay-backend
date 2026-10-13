@@ -63,7 +63,7 @@ describe('loadProviderTerms', () => {
 
     expect(terms.commercialTerms.map((term) => `${term.label}: ${term.value}`)).toEqual([
       'Take rate: 10%',
-      'Payouts: hourly above $10',
+      'Payouts: as each call settles',
       'Reserve held: $0.00',
       'Clawback: never',
       'Stake required: $50.00 minimum',
