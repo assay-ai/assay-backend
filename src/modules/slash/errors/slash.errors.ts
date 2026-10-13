@@ -31,6 +31,7 @@ export enum SlashErrorCode {
   /** The signature offered as a compensation does not show the deposit it claims. */
   SLASH_COMPENSATION_NOT_CONFIRMED = 'SLASH_COMPENSATION_NOT_CONFIRMED',
   SLASH_COMPENSATION_ALREADY_USED = 'SLASH_COMPENSATION_ALREADY_USED',
+  SLASH_PLAN_EVIDENCE_MISMATCH = 'SLASH_PLAN_EVIDENCE_MISMATCH',
   /** A pro-rata window case found no agent with a priced DATA_FAIL call to compensate. */
   SLASH_NO_HARMED_AGENTS = 'SLASH_NO_HARMED_AGENTS',
   /** A case whose beneficiary cannot be named on this chain (e.g. the EVM vault). */
@@ -382,6 +383,19 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
    * price, or every share was reduced to nothing by the on-chain caps. Left
    * for a human rather than voided — the provider still breached its SLA.
    */
+  /**
+   * The stored pro-rata plan does not follow from the window's evidence
+   * (review H-2), so nothing was signed or sent. Not a chain refusal: the
+   * case stays PROPOSING, `chain_last_error` names this code, and a
+   * `PLAN_REFUSED` event on the timeline asks an operator to look.
+   */
+  planEvidenceMismatch: {
+    code: SlashErrorCode.SLASH_PLAN_EVIDENCE_MISMATCH,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Slash case ${context?.proposalId ?? ''}: the stored plan does not match the evidence` +
+      `${context?.reason ? ` (${context.reason})` : ''}. Nothing was signed or sent.`,
+  },
   noHarmedAgents: {
     code: SlashErrorCode.SLASH_NO_HARMED_AGENTS,
     statusCode: 409,

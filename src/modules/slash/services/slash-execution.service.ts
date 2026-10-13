@@ -407,11 +407,42 @@ export class SlashExecutionService {
             `propose_slash failed for proposal ${proposal.id}`,
             error instanceof Error ? error.stack : String(error),
           );
+          await this.flagPlanRefusal(proposal, error);
         }
       }
     }
 
     return { proposed, refused, failed };
+  }
+
+  /**
+   * Put a refused plan (review H-2) on the case timeline, once: the sweep
+   * retries every ten minutes and refuses again each time, and one entry is
+   * enough to send an operator to look. Never throws; the refusal itself is
+   * already on the row as `chain_last_error`.
+   */
+  private async flagPlanRefusal(proposal: SlashProposalEntity, error: unknown): Promise<void> {
+    if ((error as { errorCode?: unknown })?.errorCode !== 'SLASH_PLAN_EVIDENCE_MISMATCH') return;
+    if (proposal.chainLastError === 'SLASH_PLAN_EVIDENCE_MISMATCH') return;
+    try {
+      await this.lifecycle.appendEventDirect({
+        organizationId: proposal.organizationId,
+        proposalId: proposal.id,
+        occurredAt: new Date(),
+        kind: 'PLAN_REFUSED',
+        actorType: 'system',
+        actorId: null,
+        summary:
+          'Nothing was signed: the stored slash plan does not match the window evidence. ' +
+          'An operator must check the parts before this case can go on chain.',
+        detail: { reason: error instanceof Error ? error.message : String(error) },
+      });
+    } catch (appendError) {
+      this.logger.error(
+        `slash proposal ${proposal.id}: the plan refusal could not be put on the timeline`,
+        appendError instanceof Error ? appendError.stack : String(appendError),
+      );
+    }
   }
 
   /**

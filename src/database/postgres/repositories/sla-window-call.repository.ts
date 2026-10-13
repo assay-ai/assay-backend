@@ -140,8 +140,13 @@ export class SlaWindowCallRepository extends OrganizationScopedRepository<SlaWin
    * comes off `payment_intents.agent_account` (CAIP-10, the payer's own
    * account) for the reason {@link sumSpendByAgent} documents.
    */
-  async sumFailedPriceByAgent(windowId: string, assetId: string): Promise<AgentWindowSpend[]> {
-    return this.manager
+  async sumFailedPriceByAgent(
+    windowId: string,
+    assetId: string,
+    // Only calls routed to this provider (review H-2's evidence check).
+    providerId?: string,
+  ): Promise<AgentWindowSpend[]> {
+    const query = this.manager
       .createQueryBuilder(SlaWindowCallEntity, 'call')
       .innerJoin(PaymentIntentEntity, 'intent', 'intent.id = call.intentId')
       .select('intent.organization_id', 'organizationId')
@@ -149,7 +154,9 @@ export class SlaWindowCallRepository extends OrganizationScopedRepository<SlaWin
       .addSelect('SUM(call.price_amount)', 'spend')
       .where('call.windowId = :windowId', { windowId })
       .andWhere('call.countedAsFailure = true')
-      .andWhere('call.assetId = :assetId', { assetId })
+      .andWhere('call.assetId = :assetId', { assetId });
+    if (providerId) query.andWhere('intent.provider_id = :providerId', { providerId });
+    return query
       .groupBy('intent.organization_id')
       .addGroupBy('intent.agent_account')
       .orderBy('intent.agent_account', 'ASC')
