@@ -86,6 +86,8 @@ export class SlashLifecycleJob {
     // about parked rows, and running it earlier would have it read records the
     // execute pass is about to move.
     await this.sweepAdminCancels();
+    // D-19: disputed records nobody ruled on within 30 days.
+    await this.sweepUnresolvedDisputes();
     // Last. Cleanup for a crashed submit, and it must never delay a live
     // judgement to do it.
     await this.reconcileExecuting();
@@ -196,6 +198,20 @@ export class SlashLifecycleJob {
     } catch (error) {
       this.logger.error(
         `Admin-cancel sweep aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async sweepUnresolvedDisputes(): Promise<void> {
+    try {
+      const { expired } = await this.execution.sweepUnresolvedDisputes();
+      if (expired > 0) {
+        // `warn`: a dispute nobody ruled on is an arbiter who did not act.
+        this.logger.warn(`${expired} on-chain dispute(s) went unruled for 30 days and expired.`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Unresolved-dispute sweep aborted: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

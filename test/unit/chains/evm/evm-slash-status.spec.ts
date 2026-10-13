@@ -14,6 +14,8 @@ describe('the EVM slash status map', () => {
     [1, 'PENDING'],
     [2, 'EXECUTED'],
     [3, 'CANCELLED'],
+    // The dispute upgrade's appended member (D-19).
+    [4, 'DISPUTED'],
   ])('EVM %i is %s', (value, name) => {
     expect(slashStatusFromEvm(value as number)).toBe(name);
   });
@@ -25,7 +27,7 @@ describe('the EVM slash status map', () => {
   });
 
   it('refuses a value outside the enum rather than defaulting', () => {
-    expect(() => slashStatusFromEvm(4)).toThrow(/SlashStatus/);
+    expect(() => slashStatusFromEvm(5)).toThrow(/SlashStatus/);
     expect(() => slashStatusFromEvm(-1)).toThrow(/SlashStatus/);
   });
 
@@ -38,7 +40,7 @@ describe('the EVM slash status map', () => {
   });
 
   it('round-trips every named status', () => {
-    for (const status of ['PENDING', 'EXECUTED', 'CANCELLED'] as const) {
+    for (const status of ['PENDING', 'EXECUTED', 'CANCELLED', 'DISPUTED'] as const) {
       expect(slashStatusFromEvm(slashStatusToEvm(status))).toBe(status);
     }
   });
@@ -56,7 +58,7 @@ describe('the EVM slash status map', () => {
     // The other direction of the same defect: writing `None` for a real
     // judgement would make an executed slash read back as "there is no record
     // here" on the next poll.
-    for (const status of ['PENDING', 'EXECUTED', 'CANCELLED'] as const) {
+    for (const status of ['PENDING', 'EXECUTED', 'CANCELLED', 'DISPUTED'] as const) {
       expect(slashStatusToEvm(status)).not.toBe(0);
     }
   });

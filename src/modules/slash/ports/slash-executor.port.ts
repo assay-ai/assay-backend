@@ -85,7 +85,13 @@ export interface SlashProposalRequest {
 }
 
 /**
- * The three states a `SlashRecord` can be in, named rather than numbered.
+ * The states a `SlashRecord` can be in, named rather than numbered.
+ *
+ * `DISPUTED` is EVM only (assay-evm D-19): the provider called `disputeSlash`
+ * inside the delay. The reservation stands, `executeSlash` refuses the record,
+ * and it leaves the state by the arbiter's `upholdSlash` (back to `PENDING`,
+ * executable from that moment), by `cancelSlash` (admin or arbiter) or by
+ * `expireSlash` once `disputedAt + 30 d` has passed. Solana never reports it.
  *
  * `CANCELLED` covers both doors that end a judgement without paying it —
  * `cancel_slash` (a verifier withdrew it) and `expire_slash` (it outlived its
@@ -93,7 +99,7 @@ export interface SlashProposalRequest {
  * record's `cancelled_at` is written by either and the distinction, where it
  * matters, is in the platform's own audit trail rather than on chain.
  */
-export type SlashRecordStatus = 'PENDING' | 'EXECUTED' | 'CANCELLED';
+export type SlashRecordStatus = 'PENDING' | 'EXECUTED' | 'CANCELLED' | 'DISPUTED';
 
 export interface SlashProposalResult {
   /** Empty when {@link adopted} — nothing was submitted, so there is no signature. */
@@ -211,6 +217,12 @@ export interface SlashCancelResult {
   readonly signature: string;
   /** The chain's `cancelled_at`. Both doors write the same field. */
   readonly cancelledAt: Date;
+  /**
+   * `SlashCancelled.reason`, when the chain says it (EVM): `EXPIRED`,
+   * `VERIFIER_UNAVAILABLE`, or — for a `Disputed` record nobody ruled on within
+   * 30 days (D-19) — `DISPUTE_UNRESOLVED`.
+   */
+  readonly reason?: 'WITHDRAWN' | 'EXPIRED' | 'VERIFIER_UNAVAILABLE' | 'DISPUTE_UNRESOLVED';
 }
 
 /**
@@ -230,8 +242,15 @@ export interface SlashCancelIntent {
   readonly transaction: string;
   /** EVM only: the contract the calldata is addressed to (the `X402Stake` proxy). */
   readonly to?: string;
-  /** `Config.admin` — the only account that may sign it, and its fee payer. */
+  /**
+   * The only account that may sign it, and its fee payer: `Config.admin`, or
+   * — on EVM once the dispute upgrade has appointed one — `X402Config.arbiter()`.
+   * The field keeps its name for the clients that read it; {@link signerRole}
+   * says which of the two it is.
+   */
   readonly admin: string;
+  /** `ADMIN` (Solana, and EVM without an arbiter) or `ARBITER` (D-19). */
+  readonly signerRole?: 'ADMIN' | 'ARBITER';
   readonly requestId: string;
   readonly provider: string;
   /** The blockhash the transaction is bound to — a wallet showing an expiry needs it. Empty on EVM. */
@@ -262,6 +281,12 @@ export interface SlashRecordSnapshot {
   readonly executedAt: Date | null;
   /** `null` unless the judgement was cancelled or expired. */
   readonly cancelledAt: Date | null;
+  /**
+   * EVM only (D-19): when the provider called `disputeSlash`, or `null`. A
+   * `DISPUTED` record becomes expirable at `disputedAt + 30 d`, not on the
+   * seven-day grace.
+   */
+  readonly disputedAt?: Date | null;
   /**
    * The signed terms, where the chain's record keeps them (EVM does; the
    * Solana snapshot leaves them absent). What `slashRecordMismatch` judges.
@@ -458,6 +483,15 @@ export interface SlashExecutorPort {
    * name it on.
    */
   settlementTreasury(asset: AssetId): Promise<AccountId>;
+
+  /**
+   * The delay a record proposed NOW would freeze into its `executableAt`, in
+   * seconds, read from the chain (EVM: `X402Config.slashDelaySeconds()` since
+   * the dispute upgrade, the old contract's constant before it). Optional, and
+   * `null` when the namespace cannot say: the caller then falls back to the
+   * Solana program's floor, `MIN_SLASH_DELAY_SECONDS` (72 h).
+   */
+  slashDelaySeconds?(chainId: ChainId): Promise<number | null>;
 }
 
 export const SLASH_EXECUTOR = 'SLASH_EXECUTOR';

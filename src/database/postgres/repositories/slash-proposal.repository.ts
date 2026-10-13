@@ -505,6 +505,24 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 
   /**
+   * Cases whose record has stood `DISPUTED` on chain (D-19) since before
+   * `disputedBefore` — `disputedAt + 30 d` has passed and the permissionless
+   * `expireSlash` (`DisputeUnresolved`) releases the reservation. Backed by
+   * `idx_slash_proposals_chain_disputed`.
+   */
+  async findChainDisputedBefore(disputedBefore: Date, limit: number): Promise<ChainSweepRow[]> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.organization_id', 'organizationId')
+      .addSelect('proposal.id', 'id')
+      .where('proposal.chain_status = :disputed', { disputed: 'DISPUTED' })
+      .andWhere('proposal.chain_disputed_at <= :disputedBefore', { disputedBefore })
+      .orderBy('proposal.chain_disputed_at', 'ASC')
+      .limit(limit)
+      .getRawMany<ChainSweepRow>();
+  }
+
+  /**
    * Cases closed off chain whose record still mirrors `PENDING`: the repair
    * behind every best-effort cancel request.
    *
@@ -523,16 +541,22 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * `chain_status = 'PENDING'`), soonest deadline first.
    */
   async findClosedStillPending(limit: number): Promise<ChainSweepRow[]> {
-    return this.manager
-      .createQueryBuilder(SlashProposalEntity, 'proposal')
-      .select('proposal.organization_id', 'organizationId')
-      .addSelect('proposal.id', 'id')
-      .where('proposal.chain_status = :pending', { pending: 'PENDING' })
-      .andWhere('proposal.status IN (:...closed)', { closed: [...CLOSED_WITHOUT_PENALTY_STATUSES] })
-      .andWhere(`proposal.resolution_kind IS DISTINCT FROM 'AUTO_CHAIN_VOIDED'`)
-      .orderBy('proposal.chain_executable_at', 'ASC')
-      .limit(limit)
-      .getRawMany<ChainSweepRow>();
+    return (
+      this.manager
+        .createQueryBuilder(SlashProposalEntity, 'proposal')
+        .select('proposal.organization_id', 'organizationId')
+        .addSelect('proposal.id', 'id')
+        // DISPUTED (D-19) is a standing reservation too, and `cancelSlash`
+        // accepts it.
+        .where('proposal.chain_status IN (:...standing)', { standing: ['PENDING', 'DISPUTED'] })
+        .andWhere('proposal.status IN (:...closed)', {
+          closed: [...CLOSED_WITHOUT_PENALTY_STATUSES],
+        })
+        .andWhere(`proposal.resolution_kind IS DISTINCT FROM 'AUTO_CHAIN_VOIDED'`)
+        .orderBy('proposal.chain_executable_at', 'ASC')
+        .limit(limit)
+        .getRawMany<ChainSweepRow>()
+    );
   }
 
   /**

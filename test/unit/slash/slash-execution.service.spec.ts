@@ -57,6 +57,12 @@ class FakeExecutor implements SlashExecutorPort {
   readonly expired: SlashCancelRequest[] = [];
   appliedMinor = '5000000';
   failNext = false;
+  /** The chain's live slash delay; `null` = the namespace cannot say (Solana). */
+  slashDelay: number | null = null;
+
+  async slashDelaySeconds(): Promise<number | null> {
+    return this.slashDelay;
+  }
 
   /** Read only, and nothing in this suite resolves a beneficiary. */
   async settlementTreasury() {
@@ -3637,5 +3643,99 @@ describe('review fix S2-3 — no single-beneficiary slash on EVM', () => {
     expect(executor.proposed).toHaveLength(0);
     expect(result.proposed).toBe(0);
     expect(proposals.rows.get('p1')!.chainLastError).toBe('SLASH_BENEFICIARY_UNSUPPORTED');
+  });
+});
+
+describe('the dispute upgrade (D-19)', () => {
+  it('reads the live slash delay: a 10-minute chain defers a promise 71 hours out', async () => {
+    // The 72 h floor is Solana's. An upgraded EVM Config may run a 10-minute
+    // delay, and a record written now would open its door long before the
+    // provider's promise.
+    const { service, proposals, executor } = build();
+    executor.slashDelay = 600;
+    proposals.seed(proposable({ id: 'p1', earliestExecutionAt: hoursFromNow(71) }));
+
+    expect(await service.proposeDue(NOW)).toEqual({ proposed: 0, refused: 0, failed: 0 });
+    expect(executor.proposed).toEqual([]);
+
+    proposals.rows.get('p1')!.earliestExecutionAt = new Date(NOW.getTime() + 9 * 60_000);
+    expect(await service.proposeDue(NOW)).toEqual({ proposed: 1, refused: 0, failed: 0 });
+  });
+
+  it('returns a crashed EXECUTING case to UPHELD with a DISPUTED mirror', async () => {
+    const { service, proposals, executor } = build();
+    proposals.seed(orphaned({ id: 'p1' }));
+    const disputedAt = hoursFromNow(-1);
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'DISPUTED', executedAt: null, disputedAt });
+
+    expect(await service.reconcileExecuting(NOW)).toEqual({ recovered: 0, returned: 1, voided: 0 });
+    expect(proposals.rows.get('p1')).toMatchObject({
+      status: SlashProposalStatus.UPHELD,
+      chainStatus: 'DISPUTED',
+      chainDisputedAt: disputedAt,
+    });
+    // Out of the execute sweep until the arbiter's uphold lands.
+    expect(await proposals.findChainExecutable(NOW, 100)).toEqual([]);
+  });
+
+  it('asks for the cancel of a closed case whose record is disputed', async () => {
+    const { service, proposals } = build();
+    proposals.seed(standing({ id: 'p1', chainStatus: 'DISPUTED' }));
+    await expect(service.requestAdminCancel('org_1', 'p1', 'overturned')).resolves.toBe(true);
+    expect(proposals.rows.get('p1')!.chainStatus).toBe('CANCEL_REQUESTED');
+  });
+
+  it('expires a cancel-requested DISPUTED record on disputedAt + 30 d, not on the grace', async () => {
+    const { service, proposals, executor } = build();
+    proposals.seed(
+      standingAndDue({
+        id: 'p1',
+        chainStatus: 'CANCEL_REQUESTED',
+        chainExecutableAt: hoursFromNow(-8 * 24),
+        chainDisputedAt: hoursFromNow(-29 * 24),
+      }),
+    );
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'DISPUTED', executedAt: null, disputedAt: hoursFromNow(-29 * 24) });
+
+    // The grace (executableAt + 7 d) has passed; the dispute clock has not.
+    expect((await service.sweepAdminCancels(NOW)).expired).toBe(0);
+    expect(executor.expired).toEqual([]);
+
+    proposals.rows.get('p1')!.chainDisputedAt = hoursFromNow(-30 * 24 - 1);
+    expect((await service.sweepAdminCancels(NOW)).expired).toBe(1);
+  });
+
+  it('expires a disputed record nobody ruled on within 30 days and closes the case', async () => {
+    const { service, proposals, executor } = build();
+    proposals.seed(
+      standingAndDue({
+        id: 'p1',
+        status: 'UPHELD',
+        chainStatus: 'DISPUTED',
+        chainDisputedAt: hoursFromNow(-30 * 24 - 1),
+      }),
+    );
+    proposals.seed(
+      standingAndDue({
+        id: 'p2',
+        status: 'UPHELD',
+        chainStatus: 'DISPUTED',
+        chainDisputedAt: hoursFromNow(-24),
+      }),
+    );
+    executor.expireImpl = async () => ({
+      signature: '0xexp',
+      cancelledAt: NOW,
+      reason: 'DISPUTE_UNRESOLVED',
+    });
+
+    expect(await service.sweepUnresolvedDisputes(NOW)).toEqual({ expired: 1 });
+    expect(proposals.rows.get('p1')).toMatchObject({
+      chainStatus: 'CANCELLED',
+      status: SlashProposalStatus.CANCELLED,
+    });
+    expect(proposals.rows.get('p2')!.chainStatus).toBe('DISPUTED');
   });
 });

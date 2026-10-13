@@ -277,6 +277,10 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   chainProposalSignature: string | null;
 
   /** When `PROPOSING`/`EXECUTING` was claimed, so a crashed claim can be reaped. */
+  /** The chain's `disputedAt` (D-19), when the provider disputed the record on chain. */
+  @Column({ name: 'chain_disputed_at', type: 'timestamptz', nullable: true })
+  chainDisputedAt: Date | null;
+
   @Column({ name: 'chain_claimed_at', type: 'timestamptz', nullable: true })
   chainClaimedAt: Date | null;
 

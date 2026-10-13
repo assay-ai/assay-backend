@@ -29,6 +29,14 @@ import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.const
  * 172: uint64 internal constant MAX_SIGNATURE_LIFETIME_SECONDS = 3600;
  * ```
  *
+ * and, on 2026-10-14 at assay-evm 99f98ed (the dispute upgrade, D-19):
+ *
+ * ```
+ *  56: uint64 internal constant DISPUTE_TIMEOUT_SECONDS = 30 * 86_400;
+ *  40: uint64 internal constant SLASH_DELAY_SECONDS = 72 * 3600;  // the default, and the old delay
+ * 182: uint256 internal constant MAX_SLASH_BATCH = 64;
+ * ```
+ *
  * **State the limit rather than overstate the check.** This suite cannot catch
  * the Solidity moving; the deployment-record comparison is what does that.
  * What it does catch is the other direction, which is the one that happens:
@@ -48,6 +56,9 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
     ['MAX_DELEGATES_PER_PAYER', 16],
     ['MAX_SEQ_GAP', 1_000_000],
     ['MAX_SIGNATURE_LIFETIME_SECONDS', 3_600],
+    ['MAX_SLASH_BATCH', 64],
+    ['DISPUTE_TIMEOUT_SECONDS', 30 * 86_400],
+    ['PRE_DISPUTE_SLASH_DELAY_SECONDS', 72 * 3_600],
   ])('%s is %i', (name, value) => {
     expect(EVM_CONSTANTS[name as keyof typeof EVM_CONSTANTS]).toBe(value);
   });
@@ -58,12 +69,15 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
     // nobody checked reaches a redeem call.
     expect(Object.keys(EVM_CONSTANTS).sort()).toEqual([
       'CLOCK_SKEW_TOLERANCE_SECONDS',
+      'DISPUTE_TIMEOUT_SECONDS',
       'MAX_DELEGATES_PER_PAYER',
       'MAX_DELEGATION_LIFETIME_SECONDS',
       'MAX_REDEEM_BATCH',
       'MAX_SEQ_GAP',
       'MAX_SIGNATURE_LIFETIME_SECONDS',
+      'MAX_SLASH_BATCH',
       'MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS',
+      'PRE_DISPUTE_SLASH_DELAY_SECONDS',
       'REDEEM_GRACE_SECONDS',
       'SLASH_WINDOW_SECONDS',
       'VOUCHER_MAX_LIFETIME_SECONDS',

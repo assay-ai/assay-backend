@@ -73,6 +73,15 @@ export enum ChainProposalStatus {
    * seven-day grace.
    */
   CANCEL_REQUESTED = 'CANCEL_REQUESTED',
+  /**
+   * EVM only (assay-evm D-19): the provider called `disputeSlash` and the
+   * record is `Disputed`. The reservation stands and `executeSlash` refuses
+   * it; it leaves by the arbiter's `upholdSlash` (back to `PENDING`, at the
+   * `executableAt` the chain reports), by a cancel, or by `expireSlash` once
+   * `chain_disputed_at + 30 d` has passed. Outside `findChainExecutable`'s
+   * `chain_status = 'PENDING'` by construction.
+   */
+  DISPUTED = 'DISPUTED',
   /** `SlashStatus::Executed` — the money moved. */
   EXECUTED = 'EXECUTED',
   /** `SlashStatus::Cancelled` — cancelled or expired; the reservation is released. */

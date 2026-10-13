@@ -33,7 +33,12 @@ function event(requestId: string, beneficiary: `0x${string}`, penalty: bigint): 
   };
 }
 
-function build(options: { head: bigint; logs?: SlashProposedLog[]; cursor?: string }) {
+function build(options: {
+  head: bigint;
+  logs?: SlashProposedLog[];
+  cursor?: string;
+  rulings?: unknown;
+}) {
   const alerts: Alert[] = [];
   const ranges: [bigint, bigint][] = [];
   const store = new Map<string, string>(
@@ -72,6 +77,7 @@ function build(options: { head: bigint; logs?: SlashProposedLog[]; cursor?: stri
     parts as never,
     { emit: async (alert: Alert) => void alerts.push(alert) },
     redis as never,
+    options.rulings ? ({ get: () => options.rulings } as never) : null,
   );
   return { watcher, alerts, ranges, store };
 }
@@ -149,5 +155,77 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
       name: EVM_SLASH_WATCH_ALERTS.UNREADABLE,
     });
     expect(store.get(`evm:slash-watch:cursor:${CHAIN}`)).toBe('10');
+  });
+
+  describe('the dispute upgrade (D-19)', () => {
+    const disputedLog = (requestId: string): SlashProposedLog => ({
+      eventName: 'SlashDisputed',
+      args: {
+        requestId: `0x${requestId}`,
+        provider: '0x00000000000000000000000000000000000000c1',
+        disputedAt: 1_799_000_000n,
+        executableAt: 1_800_000_000n,
+      },
+      transactionHash: `0x${'2'.repeat(64)}`,
+      blockNumber: 101n,
+    });
+    const upheldLog = (requestId: string): SlashProposedLog => ({
+      eventName: 'SlashUpheld',
+      args: {
+        requestId: `0x${requestId}`,
+        provider: '0x00000000000000000000000000000000000000c1',
+        arbiter: '0x00000000000000000000000000000000000000a5',
+        executableAt: 1_800_000_000n,
+      },
+      transactionHash: `0x${'3'.repeat(64)}`,
+      blockNumber: 102n,
+    });
+
+    it("hands a dispute and an uphold to the slash domain with the chain's own clocks", async () => {
+      const seen: unknown[] = [];
+      const rulings = {
+        recordDisputed: async (event: unknown) => (seen.push(event), true),
+        recordUpheld: async (event: unknown) => (seen.push(event), true),
+      };
+      const { watcher, alerts } = build({
+        head: 500n,
+        logs: [disputedLog(KNOWN), upheldLog(KNOWN)],
+        rulings,
+      });
+      await expect(watcher.check()).resolves.toEqual([]);
+      expect(alerts).toEqual([]);
+      expect(seen).toEqual([
+        expect.objectContaining({
+          requestId: KNOWN,
+          disputedAt: new Date(1_799_000_000_000),
+          executableAt: new Date(1_800_000_000_000),
+        }),
+        expect.objectContaining({ requestId: KNOWN, executableAt: new Date(1_800_000_000_000) }),
+      ]);
+    });
+
+    it('warns on a dispute of a record nobody planned', async () => {
+      const rulings = { recordDisputed: async () => false, recordUpheld: async () => false };
+      const { watcher, alerts } = build({ head: 500n, logs: [disputedLog(ROGUE)], rulings });
+      await watcher.check();
+      expect(alerts).toEqual([
+        expect.objectContaining({
+          severity: AlertSeverity.WARN,
+          name: EVM_SLASH_WATCH_ALERTS.UNKNOWN_RULING,
+        }),
+      ]);
+    });
+
+    it('does not advance the cursor when the mirror fails, so the range is re-read', async () => {
+      const rulings = {
+        recordDisputed: async () => {
+          throw new Error('db down');
+        },
+        recordUpheld: async () => true,
+      };
+      const { watcher, store } = build({ head: 500n, logs: [disputedLog(KNOWN)], rulings });
+      await watcher.check();
+      expect(store.has(`evm:slash-watch:cursor:${CHAIN}`)).toBe(false);
+    });
   });
 });
