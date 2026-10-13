@@ -539,6 +539,13 @@ describe('McpToolCallService — the paid call loop', () => {
     expect(outcome.code).toBe(McpFailureCode.PROVIDER_REQUEST_ERROR);
     expect(outcome.retryable).toBe(false);
     expect(ledger.kinds).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
+    // BUG-R3-J-03: the bare "was not served: REQUEST_REJECTED" gave no direction.
+    expect(outcome.message).toMatch(
+      /the provider rejected the request \(REQUEST_REJECTED, status 400\)/,
+    );
+    expect(outcome.message).toMatch(/Nothing was charged/);
+    expect(outcome.message).toMatch(/do not retry it unchanged/);
+    expect(outcome.detail.fault).toBe('UNDETERMINED');
   });
 
   /**
@@ -562,6 +569,8 @@ describe('McpToolCallService — the paid call loop', () => {
     if (outcome.kind !== 'ERROR') return;
 
     expect(outcome.code).toBe(McpFailureCode.PROVIDER_CONTRACT_VIOLATION);
+    expect(outcome.message).toMatch(/provider's fault, not your arguments; a retry will not help/);
+    expect(outcome.detail.fault).toBe('PROVIDER');
     expect(ledger.kinds).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
     expect(intents.only.status).toBe(PaymentIntentStatus.REFUNDED);
   });
