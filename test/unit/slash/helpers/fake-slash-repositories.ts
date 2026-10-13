@@ -121,12 +121,17 @@ export class FakeSlashProposals {
     id?: string;
     strikeId?: string;
     verdictId?: string;
+    windowId?: string;
+    /** Any value here stands for TypeORM's `Not(IsNull())`, the only use. */
+    chainDisputeWonAt?: unknown;
   }) {
     for (const row of this.rows.values()) {
       if (row.organizationId !== where.organizationId) continue;
       if (where.id !== undefined && row.id !== where.id) continue;
       if (where.strikeId !== undefined && row.strikeId !== where.strikeId) continue;
       if (where.verdictId !== undefined && row.verdictId !== where.verdictId) continue;
+      if (where.windowId !== undefined && row.windowId !== where.windowId) continue;
+      if (where.chainDisputeWonAt !== undefined && !row.chainDisputeWonAt) continue;
       return row;
     }
     return null;

@@ -1824,6 +1824,11 @@ export class SlashExecutionService {
         if (!proposal || proposal.chainStatus !== ChainProposalStatus.DISPUTED) continue;
         if (!(await this.expireAbandonedRecord(proposal))) continue;
         expired += 1;
+        // The provider won by default (B7): never proposed again.
+        await this.proposals.update(
+          { organizationId: proposal.organizationId, id: proposal.id },
+          { chainDisputeWonAt: proposal.chainDisputeWonAt ?? now },
+        );
         await this.voidCase(
           proposal,
           { status: ChainProposalStatus.CANCELLED, lastError: null, mirroredByCaller: true },
@@ -2283,6 +2288,28 @@ export class SlashExecutionService {
     const organizationId = proposal.organizationId;
     const proposalId = proposal.id;
     try {
+      // B7: an incident whose on-chain dispute the provider WON is never put
+      // back on chain under a new request id.
+      if (await this.providerWonTheDispute(proposal)) {
+        this.logger.warn(
+          `slash proposal ${proposalId} is not re-proposed: the provider won its on-chain dispute`,
+        );
+        await this.lifecycle
+          .appendEventDirect({
+            organizationId,
+            proposalId,
+            occurredAt: now,
+            kind: 'REPROPOSAL_REFUSED',
+            actorType: 'system',
+            actorId: null,
+            summary:
+              'Not proposed again: the provider won the on-chain dispute of this case, so it ' +
+              'cannot be put back on chain under a new request id',
+            detail: { chainDisputeWonAt: proposal.chainDisputeWonAt?.toISOString() ?? null },
+          })
+          .catch(() => undefined);
+        return;
+      }
       const chainEpoch = proposal.chainEpoch + 1;
       // Derived from the BUMPED epoch. Deriving from the row as it stands would
       // reproduce the id that was just cancelled, and `propose_slash`'s `init`
@@ -2353,6 +2380,16 @@ export class SlashExecutionService {
         error instanceof Error ? error.stack : String(error),
       );
     }
+  }
+
+  /**
+   * B7: did the provider win an on-chain dispute of this case
+   * (`chain_dispute_won_at`, written when a record is cancelled while
+   * `DISPUTED` or expired as `DisputeUnresolved`)?
+   */
+  private async providerWonTheDispute(proposal: SlashProposalEntity): Promise<boolean> {
+    if (proposal.chainDisputeWonAt) return true;
+    return false;
   }
 
   /**

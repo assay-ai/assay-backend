@@ -202,6 +202,19 @@ describe('SlashChainRulingService', () => {
       expect(events.filter((event) => event.kind === 'CHAIN_CANCELLED')).toHaveLength(2);
     });
 
+    it('B7: remembers that the provider won the dispute when a DISPUTED part is cancelled', async () => {
+      const { service, proposal } = build('UPHELD');
+      await service.recordDisputed(disputed(ID_A));
+      await service.recordCancelled(cancelled(ID_A));
+      expect(proposal.chainDisputeWonAt).toEqual(new Date('2026-10-16T00:00:00Z'));
+    });
+
+    it('B7: a cancel of a part nobody disputed is not a dispute won', async () => {
+      const { service, proposal } = build('UPHELD');
+      await service.recordCancelled(cancelled(ID_A));
+      expect(proposal.chainDisputeWonAt ?? null).toBeNull();
+    });
+
     it('leaves the case executing when another part still stands', async () => {
       const { service, parts, proposal, closed } = build('UPHELD');
       await service.recordDisputed(disputed(ID_A));
