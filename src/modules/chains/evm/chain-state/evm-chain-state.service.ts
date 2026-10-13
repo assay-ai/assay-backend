@@ -112,6 +112,20 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
     }
   }
 
+  async blockedAccounts(chainId: string): Promise<readonly string[]> {
+    const snapshot = this.chains.get(chainId);
+    if (!snapshot || snapshot.upgraded !== true || snapshot.blocked.size === 0) return [];
+    const confirmed: string[] = [];
+    for (const address of snapshot.blocked) {
+      if (!isAddress(address, { strict: false })) continue;
+      // `hold` mode: an unreadable confirmation does not keep the address out.
+      if (await this.confirm(chainId as ChainId, 'blocked', [getAddress(address)], 'hold')) {
+        confirmed.push(`${chainId}:${address.toLowerCase()}`);
+      }
+    }
+    return confirmed;
+  }
+
   /**
    * The cache's verdict, confirmed live. `mode: 'hold'` answers "not
    * inactive" when the confirmation cannot be read; `'refuse'` refuses on

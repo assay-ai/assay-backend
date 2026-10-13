@@ -116,4 +116,17 @@ describe('EvmChainStateService — refuse early what the chain would refuse', ()
       errorCode: 'CHAIN_PROGRAM_PAUSED',
     });
   });
+
+  it('lists the cached blocked accounts confirmed live, for the redemption query (E-1)', async () => {
+    const STALE = '0x3333333333333333333333333333333333333333';
+    const { service } = build({ blocked: [BLOCKED, STALE], live: { blocked: [BLOCKED] } });
+    await service.refresh();
+    await expect(service.blockedAccounts(CHAIN)).resolves.toEqual([`${CHAIN}:${BLOCKED}`]);
+    await expect(service.blockedAccounts('eip155:1')).resolves.toEqual([]);
+
+    // An unreadable confirmation leaves the address out: a hold can cost a voucher.
+    const unreadable = build({ blocked: [BLOCKED], live: { fails: true } });
+    await unreadable.service.refresh();
+    await expect(unreadable.service.blockedAccounts(CHAIN)).resolves.toEqual([]);
+  });
 });

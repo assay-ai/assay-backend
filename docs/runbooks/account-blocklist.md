@@ -43,11 +43,21 @@ without its `A-9` register entry is an intervention nobody can audit.
 | New payment intent (every rail) | payer org, payer account, provider org, payout account, voucher delegate | `ACCOUNT_BLOCKED` |
 | Voucher accepted on a call | payer, `payTo`, provider account | `ACCOUNT_BLOCKED` |
 | Voucher seq (`GET /escrow/next-seq`, rail B `PAYMENT_REQUIRED`) | payer org or account | `ACCOUNT_BLOCKED` |
-| Voucher redemption worker | any party blocked: held back, hold kept, resumes after unblock | (log line) |
+| Voucher redemption worker | any party blocked (platform or on-chain blocklist): left out of the queue, hold kept; see below | (one log line per payer) |
 | Routing (`tools/call`, `tools/list`, catalogue quotes) | blocked provider reads as `SUSPENDED`; blocked payout wallet drops that chain | existing routing refusals |
 | Catalogue (`/catalogue/providers`, `/catalogue/tools`) | blocked provider's bindings are hidden | — |
 | Stake intents, stake-authority proof | blocked stake authority | `ACCOUNT_BLOCKED` |
 | Payout-address proof | blocked wallet | `ACCOUNT_BLOCKED` |
+
+**A held voucher does not survive a long block.** The redemption queue leaves every voucher with a
+blocked party (and the same payer's later vouchers) out of its query, so a blocked party never
+delays anyone else's redemption. The chain refuses a voucher `REDEEM_GRACE_SECONDS` (30 min) after
+its expiry, about 35 minutes after the call. **By owner decision, a voucher still held past that
+point is absorbed by the platform**: after the unblock the next pass meets `VoucherExpired`, the
+platform pays the provider out of its own funds (`PROVIDER_CREDIT` with
+`chainTxRef = platform_absorbed:VoucherExpired`, CRITICAL alert `voucher_unredeemable`) and the
+buyer's hold is released, so the buyer is not charged. A block shorter than ~35 minutes resumes
+normally.
 
 **Read-only access stays open for people, by decision.** A blocked person can still sign in and
 read the account's own data, so they can see that, and why, they are blocked. `GET
