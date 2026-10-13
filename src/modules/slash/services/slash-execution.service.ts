@@ -10,6 +10,7 @@ import { isSolanaTransaction } from '@modules/chains/ports/unsigned-chain-transa
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { QueryRunner } from 'typeorm';
 
+import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { FleetSweepEntity } from '@database/postgres/entities/fleet-sweep.entity';
 import { FleetSweepRepository } from '@database/postgres/repositories/fleet-sweep.repository';
@@ -40,7 +41,12 @@ import { SlashCompensationService } from './slash-compensation.service';
 import { SlashPartsService } from './slash-parts.service';
 import { SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
 import { SLASH_PROPOSAL_SUBJECT_TYPE } from '../constants/slash-subject.constants';
-import { ArbitrationOutcome, OUTCOME_CONSEQUENCE, ResolutionKind } from '../domain/arbitration';
+import {
+  ARBITRATION_STATE_MAP,
+  ArbitrationOutcome,
+  OUTCOME_CONSEQUENCE,
+  ResolutionKind,
+} from '../domain/arbitration';
 import {
   ChainFailureKind,
   ChainProposalStatus,
@@ -3075,6 +3081,27 @@ export class SlashExecutionService {
         queryRunner.manager,
       );
       if (affected === 0) continue;
+
+      // Close the objection as a decision would (`writeDisputeDecision`): the
+      // provider's case view reads this row, and a swept case left it
+      // `UNDER_REVIEW` with the outcome it was overturned from (BUG-R11-O1-03).
+      // The second signature goes with it, as on the proposal above.
+      if (candidate.disputeId) {
+        await queryRunner.manager.update(
+          DisputeEntity,
+          { organizationId: candidate.organizationId, id: candidate.disputeId },
+          {
+            state: ARBITRATION_STATE_MAP[sweep.outcome as ArbitrationOutcome],
+            outcome: sweep.outcome,
+            resolutionKind: ResolutionKind.ADJUDICATOR,
+            resolvedAt: now,
+            resolvedBy: operator.subject,
+            secondedByOperatorId: null,
+            secondedAt: null,
+            secondKind: null,
+          },
+        );
+      }
 
       applied.push(candidate);
       await this.lifecycle.appendEvent(queryRunner, {

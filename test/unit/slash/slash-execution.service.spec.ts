@@ -1,5 +1,7 @@
 import { Logger } from '@nestjs/common';
 
+import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
+
 import { ChainErrors } from '@modules/chains/errors/chains.errors';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
@@ -3558,6 +3560,58 @@ describe('the fleet sweep asks for the chain reservation to be released too', ()
 
     expect(sweep).toMatchObject({ status: 'COMPLETED', matchedCount: 2, appliedCount: 2 });
     expect(sweep.completedAt).toBeInstanceOf(Date);
+  });
+
+  /**
+   * BUG-R11-O1-03: a swept case kept its dispute `UNDER_REVIEW` with the
+   * outcome it was overturned from. The sweep closes it as a decision does.
+   */
+  it('closes the dispute of a swept case with the sweep outcome', async () => {
+    const { service, proposals, overrides } = build();
+    proposals.seed(
+      standing({
+        id: 'source',
+        status: 'OVERTURNED',
+        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+        rootCauseKey: 'mapping/v3',
+        proposedAt: RECENTLY,
+        chainStatus: 'CANCELLED',
+      }),
+    );
+    proposals.seed(
+      standing({
+        id: 'disputed',
+        organizationId: 'org_2',
+        status: 'AWAITING_SECOND',
+        rootCauseKey: 'mapping/v3',
+        proposedAt: RECENTLY,
+        disputeId: 'dispute_1',
+      }),
+    );
+    proposals.seed(
+      standing({ id: 'plain', status: 'UPHELD', rootCauseKey: 'mapping/v3', proposedAt: RECENTLY }),
+    );
+
+    await service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
+      defectKey: 'mapping/v3',
+      lookbackHours: 72,
+      reasonCode: 'S11_PLATFORM_DEFECT',
+      note: 'the v3 binding dropped a field on every tool it touched',
+    });
+
+    const disputeWrites = overrides.updates.filter(({ entity }) => entity === DisputeEntity);
+    expect(disputeWrites).toHaveLength(1);
+    expect(disputeWrites[0].criteria).toEqual({ organizationId: 'org_2', id: 'dispute_1' });
+    expect(disputeWrites[0].patch).toMatchObject({
+      state: 'UPHELD',
+      outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+      resolutionKind: ResolutionKind.ADJUDICATOR,
+      resolvedBy: OPERATOR.subject,
+      secondedByOperatorId: null,
+      secondedAt: null,
+      secondKind: null,
+    });
+    expect(disputeWrites[0].patch.resolvedAt).toBeInstanceOf(Date);
   });
 });
 
