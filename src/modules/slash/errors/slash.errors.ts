@@ -39,6 +39,8 @@ export enum SlashErrorCode {
   SLASH_BENEFICIARY_UNSUPPORTED = 'SLASH_BENEFICIARY_UNSUPPORTED',
   /** A dispute-upgrade batch (D-19) the chain would revert: one entry per refused id. */
   SLASH_CHAIN_BATCH_REFUSED = 'SLASH_CHAIN_BATCH_REFUSED',
+  SLASH_DISPUTE_WON_ON_CHAIN = 'SLASH_DISPUTE_WON_ON_CHAIN',
+  SLASH_BENEFICIARY_EVIDENCE_REFUSED = 'SLASH_BENEFICIARY_EVIDENCE_REFUSED',
 }
 
 export type SlashErrorCodesArePrefixed = AssertDomainErrorCodes<'SLASH', `${SlashErrorCode}`>;
@@ -439,6 +441,32 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
    * `SlashNotPending`, `DisputeWindowClosed`, `SlashNotDisputed`,
    * `ArbiterIsVerifier`, `DisputeTimedOut`, `NoSuchRecord`, `DuplicateId`).
    */
+  /**
+   * Follow-up B7: the provider won an on-chain dispute over these calls, so
+   * the incident is never proposed again — not under a new request id, and not
+   * as a new case over the same window.
+   */
+  disputeWonOnChain: {
+    code: SlashErrorCode.SLASH_DISPUTE_WON_ON_CHAIN,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The provider won the on-chain dispute of case ${context?.proposalId ?? ''}` +
+      `${context?.windowId ? ` (window ${context.windowId})` : ''}; these calls cannot be ` +
+      'proposed again',
+  },
+  /**
+   * Follow-up C5: a part's beneficiary is not the payer of the failed calls'
+   * vouchers, or its share (the contract's agent bps of the part) is more than
+   * that payer paid for them. Nothing was signed; the case stays PROPOSING and
+   * a `BENEFICIARY_REFUSED` timeline entry names every part that failed.
+   */
+  beneficiaryEvidenceRefused: {
+    code: SlashErrorCode.SLASH_BENEFICIARY_EVIDENCE_REFUSED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Slash case ${context?.proposalId ?? ''}: refused before signing — ` +
+      `${context?.reason ?? 'a beneficiary does not match the paid vouchers'}`,
+  },
   chainBatchRefused: {
     code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,
     statusCode: 422,

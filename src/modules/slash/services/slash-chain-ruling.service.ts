@@ -221,6 +221,15 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     });
 
     const ruledForProvider = event.reason === 'WITHDRAWN';
+    // The provider won its dispute (B7): the record was cancelled while it
+    // stood DISPUTED, or expired unruled. Remembered on the case so it is
+    // never proposed again.
+    if ((wasDisputed || event.reason === 'DISPUTE_UNRESOLVED') && !proposal.chainDisputeWonAt) {
+      await this.proposals.update(
+        { organizationId: proposal.organizationId, id: proposal.id },
+        { chainDisputeWonAt: event.cancelledAt },
+      );
+    }
     await this.timeline(proposal, event.cancelledAt, 'CHAIN_CANCELLED', {
       summary: ruledForProvider
         ? wasDisputed

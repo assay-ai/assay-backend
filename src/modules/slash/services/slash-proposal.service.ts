@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto';
 
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { QueryRunner } from 'typeorm';
+import { IsNull, Not, QueryRunner } from 'typeorm';
 
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { SlaStrikeEntity } from '@database/postgres/entities/sla-strike.entity';
@@ -142,6 +142,18 @@ export class SlashProposalService {
     });
     if (existing) {
       throw SlashErrors.proposalAlreadyExists({ verdictId: input.verdictId });
+    }
+    // B7: the provider won an on-chain dispute over this window's calls; a new
+    // case over the same calls would be the same incident under a new id.
+    if (input.windowId) {
+      const won = await this.proposals.findOneBy({
+        organizationId: input.organizationId,
+        windowId: input.windowId,
+        chainDisputeWonAt: Not(IsNull()),
+      });
+      if (won) {
+        throw SlashErrors.disputeWonOnChain({ proposalId: won.id, windowId: input.windowId });
+      }
     }
 
     const now = new Date();

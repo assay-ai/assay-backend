@@ -353,3 +353,27 @@ describe('deriveChainRequestId', () => {
     );
   });
 });
+
+describe('openFromVerdict — B7', () => {
+  it('refuses a new case over the calls of a window whose on-chain dispute the provider won', async () => {
+    const { proposals, service } = build();
+    proposals.seed({
+      id: 'won',
+      organizationId: 'org_1',
+      windowId: 'window-1',
+      chainDisputeWonAt: new Date('2026-10-01T00:00:00Z'),
+    } as never);
+    await expect(
+      service.openFromVerdict({
+        organizationId: 'org_1',
+        providerId: 'provider-1',
+        bindingId: 'binding-1',
+        toolId: 'tool-1',
+        verdictId: 'verdict-new',
+        windowId: 'window-1',
+        penaltyAmount: '1000000',
+        assetId: 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3',
+      }),
+    ).rejects.toMatchObject({ errorCode: 'SLASH_DISPUTE_WON_ON_CHAIN' });
+  });
+});

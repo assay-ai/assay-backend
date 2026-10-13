@@ -291,6 +291,15 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   @Column({ name: 'chain_disputed_parts', type: 'integer', default: 0 })
   chainDisputedParts: number;
 
+  /**
+   * When the provider WON an on-chain dispute of this case (follow-up B7): a
+   * record cancelled while `DISPUTED`, or expired as `DisputeUnresolved`. Set,
+   * the case is never re-proposed and its window's calls are never put in a
+   * new case.
+   */
+  @Column({ name: 'chain_dispute_won_at', type: 'timestamptz', nullable: true })
+  chainDisputeWonAt: Date | null;
+
   @Column({ name: 'chain_claimed_at', type: 'timestamptz', nullable: true })
   chainClaimedAt: Date | null;
 

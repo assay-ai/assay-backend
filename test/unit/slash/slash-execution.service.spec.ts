@@ -3229,6 +3229,29 @@ describe('reproposeAtRevisedPenalty', () => {
     expect(saved.chainExecutableAt).toEqual(new Date('2026-08-13T09:15:00Z'));
   });
 
+  it('B7: never re-proposes a case whose on-chain dispute the provider won', async () => {
+    const { service, proposals, executor, events } = build();
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    proposals.seed(
+      standing({
+        id: 'p1',
+        status: 'UPHELD',
+        chainEpoch: 0,
+        penaltyAmount: '400000',
+        chainStatus: 'CANCELLED',
+        chainDisputeWonAt: hoursFromNow(-2),
+      }),
+    );
+
+    await service.reproposeAtRevisedPenalty('org_1', 'p1');
+
+    const saved = proposals.rows.get('p1')!;
+    expect(saved.chainEpoch).toBe(0);
+    expect(saved.chainRequestId).toBe(requestIdOf('p1'));
+    expect(executor.proposed).toHaveLength(0);
+    expect(events.kinds()).toContain('REPROPOSAL_REFUSED');
+  });
+
   it('says so loudly when the fresh epoch id is spent as well', async () => {
     // `proposeOne` returns the status it mirrored. Ignoring a non-PENDING
     // answer would leave the case believing it has a live proposal when the
