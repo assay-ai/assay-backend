@@ -8,6 +8,7 @@ import {
 } from '@modules/chains/ports/caip.types';
 import { isSolanaTransaction } from '@modules/chains/ports/unsigned-chain-transaction';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { QueryRunner } from 'typeorm';
 
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { FleetSweepEntity } from '@database/postgres/entities/fleet-sweep.entity';
@@ -16,6 +17,7 @@ import { ProviderChainEnrolmentRepository } from '@database/postgres/repositorie
 import {
   CHAIN_PROPOSABLE_STATUSES,
   CLOSED_WITHOUT_PENALTY_STATUSES,
+  QueuedProposalRow,
   SlashProposalRepository,
 } from '@database/postgres/repositories/slash-proposal.repository';
 import {
@@ -2928,26 +2930,54 @@ export class SlashExecutionService {
       throw SlashErrors.outcomeNotSweepable({ outcome });
     }
 
+    // Review M-2: the sweep matches on `root_cause_key`, so it may only carry
+    // the source case's own root cause, never a free-text key.
+    if (!source.rootCauseKey || input.defectKey !== source.rootCauseKey) {
+      throw SlashErrors.sweepDefectKeyMismatch({
+        defectKey: input.defectKey,
+        rootCauseKey: source.rootCauseKey,
+      });
+    }
+
     const to = new Date();
     const from = new Date(to.getTime() - input.lookbackHours * 60 * 60 * 1000);
 
-    return this.overrides
-      .perform<FleetSweepEntity>(
-        {
-          code: 'S-11',
-          actor: operator,
-          approver,
-          targetType: 'slash_proposal',
-          targetId: sourceProposalId,
-          // Platform-wide: a sweep has no single subject tenant, which is exactly
-          // the case the nullable column exists for.
-          organizationId: null,
-          reasonCode: input.reasonCode,
-          reason: input.note,
-          requestId: requestId ?? null,
-        },
-        async (queryRunner) => {
-          const sweep = queryRunner.manager.create(FleetSweepEntity, {
+    // Matched before the override, so the authority check sees the money the
+    // sweep can drop: the summed penalties of every matched case.
+    const matched = (
+      await this.proposals.findSweepCandidates(
+        input.defectKey,
+        from,
+        to,
+        this.config.sweepBatchSize,
+      )
+    ).filter((candidate) => candidate.id !== sourceProposalId);
+    const matchedMinor = matched
+      .reduce((sum, candidate) => sum + BigInt(candidate.penaltyAmount), 0n)
+      .toString();
+
+    const { sweep, applied } = await this.overrides.perform<{
+      sweep: FleetSweepEntity;
+      applied: QueuedProposalRow[];
+    }>(
+      {
+        code: 'S-11',
+        actor: operator,
+        approver,
+        targetType: 'slash_proposal',
+        targetId: sourceProposalId,
+        // Platform-wide: a sweep has no single subject tenant, which is exactly
+        // the case the nullable column exists for.
+        organizationId: null,
+        reasonCode: input.reasonCode,
+        reason: input.note,
+        requestId: requestId ?? null,
+        amountMinor: matchedMinor,
+      },
+      async (queryRunner) => {
+        const saved = await queryRunner.manager.save(
+          FleetSweepEntity,
+          queryRunner.manager.create(FleetSweepEntity, {
             openedByOperatorId: operator.operatorId,
             sourceProposalId,
             outcome,
@@ -2955,46 +2985,71 @@ export class SlashExecutionService {
             windowFrom: from,
             windowTo: to,
             status: 'OPEN',
-          });
-          const saved = await queryRunner.manager.save(FleetSweepEntity, sweep);
+          }),
+        );
+        // Every case in this one transaction, with the register entry: the
+        // sweep lands whole or not at all (review M-2). Before, each case was
+        // its own write after the entry had committed, and one refused row
+        // left the earlier cases overturned and the sweep OPEN.
+        const swept = await this.applySweep(queryRunner, saved, operator, matched);
+        await queryRunner.manager.update(
+          FleetSweepEntity,
+          { id: saved.id },
+          {
+            status: 'COMPLETED',
+            matchedCount: matched.length,
+            appliedCount: swept.length,
+            completedAt: new Date(),
+          },
+        );
 
-          return {
-            value: saved,
-            before: { sweep: null },
-            after: {
-              sweepId: saved.id,
-              outcome,
-              defectKey: input.defectKey,
-              windowFrom: from.toISOString(),
-              windowTo: to.toISOString(),
-            },
-          };
-        },
-      )
-      .then(async (sweep) => {
-        // Applied outside the override transaction, deliberately. A sweep may
-        // touch hundreds of cases and each of those is its own decision with its
-        // own notification; holding one transaction open across all of them would
-        // make a slow RPC roll back the record that the sweep was authorised.
-        // The register entry says a sweep was opened, which is the act a human
-        // performed; the sweep's own row carries what it then reached.
-        await this.applySweep(sweep);
-        return sweep;
-      });
-  }
-
-  private async applySweep(sweep: FleetSweepEntity): Promise<void> {
-    const candidates = await this.proposals.findSweepCandidates(
-      sweep.defectKey,
-      sweep.windowFrom,
-      sweep.windowTo,
-      this.config.sweepBatchSize,
+        return {
+          value: { sweep: saved, applied: swept },
+          before: {
+            sweep: null,
+            cases: matched.map((candidate) => ({ id: candidate.id, status: candidate.status })),
+          },
+          after: {
+            sweepId: saved.id,
+            outcome,
+            defectKey: input.defectKey,
+            windowFrom: from.toISOString(),
+            windowTo: to.toISOString(),
+            matchedPenaltyMinor: matchedMinor,
+            appliedProposalIds: swept.map((candidate) => candidate.id),
+          },
+        };
+      },
     );
 
-    let applied = 0;
-    for (const candidate of candidates) {
-      if (candidate.id === sweep.sourceProposalId) continue;
+    this.logger.log(
+      `fleet sweep ${sweep.id} matched ${matched.length} case(s), applied to ${applied.length}`,
+    );
+    // After the commit: telling the provider and asking for the on-chain
+    // cancel. Neither may undo the sweep. A lost cancel request is repaired by
+    // the lifecycle job's pass over closed cases.
+    for (const candidate of applied) {
+      await this.afterSweepApplied(sweep, candidate);
+    }
+    return sweep;
+  }
 
+  /**
+   * Overturn each matched case still in a sweepable status, inside the
+   * override's transaction. The sweep's actor is recorded as the case's
+   * decider (the sweep resolved it, not the adjudicator who decided it before),
+   * and an earlier second signature is cleared: it countersigned a decision
+   * that no longer stands, and the sweep's own approver is on the register.
+   */
+  private async applySweep(
+    queryRunner: QueryRunner,
+    sweep: FleetSweepEntity,
+    operator: OperatorSession,
+    candidates: readonly QueuedProposalRow[],
+  ): Promise<QueuedProposalRow[]> {
+    const applied: QueuedProposalRow[] = [];
+    const now = new Date();
+    for (const candidate of candidates) {
       const affected = await this.proposals.transitionIfIn(
         candidate.organizationId,
         candidate.id,
@@ -3009,27 +3064,41 @@ export class SlashExecutionService {
           status: SlashProposalStatus.OVERTURNED,
           outcome: sweep.outcome,
           resolutionKind: ResolutionKind.ADJUDICATOR,
-          resolvedAt: new Date(),
+          resolvedAt: now,
           sweepId: sweep.id,
           countsAsFalsePositive: true,
+          decidedByOperatorId: operator.operatorId,
+          secondedByOperatorId: null,
+          secondedAt: null,
+          secondKind: null,
         },
+        queryRunner.manager,
       );
       if (affected === 0) continue;
 
-      applied += 1;
-      await this.lifecycle.appendEventDirect({
+      applied.push(candidate);
+      await this.lifecycle.appendEvent(queryRunner, {
         organizationId: candidate.organizationId,
         proposalId: candidate.id,
-        occurredAt: new Date(),
+        occurredAt: now,
         kind: 'SWEEP_APPLIED',
-        actorType: 'system',
-        actorId: null,
+        actorType: 'operator',
+        actorId: operator.subject,
         summary:
           `Cancelled by a fleet sweep: the same defect was found on another binding and this ` +
           `case was reached without you having to ask.`,
         detail: { sweepId: sweep.id, outcome: sweep.outcome, defectKey: sweep.defectKey },
       });
+    }
+    return applied;
+  }
 
+  /** The side effects of one swept case, after the sweep has committed. Never throws. */
+  private async afterSweepApplied(
+    sweep: FleetSweepEntity,
+    candidate: QueuedProposalRow,
+  ): Promise<void> {
+    try {
       await this.notifications.notify({
         organizationId: candidate.organizationId,
         event: NotificationEvent.PROVIDER_SLASH_DECIDED,
@@ -3042,28 +3111,26 @@ export class SlashExecutionService {
         dedupeKey: `${candidate.id}:decided`,
         payload: { proposalId: candidate.id, sweepId: sweep.id, outcome: sweep.outcome },
       });
-
-      // The fourth and sharpest of the places a case stops standing.
-      //
-      // This sweep is the one that most needs it: its predicate carries **no
-      // clock at all** and it overturns from `UPHELD`, so it routinely reaches
-      // cases whose on-chain record has been executable for days. A provider
-      // swept clear of a defect that was never theirs would otherwise keep a
-      // `Pending` record that any stranger can `execute_slash` — the platform
-      // having decided, in writing, that they owe nothing.
-      //
-      // This only *records* the request — `cancel_slash` is the
-      // admin's signature, and `sweepAdminCancels` is what carries it through
-      // (or expires the record after seven days if nobody signs). So it works
-      // identically in the API pod, where the verifier signer is out of reach:
-      // there is no signing on this path at all any more.
-      await this.requestAdminCancel(candidate.organizationId, candidate.id, 'FLEET_SWEEP');
+    } catch (error) {
+      this.logger.error(
+        `fleet sweep ${sweep.id}: case ${candidate.id} was not notified`,
+        error instanceof Error ? error.stack : String(error),
+      );
     }
 
-    await this.sweeps.complete(sweep.id, candidates.length, applied);
-    this.logger.log(
-      `fleet sweep ${sweep.id} matched ${candidates.length} case(s), applied to ${applied}`,
-    );
+    // The fourth and sharpest of the places a case stops standing: the sweep
+    // overturns from `UPHELD`, so it reaches cases whose on-chain record may
+    // already be executable. This only RECORDS the request; `cancel_slash` is
+    // the admin's signature, carried through by `sweepAdminCancels`.
+    try {
+      await this.requestAdminCancel(candidate.organizationId, candidate.id, 'FLEET_SWEEP');
+    } catch (error) {
+      this.logger.error(
+        `fleet sweep ${sweep.id}: the admin cancel for case ${candidate.id} was not recorded; ` +
+          `the closed-case repair pass will ask again`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 }
 

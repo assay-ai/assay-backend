@@ -382,6 +382,11 @@ describe('operator case actions, against a real database', () => {
       });
       await arbitration.second(lead, seeded.organizationId, seeded.proposalId, 'SIGNED', NOTE);
       expect((await proposalRow(seeded.proposalId)).status).toBe('OVERTURNED');
+      // A sweep may only carry the source's own root cause (review M-2).
+      await dataSource.query(`UPDATE slash_proposals SET root_cause_key = $2 WHERE id = $1`, [
+        seeded.proposalId,
+        SWEEP.defectKey,
+      ]);
       return seeded;
     }
 

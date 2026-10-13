@@ -183,6 +183,7 @@ class FakeOverrideLog {
           id: 'sweep_1',
           ...saved,
         }),
+        update: async () => ({ affected: 1 }),
       },
     };
     this.lastManager = queryRunner.manager;

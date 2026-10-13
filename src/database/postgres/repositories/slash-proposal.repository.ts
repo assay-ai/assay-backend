@@ -142,8 +142,11 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     id: string,
     expectedFrom: readonly string[],
     patch: Partial<SlashProposalEntity> & { status: string },
+    // A caller's transaction, when the change must commit with something else.
+    manager: EntityManager = this.manager,
   ): Promise<number> {
-    const result = await this.createQueryBuilder('proposal')
+    const result = await manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
       .update()
       .set(patch)
       .where('organization_id = :organizationId', { organizationId })

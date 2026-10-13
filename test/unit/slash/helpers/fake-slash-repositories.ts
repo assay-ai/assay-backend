@@ -320,7 +320,7 @@ export class FakeSlashProposals {
     from: Date,
     to: Date,
     limit: number,
-  ): Promise<Array<{ organizationId: string; id: string }>> {
+  ): Promise<Array<{ organizationId: string; id: string; status: string; penaltyAmount: string }>> {
     return [...this.rows.values()]
       .filter(
         (row) =>
@@ -331,7 +331,12 @@ export class FakeSlashProposals {
       )
       .sort((a, b) => a.proposedAt.getTime() - b.proposedAt.getTime())
       .slice(0, limit)
-      .map((row) => ({ organizationId: row.organizationId, id: row.id }));
+      .map((row) => ({
+        organizationId: row.organizationId,
+        id: row.id,
+        status: row.status,
+        penaltyAmount: row.penaltyAmount,
+      }));
   }
 
   /**
