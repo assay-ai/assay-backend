@@ -507,7 +507,8 @@ export class EvmSlashExecutor
   /**
    * `disputeSlashBatch(ids)` for the provider's own stake wallet, every id
    * pre-checked against `_dispute`'s rule: the record exists, names this
-   * provider, is `Pending`, and its dispute window (`executableAt − now`) is
+   * provider, is `Pending`, was never disputed before (`disputedAt == 0`), and its
+   * dispute window (`executableAt − now`) is
    * still open. Neither the pause nor the blocklist closes this door, so a
    * blocked provider gets an intent too.
    */
@@ -530,6 +531,16 @@ export class EvmSlashExecutor
           id,
           'SlashNotPending',
           `the record is ${slashStatusFromEvm(record.status)}, and only a PENDING record can be disputed`,
+        );
+      }
+      // A record may be disputed once: after an uphold it is Pending again
+      // with `disputedAt` kept, and the contract refuses a second dispute,
+      // which would revert the whole atomic batch (audit E-9).
+      if (record.disputedAt > 0n) {
+        return refusal(
+          id,
+          'SlashAlreadyDisputed',
+          `the record was already disputed at ${secondsToDate(record.disputedAt).toISOString()}`,
         );
       }
       if (nowSeconds >= record.executableAt) {
