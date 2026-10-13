@@ -399,6 +399,12 @@ describe('chainErrorName — EVM program errors', () => {
     );
   });
 
+  it('C2: reads the "window full, retry later" revert as WAIT, never VOID', () => {
+    expect(outcome.classifyChainFailure(evmRevert('SlashWindowNotDrained'))).toBe(
+      outcome.ChainFailureKind.WAIT,
+    );
+  });
+
   it('treats an unrecognised revert as a program that never spoke', () => {
     expect(outcome.chainErrorName(evmRevert('UNKNOWN_REVERT:0xdeadbeef'))).toBeNull();
     expect(outcome.classifyChainFailure(evmRevert('UNKNOWN_REVERT:none'))).toBe(

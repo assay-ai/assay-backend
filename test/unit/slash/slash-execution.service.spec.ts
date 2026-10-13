@@ -2103,6 +2103,26 @@ describe('executeDue', () => {
     expect(saved.chainClaimedAt).toBeNull();
   });
 
+  it('C2: parks a "window full, retry later" EVM refusal at UPHELD, keeping the record', async () => {
+    const { service, proposals, executor } = build();
+    proposals.seed(executable({ id: 'p1' }));
+    executor.executeImpl = async () => {
+      throw ChainErrors.transactionFailed({
+        instruction: 'executeSlash',
+        reason: 'SlashWindowNotDrained',
+        customErrorCode: null,
+        programErrorName: 'SlashWindowNotDrained',
+      });
+    };
+
+    expect(await service.executeDue(NOW)).toEqual({ executed: 0, voided: 0, failed: 1 });
+    const saved = proposals.rows.get('p1')!;
+    expect(saved.status).toBe(SlashProposalStatus.UPHELD);
+    expect(saved.chainStatus).toBe('PENDING');
+    expect(saved.chainLastError).toBe('SlashWindowNotDrained');
+    expect(saved.chainClaimedAt).toBeNull();
+  });
+
   it('leaves the case EXECUTING when the program never spoke', async () => {
     // The distinction this whole path turns on. A NAMED custom error means the
     // transaction was processed and reverted — nothing moved, and the case is
