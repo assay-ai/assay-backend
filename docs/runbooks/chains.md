@@ -163,12 +163,31 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   shows each chain's flag, blocked count and `lagSeconds`; `stale: true` (more
   than `EVM_CHAIN_STATE_MAX_LAG_MS` behind) also logs a WARN and raises
   `evm_chain_state_lagging`. A stale cache never refuses on its own: every
-  refusal is confirmed with a live read. When deploying after the upgrade,
-  set `EVM_CHAIN_STATE_FROM_BLOCK` to the upgrade's block so no `BlockedSet`
-  is missed (the reconcile only re-checks addresses it has seen).
-- **CRITICAL `evm_config_lever_pulled`** on `ArbiterSet`, `SlashDelaySet` or
-  `VerifierRegistered`: confirm with the admin that it was intended; if not,
-  treat the admin key as stolen (owner `setAdmin`, then revoke).
+  refusal is confirmed with a live read.
+  - **Confirmations.** The index stops `EVM_CHAIN_STATE_CONFIRMATIONS` blocks
+    (default 12) behind the head, so a reorged-out event is never written and a
+    reorged-in one is not skipped. `lagSeconds` therefore never reaches 0.
+  - **Where a new chain starts.** With no cursor yet, the indexer starts at
+    `EVM_CHAIN_STATE_FROM_BLOCK` (JSON, `{"eip155:46630": <block>}`), else at
+    the deployment's recorded `disputeUpgradeBlock`. With neither, it reads
+    `blocked()` live for every address the platform knows on that chain
+    (buyers' escrows, providers' payout and stake-authority accounts, agent
+    credentials' delegates), writes the blocked ones, starts at the safe head
+    and raises WARN `evm_chain_state_unknown_start`. An address the platform
+    has never seen is then only learned from a later `BlockedSet`, so set
+    `EVM_CHAIN_STATE_FROM_BLOCK` to the dispute upgrade's block when you know
+    it. The reconcile re-checks only addresses already in the table.
+- **CRITICAL `evm_config_lever_pulled`** on `AdminSet`, `ConfigUpdated`
+  (treasury, redeemer, bps, caps, minimum stake), `VerifierRevokedEvent`,
+  `ArbiterSet`, `SlashDelaySet` or `VerifierRegistered`: confirm with the admin
+  that it was intended; if not, treat the admin key as stolen (owner
+  `setAdmin`, then revoke). A new treasury redirects 30% of every slash.
+  **CRITICAL `evm_proxy_upgraded`** on an ERC-1967 `Upgraded` of the Config,
+  Stake or Escrow proxy: only the owner key can do this; confirm it, and record
+  the new implementation (`escrowImplementation`).
+  **WARN `evm_config_pause_toggled`** on `PauseToggled`, and
+  **WARN `evm_admin_unblocked_address`** on `BlockedSet(false)` (only the admin
+  can unblock — the dangerous direction): confirm with the admin.
   **WARN `evm_arbiter_blocked_address`**: the arbiter blocked an address;
   confirm with the arbiter.
 - **Disputes.** A provider's `disputeSlash` shows on the case as
@@ -177,6 +196,12 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   backend builds the unsigned `upholdSlashBatch` / `cancelSlashBatch` /
   `setBlocked`, the arbiter's wallet signs. An unruled dispute is expired by
   the backend at `disputedAt + 30 d`.
+  - A dispute freezes only the part it names: the case's other parts keep
+    executing (`chainStatus` stays `PENDING`, `chainDisputedParts` counts the
+    disputed ones; `DISPUTED` means every live part is disputed).
+  - An arbiter's `cancelSlash(Batch)` (`SlashCancelled`) is mirrored at once:
+    the part is `CANCELLED`, and the case closes as soon as nothing of it
+    stands and nothing executed.
 - **On the upgrade itself**, update `EVM_DEPLOYMENTS[...].escrowImplementation`
   in the same change: the vault-control check stops the reconciler on an
   implementation nobody recorded.

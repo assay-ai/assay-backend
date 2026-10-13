@@ -49,6 +49,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
   };
   const events: { kind: string }[] = [];
   const filed: string[] = [];
+  const closed: string[] = [];
   const service = new SlashChainRulingService(
     {
       findOneByChainRequestId: async (id: string) => (parts.has(id) ? { ...parts.get(id) } : null),
@@ -73,8 +74,15 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
         return proposal;
       },
     } as never,
+    {
+      closeCancelledOnChain: async (_case: unknown, because: string) => {
+        closed.push(because);
+        proposal.chainStatus = 'CANCELLED';
+        proposal.status = 'CANCELLED';
+      },
+    } as never,
   );
-  return { service, parts, proposal, events, filed };
+  return { service, parts, proposal, events, filed, closed };
 }
 
 const disputed = (requestId: string, at = '2026-10-15T00:00:00Z') => ({
@@ -161,5 +169,52 @@ describe('SlashChainRulingService', () => {
       status: 'UPHELD',
     });
     expect(events.filter((event) => event.kind === 'CHAIN_UPHELD')).toHaveLength(2);
+  });
+
+  describe('SlashCancelled (audit E-6)', () => {
+    const cancelled = (requestId: string, reason = 'WITHDRAWN' as const) => ({
+      chainId: CHAIN,
+      requestId,
+      reason,
+      cancelledAt: new Date('2026-10-16T00:00:00Z'),
+      transactionHash: '0xdef',
+    });
+
+    it('closes the case at once when the arbiter cancels its last standing parts', async () => {
+      const { service, parts, proposal, events, closed } = build('UPHELD');
+      await service.recordDisputed(disputed(ID_A));
+      await service.recordDisputed(disputed(ID_B));
+      expect(proposal.chainStatus).toBe('DISPUTED');
+
+      await expect(service.recordCancelled(cancelled(ID_A))).resolves.toBe(true);
+      expect(parts.get(ID_A)).toMatchObject({ chainStatus: 'CANCELLED' });
+      expect(closed).toEqual([]);
+      expect(proposal).toMatchObject({ chainStatus: 'DISPUTED', chainDisputedParts: 1 });
+
+      await service.recordCancelled(cancelled(ID_B));
+      expect(closed).toEqual(['the arbiter ruled for the provider on chain (cancelSlash)']);
+      expect(proposal).toMatchObject({ chainStatus: 'CANCELLED', chainDisputedParts: 0 });
+      expect(events.filter((event) => event.kind === 'CHAIN_CANCELLED')).toHaveLength(2);
+
+      // The watcher re-reads a range: nothing twice.
+      await service.recordCancelled(cancelled(ID_B));
+      expect(closed).toHaveLength(1);
+      expect(events.filter((event) => event.kind === 'CHAIN_CANCELLED')).toHaveLength(2);
+    });
+
+    it('leaves the case executing when another part still stands', async () => {
+      const { service, parts, proposal, closed } = build('UPHELD');
+      await service.recordDisputed(disputed(ID_A));
+      await service.recordCancelled(cancelled(ID_A));
+      expect(parts.get(ID_A)).toMatchObject({ chainStatus: 'CANCELLED' });
+      expect(parts.get(ID_B)).toMatchObject({ chainStatus: 'PENDING' });
+      expect(proposal).toMatchObject({ chainStatus: 'PENDING', chainDisputedParts: 0 });
+      expect(closed).toEqual([]);
+    });
+
+    it('answers false for a record nobody planned', async () => {
+      const { service } = build();
+      await expect(service.recordCancelled(cancelled('c'.repeat(64)))).resolves.toBe(false);
+    });
   });
 });

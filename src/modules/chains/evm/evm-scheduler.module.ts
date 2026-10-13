@@ -17,6 +17,7 @@ import { EvmRelayerFloatMonitor } from './evm-relayer-float.monitor';
 import { EvmSlashProposalWatcher } from './evm-slash-proposal.watcher';
 import { EvmModule, readPositiveInt } from './evm.module';
 import {
+  DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS,
   EVM_CHAIN_STATE_INDEXER_CONFIG,
   EvmChainStateIndexer,
   EvmChainStateIndexerConfig,
@@ -52,6 +53,19 @@ function readFromBlocks(raw: string | undefined): ReadonlyMap<ChainId, bigint> {
       return [chainId as ChainId, BigInt(block as number)];
     }),
   );
+}
+
+/** `EVM_CHAIN_STATE_CONFIRMATIONS`: a whole number of blocks, default 12. */
+function readConfirmations(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 0 || value > 10_000) {
+    throw ChainErrors.configValueInvalid({
+      variable: 'EVM_CHAIN_STATE_CONFIRMATIONS',
+      accepted: 'a whole number of blocks from 0 to 10000',
+    });
+  }
+  return value;
 }
 
 /**
@@ -103,6 +117,7 @@ function readFromBlocks(raw: string | undefined): ReadonlyMap<ChainId, bigint> {
           'EVM_CHAIN_STATE_MAX_LAG_MS',
         ),
         fromBlock: readFromBlocks(config.get<string>('EVM_CHAIN_STATE_FROM_BLOCK')),
+        confirmations: readConfirmations(config.get<string>('EVM_CHAIN_STATE_CONFIRMATIONS')),
         now: () => Date.now(),
       }),
       inject: [ConfigService],

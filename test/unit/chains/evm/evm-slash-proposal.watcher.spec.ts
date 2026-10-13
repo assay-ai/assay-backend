@@ -216,6 +216,36 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
       ]);
     });
 
+    it('AUDIT E-6: hands an arbiter cancel (SlashCancelled) to the slash domain, by reason name', async () => {
+      const seen: unknown[] = [];
+      const rulings = {
+        recordDisputed: async () => true,
+        recordUpheld: async () => true,
+        recordCancelled: async (event: unknown) => (seen.push(event), true),
+      };
+      const { watcher, alerts } = build({
+        head: 500n,
+        logs: [
+          {
+            eventName: 'SlashCancelled',
+            args: { requestId: `0x${KNOWN}`, reason: 0, cancelledAt: 1_801_000_000n },
+            transactionHash: `0x${'4'.repeat(64)}`,
+            blockNumber: 103n,
+          },
+        ],
+        rulings,
+      });
+      await watcher.check();
+      expect(alerts).toEqual([]);
+      expect(seen).toEqual([
+        expect.objectContaining({
+          requestId: KNOWN,
+          reason: 'WITHDRAWN',
+          cancelledAt: new Date(1_801_000_000_000),
+        }),
+      ]);
+    });
+
     it('does not advance the cursor when the mirror fails, so the range is re-read', async () => {
       const rulings = {
         recordDisputed: async () => {

@@ -26,10 +26,24 @@ export interface SlashChainUpheldEvent {
   readonly transactionHash: string | null;
 }
 
+/**
+ * `SlashCancelled`: an arbiter's or admin's `cancelSlash(Batch)` (a ruling for
+ * the provider), or an `expireSlash` by anyone. `reason` is the contract's
+ * `CancelReason`, by name.
+ */
+export interface SlashChainCancelledEvent {
+  readonly chainId: ChainId;
+  readonly requestId: string;
+  readonly reason: 'WITHDRAWN' | 'EXPIRED' | 'VERIFIER_UNAVAILABLE' | 'DISPUTE_UNRESOLVED';
+  readonly cancelledAt: Date;
+  readonly transactionHash: string | null;
+}
+
 export interface SlashChainRulingsPort {
   /** Returns whether the request id belongs to a case this platform planned. */
   recordDisputed(event: SlashChainDisputedEvent): Promise<boolean>;
   recordUpheld(event: SlashChainUpheldEvent): Promise<boolean>;
+  recordCancelled(event: SlashChainCancelledEvent): Promise<boolean>;
 }
 
 export const SLASH_CHAIN_RULINGS = 'SLASH_CHAIN_RULINGS';

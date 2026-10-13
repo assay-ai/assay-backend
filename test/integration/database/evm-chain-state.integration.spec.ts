@@ -124,4 +124,21 @@ describe('EvmChainStateRepository, against a real database', () => {
     );
     for (const { def } of constraint) expect(def).toContain('DISPUTED');
   });
+
+  it('reads the known EVM accounts of a chain and writes live corrections (audit E-11)', async () => {
+    // The query runs against every table it names; an empty schema answers [].
+    await expect(repository.findKnownChainAccounts(CHAIN)).resolves.toEqual([]);
+    const fresh = '0x7777777777777777777777777777777777777777';
+    await repository.applyCorrections(CHAIN, [
+      {
+        address: fresh,
+        blocked: true,
+        setBy: null,
+        blockNumber: null,
+        logIndex: null,
+        transactionHash: null,
+      },
+    ]);
+    expect((await repository.findBlocked()).map((row) => row.address)).toContain(fresh);
+  });
 });
