@@ -75,6 +75,22 @@ export enum PaymentErrorCode {
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
 
+/**
+ * ` (maxPerWindow: 14353 left, in the payment asset's smallest units)`. The
+ * `allowed` context stays the bare atomic string for machines; the sentence is
+ * what a person reads, and a bare number there was read as dollars.
+ */
+function limitDetail(context?: Record<string, any>): string {
+  if (!context?.limit) return '';
+  if (context.allowed === undefined) return ` (${context.limit})`;
+  const amount = /^\d+$/.test(String(context.allowed));
+  const left = amount && context.limit === 'maxPerWindow' ? ' left' : '';
+  return (
+    ` (${context.limit}: ${context.allowed}${left}` +
+    `${amount ? `, in the payment asset's smallest units` : ''})`
+  );
+}
+
 export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
   paymentIntentNotFound: {
     code: PaymentErrorCode.PAYMENT_INTENT_NOT_FOUND,
@@ -141,9 +157,7 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     statusCode: 403,
     message: (context?: Record<string, any>) =>
       `This voucher exceeds what the payer authorised its delegate to spend` +
-      `${context?.limit ? ` (${context.limit}` : ''}` +
-      `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
-      `${context?.limit ? ')' : ''}; nothing was charged`,
+      `${limitDetail(context)}; nothing was charged`,
   },
   /**
    * A voucher the payer's OWN escrow limits would refuse at redemption: above
@@ -159,9 +173,7 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     statusCode: 403,
     message: (context?: Record<string, any>) =>
       `This voucher exceeds the payer's own escrow limit` +
-      `${context?.limit ? ` (${context.limit}` : ''}` +
-      `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
-      `${context?.limit ? ')' : ''}; nothing was charged`,
+      `${limitDetail(context)}; nothing was charged`,
   },
   /**
    * The payer is relaying a change that tightens its caps (its escrow limits,
