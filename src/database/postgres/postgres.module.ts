@@ -78,6 +78,8 @@ import { SlaWindowRepository } from './repositories/sla-window.repository';
 import { SlaWindowCallRepository } from './repositories/sla-window-call.repository';
 import { SlaStrikeRepository } from './repositories/sla-strike.repository';
 import { OperatorEntity } from './entities/operator.entity';
+import { AccountBlockEntity } from './entities/account-block.entity';
+import { AccountBlockRepository } from './repositories/account-block.repository';
 import { OperatorRepository } from './repositories/operator.repository';
 // Due process for taking money.
 import { SlashProposalEntity } from './entities/slash-proposal.entity';
@@ -147,6 +149,7 @@ const entities = [
   OperatorEntity,
   OrganizationEntity,
   AgentEntity,
+  AccountBlockEntity,
 ];
 const repositories = [
   PostRepository,
@@ -195,6 +198,7 @@ const repositories = [
   OperatorRepository,
   OrganizationRepository,
   AgentRepository,
+  AccountBlockRepository,
   SlashCaseReadRepository,
   PlatformMetricsRepository,
 ];

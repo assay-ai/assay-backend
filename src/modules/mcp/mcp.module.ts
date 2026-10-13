@@ -7,6 +7,9 @@ import { PaymentModule } from '@modules/payment/payment.module';
 import { SpendPolicyModule } from '@modules/spend-policy/spend-policy.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { AuthModule } from '@modules/auth/auth.module';
+import { BlocklistModule } from '@modules/blocklist/blocklist.module';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
+import { BlocklistSessionSource } from '@modules/blocklist/services/blocklist-session.source';
 import { parseSessionSourceMode } from '@modules/auth/domain/session-source-mode';
 import { createSessionSource } from '@modules/auth/services/composite-mcp-session.source';
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
@@ -62,6 +65,8 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
 @Module({
   imports: [
     AuthModule,
+    // The blocklist that wraps `MCP_SESSION_SOURCE` below.
+    BlocklistModule,
     // `ENABLED_CHAINS` alone: `McpToolCallService` and
     // `McpCatalogueService` name the deployment's chain set when they build a
     // `RoutingContext`. The router will not infer one.
@@ -98,17 +103,24 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
         configSource: ConfigMcpSessionSource,
         dbSource: DbCredentialMcpSessionSource,
         privySource: PrivyMcpSessionSource,
+        blocklist: AccountBlocklistService,
       ) =>
-        createSessionSource(parseSessionSourceMode(config.get<string>('auth.sessionSource')), {
-          config: configSource,
-          db: dbSource,
-          privy: privySource,
-        }),
+        // The blocklist wraps whichever source is selected, so no source has
+        // to remember to check it — see `BlocklistSessionSource`.
+        new BlocklistSessionSource(
+          createSessionSource(parseSessionSourceMode(config.get<string>('auth.sessionSource')), {
+            config: configSource,
+            db: dbSource,
+            privy: privySource,
+          }),
+          blocklist,
+        ),
       inject: [
         ConfigService,
         ConfigMcpSessionSource,
         DbCredentialMcpSessionSource,
         PrivyMcpSessionSource,
+        AccountBlocklistService,
       ],
     },
 

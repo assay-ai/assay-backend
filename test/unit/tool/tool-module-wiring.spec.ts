@@ -20,6 +20,7 @@ import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invo
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 import { ROUTER_CONFIG, ROUTING_RANDOM, RouterConfig } from '@modules/tool/services/routing.config';
 import { ToolModule } from '@modules/tool/tool.module';
+import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
@@ -88,6 +89,8 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
       useValue: { hasGranted: async () => false, grantedWeiSince: async () => 0n },
     },
     { provide: ProviderRepository, useValue: { find: async () => [] } },
+    // `BlocklistModule`, imported by `ProviderModule` and `PaymentModule`.
+    { provide: AccountBlockRepository, useValue: { findActive: async () => [] } },
     // `DbStakeGraceSource` reads the open grace rows behind
     // `STAKE_GRACE_SOURCE`, so the router's graph now names a fourth
     // `@Global` `PostgresModule` class. Same stub, same claim.
@@ -128,6 +131,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
     BindingVersionRepository,
     EvmGasGrantRepository,
     ProviderRepository,
+    AccountBlockRepository,
     ProviderStakeGraceRepository,
     ProviderChainEnrolmentRepository,
     ALERT_PORT,

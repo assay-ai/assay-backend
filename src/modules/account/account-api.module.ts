@@ -1,13 +1,16 @@
 import { Module } from '@nestjs/common';
 
+import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { McpModule } from '@modules/mcp/mcp.module';
 
 import { AccountModule } from './account.module';
+import { AccountBlockStatusController } from './controllers/account-block-status.controller';
 import { AgentCredentialsController } from './controllers/agent-credentials.controller';
 import { AgentDelegateController } from './controllers/agent-delegate.controller';
 import { AgentsController } from './controllers/agents.controller';
 import { AuditLogController } from './controllers/audit-log.controller';
 import { NotificationsController } from './controllers/notifications.controller';
+import { AccountBlockStatusService } from './services/account-block-status.service';
 
 /**
  * API-side account module — imported only by `AppApiModule`.
@@ -17,14 +20,16 @@ import { NotificationsController } from './controllers/notifications.controller'
  * `ledger-api.module.ts`, `verification-api.module.ts`, `payment-api.module.ts`.
  */
 @Module({
-  imports: [AccountModule, McpModule],
+  imports: [AccountModule, McpModule, BlocklistModule],
   controllers: [
     NotificationsController,
     AuditLogController,
     AgentsController,
     AgentCredentialsController,
     AgentDelegateController,
+    AccountBlockStatusController,
   ],
+  providers: [AccountBlockStatusService],
   exports: [AccountModule],
 })
 export class AccountApiModule {}

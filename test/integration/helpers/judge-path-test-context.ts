@@ -70,6 +70,7 @@ import {
   ensureTestDatabase,
   testConnectionOptions,
 } from './test-database';
+import { noBlocks } from '../../unit/helpers/blocklist';
 
 /**
  * `PaymentIntentService.secureFunds` calls the escrow spend gate
@@ -205,7 +206,12 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
   );
 
   const paymentIntents = new PaymentIntentRepository(dataSource);
-  const intents = new PaymentIntentService(paymentIntents, ledger, DISABLED_ESCROW_GATE);
+  const intents = new PaymentIntentService(
+    paymentIntents,
+    ledger,
+    DISABLED_ESCROW_GATE,
+    noBlocks(),
+  );
   const records = new VerificationRecordRepository(dataSource);
   const packs = new EvidencePackRepository(dataSource);
   const bodies = new EvidenceBodyRepository(dataSource);

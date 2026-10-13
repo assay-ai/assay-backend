@@ -16,6 +16,7 @@ import {
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { noBlocks } from '../helpers/blocklist';
 
 /**
  * The `COMMIT` branch of `PaymentIntentService.resolve()` — the one guard that
@@ -134,6 +135,7 @@ function harness() {
     intents as unknown as PaymentIntentRepository,
     ledger as unknown as LedgerService,
     escrowGate as unknown as EscrowSpendGateService,
+    noBlocks(),
   );
 
   const organizationId = randomUUID();

@@ -3,6 +3,8 @@ import type { Request, Response } from 'express';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
+import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
+
 import { MCP_BEARER_PREFIX } from '../constants/mcp.constants';
 import { MCP_SESSION_SOURCE, McpSessionPort } from '../ports/mcp-session.port';
 import { McpServerFactory } from '../services/mcp-server.factory';
@@ -51,6 +53,10 @@ export class McpController {
   @All()
   async handle(@Req() request: Request, @Res() response: Response): Promise<void> {
     const session = await this.sessions.resolve(bearerToken(request));
+    // A blocked person's session exists so the dashboard can read; nothing on
+    // this endpoint is a read of the account's own data — `tools/list` is the
+    // shop and `tools/call` spends — so it is refused whole.
+    if (session.blocked) throw sessionBlockedError(session.blocked);
 
     const server = this.servers.create(session);
     const transport = new StreamableHTTPServerTransport({

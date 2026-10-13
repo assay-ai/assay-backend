@@ -4,6 +4,7 @@ import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.const
 import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { noBlocks } from '../helpers/blocklist';
 
 const ORGANIZATION_ID = '11111111-1111-4111-8111-111111111111';
 const ACCOUNT: AccountId = toAccountId(
@@ -39,7 +40,7 @@ function buildService(
 
   return {
     escrows,
-    service: new EscrowSeqService(escrows as never, cache as never),
+    service: new EscrowSeqService(escrows as never, cache as never, noBlocks()),
   };
 }
 
@@ -241,7 +242,11 @@ describe('regression: seq-gap lockout (review S2-2)', () => {
 
   it('recovers after 1,000,001 unpaid allocations instead of refusing for ever', async () => {
     const repo = fakeRepo();
-    const svc = new EscrowSeqService(repo as never, { get: jest.fn(), set: jest.fn() } as never);
+    const svc = new EscrowSeqService(
+      repo as never,
+      { get: jest.fn(), set: jest.fn() } as never,
+      noBlocks(),
+    );
     // 1,000,001 unpaid allocations through the controller path (fast-forwarded).
     await svc.allocate(ORGANIZATION_ID, ACCOUNT);
     repo.jump(1_000_000n);
@@ -255,7 +260,11 @@ describe('regression: seq-gap lockout (review S2-2)', () => {
 
   it('never goes back to or below a recorded seq, nor the chain’s seqHigh', async () => {
     const repo = fakeRepo([40n, 41n]);
-    const svc = new EscrowSeqService(repo as never, { get: jest.fn(), set: jest.fn() } as never);
+    const svc = new EscrowSeqService(
+      repo as never,
+      { get: jest.fn(), set: jest.fn() } as never,
+      noBlocks(),
+    );
     repo.jump(2_000_000n);
 
     await expect(svc.allocate(ORGANIZATION_ID, ACCOUNT, 10n)).resolves.toMatchObject({ seq: '42' });
@@ -264,6 +273,7 @@ describe('regression: seq-gap lockout (review S2-2)', () => {
     const svc2 = new EscrowSeqService(
       chainAhead as never,
       { get: jest.fn(), set: jest.fn() } as never,
+      noBlocks(),
     );
     chainAhead.jump(3_000_000n);
     await expect(svc2.allocate(ORGANIZATION_ID, ACCOUNT, 500n)).resolves.toMatchObject({

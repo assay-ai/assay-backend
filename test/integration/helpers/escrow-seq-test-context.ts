@@ -36,6 +36,7 @@ import {
   testConnectionOptions,
   BuyerEscrowAccountColumnsSlice1759300000000,
 } from './test-database';
+import { noBlocks } from '../../unit/helpers/blocklist';
 
 loadEnv();
 
@@ -146,7 +147,7 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
 
   const escrows = new BuyerEscrowRepository(dataSource);
   const alerts = new RecordingAlertPort();
-  const service = new EscrowSeqService(escrows, new CacheService(redis));
+  const service = new EscrowSeqService(escrows, new CacheService(redis), noBlocks());
 
   const context: EscrowSeqTestContext = {
     service,

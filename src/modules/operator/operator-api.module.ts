@@ -1,15 +1,18 @@
 import { Module } from '@nestjs/common';
 
+import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
 
+import { OperatorBlocksController } from './controllers/operator-blocks.controller';
 import { OperatorCasesController } from './controllers/operator-cases.controller';
 import { OperatorReferenceController } from './controllers/operator-reference.controller';
 import { OperatorOverrideLogController } from './controllers/operator-override-log.controller';
 import { OperatorProvidersController } from './controllers/operator-providers.controller';
 import { OperatorModule } from './operator.module';
 import { AdjudicationQueueService } from './services/adjudication-queue.service';
+import { OperatorAccountBlockService } from './services/operator-account-block.service';
 import { OperatorCaseService } from './services/operator-case.service';
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
 import { PlatformHealthService } from './services/platform-health.service';
@@ -42,8 +45,9 @@ import { OperatorReferenceService } from './services/operator-reference.service'
   // panel — the on-chain allowlist is the only authority on which keys the
   // settlement program will accept, so the panel reads it rather than the
   // local custody table alone.
-  imports: [OperatorModule, SlashModule, ProviderModule, ChainsModule],
+  imports: [OperatorModule, SlashModule, ProviderModule, ChainsModule, BlocklistModule],
   controllers: [
+    OperatorBlocksController,
     OperatorCasesController,
     OperatorOverrideLogController,
     OperatorProvidersController,
@@ -51,6 +55,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
   ],
   providers: [
     AdjudicationQueueService,
+    OperatorAccountBlockService,
     OperatorCaseService,
     // `V-7`. `ProviderRepository` needs no import here — `PostgresModule` is
     // `@Global()`, and `OverrideLogService` already comes in with

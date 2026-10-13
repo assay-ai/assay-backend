@@ -29,6 +29,8 @@ import { ListQueryDto } from '@shared/api/dto/list-query.dto';
 import { ArbitrationOutcome, DisputeClaimType } from '@modules/slash/domain/arbitration';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
 
+import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+
 import { ApprovalMode, OperatorRole, OverrideFamily } from '../domain/override-register';
 
 /** Who is holding the token, as the console renders them. */
@@ -692,4 +694,140 @@ export class VerifyProviderBodyDto {
   @IsString()
   @MaxLength(128)
   ticketRef?: string;
+}
+
+// ── A-9 / A-10 · The account blocklist ─────────────────────────────────────
+
+/**
+ * `A-9` — block an organization or a wallet.
+ *
+ * The subject is validated and normalised by the service rather than here, so
+ * the refusal for "not a uuid" and "not a CAIP-10 account" is the same
+ * catalogued `OPERATOR_BLOCK_SUBJECT_INVALID` whichever kind was named.
+ */
+export class CreateAccountBlockBodyDto {
+  @ApiProperty({ enum: BlockSubjectKind })
+  @IsEnum(BlockSubjectKind)
+  subjectKind: BlockSubjectKind;
+
+  @ApiProperty({
+    description:
+      'An organization uuid, or a CAIP-10 account (e.g. `eip155:8453:0xabc…`). A wallet is ' +
+      'blocked on every chain of its namespace.',
+  })
+  @Trimmed()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(256)
+  subject: string;
+
+  @ApiProperty({ description: 'e.g. LEAKED_KEY, FRAUD, LEGAL_HOLD' })
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiProperty({ minLength: 20, description: 'Internal. Never shown to the blocked account.' })
+  @Trimmed()
+  @IsString()
+  @Length(20, 4096)
+  note: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+/** `A-10` — lift a block. Two-person: the checker's token goes in `X-Operator-Approver`. */
+export class UnblockAccountBodyDto {
+  @ApiProperty()
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 4096)
+  note: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+export class ListAccountBlocksQueryDto extends ListQueryDto {
+  @ApiPropertyOptional({ enum: BlockSubjectKind })
+  @IsOptional()
+  @IsEnum(BlockSubjectKind)
+  subjectKind?: BlockSubjectKind;
+
+  @ApiPropertyOptional({
+    description:
+      'An organization uuid or a CAIP-10 account; matched the way enforcement matches it, so a ' +
+      'wallet finds its block on any chain of the namespace',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  subject?: string;
+
+  @ApiPropertyOptional({ description: '`true` standing blocks only, `false` lifted ones only' })
+  @IsOptional()
+  @QueryBoolean()
+  @IsBoolean()
+  active?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  reasonCode?: string;
+}
+
+export class AccountBlockDto {
+  @ApiProperty()
+  id: string;
+
+  @ApiProperty({ enum: BlockSubjectKind })
+  subjectKind: BlockSubjectKind;
+
+  @ApiProperty({ description: 'Normalised: uuid lower-case, EVM address lower-case' })
+  subject: string;
+
+  @ApiProperty({ description: 'What enforcement matches on: the uuid, or `namespace:address`' })
+  subjectKey: string;
+
+  @ApiProperty()
+  active: boolean;
+
+  @ApiProperty()
+  reasonCode: string;
+
+  @ApiProperty()
+  note: string;
+
+  @ApiProperty({ nullable: true, type: String })
+  ticketRef: string | null;
+
+  @ApiProperty({ description: 'Operator subject' })
+  blockedBy: string;
+
+  @ApiProperty()
+  blockedAt: Date;
+
+  @ApiProperty({ nullable: true, type: String })
+  unblockedBy: string | null;
+
+  @ApiProperty({ nullable: true, type: String })
+  unblockApprovedBy: string | null;
+
+  @ApiProperty({ nullable: true, type: Date })
+  unblockedAt: Date | null;
+
+  @ApiProperty({ nullable: true, type: String })
+  unblockNote: string | null;
 }

@@ -4,6 +4,8 @@ import {
   PaymentIntentRepository,
   RedeemableIntent,
 } from '@database/postgres/repositories/payment-intent.repository';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
 import { LedgerAccountId, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
@@ -89,6 +91,7 @@ export class VoucherRedemptionService {
     private readonly ledger: LedgerService,
     @Inject(VOUCHER_REDEEMER) private readonly redeemer: VoucherRedeemerPort,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
+    private readonly blocklist: AccountBlocklistService,
     /** Injected so a test can age a hold without waiting 37 minutes. */
     @Optional() private readonly now: () => number = () => Date.now(),
   ) {}
@@ -128,6 +131,10 @@ export class VoucherRedemptionService {
     }
 
     for (const row of pending) {
+      if (this.heldByBlock(row)) {
+        blocked.add(row.agentAccount);
+        continue;
+      }
       if (blocked.has(row.agentAccount)) {
         this.logger.log(
           `Intent ${row.id} (seq ${row.voucherSeq}) is held back this pass: an earlier voucher ` +
@@ -202,6 +209,10 @@ export class VoucherRedemptionService {
       const carried: RedeemableIntent[] = [];
 
       for (const row of queue) {
+        if (this.heldByBlock(row)) {
+          blocked.add(row.agentAccount);
+          continue;
+        }
         if (blocked.has(row.agentAccount)) {
           this.logger.log(
             `Intent ${row.id} (seq ${row.voucherSeq}) is held back this pass: an earlier voucher ` +
@@ -288,6 +299,37 @@ export class VoucherRedemptionService {
    * Shared by the per-row pass and the batch pass so the two cannot disagree
    * about what is redeemable or about which bytes go on the wire.
    */
+  /**
+   * Whether a party to this voucher is on the account blocklist — the payer's
+   * organization or account, the provider or its payout account, or the
+   * delegate that signed.
+   *
+   * A held row is not refused, released or absorbed: it keeps its hold and is
+   * found again on the next pass, so lifting the block resumes it. The payer
+   * is added to `blocked` by the caller, so a later seq of theirs is not
+   * redeemed over it — the same rule as a voucher that did not land.
+   */
+  private heldByBlock(row: RedeemableIntent): boolean {
+    const blocked = this.blocklist.firstBlocked([
+      {
+        role: BlockedRole.ORGANIZATION,
+        kind: BlockSubjectKind.ORGANIZATION,
+        subject: row.organizationId,
+      },
+      { role: BlockedRole.PAYER, kind: BlockSubjectKind.WALLET, subject: row.agentAccount },
+      { role: BlockedRole.PROVIDER, kind: BlockSubjectKind.ORGANIZATION, subject: row.providerId },
+      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: row.providerAccount },
+      { role: BlockedRole.DELEGATE, kind: BlockSubjectKind.WALLET, subject: row.voucherDelegate },
+    ]);
+    if (!blocked) return false;
+    this.logger.warn(
+      `Intent ${row.id} (seq ${row.voucherSeq}) is held back: its ${blocked.role.toLowerCase()} ` +
+        `is blocked (block ${blocked.hit.blockId}). It keeps its hold and resumes when the ` +
+        `block is lifted.`,
+    );
+    return true;
+  }
+
   private toRequest(
     row: RedeemableIntent,
   ): { request: RedeemVoucherRequest; issuedAt: number } | null {

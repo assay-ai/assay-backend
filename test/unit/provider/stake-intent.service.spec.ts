@@ -48,6 +48,11 @@ import { ProviderStakeIntentService } from '@modules/provider/services/provider-
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { deployment as evmDeployment } from '../chains/evm/evm-fixtures';
 import { expectSettlementAccountList } from '../chains/solana/helpers/instruction-accounts';
+import { AccountErrorCode } from '@modules/account/errors/account.errors';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
+
+import { blocklistOf, noBlocks } from '../helpers/blocklist';
 
 /**
  * The four stake intents, from an HTTP-level request to the
@@ -247,6 +252,7 @@ async function build(options: {
   readonly stake?: StakeAccountFields | null;
   readonly tokenBalance?: bigint | null;
   readonly lamports?: bigint;
+  readonly blocklist?: AccountBlocklistService;
 }) {
   const rpc = new FakeRpc();
   const [configPda] = await findConfigPda({ programAddress: PROGRAM_ID as Address });
@@ -277,6 +283,7 @@ async function build(options: {
     ),
     new SolanaSettlementStakeReader(rpc, PROGRAM_ID),
     new SolanaStakeIntentBuilder(rpc, PROGRAM_ID),
+    options.blocklist ?? noBlocks(),
   );
 
   return { rpc, service };
@@ -841,6 +848,7 @@ describe('ProviderStakeIntentService — on eip155', () => {
       enrolments,
       new EvmStakeReader(clients, deployments, { now: () => Date.now(), paramsTtlMs: 60_000 }),
       builder,
+      noBlocks(),
     );
   }
 
@@ -878,4 +886,22 @@ describe('ProviderStakeIntentService — on eip155', () => {
       ProviderErrorCode.PROVIDER_STAKE_ACCOUNT_NOT_OPEN,
     );
   });
+});
+
+describe('ProviderStakeIntentService, with the stake authority blocked', () => {
+  it.each([StakeIntentKind.DEPOSIT, StakeIntentKind.WITHDRAW])(
+    'builds no %s intent for a blocked stake authority',
+    async (kind) => {
+      const { service, rpc } = await build({
+        blocklist: blocklistOf({ kind: BlockSubjectKind.WALLET, subject: STAKE_AUTHORITY }),
+      });
+      const readsBefore = rpc.accounts.size;
+
+      await expect(service.createIntent(PROVIDER_ID, kind, '1000000')).rejects.toMatchObject({
+        errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
+        context: { role: BlockedRole.STAKE_AUTHORITY },
+      });
+      expect(rpc.accounts.size).toBe(readsBefore);
+    },
+  );
 });

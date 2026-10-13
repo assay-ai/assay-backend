@@ -21,6 +21,10 @@ export enum OperatorErrorCode {
   OPERATOR_SECOND_APPROVER_REQUIRED = 'OPERATOR_SECOND_APPROVER_REQUIRED',
   OPERATOR_APPROVER_ROLE_REQUIRED = 'OPERATOR_APPROVER_ROLE_REQUIRED',
   OPERATOR_APPROVER_AUTHORITY_EXCEEDED = 'OPERATOR_APPROVER_AUTHORITY_EXCEEDED',
+  OPERATOR_BLOCK_SUBJECT_INVALID = 'OPERATOR_BLOCK_SUBJECT_INVALID',
+  OPERATOR_BLOCK_NOT_FOUND = 'OPERATOR_BLOCK_NOT_FOUND',
+  OPERATOR_BLOCK_ALREADY_ACTIVE = 'OPERATOR_BLOCK_ALREADY_ACTIVE',
+  OPERATOR_BLOCK_ALREADY_LIFTED = 'OPERATOR_BLOCK_ALREADY_LIFTED',
 }
 
 export type OperatorErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -165,5 +169,34 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
       `${context?.code ? ` (${context.code})` : ''}` +
       `${context?.limit ? ` of ${context.limit}` : ''}` +
       `${context?.requested ? `, requested ${context.requested}` : ''}`,
+  },
+  // ── A-9 / A-10 · The account blocklist ──
+
+  /** Not a uuid for an organization, or not a CAIP-10 account for a wallet. */
+  blockSubjectInvalid: {
+    code: OperatorErrorCode.OPERATOR_BLOCK_SUBJECT_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Not a valid ${context?.subjectKind === 'WALLET' ? 'CAIP-10 account' : 'organization id'}` +
+      `${context?.subject ? `: ${context.subject}` : ''}`,
+  },
+  blockNotFound: {
+    code: OperatorErrorCode.OPERATOR_BLOCK_NOT_FOUND,
+    statusCode: 404,
+    message: (context?: Record<string, any>) =>
+      `No block${context?.blockId ? ` with id ${context.blockId}` : ''}`,
+  },
+  /** One standing block per subject. The existing one is named so it can be read. */
+  blockAlreadyActive: {
+    code: OperatorErrorCode.OPERATOR_BLOCK_ALREADY_ACTIVE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This subject is already blocked${context?.blockId ? ` (block ${context.blockId})` : ''}`,
+  },
+  blockAlreadyLifted: {
+    code: OperatorErrorCode.OPERATOR_BLOCK_ALREADY_LIFTED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This block was already lifted${context?.unblockedAt ? ` at ${context.unblockedAt}` : ''}`,
   },
 });

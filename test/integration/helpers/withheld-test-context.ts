@@ -51,6 +51,7 @@ import {
   ensureTestDatabase,
   testConnectionOptions,
 } from './test-database';
+import { noBlocks } from '../../unit/helpers/blocklist';
 
 loadEnv();
 
@@ -198,7 +199,7 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
   );
 
   const repository = new PaymentIntentRepository(dataSource);
-  const intents = new PaymentIntentService(repository, ledger, DISABLED_ESCROW_GATE);
+  const intents = new PaymentIntentService(repository, ledger, DISABLED_ESCROW_GATE, noBlocks());
 
   const context: WithheldTestContext = {
     intents,

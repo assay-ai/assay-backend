@@ -19,6 +19,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import { deployment, EvmSigner, generateSigner } from '../chains/evm/evm-fixtures';
 import { FakeEscrowSeqService, InMemoryIntentWriter } from './helpers/voucher-harness';
+import { noBlocks } from '../helpers/blocklist';
 
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
 const USDG = ASSET_IDS.USDG_ROBINHOOD_TESTNET;
@@ -118,6 +119,7 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
       intents as unknown as PaymentIntentService,
       new ChainAdapterRegistry([adapter], [CHAIN]),
       seqs as unknown as EscrowSeqService,
+      noBlocks(),
     );
     payer = generateSigner(CHAIN);
     delegate = generateSigner(CHAIN);

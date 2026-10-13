@@ -8,6 +8,7 @@ import {
   SlaWindowRepository,
 } from '@database/postgres/repositories/sla-window.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
@@ -81,10 +82,24 @@ export class CatalogueService {
     @Inject(CHAIN_ENROLMENT_SOURCE) private readonly enrolments: ChainEnrolmentPort,
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
+    private readonly blocklist: AccountBlocklistService,
   ) {}
 
-  async listProviders(): Promise<CatalogueProviderListDto> {
+  /**
+   * Every `ACTIVE` binding of a provider that is not blocked.
+   *
+   * The catalogue reads bindings directly rather than through routing, so the
+   * blocklist is applied here: a blocked provider's bindings are absent from
+   * every list and count, exactly as if it had paused them all. Its own page
+   * still answers, with no tools — see {@link getProvider}.
+   */
+  private async listedBindings(): Promise<ToolBindingEntity[]> {
     const bindings = await this.bindings.findActiveBindings();
+    return bindings.filter((binding) => !this.blocklist.organizationBlock(binding.organizationId));
+  }
+
+  async listProviders(): Promise<CatalogueProviderListDto> {
+    const bindings = await this.listedBindings();
     const byProvider = groupBy(bindings, (binding) => binding.organizationId);
     const providerIds = [...byProvider.keys()];
 
@@ -134,7 +149,7 @@ export class CatalogueService {
 
     if (!row) throw ProviderErrors.providerNotFound({ providerId });
 
-    const all = await this.bindings.findActiveBindings();
+    const all = await this.listedBindings();
     const own = all.filter((binding) => binding.organizationId === providerId);
 
     const [stakes, quality, tools] = await Promise.all([
@@ -179,7 +194,7 @@ export class CatalogueService {
    */
   async listTools(): Promise<CatalogueToolListDto> {
     const [bindings, contracts] = await Promise.all([
-      this.bindings.findActiveBindings(),
+      this.listedBindings(),
       this.catalogue.listTools(),
     ]);
 

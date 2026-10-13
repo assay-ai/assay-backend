@@ -21,6 +21,11 @@ import { ProviderPayoutAddressService } from '@modules/provider/services/provide
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { AccountErrorCode } from '@modules/account/errors/account.errors';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
+
+import { blocklistOf, noBlocks } from '../helpers/blocklist';
 
 const SOLANA_MAINNET = CHAIN_IDS.SOLANA_MAINNET;
 const ORG = 'org-11111111-1111-4111-8111-111111111111';
@@ -193,6 +198,7 @@ function build(
     provider?: Record<string, unknown> | null;
     challenge?: Record<string, unknown> | null;
     transactionOptions?: Parameters<typeof fakeManager>[0];
+    blocklist?: AccountBlocklistService;
   } = {},
 ) {
   const providers = {
@@ -230,6 +236,7 @@ function build(
     chains,
     config,
     dataSource,
+    options.blocklist ?? noBlocks(),
   );
   return { service, providers, challenges, chains, dataSource, tx };
 }
@@ -502,5 +509,24 @@ describe('ProviderPayoutAddressService.prove', () => {
       () => service.prove(session(), { challengeId: row.id, signature: voucherSignature }),
       ProviderErrorCode.PROVIDER_PAYOUT_SIGNATURE_INVALID,
     );
+  });
+});
+
+describe('ProviderPayoutAddressService.prove, with the wallet blocked', () => {
+  it('refuses to make a blocked wallet a payout address, before checking the signature', async () => {
+    const w = wallet();
+    const row = challengeRow({ accountId: w.account });
+    const { service, tx } = build({
+      challenge: row,
+      blocklist: blocklistOf({ kind: BlockSubjectKind.WALLET, subject: w.account }),
+    });
+
+    await expect(
+      service.prove(session(), { challengeId: row.id, signature: 'not-checked' }),
+    ).rejects.toMatchObject({
+      errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
+      context: { role: BlockedRole.PAYEE },
+    });
+    expect(tx.calls).toHaveLength(0);
   });
 });

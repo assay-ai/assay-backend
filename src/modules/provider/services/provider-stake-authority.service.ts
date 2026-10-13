@@ -11,6 +11,8 @@ import { ProviderPayoutChallengeEntity } from '@database/postgres/entities/provi
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { ProviderPayoutChallengeRepository } from '@database/postgres/repositories/provider-payout-challenge.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { AccountId, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
@@ -255,6 +257,7 @@ export class ProviderStakeAuthorityService {
     private readonly config: ConfigService,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     @Inject(ONCHAIN_STAKE_READER) private readonly stakeReader: OnChainStakeReaderPort,
+    private readonly blocklist: AccountBlocklistService,
   ) {}
 
   /**
@@ -354,6 +357,10 @@ export class ProviderStakeAuthorityService {
     // bytes reproduced are exactly the ones `row.message` holds. Nothing here
     // is rebuilt from the request, which carries only an id and a signature.
     const account = row.accountId as AccountId;
+    // A blocked wallet cannot become a stake authority.
+    this.blocklist.assertNotBlocked([
+      { role: BlockedRole.STAKE_AUTHORITY, kind: BlockSubjectKind.WALLET, subject: account },
+    ]);
     const adapter = this.chains.resolve(chainIdOf(account));
     const challenge: StakeAuthorityChallenge = {
       account,

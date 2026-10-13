@@ -2,6 +2,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { In } from 'typeorm';
 
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 
 import {
@@ -66,6 +67,7 @@ export class DbProviderRegistry implements ProviderRegistryPort {
   constructor(
     private readonly providers: ProviderRepository,
     @Inject(CHAIN_ENROLMENT_SOURCE) private readonly enrolments: ChainEnrolmentPort,
+    private readonly blocklist: AccountBlocklistService,
   ) {}
 
   async findRoutingStates(
@@ -103,6 +105,12 @@ export class DbProviderRegistry implements ProviderRegistryPort {
       // status of its own rather than reusing the provider's.
       if (enrolment.status !== ChainEnrolmentStatus.ACTIVE) continue;
 
+      // A blocked payout wallet is not an address anybody may be paid at, so
+      // that chain leaves the routable map exactly as an unproved one would.
+      // The provider still serves its other chains, unless the organization
+      // itself is blocked — below.
+      if (this.blocklist.walletBlock(enrolment.payoutAccountId)) continue;
+
       const byChain = payoutsByProvider.get(enrolment.providerId) ?? new Map<ChainId, AccountId>();
       byChain.set(enrolment.chainId, enrolment.payoutAccountId);
       payoutsByProvider.set(enrolment.providerId, byChain);
@@ -111,7 +119,13 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     for (const row of rows) {
       found.set(row.organizationId, {
         providerId: row.organizationId,
-        status: row.status as ProviderStatus,
+        // A blocked provider reads as `SUSPENDED` to routing, so every path
+        // that routes — `tools/call`, `tools/list` and the catalogue's quotes —
+        // refuses it with the reason it already gives a suspended one, and no
+        // router code has to know the blocklist exists.
+        status: this.blocklist.organizationBlock(row.organizationId)
+          ? ProviderStatus.SUSPENDED
+          : (row.status as ProviderStatus),
         tier: row.tier as ProviderTier,
         stats: NO_OBSERVATIONS,
         // Empty when this provider has enrolled nowhere, which
