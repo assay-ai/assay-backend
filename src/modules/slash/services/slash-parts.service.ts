@@ -603,12 +603,14 @@ export class SlashPartsService {
       proposal.chainEpoch,
     );
     const executed = parts.filter((part) => part.chainStatus === 'EXECUTED');
-    // A DISPUTED part (D-19) holds the case exactly like a pending one: it is
-    // a standing reservation that may still be upheld and paid.
-    const pending = parts.filter(
-      (part) => part.chainStatus === 'PENDING' || part.chainStatus === 'DISPUTED',
-    );
+    const pending = parts.filter((part) => part.chainStatus === 'PENDING');
     const livePending = pending.filter((part) => !deadParts.has(part.id));
+    // A DISPUTED part (D-19) is frozen on its own (audit E-4): it is a standing
+    // reservation the arbiter may still uphold, but it does not hold the
+    // case's other parts. Once they have executed, the case closes on what
+    // moved and the disputed part is left to `sweepStrandedParts`, which pays
+    // it after an uphold or expires it after the 30-day timeout.
+    const disputed = parts.filter((part) => part.chainStatus === 'DISPUTED');
 
     if (livePending.length > 0) {
       if (executed.length > 0) {
@@ -651,6 +653,25 @@ export class SlashPartsService {
           );
         }
       }
+    }
+
+    if (executed.length === 0 && disputed.length > 0) {
+      // Nothing executed and only disputed parts stand: the case waits for the
+      // arbiter. Transient, so the reconciler reads the aggregate (DISPUTED).
+      return {
+        ok: false,
+        error: ChainErrors.transactionFailed({
+          instruction: 'executeSlash',
+          reason: `case ${proposal.id}: every live part is disputed on chain`,
+          customErrorCode: null,
+        }),
+      };
+    }
+    if (disputed.length > 0) {
+      this.logger.log(
+        `slash case ${proposal.id}: ${executed.length} part(s) executed; ${disputed.length} ` +
+          `disputed part(s) wait for the arbiter on their own`,
+      );
     }
 
     if (executed.length === 0) {

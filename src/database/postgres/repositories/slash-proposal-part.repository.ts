@@ -33,9 +33,16 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
    * The part behind one on-chain request id, across every tenant — for the
    * chain watcher, which reads `SlashDisputed` / `SlashUpheld` and has no
    * tenant. The id is unique (`uq_slash_proposal_parts_request`).
+   *
+   * Through the entity manager, like {@link findByChainRequestIds}: the scoped
+   * `findOne` refuses a read with no `organizationId`, which made every
+   * `SlashDisputed` / `SlashUpheld` mirror throw.
    */
   async findOneByChainRequestId(chainRequestId: string): Promise<SlashProposalPartEntity | null> {
-    return this.findOne({ where: { chainRequestId } });
+    return this.manager
+      .createQueryBuilder(SlashProposalPartEntity, 'part')
+      .where('part.chain_request_id = :chainRequestId', { chainRequestId })
+      .getOne();
   }
 
   /**

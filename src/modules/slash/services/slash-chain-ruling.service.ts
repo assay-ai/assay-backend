@@ -17,17 +17,20 @@ import { SlashProposalService } from './slash-proposal.service';
 /**
  * The dispute upgrade's two events (assay-evm D-19), mirrored onto the case.
  *
- * - **`SlashDisputed`** — the provider froze a record. Its part becomes
- *   `DISPUTED` with the chain's `disputedAt`; the case's mirror follows
- *   (`PENDING` → `DISPUTED`, which takes it out of the execute sweep), and a
- *   case still `PROPOSED` is moved into review exactly as an in-app
- *   objection would (`ArbitrationService.fileDisputeFromChain`). A case the
- *   platform already decided keeps its decision; the console shows it
- *   "disputed on chain", waiting for the arbiter.
+ * - **`SlashDisputed`** — the provider froze a record. ONLY its part becomes
+ *   `DISPUTED`, with the chain's `disputedAt` (audit E-4: a dispute on one
+ *   part must not freeze the others, which would age out of their 7-day
+ *   execution window). The case's mirror stays `PENDING` while any live part
+ *   is pending — those parts keep executing — and becomes `DISPUTED` only
+ *   when every live part is; `chain_disputed_parts` counts the disputed ones,
+ *   so a partly disputed case reads honestly. A case still `PROPOSED` is moved
+ *   into review exactly as an in-app objection would
+ *   (`ArbitrationService.fileDisputeFromChain`). A case the platform already
+ *   decided keeps its decision; the console shows the part "disputed on
+ *   chain", waiting for the arbiter.
  * - **`SlashUpheld`** — the arbiter ruled against the provider. The part goes
  *   back to `PENDING` at the `executableAt` the EVENT carries (never assumed
- *   to be "now"), and the case's mirror back to `PENDING` once none of its
- *   parts is still disputed.
+ *   to be "now"), and the case's mirror and count follow.
  *
  * A case whose cancel is already requested (`CANCEL_REQUESTED`) keeps that
  * mirror: `cancelSlash` accepts a disputed record, and only the 30-day clock
@@ -65,26 +68,20 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
 
     // Only the current epoch's parts speak for the case's mirror.
     if (part.chainEpoch === proposal.chainEpoch) {
-      const patch: Partial<SlashProposalEntity> = {};
-      if (proposal.chainStatus === ChainProposalStatus.PENDING) {
-        patch.chainStatus = ChainProposalStatus.DISPUTED;
-      }
-      if (!proposal.chainDisputedAt || proposal.chainDisputedAt > event.disputedAt) {
-        patch.chainDisputedAt = event.disputedAt;
-      }
-      if (Object.keys(patch).length > 0) {
-        await this.proposals.update(
-          { organizationId: proposal.organizationId, id: proposal.id },
-          patch,
-        );
-      }
+      await this.mirrorParts(proposal, {
+        disputedAt:
+          !proposal.chainDisputedAt || proposal.chainDisputedAt > event.disputedAt
+            ? event.disputedAt
+            : undefined,
+      });
     }
 
     if (first) {
       await this.timeline(proposal, event.disputedAt, 'CHAIN_DISPUTED', {
         summary:
-          'The provider disputed this judgement on chain (disputeSlash). Nothing of it can ' +
-          'execute until the arbiter rules; unruled, it expires 30 days after the dispute',
+          'The provider disputed one part of this judgement on chain (disputeSlash). That part ' +
+          'cannot execute until the arbiter rules, and unruled it expires 30 days after the ' +
+          "dispute; the case's other parts are not affected",
         detail: {
           requestId: event.requestId,
           transactionHash: event.transactionHash,
@@ -126,30 +123,7 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     }
 
     if (part.chainEpoch === proposal.chainEpoch) {
-      const siblings = await this.parts.findForEpoch(
-        proposal.organizationId,
-        proposal.id,
-        proposal.chainEpoch,
-      );
-      const stillDisputed = siblings.some(
-        (sibling: SlashProposalPartEntity) =>
-          sibling.id !== part.id && sibling.chainStatus === 'DISPUTED',
-      );
-      if (proposal.chainStatus === ChainProposalStatus.DISPUTED && !stillDisputed) {
-        const doors = siblings
-          .map((sibling) =>
-            sibling.id === part.id ? event.executableAt : sibling.chainExecutableAt,
-          )
-          .filter((date): date is Date => date instanceof Date)
-          .map((date) => date.getTime());
-        await this.proposals.update(
-          { organizationId: proposal.organizationId, id: proposal.id },
-          {
-            chainStatus: ChainProposalStatus.PENDING,
-            chainExecutableAt: new Date(Math.max(...doors, event.executableAt.getTime())),
-          },
-        );
-      }
+      await this.mirrorParts(proposal, {});
     }
 
     if (moved) {
@@ -166,6 +140,61 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       });
     }
     return true;
+  }
+
+  /**
+   * The case's mirror, from its current-epoch parts: the disputed count, and
+   * — only while the mirror is `PENDING` or `DISPUTED` — `DISPUTED` when every
+   * live part is disputed, else `PENDING` at the latest door of its PENDING
+   * parts (the parts the execute sweep will actually send).
+   */
+  private async mirrorParts(
+    proposal: SlashProposalEntity,
+    options: { disputedAt?: Date },
+  ): Promise<void> {
+    const parts = await this.parts.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      proposal.chainEpoch,
+    );
+    const disputed = parts.filter((row: SlashProposalPartEntity) => row.chainStatus === 'DISPUTED');
+    const pending = parts.filter((row: SlashProposalPartEntity) => row.chainStatus === 'PENDING');
+    const patch: Partial<SlashProposalEntity> = {};
+    if (proposal.chainDisputedParts !== disputed.length) {
+      patch.chainDisputedParts = disputed.length;
+    }
+    if (options.disputedAt) patch.chainDisputedAt = options.disputedAt;
+
+    const standing =
+      proposal.chainStatus === ChainProposalStatus.PENDING ||
+      proposal.chainStatus === ChainProposalStatus.DISPUTED;
+    if (standing) {
+      if (pending.length === 0 && disputed.length > 0) {
+        if (proposal.chainStatus !== ChainProposalStatus.DISPUTED) {
+          patch.chainStatus = ChainProposalStatus.DISPUTED;
+        }
+      } else if (pending.length > 0) {
+        if (proposal.chainStatus !== ChainProposalStatus.PENDING) {
+          patch.chainStatus = ChainProposalStatus.PENDING;
+        }
+        const doors = pending
+          .map((row) => row.chainExecutableAt)
+          .filter((date): date is Date => date instanceof Date)
+          .map((date) => date.getTime());
+        if (doors.length > 0) {
+          const door = new Date(Math.max(...doors));
+          if (proposal.chainExecutableAt?.getTime() !== door.getTime()) {
+            patch.chainExecutableAt = door;
+          }
+        }
+      }
+    }
+    if (Object.keys(patch).length > 0) {
+      await this.proposals.update(
+        { organizationId: proposal.organizationId, id: proposal.id },
+        patch,
+      );
+    }
   }
 
   private async timeline(
