@@ -8,6 +8,7 @@ import { assertOrganizationScopedValues } from '@database/postgres/organization-
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
+import { AuditActor, AuditLogWriter, changedFields } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 
@@ -48,11 +49,11 @@ const POLICY_HISTORY_LIST: ListSpec = {
  * with no override of its own is legitimately governed by the org default and
  * needs to see it.
  *
- * ## TODO
+ * ## Audit
  *
- * A write here should append an `audit_log_entries` row (before/after,
- * actor, timestamp) — the audit log's "Policy" event class is exactly this.
- * Not done yet.
+ * Every write appends an `audit_log_entries` row (`spend_policy.created` /
+ * `spend_policy.updated`, the changed fields before and after) in the same
+ * transaction as the version it describes — see `writeVersion`.
  */
 @Injectable()
 export class SpendPolicyService {
@@ -61,12 +62,13 @@ export class SpendPolicyService {
   constructor(
     private readonly policies: SpendPolicyRepository,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    private readonly audit: AuditLogWriter,
     /**
      * The live-usage block on `GET /spend-policy`.
      *
      * `@Optional()`: this service predates the enforcement services and
      * is constructed directly (no Nest DI) by `test/unit/spend-policy/spend-policy.service.spec.ts`
-     * with just the first two arguments. Making these two required would
+     * without the last two arguments. Making these two required would
      * break that file. When absent, `get()` simply omits the `usage` block rather than
      * throwing — see that method.
      */
@@ -135,6 +137,7 @@ export class SpendPolicyService {
     organizationId: string,
     agentId: string,
     patch: UpdateSpendPolicyDto,
+    actor: AuditActor,
   ): Promise<SpendPolicyDto> {
     const current = await this.policies.findOne({
       where: { organizationId, agentId, supersededAt: IsNull() },
@@ -175,7 +178,7 @@ export class SpendPolicyService {
       supersededAt: null,
     };
 
-    const row = await this.writeVersion(organizationId, current, values);
+    const row = await this.writeVersion(organizationId, current, values, actor);
     return toDto(row);
   }
 
@@ -208,7 +211,8 @@ export class SpendPolicyService {
 
   /**
    * Supersedes `current` (if any) and inserts `values` as the new live row, in
-   * one transaction. The supersede is a compare-and-set on `superseded_at IS
+   * one transaction, together with the audit entry for the change — a failed
+   * audit write rolls the version back. The supersede is a compare-and-set on `superseded_at IS
    * NULL`, same reasoning as `LedgerHoldRepository.resolveIfOpen`: a second
    * concurrent PATCH loses cleanly instead of leaving two live rows at one
    * scope, which the partial unique index would refuse anyway — this turns
@@ -218,6 +222,7 @@ export class SpendPolicyService {
     organizationId: string,
     current: SpendPolicyEntity | null,
     values: Partial<SpendPolicyEntity>,
+    actor: AuditActor,
   ): Promise<SpendPolicyEntity> {
     return this.dataSource.transaction(async (manager) => {
       if (current) {
@@ -246,9 +251,53 @@ export class SpendPolicyService {
         .execute();
 
       const insertedId = insertResult.identifiers[0]?.id as string;
+
+      await this.audit.record(manager, {
+        organizationId,
+        actor,
+        action: current ? 'spend_policy.updated' : 'spend_policy.created',
+        resourceType: 'spend_policy',
+        resourceId: insertedId,
+        ...auditDiff(current, values),
+      });
+
       return manager.findOneByOrFail(SpendPolicyEntity, { organizationId, id: insertedId });
     });
   }
+}
+
+/** What a policy version decides — the fields an audit entry compares. */
+const AUDITED_FIELDS = [
+  'perCallMax',
+  'dailyCap',
+  'monthlyCap',
+  'maxSpendPerHour',
+  'maxCallsPerHour',
+  'maxCallsPerMinute',
+  'requireApprovalAbove',
+  'allowedTools',
+  'paused',
+  'policyVersion',
+] as const;
+
+/**
+ * The changed fields only. A first version has no `before`, and its `after`
+ * lists what it sets (nulls omitted). Amounts are base units, as stored.
+ */
+function auditDiff(
+  current: SpendPolicyEntity | null,
+  values: Partial<SpendPolicyEntity>,
+): { before: Record<string, unknown> | null; after: Record<string, unknown> } {
+  const pick = (row: Partial<SpendPolicyEntity>): Record<string, unknown> =>
+    Object.fromEntries(AUDITED_FIELDS.map((field) => [field, row[field] ?? null]));
+  const reason = values.changeReason ? { changeReason: values.changeReason } : {};
+
+  if (!current) {
+    const set = Object.entries(pick(values)).filter(([, value]) => value !== null);
+    return { before: null, after: { ...Object.fromEntries(set), ...reason } };
+  }
+  const diff = changedFields(pick(current), pick(values));
+  return { before: diff.before, after: { ...diff.after, ...reason } };
 }
 
 /** `undefined` (omitted) keeps `previous`; an explicit `null` clears it. */
