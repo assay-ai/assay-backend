@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager, SelectQueryBuilder } from 'typeorm';
+import { DataSource, EntityManager, In, SelectQueryBuilder } from 'typeorm';
 
 import { SlashProposalEntity } from '../entities/slash-proposal.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -122,6 +122,22 @@ export const CLOSED_WITHOUT_PENALTY_STATUSES = ['CANCELLED', 'OVERTURNED'] as co
 export class SlashProposalRepository extends OrganizationScopedRepository<SlashProposalEntity> {
   constructor(@InjectDataSource('postgres') dataSource: DataSource) {
     super(SlashProposalEntity, dataSource);
+  }
+
+  /**
+   * This organization's cases whose on-chain request id is one of
+   * `chainRequestIds` (lower-case hex, no `0x`). Scoped to the tenant, so an id
+   * belonging to another provider's case is simply not returned.
+   */
+  async findOwnByChainRequestIds(
+    organizationId: string,
+    chainRequestIds: readonly string[],
+  ): Promise<Pick<SlashProposalEntity, 'id' | 'chainRequestId'>[]> {
+    if (chainRequestIds.length === 0) return [];
+    return this.find({
+      select: { id: true, chainRequestId: true },
+      where: { organizationId, chainRequestId: In([...chainRequestIds]) },
+    });
   }
 
   /**
