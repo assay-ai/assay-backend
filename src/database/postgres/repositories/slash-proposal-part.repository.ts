@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, In } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 
 import { SlashProposalPartEntity } from '../entities/slash-proposal-part.entity';
@@ -11,6 +11,22 @@ import { OrganizationScopedRepository } from './organization-scoped.repository';
 export class SlashProposalPartRepository extends OrganizationScopedRepository<SlashProposalPartEntity> {
   constructor(@InjectDataSource('postgres') dataSource: DataSource) {
     super(SlashProposalPartEntity, dataSource);
+  }
+
+  /**
+   * The parts of this organization's cases whose on-chain request id is one of
+   * `chainRequestIds` (lower-case hex, no `0x`). Every epoch's rows, because a
+   * record an earlier epoch proposed can still be standing on chain.
+   */
+  async findOwnByChainRequestIds(
+    organizationId: string,
+    chainRequestIds: readonly string[],
+  ): Promise<Pick<SlashProposalPartEntity, 'id' | 'proposalId' | 'chainRequestId'>[]> {
+    if (chainRequestIds.length === 0) return [];
+    return this.find({
+      select: { id: true, proposalId: true, chainRequestId: true },
+      where: { organizationId, chainRequestId: In([...chainRequestIds]) },
+    });
   }
 
   /** One case's parts at one epoch, in agent order — the order they were planned in. */
