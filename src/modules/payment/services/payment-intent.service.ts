@@ -1,5 +1,10 @@
+import {
+  CHAIN_STATE_GATE,
+  ChainDoor,
+  ChainStateGatePort,
+} from '@modules/chains/ports/chain-state-gate.port';
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
@@ -78,6 +83,12 @@ export class PaymentIntentService {
     private readonly ledger: LedgerService,
     private readonly escrowGate: EscrowSpendGateService,
     private readonly blocklist: AccountBlocklistService,
+    // The ON-CHAIN pause and blocklist (D-19), refused here with a clear error
+    // rather than at redemption. Optional: a composition without the chain
+    // cache still creates intents, and the contract still enforces.
+    @Optional()
+    @Inject(CHAIN_STATE_GATE)
+    private readonly chainState: ChainStateGatePort | null = null,
   ) {}
 
   /**
@@ -121,6 +132,11 @@ export class PaymentIntentService {
       },
       { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: input.providerAccount },
       { role: BlockedRole.DELEGATE, kind: BlockSubjectKind.WALLET, subject: input.voucherDelegate },
+    ]);
+    await this.chainState?.assertActive(ChainDoor.REDEEM, [
+      { role: 'PAYER', account: input.agentAccount },
+      { role: 'PAYEE', account: input.providerAccount },
+      { role: 'DELEGATE', account: input.voucherDelegate },
     ]);
 
     const providerAmount = MoneyUtil.subtract(input.price, input.platformFee);

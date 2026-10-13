@@ -1,3 +1,8 @@
+import {
+  CHAIN_STATE_GATE,
+  ChainDoor,
+  ChainStateGatePort,
+} from '@modules/chains/ports/chain-state-gate.port';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import {
@@ -94,6 +99,11 @@ export class VoucherRedemptionService {
     private readonly blocklist: AccountBlocklistService,
     /** Injected so a test can age a hold without waiting 37 minutes. */
     @Optional() private readonly now: () => number = () => Date.now(),
+    // The ON-CHAIN pause and blocklist (D-19). Optional: without it the
+    // contract's own refusal is what the pass meets.
+    @Optional()
+    @Inject(CHAIN_STATE_GATE)
+    private readonly chainState: ChainStateGatePort | null = null,
   ) {}
 
   /**
@@ -131,7 +141,7 @@ export class VoucherRedemptionService {
     }
 
     for (const row of pending) {
-      if (this.heldByBlock(row)) {
+      if (await this.held(row)) {
         blocked.add(row.agentAccount);
         continue;
       }
@@ -209,7 +219,7 @@ export class VoucherRedemptionService {
       const carried: RedeemableIntent[] = [];
 
       for (const row of queue) {
-        if (this.heldByBlock(row)) {
+        if (await this.held(row)) {
           blocked.add(row.agentAccount);
           continue;
         }
@@ -309,6 +319,36 @@ export class VoucherRedemptionService {
    * is added to `blocked` by the caller, so a later seq of theirs is not
    * redeemed over it — the same rule as a voucher that did not land.
    */
+  private async held(row: RedeemableIntent): Promise<boolean> {
+    return this.heldByBlock(row) || (await this.heldByChain(row));
+  }
+
+  /**
+   * Whether the CHAIN would refuse this voucher right now: the program is
+   * paused, or the payer, the payee or the delegate is on the on-chain
+   * blocklist (`assertActive(payer, provider, delegate)` in `_redeem`).
+   *
+   * Held before batching so one bad voucher does not revert the whole atomic
+   * `redeemVoucherBatch` — the same hold as the platform's own blocklist: the
+   * row keeps its hold and resumes on the next pass after the unpause or
+   * unblock. The gate answers only on a LIVE confirmation of what the cache
+   * says, so a stale cache never holds a voucher the chain would redeem.
+   */
+  private async heldByChain(row: RedeemableIntent): Promise<boolean> {
+    if (!this.chainState) return false;
+    const reason = await this.chainState.holdReason(ChainDoor.REDEEM, [
+      { role: 'PAYER', account: row.agentAccount },
+      { role: 'PAYEE', account: row.providerAccount },
+      { role: 'DELEGATE', account: row.voucherDelegate },
+    ]);
+    if (!reason) return false;
+    this.logger.warn(
+      `Intent ${row.id} (seq ${row.voucherSeq}) is held back: ${reason}. It keeps its hold and ` +
+        `resumes when the chain admits it again.`,
+    );
+    return true;
+  }
+
   private heldByBlock(row: RedeemableIntent): boolean {
     const blocked = this.blocklist.firstBlocked([
       {

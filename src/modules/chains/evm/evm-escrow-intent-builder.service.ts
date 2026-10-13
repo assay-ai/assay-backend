@@ -28,6 +28,7 @@ import {
 import { EscrowLimits } from '../ports/escrow.types';
 import { Eip712Domain, UnsignedChainTransaction } from '../ports/unsigned-chain-transaction';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
+import { ChainDoor, ChainStateGatePort } from '../ports/chain-state-gate.port';
 import { X402_ESCROW_ABI } from './abi/x402.abi';
 import { evmDomain } from './eip712/domain';
 import { authorizeDelegateTypedData, revokeDelegateTypedData } from './eip712/delegation';
@@ -200,6 +201,13 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
     private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
     /** Milliseconds, `Date.now()`'s own unit. The chain's timestamps are seconds. */
     private readonly config: { readonly now: () => number },
+    /**
+     * The pause/blocklist gate (D-19): since the dispute upgrade the pause
+     * closes the exit, the limits and a delegate grant, and the blocklist
+     * refuses a blocked buyer (and a blocked delegate). Revoking is never
+     * gated. Optional so a composition without the cache still builds.
+     */
+    private readonly gate: ChainStateGatePort | null = null,
   ) {}
 
   /**
@@ -238,6 +246,10 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
   async buildIntent(request: EscrowIntentRequest): Promise<UnsignedChainTransaction> {
     const { chainId, address: buyer } = this.parse(request.account);
     const deployment = this.deployment(chainId);
+    await this.gate?.assertActive(
+      request.kind === EscrowIntentKind.SET_LIMITS ? ChainDoor.LIMITS : ChainDoor.WITHDRAW,
+      [{ role: 'BUYER', account: request.account }],
+    );
 
     /*
       ONE escrow read and ONE clock reading, for every kind, issued together.
@@ -304,6 +316,10 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
     const { chainId, address: payer } = this.parse(account);
     const deployment = this.deployment(chainId);
     const delegate = this.delegateOn(chainId, payer, terms.delegate);
+    await this.gate?.assertActive(ChainDoor.DELEGATE, [
+      { role: 'PAYER', account },
+      { role: 'DELEGATE', account: terms.delegate },
+    ]);
     const maxVoucherAmount = this.uint64(terms.maxVoucherAmount, 'maxVoucherAmount');
     const maxPerWindow = this.uint64(terms.maxPerWindow, 'maxPerWindow');
     const validUntil = this.uint64(terms.validUntil, 'validUntil');
@@ -746,6 +762,11 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
           });
         case 'NoWithdrawRequested':
           throw SettlementErrors.withdrawalNotYetAvailable({});
+        // D-19: the exit is paused and blocklist-gated since the dispute upgrade.
+        case 'ProgramPaused':
+          throw ChainErrors.programPaused({ door: 'WITHDRAW' });
+        case 'AddressBlocked':
+          throw ChainErrors.addressBlocked({ role: 'BUYER', account: buyer });
         default:
           throw error;
       }

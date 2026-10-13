@@ -2,6 +2,7 @@ import { Global, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { Test } from '@nestjs/testing';
 
+import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ChainsModule } from '@modules/chains/chains.module';
@@ -53,8 +54,12 @@ const RPC_URLS = JSON.stringify({ [EVM]: 'https://rpc.testnet.chain.robinhood.ex
       provide: EvmGasGrantRepository,
       useValue: { hasGranted: async () => false, grantedWeiSince: async () => 0n },
     },
+    {
+      provide: EvmChainStateRepository,
+      useValue: { findAllStates: async () => [], findBlocked: async () => [] },
+    },
   ],
-  exports: [ALERT_PORT, EvmGasGrantRepository],
+  exports: [ALERT_PORT, EvmGasGrantRepository, EvmChainStateRepository],
 })
 class GlobalsStubModule {}
 

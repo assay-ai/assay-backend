@@ -27,6 +27,7 @@ import { EgressHttpClient } from '@shared/network/egress/egress-http.client';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
@@ -131,6 +132,10 @@ import { ChainId } from '@modules/chains/ports/caip.types';
       provide: EvmGasGrantRepository,
       useValue: { hasGranted: async () => false, grantedWeiSince: async () => 0n },
     },
+    {
+      provide: EvmChainStateRepository,
+      useValue: { findAllStates: async () => [], findBlocked: async () => [] },
+    },
     { provide: ProviderRepository, useValue: { find: async () => [] } },
     // `BlocklistModule`, imported by `ProviderModule` and `PaymentModule`.
     { provide: AccountBlockRepository, useValue: { findActive: async () => [] } },
@@ -185,6 +190,7 @@ import { ChainId } from '@modules/chains/ports/caip.types';
     ToolBindingRepository,
     BindingVersionRepository,
     EvmGasGrantRepository,
+    EvmChainStateRepository,
     ProviderRepository,
     AccountBlockRepository,
     PaymentIntentRepository,

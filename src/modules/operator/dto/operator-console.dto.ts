@@ -108,6 +108,56 @@ export class PlatformHealthDto {
     description: 'Age of the oldest open case, in seconds. Null when there are none.',
   })
   oldestOpenDisputeAgeSeconds: number | null;
+
+  @ApiProperty({
+    type: () => [ChainStateHealthDto],
+    description:
+      'Per EVM chain: the indexed pause flag, blocklist and dispute-upgrade terms, and how far ' +
+      'the indexer is behind. A cache of the chain — the contracts stay the enforcer.',
+  })
+  chainState: ChainStateHealthDto[];
+}
+
+/** One EVM chain's row of `GET /operator/health`'s `chainState`. */
+export class ChainStateHealthDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  chainId: string;
+
+  @ApiProperty({ description: 'X402Config.paused, as last indexed' })
+  paused: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Whether the Config has the dispute upgrade; null until first reconciled',
+  })
+  upgraded: boolean | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'X402Config.arbiter(), lower-case' })
+  arbiter: string | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'The live slash delay — the dispute window' })
+  slashDelaySeconds: number | null;
+
+  @ApiProperty({ description: 'Addresses blocked on chain' })
+  blockedCount: number;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Last indexed block' })
+  indexedBlock: string | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Chain head at the last tick' })
+  headBlock: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Seconds since the indexer last reached the head; null if it never has',
+  })
+  lagSeconds: number | null;
+
+  @ApiProperty({ description: 'True when lagSeconds is null or above EVM_CHAIN_STATE_MAX_LAG_MS' })
+  stale: boolean;
+
+  @ApiPropertyOptional({ nullable: true })
+  reconciledAt: string | null;
 }
 
 /**
