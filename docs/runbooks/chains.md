@@ -199,6 +199,9 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   - A dispute freezes only the part it names: the case's other parts keep
     executing (`chainStatus` stays `PENDING`, `chainDisputedParts` counts the
     disputed ones; `DISPUTED` means every live part is disputed).
+  - A block intent for one of the platform's own addresses (treasury, redeemer,
+    a verifier key, admin, owner, arbiter, the three contracts) is refused with
+    `422 CHAIN_PLATFORM_ADDRESS_NOT_BLOCKABLE`; each is read live.
   - An arbiter's `cancelSlash(Batch)` (`SlashCancelled`) is mirrored at once:
     the part is `CANCELLED`, and the case closes as soon as nothing of it
     stands and nothing executed.
