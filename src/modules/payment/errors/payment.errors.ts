@@ -624,13 +624,18 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
    * it is open so the platform is not still taking money out of an escrow whose
    * owner has announced they are leaving. Vouchers already accepted are still
    * redeemed.
+   *
+   * Raised by the escrow spend gate (with `availableAt`) and by the router when
+   * a call is unroutable for this reason (with `chains`). The message addresses
+   * an agent that may not own the escrow, so it names who can clear it.
    */
   withdrawalPending: {
     code: PaymentErrorCode.PAYMENT_WITHDRAWAL_PENDING,
     statusCode: 409,
     message: (context?: Record<string, any>) =>
-      `A withdrawal is pending on this escrow` +
+      `A withdrawal is pending on the payer's escrow` +
+      `${context?.chains?.length ? ` on ${context.chains.join(', ')}` : ''}` +
       `${context?.availableAt ? `, available at ${context.availableAt}` : ''}` +
-      `; cancel it with request_withdraw(0) to resume paying calls`,
+      `; paid calls are refused until then — the escrow owner must cancel or complete it`,
   },
 });
