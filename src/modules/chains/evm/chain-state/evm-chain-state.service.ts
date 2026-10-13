@@ -13,7 +13,10 @@ import { EvmDeployment } from '../evm.constants';
 export const DEFAULT_EVM_CHAIN_STATE_POLL_MS = 15_000;
 
 /** The doors a Config that predates the dispute upgrade already pauses. */
-const PAUSED_BEFORE_UPGRADE: ReadonlySet<ChainDoor> = new Set([ChainDoor.DEPOSIT, ChainDoor.REDEEM]);
+const PAUSED_BEFORE_UPGRADE: ReadonlySet<ChainDoor> = new Set([
+  ChainDoor.DEPOSIT,
+  ChainDoor.REDEEM,
+]);
 
 interface ChainSnapshot {
   readonly paused: boolean;
@@ -145,7 +148,11 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
         const live = await this.confirm(chainId, 'blocked', [member.address], mode);
         if (live) {
           return {
-            error: ChainErrors.addressBlocked({ chainId, role: member.role, account: member.address }),
+            error: ChainErrors.addressBlocked({
+              chainId,
+              role: member.role,
+              account: member.address,
+            }),
             reason: `the ${member.role.toLowerCase()} ${member.address} is blocked on ${chainId}`,
           };
         }
@@ -183,7 +190,9 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
   }
 }
 
-function evmParty(party: ChainParty): { chainId: ChainId; role: string; address: `0x${string}` } | null {
+function evmParty(
+  party: ChainParty,
+): { chainId: ChainId; role: string; address: `0x${string}` } | null {
   if (!party.account) return null;
   try {
     const parsed = parseAccountId(party.account as never);

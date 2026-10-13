@@ -126,7 +126,9 @@ export class EvmChainStateIndexer {
         // The node's message stays in this log line, never in an alert or a
         // row: an RPC URL can carry an API key.
         this.logger.error(`EVM chain-state index on ${chainId} failed: ${describe(error)}`);
-        await this.repository.recordError(chainId, 'the chain could not be read').catch(() => undefined);
+        await this.repository
+          .recordError(chainId, 'the chain could not be read')
+          .catch(() => undefined);
       }
       try {
         await this.reconcileIfDue(chainId, deployment, client);
@@ -163,7 +165,9 @@ export class EvmChainStateIndexer {
       return;
     }
     const end =
-      head - start + 1n > EVM_CHAIN_STATE_MAX_BLOCKS ? start + EVM_CHAIN_STATE_MAX_BLOCKS - 1n : head;
+      head - start + 1n > EVM_CHAIN_STATE_MAX_BLOCKS
+        ? start + EVM_CHAIN_STATE_MAX_BLOCKS - 1n
+        : head;
 
     const logs: EvmConfigEventLog[] = [];
     for (let from = start; from <= end; from += EVM_CHAIN_STATE_CHUNK) {
@@ -300,7 +304,8 @@ export class EvmChainStateIndexer {
     const state = await this.repository.findState(chainId).catch(() => null);
     const lagMs = chainStateLagMs(state?.caughtUpAt ?? null, this.config.now());
     if (lagMs !== null && lagMs <= this.config.maxLagMs) return;
-    const behind = lagMs === null ? 'has never caught up' : `is ${Math.round(lagMs / 1000)}s behind`;
+    const behind =
+      lagMs === null ? 'has never caught up' : `is ${Math.round(lagMs / 1000)}s behind`;
     this.logger.warn(
       `EVM chain-state index on ${chainId} ${behind}; pause and blocklist refusals may be stale ` +
         `(the contracts still enforce)`,
