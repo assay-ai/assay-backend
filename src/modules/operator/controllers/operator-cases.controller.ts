@@ -167,6 +167,11 @@ export class OperatorCasesController {
    * Closes the case and asks for the cancel of any record standing on chain
    * (`chain_status` → `CANCEL_REQUESTED`). The cancel itself is the settlement
    * admin's to sign — see {@link cancelIntent}.
+   *
+   * Single-person from `PROPOSED`, `DISPUTED` and `UNDER_REVIEW`. From
+   * `AWAITING_SECOND` and `UPHELD` it is two-person: a second operator's token
+   * in `X-Operator-Approver`, holding `ADJ` or `ADJL` with an authority limit
+   * that covers the penalty.
    */
   @Post('cases/:proposalId/suspend')
   @Override('S-1')
@@ -178,7 +183,7 @@ export class OperatorCasesController {
     @Body() body: SuspendProposalBodyDto,
     @Req() request: Request,
   ) {
-    return this.cases.suspend(operator, proposalId, body, requestIdOf(request));
+    return this.cases.suspend(operator, proposalId, body, request, requestIdOf(request));
   }
 
   /**
@@ -218,7 +223,10 @@ export class OperatorCasesController {
   @RequireRoles(OperatorRole.ADJL)
   @ApiOperation({ summary: 'Open a fleet sweep from this decided case' })
   @ApiResponse({ status: 200, type: FleetSweepDto })
-  @ApiResponse({ status: 403, description: 'The second approver holds neither ADJ nor ADJL' })
+  @ApiResponse({
+    status: 403,
+    description: 'The second approver holds neither ADJ nor ADJL',
+  })
   @ApiResponse({ status: 422, description: 'This outcome does not generalise' })
   async sweep(
     @CurrentOperator() operator: OperatorSession,

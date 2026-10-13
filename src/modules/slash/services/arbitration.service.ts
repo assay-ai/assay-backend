@@ -255,42 +255,51 @@ export class ArbitrationService {
     const now = new Date();
     const opensReview = from === SlashProposalStatus.DISPUTED;
 
-    if (opensReview) {
-      const affected = await this.proposals.transitionIfIn(
+    // One transaction, and its first statement is a compare-and-swap on the
+    // status the row was read in. A decision landing between the read and the
+    // write makes it affect nothing, and then neither the dispute row nor the
+    // ASSIGNED event is written: a decided case is never re-opened or
+    // re-assigned by a claim that lost the race.
+    await this.proposals.manager.transaction(async (manager) => {
+      const queryRunner = manager.queryRunner as QueryRunner;
+      const affected = await this.updateInTransaction(
+        queryRunner,
         organizationId,
         proposalId,
-        [SlashProposalStatus.DISPUTED],
-        { status: SlashProposalStatus.UNDER_REVIEW },
-      );
-      if (affected === 0) {
-        // Lost a race: the case left `DISPUTED` after it was read.
-        throw SlashErrors.invalidTransition({
-          from: proposal.status,
-          to: SlashProposalStatus.UNDER_REVIEW,
-        });
-      }
-    }
-
-    if (proposal.disputeId) {
-      await this.disputes.update(
-        { organizationId, id: proposal.disputeId },
+        [from],
         {
-          ...(opensReview ? { state: 'UNDER_REVIEW' } : {}),
-          assignedOperatorId: operator.operatorId,
-          assignedAt: now,
+          status: opensReview ? SlashProposalStatus.UNDER_REVIEW : from,
         },
       );
-    }
+      if (affected === 0) {
+        throw SlashErrors.invalidTransition({
+          from: proposal.status,
+          to: opensReview ? SlashProposalStatus.UNDER_REVIEW : 'a claim',
+        });
+      }
 
-    await this.lifecycle.appendEventDirect({
-      organizationId,
-      proposalId,
-      occurredAt: now,
-      kind: 'ASSIGNED',
-      actorType: 'operator',
-      actorId: operator.subject,
-      summary: `Assigned to ${operator.subject}`,
-      detail: { operatorId: operator.operatorId },
+      if (proposal.disputeId) {
+        await queryRunner.manager.update(
+          DisputeEntity,
+          { organizationId, id: proposal.disputeId },
+          {
+            ...(opensReview ? { state: 'UNDER_REVIEW' } : {}),
+            assignedOperatorId: operator.operatorId,
+            assignedAt: now,
+          },
+        );
+      }
+
+      await this.lifecycle.appendEvent(queryRunner, {
+        organizationId,
+        proposalId,
+        occurredAt: now,
+        kind: 'ASSIGNED',
+        actorType: 'operator',
+        actorId: operator.subject,
+        summary: `Assigned to ${operator.subject}`,
+        detail: { operatorId: operator.operatorId },
+      });
     });
 
     return this.lifecycle.require(organizationId, proposalId);
@@ -340,9 +349,14 @@ export class ArbitrationService {
     const consequence = OUTCOME_CONSEQUENCE[input.outcome];
     const penalty = this.resolvePenalty(proposal, input);
 
+    // The threshold and the authority limit are measured on the penalty the
+    // case CARRIES, never on the recalculated figure: measured on that, one
+    // adjudicator could cut any penalty to one minor unit alone. `penalty` is
+    // never above the original (`resolvePenalty`), so the original is also the
+    // larger of the two.
     const needsSecond = requiresSecondSignature(
       input.outcome,
-      BigInt(penalty),
+      BigInt(proposal.penaltyAmount),
       BigInt(this.config.secondSignatureThresholdMinor),
       consequence.opensFleetSweep,
     );
@@ -373,7 +387,7 @@ export class ArbitrationService {
           // blast radius or materiality. The register cannot express that,
           // because it is a property of the case rather than of the action.
           escalateToTwoPerson: false,
-          amountMinor: penalty,
+          amountMinor: proposal.penaltyAmount,
         },
         async (queryRunner) => {
           const before = {
@@ -409,7 +423,11 @@ export class ArbitrationService {
           const patch: Partial<SlashProposalEntity> & { status: string } = {
             status: nextStatus,
             decidedByOperatorId: operator.operatorId,
-            penaltyAmount: penalty,
+            // Only when the decision binds. A recalculation awaiting its second
+            // signature has changed nothing yet; the decided figure is on this
+            // override's register entry (`after.penaltyAmount`), which is where
+            // `second()` reads it back.
+            penaltyAmount: binds ? penalty : proposal.penaltyAmount,
             rootCauseKey: input.rootCauseKey ?? proposal.rootCauseKey,
             outcome: binds ? input.outcome : null,
             resolutionKind: binds ? ResolutionKind.ADJUDICATOR : null,
@@ -441,11 +459,13 @@ export class ArbitrationService {
             kind: 'DECIDED',
             actorType: 'operator',
             actorId: operator.subject,
-            summary: needsSecond
-              ? `${operator.subject} decided ${input.outcome}; a second signature is required`
-              : `${operator.subject} decided ${input.outcome}`,
+            summary:
+              `${operator.subject} decided ${input.outcome}` +
+              (penalty !== proposal.penaltyAmount ? ` at ${penalty}` : '') +
+              (needsSecond ? '; a second signature is required' : ''),
             detail: {
               outcome: input.outcome,
+              penaltyAmount: penalty,
               reasonCodes: input.reasonCodes,
               rubricVersion: CURRENT_RUBRIC_VERSION,
               requiresSecondSignature: needsSecond,
@@ -519,6 +539,15 @@ export class ArbitrationService {
       throw SlashErrors.secondSignatureNotPending({ status: proposal.status });
     }
 
+    // A recalculation's figure is written only when it binds, so a countersign
+    // has to know what was decided. Read off the decision's own register entry;
+    // a figure that cannot be read refuses the countersignature rather than
+    // binding the original or a guess. An objection needs no figure.
+    const decidedPenalty =
+      kind === 'SIGNED' && outcome === ArbitrationOutcome.UPHELD_RECALCULATED
+        ? await this.pendingRecalculatedPenalty(proposal)
+        : null;
+
     const now = new Date();
     const nextStatus =
       kind === 'SIGNED' ? statusForOutcome(outcome) : SlashProposalStatus.UNDER_REVIEW;
@@ -557,6 +586,7 @@ export class ArbitrationService {
                   resolutionKind: ResolutionKind.ADJUDICATOR,
                   resolvedAt: now,
                   countsAsFalsePositive: OUTCOME_CONSEQUENCE[outcome].countsAsFalsePositive,
+                  ...(decidedPenalty ? { penaltyAmount: decidedPenalty } : {}),
                 }
               : {
                   status: nextStatus,
@@ -673,6 +703,13 @@ export class ArbitrationService {
    * asks again on the next tick. A case with no record yet (`NONE`) needs
    * nothing: the propose sweep never proposes a closed case.
    *
+   * **Who may do it alone.** From `PROPOSED`, `DISPUTED` and `UNDER_REVIEW`
+   * one operator suspends. From `AWAITING_SECOND` and `UPHELD` a second person
+   * has confirmed the penalty or is confirming it, so the occurrence is
+   * two-person: `approver` (the `X-Operator-Approver` token) must be another
+   * active operator holding `ADJ` or `ADJL` whose authority limit covers the
+   * penalty. An approver supplied in the other statuses is ignored.
+   *
    * **`EXECUTING` is refused, deliberately.** The state machine has an
    * `EXECUTING → CANCELLED` edge, and that edge exists for one caller: the
    * chain-void path, which reaches it only after the settlement program has
@@ -689,6 +726,7 @@ export class ArbitrationService {
     note: string,
     ticketRef?: string | null,
     requestId?: string | null,
+    approver?: OperatorSession | null,
   ): Promise<SlashProposalEntity> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
     const from = proposal.status as SlashProposalStatus;
@@ -703,11 +741,21 @@ export class ArbitrationService {
       throw SlashErrors.invalidTransition({ from, to: SlashProposalStatus.CANCELLED });
     }
 
+    // Single-person while nobody else has ruled on the case. From
+    // AWAITING_SECOND or UPHELD a second person has confirmed the penalty, or
+    // is confirming it, and cancelling it alone would undo their decision: the
+    // occurrence is raised to two-person and the register demands an approver
+    // (ADJ or ADJL, within their own authority limit).
+    const needsApprover =
+      from === SlashProposalStatus.AWAITING_SECOND || from === SlashProposalStatus.UPHELD;
+
     const now = new Date();
     const saved = await this.overrides.perform<SlashProposalEntity>(
       {
         code: 'S-1',
         actor: operator,
+        escalateToTwoPerson: needsApprover,
+        approver: needsApprover ? (approver ?? null) : null,
         targetType: 'slash_proposal',
         targetId: proposalId,
         organizationId,
@@ -1042,6 +1090,27 @@ export class ArbitrationService {
    * the number that happens to them — which is the process this arbitration
    * exists to replace, wearing our own uniform.
    */
+  /**
+   * The figure a pending `UPHELD_RECALCULATED` decision bound itself to, read
+   * off its `S-3` register entry — the latest one for the case, which is the
+   * decision `AWAITING_SECOND` holds. Refuses when it is missing, malformed or
+   * above the penalty the case carries.
+   */
+  private async pendingRecalculatedPenalty(proposal: SlashProposalEntity): Promise<string> {
+    const decisions = (await this.overrides.historyFor('slash_proposal', proposal.id)).filter(
+      (entry) => entry.code === 'S-3',
+    );
+    const decided = decisions[decisions.length - 1]?.after?.penaltyAmount;
+    if (
+      typeof decided !== 'string' ||
+      !RECALCULATED_AMOUNT_PATTERN.test(decided) ||
+      BigInt(decided) > BigInt(proposal.penaltyAmount)
+    ) {
+      throw SlashErrors.secondSignatureNotPending({ status: proposal.status });
+    }
+    return decided;
+  }
+
   private resolvePenalty(proposal: SlashProposalEntity, input: DecideInput): string {
     if (input.outcome !== ArbitrationOutcome.UPHELD_RECALCULATED) {
       return proposal.penaltyAmount;

@@ -19,6 +19,7 @@ export enum OperatorErrorCode {
   OPERATOR_OVERRIDE_NOT_IMPLEMENTED = 'OPERATOR_OVERRIDE_NOT_IMPLEMENTED',
   OPERATOR_SECOND_APPROVER_REQUIRED = 'OPERATOR_SECOND_APPROVER_REQUIRED',
   OPERATOR_APPROVER_ROLE_REQUIRED = 'OPERATOR_APPROVER_ROLE_REQUIRED',
+  OPERATOR_APPROVER_AUTHORITY_EXCEEDED = 'OPERATOR_APPROVER_AUTHORITY_EXCEEDED',
 }
 
 export type OperatorErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -139,5 +140,20 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
         `${held ? ` — held: ${held}` : ''}`
       );
     },
+  },
+  /**
+   * The second identity holds a qualifying role, but the action's amount is
+   * above their own authority limit. A checker who could not have taken the
+   * action cannot approve it either — otherwise a zero-authority token turns
+   * any two-person action into a one-person one.
+   */
+  approverAuthorityExceeded: {
+    code: OperatorErrorCode.OPERATOR_APPROVER_AUTHORITY_EXCEEDED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `Action exceeds the second approver's authority limit` +
+      `${context?.code ? ` (${context.code})` : ''}` +
+      `${context?.limit ? ` of ${context.limit}` : ''}` +
+      `${context?.requested ? `, requested ${context.requested}` : ''}`,
   },
 });

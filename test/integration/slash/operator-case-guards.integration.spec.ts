@@ -442,4 +442,176 @@ describe('operator case actions, against a real database', () => {
       });
     });
   });
+
+  /** Security review H-3 and L-2, against the real register and the real CHECKs. */
+  describe('recalculating a material penalty', () => {
+    const MATERIAL = 28_470_000n;
+
+    async function disputedAt(penalty: bigint) {
+      const seeded = await seedProRataCase(dataSource, {
+        providerOrg: randomUUID(),
+        stakeAuthority: STAKE_AUTHORITY,
+        assetId: ASSET,
+        penalty,
+        agents: [{ account: AGENT, failed: [100_000n] }],
+        proposedAt: new Date(Date.now() - 60 * 60 * 1000),
+      });
+      await arbitration.fileDispute(seeded.organizationId, seeded.proposalId, {
+        claimType: DisputeClaimType.AGENT_GRIEFING,
+        reason: 'one agent sent every failing call',
+        evidence: [],
+        openedBy: 'provider@example.test',
+      });
+      return seeded;
+    }
+
+    const recalculateToOne = (
+      who: OperatorSession,
+      seeded: { organizationId: string; proposalId: string },
+    ) =>
+      arbitration.decide(who, seeded.organizationId, seeded.proposalId, {
+        outcome: ArbitrationOutcome.UPHELD_RECALCULATED,
+        reasonCodes: ['PRICE_BASIS_WRONG'],
+        note: NOTE,
+        recalculatedAmount: '1',
+      });
+
+    it('refuses an adjudicator whose limit is below the original penalty', async () => {
+      const seeded = await disputedAt(MATERIAL);
+      const limited = {
+        ...(await seedOperator(`ops-adj-limited-${randomUUID()}`, [OperatorRole.ADJ])),
+        authorityLimitMinor: '5000000',
+      };
+
+      await expect(recalculateToOne(limited, seeded)).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_AUTHORITY_EXCEEDED,
+        statusCode: 403,
+      });
+      expect(await proposalRow(seeded.proposalId)).toEqual({
+        status: 'DISPUTED',
+        penalty_amount: MATERIAL.toString(),
+        outcome: null,
+      });
+      expect(await registerEntries(seeded.proposalId)).toEqual([]);
+    });
+
+    it('holds a cut to one minor unit for a second signature, and binds it only then', async () => {
+      const seeded = await disputedAt(MATERIAL);
+
+      await recalculateToOne(adjudicator, seeded);
+
+      expect(await proposalRow(seeded.proposalId)).toEqual({
+        status: 'AWAITING_SECOND',
+        penalty_amount: MATERIAL.toString(),
+        outcome: null,
+      });
+
+      await arbitration.second(lead, seeded.organizationId, seeded.proposalId, 'SIGNED', NOTE);
+
+      expect(await proposalRow(seeded.proposalId)).toEqual({
+        status: 'UPHELD',
+        penalty_amount: '1',
+        outcome: 'UPHELD_RECALCULATED',
+      });
+      expect(await registerEntries(seeded.proposalId)).toEqual(['S-3', 'S-12']);
+    });
+
+    it('leaves the original penalty when the second reader objects', async () => {
+      const seeded = await disputedAt(MATERIAL);
+      await recalculateToOne(adjudicator, seeded);
+
+      await arbitration.second(lead, seeded.organizationId, seeded.proposalId, 'OBJECTED', NOTE);
+
+      expect(await proposalRow(seeded.proposalId)).toEqual({
+        status: 'UNDER_REVIEW',
+        penalty_amount: MATERIAL.toString(),
+        outcome: null,
+      });
+    });
+  });
+
+  /** Security review H-4: a case two people upheld is not one person's to cancel. */
+  describe('suspending an upheld case', () => {
+    async function upheld() {
+      const seeded = await disputed();
+      await arbitration.decide(adjudicator, seeded.organizationId, seeded.proposalId, {
+        outcome: ArbitrationOutcome.UPHELD,
+        reasonCodes: ['RATE_GENUINELY_EXCEEDED'],
+        note: NOTE,
+      });
+      expect((await proposalRow(seeded.proposalId)).status).toBe('UPHELD');
+      return seeded;
+    }
+
+    const suspend = (
+      seeded: { organizationId: string; proposalId: string },
+      approver: OperatorSession | null,
+    ) =>
+      arbitration.suspend(
+        lead,
+        seeded.organizationId,
+        seeded.proposalId,
+        'OPERATOR_HOLD',
+        'held while the mapping is checked',
+        null,
+        null,
+        approver,
+      );
+
+    it('refuses without an approver, and with an SRE approver, writing nothing', async () => {
+      const seeded = await upheld();
+      const sre = await seedOperator(`ops-sre-${randomUUID()}`, [OperatorRole.SRE]);
+
+      await expect(suspend(seeded, null)).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_SECOND_APPROVER_REQUIRED,
+      });
+      await expect(suspend(seeded, sre)).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED,
+        statusCode: 403,
+      });
+      expect((await proposalRow(seeded.proposalId)).status).toBe('UPHELD');
+      expect(await registerEntries(seeded.proposalId)).toEqual(['S-3']);
+    });
+
+    it('suspends with an adjudicator as approver, and the register names them', async () => {
+      const seeded = await upheld();
+
+      await suspend(seeded, adjudicator);
+
+      expect((await proposalRow(seeded.proposalId)).status).toBe('CANCELLED');
+      expect(
+        await one<{ approver_operator_id: string; approval_mode: string }>(
+          `SELECT approver_operator_id, approval_mode FROM override_log_entries
+            WHERE target_id = $1 AND code = 'S-1'`,
+          [seeded.proposalId],
+        ),
+      ).toEqual({ approver_operator_id: adjudicator.operatorId, approval_mode: 'TWO_PERSON' });
+    });
+
+    it('still suspends a PROPOSED case alone', async () => {
+      const seeded = await proposed();
+
+      await suspend(seeded, null);
+
+      expect((await proposalRow(seeded.proposalId)).status).toBe('CANCELLED');
+    });
+  });
+
+  /** Security review L-3: the whole claim is one guarded transaction. */
+  describe('claim, in one transaction', () => {
+    it('re-assigns a case already UNDER_REVIEW and records it once', async () => {
+      const seeded = await disputed();
+      await arbitration.claim(adjudicator, seeded.organizationId, seeded.proposalId);
+
+      await arbitration.claim(lead, seeded.organizationId, seeded.proposalId);
+
+      expect((await proposalRow(seeded.proposalId)).status).toBe('UNDER_REVIEW');
+      expect((await disputeRow(seeded.disputeId)).assigned_operator_id).toBe(lead.operatorId);
+      expect(await eventKinds(seeded.proposalId)).toEqual([
+        'DISPUTE_FILED',
+        'ASSIGNED',
+        'ASSIGNED',
+      ]);
+    });
+  });
 });
