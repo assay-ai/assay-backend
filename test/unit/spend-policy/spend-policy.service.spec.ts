@@ -336,7 +336,7 @@ describe('SpendPolicyService.patch', () => {
       transactionOptions: { updateAffected: 0 },
     });
 
-    const code = await errorCodeOf(() => service.patch(ORG, AGENT, {}, ACTOR));
+    const code = await errorCodeOf(() => service.patch(ORG, AGENT, { paused: true }, ACTOR));
 
     expect(code).toBe(SpendPolicyErrorCode.SPEND_POLICY_CONCURRENT_MODIFICATION);
   });
@@ -420,9 +420,65 @@ describe('SpendPolicyService.patch — audit log (BUG-R2-B4-01)', () => {
       transactionOptions: { updateAffected: 0 },
     });
 
-    await errorCodeOf(() => service.patch(ORG, AGENT, {}, ACTOR));
+    await errorCodeOf(() => service.patch(ORG, AGENT, { paused: true }, ACTOR));
 
     expect(audit.record).not.toHaveBeenCalled();
+  });
+});
+
+/**
+ * BUG-R8-A-01: a PATCH whose values equal the live policy used to supersede it
+ * with an identical version and write an audit entry whose only "change" was
+ * `policyVersion 18 → 19`.
+ */
+describe('SpendPolicyService.patch — a request that changes nothing (BUG-R8-A-01)', () => {
+  const current = () =>
+    policyRow({ policyVersion: 18, dailyCap: '10000000', allowedTools: ['search'], paused: false });
+
+  it.each([
+    ['the same value for one field', { dailyCap: '10000000' }],
+    ['an empty body', {}],
+    ['every field restated', { perCallMax: '500000', dailyCap: '10000000', paused: false }],
+    ['the same allowlist', { allowedTools: ['search'] }],
+    ['null for a limit that is already unset', { maxSpendPerHour: null }],
+    ['the same asset', { assetId: USDC, decimals: DECIMALS }],
+    ['only a changedBy, which is ignored', { changedBy: 'someone@example.com' }],
+  ])('writes no version and no audit entry for %s', async (_name, patch) => {
+    const row = current();
+    const { service, dataSource, tx, audit } = build({ findOneResults: [row] });
+
+    const result = await service.patch(ORG, AGENT, patch, ACTOR);
+
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(tx.insertValues).toBeUndefined();
+    expect(audit.record).not.toHaveBeenCalled();
+    // The caller is answered with the policy that is still live.
+    expect(result).toMatchObject({ id: row.id, policyVersion: 18, changedBy: row.changedBy });
+  });
+
+  it.each([
+    ['a different value', { dailyCap: '10000001' }],
+    ['a cleared limit', { dailyCap: null }],
+    ['a narrower allowlist', { allowedTools: [] }],
+    ['a pause', { paused: true }],
+    ['a reason, which is itself something to record', { changeReason: 'reviewed, unchanged' }],
+  ])('still writes a version for %s', async (_name, patch) => {
+    const { service, tx, audit } = build({ findOneResults: [current()] });
+
+    await service.patch(ORG, AGENT, patch, ACTOR);
+
+    expect(tx.insertValues).toMatchObject({ policyVersion: 19 });
+    expect(audit.record).toHaveBeenCalledTimes(1);
+  });
+
+  it('still writes the first agent-scoped version when it restates the organization default', async () => {
+    const orgDefault = policyRow({ agentId: null, policyVersion: 2, dailyCap: '10000000' });
+    const { service, tx, audit } = build({ findOneResults: [null, orgDefault] });
+
+    await service.patch(ORG, AGENT, { dailyCap: '10000000' }, ACTOR);
+
+    expect(tx.insertValues).toMatchObject({ agentId: AGENT, policyVersion: 1 });
+    expect(audit.record.mock.calls[0][1]).toMatchObject({ action: 'spend_policy.created' });
   });
 });
 
