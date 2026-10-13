@@ -74,6 +74,13 @@ export enum CallReconciliationClass {
    * redemption that never lands stays visible rather than reading as paid.
    */
   PAID_AWAITING_REDEMPTION = 'PAID_AWAITING_REDEMPTION',
+  /**
+   * Rail B: verified and credited, but the voucher could never be redeemed
+   * (`DelegateIsRevoked`, …), so the credit came out of platform funds and no
+   * platform fee was taken. Reported apart from `PAID_CREDITED` because the
+   * chain holds no redemption for it.
+   */
+  PLATFORM_ABSORBED = 'PLATFORM_ABSORBED',
   /** A `DATA_RESULT` that verification found `FAIL` — not credited, a strike recorded. */
   PAID_UNCREDITED = 'PAID_UNCREDITED',
   /** The relay path — no payment machinery ever ran, regardless of what `status` says. */
@@ -106,6 +113,15 @@ export interface CallReconciliationCandidate {
    * redeemed on chain. Optional; absent means not awaiting.
    */
   readonly awaitingRedemption?: boolean;
+  /** Credited from platform funds (`platform_absorbed:` credit). Optional; absent means not. */
+  readonly platformAbsorbed?: boolean;
+  /**
+   * Whether the `SETTLED` intent's hold was committed, which is when
+   * `PROVIDER_CREDIT` is written (`CREDITED_SQL`). Optional; absent means
+   * credited. `false` is a settled row nobody was credited for — no hold, or a
+   * commit that failed after the status moved.
+   */
+  readonly credited?: boolean;
   /**
    * Whether this call was excluded from its SLA window (griefing
    * attribution). Optional; absent means not excluded. Kept as a real
@@ -140,8 +156,13 @@ export function classifyForReconciliation(
 
   switch (candidate.status) {
     case 'SETTLED':
-      return candidate.awaitingRedemption
-        ? CallReconciliationClass.PAID_AWAITING_REDEMPTION
+      if (candidate.awaitingRedemption) return CallReconciliationClass.PAID_AWAITING_REDEMPTION;
+      // Settled with no credit behind it: the money side is unresolved, and
+      // calling it PAID_CREDITED would claim a credit the ledger does not hold
+      // (BUG-R2-V3-03). The earnings report counts it as neither earned nor withheld.
+      if (candidate.credited === false) return CallReconciliationClass.PENDING;
+      return candidate.platformAbsorbed
+        ? CallReconciliationClass.PLATFORM_ABSORBED
         : CallReconciliationClass.PAID_CREDITED;
     case 'REFUNDED':
       return CallReconciliationClass.PAID_UNCREDITED;

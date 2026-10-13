@@ -153,6 +153,18 @@ export const PLATFORM_ABSORBED_SQL =
   `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
   `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')`;
 
+/**
+ * The same credit as {@link PLATFORM_ABSORBED_SQL}, read for its reason (the
+ * program error after the prefix, e.g. `DelegateIsRevoked`); `NULL` when the
+ * call was not absorbed. One credit per intent (partial unique index).
+ */
+export const PLATFORM_ABSORBED_REASON_SQL =
+  `(SELECT substring(absorbed.chain_tx_ref FROM 19) ` + // after the 18-char prefix
+  `FROM ledger_entries absorbed ` +
+  `WHERE absorbed.organization_id = intent.provider_id AND absorbed.intent_id = intent.id ` +
+  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
+  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%' LIMIT 1)`;
+
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
   readonly id: string;
@@ -171,6 +183,10 @@ export interface CallExportRow {
   readonly platformFee: string;
   /** Rail B, hold still open: settled by the verdict, not yet redeemed on chain. */
   readonly awaitingRedemption: boolean;
+  /** {@link CREDITED_SQL}: the hold was committed. Only meaningful on a `SETTLED` row. */
+  readonly credited: boolean;
+  /** Why the credit came out of platform funds, or `null` — see {@link PLATFORM_ABSORBED_REASON_SQL}. */
+  readonly absorbedReason: string | null;
   readonly createdAt: Date;
 }
 
@@ -1141,6 +1157,8 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.providerAmount', 'providerAmount')
       .addSelect('intent.platformFee', 'platformFee')
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
+      .addSelect(CREDITED_SQL, 'credited')
+      .addSelect(PLATFORM_ABSORBED_REASON_SQL, 'absorbedReason')
       .addSelect('intent.createdAt', 'createdAt');
 
     if (after) {
@@ -1170,6 +1188,8 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         providerAmount: string;
         platformFee: string;
         awaitingRedemption: boolean | string;
+        credited: boolean | string;
+        absorbedReason: string | null;
         createdAt: Date;
       }>();
 
@@ -1177,6 +1197,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       ...row,
       decimals: Number(row.decimals),
       awaitingRedemption: row.awaitingRedemption === true || row.awaitingRedemption === 'true',
+      credited: row.credited === true || row.credited === 'true',
     }));
   }
 

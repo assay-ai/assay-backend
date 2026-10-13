@@ -1003,6 +1003,9 @@ interface AttemptOutcome {
  * for chain. A single non-chain rejection means some provider was reachable
  * and failed for a reason the buyer cannot fix by funding another chain, and
  * sending them to do so would be a wrong instruction.
+ *
+ * `PAYMENT_WITHDRAWAL_PENDING` when any candidate was withheld because the
+ * buyer has a standing withdrawal request on the chain it would settle on.
  */
 function unroutable(
   toolId: string,
@@ -1021,6 +1024,17 @@ function unroutable(
       toolChains: [...new Set(rejected.flatMap((r) => [...r.candidate.settlementChains]))],
       priceMinor: dearest?.amount ?? null,
       decimals: dearest?.decimals ?? null,
+    });
+  }
+
+  // A standing withdrawal is the buyer's own state, not missing supply, so it
+  // is named as such: `TOOL_NO_ELIGIBLE_BINDING` sends an agent to look for a
+  // provider when the one thing that helps is its owner cancelling or
+  // completing the withdrawal.
+  if (rejected.some((r) => r.reason === IneligibilityReason.BUYER_WITHDRAWING)) {
+    return PaymentErrors.withdrawalPending({
+      tool: toolId,
+      chains: [...routing.withdrawingChains],
     });
   }
 

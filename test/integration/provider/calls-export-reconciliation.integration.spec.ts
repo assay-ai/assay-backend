@@ -16,6 +16,8 @@ import {
   PaymentIntentCallClass,
   PaymentIntentStatus,
 } from '@modules/payment/ports/payment.types';
+import { LedgerAccountId, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
+import { PLATFORM_ABSORBED_TX_REF_PREFIX } from '@modules/payment/services/voucher-redemption.service';
 import { CallReconciliationClass } from '@modules/provider/domain/call-reconciliation';
 import { GetProviderCallsExportQueryDto } from '@modules/provider/dto/get-provider-calls-export.dto';
 import {
@@ -302,5 +304,109 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
     expect(
       rows.every((row) => typeof classificationOf(row) === 'string' && classificationOf(row)),
     ).toBe(true);
+  });
+
+  it('a platform-absorbed call is PLATFORM_ABSORBED, with its reason and no fee', async () => {
+    const PROVIDER_ID = context.id('absorbed:provider');
+    const PROVIDER_ACCOUNT = context.account('absorbed-provider');
+    const AGENT_ACCOUNT = context.account('absorbed-agent');
+    await context.fund(AGENT_ACCOUNT, 100_000_000n);
+
+    const parties = {
+      agentAccount: AGENT_ACCOUNT,
+      providerId: PROVIDER_ID,
+      providerAccount: PROVIDER_ACCOUNT,
+    };
+    const settle = async (label: string) => {
+      const verifying = await driveToVerifying(await context.createIntent(label, parties));
+      return context.intents.resolve(
+        context.organizationId,
+        verifying.id,
+        PaymentIntentStatus.VERIFYING,
+        PaymentIntentStatus.SETTLED,
+      );
+    };
+
+    const redeemed = await settle('absorbed-redeemed');
+    await context.intents.commitRedeemedHold(
+      context.organizationId,
+      redeemed.id,
+      `redeem-${redeemed.id}`,
+    );
+
+    // What `VoucherRedemptionService.absorb` does for an unredeemable voucher.
+    const absorbed = await settle('absorbed-revoked');
+    await context.ledger.appendNow({
+      organizationId: PROVIDER_ID,
+      accountId: PROVIDER_ACCOUNT as LedgerAccountId,
+      entryType: LedgerEntryType.PROVIDER_CREDIT,
+      money: absorbed.providerAmount,
+      intentId: absorbed.id,
+      chainTxRef: `${PLATFORM_ABSORBED_TX_REF_PREFIX}DelegateIsRevoked`,
+    });
+    await context.intents.releaseHold({
+      organizationId: context.organizationId,
+      id: absorbed.id,
+      holdId: absorbed.holdId as string,
+    });
+
+    const times = [redeemed.createdAt, absorbed.createdAt].map((d) => d.getTime());
+    const from = new Date(Math.min(...times) - 1_000).toISOString();
+    const to = new Date(Math.max(...times) + 1_000).toISOString();
+
+    const result = await exportService.prepare(PROVIDER_ID, { from, to });
+    const rows: Array<ReadonlyArray<string | number | null>> = [];
+    for await (const row of result.rows) rows.push(row);
+
+    // 1 intent_id · 5 classification · 6 reason · 8 provider_amount · 9 platform_fee
+    const byIntent = new Map(rows.map((row) => [row[1], row]));
+    const absorbedRow = byIntent.get(absorbed.id);
+    expect(absorbedRow?.[5]).toBe(CallReconciliationClass.PLATFORM_ABSORBED);
+    expect(absorbedRow?.[6]).toBe('DelegateIsRevoked');
+    expect(absorbedRow?.[8]).toBe(absorbed.providerAmount.amount);
+    expect(absorbedRow?.[9]).toBe('0');
+    expect(byIntent.get(redeemed.id)?.[5]).toBe(CallReconciliationClass.PAID_CREDITED);
+
+    // The CSV's fees and amounts add up to the earnings report.
+    const earnings = await earningsService.getEarnings(PROVIDER_ID, {
+      from,
+      to,
+      groupBy: ProviderEarningsGroupBy.DAY,
+    });
+    const total = (column: number) =>
+      rows.reduce((sum, row) => sum + BigInt(row[column] as string), 0n).toString();
+    expect(total(9)).toBe(earnings.totals.platformFee?.amount);
+    expect(total(8)).toBe(earnings.totals.earned?.amount);
+    expect(earnings.totals.absorbed?.amount).toBe(absorbed.providerAmount.amount);
+  });
+
+  it('a settled call nobody was credited for is PENDING, not PAID_CREDITED', async () => {
+    const PROVIDER_ID = context.id('uncredited:provider');
+    // SETTLED with no hold at all — the shape a bulk seed writes, and what a
+    // failed commit leaves behind. The earnings report credits nothing for it.
+    const intent = await context.createIntent('uncredited-1', {
+      providerId: PROVIDER_ID,
+      providerAccount: context.account('uncredited-provider'),
+    });
+    await context.dataSource.query(`UPDATE payment_intents SET status = 'SETTLED' WHERE id = $1`, [
+      intent.id,
+    ]);
+
+    const from = new Date(intent.createdAt.getTime() - 1_000).toISOString();
+    const to = new Date(intent.createdAt.getTime() + 1_000).toISOString();
+    const result = await exportService.prepare(PROVIDER_ID, { from, to });
+    const rows: Array<ReadonlyArray<string | number | null>> = [];
+    for await (const row of result.rows) rows.push(row);
+
+    expect(rows).toHaveLength(1);
+    expect(rows[0][5]).toBe(CallReconciliationClass.PENDING);
+    expect(rows[0][6]).toBe('settled, no credit recorded');
+
+    const earnings = await earningsService.getEarnings(PROVIDER_ID, {
+      from,
+      to,
+      groupBy: ProviderEarningsGroupBy.DAY,
+    });
+    expect(earnings.totals.earned?.amount ?? '0').toBe('0');
   });
 });

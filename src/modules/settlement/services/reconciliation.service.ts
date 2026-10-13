@@ -7,7 +7,7 @@ import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-esc
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { ReconciliationRunRepository } from '@database/postgres/repositories/reconciliation-run.repository';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
-import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
+import { AccountId, AssetId, namespaceOf } from '@modules/chains/ports/caip.types';
 import { VAULT_PORT, VaultPort } from '@modules/chains/ports/vault.port';
 import {
   ESCROW_BALANCE_READER,
@@ -179,9 +179,24 @@ export class ReconciliationService {
     const difference = vaultAtomic - liabilities.total;
 
     const escrows = await this.walkEscrows(asset, decimals);
+    // On eip155 the vault IS the escrow contract, so what it holds beyond the
+    // buyer escrows the walk read is value in no `buyer_escrows` row. Only
+    // known when every escrow was read; Solana escrows sit outside the vault.
+    const outsideEscrows =
+      namespaceOf(asset) === 'eip155' && escrows.unreadable === 0
+        ? vaultAtomic - escrows.total
+        : null;
 
     const findings = [
-      ...this.checkReserves(asset, decimals, vault, vaultAtomic, liabilities, difference),
+      ...this.checkReserves(
+        asset,
+        decimals,
+        vault,
+        vaultAtomic,
+        liabilities,
+        difference,
+        outsideEscrows,
+      ),
       ...this.checkSnapshot(decimals, asset, books.total, snapshotTotal),
       ...this.checkBooks(decimals, asset, books),
       ...escrows.findings,
@@ -303,7 +318,7 @@ export class ReconciliationService {
       });
     }
 
-    return { findings, total, read, shortfalls };
+    return { findings, total, read, shortfalls, unreadable };
   }
 
   /**
@@ -448,6 +463,7 @@ export class ReconciliationService {
     vaultAtomic: bigint,
     liabilities: LedgerLiabilities,
     difference: bigint,
+    outsideEscrows: bigint | null = null,
   ): ReconciliationFinding[] {
     const details = {
       asset,
@@ -485,6 +501,10 @@ export class ReconciliationService {
 
     const tolerance = RECONCILIATION_SURPLUS_TOLERANCE_UNITS * 10n ** BigInt(decimals);
     if (difference > tolerance) {
+      // Where it sits, when that is known: held by the escrow contract but in
+      // no buyer escrow the platform mirrors (a direct deposit by a payer with
+      // no `buyer_escrows` row looks exactly like this).
+      const outside = outsideEscrows !== null && outsideEscrows > 0n ? outsideEscrows : null;
       return [
         {
           code: ReconciliationFindingCode.UNEXPLAINED_SURPLUS,
@@ -492,8 +512,16 @@ export class ReconciliationService {
           summary:
             `Vault ${vault} holds ${format(difference, decimals)} more than the ledger ` +
             `accounts for on ${asset} — value arrived without a journal entry. ` +
-            `Check for an uncredited deposit before assuming it is a stray transfer.`,
-          details: { ...details, surplus: difference.toString() },
+            (outside === null
+              ? `Check for an uncredited deposit before assuming it is a stray transfer.`
+              : `${format(outside, decimals)} of the vault is outside every buyer escrow the ` +
+                `platform mirrors: look for a Deposited event whose buyer has no buyer_escrows ` +
+                `row before assuming it is a stray transfer.`),
+          details: {
+            ...details,
+            surplus: difference.toString(),
+            ...(outside === null ? {} : { outsideBuyerEscrows: outside.toString() }),
+          },
         },
       ];
     }
@@ -803,6 +831,8 @@ interface EscrowWalk {
   /** How many were read — never how many rows exist, which is a different number. */
   readonly read: number;
   readonly shortfalls: number;
+  /** Rows whose escrow could not be read — `total` is then a lower bound. */
+  readonly unreadable: number;
 }
 
 /** A run with no figures is a run that could not complete. */

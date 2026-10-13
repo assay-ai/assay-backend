@@ -390,6 +390,12 @@ describe('rail B over MCP', () => {
         retryable: true,
         retryAfter: 7,
       });
+      // BUG-R3-J-04: the pause outlives the on-chain landing by a safety
+      // margin, so the text must not claim the change has yet to land.
+      const text = (paused.content as Array<{ text: string }>)[0].text;
+      expect(text).toContain('retry in about 7 s');
+      expect(text).toContain('short safety margin after the change lands on chain');
+      expect(text).not.toContain('until the change lands');
     });
 
     it('carries the requirement in _meta[x402/paymentRequired] and takes the voucher back in _meta', async () => {

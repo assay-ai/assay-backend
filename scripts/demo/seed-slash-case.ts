@@ -233,7 +233,13 @@ async function main(): Promise<void> {
   const runSalt = readRunSalt();
   log(`run salt ${runSalt} — pass \`--run ${runSalt}\` to re-derive these ids`);
 
-  const app = await NestFactory.createApplicationContext(SlashCaseSeedModule, { logger: false });
+  // `abortOnError: false` makes a failed boot (missing env, unreachable DB)
+  // reject into the catch below; with the logger off, Nest's default is to
+  // exit 1 without printing anything.
+  const app = await NestFactory.createApplicationContext(SlashCaseSeedModule, {
+    logger: false,
+    abortOnError: false,
+  });
 
   const poster = app.get(SlaWindowService);
   // Kept: `openFromStrike` is reached through SLASH_PROPOSAL_OPENER, not this.
@@ -517,6 +523,9 @@ function log(line: string): void {
 }
 
 void main().catch((error: unknown) => {
+  console.error(
+    'demo:slash-case failed — it needs the API environment (.env or exported) and its database:',
+  );
   console.error(error);
   process.exit(1);
 });

@@ -237,7 +237,7 @@ export class ProviderVerdictService {
   private async fetchRetentionByVerdictIds(
     providerId: string,
     verdictIds: readonly string[],
-  ): Promise<Map<string, 'RAW' | 'DIGESTED'>> {
+  ): Promise<Map<string, VerdictRetention>> {
     if (verdictIds.length === 0) return new Map();
 
     const packs = await this.evidencePacks
@@ -253,25 +253,35 @@ export class ProviderVerdictService {
     const packIds = packs.map((pack) => pack.id);
     const bodies = await this.evidenceBodies
       .createQueryBuilder('body')
-      .select(['body.packId'])
+      .select(['body.packId', 'body.expiresAt'])
       .where('body.organizationId IS NOT NULL')
       .andWhere('body.packId IN (:...packIds)', { packIds })
       .getMany();
 
-    const packIdsWithBody = new Set(bodies.map((body) => body.packId));
-    const result = new Map<string, 'RAW' | 'DIGESTED'>();
+    const expiryByPackId = new Map(bodies.map((body) => [body.packId, body.expiresAt]));
+    const result = new Map<string, VerdictRetention>();
     for (const pack of packs) {
-      result.set(pack.verdictId, packIdsWithBody.has(pack.id) ? 'RAW' : 'DIGESTED');
+      const bodiesExpireAt = expiryByPackId.get(pack.id) ?? null;
+      result.set(pack.verdictId, {
+        state: expiryByPackId.has(pack.id) ? 'RAW' : 'DIGESTED',
+        bodiesExpireAt,
+      });
     }
     return result;
   }
+}
+
+/** A sealed pack's body state, and when a still-kept body stops being kept. */
+interface VerdictRetention {
+  readonly state: 'RAW' | 'DIGESTED';
+  readonly bodiesExpireAt: Date | null;
 }
 
 function toListItemDto(
   record: VerificationRecordEntity,
   intent: PaymentIntentEntity | null,
   slaCall: SlaWindowCallEntity | null,
-  retentionState: 'RAW' | 'DIGESTED' | null,
+  retention: VerdictRetention | null,
 ): ProviderVerdictListItemDto {
   return {
     id: record.id,
@@ -290,7 +300,8 @@ function toListItemDto(
     bindingVersion: null,
     windowId: slaCall?.windowId ?? null,
     countedTowardWindow: slaCall?.countedAsQuality ?? null,
-    retentionState,
+    retentionState: retention?.state ?? null,
+    bodiesExpireAt: retention?.bodiesExpireAt ?? null,
     createdAt: record.createdAt,
   };
 }

@@ -69,6 +69,8 @@ import { WebSocketBoardModule } from '@websocket/websocket-board.module';
 // Controllers
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
 
+import { PublicFeaturesController } from './public-features.controller';
+
 // Providers
 import { SingleFlightService } from '@shared/services/single-flight.service';
 import { NetworkModule } from '@shared/network/network.module';
@@ -173,6 +175,6 @@ import { NetworkModule } from '@shared/network/network.module';
     ...(areExamplesEnabled() ? [ExamplesApiModule] : []),
   ],
   providers: [SingleFlightService],
-  controllers: [HealthcheckController],
+  controllers: [HealthcheckController, PublicFeaturesController],
 })
 export class AppApiModule {}

@@ -75,6 +75,22 @@ export enum PaymentErrorCode {
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
 
+/**
+ * ` (maxPerWindow: 14353 left, in the payment asset's smallest units)`. The
+ * `allowed` context stays the bare atomic string for machines; the sentence is
+ * what a person reads, and a bare number there was read as dollars.
+ */
+function limitDetail(context?: Record<string, any>): string {
+  if (!context?.limit) return '';
+  if (context.allowed === undefined) return ` (${context.limit})`;
+  const amount = /^\d+$/.test(String(context.allowed));
+  const left = amount && context.limit === 'maxPerWindow' ? ' left' : '';
+  return (
+    ` (${context.limit}: ${context.allowed}${left}` +
+    `${amount ? `, in the payment asset's smallest units` : ''})`
+  );
+}
+
 export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
   paymentIntentNotFound: {
     code: PaymentErrorCode.PAYMENT_INTENT_NOT_FOUND,
@@ -141,9 +157,7 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     statusCode: 403,
     message: (context?: Record<string, any>) =>
       `This voucher exceeds what the payer authorised its delegate to spend` +
-      `${context?.limit ? ` (${context.limit}` : ''}` +
-      `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
-      `${context?.limit ? ')' : ''}; nothing was charged`,
+      `${limitDetail(context)}; nothing was charged`,
   },
   /**
    * A voucher the payer's OWN escrow limits would refuse at redemption: above
@@ -159,23 +173,24 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     statusCode: 403,
     message: (context?: Record<string, any>) =>
       `This voucher exceeds the payer's own escrow limit` +
-      `${context?.limit ? ` (${context.limit}` : ''}` +
-      `${context?.limit && context?.allowed !== undefined ? `: ${context.allowed}` : ''}` +
-      `${context?.limit ? ')' : ''}; nothing was charged`,
+      `${limitDetail(context)}; nothing was charged`,
   },
   /**
    * The payer is relaying a change that tightens its caps (its escrow limits,
    * or a delegate's caps, expiry or authority), and a voucher admitted now
    * could be one the new caps refuse at redemption (BUG-D1-07). Nothing was
    * charged and the voucher's seq is not spent; the same call can be retried
-   * once the change has landed, usually within seconds.
+   * once the change has landed and `VOUCHER_ADMISSION_CHAIN_LAG_MS` has passed
+   * (an RPC node may still answer with the old caps until then, BUG-R3-J-04).
    */
   voucherAdmissionPaused: {
     code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
     statusCode: 503,
     message: (context?: Record<string, any>) =>
-      `The payer is changing its payment limits right now, so no payment is accepted until the ` +
-      `change lands${context?.retryAfter ? ` (retry in about ${context.retryAfter} s)` : ''}; ` +
+      `The payer is tightening its payment limits. Payments are paused while the change is ` +
+      `relayed and for a short safety margin after the change lands on chain (about 30 s), so ` +
+      `that none is accepted under the old limits` +
+      `${context?.retryAfter ? ` (retry in about ${context.retryAfter} s)` : ''}; ` +
       `nothing was charged`,
   },
   /**
@@ -624,13 +639,18 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
    * it is open so the platform is not still taking money out of an escrow whose
    * owner has announced they are leaving. Vouchers already accepted are still
    * redeemed.
+   *
+   * Raised by the escrow spend gate (with `availableAt`) and by the router when
+   * a call is unroutable for this reason (with `chains`). The message addresses
+   * an agent that may not own the escrow, so it names who can clear it.
    */
   withdrawalPending: {
     code: PaymentErrorCode.PAYMENT_WITHDRAWAL_PENDING,
     statusCode: 409,
     message: (context?: Record<string, any>) =>
-      `A withdrawal is pending on this escrow` +
+      `A withdrawal is pending on the payer's escrow` +
+      `${context?.chains?.length ? ` on ${context.chains.join(', ')}` : ''}` +
       `${context?.availableAt ? `, available at ${context.availableAt}` : ''}` +
-      `; cancel it with request_withdraw(0) to resume paying calls`,
+      `; paid calls are refused until then — the escrow owner must cancel or complete it`,
   },
 });
