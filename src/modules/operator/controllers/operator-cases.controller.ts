@@ -204,13 +204,15 @@ export class OperatorCasesController {
    * Two-person, and the approver is resolved from a header rather than a body
    * field, so a client cannot name itself as its own checker by shape alone;
    * `chk_override_log_entries_no_self_approval` refuses it at the database in
-   * any case.
+   * any case. The approver must hold `ADJ` or `ADJL` (the register row's
+   * `approverRoles`).
    */
   @Post('cases/:proposalId/sweep')
   @Override('S-11')
   @RequireRoles(OperatorRole.ADJL)
   @ApiOperation({ summary: 'Open a fleet sweep from this decided case' })
   @ApiResponse({ status: 200, type: FleetSweepDto })
+  @ApiResponse({ status: 403, description: 'The second approver holds neither ADJ nor ADJL' })
   @ApiResponse({ status: 422, description: 'This outcome does not generalise' })
   async sweep(
     @CurrentOperator() operator: OperatorSession,

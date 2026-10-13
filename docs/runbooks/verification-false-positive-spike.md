@@ -124,7 +124,11 @@ the application layer. So the real branch is:
   Step 3 is **two-person** (override code `S-5`): the second operator's session token goes in the
   `X-Operator-Approver` header, and it must not be the same operator as the bearer token
   (`chk_override_log_entries_no_self_approval` refuses it at the database even if a client tried).
-  Step 1 is not — it builds and writes nothing.
+  Step 1 is not — it builds and writes nothing. Any other active operator may be the `S-5` approver.
+
+  A **fleet sweep** (`POST /operator/cases/:proposalId/sweep`, override code `S-11`) is two-person
+  the same way, with one more rule: its second approver must hold `ADJ` or `ADJL`. Any other
+  approver is refused with `403 OPERATOR_APPROVER_ROLE_REQUIRED` and no sweep is opened.
 
 ## 4b. The standing on-chain record, when nobody has executed it
 

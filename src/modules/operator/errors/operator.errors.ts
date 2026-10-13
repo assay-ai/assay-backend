@@ -18,6 +18,7 @@ export enum OperatorErrorCode {
   OPERATOR_UNKNOWN_OVERRIDE_CODE = 'OPERATOR_UNKNOWN_OVERRIDE_CODE',
   OPERATOR_OVERRIDE_NOT_IMPLEMENTED = 'OPERATOR_OVERRIDE_NOT_IMPLEMENTED',
   OPERATOR_SECOND_APPROVER_REQUIRED = 'OPERATOR_SECOND_APPROVER_REQUIRED',
+  OPERATOR_APPROVER_ROLE_REQUIRED = 'OPERATOR_APPROVER_ROLE_REQUIRED',
 }
 
 export type OperatorErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -119,5 +120,24 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
     statusCode: 409,
     message: (context?: Record<string, any>) =>
       `A second signature is required${context?.code ? ` for ${context.code}` : ''}`,
+  },
+  /**
+   * A second identity authenticated, and holds none of the roles the register
+   * row demands of its approver. Distinct from `roleRequired`, which is about
+   * the actor: an operator reading the refusal has to know which of the two
+   * people to replace.
+   */
+  approverRoleRequired: {
+    code: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) => {
+      const required = Array.isArray(context?.required) ? context.required.join(', ') : null;
+      const held = Array.isArray(context?.held) ? context.held.join(', ') || '(none)' : null;
+      return (
+        `The second approver must hold one of: ${required ?? 'a named role'}` +
+        `${context?.code ? ` (${context.code})` : ''}` +
+        `${held ? ` — held: ${held}` : ''}`
+      );
+    },
   },
 });

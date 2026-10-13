@@ -7,6 +7,7 @@ import { OverrideLogEntryRepository } from '@database/postgres/repositories/over
 
 import {
   ApprovalMode,
+  approverRolesSatisfy,
   lookupOverride,
   OperatorRole,
   OverrideDefinition,
@@ -246,6 +247,16 @@ export class OverrideLogService {
       }
       if (context.approver.operatorId === context.actor.operatorId) {
         throw OperatorErrors.selfApprovalRefused({ code: context.code });
+      }
+      // The session was resolved from the approver's own token, so it is an
+      // active operator; what is left to check is whether the row accepts
+      // their roles as a checker's.
+      if (!approverRolesSatisfy(definition, context.approver.roles as OperatorRole[])) {
+        throw OperatorErrors.approverRoleRequired({
+          code: context.code,
+          required: definition.approverRoles,
+          held: context.approver.roles,
+        });
       }
     }
 

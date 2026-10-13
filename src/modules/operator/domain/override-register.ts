@@ -81,6 +81,12 @@ export interface OverrideDefinition {
   readonly label: string;
   readonly roles: readonly OperatorRole[];
   readonly approval: ApprovalMode;
+  /**
+   * The roles the **second** identity must hold on a two-person occurrence —
+   * at least one of them. Absent means the row names none, and any other
+   * active operator may approve.
+   */
+  readonly approverRoles?: readonly OperatorRole[];
   readonly reversible: boolean;
   /** Whether a path that can cite this code has actually been built. */
   readonly implemented: boolean;
@@ -170,6 +176,10 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     label: 'Open a fleet sweep from a decided case',
     roles: [OperatorRole.ADJL],
     approval: ApprovalMode.TWO_PERSON,
+    // A sweep carries one conclusion to providers who never complained, so the
+    // checker has to be somebody who can read a case — not any operator who
+    // can authenticate.
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
     reversible: false,
     implemented: true,
   }),
@@ -388,4 +398,18 @@ export function rolesSatisfy(
 ): boolean {
   if (definition.roles.length === 0) return false;
   return definition.roles.some((required) => roles.includes(required));
+}
+
+/**
+ * True when `roles` may approve a two-person occurrence of the definition.
+ *
+ * A row that names no approver roles accepts any second operator, which is the
+ * rule every two-person row had before `approverRoles` existed.
+ */
+export function approverRolesSatisfy(
+  definition: OverrideDefinition,
+  roles: readonly OperatorRole[],
+): boolean {
+  if (!definition.approverRoles) return true;
+  return definition.approverRoles.some((required) => roles.includes(required));
 }

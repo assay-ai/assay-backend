@@ -10,6 +10,7 @@ import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.
 import { SlashProposalEventRepository } from '@database/postgres/repositories/slash-proposal-event.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { OperatorRole } from '@modules/operator/domain/override-register';
+import { OperatorErrorCode } from '@modules/operator/errors/operator.errors';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 import { ArbitrationOutcome, DisputeClaimType } from '@modules/slash/domain/arbitration';
@@ -355,6 +356,90 @@ describe('operator case actions, against a real database', () => {
         statusCode: 409,
       });
       expect((await proposalRow(seeded.proposalId)).status).toBe(SlashProposalStatus.PROPOSED);
+    });
+  });
+
+  /**
+   * `S-11` — the second approver of a fleet sweep must hold `ADJ` or `ADJL`.
+   * A sweep carries one conclusion to providers who never complained, so
+   * authenticating as *an* operator is not enough to be its checker.
+   */
+  describe('the fleet sweep approver', () => {
+    const SWEEP = {
+      defectKey: 'mapping/no-such-defect',
+      lookbackHours: 24,
+      reasonCode: 'MAPPING_REGRESSION',
+      note: NOTE,
+    };
+
+    /** A case two adjudicators overturned as a platform defect — a sweepable source. */
+    async function overturnedAsPlatformDefect() {
+      const seeded = await disputed();
+      await arbitration.decide(adjudicator, seeded.organizationId, seeded.proposalId, {
+        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+        reasonCodes: ['MAPPING_REGRESSION'],
+        note: NOTE,
+      });
+      await arbitration.second(lead, seeded.organizationId, seeded.proposalId, 'SIGNED', NOTE);
+      expect((await proposalRow(seeded.proposalId)).status).toBe('OVERTURNED');
+      return seeded;
+    }
+
+    const sweepCount = async () =>
+      (await one<{ count: string }>(`SELECT count(*)::text AS count FROM fleet_sweeps`, [])).count;
+
+    it.each([[OperatorRole.POL], [OperatorRole.SRE]])(
+      'refuses a %s approver and opens no sweep',
+      async (role) => {
+        const seeded = await overturnedAsPlatformDefect();
+        const approver = await seedOperator(`ops-${role.toLowerCase()}-${randomUUID()}`, [role]);
+        const sweepsBefore = await sweepCount();
+        const registerBefore = await registerEntries(seeded.proposalId);
+
+        await expect(
+          execution.openSweep(lead, approver, seeded.organizationId, seeded.proposalId, SWEEP),
+        ).rejects.toMatchObject({
+          errorCode: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED,
+          statusCode: 403,
+          message: `The second approver must hold one of: ADJ, ADJL (S-11) — held: ${role}`,
+        });
+
+        expect(await sweepCount()).toBe(sweepsBefore);
+        expect(await registerEntries(seeded.proposalId)).toEqual(registerBefore);
+      },
+    );
+
+    it('accepts an ADJ approver, and the register names them', async () => {
+      const seeded = await overturnedAsPlatformDefect();
+      const sweepsBefore = Number(await sweepCount());
+
+      const sweep = await execution.openSweep(
+        lead,
+        adjudicator,
+        seeded.organizationId,
+        seeded.proposalId,
+        SWEEP,
+      );
+
+      expect(sweep.sourceProposalId).toBe(seeded.proposalId);
+      expect(Number(await sweepCount())).toBe(sweepsBefore + 1);
+      expect(
+        await one<{ approver_operator_id: string; approval_mode: string }>(
+          `SELECT approver_operator_id, approval_mode FROM override_log_entries
+            WHERE target_id = $1 AND code = 'S-11'`,
+          [seeded.proposalId],
+        ),
+      ).toEqual({ approver_operator_id: adjudicator.operatorId, approval_mode: 'TWO_PERSON' });
+    });
+
+    it('still refuses the actor as their own approver', async () => {
+      const seeded = await overturnedAsPlatformDefect();
+
+      await expect(
+        execution.openSweep(lead, lead, seeded.organizationId, seeded.proposalId, SWEEP),
+      ).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_SELF_APPROVAL_REFUSED,
+      });
     });
   });
 });
