@@ -170,6 +170,22 @@ describe('pro-rata EVM slash, against a real database', () => {
       );
     }
 
+    // What `EvmSlashProposalWatcher` (review H-1) looks records up by: across
+    // tenants, by on-chain request id.
+    const known = await services.partsRepository.findByChainRequestIds([
+      ...parts.map((part) => part.chainRequestId),
+      'f'.repeat(64),
+    ]);
+    expect(
+      known
+        .map((part) => [part.chainRequestId, part.beneficiaryAccount, part.penaltyAmount])
+        .sort(),
+    ).toEqual(
+      parts
+        .map((part) => [part.chainRequestId, part.beneficiaryAccount, part.penaltyAmount])
+        .sort(),
+    );
+
     const proposal = await load(seeded);
     expect(proposal.chainStatus).toBe('PENDING');
     expect(proposal.chainReserved).toBe('250001');

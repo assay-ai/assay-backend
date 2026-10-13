@@ -91,6 +91,33 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
     );
   }
 
+  /**
+   * The stored parts behind these on-chain request ids, across every tenant —
+   * for `EvmSlashProposalWatcher`, which reads `SlashProposed` events and has
+   * no tenant. `chainRequestIds` are 64 lower-case hex characters, no `0x`.
+   */
+  async findByChainRequestIds(
+    chainRequestIds: readonly string[],
+  ): Promise<
+    Pick<
+      SlashProposalPartEntity,
+      'organizationId' | 'proposalId' | 'chainRequestId' | 'beneficiaryAccount' | 'penaltyAmount'
+    >[]
+  > {
+    if (chainRequestIds.length === 0) return [];
+    return this.manager
+      .createQueryBuilder(SlashProposalPartEntity, 'part')
+      .select([
+        'part.organizationId',
+        'part.proposalId',
+        'part.chainRequestId',
+        'part.beneficiaryAccount',
+        'part.penaltyAmount',
+      ])
+      .where('part.chain_request_id IN (:...ids)', { ids: [...chainRequestIds] })
+      .getMany();
+  }
+
   async updatePart(
     organizationId: string,
     id: string,

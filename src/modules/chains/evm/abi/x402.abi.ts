@@ -158,6 +158,16 @@ export const X402_STAKE_SLASH_ABI = parseAbi([
 ]);
 
 /**
+ * `SlashProposed` alone, for `EvmSlashProposalWatcher` (review H-1), which
+ * reads every record on chain to find ones this platform did not plan. Kept
+ * apart from {@link X402_STAKE_SLASH_ABI} so the slash WRITES stay reachable
+ * from the slash executor only: this constant holds an event and no function.
+ */
+export const X402_SLASH_PROPOSED_EVENT_ABI = parseAbi([
+  'event SlashProposed(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 reserved, uint64 capAllowance, uint64 pendingSlash, uint64 proposedAt, uint64 executableAt)',
+]);
+
+/**
  * `Multicall3.aggregate3` — the one batching door. Each call carries
  * `allowFailure: true`, so one refused judgement does not revert the others;
  * the per-call result is learned by simulating the batch first (`eth_call`

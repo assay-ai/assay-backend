@@ -108,3 +108,40 @@ an environment variable, and it is the only thing that actually stops money movi
 
 Take a chain out of `ENABLED_CHAINS` when this deployment should no longer offer it — a decommission,
 a split of traffic between deployments. Pause on chain when something is wrong.
+
+## A slash record this platform did not plan
+
+**Alerts:** `slash_proposal_unknown` and `slash_proposal_mismatch` (CRITICAL), from
+`EvmSlashProposalWatcher` in the scheduler. Every two minutes it reads `SlashProposed` events from the
+stake contract of each enabled `eip155` chain (at most 10,000 blocks per pass, from a cursor kept in
+Redis) and compares each record with `slash_proposal_parts`:
+
+- `slash_proposal_unknown`: no part has this `chain_request_id`. The backend writes a part before it
+  signs anything, so the record was signed outside this backend's planner.
+- `slash_proposal_mismatch`: a part exists, but the record's beneficiary or penalty differs from it.
+
+`slash_watch_unreadable` (WARN) means the events could not be read, so nothing is being watched on
+that chain until it clears. The watcher only reads; it never signs or sends.
+
+**Treat either CRITICAL alert as a compromised verifier key or a compromised database.** A valid
+attestation is all `proposeSlash` checks, and the record can name any beneficiary.
+
+**The window is 72 hours.** Nothing moves at `proposeSlash`. Anyone can call `executeSlash` once the
+record's `executableAt` (in the alert details) has passed, 72 hours after the proposal, and then up to
+`slashCapBps` of the provider's stake per day moves, 60% of it to the named beneficiary. Act before
+`executableAt`; do not wait for business hours.
+
+Response, from the admin hardware wallet (the backend holds no admin key):
+
+1. **`X402Config.revokeVerifier(<verifier>)`** with the `verifier` from the alert. Execution re-checks
+   the key, so this voids every pending record that key signed, including any not yet alerted, and
+   stops new ones. Afterwards anyone can call `expireSlash(requestId)` to release the reservations.
+2. If the scope is unclear, or more than one key is involved: **`X402Config.setPaused(true)`**. It
+   blocks `proposeSlash` and `executeSlash` (and deposits and redemptions; buyers can still withdraw).
+3. For a single record when the key itself is still trusted (for example a mismatch traced to a
+   database edit): **`X402Stake.cancelSlash(<requestId>)`**.
+
+Then: register a fresh verifier key (`yarn verifier:registry`), rotate the database and server
+credentials if the cause is not yet known, check the stored parts of every open case against the
+chain before unpausing, and write up the incident. A record the platform did plan never raises these
+alerts, so a false positive points at a bug in the watcher or in the part rows, not at noise.
