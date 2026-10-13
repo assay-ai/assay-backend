@@ -13,6 +13,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { Request } from 'express';
 
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
+import { RequestContext } from '@shared/observability';
 import { CurrentOperator, OperatorAuthGuard, OperatorRolesGuard, RequireRoles } from '@shared/auth';
 
 import { OperatorRole } from '../domain/override-register';
@@ -142,9 +143,8 @@ export class OperatorCasesController {
     @CurrentOperator() operator: OperatorSession,
     @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: DecideCaseBodyDto,
-    @Req() request: Request,
   ) {
-    return this.cases.decide(operator, proposalId, body, requestIdOf(request));
+    return this.cases.decide(operator, proposalId, body, requestIdOf());
   }
 
   /** `S-12` — countersign, or object. An objection returns the case undecided. */
@@ -156,9 +156,8 @@ export class OperatorCasesController {
     @CurrentOperator() operator: OperatorSession,
     @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: SecondSignatureBodyDto,
-    @Req() request: Request,
   ) {
-    return this.cases.second(operator, proposalId, body, requestIdOf(request));
+    return this.cases.second(operator, proposalId, body, requestIdOf());
   }
 
   /**
@@ -183,7 +182,7 @@ export class OperatorCasesController {
     @Body() body: SuspendProposalBodyDto,
     @Req() request: Request,
   ) {
-    return this.cases.suspend(operator, proposalId, body, request, requestIdOf(request));
+    return this.cases.suspend(operator, proposalId, body, request, requestIdOf());
   }
 
   /**
@@ -204,9 +203,8 @@ export class OperatorCasesController {
     @CurrentOperator() operator: OperatorSession,
     @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: ExtendDeadlineBodyDto,
-    @Req() request: Request,
   ) {
-    return this.cases.extendDeadline(operator, proposalId, body, requestIdOf(request));
+    return this.cases.extendDeadline(operator, proposalId, body, requestIdOf());
   }
 
   /**
@@ -234,7 +232,7 @@ export class OperatorCasesController {
     @Body() body: OpenFleetSweepBodyDto,
     @Req() request: Request,
   ): Promise<FleetSweepDto> {
-    return this.cases.openSweep(operator, proposalId, body, request, requestIdOf(request));
+    return this.cases.openSweep(operator, proposalId, body, request, requestIdOf());
   }
 
   /**
@@ -279,7 +277,7 @@ export class OperatorCasesController {
     @Body() body: CompensatedBodyDto,
     @Req() request: Request,
   ) {
-    return this.cases.compensated(operator, proposalId, body, request, requestIdOf(request));
+    return this.cases.compensated(operator, proposalId, body, request, requestIdOf());
   }
 
   /**
@@ -308,15 +306,11 @@ export class OperatorCasesController {
 }
 
 /**
- * The request id, for cross-system tracing on the override row.
- *
- * Read off the header the platform already sets rather than generated here: an
- * id minted at this layer would trace the override to nothing upstream of it,
- * which is the half of the trace an incident actually needs.
+ * The request id for the override row: the one this server minted for the
+ * request (review L-7), never the caller's `x-request-id`, so a client cannot
+ * point the entry at an unrelated trace. Log lines of the same request carry
+ * it as `serverRequestId` beside the caller's `requestId`.
  */
-function requestIdOf(request: Request): string | null {
-  const header = request.headers['x-request-id'];
-  if (typeof header === 'string') return header.slice(0, 64);
-  if (Array.isArray(header) && header.length > 0) return header[0].slice(0, 64);
-  return null;
+function requestIdOf(): string | null {
+  return RequestContext.getServerRequestId();
 }
