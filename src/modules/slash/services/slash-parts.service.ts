@@ -780,6 +780,31 @@ export class SlashPartsService {
   }
 
   /**
+   * When every standing part of the case can be expired (audit E-8): a part
+   * `DISPUTED` on chain at `disputedAt + 30 d`, a `PENDING` one — including a
+   * part that was disputed and then upheld — at its own `executableAt + 7 d`.
+   * The latest of those, or `null` when nothing stands. Reads the stored
+   * parts; call after {@link readRecord} has brought them up to date.
+   */
+  async expirableAt(proposal: SlashProposalEntity): Promise<Date | null> {
+    const parts = await this.parts.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      proposal.chainEpoch,
+    );
+    const doors = parts.flatMap((part) => {
+      if (part.chainStatus === 'DISPUTED' && part.chainDisputedAt) {
+        return [part.chainDisputedAt.getTime() + DISPUTE_TIMEOUT_MS];
+      }
+      if (part.chainStatus === 'PENDING' && part.chainExecutableAt) {
+        return [part.chainExecutableAt.getTime() + SLASH_EXECUTION_GRACE_MS_FOR_PARTS];
+      }
+      return [];
+    });
+    return doors.length > 0 ? new Date(Math.max(...doors)) : null;
+  }
+
+  /**
    * The admin's unsigned `cancelSlash` for the FIRST part still pending. The
    * case stays `CANCEL_REQUESTED` until every part has left `Pending`, so the
    * operator route hands out the next part's intent on the next request.
