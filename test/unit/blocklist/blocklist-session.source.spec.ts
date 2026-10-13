@@ -1,4 +1,5 @@
-import { ExecutionContext } from '@nestjs/common';
+import { Controller, ExecutionContext, Post } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 
 import { AccountErrorCode } from '@modules/account/errors/account.errors';
 import { AuthErrorCode } from '@modules/auth/errors/auth.errors';
@@ -7,7 +8,13 @@ import { BlocklistSessionSource } from '@modules/blocklist/services/blocklist-se
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { McpController } from '@modules/mcp/controllers/mcp.controller';
 import { McpCallerKind, McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
-import { SESSION_REQUEST_KEY, SessionAuthGuard } from '@shared/auth';
+import { ProviderSlashRequestsController } from '@modules/slash/controllers/provider-slash-requests.controller';
+import {
+  BLOCKED_SESSION_READ_ONLY_METADATA,
+  BlockedSessionReadOnly,
+  SESSION_REQUEST_KEY,
+  SessionAuthGuard,
+} from '@shared/auth';
 
 import { blocklistOf } from '../helpers/blocklist';
 
@@ -105,20 +112,34 @@ describe('BlocklistSessionSource', () => {
   });
 });
 
-describe('SessionAuthGuard on a blocked person', () => {
-  function context(method: string) {
-    const request: Record<string, unknown> = { method, headers: { authorization: 'Bearer t' } };
-    return {
-      request,
-      context: {
-        switchToHttp: () => ({ getRequest: () => request }),
-      } as unknown as ExecutionContext,
-    };
-  }
+/** A controller with one route marked read-only and one not, for the guard below. */
+@Controller('test')
+class RoutesUnderTest {
+  @Post('read-only')
+  @BlockedSessionReadOnly()
+  readOnly(): void {}
 
+  @Post('write')
+  write(): void {}
+}
+
+function context(method: string, handler: keyof RoutesUnderTest = 'write') {
+  const request: Record<string, unknown> = { method, headers: { authorization: 'Bearer t' } };
+  return {
+    request,
+    context: {
+      switchToHttp: () => ({ getRequest: () => request }),
+      getHandler: () => RoutesUnderTest.prototype[handler],
+      getClass: () => RoutesUnderTest,
+    } as unknown as ExecutionContext,
+  };
+}
+
+describe('SessionAuthGuard on a blocked person', () => {
   const blockedHuman = (role: BlockedRole, subjectKind: BlockSubjectKind) =>
     new SessionAuthGuard(
       sourceOf(session(McpCallerKind.HUMAN, { blocked: { role, subjectKind } })),
+      new Reflector(),
     );
 
   it.each(['GET', 'HEAD'])('lets a %s through, with the session attached', async (method) => {
@@ -152,8 +173,69 @@ describe('SessionAuthGuard on a blocked person', () => {
 
   it('does not touch an unblocked session', async () => {
     const { context: ctx } = context('POST');
-    const guard = new SessionAuthGuard(sourceOf(session(McpCallerKind.HUMAN)));
+    const guard = new SessionAuthGuard(sourceOf(session(McpCallerKind.HUMAN)), new Reflector());
     await expect(guard.canActivate(ctx)).resolves.toBe(true);
+  });
+});
+
+describe('SessionAuthGuard on a route marked @BlockedSessionReadOnly', () => {
+  it.each([
+    [BlockedRole.ORGANIZATION, BlockSubjectKind.ORGANIZATION],
+    [BlockedRole.PAYER, BlockSubjectKind.WALLET],
+  ])(
+    'lets a blocked person (%s) POST to it, with the session attached',
+    async (role, subjectKind) => {
+      const { request, context: ctx } = context('POST', 'readOnly');
+      const guard = new SessionAuthGuard(
+        sourceOf(session(McpCallerKind.HUMAN, { blocked: { role, subjectKind } })),
+        new Reflector(),
+      );
+      await expect(guard.canActivate(ctx)).resolves.toBe(true);
+      expect(request[SESSION_REQUEST_KEY]).toMatchObject({
+        organizationId: ORG,
+        blocked: { role },
+      });
+    },
+  );
+
+  it('still refuses the same person on an unmarked POST of the same controller', async () => {
+    const { context: ctx } = context('POST', 'write');
+    const guard = new SessionAuthGuard(
+      sourceOf(
+        session(McpCallerKind.HUMAN, {
+          blocked: { role: BlockedRole.ORGANIZATION, subjectKind: BlockSubjectKind.ORGANIZATION },
+        }),
+      ),
+      new Reflector(),
+    );
+    await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+      errorCode: AuthErrorCode.AUTH_ORGANIZATION_SUSPENDED,
+    });
+  });
+
+  it('still refuses a machine credential of a blocked organization outright', async () => {
+    const { request, context: ctx } = context('POST', 'readOnly');
+    const guard = new SessionAuthGuard(
+      new BlocklistSessionSource(
+        sourceOf(session(McpCallerKind.AGENT)),
+        blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: ORG }),
+      ),
+      new Reflector(),
+    );
+    await expect(guard.canActivate(ctx)).rejects.toMatchObject({
+      errorCode: AuthErrorCode.AUTH_ORGANIZATION_SUSPENDED,
+      statusCode: 403,
+    });
+    expect(request[SESSION_REQUEST_KEY]).toBeUndefined();
+  });
+
+  it('marks the penalties lookup, the read-only POST a blocked provider needs', () => {
+    expect(
+      new Reflector().get(
+        BLOCKED_SESSION_READ_ONLY_METADATA,
+        ProviderSlashRequestsController.prototype.lookup,
+      ),
+    ).toBe(true);
   });
 });
 

@@ -2,7 +2,7 @@ import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { BlockedSessionReadOnly, CurrentSession, SessionAuthGuard } from '@shared/auth';
 
 import {
   LookupSlashRequestsBodyDto,
@@ -14,7 +14,9 @@ import { SlashRequestLookupService } from '../services/slash-request-lookup.serv
  * On-chain slash request ids, matched to the provider's own cases.
  *
  * A `POST` because the question is a list of up to 200 ids, which does not fit
- * a query string; it writes nothing and answers `200`.
+ * a query string; it writes nothing and answers `200`. So it is marked
+ * `@BlockedSessionReadOnly()`: a blocked provider may still ask, and most needs
+ * to — its pending penalties are what the block is about.
  */
 @ApiTags('Provider')
 @ApiBearerAuth()
@@ -24,6 +26,7 @@ export class ProviderSlashRequestsController {
   constructor(private readonly lookups: SlashRequestLookupService) {}
 
   @Post('lookup')
+  @BlockedSessionReadOnly()
   @HttpCode(200)
   @ApiOperation({ summary: 'Which of these on-chain slash request ids are your Assay cases' })
   @ApiResponse({ status: 200, type: LookupSlashRequestsResponseDto })
