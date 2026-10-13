@@ -10,6 +10,7 @@ import {
   SETTLEMENT_ERROR_NAMES,
 } from '@modules/slash/domain/chain-slash-outcome';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
+import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { SlashErrorCode } from '@modules/slash/errors/slash.errors';
 import {
   SlashCancelRequest,
@@ -284,6 +285,7 @@ function build(
 
   return {
     proposals,
+    enrolments: enrolmentsRepo,
     events,
     notifications,
     executor,
@@ -655,6 +657,21 @@ describe('SlashExecutionService', () => {
       await expect(ctx.service.compensationIntent('org_1', 'p1')).rejects.toMatchObject({
         errorCode: SlashErrorCode.SLASH_NOT_EXECUTED,
       });
+      expect(ctx.stakeIntents.buildIntent).not.toHaveBeenCalled();
+    });
+
+    it('names the missing stake authority on an executed case, not "never executed"', async () => {
+      const ctx = await executed();
+      ctx.enrolments.findOneBy.mockResolvedValue(null);
+
+      const refusal = await ctx.service.compensationIntent('org_1', 'p1').catch((e) => e);
+
+      expect(refusal).toMatchObject({
+        errorCode: ProviderErrorCode.PROVIDER_STAKE_AUTHORITY_UNPROVEN,
+        statusCode: 409,
+      });
+      expect(refusal.message).toContain('no proved stake authority');
+      expect(refusal.message).not.toContain('never executed');
       expect(ctx.stakeIntents.buildIntent).not.toHaveBeenCalled();
     });
 
@@ -2628,6 +2645,27 @@ describe('buildCancelIntent', () => {
       expect(executor.cancelBuilds).toEqual([]);
     },
   );
+
+  /**
+   * The refusal for a provider with no proved stake authority used to be
+   * `SLASH_NOT_EXECUTED` — "Nothing to compensate: this proposal never
+   * executed" — on a route that compensates nothing.
+   */
+  it('names the missing stake authority when the provider never proved one', async () => {
+    const { service, proposals, enrolments, executor } = build();
+    proposals.seed(standing({ id: 'p1', chainStatus: 'CANCEL_REQUESTED' }));
+    enrolments.findOneBy.mockResolvedValue({
+      organizationId: 'org-1',
+      stakeAuthorityAccountId: null,
+    });
+
+    await expect(service.buildCancelIntent('org_1', 'p1')).rejects.toMatchObject({
+      errorCode: ProviderErrorCode.PROVIDER_STAKE_AUTHORITY_UNPROVEN,
+      statusCode: 409,
+      message: expect.stringMatching(/no proved stake authority on .+ no transaction can be built/),
+    });
+    expect(executor.cancelBuilds).toEqual([]);
+  });
 });
 
 describe('sweepAdminCancels', () => {
