@@ -9,7 +9,10 @@ import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { McpController } from '@modules/mcp/controllers/mcp.controller';
 import { McpCallerKind, McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 import { ProviderSlashRequestsController } from '@modules/slash/controllers/provider-slash-requests.controller';
+import { AgentCredentialsController } from '@modules/account/controllers/agent-credentials.controller';
+import { EscrowDelegatesController } from '@modules/settlement/controllers/escrow-delegates.controller';
 import {
+  ALLOWED_WHILE_BLOCKED_METADATA,
   BLOCKED_SESSION_READ_ONLY_METADATA,
   BlockedSessionReadOnly,
   SESSION_REQUEST_KEY,
@@ -236,6 +239,64 @@ describe('SessionAuthGuard on a route marked @BlockedSessionReadOnly', () => {
         ProviderSlashRequestsController.prototype.lookup,
       ),
     ).toBe(true);
+  });
+});
+
+describe('the revoke routes a blocked person still needs (audit E-5)', () => {
+  const blocked = (role: BlockedRole, subjectKind: BlockSubjectKind) =>
+    new SessionAuthGuard(
+      sourceOf(session(McpCallerKind.HUMAN, { blocked: { role, subjectKind } })),
+      new Reflector(),
+    );
+  const on = (controller: { prototype: object }, handler: string, method: string) =>
+    ({
+      switchToHttp: () => ({
+        getRequest: () => ({ method, headers: { authorization: 'Bearer t' } }),
+      }),
+      getHandler: () => (controller.prototype as unknown as Record<string, unknown>)[handler],
+      getClass: () => controller,
+    }) as unknown as ExecutionContext;
+
+  it.each([
+    [EscrowDelegatesController, 'revokeIntent', 'POST'],
+    [EscrowDelegatesController, 'revoke', 'POST'],
+    [AgentCredentialsController, 'revoke', 'DELETE'],
+  ] as const)('lets a blocked person through %p.%s', async (controller, handler, method) => {
+    for (const [role, kind] of [
+      [BlockedRole.ORGANIZATION, BlockSubjectKind.ORGANIZATION],
+      [BlockedRole.PAYER, BlockSubjectKind.WALLET],
+    ] as const) {
+      await expect(blocked(role, kind).canActivate(on(controller, handler, method))).resolves.toBe(
+        true,
+      );
+    }
+    expect(
+      new Reflector().get(
+        ALLOWED_WHILE_BLOCKED_METADATA,
+        (controller.prototype as unknown as Record<string, () => void>)[handler],
+      ),
+    ).toBe(true);
+    // A write that only revokes authority is not "read-only".
+    expect(
+      new Reflector().get(
+        BLOCKED_SESSION_READ_ONLY_METADATA,
+        (controller.prototype as unknown as Record<string, () => void>)[handler],
+      ),
+    ).toBeUndefined();
+  });
+
+  it('still refuses granting authority: authorizing a delegate or creating a credential', async () => {
+    const guard = blocked(BlockedRole.PAYER, BlockSubjectKind.WALLET);
+    for (const [controller, handler] of [
+      [EscrowDelegatesController, 'authorizeIntent'],
+      [EscrowDelegatesController, 'authorize'],
+      [AgentCredentialsController, 'create'],
+    ] as const) {
+      expect((controller.prototype as unknown as Record<string, unknown>)[handler]).toBeDefined();
+      await expect(guard.canActivate(on(controller, handler, 'POST'))).rejects.toMatchObject({
+        errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
+      });
+    }
   });
 });
 

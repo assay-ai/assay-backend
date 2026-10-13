@@ -63,9 +63,20 @@ normally.
 read the account's own data, so they can see that, and why, they are blocked. `GET
 /account/block-status` returns the blocks that apply to the session. Machine credentials get no
 access at all, because the machine credential may be the thing that leaked.
-The rule is by method, so the one read that is a `POST`
-(`POST /providers/me/slash-requests/lookup`) is refused too, and the one `GET` that hands out
-something spendable (`GET /escrow/next-seq`) refuses on its own.
+The rule is by method, with a short list of reviewed exceptions that a blocked person can still
+`POST`/`DELETE`:
+
+- `POST /providers/me/slash-requests/lookup` (read-only: matches on-chain penalties to cases);
+- `POST /providers/me/slash-requests/dispute-intent` (builds the provider's own `disputeSlashBatch`;
+  the contract lets a blocked provider dispute);
+- `POST /escrow/delegates/revoke-intent` and `POST /escrow/delegates/revoke` (revoke an escrow
+  delegate; the contract never gates revoking);
+- `DELETE /agents/:agentId/credentials/:id` (revoke an agent credential).
+
+The revokes only take authority away, so a leaked delegate or credential can be cut off while the
+block stands and does not come back on unblock. Authorizing a delegate and creating a credential
+stay refused. The one `GET` that hands out something spendable (`GET /escrow/next-seq`) refuses on
+its own. The dashboard mirrors this list (`READ_ONLY_POSTS` in `assay-frontend`).
 
 **Not covered here:** the stand-alone x402 facilitator process (`/verify`, `/settle`) has no
 database and does not read the blocklist. `POST /auth/wallet/link` (linking the Privy wallet at sign-in) is not
