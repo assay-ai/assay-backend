@@ -170,6 +170,11 @@ export class AdjudicationQueueService {
       // overturned case waiting for the settlement admin still reads
       // `OVERTURNED`), so the console could never tell when to offer it.
       chainStatus: (proposal?.chainStatus ?? ChainProposalStatus.NONE) as ChainProposalStatus,
+      // Read-only as well, and the deadline that goes with `CANCEL_REQUESTED`:
+      // the settlement admin has to sign the cancel before this moment, because
+      // from it on the record is anyone's to execute. Null until a record
+      // stands on chain.
+      chainExecutableAt: proposal?.chainExecutableAt ?? null,
     };
   }
 

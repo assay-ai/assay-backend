@@ -8,9 +8,11 @@ import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state'
  * an overturned case waiting for the settlement admin reads `OVERTURNED`.
  */
 describe('AdjudicationQueueService.brief', () => {
-  function build(chainStatus: ChainProposalStatus | null) {
+  function build(chainStatus: ChainProposalStatus | null, chainExecutableAt: Date | null = null) {
     const proposals = {
-      findOneScoped: jest.fn().mockResolvedValue(chainStatus === null ? null : { chainStatus }),
+      findOneScoped: jest
+        .fn()
+        .mockResolvedValue(chainStatus === null ? null : { chainStatus, chainExecutableAt }),
     };
     const cases = {
       buildCase: jest.fn().mockResolvedValue({
@@ -43,5 +45,23 @@ describe('AdjudicationQueueService.brief', () => {
     const { service } = build(null);
 
     expect((await service.brief('org_1', 'p1')).chainStatus).toBe('NONE');
+  });
+
+  /**
+   * The cancel has a deadline: from this moment the record is anyone's to
+   * execute, so the console has to be able to say when.
+   */
+  it('carries the moment the on-chain record becomes executable', async () => {
+    const executableAt = new Date('2026-10-17T09:15:00Z');
+    const { service } = build(ChainProposalStatus.CANCEL_REQUESTED, executableAt);
+
+    expect((await service.brief('org_1', 'p1')).chainExecutableAt).toEqual(executableAt);
+  });
+
+  it('reports no deadline when nothing stands on chain or the row cannot be read', async () => {
+    expect(
+      (await build(ChainProposalStatus.NONE).service.brief('org_1', 'p1')).chainExecutableAt,
+    ).toBeNull();
+    expect((await build(null).service.brief('org_1', 'p1')).chainExecutableAt).toBeNull();
   });
 });

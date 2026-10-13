@@ -101,6 +101,13 @@ export const CHAIN_PROPOSABLE_STATUSES = [
 const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
 
 /**
+ * The statuses that close a case with no penalty owed: an operator suspended
+ * it, or it was overturned. A record still standing on chain for one of these
+ * has to be cancelled — see {@link SlashProposalRepository.findClosedStillPending}.
+ */
+export const CLOSED_WITHOUT_PENALTY_STATUSES = ['CANCELLED', 'OVERTURNED'] as const;
+
+/**
  * `slash_proposals`.
  *
  * Three of the methods here are compare-and-swaps rather than updates, and that
@@ -469,6 +476,37 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .select('proposal.organization_id', 'organizationId')
       .addSelect('proposal.id', 'id')
       .where('proposal.chain_status = :requested', { requested: 'CANCEL_REQUESTED' })
+      .orderBy('proposal.chain_executable_at', 'ASC')
+      .limit(limit)
+      .getRawMany<ChainSweepRow>();
+  }
+
+  /**
+   * Cases closed off chain whose record still mirrors `PENDING`: the repair
+   * behind every best-effort cancel request.
+   *
+   * A suspension (`CANCELLED`) or an overturn (`OVERTURNED`) asks for the
+   * on-chain cancel after its own transaction commits, and that request can be
+   * lost — the write fails, or the record lands after the case was closed. The
+   * row is then selected by nothing: the execute sweep wants `UPHELD` and the
+   * admin-cancel sweep wants `CANCEL_REQUESTED`.
+   *
+   * `AUTO_CHAIN_VOIDED` is excluded on purpose. A case the chain voided at
+   * execution time is `CANCELLED` with a `PENDING` mirror by design (see
+   * `SlashExecutionService.reservationHeldUntil`), and asking for its cancel
+   * is a decision nobody has taken.
+   *
+   * Reads through `idx_slash_proposals_chain_executable_at` (partial on
+   * `chain_status = 'PENDING'`), soonest deadline first.
+   */
+  async findClosedStillPending(limit: number): Promise<ChainSweepRow[]> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.organization_id', 'organizationId')
+      .addSelect('proposal.id', 'id')
+      .where('proposal.chain_status = :pending', { pending: 'PENDING' })
+      .andWhere('proposal.status IN (:...closed)', { closed: [...CLOSED_WITHOUT_PENALTY_STATUSES] })
+      .andWhere(`proposal.resolution_kind IS DISTINCT FROM 'AUTO_CHAIN_VOIDED'`)
       .orderBy('proposal.chain_executable_at', 'ASC')
       .limit(limit)
       .getRawMany<ChainSweepRow>();

@@ -161,7 +161,13 @@ export class OperatorCasesController {
     return this.cases.second(operator, proposalId, body, requestIdOf(request));
   }
 
-  /** `S-1` — stop a proposal before anything is signed. */
+  /**
+   * `S-1` — suspend a proposal.
+   *
+   * Closes the case and asks for the cancel of any record standing on chain
+   * (`chain_status` → `CANCEL_REQUESTED`). The cancel itself is the settlement
+   * admin's to sign — see {@link cancelIntent}.
+   */
   @Post('cases/:proposalId/suspend')
   @Override('S-1')
   @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE)
@@ -272,9 +278,10 @@ export class OperatorCasesController {
    * Build the settlement admin's unsigned `cancel_slash`.
    *
    * Reads and builds; changes nothing, and deliberately is not an override.
-   * The case moved to `CANCEL_REQUESTED` when it was decided; it moves to
-   * `CANCELLED` when the lifecycle sweep sees the record leave `Pending`, not
-   * because somebody was handed a transaction.
+   * The on-chain record moved to `CANCEL_REQUESTED` when the case was
+   * overturned or suspended; it moves to `CANCELLED` when the lifecycle sweep
+   * sees the record leave `Pending`, not because somebody was handed a
+   * transaction.
    */
   @Post('cases/:proposalId/cancel-intent')
   @OverrideExempt(
