@@ -2658,7 +2658,11 @@ export class SlashExecutionService {
    *
    * The signature is **verified against the cluster**, not trusted: the
    * transaction has to have confirmed, and to contain a `deposit_stake` into
-   * this provider's own stake account for at least the amount the chain took.
+   * this provider's own stake account for at least the amount the chain took,
+   * funded by the settlement treasury and mined after the slash executed
+   * (review M-3: before, the provider's own earlier deposit passed). One
+   * deposit compensates one case (`uq_slash_proposals_reversal_signature`), and
+   * the status moves inside the override's transaction.
    * Without that check this route would be a way to mark a case compensated by
    * typing a plausible string, which is the same thing as not having the route.
    *
@@ -2689,8 +2693,11 @@ export class SlashExecutionService {
     note: string,
     requestId?: string | null,
   ): Promise<SlashProposalEntity> {
-    if (!this.stakeIntents) {
-      throw SlashErrors.chainUnavailable({ proposalId, reason: 'no stake intent builder' });
+    if (!this.stakeIntents || !this.executor) {
+      throw SlashErrors.chainUnavailable({
+        proposalId,
+        reason: 'no settlement executor or stake intent builder',
+      });
     }
 
     const proposal = await this.lifecycle.require(organizationId, proposalId);
@@ -2701,8 +2708,21 @@ export class SlashExecutionService {
       throw SlashErrors.invalidTransition({ from, to: SlashProposalStatus.REVERSED });
     }
 
+    // An EVM hash is hex, and `0xAB…` and `0xab…` are one transaction; stored
+    // lower-case so the unique index sees them as one. Solana signatures are
+    // base58 and case-sensitive, so they are kept as given.
+    if (namespaceOf(proposal.assetId as AssetId) === ChainNamespace.EIP155) {
+      signature = signature.toLowerCase();
+    }
+
     const account = await this.stakeAuthorityAccountOf(proposal);
-    const deposited = await this.stakeIntents.confirmedDeposit(signature, account);
+    // Review M-3: only a deposit the treasury funded, mined after this slash
+    // executed. `assertCompensable` has already required `executed_at`.
+    const treasury = await this.executor.settlementTreasury(proposal.assetId as AssetId);
+    const deposited = await this.stakeIntents.confirmedDeposit(signature, account, {
+      funder: treasury,
+      after: proposal.executedAt as Date,
+    });
     const owed = BigInt(proposal.appliedAmount as string);
     if (deposited === null || MoneyUtil.toAtomic(deposited) < owed) {
       throw SlashErrors.compensationNotConfirmed({
@@ -2733,12 +2753,21 @@ export class SlashExecutionService {
           amountMinor: restoredMinor,
         },
         async (queryRunner) => {
-          const affected = await this.proposals.markReversedIfExecuted(
-            organizationId,
-            proposalId,
-            compensatedAt,
-            signature,
-          );
+          let affected: number;
+          try {
+            affected = await this.proposals.markReversedIfExecuted(
+              organizationId,
+              proposalId,
+              compensatedAt,
+              signature,
+              queryRunner.manager,
+            );
+          } catch (error) {
+            if (isUniqueViolation(error, 'uq_slash_proposals_reversal_signature')) {
+              throw SlashErrors.compensationAlreadyUsed({ signature });
+            }
+            throw error;
+          }
           if (affected === 0) {
             // The deposit landed and the local guard refused it, which means
             // somebody else recorded it in the interval. Not an error to the
@@ -3029,4 +3058,11 @@ function bareAddress(account: string): string {
 function localRefusalName(error: unknown): string | null {
   const code = (error as { errorCode?: unknown })?.errorCode;
   return typeof code === 'string' && code.startsWith('SLASH_') ? code.slice(0, 64) : null;
+}
+
+/** A Postgres unique violation (23505) on the named constraint or index. */
+function isUniqueViolation(error: unknown, constraint: string): boolean {
+  const driver = (error as { driverError?: { code?: string; constraint?: string } } | null)
+    ?.driverError;
+  return driver?.code === '23505' && driver.constraint === constraint;
 }

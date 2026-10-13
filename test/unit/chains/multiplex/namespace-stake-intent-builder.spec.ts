@@ -55,7 +55,12 @@ describe('NamespaceStakeIntentBuilder', () => {
     await expect(builder.preflight({ ...request, account: SOLANA_PROVIDER })).resolves.toEqual({
       from: 'solana',
     });
-    await expect(builder.confirmedDeposit('0xabc', EVM_PROVIDER)).resolves.toEqual({
+    await expect(
+      builder.confirmedDeposit('0xabc', EVM_PROVIDER, {
+        funder: EVM_PROVIDER,
+        after: new Date(0),
+      }),
+    ).resolves.toEqual({
       from: 'eip155',
     });
   });

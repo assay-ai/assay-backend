@@ -34,6 +34,9 @@ const CHAIN_PROPOSABLE_STATUSES = [
 const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
 
 export class FakeSlashProposals {
+  /** The entity manager each `markReversedIfExecuted` ran on (undefined = default connection). */
+  readonly reversalManagers: unknown[] = [];
+
   readonly rows = new Map<string, SlashProposalEntity>();
 
   /** Records every CAS attempt, so a test can prove which predicate refused. */
@@ -167,7 +170,9 @@ export class FakeSlashProposals {
     id: string,
     reversedAt: Date,
     reversalSignature: string,
+    manager?: unknown,
   ): Promise<number> {
+    this.reversalManagers.push(manager);
     const row = this.rows.get(id);
     if (
       !row ||

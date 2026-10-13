@@ -163,6 +163,8 @@ class FakeOverrideLog {
    * hard-coded `before` is a lie the register cannot detect on its own.
    */
   readonly befores: Record<string, unknown>[] = [];
+  /** The `queryRunner.manager` handed to the last mutation. */
+  lastManager: unknown = null;
 
   async perform<T>(
     context: { code: string; amountMinor?: string | null },
@@ -183,6 +185,7 @@ class FakeOverrideLog {
         }),
       },
     };
+    this.lastManager = queryRunner.manager;
     const result = await mutation(queryRunner);
     if (result.before) this.befores.push(result.before);
     return result.value;
@@ -466,10 +469,15 @@ describe('SlashExecutionService', () => {
       const row = ctx.proposals.rows.get('p1')!;
       expect(row.status).toBe(SlashProposalStatus.REVERSED);
       expect(row.reversalSignature).toBe('deposit-signature-1');
+      // Review M-3: only a treasury deposit made after the slash executed counts.
       expect(ctx.stakeIntents.confirmedDeposit).toHaveBeenCalledWith(
         'deposit-signature-1',
         'solana:dev:StakeAuth9999',
+        { funder: 'solana:dev:Treasury3333', after: row.executedAt },
       );
+      expect(row.executedAt).toBeInstanceOf(Date);
+      // And the status moves inside the override's own transaction.
+      expect(ctx.proposals.reversalManagers).toEqual([ctx.overrides.lastManager]);
       expect(ctx.notifications.sent.map((n) => n.event)).toContain('provider.slash_reversed');
       expect(ctx.overrides.performed).toEqual(['S-5']);
     });

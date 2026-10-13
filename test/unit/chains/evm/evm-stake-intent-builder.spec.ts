@@ -35,6 +35,7 @@ const PROVIDER = '0x31b1DF6F36ec62075a3BE03a5C0BebB06534bA72';
 const PROVIDER_ACCOUNT = toAccountId(TESTNET, PROVIDER);
 const TREASURY = '0xD75ba4a2BA90Cb110E32FF4d87e1D1352434C687';
 const STRANGER = '0x5B38Da6a701c568545dCfcB03FcB875f56beddC4';
+const TREASURY_ACCOUNT = toAccountId(TESTNET, TREASURY);
 
 const STAKE_ABI = parseAbi([
   'function depositStake(uint64 amount)',
@@ -46,6 +47,13 @@ const STAKE_ABI = parseAbi([
 
 const MAX_FEE = 10_000_000n;
 
+/** The block every fixture receipt is mined in, and its timestamp. */
+const BLOCK = 4_242n;
+const BLOCK_TIME = 1_790_000_000n;
+/** The slash executed one hour before that block. */
+const EXECUTED_AT = new Date(Number(BLOCK_TIME - 3_600n) * 1000);
+const EXPECTED = { funder: TREASURY_ACCOUNT, after: EXECUTED_AT };
+
 function usdg(atomic: bigint) {
   return MoneyUtil.of(atomic, USDG, 6);
 }
@@ -55,6 +63,8 @@ interface Chain {
   nativeBalance: Map<string, bigint>;
   nonce: number;
   receipts: Map<string, Awaited<ReturnType<EvmStakeIntentClient['getTransactionReceipt']>>>;
+  /** Block timestamps, seconds. */
+  blockTimes: Map<bigint, bigint>;
 }
 
 function client(chain: Chain): EvmStakeIntentClient {
@@ -76,6 +86,11 @@ function client(chain: Chain): EvmStakeIntentClient {
       if (!receipt) throw new Error(`Transaction receipt with hash "${hash}" could not be found.`);
       return receipt;
     }),
+    getBlock: jest.fn(async ({ blockNumber }) => {
+      const timestamp = chain.blockTimes.get(blockNumber);
+      if (timestamp === undefined) throw new Error(`Block ${blockNumber} could not be found.`);
+      return { timestamp };
+    }),
   };
 }
 
@@ -85,6 +100,7 @@ function freshChain(): Chain {
     nativeBalance: new Map([[PROVIDER.toLowerCase(), 600_000_000_000_000n]]),
     nonce: 7,
     receipts: new Map(),
+    blockTimes: new Map([[BLOCK, BLOCK_TIME]]),
   };
 }
 
@@ -266,6 +282,7 @@ describe('EvmStakeIntentBuilder', () => {
       const chain = freshChain();
       chain.receipts.set(HASH, {
         status: 'success',
+        blockNumber: BLOCK,
         logs: [
           depositLog(PROVIDER, TREASURY, 2_000_000n),
           depositLog(STRANGER, TREASURY, 9_000_000n),
@@ -273,32 +290,75 @@ describe('EvmStakeIntentBuilder', () => {
         ],
       });
 
-      await expect(builderOn(chain).confirmedDeposit(HASH, PROVIDER_ACCOUNT)).resolves.toEqual(
-        usdg(3_000_000n),
-      );
+      await expect(
+        builderOn(chain).confirmedDeposit(HASH, PROVIDER_ACCOUNT, EXPECTED),
+      ).resolves.toEqual(usdg(3_000_000n));
     });
 
     it('ignores a StakeDeposited emitted by any contract but the stake proxy', async () => {
       const chain = freshChain();
       chain.receipts.set(HASH, {
         status: 'success',
+        blockNumber: BLOCK,
         logs: [depositLog(PROVIDER, TREASURY, 2_000_000n, STRANGER)],
       });
 
-      await expect(builderOn(chain).confirmedDeposit(HASH, PROVIDER_ACCOUNT)).resolves.toBeNull();
+      await expect(
+        builderOn(chain).confirmedDeposit(HASH, PROVIDER_ACCOUNT, EXPECTED),
+      ).resolves.toBeNull();
     });
 
     it('is null for a reverted transaction and for one the chain has never seen', async () => {
       const chain = freshChain();
       chain.receipts.set(HASH, {
         status: 'reverted',
+        blockNumber: BLOCK,
         logs: [depositLog(PROVIDER, TREASURY, 2_000_000n)],
       });
       const builder = builderOn(chain);
 
-      await expect(builder.confirmedDeposit(HASH, PROVIDER_ACCOUNT)).resolves.toBeNull();
+      await expect(builder.confirmedDeposit(HASH, PROVIDER_ACCOUNT, EXPECTED)).resolves.toBeNull();
       await expect(
-        builder.confirmedDeposit(`0x${'cd'.repeat(32)}`, PROVIDER_ACCOUNT),
+        builder.confirmedDeposit(`0x${'cd'.repeat(32)}`, PROVIDER_ACCOUNT, EXPECTED),
+      ).resolves.toBeNull();
+    });
+
+    // Review M-3: the provider's own earlier stake deposit is not a compensation.
+    it('ignores a deposit not funded by the treasury', async () => {
+      const chain = freshChain();
+      chain.receipts.set(HASH, {
+        status: 'success',
+        blockNumber: BLOCK,
+        logs: [depositLog(PROVIDER, PROVIDER, 5_000_000n), depositLog(PROVIDER, TREASURY, 1n)],
+      });
+
+      await expect(
+        builderOn(chain).confirmedDeposit(HASH, PROVIDER_ACCOUNT, EXPECTED),
+      ).resolves.toEqual(usdg(1n));
+
+      chain.receipts.set(HASH, {
+        status: 'success',
+        blockNumber: BLOCK,
+        logs: [depositLog(PROVIDER, STRANGER, 5_000_000n)],
+      });
+      await expect(
+        builderOn(chain).confirmedDeposit(HASH, PROVIDER_ACCOUNT, EXPECTED),
+      ).resolves.toBeNull();
+    });
+
+    it('is null for a treasury deposit mined before the slash executed', async () => {
+      const chain = freshChain();
+      chain.receipts.set(HASH, {
+        status: 'success',
+        blockNumber: BLOCK,
+        logs: [depositLog(PROVIDER, TREASURY, 5_000_000n)],
+      });
+
+      await expect(
+        builderOn(chain).confirmedDeposit(HASH, PROVIDER_ACCOUNT, {
+          funder: TREASURY_ACCOUNT,
+          after: new Date(Number(BLOCK_TIME) * 1000),
+        }),
       ).resolves.toBeNull();
     });
   });
