@@ -1,4 +1,5 @@
 import { CanActivate, ExecutionContext, Inject, Injectable } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 
 import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
@@ -9,6 +10,7 @@ import {
 } from '@modules/mcp/ports/mcp-session.port';
 
 import { extractBearerToken } from './bearer-token';
+import { BLOCKED_SESSION_READ_ONLY_METADATA } from './blocked-session-read-only.decorator';
 import { SESSION_REQUEST_KEY } from './session-request.key';
 
 /**
@@ -65,22 +67,39 @@ export interface RequestWithSession extends Request {
  * refuses a blocked machine credential outright and marks a blocked person's
  * session (`McpSession.blocked`). Such a session passes here on `GET` and
  * `HEAD` only — the dashboard can still show the account its own data and the
- * block — and every other method is refused with the block's own code. A read
- * that hands out something spendable (`GET /escrow/next-seq` issues a voucher
- * seq) refuses again where it does so.
+ * block — and every other method is refused with the block's own code, except
+ * on a route marked `@BlockedSessionReadOnly()`: a `POST` that only reads. A
+ * read that hands out something spendable (`GET /escrow/next-seq` issues a
+ * voucher seq) refuses again where it does so.
  */
 @Injectable()
 export class SessionAuthGuard implements CanActivate {
-  constructor(@Inject(MCP_SESSION_SOURCE) private readonly sessions: McpSessionPort) {}
+  constructor(
+    @Inject(MCP_SESSION_SOURCE) private readonly sessions: McpSessionPort,
+    private readonly reflector: Reflector,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestWithSession>();
     const session = await this.sessions.resolve(extractBearerToken(request));
-    if (session.blocked && !READ_METHODS.has(request.method.toUpperCase())) {
+    if (
+      session.blocked &&
+      !READ_METHODS.has(request.method.toUpperCase()) &&
+      !this.isReadOnlyRoute(context)
+    ) {
       throw sessionBlockedError(session.blocked);
     }
     request[SESSION_REQUEST_KEY] = session;
     return true;
+  }
+
+  private isReadOnlyRoute(context: ExecutionContext): boolean {
+    return (
+      this.reflector.getAllAndOverride<boolean | undefined>(BLOCKED_SESSION_READ_ONLY_METADATA, [
+        context.getHandler(),
+        context.getClass(),
+      ]) === true
+    );
   }
 }
 

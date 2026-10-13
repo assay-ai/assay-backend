@@ -1,19 +1,30 @@
 import { randomUUID } from 'node:crypto';
 
+import { Controller, HttpCode, Post, UseGuards, ValidationPipe } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
 import Redis from 'ioredis';
+import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
+import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
+import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { AccountErrorCode } from '@modules/account/errors/account.errors';
 import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
+import { BlocklistSessionSource } from '@modules/blocklist/services/blocklist-session.source';
+import { MCP_SESSION_SOURCE, McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { OperatorRole } from '@modules/operator/domain/override-register';
 import { OperatorErrorCode } from '@modules/operator/errors/operator.errors';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { OperatorAccountBlockService } from '@modules/operator/services/operator-account-block.service';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
+import { ProviderSlashRequestsController } from '@modules/slash/controllers/provider-slash-requests.controller';
+import { SlashRequestLookupService } from '@modules/slash/services/slash-request-lookup.service';
+import { SessionAuthGuard } from '@shared/auth';
+import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
 import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
 
@@ -37,6 +48,17 @@ const redisOptions = () => ({
   password: process.env.REDIS_PASSWORD || undefined,
   maxRetriesPerRequest: 1,
 });
+
+/** An ordinary write on the same guard, next to the read-only lookup. */
+@UseGuards(SessionAuthGuard)
+@Controller('providers/me/slash-requests')
+class UnmarkedWriteController {
+  @Post('unmarked-write')
+  @HttpCode(200)
+  write(): { written: true } {
+    return { written: true };
+  }
+}
 
 async function eventually(check: () => boolean, withinMs: number): Promise<number> {
   const started = Date.now();
@@ -359,5 +381,96 @@ describe('account blocks, against a real database and Redis', () => {
     expect(lifted.items.map((item) => item.id)).toContain(block.id);
     const times = lifted.items.map((item) => new Date(item.blockedAt).getTime());
     expect([...times].sort((a, b) => b - a)).toEqual(times);
+  });
+  it('lets a blocked person POST the read-only penalties lookup over HTTP, and nothing else', async () => {
+    const writer = await instance();
+    const org = randomUUID();
+    const sessionFor = (callerKind: McpCallerKind): McpSession => ({
+      credentialId: `cred-${callerKind}`,
+      organizationId: org,
+      agentId: 'agent-1',
+      agentAccount: WALLET as never,
+      chainId: 'eip155:84532' as never,
+      label: null,
+      callerKind,
+      delegateAccount: null,
+    });
+    const tokenKinds: Record<string, McpCallerKind> = {
+      person: McpCallerKind.HUMAN,
+      machine: McpCallerKind.AGENT,
+    };
+    const inner = {
+      resolve: async (token: string | null) => {
+        const kind = token ? tokenKinds[token] : undefined;
+        if (!kind) throw new Error('unknown bearer token in test stub');
+        return sessionFor(kind);
+      },
+    };
+
+    const moduleRef = await Test.createTestingModule({
+      controllers: [ProviderSlashRequestsController, UnmarkedWriteController],
+      providers: [
+        SessionAuthGuard,
+        { provide: MCP_SESSION_SOURCE, useValue: new BlocklistSessionSource(inner, writer) },
+        {
+          provide: SlashRequestLookupService,
+          useValue: new SlashRequestLookupService(
+            new SlashProposalRepository(dataSource),
+            new SlashProposalPartRepository(dataSource),
+          ),
+        },
+      ],
+    }).compile();
+    const app = moduleRef.createNestApplication();
+    app.useGlobalPipes(new ValidationPipe({ whitelist: true, transform: true }));
+    app.useGlobalFilters(new AllExceptionsFilter());
+    await app.init();
+
+    try {
+      const lookup = (token: string) =>
+        request(app.getHttpServer())
+          .post('/providers/me/slash-requests/lookup')
+          .set('Authorization', `Bearer ${token}`)
+          .send({ requestIds: [`0x${'ab'.repeat(32)}`] });
+      const unmarked = (token: string) =>
+        request(app.getHttpServer())
+          .post('/providers/me/slash-requests/unmarked-write')
+          .set('Authorization', `Bearer ${token}`)
+          .send({});
+
+      // Not blocked: both answer.
+      expect((await lookup('person')).status).toBe(200);
+      expect((await unmarked('person')).status).toBe(200);
+
+      const ops = operatorService(writer);
+      const block = await ops.block(
+        sre,
+        {
+          subjectKind: BlockSubjectKind.ORGANIZATION,
+          subject: org,
+          reasonCode: 'FRAUD',
+          note: NOTE,
+        },
+        null,
+      );
+
+      // Blocked person: the read-only POST answers, the ordinary write is refused.
+      const read = await lookup('person');
+      expect(read.status).toBe(200);
+      expect(JSON.stringify(read.body)).toContain('matches');
+      const refused = await unmarked('person');
+      expect(refused.status).toBe(403);
+      expect(JSON.stringify(refused.body)).toContain('AUTH_ORGANIZATION_SUSPENDED');
+
+      // Blocked machine credential: refused outright, the read-only POST too.
+      const machine = await lookup('machine');
+      expect(machine.status).toBe(403);
+      expect(JSON.stringify(machine.body)).toContain('AUTH_ORGANIZATION_SUSPENDED');
+
+      await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, approver('ops-adjl'), null);
+      expect((await lookup('machine')).status).toBe(200);
+    } finally {
+      await app.close();
+    }
   });
 });
