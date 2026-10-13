@@ -649,23 +649,37 @@ export class ArbitrationService {
   }
 
   /**
-   * `S-1` — suspend a proposal before anything is signed.
+   * `S-1` — suspend a proposal.
    *
    * Terminal. There is no un-suspend, because the finding is still on record as
    * a strike and a re-proposal would restart the provider's clock — which is
    * the correct thing to happen if we want to levy it after all, and is not the
    * same object.
    *
+   * ## What it does about the chain
+   *
+   * A case is proposed on chain about a minute after the provider is told, so
+   * a suspended case usually has a `Pending` record standing with the
+   * provider's stake reserved — and that record is anyone's to execute once
+   * its timelock passes. A suspension therefore follows the same path as an
+   * overturn: after its own transaction commits it asks for the on-chain
+   * cancel ({@link settleTheChainProposal}), which moves `chain_status` from
+   * `PENDING` to `CANCEL_REQUESTED`. Nothing is signed here — the cancel is the
+   * settlement admin's — and from there `SlashLifecycleJob`'s admin-cancel
+   * sweep carries it.
+   *
+   * The request is best-effort, like the overturn's. When it is lost, or the
+   * record lands after the suspension, `SlashLifecycleJob`'s closed-case repair
+   * asks again on the next tick. A case with no record yet (`NONE`) needs
+   * nothing: the propose sweep never proposes a closed case.
+   *
    * **`EXECUTING` is refused, deliberately.** The state machine has an
    * `EXECUTING → CANCELLED` edge, and that edge exists for one caller: the
    * chain-void path, which reaches it only after the settlement program has
-   * refused the judgement permanently. `S-1` is the opposite situation — the
-   * chain has accepted it, a `SlashRecord` is `Pending`, and the transaction may
-   * be in flight this second. Closing the case here would leave that record
-   * standing with the provider's stake reserved until `expire_slash` reaps it
-   * seven days later, and would let an operator record a suspension of an
-   * execution that then lands anyway. Allowing it needs an on-chain
-   * `cancel_slash` first, which is a design decision nobody has taken.
+   * refused the judgement permanently. `S-1` is the opposite situation — this
+   * platform's own execute transaction may be in flight this second, and
+   * closing the case here would let an operator record a suspension of an
+   * execution that then lands anyway.
    */
   async suspend(
     operator: OperatorSession,
@@ -690,7 +704,7 @@ export class ArbitrationService {
     }
 
     const now = new Date();
-    return this.overrides.perform<SlashProposalEntity>(
+    const saved = await this.overrides.perform<SlashProposalEntity>(
       {
         code: 'S-1',
         actor: operator,
@@ -751,6 +765,10 @@ export class ArbitrationService {
         };
       },
     );
+    // After the commit, exactly as a decision does: the suspension stands
+    // whether or not the chain half could be recorded.
+    await this.settleTheChainProposal(organizationId, proposalId, saved.status, null);
+    return saved;
   }
 
   /**
@@ -947,7 +965,8 @@ export class ArbitrationService {
    *
    * Two outcomes, and only two:
    *
-   * - **Overturned** — cancel. The reservation is real money to the provider
+   * - **Overturned, or suspended** (`outcome` is `null` for a suspension, which
+   *   is not a judgement) — cancel. The reservation is real money to the provider
    *   (`pending_slash` is subtracted from `withdrawable`), and a case they won
    *   must not go on costing them it until `expire_slash`'s grace runs out ten
    *   days later.
@@ -989,13 +1008,13 @@ export class ArbitrationService {
     organizationId: string,
     proposalId: string,
     status: string,
-    outcome: ArbitrationOutcome,
+    outcome: ArbitrationOutcome | null,
   ): Promise<void> {
     if (!this.execution) return;
 
     try {
-      if (status === SlashProposalStatus.OVERTURNED) {
-        await this.execution.requestAdminCancel(organizationId, proposalId, outcome);
+      if (status === SlashProposalStatus.OVERTURNED || status === SlashProposalStatus.CANCELLED) {
+        await this.execution.requestAdminCancel(organizationId, proposalId, outcome ?? 'SUSPENDED');
         return;
       }
       if (
@@ -1006,8 +1025,9 @@ export class ArbitrationService {
       }
     } catch (error) {
       this.logger.error(
-        `slash proposal ${proposalId} was decided ${outcome} but its on-chain proposal could ` +
-          `not be settled; the decision stands and the chain step will be retried`,
+        `slash proposal ${proposalId} was ${outcome ? `decided ${outcome}` : 'suspended'} but its ` +
+          `on-chain proposal could not be settled; the decision stands and the chain step will ` +
+          `be retried`,
         error instanceof Error ? error.stack : String(error),
       );
     }

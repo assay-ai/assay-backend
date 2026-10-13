@@ -637,6 +637,47 @@ describe('SlashExecutionService', () => {
     });
 
     /**
+     * A known gap, pinned so it is not mistaken for working: a SUSPENDED case
+     * whose penalty a third party took before the cancel was signed is
+     * recorded honestly (`recordAnExecutionNobodyAskedFor`), and the deposit
+     * can be built, but recording the compensation needs a `CANCELLED →
+     * REVERSED` edge the state machine does not have. No decision has been
+     * taken to add it.
+     */
+    it('cannot yet record a compensation for a suspended case the chain executed', async () => {
+      const ctx = build();
+      ctx.proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.CANCELLED,
+        appliedAmount: '5000000',
+        executedAt: new Date('2026-08-13T09:15:00Z'),
+        executionSignature: null,
+        chainStatus: 'EXECUTED',
+        chainProposedAt: new Date('2026-08-10T09:14:30Z'),
+        chainExecutableAt: new Date('2026-08-13T09:14:30Z'),
+        earliestExecutionAt: new Date('2026-08-13T09:14:00Z'),
+      });
+
+      await expect(ctx.service.compensationIntent('org_1', 'p1')).resolves.toMatchObject({
+        amountMinor: '5000000',
+      });
+      await expect(
+        ctx.service.markCompensated(
+          OPERATOR as never,
+          APPROVER as never,
+          'org_1',
+          'p1',
+          'deposit-signature-1',
+          'MAPPING_REGRESSION',
+          'a third party executed it after we suspended it',
+        ),
+      ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION });
+      expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.CANCELLED);
+      expect(ctx.overrides.performed).toEqual([]);
+    });
+
+    /**
      * The other half of the same predicate, and the half that must stay shut.
      * An overturn where nothing was taken has nothing to give back, and a
      * deposit built for it would pay a provider who was never charged.
@@ -1654,6 +1695,51 @@ describe('proposeDue — the gap between the SELECT and the claim', () => {
     expect(proposals.rows.get('second')!.chainStatus).toBe('NONE');
     expect(proposals.rows.get('second')!.status).toBe(SlashProposalStatus.OVERTURNED);
   });
+
+  /**
+   * The gap the claim cannot close: the case is closed AFTER the claim, while
+   * `propose_slash` is in flight. The close finds `PROPOSING` and has nothing to
+   * cancel yet; the record then lands, and a mirror written as plain `PENDING`
+   * would leave a closed case with its stake reserved and nobody asking for
+   * the cancel.
+   */
+  it.each([SlashProposalStatus.CANCELLED, SlashProposalStatus.OVERTURNED])(
+    'asks for the cancel when the case went %s while its proposal was in flight',
+    async (closedAs) => {
+      const { service, proposals, executor, events } = build();
+      proposals.seed(proposable({ id: 'p1' }));
+      executor.proposeImpl = async () => {
+        proposals.rows.get('p1')!.status = closedAs;
+        return {
+          signature: 'sig',
+          status: 'PENDING' as const,
+          proposedAt: NOW,
+          executableAt: hoursFromNow(72),
+          reservedMinor: '900',
+          adopted: false,
+        };
+      };
+
+      await service.proposeDue(NOW);
+
+      const saved = proposals.rows.get('p1')!;
+      expect(saved.status).toBe(closedAs);
+      expect(saved.chainStatus).toBe('CANCEL_REQUESTED');
+      // The chain's clocks are still on the row: the cancel has a deadline.
+      expect(saved.chainExecutableAt).toEqual(hoursFromNow(72));
+      expect(events.kinds()).toContain('CHAIN_CANCEL_REQUESTED');
+    },
+  );
+
+  it('leaves a live case PENDING when its proposal confirms', async () => {
+    const { service, proposals, events } = build();
+    proposals.seed(proposable({ id: 'p1' }));
+
+    await service.proposeDue(NOW);
+
+    expect(proposals.rows.get('p1')!.chainStatus).toBe('PENDING');
+    expect(events.kinds()).not.toContain('CHAIN_CANCEL_REQUESTED');
+  });
 });
 
 describe('proposeDue — nothing after the chain write may re-classify it', () => {
@@ -2608,6 +2694,103 @@ describe('requestAdminCancel', () => {
   });
 });
 
+/**
+ * The repair behind every best-effort cancel request: a case closed off chain
+ * (suspended, or overturned) whose record still mirrors `PENDING` is watched by
+ * nothing — the execute sweep wants `UPHELD`, the admin-cancel sweep wants
+ * `CANCEL_REQUESTED` — while its stake stays reserved and anyone may execute it
+ * once the timelock passes.
+ */
+describe('requestCancelsForClosedCases', () => {
+  it.each([SlashProposalStatus.CANCELLED, SlashProposalStatus.OVERTURNED])(
+    'asks for the cancel of a %s case whose record is still PENDING',
+    async (status) => {
+      const { service, proposals, events, executor } = build();
+      proposals.seed(standing({ id: 'p1', status }));
+
+      await expect(service.requestCancelsForClosedCases()).resolves.toBe(1);
+
+      expect(proposals.rows.get('p1')!.chainStatus).toBe('CANCEL_REQUESTED');
+      expect(proposals.rows.get('p1')!.status).toBe(status);
+      expect(events.kinds()).toContain('CHAIN_CANCEL_REQUESTED');
+      // Records the request and nothing else: no transaction is built or sent.
+      expect(executor.cancelBuilds).toHaveLength(0);
+      expect(executor.expired).toHaveLength(0);
+    },
+  );
+
+  it('is idempotent: a second pass finds nothing and appends nothing', async () => {
+    const { service, proposals, events } = build();
+    proposals.seed(standing({ id: 'p1', status: SlashProposalStatus.CANCELLED }));
+
+    await service.requestCancelsForClosedCases();
+    await expect(service.requestCancelsForClosedCases()).resolves.toBe(0);
+
+    expect(events.kinds().filter((kind) => kind === 'CHAIN_CANCEL_REQUESTED')).toHaveLength(1);
+  });
+
+  it('leaves every other case alone', async () => {
+    const { service, proposals, events } = build();
+    // A live judgement: the record is supposed to stand.
+    proposals.seed(standing({ id: 'live', status: SlashProposalStatus.UPHELD }));
+    // Closed with nothing on chain, already asked for, already released.
+    proposals.seed(standing({ id: 'none', status: 'CANCELLED', chainStatus: 'NONE' }));
+    proposals.seed(standing({ id: 'asked', status: 'CANCELLED', chainStatus: 'CANCEL_REQUESTED' }));
+    proposals.seed(standing({ id: 'released', status: 'OVERTURNED', chainStatus: 'CANCELLED' }));
+    // In flight: `proposeOne` asks when the record lands.
+    proposals.seed(standing({ id: 'flying', status: 'CANCELLED', chainStatus: 'PROPOSING' }));
+    // Voided by the chain at execution time: deliberately left PENDING today,
+    // and not a decision this repair takes.
+    proposals.seed(
+      standing({
+        id: 'voided',
+        status: 'CANCELLED',
+        resolutionKind: ResolutionKind.AUTO_CHAIN_VOIDED,
+        resolvedAt: NOW,
+      }),
+    );
+
+    await expect(service.requestCancelsForClosedCases()).resolves.toBe(0);
+
+    expect([...proposals.rows.values()].map((saved) => [saved.id, saved.chainStatus])).toEqual([
+      ['live', 'PENDING'],
+      ['none', 'NONE'],
+      ['asked', 'CANCEL_REQUESTED'],
+      ['released', 'CANCELLED'],
+      ['flying', 'PROPOSING'],
+      ['voided', 'PENDING'],
+    ]);
+    expect(events.kinds()).not.toContain('CHAIN_CANCEL_REQUESTED');
+  });
+
+  it('is bounded by the sweep batch size', async () => {
+    const { service, proposals } = build();
+    const find = jest.spyOn(proposals, 'findClosedStillPending');
+
+    await service.requestCancelsForClosedCases();
+
+    expect(find).toHaveBeenCalledWith(TEST_SLASH_CONFIG.sweepBatchSize);
+  });
+
+  it('does not count a case that could not be marked', async () => {
+    const { service, proposals } = build();
+    proposals.seed(standing({ id: 'p1', status: SlashProposalStatus.CANCELLED }));
+    proposals.seed(standing({ id: 'p2', status: SlashProposalStatus.CANCELLED }));
+    const update = proposals.update.bind(proposals);
+    jest.spyOn(proposals, 'update').mockImplementation(async (criteria, patch) => {
+      if (criteria.id === 'p1') throw new Error('database unavailable');
+      return update(criteria, patch);
+    });
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+    await expect(service.requestCancelsForClosedCases()).resolves.toBe(1);
+
+    expect(proposals.rows.get('p1')!.chainStatus).toBe('PENDING');
+    expect(proposals.rows.get('p2')!.chainStatus).toBe('CANCEL_REQUESTED');
+    error.mockRestore();
+  });
+});
+
 describe('buildCancelIntent', () => {
   it('hands back the admin’s unsigned transaction and changes nothing', async () => {
     const { service, proposals, executor } = build();
@@ -2796,6 +2979,41 @@ describe('sweepAdminCancels', () => {
     expect(saved.executedAt).toEqual(hoursFromNow(-0.5));
     expect(saved.executionSignature).toBeNull();
     expect(events.kinds()).toContain('EXECUTED_AFTER_CLOSURE');
+  });
+
+  /**
+   * The same door on a SUSPENDED case: the cancel was requested, nobody signed
+   * it before the timelock ran out, and a third party executed the record.
+   * The row has to say the money moved and still say an operator suspended it.
+   */
+  it('records an execution of a suspended case beside the suspension', async () => {
+    const { service, proposals, executor, events } = build();
+    proposals.seed(
+      standingAndDue({
+        id: 'p1',
+        status: SlashProposalStatus.CANCELLED,
+        chainStatus: 'CANCEL_REQUESTED',
+        penaltyAmount: '5000000',
+      }),
+    );
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'EXECUTED', penaltyMinor: '5000000', appliedMinor: '900' });
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+    await service.sweepAdminCancels(NOW);
+
+    const saved = proposals.rows.get('p1')!;
+    expect(saved.status).toBe(SlashProposalStatus.CANCELLED);
+    expect(saved.chainStatus).toBe('EXECUTED');
+    expect(saved.appliedAmount).toBe('900');
+    expect(saved.executedAt).toEqual(hoursFromNow(-0.5));
+    expect(saved.executionSignature).toBeNull();
+    const event = events.rows.find((row) => row.kind === 'EXECUTED_AFTER_CLOSURE');
+    expect(event?.detail).toMatchObject({ applied: '900', caseStatus: 'CANCELLED' });
+    // Loud for the operator on call, and out of the admin-cancel sweep for good.
+    expect(error).toHaveBeenCalledWith(expect.stringContaining('was CLOSED (CANCELLED)'));
+    expect(await proposals.findAwaitingAdminCancel(100)).toEqual([]);
+    error.mockRestore();
   });
 
   /**

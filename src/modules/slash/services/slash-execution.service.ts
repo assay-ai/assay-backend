@@ -15,6 +15,7 @@ import { FleetSweepRepository } from '@database/postgres/repositories/fleet-swee
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import {
   CHAIN_PROPOSABLE_STATUSES,
+  CLOSED_WITHOUT_PENALTY_STATUSES,
   SlashProposalRepository,
 } from '@database/postgres/repositories/slash-proposal.repository';
 import {
@@ -608,7 +609,42 @@ export class SlashExecutionService {
       );
     }
 
+    // The claim's `caseStatusIn` guard stops a closed case being PROPOSED. It
+    // cannot stop a case being closed while this proposal was in flight: the
+    // suspension or overturn then found `PROPOSING`, had nothing to cancel, and
+    // the mirror above has just written `PENDING` on a row whose case is over.
+    // Ask for the cancel now rather than leave it for the next tick's repair.
+    if (mirrored === ChainProposalStatus.PENDING) {
+      await this.requestCancelIfClosed(proposal);
+    }
+
     return mirrored;
+  }
+
+  /**
+   * Ask for the admin cancel when the case behind a freshly mirrored `PENDING`
+   * record has already been closed without a penalty.
+   *
+   * Never throws, for the reason given above its call site: the chain has
+   * spoken and the mirror is written. A failure here is repaired by
+   * {@link requestCancelsForClosedCases} on the next tick.
+   */
+  private async requestCancelIfClosed(proposal: SlashProposalEntity): Promise<void> {
+    try {
+      const current = await this.proposals.findOneScoped(proposal.organizationId, proposal.id);
+      if (!current) return;
+      if (!(CLOSED_WITHOUT_PENALTY_STATUSES as readonly string[]).includes(current.status)) return;
+      await this.requestAdminCancel(
+        proposal.organizationId,
+        proposal.id,
+        `the case was already ${current.status} when its proposal confirmed`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `slash proposal ${proposal.id} could not be checked for a closure that raced its proposal`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 
   /** The one-judgement path: one beneficiary on the row, one record on chain. */
@@ -1427,16 +1463,18 @@ export class SlashExecutionService {
    *
    * ## Why it never throws
    *
-   * Two of its three callers reach it *after* a transaction has committed —
-   * `ArbitrationService.decide` and `second()` — and the third is a cron tick
-   * sweeping a batch. An exception here would hand an operator a failure for a
-   * decision that stands, which they would then make again.
+   * Most of its callers reach it *after* a transaction has committed —
+   * `ArbitrationService.decide`, `second()` and `suspend()` — and the rest are
+   * cron ticks sweeping a batch. An exception here would hand an operator a
+   * failure for a decision that stands, which they would then make again.
+   *
+   * Returns whether it recorded a request, so a sweep can count what it did.
    */
   async requestAdminCancel(
     organizationId: string,
     proposalId: string,
     reason: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     let proposal: SlashProposalEntity | null;
     try {
       proposal = await this.proposals.findOneScoped(organizationId, proposalId);
@@ -1445,19 +1483,30 @@ export class SlashExecutionService {
         `slash proposal ${proposalId} could not be read to request its chain cancellation`,
         error instanceof Error ? error.stack : String(error),
       );
-      return;
+      return false;
     }
     // `PENDING` is the only mirror with a reservation behind it. `NONE` and
     // `REFUSED` never wrote a record, `CANCELLED` released one, `EXECUTED`
     // spent it, and `CANCEL_REQUESTED` has already been asked for — asking
     // again would rewrite the same row and append a second identical event.
-    if (!proposal || proposal.chainStatus !== ChainProposalStatus.PENDING) return;
+    if (!proposal || proposal.chainStatus !== ChainProposalStatus.PENDING) return false;
 
     try {
       await this.proposals.update(
         { organizationId, id: proposalId },
         { chainStatus: ChainProposalStatus.CANCEL_REQUESTED, chainLastError: null },
       );
+    } catch (error) {
+      this.logger.error(
+        `slash proposal ${proposalId} could not be marked as awaiting an admin cancel (${reason})`,
+        error instanceof Error ? error.stack : String(error),
+      );
+      return false;
+    }
+
+    // The request is recorded; a timeline entry that does not append is a lost
+    // annotation, not a lost request.
+    try {
       await this.lifecycle.appendEventDirect({
         organizationId,
         proposalId,
@@ -1472,10 +1521,43 @@ export class SlashExecutionService {
       });
     } catch (error) {
       this.logger.error(
-        `slash proposal ${proposalId} could not be marked as awaiting an admin cancel (${reason})`,
+        `slash proposal ${proposalId} is awaiting an admin cancel (${reason}) but its timeline ` +
+          `entry failed`,
         error instanceof Error ? error.stack : String(error),
       );
     }
+    return true;
+  }
+
+  /**
+   * Ask for the cancel of every closed case whose record still mirrors
+   * `PENDING` — the repair behind the best-effort requests.
+   *
+   * A suspension and an overturn both ask *after* their own transaction has
+   * committed, so the request can be lost: the write fails, the process dies
+   * between the two, or the case is closed while `propose_slash` is in flight
+   * and the record lands afterwards. Such a row is selected by nothing — the
+   * execute sweep wants `UPHELD`, the admin-cancel sweep wants
+   * `CANCEL_REQUESTED` — while the provider's stake stays reserved and the
+   * record becomes anyone's to execute once its timelock passes.
+   *
+   * Records the request and nothing else: no transaction is built, signed or
+   * sent here. Bounded by the sweep batch size, soonest deadline first, and
+   * idempotent — a marked row leaves the predicate, so a second pass finds
+   * nothing. Returns how many it marked.
+   */
+  async requestCancelsForClosedCases(): Promise<number> {
+    const rows = await this.proposals.findClosedStillPending(this.config.sweepBatchSize);
+    let requested = 0;
+    for (const row of rows) {
+      const marked = await this.requestAdminCancel(
+        row.organizationId,
+        row.id,
+        'the case is closed and its on-chain record was still pending',
+      );
+      if (marked) requested += 1;
+    }
+    return requested;
   }
 
   /**

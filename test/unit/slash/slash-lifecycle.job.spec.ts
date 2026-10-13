@@ -49,6 +49,17 @@ class FakeSlashExecution {
     this.adminCancelRequests.push({ organizationId, proposalId, reason });
   }
 
+  /** What the closed-case repair answers; a tick is quiet when it is 0. */
+  closedCasesRepaired = 0;
+
+  async requestCancelsForClosedCases() {
+    this.record('requestCancelsForClosedCases');
+    if (this.throwOn === 'requestCancelsForClosedCases') {
+      throw new Error('requestCancelsForClosedCases failed');
+    }
+    return this.closedCasesRepaired;
+  }
+
   async sweepAdminCancels() {
     this.adminCancelSweeps += 1;
     this.record('sweepAdminCancels');
@@ -89,14 +100,15 @@ function buildJob(
   return { proposals, execution, job };
 }
 
-describe('SlashLifecycleJob — the six-step tick', () => {
-  it('runs the six steps in the order the clocks require', async () => {
+describe('SlashLifecycleJob — the seven-step tick', () => {
+  it('runs the seven steps in the order the clocks require', async () => {
     // Propose before execute, because a case that becomes upheld on this very
     // tick has to reach the chain before anything looks for it there. The
     // admin-cancel sweep after execute, because it READS on-chain records and
     // must not read them one instant before the execute pass finishes moving
-    // them. Reconcile last, because it is cleanup and must never delay a live
-    // judgement.
+    // them. The closed-case repair just before that sweep, so a case it marks
+    // is watched on the same tick. Reconcile last, because it is cleanup and
+    // must never delay a live judgement.
     const calls: string[] = [];
     const { job } = buildJob({ record: (name: string) => calls.push(name) });
 
@@ -107,6 +119,7 @@ describe('SlashLifecycleJob — the six-step tick', () => {
       'sweepPlatformMisses',
       'proposeDue',
       'executeDue',
+      'requestCancelsForClosedCases',
       'sweepAdminCancels',
       'reconcileExecuting',
     ]);
@@ -202,6 +215,7 @@ describe('SlashLifecycleJob — the six-step tick', () => {
       'sweepPlatformMisses',
       'proposeDue',
       'executeDue',
+      'requestCancelsForClosedCases',
       'sweepAdminCancels',
       'reconcileExecuting',
     ]);
@@ -261,6 +275,44 @@ describe('SlashLifecycleJob — the platform-miss sweep', () => {
 
     await expect(job.handleTick()).resolves.toBeUndefined();
 
+    expect(error).toHaveBeenCalled();
+    error.mockRestore();
+  });
+});
+
+describe('SlashLifecycleJob — the closed-case repair', () => {
+  it('says so, loudly, when it had to ask for a cancel nobody had asked for', async () => {
+    const { execution, job } = buildJob();
+    execution.closedCasesRepaired = 2;
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+    await job.handleTick();
+
+    expect(warn).toHaveBeenCalledWith(expect.stringContaining('2 closed case(s)'));
+    warn.mockRestore();
+  });
+
+  it('stays quiet on a tick that repaired nothing', async () => {
+    const { job } = buildJob();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+    await job.handleTick();
+
+    expect(warn).not.toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('keeps running the remaining steps when it throws', async () => {
+    const calls: string[] = [];
+    const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    const { job } = buildJob({
+      record: (name: string) => calls.push(name),
+      throwOn: 'requestCancelsForClosedCases',
+    });
+
+    await expect(job.handleTick()).resolves.toBeUndefined();
+
+    expect(calls).toEqual(expect.arrayContaining(['sweepAdminCancels', 'reconcileExecuting']));
     expect(error).toHaveBeenCalled();
     error.mockRestore();
   });

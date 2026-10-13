@@ -41,10 +41,17 @@ export enum SlashProposalStatus {
    * Closed without a penalty and without an overturn. Terminal.
    *
    * Two ways in, and they are not the same event. An operator suspends a case
-   * before anything is signed (`S-1`), or the chain refuses
-   * the judgement permanently and the case is voided from wherever it stood,
-   * `EXECUTING` included. `resolution_kind` is what tells them apart:
-   * `ADJUDICATOR` for the first, `AUTO_CHAIN_VOIDED` for the second.
+   * (`S-1`), or the chain refuses the judgement permanently and the case is
+   * voided from wherever it stood, `EXECUTING` included. `resolution_kind` is
+   * what tells them apart: null for the first (a suspension is not a
+   * judgement), `AUTO_CHAIN_VOIDED` for the second.
+   *
+   * A suspended case may still have a record standing on chain. The
+   * suspension asks for its cancel (`chain_status = CANCEL_REQUESTED`); until
+   * the settlement admin signs it the record can be executed by anyone once
+   * its timelock passes, and such an execution is recorded on the row beside
+   * this status — see `SlashExecutionService.recordAnExecutionNobodyAskedFor`.
+   * There is no edge from here to `REVERSED`.
    */
   CANCELLED = 'CANCELLED',
 }

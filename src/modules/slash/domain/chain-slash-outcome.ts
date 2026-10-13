@@ -59,8 +59,8 @@ export enum ChainProposalStatus {
    *
    * `cancel_slash` is the **admin's** instruction: its only signer is
    * `Config.admin`, a person's hardware key that no service in this codebase
-   * holds. So an overturn, a platform-miss sweep or a downward recalculation
-   * can no longer release the reservation inside the request that decided it —
+   * holds. So an overturn, a suspension, a platform-miss sweep or a downward
+   * recalculation can no longer release the reservation inside the request that decided it —
    * it can only say so, and wait for a human to sign the transaction
    * `POST /operator/cases/:id/cancel-intent` builds.
    *

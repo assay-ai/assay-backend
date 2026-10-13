@@ -709,6 +709,57 @@ describe('ArbitrationService', () => {
       expect(row.resolvedAt ?? null).toBeNull();
       expect(ctx.overrides.performed).toEqual([{ code: 'S-1', reason: NOTE }]);
     });
+
+    /**
+     * A suspension recorded only in Postgres leaves the on-chain record
+     * standing: the stake stays reserved and, once the timelock passes, anyone
+     * may execute it. So it asks for the cancel exactly as an overturn does.
+     */
+    it('asks for the standing on-chain proposal to be cancelled', async () => {
+      const ctx = build();
+      ctx.proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.PROPOSED,
+      });
+
+      await ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE);
+
+      expect(ctx.execution.adminCancelRequests).toEqual([
+        { organizationId: 'org_1', proposalId: 'p1', reason: 'SUSPENDED' },
+      ]);
+      expect(ctx.execution.reproposeCalls).toEqual([]);
+    });
+
+    it('asks for nothing when the suspension is refused', async () => {
+      const ctx = build();
+      ctx.proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.EXECUTING,
+      });
+
+      await expect(
+        ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE),
+      ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION });
+
+      expect(ctx.execution.adminCancelRequests).toEqual([]);
+    });
+
+    /** The suspension has committed; a failed request is repaired by the lifecycle job. */
+    it('does not fail a committed suspension when the cancel request throws', async () => {
+      const ctx = build();
+      ctx.proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.PROPOSED,
+      });
+      ctx.execution.throws = new Error('database unavailable');
+
+      await expect(
+        ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE),
+      ).resolves.toMatchObject({ status: SlashProposalStatus.CANCELLED });
+    });
   });
 
   /**
