@@ -1,0 +1,153 @@
+import { Logger } from '@nestjs/common';
+
+import { CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
+import {
+  EVM_SLASH_WATCH_ALERTS,
+  EVM_SLASH_WATCH_CHUNK,
+  EVM_SLASH_WATCH_INITIAL_LOOKBACK,
+  EVM_SLASH_WATCH_MAX_BLOCKS,
+  EvmSlashProposalWatcher,
+  SlashProposedLog,
+} from '@modules/chains/evm/evm-slash-proposal.watcher';
+import { Alert, AlertSeverity } from '@shared/alerting';
+
+const CHAIN: ChainId = CHAIN_IDS.ROBINHOOD_TESTNET;
+const STAKE = '0x00000000000000000000000000000000000000aa' as const;
+const AGENT = '0x00000000000000000000000000000000000000b1' as const;
+const ATTACKER = '0x00000000000000000000000000000000000000ee' as const;
+const KNOWN = 'a'.repeat(64);
+const ROGUE = 'f'.repeat(64);
+
+function event(requestId: string, beneficiary: `0x${string}`, penalty: bigint): SlashProposedLog {
+  return {
+    args: {
+      requestId: `0x${requestId}`,
+      provider: '0x00000000000000000000000000000000000000c1',
+      verifier: '0x00000000000000000000000000000000000000d1',
+      beneficiary,
+      penalty,
+      executableAt: 1_800_000_000n,
+    },
+    transactionHash: `0x${'1'.repeat(64)}`,
+    blockNumber: 100n,
+  };
+}
+
+function build(options: { head: bigint; logs?: SlashProposedLog[]; cursor?: string }) {
+  const alerts: Alert[] = [];
+  const ranges: [bigint, bigint][] = [];
+  const store = new Map<string, string>(
+    options.cursor ? [[`evm:slash-watch:cursor:${CHAIN}`, options.cursor]] : [],
+  );
+  const client = {
+    getBlockNumber: async () => options.head,
+    getContractEvents: async (args: { fromBlock: bigint; toBlock: bigint; address: string }) => {
+      expect(args.address).toBe(STAKE);
+      ranges.push([args.fromBlock, args.toBlock]);
+      return ranges.length === 1 ? (options.logs ?? []) : [];
+    },
+  };
+  const parts = {
+    findByChainRequestIds: async (ids: readonly string[]) =>
+      ids.includes(KNOWN)
+        ? [
+            {
+              organizationId: 'org-1',
+              proposalId: 'case-1',
+              chainRequestId: KNOWN,
+              beneficiaryAccount: `${CHAIN}:${AGENT}`,
+              penaltyAmount: '1000000',
+            },
+          ]
+        : [],
+  };
+  const redis = {
+    get: async (key: string) => store.get(key) ?? null,
+    set: async (key: string, value: string) => store.set(key, value),
+  };
+  const watcher = new EvmSlashProposalWatcher(
+    new Map([[CHAIN, client]]) as never,
+    new Map([[CHAIN, { stake: STAKE }]]) as never,
+    [CHAIN],
+    parts as never,
+    { emit: async (alert: Alert) => void alerts.push(alert) },
+    redis as never,
+  );
+  return { watcher, alerts, ranges, store };
+}
+
+describe('EvmSlashProposalWatcher — alerts on slash records this platform did not plan', () => {
+  beforeEach(() => {
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+  });
+  afterEach(() => jest.restoreAllMocks());
+
+  it('is silent for a record whose part matches', async () => {
+    const { watcher, alerts } = build({ head: 500n, logs: [event(KNOWN, AGENT, 1_000_000n)] });
+    await expect(watcher.check()).resolves.toEqual([]);
+    expect(alerts).toEqual([]);
+  });
+
+  it('raises CRITICAL for a request id the database does not know', async () => {
+    const { watcher, alerts } = build({ head: 500n, logs: [event(ROGUE, ATTACKER, 1_000_000n)] });
+    await expect(watcher.check()).resolves.toEqual([
+      { chainId: CHAIN, kind: 'UNKNOWN', requestId: ROGUE },
+    ]);
+    expect(alerts).toHaveLength(1);
+    expect(alerts[0]).toMatchObject({
+      severity: AlertSeverity.CRITICAL,
+      name: EVM_SLASH_WATCH_ALERTS.UNKNOWN,
+      details: { requestId: `0x${ROGUE}`, beneficiary: ATTACKER },
+    });
+  });
+
+  it('raises CRITICAL when the beneficiary or the penalty differs from the stored part', async () => {
+    const beneficiary = build({ head: 500n, logs: [event(KNOWN, ATTACKER, 1_000_000n)] });
+    await beneficiary.watcher.check();
+    expect(beneficiary.alerts[0]).toMatchObject({
+      severity: AlertSeverity.CRITICAL,
+      name: EVM_SLASH_WATCH_ALERTS.MISMATCH,
+      details: { storedBeneficiary: `${CHAIN}:${AGENT}`, beneficiary: ATTACKER },
+    });
+
+    const penalty = build({ head: 500n, logs: [event(KNOWN, AGENT, 2_000_000n)] });
+    await penalty.watcher.check();
+    expect(penalty.alerts[0]).toMatchObject({
+      name: EVM_SLASH_WATCH_ALERTS.MISMATCH,
+      details: { storedPenalty: '1000000', penalty: '2000000' },
+    });
+  });
+
+  it('reads a bounded range in chunks from the cursor, and advances it', async () => {
+    const { watcher, ranges, store } = build({ head: 1_000_000n, cursor: '100' });
+    await watcher.check();
+
+    const last = 100n + EVM_SLASH_WATCH_MAX_BLOCKS;
+    expect(ranges[0]).toEqual([101n, 100n + EVM_SLASH_WATCH_CHUNK]);
+    expect(ranges[ranges.length - 1][1]).toBe(last);
+    expect(ranges).toHaveLength(Number(EVM_SLASH_WATCH_MAX_BLOCKS / EVM_SLASH_WATCH_CHUNK));
+    expect(store.get(`evm:slash-watch:cursor:${CHAIN}`)).toBe(last.toString());
+  });
+
+  it('starts a chain with no cursor a bounded distance behind the head', async () => {
+    const { watcher, ranges } = build({ head: 50_000n });
+    await watcher.check();
+    expect(ranges[0][0]).toBe(50_000n - EVM_SLASH_WATCH_INITIAL_LOOKBACK);
+  });
+
+  it('warns, keeps the cursor and does not throw when the chain cannot be read', async () => {
+    const { watcher, alerts, store } = build({ head: 500n, cursor: '10' });
+    (watcher as unknown as { clients: Map<ChainId, unknown> }).clients.set(CHAIN, {
+      getBlockNumber: async () => {
+        throw new Error('rpc down');
+      },
+    });
+    await expect(watcher.check()).resolves.toEqual([]);
+    expect(alerts[0]).toMatchObject({
+      severity: AlertSeverity.WARN,
+      name: EVM_SLASH_WATCH_ALERTS.UNREADABLE,
+    });
+    expect(store.get(`evm:slash-watch:cursor:${CHAIN}`)).toBe('10');
+  });
+});

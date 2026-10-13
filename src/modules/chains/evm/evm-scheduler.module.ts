@@ -14,6 +14,7 @@ import {
   parseFloatMarks,
 } from './evm-relayer-float.constants';
 import { EvmRelayerFloatMonitor } from './evm-relayer-float.monitor';
+import { EvmSlashProposalWatcher } from './evm-slash-proposal.watcher';
 import { EvmModule } from './evm.module';
 
 /**
@@ -50,6 +51,9 @@ import { EvmModule } from './evm.module';
       inject: [ConfigService, ENABLED_CHAINS],
     },
     EvmRelayerFloatMonitor,
+    // Read-only: alerts on SlashProposed records this platform did not plan
+    // (review H-1). The repository and Redis come from global modules.
+    EvmSlashProposalWatcher,
   ],
 })
 export class EvmSchedulerModule {}
