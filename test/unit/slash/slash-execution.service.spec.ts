@@ -2916,7 +2916,8 @@ describe('sweepAdminCancels', () => {
         chainExecutableAt: hoursFromNow(-24 * 8),
       }),
     );
-    executor.readRecordImpl = async () => chainRecord({ status: 'PENDING', executedAt: null });
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'PENDING', executedAt: null, executableAt: hoursFromNow(-24 * 8) });
 
     await expect(service.sweepAdminCancels(NOW)).resolves.toEqual({
       mirrored: 0,
@@ -2957,7 +2958,8 @@ describe('sweepAdminCancels', () => {
         chainExecutableAt: hoursFromNow(-24 * 8),
       }),
     );
-    executor.readRecordImpl = async () => chainRecord({ status: 'PENDING', executedAt: null });
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'PENDING', executedAt: null, executableAt: hoursFromNow(-24 * 8) });
     executor.expireImpl = async () => {
       throw cancelRefusal(codeOf('SlashNotExpired'), 'the record is not expired');
     };
@@ -3703,8 +3705,54 @@ describe('the dispute upgrade (D-19)', () => {
     expect((await service.sweepAdminCancels(NOW)).expired).toBe(0);
     expect(executor.expired).toEqual([]);
 
-    proposals.rows.get('p1')!.chainDisputedAt = hoursFromNow(-30 * 24 - 1);
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'DISPUTED', executedAt: null, disputedAt: hoursFromNow(-30 * 24 - 1) });
     expect((await service.sweepAdminCancels(NOW)).expired).toBe(1);
+  });
+
+  it('AUDIT E-8: expires an upheld-then-cancel-requested record on executableAt + 7 d, not the dispute clock', async () => {
+    const { service, proposals, executor } = build();
+    // Disputed on day 0, upheld on day 1 (executable from then), overturned off chain.
+    proposals.seed(
+      standingAndDue({
+        id: 'p1',
+        chainStatus: 'CANCEL_REQUESTED',
+        chainExecutableAt: hoursFromNow(-9 * 24),
+        chainDisputedAt: hoursFromNow(-9 * 24),
+      }),
+    );
+    executor.readRecordImpl = async () =>
+      chainRecord({
+        status: 'PENDING',
+        executedAt: null,
+        executableAt: hoursFromNow(-8 * 24),
+        disputedAt: hoursFromNow(-9 * 24),
+      });
+    // Day 9: the dispute clock (day 30) has not run, the grace from day 1 has.
+    expect((await service.sweepAdminCancels(NOW)).expired).toBe(1);
+    expect(executor.expired).toHaveLength(1);
+  });
+
+  it('AUDIT E-8: does not try an upheld record before its new executableAt + 7 d', async () => {
+    const { service, proposals, executor } = build();
+    // Upheld on day 29 of the dispute: executable until day 36.
+    proposals.seed(
+      standingAndDue({
+        id: 'p1',
+        chainStatus: 'CANCEL_REQUESTED',
+        chainExecutableAt: hoursFromNow(-40 * 24),
+        chainDisputedAt: hoursFromNow(-31 * 24),
+      }),
+    );
+    executor.readRecordImpl = async () =>
+      chainRecord({
+        status: 'PENDING',
+        executedAt: null,
+        executableAt: hoursFromNow(-2 * 24),
+        disputedAt: hoursFromNow(-31 * 24),
+      });
+    expect((await service.sweepAdminCancels(NOW)).expired).toBe(0);
+    expect(executor.expired).toEqual([]);
   });
 
   it('expires a disputed record nobody ruled on within 30 days and closes the case', async () => {

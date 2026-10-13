@@ -1736,16 +1736,9 @@ export class SlashExecutionService {
           continue;
         }
 
-        // Still `Pending`. The expiry door opens seven days after the record
-        // became executable — the program's own `SLASH_EXECUTION_GRACE_SECONDS`,
-        // read from the client rather than retyped here.
-        // A record the provider disputed (D-19) expires on its own clock,
-        // `disputedAt + 30 d`, and not on the grace.
-        const expiresAt = proposal.chainDisputedAt
-          ? proposal.chainDisputedAt.getTime() + DISPUTE_TIMEOUT_MS
-          : proposal.chainExecutableAt
-            ? proposal.chainExecutableAt.getTime() + SLASH_EXECUTION_GRACE_MS
-            : null;
+        // Still standing. When it can be expired depends on what the record
+        // is NOW, not on whether it was ever disputed (audit E-8).
+        const expiresAt = await this.standingExpiryMs(proposal);
         if (
           expiresAt !== null &&
           now.getTime() >= expiresAt &&
@@ -1765,6 +1758,34 @@ export class SlashExecutionService {
     }
 
     return { mirrored, expired, waiting };
+  }
+
+  /**
+   * When a standing record (or every standing part) can be expired, in ms:
+   *
+   * - `Disputed` on chain → `disputedAt + 30 d` (`DisputeUnresolved`);
+   * - `Pending` → `executableAt + 7 d`, the program's
+   *   `SLASH_EXECUTION_GRACE_SECONDS`. That includes a record that was
+   *   disputed and then UPHELD (audit E-8): `chain_disputed_at` is kept after
+   *   an uphold as the record of the dispute, but the chain expires an upheld
+   *   record on the grace from its new `executableAt`, so using the dispute
+   *   clock held the provider's reservation weeks too long, or tried too early.
+   *
+   * Read live; `null` when it cannot be told.
+   */
+  private async standingExpiryMs(proposal: SlashProposalEntity): Promise<number | null> {
+    if (this.parts?.appliesTo(proposal)) {
+      await this.readCaseRecord(proposal);
+      return (await this.parts.expirableAt(proposal))?.getTime() ?? null;
+    }
+    const record = await this.readCaseRecord(proposal).catch(() => null);
+    if (record?.status === 'DISPUTED' && record.disputedAt) {
+      return record.disputedAt.getTime() + DISPUTE_TIMEOUT_MS;
+    }
+    const doors = [record?.executableAt, proposal.chainExecutableAt]
+      .filter((date): date is Date => date instanceof Date)
+      .map((date) => date.getTime());
+    return doors.length > 0 ? Math.max(...doors) + SLASH_EXECUTION_GRACE_MS : null;
   }
 
   /**
