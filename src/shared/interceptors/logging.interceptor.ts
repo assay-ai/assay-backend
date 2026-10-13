@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import {
   Injectable,
   NestInterceptor,
@@ -21,11 +23,11 @@ import { RequestContext, RequestContextStore, requestIdFromHeader } from '@share
  *
  * ## Where `requestId` and `organizationId` come from
  *
- * `requestId` reads `x-request-id` — the same header
- * `operator-cases.controller.ts`'s `requestIdOf` reads, so an id set upstream
- * (a gateway, a caller that wants its own trace id honoured) survives — and
- * generates one when absent, because an internally-originated request still
- * needs a trace.
+ * `requestId` reads `x-request-id`, so an id set upstream (a gateway, a
+ * caller that wants its own trace id honoured) survives — and generates one
+ * when absent, because an internally-originated request still needs a trace.
+ * Because the caller controls it, `serverRequestId` is minted here as well and
+ * never read from the request; the override log records that one (L-7).
  *
  * `organizationId` reads `request[SESSION_REQUEST_KEY]` — the property
  * `SessionAuthGuard` sets (`src/shared/auth/session-auth.guard.ts`) — never a
@@ -110,7 +112,7 @@ function buildRequestContextStore(request: Request): RequestContextStore {
       ? session.organizationId
       : null;
 
-  return { requestId, organizationId };
+  return { requestId, organizationId, serverRequestId: randomUUID() };
 }
 
 function statusCodeOf(error: unknown): number {
