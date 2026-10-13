@@ -32,6 +32,7 @@ export enum SlashErrorCode {
   SLASH_COMPENSATION_NOT_CONFIRMED = 'SLASH_COMPENSATION_NOT_CONFIRMED',
   SLASH_COMPENSATION_ALREADY_USED = 'SLASH_COMPENSATION_ALREADY_USED',
   SLASH_PLAN_EVIDENCE_MISMATCH = 'SLASH_PLAN_EVIDENCE_MISMATCH',
+  SLASH_SWEEP_DEFECT_KEY_MISMATCH = 'SLASH_SWEEP_DEFECT_KEY_MISMATCH',
   /** A pro-rata window case found no agent with a priced DATA_FAIL call to compensate. */
   SLASH_NO_HARMED_AGENTS = 'SLASH_NO_HARMED_AGENTS',
   /** A case whose beneficiary cannot be named on this chain (e.g. the EVM vault). */
@@ -349,6 +350,19 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
    * providers whose facts were never in question — the same defect as levying
    * them, pointed the other way.
    */
+  /**
+   * A sweep matches cases by `root_cause_key`, so the key it uses must be the
+   * source case's own (review M-2). Before, any free-text key was accepted and
+   * the source case only had to have a sweepable outcome.
+   */
+  sweepDefectKeyMismatch: {
+    code: SlashErrorCode.SLASH_SWEEP_DEFECT_KEY_MISMATCH,
+    statusCode: 422,
+    message: (context?: Record<string, any>) =>
+      context?.rootCauseKey
+        ? `The sweep's defect key must be the source case's root cause (${String(context.rootCauseKey)}), not ${String(context?.defectKey ?? '')}.`
+        : `The source case has no root cause key, so it cannot open a fleet sweep.`,
+  },
   outcomeNotSweepable: {
     code: SlashErrorCode.SLASH_SWEEP_OUTCOME_NOT_SWEEPABLE,
     statusCode: 422,
