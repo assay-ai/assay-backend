@@ -430,19 +430,26 @@ export class SlashExecutionService {
    * already on the row as `chain_last_error`.
    */
   private async flagPlanRefusal(proposal: SlashProposalEntity, error: unknown): Promise<void> {
-    if ((error as { errorCode?: unknown })?.errorCode !== 'SLASH_PLAN_EVIDENCE_MISMATCH') return;
-    if (proposal.chainLastError === 'SLASH_PLAN_EVIDENCE_MISMATCH') return;
+    const code = (error as { errorCode?: unknown })?.errorCode;
+    if (code !== 'SLASH_PLAN_EVIDENCE_MISMATCH' && code !== 'SLASH_BENEFICIARY_EVIDENCE_REFUSED') {
+      return;
+    }
+    if (proposal.chainLastError === code) return;
     try {
       await this.lifecycle.appendEventDirect({
         organizationId: proposal.organizationId,
         proposalId: proposal.id,
         occurredAt: new Date(),
-        kind: 'PLAN_REFUSED',
+        kind: code === 'SLASH_PLAN_EVIDENCE_MISMATCH' ? 'PLAN_REFUSED' : 'BENEFICIARY_REFUSED',
         actorType: 'system',
         actorId: null,
         summary:
-          'Nothing was signed: the stored slash plan does not match the window evidence. ' +
-          'An operator must check the parts before this case can go on chain.',
+          code === 'SLASH_PLAN_EVIDENCE_MISMATCH'
+            ? 'Nothing was signed: the stored slash plan does not match the window evidence. ' +
+              'An operator must check the parts before this case can go on chain.'
+            : 'Nothing was signed: a beneficiary did not pay for the failed calls, or its ' +
+              'share is more than it paid for them (C5). An operator must check the parts ' +
+              'before this case can go on chain.',
         detail: { reason: error instanceof Error ? error.message : String(error) },
       });
     } catch (appendError) {

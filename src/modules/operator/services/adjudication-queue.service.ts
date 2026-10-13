@@ -179,6 +179,18 @@ export class AdjudicationQueueService {
       // `chainStatus: PENDING` and a non-zero count the case is partly
       // disputed: the other parts keep executing.
       chainDisputedParts: proposal?.chainDisputedParts ?? 0,
+      // C4: the provider's slash cases upheld or executed in the last 30 days,
+      // so an operator knows when to ban a repeat offender with the blocklist.
+      upheldViolations30d: proposal
+        ? ((
+            await this.proposals
+              .countUpheldViolationsByProvider(
+                [proposal.providerId],
+                new Date(Date.now() - 30 * 24 * 60 * 60 * 1000),
+              )
+              .catch(() => new Map<string, number>())
+          ).get(proposal.providerId) ?? 0)
+        : 0,
     };
   }
 

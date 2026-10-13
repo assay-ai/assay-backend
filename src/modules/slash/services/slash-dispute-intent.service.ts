@@ -16,7 +16,10 @@ import { OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 import { ProviderErrors } from '@modules/provider/errors/provider.errors';
 
+import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
+
 import { DISPUTE_TIMEOUT_MS } from '../constants/slash.constants';
+import { BeneficiaryEvidence } from '../domain/slash-beneficiary-evidence';
 import { SlashErrors } from '../errors/slash.errors';
 import {
   SLASH_DISPUTE_INTENTS,
@@ -26,6 +29,7 @@ import {
   SlashDisputeIntentPort,
   SlashRuling,
 } from '../ports/slash-dispute-intent.port';
+import { SlashPartsService } from './slash-parts.service';
 
 /** Who asked, and why, for the override register entry an arbiter intent writes. */
 export interface ArbiterIntentContext {
@@ -56,17 +60,72 @@ export class SlashDisputeIntentService {
     @Optional()
     @Inject(SLASH_DISPUTE_INTENTS)
     private readonly intents: SlashDisputeIntentPort | null = null,
+    @Optional() private readonly proposals: SlashProposalRepository | null = null,
+    @Optional() private readonly partsService: SlashPartsService | null = null,
   ) {}
 
   /**
    * The arbiter's queue: every record disputed on chain, with its case and the
    * moment `expireSlash` can end it (`disputedAt + 30 d`).
    */
-  async disputedOnChain(limit = 200) {
+  async disputedOnChain(limit = 200, now: Date = new Date()) {
     const rows = await this.parts.findChainDisputed(limit);
+    // C4: how often each provider was found at fault lately, so an operator
+    // knows when to ban it with the blocklist.
+    const violations =
+      (await this.proposals
+        ?.countUpheldViolationsByProvider(
+          rows.map((row) => row.providerId),
+          new Date(now.getTime() - 30 * 24 * 60 * 60 * 1000),
+        )
+        .catch(() => null)) ?? new Map<string, number>();
+    // C5: the beneficiary evidence, with the chain's live agent share.
+    const agentBps = new Map<string, number | null>();
+    for (const chainId of new Set(rows.map((row) => chainOfAsset(row.assetId)))) {
+      agentBps.set(
+        chainId,
+        await this.chainTerms(chainId)
+          .then((terms) => terms.slashAgentBps)
+          .catch(() => null),
+      );
+    }
+    const evidence = new Map<string, BeneficiaryEvidence>();
+    for (const row of rows) {
+      const bps = agentBps.get(chainOfAsset(row.assetId));
+      if (!this.partsService || bps === null || bps === undefined || !row.windowId) continue;
+      const [found] = await this.partsService
+        .beneficiaryEvidenceOf(
+          { windowId: row.windowId, assetId: row.assetId, providerId: row.providerId },
+          [
+            {
+              chainRequestId: row.requestId,
+              agentAccount: row.agentAccount,
+              beneficiaryAccount: row.beneficiaryAccount,
+              penaltyAmount: String(row.penaltyAmount),
+            } as never,
+          ],
+          bps,
+        )
+        .catch(() => []);
+      if (found) evidence.set(row.requestId, found);
+    }
     return rows.map((row) => {
       const disputedAt = row.chainDisputedAt ? new Date(row.chainDisputedAt) : null;
+      const found = evidence.get(row.requestId);
       return {
+        upheldViolations30d: violations.get(row.providerId) ?? 0,
+        beneficiary: row.beneficiaryAccount,
+        beneficiaryEvidence: found
+          ? {
+              payer: found.payer,
+              failedCalls: found.failedCalls,
+              paidAmount: found.paidMinor,
+              redeemedAmount: found.redeemedMinor,
+              shareAmount: found.shareMinor,
+              ok: found.ok,
+              reason: found.reason,
+            }
+          : null,
         requestId: `0x${row.requestId}`,
         proposalId: row.proposalId,
         providerId: row.providerId,

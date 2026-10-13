@@ -140,6 +140,34 @@ export class SlaWindowCallRepository extends OrganizationScopedRepository<SlaWin
    * comes off `payment_intents.agent_account` (CAIP-10, the payer's own
    * account) for the reason {@link sumSpendByAgent} documents.
    */
+  /**
+   * Per payer: the failed calls of a window to this provider, what was paid
+   * for them (the voucher amount of each) and how much of it settled — the
+   * evidence follow-up C5 checks a slash's beneficiary and share against.
+   */
+  async failedCallPaymentsByAgent(
+    windowId: string,
+    assetId: string,
+    providerId: string,
+  ): Promise<
+    { agentAccount: string; failedCalls: string; paid: string | null; redeemed: string | null }[]
+  > {
+    return this.manager
+      .createQueryBuilder(SlaWindowCallEntity, 'call')
+      .innerJoin(PaymentIntentEntity, 'intent', 'intent.id = call.intentId')
+      .select('intent.agent_account', 'agentAccount')
+      .addSelect('COUNT(*)', 'failedCalls')
+      .addSelect('SUM(call.price_amount)', 'paid')
+      .addSelect(`SUM(call.price_amount) FILTER (WHERE intent.status = 'SETTLED')`, 'redeemed')
+      .where('call.windowId = :windowId', { windowId })
+      .andWhere('call.countedAsFailure = true')
+      .andWhere('call.assetId = :assetId', { assetId })
+      .andWhere('intent.provider_id = :providerId', { providerId })
+      .groupBy('intent.agent_account')
+      .orderBy('intent.agent_account', 'ASC')
+      .getRawMany();
+  }
+
   async sumFailedPriceByAgent(
     windowId: string,
     assetId: string,

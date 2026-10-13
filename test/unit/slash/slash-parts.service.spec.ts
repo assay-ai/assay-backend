@@ -141,6 +141,7 @@ function build(
     stragglerMaxAttempts: 3,
     stragglerDeadlineMs: 24 * 3_600_000,
   },
+  paidOverride: [string, string][] | null = null,
 ) {
   const parts = new FakeParts();
   const executor = new ScriptedExecutor();
@@ -150,6 +151,14 @@ function build(
         organizationId: 'agent-org',
         agentAccount,
         spend,
+      })),
+    // C5: what each payer paid for its failed calls (here, what it was weighed by).
+    failedCallPaymentsByAgent: async () =>
+      (paidOverride ?? weights).map(([agentAccount, paid]) => ({
+        agentAccount,
+        failedCalls: '1',
+        paid,
+        redeemed: '0',
       })),
   };
   const service = new SlashPartsService(parts as never, windowCalls as never, executor, config, {
@@ -205,6 +214,49 @@ describe('SlashPartsService.propose', () => {
       ],
     );
     expect(result).toMatchObject({ status: 'PENDING', reservedMinor: '300', executableAt: X0 });
+  });
+
+  it('C5: refuses to sign when a beneficiary’s share is more than it paid for the failed calls', async () => {
+    // Penalty 300 split 200/100; the 60% shares are 120 and 60. Agent 1 paid
+    // only 100 for its failed calls.
+    const { service, proposal, executor } = build(
+      [
+        [agent(1), '200'],
+        [agent(2), '100'],
+      ],
+      undefined,
+      [
+        [agent(1), '100'],
+        [agent(2), '100'],
+      ],
+    );
+    await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: 'SLASH_BENEFICIARY_EVIDENCE_REFUSED',
+      message: expect.stringContaining('share 120 is more than the 100 it paid'),
+    });
+    expect(executor.batches).toEqual([]);
+  });
+
+  it('C5: refuses to sign for a beneficiary that paid no voucher for a failed call', async () => {
+    const { service, proposal, executor } = build([[agent(1), '300']], undefined, []);
+    await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: 'SLASH_BENEFICIARY_EVIDENCE_REFUSED',
+      message: expect.stringContaining('paid no voucher for a failed call'),
+    });
+    expect(executor.batches).toEqual([]);
+  });
+
+  it('C5: reports the evidence per part, share within what was paid', async () => {
+    const { service, proposal, parts } = build([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    await service.propose(proposal, '0xprovider');
+    const evidence = await service.beneficiaryEvidenceOf(proposal, parts.rows as never, 6000);
+    expect(evidence.map((row) => [row.payer, row.paidMinor, row.shareMinor, row.ok])).toEqual([
+      [agent(1), '200', '120', true],
+      [agent(2), '100', '60', true],
+    ]);
   });
 
   it('merges two spellings of one EVM account into one beneficiary', async () => {

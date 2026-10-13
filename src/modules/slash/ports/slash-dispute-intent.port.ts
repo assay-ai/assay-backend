@@ -31,6 +31,8 @@ export interface SlashChainTerms {
   readonly admin: string;
   /** The delay a proposal made now would freeze into its `executableAt`. */
   readonly slashDelaySeconds: number;
+  /** `params().slashAgentBps`: the beneficiary's share of an executed slash. */
+  readonly slashAgentBps: number;
 }
 
 /** Who must sign a built call. */

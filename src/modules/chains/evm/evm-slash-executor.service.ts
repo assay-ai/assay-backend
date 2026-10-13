@@ -466,7 +466,7 @@ export class EvmSlashExecutor
   async chainTerms(chainId: ChainId): Promise<SlashChainTerms> {
     const deployment = this.deployment(chainId);
     const client = this.client(chainId);
-    const [terms, admin] = await Promise.all([
+    const [terms, admin, params] = await Promise.all([
       readConfigTerms(client, deployment.config),
       client.readContract({
         address: deployment.config,
@@ -474,8 +474,19 @@ export class EvmSlashExecutor
         functionName: 'admin',
         args: [],
       }) as Promise<`0x${string}`>,
+      client.readContract({
+        address: deployment.config,
+        abi: X402_CONFIG_ABI,
+        functionName: 'params',
+        args: [],
+      }) as Promise<{ slashAgentBps: number | bigint }>,
     ]);
-    return { chainId, ...terms, admin: getAddress(admin) };
+    return {
+      chainId,
+      ...terms,
+      admin: getAddress(admin),
+      slashAgentBps: Number(params.slashAgentBps),
+    };
   }
 
   /**
