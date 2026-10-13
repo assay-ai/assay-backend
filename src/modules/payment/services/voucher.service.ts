@@ -132,18 +132,20 @@ export class VoucherService {
     const now = Math.floor(Date.now() / 1000);
 
     this.assertWellFormed(voucher);
-    // Right after the shape check, and before the signature: it is an
-    // in-memory lookup, and a voucher naming a blocked wallet is refused
-    // whoever signed it. `record` → `PaymentIntentService.create` checks the
-    // session's own parties again; this covers the voucher's.
+    this.assertUnexpired(voucher, now);
+    this.assertAuthorisesCall(voucher, input);
+    const delegation = await this.assertAuthorisedByPayer(voucher, signature, input, now);
+    // AFTER the session binding and the signature (audit E-10): checked first,
+    // any agent could send an unsigned voucher naming any wallet and read from
+    // the error whether that wallet is on the internal blocklist. By now the
+    // parties are the session's own account, its escrow and the routed
+    // provider. `record` → `PaymentIntentService.create` checks the session's
+    // own parties again; this covers the voucher's.
     this.blocklist.assertNotBlocked([
       { role: BlockedRole.PAYER, kind: BlockSubjectKind.WALLET, subject: voucher.payer },
       { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: voucher.payTo },
       { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: voucher.provider },
     ]);
-    this.assertUnexpired(voucher, now);
-    this.assertAuthorisesCall(voucher, input);
-    const delegation = await this.assertAuthorisedByPayer(voucher, signature, input, now);
     this.assertWithinEscrowLimit(voucher, input);
     await this.assertIssuedSeq(voucher, input);
 
