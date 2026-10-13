@@ -24,6 +24,7 @@ import {
 } from '@modules/notification/ports/notification.port';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { ProviderErrors } from '@modules/provider/errors/provider.errors';
 import {
   STAKE_INTENT_BUILDER,
   StakeIntentBuilderPort,
@@ -2182,11 +2183,7 @@ export class SlashExecutionService {
     });
 
     if (!enrolment?.stakeAuthorityAccountId) {
-      throw SlashErrors.notExecuted({
-        status:
-          `provider ${proposal.providerId} has no proved stake authority on ${chainId} ` +
-          `to slash`,
-      });
+      throw ProviderErrors.stakeAuthorityUnprovenFor({ providerId: proposal.providerId, chainId });
     }
 
     return enrolment.stakeAuthorityAccountId as AccountId;

@@ -434,6 +434,22 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
       ` derives your stake account from the wallet that signs it, and will never take that` +
       ` address from a request body.`,
   },
+  /**
+   * The same fact as {@link stakeAuthorityUnproven}, told to somebody who is
+   * not the provider: an operator route that has to build a transaction
+   * against the provider's stake account and finds no account to name.
+   *
+   * It used to be reported as `SLASH_NOT_EXECUTED` — "Nothing to compensate:
+   * this proposal never executed" — on a cancel and on an executed case alike.
+   */
+  stakeAuthorityUnprovenFor: {
+    code: ProviderErrorCode.PROVIDER_STAKE_AUTHORITY_UNPROVEN,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Provider ${String(context?.providerId ?? '')} has no proved stake authority on ` +
+      `${String(context?.chainId ?? 'that chain')}, so there is no stake account to name and ` +
+      `no transaction can be built. Nothing was signed or submitted.`,
+  },
   chainNotEnrolled: {
     code: ProviderErrorCode.PROVIDER_CHAIN_NOT_ENROLLED,
     statusCode: 409,
