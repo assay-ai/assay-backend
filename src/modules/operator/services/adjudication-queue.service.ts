@@ -7,6 +7,7 @@ import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
 import { DisputeClaimType } from '@modules/slash/domain/arbitration';
+import { ChainProposalStatus } from '@modules/slash/domain/chain-slash-outcome';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
 import { SlashCaseService } from '@modules/slash/services/slash-case.service';
 
@@ -147,10 +148,11 @@ export class AdjudicationQueueService {
   }
 
   async brief(organizationId: string, proposalId: string) {
-    const [caseDto, timeline, restoration] = await Promise.all([
+    const [caseDto, timeline, restoration, proposal] = await Promise.all([
       this.cases.buildCase(organizationId, proposalId),
       this.cases.timeline(organizationId, proposalId),
       this.cases.restoration(organizationId, proposalId),
+      this.proposals.findOneScoped(organizationId, proposalId),
     ]);
 
     const dispute = caseDto.proposal.disputeId
@@ -163,6 +165,11 @@ export class AdjudicationQueueService {
       timeline,
       restoration,
       requiresSecondSignature: caseDto.proposal.status === SlashProposalStatus.AWAITING_SECOND,
+      // Read-only, and for the operator alone: `cancel-intent` is guarded on
+      // the on-chain record's status, which the case status does not carry (an
+      // overturned case waiting for the settlement admin still reads
+      // `OVERTURNED`), so the console could never tell when to offer it.
+      chainStatus: (proposal?.chainStatus ?? ChainProposalStatus.NONE) as ChainProposalStatus,
     };
   }
 
