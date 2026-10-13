@@ -96,6 +96,9 @@ export class AccountBlocklistService implements OnModuleInit, OnModuleDestroy {
   private refreshedAt = 0;
   /** Bumped by every local write, so a refresh that started before it is not applied after it. */
   private localWrites = 0;
+  /** The generation of the last refresh started, and of the last one applied (audit E-7). */
+  private refreshesStarted = 0;
+  private appliedGeneration = 0;
   private timer: NodeJS.Timeout | null = null;
   private started = false;
 
@@ -241,11 +244,18 @@ export class AccountBlocklistService implements OnModuleInit, OnModuleDestroy {
    * A local write that lands while the read is in flight would be overwritten
    * by a result that predates it, so the read is repeated until no write
    * overtook it.
+   *
+   * Overlapping refreshes (the poll and a pub/sub message) can complete out of
+   * order, so each takes a generation when its read starts and is applied only
+   * if no LATER-started read has been applied already: an older result never
+   * overwrites a newer one (audit E-7).
    */
   async refresh(): Promise<void> {
     for (let attempt = 0; attempt < 3; attempt += 1) {
       const seen = this.localWrites;
+      const generation = (this.refreshesStarted += 1);
       const rows = await this.blocks.findActive();
+      if (generation < this.appliedGeneration) return;
       if (this.localWrites !== seen) continue;
 
       const organizations = new Map<string, BlockHit>();
@@ -256,6 +266,7 @@ export class AccountBlocklistService implements OnModuleInit, OnModuleDestroy {
       }
       this.organizations = organizations;
       this.wallets = wallets;
+      this.appliedGeneration = generation;
       this.refreshedAt = Date.now();
       return;
     }
