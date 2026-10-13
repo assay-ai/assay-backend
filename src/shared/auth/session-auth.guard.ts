@@ -10,7 +10,10 @@ import {
 } from '@modules/mcp/ports/mcp-session.port';
 
 import { extractBearerToken } from './bearer-token';
-import { BLOCKED_SESSION_READ_ONLY_METADATA } from './blocked-session-read-only.decorator';
+import {
+  ALLOWED_WHILE_BLOCKED_METADATA,
+  BLOCKED_SESSION_READ_ONLY_METADATA,
+} from './blocked-session-read-only.decorator';
 import { SESSION_REQUEST_KEY } from './session-request.key';
 
 /**
@@ -68,7 +71,8 @@ export interface RequestWithSession extends Request {
  * session (`McpSession.blocked`). Such a session passes here on `GET` and
  * `HEAD` only — the dashboard can still show the account its own data and the
  * block — and every other method is refused with the block's own code, except
- * on a route marked `@BlockedSessionReadOnly()`: a `POST` that only reads. A
+ * on a route marked `@BlockedSessionReadOnly()` (a `POST` that only reads) or
+ * `@AllowedWhileBlocked()` (a write that only revokes authority). A
  * read that hands out something spendable (`GET /escrow/next-seq` issues a
  * voucher seq) refuses again where it does so.
  */
@@ -94,11 +98,12 @@ export class SessionAuthGuard implements CanActivate {
   }
 
   private isReadOnlyRoute(context: ExecutionContext): boolean {
-    return (
-      this.reflector.getAllAndOverride<boolean | undefined>(BLOCKED_SESSION_READ_ONLY_METADATA, [
-        context.getHandler(),
-        context.getClass(),
-      ]) === true
+    return [BLOCKED_SESSION_READ_ONLY_METADATA, ALLOWED_WHILE_BLOCKED_METADATA].some(
+      (key) =>
+        this.reflector.getAllAndOverride<boolean | undefined>(key, [
+          context.getHandler(),
+          context.getClass(),
+        ]) === true,
     );
   }
 }
