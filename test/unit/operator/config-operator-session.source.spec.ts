@@ -1,3 +1,4 @@
+import { createHash } from 'node:crypto';
 import { mkdtempSync, rmSync, writeFileSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
@@ -122,6 +123,9 @@ describe('ConfigOperatorSessionSource — the token names a subject, the table n
   });
 });
 
+/** 32 characters: the shortest plaintext token the loader accepts. */
+const LONG_TOKEN = 'tok_live_0123456789abcdefghijklmn';
+
 describe('loadOperatorCredentials', () => {
   let dir: string;
 
@@ -150,12 +154,12 @@ describe('loadOperatorCredentials', () => {
 
   it('reads the env var when no path is passed', () => {
     const path = join(dir, 'from-env.json');
-    writeFileSync(path, JSON.stringify({ tok_from_env: { subject: 'env@' } }));
+    writeFileSync(path, JSON.stringify({ [LONG_TOKEN]: { subject: 'env@' } }));
 
     const saved = process.env.OPERATOR_CREDENTIALS_FILE;
     process.env.OPERATOR_CREDENTIALS_FILE = path;
     try {
-      expect(loadOperatorCredentials()).toEqual({ tok_from_env: { subject: 'env@' } });
+      expect(loadOperatorCredentials()).toEqual({ [LONG_TOKEN]: { subject: 'env@' } });
     } finally {
       if (saved === undefined) delete process.env.OPERATOR_CREDENTIALS_FILE;
       else process.env.OPERATOR_CREDENTIALS_FILE = saved;
@@ -164,9 +168,9 @@ describe('loadOperatorCredentials', () => {
 
   it('loads a valid token → { subject } map', () => {
     const path = join(dir, 'credentials.json');
-    writeFileSync(path, JSON.stringify({ tok_live_abc: { subject: 'dan@' } }));
+    writeFileSync(path, JSON.stringify({ [LONG_TOKEN]: { subject: 'dan@' } }));
 
-    expect(loadOperatorCredentials(path)).toEqual({ tok_live_abc: { subject: 'dan@' } });
+    expect(loadOperatorCredentials(path)).toEqual({ [LONG_TOKEN]: { subject: 'dan@' } });
   });
 
   it('throws at load when the file is not a JSON object (an array)', () => {
@@ -181,5 +185,68 @@ describe('loadOperatorCredentials', () => {
     writeFileSync(path, '{ not json');
 
     expect(() => loadOperatorCredentials(path)).toThrow();
+  });
+
+  it('never quotes the file in the error when the JSON is malformed', () => {
+    const path = join(dir, 'credentials.json');
+    // A token followed by a syntax error: Node's own message would quote it.
+    writeFileSync(path, `{ "${LONG_TOKEN}": { "subject": "dan@" }, oops`);
+
+    let message = '';
+    try {
+      loadOperatorCredentials(path);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toBe('operator credentials file is not valid JSON');
+  });
+
+  it('refuses a plaintext token shorter than 32 characters, without printing it', () => {
+    const path = join(dir, 'credentials.json');
+    const short = 'tok_short_0123456789abcdefghijk'; // 31 characters
+    writeFileSync(
+      path,
+      JSON.stringify({ [LONG_TOKEN]: { subject: 'a@' }, [short]: { subject: 'b@' } }),
+    );
+
+    let message = '';
+    try {
+      loadOperatorCredentials(path);
+    } catch (error) {
+      message = (error as Error).message;
+    }
+    expect(message).toContain('entry 2');
+    expect(message).toContain('shorter than 32 characters');
+    expect(message).not.toContain(short);
+    expect(message).not.toContain(LONG_TOKEN);
+  });
+
+  it('accepts a sha256: digest key and refuses a malformed one', () => {
+    const path = join(dir, 'credentials.json');
+    const digest = createHash('sha256').update(LONG_TOKEN).digest('hex');
+    writeFileSync(path, JSON.stringify({ [`sha256:${digest}`]: { subject: 'dan@' } }));
+    expect(loadOperatorCredentials(path)).toEqual({ [`sha256:${digest}`]: { subject: 'dan@' } });
+
+    writeFileSync(path, JSON.stringify({ 'sha256:abc123': { subject: 'dan@' } }));
+    expect(() => loadOperatorCredentials(path)).toThrow(/64 hex characters/);
+  });
+});
+
+describe('ConfigOperatorSessionSource — digest keys', () => {
+  it('authenticates the token behind a sha256: key, and not the digest itself', async () => {
+    const digest = createHash('sha256').update(LONG_TOKEN).digest('hex');
+    const repo = new FakeOperatorRepository();
+    repo.seed(buildOperator({ id: 'op-dan', subject: 'dan@' }));
+    const source = new ConfigOperatorSessionSource(
+      { [`sha256:${digest.toUpperCase()}`]: { subject: 'dan@' } },
+      repo as never,
+    );
+
+    await expect(source.resolve(LONG_TOKEN)).resolves.toMatchObject({ operatorId: 'op-dan' });
+    await expectErrorCodeAsync(() => source.resolve(digest), 'OPERATOR_CREDENTIAL_INVALID');
+    await expectErrorCodeAsync(
+      () => source.resolve(`sha256:${digest}`),
+      'OPERATOR_CREDENTIAL_INVALID',
+    );
   });
 });

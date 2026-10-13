@@ -10,6 +10,7 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  */
 export enum OperatorErrorCode {
   OPERATOR_CREDENTIAL_INVALID = 'OPERATOR_CREDENTIAL_INVALID',
+  OPERATOR_AUTH_RATE_LIMITED = 'OPERATOR_AUTH_RATE_LIMITED',
   OPERATOR_SUSPENDED = 'OPERATOR_SUSPENDED',
   OPERATOR_ROLE_REQUIRED = 'OPERATOR_ROLE_REQUIRED',
   OPERATOR_NOT_FOUND = 'OPERATOR_NOT_FOUND',
@@ -39,6 +40,15 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
     code: OperatorErrorCode.OPERATOR_CREDENTIAL_INVALID,
     statusCode: 401,
     message: () => 'Operator credential invalid',
+  },
+  /**
+   * Too many refused tokens from one address. Raised before the token is
+   * looked at, so a blocked address learns nothing about the next guess.
+   */
+  authRateLimited: {
+    code: OperatorErrorCode.OPERATOR_AUTH_RATE_LIMITED,
+    statusCode: 429,
+    message: () => 'Too many failed operator sign-in attempts. Try again later.',
   },
   /**
    * The token is genuine and its subject is provisioned, but `status =
