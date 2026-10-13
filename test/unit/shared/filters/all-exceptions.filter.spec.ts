@@ -7,6 +7,8 @@ import {
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { ErrorResponse } from '@shared/errors/error-response';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
+import { AccountErrors } from '@modules/account/errors/account.errors';
+import { SlashErrors } from '@modules/slash/errors/slash.errors';
 
 function buildHost(url = '/api/v1/payments/abc-123') {
   const json = jest.fn();
@@ -121,5 +123,33 @@ describe('AllExceptionsFilter', () => {
 
     new AllExceptionsFilter().catch(new Error('late'), host);
     expect(json).not.toHaveBeenCalled();
+  });
+
+  describe('error.context, only where the definition declares it safe', () => {
+    it('puts SLASH_CHAIN_BATCH_REFUSED refusals[] on the wire', () => {
+      const refusals = [
+        { requestId: 'ab'.repeat(32), reason: 'SlashNotPending', detail: 'the record is EXECUTED' },
+      ];
+      const body = capture(
+        SlashErrors.chainBatchRefused({ functionName: 'disputeSlashBatch', refusals }),
+      );
+      expect(body.error.code).toBe('SLASH_CHAIN_BATCH_REFUSED');
+      expect(body.error.context).toEqual({ functionName: 'disputeSlashBatch', refusals });
+    });
+
+    it('keeps every other context off the wire (no block note, no internals)', () => {
+      const blocked = capture(
+        AccountErrors.accountBlocked({
+          role: 'PAYER',
+          subjectKind: 'WALLET',
+          note: 'internal: key leaked in a public repo',
+        } as never),
+      );
+      expectTheOneShape(blocked);
+      expect(JSON.stringify(blocked)).not.toContain('leaked');
+
+      const notFound = capture(PaymentErrors.paymentIntentNotFound({ id: 'abc-123' }));
+      expectTheOneShape(notFound);
+    });
   });
 });
