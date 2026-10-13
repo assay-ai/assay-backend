@@ -1,17 +1,18 @@
 import 'reflect-metadata';
 
-import { METHOD_METADATA } from '@nestjs/common/constants';
+import { readdirSync, statSync } from 'fs';
+import { join } from 'path';
+
+import { GUARDS_METADATA, METHOD_METADATA, PATH_METADATA } from '@nestjs/common/constants';
 import { RequestMethod } from '@nestjs/common';
 
-import { OperatorCasesController } from '@modules/operator/controllers/operator-cases.controller';
-import { OperatorOverrideLogController } from '@modules/operator/controllers/operator-override-log.controller';
-import { OperatorProvidersController } from '@modules/operator/controllers/operator-providers.controller';
 import {
   OVERRIDE_CODE_METADATA,
   SKIP_OVERRIDE_METADATA,
 } from '@modules/operator/decorators/override.decorator';
 import { lookupOverride } from '@modules/operator/domain/override-register';
-import { REQUIRE_ROLES_METADATA } from '@shared/auth';
+import { OperatorOverrideGuard } from '@modules/operator/guards/operator-override.guard';
+import { OperatorRolesGuard, REQUIRE_ROLES_METADATA } from '@shared/auth';
 
 /**
  * Every manual intervention appears in the override register; there is no way
@@ -33,11 +34,39 @@ import { REQUIRE_ROLES_METADATA } from '@shared/auth';
  * decorators would miss a handler in a file nobody thought to include, and
  * would be fooled by a decorator that is present but commented out.
  */
-const OPERATOR_CONTROLLERS = [
-  OperatorCasesController,
-  OperatorOverrideLogController,
-  OperatorProvidersController,
-];
+type ControllerClass = new (...args: never[]) => unknown;
+
+const SRC = join(__dirname, '../../../src');
+
+function controllerFiles(dir: string, out: string[] = []): string[] {
+  for (const entry of readdirSync(dir)) {
+    const full = join(dir, entry);
+    if (statSync(full).isDirectory()) controllerFiles(full, out);
+    else if (full.endsWith('.controller.ts')) out.push(full);
+  }
+  return out;
+}
+
+function pathsOf(controller: ControllerClass): string[] {
+  const path = Reflect.getMetadata(PATH_METADATA, controller) as string | string[] | undefined;
+  return (Array.isArray(path) ? path : [path ?? '']).map((p) => p.replace(/^\/+/, ''));
+}
+
+/**
+ * Every controller in `src` whose route prefix starts with `operator`, found
+ * from Nest's own route metadata rather than a hand-written list (review L-4:
+ * the old list of three missed `operator/tool-requests`). A new controller
+ * under `/operator` is covered the moment it exists.
+ */
+const OPERATOR_CONTROLLERS: ControllerClass[] = controllerFiles(SRC)
+  // A dynamic list of files: `require` is the only synchronous way to load it.
+  // eslint-disable-next-line @typescript-eslint/no-require-imports
+  .flatMap((file) => Object.values(require(file) as Record<string, unknown>))
+  .filter(
+    (value): value is ControllerClass =>
+      typeof value === 'function' && Reflect.hasMetadata(PATH_METADATA, value),
+  )
+  .filter((controller) => pathsOf(controller).some((path) => path.startsWith('operator')));
 
 const MUTATING = new Set([
   RequestMethod.POST,
@@ -55,7 +84,7 @@ interface RouteInfo {
   readonly roles: unknown;
 }
 
-function routesOf(controller: new (...args: never[]) => unknown): RouteInfo[] {
+function routesOf(controller: ControllerClass): RouteInfo[] {
   const prototype = controller.prototype as Record<string, unknown>;
   return Object.getOwnPropertyNames(prototype)
     .filter((name) => name !== 'constructor')
@@ -78,6 +107,32 @@ describe('override register coverage', () => {
   it('finds routes at all (the test is meaningless if it does not)', () => {
     expect(routes.length).toBeGreaterThan(5);
     expect(routes.some((route) => MUTATING.has(route.method))).toBe(true);
+    // The controllers the hand-written list used to miss are found.
+    expect(OPERATOR_CONTROLLERS.map((c) => c.name)).toEqual(
+      expect.arrayContaining([
+        'OperatorCasesController',
+        'OperatorToolRequestsController',
+        'OperatorReferenceController',
+      ]),
+    );
+  });
+
+  /**
+   * Metadata alone enforces nothing: `@RequireRoles` and the register code are
+   * checked by `OperatorRolesGuard` and `OperatorOverrideGuard` at runtime, so
+   * a controller with a write must mount both.
+   */
+  it('mounts the role and override guards on every operator controller that writes', () => {
+    const unguarded = OPERATOR_CONTROLLERS.filter((controller) =>
+      routesOf(controller).some((route) => MUTATING.has(route.method)),
+    )
+      .filter((controller) => {
+        const guards = (Reflect.getMetadata(GUARDS_METADATA, controller) ?? []) as unknown[];
+        return !guards.includes(OperatorRolesGuard) || !guards.includes(OperatorOverrideGuard);
+      })
+      .map((controller) => controller.name);
+
+    expect(unguarded).toEqual([]);
   });
 
   it('gives every mutating operator route a register code or a named exemption', () => {
