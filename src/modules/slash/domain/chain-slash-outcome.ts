@@ -195,6 +195,11 @@ const WAIT_ERRORS: ReadonlySet<string> = new Set([
   'VerifierDailyCapExceeded',
   'PenaltyTooSmallToSplit',
   'NothingToSlash',
+  // EVM (follow-up C2): `executeSlash` refuses a payment a rolling window
+  // (the provider's or the key's) would cut below `min(reserved, atRisk)`,
+  // before the last day of the grace — "window full, retry later". The record
+  // stays Pending and is paid whole once the window drains.
+  'SlashWindowNotDrained',
 ]);
 
 /**
