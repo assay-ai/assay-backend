@@ -168,14 +168,17 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
    * or a delegate's caps, expiry or authority), and a voucher admitted now
    * could be one the new caps refuse at redemption (BUG-D1-07). Nothing was
    * charged and the voucher's seq is not spent; the same call can be retried
-   * once the change has landed, usually within seconds.
+   * once the change has landed and `VOUCHER_ADMISSION_CHAIN_LAG_MS` has passed
+   * (an RPC node may still answer with the old caps until then, BUG-R3-J-04).
    */
   voucherAdmissionPaused: {
     code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
     statusCode: 503,
     message: (context?: Record<string, any>) =>
-      `The payer is changing its payment limits right now, so no payment is accepted until the ` +
-      `change lands${context?.retryAfter ? ` (retry in about ${context.retryAfter} s)` : ''}; ` +
+      `The payer is tightening its payment limits. Payments are paused while the change is ` +
+      `relayed and for a short safety margin after the change lands on chain (about 30 s), so ` +
+      `that none is accepted under the old limits` +
+      `${context?.retryAfter ? ` (retry in about ${context.retryAfter} s)` : ''}; ` +
       `nothing was charged`,
   },
   /**
