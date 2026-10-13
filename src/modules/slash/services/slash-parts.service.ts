@@ -37,6 +37,11 @@ import {
   SlashPartView,
   slashPartRequestId,
 } from '../domain/prorata-slash';
+import {
+  BeneficiaryEvidence,
+  beneficiaryEvidence,
+  FailedCallPayment,
+} from '../domain/slash-beneficiary-evidence';
 import { planEvidenceMismatch } from '../domain/slash-plan-evidence';
 import { SlashErrors } from '../errors/slash.errors';
 import { SLASH_CAPS_READER, SlashCapsReaderPort } from '../ports/slash-caps-reader.port';
@@ -142,6 +147,9 @@ export class SlashPartsService {
     if (todo.length > 0) {
       // Review H-2: never sign a stored plan the evidence does not produce.
       await this.assertPlanFollowsEvidence(proposal, chainId, parts);
+      // Follow-up C5: every beneficiary paid for the failed calls, and is
+      // owed no more than it paid.
+      await this.assertBeneficiariesPaid(proposal, provider, chainId, todo);
       const outcomes = await this.executor.proposeBatch(
         todo.map((part) => ({
           chainId,
@@ -419,6 +427,56 @@ export class SlashPartsService {
         `evidence: ${reason}`,
     );
     throw SlashErrors.planEvidenceMismatch({ proposalId: proposal.id, reason });
+  }
+
+  /**
+   * The C5 evidence of `parts`: per part, the payer of the failed calls, what
+   * it paid and the share it would receive. `agentBps` is the contract's
+   * `slashAgentBps` (read live when not given).
+   */
+  async beneficiaryEvidenceOf(
+    proposal: Pick<SlashProposalEntity, 'windowId' | 'assetId' | 'providerId'>,
+    parts: readonly SlashProposalPartEntity[],
+    agentBps: number,
+  ): Promise<BeneficiaryEvidence[]> {
+    if (!proposal.windowId) return [];
+    const rows = await this.windowCalls.failedCallPaymentsByAgent(
+      proposal.windowId,
+      proposal.assetId,
+      proposal.providerId,
+    );
+    const payments = new Map<string, FailedCallPayment>();
+    for (const row of rows) {
+      const account = normalizeAgentAccount(row.agentAccount);
+      const prior = payments.get(account);
+      payments.set(account, {
+        agentAccount: account,
+        failedCalls: (prior?.failedCalls ?? 0) + Number(row.failedCalls),
+        paidMinor: (prior?.paidMinor ?? 0n) + BigInt(row.paid ?? '0'),
+        redeemedMinor: (prior?.redeemedMinor ?? 0n) + BigInt(row.redeemed ?? '0'),
+      });
+    }
+    return beneficiaryEvidence(parts, payments, agentBps);
+  }
+
+  /** Refuse (sign nothing) when a part fails the C5 check — see `beneficiaryEvidence`. */
+  private async assertBeneficiariesPaid(
+    proposal: SlashProposalEntity,
+    provider: string,
+    chainId: ChainId,
+    parts: readonly SlashProposalPartEntity[],
+  ): Promise<void> {
+    if (!this.caps) {
+      throw ChainErrors.programNotConfigured({ what: 'a slash caps reader for ' + chainId });
+    }
+    const { agentBps } = await this.caps.readCaps({ chainId, provider });
+    const failed = (await this.beneficiaryEvidenceOf(proposal, parts, agentBps)).filter(
+      (row) => !row.ok,
+    );
+    if (failed.length === 0) return;
+    const reason = failed.map((row) => `part 0x${row.requestId}: ${row.reason}`).join('; ');
+    this.logger.error(`slash case ${proposal.id}: refusing to sign (C5): ${reason}`);
+    throw SlashErrors.beneficiaryEvidenceRefused({ proposalId: proposal.id, reason });
   }
 
   /** The window's DATA_FAIL weight per agent, merged on the normalised account, on this chain only. */

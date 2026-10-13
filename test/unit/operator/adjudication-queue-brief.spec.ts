@@ -12,7 +12,12 @@ describe('AdjudicationQueueService.brief', () => {
     const proposals = {
       findOneScoped: jest
         .fn()
-        .mockResolvedValue(chainStatus === null ? null : { chainStatus, chainExecutableAt }),
+        .mockResolvedValue(
+          chainStatus === null
+            ? null
+            : { chainStatus, chainExecutableAt, providerId: 'provider-1', chainDisputedParts: 0 },
+        ),
+      countUpheldViolationsByProvider: jest.fn().mockResolvedValue(new Map([['provider-1', 3]])),
     };
     const cases = {
       buildCase: jest.fn().mockResolvedValue({
@@ -63,5 +68,15 @@ describe('AdjudicationQueueService.brief', () => {
       (await build(ChainProposalStatus.NONE).service.brief('org_1', 'p1')).chainExecutableAt,
     ).toBeNull();
     expect((await build(null).service.brief('org_1', 'p1')).chainExecutableAt).toBeNull();
+  });
+
+  it('C4: carries the provider’s upheld violations of the last 30 days', async () => {
+    const { service, proposals } = build(ChainProposalStatus.PENDING);
+    const brief = await service.brief('org_1', 'p1');
+    expect(brief.upheldViolations30d).toBe(3);
+    expect(proposals.countUpheldViolationsByProvider).toHaveBeenCalledWith(
+      ['provider-1'],
+      expect.any(Date),
+    );
   });
 });

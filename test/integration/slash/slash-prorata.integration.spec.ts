@@ -13,6 +13,7 @@ import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { ChainNamespace } from '@modules/chains/ports/caip.types';
 import { slashPartRequestId } from '@modules/slash/domain/prorata-slash';
 import { SlashChainRulingService } from '@modules/slash/services/slash-chain-ruling.service';
+import { SlashDisputeIntentService } from '@modules/slash/services/slash-dispute-intent.service';
 import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp256k1-env.signer';
 
 import {
@@ -119,7 +120,8 @@ describe('pro-rata EVM slash, against a real database', () => {
   const multicallSends = () =>
     chain.sent.filter((tx) => getAddress(tx.to) === getAddress(MULTICALL));
 
-  async function seedWindow(penalty: bigint, provider = PROVIDER) {
+  async function seedWindow(penalty: bigint, provider = PROVIDER, price = 100_000n) {
+    const p = (factor: bigint) => (price * factor) / 100_000n;
     return seedProRataCase(dataSource, {
       providerOrg: randomUUID(),
       stakeAuthority: `${CHAIN}:${provider}`,
@@ -127,13 +129,13 @@ describe('pro-rata EVM slash, against a real database', () => {
       penalty,
       proposedAt: new Date(nowOf().getTime() - 60_000),
       agents: [
-        { account: A, failed: [100_000n, 100_000n, 100_000n], passed: [100_000n] },
-        { account: B, failed: [100_000n] },
-        { account: C, failed: [50_000n, 50_000n] },
+        { account: A, failed: [p(100_000n), p(100_000n), p(100_000n)], passed: [p(100_000n)] },
+        { account: B, failed: [p(100_000n)] },
+        { account: C, failed: [p(50_000n), p(50_000n)] },
         // Served well: in the window, never a beneficiary.
-        { account: D, failed: [], passed: [100_000n] },
+        { account: D, failed: [], passed: [p(100_000n)] },
         // A failure priced in another asset is not weighed in this one.
-        { account: D, failed: [100_000n], assetId: ASSET_IDS.USDC_SOLANA_DEVNET },
+        { account: D, failed: [p(100_000n)], assetId: ASSET_IDS.USDC_SOLANA_DEVNET },
       ],
     });
   }
@@ -263,7 +265,8 @@ describe('pro-rata EVM slash, against a real database', () => {
   });
 
   it('scales the whole plan to the per-attestation ceiling and records it', async () => {
-    const seeded = await seedWindow(2_500_000n);
+    // Priced so every payer paid more than its 60% share (C5).
+    const seeded = await seedWindow(2_500_000n, PROVIDER, 1_000_000n);
     await services.execution.proposeDue(nowOf());
     const proposal = await load(seeded);
     const parts = await services.partsRepository.findForEpoch(
@@ -454,6 +457,59 @@ describe('pro-rata EVM slash, against a real database', () => {
     );
     expect(paid.map((part) => part.chainStatus)).toEqual(['EXECUTED', 'EXECUTED', 'EXECUTED']);
     expect((await load(seeded)).appliedAmount).toBe('250001');
+  });
+
+  it('C5: refuses to sign a plan whose shares exceed what the payers paid, with a timeline entry', async () => {
+    const seeded = await seedWindow(2_500_000n);
+    await services.execution.proposeDue(nowOf());
+    const proposal = await load(seeded);
+    expect(proposal.chainStatus).not.toBe('PENDING');
+    expect(proposal.chainLastError).toBe('SLASH_BENEFICIARY_EVIDENCE_REFUSED');
+    expect(chain.sent).toHaveLength(0);
+    const kinds = (await dataSource.query(
+      `SELECT kind FROM slash_proposal_events WHERE proposal_id = $1`,
+      [proposal.id],
+    )) as { kind: string }[];
+    expect(kinds.map((row) => row.kind)).toContain('BENEFICIARY_REFUSED');
+  });
+
+  it('C4/C5: the arbiter queue shows the beneficiary evidence and the provider’s upheld violations', async () => {
+    const seeded = await seedWindow(250_001n);
+    await services.execution.proposeDue(nowOf());
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    const proposal = await load(seeded);
+    const [partB] = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    await services.partsRepository.updatePart(proposal.organizationId, partB.id, {
+      chainStatus: 'DISPUTED',
+      chainDisputedAt: nowOf(),
+    });
+    const queue = new SlashDisputeIntentService(
+      {} as never,
+      {} as never,
+      services.partsRepository,
+      { chainTerms: async () => ({ slashAgentBps: 6000 }) } as never,
+      services.proposals,
+      services.parts,
+    );
+    const items = await queue.disputedOnChain(200, new Date(nowOf().getTime() + 50 * HOUR));
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      requestId: `0x${partB.chainRequestId}`,
+      beneficiary: B,
+      // The case was upheld off chain by the sweep: one violation in 30 days.
+      upheldViolations30d: 1,
+      beneficiaryEvidence: {
+        payer: B,
+        failedCalls: 1,
+        paidAmount: '100000',
+        shareAmount: '30000',
+        ok: true,
+      },
+    });
   });
 
   it('expires the still-pending part of an executed case on the reconcile pass', async () => {

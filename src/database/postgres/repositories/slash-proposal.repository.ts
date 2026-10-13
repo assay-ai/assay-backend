@@ -510,6 +510,36 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * `expireSlash` (`DisputeUnresolved`) releases the reservation. Backed by
    * `idx_slash_proposals_chain_disputed`.
    */
+  /**
+   * Per provider, the slash cases upheld or executed since `since` (owner
+   * decision C4: repeat offenders are banned with the blocklist, so the
+   * arbiter page shows the count). Cross-tenant on purpose, like the arbiter
+   * queue it feeds; `provider_id` is the provider organization.
+   */
+  async countUpheldViolationsByProvider(
+    providerIds: readonly string[],
+    since: Date,
+  ): Promise<Map<string, number>> {
+    if (providerIds.length === 0) return new Map();
+    const rows = (await this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.provider_id', 'providerId')
+      .addSelect('COUNT(*)', 'count')
+      .where('proposal.provider_id IN (:...providerIds)', {
+        providerIds: [...new Set(providerIds)],
+      })
+      .andWhere('proposal.status IN (:...upheld)', {
+        upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'],
+      })
+      .andWhere(
+        'COALESCE(proposal.executed_at, proposal.resolved_at, proposal.proposed_at) >= :since',
+        { since },
+      )
+      .groupBy('proposal.provider_id')
+      .getRawMany()) as { providerId: string; count: string }[];
+    return new Map(rows.map((row) => [row.providerId, Number(row.count)]));
+  }
+
   async findChainDisputedBefore(disputedBefore: Date, limit: number): Promise<ChainSweepRow[]> {
     return this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
