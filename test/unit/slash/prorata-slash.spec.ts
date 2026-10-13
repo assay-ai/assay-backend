@@ -418,12 +418,21 @@ describe('aggregateSlashParts', () => {
       ...overrides,
     };
   }
-  it('reads a case DISPUTED while any part is disputed on chain, from the earliest dispute', () => {
+  it('AUDIT E-4: reads a partly disputed case PENDING, so its other parts still execute', () => {
     const D0 = new Date('2026-10-12T00:00:00Z');
     const D1 = new Date('2026-10-12T01:00:00Z');
     const folded = aggregateSlashParts([
       part({}),
       part({ status: 'DISPUTED', disputedAt: D1 }),
+      part({ status: 'DISPUTED', disputedAt: D0 }),
+      part({ status: 'EXECUTED', appliedMinor: '100', executedAt: X1 }),
+    ]);
+    expect(folded).toMatchObject({ status: 'PENDING', disputedAt: D0, executedAt: null });
+  });
+
+  it('reads a case DISPUTED once no part is pending and one is disputed, from the earliest dispute', () => {
+    const D0 = new Date('2026-10-12T00:00:00Z');
+    const folded = aggregateSlashParts([
       part({ status: 'DISPUTED', disputedAt: D0 }),
       part({ status: 'EXECUTED', appliedMinor: '100', executedAt: X1 }),
     ]);

@@ -44,6 +44,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     chainStatus,
     chainEpoch: 0,
     chainDisputedAt: null,
+    chainDisputedParts: 0,
     chainExecutableAt: new Date('2026-10-17T00:00:05Z'),
   };
   const events: { kind: string }[] = [];
@@ -86,19 +87,31 @@ const disputed = (requestId: string, at = '2026-10-15T00:00:00Z') => ({
 });
 
 describe('SlashChainRulingService', () => {
-  it('marks the part and the case DISPUTED and moves a PROPOSED case into review, once', async () => {
+  it('AUDIT E-4: marks only the part DISPUTED; the case stays PENDING with a count, and moves into review once', async () => {
     const { service, parts, proposal, events, filed } = build();
     await expect(service.recordDisputed(disputed(ID_A))).resolves.toBe(true);
     await service.recordDisputed(disputed(ID_A)); // the watcher re-read the range
 
     expect(parts.get(ID_A)).toMatchObject({ chainStatus: 'DISPUTED' });
+    expect(parts.get(ID_B)).toMatchObject({ chainStatus: 'PENDING' });
     expect(proposal).toMatchObject({
-      chainStatus: 'DISPUTED',
+      // Part B still executes: the case mirror stays in the execute sweep.
+      chainStatus: 'PENDING',
+      chainDisputedParts: 1,
+      chainExecutableAt: new Date('2026-10-17T00:00:05Z'),
       chainDisputedAt: new Date('2026-10-15T00:00:00Z'),
       status: 'DISPUTED',
     });
     expect(events.map((event) => event.kind)).toEqual(['CHAIN_DISPUTED']);
     expect(filed).toEqual(['case']);
+  });
+
+  it('marks the case DISPUTED only when every live part is disputed', async () => {
+    const { service, proposal } = build('UPHELD');
+    await service.recordDisputed(disputed(ID_A));
+    expect(proposal).toMatchObject({ chainStatus: 'PENDING', chainDisputedParts: 1 });
+    await service.recordDisputed(disputed(ID_B));
+    expect(proposal).toMatchObject({ chainStatus: 'DISPUTED', chainDisputedParts: 2 });
   });
 
   it('keeps a decided case decided, and a requested cancel requested', async () => {
@@ -116,7 +129,7 @@ describe('SlashChainRulingService', () => {
     await expect(service.recordDisputed(disputed('c'.repeat(64)))).resolves.toBe(false);
   });
 
-  it('returns the case to PENDING at the executableAt the event carries, once no part is disputed', async () => {
+  it('returns the case to PENDING at the executableAt the event carries, as soon as a part is pending', async () => {
     const { service, parts, proposal, events } = build('UPHELD');
     await service.recordDisputed(disputed(ID_A));
     await service.recordDisputed(disputed(ID_B));
@@ -131,7 +144,8 @@ describe('SlashChainRulingService', () => {
       transactionHash: null,
     });
     expect(parts.get(ID_A)).toMatchObject({ chainStatus: 'PENDING', chainExecutableAt: later });
-    expect(proposal.chainStatus).toBe('DISPUTED');
+    // Part A is pending again, so the case is back in the execute sweep.
+    expect(proposal).toMatchObject({ chainStatus: 'PENDING', chainDisputedParts: 1 });
 
     await service.recordUpheld({
       chainId: CHAIN,
@@ -142,6 +156,7 @@ describe('SlashChainRulingService', () => {
     });
     expect(proposal).toMatchObject({
       chainStatus: 'PENDING',
+      chainDisputedParts: 0,
       chainExecutableAt: new Date('2026-10-17T00:00:05Z'),
       status: 'UPHELD',
     });

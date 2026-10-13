@@ -545,6 +545,14 @@ export class FakeStakeChain {
     rec.disputedAt = at;
   }
 
+  /** Test hook: the arbiter's `upholdSlash` — `Pending` again from `executableAt`. */
+  markUpheld(requestId: string, executableAt: bigint = this.now): void {
+    const rec = this.state.records.get(norm(requestId));
+    if (!rec) throw new Error(`no record ${requestId}`);
+    rec.status = 1;
+    rec.executableAt = executableAt;
+  }
+
   private expire(state: State, requestId: `0x${string}`, logs: Log[]): void {
     const rec = state.records.get(norm(requestId));
     if (!rec || (rec.status !== 1 && rec.status !== 4)) throw new Revert('SlashNotPending');

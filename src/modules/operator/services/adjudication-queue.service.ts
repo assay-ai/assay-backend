@@ -175,6 +175,10 @@ export class AdjudicationQueueService {
       // from it on the record is anyone's to execute. Null until a record
       // stands on chain.
       chainExecutableAt: proposal?.chainExecutableAt ?? null,
+      // How many of the case's parts are disputed on chain (audit E-4). With
+      // `chainStatus: PENDING` and a non-zero count the case is partly
+      // disputed: the other parts keep executing.
+      chainDisputedParts: proposal?.chainDisputedParts ?? 0,
     };
   }
 

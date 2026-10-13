@@ -281,6 +281,16 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   @Column({ name: 'chain_disputed_at', type: 'timestamptz', nullable: true })
   chainDisputedAt: Date | null;
 
+  /**
+   * How many of the current epoch's parts are `DISPUTED` on chain (audit
+   * E-4). A dispute freezes only its part: the mirror stays `PENDING` while
+   * any part is pending (and those parts keep executing), and is `DISPUTED`
+   * only when every live part is. `PENDING` with a non-zero count is a partly
+   * disputed case.
+   */
+  @Column({ name: 'chain_disputed_parts', type: 'integer', default: 0 })
+  chainDisputedParts: number;
+
   @Column({ name: 'chain_claimed_at', type: 'timestamptz', nullable: true })
   chainClaimedAt: Date | null;
 

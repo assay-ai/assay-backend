@@ -12,11 +12,13 @@ import {
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { ChainNamespace } from '@modules/chains/ports/caip.types';
 import { slashPartRequestId } from '@modules/slash/domain/prorata-slash';
+import { SlashChainRulingService } from '@modules/slash/services/slash-chain-ruling.service';
 import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp256k1-env.signer';
 
 import {
   CHAIN,
   DEPLOYMENT,
+  FAKE_ARBITER,
   FakeStakeChain,
   MULTICALL,
   TREASURY,
@@ -391,6 +393,69 @@ describe('pro-rata EVM slash, against a real database', () => {
   });
 
   // S3(5): a reservation a failed expire left behind is revisited by the reconciler.
+  it('AUDIT E-4: a dispute on one part freezes only that part; the others execute and the upheld one is paid later', async () => {
+    const seeded = await seedWindow(250_001n);
+    await services.execution.proposeDue(nowOf());
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    const proposal = await load(seeded);
+    const parts = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    // The provider disputes its SMALLEST part (B) on chain, and the watcher mirrors it.
+    const disputedPart = parts[0];
+    chain.markDisputed(disputedPart.chainRequestId);
+    const rulings = new SlashChainRulingService(
+      services.partsRepository,
+      services.proposals,
+      services.lifecycle,
+    );
+    const record = chain.record(disputedPart.chainRequestId)!;
+    await rulings.recordDisputed({
+      chainId: CHAIN,
+      requestId: disputedPart.chainRequestId,
+      provider: PROVIDER,
+      disputedAt: nowOf(),
+      executableAt: new Date(Number(record.executableAt) * 1000),
+      transactionHash: null,
+    });
+    expect(await load(seeded)).toMatchObject({ chainStatus: 'PENDING', chainDisputedParts: 1 });
+
+    // Past the door: the two undisputed parts execute, the case closes on them.
+    chain.now += BigInt(73 * 3600);
+    expect(await services.execution.executeDue(nowOf())).toEqual({
+      executed: 1,
+      voided: 0,
+      failed: 0,
+    });
+    const after = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    expect(after.map((part) => part.chainStatus)).toEqual(['DISPUTED', 'EXECUTED', 'EXECUTED']);
+    expect(await load(seeded)).toMatchObject({ status: 'EXECUTED', appliedAmount: '200001' });
+
+    // The arbiter upholds; the stranded-part pass pays the disputed part.
+    chain.markUpheld(disputedPart.chainRequestId);
+    await rulings.recordUpheld({
+      chainId: CHAIN,
+      requestId: disputedPart.chainRequestId,
+      arbiter: FAKE_ARBITER,
+      executableAt: nowOf(),
+      transactionHash: null,
+    });
+    await services.execution.reconcileExecuting(nowOf());
+    const paid = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    expect(paid.map((part) => part.chainStatus)).toEqual(['EXECUTED', 'EXECUTED', 'EXECUTED']);
+    expect((await load(seeded)).appliedAmount).toBe('250001');
+  });
+
   it('expires the still-pending part of an executed case on the reconcile pass', async () => {
     const seeded = await seedWindow(250_001n);
     await services.execution.proposeDue(nowOf());

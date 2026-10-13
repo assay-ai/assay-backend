@@ -367,9 +367,11 @@ const LANDED: ReadonlySet<SlashPartChainStatus> = new Set([
  * The case is ONE judgement to the arbitration state machine, so the parts are
  * folded into the one record shape it already reasons about:
  *
- * - `DISPUTED` while any part is disputed on chain (D-19) — nothing of the
- *   case may execute until the arbiter rules on it;
- * - `PENDING` while any part is pending — the case is not done;
+ * - `PENDING` while any part is pending — the case is not done, and its
+ *   pending parts may execute even while another part is disputed (audit
+ *   E-4: a dispute freezes only its own part);
+ * - `DISPUTED` when no part is pending and at least one is disputed on chain
+ *   (D-19) — nothing of the case can execute until the arbiter rules;
  * - otherwise `EXECUTED` if any part executed — money moved, and a case that
  *   says otherwise would tell the provider a penalty was dropped that was
  *   taken;
@@ -389,14 +391,13 @@ export function aggregateSlashParts(parts: readonly SlashPartView[]): SlashRecor
   const disputed = landed.filter((part) => part.status === 'DISPUTED');
   const pending = landed.some((part) => part.status === 'PENDING');
   const executed = landed.filter((part) => part.status === 'EXECUTED');
-  const status =
-    disputed.length > 0
+  const status = pending
+    ? 'PENDING'
+    : disputed.length > 0
       ? 'DISPUTED'
-      : pending
-        ? 'PENDING'
-        : executed.length > 0
-          ? 'EXECUTED'
-          : 'CANCELLED';
+      : executed.length > 0
+        ? 'EXECUTED'
+        : 'CANCELLED';
   const disputedDates = disputed
     .map((part) => part.disputedAt)
     .filter((date): date is Date => date instanceof Date);
