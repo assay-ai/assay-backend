@@ -194,6 +194,24 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     reversible: false,
     implemented: true,
   }),
+  /**
+   * Prepare the ARBITER's on-chain ruling (assay-evm D-19): an unsigned
+   * `upholdSlashBatch` (against the provider) or `cancelSlashBatch` (for them)
+   * over up to 64 records. The arbiter's wallet signs; the backend holds no
+   * arbiter key. `ADJL`/`TRE`, the pair that already builds the on-chain cancel
+   * and compensation intents. Logged although nothing is signed here, because
+   * an operator chose which records to put before the arbiter and why.
+   */
+  'S-13': define({
+    code: 'S-13',
+    family: OverrideFamily.SLASHING,
+    action: 'slash.arbiter_ruling_prepared',
+    label: 'Prepare the arbiter’s on-chain uphold or cancel of disputed slash records',
+    roles: [OperatorRole.ADJL, OperatorRole.TRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
   // Enumerated, not built. Each needs a resource the arbitration flow does not create.
   'S-4': define({
     code: 'S-4',
@@ -418,6 +436,22 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     approval: ApprovalMode.TWO_PERSON,
     approverRoles: [OperatorRole.ADJL],
     reversible: true,
+    implemented: true,
+  }),
+  /**
+   * Prepare the ARBITER's on-chain block of an address (`setBlocked(a, true)`,
+   * assay-evm D-19). Block only: the contract lets the arbiter block and only
+   * the admin unblock, so there is no unblocking row. The incident roles of
+   * `A-9` plus `TRE`, the arbiter page's other role.
+   */
+  'A-11': define({
+    code: 'A-11',
+    family: OverrideFamily.ACCESS,
+    action: 'account.chain_block_prepared',
+    label: 'Prepare the arbiter’s on-chain block of an address',
+    roles: [OperatorRole.ADJL, OperatorRole.SRE, OperatorRole.TRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
     implemented: true,
   }),
 });

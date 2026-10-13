@@ -358,6 +358,9 @@ describe('REST surface consistency', () => {
     const OPERATOR_SURFACE = new Set([
       // `A-9`/`A-10`, the account blocklist. The subject of a block is never the
       // caller, and a blocked tenant must not be the one who can lift it.
+      // The arbiter page (D-19): records disputed on chain and the unsigned
+      // rulings and blocks the arbiter's wallet signs. Nobody's tenant.
+      'modules/operator/controllers/operator-arbiter.controller.ts',
       'modules/operator/controllers/operator-blocks.controller.ts',
       'modules/operator/controllers/operator-cases.controller.ts',
       'modules/operator/controllers/operator-override-log.controller.ts',

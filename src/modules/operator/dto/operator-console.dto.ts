@@ -3,6 +3,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   ArrayNotEmpty,
   IsArray,
   IsBoolean,
@@ -645,8 +646,18 @@ export class CancelIntentDto {
   @ApiProperty({ description: 'Base64 wire bytes, unsigned. The settlement admin signs it.' })
   transaction: string;
 
-  @ApiProperty({ description: '`Config.admin`, base58 — the only signer, and the fee payer' })
+  @ApiProperty({
+    description:
+      'The only signer, and the fee payer: `Config.admin` (Solana; EVM without an arbiter), or ' +
+      'the ARBITER on an EVM Config with one appointed (D-19). See `signerRole`.',
+  })
   admin: string;
+
+  @ApiPropertyOptional({ enum: ['ADMIN', 'ARBITER'], description: 'Who `admin` is' })
+  signerRole?: 'ADMIN' | 'ARBITER';
+
+  @ApiPropertyOptional({ description: 'EVM only: the X402Stake proxy the calldata is sent to' })
+  to?: string;
 
   @ApiProperty({ description: "The record's 32-byte request id, lower-case hex" })
   requestId: string;
@@ -880,4 +891,83 @@ export class AccountBlockDto {
 
   @ApiProperty({ nullable: true, type: String })
   unblockNote: string | null;
+}
+
+/** `S-13` — the arbiter's on-chain ruling over up to 64 disputed (or pending) records. */
+export class ArbiterRulingBodyDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  @IsString()
+  @Matches(/^eip155:[0-9]+$/, { message: 'chainId must be an eip155 CAIP-2 chain id' })
+  chainId: string;
+
+  @ApiProperty({
+    enum: ['UPHOLD', 'CANCEL'],
+    description:
+      'UPHOLD → upholdSlashBatch (rules against the provider; arbiter only, DISPUTED records). ' +
+      'CANCEL → cancelSlashBatch (rules for the provider; PENDING or DISPUTED records).',
+  })
+  @IsIn(['UPHOLD', 'CANCEL'])
+  ruling: 'UPHOLD' | 'CANCEL';
+
+  @ApiProperty({ isArray: true, type: String, minItems: 1, maxItems: 64 })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @Matches(/^0x[0-9a-fA-F]{64}$/, { each: true, message: 'each requestId must be 0x + 64 hex' })
+  requestIds: string[];
+
+  @ApiProperty()
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 4096)
+  note: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+/** `A-11` — the arbiter's on-chain block of one address. Block only. */
+export class ArbiterBlockBodyDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  @IsString()
+  @Matches(/^eip155:[0-9]+$/, { message: 'chainId must be an eip155 CAIP-2 chain id' })
+  chainId: string;
+
+  @ApiProperty({ description: 'The 0x address to block on chain' })
+  @IsString()
+  @Matches(/^0x[0-9a-fA-F]{40}$/, { message: 'account must be a 0x address' })
+  account: string;
+
+  @ApiProperty({ description: 'e.g. LEAKED_KEY, FRAUD' })
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 4096)
+  note: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+export class ArbiterTermsQueryDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  @IsString()
+  @Matches(/^eip155:[0-9]+$/, { message: 'chainId must be an eip155 CAIP-2 chain id' })
+  chainId: string;
 }

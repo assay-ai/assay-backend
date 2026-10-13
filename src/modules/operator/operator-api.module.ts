@@ -5,6 +5,7 @@ import { ChainsModule } from '@modules/chains/chains.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
 
+import { OperatorArbiterController } from './controllers/operator-arbiter.controller';
 import { OperatorBlocksController } from './controllers/operator-blocks.controller';
 import { OperatorCasesController } from './controllers/operator-cases.controller';
 import { OperatorReferenceController } from './controllers/operator-reference.controller';
@@ -47,6 +48,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
   // local custody table alone.
   imports: [OperatorModule, SlashModule, ProviderModule, ChainsModule, BlocklistModule],
   controllers: [
+    OperatorArbiterController,
     OperatorBlocksController,
     OperatorCasesController,
     OperatorOverrideLogController,

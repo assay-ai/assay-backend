@@ -38,6 +38,46 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
     return this.findOne({ where: { chainRequestId } });
   }
 
+  /**
+   * Every part whose record stands `DISPUTED` on chain (D-19), oldest dispute
+   * first, across tenants — the arbiter's queue. Each row says which case it
+   * belongs to and when the 30-day timeout ends it.
+   */
+  async findChainDisputed(limit: number): Promise<
+    {
+      requestId: string;
+      proposalId: string;
+      organizationId: string;
+      providerId: string;
+      assetId: string;
+      caseStatus: string;
+      caseChainStatus: string;
+      penaltyAmount: string;
+      chainReserved: string | null;
+      chainDisputedAt: Date | null;
+      chainExecutableAt: Date | null;
+    }[]
+  > {
+    return this.manager
+      .createQueryBuilder(SlashProposalPartEntity, 'part')
+      .innerJoin('slash_proposals', 'proposal', 'proposal.id = part.proposal_id')
+      .select('part.chain_request_id', 'requestId')
+      .addSelect('part.proposal_id', 'proposalId')
+      .addSelect('part.organization_id', 'organizationId')
+      .addSelect('proposal.provider_id', 'providerId')
+      .addSelect('proposal.asset_id', 'assetId')
+      .addSelect('proposal.status', 'caseStatus')
+      .addSelect('proposal.chain_status', 'caseChainStatus')
+      .addSelect('part.penalty_amount', 'penaltyAmount')
+      .addSelect('part.chain_reserved', 'chainReserved')
+      .addSelect('part.chain_disputed_at', 'chainDisputedAt')
+      .addSelect('part.chain_executable_at', 'chainExecutableAt')
+      .where(`part.chain_status = 'DISPUTED'`)
+      .orderBy('part.chain_disputed_at', 'ASC')
+      .limit(limit)
+      .getRawMany();
+  }
+
   /** One case's parts at one epoch, in agent order — the order they were planned in. */
   async findForEpoch(
     organizationId: string,

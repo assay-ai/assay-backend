@@ -24,6 +24,7 @@ import {
 } from './constants/slash.constants';
 import { ProviderSlashProposalsController } from './controllers/provider-slash-proposals.controller';
 import { ProviderSlashRequestsController } from './controllers/provider-slash-requests.controller';
+import { SlashDisputeIntentService } from './services/slash-dispute-intent.service';
 import { SlashRequestLookupService } from './services/slash-request-lookup.service';
 import { ArbitrationService } from './services/arbitration.service';
 import { SlashCaseService } from './services/slash-case.service';
@@ -115,7 +116,15 @@ import { SlashProposalService } from './services/slash-proposal.service';
     SlashCompensationService,
     SlashPartsService,
     SlashExecutionService,
+    // The dispute upgrade's unsigned provider and arbiter intents (D-19).
+    SlashDisputeIntentService,
   ],
-  exports: [SlashProposalService, SlashCaseService, ArbitrationService, SlashExecutionService],
+  exports: [
+    SlashProposalService,
+    SlashCaseService,
+    ArbitrationService,
+    SlashExecutionService,
+    SlashDisputeIntentService,
+  ],
 })
 export class SlashModule {}
