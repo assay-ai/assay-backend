@@ -29,7 +29,11 @@ import {
   railName,
 } from '@modules/payment/ports/payment.types';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
-import { ResponseClass, isRetryable } from '@modules/tool/domain/classification';
+import {
+  ClassificationReason,
+  ResponseClass,
+  isRetryable,
+} from '@modules/tool/domain/classification';
 import { RoutingContext } from '@modules/tool/domain/routing';
 import {
   JsonObject,
@@ -784,11 +788,12 @@ export class McpToolCallService {
             ? McpFailureCode.PROVIDER_REQUEST_ERROR
             : McpFailureCode.PROVIDER_SYSTEM_ERROR,
         retryable: isRetryable(classification.responseClass),
-        message: `${tool.name} was not served: ${classification.reason}`,
+        message: notServedMessage(tool.name, classification),
         intentId: null,
         detail: {
           classification: classification.responseClass,
           reason: classification.reason,
+          fault: faultOf(classification),
           attempts: routed.attempts.length,
           retryAfterMs: classification.retryAfterMs,
         },
@@ -800,11 +805,12 @@ export class McpToolCallService {
         kind: 'ERROR',
         code: McpFailureCode.PROVIDER_CONTRACT_VIOLATION,
         retryable: false,
-        message: `${tool.name}: the provider's response did not honour the tool's contract`,
+        message: contractViolationMessage(tool.name, classification),
         intentId: null,
         detail: {
           classification: classification.responseClass,
           reason: classification.reason,
+          fault: faultOf(classification),
           attempts: routed.attempts.length,
           // Nothing to refund — there was never a charge. Stated rather than
           // omitted, so a client reading this field does not read its absence
@@ -895,11 +901,12 @@ export class McpToolCallService {
         // router asks the same question to decide failover; an agent deciding
         // whether to retry deserves the same answer, not a second opinion.
         retryable: isRetryable(classification.responseClass),
-        message: `${tool.name} was not served: ${classification.reason}`,
+        message: notServedMessage(tool.name, classification),
         intentId: voided.id,
         detail: {
           classification: classification.responseClass,
           reason: classification.reason,
+          fault: faultOf(classification),
           attempts: routed.attempts.length,
           retryAfterMs: classification.retryAfterMs,
         },
@@ -938,11 +945,12 @@ export class McpToolCallService {
         kind: 'ERROR',
         code: McpFailureCode.PROVIDER_CONTRACT_VIOLATION,
         retryable: false,
-        message: `${tool.name}: the provider's response did not honour the tool's contract`,
+        message: contractViolationMessage(tool.name, classification),
         intentId: resolved.id,
         detail: {
           classification: classification.responseClass,
           reason: classification.reason,
+          fault: faultOf(classification),
           attempts: routed.attempts.length,
           // Both terminal states here mean "you were not charged": `REFUNDED`
           // is the schema-contract path, and `VOIDED` is `voidUnpayable`'s
@@ -1237,6 +1245,65 @@ function agentFacing(error: unknown, intentId: string | null): unknown {
   });
 }
 
+/**
+ * Why a call was not served, with the direction an agent needs: whose side
+ * rejected it, that nothing was charged, and whether a retry can help. A 4xx
+ * alone cannot say whether the arguments or the provider were wrong (see
+ * `classify`), so the sentence says to check the arguments rather than assign
+ * a fault nobody measured.
+ */
+function notServedMessage(
+  toolName: string,
+  classification: { responseClass: ResponseClass; reason: string; detail?: string },
+): string {
+  const evidence = classification.detail?.startsWith('status ')
+    ? `${classification.reason}, ${classification.detail}`
+    : classification.reason;
+
+  if (classification.responseClass === ResponseClass.REQUEST_ERROR) {
+    return (
+      `${toolName} was not served: the provider rejected the request (${evidence}). ` +
+      `Nothing was charged. The same call will be rejected again, so do not retry it ` +
+      `unchanged: check the arguments.`
+    );
+  }
+  return (
+    `${toolName} was not served: the provider failed (${evidence}). ` +
+    `Nothing was charged; a retry may succeed.`
+  );
+}
+
+/**
+ * Whose side a failed call is on, in the mapping engine's own vocabulary
+ * (`AGENT` / `PROVIDER` / `PLATFORM`) so an agent reads one `fault` field on
+ * every failure. A bare 4xx is `UNDETERMINED`: the status alone cannot say
+ * whether the arguments or the provider were wrong (see `classify`).
+ */
+export function faultOf(classification: { reason: string }): string {
+  switch (classification.reason) {
+    case ClassificationReason.MAPPING_FAULT_AGENT:
+      return 'AGENT';
+    case ClassificationReason.MAPPING_FAULT_PLATFORM:
+      return 'PLATFORM';
+    case ClassificationReason.REQUEST_REJECTED:
+      return 'UNDETERMINED';
+    default:
+      return 'PROVIDER';
+  }
+}
+
+/** The answer came back in the wrong shape; the same call would get the same shape again. */
+function contractViolationMessage(toolName: string, classification: { reason: string }): string {
+  const whose =
+    faultOf(classification) === 'PLATFORM'
+      ? `This is the platform's fault`
+      : `This is the provider's fault`;
+  return (
+    `${toolName}: the provider's response did not honour the tool's contract. ` +
+    `${whose}, not your arguments; a retry will not help.`
+  );
+}
+
 /** The price is reserved, not charged or released yet. */
 function isAwaitingVerdict(status: PaymentIntentStatus): boolean {
   return (
@@ -1287,9 +1354,13 @@ export enum McpFailureCode {
    * sign `x402/paymentRequired` and call again with `x402/voucher`.
    */
   PAYMENT_REQUIRED = 'PAYMENT_REQUIRED',
-  /** The provider rejected the request. Another provider would too. */
+  /**
+   * The provider answered 4xx. Nothing charged, not retryable unchanged;
+   * `fault` is `UNDETERMINED` (the arguments or the provider), or `AGENT`
+   * when the mapping engine proved the arguments wrong.
+   */
   PROVIDER_REQUEST_ERROR = 'PROVIDER_REQUEST_ERROR',
-  /** The provider's infrastructure failed. Retrying may reach a different one. */
+  /** The provider's infrastructure failed (`fault: PROVIDER`). Retryable: it may reach a different one. */
   PROVIDER_SYSTEM_ERROR = 'PROVIDER_SYSTEM_ERROR',
   /**
    * The provider answered, and the answer did not fit the tool's
