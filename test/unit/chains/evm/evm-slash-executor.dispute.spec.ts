@@ -6,7 +6,16 @@ import { EvmSlashExecutor } from '@modules/chains/evm/evm-slash-executor.service
 import { SlashProposalRequest } from '@modules/slash/ports/slash-executor.port';
 import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp256k1-env.signer';
 
-import { CHAIN, DEPLOYMENT, FakeStakeChain, MULTICALL, STAKE } from './helpers/fake-stake-chain';
+import {
+  CHAIN,
+  DEPLOYMENT,
+  FakeStakeChain,
+  MULTICALL,
+  OWNER,
+  RELAYER,
+  STAKE,
+  TREASURY,
+} from './helpers/fake-stake-chain';
 
 const VERIFIER_SECRET = new Uint8Array(32).fill(9);
 const VERIFIER = privateKeyToAccount(toHex(VERIFIER_SECRET)).address;
@@ -295,6 +304,32 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
       expect(
         decodeFunctionData({ abi: X402_CONFIG_ARBITER_ABI, data: call.data as `0x${string}` }),
       ).toMatchObject({ args: [getAddress(TARGET), true] });
+    });
+
+    it('AUDIT E-12: refuses to block any of the platform’s own configured addresses', async () => {
+      const { chain, executor } = await upgraded();
+      const platform: [string, string][] = [
+        [TREASURY, 'treasury'],
+        [RELAYER, 'redeemer'],
+        [DEPLOYMENT.admin, 'admin'],
+        [OWNER, 'owner'],
+        [ARBITER, 'arbiter'],
+        [DEPLOYMENT.config, 'config contract'],
+        [DEPLOYMENT.stake, 'stake contract'],
+        [DEPLOYMENT.escrow, 'escrow contract'],
+        [chain.verifier, 'verifier key'],
+      ];
+      for (const [account, role] of platform) {
+        await expect(
+          executor.buildBlock({ chainId: CHAIN, account: account.toLowerCase() }),
+        ).rejects.toMatchObject({
+          errorCode: 'CHAIN_PLATFORM_ADDRESS_NOT_BLOCKABLE',
+          context: { role },
+        });
+      }
+      await expect(executor.buildBlock({ chainId: CHAIN, account: TARGET })).resolves.toMatchObject(
+        { functionName: 'setBlocked' },
+      );
     });
 
     it('refuses an account already blocked, and a chain without an arbiter', async () => {

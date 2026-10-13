@@ -624,6 +624,7 @@ export class EvmSlashExecutor
     const terms = await this.chainTerms(chainId);
     if (!terms.arbiter) throw ChainErrors.arbiterNotSet({ chainId, what: 'setBlocked' });
     const config = this.deployment(chainId).config;
+    await this.assertNotPlatformAddress(chainId, account, terms);
     const already = (await this.client(chainId).readContract({
       address: config,
       abi: X402_CONFIG_ABI,
@@ -645,6 +646,45 @@ export class EvmSlashExecutor
       functionName: 'setBlocked',
       requestIds: [],
     };
+  }
+
+  /**
+   * Refuse a block of the platform's own configured addresses (audit E-12),
+   * each read live: the treasury and the redeemer (`params()`), the admin, the
+   * owner, the arbiter, any registered verifier (`canSign`), and the three
+   * contracts themselves.
+   */
+  private async assertNotPlatformAddress(
+    chainId: ChainId,
+    account: `0x${string}`,
+    terms: SlashChainTerms,
+  ): Promise<void> {
+    const deployment = this.deployment(chainId);
+    const client = this.client(chainId);
+    const read = (functionName: string, args: readonly unknown[] = []) =>
+      client.readContract({ address: deployment.config, abi: X402_CONFIG_ABI, functionName, args });
+    const [params, owner, isVerifier] = await Promise.all([
+      read('params') as Promise<{ treasury: `0x${string}`; redeemer: `0x${string}` }>,
+      read('owner') as Promise<`0x${string}`>,
+      read('canSign', [account]) as Promise<boolean>,
+    ]);
+    const roles: [string, string | null | undefined][] = [
+      ['treasury', params.treasury],
+      ['redeemer', params.redeemer],
+      ['admin', terms.admin],
+      ['owner', owner],
+      ['arbiter', terms.arbiter],
+      ['config contract', deployment.config],
+      ['stake contract', deployment.stake],
+      ['escrow contract', deployment.escrow],
+    ];
+    const hit = roles.find(([, address]) => address && getAddress(address) === account);
+    if (hit) {
+      throw ChainErrors.platformAddressNotBlockable({ chainId, account, role: hit[0] });
+    }
+    if (isVerifier) {
+      throw ChainErrors.platformAddressNotBlockable({ chainId, account, role: 'verifier key' });
+    }
   }
 
   /** 1 to `MAX_SLASH_BATCH` well-formed ids, lower-case, in the caller's order. */

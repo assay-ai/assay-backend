@@ -44,6 +44,7 @@ export enum ChainErrorCode {
   CHAIN_ADDRESS_BLOCKED = 'CHAIN_ADDRESS_BLOCKED',
   CHAIN_ARBITER_NOT_SET = 'CHAIN_ARBITER_NOT_SET',
   CHAIN_ADDRESS_ALREADY_BLOCKED = 'CHAIN_ADDRESS_ALREADY_BLOCKED',
+  CHAIN_PLATFORM_ADDRESS_NOT_BLOCKABLE = 'CHAIN_PLATFORM_ADDRESS_NOT_BLOCKABLE',
 }
 
 export type ChainErrorCodesArePrefixed = AssertDomainErrorCodes<'CHAIN', `${ChainErrorCode}`>;
@@ -512,5 +513,19 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
     message: (context?: Record<string, any>) =>
       `${context?.account ?? 'The account'} is already blocked on chain` +
       `${context?.chainId ? ` (${context.chainId})` : ''}`,
+  },
+  /**
+   * An arbiter block intent naming one of the platform's own configured
+   * addresses (audit E-12): blocking the treasury, the redeemer, a verifier,
+   * the admin, the owner, the arbiter or a contract would stop the platform,
+   * not a bad actor.
+   */
+  platformAddressNotBlockable: {
+    code: ChainErrorCode.CHAIN_PLATFORM_ADDRESS_NOT_BLOCKABLE,
+    statusCode: 422,
+    message: (context?: Record<string, any>) =>
+      `${context?.account ?? 'The account'} is the platform's own ` +
+      `${context?.role ?? 'configured address'}${context?.chainId ? ` on ${context.chainId}` : ''}` +
+      ' and cannot be blocked',
   },
 });
