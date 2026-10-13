@@ -2606,6 +2606,28 @@ describe('buildCancelIntent', () => {
     // was handed a transaction.
     expect(proposals.rows.get('p1')!.chainStatus).toBe('CANCEL_REQUESTED');
   });
+
+  /**
+   * A `cancel_slash` for a judgement nobody decided to withdraw is a
+   * transaction that drops a standing penalty once the admin signs it. The
+   * route builds one only for a case waiting on exactly that signature, and the
+   * refusal names this action — it used to fall through to a lookup that
+   * answered "nothing to compensate".
+   */
+  it.each(['NONE', 'PROPOSING', 'PENDING', 'EXECUTED', 'CANCELLED', 'REFUSED'])(
+    'refuses to build a cancel while the chain record is %s',
+    async (chainStatus) => {
+      const { service, proposals, executor } = build();
+      proposals.seed(standing({ id: 'p1', chainStatus }));
+
+      await expect(service.buildCancelIntent('org_1', 'p1')).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION,
+        statusCode: 409,
+        message: expect.stringContaining('Cannot build the cancel transaction'),
+      });
+      expect(executor.cancelBuilds).toEqual([]);
+    },
+  );
 });
 
 describe('sweepAdminCancels', () => {
@@ -3146,6 +3168,60 @@ describe('the fleet sweep asks for the chain reservation to be released too', ()
     // dealt with when it was decided.
     expect(proposals.rows.get('source')!.chainStatus).toBe('CANCELLED');
     expect(events.kinds().filter((kind) => kind === 'CHAIN_CANCEL_REQUESTED')).toHaveLength(1);
+  });
+
+  /**
+   * A sweep carries a decision to other cases, so a case with no decision has
+   * nothing to carry. That is a wrong-status refusal, and it used to be
+   * reported as an outcome called "no decision" that "is a finding about one
+   * provider".
+   */
+  it.each(['PROPOSED', 'DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND', 'UPHELD', 'CANCELLED'])(
+    'refuses to sweep from an undecided %s case',
+    async (status) => {
+      const { service, proposals } = build();
+      proposals.seed(standing({ id: 'source', status, outcome: null, rootCauseKey: 'mapping/v3' }));
+
+      await expect(
+        service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
+          defectKey: 'mapping/v3',
+          lookbackHours: 72,
+          reasonCode: 'S11_PLATFORM_DEFECT',
+          note: 'the v3 binding dropped a field on every tool it touched',
+        }),
+      ).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION,
+        statusCode: 409,
+        message:
+          `Cannot open a fleet sweep while the case is ${status}; only while it is decided as ` +
+          `a platform or policy defect`,
+      });
+    },
+  );
+
+  it('names the outcome when the decision is one that does not generalise', async () => {
+    const { service, proposals } = build();
+    proposals.seed(
+      standing({
+        id: 'source',
+        status: 'OVERTURNED',
+        outcome: ArbitrationOutcome.OVERTURNED_GRIEFING,
+        rootCauseKey: 'mapping/v3',
+      }),
+    );
+
+    await expect(
+      service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
+        defectKey: 'mapping/v3',
+        lookbackHours: 72,
+        reasonCode: 'S11_PLATFORM_DEFECT',
+        note: 'the v3 binding dropped a field on every tool it touched',
+      }),
+    ).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_SWEEP_OUTCOME_NOT_SWEEPABLE,
+      statusCode: 422,
+      message: expect.stringContaining('OVERTURNED_GRIEFING is a finding about one provider'),
+    });
   });
 
   it('marks every swept case, not just the first', async () => {

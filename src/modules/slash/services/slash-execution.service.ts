@@ -1492,6 +1492,16 @@ export class SlashExecutionService {
     if (!proposal) {
       throw SlashErrors.proposalNotFound({ proposalId });
     }
+    // Only for a record this platform has already decided to withdraw. A
+    // `cancel_slash` built for any other case is a transaction that drops a
+    // standing judgement the moment the admin signs it, on nobody's decision.
+    if (proposal.chainStatus !== ChainProposalStatus.CANCEL_REQUESTED) {
+      throw SlashErrors.actionNotAllowedInStatus({
+        action: 'build the cancel transaction',
+        status: `${proposal.status} (on-chain record ${proposal.chainStatus})`,
+        allowed: "waiting for the settlement admin's cancel (CANCEL_REQUESTED)",
+      });
+    }
     if (this.parts?.appliesTo(proposal)) {
       // One part's cancel per request: the case stays CANCEL_REQUESTED until
       // every part has left Pending, so the next request hands out the next.
@@ -2765,8 +2775,18 @@ export class SlashExecutionService {
     const source = await this.lifecycle.require(organizationId, sourceProposalId);
     const outcome = source.outcome as ArbitrationOutcome | null;
 
-    if (!outcome || !OUTCOME_CONSEQUENCE[outcome].opensFleetSweep) {
-      throw SlashErrors.outcomeNotSweepable({ outcome: outcome ?? 'no decision' });
+    // Two different refusals. No bound outcome is a wrong-status answer — the
+    // case is undecided, or was closed without an adjudicator — and an outcome
+    // that does not generalise is a statement about that outcome.
+    if (!outcome) {
+      throw SlashErrors.actionNotAllowedInStatus({
+        action: 'open a fleet sweep',
+        status: source.status,
+        allowed: 'decided as a platform or policy defect',
+      });
+    }
+    if (!OUTCOME_CONSEQUENCE[outcome].opensFleetSweep) {
+      throw SlashErrors.outcomeNotSweepable({ outcome });
     }
 
     const to = new Date();

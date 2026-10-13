@@ -17,6 +17,7 @@ export enum SlashErrorCode {
   SLASH_SECOND_SIGNATURE_NOT_PENDING = 'SLASH_SECOND_SIGNATURE_NOT_PENDING',
   SLASH_SECOND_READER_MUST_DIFFER = 'SLASH_SECOND_READER_MUST_DIFFER',
   SLASH_RECALCULATION_EXCEEDS_ORIGINAL = 'SLASH_RECALCULATION_EXCEEDS_ORIGINAL',
+  SLASH_RECALCULATED_AMOUNT_INVALID = 'SLASH_RECALCULATED_AMOUNT_INVALID',
   SLASH_TIMELOCK_NOT_ELAPSED = 'SLASH_TIMELOCK_NOT_ELAPSED',
   SLASH_EXTENSION_EXCEEDS_CHAIN_TIMELOCK = 'SLASH_EXTENSION_EXCEEDS_CHAIN_TIMELOCK',
   SLASH_EXTENSION_WHILE_PROPOSING = 'SLASH_EXTENSION_WHILE_PROPOSING',
@@ -103,6 +104,24 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
       `Cannot move a slash proposal from ${context?.from ?? 'its current state'} to ` +
       `${context?.to ?? 'the requested state'}`,
   },
+  /**
+   * An operator action asked for in a status it does not apply to.
+   *
+   * The same code as {@link invalidTransition}, because it is the same answer —
+   * the case is not where this action needs it to be — but it names the action
+   * and the statuses it is possible in, for the actions that are not a move to
+   * one target status (a claim, an extension, a build-only intent, a sweep).
+   * Borrowing another action's refusal instead told an operator extending a
+   * deadline that the case "cannot be disputed".
+   */
+  actionNotAllowedInStatus: {
+    code: SlashErrorCode.SLASH_INVALID_TRANSITION,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Cannot ${context?.action ?? 'do this'} while the case is ` +
+      `${context?.status ?? 'in its current status'}` +
+      `${context?.allowed ? `; only while it is ${context.allowed}` : ''}`,
+  },
   /** A reason code that is not in the closed list for the chosen outcome. */
   invalidReasonCode: {
     code: SlashErrorCode.SLASH_INVALID_REASON_CODE,
@@ -150,6 +169,21 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     message: (context?: Record<string, any>) =>
       `A recalculated penalty may not exceed the proposed one` +
       `${context?.original ? ` (${context.original})` : ''}`,
+  },
+  /**
+   * `UPHELD_RECALCULATED` with no amount, or one that is not a positive whole
+   * number of minor units.
+   *
+   * The request DTO refuses the same thing first with a `400`; this is the
+   * service's own refusal, raised before `BigInt()` sees the value and before
+   * anything is written, so a second caller cannot record a penalty of `''`.
+   */
+  recalculatedAmountInvalid: {
+    code: SlashErrorCode.SLASH_RECALCULATED_AMOUNT_INVALID,
+    statusCode: 422,
+    message: (context?: Record<string, any>) =>
+      `UPHELD_RECALCULATED needs a recalculated penalty: a positive whole number of minor units` +
+      `${context?.original ? `, no more than the proposed ${context.original}` : ''}`,
   },
   /** The case screen promises nothing executes before the deadline. This enforces it. */
   timelockNotElapsed: {
