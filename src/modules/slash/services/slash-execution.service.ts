@@ -2992,19 +2992,19 @@ export class SlashExecutionService {
         // its own write after the entry had committed, and one refused row
         // left the earlier cases overturned and the sweep OPEN.
         const swept = await this.applySweep(queryRunner, saved, operator, matched);
-        await queryRunner.manager.update(
-          FleetSweepEntity,
-          { id: saved.id },
-          {
-            status: 'COMPLETED',
-            matchedCount: matched.length,
-            appliedCount: swept.length,
-            completedAt: new Date(),
-          },
-        );
+        const completion = {
+          status: 'COMPLETED',
+          matchedCount: matched.length,
+          appliedCount: swept.length,
+          completedAt: new Date(),
+        };
+        await queryRunner.manager.update(FleetSweepEntity, { id: saved.id }, completion);
+        // The row as stored, not as first saved: the route answers with it, and
+        // the first save is `OPEN` with no counts (BUG-R11-O1-02).
+        const completed = Object.assign(saved, completion);
 
         return {
-          value: { sweep: saved, applied: swept },
+          value: { sweep: completed, applied: swept },
           before: {
             sweep: null,
             cases: matched.map((candidate) => ({ id: candidate.id, status: candidate.status })),

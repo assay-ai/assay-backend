@@ -165,6 +165,8 @@ class FakeOverrideLog {
   readonly befores: Record<string, unknown>[] = [];
   /** The `queryRunner.manager` handed to the last mutation. */
   lastManager: unknown = null;
+  /** Every `manager.update` inside a mutation, in order: entity, criteria, patch. */
+  readonly updates: { entity: unknown; criteria: unknown; patch: Record<string, unknown> }[] = [];
 
   async perform<T>(
     context: { code: string; amountMinor?: string | null },
@@ -183,7 +185,10 @@ class FakeOverrideLog {
           id: 'sweep_1',
           ...saved,
         }),
-        update: async () => ({ affected: 1 }),
+        update: async (entity: unknown, criteria: unknown, patch: Record<string, unknown>) => {
+          this.updates.push({ entity, criteria, patch });
+          return { affected: 1 };
+        },
       },
     };
     this.lastManager = queryRunner.manager;
@@ -3519,6 +3524,40 @@ describe('the fleet sweep asks for the chain reservation to be released too', ()
       expect(proposals.rows.get(id)!.status).toBe(SlashProposalStatus.OVERTURNED);
       expect(proposals.rows.get(id)!.chainStatus).toBe('CANCEL_REQUESTED');
     }
+  });
+
+  /**
+   * BUG-R11-O1-02: the route built its 201 body from the row as first saved,
+   * `OPEN` with zero counts, while the stored row was already `COMPLETED`.
+   */
+  it('returns the sweep as stored: completed, with its matched and applied counts', async () => {
+    const { service, proposals } = build();
+    proposals.seed(
+      standing({
+        id: 'source',
+        status: 'OVERTURNED',
+        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+        rootCauseKey: 'mapping/v3',
+        proposedAt: RECENTLY,
+        chainStatus: 'CANCELLED',
+      }),
+    );
+    proposals.seed(
+      standing({ id: 'a', status: 'UPHELD', rootCauseKey: 'mapping/v3', proposedAt: RECENTLY }),
+    );
+    proposals.seed(
+      standing({ id: 'b', status: 'UPHELD', rootCauseKey: 'mapping/v3', proposedAt: RECENTLY }),
+    );
+
+    const sweep = await service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
+      defectKey: 'mapping/v3',
+      lookbackHours: 72,
+      reasonCode: 'S11_PLATFORM_DEFECT',
+      note: 'the v3 binding dropped a field on every tool it touched',
+    });
+
+    expect(sweep).toMatchObject({ status: 'COMPLETED', matchedCount: 2, appliedCount: 2 });
+    expect(sweep.completedAt).toBeInstanceOf(Date);
   });
 });
 

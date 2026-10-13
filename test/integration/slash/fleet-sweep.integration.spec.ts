@@ -263,6 +263,40 @@ describe('fleet sweep, against a real database', () => {
     expect((entry?.after.appliedProposalIds as string[]).length).toBe(2);
   });
 
+  // BUG-R11-O1-02: the route answered with the row as first saved (OPEN, 0/0)
+  // while the stored row was already COMPLETED.
+  it('returns the sweep as it is stored: completed, with both counts', async () => {
+    const defect = freshDefect();
+    const seeded = await source(defect);
+    await upheld(defect);
+    await undecided(defect);
+
+    const sweep = await execution.openSweep(
+      lead,
+      adjudicator,
+      seeded.organizationId,
+      seeded.proposalId,
+      sweepInput(defect),
+    );
+
+    const stored = await one<{
+      status: string;
+      matched_count: number;
+      applied_count: number;
+      completed_at: Date | null;
+    }>(
+      `SELECT status, matched_count, applied_count, completed_at FROM fleet_sweeps WHERE id = $1`,
+      [sweep.id],
+    );
+    expect(stored).toMatchObject({ status: 'COMPLETED', matched_count: 2, applied_count: 2 });
+    expect(sweep).toMatchObject({
+      status: stored.status,
+      matchedCount: stored.matched_count,
+      appliedCount: stored.applied_count,
+      completedAt: stored.completed_at,
+    });
+  });
+
   it('checks the authority limit against the summed penalties of the matched cases', async () => {
     const defect = freshDefect();
     const seeded = await source(defect);
