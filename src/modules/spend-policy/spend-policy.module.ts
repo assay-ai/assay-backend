@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { AuditLogModule } from '@shared/audit';
 import { NotificationModule } from '@modules/notification/notification.module';
 
 import { SpendPolicyService } from './services/spend-policy.service';
@@ -26,7 +27,7 @@ import { SpendPolicyEnforcementService } from './services/spend-policy-enforceme
   // `NotificationModule` registers a BullMQ queue, and a module that pulls a
   // queue into every graph that touches it is a module that breaks processes
   // which have no business owning one.
-  imports: [NotificationModule],
+  imports: [NotificationModule, AuditLogModule],
   providers: [
     SpendPolicyService,
     SpendUsageService,

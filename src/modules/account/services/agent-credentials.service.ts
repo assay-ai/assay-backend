@@ -1,10 +1,13 @@
 import { Injectable } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
+import { DataSource } from 'typeorm';
 
 import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
+import { AuditActor, AuditLogWriter } from '@shared/audit';
 import { digestToken } from '@shared/crypto/token-digest';
 
 import {
@@ -50,12 +53,19 @@ const CREDENTIALS_LIST: ListSpec = {
  * only `tokenHash` (a SHA-256 digest) is written. `list` and its DTO
  * (`AgentCredentialDto`) never carry `tokenHash` at all, so "never return the
  * secret" cannot be violated by a future field added to the wrong DTO.
+ *
+ * `create` and `revoke` each append an `audit_log_entries` row in the same
+ * transaction as the write (`credential.created` / `credential.revoked`). The
+ * entry names the credential by id and name — never the token, its stored
+ * prefix or its hash.
  */
 @Injectable()
 export class AgentCredentialsService {
   constructor(
     private readonly credentials: AgentCredentialRepository,
     private readonly agents: AgentRepository,
+    @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    private readonly audit: AuditLogWriter,
   ) {}
 
   async list(
@@ -84,6 +94,7 @@ export class AgentCredentialsService {
     organizationId: string,
     agentId: string,
     body: CreateAgentCredentialBodyDto,
+    actor: AuditActor,
   ): Promise<CreateAgentCredentialResponseDto> {
     const agent = await this.agents.findById(agentId);
     if (!agent || agent.organizationId !== organizationId) {
@@ -102,7 +113,24 @@ export class AgentCredentialsService {
       expiresAt: body.expiresAt ?? null,
     });
 
-    const saved = await this.credentials.save(entity);
+    const saved = await this.dataSource.transaction(async (manager) => {
+      const row = await manager.save(AgentCredentialEntity, entity);
+      await this.audit.record(manager, {
+        organizationId,
+        actor,
+        action: 'credential.created',
+        resourceType: 'agent_credential',
+        resourceId: row.id,
+        before: null,
+        after: {
+          agentId: row.agentId,
+          name: row.name,
+          scopes: row.scopes,
+          expiresAt: row.expiresAt ? new Date(row.expiresAt).toISOString() : null,
+        },
+      });
+      return row;
+    });
 
     return {
       id: saved.id,
@@ -128,7 +156,7 @@ export class AgentCredentialsService {
     organizationId: string,
     agentId: string,
     id: string,
-    revokedBy: string,
+    actor: AuditActor,
   ): Promise<void> {
     const credential = await this.credentials.findOneBy({ organizationId, id });
     if (!credential || credential.agentId !== agentId) {
@@ -139,7 +167,23 @@ export class AgentCredentialsService {
     // the original revocation time.
     if (credential.revokedAt) return;
 
-    await this.credentials.update({ organizationId, id }, { revokedAt: new Date(), revokedBy });
+    const revokedAt = new Date();
+    await this.dataSource.transaction(async (manager) => {
+      await manager.update(
+        AgentCredentialEntity,
+        { organizationId, id },
+        { revokedAt, revokedBy: actor.id },
+      );
+      await this.audit.record(manager, {
+        organizationId,
+        actor,
+        action: 'credential.revoked',
+        resourceType: 'agent_credential',
+        resourceId: id,
+        before: { revokedAt: null },
+        after: { revokedAt: revokedAt.toISOString(), name: credential.name },
+      });
+    });
   }
 
   private toDto(entity: AgentCredentialEntity): AgentCredentialDto {
