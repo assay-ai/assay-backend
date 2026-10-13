@@ -1,5 +1,9 @@
 import { OverrideLogEntryEntity } from '@database/postgres/entities/override-log-entry.entity';
-import { ApprovalMode, OperatorRole } from '@modules/operator/domain/override-register';
+import {
+  ApprovalMode,
+  OperatorRole,
+  OVERRIDE_REGISTER,
+} from '@modules/operator/domain/override-register';
 import { OperatorErrorCode } from '@modules/operator/errors/operator.errors';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 
@@ -237,6 +241,110 @@ describe('OverrideLogService', () => {
         approverOperatorId: 'op_1',
         breakGlass: false,
       });
+    });
+
+    /**
+     * A fleet sweep applies one conclusion to providers who never complained,
+     * so its checker has to be somebody who can read a case: an adjudicator or
+     * an adjudication lead. Authenticating as *an* operator is not enough.
+     */
+    describe('the fleet sweep approver (S-11)', () => {
+      const perform = (service: OverrideLogService, roles: OperatorRole[]) =>
+        service.perform(
+          { code: 'S-11', actor: LEAD, approver: { ...ADJUDICATOR, roles }, ...BASE },
+          async () => ({ value: null, before: {}, after: {} }),
+        );
+
+      it.each([
+        [[OperatorRole.POL]],
+        [[OperatorRole.SRE]],
+        [[OperatorRole.TRE, OperatorRole.SUP]],
+        [[]],
+      ])('refuses an approver holding %j, before touching the database', async (roles) => {
+        const { service, dataSource, entries } = build();
+
+        await expect(perform(service, roles)).rejects.toMatchObject({
+          errorCode: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED,
+          statusCode: 403,
+          message: expect.stringContaining('ADJ, ADJL'),
+        });
+        expect(dataSource.runner.started).toBe(false);
+        expect(entries.appended).toEqual([]);
+      });
+
+      it.each([
+        [[OperatorRole.ADJ]],
+        [[OperatorRole.ADJL]],
+        [[OperatorRole.SRE, OperatorRole.ADJ]],
+      ])('accepts an approver holding %j', async (roles) => {
+        const { service, entries } = build();
+
+        await perform(service, roles);
+
+        expect(entries.appended[0]).toMatchObject({
+          code: 'S-11',
+          approvalMode: ApprovalMode.TWO_PERSON,
+          approverOperatorId: 'op_1',
+        });
+      });
+
+      it('still answers "no approver" and "self approval" before the role', async () => {
+        const { service } = build();
+
+        await expect(
+          service.perform({ code: 'S-11', actor: LEAD, ...BASE }, async () => ({
+            value: null,
+            before: {},
+            after: {},
+          })),
+        ).rejects.toMatchObject({
+          errorCode: OperatorErrorCode.OPERATOR_SECOND_APPROVER_REQUIRED,
+        });
+        await expect(
+          service.perform(
+            {
+              code: 'S-11',
+              actor: { ...LEAD, roles: [OperatorRole.ADJL] },
+              approver: LEAD,
+              ...BASE,
+            },
+            async () => ({ value: null, before: {}, after: {} }),
+          ),
+        ).rejects.toMatchObject({ errorCode: OperatorErrorCode.OPERATOR_SELF_APPROVAL_REFUSED });
+      });
+    });
+
+    /** A row that names no approver roles keeps the rule it always had. */
+    it('leaves the other two-person action (S-5) open to any second operator', async () => {
+      const { service, entries } = build();
+
+      await service.perform(
+        {
+          code: 'S-5',
+          actor: LEAD,
+          approver: { ...ADJUDICATOR, roles: [OperatorRole.POL] },
+          ...BASE,
+        },
+        async () => ({ value: null, before: {}, after: {} }),
+      );
+
+      expect(entries.appended[0]).toMatchObject({
+        code: 'S-5',
+        approvalMode: ApprovalMode.TWO_PERSON,
+        approverOperatorId: 'op_1',
+      });
+    });
+
+    it('names approver roles on the fleet sweep row and on no other', () => {
+      expect(OVERRIDE_REGISTER['S-11'].approverRoles).toEqual([
+        OperatorRole.ADJ,
+        OperatorRole.ADJL,
+      ]);
+      expect(
+        Object.values(OVERRIDE_REGISTER)
+          .filter((row) => row.approverRoles !== undefined)
+          .map((row) => row.code),
+      ).toEqual(['S-11']);
     });
   });
 

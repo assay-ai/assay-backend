@@ -249,6 +249,12 @@ export class OperatorCaseService {
    * The full workflow has the action sit in `PENDING` and do nothing until a
    * second identity approves it asynchronously; that needs a queue of pending
    * actions, which is not built yet.
+   *
+   * This resolves *who* the checker is: an authenticated, active operator
+   * (`sessions.resolve` refuses a suspended one) who is not the actor. Whether
+   * their **roles** qualify them is the register row's to say — `S-11` demands
+   * `ADJ` or `ADJL`, `S-5` names none — and `OverrideLogService` enforces it,
+   * so the rule cannot differ between two routes citing one code.
    */
   private async resolveApprover(
     request: Request,
