@@ -158,6 +158,12 @@ export interface EvmDeployment {
    * WRITES is opted into here, explicitly.)
    */
   readonly multicall3?: `0x${string}`;
+  /**
+   * The block the dispute upgrade (D-19) landed in, when it is recorded: where
+   * `EvmChainStateIndexer` starts a chain with no cursor and no
+   * `EVM_CHAIN_STATE_FROM_BLOCK`, since no `BlockedSet` can predate it.
+   */
+  readonly disputeUpgradeBlock?: bigint;
 }
 
 /** DI token: `ReadonlyMap<ChainId, EvmDeployment>`. */

@@ -7,11 +7,13 @@ import { SlashProposalRepository } from '@database/postgres/repositories/slash-p
 
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import {
+  SlashChainCancelledEvent,
   SlashChainDisputedEvent,
   SlashChainRulingsPort,
   SlashChainUpheldEvent,
 } from '../ports/slash-chain-rulings.port';
 import { ArbitrationService } from './arbitration.service';
+import { SlashExecutionService } from './slash-execution.service';
 import { SlashProposalService } from './slash-proposal.service';
 
 /**
@@ -32,6 +34,12 @@ import { SlashProposalService } from './slash-proposal.service';
  *   back to `PENDING` at the `executableAt` the EVENT carries (never assumed
  *   to be "now"), and the case's mirror and count follow.
  *
+ * - **`SlashCancelled`** — the arbiter's `cancelSlash` (a ruling for the
+ *   provider) or anybody's `expireSlash` (audit E-6). The part becomes
+ *   `CANCELLED`; once no part of the case stands and none executed, the case
+ *   closes AT ONCE (it used to stay `DISPUTED` until the 30-day sweep, which
+ *   then said, falsely, that the arbiter never ruled).
+ *
  * A case whose cancel is already requested (`CANCEL_REQUESTED`) keeps that
  * mirror: `cancelSlash` accepts a disputed record, and only the 30-day clock
  * is noted. Idempotent — the watcher re-reads a range after any failure.
@@ -45,6 +53,7 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     private readonly proposals: SlashProposalRepository,
     private readonly lifecycle: SlashProposalService,
     @Optional() private readonly arbitration: ArbitrationService | null = null,
+    @Optional() private readonly execution: SlashExecutionService | null = null,
   ) {}
 
   async recordDisputed(event: SlashChainDisputedEvent): Promise<boolean> {
@@ -195,6 +204,69 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
         patch,
       );
     }
+  }
+
+  async recordCancelled(event: SlashChainCancelledEvent): Promise<boolean> {
+    const part = await this.parts.findOneByChainRequestId(event.requestId);
+    if (!part) return false;
+    const proposal = await this.proposals.findOneScoped(part.organizationId, part.proposalId);
+    if (!proposal) return false;
+
+    // Idempotent: our own expire already wrote it, or the watcher re-read.
+    if (!['PENDING', 'DISPUTED', 'REFUSED'].includes(part.chainStatus)) return true;
+    const wasDisputed = part.chainStatus === 'DISPUTED';
+    await this.parts.updatePart(part.organizationId, part.id, {
+      chainStatus: 'CANCELLED',
+      cancelledAt: event.cancelledAt,
+    });
+
+    const ruledForProvider = event.reason === 'WITHDRAWN';
+    await this.timeline(proposal, event.cancelledAt, 'CHAIN_CANCELLED', {
+      summary: ruledForProvider
+        ? wasDisputed
+          ? 'The arbiter ruled for the provider on chain (cancelSlash): this part is cancelled ' +
+            'and its reservation released'
+          : 'This part was cancelled on chain (cancelSlash) and its reservation released'
+        : `This part was expired on chain (expireSlash, ${event.reason}) and its reservation ` +
+          'released',
+      detail: {
+        requestId: event.requestId,
+        reason: event.reason,
+        transactionHash: event.transactionHash,
+        cancelledAt: event.cancelledAt.toISOString(),
+      },
+    });
+
+    if (part.chainEpoch !== proposal.chainEpoch) return true;
+    const parts = await this.parts.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      proposal.chainEpoch,
+    );
+    const standing = parts.some((row: SlashProposalPartEntity) =>
+      ['PENDING', 'DISPUTED'].includes(row.chainStatus),
+    );
+    const executed = parts.some((row: SlashProposalPartEntity) => row.chainStatus === 'EXECUTED');
+    if (standing || executed) {
+      await this.mirrorParts(proposal, {});
+      return true;
+    }
+    const because = ruledForProvider
+      ? 'the arbiter ruled for the provider on chain (cancelSlash)'
+      : `its on-chain record was expired (${event.reason})`;
+    await this.proposals.update(
+      { organizationId: proposal.organizationId, id: proposal.id },
+      { chainDisputedParts: 0 },
+    );
+    if (this.execution) {
+      await this.execution.closeCancelledOnChain(proposal, because);
+    } else {
+      await this.proposals.update(
+        { organizationId: proposal.organizationId, id: proposal.id },
+        { chainStatus: ChainProposalStatus.CANCELLED, chainDisputedParts: 0 },
+      );
+    }
+    return true;
   }
 
   private async timeline(

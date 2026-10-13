@@ -15,6 +15,7 @@ import { ENABLED_CHAINS } from '../enabled-chains';
 import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
 import { X402_SLASH_WATCH_EVENTS_ABI } from './abi/x402.abi';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
+import { cancelReasonFromEvm } from './evm-slash-status';
 
 /**
  * Every two minutes. A rogue record cannot move money before its
@@ -58,7 +59,7 @@ export interface EvmSlashWatchClient {
  * asked for.
  */
 export interface SlashProposedLog {
-  readonly eventName?: 'SlashProposed' | 'SlashDisputed' | 'SlashUpheld';
+  readonly eventName?: 'SlashProposed' | 'SlashDisputed' | 'SlashUpheld' | 'SlashCancelled';
   readonly args: {
     readonly requestId?: `0x${string}`;
     readonly provider?: `0x${string}`;
@@ -68,6 +69,8 @@ export interface SlashProposedLog {
     readonly executableAt?: bigint;
     readonly disputedAt?: bigint;
     readonly arbiter?: `0x${string}`;
+    readonly reason?: number;
+    readonly cancelledAt?: bigint;
   };
   readonly transactionHash: `0x${string}` | null;
   readonly blockNumber: bigint | null;
@@ -94,12 +97,14 @@ export interface SlashWatchFinding {
  * ## The dispute upgrade's events (D-19)
  *
  * The same `eth_getLogs` also returns `SlashDisputed` (the provider froze a
- * record) and `SlashUpheld` (the arbiter ruled against the provider). They
+ * record), `SlashUpheld` (the arbiter ruled against the provider) and
+ * `SlashCancelled` (the arbiter ruled for the provider, or an expiry). They
  * are handed to the slash domain (`SLASH_CHAIN_RULINGS`), which mirrors them
- * onto the case: `chain_status = DISPUTED`, the case into review, and on an
- * uphold back to `PENDING` at the `executableAt` the EVENT carries. A dispute
- * or ruling on a record nobody planned is a WARN — the proposal itself was
- * already the CRITICAL. A Stake that predates the upgrade emits neither.
+ * onto the case: the part `DISPUTED`, the case into review; on an uphold the
+ * part back to `PENDING` at the `executableAt` the EVENT carries; on a cancel
+ * the part `CANCELLED`, and the case closed at once when nothing of it stands
+ * (audit E-6). A dispute or ruling on a record nobody planned is a WARN — the
+ * proposal itself was already the CRITICAL.
  *
  * Read-only on chain: `eth_blockNumber` and `eth_getLogs`, nothing signed or
  * sent. The response is in `docs/runbooks/chains.md` ("Unknown slash record").
@@ -198,7 +203,12 @@ export class EvmSlashProposalWatcher {
     // and the (idempotent) mirror is retried next tick.
     await this.mirrorRulings(
       chainId,
-      logs.filter((log) => log.eventName === 'SlashDisputed' || log.eventName === 'SlashUpheld'),
+      logs.filter(
+        (log) =>
+          log.eventName === 'SlashDisputed' ||
+          log.eventName === 'SlashUpheld' ||
+          log.eventName === 'SlashCancelled',
+      ),
     );
     // Only after the comparison and its alerts: a failure above re-reads the
     // same range next tick rather than skipping it.
@@ -292,23 +302,36 @@ export class EvmSlashProposalWatcher {
         );
         continue;
       }
-      const known =
-        log.eventName === 'SlashDisputed'
-          ? await rulings.recordDisputed({
-              chainId,
-              requestId,
-              provider: log.args.provider ?? '',
-              disputedAt: new Date(Number(log.args.disputedAt ?? 0n) * 1000),
-              executableAt,
-              transactionHash,
-            })
-          : await rulings.recordUpheld({
-              chainId,
-              requestId,
-              arbiter: log.args.arbiter ?? '',
-              executableAt,
-              transactionHash,
-            });
+      let known: boolean;
+      if (log.eventName === 'SlashDisputed') {
+        known = await rulings.recordDisputed({
+          chainId,
+          requestId,
+          provider: log.args.provider ?? '',
+          disputedAt: new Date(Number(log.args.disputedAt ?? 0n) * 1000),
+          executableAt,
+          transactionHash,
+        });
+      } else if (log.eventName === 'SlashUpheld') {
+        known = await rulings.recordUpheld({
+          chainId,
+          requestId,
+          arbiter: log.args.arbiter ?? '',
+          executableAt,
+          transactionHash,
+        });
+      } else {
+        known = await rulings.recordCancelled({
+          chainId,
+          requestId,
+          reason: cancelReasonFromEvm(Number(log.args.reason ?? 0)),
+          cancelledAt: new Date(Number(log.args.cancelledAt ?? 0n) * 1000),
+          transactionHash,
+        });
+        // A cancel of a record nobody planned is not worth a WARN on its own:
+        // the proposal itself was already the CRITICAL.
+        if (!known) continue;
+      }
       if (!known) {
         await this.alerts.emit({
           severity: AlertSeverity.WARN,

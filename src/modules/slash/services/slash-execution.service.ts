@@ -816,6 +816,21 @@ export class SlashExecutionService {
    *   the timeline entry reports, never a re-read of the passed-in entity,
    *   which `update()` does not refresh.
    */
+  /**
+   * Every standing record of the case was cancelled ON CHAIN by somebody else
+   * — the arbiter's `cancelSlash` (a ruling for the provider) or an
+   * `expireSlash` — and nothing of it executed (audit E-6). Closes the case at
+   * once, with the chain mirror `CANCELLED`; a case already closed only gets
+   * the mirror. Never throws past the closure.
+   */
+  async closeCancelledOnChain(proposal: SlashProposalEntity, because: string): Promise<void> {
+    await this.voidCase(
+      proposal,
+      { status: ChainProposalStatus.CANCELLED, lastError: null },
+      because,
+    );
+  }
+
   private async voidCase(
     proposal: SlashProposalEntity,
     chain: {

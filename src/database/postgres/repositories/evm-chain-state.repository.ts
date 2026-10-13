@@ -121,6 +121,37 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
     });
   }
 
+  /**
+   * Every EVM address of `chainId` the platform knows — buyers (their
+   * escrows), providers' payout and stake-authority accounts, agent
+   * credentials' delegates — lower-case, without the CAIP prefix. Read once,
+   * when the indexer starts a chain with no known start block: the full
+   * `blocked()` reconcile over these stands in for the `BlockedSet` events it
+   * cannot read (audit E-11).
+   */
+  async findKnownChainAccounts(chainId: string): Promise<string[]> {
+    const rows = (await this.manager.query(
+      `SELECT DISTINCT lower(split_part(account, ':', 3)) AS address FROM (
+         SELECT account_id AS account FROM buyer_escrows
+         UNION SELECT payout_account_id FROM provider_chain_enrolments
+         UNION SELECT stake_authority_account_id FROM provider_chain_enrolments
+         UNION SELECT delegate_account FROM agent_credentials
+       ) known
+       WHERE account LIKE $1`,
+      [`${chainId}:0x%`],
+    )) as { address: string }[];
+    return rows.map((row) => row.address).filter((address) => /^0x[0-9a-f]{40}$/.test(address));
+  }
+
+  /** Live `blocked()` reads written as reconcile corrections: they always win. */
+  async applyCorrections(chainId: string, rows: readonly BlockedSetRow[]): Promise<void> {
+    if (rows.length === 0) return;
+    await this.manager.transaction(async (manager) => {
+      await this.lockState(manager, chainId);
+      for (const row of rows) await this.upsertBlocked(manager, chainId, row, true);
+    });
+  }
+
   async recordError(chainId: string, message: string): Promise<void> {
     await this.manager.transaction(async (manager) => {
       const state = await this.lockState(manager, chainId);

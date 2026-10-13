@@ -10,6 +10,7 @@ import {
   MULTICALL3_ABI,
   X402_CONFIG_ARBITER_ABI,
   X402_CONFIG_EVENTS_ABI,
+  X402_PROXY_EVENTS_ABI,
   X402_SLASH_WATCH_EVENTS_ABI,
   X402_STAKE_ABI,
   X402_STAKE_SLASH_ABI,
@@ -287,7 +288,7 @@ describe('the vendored ABI matches the compiled contracts', () => {
     });
   });
 
-  it('watches exactly the proposal, dispute and ruling events, with the slash ABI topics', () => {
+  it('watches exactly the proposal, dispute, ruling and cancel events, with the slash ABI topics', () => {
     const slashTopics = new Map(
       X402_STAKE_SLASH_ABI.filter((entry) => entry.type === 'event').map(
         (entry) => [entry.name, toEventSelector(entry)] as const,
@@ -301,6 +302,7 @@ describe('the vendored ABI matches the compiled contracts', () => {
       'SlashProposed',
       'SlashDisputed',
       'SlashUpheld',
+      'SlashCancelled',
     ]);
     for (const [name, topic] of watched) expect(topic).toBe(slashTopics.get(name));
   });
@@ -317,7 +319,17 @@ describe('the vendored ABI matches the compiled contracts', () => {
       ArbiterSet: '0xa99fc739cab6b19d8ee27aaf57eabd8d86b73474801240c86a747a5f5ee88841',
       SlashDelaySet: '0xe92892ac23b44eec891739e9373975ea3d0390fff6945b656d711465fa06a44a',
       VerifierRegistered: '0xf548a4789950d0f1776ed9cb2587f9c617dd22bcaf73b7e11671ea12a11788a9',
+      // Audit E-6, from the compiled X402Config artifact.
+      AdminSet: '0xbf265e8326285a2747e33e54d5945f7111f2b5edb826eb8c08d4677779b3ff97',
+      ConfigUpdated: '0x8e7fa7a1420deb5f5e4a066cf608648e5033204e61af8207cde6761776d5d78f',
+      VerifierRevokedEvent: '0x09d81452cebb749c6fa606928a01c3693c6dfc54af1b5dadfb01349c0b93d345',
     });
+  });
+
+  it('pins the ERC-1967 Upgraded event watched on all three proxies', () => {
+    expect(X402_PROXY_EVENTS_ABI.map((entry) => [entry.name, toEventSelector(entry)])).toEqual([
+      ['Upgraded', '0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b'],
+    ]);
   });
 
   it('lets only the slash executor import the arbiter Config ABI', () => {

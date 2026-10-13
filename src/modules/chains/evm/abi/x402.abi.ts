@@ -111,18 +111,31 @@ export const X402_CONFIG_ABI = parseAbi([
 
 /**
  * `X402Config`'s events the chain-state indexer reads (`EvmChainStateIndexer`):
- * `PauseToggled` and `BlockedSet` into Postgres; `ArbiterSet`, `SlashDelaySet`
- * and `VerifierRegistered` as CRITICAL alerts (the levers a stolen admin key
- * pulls), and a `BlockedSet` by the arbiter as a WARN. Events only, no
- * function: nothing here may write the Config.
+ * `PauseToggled` and `BlockedSet` into Postgres; `AdminSet`, `ConfigUpdated`
+ * (treasury, bps, caps), `VerifierRevokedEvent`, `ArbiterSet`,
+ * `SlashDelaySet` and `VerifierRegistered` as CRITICAL alerts (the levers a
+ * stolen admin key pulls); `PauseToggled`, an unblock (`BlockedSet` false,
+ * which only the admin can send) and a block by the arbiter as a WARN. Events
+ * only, no function: nothing here may write the Config.
  */
 export const X402_CONFIG_EVENTS_ABI = parseAbi([
+  'struct ParamSet { address treasury; address redeemer; uint64 unbondingPeriodSeconds; uint64 minimumStake; uint64 penaltyAmount; uint64 verifierDailyCap; uint16 takeRateBps; uint16 slashAgentBps; uint16 slashPlatformBps; uint16 slashCapBps; }',
   'event PauseToggled(address indexed admin, bool paused, uint64 at)',
+  'event AdminSet(address indexed previousAdmin, address indexed newAdmin)',
+  'event ConfigUpdated(address indexed admin, ParamSet params)',
+  'event VerifierRevokedEvent(address indexed verifier, address indexed admin, uint64 revokedAt)',
   'event BlockedSet(address indexed account, bool blocked, address indexed by)',
   'event ArbiterSet(address indexed previousArbiter, address indexed newArbiter)',
   'event SlashDelaySet(uint64 previousDelay, uint64 newDelay)',
   'event VerifierRegistered(address indexed verifier, address indexed admin, bytes32 label, uint64 registeredAt, uint64 expiresAt)',
 ]);
+
+/**
+ * ERC-1967 `Upgraded`, watched on all three proxies (Config, Stake, Escrow):
+ * an implementation swap is the biggest lever a stolen owner key pulls, so it
+ * is a CRITICAL alert (audit E-6). Events only.
+ */
+export const X402_PROXY_EVENTS_ABI = parseAbi(['event Upgraded(address indexed implementation)']);
 
 /**
  * `setBlocked(account, true)` — ENCODED, never sent, for the ARBITER's wallet
@@ -212,8 +225,8 @@ export const X402_STAKE_SLASH_ABI = parseAbi([
 /**
  * The events `EvmSlashProposalWatcher` reads (review H-1, and the dispute
  * upgrade): `SlashProposed` to find records this platform did not plan,
- * `SlashDisputed` and `SlashUpheld` to mirror a provider's on-chain dispute and
- * the arbiter's ruling onto the case. Kept apart from
+ * `SlashDisputed`, `SlashUpheld` and `SlashCancelled` to mirror a provider's
+ * on-chain dispute and the arbiter's ruling onto the case. Kept apart from
  * {@link X402_STAKE_SLASH_ABI} so the slash WRITES stay reachable from the
  * slash executor only: this constant holds events and no function.
  */
@@ -221,6 +234,7 @@ export const X402_SLASH_WATCH_EVENTS_ABI = parseAbi([
   'event SlashProposed(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 reserved, uint64 capAllowance, uint64 pendingSlash, uint64 proposedAt, uint64 executableAt)',
   'event SlashDisputed(bytes32 indexed requestId, address indexed provider, uint64 disputedAt, uint64 executableAt)',
   'event SlashUpheld(bytes32 indexed requestId, address indexed provider, address indexed arbiter, uint64 executableAt)',
+  'event SlashCancelled(bytes32 indexed requestId, address indexed provider, uint8 reason, uint64 released, uint64 pendingSlash, uint64 cancelledAt)',
 ]);
 
 /**
