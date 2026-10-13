@@ -148,10 +148,13 @@ alerts, so a false positive points at a bug in the watcher or in the part rows, 
 
 ## The EVM dispute upgrade (assay-evm D-19)
 
-The backend runs against both sides of the upgrade with no flag. It probes
-`X402Config.slashDelaySeconds()`: a revert means the Config predates the
-upgrade (no arbiter, no on-chain blocklist, the old 72 h delay, and the pause
-closes only deposits, redemption and the slash doors).
+**The backend assumes the upgraded contracts; upgrade the chain before deploying it.** There is no
+old-versus-new detection. At boot every process logs one error, `contracts not upgraded`, for a
+chain whose `X402Config` does not answer `arbiter()`; disputes, rulings, the on-chain blocklist
+and the slash delay will not work there. The live `slashDelaySeconds()` is read for every proposal
+pass; a failed read is an RPC error and the case waits for the next tick (no delay is ever
+assumed). The arbiter must be appointed: every cancel and ruling is built for the arbiter, and
+`CHAIN_ARBITER_NOT_SET` is returned while it is `address(0)`.
 
 - **Pause and blocklist cache.** `EvmChainStateIndexer` (scheduler, every
   minute) indexes `PauseToggled` / `BlockedSet` into `evm_chain_states` and

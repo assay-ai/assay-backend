@@ -127,12 +127,6 @@ export class ChainStateHealthDto {
   @ApiProperty({ description: 'X402Config.paused, as last indexed' })
   paused: boolean;
 
-  @ApiPropertyOptional({
-    nullable: true,
-    description: 'Whether the Config has the dispute upgrade; null until first reconciled',
-  })
-  upgraded: boolean | null;
-
   @ApiPropertyOptional({ nullable: true, description: 'X402Config.arbiter(), lower-case' })
   arbiter: string | null;
 

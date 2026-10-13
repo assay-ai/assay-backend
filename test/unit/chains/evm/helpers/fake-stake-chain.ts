@@ -11,7 +11,6 @@ import {
 import {
   MULTICALL3_ABI,
   X402_STAKE_ABI,
-  X402_STAKE_LEGACY_SLASH_RECORD_ABI,
   X402_STAKE_SLASH_ABI,
 } from '@modules/chains/evm/abi/x402.abi';
 import { evmDomain } from '@modules/chains/evm/eip712/domain';
@@ -50,6 +49,7 @@ export const MULTICALL = '0xcA11bde05977b3631167028862bE2a173976CA11' as const;
 export const TREASURY = '0x4246bee428758e8215bA587717d48B8Ef0130388' as const;
 export const ADMIN = '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32' as const;
 export const OWNER = '0x7777777777777777777777777777777777777777' as const;
+export const FAKE_ARBITER = '0xA4B17E4000000000000000000000000000000001' as const;
 export const RELAYER = '0x24A2c5823204150fe1bdc5Ce378A704788B345DB' as const;
 
 export const DEPLOYMENT: EvmDeployment = {
@@ -64,7 +64,6 @@ export const DEPLOYMENT: EvmDeployment = {
   multicall3: MULTICALL,
 };
 
-const DELAY = 72n * 3600n;
 const SLASH_RECORD_OF = toFunctionSelector('slashRecordOf(bytes32)');
 const GRACE = 7n * 86_400n;
 
@@ -157,15 +156,9 @@ export class FakeStakeChain {
     string,
     { status: 'success'; blockNumber: bigint; gasUsed: bigint; logs: Log[] }
   >();
-  /**
-   * The dispute upgrade (D-19). `false` (the default) is the contracts as
-   * deployed today: `slashDelaySeconds()` / `arbiter()` revert like a function
-   * the Config does not have, and `slashRecordOf` returns the fourteen-word
-   * record, which the current shape cannot decode.
-   */
-  upgraded = false;
+  /** The upgraded contracts (D-19) are the only ones the backend supports. */
   slashDelay = 72n * 3600n;
-  arbiter: `0x${string}` = '0x0000000000000000000000000000000000000000';
+  arbiter: `0x${string}` = FAKE_ARBITER;
   readonly blockedAccounts = new Set<string>();
   /** Test hook: run before a sent transaction is applied (to change state under it). */
   beforeSend: ((data: `0x${string}`) => void) | null = null;
@@ -196,12 +189,6 @@ export class FakeStakeChain {
 
   readonly client: EvmSlashClient = {
     readContract: async (args) => {
-      if (!this.upgraded && args.functionName === 'slashRecordOf' && args.abi === X402_STAKE_ABI) {
-        // What viem does with fourteen words against the fifteen-word shape.
-        throw Object.assign(new Error('Position `448` is out of bounds'), {
-          name: 'PositionOutOfBoundsError',
-        });
-      }
       return this.read(args.address, args.functionName, args.args);
     },
     call: async (args) => {
@@ -292,11 +279,6 @@ export class FakeStakeChain {
     if (functionName === 'admin') return ADMIN;
     if (functionName === 'paused') return false;
     if (['slashDelaySeconds', 'arbiter', 'blocked'].includes(functionName)) {
-      if (!this.upgraded) {
-        throw Object.assign(new Error('execution reverted'), {
-          name: 'ContractFunctionRevertedError',
-        });
-      }
       if (functionName === 'slashDelaySeconds') return this.slashDelay;
       if (functionName === 'arbiter') return this.arbiter;
       return this.blockedAccounts.has(getAddress(args[0] as string));
@@ -370,7 +352,7 @@ export class FakeStakeChain {
           return {
             success: true,
             returnData: encodeFunctionResult({
-              abi: this.upgraded ? X402_STAKE_ABI : X402_STAKE_LEGACY_SLASH_RECORD_ABI,
+              abi: X402_STAKE_ABI,
               functionName: 'slashRecordOf',
               result: view as never,
             }),
@@ -457,7 +439,7 @@ export class FakeStakeChain {
       beneficiary: getAddress(a.beneficiary),
       proposedAt: this.now,
       verifier: this.verifier,
-      executableAt: this.now + (this.upgraded ? this.slashDelay : DELAY),
+      executableAt: this.now + this.slashDelay,
       reserved,
       capAllowance,
       applied: 0n,

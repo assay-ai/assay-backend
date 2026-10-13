@@ -251,26 +251,24 @@ export class EvmChainStateIndexer {
     }
     const terms = await readConfigTerms(client, deployment.config);
     const corrections: BlockedSetRow[] = [];
-    if (terms.upgraded) {
-      for (const row of await this.repository.findKnownAddresses(chainId)) {
-        const live = Boolean(
-          await client.readContract({
-            address: deployment.config,
-            abi: X402_CONFIG_ABI,
-            functionName: 'blocked',
-            args: [getAddress(row.address)],
-          }),
-        );
-        if (live !== row.blocked) {
-          corrections.push({
-            address: row.address,
-            blocked: live,
-            setBy: null,
-            blockNumber: null,
-            logIndex: null,
-            transactionHash: null,
-          });
-        }
+    for (const row of await this.repository.findKnownAddresses(chainId)) {
+      const live = Boolean(
+        await client.readContract({
+          address: deployment.config,
+          abi: X402_CONFIG_ABI,
+          functionName: 'blocked',
+          args: [getAddress(row.address)],
+        }),
+      );
+      if (live !== row.blocked) {
+        corrections.push({
+          address: row.address,
+          blocked: live,
+          setBy: null,
+          blockNumber: null,
+          logIndex: null,
+          transactionHash: null,
+        });
       }
     }
     if ((state && state.paused !== terms.paused) || corrections.length > 0) {
@@ -290,7 +288,6 @@ export class EvmChainStateIndexer {
     await this.repository.applyReconcile(
       chainId,
       {
-        upgraded: terms.upgraded,
         paused: terms.paused,
         arbiter: terms.arbiter?.toLowerCase() ?? null,
         slashDelaySeconds: terms.slashDelaySeconds,

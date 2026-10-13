@@ -144,13 +144,6 @@ const GRACE_WARNING_MS = 6 * 24 * 60 * 60 * 1000;
 const SOLANA_MIN_SLASH_DELAY_MS = 72 * 60 * 60 * 1000;
 
 /**
- * `MIN_SLASH_DELAY_SECONDS` on EVM since the dispute upgrade (ten minutes) —
- * the shortest delay an upgraded Config can hold, used only when the live
- * value cannot be read.
- */
-const EVM_MIN_SLASH_DELAY_MS = 10 * 60 * 1000;
-
-/**
  * `VOID` names that must **not** close the case on the *execute* path.
  *
  * `SlashNotPending` is `VOID` for the classifier's purposes — the record has
@@ -303,12 +296,15 @@ export class SlashExecutionService {
     let refused = 0;
     let failed = 0;
     // The live delay per chain, read once per pass (see `slashDelayMs`).
-    const delays = new Map<string, number>();
+    const delays = new Map<string, number | null>();
 
     for (const candidate of due) {
       const proposal = await this.proposals.findOneScoped(candidate.organizationId, candidate.id);
       if (!proposal) continue;
       const delayMs = await this.slashDelayMs(proposal, delays);
+      // The live delay could not be read: an RPC error, retried next tick.
+      // Nothing is proposed on an assumed delay.
+      if (delayMs === null) continue;
 
       // Proposing this case NOW would open the door before the promise closes.
       //
@@ -489,29 +485,27 @@ export class SlashExecutionService {
 
   /**
    * How long after a proposal made now its record becomes executable, read
-   * from the chain: on EVM `X402Config.slashDelaySeconds()` since the dispute
-   * upgrade (settable, 10 minutes at the least) and the old contract's own
-   * constant before it. Never assumed to be 72 hours on EVM. A namespace that
-   * cannot say (Solana) uses its program's floor. A failed read falls back to
-   * the SHORTEST delay the chain could have, which only ever defers a proposal.
+   * from the chain: on EVM `X402Config.slashDelaySeconds()` (settable, 10
+   * minutes at the least), never assumed. A namespace whose executor cannot
+   * say (Solana) uses its program's floor.
+   *
+   * `null` when the live read failed: a plain RPC error. The caller defers the
+   * case to the next tick rather than propose on a guessed delay.
    */
   private async slashDelayMs(
     proposal: SlashProposalEntity,
-    cache: Map<string, number>,
-  ): Promise<number> {
+    cache: Map<string, number | null>,
+  ): Promise<number | null> {
     const chainId = chainIdOf(proposal.assetId as AssetId);
-    const known = cache.get(chainId);
-    if (known !== undefined) return known;
-    let delayMs = SOLANA_MIN_SLASH_DELAY_MS;
+    if (cache.has(chainId)) return cache.get(chainId) ?? null;
+    let delayMs: number | null = SOLANA_MIN_SLASH_DELAY_MS;
     try {
       const seconds = await this.executor?.slashDelaySeconds?.(chainId);
       if (typeof seconds === 'number') delayMs = seconds * 1000;
     } catch (error) {
-      if (namespaceOf(proposal.assetId as AssetId) === ChainNamespace.EIP155) {
-        delayMs = EVM_MIN_SLASH_DELAY_MS;
-      }
+      delayMs = null;
       this.logger.warn(
-        `the slash delay on ${chainId} could not be read; using ${delayMs / 1000}s for this pass ` +
+        `the slash delay on ${chainId} could not be read; its proposals wait for the next tick ` +
           `(${error instanceof Error ? error.message : String(error)})`,
       );
     }
@@ -2296,13 +2290,8 @@ export class SlashExecutionService {
       // fresh epoch the first tick on which the door can land after the promise.
       // The old, larger record has already been cancelled, so nothing is
       // reserved in the meantime.
-      if (
-        this.proposingNowWouldOutrunThePromise(
-          refreshed,
-          now,
-          await this.slashDelayMs(refreshed, new Map()),
-        )
-      ) {
+      const delayMs = await this.slashDelayMs(refreshed, new Map());
+      if (delayMs === null || this.proposingNowWouldOutrunThePromise(refreshed, now, delayMs)) {
         this.logger.log(
           `slash proposal ${proposalId} was re-proposed at its revised penalty but its promise ` +
             `runs to ${refreshed.earliestExecutionAt.toISOString()}; the fresh epoch is left for ` +

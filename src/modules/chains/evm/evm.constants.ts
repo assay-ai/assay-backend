@@ -83,14 +83,6 @@ export const EVM_CONSTANTS = {
    * `disputedAt + this`; the 7-day execution grace no longer applies to it.
    */
   DISPUTE_TIMEOUT_SECONDS: 2_592_000,
-  /**
-   * `Constants.sol:40` — `SLASH_DELAY_SECONDS = 72 * 3600`. Since D-19 it is
-   * only the DEFAULT of `X402Config.slashDelaySeconds()`, and the delay a
-   * Config that predates the upgrade (which has no getter) still applies. The
-   * live delay is always read where the chain offers it; this is never assumed
-   * for an upgraded Config.
-   */
-  PRE_DISPUTE_SLASH_DELAY_SECONDS: 259_200,
 } as const;
 
 /**

@@ -42,7 +42,6 @@ export enum ChainErrorCode {
   CHAIN_RELAY_NOT_SENT = 'CHAIN_RELAY_NOT_SENT',
   CHAIN_PROGRAM_PAUSED = 'CHAIN_PROGRAM_PAUSED',
   CHAIN_ADDRESS_BLOCKED = 'CHAIN_ADDRESS_BLOCKED',
-  CHAIN_DISPUTE_UPGRADE_ABSENT = 'CHAIN_DISPUTE_UPGRADE_ABSENT',
   CHAIN_ARBITER_NOT_SET = 'CHAIN_ARBITER_NOT_SET',
   CHAIN_ADDRESS_ALREADY_BLOCKED = 'CHAIN_ADDRESS_ALREADY_BLOCKED',
 }
@@ -496,17 +495,6 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
       `${context?.account ? ` ${context.account}` : ''} is blocked on chain` +
       `${context?.chainId ? ` (${context.chainId})` : ''}; the contract refuses it here. ` +
       'A blocked address can still revoke a delegate and dispute a slash; nothing moves its funds',
-  },
-  /**
-   * The deployed `X402Config` or `X402Stake` predates the dispute upgrade, so
-   * the door asked for does not exist on this chain yet.
-   */
-  disputeUpgradeAbsent: {
-    code: ChainErrorCode.CHAIN_DISPUTE_UPGRADE_ABSENT,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `The settlement contracts${context?.chainId ? ` on ${context.chainId}` : ''} do not have ` +
-      `the dispute upgrade yet${context?.what ? `, so ${context.what} is not available` : ''}`,
   },
   /** `X402Config.arbiter()` is `address(0)`: nobody can uphold a dispute or block. */
   arbiterNotSet: {

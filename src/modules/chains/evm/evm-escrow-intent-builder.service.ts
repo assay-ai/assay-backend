@@ -34,7 +34,6 @@ import { evmDomain } from './eip712/domain';
 import { authorizeDelegateTypedData, revokeDelegateTypedData } from './eip712/delegation';
 import { requestWithdrawTypedData, setLimitsTypedData } from './eip712/escrow-control';
 import { decayWindow } from './evm-voucher-prevalidation';
-import { isRevert } from './evm-voucher-authority';
 import { EVM_CONSTANTS, EvmDeployment } from './evm.constants';
 
 /**
@@ -423,20 +422,12 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
     const deployment = this.deployment(chainId);
     const client = this.client(chainId);
     const [delegates, chainSeconds] = await Promise.all([
-      (
-        client.readContract({
-          address: getAddress(deployment.escrow),
-          abi: X402_ESCROW_ABI,
-          functionName: 'delegatesOf',
-          args: [payer],
-        }) as Promise<readonly `0x${string}`[]>
-      ).catch((error: unknown) => {
-        // An escrow not yet upgraded has no `delegatesOf`: it has no delegates,
-        // exactly as the voucher authority reads it (review S3-18). An outage
-        // is still an error.
-        if (isRevert(error)) return [] as readonly `0x${string}`[];
-        throw error;
-      }),
+      client.readContract({
+        address: getAddress(deployment.escrow),
+        abi: X402_ESCROW_ABI,
+        functionName: 'delegatesOf',
+        args: [payer],
+      }) as Promise<readonly `0x${string}`[]>,
       this.chainSeconds(chainId),
     ]);
     const records = await Promise.all(

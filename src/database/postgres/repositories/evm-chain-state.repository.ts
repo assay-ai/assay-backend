@@ -31,7 +31,6 @@ export interface IndexedRange {
 }
 
 export interface ChainTermsRow {
-  readonly upgraded: boolean;
   readonly paused: boolean;
   readonly arbiter: string | null;
   readonly slashDelaySeconds: number;
@@ -107,7 +106,6 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
         EvmChainStateEntity,
         { id: state.id },
         {
-          upgraded: terms.upgraded,
           paused: terms.paused,
           arbiter: terms.arbiter,
           slashDelaySeconds: terms.slashDelaySeconds,

@@ -49,9 +49,8 @@ interface DelegationRead {
  * sum that no longer holds the redeemed voucher under-counts the window (review
  * S3-6); a cached revocation is a served call nobody pays for. Reads **fail
  * closed**: an RPC that cannot answer is a `CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE`
- * refusal, never an acceptance. A call that REVERTS is an answer, not an
- * outage — `delegationOf` reverting (an escrow not yet upgraded) reads as "no
- * delegate".
+ * refusal, never an acceptance. The backend assumes the upgraded escrow, so
+ * `delegationOf` failing in any way is that refusal too.
  *
  * The delegate's CAPS are returned, not applied: the per-call and window
  * checks also need the delegate's in-flight vouchers, which only the payment
@@ -90,7 +89,7 @@ export class EvmVoucherAuthority {
     let refusal = VoucherAuthorityRefusal.NOT_PAYER;
     if (signer !== null) {
       const delegation = await this.delegation(payerAddress, signer);
-      if (delegation !== null && delegation.validUntil !== 0n) {
+      if (delegation.validUntil !== 0n) {
         if (delegation.revoked) {
           refusal = VoucherAuthorityRefusal.DELEGATE_REVOKED;
         } else if (BigInt(nowSeconds) > delegation.validUntil) {
@@ -122,10 +121,7 @@ export class EvmVoucherAuthority {
     };
   }
 
-  private async delegation(
-    payer: `0x${string}`,
-    delegate: `0x${string}`,
-  ): Promise<DelegationRead | null> {
+  private async delegation(payer: `0x${string}`, delegate: `0x${string}`): Promise<DelegationRead> {
     try {
       return (await this.client.readContract({
         address: this.escrow,
@@ -133,14 +129,10 @@ export class EvmVoucherAuthority {
         functionName: 'delegationOf',
         args: [payer, delegate],
       })) as DelegationRead;
-    } catch (error) {
-      if (!isRevert(error)) {
-        throw ChainErrors.voucherAuthorityUnavailable({
-          what: `delegationOf(${payer}, ${delegate})`,
-        });
-      }
-      // An escrow without the delegation surface has no delegates.
-      return null;
+    } catch {
+      throw ChainErrors.voucherAuthorityUnavailable({
+        what: `delegationOf(${payer}, ${delegate})`,
+      });
     }
   }
 }

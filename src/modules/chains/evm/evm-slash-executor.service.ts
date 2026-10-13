@@ -426,15 +426,12 @@ export class EvmSlashExecutor
   }
 
   /**
-   * The unsigned `cancelSlash` for the person who may sign it. Built, never
-   * sent: this process holds neither key.
-   *
-   * **The ARBITER's, when the Config has one** (assay-evm D-19: an overturn or
-   * a suspension is the arbiter's `cancelSlash`, so the admin key stays cold);
-   * otherwise the ADMIN's, as before the upgrade — an old Config has no
-   * arbiter, and an upgraded one with `arbiter() == 0x0` admits only the
-   * admin. `cancelSlash` accepts a `Pending` or (since D-19) a `Disputed`
-   * record.
+   * The unsigned `cancelSlash` for the ARBITER, the only person this backend
+   * builds a cancel for (assay-evm D-19: an overturn or a suspension is the
+   * arbiter's `cancelSlash`, so the admin key stays cold). The arbiter is
+   * required: an unset arbiter is `CHAIN_ARBITER_NOT_SET`. Built, never sent:
+   * this process holds no such key. `cancelSlash` accepts a `Pending` or a
+   * `Disputed` record.
    */
   async buildCancel(request: SlashCancelRequest): Promise<SlashCancelIntent> {
     const { chainId } = request;
@@ -444,7 +441,8 @@ export class EvmSlashExecutor
 
     const deployment = this.deployment(chainId);
     const terms = await this.chainTerms(chainId);
-    const signer = terms.arbiter ?? terms.admin;
+    if (!terms.arbiter) throw ChainErrors.arbiterNotSet({ chainId, what: 'cancelSlash' });
+    const signer = terms.arbiter;
 
     return {
       transaction: encodeFunctionData({
@@ -454,7 +452,7 @@ export class EvmSlashExecutor
       }),
       to: deployment.stake,
       admin: signer,
-      signerRole: terms.arbiter ? 'ARBITER' : 'ADMIN',
+      signerRole: 'ARBITER',
       requestId: request.requestId,
       provider: request.provider,
       blockhash: '',
@@ -464,7 +462,7 @@ export class EvmSlashExecutor
 
   // ── The dispute upgrade's intents (D-19) ────────────────────────────────
 
-  /** The Config's dispute terms, read live — see `readConfigTerms` for the old-Config rule. */
+  /** The Config's dispute terms, read live. Any read failure is thrown (an RPC error). */
   async chainTerms(chainId: ChainId): Promise<SlashChainTerms> {
     const deployment = this.deployment(chainId);
     const client = this.client(chainId);
@@ -482,12 +480,17 @@ export class EvmSlashExecutor
 
   /**
    * The delay a record proposed NOW will freeze into its `executableAt`:
-   * `slashDelaySeconds()` on an upgraded Config, the old contract's own
-   * constant on one that predates it. Never assumed.
+   * `slashDelaySeconds()`, read live. A failed read throws; the caller
+   * retries on its next tick. Never assumed.
    */
   async slashDelaySeconds(chainId: ChainId): Promise<number> {
-    return (await readConfigTerms(this.client(chainId), this.deployment(chainId).config))
-      .slashDelaySeconds;
+    const delay = (await this.client(chainId).readContract({
+      address: this.deployment(chainId).config,
+      abi: X402_CONFIG_ABI,
+      functionName: 'slashDelaySeconds',
+      args: [],
+    })) as bigint;
+    return Number(delay);
   }
 
   /**
@@ -504,7 +507,6 @@ export class EvmSlashExecutor
   }): Promise<SlashBatchBuild> {
     const { chainId } = request;
     const provider = this.address(request.provider, 'provider');
-    await this.assertUpgraded(chainId, 'disputeSlash');
     const ids = this.batchIds(request.requestIds);
     const nowSeconds = BigInt(Math.floor(this.config.now() / 1000));
 
@@ -541,8 +543,9 @@ export class EvmSlashExecutor
    * (arbiter only; each record `Disputed`, inside `disputedAt + 30 d`, and not
    * judged by the arbiter's own key — and an uphold does NOT necessarily make
    * the record executable at once: the new `executableAt` is read back from
-   * `SlashUpheld` or `slashRecordOf`, never assumed); `CANCEL` → `cancelSlashBatch` (each record `Pending` or `Disputed`),
-   * for the arbiter when one is set and the admin otherwise.
+   * `SlashUpheld` or `slashRecordOf`, never assumed); `CANCEL` →
+   * `cancelSlashBatch` (each record `Pending` or `Disputed`), for the arbiter.
+   * Both need the arbiter set.
    */
   async buildRulingBatch(request: {
     readonly chainId: ChainId;
@@ -551,14 +554,11 @@ export class EvmSlashExecutor
   }): Promise<SlashBatchBuild> {
     const { chainId, ruling } = request;
     const terms = await this.chainTerms(chainId);
-    if (!terms.upgraded) {
-      throw ChainErrors.disputeUpgradeAbsent({
+    if (!terms.arbiter) {
+      throw ChainErrors.arbiterNotSet({
         chainId,
-        what: ruling === 'UPHOLD' ? 'upholdSlash' : 'cancelSlashBatch',
+        what: ruling === 'UPHOLD' ? 'upholdSlashBatch' : 'cancelSlashBatch',
       });
-    }
-    if (ruling === 'UPHOLD' && !terms.arbiter) {
-      throw ChainErrors.arbiterNotSet({ chainId, what: 'upholdSlashBatch' });
     }
     const ids = this.batchIds(request.requestIds);
     const arbiter = terms.arbiter;
@@ -602,13 +602,7 @@ export class EvmSlashExecutor
       call:
         ruling === 'UPHOLD'
           ? this.stakeCall(chainId, 'upholdSlashBatch', ids, arbiter as string, 'ARBITER')
-          : this.stakeCall(
-              chainId,
-              'cancelSlashBatch',
-              ids,
-              arbiter ?? terms.admin,
-              arbiter ? 'ARBITER' : 'ADMIN',
-            ),
+          : this.stakeCall(chainId, 'cancelSlashBatch', ids, arbiter as string, 'ARBITER'),
       refusals: [],
     };
   }
@@ -628,9 +622,6 @@ export class EvmSlashExecutor
       throw ChainErrors.payloadMalformed({ reason: 'the zero address cannot be blocked' });
     }
     const terms = await this.chainTerms(chainId);
-    if (!terms.upgraded) {
-      throw ChainErrors.disputeUpgradeAbsent({ chainId, what: 'the on-chain blocklist' });
-    }
     if (!terms.arbiter) throw ChainErrors.arbiterNotSet({ chainId, what: 'setBlocked' });
     const config = this.deployment(chainId).config;
     const already = (await this.client(chainId).readContract({
@@ -654,11 +645,6 @@ export class EvmSlashExecutor
       functionName: 'setBlocked',
       requestIds: [],
     };
-  }
-
-  private async assertUpgraded(chainId: ChainId, what: string): Promise<void> {
-    const terms = await readConfigTerms(this.client(chainId), this.deployment(chainId).config);
-    if (!terms.upgraded) throw ChainErrors.disputeUpgradeAbsent({ chainId, what });
   }
 
   /** 1 to `MAX_SLASH_BATCH` well-formed ids, lower-case, in the caller's order. */

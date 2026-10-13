@@ -1,31 +1,20 @@
 import { getAddress } from 'viem';
 
 import { X402_CONFIG_ABI } from './abi/x402.abi';
-import { EVM_CONSTANTS } from './evm.constants';
-import { isRevert } from './evm-voucher-authority';
 
 /**
- * What `X402Config` says about the dispute upgrade (assay-evm D-19), read live.
+ * What `X402Config` says about disputes, the pause and the slash delay
+ * (assay-evm D-19), read live.
  *
- * ## How an old Config is told apart
- *
- * The upgrade is not deployed everywhere at once, and the backend must serve
- * both sides of it with no flag to flip. `slashDelaySeconds()` is the probe:
- * a Config that predates the upgrade has no such function and reverts with
- * empty data, which is exactly what `isRevert` recognises. A TRANSPORT error
- * (the node did not answer) is rethrown, never read as "old": mistaking an
- * outage for an old Config would quietly switch off the blocklist checks.
- *
- * On an old Config the delay is {@link EVM_CONSTANTS.PRE_DISPUTE_SLASH_DELAY_SECONDS}
- * — that contract's own compile-time constant, not an assumption — there is no
- * arbiter and no blocklist, and the pause closes only deposits, redemption and
- * the slash doors.
+ * The backend assumes the upgraded contracts (owner decision): there is no
+ * "old Config" branch. Every read failure is a plain RPC error and is thrown,
+ * so the caller retries; nothing is ever assumed (in particular not a 72 h
+ * delay). The one compatibility check left is {@link checkConfigUpgraded}, a
+ * boot-time log line.
  */
 export interface EvmConfigTerms {
-  /** True when the Config carries the dispute upgrade's surface. */
-  readonly upgraded: boolean;
   readonly paused: boolean;
-  /** `X402Config.arbiter()`, or `null` for none (and on an old Config). */
+  /** `X402Config.arbiter()`, or `null` when it reads as the zero address. */
   readonly arbiter: `0x${string}` | null;
   /** The delay a proposal made NOW freezes into its `executableAt`, in seconds. */
   readonly slashDelaySeconds: number;
@@ -44,29 +33,47 @@ export async function readConfigTerms(
   client: EvmConfigTermsClient,
   config: `0x${string}`,
 ): Promise<EvmConfigTerms> {
-  const read = (functionName: string, args: readonly unknown[] = []) =>
-    client.readContract({ address: config, abi: X402_CONFIG_ABI, functionName, args });
+  const read = (functionName: string) =>
+    client.readContract({ address: config, abi: X402_CONFIG_ABI, functionName, args: [] });
 
-  const [paused, delay] = await Promise.all([
+  const [paused, delay, arbiter] = await Promise.all([
     read('paused') as Promise<boolean>,
-    (read('slashDelaySeconds') as Promise<bigint>).catch((error: unknown) => {
-      if (isRevert(error)) return null;
-      throw error;
-    }),
+    read('slashDelaySeconds') as Promise<bigint>,
+    read('arbiter') as Promise<`0x${string}`>,
   ]);
-  if (delay === null) {
-    return {
-      upgraded: false,
-      paused: Boolean(paused),
-      arbiter: null,
-      slashDelaySeconds: EVM_CONSTANTS.PRE_DISPUTE_SLASH_DELAY_SECONDS,
-    };
-  }
-  const arbiter = (await read('arbiter')) as `0x${string}`;
   return {
-    upgraded: true,
     paused: Boolean(paused),
     arbiter: !arbiter || BigInt(arbiter) === 0n ? null : getAddress(arbiter),
     slashDelaySeconds: Number(delay),
   };
+}
+
+/**
+ * The one boot-time sanity check: a Config that does not answer `arbiter()`
+ * has not been upgraded, and nothing about disputes, the on-chain blocklist or
+ * the settable delay will work against it. Logged, never thrown — the process
+ * still serves everything else.
+ */
+export async function checkConfigUpgraded(
+  client: EvmConfigTermsClient,
+  config: `0x${string}`,
+  chainId: string,
+  log: { error(message: string): void },
+): Promise<boolean> {
+  try {
+    await client.readContract({
+      address: config,
+      abi: X402_CONFIG_ABI,
+      functionName: 'arbiter',
+      args: [],
+    });
+    return true;
+  } catch (error) {
+    log.error(
+      `contracts not upgraded: X402Config ${config} on ${chainId} does not answer arbiter(); ` +
+        `the backend requires the dispute upgrade (assay-evm D-19) ` +
+        `(${error instanceof Error ? error.message : String(error)})`,
+    );
+    return false;
+  }
 }

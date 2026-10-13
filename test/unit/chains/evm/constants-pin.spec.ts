@@ -58,7 +58,6 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
     ['MAX_SIGNATURE_LIFETIME_SECONDS', 3_600],
     ['MAX_SLASH_BATCH', 64],
     ['DISPUTE_TIMEOUT_SECONDS', 30 * 86_400],
-    ['PRE_DISPUTE_SLASH_DELAY_SECONDS', 72 * 3_600],
   ])('%s is %i', (name, value) => {
     expect(EVM_CONSTANTS[name as keyof typeof EVM_CONSTANTS]).toBe(value);
   });
@@ -77,7 +76,6 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
       'MAX_SIGNATURE_LIFETIME_SECONDS',
       'MAX_SLASH_BATCH',
       'MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS',
-      'PRE_DISPUTE_SLASH_DELAY_SECONDS',
       'REDEEM_GRACE_SECONDS',
       'SLASH_WINDOW_SECONDS',
       'VOUCHER_MAX_LIFETIME_SECONDS',
