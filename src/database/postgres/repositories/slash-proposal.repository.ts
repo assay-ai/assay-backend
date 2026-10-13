@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, SelectQueryBuilder } from 'typeorm';
+import { DataSource, EntityManager, SelectQueryBuilder } from 'typeorm';
 
 import { SlashProposalEntity } from '../entities/slash-proposal.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -194,8 +194,12 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     id: string,
     reversedAt: Date,
     reversalSignature: string,
+    // The override's transaction (review M-3): the status and its register
+    // entry commit or roll back together.
+    manager: EntityManager = this.manager,
   ): Promise<number> {
-    const result = await this.createQueryBuilder('proposal')
+    const result = await manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
       .update()
       .set({ status: 'REVERSED', reversedAt, reversalSignature })
       .where('organization_id = :organizationId', { organizationId })

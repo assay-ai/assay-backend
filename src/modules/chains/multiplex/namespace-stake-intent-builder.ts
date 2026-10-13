@@ -3,6 +3,7 @@ import {
   StakeIntentBuilderPort,
   StakeIntentPreflight,
   StakeIntentRequest,
+  ConfirmedDepositExpectation,
 } from '@modules/provider/ports/stake-intent-builder.port';
 
 import { AccountId, ChainId } from '../ports/caip.types';
@@ -35,8 +36,16 @@ export class NamespaceStakeIntentBuilder implements StakeIntentBuilderPort {
     return implementationFor(this.byNamespace, request.account).preflight(request);
   }
 
-  async confirmedDeposit(signature: string, account: AccountId): Promise<Money | null> {
-    return implementationFor(this.byNamespace, account).confirmedDeposit(signature, account);
+  async confirmedDeposit(
+    signature: string,
+    account: AccountId,
+    expected: ConfirmedDepositExpectation,
+  ): Promise<Money | null> {
+    return implementationFor(this.byNamespace, account).confirmedDeposit(
+      signature,
+      account,
+      expected,
+    );
   }
 
   async buildIntent(

@@ -30,6 +30,7 @@ export enum SlashErrorCode {
   SLASH_CHAIN_UNAVAILABLE = 'SLASH_CHAIN_UNAVAILABLE',
   /** The signature offered as a compensation does not show the deposit it claims. */
   SLASH_COMPENSATION_NOT_CONFIRMED = 'SLASH_COMPENSATION_NOT_CONFIRMED',
+  SLASH_COMPENSATION_ALREADY_USED = 'SLASH_COMPENSATION_ALREADY_USED',
   /** A pro-rata window case found no agent with a priced DATA_FAIL call to compensate. */
   SLASH_NO_HARMED_AGENTS = 'SLASH_NO_HARMED_AGENTS',
   /** A case whose beneficiary cannot be named on this chain (e.g. the EVM vault). */
@@ -297,11 +298,20 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     code: SlashErrorCode.SLASH_COMPENSATION_NOT_CONFIRMED,
     statusCode: 409,
     message: (context?: Record<string, any>) =>
-      `That transaction does not show a confirmed deposit into this provider's stake for at ` +
+      `That transaction does not show a confirmed deposit by the settlement treasury into this ` +
+      `provider's stake, made after the slash executed, for at ` +
       `least ${String(context?.owed ?? 'the amount taken')}` +
       `${context?.deposited ? ` — it deposited ${String(context.deposited)}` : ''}` +
       `${context?.signature ? ` (${String(context.signature)})` : ''}` +
       `. Nothing on the case was changed.`,
+  },
+  /** One deposit compensates one case (review M-3, `uq_slash_proposals_reversal_signature`). */
+  compensationAlreadyUsed: {
+    code: SlashErrorCode.SLASH_COMPENSATION_ALREADY_USED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `That deposit${context?.signature ? ` (${String(context.signature)})` : ''} already ` +
+      `compensates another case. One deposit compensates one case. Nothing on this case was changed.`,
   },
   chainUnavailable: {
     code: SlashErrorCode.SLASH_CHAIN_UNAVAILABLE,
