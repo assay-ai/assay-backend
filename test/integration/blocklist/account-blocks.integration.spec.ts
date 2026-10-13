@@ -22,6 +22,7 @@ import { OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { OperatorAccountBlockService } from '@modules/operator/services/operator-account-block.service';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 import { ProviderSlashRequestsController } from '@modules/slash/controllers/provider-slash-requests.controller';
+import { SlashDisputeIntentService } from '@modules/slash/services/slash-dispute-intent.service';
 import { SlashRequestLookupService } from '@modules/slash/services/slash-request-lookup.service';
 import { SessionAuthGuard } from '@shared/auth';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
@@ -419,6 +420,23 @@ describe('account blocks, against a real database and Redis', () => {
             new SlashProposalPartRepository(dataSource),
           ),
         },
+        // The dispute intent (D-19): a stand-in that builds, so the route's
+        // blocklist marking is what is under test.
+        {
+          provide: SlashDisputeIntentService,
+          useValue: {
+            providerDispute: async (_org: string, chainId: string, requestIds: string[]) => ({
+              chainId,
+              to: '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c',
+              data: '0x',
+              value: '0',
+              signer: '0xA271A3407D3302f4b4Fbe469b9188487cedd7d45',
+              signerRole: 'PROVIDER',
+              functionName: 'disputeSlashBatch',
+              requestIds,
+            }),
+          },
+        },
       ],
     }).compile();
     const app = moduleRef.createNestApplication();
@@ -457,6 +475,14 @@ describe('account blocks, against a real database and Redis', () => {
       // Blocked person: the read-only POST answers, the ordinary write is refused.
       const read = await lookup('person');
       expect(read.status).toBe(200);
+      // …and so does the on-chain dispute intent: the chain lets a blocked
+      // provider dispute, and building a transaction writes nothing here.
+      const dispute = await request(app.getHttpServer())
+        .post('/providers/me/slash-requests/dispute-intent')
+        .set('Authorization', 'Bearer person')
+        .send({ chainId: 'eip155:46630', requestIds: [`0x${'ab'.repeat(32)}`] });
+      expect(dispute.status).toBe(200);
+      expect(JSON.stringify(dispute.body)).toContain('disputeSlashBatch');
       expect(JSON.stringify(read.body)).toContain('matches');
       const refused = await unmarked('person');
       expect(refused.status).toBe(403);

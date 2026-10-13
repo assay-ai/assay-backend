@@ -145,3 +145,35 @@ Then: register a fresh verifier key (`yarn verifier:registry`), rotate the datab
 credentials if the cause is not yet known, check the stored parts of every open case against the
 chain before unpausing, and write up the incident. A record the platform did plan never raises these
 alerts, so a false positive points at a bug in the watcher or in the part rows, not at noise.
+
+## The EVM dispute upgrade (assay-evm D-19)
+
+The backend runs against both sides of the upgrade with no flag. It probes
+`X402Config.slashDelaySeconds()`: a revert means the Config predates the
+upgrade (no arbiter, no on-chain blocklist, the old 72 h delay, and the pause
+closes only deposits, redemption and the slash doors).
+
+- **Pause and blocklist cache.** `EvmChainStateIndexer` (scheduler, every
+  minute) indexes `PauseToggled` / `BlockedSet` into `evm_chain_states` and
+  `evm_blocked_addresses`, and every `EVM_CHAIN_STATE_RECONCILE_MS` re-reads
+  `paused()` and `blocked()` live. `GET /operator/health` → `chainState[]`
+  shows each chain's flag, blocked count and `lagSeconds`; `stale: true` (more
+  than `EVM_CHAIN_STATE_MAX_LAG_MS` behind) also logs a WARN and raises
+  `evm_chain_state_lagging`. A stale cache never refuses on its own: every
+  refusal is confirmed with a live read. When deploying after the upgrade,
+  set `EVM_CHAIN_STATE_FROM_BLOCK` to the upgrade's block so no `BlockedSet`
+  is missed (the reconcile only re-checks addresses it has seen).
+- **CRITICAL `evm_config_lever_pulled`** on `ArbiterSet`, `SlashDelaySet` or
+  `VerifierRegistered`: confirm with the admin that it was intended; if not,
+  treat the admin key as stolen (owner `setAdmin`, then revoke).
+  **WARN `evm_arbiter_blocked_address`**: the arbiter blocked an address;
+  confirm with the arbiter.
+- **Disputes.** A provider's `disputeSlash` shows on the case as
+  `chainStatus: DISPUTED` and moves a `PROPOSED` case into review. The arbiter
+  rules from the operator console's arbiter page (`/operator/arbiter/*`): the
+  backend builds the unsigned `upholdSlashBatch` / `cancelSlashBatch` /
+  `setBlocked`, the arbiter's wallet signs. An unruled dispute is expired by
+  the backend at `disputedAt + 30 d`.
+- **On the upgrade itself**, update `EVM_DEPLOYMENTS[...].escrowImplementation`
+  in the same change: the vault-control check stops the reconciler on an
+  implementation nobody recorded.
