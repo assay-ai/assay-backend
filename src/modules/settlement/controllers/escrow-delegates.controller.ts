@@ -8,6 +8,7 @@ import {
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { AuditLogWriter, auditActorOf } from '@shared/audit';
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 
 import {
@@ -49,7 +50,10 @@ import {
 @ApiExtraModels(...UNSIGNED_CHAIN_TRANSACTION_EXTRA_MODELS)
 @Controller('escrow/delegates')
 export class EscrowDelegatesController {
-  constructor(private readonly delegation: EscrowDelegationService) {}
+  constructor(
+    private readonly delegation: EscrowDelegationService,
+    private readonly audit: AuditLogWriter,
+  ) {}
 
   /** `GET /escrow/delegates` — the payer's standing delegates, read from the chain. */
   @Get()
@@ -128,6 +132,12 @@ export class EscrowDelegatesController {
       },
       body.acknowledgeUnsettled === true,
     );
+    await this.recordDelegateChange(session, 'signer.authorized', body.delegate, {
+      maxVoucherAmount: body.maxVoucherAmount,
+      maxPerWindow: body.maxPerWindow,
+      validUntil: new Date(Number(body.validUntil) * 1000).toISOString(),
+      transactionHash: result.submission.transactionHash,
+    });
     return toRelayedDto(EscrowDelegationKind.AUTHORIZE_DELEGATE, session.agentAccount, result);
   }
 
@@ -176,7 +186,33 @@ export class EscrowDelegatesController {
         signature: body.signature,
       },
     );
+    await this.recordDelegateChange(session, 'signer.revoked', body.delegate, {
+      revoked: true,
+      transactionHash: result.submission.transactionHash,
+    });
     return toRelayedDto(EscrowDelegationKind.REVOKE_DELEGATE, session.agentAccount, result);
+  }
+
+  /**
+   * The relayed transaction has landed and there is no database transaction to
+   * join, so the entry is written after the fact; a failure is logged, not
+   * thrown. The payer's signature is never part of it.
+   */
+  private recordDelegateChange(
+    session: McpSession,
+    action: 'signer.authorized' | 'signer.revoked',
+    delegate: string,
+    after: Record<string, unknown>,
+  ): Promise<void> {
+    return this.audit.recordAfterCommit({
+      organizationId: session.organizationId,
+      actor: auditActorOf(session),
+      action,
+      resourceType: 'escrow_delegate',
+      resourceId: delegateOn(session.agentAccount, delegate),
+      before: null,
+      after,
+    });
   }
 }
 

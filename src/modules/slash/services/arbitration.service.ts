@@ -47,6 +47,22 @@ export interface DecideInput {
 }
 
 /**
+ * The statuses a case may be claimed in: an objection is on file and nothing
+ * has resolved it. The console offers the action in exactly these.
+ */
+const CLAIMABLE_STATUSES: readonly SlashProposalStatus[] = Object.freeze([
+  SlashProposalStatus.DISPUTED,
+  SlashProposalStatus.UNDER_REVIEW,
+  SlashProposalStatus.AWAITING_SECOND,
+]);
+
+/**
+ * A recalculated penalty as it must arrive: minor units, digits only, positive,
+ * no leading zero. The same pattern `DecideCaseBodyDto` enforces.
+ */
+const RECALCULATED_AMOUNT_PATTERN = /^[1-9]\d{0,39}$/;
+
+/**
  * The human half.
  *
  * Everything here happens because an operator clicked something, and every
@@ -206,6 +222,17 @@ export class ArbitrationService {
    * nobody's state but the queue's — but the adjudication queue renders an
    * unowned case in red precisely because ownership is the thing that decides
    * whether it gets worked, so the timeline records it.
+   *
+   * ## Only while the case is open
+   *
+   * {@link CLAIMABLE_STATUSES}, checked before anything is written. `DISPUTED`
+   * moves to `UNDER_REVIEW` and its objection with it; in `UNDER_REVIEW` and
+   * `AWAITING_SECOND` a claim changes the owner and nothing else — in
+   * particular not the dispute's `state`, which carries a pending decision
+   * while a second signature is outstanding. Every other status is refused:
+   * with no register entry behind this route, an unguarded claim on a resolved
+   * case reopened its objection and appended to a closed timeline with nothing
+   * on record to say who had done it or why.
    */
   async claim(
     operator: OperatorSession,
@@ -213,9 +240,22 @@ export class ArbitrationService {
     proposalId: string,
   ): Promise<SlashProposalEntity> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
-    const now = new Date();
+    const from = proposal.status as SlashProposalStatus;
+    const refusal = () =>
+      SlashErrors.actionNotAllowedInStatus({
+        action: 'claim the case',
+        status: proposal.status,
+        allowed: 'DISPUTED, UNDER_REVIEW or AWAITING_SECOND',
+      });
 
-    if (proposal.status === SlashProposalStatus.DISPUTED) {
+    if (!CLAIMABLE_STATUSES.includes(from)) {
+      throw refusal();
+    }
+
+    const now = new Date();
+    const opensReview = from === SlashProposalStatus.DISPUTED;
+
+    if (opensReview) {
       const affected = await this.proposals.transitionIfIn(
         organizationId,
         proposalId,
@@ -223,6 +263,7 @@ export class ArbitrationService {
         { status: SlashProposalStatus.UNDER_REVIEW },
       );
       if (affected === 0) {
+        // Lost a race: the case left `DISPUTED` after it was read.
         throw SlashErrors.invalidTransition({
           from: proposal.status,
           to: SlashProposalStatus.UNDER_REVIEW,
@@ -234,7 +275,7 @@ export class ArbitrationService {
       await this.disputes.update(
         { organizationId, id: proposal.disputeId },
         {
-          state: 'UNDER_REVIEW',
+          ...(opensReview ? { state: 'UNDER_REVIEW' } : {}),
           assignedOperatorId: operator.operatorId,
           assignedAt: now,
         },
@@ -792,7 +833,7 @@ export class ArbitrationService {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
 
     if (proposal.status !== SlashProposalStatus.PROPOSED || !proposal.respondByAt) {
-      throw SlashErrors.notDisputable({ status: proposal.status });
+      throw this.extensionNotPossible(proposal);
     }
 
     const extendedTo = new Date(proposal.respondByAt.getTime() + additionalHours * 60 * 60 * 1000);
@@ -846,16 +887,13 @@ export class ArbitrationService {
         if (affected === 0) {
           // Re-read rather than assume. Losing this CAS has three causes with
           // three different remedies — the case moved on, a propose landed, or
-          // one is in flight — and telling an operator "not disputable" when the
+          // one is in flight — and telling an operator "wrong status" when the
           // truth is "retry in a minute" is how a support ticket gets opened
           // about a system that was working.
           const current = await queryRunner.manager.findOneOrFail(SlashProposalEntity, {
             where: { organizationId, id: proposalId },
           });
-          throw (
-            this.extensionRefusal(current, executionAt) ??
-            SlashErrors.notDisputable({ status: current.status })
-          );
+          throw this.extensionRefusal(current, executionAt) ?? this.extensionNotPossible(current);
         }
 
         if (proposal.disputeId) {
@@ -978,7 +1016,8 @@ export class ArbitrationService {
   /**
    * The penalty a decision binds to.
    *
-   * Only `UPHELD_RECALCULATED` may change it, and only downwards. Raising it on
+   * Only `UPHELD_RECALCULATED` may change it, to a positive amount no greater
+   * than the original — equal is allowed, matching the console. Raising it on
    * review would mean the number the provider had a chance to answer was not
    * the number that happens to them — which is the process this arbitration
    * exists to replace, wearing our own uniform.
@@ -988,11 +1027,11 @@ export class ArbitrationService {
       return proposal.penaltyAmount;
     }
     const revised = input.recalculatedAmount;
-    if (revised === null || revised === undefined) {
-      throw SlashErrors.invalidReasonCode({
-        outcome: input.outcome,
-        code: 'a recalculated amount is required',
-      });
+    // Shape first, and before `BigInt()`: `BigInt('')` is `0n`, `BigInt('-5')`
+    // is negative, and both are "not above the original". `BigInt('284.7')`
+    // throws, which reached the operator as a 500.
+    if (typeof revised !== 'string' || !RECALCULATED_AMOUNT_PATTERN.test(revised)) {
+      throw SlashErrors.recalculatedAmountInvalid({ original: proposal.penaltyAmount });
     }
     if (BigInt(revised) > BigInt(proposal.penaltyAmount)) {
       throw SlashErrors.recalculationExceedsOriginal({ original: proposal.penaltyAmount });
@@ -1049,7 +1088,7 @@ export class ArbitrationService {
    */
   private extensionRefusal(proposal: SlashProposalEntity, executionAt: Date) {
     if (proposal.status !== SlashProposalStatus.PROPOSED || !proposal.respondByAt) {
-      return SlashErrors.notDisputable({ status: proposal.status });
+      return this.extensionNotPossible(proposal);
     }
     if (proposal.chainStatus === ChainProposalStatus.PROPOSING) {
       return SlashErrors.extensionWhileProposing({ proposalId: proposal.id });
@@ -1065,6 +1104,15 @@ export class ArbitrationService {
       });
     }
     return null;
+  }
+
+  /** The wrong-status refusal of `S-8`: the deadline only exists to extend in `PROPOSED`. */
+  private extensionNotPossible(proposal: SlashProposalEntity) {
+    return SlashErrors.actionNotAllowedInStatus({
+      action: 'extend the deadline',
+      status: proposal.status,
+      allowed: 'PROPOSED',
+    });
   }
 
   private async writeDisputeDecision(

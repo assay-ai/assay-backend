@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { ChainsModule } from '@modules/chains/chains.module';
+import { AuditLogModule } from '@shared/audit';
 
 import { AgentCredentialsService } from './services/agent-credentials.service';
 import { AgentDelegateService } from './services/agent-delegate.service';
@@ -21,7 +22,7 @@ import { NotificationsService } from './services/notifications.service';
  * pattern as `PaymentModule`.
  */
 @Module({
-  imports: [ChainsModule],
+  imports: [ChainsModule, AuditLogModule],
   providers: [
     NotificationsService,
     AuditLogService,

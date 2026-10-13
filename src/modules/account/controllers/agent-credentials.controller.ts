@@ -13,6 +13,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
+import { auditActorOf } from '@shared/audit';
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 
 import { AgentIdParamDto } from '../dto/agent-id-param.dto';
@@ -31,10 +32,10 @@ import { AgentCredentialsService } from '../services/agent-credentials.service';
  * Machine tokens for an agent.
  *
  * `organizationId` comes from `@CurrentSession()` and nowhere else — see
- * `SessionAuthGuard`. `revokedBy` on `DELETE` is the caller's own credential
- * id: `McpSession` carries no separate human-user identity yet, so this is
- * the closest honest answer to "who did this" until that identity model
- * exists — recorded here rather than silently left blank.
+ * `SessionAuthGuard`. The actor of a create or revoke (and `revokedBy`) is
+ * `auditActorOf(session)` — the caller's own credential id: `McpSession`
+ * carries no separate human-user identity yet, so this is the closest honest
+ * answer to "who did this" until that identity model exists.
  */
 @ApiTags('AgentCredentials')
 @ApiBearerAuth()
@@ -69,7 +70,12 @@ export class AgentCredentialsController {
     @Param() params: AgentIdParamDto,
     @Body() body: CreateAgentCredentialBodyDto,
   ): Promise<CreateAgentCredentialResponseDto> {
-    return this.credentials.create(session.organizationId, params.agentId, body);
+    return this.credentials.create(
+      session.organizationId,
+      params.agentId,
+      body,
+      auditActorOf(session),
+    );
   }
 
   @Delete(':id')
@@ -89,7 +95,7 @@ export class AgentCredentialsController {
       session.organizationId,
       params.agentId,
       params.id,
-      session.credentialId,
+      auditActorOf(session),
     );
   }
 }

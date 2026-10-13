@@ -1,10 +1,16 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable } from '@nestjs/common';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
+
+import { NotificationChannelEntity } from '@database/postgres/entities/notification-channel.entity';
+import { NotificationPreferenceEntity } from '@database/postgres/entities/notification-preference.entity';
 
 import { NotificationChannelRepository } from '@database/postgres/repositories/notification-channel.repository';
 import { NotificationDeliveryRepository } from '@database/postgres/repositories/notification-delivery.repository';
 import { NotificationPreferenceRepository } from '@database/postgres/repositories/notification-preference.repository';
 import { NotificationRepository } from '@database/postgres/repositories/notification.repository';
+import { AuditActor, AuditLogWriter, changedFields } from '@shared/audit';
 
 import { NOTIFICATION_CATALOGUE } from '../constants/notification-catalogue';
 import { NotificationChannelDto } from '../dto/notification-channel.dto';
@@ -21,6 +27,11 @@ import { NotificationChannel, NotificationEvent } from '../ports/notification.po
  * `notification_preferences` — everything
  * `NotificationService.notify` reads at fan-out time, seen and edited by an
  * organization.
+ *
+ * A channel or preference change appends an `audit_log_entries` row in the
+ * same transaction (`notification_channel.created` / `.updated`,
+ * `notification_preference.updated`). A request that changes nothing records
+ * nothing.
  */
 @Injectable()
 export class NotificationSettingsService {
@@ -29,6 +40,8 @@ export class NotificationSettingsService {
     private readonly preferences: NotificationPreferenceRepository,
     private readonly notifications: NotificationRepository,
     private readonly deliveries: NotificationDeliveryRepository,
+    @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    private readonly audit: AuditLogWriter,
   ) {}
 
   async listChannels(organizationId: string): Promise<NotificationChannelDto[]> {
@@ -54,6 +67,7 @@ export class NotificationSettingsService {
     channel: NotificationChannel,
     destination: string | null | undefined,
     enabled: boolean,
+    actor: AuditActor,
   ): Promise<NotificationChannelDto> {
     const existing = (await this.channels.findForOrganization(organizationId)).find(
       (row) => row.channel === channel,
@@ -71,10 +85,27 @@ export class NotificationSettingsService {
       // verified_at` is a re-verify."
       const nextVerifiedAt = nextDestination !== existing.destination ? null : existing.verifiedAt;
 
-      await this.channels.update(
-        { organizationId, id: existing.id },
-        { destination: nextDestination, enabled, verifiedAt: nextVerifiedAt },
+      const diff = changedFields(
+        channelAudit(channel, existing.destination, existing.enabled, false),
+        channelAudit(channel, nextDestination, enabled, nextDestination !== existing.destination),
       );
+      await this.dataSource.transaction(async (manager) => {
+        await manager.update(
+          NotificationChannelEntity,
+          { organizationId, id: existing.id },
+          { destination: nextDestination, enabled, verifiedAt: nextVerifiedAt },
+        );
+        if (Object.keys(diff.after).length === 0) return;
+        await this.audit.record(manager, {
+          organizationId,
+          actor,
+          action: 'notification_channel.updated',
+          resourceType: 'notification_channel',
+          resourceId: existing.id,
+          before: { channel, ...diff.before },
+          after: { channel, ...diff.after },
+        });
+      });
 
       return {
         id: existing.id,
@@ -88,13 +119,24 @@ export class NotificationSettingsService {
 
     const id = randomUUID();
     const createdAt = new Date();
-    await this.channels.insert({
-      id,
-      organizationId,
-      channel,
-      destination: provided as string,
-      enabled,
-      verifiedAt: null,
+    await this.dataSource.transaction(async (manager) => {
+      await manager.insert(NotificationChannelEntity, {
+        id,
+        organizationId,
+        channel,
+        destination: provided as string,
+        enabled,
+        verifiedAt: null,
+      });
+      await this.audit.record(manager, {
+        organizationId,
+        actor,
+        action: 'notification_channel.created',
+        resourceType: 'notification_channel',
+        resourceId: id,
+        before: null,
+        after: { channel, ...channelAudit(channel, provided as string, enabled, true) },
+      });
     });
 
     return { id, channel, destination: provided as string, enabled, verifiedAt: null, createdAt };
@@ -117,10 +159,14 @@ export class NotificationSettingsService {
    * `nonSuppressible` event — a partial save that silently dropped just the
    * dangerous toggle would be worse than refusing outright, since the caller
    * would see the other toggles land and reasonably assume this one did too.
+   *
+   * One transaction for the batch and its audit entries; an item that already
+   * holds the requested value is left alone and records nothing.
    */
   async upsertPreferences(
     organizationId: string,
     items: readonly UpsertNotificationPreferenceItemDto[],
+    actor: AuditActor,
   ): Promise<NotificationPreferenceDto[]> {
     for (const item of items) {
       const definition = NOTIFICATION_CATALOGUE[item.event];
@@ -129,28 +175,42 @@ export class NotificationSettingsService {
       }
     }
 
-    for (const item of items) {
-      const existing = await this.preferences.findOneBy({
-        organizationId,
-        event: item.event,
-        channel: item.channel,
-      });
-
-      if (existing) {
-        await this.preferences.update(
-          { organizationId, id: existing.id },
-          { enabled: item.enabled },
-        );
-      } else {
-        await this.preferences.insert({
-          id: randomUUID(),
+    await this.dataSource.transaction(async (manager) => {
+      for (const item of items) {
+        const existing = await manager.findOneBy(NotificationPreferenceEntity, {
           organizationId,
           event: item.event,
           channel: item.channel,
-          enabled: item.enabled,
+        });
+        if (existing?.enabled === item.enabled) continue;
+
+        const id = existing?.id ?? randomUUID();
+        if (existing) {
+          await manager.update(
+            NotificationPreferenceEntity,
+            { organizationId, id },
+            { enabled: item.enabled },
+          );
+        } else {
+          await manager.insert(NotificationPreferenceEntity, {
+            id,
+            organizationId,
+            event: item.event,
+            channel: item.channel,
+            enabled: item.enabled,
+          });
+        }
+        await this.audit.record(manager, {
+          organizationId,
+          actor,
+          action: 'notification_preference.updated',
+          resourceType: 'notification_preference',
+          resourceId: id,
+          before: existing ? { enabled: existing.enabled } : null,
+          after: { event: item.event, channel: item.channel, enabled: item.enabled },
         });
       }
-    }
+    });
 
     return this.listPreferences(organizationId);
   }
@@ -178,4 +238,20 @@ export class NotificationSettingsService {
       createdAt: row.createdAt,
     }));
   }
+}
+
+/**
+ * What an audit entry may say about a channel. Only an EMAIL destination is
+ * recorded: a Slack, webhook or push destination is a URL or device token that
+ * is itself a credential, so for those the entry says only that it changed.
+ */
+function channelAudit(
+  channel: NotificationChannel,
+  destination: string | null,
+  enabled: boolean,
+  destinationChanged: boolean,
+): Record<string, unknown> {
+  return channel === NotificationChannel.EMAIL
+    ? { destination, enabled }
+    : { ...(destinationChanged ? { destinationChanged: true } : {}), enabled };
 }

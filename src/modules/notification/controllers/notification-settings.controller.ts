@@ -2,6 +2,7 @@ import { Body, Controller, Get, Param, Put, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { auditActorOf } from '@shared/audit';
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 
 import {
@@ -70,6 +71,7 @@ export class NotificationSettingsController {
       params.channel,
       body.destination,
       body.enabled,
+      auditActorOf(session),
     );
   }
 
@@ -91,7 +93,11 @@ export class NotificationSettingsController {
     @CurrentSession() session: McpSession,
     @Body() body: UpsertNotificationPreferencesBodyDto,
   ): Promise<NotificationPreferenceDto[]> {
-    return this.settings.upsertPreferences(session.organizationId, body.preferences);
+    return this.settings.upsertPreferences(
+      session.organizationId,
+      body.preferences,
+      auditActorOf(session),
+    );
   }
 
   @Get('notifications/:id/deliveries')
