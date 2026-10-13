@@ -6,6 +6,7 @@ import { ChainsApiModule } from '@modules/chains/chains-api.module';
 import { ChainsController } from '@modules/chains/controllers/chains.controller';
 import { ENABLED_CHAINS_ENV } from '@modules/chains/enabled-chains';
 import { CHAIN_IDS, toChainId } from '@modules/chains/ports/caip.types';
+import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
 import { ALERT_PORT } from '@shared/alerting';
 
@@ -62,8 +63,12 @@ async function compileWith<T>(value: string, use: (moduleRef: TestingModule) => 
       provide: EvmGasGrantRepository,
       useValue: { hasGranted: async () => false, grantedWeiSince: async () => 0n },
     },
+    {
+      provide: EvmChainStateRepository,
+      useValue: { findAllStates: async () => [], findBlocked: async () => [] },
+    },
   ],
-  exports: [ALERT_PORT, EvmGasGrantRepository],
+  exports: [ALERT_PORT, EvmGasGrantRepository, EvmChainStateRepository],
 })
 class EvmGlobalsStubModule {}
 

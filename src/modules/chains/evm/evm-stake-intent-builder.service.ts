@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+
+import { ChainDoor, ChainStateGatePort } from '../ports/chain-state-gate.port';
 import { encodeFunctionData, getAddress, isAddress, parseEventLogs } from 'viem';
 
 import {
@@ -108,6 +110,12 @@ export class EvmStakeIntentBuilder implements StakeIntentBuilderPort {
   constructor(
     private readonly clients: ReadonlyMap<ChainId, EvmStakeIntentClient>,
     private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
+    /**
+     * The pause/blocklist gate (D-19): every stake door — deposit, unstake,
+     * withdraw — is paused and refuses a blocked provider or funder since the
+     * dispute upgrade. Optional so a composition without the cache still builds.
+     */
+    private readonly gate: ChainStateGatePort | null = null,
   ) {}
 
   /**
@@ -231,6 +239,10 @@ export class EvmStakeIntentBuilder implements StakeIntentBuilderPort {
 
     const { chainId, address: provider } = this.parse(request.account);
     const deployment = this.deployment(chainId);
+    await this.gate?.assertActive(ChainDoor.STAKE, [
+      { role: 'PROVIDER', account: request.account },
+      { role: 'FUNDER', account: request.funder ?? null },
+    ]);
     const { asset, decimals } = await this.stakeAsset(chainId);
     // Normally the provider. A treasury-funded compensation deposit is the one
     // case where they differ — see `StakeIntentRequest.funder`.

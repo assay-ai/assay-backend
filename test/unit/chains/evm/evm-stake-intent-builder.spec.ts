@@ -363,3 +363,31 @@ describe('EvmStakeIntentBuilder', () => {
     });
   });
 });
+
+describe('EvmStakeIntentBuilder — the on-chain pause and blocklist gate (D-19)', () => {
+  it('refuses every stake door the chain would refuse, naming provider and funder', async () => {
+    const seen: unknown[] = [];
+    const gate = {
+      assertActive: async (door: string, parties: unknown[]) => {
+        seen.push({ door, parties });
+        throw new Error('CHAIN_ADDRESS_BLOCKED');
+      },
+      holdReason: async () => null,
+    };
+    const builder = new EvmStakeIntentBuilder(
+      new Map([[TESTNET, client(freshChain())]]),
+      new Map([[TESTNET, DEPLOYMENT]]),
+      gate as never,
+    );
+    await expect(builder.buildIntent(request({}))).rejects.toThrow(/BLOCKED/);
+    expect(seen).toEqual([
+      {
+        door: 'STAKE',
+        parties: [
+          { role: 'PROVIDER', account: PROVIDER_ACCOUNT },
+          { role: 'FUNDER', account: null },
+        ],
+      },
+    ]);
+  });
+});

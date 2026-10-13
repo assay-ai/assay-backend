@@ -16,7 +16,13 @@ import {
 } from '@modules/provider/ports/provider-stake.port';
 import { MoneyUtil } from '@shared/utils/money.util';
 
-import { PlatformHealthDto } from '../dto/operator-console.dto';
+import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
+import { chainStateLagMs } from '@modules/chains/evm/chain-state/evm-chain-state.indexer';
+
+import { ChainStateHealthDto, PlatformHealthDto } from '../dto/operator-console.dto';
+
+/** `EVM_CHAIN_STATE_MAX_LAG_MS`, the indexer's own bound (default five minutes). */
+const CHAIN_STATE_MAX_LAG_MS = Number(process.env.EVM_CHAIN_STATE_MAX_LAG_MS ?? 5 * 60 * 1000);
 
 /** The trailing window for the false-positive rate tile. */
 const FALSE_POSITIVE_WINDOW_MS = 30 * 24 * 60 * 60 * 1000;
@@ -62,19 +68,22 @@ export class PlatformHealthService {
     private readonly providers: ProviderRepository,
     @Inject(PROVIDER_STAKE_SOURCE) private readonly stakes: ProviderStakePort,
     @Inject(ENABLED_CHAINS) private readonly enabled: readonly ChainId[],
+    private readonly chainStates: EvmChainStateRepository,
   ) {}
 
   async getHealth(): Promise<PlatformHealthDto> {
     const now = new Date();
 
-    const [intentRates, backlog, falsePositiveRate, policies, stake, disputes] = await Promise.all([
-      this.metrics.intentRateCounts(now),
-      this.metrics.verificationBacklog(now),
-      this.falsePositiveRate(now),
-      this.metrics.policyLifecycleCounts(),
-      this.stakeLocked(),
-      this.metrics.openSlashProposalCounts(now),
-    ]);
+    const [intentRates, backlog, falsePositiveRate, policies, stake, disputes, chainState] =
+      await Promise.all([
+        this.metrics.intentRateCounts(now),
+        this.metrics.verificationBacklog(now),
+        this.falsePositiveRate(now),
+        this.metrics.policyLifecycleCounts(),
+        this.stakeLocked(),
+        this.metrics.openSlashProposalCounts(now),
+        this.chainState(now),
+      ]);
 
     return {
       intentsPerMinute: intentRates.lastMinute,
@@ -89,7 +98,42 @@ export class PlatformHealthService {
       providersWithStake: stake.providersWithStake,
       openDisputes: disputes.count,
       oldestOpenDisputeAgeSeconds: disputes.oldestAgeSeconds,
+      chainState,
     };
+  }
+
+  /**
+   * The EVM chain-state cache, per chain, with the indexer's lag. A row is
+   * `stale` when the indexer never caught up or is more than
+   * `EVM_CHAIN_STATE_MAX_LAG_MS` behind; the indexer logs the same warning.
+   * Never fails the tile: an unreadable table reports no rows.
+   */
+  private async chainState(now: Date): Promise<ChainStateHealthDto[]> {
+    try {
+      const [states, blocked] = await Promise.all([
+        this.chainStates.findAllStates(),
+        this.chainStates.findBlocked(),
+      ]);
+      return states.map((state) => {
+        const lagMs = chainStateLagMs(state.caughtUpAt, now.getTime());
+        return {
+          chainId: state.chainId,
+          paused: state.paused,
+          upgraded: state.upgraded,
+          arbiter: state.arbiter,
+          slashDelaySeconds: state.slashDelaySeconds,
+          blockedCount: blocked.filter((row) => row.chainId === state.chainId).length,
+          indexedBlock: state.cursorBlock,
+          headBlock: state.headBlock,
+          lagSeconds: lagMs === null ? null : Math.round(lagMs / 1000),
+          stale: lagMs === null || lagMs > CHAIN_STATE_MAX_LAG_MS,
+          reconciledAt: state.reconciledAt?.toISOString() ?? null,
+        };
+      });
+    } catch (error) {
+      this.logger.warn(`EVM chain-state read failed for the health tile: ${String(error)}`);
+      return [];
+    }
   }
 
   /**

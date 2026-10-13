@@ -80,6 +80,9 @@ import { SlaStrikeRepository } from './repositories/sla-strike.repository';
 import { OperatorEntity } from './entities/operator.entity';
 import { AccountBlockEntity } from './entities/account-block.entity';
 import { AccountBlockRepository } from './repositories/account-block.repository';
+import { EvmBlockedAddressEntity } from './entities/evm-blocked-address.entity';
+import { EvmChainStateEntity } from './entities/evm-chain-state.entity';
+import { EvmChainStateRepository } from './repositories/evm-chain-state.repository';
 import { OperatorRepository } from './repositories/operator.repository';
 // Due process for taking money.
 import { SlashProposalEntity } from './entities/slash-proposal.entity';
@@ -150,6 +153,8 @@ const entities = [
   OrganizationEntity,
   AgentEntity,
   AccountBlockEntity,
+  EvmChainStateEntity,
+  EvmBlockedAddressEntity,
 ];
 const repositories = [
   PostRepository,
@@ -199,6 +204,7 @@ const repositories = [
   OrganizationRepository,
   AgentRepository,
   AccountBlockRepository,
+  EvmChainStateRepository,
   SlashCaseReadRepository,
   PlatformMetricsRepository,
 ];

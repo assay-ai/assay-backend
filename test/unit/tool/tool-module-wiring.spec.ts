@@ -26,6 +26,7 @@ import { PaymentIntentRepository } from '@database/postgres/repositories/payment
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { ALERT_PORT } from '@shared/alerting';
 import { ProviderStakeGraceRepository } from '@database/postgres/repositories/provider-stake-grace.repository';
+import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
@@ -88,6 +89,10 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
       provide: EvmGasGrantRepository,
       useValue: { hasGranted: async () => false, grantedWeiSince: async () => 0n },
     },
+    {
+      provide: EvmChainStateRepository,
+      useValue: { findAllStates: async () => [], findBlocked: async () => [] },
+    },
     { provide: ProviderRepository, useValue: { find: async () => [] } },
     // `BlocklistModule`, imported by `ProviderModule` and `PaymentModule`.
     { provide: AccountBlockRepository, useValue: { findActive: async () => [] } },
@@ -130,6 +135,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
     ToolBindingRepository,
     BindingVersionRepository,
     EvmGasGrantRepository,
+    EvmChainStateRepository,
     ProviderRepository,
     AccountBlockRepository,
     ProviderStakeGraceRepository,

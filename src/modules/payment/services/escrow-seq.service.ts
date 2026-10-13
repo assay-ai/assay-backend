@@ -1,4 +1,9 @@
-import { Injectable, Logger } from '@nestjs/common';
+import {
+  CHAIN_STATE_GATE,
+  ChainDoor,
+  ChainStateGatePort,
+} from '@modules/chains/ports/chain-state-gate.port';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { BuyerEscrowRepository } from '@database/postgres/repositories/buyer-escrow.repository';
 import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
@@ -53,6 +58,11 @@ export class EscrowSeqService {
     private readonly escrows: BuyerEscrowRepository,
     private readonly cache: CacheService,
     private readonly blocklist: AccountBlocklistService,
+    // The ON-CHAIN pause and blocklist (D-19): no seq — the first half of a
+    // voucher — for a payer the chain would refuse at redemption.
+    @Optional()
+    @Inject(CHAIN_STATE_GATE)
+    private readonly chainState: ChainStateGatePort | null = null,
   ) {}
 
   /**
@@ -96,6 +106,7 @@ export class EscrowSeqService {
       },
       { role: BlockedRole.PAYER, kind: BlockSubjectKind.WALLET, subject: account },
     ]);
+    await this.chainState?.assertActive(ChainDoor.REDEEM, [{ role: 'PAYER', account }]);
 
     if (chainSeqHigh !== null) {
       const moved = await this.escrows.bumpNextSeqTo(organizationId, account, chainSeqHigh + 1n);

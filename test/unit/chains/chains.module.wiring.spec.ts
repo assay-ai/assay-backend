@@ -7,6 +7,7 @@ import { ChainsModule } from '@modules/chains/chains.module';
 import { ENABLED_CHAINS, ENABLED_CHAINS_ENV } from '@modules/chains/enabled-chains';
 import { CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 import { SolanaChainAdapter } from '@modules/chains/solana/solana-chain.adapter';
+import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
 import { ALERT_PORT } from '@shared/alerting';
 
@@ -51,8 +52,12 @@ class EnabledChainsConsumerModule {}
       provide: EvmGasGrantRepository,
       useValue: { hasGranted: async () => false, grantedWeiSince: async () => 0n },
     },
+    {
+      provide: EvmChainStateRepository,
+      useValue: { findAllStates: async () => [], findBlocked: async () => [] },
+    },
   ],
-  exports: [ALERT_PORT, EvmGasGrantRepository],
+  exports: [ALERT_PORT, EvmGasGrantRepository, EvmChainStateRepository],
 })
 class EvmGlobalsStubModule {}
 

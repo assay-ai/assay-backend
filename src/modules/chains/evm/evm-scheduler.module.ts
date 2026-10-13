@@ -15,7 +15,44 @@ import {
 } from './evm-relayer-float.constants';
 import { EvmRelayerFloatMonitor } from './evm-relayer-float.monitor';
 import { EvmSlashProposalWatcher } from './evm-slash-proposal.watcher';
-import { EvmModule } from './evm.module';
+import { EvmModule, readPositiveInt } from './evm.module';
+import {
+  EVM_CHAIN_STATE_INDEXER_CONFIG,
+  EvmChainStateIndexer,
+  EvmChainStateIndexerConfig,
+} from './chain-state/evm-chain-state.indexer';
+import { ChainErrors } from '../errors/chains.errors';
+import { isChainId } from '../ports/caip.types';
+
+const FIVE_MINUTES_MS = 5 * 60 * 1000;
+
+/** `EVM_CHAIN_STATE_FROM_BLOCK`: `{"eip155:46630": 135000000}` — where a chain with no cursor starts. */
+function readFromBlocks(raw: string | undefined): ReadonlyMap<ChainId, bigint> {
+  if (raw === undefined || raw.trim() === '') return new Map();
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    parsed = null;
+  }
+  if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
+    throw ChainErrors.configValueInvalid({
+      variable: 'EVM_CHAIN_STATE_FROM_BLOCK',
+      accepted: 'a JSON object of CAIP-2 chain id to a block number',
+    });
+  }
+  return new Map(
+    Object.entries(parsed).map(([chainId, block]) => {
+      if (!isChainId(chainId) || !Number.isInteger(block) || (block as number) < 0) {
+        throw ChainErrors.configValueInvalid({
+          variable: 'EVM_CHAIN_STATE_FROM_BLOCK',
+          accepted: 'a JSON object of CAIP-2 chain id to a block number',
+        });
+      }
+      return [chainId as ChainId, BigInt(block as number)];
+    }),
+  );
+}
 
 /**
  * The scheduler-only half of the `eip155` wiring.
@@ -51,6 +88,26 @@ import { EvmModule } from './evm.module';
       inject: [ConfigService, ENABLED_CHAINS],
     },
     EvmRelayerFloatMonitor,
+    // The pause/blocklist indexer (D-19) and the Config-lever alerts.
+    {
+      provide: EVM_CHAIN_STATE_INDEXER_CONFIG,
+      useFactory: (config: ConfigService): EvmChainStateIndexerConfig => ({
+        reconcileMs: readPositiveInt(
+          config.get<string>('EVM_CHAIN_STATE_RECONCILE_MS'),
+          FIVE_MINUTES_MS,
+          'EVM_CHAIN_STATE_RECONCILE_MS',
+        ),
+        maxLagMs: readPositiveInt(
+          config.get<string>('EVM_CHAIN_STATE_MAX_LAG_MS'),
+          FIVE_MINUTES_MS,
+          'EVM_CHAIN_STATE_MAX_LAG_MS',
+        ),
+        fromBlock: readFromBlocks(config.get<string>('EVM_CHAIN_STATE_FROM_BLOCK')),
+        now: () => Date.now(),
+      }),
+      inject: [ConfigService],
+    },
+    EvmChainStateIndexer,
     // Read-only: alerts on SlashProposed records this platform did not plan
     // (review H-1). The repository and Redis come from global modules.
     EvmSlashProposalWatcher,
