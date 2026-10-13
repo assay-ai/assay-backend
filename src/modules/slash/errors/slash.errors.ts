@@ -37,6 +37,8 @@ export enum SlashErrorCode {
   SLASH_NO_HARMED_AGENTS = 'SLASH_NO_HARMED_AGENTS',
   /** A case whose beneficiary cannot be named on this chain (e.g. the EVM vault). */
   SLASH_BENEFICIARY_UNSUPPORTED = 'SLASH_BENEFICIARY_UNSUPPORTED',
+  /** A dispute-upgrade batch (D-19) the chain would revert: one entry per refused id. */
+  SLASH_CHAIN_BATCH_REFUSED = 'SLASH_CHAIN_BATCH_REFUSED',
 }
 
 export type SlashErrorCodesArePrefixed = AssertDomainErrorCodes<'SLASH', `${SlashErrorCode}`>;
@@ -429,5 +431,24 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     message: (context?: Record<string, any>) =>
       `No beneficiary can be named for this case on ${context?.chainId ?? 'this chain'}` +
       `${context?.reason ? `: ${context.reason}` : ''}`,
+  },
+  /**
+   * `disputeSlashBatch`, `upholdSlashBatch` and `cancelSlashBatch` are atomic:
+   * one bad id reverts them all. Nothing was built; `context.refusals` names
+   * every id the chain would refuse and why (`NotSlashedProvider`,
+   * `SlashNotPending`, `DisputeWindowClosed`, `SlashNotDisputed`,
+   * `ArbiterIsVerifier`, `DisputeTimedOut`, `NoSuchRecord`, `DuplicateId`).
+   */
+  chainBatchRefused: {
+    code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,
+    statusCode: 422,
+    message: (context?: Record<string, any>) => {
+      const refusals = (context?.refusals ?? []) as { requestId: string; reason: string }[];
+      return (
+        `${refusals.length} of the request ids would make the chain revert the whole ` +
+        `${context?.functionName ?? 'batch'}; nothing was built: ` +
+        refusals.map((refusal) => `0x${refusal.requestId} (${refusal.reason})`).join(', ')
+      );
+    },
   },
 });

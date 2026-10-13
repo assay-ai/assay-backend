@@ -8,6 +8,8 @@ import {
   LookupSlashRequestsBodyDto,
   LookupSlashRequestsResponseDto,
 } from '../dto/slash-request-lookup.dto';
+import { DisputeSlashRequestsBodyDto, SlashContractCallDto } from '../dto/slash-dispute-intent.dto';
+import { SlashDisputeIntentService } from '../services/slash-dispute-intent.service';
 import { SlashRequestLookupService } from '../services/slash-request-lookup.service';
 
 /**
@@ -23,7 +25,10 @@ import { SlashRequestLookupService } from '../services/slash-request-lookup.serv
 @UseGuards(SessionAuthGuard)
 @Controller('providers/me/slash-requests')
 export class ProviderSlashRequestsController {
-  constructor(private readonly lookups: SlashRequestLookupService) {}
+  constructor(
+    private readonly lookups: SlashRequestLookupService,
+    private readonly disputes: SlashDisputeIntentService,
+  ) {}
 
   @Post('lookup')
   @BlockedSessionReadOnly()
@@ -35,5 +40,36 @@ export class ProviderSlashRequestsController {
     @Body() body: LookupSlashRequestsBodyDto,
   ): Promise<LookupSlashRequestsResponseDto> {
     return this.lookups.lookup(session.organizationId, body.requestIds);
+  }
+
+  /**
+   * The unsigned `disputeSlashBatch` (assay-evm D-19) for YOUR stake wallet on
+   * `chainId`, 1 to 64 records at once. Every id is checked against the record
+   * first — yours, `PENDING`, and its dispute window (`executableAt − now`, the
+   * chain's slash delay, not a fixed 72 h) still open — because the batch is
+   * atomic and one bad id reverts it all; a refusal names each id (422).
+   *
+   * Open to a blocked person's session: the chain lets a blocked provider
+   * dispute, and building a transaction writes nothing here. The provider's
+   * wallet signs and sends it; the case shows "disputed on chain" once the
+   * watcher sees it land.
+   */
+  @Post('dispute-intent')
+  @BlockedSessionReadOnly()
+  @HttpCode(200)
+  @ApiOperation({ summary: 'Build the unsigned on-chain dispute of your slash records' })
+  @ApiResponse({ status: 200, type: SlashContractCallDto })
+  @ApiResponse({ status: 409, description: 'No dispute upgrade on this chain yet' })
+  @ApiResponse({ status: 422, description: 'One or more ids would revert the batch' })
+  async disputeIntent(
+    @CurrentSession() session: McpSession,
+    @Body() body: DisputeSlashRequestsBodyDto,
+  ): Promise<SlashContractCallDto> {
+    const call = await this.disputes.providerDispute(
+      session.organizationId,
+      body.chainId,
+      body.requestIds,
+    );
+    return { ...call, requestIds: [...call.requestIds] };
   }
 }
