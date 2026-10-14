@@ -490,6 +490,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         .where('proposal.status NOT IN (:...done)', {
           done: ['OVERTURNED', 'REVERSED', 'WAIVED', 'CANCELLED'],
         })
+        // Review N-2: never an EVM case. Its records are decided only on chain,
+        // and an overturn here would stop this platform executing them.
+        .andWhere('proposal.asset_id NOT LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
         .andWhere('proposal.root_cause_key = :defectKey', { defectKey })
         .andWhere('proposal.proposed_at >= :from', { from })
         .andWhere('proposal.proposed_at <= :to', { to })

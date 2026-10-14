@@ -3546,6 +3546,38 @@ describe('the fleet sweep asks for the chain reservation to be released too', ()
     expect(events.kinds().filter((kind) => kind === 'CHAIN_CANCEL_REQUESTED')).toHaveLength(1);
   });
 
+  it('N-2: never reaches an EVM case, whose records are decided only on chain', async () => {
+    const { service, proposals } = build();
+    proposals.seed(
+      standing({
+        id: 'source',
+        status: 'OVERTURNED',
+        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+        rootCauseKey: 'mapping/v3',
+        proposedAt: RECENTLY,
+        chainStatus: 'CANCELLED',
+      }),
+    );
+    proposals.seed(
+      standing({
+        id: 'evm',
+        status: 'UPHELD',
+        assetId: 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3',
+        rootCauseKey: 'mapping/v3',
+        proposedAt: RECENTLY,
+      }),
+    );
+
+    await service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
+      defectKey: 'mapping/v3',
+      lookbackHours: 72,
+      reasonCode: 'S11_PLATFORM_DEFECT',
+      note: 'the v3 binding dropped a field on every tool it touched',
+    });
+
+    expect(proposals.rows.get('evm')!).toMatchObject({ status: 'UPHELD', chainStatus: 'PENDING' });
+  });
+
   /**
    * A sweep carries a decision to other cases, so a case with no decision has
    * nothing to carry. That is a wrong-status refusal, and it used to be

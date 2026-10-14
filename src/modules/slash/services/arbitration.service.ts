@@ -907,6 +907,11 @@ export class ArbitrationService {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
     const from = proposal.status as SlashProposalStatus;
 
+    // Review N-2: an EVM penalty is decided only on chain. A suspension would
+    // stop this platform executing its record, so it is refused; the arbiter's
+    // `cancelSlash` is the way to stop it.
+    refuseOffChainDecision(proposal, 'suspend');
+
     // See the header: the `EXECUTING → CANCELLED` edge belongs to the
     // chain-void path, not to `S-1`. Refused here rather than by the state
     // machine, because the edge itself is legal and one caller needs it.
