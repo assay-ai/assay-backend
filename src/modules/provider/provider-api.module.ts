@@ -8,6 +8,7 @@ import { ChainId } from '@modules/chains/ports/caip.types';
 import { McpModule } from '@modules/mcp/mcp.module';
 import { ToolModule } from '@modules/tool/tool.module';
 import { VerificationModule } from '@modules/verification/verification.module';
+import { AuditLogModule } from '@shared/audit';
 
 import { ProviderConnectivityController } from './controllers/provider-connectivity.controller';
 import { ProviderPayoutAddressController } from './controllers/provider-payout-address.controller';
@@ -107,6 +108,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
  */
 @Module({
   imports: [
+    AuditLogModule,
     ProviderModule,
     BlocklistModule,
     ToolModule,
