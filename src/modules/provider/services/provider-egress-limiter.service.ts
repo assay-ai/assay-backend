@@ -14,8 +14,15 @@ import { ProviderErrors } from '../errors/provider.errors';
 export interface ProviderEgressLimits {
   /** Calls one organization may have in flight. */
   readonly perOrganizationConcurrent: number;
-  /** Calls the whole process may have in flight. */
+  /** Mapping tester runs the whole process may have in flight. */
   readonly globalConcurrent: number;
+  /**
+   * Connectivity checks the whole process may have in flight — a pool of its
+   * own, so tester runs held open to a slow endpoint (up to 30 s each) cannot
+   * also deny every other provider "Check we can reach it" (review N-3). A
+   * check has a 10 s budget and a tiny body, so its slots are cheap.
+   */
+  readonly globalConnectivityConcurrent: number;
   /** Calls one organization may start per {@link windowMs}. */
   readonly perOrganizationPerWindow: number;
   readonly windowMs: number;
@@ -23,12 +30,17 @@ export interface ProviderEgressLimits {
 
 export const DEFAULT_PROVIDER_EGRESS_LIMITS: ProviderEgressLimits = Object.freeze({
   perOrganizationConcurrent: 2,
-  globalConcurrent: 8,
+  // ~15 MB per tester slot at most; 16 takes eight accounts to fill (N-3).
+  globalConcurrent: 16,
+  globalConnectivityConcurrent: 8,
   perOrganizationPerWindow: 20,
   windowMs: 60_000,
 });
 
 export const PROVIDER_EGRESS_LIMITS = Symbol('PROVIDER_EGRESS_LIMITS');
+
+/** Which process-wide pool a run takes its slot from. */
+export type ProviderEgressPool = 'tester' | 'connectivity';
 
 /**
  * In-process: the state lives in this API replica only. That is the right
@@ -40,7 +52,7 @@ export const PROVIDER_EGRESS_LIMITS = Symbol('PROVIDER_EGRESS_LIMITS');
 export class ProviderEgressLimiter {
   private readonly inFlight = new Map<string, number>();
   private readonly started = new Map<string, number[]>();
-  private total = 0;
+  private readonly total: Record<ProviderEgressPool, number> = { tester: 0, connectivity: 0 };
 
   constructor(
     @Optional()
@@ -48,8 +60,15 @@ export class ProviderEgressLimiter {
     private readonly limits: ProviderEgressLimits = DEFAULT_PROVIDER_EGRESS_LIMITS,
   ) {}
 
-  /** Run `work` under the limits, or throw `PROVIDER_EGRESS_RATE_LIMITED` without running it. */
-  async run<T>(organizationId: string, work: () => Promise<T>): Promise<T> {
+  /**
+   * Run `work` under the limits, or throw `PROVIDER_EGRESS_RATE_LIMITED`
+   * without running it. The per-organization limits count both pools.
+   */
+  async run<T>(
+    organizationId: string,
+    work: () => Promise<T>,
+    pool: ProviderEgressPool = 'tester',
+  ): Promise<T> {
     const limits = this.limits ?? DEFAULT_PROVIDER_EGRESS_LIMITS;
     const now = Date.now();
     const recent = (this.started.get(organizationId) ?? []).filter(
@@ -65,19 +84,21 @@ export class ProviderEgressLimiter {
         reason: 'too many in flight for this organization',
       });
     }
-    if (this.total >= limits.globalConcurrent) {
+    const poolLimit =
+      pool === 'connectivity' ? limits.globalConnectivityConcurrent : limits.globalConcurrent;
+    if (this.total[pool] >= poolLimit) {
       throw ProviderErrors.egressRateLimited({ reason: 'the platform is busy' });
     }
 
     recent.push(now);
     this.started.set(organizationId, recent);
     this.inFlight.set(organizationId, active + 1);
-    this.total += 1;
+    this.total[pool] += 1;
 
     try {
       return await work();
     } finally {
-      this.total -= 1;
+      this.total[pool] -= 1;
       const left = (this.inFlight.get(organizationId) ?? 1) - 1;
       if (left > 0) this.inFlight.set(organizationId, left);
       else this.inFlight.delete(organizationId);

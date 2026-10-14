@@ -11,6 +11,7 @@ describe('ProviderEgressLimiter', () => {
   const LIMITS = {
     perOrganizationConcurrent: 2,
     globalConcurrent: 3,
+    globalConnectivityConcurrent: 1,
     perOrganizationPerWindow: 4,
     windowMs: 60_000,
   };
@@ -48,6 +49,47 @@ describe('ProviderEgressLimiter', () => {
 
     await expectErrorCodeAsync(
       () => limiter.run('org-d', () => Promise.resolve()),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+
+    g.open();
+    await Promise.all(running);
+  });
+
+  it('keeps connectivity checks in a pool of their own: a full tester pool does not deny them (N-3)', async () => {
+    const limiter = new ProviderEgressLimiter(LIMITS);
+    const g = gate();
+    const testers = [
+      limiter.run('org-a', () => g.promise),
+      limiter.run('org-b', () => g.promise),
+      limiter.run('org-c', () => g.promise),
+    ];
+
+    const check = limiter.run('org-d', () => g.promise, 'connectivity');
+    // ...and the connectivity pool is capped on its own.
+    await expectErrorCodeAsync(
+      () => limiter.run('org-e', () => Promise.resolve(), 'connectivity'),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+    await expectErrorCodeAsync(
+      () => limiter.run('org-e', () => Promise.resolve()),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+
+    g.open();
+    await Promise.all([...testers, check]);
+  });
+
+  it('counts both pools against one organization', async () => {
+    const limiter = new ProviderEgressLimiter({ ...LIMITS, globalConnectivityConcurrent: 3 });
+    const g = gate();
+    const running = [
+      limiter.run('org-a', () => g.promise),
+      limiter.run('org-a', () => g.promise, 'connectivity'),
+    ];
+
+    await expectErrorCodeAsync(
+      () => limiter.run('org-a', () => Promise.resolve(), 'connectivity'),
       ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
     );
 
