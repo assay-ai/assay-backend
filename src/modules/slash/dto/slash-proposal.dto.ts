@@ -122,16 +122,19 @@ export class SlashProposalClocksDto {
     nullable: true,
     enum: OnChainDisputeState,
     description:
-      'The record’s state from the watcher’s mirror: PENDING, DISPUTED, UPHELD, CANCELLED, ' +
-      'EXECUTED or EXPIRED. Null off EVM or before a record stands on chain.',
+      'The state of the case’s on-chain records, derived per record: DISPUTED while any is, ' +
+      'UPHELD when every pending record was disputed and upheld, PENDING while one stands ' +
+      'undisputed, EXECUTED once one executed and nothing stands, else CANCELLED (cancelSlash), ' +
+      'EXPIRED (a dispute nobody ruled on) or LAPSED (an undisputed record that expired ' +
+      'unexecuted). Null off EVM or before a record stands on chain.',
   })
   chainState: OnChainDisputeState | null;
 
   @ApiPropertyOptional({
     nullable: true,
     description:
-      'The deadline to dispute on chain: the record’s `executableAt`, while the case can still ' +
-      'be disputed (PROPOSED, record PENDING and never disputed). Null otherwise.',
+      'The deadline to dispute on chain: the earliest `executableAt` of a record still PENDING ' +
+      'and never disputed, whatever its sibling records or the case status. Null when none.',
   })
   disputeBy: Date | null;
 }
