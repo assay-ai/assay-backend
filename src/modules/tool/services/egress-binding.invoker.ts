@@ -6,7 +6,12 @@ import {
   EgressFailureKind,
   isEgressError,
 } from '@shared/network/egress/egress.errors';
-import { UNTRUSTED_EGRESS_POLICY, withLimits } from '@shared/network/egress/egress.policy';
+import {
+  EgressPolicy,
+  UNTRUSTED_EGRESS_POLICY,
+  bindingEndpointProtocols,
+  withLimits,
+} from '@shared/network/egress/egress.policy';
 
 import {
   ProviderResponse,
@@ -84,7 +89,7 @@ export class EgressBindingInvoker implements BindingInvokerPort {
         // exist so a redirect chain cannot multiply the wait, and the router
         // has already reconciled `timeoutMs` against the request's total — so
         // the correct value for all three is the same one.
-        policy: withLimits(UNTRUSTED_EGRESS_POLICY, {
+        policy: withLimits(bindingPolicy(), {
           headersTimeoutMs: timeoutMs,
           bodyTimeoutMs: timeoutMs,
           totalTimeoutMs: timeoutMs,
@@ -111,6 +116,17 @@ export class EgressBindingInvoker implements BindingInvokerPort {
       };
     }
   }
+}
+
+/**
+ * `UNTRUSTED_EGRESS_POLICY`, narrowed to https in production. Read per call so
+ * the rule covers rows saved before it existed, not just new DTOs.
+ */
+function bindingPolicy(): EgressPolicy {
+  return Object.freeze({
+    ...UNTRUSTED_EGRESS_POLICY,
+    allowedProtocols: Object.freeze([...bindingEndpointProtocols()]),
+  });
 }
 
 /**

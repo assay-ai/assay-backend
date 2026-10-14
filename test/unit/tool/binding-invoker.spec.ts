@@ -25,6 +25,7 @@ import { MappingFault, mappingFaultOf } from '@modules/tool/domain/mapping';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { EgressHttpClient } from '@shared/network/egress';
+import { bindingEndpointProtocols } from '@shared/network/egress/egress.policy';
 import { AppError } from '@shared/errors/app-errors';
 
 import {
@@ -302,6 +303,38 @@ describe('EgressBindingInvoker (router call path)', () => {
 
     expect(response.transportError).toBeDefined();
     expect(received.url).toBeUndefined();
+  });
+
+  // Review P-8: plaintext binding endpoints in production.
+  describe('under NODE_ENV=production', () => {
+    const previous = process.env.NODE_ENV;
+    beforeEach(() => {
+      process.env.NODE_ENV = 'production';
+    });
+    afterEach(() => {
+      process.env.NODE_ENV = previous;
+    });
+
+    it('refuses an http:// binding endpoint before any dial', async () => {
+      respondWith(200, JSON.stringify({ answer: 'never reached' }));
+
+      const response = await invoker().invoke({
+        tool,
+        binding,
+        input: { query: 'x' },
+        timeoutMs: 2_000,
+        callId: 'test-call-id',
+      });
+
+      expect(response.transportError).toBeDefined();
+      expect(received.url).toBeUndefined();
+      expect(bindingEndpointProtocols()).toEqual(['https:']);
+    });
+  });
+
+  it('allows http:// binding endpoints outside production, for local stacks', () => {
+    expect(bindingEndpointProtocols('test')).toEqual(['http:', 'https:']);
+    expect(bindingEndpointProtocols('development')).toEqual(['http:', 'https:']);
   });
 
   it('fails over between two real endpoints', async () => {
