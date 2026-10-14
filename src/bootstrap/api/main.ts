@@ -1,4 +1,5 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder, SwaggerCustomOptions } from '@nestjs/swagger';
@@ -15,13 +16,22 @@ import { SingleFlightInterceptor } from '@shared/interceptors/single-flight.inte
 import { StructuredLogger } from '@shared/observability';
 
 async function bootstrapApi() {
-  const app = await NestFactory.create(AppApiModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppApiModule, {
     logger: new StructuredLogger(),
   });
   const configService = app.get(ConfigService);
 
   // Get config
   const port = configService.get<number>('app.api.port');
+
+  // Client address
+  //
+  // `request.ip` is what the operator sign-in throttle counts against. Behind
+  // a load balancer it is the balancer's address unless Express is told how
+  // many proxies to trust, and then every caller shares one counter. Production
+  // sets `API_TRUST_PROXY_HOPS` to the number of proxies in front of the API;
+  // locally it is 0 and `X-Forwarded-For` is ignored (`parseTrustProxyHops`).
+  app.set('trust proxy', configService.get<number>('app.api.trustProxyHops') ?? 0);
 
   // Global prefix
   app.setGlobalPrefix('api');

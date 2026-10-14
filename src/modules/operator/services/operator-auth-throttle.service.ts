@@ -35,9 +35,10 @@ export const walletKey = (address: string): string => `wallet:${address.toLowerC
  * need the console most during an incident, and a counter outage must not lock
  * them out of it.
  *
- * The address is whatever Express reports as `request.ip`. Behind a shared
- * proxy or NAT every caller shares one counter, so ten bad tokens from one
- * desk block the whole office for the window.
+ * The address is whatever Express reports as `request.ip`, which is right
+ * behind a load balancer only when `API_TRUST_PROXY_HOPS` names its hops.
+ * Behind a shared NAT every caller still shares one counter; that is why the
+ * guard limits only refused tokens and never a valid session.
  */
 @Injectable()
 export class OperatorAuthThrottle {
