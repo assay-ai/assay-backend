@@ -238,7 +238,7 @@ export class McpToolCallService {
       chooseRail(session.chainId, payment.rail, payment.voucher !== null) ===
       PaymentRail.RAIL_B_VOUCHER
     ) {
-      return this.callOnRailB(session, tool, price, args, callId, payment.voucher);
+      return this.callOnRailB(session, tool, args, callId, payment.voucher);
     }
 
     // Hoisted out of `intents.create` below, because two things now need the
@@ -372,7 +372,6 @@ export class McpToolCallService {
   private async callOnRailB(
     session: McpSession,
     tool: Tool,
-    price: Money,
     args: JsonObject,
     callId: string,
     payment: McpVoucherPayment | null,
@@ -400,6 +399,13 @@ export class McpToolCallService {
         reason: `provider ${offer.providerId} has no payout account on ${offer.settlementChain}`,
       });
     }
+
+    // The offered provider's own price, not the quote. The voucher is signed
+    // for an exact amount and pays this provider and no other, so the buyer
+    // pays what the binding that serves charges — the rule rail A applies at
+    // settlement. On the retry the re-drawn offer must name the same price, or
+    // `VoucherService` refuses the signed amount.
+    const price = offer.price;
 
     const call = voucherCallOf(tool, args);
     const requestHash = computeRequestHash({
