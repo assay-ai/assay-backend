@@ -388,6 +388,54 @@ describe('SlashCaseService.buildCase — clocks', () => {
     expect(result.proposal.clocks.runningClock).toBe('PROVIDER');
     expect(result.proposal.clocks.secondsRemaining).toBeGreaterThan(0);
   });
+
+  it('carries the mirrored on-chain record: status, executableAt, disputedAt and the disputed count', async () => {
+    const { service, proposals } = build();
+    const chainExecutableAt = new Date('2026-10-15T09:37:00.000Z');
+    const chainDisputedAt = new Date('2026-10-15T08:58:08.000Z');
+
+    proposals.seed(
+      buildProposal({
+        id: 'p1',
+        organizationId: ORG,
+        strikeId: null,
+        windowId: null,
+        status: 'DISPUTED',
+        chainStatus: 'PENDING',
+        chainExecutableAt,
+        chainDisputedAt,
+        chainDisputedParts: 0,
+      }),
+    );
+
+    const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
+
+    expect(clocks.chainStatus).toBe('PENDING');
+    expect(clocks.chainExecutableAt).toEqual(chainExecutableAt);
+    expect(clocks.chainDisputedAt).toEqual(chainDisputedAt);
+    expect(clocks.chainDisputedParts).toBe(0);
+  });
+
+  it('reports a case never put on chain as NONE with no chain clocks', async () => {
+    const { service, proposals } = build();
+
+    proposals.seed(
+      buildProposal({
+        id: 'p1',
+        organizationId: ORG,
+        strikeId: null,
+        windowId: null,
+        status: 'PROPOSED',
+      }),
+    );
+
+    const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
+
+    expect(clocks.chainStatus).toBe('NONE');
+    expect(clocks.chainExecutableAt).toBeNull();
+    expect(clocks.chainDisputedAt).toBeNull();
+    expect(clocks.chainDisputedParts).toBe(0);
+  });
 });
 
 describe('SlashCaseService.restoration', () => {
