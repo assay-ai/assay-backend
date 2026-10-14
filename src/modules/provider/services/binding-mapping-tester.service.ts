@@ -46,9 +46,13 @@ import {
 } from '../ports/binding-test.types';
 import { ProviderErrors } from '../errors/provider.errors';
 import { BindingEditorService } from './binding-editor.service';
+import { ProviderEgressLimiter } from './provider-egress-limiter.service';
 
 /** Enough of a body to debug a mapping, not enough to fill a `jsonb` column with a page. */
 const RAW_BODY_LIMIT = 32 * 1024;
+
+/** The router's default total deadline (`ROUTER_TOTAL_DEADLINE_MS`); a live call never waits longer. */
+const TESTER_MAX_TIMEOUT_MS = 30_000;
 
 /**
  * The mapping tester.
@@ -104,9 +108,26 @@ export class BindingMappingTesterService {
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
     @Inject(BINDING_INVOKER) private readonly invoker: BindingInvokerPort,
     private readonly policies: DecisionPolicyService,
+    private readonly limiter: ProviderEgressLimiter,
   ) {}
 
-  async run(
+  /**
+   * Bounded by {@link ProviderEgressLimiter}: the run happens in the API
+   * process, on a URL the provider typed, so how many may be in flight — and
+   * how often one organization may start one — is capped.
+   */
+  run(
+    organizationId: string,
+    subject: string,
+    bindingId: string,
+    input: JsonObject,
+  ): Promise<BindingTestReportDto> {
+    return this.limiter.run(organizationId, () =>
+      this.runUnlimited(organizationId, subject, bindingId, input),
+    );
+  }
+
+  private async runUnlimited(
     organizationId: string,
     subject: string,
     bindingId: string,
@@ -187,7 +208,9 @@ export class BindingMappingTesterService {
       binding,
       input,
       callId,
-      timeoutMs: binding.timeoutMs,
+      // A binding may declare up to 120 s, but no live call waits longer than
+      // the router's total deadline, so neither does a test run.
+      timeoutMs: Math.min(binding.timeoutMs, TESTER_MAX_TIMEOUT_MS),
     });
     const latencyMs = Date.now() - startedAt;
     const upstream = toUpstreamView(response, latencyMs);

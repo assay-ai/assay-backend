@@ -11,6 +11,7 @@ import {
 } from '@modules/provider/ports/binding-test.types';
 import { BindingEditorService } from '@modules/provider/services/binding-editor.service';
 import { BindingMappingTesterService } from '@modules/provider/services/binding-mapping-tester.service';
+import { ProviderEgressLimiter } from '@modules/provider/services/provider-egress-limiter.service';
 import { ResponseClass } from '@modules/tool/domain/classification';
 import { MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
@@ -140,7 +141,14 @@ function buildTester(row: ToolBindingEntity) {
   );
 
   return {
-    tester: new BindingMappingTesterService(editor, runs, catalogue, invoker, policies),
+    tester: new BindingMappingTesterService(
+      editor,
+      runs,
+      catalogue,
+      invoker,
+      policies,
+      new ProviderEgressLimiter(),
+    ),
     saved,
   };
 }
