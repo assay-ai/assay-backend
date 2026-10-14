@@ -36,7 +36,8 @@ export interface EvmSlashHoldClient {
  * provider, on one chain, whose penalties there can no longer be collected
  * promptly, so penalties do not keep piling up. A provider is held while any
  * of `SlashHoldReason` holds (see `slashHoldReasons`), read from the chain —
- * `stakeOf` and `params()` — and the platform's own upheld cases, and is
+ * `stakeOf` and `params()` — and the platform's own upheld cases (and, left
+ * out of the reservation, its records frozen by an on-chain dispute), and is
  * released after two consecutive clear checks (`nextSlashHoldState`).
  *
  * Re-checked every minute and, for one provider, on its slash events
@@ -101,7 +102,7 @@ export class EvmSlashHoldMonitor {
     const deployment = this.deployments.get(chainId);
     if (!client || !deployment || providers.length === 0) return;
     const now = new Date(this.now());
-    const [params, waiting] = await Promise.all([
+    const [params, waiting, disputed] = await Promise.all([
       client.readContract({
         address: deployment.config,
         abi: X402_CONFIG_ABI,
@@ -109,6 +110,7 @@ export class EvmSlashHoldMonitor {
         args: [],
       }) as Promise<{ penaltyAmount: bigint; minimumStake: bigint }>,
       this.proposals.findWaitingExecution(chainId, now),
+      this.proposals.findDisputedReservations(chainId),
     ]);
 
     for (const { providerId, stakeAuthority } of providers) {
@@ -125,6 +127,7 @@ export class EvmSlashHoldMonitor {
           pendingSlash: BigInt(stake.pendingSlash),
           penaltyAmount: BigInt(params.penaltyAmount),
           minimumStake: BigInt(params.minimumStake),
+          disputedReserved: disputed.get(providerId) ?? 0n,
         };
         const wait = waiting.get(providerId);
         const reasons = slashHoldReasons(reading, {
