@@ -2,7 +2,6 @@ import { Module } from '@nestjs/common';
 
 import { OperatorIdentityModule } from '@modules/operator/operator-identity.module';
 
-import { MetricsController } from './controllers/metrics.controller';
 import { ObservabilityDashboardController } from './controllers/observability-dashboard.controller';
 import { ObservabilityMetricsRepository } from './repositories/observability-metrics.repository';
 import { MetricsCollectorService } from './services/metrics-collector.service';
@@ -53,7 +52,9 @@ import { MetricsRegistryService } from './services/metrics-registry.service';
 @Module({
   imports: [OperatorIdentityModule],
   providers: [MetricsRegistryService, MetricsCollectorService, ObservabilityMetricsRepository],
-  controllers: [MetricsController, ObservabilityDashboardController],
+  // `GET /metrics` (MetricsController) is switched off on 2026-10-15: no Prometheus
+  // scraper uses it. Re-enable by adding MetricsController back to this list.
+  controllers: [ObservabilityDashboardController],
   exports: [MetricsRegistryService],
 })
 export class ObservabilityModule {}
