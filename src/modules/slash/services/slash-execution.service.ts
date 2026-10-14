@@ -2465,8 +2465,11 @@ export class SlashExecutionService {
       // `NONE` is also the recovery: if the propose below throws, the row is
       // exactly what `findAwaitingChainProposal` selects, and the next sweep
       // re-proposes it under this same fresh id.
-      await this.proposals.update(
-        { organizationId, id: proposalId },
+      //
+      // A compare-and-set on the epoch this call read (review N-9): a second
+      // scheduler holding the same row loses here instead of bumping again.
+      const bumped = await this.proposals.update(
+        { organizationId, id: proposalId, chainEpoch: proposal.chainEpoch },
         {
           chainEpoch,
           chainRequestId,
@@ -2481,6 +2484,7 @@ export class SlashExecutionService {
           chainLastError: null,
         },
       );
+      if (!bumped.affected) return;
 
       // Re-read: `update()` does not refresh the entity it was handed, and
       // `proposeOne` signs for whatever `chainRequestId` the row carries.

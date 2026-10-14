@@ -57,6 +57,9 @@ import { SlashProposalService } from './slash-proposal.service';
  * (review S-2): its cancel is the platform's own, never a provider win, and
  * the case is left open for `sweepAdminCancels` to re-propose. Idempotent — the watcher re-reads a range after any failure.
  */
+/** `chain_last_error` of a record of an earlier epoch that landed late (review N-9). */
+const SUPERSEDED_EPOCH = 'SupersededEpoch';
+
 @Injectable()
 export class SlashChainRulingService implements SlashChainRulingsPort {
   private readonly logger = new Logger(SlashChainRulingService.name);
@@ -236,10 +239,15 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     // a reason to close the case: the decided, lower figure is re-proposed by
     // `sweepAdminCancels` once every part is off the chain. A dispute that ran
     // out unruled is still the provider's win.
+    // Review N-9: never a cancel of a record that stood DISPUTED (the
+    // arbiter's ruling for the provider), nor on a case the provider already
+    // won a dispute of.
     const recalculating =
       proposal.status === SlashProposalStatus.UPHELD &&
       proposal.chainStatus === ChainProposalStatus.CANCEL_REQUESTED &&
-      event.reason !== 'DISPUTE_UNRESOLVED';
+      event.reason !== 'DISPUTE_UNRESOLVED' &&
+      part.chainStatus !== 'DISPUTED' &&
+      !proposal.chainDisputeWonAt;
     const ruledForProvider = event.reason === 'WITHDRAWN' && !recalculating;
     const because = ruledForProvider
       ? 'the arbiter ruled for the provider on chain (cancelSlash)'
@@ -406,7 +414,14 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
         chainLastError: null,
       });
     }
-    if (part && part.chainEpoch !== proposal.chainEpoch) return true;
+    if (part && part.chainEpoch !== proposal.chainEpoch) {
+      this.logger.error(
+        `CRITICAL: slash record ${event.requestId} of an earlier epoch of case ${proposal.id} ` +
+          `was executed on chain (${event.appliedMinor}); the same calls may have been charged ` +
+          'twice and need a human',
+      );
+      return true;
+    }
     if (part) {
       await this.mirrorParts(proposal, {});
       await this.followRecords(proposal, event);
@@ -431,17 +446,48 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
   async recordLateProposal(event: SlashChainProposedEvent): Promise<boolean> {
     const part = await this.parts.findOneByChainRequestId(event.requestId);
     if (!part) return false;
-    if (part.chainStatus !== 'REFUSED' || part.chainLastError?.startsWith('RecordMismatch')) {
+    if (
+      !['REFUSED', 'NONE'].includes(part.chainStatus) ||
+      part.chainLastError?.startsWith('RecordMismatch')
+    ) {
       return true;
     }
     const proposal = await this.proposals.findOneScoped(part.organizationId, part.proposalId);
     if (!proposal) return false;
-    if (part.chainEpoch !== proposal.chainEpoch || !this.execution) {
+    if (part.chainEpoch !== proposal.chainEpoch) {
+      // Review N-9: a record of an earlier epoch stands beside the current
+      // one, over the same calls, so executing both would charge them twice.
+      // It is not re-adopted: no sweep of this platform executes it (they
+      // read the current epoch only), and the arbiter is asked to cancel it.
+      await this.parts.updatePart(part.organizationId, part.id, {
+        chainStatus: 'PENDING',
+        chainExecutableAt: event.executableAt,
+        chainLastError: SUPERSEDED_EPOCH,
+      });
+      this.logger.error(
+        `CRITICAL: slash record ${event.requestId} of an earlier epoch of case ${proposal.id} ` +
+          `landed on chain after the case was re-proposed; it would charge the same calls ` +
+          `twice. The arbiter must cancel it (cancelSlash) before ${event.executableAt.toISOString()}`,
+      );
+      await this.timeline(proposal, new Date(), 'CHAIN_SUPERSEDED_RECORD', {
+        summary:
+          'A record of an earlier proposal of this case landed on chain late. It is not ' +
+          'executed by Assay, and the arbiter is asked to cancel it so the same calls are not ' +
+          'charged twice',
+        detail: {
+          requestId: event.requestId,
+          transactionHash: event.transactionHash,
+          executableAt: event.executableAt.toISOString(),
+        },
+      });
+      return true;
+    }
+    // A current-epoch part still `NONE` is the proposer's own to adopt.
+    if (part.chainStatus !== 'REFUSED') return true;
+    if (!this.execution) {
       this.logger.warn(
         `slash part ${event.requestId} (case ${proposal.id}) was given up on but its record ` +
-          `landed on chain; it is not re-adopted here (${
-            this.execution ? 'an earlier epoch' : 'no slash execution in this process'
-          })`,
+          'landed on chain; it is not re-adopted here (no slash execution in this process)',
       );
       return true;
     }

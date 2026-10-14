@@ -2951,6 +2951,26 @@ describe('sweepAdminCancels', () => {
     ]);
   });
 
+  it('N-9: bumps the epoch by compare-and-set, so a second scheduler holding the old row does nothing', async () => {
+    const { service, proposals, executor } = build();
+    proposals.seed(
+      standing({ id: 'p1', status: 'UPHELD', chainStatus: 'CANCELLED', penaltyAmount: '400000' }),
+    );
+    executor.appliedMinor = '400000';
+    const stale = { ...proposals.rows.get('p1')! };
+
+    await service.reproposeAtRevisedPenalty('org_1', 'p1', NOW);
+    // The other replica read the row before the bump.
+    await (
+      service as unknown as {
+        reproposeAfterCancellation: (row: unknown, now: Date) => Promise<void>;
+      }
+    ).reproposeAfterCancellation(stale, NOW);
+
+    expect(proposals.rows.get('p1')!.chainEpoch).toBe(1);
+    expect(executor.proposed).toHaveLength(1);
+  });
+
   it('S-2: does not re-propose an overturned case whose cancel landed', async () => {
     const { service, proposals, executor } = build();
     proposals.seed(standing({ id: 'p1', chainStatus: 'CANCEL_REQUESTED' }));
