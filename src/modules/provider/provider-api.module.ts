@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
@@ -107,6 +108,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
 @Module({
   imports: [
     ProviderModule,
+    BlocklistModule,
     ToolModule,
     McpModule,
     ChainsModule,

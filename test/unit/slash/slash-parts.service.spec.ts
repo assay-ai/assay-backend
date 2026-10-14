@@ -141,6 +141,7 @@ function build(
     stragglerMaxAttempts: 3,
     stragglerDeadlineMs: 24 * 3_600_000,
   },
+  paidOverride: [string, string][] | null = null,
 ) {
   const parts = new FakeParts();
   const executor = new ScriptedExecutor();
@@ -150,6 +151,14 @@ function build(
         organizationId: 'agent-org',
         agentAccount,
         spend,
+      })),
+    // C5: what each payer paid for its failed calls (here, what it was weighed by).
+    failedCallPaymentsByAgent: async () =>
+      (paidOverride ?? weights).map(([agentAccount, paid]) => ({
+        agentAccount,
+        failedCalls: '1',
+        paid,
+        redeemed: '0',
       })),
   };
   const service = new SlashPartsService(parts as never, windowCalls as never, executor, config, {
@@ -205,6 +214,87 @@ describe('SlashPartsService.propose', () => {
       ],
     );
     expect(result).toMatchObject({ status: 'PENDING', reservedMinor: '300', executableAt: X0 });
+  });
+
+  it('C5: signs a genuine multiplier-2 case whose 60% shares are more than the payers paid', async () => {
+    // Failed spend 100 + 50 = 150; the formula penalty is 2 × 150 = 300, split
+    // 200/100. The beneficiaries' 60% (120, 60) exceed what they paid (100,
+    // 50) — by design of the formula, so the case must still be signed.
+    const { service, proposal, executor } = build([
+      [agent(1), '100'],
+      [agent(2), '50'],
+    ]);
+    await expect(service.propose(proposal, '0xprovider')).resolves.toMatchObject({
+      status: 'PENDING',
+    });
+    expect(executor.batches).toEqual([{ kind: 'propose', size: 2 }]);
+  });
+
+  it('C5: refuses a part that exceeds the payer’s formula share', async () => {
+    // The plan (weights 200/100) gives agent 1 a part of 200, but its vouchers
+    // for the failed calls say it paid 100 of 300: its formula share is 100.
+    const { service, proposal, executor } = build(
+      [
+        [agent(1), '200'],
+        [agent(2), '100'],
+      ],
+      undefined,
+      [
+        [agent(1), '100'],
+        [agent(2), '200'],
+      ],
+    );
+    await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: 'SLASH_BENEFICIARY_EVIDENCE_REFUSED',
+      message: expect.stringContaining(
+        'part 200 is more than the 100 the penalty formula gives it',
+      ),
+    });
+    expect(executor.batches).toEqual([]);
+  });
+
+  it('C5: refuses to sign for a beneficiary that paid no voucher for a failed call', async () => {
+    const { service, proposal, executor } = build([[agent(1), '300']], undefined, []);
+    await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: 'SLASH_BENEFICIARY_EVIDENCE_REFUSED',
+      message: expect.stringContaining('paid no voucher for a failed call'),
+    });
+    expect(executor.batches).toEqual([]);
+  });
+
+  it('C5: reports the evidence per part: paid, formula share and payout', async () => {
+    const { service, proposal, parts } = build([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    await service.propose(proposal, '0xprovider');
+    const evidence = await service.beneficiaryEvidenceOf(proposal, parts.rows as never, 6000);
+    expect(
+      evidence.map((row) => [
+        row.payer,
+        row.paidMinor,
+        row.formulaShareMinor,
+        row.shareMinor,
+        row.ok,
+      ]),
+    ).toEqual([
+      [agent(1), '200', '200', '120', true],
+      [agent(2), '100', '100', '60', true],
+    ]);
+  });
+
+  it('C5: allows one minor unit of rounding per part, and no more', async () => {
+    const { service, proposal } = build([[agent(1), '300']]);
+    const part = (penalty: string) =>
+      ({
+        chainRequestId: 'a'.repeat(64),
+        agentAccount: agent(1),
+        beneficiaryAccount: agent(1),
+        penaltyAmount: penalty,
+      }) as never;
+    const [within] = await service.beneficiaryEvidenceOf(proposal, [part('301')], 6000);
+    const [beyond] = await service.beneficiaryEvidenceOf(proposal, [part('302')], 6000);
+    expect([within.ok, beyond.ok]).toEqual([true, false]);
   });
 
   it('merges two spellings of one EVM account into one beneficiary', async () => {
@@ -577,5 +667,51 @@ describe('review fixes — SlashPartsService', () => {
     expect(executor.expired).toHaveLength(0);
     expect(executor.executeRequests).toHaveLength(0);
     expect(parts.rows[1].chainLastError).toBeNull();
+  });
+});
+
+describe('review H-2 — the stored plan is checked against the evidence before signing', () => {
+  async function tampered(edit: (part: SlashProposalPartEntity) => void) {
+    const ctx = build([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    // A plan stored by an earlier attempt that never reached the chain.
+    ctx.executor.proposeFails.set(agent(1).split(':')[2], revert('Transport'));
+    ctx.executor.proposeFails.set(agent(2).split(':')[2], revert('Transport'));
+    await ctx.service.propose(ctx.proposal, '0xprovider').catch(() => undefined);
+    ctx.executor.proposeFails.clear();
+    ctx.executor.batches.length = 0;
+    for (const row of ctx.parts.rows) row.chainStatus = 'NONE';
+    edit(ctx.parts.rows[0]);
+    return ctx;
+  }
+
+  it('signs nothing when a stored beneficiary was changed', async () => {
+    const ctx = await tampered((part) => {
+      part.beneficiaryAccount = agent(99);
+    });
+    await expect(ctx.service.propose(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_PLAN_EVIDENCE_MISMATCH,
+    });
+    expect(ctx.executor.batches).toEqual([]);
+  });
+
+  it('signs nothing when a stored penalty was raised', async () => {
+    const ctx = await tampered((part) => {
+      part.penaltyAmount = (BigInt(part.penaltyAmount) + 1n).toString();
+    });
+    await expect(ctx.service.propose(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_PLAN_EVIDENCE_MISMATCH,
+    });
+    expect(ctx.executor.batches).toEqual([]);
+  });
+
+  it('still signs an untouched stored plan', async () => {
+    const ctx = await tampered(() => undefined);
+    await expect(ctx.service.propose(ctx.proposal, '0xprovider')).resolves.toMatchObject({
+      status: 'PENDING',
+    });
+    expect(ctx.executor.batches).toEqual([{ kind: 'propose', size: 2 }]);
   });
 });

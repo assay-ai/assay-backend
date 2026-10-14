@@ -277,6 +277,29 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   chainProposalSignature: string | null;
 
   /** When `PROPOSING`/`EXECUTING` was claimed, so a crashed claim can be reaped. */
+  /** The chain's `disputedAt` (D-19), when the provider disputed the record on chain. */
+  @Column({ name: 'chain_disputed_at', type: 'timestamptz', nullable: true })
+  chainDisputedAt: Date | null;
+
+  /**
+   * How many of the current epoch's parts are `DISPUTED` on chain (audit
+   * E-4). A dispute freezes only its part: the mirror stays `PENDING` while
+   * any part is pending (and those parts keep executing), and is `DISPUTED`
+   * only when every live part is. `PENDING` with a non-zero count is a partly
+   * disputed case.
+   */
+  @Column({ name: 'chain_disputed_parts', type: 'integer', default: 0 })
+  chainDisputedParts: number;
+
+  /**
+   * When the provider WON an on-chain dispute of this case (follow-up B7): a
+   * record cancelled while `DISPUTED`, or expired as `DisputeUnresolved`. Set,
+   * the case is never re-proposed and its window's calls are never put in a
+   * new case.
+   */
+  @Column({ name: 'chain_dispute_won_at', type: 'timestamptz', nullable: true })
+  chainDisputeWonAt: Date | null;
+
   @Column({ name: 'chain_claimed_at', type: 'timestamptz', nullable: true })
   chainClaimedAt: Date | null;
 

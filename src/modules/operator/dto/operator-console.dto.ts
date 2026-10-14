@@ -3,6 +3,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import {
   ArrayMaxSize,
+  ArrayMinSize,
   ArrayNotEmpty,
   IsArray,
   IsBoolean,
@@ -29,6 +30,8 @@ import { ListQueryDto } from '@shared/api/dto/list-query.dto';
 import { ArbitrationOutcome, DisputeClaimType } from '@modules/slash/domain/arbitration';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
 
+import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+
 import { ApprovalMode, OperatorRole, OverrideFamily } from '../domain/override-register';
 
 /** Who is holding the token, as the console renders them. */
@@ -36,11 +39,17 @@ export class OperatorDto {
   @ApiProperty()
   id: string;
 
-  @ApiProperty({ description: 'The SSO subject, e.g. `dan@`' })
+  @ApiProperty({ description: 'A short handle, e.g. `dan@`' })
   subject: string;
 
   @ApiProperty()
   displayName: string;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'The EVM address the operator signs in with, lower-case',
+  })
+  walletAddress: string | null;
 
   @ApiProperty({ enum: OperatorRole, isArray: true })
   roles: OperatorRole[];
@@ -52,8 +61,8 @@ export class OperatorDto {
   })
   authorityLimit: MoneyDto | null;
 
-  @ApiProperty({ enum: ['ACTIVE', 'SUSPENDED'] })
-  status: 'ACTIVE' | 'SUSPENDED';
+  @ApiProperty({ enum: ['ACTIVE', 'SUSPENDED', 'REMOVED'] })
+  status: 'ACTIVE' | 'SUSPENDED' | 'REMOVED';
 }
 
 /** The six tiles across the top of the operator console. */
@@ -106,6 +115,79 @@ export class PlatformHealthDto {
     description: 'Age of the oldest open case, in seconds. Null when there are none.',
   })
   oldestOpenDisputeAgeSeconds: number | null;
+
+  @ApiProperty({
+    type: () => [ChainStateHealthDto],
+    description:
+      'Per EVM chain: the indexed pause flag, blocklist and dispute-upgrade terms, and how far ' +
+      'the indexer is behind. A cache of the chain — the contracts stay the enforcer.',
+  })
+  chainState: ChainStateHealthDto[];
+
+  @ApiProperty({
+    type: () => [SlashHoldHealthDto],
+    description:
+      'Providers on a slash hold: their paid bindings are not routed on that chain while ' +
+      'their penalties cannot be collected promptly. Lifts by itself.',
+  })
+  slashHolds: SlashHoldHealthDto[];
+}
+
+/** One standing provider slash hold, in `GET /operator/health`. */
+export class SlashHoldHealthDto {
+  @ApiProperty({ description: "The provider's organization id" })
+  providerId: string;
+
+  @ApiProperty({ example: 'eip155:46630' })
+  chainId: string;
+
+  @ApiProperty({
+    type: [String],
+    enum: ['SLASH_WINDOW_FULL', 'STAKE_FULLY_RESERVED', 'BONDED_BELOW_MINIMUM'],
+  })
+  reasons: string[];
+
+  @ApiProperty({ type: String, format: 'date-time' })
+  heldSince: string;
+
+  @ApiPropertyOptional({ type: String, format: 'date-time', nullable: true })
+  checkedAt: string | null;
+}
+
+/** One EVM chain's row of `GET /operator/health`'s `chainState`. */
+export class ChainStateHealthDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  chainId: string;
+
+  @ApiProperty({ description: 'X402Config.paused, as last indexed' })
+  paused: boolean;
+
+  @ApiPropertyOptional({ nullable: true, description: 'X402Config.arbiter(), lower-case' })
+  arbiter: string | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'The live slash delay — the dispute window' })
+  slashDelaySeconds: number | null;
+
+  @ApiProperty({ description: 'Addresses blocked on chain' })
+  blockedCount: number;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Last indexed block' })
+  indexedBlock: string | null;
+
+  @ApiPropertyOptional({ nullable: true, description: 'Chain head at the last tick' })
+  headBlock: string | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'Seconds since the indexer last reached the head; null if it never has',
+  })
+  lagSeconds: number | null;
+
+  @ApiProperty({ description: 'True when lagSeconds is null or above EVM_CHAIN_STATE_MAX_LAG_MS' })
+  stale: boolean;
+
+  @ApiPropertyOptional({ nullable: true })
+  reconciledAt: string | null;
 }
 
 /**
@@ -288,7 +370,7 @@ export class ListOverrideLogQueryDto extends ListQueryDto {
  * register. Without this a reason code of three spaces is "a string of at most
  * 64 characters" and a note of twenty spaces meets a twenty-character minimum.
  */
-const Trimmed = () =>
+export const Trimmed = () =>
   Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value));
 
 /** As {@link Trimmed}, for each member of a string array. */
@@ -303,7 +385,7 @@ const TrimmedEach = () =>
  * As {@link Trimmed}, for an optional reference: blank becomes absent, so an
  * empty ticket reference is never recorded as though one had been given.
  */
-const TrimmedOrAbsent = () =>
+export const TrimmedOrAbsent = () =>
   Transform(({ value }: { value: unknown }) => {
     if (typeof value !== 'string') return value;
     const trimmed = value.trim();
@@ -320,7 +402,7 @@ const TrimmedOrAbsent = () =>
 const MINOR_UNITS_PATTERN = /^[1-9]\d{0,39}$/;
 
 /** The single reason code of an operator action: required, and not blank. */
-const ReasonCode = () => applyDecorators(Trimmed(), IsString(), IsNotEmpty(), MaxLength(64));
+export const ReasonCode = () => applyDecorators(Trimmed(), IsString(), IsNotEmpty(), MaxLength(64));
 
 const QueryBoolean = () =>
   Transform(({ value }: { value: unknown }) => {
@@ -593,8 +675,18 @@ export class CancelIntentDto {
   @ApiProperty({ description: 'Base64 wire bytes, unsigned. The settlement admin signs it.' })
   transaction: string;
 
-  @ApiProperty({ description: '`Config.admin`, base58 — the only signer, and the fee payer' })
+  @ApiProperty({
+    description:
+      'The only signer, and the fee payer: `Config.admin` (Solana; EVM without an arbiter), or ' +
+      'the ARBITER on an EVM Config with one appointed (D-19). See `signerRole`.',
+  })
   admin: string;
+
+  @ApiPropertyOptional({ enum: ['ADMIN', 'ARBITER'], description: 'Who `admin` is' })
+  signerRole?: 'ADMIN' | 'ARBITER';
+
+  @ApiPropertyOptional({ description: 'EVM only: the X402Stake proxy the calldata is sent to' })
+  to?: string;
 
   @ApiProperty({ description: "The record's 32-byte request id, lower-case hex" })
   requestId: string;
@@ -692,4 +784,219 @@ export class VerifyProviderBodyDto {
   @IsString()
   @MaxLength(128)
   ticketRef?: string;
+}
+
+// ── A-9 / A-10 · The account blocklist ─────────────────────────────────────
+
+/**
+ * `A-9` — block an organization or a wallet.
+ *
+ * The subject is validated and normalised by the service rather than here, so
+ * the refusal for "not a uuid" and "not a CAIP-10 account" is the same
+ * catalogued `OPERATOR_BLOCK_SUBJECT_INVALID` whichever kind was named.
+ */
+export class CreateAccountBlockBodyDto {
+  @ApiProperty({ enum: BlockSubjectKind })
+  @IsEnum(BlockSubjectKind)
+  subjectKind: BlockSubjectKind;
+
+  @ApiProperty({
+    description:
+      'An organization uuid, or a CAIP-10 account (e.g. `eip155:8453:0xabc…`). A wallet is ' +
+      'blocked on every chain of its namespace.',
+  })
+  @Trimmed()
+  @IsString()
+  @IsNotEmpty()
+  @MaxLength(256)
+  subject: string;
+
+  @ApiProperty({ description: 'e.g. LEAKED_KEY, FRAUD, LEGAL_HOLD' })
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiProperty({ minLength: 20, description: 'Internal. Never shown to the blocked account.' })
+  @Trimmed()
+  @IsString()
+  @Length(20, 4096)
+  note: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+/** `A-10` — lift a block. Two-person: queued for a second operator's approval. */
+export class UnblockAccountBodyDto {
+  @ApiProperty()
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 4096)
+  note: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+export class ListAccountBlocksQueryDto extends ListQueryDto {
+  @ApiPropertyOptional({ enum: BlockSubjectKind })
+  @IsOptional()
+  @IsEnum(BlockSubjectKind)
+  subjectKind?: BlockSubjectKind;
+
+  @ApiPropertyOptional({
+    description:
+      'An organization uuid or a CAIP-10 account; matched the way enforcement matches it, so a ' +
+      'wallet finds its block on any chain of the namespace',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  subject?: string;
+
+  @ApiPropertyOptional({ description: '`true` standing blocks only, `false` lifted ones only' })
+  @IsOptional()
+  @QueryBoolean()
+  @IsBoolean()
+  active?: boolean;
+
+  @ApiPropertyOptional()
+  @IsOptional()
+  @IsString()
+  @MaxLength(64)
+  reasonCode?: string;
+}
+
+export class AccountBlockDto {
+  @ApiProperty()
+  id: string;
+
+  @ApiProperty({ enum: BlockSubjectKind })
+  subjectKind: BlockSubjectKind;
+
+  @ApiProperty({ description: 'Normalised: uuid lower-case, EVM address lower-case' })
+  subject: string;
+
+  @ApiProperty({ description: 'What enforcement matches on: the uuid, or `namespace:address`' })
+  subjectKey: string;
+
+  @ApiProperty()
+  active: boolean;
+
+  @ApiProperty()
+  reasonCode: string;
+
+  @ApiProperty()
+  note: string;
+
+  @ApiProperty({ nullable: true, type: String })
+  ticketRef: string | null;
+
+  @ApiProperty({ description: 'Operator subject' })
+  blockedBy: string;
+
+  @ApiProperty()
+  blockedAt: Date;
+
+  @ApiProperty({ nullable: true, type: String })
+  unblockedBy: string | null;
+
+  @ApiProperty({ nullable: true, type: String })
+  unblockApprovedBy: string | null;
+
+  @ApiProperty({ nullable: true, type: Date })
+  unblockedAt: Date | null;
+
+  @ApiProperty({ nullable: true, type: String })
+  unblockNote: string | null;
+}
+
+/** `S-13` — the arbiter's on-chain ruling over up to 64 disputed (or pending) records. */
+export class ArbiterRulingBodyDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  @IsString()
+  @Matches(/^eip155:[0-9]+$/, { message: 'chainId must be an eip155 CAIP-2 chain id' })
+  chainId: string;
+
+  @ApiProperty({
+    enum: ['UPHOLD', 'CANCEL'],
+    description:
+      'UPHOLD → upholdSlashBatch (rules against the provider; arbiter only, DISPUTED records). ' +
+      'CANCEL → cancelSlashBatch (rules for the provider; PENDING or DISPUTED records).',
+  })
+  @IsIn(['UPHOLD', 'CANCEL'])
+  ruling: 'UPHOLD' | 'CANCEL';
+
+  @ApiProperty({ isArray: true, type: String, minItems: 1, maxItems: 64 })
+  @IsArray()
+  @ArrayMinSize(1)
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @Matches(/^0x[0-9a-fA-F]{64}$/, { each: true, message: 'each requestId must be 0x + 64 hex' })
+  requestIds: string[];
+
+  @ApiProperty()
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 4096)
+  note: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+/** `A-11` — the arbiter's on-chain block of one address. Block only. */
+export class ArbiterBlockBodyDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  @IsString()
+  @Matches(/^eip155:[0-9]+$/, { message: 'chainId must be an eip155 CAIP-2 chain id' })
+  chainId: string;
+
+  @ApiProperty({ description: 'The 0x address to block on chain' })
+  @IsString()
+  @Matches(/^0x[0-9a-fA-F]{40}$/, { message: 'account must be a 0x address' })
+  account: string;
+
+  @ApiProperty({ description: 'e.g. LEAKED_KEY, FRAUD' })
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 4096)
+  note: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+export class ArbiterTermsQueryDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  @IsString()
+  @Matches(/^eip155:[0-9]+$/, { message: 'chainId must be an eip155 CAIP-2 chain id' })
+  chainId: string;
 }

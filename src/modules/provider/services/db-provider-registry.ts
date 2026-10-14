@@ -1,7 +1,9 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { In } from 'typeorm';
 
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { ProviderSlashHoldRepository } from '@database/postgres/repositories/provider-slash-hold.repository';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 
 import {
@@ -12,6 +14,7 @@ import {
 import { ProviderRegistryPort } from '../ports/provider-registry.port';
 import {
   ProviderRoutingState,
+  ProviderSlashHoldView,
   ProviderStats,
   ProviderStatus,
   ProviderTier,
@@ -66,6 +69,10 @@ export class DbProviderRegistry implements ProviderRegistryPort {
   constructor(
     private readonly providers: ProviderRepository,
     @Inject(CHAIN_ENROLMENT_SOURCE) private readonly enrolments: ChainEnrolmentPort,
+    private readonly blocklist: AccountBlocklistService,
+    // The per-chain slash holds (`EvmSlashHoldMonitor`). Optional: a
+    // composition without them routes exactly as before.
+    @Optional() private readonly slashHolds: ProviderSlashHoldRepository | null = null,
   ) {}
 
   async findRoutingStates(
@@ -78,10 +85,18 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     // surface rests on — so this is an ordinary scoped read over a set of
     // organizations rather than a cross-tenant one, and it stays inside the
     // scope guard.
-    const [rows, enrolments] = await Promise.all([
+    const [rows, enrolments, holds] = await Promise.all([
       this.providers.find({ where: { organizationId: In([...providerIds]) } }),
       this.enrolments.enrolmentsOf(providerIds),
+      this.slashHolds?.findHeld(providerIds) ?? Promise.resolve([]),
     ]);
+    const holdsByProvider = new Map<string, ProviderSlashHoldView[]>();
+    for (const hold of holds) {
+      holdsByProvider.set(hold.providerId, [
+        ...(holdsByProvider.get(hold.providerId) ?? []),
+        { chainId: hold.chainId as ChainId, reasons: hold.reasons, heldSince: hold.heldSince },
+      ]);
+    }
 
     const payoutsByProvider = new Map<string, Map<ChainId, AccountId>>();
     const chainsByProvider = new Map<string, Set<ChainId>>();
@@ -103,6 +118,12 @@ export class DbProviderRegistry implements ProviderRegistryPort {
       // status of its own rather than reusing the provider's.
       if (enrolment.status !== ChainEnrolmentStatus.ACTIVE) continue;
 
+      // A blocked payout wallet is not an address anybody may be paid at, so
+      // that chain leaves the routable map exactly as an unproved one would.
+      // The provider still serves its other chains, unless the organization
+      // itself is blocked — below.
+      if (this.blocklist.walletBlock(enrolment.payoutAccountId)) continue;
+
       const byChain = payoutsByProvider.get(enrolment.providerId) ?? new Map<ChainId, AccountId>();
       byChain.set(enrolment.chainId, enrolment.payoutAccountId);
       payoutsByProvider.set(enrolment.providerId, byChain);
@@ -111,7 +132,13 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     for (const row of rows) {
       found.set(row.organizationId, {
         providerId: row.organizationId,
-        status: row.status as ProviderStatus,
+        // A blocked provider reads as `SUSPENDED` to routing, so every path
+        // that routes — `tools/call`, `tools/list` and the catalogue's quotes —
+        // refuses it with the reason it already gives a suspended one, and no
+        // router code has to know the blocklist exists.
+        status: this.blocklist.organizationBlock(row.organizationId)
+          ? ProviderStatus.SUSPENDED
+          : (row.status as ProviderStatus),
         tier: row.tier as ProviderTier,
         stats: NO_OBSERVATIONS,
         // Empty when this provider has enrolled nowhere, which
@@ -119,6 +146,7 @@ export class DbProviderRegistry implements ProviderRegistryPort {
         // a default.
         payoutAccountByChain: payoutsByProvider.get(row.organizationId) ?? NO_ENROLMENTS,
         payoutEnrolmentChains: chainsByProvider.get(row.organizationId) ?? NO_CHAINS,
+        slashHolds: holdsByProvider.get(row.organizationId) ?? [],
       });
     }
 

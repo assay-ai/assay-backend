@@ -10,7 +10,8 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  */
 export enum OperatorErrorCode {
   OPERATOR_CREDENTIAL_INVALID = 'OPERATOR_CREDENTIAL_INVALID',
-  OPERATOR_SUSPENDED = 'OPERATOR_SUSPENDED',
+  OPERATOR_AUTH_RATE_LIMITED = 'OPERATOR_AUTH_RATE_LIMITED',
+  OPERATOR_NOT_AUTHORIZED = 'OPERATOR_NOT_AUTHORIZED',
   OPERATOR_ROLE_REQUIRED = 'OPERATOR_ROLE_REQUIRED',
   OPERATOR_NOT_FOUND = 'OPERATOR_NOT_FOUND',
   OPERATOR_AUTHORITY_EXCEEDED = 'OPERATOR_AUTHORITY_EXCEEDED',
@@ -18,6 +19,19 @@ export enum OperatorErrorCode {
   OPERATOR_UNKNOWN_OVERRIDE_CODE = 'OPERATOR_UNKNOWN_OVERRIDE_CODE',
   OPERATOR_OVERRIDE_NOT_IMPLEMENTED = 'OPERATOR_OVERRIDE_NOT_IMPLEMENTED',
   OPERATOR_SECOND_APPROVER_REQUIRED = 'OPERATOR_SECOND_APPROVER_REQUIRED',
+  OPERATOR_APPROVER_ROLE_REQUIRED = 'OPERATOR_APPROVER_ROLE_REQUIRED',
+  OPERATOR_APPROVER_AUTHORITY_EXCEEDED = 'OPERATOR_APPROVER_AUTHORITY_EXCEEDED',
+  OPERATOR_BLOCK_SUBJECT_INVALID = 'OPERATOR_BLOCK_SUBJECT_INVALID',
+  OPERATOR_BLOCK_NOT_FOUND = 'OPERATOR_BLOCK_NOT_FOUND',
+  OPERATOR_BLOCK_ALREADY_ACTIVE = 'OPERATOR_BLOCK_ALREADY_ACTIVE',
+  OPERATOR_BLOCK_ALREADY_LIFTED = 'OPERATOR_BLOCK_ALREADY_LIFTED',
+  OPERATOR_WALLET_INVALID = 'OPERATOR_WALLET_INVALID',
+  OPERATOR_ALREADY_EXISTS = 'OPERATOR_ALREADY_EXISTS',
+  OPERATOR_SELF_CHANGE_REFUSED = 'OPERATOR_SELF_CHANGE_REFUSED',
+  OPERATOR_CHANGE_EMPTY = 'OPERATOR_CHANGE_EMPTY',
+  OPERATOR_APPROVAL_NOT_FOUND = 'OPERATOR_APPROVAL_NOT_FOUND',
+  OPERATOR_APPROVAL_NOT_PENDING = 'OPERATOR_APPROVAL_NOT_PENDING',
+  OPERATOR_APPROVAL_PAYLOAD_MISMATCH = 'OPERATOR_APPROVAL_PAYLOAD_MISMATCH',
 }
 
 export type OperatorErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -27,11 +41,10 @@ export type OperatorErrorCodesArePrefixed = AssertDomainErrorCodes<
 
 export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
   /**
-   * A missing token, an unknown token, or a token whose subject has no
-   * `operators` row at all. The three are deliberately indistinguishable
-   * from outside — same reasoning as `MCP_CREDENTIAL_INVALID` — so that a
-   * caller cannot tell "you typed it wrong" from "that account was never
-   * provisioned" from "the whole thing is misconfigured".
+   * No usable operator credential: a missing or unknown session token, an
+   * expired or revoked session, or a sign-in message whose signature, nonce,
+   * domain, chain or expiry does not check out. Deliberately one code, so a
+   * caller cannot tell which check failed. Counted by `OperatorAuthThrottle`.
    */
   credentialInvalid: {
     code: OperatorErrorCode.OPERATOR_CREDENTIAL_INVALID,
@@ -39,16 +52,23 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
     message: () => 'Operator credential invalid',
   },
   /**
-   * The token is genuine and its subject is provisioned, but `status =
-   * 'SUSPENDED'`. Distinguished from `credentialInvalid` on purpose: a
-   * suspension is an authenticated fact about a known operator, not a bad
-   * secret, and the two must not share a code or a 401.
+   * Too many failed sign-ins or refused session tokens from one address or
+   * for one wallet. Raised before anything presented is looked at.
    */
-  suspended: {
-    code: OperatorErrorCode.OPERATOR_SUSPENDED,
+  authRateLimited: {
+    code: OperatorErrorCode.OPERATOR_AUTH_RATE_LIMITED,
+    statusCode: 429,
+    message: () => 'Too many failed operator sign-in attempts. Try again later.',
+  },
+  /**
+   * The wallet signed correctly but is not an active operator: unknown,
+   * suspended or removed. One code for all three, so the console cannot be
+   * used to learn which wallets were ever operators.
+   */
+  notAuthorized: {
+    code: OperatorErrorCode.OPERATOR_NOT_AUTHORIZED,
     statusCode: 403,
-    message: (context?: Record<string, any>) =>
-      `Operator is suspended${context?.subject ? `: ${context.subject}` : ''}`,
+    message: () => 'This wallet is not an active operator',
   },
   /**
    * The session holds none of the roles the action requires. `context` may
@@ -119,5 +139,119 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
     statusCode: 409,
     message: (context?: Record<string, any>) =>
       `A second signature is required${context?.code ? ` for ${context.code}` : ''}`,
+  },
+  /**
+   * A second identity authenticated, and holds none of the roles the register
+   * row demands of its approver. Distinct from `roleRequired`, which is about
+   * the actor: an operator reading the refusal has to know which of the two
+   * people to replace.
+   */
+  approverRoleRequired: {
+    code: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) => {
+      const required = Array.isArray(context?.required) ? context.required.join(', ') : null;
+      const held = Array.isArray(context?.held) ? context.held.join(', ') || '(none)' : null;
+      return (
+        `The second approver must hold one of: ${required ?? 'a named role'}` +
+        `${context?.code ? ` (${context.code})` : ''}` +
+        `${held ? ` — held: ${held}` : ''}`
+      );
+    },
+  },
+  /**
+   * The second identity holds a qualifying role, but the action's amount is
+   * above their own authority limit. A checker who could not have taken the
+   * action cannot approve it either — otherwise a zero-authority token turns
+   * any two-person action into a one-person one.
+   */
+  approverAuthorityExceeded: {
+    code: OperatorErrorCode.OPERATOR_APPROVER_AUTHORITY_EXCEEDED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      `Action exceeds the second approver's authority limit` +
+      `${context?.code ? ` (${context.code})` : ''}` +
+      `${context?.limit ? ` of ${context.limit}` : ''}` +
+      `${context?.requested ? `, requested ${context.requested}` : ''}`,
+  },
+  // ── A-9 / A-10 · The account blocklist ──
+
+  /** Not a uuid for an organization, or not a CAIP-10 account for a wallet. */
+  blockSubjectInvalid: {
+    code: OperatorErrorCode.OPERATOR_BLOCK_SUBJECT_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Not a valid ${context?.subjectKind === 'WALLET' ? 'CAIP-10 account' : 'organization id'}` +
+      `${context?.subject ? `: ${context.subject}` : ''}`,
+  },
+  blockNotFound: {
+    code: OperatorErrorCode.OPERATOR_BLOCK_NOT_FOUND,
+    statusCode: 404,
+    message: (context?: Record<string, any>) =>
+      `No block${context?.blockId ? ` with id ${context.blockId}` : ''}`,
+  },
+  /** One standing block per subject. The existing one is named so it can be read. */
+  blockAlreadyActive: {
+    code: OperatorErrorCode.OPERATOR_BLOCK_ALREADY_ACTIVE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This subject is already blocked${context?.blockId ? ` (block ${context.blockId})` : ''}`,
+  },
+  blockAlreadyLifted: {
+    code: OperatorErrorCode.OPERATOR_BLOCK_ALREADY_LIFTED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This block was already lifted${context?.unblockedAt ? ` at ${context.unblockedAt}` : ''}`,
+  },
+
+  // ── A-12 / A-13 / A-14 · The operator directory ──
+
+  /** Not a `0x` + 40 hex EVM address. */
+  walletInvalid: {
+    code: OperatorErrorCode.OPERATOR_WALLET_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Not a valid EVM address${context?.address ? `: ${context.address}` : ''}`,
+  },
+  /** The wallet or the subject already names an operator. */
+  alreadyExists: {
+    code: OperatorErrorCode.OPERATOR_ALREADY_EXISTS,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `An operator with this ${context?.field ?? 'identity'} already exists`,
+  },
+  /** Nobody changes or removes their own row, nor approves a change to it. */
+  selfChangeRefused: {
+    code: OperatorErrorCode.OPERATOR_SELF_CHANGE_REFUSED,
+    statusCode: 403,
+    message: () => 'An operator cannot change, remove or approve a change to their own access',
+  },
+  /** A change request that names neither roles nor a limit, or changes nothing. */
+  changeEmpty: {
+    code: OperatorErrorCode.OPERATOR_CHANGE_EMPTY,
+    statusCode: 400,
+    message: () => 'The change does not alter the operator’s roles or authority limit',
+  },
+
+  // ── The approvals queue ──
+
+  approvalNotFound: {
+    code: OperatorErrorCode.OPERATOR_APPROVAL_NOT_FOUND,
+    statusCode: 404,
+    message: (context?: Record<string, any>) =>
+      `No approval${context?.approvalId ? ` with id ${context.approvalId}` : ''}`,
+  },
+  /** Already approved, rejected or expired — or it expired just now. */
+  approvalNotPending: {
+    code: OperatorErrorCode.OPERATOR_APPROVAL_NOT_PENDING,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This approval is no longer pending${context?.status ? ` (${context.status})` : ''}`,
+  },
+  /** The stored payload no longer matches its hash. A platform fault, never a caller's. */
+  approvalPayloadMismatch: {
+    code: OperatorErrorCode.OPERATOR_APPROVAL_PAYLOAD_MISMATCH,
+    statusCode: 500,
+    message: () => 'The stored approval payload does not match its hash',
   },
 });

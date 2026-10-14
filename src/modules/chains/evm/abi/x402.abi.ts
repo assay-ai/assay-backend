@@ -95,9 +95,58 @@ export const X402_CONFIG_ABI = parseAbi([
   'function admin() view returns (address)',
   'function owner() view returns (address)',
   'function pendingOwner() view returns (address)',
-  'function slashProviderBps() view returns (uint16)',
   'function canSign(address verifier) view returns (bool)',
   'function verifierKey(address verifier) view returns (VerifierKey)',
+  /**
+   * The dispute upgrade's three reads (assay-evm D-19); the backend assumes
+   * the upgraded Config. `assertActive` is not vendored — it is the
+   * contract's own guard, and the backend reads the two facts it combines
+   * (`paused`, `blocked`) instead.
+   */
+  'function arbiter() view returns (address)',
+  'function slashDelaySeconds() view returns (uint64)',
+  'function blocked(address account) view returns (bool)',
+]);
+
+/**
+ * `X402Config`'s events the chain-state indexer reads (`EvmChainStateIndexer`):
+ * `PauseToggled` and `BlockedSet` into Postgres; `AdminSet`, `ConfigUpdated`
+ * (treasury, bps, caps), `VerifierRevokedEvent`, `ArbiterSet`,
+ * `SlashDelaySet` and `VerifierRegistered` as CRITICAL alerts (the levers a
+ * stolen admin key pulls); `PauseToggled`, an unblock (`BlockedSet` false,
+ * which only the admin can send) and a block by the arbiter as a WARN. Events
+ * only, no function: nothing here may write the Config.
+ */
+export const X402_CONFIG_EVENTS_ABI = parseAbi([
+  'struct ParamSet { address treasury; address redeemer; uint64 unbondingPeriodSeconds; uint64 minimumStake; uint64 penaltyAmount; uint64 verifierDailyCap; uint16 takeRateBps; uint16 slashAgentBps; uint16 slashPlatformBps; uint16 slashCapBps; }',
+  'event PauseToggled(address indexed admin, bool paused, uint64 at)',
+  'event AdminSet(address indexed previousAdmin, address indexed newAdmin)',
+  'event ConfigUpdated(address indexed admin, ParamSet params)',
+  'event VerifierRevokedEvent(address indexed verifier, address indexed admin, uint64 revokedAt)',
+  'event BlockedSet(address indexed account, bool blocked, address indexed by)',
+  'event ArbiterSet(address indexed previousArbiter, address indexed newArbiter)',
+  'event SlashDelaySet(uint64 previousDelay, uint64 newDelay)',
+  'event VerifierRegistered(address indexed verifier, address indexed admin, bytes32 label, uint64 registeredAt, uint64 expiresAt)',
+]);
+
+/**
+ * ERC-1967 `Upgraded`, watched on all three proxies (Config, Stake, Escrow):
+ * an implementation swap is the biggest lever a stolen owner key pulls, so it
+ * is a CRITICAL alert (audit E-6). Events only.
+ */
+export const X402_PROXY_EVENTS_ABI = parseAbi(['event Upgraded(address indexed implementation)']);
+
+/**
+ * `setBlocked(account, true)` — ENCODED, never sent, for the ARBITER's wallet
+ * (`X402Config.setBlocked` lets the arbiter block and only the admin unblock).
+ *
+ * Kept apart from {@link X402_CONFIG_ABI} so the Config's read surface stays
+ * read-only, and imported by `EvmSlashExecutor` alone (`abi-selectors.spec.ts`
+ * enforces it): the backend holds no arbiter key, so this calldata is handed
+ * to an operator and signed by a person.
+ */
+export const X402_CONFIG_ARBITER_ABI = parseAbi([
+  'function setBlocked(address account, bool value)',
 ]);
 
 /**
@@ -113,10 +162,14 @@ export const X402_CONFIG_ABI = parseAbi([
  * and `SlashRecord` carries two (`uint32 __gap`, `uint32 __gap2`). Decode them,
  * ignore them, never renumber around them: they are what keeps the field after
  * them at the offset the deployed bytecode writes.
+ *
+ * `SlashRecord.disputedAt` is the dispute upgrade's thirteenth field (D-19).
+ * Read a record through `readSlashRecord` / `decodeSlashRecord`
+ * (`evm-slash-record.ts`).
  */
 export const X402_STAKE_ABI = parseAbi([
   'struct ProviderStake { uint128 bonded; uint64 unbonding; uint64 unbondingStartedAt; uint64 slashedInWindow; uint64 slashWindowStartedAt; uint64 pendingSlash; uint64 __gap; uint128 totalDeposited; uint128 totalWithdrawn; uint128 totalSlashed; }',
-  'struct SlashRecord { address provider; uint8 status; uint64 penalty; address beneficiary; uint64 proposedAt; uint32 __gap; address verifier; uint64 executableAt; uint32 __gap2; uint64 reserved; uint64 capAllowance; uint64 applied; uint64 executedAt; bytes32 policy; }',
+  'struct SlashRecord { address provider; uint8 status; uint64 penalty; address beneficiary; uint64 proposedAt; uint32 __gap; address verifier; uint64 executableAt; uint32 __gap2; uint64 reserved; uint64 capAllowance; uint64 applied; uint64 executedAt; bytes32 policy; uint64 disputedAt; }',
   'function stakeOf(address provider) view returns (ProviderStake)',
   'function bondedOf(address provider) view returns (uint64)',
   'function withdrawableOf(address provider) view returns (uint64)',
@@ -140,8 +193,14 @@ export const X402_STAKE_ABI = parseAbi([
  *   contract recovers the signer and calls `CONFIG.assertCanSign` itself.
  * - `executeSlash` and `expireSlash` are permissionless; every amount and the
  *   beneficiary are read off the record frozen at proposal.
- * - `cancelSlash` is `CONFIG.admin()`-only. It is vendored to ENCODE the
- *   unsigned calldata handed to the admin, and is never sent by this process.
+ * - `cancelSlash` is `CONFIG.admin()`- or `CONFIG.arbiter()`-only. It is
+ *   vendored to ENCODE the unsigned calldata handed to that person, and is
+ *   never sent by this process.
+ * - The dispute upgrade's batch doors (D-19), all ENCODED for a person and
+ *   never sent: `disputeSlashBatch` is the provider's own (`msg.sender ==
+ *   record.provider`), `upholdSlashBatch` the arbiter's, `cancelSlashBatch`
+ *   the admin's or the arbiter's. Each is atomic — one bad id reverts the
+ *   whole batch — so every builder pre-filters with `slashRecordOf`.
  *
  * The events are decoded off receipts to learn what a batched call did — a
  * `Multicall3` receipt carries no per-call return data.
@@ -152,9 +211,31 @@ export const X402_STAKE_SLASH_ABI = parseAbi([
   'function executeSlash(bytes32 requestId)',
   'function expireSlash(bytes32 requestId)',
   'function cancelSlash(bytes32 requestId)',
+  'function disputeSlashBatch(bytes32[] requestIds)',
+  'function upholdSlashBatch(bytes32[] requestIds)',
+  'function cancelSlashBatch(bytes32[] requestIds)',
   'event SlashProposed(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 reserved, uint64 capAllowance, uint64 pendingSlash, uint64 proposedAt, uint64 executableAt)',
   'event SlashExecuted(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 applied, uint64 agentAmount, uint64 platformAmount, uint64 providerAmount, uint16 slashAgentBps, uint16 slashPlatformBps, uint64 released, uint64 pendingSlash, uint128 bonded, uint64 unbonding, uint64 executedAt, uint64 proposedAt)',
   'event SlashCancelled(bytes32 indexed requestId, address indexed provider, uint8 reason, uint64 released, uint64 pendingSlash, uint64 cancelledAt)',
+  'event SlashDisputed(bytes32 indexed requestId, address indexed provider, uint64 disputedAt, uint64 executableAt)',
+  'event SlashUpheld(bytes32 indexed requestId, address indexed provider, address indexed arbiter, uint64 executableAt)',
+]);
+
+/**
+ * The events `EvmSlashProposalWatcher` reads (review H-1, and the dispute
+ * upgrade): `SlashProposed` to find records this platform did not plan,
+ * `SlashDisputed`, `SlashUpheld` and `SlashCancelled` to mirror a provider's
+ * on-chain dispute and the arbiter's ruling onto the case, and `SlashExecuted`
+ * to mirror an execution whoever sent it (BUG-R13-D-03). Kept apart from
+ * {@link X402_STAKE_SLASH_ABI} so the slash WRITES stay reachable from the
+ * slash executor only: this constant holds events and no function.
+ */
+export const X402_SLASH_WATCH_EVENTS_ABI = parseAbi([
+  'event SlashProposed(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 reserved, uint64 capAllowance, uint64 pendingSlash, uint64 proposedAt, uint64 executableAt)',
+  'event SlashDisputed(bytes32 indexed requestId, address indexed provider, uint64 disputedAt, uint64 executableAt)',
+  'event SlashUpheld(bytes32 indexed requestId, address indexed provider, address indexed arbiter, uint64 executableAt)',
+  'event SlashCancelled(bytes32 indexed requestId, address indexed provider, uint8 reason, uint64 released, uint64 pendingSlash, uint64 cancelledAt)',
+  'event SlashExecuted(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 applied, uint64 agentAmount, uint64 platformAmount, uint64 providerAmount, uint16 slashAgentBps, uint16 slashPlatformBps, uint64 released, uint64 pendingSlash, uint128 bonded, uint64 unbonding, uint64 executedAt, uint64 proposedAt)',
 ]);
 
 /**

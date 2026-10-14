@@ -47,6 +47,9 @@ import {
 import { SLASH_EXECUTOR, SlashExecutorPort } from '@modules/slash/ports/slash-executor.port';
 import { SLASH_CAPS_READER } from '@modules/slash/ports/slash-caps-reader.port';
 import { EvmSlashExecutor } from './evm/evm-slash-executor.service';
+import { EvmChainStateService } from './evm/chain-state/evm-chain-state.service';
+import { CHAIN_STATE_GATE } from './ports/chain-state-gate.port';
+import { SLASH_DISPUTE_INTENTS } from '@modules/slash/ports/slash-dispute-intent.port';
 import {
   NamespaceSlashCapsReader,
   NamespaceSlashExecutor,
@@ -463,6 +466,11 @@ import {
       inject: [EvmSlashExecutor],
     },
 
+    // The pause/blocklist gate (D-19): refuse early what the chain would refuse.
+    { provide: CHAIN_STATE_GATE, useExisting: EvmChainStateService },
+    // The dispute upgrade's unsigned intents — eip155 only.
+    { provide: SLASH_DISPUTE_INTENTS, useExisting: EvmSlashExecutor },
+
     // The buyer's own escrow doors, compiled but never signed.
     // `now` is `Date.now` in production; tests fix it to avoid a real clock.
     {
@@ -605,6 +613,8 @@ import {
     STAKE_INTENT_BUILDER,
     SLASH_EXECUTOR,
     SLASH_CAPS_READER,
+    CHAIN_STATE_GATE,
+    SLASH_DISPUTE_INTENTS,
     VOUCHER_REDEEMER,
     ESCROW_OPENER,
     ESCROW_INTENT_BUILDER,

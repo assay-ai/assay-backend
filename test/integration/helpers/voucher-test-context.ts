@@ -22,6 +22,7 @@ import {
   USDC_ASSET,
   createPaymentTestContext,
 } from './payment-test-context';
+import { noBlocks } from '../../unit/helpers/blocklist';
 
 /**
  * Records what would have paged, so a test can assert on it without a sink —
@@ -140,8 +141,8 @@ export async function createVoucherTestContext(): Promise<VoucherTestContext> {
 
   const escrows = new BuyerEscrowRepository(payment.dataSource);
   const alerts = new RecordingAlertPort();
-  const seqs = new EscrowSeqService(escrows, cache);
-  const vouchers = new VoucherService(payment.intents, registry, seqs);
+  const seqs = new EscrowSeqService(escrows, cache, noBlocks());
+  const vouchers = new VoucherService(payment.intents, registry, seqs, noBlocks());
 
   /** Stands in for the allocator behind `GET /escrow/next-seq`. */
   let issued = 0;

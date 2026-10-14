@@ -1,6 +1,8 @@
 import { randomUUID } from 'node:crypto';
 import { Injectable, Logger } from '@nestjs/common';
 
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { assertRailOffered } from '@modules/chains/chain-metadata';
 import {
@@ -114,6 +116,7 @@ export class VoucherService {
     private readonly intents: PaymentIntentService,
     private readonly chains: ChainAdapterRegistry,
     private readonly seqs: EscrowSeqService,
+    private readonly blocklist: AccountBlocklistService,
   ) {}
 
   /**
@@ -132,6 +135,17 @@ export class VoucherService {
     this.assertUnexpired(voucher, now);
     this.assertAuthorisesCall(voucher, input);
     const delegation = await this.assertAuthorisedByPayer(voucher, signature, input, now);
+    // AFTER the session binding and the signature (audit E-10): checked first,
+    // any agent could send an unsigned voucher naming any wallet and read from
+    // the error whether that wallet is on the internal blocklist. By now the
+    // parties are the session's own account, its escrow and the routed
+    // provider. `record` → `PaymentIntentService.create` checks the session's
+    // own parties again; this covers the voucher's.
+    this.blocklist.assertNotBlocked([
+      { role: BlockedRole.PAYER, kind: BlockSubjectKind.WALLET, subject: voucher.payer },
+      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: voucher.payTo },
+      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: voucher.provider },
+    ]);
     this.assertWithinEscrowLimit(voucher, input);
     await this.assertIssuedSeq(voucher, input);
 

@@ -10,19 +10,15 @@ import { AbstractEntityWithoutSoftDelete } from './abstract.entity';
  * money — a decision, a second signature, a cancelled proposal — needs a name
  * on it, and `McpSession` has never carried one.
  *
- * ## The secret is not in this table
+ * ## No secret in this table
  *
- * Bearer tokens live in `OPERATOR_CREDENTIALS_FILE` and are matched by SHA-256
- * digest at request time, exactly as `ConfigMcpSessionSource` does for agents.
- * This row is the **authority**: which roles the subject holds, what they may
- * spend without a second approver, and whether they are still allowed in.
- *
- * Splitting it that way buys one specific property: **revocation does not
- * require a deploy.** Setting `status = 'SUSPENDED'` refuses the next request
- * from a token that is still perfectly valid, which is what you need at 03:00
- * when the question is whether a laptop was stolen. A credential file is edited
- * by whoever can reach the box; a row is edited by whoever can reach the
- * database, and the two are deliberately different people.
+ * An operator signs in by signing the console's sign-in message with the
+ * wallet named in `wallet_address` (EIP-4361, `OperatorSignInService`). What
+ * the sign-in issues is a short-lived session held in Redis; this row is the
+ * **authority**: which roles the operator holds, what they may spend without a
+ * second approver, and whether they are still allowed in. Every request
+ * re-reads it, so removing or suspending an operator ends their access at
+ * once, whatever session they hold.
  *
  * ## No `organizationId`, deliberately
  *
@@ -49,10 +45,10 @@ import { AbstractEntityWithoutSoftDelete } from './abstract.entity';
  */
 @Entity('operators')
 @Index('uq_operators_subject', ['subject'], { unique: true })
+@Index('uq_operators_wallet_address', ['walletAddress'], { unique: true })
 export class OperatorEntity extends AbstractEntityWithoutSoftDelete {
   /**
-   * The SSO subject this operator will eventually be, and today the key the
-   * credential file maps a token onto.
+   * A short handle for the operator, e.g. `dan@`.
    *
    * Rendered verbatim in the override log and the adjudication queue's `Owner`
    * column — written as e.g. `dan@`, which is what a real deployment would
@@ -87,12 +83,23 @@ export class OperatorEntity extends AbstractEntityWithoutSoftDelete {
   })
   authorityLimitMinor: string | null;
 
-  /** `ACTIVE` | `SUSPENDED`. */
+  /**
+   * The EVM address the operator signs in with, lower-case. `null` only for a
+   * row that has not been linked to a wallet yet, which cannot sign in.
+   */
+  @Column({ name: 'wallet_address', type: 'varchar', length: 42, nullable: true })
+  walletAddress: string | null;
+
+  /** `ACTIVE` | `SUSPENDED` | `REMOVED`. Only `ACTIVE` may sign in or act. */
   @Column({ name: 'status', type: 'varchar', length: 16, default: 'ACTIVE' })
   status: string;
 
   @Column({ name: 'suspended_at', type: 'timestamptz', nullable: true })
   suspendedAt: Date | null;
+
+  /** Set exactly when `status = 'REMOVED'`. The row stays: the register references it. */
+  @Column({ name: 'removed_at', type: 'timestamptz', nullable: true })
+  removedAt: Date | null;
 
   /**
    * Stamped by the guard on a successful resolve.

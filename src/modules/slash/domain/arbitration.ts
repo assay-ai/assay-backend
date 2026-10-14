@@ -68,6 +68,13 @@ export enum ResolutionKind {
    * reasons that say nothing about whether the provider failed.
    */
   AUTO_CHAIN_VOIDED = 'AUTO_CHAIN_VOIDED',
+  /**
+   * The chain executed the judgement before anybody here decided the
+   * objection — `executeSlash` is permissionless (BUG-R13-D-03). Written on
+   * the open dispute row only, which closes as an upheld decision would
+   * (objection `REJECTED`, outcome `UPHELD`); it names no adjudicator.
+   */
+  AUTO_CHAIN_EXECUTED = 'AUTO_CHAIN_EXECUTED',
 }
 
 /** What follows from an outcome, automatically and without a second decision. */

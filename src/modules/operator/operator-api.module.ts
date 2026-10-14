@@ -1,16 +1,25 @@
 import { Module } from '@nestjs/common';
 
+import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
 
+import { OperatorApprovalsController } from './controllers/operator-approvals.controller';
+import { OperatorArbiterController } from './controllers/operator-arbiter.controller';
+import { OperatorBlocksController } from './controllers/operator-blocks.controller';
 import { OperatorCasesController } from './controllers/operator-cases.controller';
 import { OperatorReferenceController } from './controllers/operator-reference.controller';
+import { OperatorOperatorsController } from './controllers/operator-operators.controller';
 import { OperatorOverrideLogController } from './controllers/operator-override-log.controller';
 import { OperatorProvidersController } from './controllers/operator-providers.controller';
+import { OperatorSignInController } from './controllers/operator-sign-in.controller';
 import { OperatorModule } from './operator.module';
 import { AdjudicationQueueService } from './services/adjudication-queue.service';
+import { OperatorAccountBlockService } from './services/operator-account-block.service';
+import { OperatorApprovalService } from './services/operator-approval.service';
 import { OperatorCaseService } from './services/operator-case.service';
+import { OperatorDirectoryService } from './services/operator-directory.service';
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
 import { PlatformHealthService } from './services/platform-health.service';
 import { OperatorReferenceService } from './services/operator-reference.service';
@@ -25,7 +34,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
  * not.
  *
  * Every route behind these controllers reads across organizations by
- * construction, and does so behind `OperatorAuthGuard` rather than by
+ * construction (sign-in aside), and does so behind `OperatorAuthGuard` rather than by
  * weakening any scoped repository. That separation is the whole design: there
  * is no route on which a provider's bearer token and an operator's reach the
  * same handler.
@@ -42,16 +51,24 @@ import { OperatorReferenceService } from './services/operator-reference.service'
   // panel — the on-chain allowlist is the only authority on which keys the
   // settlement program will accept, so the panel reads it rather than the
   // local custody table alone.
-  imports: [OperatorModule, SlashModule, ProviderModule, ChainsModule],
+  imports: [OperatorModule, SlashModule, ProviderModule, ChainsModule, BlocklistModule],
   controllers: [
+    OperatorApprovalsController,
+    OperatorArbiterController,
+    OperatorBlocksController,
     OperatorCasesController,
+    OperatorOperatorsController,
     OperatorOverrideLogController,
     OperatorProvidersController,
+    OperatorSignInController,
     OperatorReferenceController,
   ],
   providers: [
     AdjudicationQueueService,
+    OperatorAccountBlockService,
+    OperatorApprovalService,
     OperatorCaseService,
+    OperatorDirectoryService,
     // `V-7`. `ProviderRepository` needs no import here — `PostgresModule` is
     // `@Global()`, and `OverrideLogService` already comes in with
     // `OperatorModule`.

@@ -75,7 +75,7 @@ describe('OperatorService', () => {
       const { service, repo } = build();
       repo.seed(buildOperator({ id: 'op-1', status: 'SUSPENDED' }));
 
-      await expectErrorCodeAsync(() => service.requireActive('op-1'), 'OPERATOR_SUSPENDED');
+      await expectErrorCodeAsync(() => service.requireActive('op-1'), 'OPERATOR_NOT_AUTHORIZED');
     });
   });
 

@@ -35,6 +35,14 @@ import {
   SlashRecordSnapshot,
 } from '@modules/slash/ports/slash-executor.port';
 import { SlashCaps, SlashCapsReaderPort } from '@modules/slash/ports/slash-caps-reader.port';
+import {
+  SlashBatchBuild,
+  SlashChainTerms,
+  SlashContractCall,
+  SlashDisputeIntentPort,
+  SlashIdRefusal,
+  SlashRuling,
+} from '@modules/slash/ports/slash-dispute-intent.port';
 import { slashRecordMismatch } from '@modules/slash/domain/prorata-slash';
 import { SigningRequesterType } from '@modules/verification/signing/domain/signing-journal';
 
@@ -42,6 +50,7 @@ import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import {
   MULTICALL3_ABI,
   X402_CONFIG_ABI,
+  X402_CONFIG_ARBITER_ABI,
   X402_STAKE_ABI,
   X402_STAKE_SLASH_ABI,
 } from './abi/x402.abi';
@@ -51,8 +60,10 @@ import {
   EvmSlashAttestation,
   hashSlashAttestation,
 } from './eip712/slash-attestation';
-import { slashStatusFromEvm } from './evm-slash-status';
-import { EvmDeployment } from './evm.constants';
+import { readConfigTerms } from './evm-config-terms';
+import { EvmSlashRecord, readSlashRecord } from './evm-slash-record';
+import { cancelReasonFromEvm, slashStatusFromEvm } from './evm-slash-status';
+import { EVM_CONSTANTS, EvmDeployment } from './evm.constants';
 import { EvmRelayerPort } from './ports/evm-relayer.port';
 
 /**
@@ -118,18 +129,10 @@ export interface EvmSlashExecutorConfig {
    * requirement.
    */
   readonly multicall: ReadonlyMap<ChainId, `0x${string}`>;
-  /**
-   * How long after its door opens a case whose parts the remaining windows
-   * would truncate is deferred rather than executed short. Default 3 days of
-   * the contract's 7-day grace.
-   */
-  readonly executeDeferLimitMs: number;
   /** Between receipt reads after a send. Default 1 s. */
   readonly receiptRetryDelayMs?: number;
 }
 
-/** Default {@link EvmSlashExecutorConfig.executeDeferLimitMs}. */
-export const DEFAULT_EVM_EXECUTE_DEFER_LIMIT_MS = 3 * 24 * 60 * 60 * 1000;
 const RECEIPT_ATTEMPTS = 3;
 
 /** Default `EVM_SLASH_BATCH_SIZE`. */
@@ -197,7 +200,9 @@ const PROPOSE_ATTESTATION_PURPOSE = 'settlement.evm.propose_slash.attestation';
  * the execution and the read. There is no `cancelledAt` either; a cancel's
  * time comes from its own event.
  */
-export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort {
+export class EvmSlashExecutor
+  implements SlashExecutorPort, SlashCapsReaderPort, SlashDisputeIntentPort
+{
   private readonly logger = new Logger(EvmSlashExecutor.name);
 
   constructor(
@@ -275,6 +280,7 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
       executableAt: secondsToDate(record.executableAt),
       executedAt: record.executedAt === 0n ? null : secondsToDate(record.executedAt),
       cancelledAt: null,
+      disputedAt: record.disputedAt === 0n ? null : secondsToDate(record.disputedAt),
       beneficiary: getAddress(record.beneficiary),
       policy: record.policy,
       verifier: getAddress(record.verifier),
@@ -353,26 +359,19 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
   }
 
   /**
-   * Execute, but never let the contract cut a case short by order.
+   * Execute every request, batched per chain.
    *
-   * `executeSlash` applies `min(reserved, windowRemaining, keyRemaining)` and
-   * DISCHARGES the rest — the provider's 24 h window and the verifier key's
-   * daily cap are shared by every case. Executing parts in whatever order a
-   * batch happens to have would let the alphabet decide which agent is paid
-   * in full and which is cut. So every group (`atomicGroup`, one case) is
-   * first simulated with its `slashRecordOf` read back inside the same
-   * `aggregate3`, and a group any of whose parts would be truncated is
-   * DEFERRED whole (`SlashCapExceeded`, a WAIT) until the windows have
-   * decayed. Past {@link EvmSlashExecutorConfig.executeDeferLimitMs} after its
-   * door opened, a group executes as the contract allows rather than risk the
-   * 7-day grace.
+   * **All or wait** (assay-evm 9f036a3): `executeSlash` pays exactly the
+   * record's `reserved`, or reverts `SlashWindowNotDrained` while the
+   * provider's or the verifier key's rolling window cannot take all of it.
+   * There is no partial payment, so nothing has to be simulated or deferred
+   * to keep a case from being cut short by order: a part that cannot be paid
+   * whole waits (a WAIT) and the next tick retries it.
    */
   async executeBatch(
     requests: readonly SlashExecutionRequest[],
   ): Promise<readonly SlashBatchOutcome<SlashExecutionResult>[]> {
-    const deferred = await this.deferTruncatedGroups(requests);
-    const live = requests.filter((_, index) => !deferred.has(index));
-    const executed = await this.batch<SlashExecutionRequest, SlashExecutionResult>(live, {
+    return this.batch<SlashExecutionRequest, SlashExecutionResult>(requests, {
       single: (request, knownHash) => this.executeOne(request, knownHash),
       prepare: async (request) => {
         await this.assertExecutable(request);
@@ -382,8 +381,6 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
         this.executionResultFromReceipt(request, receipt, hash),
       instruction: 'executeSlash',
     });
-    let next = 0;
-    return requests.map((_, index) => deferred.get(index) ?? executed[next++]);
   }
 
   async expire(request: SlashCancelRequest): Promise<SlashCancelResult> {
@@ -405,13 +402,19 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
     const cancelledAt = cancelled
       ? secondsToDate(BigInt((cancelled.args as { cancelledAt: bigint }).cancelledAt))
       : new Date(this.config.now());
-    return { signature: hash, cancelledAt };
+    const reason = cancelled
+      ? cancelReasonFromEvm(Number((cancelled.args as { reason: number }).reason))
+      : undefined;
+    return { signature: hash, cancelledAt, ...(reason ? { reason } : {}) };
   }
 
   /**
-   * The unsigned `cancelSlash` for `CONFIG.admin()`. Built, never sent:
-   * `cancelSlash` reverts `NotAdmin` for any other sender, and this process
-   * holds no admin key.
+   * The unsigned `cancelSlash` for the ARBITER, the only person this backend
+   * builds a cancel for (assay-evm D-19: an overturn or a suspension is the
+   * arbiter's `cancelSlash`, so the admin key stays cold). The arbiter is
+   * required: an unset arbiter is `CHAIN_ARBITER_NOT_SET`. Built, never sent:
+   * this process holds no such key. `cancelSlash` accepts a `Pending` or a
+   * `Disputed` record.
    */
   async buildCancel(request: SlashCancelRequest): Promise<SlashCancelIntent> {
     const { chainId } = request;
@@ -420,12 +423,9 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
     this.assertRecordProvider(record, request.provider, request.requestId);
 
     const deployment = this.deployment(chainId);
-    const admin = (await this.client(chainId).readContract({
-      address: deployment.config,
-      abi: X402_CONFIG_ABI,
-      functionName: 'admin',
-      args: [],
-    })) as `0x${string}`;
+    const terms = await this.chainTerms(chainId);
+    if (!terms.arbiter) throw ChainErrors.arbiterNotSet({ chainId, what: 'cancelSlash' });
+    const signer = terms.arbiter;
 
     return {
       transaction: encodeFunctionData({
@@ -434,11 +434,314 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
         args: [bytes32(request.requestId)],
       }),
       to: deployment.stake,
-      admin: getAddress(admin),
+      admin: signer,
+      signerRole: 'ARBITER',
       requestId: request.requestId,
       provider: request.provider,
       blockhash: '',
       lastValidBlockHeight: '0',
+    };
+  }
+
+  // ── The dispute upgrade's intents (D-19) ────────────────────────────────
+
+  /** The Config's dispute terms, read live. Any read failure is thrown (an RPC error). */
+  async chainTerms(chainId: ChainId): Promise<SlashChainTerms> {
+    const deployment = this.deployment(chainId);
+    const client = this.client(chainId);
+    const [terms, admin, params] = await Promise.all([
+      readConfigTerms(client, deployment.config),
+      client.readContract({
+        address: deployment.config,
+        abi: X402_CONFIG_ABI,
+        functionName: 'admin',
+        args: [],
+      }) as Promise<`0x${string}`>,
+      client.readContract({
+        address: deployment.config,
+        abi: X402_CONFIG_ABI,
+        functionName: 'params',
+        args: [],
+      }) as Promise<{ slashAgentBps: number | bigint }>,
+    ]);
+    return {
+      chainId,
+      ...terms,
+      admin: getAddress(admin),
+      slashAgentBps: Number(params.slashAgentBps),
+    };
+  }
+
+  /**
+   * The delay a record proposed NOW will freeze into its `executableAt`:
+   * `slashDelaySeconds()`, read live. A failed read throws; the caller
+   * retries on its next tick. Never assumed.
+   */
+  async slashDelaySeconds(chainId: ChainId): Promise<number> {
+    const delay = (await this.client(chainId).readContract({
+      address: this.deployment(chainId).config,
+      abi: X402_CONFIG_ABI,
+      functionName: 'slashDelaySeconds',
+      args: [],
+    })) as bigint;
+    return Number(delay);
+  }
+
+  /**
+   * `disputeSlashBatch(ids)` for the provider's own stake wallet, every id
+   * pre-checked against `_dispute`'s rule: the record exists, names this
+   * provider, is `Pending`, was never disputed before (`disputedAt == 0`), and its
+   * dispute window (`executableAt − now`) is
+   * still open. Neither the pause nor the blocklist closes this door, so a
+   * blocked provider gets an intent too.
+   */
+  async buildDisputeBatch(request: {
+    readonly chainId: ChainId;
+    readonly provider: string;
+    readonly requestIds: readonly string[];
+  }): Promise<SlashBatchBuild> {
+    const { chainId } = request;
+    const provider = this.address(request.provider, 'provider');
+    const ids = this.batchIds(request.requestIds);
+    const nowSeconds = BigInt(Math.floor(this.config.now() / 1000));
+
+    const refusals = await this.precheck(chainId, ids, (id, record) => {
+      if (getAddress(record.provider) !== provider) {
+        return refusal(id, 'NotSlashedProvider', 'the record names a different provider');
+      }
+      if (slashStatusFromEvm(record.status) !== 'PENDING') {
+        return refusal(
+          id,
+          'SlashNotPending',
+          `the record is ${slashStatusFromEvm(record.status)}, and only a PENDING record can be disputed`,
+        );
+      }
+      // A record may be disputed once: after an uphold it is Pending again
+      // with `disputedAt` kept, and the contract refuses a second dispute,
+      // which would revert the whole atomic batch (audit E-9).
+      if (record.disputedAt > 0n) {
+        return refusal(
+          id,
+          'SlashAlreadyDisputed',
+          `the record was already disputed at ${secondsToDate(record.disputedAt).toISOString()}`,
+        );
+      }
+      if (nowSeconds >= record.executableAt) {
+        return refusal(
+          id,
+          'DisputeWindowClosed',
+          `the dispute window closed at ${secondsToDate(record.executableAt).toISOString()}`,
+        );
+      }
+      return null;
+    });
+    if (refusals.length > 0) return { call: null, refusals };
+
+    return {
+      call: this.stakeCall(chainId, 'disputeSlashBatch', ids, provider, 'PROVIDER'),
+      refusals: [],
+    };
+  }
+
+  /**
+   * The arbiter's ruling over many records. `UPHOLD` → `upholdSlashBatch`
+   * (arbiter only; each record `Disputed`, inside `disputedAt + 30 d`, and not
+   * judged by the arbiter's own key — and an uphold does NOT necessarily make
+   * the record executable at once: the new `executableAt` is read back from
+   * `SlashUpheld` or `slashRecordOf`, never assumed); `CANCEL` →
+   * `cancelSlashBatch` (each record `Pending` or `Disputed`), for the arbiter.
+   * Both need the arbiter set.
+   */
+  async buildRulingBatch(request: {
+    readonly chainId: ChainId;
+    readonly ruling: SlashRuling;
+    readonly requestIds: readonly string[];
+  }): Promise<SlashBatchBuild> {
+    const { chainId, ruling } = request;
+    const terms = await this.chainTerms(chainId);
+    if (!terms.arbiter) {
+      throw ChainErrors.arbiterNotSet({
+        chainId,
+        what: ruling === 'UPHOLD' ? 'upholdSlashBatch' : 'cancelSlashBatch',
+      });
+    }
+    const ids = this.batchIds(request.requestIds);
+    const arbiter = terms.arbiter;
+    const nowSeconds = BigInt(Math.floor(this.config.now() / 1000));
+
+    const refusals = await this.precheck(chainId, ids, (id, record) => {
+      const status = slashStatusFromEvm(record.status);
+      if (ruling === 'UPHOLD') {
+        if (status !== 'DISPUTED') {
+          return refusal(id, 'SlashNotDisputed', `the record is ${status}, not DISPUTED`);
+        }
+        // The contract refuses an uphold after `disputedAt + 30 d`: past it the
+        // record is only `expireSlash`-able (DisputeUnresolved).
+        if (
+          record.disputedAt > 0n &&
+          nowSeconds >= record.disputedAt + BigInt(EVM_CONSTANTS.DISPUTE_TIMEOUT_SECONDS)
+        ) {
+          return refusal(
+            id,
+            'DisputeTimedOut',
+            'the dispute went unruled for 30 days; the record can only be expired now',
+          );
+        }
+        return null;
+      }
+      if (status !== 'PENDING' && status !== 'DISPUTED') {
+        return refusal(id, 'SlashNotPending', `the record is ${status}; nothing is left to cancel`);
+      }
+      return null;
+    });
+    if (refusals.length > 0) return { call: null, refusals };
+
+    return {
+      call:
+        ruling === 'UPHOLD'
+          ? this.stakeCall(chainId, 'upholdSlashBatch', ids, arbiter as string, 'ARBITER')
+          : this.stakeCall(chainId, 'cancelSlashBatch', ids, arbiter as string, 'ARBITER'),
+      refusals: [],
+    };
+  }
+
+  /**
+   * `setBlocked(account, true)` for the arbiter. Block ONLY: the contract lets
+   * the arbiter block and nobody but the admin unblock, so there is no
+   * unblock intent here at all.
+   */
+  async buildBlock(request: {
+    readonly chainId: ChainId;
+    readonly account: string;
+  }): Promise<SlashContractCall> {
+    const { chainId } = request;
+    const account = this.address(request.account, 'account');
+    if (BigInt(account) === 0n) {
+      throw ChainErrors.payloadMalformed({ reason: 'the zero address cannot be blocked' });
+    }
+    const terms = await this.chainTerms(chainId);
+    if (!terms.arbiter) throw ChainErrors.arbiterNotSet({ chainId, what: 'setBlocked' });
+    const config = this.deployment(chainId).config;
+    await this.assertNotPlatformAddress(chainId, account, terms);
+    const already = (await this.client(chainId).readContract({
+      address: config,
+      abi: X402_CONFIG_ABI,
+      functionName: 'blocked',
+      args: [account],
+    })) as boolean;
+    if (already) throw ChainErrors.addressAlreadyBlocked({ chainId, account });
+    return {
+      chainId,
+      to: getAddress(config),
+      data: encodeFunctionData({
+        abi: X402_CONFIG_ARBITER_ABI,
+        functionName: 'setBlocked',
+        args: [account, true],
+      }),
+      value: '0',
+      signer: terms.arbiter,
+      signerRole: 'ARBITER',
+      functionName: 'setBlocked',
+      requestIds: [],
+    };
+  }
+
+  /**
+   * Refuse a block of the platform's own configured addresses (audit E-12),
+   * each read live: the treasury and the redeemer (`params()`), the admin, the
+   * owner, the arbiter, any registered verifier (`canSign`), and the three
+   * contracts themselves.
+   */
+  private async assertNotPlatformAddress(
+    chainId: ChainId,
+    account: `0x${string}`,
+    terms: SlashChainTerms,
+  ): Promise<void> {
+    const deployment = this.deployment(chainId);
+    const client = this.client(chainId);
+    const read = (functionName: string, args: readonly unknown[] = []) =>
+      client.readContract({ address: deployment.config, abi: X402_CONFIG_ABI, functionName, args });
+    const [params, owner, isVerifier] = await Promise.all([
+      read('params') as Promise<{ treasury: `0x${string}`; redeemer: `0x${string}` }>,
+      read('owner') as Promise<`0x${string}`>,
+      read('canSign', [account]) as Promise<boolean>,
+    ]);
+    const roles: [string, string | null | undefined][] = [
+      ['treasury', params.treasury],
+      ['redeemer', params.redeemer],
+      ['admin', terms.admin],
+      ['owner', owner],
+      ['arbiter', terms.arbiter],
+      ['config contract', deployment.config],
+      ['stake contract', deployment.stake],
+      ['escrow contract', deployment.escrow],
+    ];
+    const hit = roles.find(([, address]) => address && getAddress(address) === account);
+    if (hit) {
+      throw ChainErrors.platformAddressNotBlockable({ chainId, account, role: hit[0] });
+    }
+    if (isVerifier) {
+      throw ChainErrors.platformAddressNotBlockable({ chainId, account, role: 'verifier key' });
+    }
+  }
+
+  /** 1 to `MAX_SLASH_BATCH` well-formed ids, lower-case, in the caller's order. */
+  private batchIds(requestIds: readonly string[]): `0x${string}`[] {
+    if (requestIds.length === 0 || requestIds.length > EVM_CONSTANTS.MAX_SLASH_BATCH) {
+      throw ChainErrors.payloadMalformed({
+        reason: `a slash batch carries 1 to ${EVM_CONSTANTS.MAX_SLASH_BATCH} request ids, got ${requestIds.length}`,
+      });
+    }
+    return requestIds.map((id) => bytes32(id));
+  }
+
+  /**
+   * Every id read with `slashRecordOf` and judged by `rule`. A duplicate is
+   * refused on its second occurrence — the contract's second iteration would
+   * find the record already moved and revert the batch.
+   */
+  private async precheck(
+    chainId: ChainId,
+    ids: readonly `0x${string}`[],
+    rule: (id: string, record: EvmSlashRecord) => SlashIdRefusal | null,
+  ): Promise<SlashIdRefusal[]> {
+    const seen = new Set<string>();
+    const records = await Promise.all(ids.map((id) => this.fetchRecord(chainId, id)));
+    const refusals: SlashIdRefusal[] = [];
+    ids.forEach((id, index) => {
+      const bare = id.slice(2);
+      if (seen.has(bare)) {
+        refusals.push(refusal(bare, 'DuplicateId', 'the id appears more than once in the batch'));
+        return;
+      }
+      seen.add(bare);
+      const record = records[index];
+      if (!record) {
+        refusals.push(refusal(bare, 'NoSuchRecord', 'no slash record exists for this id'));
+        return;
+      }
+      const refused = rule(bare, record);
+      if (refused) refusals.push(refused);
+    });
+    return refusals;
+  }
+
+  private stakeCall(
+    chainId: ChainId,
+    functionName: 'disputeSlashBatch' | 'upholdSlashBatch' | 'cancelSlashBatch',
+    ids: readonly `0x${string}`[],
+    signer: string,
+    signerRole: SlashContractCall['signerRole'],
+  ): SlashContractCall {
+    return {
+      chainId,
+      to: getAddress(this.deployment(chainId).stake),
+      data: encodeFunctionData({ abi: X402_STAKE_SLASH_ABI, functionName, args: [ids] }),
+      value: '0',
+      signer: getAddress(signer),
+      signerRole,
+      functionName,
+      requestIds: ids.map((id) => id.slice(2)),
     };
   }
 
@@ -476,7 +779,7 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
   ): Promise<SlashExecutionResult> {
     if (knownHash) {
       const record = await this.fetchRecord(request.chainId, request.requestId);
-      if (record && Number(record.status) === 2) {
+      if (record && slashStatusFromEvm(record.status) === 'EXECUTED') {
         const receipt = await this.receiptOf(request.chainId, knownHash);
         const result = receipt
           ? await this.executionResultFromReceipt(request, receipt, knownHash)
@@ -508,134 +811,6 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
   }
 
   // ── Internals: the batch engine ─────────────────────────────────────────
-
-  /**
-   * See {@link executeBatch}. Returns the deferred requests' outcomes by
-   * index. Requires `Multicall3` to see the contract's own arithmetic; on a
-   * chain without one there is no simulation that can, and nothing is
-   * deferred (documented in the G7 report as a limitation).
-   */
-  private async deferTruncatedGroups(
-    requests: readonly SlashExecutionRequest[],
-  ): Promise<Map<number, SlashBatchOutcome<SlashExecutionResult>>> {
-    const deferred = new Map<number, SlashBatchOutcome<SlashExecutionResult>>();
-    const byChain = new Map<ChainId, number[]>();
-    requests.forEach((request, index) =>
-      byChain.set(request.chainId, [...(byChain.get(request.chainId) ?? []), index]),
-    );
-
-    for (const [chainId, indexes] of byChain) {
-      const multicall = this.config.multicall.get(chainId);
-      if (!multicall) continue;
-      const stake = this.deployment(chainId).stake;
-      const groupOf = (index: number) => requests[index].atomicGroup ?? requests[index].requestId;
-      let remaining = [...indexes];
-
-      // Removing a group only frees capacity for the others, so this
-      // converges in at most one round per group.
-      for (let round = 0; round <= indexes.length; round += 1) {
-        let results: readonly { success: boolean; returnData: `0x${string}` }[];
-        try {
-          const calls = remaining.flatMap((index) => [
-            { callData: this.executeCallData(requests[index].requestId) },
-            {
-              callData: encodeFunctionData({
-                abi: X402_STAKE_ABI,
-                functionName: 'slashRecordOf',
-                args: [bytes32(requests[index].requestId)],
-              }),
-            },
-          ]);
-          if (calls.length === 0) break;
-          const reply = await this.client(chainId).call({
-            account: await this.relayerAddress(chainId),
-            to: multicall,
-            data: aggregate3(stake, calls),
-          });
-          results = decodeFunctionResult({
-            abi: MULTICALL3_ABI,
-            functionName: 'aggregate3',
-            data: reply.data ?? '0x',
-          }) as readonly { success: boolean; returnData: `0x${string}` }[];
-        } catch (error) {
-          // Cannot tell; defer nothing and let the ordinary path simulate.
-          this.logger.warn(
-            `could not simulate the execute windows on ${chainId} ` +
-              `(${error instanceof Error ? error.message : String(error)})`,
-          );
-          break;
-        }
-
-        const truncated = new Set<string>();
-        const keysOf = new Map<number, { provider: string; verifier: string | null }>();
-        remaining.forEach((index, position) => {
-          const executed = results[position * 2];
-          const read = results[position * 2 + 1];
-          if (!read?.success) return;
-          const record = decodeFunctionResult({
-            abi: X402_STAKE_ABI,
-            functionName: 'slashRecordOf',
-            data: read.returnData,
-          }) as { applied: bigint; reserved: bigint; executableAt: bigint; verifier: string };
-          keysOf.set(index, {
-            provider: requests[index].provider.toLowerCase(),
-            verifier: record.verifier ? record.verifier.toLowerCase() : null,
-          });
-          if (!executed?.success) return;
-          if (BigInt(record.applied) >= BigInt(record.reserved)) return;
-          const overdue =
-            this.config.now() >=
-            Number(record.executableAt) * 1000 + this.config.executeDeferLimitMs;
-          if (!overdue) truncated.add(groupOf(index));
-        });
-        if (truncated.size === 0) break;
-
-        // No starvation. A newer group that shares a provider window or a
-        // verifier key with a deferred one is held back too — otherwise the
-        // capacity freed by deferring the older case is taken by the newer
-        // ones, every tick, and the older case never executes.
-        const blockedProviders = new Set<string>();
-        const blockedVerifiers = new Set<string>();
-        let firstDeferred = Number.POSITIVE_INFINITY;
-        remaining.forEach((index, position) => {
-          if (!truncated.has(groupOf(index))) return;
-          firstDeferred = Math.min(firstDeferred, position);
-          const keys = keysOf.get(index);
-          if (keys) {
-            blockedProviders.add(keys.provider);
-            if (keys.verifier) blockedVerifiers.add(keys.verifier);
-          }
-        });
-        remaining.forEach((index, position) => {
-          if (position <= firstDeferred) return;
-          const keys = keysOf.get(index);
-          const shares =
-            blockedProviders.has(requests[index].provider.toLowerCase()) ||
-            (keys?.verifier !== null &&
-              keys?.verifier !== undefined &&
-              blockedVerifiers.has(keys.verifier));
-          if (shares) truncated.add(groupOf(index));
-        });
-
-        for (const index of remaining) {
-          if (!truncated.has(groupOf(index))) continue;
-          deferred.set(index, {
-            ok: false,
-            error: ChainErrors.transactionFailed({
-              instruction: 'executeSlash',
-              reason:
-                'SlashCapExceeded: deferred — the remaining provider or verifier window would ' +
-                'truncate this case; it executes whole once the window decays',
-              customErrorCode: null,
-              programErrorName: 'SlashCapExceeded',
-            }),
-          });
-        }
-        remaining = remaining.filter((index) => !truncated.has(groupOf(index)));
-      }
-    }
-    return deferred;
-  }
 
   private async batch<Request extends { chainId: ChainId; requestId: string }, Result>(
     requests: readonly Request[],
@@ -1089,6 +1264,23 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
       platformAmount: bigint;
       executedAt: bigint;
     };
+    // All or wait: an execution pays exactly the record's `reserved`. Read
+    // back and compared, never assumed; a mismatch is logged, and the event's
+    // `applied` is still what is recorded, since it is what moved.
+    try {
+      const record = await this.fetchRecord(request.chainId, request.requestId);
+      if (record && BigInt(record.reserved) !== BigInt(args.applied)) {
+        this.logger.error(
+          `executeSlash ${request.requestId} on ${request.chainId} applied ${args.applied}, but ` +
+            `the record reserved ${record.reserved}; the contract pays all or waits`,
+        );
+      }
+    } catch (error) {
+      this.logger.warn(
+        `executeSlash ${request.requestId}: the record could not be read back to check the ` +
+          `applied amount (${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
     return {
       signature: hash,
       appliedMinor: BigInt(args.applied).toString(),
@@ -1099,14 +1291,13 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
   }
 
   private async fetchRecord(chainId: ChainId, requestId: string): Promise<EvmSlashRecord | null> {
-    const raw = (await this.client(chainId).readContract({
-      address: this.deployment(chainId).stake,
-      abi: X402_STAKE_ABI,
-      functionName: 'slashRecordOf',
-      args: [bytes32(requestId)],
-    })) as EvmSlashRecord;
+    const record = await readSlashRecord(
+      this.client(chainId),
+      this.deployment(chainId).stake,
+      bytes32(requestId),
+    );
     // `None` (0) is the untouched mapping slot: no record.
-    return Number(raw.status) === 0 ? null : normaliseRecord(raw);
+    return record.status === 0 ? null : record;
   }
 
   private assertRecordProvider(record: EvmSlashRecord, provider: string, requestId: string): void {
@@ -1176,36 +1367,6 @@ export class EvmSlashExecutor implements SlashExecutorPort, SlashCapsReaderPort 
   }
 }
 
-interface EvmSlashRecord {
-  readonly provider: `0x${string}`;
-  readonly status: number;
-  readonly penalty: bigint;
-  readonly beneficiary: `0x${string}`;
-  readonly proposedAt: bigint;
-  readonly verifier: `0x${string}`;
-  readonly executableAt: bigint;
-  readonly reserved: bigint;
-  readonly applied: bigint;
-  readonly executedAt: bigint;
-  readonly policy: `0x${string}`;
-}
-
-function normaliseRecord(raw: EvmSlashRecord): EvmSlashRecord {
-  return {
-    provider: raw.provider,
-    status: Number(raw.status),
-    penalty: BigInt(raw.penalty),
-    beneficiary: raw.beneficiary,
-    proposedAt: BigInt(raw.proposedAt),
-    verifier: raw.verifier,
-    policy: raw.policy,
-    executableAt: BigInt(raw.executableAt),
-    reserved: BigInt(raw.reserved),
-    applied: BigInt(raw.applied),
-    executedAt: BigInt(raw.executedAt),
-  };
-}
-
 function aggregate3(stake: `0x${string}`, rows: readonly { callData: `0x${string}` }[]) {
   return encodeFunctionData({
     abi: MULTICALL3_ABI,
@@ -1252,6 +1413,14 @@ function receiptHasEvent(
   requestId: string,
 ): boolean {
   return findEvent(receipt, stake, eventName, requestId) !== null;
+}
+
+function refusal(
+  requestId: string,
+  reason: SlashIdRefusal['reason'],
+  detail: string,
+): SlashIdRefusal {
+  return { requestId: requestId.replace(/^0x/, '').toLowerCase(), reason, detail };
 }
 
 function revertError(instruction: string, name: string, hash: string | null) {

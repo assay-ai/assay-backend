@@ -2,8 +2,11 @@ import { Body, Controller, Get, Param, Patch, Query, UseGuards } from '@nestjs/c
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
-import { CurrentOperator, OperatorAuthGuard } from '@shared/auth';
+import { CurrentOperator, OperatorAuthGuard, OperatorRolesGuard, RequireRoles } from '@shared/auth';
 
+import { OverrideExempt } from '@modules/operator/decorators/override.decorator';
+import { OperatorRole } from '@modules/operator/domain/override-register';
+import { OperatorOverrideGuard } from '@modules/operator/guards/operator-override.guard';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
 
 import {
@@ -18,48 +21,19 @@ import { ToolRequestQueueService } from '../services/operator-tool-request-queue
 /**
  * The operator side of the tool request queue.
  *
- * ## Why this is `OperatorAuthGuard` alone, and not `OperatorRolesGuard` /
- * `OperatorOverrideGuard` too
+ * Reads are open to any operator, like the case queue. The one write, `PATCH`
+ * (acknowledge, accept or decline a ticket), needs a role (security review
+ * L-4): support or provider success own the queue, and the adjudication lead
+ * can stand in. `OperatorRolesGuard` enforces it.
  *
- * `OperatorCasesController`'s docstring lays out three guards and what each
- * answers: *who is this* (`OperatorAuthGuard`), *may they do this kind of
- * thing* (`OperatorRolesGuard`), *is this recorded* (`OperatorOverrideGuard`).
- * This controller only needs the first, for two separate reasons:
- *
- * 1. **It is not an override.** `src/modules/operator/domain/override-register.ts`
- *    enumerates every action across six families — verification, policy,
- *    slashing, money, access, keys — and nothing in that taxonomy is "answer a
- *    ticket about a tool we don't have yet." Acknowledging, accepting or
- *    declining a request moves no money, touches no stake, changes no verdict
- *    and grants no access; it changes the ticket's own row and nothing else,
- *    the same reasoning `OperatorCasesController.claim` gives for its own
- *    `@OverrideExempt` ("changes nobody's money and nobody's state but the
- *    queue's"). Filing this under a register built for interventions with a
- *    blast radius would bury the interventions under ordinary queue work, and
- *    the register's own docstring is explicit that unimplemented rows must be
- *    named rather than invented ad hoc — there is no `T-*` family to cite.
- * 2. **There is no role for it.** `OperatorRole` enumerates SRE, ADJ, ADJL,
- *    POL, POLA, TRE, TREA, BD, SUP, CMP, SEC — built for the slashing,
- *    verification and policy domains. The tool request queue's owner is the
- *    "product lead", which is not one
- *    of them, and `override-register.ts` is not a file this module owns —
- *    inventing a role assignment here would be a guess dressed as a decision.
- *    `OperatorRolesGuard`'s own docstring draws the same line this controller
- *    does for reads: "being blocked from a decision needs a role, being
- *    blocked from a list would just be noise" — and answering a ticket is
- *    closer to the list than to a decision with a blast radius, in the sense
- *    that matters here (nothing it does is irreversible or moves value).
- *
- * If tool-request ownership later gets its own role or its own
- * register row, this is the seam: add the role to `OperatorRole`, add
- * `@RequireRoles` here, and — if it should be logged as an intervention after
- * all — add a row to the register and `@Override` the `answer` handler. Doing
- * either today would be inventing product decisions this module was not asked
- * to make.
+ * It is not an override: answering a ticket moves no money, touches no stake,
+ * changes no verdict and grants no access, so it carries a named exemption,
+ * the same way `OperatorCasesController.claim` does. The ticket row keeps the
+ * first operator who answered it as its owner (`owner_operator_id`).
  */
 @ApiTags('Operator')
 @ApiBearerAuth()
-@UseGuards(OperatorAuthGuard)
+@UseGuards(OperatorAuthGuard, OperatorRolesGuard, OperatorOverrideGuard)
 @Controller('operator/tool-requests')
 export class OperatorToolRequestsController {
   constructor(private readonly queueService: ToolRequestQueueService) {}
@@ -82,6 +56,8 @@ export class OperatorToolRequestsController {
   }
 
   @Patch(':id')
+  @OverrideExempt('Answers a ticket: moves no money and changes no case, stake or access')
+  @RequireRoles(OperatorRole.SUP, OperatorRole.BD, OperatorRole.ADJL)
   @ApiOperation({ summary: 'Acknowledge, accept or decline — the whole MVP queue' })
   @ApiResponse({ status: 200, type: ToolRequestDto })
   @ApiResponse({ status: 404, description: 'No such request' })

@@ -1,7 +1,7 @@
-import { Body, Controller, Param, ParseUUIDPipe, Post, Req, UseGuards } from '@nestjs/common';
+import { Body, Controller, Param, ParseUUIDPipe, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
 
+import { RequestContext } from '@shared/observability';
 import { CurrentOperator, OperatorAuthGuard, OperatorRolesGuard, RequireRoles } from '@shared/auth';
 
 import { Override } from '../decorators/override.decorator';
@@ -39,22 +39,17 @@ export class OperatorProvidersController {
     @CurrentOperator() operator: OperatorSession,
     @Param('providerId', ParseUUIDPipe) providerId: string,
     @Body() body: VerifyProviderBodyDto,
-    @Req() request: Request,
   ) {
-    return this.verification.setVerification(operator, providerId, body, requestIdOf(request));
+    return this.verification.setVerification(operator, providerId, body, requestIdOf());
   }
 }
 
 /**
- * The request id, for cross-system tracing on the override row.
- *
- * Read off the header the platform already sets rather than generated here: an
- * id minted at this layer would trace the override to nothing upstream of it,
- * which is the half of the trace an incident actually needs.
+ * The request id for the override row: the one this server minted for the
+ * request (review L-7), never the caller's `x-request-id`, so a client cannot
+ * point the entry at an unrelated trace. Log lines of the same request carry
+ * it as `serverRequestId` beside the caller's `requestId`.
  */
-function requestIdOf(request: Request): string | null {
-  const header = request.headers['x-request-id'];
-  if (typeof header === 'string') return header.slice(0, 64);
-  if (Array.isArray(header) && header.length > 0) return header[0].slice(0, 64);
-  return null;
+function requestIdOf(): string | null {
+  return RequestContext.getServerRequestId();
 }

@@ -1,25 +1,26 @@
 import { OperatorRole } from '../domain/override-register';
 
 /**
- * Who is holding the token, resolved from the bearer credential.
+ * Who is calling, resolved from the operator's sign-in session.
  *
- * Mirrors {@link McpSession} deliberately: an authenticated route reads
- * *who* off a resolved session and never off the request body, and that
- * discipline should not have a different shape for an operator than it has
- * for an agent. The one thing this session carries that `McpSession` does
- * not is `roles` — `McpSessionPort` answers "which balance", this port
- * answers "which of the register's rows".
+ * Mirrors `McpSession` deliberately: an authenticated route reads *who* off a
+ * resolved session and never off the request body. The one thing this session
+ * carries that `McpSession` does not is `roles` — `McpSessionPort` answers
+ * "which balance", this port answers "which of the register's rows".
  */
 export interface OperatorSession {
   readonly operatorId: string;
 
-  /** The SSO subject, e.g. `dan@`. Rendered verbatim in the override log. */
+  /** A short handle, e.g. `dan@`. Rendered verbatim in the override log. */
   readonly subject: string;
 
   readonly displayName: string;
   readonly email: string;
 
-  /** The operator's roles, as held **right now** — read from `operators`, not from the token. */
+  /** The EVM address the operator signed in with, lower-case. */
+  readonly walletAddress?: string | null;
+
+  /** The operator's roles, as held **right now** — read from `operators`, not from the session. */
   readonly roles: readonly OperatorRole[];
 
   /**
@@ -31,14 +32,26 @@ export interface OperatorSession {
 }
 
 /**
- * Resolve a bearer token, or refuse.
+ * The second person of a two-person action.
+ *
+ * Only `OperatorApprovalService` makes one: it is the session of the operator
+ * who approved a queued action with their own sign-in, carrying the id of the
+ * approval it approves. `OverrideLogService.perform` marks that approval
+ * `APPROVED` in the action's own transaction. Typing the approver this way is
+ * what keeps a plain session — somebody else's, passed along — from standing
+ * in for a second person.
+ */
+export interface OperatorApprover extends OperatorSession {
+  readonly approvalId: string;
+}
+
+/**
+ * Resolve an operator session token, or refuse.
  *
  * **Fails closed by throwing**, the same contract as `McpSessionPort`: there
- * is no "anonymous operator" branch, so no caller can mistake an
- * unauthenticated request for a cheap one and let it reach a code path that
- * decides a case or moves money. A missing token, an unknown token and a
- * suspended operator are all refusals — which one is thrown differs (see
- * `ConfigOperatorSessionSource`), but none of them ever returns.
+ * is no "anonymous operator" branch. A missing, unknown, expired or revoked
+ * token is `OPERATOR_CREDENTIAL_INVALID` (401); a live session whose operator
+ * is no longer active is `OPERATOR_NOT_AUTHORIZED` (403).
  */
 export interface OperatorSessionPort {
   resolve(bearerToken: string | null): Promise<OperatorSession>;

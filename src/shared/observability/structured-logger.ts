@@ -88,6 +88,8 @@ export class StructuredLogger extends ConsoleLogger {
       ...base,
       requestId: store?.requestId ?? null,
       organizationId: store?.organizationId ?? null,
+      // Present on HTTP requests only; joins a log line to an override entry.
+      ...(store?.serverRequestId ? { serverRequestId: store.serverRequestId } : {}),
     };
 
     // `redact` is generic over `unknown`; the cast back to `typeof enriched`

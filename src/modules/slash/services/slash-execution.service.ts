@@ -8,13 +8,17 @@ import {
 } from '@modules/chains/ports/caip.types';
 import { isSolanaTransaction } from '@modules/chains/ports/unsigned-chain-transaction';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { EntityManager, IsNull, QueryRunner } from 'typeorm';
 
+import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { FleetSweepEntity } from '@database/postgres/entities/fleet-sweep.entity';
 import { FleetSweepRepository } from '@database/postgres/repositories/fleet-sweep.repository';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import {
   CHAIN_PROPOSABLE_STATUSES,
+  CLOSED_WITHOUT_PENALTY_STATUSES,
+  QueuedProposalRow,
   SlashProposalRepository,
 } from '@database/postgres/repositories/slash-proposal.repository';
 import {
@@ -23,7 +27,8 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
-import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { OperatorApprover, OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { ProviderErrors } from '@modules/provider/errors/provider.errors';
 import {
   STAKE_INTENT_BUILDER,
   StakeIntentBuilderPort,
@@ -34,9 +39,14 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import { SlashBeneficiaryService } from './slash-beneficiary.service';
 import { SlashCompensationService } from './slash-compensation.service';
 import { SlashPartsService } from './slash-parts.service';
-import { SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
+import { DISPUTE_TIMEOUT_MS, SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
 import { SLASH_PROPOSAL_SUBJECT_TYPE } from '../constants/slash-subject.constants';
-import { ArbitrationOutcome, OUTCOME_CONSEQUENCE, ResolutionKind } from '../domain/arbitration';
+import {
+  ARBITRATION_STATE_MAP,
+  ArbitrationOutcome,
+  OUTCOME_CONSEQUENCE,
+  ResolutionKind,
+} from '../domain/arbitration';
 import {
   ChainFailureKind,
   ChainProposalStatus,
@@ -80,6 +90,7 @@ export const CHAIN_CLAIM_STALE_MS = 10 * 60 * 1000;
 const CHAIN_STATUS_FOR_RECORD: Readonly<Record<SlashRecordStatus, ChainProposalStatus>> =
   Object.freeze({
     PENDING: ChainProposalStatus.PENDING,
+    DISPUTED: ChainProposalStatus.DISPUTED,
     EXECUTED: ChainProposalStatus.EXECUTED,
     CANCELLED: ChainProposalStatus.CANCELLED,
   });
@@ -125,19 +136,12 @@ export const SLASH_EXECUTION_GRACE_MS = 7 * 24 * 60 * 60 * 1000;
 const GRACE_WARNING_MS = 6 * 24 * 60 * 60 * 1000;
 
 /**
- * `MIN_SLASH_DELAY_SECONDS` — the program's floor on `Config.slash_delay_seconds`,
- * mirrored. **A lower bound, not the value:** the configured delay may be
- * longer, never shorter.
- *
- * That one-sided guarantee is exactly what makes it usable without an RPC. A
- * record proposed now cannot become executable before `now + 72h`, whatever the
- * chain is configured to, so a promise that falls inside that window is one a
- * fresh proposal cannot outrun. Deliberately NOT `SlashConfig.timelockMs`:
- * that is a local environment variable and could be set *above* the chain's
- * delay, which would make the bound optimistic in the one direction that
- * matters.
+ * The Solana program's floor on `Config.slash_delay_seconds`, 72 h — used for
+ * a namespace whose executor cannot report its live delay. On EVM the delay
+ * is READ (`EvmSlashExecutor.slashDelaySeconds`); since the dispute upgrade
+ * the admin may set it as low as ten minutes, so no EVM path may assume 72 h.
  */
-const MIN_SLASH_DELAY_MS = 72 * 60 * 60 * 1000;
+const SOLANA_MIN_SLASH_DELAY_MS = 72 * 60 * 60 * 1000;
 
 /**
  * `VOID` names that must **not** close the case on the *execute* path.
@@ -291,10 +295,16 @@ export class SlashExecutionService {
     let proposed = 0;
     let refused = 0;
     let failed = 0;
+    // The live delay per chain, read once per pass (see `slashDelayMs`).
+    const delays = new Map<string, number | null>();
 
     for (const candidate of due) {
       const proposal = await this.proposals.findOneScoped(candidate.organizationId, candidate.id);
       if (!proposal) continue;
+      const delayMs = await this.slashDelayMs(proposal, delays);
+      // The live delay could not be read: an RPC error, retried next tick.
+      // Nothing is proposed on an assumed delay.
+      if (delayMs === null) continue;
 
       // Proposing this case NOW would open the door before the promise closes.
       //
@@ -314,12 +324,12 @@ export class SlashExecutionService {
       //
       // Uncounted on purpose: the counters report what the chain did with a
       // judgement, and this one has deliberately not been shown to it yet.
-      if (this.proposingNowWouldOutrunThePromise(proposal, now)) {
+      if (this.proposingNowWouldOutrunThePromise(proposal, now, delayMs)) {
         this.logger.debug(
           `slash proposal ${proposal.id} is not being proposed yet: its promise to the provider ` +
             `runs to ${proposal.earliestExecutionAt.toISOString()} and a record written now ` +
             `could become executable by anyone from ` +
-            `${new Date(now.getTime() + MIN_SLASH_DELAY_MS).toISOString()}`,
+            `${new Date(now.getTime() + delayMs).toISOString()}`,
         );
         continue;
       }
@@ -405,6 +415,7 @@ export class SlashExecutionService {
             `propose_slash failed for proposal ${proposal.id}`,
             error instanceof Error ? error.stack : String(error),
           );
+          await this.flagPlanRefusal(proposal, error);
         }
       }
     }
@@ -413,11 +424,48 @@ export class SlashExecutionService {
   }
 
   /**
+   * Put a refused plan (review H-2) on the case timeline, once: the sweep
+   * retries every ten minutes and refuses again each time, and one entry is
+   * enough to send an operator to look. Never throws; the refusal itself is
+   * already on the row as `chain_last_error`.
+   */
+  private async flagPlanRefusal(proposal: SlashProposalEntity, error: unknown): Promise<void> {
+    const code = (error as { errorCode?: unknown })?.errorCode;
+    if (code !== 'SLASH_PLAN_EVIDENCE_MISMATCH' && code !== 'SLASH_BENEFICIARY_EVIDENCE_REFUSED') {
+      return;
+    }
+    if (proposal.chainLastError === code) return;
+    try {
+      await this.lifecycle.appendEventDirect({
+        organizationId: proposal.organizationId,
+        proposalId: proposal.id,
+        occurredAt: new Date(),
+        kind: code === 'SLASH_PLAN_EVIDENCE_MISMATCH' ? 'PLAN_REFUSED' : 'BENEFICIARY_REFUSED',
+        actorType: 'system',
+        actorId: null,
+        summary:
+          code === 'SLASH_PLAN_EVIDENCE_MISMATCH'
+            ? 'Nothing was signed: the stored slash plan does not match the window evidence. ' +
+              'An operator must check the parts before this case can go on chain.'
+            : 'Nothing was signed: a beneficiary is not a payer of the failed calls, or its ' +
+              'part is more than the penalty formula gives it (C5). An operator must check the parts ' +
+              'before this case can go on chain.',
+        detail: { reason: error instanceof Error ? error.message : String(error) },
+      });
+    } catch (appendError) {
+      this.logger.error(
+        `slash proposal ${proposal.id}: the plan refusal could not be put on the timeline`,
+        appendError instanceof Error ? appendError.stack : String(appendError),
+      );
+    }
+  }
+
+  /**
    * Would a record written now become executable before the provider's deadline?
    *
    * Reads the row and a constant — no RPC, no `Config` fetch, no second query.
-   * {@link MIN_SLASH_DELAY_MS} is the program's floor on `slash_delay_seconds`,
-   * so `now + MIN_SLASH_DELAY_MS` is the earliest moment a record proposed on
+   * `delayMs` is the chain's live delay ({@link slashDelayMs}), so
+   * `now + delayMs` is the earliest moment a record proposed on
    * this tick could be spent by a stranger. If the promise runs past that, the
    * only honest answers are "do not write the record yet" or "break the
    * promise", and this picks the first.
@@ -434,8 +482,42 @@ export class SlashExecutionService {
    * older than anything computable from `now`. {@link proposeOne} checks the
    * returned `executableAt` for exactly that.
    */
-  private proposingNowWouldOutrunThePromise(proposal: SlashProposalEntity, now: Date): boolean {
-    return proposal.earliestExecutionAt.getTime() > now.getTime() + MIN_SLASH_DELAY_MS;
+  private proposingNowWouldOutrunThePromise(
+    proposal: SlashProposalEntity,
+    now: Date,
+    delayMs: number,
+  ): boolean {
+    return proposal.earliestExecutionAt.getTime() > now.getTime() + delayMs;
+  }
+
+  /**
+   * How long after a proposal made now its record becomes executable, read
+   * from the chain: on EVM `X402Config.slashDelaySeconds()` (settable, 10
+   * minutes at the least), never assumed. A namespace whose executor cannot
+   * say (Solana) uses its program's floor.
+   *
+   * `null` when the live read failed: a plain RPC error. The caller defers the
+   * case to the next tick rather than propose on a guessed delay.
+   */
+  private async slashDelayMs(
+    proposal: SlashProposalEntity,
+    cache: Map<string, number | null>,
+  ): Promise<number | null> {
+    const chainId = chainIdOf(proposal.assetId as AssetId);
+    if (cache.has(chainId)) return cache.get(chainId) ?? null;
+    let delayMs: number | null = SOLANA_MIN_SLASH_DELAY_MS;
+    try {
+      const seconds = await this.executor?.slashDelaySeconds?.(chainId);
+      if (typeof seconds === 'number') delayMs = seconds * 1000;
+    } catch (error) {
+      delayMs = null;
+      this.logger.warn(
+        `the slash delay on ${chainId} could not be read; its proposals wait for the next tick ` +
+          `(${error instanceof Error ? error.message : String(error)})`,
+      );
+    }
+    cache.set(chainId, delayMs);
+    return delayMs;
   }
 
   /**
@@ -607,7 +689,42 @@ export class SlashExecutionService {
       );
     }
 
+    // The claim's `caseStatusIn` guard stops a closed case being PROPOSED. It
+    // cannot stop a case being closed while this proposal was in flight: the
+    // suspension or overturn then found `PROPOSING`, had nothing to cancel, and
+    // the mirror above has just written `PENDING` on a row whose case is over.
+    // Ask for the cancel now rather than leave it for the next tick's repair.
+    if (mirrored === ChainProposalStatus.PENDING || mirrored === ChainProposalStatus.DISPUTED) {
+      await this.requestCancelIfClosed(proposal);
+    }
+
     return mirrored;
+  }
+
+  /**
+   * Ask for the admin cancel when the case behind a freshly mirrored `PENDING`
+   * record has already been closed without a penalty.
+   *
+   * Never throws, for the reason given above its call site: the chain has
+   * spoken and the mirror is written. A failure here is repaired by
+   * {@link requestCancelsForClosedCases} on the next tick.
+   */
+  private async requestCancelIfClosed(proposal: SlashProposalEntity): Promise<void> {
+    try {
+      const current = await this.proposals.findOneScoped(proposal.organizationId, proposal.id);
+      if (!current) return;
+      if (!(CLOSED_WITHOUT_PENALTY_STATUSES as readonly string[]).includes(current.status)) return;
+      await this.requestAdminCancel(
+        proposal.organizationId,
+        proposal.id,
+        `the case was already ${current.status} when its proposal confirmed`,
+      );
+    } catch (error) {
+      this.logger.error(
+        `slash proposal ${proposal.id} could not be checked for a closure that raced its proposal`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 
   /** The one-judgement path: one beneficiary on the row, one record on chain. */
@@ -706,6 +823,108 @@ export class SlashExecutionService {
    *   the timeline entry reports, never a re-read of the passed-in entity,
    *   which `update()` does not refresh.
    */
+  /**
+   * A record of this case was executed on chain, possibly by somebody other
+   * than this platform's executor (BUG-R13-D-03: `executeSlash` is
+   * permissionless). Once the chain says the whole case is `Executed`, the case
+   * follows the same completion the executor's own success takes:
+   *
+   * - `PROPOSED` / `DISPUTED` / `UNDER_REVIEW` / `AWAITING_SECOND` / `UPHELD`
+   *   → `EXECUTED`, with applied and executed_at, the `EXECUTED` timeline
+   *   entry, the notification and the compensation (`completeExecution` +
+   *   `compensate`);
+   * - closed in the app (`CANCELLED`, `OVERTURNED`) → the existing
+   *   `EXECUTED_AFTER_CLOSURE` handling (`recordAnExecutionNobodyAskedFor`).
+   *
+   * Idempotent: a case already `EXECUTED`, already carrying the execution
+   * (`executed_at`), or `EXECUTING` (the executor's own claim — it and the
+   * reconciler finish it) is left alone. Never throws.
+   */
+  async mirrorChainExecution(
+    proposal: SlashProposalEntity,
+    transactionHash: string | null,
+  ): Promise<void> {
+    const fresh =
+      (await this.proposals.findOneScoped(proposal.organizationId, proposal.id)) ?? proposal;
+    if (
+      fresh.status === SlashProposalStatus.EXECUTED ||
+      fresh.status === SlashProposalStatus.EXECUTING ||
+      fresh.status === SlashProposalStatus.REVERSED ||
+      fresh.executedAt
+    ) {
+      return;
+    }
+    try {
+      const record = await this.readCaseRecord(fresh);
+      if (record?.status !== 'EXECUTED') return; // a part is still pending or disputed
+      if ((CHAIN_PROPOSABLE_STATUSES as readonly string[]).includes(fresh.status)) {
+        const result = {
+          signature: transactionHash,
+          appliedMinor: record.appliedMinor,
+          agentAmountMinor: record.agentAmountMinor,
+          platformAmountMinor: record.platformAmountMinor,
+          executedAt: record.executedAt ?? new Date(),
+        };
+        // An objection still open in the app closes with the case, in the same
+        // transaction, as an upheld decision closes it: the chain took the
+        // penalty, so the objection did not succeed.
+        const closeDispute = async (manager: EntityManager) => {
+          if (!fresh.disputeId) return;
+          await manager.update(
+            DisputeEntity,
+            { organizationId: fresh.organizationId, id: fresh.disputeId, resolvedAt: IsNull() },
+            {
+              state: ARBITRATION_STATE_MAP[ArbitrationOutcome.UPHELD],
+              outcome: ArbitrationOutcome.UPHELD,
+              resolutionKind: ResolutionKind.AUTO_CHAIN_EXECUTED,
+              resolvedAt: result.executedAt,
+              resolvedBy: 'chain:executeSlash',
+            },
+          );
+        };
+        if (
+          (await this.completeExecution(fresh, result, CHAIN_PROPOSABLE_STATUSES, closeDispute)) > 0
+        ) {
+          this.logger.warn(
+            `slash proposal ${fresh.id} was executed on chain by somebody else while the case ` +
+              `was ${fresh.status}; the case now records the penalty the chain took`,
+          );
+          await this.compensate(fresh, {
+            ...result,
+            signature: transactionHash ?? fresh.chainRequestId,
+          });
+        }
+        return;
+      }
+      await this.recordAnExecutionNobodyAskedFor(
+        fresh,
+        record,
+        'executed on chain by somebody else after the case was closed',
+      );
+    } catch (error) {
+      this.logger.error(
+        `slash proposal ${fresh.id}: an on-chain execution could not be mirrored; the reconcile ` +
+          `pass reads the record again`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
+  }
+
+  /**
+   * Every standing record of the case was cancelled ON CHAIN by somebody else
+   * — the arbiter's `cancelSlash` (a ruling for the provider) or an
+   * `expireSlash` — and nothing of it executed (audit E-6). Closes the case at
+   * once, with the chain mirror `CANCELLED`; a case already closed only gets
+   * the mirror. Never throws past the closure.
+   */
+  async closeCancelledOnChain(proposal: SlashProposalEntity, because: string): Promise<void> {
+    await this.voidCase(
+      proposal,
+      { status: ChainProposalStatus.CANCELLED, lastError: null },
+      because,
+    );
+  }
+
   private async voidCase(
     proposal: SlashProposalEntity,
     chain: {
@@ -852,6 +1071,9 @@ export class SlashExecutionService {
     proposal: SlashProposalEntity,
     chainStatus: ChainProposalStatus,
   ): Date | null {
+    if (chainStatus === ChainProposalStatus.DISPUTED && proposal.chainDisputedAt) {
+      return new Date(proposal.chainDisputedAt.getTime() + DISPUTE_TIMEOUT_MS);
+    }
     if (chainStatus !== ChainProposalStatus.PENDING) return null;
     if (!proposal.chainExecutableAt) return null;
     return new Date(proposal.chainExecutableAt.getTime() + SLASH_EXECUTION_GRACE_MS);
@@ -1307,15 +1529,26 @@ export class SlashExecutionService {
           continue;
         }
 
-        if (!record || record.status === 'PENDING') {
+        if (!record || record.status === 'PENDING' || record.status === 'DISPUTED') {
           // Either the transaction never landed or it landed and failed. The
           // judgement is alive; put the case back in the queue and release the
-          // claim so the next `executeDue` can take it.
+          // claim so the next `executeDue` can take it. A record the provider
+          // DISPUTED (D-19) is alive too: the mirror says so, which keeps it
+          // out of the execute sweep until the arbiter's uphold lands.
           await this.proposals.transitionIfIn(
             proposal.organizationId,
             proposal.id,
             [SlashProposalStatus.EXECUTING],
-            { status: SlashProposalStatus.UPHELD, chainClaimedAt: null },
+            {
+              status: SlashProposalStatus.UPHELD,
+              chainClaimedAt: null,
+              ...(record?.status === 'DISPUTED'
+                ? {
+                    chainStatus: ChainProposalStatus.DISPUTED,
+                    chainDisputedAt: record.disputedAt ?? null,
+                  }
+                : {}),
+            },
           );
           returned += 1;
           continue;
@@ -1342,8 +1575,32 @@ export class SlashExecutionService {
     }
 
     await this.sweepStrandedParts(now);
+    await this.sweepExternalExecutions(now);
 
     return { recovered, returned, voided };
+  }
+
+  /**
+   * The backstop behind the watcher's `SlashExecuted` mirror (BUG-R13-D-03):
+   * cases whose record still mirrors `PENDING`/`DISPUTED` after its door
+   * opened are re-read, and any the chain says were executed — by anybody —
+   * are completed through {@link mirrorChainExecution}. Covers an event the
+   * watcher missed (a range read before it watched `SlashExecuted`, a lost
+   * cursor). `EXECUTING` is the executor's own and is skipped. Never throws.
+   */
+  private async sweepExternalExecutions(now: Date): Promise<void> {
+    try {
+      const rows = await this.proposals.findStandingPastDoor(now, this.config.sweepBatchSize);
+      for (const row of rows) {
+        const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (proposal) await this.mirrorChainExecution(proposal, null);
+      }
+    } catch (error) {
+      this.logger.error(
+        `the external-execution sweep failed`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 
   /**
@@ -1426,16 +1683,18 @@ export class SlashExecutionService {
    *
    * ## Why it never throws
    *
-   * Two of its three callers reach it *after* a transaction has committed —
-   * `ArbitrationService.decide` and `second()` — and the third is a cron tick
-   * sweeping a batch. An exception here would hand an operator a failure for a
-   * decision that stands, which they would then make again.
+   * Most of its callers reach it *after* a transaction has committed —
+   * `ArbitrationService.decide`, `second()` and `suspend()` — and the rest are
+   * cron ticks sweeping a batch. An exception here would hand an operator a
+   * failure for a decision that stands, which they would then make again.
+   *
+   * Returns whether it recorded a request, so a sweep can count what it did.
    */
   async requestAdminCancel(
     organizationId: string,
     proposalId: string,
     reason: string,
-  ): Promise<void> {
+  ): Promise<boolean> {
     let proposal: SlashProposalEntity | null;
     try {
       proposal = await this.proposals.findOneScoped(organizationId, proposalId);
@@ -1444,19 +1703,38 @@ export class SlashExecutionService {
         `slash proposal ${proposalId} could not be read to request its chain cancellation`,
         error instanceof Error ? error.stack : String(error),
       );
-      return;
+      return false;
     }
     // `PENDING` is the only mirror with a reservation behind it. `NONE` and
     // `REFUSED` never wrote a record, `CANCELLED` released one, `EXECUTED`
     // spent it, and `CANCEL_REQUESTED` has already been asked for — asking
     // again would rewrite the same row and append a second identical event.
-    if (!proposal || proposal.chainStatus !== ChainProposalStatus.PENDING) return;
+    // `DISPUTED` (D-19) is a standing reservation too, and `cancelSlash`
+    // accepts it.
+    if (
+      !proposal ||
+      (proposal.chainStatus !== ChainProposalStatus.PENDING &&
+        proposal.chainStatus !== ChainProposalStatus.DISPUTED)
+    ) {
+      return false;
+    }
 
     try {
       await this.proposals.update(
         { organizationId, id: proposalId },
         { chainStatus: ChainProposalStatus.CANCEL_REQUESTED, chainLastError: null },
       );
+    } catch (error) {
+      this.logger.error(
+        `slash proposal ${proposalId} could not be marked as awaiting an admin cancel (${reason})`,
+        error instanceof Error ? error.stack : String(error),
+      );
+      return false;
+    }
+
+    // The request is recorded; a timeline entry that does not append is a lost
+    // annotation, not a lost request.
+    try {
       await this.lifecycle.appendEventDirect({
         organizationId,
         proposalId,
@@ -1466,15 +1744,49 @@ export class SlashExecutionService {
         actorId: null,
         summary:
           `The on-chain reservation is due to be released (${reason}); ` +
-          `waiting for the settlement admin to sign cancel_slash`,
+          `waiting for the arbiter (or, with none appointed, the settlement admin) to sign ` +
+          `cancel_slash`,
         detail: { reason, requestId: proposal.chainRequestId },
       });
     } catch (error) {
       this.logger.error(
-        `slash proposal ${proposalId} could not be marked as awaiting an admin cancel (${reason})`,
+        `slash proposal ${proposalId} is awaiting an admin cancel (${reason}) but its timeline ` +
+          `entry failed`,
         error instanceof Error ? error.stack : String(error),
       );
     }
+    return true;
+  }
+
+  /**
+   * Ask for the cancel of every closed case whose record still mirrors
+   * `PENDING` — the repair behind the best-effort requests.
+   *
+   * A suspension and an overturn both ask *after* their own transaction has
+   * committed, so the request can be lost: the write fails, the process dies
+   * between the two, or the case is closed while `propose_slash` is in flight
+   * and the record lands afterwards. Such a row is selected by nothing — the
+   * execute sweep wants `UPHELD`, the admin-cancel sweep wants
+   * `CANCEL_REQUESTED` — while the provider's stake stays reserved and the
+   * record becomes anyone's to execute once its timelock passes.
+   *
+   * Records the request and nothing else: no transaction is built, signed or
+   * sent here. Bounded by the sweep batch size, soonest deadline first, and
+   * idempotent — a marked row leaves the predicate, so a second pass finds
+   * nothing. Returns how many it marked.
+   */
+  async requestCancelsForClosedCases(): Promise<number> {
+    const rows = await this.proposals.findClosedStillPending(this.config.sweepBatchSize);
+    let requested = 0;
+    for (const row of rows) {
+      const marked = await this.requestAdminCancel(
+        row.organizationId,
+        row.id,
+        'the case is closed and its on-chain record was still pending',
+      );
+      if (marked) requested += 1;
+    }
+    return requested;
   }
 
   /**
@@ -1557,13 +1869,12 @@ export class SlashExecutionService {
           continue;
         }
 
-        // Still `Pending`. The expiry door opens seven days after the record
-        // became executable — the program's own `SLASH_EXECUTION_GRACE_SECONDS`,
-        // read from the client rather than retyped here.
-        const executableAt = proposal.chainExecutableAt;
+        // Still standing. When it can be expired depends on what the record
+        // is NOW, not on whether it was ever disputed (audit E-8).
+        const expiresAt = await this.standingExpiryMs(proposal);
         if (
-          executableAt &&
-          now.getTime() >= executableAt.getTime() + SLASH_EXECUTION_GRACE_MS &&
+          expiresAt !== null &&
+          now.getTime() >= expiresAt &&
           (await this.expireAbandonedRecord(proposal))
         ) {
           expired += 1;
@@ -1580,6 +1891,75 @@ export class SlashExecutionService {
     }
 
     return { mirrored, expired, waiting };
+  }
+
+  /**
+   * When a standing record (or every standing part) can be expired, in ms:
+   *
+   * - `Disputed` on chain → `disputedAt + 30 d` (`DisputeUnresolved`);
+   * - `Pending` → `executableAt + 7 d`, the program's
+   *   `SLASH_EXECUTION_GRACE_SECONDS`. That includes a record that was
+   *   disputed and then UPHELD (audit E-8): `chain_disputed_at` is kept after
+   *   an uphold as the record of the dispute, but the chain expires an upheld
+   *   record on the grace from its new `executableAt`, so using the dispute
+   *   clock held the provider's reservation weeks too long, or tried too early.
+   *
+   * Read live; `null` when it cannot be told.
+   */
+  private async standingExpiryMs(proposal: SlashProposalEntity): Promise<number | null> {
+    if (this.parts?.appliesTo(proposal)) {
+      await this.readCaseRecord(proposal);
+      return (await this.parts.expirableAt(proposal))?.getTime() ?? null;
+    }
+    const record = await this.readCaseRecord(proposal).catch(() => null);
+    if (record?.status === 'DISPUTED' && record.disputedAt) {
+      return record.disputedAt.getTime() + DISPUTE_TIMEOUT_MS;
+    }
+    const doors = [record?.executableAt, proposal.chainExecutableAt]
+      .filter((date): date is Date => date instanceof Date)
+      .map((date) => date.getTime());
+    return doors.length > 0 ? Math.max(...doors) + SLASH_EXECUTION_GRACE_MS : null;
+  }
+
+  /**
+   * Records the provider disputed on chain (D-19) that nobody ruled on within
+   * 30 days. `expireSlash` is then permissionless (`DisputeUnresolved`), so
+   * this platform reaps them and the provider's reservation is released; the
+   * judgement can never execute, so a case still open is closed. A record
+   * whose cancel is requested is left to `sweepAdminCancels`, which applies
+   * the same clock. Never throws.
+   */
+  async sweepUnresolvedDisputes(now: Date = new Date()): Promise<{ expired: number }> {
+    if (!this.executor) return { expired: 0 };
+    const rows = await this.proposals.findChainDisputedBefore(
+      new Date(now.getTime() - DISPUTE_TIMEOUT_MS),
+      this.config.sweepBatchSize,
+    );
+    let expired = 0;
+    for (const row of rows) {
+      try {
+        const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (!proposal || proposal.chainStatus !== ChainProposalStatus.DISPUTED) continue;
+        if (!(await this.expireAbandonedRecord(proposal))) continue;
+        expired += 1;
+        // The provider won by default (B7): never proposed again.
+        await this.proposals.update(
+          { organizationId: proposal.organizationId, id: proposal.id },
+          { chainDisputeWonAt: proposal.chainDisputeWonAt ?? now },
+        );
+        await this.voidCase(
+          proposal,
+          { status: ChainProposalStatus.CANCELLED, lastError: null, mirroredByCaller: true },
+          'the provider disputed it on chain and the arbiter did not rule within 30 days',
+        );
+      } catch (error) {
+        this.logger.error(
+          `slash proposal ${row.id}: the unresolved on-chain dispute could not be swept`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    }
+    return { expired };
   }
 
   /**
@@ -1635,11 +2015,14 @@ export class SlashExecutionService {
         actorType: 'system',
         actorId: null,
         summary:
-          'The on-chain reservation was reaped by expire_slash — the settlement admin did not ' +
-          'cancel it inside the seven-day grace',
+          result.reason === 'DISPUTE_UNRESOLVED'
+            ? 'The on-chain reservation was reaped by expire_slash — the dispute went unruled ' +
+              'for 30 days'
+            : 'The on-chain reservation was reaped by expire_slash — nobody cancelled it inside ' +
+              'the seven-day grace',
         detail: {
           signature: result.signature,
-          reason: 'EXPIRED',
+          reason: result.reason ?? 'EXPIRED',
           requestId: proposal.chainRequestId,
         },
       });
@@ -1729,6 +2112,15 @@ export class SlashExecutionService {
 
       if (record.status === 'EXECUTED') {
         await this.recordAnExecutionNobodyAskedFor(proposal, record, reason);
+        return false;
+      }
+
+      if (record.status === 'DISPUTED') {
+        // Still standing (D-19): the provider disputed it while the cancel
+        // waited. `cancelSlash` still takes it; the 30-day clock is noted.
+        if (record.disputedAt && !proposal.chainDisputedAt) {
+          await this.proposals.update(scope, { chainDisputedAt: record.disputedAt });
+        }
         return false;
       }
 
@@ -2014,6 +2406,28 @@ export class SlashExecutionService {
     const organizationId = proposal.organizationId;
     const proposalId = proposal.id;
     try {
+      // B7: an incident whose on-chain dispute the provider WON is never put
+      // back on chain under a new request id.
+      if (await this.providerWonTheDispute(proposal)) {
+        this.logger.warn(
+          `slash proposal ${proposalId} is not re-proposed: the provider won its on-chain dispute`,
+        );
+        await this.lifecycle
+          .appendEventDirect({
+            organizationId,
+            proposalId,
+            occurredAt: now,
+            kind: 'REPROPOSAL_REFUSED',
+            actorType: 'system',
+            actorId: null,
+            summary:
+              'Not proposed again: the provider won the on-chain dispute of this case, so it ' +
+              'cannot be put back on chain under a new request id',
+            detail: { chainDisputeWonAt: proposal.chainDisputeWonAt?.toISOString() ?? null },
+          })
+          .catch(() => undefined);
+        return;
+      }
       const chainEpoch = proposal.chainEpoch + 1;
       // Derived from the BUMPED epoch. Deriving from the row as it stands would
       // reproduce the id that was just cancelled, and `propose_slash`'s `init`
@@ -2057,7 +2471,8 @@ export class SlashExecutionService {
       // fresh epoch the first tick on which the door can land after the promise.
       // The old, larger record has already been cancelled, so nothing is
       // reserved in the meantime.
-      if (this.proposingNowWouldOutrunThePromise(refreshed, now)) {
+      const delayMs = await this.slashDelayMs(refreshed, new Map());
+      if (delayMs === null || this.proposingNowWouldOutrunThePromise(refreshed, now, delayMs)) {
         this.logger.log(
           `slash proposal ${proposalId} was re-proposed at its revised penalty but its promise ` +
             `runs to ${refreshed.earliestExecutionAt.toISOString()}; the fresh epoch is left for ` +
@@ -2083,6 +2498,16 @@ export class SlashExecutionService {
         error instanceof Error ? error.stack : String(error),
       );
     }
+  }
+
+  /**
+   * B7: did the provider win an on-chain dispute of this case
+   * (`chain_dispute_won_at`, written when a record is cancelled while
+   * `DISPUTED` or expired as `DisputeUnresolved`)?
+   */
+  private async providerWonTheDispute(proposal: SlashProposalEntity): Promise<boolean> {
+    if (proposal.chainDisputeWonAt) return true;
+    return false;
   }
 
   /**
@@ -2182,11 +2607,7 @@ export class SlashExecutionService {
     });
 
     if (!enrolment?.stakeAuthorityAccountId) {
-      throw SlashErrors.notExecuted({
-        status:
-          `provider ${proposal.providerId} has no proved stake authority on ${chainId} ` +
-          `to slash`,
-      });
+      throw ProviderErrors.stakeAuthorityUnprovenFor({ providerId: proposal.providerId, chainId });
     }
 
     return enrolment.stakeAuthorityAccountId as AccountId;
@@ -2356,6 +2777,30 @@ export class SlashExecutionService {
    * @returns the rows affected. Zero means somebody else moved the case first,
    *   and nothing is announced for a transition that did not happen.
    */
+  /** The case row's patch for a recorded execution — one shape for every writer. */
+  private executedPatch(result: {
+    readonly signature: string | null;
+    readonly appliedMinor: string;
+    readonly platformAmountMinor: string;
+    readonly executedAt: Date;
+  }): Partial<SlashProposalEntity> & { status: string } {
+    return {
+      status: SlashProposalStatus.EXECUTED,
+      executedAt: result.executedAt,
+      executionSignature: result.signature,
+      appliedAmount: result.appliedMinor,
+      // Recorded, never booked: it went to the treasury, which is outside the
+      // vault the reconciler measures.
+      platformAmount: result.platformAmountMinor,
+      chainStatus: ChainProposalStatus.EXECUTED,
+      // Nothing is in flight for this row any more. Leaving the claim
+      // standing would keep it inside `findExecutingToReconcile`'s staleness
+      // window for no reason.
+      chainClaimedAt: null,
+      chainLastError: null,
+    };
+  }
+
   private async completeExecution(
     proposal: SlashProposalEntity,
     result: {
@@ -2365,27 +2810,25 @@ export class SlashExecutionService {
       readonly executedAt: Date;
     },
     expectedFrom: readonly string[],
+    // Written in the SAME transaction as the case's move to EXECUTED, and only
+    // when that move took (e.g. closing the open dispute row).
+    alongside?: (manager: EntityManager) => Promise<void>,
   ): Promise<number> {
-    const affected = await this.proposals.transitionIfIn(
-      proposal.organizationId,
-      proposal.id,
-      expectedFrom,
-      {
-        status: SlashProposalStatus.EXECUTED,
-        executedAt: result.executedAt,
-        executionSignature: result.signature,
-        appliedAmount: result.appliedMinor,
-        // Recorded, never booked: it went to the treasury, which is outside the
-        // vault the reconciler measures.
-        platformAmount: result.platformAmountMinor,
-        chainStatus: ChainProposalStatus.EXECUTED,
-        // Nothing is in flight for this row any more. Leaving the claim
-        // standing would keep it inside `findExecutingToReconcile`'s staleness
-        // window for no reason.
-        chainClaimedAt: null,
-        chainLastError: null,
-      },
-    );
+    const transition = (manager?: EntityManager) =>
+      this.proposals.transitionIfIn(
+        proposal.organizationId,
+        proposal.id,
+        expectedFrom,
+        this.executedPatch(result),
+        manager,
+      );
+    const affected = alongside
+      ? await this.proposals.manager.transaction(async (manager) => {
+          const moved = await transition(manager);
+          if (moved > 0) await alongside(manager);
+          return moved;
+        })
+      : await transition();
 
     if (affected === 0) {
       this.logger.error(
@@ -2579,7 +3022,11 @@ export class SlashExecutionService {
    *
    * The signature is **verified against the cluster**, not trusted: the
    * transaction has to have confirmed, and to contain a `deposit_stake` into
-   * this provider's own stake account for at least the amount the chain took.
+   * this provider's own stake account for at least the amount the chain took,
+   * funded by the settlement treasury and mined after the slash executed
+   * (review M-3: before, the provider's own earlier deposit passed). One
+   * deposit compensates one case (`uq_slash_proposals_reversal_signature`), and
+   * the status moves inside the override's transaction.
    * Without that check this route would be a way to mark a case compensated by
    * typing a plausible string, which is the same thing as not having the route.
    *
@@ -2602,7 +3049,7 @@ export class SlashExecutionService {
    */
   async markCompensated(
     operator: OperatorSession,
-    approver: OperatorSession,
+    approver: OperatorApprover | null,
     organizationId: string,
     proposalId: string,
     signature: string,
@@ -2610,8 +3057,11 @@ export class SlashExecutionService {
     note: string,
     requestId?: string | null,
   ): Promise<SlashProposalEntity> {
-    if (!this.stakeIntents) {
-      throw SlashErrors.chainUnavailable({ proposalId, reason: 'no stake intent builder' });
+    if (!this.stakeIntents || !this.executor) {
+      throw SlashErrors.chainUnavailable({
+        proposalId,
+        reason: 'no settlement executor or stake intent builder',
+      });
     }
 
     const proposal = await this.lifecycle.require(organizationId, proposalId);
@@ -2622,8 +3072,21 @@ export class SlashExecutionService {
       throw SlashErrors.invalidTransition({ from, to: SlashProposalStatus.REVERSED });
     }
 
+    // An EVM hash is hex, and `0xAB…` and `0xab…` are one transaction; stored
+    // lower-case so the unique index sees them as one. Solana signatures are
+    // base58 and case-sensitive, so they are kept as given.
+    if (namespaceOf(proposal.assetId as AssetId) === ChainNamespace.EIP155) {
+      signature = signature.toLowerCase();
+    }
+
     const account = await this.stakeAuthorityAccountOf(proposal);
-    const deposited = await this.stakeIntents.confirmedDeposit(signature, account);
+    // Review M-3: only a deposit the treasury funded, mined after this slash
+    // executed. `assertCompensable` has already required `executed_at`.
+    const treasury = await this.executor.settlementTreasury(proposal.assetId as AssetId);
+    const deposited = await this.stakeIntents.confirmedDeposit(signature, account, {
+      funder: treasury,
+      after: proposal.executedAt as Date,
+    });
     const owed = BigInt(proposal.appliedAmount as string);
     if (deposited === null || MoneyUtil.toAtomic(deposited) < owed) {
       throw SlashErrors.compensationNotConfirmed({
@@ -2654,12 +3117,21 @@ export class SlashExecutionService {
           amountMinor: restoredMinor,
         },
         async (queryRunner) => {
-          const affected = await this.proposals.markReversedIfExecuted(
-            organizationId,
-            proposalId,
-            compensatedAt,
-            signature,
-          );
+          let affected: number;
+          try {
+            affected = await this.proposals.markReversedIfExecuted(
+              organizationId,
+              proposalId,
+              compensatedAt,
+              signature,
+              queryRunner.manager,
+            );
+          } catch (error) {
+            if (isUniqueViolation(error, 'uq_slash_proposals_reversal_signature')) {
+              throw SlashErrors.compensationAlreadyUsed({ signature });
+            }
+            throw error;
+          }
           if (affected === 0) {
             // The deposit landed and the local guard refused it, which means
             // somebody else recorded it in the interval. Not an error to the
@@ -2766,7 +3238,7 @@ export class SlashExecutionService {
    */
   async openSweep(
     operator: OperatorSession,
-    approver: OperatorSession,
+    approver: OperatorApprover | null,
     organizationId: string,
     sourceProposalId: string,
     input: { defectKey: string; lookbackHours: number; reasonCode: string; note: string },
@@ -2789,26 +3261,54 @@ export class SlashExecutionService {
       throw SlashErrors.outcomeNotSweepable({ outcome });
     }
 
+    // Review M-2: the sweep matches on `root_cause_key`, so it may only carry
+    // the source case's own root cause, never a free-text key.
+    if (!source.rootCauseKey || input.defectKey !== source.rootCauseKey) {
+      throw SlashErrors.sweepDefectKeyMismatch({
+        defectKey: input.defectKey,
+        rootCauseKey: source.rootCauseKey,
+      });
+    }
+
     const to = new Date();
     const from = new Date(to.getTime() - input.lookbackHours * 60 * 60 * 1000);
 
-    return this.overrides
-      .perform<FleetSweepEntity>(
-        {
-          code: 'S-11',
-          actor: operator,
-          approver,
-          targetType: 'slash_proposal',
-          targetId: sourceProposalId,
-          // Platform-wide: a sweep has no single subject tenant, which is exactly
-          // the case the nullable column exists for.
-          organizationId: null,
-          reasonCode: input.reasonCode,
-          reason: input.note,
-          requestId: requestId ?? null,
-        },
-        async (queryRunner) => {
-          const sweep = queryRunner.manager.create(FleetSweepEntity, {
+    // Matched before the override, so the authority check sees the money the
+    // sweep can drop: the summed penalties of every matched case.
+    const matched = (
+      await this.proposals.findSweepCandidates(
+        input.defectKey,
+        from,
+        to,
+        this.config.sweepBatchSize,
+      )
+    ).filter((candidate) => candidate.id !== sourceProposalId);
+    const matchedMinor = matched
+      .reduce((sum, candidate) => sum + BigInt(candidate.penaltyAmount), 0n)
+      .toString();
+
+    const { sweep, applied } = await this.overrides.perform<{
+      sweep: FleetSweepEntity;
+      applied: QueuedProposalRow[];
+    }>(
+      {
+        code: 'S-11',
+        actor: operator,
+        approver,
+        targetType: 'slash_proposal',
+        targetId: sourceProposalId,
+        // Platform-wide: a sweep has no single subject tenant, which is exactly
+        // the case the nullable column exists for.
+        organizationId: null,
+        reasonCode: input.reasonCode,
+        reason: input.note,
+        requestId: requestId ?? null,
+        amountMinor: matchedMinor,
+      },
+      async (queryRunner) => {
+        const saved = await queryRunner.manager.save(
+          FleetSweepEntity,
+          queryRunner.manager.create(FleetSweepEntity, {
             openedByOperatorId: operator.operatorId,
             sourceProposalId,
             outcome,
@@ -2816,46 +3316,71 @@ export class SlashExecutionService {
             windowFrom: from,
             windowTo: to,
             status: 'OPEN',
-          });
-          const saved = await queryRunner.manager.save(FleetSweepEntity, sweep);
+          }),
+        );
+        // Every case in this one transaction, with the register entry: the
+        // sweep lands whole or not at all (review M-2). Before, each case was
+        // its own write after the entry had committed, and one refused row
+        // left the earlier cases overturned and the sweep OPEN.
+        const swept = await this.applySweep(queryRunner, saved, operator, matched);
+        const completion = {
+          status: 'COMPLETED',
+          matchedCount: matched.length,
+          appliedCount: swept.length,
+          completedAt: new Date(),
+        };
+        await queryRunner.manager.update(FleetSweepEntity, { id: saved.id }, completion);
+        // The row as stored, not as first saved: the route answers with it, and
+        // the first save is `OPEN` with no counts (BUG-R11-O1-02).
+        const completed = Object.assign(saved, completion);
 
-          return {
-            value: saved,
-            before: { sweep: null },
-            after: {
-              sweepId: saved.id,
-              outcome,
-              defectKey: input.defectKey,
-              windowFrom: from.toISOString(),
-              windowTo: to.toISOString(),
-            },
-          };
-        },
-      )
-      .then(async (sweep) => {
-        // Applied outside the override transaction, deliberately. A sweep may
-        // touch hundreds of cases and each of those is its own decision with its
-        // own notification; holding one transaction open across all of them would
-        // make a slow RPC roll back the record that the sweep was authorised.
-        // The register entry says a sweep was opened, which is the act a human
-        // performed; the sweep's own row carries what it then reached.
-        await this.applySweep(sweep);
-        return sweep;
-      });
-  }
-
-  private async applySweep(sweep: FleetSweepEntity): Promise<void> {
-    const candidates = await this.proposals.findSweepCandidates(
-      sweep.defectKey,
-      sweep.windowFrom,
-      sweep.windowTo,
-      this.config.sweepBatchSize,
+        return {
+          value: { sweep: completed, applied: swept },
+          before: {
+            sweep: null,
+            cases: matched.map((candidate) => ({ id: candidate.id, status: candidate.status })),
+          },
+          after: {
+            sweepId: saved.id,
+            outcome,
+            defectKey: input.defectKey,
+            windowFrom: from.toISOString(),
+            windowTo: to.toISOString(),
+            matchedPenaltyMinor: matchedMinor,
+            appliedProposalIds: swept.map((candidate) => candidate.id),
+          },
+        };
+      },
     );
 
-    let applied = 0;
-    for (const candidate of candidates) {
-      if (candidate.id === sweep.sourceProposalId) continue;
+    this.logger.log(
+      `fleet sweep ${sweep.id} matched ${matched.length} case(s), applied to ${applied.length}`,
+    );
+    // After the commit: telling the provider and asking for the on-chain
+    // cancel. Neither may undo the sweep. A lost cancel request is repaired by
+    // the lifecycle job's pass over closed cases.
+    for (const candidate of applied) {
+      await this.afterSweepApplied(sweep, candidate);
+    }
+    return sweep;
+  }
 
+  /**
+   * Overturn each matched case still in a sweepable status, inside the
+   * override's transaction. The sweep's actor is recorded as the case's
+   * decider (the sweep resolved it, not the adjudicator who decided it before),
+   * and an earlier second signature is cleared: it countersigned a decision
+   * that no longer stands, and the sweep's own approver is on the register.
+   */
+  private async applySweep(
+    queryRunner: QueryRunner,
+    sweep: FleetSweepEntity,
+    operator: OperatorSession,
+    candidates: readonly QueuedProposalRow[],
+  ): Promise<QueuedProposalRow[]> {
+    const applied: QueuedProposalRow[] = [];
+    const now = new Date();
+    for (const candidate of candidates) {
       const affected = await this.proposals.transitionIfIn(
         candidate.organizationId,
         candidate.id,
@@ -2870,27 +3395,62 @@ export class SlashExecutionService {
           status: SlashProposalStatus.OVERTURNED,
           outcome: sweep.outcome,
           resolutionKind: ResolutionKind.ADJUDICATOR,
-          resolvedAt: new Date(),
+          resolvedAt: now,
           sweepId: sweep.id,
           countsAsFalsePositive: true,
+          decidedByOperatorId: operator.operatorId,
+          secondedByOperatorId: null,
+          secondedAt: null,
+          secondKind: null,
         },
+        queryRunner.manager,
       );
       if (affected === 0) continue;
 
-      applied += 1;
-      await this.lifecycle.appendEventDirect({
+      // Close the objection as a decision would (`writeDisputeDecision`): the
+      // provider's case view reads this row, and a swept case left it
+      // `UNDER_REVIEW` with the outcome it was overturned from (BUG-R11-O1-03).
+      // The second signature goes with it, as on the proposal above.
+      if (candidate.disputeId) {
+        await queryRunner.manager.update(
+          DisputeEntity,
+          { organizationId: candidate.organizationId, id: candidate.disputeId },
+          {
+            state: ARBITRATION_STATE_MAP[sweep.outcome as ArbitrationOutcome],
+            outcome: sweep.outcome,
+            resolutionKind: ResolutionKind.ADJUDICATOR,
+            resolvedAt: now,
+            resolvedBy: operator.subject,
+            secondedByOperatorId: null,
+            secondedAt: null,
+            secondKind: null,
+          },
+        );
+      }
+
+      applied.push(candidate);
+      await this.lifecycle.appendEvent(queryRunner, {
         organizationId: candidate.organizationId,
         proposalId: candidate.id,
-        occurredAt: new Date(),
+        occurredAt: now,
         kind: 'SWEEP_APPLIED',
-        actorType: 'system',
-        actorId: null,
+        actorType: 'operator',
+        actorId: operator.subject,
         summary:
           `Cancelled by a fleet sweep: the same defect was found on another binding and this ` +
           `case was reached without you having to ask.`,
         detail: { sweepId: sweep.id, outcome: sweep.outcome, defectKey: sweep.defectKey },
       });
+    }
+    return applied;
+  }
 
+  /** The side effects of one swept case, after the sweep has committed. Never throws. */
+  private async afterSweepApplied(
+    sweep: FleetSweepEntity,
+    candidate: QueuedProposalRow,
+  ): Promise<void> {
+    try {
       await this.notifications.notify({
         organizationId: candidate.organizationId,
         event: NotificationEvent.PROVIDER_SLASH_DECIDED,
@@ -2903,28 +3463,26 @@ export class SlashExecutionService {
         dedupeKey: `${candidate.id}:decided`,
         payload: { proposalId: candidate.id, sweepId: sweep.id, outcome: sweep.outcome },
       });
-
-      // The fourth and sharpest of the places a case stops standing.
-      //
-      // This sweep is the one that most needs it: its predicate carries **no
-      // clock at all** and it overturns from `UPHELD`, so it routinely reaches
-      // cases whose on-chain record has been executable for days. A provider
-      // swept clear of a defect that was never theirs would otherwise keep a
-      // `Pending` record that any stranger can `execute_slash` — the platform
-      // having decided, in writing, that they owe nothing.
-      //
-      // This only *records* the request — `cancel_slash` is the
-      // admin's signature, and `sweepAdminCancels` is what carries it through
-      // (or expires the record after seven days if nobody signs). So it works
-      // identically in the API pod, where the verifier signer is out of reach:
-      // there is no signing on this path at all any more.
-      await this.requestAdminCancel(candidate.organizationId, candidate.id, 'FLEET_SWEEP');
+    } catch (error) {
+      this.logger.error(
+        `fleet sweep ${sweep.id}: case ${candidate.id} was not notified`,
+        error instanceof Error ? error.stack : String(error),
+      );
     }
 
-    await this.sweeps.complete(sweep.id, candidates.length, applied);
-    this.logger.log(
-      `fleet sweep ${sweep.id} matched ${candidates.length} case(s), applied to ${applied}`,
-    );
+    // The fourth and sharpest of the places a case stops standing: the sweep
+    // overturns from `UPHELD`, so it reaches cases whose on-chain record may
+    // already be executable. This only RECORDS the request; `cancel_slash` is
+    // the admin's signature, carried through by `sweepAdminCancels`.
+    try {
+      await this.requestAdminCancel(candidate.organizationId, candidate.id, 'FLEET_SWEEP');
+    } catch (error) {
+      this.logger.error(
+        `fleet sweep ${sweep.id}: the admin cancel for case ${candidate.id} was not recorded; ` +
+          `the closed-case repair pass will ask again`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 }
 
@@ -2950,4 +3508,11 @@ function bareAddress(account: string): string {
 function localRefusalName(error: unknown): string | null {
   const code = (error as { errorCode?: unknown })?.errorCode;
   return typeof code === 'string' && code.startsWith('SLASH_') ? code.slice(0, 64) : null;
+}
+
+/** A Postgres unique violation (23505) on the named constraint or index. */
+function isUniqueViolation(error: unknown, constraint: string): boolean {
+  const driver = (error as { driverError?: { code?: string; constraint?: string } } | null)
+    ?.driverError;
+  return driver?.code === '23505' && driver.constraint === constraint;
 }

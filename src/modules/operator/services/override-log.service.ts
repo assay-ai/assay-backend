@@ -3,25 +3,31 @@ import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner } from 'typeorm';
 
 import { OverrideLogEntryEntity } from '@database/postgres/entities/override-log-entry.entity';
+import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
 
 import {
   ApprovalMode,
+  approverRolesSatisfy,
   lookupOverride,
   OperatorRole,
   OverrideDefinition,
   rolesSatisfy,
 } from '../domain/override-register';
 import { OperatorErrors } from '../errors/operator.errors';
-import { OperatorSession } from '../ports/operator-session.port';
+import { OperatorApprover, OperatorSession } from '../ports/operator-session.port';
 
 /** Everything an entry needs that the caller knows and the register does not. */
 export interface OverrideContext {
   /** The register code being exercised, e.g. `S-3`. */
   readonly code: string;
   readonly actor: OperatorSession;
-  /** The checker, on two-person rows. */
-  readonly approver?: OperatorSession | null;
+  /**
+   * The checker, on two-person rows: the operator who approved the queued
+   * action (`OperatorApprovalService`). Its approval is marked `APPROVED` in
+   * this action's transaction.
+   */
+  readonly approver?: OperatorApprover | null;
   readonly targetType: string;
   readonly targetId: string;
   /** The subject's tenant. `null` for platform-wide actions, and only those. */
@@ -88,13 +94,14 @@ export interface OverrideResult<T> {
  *
  * ## What this deliberately does not do
  *
- * It does not perform the approval *workflow*. Full maker/checker has the
- * action sit in `PENDING` and do nothing until a second identity approves;
- * The second signature on an adjudication is that workflow and it lives
- * in the arbitration service, where the case's own state machine can hold the
- * pending decision. This class checks that a second identity is *present* when
- * the register demands one, and refuses the write otherwise. Doing both here
- * would put a queue of pending actions in an audit log.
+ * It does not hold the approval *queue*. A two-person action called without
+ * an approver is refused here with `OPERATOR_SECOND_APPROVER_REQUIRED`, and
+ * `OperatorApprovalService` turns that refusal into a `PENDING` approval; when
+ * a second operator approves it, the action runs again with them as the
+ * approver, and this class checks their roles and limit and marks the approval
+ * `APPROVED` inside the same transaction as the action — so an approval is
+ * never spent on an action that rolled back, and two approvers racing produce
+ * one execution.
  */
 @Injectable()
 export class OverrideLogService {
@@ -103,6 +110,7 @@ export class OverrideLogService {
   constructor(
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     private readonly entries: OverrideLogEntryRepository,
+    private readonly approvals: OperatorApprovalRepository,
   ) {}
 
   /**
@@ -123,6 +131,16 @@ export class OverrideLogService {
     await queryRunner.startTransaction();
 
     try {
+      if (context.approver) {
+        const claimed = await this.approvals.markApproved(
+          queryRunner.manager,
+          context.approver.approvalId,
+          context.actor.operatorId,
+          context.approver.operatorId,
+        );
+        if (!claimed) throw OperatorErrors.approvalNotPending({});
+      }
+
       const result = await mutation(queryRunner);
 
       await this.entries.append(queryRunner, {
@@ -246,6 +264,33 @@ export class OverrideLogService {
       }
       if (context.approver.operatorId === context.actor.operatorId) {
         throw OperatorErrors.selfApprovalRefused({ code: context.code });
+      }
+      // The approver signed in with their own wallet and the guard found them
+      // active; what is left to check is whether the row accepts their roles
+      // as a checker's.
+      if (!approverRolesSatisfy(definition, context.approver.roles as OperatorRole[])) {
+        throw OperatorErrors.approverRoleRequired({
+          code: context.code,
+          required: definition.approverRoles,
+          held: context.approver.roles,
+        });
+      }
+      // The same ceiling the actor is held to, for the same reason: a checker
+      // who could not have taken the action cannot approve it. Without this a
+      // zero-authority token is enough to make any amount "two-person".
+      const limit = context.approver.authorityLimitMinor;
+      const amount = context.amountMinor;
+      if (
+        limit !== null &&
+        amount !== null &&
+        amount !== undefined &&
+        BigInt(amount) > BigInt(limit)
+      ) {
+        throw OperatorErrors.approverAuthorityExceeded({
+          code: context.code,
+          limit,
+          requested: amount,
+        });
       }
     }
 

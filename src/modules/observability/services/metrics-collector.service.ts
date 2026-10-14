@@ -1,4 +1,6 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
+import { chainStateLagMs } from '@modules/chains/evm/chain-state/evm-chain-state.indexer';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 
 import { ReconciliationRunRepository } from '@database/postgres/repositories/reconciliation-run.repository';
 import { PlatformMetricsRepository } from '@database/postgres/repositories/platform-metrics.repository';
@@ -88,6 +90,9 @@ export class MetricsCollectorService {
     private readonly slashProposals: SlashProposalRepository,
     private readonly observability: ObservabilityMetricsRepository,
     private readonly registry: MetricsRegistryService,
+    // The EVM chain-state indexer's lag. Optional so a composition without it
+    // still scrapes.
+    @Optional() private readonly chainStates: EvmChainStateRepository | null = null,
   ) {}
 
   /** Prometheus exposition text for `GET /metrics`. Refreshes the gauges first if the cache is stale. */
@@ -221,6 +226,12 @@ export class MetricsCollectorService {
     }
     setGauge(this.registry.payoutQueueDepth, payoutQueueDepth);
     setGauge(this.registry.intentsPerMinute, intentRates.lastMinute);
+    for (const state of (await this.chainStates?.findAllStates().catch(() => [])) ?? []) {
+      const lagMs = chainStateLagMs(state.caughtUpAt, now);
+      if (lagMs !== null) {
+        setGauge(this.registry.evmChainStateLagSeconds.labels(state.chainId), lagMs / 1000);
+      }
+    }
 
     const signals: SignalReadingDto[] = [
       this.reading(

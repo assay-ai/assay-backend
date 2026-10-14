@@ -146,6 +146,13 @@ const PUBLIC_SURFACE = new Map<string, number>([
   //    same set to any unauthenticated caller, so nothing here is disclosed
   //    that the protocol does not hand out first.
   ['modules/chains/controllers/chains.controller.ts', 1],
+  // Operator sign-in: `challenge`, `verify`, `logout`. Pre-authentication by
+  // definition — `verify` is what issues the session `OperatorAuthGuard`
+  // checks. Nothing here reads a row on anybody's behalf: the challenge is a
+  // nonce for whatever address asked, the verify answers only with the
+  // caller's own session (and only after a valid signature by an active
+  // operator's wallet), and logout revokes the token it was handed.
+  ['modules/operator/controllers/operator-sign-in.controller.ts', 3],
   // `GET /public/features`. Two booleans — whether the two optional public
   // pages above are registered on this deployment — so those pages ask here
   // instead of calling a route that 404s. No row is read, nothing is keyed to
@@ -356,7 +363,18 @@ describe('REST surface consistency', () => {
      * somebody adding it, which is the conversation this test exists to force.
      */
     const OPERATOR_SURFACE = new Set([
+      // `A-9`/`A-10`, the account blocklist. The subject of a block is never the
+      // caller, and a blocked tenant must not be the one who can lift it.
+      // The arbiter page (D-19): records disputed on chain and the unsigned
+      // rulings and blocks the arbiter's wallet signs. Nobody's tenant.
+      // The two-person approvals inbox: actions queued by one operator for
+      // another, across tenants like the actions themselves.
+      'modules/operator/controllers/operator-approvals.controller.ts',
+      'modules/operator/controllers/operator-arbiter.controller.ts',
+      'modules/operator/controllers/operator-blocks.controller.ts',
       'modules/operator/controllers/operator-cases.controller.ts',
+      // `A-12`–`A-14`, the operator directory. Operators have no tenant.
+      'modules/operator/controllers/operator-operators.controller.ts',
       'modules/operator/controllers/operator-override-log.controller.ts',
       // `V-7`, the only writer of `providers.verified`. Its subject is a
       // provider who is never the caller, so it belongs with the rest of the

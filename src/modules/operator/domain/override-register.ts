@@ -50,6 +50,13 @@ export enum OperatorRole {
   CMP = 'CMP',
   /** Security / key custodian. */
   SEC = 'SEC',
+  /**
+   * Operator administrator: adds, changes and removes operators (`A-12`,
+   * `A-13`, `A-14`). Added because no other role owns the directory itself —
+   * `SEC` holds keys, not people — and an action that grants authority must
+   * belong to a role nobody holds by accident.
+   */
+  OPS_ADMIN = 'OPS_ADMIN',
 }
 
 export enum OverrideFamily {
@@ -81,6 +88,13 @@ export interface OverrideDefinition {
   readonly label: string;
   readonly roles: readonly OperatorRole[];
   readonly approval: ApprovalMode;
+  /**
+   * The roles the **second** identity must hold on a two-person occurrence —
+   * at least one of them. Absent means the row names none, and any other
+   * active operator may approve; every implemented row that is two-person, or
+   * can be raised to it, names them.
+   */
+  readonly approverRoles?: readonly OperatorRole[];
   readonly reversible: boolean;
   /** Whether a path that can cite this code has actually been built. */
   readonly implemented: boolean;
@@ -96,7 +110,13 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     action: 'slash_proposal.suspended',
     label: 'Suspend a pending slash proposal (pre-attestation)',
     roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    // The floor. `ArbitrationService.suspend` raises an occurrence to
+    // TWO_PERSON when the case is `AWAITING_SECOND` or `UPHELD`: cancelling a
+    // penalty a second person has confirmed, or is confirming, is not one
+    // person's act. `approverRoles` applies to those occurrences — the checker
+    // must be able to read a case, which `SRE` cannot.
     approval: ApprovalMode.SINGLE,
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
     reversible: true,
     implemented: true,
   }),
@@ -107,6 +127,7 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     label: 'Cancel an attestation inside the timelock',
     roles: [OperatorRole.ADJL],
     approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJL],
     reversible: true,
     implemented: true,
   }),
@@ -131,6 +152,9 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     label: 'Reverse an executed slash',
     roles: [OperatorRole.ADJL, OperatorRole.TRE],
     approval: ApprovalMode.TWO_PERSON,
+    // The action's own roles: whoever checks a treasury payment being
+    // recorded must be somebody who could have recorded it.
+    approverRoles: [OperatorRole.ADJL, OperatorRole.TRE],
     // "No — on-chain" in the register. The reversal itself is a new
     // transaction, and there is no un-reversal: the program refuses a second
     // one with `SlashAlreadyReversed`.
@@ -170,6 +194,28 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     label: 'Open a fleet sweep from a decided case',
     roles: [OperatorRole.ADJL],
     approval: ApprovalMode.TWO_PERSON,
+    // A sweep carries one conclusion to providers who never complained, so the
+    // checker has to be somebody who can read a case — not any operator who
+    // can authenticate.
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    reversible: false,
+    implemented: true,
+  }),
+  /**
+   * Prepare the ARBITER's on-chain ruling (assay-evm D-19): an unsigned
+   * `upholdSlashBatch` (against the provider) or `cancelSlashBatch` (for them)
+   * over up to 64 records. The arbiter's wallet signs; the backend holds no
+   * arbiter key. `ADJL`/`TRE`, the pair that already builds the on-chain cancel
+   * and compensation intents. Logged although nothing is signed here, because
+   * an operator chose which records to put before the arbiter and why.
+   */
+  'S-13': define({
+    code: 'S-13',
+    family: OverrideFamily.SLASHING,
+    action: 'slash.arbiter_ruling_prepared',
+    label: 'Prepare the arbiter’s on-chain uphold or cancel of disputed slash records',
+    roles: [OperatorRole.ADJL, OperatorRole.TRE],
+    approval: ApprovalMode.SINGLE,
     reversible: false,
     implemented: true,
   }),
@@ -359,6 +405,106 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     reversible: true,
     implemented: false,
   }),
+  /**
+   * Block an organization or a wallet — the leaked-key response.
+   *
+   * Numbered after the access rows the register already enumerates (`A-8` is
+   * the prohibited one), not in a gap, so no code ever means two things.
+   *
+   * `ADJL`/`SRE`: the incident roles, the same pairing `S-1` uses for the other
+   * "stop it now" action. `SRE` is on call when a key leaks at 03:00; `ADJL` is
+   * who decides about an account in daylight. `SINGLE` because a block that
+   * waits for a second person is a block that lands after the money moved, and
+   * because it takes nobody's money — it is reversible by `A-10`.
+   */
+  'A-9': define({
+    code: 'A-9',
+    family: OverrideFamily.ACCESS,
+    action: 'account.blocked',
+    label: 'Block an organization or a wallet',
+    roles: [OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  /**
+   * Lift a block. The asymmetry with `A-9` is the point: blocking is cheap
+   * and fast because a wrong block costs an apology, while lifting the block
+   * of a leaked key costs whatever the key can then spend — so the second
+   * identity is demanded here and not there. The checker must be `ADJL`; the
+   * maker may be the `SRE` who blocked it.
+   */
+  'A-10': define({
+    code: 'A-10',
+    family: OverrideFamily.ACCESS,
+    action: 'account.unblocked',
+    label: 'Lift a block on an organization or a wallet',
+    roles: [OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJL],
+    reversible: true,
+    implemented: true,
+  }),
+  /**
+   * Prepare the ARBITER's on-chain block of an address (`setBlocked(a, true)`,
+   * assay-evm D-19). Block only: the contract lets the arbiter block and only
+   * the admin unblock, so there is no unblocking row. The incident roles of
+   * `A-9` plus `TRE`, the arbiter page's other role.
+   */
+  'A-11': define({
+    code: 'A-11',
+    family: OverrideFamily.ACCESS,
+    action: 'account.chain_block_prepared',
+    label: 'Prepare the arbiter’s on-chain block of an address',
+    roles: [OperatorRole.ADJL, OperatorRole.SRE, OperatorRole.TRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+  /**
+   * The operator directory (`operators`). Who may act on this console is
+   * itself an intervention, and it is recorded like one.
+   *
+   * Adding someone grants authority, so it is two-person: a second
+   * `OPS_ADMIN` approves it through the approvals queue. Changing roles or the
+   * authority limit is single-person when it only lowers them, and raised to
+   * two-person for the occurrence when it adds a role or raises the limit
+   * (`OperatorDirectoryService`). Removing is single-person — the safe
+   * direction. Nobody acts on their own row, and an approver may not be the
+   * operator being changed.
+   */
+  'A-12': define({
+    code: 'A-12',
+    family: OverrideFamily.ACCESS,
+    action: 'operator.added',
+    label: 'Add an operator',
+    roles: [OperatorRole.OPS_ADMIN],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.OPS_ADMIN],
+    reversible: true,
+    implemented: true,
+  }),
+  'A-13': define({
+    code: 'A-13',
+    family: OverrideFamily.ACCESS,
+    action: 'operator.changed',
+    label: 'Change an operator’s roles or authority limit',
+    roles: [OperatorRole.OPS_ADMIN],
+    approval: ApprovalMode.SINGLE,
+    approverRoles: [OperatorRole.OPS_ADMIN],
+    reversible: true,
+    implemented: true,
+  }),
+  'A-14': define({
+    code: 'A-14',
+    family: OverrideFamily.ACCESS,
+    action: 'operator.removed',
+    label: 'Remove an operator',
+    roles: [OperatorRole.OPS_ADMIN],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
 });
 
 /** Every code, ordered by family then numerically — the console's own order. */
@@ -388,4 +534,18 @@ export function rolesSatisfy(
 ): boolean {
   if (definition.roles.length === 0) return false;
   return definition.roles.some((required) => roles.includes(required));
+}
+
+/**
+ * True when `roles` may approve a two-person occurrence of the definition.
+ *
+ * A row that names no approver roles accepts any second operator, which is the
+ * rule every two-person row had before `approverRoles` existed.
+ */
+export function approverRolesSatisfy(
+  definition: OverrideDefinition,
+  roles: readonly OperatorRole[],
+): boolean {
+  if (!definition.approverRoles) return true;
+  return definition.approverRoles.some((required) => roles.includes(required));
 }

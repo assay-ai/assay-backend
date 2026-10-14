@@ -1,6 +1,8 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { toUnsignedChainTransactionDto } from '@modules/chains/dto/unsigned-chain-transaction.dto';
 import { AccountId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
@@ -101,6 +103,7 @@ export class ProviderStakeIntentService {
     private readonly enrolments: ProviderChainEnrolmentRepository,
     @Inject(ONCHAIN_STAKE_READER) private readonly onChain: OnChainStakeReaderPort,
     @Inject(STAKE_INTENT_BUILDER) private readonly builder: StakeIntentBuilderPort,
+    private readonly blocklist: AccountBlocklistService,
   ) {}
 
   /**
@@ -118,6 +121,11 @@ export class ProviderStakeIntentService {
     amount: string | null,
   ): Promise<CreateStakeIntentResponseDto> {
     const account = await this.requireStakeAuthority(providerId);
+    // Every kind, withdrawals included: a blocked stake authority is most
+    // often a leaked key, and a withdrawal is what a thief would build first.
+    this.blocklist.assertNotBlocked([
+      { role: BlockedRole.STAKE_AUTHORITY, kind: BlockSubjectKind.WALLET, subject: account },
+    ]);
     const stake = await this.readStake(account);
 
     this.assertAccountState(kind, account, stake);

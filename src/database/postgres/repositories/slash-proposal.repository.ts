@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, SelectQueryBuilder } from 'typeorm';
+import { DataSource, EntityManager, In, SelectQueryBuilder } from 'typeorm';
 
 import { SlashProposalEntity } from '../entities/slash-proposal.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -101,6 +101,13 @@ export const CHAIN_PROPOSABLE_STATUSES = [
 const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
 
 /**
+ * The statuses that close a case with no penalty owed: an operator suspended
+ * it, or it was overturned. A record still standing on chain for one of these
+ * has to be cancelled — see {@link SlashProposalRepository.findClosedStillPending}.
+ */
+export const CLOSED_WITHOUT_PENALTY_STATUSES = ['CANCELLED', 'OVERTURNED'] as const;
+
+/**
  * `slash_proposals`.
  *
  * Three of the methods here are compare-and-swaps rather than updates, and that
@@ -115,6 +122,22 @@ const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
 export class SlashProposalRepository extends OrganizationScopedRepository<SlashProposalEntity> {
   constructor(@InjectDataSource('postgres') dataSource: DataSource) {
     super(SlashProposalEntity, dataSource);
+  }
+
+  /**
+   * This organization's cases whose on-chain request id is one of
+   * `chainRequestIds` (lower-case hex, no `0x`). Scoped to the tenant, so an id
+   * belonging to another provider's case is simply not returned.
+   */
+  async findOwnByChainRequestIds(
+    organizationId: string,
+    chainRequestIds: readonly string[],
+  ): Promise<Pick<SlashProposalEntity, 'id' | 'chainRequestId'>[]> {
+    if (chainRequestIds.length === 0) return [];
+    return this.find({
+      select: { id: true, chainRequestId: true },
+      where: { organizationId, chainRequestId: In([...chainRequestIds]) },
+    });
   }
 
   /**
@@ -135,8 +158,11 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     id: string,
     expectedFrom: readonly string[],
     patch: Partial<SlashProposalEntity> & { status: string },
+    // A caller's transaction, when the change must commit with something else.
+    manager: EntityManager = this.manager,
   ): Promise<number> {
-    const result = await this.createQueryBuilder('proposal')
+    const result = await manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
       .update()
       .set(patch)
       .where('organization_id = :organizationId', { organizationId })
@@ -187,8 +213,12 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     id: string,
     reversedAt: Date,
     reversalSignature: string,
+    // The override's transaction (review M-3): the status and its register
+    // entry commit or roll back together.
+    manager: EntityManager = this.manager,
   ): Promise<number> {
-    const result = await this.createQueryBuilder('proposal')
+    const result = await manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
       .update()
       .set({ status: 'REVERSED', reversedAt, reversalSignature })
       .where('organization_id = :organizationId', { organizationId })
@@ -226,6 +256,38 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .andWhere('notified_at IS NULL')
       .execute();
     return result.affected ?? 0;
+  }
+
+  /**
+   * Cases whose record still mirrors standing (`PENDING` / `DISPUTED`) though
+   * its door opened, not in the executor's hands and with no execution
+   * recorded — what the external-execution sweep re-reads (BUG-R13-D-03).
+   * Oldest door first.
+   */
+  async findStandingPastDoor(now: Date, limit: number): Promise<ChainSweepRow[]> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.organization_id', 'organizationId')
+      .addSelect('proposal.id', 'id')
+      .where('proposal.chain_status IN (:...standing)', { standing: ['PENDING', 'DISPUTED'] })
+      .andWhere('proposal.chain_executable_at <= :now', { now })
+      .andWhere('proposal.executed_at IS NULL')
+      .andWhere(`proposal.status <> 'EXECUTING'`)
+      .orderBy('proposal.chain_executable_at', 'ASC')
+      .limit(limit)
+      .getRawMany<ChainSweepRow>();
+  }
+
+  /**
+   * The case whose single (non-partitioned) on-chain record is
+   * `chainRequestId`, across tenants — for the chain watcher, which has no
+   * tenant. 64 lower-case hex characters, no `0x`.
+   */
+  async findOneByChainRequestId(chainRequestId: string): Promise<SlashProposalEntity | null> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .where('proposal.chain_request_id = :chainRequestId', { chainRequestId })
+      .getOne();
   }
 
   async findOneScoped(organizationId: string, id: string): Promise<SlashProposalEntity | null> {
@@ -475,6 +537,124 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 
   /**
+   * Cases whose record has stood `DISPUTED` on chain (D-19) since before
+   * `disputedBefore` — `disputedAt + 30 d` has passed and the permissionless
+   * `expireSlash` (`DisputeUnresolved`) releases the reservation. Backed by
+   * `idx_slash_proposals_chain_disputed`.
+   */
+  /**
+   * Per provider, on `chainId`: whether an upheld case of theirs has a record
+   * due to execute (`UPHELD`, mirror `PENDING`, door open), and whether its
+   * last execute attempt — the case's or one of its parts' — was refused
+   * `SlashWindowNotDrained`. The slash hold's condition 1 reads this.
+   */
+  async findWaitingExecution(
+    chainId: string,
+    now: Date,
+  ): Promise<Map<string, { windowRefused: boolean }>> {
+    const rows = (await this.manager.query(
+      `SELECT proposal.provider_id AS "providerId",
+              bool_or(
+                proposal.chain_last_error = ANY($3)
+                OR EXISTS (
+                  SELECT 1 FROM slash_proposal_parts part
+                   WHERE part.proposal_id = proposal.id
+                     AND part.chain_epoch = proposal.chain_epoch
+                     AND part.chain_status = 'PENDING'
+                     AND part.chain_last_error = ANY($3)
+                )
+              ) AS "windowRefused"
+         FROM slash_proposals proposal
+        WHERE proposal.status = 'UPHELD'
+          AND proposal.chain_status = 'PENDING'
+          AND proposal.chain_executable_at <= $2
+          AND proposal.asset_id LIKE $1
+        GROUP BY proposal.provider_id`,
+      [`${chainId}/%`, now, [...WINDOW_REFUSALS]],
+    )) as { providerId: string; windowRefused: boolean }[];
+    return new Map(rows.map((row) => [row.providerId, { windowRefused: row.windowRefused }]));
+  }
+
+  /**
+   * Per provider, the slash cases upheld or executed since `since` (owner
+   * decision C4: repeat offenders are banned with the blocklist, so the
+   * arbiter page shows the count). Cross-tenant on purpose, like the arbiter
+   * queue it feeds; `provider_id` is the provider organization.
+   */
+  async countUpheldViolationsByProvider(
+    providerIds: readonly string[],
+    since: Date,
+  ): Promise<Map<string, number>> {
+    if (providerIds.length === 0) return new Map();
+    const rows = (await this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.provider_id', 'providerId')
+      .addSelect('COUNT(*)', 'count')
+      .where('proposal.provider_id IN (:...providerIds)', {
+        providerIds: [...new Set(providerIds)],
+      })
+      .andWhere('proposal.status IN (:...upheld)', {
+        upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'],
+      })
+      .andWhere(
+        'COALESCE(proposal.executed_at, proposal.resolved_at, proposal.proposed_at) >= :since',
+        { since },
+      )
+      .groupBy('proposal.provider_id')
+      .getRawMany()) as { providerId: string; count: string }[];
+    return new Map(rows.map((row) => [row.providerId, Number(row.count)]));
+  }
+
+  async findChainDisputedBefore(disputedBefore: Date, limit: number): Promise<ChainSweepRow[]> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.organization_id', 'organizationId')
+      .addSelect('proposal.id', 'id')
+      .where('proposal.chain_status = :disputed', { disputed: 'DISPUTED' })
+      .andWhere('proposal.chain_disputed_at <= :disputedBefore', { disputedBefore })
+      .orderBy('proposal.chain_disputed_at', 'ASC')
+      .limit(limit)
+      .getRawMany<ChainSweepRow>();
+  }
+
+  /**
+   * Cases closed off chain whose record still mirrors `PENDING`: the repair
+   * behind every best-effort cancel request.
+   *
+   * A suspension (`CANCELLED`) or an overturn (`OVERTURNED`) asks for the
+   * on-chain cancel after its own transaction commits, and that request can be
+   * lost — the write fails, or the record lands after the case was closed. The
+   * row is then selected by nothing: the execute sweep wants `UPHELD` and the
+   * admin-cancel sweep wants `CANCEL_REQUESTED`.
+   *
+   * `AUTO_CHAIN_VOIDED` is excluded on purpose. A case the chain voided at
+   * execution time is `CANCELLED` with a `PENDING` mirror by design (see
+   * `SlashExecutionService.reservationHeldUntil`), and asking for its cancel
+   * is a decision nobody has taken.
+   *
+   * Reads through `idx_slash_proposals_chain_executable_at` (partial on
+   * `chain_status = 'PENDING'`), soonest deadline first.
+   */
+  async findClosedStillPending(limit: number): Promise<ChainSweepRow[]> {
+    return (
+      this.manager
+        .createQueryBuilder(SlashProposalEntity, 'proposal')
+        .select('proposal.organization_id', 'organizationId')
+        .addSelect('proposal.id', 'id')
+        // DISPUTED (D-19) is a standing reservation too, and `cancelSlash`
+        // accepts it.
+        .where('proposal.chain_status IN (:...standing)', { standing: ['PENDING', 'DISPUTED'] })
+        .andWhere('proposal.status IN (:...closed)', {
+          closed: [...CLOSED_WITHOUT_PENALTY_STATUSES],
+        })
+        .andWhere(`proposal.resolution_kind IS DISTINCT FROM 'AUTO_CHAIN_VOIDED'`)
+        .orderBy('proposal.chain_executable_at', 'ASC')
+        .limit(limit)
+        .getRawMany<ChainSweepRow>()
+    );
+  }
+
+  /**
    * Cases both clocks agree may now be paid: the execute sweep.
    *
    * `earliest_execution_at` is the promise the provider was given and
@@ -667,3 +847,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     return new Map(rows.map((row) => [row.key, row.count]));
   }
 }
+
+/**
+ * The execute refusal that means "a rolling window is full; retry as it
+ * drains". Execution is all or wait (assay-evm 9f036a3), so it is the only one.
+ */
+const WINDOW_REFUSALS: readonly string[] = ['SlashWindowNotDrained'];

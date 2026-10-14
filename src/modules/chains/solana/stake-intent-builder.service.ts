@@ -39,6 +39,7 @@ import {
   StakeIntentKind,
   StakeIntentPreflight,
   StakeIntentRequest,
+  ConfirmedDepositExpectation,
 } from '@modules/provider/ports/stake-intent-builder.port';
 import { UnsignedChainTransaction } from '@modules/chains/ports/unsigned-chain-transaction';
 import { MoneyUtil } from '@shared/utils/money.util';
@@ -100,6 +101,8 @@ export interface StakeIntentRpcClient {
  */
 export interface ParsedTransactionForDeposit {
   readonly meta: { readonly err: unknown } | null;
+  /** Unix seconds the slot was produced; `null` when the node does not know. */
+  readonly blockTime?: bigint | number | null;
   readonly transaction: {
     readonly message: {
       readonly instructions: readonly {
@@ -113,6 +116,9 @@ export interface ParsedTransactionForDeposit {
 
 /** `deposit_stake`'s fourth account. See `lean-v3-api.md` for the whole order. */
 const DEPOSIT_STAKE_ACCOUNT_INDEX = 3;
+
+/** `deposit_stake`'s first account: the funder who signed and paid. */
+const DEPOSIT_FUNDER_ACCOUNT_INDEX = 0;
 
 /** Lamports per SOL, as a scale. SPL and the native asset are both `u64`. */
 export const LAMPORTS_DECIMALS = 9;
@@ -251,8 +257,13 @@ export class SolanaStakeIntentBuilder implements StakeIntentBuilderPort {
    * carry two deposits into the same stake, and taking only the first would
    * under-report what the provider actually received.
    */
-  async confirmedDeposit(signature: string, account: AccountId): Promise<Money | null> {
+  async confirmedDeposit(
+    signature: string,
+    account: AccountId,
+    expected: ConfirmedDepositExpectation,
+  ): Promise<Money | null> {
     const programAddress = address(this.requireProgramId());
+    const funder = parseAccountId(expected.funder).address;
     const chain = chainIdOf(account);
     const { stakeMint } = await this.settlementConfig();
     const asset = toAssetId(chain, 'token', stakeMint);
@@ -277,10 +288,18 @@ export class SolanaStakeIntentBuilder implements StakeIntentBuilderPort {
       return null;
     }
 
+    // A deposit made at or before the slash executed is not its compensation
+    // (review M-3), and one with no known time cannot be shown to be after it.
+    const blockTime = response.blockTime;
+    if (blockTime === null || blockTime === undefined) return null;
+    if (!(Number(blockTime) * 1000 > expected.after.getTime())) return null;
+
     let total = 0n;
     for (const instruction of response.transaction.message.instructions) {
       if (instruction.programId !== programAddress) continue;
       if (instruction.accounts?.[DEPOSIT_STAKE_ACCOUNT_INDEX] !== stakePda) continue;
+      // Only the treasury's deposits count, never the provider's own.
+      if (instruction.accounts?.[DEPOSIT_FUNDER_ACCOUNT_INDEX] !== funder) continue;
 
       const amount = depositAmountOf(instruction.data);
       if (amount !== null) total += amount;

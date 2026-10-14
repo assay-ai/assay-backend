@@ -866,3 +866,28 @@ describe('EvmEscrowIntentBuilder', () => {
     ).rejects.toThrow(/amount/i);
   });
 });
+
+describe('EvmEscrowIntentBuilder — the on-chain pause and blocklist gate (D-19)', () => {
+  it('asks the gate with the door each kind opens, and refuses before any read', async () => {
+    const doors: string[] = [];
+    const gate = {
+      assertActive: async (door: string) => {
+        doors.push(door);
+        if (door === 'WITHDRAW') throw new Error('CHAIN_PROGRAM_PAUSED');
+      },
+      holdReason: async () => null,
+    };
+    const { escrowOf } = build();
+    const builder = new EvmEscrowIntentBuilder(
+      new Map([[TESTNET, { readContract: escrowOf } as never]]),
+      new Map([[TESTNET, DEPLOYMENT]]),
+      { now: () => NOW_SECONDS * 1000 },
+      gate as never,
+    );
+    await expect(
+      builder.buildIntent(request({ kind: EscrowIntentKind.REQUEST_WITHDRAW, amount: null })),
+    ).rejects.toThrow(/PAUSED/);
+    expect(doors).toEqual(['WITHDRAW']);
+    expect(escrowOf).not.toHaveBeenCalled();
+  });
+});

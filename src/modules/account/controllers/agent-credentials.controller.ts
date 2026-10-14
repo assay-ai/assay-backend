@@ -14,7 +14,12 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { auditActorOf } from '@shared/audit';
-import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
+import {
+  AllowedWhileBlocked,
+  CurrentSession,
+  HumanSessionGuard,
+  SessionAuthGuard,
+} from '@shared/auth';
 
 import { AgentIdParamDto } from '../dto/agent-id-param.dto';
 import {
@@ -80,6 +85,7 @@ export class AgentCredentialsController {
 
   @Delete(':id')
   @UseGuards(HumanSessionGuard)
+  @AllowedWhileBlocked()
   @HttpCode(204)
   @ApiOperation({ summary: 'Revoke a credential — sets revoked_at, never deletes the row' })
   @ApiResponse({ status: 204, description: 'Revoked' })

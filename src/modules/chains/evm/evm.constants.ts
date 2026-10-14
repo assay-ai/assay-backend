@@ -71,6 +71,18 @@ export const EVM_CONSTANTS = {
    * time + `VOUCHER_MAX_LIFETIME_SECONDS` (300), well inside it.
    */
   MAX_SIGNATURE_LIFETIME_SECONDS: 3_600,
+  /**
+   * `Constants.sol:182` — `MAX_SLASH_BATCH = 64` (D-19). `disputeSlashBatch`,
+   * `upholdSlashBatch` and `cancelSlashBatch` refuse more (`BatchTooLarge`)
+   * and an empty list (`EmptyBatch`).
+   */
+  MAX_SLASH_BATCH: 64,
+  /**
+   * `Constants.sol:56` — `DISPUTE_TIMEOUT_SECONDS = 30 * 86_400` (D-19). A
+   * `Disputed` record becomes `expireSlash`-able (`DisputeUnresolved`) at
+   * `disputedAt + this`; the 7-day execution grace no longer applies to it.
+   */
+  DISPUTE_TIMEOUT_SECONDS: 2_592_000,
 } as const;
 
 /**
@@ -146,6 +158,12 @@ export interface EvmDeployment {
    * WRITES is opted into here, explicitly.)
    */
   readonly multicall3?: `0x${string}`;
+  /**
+   * The block the dispute upgrade (D-19) landed in, when it is recorded: where
+   * `EvmChainStateIndexer` starts a chain with no cursor and no
+   * `EVM_CHAIN_STATE_FROM_BLOCK`, since no `BlockedSet` can predate it.
+   */
+  readonly disputeUpgradeBlock?: bigint;
 }
 
 /** DI token: `ReadonlyMap<ChainId, EvmDeployment>`. */

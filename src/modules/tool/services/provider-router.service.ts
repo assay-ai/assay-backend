@@ -1038,6 +1038,21 @@ function unroutable(
     });
   }
 
+  // Every reachable provider is on a slash hold: say so, rather than a
+  // generic "no binding".
+  if (
+    rejected.length > 0 &&
+    rejected.every(
+      (r) =>
+        r.reason === IneligibilityReason.PROVIDER_SLASH_HOLD ||
+        r.reason === IneligibilityReason.CHAIN_NOT_SETTLEABLE ||
+        r.reason === IneligibilityReason.PROVIDER_EXCLUDED,
+    ) &&
+    rejected.some((r) => r.reason === IneligibilityReason.PROVIDER_SLASH_HOLD)
+  ) {
+    return ToolErrors.providerSlashHold({ toolId });
+  }
+
   return ToolErrors.noEligibleBinding({ toolId, reason: summariseRejections(rejected) });
 }
 

@@ -33,6 +33,7 @@ import {
   createBindingEditorTestContext,
 } from '../helpers/binding-editor-test-context';
 import { FakeRedis } from '../../unit/tool/helpers/fake-redis';
+import { noBlocks } from '../../unit/helpers/blocklist';
 
 /**
  * How long a paused binding keeps serving, **measured**.
@@ -198,7 +199,7 @@ beforeAll(async () => {
 
   router = new ProviderRouterService(
     context.catalogue,
-    new DbProviderRegistry(new ProviderRepository(context.dataSource), enrolments),
+    new DbProviderRegistry(new ProviderRepository(context.dataSource), enrolments, noBlocks()),
     context.stakes,
     // The router narrows each binding's declared chains by
     // the provider's ACTIVE enrolments. The same source the registry reads, so

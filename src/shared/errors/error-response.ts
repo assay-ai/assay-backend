@@ -32,6 +32,12 @@ export interface ErrorResponse {
     path: string;
     /** ISO-8601, UTC. */
     timestamp: string;
+    /**
+     * Structured detail, only for an error whose definition declares it safe
+     * (`ErrorDefinition.publicContext`) — e.g. `SLASH_CHAIN_BATCH_REFUSED`'s
+     * `refusals[]`. Absent otherwise.
+     */
+    context?: Record<string, unknown>;
   };
 }
 

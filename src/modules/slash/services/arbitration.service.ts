@@ -13,7 +13,7 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
-import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { OperatorApprover, OperatorSession } from '@modules/operator/ports/operator-session.port';
 
 import { SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
@@ -129,6 +129,58 @@ export class ArbitrationService {
       openedBy: string;
     },
   ): Promise<{ proposal: SlashProposalEntity; dispute: DisputeEntity }> {
+    return this.openDispute(organizationId, proposalId, input, null);
+  }
+
+  /**
+   * The provider disputed the case's on-chain record (`disputeSlash`, assay-evm
+   * D-19) while the case was still `PROPOSED`: the same objection as
+   * {@link fileDispute}, so the case moves into review and our decision clock
+   * starts. The chain already enforced its own window (`executableAt`), so
+   * the off-chain `respondByAt` is not re-checked — refusing here would leave a
+   * record frozen on chain behind a case nobody reviews. Returns `null` when
+   * the case is no longer `PROPOSED` or already has an objection.
+   */
+  async fileDisputeFromChain(
+    organizationId: string,
+    proposalId: string,
+    chain: { readonly requestId: string; readonly transactionHash: string | null },
+  ): Promise<SlashProposalEntity | null> {
+    const proposal = await this.lifecycle.require(organizationId, proposalId);
+    if (proposal.disputeId || proposal.status !== SlashProposalStatus.PROPOSED) return null;
+    try {
+      const { proposal: updated } = await this.openDispute(
+        organizationId,
+        proposalId,
+        {
+          claimType: DisputeClaimType.OTHER,
+          reason:
+            `Disputed on chain: the provider called disputeSlash on record ${chain.requestId}` +
+            `${chain.transactionHash ? ` (transaction ${chain.transactionHash})` : ''}.`,
+          evidence: [],
+          openedBy: 'chain:disputeSlash',
+        },
+        chain,
+      );
+      return updated;
+    } catch (error) {
+      // Lost a race with the undisputed sweep or a provider filing in-app.
+      if ((error as { errorCode?: string })?.errorCode?.startsWith('SLASH_')) return null;
+      throw error;
+    }
+  }
+
+  private async openDispute(
+    organizationId: string,
+    proposalId: string,
+    input: {
+      claimType: DisputeClaimType;
+      reason: string;
+      evidence: unknown[];
+      openedBy: string;
+    },
+    chain: { readonly requestId: string; readonly transactionHash: string | null } | null,
+  ): Promise<{ proposal: SlashProposalEntity; dispute: DisputeEntity }> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
 
     if (proposal.disputeId) {
@@ -141,7 +193,7 @@ export class ArbitrationService {
     // state" when the truth is "you were three hours late" produces a support
     // ticket instead of an understanding.
     const now = new Date();
-    if (proposal.respondByAt && proposal.respondByAt.getTime() < now.getTime()) {
+    if (!chain && proposal.respondByAt && proposal.respondByAt.getTime() < now.getTime()) {
       throw SlashErrors.responseWindowClosed({
         respondByAt: proposal.respondByAt.toISOString(),
       });
@@ -198,11 +250,14 @@ export class ArbitrationService {
       kind: 'DISPUTE_FILED',
       actorType: 'provider',
       actorId: input.openedBy,
-      summary: `Objection filed: ${input.claimType}`,
+      summary: chain
+        ? 'Objection filed on chain (disputeSlash); the case is in review'
+        : `Objection filed: ${input.claimType}`,
       detail: {
         disputeId: savedDispute.id,
         claimType: input.claimType,
         platformDueAt: platformDueAt.toISOString(),
+        ...(chain ? { onChain: true, requestId: chain.requestId } : {}),
       },
     });
 
@@ -255,42 +310,51 @@ export class ArbitrationService {
     const now = new Date();
     const opensReview = from === SlashProposalStatus.DISPUTED;
 
-    if (opensReview) {
-      const affected = await this.proposals.transitionIfIn(
+    // One transaction, and its first statement is a compare-and-swap on the
+    // status the row was read in. A decision landing between the read and the
+    // write makes it affect nothing, and then neither the dispute row nor the
+    // ASSIGNED event is written: a decided case is never re-opened or
+    // re-assigned by a claim that lost the race.
+    await this.proposals.manager.transaction(async (manager) => {
+      const queryRunner = manager.queryRunner as QueryRunner;
+      const affected = await this.updateInTransaction(
+        queryRunner,
         organizationId,
         proposalId,
-        [SlashProposalStatus.DISPUTED],
-        { status: SlashProposalStatus.UNDER_REVIEW },
-      );
-      if (affected === 0) {
-        // Lost a race: the case left `DISPUTED` after it was read.
-        throw SlashErrors.invalidTransition({
-          from: proposal.status,
-          to: SlashProposalStatus.UNDER_REVIEW,
-        });
-      }
-    }
-
-    if (proposal.disputeId) {
-      await this.disputes.update(
-        { organizationId, id: proposal.disputeId },
+        [from],
         {
-          ...(opensReview ? { state: 'UNDER_REVIEW' } : {}),
-          assignedOperatorId: operator.operatorId,
-          assignedAt: now,
+          status: opensReview ? SlashProposalStatus.UNDER_REVIEW : from,
         },
       );
-    }
+      if (affected === 0) {
+        throw SlashErrors.invalidTransition({
+          from: proposal.status,
+          to: opensReview ? SlashProposalStatus.UNDER_REVIEW : 'a claim',
+        });
+      }
 
-    await this.lifecycle.appendEventDirect({
-      organizationId,
-      proposalId,
-      occurredAt: now,
-      kind: 'ASSIGNED',
-      actorType: 'operator',
-      actorId: operator.subject,
-      summary: `Assigned to ${operator.subject}`,
-      detail: { operatorId: operator.operatorId },
+      if (proposal.disputeId) {
+        await queryRunner.manager.update(
+          DisputeEntity,
+          { organizationId, id: proposal.disputeId },
+          {
+            ...(opensReview ? { state: 'UNDER_REVIEW' } : {}),
+            assignedOperatorId: operator.operatorId,
+            assignedAt: now,
+          },
+        );
+      }
+
+      await this.lifecycle.appendEvent(queryRunner, {
+        organizationId,
+        proposalId,
+        occurredAt: now,
+        kind: 'ASSIGNED',
+        actorType: 'operator',
+        actorId: operator.subject,
+        summary: `Assigned to ${operator.subject}`,
+        detail: { operatorId: operator.operatorId },
+      });
     });
 
     return this.lifecycle.require(organizationId, proposalId);
@@ -340,9 +404,14 @@ export class ArbitrationService {
     const consequence = OUTCOME_CONSEQUENCE[input.outcome];
     const penalty = this.resolvePenalty(proposal, input);
 
+    // The threshold and the authority limit are measured on the penalty the
+    // case CARRIES, never on the recalculated figure: measured on that, one
+    // adjudicator could cut any penalty to one minor unit alone. `penalty` is
+    // never above the original (`resolvePenalty`), so the original is also the
+    // larger of the two.
     const needsSecond = requiresSecondSignature(
       input.outcome,
-      BigInt(penalty),
+      BigInt(proposal.penaltyAmount),
       BigInt(this.config.secondSignatureThresholdMinor),
       consequence.opensFleetSweep,
     );
@@ -373,7 +442,7 @@ export class ArbitrationService {
           // blast radius or materiality. The register cannot express that,
           // because it is a property of the case rather than of the action.
           escalateToTwoPerson: false,
-          amountMinor: penalty,
+          amountMinor: proposal.penaltyAmount,
         },
         async (queryRunner) => {
           const before = {
@@ -409,7 +478,11 @@ export class ArbitrationService {
           const patch: Partial<SlashProposalEntity> & { status: string } = {
             status: nextStatus,
             decidedByOperatorId: operator.operatorId,
-            penaltyAmount: penalty,
+            // Only when the decision binds. A recalculation awaiting its second
+            // signature has changed nothing yet; the decided figure is on this
+            // override's register entry (`after.penaltyAmount`), which is where
+            // `second()` reads it back.
+            penaltyAmount: binds ? penalty : proposal.penaltyAmount,
             rootCauseKey: input.rootCauseKey ?? proposal.rootCauseKey,
             outcome: binds ? input.outcome : null,
             resolutionKind: binds ? ResolutionKind.ADJUDICATOR : null,
@@ -441,11 +514,13 @@ export class ArbitrationService {
             kind: 'DECIDED',
             actorType: 'operator',
             actorId: operator.subject,
-            summary: needsSecond
-              ? `${operator.subject} decided ${input.outcome}; a second signature is required`
-              : `${operator.subject} decided ${input.outcome}`,
+            summary:
+              `${operator.subject} decided ${input.outcome}` +
+              (penalty !== proposal.penaltyAmount ? ` at ${penalty}` : '') +
+              (needsSecond ? '; a second signature is required' : ''),
             detail: {
               outcome: input.outcome,
+              penaltyAmount: penalty,
               reasonCodes: input.reasonCodes,
               rubricVersion: CURRENT_RUBRIC_VERSION,
               requiresSecondSignature: needsSecond,
@@ -519,6 +594,15 @@ export class ArbitrationService {
       throw SlashErrors.secondSignatureNotPending({ status: proposal.status });
     }
 
+    // A recalculation's figure is written only when it binds, so a countersign
+    // has to know what was decided. Read off the decision's own register entry;
+    // a figure that cannot be read refuses the countersignature rather than
+    // binding the original or a guess. An objection needs no figure.
+    const decidedPenalty =
+      kind === 'SIGNED' && outcome === ArbitrationOutcome.UPHELD_RECALCULATED
+        ? await this.pendingRecalculatedPenalty(proposal)
+        : null;
+
     const now = new Date();
     const nextStatus =
       kind === 'SIGNED' ? statusForOutcome(outcome) : SlashProposalStatus.UNDER_REVIEW;
@@ -557,6 +641,7 @@ export class ArbitrationService {
                   resolutionKind: ResolutionKind.ADJUDICATOR,
                   resolvedAt: now,
                   countsAsFalsePositive: OUTCOME_CONSEQUENCE[outcome].countsAsFalsePositive,
+                  ...(decidedPenalty ? { penaltyAmount: decidedPenalty } : {}),
                 }
               : {
                   status: nextStatus,
@@ -649,23 +734,46 @@ export class ArbitrationService {
   }
 
   /**
-   * `S-1` — suspend a proposal before anything is signed.
+   * `S-1` — suspend a proposal.
    *
    * Terminal. There is no un-suspend, because the finding is still on record as
    * a strike and a re-proposal would restart the provider's clock — which is
    * the correct thing to happen if we want to levy it after all, and is not the
    * same object.
    *
+   * ## What it does about the chain
+   *
+   * A case is proposed on chain about a minute after the provider is told, so
+   * a suspended case usually has a `Pending` record standing with the
+   * provider's stake reserved — and that record is anyone's to execute once
+   * its timelock passes. A suspension therefore follows the same path as an
+   * overturn: after its own transaction commits it asks for the on-chain
+   * cancel ({@link settleTheChainProposal}), which moves `chain_status` from
+   * `PENDING` to `CANCEL_REQUESTED`. Nothing is signed here — the cancel is the
+   * settlement admin's — and from there `SlashLifecycleJob`'s admin-cancel
+   * sweep carries it.
+   *
+   * The request is best-effort, like the overturn's. When it is lost, or the
+   * record lands after the suspension, `SlashLifecycleJob`'s closed-case repair
+   * asks again on the next tick. A case with no record yet (`NONE`) needs
+   * nothing: the propose sweep never proposes a closed case.
+   *
+   * **Who may do it alone.** From `PROPOSED`, `DISPUTED` and `UNDER_REVIEW`
+   * one operator suspends. From `AWAITING_SECOND` and `UPHELD` a second person
+   * has confirmed the penalty or is confirming it, so the occurrence is
+   * two-person: called without `approver` it is refused with
+   * `OPERATOR_SECOND_APPROVER_REQUIRED`, which the console turns into a queued
+   * approval; `approver` is the second operator who approved it, holding `ADJ`
+   * or `ADJL` with an authority limit that covers the penalty. An approver
+   * supplied in the other statuses is recorded, and not required.
+   *
    * **`EXECUTING` is refused, deliberately.** The state machine has an
    * `EXECUTING → CANCELLED` edge, and that edge exists for one caller: the
    * chain-void path, which reaches it only after the settlement program has
-   * refused the judgement permanently. `S-1` is the opposite situation — the
-   * chain has accepted it, a `SlashRecord` is `Pending`, and the transaction may
-   * be in flight this second. Closing the case here would leave that record
-   * standing with the provider's stake reserved until `expire_slash` reaps it
-   * seven days later, and would let an operator record a suspension of an
-   * execution that then lands anyway. Allowing it needs an on-chain
-   * `cancel_slash` first, which is a design decision nobody has taken.
+   * refused the judgement permanently. `S-1` is the opposite situation — this
+   * platform's own execute transaction may be in flight this second, and
+   * closing the case here would let an operator record a suspension of an
+   * execution that then lands anyway.
    */
   async suspend(
     operator: OperatorSession,
@@ -675,6 +783,7 @@ export class ArbitrationService {
     note: string,
     ticketRef?: string | null,
     requestId?: string | null,
+    approver?: OperatorApprover | null,
   ): Promise<SlashProposalEntity> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
     const from = proposal.status as SlashProposalStatus;
@@ -689,11 +798,24 @@ export class ArbitrationService {
       throw SlashErrors.invalidTransition({ from, to: SlashProposalStatus.CANCELLED });
     }
 
+    // Single-person while nobody else has ruled on the case. From
+    // AWAITING_SECOND or UPHELD a second person has confirmed the penalty, or
+    // is confirming it, and cancelling it alone would undo their decision: the
+    // occurrence is raised to two-person and the register demands an approver
+    // (ADJ or ADJL, within their own authority limit).
+    const needsApprover =
+      from === SlashProposalStatus.AWAITING_SECOND || from === SlashProposalStatus.UPHELD;
+
     const now = new Date();
-    return this.overrides.perform<SlashProposalEntity>(
+    const saved = await this.overrides.perform<SlashProposalEntity>(
       {
         code: 'S-1',
         actor: operator,
+        escalateToTwoPerson: needsApprover,
+        // Passed even when not needed, so an approval queued from UPHELD is
+        // still marked done if the case has since moved to a status where one
+        // person may suspend.
+        approver: approver ?? null,
         targetType: 'slash_proposal',
         targetId: proposalId,
         organizationId,
@@ -751,6 +873,10 @@ export class ArbitrationService {
         };
       },
     );
+    // After the commit, exactly as a decision does: the suspension stands
+    // whether or not the chain half could be recorded.
+    await this.settleTheChainProposal(organizationId, proposalId, saved.status, null);
+    return saved;
   }
 
   /**
@@ -947,7 +1073,8 @@ export class ArbitrationService {
    *
    * Two outcomes, and only two:
    *
-   * - **Overturned** — cancel. The reservation is real money to the provider
+   * - **Overturned, or suspended** (`outcome` is `null` for a suspension, which
+   *   is not a judgement) — cancel. The reservation is real money to the provider
    *   (`pending_slash` is subtracted from `withdrawable`), and a case they won
    *   must not go on costing them it until `expire_slash`'s grace runs out ten
    *   days later.
@@ -989,13 +1116,13 @@ export class ArbitrationService {
     organizationId: string,
     proposalId: string,
     status: string,
-    outcome: ArbitrationOutcome,
+    outcome: ArbitrationOutcome | null,
   ): Promise<void> {
     if (!this.execution) return;
 
     try {
-      if (status === SlashProposalStatus.OVERTURNED) {
-        await this.execution.requestAdminCancel(organizationId, proposalId, outcome);
+      if (status === SlashProposalStatus.OVERTURNED || status === SlashProposalStatus.CANCELLED) {
+        await this.execution.requestAdminCancel(organizationId, proposalId, outcome ?? 'SUSPENDED');
         return;
       }
       if (
@@ -1006,8 +1133,9 @@ export class ArbitrationService {
       }
     } catch (error) {
       this.logger.error(
-        `slash proposal ${proposalId} was decided ${outcome} but its on-chain proposal could ` +
-          `not be settled; the decision stands and the chain step will be retried`,
+        `slash proposal ${proposalId} was ${outcome ? `decided ${outcome}` : 'suspended'} but its ` +
+          `on-chain proposal could not be settled; the decision stands and the chain step will ` +
+          `be retried`,
         error instanceof Error ? error.stack : String(error),
       );
     }
@@ -1022,6 +1150,27 @@ export class ArbitrationService {
    * the number that happens to them — which is the process this arbitration
    * exists to replace, wearing our own uniform.
    */
+  /**
+   * The figure a pending `UPHELD_RECALCULATED` decision bound itself to, read
+   * off its `S-3` register entry — the latest one for the case, which is the
+   * decision `AWAITING_SECOND` holds. Refuses when it is missing, malformed or
+   * above the penalty the case carries.
+   */
+  private async pendingRecalculatedPenalty(proposal: SlashProposalEntity): Promise<string> {
+    const decisions = (await this.overrides.historyFor('slash_proposal', proposal.id)).filter(
+      (entry) => entry.code === 'S-3',
+    );
+    const decided = decisions[decisions.length - 1]?.after?.penaltyAmount;
+    if (
+      typeof decided !== 'string' ||
+      !RECALCULATED_AMOUNT_PATTERN.test(decided) ||
+      BigInt(decided) > BigInt(proposal.penaltyAmount)
+    ) {
+      throw SlashErrors.secondSignatureNotPending({ status: proposal.status });
+    }
+    return decided;
+  }
+
   private resolvePenalty(proposal: SlashProposalEntity, input: DecideInput): string {
     if (input.outcome !== ArbitrationOutcome.UPHELD_RECALCULATED) {
       return proposal.penaltyAmount;

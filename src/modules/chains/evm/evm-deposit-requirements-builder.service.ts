@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 
 import { readRequiredExtra } from '@modules/payment/domain/deposit-wire';
 import {
@@ -7,6 +7,8 @@ import {
   Eip155DepositRequirements,
 } from '@modules/payment/ports/deposit-requirements.port';
 
+import { ChainDoor } from '../ports/chain-state-gate.port';
+import { EvmChainStateService } from './chain-state/evm-chain-state.service';
 import { EVM_DEPOSIT_METHOD } from './evm.constants';
 
 /**
@@ -50,6 +52,13 @@ import { EVM_DEPOSIT_METHOD } from './evm.constants';
  */
 @Injectable()
 export class EvmDepositRequirementsBuilder implements DepositRequirementsBuilderPort {
+  /**
+   * The pause/blocklist gate (D-19): `depositFor` is paused on every Config,
+   * and since the dispute upgrade refuses a blocked buyer. No RPC unless the
+   * cache says the deposit would be refused.
+   */
+  constructor(@Optional() private readonly chainState: EvmChainStateService | null = null) {}
+
   async build({
     chainId,
     requirements,
@@ -58,6 +67,9 @@ export class EvmDepositRequirementsBuilder implements DepositRequirementsBuilder
     const contract = readRequiredExtra(requirements, 'contract');
     const spender = readRequiredExtra(requirements, 'spender');
     const buyer = readRequiredExtra(requirements, 'buyer');
+    await this.chainState?.assertActive(ChainDoor.DEPOSIT, [
+      { role: 'BUYER', account: `${chainId}:${buyer}` },
+    ]);
 
     return {
       namespace: 'eip155',

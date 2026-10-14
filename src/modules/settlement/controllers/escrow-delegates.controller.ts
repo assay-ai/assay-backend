@@ -9,7 +9,12 @@ import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { AuditLogWriter, auditActorOf } from '@shared/audit';
-import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
+import {
+  AllowedWhileBlocked,
+  CurrentSession,
+  HumanSessionGuard,
+  SessionAuthGuard,
+} from '@shared/auth';
 
 import {
   CreateDelegateIntentBodyDto,
@@ -143,6 +148,7 @@ export class EscrowDelegatesController {
 
   /** `POST /escrow/delegates/revoke-intent` — the `RevokeDelegate` request the payer signs. */
   @Post('revoke-intent')
+  @AllowedWhileBlocked()
   @ApiOperation({ summary: 'Build the RevokeDelegate request the payer signs' })
   @ApiResponse({ status: 201, type: DelegateIntentResponseDto })
   @ApiResponse({ status: 409, description: 'SETTLEMENT_DELEGATION_NOT_ACTIVE' })
@@ -168,6 +174,7 @@ export class EscrowDelegatesController {
 
   /** `POST /escrow/delegates/revoke` — relay the signed `RevokeDelegate` (`revokeDelegateBySig`). */
   @Post('revoke')
+  @AllowedWhileBlocked()
   @ApiOperation({ summary: "Relay the payer's signed RevokeDelegate request" })
   @ApiResponse({ status: 201, type: RelayedDelegateResponseDto })
   async revoke(

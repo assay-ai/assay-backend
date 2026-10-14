@@ -59,6 +59,7 @@ export enum PaymentErrorCode {
   PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE = 'PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE',
   PAYMENT_NEXT_SEQ_RATE_LIMITED = 'PAYMENT_NEXT_SEQ_RATE_LIMITED',
   PAYMENT_WITHDRAWAL_PENDING = 'PAYMENT_WITHDRAWAL_PENDING',
+  PAYMENT_PROVIDER_SLASH_HOLD = 'PAYMENT_PROVIDER_SLASH_HOLD',
 
   // ── Agent payment delegation: a voucher signed by a DELEGATE key the payer
   //    authorised on chain, instead of by the payer's own key.
@@ -427,6 +428,18 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
    * The context fields exist so an agent — or the SDK — can do the one useful
    * thing: fund the other chain.
    */
+  /**
+   * The provider is on a slash hold on this chain: its penalties cannot be
+   * collected promptly, so no new payment intent names it there until the
+   * hold lifts (by itself, once the chain says otherwise).
+   */
+  providerSlashHold: {
+    code: PaymentErrorCode.PAYMENT_PROVIDER_SLASH_HOLD,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The provider is paused on ${context?.chainId ?? 'this chain'} while its outstanding ` +
+      'penalties cannot be collected (slash hold); no payment to it can be created there now',
+  },
   noSettleableChain: {
     code: PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN,
     statusCode: 409,

@@ -12,11 +12,18 @@ import {
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { ChainNamespace } from '@modules/chains/ports/caip.types';
 import { slashPartRequestId } from '@modules/slash/domain/prorata-slash';
+import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
+import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
+import { DisputeClaimType } from '@modules/slash/domain/arbitration';
+import { ArbitrationService } from '@modules/slash/services/arbitration.service';
+import { SlashChainRulingService } from '@modules/slash/services/slash-chain-ruling.service';
+import { SlashDisputeIntentService } from '@modules/slash/services/slash-dispute-intent.service';
 import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp256k1-env.signer';
 
 import {
   CHAIN,
   DEPLOYMENT,
+  FAKE_ARBITER,
   FakeStakeChain,
   MULTICALL,
   TREASURY,
@@ -25,6 +32,7 @@ import {
   buildProRataSlashServices,
   freshMigratedDatabase,
   ProRataSlashServices,
+  TEST_SLASH_CONFIG,
 } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
 
@@ -99,7 +107,6 @@ describe('pro-rata EVM slash, against a real database', () => {
         now: () => Number(chain.now) * 1000,
         batchSize: 20,
         multicall: new Map([[CHAIN, MULTICALL]]),
-        executeDeferLimitMs: 3 * 24 * 3_600_000,
         receiptRetryDelayMs: 0,
       },
     );
@@ -118,6 +125,7 @@ describe('pro-rata EVM slash, against a real database', () => {
     chain.sent.filter((tx) => getAddress(tx.to) === getAddress(MULTICALL));
 
   async function seedWindow(penalty: bigint, provider = PROVIDER) {
+    const p = (price: bigint) => price;
     return seedProRataCase(dataSource, {
       providerOrg: randomUUID(),
       stakeAuthority: `${CHAIN}:${provider}`,
@@ -125,13 +133,13 @@ describe('pro-rata EVM slash, against a real database', () => {
       penalty,
       proposedAt: new Date(nowOf().getTime() - 60_000),
       agents: [
-        { account: A, failed: [100_000n, 100_000n, 100_000n], passed: [100_000n] },
-        { account: B, failed: [100_000n] },
-        { account: C, failed: [50_000n, 50_000n] },
+        { account: A, failed: [p(100_000n), p(100_000n), p(100_000n)], passed: [p(100_000n)] },
+        { account: B, failed: [p(100_000n)] },
+        { account: C, failed: [p(50_000n), p(50_000n)] },
         // Served well: in the window, never a beneficiary.
-        { account: D, failed: [], passed: [100_000n] },
+        { account: D, failed: [], passed: [p(100_000n)] },
         // A failure priced in another asset is not weighed in this one.
-        { account: D, failed: [100_000n], assetId: ASSET_IDS.USDC_SOLANA_DEVNET },
+        { account: D, failed: [p(100_000n)], assetId: ASSET_IDS.USDC_SOLANA_DEVNET },
       ],
     });
   }
@@ -169,6 +177,27 @@ describe('pro-rata EVM slash, against a real database', () => {
         getAddress(part.agentAccount.split(':')[2]),
       );
     }
+
+    // What `EvmSlashProposalWatcher` (review H-1) looks records up by: across
+    // tenants, by on-chain request id.
+    const known = await services.partsRepository.findByChainRequestIds([
+      ...parts.map((part) => part.chainRequestId),
+      'f'.repeat(64),
+    ]);
+    expect(
+      known
+        .map((part) => [part.chainRequestId, part.beneficiaryAccount, part.penaltyAmount])
+        .sort(),
+    ).toEqual(
+      parts
+        .map((part) => [part.chainRequestId, part.beneficiaryAccount, part.penaltyAmount])
+        .sort(),
+    );
+
+    // B5: the expiry monitor reads these, across tenants.
+    expect(
+      (await services.partsRepository.findOpenChainRecords(100)).map((row) => row.requestId).sort(),
+    ).toEqual(parts.map((part) => part.chainRequestId).sort());
 
     const proposal = await load(seeded);
     expect(proposal.chainStatus).toBe('PENDING');
@@ -375,6 +404,381 @@ describe('pro-rata EVM slash, against a real database', () => {
   });
 
   // S3(5): a reservation a failed expire left behind is revisited by the reconciler.
+  it('AUDIT E-4: a dispute on one part freezes only that part; the others execute and the upheld one is paid later', async () => {
+    const seeded = await seedWindow(250_001n);
+    await services.execution.proposeDue(nowOf());
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    const proposal = await load(seeded);
+    const parts = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    // The provider disputes its SMALLEST part (B) on chain, and the watcher mirrors it.
+    const disputedPart = parts[0];
+    chain.markDisputed(disputedPart.chainRequestId);
+    const rulings = new SlashChainRulingService(
+      services.partsRepository,
+      services.proposals,
+      services.lifecycle,
+    );
+    const record = chain.record(disputedPart.chainRequestId)!;
+    await rulings.recordDisputed({
+      chainId: CHAIN,
+      requestId: disputedPart.chainRequestId,
+      provider: PROVIDER,
+      disputedAt: nowOf(),
+      executableAt: new Date(Number(record.executableAt) * 1000),
+      transactionHash: null,
+    });
+    expect(await load(seeded)).toMatchObject({ chainStatus: 'PENDING', chainDisputedParts: 1 });
+
+    // Past the door: the two undisputed parts execute, the case closes on them.
+    chain.now += BigInt(73 * 3600);
+    expect(await services.execution.executeDue(nowOf())).toEqual({
+      executed: 1,
+      voided: 0,
+      failed: 0,
+    });
+    const after = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    expect(after.map((part) => part.chainStatus)).toEqual(['DISPUTED', 'EXECUTED', 'EXECUTED']);
+    expect(await load(seeded)).toMatchObject({ status: 'EXECUTED', appliedAmount: '200001' });
+
+    // The arbiter upholds; the stranded-part pass pays the disputed part.
+    chain.markUpheld(disputedPart.chainRequestId);
+    await rulings.recordUpheld({
+      chainId: CHAIN,
+      requestId: disputedPart.chainRequestId,
+      arbiter: FAKE_ARBITER,
+      executableAt: nowOf(),
+      transactionHash: null,
+    });
+    await services.execution.reconcileExecuting(nowOf());
+    const paid = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    expect(paid.map((part) => part.chainStatus)).toEqual(['EXECUTED', 'EXECUTED', 'EXECUTED']);
+    expect((await load(seeded)).appliedAmount).toBe('250001');
+  });
+
+  it('C5: signs a genuine case at the normal prices and multiplier 2, though the 60% exceeds what was paid', async () => {
+    // Failed spend 300k + 100k + 100k = 500k; SLA_PENALTY_MULTIPLIER = 2 gives
+    // a penalty of 1,000,000, split 600k / 200k / 200k. A's 60% (360k) is more
+    // than the 300k it paid — the formula's own consequence, so it is signed.
+    const seeded = await seedWindow(1_000_000n);
+    await services.execution.proposeDue(nowOf());
+    const proposal = await load(seeded);
+    expect(proposal).toMatchObject({ chainStatus: 'PENDING', chainLastError: null });
+    const parts = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    expect(parts.map((part) => part.penaltyAmount)).toEqual(['200000', '600000', '200000']);
+  });
+
+  it('C5: refuses a tampered part that exceeds its payer’s formula share, and signs nothing', async () => {
+    const seeded = await seedWindow(1_000_000n);
+    const proposal = await load(seeded);
+    // A stored plan whose part for B (formula share 200k of 1,000,000) was
+    // raised to 400k at A's expense.
+    const row = (agent: string, weight: string, share: string, penalty: string) => ({
+      windowId: proposal.windowId as string,
+      agentAccount: agent,
+      beneficiaryAccount: agent,
+      weightAmount: weight,
+      uncappedShareAmount: share,
+      penaltyAmount: penalty,
+      planPenaltyAmount: '1000000',
+      planCappedTotal: '1000000',
+      capBinding: 'NONE',
+      chainRequestId: slashPartRequestId(
+        proposal.windowId as string,
+        proposal.chainRequestId,
+        agent,
+      ),
+      chainStatus: 'NONE',
+    });
+    await services.partsRepository.insertPlan(proposal.organizationId, proposal.id, 0, [
+      row(B, '100000', '400000', '400000'),
+      row(A, '300000', '400000', '400000'),
+      row(C, '100000', '200000', '200000'),
+    ] as never);
+    await services.execution.proposeDue(nowOf());
+    const after = await load(seeded);
+    expect(after.chainStatus).not.toBe('PENDING');
+    // The H-2 plan check and the C5 formula check both refuse it; H-2 runs first.
+    expect(after.chainLastError).toMatch(
+      /^SLASH_(PLAN_EVIDENCE_MISMATCH|BENEFICIARY_EVIDENCE_REFUSED)$/,
+    );
+    expect(multicallSends()).toHaveLength(0);
+  });
+
+  it('C4/C5: the arbiter queue shows the beneficiary evidence and the provider’s upheld violations', async () => {
+    const seeded = await seedWindow(250_001n);
+    await services.execution.proposeDue(nowOf());
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    const proposal = await load(seeded);
+    const [partB] = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    await services.partsRepository.updatePart(proposal.organizationId, partB.id, {
+      chainStatus: 'DISPUTED',
+      chainDisputedAt: nowOf(),
+    });
+    const queue = new SlashDisputeIntentService(
+      {} as never,
+      {} as never,
+      services.partsRepository,
+      { chainTerms: async () => ({ slashAgentBps: 6000 }) } as never,
+      services.proposals,
+      services.parts,
+    );
+    const items = await queue.disputedOnChain(200, new Date(nowOf().getTime() + 50 * HOUR));
+    expect(items).toHaveLength(1);
+    expect(items[0]).toMatchObject({
+      requestId: `0x${partB.chainRequestId}`,
+      beneficiary: B,
+      // The case was upheld off chain by the sweep: one violation in 30 days.
+      upheldViolations30d: 1,
+      beneficiaryEvidence: {
+        payer: B,
+        failedCalls: 1,
+        paidAmount: '100000',
+        formulaShareAmount: '50000',
+        shareAmount: '30000',
+        ok: true,
+      },
+    });
+  });
+
+  describe('BUG-R13-D-03: an execution sent by somebody else is mirrored', () => {
+    const rulings = () =>
+      new SlashChainRulingService(
+        services.partsRepository,
+        services.proposals,
+        services.lifecycle,
+        null,
+        services.execution,
+      );
+    const executedEvent = (args: Record<string, unknown>) => ({
+      chainId: CHAIN,
+      requestId: String(args.requestId).slice(2),
+      appliedMinor: String(args.applied),
+      agentAmountMinor: String(args.agentAmount),
+      platformAmountMinor: String(args.platformAmount),
+      executedAt: new Date(Number(args.executedAt) * 1000),
+      transactionHash: `0x${'e'.repeat(64)}`,
+    });
+    const kinds = async (proposalId: string) =>
+      (
+        (await dataSource.query(
+          `SELECT kind FROM slash_proposal_events WHERE proposal_id = $1 ORDER BY occurred_at`,
+          [proposalId],
+        )) as { kind: string }[]
+      ).map((row) => row.kind);
+
+    it('closes an UPHELD case EXECUTED when a keeper executes every part', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      expect(proposal.status).toBe('UPHELD');
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      for (const part of parts) {
+        await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
+      }
+      expect(await load(seeded)).toMatchObject({
+        status: 'EXECUTED',
+        chainStatus: 'EXECUTED',
+        appliedAmount: '250001',
+      });
+      expect((await load(seeded)).executedAt).not.toBeNull();
+      const after = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      expect(after.map((part) => part.chainStatus)).toEqual(['EXECUTED', 'EXECUTED', 'EXECUTED']);
+      expect((await kinds(proposal.id)).filter((kind) => kind === 'EXECUTED')).toHaveLength(1);
+      // Nothing left for the backend's own executor.
+      expect(await services.execution.executeDue(nowOf())).toEqual({
+        executed: 0,
+        voided: 0,
+        failed: 0,
+      });
+    });
+
+    it('closes a still PROPOSED case EXECUTED when its PENDING parts are executed on chain', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      expect(proposal).toMatchObject({ status: 'PROPOSED', chainStatus: 'PENDING' });
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      // One part first: the case is not done yet.
+      await rulings().recordExecuted(
+        executedEvent(chain.executeExternally(parts[0].chainRequestId)),
+      );
+      expect((await load(seeded)).status).toBe('PROPOSED');
+      for (const part of parts.slice(1)) {
+        await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
+      }
+      expect(await load(seeded)).toMatchObject({ status: 'EXECUTED', appliedAmount: '250001' });
+    });
+
+    it('books nothing twice when the backend’s own executor already mirrored it', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+      chain.now += BigInt(73 * 3600);
+      expect((await services.execution.executeDue(nowOf())).executed).toBe(1);
+      const proposal = await load(seeded);
+      const before = await kinds(proposal.id);
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      // The watcher sees the same SlashExecuted events afterwards.
+      for (const part of parts) {
+        const record = chain.record(part.chainRequestId)!;
+        await rulings().recordExecuted({
+          chainId: CHAIN,
+          requestId: part.chainRequestId,
+          appliedMinor: String(record.applied),
+          agentAmountMinor: part.agentAmount ?? '0',
+          platformAmountMinor: part.platformAmount ?? '0',
+          executedAt: new Date(Number(record.executedAt) * 1000),
+          transactionHash: part.executionSignature,
+        });
+      }
+      expect(await load(seeded)).toMatchObject({ status: 'EXECUTED', appliedAmount: '250001' });
+      expect(await kinds(proposal.id)).toEqual(before);
+      expect(services.ledgerDistributions).toEqual([]);
+    });
+
+    it('catches an external execution whose event the watcher never saw, on the reconcile pass', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      for (const part of parts) chain.executeExternally(part.chainRequestId); // no event mirrored
+      expect((await load(seeded)).status).toBe('PROPOSED');
+
+      await services.execution.reconcileExecuting(nowOf());
+
+      expect(await load(seeded)).toMatchObject({
+        status: 'EXECUTED',
+        chainStatus: 'EXECUTED',
+        appliedAmount: '250001',
+      });
+    });
+
+    it('closes the open in-app dispute of a case it moves to EXECUTED, as an upheld decision would', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      const arbitration = new ArbitrationService(
+        services.proposals,
+        new DisputeRepository(dataSource),
+        new SlaStrikeRepository(dataSource),
+        services.lifecycle,
+        {} as never,
+        { notify: async () => undefined } as never,
+        TEST_SLASH_CONFIG,
+        services.execution,
+      );
+      // The seed's clock is the fake chain's; the objection window is measured
+      // in wall time, so open it wide enough for the provider to object now.
+      await dataSource.query(
+        `UPDATE slash_proposals SET respond_by_at = now() + interval '1 day' WHERE id = $1`,
+        [seeded.proposalId],
+      );
+      const { dispute } = await arbitration.fileDispute(seeded.organizationId, seeded.proposalId, {
+        claimType: DisputeClaimType.AGENT_GRIEFING,
+        reason: 'one agent sent every failing call',
+        evidence: [],
+        openedBy: 'provider@example.test',
+      });
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      expect(proposal.status).toBe('DISPUTED');
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      for (const part of parts) {
+        await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
+      }
+
+      expect((await load(seeded)).status).toBe('EXECUTED');
+      const [row] = (await dataSource.query(
+        `SELECT state, outcome, resolution_kind, resolved_at, resolved_by FROM disputes WHERE id = $1`,
+        [dispute.id],
+      )) as {
+        state: string;
+        outcome: string;
+        resolution_kind: string;
+        resolved_at: Date | null;
+        resolved_by: string;
+      }[];
+      expect(row).toMatchObject({
+        state: 'REJECTED',
+        outcome: 'UPHELD',
+        resolution_kind: 'AUTO_CHAIN_EXECUTED',
+        resolved_by: 'chain:executeSlash',
+      });
+      expect(row.resolved_at).not.toBeNull();
+    });
+
+    it('keeps EXECUTED_AFTER_CLOSURE for a case closed in the app', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      await dataSource.query(
+        `UPDATE slash_proposals SET status = 'OVERTURNED', resolution_kind = 'AUTO_PLATFORM_MISS',
+           resolved_at = now() WHERE id = $1`,
+        [proposal.id],
+      );
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      for (const part of parts) {
+        await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
+      }
+      const after = await load(seeded);
+      expect(after).toMatchObject({ status: 'OVERTURNED', chainStatus: 'EXECUTED' });
+      expect(after.executedAt).not.toBeNull();
+      expect(await kinds(proposal.id)).toContain('EXECUTED_AFTER_CLOSURE');
+    });
+  });
+
   it('expires the still-pending part of an executed case on the reconcile pass', async () => {
     const seeded = await seedWindow(250_001n);
     await services.execution.proposeDue(nowOf());

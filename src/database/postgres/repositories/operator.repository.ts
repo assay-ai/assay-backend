@@ -23,18 +23,12 @@ export class OperatorRepository extends AbstractRepository<OperatorEntity> {
     super(OperatorEntity, dataSource);
   }
 
-  /**
-   * The row for a subject, whatever its `status`.
-   *
-   * Named for what it answers — "who is the operator behind this subject,
-   * right now" — not for a status filter: `subject` is unique, so there is
-   * only ever one current record to find. `ConfigOperatorSessionSource` is
-   * the one caller, and it reads `status` itself so it can throw
-   * `OPERATOR_SUSPENDED` rather than the same `OPERATOR_CREDENTIAL_INVALID`
-   * it throws for a subject that was never provisioned — a filtered finder
-   * would erase that distinction before the caller ever saw it.
-   */
-  findActiveBySubject(subject: string): Promise<OperatorEntity | null> {
+  /** The row for a wallet, whatever its `status`. `address` is matched lower-case. */
+  findByWallet(address: string): Promise<OperatorEntity | null> {
+    return this.findOne({ where: { walletAddress: address.toLowerCase() } });
+  }
+
+  findBySubject(subject: string): Promise<OperatorEntity | null> {
     return this.findOne({ where: { subject } });
   }
 

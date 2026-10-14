@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
+import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { JsonObject } from '@modules/tool/domain/mapping/mapping.types';
@@ -98,6 +99,9 @@ export class PublicDemoService {
     // The demo agent's own spend policy is the other half of the guard, and it
     // is already on the path inside `call()`. Nothing is counted here.
     const session = await this.sessions.resolve(this.config.token);
+    // The demo acts as a person's credential, so a blocked demo account gets a
+    // read-only session rather than a refusal; a run is a paid call.
+    if (session.blocked) throw sessionBlockedError(session.blocked);
     const tool = input.side === 'fail' ? this.config.brokenTool : this.config.healthyTool;
 
     const listedPrice = await this.listedPriceOf(tool);

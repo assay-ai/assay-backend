@@ -14,7 +14,11 @@ import {
   parseAccountId,
 } from '@modules/chains/ports/caip.types';
 
-import { SLASH_PRORATA_CONFIG, ProRataSlashConfig } from '../constants/slash.constants';
+import {
+  DISPUTE_TIMEOUT_MS,
+  ProRataSlashConfig,
+  SLASH_PRORATA_CONFIG,
+} from '../constants/slash.constants';
 import {
   ChainFailureKind,
   chainErrorName,
@@ -33,6 +37,12 @@ import {
   SlashPartView,
   slashPartRequestId,
 } from '../domain/prorata-slash';
+import {
+  BeneficiaryEvidence,
+  beneficiaryEvidence,
+  FailedCallPayment,
+} from '../domain/slash-beneficiary-evidence';
+import { planEvidenceMismatch } from '../domain/slash-plan-evidence';
 import { SlashErrors } from '../errors/slash.errors';
 import { SLASH_CAPS_READER, SlashCapsReaderPort } from '../ports/slash-caps-reader.port';
 import {
@@ -135,6 +145,11 @@ export class SlashPartsService {
     const stragglers: { part: SlashProposalPartEntity; attempts: number; reason: string }[] = [];
 
     if (todo.length > 0) {
+      // Review H-2: never sign a stored plan the evidence does not produce.
+      await this.assertPlanFollowsEvidence(proposal, chainId, parts);
+      // Follow-up C5: every beneficiary is a payer of the failed calls, and no
+      // part exceeds that payer's share of the formula penalty.
+      await this.assertBeneficiariesPaid(proposal, provider, chainId, todo);
       const outcomes = await this.executor.proposeBatch(
         todo.map((part) => ({
           chainId,
@@ -389,14 +404,94 @@ export class SlashPartsService {
     );
   }
 
+  /**
+   * Refuse (log, throw, sign nothing) when the case's stored parts are not the
+   * plan its evidence produces — see `planEvidenceMismatch`. Every part of the
+   * epoch is checked, not only the unsent ones, so a part that landed earlier
+   * still counts toward the sum and an edited row cannot be skipped past.
+   */
+  private async assertPlanFollowsEvidence(
+    proposal: SlashProposalEntity,
+    chainId: ChainId,
+    parts: readonly SlashProposalPartEntity[],
+  ): Promise<void> {
+    const weights = await this.harmedAgents(proposal, chainId, proposal.providerId);
+    const reason = planEvidenceMismatch({
+      casePenalty: BigInt(proposal.penaltyAmount),
+      evidence: new Map(weights.map((row) => [row.agentAccount, row.weight])),
+      parts,
+    });
+    if (!reason) return;
+    this.logger.error(
+      `slash case ${proposal.id}: refusing to sign; the stored plan does not match the ` +
+        `evidence: ${reason}`,
+    );
+    throw SlashErrors.planEvidenceMismatch({ proposalId: proposal.id, reason });
+  }
+
+  /**
+   * The C5 evidence of `parts`: per part, the payer of the failed calls, what
+   * it paid, what the penalty formula gives it, and the share it would receive. `agentBps` is the contract's
+   * `slashAgentBps` (read live when not given).
+   */
+  async beneficiaryEvidenceOf(
+    proposal: Pick<SlashProposalEntity, 'windowId' | 'assetId' | 'providerId' | 'penaltyAmount'>,
+    parts: readonly SlashProposalPartEntity[],
+    agentBps: number,
+  ): Promise<BeneficiaryEvidence[]> {
+    if (!proposal.windowId) return [];
+    const rows = await this.windowCalls.failedCallPaymentsByAgent(
+      proposal.windowId,
+      proposal.assetId,
+      proposal.providerId,
+    );
+    const payments = new Map<string, FailedCallPayment>();
+    const chainId = chainIdOf(proposal.assetId as AssetId);
+    for (const row of rows) {
+      const account = normalizeAgentAccount(row.agentAccount);
+      // As the plan does: a payer on another chain is not in the on-chain split.
+      if (!account.startsWith(`${chainId}:`)) continue;
+      const prior = payments.get(account);
+      payments.set(account, {
+        agentAccount: account,
+        failedCalls: (prior?.failedCalls ?? 0) + Number(row.failedCalls),
+        paidMinor: (prior?.paidMinor ?? 0n) + BigInt(row.paid ?? '0'),
+        redeemedMinor: (prior?.redeemedMinor ?? 0n) + BigInt(row.redeemed ?? '0'),
+      });
+    }
+    return beneficiaryEvidence(parts, payments, BigInt(proposal.penaltyAmount), agentBps);
+  }
+
+  /** Refuse (sign nothing) when a part fails the C5 check — see `beneficiaryEvidence`. */
+  private async assertBeneficiariesPaid(
+    proposal: SlashProposalEntity,
+    provider: string,
+    chainId: ChainId,
+    parts: readonly SlashProposalPartEntity[],
+  ): Promise<void> {
+    if (!this.caps) {
+      throw ChainErrors.programNotConfigured({ what: 'a slash caps reader for ' + chainId });
+    }
+    const { agentBps } = await this.caps.readCaps({ chainId, provider });
+    const failed = (await this.beneficiaryEvidenceOf(proposal, parts, agentBps)).filter(
+      (row) => !row.ok,
+    );
+    if (failed.length === 0) return;
+    const reason = failed.map((row) => `part 0x${row.requestId}: ${row.reason}`).join('; ');
+    this.logger.error(`slash case ${proposal.id}: refusing to sign (C5): ${reason}`);
+    throw SlashErrors.beneficiaryEvidenceRefused({ proposalId: proposal.id, reason });
+  }
+
   /** The window's DATA_FAIL weight per agent, merged on the normalised account, on this chain only. */
   private async harmedAgents(
     proposal: SlashProposalEntity,
     chainId: ChainId,
+    providerId?: string,
   ): Promise<HarmedAgentWeight[]> {
     const rows = await this.windowCalls.sumFailedPriceByAgent(
       proposal.windowId as string,
       proposal.assetId,
+      providerId,
     );
     const merged = new Map<string, bigint>();
     for (const row of rows) {
@@ -571,6 +666,12 @@ export class SlashPartsService {
     const executed = parts.filter((part) => part.chainStatus === 'EXECUTED');
     const pending = parts.filter((part) => part.chainStatus === 'PENDING');
     const livePending = pending.filter((part) => !deadParts.has(part.id));
+    // A DISPUTED part (D-19) is frozen on its own (audit E-4): it is a standing
+    // reservation the arbiter may still uphold, but it does not hold the
+    // case's other parts. Once they have executed, the case closes on what
+    // moved and the disputed part is left to `sweepStrandedParts`, which pays
+    // it after an uphold or expires it after the 30-day timeout.
+    const disputed = parts.filter((part) => part.chainStatus === 'DISPUTED');
 
     if (livePending.length > 0) {
       if (executed.length > 0) {
@@ -613,6 +714,25 @@ export class SlashPartsService {
           );
         }
       }
+    }
+
+    if (executed.length === 0 && disputed.length > 0) {
+      // Nothing executed and only disputed parts stand: the case waits for the
+      // arbiter. Transient, so the reconciler reads the aggregate (DISPUTED).
+      return {
+        ok: false,
+        error: ChainErrors.transactionFailed({
+          instruction: 'executeSlash',
+          reason: `case ${proposal.id}: every live part is disputed on chain`,
+          customErrorCode: null,
+        }),
+      };
+    }
+    if (disputed.length > 0) {
+      this.logger.log(
+        `slash case ${proposal.id}: ${executed.length} part(s) executed; ${disputed.length} ` +
+          `disputed part(s) wait for the arbiter on their own`,
+      );
     }
 
     if (executed.length === 0) {
@@ -695,7 +815,7 @@ export class SlashPartsService {
     let signature = '';
     let cancelledAt: Date | null = null;
     let failure: unknown = null;
-    for (const part of parts.filter((row) => row.chainStatus === 'PENDING')) {
+    for (const part of parts.filter((row) => ['PENDING', 'DISPUTED'].includes(row.chainStatus))) {
       try {
         const result = await this.executor.expire({
           chainId,
@@ -721,6 +841,31 @@ export class SlashPartsService {
   }
 
   /**
+   * When every standing part of the case can be expired (audit E-8): a part
+   * `DISPUTED` on chain at `disputedAt + 30 d`, a `PENDING` one — including a
+   * part that was disputed and then upheld — at its own `executableAt + 7 d`.
+   * The latest of those, or `null` when nothing stands. Reads the stored
+   * parts; call after {@link readRecord} has brought them up to date.
+   */
+  async expirableAt(proposal: SlashProposalEntity): Promise<Date | null> {
+    const parts = await this.parts.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      proposal.chainEpoch,
+    );
+    const doors = parts.flatMap((part) => {
+      if (part.chainStatus === 'DISPUTED' && part.chainDisputedAt) {
+        return [part.chainDisputedAt.getTime() + DISPUTE_TIMEOUT_MS];
+      }
+      if (part.chainStatus === 'PENDING' && part.chainExecutableAt) {
+        return [part.chainExecutableAt.getTime() + SLASH_EXECUTION_GRACE_MS_FOR_PARTS];
+      }
+      return [];
+    });
+    return doors.length > 0 ? new Date(Math.max(...doors)) : null;
+  }
+
+  /**
    * The admin's unsigned `cancelSlash` for the FIRST part still pending. The
    * case stays `CANCEL_REQUESTED` until every part has left `Pending`, so the
    * operator route hands out the next part's intent on the next request.
@@ -733,7 +878,8 @@ export class SlashPartsService {
       proposal.id,
       proposal.chainEpoch,
     );
-    const next = parts.find((part) => part.chainStatus === 'PENDING');
+    // `cancelSlash` takes a `Pending` or (D-19) a `Disputed` record.
+    const next = parts.find((part) => ['PENDING', 'DISPUTED'].includes(part.chainStatus));
     if (!next) {
       throw SlashErrors.chainUnavailable({
         proposalId: proposal.id,
@@ -783,10 +929,37 @@ export class SlashPartsService {
       if (!parts.some((part) => part.chainStatus === 'EXECUTED')) continue;
 
       const due: SlashProposalPartEntity[] = [];
-      for (const part of parts.filter((row) => ['PENDING', 'REFUSED'].includes(row.chainStatus))) {
+      for (const part of parts.filter((row) =>
+        ['PENDING', 'DISPUTED', 'REFUSED'].includes(row.chainStatus),
+      )) {
         try {
           const record = await this.readMatching(part, proposal, provider, chainId);
           if (!record) continue; // never landed (a refusal that stands), or not ours
+          if (record.status === 'DISPUTED') {
+            // D-19: no execution until the arbiter rules; expirable once the
+            // key is gone or `disputedAt + 30 d` has passed.
+            await this.mirrorRecord(part, record);
+            const timedOut =
+              record.disputedAt !== null &&
+              record.disputedAt !== undefined &&
+              now.getTime() >= record.disputedAt.getTime() + DISPUTE_TIMEOUT_MS;
+            if (record.verifierCanSign === false || timedOut) {
+              const result = await this.executor.expire({
+                chainId,
+                requestId: part.chainRequestId,
+                provider,
+              });
+              await this.parts.updatePart(part.organizationId, part.id, {
+                chainStatus: 'CANCELLED',
+                cancelledAt: result.cancelledAt,
+                chainLastError: null,
+              });
+              expired += 1;
+            } else {
+              waiting += 1;
+            }
+            continue;
+          }
           if (record.status !== 'PENDING') {
             await this.mirrorRecord(part, record);
             continue;
@@ -879,6 +1052,8 @@ export class SlashPartsService {
       chainProposedAt: record.proposedAt,
       chainExecutableAt: record.executableAt,
       chainReserved: record.reservedMinor,
+      // D-19: kept after an uphold, as the record of the dispute.
+      ...(record.disputedAt ? { chainDisputedAt: record.disputedAt } : {}),
       ...(record.status === 'EXECUTED'
         ? {
             // Keep the receipt-derived amounts if the live path wrote them.
@@ -895,6 +1070,7 @@ export class SlashPartsService {
 
 const STATUS_FOR_RECORD: Readonly<Record<SlashRecordStatus, SlashPartChainStatus>> = {
   PENDING: 'PENDING',
+  DISPUTED: 'DISPUTED',
   EXECUTED: 'EXECUTED',
   CANCELLED: 'CANCELLED',
 };
@@ -911,6 +1087,7 @@ function toView(part: SlashProposalPartEntity): SlashPartView {
     executableAt: part.chainExecutableAt,
     executedAt: part.executedAt,
     cancelledAt: part.cancelledAt,
+    disputedAt: part.chainDisputedAt,
   };
 }
 

@@ -34,6 +34,9 @@ const CHAIN_PROPOSABLE_STATUSES = [
 const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
 
 export class FakeSlashProposals {
+  /** The entity manager each `markReversedIfExecuted` ran on (undefined = default connection). */
+  readonly reversalManagers: unknown[] = [];
+
   readonly rows = new Map<string, SlashProposalEntity>();
 
   /** Records every CAS attempt, so a test can prove which predicate refused. */
@@ -73,6 +76,7 @@ export class FakeSlashProposals {
         chainProposalSignature: null,
         chainClaimedAt: null,
         chainLastError: null,
+        chainDisputedAt: null,
         penaltyAmount: '5000000',
         appliedAmount: null,
         // A real CAIP-19: `MoneyUtil.of` refuses anything else, and the
@@ -117,12 +121,17 @@ export class FakeSlashProposals {
     id?: string;
     strikeId?: string;
     verdictId?: string;
+    windowId?: string;
+    /** Any value here stands for TypeORM's `Not(IsNull())`, the only use. */
+    chainDisputeWonAt?: unknown;
   }) {
     for (const row of this.rows.values()) {
       if (row.organizationId !== where.organizationId) continue;
       if (where.id !== undefined && row.id !== where.id) continue;
       if (where.strikeId !== undefined && row.strikeId !== where.strikeId) continue;
       if (where.verdictId !== undefined && row.verdictId !== where.verdictId) continue;
+      if (where.windowId !== undefined && row.windowId !== where.windowId) continue;
+      if (where.chainDisputeWonAt !== undefined && !row.chainDisputeWonAt) continue;
       return row;
     }
     return null;
@@ -167,7 +176,9 @@ export class FakeSlashProposals {
     id: string,
     reversedAt: Date,
     reversalSignature: string,
+    manager?: unknown,
   ): Promise<number> {
+    this.reversalManagers.push(manager);
     const row = this.rows.get(id);
     if (
       !row ||
@@ -271,6 +282,49 @@ export class FakeSlashProposals {
       .map((row) => ({ organizationId: row.organizationId, id: row.id }));
   }
 
+  /** Mirrors `SlashProposalRepository.findChainDisputedBefore`. */
+  async findChainDisputedBefore(disputedBefore: Date, limit: number): Promise<ChainSweepRow[]> {
+    return [...this.rows.values()]
+      .filter(
+        (row) =>
+          row.chainStatus === 'DISPUTED' &&
+          row.chainDisputedAt !== null &&
+          row.chainDisputedAt.getTime() <= disputedBefore.getTime(),
+      )
+      .slice(0, limit)
+      .map((row) => ({ organizationId: row.organizationId, id: row.id }));
+  }
+
+  /** Mirrors `SlashProposalRepository.findStandingPastDoor` — see that method's SQL. */
+  async findStandingPastDoor(now: Date, limit: number): Promise<ChainSweepRow[]> {
+    return [...this.rows.values()]
+      .filter(
+        (row) =>
+          ['PENDING', 'DISPUTED'].includes(row.chainStatus) &&
+          row.chainExecutableAt !== null &&
+          row.chainExecutableAt.getTime() <= now.getTime() &&
+          row.executedAt === null &&
+          row.status !== 'EXECUTING',
+      )
+      .sort((a, b) => (a.chainExecutableAt?.getTime() ?? 0) - (b.chainExecutableAt?.getTime() ?? 0))
+      .slice(0, limit)
+      .map((row) => ({ organizationId: row.organizationId, id: row.id }));
+  }
+
+  /** Mirrors `SlashProposalRepository.findClosedStillPending` — see that method's SQL. */
+  async findClosedStillPending(limit: number): Promise<ChainSweepRow[]> {
+    return [...this.rows.values()]
+      .filter(
+        (row) =>
+          ['PENDING', 'DISPUTED'].includes(row.chainStatus) &&
+          ['CANCELLED', 'OVERTURNED'].includes(row.status) &&
+          row.resolutionKind !== 'AUTO_CHAIN_VOIDED',
+      )
+      .sort((a, b) => (a.chainExecutableAt?.getTime() ?? 0) - (b.chainExecutableAt?.getTime() ?? 0))
+      .slice(0, limit)
+      .map((row) => ({ organizationId: row.organizationId, id: row.id }));
+  }
+
   /** Mirrors `SlashProposalRepository.findExecutingToReconcile` — see that method's SQL. */
   async findExecutingToReconcile(staleClaimBefore: Date, limit: number): Promise<ChainSweepRow[]> {
     return [...this.rows.values()]
@@ -301,7 +355,15 @@ export class FakeSlashProposals {
     from: Date,
     to: Date,
     limit: number,
-  ): Promise<Array<{ organizationId: string; id: string }>> {
+  ): Promise<
+    Array<{
+      organizationId: string;
+      id: string;
+      status: string;
+      penaltyAmount: string;
+      disputeId: string | null;
+    }>
+  > {
     return [...this.rows.values()]
       .filter(
         (row) =>
@@ -312,7 +374,13 @@ export class FakeSlashProposals {
       )
       .sort((a, b) => a.proposedAt.getTime() - b.proposedAt.getTime())
       .slice(0, limit)
-      .map((row) => ({ organizationId: row.organizationId, id: row.id }));
+      .map((row) => ({
+        organizationId: row.organizationId,
+        id: row.id,
+        status: row.status,
+        penaltyAmount: row.penaltyAmount,
+        disputeId: row.disputeId,
+      }));
   }
 
   /**

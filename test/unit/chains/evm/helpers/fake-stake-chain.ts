@@ -49,6 +49,7 @@ export const MULTICALL = '0xcA11bde05977b3631167028862bE2a173976CA11' as const;
 export const TREASURY = '0x4246bee428758e8215bA587717d48B8Ef0130388' as const;
 export const ADMIN = '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32' as const;
 export const OWNER = '0x7777777777777777777777777777777777777777' as const;
+export const FAKE_ARBITER = '0xA4B17E4000000000000000000000000000000001' as const;
 export const RELAYER = '0x24A2c5823204150fe1bdc5Ce378A704788B345DB' as const;
 
 export const DEPLOYMENT: EvmDeployment = {
@@ -63,7 +64,6 @@ export const DEPLOYMENT: EvmDeployment = {
   multicall3: MULTICALL,
 };
 
-const DELAY = 72n * 3600n;
 const SLASH_RECORD_OF = toFunctionSelector('slashRecordOf(bytes32)');
 const GRACE = 7n * 86_400n;
 
@@ -80,6 +80,7 @@ interface SlashRecordState {
   applied: bigint;
   executedAt: bigint;
   policy: `0x${string}`;
+  disputedAt?: bigint;
 }
 
 interface Stake {
@@ -155,6 +156,10 @@ export class FakeStakeChain {
     string,
     { status: 'success'; blockNumber: bigint; gasUsed: bigint; logs: Log[] }
   >();
+  /** The upgraded contracts (D-19) are the only ones the backend supports. */
+  slashDelay = 72n * 3600n;
+  arbiter: `0x${string}` = FAKE_ARBITER;
+  readonly blockedAccounts = new Set<string>();
   /** Test hook: run before a sent transaction is applied (to change state under it). */
   beforeSend: ((data: `0x${string}`) => void) | null = null;
 
@@ -183,7 +188,9 @@ export class FakeStakeChain {
   // ── EvmSlashClient ────────────────────────────────────────────────────
 
   readonly client: EvmSlashClient = {
-    readContract: async (args) => this.read(args.address, args.functionName, args.args),
+    readContract: async (args) => {
+      return this.read(args.address, args.functionName, args.args);
+    },
     call: async (args) => {
       if (this.failNextCalls > 0) {
         this.failNextCalls -= 1;
@@ -270,6 +277,12 @@ export class FakeStakeChain {
   private read(address: string, functionName: string, args: readonly unknown[]): unknown {
     if (functionName === 'params') return { ...this.params };
     if (functionName === 'admin') return ADMIN;
+    if (functionName === 'paused') return false;
+    if (['slashDelaySeconds', 'arbiter', 'blocked'].includes(functionName)) {
+      if (functionName === 'slashDelaySeconds') return this.slashDelay;
+      if (functionName === 'arbiter') return this.arbiter;
+      return this.blockedAccounts.has(getAddress(args[0] as string));
+    }
     if (functionName === 'owner') return OWNER;
     if (functionName === 'canSign') {
       const key = getAddress(args[0] as string);
@@ -299,7 +312,7 @@ export class FakeStakeChain {
   private recordView(state: State, requestId: string) {
     const record = state.records.get(norm(requestId));
     return record
-      ? { ...record, __gap: 0, __gap2: 0 }
+      ? { ...record, __gap: 0, __gap2: 0, disputedAt: record.disputedAt ?? 0n }
       : {
           provider: '0x0000000000000000000000000000000000000000',
           status: 0,
@@ -315,6 +328,7 @@ export class FakeStakeChain {
           applied: 0n,
           executedAt: 0n,
           policy: `0x${'00'.repeat(32)}`,
+          disputedAt: 0n,
         };
   }
 
@@ -369,6 +383,9 @@ export class FakeStakeChain {
         return this.execute(state, decoded.args[0] as `0x${string}`, logs);
       case 'expireSlash':
         return this.expire(state, decoded.args[0] as `0x${string}`, logs);
+      case 'disputeSlashBatch':
+        for (const id of decoded.args[0] as readonly `0x${string}`[]) this.dispute(state, id, logs);
+        return;
       default:
         throw new Revert('NotAdmin');
     }
@@ -422,7 +439,7 @@ export class FakeStakeChain {
       beneficiary: getAddress(a.beneficiary),
       proposedAt: this.now,
       verifier: this.verifier,
-      executableAt: this.now + DELAY,
+      executableAt: this.now + this.slashDelay,
       reserved,
       capAllowance,
       applied: 0n,
@@ -454,22 +471,21 @@ export class FakeStakeChain {
     if (this.now >= rec.executableAt + GRACE) throw new Revert('SlashExecutionWindowClosed');
     if (this.revoked) throw new Revert('VerifierRevoked');
     const stake = state.stakes.get(rec.provider)!;
-    // The two rolling windows, as `executeSlash` meters them.
+    // All or wait (assay-evm 9f036a3): `applied == reserved`, or revert while
+    // either rolling window cannot take all of it.
     const providerCarried = decay(stake.slashedInWindow, stake.slashWindowStartedAt, this.now);
-    const windowRemaining =
-      rec.capAllowance > providerCarried ? rec.capAllowance - providerCarried : 0n;
-    if (windowRemaining === 0n) throw new Revert('SlashCapExceeded');
     const keyCarried = decay(
       state.keyWindow.slashedInWindow,
       state.keyWindow.windowStartedAt,
       this.now,
     );
-    const keyRemaining =
-      this.params.verifierDailyCap > keyCarried ? this.params.verifierDailyCap - keyCarried : 0n;
-    if (keyRemaining === 0n) throw new Revert('VerifierDailyCapExceeded');
-    let applied = rec.reserved;
-    if (applied > windowRemaining) applied = windowRemaining;
-    if (applied > keyRemaining) applied = keyRemaining;
+    const applied = rec.reserved;
+    if (
+      providerCarried + applied > rec.capAllowance ||
+      keyCarried + applied > this.params.verifierDailyCap
+    ) {
+      throw new Revert('SlashWindowNotDrained');
+    }
     const agentAmount = (applied * BigInt(this.params.slashAgentBps)) / 10_000n;
     const platformAmount = (applied * BigInt(this.params.slashPlatformBps)) / 10_000n;
     if (agentAmount + platformAmount === 0n) throw new Revert('PenaltyTooSmallToSplit');
@@ -510,18 +526,68 @@ export class FakeStakeChain {
     );
   }
 
-  private expire(state: State, requestId: `0x${string}`, logs: Log[]): void {
+  /** `_dispute` — no sender check here; the intent tests read records, they never send. */
+  private dispute(state: State, requestId: `0x${string}`, logs: Log[]): void {
     const rec = state.records.get(norm(requestId));
     if (!rec || rec.status !== 1) throw new Revert('SlashNotPending');
-    if (!this.revoked && this.now < rec.executableAt + GRACE) throw new Revert('SlashNotExpired');
+    if (this.now >= rec.executableAt) throw new Revert('DisputeWindowClosed');
+    rec.status = 4;
+    rec.disputedAt = this.now;
+    void logs;
+  }
+
+  /** Test hook: put a record in the `Disputed` state, as the provider's `disputeSlash` would. */
+  markDisputed(requestId: string, at: bigint = this.now): void {
+    const rec = this.state.records.get(norm(requestId));
+    if (!rec) throw new Error(`no record ${requestId}`);
+    rec.status = 4;
+    rec.disputedAt = at;
+  }
+
+  /**
+   * Test hook: `executeSlash` sent by somebody else (a keeper, a script, the
+   * provider) — the state moves exactly as for the backend's own send, and the
+   * `SlashExecuted` args are returned as the chain watcher would decode them.
+   */
+  executeExternally(requestId: string): Record<string, unknown> {
+    const logs: Log[] = [];
+    this.execute(this.state, `0x${norm(requestId)}` as `0x${string}`, logs);
+    const rec = this.state.records.get(norm(requestId))!;
+    return {
+      requestId: `0x${norm(requestId)}`,
+      provider: rec.provider,
+      applied: rec.applied,
+      agentAmount: (rec.applied * BigInt(this.params.slashAgentBps)) / 10_000n,
+      platformAmount: (rec.applied * BigInt(this.params.slashPlatformBps)) / 10_000n,
+      executedAt: rec.executedAt,
+    };
+  }
+
+  /** Test hook: the arbiter's `upholdSlash` — `Pending` again from `executableAt`. */
+  markUpheld(requestId: string, executableAt: bigint = this.now): void {
+    const rec = this.state.records.get(norm(requestId));
+    if (!rec) throw new Error(`no record ${requestId}`);
+    rec.status = 1;
+    rec.executableAt = executableAt;
+  }
+
+  private expire(state: State, requestId: `0x${string}`, logs: Log[]): void {
+    const rec = state.records.get(norm(requestId));
+    if (!rec || (rec.status !== 1 && rec.status !== 4)) throw new Revert('SlashNotPending');
+    const timedOut =
+      rec.status === 4
+        ? this.now >= (rec.disputedAt ?? 0n) + 30n * 86_400n
+        : this.now >= rec.executableAt + GRACE;
+    if (!this.revoked && !timedOut) throw new Revert('SlashNotExpired');
     const stake = state.stakes.get(rec.provider)!;
     stake.pendingSlash -= rec.reserved;
+    const wasDisputed = rec.status === 4;
     rec.status = 3;
     logs.push(
       event('SlashCancelled', {
         requestId,
         provider: rec.provider,
-        reason: this.revoked ? 2 : 1,
+        reason: this.revoked ? 2 : wasDisputed ? 3 : 1,
         released: rec.reserved,
         pendingSlash: stake.pendingSlash,
         cancelledAt: this.now,

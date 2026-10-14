@@ -67,6 +67,12 @@ export class NamespaceSlashExecutor implements SlashExecutorPort {
     return implementationFor(this.byNamespace, asset).settlementTreasury(asset);
   }
 
+  /** The namespace's own answer, or `undefined` when it has none (see the port). */
+  async slashDelaySeconds(chainId: ChainId): Promise<number | null> {
+    const implementation = implementationFor(this.byNamespace, chainId);
+    return (await implementation.slashDelaySeconds?.(chainId)) ?? null;
+  }
+
   /**
    * Refuses an unserved namespace before any group is sent — the same rule as
    * `groupByNamespace`: a mixed batch with one unserved chain spends nothing.

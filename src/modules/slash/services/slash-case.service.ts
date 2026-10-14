@@ -32,6 +32,7 @@ import {
   OUTCOME_CONSEQUENCE,
   ResolutionKind,
 } from '../domain/arbitration';
+import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import {
   ChangeOverlayDto,
@@ -494,6 +495,12 @@ function computeClocks(proposal: SlashProposalEntity, now: Date): SlashProposalC
     earliestExecutionAt: proposal.earliestExecutionAt,
     secondsRemaining,
     runningClock,
+    // The on-chain record, as mirrored. The case screen reads its execution
+    // date and dispute state from these, not from the off-chain promise.
+    chainStatus: (proposal.chainStatus ?? ChainProposalStatus.NONE) as ChainProposalStatus,
+    chainExecutableAt: proposal.chainExecutableAt ?? null,
+    chainDisputedAt: proposal.chainDisputedAt ?? null,
+    chainDisputedParts: proposal.chainDisputedParts ?? 0,
   };
 }
 
