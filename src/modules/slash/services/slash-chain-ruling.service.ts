@@ -456,6 +456,38 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     return true;
   }
 
+  /**
+   * Review N-3: EVM cases left open by the in-app objection era (`DISPUTED`,
+   * `UNDER_REVIEW`, `AWAITING_SECOND`) that no queue, sweep or action reaches
+   * any more. Each case's records are re-read from the chain onto its parts,
+   * and the case then follows them ({@link followRecords}): a record standing
+   * undisputed makes it `UPHELD` for the executor, a case with nothing
+   * standing closes, and one whose every record is disputed on chain stays for
+   * the arbiter. Run once when the scheduler starts; idempotent. Returns how
+   * many cases moved.
+   */
+  async reconcileOpenCases(limit: number): Promise<number> {
+    const rows = await this.proposals.findOpenOnChainCases(limit);
+    let moved = 0;
+    for (const row of rows) {
+      try {
+        const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (!proposal) continue;
+        await this.execution?.reconcileRecord(proposal);
+        await this.mirrorParts(proposal, {});
+        await this.followRecords(proposal, { transactionHash: null });
+        const after = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (after && after.status !== proposal.status) moved += 1;
+      } catch (error) {
+        this.logger.error(
+          `slash case ${row.id}: its on-chain records could not be re-read at start-up`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    }
+    return moved;
+  }
+
   private async timeline(
     proposal: SlashProposalEntity,
     occurredAt: Date,

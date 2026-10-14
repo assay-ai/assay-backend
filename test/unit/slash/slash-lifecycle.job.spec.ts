@@ -317,3 +317,35 @@ describe('SlashLifecycleJob — the closed-case repair', () => {
     error.mockRestore();
   });
 });
+
+describe('SlashLifecycleJob — open EVM cases from the in-app objection era (review N-3)', () => {
+  it('re-derives them from their records once per process, before the sweeps', async () => {
+    const steps: string[] = [];
+    const proposals = new FakeSlashProposals((name) => steps.push(name));
+    const execution = new FakeSlashExecution();
+    let calls = 0;
+    const rulings = {
+      reconcileOpenCases: async () => {
+        calls += 1;
+        steps.push('reconcileOpenCases');
+        if (calls === 1) throw new Error('rpc down');
+        return 2;
+      },
+    };
+    const job = new SlashLifecycleJob(
+      proposals as never,
+      execution as never,
+      {} as never,
+      rulings as never,
+    );
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+    await job.handleTick(); // the pass failed: tried again next tick
+    await job.handleTick();
+    await job.handleTick();
+
+    expect(calls).toBe(2);
+    expect(steps.slice(0, 2)).toEqual(['reconcileOpenCases', 'sweepUndisputed']);
+  });
+});
