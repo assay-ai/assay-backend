@@ -45,10 +45,11 @@ export interface RequestWithOperator extends Request {
  * session) on a missing, unknown, expired or revoked token, or an operator who
  * is no longer active, and that throw propagates through this guard unchanged.
  *
- * A presented token that is refused as invalid is counted against the client
- * address (`OperatorAuthThrottle`); an address over the limit is refused with
- * 429 before its token is looked at. A request with no token is not a guess
- * and is not counted.
+ * The token is resolved first. A presented token that is refused as invalid
+ * is counted against the client address (`OperatorAuthThrottle`), and once the
+ * address is over the limit its invalid tokens are answered 429 instead of
+ * 401. A valid session is never refused because of that count. A request with
+ * no token is not a guess and is not counted.
  */
 @Injectable()
 export class OperatorAuthGuard implements CanActivate {
@@ -60,14 +61,18 @@ export class OperatorAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestWithOperator>();
     const token = extractBearerToken(request);
-    const ip = ipKey(request.ip ?? 'unknown');
-
-    if (token) await this.throttle.assertNotBlocked(ip);
 
     try {
       request[OPERATOR_REQUEST_KEY] = await this.sessions.resolve(token);
     } catch (error) {
-      if (token && isCredentialInvalid(error)) await this.throttle.recordFailure(ip);
+      if (token && isCredentialInvalid(error)) {
+        // Only a refused token is limited. A valid session is never refused
+        // because of the address's count: behind a shared proxy or NAT that
+        // count is everyone's, and a 256-bit token cannot be guessed anyway.
+        const ip = ipKey(request.ip ?? 'unknown');
+        await this.throttle.assertNotBlocked(ip);
+        await this.throttle.recordFailure(ip);
+      }
       throw error;
     }
     return true;
