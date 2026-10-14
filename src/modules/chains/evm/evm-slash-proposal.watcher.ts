@@ -3,6 +3,7 @@ import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
 import type { Redis } from 'ioredis';
 
+import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import {
   SLASH_CHAIN_RULINGS,
@@ -14,6 +15,11 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 import { ENABLED_CHAINS } from '../enabled-chains';
 import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
 import { X402_SLASH_WATCH_EVENTS_ABI } from './abi/x402.abi';
+import {
+  DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS,
+  EVM_CHAIN_STATE_INDEXER_CONFIG,
+  EvmChainStateIndexerConfig,
+} from './chain-state/evm-chain-state.indexer';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
 import { EvmSlashHoldMonitor } from './evm-slash-hold.monitor';
 import { cancelReasonFromEvm } from './evm-slash-status';
@@ -31,7 +37,10 @@ export const EVM_SLASH_WATCH_MAX_BLOCKS = 10_000n;
 /** Blocks per `eth_getLogs` call; most providers refuse wider ranges. */
 export const EVM_SLASH_WATCH_CHUNK = 2_000n;
 
-/** Where a chain with no cursor yet starts: this many blocks behind the head. */
+/**
+ * Where a chain with no cursor, no `EVM_CHAIN_STATE_FROM_BLOCK` and no recorded
+ * `disputeUpgradeBlock` starts: this many blocks behind the safe head.
+ */
 export const EVM_SLASH_WATCH_INITIAL_LOOKBACK = 10_000n;
 
 export const EVM_SLASH_WATCH_ALERTS = {
@@ -41,7 +50,8 @@ export const EVM_SLASH_WATCH_ALERTS = {
   UNKNOWN_RULING: 'slash_ruling_unknown',
 } as const;
 
-const CURSOR_PREFIX = 'evm:slash-watch:cursor:';
+/** The cursor's former home in the cache Redis: read once, when Postgres has none yet. */
+const LEGACY_CURSOR_PREFIX = 'evm:slash-watch:cursor:';
 
 /** The two reads this class needs from a viem public client. */
 export interface EvmSlashWatchClient {
@@ -119,9 +129,17 @@ export interface SlashWatchFinding {
  * Read-only on chain: `eth_blockNumber` and `eth_getLogs`, nothing signed or
  * sent. The response is in `docs/runbooks/chains.md` ("Unknown slash record").
  *
- * The cursor (last block read, per chain) is kept in Redis. A lost cursor
- * re-reads the last {@link EVM_SLASH_WATCH_INITIAL_LOOKBACK} blocks; known
- * records stay silent, so a re-read costs RPC calls, not false alerts.
+ * ## Cursor and confirmations (review S-4)
+ *
+ * Events are read only up to `head − EVM_CHAIN_STATE_CONFIRMATIONS`, the
+ * chain-state indexer's depth: a node behind the one that answered
+ * `eth_blockNumber`, or a reorg, cannot make the cursor pass a block whose logs
+ * were not seen. The cursor (last block read, per chain) is durable, in
+ * `evm_chain_states.slash_watch_cursor_block`. A chain with none starts at the
+ * old Redis cursor if one is left, else `EVM_CHAIN_STATE_FROM_BLOCK`, else the
+ * deployment's `disputeUpgradeBlock`, and only with neither
+ * {@link EVM_SLASH_WATCH_INITIAL_LOOKBACK} blocks back. Known records stay
+ * silent, so a re-read costs RPC calls, not false alerts.
  */
 @Injectable()
 export class EvmSlashProposalWatcher {
@@ -134,12 +152,20 @@ export class EvmSlashProposalWatcher {
     private readonly parts: SlashProposalPartRepository,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis,
+    private readonly cursors: EvmChainStateRepository,
     // Resolved at call time: the slash domain is composed beside this module
     // in the scheduler, and a composition without it still alerts.
     @Optional() private readonly moduleRef: ModuleRef | null = null,
     // A slash event can put a provider on (or take it off) a slash hold:
     // re-check that provider at once rather than at the next minute.
     @Optional() private readonly slashHolds: EvmSlashHoldMonitor | null = null,
+    // The chain-state indexer's start blocks and confirmation depth.
+    @Optional()
+    @Inject(EVM_CHAIN_STATE_INDEXER_CONFIG)
+    private readonly indexer: Pick<
+      EvmChainStateIndexerConfig,
+      'fromBlock' | 'confirmations'
+    > | null = null,
   ) {}
 
   @Cron(EVM_SLASH_WATCH_CRON)
@@ -184,18 +210,24 @@ export class EvmSlashProposalWatcher {
     client: EvmSlashWatchClient,
   ): Promise<SlashWatchFinding[]> {
     const head = await client.getBlockNumber({ cacheTime: 0 });
+    const confirmations = BigInt(
+      this.indexer?.confirmations ?? DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS,
+    );
+    const safeHead = head > confirmations ? head - confirmations : 0n;
     const cursor = await this.readCursor(chainId);
+    const known = this.indexer?.fromBlock.get(chainId) ?? deployment.disputeUpgradeBlock;
     const start =
-      cursor === null
-        ? head > EVM_SLASH_WATCH_INITIAL_LOOKBACK
-          ? head - EVM_SLASH_WATCH_INITIAL_LOOKBACK
-          : 0n
-        : cursor + 1n;
-    if (start > head) return [];
+      cursor !== null
+        ? cursor + 1n
+        : (known ??
+          (safeHead > EVM_SLASH_WATCH_INITIAL_LOOKBACK
+            ? safeHead - EVM_SLASH_WATCH_INITIAL_LOOKBACK
+            : 0n));
+    if (start > safeHead) return [];
     const end =
-      head - start + 1n > EVM_SLASH_WATCH_MAX_BLOCKS
+      safeHead - start + 1n > EVM_SLASH_WATCH_MAX_BLOCKS
         ? start + EVM_SLASH_WATCH_MAX_BLOCKS - 1n
-        : head;
+        : safeHead;
 
     const logs: SlashProposedLog[] = [];
     for (let from = start; from <= end; from += EVM_SLASH_WATCH_CHUNK) {
@@ -211,7 +243,8 @@ export class EvmSlashProposalWatcher {
     }
 
     const proposed = logs.filter((log) => (log.eventName ?? 'SlashProposed') === 'SlashProposed');
-    const findings = await this.compare(chainId, proposed);
+    const { findings, late } = await this.compare(chainId, proposed);
+    await this.readoptLate(chainId, late);
     // A failure here throws before the cursor moves, so the range is re-read
     // and the (idempotent) mirror is retried next tick.
     await this.mirrorRulings(
@@ -241,7 +274,7 @@ export class EvmSlashProposalWatcher {
   private async compare(
     chainId: ChainId,
     logs: readonly SlashProposedLog[],
-  ): Promise<SlashWatchFinding[]> {
+  ): Promise<{ findings: SlashWatchFinding[]; late: SlashProposedLog[] }> {
     const ids = logs
       .map((log) => log.args.requestId?.toLowerCase().replace(/^0x/, ''))
       .filter((id): id is string => typeof id === 'string');
@@ -250,6 +283,7 @@ export class EvmSlashProposalWatcher {
     );
 
     const findings: SlashWatchFinding[] = [];
+    const late: SlashProposedLog[] = [];
     for (const log of logs) {
       const requestId = log.args.requestId?.toLowerCase().replace(/^0x/, '');
       if (!requestId) continue;
@@ -304,9 +338,38 @@ export class EvmSlashProposalWatcher {
           aggregation: AlertAggregation.ONCE_PER_INCIDENT,
           dedupeKey: `${chainId}:${requestId}`,
         });
+      } else if (part.chainStatus === 'REFUSED') {
+        // Review S-5: a straggler given up on whose transaction landed late.
+        late.push(log);
       }
     }
-    return findings;
+    return { findings, late };
+  }
+
+  /**
+   * Hands the slash domain each matching `SlashProposed` of a part it had
+   * given up on (review S-5), so the part is re-adopted rather than left
+   * reserving the provider's stake unseen. Throws before the cursor moves.
+   */
+  private async readoptLate(chainId: ChainId, logs: readonly SlashProposedLog[]): Promise<void> {
+    if (logs.length === 0) return;
+    const rulings = this.rulings();
+    for (const log of logs) {
+      const requestId = log.args.requestId?.toLowerCase().replace(/^0x/, '') ?? '';
+      if (!rulings) {
+        this.logger.warn(
+          `a late SlashProposed for given-up part ${requestId} on ${chainId} seen, but no slash ` +
+            `domain is composed in this process to re-adopt it`,
+        );
+        continue;
+      }
+      await rulings.recordLateProposal({
+        chainId,
+        requestId,
+        executableAt: new Date(Number(log.args.executableAt ?? 0n) * 1000),
+        transactionHash: log.transactionHash ?? null,
+      });
+    }
   }
 
   private async mirrorRulings(chainId: ChainId, logs: readonly SlashProposedLog[]): Promise<void> {
@@ -394,24 +457,24 @@ export class EvmSlashProposalWatcher {
     }
   }
 
+  /**
+   * Postgres first; the old Redis cursor only while Postgres has none, so the
+   * move does not re-read from the start block. A failed Postgres read throws:
+   * guessing a start could skip blocks.
+   */
   private async readCursor(chainId: ChainId): Promise<bigint | null> {
+    const stored = await this.cursors.findSlashWatchCursor(chainId);
+    if (stored !== null) return stored;
     try {
-      const value = await this.redis.get(CURSOR_PREFIX + chainId);
+      const value = await this.redis.get(LEGACY_CURSOR_PREFIX + chainId);
       return value === null ? null : BigInt(value);
-    } catch (error) {
-      this.logger.warn(
-        `slash watch cursor for ${chainId} unreadable, re-reading: ${describe(error)}`,
-      );
+    } catch {
       return null;
     }
   }
 
   private async writeCursor(chainId: ChainId, block: bigint): Promise<void> {
-    try {
-      await this.redis.set(CURSOR_PREFIX + chainId, block.toString());
-    } catch (error) {
-      this.logger.warn(`slash watch cursor for ${chainId} not saved: ${describe(error)}`);
-    }
+    await this.cursors.saveSlashWatchCursor(chainId, block);
   }
 }
 

@@ -351,9 +351,13 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         relayer: never,
         moduleRef: ModuleRef,
         config: ConfigService,
+        chainState: EvmChainStateService,
       ) =>
         new EvmSlashExecutor(clients, deployments, relayer, moduleRef, VerifierSigningService, {
           now: () => Date.now(),
+          // The EIP-712 domain guard: no attestation while the Stake proxy
+          // signs under another domain.
+          domains: chainState,
           batchSize: readBatchSize(config.get<string>(EVM_SLASH_BATCH_SIZE_ENV)),
           multicall: new Map(
             [...deployments]
@@ -361,7 +365,14 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
               .map(([chainId, deployment]) => [chainId, deployment.multicall3 as `0x${string}`]),
           ),
         }),
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_RELAYER, ModuleRef, ConfigService],
+      inject: [
+        EVM_RPC_CLIENTS,
+        EVM_DEPLOYMENTS,
+        EVM_RELAYER,
+        ModuleRef,
+        ConfigService,
+        EvmChainStateService,
+      ],
     },
     {
       provide: EvmVerifierRegistryService,
@@ -429,15 +440,28 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         clients: never,
         deployments: ReadonlyMap<ChainId, EvmDeployment>,
         config: ConfigService,
+        alerts: AlertPort,
       ) =>
-        new EvmChainStateService(repository, clients, deployments, {
-          pollMs: readPositiveInt(
-            config.get<string>(EVM_CHAIN_STATE_POLL_MS_ENV),
-            DEFAULT_EVM_CHAIN_STATE_POLL_MS,
-            EVM_CHAIN_STATE_POLL_MS_ENV,
-          ),
-        }),
-      inject: [EvmChainStateRepository, EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, ConfigService],
+        new EvmChainStateService(
+          repository,
+          clients,
+          deployments,
+          {
+            pollMs: readPositiveInt(
+              config.get<string>(EVM_CHAIN_STATE_POLL_MS_ENV),
+              DEFAULT_EVM_CHAIN_STATE_POLL_MS,
+              EVM_CHAIN_STATE_POLL_MS_ENV,
+            ),
+          },
+          alerts,
+        ),
+      inject: [
+        EvmChainStateRepository,
+        EVM_RPC_CLIENTS,
+        EVM_DEPLOYMENTS,
+        ConfigService,
+        ALERT_PORT,
+      ],
     },
     {
       // Holds no key — it broadcasts bytes the buyer signed — so it needs no

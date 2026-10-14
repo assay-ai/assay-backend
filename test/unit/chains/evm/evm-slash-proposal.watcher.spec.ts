@@ -1,6 +1,7 @@
 import { Logger } from '@nestjs/common';
 
 import { CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
+import { DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS } from '@modules/chains/evm/chain-state/evm-chain-state.indexer';
 import {
   EVM_SLASH_WATCH_ALERTS,
   EVM_SLASH_WATCH_CHUNK,
@@ -37,14 +38,24 @@ function build(options: {
   head: bigint;
   logs?: SlashProposedLog[];
   cursor?: string;
+  legacyCursor?: string;
   rulings?: unknown;
   slashHolds?: unknown;
+  disputeUpgradeBlock?: bigint;
+  knownStatus?: string;
+  indexer?: { fromBlock: ReadonlyMap<ChainId, bigint>; confirmations?: number };
 }) {
   const alerts: Alert[] = [];
   const ranges: [bigint, bigint][] = [];
+  // The legacy Redis cursor, and the durable one (review S-4).
   const store = new Map<string, string>(
-    options.cursor ? [[`evm:slash-watch:cursor:${CHAIN}`, options.cursor]] : [],
+    options.legacyCursor ? [[`evm:slash-watch:cursor:${CHAIN}`, options.legacyCursor]] : [],
   );
+  const db = new Map<string, bigint>(options.cursor ? [[CHAIN, BigInt(options.cursor)]] : []);
+  const cursors = {
+    findSlashWatchCursor: async (chainId: string) => db.get(chainId) ?? null,
+    saveSlashWatchCursor: async (chainId: string, block: bigint) => void db.set(chainId, block),
+  };
   const client = {
     getBlockNumber: async () => options.head,
     getContractEvents: async (args: { fromBlock: bigint; toBlock: bigint; address: string }) => {
@@ -63,6 +74,7 @@ function build(options: {
               chainRequestId: KNOWN,
               beneficiaryAccount: `${CHAIN}:${AGENT}`,
               penaltyAmount: '1000000',
+              chainStatus: options.knownStatus ?? 'PENDING',
             },
           ]
         : [],
@@ -73,15 +85,17 @@ function build(options: {
   };
   const watcher = new EvmSlashProposalWatcher(
     new Map([[CHAIN, client]]) as never,
-    new Map([[CHAIN, { stake: STAKE }]]) as never,
+    new Map([[CHAIN, { stake: STAKE, disputeUpgradeBlock: options.disputeUpgradeBlock }]]) as never,
     [CHAIN],
     parts as never,
     { emit: async (alert: Alert) => void alerts.push(alert) },
     redis as never,
+    cursors as never,
     options.rulings ? ({ get: () => options.rulings } as never) : null,
     (options.slashHolds ?? null) as never,
+    options.indexer ?? null,
   );
-  return { watcher, alerts, ranges, store };
+  return { watcher, alerts, ranges, store, cursor: () => db.get(CHAIN)?.toString() };
 }
 
 describe('EvmSlashProposalWatcher — alerts on slash records this platform did not plan', () => {
@@ -128,24 +142,92 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
   });
 
   it('reads a bounded range in chunks from the cursor, and advances it', async () => {
-    const { watcher, ranges, store } = build({ head: 1_000_000n, cursor: '100' });
+    const { watcher, ranges, store, cursor } = build({ head: 1_000_000n, cursor: '100' });
     await watcher.check();
 
     const last = 100n + EVM_SLASH_WATCH_MAX_BLOCKS;
     expect(ranges[0]).toEqual([101n, 100n + EVM_SLASH_WATCH_CHUNK]);
     expect(ranges[ranges.length - 1][1]).toBe(last);
     expect(ranges).toHaveLength(Number(EVM_SLASH_WATCH_MAX_BLOCKS / EVM_SLASH_WATCH_CHUNK));
-    expect(store.get(`evm:slash-watch:cursor:${CHAIN}`)).toBe(last.toString());
+    // Durable, in Postgres; Redis is no longer written.
+    expect(cursor()).toBe(last.toString());
+    expect(store.size).toBe(0);
   });
 
-  it('starts a chain with no cursor a bounded distance behind the head', async () => {
+  it('S-4: stops the confirmation depth behind the head', async () => {
+    const confirmations = BigInt(DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS);
+    const { watcher, ranges, cursor } = build({ head: 200n, cursor: '100' });
+    await watcher.check();
+    expect(ranges).toEqual([[101n, 200n - confirmations]]);
+    expect(cursor()).toBe((200n - confirmations).toString());
+
+    const configured = build({
+      head: 200n,
+      cursor: '100',
+      indexer: { fromBlock: new Map(), confirmations: 50 },
+    });
+    await configured.watcher.check();
+    expect(configured.ranges).toEqual([[101n, 150n]]);
+  });
+
+  it('S-4: reads nothing while the cursor is within the confirmation depth', async () => {
+    const { watcher, ranges, cursor } = build({ head: 110n, cursor: '100' });
+    await watcher.check();
+    expect(ranges).toEqual([]);
+    expect(cursor()).toBe('100');
+  });
+
+  it('S-4: a chain with no cursor starts at the known start block, not a fixed lookback', async () => {
+    const upgrade = build({ head: 50_000n, disputeUpgradeBlock: 1_000n });
+    await upgrade.watcher.check();
+    expect(upgrade.ranges[0][0]).toBe(1_000n);
+
+    const configured = build({
+      head: 50_000n,
+      disputeUpgradeBlock: 1_000n,
+      indexer: { fromBlock: new Map([[CHAIN, 2_000n]]) },
+    });
+    await configured.watcher.check();
+    expect(configured.ranges[0][0]).toBe(2_000n);
+  });
+
+  it('S-4: carries the old Redis cursor over when Postgres has none', async () => {
+    const { watcher, ranges } = build({ head: 50_000n, legacyCursor: '40000' });
+    await watcher.check();
+    expect(ranges[0][0]).toBe(40_001n);
+  });
+
+  it('starts a chain with no cursor and no known start a bounded distance behind the safe head', async () => {
     const { watcher, ranges } = build({ head: 50_000n });
     await watcher.check();
-    expect(ranges[0][0]).toBe(50_000n - EVM_SLASH_WATCH_INITIAL_LOOKBACK);
+    expect(ranges[0][0]).toBe(
+      50_000n - BigInt(DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS) - EVM_SLASH_WATCH_INITIAL_LOOKBACK,
+    );
+  });
+
+  it('S-5: hands a late SlashProposed of a given-up part to the slash domain, silently', async () => {
+    const seen: unknown[] = [];
+    const rulings = { recordLateProposal: async (event: unknown) => (seen.push(event), true) };
+    const { watcher, alerts } = build({
+      head: 500n,
+      logs: [event(KNOWN, AGENT, 1_000_000n)],
+      knownStatus: 'REFUSED',
+      rulings,
+    });
+    await expect(watcher.check()).resolves.toEqual([]);
+    expect(alerts).toEqual([]);
+    expect(seen).toEqual([
+      expect.objectContaining({ requestId: KNOWN, executableAt: new Date(1_800_000_000_000) }),
+    ]);
+
+    // A part that already stands is not handed over.
+    const standing = build({ head: 500n, logs: [event(KNOWN, AGENT, 1_000_000n)], rulings });
+    await standing.watcher.check();
+    expect(seen).toHaveLength(1);
   });
 
   it('warns, keeps the cursor and does not throw when the chain cannot be read', async () => {
-    const { watcher, alerts, store } = build({ head: 500n, cursor: '10' });
+    const { watcher, alerts, cursor } = build({ head: 500n, cursor: '10' });
     (watcher as unknown as { clients: Map<ChainId, unknown> }).clients.set(CHAIN, {
       getBlockNumber: async () => {
         throw new Error('rpc down');
@@ -156,7 +238,7 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
       severity: AlertSeverity.WARN,
       name: EVM_SLASH_WATCH_ALERTS.UNREADABLE,
     });
-    expect(store.get(`evm:slash-watch:cursor:${CHAIN}`)).toBe('10');
+    expect(cursor()).toBe('10');
   });
 
   describe('the dispute upgrade (D-19)', () => {
@@ -312,9 +394,9 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
         },
         recordUpheld: async () => true,
       };
-      const { watcher, store } = build({ head: 500n, logs: [disputedLog(KNOWN)], rulings });
+      const { watcher, cursor } = build({ head: 500n, logs: [disputedLog(KNOWN)], rulings });
       await watcher.check();
-      expect(store.has(`evm:slash-watch:cursor:${CHAIN}`)).toBe(false);
+      expect(cursor()).toBeUndefined();
     });
   });
 });
