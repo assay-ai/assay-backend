@@ -750,6 +750,30 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
+   * Records a transaction about to carry this intent's voucher, before it is
+   * broadcast. Idempotent per reference. See `redemptionTxRefs` on the entity.
+   */
+  async recordRedemptionTxRef(organizationId: string, id: string, txRef: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "redemption_tx_refs" = array_append("redemption_tx_refs", $3::text)
+        WHERE "organization_id" = $1 AND "id" = $2
+          AND NOT ($3::text = ANY("redemption_tx_refs"))`,
+      [organizationId, id, txRef],
+    );
+  }
+
+  /** The transactions {@link recordRedemptionTxRef} recorded for this intent, oldest first. */
+  async findRedemptionTxRefs(organizationId: string, id: string): Promise<string[]> {
+    const [row] = (await this.manager.query(
+      `SELECT "redemption_tx_refs" AS "refs" FROM "payment_intents"
+        WHERE "organization_id" = $1 AND "id" = $2`,
+      [organizationId, id],
+    )) as Array<{ refs: string[] | null }>;
+    return row?.refs ?? [];
+  }
+
+  /**
    * Inserts a rail-B voucher's intent **only if it is admitted**, atomically
    * with the read that admits it (BUG-D1-02).
    *

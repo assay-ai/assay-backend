@@ -63,6 +63,15 @@ export interface EvmRelayedCall {
    * that must bound how long the outcome can stay unknown (`evm-relayer-timing.ts`).
    */
   readonly boundQueueWait?: boolean;
+  /**
+   * Called with the signed transaction's hash AFTER signing and BEFORE the
+   * broadcast, so a caller can record what it is about to send. If it rejects,
+   * nothing is broadcast and the send rejects with it. The redemption job keeps
+   * the hash on the intent, so a redemption whose receipt it never saw (a
+   * timeout, a restart) is found on chain rather than absorbed and paid twice
+   * (review 2026-10-15 P-1).
+   */
+  readonly beforeBroadcast?: (hash: `0x${string}`) => Promise<void>;
 }
 
 /** A bare value transfer. NOTE THE ABSENCE OF A CALLDATA FIELD. */

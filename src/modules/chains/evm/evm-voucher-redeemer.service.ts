@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { encodeFunctionData, getAddress, isAddress } from 'viem';
+import { decodeEventLog, encodeFunctionData, getAddress, isAddress } from 'viem';
 
 import {
   RedeemOutcome,
@@ -232,6 +232,9 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       }),
       gasLimit: gasFor(1),
       purpose: `redeemVoucher seq=${request.seq}`,
+      beforeBroadcast: async (hash) => {
+        await request.recordAttempt?.(hash);
+      },
     });
 
     if (result.status === 'SUCCESS') {
@@ -302,6 +305,12 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       }),
       gasLimit: gasFor(admissible.length),
       purpose: `redeemVoucherBatch n=${admissible.length}`,
+      // One hash, recorded on every voucher it carries.
+      beforeBroadcast: async (hash) => {
+        for (const index of admissible) {
+          await requests[index].recordAttempt?.(hash);
+        }
+      },
     });
 
     if (result.status === 'SUCCESS') {
@@ -327,6 +336,74 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       outcomes[index] = await this.redeem(requests[index]);
     }
     return outcomes;
+  }
+
+  /**
+   * Which recorded transaction redeemed this voucher: a mined, successful one
+   * from the escrow that emitted `VoucherRedeemed` for this payer, seq and
+   * request hash. `null` when none did.
+   *
+   * Asked only after the chain said `seq <= seqHigh`, so a transaction still
+   * pending cannot redeem this voucher any more — it will revert. It is still
+   * "cannot tell yet" (a throw, so the hold waits a pass) rather than "did not
+   * land": the state read and this read may come from RPC nodes a block apart.
+   * A hash the node has never seen was dropped, or never broadcast (it is
+   * recorded before the broadcast), and did not land.
+   */
+  async findLanding(
+    request: RedeemVoucherRequest,
+    txRefs: readonly string[],
+  ): Promise<string | null> {
+    const chainId = this.chainOf(request);
+    const client = this.client(chainId) as EvmLandingClient;
+    if (!client.getTransactionReceipt || !client.getTransaction) {
+      throw new Error(`the JSON-RPC client for ${chainId} cannot read receipts`);
+    }
+    const voucher = this.toVoucher(request);
+    const escrow = getAddress(this.deployment(chainId).escrow);
+    let pending: string | null = null;
+
+    for (const ref of txRefs) {
+      if (!/^0x[0-9a-fA-F]{64}$/.test(ref)) continue;
+      const hash = ref as `0x${string}`;
+      let receipt: Awaited<ReturnType<NonNullable<EvmLandingClient['getTransactionReceipt']>>>;
+      try {
+        receipt = await client.getTransactionReceipt({ hash });
+      } catch (error) {
+        if (!isNotFound(error)) throw error;
+        try {
+          await client.getTransaction({ hash });
+          pending = hash;
+        } catch (lookup) {
+          if (!isNotFound(lookup)) throw lookup;
+        }
+        continue;
+      }
+      if (receipt.status !== 'success') continue;
+      for (const log of receipt.logs) {
+        if (getAddress(log.address) !== escrow) continue;
+        let decoded: { eventName: string; args: unknown };
+        try {
+          decoded = decodeEventLog({ abi: X402_ESCROW_ABI, data: log.data, topics: log.topics });
+        } catch {
+          continue;
+        }
+        if (decoded.eventName !== 'VoucherRedeemed') continue;
+        const args = decoded.args as { payer: string; seq: bigint; requestHash: string };
+        if (
+          getAddress(args.payer) === voucher.payer &&
+          args.seq === voucher.seq &&
+          args.requestHash.toLowerCase() === voucher.requestHash
+        ) {
+          return hash;
+        }
+      }
+    }
+
+    if (pending !== null) {
+      throw new Error(`redemption ${pending} of seq ${request.seq} is still pending`);
+    }
+    return null;
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -673,6 +750,32 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     }
     return client;
   }
+}
+
+/**
+ * The two reads {@link EvmVoucherRedeemer.findLanding} needs beyond
+ * `EvmReaderClient`. The viem public client behind `EVM_RPC_CLIENTS` has both.
+ */
+interface EvmLandingClient extends EvmReaderClient {
+  getTransactionReceipt?(args: { hash: `0x${string}` }): Promise<{
+    status: 'success' | 'reverted';
+    logs: readonly {
+      address: string;
+      data: `0x${string}`;
+      topics: [] | [`0x${string}`, ...`0x${string}`[]];
+    }[];
+  }>;
+  getTransaction?(args: { hash: `0x${string}` }): Promise<unknown>;
+}
+
+/** viem's `TransactionReceiptNotFoundError` / `TransactionNotFoundError`. */
+function isNotFound(error: unknown): boolean {
+  const name = (error as { name?: unknown })?.name;
+  return (
+    name === 'TransactionReceiptNotFoundError' ||
+    name === 'TransactionNotFoundError' ||
+    /could not be found/i.test(messageOf(error))
+  );
 }
 
 function gasFor(vouchers: number): bigint {

@@ -43,6 +43,9 @@ import { PaymentIntentService } from './payment-intent.service';
  */
 export const PLATFORM_ABSORBED_TX_REF_PREFIX = 'platform_absorbed:';
 
+/** The chain's refusal of `seq <= seqHigh` — and the answer a voucher that already landed gets. */
+const SEQ_NOT_INCREASING = 'VoucherSeqNotIncreasing';
+
 /**
  * Turns each passed rail-B hold into money that has actually moved.
  *
@@ -78,9 +81,12 @@ export const PLATFORM_ABSORBED_TX_REF_PREFIX = 'platform_absorbed:';
  * ## Who bears an unredeemable voucher: neither party
  *
  * The backend prevents an out-of-order redemption and must still handle it.
- * When `VoucherSeqNotIncreasing` comes back, the hold is **released** — the
- * buyer keeps their money — and the provider is credited anyway, out of the
- * platform's own funds. That direction is safe and it is the incentive to keep
+ * When `VoucherSeqNotIncreasing` comes back, the chain is asked first whether
+ * one of this intent's own recorded transactions already redeemed it — a
+ * landing whose receipt was never seen gets the same refusal — and if one did,
+ * the hold is committed with that transaction. Otherwise the hold is
+ * **released** — the buyer keeps their money — and the provider is credited
+ * anyway, out of the platform's own funds. That direction is safe and it is the incentive to keep
  * verification fast: the party that can make redemption slow is the only party
  * that pays for it.
  *
@@ -199,7 +205,7 @@ export class VoucherRedemptionService {
     }
 
     const outcome = await this.redeemer.redeem(request.request);
-    return this.applyOutcome(row, request.issuedAt, outcome);
+    return this.applyOutcome(row, request.issuedAt, outcome, request.request);
   }
 
   /**
@@ -290,7 +296,7 @@ export class VoucherRedemptionService {
 
         let landed: { stop: boolean; settled: boolean };
         try {
-          landed = await this.applyOutcome(entry.row, entry.issuedAt, outcome);
+          landed = await this.applyOutcome(entry.row, entry.issuedAt, outcome, entry.request);
         } catch (error) {
           blocked.add(entry.row.agentAccount);
           this.logger.error(
@@ -462,6 +468,10 @@ export class VoucherRedemptionService {
         expiresAt: Math.floor(row.expiresAt.getTime() / 1000),
         signature: row.voucherSignature,
         delegate: (row.voucherDelegate as AccountId | null) ?? null,
+        // Kept on the intent BEFORE the broadcast, so a redemption whose
+        // receipt this pass never sees is found on chain by the next one.
+        recordAttempt: (txRef) =>
+          this.payments.recordRedemptionTxRef(row.organizationId, row.id, txRef),
       },
     };
   }
@@ -475,6 +485,7 @@ export class VoucherRedemptionService {
     row: RedeemableIntent,
     issuedAt: number,
     outcome: RedeemOutcome,
+    request: RedeemVoucherRequest,
   ): Promise<{ stop: boolean; settled: boolean }> {
     switch (outcome.kind) {
       case RedeemOutcomeKind.REDEEMED:
@@ -494,11 +505,24 @@ export class VoucherRedemptionService {
         // comment — going ahead of a retryable seq makes it unredeemable.
         return { stop: false, settled: false };
 
-      case RedeemOutcomeKind.UNREDEEMABLE:
+      case RedeemOutcomeKind.UNREDEEMABLE: {
+        if (outcome.programError === SEQ_NOT_INCREASING) {
+          // Also what a voucher that ALREADY landed gets. Absorbing that one
+          // pays the provider a second time (review 2026-10-15 P-1).
+          const landing = await this.findLanding(row, request);
+          if (landing === undefined) {
+            return { stop: false, settled: false };
+          }
+          if (landing !== null) {
+            await this.intents.commitRedeemedHold(row.organizationId, row.id, landing);
+            return { stop: false, settled: true };
+          }
+        }
         await this.absorb(row, outcome.programError);
         // Settled, in the only sense this loop cares about: the hold is closed
         // and nothing will ever redeem this seq, so it cannot be stepped over.
         return { stop: false, settled: true };
+      }
 
       case RedeemOutcomeKind.PAUSED:
         // Every remaining hold would be refused identically, and each attempt
@@ -515,6 +539,36 @@ export class VoucherRedemptionService {
         // so it pages instead of logging.
         await this.reportMisconfiguration(row, outcome.programError);
         return { stop: true, settled: false };
+    }
+  }
+
+  /**
+   * The transaction that already redeemed this voucher, `null` when the chain
+   * shows none of this intent's recorded transactions did, or `undefined` when
+   * that cannot be told yet (a transaction still pending, an RPC that did not
+   * answer) — the hold then stays open for the next pass.
+   *
+   * The references are read from the database now, not from the queue row: a
+   * pass that overlapped this one may have recorded its transaction after the
+   * row was read. A chain whose redeemer cannot look (no `findLanding`) keeps
+   * the old behaviour, and the refusal is absorbed.
+   */
+  private async findLanding(
+    row: RedeemableIntent,
+    request: RedeemVoucherRequest,
+  ): Promise<string | null | undefined> {
+    if (!this.redeemer.findLanding) return null;
+    try {
+      const refs = await this.payments.findRedemptionTxRefs(row.organizationId, row.id);
+      if (refs.length === 0) return null;
+      return await this.redeemer.findLanding(request, refs);
+    } catch (error) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused VoucherSeqNotIncreasing, and ` +
+          `whether one of its own transactions redeemed it is not known yet: ${describe(error)}. ` +
+          `The hold stays open.`,
+      );
+      return undefined;
     }
   }
 
