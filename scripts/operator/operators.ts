@@ -3,6 +3,8 @@
  * maintain the operator directory from the database. See
  * `lib/operator-cli.ts` for the flags, and `docs/runbooks/operator-access.md`.
  */
+import { userInfo } from 'node:os';
+
 import { INestApplicationContext, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
@@ -13,6 +15,7 @@ import { DatabaseModule } from '@database/database.module';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
 import { OperatorSessionStore } from '@modules/operator/auth/operator-session.store';
 import { RedisCacheProvider } from '@shared/cache/redis-cache/redis-cache.provider';
+import { StructuredLogger } from '@shared/observability';
 
 import { OperatorCliError, runOperatorCli } from './lib/operator-cli';
 
@@ -45,6 +48,10 @@ async function main(): Promise<void> {
       command,
       argv,
       (line) => console.log(line),
+      // The directory change, as a structured log line: the CLI has no
+      // operator to write an override entry as.
+      (line) => new StructuredLogger('OperatorCli').log(line),
+      `cli:${osUser()}`,
     );
   } catch (error) {
     failed = true;
@@ -53,6 +60,14 @@ async function main(): Promise<void> {
     await app?.close().catch(() => undefined);
     await new Promise<void>((resolve) => process.stdout.write('', () => resolve()));
     process.exit(failed ? 1 : 0);
+  }
+}
+
+function osUser(): string {
+  try {
+    return userInfo().username;
+  } catch {
+    return process.env.USER ?? 'unknown';
   }
 }
 

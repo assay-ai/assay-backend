@@ -301,6 +301,39 @@ describe('OperatorSignInService — sign in with a wallet', () => {
     await expect(ctx.signIn.challenge(wallet().address, '192.0.2.1')).resolves.toBeDefined();
   });
 
+  it('logs a sign-in and a refusal with the wallet and the address, never the token', async () => {
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const ctx = build();
+    const account = await operatorWallet(ctx);
+    const wallet_ = account.address.toLowerCase();
+
+    const first = await ctx.signIn.challenge(account.address, IP);
+    await ctx.signIn
+      .verify(first.message, await wallet().signMessage({ message: first.message }), IP)
+      .catch(() => undefined);
+    const { message } = await ctx.signIn.challenge(account.address, IP);
+    const { token, operator } = await ctx.signIn.verify(
+      message,
+      await account.signMessage({ message }),
+      IP,
+    );
+    await ctx.signIn.logout(token);
+
+    const warned = warn.mock.calls.map((call) => String(call[0]));
+    expect(warned).toEqual([expect.stringMatching(/sign-in refused.*signature.*/)]);
+    expect(warned[0]).toContain(wallet_);
+    expect(warned[0]).toContain(IP);
+    const logged = log.mock.calls.map((call) => String(call[0]));
+    expect(logged).toEqual([
+      expect.stringContaining(`operator signed in: ${operator.id}`),
+      `operator signed out: ${operator.id}`,
+    ]);
+    expect(logged[0]).toContain(wallet_);
+    expect(logged[0]).toContain(IP);
+    expect([...warned, ...logged].join('\n')).not.toContain(token);
+  });
+
   it('refuses every sign-in when no domain is configured', async () => {
     const ctx = build();
     const unconfigured = new OperatorSignInService(
