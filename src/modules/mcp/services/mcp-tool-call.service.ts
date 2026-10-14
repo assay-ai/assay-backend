@@ -387,6 +387,7 @@ export class McpToolCallService {
     const context: RoutingContext = {
       ...routingContextOf(session, this.enabledChains, withdrawing),
       onlyProviderId: payment?.providerId,
+      callClass: 'PAID',
     };
 
     const offer = await this.router.offer(tool.id, context);
@@ -712,7 +713,8 @@ export class McpToolCallService {
         // A FREE call collects nothing, so a standing withdrawal cannot leave the
         // platform short on it: `withdrawingChains` is empty here on purpose, and
         // this path deliberately does not read the escrow.
-        context: routingContextOf(session, this.enabledChains, []),
+        // `FREE`: a call nobody is charged for never reaches a `PAID` binding.
+        context: { ...routingContextOf(session, this.enabledChains, []), callClass: 'FREE' },
       })
       .catch((error: unknown) => {
         throw agentFacing(error, null);
@@ -844,6 +846,8 @@ export class McpToolCallService {
         context: {
           ...routingContextOf(session, this.enabledChains, await this.withdrawingChains(session)),
           onlyProviderId,
+          // A charged call is served only by a staked, payable paid binding.
+          callClass: 'PAID',
         },
       });
     } catch (error) {
@@ -1110,12 +1114,13 @@ export class McpToolCallService {
    * `evaluatePayoutGate` refuses any candidate whose provider has proved no
    * payout address on the chain the call settles on — except a
    * `FREE` binding, which is exempt because the relay
-   * path creates no payment intent. But a tool with *both* free and paid
-   * bindings quotes as paid (`quotedPricingMode`), takes the paid path, and can
-   * then draw the free binding. That call is charged, and its provider was
-   * never checked. It is the one hole the gate leaves open, it is real — a
-   * devnet run was observed charging $0.088 for a call a $0 binding served —
-   * and this is where it lands.
+   * path creates no payment intent. A tool with *both* free and paid bindings
+   * quotes as paid and takes the paid path, and the router used to be able to
+   * draw the free binding — a devnet run was observed charging $0.088 for a
+   * call a $0 binding served. A paid call is now routed with
+   * `callClass: 'PAID'`, which leaves FREE bindings out of the pool, so this is
+   * a guard for a catalogue that changed under the call rather than a path
+   * routing takes.
    *
    * ## Why voiding, and not any of the alternatives
    *
@@ -1137,11 +1142,6 @@ export class McpToolCallService {
    * edge `HoldEffect.RELEASE` and its own doc calls it *"no charge and no
    * strike"*. There is no strike to make here — the provider did nothing wrong,
    * they served the call their free binding offered.
-   *
-   * This is a mitigation, not the fix. The fix is for a paid call's payee
-   * eligibility to be decided from the tool's supply rather than the binding's,
-   * which is a routing change; until then this bounds the damage to "the
-   * platform served one call for free".
    */
   private async voidUnpayable(
     session: McpSession,
