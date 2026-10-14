@@ -1,7 +1,7 @@
 import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import {
@@ -31,7 +31,9 @@ import { ProviderStakeAuthorityService } from '../services/provider-stake-author
  */
 @ApiTags('Provider')
 @ApiBearerAuth()
-@UseGuards(SessionAuthGuard)
+// Person-only (review A-1): the stake authority controls the provider's
+// capital, so a machine credential may neither name nor prove one.
+@UseGuards(SessionAuthGuard, HumanSessionGuard)
 @Controller('providers/me/stake-authority')
 export class ProviderStakeAuthorityController {
   constructor(private readonly stakeAuthority: ProviderStakeAuthorityService) {}

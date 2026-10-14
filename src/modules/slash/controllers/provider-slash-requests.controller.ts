@@ -2,7 +2,12 @@ import { Body, Controller, HttpCode, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { BlockedSessionReadOnly, CurrentSession, SessionAuthGuard } from '@shared/auth';
+import {
+  BlockedSessionReadOnly,
+  CurrentSession,
+  HumanSessionGuard,
+  SessionAuthGuard,
+} from '@shared/auth';
 
 import {
   LookupSlashRequestsBodyDto,
@@ -22,7 +27,9 @@ import { SlashRequestLookupService } from '../services/slash-request-lookup.serv
  */
 @ApiTags('Provider')
 @ApiBearerAuth()
-@UseGuards(SessionAuthGuard)
+// Person-only (review A-1): disputing a slash request is the provider's
+// answer to a penalty, and a person signs it.
+@UseGuards(SessionAuthGuard, HumanSessionGuard)
 @Controller('providers/me/slash-requests')
 export class ProviderSlashRequestsController {
   constructor(
