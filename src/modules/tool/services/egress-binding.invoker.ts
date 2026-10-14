@@ -1,7 +1,11 @@
 import { Injectable } from '@nestjs/common';
 
 import { EgressHttpClient } from '@shared/network/egress/egress-http.client';
-import { isEgressError } from '@shared/network/egress/egress.errors';
+import {
+  EgressError,
+  EgressFailureKind,
+  isEgressError,
+} from '@shared/network/egress/egress.errors';
 import { UNTRUSTED_EGRESS_POLICY, withLimits } from '@shared/network/egress/egress.policy';
 
 import {
@@ -122,6 +126,19 @@ function buildUrl(endpoint: string, upstream: UpstreamRequest): string {
   const base = endpoint.replace(/\/+$/, '');
   const path = upstream.path ? `/${upstream.path.replace(/^\/+/, '')}` : '';
   const url = new URL(`${base}${path}`);
+
+  // Dot segments are resolved by `new URL`, so a mapped path can climb out of
+  // the endpoint's prefix while still carrying the provider's credentials.
+  // `interpolatePath` refuses `.`/`..` values; this is the backstop for any
+  // other route to the same place.
+  const prefix = new URL(base).pathname.replace(/\/+$/, '');
+  if (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) {
+    throw new EgressError(
+      EgressFailureKind.URL_INVALID,
+      `the mapped path leaves the endpoint's path prefix "${prefix}"`,
+      { url: url.href },
+    );
+  }
 
   for (const [name, value] of Object.entries(upstream.query)) {
     url.searchParams.set(name, value);
