@@ -51,6 +51,8 @@ export const TWO_ORG_CREDENTIALS: McpCredentialSnapshot = Object.freeze({
     agentAccount: `${CHAIN_ID}:AgentTestOrgAWalletAddress11111` as AccountId,
     chainId: CHAIN_ID,
     label: 'org A',
+    // These stand in for the dashboard login, as the local stack's do.
+    kind: 'human',
   },
   [TOKEN_B]: {
     credentialId: 'cred-test-org-b',
@@ -59,6 +61,8 @@ export const TWO_ORG_CREDENTIALS: McpCredentialSnapshot = Object.freeze({
     agentAccount: `${CHAIN_ID}:AgentTestOrgBWalletAddress22222` as AccountId,
     chainId: CHAIN_ID,
     label: 'org B',
+    // These stand in for the dashboard login, as the local stack's do.
+    kind: 'human',
   },
 });
 

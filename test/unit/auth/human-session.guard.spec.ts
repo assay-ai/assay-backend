@@ -198,7 +198,7 @@ describe('human-only control writes', () => {
   });
 
   it.each(WRITES)(
-    '$method $path lets a config demo token through — it stands in for a person',
+    '$method $path lets a config token marked as a person through',
     async ({ method, path }) => {
       const res = await send(method, path, 'token-config');
 
