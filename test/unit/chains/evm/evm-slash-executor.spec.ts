@@ -156,8 +156,10 @@ describe('EvmSlashExecutor — propose', () => {
 
   it('signs nothing when the verifier key expires before the record could execute (S-7)', async () => {
     const { chain, executor, signatures } = build();
-    const grace = 7n * 86_400n;
-    // Still registered, but it lapses exactly at `now + delay + grace`.
+    // The record may be disputed until its door and frozen up to 30 days
+    // before an uphold restarts the 7-day grace.
+    const grace = 30n * 86_400n + 7n * 86_400n;
+    // Still registered, but it lapses exactly at `now + delay + 30 d + grace`.
     chain.verifierExpiresAt = chain.now + chain.slashDelay + grace;
 
     const error = await executor.propose(proposal(1)).catch((caught) => caught);
