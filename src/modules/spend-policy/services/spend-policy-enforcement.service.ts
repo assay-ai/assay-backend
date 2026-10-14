@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { Money } from '@modules/chains/ports/money.types';
@@ -22,6 +24,12 @@ import {
 import { utcHourStart, utcNextDayStart, utcNextMonthStart } from '../domain/spend-window.util';
 import { SpendUsageService } from './spend-usage.service';
 import { SpendPolicyVelocityService, VelocityViolationKind } from './spend-policy-velocity.service';
+
+/** How long one agent's spend lock lives at most: well above one check-and-hold. */
+export const AGENT_SPEND_LOCK_TTL_MS = 15_000;
+/** How long a call waits for the agent's spend lock before it is refused, retryably. */
+export const AGENT_SPEND_LOCK_WAIT_MS = 10_000;
+const AGENT_SPEND_LOCK_POLL_MS = 25;
 
 /** What the caller wants to spend money on, before any of it is reserved. */
 export interface AssertCallAllowedInput {
@@ -136,15 +144,14 @@ export interface AssertCallAllowedInput {
  *
  * A `spend_policies` row denominates every limit in one asset
  * (`spend_policies.asset_id`). If this call's `price.asset` differs from the
- * resolved policy's asset, every **money** check below (per-call, velocity's
- * spend/hour, the daily/monthly cap, the alert bands) is skipped — `MoneyUtil`
- * refuses to compare two different assets, and coercing one into the other's
- * units is not this service's job. The **non-money** checks (paused,
- * allowlist, calls/minute, calls/hour, duplicate-hash) still run, since none
- * of them depend on which asset the price is in. This is a real, deliberate
- * gap: a multi-asset spend policy does not exist in this schema, and every
- * deployment this platform runs today prices every tool in one settlement
- * asset, so the gap has never been reachable in practice.
+ * resolved policy's asset, the call is **refused** (`MCP_SPEND_LIMIT_EXCEEDED`,
+ * `limitType: 'asset_mismatch'`), after the pause and the allowlist.
+ * `MoneyUtil` refuses to compare two different assets, and coercing one into
+ * the other's units is not this service's job — but skipping the money checks,
+ * as this once did, ran the call with no cap at all while the policy screen
+ * still showed every cap (review 2026-10-15 P-9). A multi-asset spend policy
+ * does not exist in this schema; an agent whose calls are priced in another
+ * asset needs its policy re-denominated.
  *
  * ## What the orchestrator must compute once
  *
@@ -164,6 +171,56 @@ export class SpendPolicyEnforcementService {
     private readonly velocity: SpendPolicyVelocityService,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
   ) {}
+
+  /**
+   * Runs `fn` — the cap check and the reservation it allows — holding the
+   * agent's spend lock, so the two are atomic per agent (review 2026-10-15
+   * P-6).
+   *
+   * {@link assertCallAllowed} sums what the agent has held or settled, and the
+   * caller then writes the intent and its hold. Without a lock, N concurrent
+   * calls all read the same sum and all fit, and every money cap is overshot
+   * by up to N calls. The caller puts the check AND the hold inside `fn`; the
+   * next call of the same agent waits, and its sum then counts this hold.
+   *
+   * A Redis lock rather than a Postgres one because the critical section spans
+   * several services and connections (the intent insert, the ledger hold, a
+   * voucher's checks); an advisory lock would hold a pool connection while
+   * waiting on the others. It expires after {@link AGENT_SPEND_LOCK_TTL_MS}, so
+   * a crashed holder cannot stop an agent for longer than that. Fails closed:
+   * Redis unreachable, or the lock still busy after
+   * {@link AGENT_SPEND_LOCK_WAIT_MS}, is a retryable velocity refusal, and
+   * nothing was reserved.
+   */
+  async withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+    const token = randomUUID();
+    const deadline = Date.now() + AGENT_SPEND_LOCK_WAIT_MS;
+    for (;;) {
+      let claimed: boolean;
+      try {
+        claimed = await this.velocity.tryLockAgentSpend(agentId, token, AGENT_SPEND_LOCK_TTL_MS);
+      } catch (error) {
+        this.logger.warn(`agent ${agentId}: spend lock unavailable. ${describe(error)}`);
+        throw McpErrors.velocityLimitExceeded({
+          reason: VelocityViolationKind.UNAVAILABLE,
+          retryAfter: 1,
+        });
+      }
+      if (claimed) break;
+      if (Date.now() >= deadline) {
+        throw McpErrors.velocityLimitExceeded({
+          reason: VelocityViolationKind.UNAVAILABLE,
+          retryAfter: 1,
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, AGENT_SPEND_LOCK_POLL_MS));
+    }
+    try {
+      return await fn();
+    } finally {
+      await this.velocity.unlockAgentSpend(agentId, token);
+    }
+  }
 
   async assertCallAllowed(input: AssertCallAllowedInput): Promise<number | null> {
     const { organizationId, agentId, toolId, price, requestHash } = input;
@@ -189,16 +246,23 @@ export class SpendPolicyEnforcementService {
       throw McpErrors.toolNotAllowed({ toolId, allowedTools: policy.allowedTools });
     }
 
-    const sameAsset = price.asset === policy.assetId;
-    if (!sameAsset) {
+    // Fails CLOSED on an asset the policy is not denominated in (review
+    // 2026-10-15 P-9). Skipping the money checks here used to switch off every
+    // cap — per-call, approval, hourly, daily, monthly — while
+    // `GET /spend-policy` still showed them. See the class doc.
+    if (price.asset !== policy.assetId) {
       this.logger.warn(
         `agent ${agentId}: call priced in ${price.asset} but the policy is denominated in ` +
-          `${policy.assetId}; skipping every money-based check for this call (see class doc)`,
+          `${policy.assetId}; refusing it rather than running it with no money limit`,
       );
+      throw McpErrors.spendLimitExceeded({
+        limitType: 'asset_mismatch',
+        asset: policy.assetId,
+      });
     }
 
     // 3. Per-call ceiling.
-    if (sameAsset && policy.perCallMax !== null) {
+    if (policy.perCallMax !== null) {
       const limit = MoneyUtil.of(policy.perCallMax, policy.assetId as AssetId, policy.decimals);
       if (MoneyUtil.greaterThan(price, limit)) {
         throw McpErrors.spendLimitExceeded({
@@ -212,7 +276,7 @@ export class SpendPolicyEnforcementService {
     // 3b. Approval threshold. There is no approval flow to ask, so a call above
     // it is refused: an approval nobody can give resolves to DENY, never ALLOW.
     // Before velocity, like the per-call ceiling, so a refused call is not counted.
-    if (sameAsset && policy.requireApprovalAbove !== null) {
+    if (policy.requireApprovalAbove !== null) {
       const threshold = MoneyUtil.of(
         policy.requireApprovalAbove,
         policy.assetId as AssetId,
@@ -242,10 +306,7 @@ export class SpendPolicyEnforcementService {
     // 4b + 5. Spend/hour and the daily / monthly cap — money held or settled.
     let spendToday: Money | null = null;
     let spendThisMonth: Money | null = null;
-    if (
-      sameAsset &&
-      (policy.maxSpendPerHour !== null || policy.dailyCap !== null || policy.monthlyCap !== null)
-    ) {
+    if (policy.maxSpendPerHour !== null || policy.dailyCap !== null || policy.monthlyCap !== null) {
       const usage = await this.usage.spendSoFar(
         organizationId,
         agentId,
@@ -301,7 +362,7 @@ export class SpendPolicyEnforcementService {
 
     // 6. Alert bands — never blocks. Best-effort: a notification failure must
     // not turn an otherwise-successful call into an error.
-    if (sameAsset && spendToday && spendThisMonth) {
+    if (spendToday && spendThisMonth) {
       await this.emitCrossedBands(
         organizationId,
         agentId,

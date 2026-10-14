@@ -44,6 +44,8 @@ export interface EvmGasGrantClient {
    * chain's. See control 2 in {@link EvmGasGrantService.grantNow}.
    */
   getBlock(args: { blockTag: 'latest' }): Promise<{ timestamp: bigint }>;
+  /** The account's code: `undefined` or `0x` for a plain EOA. See control 3b. */
+  getCode(args: { address: `0x${string}` }): Promise<`0x${string}` | undefined>;
 }
 
 /**
@@ -389,7 +391,7 @@ export class EvmGasGrantService implements WithdrawGasGrantPort {
 
     const escrowAddress = getAddress(deployment.escrow);
 
-    const [fees, gas, buyerBalance] = await Promise.all([
+    const [fees, gas, buyerBalance, code] = await Promise.all([
       client.estimateFeesPerGas(),
       client.estimateGas({
         account: address,
@@ -398,7 +400,16 @@ export class EvmGasGrantService implements WithdrawGasGrantPort {
         value: 0n,
       }),
       client.getBalance({ address }),
+      client.getCode({ address }),
     ]);
+
+    // 3b. Only a plain EOA. A contract or an EIP-7702-delegated account can make
+    //     the bare 21 000-gas transfer revert every time, and a reverted grant
+    //     burns the relayer's gas while leaving the once-ever budget intact — an
+    //     unbounded loop on the relayer float (review 2026-10-15 P-7).
+    if (code !== undefined && code !== '0x') {
+      return refuse(GasGrantRefusal.ACCOUNT_HAS_CODE);
+    }
 
     // What one `withdraw` costs at the fee the chain is quoting right now.
     const cost = gas * fees.maxFeePerGas;

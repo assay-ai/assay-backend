@@ -745,4 +745,30 @@ describe('McpToolCallService — the paid call loop', () => {
 
     expect(ledger.kinds).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
   });
+
+  /**
+   * REGRESSION (review 2026-10-15 P-6): the caps were read, and the hold
+   * written, as separate steps — so N concurrent calls all read the same
+   * spend-so-far and all fit. The check and the hold now run under the agent's
+   * spend lock: the second call's check sees the first call's hold.
+   */
+  it('lets concurrent calls of one agent overshoot no cap', async () => {
+    const h = harness({
+      'binding-provider-a': () => Promise.resolve(ok()),
+      'binding-provider-a#2': () => Promise.resolve(ok()),
+    });
+    h.spendPolicy.holdCap = {
+      max: 1,
+      held: () => h.ledger.kinds.filter((kind) => kind === 'HOLD_CREATE').length,
+    };
+
+    const results = await Promise.allSettled([
+      h.calls.call(SESSION, 'Search the web', ARGS),
+      h.calls.call(SESSION, 'Search the web', { query: 'another' }),
+    ]);
+
+    expect(h.ledger.kinds.filter((kind) => kind === 'HOLD_CREATE')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(h.spendPolicy.uncheckedOutsideLock).toBe(0);
+  });
 });

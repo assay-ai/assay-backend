@@ -273,67 +273,74 @@ export class McpToolCallService {
     // be swept.
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_A_PER_CALL));
 
-    const spendPolicyVersion = await this.spendPolicy.assertCallAllowed({
-      organizationId: session.organizationId,
-      agentId: session.agentId,
-      toolId: tool.id,
-      price,
-      requestHash,
-    });
+    // The cap check and the hold it allows run under the agent's spend lock:
+    // read and reserve as one step, so concurrent calls cannot all read the
+    // same spend-so-far and all fit (review 2026-10-15 P-6).
+    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async () => {
+      const spendPolicyVersion = await this.spendPolicy.assertCallAllowed({
+        organizationId: session.organizationId,
+        agentId: session.agentId,
+        toolId: tool.id,
+        price,
+        requestHash,
+      });
 
-    const intent = await this.intents.create({
-      organizationId: session.organizationId,
-      agentId: session.agentId,
-      agentAccount: session.agentAccount,
-      // Which of the agent's credentials paid — two credentials are two keys.
-      credentialId: credentialOf(session),
-      // No provider yet, and none can be named: the router picks one below and
-      // failover may change it. Nor the payout account, nor the binding, for
-      // exactly the same reason and at exactly the same grain. All three are
-      // written by the transition out of `PROVIDER_EXECUTING`, which is the
-      // first moment the answer is final — see `resolveDataResult`.
-      toolId: tool.id,
-      // Rail A, not rail B: rail B means a signed voucher and there is no
-      // signature here — the MCP server spends the agent's ledger balance on the
-      // strength of its bearer token. Recording it as rail B would claim a
-      // voucher nonce was spent, and the database would refuse the row for the
-      // good reason that no nonce exists.
-      //
-      // Rail A names no `payTo` and cannot: an escrow is debited only by
-      // `redeem_voucher`, which needs the buyer's ed25519 signature over 239
-      // bytes, and an MCP session has no key. "Rail A uses the same payTo"
-      // describes the x402-over-HTTP rail, not this one. While
-      // ESCROW_SPEND_GATE_ENABLED is on, `EscrowSpendGate` refuses a rail-A
-      // intent outright rather than spending a mirror balance.
-      //
-      // `assertRailOffered` above is what makes "4663 ships rail B only" a
-      // rule rather than a table nobody reads. It is asserted HERE, at the site
-      // that CHOOSES the rail, not where `payment_intents.rail` is written: the
-      // writer records a decision already made, and a check there would refuse a
-      // row after the money path had committed to it.
-      rail: PaymentRail.RAIL_A_PER_CALL,
-      callId,
-      // `quote.pricingMode` is the aggregate over every *eligible* binding at
-      // quote time (`ProviderRouterService.quote`'s "dearest eligible
-      // binding" reasoning) — routing has not run yet, so it is the best
-      // information available at creation time, same as `price` itself.
-      // `FREEMIUM` is folded into `PAID` here, matching the router's own
-      // "gated like PAID" rule: the free quota has not been checked,
-      // so this call may well be charged.
-      callClass:
-        quote.pricingMode === PricingMode.FREE
-          ? PaymentIntentCallClass.FREE
-          : PaymentIntentCallClass.PAID,
-      price,
-      platformFee: this.platformFee(price),
-      requestHash,
-      // The receipt's link to the policy that governed this call.
-      spendPolicyVersion,
-      chainId: session.chainId,
-    });
+      const intent = await this.intents.create({
+        organizationId: session.organizationId,
+        agentId: session.agentId,
+        agentAccount: session.agentAccount,
+        // Which of the agent's credentials paid — two credentials are two keys.
+        credentialId: credentialOf(session),
+        // No provider yet, and none can be named: the router picks one below and
+        // failover may change it. Nor the payout account, nor the binding, for
+        // exactly the same reason and at exactly the same grain. All three are
+        // written by the transition out of `PROVIDER_EXECUTING`, which is the
+        // first moment the answer is final — see `resolveDataResult`.
+        toolId: tool.id,
+        // Rail A, not rail B: rail B means a signed voucher and there is no
+        // signature here — the MCP server spends the agent's ledger balance on the
+        // strength of its bearer token. Recording it as rail B would claim a
+        // voucher nonce was spent, and the database would refuse the row for the
+        // good reason that no nonce exists.
+        //
+        // Rail A names no `payTo` and cannot: an escrow is debited only by
+        // `redeem_voucher`, which needs the buyer's ed25519 signature over 239
+        // bytes, and an MCP session has no key. "Rail A uses the same payTo"
+        // describes the x402-over-HTTP rail, not this one. While
+        // ESCROW_SPEND_GATE_ENABLED is on, `EscrowSpendGate` refuses a rail-A
+        // intent outright rather than spending a mirror balance.
+        //
+        // `assertRailOffered` above is what makes "4663 ships rail B only" a
+        // rule rather than a table nobody reads. It is asserted HERE, at the site
+        // that CHOOSES the rail, not where `payment_intents.rail` is written: the
+        // writer records a decision already made, and a check there would refuse a
+        // row after the money path had committed to it.
+        rail: PaymentRail.RAIL_A_PER_CALL,
+        callId,
+        // `quote.pricingMode` is the aggregate over every *eligible* binding at
+        // quote time (`ProviderRouterService.quote`'s "dearest eligible
+        // binding" reasoning) — routing has not run yet, so it is the best
+        // information available at creation time, same as `price` itself.
+        // `FREEMIUM` is folded into `PAID` here, matching the router's own
+        // "gated like PAID" rule: the free quota has not been checked,
+        // so this call may well be charged.
+        callClass:
+          quote.pricingMode === PricingMode.FREE
+            ? PaymentIntentCallClass.FREE
+            : PaymentIntentCallClass.PAID,
+        price,
+        platformFee: this.platformFee(price),
+        requestHash,
+        // The receipt's link to the policy that governed this call.
+        spendPolicyVersion,
+        chainId: session.chainId,
+      });
 
-    const unaffordable = await this.secureFunds(session, intent, price);
-    if (unaffordable) return unaffordable;
+      const unaffordable = await this.secureFunds(session, intent, price);
+      return { intent, unaffordable };
+    });
+    if (admitted.unaffordable) return admitted.unaffordable;
+    const intent = admitted.intent;
 
     const executing = await this.intents.transition(
       session.organizationId,
@@ -446,42 +453,49 @@ export class McpToolCallService {
 
     // A charge like any other, so the same gate that caps rail A caps this —
     // against the hash the voucher signs, which is this call's identity here.
-    await this.spendPolicy.assertCallAllowed({
-      organizationId: session.organizationId,
-      agentId: session.agentId,
-      toolId: tool.id,
-      price,
-      requestHash,
-    });
-
-    let intent: PaymentIntent;
-    try {
-      intent = await this.vouchers.redeem({
+    // Checked and held under the agent's spend lock, as on rail A (P-6).
+    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async () => {
+      await this.spendPolicy.assertCallAllowed({
         organizationId: session.organizationId,
-        signed: payment.signed,
-        call,
         agentId: session.agentId,
-        agentAccount: session.agentAccount,
-        providerId: offer.providerId,
-        providerAccount: offer.providerAccount,
         toolId: tool.id,
-        resource: call.path,
-        escrowPda,
         price,
-        platformFee: this.platformFee(price),
-        chainId: session.chainId,
-        boundDelegate: session.delegateAccount ?? null,
-        credentialId: credentialOf(session),
-        // The same read as the withdraw gate above: the escrow's own limits
-        // bind this voucher at redemption, so they are applied before serving.
-        escrow: reading,
+        requestHash,
       });
-    } catch (error) {
-      if (!isInsufficientBalance(error)) throw error;
-      // The intent exists in `CREATED` with nothing reserved; the expiry sweep
-      // closes it, exactly as on rail A. Its id is not surfaced by `redeem`.
-      return this.insufficientFunds(session, null, price);
-    }
+
+      try {
+        return {
+          intent: await this.vouchers.redeem({
+            organizationId: session.organizationId,
+            signed: payment.signed,
+            call,
+            agentId: session.agentId,
+            agentAccount: session.agentAccount,
+            providerId: offer.providerId,
+            providerAccount: offer.providerAccount,
+            toolId: tool.id,
+            resource: call.path,
+            escrowPda,
+            price,
+            platformFee: this.platformFee(price),
+            chainId: session.chainId,
+            boundDelegate: session.delegateAccount ?? null,
+            credentialId: credentialOf(session),
+            // The same read as the withdraw gate above: the escrow's own limits
+            // bind this voucher at redemption, so they are applied before serving.
+            escrow: reading,
+          }),
+          unaffordable: null,
+        };
+      } catch (error) {
+        if (!isInsufficientBalance(error)) throw error;
+        // The intent exists in `CREATED` with nothing reserved; the expiry sweep
+        // closes it, exactly as on rail A. Its id is not surfaced by `redeem`.
+        return { intent: null, unaffordable: await this.insufficientFunds(session, null, price) };
+      }
+    });
+    if (admitted.intent === null) return admitted.unaffordable;
+    const intent: PaymentIntent = admitted.intent;
 
     const executing = await this.intents.transition(
       session.organizationId,

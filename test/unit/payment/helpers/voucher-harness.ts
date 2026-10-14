@@ -206,6 +206,19 @@ export class InMemoryIntentWriter {
     };
   }
 
+  /** The highest seq of the payer's intents not abandoned, as the locked admission reads it. */
+  private maxSeq(payer: string): bigint | null {
+    let highest: bigint | null = null;
+    for (const intent of this.created) {
+      if (intent.agentAccount !== payer || !intent.voucherSeq || this.abandoned.has(intent.id)) {
+        continue;
+      }
+      const seq = BigInt(intent.voucherSeq);
+      if (highest === null || seq > highest) highest = seq;
+    }
+    return highest;
+  }
+
   async abandonUnsecuredVoucher(_organizationId: string, intentId: string): Promise<void> {
     this.abandoned.add(intentId);
   }
@@ -223,6 +236,7 @@ export class InMemoryIntentWriter {
         ...this.openTotals(admission.scope),
         pausedFor: this.pausedFor,
         nextSeq: this.nextSeq,
+        maxSeq: this.maxSeq(admission.scope.payer),
       });
     }
 

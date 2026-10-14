@@ -220,6 +220,16 @@ describe('rail B over MCP', () => {
       expect(config.intents.only.credentialId ?? null).toBeNull();
     });
 
+    it('checks the caps and secures the voucher under the agent spend lock (P-6)', async () => {
+      const h = harness();
+      const requirement = await requirementOf(h);
+
+      await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement));
+
+      expect(h.spendPolicy.checked).toHaveLength(1);
+      expect(h.spendPolicy.uncheckedOutsideLock).toBe(0);
+    });
+
     it('is still a charge the spend policy sees, against the voucher request hash', async () => {
       const h = harness();
       const requirement = await requirementOf(h);
