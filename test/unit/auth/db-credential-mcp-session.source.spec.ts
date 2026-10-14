@@ -32,7 +32,11 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
     return { source, credentials, agents };
   }
 
-  function seedLinkedAgent(agents: FakeAgentRepository, overrides = {}) {
+  function seedLinkedAgent(
+    agents: FakeAgentRepository,
+    overrides = {},
+    organizationStatus = 'ACTIVE',
+  ) {
     return agents.seed(
       buildAgent({
         id: 'agent-1',
@@ -42,6 +46,7 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
         label: 'ci-deploy',
         ...overrides,
       }),
+      organizationStatus,
     );
   }
 
@@ -113,6 +118,27 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
     credentials.seed(buildCredential({ tokenHash: digestToken(TOKEN) }));
 
     await expectErrorCodeAsync(() => source.resolve(TOKEN), 'AUTH_AGENT_SUSPENDED');
+  });
+
+  // Same rule as the Privy source: anything but ACTIVE is refused, so a status
+  // added later does not quietly keep a credential working.
+  it('refuses an agent in any status other than ACTIVE', async () => {
+    const { source, credentials, agents } = build();
+    seedLinkedAgent(agents, { status: 'DISABLED' });
+    credentials.seed(buildCredential({ tokenHash: digestToken(TOKEN) }));
+
+    await expectErrorCodeAsync(() => source.resolve(TOKEN), 'AUTH_AGENT_SUSPENDED');
+  });
+
+  // Suspending a tenant locks the person out through the Privy source; it has
+  // to stop the tenant's machine credentials too, or the suspension is only
+  // half applied.
+  it('refuses a credential whose organization is suspended', async () => {
+    const { source, credentials, agents } = build();
+    seedLinkedAgent(agents, {}, 'SUSPENDED');
+    credentials.seed(buildCredential({ tokenHash: digestToken(TOKEN) }));
+
+    await expectErrorCodeAsync(() => source.resolve(TOKEN), 'AUTH_ORGANIZATION_SUSPENDED');
   });
 
   it('resolves a valid credential to a session with all six fields correct', async () => {
