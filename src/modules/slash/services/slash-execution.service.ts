@@ -770,6 +770,14 @@ export class SlashExecutionService {
   }
 
   /**
+   * Re-read this case's on-chain records and bring its rows up to date — for
+   * a straggler part that landed after it was given up on (review S-5).
+   */
+  async reconcileRecord(proposal: SlashProposalEntity): Promise<void> {
+    await this.readCaseRecord(proposal);
+  }
+
+  /**
    * What the chain says this case's judgement is — one record, or the fold of
    * a partitioned case's per-agent records. Every recovery path reads through
    * this, so a partitioned case is reconciled exactly like a single one.

@@ -243,7 +243,8 @@ export class EvmSlashProposalWatcher {
     }
 
     const proposed = logs.filter((log) => (log.eventName ?? 'SlashProposed') === 'SlashProposed');
-    const findings = await this.compare(chainId, proposed);
+    const { findings, late } = await this.compare(chainId, proposed);
+    await this.readoptLate(chainId, late);
     // A failure here throws before the cursor moves, so the range is re-read
     // and the (idempotent) mirror is retried next tick.
     await this.mirrorRulings(
@@ -273,7 +274,7 @@ export class EvmSlashProposalWatcher {
   private async compare(
     chainId: ChainId,
     logs: readonly SlashProposedLog[],
-  ): Promise<SlashWatchFinding[]> {
+  ): Promise<{ findings: SlashWatchFinding[]; late: SlashProposedLog[] }> {
     const ids = logs
       .map((log) => log.args.requestId?.toLowerCase().replace(/^0x/, ''))
       .filter((id): id is string => typeof id === 'string');
@@ -282,6 +283,7 @@ export class EvmSlashProposalWatcher {
     );
 
     const findings: SlashWatchFinding[] = [];
+    const late: SlashProposedLog[] = [];
     for (const log of logs) {
       const requestId = log.args.requestId?.toLowerCase().replace(/^0x/, '');
       if (!requestId) continue;
@@ -336,9 +338,38 @@ export class EvmSlashProposalWatcher {
           aggregation: AlertAggregation.ONCE_PER_INCIDENT,
           dedupeKey: `${chainId}:${requestId}`,
         });
+      } else if (part.chainStatus === 'REFUSED') {
+        // Review S-5: a straggler given up on whose transaction landed late.
+        late.push(log);
       }
     }
-    return findings;
+    return { findings, late };
+  }
+
+  /**
+   * Hands the slash domain each matching `SlashProposed` of a part it had
+   * given up on (review S-5), so the part is re-adopted rather than left
+   * reserving the provider's stake unseen. Throws before the cursor moves.
+   */
+  private async readoptLate(chainId: ChainId, logs: readonly SlashProposedLog[]): Promise<void> {
+    if (logs.length === 0) return;
+    const rulings = this.rulings();
+    for (const log of logs) {
+      const requestId = log.args.requestId?.toLowerCase().replace(/^0x/, '') ?? '';
+      if (!rulings) {
+        this.logger.warn(
+          `a late SlashProposed for given-up part ${requestId} on ${chainId} seen, but no slash ` +
+            `domain is composed in this process to re-adopt it`,
+        );
+        continue;
+      }
+      await rulings.recordLateProposal({
+        chainId,
+        requestId,
+        executableAt: new Date(Number(log.args.executableAt ?? 0n) * 1000),
+        transactionHash: log.transactionHash ?? null,
+      });
+    }
   }
 
   private async mirrorRulings(chainId: ChainId, logs: readonly SlashProposedLog[]): Promise<void> {

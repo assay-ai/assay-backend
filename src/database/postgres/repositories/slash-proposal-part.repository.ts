@@ -214,7 +214,12 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
   ): Promise<
     Pick<
       SlashProposalPartEntity,
-      'organizationId' | 'proposalId' | 'chainRequestId' | 'beneficiaryAccount' | 'penaltyAmount'
+      | 'organizationId'
+      | 'proposalId'
+      | 'chainRequestId'
+      | 'beneficiaryAccount'
+      | 'penaltyAmount'
+      | 'chainStatus'
     >[]
   > {
     if (chainRequestIds.length === 0) return [];
@@ -226,6 +231,7 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
         'part.chainRequestId',
         'part.beneficiaryAccount',
         'part.penaltyAmount',
+        'part.chainStatus',
       ])
       .where('part.chain_request_id IN (:...ids)', { ids: [...chainRequestIds] })
       .getMany();

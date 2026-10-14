@@ -10,6 +10,7 @@ import {
   SlashChainCancelledEvent,
   SlashChainDisputedEvent,
   SlashChainExecutedEvent,
+  SlashChainProposedEvent,
   SlashChainRulingsPort,
   SlashChainUpheldEvent,
 } from '../ports/slash-chain-rulings.port';
@@ -314,6 +315,50 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     if (this.execution) {
       await this.execution.mirrorChainExecution(proposal, event.transactionHash);
     }
+    return true;
+  }
+
+  /**
+   * A straggler that landed after it was given up on (review S-5): its record
+   * stands on chain and reserves the provider's stake, but the part says
+   * `REFUSED`, so nothing would execute or expire it. The case's records are
+   * re-read by the one match rule (`SlashExecutionService.reconcileRecord`),
+   * which brings the part back to `PENDING`; the case's mirror then follows,
+   * so the part executes with its siblings (or, on a case already executed,
+   * the stranded-part sweep pays or expires it).
+   *
+   * Only a `REFUSED` part of the current epoch: a part still `NONE` is the
+   * proposer's own to adopt, and a `RecordMismatch` refusal is not ours.
+   */
+  async recordLateProposal(event: SlashChainProposedEvent): Promise<boolean> {
+    const part = await this.parts.findOneByChainRequestId(event.requestId);
+    if (!part) return false;
+    if (part.chainStatus !== 'REFUSED' || part.chainLastError?.startsWith('RecordMismatch')) {
+      return true;
+    }
+    const proposal = await this.proposals.findOneScoped(part.organizationId, part.proposalId);
+    if (!proposal) return false;
+    if (part.chainEpoch !== proposal.chainEpoch || !this.execution) {
+      this.logger.warn(
+        `slash part ${event.requestId} (case ${proposal.id}) was given up on but its record ` +
+          `landed on chain; it is not re-adopted here (${
+            this.execution ? 'an earlier epoch' : 'no slash execution in this process'
+          })`,
+      );
+      return true;
+    }
+    await this.execution.reconcileRecord(proposal);
+    await this.mirrorParts(proposal, {});
+    await this.timeline(proposal, new Date(), 'CHAIN_PART_READOPTED', {
+      summary:
+        'A part given up on was proposed on chain after all (its transaction landed late); it ' +
+        'is pending again and executes with the rest of the case',
+      detail: {
+        requestId: event.requestId,
+        transactionHash: event.transactionHash,
+        executableAt: event.executableAt.toISOString(),
+      },
+    });
     return true;
   }
 

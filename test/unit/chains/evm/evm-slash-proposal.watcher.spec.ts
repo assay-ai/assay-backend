@@ -42,6 +42,7 @@ function build(options: {
   rulings?: unknown;
   slashHolds?: unknown;
   disputeUpgradeBlock?: bigint;
+  knownStatus?: string;
   indexer?: { fromBlock: ReadonlyMap<ChainId, bigint>; confirmations?: number };
 }) {
   const alerts: Alert[] = [];
@@ -73,6 +74,7 @@ function build(options: {
               chainRequestId: KNOWN,
               beneficiaryAccount: `${CHAIN}:${AGENT}`,
               penaltyAmount: '1000000',
+              chainStatus: options.knownStatus ?? 'PENDING',
             },
           ]
         : [],
@@ -201,6 +203,27 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
     expect(ranges[0][0]).toBe(
       50_000n - BigInt(DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS) - EVM_SLASH_WATCH_INITIAL_LOOKBACK,
     );
+  });
+
+  it('S-5: hands a late SlashProposed of a given-up part to the slash domain, silently', async () => {
+    const seen: unknown[] = [];
+    const rulings = { recordLateProposal: async (event: unknown) => (seen.push(event), true) };
+    const { watcher, alerts } = build({
+      head: 500n,
+      logs: [event(KNOWN, AGENT, 1_000_000n)],
+      knownStatus: 'REFUSED',
+      rulings,
+    });
+    await expect(watcher.check()).resolves.toEqual([]);
+    expect(alerts).toEqual([]);
+    expect(seen).toEqual([
+      expect.objectContaining({ requestId: KNOWN, executableAt: new Date(1_800_000_000_000) }),
+    ]);
+
+    // A part that already stands is not handed over.
+    const standing = build({ head: 500n, logs: [event(KNOWN, AGENT, 1_000_000n)], rulings });
+    await standing.watcher.check();
+    expect(seen).toHaveLength(1);
   });
 
   it('warns, keeps the cursor and does not throw when the chain cannot be read', async () => {
