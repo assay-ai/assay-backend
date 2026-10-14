@@ -18,6 +18,7 @@ import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { ChainEnrolmentStatus } from '@modules/provider/ports/chain-enrolment.port';
 import { ProviderPayoutAddressService } from '@modules/provider/services/provider-payout-address.service';
+import { AuditLogWriter } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
@@ -116,10 +117,14 @@ interface RecordedStatement {
 }
 
 /** `manager.createQueryBuilder().update(Entity)|.insert()...execute()`, in issue order. */
-function fakeManager(options: { challengeAffected?: number }) {
+function fakeManager(options: { challengeAffected?: number; previousPayoutAccountId?: string }) {
   const calls: RecordedStatement[] = [];
 
   const manager = {
+    // The enrolment as it was before the upsert, read for the audit entry.
+    findOne: jest.fn(async () =>
+      options.previousPayoutAccountId ? { payoutAccountId: options.previousPayoutAccountId } : null,
+    ),
     createQueryBuilder() {
       return {
         update(entity: { name: string }) {
@@ -230,6 +235,8 @@ function build(
       .mockImplementation(async (work: (manager: unknown) => unknown) => work(tx.manager)),
   } as unknown as DataSource;
 
+  const audit = { record: jest.fn(async () => undefined) };
+
   const service = new ProviderPayoutAddressService(
     providers,
     challenges,
@@ -237,8 +244,9 @@ function build(
     config,
     dataSource,
     options.blocklist ?? noBlocks(),
+    audit as unknown as AuditLogWriter,
   );
-  return { service, providers, challenges, chains, dataSource, tx };
+  return { service, providers, challenges, chains, dataSource, tx, audit };
 }
 
 describe('ProviderPayoutAddressService.issueChallenge', () => {
@@ -354,6 +362,48 @@ describe('ProviderPayoutAddressService.prove', () => {
       conflictTarget: ['organization_id', 'chain_id'],
     });
     expect(providers.findOneBy).not.toHaveBeenCalled(); // prove() never re-reads the provider row
+  });
+
+  // Review A-1: a payout address that changed without a trace was found only
+  // when a payout went missing. The change is recorded in the owner's audit
+  // log, in the same transaction as the write, with the address it replaced.
+  it('records the change, old and new address, in the audit log on the same transaction', async () => {
+    const w = wallet();
+    const previous = wallet().account;
+    const challenge: PayoutProofChallenge = {
+      account: w.account,
+      organizationId: ORG,
+      nonce: 'c'.repeat(64),
+      expiresAt: Math.floor((Date.now() + 60_000) / 1000),
+    };
+    const solana = new SolanaChainAdapter(stubRpc(), [
+      CHAIN_IDS.SOLANA_MAINNET,
+      CHAIN_IDS.SOLANA_DEVNET,
+    ]);
+    const signature = signBytes(solana.buildPayoutProofMessage(challenge), w.keyPair.privateKey);
+    const row = challengeRow({
+      accountId: w.account,
+      nonce: challenge.nonce,
+      message: new TextDecoder().decode(solana.buildPayoutProofMessage(challenge)),
+      expiresAt: new Date(challenge.expiresAt * 1000),
+    });
+    const { service, tx, audit } = build({
+      challenge: row,
+      transactionOptions: { previousPayoutAccountId: previous },
+    });
+
+    await service.prove(session(), { challengeId: row.id, signature });
+
+    expect(audit.record).toHaveBeenCalledTimes(1);
+    expect(audit.record).toHaveBeenCalledWith(tx.manager, {
+      organizationId: ORG,
+      actor: { type: 'user', id: session().credentialId },
+      action: 'payout_address.updated',
+      resourceType: 'provider_chain_enrolment',
+      resourceId: chainIdOf(w.account),
+      before: { payoutAccountId: previous },
+      after: { payoutAccountId: w.account },
+    });
   });
 
   it('the headline test: rejects a genuine signature from a different wallet than the one claimed', async () => {
