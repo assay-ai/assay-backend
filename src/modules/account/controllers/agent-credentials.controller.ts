@@ -49,7 +49,12 @@ import { AgentCredentialsService } from '../services/agent-credentials.service';
 export class AgentCredentialsController {
   constructor(private readonly credentials: AgentCredentialsService) {}
 
+  // A person's read too: the list names every sibling credential, its prefix,
+  // its bound delegate key and its expiry, which a leaked machine token must
+  // not be able to enumerate. An agent reads its own binding through
+  // `GET /agents/me/delegate`.
   @Get()
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Credentials for one agent, newest first' })
   @ApiCursorPage(AgentCredentialDto)
   async list(
