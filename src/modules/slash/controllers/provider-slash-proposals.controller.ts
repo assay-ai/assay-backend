@@ -111,8 +111,9 @@ export class ProviderSlashProposalsController {
    * Opening the case.
    *
    * Recorded, and it moves no clock. The provider's window runs from
-   * *delivery*, not from reading — a provider who never opens the dashboard has
-   * exactly as long to object as one who opens it immediately.
+   * *delivery* (Solana) or to the record's `executableAt` (EVM), never from
+   * reading — a provider who never opens the dashboard has exactly as long to
+   * object as one who opens it immediately.
    */
   @Post(':proposalId/acknowledge')
   @UseGuards(HumanSessionGuard)
@@ -127,7 +128,13 @@ export class ProviderSlashProposalsController {
   }
 
   /**
-   * File the objection.
+   * File the objection — Solana cases only.
+   *
+   * An EVM case is refused (409 `SLASH_DISPUTE_ON_CHAIN_ONLY`, with the
+   * record's `executableAt`): its dispute is `disputeSlash` from the
+   * provider's own stake wallet (`POST /providers/me/slash-requests/
+   * dispute-intent` builds it), which freezes the record on chain until the
+   * arbiter decides. An in-app objection would not.
    *
    * Filing is free and does not affect routing or tier — stated on the screen,
    * and true: nothing in this path touches either. It is worth saying out loud
@@ -138,7 +145,12 @@ export class ProviderSlashProposalsController {
   @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Object to a proposed penalty' })
   @ApiResponse({ status: 201, type: SlashProposalCaseDto })
-  @ApiResponse({ status: 409, description: 'The window to object has closed, or one is on file' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'The window to object has closed, one is on file, or the case is on EVM and is disputed ' +
+      'on chain only (SLASH_DISPUTE_ON_CHAIN_ONLY)',
+  })
   async dispute(
     @CurrentSession() session: McpSession,
     @Param() params: SlashProposalIdParamsDto,

@@ -782,12 +782,18 @@ function row(overrides: Partial<Parameters<FakeSlashProposals['seed']>[0]> & { i
 
 describe("the propose sweep's selection contract", () => {
   it('never proposes for a case the provider has not been told about', async () => {
-    // respond_by_at is null until a channel confirms delivery. Proposing then
+    // notified_at is null until a channel confirms delivery. Proposing then
     // would reserve a provider's stake for a case they cannot answer, and the
     // delivery-confirmed deadline exists precisely so a dead webhook does not cost them their window.
     const proposals = new FakeSlashProposals();
     proposals.seed(
-      row({ id: 'undelivered', status: 'PROPOSED', respondByAt: null, chainStatus: 'NONE' }),
+      row({
+        id: 'undelivered',
+        status: 'PROPOSED',
+        notifiedAt: null,
+        respondByAt: null,
+        chainStatus: 'NONE',
+      }),
     );
     proposals.seed(
       row({

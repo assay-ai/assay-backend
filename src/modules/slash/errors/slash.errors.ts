@@ -41,6 +41,10 @@ export enum SlashErrorCode {
   SLASH_CHAIN_BATCH_REFUSED = 'SLASH_CHAIN_BATCH_REFUSED',
   SLASH_DISPUTE_WON_ON_CHAIN = 'SLASH_DISPUTE_WON_ON_CHAIN',
   SLASH_BENEFICIARY_EVIDENCE_REFUSED = 'SLASH_BENEFICIARY_EVIDENCE_REFUSED',
+  /** An EVM case: the provider disputes on chain, there is no in-app objection. */
+  SLASH_DISPUTE_ON_CHAIN_ONLY = 'SLASH_DISPUTE_ON_CHAIN_ONLY',
+  /** An EVM case: the arbiter rules on chain, there is no off-chain decision. */
+  SLASH_ARBITER_RULES_ON_CHAIN = 'SLASH_ARBITER_RULES_ON_CHAIN',
 }
 
 export type SlashErrorCodesArePrefixed = AssertDomainErrorCodes<'SLASH', `${SlashErrorCode}`>;
@@ -467,6 +471,35 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     message: (context?: Record<string, any>) =>
       `Slash case ${context?.proposalId ?? ''}: refused before signing — ` +
       `${context?.reason ?? 'a beneficiary does not match the paid vouchers'}`,
+  },
+  /**
+   * The in-app objection on an EVM case. The provider's dispute is
+   * `disputeSlash` / `disputeSlashBatch`, sent from its own stake wallet
+   * (`POST /providers/me/slash-requests/dispute-intent` builds it): only that
+   * freezes the record, and it must land before the record's `executableAt`.
+   */
+  disputeOnChainOnly: {
+    code: SlashErrorCode.SLASH_DISPUTE_ON_CHAIN_ONLY,
+    statusCode: 409,
+    publicContext: ['executableAt'],
+    message: (context?: Record<string, any>) =>
+      'This penalty is disputed on chain, not in the app: send disputeSlash from your stake ' +
+      'wallet (the penalties on chain page builds it). Disputing freezes the penalty on chain ' +
+      'until the arbiter decides' +
+      (context?.executableAt
+        ? `; you must dispute before ${context.executableAt}`
+        : '; you can dispute once its record is on chain'),
+  },
+  /**
+   * An off-chain decision (claim, decide, second, extension) on an EVM case.
+   * The arbiter's on-chain ruling is the only decision for it.
+   */
+  arbiterRulesOnChain: {
+    code: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Cannot ${context?.action ?? 'decide'} this case off chain: it is disputed on chain and ` +
+      'the arbiter rules on it there (upholdSlash / cancelSlash, from the arbiter page)',
   },
   chainBatchRefused: {
     code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,
