@@ -1506,6 +1506,20 @@ describe('ArbitrationService', () => {
       ).toBe(false);
     });
 
+    it('N-3: upholds an open case whose record stands undisputed on chain, and closes the objection', async () => {
+      const ctx = build();
+      const dispute = seedEvm(ctx, SlashProposalStatus.UNDER_REVIEW);
+
+      expect(await ctx.service.recordChainStanding('org_1', 'p1')).toBe(true);
+      expect(ctx.proposals.rows.get('p1')!).toMatchObject({
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+        outcome: null,
+      });
+      expect(dispute).toMatchObject({ state: 'REJECTED', resolvedBy: 'chain:undisputed' });
+      expect(await ctx.service.recordChainStanding('org_1', 'p1')).toBe(false);
+    });
+
     it('leaves a Solana case to its own decision', async () => {
       const ctx = build();
       seedDisputed(ctx);
