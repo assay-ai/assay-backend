@@ -41,6 +41,7 @@ export enum ChainErrorCode {
   CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE = 'CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE',
   CHAIN_RELAY_NOT_SENT = 'CHAIN_RELAY_NOT_SENT',
   CHAIN_PROGRAM_PAUSED = 'CHAIN_PROGRAM_PAUSED',
+  CHAIN_DOMAIN_MISMATCH = 'CHAIN_DOMAIN_MISMATCH',
   CHAIN_ADDRESS_BLOCKED = 'CHAIN_ADDRESS_BLOCKED',
   CHAIN_ARBITER_NOT_SET = 'CHAIN_ARBITER_NOT_SET',
   CHAIN_ADDRESS_ALREADY_BLOCKED = 'CHAIN_ADDRESS_ALREADY_BLOCKED',
@@ -481,6 +482,23 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
       `${context?.chainId ? ` on ${context.chainId}` : ''}` +
       `${context?.door ? `, so ${String(context.door).toLowerCase().replace(/_/g, ' ')} is refused` : ''}` +
       `; nothing was signed or sent, and it reopens when the pause lifts`,
+  },
+  /**
+   * The live `DOMAIN_SEPARATOR()` of a settlement proxy is not the EIP-712
+   * domain this backend signs and verifies under (reviews evm-escrow R1,
+   * evm-stake-slash R-3): a voucher accepted now would revert at redemption
+   * and an attestation would not recover to the verifier. Vouchers and slash
+   * proposals stop on that chain until the domains match again. `503`: the
+   * remedy is a deploy, not a different request.
+   */
+  domainMismatch: {
+    code: ChainErrorCode.CHAIN_DOMAIN_MISMATCH,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `The settlement contracts${context?.chainId ? ` on ${context.chainId}` : ''} sign under ` +
+      `a different EIP-712 domain than this service` +
+      `${context?.contracts ? ` (${context.contracts})` : ''}; nothing was signed or sent, and ` +
+      'it resumes once the domains match',
   },
   /**
    * A party to this action is on the ON-CHAIN blocklist (`X402Config.blocked`,
