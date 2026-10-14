@@ -147,8 +147,8 @@ export class SlashPartsService {
     if (todo.length > 0) {
       // Review H-2: never sign a stored plan the evidence does not produce.
       await this.assertPlanFollowsEvidence(proposal, chainId, parts);
-      // Follow-up C5: every beneficiary paid for the failed calls, and is
-      // owed no more than it paid.
+      // Follow-up C5: every beneficiary is a payer of the failed calls, and no
+      // part exceeds that payer's share of the formula penalty.
       await this.assertBeneficiariesPaid(proposal, provider, chainId, todo);
       const outcomes = await this.executor.proposeBatch(
         todo.map((part) => ({
@@ -431,11 +431,11 @@ export class SlashPartsService {
 
   /**
    * The C5 evidence of `parts`: per part, the payer of the failed calls, what
-   * it paid and the share it would receive. `agentBps` is the contract's
+   * it paid, what the penalty formula gives it, and the share it would receive. `agentBps` is the contract's
    * `slashAgentBps` (read live when not given).
    */
   async beneficiaryEvidenceOf(
-    proposal: Pick<SlashProposalEntity, 'windowId' | 'assetId' | 'providerId'>,
+    proposal: Pick<SlashProposalEntity, 'windowId' | 'assetId' | 'providerId' | 'penaltyAmount'>,
     parts: readonly SlashProposalPartEntity[],
     agentBps: number,
   ): Promise<BeneficiaryEvidence[]> {
@@ -446,8 +446,11 @@ export class SlashPartsService {
       proposal.providerId,
     );
     const payments = new Map<string, FailedCallPayment>();
+    const chainId = chainIdOf(proposal.assetId as AssetId);
     for (const row of rows) {
       const account = normalizeAgentAccount(row.agentAccount);
+      // As the plan does: a payer on another chain is not in the on-chain split.
+      if (!account.startsWith(`${chainId}:`)) continue;
       const prior = payments.get(account);
       payments.set(account, {
         agentAccount: account,
@@ -456,7 +459,7 @@ export class SlashPartsService {
         redeemedMinor: (prior?.redeemedMinor ?? 0n) + BigInt(row.redeemed ?? '0'),
       });
     }
-    return beneficiaryEvidence(parts, payments, agentBps);
+    return beneficiaryEvidence(parts, payments, BigInt(proposal.penaltyAmount), agentBps);
   }
 
   /** Refuse (sign nothing) when a part fails the C5 check — see `beneficiaryEvidence`. */

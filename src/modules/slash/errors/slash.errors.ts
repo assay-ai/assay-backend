@@ -456,9 +456,9 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
       'proposed again',
   },
   /**
-   * Follow-up C5: a part's beneficiary is not the payer of the failed calls'
-   * vouchers, or its share (the contract's agent bps of the part) is more than
-   * that payer paid for them. Nothing was signed; the case stays PROPOSING and
+   * Follow-up C5: a part's beneficiary is not a payer of the window's failed
+   * calls, or the part is more than that payer's pro-rata share of the formula
+   * penalty (one minor unit of rounding allowed). Nothing was signed; the case stays PROPOSING and
    * a `BENEFICIARY_REFUSED` timeline entry names every part that failed.
    */
   beneficiaryEvidenceRefused: {
