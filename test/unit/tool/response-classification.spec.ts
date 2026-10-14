@@ -262,6 +262,13 @@ const CASES: readonly Case[] = [
     reason: ClassificationReason.TRANSPORT_BODY_TRUNCATED,
   },
   {
+    name: 'an endpoint whose scheme production refuses → SYSTEM_ERROR, named HTTPS_REQUIRED',
+    response: transport(TransportErrorKind.SCHEME_NOT_ALLOWED),
+    policy: DEFAULT_POLICY,
+    expected: ResponseClass.SYSTEM_ERROR,
+    reason: ClassificationReason.TRANSPORT_HTTPS_REQUIRED,
+  },
+  {
     name: 'an unrecognised transport failure → SYSTEM_ERROR (uncertainty never penalises)',
     response: transport(TransportErrorKind.UNKNOWN),
     policy: DEFAULT_POLICY,
