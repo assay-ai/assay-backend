@@ -635,3 +635,75 @@ describe('SlashCaseService.buildCase — the inaction forecast is about ONE chai
     expect(inaction.stakeBefore).toEqual({ amount: '0', asset: TEST_ASSET, decimals: 6 });
   });
 });
+
+describe('SlashCaseService.buildCase — the clocks of an EVM case', () => {
+  const EVM_ASSET = 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3';
+  const DOOR = new Date('2099-01-01T00:00:00Z');
+
+  it('has one deadline, the record’s executableAt, and no in-app or platform clock', async () => {
+    const { service, proposals, strikes, windows, bindings } = build();
+    proposals.seed(
+      buildProposal({
+        id: 'p1',
+        organizationId: ORG,
+        assetId: EVM_ASSET,
+        chainStatus: 'PENDING',
+        chainExecutableAt: DOOR,
+        platformDecisionDueAt: new Date('2098-01-01T00:00:00Z'),
+      }),
+    );
+    strikes.seed(buildStrike({ id: 'strike_1', organizationId: ORG }));
+    windows.seed(buildWindow({ id: 'window_1', organizationId: ORG }));
+    bindings.seed(buildBinding({ id: TEST_BINDING_ID, organizationId: ORG }));
+
+    const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
+
+    expect(clocks).toMatchObject({
+      disputeOnChain: true,
+      chainState: 'PENDING',
+      disputeBy: DOOR,
+      respondByAt: null,
+      platformDecisionDueAt: null,
+      runningClock: 'PROVIDER',
+    });
+  });
+
+  it('shows a disputed record as DISPUTED, with nothing left to dispute', async () => {
+    const { service, proposals, strikes, windows, bindings } = build();
+    proposals.seed(
+      buildProposal({
+        id: 'p1',
+        organizationId: ORG,
+        status: 'DISPUTED',
+        assetId: EVM_ASSET,
+        chainStatus: 'DISPUTED',
+        chainExecutableAt: DOOR,
+        chainDisputedAt: new Date('2026-08-11T00:00:00Z'),
+      }),
+    );
+    strikes.seed(buildStrike({ id: 'strike_1', organizationId: ORG }));
+    windows.seed(buildWindow({ id: 'window_1', organizationId: ORG }));
+    bindings.seed(buildBinding({ id: TEST_BINDING_ID, organizationId: ORG }));
+
+    const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
+
+    expect(clocks).toMatchObject({ chainState: 'DISPUTED', disputeBy: null, runningClock: 'NONE' });
+  });
+
+  it('keeps the in-app clocks on Solana', async () => {
+    const { service, proposals, strikes, windows, bindings } = build();
+    proposals.seed(buildProposal({ id: 'p1', organizationId: ORG }));
+    strikes.seed(buildStrike({ id: 'strike_1', organizationId: ORG }));
+    windows.seed(buildWindow({ id: 'window_1', organizationId: ORG }));
+    bindings.seed(buildBinding({ id: TEST_BINDING_ID, organizationId: ORG }));
+
+    const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
+
+    expect(clocks).toMatchObject({
+      disputeOnChain: false,
+      chainState: null,
+      disputeBy: null,
+      respondByAt: new Date('2026-08-12T09:14:00Z'),
+    });
+  });
+});

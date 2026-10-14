@@ -1,9 +1,14 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager, In, SelectQueryBuilder } from 'typeorm';
+import { Brackets, DataSource, EntityManager, In, SelectQueryBuilder } from 'typeorm';
+
+import { ON_CHAIN_DISPUTE_ASSET_PREFIX } from '@modules/slash/domain/on-chain-dispute';
 
 import { SlashProposalEntity } from '../entities/slash-proposal.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
+
+/** EVM assets, whose cases are disputed and ruled on chain only (`disputesOnChain`). */
+const ON_CHAIN_DISPUTE_LIKE = `${ON_CHAIN_DISPUTE_ASSET_PREFIX}%`;
 
 /**
  * One row of the adjudication queue, projected.
@@ -32,6 +37,7 @@ export interface QueuedProposalRow {
 export interface UndisputedProposalRow {
   readonly organizationId: string;
   readonly id: string;
+  /** The deadline that passed: `respond_by_at`, or `chain_executable_at` on EVM. */
   readonly respondByAt: Date;
 }
 
@@ -246,7 +252,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     organizationId: string,
     id: string,
     notifiedAt: Date,
-    respondByAt: Date,
+    respondByAt: Date | null,
   ): Promise<number> {
     const result = await this.createQueryBuilder('proposal')
       .update()
@@ -372,12 +378,14 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * invisibly, in the middle of a page.
    */
   queueQueryBuilder(): SelectQueryBuilder<SlashProposalEntity> {
+    // EVM cases are decided by the arbiter on chain, never from this queue.
     return this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .where('proposal.status IN (:...open)', {
         open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
       })
-      .andWhere('proposal.platform_decision_due_at IS NOT NULL');
+      .andWhere('proposal.platform_decision_due_at IS NOT NULL')
+      .andWhere('proposal.asset_id NOT LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE });
   }
 
   /**
@@ -387,15 +395,35 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * because this one has no human caller at all — it runs on a scheduler tick.
    */
   async findUndisputedPast(now: Date, limit: number): Promise<UndisputedProposalRow[]> {
+    // The deadline that passed: the in-app `respond_by_at` (Solana), or on EVM
+    // the record's own door, `chain_executable_at`, with the record still
+    // `PENDING` (not disputed on chain). The on-chain door is the only EVM
+    // clock; no delivery starts it.
+    const deadline =
+      `CASE WHEN proposal.asset_id LIKE :onChain ` +
+      `THEN proposal.chain_executable_at ELSE proposal.respond_by_at END`;
     return this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.organization_id', 'organizationId')
       .addSelect('proposal.id', 'id')
-      .addSelect('proposal.respond_by_at', 'respondByAt')
+      .addSelect(deadline, 'respondByAt')
       .where('proposal.status = :proposed', { proposed: 'PROPOSED' })
-      .andWhere('proposal.respond_by_at IS NOT NULL')
-      .andWhere('proposal.respond_by_at <= :now', { now })
-      .orderBy('proposal.respond_by_at', 'ASC')
+      .andWhere(
+        new Brackets((where) =>
+          where
+            .where(
+              'proposal.asset_id NOT LIKE :onChain AND proposal.respond_by_at IS NOT NULL ' +
+                'AND proposal.respond_by_at <= :now',
+            )
+            .orWhere(
+              "proposal.asset_id LIKE :onChain AND proposal.chain_status = 'PENDING' " +
+                'AND proposal.chain_executable_at IS NOT NULL ' +
+                'AND proposal.chain_executable_at <= :now',
+            ),
+        ),
+      )
+      .setParameters({ now, onChain: ON_CHAIN_DISPUTE_LIKE })
+      .orderBy(deadline, 'ASC')
       .limit(limit)
       .getRawMany<UndisputedProposalRow>();
   }
@@ -407,6 +435,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * fault, and it exists so that fact is measured rather than absorbed.
    */
   async findOverduePast(now: Date, limit: number): Promise<OverdueProposalRow[]> {
+    // Never on EVM: a missed platform deadline must not acquit a record that
+    // still stands on chain (business review 4). The arbiter rules there, or
+    // the chain's 30-day dispute expiry applies.
     return this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.organization_id', 'organizationId')
@@ -416,6 +447,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .where('proposal.status IN (:...open)', { open: ['DISPUTED', 'UNDER_REVIEW'] })
       .andWhere('proposal.platform_decision_due_at IS NOT NULL')
       .andWhere('proposal.platform_decision_due_at <= :now', { now })
+      .andWhere('proposal.asset_id NOT LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
       .orderBy('proposal.platform_decision_due_at', 'ASC')
       .limit(limit)
       .getRawMany<OverdueProposalRow>();
@@ -472,10 +504,10 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    *
    * Two predicates carry the logic:
    *
-   * - **`respond_by_at IS NOT NULL`** — the provider has actually been told.
+   * - **`notified_at IS NOT NULL`** — the provider has actually been told.
    *   Proposing before delivery would reserve their stake for a case they
-   *   cannot answer, and the provider's clock starts on delivery precisely so a
-   *   dead webhook does not cost them their window.
+   *   cannot answer. (Not `respond_by_at`: an EVM case has none, its only
+   *   deadline being the record's own `executableAt`.)
    * - **A `PROPOSING` row older than `staleClaimBefore` is included beside the
    *   `NONE` rows.** That is crash recovery (design decision D4, crash point
    *   1), not a race: a process that claims a row `PROPOSING` and then dies
@@ -501,7 +533,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .select('proposal.organization_id', 'organizationId')
       .addSelect('proposal.id', 'id')
       .where('proposal.status IN (:...live)', { live: [...CHAIN_PROPOSABLE_STATUSES] })
-      .andWhere('proposal.respond_by_at IS NOT NULL')
+      .andWhere('proposal.notified_at IS NOT NULL')
       .andWhere(
         `(proposal.chain_status = 'NONE'
           OR (proposal.chain_status = 'PROPOSING' AND proposal.chain_claimed_at <= :staleClaimBefore))`,
@@ -622,6 +654,8 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .where('proposal.provider_id IN (:...providerIds)', {
         providerIds: [...new Set(providerIds)],
       })
+      // An arbiter's on-chain uphold makes the case UPHELD (`CHAIN_ARBITER`)
+      // and an on-chain execution EXECUTED, so both count here.
       .andWhere('proposal.status IN (:...upheld)', {
         upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'],
       })

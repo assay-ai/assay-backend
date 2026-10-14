@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { QueryRunner } from 'typeorm';
+import { IsNull, QueryRunner } from 'typeorm';
 
 import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
@@ -27,6 +27,7 @@ import {
   reasonCodesAreValid,
   ResolutionKind,
 } from '../domain/arbitration';
+import { disputesOnChain } from '../domain/on-chain-dispute';
 import {
   canTransition,
   requiresSecondSignature,
@@ -36,6 +37,16 @@ import {
 import { SlashErrors } from '../errors/slash.errors';
 import { SlashExecutionService } from './slash-execution.service';
 import { SlashProposalService } from './slash-proposal.service';
+
+/**
+ * EVM cases have one decision path, the arbiter's on-chain ruling (operator
+ * review F3): no claim, off-chain decision, second signature or extension.
+ */
+function refuseOffChainDecision(proposal: SlashProposalEntity, action: string): void {
+  if (disputesOnChain(proposal.assetId)) {
+    throw SlashErrors.arbiterRulesOnChain({ action });
+  }
+}
 
 export interface DecideInput {
   readonly outcome: ArbitrationOutcome;
@@ -129,16 +140,25 @@ export class ArbitrationService {
       openedBy: string;
     },
   ): Promise<{ proposal: SlashProposalEntity; dispute: DisputeEntity }> {
+    const proposal = await this.lifecycle.require(organizationId, proposalId);
+    // EVM: the dispute is the provider's own `disputeSlash`, and only that
+    // freezes the record. An in-app objection would run clocks the chain does
+    // not know about (review S-1, business 3-5).
+    if (disputesOnChain(proposal.assetId)) {
+      throw SlashErrors.disputeOnChainOnly({
+        executableAt: proposal.chainExecutableAt?.toISOString() ?? null,
+      });
+    }
     return this.openDispute(organizationId, proposalId, input, null);
   }
 
   /**
    * The provider disputed the case's on-chain record (`disputeSlash`, assay-evm
-   * D-19) while the case was still `PROPOSED`: the same objection as
-   * {@link fileDispute}, so the case moves into review and our decision clock
-   * starts. The chain already enforced its own window (`executableAt`), so
-   * the off-chain `respondByAt` is not re-checked — refusing here would leave a
-   * record frozen on chain behind a case nobody reviews. Returns `null` when
+   * D-19) while the case was still `PROPOSED`: the case becomes `DISPUTED`
+   * and waits for the arbiter's on-chain ruling. No platform deadline is set
+   * and none runs: the arbiter is the only judge, and an unruled dispute
+   * expires on chain after 30 days. The chain already enforced its own window
+   * (`executableAt`), so nothing off-chain is re-checked. Returns `null` when
    * the case is no longer `PROPOSED` or already has an objection.
    */
   async fileDisputeFromChain(
@@ -170,6 +190,48 @@ export class ArbitrationService {
     }
   }
 
+  /**
+   * The arbiter upheld the case's disputed record on chain (`upholdSlash`):
+   * that ruling is the decision (EVM has no off-chain one). The case becomes
+   * `UPHELD` (`CHAIN_ARBITER`) so the executor sends it at the record's
+   * `executableAt`, and its dispute closes as an upheld decision closes it.
+   * A case no longer open is left alone. Returns whether the case moved.
+   */
+  async recordChainUphold(
+    organizationId: string,
+    proposalId: string,
+    chain: { readonly arbiter: string; readonly transactionHash: string | null },
+  ): Promise<boolean> {
+    const proposal = await this.lifecycle.require(organizationId, proposalId);
+    if (!disputesOnChain(proposal.assetId)) return false;
+    const now = new Date();
+    const affected = await this.proposals.transitionIfIn(
+      organizationId,
+      proposalId,
+      CLAIMABLE_STATUSES,
+      {
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.CHAIN_ARBITER,
+        resolvedAt: now,
+        countsAsFalsePositive: false,
+      },
+    );
+    if (affected === 0) return false;
+    if (proposal.disputeId) {
+      await this.disputes.update(
+        { organizationId, id: proposal.disputeId, resolvedAt: IsNull() },
+        {
+          state: ARBITRATION_STATE_MAP[ArbitrationOutcome.UPHELD],
+          outcome: ArbitrationOutcome.UPHELD,
+          resolutionKind: ResolutionKind.CHAIN_ARBITER,
+          resolvedAt: now,
+          resolvedBy: `chain:upholdSlash:${chain.arbiter.toLowerCase()}`,
+        },
+      );
+    }
+    return true;
+  }
+
   private async openDispute(
     organizationId: string,
     proposalId: string,
@@ -199,7 +261,11 @@ export class ArbitrationService {
       });
     }
 
-    const platformDueAt = new Date(now.getTime() + this.config.platformDecisionWindowMs);
+    // Our decision clock runs only for an in-app objection; an on-chain
+    // dispute waits for the arbiter.
+    const platformDueAt = chain
+      ? null
+      : new Date(now.getTime() + this.config.platformDecisionWindowMs);
 
     const dispute = new DisputeEntity();
     dispute.organizationId = organizationId;
@@ -251,12 +317,12 @@ export class ArbitrationService {
       actorType: 'provider',
       actorId: input.openedBy,
       summary: chain
-        ? 'Objection filed on chain (disputeSlash); the case is in review'
+        ? 'Disputed on chain (disputeSlash); the arbiter rules on chain'
         : `Objection filed: ${input.claimType}`,
       detail: {
         disputeId: savedDispute.id,
         claimType: input.claimType,
-        platformDueAt: platformDueAt.toISOString(),
+        platformDueAt: platformDueAt?.toISOString() ?? null,
         ...(chain ? { onChain: true, requestId: chain.requestId } : {}),
       },
     });
@@ -295,6 +361,7 @@ export class ArbitrationService {
     proposalId: string,
   ): Promise<SlashProposalEntity> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
+    refuseOffChainDecision(proposal, 'claim');
     const from = proposal.status as SlashProposalStatus;
     const refusal = () =>
       SlashErrors.actionNotAllowedInStatus({
@@ -380,6 +447,7 @@ export class ArbitrationService {
     requestId?: string | null,
   ): Promise<SlashProposalEntity> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
+    refuseOffChainDecision(proposal, 'decide');
 
     const from = proposal.status as SlashProposalStatus;
     if (from !== SlashProposalStatus.DISPUTED && from !== SlashProposalStatus.UNDER_REVIEW) {
@@ -565,6 +633,7 @@ export class ArbitrationService {
     requestId?: string | null,
   ): Promise<SlashProposalEntity> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
+    refuseOffChainDecision(proposal, 'second-sign');
 
     if (proposal.status !== SlashProposalStatus.AWAITING_SECOND) {
       throw SlashErrors.secondSignatureNotPending({ status: proposal.status });
@@ -957,6 +1026,7 @@ export class ArbitrationService {
     requestId?: string | null,
   ): Promise<SlashProposalEntity> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
+    refuseOffChainDecision(proposal, 'extend the deadline of');
 
     if (proposal.status !== SlashProposalStatus.PROPOSED || !proposal.respondByAt) {
       throw this.extensionNotPossible(proposal);

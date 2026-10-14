@@ -32,7 +32,13 @@ import {
   OUTCOME_CONSEQUENCE,
   ResolutionKind,
 } from '../domain/arbitration';
+import { DISPUTE_TIMEOUT_MS } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
+import {
+  disputesOnChain,
+  OnChainDisputeState,
+  onChainDisputeState,
+} from '../domain/on-chain-dispute';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import {
   ChangeOverlayDto,
@@ -468,7 +474,32 @@ function computeClocks(proposal: SlashProposalEntity, now: Date): SlashProposalC
   let runningClock: 'PROVIDER' | 'PLATFORM' | 'NONE' = 'NONE';
   let deadline: Date | null = null;
 
-  if (
+  // EVM: the record's executableAt is the provider's only deadline, and no
+  // platform clock runs (the arbiter rules on chain).
+  const onChain = disputesOnChain(proposal.assetId);
+  const chainState = onChainDisputeState(
+    {
+      assetId: proposal.assetId,
+      chainStatus: proposal.chainStatus ?? ChainProposalStatus.NONE,
+      chainDisputedAt: proposal.chainDisputedAt ?? null,
+      chainDisputeWonAt: proposal.chainDisputeWonAt ?? null,
+      chainDisputedParts: proposal.chainDisputedParts ?? 0,
+    },
+    DISPUTE_TIMEOUT_MS,
+  );
+  const disputeBy =
+    onChain &&
+    proposal.status === SlashProposalStatus.PROPOSED &&
+    chainState === OnChainDisputeState.PENDING
+      ? (proposal.chainExecutableAt ?? null)
+      : null;
+
+  if (onChain) {
+    if (disputeBy && disputeBy.getTime() > now.getTime()) {
+      runningClock = 'PROVIDER';
+      deadline = disputeBy;
+    }
+  } else if (
     proposal.status === SlashProposalStatus.PROPOSED &&
     proposal.respondByAt &&
     proposal.respondByAt.getTime() > now.getTime()
@@ -490,8 +521,8 @@ function computeClocks(proposal: SlashProposalEntity, now: Date): SlashProposalC
     proposedAt: proposal.proposedAt,
     notifiedAt: proposal.notifiedAt,
     acknowledgedAt: proposal.acknowledgedAt,
-    respondByAt: proposal.respondByAt,
-    platformDecisionDueAt: proposal.platformDecisionDueAt,
+    respondByAt: onChain ? null : proposal.respondByAt,
+    platformDecisionDueAt: onChain ? null : proposal.platformDecisionDueAt,
     earliestExecutionAt: proposal.earliestExecutionAt,
     secondsRemaining,
     runningClock,
@@ -501,6 +532,9 @@ function computeClocks(proposal: SlashProposalEntity, now: Date): SlashProposalC
     chainExecutableAt: proposal.chainExecutableAt ?? null,
     chainDisputedAt: proposal.chainDisputedAt ?? null,
     chainDisputedParts: proposal.chainDisputedParts ?? 0,
+    disputeOnChain: onChain,
+    chainState,
+    disputeBy,
   };
 }
 
