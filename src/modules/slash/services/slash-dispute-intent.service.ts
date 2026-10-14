@@ -12,7 +12,7 @@ import {
   namespaceOf,
   parseAccountId,
 } from '@modules/chains/ports/caip.types';
-import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { OperatorApprover, OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 import { ProviderErrors } from '@modules/provider/errors/provider.errors';
 
@@ -38,6 +38,8 @@ export interface ArbiterIntentContext {
   readonly note: string;
   readonly ticketRef?: string | null;
   readonly requestId: string | null;
+  /** The second operator, on a two-person row (`A-11`), once they approved it. */
+  readonly approver?: OperatorApprover | null;
 }
 
 /**
@@ -226,6 +228,7 @@ export class SlashDisputeIntentService {
       {
         code,
         actor: context.operator,
+        approver: context.approver ?? null,
         // An intent is not a tenant's record; the batch can span providers.
         targetType,
         targetId: randomUUID(),

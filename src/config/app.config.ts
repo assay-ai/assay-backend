@@ -58,6 +58,26 @@ class AppEnvVariables {
   CDN_CACHE_ENABLED?: boolean;
 }
 
+/**
+ * Express `trust proxy`, from `API_TRUST_PROXY_HOPS`: how many proxies (load
+ * balancers) sit in front of the API. With `n`, Express trusts the last `n`
+ * entries of `X-Forwarded-For`, and `request.ip` is the client as the
+ * outermost of those proxies saw it; with `0` (the default, and
+ * right for local runs with no proxy) the header is ignored and `request.ip`
+ * is the socket's peer. The operator sign-in throttle keys on `request.ip`, so
+ * behind a balancer an unset value puts every caller on one counter, and a
+ * value higher than the real hop count lets a caller choose their own address.
+ * Set it to exactly the number of hops in the deployment.
+ */
+export function parseTrustProxyHops(raw: string | undefined): number {
+  if (raw === undefined || raw.trim() === '') return 0;
+  const hops = Number(raw);
+  if (!Number.isInteger(hops) || hops < 0) {
+    throw new Error(`API_TRUST_PROXY_HOPS must be a whole number of hops, got "${raw}"`);
+  }
+  return hops;
+}
+
 const appConfig = registerAs('app', () => {
   validateConfig(process.env, AppEnvVariables);
 
@@ -66,6 +86,7 @@ const appConfig = registerAs('app', () => {
     serviceType: process.env.SERVICE_TYPE,
     api: {
       port: parseInt(process.env.API_PORT, 10),
+      trustProxyHops: parseTrustProxyHops(process.env.API_TRUST_PROXY_HOPS),
       typeormCacheEnabled: process.env.TYPEORM_CACHE_ENABLED === 'true',
       typeormCacheTtlMultiplier: parseInt(process.env.TYPEORM_CACHE_TTL_MULTIPLIER, 10),
       httpCacheEnabled: process.env.HTTP_CACHE_ENABLED !== 'false',
