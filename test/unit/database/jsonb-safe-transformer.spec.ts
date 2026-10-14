@@ -1,6 +1,7 @@
 import { getMetadataArgsStorage } from 'typeorm';
 
 import { EvidenceBodyEntity } from '@database/postgres/entities/evidence-body.entity';
+import { EvidencePackEntity } from '@database/postgres/entities/evidence-pack.entity';
 import {
   JSONB_ESCAPE_MARK,
   jsonbSafeTransformer,
@@ -64,6 +65,11 @@ describe('jsonbSafeTransformer', () => {
   it.each([
     [VerificationRecordEntity, 'request'],
     [VerificationRecordEntity, 'response'],
+    [VerificationRecordEntity, 'stages'],
+    [VerificationRecordEntity, 'verifiers'],
+    [VerificationRecordEntity, 'tally'],
+    [VerificationRecordEntity, 'decidedBy'],
+    [EvidencePackEntity, 'core'],
     [EvidenceBodyEntity, 'request'],
     [EvidenceBodyEntity, 'response'],
   ])('is installed on %p.%s', (entity, property) => {
