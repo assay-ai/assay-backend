@@ -102,7 +102,6 @@ describe('pro-rata EVM slash, against a real database', () => {
         now: () => Number(chain.now) * 1000,
         batchSize: 20,
         multicall: new Map([[CHAIN, MULTICALL]]),
-        executeDeferLimitMs: 3 * 24 * 3_600_000,
         receiptRetryDelayMs: 0,
       },
     );

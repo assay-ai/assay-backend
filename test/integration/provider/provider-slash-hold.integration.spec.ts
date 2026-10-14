@@ -30,13 +30,11 @@ const NOW = new Date('2026-10-15T12:00:00Z');
 describe('provider slash hold, against a real database', () => {
   let dataSource: DataSource;
   let holds: ProviderSlashHoldRepository;
-  const params = { penaltyAmount: 1_000_000n, slashCapBps: 1_000, minimumStake: 50_000_000n };
+  const params = { penaltyAmount: 1_000_000n, minimumStake: 50_000_000n };
   let stake: {
     bonded: bigint;
     unbonding: bigint;
     pendingSlash: bigint;
-    slashedInWindow: bigint;
-    slashWindowStartedAt: bigint;
   };
 
   beforeAll(async () => {
@@ -57,8 +55,6 @@ describe('provider slash hold, against a real database', () => {
       bonded: 100_000_000n,
       unbonding: 0n,
       pendingSlash: 0n,
-      slashedInWindow: 0n,
-      slashWindowStartedAt: 0n,
     };
   });
   afterEach(() => jest.restoreAllMocks());
@@ -114,20 +110,30 @@ describe('provider slash hold, against a real database', () => {
     );
   }
 
-  it('1. holds on a full window with an upheld record waiting, from the real queries', async () => {
+  it('1. holds on an upheld record whose execute was refused SlashWindowNotDrained', async () => {
     const providerOrg = await seed();
-    await upheldAndDue(providerOrg, null);
-    stake.slashedInWindow = 10_000_000n;
-    stake.slashWindowStartedAt = BigInt(Math.floor(NOW.getTime() / 1000));
+    await upheldAndDue(providerOrg, 'SlashWindowNotDrained');
     await monitor().tick();
     expect(await holds.findHeld([providerOrg])).toEqual([
       expect.objectContaining({ chainId: CHAIN, reasons: ['SLASH_WINDOW_FULL'] }),
     ]);
   });
 
-  it('1. holds on a verifier-key window refusal of the waiting record', async () => {
+  it('1. holds on a part of the waiting case refused SlashWindowNotDrained', async () => {
     const providerOrg = await seed();
-    await upheldAndDue(providerOrg, 'VerifierDailyCapExceeded');
+    await upheldAndDue(providerOrg, null);
+    await dataSource.query(
+      `INSERT INTO slash_proposal_parts
+         (organization_id, proposal_id, chain_epoch, window_id, agent_account,
+          beneficiary_account, weight_amount, uncapped_share_amount, penalty_amount,
+          plan_penalty_amount, plan_capped_total, cap_binding, chain_request_id, chain_status,
+          chain_last_error, chain_proposed_at, chain_executable_at)
+       SELECT organization_id, id, chain_epoch, window_id, $2, $2, 1, 1, 1, 1, 1, 'NONE',
+              repeat('a', 64), 'PENDING', 'SlashWindowNotDrained', chain_proposed_at,
+              chain_executable_at
+         FROM slash_proposals WHERE provider_id = $1`,
+      [providerOrg, AGENT],
+    );
     await monitor().tick();
     expect(await holds.isHeld(providerOrg, CHAIN)).toBe(true);
   });
@@ -176,10 +182,9 @@ describe('provider slash hold, against a real database', () => {
     expect(intents.insert).not.toHaveBeenCalled();
   });
 
-  it('does not hold a healthy provider, nor one whose full window has nothing waiting', async () => {
+  it('does not hold a healthy provider, nor one whose waiting record was not refused', async () => {
     const providerOrg = await seed();
-    stake.slashedInWindow = 10_000_000n;
-    stake.slashWindowStartedAt = BigInt(Math.floor(NOW.getTime() / 1000));
+    await upheldAndDue(providerOrg, 'SlashNotYetExecutable');
     await monitor().tick();
     expect(await holds.isHeld(providerOrg, CHAIN)).toBe(false);
   });

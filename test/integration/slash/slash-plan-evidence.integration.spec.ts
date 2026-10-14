@@ -104,7 +104,6 @@ describe('a stored slash plan is checked against its evidence before signing', (
         now: () => Number(chain.now) * 1000,
         batchSize: 20,
         multicall: new Map([[CHAIN, MULTICALL]]),
-        executeDeferLimitMs: 3 * 24 * 3_600_000,
         receiptRetryDelayMs: 0,
       },
     );

@@ -42,11 +42,7 @@ import { EvmStakeIntentBuilder } from './evm-stake-intent-builder.service';
 import { EvmVerifierRegistryService } from './evm-verifier-registry.service';
 import { EvmVaultService } from './evm-vault.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
-import {
-  DEFAULT_EVM_EXECUTE_DEFER_LIMIT_MS,
-  DEFAULT_EVM_SLASH_BATCH_SIZE,
-  EvmSlashExecutor,
-} from './evm-slash-executor.service';
+import { DEFAULT_EVM_SLASH_BATCH_SIZE, EvmSlashExecutor } from './evm-slash-executor.service';
 import { ModuleRef } from '@nestjs/core';
 import { VerifierSigningService } from '@modules/verification/signing/services/verifier-signing.service';
 import {
@@ -359,7 +355,6 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         new EvmSlashExecutor(clients, deployments, relayer, moduleRef, VerifierSigningService, {
           now: () => Date.now(),
           batchSize: readBatchSize(config.get<string>(EVM_SLASH_BATCH_SIZE_ENV)),
-          executeDeferLimitMs: DEFAULT_EVM_EXECUTE_DEFER_LIMIT_MS,
           multicall: new Map(
             [...deployments]
               .filter(([, deployment]) => deployment.multicall3)

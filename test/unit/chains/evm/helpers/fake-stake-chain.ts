@@ -471,22 +471,21 @@ export class FakeStakeChain {
     if (this.now >= rec.executableAt + GRACE) throw new Revert('SlashExecutionWindowClosed');
     if (this.revoked) throw new Revert('VerifierRevoked');
     const stake = state.stakes.get(rec.provider)!;
-    // The two rolling windows, as `executeSlash` meters them.
+    // All or wait (assay-evm 9f036a3): `applied == reserved`, or revert while
+    // either rolling window cannot take all of it.
     const providerCarried = decay(stake.slashedInWindow, stake.slashWindowStartedAt, this.now);
-    const windowRemaining =
-      rec.capAllowance > providerCarried ? rec.capAllowance - providerCarried : 0n;
-    if (windowRemaining === 0n) throw new Revert('SlashCapExceeded');
     const keyCarried = decay(
       state.keyWindow.slashedInWindow,
       state.keyWindow.windowStartedAt,
       this.now,
     );
-    const keyRemaining =
-      this.params.verifierDailyCap > keyCarried ? this.params.verifierDailyCap - keyCarried : 0n;
-    if (keyRemaining === 0n) throw new Revert('VerifierDailyCapExceeded');
-    let applied = rec.reserved;
-    if (applied > windowRemaining) applied = windowRemaining;
-    if (applied > keyRemaining) applied = keyRemaining;
+    const applied = rec.reserved;
+    if (
+      providerCarried + applied > rec.capAllowance ||
+      keyCarried + applied > this.params.verifierDailyCap
+    ) {
+      throw new Revert('SlashWindowNotDrained');
+    }
     const agentAmount = (applied * BigInt(this.params.slashAgentBps)) / 10_000n;
     const platformAmount = (applied * BigInt(this.params.slashPlatformBps)) / 10_000n;
     if (agentAmount + platformAmount === 0n) throw new Revert('PenaltyTooSmallToSplit');

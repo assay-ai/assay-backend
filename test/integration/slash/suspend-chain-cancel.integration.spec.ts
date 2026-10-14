@@ -126,7 +126,6 @@ describe('suspending a case with a record standing on chain, against a real data
         now: () => Number(chain.now) * 1000,
         batchSize: 20,
         multicall: new Map([[CHAIN, MULTICALL]]),
-        executeDeferLimitMs: 3 * 24 * HOUR,
         receiptRetryDelayMs: 0,
       },
     );

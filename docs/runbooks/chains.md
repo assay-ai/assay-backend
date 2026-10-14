@@ -213,8 +213,8 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
 - **Provider slash hold** (`provider_slash_holds`, `EvmSlashHoldMonitor`, every minute and on each
   slash event): a provider's paid bindings are not routed or quoted on a chain, and no payment
   intent names it there, while any of these holds for its stake on that chain:
-  `SLASH_WINDOW_FULL` (its slash window, or the verifier key's, is full and an upheld record is
-  due), `STAKE_FULLY_RESERVED` (`pendingSlash ≥ atRisk − penaltyAmount`) or
+  `SLASH_WINDOW_FULL` (an upheld record is due and its last execute was refused
+  `SlashWindowNotDrained`: execution pays the whole reservation or waits), `STAKE_FULLY_RESERVED` (`pendingSlash ≥ atRisk − penaltyAmount`) or
   `BONDED_BELOW_MINIMUM`. Buyers are routed to another provider; with none left the call fails
   `TOOL_PROVIDER_SLASH_HOLD` (and an intent `PAYMENT_PROVIDER_SLASH_HOLD`). It lifts by itself after
   two consecutive clear checks. WARN in the log on a hold, INFO on a release; the provider sees

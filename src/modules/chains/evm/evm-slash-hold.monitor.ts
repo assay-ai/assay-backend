@@ -101,14 +101,13 @@ export class EvmSlashHoldMonitor {
     const deployment = this.deployments.get(chainId);
     if (!client || !deployment || providers.length === 0) return;
     const now = new Date(this.now());
-    const nowSeconds = BigInt(Math.floor(now.getTime() / 1000));
     const [params, waiting] = await Promise.all([
       client.readContract({
         address: deployment.config,
         abi: X402_CONFIG_ABI,
         functionName: 'params',
         args: [],
-      }) as Promise<{ penaltyAmount: bigint; slashCapBps: number | bigint; minimumStake: bigint }>,
+      }) as Promise<{ penaltyAmount: bigint; minimumStake: bigint }>,
       this.proposals.findWaitingExecution(chainId, now),
     ]);
 
@@ -119,29 +118,19 @@ export class EvmSlashHoldMonitor {
           abi: X402_STAKE_ABI,
           functionName: 'stakeOf',
           args: [addressOf(stakeAuthority)],
-        })) as {
-          bonded: bigint;
-          unbonding: bigint;
-          pendingSlash: bigint;
-          slashedInWindow: bigint;
-          slashWindowStartedAt: bigint;
-        };
+        })) as { bonded: bigint; unbonding: bigint; pendingSlash: bigint };
         const reading: SlashHoldStakeReading = {
           bonded: BigInt(stake.bonded),
           unbonding: BigInt(stake.unbonding),
           pendingSlash: BigInt(stake.pendingSlash),
-          slashedInWindow: BigInt(stake.slashedInWindow),
-          slashWindowStartedAt: BigInt(stake.slashWindowStartedAt),
           penaltyAmount: BigInt(params.penaltyAmount),
-          slashCapBps: Number(params.slashCapBps),
           minimumStake: BigInt(params.minimumStake),
         };
         const wait = waiting.get(providerId);
-        const reasons = slashHoldReasons(
-          reading,
-          { recordWaiting: wait !== undefined, windowRefused: wait?.windowRefused ?? false },
-          nowSeconds,
-        );
+        const reasons = slashHoldReasons(reading, {
+          recordWaiting: wait !== undefined,
+          windowRefused: wait?.windowRefused ?? false,
+        });
         await this.apply(providerId, chainId, reasons, now);
       } catch (error) {
         // Keep the last decision: a node outage neither holds nor releases.

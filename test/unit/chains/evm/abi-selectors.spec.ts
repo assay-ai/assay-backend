@@ -110,7 +110,6 @@ const CONFIG_PINS: readonly Pin[] = [
   // 'owner()'` and `cast sig 'pendingOwner()'`. Reads only.
   ['0x8da5cb5b', 'owner()', '(address)'],
   ['0xe30c3978', 'pendingOwner()', '(address)'],
-  ['0x5a6d11bb', 'slashProviderBps()', '(uint16)'],
   ['0x7ef30520', 'canSign(address)', '(bool)'],
   [
     '0x4d44b5b7',
@@ -411,7 +410,8 @@ describe('the vendored ABI matches the compiled contracts', () => {
  * (`grep '^error' src/Errors.sol` → 81 hits, every one zero-argument) on
  * 2026-10-13, after D-17/D-18, and again at assay-evm 99f98ed (88 hits: the
  * dispute upgrade's seven appended), and at 6865b24 (95 hits: a4f97ab's and
- * the audit fix round's seven appended). Each selector is `cast sig '<Name>()'`
+ * the audit fix round's seven appended), and at 9f036a3 (91: the simplify
+ * round removed four). Each selector is `cast sig '<Name>()'`
  * on the pinned Foundry build (1.2.1-nightly), the last seven viem's keccak
  * cross-checked against the compiled ABIs. `target-branch-pin.spec.ts` checks
  * the list against the branch the backend targets (audit T-3).
@@ -495,7 +495,6 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0xd56697d0', 'StatusDoesNotSlash'],
   ['0x38fbeb34', 'NothingToSlash'],
   ['0xc7300280', 'SlashCapExceeded'],
-  ['0x7c2fa623', 'VerifierDailyCapExceeded'],
   ['0x09c1eae5', 'PenaltyTooSmallToSplit'],
   ['0x4789b627', 'PenaltyExceedsMaximum'],
   ['0x5d2cbb98', 'SlashNotPending'],
@@ -508,7 +507,6 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0x435a3cfe', 'DisputeWindowClosed'],
   ['0x0c7b2f65', 'SlashNotDisputed'],
   ['0xccb665a6', 'NotArbiter'],
-  ['0x92428dbd', 'ArbiterIsVerifier'],
   ['0xae170cc2', 'AddressBlocked'],
   ['0x9589cd8b', 'InvalidSlashDelay'],
   // a4f97ab and the audit fix round (audit E-9). Computed with viem's keccak
@@ -518,8 +516,6 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0x6eccea65', 'SlashAlreadyDisputed'],
   ['0x6a3f467f', 'SlashWindowNotDrained'],
   ['0x64ce2c77', 'ArbiterCannotUnblock'],
-  ['0x9df5d0bf', 'VerifierIsAdminOrArbiter'],
-  ['0x23b2521b', 'RedeemerIsArbiter'],
   ['0xf0318500', 'InvalidArbiter'],
   // OpenZeppelin `Ownable2StepUpgradeable`, raised by X402Config's owner doors
   // (D-17). Parameterised: `cast sig 'OwnableUnauthorizedAccount(address)'`
@@ -530,9 +526,9 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
 
 describe('the Errors.sol selector table', () => {
   it('has one entry per declared error and no collisions', () => {
-    // 95 from Errors.sol plus OpenZeppelin's two Ownable errors.
-    expect(EVM_ERROR_BY_SELECTOR.size).toBe(97);
-    expect(ERROR_PINS).toHaveLength(97);
+    // 91 from Errors.sol plus OpenZeppelin's two Ownable errors.
+    expect(EVM_ERROR_BY_SELECTOR.size).toBe(93);
+    expect(ERROR_PINS).toHaveLength(93);
   });
 
   it.each(ERROR_PINS)('%s decodes to %s', (selector, name) => {
