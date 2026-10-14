@@ -320,6 +320,15 @@ export class CatalogueProviderToolDto {
 
   @ApiProperty({ type: CatalogueMoneyDto })
   price: CatalogueMoneyDto;
+
+  @ApiPropertyOptional({
+    type: Number,
+    nullable: true,
+    description:
+      'Free calls one agent gets from this binding per UTC day — the binding’s own quota, or ' +
+      'the platform default when it set none. null for a PAID binding.',
+  })
+  freeCallsPerAgentPerDay: number | null;
 }
 
 export class CatalogueProviderDetailDto extends CatalogueProviderDto {

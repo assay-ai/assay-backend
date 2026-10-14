@@ -158,6 +158,22 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // instead of calling a route that 404s. No row is read, nothing is keyed to
   // a caller, and the readers are the same session-less pages.
   ['bootstrap/api/public-features.controller.ts', 1],
+  // The public Explorer's catalogue. The same derivation as the guarded
+  // `catalogue.controller.ts`, whose own comment records that the answer is
+  // identical for every caller and holds nothing about the caller — but
+  // copied through its OWN allowlisted DTOs (`public-catalogue.dto.ts`, key
+  // sets pinned in the catalogue spec), so a field added to the signed-in
+  // catalogue does not reach anonymous readers. The detail route answers only
+  // for providers the public list shows; every other id is the same 404.
+  // Cached in process and rate limited per address.
+  ['modules/catalogue/controllers/public-catalogue.controller.ts', 3],
+  // The Explorer's "not charged" feed. Platform-wide paid calls that ended
+  // without a charge, and 30-day totals. Against the three bars: the payload
+  // is tool, provider name, listed price, a reason and a minute — the
+  // repository selects no intent, call, buyer, agent, hold or transaction
+  // identifier, and the spec pins the exact key set; there is no caller to
+  // scope it to; and the claim it backs is made to visitors without accounts.
+  ['modules/catalogue/controllers/public-not-charged.controller.ts', 1],
 ]);
 
 /**

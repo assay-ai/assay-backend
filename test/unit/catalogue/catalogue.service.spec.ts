@@ -1,4 +1,5 @@
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
+import { DEFAULT_FREE_QUOTA_CONFIG } from '@modules/free-tier/config/free-quota.config';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import {
@@ -17,6 +18,7 @@ import {
 } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { CatalogueService } from '@modules/catalogue/services/catalogue.service';
+import { PublicCatalogueService } from '@modules/catalogue/services/public-catalogue.service';
 import { X402_SETTLEMENT_CHAINS } from '@modules/mcp/constants/mcp.constants';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import {
@@ -244,6 +246,7 @@ function build(wiring: Wiring = {}) {
       // chain set.
       [CHAIN, OTHER_CHAIN],
       wiring.blocklist ?? noBlocks(),
+      DEFAULT_FREE_QUOTA_CONFIG,
     ),
   };
 }
@@ -705,8 +708,33 @@ describe('GET /catalogue/providers/:providerId', () => {
         name: 'get_weather',
         pricingMode: 'PAID',
         price: { amount: '250000', asset: ASSET, decimals: 6 },
+        freeCallsPerAgentPerDay: null,
       },
     ]);
+  });
+
+  /**
+   * The free tier a binding grants, so a visitor can see it before signing up:
+   * the binding's own quota when it set one, the platform default otherwise,
+   * and nothing for a PAID binding.
+   */
+  it('states the free calls per agent per day, falling back to the platform default', async () => {
+    const { service } = build({
+      bindings: [
+        binding({ toolId: WEATHER.id, pricingMode: 'FREEMIUM', freeQuotaPerAgent: 7 }),
+        binding({ toolId: RATE.id, pricingMode: 'FREE', freeQuotaPerAgent: null }),
+      ],
+      tools: [WEATHER, RATE],
+    });
+
+    const detail = await service.getProvider('provider-a');
+
+    expect(
+      Object.fromEntries(detail.tools.map((tool) => [tool.toolId, tool.freeCallsPerAgentPerDay])),
+    ).toEqual({
+      [WEATHER.id]: 7,
+      [RATE.id]: DEFAULT_FREE_QUOTA_CONFIG.defaultPerAgentDailyLimit,
+    });
   });
 
   /**
@@ -768,5 +796,121 @@ describe('the catalogue, with a provider blocked', () => {
     const detail = await service.getProvider(BLOCKED);
 
     expect(detail.tools).toEqual([]);
+  });
+});
+
+/**
+ * The public Explorer's catalogue — the same derivation, copied through an
+ * allowlist, and answering only for providers the public list shows.
+ */
+describe('PublicCatalogueService', () => {
+  const OPEN = '0a6f3c1e-7d8b-4e2a-9c5f-1b3d5e7f9a11';
+  const BLOCKED = '5c0b3b4e-0d8a-4f6e-9a51-6f1d2b7c9e10';
+  const SUSPENDED = '7e2d4f6a-1b3c-4d5e-8f90-a1b2c3d4e5f6';
+  const PAUSED_ONLY = '9a8b7c6d-5e4f-4a3b-8c2d-1e0f9a8b7c6d';
+
+  const publicService = () =>
+    new PublicCatalogueService(
+      build({
+        bindings: [
+          binding({ organizationId: OPEN, pricingMode: 'FREEMIUM', freeQuotaPerAgent: 3 }),
+          binding({ organizationId: BLOCKED }),
+          binding({ organizationId: SUSPENDED }),
+          // PAUSED_ONLY has no ACTIVE binding: `findActiveBindings` never returns one.
+        ],
+        providers: [
+          provider({ organizationId: OPEN }),
+          provider({ organizationId: BLOCKED, legalName: 'Blocked BV' }),
+          provider({ organizationId: SUSPENDED, legalName: 'Suspended BV', status: 'SUSPENDED' }),
+          provider({ organizationId: PAUSED_ONLY, legalName: 'Paused BV' }),
+        ],
+        stakesByChain: { [stakeKey(OPEN, CHAIN)]: MoneyUtil.of('90000000', ASSET, 6) },
+        quality: new Map([[OPEN, { providerId: OPEN, verifiedCalls: 20, failedCalls: 1 }]]),
+        blocklist: blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: BLOCKED }),
+        quotes: {
+          [RATE.id]: quote({ price: null, unroutableReason: 'internal: rpc 10.0.0.7 down' }),
+        },
+      }).service,
+    );
+
+  it('lists only ACTIVE, unblocked providers with an ACTIVE binding', async () => {
+    const { providers } = await publicService().listProviders();
+
+    expect(providers.map((row) => row.providerId)).toEqual([OPEN]);
+  });
+
+  it.each([
+    ['blocked', BLOCKED],
+    ['suspended', SUSPENDED],
+    ['with every binding paused', PAUSED_ONLY],
+    ['unknown', '11111111-2222-4333-8444-555555555555'],
+  ])('404s on a %s provider, exactly as on an unknown one', async (_label, providerId) => {
+    await expectErrorCodeAsync(
+      () => publicService().getProvider(providerId),
+      ProviderErrorCode.PROVIDER_NOT_FOUND,
+    );
+  });
+
+  /** The allowlist, pinned: a field added to the internal DTO is a red test here. */
+  it('publishes exactly the allowlisted provider keys', async () => {
+    const service = publicService();
+    const [card] = (await service.listProviders()).providers;
+    const detail = await service.getProvider(OPEN);
+
+    const PROVIDER_KEYS = [
+      'fromPrice',
+      'name',
+      'providerId',
+      'quality',
+      'stake',
+      'tier',
+      'toolIds',
+      'verified',
+    ];
+    expect(Object.keys(card).sort()).toEqual(PROVIDER_KEYS);
+    expect(Object.keys(detail).sort()).toEqual([...PROVIDER_KEYS, 'tools'].sort());
+    expect(Object.keys(card.fromPrice!).sort()).toEqual(['amount', 'asset', 'decimals']);
+    expect(Object.keys(card.stake[0]).sort()).toEqual(['amount', 'asset', 'chainId', 'decimals']);
+    expect(Object.keys(card.quality!).sort()).toEqual(['failedCalls', 'measuredCalls', 'rate']);
+    expect(Object.keys(detail.tools[0]).sort()).toEqual([
+      'freeCallsPerAgentPerDay',
+      'name',
+      'price',
+      'pricingMode',
+      'toolId',
+    ]);
+    expect(detail.tools[0].freeCallsPerAgentPerDay).toBe(3);
+  });
+
+  it('publishes exactly the allowlisted tool keys, and never the router’s reason text', async () => {
+    const { tools } = await publicService().listTools();
+
+    for (const tool of tools) {
+      expect(Object.keys(tool).sort()).toEqual([
+        'description',
+        'fromPrice',
+        'id',
+        'name',
+        'price',
+        'pricingMode',
+        'providerCount',
+        'routable',
+        'settlementChains',
+        'tier',
+      ]);
+    }
+    expect(JSON.stringify(tools)).not.toContain('10.0.0.7');
+  });
+
+  it('serves a repeat request from its cache', async () => {
+    const service = publicService();
+    const inner = (service as unknown as { catalogue: CatalogueService }).catalogue;
+    const spy = jest.spyOn(inner, 'listProviders');
+
+    await service.listProviders();
+    await service.listProviders();
+    await service.getProvider(OPEN);
+
+    expect(spy).toHaveBeenCalledTimes(1);
   });
 });

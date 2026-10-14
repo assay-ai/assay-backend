@@ -24,6 +24,11 @@ export class PublicFeaturesResponseDto {
  *
  * Unguarded on purpose: two booleans about the deployment, no tenant, and the
  * pages that read it have no session.
+ *
+ * The Explorer's routes — `/public/catalogue/*` and `/public/not-charged` — are
+ * deliberately **not** listed: they need no configuration and are registered
+ * on every deployment, so there is nothing for a page to ask. A flag that is
+ * always `true` would only invite a page to branch on it.
  */
 @ApiTags('Public')
 @Controller('public/features')
