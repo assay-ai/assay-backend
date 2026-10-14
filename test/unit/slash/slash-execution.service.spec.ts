@@ -2916,6 +2916,47 @@ describe('sweepAdminCancels', () => {
     expect(proposals.rows.get('p1')!.chainStatus).toBe('CANCELLED');
   });
 
+  it('S-2: re-proposes a downward recalculation once its cancel has landed', async () => {
+    // The second half of `reproposeAtRevisedPenalty` used to have no caller:
+    // the decided, lower penalty was never put back on chain.
+    const { service, proposals, executor } = build();
+    proposals.seed(
+      standing({
+        id: 'p1',
+        status: 'UPHELD',
+        chainStatus: 'CANCEL_REQUESTED',
+        penaltyAmount: '400000',
+      }),
+    );
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'CANCELLED', executedAt: null, cancelledAt: hoursFromNow(-1) });
+    executor.appliedMinor = '400000';
+
+    await expect(service.sweepAdminCancels(NOW)).resolves.toMatchObject({ mirrored: 1 });
+
+    const saved = proposals.rows.get('p1')!;
+    expect(saved.chainEpoch).toBe(1);
+    expect(saved.chainRequestId).toBe(deriveChainRequestId({ id: 'p1', chainEpoch: 1 }));
+    expect(executor.proposed).toEqual([
+      expect.objectContaining({
+        requestId: deriveChainRequestId({ id: 'p1', chainEpoch: 1 }),
+        penaltyMinor: '400000',
+      }),
+    ]);
+  });
+
+  it('S-2: does not re-propose an overturned case whose cancel landed', async () => {
+    const { service, proposals, executor } = build();
+    proposals.seed(standing({ id: 'p1', chainStatus: 'CANCEL_REQUESTED' }));
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'CANCELLED', executedAt: null, cancelledAt: hoursFromNow(-1) });
+
+    await service.sweepAdminCancels(NOW);
+
+    expect(proposals.rows.get('p1')!.chainEpoch).toBe(0);
+    expect(executor.proposed).toHaveLength(0);
+  });
+
   it('leaves a record nobody has signed for alone while its grace is running', async () => {
     const { service, proposals, executor } = build();
     proposals.seed(standing({ id: 'p1', chainStatus: 'CANCEL_REQUESTED' }));

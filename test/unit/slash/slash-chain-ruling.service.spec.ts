@@ -226,6 +226,33 @@ describe('SlashChainRulingService', () => {
       expect(proposal.chainDisputeWonAt).toEqual(new Date('2026-10-16T00:00:00Z'));
     });
 
+    it('S-2: the cancel of a downward recalculation leaves the case open, and is no dispute won', async () => {
+      const { service, parts, proposal, closed, events } = build('UPHELD', 'CANCEL_REQUESTED');
+      await service.recordDisputed(disputed(ID_A));
+      await service.recordCancelled(cancelled(ID_A));
+      await service.recordCancelled(cancelled(ID_B));
+
+      expect(parts.get(ID_A)).toMatchObject({ chainStatus: 'CANCELLED' });
+      expect(parts.get(ID_B)).toMatchObject({ chainStatus: 'CANCELLED' });
+      expect(closed).toEqual([]);
+      expect(proposal).toMatchObject({
+        status: 'UPHELD',
+        chainStatus: 'CANCEL_REQUESTED',
+        chainDisputedParts: 0,
+      });
+      expect(proposal.chainDisputeWonAt ?? null).toBeNull();
+      expect(events.filter((event) => event.kind === 'CHAIN_CANCELLED')).toHaveLength(2);
+    });
+
+    it('S-2: a dispute that ran out unruled is still the provider’s win', async () => {
+      const { service, proposal, closed } = build('UPHELD', 'CANCEL_REQUESTED');
+      await service.recordDisputed(disputed(ID_A));
+      await service.recordCancelled(cancelled(ID_A, 'DISPUTE_UNRESOLVED' as never));
+      await service.recordCancelled(cancelled(ID_B, 'DISPUTE_UNRESOLVED' as never));
+      expect(proposal.chainDisputeWonAt).toEqual(new Date('2026-10-16T00:00:00Z'));
+      expect(closed).toHaveLength(1);
+    });
+
     it('B7: a cancel of a part nobody disputed is not a dispute won', async () => {
       const { service, proposal } = build('UPHELD');
       await service.recordCancelled(cancelled(ID_A));
