@@ -402,6 +402,48 @@ describe('rail B over MCP', () => {
      * not spent — but the MCP error said `retryable: false`, so an agent gave
      * up the task every time its payer edited a cap.
      */
+    /**
+     * Final review N-6: two parallel calls get seqs 5 and 6; 6 is admitted
+     * first, and 5 used to come back "already used", final. It was never
+     * used: it is a distinct, retryable code that says to request a new seq.
+     */
+    it('marks a seq passed by a parallel call PAYMENT_VOUCHER_SEQ_STALE, retryable', async () => {
+      const { client, escrow } = await connect();
+      escrow.withdrawRequested = 0n;
+      const offer = async () =>
+        (
+          (await client.callTool({
+            name: TOOL_NAME,
+            arguments: ARGS,
+            _meta: { [X402_RAIL]: 'B' },
+          })) as CallToolResult
+        )._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
+      const pay = async (requirement: VoucherRequirement) =>
+        (await client.callTool({
+          name: TOOL_NAME,
+          arguments: ARGS,
+          _meta: {
+            [X402_VOUCHER]: {
+              voucher: voucherFor(requirement),
+              signature: fakeVoucherSignature(requirement.payer),
+              providerId: requirement.providerId,
+            },
+          },
+        })) as CallToolResult;
+
+      const first = await offer();
+      const second = await offer();
+      expect((await pay(second)).isError).toBeFalsy();
+
+      const stale = await pay(first);
+      expect(stale.isError).toBe(true);
+      expect(stale._meta?.[X402_ERROR]).toMatchObject({
+        code: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
+        retryable: true,
+      });
+      expect((stale.content as Array<{ text: string }>)[0].text).toContain('request a new seq');
+    });
+
     it('marks PAYMENT_VOUCHER_ADMISSION_PAUSED retryable, with a retryAfter hint', async () => {
       const { client, intents, escrow } = await connect();
       escrow.withdrawRequested = 0n;

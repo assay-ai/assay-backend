@@ -562,16 +562,6 @@ export class VoucherService {
     // is not served on, even though this backend issued its seq.
     if (input.escrow) {
       assertWithinSeqGap(BigInt(voucher.seq), input.escrow.seqHigh, input.agentAccount);
-      // The chain admits a voucher on `seq > seqHigh` and nothing else. One at
-      // or below it can never be redeemed: served, it would be absorbed and the
-      // platform would pay for the call (review 2026-10-15 P-2). Refused, the
-      // agent asks for a fresh seq.
-      if (BigInt(voucher.seq) <= input.escrow.seqHigh) {
-        throw PaymentErrors.voucherSeqAlreadyUsed({
-          account: input.agentAccount,
-          actual: voucher.seq,
-        });
-      }
     }
 
     // A sequential replay is refused here, by name, rather than left to the
@@ -584,6 +574,18 @@ export class VoucherService {
     );
     if (used) {
       throw PaymentErrors.voucherSeqAlreadyUsed({
+        account: input.agentAccount,
+        actual: voucher.seq,
+      });
+    }
+
+    // The chain admits a voucher on `seq > seqHigh` and nothing else. One at
+    // or below it can never be redeemed: served, it would be absorbed and the
+    // platform would pay for the call (review 2026-10-15 P-2). After the
+    // replay check, so a seq refused here was never used: stale, retryable
+    // with a fresh seq (final review N-6).
+    if (input.escrow && BigInt(voucher.seq) <= input.escrow.seqHigh) {
+      throw PaymentErrors.voucherSeqStale({
         account: input.agentAccount,
         actual: voucher.seq,
       });
@@ -747,16 +749,20 @@ export class VoucherService {
         // Below a seq already admitted for this payer and still bound for the
         // chain: that one's redemption advances `seqHigh` past this one, which
         // then dies and is paid by the platform (review 2026-10-15 P-2). Under
-        // the payer's lock, so two admissions cannot both pass it.
+        // the payer's lock, so two admissions cannot both pass it. Equal is
+        // this very seq admitted by a concurrent call — a replay; below is a
+        // seq never used, signed out of order beside a parallel call — stale,
+        // retryable with a fresh seq (final review N-6).
         if (
           open.maxSeq !== undefined &&
           open.maxSeq !== null &&
           BigInt(voucher.seq) <= open.maxSeq
         ) {
-          throw PaymentErrors.voucherSeqAlreadyUsed({
-            account: input.agentAccount,
-            actual: voucher.seq,
-          });
+          const refusal =
+            BigInt(voucher.seq) === open.maxSeq
+              ? PaymentErrors.voucherSeqAlreadyUsed
+              : PaymentErrors.voucherSeqStale;
+          throw refusal({ account: input.agentAccount, actual: voucher.seq });
         }
         if (escrow !== null) {
           const used = escrowCarried + open.escrow;
