@@ -831,7 +831,7 @@ export interface ToolCallRequest {
   /** The agent's arguments, before `requestMapping` runs. */
   readonly input: JsonObject;
   /**
-   * The value sent upstream as `X-X402-Call-Id`. Minted once by the
+   * The value sent upstream as `X-Assay-Call-Id`. Minted once by the
    * caller for the whole call, not per attempt — see `BindingInvocation.callId`
    * for why, and why it is required rather than optional here too: an
    * optional field the router could invent a fallback for is exactly the
@@ -881,7 +881,7 @@ function allBindingsFailed(toolId: string, attempts: readonly RoutingAttempt[], 
 export interface RoutingAttempt {
   readonly bindingId: string;
   readonly providerId: string;
-  /** The `X-X402-Call-Id` this attempt carried — the same value on every attempt of one call. */
+  /** The `X-Assay-Call-Id` this attempt carried — the same value on every attempt of one call. */
   readonly callId: string;
   /** The share of traffic this binding held at the moment it was drawn. */
   readonly weight: number;
@@ -957,7 +957,7 @@ export interface RoutedCall {
    * the intent with a chain the gates never approved.
    */
   readonly settlementChain: ChainId;
-  /** The `X-X402-Call-Id` sent to `providerId` — see `ToolCallRequest.callId`. */
+  /** The `X-Assay-Call-Id` sent to `providerId` — see `ToolCallRequest.callId`. */
   readonly callId: string;
   readonly classification: Classification;
   readonly response: ProviderResponse;

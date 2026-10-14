@@ -665,7 +665,7 @@ const ACCEPTANCE_RESPONSE_MAPPING = {
  * the body `User-Agent header cannot be empty, use a unique identifier` — their
  * published terms of service ask every client to identify itself.
  * `EgressBindingInvoker` sets only `accept`, `content-type` and
- * `x-x402-call-id`, so without this the tester fails at the **CLASSIFICATION**
+ * `x-assay-call-id`, so without this the tester fails at the **CLASSIFICATION**
  * layer with `REQUEST_REJECTED` (observed live, 2026-08-25, on the first run of
  * this step). Worse than failing, it fails *intermittently*: an earlier probe of
  * the identical binding got 200, so their enforcement is not uniform across
@@ -675,7 +675,7 @@ const ACCEPTANCE_RESPONSE_MAPPING = {
  * says a header the endpoint needs is *"the provider's own, injected by the
  * caller into `headers`"*. The value identifies this suite honestly and invents
  * no contact address; note it cannot spoof anything, because the invoker spreads
- * `x-x402-call-id` in **after** the mapping's headers, deliberately.
+ * `x-assay-call-id` in **after** the mapping's headers, deliberately.
  *
  * Verified against the live API: all five tester layers PASSED,
  * `policySource=STORED_POLICY` (`get_weather.default` v1), and the

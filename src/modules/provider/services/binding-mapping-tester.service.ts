@@ -89,7 +89,7 @@ const RAW_BODY_LIMIT = 32 * 1024;
  * upstream compute, which is the same thing a `curl` would cost them.
  *
  * The one trace it leaves is deliberate: the call carries a real
- * `X-X402-Call-Id` (non-optional on `BindingInvocation`) and the run is
+ * `X-Assay-Call-Id` (non-optional on `BindingInvocation`) and the run is
  * recorded against it, so a provider who finds that id in their own access log
  * can resolve it. An id with no record on our side is precisely the
  * reconciliation hole the call id exists to close.

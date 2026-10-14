@@ -163,7 +163,7 @@ export class McpToolCallService {
     // Minted once, here, for the whole call — not per attempt. Failover
     // excludes the whole provider (`ProviderRouterService`'s own doc comment),
     // so a given provider sees at most one request per call, and this is the
-    // id that request carries as `X-X402-Call-Id`. Threaded through
+    // id that request carries as `X-Assay-Call-Id`. Threaded through
     // `intents.create` (so it lands on the payment record the export reads)
     // and through `router.route` (so it reaches `EgressBindingInvoker`) —
     // both from this one value, which is what guarantees the header on the

@@ -98,7 +98,7 @@ export class ProviderVerdictListItemDto {
 
   @ApiPropertyOptional({
     nullable: true,
-    description: 'The `X-X402-Call-Id` value (`payment_intents.call_id`)',
+    description: 'The `X-Assay-Call-Id` value (`payment_intents.call_id`)',
   })
   callId: string | null;
 

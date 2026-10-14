@@ -48,7 +48,7 @@ describe('free-tier annotations, through the reference MCP client', () => {
     });
 
     const server = new Server(
-      { name: 'x402-payment-platform', version: '0.0.0-test' },
+      { name: 'assay', version: '0.0.0-test' },
       { capabilities: { tools: {} } },
     );
     server.setRequestHandler(ListToolsRequestSchema, async () => ({

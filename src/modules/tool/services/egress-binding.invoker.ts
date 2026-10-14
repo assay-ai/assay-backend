@@ -60,20 +60,20 @@ export class EgressBindingInvoker implements BindingInvokerPort {
       const response = await this.http.request({
         url: buildUrl(binding.endpoint, upstream),
         method: upstream.method,
-        // `x-x402-call-id` is spread in *last*, after `upstream.headers` — a
+        // `x-assay-call-id` is spread in *last*, after `upstream.headers` — a
         // binding is a provider-authored mapping, and a provider
         // that could set this header itself could spoof the correlation id
         // the whole point of the call id is to make unforgeable. `EgressHttpClient`
         // lower-cases every header name before it sends anything
         // (`normalizeHeaders`), so this also wins against a differently-cased
-        // duplicate (`X-X402-Call-Id`) coming out of `upstream.headers` — the
+        // duplicate (`X-Assay-Call-Id`) coming out of `upstream.headers` — the
         // last write for a given lower-cased key is the one that reaches the
         // wire, and this object literal places it last either way.
         headers: {
           accept: 'application/json',
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
           ...upstream.headers,
-          'x-x402-call-id': callId,
+          'x-assay-call-id': callId,
         },
         body,
         // Every deadline collapses to the attempt's budget. The per-hop figures

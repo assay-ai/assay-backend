@@ -11,7 +11,7 @@ import {
   buildCredential,
 } from './helpers/fake-agent-credential-repository';
 
-const TOKEN = 'x402_sk_live_abcdefghijklmnopqrstuvwxyz012345';
+const TOKEN = 'assay_sk_live_abcdefghijklmnopqrstuvwxyz012345';
 const ACCOUNT =
   'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
 const CHAIN = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
@@ -45,7 +45,7 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
     );
   }
 
-  it('refuses a token without the x402_sk_live_ prefix — the chain must be able to continue', async () => {
+  it('refuses a token without the assay_sk_live_ prefix — the chain must be able to continue', async () => {
     const { source } = build();
 
     await expectErrorCodeAsync(

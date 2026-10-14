@@ -35,15 +35,15 @@ async function bootstrapApi() {
   // `exposedHeaders` is not decoration. A cross-origin browser client can read
   // only the seven CORS-safelisted response headers unless the server names the
   // rest, so without this list `GET /providers/me/calls/export` reaches the
-  // console as a CSV body with no metadata: `X-X402-Export-Row-Count`,
-  // `X-X402-Export-Total-Matching`, `X-X402-Export-Truncated` and even the
+  // console as a CSV body with no metadata: `X-Assay-Export-Row-Count`,
+  // `X-Assay-Export-Total-Matching`, `X-Assay-Export-Truncated` and even the
   // filename in `Content-Disposition` are silently dropped by the browser, with
   // no error anywhere.
   //
-  // The three `X-X402-Export-*` headers are `docs/api-list-contract.md`'s
+  // The three `X-Assay-Export-*` headers are `docs/api-list-contract.md`'s
   // no-silent-caps rule applied to a response the JSON envelope cannot wrap —
   // they are the only way the export says how many rows it returned and whether
-  // it hit its cap. A client that cannot read `X-X402-Export-Truncated` has to
+  // it hit its cap. A client that cannot read `X-Assay-Export-Truncated` has to
   // either show nothing or assume `false`, and assuming `false` tells a provider
   // their financial export is complete on exactly the evidence that it might not
   // be. That is the failure mode this list exists to prevent.
@@ -61,9 +61,9 @@ async function bootstrapApi() {
     credentials: true,
     exposedHeaders: [
       'Content-Disposition',
-      'X-X402-Export-Total-Matching',
-      'X-X402-Export-Row-Count',
-      'X-X402-Export-Truncated',
+      'X-Assay-Export-Total-Matching',
+      'X-Assay-Export-Row-Count',
+      'X-Assay-Export-Truncated',
     ],
   });
 

@@ -143,7 +143,7 @@ export class McpServerFactory {
 // Platform outcome → MCP result
 // ---------------------------------------------------------------------------
 
-export const MCP_SERVER_NAME = 'x402-payment-platform';
+export const MCP_SERVER_NAME = 'assay';
 
 /**
  * The request's `_meta` → what the agent said about paying (rail B).

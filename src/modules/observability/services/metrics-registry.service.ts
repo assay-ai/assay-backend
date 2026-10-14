@@ -49,14 +49,14 @@ export class MetricsRegistryService {
   // ── In-process instruments (awaiting a wiring line elsewhere) ────────────
 
   private readonly egressBlockedTotal = new Counter({
-    name: 'x402_egress_blocked_total',
+    name: 'assay_egress_blocked_total',
     help: 'Outbound calls refused by the egress SSRF guard (EgressFailureKind.BLOCKED_ADDRESS), by reason.',
     labelNames: ['reason'] as const,
     registers: [this.registry],
   });
 
   private readonly platformAddedLatencyMs = new Histogram({
-    name: 'x402_platform_added_latency_ms',
+    name: 'assay_platform_added_latency_ms',
     help:
       'Platform-added time per tool call, excluding provider_call — resolve_tool + verify_voucher + ' +
       'ledger_hold + select_provider + classify_response + return_to_agent. Warn above 25ms.',
@@ -78,7 +78,7 @@ export class MetricsRegistryService {
   // ── DB-backed gauges (set by `MetricsCollectorService` on each refresh) ──
 
   readonly reconciliationDifference = new Gauge({
-    name: 'x402_reconciliation_difference',
+    name: 'assay_reconciliation_difference',
     help:
       'vault_balance − total_liabilities for the latest reconciliation run, in display units. ' +
       'Page immediately if < 0.',
@@ -87,7 +87,7 @@ export class MetricsRegistryService {
   });
 
   readonly evmChainStateLagSeconds = new Gauge({
-    name: 'x402_evm_chain_state_lag_seconds',
+    name: 'assay_evm_chain_state_lag_seconds',
     help:
       'Seconds since the EVM chain-state indexer (pause, blocklist) last reached the chain head. ' +
       'Warn above EVM_CHAIN_STATE_MAX_LAG_MS (default 300).',
@@ -96,96 +96,96 @@ export class MetricsRegistryService {
   });
 
   readonly reconciliationSeverity = new Gauge({
-    name: 'x402_reconciliation_severity',
+    name: 'assay_reconciliation_severity',
     help: 'Latest reconciliation run severity: 0=OK, 1=WARN, 2=CRITICAL.',
     labelNames: ['asset'] as const,
     registers: [this.registry],
   });
 
   readonly reconciliationAgeSeconds = new Gauge({
-    name: 'x402_reconciliation_age_seconds',
+    name: 'assay_reconciliation_age_seconds',
     help: 'Seconds since the latest reconciliation run for this asset started.',
     labelNames: ['asset'] as const,
     registers: [this.registry],
   });
 
   readonly falsePositiveRate = new Gauge({
-    name: 'x402_verification_false_positive_rate',
+    name: 'assay_verification_false_positive_rate',
     help: 'False positives / resolved slash proposals, trailing 30 days. Warn > 2%, page > 5%.',
     registers: [this.registry],
   });
 
   readonly disputeOverturnRate = new Gauge({
-    name: 'x402_dispute_overturn_rate',
+    name: 'assay_dispute_overturn_rate',
     help: 'Overturned / disputed slash proposals, trailing 30 days. Warn > 20%.',
     registers: [this.registry],
   });
 
   readonly toolCallSuccessRate = new Gauge({
-    name: 'x402_tool_call_success_rate',
+    name: 'assay_tool_call_success_rate',
     help: 'non-SYSTEM_ERROR / classified PAID calls, trailing 1 hour. Warn < 97%.',
     registers: [this.registry],
   });
 
   readonly settlementLagP95Seconds = new Gauge({
-    name: 'x402_settlement_lag_p95_seconds',
+    name: 'assay_settlement_lag_p95_seconds',
     help: 'p95 verification-record settlement lag, trailing 1 hour. Warn > 60s.',
     registers: [this.registry],
   });
 
   readonly openHoldOldestAgeSeconds = new Gauge({
-    name: 'x402_open_hold_oldest_age_seconds',
+    name: 'assay_open_hold_oldest_age_seconds',
     help: 'Age in seconds of the oldest still-OPEN ledger hold. Page > 1h.',
     registers: [this.registry],
   });
 
   readonly openHoldCount = new Gauge({
-    name: 'x402_open_hold_count',
+    name: 'assay_open_hold_count',
     help: 'Count of ledger_holds rows with status = OPEN.',
     registers: [this.registry],
   });
 
   readonly failRateByPolicy = new Gauge({
-    name: 'x402_verification_fail_rate_by_policy',
+    name: 'assay_verification_fail_rate_by_policy',
     help: 'FAIL verdicts / verdicts, per (policy, policy_version), trailing 1 hour.',
     labelNames: ['policyId', 'policyVersion'] as const,
     registers: [this.registry],
   });
 
   readonly attestationsSigned = new Gauge({
-    name: 'x402_attestations_signed',
+    name: 'assay_attestations_signed',
     help: 'Verifier signing-journal rows with outcome SIGNED or ATTEMPTED, trailing window.',
     labelNames: ['window'] as const,
     registers: [this.registry],
   });
 
   readonly slashesExecuted = new Gauge({
-    name: 'x402_slashes_executed',
+    name: 'assay_slashes_executed',
     help: 'slash_proposals rows that reached EXECUTED, trailing window.',
     labelNames: ['window'] as const,
     registers: [this.registry],
   });
 
   readonly verificationQueueDepth = new Gauge({
-    name: 'x402_verification_queue_depth',
+    name: 'assay_verification_queue_depth',
     help: 'verification_records rows still in state PENDING.',
     registers: [this.registry],
   });
 
   readonly verificationQueueP95AgeSeconds = new Gauge({
-    name: 'x402_verification_queue_p95_age_seconds',
+    name: 'assay_verification_queue_p95_age_seconds',
     help: 'p95 age in seconds of the PENDING verification backlog.',
     registers: [this.registry],
   });
 
   readonly payoutQueueDepth = new Gauge({
-    name: 'x402_payout_queue_depth',
+    name: 'assay_payout_queue_depth',
     help: 'provider_payouts rows still PENDING or SUBMITTED (not yet RECORDED).',
     registers: [this.registry],
   });
 
   readonly intentsPerMinute = new Gauge({
-    name: 'x402_intents_per_minute',
+    name: 'assay_intents_per_minute',
     help: 'payment_intents created in the last minute.',
     registers: [this.registry],
   });
@@ -199,7 +199,7 @@ export class MetricsRegistryService {
    * deliberate, see `MetricsCollectorService`.
    */
   readonly signalStatus = new Gauge({
-    name: 'x402_signal_status',
+    name: 'assay_signal_status',
     help: 'Golden-signal gate status: 0=OK, 1=WARN, 2=CRITICAL.',
     labelNames: ['signal'] as const,
     registers: [this.registry],

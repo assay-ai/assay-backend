@@ -158,9 +158,9 @@ export class ProviderController {
     // Visible-cap headers — `docs/api-list-contract.md`'s no-silent-caps
     // principle, applied to a response shape the JSON envelope cannot carry
     // it in. Set before the first byte, since a header cannot follow a body.
-    res.setHeader('X-X402-Export-Total-Matching', String(result.meta.totalMatching));
-    res.setHeader('X-X402-Export-Row-Count', String(result.meta.rowCount));
-    res.setHeader('X-X402-Export-Truncated', String(result.meta.truncated));
+    res.setHeader('X-Assay-Export-Total-Matching', String(result.meta.totalMatching));
+    res.setHeader('X-Assay-Export-Row-Count', String(result.meta.rowCount));
+    res.setHeader('X-Assay-Export-Truncated', String(result.meta.truncated));
 
     await writeExportCsv(result, (chunk) => res.write(chunk));
     res.end();

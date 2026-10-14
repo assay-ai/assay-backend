@@ -52,7 +52,7 @@ export class CreateAgentCredentialResponseDto {
   @ApiProperty({
     description:
       'The full secret. Shown exactly once — copy it now. We cannot show it again; create a new one if you lose it.',
-    example: 'x402_sk_live_a91f4c2e7b3d0918f6c5a2e4b8d17f30',
+    example: 'assay_sk_live_a91f4c2e7b3d0918f6c5a2e4b8d17f30',
   })
   token: string;
 

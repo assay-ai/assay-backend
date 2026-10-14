@@ -100,7 +100,7 @@ export class BindingTestVerificationDto {
  * so what a provider saw and what the publish gate read cannot drift apart.
  */
 export class BindingTestReportDto {
-  @ApiProperty({ description: 'The X-X402-Call-Id this run actually sent upstream.' })
+  @ApiProperty({ description: 'The X-Assay-Call-Id this run actually sent upstream.' })
   callId: string;
 
   @ApiProperty({ enum: BindingTestOutcome })

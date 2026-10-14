@@ -10,7 +10,7 @@ import { TOOL_CALL_RECORD_RETENTION_DAYS } from '../constants/free-quota.constan
 export interface ToolCallRecordInput {
   readonly organizationId: string;
   readonly agentId: string;
-  /** The same id sent as `X-X402-Call-Id`. Idempotency key for this write. */
+  /** The same id sent as `X-Assay-Call-Id`. Idempotency key for this write. */
   readonly callId: string;
   readonly toolId: string;
   /** `null` only when no candidate survived routing — every binding refused. */

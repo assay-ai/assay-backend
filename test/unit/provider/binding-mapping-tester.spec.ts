@@ -203,7 +203,7 @@ describe('BindingMappingTesterService — an endpoint that behaves', () => {
     // The endpoint's own path prefix survives — `/api` + the mapped `/search`.
     expect(received?.url).toBe('/api/search');
     expect(received?.body).toBe('{"q":"the ultimate question"}');
-    expect(received?.headers['x-x402-call-id']).toBe(report.callId);
+    expect(received?.headers['x-assay-call-id']).toBe(report.callId);
 
     // And the run is on the record, against the revision it exercised.
     expect(saved).toHaveLength(1);

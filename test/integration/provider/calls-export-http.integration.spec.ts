@@ -144,9 +144,9 @@ describe('GET /providers/me/calls/export — real HTTP', () => {
 
     expect(response.headers['content-type']).toContain('text/csv');
     expect(response.headers['content-disposition']).toContain('attachment');
-    expect(response.headers['x-x402-export-total-matching']).toBe('2');
-    expect(response.headers['x-x402-export-row-count']).toBe('2');
-    expect(response.headers['x-x402-export-truncated']).toBe('false');
+    expect(response.headers['x-assay-export-total-matching']).toBe('2');
+    expect(response.headers['x-assay-export-row-count']).toBe('2');
+    expect(response.headers['x-assay-export-truncated']).toBe('false');
 
     const body: string = response.text;
     const lines = body.split('\r\n').filter((line) => line.length > 0);

@@ -138,7 +138,7 @@ describe('EgressBindingInvoker (router call path)', () => {
     });
   });
 
-  it('sends X-X402-Call-Id on the upstream request, byte-identical to the invocation', async () => {
+  it('sends X-Assay-Call-Id on the upstream request, byte-identical to the invocation', async () => {
     respondWith(200, JSON.stringify({ answer: 'from upstream' }));
 
     await invoker().invoke({
@@ -150,10 +150,10 @@ describe('EgressBindingInvoker (router call path)', () => {
     });
 
     console.log('Captured upstream headers:', JSON.stringify(received.headers, null, 2));
-    expect(received.headers?.['x-x402-call-id']).toBe('call-abc-123');
+    expect(received.headers?.['x-assay-call-id']).toBe('call-abc-123');
   });
 
-  it('does not let a binding-supplied header override X-X402-Call-Id', async () => {
+  it('does not let a binding-supplied header override X-Assay-Call-Id', async () => {
     respondWith(200, JSON.stringify({ answer: 'from upstream' }));
 
     // A provider's own mapping is untrusted input — a mapping that
@@ -166,8 +166,8 @@ describe('EgressBindingInvoker (router call path)', () => {
         path: '/search',
         body: { q: { $path: '$.query' } },
         headers: {
-          'X-X402-Call-Id': { $const: 'attacker-supplied-id' },
-          'x-x402-call-id': { $const: 'also-attacker' },
+          'X-Assay-Call-Id': { $const: 'attacker-supplied-id' },
+          'x-assay-call-id': { $const: 'also-attacker' },
         },
       },
     });
@@ -180,7 +180,7 @@ describe('EgressBindingInvoker (router call path)', () => {
       callId: 'real-call-id',
     });
 
-    expect(received.headers?.['x-x402-call-id']).toBe('real-call-id');
+    expect(received.headers?.['x-assay-call-id']).toBe('real-call-id');
   });
 
   it('returns a 5xx as a status rather than throwing', async () => {
