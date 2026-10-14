@@ -212,19 +212,23 @@ export class CatalogueToolDto {
   fromPrice: CatalogueMoneyDto | null;
 
   /**
-   * What a call would actually be held for, straight from `ProviderRouterService.quote`.
+   * What a call would actually be held for, straight from `ProviderRouterService.quote`
+   * — and so the most it can be charged.
    *
    * It is **not** {@link fromPrice}, and the gap is deliberate rather than a
    * rounding difference: the router quotes the *dearest* eligible binding, so
-   * that the hold covers whichever provider failover lands on. Publishing only
-   * the floor would under-quote every call the moment a second provider joined
-   * at a higher price; publishing only the quote would hide how cheap the
-   * market's floor is. Both, named for what they are.
+   * that the hold covers whichever provider failover lands on. The charge is
+   * the price of the binding that serves, somewhere between the two, and the
+   * rest of the hold is returned. Publishing only the floor would hide the
+   * worst case; publishing only the quote would hide how cheap the market's
+   * floor is. Both, named for what they are.
    */
   @ApiPropertyOptional({
     type: CatalogueMoneyDto,
     nullable: true,
-    description: 'The routed quote — dearest eligible binding. null when nothing is routable.',
+    description:
+      'The routed quote — dearest eligible binding, the most a call is charged (it pays the ' +
+      'serving binding). null when nothing is routable.',
   })
   price: CatalogueMoneyDto | null;
 
