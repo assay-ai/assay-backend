@@ -476,7 +476,8 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
    * authority limit is single-person when it only lowers them, and raised to
    * two-person for the occurrence when it adds a role or raises the limit
    * (`OperatorDirectoryService`). Removing is single-person — the safe
-   * direction. Nobody acts on their own row, and an approver may not be the
+   * direction — except that removing an `OPS_ADMIN`, or taking the role away,
+   * is two-person. Nobody acts on their own row, and an approver may not be the
    * operator being changed.
    */
   'A-12': define({
@@ -507,7 +508,9 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     action: 'operator.removed',
     label: 'Remove an operator',
     roles: [OperatorRole.OPS_ADMIN],
+    // Raised to TWO_PERSON when the operator removed holds `OPS_ADMIN`.
     approval: ApprovalMode.SINGLE,
+    approverRoles: [OperatorRole.OPS_ADMIN],
     reversible: true,
     implemented: true,
   }),

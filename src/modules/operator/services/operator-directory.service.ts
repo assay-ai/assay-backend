@@ -28,7 +28,17 @@ const TARGET_TYPE = 'operator';
 export const DIRECTORY_APPROVAL_ACTIONS = {
   add: 'operator.add',
   change: 'operator.change',
+  remove: 'operator.remove',
 } as const;
+
+/**
+ * True when the change takes `OPS_ADMIN` away. Who may add operators is the
+ * one authority whose loss the console cannot repair (`A-12` needs a second
+ * `OPS_ADMIN`), so losing a holder is two-person like gaining one.
+ */
+function demotesAdmin(current: readonly string[], next: readonly string[]): boolean {
+  return current.includes(OperatorRole.OPS_ADMIN) && !next.includes(OperatorRole.OPS_ADMIN);
+}
 
 /** True when `next` grants anything `current` does not: a new role, or a higher limit. */
 export function raisesAuthority(
@@ -49,6 +59,10 @@ export function raisesAuthority(
  *   two-person when it adds a role or raises the limit.
  * - Removing is single-person, takes effect at once, and revokes every session
  *   the operator holds.
+ * - Except for an `OPS_ADMIN`: removing one, or taking the role away, is
+ *   two-person, approved by another `OPS_ADMIN` who is not the target. With
+ *   two holders left, that leaves nobody to approve it, which is the point:
+ *   one stolen admin session cannot strip the directory of its admins.
  *
  * Nobody acts on their own row, and an approver may not approve a change to
  * their own. Every change writes its register entry in the same transaction.
@@ -74,6 +88,17 @@ export class OperatorDirectoryService {
           requester,
           payload.operatorId as string,
           payload.body as ChangeOperatorBodyDto,
+          requestId,
+          approver,
+        ),
+    });
+    approvals.register(DIRECTORY_APPROVAL_ACTIONS.remove, {
+      code: 'A-14',
+      run: (requester, approver, payload, requestId) =>
+        this.remove(
+          requester,
+          payload.operatorId as string,
+          payload.body as RemoveOperatorBodyDto,
           requestId,
           approver,
         ),
@@ -205,7 +230,8 @@ export class OperatorDirectoryService {
           code: 'A-13',
           actor,
           approver,
-          escalateToTwoPerson: raisesAuthority(current, next),
+          escalateToTwoPerson:
+            raisesAuthority(current, next) || demotesAdmin(current.roles, next.roles),
           targetType: TARGET_TYPE,
           targetId: operatorId,
           organizationId: null,
@@ -244,8 +270,29 @@ export class OperatorDirectoryService {
     operatorId: string,
     body: RemoveOperatorBodyDto,
     requestId: string | null,
+    approver: OperatorApprover | null = null,
+  ): Promise<OperatorDirectoryEntryDto | ApprovalQueuedDto> {
+    const attempt = () => this.removeNow(actor, operatorId, body, requestId, approver);
+    if (approver) return attempt();
+    return this.approvals.orQueue(
+      {
+        action: DIRECTORY_APPROVAL_ACTIONS.remove,
+        target: `operator:${operatorId}`,
+        payload: { operatorId, body: { ...body } },
+        requester: actor,
+      },
+      attempt,
+    );
+  }
+
+  private async removeNow(
+    actor: OperatorSession,
+    operatorId: string,
+    body: RemoveOperatorBodyDto,
+    requestId: string | null,
+    approver: OperatorApprover | null,
   ): Promise<OperatorDirectoryEntryDto> {
-    this.assertNotSelf(actor, operatorId, null);
+    this.assertNotSelf(actor, operatorId, approver);
     const current = await this.requireListed(operatorId);
     const removedAt = new Date();
 
@@ -253,6 +300,8 @@ export class OperatorDirectoryService {
       {
         code: 'A-14',
         actor,
+        approver,
+        escalateToTwoPerson: current.roles.includes(OperatorRole.OPS_ADMIN),
         targetType: TARGET_TYPE,
         targetId: operatorId,
         organizationId: null,
