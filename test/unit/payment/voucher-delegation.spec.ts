@@ -264,6 +264,41 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
     });
   });
 
+  /**
+   * REGRESSION (review 2026-10-15 P-2): the chain admits a voucher only on
+   * `seq > seqHigh`. One at or below it was served and then absorbed at
+   * redemption — the buyer got the call free and the platform paid. It is
+   * refused at admission instead, and so is one below a seq already admitted
+   * for this payer (that one will push `seqHigh` past it).
+   */
+  describe('a seq the chain has already passed', () => {
+    it('refuses a seq at or below the escrow seqHigh, and reserves nothing', async () => {
+      const call = input(payer);
+      const seq = BigInt(call.signed.voucher.seq);
+      await rejects(
+        service.redeem({ ...call, escrow: escrow({ seqHigh: seq }) }),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
+      );
+      await rejects(
+        service.redeem({ ...call, escrow: escrow({ seqHigh: seq + 1n }) }),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
+      );
+      expect(intents.created).toHaveLength(0);
+
+      await expect(
+        service.redeem({ ...call, escrow: escrow({ seqHigh: seq - 1n }) }),
+      ).resolves.toMatchObject({ status: PaymentIntentStatus.FUNDS_SECURED });
+    });
+
+    it('refuses a seq below one already admitted for the payer, under the lock', async () => {
+      const lower = input(payer, { escrow: escrow() });
+      const higher = input(payer, { escrow: escrow() });
+      await service.redeem(higher);
+      await rejects(service.redeem(lower), PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED);
+      expect(intents.created).toHaveLength(1);
+    });
+  });
+
   describe('(b) an authorised delegate', () => {
     it('redeems a delegate-signed voucher within its caps and records the delegate', async () => {
       chain.grant(payer.address, delegate.address);
