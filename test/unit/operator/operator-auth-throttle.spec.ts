@@ -66,9 +66,8 @@ describe('OperatorAuthGuard — failed sign-ins are counted per address', () => 
     throw OperatorErrors.credentialInvalid();
   };
 
-  it('blocks an address after the limit, before the next token is looked at', async () => {
-    const resolve = jest.fn(refuse);
-    const { guard, redis } = build(resolve);
+  it('answers 429 to an address over the limit that presents another bad token', async () => {
+    const { guard, redis } = build(refuse);
     const { context } = contextFor({ authorization: 'Bearer wrong-token-value' });
 
     for (let attempt = 0; attempt < OPERATOR_AUTH_MAX_FAILURES; attempt += 1) {
@@ -76,8 +75,25 @@ describe('OperatorAuthGuard — failed sign-ins are counted per address', () => 
     }
     await expectErrorCodeAsync(() => guard.canActivate(context), 'OPERATOR_AUTH_RATE_LIMITED');
 
-    expect(resolve).toHaveBeenCalledTimes(OPERATOR_AUTH_MAX_FAILURES);
     expect([...redis.ttl.values()]).toEqual([OPERATOR_AUTH_FAILURE_WINDOW_SECONDS]);
+  });
+
+  it('never refuses a valid session because its address is over the limit', async () => {
+    const tokens = new Map([['good-token-value', SESSION]]);
+    const { guard } = build(async (token) => {
+      const session = token ? tokens.get(token) : undefined;
+      if (!session) throw OperatorErrors.credentialInvalid();
+      return session;
+    });
+    // Every caller behind one proxy shares this address.
+    const bad = contextFor({ authorization: 'Bearer wrong-token-value' });
+    for (let attempt = 0; attempt <= OPERATOR_AUTH_MAX_FAILURES; attempt += 1) {
+      await guard.canActivate(bad.context).catch(() => undefined);
+    }
+
+    const good = contextFor({ authorization: 'Bearer good-token-value' });
+    await expect(guard.canActivate(good.context)).resolves.toBe(true);
+    expect(good.request.operator).toBe(SESSION);
   });
 
   it('logs one error line when the limit is reached, without the token', async () => {

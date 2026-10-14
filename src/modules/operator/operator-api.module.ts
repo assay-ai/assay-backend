@@ -18,6 +18,7 @@ import { OperatorModule } from './operator.module';
 import { AdjudicationQueueService } from './services/adjudication-queue.service';
 import { OperatorAccountBlockService } from './services/operator-account-block.service';
 import { OperatorApprovalService } from './services/operator-approval.service';
+import { OperatorArbiterService } from './services/operator-arbiter.service';
 import { OperatorCaseService } from './services/operator-case.service';
 import { OperatorDirectoryService } from './services/operator-directory.service';
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
@@ -67,6 +68,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     AdjudicationQueueService,
     OperatorAccountBlockService,
     OperatorApprovalService,
+    OperatorArbiterService,
     OperatorCaseService,
     OperatorDirectoryService,
     // `V-7`. `ProviderRepository` needs no import here — `PostgresModule` is
