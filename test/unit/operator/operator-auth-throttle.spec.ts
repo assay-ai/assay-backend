@@ -17,7 +17,13 @@ class FakeRedis {
   down = false;
 
   /** `SET key value EX seconds NX`, the only form the throttle sends. */
-  async set(key: string, value: number, _ex: 'EX', seconds: number, _nx: 'NX'): Promise<'OK' | null> {
+  async set(
+    key: string,
+    value: number,
+    _ex: 'EX',
+    seconds: number,
+    _nx: 'NX',
+  ): Promise<'OK' | null> {
     if (this.down) throw new Error('redis down');
     if (this.counts.has(key)) return null;
     this.counts.set(key, Number(value));

@@ -8,7 +8,11 @@ import { AgentCredentialRepository } from '@database/postgres/repositories/agent
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { AccountId } from '@modules/chains/ports/caip.types';
 import { DelegateBindingChallenge } from '@modules/chains/ports/delegate-binding.types';
-import { McpCallerKind, McpSession, storedCredentialIdOf } from '@modules/mcp/ports/mcp-session.port';
+import {
+  McpCallerKind,
+  McpSession,
+  storedCredentialIdOf,
+} from '@modules/mcp/ports/mcp-session.port';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import { AgentDelegateBindingDto, DelegateChallengeResponseDto } from '../dto/agent-delegate.dto';
