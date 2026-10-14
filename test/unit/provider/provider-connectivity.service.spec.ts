@@ -172,6 +172,25 @@ describe('a live endpoint that answers', () => {
     expect(checks.rows[0].outcome).toBe(ConnectivityOutcome.REACHABLE);
   });
 
+  it('takes its slot from the connectivity pool, not the tester pool (N-3)', async () => {
+    const { service, providers, http } = buildHarness();
+    providers.seed(ORG, null);
+    http.request.mockResolvedValue({
+      status: 200,
+      headers: {},
+      body: '{}',
+      bytes: 2,
+      url: PUBLIC_ENDPOINT,
+      redirects: 0,
+    });
+    const run = jest.spyOn(ProviderEgressLimiter.prototype, 'run');
+
+    await service.check(ORG, PUBLIC_ENDPOINT);
+
+    expect(run).toHaveBeenCalledWith(ORG, expect.any(Function), 'connectivity');
+    run.mockRestore();
+  });
+
   it('401 → still REACHABLE — auth is not this check’s business', async () => {
     const { service, http } = buildHarness();
     http.request.mockResolvedValue({

@@ -4,6 +4,7 @@ import { ValidationPipe, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder, SwaggerCustomOptions } from '@nestjs/swagger';
 import { Reflector } from '@nestjs/core';
+import { assertTrustProxyHopsConfigured } from '@config/app.config';
 import { AppApiModule } from './app.module';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
@@ -31,6 +32,8 @@ async function bootstrapApi() {
   // many proxies to trust, and then every caller shares one counter. Production
   // sets `API_TRUST_PROXY_HOPS` to the number of proxies in front of the API;
   // locally it is 0 and `X-Forwarded-For` is ignored (`parseTrustProxyHops`).
+  // Production refuses to start with it unset; `.env` is loaded by now.
+  assertTrustProxyHopsConfigured();
   app.set('trust proxy', configService.get<number>('app.api.trustProxyHops') ?? 0);
 
   // Global prefix

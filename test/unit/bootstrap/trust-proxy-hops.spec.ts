@@ -1,6 +1,6 @@
 import express from 'express';
 
-import { parseTrustProxyHops } from '@config/app.config';
+import { assertTrustProxyHopsConfigured, parseTrustProxyHops } from '@config/app.config';
 
 describe('API_TRUST_PROXY_HOPS', () => {
   it('defaults to 0, which ignores X-Forwarded-For', () => {
@@ -15,6 +15,18 @@ describe('API_TRUST_PROXY_HOPS', () => {
 
   it.each(['-1', '1.5', 'true', 'loopback'])('refuses %s', (raw) => {
     expect(() => parseTrustProxyHops(raw)).toThrow(/API_TRUST_PROXY_HOPS/);
+  });
+
+  it('must be set in production, where an explicit 0 is accepted (N-4)', () => {
+    expect(() => assertTrustProxyHopsConfigured(undefined, 'production')).toThrow(
+      /API_TRUST_PROXY_HOPS must be set/,
+    );
+    expect(() => assertTrustProxyHopsConfigured(' ', 'production')).toThrow(
+      /API_TRUST_PROXY_HOPS must be set/,
+    );
+    expect(() => assertTrustProxyHopsConfigured('0', 'production')).not.toThrow();
+    expect(() => assertTrustProxyHopsConfigured('1', 'production')).not.toThrow();
+    expect(() => assertTrustProxyHopsConfigured(undefined, 'development')).not.toThrow();
   });
 
   it('with one hop, request.ip is the client the balancer saw, not the balancer', () => {

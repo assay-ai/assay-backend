@@ -234,6 +234,7 @@ describe('rail B over MCP', () => {
         ...RAIL_B_SESSION,
         callerKind: McpCallerKind.AGENT,
         credentialId: '0f5e7c2a-8d3b-4c1e-9a6f-2b7d4e8c1a90',
+        storedCredential: true,
       };
       const requirement = await (async () => {
         const outcome = await h.calls.call(agentSession, TOOL_NAME, ARGS, {
@@ -249,6 +250,25 @@ describe('rail B over MCP', () => {
       const config = harness();
       await config.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(await requirementOf(config)));
       expect(config.intents.only.credentialId ?? null).toBeNull();
+    });
+
+    it('records no credential for a config-file machine token: its id is no uuid (N-1)', async () => {
+      const h = harness();
+      const configAgent: McpSession = {
+        ...RAIL_B_SESSION,
+        callerKind: McpCallerKind.AGENT,
+        credentialId: 'cred-demo-agent',
+      };
+      const requirement = await (async () => {
+        const outcome = await h.calls.call(configAgent, TOOL_NAME, ARGS, {
+          rail: PaymentRail.RAIL_B_VOUCHER,
+          voucher: null,
+        });
+        if (outcome.kind !== 'ERROR') throw new Error('expected a payment requirement');
+        return outcome.detail.paymentRequired as VoucherRequirement;
+      })();
+      await h.calls.call(configAgent, TOOL_NAME, ARGS, paying(requirement));
+      expect(h.intents.only.credentialId ?? null).toBeNull();
     });
 
     it('checks the caps and secures the voucher under the agent spend lock (P-6)', async () => {

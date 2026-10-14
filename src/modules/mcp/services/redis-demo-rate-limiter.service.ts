@@ -50,8 +50,10 @@ export class RedisDemoRateLimiter implements OnModuleDestroy {
   /**
    * Record one attempt from `address` and say whether it may proceed.
    *
-   * `address` is whatever the caller decided identifies the client — see the
-   * controller for why that is not simply `req.ip`.
+   * `address` is whatever the caller decided identifies the client: the
+   * controller passes `request.ip`, which Express derives from the configured
+   * `trust proxy` hop count (`API_TRUST_PROXY_HOPS`), never a raw forwarded
+   * header.
    */
   async take(address: string): Promise<DemoRateOutcome> {
     const now = Date.now();

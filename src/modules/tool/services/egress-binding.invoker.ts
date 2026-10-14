@@ -120,7 +120,9 @@ export class EgressBindingInvoker implements BindingInvokerPort {
 
 /**
  * `UNTRUSTED_EGRESS_POLICY`, narrowed to https in production. Read per call so
- * the rule covers rows saved before it existed, not just new DTOs.
+ * the rule covers rows saved before it existed, not just new DTOs: such a row
+ * fails with `TRANSPORT_HTTPS_REQUIRED`, and
+ * `scripts/deploy/list-http-bindings.sql` lists them.
  */
 function bindingPolicy(): EgressPolicy {
   return Object.freeze({

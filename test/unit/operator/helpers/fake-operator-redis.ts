@@ -25,9 +25,16 @@ export class FakeOperatorRedis {
     return this.live(key)?.value ?? null;
   }
 
-  async set(key: string, value: string, mode?: string, seconds?: number): Promise<'OK'> {
+  async set(
+    key: string,
+    value: string | number,
+    mode?: string,
+    seconds?: number,
+    condition?: 'NX',
+  ): Promise<'OK' | null> {
+    if (condition === 'NX' && this.live(key)) return null;
     this.values.set(key, {
-      value,
+      value: String(value),
       expiresAt: mode === 'EX' && seconds ? this.now() + seconds * 1000 : null,
     });
     return 'OK';
@@ -78,8 +85,18 @@ export class FakeOperatorRedis {
   multi() {
     const queued: Array<() => Promise<unknown>> = [];
     const chain = {
-      set: (key: string, value: string, mode?: string, seconds?: number) => {
-        queued.push(() => this.set(key, value, mode, seconds));
+      set: (
+        key: string,
+        value: string | number,
+        mode?: string,
+        seconds?: number,
+        condition?: 'NX',
+      ) => {
+        queued.push(() => this.set(key, value, mode, seconds, condition));
+        return chain;
+      },
+      incr: (key: string) => {
+        queued.push(() => this.incr(key));
         return chain;
       },
       sadd: (key: string, member: string) => {

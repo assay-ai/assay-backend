@@ -70,9 +70,7 @@ export class OperatorAuthThrottle {
   async countChallenge(key: string): Promise<void> {
     let issued: number;
     try {
-      const redisKey = CHALLENGE_PREFIX + key;
-      issued = await this.redis.incr(redisKey);
-      if (issued === 1) await this.redis.expire(redisKey, OPERATOR_AUTH_FAILURE_WINDOW_SECONDS);
+      issued = await this.countInWindow(CHALLENGE_PREFIX + key);
     } catch (error) {
       this.logger.warn(`operator challenge throttle unavailable, not enforced: ${describe(error)}`);
       return;
@@ -83,11 +81,7 @@ export class OperatorAuthThrottle {
   /** Count one failure. Logs at error level when the limit is reached. */
   async recordFailure(key: string): Promise<void> {
     try {
-      const redisKey = KEY_PREFIX + key;
-      const failures = await this.redis.incr(redisKey);
-      if (failures === 1) {
-        await this.redis.expire(redisKey, OPERATOR_AUTH_FAILURE_WINDOW_SECONDS);
-      }
+      const failures = await this.countInWindow(KEY_PREFIX + key);
       if (failures === OPERATOR_AUTH_MAX_FAILURES) {
         this.logger.error(
           `operator authentication: ${failures} failures for ${key} within ` +
@@ -97,6 +91,25 @@ export class OperatorAuthThrottle {
     } catch (error) {
       this.logger.warn(`operator auth failure not counted: ${describe(error)}`);
     }
+  }
+
+  /**
+   * Add one to a fixed-window counter and return the new count.
+   *
+   * One transaction: `SET … EX NX` opens the window with its TTL only when
+   * the key is new, and `INCR` keeps that TTL. A separate `INCR` then
+   * `EXPIRE` left a counter that never expires when the second command failed,
+   * which for an IP-keyed throttle is a permanent lockout (review N-4).
+   */
+  private async countInWindow(redisKey: string): Promise<number> {
+    const results = await this.redis
+      .multi()
+      .set(redisKey, 0, 'EX', OPERATOR_AUTH_FAILURE_WINDOW_SECONDS, 'NX')
+      .incr(redisKey)
+      .exec();
+    const [error, count] = results?.[1] ?? [new Error('transaction discarded'), null];
+    if (error) throw error;
+    return Number(count);
   }
 }
 
