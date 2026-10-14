@@ -11,7 +11,11 @@ export const OPERATOR_AUTH_MAX_FAILURES = 10;
 /** The window, and how long an address stays blocked once it is over the limit. */
 export const OPERATOR_AUTH_FAILURE_WINDOW_SECONDS = 300;
 
+/** Sign-in challenges one client address may ask for inside the window. */
+export const OPERATOR_CHALLENGE_MAX_PER_WINDOW = 30;
+
 const KEY_PREFIX = 'operator:auth:failures:';
+const CHALLENGE_PREFIX = 'operator:auth:challenges:';
 
 /** The throttle key for a client address. */
 export const ipKey = (ip: string): string => `ip:${ip}`;
@@ -58,6 +62,25 @@ export class OperatorAuthThrottle {
     if (failures >= OPERATOR_AUTH_MAX_FAILURES) {
       throw OperatorErrors.authRateLimited();
     }
+  }
+
+  /**
+   * Count one sign-in challenge for this key, and throw
+   * `OPERATOR_AUTH_RATE_LIMITED` once it is over
+   * {@link OPERATOR_CHALLENGE_MAX_PER_WINDOW} inside the window. Each challenge
+   * writes a Redis key, so an unthrottled flood grows Redis without bound.
+   */
+  async countChallenge(key: string): Promise<void> {
+    let issued: number;
+    try {
+      const redisKey = CHALLENGE_PREFIX + key;
+      issued = await this.redis.incr(redisKey);
+      if (issued === 1) await this.redis.expire(redisKey, OPERATOR_AUTH_FAILURE_WINDOW_SECONDS);
+    } catch (error) {
+      this.logger.warn(`operator challenge throttle unavailable, not enforced: ${describe(error)}`);
+      return;
+    }
+    if (issued > OPERATOR_CHALLENGE_MAX_PER_WINDOW) throw OperatorErrors.authRateLimited();
   }
 
   /** Count one failure. Logs at error level when the limit is reached. */

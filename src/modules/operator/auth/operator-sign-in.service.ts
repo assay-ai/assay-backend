@@ -96,6 +96,10 @@ export class OperatorSignInService {
       throw OperatorErrors.walletInvalid({ address });
     }
     this.assertConfigured();
+    // Per client address only. A per-wallet count would let anyone stop a
+    // named operator from getting a challenge, the lockout the wallet failure
+    // count is careful not to allow.
+    await this.throttle.countChallenge(ipKey(ip));
 
     const nonce = newSignInNonce();
     const issuedAt = new Date();

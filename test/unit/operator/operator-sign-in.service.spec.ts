@@ -10,6 +10,7 @@ import { OperatorSignInService } from '@modules/operator/auth/operator-sign-in.s
 import { WalletOperatorSessionSource } from '@modules/operator/auth/wallet-operator-session.source';
 import {
   OPERATOR_AUTH_MAX_FAILURES,
+  OPERATOR_CHALLENGE_MAX_PER_WINDOW,
   OperatorAuthThrottle,
 } from '@modules/operator/services/operator-auth-throttle.service';
 import { OperatorService } from '@modules/operator/services/operator.service';
@@ -284,6 +285,20 @@ describe('OperatorSignInService — sign in with a wallet', () => {
       () => ctx.signIn.challenge(wallet().address, IP),
       'OPERATOR_AUTH_RATE_LIMITED',
     );
+  });
+
+  it('throttles challenge issuance per client address', async () => {
+    const ctx = build();
+    for (let i = 0; i < OPERATOR_CHALLENGE_MAX_PER_WINDOW; i += 1) {
+      await ctx.signIn.challenge(wallet().address, IP);
+    }
+
+    await expectErrorCodeAsync(
+      () => ctx.signIn.challenge(wallet().address, IP),
+      'OPERATOR_AUTH_RATE_LIMITED',
+    );
+    // Another address is not affected, and the victim's wallet still gets one.
+    await expect(ctx.signIn.challenge(wallet().address, '192.0.2.1')).resolves.toBeDefined();
   });
 
   it('refuses every sign-in when no domain is configured', async () => {
