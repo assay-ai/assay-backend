@@ -9,6 +9,7 @@ import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { McpController } from '@modules/mcp/controllers/mcp.controller';
 import { McpCallerKind, McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 import { ProviderSlashRequestsController } from '@modules/slash/controllers/provider-slash-requests.controller';
+import { ProviderSlashProposalsController } from '@modules/slash/controllers/provider-slash-proposals.controller';
 import { AgentCredentialsController } from '@modules/account/controllers/agent-credentials.controller';
 import { EscrowDelegatesController } from '@modules/settlement/controllers/escrow-delegates.controller';
 import {
@@ -261,6 +262,9 @@ describe('the revoke routes a blocked person still needs (audit E-5)', () => {
     [EscrowDelegatesController, 'revokeIntent', 'POST'],
     [EscrowDelegatesController, 'revoke', 'POST'],
     [AgentCredentialsController, 'revoke', 'DELETE'],
+    // Review S-8: an objection only takes authority away from the platform.
+    [ProviderSlashProposalsController, 'dispute', 'POST'],
+    [ProviderSlashProposalsController, 'acknowledge', 'POST'],
   ] as const)('lets a blocked person through %p.%s', async (controller, handler, method) => {
     for (const [role, kind] of [
       [BlockedRole.ORGANIZATION, BlockSubjectKind.ORGANIZATION],
