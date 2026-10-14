@@ -252,3 +252,37 @@ describe('OperatorDirectoryService — an approver cannot grant more than they h
     );
   });
 });
+
+describe('OperatorDirectoryService — sessions end with the authority', () => {
+  it('revokes every session of an operator who loses a role, and of one removed', async () => {
+    const { service, rows, revoked } = build();
+    const a = rows.seed('admin-a', [OperatorRole.OPS_ADMIN]);
+    rows.seed('lead-1', [OperatorRole.ADJ, OperatorRole.ADJL]);
+    rows.seed('adj-1', [OperatorRole.ADJ]);
+
+    await service.change(
+      sessionOf(a),
+      'lead-1',
+      { roles: [OperatorRole.ADJ], reasonCode: 'ROTATION', note: NOTE },
+      null,
+    );
+    await service.remove(sessionOf(a), 'adj-1', { reasonCode: 'LEFT', note: NOTE }, null);
+
+    expect(revoked).toEqual(['lead-1', 'adj-1']);
+  });
+
+  it('keeps the sessions of an operator whose limit is only lowered', async () => {
+    const { service, rows, revoked } = build();
+    const a = rows.seed('admin-a', [OperatorRole.OPS_ADMIN]);
+    rows.seed('tre-1', [OperatorRole.TRE], { authorityLimitMinor: '100' });
+
+    await service.change(
+      sessionOf(a),
+      'tre-1',
+      { authorityLimitMinor: '50', reasonCode: 'ROTATION', note: NOTE },
+      null,
+    );
+
+    expect(revoked).toEqual([]);
+  });
+});
