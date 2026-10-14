@@ -41,6 +41,18 @@ const DISPUTE_LIST: ListSpec = {
 };
 
 /**
+ * The subject type of a provider's objection to a proposed penalty. It is
+ * written by the slash module (`ArbitrationService.fileDispute`) and moved only
+ * by the slash case's own lifecycle, so the generic acknowledge and withdraw
+ * routes refuse it (review S-10): otherwise the dispute and its case disagree.
+ */
+const SLASH_PROPOSAL_SUBJECT = 'SLASH_PROPOSAL';
+
+/** The `state` context of a refusal on a slash objection. */
+const slashObjectionState = (dispute: DisputeEntity): string =>
+  `${dispute.state} (an objection to a proposed penalty, managed on its slash case)`;
+
+/**
  * `GET /disputes`, `GET /disputes/:id`, `POST /disputes`,
  * `POST /disputes/:id/acknowledge`, `POST /disputes/:id/withdraw`.
  *
@@ -146,6 +158,9 @@ export class DisputeService {
     if (!dispute) {
       throw DisputeErrors.disputeNotFound({ id });
     }
+    if (dispute.subjectType === SLASH_PROPOSAL_SUBJECT) {
+      throw DisputeErrors.notAcknowledgeable({ state: slashObjectionState(dispute) });
+    }
     if (TERMINAL_DISPUTE_STATES.includes(dispute.state as DisputeState)) {
       throw DisputeErrors.notAcknowledgeable({ state: dispute.state });
     }
@@ -172,6 +187,9 @@ export class DisputeService {
     const dispute = await this.disputes.findOneBy({ organizationId, id });
     if (!dispute) {
       throw DisputeErrors.disputeNotFound({ id });
+    }
+    if (dispute.subjectType === SLASH_PROPOSAL_SUBJECT) {
+      throw DisputeErrors.notWithdrawable({ state: slashObjectionState(dispute) });
     }
     if (TERMINAL_DISPUTE_STATES.includes(dispute.state as DisputeState)) {
       throw DisputeErrors.notWithdrawable({ state: dispute.state });
