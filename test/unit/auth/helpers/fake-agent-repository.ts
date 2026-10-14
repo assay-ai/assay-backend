@@ -75,6 +75,17 @@ export class FakeAgentRepository {
     return Promise.resolve(null);
   }
 
+  findByIdWithOrganization(id: string): Promise<AgentWithOrganization | null> {
+    for (const agent of this.rows.values()) {
+      if (agent.id !== id) continue;
+      return Promise.resolve({
+        agent,
+        organizationStatus: this.organizations.get(agent.organizationId)?.status ?? 'ACTIVE',
+      });
+    }
+    return Promise.resolve(null);
+  }
+
   findWithOrganization(privyUserId: string): Promise<AgentWithOrganization | null> {
     const agent = this.rows.get(privyUserId);
     if (!agent) return Promise.resolve(null);

@@ -108,11 +108,27 @@ export class AgentRepository extends AbstractRepository<AgentEntity> {
    * expire. Reading them with two queries would double the database work on
    * the auth hot path to answer one question, so this joins.
    */
-  async findWithOrganization(privyUserId: string): Promise<AgentWithOrganization | null> {
+  findWithOrganization(privyUserId: string): Promise<AgentWithOrganization | null> {
+    return this.findOneWithOrganization('agent.privyUserId = :privyUserId', { privyUserId });
+  }
+
+  /**
+   * {@link findWithOrganization} by agent id: the join
+   * `DbCredentialMcpSessionSource` needs, so a suspended organization stops its
+   * machine credentials as well as its people.
+   */
+  findByIdWithOrganization(id: string): Promise<AgentWithOrganization | null> {
+    return this.findOneWithOrganization('agent.id = :id', { id });
+  }
+
+  private async findOneWithOrganization(
+    where: string,
+    parameters: Record<string, string>,
+  ): Promise<AgentWithOrganization | null> {
     const result = await this.createQueryBuilder('agent')
       .innerJoin(OrganizationEntity, 'org', 'org.id = agent.organizationId')
       .addSelect('org.status', 'org_status')
-      .where('agent.privyUserId = :privyUserId', { privyUserId })
+      .where(where, parameters)
       .limit(1)
       .getRawAndEntities();
 

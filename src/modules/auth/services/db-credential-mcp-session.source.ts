@@ -11,7 +11,7 @@ import { digestToken } from '@shared/crypto/token-digest';
 
 import { AuthErrors } from '../errors/auth.errors';
 
-const SUSPENDED = 'SUSPENDED';
+const ACTIVE = 'ACTIVE';
 
 /**
  * `agent_credentials` bearer tokens (`assay_sk_live_…`), resolved to a
@@ -44,8 +44,9 @@ const SUSPENDED = 'SUSPENDED';
  * reads them from `agents` rather than the token: they name the account a
  * call is charged to, and the one honest source for that is the row a wallet
  * was actually linked to, not anything a caller-controlled artefact carries.
- * The join is `AgentRepository.findById(credential.agentId)`, done as two
- * queries rather than one because **there is no FK** between the two tables.
+ * The join is `AgentRepository.findByIdWithOrganization(credential.agentId)`
+ * (which also reads the organization's status), a second query rather than
+ * part of the first because **there is no FK** between the two tables.
  * `AgentCredentialsService.create` refuses an agent that does not exist, but
  * rows minted before that check (or by scripts) can still name one, so the
  * join can miss, and a miss is treated exactly like an
@@ -77,11 +78,13 @@ const SUSPENDED = 'SUSPENDED';
  *
  * ## The refusals that are not `MCP_CREDENTIAL_INVALID`
  *
- * A suspended agent and an agent with no linked wallet are facts about a
- * caller already identified by a genuine credential — exactly the reasoning
- * `PrivyMcpSessionSource` and `auth.errors.ts` give for `AUTH_AGENT_SUSPENDED`
- * and `AUTH_WALLET_NOT_LINKED` over a generic 401. `CompositeMcpSessionSource`
- * lets both propagate rather than trying the next source.
+ * A suspended organization, a suspended agent and an agent with no linked
+ * wallet are facts about a caller already identified by a genuine
+ * credential — exactly the reasoning `PrivyMcpSessionSource` and
+ * `auth.errors.ts` give for `AUTH_ORGANIZATION_SUSPENDED`,
+ * `AUTH_AGENT_SUSPENDED` and `AUTH_WALLET_NOT_LINKED` over a generic 401.
+ * `CompositeMcpSessionSource` lets all three propagate rather than trying the
+ * next source.
  */
 @Injectable()
 export class DbCredentialMcpSessionSource implements McpSessionPort {
@@ -100,12 +103,20 @@ export class DbCredentialMcpSessionSource implements McpSessionPort {
       throw McpErrors.credentialInvalid();
     }
 
-    const agent = await this.agents.findById(credential.agentId);
+    const found = await this.agents.findByIdWithOrganization(credential.agentId);
+    const agent = found?.agent;
     if (!agent || agent.organizationId !== credential.organizationId) {
       throw McpErrors.credentialInvalid();
     }
 
-    if (agent.status === SUSPENDED) {
+    // The same two checks, in the same order, as `PrivyMcpSessionSource`:
+    // suspending the organization must stop its machine credentials too, and
+    // only ACTIVE passes, so a status added later is refused by default.
+    if (found.organizationStatus !== ACTIVE) {
+      throw AuthErrors.organizationSuspended();
+    }
+
+    if (agent.status !== ACTIVE) {
       throw AuthErrors.agentSuspended();
     }
 
