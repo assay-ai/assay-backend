@@ -232,6 +232,56 @@ export class ArbitrationService {
     return true;
   }
 
+  /**
+   * Review N-1 / N-3: an open EVM case (`DISPUTED`, `UNDER_REVIEW`,
+   * `AWAITING_SECOND`) one of whose records stands on chain undisputed — an
+   * older in-app objection the chain never saw, or a straggler re-adopted. The
+   * chain decides that record, and it executes after its `executableAt`, so
+   * the case becomes `UPHELD` (`AUTO_UNDISPUTED`, no outcome: nobody ruled)
+   * and the executor sends it. An open in-app objection is closed with it: it
+   * never froze the record. Returns whether the case moved.
+   */
+  async recordChainStanding(organizationId: string, proposalId: string): Promise<boolean> {
+    const proposal = await this.lifecycle.require(organizationId, proposalId);
+    if (!disputesOnChain(proposal.assetId)) return false;
+    const now = new Date();
+    const affected = await this.proposals.transitionIfIn(
+      organizationId,
+      proposalId,
+      CLAIMABLE_STATUSES,
+      {
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+        resolvedAt: now,
+        countsAsFalsePositive: false,
+      },
+    );
+    if (affected === 0) return false;
+    if (proposal.disputeId) {
+      await this.disputes.update(
+        { organizationId, id: proposal.disputeId, resolvedAt: IsNull() },
+        {
+          state: ARBITRATION_STATE_MAP[ArbitrationOutcome.UPHELD],
+          resolvedAt: now,
+          resolvedBy: 'chain:undisputed',
+        },
+      );
+    }
+    await this.lifecycle.appendEventDirect({
+      organizationId,
+      proposalId,
+      occurredAt: now,
+      kind: 'AUTO_CLOSED',
+      actorType: 'system',
+      actorId: null,
+      summary:
+        'A record of this case stands on chain undisputed, so it executes after its ' +
+        'executableAt; only a dispute sent on chain (disputeSlash) could have frozen it',
+      detail: { from: proposal.status },
+    });
+    return true;
+  }
+
   private async openDispute(
     organizationId: string,
     proposalId: string,
