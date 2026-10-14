@@ -346,7 +346,6 @@ describe('SlashChainRulingService', () => {
 
     it('S-2: the cancel of a downward recalculation leaves the case open, and is no dispute won', async () => {
       const { service, parts, proposal, closed, events } = build('UPHELD', 'CANCEL_REQUESTED');
-      await service.recordDisputed(disputed(ID_A));
       await service.recordCancelled(cancelled(ID_A));
       await service.recordCancelled(cancelled(ID_B));
 
@@ -369,6 +368,16 @@ describe('SlashChainRulingService', () => {
       await service.recordCancelled(cancelled(ID_B, 'DISPUTE_UNRESOLVED' as never));
       expect(proposal.chainDisputeWonAt).toEqual(new Date('2026-10-16T00:00:00Z'));
       expect(closed).toHaveLength(1);
+    });
+
+    it("N-9: an arbiter's cancel of a DISPUTED part during a recalculation is the provider's win", async () => {
+      const { service, proposal, closed } = build('UPHELD', 'CANCEL_REQUESTED');
+      await service.recordDisputed(disputed(ID_A));
+      await service.recordDisputed(disputed(ID_B));
+      await service.recordCancelled(cancelled(ID_A));
+      await service.recordCancelled(cancelled(ID_B));
+      expect(proposal.chainDisputeWonAt).toEqual(new Date('2026-10-16T00:00:00Z'));
+      expect(closed).toEqual(['the arbiter ruled for the provider on chain (cancelSlash)']);
     });
 
     it('B7: a cancel of a part nobody disputed is not a dispute won', async () => {
@@ -488,6 +497,20 @@ describe('SlashChainRulingService', () => {
         chainExecutableAt: new Date('2026-10-17T00:10:00Z'),
       });
       expect(events.map((event) => event.kind)).toEqual(['CHAIN_PART_READOPTED']);
+    });
+
+    it('N-9: refuses a straggler of an earlier epoch and names it for the arbiter’s cancel', async () => {
+      const { service, parts, proposal, events, reconciled } = build('UPHELD');
+      proposal.chainEpoch = 1;
+      Object.assign(parts.get(ID_B)!, { chainStatus: 'REFUSED', chainLastError: 'Straggler:x' });
+      await expect(service.recordLateProposal(late(ID_B))).resolves.toBe(true);
+
+      expect(reconciled).toEqual([]);
+      expect(parts.get(ID_B)).toMatchObject({
+        chainStatus: 'PENDING',
+        chainLastError: 'SupersededEpoch',
+      });
+      expect(events.map((event) => event.kind)).toEqual(['CHAIN_SUPERSEDED_RECORD']);
     });
 
     it('leaves a standing part and a mismatched record alone', async () => {
