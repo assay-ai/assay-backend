@@ -1,5 +1,6 @@
 import { Column, Entity, Index } from 'typeorm';
 
+import { jsonbSafeTransformer } from './jsonb-safe.transformer';
 import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped.entity';
 
 /**
@@ -27,10 +28,22 @@ export class EvidenceBodyEntity extends OrganizationScopedEntityWithoutSoftDelet
   packId: string;
 
   /** The request as sent upstream, parsed. Null when the call had no body. */
-  @Column({ name: 'request', type: 'jsonb', nullable: true })
+  @Column({
+    name: 'request',
+    type: 'jsonb',
+    nullable: true,
+    // U+0000 and lone surrogates are escaped reversibly — see the transformer.
+    transformer: jsonbSafeTransformer,
+  })
   request: Record<string, unknown> | null;
 
-  @Column({ name: 'response', type: 'jsonb', nullable: true })
+  @Column({
+    name: 'response',
+    type: 'jsonb',
+    nullable: true,
+    // U+0000 and lone surrogates are escaped reversibly — see the transformer.
+    transformer: jsonbSafeTransformer,
+  })
   response: Record<string, unknown> | null;
 
   /** `sealed_at + EVIDENCE_BODY_RETENTION_HOURS`; the sweep's only predicate. */

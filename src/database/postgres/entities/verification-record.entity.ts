@@ -1,4 +1,5 @@
 import { Column, Entity, Index } from 'typeorm';
+import { jsonbSafeTransformer } from './jsonb-safe.transformer';
 import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped.entity';
 
 /**
@@ -66,11 +67,23 @@ export class VerificationRecordEntity extends OrganizationScopedEntityWithoutSof
   // ── Evidence in ───────────────────────────────────────────────────────────
 
   /** The agent's arguments. Read by rules gated on the request. */
-  @Column({ name: 'request', type: 'jsonb', nullable: true })
+  @Column({
+    name: 'request',
+    type: 'jsonb',
+    nullable: true,
+    // U+0000 and lone surrogates are escaped reversibly — see the transformer.
+    transformer: jsonbSafeTransformer,
+  })
   request: unknown;
 
   /** The provider's response **after** the binding's response mapping. */
-  @Column({ name: 'response', type: 'jsonb', nullable: true })
+  @Column({
+    name: 'response',
+    type: 'jsonb',
+    nullable: true,
+    // U+0000 and lone surrogates are escaped reversibly — see the transformer.
+    transformer: jsonbSafeTransformer,
+  })
   response: unknown;
 
   /** The tool's `outputSchema` as it stood at call time, so a replay is honest. */
