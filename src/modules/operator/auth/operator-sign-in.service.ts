@@ -13,7 +13,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 
 import { OperatorDto } from '../dto/operator-console.dto';
 import { OperatorErrors } from '../errors/operator.errors';
-import { OperatorAuthThrottle, ipKey, walletKey } from '../services/operator-auth-throttle.service';
+import { OperatorAuthThrottle, ipKey } from '../services/operator-auth-throttle.service';
 import { OperatorService } from '../services/operator.service';
 import {
   OPERATOR_CHALLENGE_TTL_SECONDS,
@@ -76,11 +76,12 @@ interface StoredChallenge {
  * from.
  *
  * Every failure is the one `OPERATOR_CREDENTIAL_INVALID`, and counts against
- * the client address (`OperatorAuthThrottle`). It counts against the wallet
- * too, but only once the message is exactly the one issued for that wallet:
- * the address in an unchecked message is whatever the caller wrote. A good signature
- * from a wallet that is not an active operator is `OPERATOR_NOT_AUTHORIZED`,
- * and counts too.
+ * the client address only (`OperatorAuthThrottle`). Nothing counts against
+ * the wallet: anyone can request a real challenge for any address and sign it
+ * badly, so a per-wallet count would let a stranger lock a named operator out,
+ * and a signature cannot be guessed, so the count would stop no attack. A good
+ * signature from a wallet that is not an active operator is
+ * `OPERATOR_NOT_AUTHORIZED`, and counts too.
  */
 @Injectable()
 export class OperatorSignInService {
@@ -136,16 +137,10 @@ export class OperatorSignInService {
 
     const fields = parseSignInMessage(message);
     const address = typeof fields.address === 'string' ? fields.address.toLowerCase() : null;
-    if (address) await this.throttle.assertNotBlocked(walletKey(address));
 
-    // The message is unsigned until proven otherwise, so the wallet it names
-    // is counted only once it is the message issued for that wallet. Before
-    // that, a made-up message naming somebody's address would lock them out.
-    let issuedToWallet = false;
     const fail = async (reason: string): Promise<never> => {
       this.logger.warn(`operator sign-in refused: ${reason}; wallet ${address ?? '-'} ip ${ip}`);
       await this.throttle.recordFailure(ipKey(ip));
-      if (address && issuedToWallet) await this.throttle.recordFailure(walletKey(address));
       throw OperatorErrors.credentialInvalid();
     };
 
@@ -158,7 +153,6 @@ export class OperatorSignInService {
     if (stored.message !== message || stored.address !== address) {
       return fail('message differs from the challenge');
     }
-    issuedToWallet = true;
 
     // The message is the one issued, so these hold unless the configuration
     // changed in between — checked anyway, because they are the property.
@@ -185,7 +179,6 @@ export class OperatorSignInService {
           `${operator ? ` (${operator.id}, ${operator.status})` : ''}; wallet ${address} ip ${ip}`,
       );
       await this.throttle.recordFailure(ipKey(ip));
-      await this.throttle.recordFailure(walletKey(address));
       throw OperatorErrors.notAuthorized();
     }
 

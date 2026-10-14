@@ -231,23 +231,25 @@ describe('OperatorSignInService — sign in with a wallet', () => {
     await expect(ctx.signIn.logout(token)).resolves.toBeUndefined();
   });
 
-  it('throttles failed verifications per wallet, across addresses', async () => {
+  it('never locks a wallet out: real challenges signed badly by strangers do not count against it', async () => {
     const ctx = build();
     const account = await operatorWallet(ctx);
 
-    for (let attempt = 0; attempt < OPERATOR_AUTH_MAX_FAILURES; attempt += 1) {
+    for (let attempt = 0; attempt < OPERATOR_AUTH_MAX_FAILURES + 2; attempt += 1) {
       const { message } = await ctx.signIn.challenge(account.address, `198.51.100.${attempt}`);
       await ctx.signIn
         .verify(message, await wallet().signMessage({ message }), `198.51.100.${attempt}`)
         .catch(() => undefined);
     }
 
-    // Even with a good signature, from a fresh address.
+    // The operator, from their own address, still signs in.
     const { message } = await ctx.signIn.challenge(account.address, '192.0.2.1');
-    await expectErrorCodeAsync(
-      async () => ctx.signIn.verify(message, await account.signMessage({ message }), '192.0.2.1'),
-      'OPERATOR_AUTH_RATE_LIMITED',
+    const signedIn = await ctx.signIn.verify(
+      message,
+      await account.signMessage({ message }),
+      '192.0.2.1',
     );
+    expect(signedIn.token).toBeTruthy();
   });
 
   it('does not count a made-up message against the wallet it names', async () => {
