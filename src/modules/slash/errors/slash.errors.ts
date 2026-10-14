@@ -30,10 +30,17 @@ export enum SlashErrorCode {
   SLASH_CHAIN_UNAVAILABLE = 'SLASH_CHAIN_UNAVAILABLE',
   /** The signature offered as a compensation does not show the deposit it claims. */
   SLASH_COMPENSATION_NOT_CONFIRMED = 'SLASH_COMPENSATION_NOT_CONFIRMED',
+  SLASH_COMPENSATION_ALREADY_USED = 'SLASH_COMPENSATION_ALREADY_USED',
+  SLASH_PLAN_EVIDENCE_MISMATCH = 'SLASH_PLAN_EVIDENCE_MISMATCH',
+  SLASH_SWEEP_DEFECT_KEY_MISMATCH = 'SLASH_SWEEP_DEFECT_KEY_MISMATCH',
   /** A pro-rata window case found no agent with a priced DATA_FAIL call to compensate. */
   SLASH_NO_HARMED_AGENTS = 'SLASH_NO_HARMED_AGENTS',
   /** A case whose beneficiary cannot be named on this chain (e.g. the EVM vault). */
   SLASH_BENEFICIARY_UNSUPPORTED = 'SLASH_BENEFICIARY_UNSUPPORTED',
+  /** A dispute-upgrade batch (D-19) the chain would revert: one entry per refused id. */
+  SLASH_CHAIN_BATCH_REFUSED = 'SLASH_CHAIN_BATCH_REFUSED',
+  SLASH_DISPUTE_WON_ON_CHAIN = 'SLASH_DISPUTE_WON_ON_CHAIN',
+  SLASH_BENEFICIARY_EVIDENCE_REFUSED = 'SLASH_BENEFICIARY_EVIDENCE_REFUSED',
 }
 
 export type SlashErrorCodesArePrefixed = AssertDomainErrorCodes<'SLASH', `${SlashErrorCode}`>;
@@ -297,11 +304,20 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     code: SlashErrorCode.SLASH_COMPENSATION_NOT_CONFIRMED,
     statusCode: 409,
     message: (context?: Record<string, any>) =>
-      `That transaction does not show a confirmed deposit into this provider's stake for at ` +
+      `That transaction does not show a confirmed deposit by the settlement treasury into this ` +
+      `provider's stake, made after the slash executed, for at ` +
       `least ${String(context?.owed ?? 'the amount taken')}` +
       `${context?.deposited ? ` — it deposited ${String(context.deposited)}` : ''}` +
       `${context?.signature ? ` (${String(context.signature)})` : ''}` +
       `. Nothing on the case was changed.`,
+  },
+  /** One deposit compensates one case (review M-3, `uq_slash_proposals_reversal_signature`). */
+  compensationAlreadyUsed: {
+    code: SlashErrorCode.SLASH_COMPENSATION_ALREADY_USED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `That deposit${context?.signature ? ` (${String(context.signature)})` : ''} already ` +
+      `compensates another case. One deposit compensates one case. Nothing on this case was changed.`,
   },
   chainUnavailable: {
     code: SlashErrorCode.SLASH_CHAIN_UNAVAILABLE,
@@ -338,6 +354,19 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
    * providers whose facts were never in question — the same defect as levying
    * them, pointed the other way.
    */
+  /**
+   * A sweep matches cases by `root_cause_key`, so the key it uses must be the
+   * source case's own (review M-2). Before, any free-text key was accepted and
+   * the source case only had to have a sweepable outcome.
+   */
+  sweepDefectKeyMismatch: {
+    code: SlashErrorCode.SLASH_SWEEP_DEFECT_KEY_MISMATCH,
+    statusCode: 422,
+    message: (context?: Record<string, any>) =>
+      context?.rootCauseKey
+        ? `The sweep's defect key must be the source case's root cause (${String(context.rootCauseKey)}), not ${String(context?.defectKey ?? '')}.`
+        : `The source case has no root cause key, so it cannot open a fleet sweep.`,
+  },
   outcomeNotSweepable: {
     code: SlashErrorCode.SLASH_SWEEP_OUTCOME_NOT_SWEEPABLE,
     statusCode: 422,
@@ -372,6 +401,19 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
    * price, or every share was reduced to nothing by the on-chain caps. Left
    * for a human rather than voided — the provider still breached its SLA.
    */
+  /**
+   * The stored pro-rata plan does not follow from the window's evidence
+   * (review H-2), so nothing was signed or sent. Not a chain refusal: the
+   * case stays PROPOSING, `chain_last_error` names this code, and a
+   * `PLAN_REFUSED` event on the timeline asks an operator to look.
+   */
+  planEvidenceMismatch: {
+    code: SlashErrorCode.SLASH_PLAN_EVIDENCE_MISMATCH,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Slash case ${context?.proposalId ?? ''}: the stored plan does not match the evidence` +
+      `${context?.reason ? ` (${context.reason})` : ''}. Nothing was signed or sent.`,
+  },
   noHarmedAgents: {
     code: SlashErrorCode.SLASH_NO_HARMED_AGENTS,
     statusCode: 409,
@@ -391,5 +433,54 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     message: (context?: Record<string, any>) =>
       `No beneficiary can be named for this case on ${context?.chainId ?? 'this chain'}` +
       `${context?.reason ? `: ${context.reason}` : ''}`,
+  },
+  /**
+   * `disputeSlashBatch`, `upholdSlashBatch` and `cancelSlashBatch` are atomic:
+   * one bad id reverts them all. Nothing was built; `context.refusals` names
+   * every id the chain would refuse and why (`NotSlashedProvider`,
+   * `SlashNotPending`, `DisputeWindowClosed`, `SlashNotDisputed`,
+   * `DisputeTimedOut`, `SlashAlreadyDisputed`, `NoSuchRecord`,
+   * `DuplicateId`).
+   */
+  /**
+   * Follow-up B7: the provider won an on-chain dispute over these calls, so
+   * the incident is never proposed again — not under a new request id, and not
+   * as a new case over the same window.
+   */
+  disputeWonOnChain: {
+    code: SlashErrorCode.SLASH_DISPUTE_WON_ON_CHAIN,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The provider won the on-chain dispute of case ${context?.proposalId ?? ''}` +
+      `${context?.windowId ? ` (window ${context.windowId})` : ''}; these calls cannot be ` +
+      'proposed again',
+  },
+  /**
+   * Follow-up C5: a part's beneficiary is not a payer of the window's failed
+   * calls, or the part is more than that payer's pro-rata share of the formula
+   * penalty (one minor unit of rounding allowed). Nothing was signed; the case stays PROPOSING and
+   * a `BENEFICIARY_REFUSED` timeline entry names every part that failed.
+   */
+  beneficiaryEvidenceRefused: {
+    code: SlashErrorCode.SLASH_BENEFICIARY_EVIDENCE_REFUSED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Slash case ${context?.proposalId ?? ''}: refused before signing — ` +
+      `${context?.reason ?? 'a beneficiary does not match the paid vouchers'}`,
+  },
+  chainBatchRefused: {
+    code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,
+    statusCode: 422,
+    // The caller's own ids and why each would revert: on the wire as
+    // `error.context`, so a client need not parse the message.
+    publicContext: ['functionName', 'refusals'],
+    message: (context?: Record<string, any>) => {
+      const refusals = (context?.refusals ?? []) as { requestId: string; reason: string }[];
+      return (
+        `${refusals.length} of the request ids would make the chain revert the whole ` +
+        `${context?.functionName ?? 'batch'}; nothing was built: ` +
+        refusals.map((refusal) => `0x${refusal.requestId} (${refusal.reason})`).join(', ')
+      );
+    },
   },
 });

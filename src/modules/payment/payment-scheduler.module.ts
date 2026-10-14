@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { FeePayerSignerModule } from '@modules/chains/facilitator/signing/fee-payer-signer.module';
 import { LedgerModule } from '@modules/ledger/ledger.module';
@@ -45,7 +46,7 @@ import { VoucherRedemptionService } from './services/voucher-redemption.service'
   // `VoucherRedemptionService` injects `LedgerService` to write the
   // platform-absorbed `PROVIDER_CREDIT`, and `PaymentModule` imports the ledger
   // without re-exporting it.
-  imports: [PaymentModule, ChainsModule, LedgerModule, FeePayerSignerModule],
+  imports: [PaymentModule, ChainsModule, LedgerModule, FeePayerSignerModule, BlocklistModule],
   providers: [
     PaymentIntentExpiryJob,
     DepositIntentExpiryJob,

@@ -24,7 +24,8 @@ import { MetricsCollectorService } from '../services/metrics-collector.service';
  * `OPERATOR_SURFACE` docstring describes as the expected workflow for a new
  * operator route. So `/metrics` sits behind the same guard as
  * `ObservabilityDashboardController` instead: a scrape config now needs an
- * operator bearer token (`OPERATOR_CREDENTIALS_FILE`), which is unusual for a
+ * operator session token (a wallet sign-in, `POST /operator/auth/verify`, which
+ * expires within hours — so a long-running scraper cannot hold one), which is unusual for a
  * Prometheus target but keeps this codebase's one authorization rule
  * genuinely closed rather than growing a third informal exception. Revisiting
  * this — e.g. adding a dedicated "unauthenticated infra route" allowlist to

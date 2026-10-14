@@ -1,12 +1,17 @@
 import { randomUUID } from 'node:crypto';
 
-import { RedeemableIntent } from '@database/postgres/repositories/payment-intent.repository';
+import {
+  RedeemableIntent,
+  RedemptionExclusions,
+} from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import {
   MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+  REDEEM_GRACE_SECONDS,
   VOUCHER_REDEMPTION_ALERTS,
+  VOUCHER_REDEMPTION_BATCH,
 } from '@modules/payment/constants/voucher-redemption.constants';
 import {
   RedeemOutcome,
@@ -15,6 +20,9 @@ import {
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
 import { Alert, AlertSeverity } from '@shared/alerting';
+import { BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
+
+import { blocklistOf, noBlocks } from '../helpers/blocklist';
 
 /**
  * `VoucherRedemptionService` — what happens to a rail-B hold after the verdict
@@ -103,7 +111,7 @@ class FakeAlerts {
   }
 }
 
-function build(rows: RedeemableIntent[]) {
+function build(rows: RedeemableIntent[], blocklist = noBlocks()) {
   const redeemer = new FakeRedeemer();
   const alerts = new FakeAlerts();
   const intents = {
@@ -119,6 +127,7 @@ function build(rows: RedeemableIntent[]) {
     ledger as never,
     redeemer as never,
     alerts as never,
+    blocklist,
     () => NOW_SECONDS * 1000,
   );
 
@@ -325,5 +334,220 @@ describe('VoucherRedemptionService.run', () => {
     // earnings account is derived from a provider the row does not name would
     // move a buyer's money to nobody.
     expect(redeemer.calls).toEqual([]);
+  });
+});
+
+/**
+ * The queue as Postgres answers it: `ORDER BY agent_account, voucher_seq`,
+ * the `LIMIT`, and the blocked-party exclusion applied BEFORE the limit (a
+ * row is left out when it or an earlier seq of the same payer has a blocked
+ * party). The redeemer models the chain's expiry: `VoucherExpired` once
+ * `now > expiresAt + REDEEM_GRACE_SECONDS`. Audit T-1: the fake used to ignore
+ * both the clock and `limit`, so it could not express E-1 or E-2.
+ */
+function realisticBuild(all: RedeemableIntent[], blocklist = noBlocks()) {
+  let now = NOW_SECONDS;
+  const calls: RedeemVoucherRequest[] = [];
+  const redeemer = {
+    maxBatchSize: 1,
+    async redeemBatch(requests: readonly RedeemVoucherRequest[]) {
+      return Promise.all(requests.map((request) => redeemer.redeem(request)));
+    },
+    async redeem(request: RedeemVoucherRequest): Promise<RedeemOutcome> {
+      calls.push(request);
+      if (now > request.expiresAt + REDEEM_GRACE_SECONDS) {
+        return {
+          kind: RedeemOutcomeKind.UNREDEEMABLE,
+          signature: null,
+          programError: 'VoucherExpired',
+        };
+      }
+      return {
+        kind: RedeemOutcomeKind.REDEEMED,
+        signature: `sig-${request.seq}`,
+        programError: null,
+      };
+    },
+  };
+  const open = new Set(all.map((row) => row.id));
+  const intents = {
+    commitRedeemedHold: jest.fn(async (_org: string, id: string) => void open.delete(id)),
+    releaseHold: jest.fn(async ({ id }: { id: string }) => open.delete(id)),
+  };
+  const ledger = { appendNow: jest.fn().mockResolvedValue(undefined) };
+  const walletKey = (account: string | null) =>
+    account ? subjectKey(BlockSubjectKind.WALLET, account) : null;
+  const payments = {
+    findAwaitingRedemption: jest.fn(
+      async (_a: string, _s: string, _r: string, limit: number, exclude?: RedemptionExclusions) => {
+        const live = all.filter((row) => open.has(row.id));
+        const blockedRow = (row: RedeemableIntent) =>
+          !!exclude &&
+          (exclude.organizationIds.includes(row.organizationId) ||
+            exclude.organizationIds.includes(row.providerId ?? '') ||
+            [row.agentAccount, row.providerAccount, row.voucherDelegate].some(
+              (account) =>
+                (walletKey(account) !== null && exclude.walletKeys.includes(walletKey(account)!)) ||
+                (!!account && exclude.chainAccounts.includes(account.toLowerCase())),
+            ));
+        return live
+          .filter(
+            (row) =>
+              !live.some(
+                (other) =>
+                  other.agentAccount === row.agentAccount &&
+                  Number(other.voucherSeq) <= Number(row.voucherSeq) &&
+                  blockedRow(other),
+              ),
+          )
+          .sort(
+            (a, b) =>
+              a.agentAccount.localeCompare(b.agentAccount) ||
+              Number(a.voucherSeq) - Number(b.voucherSeq),
+          )
+          .slice(0, limit);
+      },
+    ),
+  };
+  const service = new VoucherRedemptionService(
+    payments as never,
+    intents as never,
+    ledger as never,
+    redeemer as never,
+    new FakeAlerts() as never,
+    blocklist,
+    () => now * 1000,
+  );
+  return { service, calls, intents, ledger, payments, setNow: (s: number) => (now = s) };
+}
+
+describe('VoucherRedemptionService.run, with a party blocked', () => {
+  const PROVIDER_UUID = '33333333-3333-4333-8333-333333333333';
+
+  it('redeems nothing whose payer wallet is blocked, and keeps the hold open', async () => {
+    const { service, redeemer, intents } = build(
+      [pending(1), pending(2, { agentAccount: OTHER_BUYER })],
+      blocklistOf({ kind: BlockSubjectKind.WALLET, subject: BUYER }),
+    );
+
+    await service.run(USDC);
+
+    expect(redeemer.calls.map((call) => call.payer)).toEqual([OTHER_BUYER]);
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(1);
+  });
+
+  it('holds a voucher whose provider is blocked, and the payer’s later seqs behind it', async () => {
+    const { service, redeemer } = build(
+      [pending(1, { providerId: PROVIDER_UUID }), pending(2), pending(3)],
+      blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: PROVIDER_UUID }),
+    );
+
+    await service.run(USDC);
+
+    // Redeeming seq 2 would make seq 1 unredeemable for ever.
+    expect(redeemer.calls).toEqual([]);
+  });
+
+  it('holds a voucher whose payee wallet or delegate is blocked', async () => {
+    const delegate = `${CHAIN_IDS.SOLANA_DEVNET}:DeLeGaTe1111111111111111111111111111111111`;
+    const payee = build(
+      [pending(1)],
+      blocklistOf({ kind: BlockSubjectKind.WALLET, subject: PROVIDER_ACCOUNT }),
+    );
+    await payee.service.run(USDC);
+    expect(payee.redeemer.calls).toEqual([]);
+
+    const signer = build(
+      [pending(1, { voucherDelegate: delegate })],
+      blocklistOf({ kind: BlockSubjectKind.WALLET, subject: delegate }),
+    );
+    await signer.service.run(USDC);
+    expect(signer.redeemer.calls).toEqual([]);
+  });
+
+  it('resumes after a short block, inside the voucher’s on-chain life', async () => {
+    const blocklist = blocklistOf({ kind: BlockSubjectKind.WALLET, subject: BUYER });
+    const { service, calls, ledger, setNow } = realisticBuild([pending(1)], blocklist);
+    await service.run(USDC);
+    expect(calls).toEqual([]);
+
+    setNow(NOW_SECONDS + 600); // a ten-minute block: expiresAt + grace not reached
+    await blocklist.applied({
+      kind: 'unblocked',
+      subjectKind: BlockSubjectKind.WALLET,
+      subjectKey: subjectKey(BlockSubjectKind.WALLET, BUYER) as string,
+    });
+    await service.run(USDC);
+    expect(calls.map((call) => call.seq)).toEqual(['1']);
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+  });
+
+  it('AUDIT E-2: past its on-chain expiry a held voucher is absorbed: provider paid, buyer not charged', async () => {
+    // Owner decision: the platform bears a voucher held past its expiry.
+    const blocklist = blocklistOf({ kind: BlockSubjectKind.WALLET, subject: BUYER });
+    const { service, calls, ledger, intents, setNow } = realisticBuild([pending(1)], blocklist);
+    await service.run(USDC);
+    expect(calls).toEqual([]);
+
+    setNow(NOW_SECONDS + 3600); // the block lasted an hour
+    await blocklist.applied({
+      kind: 'unblocked',
+      subjectKind: BlockSubjectKind.WALLET,
+      subjectKey: subjectKey(BlockSubjectKind.WALLET, BUYER) as string,
+    });
+    await service.run(USDC);
+    expect(calls).toHaveLength(1);
+    expect(ledger.appendNow).toHaveBeenCalledWith(
+      expect.objectContaining({ entryType: LedgerEntryType.PROVIDER_CREDIT }),
+    );
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+  });
+
+  it('AUDIT E-1: a blocked payer with a full batch of holds does not starve another buyer', async () => {
+    const rows = [
+      ...Array.from({ length: VOUCHER_REDEMPTION_BATCH + 5 }, (_, i) =>
+        pending(i + 1, { id: `blocked-${i + 1}` }),
+      ),
+      pending(1, { id: 'honest-1', agentAccount: OTHER_BUYER }),
+    ];
+    // BUYER sorts before OTHER_BUYER, so its rows are at the head of the queue.
+    expect(BUYER.localeCompare(OTHER_BUYER)).toBeLessThan(0);
+    const { service, calls, payments } = realisticBuild(
+      rows,
+      blocklistOf({ kind: BlockSubjectKind.WALLET, subject: BUYER }),
+    );
+    await service.run(USDC);
+    expect(calls.map((call) => call.payer)).toEqual([OTHER_BUYER]);
+    expect(payments.findAwaitingRedemption.mock.calls[0][4]).toEqual({
+      organizationIds: [],
+      walletKeys: [subjectKey(BlockSubjectKind.WALLET, BUYER)],
+      chainAccounts: [],
+    });
+  });
+
+  it('AUDIT E-1: an on-chain blocked payer is left out of the query too', async () => {
+    const rows = [pending(1), pending(1, { id: 'honest-1', agentAccount: OTHER_BUYER })];
+    const { payments } = realisticBuild(rows);
+    const chainState = {
+      holdReason: jest.fn().mockResolvedValue(null),
+      blockedAccounts: jest.fn().mockResolvedValue([BUYER.toLowerCase()]),
+    };
+    const service = new VoucherRedemptionService(
+      payments as never,
+      { commitRedeemedHold: jest.fn(), releaseHold: jest.fn() } as never,
+      { appendNow: jest.fn() } as never,
+      new FakeRedeemer() as never,
+      new FakeAlerts() as never,
+      noBlocks(),
+      () => NOW_SECONDS * 1000,
+      chainState as never,
+    );
+    await service.run(USDC);
+    expect(chainState.blockedAccounts).toHaveBeenCalledWith(USDC.split('/')[0]);
+    expect(payments.findAwaitingRedemption.mock.calls[0][4].chainAccounts).toEqual([
+      BUYER.toLowerCase(),
+    ]);
   });
 });

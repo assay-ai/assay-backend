@@ -281,8 +281,8 @@ describe('agent payment delegation — the relayed EVM doors', () => {
     });
   });
 
-  describe('EvmEscrowIntentBuilder.list before the upgrade (review S3-18)', () => {
-    it('reads an escrow without delegatesOf (a revert) as no delegates', async () => {
+  describe('EvmEscrowIntentBuilder.list failures', () => {
+    it('fails on a revert: the backend assumes the upgraded escrow', async () => {
       const builder = builderWith({
         delegatesOf: () => {
           throw Object.assign(new Error('reverted'), {
@@ -291,7 +291,7 @@ describe('agent payment delegation — the relayed EVM doors', () => {
           });
         },
       });
-      expect(await builder.list(PAYER_ACCOUNT)).toEqual([]);
+      await expect(builder.list(PAYER_ACCOUNT)).rejects.toThrow('reverted');
     });
 
     it('still fails on an outage', async () => {

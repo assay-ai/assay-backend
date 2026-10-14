@@ -123,14 +123,27 @@ class PassThroughOverrideLog {
 
   constructor(private readonly manager: FakeTxManager) {}
 
+  /** The whole context of each call: amount, approver, escalation. */
+  readonly contexts: Record<string, unknown>[] = [];
+  /** What the register would hold: one entry per performed override. */
+  readonly entries: { code: string; targetId: string; after: Record<string, unknown> }[] = [];
+
   async perform<T>(
-    context: { code: string; reason: string },
-    mutation: (qr: { manager: FakeTxManager }) => Promise<{ value: T }>,
+    context: { code: string; reason: string; targetId: string },
+    mutation: (qr: {
+      manager: FakeTxManager;
+    }) => Promise<{ value: T; after: Record<string, unknown> }>,
   ): Promise<T> {
     this.performed.push({ code: context.code, reason: context.reason });
+    this.contexts.push(context as unknown as Record<string, unknown>);
     this.beforeMutation?.();
     const result = await mutation({ manager: this.manager });
+    this.entries.push({ code: context.code, targetId: context.targetId, after: result.after });
     return result.value;
+  }
+
+  async historyFor(_targetType: string, targetId: string) {
+    return this.entries.filter((entry) => entry.targetId === targetId);
   }
 }
 
@@ -170,6 +183,18 @@ function build(config = TEST_SLASH_CONFIG) {
 
   const manager = new FakeTxManager(proposals, disputes);
   const overrides = new PassThroughOverrideLog(manager);
+  // `claim` opens its own transaction on the repository's connection. The
+  // hook fires after the service has read the row and before the transaction
+  // writes — the interval a concurrent decision lands in.
+  const claimTx: { beforeWrites: (() => void) | null } = { beforeWrites: null };
+  Object.assign(proposals, {
+    manager: {
+      transaction: async (work: (tx: { queryRunner: { manager: FakeTxManager } }) => unknown) => {
+        claimTx.beforeWrites?.();
+        return work({ queryRunner: { manager } });
+      },
+    },
+  });
   const execution = new FakeSlashExecution();
 
   const lifecycle = new SlashProposalService(
@@ -189,7 +214,7 @@ function build(config = TEST_SLASH_CONFIG) {
     execution as never,
   );
 
-  return { proposals, events, notifications, disputes, overrides, execution, service };
+  return { proposals, events, notifications, disputes, overrides, execution, service, claimTx };
 }
 
 /**
@@ -438,6 +463,126 @@ describe('ArbitrationService', () => {
       expect(row.resolvedAt).not.toBeNull();
       expect(dispute.state).toBe('UPHELD');
       expect(ctx.overrides.performed.map((p) => p.code)).toEqual(['S-3', 'S-12']);
+    });
+
+    /**
+     * The threshold and the authority limit are about the penalty the case
+     * CARRIES. Measured on the recalculated figure, one adjudicator could cut a
+     * 28.47 penalty to one minor unit alone: 1 is below every threshold and
+     * inside every limit.
+     */
+    describe('a recalculation of a material penalty', () => {
+      const ORIGINAL = '28470000';
+
+      async function decideRecalculated(ctx: ReturnType<typeof build>, recalculatedAmount: string) {
+        return ctx.service.decide(ADJUDICATOR as never, 'org_1', 'p1', {
+          outcome: ArbitrationOutcome.UPHELD_RECALCULATED,
+          reasonCodes: ['PRICE_BASIS_WRONG'],
+          note: NOTE,
+          recalculatedAmount,
+        });
+      }
+
+      it('needs a second signature however small the recalculated figure is', async () => {
+        const ctx = build();
+        seedDisputed(ctx, ORIGINAL);
+
+        await decideRecalculated(ctx, '1');
+
+        const row = ctx.proposals.rows.get('p1')!;
+        expect(row.status).toBe(SlashProposalStatus.AWAITING_SECOND);
+        expect(ctx.execution.reproposeCalls).toEqual([]);
+      });
+
+      it('checks the authority limit against the original penalty', async () => {
+        const ctx = build();
+        seedDisputed(ctx, ORIGINAL);
+
+        await decideRecalculated(ctx, '1');
+
+        expect(ctx.overrides.contexts[0]).toMatchObject({ code: 'S-3', amountMinor: ORIGINAL });
+      });
+
+      it('checks it against the original below the threshold too', async () => {
+        const ctx = build();
+        seedDisputed(ctx, '2000000');
+
+        await decideRecalculated(ctx, '1');
+
+        expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.UPHELD);
+        expect(ctx.overrides.contexts[0]).toMatchObject({ amountMinor: '2000000' });
+      });
+
+      /** A decision nobody has countersigned has not changed the penalty. */
+      it('leaves the penalty where it was until the decision binds', async () => {
+        const ctx = build();
+        seedDisputed(ctx, ORIGINAL);
+
+        await decideRecalculated(ctx, '400000');
+
+        expect(ctx.proposals.rows.get('p1')!.penaltyAmount).toBe(ORIGINAL);
+        // The decided figure is on the register entry and on the timeline.
+        expect(ctx.overrides.entries[0].after).toMatchObject({ penaltyAmount: '400000' });
+        expect(ctx.events.rows[0].summary).toContain('400000');
+        expect(ctx.events.rows[0].detail).toMatchObject({ penaltyAmount: '400000' });
+      });
+
+      it('writes the recalculated penalty when the second reader signs', async () => {
+        const ctx = build();
+        seedDisputed(ctx, ORIGINAL);
+        await decideRecalculated(ctx, '400000');
+
+        await ctx.service.second(SECOND as never, 'org_1', 'p1', 'SIGNED', 'agreed');
+
+        const row = ctx.proposals.rows.get('p1')!;
+        expect(row.status).toBe(SlashProposalStatus.UPHELD);
+        expect(row.penaltyAmount).toBe('400000');
+        expect(row.outcome).toBe(ArbitrationOutcome.UPHELD_RECALCULATED);
+        // The countersigner's own limit is checked against the original too.
+        expect(ctx.overrides.contexts[1]).toMatchObject({ code: 'S-12', amountMinor: ORIGINAL });
+        expect(ctx.execution.reproposeCalls).toEqual([
+          { organizationId: 'org_1', proposalId: 'p1' },
+        ]);
+      });
+
+      it('leaves the original penalty on the case when the second reader objects', async () => {
+        const ctx = build();
+        seedDisputed(ctx, ORIGINAL);
+        await decideRecalculated(ctx, '400000');
+
+        await ctx.service.second(SECOND as never, 'org_1', 'p1', 'OBJECTED', 'the basis is right');
+
+        const row = ctx.proposals.rows.get('p1')!;
+        expect(row.status).toBe(SlashProposalStatus.UNDER_REVIEW);
+        expect(row.penaltyAmount).toBe(ORIGINAL);
+        expect(ctx.execution.reproposeCalls).toEqual([]);
+      });
+
+      it('refuses to countersign a recalculation whose decided figure cannot be read', async () => {
+        const ctx = build();
+        seedDisputed(ctx, ORIGINAL);
+        await decideRecalculated(ctx, '400000');
+        ctx.overrides.entries.length = 0;
+
+        await expect(
+          ctx.service.second(SECOND as never, 'org_1', 'p1', 'SIGNED', 'agreed'),
+        ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_SECOND_SIGNATURE_NOT_PENDING });
+
+        const row = ctx.proposals.rows.get('p1')!;
+        expect(row.status).toBe(SlashProposalStatus.AWAITING_SECOND);
+        expect(row.penaltyAmount).toBe(ORIGINAL);
+      });
+
+      it('still lets an objection through when the decided figure cannot be read', async () => {
+        const ctx = build();
+        seedDisputed(ctx, ORIGINAL);
+        await decideRecalculated(ctx, '400000');
+        ctx.overrides.entries.length = 0;
+
+        await ctx.service.second(SECOND as never, 'org_1', 'p1', 'OBJECTED', 'the basis is right');
+
+        expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.UNDER_REVIEW);
+      });
     });
 
     it('refuses a countersignature from the operator who decided', async () => {
@@ -708,6 +853,136 @@ describe('ArbitrationService', () => {
       expect(row.resolutionKind ?? null).toBeNull();
       expect(row.resolvedAt ?? null).toBeNull();
       expect(ctx.overrides.performed).toEqual([{ code: 'S-1', reason: NOTE }]);
+    });
+
+    /**
+     * A suspension recorded only in Postgres leaves the on-chain record
+     * standing: the stake stays reserved and, once the timelock passes, anyone
+     * may execute it. So it asks for the cancel exactly as an overturn does.
+     */
+    it('asks for the standing on-chain proposal to be cancelled', async () => {
+      const ctx = build();
+      ctx.proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.PROPOSED,
+      });
+
+      await ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE);
+
+      expect(ctx.execution.adminCancelRequests).toEqual([
+        { organizationId: 'org_1', proposalId: 'p1', reason: 'SUSPENDED' },
+      ]);
+      expect(ctx.execution.reproposeCalls).toEqual([]);
+    });
+
+    it('asks for nothing when the suspension is refused', async () => {
+      const ctx = build();
+      ctx.proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.EXECUTING,
+      });
+
+      await expect(
+        ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE),
+      ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION });
+
+      expect(ctx.execution.adminCancelRequests).toEqual([]);
+    });
+
+    /**
+     * A suspension is one person's act only while nobody else has ruled on the
+     * case. Once a second person has confirmed the penalty (UPHELD) or is
+     * confirming it (AWAITING_SECOND), cancelling it alone would undo two
+     * people's decision — so it needs an approver.
+     */
+    describe('who may suspend alone', () => {
+      it.each([
+        SlashProposalStatus.PROPOSED,
+        SlashProposalStatus.DISPUTED,
+        SlashProposalStatus.UNDER_REVIEW,
+      ])('is a single-person action from %s, and passes on a supplied approver', async (status) => {
+        const ctx = build();
+        ctx.proposals.seed({ id: 'p1', organizationId: 'org_1', status, penaltyAmount: '700' });
+
+        await ctx.service.suspend(
+          ADJUDICATOR as never,
+          'org_1',
+          'p1',
+          'S1_OPERATOR_HOLD',
+          NOTE,
+          null,
+          null,
+          SECOND as never,
+        );
+
+        // Not required here; passed on so that an approval queued while the
+        // case needed one is still marked done when it is approved later.
+        expect(ctx.overrides.contexts[0]).toMatchObject({
+          code: 'S-1',
+          escalateToTwoPerson: false,
+          approver: SECOND,
+          amountMinor: '700',
+        });
+      });
+
+      it.each([SlashProposalStatus.AWAITING_SECOND, SlashProposalStatus.UPHELD])(
+        'is raised to two-person from %s and carries the approver',
+        async (status) => {
+          const ctx = build();
+          ctx.proposals.seed({ id: 'p1', organizationId: 'org_1', status, penaltyAmount: '700' });
+
+          await ctx.service.suspend(
+            ADJUDICATOR as never,
+            'org_1',
+            'p1',
+            'S1_OPERATOR_HOLD',
+            NOTE,
+            null,
+            null,
+            SECOND as never,
+          );
+
+          expect(ctx.overrides.contexts[0]).toMatchObject({
+            code: 'S-1',
+            escalateToTwoPerson: true,
+            approver: SECOND,
+            amountMinor: '700',
+          });
+        },
+      );
+
+      it('is raised to two-person from UPHELD with no approver, for the register to refuse', async () => {
+        const ctx = build();
+        ctx.proposals.seed({
+          id: 'p1',
+          organizationId: 'org_1',
+          status: SlashProposalStatus.UPHELD,
+        });
+
+        await ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE);
+
+        expect(ctx.overrides.contexts[0]).toMatchObject({
+          escalateToTwoPerson: true,
+          approver: null,
+        });
+      });
+    });
+
+    /** The suspension has committed; a failed request is repaired by the lifecycle job. */
+    it('does not fail a committed suspension when the cancel request throws', async () => {
+      const ctx = build();
+      ctx.proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.PROPOSED,
+      });
+      ctx.execution.throws = new Error('database unavailable');
+
+      await expect(
+        ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE),
+      ).resolves.toMatchObject({ status: SlashProposalStatus.CANCELLED });
     });
   });
 
@@ -1051,13 +1326,16 @@ describe('ArbitrationService', () => {
       expect(ctx.proposals.transitions).toEqual([]);
     });
 
+    /**
+     * The whole claim is one transaction whose first statement is a
+     * compare-and-swap on the case status, so a decision that lands between
+     * the read and the write leaves nothing of the claim behind.
+     */
     it('writes nothing when the case leaves DISPUTED between the read and the claim', async () => {
       const ctx = build();
       const dispute = seedDisputed(ctx);
-      const original = ctx.proposals.transitionIfIn.bind(ctx.proposals);
-      ctx.proposals.transitionIfIn = async (...args: Parameters<typeof original>) => {
+      ctx.claimTx.beforeWrites = () => {
         ctx.proposals.rows.get('p1')!.status = SlashProposalStatus.OVERTURNED;
-        return original(...args);
       };
 
       await expect(ctx.service.claim(ADJUDICATOR as never, 'org_1', 'p1')).rejects.toMatchObject({
@@ -1067,5 +1345,38 @@ describe('ArbitrationService', () => {
       expect(dispute.assignedOperatorId).toBeUndefined();
       expect(ctx.events.kinds()).toEqual([]);
     });
+
+    /**
+     * The sibling the DISPUTED guard did not cover: a re-claim of a case that
+     * is UNDER_REVIEW or AWAITING_SECOND wrote the dispute row and the ASSIGNED
+     * event unconditionally, so a decision landing first was re-assigned on a
+     * case that was already decided.
+     */
+    it.each([
+      [SlashProposalStatus.UNDER_REVIEW, SlashProposalStatus.OVERTURNED],
+      [SlashProposalStatus.AWAITING_SECOND, SlashProposalStatus.UPHELD],
+    ])(
+      'writes nothing when a %s case is decided (%s) between the read and the claim',
+      async (from, decidedAs) => {
+        const ctx = build();
+        const dispute = seedInStatus(ctx, from);
+        dispute.state = 'UNDER_REVIEW';
+        dispute.assignedOperatorId = 'op_1';
+        ctx.claimTx.beforeWrites = () => {
+          ctx.proposals.rows.get('p1')!.status = decidedAs;
+          dispute.state = 'UPHELD';
+        };
+
+        await expect(ctx.service.claim(SECOND as never, 'org_1', 'p1')).rejects.toMatchObject({
+          errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION,
+          statusCode: 409,
+        });
+
+        expect(ctx.proposals.rows.get('p1')!.status).toBe(decidedAs);
+        expect(dispute.state).toBe('UPHELD');
+        expect(dispute.assignedOperatorId).toBe('op_1');
+        expect(ctx.events.kinds()).toEqual([]);
+      },
+    );
   });
 });

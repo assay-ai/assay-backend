@@ -3,6 +3,7 @@
 ## Overview
 
 Database module structured to support **multiple database systems**:
+
 - **PostgreSQL** - OLTP (Online Transaction Processing) for business logic
 
 ## Directory Structure
@@ -40,6 +41,7 @@ src/database/
 **File**: `postgres/postgres.data-source.ts`
 
 DataSource used by TypeORM CLI to:
+
 - Generate migrations
 - Run migrations
 - Revert migrations
@@ -59,7 +61,7 @@ All repositories inject DataSource with connection name `'postgres'`:
 export class PostRepository extends AbstractRepository<PostEntity> {
   constructor(
     @InjectDataSource('postgres')
-    protected readonly dataSource: DataSource
+    protected readonly dataSource: DataSource,
   ) {
     super(PostEntity, dataSource);
   }

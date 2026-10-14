@@ -58,7 +58,8 @@ export class SlashProposalEventEntity extends OrganizationScopedEntityWithoutSof
    * `REVERSED`, `SWEEP_APPLIED`, `EXECUTED_AFTER_CLOSURE`.
    *
    * The chain lifecycle adds `CHAIN_PROPOSED`, `CHAIN_PROPOSAL_ADOPTED`,
-   * `CHAIN_CANCELLED` and `CHAIN_VOIDED`.
+   * `CHAIN_CANCELLED` and `CHAIN_VOIDED`, and `PLAN_REFUSED` when a stored
+   * plan did not match its evidence and nothing was signed (review H-2).
    *
    * `EXECUTED_AFTER_CLOSURE` is the one that looks like a contradiction and is
    * not: `execute_slash` consults nobody but a fee payer, so a stranger may

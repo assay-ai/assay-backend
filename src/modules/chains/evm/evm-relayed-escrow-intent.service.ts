@@ -265,7 +265,11 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       if (revertData === null) {
         throw error;
       }
-      throw SettlementErrors.relayedIntentRefused({ reason: evmErrorName(revertData) });
+      const name = evmErrorName(revertData);
+      // D-19: the two refusals a person can act on get their own errors.
+      if (name === 'ProgramPaused') throw ChainErrors.programPaused({ chainId });
+      if (name === 'AddressBlocked') throw ChainErrors.addressBlocked({ chainId });
+      throw SettlementErrors.relayedIntentRefused({ reason: name });
     }
 
     // 20 % margin, for the reason the builder gives at its own: an estimate is a

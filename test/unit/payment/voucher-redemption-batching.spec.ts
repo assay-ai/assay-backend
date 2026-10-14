@@ -10,6 +10,7 @@ import {
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
 import { Alert } from '@shared/alerting';
+import { noBlocks } from '../helpers/blocklist';
 
 /**
  * Batch forming — the half of batched voucher redemption that lives in the
@@ -92,7 +93,13 @@ class FakeRedeemer {
   }
 }
 
-function build(rows: RedeemableIntent[], maxBatchSize: number) {
+function build(
+  rows: RedeemableIntent[],
+  maxBatchSize: number,
+  chainState: {
+    holdReason: (door: unknown, parties: { account: unknown }[]) => Promise<string | null>;
+  } | null = null,
+) {
   const redeemer = new FakeRedeemer(maxBatchSize);
   const emitted: Alert[] = [];
   const alerts = {
@@ -113,7 +120,9 @@ function build(rows: RedeemableIntent[], maxBatchSize: number) {
     ledger as never,
     redeemer as never,
     alerts as never,
+    noBlocks(),
     () => NOW_SECONDS * 1000,
+    chainState as never,
   );
 
   return { service, redeemer, intents, ledger, emitted };
@@ -257,5 +266,29 @@ describe('VoucherRedemptionService batch forming', () => {
       expect(new Set(batch.map((r) => r.payer)).size).toBe(batch.length);
     }
     expect(redeemer.batches.map((batch) => batch.map((r) => r.seq))).toEqual([['1'], ['2'], ['3']]);
+  });
+});
+
+describe('VoucherRedemptionService — the on-chain pause and blocklist (D-19)', () => {
+  it('holds a voucher the chain would refuse, so the atomic batch carries only good ones', async () => {
+    // Bob's payer is blocked on chain. One bad voucher in `redeemVoucherBatch`
+    // reverts all 64; held, it keeps its hold and resumes after the unblock.
+    const chainState = {
+      holdReason: async (_door: unknown, parties: { role?: string; account: unknown }[]) =>
+        parties.some((party) => party.role === 'PAYER' && party.account === BOB)
+          ? 'the payer is blocked on chain'
+          : null,
+    };
+    const { service, redeemer, intents } = build(
+      [pending(5, ALICE), pending(9, BOB), pending(10, BOB)],
+      64,
+      chainState,
+    );
+
+    await service.run(USDC);
+
+    const sent = [...redeemer.batches.flat(), ...redeemer.singles].map((r) => r.seq);
+    expect(sent).toEqual(['5']);
+    expect(intents.releaseHold).not.toHaveBeenCalled();
   });
 });

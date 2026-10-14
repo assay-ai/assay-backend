@@ -78,7 +78,16 @@ import { SlaWindowRepository } from './repositories/sla-window.repository';
 import { SlaWindowCallRepository } from './repositories/sla-window-call.repository';
 import { SlaStrikeRepository } from './repositories/sla-strike.repository';
 import { OperatorEntity } from './entities/operator.entity';
+import { OperatorApprovalEntity } from './entities/operator-approval.entity';
+import { AccountBlockEntity } from './entities/account-block.entity';
+import { AccountBlockRepository } from './repositories/account-block.repository';
+import { EvmBlockedAddressEntity } from './entities/evm-blocked-address.entity';
+import { EvmChainStateEntity } from './entities/evm-chain-state.entity';
+import { ProviderSlashHoldEntity } from './entities/provider-slash-hold.entity';
+import { EvmChainStateRepository } from './repositories/evm-chain-state.repository';
+import { ProviderSlashHoldRepository } from './repositories/provider-slash-hold.repository';
 import { OperatorRepository } from './repositories/operator.repository';
+import { OperatorApprovalRepository } from './repositories/operator-approval.repository';
 // Due process for taking money.
 import { SlashProposalEntity } from './entities/slash-proposal.entity';
 import { ToolRequestEntity } from './entities/tool-request.entity';
@@ -145,8 +154,13 @@ const entities = [
   OverrideLogEntryEntity,
   FleetSweepEntity,
   OperatorEntity,
+  OperatorApprovalEntity,
   OrganizationEntity,
   AgentEntity,
+  AccountBlockEntity,
+  EvmChainStateEntity,
+  ProviderSlashHoldEntity,
+  EvmBlockedAddressEntity,
 ];
 const repositories = [
   PostRepository,
@@ -193,8 +207,12 @@ const repositories = [
   OverrideLogEntryRepository,
   FleetSweepRepository,
   OperatorRepository,
+  OperatorApprovalRepository,
   OrganizationRepository,
   AgentRepository,
+  AccountBlockRepository,
+  EvmChainStateRepository,
+  ProviderSlashHoldRepository,
   SlashCaseReadRepository,
   PlatformMetricsRepository,
 ];

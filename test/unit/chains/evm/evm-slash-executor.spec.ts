@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { decodeFunctionData, getAddress, sha256, toBytes, toHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
@@ -11,6 +12,7 @@ import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp2
 import {
   CHAIN,
   DEPLOYMENT,
+  FAKE_ARBITER,
   FakeStakeChain,
   MULTICALL,
   STAKE,
@@ -82,7 +84,6 @@ function build(options: { multicall?: boolean; batchSize?: number } = {}) {
       now: () => Number(chain.now) * 1000,
       batchSize: options.batchSize ?? 20,
       multicall: options.multicall === false ? new Map() : new Map([[CHAIN, MULTICALL]]),
-      executeDeferLimitMs: 3 * 24 * 3_600_000,
       receiptRetryDelayMs: 0,
     },
   );
@@ -392,7 +393,7 @@ describe('EvmSlashExecutor — reads, cancel, expire, caps', () => {
     });
   });
 
-  it('builds the admin’s unsigned cancelSlash and sends nothing', async () => {
+  it('builds the arbiter’s unsigned cancelSlash and sends nothing', async () => {
     const { chain, executor } = build();
     await executor.propose(proposal(1));
     chain.sent.length = 0;
@@ -410,7 +411,7 @@ describe('EvmSlashExecutor — reads, cancel, expire, caps', () => {
       args: [`0x${requestId(1)}`],
     });
     expect(intent.to).toBe(STAKE);
-    expect(intent.admin).toBe(getAddress(DEPLOYMENT.admin));
+    expect(intent).toMatchObject({ admin: FAKE_ARBITER, signerRole: 'ARBITER' });
     expect(chain.sent).toHaveLength(0);
   });
 
@@ -607,51 +608,48 @@ describe('review fixes — EvmSlashExecutor', () => {
       return { ...built, requests };
     }
 
-    it('executes the case that fits and defers the one that would be truncated, whole', async () => {
+    it('all or wait: pays what fits in full, and the rest waits with SlashWindowNotDrained', async () => {
       const { chain, executor, requests } = await twoCases();
 
       const outcomes = await executor.executeBatch(requests);
 
+      // 10 of the 20 USDG window is used: case A (4 + 4) fits whole, and
+      // case B (3 + 3) would need 14 — its parts wait, nothing is cut.
       expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, true, false, false]);
       expect(outcomes.slice(0, 2).map((outcome) => outcome.result?.appliedMinor)).toEqual([
         '4000000',
         '4000000',
       ]);
-      expect(chainErrorName(outcomes[2].error)).toBe('SlashCapExceeded');
+      expect(chainErrorName(outcomes[2].error)).toBe('SlashWindowNotDrained');
+      expect(chainErrorName(outcomes[3].error)).toBe('SlashWindowNotDrained');
       for (const n of [3, 4]) expect(chain.record(requestId(n))?.status).toBe(1);
-      // Nothing that executed was cut.
       for (const n of [1, 2]) expect(chain.record(requestId(n))?.applied).toBe(4_000_000n);
     });
 
-    it('holds back a newer case on the same provider behind a deferred one — no starvation', async () => {
-      const built = build();
-      built.chain.params = { ...built.chain.params, penaltyAmount: 10_000_000n };
-      await built.executor.proposeBatch([
-        proposal(1, '4000000', AGENTS[1]), // G1
-        proposal(2, '8000000', AGENTS[2]), // G2: would be cut
-        proposal(3, '1000000', AGENTS[3]), // G3: small, would fit once G2 is out
-      ]);
-      built.chain.now += 72n * 3600n;
-      const stake = built.chain.state.stakes.get(getAddress(PROVIDER))!;
-      stake.slashedInWindow = 10_000_000n;
-      stake.slashWindowStartedAt = built.chain.now;
-
-      const outcomes = await built.executor.executeBatch(
-        [1, 2, 3].map((n) => ({
-          chainId: CHAIN,
-          requestId: requestId(n),
-          provider: PROVIDER,
-          beneficiary: AGENTS[n],
-          atomicGroup: `G${n}`,
-        })),
+    it('logs an error if an execution ever applies other than the reserved amount', async () => {
+      const { chain, executor, requests } = await twoCases();
+      const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      let sent = false;
+      chain.beforeSend = () => {
+        sent = true;
+      };
+      const read = chain.client.readContract;
+      chain.client.readContract = async (args) => {
+        const value = await read(args);
+        if (sent && args.functionName === 'slashRecordOf') {
+          return { ...(value as object), reserved: 1n };
+        }
+        return value;
+      };
+      const [outcome] = await executor.executeBatch(requests.slice(0, 1));
+      expect(outcome.result?.appliedMinor).toBe('4000000');
+      expect(error).toHaveBeenCalledWith(
+        expect.stringMatching(/applied 4000000, but the record reserved 1/),
       );
-
-      expect(outcomes.map((outcome) => outcome.ok)).toEqual([true, false, false]);
-      expect(chainErrorName(outcomes[2].error)).toBe('SlashCapExceeded');
-      expect(built.chain.record(requestId(3))?.status).toBe(1);
+      error.mockRestore();
     });
 
-    it('executes the deferred case in full once the window has decayed', async () => {
+    it('pays a waiting part in full once the window has drained', async () => {
       const { chain, executor, requests } = await twoCases();
       await executor.executeBatch(requests);
       chain.now += 86_400n;

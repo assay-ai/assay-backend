@@ -211,6 +211,27 @@ export interface CallExportCursor {
  * `expires_at`: `VoucherService.record` writes it as `voucher.expiresAt * 1000`
  * and nothing updates it afterwards.
  */
+/**
+ * The parties the redemption queue leaves out, from the cached blocklists.
+ *
+ * - `organizationIds`: blocked organizations (payer or provider), lower-case uuids.
+ * - `walletKeys`: the platform blocklist's namespace-wide wallet keys
+ *   (`subjectKey`, e.g. `eip155:0xabc…`, Solana as written).
+ * - `chainAccounts`: CAIP-10 accounts the ON-CHAIN blocklist refuses on this
+ *   asset's chain, confirmed live (compared lower-case; EVM only).
+ */
+export interface RedemptionExclusions {
+  readonly organizationIds: readonly string[];
+  readonly walletKeys: readonly string[];
+  readonly chainAccounts: readonly string[];
+}
+
+export const NO_REDEMPTION_EXCLUSIONS: RedemptionExclusions = Object.freeze({
+  organizationIds: [],
+  walletKeys: [],
+  chainAccounts: [],
+});
+
 export interface RedeemableIntent {
   readonly organizationId: string;
   readonly id: string;
@@ -618,8 +639,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
     settledStatus: string,
     rail: string,
     limit: number,
+    exclude: RedemptionExclusions = NO_REDEMPTION_EXCLUSIONS,
   ): Promise<RedeemableIntent[]> {
-    return this.createQueryBuilder('intent')
+    const query = this.createQueryBuilder('intent')
       .select('intent.organizationId', 'organizationId')
       .addSelect('intent.id', 'id')
       .addSelect('intent.agentAccount', 'agentAccount')
@@ -645,7 +667,55 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.holdId IS NOT NULL')
       .andWhere('intent.holdReleasedAt IS NULL')
       .andWhere('intent.voucherSeq IS NOT NULL')
-      .andWhere('intent.voucherSignature IS NOT NULL')
+      .andWhere('intent.voucherSignature IS NOT NULL');
+
+    if (
+      exclude.organizationIds.length > 0 ||
+      exclude.walletKeys.length > 0 ||
+      exclude.chainAccounts.length > 0
+    ) {
+      // A row is left out when it, or an EARLIER seq of the same payer in this
+      // queue, has a blocked party. Leaving out only the blocked row would let
+      // the payer's later seqs through, and redeeming one of those advances
+      // `seq_high` past the held one and kills it. Done in the query, BEFORE
+      // the LIMIT, so held rows can never fill the pass (audit E-1).
+      const blockedParty = (alias: string) => {
+        const key = (column: string) =>
+          `(split_part(${alias}.${column}, ':', 1) || ':' || CASE WHEN split_part(${alias}.${column}, ':', 1) = 'eip155' ` +
+          `THEN lower(split_part(${alias}.${column}, ':', 3)) ELSE split_part(${alias}.${column}, ':', 3) END)`;
+        return [
+          `${alias}.organization_id::text = ANY(:blockedOrgs)`,
+          `${alias}.provider_id::text = ANY(:blockedOrgs)`,
+          ...['agent_account', 'provider_account', 'voucher_delegate'].flatMap((column) => [
+            `${key(column)} = ANY(:blockedWalletKeys)`,
+            `lower(${alias}.${column}) = ANY(:blockedChainAccounts)`,
+          ]),
+        ].join(' OR ');
+      };
+      query.andWhere(
+        `NOT EXISTS (
+           SELECT 1 FROM payment_intents held
+            WHERE held.organization_id IS NOT NULL
+              AND held.agent_account = intent.agent_account
+              AND held.asset_id = intent.asset_id
+              AND held.rail = :rail
+              AND held.status = :settledStatus
+              AND held.hold_id IS NOT NULL
+              AND held.hold_released_at IS NULL
+              AND held.voucher_seq IS NOT NULL
+              AND held.voucher_signature IS NOT NULL
+              AND held.voucher_seq <= intent.voucher_seq
+              AND (${blockedParty('held')})
+         )`,
+        {
+          blockedOrgs: [...exclude.organizationIds],
+          blockedWalletKeys: [...exclude.walletKeys],
+          blockedChainAccounts: exclude.chainAccounts.map((account) => account.toLowerCase()),
+        },
+      );
+    }
+
+    return query
       .orderBy('intent.agentAccount', 'ASC')
       .addOrderBy('intent.voucherSeq', 'ASC')
       .limit(limit)

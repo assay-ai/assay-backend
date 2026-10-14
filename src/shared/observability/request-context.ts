@@ -16,8 +16,15 @@ import { randomUUID } from 'node:crypto';
  * publisher was able to resolve.
  */
 export interface RequestContextStore {
+  /** The caller's `x-request-id` when it sent one, else generated. Client-controlled. */
   readonly requestId: string;
   readonly organizationId: string | null;
+  /**
+   * Minted by this server for every HTTP request, never read from the client.
+   * Use it where a record must not point at a trace the caller chose (the
+   * override log, review L-7). Absent outside an HTTP request.
+   */
+  readonly serverRequestId?: string;
 }
 
 const storage = new AsyncLocalStorage<RequestContextStore>();
@@ -50,20 +57,23 @@ export const RequestContext = {
     return storage.getStore()?.requestId ?? null;
   },
 
+  /** The id this server minted for the current HTTP request, or `null`. */
+  getServerRequestId(): string | null {
+    return storage.getStore()?.serverRequestId ?? null;
+  },
+
   getOrganizationId(): string | null {
     return storage.getStore()?.organizationId ?? null;
   },
 };
 
-/** Same truncation `operator-cases.controller.ts`'s `requestIdOf` applies. */
+/** The `request_id` column of the log tables is varchar(64). */
 const MAX_REQUEST_ID_LENGTH = 64;
 
 /**
  * Reads `x-request-id`, generating one when the caller did not send it.
  *
- * Mirrors `requestIdOf` in `operator-cases.controller.ts` for the "read the
- * header" half; the difference is this always returns a usable id rather than
- * `null`; a request that arrived with no header still deserves a trace, and a
+ * Always returns a usable id; a request that arrived with no header still deserves a trace, and a
  * generated id is what makes an internally-initiated call (a cron tick, a
  * queue wakeup with no HTTP origin) traceable at all.
  */

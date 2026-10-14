@@ -80,6 +80,7 @@ import {
   ensureTestDatabase,
   testConnectionOptions,
 } from './test-database';
+import { noBlocks } from '../../unit/helpers/blocklist';
 
 loadEnv();
 
@@ -335,7 +336,11 @@ export async function createBindingEditorTestContext(
     editor,
     runs,
     stakes,
-    new DbProviderRegistry(providers, new DbChainEnrolmentSource(chainEnrolments, NO_ALERTS)),
+    new DbProviderRegistry(
+      providers,
+      new DbChainEnrolmentSource(chainEnrolments, NO_ALERTS),
+      noBlocks(),
+    ),
     new Map([[STAKE_CHAIN, MINIMUM_STAKE]]),
     dataSource,
   );

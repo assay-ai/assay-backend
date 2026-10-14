@@ -33,6 +33,29 @@ describe('ProviderProfileService — the calling organization is the provider id
     expect(me.stats.callsServed).toBe(10_000);
   });
 
+  it('shows the provider its slash holds, for the banner, and none when there are none', async () => {
+    const heldSince = new Date('2026-10-15T00:00:00Z');
+    const { service } = build({
+      [ORG]: {
+        status: ProviderStatus.ACTIVE,
+        tier: ProviderTier.NEW,
+        stats: {},
+        slashHolds: [{ chainId: 'eip155:46630', reasons: ['SLASH_WINDOW_FULL'], heldSince }],
+      },
+    });
+    expect((await service.getMe(ORG)).slashHolds).toEqual([
+      {
+        chainId: 'eip155:46630',
+        reasons: ['SLASH_WINDOW_FULL'],
+        heldSince: '2026-10-15T00:00:00.000Z',
+      },
+    ]);
+    const none = build({
+      [ORG]: { status: ProviderStatus.ACTIVE, tier: ProviderTier.NEW, stats: {} },
+    });
+    expect((await none.service.getMe(ORG)).slashHolds).toEqual([]);
+  });
+
   it('never serializes an unmeasured stat as 0 — absent stays null', async () => {
     const { service } = build({
       [ORG]: { status: ProviderStatus.ACTIVE, tier: ProviderTier.NEW, stats: {} },

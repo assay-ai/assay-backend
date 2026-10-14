@@ -17,6 +17,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import { deployment, EvmSigner, generateSigner } from '../../unit/chains/evm/evm-fixtures';
 import { PaymentTestContext, createPaymentTestContext } from '../helpers/payment-test-context';
+import { noBlocks } from '../../unit/helpers/blocklist';
 
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
 const USDG = ASSET_IDS.USDG_ROBINHOOD_TESTNET as AssetId;
@@ -95,9 +96,12 @@ describe('Voucher admission — concurrent vouchers against one window (BUG-D1-0
       new Map([[CHAIN, DEPLOYMENT]]),
       [CHAIN],
     );
-    service = new VoucherService(context.intents, new ChainAdapterRegistry([adapter], [CHAIN]), {
-      wasIssued: async () => true,
-    } as unknown as EscrowSeqService);
+    service = new VoucherService(
+      context.intents,
+      new ChainAdapterRegistry([adapter], [CHAIN]),
+      { wasIssued: async () => true } as unknown as EscrowSeqService,
+      noBlocks(),
+    );
     payer = generateSigner(CHAIN);
     delegate = generateSigner(CHAIN);
     await context.ledger.appendNow({

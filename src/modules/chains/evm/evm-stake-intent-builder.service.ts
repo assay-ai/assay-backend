@@ -1,4 +1,6 @@
 import { Injectable } from '@nestjs/common';
+
+import { ChainDoor, ChainStateGatePort } from '../ports/chain-state-gate.port';
 import { encodeFunctionData, getAddress, isAddress, parseEventLogs } from 'viem';
 
 import {
@@ -8,6 +10,7 @@ import {
   StakeIntentKind,
   StakeIntentPreflight,
   StakeIntentRequest,
+  ConfirmedDepositExpectation,
 } from '@modules/provider/ports/stake-intent-builder.port';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -35,12 +38,15 @@ export interface EvmStakeIntentClient {
   estimateFeesPerGas(): Promise<{ maxFeePerGas: bigint; maxPriorityFeePerGas: bigint }>;
   getTransactionReceipt(args: { hash: `0x${string}` }): Promise<{
     readonly status: 'success' | 'reverted';
+    readonly blockNumber: bigint;
     readonly logs: readonly {
       readonly address: string;
       readonly topics: readonly string[];
       readonly data: string;
     }[];
   }>;
+  /** For the mined block's timestamp (seconds). */
+  getBlock(args: { blockNumber: bigint }): Promise<{ readonly timestamp: bigint }>;
 }
 
 /**
@@ -104,6 +110,12 @@ export class EvmStakeIntentBuilder implements StakeIntentBuilderPort {
   constructor(
     private readonly clients: ReadonlyMap<ChainId, EvmStakeIntentClient>,
     private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
+    /**
+     * The pause/blocklist gate (D-19): every stake door — deposit, unstake,
+     * withdraw — is paused and refuses a blocked provider or funder since the
+     * dispute upgrade. Optional so a composition without the cache still builds.
+     */
+    private readonly gate: ChainStateGatePort | null = null,
   ) {}
 
   /**
@@ -159,8 +171,13 @@ export class EvmStakeIntentBuilder implements StakeIntentBuilderPort {
    * hash, or a transaction with no deposit for this provider; see the port for
    * why the three are one answer.
    */
-  async confirmedDeposit(signature: string, account: AccountId): Promise<Money | null> {
+  async confirmedDeposit(
+    signature: string,
+    account: AccountId,
+    expected: ConfirmedDepositExpectation,
+  ): Promise<Money | null> {
     const { chainId, address: provider } = this.parse(account);
+    const { address: funder } = this.parse(expected.funder);
     const deployment = this.deployment(chainId);
     const { asset, decimals } = await this.stakeAsset(chainId);
 
@@ -185,11 +202,28 @@ export class EvmStakeIntentBuilder implements StakeIntentBuilderPort {
       logs: receipt.logs.filter((log) => getAddress(log.address) === stake) as never,
     });
 
+    // Only what the treasury funded counts (review M-3): a provider's own
+    // deposit, or anybody else's, is not a compensation.
     let total = 0n;
     for (const event of events) {
-      if (getAddress(event.args.provider) === provider) total += event.args.amount;
+      if (getAddress(event.args.provider) !== provider) continue;
+      if (getAddress(event.args.funder) !== funder) continue;
+      total += event.args.amount;
     }
-    return total > 0n ? MoneyUtil.of(total, asset, decimals) : null;
+    if (total === 0n) return null;
+
+    // And only a deposit made after the slash executed: one earlier deposit
+    // must not be presented as the repayment of a later penalty.
+    let minedAtMs: number;
+    try {
+      const block = await this.client(chainId).getBlock({ blockNumber: receipt.blockNumber });
+      minedAtMs = Number(block.timestamp) * 1000;
+    } catch {
+      return null;
+    }
+    if (!(minedAtMs > expected.after.getTime())) return null;
+
+    return MoneyUtil.of(total, asset, decimals);
   }
 
   // ── Internals ────────────────────────────────────────────────────────────
@@ -205,6 +239,10 @@ export class EvmStakeIntentBuilder implements StakeIntentBuilderPort {
 
     const { chainId, address: provider } = this.parse(request.account);
     const deployment = this.deployment(chainId);
+    await this.gate?.assertActive(ChainDoor.STAKE, [
+      { role: 'PROVIDER', account: request.account },
+      { role: 'FUNDER', account: request.funder ?? null },
+    ]);
     const { asset, decimals } = await this.stakeAsset(chainId);
     // Normally the provider. A treasury-funded compensation deposit is the one
     // case where they differ — see `StakeIntentRequest.funder`.

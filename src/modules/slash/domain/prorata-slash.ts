@@ -331,7 +331,13 @@ export function normalizeAgentAccount(account: string): string {
 }
 
 /** The chain-facing state of one part, as the parts table mirrors it. */
-export type SlashPartChainStatus = 'NONE' | 'PENDING' | 'EXECUTED' | 'CANCELLED' | 'REFUSED';
+export type SlashPartChainStatus =
+  | 'NONE'
+  | 'PENDING'
+  | 'DISPUTED'
+  | 'EXECUTED'
+  | 'CANCELLED'
+  | 'REFUSED';
 
 export interface SlashPartView {
   readonly status: SlashPartChainStatus;
@@ -344,9 +350,16 @@ export interface SlashPartView {
   readonly executableAt: Date | null;
   readonly executedAt: Date | null;
   readonly cancelledAt: Date | null;
+  /** D-19: the chain's `disputedAt`, when the provider disputed this part's record. */
+  readonly disputedAt?: Date | null;
 }
 
-const LANDED: ReadonlySet<SlashPartChainStatus> = new Set(['PENDING', 'EXECUTED', 'CANCELLED']);
+const LANDED: ReadonlySet<SlashPartChainStatus> = new Set([
+  'PENDING',
+  'DISPUTED',
+  'EXECUTED',
+  'CANCELLED',
+]);
 
 /**
  * What a case's judgement is, when it is a set of per-agent records.
@@ -354,7 +367,11 @@ const LANDED: ReadonlySet<SlashPartChainStatus> = new Set(['PENDING', 'EXECUTED'
  * The case is ONE judgement to the arbitration state machine, so the parts are
  * folded into the one record shape it already reasons about:
  *
- * - `PENDING` while any part is pending — the case is not done;
+ * - `PENDING` while any part is pending — the case is not done, and its
+ *   pending parts may execute even while another part is disputed (audit
+ *   E-4: a dispute freezes only its own part);
+ * - `DISPUTED` when no part is pending and at least one is disputed on chain
+ *   (D-19) — nothing of the case can execute until the arbiter rules;
  * - otherwise `EXECUTED` if any part executed — money moved, and a case that
  *   says otherwise would tell the provider a penalty was dropped that was
  *   taken;
@@ -371,9 +388,19 @@ export function aggregateSlashParts(parts: readonly SlashPartView[]): SlashRecor
   const landed = parts.filter((part) => LANDED.has(part.status));
   if (landed.length === 0) return null;
 
+  const disputed = landed.filter((part) => part.status === 'DISPUTED');
   const pending = landed.some((part) => part.status === 'PENDING');
   const executed = landed.filter((part) => part.status === 'EXECUTED');
-  const status = pending ? 'PENDING' : executed.length > 0 ? 'EXECUTED' : 'CANCELLED';
+  const status = pending
+    ? 'PENDING'
+    : disputed.length > 0
+      ? 'DISPUTED'
+      : executed.length > 0
+        ? 'EXECUTED'
+        : 'CANCELLED';
+  const disputedDates = disputed
+    .map((part) => part.disputedAt)
+    .filter((date): date is Date => date instanceof Date);
 
   const sumOf = (rows: readonly SlashPartView[], pick: (row: SlashPartView) => string | null) =>
     rows.reduce((sum, row) => sum + BigInt(pick(row) ?? '0'), 0n).toString();
@@ -398,6 +425,7 @@ export function aggregateSlashParts(parts: readonly SlashPartView[]): SlashRecor
       status === 'CANCELLED'
         ? latest(landed.map((part) => part.cancelledAt ?? part.executableAt ?? proposedAt))
         : null,
+    disputedAt: disputedDates.length > 0 ? earliest(disputedDates) : null,
   };
 }
 

@@ -59,8 +59,8 @@ export enum ChainProposalStatus {
    *
    * `cancel_slash` is the **admin's** instruction: its only signer is
    * `Config.admin`, a person's hardware key that no service in this codebase
-   * holds. So an overturn, a platform-miss sweep or a downward recalculation
-   * can no longer release the reservation inside the request that decided it —
+   * holds. So an overturn, a suspension, a platform-miss sweep or a downward
+   * recalculation can no longer release the reservation inside the request that decided it —
    * it can only say so, and wait for a human to sign the transaction
    * `POST /operator/cases/:id/cancel-intent` builds.
    *
@@ -73,6 +73,15 @@ export enum ChainProposalStatus {
    * seven-day grace.
    */
   CANCEL_REQUESTED = 'CANCEL_REQUESTED',
+  /**
+   * EVM only (assay-evm D-19): the provider called `disputeSlash` and the
+   * record is `Disputed`. The reservation stands and `executeSlash` refuses
+   * it; it leaves by the arbiter's `upholdSlash` (back to `PENDING`, at the
+   * `executableAt` the chain reports), by a cancel, or by `expireSlash` once
+   * `chain_disputed_at + 30 d` has passed. Outside `findChainExecutable`'s
+   * `chain_status = 'PENDING'` by construction.
+   */
+  DISPUTED = 'DISPUTED',
   /** `SlashStatus::Executed` — the money moved. */
   EXECUTED = 'EXECUTED',
   /** `SlashStatus::Cancelled` — cancelled or expired; the reservation is released. */
@@ -186,6 +195,11 @@ const WAIT_ERRORS: ReadonlySet<string> = new Set([
   'VerifierDailyCapExceeded',
   'PenaltyTooSmallToSplit',
   'NothingToSlash',
+  // EVM (follow-up C2): `executeSlash` refuses a payment a rolling window
+  // (the provider's or the key's) would cut below `min(reserved, atRisk)`,
+  // before the last day of the grace — "window full, retry later". The record
+  // stays Pending and is paid whole once the window drains.
+  'SlashWindowNotDrained',
 ]);
 
 /**

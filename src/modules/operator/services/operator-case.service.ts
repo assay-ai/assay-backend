@@ -1,5 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
-import { Request } from 'express';
+import { Injectable } from '@nestjs/common';
 
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { CursorPageDto } from '@shared/api';
@@ -22,13 +21,17 @@ import {
   SecondSignatureBodyDto,
   SuspendProposalBodyDto,
 } from '../dto/operator-console.dto';
-import { OperatorErrors } from '../errors/operator.errors';
+import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
+import { OperatorApprover, OperatorSession } from '../ports/operator-session.port';
 import { AdjudicationQueueService } from './adjudication-queue.service';
-import {
-  OPERATOR_SESSION_SOURCE,
-  OperatorSession,
-  OperatorSessionPort,
-} from '../ports/operator-session.port';
+import { OperatorApprovalService } from './operator-approval.service';
+
+/** The queued-action names this service owns. */
+export const CASE_APPROVAL_ACTIONS = {
+  suspend: 'slash.suspend',
+  sweep: 'slash.sweep',
+  compensated: 'slash.compensated',
+} as const;
 
 /**
  * The operator's side of a case, and the one place a tenant is resolved from a
@@ -55,8 +58,44 @@ export class OperatorCaseService {
     private readonly queue: AdjudicationQueueService,
     private readonly arbitration: ArbitrationService,
     private readonly execution: SlashExecutionService,
-    @Inject(OPERATOR_SESSION_SOURCE) private readonly sessions: OperatorSessionPort,
-  ) {}
+    private readonly approvals: OperatorApprovalService,
+  ) {
+    // How an approved action is re-run: the same method, as the requester,
+    // with the approver attached.
+    approvals.register(CASE_APPROVAL_ACTIONS.suspend, {
+      code: 'S-1',
+      run: (requester, approver, payload, requestId) =>
+        this.suspend(
+          requester,
+          payload.proposalId as string,
+          payload.body as SuspendProposalBodyDto,
+          requestId,
+          approver,
+        ),
+    });
+    approvals.register(CASE_APPROVAL_ACTIONS.sweep, {
+      code: 'S-11',
+      run: (requester, approver, payload, requestId) =>
+        this.openSweep(
+          requester,
+          payload.proposalId as string,
+          payload.body as OpenFleetSweepBodyDto,
+          requestId,
+          approver,
+        ),
+    });
+    approvals.register(CASE_APPROVAL_ACTIONS.compensated, {
+      code: 'S-5',
+      run: (requester, approver, payload, requestId) =>
+        this.compensated(
+          requester,
+          payload.proposalId as string,
+          payload.body as CompensatedBodyDto,
+          requestId,
+          approver,
+        ),
+    });
+  }
 
   async listQueue(
     operator: OperatorSession,
@@ -124,21 +163,39 @@ export class OperatorCaseService {
     );
   }
 
+  /**
+   * `S-1`. One person from `PROPOSED`, `DISPUTED` and `UNDER_REVIEW`; from
+   * `AWAITING_SECOND` and `UPHELD` the register raises it to two-person, and a
+   * call without an approver is queued (`ApprovalQueuedDto`, HTTP 202).
+   */
   async suspend(
     operator: OperatorSession,
     proposalId: string,
     body: SuspendProposalBodyDto,
     requestId: string | null,
+    approver: OperatorApprover | null = null,
   ) {
     const organizationId = await this.tenantOf(proposalId);
-    return this.arbitration.suspend(
-      operator,
-      organizationId,
-      proposalId,
-      body.reasonCode,
-      body.note,
-      body.ticketRef ?? null,
-      requestId,
+    const attempt = () =>
+      this.arbitration.suspend(
+        operator,
+        organizationId,
+        proposalId,
+        body.reasonCode,
+        body.note,
+        body.ticketRef ?? null,
+        requestId,
+        approver,
+      );
+    if (approver) return attempt();
+    return this.approvals.orQueue(
+      {
+        action: CASE_APPROVAL_ACTIONS.suspend,
+        target: `slash_proposal:${proposalId}`,
+        payload: { proposalId, body: { ...body } },
+        requester: operator,
+      },
+      attempt,
     );
   }
 
@@ -160,35 +217,47 @@ export class OperatorCaseService {
     );
   }
 
+  /** `S-11`. Always two-person: called without an approver, it is queued. */
   async openSweep(
     operator: OperatorSession,
     proposalId: string,
     body: OpenFleetSweepBodyDto,
-    request: Request,
     requestId: string | null,
-  ): Promise<FleetSweepDto> {
+    approver: OperatorApprover | null = null,
+  ): Promise<FleetSweepDto | ApprovalQueuedDto> {
     const organizationId = await this.tenantOf(proposalId);
-    const approver = await this.resolveApprover(request, operator);
-    const sweep = await this.execution.openSweep(
-      operator,
-      approver,
-      organizationId,
-      proposalId,
-      body,
-      requestId,
-    );
-    return {
-      id: sweep.id,
-      outcome: sweep.outcome as FleetSweepDto['outcome'],
-      defectKey: sweep.defectKey,
-      windowFrom: sweep.windowFrom,
-      windowTo: sweep.windowTo,
-      status: sweep.status as FleetSweepDto['status'],
-      matchedCount: sweep.matchedCount,
-      appliedCount: sweep.appliedCount,
-      openedBySubject: operator.subject,
-      completedAt: sweep.completedAt,
+    const attempt = async (): Promise<FleetSweepDto> => {
+      const sweep = await this.execution.openSweep(
+        operator,
+        approver,
+        organizationId,
+        proposalId,
+        body,
+        requestId,
+      );
+      return {
+        id: sweep.id,
+        outcome: sweep.outcome as FleetSweepDto['outcome'],
+        defectKey: sweep.defectKey,
+        windowFrom: sweep.windowFrom,
+        windowTo: sweep.windowTo,
+        status: sweep.status as FleetSweepDto['status'],
+        matchedCount: sweep.matchedCount,
+        appliedCount: sweep.appliedCount,
+        openedBySubject: operator.subject,
+        completedAt: sweep.completedAt,
+      };
     };
+    if (approver) return attempt();
+    return this.approvals.orQueue(
+      {
+        action: CASE_APPROVAL_ACTIONS.sweep,
+        target: `slash_proposal:${proposalId}`,
+        payload: { proposalId, body: { ...body } },
+        requester: operator,
+      },
+      attempt,
+    );
   }
 
   /** `S-5`, step one. Builds only — see `SlashExecutionService.compensationIntent`. */
@@ -197,25 +266,39 @@ export class OperatorCaseService {
     return this.execution.compensationIntent(organizationId, proposalId);
   }
 
-  /** `S-5`, step two. Two-person, and the signature is checked against the cluster. */
+  /**
+   * `S-5`, step two. Two-person: called without an approver it is queued,
+   * after the deposit has been checked against the chain; the approval checks
+   * it again.
+   */
   async compensated(
     operator: OperatorSession,
     proposalId: string,
     body: CompensatedBodyDto,
-    request: Request,
     requestId: string | null,
+    approver: OperatorApprover | null = null,
   ) {
     const organizationId = await this.tenantOf(proposalId);
-    const approver = await this.resolveApprover(request, operator);
-    return this.execution.markCompensated(
-      operator,
-      approver,
-      organizationId,
-      proposalId,
-      body.signature,
-      body.reasonCode,
-      body.note,
-      requestId,
+    const attempt = () =>
+      this.execution.markCompensated(
+        operator,
+        approver,
+        organizationId,
+        proposalId,
+        body.signature,
+        body.reasonCode,
+        body.note,
+        requestId,
+      );
+    if (approver) return attempt();
+    return this.approvals.orQueue(
+      {
+        action: CASE_APPROVAL_ACTIONS.compensated,
+        target: `slash_proposal:${proposalId}`,
+        payload: { proposalId, body: { ...body } },
+        requester: operator,
+      },
+      attempt,
     );
   }
 
@@ -228,43 +311,6 @@ export class OperatorCaseService {
   async cancelIntent(proposalId: string): Promise<SlashCancelIntent> {
     const organizationId = await this.tenantOf(proposalId);
     return this.execution.buildCancelIntent(organizationId, proposalId);
-  }
-
-  /**
-   * The checker, for a two-person action.
-   *
-   * Supplied as a **second bearer token** in `X-Operator-Approver`, resolved
-   * through the same credential source as the actor. Two properties follow, and
-   * both matter:
-   *
-   * - The checker has to *authenticate*, so approval is an act by an identity
-   *   rather than a name typed into a form. A body field naming an operator id
-   *   would let one person approve as another by knowing their id.
-   * - Nothing is stored between the two, so there is no pending-approval queue
-   *   to leak or to time out.
-   *
-   * What it costs is that both people must be at the same keyboard, or one must
-   * hand the other a token — which is a real operational limitation and is the
-   * honest MVP of maker/checker rather than a claim to have built it.
-   * The full workflow has the action sit in `PENDING` and do nothing until a
-   * second identity approves it asynchronously; that needs a queue of pending
-   * actions, which is not built yet.
-   */
-  private async resolveApprover(
-    request: Request,
-    actor: OperatorSession,
-  ): Promise<OperatorSession> {
-    const header = request.headers['x-operator-approver'];
-    const token = Array.isArray(header) ? header[0] : header;
-    if (!token) {
-      throw OperatorErrors.secondApproverRequired({ code: 'two-person' });
-    }
-
-    const approver = await this.sessions.resolve(token);
-    if (approver.operatorId === actor.operatorId) {
-      throw OperatorErrors.selfApprovalRefused({ code: 'two-person' });
-    }
-    return approver;
   }
 
   /**

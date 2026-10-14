@@ -37,6 +37,10 @@ import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provide
 import { MoneyUtil } from '@utils/money.util';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
+
+import { blocklistOf, noBlocks } from '../helpers/blocklist';
 
 /**
  * `GET /catalogue/*` — the buyer's shop window.
@@ -145,6 +149,7 @@ interface Wiring {
   readonly enrolledOn?: Readonly<Record<string, readonly ChainId[]>>;
   /** `stakeKey(providerId, chainId)` → staked amount. Absent means "not known". */
   readonly stakesByChain?: Readonly<Record<string, Money>>;
+  readonly blocklist?: AccountBlocklistService;
 }
 
 function build(wiring: Wiring = {}) {
@@ -238,6 +243,7 @@ function build(wiring: Wiring = {}) {
       // reported as two entries rather than narrowed away by the quote's own
       // chain set.
       [CHAIN, OTHER_CHAIN],
+      wiring.blocklist ?? noBlocks(),
     ),
   };
 }
@@ -725,5 +731,42 @@ describe('GET /catalogue/providers/:providerId', () => {
       () => service.getProvider('nobody'),
       ProviderErrorCode.PROVIDER_NOT_FOUND,
     );
+  });
+});
+
+describe('the catalogue, with a provider blocked', () => {
+  const OPEN = '0a6f3c1e-7d8b-4e2a-9c5f-1b3d5e7f9a11';
+  const BLOCKED = '5c0b3b4e-0d8a-4f6e-9a51-6f1d2b7c9e10';
+  const wiring = (): Wiring => ({
+    bindings: [binding({ organizationId: OPEN }), binding({ organizationId: BLOCKED })],
+    providers: [
+      provider({ organizationId: OPEN }),
+      provider({ organizationId: BLOCKED, legalName: 'Blocked BV' }),
+    ],
+    blocklist: blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: BLOCKED }),
+  });
+
+  it('leaves the blocked provider out of the provider list', async () => {
+    const { service } = build(wiring());
+
+    const { providers } = await service.listProviders();
+
+    expect(providers.map((row) => row.providerId)).toEqual([OPEN]);
+  });
+
+  it('does not count the blocked provider behind a tool', async () => {
+    const { service } = build(wiring());
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].providerCount).toBe(1);
+  });
+
+  it('still answers for the blocked provider, with no tools', async () => {
+    const { service } = build(wiring());
+
+    const detail = await service.getProvider(BLOCKED);
+
+    expect(detail.tools).toEqual([]);
   });
 });

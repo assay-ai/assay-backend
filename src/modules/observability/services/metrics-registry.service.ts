@@ -86,6 +86,15 @@ export class MetricsRegistryService {
     registers: [this.registry],
   });
 
+  readonly evmChainStateLagSeconds = new Gauge({
+    name: 'x402_evm_chain_state_lag_seconds',
+    help:
+      'Seconds since the EVM chain-state indexer (pause, blocklist) last reached the chain head. ' +
+      'Warn above EVM_CHAIN_STATE_MAX_LAG_MS (default 300).',
+    labelNames: ['chain'] as const,
+    registers: [this.registry],
+  });
+
   readonly reconciliationSeverity = new Gauge({
     name: 'x402_reconciliation_severity',
     help: 'Latest reconciliation run severity: 0=OK, 1=WARN, 2=CRITICAL.',

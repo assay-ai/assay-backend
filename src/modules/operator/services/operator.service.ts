@@ -9,6 +9,7 @@ import { platformAssetFrom } from '@modules/chains/platform-asset';
 import { OperatorDto } from '../dto/operator-console.dto';
 import { OperatorRole } from '../domain/override-register';
 import { OperatorErrors } from '../errors/operator.errors';
+import { OperatorSession } from '../ports/operator-session.port';
 
 /**
  * The platform asset `authority_limit_minor` is denominated in.
@@ -40,9 +41,21 @@ function platformAsset(config: ConfigService): {
  * by id is still allowed to act, and whether two named operators are actually
  * two people.
  */
+/** How long a resolved operator row is reused before it is read again. */
+export const OPERATOR_ROW_CACHE_MS = 5_000;
+
 @Injectable()
 export class OperatorService {
   private readonly asset: { readonly asset: AssetId; readonly decimals: number };
+
+  /**
+   * Active operator rows by id, for a few seconds. Every request re-checks
+   * the row, and this keeps that from being a query per request. A change made
+   * through the console invalidates this instance's entry at once and revokes
+   * the operator's sessions where it removes access, so another instance's
+   * stale entry can only lag a role change, by at most this long.
+   */
+  private readonly cache = new Map<string, { entity: OperatorEntity; at: number }>();
 
   constructor(
     private readonly operators: OperatorRepository,
@@ -66,8 +79,41 @@ export class OperatorService {
               asset: this.asset.asset,
               decimals: this.asset.decimals,
             },
-      status: entity.status as 'ACTIVE' | 'SUSPENDED',
+      walletAddress: entity.walletAddress,
+      status: entity.status as 'ACTIVE' | 'SUSPENDED' | 'REMOVED',
     };
+  }
+
+  /** The session shape of a row, for the guard and for re-running a queued action. */
+  sessionOf(entity: OperatorEntity): OperatorSession {
+    return {
+      operatorId: entity.id,
+      subject: entity.subject,
+      displayName: entity.displayName,
+      email: entity.email,
+      walletAddress: entity.walletAddress,
+      roles: entity.roles as OperatorRole[],
+      authorityLimitMinor: entity.authorityLimitMinor,
+    };
+  }
+
+  /** The active row for `id`, from the short cache, or `null` when it is not active. */
+  async findActiveCached(id: string): Promise<OperatorEntity | null> {
+    const hit = this.cache.get(id);
+    if (hit && Date.now() - hit.at < OPERATOR_ROW_CACHE_MS) return hit.entity;
+
+    const entity = await this.operators.findById(id);
+    if (!entity || entity.status !== 'ACTIVE') {
+      this.cache.delete(id);
+      return null;
+    }
+    this.cache.set(id, { entity, at: Date.now() });
+    return entity;
+  }
+
+  /** Drop this instance's cached row for `id`. Called on every change to it. */
+  invalidate(id: string): void {
+    this.cache.delete(id);
   }
 
   /**
@@ -77,15 +123,15 @@ export class OperatorService {
    * `decided_by_operator_id`, `approver_operator_id`, `assigned_operator_id`
    * or `opened_by_operator_id` — an id that resolved to an active operator
    * five minutes ago is not proof it still does, and the revocation story
-   * is worthless if only the bearer-token path checks `status`.
+   * is worthless if only the sign-in path checks `status`. Uncached.
    */
   async requireActive(id: string): Promise<OperatorEntity> {
     const operator = await this.operators.findById(id);
     if (!operator) {
       throw OperatorErrors.notFound({ id });
     }
-    if (operator.status === 'SUSPENDED') {
-      throw OperatorErrors.suspended({ subject: operator.subject });
+    if (operator.status !== 'ACTIVE') {
+      throw OperatorErrors.notAuthorized();
     }
     return operator;
   }

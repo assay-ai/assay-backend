@@ -1,3 +1,4 @@
+import type { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 
 /**
@@ -53,6 +54,24 @@ export interface McpSession {
    * key, and PAYMENT_REQUIRED names it. Absent or null for every other source.
    */
   readonly delegateAccount?: AccountId | null;
+
+  /**
+   * Set when the caller's organization, account or delegate is on the
+   * account blocklist and the caller is a person (`HUMAN` or `CONFIG`).
+   *
+   * A blocked machine credential never gets a session at all. A blocked person
+   * does, so the dashboard can still read the account's own data and show why
+   * it is blocked; `SessionAuthGuard` refuses every non-read route for such a
+   * session, and the MCP endpoint refuses it outright. Absent on every other
+   * session.
+   */
+  readonly blocked?: SessionBlock | null;
+}
+
+/** Which party of a session is blocked. */
+export interface SessionBlock {
+  readonly role: BlockedRole;
+  readonly subjectKind: BlockSubjectKind;
 }
 
 /** Who presented the credential behind an {@link McpSession}. */

@@ -134,4 +134,20 @@ export interface ProviderRoutingState {
    * — see `minimumStakeFor`.
    */
   readonly minimumStakeOverride?: Money;
+
+  /**
+   * The chains this provider is on a "slash hold" on (`provider_slash_holds`):
+   * its penalties there cannot be collected promptly, so its paid bindings are
+   * not routed or quoted on those chains and no payment intent names it
+   * there. Absent or empty: no hold. Only ever narrows routing.
+   */
+  readonly slashHolds?: readonly ProviderSlashHoldView[];
+}
+
+/** One standing slash hold, as routing and the provider banner read it. */
+export interface ProviderSlashHoldView {
+  readonly chainId: ChainId;
+  /** `SlashHoldReason` values: `SLASH_WINDOW_FULL`, `STAKE_FULLY_RESERVED`, `BONDED_BELOW_MINIMUM`. */
+  readonly reasons: readonly string[];
+  readonly heldSince: Date;
 }

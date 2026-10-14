@@ -191,11 +191,11 @@ describe('EvmVoucherAuthority — X402Escrow._voucherAuthority, off chain', () =
       expect(answer).toMatchObject({ kind: 'REFUSED', reason: VoucherAuthorityRefusal.NOT_PAYER });
     });
 
-    it('reads an escrow without the delegation surface (a revert) as having no delegates', async () => {
+    it('fails CLOSED on a revert too: the backend assumes the upgraded escrow', async () => {
       chain.delegationFails = 'revert';
-      expect(
-        await authority.authorize(payerKey.address, DIGEST, await sign(delegateKey), NOW),
-      ).toMatchObject({ kind: 'REFUSED', reason: VoucherAuthorityRefusal.NOT_PAYER });
+      await expect(
+        authority.authorize(payerKey.address, DIGEST, await sign(delegateKey), NOW),
+      ).rejects.toMatchObject({ errorCode: 'CHAIN_VOUCHER_AUTHORITY_UNAVAILABLE' });
     });
 
     it('fails CLOSED when the delegation cannot be read', async () => {

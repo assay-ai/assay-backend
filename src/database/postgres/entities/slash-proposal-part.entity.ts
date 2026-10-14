@@ -70,7 +70,7 @@ export class SlashProposalPartEntity extends OrganizationScopedEntityWithoutSoft
   @Column({ name: 'chain_request_id', type: 'char', length: 64 })
   chainRequestId: string;
 
-  /** `NONE`, `PENDING`, `EXECUTED`, `CANCELLED` or `REFUSED`. */
+  /** `NONE`, `PENDING`, `DISPUTED` (D-19), `EXECUTED`, `CANCELLED` or `REFUSED`. */
   @Column({ name: 'chain_status', type: 'varchar', length: 16, default: 'NONE' })
   chainStatus: string;
 
@@ -82,6 +82,10 @@ export class SlashProposalPartEntity extends OrganizationScopedEntityWithoutSoft
 
   @Column({ name: 'chain_reserved', type: 'numeric', precision: 78, scale: 0, nullable: true })
   chainReserved: string | null;
+
+  /** The chain's `disputedAt` (D-19); the 30-day expiry is measured from it. */
+  @Column({ name: 'chain_disputed_at', type: 'timestamptz', nullable: true })
+  chainDisputedAt: Date | null;
 
   @Column({ name: 'chain_proposal_signature', type: 'varchar', length: 256, nullable: true })
   chainProposalSignature: string | null;

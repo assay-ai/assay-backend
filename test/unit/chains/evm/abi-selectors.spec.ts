@@ -8,6 +8,10 @@ import {
   X402_CONFIG_ABI,
   X402_ESCROW_ABI,
   MULTICALL3_ABI,
+  X402_CONFIG_ARBITER_ABI,
+  X402_CONFIG_EVENTS_ABI,
+  X402_PROXY_EVENTS_ABI,
+  X402_SLASH_WATCH_EVENTS_ABI,
   X402_STAKE_ABI,
   X402_STAKE_SLASH_ABI,
 } from '@modules/chains/evm/abi/x402.abi';
@@ -106,14 +110,21 @@ const CONFIG_PINS: readonly Pin[] = [
   // 'owner()'` and `cast sig 'pendingOwner()'`. Reads only.
   ['0x8da5cb5b', 'owner()', '(address)'],
   ['0xe30c3978', 'pendingOwner()', '(address)'],
-  ['0x5a6d11bb', 'slashProviderBps()', '(uint16)'],
   ['0x7ef30520', 'canSign(address)', '(bool)'],
   [
     '0x4d44b5b7',
     'verifierKey(address)',
     '((uint64 registeredAt,uint64 expiresAt,uint64 revokedAt,bool registered,bool revoked))',
   ],
+  // The dispute upgrade (D-19): `.methodIdentifiers` of assay-evm 99f98ed's
+  // `out/X402Config.sol/X402Config.json`, agreeing with `cast sig`.
+  ['0xfe25e00a', 'arbiter()', '(address)'],
+  ['0x41985d41', 'slashDelaySeconds()', '(uint64)'],
+  ['0xe5962195', 'blocked(address)', '(bool)'],
 ];
+
+/** `setBlocked` alone — encoded for the arbiter's wallet, never sent (`cast sig`). */
+const CONFIG_ARBITER_PINS: readonly Pin[] = [['0x000af2a1', 'setBlocked(address,bool)', '()']];
 
 const STAKE_PINS: readonly Pin[] = [
   [
@@ -126,7 +137,8 @@ const STAKE_PINS: readonly Pin[] = [
   [
     '0x8e00f4d1',
     'slashRecordOf(bytes32)',
-    '((address provider,uint8 status,uint64 penalty,address beneficiary,uint64 proposedAt,uint32 __gap,address verifier,uint64 executableAt,uint32 __gap2,uint64 reserved,uint64 capAllowance,uint64 applied,uint64 executedAt,bytes32 policy))',
+    // assay-evm 99f98ed: `disputedAt` appended as the thirteenth field (D-19).
+    '((address provider,uint8 status,uint64 penalty,address beneficiary,uint64 proposedAt,uint32 __gap,address verifier,uint64 executableAt,uint32 __gap2,uint64 reserved,uint64 capAllowance,uint64 applied,uint64 executedAt,bytes32 policy,uint64 disputedAt))',
   ],
   ['0x3644e515', 'DOMAIN_SEPARATOR()', '(bytes32)'],
   // The provider's own doors — built unsigned by `EvmStakeIntentBuilder`,
@@ -168,6 +180,12 @@ const STAKE_SLASH_PINS: readonly Pin[] = [
   ['0xb850cdf7', 'executeSlash(bytes32)', '()'],
   ['0xb46940b6', 'expireSlash(bytes32)', '()'],
   ['0xa91e3b8e', 'cancelSlash(bytes32)', '()'],
+  // The dispute upgrade's batch doors (D-19), from `.methodIdentifiers` of
+  // assay-evm 99f98ed's `out/X402Stake.sol/X402Stake.json`, agreeing with
+  // `cast sig`. Encoded for a person's wallet, never sent.
+  ['0xa384e225', 'disputeSlashBatch(bytes32[])', '()'],
+  ['0xfe08fd47', 'upholdSlashBatch(bytes32[])', '()'],
+  ['0x3e87bd05', 'cancelSlashBatch(bytes32[])', '()'],
 ];
 
 const MULTICALL3_PINS: readonly Pin[] = [
@@ -181,6 +199,7 @@ const MULTICALL3_PINS: readonly Pin[] = [
 const SUITES = [
   ['escrow', X402_ESCROW_ABI, ESCROW_PINS],
   ['config', X402_CONFIG_ABI, CONFIG_PINS],
+  ['config-arbiter', X402_CONFIG_ARBITER_ABI, CONFIG_ARBITER_PINS],
   ['stake', X402_STAKE_ABI, STAKE_PINS],
   ['stake-slash', X402_STAKE_SLASH_ABI, STAKE_SLASH_PINS],
   ['multicall3', MULTICALL3_ABI, MULTICALL3_PINS],
@@ -262,7 +281,69 @@ describe('the vendored ABI matches the compiled contracts', () => {
       SlashProposed: '0x89a06db4f05c4eb0313f470e883eeec82e71b9526b56332373ea25030ac52457',
       SlashExecuted: '0x796048ad6bc167288173ac09bbc37852a68c771d44255cf3f9f3c9181d1c8025',
       SlashCancelled: '0xd49e8d4811b1f1cee769ed651b311fedc3dee19890a75297949c7316de37ac08',
+      // `cast sig-event` on the D-19 signatures.
+      SlashDisputed: '0x71dcb2ee04ff61961c8f4e7a01db35a26b8d22805252ed7551752962849d1cae',
+      SlashUpheld: '0x1c63e1dc5cf373fdb9eeaace59066465ab6345c63c20d6fbfff7c51687299364',
     });
+  });
+
+  it('watches exactly the proposal, dispute, ruling and cancel events, with the slash ABI topics', () => {
+    const slashTopics = new Map(
+      X402_STAKE_SLASH_ABI.filter((entry) => entry.type === 'event').map(
+        (entry) => [entry.name, toEventSelector(entry)] as const,
+      ),
+    );
+    const watched = X402_SLASH_WATCH_EVENTS_ABI.map((entry) => {
+      expect(entry.type).toBe('event');
+      return [entry.name, toEventSelector(entry)] as const;
+    });
+    expect(watched.map(([name]) => name)).toEqual([
+      'SlashProposed',
+      'SlashDisputed',
+      'SlashUpheld',
+      'SlashCancelled',
+      'SlashExecuted',
+    ]);
+    for (const [name, topic] of watched) expect(topic).toBe(slashTopics.get(name));
+  });
+
+  it('pins the Config events the chain-state indexer reads, as cast computed them', () => {
+    expect(X402_CONFIG_EVENTS_ABI.every((entry) => entry.type === 'event')).toBe(true);
+    expect(
+      Object.fromEntries(
+        X402_CONFIG_EVENTS_ABI.map((entry) => [entry.name, toEventSelector(entry)]),
+      ),
+    ).toEqual({
+      PauseToggled: '0x961373cd433c8ca67a43995ef5ebe71bec5d8a9fe7d599aaf511dbabc5e1686c',
+      BlockedSet: '0xe542f9e64ac19b6755a8df86c41b0b8e0fd7a37565a0b79291c2b5383e6a4a15',
+      ArbiterSet: '0xa99fc739cab6b19d8ee27aaf57eabd8d86b73474801240c86a747a5f5ee88841',
+      SlashDelaySet: '0xe92892ac23b44eec891739e9373975ea3d0390fff6945b656d711465fa06a44a',
+      VerifierRegistered: '0xf548a4789950d0f1776ed9cb2587f9c617dd22bcaf73b7e11671ea12a11788a9',
+      // Audit E-6, from the compiled X402Config artifact.
+      AdminSet: '0xbf265e8326285a2747e33e54d5945f7111f2b5edb826eb8c08d4677779b3ff97',
+      ConfigUpdated: '0x8e7fa7a1420deb5f5e4a066cf608648e5033204e61af8207cde6761776d5d78f',
+      VerifierRevokedEvent: '0x09d81452cebb749c6fa606928a01c3693c6dfc54af1b5dadfb01349c0b93d345',
+    });
+  });
+
+  it('pins the ERC-1967 Upgraded event watched on all three proxies', () => {
+    expect(X402_PROXY_EVENTS_ABI.map((entry) => [entry.name, toEventSelector(entry)])).toEqual([
+      ['Upgraded', '0xbc7cd75a20ee27fd9adebab32041f755214dbc6bffa90cc0225b39da2e5c2d3b'],
+    ]);
+  });
+
+  it('lets only the slash executor import the arbiter Config ABI', () => {
+    const hits = execSync(`grep -rl "X402_CONFIG_ARBITER_ABI" src`, {
+      cwd: `${__dirname}/../../../..`,
+      encoding: 'utf8',
+    })
+      .trim()
+      .split('\n')
+      .sort();
+    expect(hits).toEqual([
+      'src/modules/chains/evm/abi/x402.abi.ts',
+      'src/modules/chains/evm/evm-slash-executor.service.ts',
+    ]);
   });
 
   it('lets only the slash executor import the slash ABI', () => {
@@ -284,7 +365,12 @@ describe('the vendored ABI matches the compiled contracts', () => {
   it('vendors no writer the admin ledger owns, by name', () => {
     // Belt and braces over the selector check above, and the one that reads as
     // an instruction to a future editor rather than as a hash comparison.
-    const names: readonly string[] = [...X402_CONFIG_ABI, ...X402_STAKE_ABI, ...X402_ESCROW_ABI]
+    const names: readonly string[] = [
+      ...X402_CONFIG_ABI,
+      ...X402_CONFIG_EVENTS_ABI,
+      ...X402_STAKE_ABI,
+      ...X402_ESCROW_ABI,
+    ]
       .filter((entry) => entry.type === 'function')
       .map((entry) => entry.name);
     for (const forbidden of [
@@ -303,6 +389,11 @@ describe('the vendored ABI matches the compiled contracts', () => {
       'acceptOwnership',
       'renounceOwnership',
       'initializeV2',
+      // The dispute upgrade's admin doors (D-19), and the blocklist writer,
+      // which only the arbiter-only constant may carry.
+      'setArbiter',
+      'setSlashDelay',
+      'setBlocked',
     ]) {
       expect({ forbidden, vendored: names.includes(forbidden) }).toEqual({
         forbidden,
@@ -318,8 +409,13 @@ describe('the vendored ABI matches the compiled contracts', () => {
  *
  * The names were extracted mechanically from the Solidity
  * (`grep '^error' src/Errors.sol` → 81 hits, every one zero-argument) on
- * 2026-10-13, after D-17/D-18. Each selector is `cast sig '<Name>()'` on the
- * pinned Foundry build (1.2.1-nightly).
+ * 2026-10-13, after D-17/D-18, and again at assay-evm 99f98ed (88 hits: the
+ * dispute upgrade's seven appended), and at 6865b24 (95 hits: a4f97ab's and
+ * the audit fix round's seven appended), and at 9f036a3 (91: the simplify
+ * round removed four). Each selector is `cast sig '<Name>()'`
+ * on the pinned Foundry build (1.2.1-nightly), the last seven viem's keccak
+ * cross-checked against the compiled ABIs. `target-branch-pin.spec.ts` checks
+ * the list against the branch the backend targets (audit T-3).
  *
  * All are pinned rather than a sample: pinning four leaves the rest free to
  * be misspelled, and a misspelled name produces a selector that no revert will
@@ -400,7 +496,6 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0xd56697d0', 'StatusDoesNotSlash'],
   ['0x38fbeb34', 'NothingToSlash'],
   ['0xc7300280', 'SlashCapExceeded'],
-  ['0x7c2fa623', 'VerifierDailyCapExceeded'],
   ['0x09c1eae5', 'PenaltyTooSmallToSplit'],
   ['0x4789b627', 'PenaltyExceedsMaximum'],
   ['0x5d2cbb98', 'SlashNotPending'],
@@ -408,6 +503,21 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0xb3b45102', 'SlashNotYetExecutable'],
   ['0xa0057580', 'SlashExecutionWindowClosed'],
   ['0x15fbdbc2', 'SlashNotExpired'],
+  // The dispute upgrade (D-19).
+  ['0xb9a22a6a', 'NotSlashedProvider'],
+  ['0x435a3cfe', 'DisputeWindowClosed'],
+  ['0x0c7b2f65', 'SlashNotDisputed'],
+  ['0xccb665a6', 'NotArbiter'],
+  ['0xae170cc2', 'AddressBlocked'],
+  ['0x9589cd8b', 'InvalidSlashDelay'],
+  // a4f97ab and the audit fix round (audit E-9). Computed with viem's keccak
+  // over `<Name>()`; every name is in the compiled X402Config/X402Stake/
+  // X402Escrow ABIs of that commit.
+  ['0xe048dc84', 'DisputeTimedOut'],
+  ['0x6eccea65', 'SlashAlreadyDisputed'],
+  ['0x6a3f467f', 'SlashWindowNotDrained'],
+  ['0x64ce2c77', 'ArbiterCannotUnblock'],
+  ['0xf0318500', 'InvalidArbiter'],
   // OpenZeppelin `Ownable2StepUpgradeable`, raised by X402Config's owner doors
   // (D-17). Parameterised: `cast sig 'OwnableUnauthorizedAccount(address)'`
   // and `cast sig 'OwnableInvalidOwner(address)'`.
@@ -417,9 +527,9 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
 
 describe('the Errors.sol selector table', () => {
   it('has one entry per declared error and no collisions', () => {
-    // 81 from Errors.sol plus OpenZeppelin's two Ownable errors.
-    expect(EVM_ERROR_BY_SELECTOR.size).toBe(83);
-    expect(ERROR_PINS).toHaveLength(83);
+    // 91 from Errors.sol plus OpenZeppelin's two Ownable errors.
+    expect(EVM_ERROR_BY_SELECTOR.size).toBe(93);
+    expect(ERROR_PINS).toHaveLength(93);
   });
 
   it.each(ERROR_PINS)('%s decodes to %s', (selector, name) => {

@@ -1,6 +1,8 @@
 import { Module } from '@nestjs/common';
 
 import { SlashLifecycleJob } from './jobs/slash-lifecycle.job';
+import { SLASH_CHAIN_RULINGS } from './ports/slash-chain-rulings.port';
+import { SlashChainRulingService } from './services/slash-chain-ruling.service';
 import { SlashModule } from './slash.module';
 
 /**
@@ -39,6 +41,12 @@ import { SlashModule } from './slash.module';
  */
 @Module({
   imports: [SlashModule],
-  providers: [SlashLifecycleJob],
+  providers: [
+    SlashLifecycleJob,
+    // The chain watcher's `SlashDisputed` / `SlashUpheld` (D-19) land here; the
+    // watcher resolves the token through `ModuleRef` in this same process.
+    SlashChainRulingService,
+    { provide: SLASH_CHAIN_RULINGS, useExisting: SlashChainRulingService },
+  ],
 })
 export class SlashSchedulerModule {}

@@ -189,6 +189,19 @@ export interface StakeIntentPreflight {
  * describes what to sign, never a signature.
  */
 
+/**
+ * What makes a deposit a compensation (review M-3): it was funded by this
+ * account (the settlement treasury), and its transaction landed strictly after
+ * this instant (the slash's `executed_at`). Deposits by any other funder are
+ * not counted, and a transaction at or before `after`, or with no known time,
+ * answers `null`. Without these, the provider's own earlier stake deposit
+ * passed as the treasury paying them back.
+ */
+export interface ConfirmedDepositExpectation {
+  readonly funder: AccountId;
+  readonly after: Date;
+}
+
 export interface StakeIntentBuilderPort {
   /**
    * `Config.stake_mint` as a CAIP-19 asset plus its scale.
@@ -238,7 +251,11 @@ export interface StakeIntentBuilderPort {
    * deposited less than the compensation owed is exactly the case this check
    * exists to catch.
    */
-  confirmedDeposit(signature: string, account: AccountId): Promise<Money | null>;
+  confirmedDeposit(
+    signature: string,
+    account: AccountId,
+    expected: ConfirmedDepositExpectation,
+  ): Promise<Money | null>;
 
   /**
    * The unsigned transaction, plus the preflight taken in the same pass.

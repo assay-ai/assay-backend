@@ -260,6 +260,14 @@ export enum IneligibilityReason {
    * recorded in the quality profile — the router fails over to another provider.
    */
   CEILING_REACHED = 'CEILING_REACHED',
+  /**
+   * The provider is on a slash hold on every chain this buyer could settle
+   * with it: its penalties there cannot be collected promptly (a full slash
+   * window with an upheld record waiting, a stake fully reserved by pending
+   * slashes, or bonded below the minimum). Lifts by itself once the chain
+   * says otherwise; not a strike.
+   */
+  PROVIDER_SLASH_HOLD = 'PROVIDER_SLASH_HOLD',
 }
 
 export interface Ineligible {

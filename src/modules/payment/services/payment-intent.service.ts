@@ -1,13 +1,21 @@
+import {
+  CHAIN_STATE_GATE,
+  ChainDoor,
+  ChainStateGatePort,
+} from '@modules/chains/ports/chain-state-gate.port';
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
+import { ProviderSlashHoldRepository } from '@database/postgres/repositories/provider-slash-hold.repository';
 import {
   OpenVoucherTotals,
   PaymentIntentRepository,
   VoucherAdmissionScope,
 } from '@database/postgres/repositories/payment-intent.repository';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { LedgerAccountId, LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
@@ -75,6 +83,15 @@ export class PaymentIntentService {
     private readonly intents: PaymentIntentRepository,
     private readonly ledger: LedgerService,
     private readonly escrowGate: EscrowSpendGateService,
+    private readonly blocklist: AccountBlocklistService,
+    // The ON-CHAIN pause and blocklist (D-19), refused here with a clear error
+    // rather than at redemption. Optional: a composition without the chain
+    // cache still creates intents, and the contract still enforces.
+    @Optional()
+    @Inject(CHAIN_STATE_GATE)
+    private readonly chainState: ChainStateGatePort | null = null,
+    // The per-chain slash holds: no new intent names a held provider there.
+    @Optional() private readonly slashHolds: ProviderSlashHoldRepository | null = null,
   ) {}
 
   /**
@@ -93,11 +110,46 @@ export class PaymentIntentService {
    * A key replayed against a *different* request is not a retry — it is a
    * collision, and it is refused rather than silently answered with the first
    * request's intent.
+   *
+   * **No intent names a blocked party.** Every new payment, on every rail,
+   * starts here, so this is the one place the account blocklist refuses the
+   * payer's organization and account, the provider and its payout account, and
+   * the voucher delegate. It is checked before the insert, so a refusal leaves
+   * nothing behind — not even the idempotency key.
    */
   async create(
     input: CreatePaymentIntentInput,
     admission?: VoucherAdmission,
   ): Promise<PaymentIntent> {
+    this.blocklist.assertNotBlocked([
+      {
+        role: BlockedRole.ORGANIZATION,
+        kind: BlockSubjectKind.ORGANIZATION,
+        subject: input.organizationId,
+      },
+      { role: BlockedRole.PAYER, kind: BlockSubjectKind.WALLET, subject: input.agentAccount },
+      {
+        role: BlockedRole.PROVIDER,
+        kind: BlockSubjectKind.ORGANIZATION,
+        subject: input.providerId,
+      },
+      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: input.providerAccount },
+      { role: BlockedRole.DELEGATE, kind: BlockSubjectKind.WALLET, subject: input.voucherDelegate },
+    ]);
+    await this.chainState?.assertActive(ChainDoor.REDEEM, [
+      { role: 'PAYER', account: input.agentAccount },
+      { role: 'PAYEE', account: input.providerAccount },
+      { role: 'DELEGATE', account: input.voucherDelegate },
+    ]);
+
+    if (
+      input.providerId &&
+      this.slashHolds &&
+      (await this.slashHolds.isHeld(input.providerId, input.chainId))
+    ) {
+      throw PaymentErrors.providerSlashHold({ chainId: input.chainId });
+    }
+
     const providerAmount = MoneyUtil.subtract(input.price, input.platformFee);
 
     const row: Partial<PaymentIntentEntity> = {

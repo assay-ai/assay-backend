@@ -1,6 +1,8 @@
 import { CanActivate, ExecutionContext, Inject, Injectable } from '@nestjs/common';
+import { Reflector } from '@nestjs/core';
 import { Request } from 'express';
 
+import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
 import {
   MCP_SESSION_SOURCE,
   McpSession,
@@ -8,6 +10,10 @@ import {
 } from '@modules/mcp/ports/mcp-session.port';
 
 import { extractBearerToken } from './bearer-token';
+import {
+  ALLOWED_WHILE_BLOCKED_METADATA,
+  BLOCKED_SESSION_READ_ONLY_METADATA,
+} from './blocked-session-read-only.decorator';
 import { SESSION_REQUEST_KEY } from './session-request.key';
 
 /**
@@ -59,15 +65,48 @@ export interface RequestWithSession extends Request {
  * Fails closed: `McpSessionPort.resolve` throws (never returns a null
  * session) on a missing or unknown token, and that throw propagates through
  * this guard to `AllExceptionsFilter` unchanged.
+ *
+ * **A blocked account reads, and does nothing else.** The session source
+ * refuses a blocked machine credential outright and marks a blocked person's
+ * session (`McpSession.blocked`). Such a session passes here on `GET` and
+ * `HEAD` only — the dashboard can still show the account its own data and the
+ * block — and every other method is refused with the block's own code, except
+ * on a route marked `@BlockedSessionReadOnly()` (a `POST` that only reads) or
+ * `@AllowedWhileBlocked()` (a write that only revokes authority). A
+ * read that hands out something spendable (`GET /escrow/next-seq` issues a
+ * voucher seq) refuses again where it does so.
  */
 @Injectable()
 export class SessionAuthGuard implements CanActivate {
-  constructor(@Inject(MCP_SESSION_SOURCE) private readonly sessions: McpSessionPort) {}
+  constructor(
+    @Inject(MCP_SESSION_SOURCE) private readonly sessions: McpSessionPort,
+    private readonly reflector: Reflector,
+  ) {}
 
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestWithSession>();
     const session = await this.sessions.resolve(extractBearerToken(request));
+    if (
+      session.blocked &&
+      !READ_METHODS.has(request.method.toUpperCase()) &&
+      !this.isReadOnlyRoute(context)
+    ) {
+      throw sessionBlockedError(session.blocked);
+    }
     request[SESSION_REQUEST_KEY] = session;
     return true;
   }
+
+  private isReadOnlyRoute(context: ExecutionContext): boolean {
+    return [BLOCKED_SESSION_READ_ONLY_METADATA, ALLOWED_WHILE_BLOCKED_METADATA].some(
+      (key) =>
+        this.reflector.getAllAndOverride<boolean | undefined>(key, [
+          context.getHandler(),
+          context.getClass(),
+        ]) === true,
+    );
+  }
 }
+
+/** The methods a blocked person's session may still use. */
+const READ_METHODS: ReadonlySet<string> = new Set(['GET', 'HEAD']);

@@ -48,6 +48,11 @@ import { ProviderStakeIntentService } from '@modules/provider/services/provider-
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { deployment as evmDeployment } from '../chains/evm/evm-fixtures';
 import { expectSettlementAccountList } from '../chains/solana/helpers/instruction-accounts';
+import { AccountErrorCode } from '@modules/account/errors/account.errors';
+import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
+
+import { blocklistOf, noBlocks } from '../helpers/blocklist';
 
 /**
  * The four stake intents, from an HTTP-level request to the
@@ -247,6 +252,7 @@ async function build(options: {
   readonly stake?: StakeAccountFields | null;
   readonly tokenBalance?: bigint | null;
   readonly lamports?: bigint;
+  readonly blocklist?: AccountBlocklistService;
 }) {
   const rpc = new FakeRpc();
   const [configPda] = await findConfigPda({ programAddress: PROGRAM_ID as Address });
@@ -277,6 +283,7 @@ async function build(options: {
     ),
     new SolanaSettlementStakeReader(rpc, PROGRAM_ID),
     new SolanaStakeIntentBuilder(rpc, PROGRAM_ID),
+    options.blocklist ?? noBlocks(),
   );
 
   return { rpc, service };
@@ -594,6 +601,13 @@ describe('ProviderStakeIntentService — stake transactions the provider signs',
  */
 describe('SolanaStakeIntentBuilder.confirmedDeposit', () => {
   const SIGNATURE = 'a-confirmed-signature';
+  /** The treasury that funds a compensation, and when its transaction landed. */
+  const TREASURY = addressOf(300);
+  const BLOCK_TIME = 1_790_000_000;
+  const EXPECTED = {
+    funder: toAccountId(CHAIN_IDS.SOLANA_DEVNET, TREASURY) as AccountId,
+    after: new Date((BLOCK_TIME - 3_600) * 1000),
+  };
 
   function depositData(amount: bigint): string {
     const data = new Uint8Array(DEPOSIT_STAKE_DISCRIMINATOR.length + 8);
@@ -605,11 +619,16 @@ describe('SolanaStakeIntentBuilder.confirmedDeposit', () => {
   async function builderWith(
     instructions: readonly { programId: string; accounts?: string[]; data?: string }[],
     meta: { err: unknown } | null = { err: null },
+    blockTime: number | null = BLOCK_TIME,
   ) {
     const rpc = new FakeRpc();
     const [configPda] = await findConfigPda({ programAddress: PROGRAM_ID as Address });
     rpc.accounts.set(configPda, encodeConfig());
-    rpc.transactions.set(SIGNATURE, { meta, transaction: { message: { instructions } } });
+    rpc.transactions.set(SIGNATURE, {
+      meta,
+      blockTime,
+      transaction: { message: { instructions } },
+    });
     return { builder: new SolanaStakeIntentBuilder(rpc, PROGRAM_ID), rpc };
   }
 
@@ -625,12 +644,12 @@ describe('SolanaStakeIntentBuilder.confirmedDeposit', () => {
     const { builder } = await builderWith([
       {
         programId: PROGRAM_ID,
-        accounts: ['a', 'b', 'c', await stakePdaOf()],
+        accounts: [TREASURY, 'b', 'c', await stakePdaOf()],
         data: depositData(7_000_000n),
       },
     ]);
 
-    const deposited = await builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY);
+    const deposited = await builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY, EXPECTED);
 
     expect(deposited?.amount).toBe('7000000');
     expect(deposited?.asset).toBe(ASSET_IDS.USDC_SOLANA_DEVNET);
@@ -639,11 +658,21 @@ describe('SolanaStakeIntentBuilder.confirmedDeposit', () => {
   it('sums two deposits into the same stake in one transaction', async () => {
     const stake = await stakePdaOf();
     const { builder } = await builderWith([
-      { programId: PROGRAM_ID, accounts: ['a', 'b', 'c', stake], data: depositData(1_000_000n) },
-      { programId: PROGRAM_ID, accounts: ['a', 'b', 'c', stake], data: depositData(2_000_000n) },
+      {
+        programId: PROGRAM_ID,
+        accounts: [TREASURY, 'b', 'c', stake],
+        data: depositData(1_000_000n),
+      },
+      {
+        programId: PROGRAM_ID,
+        accounts: [TREASURY, 'b', 'c', stake],
+        data: depositData(2_000_000n),
+      },
     ]);
 
-    expect((await builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY))?.amount).toBe('3000000');
+    expect((await builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY, EXPECTED))?.amount).toBe(
+      '3000000',
+    );
   });
 
   it('ignores a deposit into somebody else’s stake account', async () => {
@@ -652,12 +681,14 @@ describe('SolanaStakeIntentBuilder.confirmedDeposit', () => {
     const { builder } = await builderWith([
       {
         programId: PROGRAM_ID,
-        accounts: ['a', 'b', 'c', addressOf(200)],
+        accounts: [TREASURY, 'b', 'c', addressOf(200)],
         data: depositData(7_000_000n),
       },
     ]);
 
-    await expect(builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY)).resolves.toBeNull();
+    await expect(
+      builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY, EXPECTED),
+    ).resolves.toBeNull();
   });
 
   it('ignores an instruction of this program that is not a deposit', async () => {
@@ -666,24 +697,28 @@ describe('SolanaStakeIntentBuilder.confirmedDeposit', () => {
     const { builder } = await builderWith([
       {
         programId: PROGRAM_ID,
-        accounts: ['a', 'b', 'c', await stakePdaOf()],
+        accounts: [TREASURY, 'b', 'c', await stakePdaOf()],
         data: getBase58Decoder().decode(other),
       },
     ]);
 
-    await expect(builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY)).resolves.toBeNull();
+    await expect(
+      builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY, EXPECTED),
+    ).resolves.toBeNull();
   });
 
   it('ignores a deposit belonging to some other program entirely', async () => {
     const { builder } = await builderWith([
       {
         programId: '11111111111111111111111111111111',
-        accounts: ['a', 'b', 'c', await stakePdaOf()],
+        accounts: [TREASURY, 'b', 'c', await stakePdaOf()],
         data: depositData(7_000_000n),
       },
     ]);
 
-    await expect(builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY)).resolves.toBeNull();
+    await expect(
+      builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY, EXPECTED),
+    ).resolves.toBeNull();
   });
 
   it('answers null for a transaction that landed and failed', async () => {
@@ -691,20 +726,63 @@ describe('SolanaStakeIntentBuilder.confirmedDeposit', () => {
       [
         {
           programId: PROGRAM_ID,
-          accounts: ['a', 'b', 'c', await stakePdaOf()],
+          accounts: [TREASURY, 'b', 'c', await stakePdaOf()],
           data: depositData(7_000_000n),
         },
       ],
       { err: { InstructionError: [0, 'Custom'] } },
     );
 
-    await expect(builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY)).resolves.toBeNull();
+    await expect(
+      builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY, EXPECTED),
+    ).resolves.toBeNull();
   });
 
   it('answers null for a signature the cluster has never heard of', async () => {
     const { builder } = await builderWith([]);
 
-    await expect(builder.confirmedDeposit('unknown', STAKE_AUTHORITY)).resolves.toBeNull();
+    await expect(
+      builder.confirmedDeposit('unknown', STAKE_AUTHORITY, EXPECTED),
+    ).resolves.toBeNull();
+  });
+
+  // Review M-3: only a deposit the treasury funded, after the slash executed.
+  it('ignores a deposit funded by anyone but the treasury', async () => {
+    const stake = await stakePdaOf();
+    const { builder } = await builderWith([
+      {
+        programId: PROGRAM_ID,
+        accounts: [addressOf(301), 'b', 'c', stake],
+        data: depositData(7_000_000n),
+      },
+    ]);
+
+    await expect(
+      builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY, EXPECTED),
+    ).resolves.toBeNull();
+  });
+
+  it('answers null for a deposit that landed before the slash executed, or with no time', async () => {
+    const stake = await stakePdaOf();
+    const instructions = [
+      {
+        programId: PROGRAM_ID,
+        accounts: [TREASURY, 'b', 'c', stake],
+        data: depositData(7_000_000n),
+      },
+    ];
+    const early = await builderWith(instructions);
+    await expect(
+      early.builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY, {
+        ...EXPECTED,
+        after: new Date(BLOCK_TIME * 1000),
+      }),
+    ).resolves.toBeNull();
+
+    const untimed = await builderWith(instructions, { err: null }, null);
+    await expect(
+      untimed.builder.confirmedDeposit(SIGNATURE, STAKE_AUTHORITY, EXPECTED),
+    ).resolves.toBeNull();
   });
 });
 
@@ -751,6 +829,7 @@ describe('ProviderStakeIntentService — on eip155', () => {
         maxPriorityFeePerGas: 0n,
       })),
       getTransactionReceipt: jest.fn(),
+      getBlock: jest.fn(),
     };
     const clients = new Map([[EVM_CHAIN, client]]);
     const deployments = new Map([[EVM_CHAIN, evmDeployment(EVM_CHAIN)]]);
@@ -769,6 +848,7 @@ describe('ProviderStakeIntentService — on eip155', () => {
       enrolments,
       new EvmStakeReader(clients, deployments, { now: () => Date.now(), paramsTtlMs: 60_000 }),
       builder,
+      noBlocks(),
     );
   }
 
@@ -806,4 +886,22 @@ describe('ProviderStakeIntentService — on eip155', () => {
       ProviderErrorCode.PROVIDER_STAKE_ACCOUNT_NOT_OPEN,
     );
   });
+});
+
+describe('ProviderStakeIntentService, with the stake authority blocked', () => {
+  it.each([StakeIntentKind.DEPOSIT, StakeIntentKind.WITHDRAW])(
+    'builds no %s intent for a blocked stake authority',
+    async (kind) => {
+      const { service, rpc } = await build({
+        blocklist: blocklistOf({ kind: BlockSubjectKind.WALLET, subject: STAKE_AUTHORITY }),
+      });
+      const readsBefore = rpc.accounts.size;
+
+      await expect(service.createIntent(PROVIDER_ID, kind, '1000000')).rejects.toMatchObject({
+        errorCode: AccountErrorCode.ACCOUNT_BLOCKED,
+        context: { role: BlockedRole.STAKE_AUTHORITY },
+      });
+      expect(rpc.accounts.size).toBe(readsBefore);
+    },
+  );
 });

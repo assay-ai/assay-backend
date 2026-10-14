@@ -1,0 +1,101 @@
+/**
+ * The provider "slash hold": stop routing paid calls to a provider, on one
+ * chain, whose penalties can no longer be collected promptly, so penalties do
+ * not keep piling up behind a stake that cannot pay them (owner feature).
+ *
+ * Pure. The inputs are the provider's stake on that chain and the Config's
+ * parameters, read live and cached by `EvmSlashHoldMonitor`, plus whether the
+ * platform has an upheld record of this provider waiting to execute there.
+ */
+
+/** Why a provider is held, as the provider's banner and the operator see it. */
+export enum SlashHoldReason {
+  /**
+   * An upheld record is waiting to execute and its last attempt was refused
+   * `SlashWindowNotDrained`: the provider's (or the verifier key's) rolling
+   * window cannot take it whole, and execution is all or wait (assay-evm
+   * 9f036a3), so nothing is collected until the window drains.
+   */
+  SLASH_WINDOW_FULL = 'SLASH_WINDOW_FULL',
+  /** `pendingSlash ≥ atRisk − penaltyAmount`: the free stake cannot back another penalty. */
+  STAKE_FULLY_RESERVED = 'STAKE_FULLY_RESERVED',
+  /** `bonded < minimumStake`. */
+  BONDED_BELOW_MINIMUM = 'BONDED_BELOW_MINIMUM',
+}
+
+/** One provider's stake and the Config's parameters on one chain, read live. */
+export interface SlashHoldStakeReading {
+  readonly bonded: bigint;
+  readonly unbonding: bigint;
+  readonly pendingSlash: bigint;
+  /** `params.penaltyAmount`: the most one record may take. */
+  readonly penaltyAmount: bigint;
+  /** `params.minimumStake`. */
+  readonly minimumStake: bigint;
+}
+
+/** What the platform's own rows say about records waiting to execute. */
+export interface SlashHoldWaiting {
+  /** An upheld case of this provider whose record is due on this chain. */
+  readonly recordWaiting: boolean;
+  /** Its last execute attempt (the case's or a part's) was refused `SlashWindowNotDrained`. */
+  readonly windowRefused: boolean;
+}
+
+/** Checks with every condition false before a hold is released (the hysteresis). */
+export const SLASH_HOLD_RELEASE_AFTER_CLEAR_CHECKS = 2;
+
+/** Every condition that holds now, in a fixed order; empty when none does. */
+export function slashHoldReasons(
+  stake: SlashHoldStakeReading,
+  waiting: SlashHoldWaiting,
+): SlashHoldReason[] {
+  const reasons: SlashHoldReason[] = [];
+  const atRisk = stake.bonded + stake.unbonding;
+
+  if (waiting.recordWaiting && waiting.windowRefused) {
+    reasons.push(SlashHoldReason.SLASH_WINDOW_FULL);
+  }
+
+  if (stake.pendingSlash + stake.penaltyAmount >= atRisk) {
+    reasons.push(SlashHoldReason.STAKE_FULLY_RESERVED);
+  }
+
+  if (stake.bonded < stake.minimumStake) reasons.push(SlashHoldReason.BONDED_BELOW_MINIMUM);
+  return reasons;
+}
+
+/** The stored state of one provider's hold on one chain. */
+export interface SlashHoldState {
+  readonly held: boolean;
+  readonly reasons: readonly SlashHoldReason[];
+  /** Consecutive checks with no condition true while still held. */
+  readonly clearChecks: number;
+  readonly heldSince: Date | null;
+}
+
+export const NOT_HELD: SlashHoldState = Object.freeze({
+  held: false,
+  reasons: [],
+  clearChecks: 0,
+  heldSince: null,
+});
+
+/**
+ * The next state after one check. Holds at once on any condition; releases
+ * only after {@link SLASH_HOLD_RELEASE_AFTER_CLEAR_CHECKS} consecutive clear
+ * checks, so a window draining and refilling does not flap routing.
+ */
+export function nextSlashHoldState(
+  previous: SlashHoldState,
+  reasons: readonly SlashHoldReason[],
+  now: Date,
+): SlashHoldState {
+  if (reasons.length > 0) {
+    return { held: true, reasons, clearChecks: 0, heldSince: previous.heldSince ?? now };
+  }
+  if (!previous.held) return NOT_HELD;
+  const clearChecks = previous.clearChecks + 1;
+  if (clearChecks >= SLASH_HOLD_RELEASE_AFTER_CLEAR_CHECKS) return NOT_HELD;
+  return { ...previous, clearChecks };
+}

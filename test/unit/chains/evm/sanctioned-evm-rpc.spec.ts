@@ -1,6 +1,8 @@
 import { readdirSync, readFileSync, statSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { parseAbi } from 'viem';
+
 import { createSanctionedEvmClient } from '@modules/chains/evm/sanctioned-evm-rpc';
 import {
   EgressHttpClient,
@@ -126,6 +128,37 @@ describe('the EVM JSON-RPC client is declared to the egress guard', () => {
     await expect(client.getChainId()).rejects.toThrow(/eth_chainId/);
     await expect(client.getChainId()).rejects.toThrow(/-32000/);
     await expect(client.getChainId()).rejects.not.toThrow(/SECRET/);
+  });
+
+  it('reports a revert with empty data as a revert, which an older contract answers with', async () => {
+    // A Config that predates the dispute upgrade has no `slashDelaySeconds()`
+    // and the node says `execution reverted, data: "0x"`. That must reach the
+    // caller as viem's ContractFunctionRevertedError — not a TypeError from
+    // inside viem — so `readConfigTerms` can tell an old contract from an
+    // outage. Measured shape: eip155:46630 on 2026-10-14.
+    const { client: egress } = fakeEgress(() => ({
+      body: JSON.stringify({
+        jsonrpc: '2.0',
+        id: 1,
+        error: { code: 3, message: 'execution reverted', data: '0x' },
+      }),
+    }));
+    const client = createSanctionedEvmClient(RPC_URL, egress, TEST_CHAIN as never);
+
+    const error = await client
+      .readContract({
+        address: '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43',
+        abi: parseAbi(['function slashDelaySeconds() view returns (uint64)']),
+        functionName: 'slashDelaySeconds',
+      })
+      .catch((caught: unknown) => caught);
+
+    const names: string[] = [];
+    for (let current = error; current; current = (current as { cause?: unknown }).cause) {
+      names.push((current as Error).name);
+    }
+    expect(names).toContain('ContractFunctionRevertedError');
+    expect(names).not.toContain('TypeError');
   });
 
   it('refuses a non-2xx answer rather than decoding whatever body came back', async () => {

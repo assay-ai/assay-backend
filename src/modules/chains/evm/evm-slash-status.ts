@@ -1,7 +1,12 @@
 import { SlashRecordStatus } from '@modules/slash/ports/slash-executor.port';
 
-/** The four discriminants of `enum SlashStatus` in assay-evm's `src/Types.sol`. */
-export type EvmSlashStatusValue = 0 | 1 | 2 | 3;
+/**
+ * The five discriminants of `enum SlashStatus` in assay-evm's `src/Types.sol`.
+ * `Disputed = 4` is the dispute upgrade's (D-19), appended last so every
+ * stored discriminant kept its meaning; a Stake that predates the upgrade never
+ * reports it.
+ */
+export type EvmSlashStatusValue = 0 | 1 | 2 | 3 | 4;
 
 /**
  * MAP, NEVER CAST.
@@ -22,6 +27,10 @@ const FROM_EVM: Readonly<Record<number, SlashRecordStatus | null>> = {
   1: 'PENDING',
   2: 'EXECUTED',
   3: 'CANCELLED',
+  // D-19: the provider called `disputeSlash` inside the delay. Not terminal —
+  // the arbiter's `upholdSlash` returns it to `Pending` (executable from that
+  // moment), `cancelSlash` or `expireSlash` ends it.
+  4: 'DISPUTED',
 };
 
 /**
@@ -37,7 +46,7 @@ export function slashStatusFromEvm(value: number): SlashRecordStatus | null {
   // either, but the refusal has to name the enum rather than depend on a
   // property test that happens to be false for them.
   if (!Number.isInteger(value) || !(value in FROM_EVM)) {
-    throw new Error(`unknown EVM SlashStatus ${value}; the enum has four members`);
+    throw new Error(`unknown EVM SlashStatus ${value}; the enum has five members`);
   }
   return FROM_EVM[value];
 }
@@ -50,7 +59,7 @@ export function slashStatusFromEvm(value: number): SlashRecordStatus | null {
  * `None` is unreachable from here by construction, because this codebase has no
  * name for it.
  */
-export function slashStatusToEvm(status: SlashRecordStatus): 1 | 2 | 3 {
+export function slashStatusToEvm(status: SlashRecordStatus): 1 | 2 | 3 | 4 {
   switch (status) {
     case 'PENDING':
       return 1;
@@ -58,5 +67,32 @@ export function slashStatusToEvm(status: SlashRecordStatus): 1 | 2 | 3 {
       return 2;
     case 'CANCELLED':
       return 3;
+    case 'DISPUTED':
+      return 4;
   }
+}
+
+/** `enum CancelReason` in `Types.sol`, named. `DisputeUnresolved = 3` is D-19's. */
+export type EvmCancelReason =
+  | 'WITHDRAWN'
+  | 'EXPIRED'
+  | 'VERIFIER_UNAVAILABLE'
+  | 'DISPUTE_UNRESOLVED';
+
+const CANCEL_REASON_FROM_EVM: Readonly<Record<number, EvmCancelReason>> = {
+  0: 'WITHDRAWN', // `cancelSlash` — the admin's, or (D-19) the arbiter's
+  1: 'EXPIRED', // `expireSlash` after `executableAt + 7 d`
+  2: 'VERIFIER_UNAVAILABLE', // `expireSlash` on a key that can no longer sign
+  3: 'DISPUTE_UNRESOLVED', // `expireSlash` on a `Disputed` record after `disputedAt + 30 d`
+};
+
+/**
+ * `SlashCancelled.reason`, by name. Same discipline as the status: map, never
+ * cast, and refuse a number the enum does not have.
+ */
+export function cancelReasonFromEvm(value: number): EvmCancelReason {
+  if (!Number.isInteger(value) || !(value in CANCEL_REASON_FROM_EVM)) {
+    throw new Error(`unknown EVM CancelReason ${value}; the enum has four members`);
+  }
+  return CANCEL_REASON_FROM_EVM[value];
 }

@@ -1,5 +1,6 @@
 export * from './session-request.key';
 export * from './bearer-token';
+export * from './blocked-session-read-only.decorator';
 export * from './session-auth.guard';
 export * from './current-session.decorator';
 export * from './operator-request.key';

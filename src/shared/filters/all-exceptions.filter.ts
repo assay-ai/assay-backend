@@ -18,6 +18,7 @@ interface DescribedError {
   code: string;
   message: string;
   statusCode: number;
+  context?: Record<string, unknown>;
 }
 
 /**
@@ -52,7 +53,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const request = ctx.getRequest<Request>();
     const response = ctx.getResponse<Response>();
 
-    const { code, message, statusCode } = this.describe(exception);
+    const { code, message, statusCode, context } = this.describe(exception);
     const path = request.originalUrl ?? request.url;
     const line = `[${statusCode}] ${code} - ${message} | ${request.method} ${path}`;
 
@@ -70,7 +71,15 @@ export class AllExceptionsFilter implements ExceptionFilter {
 
     const body: ErrorResponse = {
       success: false,
-      error: { code, message, statusCode, path, timestamp: new Date().toISOString() },
+      error: {
+        code,
+        message,
+        statusCode,
+        path,
+        timestamp: new Date().toISOString(),
+        // Only what the error's definition declares safe (`publicContext`).
+        ...(context ? { context } : {}),
+      },
     };
 
     response.status(statusCode).json(body);
@@ -82,6 +91,7 @@ export class AllExceptionsFilter implements ExceptionFilter {
         code: exception.errorCode,
         message: exception.message,
         statusCode: exception.statusCode,
+        ...(exception.publicContext ? { context: { ...exception.publicContext } } : {}),
       };
     }
 

@@ -6,7 +6,7 @@ import { SlashExecutionService } from '../services/slash-execution.service';
 import { SlashProposalService } from '../services/slash-proposal.service';
 
 /**
- * The six clocks, on a tick.
+ * The seven steps, on a tick.
  *
  * Modelled on `SlaWindowSweepJob`, including the try/catch: a throw out of a
  * `@Cron` handler is an unhandled rejection that takes the scheduler process
@@ -15,15 +15,15 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  * cases we failed to decide, so a crash here would silently convert our own
  * missed deadlines into upheld penalties.
  *
- * Each of the six is a separate try/catch for the same reason: an RPC outage
+ * Each of the seven is a separate try/catch for the same reason: an RPC outage
  * that stops execution must not stop the two sweepers, and the sweeper that
  * *costs the platform money* must be the least stoppable thing in the file.
  *
  * ## Order within one tick
  *
  * `sweepUndisputed` → `sweepPlatformMisses` → `proposeDue` → `executeDue` →
- * `sweepAdminCancels` → `reconcileExecuting`, and the order is load-bearing,
- * not cosmetic:
+ * `requestCancelsForClosedCases` → `sweepAdminCancels` → `reconcileExecuting`,
+ * and the order is load-bearing, not cosmetic:
  *
  * - The sweepers run first because either can change what is due for the
  *   chain steps below them on the very same tick: a case `sweepUndisputed`
@@ -46,6 +46,8 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  * - `sweepAdminCancels` after `executeDue`: it reads on-chain records, and
  *   reading them before the execute pass has finished moving them would mirror
  *   a state that is one instant out of date.
+ * - `requestCancelsForClosedCases` just before it, so a closed case whose cancel
+ *   request was lost is marked and watched on the same tick.
  *
  * ## Why the chain steps live here and not in their own job
  *
@@ -55,7 +57,7 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  * `@Cron` class would need its own copy of the try/catch discipline above and
  * would double the per-minute round-trips to say the same thing. The design
  * spec calls this `SlashExecutionJob`; the difference is a file boundary and
- * the reason to keep it here is that these five steps have to agree about
+ * the reason to keep it here is that these steps have to agree about
  * order.
  */
 @Injectable()
@@ -77,11 +79,15 @@ export class SlashLifecycleJob {
     // as it honestly can, which is the whole point of the parallel clock.
     await this.proposeDue();
     await this.executeDue();
+    // Before the admin-cancel sweep, which only watches cases this has marked.
+    await this.requestCancelsForClosedCases();
     // After `executeDue` and before the reconcile: a case whose admin cancel
     // landed this tick should have its mirror caught up before anything reasons
     // about parked rows, and running it earlier would have it read records the
     // execute pass is about to move.
     await this.sweepAdminCancels();
+    // D-19: disputed records nobody ruled on within 30 days.
+    await this.sweepUnresolvedDisputes();
     // Last. Cleanup for a crashed submit, and it must never delay a live
     // judgement to do it.
     await this.reconcileExecuting();
@@ -141,6 +147,35 @@ export class SlashLifecycleJob {
   }
 
   /**
+   * Closed cases whose on-chain record nobody has asked to cancel.
+   *
+   * A suspension or an overturn asks once, after its transaction commits, and
+   * that request can be lost — or the record can land after the case was
+   * closed. Either way the row is `CANCELLED` / `OVERTURNED` with a `PENDING`
+   * mirror that no sweep selects, the stake stays reserved, and the record is
+   * anyone's to execute once its timelock passes. This asks again; the
+   * admin-cancel sweep below takes it from there.
+   */
+  private async requestCancelsForClosedCases(): Promise<void> {
+    try {
+      const requested = await this.execution.requestCancelsForClosedCases();
+      if (requested > 0) {
+        // `warn`: every row is a cancel request that was lost or raced, and
+        // each one still needs the settlement admin's signature before the
+        // record's timelock passes.
+        this.logger.warn(
+          `${requested} closed case(s) still had a pending on-chain record; the admin cancel ` +
+            `has now been requested for each.`,
+        );
+      }
+    } catch (error) {
+      this.logger.error(
+        `Closed-case cancel repair aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  /**
    * The cases waiting on the settlement admin's `cancel_slash`.
    *
    * Two ends, and only one of them needs a human. Either the admin signed and
@@ -163,6 +198,20 @@ export class SlashLifecycleJob {
     } catch (error) {
       this.logger.error(
         `Admin-cancel sweep aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
+  }
+
+  private async sweepUnresolvedDisputes(): Promise<void> {
+    try {
+      const { expired } = await this.execution.sweepUnresolvedDisputes();
+      if (expired > 0) {
+        // `warn`: a dispute nobody ruled on is an arbiter who did not act.
+        this.logger.warn(`${expired} on-chain dispute(s) went unruled for 30 days and expired.`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Unresolved-dispute sweep aborted: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }

@@ -42,11 +42,7 @@ import { EvmStakeIntentBuilder } from './evm-stake-intent-builder.service';
 import { EvmVerifierRegistryService } from './evm-verifier-registry.service';
 import { EvmVaultService } from './evm-vault.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
-import {
-  DEFAULT_EVM_EXECUTE_DEFER_LIMIT_MS,
-  DEFAULT_EVM_SLASH_BATCH_SIZE,
-  EvmSlashExecutor,
-} from './evm-slash-executor.service';
+import { DEFAULT_EVM_SLASH_BATCH_SIZE, EvmSlashExecutor } from './evm-slash-executor.service';
 import { ModuleRef } from '@nestjs/core';
 import { VerifierSigningService } from '@modules/verification/signing/services/verifier-signing.service';
 import {
@@ -58,6 +54,11 @@ import {
 import { Chain } from 'viem';
 
 import { createSanctionedEvmClient } from './sanctioned-evm-rpc';
+import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
+import {
+  DEFAULT_EVM_CHAIN_STATE_POLL_MS,
+  EvmChainStateService,
+} from './chain-state/evm-chain-state.service';
 
 /** The two variables an eip155 chain cannot be served without. */
 export const EVM_RPC_URLS_ENV = 'EVM_RPC_URLS';
@@ -302,17 +303,17 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       // A provider's stake doors, build-only: a read client and the deployment
       // map, and no relayer — there is nothing here to send with.
       provide: EvmStakeIntentBuilder,
-      useFactory: (clients: never, deployments: never) =>
-        new EvmStakeIntentBuilder(clients, deployments),
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS],
+      useFactory: (clients: never, deployments: never, gate: EvmChainStateService) =>
+        new EvmStakeIntentBuilder(clients, deployments, gate),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EvmChainStateService],
     },
     {
       provide: EvmEscrowIntentBuilder,
-      useFactory: (clients: never, deployments: never) =>
+      useFactory: (clients: never, deployments: never, gate: EvmChainStateService) =>
         // The wall clock is the STALENESS detector only — it never reaches a
         // signed struct. See the builder's constructor.
-        new EvmEscrowIntentBuilder(clients, deployments, { now: () => Date.now() }),
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS],
+        new EvmEscrowIntentBuilder(clients, deployments, { now: () => Date.now() }, gate),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EvmChainStateService],
     },
     {
       /**
@@ -354,7 +355,6 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
         new EvmSlashExecutor(clients, deployments, relayer, moduleRef, VerifierSigningService, {
           now: () => Date.now(),
           batchSize: readBatchSize(config.get<string>(EVM_SLASH_BATCH_SIZE_ENV)),
-          executeDeferLimitMs: DEFAULT_EVM_EXECUTE_DEFER_LIMIT_MS,
           multicall: new Map(
             [...deployments]
               .filter(([, deployment]) => deployment.multicall3)
@@ -420,6 +420,25 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     },
     { provide: EVM_GAS_GRANT_CONFIG, useValue: { now: () => Date.now() } },
     EvmGasGrantService,
+    // The pause/blocklist cache (D-19), in every process. The indexer that
+    // fills it runs in the scheduler (`EvmSchedulerModule`).
+    {
+      provide: EvmChainStateService,
+      useFactory: (
+        repository: EvmChainStateRepository,
+        clients: never,
+        deployments: ReadonlyMap<ChainId, EvmDeployment>,
+        config: ConfigService,
+      ) =>
+        new EvmChainStateService(repository, clients, deployments, {
+          pollMs: readPositiveInt(
+            config.get<string>(EVM_CHAIN_STATE_POLL_MS_ENV),
+            DEFAULT_EVM_CHAIN_STATE_POLL_MS,
+            EVM_CHAIN_STATE_POLL_MS_ENV,
+          ),
+        }),
+      inject: [EvmChainStateRepository, EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, ConfigService],
+    },
     {
       // Holds no key — it broadcasts bytes the buyer signed — so it needs no
       // separate process the way the Solana fee-payer facilitator does.
@@ -429,6 +448,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     },
   ],
   exports: [
+    EvmChainStateService,
     EvmChainAdapter,
     EvmEscrowBalanceReader,
     EvmEscrowOpener,
@@ -604,6 +624,21 @@ function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
 }
 
 export const EVM_SLASH_BATCH_SIZE_ENV = 'EVM_SLASH_BATCH_SIZE';
+export const EVM_CHAIN_STATE_POLL_MS_ENV = 'EVM_CHAIN_STATE_POLL_MS';
+
+/** A positive whole number from the environment, or `fallback` when unset. */
+export function readPositiveInt(
+  raw: string | undefined,
+  fallback: number,
+  variable: string,
+): number {
+  if (raw === undefined || raw.trim() === '') return fallback;
+  const value = Number(raw);
+  if (!Number.isInteger(value) || value < 1) {
+    throw ChainErrors.configValueInvalid({ variable, accepted: 'a positive whole number' });
+  }
+  return value;
+}
 
 /** `EVM_SLASH_BATCH_SIZE`: 1–100, default {@link DEFAULT_EVM_SLASH_BATCH_SIZE}. */
 function readBatchSize(raw: string | undefined): number {

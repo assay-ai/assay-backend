@@ -49,6 +49,7 @@ import { VoucherService } from '@modules/payment/services/voucher.service';
 import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
 
 import { STAKE_ASSET, buildRouter, buildTool, usdc } from '../../tool/helpers/routing-fixtures';
+import { noBlocks } from '../../helpers/blocklist';
 
 /**
  * The MCP loop, assembled from the real services and two fakes.
@@ -645,6 +646,7 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
     intents as unknown as PaymentIntentService,
     voucherOnlyRegistry(CHAIN_ID),
     seqs as unknown as EscrowSeqService,
+    noBlocks(),
   );
 
   const calls = new McpToolCallService(

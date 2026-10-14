@@ -37,6 +37,11 @@ export class ProviderProfileService {
       status: state.status,
       tier: state.tier,
       stats: toStatsDto(state),
+      slashHolds: (state.slashHolds ?? []).map((hold) => ({
+        chainId: hold.chainId,
+        reasons: [...hold.reasons],
+        heldSince: hold.heldSince.toISOString(),
+      })),
     };
   }
 }

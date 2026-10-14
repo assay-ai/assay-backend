@@ -64,6 +64,8 @@ function harness(
     stakes?: ReadonlyMap<string, ProviderStake>;
     chainThrows?: boolean;
     enabled?: readonly ChainId[];
+    chainStates?: readonly Record<string, unknown>[];
+    blocked?: readonly { chainId: string; address: string }[];
   } = {},
 ): { service: PlatformHealthService; stakes: ProviderStakePort } {
   const stakes = fakeStakeSource({ stakes: options.stakes, throws: options.chainThrows });
@@ -75,6 +77,21 @@ function harness(
       fakeProviderRepository(options.providerIds ?? []),
       stakes,
       options.enabled ?? [CHAIN],
+      {
+        findAllStates: async () => options.chainStates ?? [],
+        findBlocked: async () => options.blocked ?? [],
+      } as never,
+      {
+        findAllHeld: async () => [
+          {
+            providerId: 'provider-1',
+            chainId: CHAIN,
+            reasons: ['STAKE_FULLY_RESERVED'],
+            heldSince: new Date('2026-10-15T00:00:00Z'),
+            checkedAt: new Date('2026-10-15T00:05:00Z'),
+          },
+        ],
+      } as never,
     ),
   };
 }
@@ -244,5 +261,67 @@ describe('PlatformHealthService — stakeLocked spans every enabled chain', () =
 
     expect(health.stakeLocked.amount).toBe('70000000');
     expect(health.providersWithStake).toBe(1);
+  });
+});
+
+describe('PlatformHealthService — the EVM chain-state cache', () => {
+  it('reports each chain with its lag, and flags it stale past five minutes', async () => {
+    const now = Date.now();
+    const { service } = harness({
+      chainStates: [
+        {
+          chainId: 'eip155:46630',
+          paused: true,
+          arbiter: '0x5555555555555555555555555555555555555555',
+          slashDelaySeconds: 600,
+          cursorBlock: '100',
+          headBlock: '100',
+          caughtUpAt: new Date(now - 10_000),
+          reconciledAt: new Date(now - 20_000),
+        },
+        {
+          chainId: 'eip155:4663',
+          paused: false,
+          arbiter: null,
+          slashDelaySeconds: 259_200,
+          cursorBlock: '5',
+          headBlock: '900',
+          caughtUpAt: new Date(now - 6 * 60_000),
+          reconciledAt: null,
+        },
+      ],
+      blocked: [{ chainId: 'eip155:46630', address: '0x1111111111111111111111111111111111111111' }],
+    });
+
+    const { chainState } = await service.getHealth();
+    expect(chainState).toEqual([
+      expect.objectContaining({
+        chainId: 'eip155:46630',
+        paused: true,
+        blockedCount: 1,
+        stale: false,
+      }),
+      expect.objectContaining({
+        chainId: 'eip155:4663',
+        blockedCount: 0,
+        stale: true,
+      }),
+    ]);
+    expect(chainState[0].lagSeconds).toBeLessThan(60);
+  });
+});
+
+describe('PlatformHealthService — slash holds', () => {
+  it('lists every provider on a slash hold, with its reasons', async () => {
+    const { service } = harness({});
+    expect((await service.getHealth()).slashHolds).toEqual([
+      {
+        providerId: 'provider-1',
+        chainId: CHAIN,
+        reasons: ['STAKE_FULLY_RESERVED'],
+        heldSince: '2026-10-15T00:00:00.000Z',
+        checkedAt: '2026-10-15T00:05:00.000Z',
+      },
+    ]);
   });
 });

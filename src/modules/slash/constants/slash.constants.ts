@@ -196,3 +196,10 @@ export function loadProRataSlashConfig(): ProRataSlashConfig {
     stragglerDeadlineMs: readInt('SLASH_PRORATA_STRAGGLER_DEADLINE_HOURS', 24) * HOUR_MS,
   };
 }
+
+/**
+ * `DISPUTE_TIMEOUT_SECONDS` (assay-evm `Constants.sol:56`, D-19), mirrored: a
+ * `Disputed` record is `expireSlash`-able at `disputedAt + 30 d`
+ * (`DisputeUnresolved`) — the seven-day execution grace does not apply to it.
+ */
+export const DISPUTE_TIMEOUT_MS = 30 * 24 * 60 * 60 * 1000;
