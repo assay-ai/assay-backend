@@ -63,4 +63,19 @@ export class ProviderChainEnrolmentRepository extends OrganizationScopedReposito
       order: { chainId: 'ASC' },
     });
   }
+
+  /**
+   * Every ACTIVE enrolment on `chainId` with a proved stake authority, across
+   * tenants — the providers the slash-hold monitor checks on that chain.
+   */
+  async findStakeAuthoritiesOn(
+    chainId: string,
+  ): Promise<{ providerId: string; stakeAuthority: string }[]> {
+    return (await this.manager.query(
+      `SELECT organization_id AS "providerId", stake_authority_account_id AS "stakeAuthority"
+         FROM provider_chain_enrolments
+        WHERE chain_id = $1 AND status = 'ACTIVE' AND stake_authority_account_id IS NOT NULL`,
+      [chainId],
+    )) as { providerId: string; stakeAuthority: string }[];
+  }
 }

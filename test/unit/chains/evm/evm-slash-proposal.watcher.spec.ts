@@ -38,6 +38,7 @@ function build(options: {
   logs?: SlashProposedLog[];
   cursor?: string;
   rulings?: unknown;
+  slashHolds?: unknown;
 }) {
   const alerts: Alert[] = [];
   const ranges: [bigint, bigint][] = [];
@@ -78,6 +79,7 @@ function build(options: {
     { emit: async (alert: Alert) => void alerts.push(alert) },
     redis as never,
     options.rulings ? ({ get: () => options.rulings } as never) : null,
+    (options.slashHolds ?? null) as never,
   );
   return { watcher, alerts, ranges, store };
 }
@@ -244,6 +246,21 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
           cancelledAt: new Date(1_801_000_000_000),
         }),
       ]);
+    });
+
+    it('re-checks the slash hold of each provider whose record an event touched', async () => {
+      const rechecked: string[] = [];
+      const { watcher } = build({
+        head: 500n,
+        logs: [disputedLog(KNOWN)],
+        rulings: { recordDisputed: async () => true, recordUpheld: async () => true },
+        slashHolds: {
+          recheckAuthority: async (_chain: string, provider: string) =>
+            void rechecked.push(provider),
+        },
+      });
+      await watcher.check();
+      expect(rechecked).toEqual(['0x00000000000000000000000000000000000000c1']);
     });
 
     it('does not advance the cursor when the mirror fails, so the range is re-read', async () => {

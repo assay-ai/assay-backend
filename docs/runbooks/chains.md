@@ -210,6 +210,16 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   already has. Records signed by an expired key can never execute, so rotate:
   register a NEW key (`yarn verifier:registry`; an address is one-shot), switch
   signing to it, and let the old key's records run out or be re-proposed.
+- **Provider slash hold** (`provider_slash_holds`, `EvmSlashHoldMonitor`, every minute and on each
+  slash event): a provider's paid bindings are not routed or quoted on a chain, and no payment
+  intent names it there, while any of these holds for its stake on that chain:
+  `SLASH_WINDOW_FULL` (its slash window, or the verifier key's, is full and an upheld record is
+  due), `STAKE_FULLY_RESERVED` (`pendingSlash ≥ atRisk − penaltyAmount`) or
+  `BONDED_BELOW_MINIMUM`. Buyers are routed to another provider; with none left the call fails
+  `TOOL_PROVIDER_SLASH_HOLD` (and an intent `PAYMENT_PROVIDER_SLASH_HOLD`). It lifts by itself after
+  two consecutive clear checks. WARN in the log on a hold, INFO on a release; the provider sees
+  `slashHolds` on `GET /providers/me`, operators on `GET /operator/health`. A failed chain read
+  keeps the last decision. Nothing on chain is written.
 - **On the upgrade itself**, update `EVM_DEPLOYMENTS[...].escrowImplementation`
   in the same change: the vault-control check stops the reconciler on an
   implementation nobody recorded.

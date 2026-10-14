@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { PlatformMetricsRepository } from '@database/postgres/repositories/platform-metrics.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
@@ -16,6 +16,7 @@ import {
 } from '@modules/provider/ports/provider-stake.port';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import { ProviderSlashHoldRepository } from '@database/postgres/repositories/provider-slash-hold.repository';
 import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { chainStateLagMs } from '@modules/chains/evm/chain-state/evm-chain-state.indexer';
 
@@ -69,12 +70,13 @@ export class PlatformHealthService {
     @Inject(PROVIDER_STAKE_SOURCE) private readonly stakes: ProviderStakePort,
     @Inject(ENABLED_CHAINS) private readonly enabled: readonly ChainId[],
     private readonly chainStates: EvmChainStateRepository,
+    @Optional() private readonly slashHolds: ProviderSlashHoldRepository | null = null,
   ) {}
 
   async getHealth(): Promise<PlatformHealthDto> {
     const now = new Date();
 
-    const [intentRates, backlog, falsePositiveRate, policies, stake, disputes, chainState] =
+    const [intentRates, backlog, falsePositiveRate, policies, stake, disputes, chainState, holds] =
       await Promise.all([
         this.metrics.intentRateCounts(now),
         this.metrics.verificationBacklog(now),
@@ -83,6 +85,7 @@ export class PlatformHealthService {
         this.stakeLocked(),
         this.metrics.openSlashProposalCounts(now),
         this.chainState(now),
+        (this.slashHolds?.findAllHeld() ?? Promise.resolve([])).catch(() => []),
       ]);
 
     return {
@@ -99,6 +102,13 @@ export class PlatformHealthService {
       openDisputes: disputes.count,
       oldestOpenDisputeAgeSeconds: disputes.oldestAgeSeconds,
       chainState,
+      slashHolds: holds.map((hold) => ({
+        providerId: hold.providerId,
+        chainId: hold.chainId,
+        reasons: [...hold.reasons],
+        heldSince: hold.heldSince.toISOString(),
+        checkedAt: hold.checkedAt?.toISOString() ?? null,
+      })),
     };
   }
 

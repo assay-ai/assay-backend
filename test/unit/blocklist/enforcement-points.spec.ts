@@ -62,6 +62,27 @@ describe('PaymentIntentService.create, with a party blocked', () => {
     voucherDelegate: DELEGATE,
   };
 
+  it('refuses an intent to a provider on a slash hold on that chain, and inserts nothing', async () => {
+    const intents = { insert: jest.fn(), insertAdmittedVoucherIntent: jest.fn() };
+    const isHeld = jest.fn(async (providerId: string, chainId: string) => {
+      return providerId === PROVIDER_ORG && chainId === CHAIN;
+    });
+    const service = new PaymentIntentService(
+      intents as never,
+      {} as never,
+      {} as never,
+      blocklistOf(),
+      null,
+      { isHeld } as never,
+    );
+    await expect(service.create(input)).rejects.toMatchObject({
+      errorCode: 'PAYMENT_PROVIDER_SLASH_HOLD',
+    });
+    expect(isHeld).toHaveBeenCalledWith(PROVIDER_ORG, CHAIN);
+    expect(intents.insert).not.toHaveBeenCalled();
+    expect(intents.insertAdmittedVoucherIntent).not.toHaveBeenCalled();
+  });
+
   it.each<[string, SeededBlock, BlockedRole]>([
     [
       'the payer’s organization',
