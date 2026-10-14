@@ -160,3 +160,48 @@ describe('LedgerHoldService.commitHoldAndCredit — the commit names its transac
     );
   });
 });
+
+describe('LedgerHoldService.commitHoldAndCredit — a charge below the hold', () => {
+  // The hold is the quote, the dearest eligible binding; the charge is the
+  // price of the binding that served. The difference goes back to the buyer.
+  const charged = () =>
+    credit({
+      providerAmount: MoneyUtil.of(480_000n, USDC, USDC_DECIMALS),
+      platformFee: MoneyUtil.of(120_000n, USDC, USDC_DECIMALS),
+    });
+
+  it('commits only the charge and releases the rest of the hold, in one transaction', async () => {
+    const harness = buildHarness();
+
+    await harness.service.commitHoldAndCredit(ORG, HOLD_ID, charged());
+
+    expect(
+      harness.prepared.map((entry) => [entry.entryType, MoneyUtil.toAtomic(entry.money)]),
+    ).toEqual([
+      [LedgerEntryType.HOLD_COMMIT, 600_000n],
+      [LedgerEntryType.HOLD_RELEASE, 400_000n],
+      [LedgerEntryType.PLATFORM_FEE, 120_000n],
+      [LedgerEntryType.PROVIDER_CREDIT, 480_000n],
+    ]);
+    // The release belongs to the same hold, so the journal says where it came from.
+    expect(harness.prepared[1]).toMatchObject({ holdId: HOLD_ID, accountId: testAccount('buyer') });
+    // The hold still ends COMMITTED, resolved by the commit entry.
+    expect(harness.holds.resolveIfOpen).toHaveBeenCalledWith(
+      ORG,
+      HOLD_ID,
+      LedgerHoldStatus.COMMITTED,
+      'prepared-1',
+      expect.anything(),
+    );
+  });
+
+  it('writes no release when the charge is the whole hold', async () => {
+    const harness = buildHarness();
+
+    await harness.service.commitHoldAndCredit(ORG, HOLD_ID, credit());
+
+    expect(harness.prepared.map((entry) => entry.entryType)).not.toContain(
+      LedgerEntryType.HOLD_RELEASE,
+    );
+  });
+});

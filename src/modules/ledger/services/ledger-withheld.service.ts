@@ -30,7 +30,7 @@ import { LedgerEntryType } from '../ports/ledger.types';
  * two are compared rather than one being trusted. Here, `withheldFromJournal`
  * is the ledger side (`Σ HOLD_RELEASE`) and the intent-side computation below
  * is a second, independently-obtained route to the same number
- * (`Σ` listed price over the withheld statuses that had a hold). Neither is
+ * (`Σ` held amount over the withheld statuses that had a hold). Neither is
  * derived from the other; `reconcile` is what decides whether they agree.
  *
  * See `domain/withheld.ts` for the definition this file is not — that file is
@@ -90,7 +90,7 @@ export class LedgerWithheldService {
     return MoneyUtil.of(row.amount, asset, row.decimals);
   }
 
-  /** The intent side: `Σ` listed price over the withheld buckets, for one asset. */
+  /** The intent side: `Σ` held amount over the withheld buckets, for one asset. */
   async withheldFromIntents(
     organizationId: string,
     asset: AssetId,
