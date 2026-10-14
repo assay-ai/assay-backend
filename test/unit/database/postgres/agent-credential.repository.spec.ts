@@ -52,7 +52,7 @@ function buildCredential(overrides: Partial<AgentCredentialEntity> = {}): AgentC
     organizationId: 'org-1',
     agentId: 'agent-1',
     name: 'CI deploy',
-    prefix: 'x402_sk_live_abcd1234',
+    prefix: 'assay_sk_live_abcd1234',
     tokenHash: 'digest-of-token',
     scopes: [],
     lastUsedAt: null,

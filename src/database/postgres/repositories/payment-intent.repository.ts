@@ -168,7 +168,7 @@ export const PLATFORM_ABSORBED_REASON_SQL =
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
   readonly id: string;
-  /** `X-X402-Call-Id` as sent upstream — the provider's key for the request. */
+  /** `X-Assay-Call-Id` as sent upstream — the provider's key for the request. */
   readonly callId: string;
   readonly callClass: string;
   readonly status: string;

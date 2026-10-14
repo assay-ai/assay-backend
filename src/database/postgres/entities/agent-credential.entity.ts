@@ -14,7 +14,7 @@ import { OrganizationScopedEntity } from './organization-scoped.entity';
  * exists.
  *
  * `prefix` is the first few characters, stored in clear, so the UI can show
- * `x402_live_8fK2…` next to "last used 3 minutes ago" and an operator can tell
+ * `assay_live_8fK2…` next to "last used 3 minutes ago" and an operator can tell
  * which of four tokens is the one their CI is using. It is deliberately short
  * enough to be useless on its own.
  *

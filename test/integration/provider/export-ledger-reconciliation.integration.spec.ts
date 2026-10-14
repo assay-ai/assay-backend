@@ -5,7 +5,7 @@
  * The earnings ledger is `PROVIDER_CREDIT` entries under the provider's own
  * organization. The export's whole promise is that a provider's finance team
  * can take the export, join it
- * to their own access log on `X-X402-Call-Id`, and have every row explained.
+ * to their own access log on `X-Assay-Call-Id`, and have every row explained.
  * That promise is only worth anything if the export agrees with **the ledger we
  * actually pay out of** — not merely with `payment_intents`, which is what
  * `calls-export-reconciliation.integration.spec.ts` already checks.

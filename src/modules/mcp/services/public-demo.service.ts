@@ -29,7 +29,7 @@ export type DemoSide = 'pass' | 'fail';
 
 export interface DemoRunResult {
   /**
-   * The poll key, and it is the **intent id**, not `X-X402-Call-Id`.
+   * The poll key, and it is the **intent id**, not `X-Assay-Call-Id`.
    *
    * The call id is the obvious candidate: it is minted once and cannot be
    * spoofed by a provider's mapping. Both are true of it — and `McpReceipt`

@@ -4,7 +4,7 @@ import { ReconciliationSeverity } from '@modules/settlement/ports/reconciliation
  * `ReconciliationSeverity` as a Prometheus gauge value.
  *
  * A gauge is a number, and Grafana/Prometheus alerting reads a numeric
- * series far more easily than a string label switch — `x402_reconciliation_severity
+ * series far more easily than a string label switch — `assay_reconciliation_severity
  * > 1` is one alert rule for "critical on any asset," where a label match has
  * to be re-written every time an asset is added. `0/1/2` is ordered the same
  * way the severity words are ordered: worse is higher, matching `worstOf` in

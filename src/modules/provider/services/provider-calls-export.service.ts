@@ -37,8 +37,8 @@ import { ProviderErrors } from '../errors/provider.errors';
  *
  *  - **No silent caps** (`docs/api-list-contract.md`). {@link EXPORT_MAX_ROWS}
  *    is real, and a window that exceeds it is visible in the response —
- *    `X-X402-Export-Truncated` / `X-X402-Export-Row-Count` /
- *    `X-X402-Export-Total-Matching` headers, set before the first CSV byte,
+ *    `X-Assay-Export-Truncated` / `X-Assay-Export-Row-Count` /
+ *    `X-Assay-Export-Total-Matching` headers, set before the first CSV byte,
  *    never a file that silently stops short with no signal.
  *  - **Streamed, not buffered.** {@link ProviderCallsExportService.prepare}
  *    counts the window with one `COUNT(*)`, then hands back an async

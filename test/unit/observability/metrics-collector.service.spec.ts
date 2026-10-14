@@ -224,7 +224,7 @@ describe('MetricsCollectorService', () => {
     await collector.snapshot();
     const text = await registry.metricsText();
 
-    expect(text).toContain('x402_attestations_signed{window="24h"} 12');
-    expect(text).toContain('x402_slashes_executed{window="30d"} 2');
+    expect(text).toContain('assay_attestations_signed{window="24h"} 12');
+    expect(text).toContain('assay_slashes_executed{window="30d"} 2');
   });
 });

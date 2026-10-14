@@ -155,7 +155,7 @@ export interface PaymentIntent {
   readonly rail: PaymentRail;
 
   /**
-   * The value sent upstream as `X-X402-Call-Id` on every attempt this intent
+   * The value sent upstream as `X-Assay-Call-Id` on every attempt this intent
    * produced. Independent of `id` — see the call-id migration's doc
    * comment on `payment_intents.call_id` for why a call id must be able to
    * outlive, and exist without, a payment record.
@@ -232,7 +232,7 @@ export interface CreatePaymentIntentInput {
   readonly toolId: string;
   readonly rail: PaymentRail;
   /**
-   * The value sent upstream as `X-X402-Call-Id`. Minted once per
+   * The value sent upstream as `X-Assay-Call-Id`. Minted once per
    * tool call by the caller — `EgressBindingInvoker` sets the header from
    * this value and refuses to let a binding's own `upstream.headers`
    * override it.

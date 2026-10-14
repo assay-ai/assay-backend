@@ -16,7 +16,7 @@ export enum SessionSourceMode {
   PRIVY = 'privy',
 
   /**
-   * `agent_credentials` tokens only (`x402_sk_live_…`) — the credential a
+   * `agent_credentials` tokens only (`assay_sk_live_…`) — the credential a
    * user creates in the UI, read through
    * `DbCredentialMcpSessionSource`.
    */
@@ -30,7 +30,7 @@ export enum SessionSourceMode {
    * config check is an in-memory constant-time scan over a handful of digests,
    * so putting it first costs a Privy caller nothing measurable and saves a
    * config caller a signature verification. `db` sits ahead of `privy` for
-   * the same reason: a rejected `x402_sk_live_…` prefix is cheaper than a
+   * the same reason: a rejected `assay_sk_live_…` prefix is cheaper than a
    * signature verification, and neither source can admit a token another
    * source would have refused.
    */

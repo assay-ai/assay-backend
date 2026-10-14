@@ -52,7 +52,7 @@ export class MetricsController {
   // give, without `@Header` needing a per-request value it cannot compute.
   @RawResponse()
   @Header('Content-Type', 'text/plain; version=0.0.4; charset=utf-8')
-  @ApiOperation({ summary: 'Prometheus exposition text for every x402_* series' })
+  @ApiOperation({ summary: 'Prometheus exposition text for every assay_* series' })
   async getMetrics(): Promise<string> {
     return this.collector.metricsText();
   }

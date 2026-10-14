@@ -17,7 +17,7 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
  *    test-then-edit hole: an edit raises `mapping_version` and the green run no
  *    longer refers to what is about to be published.
  * 3. **A provider reconciling their own logs.** The tester dials their endpoint
- *    for real and sends a real `X-X402-Call-Id`. A sandbox run deliberately
+ *    for real and sends a real `X-Assay-Call-Id`. A sandbox run deliberately
  *    creates no `payment_intents` row — it must never touch money — so this
  *    table is the only record on our side that a call with that id happened,
  *    and `uq_binding_test_runs_call_id` makes it resolvable.
@@ -35,7 +35,7 @@ export class BindingTestRunEntity extends OrganizationScopedEntityWithoutSoftDel
   @Column({ name: 'mapping_version', type: 'int' })
   mappingVersion: number;
 
-  /** The id sent upstream as `X-X402-Call-Id`. Unique platform-wide. */
+  /** The id sent upstream as `X-Assay-Call-Id`. Unique platform-wide. */
   @Column({ name: 'call_id', type: 'uuid' })
   callId: string;
 

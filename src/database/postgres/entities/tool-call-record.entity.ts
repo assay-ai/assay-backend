@@ -38,7 +38,7 @@ export class ToolCallRecordEntity extends OrganizationScopedEntityWithoutSoftDel
   agentId: string;
 
   /**
-   * The same id the provider received as `X-X402-Call-Id`.
+   * The same id the provider received as `X-Assay-Call-Id`.
    *
    * Unique, so a retried write cannot double-count one free call against the
    * quota that is the only thing standing between the platform and unbounded

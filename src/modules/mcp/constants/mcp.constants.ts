@@ -60,7 +60,7 @@ export const X402_PAID_ALTERNATIVE = 'x402/paidAlternative';
  *
  * Published even though the tool name would suffice to call it: an MCP tool is
  * addressed by `name`, while every receipt, intent and journal entry references the uuid. An
- * agent reconciling its own spend against `x402_list_receipts` (or against the
+ * agent reconciling its own spend against `assay_list_receipts` (or against the
  * REST API) has no other way to join the two.
  */
 export const X402_TOOL_ID = 'x402/toolId';

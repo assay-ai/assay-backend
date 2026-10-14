@@ -78,7 +78,7 @@ export interface SessionBlock {
 export enum McpCallerKind {
   /** A Privy access token — a person signed in to the dashboard. */
   HUMAN = 'HUMAN',
-  /** An agent machine credential (`x402_sk_live_…`, `agent_credentials`). */
+  /** An agent machine credential (`assay_sk_live_…`, `agent_credentials`). */
   AGENT = 'AGENT',
   /**
    * A token from `MCP_CREDENTIALS_FILE`. The config file stands in for the

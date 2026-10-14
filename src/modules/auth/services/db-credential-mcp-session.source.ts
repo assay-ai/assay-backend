@@ -4,7 +4,7 @@ import { AgentCredentialEntity } from '@database/postgres/entities/agent-credent
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
-import { AGENT_CREDENTIAL_TOKEN_PREFIX } from '@modules/account/constants/agent-credential-token.constants';
+import { isAgentCredentialToken } from '@modules/account/constants/agent-credential-token.constants';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 import { digestToken } from '@shared/crypto/token-digest';
@@ -14,7 +14,7 @@ import { AuthErrors } from '../errors/auth.errors';
 const SUSPENDED = 'SUSPENDED';
 
 /**
- * `agent_credentials` bearer tokens (`x402_sk_live_…`), resolved to a
+ * `agent_credentials` bearer tokens (`assay_sk_live_…`), resolved to a
  * session — the third session source.
  *
  * `POST /agents/:agentId/credentials` mints these and stores only their
@@ -31,7 +31,7 @@ const SUSPENDED = 'SUSPENDED';
  *
  * `CompositeMcpSessionSource` only advances to the next source when this one
  * raises `MCP_CREDENTIAL_INVALID` — every other error stops the chain. A
- * Privy access token is JWT-shaped (`eyJ…`), never `x402_sk_live_…`-shaped,
+ * Privy access token is JWT-shaped (`eyJ…`), never `assay_sk_live_…`-shaped,
  * so refusing anything without the prefix *before* touching the database is
  * what lets a Privy caller reach `PrivyMcpSessionSource` at all in `both`
  * mode. Skip this check (or get it wrong) and this source would swallow
@@ -91,7 +91,7 @@ export class DbCredentialMcpSessionSource implements McpSessionPort {
   ) {}
 
   async resolve(bearerToken: string | null): Promise<McpSession> {
-    if (!bearerToken || !bearerToken.startsWith(AGENT_CREDENTIAL_TOKEN_PREFIX)) {
+    if (!bearerToken || !isAgentCredentialToken(bearerToken)) {
       throw McpErrors.credentialInvalid();
     }
 

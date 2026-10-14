@@ -74,7 +74,7 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   rail: string;
 
   /**
-   * The value sent upstream as `X-X402-Call-Id` on every attempt this intent
+   * The value sent upstream as `X-Assay-Call-Id` on every attempt this intent
    * produced.
    *
    * Independent of `id`, deliberately — see the `CallIdAndCallClass…` migration

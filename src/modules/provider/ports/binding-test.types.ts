@@ -149,7 +149,7 @@ export enum BindingTestOutcome {
  * so what a provider saw and what the publish gate read are the same document.
  */
 export interface BindingTestReport {
-  /** The `X-X402-Call-Id` this run sent upstream. Real, and unique. */
+  /** The `X-Assay-Call-Id` this run sent upstream. Real, and unique. */
   readonly callId: string;
   readonly outcome: BindingTestOutcome;
   /** Which layer stopped it, or `null` when every layer passed. */
