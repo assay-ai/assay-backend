@@ -254,25 +254,20 @@ describe('McpToolCallService — the paid call loop', () => {
   });
 
   /**
-   * The hole `evaluatePayoutGate` deliberately leaves, and what happens
-   * in it.
+   * The hole `evaluatePayoutGate` used to leave, now closed by the router.
    *
    * A tool with both a FREE and a PAID binding quotes as paid, so the call takes
-   * the paid path and creates an intent — and the router may then draw the FREE
-   * binding, which the payout gate exempts. Observed on devnet: an agent charged
-   * $0.088 for a call a $0 binding served.
-   *
-   * The first version of this fix wrote `providerAccount ?? undefined`, and
-   * `transition()` reads `undefined` as "leave the column alone" — so the row
-   * hit `chk_payment_intents_settled_names_payee`, a raw `23514` propagated out
-   * of `call()` through an un-caught `await`, and the agent lost data a provider
-   * had already served. These three tests exist so that cannot come back.
+   * the paid path and creates an intent. The router used to be free to draw the
+   * FREE binding, which the payout and stake gates exempt — observed on devnet:
+   * an agent charged $0.088 for a call a $0 binding served, by a provider nobody
+   * had bonded or checked. A paid call is now routed with `callClass: 'PAID'`,
+   * which leaves FREE bindings out of the pool.
    */
-  function unpayableFreeBindingDrawnOnAPaidTool() {
+  function freeBindingBesideAPaidOne() {
     return buildMcpHarness({
       bindings: [
-        // Drawn first under `random: () => 0`. Free, so the payout gate exempts
-        // it; its provider has proved nothing.
+        // Drawn first under `random: () => 0` if it were in the pool. Free, so
+        // the payout gate exempts it; its provider has proved nothing.
         buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' }),
         // What makes the tool quote as PAID, and what the agent is held for.
         buildBinding('provider-b'),
@@ -283,58 +278,23 @@ describe('McpToolCallService — the paid call loop', () => {
       ],
       invoker: new ScriptedInvoker({
         'binding-provider-a': () => Promise.resolve(ok('served free')),
-        'binding-provider-b': () => Promise.resolve(ok('never reached')),
+        'binding-provider-b': () => Promise.resolve(ok('served paid')),
       }),
       random: () => 0,
     });
   }
 
-  it('hands the agent its data when the serving provider cannot be paid', async () => {
-    const { calls, intents } = unpayableFreeBindingDrawnOnAPaidTool();
+  it('never routes a paid call to a FREE binding, so the paid provider serves it', async () => {
+    const { calls, intents, bindingCalls } = freeBindingBesideAPaidOne();
 
     const outcome = await calls.call(SESSION, 'Search the web', ARGS);
 
-    // The invariant this file states three times, and the one the first draft
-    // of the payee fix broke: a bookkeeping problem must never replace a result the
-    // provider already served.
     expect(outcome.kind).toBe('RESULT');
     if (outcome.kind !== 'RESULT') return;
-    expect(outcome.output).toEqual({ answer: 'served free' });
-    expect(intents.only.providerId).toBe('provider-a');
-  });
-
-  it('voids rather than charging, and the receipt says nothing was charged', async () => {
-    const { calls, intents, ledger } = unpayableFreeBindingDrawnOnAPaidTool();
-
-    const outcome = await calls.call(SESSION, 'Search the web', ARGS);
-    if (outcome.kind !== 'RESULT') throw new Error('expected a RESULT');
-
-    expect(intents.only.status).toBe(PaymentIntentStatus.VOIDED);
-    expect(outcome.receipt.status).toBe(PaymentIntentStatus.VOIDED);
-    // Zero, not the quoted price. A receipt reporting a charge for a call the
-    // agent was not charged for is the same class of untruth as the stale
-    // comments the payee fix deleted.
-    expect(outcome.receipt.charged.amount).toBe('0');
-
-    // And the money actually went back — no `HOLD_COMMIT`, and nothing left
-    // reserved. There is no sweeper underneath this to catch a leak.
-    expect(ledger.kinds).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
-  });
-
-  it('never reaches VERIFYING, so the CHECK is never the thing that stops it', async () => {
-    const { calls, intents, settlement, bindingCalls } = unpayableFreeBindingDrawnOnAPaidTool();
-
-    await calls.call(SESSION, 'Search the web', ARGS);
-
-    // The decision is taken before the transition, not caught after it fails.
-    // Relying on the database to refuse would mean relying on an exception
-    // thrown from inside an `await` nobody catches.
-    expect(intents.transitions).not.toContain(`→ ${PaymentIntentStatus.VERIFYING}`);
-    // Nothing was handed to the verification worker either — there is no
-    // settlement to verify.
-    expect(settlement.calls).toEqual([]);
-    // The binding still served the call, so it still counts toward exploration.
-    expect(bindingCalls.recorded).toEqual(['binding-provider-a']);
+    expect(outcome.output).toEqual({ answer: 'served paid' });
+    expect(intents.only.providerId).toBe('provider-b');
+    expect(intents.only.status).toBe(PaymentIntentStatus.VERIFYING);
+    expect(bindingCalls.recorded).toEqual(['binding-provider-b']);
   });
 
   it('refuses to route a PAID binding whose provider has proved no payout address', async () => {

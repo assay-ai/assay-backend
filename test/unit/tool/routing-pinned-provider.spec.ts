@@ -40,6 +40,8 @@ describe('pinning a call to the provider a voucher names', () => {
         providerId: 'provider-a',
         providerAccount: PAYOUT_ACCOUNT,
         settlementChain: PAYOUT_CHAIN,
+        // The offered binding's own price — what the voucher is signed for.
+        price: usdc('0.05'),
       });
     });
 
