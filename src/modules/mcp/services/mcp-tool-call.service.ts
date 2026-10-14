@@ -318,7 +318,8 @@ export class McpToolCallService {
       // `quote.pricingMode` is the aggregate over every *eligible* binding at
       // quote time (`ProviderRouterService.quote`'s "dearest eligible
       // binding" reasoning) — routing has not run yet, so it is the best
-      // information available at creation time, same as `price` itself.
+      // information available at creation time. So is `price`, which is the
+      // hold: `servedCharge` re-prices the intent once a binding has served.
       // `FREEMIUM` is folded into `PAID` here, matching the router's own
       // "gated like PAID" rule: the free quota has not been checked,
       // so this call may well be charged.
