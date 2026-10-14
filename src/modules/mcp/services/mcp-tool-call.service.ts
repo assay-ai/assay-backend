@@ -25,6 +25,7 @@ import {
   PaymentIntent,
   PaymentIntentCallClass,
   PaymentIntentStatus,
+  PaymentIntentTransitionContext,
   PaymentRail,
   railName,
 } from '@modules/payment/ports/payment.types';
@@ -53,6 +54,7 @@ import {
   ProviderRouterService,
   RoutedCall,
   ToolQuote,
+  bindingPrice,
 } from '@modules/tool/services/provider-router.service';
 import { VerificationSettlementService } from '@modules/verification/services/verification-settlement.service';
 import { AppError } from '@shared/errors/app-errors';
@@ -239,7 +241,7 @@ export class McpToolCallService {
       chooseRail(session.chainId, payment.rail, payment.voucher !== null) ===
       PaymentRail.RAIL_B_VOUCHER
     ) {
-      return this.callOnRailB(session, tool, price, args, callId, payment.voucher);
+      return this.callOnRailB(session, tool, args, callId, payment.voucher);
     }
 
     // Hoisted out of `intents.create` below, because two things now need the
@@ -321,7 +323,8 @@ export class McpToolCallService {
         // `quote.pricingMode` is the aggregate over every *eligible* binding at
         // quote time (`ProviderRouterService.quote`'s "dearest eligible
         // binding" reasoning) — routing has not run yet, so it is the best
-        // information available at creation time, same as `price` itself.
+        // information available at creation time. So is `price`, which is the
+        // hold: `servedCharge` re-prices the intent once a binding has served.
         // `FREEMIUM` is folded into `PAID` here, matching the router's own
         // "gated like PAID" rule: the free quota has not been checked,
         // so this call may well be charged.
@@ -380,7 +383,6 @@ export class McpToolCallService {
   private async callOnRailB(
     session: McpSession,
     tool: Tool,
-    price: Money,
     args: JsonObject,
     callId: string,
     payment: McpVoucherPayment | null,
@@ -395,6 +397,7 @@ export class McpToolCallService {
     const context: RoutingContext = {
       ...routingContextOf(session, this.enabledChains, withdrawing),
       onlyProviderId: payment?.providerId,
+      callClass: 'PAID',
     };
 
     const offer = await this.router.offer(tool.id, context);
@@ -407,6 +410,13 @@ export class McpToolCallService {
         reason: `provider ${offer.providerId} has no payout account on ${offer.settlementChain}`,
       });
     }
+
+    // The offered provider's own price, not the quote. The voucher is signed
+    // for an exact amount and pays this provider and no other, so the buyer
+    // pays what the binding that serves charges — the rule rail A applies at
+    // settlement. On the retry the re-drawn offer must name the same price, or
+    // `VoucherService` refuses the signed amount.
+    const price = offer.price;
 
     const call = voucherCallOf(tool, args);
     const requestHash = computeRequestHash({
@@ -727,7 +737,8 @@ export class McpToolCallService {
         // A FREE call collects nothing, so a standing withdrawal cannot leave the
         // platform short on it: `withdrawingChains` is empty here on purpose, and
         // this path deliberately does not read the escrow.
-        context: routingContextOf(session, this.enabledChains, []),
+        // `FREE`: a call nobody is charged for never reaches a `PAID` binding.
+        context: { ...routingContextOf(session, this.enabledChains, []), callClass: 'FREE' },
       })
       .catch((error: unknown) => {
         throw agentFacing(error, null);
@@ -859,6 +870,8 @@ export class McpToolCallService {
         context: {
           ...routingContextOf(session, this.enabledChains, await this.withdrawingChains(session)),
           onlyProviderId,
+          // A charged call is served only by a staked, payable paid binding.
+          callClass: 'PAID',
         },
       });
     } catch (error) {
@@ -939,8 +952,10 @@ export class McpToolCallService {
       // that has not happened, or never will, is wrong in the way that matters
       // most to the agent.
       charged: resolved.status === PaymentIntentStatus.SETTLED ? resolved.price : zero,
-      // What is reserved against the agent's balance pending the verdict.
-      held: isAwaitingVerdict(resolved.status) ? resolved.price : zero,
+      // What is reserved against the agent's balance pending the verdict: the
+      // hold, taken at the quote before the intent was re-priced to the
+      // binding that served.
+      held: isAwaitingVerdict(resolved.status) ? intent.price : zero,
       status: resolved.status,
       toolId: tool.id,
       // Read back off the row rather than off `routed`, so the receipt cannot
@@ -1051,6 +1066,8 @@ export class McpToolCallService {
         // classification this transition is recording — so there is nothing to
         // look up and nothing to re-derive.
         bindingId: routed.binding.id,
+        // The price of that binding, on the same edge — see `servedCharge`.
+        ...this.servedCharge(intent, routed),
         classification: routed.classification.responseClass,
         reason: MCP_FORWARDED_TO_VERIFICATION_REASON,
       },
@@ -1132,6 +1149,31 @@ export class McpToolCallService {
   }
 
   /**
+   * Rail A: what the buyer is charged — the price of the binding that served.
+   *
+   * The intent was created and held at the quote, the dearest eligible
+   * binding, because routing had not run. Now it has, so the intent is
+   * re-priced to `routed.binding`'s own price and fee, and settlement commits
+   * that and releases the rest of the hold. Never above the hold: a binding
+   * whose price rose between the quote and the call is charged at the hold,
+   * because the quote is the most the agent agreed to pay.
+   *
+   * Nothing on rail B, whose voucher already signs the offered binding's own
+   * price and pays exactly that on chain.
+   */
+  private servedCharge(
+    intent: PaymentIntent,
+    routed: RoutedCall,
+  ): Pick<PaymentIntentTransitionContext, 'charge'> {
+    if (intent.rail !== PaymentRail.RAIL_A_PER_CALL) return {};
+
+    const served = bindingPrice(routed.binding);
+    if (served.asset !== intent.price.asset || !MoneyUtil.lessThan(served, intent.price)) return {};
+
+    return { charge: { price: served, platformFee: this.platformFee(served) } };
+  }
+
+  /**
    * A call that was served correctly by somebody the platform cannot pay.
    *
    * ## When this is reachable
@@ -1139,12 +1181,13 @@ export class McpToolCallService {
    * `evaluatePayoutGate` refuses any candidate whose provider has proved no
    * payout address on the chain the call settles on — except a
    * `FREE` binding, which is exempt because the relay
-   * path creates no payment intent. But a tool with *both* free and paid
-   * bindings quotes as paid (`quotedPricingMode`), takes the paid path, and can
-   * then draw the free binding. That call is charged, and its provider was
-   * never checked. It is the one hole the gate leaves open, it is real — a
-   * devnet run was observed charging $0.088 for a call a $0 binding served —
-   * and this is where it lands.
+   * path creates no payment intent. A tool with *both* free and paid bindings
+   * quotes as paid and takes the paid path, and the router used to be able to
+   * draw the free binding — a devnet run was observed charging $0.088 for a
+   * call a $0 binding served. A paid call is now routed with
+   * `callClass: 'PAID'`, which leaves FREE bindings out of the pool, so this is
+   * a guard for a catalogue that changed under the call rather than a path
+   * routing takes.
    *
    * ## Why voiding, and not any of the alternatives
    *
@@ -1166,11 +1209,6 @@ export class McpToolCallService {
    * edge `HoldEffect.RELEASE` and its own doc calls it *"no charge and no
    * strike"*. There is no strike to make here — the provider did nothing wrong,
    * they served the call their free binding offered.
-   *
-   * This is a mitigation, not the fix. The fix is for a paid call's payee
-   * eligibility to be decided from the tool's supply rather than the binding's,
-   * which is a routing change; until then this bounds the damage to "the
-   * platform served one call for free".
    */
   private async voidUnpayable(
     session: McpSession,

@@ -339,15 +339,19 @@ export class ProviderRouterService {
    * Any eligible binding may take the call, and failover means the one that
    * answers may be the third one drawn. Quoting an average or the cheapest
    * would produce calls that cost more than the agent was shown, which is the
-   * exact surprise the annotation exists to prevent. The agent is quoted the
-   * worst case, is held for the worst case, and is never charged more than it
-   * agreed to.
+   * exact surprise the annotation exists to prevent. The quote is therefore the
+   * **upper bound**: the agent is held for it and is never charged more.
    *
-   * What that leaves open: when a cheaper binding serves the call, the intent
-   * was created against the quote, so `providerAmount` overstates what that
-   * provider is owed. Settlement is where the difference is either
-   * returned to the agent or kept as margin, and it is deliberately not decided
-   * here — routing must not be the thing that quietly sets the take rate.
+   * It is not what the agent pays. The buyer pays the price of the binding that
+   * actually served: rail A re-prices the intent from `RoutedCall.binding` when
+   * the call leaves `PROVIDER_EXECUTING` (capped at the hold) and settlement
+   * returns the rest of the hold, and rail B signs the offered binding's own
+   * price ({@link offer}). The cheaper provider is credited its own price, not
+   * the dearest one.
+   *
+   * `FREE` bindings are left out of a paid quote's price: a paid call is never
+   * routed to one (`RoutingContext.callClass`), so they are not part of what
+   * the agent can be charged.
    *
    * ## Why the statistics are traffic-weighted
    *
@@ -417,11 +421,16 @@ export class ProviderRouterService {
       ...new Set(eligible.flatMap((candidate) => settleableChains(candidate, context))),
     ];
     const priced = pricedOnQuotedChain(eligible, settlementChains, context);
+    const pricingMode = quotedPricingMode(priced);
 
     return {
       tool,
-      price: dearestPrice(priced),
-      pricingMode: quotedPricingMode(priced),
+      price: dearestPrice(
+        pricingMode === PricingMode.FREE
+          ? priced
+          : priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE),
+      ),
+      pricingMode,
       routableBindings: eligible.length,
       settlementChains,
       p95LatencyMs: weightedMean(weighted, (c) => c.provider.stats.p95LatencyMs),
@@ -446,6 +455,12 @@ export class ProviderRouterService {
    * The retry that spends the voucher pins this provider with
    * `onlyProviderId`, and routing then takes the token for real.
    *
+   * It also carries the offered binding's **own** price, not the quote: the
+   * voucher is signed for an exact amount and pays this provider and no other,
+   * so the buyer is asked for what this provider charges. It is drawn from the
+   * same eligible set the quote takes its dearest price from, and the buyer
+   * signs the exact figure, so it is never more than the buyer agreed to.
+   *
    * Refuses exactly as the first attempt of {@link route} would.
    */
   async offer(toolId: string, context: RoutingContext): Promise<RoutingOffer> {
@@ -458,6 +473,7 @@ export class ProviderRouterService {
       providerId: picked.candidate.binding.providerId,
       providerAccount: payoutAccountOn(picked.candidate.provider, settlementChain),
       settlementChain,
+      price: bindingPrice(picked.candidate.binding),
     };
   }
 
@@ -489,9 +505,17 @@ export class ProviderRouterService {
     // Rail B's pin, applied before the gates so a pinned provider is judged by
     // exactly the rules any other call would judge it by — and so no other
     // provider can be drawn, on the first attempt or on any failover.
-    const pool = context.onlyProviderId
-      ? candidates.filter((candidate) => candidate.binding.providerId === context.onlyProviderId)
-      : candidates;
+    //
+    // The call class narrows the same way and for the same reason: a paid call
+    // never reaches a `FREE` binding (which no stake or payout gate checked),
+    // and a free call never reaches a `PAID` one (whose provider it cannot pay).
+    // Dropped from the pool rather than rejected, so a refusal names the
+    // reasons the remaining supply failed rather than the other class's.
+    const pool = candidates.filter(
+      (candidate) =>
+        (!context.onlyProviderId || candidate.binding.providerId === context.onlyProviderId) &&
+        servesCallClass(candidate.binding, context.callClass),
+    );
     const { eligible, rejected, settlementChainOf } = reinstateGraced(
       pool,
       filterEligible(pool, this.config.minimumStakeByChain, context),
@@ -905,10 +929,11 @@ export interface ToolQuote {
   /**
    * The dearest price among the eligible bindings that settle on the chain
    * this buyer's call would settle on — the worst case the agent is held for,
-   * in that chain's asset. See `pricedOnQuotedChain`.
+   * in that chain's asset, and so the most it can be charged. The charge itself
+   * is the serving binding's own price. See `pricedOnQuotedChain`.
    */
   readonly price: Money | null;
-  /** `FREE` only when every eligible binding is free; otherwise the paid mode. */
+  /** `FREE` when every eligible binding is free, `PAID` when any is paid, else `FREEMIUM`. */
   readonly pricingMode: PricingMode | null;
   readonly routableBindings: number;
   /**
@@ -971,11 +996,13 @@ export interface RoutedCall {
   readonly attempts: readonly RoutingAttempt[];
 }
 
-/** Who {@link ProviderRouterService.offer} would route to, and where it settles. */
+/** Who {@link ProviderRouterService.offer} would route to, where it settles, and at what price. */
 export interface RoutingOffer {
   readonly providerId: string;
   readonly providerAccount: AccountId | null;
   readonly settlementChain: ChainId;
+  /** The offered binding's own price — what a rail-B voucher is signed for. */
+  readonly price: Money;
 }
 
 interface Selection {
@@ -1186,26 +1213,50 @@ function dearestPrice(eligible: readonly RoutingCandidate[]): Money {
     if (BigInt(binding.priceAmount) > BigInt(dearest.priceAmount)) dearest = binding;
   }
 
-  // The scale comes from the asset registry, never from the binding: a
-  // provider that published a price at the wrong scale would otherwise have its
-  // mistake quoted back to the agent as a display value off by three orders of
-  // magnitude. An unregistered asset throws `CHAIN_ASSET_UNKNOWN` here rather
-  // than reaching an agent as a price in an asset the platform cannot hold.
-  const { decimals } = getAssetMetadata(dearest.assetId);
-  return MoneyUtil.of(dearest.priceAmount, dearest.assetId, decimals);
+  return bindingPrice(dearest);
 }
 
 /**
- * `FREE` only if the agent cannot be charged by any eligible binding.
+ * One binding's price, as `Money`.
  *
- * Mixed supply is quoted as paid, matching how `filterEligible` gates it: a
- * `FREEMIUM` binding is treated as paid at selection time because the quota has
- * not been checked yet, and a quote that said "free" for a call that might be
- * charged would be the same guess in the other direction.
+ * The scale comes from the asset registry, never from the binding: a
+ * provider that published a price at the wrong scale would otherwise have its
+ * mistake quoted back to the agent as a display value off by three orders of
+ * magnitude. An unregistered asset throws `CHAIN_ASSET_UNKNOWN` here rather
+ * than reaching an agent as a price in an asset the platform cannot hold.
+ */
+export function bindingPrice(binding: ToolBinding): Money {
+  const { decimals } = getAssetMetadata(binding.assetId);
+  return MoneyUtil.of(binding.priceAmount, binding.assetId, decimals);
+}
+
+/**
+ * The call class the eligible supply is quoted as.
+ *
+ * - `FREE` only if the agent cannot be charged by any eligible binding.
+ * - `PAID` as soon as any eligible binding is `PAID`, whatever order the
+ *   catalogue lists them in. A free call is never routed to a `PAID` binding,
+ *   so quoting `FREEMIUM` here would offer free calls the `FREEMIUM` supply
+ *   alone has to carry, and used to hand them to a `PAID` provider who was then
+ *   paid nothing.
+ * - `FREEMIUM` otherwise: the free quota decides whether the call is free.
  */
 function quotedPricingMode(eligible: readonly RoutingCandidate[]): PricingMode {
-  const paid = eligible.find(({ binding }) => binding.pricingMode !== PricingMode.FREE);
-  return paid ? paid.binding.pricingMode : PricingMode.FREE;
+  const modes = new Set(eligible.map(({ binding }) => binding.pricingMode));
+  if (modes.has(PricingMode.PAID)) return PricingMode.PAID;
+  if (modes.has(PricingMode.FREEMIUM)) return PricingMode.FREEMIUM;
+  return PricingMode.FREE;
+}
+
+/**
+ * Whether a binding may serve a call of this class — see
+ * `RoutingContext.callClass`. `FREEMIUM` serves both: the same binding takes
+ * free calls inside its quota and paid ones past it, and is gated as paid.
+ */
+function servesCallClass(binding: ToolBinding, callClass: RoutingContext['callClass']): boolean {
+  if (callClass === 'PAID') return binding.pricingMode !== PricingMode.FREE;
+  if (callClass === 'FREE') return binding.pricingMode !== PricingMode.PAID;
+  return true;
 }
 
 /**

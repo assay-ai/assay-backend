@@ -172,13 +172,16 @@ export class LedgerHoldService {
    *
    * ## Conservation, checked before anything is written
    *
-   * `providerAmount + platformFee` must equal the hold's own committed
-   * amount. `payment_intents` carries the matching CHECK
-   * (`provider_amount + platform_fee = price_amount`), so a caller reading
-   * both numbers off the same intent row can never fail this — the assertion
-   * exists for the caller that does not, and it fails loudly with
-   * `LEDGER_SETTLEMENT_CREDIT_MISMATCH` rather than quietly writing a journal
-   * `foldLiabilities` would silently over- or under-report from.
+   * `providerAmount + platformFee` is what the buyer is charged, and it may
+   * not exceed the hold. It may be **less**: a rail-A hold is the quote (the
+   * dearest eligible binding) and the intent is re-priced to the binding that
+   * served, so the `HOLD_COMMIT` takes exactly the charge and a `HOLD_RELEASE`
+   * on the same hold returns the remainder, in the same transaction.
+   * `payment_intents` carries the matching CHECK
+   * (`provider_amount + platform_fee = price_amount`), so the credit always
+   * equals the intent's price. A credit above the hold, or in another asset,
+   * fails loudly with `LEDGER_SETTLEMENT_CREDIT_MISMATCH` rather than quietly
+   * writing a journal `foldLiabilities` would silently over-report from.
    */
   async commitHoldAndCredit(
     organizationId: string,
@@ -214,25 +217,44 @@ export class LedgerHoldService {
           return { hold: toLedgerHold(row), applied: false };
         }
 
-        const committedAmount = MoneyUtil.of(row.amount, row.assetId as AssetId, row.decimals);
+        const heldAmount = MoneyUtil.of(row.amount, row.assetId as AssetId, row.decimals);
         const creditedAmount = MoneyUtil.add(credit.providerAmount, credit.platformFee);
-        if (!MoneyUtil.equals(committedAmount, creditedAmount)) {
+        if (
+          heldAmount.asset !== creditedAmount.asset ||
+          MoneyUtil.toAtomic(creditedAmount) > MoneyUtil.toAtomic(heldAmount)
+        ) {
           throw LedgerErrors.settlementCreditMismatch({
             holdId,
-            committed: MoneyUtil.format(committedAmount),
+            committed: MoneyUtil.format(heldAmount),
             credited: MoneyUtil.format(creditedAmount),
           });
         }
 
+        // What the buyer is charged is the credit, never more than was held.
+        // The rest of the hold — the quote less the serving binding's price —
+        // goes back to `available` as a HOLD_RELEASE on the same hold.
         const commitEntry = this.journal.prepare({
           organizationId,
           accountId: row.accountId as LedgerAccountId,
           entryType: decision.entryType,
-          money: committedAmount,
+          money: creditedAmount,
           intentId: row.intentId,
           holdId,
           chainTxRef,
         });
+        const remainder = MoneyUtil.subtract(heldAmount, creditedAmount);
+        const releaseEntries = MoneyUtil.isZero(remainder)
+          ? []
+          : [
+              this.journal.prepare({
+                organizationId,
+                accountId: row.accountId as LedgerAccountId,
+                entryType: LedgerEntryType.HOLD_RELEASE,
+                money: remainder,
+                intentId: row.intentId,
+                holdId,
+              }),
+            ];
         const platformFeeEntry = this.journal.prepare({
           organizationId,
           accountId: INTERNAL_ACCOUNTS.PLATFORM_FEES,
@@ -244,6 +266,7 @@ export class LedgerHoldService {
 
         await this.journal.applyEntries(queryRunner, organizationId, [
           commitEntry,
+          ...releaseEntries,
           platformFeeEntry,
         ]);
 

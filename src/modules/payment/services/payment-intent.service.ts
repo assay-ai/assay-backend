@@ -150,6 +150,10 @@ export class PaymentIntentService {
       throw PaymentErrors.providerSlashHold({ chainId: input.chainId });
     }
 
+    // At the quote on rail A, where routing has not run yet: the edge out of
+    // `PROVIDER_EXECUTING` re-prices it to the binding that served
+    // (`PaymentIntentTransitionContext.charge`). On rail B the price is
+    // already the offered binding's own.
     const providerAmount = MoneyUtil.subtract(input.price, input.platformFee);
 
     const row: Partial<PaymentIntentEntity> = {
@@ -297,6 +301,14 @@ export class PaymentIntentService {
         : {}),
       ...(context.settledAmount !== undefined
         ? { settledAmount: context.settledAmount.amount }
+        : {}),
+      ...(context.charge !== undefined
+        ? {
+            priceAmount: context.charge.price.amount,
+            providerAmount: MoneyUtil.subtract(context.charge.price, context.charge.platformFee)
+              .amount,
+            platformFee: context.charge.platformFee.amount,
+          }
         : {}),
       ...(context.classification !== undefined ? { classification: context.classification } : {}),
       ...(context.verificationVerdict !== undefined

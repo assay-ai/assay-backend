@@ -256,6 +256,7 @@ describe('PaymentIntentRepository.sumWithheldByAssetAndStatus — the query itse
     for (const method of [
       'select',
       'addSelect',
+      'leftJoin',
       'where',
       'andWhere',
       'groupBy',
@@ -294,6 +295,16 @@ describe('PaymentIntentRepository.sumWithheldByAssetAndStatus — the query itse
       (call) => call.method === 'andWhere' && call.args[0] === 'intent.holdId IS NOT NULL',
     );
     expect(holdPredicate).toBeDefined();
+  });
+
+  it('sums the hold, not the price — a rail-A refund gives back the whole quote', async () => {
+    const { repository, calls } = buildRepository();
+
+    await repository.sumWithheldByAssetAndStatus(ORG);
+
+    expect(calls.find((call) => call.method === 'leftJoin')?.args[0]).toBe('ledger_holds');
+    const amount = calls.find((call) => call.method === 'addSelect' && call.args[1] === 'amount');
+    expect(amount?.args[0]).toContain('hold.amount');
   });
 
   it('restricts status to WITHHELD_STATUSES, never retyping the list', async () => {
