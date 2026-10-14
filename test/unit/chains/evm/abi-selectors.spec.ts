@@ -410,8 +410,11 @@ describe('the vendored ABI matches the compiled contracts', () => {
  * The names were extracted mechanically from the Solidity
  * (`grep '^error' src/Errors.sol` → 81 hits, every one zero-argument) on
  * 2026-10-13, after D-17/D-18, and again at assay-evm 99f98ed (88 hits: the
- * dispute upgrade's seven appended). Each selector is `cast sig '<Name>()'` on
- * the pinned Foundry build (1.2.1-nightly).
+ * dispute upgrade's seven appended), and at 6865b24 (95 hits: a4f97ab's and
+ * the audit fix round's seven appended). Each selector is `cast sig '<Name>()'`
+ * on the pinned Foundry build (1.2.1-nightly), the last seven viem's keccak
+ * cross-checked against the compiled ABIs. `target-branch-pin.spec.ts` checks
+ * the list against the branch the backend targets (audit T-3).
  *
  * All are pinned rather than a sample: pinning four leaves the rest free to
  * be misspelled, and a misspelled name produces a selector that no revert will
@@ -508,6 +511,16 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0x92428dbd', 'ArbiterIsVerifier'],
   ['0xae170cc2', 'AddressBlocked'],
   ['0x9589cd8b', 'InvalidSlashDelay'],
+  // a4f97ab and the audit fix round (audit E-9). Computed with viem's keccak
+  // over `<Name>()`; every name is in the compiled X402Config/X402Stake/
+  // X402Escrow ABIs of that commit.
+  ['0xe048dc84', 'DisputeTimedOut'],
+  ['0x6eccea65', 'SlashAlreadyDisputed'],
+  ['0x6a3f467f', 'SlashWindowNotDrained'],
+  ['0x64ce2c77', 'ArbiterCannotUnblock'],
+  ['0x9df5d0bf', 'VerifierIsAdminOrArbiter'],
+  ['0x23b2521b', 'RedeemerIsArbiter'],
+  ['0xf0318500', 'InvalidArbiter'],
   // OpenZeppelin `Ownable2StepUpgradeable`, raised by X402Config's owner doors
   // (D-17). Parameterised: `cast sig 'OwnableUnauthorizedAccount(address)'`
   // and `cast sig 'OwnableInvalidOwner(address)'`.
@@ -517,9 +530,9 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
 
 describe('the Errors.sol selector table', () => {
   it('has one entry per declared error and no collisions', () => {
-    // 88 from Errors.sol plus OpenZeppelin's two Ownable errors.
-    expect(EVM_ERROR_BY_SELECTOR.size).toBe(90);
-    expect(ERROR_PINS).toHaveLength(90);
+    // 95 from Errors.sol plus OpenZeppelin's two Ownable errors.
+    expect(EVM_ERROR_BY_SELECTOR.size).toBe(97);
+    expect(ERROR_PINS).toHaveLength(97);
   });
 
   it.each(ERROR_PINS)('%s decodes to %s', (selector, name) => {

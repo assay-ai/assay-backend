@@ -3,7 +3,7 @@ import { toFunctionSelector } from 'viem';
 /**
  * Every `error X();` in assay-evm's `src/Errors.sol`, by name.
  *
- * All 88 are **zero-argument** custom errors, so a revert arrives as a bare
+ * All 95 are **zero-argument** custom errors, so a revert arrives as a bare
  * 4-byte selector with nothing else in it — the only way to say what happened
  * is this table. `check-errors.sh` in `evm/` keeps the Solidity honest;
  * `abi-selectors.spec.ts` keeps this list in step by pinning every name to the
@@ -19,7 +19,10 @@ import { toFunctionSelector } from 'viem';
  * `VoucherSeqGapTooLarge` and `SignatureDeadlineTooFar`. The dispute upgrade
  * (D-19) appended seven: `NotSlashedProvider`, `DisputeWindowClosed`,
  * `SlashNotDisputed`, `NotArbiter`, `ArbiterIsVerifier`, `AddressBlocked` and
- * `InvalidSlashDelay`.
+ * `InvalidSlashDelay`. The uphold-timeout fix (a4f97ab) and the audit fix
+ * round added `DisputeTimedOut`, `SlashAlreadyDisputed` (first named
+ * `AlreadyDisputed`), `SlashWindowNotDrained`, `ArbiterCannotUnblock`,
+ * `VerifierIsAdminOrArbiter`, `RedeemerIsArbiter` and `InvalidArbiter`.
  */
 const NAMES: readonly string[] = [
   'ZeroAmount',
@@ -111,6 +114,14 @@ const NAMES: readonly string[] = [
   'ArbiterIsVerifier',
   'AddressBlocked',
   'InvalidSlashDelay',
+  // a4f97ab and the audit fix round (audit E-9), in Errors.sol's order.
+  'DisputeTimedOut',
+  'SlashAlreadyDisputed',
+  'SlashWindowNotDrained',
+  'ArbiterCannotUnblock',
+  'VerifierIsAdminOrArbiter',
+  'RedeemerIsArbiter',
+  'InvalidArbiter',
 ];
 
 /**
