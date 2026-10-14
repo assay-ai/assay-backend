@@ -206,7 +206,6 @@ import type { OperatorSession } from '@modules/operator/ports/operator-session.p
 // The credential file's own loader, rather than a second `JSON.parse` of the
 // same path: it is what the running API parses the file with, so this script
 // cannot come to disagree with the server about what the file means.
-import { loadOperatorCredentials } from '@modules/operator/services/config-operator-session.source';
 import {
   DEPOSIT_FINALITY_SWEEP_CRON,
   DEPOSIT_INTENT_TTL_MS,
@@ -1111,7 +1110,7 @@ async function signAndBroadcast(
  * `hasEnoughGas` is unconditional; the provider pays their own.
  *
  * The `feePayer`/`signers` check is not ceremony: the backend takes the
-  * account from the enrolment's `stake_authority_account_id` and never from the
+ * account from the enrolment's `stake_authority_account_id` and never from the
  * request, so this
  * is the one place a run can confirm that the transaction it is about to sign
  * belongs to the key it holds — and that step 1's proof reached the row the
@@ -2049,9 +2048,7 @@ async function runStep3(ctx: SuiteContext): Promise<string> {
       throw new Error(
         `publish-check for ${binding.id} carries no ${requirement} entry — the gate returns at ` +
           `least one entry per requirement, always (one per failing settlement chain when it is ` +
-          `unmet). Got [${check.requirements
-            .map((entry) => entry.requirement)
-            .join(', ')}]`,
+          `unmet). Got [${check.requirements.map((entry) => entry.requirement).join(', ')}]`,
       );
     }
     return result;
@@ -4554,26 +4551,13 @@ interface AdjudicatorClient {
 const ADJUDICATING_ROLES: readonly OperatorRole[] = [OperatorRole.ADJ, OperatorRole.ADJL];
 
 /**
- * An operator credential that may decide a case, from the file this deployment
- * already has.
- *
- * ## No credential is minted
- *
- * `OPERATOR_CREDENTIALS_FILE` maps a plaintext token to a `subject`, and
- * **nothing else** — every other fact about an operator (their roles, their
- * authority limit, whether they are still allowed in) is read from the
- * `operators` table on every request. So minting a token here would produce a
- * subject the table has never provisioned, which `ConfigOperatorSessionSource`
- * refuses exactly like an unknown token. Reusing an existing entry is not a
- * shortcut; it is the only thing that works.
+ * An operator session that may decide a case, from `ACCEPTANCE_OPERATOR_TOKEN`.
  *
  * ## Why every candidate is tried instead of one being named
  *
- * The file is keyed by token, and a token says nothing about what its holder
- * may do. `ops-tre` is treasury and cannot adjudicate; `ops-adjl` can. Naming
- * one in this script would hard-code a fact that lives in Postgres, and would
- * fail with `OPERATOR_ROLE_REQUIRED` several calls later. Asking
- * `GET /operator/me` — which re-reads the row — turns that into one refusal
+ * A session token says nothing about what its holder may do; the `operators`
+ * row does, and it is read on every request. Asking `GET /operator/me` — which
+ * re-reads the row — for each candidate turns a missing role into one refusal
  * here, with the subject and roles of everything that was tried.
  *
  * ## Two facts gate the write, not one
@@ -4600,56 +4584,45 @@ const ADJUDICATING_ROLES: readonly OperatorRole[] = [OperatorRole.ADJ, OperatorR
  * the same comparison decide both, so a fall-through would be unreachable — and
  * it would mean re-attempting a *mutating* call with a second credential.
  *
- * `ACCEPTANCE_OPERATOR_TOKEN` overrides the file for a deployment whose
- * credentials this machine does not hold.
- *
  * @param amountMinor the figure the override will be recorded for, in minor
  *   units — for a decision, the penalty `resolvePenalty` will hand
  *   `OverrideLogService`. `null` for an action that carries no amount, which is
  *   unbounded by the same rule the service applies.
  */
-/** One entry of the operator credentials file, or the env override. */
+/** One operator session this run may act as. */
 interface OperatorCandidate {
   readonly token: string;
-  /** What the file claims; the `operators` row decides what is true. */
+  /** A label for the refusal message; the `operators` row decides what is true. */
   readonly claimedSubject: string;
 }
 
 /**
- * Every operator credential this machine holds, in file order.
+ * Every operator session this machine holds: `ACCEPTANCE_OPERATOR_TOKEN`, a
+ * comma-separated list of session tokens from `POST /operator/auth/verify`
+ * (an operator signs in with their wallet in the console, or by script, and
+ * hands the run the token — it lasts a few hours). There is no credentials
+ * file any more.
  *
- * Shared by {@link resolveAdjudicator} (step 8a) and
- * {@link resolveReversalOperators} (step 9), so the two agree about which
- * operators this run is entitled to act as. Step 9 uses only the *subjects*:
- * it calls the domain in-process and authenticates nothing, but it must still
- * act as somebody whose token is on this machine, which is the trust tier
- * `yarn devnet:reverse-slash` already runs at.
- *
- * @param purpose named in the refusal, because "no operator credential" is
- *   read by whoever has to go and provision one.
+ * @param purpose named in the refusal, because "no operator session" is read
+ *   by whoever has to go and sign one in.
  */
 function operatorCandidates(purpose: string): OperatorCandidate[] {
-  const override = process.env.ACCEPTANCE_OPERATOR_TOKEN;
-  const credentialsPath = process.env.OPERATOR_CREDENTIALS_FILE;
-  const candidates: OperatorCandidate[] = override
-    ? [{ token: override, claimedSubject: 'ACCEPTANCE_OPERATOR_TOKEN' }]
-    : Object.entries(loadOperatorCredentials(credentialsPath)).map(([token, record]) => ({
-        token,
-        claimedSubject: record.subject,
-      }));
+  const candidates = (process.env.ACCEPTANCE_OPERATOR_TOKEN ?? '')
+    .split(',')
+    .map((token) => token.trim())
+    .filter(Boolean)
+    .map((token, index) => ({ token, claimedSubject: `ACCEPTANCE_OPERATOR_TOKEN[${index}]` }));
 
   if (candidates.length === 0) {
     throw new Error(
-      `no operator credential to ${purpose} with: OPERATOR_CREDENTIALS_FILE is ` +
-        `${credentialsPath ? `${credentialsPath}, and it is empty` : 'not set'}, and ` +
-        `ACCEPTANCE_OPERATOR_TOKEN is not set either — the same file the running API loads.`,
+      `no operator session to ${purpose} with: set ACCEPTANCE_OPERATOR_TOKEN to one or more ` +
+        `session tokens from POST /api/v1/operator/auth/verify (comma-separated).`,
     );
   }
   return candidates;
 }
 
 async function resolveAdjudicator(amountMinor: string | null): Promise<AdjudicatorClient> {
-  const credentialsPath = process.env.OPERATOR_CREDENTIALS_FILE;
   const candidates = operatorCandidates('adjudicate');
 
   const rejected: string[] = [];
@@ -4702,9 +4675,7 @@ async function resolveAdjudicator(amountMinor: string | null): Promise<Adjudicat
     `none of the ${candidates.length} configured operator credential(s) can decide this case. ` +
       `\`POST /operator/cases/:id/decide\` requires ${ADJUDICATING_ROLES.join(' or ')} AND an ` +
       `authority limit at or above ${amountMinor ?? '(no amount)'} minor units; tried ` +
-      `[${rejected.join('; ')}]. Both facts live in the \`operators\` table, not in ` +
-      `${credentialsPath ?? 'the credentials file'} — a token this deployment does not know and ` +
-      `a subject the table has never provisioned are deliberately indistinguishable from here.`,
+      `[${rejected.join('; ')}]. Both facts live in the \`operators\` table.`,
   );
 }
 
@@ -5413,20 +5384,17 @@ async function readSlashRecordFromChain(
 }
 
 /**
- * Two operator identities that may perform `S-5`, from the credentials this
- * machine holds.
+ * Two operator identities that may perform `S-5`, named by
+ * `ACCEPTANCE_OPERATOR_SUBJECTS`.
  *
  * ## Why subjects and not tokens
  *
  * Step 9 calls `SlashExecutionService.reverse()` in process — see
  * `lib/acceptance-resume-context.ts` for why there is no HTTP route to call —
  * so nothing authenticates and no token is ever presented. What the method
- * wants is two `OperatorSession`s, and the honest way to build them is the way
- * `ConfigOperatorSessionSource` would have: take the subject from the
- * credentials file, and read every other fact — roles, authority, whether they
- * are still allowed in — from the `operators` row, on the spot. Minting a
- * session for a subject this machine holds no credential for would be acting as
- * somebody the operator running the script is not.
+ * wants is two `OperatorSession`s, built the way the session source builds
+ * them: every fact — roles, authority, whether they are still allowed in —
+ * read from the `operators` row, on the spot.
  *
  * ## The register's own rules, not this script's reading of them
  *
@@ -5466,34 +5434,24 @@ async function resolveReversalOperators(
     );
   }
 
-  // `ACCEPTANCE_OPERATOR_TOKEN` names a token and no subject, which is enough
-  // for step 8a (it presents the token and asks `/operator/me` who it is) and
-  // is not enough here (nothing is presented). `ACCEPTANCE_OPERATOR_SUBJECTS`
-  // is the in-process equivalent, and saying so is better than resolving a
-  // literal 'ACCEPTANCE_OPERATOR_TOKEN' subject and reporting it as unknown.
-  const named = (process.env.ACCEPTANCE_OPERATOR_SUBJECTS ?? '')
+  // Step 9 acts in process rather than over HTTP, so it needs subjects, not
+  // session tokens: `ACCEPTANCE_OPERATOR_SUBJECTS`, comma-separated.
+  const subjects = (process.env.ACCEPTANCE_OPERATOR_SUBJECTS ?? '')
     .split(',')
     .map((entry) => entry.trim())
     .filter(Boolean);
-  const subjects =
-    named.length > 0
-      ? named
-      : operatorCandidates(`perform ${REVERSE_OVERRIDE_CODE}`)
-          .map((candidate) => candidate.claimedSubject)
-          .filter((subject) => subject !== 'ACCEPTANCE_OPERATOR_TOKEN');
 
   if (subjects.length === 0) {
     throw new Error(
-      `ACCEPTANCE_OPERATOR_TOKEN is set but names no subject, and step 9 acts in process rather ` +
-        `than over HTTP — it needs subjects, not a token. Set ACCEPTANCE_OPERATOR_SUBJECTS to a ` +
-        `comma-separated pair, or point OPERATOR_CREDENTIALS_FILE at the file the API loads.`,
+      `step 9 acts in process rather than over HTTP — it needs operator subjects, not a ` +
+        `session. Set ACCEPTANCE_OPERATOR_SUBJECTS to a comma-separated pair.`,
     );
   }
 
   const sessions: OperatorSession[] = [];
   const rejected: string[] = [];
   for (const subject of subjects) {
-    const row = await operators.findActiveBySubject(subject);
+    const row = await operators.findBySubject(subject);
     if (!row) {
       rejected.push(`${subject}: no operators row`);
       continue;
@@ -5529,7 +5487,7 @@ async function resolveReversalOperators(
         .join('; ')}]${rejected.length ? ` (also rejected: ${rejected.join('; ')})` : ''} can ` +
         `perform ${REVERSE_OVERRIDE_CODE}: it needs [${definition.roles.join(' or ')}] AND an ` +
         `authority limit at or above the ${restoredMinor} minor units the reversal restores. ` +
-        `Both facts live in the \`operators\` table, not in the credentials file.`,
+        `Both facts live in the \`operators\` table.`,
     );
   }
 
@@ -6397,7 +6355,7 @@ async function resolveOperatorReader(): Promise<{
     }
   }
   throw new Error(
-    `no configured operator credential can read the console: tried [${rejected.join('; ')}]. ` +
+    `no operator session in ACCEPTANCE_OPERATOR_TOKEN can read the console: tried [${rejected.join('; ')}]. ` +
       `GET /operator/cases/:id needs only an ACTIVE operator, so every one of these was refused ` +
       `at the door rather than on a role.`,
   );

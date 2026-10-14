@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
 import { FleetSweepRepository } from '@database/postgres/repositories/fleet-sweep.repository';
+import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
+import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { SlashProposalEventRepository } from '@database/postgres/repositories/slash-proposal-event.repository';
@@ -10,6 +12,10 @@ import { SlashProposalRepository } from '@database/postgres/repositories/slash-p
 import { AccountId } from '@modules/chains/ports/caip.types';
 import { OperatorRole } from '@modules/operator/domain/override-register';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { ApprovalQueuedDto } from '@modules/operator/dto/operator-approval.dto';
+import { OperatorApprovalService } from '@modules/operator/services/operator-approval.service';
+import { OperatorCaseService } from '@modules/operator/services/operator-case.service';
+import { OperatorService } from '@modules/operator/services/operator.service';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 import { SlashErrorCode } from '@modules/slash/errors/slash.errors';
 import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
@@ -19,6 +25,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import { CHAIN } from '../../unit/chains/evm/helpers/fake-stake-chain';
 import { freshMigratedDatabase, TEST_SLASH_CONFIG } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
+import { approvalFor } from '../helpers/operator-approval';
 
 /**
  * `S-5` (record a compensation) against a real Postgres (review M-3).
@@ -42,6 +49,8 @@ describe('recording a compensation, against a real database', () => {
   let confirmedDeposit: jest.Mock;
   let lead: OperatorSession;
   let treasurer: OperatorSession;
+  let cases: OperatorCaseService;
+  let approvals: OperatorApprovalService;
 
   beforeAll(async () => {
     dataSource = await freshMigratedDatabase(DATABASE);
@@ -60,7 +69,11 @@ describe('recording a compensation, against a real database', () => {
       new ProviderChainEnrolmentRepository(dataSource),
       new FleetSweepRepository(dataSource),
       lifecycle,
-      new OverrideLogService(dataSource, new OverrideLogEntryRepository(dataSource)),
+      new OverrideLogService(
+        dataSource,
+        new OverrideLogEntryRepository(dataSource),
+        new OperatorApprovalRepository(dataSource),
+      ),
       notifications,
       TEST_SLASH_CONFIG,
       // Only the treasury lookup is reached; nothing is signed or sent.
@@ -69,6 +82,14 @@ describe('recording a compensation, against a real database', () => {
       null,
       { confirmedDeposit } as never,
     );
+
+    const operators = new OperatorRepository(dataSource);
+    approvals = new OperatorApprovalService(
+      new OperatorApprovalRepository(dataSource),
+      operators,
+      new OperatorService(operators, { get: () => undefined } as never),
+    );
+    cases = new OperatorCaseService(proposals, null as never, null as never, execution, approvals);
 
     lead = await seedOperator('ops-adjl', [OperatorRole.ADJL]);
     treasurer = await seedOperator('ops-tre', [OperatorRole.TRE]);
@@ -142,7 +163,7 @@ describe('recording a compensation, against a real database', () => {
 
     await execution.markCompensated(
       lead,
-      treasurer,
+      await approvalFor(dataSource, lead, treasurer),
       seeded.organizationId,
       seeded.proposalId,
       signature.toUpperCase().replace('0X', '0x'),
@@ -171,7 +192,7 @@ describe('recording a compensation, against a real database', () => {
 
     await execution.markCompensated(
       lead,
-      treasurer,
+      await approvalFor(dataSource, lead, treasurer),
       first.organizationId,
       first.proposalId,
       DEPOSIT,
@@ -181,7 +202,7 @@ describe('recording a compensation, against a real database', () => {
     await expect(
       execution.markCompensated(
         lead,
-        treasurer,
+        await approvalFor(dataSource, lead, treasurer),
         second.organizationId,
         second.proposalId,
         DEPOSIT,
@@ -204,7 +225,7 @@ describe('recording a compensation, against a real database', () => {
     await expect(
       execution.markCompensated(
         lead,
-        treasurer,
+        await approvalFor(dataSource, lead, treasurer),
         seeded.organizationId,
         seeded.proposalId,
         `0x${'ef'.repeat(32)}`,
@@ -216,5 +237,49 @@ describe('recording a compensation, against a real database', () => {
 
     expect((await row(seeded.proposalId)).status).toBe('EXECUTED');
     expect(await s5Entries(seeded.proposalId)).toBe(0);
+  });
+
+  it('queues S-5 for a second person, after checking the deposit, and records it on approval', async () => {
+    const seeded = await executed();
+    const body = {
+      signature: `0x${'12'.repeat(32)}`,
+      reasonCode: 'MAPPING_REGRESSION',
+      note: NOTE,
+    };
+
+    const queued = await cases.compensated(lead, seeded.proposalId, body, null);
+
+    expect(queued).toBeInstanceOf(ApprovalQueuedDto);
+    expect((await row(seeded.proposalId)).status).toBe('EXECUTED');
+    expect(await s5Entries(seeded.proposalId)).toBe(0);
+
+    await approvals.approve((queued as ApprovalQueuedDto).approvalId, treasurer, null);
+
+    expect((await row(seeded.proposalId)).status).toBe('REVERSED');
+    expect(await s5Entries(seeded.proposalId)).toBe(1);
+  });
+
+  it('queues nothing for a deposit the chain does not show', async () => {
+    const seeded = await executed();
+    confirmedDeposit.mockResolvedValueOnce(null);
+
+    await expect(
+      cases.compensated(
+        lead,
+        seeded.proposalId,
+        { signature: `0x${'34'.repeat(32)}`, reasonCode: 'MAPPING_REGRESSION', note: NOTE },
+        null,
+      ),
+    ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_COMPENSATION_NOT_CONFIRMED });
+    expect(
+      Number(
+        (
+          (await dataSource.query(
+            `SELECT count(*)::int AS n FROM operator_approvals WHERE target = $1`,
+            [`slash_proposal:${seeded.proposalId}`],
+          )) as { n: number }[]
+        )[0].n,
+      ),
+    ).toBe(0);
   });
 });

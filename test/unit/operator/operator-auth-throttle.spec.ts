@@ -109,13 +109,13 @@ describe('OperatorAuthGuard — failed sign-ins are counted per address', () => 
     );
   });
 
-  it('does not count a request with no token, or a suspended operator', async () => {
+  it('does not count a request with no token, or a live session of an inactive operator', async () => {
     const missing = build(refuse);
     await missing.guard.canActivate(contextFor({}).context).catch(() => undefined);
     expect(missing.redis.counts.size).toBe(0);
 
     const suspended = build(async () => {
-      throw OperatorErrors.suspended({ subject: 'dan@' });
+      throw OperatorErrors.notAuthorized();
     });
     await suspended.guard
       .canActivate(contextFor({ authorization: 'Bearer some-valid-token' }).context)

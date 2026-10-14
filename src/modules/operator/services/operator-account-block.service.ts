@@ -1,7 +1,6 @@
 import { randomUUID } from 'node:crypto';
 
-import { Inject, Injectable } from '@nestjs/common';
-import { Request } from 'express';
+import { Injectable } from '@nestjs/common';
 import { IsNull } from 'typeorm';
 
 import { AccountBlockEntity } from '@database/postgres/entities/account-block.entity';
@@ -22,13 +21,14 @@ import {
   ListAccountBlocksQueryDto,
   UnblockAccountBodyDto,
 } from '../dto/operator-console.dto';
+import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
 import { OperatorErrors } from '../errors/operator.errors';
-import {
-  OPERATOR_SESSION_SOURCE,
-  OperatorSession,
-  OperatorSessionPort,
-} from '../ports/operator-session.port';
+import { OperatorApprover, OperatorSession } from '../ports/operator-session.port';
+import { OperatorApprovalService } from './operator-approval.service';
 import { OverrideLogService } from './override-log.service';
+
+/** The queued-action name for `A-10`. */
+export const UNBLOCK_APPROVAL_ACTION = 'account.unblock';
 
 const TARGET_TYPE = 'account_block';
 
@@ -55,8 +55,20 @@ export class OperatorAccountBlockService {
     private readonly blocks: AccountBlockRepository,
     private readonly operators: OperatorRepository,
     private readonly blocklist: AccountBlocklistService,
-    @Inject(OPERATOR_SESSION_SOURCE) private readonly sessions: OperatorSessionPort,
-  ) {}
+    private readonly approvals: OperatorApprovalService,
+  ) {
+    approvals.register(UNBLOCK_APPROVAL_ACTION, {
+      code: 'A-10',
+      run: (requester, approver, payload, requestId) =>
+        this.unblock(
+          requester,
+          payload.blockId as string,
+          payload.body as UnblockAccountBodyDto,
+          requestId,
+          approver,
+        ),
+    });
+  }
 
   async block(
     operator: OperatorSession,
@@ -142,12 +154,36 @@ export class OperatorAccountBlockService {
     return (await this.toDtos([row]))[0];
   }
 
+  /**
+   * `A-10`, two-person. Called without an approver it is queued
+   * (`ApprovalQueuedDto`); the approval re-runs it, block state checked again.
+   */
   async unblock(
     operator: OperatorSession,
     blockId: string,
     body: UnblockAccountBodyDto,
-    request: Request,
     requestId: string | null,
+    approver: OperatorApprover | null = null,
+  ): Promise<AccountBlockDto | ApprovalQueuedDto> {
+    const attempt = () => this.lift(operator, blockId, body, requestId, approver);
+    if (approver) return attempt();
+    return this.approvals.orQueue(
+      {
+        action: UNBLOCK_APPROVAL_ACTION,
+        target: `account_block:${blockId}`,
+        payload: { blockId, body: { ...body } },
+        requester: operator,
+      },
+      attempt,
+    );
+  }
+
+  private async lift(
+    operator: OperatorSession,
+    blockId: string,
+    body: UnblockAccountBodyDto,
+    requestId: string | null,
+    approver: OperatorApprover | null,
   ): Promise<AccountBlockDto> {
     const existing = await this.blocks.findOneBy({ id: blockId });
     if (!existing) throw OperatorErrors.blockNotFound({ blockId });
@@ -155,7 +191,6 @@ export class OperatorAccountBlockService {
       throw OperatorErrors.blockAlreadyLifted({ unblockedAt: existing.unblockedAt.toISOString() });
     }
 
-    const approver = await this.resolveApprover(request, operator);
     const unblockedAt = new Date();
 
     await this.overrides.perform<void>(
@@ -175,7 +210,8 @@ export class OperatorAccountBlockService {
       async (queryRunner) => {
         const moved = await this.blocks.markUnblocked(queryRunner, existing.id, {
           unblockedBy: operator.operatorId,
-          unblockApprovedBy: approver.operatorId,
+          // `perform` refused the write unless an approver was present.
+          unblockApprovedBy: (approver as OperatorApprover).operatorId,
           unblockedAt,
           unblockNote: body.note,
         });
@@ -227,22 +263,6 @@ export class OperatorAccountBlockService {
       ACCOUNT_BLOCK_LIST,
     );
     return new CursorPageDto(await this.toDtos(page.items), page.pageInfo.nextCursor);
-  }
-
-  /** The `X-Operator-Approver` checker — the same contract as `OperatorCaseService`'s. */
-  private async resolveApprover(
-    request: Request,
-    actor: OperatorSession,
-  ): Promise<OperatorSession> {
-    const header = request.headers['x-operator-approver'];
-    const token = Array.isArray(header) ? header[0] : header;
-    if (!token) throw OperatorErrors.secondApproverRequired({ code: 'A-10' });
-
-    const approver = await this.sessions.resolve(token);
-    if (approver.operatorId === actor.operatorId) {
-      throw OperatorErrors.selfApprovalRefused({ code: 'A-10' });
-    }
-    return approver;
   }
 
   private async toDtos(rows: readonly AccountBlockEntity[]): Promise<AccountBlockDto[]> {

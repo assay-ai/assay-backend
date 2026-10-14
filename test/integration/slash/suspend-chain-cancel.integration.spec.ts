@@ -5,6 +5,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { DataSource } from 'typeorm';
 
 import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
+import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
 import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
 import { EvmSlashExecutor } from '@modules/chains/evm/evm-slash-executor.service';
@@ -145,7 +146,11 @@ describe('suspending a case with a record standing on chain, against a real data
       new DisputeRepository(dataSource),
       new SlaStrikeRepository(dataSource),
       services.lifecycle,
-      new OverrideLogService(dataSource, new OverrideLogEntryRepository(dataSource)),
+      new OverrideLogService(
+        dataSource,
+        new OverrideLogEntryRepository(dataSource),
+        new OperatorApprovalRepository(dataSource),
+      ),
       notifications,
       TEST_SLASH_CONFIG,
       execution,

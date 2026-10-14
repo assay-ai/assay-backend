@@ -5,7 +5,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 
 import { OperatorErrors } from '../errors/operator.errors';
 
-/** Refused tokens one address may present inside the window. */
+/** Failures one key (a client address or a wallet) may accumulate inside the window. */
 export const OPERATOR_AUTH_MAX_FAILURES = 10;
 
 /** The window, and how long an address stays blocked once it is over the limit. */
@@ -13,11 +13,21 @@ export const OPERATOR_AUTH_FAILURE_WINDOW_SECONDS = 300;
 
 const KEY_PREFIX = 'operator:auth:failures:';
 
+/** The throttle key for a client address. */
+export const ipKey = (ip: string): string => `ip:${ip}`;
+
+/** The throttle key for a wallet, lower-case. */
+export const walletKey = (address: string): string => `wallet:${address.toLowerCase()}`;
+
 /**
- * Counts refused operator tokens per client address, in Redis.
+ * Counts failed operator sign-ins and refused session tokens, in Redis.
+ *
+ * Keyed by client address (`ipKey`) for everything, and by wallet
+ * (`walletKey`) for sign-in verifications, so one guesser cannot spread across
+ * many addresses against one wallet nor many wallets from one address.
  *
  * A fixed window is enough here: the control is "slow a guesser down and make
- * it visible", not a spend limit, and tokens are at least 32 characters.
+ * it visible", not a spend limit.
  *
  * ## Fails OPEN
  *
@@ -35,11 +45,11 @@ export class OperatorAuthThrottle {
 
   constructor(@Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis) {}
 
-  /** Throws `OPERATOR_AUTH_RATE_LIMITED` when this address is over the limit. */
-  async assertNotBlocked(ip: string): Promise<void> {
+  /** Throws `OPERATOR_AUTH_RATE_LIMITED` when this key is over the limit. */
+  async assertNotBlocked(key: string): Promise<void> {
     let failures: number;
     try {
-      failures = Number((await this.redis.get(KEY_PREFIX + ip)) ?? 0);
+      failures = Number((await this.redis.get(KEY_PREFIX + key)) ?? 0);
     } catch (error) {
       this.logger.warn(`operator auth throttle unavailable, not enforced: ${describe(error)}`);
       return;
@@ -49,18 +59,18 @@ export class OperatorAuthThrottle {
     }
   }
 
-  /** Count one refused token. Logs at error level when the limit is reached. */
-  async recordFailure(ip: string): Promise<void> {
+  /** Count one failure. Logs at error level when the limit is reached. */
+  async recordFailure(key: string): Promise<void> {
     try {
-      const key = KEY_PREFIX + ip;
-      const failures = await this.redis.incr(key);
+      const redisKey = KEY_PREFIX + key;
+      const failures = await this.redis.incr(redisKey);
       if (failures === 1) {
-        await this.redis.expire(key, OPERATOR_AUTH_FAILURE_WINDOW_SECONDS);
+        await this.redis.expire(redisKey, OPERATOR_AUTH_FAILURE_WINDOW_SECONDS);
       }
       if (failures === OPERATOR_AUTH_MAX_FAILURES) {
         this.logger.error(
-          `operator authentication: ${failures} refused tokens from ${ip} within ` +
-            `${OPERATOR_AUTH_FAILURE_WINDOW_SECONDS}s, address blocked until the window ends`,
+          `operator authentication: ${failures} failures for ${key} within ` +
+            `${OPERATOR_AUTH_FAILURE_WINDOW_SECONDS}s, blocked until the window ends`,
         );
       }
     } catch (error) {

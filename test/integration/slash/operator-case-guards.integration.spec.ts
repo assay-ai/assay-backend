@@ -4,6 +4,8 @@ import { DataSource } from 'typeorm';
 
 import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
 import { FleetSweepRepository } from '@database/postgres/repositories/fleet-sweep.repository';
+import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
+import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
@@ -12,6 +14,10 @@ import { SlashProposalRepository } from '@database/postgres/repositories/slash-p
 import { OperatorRole } from '@modules/operator/domain/override-register';
 import { OperatorErrorCode } from '@modules/operator/errors/operator.errors';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { ApprovalQueuedDto } from '@modules/operator/dto/operator-approval.dto';
+import { OperatorApprovalService } from '@modules/operator/services/operator-approval.service';
+import { OperatorCaseService } from '@modules/operator/services/operator-case.service';
+import { OperatorService } from '@modules/operator/services/operator.service';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 import { ArbitrationOutcome, DisputeClaimType } from '@modules/slash/domain/arbitration';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
@@ -23,6 +29,7 @@ import { SlashProposalService } from '@modules/slash/services/slash-proposal.ser
 import { CHAIN } from '../../unit/chains/evm/helpers/fake-stake-chain';
 import { freshMigratedDatabase, TEST_SLASH_CONFIG } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
+import { approvalFor } from '../helpers/operator-approval';
 
 /**
  * The operator's case actions against a real Postgres built from every
@@ -47,6 +54,8 @@ describe('operator case actions, against a real database', () => {
   let execution: SlashExecutionService;
   let adjudicator: OperatorSession;
   let lead: OperatorSession;
+  let cases: OperatorCaseService;
+  let approvals: OperatorApprovalService;
 
   beforeAll(async () => {
     dataSource = await freshMigratedDatabase(DATABASE);
@@ -62,6 +71,7 @@ describe('operator case actions, against a real database', () => {
     const overrides = new OverrideLogService(
       dataSource,
       new OverrideLogEntryRepository(dataSource),
+      new OperatorApprovalRepository(dataSource),
     );
     execution = new SlashExecutionService(
       proposals,
@@ -85,6 +95,15 @@ describe('operator case actions, against a real database', () => {
       execution,
     );
 
+    const operators = new OperatorRepository(dataSource);
+    approvals = new OperatorApprovalService(
+      new OperatorApprovalRepository(dataSource),
+      operators,
+      new OperatorService(operators, { get: () => undefined } as never),
+    );
+    // The queue (`AdjudicationQueueService`) is only read by the list routes.
+    cases = new OperatorCaseService(proposals, null as never, arbitration, execution, approvals);
+
     adjudicator = await seedOperator('ops-adj', [OperatorRole.ADJ]);
     lead = await seedOperator('ops-adjl', [OperatorRole.ADJL]);
   }, 300_000);
@@ -93,12 +112,16 @@ describe('operator case actions, against a real database', () => {
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
-  async function seedOperator(subject: string, roles: OperatorRole[]): Promise<OperatorSession> {
+  async function seedOperator(
+    subject: string,
+    roles: OperatorRole[],
+    authorityLimitMinor: string | null = null,
+  ): Promise<OperatorSession> {
     const id = randomUUID();
     await dataSource.query(
-      `INSERT INTO operators (id, subject, display_name, email, roles, status)
-       VALUES ($1, $2, $2, $3, $4::jsonb, 'ACTIVE')`,
-      [id, subject, `${subject}@example.test`, JSON.stringify(roles)],
+      `INSERT INTO operators (id, subject, display_name, email, roles, status, authority_limit_minor)
+       VALUES ($1, $2, $2, $3, $4::jsonb, 'ACTIVE', $5)`,
+      [id, subject, `${subject}@example.test`, JSON.stringify(roles), authorityLimitMinor],
     );
     return {
       operatorId: id,
@@ -106,7 +129,7 @@ describe('operator case actions, against a real database', () => {
       displayName: subject,
       email: `${subject}@example.test`,
       roles,
-      authorityLimitMinor: null,
+      authorityLimitMinor,
     };
   }
 
@@ -316,12 +339,18 @@ describe('operator case actions, against a real database', () => {
       const seeded = await proposed();
 
       await expect(
-        execution.openSweep(lead, adjudicator, seeded.organizationId, seeded.proposalId, {
-          defectKey: 'mapping/v3',
-          lookbackHours: 24,
-          reasonCode: 'MAPPING_REGRESSION',
-          note: NOTE,
-        }),
+        execution.openSweep(
+          lead,
+          await approvalFor(dataSource, lead, adjudicator),
+          seeded.organizationId,
+          seeded.proposalId,
+          {
+            defectKey: 'mapping/v3',
+            lookbackHours: 24,
+            reasonCode: 'MAPPING_REGRESSION',
+            note: NOTE,
+          },
+        ),
       ).rejects.toMatchObject({
         errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION,
         statusCode: 409,
@@ -402,7 +431,13 @@ describe('operator case actions, against a real database', () => {
         const registerBefore = await registerEntries(seeded.proposalId);
 
         await expect(
-          execution.openSweep(lead, approver, seeded.organizationId, seeded.proposalId, SWEEP),
+          execution.openSweep(
+            lead,
+            await approvalFor(dataSource, lead, approver),
+            seeded.organizationId,
+            seeded.proposalId,
+            SWEEP,
+          ),
         ).rejects.toMatchObject({
           errorCode: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED,
           statusCode: 403,
@@ -420,7 +455,7 @@ describe('operator case actions, against a real database', () => {
 
       const sweep = await execution.openSweep(
         lead,
-        adjudicator,
+        await approvalFor(dataSource, lead, adjudicator),
         seeded.organizationId,
         seeded.proposalId,
         SWEEP,
@@ -441,7 +476,13 @@ describe('operator case actions, against a real database', () => {
       const seeded = await overturnedAsPlatformDefect();
 
       await expect(
-        execution.openSweep(lead, lead, seeded.organizationId, seeded.proposalId, SWEEP),
+        execution.openSweep(
+          lead,
+          await approvalFor(dataSource, lead, lead),
+          seeded.organizationId,
+          seeded.proposalId,
+          SWEEP,
+        ),
       ).rejects.toMatchObject({
         errorCode: OperatorErrorCode.OPERATOR_SELF_APPROVAL_REFUSED,
       });
@@ -548,7 +589,7 @@ describe('operator case actions, against a real database', () => {
       return seeded;
     }
 
-    const suspend = (
+    const suspend = async (
       seeded: { organizationId: string; proposalId: string },
       approver: OperatorSession | null,
     ) =>
@@ -560,7 +601,7 @@ describe('operator case actions, against a real database', () => {
         'held while the mapping is checked',
         null,
         null,
-        approver,
+        approver ? await approvalFor(dataSource, lead, approver) : null,
       );
 
     it('refuses without an approver, and with an SRE approver, writing nothing', async () => {
@@ -617,6 +658,211 @@ describe('operator case actions, against a real database', () => {
         'ASSIGNED',
         'ASSIGNED',
       ]);
+    });
+  });
+
+  /**
+   * The two-person case actions through the approvals queue: the requester's
+   * call queues the action and changes nothing, a second operator's approval
+   * re-runs it on the state as it is then, and the register names both.
+   */
+  describe('through the approvals queue', () => {
+    const approval = (id: string) =>
+      one<{ status: string; approved_by: string | null; requested_by: string }>(
+        `SELECT status, approved_by, requested_by FROM operator_approvals WHERE id = $1`,
+        [id],
+      );
+
+    async function upheldCase() {
+      const seeded = await disputed();
+      await arbitration.decide(adjudicator, seeded.organizationId, seeded.proposalId, {
+        outcome: ArbitrationOutcome.UPHELD,
+        reasonCodes: ['RATE_GENUINELY_EXCEEDED'],
+        note: NOTE,
+      });
+      return seeded;
+    }
+
+    async function queuedSuspension() {
+      const seeded = await upheldCase();
+      const queued = await cases.suspend(
+        lead,
+        seeded.proposalId,
+        { reasonCode: 'OPERATOR_HOLD', note: 'held while the mapping is checked' },
+        null,
+      );
+      expect(queued).toBeInstanceOf(ApprovalQueuedDto);
+      return { seeded, approvalId: (queued as ApprovalQueuedDto).approvalId };
+    }
+
+    it('queues an S-1 from UPHELD, and an adjudicator’s approval suspends it', async () => {
+      const { seeded, approvalId } = await queuedSuspension();
+      expect((await proposalRow(seeded.proposalId)).status).toBe('UPHELD');
+      expect(await registerEntries(seeded.proposalId)).toEqual(['S-3']);
+
+      const decided = await approvals.approve(approvalId, adjudicator, null);
+
+      expect(decided.approval).toMatchObject({ status: 'APPROVED', approvedBy: 'ops-adj' });
+      expect((await proposalRow(seeded.proposalId)).status).toBe('CANCELLED');
+      expect(
+        await one(
+          `SELECT actor_operator_id, approver_operator_id, approval_mode FROM override_log_entries
+            WHERE target_id = $1 AND code = 'S-1'`,
+          [seeded.proposalId],
+        ),
+      ).toEqual({
+        actor_operator_id: lead.operatorId,
+        approver_operator_id: adjudicator.operatorId,
+        approval_mode: 'TWO_PERSON',
+      });
+    });
+
+    it('suspends a PROPOSED case at once, queueing nothing', async () => {
+      const seeded = await proposed();
+      const result = await cases.suspend(
+        lead,
+        seeded.proposalId,
+        { reasonCode: 'OPERATOR_HOLD', note: 'held while the mapping is checked' },
+        null,
+      );
+      expect(result).not.toBeInstanceOf(ApprovalQueuedDto);
+      expect((await proposalRow(seeded.proposalId)).status).toBe('CANCELLED');
+    });
+
+    it('refuses the requester approving their own request', async () => {
+      const { approvalId } = await queuedSuspension();
+      await expect(approvals.approve(approvalId, lead, null)).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_SELF_APPROVAL_REFUSED,
+      });
+      expect((await approval(approvalId)).status).toBe('PENDING');
+    });
+
+    it('refuses an approver without the role, or without the limit, and stays pending', async () => {
+      const { seeded, approvalId } = await queuedSuspension();
+      const sre = await seedOperator(`ops-sre-${randomUUID()}`, [OperatorRole.SRE]);
+      const capped = await seedOperator(`ops-adj-${randomUUID()}`, [OperatorRole.ADJ], '1');
+
+      await expect(approvals.approve(approvalId, sre, null)).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED,
+      });
+      await expect(approvals.approve(approvalId, capped, null)).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_APPROVER_AUTHORITY_EXCEEDED,
+      });
+      expect((await approval(approvalId)).status).toBe('PENDING');
+      expect((await proposalRow(seeded.proposalId)).status).toBe('UPHELD');
+    });
+
+    it('re-validates at approval time: a case that moved on is refused, and stays pending', async () => {
+      const { seeded, approvalId } = await queuedSuspension();
+      await dataSource.query(`UPDATE slash_proposals SET status = 'EXECUTING' WHERE id = $1`, [
+        seeded.proposalId,
+      ]);
+
+      await expect(approvals.approve(approvalId, adjudicator, null)).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION,
+      });
+      expect((await approval(approvalId)).status).toBe('PENDING');
+      expect(await registerEntries(seeded.proposalId)).toEqual(['S-3']);
+    });
+
+    it('refuses an approval whose requester has since been removed', async () => {
+      const requester = await seedOperator(`ops-adjl-${randomUUID()}`, [OperatorRole.ADJL]);
+      const seeded = await upheldCase();
+      const queued = (await cases.suspend(
+        requester,
+        seeded.proposalId,
+        { reasonCode: 'OPERATOR_HOLD', note: 'held while the mapping is checked' },
+        null,
+      )) as ApprovalQueuedDto;
+      await dataSource.query(
+        `UPDATE operators SET status = 'REMOVED', removed_at = now() WHERE id = $1`,
+        [requester.operatorId],
+      );
+
+      await expect(approvals.approve(queued.approvalId, adjudicator, null)).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_NOT_AUTHORIZED,
+      });
+      expect((await proposalRow(seeded.proposalId)).status).toBe('UPHELD');
+    });
+
+    it('expires after its window, and cannot then be approved', async () => {
+      const { seeded, approvalId } = await queuedSuspension();
+      await dataSource.query(
+        `UPDATE operator_approvals SET expires_at = now() - interval '1 second' WHERE id = $1`,
+        [approvalId],
+      );
+
+      await expect(approvals.approve(approvalId, adjudicator, null)).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_APPROVAL_NOT_PENDING,
+      });
+      expect((await approval(approvalId)).status).toBe('EXPIRED');
+      expect((await proposalRow(seeded.proposalId)).status).toBe('UPHELD');
+    });
+
+    it('is closed by a rejection, and cannot then be approved', async () => {
+      const { seeded, approvalId } = await queuedSuspension();
+
+      const rejected = await approvals.reject(approvalId, adjudicator);
+
+      expect(rejected.approval).toMatchObject({ status: 'REJECTED', rejectedBy: 'ops-adj' });
+      await expect(approvals.approve(approvalId, adjudicator, null)).rejects.toMatchObject({
+        errorCode: OperatorErrorCode.OPERATOR_APPROVAL_NOT_PENDING,
+      });
+      expect((await proposalRow(seeded.proposalId)).status).toBe('UPHELD');
+    });
+
+    it('runs once when two operators approve at the same moment', async () => {
+      const { seeded, approvalId } = await queuedSuspension();
+      const other = await seedOperator(`ops-adj-${randomUUID()}`, [OperatorRole.ADJ]);
+
+      const results = await Promise.allSettled([
+        approvals.approve(approvalId, adjudicator, null),
+        approvals.approve(approvalId, other, null),
+      ]);
+
+      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
+      expect(
+        (await registerEntries(seeded.proposalId)).filter((code) => code === 'S-1'),
+      ).toHaveLength(1);
+    });
+
+    it('queues an S-11 fleet sweep, and an adjudicator’s approval opens it', async () => {
+      const seeded = await disputed();
+      await arbitration.decide(adjudicator, seeded.organizationId, seeded.proposalId, {
+        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+        reasonCodes: ['MAPPING_REGRESSION'],
+        note: NOTE,
+      });
+      await arbitration.second(lead, seeded.organizationId, seeded.proposalId, 'SIGNED', NOTE);
+      const defectKey = `mapping/queued-${randomUUID()}`;
+      await dataSource.query(`UPDATE slash_proposals SET root_cause_key = $2 WHERE id = $1`, [
+        seeded.proposalId,
+        defectKey,
+      ]);
+      const body = { defectKey, lookbackHours: 24, reasonCode: 'MAPPING_REGRESSION', note: NOTE };
+
+      const queued = await cases.openSweep(lead, seeded.proposalId, body, null);
+      expect(queued).toBeInstanceOf(ApprovalQueuedDto);
+      expect(await registerEntries(seeded.proposalId)).not.toContain('S-11');
+
+      const decided = await approvals.approve(
+        (queued as ApprovalQueuedDto).approvalId,
+        adjudicator,
+        null,
+      );
+
+      expect(decided.result).toMatchObject({
+        defectKey,
+        status: 'COMPLETED',
+        openedBySubject: 'ops-adjl',
+      });
+      expect(
+        await one(
+          `SELECT approver_operator_id, approval_mode FROM override_log_entries
+            WHERE target_id = $1 AND code = 'S-11'`,
+          [seeded.proposalId],
+        ),
+      ).toEqual({ approver_operator_id: adjudicator.operatorId, approval_mode: 'TWO_PERSON' });
     });
   });
 });
