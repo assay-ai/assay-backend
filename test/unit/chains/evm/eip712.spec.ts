@@ -39,7 +39,7 @@ const VOUCHER: EvmVoucher = {
  * ```
  * cast keccak "<typehash preimage>"
  * cast keccak "$(cast abi-encode 'f(bytes32,bytes32,bytes32,uint256,address)' \
- *   $EIP712_DOMAIN_TYPEHASH $(cast keccak "x402 Settlement") $(cast keccak "2") \
+ *   $EIP712_DOMAIN_TYPEHASH $(cast keccak "Assay Settlement") $(cast keccak "2") \
  *   46630 0x1111111111111111111111111111111111111111)"           # domain separator
  * cast keccak "$(cast abi-encode 'f(bytes32,address,address,uint64,…)' $VOUCHER_TYPEHASH …)"
  * cast keccak $(cast concat-hex 0x1901 $DOMAIN_SEPARATOR $STRUCT_HASH)   # the digest
@@ -95,16 +95,16 @@ describe('the EIP-712 encoders agree with assay-evm/src/Types.sol', () => {
   });
 
   describe('the domain', () => {
-    it('is name "x402 Settlement", version "2", and carries no salt', () => {
+    it('is name "Assay Settlement", version "2", and carries no salt', () => {
       // `verifyingContract` is the PROXY address, which does not move
       // across an upgrade. No `salt` — three fields do all the work.
       expect(TESTNET).toEqual({
-        name: 'x402 Settlement',
+        name: 'Assay Settlement',
         version: '2',
         chainId: 46_630,
         verifyingContract: ESCROW,
       });
-      expect(EVM_DOMAIN_NAME).toBe('x402 Settlement');
+      expect(EVM_DOMAIN_NAME).toBe('Assay Settlement');
       expect(EVM_DOMAIN_VERSION).toBe('2');
     });
 
@@ -112,17 +112,17 @@ describe('the EIP-712 encoders agree with assay-evm/src/Types.sol', () => {
       [
         'testnet, escrow A',
         TESTNET,
-        '0x7a73d7d6463e0dade2983c248677cab7dc9c81ecff1d25304e9c76d8615dc3db',
+        '0x01a0e125a9160ae7be29f3c876038a6402946b19d2615eb6a7b3c4bdd7a98be3',
       ],
       [
         'mainnet, escrow A',
         MAINNET,
-        '0xdd7608eebb2716cdf547bc6989b8a9cc4642227623706fc99d865b78cb8fef35',
+        '0xcf6da17124c677713bdd547855d827748726cae426a701f72a0908aae840a97c',
       ],
       [
         'testnet, escrow B',
         OTHER,
-        '0x5e2a8730c0a70aca55b3f1132600139ef321efe67032e059c8c4e22006c2370e',
+        '0x7edd459b084835e2e155f798ef783855f2ddfe93aef0df1e4949fb28febded70',
       ],
     ] as const)('separator for %s is the one cast computed', (_label, domain, separator) => {
       expect(
@@ -153,7 +153,7 @@ describe('the EIP-712 encoders agree with assay-evm/src/Types.sol', () => {
   describe('the digests', () => {
     it('the voucher hashes to the vector cast produced', () => {
       expect(hashVoucher(VOUCHER, TESTNET)).toBe(
-        '0x2439fab4099d1a1f2802c2978fa447b46089e2b040316e7b2c169606d92b6b9b',
+        '0xb50bc1d1af99579d1bdef9a5531e5a4114abe8c0d6352c4956bb66bc439241e1',
       );
     });
 
@@ -164,14 +164,14 @@ describe('the EIP-712 encoders agree with assay-evm/src/Types.sol', () => {
       // asserted unequal: `not.toBe` is satisfied by an encoder that mixes the
       // chain in wrongly as well as by one that mixes it in correctly.
       expect(hashVoucher(VOUCHER, MAINNET)).toBe(
-        '0x3098092a80e1e2ade8818dcdd7a22a837dbda3c3a185e9e388d0bfba18e87fc2',
+        '0x6315685c7adfcba0f0838ad7e8fa5eaba5db6d0356e45f694a818f4f95464c29',
       );
       expect(hashVoucher(VOUCHER, MAINNET)).not.toBe(hashVoucher(VOUCHER, TESTNET));
     });
 
     it('the same voucher hashes differently against a different escrow', () => {
       expect(hashVoucher(VOUCHER, OTHER)).toBe(
-        '0x7069a1db8fa835c6441a785d9dd52364a606d56d15f7e513c416d0b1247840ae',
+        '0xbf60f19e26977dd3a5f227953edcbc06bfdd555499e4c3edf115dea30f6bdf43',
       );
       expect(hashVoucher(VOUCHER, OTHER)).not.toBe(hashVoucher(VOUCHER, TESTNET));
     });
@@ -188,7 +188,7 @@ describe('the EIP-712 encoders agree with assay-evm/src/Types.sol', () => {
           },
           TESTNET,
         ),
-      ).toBe('0x8e85aca2d5168513c1ac9f4de1408543712f156d67f1fac0bcabc1f95cfc4c2d');
+      ).toBe('0x28240eeb96ba4005f625562a6636451118c4dde182896367595226de8efb421a');
 
       expect(
         hashRequestWithdraw(
@@ -200,7 +200,7 @@ describe('the EIP-712 encoders agree with assay-evm/src/Types.sol', () => {
           },
           TESTNET,
         ),
-      ).toBe('0x90ea58c031f80cfaa95f598bbfb90336f577aff4b931691c62db46ed3417d540');
+      ).toBe('0x5a889ff93f9f2a9ff89dd9c4da47cdcd15944fa9bb69563dd16a5eeffbca7b89');
     });
 
     it('a voucher and a set-limits message with the same numbers hash differently', () => {

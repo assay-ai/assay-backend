@@ -71,7 +71,7 @@ describe.each([
     expect(typed).not.toBeNull();
     expect(typed!.primaryType).toBe(primaryType);
     expect(typed!.domain).toEqual({
-      name: 'x402 Settlement',
+      name: 'Assay Settlement',
       version: '2',
       chainId: '46630',
       verifyingContract,

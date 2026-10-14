@@ -2,8 +2,8 @@ import { TypedDataDomain } from 'viem';
 
 import { ChainId, ChainNamespace, parseChainId } from '../../ports/caip.types';
 
-/** `"x402 Settlement"` — identical on `X402Escrow` and `X402Stake`. */
-export const EVM_DOMAIN_NAME = 'x402 Settlement';
+/** `"Assay Settlement"` — identical on `X402Escrow` and `X402Stake`. */
+export const EVM_DOMAIN_NAME = 'Assay Settlement';
 
 /**
  * `"2"`.
