@@ -46,7 +46,7 @@
  * the quote (the dearest eligible binding) and re-priced to the binding that
  * served, and a refund gives back the whole hold. A call that settles below
  * its hold releases the remainder on a COMMITTED hold; that release is not
- * withheld value and is counted with the orphaned releases below.
+ * withheld value either, and is its own term below, `settlementRemainders`.
  *
  * ## What this file is not
  *
@@ -256,8 +256,12 @@ export function zeroWithheld(asset: AssetId, decimals: number): WithheldTotal {
  * So the identity this returns is the honest one:
  *
  * ```text
- *   holdReleaseTotal  ==  withheld  +  orphanedReleases
+ *   holdReleaseTotal  ==  withheld  +  settlementRemainders  +  orphanedReleases
  * ```
+ *
+ * `settlementRemainders` is the remainder a cheaper serve returns on its own
+ * committed hold: expected, one per such call, so it is kept out of the orphan
+ * term rather than burying a real orphan among them (final review N-8).
  *
  * and `ok` asserts it. Reporting a bare `withheld == Σ HOLD_RELEASE` and
  * quietly tolerating a delta would mean the first genuine bug in hold accounting
@@ -278,12 +282,23 @@ export interface WithheldReconciliation {
    * unreferenced by their intents.
    */
   readonly orphanedReleases: Money;
+  /** The first {@link MAX_LISTED_ORPHANED_HOLD_IDS} of them; `orphanedHoldCount` is all. */
   readonly orphanedHoldIds: readonly string[];
-  /** `holdReleaseTotal == withheld + orphanedReleases`. */
+  readonly orphanedHoldCount: number;
+  /** `Σ HOLD_RELEASE` of the remainders returned on committed holds — see above. */
+  readonly settlementRemainders: Money;
+  /** `holdReleaseTotal == withheld + settlementRemainders + orphanedReleases`. */
   readonly ok: boolean;
-  /** `holdReleaseTotal - (withheld + orphanedReleases)`, as an atomic string. */
+  /** `holdReleaseTotal - (withheld + settlementRemainders + orphanedReleases)`, atomic. */
   readonly difference: string;
 }
+
+/**
+ * How many orphaned hold ids a reconciliation lists. Orphans are normally
+ * none; past this many the count says enough, and a response that grows with
+ * an account's history is not one to return on every `GET /balances`.
+ */
+export const MAX_LISTED_ORPHANED_HOLD_IDS = 100;
 
 /**
  * Assembles the reconciliation and decides whether it balances.
@@ -297,16 +312,21 @@ export function reconcileWithheld(input: {
   readonly holdReleaseTotal: Money;
   readonly orphanedReleases: Money;
   readonly orphanedHoldIds: readonly string[];
+  readonly settlementRemainders: Money;
 }): WithheldReconciliation {
   const difference =
     MoneyUtil.toAtomic(input.holdReleaseTotal) -
-    (MoneyUtil.toAtomic(input.withheld.amount) + MoneyUtil.toAtomic(input.orphanedReleases));
+    (MoneyUtil.toAtomic(input.withheld.amount) +
+      MoneyUtil.toAtomic(input.settlementRemainders) +
+      MoneyUtil.toAtomic(input.orphanedReleases));
 
   return {
     withheld: input.withheld,
     holdReleaseTotal: input.holdReleaseTotal,
     orphanedReleases: input.orphanedReleases,
-    orphanedHoldIds: input.orphanedHoldIds,
+    orphanedHoldIds: input.orphanedHoldIds.slice(0, MAX_LISTED_ORPHANED_HOLD_IDS),
+    orphanedHoldCount: input.orphanedHoldIds.length,
+    settlementRemainders: input.settlementRemainders,
     ok: difference === 0n,
     difference: difference.toString(),
   };

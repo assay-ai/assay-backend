@@ -272,17 +272,25 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
    * for this payer (that one will push `seqHigh` past it).
    */
   describe('a seq the chain has already passed', () => {
-    it('refuses a seq at or below the escrow seqHigh, and reserves nothing', async () => {
+    /**
+     * Final review N-6: a seq that was never used but was passed — parallel
+     * calls signed out of order — is refused as STALE, retryable ("request a
+     * new seq"), not as "already used", which a client reads as final.
+     */
+    it('refuses a seq at or below the escrow seqHigh as stale, and reserves nothing', async () => {
       const call = input(payer);
       const seq = BigInt(call.signed.voucher.seq);
       await rejects(
         service.redeem({ ...call, escrow: escrow({ seqHigh: seq }) }),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
       );
       await rejects(
         service.redeem({ ...call, escrow: escrow({ seqHigh: seq + 1n }) }),
-        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
       );
+      await expect(
+        service.redeem({ ...call, escrow: escrow({ seqHigh: seq + 1n }) }),
+      ).rejects.toThrow(/request a new seq/);
       expect(intents.created).toHaveLength(0);
 
       await expect(
@@ -290,11 +298,21 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
       ).resolves.toMatchObject({ status: PaymentIntentStatus.FUNDS_SECURED });
     });
 
-    it('refuses a seq below one already admitted for the payer, under the lock', async () => {
+    it('still names a replay of a passed seq as already used', async () => {
+      const call = input(payer);
+      const seq = BigInt(call.signed.voucher.seq);
+      await service.redeem({ ...call, escrow: escrow({ seqHigh: seq - 1n }) });
+      await rejects(
+        service.redeem({ ...call, escrow: escrow({ seqHigh: seq }) }),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
+      );
+    });
+
+    it('refuses a seq below one already admitted for the payer as stale, under the lock', async () => {
       const lower = input(payer, { escrow: escrow() });
       const higher = input(payer, { escrow: escrow() });
       await service.redeem(higher);
-      await rejects(service.redeem(lower), PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED);
+      await rejects(service.redeem(lower), PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE);
       expect(intents.created).toHaveLength(1);
     });
   });

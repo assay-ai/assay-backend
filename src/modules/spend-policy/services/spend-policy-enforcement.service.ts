@@ -25,8 +25,14 @@ import { utcHourStart, utcNextDayStart, utcNextMonthStart } from '../domain/spen
 import { SpendUsageService } from './spend-usage.service';
 import { SpendPolicyVelocityService, VelocityViolationKind } from './spend-policy-velocity.service';
 
-/** How long one agent's spend lock lives at most: well above one check-and-hold. */
+/**
+ * How long one agent's spend lock outlives its last renewal: what a crashed
+ * holder can stop the agent for. Renewed every {@link AGENT_SPEND_LOCK_RENEW_MS}
+ * while the holder runs, so a slow section cannot outlast it (final review N-4).
+ */
 export const AGENT_SPEND_LOCK_TTL_MS = 15_000;
+/** How often a running holder renews its lock: a third of the TTL, so two renewals can miss. */
+export const AGENT_SPEND_LOCK_RENEW_MS = 5_000;
 /** How long a call waits for the agent's spend lock before it is refused, retryably. */
 export const AGENT_SPEND_LOCK_WAIT_MS = 10_000;
 const AGENT_SPEND_LOCK_POLL_MS = 25;
@@ -186,8 +192,9 @@ export class SpendPolicyEnforcementService {
    * A Redis lock rather than a Postgres one because the critical section spans
    * several services and connections (the intent insert, the ledger hold, a
    * voucher's checks); an advisory lock would hold a pool connection while
-   * waiting on the others. It expires after {@link AGENT_SPEND_LOCK_TTL_MS}, so
-   * a crashed holder cannot stop an agent for longer than that. Fails closed:
+   * waiting on the others. It is renewed while `fn` runs and expires
+   * {@link AGENT_SPEND_LOCK_TTL_MS} after the last renewal, so a crashed holder
+   * cannot stop an agent for longer than that. Fails closed:
    * Redis unreachable, or the lock still busy after
    * {@link AGENT_SPEND_LOCK_WAIT_MS}, is a retryable velocity refusal, and
    * nothing was reserved.
@@ -215,9 +222,17 @@ export class SpendPolicyEnforcementService {
       }
       await new Promise((resolve) => setTimeout(resolve, AGENT_SPEND_LOCK_POLL_MS));
     }
+    // Rail B reads the chain inside `fn` (the voucher's signer), and an RPC
+    // brown-out can take longer than the TTL; a lapsed lock would let the
+    // next call of this agent sum its spend without this call's hold.
+    const renewal = setInterval(() => {
+      void this.velocity.renewAgentSpendLock(agentId, token, AGENT_SPEND_LOCK_TTL_MS);
+    }, AGENT_SPEND_LOCK_RENEW_MS);
+    renewal.unref();
     try {
       return await fn();
     } finally {
+      clearInterval(renewal);
       await this.velocity.unlockAgentSpend(agentId, token);
     }
   }

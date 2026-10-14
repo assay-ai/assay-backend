@@ -54,15 +54,17 @@ export class FakeRedis {
     return Promise.resolve('OK');
   }
 
-  /** The spend lock's compare-and-delete script, and only that one. */
-  eval(_script: string, _keys: number, key: string, token: string): Promise<number> {
+  /** The spend lock's two scripts: compare-and-delete, and compare-and-renew. */
+  eval(script: string, _keys: number, key: string, token: string, ttlMs?: string): Promise<number> {
+    const renew = script.includes('pexpire');
     try {
-      this.guard(`eval ${key}`);
+      this.guard(`${renew ? 'renew' : 'eval'} ${key}`);
     } catch (error) {
       return Promise.reject(error);
     }
     if (this.strings.get(key) !== token) return Promise.resolve(0);
-    this.strings.delete(key);
+    if (renew) this.expiries.set(key, Number(ttlMs));
+    else this.strings.delete(key);
     return Promise.resolve(1);
   }
 
