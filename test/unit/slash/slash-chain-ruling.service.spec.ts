@@ -50,6 +50,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
   const events: { kind: string }[] = [];
   const filed: string[] = [];
   const closed: string[] = [];
+  const mirrored: string[] = [];
   const service = new SlashChainRulingService(
     {
       findOneByChainRequestId: async (id: string) => (parts.has(id) ? { ...parts.get(id) } : null),
@@ -61,6 +62,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     } as never,
     {
       findOneScoped: async () => ({ ...proposal }),
+      findOneByChainRequestId: async () => null,
       update: async (_scope: unknown, patch: Record<string, unknown>) =>
         Object.assign(proposal, patch),
     } as never,
@@ -75,6 +77,8 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
       },
     } as never,
     {
+      mirrorChainExecution: async (_case: unknown, hash: string | null) =>
+        void mirrored.push(hash ?? 'none'),
       closeCancelledOnChain: async (_case: unknown, because: string) => {
         closed.push(because);
         proposal.chainStatus = 'CANCELLED';
@@ -82,7 +86,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
       },
     } as never,
   );
-  return { service, parts, proposal, events, filed, closed };
+  return { service, parts, proposal, events, filed, closed, mirrored };
 }
 
 const disputed = (requestId: string, at = '2026-10-15T00:00:00Z') => ({
@@ -228,6 +232,47 @@ describe('SlashChainRulingService', () => {
     it('answers false for a record nobody planned', async () => {
       const { service } = build();
       await expect(service.recordCancelled(cancelled('c'.repeat(64)))).resolves.toBe(false);
+    });
+  });
+
+  describe('SlashExecuted, whoever sent it (BUG-R13-D-03)', () => {
+    const executed = (requestId: string) => ({
+      chainId: CHAIN,
+      requestId,
+      appliedMinor: '500',
+      agentAmountMinor: '300',
+      platformAmountMinor: '150',
+      executedAt: new Date('2026-10-18T00:00:00Z'),
+      transactionHash: '0xfeed',
+    });
+
+    it('mirrors the part EXECUTED with the event’s amounts and hands the case to the executor’s completion', async () => {
+      const { service, parts, mirrored } = build('UPHELD');
+      await expect(service.recordExecuted(executed(ID_A))).resolves.toBe(true);
+      expect(parts.get(ID_A)).toMatchObject({
+        chainStatus: 'EXECUTED',
+        appliedAmount: '500',
+        agentAmount: '300',
+        platformAmount: '150',
+        executionSignature: '0xfeed',
+      });
+      expect(mirrored).toEqual(['0xfeed']);
+    });
+
+    it('does not rewrite a part the executor already mirrored', async () => {
+      const { service, parts } = build('EXECUTED');
+      Object.assign(parts.get(ID_A)!, {
+        chainStatus: 'EXECUTED',
+        appliedAmount: '400',
+        executionSignature: '0xown',
+      });
+      await service.recordExecuted(executed(ID_A));
+      expect(parts.get(ID_A)).toMatchObject({ appliedAmount: '400', executionSignature: '0xown' });
+    });
+
+    it('answers false for a record nobody planned', async () => {
+      const { service } = build();
+      await expect(service.recordExecuted(executed('c'.repeat(64)))).resolves.toBe(false);
     });
   });
 });

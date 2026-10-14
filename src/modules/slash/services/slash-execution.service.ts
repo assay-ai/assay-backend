@@ -824,6 +824,74 @@ export class SlashExecutionService {
    *   which `update()` does not refresh.
    */
   /**
+   * A record of this case was executed on chain, possibly by somebody other
+   * than this platform's executor (BUG-R13-D-03: `executeSlash` is
+   * permissionless). Once the chain says the whole case is `Executed`, the case
+   * follows the same completion the executor's own success takes:
+   *
+   * - `PROPOSED` / `DISPUTED` / `UNDER_REVIEW` / `AWAITING_SECOND` / `UPHELD`
+   *   → `EXECUTED`, with applied and executed_at, the `EXECUTED` timeline
+   *   entry, the notification and the compensation (`completeExecution` +
+   *   `compensate`);
+   * - closed in the app (`CANCELLED`, `OVERTURNED`) → the existing
+   *   `EXECUTED_AFTER_CLOSURE` handling (`recordAnExecutionNobodyAskedFor`).
+   *
+   * Idempotent: a case already `EXECUTED`, already carrying the execution
+   * (`executed_at`), or `EXECUTING` (the executor's own claim — it and the
+   * reconciler finish it) is left alone. Never throws.
+   */
+  async mirrorChainExecution(
+    proposal: SlashProposalEntity,
+    transactionHash: string | null,
+  ): Promise<void> {
+    const fresh =
+      (await this.proposals.findOneScoped(proposal.organizationId, proposal.id)) ?? proposal;
+    if (
+      fresh.status === SlashProposalStatus.EXECUTED ||
+      fresh.status === SlashProposalStatus.EXECUTING ||
+      fresh.status === SlashProposalStatus.REVERSED ||
+      fresh.executedAt
+    ) {
+      return;
+    }
+    try {
+      const record = await this.readCaseRecord(fresh);
+      if (record?.status !== 'EXECUTED') return; // a part is still pending or disputed
+      if ((CHAIN_PROPOSABLE_STATUSES as readonly string[]).includes(fresh.status)) {
+        const result = {
+          signature: transactionHash,
+          appliedMinor: record.appliedMinor,
+          agentAmountMinor: record.agentAmountMinor,
+          platformAmountMinor: record.platformAmountMinor,
+          executedAt: record.executedAt ?? new Date(),
+        };
+        if ((await this.completeExecution(fresh, result, CHAIN_PROPOSABLE_STATUSES)) > 0) {
+          this.logger.warn(
+            `slash proposal ${fresh.id} was executed on chain by somebody else while the case ` +
+              `was ${fresh.status}; the case now records the penalty the chain took`,
+          );
+          await this.compensate(fresh, {
+            ...result,
+            signature: transactionHash ?? fresh.chainRequestId,
+          });
+        }
+        return;
+      }
+      await this.recordAnExecutionNobodyAskedFor(
+        fresh,
+        record,
+        'executed on chain by somebody else after the case was closed',
+      );
+    } catch (error) {
+      this.logger.error(
+        `slash proposal ${fresh.id}: an on-chain execution could not be mirrored; the reconcile ` +
+          `pass reads the record again`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
+  }
+
+  /**
    * Every standing record of the case was cancelled ON CHAIN by somebody else
    * — the arbiter's `cancelSlash` (a ruling for the provider) or an
    * `expireSlash` — and nothing of it executed (audit E-6). Closes the case at
@@ -1488,8 +1556,32 @@ export class SlashExecutionService {
     }
 
     await this.sweepStrandedParts(now);
+    await this.sweepExternalExecutions(now);
 
     return { recovered, returned, voided };
+  }
+
+  /**
+   * The backstop behind the watcher's `SlashExecuted` mirror (BUG-R13-D-03):
+   * cases whose record still mirrors `PENDING`/`DISPUTED` after its door
+   * opened are re-read, and any the chain says were executed — by anybody —
+   * are completed through {@link mirrorChainExecution}. Covers an event the
+   * watcher missed (a range read before it watched `SlashExecuted`, a lost
+   * cursor). `EXECUTING` is the executor's own and is skipped. Never throws.
+   */
+  private async sweepExternalExecutions(now: Date): Promise<void> {
+    try {
+      const rows = await this.proposals.findStandingPastDoor(now, this.config.sweepBatchSize);
+      for (const row of rows) {
+        const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (proposal) await this.mirrorChainExecution(proposal, null);
+      }
+    } catch (error) {
+      this.logger.error(
+        `the external-execution sweep failed`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
   }
 
   /**

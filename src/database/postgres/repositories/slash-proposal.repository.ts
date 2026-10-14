@@ -258,6 +258,38 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     return result.affected ?? 0;
   }
 
+  /**
+   * Cases whose record still mirrors standing (`PENDING` / `DISPUTED`) though
+   * its door opened, not in the executor's hands and with no execution
+   * recorded — what the external-execution sweep re-reads (BUG-R13-D-03).
+   * Oldest door first.
+   */
+  async findStandingPastDoor(now: Date, limit: number): Promise<ChainSweepRow[]> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.organization_id', 'organizationId')
+      .addSelect('proposal.id', 'id')
+      .where('proposal.chain_status IN (:...standing)', { standing: ['PENDING', 'DISPUTED'] })
+      .andWhere('proposal.chain_executable_at <= :now', { now })
+      .andWhere('proposal.executed_at IS NULL')
+      .andWhere(`proposal.status <> 'EXECUTING'`)
+      .orderBy('proposal.chain_executable_at', 'ASC')
+      .limit(limit)
+      .getRawMany<ChainSweepRow>();
+  }
+
+  /**
+   * The case whose single (non-partitioned) on-chain record is
+   * `chainRequestId`, across tenants — for the chain watcher, which has no
+   * tenant. 64 lower-case hex characters, no `0x`.
+   */
+  async findOneByChainRequestId(chainRequestId: string): Promise<SlashProposalEntity | null> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .where('proposal.chain_request_id = :chainRequestId', { chainRequestId })
+      .getOne();
+  }
+
   async findOneScoped(organizationId: string, id: string): Promise<SlashProposalEntity | null> {
     return this.findOneBy({ organizationId, id });
   }
