@@ -249,6 +249,26 @@ describe('OperatorSignInService — sign in with a wallet', () => {
     );
   });
 
+  it('does not count a made-up message against the wallet it names', async () => {
+    const ctx = build();
+    const victim = await operatorWallet(ctx);
+    const { message: real } = await ctx.signIn.challenge(victim.address, '192.0.2.1');
+
+    for (let attempt = 0; attempt < OPERATOR_AUTH_MAX_FAILURES; attempt += 1) {
+      const forged = real.replace(/Nonce: \w+/, `Nonce: forged${attempt}nonce`);
+      await ctx.signIn
+        .verify(forged, await wallet().signMessage({ message: forged }), `198.51.100.${attempt}`)
+        .catch(() => undefined);
+    }
+
+    const result = await ctx.signIn.verify(
+      real,
+      await victim.signMessage({ message: real }),
+      '192.0.2.1',
+    );
+    expect(result.operator.walletAddress).toBe(victim.address.toLowerCase());
+  });
+
   it('throttles failed verifications per client address, across wallets', async () => {
     const ctx = build();
 

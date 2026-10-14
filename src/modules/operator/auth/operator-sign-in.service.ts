@@ -71,7 +71,9 @@ interface StoredChallenge {
  * Privy embedded wallet are EOAs.
  *
  * Every failure is the one `OPERATOR_CREDENTIAL_INVALID`, and counts against
- * the client address and the wallet (`OperatorAuthThrottle`). A good signature
+ * the client address (`OperatorAuthThrottle`). It counts against the wallet
+ * too, but only once the message is exactly the one issued for that wallet:
+ * the address in an unchecked message is whatever the caller wrote. A good signature
  * from a wallet that is not an active operator is `OPERATOR_NOT_AUTHORIZED`,
  * and counts too.
  */
@@ -127,10 +129,14 @@ export class OperatorSignInService {
     const address = typeof fields.address === 'string' ? fields.address.toLowerCase() : null;
     if (address) await this.throttle.assertNotBlocked(walletKey(address));
 
+    // The message is unsigned until proven otherwise, so the wallet it names
+    // is counted only once it is the message issued for that wallet. Before
+    // that, a made-up message naming somebody's address would lock them out.
+    let issuedToWallet = false;
     const fail = async (reason: string): Promise<never> => {
       this.logger.debug(`operator sign-in refused: ${reason}`);
       await this.throttle.recordFailure(ipKey(ip));
-      if (address) await this.throttle.recordFailure(walletKey(address));
+      if (address && issuedToWallet) await this.throttle.recordFailure(walletKey(address));
       throw OperatorErrors.credentialInvalid();
     };
 
@@ -143,6 +149,7 @@ export class OperatorSignInService {
     if (stored.message !== message || stored.address !== address) {
       return fail('message differs from the challenge');
     }
+    issuedToWallet = true;
 
     // The message is the one issued, so these hold unless the configuration
     // changed in between — checked anyway, because they are the property.
