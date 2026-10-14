@@ -177,3 +177,78 @@ describe('OperatorDirectoryService — OPS_ADMIN is not one person’s to take a
     expect(queued).toHaveLength(1);
   });
 });
+
+describe('OperatorDirectoryService — an approver cannot grant more than they hold', () => {
+  const add = (limit: string | null | undefined, wallet = `0x${'b'.repeat(40)}`) => ({
+    walletAddress: wallet,
+    subject: 'carol@',
+    roles: [OperatorRole.TRE],
+    ...(limit === undefined ? {} : { authorityLimitMinor: limit }),
+    reasonCode: 'HIRE',
+    note: NOTE,
+  });
+
+  it('refuses a $0 approver adding an operator with an unbounded or higher limit', async () => {
+    const { service, rows } = build();
+    const a = rows.seed('admin-a', [OperatorRole.OPS_ADMIN]);
+    const b = rows.seed('admin-b', [OperatorRole.OPS_ADMIN], { authorityLimitMinor: '0' });
+
+    for (const limit of [null, '1']) {
+      await expectErrorCodeAsync(
+        () => service.add(sessionOf(a), add(limit), null, approvedBy(b)),
+        'OPERATOR_APPROVER_AUTHORITY_EXCEEDED',
+      );
+    }
+    expect(await rows.findBySubject('carol@')).toBeNull();
+
+    // Within their own limit is fine.
+    await service.add(sessionOf(a), add(undefined), null, approvedBy(b));
+    expect((await rows.findBySubject('carol@'))!.authorityLimitMinor).toBe('0');
+  });
+
+  it('lets an unbounded approver grant any limit', async () => {
+    const { service, rows } = build();
+    const a = rows.seed('admin-a', [OperatorRole.OPS_ADMIN]);
+    const b = rows.seed('admin-b', [OperatorRole.OPS_ADMIN], { authorityLimitMinor: null });
+
+    await service.add(sessionOf(a), add(null), null, approvedBy(b));
+    expect((await rows.findBySubject('carol@'))!.authorityLimitMinor).toBeNull();
+  });
+
+  it('refuses a $0 approver raising another operator’s limit', async () => {
+    const { service, rows } = build();
+    const a = rows.seed('admin-a', [OperatorRole.OPS_ADMIN]);
+    const b = rows.seed('admin-b', [OperatorRole.OPS_ADMIN], { authorityLimitMinor: '0' });
+    rows.seed('tre-1', [OperatorRole.TRE], { authorityLimitMinor: '0' });
+
+    await expectErrorCodeAsync(
+      () =>
+        service.change(
+          sessionOf(a),
+          'tre-1',
+          { authorityLimitMinor: '5000000', reasonCode: 'RAISE', note: NOTE },
+          null,
+          approvedBy(b),
+        ),
+      'OPERATOR_APPROVER_AUTHORITY_EXCEEDED',
+    );
+    expect(rows.byId.get('tre-1')!.authorityLimitMinor).toBe('0');
+  });
+
+  it('refuses adding a wallet another active operator already holds', async () => {
+    const { service, rows } = build();
+    const a = rows.seed('admin-a', [OperatorRole.OPS_ADMIN]);
+    const b = rows.seed('admin-b', [OperatorRole.OPS_ADMIN]);
+
+    await expectErrorCodeAsync(
+      () =>
+        service.add(
+          sessionOf(a),
+          add('0', a.walletAddress!.toUpperCase().replace('0X', '0x')),
+          null,
+          approvedBy(b),
+        ),
+      'OPERATOR_ALREADY_EXISTS',
+    );
+  });
+});
