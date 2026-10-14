@@ -562,6 +562,16 @@ export class VoucherService {
     // is not served on, even though this backend issued its seq.
     if (input.escrow) {
       assertWithinSeqGap(BigInt(voucher.seq), input.escrow.seqHigh, input.agentAccount);
+      // The chain admits a voucher on `seq > seqHigh` and nothing else. One at
+      // or below it can never be redeemed: served, it would be absorbed and the
+      // platform would pay for the call (review 2026-10-15 P-2). Refused, the
+      // agent asks for a fresh seq.
+      if (BigInt(voucher.seq) <= input.escrow.seqHigh) {
+        throw PaymentErrors.voucherSeqAlreadyUsed({
+          account: input.agentAccount,
+          actual: voucher.seq,
+        });
+      }
     }
 
     // A sequential replay is refused here, by name, rather than left to the
@@ -730,6 +740,20 @@ export class VoucherService {
           BigInt(voucher.seq) >= open.nextSeq
         ) {
           throw PaymentErrors.voucherSeqMismatch({
+            account: input.agentAccount,
+            actual: voucher.seq,
+          });
+        }
+        // Below a seq already admitted for this payer and still bound for the
+        // chain: that one's redemption advances `seqHigh` past this one, which
+        // then dies and is paid by the platform (review 2026-10-15 P-2). Under
+        // the payer's lock, so two admissions cannot both pass it.
+        if (
+          open.maxSeq !== undefined &&
+          open.maxSeq !== null &&
+          BigInt(voucher.seq) <= open.maxSeq
+        ) {
+          throw PaymentErrors.voucherSeqAlreadyUsed({
             account: input.agentAccount,
             actual: voucher.seq,
           });
