@@ -8,7 +8,7 @@ import { AgentCredentialRepository } from '@database/postgres/repositories/agent
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { AccountId } from '@modules/chains/ports/caip.types';
 import { DelegateBindingChallenge } from '@modules/chains/ports/delegate-binding.types';
-import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { McpCallerKind, McpSession, storedCredentialIdOf } from '@modules/mcp/ports/mcp-session.port';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import { AgentDelegateBindingDto, DelegateChallengeResponseDto } from '../dto/agent-delegate.dto';
@@ -180,7 +180,9 @@ export class AgentDelegateService {
   }
 
   private assertAgent(session: McpSession): void {
-    if (session.callerKind !== McpCallerKind.AGENT) {
+    // A config-file machine token is AGENT too, but no `agent_credentials`
+    // row backs it, so there is nothing to bind the key to (review N-1).
+    if (session.callerKind !== McpCallerKind.AGENT || !storedCredentialIdOf(session)) {
       throw AccountErrors.delegateBindingAgentOnly();
     }
   }

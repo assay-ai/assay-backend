@@ -72,7 +72,7 @@ import {
   MCP_VOIDED_REASON,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
-import { McpCallerKind, McpSession } from '../ports/mcp-session.port';
+import { McpSession, storedCredentialIdOf } from '../ports/mcp-session.port';
 import { McpCatalogueService } from './mcp-catalogue.service';
 import { MCP_PRICING, McpPricingConfig } from './mcp-pricing.config';
 
@@ -1674,9 +1674,9 @@ function namespaceOf(chainId: ChainId): string {
 
 /**
  * The agent credential behind the session (`agent_credentials.id`), or null
- * for a person's or a config session, whose `credentialId` names no stored
- * credential.
+ * for a person's or a config session (machine ones included), whose
+ * `credentialId` names no stored credential and is not a uuid (review N-1).
  */
 function credentialOf(session: McpSession): string | null {
-  return session.callerKind === McpCallerKind.AGENT ? session.credentialId : null;
+  return storedCredentialIdOf(session);
 }
