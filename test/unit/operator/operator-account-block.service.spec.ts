@@ -8,8 +8,10 @@ import {
   OverrideFamily,
 } from '@modules/operator/domain/override-register';
 import { OperatorErrorCode } from '@modules/operator/errors/operator.errors';
-import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { ApprovalQueuedDto } from '@modules/operator/dto/operator-approval.dto';
+import { OperatorApprover, OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { OperatorAccountBlockService } from '@modules/operator/services/operator-account-block.service';
+import { OperatorApprovalService } from '@modules/operator/services/operator-approval.service';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 
 import { noBlocks } from '../helpers/blocklist';
@@ -80,35 +82,39 @@ function build() {
         return entry;
       },
     } as never,
+    { markApproved: async () => true } as never,
   );
   const blocks = new FakeBlocks();
   const blocklist = noBlocks();
   const applied = jest.spyOn(blocklist, 'applied');
-  const tokens = new Map<string, OperatorSession>([
-    ['token-lead', LEAD],
-    ['token-adj', ADJ],
-    ['token-sre', SRE],
-  ]);
-  const sessions = {
-    resolve: async (token: string) => {
-      const found = tokens.get(token);
-      if (!found) throw new Error('bad token');
-      return found;
-    },
-  };
   const operators = { findById: async (id: string) => ({ id, subject: `${id}@` }) };
+  const queued: Record<string, unknown>[] = [];
+  const approvals = new OperatorApprovalService(
+    {
+      create: (row: Record<string, unknown>) => row,
+      save: async (row: Record<string, unknown>) => {
+        queued.push(row);
+        return { ...row, id: 'appr-1' };
+      },
+    } as never,
+    operators as never,
+    {} as never,
+  );
   const service = new OperatorAccountBlockService(
     overrides,
     blocks as never,
     operators as never,
     blocklist,
-    sessions as never,
+    approvals,
   );
-  return { service, blocks, entries, blocklist, applied, runner };
+  return { service, blocks, entries, blocklist, applied, runner, queued };
 }
 
-const approverHeader = (token?: string) =>
-  ({ headers: token ? { 'x-operator-approver': token } : {} }) as never;
+/** A second operator who approved the queued unblock with their own session. */
+const approvedBy = (session: OperatorSession): OperatorApprover => ({
+  ...session,
+  approvalId: 'appr-1',
+});
 
 describe('the account blocklist register rows', () => {
   it('A-9 blocks, single-person, for the incident roles', () => {
@@ -292,8 +298,8 @@ describe('OperatorAccountBlockService.unblock', () => {
       SRE,
       blockId,
       { reasonCode: 'KEY_ROTATED', note: NOTE },
-      approverHeader('token-lead'),
       'req-2',
+      approvedBy(LEAD),
     );
 
     expect(dto).toMatchObject({
@@ -321,37 +327,52 @@ describe('OperatorAccountBlockService.unblock', () => {
     expect(blocklist.organizationBlock(ORG)).toBeNull();
   });
 
-  it('refuses without a second approver', async () => {
-    const { service, blocks, blockId } = await blocked();
-    await expect(
-      service.unblock(SRE, blockId, { reasonCode: 'X', note: NOTE }, approverHeader(), null),
-    ).rejects.toMatchObject({ errorCode: OperatorErrorCode.OPERATOR_SECOND_APPROVER_REQUIRED });
+  it('queues the lifting for a second operator when called alone, and lifts nothing', async () => {
+    const { service, blocks, blockId, queued, entries } = await blocked();
+    const result = await service.unblock(SRE, blockId, { reasonCode: 'X', note: NOTE }, null);
+
+    expect(result).toBeInstanceOf(ApprovalQueuedDto);
+    expect(result).toMatchObject({
+      approvalId: 'appr-1',
+      status: 'PENDING',
+      action: 'account.unblock',
+    });
+    expect(queued).toEqual([
+      expect.objectContaining({
+        action: 'account.unblock',
+        target: `account_block:${blockId}`,
+        requestedBy: SRE.operatorId,
+        payload: { blockId, body: { reasonCode: 'X', note: NOTE } },
+      }),
+    ]);
     expect(blocks.rows[0].unblockedAt).toBeNull();
+    expect(entries).toHaveLength(0);
+  });
+
+  it('refuses to queue a lifting of a block that does not exist', async () => {
+    const { service, queued } = await blocked();
+    await expect(
+      service.unblock(
+        SRE,
+        '00000000-0000-4000-8000-000000000000',
+        { reasonCode: 'X', note: NOTE },
+        null,
+      ),
+    ).rejects.toMatchObject({ errorCode: OperatorErrorCode.OPERATOR_BLOCK_NOT_FOUND });
+    expect(queued).toHaveLength(0);
   });
 
   it('refuses the actor approving their own lifting', async () => {
     const { service, blockId } = await blocked();
     await expect(
-      service.unblock(
-        SRE,
-        blockId,
-        { reasonCode: 'X', note: NOTE },
-        approverHeader('token-sre'),
-        null,
-      ),
+      service.unblock(SRE, blockId, { reasonCode: 'X', note: NOTE }, null, approvedBy(SRE)),
     ).rejects.toMatchObject({ errorCode: OperatorErrorCode.OPERATOR_SELF_APPROVAL_REFUSED });
   });
 
   it('refuses a checker who is not a lead, and leaves the block standing', async () => {
     const { service, blocks, applied, blocklist, blockId } = await blocked();
     await expect(
-      service.unblock(
-        SRE,
-        blockId,
-        { reasonCode: 'X', note: NOTE },
-        approverHeader('token-adj'),
-        null,
-      ),
+      service.unblock(SRE, blockId, { reasonCode: 'X', note: NOTE }, null, approvedBy(ADJ)),
     ).rejects.toMatchObject({ errorCode: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED });
     expect(blocks.rows[0].unblockedAt).toBeNull();
     expect(applied).not.toHaveBeenCalled();
@@ -365,29 +386,17 @@ describe('OperatorAccountBlockService.unblock', () => {
         SRE,
         '00000000-0000-4000-8000-000000000000',
         { reasonCode: 'X', note: NOTE },
-        approverHeader('token-lead'),
         null,
+        approvedBy(LEAD),
       ),
     ).rejects.toMatchObject({
       errorCode: OperatorErrorCode.OPERATOR_BLOCK_NOT_FOUND,
       statusCode: 404,
     });
 
-    await service.unblock(
-      SRE,
-      blockId,
-      { reasonCode: 'X', note: NOTE },
-      approverHeader('token-lead'),
-      null,
-    );
+    await service.unblock(SRE, blockId, { reasonCode: 'X', note: NOTE }, null, approvedBy(LEAD));
     await expect(
-      service.unblock(
-        SRE,
-        blockId,
-        { reasonCode: 'X', note: NOTE },
-        approverHeader('token-lead'),
-        null,
-      ),
+      service.unblock(SRE, blockId, { reasonCode: 'X', note: NOTE }, null, approvedBy(LEAD)),
     ).rejects.toMatchObject({
       errorCode: OperatorErrorCode.OPERATOR_BLOCK_ALREADY_LIFTED,
       statusCode: 409,

@@ -39,11 +39,17 @@ export class OperatorDto {
   @ApiProperty()
   id: string;
 
-  @ApiProperty({ description: 'The SSO subject, e.g. `dan@`' })
+  @ApiProperty({ description: 'A short handle, e.g. `dan@`' })
   subject: string;
 
   @ApiProperty()
   displayName: string;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'The EVM address the operator signs in with, lower-case',
+  })
+  walletAddress: string | null;
 
   @ApiProperty({ enum: OperatorRole, isArray: true })
   roles: OperatorRole[];
@@ -55,8 +61,8 @@ export class OperatorDto {
   })
   authorityLimit: MoneyDto | null;
 
-  @ApiProperty({ enum: ['ACTIVE', 'SUSPENDED'] })
-  status: 'ACTIVE' | 'SUSPENDED';
+  @ApiProperty({ enum: ['ACTIVE', 'SUSPENDED', 'REMOVED'] })
+  status: 'ACTIVE' | 'SUSPENDED' | 'REMOVED';
 }
 
 /** The six tiles across the top of the operator console. */
@@ -364,7 +370,7 @@ export class ListOverrideLogQueryDto extends ListQueryDto {
  * register. Without this a reason code of three spaces is "a string of at most
  * 64 characters" and a note of twenty spaces meets a twenty-character minimum.
  */
-const Trimmed = () =>
+export const Trimmed = () =>
   Transform(({ value }: { value: unknown }) => (typeof value === 'string' ? value.trim() : value));
 
 /** As {@link Trimmed}, for each member of a string array. */
@@ -379,7 +385,7 @@ const TrimmedEach = () =>
  * As {@link Trimmed}, for an optional reference: blank becomes absent, so an
  * empty ticket reference is never recorded as though one had been given.
  */
-const TrimmedOrAbsent = () =>
+export const TrimmedOrAbsent = () =>
   Transform(({ value }: { value: unknown }) => {
     if (typeof value !== 'string') return value;
     const trimmed = value.trim();
@@ -396,7 +402,7 @@ const TrimmedOrAbsent = () =>
 const MINOR_UNITS_PATTERN = /^[1-9]\d{0,39}$/;
 
 /** The single reason code of an operator action: required, and not blank. */
-const ReasonCode = () => applyDecorators(Trimmed(), IsString(), IsNotEmpty(), MaxLength(64));
+export const ReasonCode = () => applyDecorators(Trimmed(), IsString(), IsNotEmpty(), MaxLength(64));
 
 const QueryBoolean = () =>
   Transform(({ value }: { value: unknown }) => {
@@ -823,7 +829,7 @@ export class CreateAccountBlockBodyDto {
   ticketRef?: string;
 }
 
-/** `A-10` — lift a block. Two-person: the checker's token goes in `X-Operator-Approver`. */
+/** `A-10` — lift a block. Two-person: queued for a second operator's approval. */
 export class UnblockAccountBodyDto {
   @ApiProperty()
   @ReasonCode()

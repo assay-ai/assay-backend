@@ -101,8 +101,33 @@ function routesOf(controller: ControllerClass): RouteInfo[] {
     }));
 }
 
+/**
+ * The one operator controller that cannot sit behind the operator guards: the
+ * sign-in routes that issue the session those guards check. Pinned by name and
+ * by route list, and required to mount no guard, so a write added to it is a
+ * red test rather than an unguarded intervention.
+ */
+const PRE_AUTH_CONTROLLERS: Readonly<Record<string, readonly string[]>> = {
+  OperatorSignInController: ['challenge', 'logout', 'verify'],
+};
+
 describe('override register coverage', () => {
-  const routes = OPERATOR_CONTROLLERS.flatMap(routesOf);
+  const routes = OPERATOR_CONTROLLERS.filter(
+    (controller) => !(controller.name in PRE_AUTH_CONTROLLERS),
+  ).flatMap(routesOf);
+
+  it('keeps the pre-authentication controller to its sign-in routes, with no guard', () => {
+    for (const [name, handlers] of Object.entries(PRE_AUTH_CONTROLLERS)) {
+      const controller = OPERATOR_CONTROLLERS.find((candidate) => candidate.name === name);
+      expect(controller).toBeDefined();
+      expect(
+        routesOf(controller!)
+          .map((route) => route.handler)
+          .sort(),
+      ).toEqual([...handlers]);
+      expect(Reflect.getMetadata(GUARDS_METADATA, controller!)).toBeUndefined();
+    }
+  });
 
   it('finds routes at all (the test is meaningless if it does not)', () => {
     expect(routes.length).toBeGreaterThan(5);
@@ -113,6 +138,8 @@ describe('override register coverage', () => {
         'OperatorCasesController',
         'OperatorToolRequestsController',
         'OperatorReferenceController',
+        'OperatorApprovalsController',
+        'OperatorOperatorsController',
       ]),
     );
   });
@@ -123,9 +150,10 @@ describe('override register coverage', () => {
    * a controller with a write must mount both.
    */
   it('mounts the role and override guards on every operator controller that writes', () => {
-    const unguarded = OPERATOR_CONTROLLERS.filter((controller) =>
-      routesOf(controller).some((route) => MUTATING.has(route.method)),
+    const unguarded = OPERATOR_CONTROLLERS.filter(
+      (controller) => !(controller.name in PRE_AUTH_CONTROLLERS),
     )
+      .filter((controller) => routesOf(controller).some((route) => MUTATING.has(route.method)))
       .filter((controller) => {
         const guards = (Reflect.getMetadata(GUARDS_METADATA, controller) ?? []) as unknown[];
         return !guards.includes(OperatorRolesGuard) || !guards.includes(OperatorOverrideGuard);

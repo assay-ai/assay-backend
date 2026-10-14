@@ -6,11 +6,11 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
-  Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
+import { Response } from 'express';
 
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { RequestContext } from '@shared/observability';
@@ -32,6 +32,8 @@ import {
   SuspendProposalBodyDto,
 } from '../dto/operator-console.dto';
 import { Override, OverrideExempt } from '../decorators/override.decorator';
+import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
+import { answerOrQueued } from './approval-response';
 import { OperatorOverrideGuard } from '../guards/operator-override.guard';
 import { OperatorSession } from '../ports/operator-session.port';
 import { OperatorCaseService } from '../services/operator-case.service';
@@ -75,11 +77,11 @@ export class OperatorCasesController {
   ) {}
 
   @Get('me')
-  @ApiOperation({ summary: 'Who is holding this token, and what they may do' })
+  @ApiOperation({ summary: 'Who is signed in, and what they may do' })
   @ApiResponse({ status: 200, type: OperatorDto })
   async me(@CurrentOperator() operator: OperatorSession): Promise<OperatorDto> {
-    // Re-read rather than project the session, so a suspension applied since
-    // the token was issued shows here immediately. The session is what got the
+    // Re-read rather than project the session, so a change applied since the
+    // sign-in shows here immediately. The session is what got the
     // request in; the row is what says what may be done with it.
     const entity = await this.operators.requireActive(operator.operatorId);
     return this.operators.toDto(entity);
@@ -168,21 +170,30 @@ export class OperatorCasesController {
    * admin's to sign — see {@link cancelIntent}.
    *
    * Single-person from `PROPOSED`, `DISPUTED` and `UNDER_REVIEW`. From
-   * `AWAITING_SECOND` and `UPHELD` it is two-person: a second operator's token
-   * in `X-Operator-Approver`, holding `ADJ` or `ADJL` with an authority limit
-   * that covers the penalty.
+   * `AWAITING_SECOND` and `UPHELD` it is two-person: the call is queued and
+   * answers 202 `{approvalId}`; a second operator holding `ADJ` or `ADJL`, with
+   * an authority limit that covers the penalty, approves it in
+   * `POST /operator/approvals/:id/approve`.
    */
   @Post('cases/:proposalId/suspend')
   @Override('S-1')
   @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE)
   @ApiOperation({ summary: 'Suspend a pending proposal' })
+  @ApiResponse({
+    status: 202,
+    type: ApprovalQueuedDto,
+    description: 'Queued for a second operator',
+  })
   async suspend(
     @CurrentOperator() operator: OperatorSession,
     @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: SuspendProposalBodyDto,
-    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
   ) {
-    return this.cases.suspend(operator, proposalId, body, request, requestIdOf());
+    return answerOrQueued(
+      response,
+      await this.cases.suspend(operator, proposalId, body, requestIdOf()),
+    );
   }
 
   /**
@@ -210,29 +221,32 @@ export class OperatorCasesController {
   /**
    * `S-11` — carry this conclusion to every binding the same defect touched.
    *
-   * Two-person, and the approver is resolved from a header rather than a body
-   * field, so a client cannot name itself as its own checker by shape alone;
-   * `chk_override_log_entries_no_self_approval` refuses it at the database in
-   * any case. The approver must hold `ADJ` or `ADJL` (the register row's
-   * `approverRoles`).
+   * Two-person: the call is queued and answers 202 `{approvalId}`, and a
+   * second operator holding `ADJ` or `ADJL` (the register row's
+   * `approverRoles`) approves it with their own session.
+   * `chk_override_log_entries_no_self_approval` refuses self-approval at the
+   * database in any case.
    */
   @Post('cases/:proposalId/sweep')
   @Override('S-11')
   @RequireRoles(OperatorRole.ADJL)
   @ApiOperation({ summary: 'Open a fleet sweep from this decided case' })
-  @ApiResponse({ status: 200, type: FleetSweepDto })
   @ApiResponse({
-    status: 403,
-    description: 'The second approver holds neither ADJ nor ADJL',
+    status: 202,
+    type: ApprovalQueuedDto,
+    description: 'Queued for a second operator',
   })
   @ApiResponse({ status: 422, description: 'This outcome does not generalise' })
   async sweep(
     @CurrentOperator() operator: OperatorSession,
     @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: OpenFleetSweepBodyDto,
-    @Req() request: Request,
-  ): Promise<FleetSweepDto> {
-    return this.cases.openSweep(operator, proposalId, body, request, requestIdOf());
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<FleetSweepDto | ApprovalQueuedDto> {
+    return answerOrQueued(
+      response,
+      await this.cases.openSweep(operator, proposalId, body, requestIdOf()),
+    );
   }
 
   /**
@@ -262,22 +276,31 @@ export class OperatorCasesController {
   /**
    * `S-5`, step two — record a compensation the treasury has paid.
    *
-   * Two-person, and irreversible. The signature is verified against the cluster
-   * before anything is written: it must be a confirmed `deposit_stake` into
-   * this provider's own stake account for at least what was taken.
+   * Two-person, and irreversible. The signature is verified against the chain
+   * before anything is queued or written: it must be a confirmed deposit into
+   * this provider's own stake for at least what was taken. Queued with 202
+   * `{approvalId}`; the approval verifies it again.
    */
   @Post('cases/:proposalId/compensated')
   @Override('S-5')
   @RequireRoles(OperatorRole.ADJL, OperatorRole.TRE)
   @ApiOperation({ summary: 'Record the treasury deposit that compensated an executed slash' })
+  @ApiResponse({
+    status: 202,
+    type: ApprovalQueuedDto,
+    description: 'Queued for a second operator',
+  })
   @ApiResponse({ status: 409, description: 'Never executed, already compensated, or unconfirmed' })
   async compensated(
     @CurrentOperator() operator: OperatorSession,
     @Param('proposalId', ParseUUIDPipe) proposalId: string,
     @Body() body: CompensatedBodyDto,
-    @Req() request: Request,
+    @Res({ passthrough: true }) response: Response,
   ) {
-    return this.cases.compensated(operator, proposalId, body, request, requestIdOf());
+    return answerOrQueued(
+      response,
+      await this.cases.compensated(operator, proposalId, body, requestIdOf()),
+    );
   }
 
   /**

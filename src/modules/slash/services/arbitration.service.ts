@@ -13,7 +13,7 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
-import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { OperatorApprover, OperatorSession } from '@modules/operator/ports/operator-session.port';
 
 import { SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
@@ -761,9 +761,11 @@ export class ArbitrationService {
    * **Who may do it alone.** From `PROPOSED`, `DISPUTED` and `UNDER_REVIEW`
    * one operator suspends. From `AWAITING_SECOND` and `UPHELD` a second person
    * has confirmed the penalty or is confirming it, so the occurrence is
-   * two-person: `approver` (the `X-Operator-Approver` token) must be another
-   * active operator holding `ADJ` or `ADJL` whose authority limit covers the
-   * penalty. An approver supplied in the other statuses is ignored.
+   * two-person: called without `approver` it is refused with
+   * `OPERATOR_SECOND_APPROVER_REQUIRED`, which the console turns into a queued
+   * approval; `approver` is the second operator who approved it, holding `ADJ`
+   * or `ADJL` with an authority limit that covers the penalty. An approver
+   * supplied in the other statuses is recorded, and not required.
    *
    * **`EXECUTING` is refused, deliberately.** The state machine has an
    * `EXECUTING → CANCELLED` edge, and that edge exists for one caller: the
@@ -781,7 +783,7 @@ export class ArbitrationService {
     note: string,
     ticketRef?: string | null,
     requestId?: string | null,
-    approver?: OperatorSession | null,
+    approver?: OperatorApprover | null,
   ): Promise<SlashProposalEntity> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
     const from = proposal.status as SlashProposalStatus;
@@ -810,7 +812,10 @@ export class ArbitrationService {
         code: 'S-1',
         actor: operator,
         escalateToTwoPerson: needsApprover,
-        approver: needsApprover ? (approver ?? null) : null,
+        // Passed even when not needed, so an approval queued from UPHELD is
+        // still marked done if the case has since moved to a status where one
+        // person may suspend.
+        approver: approver ?? null,
         targetType: 'slash_proposal',
         targetId: proposalId,
         organizationId,

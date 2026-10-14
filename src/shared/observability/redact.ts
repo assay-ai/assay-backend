@@ -50,6 +50,8 @@ const FORBIDDEN_KEY_SUBSTRINGS = [
   'privatekey',
   'signingkey',
   'authorization',
+  // The retired `X-Operator-Approver` header carried a second operator's
+  // bearer token. Nothing reads it any more; an old client may still send one.
   'operatorapprover',
   'apikey',
   'cookie',

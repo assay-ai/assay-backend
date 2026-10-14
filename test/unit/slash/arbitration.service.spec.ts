@@ -902,7 +902,7 @@ describe('ArbitrationService', () => {
         SlashProposalStatus.PROPOSED,
         SlashProposalStatus.DISPUTED,
         SlashProposalStatus.UNDER_REVIEW,
-      ])('is a single-person action from %s, and ignores a supplied approver', async (status) => {
+      ])('is a single-person action from %s, and passes on a supplied approver', async (status) => {
         const ctx = build();
         ctx.proposals.seed({ id: 'p1', organizationId: 'org_1', status, penaltyAmount: '700' });
 
@@ -917,10 +917,12 @@ describe('ArbitrationService', () => {
           SECOND as never,
         );
 
+        // Not required here; passed on so that an approval queued while the
+        // case needed one is still marked done when it is approved later.
         expect(ctx.overrides.contexts[0]).toMatchObject({
           code: 'S-1',
           escalateToTwoPerson: false,
-          approver: null,
+          approver: SECOND,
           amountMinor: '700',
         });
       });

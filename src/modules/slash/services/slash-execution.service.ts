@@ -27,7 +27,7 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
-import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { OperatorApprover, OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { ProviderErrors } from '@modules/provider/errors/provider.errors';
 import {
   STAKE_INTENT_BUILDER,
@@ -3049,7 +3049,7 @@ export class SlashExecutionService {
    */
   async markCompensated(
     operator: OperatorSession,
-    approver: OperatorSession,
+    approver: OperatorApprover | null,
     organizationId: string,
     proposalId: string,
     signature: string,
@@ -3238,7 +3238,7 @@ export class SlashExecutionService {
    */
   async openSweep(
     operator: OperatorSession,
-    approver: OperatorSession,
+    approver: OperatorApprover | null,
     organizationId: string,
     sourceProposalId: string,
     input: { defectKey: string; lookbackHours: number; reasonCode: string; note: string },

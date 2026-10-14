@@ -50,6 +50,13 @@ export enum OperatorRole {
   CMP = 'CMP',
   /** Security / key custodian. */
   SEC = 'SEC',
+  /**
+   * Operator administrator: adds, changes and removes operators (`A-12`,
+   * `A-13`, `A-14`). Added because no other role owns the directory itself —
+   * `SEC` holds keys, not people — and an action that grants authority must
+   * belong to a role nobody holds by accident.
+   */
+  OPS_ADMIN = 'OPS_ADMIN',
 }
 
 export enum OverrideFamily {
@@ -452,6 +459,50 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     roles: [OperatorRole.ADJL, OperatorRole.SRE, OperatorRole.TRE],
     approval: ApprovalMode.SINGLE,
     reversible: false,
+    implemented: true,
+  }),
+  /**
+   * The operator directory (`operators`). Who may act on this console is
+   * itself an intervention, and it is recorded like one.
+   *
+   * Adding someone grants authority, so it is two-person: a second
+   * `OPS_ADMIN` approves it through the approvals queue. Changing roles or the
+   * authority limit is single-person when it only lowers them, and raised to
+   * two-person for the occurrence when it adds a role or raises the limit
+   * (`OperatorDirectoryService`). Removing is single-person — the safe
+   * direction. Nobody acts on their own row, and an approver may not be the
+   * operator being changed.
+   */
+  'A-12': define({
+    code: 'A-12',
+    family: OverrideFamily.ACCESS,
+    action: 'operator.added',
+    label: 'Add an operator',
+    roles: [OperatorRole.OPS_ADMIN],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.OPS_ADMIN],
+    reversible: true,
+    implemented: true,
+  }),
+  'A-13': define({
+    code: 'A-13',
+    family: OverrideFamily.ACCESS,
+    action: 'operator.changed',
+    label: 'Change an operator’s roles or authority limit',
+    roles: [OperatorRole.OPS_ADMIN],
+    approval: ApprovalMode.SINGLE,
+    approverRoles: [OperatorRole.OPS_ADMIN],
+    reversible: true,
+    implemented: true,
+  }),
+  'A-14': define({
+    code: 'A-14',
+    family: OverrideFamily.ACCESS,
+    action: 'operator.removed',
+    label: 'Remove an operator',
+    roles: [OperatorRole.OPS_ADMIN],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
     implemented: true,
   }),
 });

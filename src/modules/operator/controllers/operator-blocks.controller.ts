@@ -7,11 +7,11 @@ import {
   ParseUUIDPipe,
   Post,
   Query,
-  Req,
+  Res,
   UseGuards,
 } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { Request } from 'express';
+import { Response } from 'express';
 
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { RequestContext } from '@shared/observability';
@@ -19,6 +19,8 @@ import { CurrentOperator, OperatorAuthGuard, OperatorRolesGuard, RequireRoles } 
 
 import { Override } from '../decorators/override.decorator';
 import { OperatorRole } from '../domain/override-register';
+import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
+import { answerOrQueued } from './approval-response';
 import {
   AccountBlockDto,
   CreateAccountBlockBodyDto,
@@ -68,8 +70,8 @@ export class OperatorBlocksController {
   }
 
   /**
-   * `A-10` — two-person. A second operator's token in `X-Operator-Approver`,
-   * holding `ADJL`.
+   * `A-10` — two-person. Queued with 202 `{approvalId}`; a second operator
+   * holding `ADJL` approves it with their own session.
    */
   @Post(':blockId/unblock')
   @HttpCode(200)
@@ -77,15 +79,22 @@ export class OperatorBlocksController {
   @RequireRoles(OperatorRole.ADJL, OperatorRole.SRE)
   @ApiOperation({ summary: 'Lift a block' })
   @ApiResponse({ status: 200, type: AccountBlockDto })
-  @ApiResponse({ status: 403, description: 'The second approver does not hold ADJL' })
-  @ApiResponse({ status: 409, description: 'No second approver, or the block is already lifted' })
+  @ApiResponse({
+    status: 202,
+    type: ApprovalQueuedDto,
+    description: 'Queued for a second operator',
+  })
+  @ApiResponse({ status: 409, description: 'The block is already lifted' })
   async unblock(
     @CurrentOperator() operator: OperatorSession,
     @Param('blockId', ParseUUIDPipe) blockId: string,
     @Body() body: UnblockAccountBodyDto,
-    @Req() request: Request,
-  ): Promise<AccountBlockDto> {
-    return this.blocks.unblock(operator, blockId, body, request, requestIdOf());
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<AccountBlockDto | ApprovalQueuedDto> {
+    return answerOrQueued(
+      response,
+      await this.blocks.unblock(operator, blockId, body, requestIdOf()),
+    );
   }
 }
 

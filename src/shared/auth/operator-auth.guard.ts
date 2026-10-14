@@ -7,9 +7,13 @@ import {
   OperatorSession,
   OperatorSessionPort,
 } from '@modules/operator/ports/operator-session.port';
-import { OperatorAuthThrottle } from '@modules/operator/services/operator-auth-throttle.service';
+import {
+  OperatorAuthThrottle,
+  ipKey,
+} from '@modules/operator/services/operator-auth-throttle.service';
 import { BaseError } from '@shared/errors/base.error';
 
+import { extractBearerToken } from './bearer-token';
 import { OPERATOR_REQUEST_KEY } from './operator-request.key';
 
 /**
@@ -30,15 +34,16 @@ export interface RequestWithOperator extends Request {
  *
  * It is an **authenticator, not an authorizer** — same division of labour as
  * `SessionAuthGuard`. This guard answers "which operator, with which roles
- * and authority limit, is this bearer token" and stops there; it does not
+ * and authority limit, holds this session token" (issued by a wallet sign-in,
+ * `POST /operator/auth/verify`) and stops there; it does not
  * know or care which of the register's rows the handler is about to perform.
  * That question is `OperatorRolesGuard`'s, and it runs second — always in
  * that order, because there is no session to check roles against until this
  * one has resolved one.
  *
  * Fails closed: `OperatorSessionPort.resolve` throws (never returns a null
- * session) on a missing token, an unknown token, or a suspended operator, and
- * that throw propagates through this guard unchanged.
+ * session) on a missing, unknown, expired or revoked token, or an operator who
+ * is no longer active, and that throw propagates through this guard unchanged.
  *
  * A presented token that is refused as invalid is counted against the client
  * address (`OperatorAuthThrottle`); an address over the limit is refused with
@@ -55,7 +60,7 @@ export class OperatorAuthGuard implements CanActivate {
   async canActivate(context: ExecutionContext): Promise<boolean> {
     const request = context.switchToHttp().getRequest<RequestWithOperator>();
     const token = extractBearerToken(request);
-    const ip = request.ip ?? 'unknown';
+    const ip = ipKey(request.ip ?? 'unknown');
 
     if (token) await this.throttle.assertNotBlocked(ip);
 
@@ -73,13 +78,4 @@ function isCredentialInvalid(error: unknown): boolean {
   return (
     error instanceof BaseError && error.errorCode === OperatorErrorCode.OPERATOR_CREDENTIAL_INVALID
   );
-}
-
-function extractBearerToken(request: Request): string | null {
-  const header = request.headers.authorization;
-  if (!header) return null;
-
-  const [scheme, token] = header.split(' ');
-  if (scheme?.toLowerCase() !== 'bearer' || !token) return null;
-  return token;
 }

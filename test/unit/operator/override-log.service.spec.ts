@@ -12,6 +12,7 @@ import { OverrideLogService } from '@modules/operator/services/override-log.serv
  * commit/rollback rather than infer it.
  */
 class FakeQueryRunner {
+  readonly manager = {};
   connected = false;
   started = false;
   committed = false;
@@ -57,6 +58,18 @@ class FakeEntries {
   }
 }
 
+/** The queue's approval rows, as far as `perform` touches them. */
+class FakeApprovals {
+  claimable = true;
+  readonly claims: { id: string; requestedBy: string; approvedBy: string }[] = [];
+
+  async markApproved(_manager: unknown, id: string, requestedBy: string, approvedBy: string) {
+    this.claims.push({ id, requestedBy, approvedBy });
+    return this.claimable;
+  }
+}
+
+// `approvalId` makes each of these usable as an approver; on an actor it is ignored.
 const ADJUDICATOR = {
   operatorId: 'op_1',
   subject: 'dan@',
@@ -64,14 +77,16 @@ const ADJUDICATOR = {
   email: 'dan@example.test',
   roles: [OperatorRole.ADJ],
   authorityLimitMinor: null as string | null,
+  approvalId: 'appr_1',
 };
 const LEAD = { ...ADJUDICATOR, operatorId: 'op_2', subject: 'sam@', roles: [OperatorRole.ADJL] };
 
 function build() {
   const dataSource = new FakeDataSource();
   const entries = new FakeEntries();
-  const service = new OverrideLogService(dataSource as never, entries as never);
-  return { dataSource, entries, service };
+  const approvals = new FakeApprovals();
+  const service = new OverrideLogService(dataSource as never, entries as never, approvals as never);
+  return { dataSource, entries, approvals, service };
 }
 
 const BASE = {
@@ -545,6 +560,48 @@ describe('OverrideLogService', () => {
     expect(entries.appended[0]).toMatchObject({
       approvalMode: ApprovalMode.BREAK_GLASS,
       breakGlass: true,
+    });
+  });
+
+  describe('the approvals queue', () => {
+    it('marks the approval approved inside the action’s transaction', async () => {
+      const { service, approvals, dataSource, entries } = build();
+
+      await service.perform(
+        {
+          code: 'A-10',
+          actor: { ...ADJUDICATOR, roles: [OperatorRole.SRE] },
+          approver: LEAD,
+          ...BASE,
+        },
+        async () => ({ value: null, before: {}, after: {} }),
+      );
+
+      expect(approvals.claims).toEqual([{ id: 'appr_1', requestedBy: 'op_1', approvedBy: 'op_2' }]);
+      expect(dataSource.runner.committed).toBe(true);
+      expect(entries.appended[0]).toMatchObject({ approverOperatorId: 'op_2' });
+    });
+
+    it('refuses, and writes nothing, when the approval is no longer pending', async () => {
+      const { service, approvals, dataSource, entries } = build();
+      approvals.claimable = false;
+      const mutation = jest.fn(async () => ({ value: null, before: {}, after: {} }));
+
+      await expect(
+        service.perform(
+          {
+            code: 'A-10',
+            actor: { ...ADJUDICATOR, roles: [OperatorRole.SRE] },
+            approver: LEAD,
+            ...BASE,
+          },
+          mutation,
+        ),
+      ).rejects.toMatchObject({ errorCode: OperatorErrorCode.OPERATOR_APPROVAL_NOT_PENDING });
+
+      expect(mutation).not.toHaveBeenCalled();
+      expect(dataSource.runner.rolledBack).toBe(true);
+      expect(entries.appended).toHaveLength(0);
     });
   });
 });

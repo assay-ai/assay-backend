@@ -7,6 +7,7 @@ import request from 'supertest';
 import { DataSource } from 'typeorm';
 
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
+import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
@@ -19,7 +20,11 @@ import { MCP_SESSION_SOURCE, McpCallerKind, McpSession } from '@modules/mcp/port
 import { OperatorRole } from '@modules/operator/domain/override-register';
 import { OperatorErrorCode } from '@modules/operator/errors/operator.errors';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
+import { ApprovalQueuedDto } from '@modules/operator/dto/operator-approval.dto';
+import type { AccountBlockDto } from '@modules/operator/dto/operator-console.dto';
 import { OperatorAccountBlockService } from '@modules/operator/services/operator-account-block.service';
+import { OperatorApprovalService } from '@modules/operator/services/operator-approval.service';
+import { OperatorService } from '@modules/operator/services/operator.service';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 import { ProviderSlashRequestsController } from '@modules/slash/controllers/provider-slash-requests.controller';
 import { SlashDisputeIntentService } from '@modules/slash/services/slash-dispute-intent.service';
@@ -78,7 +83,7 @@ describe('account blocks, against a real database and Redis', () => {
   let sre: OperatorSession;
   let lead: OperatorSession;
   let adjudicator: OperatorSession;
-  const tokens = new Map<string, OperatorSession>();
+  const sessions = new Map<string, OperatorSession>();
 
   /** One API instance's copy of the blocklist. */
   async function instance(pollIntervalMs = 60_000): Promise<AccountBlocklistService> {
@@ -93,14 +98,49 @@ describe('account blocks, against a real database and Redis', () => {
     return service;
   }
 
-  function operatorService(blocklist: AccountBlocklistService): OperatorAccountBlockService {
-    return new OperatorAccountBlockService(
-      new OverrideLogService(dataSource, new OverrideLogEntryRepository(dataSource)),
-      blocks,
-      new OperatorRepository(dataSource),
-      blocklist,
-      { resolve: async (token: string) => tokens.get(token) as OperatorSession },
+  /**
+   * The operator service, with `unblock` driven through the real approvals
+   * queue: the lifter's call queues it, and the named second operator approves
+   * it with their own session.
+   */
+  function operatorService(blocklist: AccountBlocklistService) {
+    const operators = new OperatorRepository(dataSource);
+    const approvals = new OperatorApprovalService(
+      new OperatorApprovalRepository(dataSource),
+      operators,
+      new OperatorService(operators, { get: () => undefined } as never),
     );
+    const service = new OperatorAccountBlockService(
+      new OverrideLogService(
+        dataSource,
+        new OverrideLogEntryRepository(dataSource),
+        new OperatorApprovalRepository(dataSource),
+      ),
+      blocks,
+      operators,
+      blocklist,
+      approvals,
+    );
+    return {
+      block: service.block.bind(service),
+      list: service.list.bind(service),
+      async unblock(
+        actor: OperatorSession,
+        blockId: string,
+        body: { reasonCode: string; note: string },
+        approverSubject: string,
+      ): Promise<AccountBlockDto> {
+        const queued = await service.unblock(actor, blockId, body, null);
+        if (!(queued instanceof ApprovalQueuedDto))
+          throw new Error('expected the unblock to queue');
+        const decided = await approvals.approve(
+          queued.approvalId,
+          sessions.get(approverSubject) as OperatorSession,
+          null,
+        );
+        return decided.result as AccountBlockDto;
+      },
+    };
   }
 
   async function seedOperator(subject: string, roles: OperatorRole[]): Promise<OperatorSession> {
@@ -118,12 +158,9 @@ describe('account blocks, against a real database and Redis', () => {
       roles,
       authorityLimitMinor: null,
     };
-    tokens.set(`token-${subject}`, session);
+    sessions.set(subject, session);
     return session;
   }
-
-  const approver = (subject: string) =>
-    ({ headers: { 'x-operator-approver': `token-${subject}` } }) as never;
 
   const register = async (targetId: string) =>
     (await dataSource.query(
@@ -192,8 +229,7 @@ describe('account blocks, against a real database and Redis', () => {
       sre,
       block.id,
       { reasonCode: 'CLEARED', note: NOTE },
-      approver('ops-adjl'),
-      null,
+      'ops-adjl',
     );
     expect(lifted).toMatchObject({ active: false, unblockApprovedBy: 'ops-adjl' });
     expect(writer.organizationBlock(org)).toBeNull();
@@ -231,7 +267,7 @@ describe('account blocks, against a real database and Redis', () => {
     );
     expect((await register(block.id))[0].organization_id).toBeNull();
 
-    await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, approver('ops-adjl'), null);
+    await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, 'ops-adjl');
   });
 
   it('loads standing blocks from the database at boot, whoever wrote them', async () => {
@@ -255,8 +291,7 @@ describe('account blocks, against a real database and Redis', () => {
       sre,
       block.id,
       { reasonCode: 'X', note: NOTE },
-      approver('ops-adjl'),
-      null,
+      'ops-adjl',
     );
   });
 
@@ -288,14 +323,14 @@ describe('account blocks, against a real database and Redis', () => {
     ).rejects.toMatchObject({ code: '23505' });
 
     // Once lifted, the subject can be blocked again — a new row.
-    await ops.unblock(sre, first.id, { reasonCode: 'X', note: NOTE }, approver('ops-adjl'), null);
+    await ops.unblock(sre, first.id, { reasonCode: 'X', note: NOTE }, 'ops-adjl');
     const second = await ops.block(
       sre,
       { subjectKind: BlockSubjectKind.ORGANIZATION, subject: org, reasonCode: 'X', note: NOTE },
       null,
     );
     expect(second.id).not.toBe(first.id);
-    await ops.unblock(sre, second.id, { reasonCode: 'X', note: NOTE }, approver('ops-adjl'), null);
+    await ops.unblock(sre, second.id, { reasonCode: 'X', note: NOTE }, 'ops-adjl');
   });
 
   it('refuses a lifting a lead did not check, and leaves block, register and cache as they were', async () => {
@@ -309,7 +344,7 @@ describe('account blocks, against a real database and Redis', () => {
     );
 
     await expect(
-      ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, approver('ops-adj'), null),
+      ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, 'ops-adj'),
     ).rejects.toMatchObject({ errorCode: OperatorErrorCode.OPERATOR_APPROVER_ROLE_REQUIRED });
 
     const [row] = (await dataSource.query(`SELECT unblocked_at FROM account_blocks WHERE id = $1`, [
@@ -320,7 +355,7 @@ describe('account blocks, against a real database and Redis', () => {
     expect(writer.organizationBlock(org)).not.toBeNull();
     void adjudicator;
 
-    await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, approver('ops-adjl'), null);
+    await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, 'ops-adjl');
   });
 
   it('refuses, at the database, a lifting without a second person or approved by the lifter', async () => {
@@ -377,7 +412,7 @@ describe('account blocks, against a real database and Redis', () => {
     expect(active.items.map((item) => item.id)).toContain(block.id);
     expect(active.items.every((item) => item.active)).toBe(true);
 
-    await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, approver('ops-adjl'), null);
+    await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, 'ops-adjl');
     const lifted = await ops.list({ active: false, limit: 100 } as never);
     expect(lifted.items.map((item) => item.id)).toContain(block.id);
     const times = lifted.items.map((item) => new Date(item.blockedAt).getTime());
@@ -493,7 +528,7 @@ describe('account blocks, against a real database and Redis', () => {
       expect(machine.status).toBe(403);
       expect(JSON.stringify(machine.body)).toContain('AUTH_ORGANIZATION_SUSPENDED');
 
-      await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, approver('ops-adjl'), null);
+      await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, 'ops-adjl');
       expect((await lookup('machine')).status).toBe(200);
     } finally {
       await app.close();

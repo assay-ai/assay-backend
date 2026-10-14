@@ -4,6 +4,7 @@ import { DataSource } from 'typeorm';
 
 import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
 import { FleetSweepRepository } from '@database/postgres/repositories/fleet-sweep.repository';
+import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
@@ -21,6 +22,7 @@ import { SlashProposalService } from '@modules/slash/services/slash-proposal.ser
 import { CHAIN } from '../../unit/chains/evm/helpers/fake-stake-chain';
 import { freshMigratedDatabase, TEST_SLASH_CONFIG } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
+import { approvalFor } from '../helpers/operator-approval';
 
 /**
  * Fleet sweep (`S-11`) against a real Postgres (review M-2).
@@ -62,6 +64,7 @@ describe('fleet sweep, against a real database', () => {
     const overrides = new OverrideLogService(
       dataSource,
       new OverrideLogEntryRepository(dataSource),
+      new OperatorApprovalRepository(dataSource),
     );
     execution = new SlashExecutionService(
       proposals,
@@ -221,7 +224,7 @@ describe('fleet sweep, against a real database', () => {
     await expect(
       execution.openSweep(
         lead,
-        adjudicator,
+        await approvalFor(dataSource, lead, adjudicator),
         seeded.organizationId,
         seeded.proposalId,
         sweepInput(freshDefect()),
@@ -241,7 +244,7 @@ describe('fleet sweep, against a real database', () => {
 
     const sweep = await execution.openSweep(
       lead,
-      adjudicator,
+      await approvalFor(dataSource, lead, adjudicator),
       seeded.organizationId,
       seeded.proposalId,
       sweepInput(defect),
@@ -273,7 +276,7 @@ describe('fleet sweep, against a real database', () => {
 
     const sweep = await execution.openSweep(
       lead,
-      adjudicator,
+      await approvalFor(dataSource, lead, adjudicator),
       seeded.organizationId,
       seeded.proposalId,
       sweepInput(defect),
@@ -318,7 +321,7 @@ describe('fleet sweep, against a real database', () => {
 
     await execution.openSweep(
       lead,
-      adjudicator,
+      await approvalFor(dataSource, lead, adjudicator),
       seeded.organizationId,
       seeded.proposalId,
       sweepInput(defect),
@@ -362,7 +365,7 @@ describe('fleet sweep, against a real database', () => {
     await expect(
       execution.openSweep(
         { ...capped, authorityLimitMinor: (PENALTY * 2n - 1n).toString() },
-        adjudicator,
+        await approvalFor(dataSource, capped, adjudicator),
         seeded.organizationId,
         seeded.proposalId,
         sweepInput(defect),
@@ -394,7 +397,7 @@ describe('fleet sweep, against a real database', () => {
       await expect(
         execution.openSweep(
           lead,
-          adjudicator,
+          await approvalFor(dataSource, lead, adjudicator),
           seeded.organizationId,
           seeded.proposalId,
           sweepInput(defect),
