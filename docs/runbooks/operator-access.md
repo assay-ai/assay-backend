@@ -76,11 +76,20 @@ yarn operator:remove --wallet 0x… | --subject alice@ | --id <uuid>
 |---|---|---|
 | `GET /operator/operators[?status=]` | — | any operator may read |
 | `POST /operator/operators` | `A-12` | always two-person: `202 { approvalId }` |
-| `PATCH /operator/operators/:id` | `A-13` | lowering roles or the limit: applied at once (`200`); adding a role or raising the limit: `202 { approvalId }` |
-| `POST /operator/operators/:id/remove` | `A-14` | single-person, at once (`200`) |
+| `PATCH /operator/operators/:id` | `A-13` | lowering roles or the limit: applied at once (`200`); adding a role, raising the limit, or taking `OPS_ADMIN` away: `202 { approvalId }` |
+| `POST /operator/operators/:id/remove` | `A-14` | single-person, at once (`200`); removing an `OPS_ADMIN`: `202 { approvalId }` |
 
 Nobody may change or remove their own row, and an approver may not approve a change to their own
-row (`403 OPERATOR_SELF_CHANGE_REFUSED`).
+row (`403 OPERATOR_SELF_CHANGE_REFUSED`). So with two `OPS_ADMIN`s left, neither can remove or
+demote the other from the console; that takes the CLI.
+
+An approver may not grant an authority limit above their own (`403
+OPERATOR_APPROVER_AUTHORITY_EXCEEDED`); an unbounded limit needs an unbounded approver.
+
+**Two-person means two operator rows, not two people.** Nothing proves that the wallet being added
+belongs to somebody other than the requester: an `OPS_ADMIN` who gets a second wallet added as
+"another person" can then approve their own two-person actions. The control is the approver
+knowing, out of band, who the new operator is and that the wallet is theirs.
 
 ## 4. Two-person actions: the approvals queue
 
@@ -93,8 +102,10 @@ expiresAt }`** and does nothing else. The routes:
 | `POST /operator/cases/:id/sweep` | `S-11` | `ADJ` or `ADJL`, limit ≥ swept penalties |
 | `POST /operator/cases/:id/compensated` | `S-5` | `ADJL` or `TRE`, limit ≥ deposit |
 | `POST /operator/blocks/:id/unblock` | `A-10` | `ADJL` |
-| `POST /operator/operators` | `A-12` | `OPS_ADMIN` |
-| `PATCH /operator/operators/:id` (raising) | `A-13` | `OPS_ADMIN` |
+| `POST /operator/operators` | `A-12` | `OPS_ADMIN`, limit ≥ the limit granted |
+| `PATCH /operator/operators/:id` (raising, or taking `OPS_ADMIN` away) | `A-13` | `OPS_ADMIN`, limit ≥ the limit granted |
+| `POST /operator/operators/:id/remove` (an `OPS_ADMIN`) | `A-14` | `OPS_ADMIN`, not the target |
+| `POST /operator/arbiter/block-intent` | `A-11` | `ADJL`; the approval's `result` is the unsigned call |
 
 Everything the action checks before it would write (the requester's role and limit, the target's
 state, a compensation deposit on chain) is checked when it is queued, so a request that could never

@@ -52,6 +52,27 @@ export function raisesAuthority(
 }
 
 /**
+ * Refuse an approver granting an authority limit above their own: a checker
+ * with a $0 ceiling must not be enough to create an unbounded operator. `null`
+ * is unbounded, on either side.
+ */
+function assertApproverCanGrant(
+  approver: OperatorApprover | null,
+  granted: string | null,
+  code: string,
+): void {
+  const limit = approver?.authorityLimitMinor;
+  if (limit === null || limit === undefined) return;
+  if (granted === null || BigInt(granted) > BigInt(limit)) {
+    throw OperatorErrors.approverAuthorityExceeded({
+      code,
+      limit,
+      requested: granted ?? 'unbounded',
+    });
+  }
+}
+
+/**
  * `A-12`, `A-13`, `A-14` — the operator directory, managed from the console.
  *
  * - Adding grants authority, so it is always two-person (queued, 202).
@@ -65,7 +86,11 @@ export function raisesAuthority(
  *   one stolen admin session cannot strip the directory of its admins.
  *
  * Nobody acts on their own row, and an approver may not approve a change to
- * their own. Every change writes its register entry in the same transaction.
+ * their own, nor grant an authority limit above their own.
+ *
+ * Two-person means two operator rows, not two people: nothing here proves the
+ * wallet being added belongs to somebody other than the requester. That rests
+ * on the approver knowing who the new operator is. Every change writes its register entry in the same transaction.
  */
 @Injectable()
 export class OperatorDirectoryService {
@@ -132,6 +157,10 @@ export class OperatorDirectoryService {
         throw OperatorErrors.alreadyExists({ field: 'subject' });
       }
 
+      const authorityLimitMinor =
+        body.authorityLimitMinor === undefined ? '0' : body.authorityLimitMinor;
+      assertApproverCanGrant(approver, authorityLimitMinor, 'A-12');
+
       // A removed operator coming back is the same row, so their history
       // stays theirs.
       const id = byWallet?.id ?? randomUUID();
@@ -141,8 +170,7 @@ export class OperatorDirectoryService {
         email: body.email ?? byWallet?.email ?? '',
         walletAddress: wallet,
         roles: [...body.roles],
-        authorityLimitMinor:
-          body.authorityLimitMinor === undefined ? '0' : body.authorityLimitMinor,
+        authorityLimitMinor,
         status: 'ACTIVE',
         suspendedAt: null,
         removedAt: null,
@@ -223,6 +251,9 @@ export class OperatorDirectoryService {
         next.roles.every((role) => current.roles.includes(role));
       if (sameRoles && next.authorityLimitMinor === current.authorityLimitMinor) {
         throw OperatorErrors.changeEmpty();
+      }
+      if (next.authorityLimitMinor !== current.authorityLimitMinor) {
+        assertApproverCanGrant(approver, next.authorityLimitMinor, 'A-13');
       }
 
       const saved = await this.overrides.perform<OperatorEntity>(
