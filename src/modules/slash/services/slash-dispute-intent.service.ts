@@ -210,6 +210,16 @@ export class SlashDisputeIntentService {
     });
   }
 
+  /**
+   * Review N-5: the same `setBlocked(account, true)` an approved `A-11` built,
+   * rebuilt from the approval's own payload for the arbiter to sign. It writes
+   * no second register entry (the approval's is the record), and it is
+   * refused once the address is blocked: the call was executed.
+   */
+  async rebuildArbiterBlock(chainId: string, account: string): Promise<SlashContractCall> {
+    return this.port().buildBlock({ chainId: this.evmChain(chainId), account });
+  }
+
   private accepted(built: SlashBatchBuild, functionName: string): SlashContractCall {
     if (built.call) {
       return { ...built.call, requestIds: built.call.requestIds.map((id) => `0x${id}`) };
