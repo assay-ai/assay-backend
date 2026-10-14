@@ -658,10 +658,21 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         providerIds: [...new Set(providerIds)],
       })
       // An arbiter's on-chain uphold makes the case UPHELD (`CHAIN_ARBITER`)
-      // and an on-chain execution EXECUTED, so both count here.
-      .andWhere('proposal.status IN (:...upheld)', {
-        upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'],
-      })
+      // and an on-chain execution EXECUTED, so both count here. Review N-4:
+      // so does a case any record of which was executed (disputed or not,
+      // whoever sent it), and one whose undisputed record lapsed (expired
+      // unexecuted: nobody ruled for the provider). Not a reversed case.
+      .andWhere(
+        `proposal.status <> 'REVERSED' AND (` +
+          'proposal.status IN (:...upheld) OR proposal.executed_at IS NOT NULL OR ' +
+          'EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
+          'WHERE part.organization_id = proposal.organization_id ' +
+          'AND part.proposal_id = proposal.id AND (' +
+          "part.chain_status = 'EXECUTED' OR (part.chain_status = 'CANCELLED' " +
+          "AND part.cancel_reason IN ('EXPIRED', 'VERIFIER_UNAVAILABLE') " +
+          'AND part.chain_disputed_at IS NULL))))',
+        { upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'] },
+      )
       .andWhere(
         'COALESCE(proposal.executed_at, proposal.resolved_at, proposal.proposed_at) >= :since',
         { since },

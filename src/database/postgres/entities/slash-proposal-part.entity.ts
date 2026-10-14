@@ -108,6 +108,10 @@ export class SlashProposalPartEntity extends OrganizationScopedEntityWithoutSoft
   @Column({ name: 'cancelled_at', type: 'timestamptz', nullable: true })
   cancelledAt: Date | null;
 
+  /** `SlashCancelled.reason` (review N-4): `WITHDRAWN`, `EXPIRED`, `VERIFIER_UNAVAILABLE`, `DISPUTE_UNRESOLVED`. */
+  @Column({ name: 'cancel_reason', type: 'varchar', length: 32, nullable: true })
+  cancelReason: string | null;
+
   @Column({ name: 'chain_last_error', type: 'varchar', length: 64, nullable: true })
   chainLastError: string | null;
 

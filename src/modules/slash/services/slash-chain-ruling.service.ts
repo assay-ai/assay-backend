@@ -249,6 +249,9 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     // case still follows its records (review N-1): an expire the sweep wrote
     // first must not leave the case open.
     if (!['PENDING', 'DISPUTED', 'REFUSED'].includes(part.chainStatus)) {
+      if (part.chainStatus === 'CANCELLED' && !part.cancelReason) {
+        await this.parts.updatePart(part.organizationId, part.id, { cancelReason: event.reason });
+      }
       if (part.chainEpoch === proposal.chainEpoch) {
         await this.followRecords(proposal, event, { because, recalculating });
       }
@@ -258,6 +261,7 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     await this.parts.updatePart(part.organizationId, part.id, {
       chainStatus: 'CANCELLED',
       cancelledAt: event.cancelledAt,
+      cancelReason: event.reason,
     });
 
     // The provider won its dispute (B7): the record was cancelled while it
