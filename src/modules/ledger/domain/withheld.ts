@@ -11,7 +11,7 @@
  * the platform exposes.
  *
  * ```text
- * withheld  =  Σ listed price of intents that reached a terminal state
+ * withheld  =  Σ amount held for intents that reached a terminal state
  *              charging the agent nothing
  *
  *              bucket 1  REFUNDED           failed verification        ← the guarantee
@@ -41,6 +41,12 @@
  *
  * So the test is `holdId !== null`: **value can only be withheld if it was
  * first held.** {@link isWithheldIntent} is the single place that is written.
+ *
+ * The amount is the hold's, not the intent's price. A rail-A call is held at
+ * the quote (the dearest eligible binding) and re-priced to the binding that
+ * served, and a refund gives back the whole hold. A call that settles below
+ * its hold releases the remainder on a COMMITTED hold; that release is not
+ * withheld value and is counted with the orphaned releases below.
  *
  * ## What this file is not
  *
@@ -260,7 +266,7 @@ export function zeroWithheld(asset: AssetId, decimals: number): WithheldTotal {
  * normally zero is a term whose becoming non-zero is a signal.
  */
 export interface WithheldReconciliation {
-  /** The intent side: `Σ` listed price over the withheld buckets. */
+  /** The intent side: `Σ` held amount over the withheld buckets. */
   readonly withheld: WithheldTotal;
   /** The ledger side: `Σ HOLD_RELEASE` over the same window and account. */
   readonly holdReleaseTotal: Money;

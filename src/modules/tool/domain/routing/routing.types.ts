@@ -349,6 +349,9 @@ export interface WeightedCandidate {
  */
 export type RoutingRandom = () => number;
 
+/** See {@link RoutingContext.callClass}. */
+export type RoutingCallClass = 'FREE' | 'PAID';
+
 export interface RoutingContext {
   /**
    * Providers already tried in this request.
@@ -369,6 +372,19 @@ export interface RoutingContext {
    * one operator's work to another operator's earnings. Absent means any.
    */
   readonly onlyProviderId?: string;
+  /**
+   * Whether this call is charged, and so which bindings may serve it.
+   *
+   * - `PAID`: only `PAID` and `FREEMIUM` bindings. A `FREE` binding is exempt
+   *   from the stake floor and the payout gate, so a charged call drawn onto one
+   *   would credit a provider nobody bonded or checked.
+   * - `FREE`: only `FREE` and `FREEMIUM` bindings. A `PAID` binding's provider
+   *   would serve with no intent behind the call and be paid nothing.
+   *
+   * Absent means every binding, and only a quote leaves it out: the quote is
+   * what decides the call class, so it has to see the whole supply.
+   */
+  readonly callClass?: RoutingCallClass;
   /**
    * The chains the buyer can pay from RIGHT NOW. Supplied, never inferred.
    *

@@ -6,7 +6,10 @@
  * they are constants rather than literals scattered through the builders.
  */
 
-/** The price the agent is quoted, and will be charged, for one call. */
+/**
+ * The price the agent is quoted for one call: the most it can be charged, and
+ * what it is held for. The charge is the price of the binding that serves.
+ */
 export const X402_PRICE = 'x402/price';
 /** `unverified` | `verified` | `guaranteed` — the tool's verification tier. */
 export const X402_TIER = 'x402/tier';

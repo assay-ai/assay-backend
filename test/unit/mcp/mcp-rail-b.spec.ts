@@ -197,6 +197,37 @@ describe('rail B over MCP', () => {
       expect(h.invoker.providerIds).toEqual(['provider-a']);
     });
 
+    it("asks for and holds the offered provider's own price, not the dearest binding", async () => {
+      // The quote is the dearest binding ($0.10); the offer draws provider-a,
+      // which charges $0.05. The voucher pays provider-a and nobody else, so it
+      // is signed for provider-a's price.
+      const invoker = new ScriptedInvoker({
+        'binding-provider-a': async () => ok('forty-two'),
+        'binding-provider-b': async () => ok('forty-two'),
+      });
+      const h = {
+        ...buildMcpHarness({
+          bindings: [
+            buildBinding('provider-a'),
+            buildBinding('provider-b', { priceAmount: usdc('0.10').amount }),
+          ],
+          providers: [buildProvider('provider-a'), buildProvider('provider-b')],
+          invoker,
+          random: () => 0,
+        }),
+        invoker,
+      };
+      const requirement = await requirementOf(h);
+      expect(requirement.providerId).toBe('provider-a');
+      expect(requirement.amount.amount).toBe(PRICE.amount);
+
+      const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement));
+
+      expect(outcome.kind).toBe('RESULT');
+      expect(h.intents.only.price).toEqual(PRICE);
+      expect(h.ledger.events[0]).toMatchObject({ kind: 'HOLD_CREATE', money: PRICE });
+    });
+
     it('records which agent credential paid, and none for a config session (U02)', async () => {
       const h = harness();
       const agentSession: McpSession = {

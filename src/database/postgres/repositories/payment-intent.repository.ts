@@ -1015,12 +1015,16 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * The intent side of `withheld`: `Σ` listed price over
+   * The intent side of `withheld`: `Σ` held amount over
    * {@link WITHHELD_STATUSES}, restricted to intents that actually reserved
    * something (`hold_id IS NOT NULL` — see `domain/withheld.ts` for why an
    * intent that expired in `CREATED` must not appear here), grouped by asset
    * and by status so a caller can fold the rows into `WithheldBucket`s without
    * loading one row per intent.
+   *
+   * The hold's amount, not `price_amount`: a rail-A intent is held at the quote
+   * and re-priced to the binding that served, and what a refund or a void
+   * gives back is the whole hold. For a tool with one price the two are equal.
    */
   async sumWithheldByAssetAndStatus(
     organizationId: string,
@@ -1031,7 +1035,12 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.decimals', 'decimals')
       .addSelect('intent.status', 'status')
       .addSelect('COUNT(*)', 'calls')
-      .addSelect('COALESCE(SUM(intent.priceAmount), 0)', 'amount')
+      .addSelect('COALESCE(SUM(COALESCE(hold.amount, intent.price_amount)), 0)', 'amount')
+      .leftJoin(
+        'ledger_holds',
+        'hold',
+        'hold.id = intent.hold_id AND hold.organization_id = intent.organization_id',
+      )
       .where('intent.organizationId = :organizationId', { organizationId })
       .andWhere('intent.status IN (:...statuses)', { statuses: WITHHELD_STATUSES })
       .andWhere('intent.holdId IS NOT NULL');

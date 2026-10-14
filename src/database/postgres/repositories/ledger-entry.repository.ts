@@ -275,7 +275,8 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
   /**
    * `HOLD_RELEASE` entries whose hold's intent does not point back at that
    * hold — see `domain/withheld.ts` for exactly why this shape of row exists
-   * and why it must be named rather than folded silently into `withheld`.
+   * and why it must be named rather than folded silently into `withheld` —
+   * and the remainder released when a hold is committed below its amount.
    *
    * The join is honest rather than inferred: it walks `ledger_entries` →
    * `ledger_holds` (the hold the release resolved) → `payment_intents` (the
@@ -313,7 +314,12 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
       .addSelect('entry.amount', 'amount')
       .where('entry.organizationId = :organizationId', { organizationId })
       .andWhere('entry.entryType = :entryType', { entryType: HOLD_RELEASE_ENTRY_TYPE })
-      .andWhere('(intent.hold_id IS NULL OR intent.hold_id <> hold.id)');
+      // A release on a COMMITTED hold is the remainder of a charge below the
+      // hold — the quote less the serving binding's price — returned at
+      // settlement. Not withheld value either: the call was charged.
+      .andWhere(
+        `(intent.hold_id IS NULL OR intent.hold_id <> hold.id OR hold.status = 'COMMITTED')`,
+      );
 
     if (period.from) {
       qb.andWhere('entry.createdAt >= :from', { from: period.from });
