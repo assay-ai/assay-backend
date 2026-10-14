@@ -109,6 +109,7 @@ class FakeConnectivityCheckRepository {
 /** DNS never touches the real network — only `dns-failure.provider.test` is unmapped. */
 const ZONE: Readonly<Record<string, { address: string; family: 4 | 6 }>> = {
   'edge.provider.test': { address: '93.184.216.34', family: 4 },
+  'postgres.internal': { address: '10.20.3.4', family: 4 },
 };
 
 const fakeLookup = jest.fn(async (hostname: string) => {
@@ -258,6 +259,18 @@ describe('an endpoint resolving to a blocked address — proving the egress guar
     // Never reached the client — the refusal happened at the pre-flight resolve.
     expect(http.request).not.toHaveBeenCalled();
     expect(checks.rows[0].outcome).toBe(ConnectivityOutcome.BLOCKED);
+  });
+
+  // Review P-9: the detail is returned to the caller; it must not name the
+  // private address an internal hostname resolves to.
+  it('does not reveal the internal address a hostname resolves to', async () => {
+    const { service } = buildHarness();
+
+    const result = await service.check(ORG, 'https://postgres.internal/');
+
+    expect(result.failureCode).toBe('EGRESS_BLOCKED_ADDRESS');
+    expect(result.detail).not.toContain('10.20.3.4');
+    expect(result.detail).not.toContain('10.0.0.0/8');
   });
 
   it('refuses PUT /providers/me/endpoint the same way — a dead endpoint is not savable', async () => {

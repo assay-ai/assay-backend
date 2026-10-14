@@ -211,7 +211,7 @@ describe('case 2 — a URL pointing at instance metadata', () => {
 // ---------------------------------------------------------------------------
 
 describe('case 3 — a hostname that resolves to an internal address', () => {
-  it('blocks it, naming the address DNS actually returned', async () => {
+  it('blocks it, recording the address DNS returned but not naming it in the message', async () => {
     const error = await expectEgressError(
       clientWithoutConnect().request({ url: 'http://internal.provider.test/v1/search' }),
     );
@@ -219,7 +219,11 @@ describe('case 3 — a hostname that resolves to an internal address', () => {
     expect(error.kind).toBe(EgressFailureKind.BLOCKED_ADDRESS);
     expect(error.addressReason).toBe(BlockedAddressReason.PRIVATE);
     expect(error.address).toBe('10.0.0.5');
-    expect(error.message).toContain('10.0.0.5');
+    // Review P-9: the message reaches the caller; a private address in it is
+    // an internal DNS oracle.
+    expect(error.message).not.toContain('10.0.0.5');
+    expect(error.message).not.toContain('10.0.0.0/8');
+    expect(error.message).toContain('non-public address');
   });
 
   it('blocks a hostname whose DNS answer resolves to metadata', async () => {
