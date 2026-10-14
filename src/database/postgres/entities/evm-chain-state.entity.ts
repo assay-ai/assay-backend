@@ -38,6 +38,13 @@ export class EvmChainStateEntity extends AbstractEntityWithoutSoftDelete {
   @Column({ name: 'cursor_block', type: 'bigint', nullable: true })
   cursorBlock: string | null;
 
+  /**
+   * The last block `EvmSlashProposalWatcher` has read (review S-4), apart from
+   * `cursor_block`: the two read different contracts on different clocks.
+   */
+  @Column({ name: 'slash_watch_cursor_block', type: 'bigint', nullable: true })
+  slashWatchCursorBlock: string | null;
+
   @Column({ name: 'head_block', type: 'bigint', nullable: true })
   headBlock: string | null;
 
