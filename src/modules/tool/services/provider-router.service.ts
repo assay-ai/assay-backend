@@ -1090,6 +1090,7 @@ const TRANSPORT_REASON: Readonly<Record<TransportErrorKind, ClassificationReason
   [TransportErrorKind.DNS_FAILURE]: ClassificationReason.TRANSPORT_DNS_FAILURE,
   [TransportErrorKind.TLS_FAILURE]: ClassificationReason.TRANSPORT_TLS_FAILURE,
   [TransportErrorKind.BODY_TRUNCATED]: ClassificationReason.TRANSPORT_BODY_TRUNCATED,
+  [TransportErrorKind.SCHEME_NOT_ALLOWED]: ClassificationReason.TRANSPORT_HTTPS_REQUIRED,
   [TransportErrorKind.UNKNOWN]: ClassificationReason.TRANSPORT_UNKNOWN,
 });
 
