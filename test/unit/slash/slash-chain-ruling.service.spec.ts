@@ -66,6 +66,10 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     {
       findOneScoped: async () => ({ ...proposal }),
       findOneByChainRequestId: async () => null,
+      findOpenOnChainCases: async () =>
+        ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'].includes(proposal.status as string)
+          ? [{ organizationId: 'org', id: 'case' }]
+          : [],
       update: async (_scope: unknown, patch: Record<string, unknown>) =>
         Object.assign(proposal, patch),
     } as never,
@@ -429,6 +433,35 @@ describe('SlashChainRulingService', () => {
     it('answers false for a record nobody planned', async () => {
       const { service } = build();
       await expect(service.recordExecuted(executed('c'.repeat(64)))).resolves.toBe(false);
+    });
+  });
+
+  describe('open EVM cases from the in-app objection era (review N-3)', () => {
+    it('re-reads the records and upholds a case whose record stands undisputed', async () => {
+      const { service, proposal, reconciled, released } = build('UNDER_REVIEW');
+      await expect(service.reconcileOpenCases(100)).resolves.toBe(1);
+      expect(reconciled).toEqual(['case']);
+      expect(released).toEqual(['case']);
+      expect(proposal.status).toBe('UPHELD');
+      // Nothing left to move.
+      await expect(service.reconcileOpenCases(100)).resolves.toBe(0);
+    });
+
+    it('leaves a case whose every record is disputed on chain to the arbiter', async () => {
+      const { service, parts, proposal, released, closed } = build('AWAITING_SECOND');
+      for (const part of parts.values()) Object.assign(part, { chainStatus: 'DISPUTED' });
+      await expect(service.reconcileOpenCases(100)).resolves.toBe(0);
+      expect(proposal.status).toBe('AWAITING_SECOND');
+      expect(released).toEqual([]);
+      expect(closed).toEqual([]);
+    });
+
+    it('closes a case whose records were all cancelled on chain', async () => {
+      const { service, parts, proposal, closed } = build('DISPUTED');
+      for (const part of parts.values()) Object.assign(part, { chainStatus: 'CANCELLED' });
+      await expect(service.reconcileOpenCases(100)).resolves.toBe(1);
+      expect(closed).toHaveLength(1);
+      expect(proposal.status).toBe('CANCELLED');
     });
   });
 

@@ -671,6 +671,29 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     return new Map(rows.map((row) => [row.providerId, Number(row.count)]));
   }
 
+  /**
+   * Review N-3: EVM cases still open from the in-app objection era
+   * (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`) whose records reached the
+   * chain. No queue, sweep or action reaches them any more; the scheduler
+   * re-derives each from its records once at start-up.
+   */
+  async findOpenOnChainCases(limit: number): Promise<ChainSweepRow[]> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.organization_id', 'organizationId')
+      .addSelect('proposal.id', 'id')
+      .where('proposal.status IN (:...open)', {
+        open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
+      })
+      .andWhere('proposal.asset_id LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
+      .andWhere('proposal.chain_status NOT IN (:...unproposed)', {
+        unproposed: ['NONE', 'PROPOSING'],
+      })
+      .orderBy('proposal.proposed_at', 'ASC')
+      .limit(limit)
+      .getRawMany<ChainSweepRow>();
+  }
+
   async findChainDisputedBefore(disputedBefore: Date, limit: number): Promise<ChainSweepRow[]> {
     return this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
