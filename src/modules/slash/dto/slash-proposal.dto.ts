@@ -5,6 +5,7 @@ import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
 import { ArbitrationOutcome, DisputeClaimType, ResolutionKind } from '../domain/arbitration';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
+import { OnChainDisputeState } from '../domain/on-chain-dispute';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 
 /** Matches `chk_slash_proposals_source`. */
@@ -48,15 +49,18 @@ export class SlashProposalClocksDto {
 
   @ApiPropertyOptional({
     nullable: true,
-    description: 'The provider’s deadline to object. Null until delivery is confirmed.',
+    description:
+      'The provider’s deadline to object in the app. Null until delivery is confirmed, and ' +
+      'always null on EVM, where the only deadline is `disputeBy`.',
   })
   respondByAt: Date | null;
 
   @ApiPropertyOptional({
     nullable: true,
     description:
-      'OUR deadline to decide, set when a dispute is filed. Missing it overturns the case ' +
-      'automatically and records it as our failure, not the provider’s.',
+      'OUR deadline to decide, set when an in-app objection is filed. Missing it overturns the ' +
+      'case automatically and records it as our failure, not the provider’s. Always null on ' +
+      'EVM: the arbiter rules on chain, and an unruled dispute expires there after 30 days.',
   })
   platformDecisionDueAt: Date | null;
 
@@ -105,6 +109,31 @@ export class SlashProposalClocksDto {
     description: 'How many of the current parts are `Disputed` on chain, awaiting the arbiter.',
   })
   chainDisputedParts: number;
+
+  @ApiProperty({
+    description:
+      'True on EVM: the provider disputes with `disputeSlash` from its own stake wallet ' +
+      '(`POST /providers/me/slash-requests/dispute-intent`), the arbiter rules on chain, and ' +
+      '`POST …/dispute` is refused. False on Solana, which keeps the in-app objection.',
+  })
+  disputeOnChain: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    enum: OnChainDisputeState,
+    description:
+      'The record’s state from the watcher’s mirror: PENDING, DISPUTED, UPHELD, CANCELLED, ' +
+      'EXECUTED or EXPIRED. Null off EVM or before a record stands on chain.',
+  })
+  chainState: OnChainDisputeState | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'The deadline to dispute on chain: the record’s `executableAt`, while the case can still ' +
+      'be disputed (PROPOSED, record PENDING and never disputed). Null otherwise.',
+  })
+  disputeBy: Date | null;
 }
 
 /** One line of the arithmetic, exactly as the case screen's "The measurement" table renders it. */

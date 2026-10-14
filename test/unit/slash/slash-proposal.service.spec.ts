@@ -15,6 +15,8 @@ import {
   SlashProposalService,
 } from '@modules/slash/services/slash-proposal.service';
 
+const EVM_ASSET = 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3';
+
 type Deps = {
   proposals: FakeSlashProposals;
   events: FakeSlashEvents;
@@ -208,6 +210,22 @@ describe('SlashProposalService', () => {
       expect(proposals.rows.get(proposal.id)!.notifiedAt).not.toBeNull();
       expect(events.kinds().filter((k) => k === 'NOTIFIED')).toHaveLength(1);
     });
+
+    /**
+     * Business review 5: no clock starts from a delivery on EVM. The record's
+     * on-chain `executableAt` is the only deadline there.
+     */
+    it('starts no clock on an EVM case: the record’s executableAt is the deadline', async () => {
+      const { service, proposals, notifications } = build();
+      const proposal = await service.openFromStrike(strike({ assetId: EVM_ASSET }));
+
+      const row = proposals.rows.get(proposal.id)!;
+      expect(row.notifiedAt).not.toBeNull();
+      expect(row.respondByAt).toBeNull();
+      expect(notifications.sent[0].body).toContain(
+        'Disputing freezes the penalty on chain until the arbiter decides',
+      );
+    });
   });
 
   /**
@@ -269,6 +287,38 @@ describe('SlashProposalService', () => {
       expect(await service.sweepUndisputed(new Date('2030-01-01T00:00:00Z'))).toBe(0);
       expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.PROPOSED);
     });
+
+    it('upholds an undisputed EVM case at its record’s executableAt, not at respondByAt', async () => {
+      const { service, proposals } = build();
+      proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.PROPOSED,
+        assetId: EVM_ASSET,
+        // A stale in-app deadline long gone: it no longer counts.
+        respondByAt: new Date('2026-08-10T00:00:00Z'),
+        chainStatus: 'PENDING',
+        chainExecutableAt: new Date('2026-08-12T09:14:00Z'),
+      });
+
+      expect(await service.sweepUndisputed(new Date('2026-08-12T09:13:00Z'))).toBe(0);
+      expect(await service.sweepUndisputed(new Date('2026-08-12T09:15:00Z'))).toBe(1);
+      expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.UPHELD);
+    });
+
+    it('never upholds an EVM case whose record is disputed on chain', async () => {
+      const { service, proposals } = build();
+      proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.PROPOSED,
+        assetId: EVM_ASSET,
+        chainStatus: 'DISPUTED',
+        chainExecutableAt: new Date('2026-08-12T09:14:00Z'),
+      });
+
+      expect(await service.sweepUndisputed(new Date('2030-01-01T00:00:00Z'))).toBe(0);
+    });
   });
 
   /**
@@ -312,6 +362,21 @@ describe('SlashProposalService', () => {
       });
 
       expect(await service.sweepPlatformMisses(new Date('2026-08-13T09:13:00Z'))).toEqual([]);
+      expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.DISPUTED);
+    });
+
+    /** Business review 4: a missed platform deadline never acquits an EVM case. */
+    it('never overturns an EVM case: the arbiter rules on chain', async () => {
+      const { service, proposals } = build();
+      proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.DISPUTED,
+        assetId: EVM_ASSET,
+        platformDecisionDueAt: new Date('2026-08-13T09:14:00Z'),
+      });
+
+      expect(await service.sweepPlatformMisses(new Date('2030-01-01T00:00:00Z'))).toEqual([]);
       expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.DISPUTED);
     });
   });

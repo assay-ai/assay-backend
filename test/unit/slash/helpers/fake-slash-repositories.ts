@@ -198,7 +198,7 @@ export class FakeSlashProposals {
     organizationId: string,
     id: string,
     notifiedAt: Date,
-    respondByAt: Date,
+    respondByAt: Date | null,
   ): Promise<number> {
     const row = this.rows.get(id);
     if (!row || row.organizationId !== organizationId || row.notifiedAt !== null) return 0;
@@ -208,12 +208,20 @@ export class FakeSlashProposals {
 
   async findUndisputedPast(now: Date, limit: number): Promise<UndisputedProposalRow[]> {
     return [...this.rows.values()]
-      .filter((row) => row.status === 'PROPOSED' && row.respondByAt && row.respondByAt <= now)
-      .slice(0, limit)
       .map((row) => ({
+        row,
+        deadline: row.assetId.startsWith('eip155:')
+          ? row.chainStatus === 'PENDING'
+            ? row.chainExecutableAt
+            : null
+          : row.respondByAt,
+      }))
+      .filter(({ row, deadline }) => row.status === 'PROPOSED' && deadline && deadline <= now)
+      .slice(0, limit)
+      .map(({ row, deadline }) => ({
         organizationId: row.organizationId,
         id: row.id,
-        respondByAt: row.respondByAt as Date,
+        respondByAt: deadline as Date,
       }));
   }
 
@@ -222,6 +230,7 @@ export class FakeSlashProposals {
       .filter(
         (row) =>
           ['DISPUTED', 'UNDER_REVIEW'].includes(row.status) &&
+          !row.assetId.startsWith('eip155:') &&
           row.platformDecisionDueAt &&
           row.platformDecisionDueAt <= now,
       )
@@ -244,7 +253,7 @@ export class FakeSlashProposals {
       .filter(
         (row) =>
           (CHAIN_PROPOSABLE_STATUSES as readonly string[]).includes(row.status) &&
-          row.respondByAt !== null &&
+          row.notifiedAt !== null &&
           (row.chainStatus === 'NONE' ||
             (row.chainStatus === 'PROPOSING' &&
               row.chainClaimedAt !== null &&

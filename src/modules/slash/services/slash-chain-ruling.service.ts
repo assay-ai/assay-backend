@@ -28,14 +28,16 @@ import { SlashProposalService } from './slash-proposal.service';
  *   execution window). The case's mirror stays `PENDING` while any live part
  *   is pending — those parts keep executing — and becomes `DISPUTED` only
  *   when every live part is; `chain_disputed_parts` counts the disputed ones,
- *   so a partly disputed case reads honestly. A case still `PROPOSED` is moved
- *   into review exactly as an in-app objection would
- *   (`ArbitrationService.fileDisputeFromChain`). A case the platform already
- *   decided keeps its decision; the console shows the part "disputed on
- *   chain", waiting for the arbiter.
+ *   so a partly disputed case reads honestly. A case still `PROPOSED` becomes
+ *   `DISPUTED` (`ArbitrationService.fileDisputeFromChain`) and waits for the
+ *   arbiter, with no platform deadline. A case already decided keeps its
+ *   decision; the console shows the part "disputed on chain", waiting for the
+ *   arbiter.
  * - **`SlashUpheld`** — the arbiter ruled against the provider. The part goes
  *   back to `PENDING` at the `executableAt` the EVENT carries (never assumed
- *   to be "now"), and the case's mirror and count follow.
+ *   to be "now"), and the case's mirror and count follow. The ruling is the
+ *   case's decision: an open case becomes `UPHELD`
+ *   (`ArbitrationService.recordChainUphold`).
  *
  * - **`SlashCancelled`** — the arbiter's `cancelSlash` (a ruling for the
  *   provider) or anybody's `expireSlash` (audit E-6). The part becomes
@@ -103,7 +105,7 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
           executableAt: event.executableAt.toISOString(),
         },
       });
-      // Into review, as an in-app objection would put it.
+      // DISPUTED: the arbiter rules on chain.
       await this.arbitration
         ?.fileDisputeFromChain(proposal.organizationId, proposal.id, {
           requestId: event.requestId,
@@ -138,6 +140,19 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
 
     if (part.chainEpoch === proposal.chainEpoch) {
       await this.mirrorParts(proposal, {});
+      // The arbiter's ruling is the decision on an EVM case: it moves the case
+      // to UPHELD, so the executor sends it at the event's executableAt.
+      await this.arbitration
+        ?.recordChainUphold(proposal.organizationId, proposal.id, {
+          arbiter: event.arbiter,
+          transactionHash: event.transactionHash,
+        })
+        .catch((error: unknown) => {
+          this.logger.error(
+            `slash case ${proposal.id} was upheld on chain but could not be marked upheld`,
+            error instanceof Error ? error.stack : String(error),
+          );
+        });
     }
 
     if (moved) {

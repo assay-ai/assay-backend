@@ -1379,4 +1379,144 @@ describe('ArbitrationService', () => {
       },
     );
   });
+
+  describe('an EVM case: the dispute and the ruling are on chain only', () => {
+    const EVM_ASSET = 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3';
+    const DOOR = new Date('2026-10-18T12:00:00Z');
+
+    function seedEvm(ctx: ReturnType<typeof build>, status: SlashProposalStatus) {
+      const dispute = seedDisputed(ctx);
+      Object.assign(ctx.proposals.rows.get('p1')!, {
+        status,
+        assetId: EVM_ASSET,
+        chainStatus: 'PENDING',
+        chainExecutableAt: DOOR,
+        disputeId: status === SlashProposalStatus.PROPOSED ? null : 'd_1',
+      });
+      return dispute;
+    }
+
+    it('refuses the in-app objection and names the on-chain deadline', async () => {
+      const ctx = build();
+      seedEvm(ctx, SlashProposalStatus.PROPOSED);
+
+      await expect(
+        ctx.service.fileDispute('org_1', 'p1', {
+          claimType: 'OTHER' as never,
+          reason: 'not ours',
+          evidence: [],
+          openedBy: 'agent_1',
+        }),
+      ).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_DISPUTE_ON_CHAIN_ONLY,
+        publicContext: { executableAt: DOOR.toISOString() },
+      });
+      expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.PROPOSED);
+    });
+
+    it('moves an on-chain dispute to DISPUTED with no platform deadline', async () => {
+      const ctx = build();
+      seedEvm(ctx, SlashProposalStatus.PROPOSED);
+      ctx.disputes.clear();
+
+      const moved = await ctx.service.fileDisputeFromChain('org_1', 'p1', {
+        requestId: 'ab'.repeat(32),
+        transactionHash: '0xabc',
+      });
+
+      expect(moved?.status).toBe(SlashProposalStatus.DISPUTED);
+      expect(moved?.platformDecisionDueAt ?? null).toBeNull();
+      expect([...ctx.disputes.values()][0].platformDueAt).toBeNull();
+    });
+
+    it.each([
+      [
+        'claim',
+        (ctx: ReturnType<typeof build>) => ctx.service.claim(ADJUDICATOR as never, 'org_1', 'p1'),
+      ],
+      [
+        'decide',
+        (ctx: ReturnType<typeof build>) =>
+          ctx.service.decide(ADJUDICATOR as never, 'org_1', 'p1', {
+            outcome: ArbitrationOutcome.OVERTURNED_GRIEFING,
+            reasonCodes: ['SINGLE_AGENT_CONCENTRATION'],
+            note: NOTE,
+          }),
+      ],
+      [
+        'second',
+        (ctx: ReturnType<typeof build>) =>
+          ctx.service.second(SECOND as never, 'org_1', 'p1', 'SIGNED', NOTE),
+      ],
+    ])('refuses the off-chain %s: the arbiter rules on chain', async (_name, act) => {
+      const ctx = build();
+      seedEvm(ctx, SlashProposalStatus.DISPUTED);
+
+      await expect(act(ctx)).rejects.toMatchObject({
+        errorCode: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
+      });
+      expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.DISPUTED);
+      expect(ctx.overrides.performed).toEqual([]);
+    });
+
+    it('refuses an S-8 extension', async () => {
+      const ctx = build();
+      seedEvm(ctx, SlashProposalStatus.PROPOSED);
+
+      await expect(
+        ctx.service.extendDeadline(
+          ADJUDICATOR as never,
+          'org_1',
+          'p1',
+          24,
+          'PROVIDER_REQUEST',
+          NOTE,
+        ),
+      ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN });
+    });
+
+    it("decides the case UPHELD on the arbiter's on-chain uphold and closes its dispute", async () => {
+      const ctx = build();
+      const dispute = seedEvm(ctx, SlashProposalStatus.DISPUTED);
+
+      expect(
+        await ctx.service.recordChainUphold('org_1', 'p1', {
+          arbiter: '0xAbC',
+          transactionHash: '0xdef',
+        }),
+      ).toBe(true);
+
+      const row = ctx.proposals.rows.get('p1')!;
+      expect(row).toMatchObject({
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.CHAIN_ARBITER,
+        outcome: null,
+      });
+      expect(dispute).toMatchObject({
+        state: 'REJECTED',
+        resolutionKind: ResolutionKind.CHAIN_ARBITER,
+        resolvedBy: 'chain:upholdSlash:0xabc',
+      });
+      // Idempotent: a re-read of the same event moves nothing.
+      expect(
+        await ctx.service.recordChainUphold('org_1', 'p1', {
+          arbiter: '0xabc',
+          transactionHash: null,
+        }),
+      ).toBe(false);
+    });
+
+    it('leaves a Solana case to its own decision', async () => {
+      const ctx = build();
+      seedDisputed(ctx);
+
+      expect(
+        await ctx.service.recordChainUphold('org_1', 'p1', {
+          arbiter: '0x1',
+          transactionHash: null,
+        }),
+      ).toBe(false);
+      expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.DISPUTED);
+    });
+  });
 });
