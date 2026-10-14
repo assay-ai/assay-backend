@@ -1,8 +1,17 @@
 import { Injectable } from '@nestjs/common';
 
 import { EgressHttpClient } from '@shared/network/egress/egress-http.client';
-import { isEgressError } from '@shared/network/egress/egress.errors';
-import { UNTRUSTED_EGRESS_POLICY, withLimits } from '@shared/network/egress/egress.policy';
+import {
+  EgressError,
+  EgressFailureKind,
+  isEgressError,
+} from '@shared/network/egress/egress.errors';
+import {
+  EgressPolicy,
+  UNTRUSTED_EGRESS_POLICY,
+  bindingEndpointProtocols,
+  withLimits,
+} from '@shared/network/egress/egress.policy';
 
 import {
   ProviderResponse,
@@ -80,7 +89,7 @@ export class EgressBindingInvoker implements BindingInvokerPort {
         // exist so a redirect chain cannot multiply the wait, and the router
         // has already reconciled `timeoutMs` against the request's total — so
         // the correct value for all three is the same one.
-        policy: withLimits(UNTRUSTED_EGRESS_POLICY, {
+        policy: withLimits(bindingPolicy(), {
           headersTimeoutMs: timeoutMs,
           bodyTimeoutMs: timeoutMs,
           totalTimeoutMs: timeoutMs,
@@ -110,6 +119,17 @@ export class EgressBindingInvoker implements BindingInvokerPort {
 }
 
 /**
+ * `UNTRUSTED_EGRESS_POLICY`, narrowed to https in production. Read per call so
+ * the rule covers rows saved before it existed, not just new DTOs.
+ */
+function bindingPolicy(): EgressPolicy {
+  return Object.freeze({
+    ...UNTRUSTED_EGRESS_POLICY,
+    allowedProtocols: Object.freeze([...bindingEndpointProtocols()]),
+  });
+}
+
+/**
  * `binding.endpoint` + the mapped path and query.
  *
  * The endpoint is the provider's own URL, unchanged, and may itself carry a
@@ -122,6 +142,19 @@ function buildUrl(endpoint: string, upstream: UpstreamRequest): string {
   const base = endpoint.replace(/\/+$/, '');
   const path = upstream.path ? `/${upstream.path.replace(/^\/+/, '')}` : '';
   const url = new URL(`${base}${path}`);
+
+  // Dot segments are resolved by `new URL`, so a mapped path can climb out of
+  // the endpoint's prefix while still carrying the provider's credentials.
+  // `interpolatePath` refuses `.`/`..` values; this is the backstop for any
+  // other route to the same place.
+  const prefix = new URL(base).pathname.replace(/\/+$/, '');
+  if (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) {
+    throw new EgressError(
+      EgressFailureKind.URL_INVALID,
+      `the mapped path leaves the endpoint's path prefix "${prefix}"`,
+      { url: url.href },
+    );
+  }
 
   for (const [name, value] of Object.entries(upstream.query)) {
     url.searchParams.set(name, value);

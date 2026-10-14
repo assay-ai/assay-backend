@@ -40,6 +40,19 @@ function parseCsvLine(line: string): string[] {
 }
 
 describe('csvField', () => {
+  // Review P-10: a field a spreadsheet would evaluate as a formula.
+  it.each(['=HYPERLINK("http://x")', '+1+1', '-2+3', '@SUM(A1)', '\tcmd'])(
+    'neutralises %j with a leading quote',
+    (value) => {
+      expect(parseCsvLine(csvField(value))[0]).toBe(`'${value}`);
+    },
+  );
+
+  it('leaves a plain signed amount alone', () => {
+    expect(csvField('-0.05')).toBe('-0.05');
+    expect(csvField(-12)).toBe('-12');
+  });
+
   it('leaves a plain value unquoted', () => {
     expect(csvField('tool-search-web')).toBe('tool-search-web');
   });

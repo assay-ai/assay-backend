@@ -1,5 +1,8 @@
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
-import { MCP_UNROUTABLE_REASON } from '@modules/mcp/constants/mcp.constants';
+import {
+  MCP_UNROUTABLE_REASON,
+  MCP_VERIFICATION_ENQUEUE_FAILED_REASON,
+} from '@modules/mcp/constants/mcp.constants';
 import { ResponseClass } from '@modules/tool/domain/classification';
 import { PricingMode } from '@modules/tool/ports/tool.types';
 import { McpFailureCode } from '@modules/mcp/services/mcp-tool-call.service';
@@ -131,8 +134,8 @@ describe('McpToolCallService — the paid call loop', () => {
     expect(enqueued.outputSchema).toBeDefined();
   });
 
-  it('still returns the result to the agent when the enqueue fails', async () => {
-    const { calls, intents } = harness(
+  it('still returns the result to the agent when the enqueue fails, and voids the hold', async () => {
+    const { calls, intents, ledger } = harness(
       { 'binding-provider-a': () => Promise.resolve(ok('forty-two')) },
       { settlementBehaviour: () => Promise.reject(new Error('durable store unavailable')) },
     );
@@ -140,16 +143,16 @@ describe('McpToolCallService — the paid call loop', () => {
     const outcome = await calls.call(SESSION, 'Search the web', ARGS);
 
     // A bookkeeping failure must never replace the agent's already-successful
-    // result: the data still comes back, and the receipt tells the truth —
-    // `VERIFYING`. There is no backstop underneath that (nothing reads
-    // `ledger_holds.expires_at`), so the hold is stuck until somebody retries
-    // the enqueue by hand — which is why the error is logged rather than
-    // swallowed.
+    // result: the data still comes back. Nothing will ever judge the intent
+    // and nothing reads `ledger_holds.expires_at`, so it is voided at once and
+    // the hold released rather than stranded in `VERIFYING` (review P-3).
     expect(outcome.kind).toBe('RESULT');
     if (outcome.kind !== 'RESULT') return;
     expect(outcome.output).toEqual({ answer: 'forty-two' });
-    expect(outcome.receipt.status).toBe(PaymentIntentStatus.VERIFYING);
-    expect(intents.only.status).toBe(PaymentIntentStatus.VERIFYING);
+    expect(outcome.receipt.status).toBe(PaymentIntentStatus.VOIDED);
+    expect(intents.only.status).toBe(PaymentIntentStatus.VOIDED);
+    expect(intents.only.statusReason).toBe(MCP_VERIFICATION_ENQUEUE_FAILED_REASON);
+    expect(ledger.kinds).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
   });
 
   it('records the provider only once the router has produced one', async () => {

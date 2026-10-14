@@ -26,6 +26,8 @@ export enum ProviderErrorCode {
   /** The accepted terms name a version that is not the one currently published. */
   PROVIDER_TERMS_VERSION_MISMATCH = 'PROVIDER_TERMS_VERSION_MISMATCH',
   PROVIDER_CONNECTIVITY_CHECK_FAILED = 'PROVIDER_CONNECTIVITY_CHECK_FAILED',
+  /** Too many tester runs or connectivity checks — in flight, or in the last minute. */
+  PROVIDER_EGRESS_RATE_LIMITED = 'PROVIDER_EGRESS_RATE_LIMITED',
   PROVIDER_STAKE_NOT_FOUND = 'PROVIDER_STAKE_NOT_FOUND',
   PROVIDER_STAKE_BELOW_MINIMUM = 'PROVIDER_STAKE_BELOW_MINIMUM',
   /**
@@ -269,6 +271,12 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
       `Endpoint failed the connectivity check` +
       `${context?.endpoint ? `: ${context.endpoint}` : ''}` +
       `${context?.detail ? ` (${context.detail})` : ''}`,
+  },
+  egressRateLimited: {
+    code: ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    statusCode: 429,
+    message: (context?: Record<string, any>) =>
+      `Too many outbound test calls${context?.reason ? ` (${context.reason})` : ''}; try again shortly`,
   },
   payoutChallengeNotFound: {
     code: ProviderErrorCode.PROVIDER_PAYOUT_CHALLENGE_NOT_FOUND,

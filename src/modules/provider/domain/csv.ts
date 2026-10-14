@@ -13,11 +13,23 @@
 export function csvField(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return '';
 
-  const text = String(value);
+  const text = neutraliseFormula(String(value));
   if (/[",\r\n]/.test(text)) {
     return `"${text.replace(/"/g, '""')}"`;
   }
   return text;
+}
+
+/**
+ * Prefix `'` to a field a spreadsheet would run as a formula (`=`, `+`, `-`,
+ * `@`, or a leading tab / carriage return) — CSV injection, OWASP's
+ * recommended neutralisation. A plain signed number (`-0.05`) is left alone:
+ * it is data, and a finance export must not turn amounts into text.
+ */
+function neutraliseFormula(text: string): string {
+  if (!/^[=+\-@\t\r]/.test(text)) return text;
+  if (/^[+-]?\d+(\.\d+)?$/.test(text)) return text;
+  return `'${text}`;
 }
 
 /** One CSV row (no trailing newline) from already-ordered field values. */
