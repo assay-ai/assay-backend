@@ -544,6 +544,25 @@ export class FakeStakeChain {
     rec.disputedAt = at;
   }
 
+  /**
+   * Test hook: `executeSlash` sent by somebody else (a keeper, a script, the
+   * provider) — the state moves exactly as for the backend's own send, and the
+   * `SlashExecuted` args are returned as the chain watcher would decode them.
+   */
+  executeExternally(requestId: string): Record<string, unknown> {
+    const logs: Log[] = [];
+    this.execute(this.state, `0x${norm(requestId)}` as `0x${string}`, logs);
+    const rec = this.state.records.get(norm(requestId))!;
+    return {
+      requestId: `0x${norm(requestId)}`,
+      provider: rec.provider,
+      applied: rec.applied,
+      agentAmount: (rec.applied * BigInt(this.params.slashAgentBps)) / 10_000n,
+      platformAmount: (rec.applied * BigInt(this.params.slashPlatformBps)) / 10_000n,
+      executedAt: rec.executedAt,
+    };
+  }
+
   /** Test hook: the arbiter's `upholdSlash` — `Pending` again from `executableAt`. */
   markUpheld(requestId: string, executableAt: bigint = this.now): void {
     const rec = this.state.records.get(norm(requestId));

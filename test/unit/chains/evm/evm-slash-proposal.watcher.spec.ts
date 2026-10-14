@@ -263,6 +263,48 @@ describe('EvmSlashProposalWatcher — alerts on slash records this platform did 
       expect(rechecked).toEqual(['0x00000000000000000000000000000000000000c1']);
     });
 
+    it('BUG-R13-D-03: hands an execution sent by anybody (SlashExecuted) to the slash domain', async () => {
+      const seen: unknown[] = [];
+      const rulings = {
+        recordDisputed: async () => true,
+        recordUpheld: async () => true,
+        recordCancelled: async () => true,
+        recordExecuted: async (event: unknown) => (seen.push(event), true),
+      };
+      const { watcher, alerts } = build({
+        head: 500n,
+        logs: [
+          {
+            eventName: 'SlashExecuted',
+            args: {
+              requestId: `0x${KNOWN}`,
+              provider: '0x00000000000000000000000000000000000000c1',
+              applied: 500_000n,
+              agentAmount: 300_000n,
+              platformAmount: 150_000n,
+              executedAt: 1_801_000_000n,
+            },
+            transactionHash: `0x${'5'.repeat(64)}`,
+            blockNumber: 104n,
+          },
+        ],
+        rulings,
+      });
+      await watcher.check();
+      expect(alerts).toEqual([]);
+      expect(seen).toEqual([
+        {
+          chainId: CHAIN,
+          requestId: KNOWN,
+          appliedMinor: '500000',
+          agentAmountMinor: '300000',
+          platformAmountMinor: '150000',
+          executedAt: new Date(1_801_000_000_000),
+          transactionHash: `0x${'5'.repeat(64)}`,
+        },
+      ]);
+    });
+
     it('does not advance the cursor when the mirror fails, so the range is re-read', async () => {
       const rulings = {
         recordDisputed: async () => {

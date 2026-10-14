@@ -225,7 +225,8 @@ export const X402_STAKE_SLASH_ABI = parseAbi([
  * The events `EvmSlashProposalWatcher` reads (review H-1, and the dispute
  * upgrade): `SlashProposed` to find records this platform did not plan,
  * `SlashDisputed`, `SlashUpheld` and `SlashCancelled` to mirror a provider's
- * on-chain dispute and the arbiter's ruling onto the case. Kept apart from
+ * on-chain dispute and the arbiter's ruling onto the case, and `SlashExecuted`
+ * to mirror an execution whoever sent it (BUG-R13-D-03). Kept apart from
  * {@link X402_STAKE_SLASH_ABI} so the slash WRITES stay reachable from the
  * slash executor only: this constant holds events and no function.
  */
@@ -234,6 +235,7 @@ export const X402_SLASH_WATCH_EVENTS_ABI = parseAbi([
   'event SlashDisputed(bytes32 indexed requestId, address indexed provider, uint64 disputedAt, uint64 executableAt)',
   'event SlashUpheld(bytes32 indexed requestId, address indexed provider, address indexed arbiter, uint64 executableAt)',
   'event SlashCancelled(bytes32 indexed requestId, address indexed provider, uint8 reason, uint64 released, uint64 pendingSlash, uint64 cancelledAt)',
+  'event SlashExecuted(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 applied, uint64 agentAmount, uint64 platformAmount, uint64 providerAmount, uint16 slashAgentBps, uint16 slashPlatformBps, uint64 released, uint64 pendingSlash, uint128 bonded, uint64 unbonding, uint64 executedAt, uint64 proposedAt)',
 ]);
 
 /**

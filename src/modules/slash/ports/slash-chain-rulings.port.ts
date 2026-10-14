@@ -39,11 +39,27 @@ export interface SlashChainCancelledEvent {
   readonly transactionHash: string | null;
 }
 
+/**
+ * `SlashExecuted`, whoever sent it — the backend's own executor, a keeper, a
+ * script or the provider (`executeSlash` is permissionless). Amounts are the
+ * event's, in minor units.
+ */
+export interface SlashChainExecutedEvent {
+  readonly chainId: ChainId;
+  readonly requestId: string;
+  readonly appliedMinor: string;
+  readonly agentAmountMinor: string;
+  readonly platformAmountMinor: string;
+  readonly executedAt: Date;
+  readonly transactionHash: string | null;
+}
+
 export interface SlashChainRulingsPort {
   /** Returns whether the request id belongs to a case this platform planned. */
   recordDisputed(event: SlashChainDisputedEvent): Promise<boolean>;
   recordUpheld(event: SlashChainUpheldEvent): Promise<boolean>;
   recordCancelled(event: SlashChainCancelledEvent): Promise<boolean>;
+  recordExecuted(event: SlashChainExecutedEvent): Promise<boolean>;
 }
 
 export const SLASH_CHAIN_RULINGS = 'SLASH_CHAIN_RULINGS';

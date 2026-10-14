@@ -302,6 +302,7 @@ describe('the vendored ABI matches the compiled contracts', () => {
       'SlashDisputed',
       'SlashUpheld',
       'SlashCancelled',
+      'SlashExecuted',
     ]);
     for (const [name, topic] of watched) expect(topic).toBe(slashTopics.get(name));
   });

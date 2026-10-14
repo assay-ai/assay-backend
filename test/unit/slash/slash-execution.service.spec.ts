@@ -2632,7 +2632,13 @@ describe('the counters report the chain, not the compare-and-swap', () => {
       returned: 0,
       voided: 0,
     });
-    expect(compensation.distribute).toHaveBeenCalledTimes(1);
+    // The external-execution backstop then records the execution beside the
+    // overturn (EXECUTED_AFTER_CLOSURE), and attributes the agent share again
+    // under the SAME idempotency key, which the ledger's unique index dedupes.
+    const keys = compensation.distribute.mock.calls.map(
+      ([request]: [{ signature: string }]) => request.signature,
+    );
+    expect(new Set(keys).size).toBe(1);
     expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.OVERTURNED);
   });
 });

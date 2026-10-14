@@ -295,6 +295,22 @@ export class FakeSlashProposals {
       .map((row) => ({ organizationId: row.organizationId, id: row.id }));
   }
 
+  /** Mirrors `SlashProposalRepository.findStandingPastDoor` — see that method's SQL. */
+  async findStandingPastDoor(now: Date, limit: number): Promise<ChainSweepRow[]> {
+    return [...this.rows.values()]
+      .filter(
+        (row) =>
+          ['PENDING', 'DISPUTED'].includes(row.chainStatus) &&
+          row.chainExecutableAt !== null &&
+          row.chainExecutableAt.getTime() <= now.getTime() &&
+          row.executedAt === null &&
+          row.status !== 'EXECUTING',
+      )
+      .sort((a, b) => (a.chainExecutableAt?.getTime() ?? 0) - (b.chainExecutableAt?.getTime() ?? 0))
+      .slice(0, limit)
+      .map((row) => ({ organizationId: row.organizationId, id: row.id }));
+  }
+
   /** Mirrors `SlashProposalRepository.findClosedStillPending` — see that method's SQL. */
   async findClosedStillPending(limit: number): Promise<ChainSweepRow[]> {
     return [...this.rows.values()]

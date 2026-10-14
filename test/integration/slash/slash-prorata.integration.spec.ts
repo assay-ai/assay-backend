@@ -555,6 +555,168 @@ describe('pro-rata EVM slash, against a real database', () => {
     });
   });
 
+  describe('BUG-R13-D-03: an execution sent by somebody else is mirrored', () => {
+    const rulings = () =>
+      new SlashChainRulingService(
+        services.partsRepository,
+        services.proposals,
+        services.lifecycle,
+        null,
+        services.execution,
+      );
+    const executedEvent = (args: Record<string, unknown>) => ({
+      chainId: CHAIN,
+      requestId: String(args.requestId).slice(2),
+      appliedMinor: String(args.applied),
+      agentAmountMinor: String(args.agentAmount),
+      platformAmountMinor: String(args.platformAmount),
+      executedAt: new Date(Number(args.executedAt) * 1000),
+      transactionHash: `0x${'e'.repeat(64)}`,
+    });
+    const kinds = async (proposalId: string) =>
+      (
+        (await dataSource.query(
+          `SELECT kind FROM slash_proposal_events WHERE proposal_id = $1 ORDER BY occurred_at`,
+          [proposalId],
+        )) as { kind: string }[]
+      ).map((row) => row.kind);
+
+    it('closes an UPHELD case EXECUTED when a keeper executes every part', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      expect(proposal.status).toBe('UPHELD');
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      for (const part of parts) {
+        await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
+      }
+      expect(await load(seeded)).toMatchObject({
+        status: 'EXECUTED',
+        chainStatus: 'EXECUTED',
+        appliedAmount: '250001',
+      });
+      expect((await load(seeded)).executedAt).not.toBeNull();
+      const after = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      expect(after.map((part) => part.chainStatus)).toEqual(['EXECUTED', 'EXECUTED', 'EXECUTED']);
+      expect((await kinds(proposal.id)).filter((kind) => kind === 'EXECUTED')).toHaveLength(1);
+      // Nothing left for the backend's own executor.
+      expect(await services.execution.executeDue(nowOf())).toEqual({
+        executed: 0,
+        voided: 0,
+        failed: 0,
+      });
+    });
+
+    it('closes a still PROPOSED case EXECUTED when its PENDING parts are executed on chain', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      expect(proposal).toMatchObject({ status: 'PROPOSED', chainStatus: 'PENDING' });
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      // One part first: the case is not done yet.
+      await rulings().recordExecuted(
+        executedEvent(chain.executeExternally(parts[0].chainRequestId)),
+      );
+      expect((await load(seeded)).status).toBe('PROPOSED');
+      for (const part of parts.slice(1)) {
+        await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
+      }
+      expect(await load(seeded)).toMatchObject({ status: 'EXECUTED', appliedAmount: '250001' });
+    });
+
+    it('books nothing twice when the backend’s own executor already mirrored it', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+      chain.now += BigInt(73 * 3600);
+      expect((await services.execution.executeDue(nowOf())).executed).toBe(1);
+      const proposal = await load(seeded);
+      const before = await kinds(proposal.id);
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      // The watcher sees the same SlashExecuted events afterwards.
+      for (const part of parts) {
+        const record = chain.record(part.chainRequestId)!;
+        await rulings().recordExecuted({
+          chainId: CHAIN,
+          requestId: part.chainRequestId,
+          appliedMinor: String(record.applied),
+          agentAmountMinor: part.agentAmount ?? '0',
+          platformAmountMinor: part.platformAmount ?? '0',
+          executedAt: new Date(Number(record.executedAt) * 1000),
+          transactionHash: part.executionSignature,
+        });
+      }
+      expect(await load(seeded)).toMatchObject({ status: 'EXECUTED', appliedAmount: '250001' });
+      expect(await kinds(proposal.id)).toEqual(before);
+      expect(services.ledgerDistributions).toEqual([]);
+    });
+
+    it('catches an external execution whose event the watcher never saw, on the reconcile pass', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      for (const part of parts) chain.executeExternally(part.chainRequestId); // no event mirrored
+      expect((await load(seeded)).status).toBe('PROPOSED');
+
+      await services.execution.reconcileExecuting(nowOf());
+
+      expect(await load(seeded)).toMatchObject({
+        status: 'EXECUTED',
+        chainStatus: 'EXECUTED',
+        appliedAmount: '250001',
+      });
+    });
+
+    it('keeps EXECUTED_AFTER_CLOSURE for a case closed in the app', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      await dataSource.query(
+        `UPDATE slash_proposals SET status = 'OVERTURNED', resolution_kind = 'AUTO_PLATFORM_MISS',
+           resolved_at = now() WHERE id = $1`,
+        [proposal.id],
+      );
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      for (const part of parts) {
+        await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
+      }
+      const after = await load(seeded);
+      expect(after).toMatchObject({ status: 'OVERTURNED', chainStatus: 'EXECUTED' });
+      expect(after.executedAt).not.toBeNull();
+      expect(await kinds(proposal.id)).toContain('EXECUTED_AFTER_CLOSURE');
+    });
+  });
+
   it('expires the still-pending part of an executed case on the reconcile pass', async () => {
     const seeded = await seedWindow(250_001n);
     await services.execution.proposeDue(nowOf());

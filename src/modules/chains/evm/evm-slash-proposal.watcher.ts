@@ -60,7 +60,12 @@ export interface EvmSlashWatchClient {
  * asked for.
  */
 export interface SlashProposedLog {
-  readonly eventName?: 'SlashProposed' | 'SlashDisputed' | 'SlashUpheld' | 'SlashCancelled';
+  readonly eventName?:
+    | 'SlashProposed'
+    | 'SlashDisputed'
+    | 'SlashUpheld'
+    | 'SlashCancelled'
+    | 'SlashExecuted';
   readonly args: {
     readonly requestId?: `0x${string}`;
     readonly provider?: `0x${string}`;
@@ -72,6 +77,10 @@ export interface SlashProposedLog {
     readonly arbiter?: `0x${string}`;
     readonly reason?: number;
     readonly cancelledAt?: bigint;
+    readonly applied?: bigint;
+    readonly agentAmount?: bigint;
+    readonly platformAmount?: bigint;
+    readonly executedAt?: bigint;
   };
   readonly transactionHash: `0x${string}` | null;
   readonly blockNumber: bigint | null;
@@ -211,7 +220,8 @@ export class EvmSlashProposalWatcher {
         (log) =>
           log.eventName === 'SlashDisputed' ||
           log.eventName === 'SlashUpheld' ||
-          log.eventName === 'SlashCancelled',
+          log.eventName === 'SlashCancelled' ||
+          log.eventName === 'SlashExecuted',
       ),
     );
     // Only after the comparison and its alerts: a failure above re-reads the
@@ -332,6 +342,19 @@ export class EvmSlashProposalWatcher {
           executableAt,
           transactionHash,
         });
+      } else if (log.eventName === 'SlashExecuted') {
+        // Whoever sent it: `executeSlash` is permissionless (BUG-R13-D-03).
+        known = await rulings.recordExecuted({
+          chainId,
+          requestId,
+          appliedMinor: (log.args.applied ?? 0n).toString(),
+          agentAmountMinor: (log.args.agentAmount ?? 0n).toString(),
+          platformAmountMinor: (log.args.platformAmount ?? 0n).toString(),
+          executedAt: new Date(Number(log.args.executedAt ?? 0n) * 1000),
+          transactionHash,
+        });
+        // An execution of a record nobody planned was already the proposal's CRITICAL.
+        if (!known) continue;
       } else {
         known = await rulings.recordCancelled({
           chainId,

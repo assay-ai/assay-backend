@@ -9,6 +9,7 @@ import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import {
   SlashChainCancelledEvent,
   SlashChainDisputedEvent,
+  SlashChainExecutedEvent,
   SlashChainRulingsPort,
   SlashChainUpheldEvent,
 } from '../ports/slash-chain-rulings.port';
@@ -274,6 +275,44 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
         { organizationId: proposal.organizationId, id: proposal.id },
         { chainStatus: ChainProposalStatus.CANCELLED, chainDisputedParts: 0 },
       );
+    }
+    return true;
+  }
+
+  /**
+   * `SlashExecuted`, whoever sent it (BUG-R13-D-03): `executeSlash` is
+   * permissionless, so a keeper, a script or the provider may pay a record the
+   * backend's executor has not reached yet. The part (or single record) is
+   * mirrored `EXECUTED` with the event's amounts, and the case follows through
+   * the same completion the executor uses (`mirrorChainExecution`).
+   *
+   * Idempotent with the executor's own mirror and with itself: a part already
+   * `EXECUTED` is not rewritten, and a case already `EXECUTED` (or in the
+   * executor's hands, `EXECUTING`) is not moved again.
+   */
+  async recordExecuted(event: SlashChainExecutedEvent): Promise<boolean> {
+    const part = await this.parts.findOneByChainRequestId(event.requestId);
+    const proposal = part
+      ? await this.proposals.findOneScoped(part.organizationId, part.proposalId)
+      : await this.proposals.findOneByChainRequestId(event.requestId);
+    if (!proposal) return false;
+
+    if (part && part.chainStatus !== 'EXECUTED') {
+      await this.parts.updatePart(part.organizationId, part.id, {
+        chainStatus: 'EXECUTED',
+        appliedAmount: event.appliedMinor,
+        agentAmount: event.agentAmountMinor,
+        platformAmount: event.platformAmountMinor,
+        executedAt: event.executedAt,
+        executionSignature: part.executionSignature ?? event.transactionHash,
+        chainLastError: null,
+      });
+    }
+    if (part && part.chainEpoch !== proposal.chainEpoch) return true;
+    if (part) await this.mirrorParts(proposal, {});
+
+    if (this.execution) {
+      await this.execution.mirrorChainExecution(proposal, event.transactionHash);
     }
     return true;
   }
