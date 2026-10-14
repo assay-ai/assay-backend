@@ -491,15 +491,22 @@ export class VerificationSettlementService {
   private async repairHoldEffect(organizationId: string, intent: PaymentIntent): Promise<void> {
     if (intent.holdReleasedAt !== null || !intent.holdId) return;
 
-    if (intent.rail === PaymentRail.RAIL_B_VOUCHER) {
-      // Not a lost commit. `holdReleasedAt === null` on a
-      // terminal intent used to mean exactly one thing — a worker died between
-      // the status change and the ledger call — and on rail B it now means a
-      // second: the hold is *awaiting redemption*, and `VoucherRedemptionJob`
-      // owns it.
+    if (
+      intent.rail === PaymentRail.RAIL_B_VOUCHER &&
+      intent.status === PaymentIntentStatus.SETTLED
+    ) {
+      // Not a lost commit. `holdReleasedAt === null` on a SETTLED intent used
+      // to mean exactly one thing — a worker died between the status change
+      // and the ledger call — and on rail B it now means a second: the hold is
+      // *awaiting redemption*, and `VoucherRedemptionJob` owns it.
       //
-      // The two are indistinguishable from here, so this refuses rather than
-      // guesses. Committing would credit the provider out of money still
+      // Only SETTLED (review 2026-10-15 P-8). A rail-B intent that ended
+      // REFUNDED or VOIDED is never redeemed — the queue reads SETTLED only —
+      // so its open hold is a lost RELEASE, and it falls through to be
+      // repaired like rail A's.
+      //
+      // The two SETTLED cases are indistinguishable from here, so this refuses
+      // rather than guesses. Committing would credit the provider out of money still
       // sitting in the buyer's escrow, and would make the earnings-vault
       // reconciliation check report a shortfall that is not real; releasing would hand the
       // buyer back a call that passed. Redemption reaches the same hold
@@ -549,8 +556,9 @@ export class VerificationSettlementService {
         providerAmount: intent.providerAmount,
         platformFee: intent.platformFee,
         intentId: intent.id,
-        // Rail A only — the branch above returns before this on rail B — so
-        // there is no chain transaction to name.
+        // Rail A only — the branch above returns before this for a SETTLED
+        // rail-B intent, the only COMMIT edge — so there is no chain
+        // transaction to name.
         chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
       });
     } else if (rule.holdEffect === HoldEffect.RELEASE) {
