@@ -25,6 +25,7 @@ import {
   PaymentIntent,
   PaymentIntentCallClass,
   PaymentIntentStatus,
+  PaymentIntentTransitionContext,
   PaymentRail,
   railName,
 } from '@modules/payment/ports/payment.types';
@@ -53,6 +54,7 @@ import {
   ProviderRouterService,
   RoutedCall,
   ToolQuote,
+  bindingPrice,
 } from '@modules/tool/services/provider-router.service';
 import { VerificationSettlementService } from '@modules/verification/services/verification-settlement.service';
 import { AppError } from '@shared/errors/app-errors';
@@ -934,8 +936,10 @@ export class McpToolCallService {
       // that has not happened, or never will, is wrong in the way that matters
       // most to the agent.
       charged: resolved.status === PaymentIntentStatus.SETTLED ? resolved.price : zero,
-      // What is reserved against the agent's balance pending the verdict.
-      held: isAwaitingVerdict(resolved.status) ? resolved.price : zero,
+      // What is reserved against the agent's balance pending the verdict: the
+      // hold, taken at the quote before the intent was re-priced to the
+      // binding that served.
+      held: isAwaitingVerdict(resolved.status) ? intent.price : zero,
       status: resolved.status,
       toolId: tool.id,
       // Read back off the row rather than off `routed`, so the receipt cannot
@@ -1048,6 +1052,8 @@ export class McpToolCallService {
         // classification this transition is recording — so there is nothing to
         // look up and nothing to re-derive.
         bindingId: routed.binding.id,
+        // The price of that binding, on the same edge — see `servedCharge`.
+        ...this.servedCharge(intent, routed),
         classification: routed.classification.responseClass,
         reason: MCP_FORWARDED_TO_VERIFICATION_REASON,
       },
@@ -1110,6 +1116,31 @@ export class McpToolCallService {
     }
 
     return verifying;
+  }
+
+  /**
+   * Rail A: what the buyer is charged — the price of the binding that served.
+   *
+   * The intent was created and held at the quote, the dearest eligible
+   * binding, because routing had not run. Now it has, so the intent is
+   * re-priced to `routed.binding`'s own price and fee, and settlement commits
+   * that and releases the rest of the hold. Never above the hold: a binding
+   * whose price rose between the quote and the call is charged at the hold,
+   * because the quote is the most the agent agreed to pay.
+   *
+   * Nothing on rail B, whose voucher already signs the offered binding's own
+   * price and pays exactly that on chain.
+   */
+  private servedCharge(
+    intent: PaymentIntent,
+    routed: RoutedCall,
+  ): Pick<PaymentIntentTransitionContext, 'charge'> {
+    if (intent.rail !== PaymentRail.RAIL_A_PER_CALL) return {};
+
+    const served = bindingPrice(routed.binding);
+    if (served.asset !== intent.price.asset || !MoneyUtil.lessThan(served, intent.price)) return {};
+
+    return { charge: { price: served, platformFee: this.platformFee(served) } };
   }
 
   /**

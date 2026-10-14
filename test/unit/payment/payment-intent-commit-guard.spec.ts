@@ -14,6 +14,7 @@ import {
   PaymentRail,
 } from '@modules/payment/ports/payment.types';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
+import { MoneyUtil } from '@utils/money.util';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { noBlocks } from '../helpers/blocklist';
@@ -416,5 +417,44 @@ describe('PaymentIntentService — a rail-B hold is retired by the redemption', 
       PaymentErrorCode.PAYMENT_INVALID_STATE_TRANSITION,
     );
     expect(ledger.credited).toEqual([]);
+  });
+});
+
+describe('PaymentIntentService — re-priced to the binding that served', () => {
+  it('writes the charge on the edge out of PROVIDER_EXECUTING and settles at it', async () => {
+    const { service, ledger, intents, organizationId, verifying } = harness();
+    // Held at the $1.00 quote.
+    const intent = verifying({ status: PaymentIntentStatus.PROVIDER_EXECUTING });
+
+    await service.transition(
+      organizationId,
+      intent.id,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+      PaymentIntentStatus.VERIFYING,
+      {
+        charge: {
+          price: MoneyUtil.of('600000', USDC, 6),
+          platformFee: MoneyUtil.of('60000', USDC, 6),
+        },
+      },
+    );
+
+    expect(intents.rows.get(intent.id)).toMatchObject({
+      priceAmount: '600000',
+      providerAmount: '540000',
+      platformFee: '60000',
+    });
+
+    await service.resolve(
+      organizationId,
+      intent.id,
+      PaymentIntentStatus.VERIFYING,
+      PaymentIntentStatus.SETTLED,
+    );
+
+    // The credit is the charge; the ledger releases the rest of the hold.
+    expect(ledger.credited).toHaveLength(1);
+    expect(ledger.credited[0].providerAmount).toEqual(MoneyUtil.of('540000', USDC, 6));
+    expect(ledger.credited[0].platformFee).toEqual(MoneyUtil.of('60000', USDC, 6));
   });
 });
