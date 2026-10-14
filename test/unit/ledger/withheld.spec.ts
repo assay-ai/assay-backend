@@ -8,7 +8,11 @@ import {
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
-import { WITHHELD_STATUSES, WithheldBucket } from '@modules/ledger/domain/withheld';
+import {
+  MAX_LISTED_ORPHANED_HOLD_IDS,
+  WITHHELD_STATUSES,
+  WithheldBucket,
+} from '@modules/ledger/domain/withheld';
 import { LedgerWithheldService } from '@modules/ledger/services/ledger-withheld.service';
 
 const ORG = 'org-11111111-1111-4111-8111-111111111111';
@@ -205,6 +209,75 @@ describe('LedgerWithheldService — reconcile', () => {
     expect(reconciliation.withheld.amount.amount).toBe('0');
     // Named, not absorbed: the identity still balances because the orphan is
     // its own term, not because it vanished into `withheld`.
+    expect(reconciliation.ok).toBe(true);
+  });
+
+  /**
+   * Final review N-8: a rail-A call served below its quote releases the
+   * remainder on a COMMITTED hold. That used to be listed as an orphan, one per
+   * call, so a real orphan was lost in the list and `GET /balances` grew
+   * without bound. It is its own term now, and the list is bounded.
+   */
+  it('counts a settlement remainder as its own term, not as an orphan', async () => {
+    const { service } = build({
+      intents: { sumWithheldByAssetAndStatus: jest.fn().mockResolvedValue([]) },
+      entries: {
+        sumEntryTypeByAsset: jest
+          .fn()
+          .mockResolvedValue([
+            { asset: USDC, decimals: USDC_DECIMALS, amount: 3_500n, entries: 2 },
+          ]),
+        findOrphanedHoldReleases: jest.fn().mockResolvedValue([
+          {
+            holdId: 'hold-cheaper',
+            asset: USDC,
+            decimals: USDC_DECIMALS,
+            amount: 3_000n,
+            settlementRemainder: true,
+          },
+          {
+            holdId: 'hold-orphan',
+            asset: USDC,
+            decimals: USDC_DECIMALS,
+            amount: 500n,
+            settlementRemainder: false,
+          },
+        ]),
+      },
+    });
+
+    const reconciliation = await service.reconcile(ORG, USDC, USDC_DECIMALS);
+
+    expect(reconciliation.orphanedHoldIds).toEqual(['hold-orphan']);
+    expect(reconciliation.orphanedHoldCount).toBe(1);
+    expect(reconciliation.orphanedReleases.amount).toBe('500');
+    expect(reconciliation.settlementRemainders.amount).toBe('3000');
+    expect(reconciliation.ok).toBe(true);
+  });
+
+  it('bounds the listed orphan ids, and still counts every one', async () => {
+    const orphans = Array.from({ length: MAX_LISTED_ORPHANED_HOLD_IDS + 50 }, (_, i) => ({
+      holdId: `hold-${i}`,
+      asset: USDC,
+      decimals: USDC_DECIMALS,
+      amount: 1n,
+      settlementRemainder: false,
+    }));
+    const { service } = build({
+      entries: {
+        sumEntryTypeByAsset: jest
+          .fn()
+          .mockResolvedValue([
+            { asset: USDC, decimals: USDC_DECIMALS, amount: BigInt(orphans.length), entries: 1 },
+          ]),
+        findOrphanedHoldReleases: jest.fn().mockResolvedValue(orphans),
+      },
+    });
+
+    const reconciliation = await service.reconcile(ORG, USDC, USDC_DECIMALS);
+
+    expect(reconciliation.orphanedHoldIds).toHaveLength(MAX_LISTED_ORPHANED_HOLD_IDS);
+    expect(reconciliation.orphanedHoldCount).toBe(orphans.length);
     expect(reconciliation.ok).toBe(true);
   });
 
