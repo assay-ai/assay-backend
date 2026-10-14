@@ -3,7 +3,12 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { ArrayMaxSize, IsArray, IsEnum, IsString, Length, MaxLength } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-import { AllowedWhileBlocked, CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
+import {
+  AllowedWhileBlocked,
+  CurrentSession,
+  HumanSessionGuard,
+  SessionAuthGuard,
+} from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { DisputeClaimType } from '../domain/arbitration';
