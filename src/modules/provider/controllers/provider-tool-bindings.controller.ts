@@ -2,7 +2,7 @@ import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@ne
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { JsonObject } from '@modules/tool/domain/mapping/mapping.types';
 
@@ -42,7 +42,10 @@ import { ProviderToolBindingsService } from '../services/provider-tool-bindings.
  */
 @ApiTags('Provider')
 @ApiBearerAuth()
-@UseGuards(SessionAuthGuard)
+// Person-only, reads included (review A-1): a binding is where buyer requests
+// go and what they cost. A machine credential that could re-point an endpoint
+// and publish it would receive every call for that tool.
+@UseGuards(SessionAuthGuard, HumanSessionGuard)
 @Controller('providers/me/tool-bindings')
 export class ProviderToolBindingsController {
   constructor(

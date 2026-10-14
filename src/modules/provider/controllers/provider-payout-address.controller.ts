@@ -1,7 +1,7 @@
 import { Body, Controller, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import {
@@ -26,7 +26,10 @@ import { ProviderPayoutAddressService } from '../services/provider-payout-addres
  */
 @ApiTags('Provider')
 @ApiBearerAuth()
-@UseGuards(SessionAuthGuard)
+// Person-only, reads included (review A-1): this decides where the provider
+// is paid, and a leaked machine token that could prove a wallet of its own
+// here would collect every payout on that chain.
+@UseGuards(SessionAuthGuard, HumanSessionGuard)
 @Controller('providers/me/payout-address')
 export class ProviderPayoutAddressController {
   constructor(private readonly payoutAddress: ProviderPayoutAddressService) {}

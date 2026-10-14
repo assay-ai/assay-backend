@@ -1,7 +1,7 @@
 import { Body, Controller, Get, Param, Post, Put, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiParam, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import {
@@ -48,7 +48,10 @@ export class ProviderConnectivityController {
     private readonly verification: ProviderVerificationService,
   ) {}
 
+  // Person-only (review A-1), like every provider write: the probe makes the
+  // platform call out to a URL the caller names.
   @Post('me/connectivity-check')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({
     summary:
       'Probe an endpoint from the platform egress IPs — "Check we can reach it". Never saves.',
@@ -68,7 +71,9 @@ export class ProviderConnectivityController {
     return { ...result };
   }
 
+  // Person-only (review A-1): the endpoint is where buyer traffic goes.
   @Put('me/endpoint')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({
     summary:
       'Declare and save the registration-time endpoint — rejected on the spot if unreachable',
