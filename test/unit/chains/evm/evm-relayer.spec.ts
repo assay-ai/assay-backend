@@ -1,4 +1,4 @@
-import { parseTransaction } from 'viem';
+import { keccak256, parseTransaction } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
 import { Alert, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
@@ -67,6 +67,35 @@ describe('EvmRelayer', () => {
     // The chain id is IN the signed payload (EIP-155), so a transaction signed
     // for the wrong chain cannot be replayed onto this one.
     expect(tx.chainId).toBe(46630);
+  });
+
+  /** REGRESSION (review 2026-10-15 P-1): the redemption job records the hash before it is sent. */
+  it('hands the signed transaction’s hash to beforeBroadcast before broadcasting it', async () => {
+    const { relayer, node } = build();
+    const seen: { hash: string; sentBefore: number }[] = [];
+
+    await relayer.sendCall({
+      ...call(),
+      beforeBroadcast: async (hash) => {
+        seen.push({ hash, sentBefore: node.sent.length });
+      },
+    });
+
+    expect(seen).toEqual([{ hash: keccak256(node.sent[0]), sentBefore: 0 }]);
+  });
+
+  it('broadcasts nothing when beforeBroadcast rejects', async () => {
+    const { relayer, node } = build();
+
+    await expect(
+      relayer.sendCall({
+        ...call(),
+        beforeBroadcast: async () => {
+          throw new Error('database down');
+        },
+      }),
+    ).rejects.toThrow('database down');
+    expect(node.sent).toHaveLength(0);
   });
 
   it('signs EIP-1559 and never a legacy gasPrice', async () => {

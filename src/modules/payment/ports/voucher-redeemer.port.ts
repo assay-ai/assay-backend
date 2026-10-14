@@ -83,6 +83,14 @@ export interface RedeemVoucherRequest {
    * voucher the chain will refuse is never broadcast.
    */
   readonly delegate?: AccountId | null;
+  /**
+   * Records the reference of a transaction carrying this voucher, BEFORE it is
+   * broadcast (review 2026-10-15 P-1). An implementation that can name its
+   * transaction before sending it calls this first and does not send if it
+   * rejects; {@link VoucherRedeemerPort.findLanding} is later handed back every
+   * reference recorded.
+   */
+  readonly recordAttempt?: (txRef: string) => Promise<void>;
 }
 
 /**
@@ -131,6 +139,19 @@ export interface VoucherRedeemerPort {
    * which is not a batch and is not pretending to be one.
    */
   redeemBatch(requests: readonly RedeemVoucherRequest[]): Promise<readonly RedeemOutcome[]>;
+
+  /**
+   * Which of `txRefs` — transactions recorded through
+   * {@link RedeemVoucherRequest.recordAttempt} — redeemed this voucher on
+   * chain, or `null` when none of them did. Throws when it cannot tell yet (one
+   * is still pending, or the RPC did not answer).
+   *
+   * Asked when a voucher comes back `VoucherSeqNotIncreasing`: that is also what
+   * a voucher that ALREADY landed gets, and absorbing it would pay the provider
+   * a second time (review 2026-10-15 P-1). Optional: a chain without it has
+   * that refusal absorbed as before.
+   */
+  findLanding?(request: RedeemVoucherRequest, txRefs: readonly string[]): Promise<string | null>;
 }
 
 export const VOUCHER_REDEEMER = 'VOUCHER_REDEEMER';
