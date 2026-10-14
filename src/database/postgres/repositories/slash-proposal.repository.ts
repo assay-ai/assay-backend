@@ -543,6 +543,35 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * `idx_slash_proposals_chain_disputed`.
    */
   /**
+   * Per provider, on `chainId`: what this platform's records that stand
+   * `DISPUTED` on chain still reserve (`chain_reserved`, else the planned
+   * penalty) — the current epoch's parts of partitioned cases and the single
+   * records of the others. The slash hold leaves it out of `pendingSlash`:
+   * filing a dispute does not affect routing (review S-6).
+   */
+  async findDisputedReservations(chainId: string): Promise<Map<string, bigint>> {
+    const rows = (await this.manager.query(
+      `SELECT provider_id AS "providerId", SUM(amount)::text AS "reserved" FROM (
+         SELECT proposal.provider_id, COALESCE(part.chain_reserved, part.penalty_amount) AS amount
+           FROM slash_proposal_parts part
+           JOIN slash_proposals proposal
+             ON proposal.id = part.proposal_id AND proposal.chain_epoch = part.chain_epoch
+          WHERE part.chain_status = 'DISPUTED'
+            AND proposal.asset_id LIKE $1
+         UNION ALL
+         SELECT proposal.provider_id, COALESCE(proposal.chain_reserved, proposal.penalty_amount)
+           FROM slash_proposals proposal
+          WHERE proposal.window_id IS NULL
+            AND proposal.chain_status = 'DISPUTED'
+            AND proposal.asset_id LIKE $1
+       ) disputed
+       GROUP BY provider_id`,
+      [`${chainId}/%`],
+    )) as { providerId: string; reserved: string }[];
+    return new Map(rows.map((row) => [row.providerId, BigInt(row.reserved)]));
+  }
+
+  /**
    * Per provider, on `chainId`: whether an upheld case of theirs has a record
    * due to execute (`UPHELD`, mirror `PENDING`, door open), and whether its
    * last execute attempt — the case's or one of its parts' — was refused

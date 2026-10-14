@@ -17,7 +17,11 @@ export enum SlashHoldReason {
    * 9f036a3), so nothing is collected until the window drains.
    */
   SLASH_WINDOW_FULL = 'SLASH_WINDOW_FULL',
-  /** `pendingSlash ≥ atRisk − penaltyAmount`: the free stake cannot back another penalty. */
+  /**
+   * `atRisk − pendingSlash < penaltyAmount`: the free stake cannot back
+   * another penalty. Reservations of records frozen by an on-chain dispute are
+   * left out of `pendingSlash` (see {@link SlashHoldStakeReading.disputedReserved}).
+   */
   STAKE_FULLY_RESERVED = 'STAKE_FULLY_RESERVED',
   /** `bonded < minimumStake`. */
   BONDED_BELOW_MINIMUM = 'BONDED_BELOW_MINIMUM',
@@ -32,6 +36,13 @@ export interface SlashHoldStakeReading {
   readonly penaltyAmount: bigint;
   /** `params.minimumStake`. */
   readonly minimumStake: bigint;
+  /**
+   * The part of `pendingSlash` reserved by this platform's records that stand
+   * `DISPUTED` on chain. Left out of the reservation check: filing a dispute
+   * does not affect routing (review S-6), even though the record keeps its
+   * reservation until the arbiter rules or the 30-day timeout ends it.
+   */
+  readonly disputedReserved?: bigint;
 }
 
 /** What the platform's own rows say about records waiting to execute. */
@@ -57,7 +68,11 @@ export function slashHoldReasons(
     reasons.push(SlashHoldReason.SLASH_WINDOW_FULL);
   }
 
-  if (stake.pendingSlash + stake.penaltyAmount >= atRisk) {
+  // Held only when one more full penalty no longer fits: free stake exactly
+  // equal to one penalty can still back it (review S-6).
+  const disputed = stake.disputedReserved ?? 0n;
+  const reserved = stake.pendingSlash > disputed ? stake.pendingSlash - disputed : 0n;
+  if (reserved + stake.penaltyAmount > atRisk) {
     reasons.push(SlashHoldReason.STAKE_FULLY_RESERVED);
   }
 
