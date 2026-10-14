@@ -99,9 +99,10 @@ has a deadline — see step 4b. `EXECUTING` cases are refused (`SLASH_INVALID_TR
 
 **Who may suspend alone.** From `PROPOSED`, `DISPUTED` and `UNDER_REVIEW` one operator suspends.
 From `AWAITING_SECOND` and `UPHELD` a second person has confirmed the penalty or is confirming it,
-so the suspension is two-person: send a second operator's token in `X-Operator-Approver`. The
-approver must hold `ADJ` or `ADJL` and have an authority limit that covers the penalty; without one
-the request is refused with `409 OPERATOR_SECOND_APPROVER_REQUIRED`.
+so the suspension is two-person: the call answers `202 { approvalId }` and suspends nothing yet. A
+second operator holding `ADJ` or `ADJL`, with an authority limit that covers the penalty, approves
+it in the Approvals inbox (`POST /operator/approvals/:approvalId/approve`), which suspends it then —
+re-checking the case as it is at that moment. See `operator-access.md`.
 
 ## 4. Compensate any slash that already executed — check `status`, not the clock
 
@@ -134,14 +135,14 @@ the application layer. So the real branch is:
      A signature that shows anything else is refused with `SLASH_COMPENSATION_NOT_CONFIRMED`
      and the case is untouched.
 
-  Step 3 is **two-person** (override code `S-5`): the second operator's session token goes in the
-  `X-Operator-Approver` header, and it must not be the same operator as the bearer token
-  (`chk_override_log_entries_no_self_approval` refuses it at the database even if a client tried).
-  Step 1 is not — it builds and writes nothing. The `S-5` approver must hold `ADJL` or `TRE`, and
-  their own authority limit must cover the amount deposited.
+  Step 3 is **two-person** (override code `S-5`): after the deposit is verified the call answers
+  `202 { approvalId }`, and a second operator approves it in the Approvals inbox — it must not be
+  the requester (`chk_override_log_entries_no_self_approval` refuses it at the database too), it
+  must hold `ADJL` or `TRE`, and its own authority limit must cover the amount deposited. The
+  deposit is verified again at approval. Step 1 is not two-person — it builds and writes nothing.
 
   A **fleet sweep** (`POST /operator/cases/:proposalId/sweep`, override code `S-11`) is two-person
-  the same way: its second approver must hold `ADJ` or `ADJL`.
+  the same way (queued, `202`): its second approver must hold `ADJ` or `ADJL`.
 
   For every two-person action the approver must be an active operator other than the actor, hold
   one of the row's approver roles, and — when the action has an amount — have an authority limit at
