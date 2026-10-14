@@ -98,6 +98,46 @@ export interface ReceiptsSummaryRow {
 }
 
 /**
+ * One paid call that ended without a charge, as the public Explorer reads it.
+ * Carries no identifier of the call, the buyer or the hold — see
+ * `PaymentIntentRepository.findRecentNotCharged`.
+ */
+export interface NotChargedCallRow {
+  readonly toolId: string;
+  readonly providerId: string | null;
+  readonly status: string;
+  readonly classification: string | null;
+  readonly verificationVerdict: string | null;
+  readonly asset: string;
+  readonly decimals: number;
+  readonly priceAmount: bigint;
+  readonly createdAt: Date;
+}
+
+/** Distinct buyers behind one tool's not-charged calls. A count, never an id. */
+export interface NotChargedToolBuyersRow {
+  readonly toolId: string;
+  readonly buyers: number;
+}
+
+/** Platform-wide totals for one asset over the Explorer's window. */
+export interface NotChargedTotalsRow {
+  readonly asset: string;
+  readonly decimals: number;
+  /** Paid calls with a hold that reached a final outcome, charged or not. */
+  readonly calls: number;
+  /** Distinct buying organizations behind `calls` — a count, never an id. */
+  readonly buyers: number;
+  readonly notChargedCalls: number;
+  /** The `REFUNDED` subset: the result failed verification. */
+  readonly failedCheckCalls: number;
+  readonly notChargedAmount: bigint;
+}
+
+/** Mirrors `PaymentIntentCallClass.PAID`, kept local like the statuses below. */
+const PAID_CALL_CLASS = 'PAID';
+
+/**
  * Mirrors `PaymentIntentStatus.SETTLED` / `.REFUNDED`. Kept as local literals
  * rather than an import of the payment domain's enum — this repository
  * already treats `status` as an opaque string everywhere else
@@ -1343,6 +1383,155 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       decimals: Number(row.decimals),
       awaitingRedemption: row.awaitingRedemption === true || row.awaitingRedemption === 'true',
       credited: row.credited === true || row.credited === 'true',
+    }));
+  }
+
+  /**
+   * The most recent paid calls that ended without a charge, platform-wide, for
+   * the public Explorer's "not charged" feed.
+   *
+   * **Deliberately cross-organization**, and there is no tenant to scope it to:
+   * the route is served with no session, and the claim it backs — *you do not
+   * pay for results you cannot use* — is a statement about the platform, not
+   * about any one buyer. What keeps that safe is the projection: tool, provider,
+   * the outcome columns, the listed price and the time. No intent id, call id,
+   * organization, agent, account, hold, body or transaction reference is
+   * selected, so none can leak through a later mapping mistake.
+   *
+   * "Not charged" is exactly {@link WITHHELD_STATUSES} with a hold, the same
+   * definition `GET /withheld` and the receipts summary use, restricted to
+   * `PAID` calls so a free call is never shown as money given back.
+   */
+  async findRecentNotCharged(
+    since: Date,
+    limit: number,
+    toolIds: readonly string[],
+  ): Promise<NotChargedCallRow[]> {
+    // Only tools the caller has cleared for publication (the k-anonymity rule
+    // lives in `PublicNotChargedService`). No tools, no rows — and no query.
+    if (toolIds.length === 0) return [];
+
+    const rows = await this.createQueryBuilder('intent')
+      .select('intent.toolId', 'toolId')
+      .addSelect('intent.providerId', 'providerId')
+      .addSelect('intent.status', 'status')
+      .addSelect('intent.classification', 'classification')
+      .addSelect('intent.verificationVerdict', 'verificationVerdict')
+      .addSelect('intent.assetId', 'asset')
+      .addSelect('intent.decimals', 'decimals')
+      .addSelect('intent.priceAmount', 'priceAmount')
+      .addSelect('intent.createdAt', 'createdAt')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.callClass = :paid', { paid: PAID_CALL_CLASS })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.status IN (:...statuses)', { statuses: WITHHELD_STATUSES })
+      .andWhere(`${CREATED_AT} >= :since`, { since })
+      .andWhere('intent.toolId IN (:...toolIds)', { toolIds })
+      .orderBy('intent.createdAt', 'DESC')
+      .limit(limit)
+      .getRawMany<{
+        toolId: string;
+        providerId: string | null;
+        status: string;
+        classification: string | null;
+        verificationVerdict: string | null;
+        asset: string;
+        decimals: string | number;
+        priceAmount: string;
+        createdAt: Date;
+      }>();
+
+    return rows.map((row) => ({
+      toolId: row.toolId,
+      providerId: row.providerId,
+      status: row.status,
+      classification: row.classification,
+      verificationVerdict: row.verificationVerdict,
+      asset: row.asset,
+      decimals: Number(row.decimals),
+      priceAmount: BigInt(row.priceAmount),
+      createdAt: new Date(row.createdAt),
+    }));
+  }
+
+  /**
+   * For each tool with a not-charged paid call since `since`: how many distinct
+   * buying organizations those calls came from. The input to the Explorer's
+   * k-anonymity rule — a tool's events are published only when enough
+   * different buyers stand behind them that no single buyer can be singled out.
+   *
+   * **Deliberately cross-organization**, for the reason given on
+   * {@link findRecentNotCharged}; the projection is a tool id and a count.
+   */
+  async countNotChargedBuyersByTool(since: Date): Promise<NotChargedToolBuyersRow[]> {
+    const rows = await this.createQueryBuilder('intent')
+      .select('intent.toolId', 'toolId')
+      .addSelect('COUNT(DISTINCT intent.organizationId)', 'buyers')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.callClass = :paid', { paid: PAID_CALL_CLASS })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.status IN (:...statuses)', { statuses: WITHHELD_STATUSES })
+      .andWhere(`${CREATED_AT} >= :since`, { since })
+      .groupBy('intent.toolId')
+      .getRawMany<{ toolId: string; buyers: string }>();
+
+    return rows.map((row) => ({ toolId: row.toolId, buyers: Number(row.buyers) }));
+  }
+
+  /**
+   * Per-asset totals behind the same feed: paid calls that reached a final
+   * outcome since `since`, how many of them were not charged, how many of those
+   * failed verification, and the listed value not charged.
+   *
+   * **Deliberately cross-organization**, for the reason given on
+   * {@link findRecentNotCharged}; the projection is counts and sums per asset,
+   * naming nobody.
+   */
+  async summarizeNotCharged(since: Date): Promise<NotChargedTotalsRow[]> {
+    const rows = await this.createQueryBuilder('intent')
+      .select('intent.assetId', 'asset')
+      .addSelect('intent.decimals', 'decimals')
+      .addSelect('COUNT(*)', 'calls')
+      .addSelect('COUNT(DISTINCT intent.organizationId)', 'buyers')
+      .addSelect(
+        'COUNT(*) FILTER (WHERE intent.status IN (:...withheldStatuses))',
+        'notChargedCalls',
+      )
+      .addSelect('COUNT(*) FILTER (WHERE intent.status = :refundedStatus)', 'failedCheckCalls')
+      .addSelect(
+        'COALESCE(SUM(CASE WHEN intent.status IN (:...withheldStatuses) ' +
+          'THEN intent.priceAmount ELSE 0 END), 0)',
+        'notChargedAmount',
+      )
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.callClass = :paid', { paid: PAID_CALL_CLASS })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.status IN (:...finalStatuses)', {
+        finalStatuses: [SETTLED_STATUS, ...WITHHELD_STATUSES],
+      })
+      .andWhere(`${CREATED_AT} >= :since`, { since })
+      .setParameters({ withheldStatuses: WITHHELD_STATUSES, refundedStatus: REFUNDED_STATUS })
+      .groupBy('intent.assetId')
+      .addGroupBy('intent.decimals')
+      .orderBy('intent.assetId', 'ASC')
+      .getRawMany<{
+        asset: string;
+        decimals: string | number;
+        calls: string;
+        buyers: string;
+        notChargedCalls: string;
+        failedCheckCalls: string;
+        notChargedAmount: string;
+      }>();
+
+    return rows.map((row) => ({
+      asset: row.asset,
+      decimals: Number(row.decimals),
+      calls: Number(row.calls),
+      buyers: Number(row.buyers),
+      notChargedCalls: Number(row.notChargedCalls),
+      failedCheckCalls: Number(row.failedCheckCalls),
+      notChargedAmount: BigInt(row.notChargedAmount),
     }));
   }
 

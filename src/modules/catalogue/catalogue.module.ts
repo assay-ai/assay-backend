@@ -2,10 +2,13 @@ import { Module } from '@nestjs/common';
 
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
+import { FreeTierModule } from '@modules/free-tier/free-tier.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { ToolModule } from '@modules/tool/tool.module';
 
 import { CatalogueService } from './services/catalogue.service';
+import { PublicCatalogueService } from './services/public-catalogue.service';
+import { PublicNotChargedService } from './services/public-not-charged.service';
 
 /**
  * The buyer's read model over the tool and provider domains.
@@ -25,8 +28,10 @@ import { CatalogueService } from './services/catalogue.service';
   // `ChainsModule` for `ENABLED_CHAINS` alone: this catalogue is anonymous, so
   // the `RoutingContext` it quotes with names every chain the deployment offers
   // rather than a buyer's.
-  imports: [ChainsModule, ToolModule, ProviderModule, BlocklistModule],
-  providers: [CatalogueService],
-  exports: [CatalogueService],
+  // `FreeTierModule` for `FREE_QUOTA_CONFIG`: a binding with no quota of its
+  // own grants the platform default, and the catalogue says which.
+  imports: [ChainsModule, ToolModule, ProviderModule, BlocklistModule, FreeTierModule],
+  providers: [CatalogueService, PublicCatalogueService, PublicNotChargedService],
+  exports: [CatalogueService, PublicCatalogueService, PublicNotChargedService],
 })
 export class CatalogueModule {}

@@ -9,11 +9,13 @@ import {
 } from '@database/postgres/repositories/sla-window.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
+import { FREE_QUOTA_CONFIG, FreeQuotaConfig } from '@modules/free-tier/config/free-quota.config';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { RoutingContext } from '@modules/tool/domain/routing';
 import { ProviderErrors } from '@modules/provider/errors/provider.errors';
+import { ProviderStatus } from '@modules/provider/ports/provider.types';
 import {
   CHAIN_ENROLMENT_SOURCE,
   ChainEnrolmentPort,
@@ -23,7 +25,7 @@ import {
   ProviderStakePort,
 } from '@modules/provider/ports/provider-stake.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { Tool } from '@modules/tool/ports/tool.types';
+import { PricingMode, Tool } from '@modules/tool/ports/tool.types';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
 
@@ -83,6 +85,7 @@ export class CatalogueService {
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
     private readonly blocklist: AccountBlocklistService,
+    @Inject(FREE_QUOTA_CONFIG) private readonly freeQuota: FreeQuotaConfig,
   ) {}
 
   /**
@@ -118,6 +121,10 @@ export class CatalogueService {
       // impossible state — and a card reading "unknown provider, $0.25 a call"
       // is worse than one fewer card.
       .filter((providerId) => rows.has(providerId))
+      // A SUSPENDED or UNBONDING provider takes no new traffic — the router
+      // refuses it — so listing it would be an invitation the platform cannot
+      // honour, the same rule that keeps a PAUSED binding off this list.
+      .filter((providerId) => rows.get(providerId)?.status === ProviderStatus.ACTIVE)
       .map((providerId) =>
         this.toProviderDto(
           rows.get(providerId) as ProviderEntity,
@@ -174,6 +181,13 @@ export class CatalogueService {
             name: names.get(binding.toolId) ?? binding.toolId,
             pricingMode: binding.pricingMode,
             price: money(binding),
+            // What the free tier would grant: the binding's own figure, else
+            // the platform default `FreeQuotaService` falls back to. Null for
+            // a PAID binding, which has no free tier at all.
+            freeCallsPerAgentPerDay:
+              binding.pricingMode === PricingMode.PAID
+                ? null
+                : (binding.freeQuotaPerAgent ?? this.freeQuota.defaultPerAgentDailyLimit),
           }),
         )
         .sort((a, b) => a.name.localeCompare(b.name)),
