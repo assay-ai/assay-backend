@@ -78,6 +78,25 @@ export function parseTrustProxyHops(raw: string | undefined): number {
   return hops;
 }
 
+/**
+ * Refuse to start the API in production with `API_TRUST_PROXY_HOPS` unset
+ * (review N-4). Unset there almost always means "forgot", and behind a
+ * balancer it turns every IP-keyed limit — the operator sign-in throttle, the
+ * public demo — into one bucket for everybody. An explicit `0` is a decision
+ * (no proxy in front) and is accepted.
+ */
+export function assertTrustProxyHopsConfigured(
+  raw = process.env.API_TRUST_PROXY_HOPS,
+  nodeEnv = process.env.NODE_ENV,
+): void {
+  if (nodeEnv === 'production' && (raw === undefined || raw.trim() === '')) {
+    throw new Error(
+      'API_TRUST_PROXY_HOPS must be set when NODE_ENV=production: the number of proxies ' +
+        'in front of the API, or 0 when there is none',
+    );
+  }
+}
+
 const appConfig = registerAs('app', () => {
   validateConfig(process.env, AppEnvVariables);
 
