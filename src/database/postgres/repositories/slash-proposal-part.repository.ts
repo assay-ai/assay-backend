@@ -66,6 +66,7 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
       agentAccount: string;
       beneficiaryAccount: string;
       windowId: string | null;
+      casePenaltyAmount: string;
     }[]
   > {
     return this.manager
@@ -85,6 +86,7 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
       .addSelect('part.agent_account', 'agentAccount')
       .addSelect('part.beneficiary_account', 'beneficiaryAccount')
       .addSelect('proposal.window_id', 'windowId')
+      .addSelect('proposal.penalty_amount', 'casePenaltyAmount')
       .where(`part.chain_status = 'DISPUTED'`)
       .orderBy('part.chain_disputed_at', 'ASC')
       .limit(limit)

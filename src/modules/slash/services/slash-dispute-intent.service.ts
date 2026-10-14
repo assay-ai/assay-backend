@@ -95,7 +95,12 @@ export class SlashDisputeIntentService {
       if (!this.partsService || bps === null || bps === undefined || !row.windowId) continue;
       const [found] = await this.partsService
         .beneficiaryEvidenceOf(
-          { windowId: row.windowId, assetId: row.assetId, providerId: row.providerId },
+          {
+            windowId: row.windowId,
+            assetId: row.assetId,
+            providerId: row.providerId,
+            penaltyAmount: String(row.casePenaltyAmount),
+          },
           [
             {
               chainRequestId: row.requestId,
@@ -120,6 +125,7 @@ export class SlashDisputeIntentService {
               payer: found.payer,
               failedCalls: found.failedCalls,
               paidAmount: found.paidMinor,
+              formulaShareAmount: found.formulaShareMinor,
               redeemedAmount: found.redeemedMinor,
               shareAmount: found.shareMinor,
               ok: found.ok,

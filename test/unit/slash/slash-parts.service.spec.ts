@@ -216,9 +216,23 @@ describe('SlashPartsService.propose', () => {
     expect(result).toMatchObject({ status: 'PENDING', reservedMinor: '300', executableAt: X0 });
   });
 
-  it('C5: refuses to sign when a beneficiary’s share is more than it paid for the failed calls', async () => {
-    // Penalty 300 split 200/100; the 60% shares are 120 and 60. Agent 1 paid
-    // only 100 for its failed calls.
+  it('C5: signs a genuine multiplier-2 case whose 60% shares are more than the payers paid', async () => {
+    // Failed spend 100 + 50 = 150; the formula penalty is 2 × 150 = 300, split
+    // 200/100. The beneficiaries' 60% (120, 60) exceed what they paid (100,
+    // 50) — by design of the formula, so the case must still be signed.
+    const { service, proposal, executor } = build([
+      [agent(1), '100'],
+      [agent(2), '50'],
+    ]);
+    await expect(service.propose(proposal, '0xprovider')).resolves.toMatchObject({
+      status: 'PENDING',
+    });
+    expect(executor.batches).toEqual([{ kind: 'propose', size: 2 }]);
+  });
+
+  it('C5: refuses a part that exceeds the payer’s formula share', async () => {
+    // The plan (weights 200/100) gives agent 1 a part of 200, but its vouchers
+    // for the failed calls say it paid 100 of 300: its formula share is 100.
     const { service, proposal, executor } = build(
       [
         [agent(1), '200'],
@@ -227,12 +241,14 @@ describe('SlashPartsService.propose', () => {
       undefined,
       [
         [agent(1), '100'],
-        [agent(2), '100'],
+        [agent(2), '200'],
       ],
     );
     await expect(service.propose(proposal, '0xprovider')).rejects.toMatchObject({
       errorCode: 'SLASH_BENEFICIARY_EVIDENCE_REFUSED',
-      message: expect.stringContaining('share 120 is more than the 100 it paid'),
+      message: expect.stringContaining(
+        'part 200 is more than the 100 the penalty formula gives it',
+      ),
     });
     expect(executor.batches).toEqual([]);
   });
@@ -246,17 +262,39 @@ describe('SlashPartsService.propose', () => {
     expect(executor.batches).toEqual([]);
   });
 
-  it('C5: reports the evidence per part, share within what was paid', async () => {
+  it('C5: reports the evidence per part: paid, formula share and payout', async () => {
     const { service, proposal, parts } = build([
       [agent(1), '200'],
       [agent(2), '100'],
     ]);
     await service.propose(proposal, '0xprovider');
     const evidence = await service.beneficiaryEvidenceOf(proposal, parts.rows as never, 6000);
-    expect(evidence.map((row) => [row.payer, row.paidMinor, row.shareMinor, row.ok])).toEqual([
-      [agent(1), '200', '120', true],
-      [agent(2), '100', '60', true],
+    expect(
+      evidence.map((row) => [
+        row.payer,
+        row.paidMinor,
+        row.formulaShareMinor,
+        row.shareMinor,
+        row.ok,
+      ]),
+    ).toEqual([
+      [agent(1), '200', '200', '120', true],
+      [agent(2), '100', '100', '60', true],
     ]);
+  });
+
+  it('C5: allows one minor unit of rounding per part, and no more', async () => {
+    const { service, proposal } = build([[agent(1), '300']]);
+    const part = (penalty: string) =>
+      ({
+        chainRequestId: 'a'.repeat(64),
+        agentAccount: agent(1),
+        beneficiaryAccount: agent(1),
+        penaltyAmount: penalty,
+      }) as never;
+    const [within] = await service.beneficiaryEvidenceOf(proposal, [part('301')], 6000);
+    const [beyond] = await service.beneficiaryEvidenceOf(proposal, [part('302')], 6000);
+    expect([within.ok, beyond.ok]).toEqual([true, false]);
   });
 
   it('merges two spellings of one EVM account into one beneficiary', async () => {

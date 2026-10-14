@@ -447,8 +447,8 @@ export class SlashExecutionService {
           code === 'SLASH_PLAN_EVIDENCE_MISMATCH'
             ? 'Nothing was signed: the stored slash plan does not match the window evidence. ' +
               'An operator must check the parts before this case can go on chain.'
-            : 'Nothing was signed: a beneficiary did not pay for the failed calls, or its ' +
-              'share is more than it paid for them (C5). An operator must check the parts ' +
+            : 'Nothing was signed: a beneficiary is not a payer of the failed calls, or its ' +
+              'part is more than the penalty formula gives it (C5). An operator must check the parts ' +
               'before this case can go on chain.',
         detail: { reason: error instanceof Error ? error.message : String(error) },
       });

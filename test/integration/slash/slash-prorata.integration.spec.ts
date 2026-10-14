@@ -120,8 +120,8 @@ describe('pro-rata EVM slash, against a real database', () => {
   const multicallSends = () =>
     chain.sent.filter((tx) => getAddress(tx.to) === getAddress(MULTICALL));
 
-  async function seedWindow(penalty: bigint, provider = PROVIDER, price = 100_000n) {
-    const p = (factor: bigint) => (price * factor) / 100_000n;
+  async function seedWindow(penalty: bigint, provider = PROVIDER) {
+    const p = (price: bigint) => price;
     return seedProRataCase(dataSource, {
       providerOrg: randomUUID(),
       stakeAuthority: `${CHAIN}:${provider}`,
@@ -270,8 +270,7 @@ describe('pro-rata EVM slash, against a real database', () => {
   });
 
   it('scales the whole plan to the per-attestation ceiling and records it', async () => {
-    // Priced so every payer paid more than its 60% share (C5).
-    const seeded = await seedWindow(2_500_000n, PROVIDER, 1_000_000n);
+    const seeded = await seedWindow(2_500_000n);
     await services.execution.proposeDue(nowOf());
     const proposal = await load(seeded);
     const parts = await services.partsRepository.findForEpoch(
@@ -464,18 +463,57 @@ describe('pro-rata EVM slash, against a real database', () => {
     expect((await load(seeded)).appliedAmount).toBe('250001');
   });
 
-  it('C5: refuses to sign a plan whose shares exceed what the payers paid, with a timeline entry', async () => {
-    const seeded = await seedWindow(2_500_000n);
+  it('C5: signs a genuine case at the normal prices and multiplier 2, though the 60% exceeds what was paid', async () => {
+    // Failed spend 300k + 100k + 100k = 500k; SLA_PENALTY_MULTIPLIER = 2 gives
+    // a penalty of 1,000,000, split 600k / 200k / 200k. A's 60% (360k) is more
+    // than the 300k it paid — the formula's own consequence, so it is signed.
+    const seeded = await seedWindow(1_000_000n);
     await services.execution.proposeDue(nowOf());
     const proposal = await load(seeded);
-    expect(proposal.chainStatus).not.toBe('PENDING');
-    expect(proposal.chainLastError).toBe('SLASH_BENEFICIARY_EVIDENCE_REFUSED');
-    expect(chain.sent).toHaveLength(0);
-    const kinds = (await dataSource.query(
-      `SELECT kind FROM slash_proposal_events WHERE proposal_id = $1`,
-      [proposal.id],
-    )) as { kind: string }[];
-    expect(kinds.map((row) => row.kind)).toContain('BENEFICIARY_REFUSED');
+    expect(proposal).toMatchObject({ chainStatus: 'PENDING', chainLastError: null });
+    const parts = await services.partsRepository.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      0,
+    );
+    expect(parts.map((part) => part.penaltyAmount)).toEqual(['200000', '600000', '200000']);
+  });
+
+  it('C5: refuses a tampered part that exceeds its payer’s formula share, and signs nothing', async () => {
+    const seeded = await seedWindow(1_000_000n);
+    const proposal = await load(seeded);
+    // A stored plan whose part for B (formula share 200k of 1,000,000) was
+    // raised to 400k at A's expense.
+    const row = (agent: string, weight: string, share: string, penalty: string) => ({
+      windowId: proposal.windowId as string,
+      agentAccount: agent,
+      beneficiaryAccount: agent,
+      weightAmount: weight,
+      uncappedShareAmount: share,
+      penaltyAmount: penalty,
+      planPenaltyAmount: '1000000',
+      planCappedTotal: '1000000',
+      capBinding: 'NONE',
+      chainRequestId: slashPartRequestId(
+        proposal.windowId as string,
+        proposal.chainRequestId,
+        agent,
+      ),
+      chainStatus: 'NONE',
+    });
+    await services.partsRepository.insertPlan(proposal.organizationId, proposal.id, 0, [
+      row(B, '100000', '400000', '400000'),
+      row(A, '300000', '400000', '400000'),
+      row(C, '100000', '200000', '200000'),
+    ] as never);
+    await services.execution.proposeDue(nowOf());
+    const after = await load(seeded);
+    expect(after.chainStatus).not.toBe('PENDING');
+    // The H-2 plan check and the C5 formula check both refuse it; H-2 runs first.
+    expect(after.chainLastError).toMatch(
+      /^SLASH_(PLAN_EVIDENCE_MISMATCH|BENEFICIARY_EVIDENCE_REFUSED)$/,
+    );
+    expect(multicallSends()).toHaveLength(0);
   });
 
   it('C4/C5: the arbiter queue shows the beneficiary evidence and the provider’s upheld violations', async () => {
@@ -511,6 +549,7 @@ describe('pro-rata EVM slash, against a real database', () => {
         payer: B,
         failedCalls: 1,
         paidAmount: '100000',
+        formulaShareAmount: '50000',
         shareAmount: '30000',
         ok: true,
       },
