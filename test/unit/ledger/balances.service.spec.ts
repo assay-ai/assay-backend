@@ -42,6 +42,8 @@ function emptyReconciliation(): WithheldReconciliation {
     holdReleaseTotal: zero,
     orphanedReleases: zero,
     orphanedHoldIds: [],
+    orphanedHoldCount: 0,
+    settlementRemainders: zero,
     ok: true,
     difference: '0',
   };

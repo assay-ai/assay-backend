@@ -107,7 +107,8 @@ export class LedgerWithheldService {
 
   /**
    * Both sides, folded into the honest identity
-   * `holdReleaseTotal == withheld + orphanedReleases` — see `domain/withheld.ts`.
+   * `holdReleaseTotal == withheld + settlementRemainders + orphanedReleases` — see
+   * `domain/withheld.ts`.
    */
   async reconcile(
     organizationId: string,
@@ -121,14 +122,20 @@ export class LedgerWithheldService {
       this.entries.findOrphanedHoldReleases(organizationId, period),
     ]);
 
-    const orphansForAsset = orphans.filter((orphan) => orphan.asset === asset);
-    const orphanedAtomic = orphansForAsset.reduce((total, orphan) => total + orphan.amount, 0n);
+    const forAsset = orphans.filter((orphan) => orphan.asset === asset);
+    const orphansForAsset = forAsset.filter((orphan) => !orphan.settlementRemainder);
+    const sum = (rows: typeof forAsset) => rows.reduce((total, row) => total + row.amount, 0n);
 
     return reconcileWithheld({
       withheld,
       holdReleaseTotal,
-      orphanedReleases: MoneyUtil.of(orphanedAtomic, asset, decimals),
+      orphanedReleases: MoneyUtil.of(sum(orphansForAsset), asset, decimals),
       orphanedHoldIds: orphansForAsset.map((orphan) => orphan.holdId),
+      settlementRemainders: MoneyUtil.of(
+        sum(forAsset.filter((row) => row.settlementRemainder)),
+        asset,
+        decimals,
+      ),
     });
   }
 }
