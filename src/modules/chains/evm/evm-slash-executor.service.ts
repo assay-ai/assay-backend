@@ -152,6 +152,14 @@ const ATTESTATION_VALIDITY_SECONDS = 600n;
 /** The chain's clock may trail this process's; `issuedAt > block.timestamp` reverts. */
 const ATTESTATION_BACKDATE_SECONDS = 60n;
 
+/**
+ * How long after `executableAt` a `Pending` record stays executable before
+ * `expireSlash` may reap it: the 7-day execution grace. The verifier key has to
+ * outlive the record for that whole span, because `executeSlash` re-checks it
+ * (review S-7).
+ */
+const RECORD_EXECUTION_GRACE_SECONDS = 7n * 86_400n;
+
 const SUBMITTER_IDENTITY = 'evm-slash-executor';
 const PROPOSE_ATTESTATION_PURPOSE = 'settlement.evm.propose_slash.attestation';
 
@@ -1098,6 +1106,7 @@ export class EvmSlashExecutor
     const chainId = request.chainId;
     const deployment = this.deployment(chainId);
     await this.assertBeneficiaryIsAnAgent(request);
+    await this.assertVerifierOutlivesRecord(chainId);
     const issuedAt = BigInt(Math.floor(this.config.now() / 1000)) - ATTESTATION_BACKDATE_SECONDS;
     const attestation: EvmSlashAttestation = {
       requestId: bytes32(request.requestId),
@@ -1133,6 +1142,39 @@ export class EvmSlashExecutor
         args: [attestation, toHex(signed.signature)],
       }),
     };
+  }
+
+  /**
+   * Refuse to sign a record the verifier key would not live to execute
+   * (review S-7): the key must outlive `now + slashDelaySeconds + the 7-day
+   * execution grace`, read live. A record signed later than that could never
+   * execute — `executeSlash` re-checks the key — and would sit on the
+   * provider's stake until it is expired. Refused retryably: the case is
+   * proposed once a rotated key signs.
+   */
+  private async assertVerifierOutlivesRecord(chainId: ChainId): Promise<void> {
+    const [verifier, delaySeconds] = await Promise.all([
+      this.verifierAddress(chainId),
+      this.slashDelaySeconds(chainId),
+    ]);
+    const key = (await this.client(chainId).readContract({
+      address: this.deployment(chainId).config,
+      abi: X402_CONFIG_ABI,
+      functionName: 'verifierKey',
+      args: [verifier],
+    })) as { expiresAt: bigint | number };
+    const expiresAt = BigInt(key.expiresAt);
+    const needed =
+      BigInt(Math.floor(this.config.now() / 1000)) +
+      BigInt(delaySeconds) +
+      RECORD_EXECUTION_GRACE_SECONDS;
+    if (expiresAt > needed) return;
+    throw ChainErrors.configValueInvalid({
+      variable: `the on-chain expiry of verifier key ${verifier} on ${chainId}`,
+      accepted:
+        `later than ${new Date(Number(needed) * 1000).toISOString()} (now + the slash delay + ` +
+        `the 7-day execution grace); rotate the key before proposing`,
+    });
   }
 
   /**

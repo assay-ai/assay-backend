@@ -15,8 +15,8 @@ import { EvmSlashRecordClient, readSlashRecord } from './evm-slash-record';
 export const EVM_VERIFIER_EXPIRY_CRON = '0 0 * * * *';
 /** Warn this long before a verifier key with open records expires (follow-up B5). */
 export const VERIFIER_EXPIRY_WARN_MS = 45 * 24 * 60 * 60 * 1000;
-/** Most open records read per pass. */
-export const VERIFIER_EXPIRY_MAX_RECORDS = 500;
+/** Open records read per page; a pass pages through all of them (review S-7). */
+export const VERIFIER_EXPIRY_PAGE_SIZE = 500;
 
 export const EVM_VERIFIER_EXPIRY_ALERTS = {
   EXPIRING: 'evm_verifier_key_expiring',
@@ -56,7 +56,12 @@ export class EvmVerifierExpiryMonitor {
 
   /** The keys warned about this pass, for tests and the log. */
   async check(now: Date = new Date()): Promise<{ chainId: ChainId; verifier: string }[]> {
-    const records = await this.parts.findOpenChainRecords(VERIFIER_EXPIRY_MAX_RECORDS);
+    const records: { requestId: string; assetId: string }[] = [];
+    for (let offset = 0; ; offset += VERIFIER_EXPIRY_PAGE_SIZE) {
+      const page = await this.parts.findOpenChainRecords(VERIFIER_EXPIRY_PAGE_SIZE, offset);
+      records.push(...page);
+      if (page.length < VERIFIER_EXPIRY_PAGE_SIZE) break;
+    }
     const byChain = new Map<ChainId, string[]>();
     for (const record of records) {
       const chainId = record.assetId.split('/')[0] as ChainId;

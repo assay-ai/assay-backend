@@ -98,25 +98,31 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
    * `DISPUTED`), across tenants, with its asset: the current epoch's parts of
    * partitioned cases and the single records of the others. For the
    * verifier-key expiry monitor (follow-up B5), which reads each record's
-   * verifier from the chain.
+   * verifier from the chain. One page, soonest `chain_executable_at` first
+   * (review S-7): the caller pages with `offset` until a short page.
    */
-  async findOpenChainRecords(limit: number): Promise<{ requestId: string; assetId: string }[]> {
+  async findOpenChainRecords(
+    limit: number,
+    offset = 0,
+  ): Promise<{ requestId: string; assetId: string }[]> {
     return (await this.manager.query(
       `SELECT request_id AS "requestId", asset_id AS "assetId" FROM (
-         SELECT part.chain_request_id AS request_id, proposal.asset_id
+         SELECT part.chain_request_id AS request_id, proposal.asset_id,
+                part.chain_executable_at AS executable_at
            FROM slash_proposal_parts part
            JOIN slash_proposals proposal
              ON proposal.id = part.proposal_id AND proposal.chain_epoch = part.chain_epoch
           WHERE part.chain_status IN ('PENDING', 'DISPUTED')
          UNION
-         SELECT proposal.chain_request_id, proposal.asset_id
+         SELECT proposal.chain_request_id, proposal.asset_id, proposal.chain_executable_at
            FROM slash_proposals proposal
           WHERE proposal.window_id IS NULL
             AND proposal.chain_status IN ('PENDING', 'DISPUTED', 'CANCEL_REQUESTED')
        ) open_records
        WHERE asset_id LIKE 'eip155:%'
-       LIMIT $1`,
-      [limit],
+       ORDER BY executable_at ASC NULLS LAST, request_id ASC
+       LIMIT $1 OFFSET $2`,
+      [limit, offset],
     )) as { requestId: string; assetId: string }[];
   }
 
