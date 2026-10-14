@@ -377,6 +377,7 @@ export class FakeSlashProposals {
       .filter(
         (row) =>
           !['OVERTURNED', 'REVERSED', 'WAIVED', 'CANCELLED'].includes(row.status) &&
+          !String(row.assetId).startsWith('eip155:') &&
           row.rootCauseKey === defectKey &&
           row.proposedAt >= from &&
           row.proposedAt <= to,

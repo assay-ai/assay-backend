@@ -1459,6 +1459,24 @@ describe('ArbitrationService', () => {
       expect(ctx.overrides.performed).toEqual([]);
     });
 
+    it.each([SlashProposalStatus.PROPOSED, SlashProposalStatus.UPHELD])(
+      'N-2: refuses an S-1 suspension from %s: only the arbiter cancels an EVM record',
+      async (status) => {
+        const ctx = build();
+        seedEvm(ctx, status);
+
+        await expect(
+          ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE),
+        ).rejects.toMatchObject({
+          errorCode: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
+          statusCode: 409,
+          message: expect.stringContaining('cancelSlash'),
+        });
+        expect(ctx.proposals.rows.get('p1')!).toMatchObject({ status, chainStatus: 'PENDING' });
+        expect(ctx.overrides.performed).toEqual([]);
+      },
+    );
+
     it('refuses an S-8 extension', async () => {
       const ctx = build();
       seedEvm(ctx, SlashProposalStatus.PROPOSED);
