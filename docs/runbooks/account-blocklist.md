@@ -86,7 +86,9 @@ anything on chain, are for the on-chain blacklist.
 ## 3. Lift
 
 `POST /operator/blocks/:id/unblock`, override code **`A-10`**, roles `ADJL` or `SRE`, **two
-person**: a second operator's bearer token in `X-Operator-Approver`, holding **`ADJL`**.
+person**: the call answers `202 { approvalId }` and lifts nothing yet; a second operator holding
+**`ADJL`** approves it with their own sign-in in the console's Approvals inbox
+(`POST /operator/approvals/:approvalId/approve`). See `operator-access.md`.
 
 ```json
 { "reasonCode": "KEY_ROTATED", "note": "<at least 20 characters>" }
