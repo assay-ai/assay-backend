@@ -61,6 +61,25 @@ describe('McpCatalogueService — tools/list carries the price', () => {
     expect(price.display).toBe('$0.05');
   });
 
+  it('says "up to" the quote when more than one binding could serve the call', async () => {
+    const { catalogue } = buildMcpHarness({
+      bindings: [
+        buildBinding('provider-a'),
+        buildBinding('provider-b', { priceAmount: usdc('0.10').amount }),
+      ],
+      providers: [buildProvider('provider-a'), buildProvider('provider-b')],
+      invoker,
+    });
+
+    const [descriptor] = await catalogue.listTools();
+    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+
+    // The amount is the most a call can cost — what it is held for. The
+    // charge is the price of whichever binding serves, so the display says so.
+    expect(price.amount).toBe(usdc('0.10').amount);
+    expect(price.display).toBe('up to $0.1');
+  });
+
   /**
    * The reason `DUPLICATED_INTO_META` exists.
    *
