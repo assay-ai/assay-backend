@@ -152,6 +152,26 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
     });
   }
 
+  /** The forged-slash watcher's cursor on `chainId` (review S-4), or `null` before its first read. */
+  async findSlashWatchCursor(chainId: string): Promise<bigint | null> {
+    const state = await this.findOne({
+      select: { id: true, slashWatchCursorBlock: true },
+      where: { chainId },
+    });
+    return state?.slashWatchCursorBlock == null ? null : BigInt(state.slashWatchCursorBlock);
+  }
+
+  async saveSlashWatchCursor(chainId: string, block: bigint): Promise<void> {
+    await this.manager.transaction(async (manager) => {
+      const state = await this.lockState(manager, chainId);
+      await manager.update(
+        EvmChainStateEntity,
+        { id: state.id },
+        { slashWatchCursorBlock: block.toString() },
+      );
+    });
+  }
+
   async recordError(chainId: string, message: string): Promise<void> {
     await this.manager.transaction(async (manager) => {
       const state = await this.lockState(manager, chainId);
