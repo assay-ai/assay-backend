@@ -20,15 +20,12 @@ const CHALLENGE_PREFIX = 'operator:auth:challenges:';
 /** The throttle key for a client address. */
 export const ipKey = (ip: string): string => `ip:${ip}`;
 
-/** The throttle key for a wallet, lower-case. */
-export const walletKey = (address: string): string => `wallet:${address.toLowerCase()}`;
-
 /**
  * Counts failed operator sign-ins and refused session tokens, in Redis.
  *
- * Keyed by client address (`ipKey`) for everything, and by wallet
- * (`walletKey`) for sign-in verifications, so one guesser cannot spread across
- * many addresses against one wallet nor many wallets from one address.
+ * Keyed by client address (`ipKey`) only. Never by wallet: a wallet key can be
+ * driven by anyone who names that wallet, which turns the count into a lockout
+ * of that operator, and a signature cannot be guessed anyway.
  *
  * A fixed window is enough here: the control is "slow a guesser down and make
  * it visible", not a spend limit.
