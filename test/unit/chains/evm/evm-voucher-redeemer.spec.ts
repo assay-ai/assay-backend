@@ -1,4 +1,10 @@
-import { decodeFunctionData, getAddress, toFunctionSelector } from 'viem';
+import {
+  decodeFunctionData,
+  encodeAbiParameters,
+  encodeEventTopics,
+  getAddress,
+  toFunctionSelector,
+} from 'viem';
 
 import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
 import { EvmReaderClient } from '@modules/chains/evm/evm-escrow-balance-reader.service';
@@ -667,6 +673,117 @@ describe('EvmVoucherRedeemer', () => {
         RedeemOutcomeKind.UNREDEEMABLE,
         RedeemOutcomeKind.REDEEMED,
       ]);
+    });
+  });
+
+  /**
+   * REGRESSION (review 2026-10-15 P-1): `VoucherSeqNotIncreasing` is also what
+   * a voucher that already landed gets. The redeemer records each transaction
+   * before its broadcast, and can say afterwards whether one of them redeemed
+   * this voucher — so the job commits it instead of absorbing it.
+   */
+  describe('a landing this process did not observe', () => {
+    it('records the transaction on the voucher before it is broadcast', async () => {
+      const { redeemer, sendCall } = harness();
+      const recordAttempt = jest.fn().mockResolvedValue(undefined);
+      await redeemer.redeem(request(0, { recordAttempt }));
+      const call = sendCall.mock.calls[0][0];
+      expect(recordAttempt).not.toHaveBeenCalled();
+      await call.beforeBroadcast?.(`0x${'aa'.repeat(32)}`);
+      expect(recordAttempt).toHaveBeenCalledWith(`0x${'aa'.repeat(32)}`);
+    });
+
+    it('records one batch transaction on every voucher it carries', async () => {
+      const { redeemer, sendCall } = harness();
+      const first = jest.fn().mockResolvedValue(undefined);
+      const second = jest.fn().mockResolvedValue(undefined);
+      await redeemer.redeemBatch([
+        request(0, { recordAttempt: first }),
+        request(1, { recordAttempt: second }),
+      ]);
+      await sendCall.mock.calls[0][0].beforeBroadcast?.(`0x${'bb'.repeat(32)}`);
+      expect(first).toHaveBeenCalledWith(`0x${'bb'.repeat(32)}`);
+      expect(second).toHaveBeenCalledWith(`0x${'bb'.repeat(32)}`);
+    });
+
+    const LANDED = `0x${'01'.repeat(32)}` as const;
+    const REVERTED = `0x${'02'.repeat(32)}` as const;
+    const PENDING = `0x${'03'.repeat(32)}` as const;
+    const DROPPED = `0x${'04'.repeat(32)}` as const;
+
+    function redeemedLog(payer: `0x${string}`, seq: bigint, requestHash: `0x${string}`) {
+      return {
+        address: DEPLOYMENT.escrow,
+        topics: encodeEventTopics({
+          abi: X402_ESCROW_ABI,
+          eventName: 'VoucherRedeemed',
+          args: { payer, provider: getAddress(PROVIDER) },
+        }) as [`0x${string}`, ...`0x${string}`[]],
+        data: encodeAbiParameters(
+          [
+            { type: 'bytes32' },
+            { type: 'bytes32' },
+            { type: 'uint64' },
+            { type: 'uint64' },
+            { type: 'uint64' },
+            { type: 'uint16' },
+            { type: 'uint64' },
+          ],
+          [requestHash, `0x${'ab'.repeat(32)}`, 1_000_000n, 120_000n, seq, 1_200, 0n],
+        ),
+      };
+    }
+
+    function chainWith(logsFor: (hash: string) => ReturnType<typeof redeemedLog>[]) {
+      const notFound = (name: string) => Object.assign(new Error('could not be found'), { name });
+      const client = {
+        readContract: async () => undefined,
+        multicall: async () => [],
+        getTransactionReceipt: async ({ hash }: { hash: string }) => {
+          if (hash === PENDING || hash === DROPPED) {
+            throw notFound('TransactionReceiptNotFoundError');
+          }
+          return { status: hash === REVERTED ? 'reverted' : 'success', logs: logsFor(hash) };
+        },
+        getTransaction: async ({ hash }: { hash: string }) => {
+          if (hash === DROPPED) throw notFound('TransactionNotFoundError');
+          return {};
+        },
+      };
+      return new EvmVoucherRedeemer(
+        new Map([[TESTNET, client as unknown as EvmReaderClient]]),
+        new Map([[TESTNET, DEPLOYMENT]]),
+        {} as EvmRelayerPort,
+        { emit: async () => undefined } as unknown as AlertPort,
+        { now: () => NOW * 1000 },
+      );
+    }
+
+    const requestHash = `0x${'cd'.repeat(32)}` as const;
+
+    it('names the mined transaction that emitted VoucherRedeemed for this payer and seq', async () => {
+      const redeemer = chainWith((hash) =>
+        hash === LANDED ? [redeemedLog(payerAddress(0), 10n, requestHash)] : [],
+      );
+      await expect(redeemer.findLanding(request(0), [DROPPED, REVERTED, LANDED])).resolves.toBe(
+        LANDED,
+      );
+    });
+
+    it('answers null when no recorded transaction redeemed this voucher', async () => {
+      // A landed transaction for ANOTHER seq, and one for another payer, are not this one.
+      const redeemer = chainWith(() => [
+        redeemedLog(payerAddress(0), 11n, requestHash),
+        redeemedLog(payerAddress(1), 10n, requestHash),
+      ]);
+      await expect(redeemer.findLanding(request(0), [LANDED, REVERTED, DROPPED])).resolves.toBe(
+        null,
+      );
+    });
+
+    it('cannot tell while a recorded transaction is still pending', async () => {
+      const redeemer = chainWith(() => []);
+      await expect(redeemer.findLanding(request(0), [PENDING])).rejects.toThrow(/pending/);
     });
   });
 });

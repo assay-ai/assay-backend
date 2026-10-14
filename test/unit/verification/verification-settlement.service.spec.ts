@@ -832,6 +832,61 @@ describe('VerificationSettlementService.judgeAndSettle', () => {
     expect(intents.rows.get(INTENT_ID)?.holdReleasedAt).not.toBeNull();
   });
 
+  /**
+   * REGRESSION (review 2026-10-15 P-8): the repair skipped EVERY rail-B intent
+   * as "awaiting redemption", which is true only of SETTLED. A rail-B intent
+   * that reached REFUNDED or VOIDED and then lost its release kept the buyer's
+   * money held for good.
+   */
+  it.each([
+    [PaymentIntentStatus.REFUNDED, VerdictStatus.FAIL, VerdictOutcome.REFUND],
+    [PaymentIntentStatus.VOIDED, VerdictStatus.MISAPPLIED, VerdictOutcome.VOID],
+  ])('releases a rail-B hold left open on %s', async (status, verdictStatus, settlementOutcome) => {
+    const { service, ledger, intents, records } = harness();
+    intents.seed(baseIntent({ status, rail: PaymentRail.RAIL_B_VOUCHER, holdReleasedAt: null }));
+    records.seedPending(INTENT_ID, {
+      state: VerificationRecordState.JUDGED,
+      verdictStatus,
+      decisionPolicyId: 'decision-1',
+      decisionPolicyVersion: 1,
+      evaluatedAt: new Date(),
+      stages: [],
+      settlementOutcome,
+    });
+
+    await service.judgeAndSettle(ORG, INTENT_ID);
+
+    expect(ledger.appliedReleases).toBe(1);
+    expect(ledger.appliedCommits).toBe(0);
+    expect(intents.rows.get(INTENT_ID)?.holdReleasedAt).not.toBeNull();
+  });
+
+  it('still leaves a SETTLED rail-B hold to the redemption job', async () => {
+    const { service, ledger, intents, records } = harness();
+    intents.seed(
+      baseIntent({
+        status: PaymentIntentStatus.SETTLED,
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        holdReleasedAt: null,
+      }),
+    );
+    records.seedPending(INTENT_ID, {
+      state: VerificationRecordState.JUDGED,
+      verdictStatus: VerdictStatus.PASS,
+      decisionPolicyId: 'decision-1',
+      decisionPolicyVersion: 1,
+      evaluatedAt: new Date(),
+      stages: [],
+      settlementOutcome: VerdictOutcome.SETTLE,
+    });
+
+    await service.judgeAndSettle(ORG, INTENT_ID);
+
+    expect(ledger.appliedReleases).toBe(0);
+    expect(ledger.appliedCommits).toBe(0);
+    expect(intents.rows.get(INTENT_ID)?.holdReleasedAt).toBeNull();
+  });
+
   it('drops the wakeup when no record exists, without throwing', async () => {
     const { service, decide } = harness();
 

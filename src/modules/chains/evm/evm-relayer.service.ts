@@ -1,3 +1,4 @@
+import { keccak256 } from 'viem';
 import { PrivateKeyAccount, privateKeyToAccount } from 'viem/accounts';
 
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
@@ -166,6 +167,7 @@ export class EvmRelayer implements EvmRelayerPort {
       call.chainId,
       { to, data: call.data, value: 0n, gas: call.gasLimit },
       call.boundQueueWait ? Date.now() + this.timing.maxQueueWaitMs : null,
+      call.beforeBroadcast,
     );
   }
 
@@ -190,6 +192,7 @@ export class EvmRelayer implements EvmRelayerPort {
     tx: { to: `0x${string}`; data?: `0x${string}`; value: bigint; gas: bigint },
     /** Epoch ms after which this send is given up unsent, or null to wait its turn however long. */
     sendBy: number | null = null,
+    beforeBroadcast?: (hash: `0x${string}`) => Promise<void>,
   ): Promise<EvmRelayResult> {
     const previous = this.queues.get(chainId) ?? Promise.resolve();
     const queuedAt = Date.now();
@@ -198,7 +201,7 @@ export class EvmRelayer implements EvmRelayerPort {
         // Nothing signed, nothing broadcast: a definite "did not happen".
         throw ChainErrors.relayNotSent({ waitedMs: Date.now() - queuedAt });
       }
-      return this.sendNow(chainId, tx);
+      return this.sendNow(chainId, tx, beforeBroadcast);
     };
     const result = previous.then(turn, turn);
     this.queues.set(
@@ -211,6 +214,7 @@ export class EvmRelayer implements EvmRelayerPort {
   private async sendNow(
     chainId: ChainId,
     tx: { to: `0x${string}`; data?: `0x${string}`; value: bigint; gas: bigint },
+    beforeBroadcast?: (hash: `0x${string}`) => Promise<void>,
   ): Promise<EvmRelayResult> {
     const client = this.clientFor(chainId);
     const account = this.accountFor(chainId);
@@ -234,6 +238,12 @@ export class EvmRelayer implements EvmRelayerPort {
       type: 'eip1559',
     })) as `0x${string}`;
 
+    // The hash is the signed bytes' keccak, known before anything is sent. A
+    // caller that records it first can find the transaction again if this
+    // process never sees the receipt.
+    if (beforeBroadcast) {
+      await beforeBroadcast(keccak256(serializedTransaction));
+    }
     const hash = await client.sendRawTransaction({ serializedTransaction });
     // An explicit timeout, the one `relayedSendBudgetMs` counts on.
     const receipt = await client.waitForTransactionReceipt({
