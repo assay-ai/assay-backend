@@ -25,6 +25,15 @@ export interface McpSession {
    */
   readonly credentialId: string;
 
+  /**
+   * True only when {@link credentialId} is the id of a stored
+   * `agent_credentials` row — set by `DbCredentialMcpSessionSource` and no
+   * other source. A config-file machine token is also `AGENT`, but its id is
+   * a free-form label, so anything that writes or looks up the credential by
+   * id reads it through {@link storedCredentialIdOf} (review N-1).
+   */
+  readonly storedCredential?: boolean;
+
   readonly organizationId: string;
   readonly agentId: string;
   /** CAIP-10. The ledger account this session's calls are charged to. */
@@ -66,6 +75,15 @@ export interface McpSession {
    * session.
    */
   readonly blocked?: SessionBlock | null;
+}
+
+/**
+ * The `agent_credentials.id` behind the session, or null when no stored
+ * credential backs it: a person's login, or a config-file token (person or
+ * machine), whose `credentialId` names no row and is not a uuid.
+ */
+export function storedCredentialIdOf(session: McpSession): string | null {
+  return session.storedCredential === true ? session.credentialId : null;
 }
 
 /** Which party of a session is blocked. */
