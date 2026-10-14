@@ -12,10 +12,8 @@ function build() {
     bonded: 100_000_000n,
     unbonding: 0n,
     pendingSlash: 0n,
-    slashedInWindow: 0n,
-    slashWindowStartedAt: 0n,
   };
-  const params = { penaltyAmount: 1_000_000n, slashCapBps: 1_000, minimumStake: 50_000_000n };
+  const params = { penaltyAmount: 1_000_000n, minimumStake: 50_000_000n };
   let waiting = new Map<string, { windowRefused: boolean }>();
   let failReads = false;
   const saved: Record<string, unknown>[] = [];
@@ -66,14 +64,19 @@ describe('EvmSlashHoldMonitor', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('holds on condition 1: a full window with an upheld record waiting, and warns', async () => {
+  it('holds on condition 1: an upheld record refused SlashWindowNotDrained, and warns', async () => {
     const harness = build();
-    harness.stake.slashedInWindow = 10_000_000n;
-    harness.stake.slashWindowStartedAt = BigInt(NOW / 1000);
-    harness.setWaiting(new Map([[PROVIDER, { windowRefused: false }]]));
+    harness.setWaiting(new Map([[PROVIDER, { windowRefused: true }]]));
     await harness.monitor.tick();
     expect(harness.row()).toMatchObject({ held: true, reasons: ['SLASH_WINDOW_FULL'] });
     expect(Logger.prototype.warn).toHaveBeenCalledWith(expect.stringMatching(/slash hold/));
+  });
+
+  it('does not hold on a record waiting whose execute was not refused', async () => {
+    const harness = build();
+    harness.setWaiting(new Map([[PROVIDER, { windowRefused: false }]]));
+    await harness.monitor.tick();
+    expect(harness.row()).toMatchObject({ held: false });
   });
 
   it('holds on condition 2: the free stake cannot back another penalty', async () => {

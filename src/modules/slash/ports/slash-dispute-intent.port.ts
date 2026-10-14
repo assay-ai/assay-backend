@@ -69,7 +69,6 @@ export interface SlashIdRefusal {
     | 'SlashNotPending'
     | 'DisputeWindowClosed'
     | 'SlashNotDisputed'
-    | 'ArbiterIsVerifier'
     | 'DisputeTimedOut'
     | 'SlashAlreadyDisputed';
   readonly detail: string;

@@ -82,7 +82,6 @@ function build(options: { multicall?: boolean; batchSize?: number } = {}) {
       now: () => Number(chain.now) * 1000,
       batchSize: options.batchSize ?? 20,
       multicall: options.multicall === false ? new Map() : new Map([[CHAIN, MULTICALL]]),
-      executeDeferLimitMs: 3 * 24 * 3_600_000,
       receiptRetryDelayMs: 0,
     },
   );
@@ -271,18 +270,6 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
         requestIds: [requestId(1)],
       });
       expect(built.refusals.map((r) => r.reason)).toEqual(['DisputeTimedOut']);
-    });
-
-    it("refuses an uphold when the arbiter is the record's verifier", async () => {
-      const { chain, executor } = await upgraded();
-      chain.arbiter = VERIFIER;
-      chain.markDisputed(requestId(1));
-      const built = await executor.buildRulingBatch({
-        chainId: CHAIN,
-        ruling: 'UPHOLD',
-        requestIds: [requestId(1)],
-      });
-      expect(built.refusals.map((r) => r.reason)).toEqual(['ArbiterIsVerifier']);
     });
 
     it('cancels pending and disputed records together; refuses either ruling with no arbiter', async () => {

@@ -3,7 +3,7 @@ import { toFunctionSelector } from 'viem';
 /**
  * Every `error X();` in assay-evm's `src/Errors.sol`, by name.
  *
- * All 95 are **zero-argument** custom errors, so a revert arrives as a bare
+ * All 91 are **zero-argument** custom errors, so a revert arrives as a bare
  * 4-byte selector with nothing else in it — the only way to say what happened
  * is this table. `check-errors.sh` in `evm/` keeps the Solidity honest;
  * `abi-selectors.spec.ts` keeps this list in step by pinning every name to the
@@ -22,7 +22,11 @@ import { toFunctionSelector } from 'viem';
  * `InvalidSlashDelay`. The uphold-timeout fix (a4f97ab) and the audit fix
  * round added `DisputeTimedOut`, `SlashAlreadyDisputed` (first named
  * `AlreadyDisputed`), `SlashWindowNotDrained`, `ArbiterCannotUnblock`,
- * `VerifierIsAdminOrArbiter`, `RedeemerIsArbiter` and `InvalidArbiter`.
+ * `VerifierIsAdminOrArbiter`, `RedeemerIsArbiter` and `InvalidArbiter`. The
+ * simplify round (9f036a3) removed `ArbiterIsVerifier`,
+ * `VerifierIsAdminOrArbiter`, `RedeemerIsArbiter` (now `InvalidAdmin` /
+ * `InvalidArbiter`) and `VerifierDailyCapExceeded` (now
+ * `SlashWindowNotDrained`: execution is all or wait).
  */
 const NAMES: readonly string[] = [
   'ZeroAmount',
@@ -98,7 +102,6 @@ const NAMES: readonly string[] = [
   'StatusDoesNotSlash',
   'NothingToSlash',
   'SlashCapExceeded',
-  'VerifierDailyCapExceeded',
   'PenaltyTooSmallToSplit',
   'PenaltyExceedsMaximum',
   'SlashNotPending',
@@ -111,7 +114,6 @@ const NAMES: readonly string[] = [
   'DisputeWindowClosed',
   'SlashNotDisputed',
   'NotArbiter',
-  'ArbiterIsVerifier',
   'AddressBlocked',
   'InvalidSlashDelay',
   // a4f97ab and the audit fix round (audit E-9), in Errors.sol's order.
@@ -119,8 +121,6 @@ const NAMES: readonly string[] = [
   'SlashAlreadyDisputed',
   'SlashWindowNotDrained',
   'ArbiterCannotUnblock',
-  'VerifierIsAdminOrArbiter',
-  'RedeemerIsArbiter',
   'InvalidArbiter',
 ];
 

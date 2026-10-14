@@ -95,7 +95,6 @@ export const X402_CONFIG_ABI = parseAbi([
   'function admin() view returns (address)',
   'function owner() view returns (address)',
   'function pendingOwner() view returns (address)',
-  'function slashProviderBps() view returns (uint16)',
   'function canSign(address verifier) view returns (bool)',
   'function verifierKey(address verifier) view returns (VerifierKey)',
   /**

@@ -11,10 +11,10 @@
 /** Why a provider is held, as the provider's banner and the operator see it. */
 export enum SlashHoldReason {
   /**
-   * The provider's rolling slash window (or the verifier key's) is full, and
-   * an upheld record is waiting to execute: the next penalty cannot be taken
-   * until the window drains (`SlashCapExceeded`, `VerifierDailyCapExceeded`,
-   * `SlashWindowNotDrained`).
+   * An upheld record is waiting to execute and its last attempt was refused
+   * `SlashWindowNotDrained`: the provider's (or the verifier key's) rolling
+   * window cannot take it whole, and execution is all or wait (assay-evm
+   * 9f036a3), so nothing is collected until the window drains.
    */
   SLASH_WINDOW_FULL = 'SLASH_WINDOW_FULL',
   /** `pendingSlash ≥ atRisk − penaltyAmount`: the free stake cannot back another penalty. */
@@ -28,13 +28,8 @@ export interface SlashHoldStakeReading {
   readonly bonded: bigint;
   readonly unbonding: bigint;
   readonly pendingSlash: bigint;
-  /** The provider window's counter and its start, as `stakeOf` returns them (undecayed). */
-  readonly slashedInWindow: bigint;
-  readonly slashWindowStartedAt: bigint;
   /** `params.penaltyAmount`: the most one record may take. */
   readonly penaltyAmount: bigint;
-  /** `params.slashCapBps`: the provider window's allowance, of `atRisk`. */
-  readonly slashCapBps: number;
   /** `params.minimumStake`. */
   readonly minimumStake: bigint;
 }
@@ -43,43 +38,24 @@ export interface SlashHoldStakeReading {
 export interface SlashHoldWaiting {
   /** An upheld case of this provider whose record is due on this chain. */
   readonly recordWaiting: boolean;
-  /**
-   * Its last execute attempt was refused by a full window — the provider's or
-   * the verifier key's. The key's window is not readable over the ABI, so the
-   * refusal is the evidence.
-   */
+  /** Its last execute attempt (the case's or a part's) was refused `SlashWindowNotDrained`. */
   readonly windowRefused: boolean;
 }
 
-/** `SLASH_WINDOW_SECONDS` in `Constants.sol`: the rolling window's width. */
-export const SLASH_WINDOW_SECONDS = 86_400n;
-
 /** Checks with every condition false before a hold is released (the hysteresis). */
 export const SLASH_HOLD_RELEASE_AFTER_CLEAR_CHECKS = 2;
-
-/** `Window.decay` in assay-evm, rounded up the same way. */
-export function decayedWindow(counter: bigint, startedAt: bigint, nowSeconds: bigint): bigint {
-  if (counter === 0n) return 0n;
-  if (nowSeconds <= startedAt) return counter;
-  const elapsed = nowSeconds - startedAt;
-  if (elapsed >= SLASH_WINDOW_SECONDS) return 0n;
-  const remaining = SLASH_WINDOW_SECONDS - elapsed;
-  return (counter * remaining + SLASH_WINDOW_SECONDS - 1n) / SLASH_WINDOW_SECONDS;
-}
 
 /** Every condition that holds now, in a fixed order; empty when none does. */
 export function slashHoldReasons(
   stake: SlashHoldStakeReading,
   waiting: SlashHoldWaiting,
-  nowSeconds: bigint,
 ): SlashHoldReason[] {
   const reasons: SlashHoldReason[] = [];
   const atRisk = stake.bonded + stake.unbonding;
 
-  const capAllowance = (atRisk * BigInt(stake.slashCapBps)) / 10_000n;
-  const carried = decayedWindow(stake.slashedInWindow, stake.slashWindowStartedAt, nowSeconds);
-  const windowFull = carried >= capAllowance || waiting.windowRefused;
-  if (windowFull && waiting.recordWaiting) reasons.push(SlashHoldReason.SLASH_WINDOW_FULL);
+  if (waiting.recordWaiting && waiting.windowRefused) {
+    reasons.push(SlashHoldReason.SLASH_WINDOW_FULL);
+  }
 
   if (stake.pendingSlash + stake.penaltyAmount >= atRisk) {
     reasons.push(SlashHoldReason.STAKE_FULLY_RESERVED);

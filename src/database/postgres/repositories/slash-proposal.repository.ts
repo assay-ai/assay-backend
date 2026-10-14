@@ -513,8 +513,8 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   /**
    * Per provider, on `chainId`: whether an upheld case of theirs has a record
    * due to execute (`UPHELD`, mirror `PENDING`, door open), and whether its
-   * last execute attempt — the case's or one of its parts' — was refused by a
-   * full window. The slash hold's condition 1 reads this.
+   * last execute attempt — the case's or one of its parts' — was refused
+   * `SlashWindowNotDrained`. The slash hold's condition 1 reads this.
    */
   async findWaitingExecution(
     chainId: string,
@@ -816,9 +816,8 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 }
 
-/** Execute refusals that mean "a rolling window is full; retry as it drains". */
-const WINDOW_REFUSALS: readonly string[] = [
-  'SlashCapExceeded',
-  'VerifierDailyCapExceeded',
-  'SlashWindowNotDrained',
-];
+/**
+ * The execute refusal that means "a rolling window is full; retry as it
+ * drains". Execution is all or wait (assay-evm 9f036a3), so it is the only one.
+ */
+const WINDOW_REFUSALS: readonly string[] = ['SlashWindowNotDrained'];
