@@ -134,7 +134,31 @@ describe('McpToolCallService — the paid call loop', () => {
     expect(enqueued.outputSchema).toBeDefined();
   });
 
-  it('still returns the result to the agent when the enqueue fails, and voids the hold', async () => {
+  it('retries a failed enqueue once, and keeps the hold for the worker when the retry lands', async () => {
+    let attempts = 0;
+    const { calls, intents, ledger, settlement } = harness(
+      { 'binding-provider-a': () => Promise.resolve(ok('forty-two')) },
+      {
+        settlementBehaviour: () =>
+          ++attempts === 1 ? Promise.reject(new Error('blip')) : Promise.resolve(),
+      },
+    );
+
+    const outcome = await calls.call(SESSION, 'Search the web', ARGS);
+
+    expect(outcome.kind).toBe('RESULT');
+    expect(settlement.calls).toHaveLength(2);
+    expect(intents.only.status).toBe(PaymentIntentStatus.VERIFYING);
+    expect(ledger.kinds).toEqual(['HOLD_CREATE']);
+  });
+
+  /**
+   * Final review N-3: an enqueue failure used to VOID the intent — no charge —
+   * while the data still went back, and a buyer could provoke that failure at
+   * will (a `\u0000` in an argument). A call that returned data is never made
+   * free by a failure to record it: it settles as served, unverified.
+   */
+  it('still returns the result when the enqueue keeps failing, and settles the call as served', async () => {
     const { calls, intents, ledger } = harness(
       { 'binding-provider-a': () => Promise.resolve(ok('forty-two')) },
       { settlementBehaviour: () => Promise.reject(new Error('durable store unavailable')) },
@@ -142,17 +166,14 @@ describe('McpToolCallService — the paid call loop', () => {
 
     const outcome = await calls.call(SESSION, 'Search the web', ARGS);
 
-    // A bookkeeping failure must never replace the agent's already-successful
-    // result: the data still comes back. Nothing will ever judge the intent
-    // and nothing reads `ledger_holds.expires_at`, so it is voided at once and
-    // the hold released rather than stranded in `VERIFYING` (review P-3).
     expect(outcome.kind).toBe('RESULT');
     if (outcome.kind !== 'RESULT') return;
     expect(outcome.output).toEqual({ answer: 'forty-two' });
-    expect(outcome.receipt.status).toBe(PaymentIntentStatus.VOIDED);
-    expect(intents.only.status).toBe(PaymentIntentStatus.VOIDED);
+    expect(outcome.receipt.status).toBe(PaymentIntentStatus.SETTLED);
+    expect(intents.only.status).toBe(PaymentIntentStatus.SETTLED);
     expect(intents.only.statusReason).toBe(MCP_VERIFICATION_ENQUEUE_FAILED_REASON);
-    expect(ledger.kinds).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
+    expect(ledger.kinds).not.toContain('HOLD_RELEASE');
+    expect(ledger.kinds).toContain('HOLD_COMMIT');
   });
 
   it('records the provider only once the router has produced one', async () => {
