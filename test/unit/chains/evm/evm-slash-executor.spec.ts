@@ -139,6 +139,22 @@ describe('EvmSlashExecutor — propose', () => {
     expect(chainErrorName(error)).toBe('PenaltyExceedsMaximum');
     expect(chain.sent).toHaveLength(0);
   });
+
+  it('signs nothing when the verifier key expires before the record could execute (S-7)', async () => {
+    const { chain, executor, signatures } = build();
+    const grace = 7n * 86_400n;
+    // Still registered, but it lapses exactly at `now + delay + grace`.
+    chain.verifierExpiresAt = chain.now + chain.slashDelay + grace;
+
+    const error = await executor.propose(proposal(1)).catch((caught) => caught);
+
+    expect(error.errorCode).toBe(ChainErrorCode.CHAIN_CONFIG_VALUE_INVALID);
+    expect(signatures).toHaveLength(0);
+    expect(chain.sent).toHaveLength(0);
+
+    chain.verifierExpiresAt = chain.now + chain.slashDelay + grace + 1n;
+    await expect(executor.propose(proposal(1))).resolves.toMatchObject({ status: 'PENDING' });
+  });
 });
 
 describe('EvmSlashExecutor — proposeBatch through Multicall3', () => {

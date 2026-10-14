@@ -159,6 +159,8 @@ export class FakeStakeChain {
   /** The upgraded contracts (D-19) are the only ones the backend supports. */
   slashDelay = 72n * 3600n;
   arbiter: `0x${string}` = FAKE_ARBITER;
+  /** `verifierKey(verifier).expiresAt`, unix seconds; far away unless a test moves it. */
+  verifierExpiresAt = 2n ** 40n;
   readonly blockedAccounts = new Set<string>();
   /** Test hook: run before a sent transaction is applied (to change state under it). */
   beforeSend: ((data: `0x${string}`) => void) | null = null;
@@ -284,6 +286,9 @@ export class FakeStakeChain {
       return this.blockedAccounts.has(getAddress(args[0] as string));
     }
     if (functionName === 'owner') return OWNER;
+    if (functionName === 'verifierKey') {
+      return { expiresAt: this.verifierExpiresAt, revoked: this.revoked };
+    }
     if (functionName === 'canSign') {
       const key = getAddress(args[0] as string);
       return !this.revoked && (key === this.verifier || this.alsoRegistered.has(key));
