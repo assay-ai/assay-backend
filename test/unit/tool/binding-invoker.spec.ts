@@ -240,6 +240,70 @@ describe('EgressBindingInvoker (router call path)', () => {
     expect(mappingFaultOf(error)).toBe(MappingFault.AGENT);
   });
 
+  // Review P-6: `encodeURIComponent` leaves `..` alone and `new URL` resolves it.
+  it.each(['..', '.', ''])(
+    'refuses %j as a path argument instead of leaving the endpoint prefix',
+    async (value) => {
+      respondWith(200, JSON.stringify({ answer: 'never reached' }));
+      const dotted = buildBinding(A, {
+        endpoint: 'http://provider-a.example.com/v2/tenants/acme',
+        requestMapping: { method: 'GET', path: '/users/{$.query}/profile' },
+      });
+
+      const error = await invoker()
+        .invoke({
+          tool,
+          binding: dotted,
+          input: { query: value },
+          timeoutMs: 2_000,
+          callId: 'test-call-id',
+        })
+        .then(() => null)
+        .catch((e: AppError) => e);
+
+      expect(error?.errorCode).toBe(ToolErrorCode.TOOL_MAPPING_TYPE_MISMATCH);
+      expect(mappingFaultOf(error)).toBe(MappingFault.AGENT);
+      expect(received.url).toBeUndefined();
+    },
+  );
+
+  it('still sends a path argument that only contains dots', async () => {
+    respondWith(200, JSON.stringify({ answer: 'ok' }));
+    const dotted = buildBinding(A, {
+      endpoint: 'http://provider-a.example.com/v2',
+      requestMapping: { method: 'GET', path: '/files/{$.query}' },
+    });
+
+    await invoker().invoke({
+      tool,
+      binding: dotted,
+      input: { query: '...' },
+      timeoutMs: 2_000,
+      callId: 'test-call-id',
+    });
+
+    expect(received.url).toBe('/v2/files/...');
+  });
+
+  it('never dials a URL whose path left the endpoint prefix', async () => {
+    respondWith(200, JSON.stringify({ answer: 'never reached' }));
+    const climbing = buildBinding(A, {
+      endpoint: 'http://provider-a.example.com/v2/tenants/acme',
+      requestMapping: { method: 'GET', path: '/../other' },
+    });
+
+    const response = await invoker().invoke({
+      tool,
+      binding: climbing,
+      input: { query: 'x' },
+      timeoutMs: 2_000,
+      callId: 'test-call-id',
+    });
+
+    expect(response.transportError).toBeDefined();
+    expect(received.url).toBeUndefined();
+  });
+
   it('fails over between two real endpoints', async () => {
     // Both bindings point at the same local server; the path says which
     // provider the request is for, and the server answers accordingly.
