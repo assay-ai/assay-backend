@@ -32,8 +32,17 @@ export class FakeRedis {
     return Promise.resolve(this.strings.get(key) ?? null);
   }
 
-  /** `SET key value EX seconds NX`. The one form the incident flag issues. */
-  set(key: string, value: string, _ex: 'EX', seconds: number, nx?: 'NX'): Promise<'OK' | null> {
+  /**
+   * `SET key value EX seconds NX` — the incident flag — or `PX ms NX`, the
+   * agent spend lock. The expiry is recorded, not enforced.
+   */
+  set(
+    key: string,
+    value: string,
+    _ex: 'EX' | 'PX',
+    seconds: number,
+    nx?: 'NX',
+  ): Promise<'OK' | null> {
     try {
       this.guard(`set ${key}`);
     } catch (error) {
@@ -43,6 +52,18 @@ export class FakeRedis {
     this.strings.set(key, value);
     this.expiries.set(key, seconds);
     return Promise.resolve('OK');
+  }
+
+  /** The spend lock's compare-and-delete script, and only that one. */
+  eval(_script: string, _keys: number, key: string, token: string): Promise<number> {
+    try {
+      this.guard(`eval ${key}`);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    if (this.strings.get(key) !== token) return Promise.resolve(0);
+    this.strings.delete(key);
+    return Promise.resolve(1);
   }
 
   incrSync(key: string): number {
