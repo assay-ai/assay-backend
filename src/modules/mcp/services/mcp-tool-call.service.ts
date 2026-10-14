@@ -66,6 +66,7 @@ import {
   MCP_SCHEMA_CONTRACT_VIOLATION_REASON,
   MCP_UNPAYABLE_PROVIDER_REASON,
   MCP_UNROUTABLE_REASON,
+  MCP_VERIFICATION_ENQUEUE_FAILED_REASON,
   MCP_VOIDED_REASON,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
@@ -1000,12 +1001,10 @@ export class McpToolCallService {
    *   `VerificationSettlementService`'s worker via {@link
    *   VerificationSettlementService.enqueue}. If the record or the enqueue
    *   fails, the agent still gets its data back — that is the safe direction
-   *   to fail in — but the intent then stays in `VERIFYING` with the agent's
-   *   money held and **nothing returns it**: `ledger_holds.expires_at` has no
-   *   reader anywhere, so the "24-hour hold expiry" this comment used to
-   *   name as the backstop does not exist. A bookkeeping failure must still
-   *   never replace the agent's successful result with an error; it must be
-   *   found in the log below and retried by hand.
+   *   to fail in — and the intent is voided at once, releasing the hold:
+   *   `ledger_holds.expires_at` has no reader anywhere, so nothing else would
+   *   ever return that money. A bookkeeping failure must still never replace
+   *   the agent's successful result with an error.
    */
   private async resolveDataResult(
     session: McpSession,
@@ -1106,11 +1105,27 @@ export class McpToolCallService {
         outputSchema: routed.tool.outputSchema,
       });
     } catch (error) {
+      // Nothing would ever judge this intent, so nothing would ever return
+      // the hold: void it now — no charge, no strike. The agent keeps the
+      // data; the provider is unpaid for a call the platform failed to record.
       this.logger.error(
         `Intent ${verifying.id}: data returned but verification could not be durably enqueued — ` +
-          `the intent is stuck in VERIFYING and its hold will NOT be returned automatically. ` +
-          `${describe(error)}`,
+          `voiding the intent and releasing its hold. ${describe(error)}`,
       );
+      try {
+        return await this.intents.resolve(
+          session.organizationId,
+          verifying.id,
+          PaymentIntentStatus.VERIFYING,
+          PaymentIntentStatus.VOIDED,
+          { reason: MCP_VERIFICATION_ENQUEUE_FAILED_REASON },
+        );
+      } catch (voidError) {
+        this.logger.error(
+          `Intent ${verifying.id}: void after a failed enqueue did not land — the intent is ` +
+            `stuck in VERIFYING and its hold must be released by hand. ${describe(voidError)}`,
+        );
+      }
     }
 
     return verifying;

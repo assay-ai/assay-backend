@@ -21,6 +21,7 @@ import { ConnectivityCheckResultDto, toConnectivityDto } from '../dto/provider-s
 import { ProviderErrors } from '../errors/provider.errors';
 import { ConnectivityOutcome } from '../ports/provider-registration.types';
 import { PROVIDER_EGRESS_IPS } from './egress-ips';
+import { ProviderEgressLimiter } from './provider-egress-limiter.service';
 
 /**
  * Time and size budget for the probe itself.
@@ -98,6 +99,7 @@ export class ProviderConnectivityService {
     private readonly checks: ProviderConnectivityCheckRepository,
     private readonly http: EgressHttpClient,
     @Inject(PROVIDER_EGRESS_IPS) private readonly egressIpList: string[],
+    private readonly limiter: ProviderEgressLimiter,
     // Unbound in production, exactly like `EgressHttpClient`'s own constructor
     // — see `EGRESS_DNS_LOOKUP`'s doc comment. Reused here rather than
     // reinvented so the pre-flight resolve in {@link probe} can be pointed at a
@@ -114,7 +116,16 @@ export class ProviderConnectivityService {
    * `ProviderConnectivityCheckEntity`'s class comment for why that argument
    * needs a table rather than a return value.
    */
-  async check(organizationId: string, endpoint?: string): Promise<ConnectivityCheckResultDto> {
+  check(organizationId: string, endpoint?: string): Promise<ConnectivityCheckResultDto> {
+    // Bounded like the mapping tester: an unthrottled probe of any public URL
+    // from the platform's egress IPs is a scanner anyone can borrow.
+    return this.limiter.run(organizationId, () => this.checkUnlimited(organizationId, endpoint));
+  }
+
+  private async checkUnlimited(
+    organizationId: string,
+    endpoint?: string,
+  ): Promise<ConnectivityCheckResultDto> {
     const target = endpoint ?? (await this.savedEndpoint(organizationId));
     const egressIps = this.egressIps();
 

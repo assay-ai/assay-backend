@@ -82,6 +82,8 @@ export function mapRequest(
   };
 }
 
+const DOT_OR_EMPTY_SEGMENT = /^\.{0,2}$/;
+
 /**
  * Substitutes `{$.selector}` segments in the path template.
  *
@@ -113,7 +115,25 @@ function interpolatePath(template: string, input: JsonObject, options: EvaluateO
       });
     }
 
-    return encodeURIComponent(String(value));
+    // `encodeURIComponent` leaves `.` alone, and WHATWG `URL` resolves `.`,
+    // `..` and their `%2e` forms as dot segments — so an agent's `..` would
+    // walk the request out of the binding's endpoint prefix with the
+    // provider's credentials attached. An empty segment addresses a different
+    // resource just as surely.
+    const segment = String(value);
+    if (DOT_OR_EMPTY_SEGMENT.test(segment)) {
+      throw ToolErrors.mappingTypeMismatch({
+        pointer: `/path${selector}`,
+        path: selector,
+        expected: 'a path segment other than "", "." or ".."',
+        actual: JSON.stringify(segment),
+        direction: options.direction,
+        fault: options.fault,
+        ...options.context,
+      });
+    }
+
+    return encodeURIComponent(segment);
   });
 }
 
