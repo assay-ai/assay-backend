@@ -439,7 +439,8 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
    * one bad id reverts them all. Nothing was built; `context.refusals` names
    * every id the chain would refuse and why (`NotSlashedProvider`,
    * `SlashNotPending`, `DisputeWindowClosed`, `SlashNotDisputed`,
-   * `ArbiterIsVerifier`, `DisputeTimedOut`, `NoSuchRecord`, `DuplicateId`).
+   * `ArbiterIsVerifier`, `DisputeTimedOut`, `SlashAlreadyDisputed`, `NoSuchRecord`,
+   * `DuplicateId`).
    */
   /**
    * Follow-up B7: the provider won an on-chain dispute over these calls, so
