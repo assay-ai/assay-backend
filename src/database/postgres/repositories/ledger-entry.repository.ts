@@ -312,11 +312,17 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
       .addSelect('entry.assetId', 'asset')
       .addSelect('entry.decimals', 'decimals')
       .addSelect('entry.amount', 'amount')
+      // A release on its intent's own COMMITTED hold is the remainder of a
+      // charge below the hold — the quote less the serving binding's price —
+      // returned at settlement. Not withheld value either: the call was
+      // charged. Flagged, so it is reported as its own term and not as an
+      // orphan (final review N-8).
+      .addSelect(
+        `(hold.status = 'COMMITTED' AND intent.hold_id IS NOT NULL AND intent.hold_id = hold.id)`,
+        'settlementRemainder',
+      )
       .where('entry.organizationId = :organizationId', { organizationId })
       .andWhere('entry.entryType = :entryType', { entryType: HOLD_RELEASE_ENTRY_TYPE })
-      // A release on a COMMITTED hold is the remainder of a charge below the
-      // hold — the quote less the serving binding's price — returned at
-      // settlement. Not withheld value either: the call was charged.
       .andWhere(
         `(intent.hold_id IS NULL OR intent.hold_id <> hold.id OR hold.status = 'COMMITTED')`,
       );
@@ -333,6 +339,7 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
       asset: string;
       decimals: string;
       amount: string;
+      settlementRemainder: boolean | string;
     }>();
 
     return rows.map((row) => ({
@@ -340,6 +347,7 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
       asset: row.asset,
       decimals: Number(row.decimals),
       amount: BigInt(row.amount),
+      settlementRemainder: row.settlementRemainder === true || row.settlementRemainder === 't',
     }));
   }
 
@@ -422,6 +430,12 @@ export interface OrphanedHoldRelease {
   readonly asset: string;
   readonly decimals: number;
   readonly amount: bigint;
+  /**
+   * The remainder released on the intent's own COMMITTED hold when the call
+   * was charged below its hold. Expected on every cheaper serve, so it is
+   * reported apart from the real orphans.
+   */
+  readonly settlementRemainder: boolean;
 }
 
 /** The `(from, to]` window a payout run swept — see `ProviderPayoutEntity`. */

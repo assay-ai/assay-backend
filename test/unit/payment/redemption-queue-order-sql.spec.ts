@@ -1,6 +1,7 @@
 import { DataSource } from 'typeorm';
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
 
 /**
  * Renders `findAwaitingRedemption`'s SQL without a database, the way
@@ -50,5 +51,19 @@ describe('PaymentIntentRepository.findAwaitingRedemption — seq order', () => {
       'VERIFYING',
     ]);
     expect(sql).not.toMatch(/intent\.[a-z]+[A-Z]/);
+  });
+
+  /**
+   * Final review N-1: a lower seq stuck in PROVIDER_EXECUTING/VERIFYING held
+   * every later voucher back until the 24 h backstop, by which time each had
+   * expired on chain and was absorbed. A lower voucher past its own
+   * redemption window can never land, so it stops holding anything back.
+   */
+  it('stops holding back once the lower seq is past its own redemption window', async () => {
+    const { sql } = await rendered();
+    const guard = sql.replace(/\s+/g, ' ');
+    expect(guard).toMatch(
+      new RegExp(`earlier\\.expires_at > now\\(\\) - interval '${REDEEM_GRACE_SECONDS} seconds'`),
+    );
   });
 });

@@ -31,6 +31,13 @@ export const REDEEM_GRACE_SECONDS = 1_800;
 export const MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS =
   MAX_VOUCHER_LIFETIME_SECONDS + CLOCK_SKEW_TOLERANCE_SECONDS + REDEEM_GRACE_SECONDS;
 
+/**
+ * How long past a voucher's on-chain deadline "not found" is still read as
+ * "unknown" (final review N-7). Far beyond the few blocks a load-balanced node
+ * lags, and short against the 24 h the hold may stay open.
+ */
+export const LANDING_SETTLE_SECONDS = 600;
+
 export const VOUCHER_REDEMPTION_ALERTS = {
   /**
    * The chain refused a voucher permanently. The buyer keeps their money and

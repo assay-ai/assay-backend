@@ -56,6 +56,7 @@ export enum PaymentErrorCode {
   PAYMENT_ESCROW_BALANCE_UNAVAILABLE = 'PAYMENT_ESCROW_BALANCE_UNAVAILABLE',
   PAYMENT_VOUCHER_SEQ_MISMATCH = 'PAYMENT_VOUCHER_SEQ_MISMATCH',
   PAYMENT_VOUCHER_SEQ_ALREADY_USED = 'PAYMENT_VOUCHER_SEQ_ALREADY_USED',
+  PAYMENT_VOUCHER_SEQ_STALE = 'PAYMENT_VOUCHER_SEQ_STALE',
   PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE = 'PAYMENT_VOUCHER_SEQ_GAP_TOO_LARGE',
   PAYMENT_NEXT_SEQ_RATE_LIMITED = 'PAYMENT_NEXT_SEQ_RATE_LIMITED',
   PAYMENT_WITHDRAWAL_PENDING = 'PAYMENT_WITHDRAWAL_PENDING',
@@ -614,6 +615,24 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `Voucher sequence ${context?.actual ?? 'unknown'} was already used for an earlier call ` +
       `on this account; a voucher pays for one call, sign a new one with a fresh sequence`,
+  },
+
+  /**
+   * The seq was issued and never used, but a higher seq of this account is
+   * already admitted or redeemed, so the chain would refuse this one
+   * (`VoucherSeqNotIncreasing`) and it is not served (review 2026-10-15 P-2).
+   * The normal outcome of two parallel calls signed out of order (final
+   * review N-6). **Retryable**: nothing was charged; the client requests a new
+   * seq and signs again. Distinct from {@link voucherSeqAlreadyUsed}, which is
+   * a replay and final.
+   */
+  voucherSeqStale: {
+    code: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Voucher sequence ${context?.actual ?? 'unknown'} was not used, but a higher sequence ` +
+      `of this account was spent first, so it can no longer be redeemed. Nothing was ` +
+      `charged — retry: request a new seq and sign a new voucher`,
   },
 
   /**

@@ -190,8 +190,14 @@ export class FakeIntents {
   pausedFor: number | null = null;
 
   create(input: CreatePaymentIntentInput, admission?: VoucherAdmission): Promise<PaymentIntent> {
-    if (admission && this.pausedFor !== null) {
-      admission.admit({ escrow: 0n, delegate: 0n, pausedFor: this.pausedFor });
+    if (admission) {
+      // The highest seq of the payer already admitted, as the locked read sees it.
+      const seqs = [...this.rows.values()]
+        .filter((row) => row.agentAccount === input.agentAccount && row.voucherSeq)
+        .filter((row) => !this.abandoned.includes(row.id))
+        .map((row) => BigInt(row.voucherSeq as string));
+      const maxSeq = seqs.length > 0 ? seqs.reduce((a, b) => (a > b ? a : b)) : null;
+      admission.admit({ escrow: 0n, delegate: 0n, pausedFor: this.pausedFor, maxSeq });
     }
     const id = `intent-${++this.sequence}`;
     const intent: PaymentIntent = {
