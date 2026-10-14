@@ -1874,6 +1874,7 @@ export class SlashExecutionService {
 
         if (await this.mirrorRecordThatLeftPending(proposal, 'ADMIN_CANCEL')) {
           mirrored += 1;
+          await this.reproposeIfRecalculated(proposal, now);
           continue;
         }
 
@@ -1886,6 +1887,7 @@ export class SlashExecutionService {
           (await this.expireAbandonedRecord(proposal))
         ) {
           expired += 1;
+          await this.reproposeIfRecalculated(proposal, now);
           continue;
         }
 
@@ -1899,6 +1901,19 @@ export class SlashExecutionService {
     }
 
     return { mirrored, expired, waiting };
+  }
+
+  /**
+   * The second half of a downward recalculation (review S-2). A case still
+   * `UPHELD` behind a `CANCEL_REQUESTED` mirror is only ever one
+   * {@link reproposeAtRevisedPenalty} asked to cancel — every other request
+   * follows an overturn or a suspension — so once its record is off the chain
+   * the decided figure is proposed under a fresh epoch, here and not on some
+   * later sweep nothing would run. Never throws (the callee does not).
+   */
+  private async reproposeIfRecalculated(proposal: SlashProposalEntity, now: Date): Promise<void> {
+    if (proposal.status !== SlashProposalStatus.UPHELD) return;
+    await this.reproposeAtRevisedPenalty(proposal.organizationId, proposal.id, now);
   }
 
   /**

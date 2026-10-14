@@ -6,6 +6,7 @@ import { SlashProposalPartRepository } from '@database/postgres/repositories/sla
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
+import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import {
   SlashChainCancelledEvent,
   SlashChainDisputedEvent,
@@ -44,7 +45,9 @@ import { SlashProposalService } from './slash-proposal.service';
  *
  * A case whose cancel is already requested (`CANCEL_REQUESTED`) keeps that
  * mirror: `cancelSlash` accepts a disputed record, and only the 30-day clock
- * is noted. Idempotent — the watcher re-reads a range after any failure.
+ * is noted. An `UPHELD` case behind that mirror is a downward recalculation
+ * (review S-2): its cancel is the platform's own, never a provider win, and
+ * the case is left open for `sweepAdminCancels` to re-propose. Idempotent — the watcher re-reads a range after any failure.
  */
 @Injectable()
 export class SlashChainRulingService implements SlashChainRulingsPort {
@@ -222,24 +225,41 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       cancelledAt: event.cancelledAt,
     });
 
-    const ruledForProvider = event.reason === 'WITHDRAWN';
+    // Review S-2: the platform's own cancel of a downward recalculation (an
+    // UPHELD case only ever has its cancel requested by
+    // `reproposeAtRevisedPenalty`). It is neither a ruling for the provider nor
+    // a reason to close the case: the decided, lower figure is re-proposed by
+    // `sweepAdminCancels` once every part is off the chain. A dispute that ran
+    // out unruled is still the provider's win.
+    const recalculating =
+      proposal.status === SlashProposalStatus.UPHELD &&
+      proposal.chainStatus === ChainProposalStatus.CANCEL_REQUESTED &&
+      event.reason !== 'DISPUTE_UNRESOLVED';
+
+    const ruledForProvider = event.reason === 'WITHDRAWN' && !recalculating;
     // The provider won its dispute (B7): the record was cancelled while it
     // stood DISPUTED, or expired unruled. Remembered on the case so it is
     // never proposed again.
-    if ((wasDisputed || event.reason === 'DISPUTE_UNRESOLVED') && !proposal.chainDisputeWonAt) {
+    if (
+      ((wasDisputed && !recalculating) || event.reason === 'DISPUTE_UNRESOLVED') &&
+      !proposal.chainDisputeWonAt
+    ) {
       await this.proposals.update(
         { organizationId: proposal.organizationId, id: proposal.id },
         { chainDisputeWonAt: event.cancelledAt },
       );
     }
     await this.timeline(proposal, event.cancelledAt, 'CHAIN_CANCELLED', {
-      summary: ruledForProvider
-        ? wasDisputed
-          ? 'The arbiter ruled for the provider on chain (cancelSlash): this part is cancelled ' +
-            'and its reservation released'
-          : 'This part was cancelled on chain (cancelSlash) and its reservation released'
-        : `This part was expired on chain (expireSlash, ${event.reason}) and its reservation ` +
-          'released',
+      summary: recalculating
+        ? 'This part was cancelled on chain (cancelSlash) so the recalculated penalty can be ' +
+          'proposed in its place'
+        : ruledForProvider
+          ? wasDisputed
+            ? 'The arbiter ruled for the provider on chain (cancelSlash): this part is cancelled ' +
+              'and its reservation released'
+            : 'This part was cancelled on chain (cancelSlash) and its reservation released'
+          : `This part was expired on chain (expireSlash, ${event.reason}) and its reservation ` +
+            'released',
       detail: {
         requestId: event.requestId,
         reason: event.reason,
@@ -260,6 +280,15 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     const executed = parts.some((row: SlashProposalPartEntity) => row.chainStatus === 'EXECUTED');
     if (standing || executed) {
       await this.mirrorParts(proposal, {});
+      return true;
+    }
+    if (recalculating) {
+      // Left `CANCEL_REQUESTED` for `sweepAdminCancels`, which mirrors the
+      // cancel and re-proposes the decided figure.
+      await this.proposals.update(
+        { organizationId: proposal.organizationId, id: proposal.id },
+        { chainDisputedParts: 0 },
+      );
       return true;
     }
     const because = ruledForProvider
