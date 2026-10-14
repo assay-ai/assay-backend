@@ -675,7 +675,26 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.holdId IS NOT NULL')
       .andWhere('intent.holdReleasedAt IS NULL')
       .andWhere('intent.voucherSeq IS NOT NULL')
-      .andWhere('intent.voucherSignature IS NOT NULL');
+      .andWhere('intent.voucherSignature IS NOT NULL')
+      // A row waits while a LOWER seq of its payer is still in flight or open
+      // (review 2026-10-15 P-4). Redeeming it first advances `seq_high` past
+      // the lower one, which then dies on `VoucherSeqNotIncreasing` and is paid
+      // by the platform. Bounded: the lower one settles (and goes first),
+      // or ends REFUNDED/VOIDED/EXPIRED (only a hole), or hits the hold
+      // backstop. Per payer account, not per asset: the seq is the escrow's.
+      .andWhere(
+        `NOT EXISTS (
+           SELECT 1 FROM payment_intents earlier
+            WHERE earlier.organization_id IS NOT NULL
+              AND earlier.agent_account = intent.agent_account
+              AND earlier.rail = :rail
+              AND earlier.voucher_seq IS NOT NULL
+              AND earlier.voucher_seq < intent.voucher_seq
+              AND (earlier.status IN (:...earlierOpenStatuses)
+                   OR (earlier.status = 'CREATED' AND earlier.expires_at > now()))
+         )`,
+        { earlierOpenStatuses: [...OPEN_HOLD_STATUSES] },
+      );
 
     if (
       exclude.organizationIds.length > 0 ||
