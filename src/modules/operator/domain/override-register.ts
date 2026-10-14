@@ -450,6 +450,11 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
    * assay-evm D-19). Block only: the contract lets the arbiter block and only
    * the admin unblock, so there is no unblocking row. The incident roles of
    * `A-9` plus `TRE`, the arbiter page's other role.
+   *
+   * Two-person, unlike `A-9`: the off-chain asymmetry flips on chain. A wrong
+   * off-chain block costs an apology; a wrong on-chain block freezes the
+   * address's escrow and its vouchers until the cold admin key is brought out.
+   * The checker must be `ADJL`, as for lifting a block (`A-10`).
    */
   'A-11': define({
     code: 'A-11',
@@ -457,7 +462,8 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     action: 'account.chain_block_prepared',
     label: 'Prepare the arbiter’s on-chain block of an address',
     roles: [OperatorRole.ADJL, OperatorRole.SRE, OperatorRole.TRE],
-    approval: ApprovalMode.SINGLE,
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJL],
     reversible: false,
     implemented: true,
   }),
