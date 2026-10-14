@@ -8,7 +8,7 @@ import {
 } from '@modules/chains/ports/caip.types';
 import { isSolanaTransaction } from '@modules/chains/ports/unsigned-chain-transaction';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
-import { QueryRunner } from 'typeorm';
+import { EntityManager, IsNull, QueryRunner } from 'typeorm';
 
 import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
@@ -865,7 +865,26 @@ export class SlashExecutionService {
           platformAmountMinor: record.platformAmountMinor,
           executedAt: record.executedAt ?? new Date(),
         };
-        if ((await this.completeExecution(fresh, result, CHAIN_PROPOSABLE_STATUSES)) > 0) {
+        // An objection still open in the app closes with the case, in the same
+        // transaction, as an upheld decision closes it: the chain took the
+        // penalty, so the objection did not succeed.
+        const closeDispute = async (manager: EntityManager) => {
+          if (!fresh.disputeId) return;
+          await manager.update(
+            DisputeEntity,
+            { organizationId: fresh.organizationId, id: fresh.disputeId, resolvedAt: IsNull() },
+            {
+              state: ARBITRATION_STATE_MAP[ArbitrationOutcome.UPHELD],
+              outcome: ArbitrationOutcome.UPHELD,
+              resolutionKind: ResolutionKind.AUTO_CHAIN_EXECUTED,
+              resolvedAt: result.executedAt,
+              resolvedBy: 'chain:executeSlash',
+            },
+          );
+        };
+        if (
+          (await this.completeExecution(fresh, result, CHAIN_PROPOSABLE_STATUSES, closeDispute)) > 0
+        ) {
           this.logger.warn(
             `slash proposal ${fresh.id} was executed on chain by somebody else while the case ` +
               `was ${fresh.status}; the case now records the penalty the chain took`,
@@ -2758,6 +2777,30 @@ export class SlashExecutionService {
    * @returns the rows affected. Zero means somebody else moved the case first,
    *   and nothing is announced for a transition that did not happen.
    */
+  /** The case row's patch for a recorded execution — one shape for every writer. */
+  private executedPatch(result: {
+    readonly signature: string | null;
+    readonly appliedMinor: string;
+    readonly platformAmountMinor: string;
+    readonly executedAt: Date;
+  }): Partial<SlashProposalEntity> & { status: string } {
+    return {
+      status: SlashProposalStatus.EXECUTED,
+      executedAt: result.executedAt,
+      executionSignature: result.signature,
+      appliedAmount: result.appliedMinor,
+      // Recorded, never booked: it went to the treasury, which is outside the
+      // vault the reconciler measures.
+      platformAmount: result.platformAmountMinor,
+      chainStatus: ChainProposalStatus.EXECUTED,
+      // Nothing is in flight for this row any more. Leaving the claim
+      // standing would keep it inside `findExecutingToReconcile`'s staleness
+      // window for no reason.
+      chainClaimedAt: null,
+      chainLastError: null,
+    };
+  }
+
   private async completeExecution(
     proposal: SlashProposalEntity,
     result: {
@@ -2767,27 +2810,25 @@ export class SlashExecutionService {
       readonly executedAt: Date;
     },
     expectedFrom: readonly string[],
+    // Written in the SAME transaction as the case's move to EXECUTED, and only
+    // when that move took (e.g. closing the open dispute row).
+    alongside?: (manager: EntityManager) => Promise<void>,
   ): Promise<number> {
-    const affected = await this.proposals.transitionIfIn(
-      proposal.organizationId,
-      proposal.id,
-      expectedFrom,
-      {
-        status: SlashProposalStatus.EXECUTED,
-        executedAt: result.executedAt,
-        executionSignature: result.signature,
-        appliedAmount: result.appliedMinor,
-        // Recorded, never booked: it went to the treasury, which is outside the
-        // vault the reconciler measures.
-        platformAmount: result.platformAmountMinor,
-        chainStatus: ChainProposalStatus.EXECUTED,
-        // Nothing is in flight for this row any more. Leaving the claim
-        // standing would keep it inside `findExecutingToReconcile`'s staleness
-        // window for no reason.
-        chainClaimedAt: null,
-        chainLastError: null,
-      },
-    );
+    const transition = (manager?: EntityManager) =>
+      this.proposals.transitionIfIn(
+        proposal.organizationId,
+        proposal.id,
+        expectedFrom,
+        this.executedPatch(result),
+        manager,
+      );
+    const affected = alongside
+      ? await this.proposals.manager.transaction(async (manager) => {
+          const moved = await transition(manager);
+          if (moved > 0) await alongside(manager);
+          return moved;
+        })
+      : await transition();
 
     if (affected === 0) {
       this.logger.error(
