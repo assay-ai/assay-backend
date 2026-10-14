@@ -2,9 +2,15 @@
  * `yarn devnet:acceptance-fixture` — build the chain-staked witness that
  * `devnet:acceptance` step `0b` requires, on a database that does not have one.
  *
- *     yarn devnet:acceptance-fixture
+ *     ACCEPTANCE_FIXTURE_PERSON_TOKEN=<token> yarn devnet:acceptance-fixture
  *     # then, as it prints:
  *     ACCEPTANCE_STAKED_PROVIDER_ORG_ID=<id> yarn devnet:acceptance
+ *
+ * `ACCEPTANCE_FIXTURE_PERSON_TOKEN` is a token of the API server's
+ * `MCP_CREDENTIALS_FILE` whose record is marked `"kind": "human"` and names an
+ * organization that is not a provider yet: registration and the stake
+ * authority proof are person-only routes, and a minted agent credential is
+ * refused on them (review N-2). See `adoptConfigPersonIdentity`.
  *
  * ## Why this is needed
  *
@@ -35,13 +41,13 @@
  *
  * Everything except the identity goes through the real HTTP endpoints
  * (`POST /providers`, the stake-authority challenge and proof), so a fixture
- * that succeeds is also evidence those endpoints work. The identity is minted
- * directly by `mintScriptIdentity`, which is how every devnet script gets one
- * without Privy.
+ * that succeeds is also evidence those endpoints work. The identity is the
+ * config-file person record, its organization and agent rows created if
+ * missing by `adoptConfigPersonIdentity`.
  *
- * Idempotent: re-running mints a **new** organization rather than reusing the
- * old one, because `providers.legal_name` is unique and a second registration
- * under the same name is refused. Each run prints its own id.
+ * One run per record: an organization that is already a provider is refused,
+ * so a re-run needs a fresh record (and an API restart to load it). Each run
+ * prints its own id.
  */
 
 import { join } from 'node:path';
@@ -51,7 +57,7 @@ import { getBase58Decoder, signBytes } from '@solana/kit';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 
 import { createApiClient } from './lib/acceptance-http';
-import { bootIdentityContext, mintScriptIdentity } from './lib/acceptance-identity';
+import { adoptConfigPersonIdentity, bootIdentityContext } from './lib/acceptance-identity';
 import { loadKeypairSigner } from '../settlement/lib/sender';
 
 const API_BASE_URL = process.env.ACCEPTANCE_API_BASE_URL ?? 'http://127.0.0.1:3000';
@@ -80,7 +86,11 @@ async function main(): Promise<void> {
     const signer = await loadKeypairSigner(PROVIDER_KEYPAIR);
     console.log(`witness provider keypair: ${signer.address}`);
 
-    const identity = await mintScriptIdentity(app, 'stake-witness');
+    const identity = await adoptConfigPersonIdentity(
+      app,
+      'ACCEPTANCE_FIXTURE_PERSON_TOKEN',
+      'stake-witness',
+    );
     console.log(`organization:             ${identity.organizationId}`);
 
     const api = createApiClient(API_BASE_URL, identity.token);

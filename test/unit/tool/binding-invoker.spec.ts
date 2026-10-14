@@ -16,6 +16,7 @@ import { AddressInfo } from 'node:net';
 import * as http from 'node:http';
 
 import {
+  ClassificationReason,
   ResponseBodyKind,
   ResponseClass,
   TransportErrorKind,
@@ -329,6 +330,12 @@ describe('EgressBindingInvoker (router call path)', () => {
       expect(response.transportError).toBeDefined();
       expect(received.url).toBeUndefined();
       expect(bindingEndpointProtocols()).toEqual(['https:']);
+      // A reason that tells the provider what to fix, not TRANSPORT_UNKNOWN (I-4).
+      expect(response.transportError?.kind).toBe(TransportErrorKind.SCHEME_NOT_ALLOWED);
+      expect(classifyResponse(response, { toolId: TOOL_ID })).toMatchObject({
+        responseClass: ResponseClass.SYSTEM_ERROR,
+        reason: ClassificationReason.TRANSPORT_HTTPS_REQUIRED,
+      });
     });
   });
 

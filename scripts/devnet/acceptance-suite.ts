@@ -23,6 +23,12 @@
  *   window — is reached in production only from a real judged payment, and
  *   there is no route that would let 800 of them be posted over HTTP. See
  *   `runStep8Seed`.
+ * - **The provider is a person, not a minted agent.** Provider writes are
+ *   behind `HumanSessionGuard`, so the provider's token is
+ *   `ACCEPTANCE_PROVIDER_PERSON_TOKEN`: a `"kind": "human"` record of the API
+ *   server's `MCP_CREDENTIALS_FILE` (`AUTH_SESSION_SOURCE=both`), naming an
+ *   organization that is not a provider yet — a fresh record per full run.
+ *   The buyer is still minted. See `adoptConfigPersonIdentity`.
  * - **That context is also what loads `.env.local`.** `-r dotenv/config` on
  *   the command line loads `.env` and only `.env`; `.env.local` reaches
  *   `process.env` solely because `@nestjs/config`'s
@@ -347,6 +353,7 @@ import { type SlaWindowSeedCall, seedSlaWindowCalls } from '../demo/lib/seed-sla
 import { explainProgramError, type Sender } from '../settlement/lib/sender';
 import { AcceptanceHttpError, createApiClient } from './lib/acceptance-http';
 import {
+  adoptConfigPersonIdentity,
   bootIdentityContext,
   borrowOrganizationCredential,
   mintScriptIdentity,
@@ -6548,12 +6555,23 @@ async function main(): Promise<void> {
     await step(report, STEP_0B, () => assertStakeSourceIsChain(identityApp));
 
     // Named for the actor, not the step: each identity belongs to one actor for
-    // the whole run, and both persist as org/agent/credential rows in real
-    // Postgres. Two separate organizations — that separation is what makes
-    // every later assertion about money crossing between them mean anything.
-    const providerIdentity = await mintScriptIdentity(identityApp, 'provider');
+    // the whole run, and both persist as org/agent rows in real Postgres. Two
+    // separate organizations — that separation is what makes every later
+    // assertion about money crossing between them mean anything.
+    //
+    // The provider is a PERSON: every provider write is behind
+    // `HumanSessionGuard`, which refuses a minted agent credential (review
+    // N-2). Its token is a `"kind": "human"` record of the server's
+    // `MCP_CREDENTIALS_FILE`, named by ACCEPTANCE_PROVIDER_PERSON_TOKEN, and
+    // a fresh one per full run — see `adoptConfigPersonIdentity`. Adopted
+    // before any signer is funded, so a stale record costs nothing.
+    const providerIdentity = await adoptConfigPersonIdentity(
+      identityApp,
+      'ACCEPTANCE_PROVIDER_PERSON_TOKEN',
+      'provider',
+    );
     console.log(
-      `minted provider identity: organizationId=${providerIdentity.organizationId} ` +
+      `provider person identity: organizationId=${providerIdentity.organizationId} ` +
         `agentId=${providerIdentity.agentId}`,
     );
 

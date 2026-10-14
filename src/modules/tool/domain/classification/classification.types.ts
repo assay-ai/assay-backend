@@ -82,6 +82,12 @@ export enum ClassificationReason {
   TRANSPORT_DNS_FAILURE = 'TRANSPORT_DNS_FAILURE',
   TRANSPORT_TLS_FAILURE = 'TRANSPORT_TLS_FAILURE',
   TRANSPORT_BODY_TRUNCATED = 'TRANSPORT_BODY_TRUNCATED',
+  /**
+   * The binding endpoint is not `https:`, which production requires. Never
+   * dialled, so `SYSTEM_ERROR` and no strike — but it fails on every call
+   * until the provider saves an `https://` endpoint.
+   */
+  TRANSPORT_HTTPS_REQUIRED = 'TRANSPORT_HTTPS_REQUIRED',
   TRANSPORT_UNKNOWN = 'TRANSPORT_UNKNOWN',
 
   // --- per-tool policy overrode the default for this status
@@ -143,6 +149,13 @@ export enum TransportErrorKind {
    * proved the body incomplete.
    */
   BODY_TRUNCATED = 'BODY_TRUNCATED',
+  /**
+   * The endpoint's scheme is not one the binding policy dials: in production
+   * that means a plain `http:` endpoint, refused before any dial because
+   * binding endpoints must be `https:` there (review P-8, I-4). A row saved
+   * with `http:` before that rule lands here on every call.
+   */
+  SCHEME_NOT_ALLOWED = 'SCHEME_NOT_ALLOWED',
   /** Recognised as a transport failure, but not as one of the above. */
   UNKNOWN = 'UNKNOWN',
 }

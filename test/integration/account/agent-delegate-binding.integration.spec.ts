@@ -90,6 +90,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     chainId: CHAIN,
     label: null,
     callerKind: McpCallerKind.AGENT,
+    storedCredential: true,
   });
 
   async function sign(typedData: Record<string, unknown>) {

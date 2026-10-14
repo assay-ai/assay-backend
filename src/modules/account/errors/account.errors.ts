@@ -54,13 +54,14 @@ export const AccountErrors = createDomainErrorFactory('ACCOUNT', {
   /**
    * Binding a delegate key is the AGENT's act, with its own credential: the
    * binding is per credential, and only the machine holding the key can sign
-   * the proof. A person's session has no credential of its own to bind.
+   * the proof. A person's session has no credential of its own to bind, and
+   * neither has a config-file machine token: no stored credential backs it.
    */
   delegateBindingAgentOnly: {
     code: AccountErrorCode.ACCOUNT_DELEGATE_BINDING_AGENT_ONLY,
     statusCode: 403,
     message: () =>
-      `Only an agent credential can bind a delegate key — call this with the agent's own token`,
+      `Only an agent credential (assay_sk_live_…) can bind a delegate key — call this with the agent's own token`,
   },
   /** The agent's chain has no voucher delegation (Solana). */
   delegateBindingUnsupported: {
