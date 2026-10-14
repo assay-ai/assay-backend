@@ -51,6 +51,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
   const filed: string[] = [];
   const closed: string[] = [];
   const mirrored: string[] = [];
+  const reconciled: string[] = [];
   const service = new SlashChainRulingService(
     {
       findOneByChainRequestId: async (id: string) => (parts.has(id) ? { ...parts.get(id) } : null),
@@ -79,6 +80,18 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     {
       mirrorChainExecution: async (_case: unknown, hash: string | null) =>
         void mirrored.push(hash ?? 'none'),
+      reconcileRecord: async (entry: { id: string }) => {
+        reconciled.push(entry.id);
+        // As the real one: the landed record is mirrored onto its part.
+        for (const part of parts.values()) {
+          if (part.chainStatus === 'REFUSED' && !String(part.chainLastError).startsWith('Record')) {
+            Object.assign(part, {
+              chainStatus: 'PENDING',
+              chainExecutableAt: new Date('2026-10-17T00:10:00Z'),
+            });
+          }
+        }
+      },
       closeCancelledOnChain: async (_case: unknown, because: string) => {
         closed.push(because);
         proposal.chainStatus = 'CANCELLED';
@@ -86,7 +99,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
       },
     } as never,
   );
-  return { service, parts, proposal, events, filed, closed, mirrored };
+  return { service, parts, proposal, events, filed, closed, mirrored, reconciled };
 }
 
 const disputed = (requestId: string, at = '2026-10-15T00:00:00Z') => ({
@@ -273,6 +286,48 @@ describe('SlashChainRulingService', () => {
     it('answers false for a record nobody planned', async () => {
       const { service } = build();
       await expect(service.recordExecuted(executed('c'.repeat(64)))).resolves.toBe(false);
+    });
+  });
+
+  describe('a straggler that landed after it was given up on (review S-5)', () => {
+    const late = (requestId: string) => ({
+      chainId: CHAIN,
+      requestId,
+      executableAt: new Date('2026-10-17T00:10:00Z'),
+      transactionHash: '0xlate',
+    });
+
+    it('re-adopts the part, and the case waits for its door', async () => {
+      const { service, parts, proposal, events, reconciled } = build('UPHELD');
+      Object.assign(parts.get(ID_B)!, {
+        chainStatus: 'REFUSED',
+        chainLastError: 'Straggler:transport',
+      });
+      await expect(service.recordLateProposal(late(ID_B))).resolves.toBe(true);
+
+      expect(reconciled).toEqual(['case']);
+      expect(parts.get(ID_B)).toMatchObject({ chainStatus: 'PENDING' });
+      expect(proposal).toMatchObject({
+        chainStatus: 'PENDING',
+        chainExecutableAt: new Date('2026-10-17T00:10:00Z'),
+      });
+      expect(events.map((event) => event.kind)).toEqual(['CHAIN_PART_READOPTED']);
+    });
+
+    it('leaves a standing part and a mismatched record alone', async () => {
+      const { service, parts, reconciled } = build('UPHELD');
+      await expect(service.recordLateProposal(late(ID_A))).resolves.toBe(true);
+      Object.assign(parts.get(ID_B)!, {
+        chainStatus: 'REFUSED',
+        chainLastError: 'RecordMismatch:penalty',
+      });
+      await expect(service.recordLateProposal(late(ID_B))).resolves.toBe(true);
+      expect(reconciled).toEqual([]);
+    });
+
+    it('answers false for a record nobody planned', async () => {
+      const { service } = build();
+      await expect(service.recordLateProposal(late('c'.repeat(64)))).resolves.toBe(false);
     });
   });
 });
