@@ -298,6 +298,13 @@ export class FakeIntents {
         providerAccount: context.providerAccount ?? intent.providerAccount,
         classification: context.classification ?? intent.classification,
         verificationVerdict: context.verificationVerdict ?? intent.verificationVerdict,
+        ...(context.charge
+          ? {
+              price: context.charge.price,
+              platformFee: context.charge.platformFee,
+              providerAmount: MoneyUtil.subtract(context.charge.price, context.charge.platformFee),
+            }
+          : {}),
       }),
     );
   }
