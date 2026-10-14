@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { Money } from '@modules/chains/ports/money.types';
@@ -22,6 +24,12 @@ import {
 import { utcHourStart, utcNextDayStart, utcNextMonthStart } from '../domain/spend-window.util';
 import { SpendUsageService } from './spend-usage.service';
 import { SpendPolicyVelocityService, VelocityViolationKind } from './spend-policy-velocity.service';
+
+/** How long one agent's spend lock lives at most: well above one check-and-hold. */
+export const AGENT_SPEND_LOCK_TTL_MS = 15_000;
+/** How long a call waits for the agent's spend lock before it is refused, retryably. */
+export const AGENT_SPEND_LOCK_WAIT_MS = 10_000;
+const AGENT_SPEND_LOCK_POLL_MS = 25;
 
 /** What the caller wants to spend money on, before any of it is reserved. */
 export interface AssertCallAllowedInput {
@@ -164,6 +172,56 @@ export class SpendPolicyEnforcementService {
     private readonly velocity: SpendPolicyVelocityService,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
   ) {}
+
+  /**
+   * Runs `fn` — the cap check and the reservation it allows — holding the
+   * agent's spend lock, so the two are atomic per agent (review 2026-10-15
+   * P-6).
+   *
+   * {@link assertCallAllowed} sums what the agent has held or settled, and the
+   * caller then writes the intent and its hold. Without a lock, N concurrent
+   * calls all read the same sum and all fit, and every money cap is overshot
+   * by up to N calls. The caller puts the check AND the hold inside `fn`; the
+   * next call of the same agent waits, and its sum then counts this hold.
+   *
+   * A Redis lock rather than a Postgres one because the critical section spans
+   * several services and connections (the intent insert, the ledger hold, a
+   * voucher's checks); an advisory lock would hold a pool connection while
+   * waiting on the others. It expires after {@link AGENT_SPEND_LOCK_TTL_MS}, so
+   * a crashed holder cannot stop an agent for longer than that. Fails closed:
+   * Redis unreachable, or the lock still busy after
+   * {@link AGENT_SPEND_LOCK_WAIT_MS}, is a retryable velocity refusal, and
+   * nothing was reserved.
+   */
+  async withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+    const token = randomUUID();
+    const deadline = Date.now() + AGENT_SPEND_LOCK_WAIT_MS;
+    for (;;) {
+      let claimed: boolean;
+      try {
+        claimed = await this.velocity.tryLockAgentSpend(agentId, token, AGENT_SPEND_LOCK_TTL_MS);
+      } catch (error) {
+        this.logger.warn(`agent ${agentId}: spend lock unavailable. ${describe(error)}`);
+        throw McpErrors.velocityLimitExceeded({
+          reason: VelocityViolationKind.UNAVAILABLE,
+          retryAfter: 1,
+        });
+      }
+      if (claimed) break;
+      if (Date.now() >= deadline) {
+        throw McpErrors.velocityLimitExceeded({
+          reason: VelocityViolationKind.UNAVAILABLE,
+          retryAfter: 1,
+        });
+      }
+      await new Promise((resolve) => setTimeout(resolve, AGENT_SPEND_LOCK_POLL_MS));
+    }
+    try {
+      return await fn();
+    } finally {
+      await this.velocity.unlockAgentSpend(agentId, token);
+    }
+  }
 
   async assertCallAllowed(input: AssertCallAllowedInput): Promise<number | null> {
     const { organizationId, agentId, toolId, price, requestHash } = input;

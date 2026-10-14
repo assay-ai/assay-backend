@@ -449,10 +449,53 @@ export class FakeSpendPolicy {
   refuseWith: Error | null = null;
   /** Every call the gate saw, for asserting it ran before the money did. */
   readonly checked: { toolId: string; requestHash: string }[] = [];
+  /**
+   * Set by a test: a cap counted in holds. The check refuses once `held()`
+   * holds exist — the real gate's "spend so far + this call > cap", reduced to
+   * what the harness can see.
+   */
+  holdCap: { readonly max: number; readonly held: () => number } | null = null;
+  /** Calls that ran the check outside {@link withAgentSpendLock}. */
+  uncheckedOutsideLock = 0;
+
+  private readonly locks = new Map<string, Promise<unknown>>();
+  private depth = 0;
+
+  /** The real lock's guarantee, in process: one critical section per agent at a time. */
+  withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+    const previous = this.locks.get(agentId) ?? Promise.resolve();
+    const run = previous.then(
+      async () => {
+        this.depth += 1;
+        try {
+          return await fn();
+        } finally {
+          this.depth -= 1;
+        }
+      },
+      async () => {
+        this.depth += 1;
+        try {
+          return await fn();
+        } finally {
+          this.depth -= 1;
+        }
+      },
+    );
+    this.locks.set(
+      agentId,
+      run.catch(() => undefined),
+    );
+    return run;
+  }
 
   assertCallAllowed(input: { toolId: string; requestHash: string }): Promise<number | null> {
     this.checked.push({ toolId: input.toolId, requestHash: input.requestHash });
+    if (this.depth === 0) this.uncheckedOutsideLock += 1;
     if (this.refuseWith) return Promise.reject(this.refuseWith);
+    if (this.holdCap && this.holdCap.held() >= this.holdCap.max) {
+      return Promise.reject(new Error('daily cap reached'));
+    }
     return Promise.resolve(1);
   }
 }
