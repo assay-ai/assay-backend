@@ -17,6 +17,7 @@ export enum ToolErrorCode {
   TOOL_MAPPING_EMPTY_COLLECTION = 'TOOL_MAPPING_EMPTY_COLLECTION',
   TOOL_MAPPING_TRANSFORM_FAILED = 'TOOL_MAPPING_TRANSFORM_FAILED',
   TOOL_NO_ELIGIBLE_BINDING = 'TOOL_NO_ELIGIBLE_BINDING',
+  TOOL_PROVIDER_SLASH_HOLD = 'TOOL_PROVIDER_SLASH_HOLD',
   TOOL_ALL_BINDINGS_FAILED = 'TOOL_ALL_BINDINGS_FAILED',
   TOOL_UPSTREAM_TIMEOUT = 'TOOL_UPSTREAM_TIMEOUT',
 }
@@ -124,6 +125,19 @@ export const ToolErrors = createDomainErrorFactory('TOOL', {
       `Transform "${context?.transform ?? '?'}" failed` +
       `${context?.pointer ? ` at ${context.pointer}` : ''}` +
       `${context?.detail ? `: ${context.detail}` : ''}`,
+  },
+  /**
+   * Every provider of this tool the buyer could pay is on a slash hold: its
+   * penalties cannot be collected promptly, so it takes no paid calls until
+   * the chain says otherwise. Transient; retry later.
+   */
+  providerSlashHold: {
+    code: ToolErrorCode.TOOL_PROVIDER_SLASH_HOLD,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `The provider${context?.toolId ? ` of tool ${context.toolId}` : ''} is paused while its ` +
+      'outstanding penalties cannot be collected (slash hold), and no other provider can serve ' +
+      'this call; retry later',
   },
   noEligibleBinding: {
     code: ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING,

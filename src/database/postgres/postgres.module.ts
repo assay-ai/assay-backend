@@ -82,7 +82,9 @@ import { AccountBlockEntity } from './entities/account-block.entity';
 import { AccountBlockRepository } from './repositories/account-block.repository';
 import { EvmBlockedAddressEntity } from './entities/evm-blocked-address.entity';
 import { EvmChainStateEntity } from './entities/evm-chain-state.entity';
+import { ProviderSlashHoldEntity } from './entities/provider-slash-hold.entity';
 import { EvmChainStateRepository } from './repositories/evm-chain-state.repository';
+import { ProviderSlashHoldRepository } from './repositories/provider-slash-hold.repository';
 import { OperatorRepository } from './repositories/operator.repository';
 // Due process for taking money.
 import { SlashProposalEntity } from './entities/slash-proposal.entity';
@@ -154,6 +156,7 @@ const entities = [
   AgentEntity,
   AccountBlockEntity,
   EvmChainStateEntity,
+  ProviderSlashHoldEntity,
   EvmBlockedAddressEntity,
 ];
 const repositories = [
@@ -205,6 +208,7 @@ const repositories = [
   AgentRepository,
   AccountBlockRepository,
   EvmChainStateRepository,
+  ProviderSlashHoldRepository,
   SlashCaseReadRepository,
   PlatformMetricsRepository,
 ];

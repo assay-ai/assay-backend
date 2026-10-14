@@ -511,6 +511,39 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * `idx_slash_proposals_chain_disputed`.
    */
   /**
+   * Per provider, on `chainId`: whether an upheld case of theirs has a record
+   * due to execute (`UPHELD`, mirror `PENDING`, door open), and whether its
+   * last execute attempt — the case's or one of its parts' — was refused by a
+   * full window. The slash hold's condition 1 reads this.
+   */
+  async findWaitingExecution(
+    chainId: string,
+    now: Date,
+  ): Promise<Map<string, { windowRefused: boolean }>> {
+    const rows = (await this.manager.query(
+      `SELECT proposal.provider_id AS "providerId",
+              bool_or(
+                proposal.chain_last_error = ANY($3)
+                OR EXISTS (
+                  SELECT 1 FROM slash_proposal_parts part
+                   WHERE part.proposal_id = proposal.id
+                     AND part.chain_epoch = proposal.chain_epoch
+                     AND part.chain_status = 'PENDING'
+                     AND part.chain_last_error = ANY($3)
+                )
+              ) AS "windowRefused"
+         FROM slash_proposals proposal
+        WHERE proposal.status = 'UPHELD'
+          AND proposal.chain_status = 'PENDING'
+          AND proposal.chain_executable_at <= $2
+          AND proposal.asset_id LIKE $1
+        GROUP BY proposal.provider_id`,
+      [`${chainId}/%`, now, [...WINDOW_REFUSALS]],
+    )) as { providerId: string; windowRefused: boolean }[];
+    return new Map(rows.map((row) => [row.providerId, { windowRefused: row.windowRefused }]));
+  }
+
+  /**
    * Per provider, the slash cases upheld or executed since `since` (owner
    * decision C4: repeat offenders are banned with the blocklist, so the
    * arbiter page shows the count). Cross-tenant on purpose, like the arbiter
@@ -782,3 +815,10 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     return new Map(rows.map((row) => [row.key, row.count]));
   }
 }
+
+/** Execute refusals that mean "a rolling window is full; retry as it drains". */
+const WINDOW_REFUSALS: readonly string[] = [
+  'SlashCapExceeded',
+  'VerifierDailyCapExceeded',
+  'SlashWindowNotDrained',
+];

@@ -1,7 +1,7 @@
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
 
-import { BindingStatus } from '../../ports/tool.types';
+import { BindingStatus, PricingMode } from '../../ports/tool.types';
 import { chooseSettlementChain, settleableChains } from './chain-gate';
 import { chainsWithheldForWithdrawal } from './withdraw-gate';
 import { evaluatePayoutGate } from './payout-gate';
@@ -96,13 +96,33 @@ export function filterEligible(
       continue;
     }
 
+    // A slash hold (the provider's penalties cannot be collected promptly)
+    // closes the provider's paid traffic on that chain only: another chain the
+    // buyer can pay on still settles, and a FREE binding moves no money.
+    const held = new Set(
+      binding.pricingMode === PricingMode.FREE
+        ? []
+        : (provider.slashHolds ?? []).map((hold) => hold.chainId),
+    );
+    const open = settleable.filter((chainId) => !held.has(chainId));
+    if (open.length === 0) {
+      rejected.push({
+        candidate,
+        reason: IneligibilityReason.PROVIDER_SLASH_HOLD,
+        detail:
+          `provider ${binding.providerId} is on a slash hold on [${settleable.join(', ')}]: its ` +
+          'penalties there cannot be collected promptly, so it takes no paid calls there',
+      });
+      continue;
+    }
+
     // The chain this call would settle on. Chosen ONCE, here, and used by both
     // gates below and by the caller — so the payout address checked, the
     // collateral checked and the chain recorded on the intent are guaranteed
     // to be the same chain. Resolving it separately in three places is how they
     // come to disagree.
     const settlementChain = chooseSettlementChain(
-      settleable,
+      open,
       context.defaultChainId,
       context.enabledChains,
     );

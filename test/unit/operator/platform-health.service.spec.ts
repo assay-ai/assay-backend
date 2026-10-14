@@ -81,6 +81,17 @@ function harness(
         findAllStates: async () => options.chainStates ?? [],
         findBlocked: async () => options.blocked ?? [],
       } as never,
+      {
+        findAllHeld: async () => [
+          {
+            providerId: 'provider-1',
+            chainId: CHAIN,
+            reasons: ['STAKE_FULLY_RESERVED'],
+            heldSince: new Date('2026-10-15T00:00:00Z'),
+            checkedAt: new Date('2026-10-15T00:05:00Z'),
+          },
+        ],
+      } as never,
     ),
   };
 }
@@ -297,5 +308,20 @@ describe('PlatformHealthService — the EVM chain-state cache', () => {
       }),
     ]);
     expect(chainState[0].lagSeconds).toBeLessThan(60);
+  });
+});
+
+describe('PlatformHealthService — slash holds', () => {
+  it('lists every provider on a slash hold, with its reasons', async () => {
+    const { service } = harness({});
+    expect((await service.getHealth()).slashHolds).toEqual([
+      {
+        providerId: 'provider-1',
+        chainId: CHAIN,
+        reasons: ['STAKE_FULLY_RESERVED'],
+        heldSince: '2026-10-15T00:00:00.000Z',
+        checkedAt: '2026-10-15T00:05:00.000Z',
+      },
+    ]);
   });
 });

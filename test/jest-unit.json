@@ -1,9 +1,5 @@
 {
-  "moduleFileExtensions": [
-    "js",
-    "json",
-    "ts"
-  ],
+  "moduleFileExtensions": ["js", "json", "ts"],
   "rootDir": ".",
   "testEnvironment": "node",
   "testRegex": "test/unit/.*\\.spec\\.ts$",
@@ -25,12 +21,8 @@
     "^@schedule/(.*)$": "<rootDir>/../src/modules/_examples/schedule/$1",
     "^@websocket/(.*)$": "<rootDir>/../src/websocket/$1"
   },
-  "collectCoverageFrom": [
-    "src/**/*.(t|j)s"
-  ],
+  "collectCoverageFrom": ["src/**/*.(t|j)s"],
   "coverageDirectory": "../coverage",
-  "setupFiles": [
-    "<rootDir>/setup-env.ts"
-  ],
+  "setupFiles": ["<rootDir>/setup-env.ts"],
   "globalSetup": "<rootDir>/global-setup-tz.ts"
 }

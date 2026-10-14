@@ -1,7 +1,8 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { In } from 'typeorm';
 
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { ProviderSlashHoldRepository } from '@database/postgres/repositories/provider-slash-hold.repository';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 
@@ -13,6 +14,7 @@ import {
 import { ProviderRegistryPort } from '../ports/provider-registry.port';
 import {
   ProviderRoutingState,
+  ProviderSlashHoldView,
   ProviderStats,
   ProviderStatus,
   ProviderTier,
@@ -68,6 +70,9 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     private readonly providers: ProviderRepository,
     @Inject(CHAIN_ENROLMENT_SOURCE) private readonly enrolments: ChainEnrolmentPort,
     private readonly blocklist: AccountBlocklistService,
+    // The per-chain slash holds (`EvmSlashHoldMonitor`). Optional: a
+    // composition without them routes exactly as before.
+    @Optional() private readonly slashHolds: ProviderSlashHoldRepository | null = null,
   ) {}
 
   async findRoutingStates(
@@ -80,10 +85,18 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     // surface rests on — so this is an ordinary scoped read over a set of
     // organizations rather than a cross-tenant one, and it stays inside the
     // scope guard.
-    const [rows, enrolments] = await Promise.all([
+    const [rows, enrolments, holds] = await Promise.all([
       this.providers.find({ where: { organizationId: In([...providerIds]) } }),
       this.enrolments.enrolmentsOf(providerIds),
+      this.slashHolds?.findHeld(providerIds) ?? Promise.resolve([]),
     ]);
+    const holdsByProvider = new Map<string, ProviderSlashHoldView[]>();
+    for (const hold of holds) {
+      holdsByProvider.set(hold.providerId, [
+        ...(holdsByProvider.get(hold.providerId) ?? []),
+        { chainId: hold.chainId as ChainId, reasons: hold.reasons, heldSince: hold.heldSince },
+      ]);
+    }
 
     const payoutsByProvider = new Map<string, Map<ChainId, AccountId>>();
     const chainsByProvider = new Map<string, Set<ChainId>>();
@@ -133,6 +146,7 @@ export class DbProviderRegistry implements ProviderRegistryPort {
         // a default.
         payoutAccountByChain: payoutsByProvider.get(row.organizationId) ?? NO_ENROLMENTS,
         payoutEnrolmentChains: chainsByProvider.get(row.organizationId) ?? NO_CHAINS,
+        slashHolds: holdsByProvider.get(row.organizationId) ?? [],
       });
     }
 

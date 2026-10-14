@@ -22,6 +22,7 @@ import {
   EvmChainStateIndexer,
   EvmChainStateIndexerConfig,
 } from './chain-state/evm-chain-state.indexer';
+import { EvmSlashHoldMonitor } from './evm-slash-hold.monitor';
 import { EvmVerifierExpiryMonitor } from './evm-verifier-expiry.monitor';
 import { ChainErrors } from '../errors/chains.errors';
 import { isChainId } from '../ports/caip.types';
@@ -129,6 +130,9 @@ function readConfirmations(raw: string | undefined): number {
     EvmSlashProposalWatcher,
     // Follow-up B5: WARN 45 days before a verifier key with open records expires.
     EvmVerifierExpiryMonitor,
+    // The provider slash hold: stop routing paid calls to a provider whose
+    // penalties cannot be collected promptly.
+    EvmSlashHoldMonitor,
   ],
 })
 export class EvmSchedulerModule {}

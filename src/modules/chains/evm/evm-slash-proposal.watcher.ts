@@ -15,6 +15,7 @@ import { ENABLED_CHAINS } from '../enabled-chains';
 import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
 import { X402_SLASH_WATCH_EVENTS_ABI } from './abi/x402.abi';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
+import { EvmSlashHoldMonitor } from './evm-slash-hold.monitor';
 import { cancelReasonFromEvm } from './evm-slash-status';
 
 /**
@@ -127,6 +128,9 @@ export class EvmSlashProposalWatcher {
     // Resolved at call time: the slash domain is composed beside this module
     // in the scheduler, and a composition without it still alerts.
     @Optional() private readonly moduleRef: ModuleRef | null = null,
+    // A slash event can put a provider on (or take it off) a slash hold:
+    // re-check that provider at once rather than at the next minute.
+    @Optional() private readonly slashHolds: EvmSlashHoldMonitor | null = null,
   ) {}
 
   @Cron(EVM_SLASH_WATCH_CRON)
@@ -213,6 +217,14 @@ export class EvmSlashProposalWatcher {
     // Only after the comparison and its alerts: a failure above re-reads the
     // same range next tick rather than skipping it.
     await this.writeCursor(chainId, end);
+    if (this.slashHolds) {
+      const authorities = new Set(
+        logs
+          .map((log) => log.args.provider)
+          .filter((provider): provider is `0x${string}` => typeof provider === 'string'),
+      );
+      for (const provider of authorities) await this.slashHolds.recheckAuthority(chainId, provider);
+    }
     return findings;
   }
 

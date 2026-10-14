@@ -95,6 +95,25 @@ describe('DbProviderRegistry', () => {
     };
   }
 
+  it('carries the provider’s standing slash holds onto the routing state', async () => {
+    const heldSince = new Date('2026-10-15T00:00:00Z');
+    const findHeld = jest.fn(async () => [
+      { providerId: PROVIDER_A, chainId: DEVNET, reasons: ['BONDED_BELOW_MINIMUM'], heldSince },
+    ]);
+    const { find } = build();
+    const registry = new DbProviderRegistry(
+      { find } as unknown as ProviderRepository,
+      { enrolmentsOf: async () => new Map() } as unknown as ChainEnrolmentPort,
+      noBlocks(),
+      { findHeld } as never,
+    );
+    const states = await registry.findRoutingStates([PROVIDER_A]);
+    expect(states.get(PROVIDER_A)?.slashHolds).toEqual([
+      { chainId: DEVNET, reasons: ['BONDED_BELOW_MINIMUM'], heldSince },
+    ]);
+    expect(findHeld).toHaveBeenCalledWith([PROVIDER_A]);
+  });
+
   it('carries every ACTIVE enrolment onto the routing state, keyed by its chain', async () => {
     const { registry } = build({
       enrolments: [enrolment(PROVIDER_A, DEVNET), enrolment(PROVIDER_A, MAINNET)],

@@ -117,6 +117,35 @@ export class PlatformHealthDto {
       'the indexer is behind. A cache of the chain — the contracts stay the enforcer.',
   })
   chainState: ChainStateHealthDto[];
+
+  @ApiProperty({
+    type: () => [SlashHoldHealthDto],
+    description:
+      'Providers on a slash hold: their paid bindings are not routed on that chain while ' +
+      'their penalties cannot be collected promptly. Lifts by itself.',
+  })
+  slashHolds: SlashHoldHealthDto[];
+}
+
+/** One standing provider slash hold, in `GET /operator/health`. */
+export class SlashHoldHealthDto {
+  @ApiProperty({ description: "The provider's organization id" })
+  providerId: string;
+
+  @ApiProperty({ example: 'eip155:46630' })
+  chainId: string;
+
+  @ApiProperty({
+    type: [String],
+    enum: ['SLASH_WINDOW_FULL', 'STAKE_FULLY_RESERVED', 'BONDED_BELOW_MINIMUM'],
+  })
+  reasons: string[];
+
+  @ApiProperty({ type: String, format: 'date-time' })
+  heldSince: string;
+
+  @ApiPropertyOptional({ type: String, format: 'date-time', nullable: true })
+  checkedAt: string | null;
 }
 
 /** One EVM chain's row of `GET /operator/health`'s `chainState`. */

@@ -63,4 +63,32 @@ export class GetProviderMeResponseDto {
 
   @ApiProperty({ type: ProviderStatsDto })
   stats: ProviderStatsDto;
+
+  @ApiProperty({
+    type: () => [ProviderSlashHoldDto],
+    description:
+      'The chains this provider is on a slash hold on: its paid bindings are not routed there ' +
+      'while its penalties cannot be collected promptly. Empty when none. Lifts by itself once ' +
+      'the condition clears on two consecutive checks.',
+  })
+  slashHolds: ProviderSlashHoldDto[];
+}
+
+/** One slash hold, for the provider console's banner. */
+export class ProviderSlashHoldDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  chainId: string;
+
+  @ApiProperty({
+    type: [String],
+    enum: ['SLASH_WINDOW_FULL', 'STAKE_FULLY_RESERVED', 'BONDED_BELOW_MINIMUM'],
+    description:
+      'SLASH_WINDOW_FULL: the slash window is full and an upheld penalty waits to execute. ' +
+      'STAKE_FULLY_RESERVED: pending penalties reserve all but less than one penalty of the ' +
+      'stake. BONDED_BELOW_MINIMUM: bonded stake is below the minimum.',
+  })
+  reasons: string[];
+
+  @ApiProperty({ type: String, format: 'date-time' })
+  heldSince: string;
 }

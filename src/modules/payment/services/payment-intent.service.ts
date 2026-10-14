@@ -8,6 +8,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
+import { ProviderSlashHoldRepository } from '@database/postgres/repositories/provider-slash-hold.repository';
 import {
   OpenVoucherTotals,
   PaymentIntentRepository,
@@ -89,6 +90,8 @@ export class PaymentIntentService {
     @Optional()
     @Inject(CHAIN_STATE_GATE)
     private readonly chainState: ChainStateGatePort | null = null,
+    // The per-chain slash holds: no new intent names a held provider there.
+    @Optional() private readonly slashHolds: ProviderSlashHoldRepository | null = null,
   ) {}
 
   /**
@@ -138,6 +141,14 @@ export class PaymentIntentService {
       { role: 'PAYEE', account: input.providerAccount },
       { role: 'DELEGATE', account: input.voucherDelegate },
     ]);
+
+    if (
+      input.providerId &&
+      this.slashHolds &&
+      (await this.slashHolds.isHeld(input.providerId, input.chainId))
+    ) {
+      throw PaymentErrors.providerSlashHold({ chainId: input.chainId });
+    }
 
     const providerAmount = MoneyUtil.subtract(input.price, input.platformFee);
 
