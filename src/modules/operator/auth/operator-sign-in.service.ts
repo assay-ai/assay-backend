@@ -70,6 +70,11 @@ interface StoredChallenge {
  * needs a chain read on every sign-in. MetaMask, hardware wallets and the
  * Privy embedded wallet are EOAs.
  *
+ * Every sign-in, refusal and logout is logged (info for a sign-in or logout,
+ * warn for a refusal) with the operator id where there is one, the wallet and
+ * the client address: the trail an investigation of a stolen session starts
+ * from.
+ *
  * Every failure is the one `OPERATOR_CREDENTIAL_INVALID`, and counts against
  * the client address (`OperatorAuthThrottle`). It counts against the wallet
  * too, but only once the message is exactly the one issued for that wallet:
@@ -138,7 +143,7 @@ export class OperatorSignInService {
     // that, a made-up message naming somebody's address would lock them out.
     let issuedToWallet = false;
     const fail = async (reason: string): Promise<never> => {
-      this.logger.debug(`operator sign-in refused: ${reason}`);
+      this.logger.warn(`operator sign-in refused: ${reason}; wallet ${address ?? '-'} ip ${ip}`);
       await this.throttle.recordFailure(ipKey(ip));
       if (address && issuedToWallet) await this.throttle.recordFailure(walletKey(address));
       throw OperatorErrors.credentialInvalid();
@@ -175,6 +180,10 @@ export class OperatorSignInService {
 
     const operator = await this.operators.findByWallet(address);
     if (!operator || operator.status !== 'ACTIVE') {
+      this.logger.warn(
+        `operator sign-in refused: not an active operator` +
+          `${operator ? ` (${operator.id}, ${operator.status})` : ''}; wallet ${address} ip ${ip}`,
+      );
       await this.throttle.recordFailure(ipKey(ip));
       await this.throttle.recordFailure(walletKey(address));
       throw OperatorErrors.notAuthorized();
@@ -185,12 +194,17 @@ export class OperatorSignInService {
       this.config.sessionTtlSeconds,
     );
     await this.operators.update({ id: operator.id }, { lastSeenAt: new Date() });
+    this.logger.log(
+      `operator signed in: ${operator.id} (${operator.subject}) wallet ${address} ip ${ip}`,
+    );
     return { token, expiresAt, operator: this.directory.toDto(operator) };
   }
 
   /** Revokes the presented session. Idempotent; an unknown token is not an error. */
   async logout(token: string | null): Promise<void> {
-    if (token) await this.sessions.revoke(token);
+    if (!token) return;
+    const operatorId = await this.sessions.revoke(token);
+    if (operatorId) this.logger.log(`operator signed out: ${operatorId}`);
   }
 
   private assertConfigured(): void {

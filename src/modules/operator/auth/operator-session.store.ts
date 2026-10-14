@@ -62,18 +62,19 @@ export class OperatorSessionStore {
     }
   }
 
-  /** Revoke one session. Idempotent. */
-  async revoke(token: string): Promise<void> {
+  /** Revoke one session. Idempotent. Returns its operator, when it was live. */
+  async revoke(token: string): Promise<string | null> {
     const digest = digestSessionToken(token);
     const raw = await this.redis.get(SESSION_PREFIX + digest);
     await this.redis.del(SESSION_PREFIX + digest);
-    if (raw) {
-      try {
-        const { operatorId } = JSON.parse(raw) as StoredOperatorSession;
-        await this.redis.srem(BY_OPERATOR_PREFIX + operatorId, digest);
-      } catch {
-        // The session is gone either way; the index entry expires with its TTL.
-      }
+    if (!raw) return null;
+    try {
+      const { operatorId } = JSON.parse(raw) as StoredOperatorSession;
+      await this.redis.srem(BY_OPERATOR_PREFIX + operatorId, digest);
+      return operatorId;
+    } catch {
+      // The session is gone either way; the index entry expires with its TTL.
+      return null;
     }
   }
 

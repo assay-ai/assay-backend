@@ -66,7 +66,10 @@ yarn operator:remove --wallet 0x… | --subject alice@ | --id <uuid>
   links the wallet to it. A removed operator's wallet is restored on the same row.
 - `remove` also revokes the operator's live console sessions in Redis, so it needs Redis
   (`REDIS_URL`) as well as the database. Taking a role away in the console does the same.
-- A CLI change writes no override-log entry (there is no operator to attribute it to). Add at
+- A CLI change writes no override-log entry (there is no operator to attribute it to). Each add
+  or remove logs one structured line instead (`OperatorCli`, `operator added by cli:<os user>: …`).
+- The API logs every operator sign-in and logout at info, and every refused sign-in at warn, with
+  the operator id, the wallet and the client address. Add at
   least **two** `OPS_ADMIN` operators, so that the console can take over: adding an operator there
   needs a second `OPS_ADMIN`.
 

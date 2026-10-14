@@ -34,11 +34,7 @@ class MemoryOperators implements OperatorCliRepository {
   }
 }
 
-async function run(
-  repo: MemoryOperators,
-  line: string,
-  revoked: string[] = [],
-): Promise<string[]> {
+async function run(repo: MemoryOperators, line: string, revoked: string[] = []): Promise<string[]> {
   const [command, ...argv] = line.split(' ');
   const out: string[] = [];
   const sessions = { revokeAll: async (id: string) => void revoked.push(id) };
@@ -95,6 +91,32 @@ describe('yarn operator:add | list | remove', () => {
     expect(out[0]).toMatch(/^linked: /);
     expect(repo.rows).toHaveLength(1);
     expect(repo.rows[0].walletAddress).toBe(WALLET.toLowerCase());
+  });
+
+  it('writes an audit line naming the OS user for every add and remove', async () => {
+    const repo = new MemoryOperators();
+    const lines: string[] = [];
+    const sessions = { revokeAll: async () => undefined };
+    const cli = (line: string) => {
+      const [command, ...argv] = line.split(' ');
+      return runOperatorCli(
+        repo,
+        sessions,
+        command,
+        argv,
+        () => undefined,
+        (l) => lines.push(l),
+        'cli:alice',
+      );
+    };
+
+    await cli(`add --wallet ${WALLET} --subject dan@ --roles SRE`);
+    await cli('list');
+    await cli(`remove --wallet ${WALLET}`);
+
+    expect(lines).toHaveLength(2);
+    expect(lines[0]).toMatch(/^operator added by cli:alice: .*dan@.*roles=SRE/);
+    expect(lines[1]).toMatch(/^operator removed by cli:alice: .*REMOVED$/);
   });
 
   it('revokes the live sessions of an operator it removes', async () => {
