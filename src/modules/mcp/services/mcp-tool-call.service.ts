@@ -56,7 +56,10 @@ import {
   ToolQuote,
   bindingPrice,
 } from '@modules/tool/services/provider-router.service';
-import { VerificationSettlementService } from '@modules/verification/services/verification-settlement.service';
+import {
+  EnqueueVerificationInput,
+  VerificationSettlementService,
+} from '@modules/verification/services/verification-settlement.service';
 import { AppError } from '@shared/errors/app-errors';
 import { BaseError } from '@shared/errors/base.error';
 import { MoneyUtil } from '@utils/money.util';
@@ -1015,11 +1018,11 @@ export class McpToolCallService {
    * - Everything else is durably recorded and handed to
    *   `VerificationSettlementService`'s worker via {@link
    *   VerificationSettlementService.enqueue}. If the record or the enqueue
-   *   fails, the agent still gets its data back — that is the safe direction
-   *   to fail in — and the intent is voided at once, releasing the hold:
-   *   `ledger_holds.expires_at` has no reader anywhere, so nothing else would
-   *   ever return that money. A bookkeeping failure must still never replace
-   *   the agent's successful result with an error.
+   *   fails twice, the agent still gets its data back — a bookkeeping failure
+   *   must never replace a successful result with an error — and the intent
+   *   is settled as served, unverified, so the hold is committed rather than
+   *   stranded. It is never voided: that made the call free, and a buyer could
+   *   provoke the failure (final review N-3).
    */
   private async resolveDataResult(
     session: McpSession,
@@ -1106,43 +1109,56 @@ export class McpToolCallService {
       }
     }
 
-    try {
-      await this.settlement.enqueue({
-        organizationId: session.organizationId,
-        intentId: verifying.id,
-        toolId: routed.tool.id,
-        // Verification judges a provider's answer against a tool's contract and
-        // its consequences land on the provider's stake, so `providerId` is the
-        // identity this payload needs. No binding: adding one would put a
-        // second copy of the routing fact into a queue that outlives the call,
-        // and the intent it names already carries the authoritative one.
-        providerId: routed.providerId,
-        request: args,
-        response: routed.output,
-        outputSchema: routed.tool.outputSchema,
-      });
-    } catch (error) {
-      // Nothing would ever judge this intent, so nothing would ever return
-      // the hold: void it now — no charge, no strike. The agent keeps the
-      // data; the provider is unpaid for a call the platform failed to record.
-      this.logger.error(
-        `Intent ${verifying.id}: data returned but verification could not be durably enqueued — ` +
-          `voiding the intent and releasing its hold. ${describe(error)}`,
+    const handoff: EnqueueVerificationInput = {
+      organizationId: session.organizationId,
+      intentId: verifying.id,
+      toolId: routed.tool.id,
+      // Verification judges a provider's answer against a tool's contract and
+      // its consequences land on the provider's stake, so `providerId` is the
+      // identity this payload needs. No binding: adding one would put a
+      // second copy of the routing fact into a queue that outlives the call,
+      // and the intent it names already carries the authoritative one.
+      providerId: routed.providerId,
+      request: args,
+      response: routed.output,
+      outputSchema: routed.tool.outputSchema,
+    };
+
+    // Once more on failure: `enqueue` is idempotent on the intent id, so a
+    // retry after a write that did land is a no-op, not a second record.
+    const enqueued = await this.settlement
+      .enqueue(handoff)
+      .catch(() => this.settlement.enqueue(handoff))
+      .then(
+        () => true,
+        (error: unknown) => {
+          this.logger.error(
+            `Intent ${verifying.id}: data returned but verification could not be durably ` +
+              `enqueued — settling the call as served, unverified. ${describe(error)}`,
+          );
+          return false;
+        },
       );
-      try {
-        return await this.intents.resolve(
-          session.organizationId,
-          verifying.id,
-          PaymentIntentStatus.VERIFYING,
-          PaymentIntentStatus.VOIDED,
-          { reason: MCP_VERIFICATION_ENQUEUE_FAILED_REASON },
-        );
-      } catch (voidError) {
-        this.logger.error(
-          `Intent ${verifying.id}: void after a failed enqueue did not land — the intent is ` +
-            `stuck in VERIFYING and its hold must be released by hand. ${describe(voidError)}`,
-        );
-      }
+    if (enqueued) return verifying;
+
+    // Nothing will ever judge this intent. It is settled as served rather than
+    // voided (final review N-3): the agent has the data, and a void here was a
+    // free call any buyer could choose by making the write fail.
+    try {
+      return await this.intents.resolve(
+        session.organizationId,
+        verifying.id,
+        PaymentIntentStatus.VERIFYING,
+        PaymentIntentStatus.SETTLED,
+        { reason: MCP_VERIFICATION_ENQUEUE_FAILED_REASON, settledAmount: verifying.price },
+      );
+    } catch (settleError) {
+      // The hold stays open on a VERIFYING intent; only the 24-hour backstop
+      // acts on it after this.
+      this.logger.error(
+        `Intent ${verifying.id}: settling after a failed enqueue did not land — the intent ` +
+          `stays in VERIFYING with its hold open. ${describe(settleError)}`,
+      );
     }
 
     return verifying;
