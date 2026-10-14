@@ -15,7 +15,8 @@ import { RequestWithSession, SESSION_REQUEST_KEY } from './session-auth.guard';
  * routing — exist to bound and watch the agent, so the agent's own bearer
  * token must not be able to change them.
  *
- * **An allow-list, not a deny-list.** Only `HUMAN` and `CONFIG` pass; a kind
+ * **An allow-list, not a deny-list.** Only `HUMAN` and `CONFIG` (a config
+ * token whose record is marked as a person's) pass; a kind
  * added later is refused until someone decides it should not be. A request
  * with no session at all means the guards were wired in the wrong order, and
  * is refused as unauthenticated rather than let through.

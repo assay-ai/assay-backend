@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiExtraModels, ApiOperation, ApiResponse, ApiTags } fro
 
 import { UNSIGNED_CHAIN_TRANSACTION_EXTRA_MODELS } from '@modules/chains/dto/unsigned-chain-transaction.dto';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 
 import {
   CreateStakeIntentBodyDto,
@@ -39,7 +39,9 @@ import { ProviderStakeIntentService } from '../services/provider-stake-intent.se
  */
 @ApiTags('Provider')
 @ApiBearerAuth()
-@UseGuards(SessionAuthGuard)
+// Person-only (review A-1): staking, unstaking and withdrawing move the
+// provider's capital; a machine credential does not even get the intent built.
+@UseGuards(SessionAuthGuard, HumanSessionGuard)
 @ApiExtraModels(...UNSIGNED_CHAIN_TRANSACTION_EXTRA_MODELS)
 @Controller('providers/me/stake')
 export class ProviderStakeIntentController {

@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { ArrayMaxSize, IsArray, IsEnum, IsString, Length, MaxLength } from 'class-validator';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { DisputeClaimType } from '../domain/arbitration';
@@ -115,6 +115,7 @@ export class ProviderSlashProposalsController {
    * exactly as long to object as one who opens it immediately.
    */
   @Post(':proposalId/acknowledge')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Record that the provider has seen this proposal' })
   @ApiResponse({ status: 200, type: SlashProposalCaseDto })
   async acknowledge(
@@ -134,6 +135,7 @@ export class ProviderSlashProposalsController {
    * providers in every comparable system under-dispute.
    */
   @Post(':proposalId/dispute')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Object to a proposed penalty' })
   @ApiResponse({ status: 201, type: SlashProposalCaseDto })
   @ApiResponse({ status: 409, description: 'The window to object has closed, or one is on file' })
