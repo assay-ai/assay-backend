@@ -149,6 +149,23 @@ export class OperatorApprovalService {
     return (await this.toDtos([await this.require(id)]))[0];
   }
 
+  /**
+   * An APPROVED approval of `action`, for the routes that hand its result out
+   * again (review N-5). Anything else is refused.
+   */
+  async requireApproved(id: string, action: string): Promise<OperatorApprovalEntity> {
+    await this.approvals.expireStale();
+    const row = await this.require(id);
+    if (row.status !== 'APPROVED' || row.action !== action) {
+      throw OperatorErrors.approvalNotApproved({
+        status: row.status,
+        action: row.action,
+        expected: action,
+      });
+    }
+    return row;
+  }
+
   async approve(
     id: string,
     approver: OperatorSession,

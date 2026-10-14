@@ -62,6 +62,7 @@ function build() {
     { markApproved: async () => true } as never,
   );
   const queued: Record<string, unknown>[] = [];
+  const stored = new Map<string, Record<string, unknown>>();
   const approvals = new OperatorApprovalService(
     {
       create: (row: Record<string, unknown>) => row,
@@ -69,6 +70,8 @@ function build() {
         queued.push(row);
         return { ...row, id: 'appr-1' };
       },
+      expireStale: async () => 0,
+      findOneBy: async ({ id }: { id: string }) => stored.get(id) ?? null,
     } as never,
     {} as never,
     {} as never,
@@ -81,7 +84,7 @@ function build() {
     { buildBlock } as never,
   );
   const service = new OperatorArbiterService(disputes, approvals);
-  return { service, entries, queued, buildBlock };
+  return { service, entries, queued, buildBlock, stored };
 }
 
 const context = (who: OperatorSession) => ({
@@ -138,5 +141,57 @@ describe('A-11 — the on-chain block is two-person', () => {
       'OPERATOR_APPROVER_ROLE_REQUIRED',
     );
     expect(entries).toHaveLength(0);
+  });
+});
+
+describe('A-11 — the approved block call, fetched again (review N-5)', () => {
+  const approved = (patch: Record<string, unknown> = {}) => ({
+    id: 'appr-1',
+    action: ARBITER_BLOCK_APPROVAL_ACTION,
+    status: 'APPROVED',
+    payload: { chainId: CHAIN, account: ACCOUNT, reasonCode: 'LEAKED_KEY', note: NOTE },
+    ...patch,
+  });
+
+  it('rebuilds the unsigned setBlocked of an APPROVED block, with no second register entry', async () => {
+    const { service, stored, buildBlock, entries } = build();
+    stored.set('appr-1', approved());
+
+    await expect(service.approvedBlockCall('appr-1')).resolves.toMatchObject({
+      functionName: 'setBlocked',
+      signerRole: 'ARBITER',
+    });
+    expect(buildBlock).toHaveBeenCalledWith({ chainId: CHAIN, account: ACCOUNT });
+    expect(entries).toHaveLength(0);
+  });
+
+  it('refuses a block that is not approved, and an approval of another action', async () => {
+    const { service, stored } = build();
+    stored.set('appr-1', approved({ status: 'PENDING' }));
+    stored.set('appr-2', approved({ id: 'appr-2', action: 'slash.suspend' }));
+
+    await expectErrorCodeAsync(
+      () => service.approvedBlockCall('appr-1'),
+      'OPERATOR_APPROVAL_NOT_APPROVED',
+    );
+    await expectErrorCodeAsync(
+      () => service.approvedBlockCall('appr-2'),
+      'OPERATOR_APPROVAL_NOT_APPROVED',
+    );
+    await expectErrorCodeAsync(
+      () => service.approvedBlockCall('missing'),
+      'OPERATOR_APPROVAL_NOT_FOUND',
+    );
+  });
+
+  it('passes the chain refusal on once the address is blocked: the call was executed', async () => {
+    const { service, stored, buildBlock } = build();
+    stored.set('appr-1', approved());
+    buildBlock.mockRejectedValueOnce(
+      Object.assign(new Error('already blocked'), { errorCode: 'CHAIN_ADDRESS_ALREADY_BLOCKED' }),
+    );
+    await expect(service.approvedBlockCall('appr-1')).rejects.toMatchObject({
+      errorCode: 'CHAIN_ADDRESS_ALREADY_BLOCKED',
+    });
   });
 });
