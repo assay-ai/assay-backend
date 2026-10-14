@@ -168,6 +168,15 @@ export const MCP_FORWARDED_TO_VERIFICATION_REASON = 'mcp: forwarded to asynchron
 export const MCP_SCHEMA_CONTRACT_VIOLATION_REASON =
   'mcp: refunded — the provider response failed the tool outputSchema';
 
+/**
+ * Written on `VERIFYING → VOIDED` when a `DATA_RESULT` could not be handed to
+ * the verification worker — the record write or the enqueue threw (for
+ * example a payload no serialiser can write). Nothing would ever judge the
+ * intent, so the hold is released rather than stranded.
+ */
+export const MCP_VERIFICATION_ENQUEUE_FAILED_REASON =
+  'mcp: voided — the response could not be handed to verification';
+
 /** Written when the provider's outcome earns no charge. */
 export const MCP_VOIDED_REASON = 'mcp: provider outcome was not a DATA_RESULT';
 

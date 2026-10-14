@@ -13,6 +13,7 @@
  */
 import {
   ClassificationPolicy,
+  MAX_RESPONSE_JSON_DEPTH,
   ClassificationReason,
   ProviderResponse,
   RESPONSE_CLASS_CONSEQUENCE,
@@ -590,6 +591,25 @@ describe('readResponseBody', () => {
   it('keeps a bare JSON scalar as JSON', () => {
     expect(readResponseBody('42').kind).toBe(ResponseBodyKind.JSON);
     expect(readResponseBody('null').kind).toBe(ResponseBodyKind.JSON);
+  });
+
+  // Review P-3: V8 parses 100 000 levels, but the recursive serialisers after
+  // it (job payload, canonicalJson, jsonb) throw, and the hold was stranded.
+  it('refuses a body nested past the depth limit as NON_JSON, so the call is not charged', () => {
+    const deep = `{"x":${'['.repeat(100_000)}${']'.repeat(100_000)}}`;
+    const body = readResponseBody(deep);
+
+    expect(body.kind).toBe(ResponseBodyKind.NON_JSON);
+    expect(classifyResponse({ status: 200, body }, { toolId: 't' }).responseClass).toBe(
+      ResponseClass.SYSTEM_ERROR,
+    );
+  });
+
+  it('accepts nesting at the limit and ignores brackets inside strings', () => {
+    const atLimit = `${'['.repeat(MAX_RESPONSE_JSON_DEPTH)}${']'.repeat(MAX_RESPONSE_JSON_DEPTH)}`;
+    expect(readResponseBody(atLimit).kind).toBe(ResponseBodyKind.JSON);
+    expect(readResponseBody(`{"s":"${'['.repeat(1000)}\\"{"}`).kind).toBe(ResponseBodyKind.JSON);
+    expect(readResponseBody(`[${atLimit}]`).kind).toBe(ResponseBodyKind.NON_JSON);
   });
 });
 
