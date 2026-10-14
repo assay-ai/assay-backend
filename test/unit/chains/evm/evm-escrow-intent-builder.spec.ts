@@ -161,7 +161,7 @@ function request(overrides: Partial<EscrowIntentRequest> = {}): EscrowIntentRequ
 
 /** The domain, written out by hand rather than imported. */
 const DOMAIN: TypedDataDomain = {
-  name: 'x402 Settlement',
+  name: 'Assay Settlement',
   version: '2',
   chainId: 46630,
   verifyingContract: DEPLOYMENT.escrow,
@@ -478,7 +478,7 @@ describe('EvmEscrowIntentBuilder', () => {
     expect(intent.domain.verifyingContract).toBe(DEPLOYMENT.escrow);
     expect(intent.domain.verifyingContract).not.toBe(DEPLOYMENT.stake);
     expect(intent.domain).toEqual({
-      name: 'x402 Settlement',
+      name: 'Assay Settlement',
       version: '2',
       chainId: '46630',
       verifyingContract: DEPLOYMENT.escrow,
