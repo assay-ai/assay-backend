@@ -263,10 +263,14 @@ export class EvmFacilitator implements FacilitatorPort {
     return { sender: toAccountId(network, sender), serialized: bytes };
   }
 
+  /**
+   * Whether these bytes were mined AND succeeded. A reverted receipt is mined
+   * but moved nothing, so it is not a settlement (review 2026-10-15 P-10).
+   */
   private async hasReceipt(client: EvmFacilitatorClient, hash: TxRef): Promise<boolean> {
     const receipt = await client
       .getTransactionReceipt({ hash: hash as `0x${string}` })
       .catch(() => null);
-    return receipt !== null;
+    return receipt !== null && receipt.status === 'success';
   }
 }

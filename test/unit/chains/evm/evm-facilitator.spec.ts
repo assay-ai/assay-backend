@@ -284,6 +284,21 @@ describe('EvmFacilitator.settle', () => {
     });
   });
 
+  /** REGRESSION (review 2026-10-15 P-10): a REVERTED receipt is not a landed settlement. */
+  it('does not treat a reverted receipt under the same bytes as landed', async () => {
+    const tx = await signedDeposit();
+    const { facilitator } = build(
+      stubClient({
+        sendRawTransaction: jest.fn().mockRejectedValue(new Error('nonce too low')),
+        getTransactionReceipt: jest.fn().mockResolvedValue({ status: 'reverted' }),
+      }),
+    );
+    await expect(facilitator.settle(payloadOf(tx), requirements)).resolves.toMatchObject({
+      success: false,
+      errorReason: X402_INVALID_REASON.UNEXPECTED_SETTLE_ERROR,
+    });
+  });
+
   it('reports a send failure with no receipt as unexpected_settle_error', async () => {
     const { facilitator } = build(
       stubClient({ sendRawTransaction: jest.fn().mockRejectedValue(new Error('boom')) }),
