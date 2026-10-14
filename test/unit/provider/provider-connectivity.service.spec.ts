@@ -33,6 +33,7 @@ import {
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { ConnectivityOutcome } from '@modules/provider/ports/provider-registration.types';
 import { ProviderConnectivityService } from '@modules/provider/services/provider-connectivity.service';
+import { ProviderEgressLimiter } from '@modules/provider/services/provider-egress-limiter.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 
@@ -133,6 +134,7 @@ function buildHarness() {
     checks.asRepository(),
     http as unknown as EgressHttpClient,
     EGRESS_IPS,
+    new ProviderEgressLimiter(),
     fakeLookup,
   );
 

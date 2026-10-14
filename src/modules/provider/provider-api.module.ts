@@ -30,6 +30,7 @@ import { PROVIDER_EGRESS_IPS, loadEgressIps } from './services/egress-ips';
 import { ProviderCallsExportService } from './services/provider-calls-export.service';
 import { ProviderConnectivityService } from './services/provider-connectivity.service';
 import { ProviderEarningsService } from './services/provider-earnings.service';
+import { ProviderEgressLimiter } from './services/provider-egress-limiter.service';
 import { ProviderPayoutAddressService } from './services/provider-payout-address.service';
 import { ProviderPayoutsService } from './services/provider-payouts.service';
 import { ProviderPolicyChangesService } from './services/provider-policy-changes.service';
@@ -138,6 +139,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderStakeAuthorityService,
     ProviderStakeIntentService,
     ProviderConnectivityService,
+    ProviderEgressLimiter,
     ProviderVerificationService,
     ProviderProfileService,
     ProviderTrafficService,
