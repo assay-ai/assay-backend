@@ -16,6 +16,7 @@ import {
 import { SLASH_PROPOSAL_SUBJECT_TYPE } from '../constants/slash-subject.constants';
 import { SLASH_CONFIG, SlashConfig } from '../constants/slash.constants';
 import { ResolutionKind } from '../domain/arbitration';
+import { disputesOnChain } from '../domain/on-chain-dispute';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import { SlashErrors } from '../errors/slash.errors';
@@ -287,10 +288,14 @@ export class SlashProposalService {
       organizationId: proposal.organizationId,
       event: NotificationEvent.PROVIDER_SLASH_PROPOSED,
       title: `A penalty of ${proposal.penaltyAmount} is proposed against your stake`,
-      body:
-        `Nothing executes before ${proposal.earliestExecutionAt.toISOString()}, even if you ` +
-        `do nothing. Your routing continues and nothing is taken from earnings already paid. ` +
-        `Open the case to see the measurement and to object.`,
+      body: disputesOnChain(proposal.assetId)
+        ? `Nothing executes before ${proposal.earliestExecutionAt.toISOString()}. Disputing ` +
+          `freezes the penalty on chain until the arbiter decides; you must dispute before the ` +
+          `record's executableAt, which the case page shows. Your routing continues and ` +
+          `nothing is taken from earnings already paid.`
+        : `Nothing executes before ${proposal.earliestExecutionAt.toISOString()}, even if you ` +
+          `do nothing. Your routing continues and nothing is taken from earnings already paid. ` +
+          `Open the case to see the measurement and to object.`,
       subjectType: SLASH_PROPOSAL_SUBJECT_TYPE,
       subjectId: proposal.id,
       dedupeKey: `${proposal.id}:proposed`,
@@ -332,7 +337,14 @@ export class SlashProposalService {
     proposalId: string,
     deliveredAt: Date,
   ): Promise<void> {
-    const respondByAt = new Date(deliveredAt.getTime() + this.config.responseWindowMs);
+    // EVM: no clock starts on delivery (business review 5: most channels only
+    // log and report "delivered"). The record's on-chain `executableAt` is the
+    // only deadline, so the delivery is recorded and nothing else.
+    const proposal = await this.proposals.findOneScoped(organizationId, proposalId);
+    if (!proposal) return;
+    const respondByAt = disputesOnChain(proposal.assetId)
+      ? null
+      : new Date(deliveredAt.getTime() + this.config.responseWindowMs);
     const affected = await this.proposals.markNotifiedIfUnnotified(
       organizationId,
       proposalId,
@@ -348,8 +360,10 @@ export class SlashProposalService {
       kind: 'NOTIFIED',
       actorType: 'system',
       actorId: null,
-      summary: `Delivered; the provider has until ${respondByAt.toISOString()} to object`,
-      detail: { respondByAt: respondByAt.toISOString() },
+      summary: respondByAt
+        ? `Delivered; the provider has until ${respondByAt.toISOString()} to object`
+        : 'Delivered in the app; the provider can dispute on chain until the record can execute',
+      detail: { respondByAt: respondByAt?.toISOString() ?? null },
     });
   }
 
@@ -415,7 +429,7 @@ export class SlashProposalService {
         kind: 'AUTO_CLOSED',
         actorType: 'system',
         actorId: null,
-        summary: `No objection was filed by ${row.respondByAt.toISOString()}; the proposal stands`,
+        summary: `No dispute was filed by ${row.respondByAt.toISOString()}; the proposal stands`,
         detail: { respondByAt: row.respondByAt.toISOString() },
       });
     }

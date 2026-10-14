@@ -146,8 +146,12 @@ export class DisputeService {
     if (!dispute) {
       throw DisputeErrors.disputeNotFound({ id });
     }
-    if (TERMINAL_DISPUTE_STATES.includes(dispute.state as DisputeState)) {
-      throw DisputeErrors.notAcknowledgeable({ state: dispute.state });
+    // A slash case's dispute moves only with its case (review S-10).
+    if (
+      dispute.subjectType === 'SLASH_PROPOSAL' ||
+      TERMINAL_DISPUTE_STATES.includes(dispute.state as DisputeState)
+    ) {
+      throw DisputeErrors.notAcknowledgeable({ state: stateForRefusal(dispute) });
     }
     if (dispute.acknowledgedAt) {
       throw DisputeErrors.alreadyAcknowledged({
@@ -173,8 +177,11 @@ export class DisputeService {
     if (!dispute) {
       throw DisputeErrors.disputeNotFound({ id });
     }
-    if (TERMINAL_DISPUTE_STATES.includes(dispute.state as DisputeState)) {
-      throw DisputeErrors.notWithdrawable({ state: dispute.state });
+    if (
+      dispute.subjectType === 'SLASH_PROPOSAL' ||
+      TERMINAL_DISPUTE_STATES.includes(dispute.state as DisputeState)
+    ) {
+      throw DisputeErrors.notWithdrawable({ state: stateForRefusal(dispute) });
     }
 
     await this.disputes.update({ organizationId, id }, { state: DisputeState.WITHDRAWN });
@@ -292,4 +299,11 @@ function toRestoredAmountDto(row: DisputeEntity): MoneyDto | null {
   if (row.restoredAmount == null || row.assetId == null || row.decimals == null) return null;
   const money = MoneyUtil.of(row.restoredAmount, row.assetId as AssetId, row.decimals);
   return { amount: money.amount, asset: money.asset, decimals: money.decimals };
+}
+
+/** The refusal's state: a slash case's dispute says where it is answered instead. */
+function stateForRefusal(dispute: DisputeEntity): string {
+  return dispute.subjectType === 'SLASH_PROPOSAL'
+    ? `${dispute.state} (a slash case's dispute follows its case; see the case page)`
+    : dispute.state;
 }

@@ -500,4 +500,19 @@ describe('DisputeService.withdraw', () => {
       statusCode: 409,
     });
   });
+
+  it('refuses a slash case dispute: it follows its case (review S-10)', async () => {
+    const { service, disputes } = build();
+    (disputes.findOneBy as jest.Mock).mockResolvedValue(
+      buildDispute({ subjectType: 'SLASH_PROPOSAL' }),
+    );
+
+    await expect(service.withdraw(ORG, 'dispute-1')).rejects.toMatchObject({
+      errorCode: DisputeErrorCode.DISPUTE_NOT_WITHDRAWABLE,
+    });
+    await expect(service.acknowledge(ORG, 'dispute-1')).rejects.toMatchObject({
+      errorCode: DisputeErrorCode.DISPUTE_NOT_ACKNOWLEDGEABLE,
+    });
+    expect(disputes.update).not.toHaveBeenCalled();
+  });
 });

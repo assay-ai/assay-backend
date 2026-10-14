@@ -51,6 +51,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
   const filed: string[] = [];
   const closed: string[] = [];
   const mirrored: string[] = [];
+  const upheld: string[] = [];
   const service = new SlashChainRulingService(
     {
       findOneByChainRequestId: async (id: string) => (parts.has(id) ? { ...parts.get(id) } : null),
@@ -75,6 +76,15 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
         proposal.status = 'DISPUTED';
         return proposal;
       },
+      recordChainUphold: async (_org: string, id: string) => {
+        // As the real one: the arbiter's ruling decides an open case.
+        if (!['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'].includes(proposal.status as string)) {
+          return false;
+        }
+        upheld.push(id);
+        proposal.status = 'UPHELD';
+        return true;
+      },
     } as never,
     {
       mirrorChainExecution: async (_case: unknown, hash: string | null) =>
@@ -86,7 +96,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
       },
     } as never,
   );
-  return { service, parts, proposal, events, filed, closed, mirrored };
+  return { service, parts, proposal, events, filed, closed, mirrored, upheld };
 }
 
 const disputed = (requestId: string, at = '2026-10-15T00:00:00Z') => ({
@@ -173,6 +183,23 @@ describe('SlashChainRulingService', () => {
       status: 'UPHELD',
     });
     expect(events.filter((event) => event.kind === 'CHAIN_UPHELD')).toHaveLength(2);
+  });
+
+  it("decides a DISPUTED case UPHELD on the arbiter's on-chain uphold, so the executor sends it", async () => {
+    const { service, proposal, upheld } = build('PROPOSED');
+    await service.recordDisputed(disputed(ID_A));
+    expect(proposal.status).toBe('DISPUTED');
+
+    await service.recordUpheld({
+      chainId: CHAIN,
+      requestId: ID_A,
+      arbiter: '0x5',
+      executableAt: new Date('2026-10-17T00:00:00Z'),
+      transactionHash: '0xabc',
+    });
+
+    expect(upheld).toEqual(['case']);
+    expect(proposal.status).toBe('UPHELD');
   });
 
   describe('SlashCancelled (audit E-6)', () => {

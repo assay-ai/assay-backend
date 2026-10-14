@@ -9,7 +9,10 @@ import { ArbitrationOutcome, isOverturn, ResolutionKind } from './arbitration';
  * and a service that decides it inline will eventually decide it twice.
  */
 export enum SlashProposalStatus {
-  /** Issued. The provider may object until `respondByAt`. */
+  /**
+   * Issued. The provider may object until `respondByAt` (Solana) or dispute
+   * on chain until the record's `chainExecutableAt` (EVM).
+   */
   PROPOSED = 'PROPOSED',
   /** The provider objected inside their window. Our clock starts here. */
   DISPUTED = 'DISPUTED',
@@ -116,6 +119,7 @@ export const SLASH_PROPOSAL_TRANSITIONS: Readonly<
   ],
   [SlashProposalStatus.UNDER_REVIEW]: [
     SlashProposalStatus.AWAITING_SECOND,
+    SlashProposalStatus.UPHELD, // EVM: the arbiter upheld on chain (CHAIN_ARBITER)
     SlashProposalStatus.OVERTURNED, // we missed our own deadline
     SlashProposalStatus.CANCELLED,
   ],
