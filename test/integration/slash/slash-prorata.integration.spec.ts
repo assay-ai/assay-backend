@@ -12,6 +12,10 @@ import {
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { ChainNamespace } from '@modules/chains/ports/caip.types';
 import { slashPartRequestId } from '@modules/slash/domain/prorata-slash';
+import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
+import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
+import { DisputeClaimType } from '@modules/slash/domain/arbitration';
+import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashChainRulingService } from '@modules/slash/services/slash-chain-ruling.service';
 import { SlashDisputeIntentService } from '@modules/slash/services/slash-dispute-intent.service';
 import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp256k1-env.signer';
@@ -28,6 +32,7 @@ import {
   buildProRataSlashServices,
   freshMigratedDatabase,
   ProRataSlashServices,
+  TEST_SLASH_CONFIG,
 } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
 
@@ -690,6 +695,63 @@ describe('pro-rata EVM slash, against a real database', () => {
         chainStatus: 'EXECUTED',
         appliedAmount: '250001',
       });
+    });
+
+    it('closes the open in-app dispute of a case it moves to EXECUTED, as an upheld decision would', async () => {
+      const seeded = await seedWindow(250_001n);
+      await services.execution.proposeDue(nowOf());
+      const arbitration = new ArbitrationService(
+        services.proposals,
+        new DisputeRepository(dataSource),
+        new SlaStrikeRepository(dataSource),
+        services.lifecycle,
+        {} as never,
+        { notify: async () => undefined } as never,
+        TEST_SLASH_CONFIG,
+        services.execution,
+      );
+      // The seed's clock is the fake chain's; the objection window is measured
+      // in wall time, so open it wide enough for the provider to object now.
+      await dataSource.query(
+        `UPDATE slash_proposals SET respond_by_at = now() + interval '1 day' WHERE id = $1`,
+        [seeded.proposalId],
+      );
+      const { dispute } = await arbitration.fileDispute(seeded.organizationId, seeded.proposalId, {
+        claimType: DisputeClaimType.AGENT_GRIEFING,
+        reason: 'one agent sent every failing call',
+        evidence: [],
+        openedBy: 'provider@example.test',
+      });
+      chain.now += BigInt(73 * 3600);
+      const proposal = await load(seeded);
+      expect(proposal.status).toBe('DISPUTED');
+      const parts = await services.partsRepository.findForEpoch(
+        proposal.organizationId,
+        proposal.id,
+        0,
+      );
+      for (const part of parts) {
+        await rulings().recordExecuted(executedEvent(chain.executeExternally(part.chainRequestId)));
+      }
+
+      expect((await load(seeded)).status).toBe('EXECUTED');
+      const [row] = (await dataSource.query(
+        `SELECT state, outcome, resolution_kind, resolved_at, resolved_by FROM disputes WHERE id = $1`,
+        [dispute.id],
+      )) as {
+        state: string;
+        outcome: string;
+        resolution_kind: string;
+        resolved_at: Date | null;
+        resolved_by: string;
+      }[];
+      expect(row).toMatchObject({
+        state: 'REJECTED',
+        outcome: 'UPHELD',
+        resolution_kind: 'AUTO_CHAIN_EXECUTED',
+        resolved_by: 'chain:executeSlash',
+      });
+      expect(row.resolved_at).not.toBeNull();
     });
 
     it('keeps EXECUTED_AFTER_CLOSURE for a case closed in the app', async () => {
