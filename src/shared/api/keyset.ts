@@ -103,7 +103,11 @@ interface ResolvedSort {
  */
 export function resolveSort(query: ListQueryDto, spec: ListSpec): ResolvedSort {
   const key = query.sort ?? spec.defaultSort;
-  const field = spec.sortable[key];
+  // Own properties only: a bare index also finds `constructor`, `toString` and
+  // the rest of `Object.prototype`, which would pass the allowlist as truthy.
+  const field = Object.prototype.hasOwnProperty.call(spec.sortable, key)
+    ? spec.sortable[key]
+    : undefined;
 
   if (!field) {
     throw ApiErrors.unknownSortField({ field: key, allowed: Object.keys(spec.sortable) });
