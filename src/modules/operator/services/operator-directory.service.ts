@@ -252,6 +252,7 @@ export class OperatorDirectoryService {
       if (sameRoles && next.authorityLimitMinor === current.authorityLimitMinor) {
         throw OperatorErrors.changeEmpty();
       }
+      const losesRole = current.roles.some((role) => !next.roles.includes(role as OperatorRole));
       if (next.authorityLimitMinor !== current.authorityLimitMinor) {
         assertApproverCanGrant(approver, next.authorityLimitMinor, 'A-13');
       }
@@ -281,6 +282,9 @@ export class OperatorDirectoryService {
         },
       );
       this.directory.invalidate(operatorId);
+      // A role taken away ends the operator's sessions everywhere at once, as
+      // a removal does, rather than when other instances' caches expire.
+      if (losesRole) await this.sessions.revokeAll(operatorId);
       return this.toEntry(saved);
     };
 

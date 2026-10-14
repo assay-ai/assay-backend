@@ -26,6 +26,15 @@ export interface OperatorCliRepository {
   save(entity: OperatorEntity): Promise<OperatorEntity>;
 }
 
+/**
+ * The operator's live console sessions, in Redis (`OperatorSessionStore`). A
+ * removal must end them now: a removed row refuses its sessions, but a wallet
+ * restored within their TTL would otherwise bring them back to life.
+ */
+export interface OperatorCliSessions {
+  revokeAll(operatorId: string): Promise<void>;
+}
+
 export class OperatorCliError extends Error {}
 
 const WALLET = /^0x[0-9a-fA-F]{40}$/;
@@ -155,6 +164,7 @@ export async function removeOperator(
 
 export async function runOperatorCli(
   repo: OperatorCliRepository,
+  sessions: OperatorCliSessions,
   command: string | undefined,
   argv: readonly string[],
   print: (line: string) => void,
@@ -173,7 +183,9 @@ export async function runOperatorCli(
       return;
     }
     case 'remove': {
-      print(`removed: ${describeOperator(await removeOperator(repo, flags))}`);
+      const operator = await removeOperator(repo, flags);
+      await sessions.revokeAll(operator.id);
+      print(`removed: ${describeOperator(operator)}`);
       return;
     }
     default:
