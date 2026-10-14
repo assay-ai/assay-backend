@@ -4,7 +4,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 
 import { MULTICALL3_ABI, X402_STAKE_SLASH_ABI } from '@modules/chains/evm/abi/x402.abi';
 import { EvmSlashExecutor } from '@modules/chains/evm/evm-slash-executor.service';
-import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
+import { ChainErrorCode, ChainErrors } from '@modules/chains/errors/chains.errors';
 import { chainErrorName } from '@modules/slash/domain/chain-slash-outcome';
 import { SlashProposalRequest } from '@modules/slash/ports/slash-executor.port';
 import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp256k1-env.signer';
@@ -50,7 +50,9 @@ function proposal(
   };
 }
 
-function build(options: { multicall?: boolean; batchSize?: number } = {}) {
+function build(
+  options: { multicall?: boolean; batchSize?: number; domainRefusal?: Error | null } = {},
+) {
   const chain = new FakeStakeChain(VERIFIER);
   chain.bond(PROVIDER, 180_000_000n, 20_000_000n, 1_000_000n);
   const backend = new Secp256k1EnvSigner(
@@ -85,6 +87,7 @@ function build(options: { multicall?: boolean; batchSize?: number } = {}) {
       batchSize: options.batchSize ?? 20,
       multicall: options.multicall === false ? new Map() : new Map([[CHAIN, MULTICALL]]),
       receiptRetryDelayMs: 0,
+      domains: { domainRefusal: () => options.domainRefusal ?? null },
     },
   );
   return { chain, executor, signatures };
@@ -137,6 +140,17 @@ describe('EvmSlashExecutor — propose', () => {
 
     expect(error.errorCode).toBe(ChainErrorCode.CHAIN_TRANSACTION_FAILED);
     expect(chainErrorName(error)).toBe('PenaltyExceedsMaximum');
+    expect(chain.sent).toHaveLength(0);
+  });
+
+  it('signs nothing while the Stake proxy signs under another EIP-712 domain', async () => {
+    const refusal = ChainErrors.domainMismatch({ chainId: CHAIN, contracts: 'X402Stake' });
+    const { chain, signatures, executor } = build({ domainRefusal: refusal });
+
+    await expect(executor.propose(proposal(1))).rejects.toMatchObject({
+      errorCode: ChainErrorCode.CHAIN_DOMAIN_MISMATCH,
+    });
+    expect(signatures).toHaveLength(0);
     expect(chain.sent).toHaveLength(0);
   });
 

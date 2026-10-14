@@ -185,6 +185,12 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   **CRITICAL `evm_proxy_upgraded`** on an ERC-1967 `Upgraded` of the Config,
   Stake or Escrow proxy: only the owner key can do this; confirm it, and record
   the new implementation (`escrowImplementation`).
+  **CRITICAL `evm_eip712_domain_mismatch`**: the Escrow or Stake proxy's live
+  `DOMAIN_SEPARATOR()` is not the domain the backend signs under
+  (`EVM_DOMAIN_NAME`, version `"2"`). Checked at boot and on the chain-state
+  poll in every process; until they match, vouchers on that chain are refused
+  `CHAIN_DOMAIN_MISMATCH` and no slash attestation is signed. Ship the backend
+  and the contract upgrade on the same name; the guard lifts by itself.
   **WARN `evm_config_pause_toggled`** on `PauseToggled`, and
   **WARN `evm_admin_unblocked_address`** on `BlockedSet(false)` (only the admin
   can unblock — the dangerous direction): confirm with the admin.
