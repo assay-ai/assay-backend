@@ -4,6 +4,7 @@ import { IsUUID } from 'class-validator';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
 import { ArbitrationOutcome, DisputeClaimType, ResolutionKind } from '../domain/arbitration';
+import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 
 /** Matches `chk_slash_proposals_source`. */
@@ -75,6 +76,35 @@ export class SlashProposalClocksDto {
     enum: ['PROVIDER', 'PLATFORM', 'NONE'],
   })
   runningClock: 'PROVIDER' | 'PLATFORM' | 'NONE';
+
+  @ApiPropertyOptional({
+    description:
+      'The mirrored on-chain record state (`ChainProposalStatus`). `PENDING` with a non-null ' +
+      '`chainDisputedAt` and no disputed part means the arbiter upheld the dispute.',
+    enum: ChainProposalStatus,
+  })
+  chainStatus: ChainProposalStatus;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'The record’s own `executableAt`, mirrored from the chain: the dispute window closes and ' +
+      'execution may start here. An uphold moves it. Null until a record stands on chain.',
+  })
+  chainExecutableAt: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'The chain’s `disputedAt`: when the provider disputed the record on chain. A record is ' +
+      'disputed at most once, so it stays set after an uphold. Null when never disputed.',
+  })
+  chainDisputedAt: Date | null;
+
+  @ApiPropertyOptional({
+    description: 'How many of the current parts are `Disputed` on chain, awaiting the arbiter.',
+  })
+  chainDisputedParts: number;
 }
 
 /** One line of the arithmetic, exactly as the case screen's "The measurement" table renders it. */
