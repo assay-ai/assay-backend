@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+
 import { SlashChainRulingService } from '@modules/slash/services/slash-chain-ruling.service';
 
 /**
@@ -47,7 +49,11 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     chainDisputedParts: 0,
     chainExecutableAt: new Date('2026-10-17T00:00:05Z'),
   };
-  const events: { kind: string }[] = [];
+  const events: { kind: string; detail?: Record<string, unknown> }[] = [];
+  const reopened: string[] = [];
+  const partlyWon: string[] = [];
+  const refolded: string[] = [];
+  const alerts: { severity: string; name: string }[] = [];
   const filed: string[] = [];
   const closed: string[] = [];
   const mirrored: string[] = [];
@@ -66,6 +72,10 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     {
       findOneScoped: async () => ({ ...proposal }),
       findOneByChainRequestId: async () => null,
+      findOpenOnChainPastDoor: async () =>
+        ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'].includes(proposal.status as string)
+          ? [{ organizationId: 'org', id: 'case' }]
+          : [],
       findOpenOnChainCases: async () =>
         ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'].includes(proposal.status as string)
           ? [{ organizationId: 'org', id: 'case' }]
@@ -73,7 +83,11 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
       update: async (_scope: unknown, patch: Record<string, unknown>) =>
         Object.assign(proposal, patch),
     } as never,
-    { appendEventDirect: async (entry: { kind: string }) => void events.push(entry) } as never,
+    {
+      appendEventDirect: async (entry: { kind: string }) => void events.push(entry),
+      hasTimelineEntry: async (_org: string, _id: string, kind: string, requestId: string) =>
+        events.some((event) => event.kind === kind && event.detail?.requestId === requestId),
+    } as never,
     {
       fileDisputeFromChain: async (_org: string, id: string) => {
         // As the real one: only a PROPOSED case without an objection moves.
@@ -91,6 +105,17 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
         proposal.status = 'UPHELD';
         return true;
       },
+      recordPartialChainWin: async (_org: string, id: string) => void partlyWon.push(id),
+      reopenForChainDispute: async (_org: string, id: string) => {
+        // As the real one: only a case the platform labelled undisputed.
+        if (proposal.status !== 'UPHELD' || proposal.resolutionKind !== 'AUTO_UNDISPUTED') {
+          return false;
+        }
+        reopened.push(id);
+        proposal.status = 'DISPUTED';
+        proposal.resolutionKind = null;
+        return true;
+      },
       recordChainStanding: async (_org: string, id: string) => {
         if (!['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'].includes(proposal.status as string)) {
           return false;
@@ -103,6 +128,8 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     {
       mirrorChainExecution: async (_case: unknown, hash: string | null) =>
         void mirrored.push(hash ?? 'none'),
+      refoldLatePart: async (_case: unknown, hash: string | null) =>
+        void refolded.push(hash ?? 'none'),
       reconcileRecord: async (entry: { id: string }) => {
         reconciled.push(entry.id);
         // As the real one: the landed record is mirrored onto its part.
@@ -121,6 +148,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
         proposal.status = 'CANCELLED';
       },
     } as never,
+    { emit: async (alert: { severity: string; name: string }) => void alerts.push(alert) } as never,
   );
   return {
     service,
@@ -133,6 +161,10 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     reconciled,
     upheld,
     released,
+    reopened,
+    partlyWon,
+    refolded,
+    alerts,
   };
 }
 
@@ -146,6 +178,12 @@ const disputed = (requestId: string, at = '2026-10-15T00:00:00Z') => ({
 });
 
 describe('SlashChainRulingService', () => {
+  // Past every door below (plus the settle margin) unless a test moves it.
+  beforeEach(() => {
+    jest.useFakeTimers({ now: new Date('2026-10-17T01:00:00Z'), doNotFake: ['nextTick'] });
+  });
+  afterEach(() => jest.useRealTimers());
+
   it('AUDIT E-4 / N-1: marks only the part DISPUTED; the case stays PROPOSED while another part is undisputed', async () => {
     const { service, parts, proposal, events, filed } = build();
     await expect(service.recordDisputed(disputed(ID_A))).resolves.toBe(true);
@@ -216,6 +254,22 @@ describe('SlashChainRulingService', () => {
     expect(mirrored).toEqual(['0xdef']);
     expect(closed).toEqual([]);
     expect(proposal.status).not.toBe('CANCELLED');
+  });
+
+  it('R2-3: a case executed in part and won in part closes its dispute accordingly', async () => {
+    const { service, parts, proposal, mirrored, partlyWon } = build('UPHELD');
+    await service.recordDisputed(disputed(ID_A));
+    Object.assign(parts.get(ID_B)!, { chainStatus: 'EXECUTED' });
+    await service.recordCancelled({
+      chainId: CHAIN,
+      requestId: ID_A,
+      reason: 'WITHDRAWN',
+      cancelledAt: new Date('2026-10-16T00:00:00Z'),
+      transactionHash: '0xdef',
+    });
+    expect(proposal.chainDisputeWonAt).toEqual(new Date('2026-10-16T00:00:00Z'));
+    expect(mirrored).toEqual(['0xdef']);
+    expect(partlyWon).toEqual(['case']);
   });
 
   it('N-1: a re-read of a cancel already mirrored still settles the case', async () => {
@@ -439,6 +493,14 @@ describe('SlashChainRulingService', () => {
       expect(parts.get(ID_A)).toMatchObject({ appliedAmount: '400', executionSignature: '0xown' });
     });
 
+    it('R2-4: a late part paid by somebody else re-sums an already executed case', async () => {
+      const { service, parts, refolded } = build('EXECUTED');
+      Object.assign(parts.get(ID_B)!, { chainStatus: 'EXECUTED', appliedAmount: '400' });
+      await service.recordExecuted(executed(ID_A));
+      expect(parts.get(ID_A)).toMatchObject({ chainStatus: 'EXECUTED', appliedAmount: '500' });
+      expect(refolded).toEqual(['0xfeed']);
+    });
+
     it('answers false for a record nobody planned', async () => {
       const { service } = build();
       await expect(service.recordExecuted(executed('c'.repeat(64)))).resolves.toBe(false);
@@ -448,27 +510,64 @@ describe('SlashChainRulingService', () => {
   describe('open EVM cases from the in-app objection era (review N-3)', () => {
     it('re-reads the records and upholds a case whose record stands undisputed', async () => {
       const { service, proposal, reconciled, released } = build('UNDER_REVIEW');
-      await expect(service.reconcileOpenCases(100)).resolves.toBe(1);
+      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({
+        moved: 1,
+        failed: [],
+      });
       expect(reconciled).toEqual(['case']);
       expect(released).toEqual(['case']);
       expect(proposal.status).toBe('UPHELD');
       // Nothing left to move.
-      await expect(service.reconcileOpenCases(100)).resolves.toBe(0);
+      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({ moved: 0 });
     });
 
     it('leaves a case whose every record is disputed on chain to the arbiter', async () => {
       const { service, parts, proposal, released, closed } = build('AWAITING_SECOND');
       for (const part of parts.values()) Object.assign(part, { chainStatus: 'DISPUTED' });
-      await expect(service.reconcileOpenCases(100)).resolves.toBe(0);
+      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({ moved: 0 });
       expect(proposal.status).toBe('AWAITING_SECOND');
       expect(released).toEqual([]);
       expect(closed).toEqual([]);
     });
 
+    it('R2-5: pages past one page, and hands back the cases whose read failed', async () => {
+      const { service, proposal } = build('UNDER_REVIEW');
+      const pageOf = (id: string, at: string) => ({
+        organizationId: 'org',
+        id,
+        proposedAt: new Date(at),
+      });
+      const asked: unknown[] = [];
+      Object.assign((service as unknown as { proposals: Record<string, unknown> }).proposals, {
+        findOpenOnChainCases: async (limit: number, after: unknown) => {
+          asked.push(after ?? null);
+          return after ? [] : [pageOf('case', '2026-10-01T00:00:00Z')].slice(0, limit);
+        },
+      });
+      Object.assign((service as unknown as { execution: Record<string, unknown> }).execution, {
+        reconcileRecord: async () => {
+          throw new Error('rpc down');
+        },
+      });
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      const first = await service.reconcileOpenCases(1);
+      expect(first.failed).toEqual([{ organizationId: 'org', id: 'case' }]);
+      expect(first.next).toEqual({ proposedAt: new Date('2026-10-01T00:00:00Z'), id: 'case' });
+      expect(proposal.status).toBe('UNDER_REVIEW');
+
+      const second = await service.reconcileOpenCases(1, first.next);
+      expect(second.next).toBeNull();
+      expect(asked).toEqual([null, first.next]);
+      await expect(service.reconcileCases(first.failed)).resolves.toMatchObject({
+        failed: [{ organizationId: 'org', id: 'case' }],
+      });
+    });
+
     it('closes a case whose records were all cancelled on chain', async () => {
       const { service, parts, proposal, closed } = build('DISPUTED');
       for (const part of parts.values()) Object.assign(part, { chainStatus: 'CANCELLED' });
-      await expect(service.reconcileOpenCases(100)).resolves.toBe(1);
+      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({ moved: 1 });
       expect(closed).toHaveLength(1);
       expect(proposal.status).toBe('CANCELLED');
     });
@@ -513,6 +612,17 @@ describe('SlashChainRulingService', () => {
       expect(events.map((event) => event.kind)).toEqual(['CHAIN_SUPERSEDED_RECORD']);
     });
 
+    it('R2-6: pages a human about a superseded record, and never executes it', async () => {
+      const { service, parts, proposal, alerts, mirrored } = build('UPHELD');
+      proposal.chainEpoch = 1;
+      Object.assign(parts.get(ID_B)!, { chainStatus: 'REFUSED', chainLastError: 'Straggler:x' });
+      await service.recordLateProposal(late(ID_B));
+      expect(alerts).toEqual([
+        expect.objectContaining({ severity: 'CRITICAL', name: 'slash_record_superseded' }),
+      ]);
+      expect(mirrored).toEqual([]);
+    });
+
     it('leaves a standing part and a mismatched record alone', async () => {
       const { service, parts, reconciled } = build('UPHELD');
       await expect(service.recordLateProposal(late(ID_A))).resolves.toBe(true);
@@ -527,6 +637,62 @@ describe('SlashChainRulingService', () => {
     it('answers false for a record nobody planned', async () => {
       const { service } = build();
       await expect(service.recordLateProposal(late('c'.repeat(64)))).resolves.toBe(false);
+    });
+  });
+  describe('labels follow the chain (review R2-2, R2-10)', () => {
+    it('R2-2: a dispute mirrored after the platform upheld the case reopens it, with its timeline entry', async () => {
+      const { service, parts, proposal, events, reopened } = build('UPHELD');
+      proposal.resolutionKind = 'AUTO_UNDISPUTED';
+      // The executor's SlashNotPending read mirrored both records DISPUTED
+      // (with disputedAt) before the watcher saw the events.
+      for (const part of parts.values()) {
+        Object.assign(part, {
+          chainStatus: 'DISPUTED',
+          chainDisputedAt: new Date('2026-10-15T00:00:00Z'),
+        });
+      }
+      await service.recordDisputed(disputed(ID_A));
+      await service.recordDisputed(disputed(ID_B));
+
+      expect(reopened).toEqual(['case']);
+      expect(proposal.status).toBe('DISPUTED');
+      expect(events.filter((event) => event.kind === 'CHAIN_DISPUTED')).toHaveLength(2);
+      // A re-read writes nothing twice.
+      await service.recordDisputed(disputed(ID_A));
+      expect(events.filter((event) => event.kind === 'CHAIN_DISPUTED')).toHaveLength(2);
+    });
+
+    it('R2-2: an open case is not upheld before every undisputed record has passed its door', async () => {
+      jest.setSystemTime(new Date('2026-10-16T23:00:00Z'));
+      const { service, proposal, released } = build('DISPUTED');
+      await service.followRecords(proposal as never, { transactionHash: null });
+      expect(released).toEqual([]);
+      expect(proposal.status).toBe('DISPUTED');
+
+      // Door passed, but a dispute sent just before it may not be confirmed yet.
+      jest.setSystemTime(new Date('2026-10-17T00:01:00Z'));
+      await service.followRecords(proposal as never, { transactionHash: null });
+      expect(released).toEqual([]);
+
+      jest.setSystemTime(new Date('2026-10-17T00:30:00Z'));
+      await service.followRecords(proposal as never, { transactionHash: null });
+      expect(released).toEqual(['case']);
+    });
+
+    it('R2-10: a record standing again after a dispute is the arbiter’s uphold, never AUTO_UNDISPUTED', async () => {
+      const { service, parts, proposal, upheld, released } = build('DISPUTED');
+      Object.assign(parts.get(ID_A)!, { chainDisputedAt: new Date('2026-10-15T00:00:00Z') });
+      Object.assign(parts.get(ID_B)!, { chainStatus: 'CANCELLED' });
+      await service.followRecords(proposal as never, { transactionHash: '0xabc' });
+      expect(upheld).toEqual(['case']);
+      expect(released).toEqual([]);
+    });
+
+    it('R2-2: lists open cases past their door on every tick, so a deferred one still moves', async () => {
+      const { service, proposal, released } = build('UNDER_REVIEW');
+      await expect(service.followOpenCasesPastDoor(new Date(), 50)).resolves.toBe(1);
+      expect(released).toEqual(['case']);
+      expect(proposal.status).toBe('UPHELD');
     });
   });
 });

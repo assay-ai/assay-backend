@@ -2958,6 +2958,7 @@ describe('sweepAdminCancels', () => {
     );
     executor.appliedMinor = '400000';
     const stale = { ...proposals.rows.get('p1')! };
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
 
     await service.reproposeAtRevisedPenalty('org_1', 'p1', NOW);
     // The other replica read the row before the bump.
@@ -2969,6 +2970,9 @@ describe('sweepAdminCancels', () => {
 
     expect(proposals.rows.get('p1')!.chainEpoch).toBe(1);
     expect(executor.proposed).toHaveLength(1);
+    // R2-9: the loser says so.
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('lost the epoch compare-and-set'));
+    log.mockRestore();
   });
 
   it('S-2: does not re-propose an overturned case whose cancel landed', async () => {
@@ -3933,5 +3937,88 @@ describe('the dispute upgrade (D-19)', () => {
       status: SlashProposalStatus.CANCELLED,
     });
     expect(proposals.rows.get('p2')!.chainStatus).toBe('DISPUTED');
+  });
+});
+
+describe('SlashExecutionService.refoldLatePart (review R2-4)', () => {
+  function buildWithParts(totals: { appliedMinor: string; platformAmountMinor: string }) {
+    const compensation = { distribute: jest.fn().mockResolvedValue(0) };
+    const ctx = build({ compensation });
+    const parts = {
+      appliesTo: () => true,
+      executedTotals: jest.fn(async () => ({
+        ...totals,
+        agentAmountMinor: '420',
+        agentAmountAfterMinor: '180',
+        executed: 2,
+      })),
+    };
+    const service = new SlashExecutionService(
+      ctx.proposals as never,
+      ctx.enrolments as never,
+      { complete: jest.fn(), fail: jest.fn() } as never,
+      new SlashProposalService(
+        ctx.proposals as never,
+        ctx.events as never,
+        ctx.notifications as never,
+        TEST_SLASH_CONFIG,
+      ),
+      ctx.overrides as never,
+      ctx.notifications as never,
+      TEST_SLASH_CONFIG,
+      ctx.executor,
+      null,
+      compensation as never,
+      null,
+      parts as never,
+    );
+    ctx.proposals.seed({
+      id: 'p1',
+      organizationId: 'org_1',
+      status: SlashProposalStatus.EXECUTED,
+      assetId: 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3',
+      windowId: 'window_1',
+      penaltyAmount: '1000',
+      appliedAmount: '500',
+      platformAmount: '150',
+      executedAt: new Date('2026-10-18T00:00:00Z'),
+      chainStatus: 'EXECUTED',
+    });
+    return { ...ctx, service, parts };
+  }
+
+  it('re-sums the case from its executed parts and runs the compensation step once', async () => {
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+    await expect(service.refoldLatePart(proposals.rows.get('p1')!, '0xlate')).resolves.toBe(true);
+    expect(proposals.rows.get('p1')!).toMatchObject({
+      status: SlashProposalStatus.EXECUTED,
+      appliedAmount: '800',
+      platformAmount: '240',
+    });
+    const compensated = () =>
+      log.mock.calls.filter(([line]) => String(line).includes('paid on chain to the harmed agents'))
+        .length;
+    expect(compensated()).toBe(1);
+
+    // Idempotent: the case already says what the parts say.
+    await expect(service.refoldLatePart(proposals.rows.get('p1')!, '0xlate')).resolves.toBe(false);
+    expect(compensated()).toBe(1);
+    log.mockRestore();
+  });
+
+  it('leaves a case that is not closed EXECUTED alone', async () => {
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
+    proposals.rows.get('p1')!.status = SlashProposalStatus.UPHELD;
+    await expect(service.refoldLatePart(proposals.rows.get('p1')!, null)).resolves.toBe(false);
+    expect(proposals.rows.get('p1')!.appliedAmount).toBe('500');
   });
 });

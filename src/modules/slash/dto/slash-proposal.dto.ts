@@ -124,11 +124,27 @@ export class SlashProposalClocksDto {
     description:
       'The state of the case’s on-chain records, derived per record: DISPUTED while any is, ' +
       'UPHELD when every pending record was disputed and upheld, PENDING while one stands ' +
-      'undisputed, EXECUTED once one executed and nothing stands, else CANCELLED (cancelSlash), ' +
-      'EXPIRED (a dispute nobody ruled on) or LAPSED (an undisputed record that expired ' +
-      'unexecuted). Null off EVM or before a record stands on chain.',
+      'undisputed, EXECUTED once every record executed, PARTIALLY_EXECUTED once some executed ' +
+      'and the others were cancelled or expired, else CANCELLED (cancelSlash), ' +
+      'EXPIRED (a dispute nobody ruled on), LAPSED (a record that expired unexecuted) or ' +
+      'RELEASED (cancelled for a reason never recorded). Null off EVM or before a record ' +
+      'stands on chain.',
   })
   chainState: OnChainDisputeState | null;
+
+  @ApiPropertyOptional({
+    description:
+      'Review R2-3: how many on-chain records (current parts) the case has. 0 off EVM, before ' +
+      'a record stands, and for a case proposed as one single record.',
+  })
+  chainRecords: number;
+
+  @ApiPropertyOptional({
+    description:
+      'The records of `chainRecords` cancelled or expired on chain, nothing taken. With ' +
+      '`chainState` PARTIALLY_EXECUTED the case was executed in part only.',
+  })
+  cancelledRecords: number;
 
   @ApiPropertyOptional({
     nullable: true,
