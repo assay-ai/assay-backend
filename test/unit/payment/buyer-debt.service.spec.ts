@@ -2,7 +2,9 @@ import { randomUUID } from 'node:crypto';
 
 import {
   LapsedVoucherReplacement,
+  OpenVoucherTotals,
   OutstandingDebt,
+  VoucherAdmissionScope,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { EvmChainAdapter } from '@modules/chains/evm/evm-chain.adapter';
@@ -37,10 +39,24 @@ const PROVIDER = `${CHAIN}:0xAb8483F64d9C6d1EcF9b849Ae677dD3315835cb2` as Accoun
 const TOOL_ID = '11111111-1111-4111-8111-111111111111';
 const REQUEST_HASH = `sha256:${'cd'.repeat(32)}`;
 
-/** A chain on which nobody is anybody's delegate. */
+/** A chain on which nobody is anybody's delegate, but for the ones a test grants. */
 class FakeEvmChain {
-  async readContract(args: { functionName: string }): Promise<unknown> {
+  readonly delegates = new Set<string>();
+
+  async readContract(args: { functionName: string; args?: unknown[] }): Promise<unknown> {
     if (args.functionName === 'delegationOf') {
+      const delegate = String(args.args?.[1] ?? '').toLowerCase();
+      if (this.delegates.has(delegate)) {
+        return {
+          maxVoucherAmount: 10_000_000n,
+          maxPerWindow: 100_000_000n,
+          spentInWindow: 0n,
+          windowStartedAt: 0n,
+          validUntil: BigInt(Math.floor(Date.now() / 1000) + 86_400),
+          listPosition: 1,
+          revoked: false,
+        };
+      }
       return {
         maxVoucherAmount: 0n,
         maxPerWindow: 0n,
@@ -74,8 +90,9 @@ function escrowReading(overrides: Partial<EscrowChainBalance> = {}): EscrowChain
 function build() {
   const payer: EvmSigner = generateSigner(CHAIN);
   const organizationId = randomUUID();
+  const chain = new FakeEvmChain();
   const adapter = new EvmChainAdapter(
-    new Map([[CHAIN, new FakeEvmChain() as never]]),
+    new Map([[CHAIN, chain as never]]),
     new Map([[CHAIN, DEPLOYMENT]]),
     [CHAIN],
   );
@@ -96,9 +113,11 @@ function build() {
     noBlocks(),
   );
 
+  const agentId = randomUUID();
   const debt: OutstandingDebt = {
     id: randomUUID(),
     organizationId,
+    agentId,
     agentAccount: payer.account,
     providerId: randomUUID(),
     providerAccount: PROVIDER,
@@ -110,33 +129,56 @@ function build() {
     requestHash: REQUEST_HASH,
     voucherResourceHash: 'ab'.repeat(32),
     voucherSeq: '3',
+    voucherResource: null,
     lapsedAt: new Date('2026-10-16T00:00:00Z'),
     cause: 'DelegateIsRevoked',
+    replacedAt: null,
+    writtenOff: false,
     createdAt: new Date('2026-10-15T23:55:00Z'),
   };
   const debts: OutstandingDebt[] = [debt];
-  const replaced: Array<{ id: string; replacement: LapsedVoucherReplacement }> = [];
-  const open = { nextSeq: 100n as bigint | null, maxSeq: 2n as bigint | null };
+  const replaced: Array<{
+    id: string;
+    replacement: LapsedVoucherReplacement;
+    scope: VoucherAdmissionScope;
+    reopenHoldId: string | null;
+  }> = [];
+  const open: { -readonly [K in keyof OpenVoucherTotals]: OpenVoucherTotals[K] } = {
+    escrow: 0n,
+    delegate: 0n,
+    pausedFor: null,
+    nextSeq: 100n,
+    maxSeq: 2n,
+  };
   const payments = {
     findOutstandingDebts: jest.fn(async () => [...debts]),
+    findOutstandingDebt: jest.fn(
+      async (payer: string, id: string) =>
+        debts.find((d) => d.id === id && d.agentAccount === payer) ?? null,
+    ),
     replaceLapsedVoucher: jest.fn(
       async (
         _org: string,
         id: string,
         _payer: string,
         replacement: LapsedVoucherReplacement,
-        admit: (o: typeof open) => void,
+        admission: { scope: VoucherAdmissionScope; admit: (o: OpenVoucherTotals) => void },
+        reopenHoldId: string | null,
       ) => {
-        admit(open);
-        replaced.push({ id, replacement });
-        debts.splice(
-          debts.findIndex((d) => d.id === id),
-          1,
-        );
+        admission.admit(open);
+        replaced.push({ id, replacement, scope: admission.scope, reopenHoldId });
+        const index = debts.findIndex((d) => d.id === id);
+        debts[index] = { ...debts[index], replacedAt: new Date(), writtenOff: false };
         return true;
       },
     ),
   };
+  const intents = {
+    reopenDebtHold: jest.fn(async () => 'hold-reopened'),
+    releaseUnusedHold: jest.fn(async () => undefined),
+  };
+  const spendPolicy = { assertReplacementAllowed: jest.fn(async () => undefined) };
+  const rateLimiter = { take: jest.fn(async () => ({ allowed: true })) };
   const escrow = {
     read: jest.fn(async () => escrowReading()),
     escrowAddresses: jest.fn(async () => ({ escrowPda: ESCROW, escrowTokenAccount: ESCROW })),
@@ -146,15 +188,18 @@ function build() {
   };
   const service = new BuyerDebtService(
     payments as never,
+    intents as never,
     vouchers,
     seqService as unknown as EscrowSeqService,
     chains,
     escrow as never,
     tools as never,
+    spendPolicy as never,
+    rateLimiter as never,
   );
   const session: McpSession = {
     organizationId,
-    agentId: randomUUID(),
+    agentId,
     agentAccount: payer.account,
     chainId: CHAIN,
     credentialId: 'human',
@@ -162,7 +207,23 @@ function build() {
   } as unknown as McpSession;
   const sign = (voucher: Voucher, signer: EvmSigner = payer) =>
     signer.sign(adapter.buildVoucherMessage(voucher));
-  return { service, payments, debt, replaced, open, session, sign, payer, adapter };
+  return {
+    service,
+    payments,
+    intents,
+    spendPolicy,
+    rateLimiter,
+    tools,
+    debt,
+    debts,
+    replaced,
+    open,
+    session,
+    sign,
+    payer,
+    adapter,
+    chain,
+  };
 }
 
 describe('BuyerDebtService — settling a debt with a replacement voucher', () => {
@@ -174,8 +235,10 @@ describe('BuyerDebtService — settling a debt with a replacement voucher', () =
         intentId: debt.id,
         amount: { amount: '50000', asset: USDG, decimals: 6 },
         cause: 'DelegateIsRevoked',
+        state: 'OPEN',
         lapsedAt: '2026-10-16T00:00:00.000Z',
         writeOffAt: '2026-11-15T00:00:00.000Z',
+        replacedAt: null,
       }),
     ]);
   });
@@ -218,7 +281,11 @@ describe('BuyerDebtService — settling a debt with a replacement voucher', () =
           delegate: null,
           issuedAt: voucher.issuedAt,
           expiresAt: new Date(voucher.expiresAt * 1000),
+          resource: '/mcp/tools/get_weather',
         }),
+        // The same admission scope a new voucher of this payer gets (M4).
+        scope: expect.objectContaining({ payer: session.agentAccount, assetId: USDG }),
+        reopenHoldId: null,
       },
     ]);
   });
@@ -278,5 +345,149 @@ describe('BuyerDebtService — settling a debt with a replacement voucher', () =
     await expect(service.voucherIntent(session, randomUUID())).rejects.toMatchObject({
       errorCode: PaymentErrorCode.PAYMENT_DEBT_NOT_FOUND,
     });
+  });
+
+  it('M4: refuses a replacement that does not fit the escrow window, and changes nothing', async () => {
+    const { service, session, debt, open, sign, debts } = build();
+    const { voucher } = await service.voucherIntent(session, debt.id);
+    // The payer's other vouchers in flight already fill the escrow's window.
+    open.escrow = 10_000_000n;
+
+    await expect(
+      service.settle(session, debt.id, { voucher, signature: sign(voucher) }),
+    ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED });
+    expect(debts[0].replacedAt).toBeNull();
+  });
+
+  it("M4: refuses a replacement while the payer's admission is paused", async () => {
+    const { service, session, debt, open, sign } = build();
+    const { voucher } = await service.voucherIntent(session, debt.id);
+    open.pausedFor = 30;
+
+    await expect(
+      service.settle(session, debt.id, { voucher, signature: sign(voucher) }),
+    ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED });
+  });
+
+  it('M4: a debt being collected is REPLACING, still listed, and cannot be re-signed', async () => {
+    const { service, session, debt, sign } = build();
+    const { voucher } = await service.voucherIntent(session, debt.id);
+    await service.settle(session, debt.id, { voucher, signature: sign(voucher) });
+
+    const [listed] = await service.list(session);
+    expect(listed).toMatchObject({ intentId: debt.id, state: 'REPLACING' });
+    expect(listed.replacedAt).not.toBeNull();
+    // The write-off clock is the first lapse, unchanged.
+    expect(listed.writeOffAt).toBe('2026-11-15T00:00:00.000Z');
+    await expect(service.voucherIntent(session, debt.id)).rejects.toMatchObject({
+      errorCode: PaymentErrorCode.PAYMENT_DEBT_REPLACEMENT_PENDING,
+    });
+  });
+
+  it("M4: a delegate signs only its own agent's debt, within its spend policy", async () => {
+    const { service, session, debt, chain, spendPolicy, replaced, debts } = build();
+    const delegate = generateSigner(CHAIN);
+    chain.delegates.add(delegate.address.toLowerCase());
+    const agentSession = {
+      ...session,
+      callerKind: McpCallerKind.AGENT,
+      delegateAccount: delegate.account,
+    } as McpSession;
+    const { voucher } = await service.voucherIntent(agentSession, debt.id);
+    const { adapter } = build();
+    const signature = delegate.sign(adapter.buildVoucherMessage(voucher));
+
+    // Another agent's credential of the same payer: refused, nothing changed.
+    await expect(
+      service.settle({ ...agentSession, agentId: randomUUID() }, debt.id, { voucher, signature }),
+    ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_DEBT_NOT_FOUND });
+    expect(replaced).toEqual([]);
+
+    // The agent's own debt: its spend policy is asked, then it is replaced.
+    await service.settle(agentSession, debt.id, { voucher, signature });
+    expect(spendPolicy.assertReplacementAllowed).toHaveBeenCalledWith({
+      organizationId: session.organizationId,
+      agentId: session.agentId,
+      price: MoneyUtil.of('50000', USDG, 6),
+    });
+    expect(replaced[0].replacement.delegate?.toLowerCase()).toBe(delegate.account.toLowerCase());
+    expect(debts[0].replacedAt).not.toBeNull();
+  });
+
+  it('H1: a written-off debt is listed, and re-signing it opens a new hold for the provider', async () => {
+    const { service, session, debt, debts, intents, replaced, sign } = build();
+    debts[0] = { ...debt, writtenOff: true, cause: 'uncollected:DelegateIsRevoked' };
+
+    const [listed] = await service.list(session);
+    expect(listed.state).toBe('WRITTEN_OFF');
+
+    const { voucher } = await service.voucherIntent(session, debt.id);
+    await service.settle(session, debt.id, { voucher, signature: sign(voucher) });
+
+    expect(intents.reopenDebtHold).toHaveBeenCalledWith(expect.objectContaining({ id: debt.id }));
+    expect(replaced[0].reopenHoldId).toBe('hold-reopened');
+  });
+
+  it('H1: a refused re-sign of a written-off debt gives the new hold back', async () => {
+    const { service, session, debt, debts, intents, open, sign } = build();
+    debts[0] = { ...debt, writtenOff: true, cause: 'uncollected:VoucherExpired' };
+    const { voucher } = await service.voucherIntent(session, debt.id);
+    open.maxSeq = 9n;
+
+    await expect(
+      service.settle(session, debt.id, { voucher, signature: sign(voucher) }),
+    ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE });
+    expect(intents.releaseUnusedHold).toHaveBeenCalledWith(debt.organizationId, 'hold-reopened');
+  });
+
+  it('L5: a debt whose tool is gone is still settleable — the stored resource is used', async () => {
+    const { service, session, debt, debts, tools, sign, replaced } = build();
+    debts[0] = { ...debt, voucherResource: '/mcp/tools/old_name' };
+    tools.findTool.mockResolvedValue(null as never);
+
+    const { voucher } = await service.voucherIntent(session, debt.id);
+    expect(voucher.resource).toBe('/mcp/tools/old_name');
+    await service.settle(session, debt.id, { voucher, signature: sign(voucher) });
+    expect(replaced[0].replacement.resource).toBe('/mcp/tools/old_name');
+  });
+
+  it('L5: an older debt whose tool is gone takes a resource that hashes to the signed one', async () => {
+    const { service, session, debt, debts, tools, adapter } = build();
+    debts[0] = { ...debt, voucherResourceHash: adapter.voucherResourceHash('/mcp/tools/gone') };
+    tools.findTool.mockResolvedValue(null as never);
+
+    await expect(service.voucherIntent(session, debt.id)).rejects.toMatchObject({
+      errorCode: PaymentErrorCode.PAYMENT_VOUCHER_BINDING_MISMATCH,
+    });
+    const { voucher } = await service.voucherIntent(session, debt.id, '/mcp/tools/gone');
+    expect(voucher.resource).toBe('/mcp/tools/gone');
+  });
+
+  it('L5: reads the debt by id, not out of the first page of debts', async () => {
+    const { service, session, debt, payments } = build();
+    await service.voucherIntent(session, debt.id);
+    expect(payments.findOutstandingDebt).toHaveBeenCalledWith(session.agentAccount, debt.id);
+  });
+
+  it('L6: a seq held by another row is a 409 replay, not a 500', async () => {
+    const { service, session, debt, payments, sign } = build();
+    const { voucher } = await service.voucherIntent(session, debt.id);
+    payments.replaceLapsedVoucher.mockRejectedValueOnce(
+      Object.assign(new Error('duplicate key'), { code: '23505' }),
+    );
+
+    await expect(
+      service.settle(session, debt.id, { voucher, signature: sign(voucher) }),
+    ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED });
+  });
+
+  it('L7: voucher-intent is throttled with the next-seq budget, before any seq is allocated', async () => {
+    const { service, session, debt, rateLimiter } = build();
+    rateLimiter.take.mockResolvedValueOnce({ allowed: false, reason: 'address' } as never);
+
+    await expect(service.voucherIntent(session, debt.id)).rejects.toMatchObject({
+      errorCode: PaymentErrorCode.PAYMENT_NEXT_SEQ_RATE_LIMITED,
+    });
+    expect(rateLimiter.take).toHaveBeenCalledWith(`credential:${session.credentialId}`);
   });
 });

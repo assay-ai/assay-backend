@@ -166,6 +166,20 @@ export class VoucherService {
    * calls never reach this. Scoped to the payer account and the organization:
    * neither a second wallet of the organization nor a second organization of
    * the wallet gets around it. `debts` lists them, oldest first.
+   *
+   * What refuses is `DEBT_REFUSING_SQL`: an open debt, a debt whose
+   * replacement is not collected yet (review-buyer-debt M4), and — the H1
+   * INTERIM RULE, until the contract change ("signed means collectable")
+   * ships — a debt that was WRITTEN OFF. A write-off ends the buyer's hold and
+   * the provider's wait; it never clears this refusal, so a buyer that revokes
+   * its delegate, withdraws and waits 30 days cannot come back with the same
+   * wallet or organization and do it again. The buyer can still settle a
+   * written-off debt by re-signing it (`BuyerDebtService.settle`), and the
+   * provider is then paid normally. Only a fresh wallet AND organization gets
+   * around it; the contract change is what closes that.
+   *
+   * Read again under the payer's admission lock (`OpenVoucherTotals.debts`),
+   * so a voucher that lapses during an admission still refuses it (L8).
    */
   async assertNoOutstandingDebt(organizationId: string, payer: AccountId): Promise<void> {
     const debts = await this.intents.findOutstandingDebts(organizationId, payer, 20);
@@ -192,6 +206,7 @@ export class VoucherService {
         amount: { amount: debt.priceAmount, asset: debt.assetId, decimals: debt.decimals },
         providerId: debt.providerId,
         toolId: debt.toolId,
+        state: debt.replacedAt ? 'REPLACING' : debt.writtenOff ? 'WRITTEN_OFF' : 'OPEN',
         lapsedAt: new Date(debt.lapsedAt).toISOString(),
         writeOffAt: writeOffAt(debt.lapsedAt).toISOString(),
         cause: debt.cause,
@@ -209,11 +224,14 @@ export class VoucherService {
    * a live delegate within its caps (bound to the calling credential, as on a
    * call). Returns the signing delegate, or `null` for the payer's own key.
    *
-   * The seq's place among the payer's live vouchers is checked under the
-   * payer's lock when the row is rewritten
-   * (`PaymentIntentRepository.replaceLapsedVoucher`).
+   * Returns, beside the delegate, the ADMISSION the replacement must pass
+   * under the payer's lock when the row is rewritten
+   * (`PaymentIntentRepository.replaceLapsedVoucher`), built exactly as a new
+   * voucher's (review-buyer-debt M4): the escrow's and the delegate's windows,
+   * any admission pause (BUG-D1-07), the seq still issued and above every
+   * live seq of the payer.
    */
-  async verifyReplacement(input: ReplacementVoucherInput): Promise<AccountId | null> {
+  async verifyReplacement(input: ReplacementVoucherInput): Promise<VerifiedReplacement> {
     const { voucher, signature } = input.signed;
     const now = Math.floor(Date.now() / 1000);
 
@@ -275,7 +293,10 @@ export class VoucherService {
     ]);
     this.assertWithinEscrowLimit(voucher, asCall);
     await this.assertIssuedSeq(voucher, asCall);
-    return delegation?.delegate ?? null;
+    return {
+      delegate: delegation?.delegate ?? null,
+      admission: this.admission(voucher, asCall, delegation, true) as VoucherAdmission,
+    };
   }
 
   // ── 1. Shape ─────────────────────────────────────────────────────────────
@@ -780,6 +801,7 @@ export class VoucherService {
         voucherResourceHash: this.chains
           .resolve(input.chainId)
           .voucherResourceHash(voucher.resource),
+        voucherResource: voucher.resource,
         voucherIssuedAt: voucher.issuedAt,
         // The delegate whose on-chain window this voucher will count against, so
         // the next delegate-signed call sees it before it reaches the chain.
@@ -830,9 +852,10 @@ export class VoucherService {
     voucher: Voucher,
     input: RedeemVoucherInput,
     delegation: AdmittedDelegation | null,
+    always = false,
   ): VoucherAdmission | undefined {
     const escrow = input.escrow ?? null;
-    if (escrow === null && delegation === null) return undefined;
+    if (escrow === null && delegation === null && !always) return undefined;
 
     const nowSeconds = Math.floor(Date.now() / 1000);
     const amount = BigInt(voucher.amount.amount);
@@ -849,6 +872,10 @@ export class VoucherService {
         delegate: delegation?.delegate ?? null,
         escrowSince: lagged(escrow?.observedAt ?? delegation?.readAt ?? new Date()),
         delegateSince: delegation === null ? null : lagged(delegation.readAt),
+        // The payer's and the organization's debts are counted under the lock
+        // too (review-buyer-debt L8): a voucher that lapsed while this call
+        // was being admitted refuses it. Not counted for a replacement.
+        organizationId: input.organizationId,
       },
       admit: (open) => {
         // A change tightening the payer's caps is being relayed (BUG-D1-07):
@@ -859,6 +886,14 @@ export class VoucherService {
           // `retryAfter` (seconds), the key the MCP error already carries for
           // velocity, so an agent paces itself the same way for both.
           throw PaymentErrors.voucherAdmissionPaused({ retryAfter: open.pausedFor });
+        }
+        // The up-front `assertNoOutstandingDebt` read is outside the lock; this
+        // one is not, so a debt that appeared since then still refuses the call.
+        if (open.debts) {
+          throw PaymentErrors.debtOutstanding({
+            count: open.debts,
+            settleWith: 'GET /escrow/debts, then POST /escrow/debts/{intentId}/voucher',
+          });
         }
         // Re-checked under the payer's lock: a seq rewind (S2-2) since the
         // up-front `wasIssued` read means this seq is no longer issued.
@@ -927,6 +962,14 @@ function describe(error: unknown): string {
 /** When an open debt that lapsed at `lapsedAt` is written off. */
 export function writeOffAt(lapsedAt: Date | string): Date {
   return new Date(new Date(lapsedAt).getTime() + BUYER_DEBT_WRITE_OFF_DAYS * 24 * 3_600_000);
+}
+
+/** What {@link VoucherService.verifyReplacement} answers. */
+export interface VerifiedReplacement {
+  /** The delegate that signed, or `null` for the payer's own key. */
+  readonly delegate: AccountId | null;
+  /** The checks the replacement must pass under the payer's lock. */
+  readonly admission: VoucherAdmission;
 }
 
 /** What {@link VoucherService.verifyReplacement} checks a replacement voucher against. */

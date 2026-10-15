@@ -255,6 +255,27 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
   });
 
   /**
+   * Review-buyer-debt L8: the debt check before the admission runs outside the
+   * payer's lock. A voucher of the payer that lapsed meanwhile is counted again
+   * under the lock, and refuses the call with nothing reserved.
+   */
+  describe('a debt that appears while the call is being admitted', () => {
+    it('refuses it under the lock, by name, and reserves nothing', async () => {
+      intents.debts = 1;
+      await expect(service.redeem(input(payer, { escrow: escrow() }))).rejects.toMatchObject({
+        errorCode: PaymentErrorCode.PAYMENT_DEBT_OUTSTANDING,
+        context: { count: 1 },
+      });
+      expect(intents.created).toHaveLength(0);
+
+      intents.debts = 0;
+      await expect(service.redeem(input(payer, { escrow: escrow() }))).resolves.toMatchObject({
+        status: PaymentIntentStatus.FUNDS_SECURED,
+      });
+    });
+  });
+
+  /**
    * REGRESSION (review S2-2): a seq rewind between the up-front `wasIssued`
    * read and the locked insert makes this seq not issued any more. The
    * admission re-reads `next_seq` under the payer's lock and refuses it.

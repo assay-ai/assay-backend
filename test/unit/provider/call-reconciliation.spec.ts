@@ -58,6 +58,12 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
       expected: CallReconciliationClass.PAID_UNCOLLECTED,
     },
     {
+      // Review-buyer-debt M2: judged FAIL after it had become debt — voided.
+      name: 'PAID + SETTLED, buyer debt voided by a late rejecting verdict → PAID_UNCREDITED',
+      input: { callClass: 'PAID', status: 'SETTLED', voided: true, credited: false },
+      expected: CallReconciliationClass.PAID_UNCREDITED,
+    },
+    {
       name: 'PAID + SETTLED, voucher lapsed into buyer debt → PAID_BUYER_DEBT',
       input: { callClass: 'PAID', status: 'SETTLED', debtOutstanding: true, credited: false },
       expected: CallReconciliationClass.PAID_BUYER_DEBT,

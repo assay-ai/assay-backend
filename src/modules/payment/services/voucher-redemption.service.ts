@@ -24,6 +24,7 @@ import {
   MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
   PROVIDER_FORFEIT_PREFIX,
   REDEEM_GRACE_SECONDS,
+  REDEMPTION_DEADLINE_MARGIN_SECONDS,
   VOUCHER_REDEMPTION_ALERTS,
   VOUCHER_REDEMPTION_BATCH,
 } from '../constants/voucher-redemption.constants';
@@ -86,6 +87,23 @@ function recordedProviderCause(stored: string | null | undefined): string | null
   const head = bare.split(' ')[0];
   return PROVIDER_CAUSED_ERRORS.has(head) ? head : null;
 }
+
+/**
+ * Refusals the BUYER causes by tightening its own grant or caps: a revoked
+ * or expired delegate, a lowered per-voucher or window cap. Each is retried
+ * until {@link REDEMPTION_DEADLINE_MARGIN_SECONDS} before the voucher's
+ * on-chain deadline — a re-grant or a raised cap in the meantime makes the
+ * same voucher redeemable — and only then becomes buyer debt
+ * (review-buyer-debt M3).
+ */
+const BUYER_TIGHTENING_ERRORS: ReadonlySet<string> = new Set([
+  'DelegateIsRevoked',
+  'DelegateIsExpired',
+  'DelegateVoucherExceedsPerCallLimit',
+  'DelegateWindowLimitExceeded',
+  'VoucherExceedsPerCallLimit',
+  'EscrowWindowLimitExceeded',
+]);
 
 /** The program error the EVM contract reverts with for any blocked party (D-19). */
 const ADDRESS_BLOCKED = 'AddressBlocked';
@@ -753,6 +771,18 @@ export class VoucherRedemptionService {
             outcome.programError,
           );
         }
+        // A buyer tightening still refusing one pass before the voucher's
+        // deadline: no re-grant came, and the next attempt can only be
+        // `VoucherExpired`. It becomes buyer debt now (the provider is still
+        // checked live first, and a landed transaction is still looked for).
+        if (
+          outcome.programError !== null &&
+          BUYER_TIGHTENING_ERRORS.has(outcome.programError) &&
+          recordedProviderCause(row.redemptionLastError) === null &&
+          this.atRedemptionDeadline(row)
+        ) {
+          return this.closeUnredeemable(row, request, outcome.programError, false);
+        }
         // Not settled: this buyer's later vouchers wait a tick. See the class
         // comment — going ahead of a retryable seq makes it unredeemable.
         return { stop: false, settled: false };
@@ -988,6 +1018,16 @@ export class VoucherRedemptionService {
    */
   private pastLandingWindow(row: RedeemableIntent): boolean {
     return Math.floor(this.now() / 1000) >= this.landingDeadline(row);
+  }
+
+  /**
+   * Whether the voucher is within {@link REDEMPTION_DEADLINE_MARGIN_SECONDS} of
+   * its on-chain deadline (`expiresAt + REDEEM_GRACE_SECONDS`): the last pass
+   * that can still redeem it.
+   */
+  private atRedemptionDeadline(row: RedeemableIntent): boolean {
+    const deadline = Math.floor(row.expiresAt.getTime() / 1000) + REDEEM_GRACE_SECONDS;
+    return Math.floor(this.now() / 1000) >= deadline - REDEMPTION_DEADLINE_MARGIN_SECONDS;
   }
 
   /** Unix seconds at which {@link pastLandingWindow} turns true. */

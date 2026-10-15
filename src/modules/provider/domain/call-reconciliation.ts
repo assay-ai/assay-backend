@@ -137,6 +137,12 @@ export interface CallReconciliationCandidate {
   /** The provider forfeited the voucher (`provider_forfeit:` cause). Optional; absent means not. */
   readonly forfeited?: boolean;
   /**
+   * A buyer debt VOIDED by a late FAIL / REFUND / VOID verdict (`voided:`
+   * cause): hold released, nobody credited, buyer not charged — reported like
+   * a refund. Optional; absent means not.
+   */
+  readonly voided?: boolean;
+  /**
    * Whether the `SETTLED` intent's hold was committed, which is when
    * `PROVIDER_CREDIT` is written (`CREDITED_SQL`). Optional; absent means
    * credited. `false` is a settled row nobody was credited for — no hold, or a
@@ -183,6 +189,7 @@ export function classifyForReconciliation(
       // it is not an unresolved PENDING either — it is closed, and nobody was paid.
       if (candidate.forfeited) return CallReconciliationClass.PROVIDER_FORFEITED;
       if (candidate.uncollected) return CallReconciliationClass.PAID_UNCOLLECTED;
+      if (candidate.voided) return CallReconciliationClass.PAID_UNCREDITED;
       // Settled with no credit behind it: the money side is unresolved, and
       // calling it PAID_CREDITED would claim a credit the ledger does not hold
       // (BUG-R2-V3-03). The earnings report counts it as neither earned nor withheld.

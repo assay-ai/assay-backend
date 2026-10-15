@@ -206,7 +206,9 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
    * buyer debt replaced absorbing) is counted here too: nothing moved on chain,
    * but the platform never pays or owes a provider, so it is not a liability
    * the vault covers either — it is reported to the provider as uncollected.
-   * Nothing writes one any more. Every rail-A credit is excluded. Cross-tenant for the reason
+   * Nothing writes one any more, and none is reversed (review-buyer-debt L4,
+   * `docs/runbooks/buyer-debt-deploy.md` §4): it still counts in the
+   * provider's ledger balance, so a payout writer must exclude it. Every rail-A credit is excluded. Cross-tenant for the reason
    * {@link sumByEntryType} gives; the `organization_id` count is what the
    * scope guard checks for.
    */
