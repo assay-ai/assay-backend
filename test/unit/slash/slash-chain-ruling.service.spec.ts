@@ -47,7 +47,8 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     chainDisputedParts: 0,
     chainExecutableAt: new Date('2026-10-17T00:00:05Z'),
   };
-  const events: { kind: string }[] = [];
+  const events: { kind: string; detail?: Record<string, unknown> }[] = [];
+  const reopened: string[] = [];
   const filed: string[] = [];
   const closed: string[] = [];
   const mirrored: string[] = [];
@@ -66,6 +67,10 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     {
       findOneScoped: async () => ({ ...proposal }),
       findOneByChainRequestId: async () => null,
+      findOpenOnChainPastDoor: async () =>
+        ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'].includes(proposal.status as string)
+          ? [{ organizationId: 'org', id: 'case' }]
+          : [],
       findOpenOnChainCases: async () =>
         ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'].includes(proposal.status as string)
           ? [{ organizationId: 'org', id: 'case' }]
@@ -73,7 +78,11 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
       update: async (_scope: unknown, patch: Record<string, unknown>) =>
         Object.assign(proposal, patch),
     } as never,
-    { appendEventDirect: async (entry: { kind: string }) => void events.push(entry) } as never,
+    {
+      appendEventDirect: async (entry: { kind: string }) => void events.push(entry),
+      hasTimelineEntry: async (_org: string, _id: string, kind: string, requestId: string) =>
+        events.some((event) => event.kind === kind && event.detail?.requestId === requestId),
+    } as never,
     {
       fileDisputeFromChain: async (_org: string, id: string) => {
         // As the real one: only a PROPOSED case without an objection moves.
@@ -89,6 +98,16 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
         }
         upheld.push(id);
         proposal.status = 'UPHELD';
+        return true;
+      },
+      reopenForChainDispute: async (_org: string, id: string) => {
+        // As the real one: only a case the platform labelled undisputed.
+        if (proposal.status !== 'UPHELD' || proposal.resolutionKind !== 'AUTO_UNDISPUTED') {
+          return false;
+        }
+        reopened.push(id);
+        proposal.status = 'DISPUTED';
+        proposal.resolutionKind = null;
         return true;
       },
       recordChainStanding: async (_org: string, id: string) => {
@@ -133,6 +152,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     reconciled,
     upheld,
     released,
+    reopened,
   };
 }
 
@@ -146,6 +166,12 @@ const disputed = (requestId: string, at = '2026-10-15T00:00:00Z') => ({
 });
 
 describe('SlashChainRulingService', () => {
+  // Past every door below (plus the settle margin) unless a test moves it.
+  beforeEach(() => {
+    jest.useFakeTimers({ now: new Date('2026-10-17T01:00:00Z'), doNotFake: ['nextTick'] });
+  });
+  afterEach(() => jest.useRealTimers());
+
   it('AUDIT E-4 / N-1: marks only the part DISPUTED; the case stays PROPOSED while another part is undisputed', async () => {
     const { service, parts, proposal, events, filed } = build();
     await expect(service.recordDisputed(disputed(ID_A))).resolves.toBe(true);
@@ -527,6 +553,62 @@ describe('SlashChainRulingService', () => {
     it('answers false for a record nobody planned', async () => {
       const { service } = build();
       await expect(service.recordLateProposal(late('c'.repeat(64)))).resolves.toBe(false);
+    });
+  });
+  describe('labels follow the chain (review R2-2, R2-10)', () => {
+    it('R2-2: a dispute mirrored after the platform upheld the case reopens it, with its timeline entry', async () => {
+      const { service, parts, proposal, events, reopened } = build('UPHELD');
+      proposal.resolutionKind = 'AUTO_UNDISPUTED';
+      // The executor's SlashNotPending read mirrored both records DISPUTED
+      // (with disputedAt) before the watcher saw the events.
+      for (const part of parts.values()) {
+        Object.assign(part, {
+          chainStatus: 'DISPUTED',
+          chainDisputedAt: new Date('2026-10-15T00:00:00Z'),
+        });
+      }
+      await service.recordDisputed(disputed(ID_A));
+      await service.recordDisputed(disputed(ID_B));
+
+      expect(reopened).toEqual(['case']);
+      expect(proposal.status).toBe('DISPUTED');
+      expect(events.filter((event) => event.kind === 'CHAIN_DISPUTED')).toHaveLength(2);
+      // A re-read writes nothing twice.
+      await service.recordDisputed(disputed(ID_A));
+      expect(events.filter((event) => event.kind === 'CHAIN_DISPUTED')).toHaveLength(2);
+    });
+
+    it('R2-2: an open case is not upheld before every undisputed record has passed its door', async () => {
+      jest.setSystemTime(new Date('2026-10-16T23:00:00Z'));
+      const { service, proposal, released } = build('DISPUTED');
+      await service.followRecords(proposal as never, { transactionHash: null });
+      expect(released).toEqual([]);
+      expect(proposal.status).toBe('DISPUTED');
+
+      // Door passed, but a dispute sent just before it may not be confirmed yet.
+      jest.setSystemTime(new Date('2026-10-17T00:01:00Z'));
+      await service.followRecords(proposal as never, { transactionHash: null });
+      expect(released).toEqual([]);
+
+      jest.setSystemTime(new Date('2026-10-17T00:30:00Z'));
+      await service.followRecords(proposal as never, { transactionHash: null });
+      expect(released).toEqual(['case']);
+    });
+
+    it('R2-10: a record standing again after a dispute is the arbiter’s uphold, never AUTO_UNDISPUTED', async () => {
+      const { service, parts, proposal, upheld, released } = build('DISPUTED');
+      Object.assign(parts.get(ID_A)!, { chainDisputedAt: new Date('2026-10-15T00:00:00Z') });
+      Object.assign(parts.get(ID_B)!, { chainStatus: 'CANCELLED' });
+      await service.followRecords(proposal as never, { transactionHash: '0xabc' });
+      expect(upheld).toEqual(['case']);
+      expect(released).toEqual([]);
+    });
+
+    it('R2-2: lists open cases past their door on every tick, so a deferred one still moves', async () => {
+      const { service, proposal, released } = build('UNDER_REVIEW');
+      await expect(service.followOpenCasesPastDoor(new Date(), 50)).resolves.toBe(1);
+      expect(released).toEqual(['case']);
+      expect(proposal.status).toBe('UPHELD');
     });
   });
 });

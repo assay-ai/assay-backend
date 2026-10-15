@@ -64,6 +64,9 @@ import { SlashProposalService } from '../services/slash-proposal.service';
 /** How many old open EVM cases the start-up pass re-derives (review N-3). */
 const OPEN_EVM_CASES_PER_START = 1000;
 
+/** How many open EVM cases past their door one tick follows (review R2-2). */
+const OPEN_EVM_CASES_PER_TICK = 100;
+
 @Injectable()
 export class SlashLifecycleJob {
   private readonly logger = new Logger(SlashLifecycleJob.name);
@@ -82,6 +85,8 @@ export class SlashLifecycleJob {
   async handleTick(): Promise<void> {
     await this.reconcileOpenEvmCases();
     await this.sweepUndisputed();
+    // Review R2-2: open EVM cases left open until their records settled.
+    await this.followOpenEvmCasesPastDoor();
     await this.sweepPlatformMisses();
     // Before `executeDue`, so a case upheld by the sweep above reaches the
     // chain on the same tick that decided it. The on-chain 72h starts as early
@@ -121,6 +126,26 @@ export class SlashLifecycleJob {
         `Open EVM case reconciliation aborted: ${
           error instanceof Error ? error.message : String(error)
         }`,
+      );
+    }
+  }
+
+  /**
+   * Review R2-2: an open EVM case a record of which stands pending is upheld
+   * for the executor only once every undisputed record is past its door by
+   * the settle margin, and no chain event comes back for it then; this
+   * follows such cases' mirrored records again. No chain read.
+   */
+  private async followOpenEvmCasesPastDoor(): Promise<void> {
+    if (!this.rulings) return;
+    try {
+      const moved = await this.rulings.followOpenCasesPastDoor(new Date(), OPEN_EVM_CASES_PER_TICK);
+      if (moved > 0) {
+        this.logger.log(`${moved} open EVM slash case(s) followed their records past the door.`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Following open EVM cases aborted: ${error instanceof Error ? error.message : String(error)}`,
       );
     }
   }
