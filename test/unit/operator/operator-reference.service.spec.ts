@@ -243,7 +243,7 @@ describe('OperatorReferenceService — economic parameters', () => {
   it('respects a custom take rate and penalty split from config', async () => {
     const service = build({
       config: {
-        PROVIDER_TERMS_TAKE_RATE_PERCENT: '12',
+        PLATFORM_FEE_BPS: '1200',
         PROVIDER_TERMS_PENALTY_SPLIT: '50 / 40 / 10',
       },
     });
