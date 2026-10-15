@@ -323,6 +323,47 @@ describe('McpCatalogueService — free-tier annotations', () => {
     expect(descriptor.annotations[X402_PAID_ALTERNATIVE]).toBe('search_web');
   });
 
+  it('quotes FREE beside PAID as FREEMIUM: "N free per day, then" the paid price', async () => {
+    const tool = buildTool();
+    const harness = buildMcpHarness({
+      tool,
+      bindings: [
+        buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' }),
+        buildBinding('provider-b', { priceAmount: usdc('0.02').amount }),
+      ],
+      providers: [buildProvider('provider-a'), buildProvider('provider-b')],
+      // The FREE provider holds no stake; its exemption covers free calls only.
+      stakes: { 'provider-b': usdc(1000) },
+      invoker,
+    });
+    harness.freeQuota.setAllowance(tool.id, 100);
+
+    const [descriptor] = await harness.catalogue.listTools();
+    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+
+    expect(descriptor.annotations[X402_PRICING_MODE]).toBe(PricingMode.FREEMIUM);
+    // The amount is still the hold — the paid supply's price, never the FREE zero.
+    expect(price.amount).toBe(usdc('0.02').amount);
+    expect(price.display).toBe('100 free per day, then up to $0.02');
+    expect(descriptor.annotations[X402_PAID_ALTERNATIVE]).toBe(tool.name);
+  });
+
+  it('words a lone FREEMIUM binding "N free per day, then $X"', async () => {
+    const tool = buildTool();
+    const harness = buildMcpHarness({
+      tool,
+      bindings: [buildBinding('provider-a', { pricingMode: PricingMode.FREEMIUM })],
+      providers: [buildProvider('provider-a')],
+      invoker,
+    });
+    harness.freeQuota.setAllowance(tool.id, 25);
+
+    const [descriptor] = await harness.catalogue.listTools();
+    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+
+    expect(price.display).toBe('25 free per day, then $0.05');
+  });
+
   it('a FREE-only tool publishes no x402/paidAlternative — no cross-tool pairing exists to name', async () => {
     const { catalogue } = buildMcpHarness({
       bindings: [buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' })],

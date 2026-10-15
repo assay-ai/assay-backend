@@ -17,6 +17,7 @@ import {
 } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { CatalogueService } from '@modules/catalogue/services/catalogue.service';
+import { DEFAULT_FREE_QUOTA_CONFIG } from '@modules/free-tier/config/free-quota.config';
 import { X402_SETTLEMENT_CHAINS } from '@modules/mcp/constants/mcp.constants';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import {
@@ -32,7 +33,7 @@ import {
   stakeKey,
 } from '@modules/provider/ports/provider-stake.port';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { Tool, ToolTier } from '@modules/tool/ports/tool.types';
+import { PricingMode, Tool, ToolTier } from '@modules/tool/ports/tool.types';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
 
@@ -244,6 +245,7 @@ function build(wiring: Wiring = {}) {
       // chain set.
       [CHAIN, OTHER_CHAIN],
       wiring.blocklist ?? noBlocks(),
+      DEFAULT_FREE_QUOTA_CONFIG,
     ),
   };
 }
@@ -526,6 +528,49 @@ describe('GET /catalogue/tools', () => {
     const { tools } = await service.listTools();
 
     expect(tools.map((tool) => tool.id)).toEqual(['get_weather']);
+  });
+
+  /**
+   * Free first, then paid: a FREEMIUM tool is listed with the free calls a day
+   * an agent gets before it pays — the most generous free-capable binding's
+   * allowance, the platform default standing in for one left unset.
+   */
+  it('publishes the free calls per day of a FREEMIUM tool', async () => {
+    const { service } = build({
+      bindings: [
+        binding({ pricingMode: 'FREE', priceAmount: '0', freeQuotaPerAgent: 30 }),
+        binding({ organizationId: 'provider-b', pricingMode: 'FREEMIUM', freeQuotaPerAgent: 10 }),
+        binding({ organizationId: 'provider-c' }),
+      ],
+      quotes: { get_weather: quote({ pricingMode: PricingMode.FREEMIUM, routableBindings: 3 }) },
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].freeCallsPerDay).toBe(30);
+  });
+
+  it('falls back to the platform default allowance for a binding that set none', async () => {
+    const { service } = build({
+      bindings: [binding({ pricingMode: 'FREE', priceAmount: '0', freeQuotaPerAgent: null })],
+      quotes: { get_weather: quote({ pricingMode: PricingMode.FREE }) },
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].freeCallsPerDay).toBe(DEFAULT_FREE_QUOTA_CONFIG.defaultPerAgentDailyLimit);
+  });
+
+  it('publishes no free calls for a tool quoted PAID', async () => {
+    const { service } = build({
+      // A FREEMIUM binding routing refused: the quote has no free supply.
+      bindings: [binding({ pricingMode: 'FREEMIUM', freeQuotaPerAgent: 10 }), binding()],
+      quotes: { get_weather: quote({ pricingMode: PricingMode.PAID }) },
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].freeCallsPerDay).toBeNull();
   });
 
   it('counts distinct providers, not bindings', async () => {

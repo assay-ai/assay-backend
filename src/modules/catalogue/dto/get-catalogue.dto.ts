@@ -235,6 +235,21 @@ export class CatalogueToolDto {
   @ApiPropertyOptional({ type: String, nullable: true, description: 'FREE | FREEMIUM | PAID' })
   pricingMode: string | null;
 
+  /**
+   * Free first, then paid: the free calls a day one agent gets before a call
+   * is charged — the most generous free-capable binding's per-agent allowance.
+   * A `FREEMIUM` tool reads *"N free per day, then up to {@link price}"*.
+   * `null` when the tool is quoted `PAID` (or nothing is routable).
+   */
+  @ApiPropertyOptional({
+    type: Number,
+    nullable: true,
+    description:
+      'Free calls per agent per day before a call is paid (FREE and FREEMIUM tools); ' +
+      'null for a PAID tool.',
+  })
+  freeCallsPerDay: number | null;
+
   @ApiProperty({ description: 'Whether a call placed now would find a provider.' })
   routable: boolean;
 

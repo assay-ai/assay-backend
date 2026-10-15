@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
+import { FreeTierModule } from '@modules/free-tier/free-tier.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { ToolModule } from '@modules/tool/tool.module';
 
@@ -24,8 +25,9 @@ import { CatalogueService } from './services/catalogue.service';
 @Module({
   // `ChainsModule` for `ENABLED_CHAINS` alone: this catalogue is anonymous, so
   // the `RoutingContext` it quotes with names every chain the deployment offers
-  // rather than a buyer's.
-  imports: [ChainsModule, ToolModule, ProviderModule, BlocklistModule],
+  // rather than a buyer's. `FreeTierModule` for `FREE_QUOTA_CONFIG` alone: the
+  // default per-agent allowance behind a tool's published free calls per day.
+  imports: [ChainsModule, ToolModule, ProviderModule, BlocklistModule, FreeTierModule],
   providers: [CatalogueService],
   exports: [CatalogueService],
 })
