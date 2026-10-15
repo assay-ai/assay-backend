@@ -51,6 +51,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
   const reopened: string[] = [];
   const partlyWon: string[] = [];
   const refolded: string[] = [];
+  const alerts: { severity: string; name: string }[] = [];
   const filed: string[] = [];
   const closed: string[] = [];
   const mirrored: string[] = [];
@@ -145,6 +146,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
         proposal.status = 'CANCELLED';
       },
     } as never,
+    { emit: async (alert: { severity: string; name: string }) => void alerts.push(alert) } as never,
   );
   return {
     service,
@@ -160,6 +162,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     reopened,
     partlyWon,
     refolded,
+    alerts,
   };
 }
 
@@ -568,6 +571,17 @@ describe('SlashChainRulingService', () => {
         chainLastError: 'SupersededEpoch',
       });
       expect(events.map((event) => event.kind)).toEqual(['CHAIN_SUPERSEDED_RECORD']);
+    });
+
+    it('R2-6: pages a human about a superseded record, and never executes it', async () => {
+      const { service, parts, proposal, alerts, mirrored } = build('UPHELD');
+      proposal.chainEpoch = 1;
+      Object.assign(parts.get(ID_B)!, { chainStatus: 'REFUSED', chainLastError: 'Straggler:x' });
+      await service.recordLateProposal(late(ID_B));
+      expect(alerts).toEqual([
+        expect.objectContaining({ severity: 'CRITICAL', name: 'slash_record_superseded' }),
+      ]);
+      expect(mirrored).toEqual([]);
     });
 
     it('leaves a standing part and a mismatched record alone', async () => {

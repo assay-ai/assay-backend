@@ -128,3 +128,82 @@ describe('SlashDisputeIntentService', () => {
     expect(logged[0].context).toMatchObject({ code: 'A-11', targetType: 'chain_blocklist' });
   });
 });
+
+describe('SlashDisputeIntentService — superseded earlier-epoch records (review R2-6)', () => {
+  const SUPERSEDED = {
+    requestId: ID,
+    proposalId: 'case-1',
+    organizationId: 'org-1',
+    providerId: 'org-1',
+    assetId: `${CHAIN}/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3`,
+    chainStatus: 'PENDING',
+    chainEpoch: 0,
+    caseChainEpoch: 1,
+    penaltyAmount: '500',
+    chainReserved: '500',
+    chainExecutableAt: new Date('2026-10-20T00:00:00Z'),
+  };
+
+  function buildSuperseded(port: Record<string, unknown>) {
+    const logged: { context: Record<string, unknown>; after: unknown }[] = [];
+    const service = new SlashDisputeIntentService(
+      { findOneBy: async () => null } as never,
+      {
+        perform: async (
+          context: Record<string, unknown>,
+          mutation: () => Promise<{ value: unknown; after: unknown }>,
+        ) => {
+          const result = await mutation();
+          logged.push({ context, after: result.after });
+          return result.value;
+        },
+      } as never,
+      {
+        findChainDisputed: async () => [],
+        findSupersededStanding: async () => [SUPERSEDED],
+      } as never,
+      port as never,
+    );
+    return { service, logged };
+  }
+
+  it('lists them for the arbiter with their chain and door', async () => {
+    const { service } = buildSuperseded({});
+    await expect(service.supersededOnChain()).resolves.toEqual([
+      expect.objectContaining({
+        requestId: `0x${ID}`,
+        proposalId: 'case-1',
+        chainId: CHAIN,
+        chainStatus: 'PENDING',
+        recordEpoch: 0,
+        caseEpoch: 1,
+        executableAt: '2026-10-20T00:00:00.000Z',
+      }),
+    ]);
+  });
+
+  it('builds the arbiter’s cancelSlash for a superseded record only, logged as S-13', async () => {
+    const seen: unknown[] = [];
+    const { service, logged } = buildSuperseded({
+      buildRulingBatch: async (request: unknown) => (
+        seen.push(request),
+        { call: { ...CALL, functionName: 'cancelSlashBatch', signerRole: 'ARBITER' }, refusals: [] }
+      ),
+    });
+    const context = {
+      operator: OPERATOR as never,
+      reasonCode: 'SUPERSEDED_EPOCH',
+      note: 'an earlier proposal landed late',
+      requestId: null,
+    };
+    const call = await service.supersededCancel(context, CHAIN, `0x${ID}`);
+    expect(call.functionName).toBe('cancelSlashBatch');
+    expect(seen).toEqual([{ chainId: CHAIN, ruling: 'CANCEL', requestIds: [`0x${ID}`] }]);
+    expect(logged[0].context).toMatchObject({ code: 'S-13' });
+    expect(logged[0].after).toMatchObject({ ruling: 'CANCEL', superseded: true });
+
+    await expect(service.supersededCancel(context, CHAIN, `0x${'b'.repeat(64)}`)).rejects.toMatchObject(
+      { statusCode: 409 },
+    );
+  });
+});
