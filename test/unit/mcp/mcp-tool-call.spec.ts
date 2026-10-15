@@ -1,3 +1,4 @@
+import { offerSolanaRailAInThisSuite } from '../helpers/solana-rail-b';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { FreeQuotaLimitKind } from '@modules/free-tier/services/free-quota.service';
 import {
@@ -46,6 +47,10 @@ import { McpHarnessOptions, SESSION, buildMcpHarness } from './helpers/mcp-harne
  * ever runs.
  */
 describe('McpToolCallService — the paid call loop', () => {
+  // Solana has no paid rail by default (review 2026-10-15, C1); these cases
+  // pin the rail-A code that is kept for when it is switched back on.
+  offerSolanaRailAInThisSuite();
+
   const ARGS = { query: 'moon landing' };
 
   function harness(

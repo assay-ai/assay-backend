@@ -1,3 +1,4 @@
+import { offerSolanaRailAInThisSuite } from '../helpers/solana-rail-b';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 
 import {
@@ -20,6 +21,10 @@ import { SESSION, buildMcpHarness } from './helpers/mcp-harness';
  * gives the buyer back the rest of the hold.
  */
 describe('McpToolCallService — the buyer pays the binding that served', () => {
+  // Solana has no paid rail by default (review 2026-10-15, C1); these cases
+  // pin the rail-A code that is kept for when it is switched back on.
+  offerSolanaRailAInThisSuite();
+
   const ARGS = { query: 'moon landing' };
   const CHEAP = usdc('0.05');
   const DEAR = usdc('0.10');

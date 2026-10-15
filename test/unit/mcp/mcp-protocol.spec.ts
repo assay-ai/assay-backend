@@ -1,3 +1,4 @@
+import { offerSolanaRailAInThisSuite } from '../helpers/solana-rail-b';
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResult, ListToolsResult } from '@modelcontextprotocol/sdk/types.js';
@@ -30,6 +31,10 @@ import { SESSION, buildMcpHarness } from './helpers/mcp-harness';
  * exactly what caught it here.
  */
 describe('MCP protocol surface, through the reference client', () => {
+  // Solana has no paid rail by default (review 2026-10-15, C1); these cases
+  // pin the rail-A code that is kept for when it is switched back on.
+  offerSolanaRailAInThisSuite();
+
   const ARGS = { query: 'moon landing' };
 
   async function connect(script: Record<string, () => Promise<never>>, overrides = {}) {

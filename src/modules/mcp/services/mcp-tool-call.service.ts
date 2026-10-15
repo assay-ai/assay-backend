@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
-import { assertRailOffered, chainMetadata } from '@modules/chains/chain-metadata';
+import { assertRailOffered, chainMetadata, offersRail } from '@modules/chains/chain-metadata';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { LedgerErrorCode } from '@modules/ledger/errors/ledger.errors';
@@ -1556,8 +1556,9 @@ export type VoucherSigner = 'payer' | 'delegate';
  * A presented voucher is rail B by definition, and an explicit `x402/rail`
  * wins next (a rail the chain does not offer is refused downstream by
  * `assertRailOffered`, naming the rails it does). With neither, rail A where
- * the chain offers it — so every existing agent on Solana is unchanged — and
- * rail B where it is all there is.
+ * the chain offers it, and rail B otherwise — which on a chain with no paid
+ * rail (Solana today) is refused with `CHAIN_RAIL_NOT_OFFERED` (4xx) before
+ * anything is created.
  */
 export function chooseRail(
   chainId: ChainId,
@@ -1566,7 +1567,7 @@ export function chooseRail(
 ): PaymentRail {
   if (hasVoucher) return PaymentRail.RAIL_B_VOUCHER;
   if (requested) return requested;
-  return chainMetadata(chainId).rails.includes(railName(PaymentRail.RAIL_A_PER_CALL))
+  return offersRail(chainId, railName(PaymentRail.RAIL_A_PER_CALL))
     ? PaymentRail.RAIL_A_PER_CALL
     : PaymentRail.RAIL_B_VOUCHER;
 }
