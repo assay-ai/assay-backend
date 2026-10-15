@@ -24,8 +24,9 @@
  *   yarn evidence:verify-chain --all           (every organization, in turn)
  */
 import { PostgresDataSource } from '../../src/database/postgres/postgres.data-source';
-import { computeContentHash } from '../../src/modules/verification/domain/evidence/pack';
 import type { EvidenceCore } from '../../src/modules/verification/domain/evidence/pack.types';
+
+import { storedContentHash } from './lib/stored-core';
 
 const BATCH = 1_000;
 
@@ -152,7 +153,7 @@ function inspect(
       : `prev_hash ${prevHash ?? 'NULL'} does not match the previous pack's ${previousHash}`;
   }
 
-  const recomputed = computeContentHash({ core: row.core, seq, prevHash });
+  const recomputed = storedContentHash({ core: row.core, seq, prevHash });
   if (recomputed !== contentHash) {
     return `content hash ${contentHash} does not match the core (recomputed ${recomputed})`;
   }
