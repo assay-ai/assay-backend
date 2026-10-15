@@ -4012,6 +4012,41 @@ describe('SlashExecutionService.refoldLatePart (review R2-4)', () => {
     log.mockRestore();
   });
 
+  it('R3-2: a second late part reports only its own agent share, and records the total', async () => {
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
+    // A first refold already accounted 300 of the agents' share.
+    Object.assign(proposals.rows.get('p1')!, { agentAmount: '300' });
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+    await expect(service.refoldLatePart(proposals.rows.get('p1')!, '0xlate')).resolves.toBe(true);
+    expect(proposals.rows.get('p1')!).toMatchObject({ appliedAmount: '800', agentAmount: '420' });
+    const lines = log.mock.calls.map(([line]) => String(line));
+    expect(lines.some((line) => line.includes(': 120 paid on chain'))).toBe(true);
+    log.mockRestore();
+  });
+
+  it('R3-2: a refold that read a stale amount never lowers or re-counts the case', async () => {
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    // The watcher read 500 applied; the sweep meanwhile folded more parts in.
+    const stale = { ...proposals.rows.get('p1')! };
+    Object.assign(proposals.rows.get('p1')!, { appliedAmount: '900', platformAmount: '270' });
+    jest.spyOn(proposals, 'findOneScoped').mockResolvedValueOnce(stale as never);
+
+    await expect(service.refoldLatePart(stale as never, '0xlate')).resolves.toBe(false);
+    expect(proposals.rows.get('p1')!).toMatchObject({
+      appliedAmount: '900',
+      platformAmount: '270',
+    });
+  });
+
   it('leaves a case that is not closed EXECUTED alone', async () => {
     const { service, proposals } = buildWithParts({
       appliedMinor: '800',

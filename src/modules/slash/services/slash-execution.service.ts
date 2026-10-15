@@ -947,14 +947,24 @@ export class SlashExecutionService {
       const before = BigInt(fresh.appliedAmount ?? '0');
       const after = BigInt(totals.appliedMinor);
       if (totals.executed === 0 || after <= before) return false;
-      const moved = await this.proposals.transitionIfIn(
+      // Review R3-2: every figure is a difference from what the case already
+      // accounted. The agents' share before the first refold is that of the
+      // parts executed by the time the case closed.
+      const agentBefore =
+        fresh.agentAmount !== null && fresh.agentAmount !== undefined
+          ? BigInt(fresh.agentAmount)
+          : BigInt(totals.agentAmountMinor) - BigInt(totals.agentAmountAfterMinor);
+      // Compare-and-set on the amount read too: a concurrent refold that saw
+      // more parts wins, and this one writes nothing (never a lower amount).
+      const moved = await this.proposals.refoldAmountsIf(
         fresh.organizationId,
         fresh.id,
         [fresh.status],
+        fresh.appliedAmount ?? null,
         {
-          status: fresh.status,
           appliedAmount: totals.appliedMinor,
           platformAmount: totals.platformAmountMinor,
+          agentAmount: totals.agentAmountMinor,
         },
       );
       if (moved === 0) return false;
@@ -965,8 +975,7 @@ export class SlashExecutionService {
       await this.compensate(fresh, {
         signature: transactionHash ?? totals.signature ?? fresh.chainRequestId,
         appliedMinor: (after - before).toString(),
-        // The agent share of the parts executed after the case closed.
-        agentAmountMinor: totals.agentAmountAfterMinor,
+        agentAmountMinor: (BigInt(totals.agentAmountMinor) - agentBefore).toString(),
         platformAmountMinor: (
           BigInt(totals.platformAmountMinor) - BigInt(fresh.platformAmount ?? '0')
         ).toString(),
