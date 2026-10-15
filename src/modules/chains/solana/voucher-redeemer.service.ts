@@ -85,10 +85,10 @@ export interface VoucherRedeemerRpcClient {
  * `VoucherSeqNotIncreasing` is the one the backend is supposed to prevent and
  * must still handle: the program admits a voucher iff `seq > escrow.seq_high`, so a
  * lower seq that lands after a higher one is dead and no retry revives it. The
- * rest are the buyer's own limits and the provider's stake, none of which a
- * retry moves. When one of these comes back the buyer keeps their money and the
- * platform pays the provider — see `VoucherRedemptionService`, and the rule
- * that neither party bears it.
+ * rest are the buyer's own limits, none of which a retry moves. When one of
+ * these comes back the buyer keeps their money and the platform pays the
+ * provider — see `VoucherRedemptionService`. The provider's stake is not here:
+ * it is retried, and a voucher that expires on it is forfeited by the provider.
  */
 /** The two `Config` addresses this class needs, from one read. */
 interface SettlementConfigFacts {
@@ -127,7 +127,10 @@ const UNREDEEMABLE_ERRORS: ReadonlySet<string> = new Set([
   'EscrowMismatch',
   'VoucherExceedsPerCallLimit',
   'EscrowWindowLimitExceeded',
-  'ProviderBelowMinimumStake',
+  // Not 'ProviderBelowMinimumStake': the provider may top its stake back up
+  // inside the window, so it is a RETRY, as on EVM. If the voucher then
+  // expires, `VoucherRedemptionService` reads it as the last refusal and the
+  // provider forfeits the voucher — the platform never pays for it.
 ]);
 
 /**

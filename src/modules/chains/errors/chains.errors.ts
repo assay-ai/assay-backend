@@ -369,10 +369,11 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
    * A payment rail was chosen for a chain whose `chain-metadata.ts` row does not
    * offer it.
    *
-   * Supported rails are per-chain: Solana keeps A and B, 4663 ships B only. The
-   * 402 response on 4663 never advertises a rail A scheme, and the router never
-   * selects one. This error is the reader that makes `ChainMetadata.rails` more
-   * than a declaration.
+   * Supported rails are per-chain: Solana offers A only (rail B is off until
+   * its program has the tighten-delay rule), 4663 ships B only. The 402
+   * response on 4663 never advertises a rail A scheme, and the router never
+   * selects one. This error is the reader that makes `ChainMetadata.rails`
+   * more than a declaration.
    *
    * **500, not 400.** No caller supplies a rail: the platform picks one from the
    * code path the request happened to arrive on, so a rail the chain does not

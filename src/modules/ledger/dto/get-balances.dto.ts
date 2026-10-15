@@ -82,8 +82,7 @@ export class AccountBalanceDto {
     description:
       '`chainBalance` minus every open ledger hold against this account and asset, ' +
       'floored at zero. `null` under the same conditions as `chainBalance`. This is what ' +
-      "`EscrowSpendGateService.assertAffordable` compares a call's price against once the " +
-      'gate is enabled.',
+      "`EscrowSpendGateService.assertAffordable` compares a rail-B call's price against.",
   })
   spendable: MoneyDto | null;
 

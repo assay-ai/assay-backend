@@ -4,13 +4,16 @@ import {
   DuePaymentIntent,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
+import { MCP_VERIFICATION_DEADLINE_REASON } from '@modules/mcp/constants/mcp.constants';
 
 import {
   PAYMENT_INTENT_EXPIRY_REASON,
   PAYMENT_INTENT_EXPIRY_SWEEP_BATCH,
   PAYMENT_INTENT_HOLD_BACKSTOP_REASON,
   PAYMENT_INTENT_HOLD_REPAIR_REASON,
+  PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
 } from '../constants/payment-intent.constants';
+import { PaymentErrorCode } from '../errors/payment.errors';
 import {
   HoldEffect,
   PAYMENT_INTENT_EXPIRABLE_STATUSES,
@@ -27,6 +30,8 @@ export interface PaymentIntentSweepReport {
   readonly holdsReleased: number;
   /** Intents a worker never resolved, expired by the 24-hour hold backstop. */
   readonly backstopped: number;
+  /** Rail-B intents settled as served because their verdict missed the deadline. */
+  readonly verdictDeadlineSettled: number;
   /** Holds returned by the repair pass, i.e. left open by an earlier pass that died. */
   readonly repaired: number;
   /** Intents this pass could not finish. They are retried on the next one. */
@@ -62,6 +67,13 @@ export interface PaymentIntentSweepReport {
  * intent outright or does nothing at all; a crash in the window between then
  * leaves a released-nothing intent that pass 2 picks up.
  *
+ * A third pass runs first: the **deadline on verdicts**. A rail-B intent still
+ * `VERIFYING` `PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS` after its voucher's
+ * `expiresAt` is settled as served and unverified (see
+ * {@link settleOverdueVerdicts}), so its voucher is redeemed before the chain
+ * refuses it. It runs before the 24-hour backstop, which would otherwise
+ * release the hold of a call that was served.
+ *
  * Runs on the scheduler, which is a single instance by design. It is written to
  * be safe if that stops being true anyway: the compare-and-swap gives an intent
  * to exactly one sweeper, and the ledger's release is idempotent.
@@ -79,11 +91,13 @@ export class PaymentIntentExpiryService {
     now: Date = new Date(),
     limit: number = PAYMENT_INTENT_EXPIRY_SWEEP_BATCH,
   ): Promise<PaymentIntentSweepReport> {
+    const deadline = await this.settleOverdueVerdicts(now, limit);
+    let failed = deadline.failed;
+
     const due = await this.intents.findDueForExpiry(now, PAYMENT_INTENT_EXPIRABLE_STATUSES, limit);
 
     let expired = 0;
     let holdsReleased = 0;
-    let failed = 0;
 
     for (const candidate of due) {
       try {
@@ -125,14 +139,72 @@ export class PaymentIntentExpiryService {
 
     const { repaired, repairFailures } = await this.repair(limit);
 
-    if (expired || backstopped || repaired || failed || repairFailures) {
+    const verdictDeadlineSettled = deadline.settled;
+    if (expired || backstopped || verdictDeadlineSettled || repaired || failed || repairFailures) {
       this.logger.log(
         `Expiry sweep: ${expired} expired, ${backstopped} backstopped, ` +
+          `${verdictDeadlineSettled} settled past the verdict deadline, ` +
           `${holdsReleased} holds released, ${repaired} repaired, ${failed + repairFailures} failed`,
       );
     }
 
-    return { expired, backstopped, holdsReleased, repaired, failed: failed + repairFailures };
+    return {
+      expired,
+      backstopped,
+      verdictDeadlineSettled,
+      holdsReleased,
+      repaired,
+      failed: failed + repairFailures,
+    };
+  }
+
+  /**
+   * Settles as served and unverified every rail-B intent whose verdict missed
+   * its deadline — the same `VERIFYING → SETTLED` the MCP path takes when the
+   * verification enqueue fails, with its own reason. The hold stays open:
+   * `resolve()` never commits a rail-B hold, and the redemption job collects
+   * it from the buyer's escrow.
+   *
+   * Idempotent through the status compare-and-swap. A verdict that lands
+   * first wins and this candidate is skipped (a lost race, not a failure); a
+   * verdict that lands after loses its own CAS and moves no money.
+   */
+  private async settleOverdueVerdicts(
+    now: Date,
+    limit: number,
+  ): Promise<{ settled: number; failed: number }> {
+    const overdue = await this.intents.findDueForVerdictDeadline(
+      now,
+      PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
+      limit,
+    );
+
+    let settled = 0;
+    let failed = 0;
+    for (const candidate of overdue) {
+      try {
+        const intent = await this.paymentIntents.findById(candidate.organizationId, candidate.id);
+        await this.paymentIntents.resolve(
+          candidate.organizationId,
+          candidate.id,
+          PaymentIntentStatus.VERIFYING,
+          PaymentIntentStatus.SETTLED,
+          { reason: MCP_VERIFICATION_DEADLINE_REASON, settledAmount: intent.price },
+        );
+        settled += 1;
+        this.logger.warn(
+          `Intent ${candidate.id}: no verdict ${PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS}s after ` +
+            `its voucher expired — settled as served, unverified, for redemption`,
+        );
+      } catch (error) {
+        if (isInvalidStateTransition(error)) continue;
+        failed += 1;
+        this.logger.error(
+          `Intent ${candidate.id}: verdict-deadline settle failed. ${describe(error)}`,
+        );
+      }
+    }
+    return { settled, failed };
   }
 
   /**
@@ -195,6 +267,14 @@ export class PaymentIntentExpiryService {
 
     return { repaired, repairFailures };
   }
+}
+
+/** The status compare-and-swap was lost: another writer moved the intent first. */
+function isInvalidStateTransition(error: unknown): boolean {
+  return (
+    (error as { errorCode?: string } | null)?.errorCode ===
+    PaymentErrorCode.PAYMENT_INVALID_STATE_TRANSITION
+  );
 }
 
 function describe(error: unknown): string {
