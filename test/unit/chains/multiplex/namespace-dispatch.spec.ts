@@ -9,6 +9,7 @@ import { EscrowIntentKind } from '@modules/settlement/ports/escrow-intent-builde
 import {
   RedeemOutcomeKind,
   RedeemVoucherRequest,
+  VoucherRedeemerPort,
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -210,6 +211,22 @@ describe('a namespace multiplexer', () => {
       // handed to Solana would be 64 transactions' worth of work presented as
       // one.
       expect(redeemer.maxBatchSize).toBe(1);
+    });
+
+    it('asks the payer chain whether a voucher landed, and answers null where it cannot look', async () => {
+      const landing = jest.fn().mockResolvedValue('0xlanded');
+      const withLanding = new NamespaceVoucherRedeemer(
+        new Map<ChainNamespace, VoucherRedeemerPort>([
+          [ChainNamespace.SOLANA, solana],
+          [ChainNamespace.EIP155, { ...evm, findLanding: landing }],
+        ]),
+      );
+
+      await expect(withLanding.findLanding(request(EVM_ACCOUNT), ['0xa'])).resolves.toBe(
+        '0xlanded',
+      );
+      expect(landing).toHaveBeenCalledWith(request(EVM_ACCOUNT), ['0xa']);
+      await expect(withLanding.findLanding(request(SOLANA_ACCOUNT), ['sig'])).resolves.toBeNull();
     });
 
     it('routes a single redemption on the payer chain', async () => {

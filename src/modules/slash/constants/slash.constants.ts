@@ -203,3 +203,13 @@ export function loadProRataSlashConfig(): ProRataSlashConfig {
  * (`DisputeUnresolved`) — the seven-day execution grace does not apply to it.
  */
 export const DISPUTE_TIMEOUT_MS = 30 * 24 * 60 * 60 * 1000;
+
+/**
+ * Review R2-2: how long past a record's `executableAt` the platform waits
+ * before it treats the record as undisputed. A `disputeSlash` sent just
+ * before the door is mirrored only once the watcher reads it (every two
+ * minutes, `EVM_CHAIN_STATE_CONFIRMATIONS` behind the head), so a case is
+ * labelled `UPHELD` / `AUTO_UNDISPUTED` only after this margin. Labels only:
+ * the chain itself refuses to execute a disputed record (`SlashNotPending`).
+ */
+export const CHAIN_DISPUTE_SETTLE_MS = 10 * 60 * 1000;

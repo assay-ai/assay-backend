@@ -95,7 +95,7 @@ export class PublicDemoController {
     return (await this.demo.run({
       side: body.side,
       query: body.query,
-      address: addressOf(request),
+      address: demoRateLimitAddress(request),
     })) as unknown as RunDemoResponseDto;
   }
 
@@ -140,19 +140,18 @@ export function demoRunSingleFlightKey(req: Request): string {
 }
 
 /**
- * Who to count against the rate limit.
+ * Who to count against the rate limit: `request.ip`, never a header read here.
  *
- * `X-Forwarded-For`'s **first** entry is the client as the closest trusted
- * proxy saw it; later entries are appended by hops nearer to us. Taking the
- * last would bucket every visitor behind our own load balancer into one
- * counter and rate-limit the whole internet as a single caller.
+ * Reading the first `X-Forwarded-For` entry directly trusted the client, who
+ * writes it: a new value per request was a new bucket, and the per-address
+ * limit was gone (review A-6). Express derives `request.ip` from the socket,
+ * and walks the forwarded chain only as many hops as the app's `trust proxy`
+ * setting allows, so behind the load balancer it is the address that hop saw.
+ * Without `trust proxy` it is the load balancer itself, one bucket for every
+ * visitor: too strict, never open.
  *
- * A client can forge this header, so it is not an identity — it is a
- * cost-spreading key. The limit it feeds is not the only defence: the demo
- * agent's spend policy bounds the total however many addresses are claimed.
+ * Exported so that is a test rather than a comment.
  */
-function addressOf(request: Request): string {
-  const forwarded = request.headers['x-forwarded-for'];
-  const first = Array.isArray(forwarded) ? forwarded[0] : forwarded?.split(',')[0];
-  return (first ?? request.ip ?? 'unknown').trim();
+export function demoRateLimitAddress(request: Request): string {
+  return request.ip ?? 'unknown';
 }

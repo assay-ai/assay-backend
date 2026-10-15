@@ -76,7 +76,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     const id = randomUUID();
     await dataSource.query(
       `INSERT INTO "agent_credentials" ("id", "organization_id", "agent_id", "name", "prefix", "token_hash", "scopes") ` +
-        `VALUES ($1, $2, $3, 'agent', 'x402_sk_live_test', $4, '{}')`,
+        `VALUES ($1, $2, $3, 'agent', 'assay_sk_live_test', $4, '{}')`,
       [id, organizationId, agentId, `hash-${id}`],
     );
     return id;
@@ -90,6 +90,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     chainId: CHAIN,
     label: null,
     callerKind: McpCallerKind.AGENT,
+    storedCredential: true,
   });
 
   async function sign(typedData: Record<string, unknown>) {
@@ -140,7 +141,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     const second = randomUUID();
     await dataSource.query(
       `INSERT INTO "agent_credentials" ("id", "organization_id", "agent_id", "name", "prefix", "token_hash", "scopes") ` +
-        `VALUES ($1, $2, $3, 'other agent', 'x402_sk_live_test', $4, '{}')`,
+        `VALUES ($1, $2, $3, 'other agent', 'assay_sk_live_test', $4, '{}')`,
       [second, otherOrg, randomUUID(), `hash-${second}`],
     );
     const s2 = { ...session(second), organizationId: otherOrg };

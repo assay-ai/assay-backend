@@ -23,7 +23,7 @@ function buildCredential(expiresAt: Date): AgentCredentialEntity {
     organizationId: ORG,
     agentId: 'agent-1',
     name: 'CI deploy',
-    prefix: 'x402_live_ab12',
+    prefix: 'assay_live_ab12',
     tokenHash: 'hash',
     scopes: [],
     lastUsedAt: null,

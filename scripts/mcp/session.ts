@@ -64,7 +64,10 @@ async function main(): Promise<void> {
   await section('5. Error: no bearer token at all', async () => {
     const response = await globalThis.fetch(MCP_URL, {
       method: 'POST',
-      headers: { 'content-type': 'application/json', accept: 'application/json, text/event-stream' },
+      headers: {
+        'content-type': 'application/json',
+        accept: 'application/json, text/event-stream',
+      },
       body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
     });
     console.log(`   HTTP ${response.status}`);
@@ -72,7 +75,7 @@ async function main(): Promise<void> {
 }
 
 async function connect(token: string): Promise<Client> {
-  const client = new Client({ name: 'x402-demo-agent', version: '0.1.0' });
+  const client = new Client({ name: 'assay-demo-agent', version: '0.1.0' });
   await client.connect(
     new StreamableHTTPClientTransport(new URL(MCP_URL), {
       requestInit: { headers: { authorization: `Bearer ${token}` } },

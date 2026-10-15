@@ -202,11 +202,11 @@ export class MetricsCollectorService {
     // that must never become a fabricated `0` ("0" reads as "one just
     // opened," not "the queue is empty"). The JSON snapshot (below) carries
     // that `null` faithfully. `GET /metrics` cannot make the same promise for
-    // this one series: `x402_open_hold_count` is labelled `[]`, and
+    // this one series: `assay_open_hold_count` is labelled `[]`, and
     // prom-client initialises every unlabelled Gauge to `0` at construction
     // (`Metric.reset()`), so the series exists from process start regardless
     // of whether `.set()` is ever called. Read it beside
-    // `x402_open_hold_count == 0` — that pairing is the honest "empty queue"
+    // `assay_open_hold_count == 0` — that pairing is the honest "empty queue"
     // signal at the Prometheus layer.
     if (openHold.oldestAgeSeconds !== null) {
       this.registry.openHoldOldestAgeSeconds.set(openHold.oldestAgeSeconds);
@@ -319,7 +319,7 @@ export class MetricsCollectorService {
       ),
     ];
 
-    // Every graded reading's gate also lands on the `x402_signal_status`
+    // Every graded reading's gate also lands on the `assay_signal_status`
     // gauge — not just reserve health's (set above, per-asset). Without this
     // loop the Prometheus surface would silently carry a gate for exactly one
     // signal while the JSON snapshot carried five; a scrape-only consumer

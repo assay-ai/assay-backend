@@ -108,6 +108,20 @@ export const INTERNAL_EGRESS_POLICY: EgressPolicy = Object.freeze({
   limits: DEFAULT_EGRESS_LIMITS,
 });
 
+/**
+ * The schemes a provider's binding endpoint may use.
+ *
+ * `https:` only in production: buyer arguments and provider replies — which
+ * feed verdicts and stake consequences — must not travel in clear. Plain
+ * `http:` stays allowed elsewhere so local and e2e stacks can serve bindings
+ * from a local mock without a certificate.
+ */
+export function bindingEndpointProtocols(
+  nodeEnv: string | undefined = process.env.NODE_ENV,
+): readonly string[] {
+  return nodeEnv === 'production' ? ['https:'] : ['http:', 'https:'];
+}
+
 /** Narrow an existing policy without losing the parts nobody meant to change. */
 export function withLimits(policy: EgressPolicy, limits: Partial<EgressLimits>): EgressPolicy {
   return Object.freeze({

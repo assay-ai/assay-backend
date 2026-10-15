@@ -100,7 +100,7 @@ describe('agent payment delegation — the relayed EVM doors', () => {
         kind: 'typed-data',
         primaryType: 'AuthorizeDelegate',
         relayed: true,
-        domain: { name: 'x402 Settlement', version: '2', chainId: '46630' },
+        domain: { name: 'Assay Settlement', version: '2', chainId: '46630' },
       });
       expect(tx.message).toEqual({
         payer: PAYER,

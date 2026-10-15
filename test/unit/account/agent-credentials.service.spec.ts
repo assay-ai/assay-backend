@@ -21,7 +21,7 @@ function credentialRow(overrides: Record<string, unknown> = {}) {
     id: CREDENTIAL_ID,
     agentId: AGENT_ID,
     name: 'CI deploy',
-    prefix: 'x402_sk_live_abc123',
+    prefix: 'assay_sk_live_abc123',
     tokenHash: 'deadbeef',
     scopes: ['tools:call'],
     lastUsedAt: null,
@@ -143,7 +143,7 @@ describe('AgentCredentialsService.create', () => {
 
     const response = await service.create(ORGANIZATION_ID, AGENT_ID, { name: 'CI deploy' }, ACTOR);
 
-    expect(response.token).toMatch(/^x402_sk_live_/);
+    expect(response.token).toMatch(/^assay_sk_live_/);
     expect(response.token.startsWith(response.prefix)).toBe(true);
     expect(response.prefix).toHaveLength(20);
     expect(response.prefix.length).toBeLessThan(response.token.length);

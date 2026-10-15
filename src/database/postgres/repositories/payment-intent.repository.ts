@@ -168,7 +168,7 @@ export const PLATFORM_ABSORBED_REASON_SQL =
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
   readonly id: string;
-  /** `X-X402-Call-Id` as sent upstream — the provider's key for the request. */
+  /** `X-Assay-Call-Id` as sent upstream — the provider's key for the request. */
   readonly callId: string;
   readonly callClass: string;
   readonly status: string;
@@ -356,6 +356,14 @@ export interface OpenVoucherTotals {
    * up-front `wasIssued` read, and the seq may be handed out again (S2-2).
    */
   readonly nextSeq?: bigint | null;
+  /**
+   * The highest `voucher_seq` of the payer's rail-B intents that are still
+   * bound for the chain or got there — in flight (`CREATED`, unexpired), open,
+   * or `SETTLED` — or `null` with none. A voucher at or below it would be
+   * stepped over by that one's redemption and can never be redeemed itself
+   * (review 2026-10-15 P-2).
+   */
+  readonly maxSeq?: bigint | null;
 }
 
 /** What {@link PaymentIntentRepository.holdVoucherAdmission} pauses, and for how long. */
@@ -667,7 +675,30 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.holdId IS NOT NULL')
       .andWhere('intent.holdReleasedAt IS NULL')
       .andWhere('intent.voucherSeq IS NOT NULL')
-      .andWhere('intent.voucherSignature IS NOT NULL');
+      .andWhere('intent.voucherSignature IS NOT NULL')
+      // A row waits while a LOWER seq of its payer is still in flight or open
+      // (review 2026-10-15 P-4). Redeeming it first advances `seq_high` past
+      // the lower one, which then dies on `VoucherSeqNotIncreasing` and is paid
+      // by the platform. Bounded: the lower one settles (and goes first),
+      // or ends REFUNDED/VOIDED/EXPIRED (only a hole), or passes its own
+      // redemption window (final review N-1): past `expires_at` + grace the
+      // chain refuses it anyway, so it is only a hole, and waiting on it to
+      // the 24 h hold backstop would let every later voucher expire too.
+      // Per payer account, not per asset: the seq is the escrow's.
+      .andWhere(
+        `NOT EXISTS (
+           SELECT 1 FROM payment_intents earlier
+            WHERE earlier.organization_id IS NOT NULL
+              AND earlier.agent_account = intent.agent_account
+              AND earlier.rail = :rail
+              AND earlier.voucher_seq IS NOT NULL
+              AND earlier.voucher_seq < intent.voucher_seq
+              AND earlier.expires_at > now() - interval '${REDEEM_GRACE_SECONDS} seconds'
+              AND (earlier.status IN (:...earlierOpenStatuses)
+                   OR (earlier.status = 'CREATED' AND earlier.expires_at > now()))
+         )`,
+        { earlierOpenStatuses: [...OPEN_HOLD_STATUSES] },
+      );
 
     if (
       exclude.organizationIds.length > 0 ||
@@ -720,6 +751,30 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addOrderBy('intent.voucherSeq', 'ASC')
       .limit(limit)
       .getRawMany<RedeemableIntent>();
+  }
+
+  /**
+   * Records a transaction about to carry this intent's voucher, before it is
+   * broadcast. Idempotent per reference. See `redemptionTxRefs` on the entity.
+   */
+  async recordRedemptionTxRef(organizationId: string, id: string, txRef: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "redemption_tx_refs" = array_append("redemption_tx_refs", $3::text)
+        WHERE "organization_id" = $1 AND "id" = $2
+          AND NOT ($3::text = ANY("redemption_tx_refs"))`,
+      [organizationId, id, txRef],
+    );
+  }
+
+  /** The transactions {@link recordRedemptionTxRef} recorded for this intent, oldest first. */
+  async findRedemptionTxRefs(organizationId: string, id: string): Promise<string[]> {
+    const [row] = (await this.manager.query(
+      `SELECT "redemption_tx_refs" AS "refs" FROM "payment_intents"
+        WHERE "organization_id" = $1 AND "id" = $2`,
+      [organizationId, id],
+    )) as Array<{ refs: string[] | null }>;
+    return row?.refs ?? [];
   }
 
   /**
@@ -820,11 +875,26 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         `SELECT "next_seq"::text AS "next_seq" FROM "buyer_escrows" WHERE "account_id" = $1`,
         [scope.payer],
       )) as Array<{ next_seq: string }>;
+      // Every asset: a seq is the payer account's, not the asset's.
+      const [highest] = (await manager.query(
+        `SELECT MAX("voucher_seq")::text AS "max_seq"
+           FROM "payment_intents"
+          WHERE "organization_id" IS NOT NULL
+            AND "agent_account" = $1
+            AND "rail" = 'RAIL_B_VOUCHER'
+            AND "voucher_seq" IS NOT NULL
+            AND ("status" IN (${[...OPEN_HOLD_STATUSES, SETTLED_STATUS]
+              .map((status) => `'${status}'`)
+              .join(', ')})
+                 OR ("status" = 'CREATED' AND "expires_at" > now()))`,
+        [scope.payer],
+      )) as Array<{ max_seq: string | null }>;
       admit({
         escrow: BigInt(totals?.escrow ?? '0'),
         delegate: scope.delegate === null ? 0n : BigInt(totals?.delegate ?? '0'),
         pausedFor: pause ? Number(pause.paused_for) : null,
         nextSeq: escrowRow ? BigInt(escrowRow.next_seq) : null,
+        maxSeq: highest?.max_seq ? BigInt(highest.max_seq) : null,
       });
       await manager.insert(PaymentIntentEntity, row);
     });
@@ -949,12 +1019,16 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * The intent side of `withheld`: `Σ` listed price over
+   * The intent side of `withheld`: `Σ` held amount over
    * {@link WITHHELD_STATUSES}, restricted to intents that actually reserved
    * something (`hold_id IS NOT NULL` — see `domain/withheld.ts` for why an
    * intent that expired in `CREATED` must not appear here), grouped by asset
    * and by status so a caller can fold the rows into `WithheldBucket`s without
    * loading one row per intent.
+   *
+   * The hold's amount, not `price_amount`: a rail-A intent is held at the quote
+   * and re-priced to the binding that served, and what a refund or a void
+   * gives back is the whole hold. For a tool with one price the two are equal.
    */
   async sumWithheldByAssetAndStatus(
     organizationId: string,
@@ -965,7 +1039,12 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.decimals', 'decimals')
       .addSelect('intent.status', 'status')
       .addSelect('COUNT(*)', 'calls')
-      .addSelect('COALESCE(SUM(intent.priceAmount), 0)', 'amount')
+      .addSelect('COALESCE(SUM(COALESCE(hold.amount, intent.price_amount)), 0)', 'amount')
+      .leftJoin(
+        'ledger_holds',
+        'hold',
+        'hold.id = intent.hold_id AND hold.organization_id = intent.organization_id',
+      )
       .where('intent.organizationId = :organizationId', { organizationId })
       .andWhere('intent.status IN (:...statuses)', { statuses: WITHHELD_STATUSES })
       .andWhere('intent.holdId IS NOT NULL');

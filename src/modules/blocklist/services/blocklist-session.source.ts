@@ -26,7 +26,7 @@ const READ_WHILE_BLOCKED: ReadonlySet<McpCallerKind> = new Set([
  *
  * ## What a blocked caller gets
  *
- * - **A machine credential** (`AGENT`: the agent's own `x402_sk_live_…` key) is
+ * - **A machine credential** (`AGENT`: the agent's own `assay_sk_live_…` key) is
  *   refused here. An agent has no "read why I am blocked" screen, and its
  *   token may be the very thing that leaked.
  * - **A person** (`HUMAN`, or `CONFIG`, which stands in for one) gets a session

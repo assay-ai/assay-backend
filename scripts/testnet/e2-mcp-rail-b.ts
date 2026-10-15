@@ -19,14 +19,14 @@
  *
  * The buyer is a scripted identity holding its own key (`TESTNET_E2_BUYER_KEY`), for the reason
  * `e2-voucher-redemption.ts` gives: a Privy embedded key cannot be exported. It authenticates as
- * an agent credential (`E2_MCP_TOKEN`, `x402_sk_live_…`) whose agent's primary account is that
+ * an agent credential (`E2_MCP_TOKEN`, `assay_sk_live_…`) whose agent's primary account is that
  * key's address. Everything the voucher binds comes from the requirement the platform answered
  * with — the script computes no hash and chooses no provider.
  *
  * ```bash
  * set -a; . path/to/e2-buyer.env; set +a
  * E2_MCP_URL=https://mcp.example.com/mcp E2_API_URL=https://api.example.com/api/v1 \
- *   E2_MCP_TOKEN=x402_sk_live_… E2_DEPOSIT_ATOMIC=5000000 yarn testnet:e2-mcp
+ *   E2_MCP_TOKEN=assay_sk_live_… E2_DEPOSIT_ATOMIC=5000000 yarn testnet:e2-mcp
  * ```
  */
 import { Client } from '@modelcontextprotocol/sdk/client/index.js';

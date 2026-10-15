@@ -368,6 +368,8 @@ function toReconciliationDto(reconciliation: WithheldReconciliation): WithheldRe
     holdReleaseTotal: toMoneyDto(reconciliation.holdReleaseTotal),
     orphanedReleases: toMoneyDto(reconciliation.orphanedReleases),
     orphanedHoldIds: [...reconciliation.orphanedHoldIds],
+    orphanedHoldCount: reconciliation.orphanedHoldCount,
+    settlementRemainders: toMoneyDto(reconciliation.settlementRemainders),
     ok: reconciliation.ok,
     difference: reconciliation.difference,
   };

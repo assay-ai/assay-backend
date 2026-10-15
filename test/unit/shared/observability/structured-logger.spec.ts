@@ -97,7 +97,7 @@ describe('StructuredLogger', () => {
     try {
       new StructuredLogger('Account').log({
         agentId: 'agent_1',
-        token: 'x402_live_secret_value',
+        token: 'assay_live_secret_value',
       });
     } finally {
       restore();

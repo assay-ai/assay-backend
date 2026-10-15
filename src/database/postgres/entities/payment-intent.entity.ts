@@ -74,7 +74,7 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   rail: string;
 
   /**
-   * The value sent upstream as `X-X402-Call-Id` on every attempt this intent
+   * The value sent upstream as `X-Assay-Call-Id` on every attempt this intent
    * produced.
    *
    * Independent of `id`, deliberately — see the `CallIdAndCallClass…` migration
@@ -240,6 +240,16 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
    */
   @Column({ name: 'voucher_delegate', type: 'varchar', length: 256, nullable: true })
   voucherDelegate: string | null;
+
+  /**
+   * Every transaction the redemption job signed to redeem this rail-B voucher,
+   * recorded BEFORE its broadcast (`PaymentIntentRepository.recordRedemptionTxRef`).
+   * Read when the chain answers `VoucherSeqNotIncreasing`, to tell a voucher
+   * that already landed unobserved from one that never can (review 2026-10-15
+   * P-1). Empty on rail A and on a voucher never sent.
+   */
+  @Column({ name: 'redemption_tx_refs', type: 'text', array: true, default: () => "'{}'" })
+  redemptionTxRefs: string[];
 
   /**
    * The agent credential that made the call, when the caller had one (the MCP

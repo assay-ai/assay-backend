@@ -6,6 +6,7 @@ import { NoCacheHeader } from '@shared/decorators/cache-header.decorator';
 import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
+import { callsExportFilename } from '../domain/csv';
 import { GetProviderCallsExportQueryDto } from '../dto/get-provider-calls-export.dto';
 import {
   GetProviderEarningsQueryDto,
@@ -153,14 +154,14 @@ export class ProviderController {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="calls-${query.from}_${query.to}.csv"`,
+      `attachment; filename="${callsExportFilename(query.from, query.to)}"`,
     );
     // Visible-cap headers — `docs/api-list-contract.md`'s no-silent-caps
     // principle, applied to a response shape the JSON envelope cannot carry
     // it in. Set before the first byte, since a header cannot follow a body.
-    res.setHeader('X-X402-Export-Total-Matching', String(result.meta.totalMatching));
-    res.setHeader('X-X402-Export-Row-Count', String(result.meta.rowCount));
-    res.setHeader('X-X402-Export-Truncated', String(result.meta.truncated));
+    res.setHeader('X-Assay-Export-Total-Matching', String(result.meta.totalMatching));
+    res.setHeader('X-Assay-Export-Row-Count', String(result.meta.rowCount));
+    res.setHeader('X-Assay-Export-Truncated', String(result.meta.truncated));
 
     await writeExportCsv(result, (chunk) => res.write(chunk));
     res.end();

@@ -88,20 +88,28 @@ export class OperatorOperatorsController {
     );
   }
 
-  /** Single-person; ends every session the operator holds at once. */
+  /**
+   * Single-person (200) and ends every session the operator holds at once;
+   * removing an `OPS_ADMIN` is queued for another one (202).
+   */
   @Post(':operatorId/remove')
   @HttpCode(200)
   @Override('A-14')
   @RequireRoles(OperatorRole.OPS_ADMIN)
   @ApiOperation({ summary: 'Remove an operator' })
   @ApiResponse({ status: 200, type: OperatorDirectoryEntryDto })
+  @ApiResponse({ status: 202, type: ApprovalQueuedDto })
   @ApiResponse({ status: 403, description: 'OPERATOR_SELF_CHANGE_REFUSED' })
   async remove(
     @CurrentOperator() operator: OperatorSession,
     @Param('operatorId', ParseUUIDPipe) operatorId: string,
     @Body() body: RemoveOperatorBodyDto,
-  ): Promise<OperatorDirectoryEntryDto> {
-    return this.directory.remove(operator, operatorId, body, requestIdOf());
+    @Res({ passthrough: true }) response: Response,
+  ): Promise<OperatorDirectoryEntryDto | ApprovalQueuedDto> {
+    return answerOrQueued(
+      response,
+      await this.directory.remove(operator, operatorId, body, requestIdOf()),
+    );
   }
 }
 

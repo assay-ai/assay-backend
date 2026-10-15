@@ -563,6 +563,7 @@ describe('the gas grant is once per address, against a real unique index', () =>
             // The chain's clock, and the one control 2 judges maturity on. Held
             // at the fixture's `NOW_SECONDS`, 60 s past `withdrawAvailableAt`.
             getBlock: async () => ({ timestamp: BigInt(NOW_SECONDS) }),
+            getCode: async () => undefined,
           },
         ],
       ]),

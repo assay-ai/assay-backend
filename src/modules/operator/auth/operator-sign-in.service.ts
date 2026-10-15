@@ -13,7 +13,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 
 import { OperatorDto } from '../dto/operator-console.dto';
 import { OperatorErrors } from '../errors/operator.errors';
-import { OperatorAuthThrottle, ipKey, walletKey } from '../services/operator-auth-throttle.service';
+import { OperatorAuthThrottle, ipKey } from '../services/operator-auth-throttle.service';
 import { OperatorService } from '../services/operator.service';
 import {
   OPERATOR_CHALLENGE_TTL_SECONDS,
@@ -70,10 +70,18 @@ interface StoredChallenge {
  * needs a chain read on every sign-in. MetaMask, hardware wallets and the
  * Privy embedded wallet are EOAs.
  *
+ * Every sign-in, refusal and logout is logged (info for a sign-in or logout,
+ * warn for a refusal) with the operator id where there is one, the wallet and
+ * the client address: the trail an investigation of a stolen session starts
+ * from.
+ *
  * Every failure is the one `OPERATOR_CREDENTIAL_INVALID`, and counts against
- * the client address and the wallet (`OperatorAuthThrottle`). A good signature
- * from a wallet that is not an active operator is `OPERATOR_NOT_AUTHORIZED`,
- * and counts too.
+ * the client address only (`OperatorAuthThrottle`). Nothing counts against
+ * the wallet: anyone can request a real challenge for any address and sign it
+ * badly, so a per-wallet count would let a stranger lock a named operator out,
+ * and a signature cannot be guessed, so the count would stop no attack. A good
+ * signature from a wallet that is not an active operator is
+ * `OPERATOR_NOT_AUTHORIZED`, and counts too.
  */
 @Injectable()
 export class OperatorSignInService {
@@ -94,6 +102,10 @@ export class OperatorSignInService {
       throw OperatorErrors.walletInvalid({ address });
     }
     this.assertConfigured();
+    // Per client address only. A per-wallet count would let anyone stop a
+    // named operator from getting a challenge, the lockout the wallet failure
+    // count is careful not to allow.
+    await this.throttle.countChallenge(ipKey(ip));
 
     const nonce = newSignInNonce();
     const issuedAt = new Date();
@@ -125,12 +137,10 @@ export class OperatorSignInService {
 
     const fields = parseSignInMessage(message);
     const address = typeof fields.address === 'string' ? fields.address.toLowerCase() : null;
-    if (address) await this.throttle.assertNotBlocked(walletKey(address));
 
     const fail = async (reason: string): Promise<never> => {
-      this.logger.debug(`operator sign-in refused: ${reason}`);
+      this.logger.warn(`operator sign-in refused: ${reason}; wallet ${address ?? '-'} ip ${ip}`);
       await this.throttle.recordFailure(ipKey(ip));
-      if (address) await this.throttle.recordFailure(walletKey(address));
       throw OperatorErrors.credentialInvalid();
     };
 
@@ -164,8 +174,11 @@ export class OperatorSignInService {
 
     const operator = await this.operators.findByWallet(address);
     if (!operator || operator.status !== 'ACTIVE') {
+      this.logger.warn(
+        `operator sign-in refused: not an active operator` +
+          `${operator ? ` (${operator.id}, ${operator.status})` : ''}; wallet ${address} ip ${ip}`,
+      );
       await this.throttle.recordFailure(ipKey(ip));
-      await this.throttle.recordFailure(walletKey(address));
       throw OperatorErrors.notAuthorized();
     }
 
@@ -174,12 +187,17 @@ export class OperatorSignInService {
       this.config.sessionTtlSeconds,
     );
     await this.operators.update({ id: operator.id }, { lastSeenAt: new Date() });
+    this.logger.log(
+      `operator signed in: ${operator.id} (${operator.subject}) wallet ${address} ip ${ip}`,
+    );
     return { token, expiresAt, operator: this.directory.toDto(operator) };
   }
 
   /** Revokes the presented session. Idempotent; an unknown token is not an error. */
   async logout(token: string | null): Promise<void> {
-    if (token) await this.sessions.revoke(token);
+    if (!token) return;
+    const operatorId = await this.sessions.revoke(token);
+    if (operatorId) this.logger.log(`operator signed out: ${operatorId}`);
   }
 
   private assertConfigured(): void {

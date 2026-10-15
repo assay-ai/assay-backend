@@ -17,7 +17,17 @@ export class CreateAgentCredentialBodyDto {
   @MaxLength(128)
   name: string;
 
-  @ApiPropertyOptional({ type: [String], description: 'What this credential may do' })
+  // Not enforced (review A-4). No scope vocabulary exists yet, every credential
+  // minted so far carries `[]`, and nothing reads the column: a credential's
+  // powers are those of an agent session whatever it lists here. Enforcing a
+  // scope means defining the vocabulary first, so it is described as a label
+  // rather than as a permission.
+  @ApiPropertyOptional({
+    type: [String],
+    description:
+      'Free-form labels, stored and returned. Not enforced yet: a credential can ' +
+      'do everything an agent credential can, whatever it lists here.',
+  })
   @IsOptional()
   @IsArray()
   @ArrayMaxSize(64)
@@ -52,7 +62,7 @@ export class CreateAgentCredentialResponseDto {
   @ApiProperty({
     description:
       'The full secret. Shown exactly once — copy it now. We cannot show it again; create a new one if you lose it.',
-    example: 'x402_sk_live_a91f4c2e7b3d0918f6c5a2e4b8d17f30',
+    example: 'assay_sk_live_a91f4c2e7b3d0918f6c5a2e4b8d17f30',
   })
   token: string;
 

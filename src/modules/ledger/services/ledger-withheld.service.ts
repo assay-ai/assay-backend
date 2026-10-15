@@ -10,6 +10,7 @@ import { Money } from '@modules/chains/ports/money.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
+  MAX_LISTED_ORPHANED_HOLD_IDS,
   WITHHELD_BUCKET_LABEL,
   WITHHELD_STATUS_BUCKET,
   WithheldBucket,
@@ -30,7 +31,7 @@ import { LedgerEntryType } from '../ports/ledger.types';
  * two are compared rather than one being trusted. Here, `withheldFromJournal`
  * is the ledger side (`Σ HOLD_RELEASE`) and the intent-side computation below
  * is a second, independently-obtained route to the same number
- * (`Σ` listed price over the withheld statuses that had a hold). Neither is
+ * (`Σ` held amount over the withheld statuses that had a hold). Neither is
  * derived from the other; `reconcile` is what decides whether they agree.
  *
  * See `domain/withheld.ts` for the definition this file is not — that file is
@@ -90,7 +91,7 @@ export class LedgerWithheldService {
     return MoneyUtil.of(row.amount, asset, row.decimals);
   }
 
-  /** The intent side: `Σ` listed price over the withheld buckets, for one asset. */
+  /** The intent side: `Σ` held amount over the withheld buckets, for one asset. */
   async withheldFromIntents(
     organizationId: string,
     asset: AssetId,
@@ -107,7 +108,8 @@ export class LedgerWithheldService {
 
   /**
    * Both sides, folded into the honest identity
-   * `holdReleaseTotal == withheld + orphanedReleases` — see `domain/withheld.ts`.
+   * `holdReleaseTotal == withheld + settlementRemainders + orphanedReleases` — see
+   * `domain/withheld.ts`.
    */
   async reconcile(
     organizationId: string,
@@ -115,20 +117,35 @@ export class LedgerWithheldService {
     decimals: number,
     period: WithheldPeriod = {},
   ): Promise<WithheldReconciliation> {
-    const [withheld, holdReleaseTotal, orphans] = await Promise.all([
+    const [withheld, holdReleaseTotal, summaries] = await Promise.all([
       this.withheldFromIntents(organizationId, asset, decimals, period),
       this.withheldFromJournal(organizationId, asset, decimals, period),
-      this.entries.findOrphanedHoldReleases(organizationId, period),
+      this.entries.summarizeOrphanedHoldReleases(
+        organizationId,
+        period,
+        MAX_LISTED_ORPHANED_HOLD_IDS,
+      ),
     ]);
 
-    const orphansForAsset = orphans.filter((orphan) => orphan.asset === asset);
-    const orphanedAtomic = orphansForAsset.reduce((total, orphan) => total + orphan.amount, 0n);
+    const forAsset = summaries.filter((summary) => summary.asset === asset);
+    const sum = (term: (row: (typeof forAsset)[number]) => bigint) =>
+      forAsset.reduce((total, row) => total + term(row), 0n);
 
     return reconcileWithheld({
       withheld,
       holdReleaseTotal,
-      orphanedReleases: MoneyUtil.of(orphanedAtomic, asset, decimals),
-      orphanedHoldIds: orphansForAsset.map((orphan) => orphan.holdId),
+      orphanedReleases: MoneyUtil.of(
+        sum((row) => row.orphanedReleases),
+        asset,
+        decimals,
+      ),
+      orphanedHoldIds: forAsset.flatMap((row) => row.orphanedHoldIds),
+      orphanedHoldCount: forAsset.reduce((total, row) => total + row.orphanedHoldCount, 0),
+      settlementRemainders: MoneyUtil.of(
+        sum((row) => row.settlementRemainders),
+        asset,
+        decimals,
+      ),
     });
   }
 }

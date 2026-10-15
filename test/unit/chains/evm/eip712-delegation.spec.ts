@@ -67,13 +67,13 @@ describe('the delegation EIP-712 encoders agree with assay-evm/src/Types.sol', (
 
   it('the authorisation hashes to the vector cast produced', () => {
     expect(hashAuthorizeDelegate(AUTHORIZE, TESTNET)).toBe(
-      '0x327bb143b5d7ac8b7987ad5e22f93caa754cd9f3a1f6c79224ab7d70dc48e908',
+      '0x5e580da376e2b23885494c7a2b37e3766e591214ecdfc2c976a4215918043bd0',
     );
   });
 
   it('the revocation hashes to the vector cast produced', () => {
     expect(hashRevokeDelegate(REVOKE, TESTNET)).toBe(
-      '0x5fdbc4c99d08871d0cb076aa5903ae5483547455f24b0083bfc71af88d2adcfd',
+      '0x0b19ac2087746aa67539648d8ee515f574eb16dbec437ef8d4017f9571f4db48',
     );
   });
 

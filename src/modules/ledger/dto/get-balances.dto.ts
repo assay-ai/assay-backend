@@ -174,10 +174,21 @@ export class WithheldReconciliationDto {
   })
   orphanedReleases: MoneyDto;
 
-  @ApiProperty({ type: [String] })
+  @ApiProperty({ type: [String], description: 'At most the first 100; see orphanedHoldCount' })
   orphanedHoldIds: string[];
 
-  @ApiProperty({ description: 'holdReleaseTotal == withheld + orphanedReleases' })
+  @ApiProperty({ description: 'Every orphaned release, listed or not' })
+  orphanedHoldCount: number;
+
+  @ApiProperty({
+    type: MoneyDto,
+    description: 'Remainders returned on committed holds when a call was charged below its hold',
+  })
+  settlementRemainders: MoneyDto;
+
+  @ApiProperty({
+    description: 'holdReleaseTotal == withheld + settlementRemainders + orphanedReleases',
+  })
   ok: boolean;
 
   @ApiProperty({ description: 'Signed atomic units. "0" when `ok`' })

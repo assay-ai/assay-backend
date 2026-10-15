@@ -18,8 +18,12 @@ import {
 
 import { CHAIN_ID_RE } from '@modules/chains/ports/caip.types';
 import { PricingMode } from '@modules/tool/ports/tool.types';
+import { bindingEndpointProtocols } from '@shared/network/egress/egress.policy';
 
 import { ToolBindingDetailDto } from './get-tool-bindings.dto';
+
+/** `https` only under `NODE_ENV=production` — see `bindingEndpointProtocols`. */
+const BINDING_ENDPOINT_SCHEMES = bindingEndpointProtocols().map((p) => p.replace(/:$/, ''));
 
 /** `free_quota_per_agent` is an `int` column; anything above would be a 500 at the insert. */
 const INT4_MAX = 2_147_483_647;
@@ -50,7 +54,7 @@ export class SaveToolBindingBodyDto {
     description: "The provider's own URL, unchanged. `requestMapping.path` is appended to it.",
     example: 'https://api.vesseldata.example/v2',
   })
-  @IsUrl({ require_protocol: true, protocols: ['http', 'https'] })
+  @IsUrl({ require_protocol: true, protocols: BINDING_ENDPOINT_SCHEMES })
   @MaxLength(2048)
   endpoint: string;
 
@@ -216,7 +220,7 @@ export class SaveToolBindingBodyDto {
 export class UpdateToolBindingBodyDto {
   @ApiPropertyOptional()
   @IsOptional()
-  @IsUrl({ require_protocol: true, protocols: ['http', 'https'] })
+  @IsUrl({ require_protocol: true, protocols: BINDING_ENDPOINT_SCHEMES })
   @MaxLength(2048)
   endpoint?: string;
 

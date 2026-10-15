@@ -16,6 +16,7 @@ import { AddressInfo } from 'node:net';
 import * as http from 'node:http';
 
 import {
+  ClassificationReason,
   ResponseBodyKind,
   ResponseClass,
   TransportErrorKind,
@@ -25,6 +26,7 @@ import { MappingFault, mappingFaultOf } from '@modules/tool/domain/mapping';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { EgressHttpClient } from '@shared/network/egress';
+import { bindingEndpointProtocols } from '@shared/network/egress/egress.policy';
 import { AppError } from '@shared/errors/app-errors';
 
 import {
@@ -138,7 +140,7 @@ describe('EgressBindingInvoker (router call path)', () => {
     });
   });
 
-  it('sends X-X402-Call-Id on the upstream request, byte-identical to the invocation', async () => {
+  it('sends X-Assay-Call-Id on the upstream request, byte-identical to the invocation', async () => {
     respondWith(200, JSON.stringify({ answer: 'from upstream' }));
 
     await invoker().invoke({
@@ -150,10 +152,10 @@ describe('EgressBindingInvoker (router call path)', () => {
     });
 
     console.log('Captured upstream headers:', JSON.stringify(received.headers, null, 2));
-    expect(received.headers?.['x-x402-call-id']).toBe('call-abc-123');
+    expect(received.headers?.['x-assay-call-id']).toBe('call-abc-123');
   });
 
-  it('does not let a binding-supplied header override X-X402-Call-Id', async () => {
+  it('does not let a binding-supplied header override X-Assay-Call-Id', async () => {
     respondWith(200, JSON.stringify({ answer: 'from upstream' }));
 
     // A provider's own mapping is untrusted input — a mapping that
@@ -166,8 +168,8 @@ describe('EgressBindingInvoker (router call path)', () => {
         path: '/search',
         body: { q: { $path: '$.query' } },
         headers: {
-          'X-X402-Call-Id': { $const: 'attacker-supplied-id' },
-          'x-x402-call-id': { $const: 'also-attacker' },
+          'X-Assay-Call-Id': { $const: 'attacker-supplied-id' },
+          'x-assay-call-id': { $const: 'also-attacker' },
         },
       },
     });
@@ -180,7 +182,7 @@ describe('EgressBindingInvoker (router call path)', () => {
       callId: 'real-call-id',
     });
 
-    expect(received.headers?.['x-x402-call-id']).toBe('real-call-id');
+    expect(received.headers?.['x-assay-call-id']).toBe('real-call-id');
   });
 
   it('returns a 5xx as a status rather than throwing', async () => {
@@ -238,6 +240,108 @@ describe('EgressBindingInvoker (router call path)', () => {
     // that fails over — spending a second provider on the same bad arguments.
     expect(error?.errorCode).toBe(ToolErrorCode.TOOL_MAPPING_REQUIRED_FIELD_MISSING);
     expect(mappingFaultOf(error)).toBe(MappingFault.AGENT);
+  });
+
+  // Review P-6: `encodeURIComponent` leaves `..` alone and `new URL` resolves it.
+  it.each(['..', '.', ''])(
+    'refuses %j as a path argument instead of leaving the endpoint prefix',
+    async (value) => {
+      respondWith(200, JSON.stringify({ answer: 'never reached' }));
+      const dotted = buildBinding(A, {
+        endpoint: 'http://provider-a.example.com/v2/tenants/acme',
+        requestMapping: { method: 'GET', path: '/users/{$.query}/profile' },
+      });
+
+      const error = await invoker()
+        .invoke({
+          tool,
+          binding: dotted,
+          input: { query: value },
+          timeoutMs: 2_000,
+          callId: 'test-call-id',
+        })
+        .then(() => null)
+        .catch((e: AppError) => e);
+
+      expect(error?.errorCode).toBe(ToolErrorCode.TOOL_MAPPING_TYPE_MISMATCH);
+      expect(mappingFaultOf(error)).toBe(MappingFault.AGENT);
+      expect(received.url).toBeUndefined();
+    },
+  );
+
+  it('still sends a path argument that only contains dots', async () => {
+    respondWith(200, JSON.stringify({ answer: 'ok' }));
+    const dotted = buildBinding(A, {
+      endpoint: 'http://provider-a.example.com/v2',
+      requestMapping: { method: 'GET', path: '/files/{$.query}' },
+    });
+
+    await invoker().invoke({
+      tool,
+      binding: dotted,
+      input: { query: '...' },
+      timeoutMs: 2_000,
+      callId: 'test-call-id',
+    });
+
+    expect(received.url).toBe('/v2/files/...');
+  });
+
+  it('never dials a URL whose path left the endpoint prefix', async () => {
+    respondWith(200, JSON.stringify({ answer: 'never reached' }));
+    const climbing = buildBinding(A, {
+      endpoint: 'http://provider-a.example.com/v2/tenants/acme',
+      requestMapping: { method: 'GET', path: '/../other' },
+    });
+
+    const response = await invoker().invoke({
+      tool,
+      binding: climbing,
+      input: { query: 'x' },
+      timeoutMs: 2_000,
+      callId: 'test-call-id',
+    });
+
+    expect(response.transportError).toBeDefined();
+    expect(received.url).toBeUndefined();
+  });
+
+  // Review P-8: plaintext binding endpoints in production.
+  describe('under NODE_ENV=production', () => {
+    const previous = process.env.NODE_ENV;
+    beforeEach(() => {
+      process.env.NODE_ENV = 'production';
+    });
+    afterEach(() => {
+      process.env.NODE_ENV = previous;
+    });
+
+    it('refuses an http:// binding endpoint before any dial', async () => {
+      respondWith(200, JSON.stringify({ answer: 'never reached' }));
+
+      const response = await invoker().invoke({
+        tool,
+        binding,
+        input: { query: 'x' },
+        timeoutMs: 2_000,
+        callId: 'test-call-id',
+      });
+
+      expect(response.transportError).toBeDefined();
+      expect(received.url).toBeUndefined();
+      expect(bindingEndpointProtocols()).toEqual(['https:']);
+      // A reason that tells the provider what to fix, not TRANSPORT_UNKNOWN (I-4).
+      expect(response.transportError?.kind).toBe(TransportErrorKind.SCHEME_NOT_ALLOWED);
+      expect(classifyResponse(response, { toolId: TOOL_ID })).toMatchObject({
+        responseClass: ResponseClass.SYSTEM_ERROR,
+        reason: ClassificationReason.TRANSPORT_HTTPS_REQUIRED,
+      });
+    });
+  });
+
+  it('allows http:// binding endpoints outside production, for local stacks', () => {
+    expect(bindingEndpointProtocols('test')).toEqual(['http:', 'https:']);
+    expect(bindingEndpointProtocols('development')).toEqual(['http:', 'https:']);
   });
 
   it('fails over between two real endpoints', async () => {

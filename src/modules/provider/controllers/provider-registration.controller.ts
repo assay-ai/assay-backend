@@ -1,7 +1,7 @@
 import { Body, Controller, Get, HttpCode, Patch, Post, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import {
@@ -28,7 +28,9 @@ import { ProviderRegistrationService } from '../services/provider-registration.s
  */
 @ApiTags('Provider')
 @ApiBearerAuth()
-@UseGuards(SessionAuthGuard)
+// Person-only (review A-1): the legal identity and accepted terms of the
+// account are the owner's to state, never a machine credential's.
+@UseGuards(SessionAuthGuard, HumanSessionGuard)
 @Controller('providers')
 export class ProviderRegistrationController {
   constructor(private readonly registration: ProviderRegistrationService) {}

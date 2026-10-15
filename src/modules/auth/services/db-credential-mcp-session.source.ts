@@ -4,17 +4,17 @@ import { AgentCredentialEntity } from '@database/postgres/entities/agent-credent
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
-import { AGENT_CREDENTIAL_TOKEN_PREFIX } from '@modules/account/constants/agent-credential-token.constants';
+import { isAgentCredentialToken } from '@modules/account/constants/agent-credential-token.constants';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 import { digestToken } from '@shared/crypto/token-digest';
 
 import { AuthErrors } from '../errors/auth.errors';
 
-const SUSPENDED = 'SUSPENDED';
+const ACTIVE = 'ACTIVE';
 
 /**
- * `agent_credentials` bearer tokens (`x402_sk_live_…`), resolved to a
+ * `agent_credentials` bearer tokens (`assay_sk_live_…`), resolved to a
  * session — the third session source.
  *
  * `POST /agents/:agentId/credentials` mints these and stores only their
@@ -31,7 +31,7 @@ const SUSPENDED = 'SUSPENDED';
  *
  * `CompositeMcpSessionSource` only advances to the next source when this one
  * raises `MCP_CREDENTIAL_INVALID` — every other error stops the chain. A
- * Privy access token is JWT-shaped (`eyJ…`), never `x402_sk_live_…`-shaped,
+ * Privy access token is JWT-shaped (`eyJ…`), never `assay_sk_live_…`-shaped,
  * so refusing anything without the prefix *before* touching the database is
  * what lets a Privy caller reach `PrivyMcpSessionSource` at all in `both`
  * mode. Skip this check (or get it wrong) and this source would swallow
@@ -44,8 +44,9 @@ const SUSPENDED = 'SUSPENDED';
  * reads them from `agents` rather than the token: they name the account a
  * call is charged to, and the one honest source for that is the row a wallet
  * was actually linked to, not anything a caller-controlled artefact carries.
- * The join is `AgentRepository.findById(credential.agentId)`, done as two
- * queries rather than one because **there is no FK** between the two tables.
+ * The join is `AgentRepository.findByIdWithOrganization(credential.agentId)`
+ * (which also reads the organization's status), a second query rather than
+ * part of the first because **there is no FK** between the two tables.
  * `AgentCredentialsService.create` refuses an agent that does not exist, but
  * rows minted before that check (or by scripts) can still name one, so the
  * join can miss, and a miss is treated exactly like an
@@ -77,11 +78,13 @@ const SUSPENDED = 'SUSPENDED';
  *
  * ## The refusals that are not `MCP_CREDENTIAL_INVALID`
  *
- * A suspended agent and an agent with no linked wallet are facts about a
- * caller already identified by a genuine credential — exactly the reasoning
- * `PrivyMcpSessionSource` and `auth.errors.ts` give for `AUTH_AGENT_SUSPENDED`
- * and `AUTH_WALLET_NOT_LINKED` over a generic 401. `CompositeMcpSessionSource`
- * lets both propagate rather than trying the next source.
+ * A suspended organization, a suspended agent and an agent with no linked
+ * wallet are facts about a caller already identified by a genuine
+ * credential — exactly the reasoning `PrivyMcpSessionSource` and
+ * `auth.errors.ts` give for `AUTH_ORGANIZATION_SUSPENDED`,
+ * `AUTH_AGENT_SUSPENDED` and `AUTH_WALLET_NOT_LINKED` over a generic 401.
+ * `CompositeMcpSessionSource` lets all three propagate rather than trying the
+ * next source.
  */
 @Injectable()
 export class DbCredentialMcpSessionSource implements McpSessionPort {
@@ -91,7 +94,7 @@ export class DbCredentialMcpSessionSource implements McpSessionPort {
   ) {}
 
   async resolve(bearerToken: string | null): Promise<McpSession> {
-    if (!bearerToken || !bearerToken.startsWith(AGENT_CREDENTIAL_TOKEN_PREFIX)) {
+    if (!bearerToken || !isAgentCredentialToken(bearerToken)) {
       throw McpErrors.credentialInvalid();
     }
 
@@ -100,12 +103,20 @@ export class DbCredentialMcpSessionSource implements McpSessionPort {
       throw McpErrors.credentialInvalid();
     }
 
-    const agent = await this.agents.findById(credential.agentId);
+    const found = await this.agents.findByIdWithOrganization(credential.agentId);
+    const agent = found?.agent;
     if (!agent || agent.organizationId !== credential.organizationId) {
       throw McpErrors.credentialInvalid();
     }
 
-    if (agent.status === SUSPENDED) {
+    // The same two checks, in the same order, as `PrivyMcpSessionSource`:
+    // suspending the organization must stop its machine credentials too, and
+    // only ACTIVE passes, so a status added later is refused by default.
+    if (found.organizationStatus !== ACTIVE) {
+      throw AuthErrors.organizationSuspended();
+    }
+
+    if (agent.status !== ACTIVE) {
       throw AuthErrors.agentSuspended();
     }
 
@@ -130,6 +141,7 @@ export class DbCredentialMcpSessionSource implements McpSessionPort {
 
     return {
       credentialId: credential.id,
+      storedCredential: true,
       organizationId: credential.organizationId,
       agentId: agent.id,
       agentAccount: agent.primaryAccountId as AccountId,

@@ -627,7 +627,7 @@ function testReport(
     request: {
       method: 'GET',
       url: `${plan.endpoint}${(plan.requestMapping as { path: string }).path}`,
-      headerNames: ['accept', 'x-x402-call-id'],
+      headerNames: ['accept', 'x-assay-call-id'],
       body: null,
     },
     upstream: {

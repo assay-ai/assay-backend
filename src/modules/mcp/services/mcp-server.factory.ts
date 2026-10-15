@@ -143,7 +143,7 @@ export class McpServerFactory {
 // Platform outcome → MCP result
 // ---------------------------------------------------------------------------
 
-export const MCP_SERVER_NAME = 'x402-payment-platform';
+export const MCP_SERVER_NAME = 'assay';
 
 /**
  * The request's `_meta` → what the agent said about paying (rail B).
@@ -307,4 +307,7 @@ const RETRYABLE_CODES: ReadonlySet<string> = new Set<string>([
   // was charged and the seq is not spent; the same call passes once the change
   // has landed. The error carries `retryAfter` (seconds).
   PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
+  // A seq never used but passed by a parallel call of the same payer (final
+  // review N-6). Nothing was charged; the call passes with a fresh seq.
+  PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE,
 ]);

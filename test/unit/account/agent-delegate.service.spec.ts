@@ -74,6 +74,7 @@ const session = (overrides: Partial<McpSession> = {}): McpSession => ({
   chainId: CHAIN,
   label: null,
   callerKind: McpCallerKind.AGENT,
+  storedCredential: true,
   ...overrides,
 });
 
@@ -324,6 +325,15 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
       });
     },
   );
+
+  it('is refused to a config-file machine token: no stored credential backs it (N-1)', async () => {
+    await expect(
+      service.challenge(
+        session({ credentialId: 'cred-demo-agent', storedCredential: undefined }),
+        delegateKey.address,
+      ),
+    ).rejects.toMatchObject({ errorCode: 'ACCOUNT_DELEGATE_BINDING_AGENT_ONLY' });
+  });
 
   it('refuses a chain without voucher delegation', async () => {
     const solana = { resolve: () => ({ toAccountId: jest.fn() }) };

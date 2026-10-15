@@ -5,6 +5,7 @@ import { X402_STAKE_ABI } from '@modules/chains/evm/abi/x402.abi';
 import {
   EVM_VERIFIER_EXPIRY_ALERTS,
   EvmVerifierExpiryMonitor,
+  VERIFIER_EXPIRY_PAGE_SIZE,
 } from '@modules/chains/evm/evm-verifier-expiry.monitor';
 import { Alert, AlertSeverity } from '@shared/alerting';
 
@@ -67,8 +68,8 @@ function build(records: { requestId: string; verifier: string }[]) {
     new Map([[CHAIN, { stake: STAKE, config: CONFIG }]]) as never,
     [CHAIN],
     {
-      findOpenChainRecords: async () =>
-        records.map((row) => ({
+      findOpenChainRecords: async (limit: number, offset = 0) =>
+        records.slice(offset, offset + limit).map((row) => ({
           requestId: row.requestId,
           assetId: `${CHAIN}/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3`,
         })),
@@ -96,6 +97,17 @@ describe('EvmVerifierExpiryMonitor (follow-up B5)', () => {
         details: expect.objectContaining({ verifier: SOON, openRecords: 2 }),
       }),
     ]);
+  });
+
+  it('pages past the first 500 open records (review S-7)', async () => {
+    const rows = Array.from({ length: VERIFIER_EXPIRY_PAGE_SIZE }, (_, index) => ({
+      requestId: index.toString(16).padStart(64, '0'),
+      verifier: LATER,
+    }));
+    // The 501st record is the only one signed by the expiring key.
+    rows.push({ requestId: 'f'.repeat(64), verifier: SOON });
+    const { monitor } = build(rows);
+    await expect(monitor.check(NOW)).resolves.toEqual([{ chainId: CHAIN, verifier: SOON }]);
   });
 
   it('says nothing when no record is open', async () => {

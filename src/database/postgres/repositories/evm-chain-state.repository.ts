@@ -64,6 +64,16 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
   }
 
   /** Every address the chain ever named on `chainId` — what a reconcile re-checks. */
+  /** One address's row on one chain (lower-cased), or `null` when the chain never named it. */
+  async findBlockedAddress(
+    chainId: string,
+    address: string,
+  ): Promise<EvmBlockedAddressEntity | null> {
+    return this.manager.findOne(EvmBlockedAddressEntity, {
+      where: { chainId, address: address.toLowerCase() },
+    });
+  }
+
   async findKnownAddresses(chainId: string): Promise<EvmBlockedAddressEntity[]> {
     return this.manager.find(EvmBlockedAddressEntity, { where: { chainId } });
   }
@@ -149,6 +159,26 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
     await this.manager.transaction(async (manager) => {
       await this.lockState(manager, chainId);
       for (const row of rows) await this.upsertBlocked(manager, chainId, row, true);
+    });
+  }
+
+  /** The forged-slash watcher's cursor on `chainId` (review S-4), or `null` before its first read. */
+  async findSlashWatchCursor(chainId: string): Promise<bigint | null> {
+    const state = await this.findOne({
+      select: { id: true, slashWatchCursorBlock: true },
+      where: { chainId },
+    });
+    return state?.slashWatchCursorBlock == null ? null : BigInt(state.slashWatchCursorBlock);
+  }
+
+  async saveSlashWatchCursor(chainId: string, block: bigint): Promise<void> {
+    await this.manager.transaction(async (manager) => {
+      const state = await this.lockState(manager, chainId);
+      await manager.update(
+        EvmChainStateEntity,
+        { id: state.id },
+        { slashWatchCursorBlock: block.toString() },
+      );
     });
   }
 

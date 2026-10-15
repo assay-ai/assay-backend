@@ -17,7 +17,7 @@ export interface BindingInvocation {
   /** The agent's arguments, before `requestMapping` runs. */
   readonly input: JsonObject;
   /**
-   * The value sent upstream as `X-X402-Call-Id`.
+   * The value sent upstream as `X-Assay-Call-Id`.
    *
    * **Non-optional, deliberately.** "Every request upstream carries this
    * header" is a guarantee, and `callId?: string` is a guarantee a future

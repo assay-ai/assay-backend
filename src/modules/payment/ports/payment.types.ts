@@ -155,7 +155,7 @@ export interface PaymentIntent {
   readonly rail: PaymentRail;
 
   /**
-   * The value sent upstream as `X-X402-Call-Id` on every attempt this intent
+   * The value sent upstream as `X-Assay-Call-Id` on every attempt this intent
    * produced. Independent of `id` — see the call-id migration's doc
    * comment on `payment_intents.call_id` for why a call id must be able to
    * outlive, and exist without, a payment record.
@@ -232,7 +232,7 @@ export interface CreatePaymentIntentInput {
   readonly toolId: string;
   readonly rail: PaymentRail;
   /**
-   * The value sent upstream as `X-X402-Call-Id`. Minted once per
+   * The value sent upstream as `X-Assay-Call-Id`. Minted once per
    * tool call by the caller — `EgressBindingInvoker` sets the header from
    * this value and refuses to let a binding's own `upstream.headers`
    * override it.
@@ -334,6 +334,19 @@ export interface PaymentIntentTransitionContext {
    * all exhausted names neither, because nobody served it.
    */
   readonly bindingId?: string;
+  /**
+   * The price of the binding that served, and the platform's cut of it —
+   * rail A only, on the edge out of `PROVIDER_EXECUTING`, with
+   * {@link bindingId}.
+   *
+   * The intent is created and held at the quote (the dearest eligible binding)
+   * because nobody has served yet; the buyer is charged what the serving
+   * binding charges. Written as `price_amount`, `platform_fee` and
+   * `provider_amount = price − fee`, so the fee-split CHECK holds, and never
+   * above the hold: settlement commits this price and releases the rest of the
+   * hold. Rail B never sets it — the voucher amount is already that price.
+   */
+  readonly charge?: { readonly price: Money; readonly platformFee: Money };
   /** Set when settlement observes what the chain actually moved. */
   readonly settledAmount?: Money;
   readonly classification?: string;

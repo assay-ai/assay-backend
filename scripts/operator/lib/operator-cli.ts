@@ -13,8 +13,9 @@ import { OperatorRole } from '@modules/operator/domain/override-register';
  * This is how the first operators exist: running it needs the database, which
  * is already privileged. The console's own directory (`A-12`…`A-14`) takes
  * over from there, with its two-person approvals and register entries. A CLI
- * change writes no register entry — there is no operator to attribute it to —
- * and is picked up by every API instance within a few seconds (the guard
+ * change writes no register entry — there is no operator to attribute it to;
+ * `audit` receives one line per add or remove instead, naming the OS user
+ * (`cli:<user>`) — and is picked up by every API instance within a few seconds (the guard
  * re-reads the row on every request, cached briefly).
  */
 export interface OperatorCliRepository {
@@ -24,6 +25,15 @@ export interface OperatorCliRepository {
   listAll(): Promise<OperatorEntity[]>;
   create(values: Partial<OperatorEntity>): OperatorEntity;
   save(entity: OperatorEntity): Promise<OperatorEntity>;
+}
+
+/**
+ * The operator's live console sessions, in Redis (`OperatorSessionStore`). A
+ * removal must end them now: a removed row refuses its sessions, but a wallet
+ * restored within their TTL would otherwise bring them back to life.
+ */
+export interface OperatorCliSessions {
+  revokeAll(operatorId: string): Promise<void>;
 }
 
 export class OperatorCliError extends Error {}
@@ -155,14 +165,18 @@ export async function removeOperator(
 
 export async function runOperatorCli(
   repo: OperatorCliRepository,
+  sessions: OperatorCliSessions,
   command: string | undefined,
   argv: readonly string[],
   print: (line: string) => void,
+  audit: (line: string) => void = () => undefined,
+  actor = 'cli:unknown',
 ): Promise<void> {
   const flags = parseFlags(argv);
   switch (command) {
     case 'add': {
       const { operator, outcome } = await addOperator(repo, flags);
+      audit(`operator ${outcome} by ${actor}: ${describeOperator(operator)}`);
       print(`${outcome}: ${describeOperator(operator)}`);
       return;
     }
@@ -173,7 +187,10 @@ export async function runOperatorCli(
       return;
     }
     case 'remove': {
-      print(`removed: ${describeOperator(await removeOperator(repo, flags))}`);
+      const operator = await removeOperator(repo, flags);
+      await sessions.revokeAll(operator.id);
+      audit(`operator removed by ${actor}: ${describeOperator(operator)}`);
+      print(`removed: ${describeOperator(operator)}`);
       return;
     }
     default:

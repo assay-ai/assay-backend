@@ -11,7 +11,7 @@ import {
   buildCredential,
 } from './helpers/fake-agent-credential-repository';
 
-const TOKEN = 'x402_sk_live_abcdefghijklmnopqrstuvwxyz012345';
+const TOKEN = 'assay_sk_live_abcdefghijklmnopqrstuvwxyz012345';
 const ACCOUNT =
   'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM';
 const CHAIN = 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1';
@@ -32,7 +32,11 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
     return { source, credentials, agents };
   }
 
-  function seedLinkedAgent(agents: FakeAgentRepository, overrides = {}) {
+  function seedLinkedAgent(
+    agents: FakeAgentRepository,
+    overrides = {},
+    organizationStatus = 'ACTIVE',
+  ) {
     return agents.seed(
       buildAgent({
         id: 'agent-1',
@@ -42,10 +46,11 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
         label: 'ci-deploy',
         ...overrides,
       }),
+      organizationStatus,
     );
   }
 
-  it('refuses a token without the x402_sk_live_ prefix — the chain must be able to continue', async () => {
+  it('refuses a token without the assay_sk_live_ prefix — the chain must be able to continue', async () => {
     const { source } = build();
 
     await expectErrorCodeAsync(
@@ -115,6 +120,27 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
     await expectErrorCodeAsync(() => source.resolve(TOKEN), 'AUTH_AGENT_SUSPENDED');
   });
 
+  // Same rule as the Privy source: anything but ACTIVE is refused, so a status
+  // added later does not quietly keep a credential working.
+  it('refuses an agent in any status other than ACTIVE', async () => {
+    const { source, credentials, agents } = build();
+    seedLinkedAgent(agents, { status: 'DISABLED' });
+    credentials.seed(buildCredential({ tokenHash: digestToken(TOKEN) }));
+
+    await expectErrorCodeAsync(() => source.resolve(TOKEN), 'AUTH_AGENT_SUSPENDED');
+  });
+
+  // Suspending a tenant locks the person out through the Privy source; it has
+  // to stop the tenant's machine credentials too, or the suspension is only
+  // half applied.
+  it('refuses a credential whose organization is suspended', async () => {
+    const { source, credentials, agents } = build();
+    seedLinkedAgent(agents, {}, 'SUSPENDED');
+    credentials.seed(buildCredential({ tokenHash: digestToken(TOKEN) }));
+
+    await expectErrorCodeAsync(() => source.resolve(TOKEN), 'AUTH_ORGANIZATION_SUSPENDED');
+  });
+
   it('resolves a valid credential to a session with all six fields correct', async () => {
     const { source, credentials, agents } = build();
     seedLinkedAgent(agents);
@@ -124,6 +150,8 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
 
     expect(session).toEqual({
       credentialId: 'cred-42',
+      // the id names a stored `agent_credentials` row (N-1)
+      storedCredential: true,
       organizationId: 'org-1',
       agentId: 'agent-1',
       agentAccount: ACCOUNT,

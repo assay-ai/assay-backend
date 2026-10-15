@@ -527,6 +527,36 @@ describe('review fixes — SlashPartsService', () => {
     expect(view?.reservedMinor).toBe('300');
   });
 
+  it('R2-8: keeps the cancel reason a chain read observed on the part', async () => {
+    const { service, proposal, executor, parts } = build([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    await service.propose(proposal, '0xprovider');
+    const cancelledAt = new Date('2026-10-16T00:00:00Z');
+    executor.records.set(parts.rows[0].chainRequestId, {
+      ...pendingRecord('200'),
+      status: 'CANCELLED',
+      cancelledAt,
+      cancelReason: 'WITHDRAWN',
+    });
+    // Unknown on chain: nothing is invented.
+    executor.records.set(parts.rows[1].chainRequestId, {
+      ...pendingRecord('100'),
+      status: 'CANCELLED',
+    });
+
+    await service.readRecord(proposal, '0xprovider');
+
+    expect(parts.rows[0]).toMatchObject({
+      chainStatus: 'CANCELLED',
+      cancelReason: 'WITHDRAWN',
+      cancelledAt,
+    });
+    expect(parts.rows[1].chainStatus).toBe('CANCELLED');
+    expect(parts.rows[1].cancelReason ?? null).toBeNull();
+  });
+
   // S2-1: one never-proposable part must not hold the case in PROPOSING for ever.
   it('gives up on a straggler after the attempt cap and lets the case proceed', async () => {
     const { service, proposal, executor, parts } = build([

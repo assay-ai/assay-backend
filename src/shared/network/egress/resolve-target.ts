@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { LookupAddress, lookup as dnsLookup } from 'node:dns';
 import { promisify } from 'node:util';
 
@@ -11,6 +12,8 @@ const lookupAll = promisify(dnsLookup) as (
   hostname: string,
   options: { all: true; verbatim: true },
 ) => Promise<LookupAddress[]>;
+
+const logger = new Logger('EgressGuard');
 
 /** The DNS surface this module needs, so a test can supply an answer. */
 export type EgressDnsLookup = (hostname: string) => Promise<LookupAddress[]>;
@@ -79,9 +82,14 @@ export async function resolveEgressTarget(
     for (const record of records) {
       const verdict = classifyAddress(record.address);
       if (isBlockedVerdict(verdict)) {
+        // The address and the range stay in the log. The message reaches the
+        // provider who typed the URL (connectivity check, mapping tester), and
+        // naming the private address an internal name resolves to turns the
+        // guard into a map of the cluster.
+        logger.warn(`Refused ${hostname}: resolves to ${record.address} — ${verdict.detail}`);
         throw new EgressError(
           EgressFailureKind.BLOCKED_ADDRESS,
-          `${hostname} resolves to ${record.address} — ${verdict.detail}`,
+          'the host resolves to a non-public address',
           { url: url.href, address: record.address, addressReason: verdict.reason },
         );
       }

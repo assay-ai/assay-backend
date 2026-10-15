@@ -14,11 +14,15 @@ import { VoucherRedemptionService } from '../services/voucher-redemption.service
  * Registered only in `PaymentSchedulerModule`, which only the scheduler process
  * imports — the scheduler is a single instance by design (`docs/architecture.md`
  * §Scaling Design), so this fires once per deployment rather than once per API
- * replica. **There is deliberately no lock**, for the same reason
- * `ReconciliationJob` has none: two passes racing the same buyer's vouchers
- * would each pay a transaction fee and one of them would lose to
- * `VoucherSeqNotIncreasing`, which is money rather than a correctness problem,
- * and the single-instance rule is what actually prevents it.
+ * replica. **Ticks never overlap** (`waitForCompletion`): one pass can outlast
+ * the minute — a receipt waits up to 180 s — and a second pass over the same
+ * rows would lose to `VoucherSeqNotIncreasing` on a voucher the first one had
+ * just redeemed. That is not a fee: the loser used to absorb it and pay the
+ * provider a second time (review 2026-10-15 P-1). A tick that comes due while
+ * a pass runs is skipped, and the next one after it finds the rows. Across
+ * processes the single-instance rule is what prevents it, and
+ * `VoucherRedemptionService` checks the chain for the voucher's own
+ * transaction before it absorbs anything as the second line.
  *
  * The handler cannot throw: `run` catches per hold, and the loop below catches
  * anything left so one asset's problem cannot stop the next asset being
@@ -35,7 +39,7 @@ export class VoucherRedemptionJob {
     private readonly chains: ChainAdapterRegistry,
   ) {}
 
-  @Cron(VOUCHER_REDEMPTION_CRON)
+  @Cron(VOUCHER_REDEMPTION_CRON, { waitForCompletion: true })
   async handleRedemption(): Promise<void> {
     for (const asset of this.assets()) {
       try {
