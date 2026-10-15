@@ -1309,7 +1309,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * decayed counter, every voucher this platform has accepted and the chain has
    * not counted yet. Read and insert as two statements, five concurrent calls
    * all read the same total and all fit; four of them were then refused at
-   * redemption and the platform paid the providers.
+   * redemption.
    *
    * Here the two happen under `pg_advisory_xact_lock` keyed on the PAYER, in
    * one transaction: the next admission for the same payer waits until this

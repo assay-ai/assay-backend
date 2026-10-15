@@ -42,6 +42,7 @@ import { EvmStakeIntentBuilder } from './evm-stake-intent-builder.service';
 import { EvmVerifierRegistryService } from './evm-verifier-registry.service';
 import { EvmVaultService } from './evm-vault.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
+import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
 import { DEFAULT_EVM_SLASH_BATCH_SIZE, EvmSlashExecutor } from './evm-slash-executor.service';
 import { ModuleRef } from '@nestjs/core';
 import { VerifierSigningService } from '@modules/verification/signing/services/verifier-signing.service';
@@ -326,12 +327,32 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       useClass: EvmRelayedEscrowIntentSubmitter,
     },
     {
+      // Whether each chain's escrow has the tighten delay (D-21), by asking it.
+      provide: EvmTightenDelayProbe,
+      useFactory: (clients: never, deployments: never) =>
+        new EvmTightenDelayProbe(clients, deployments, { now: () => Date.now() }),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS],
+    },
+    {
       provide: EvmVoucherRedeemer,
-      useFactory: (clients: never, deployments: never, redeemer: never, alerts: never) =>
-        new EvmVoucherRedeemer(clients, deployments, redeemer, alerts, { now: () => Date.now() }),
+      useFactory: (
+        clients: never,
+        deployments: never,
+        redeemer: never,
+        alerts: never,
+        tightenDelay: EvmTightenDelayProbe,
+      ) =>
+        new EvmVoucherRedeemer(
+          clients,
+          deployments,
+          redeemer,
+          alerts,
+          { now: () => Date.now() },
+          tightenDelay,
+        ),
       // The REDEEMER, not the relayer: `redeemVoucher[Batch]` accepts only
       // `Config.params().redeemer` as sender.
-      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_REDEEMER, ALERT_PORT],
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_REDEEMER, ALERT_PORT, EvmTightenDelayProbe],
     },
     {
       /**
@@ -482,6 +503,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmEscrowIntentBuilder,
     EvmRelayedEscrowIntentSubmitter,
     EvmVoucherRedeemer,
+    EvmTightenDelayProbe,
     EvmSlashExecutor,
     EvmVerifierRegistryService,
     EvmVaultService,

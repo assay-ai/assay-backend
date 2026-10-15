@@ -155,6 +155,20 @@ describe('agent payment delegation — the relayed EVM doors', () => {
       ],
       ['a horizon in the past', { validUntil: BigInt(NOW_SECONDS) }, 'DelegateValidUntilInvalid'],
       [
+        // D-21: `validUntil >= now + TIGHTEN_DELAY` at the block that lands it,
+        // which may be as late as the signed deadline (chain time + 300).
+        'a horizon less than an hour after the deadline',
+        {
+          validUntil: BigInt(
+            NOW_SECONDS +
+              EVM_CONSTANTS.VOUCHER_MAX_LIFETIME_SECONDS +
+              EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS -
+              1,
+          ),
+        },
+        'DelegateValidUntilInvalid',
+      ],
+      [
         'a horizon more than a year out',
         { validUntil: BigInt(NOW_SECONDS + EVM_CONSTANTS.MAX_DELEGATION_LIFETIME_SECONDS + 1) },
         'DelegateValidUntilInvalid',
@@ -165,6 +179,22 @@ describe('agent payment delegation — the relayed EVM doors', () => {
       ).rejects.toMatchObject({
         errorCode: 'SETTLEMENT_DELEGATION_INVALID',
         message: expect.stringContaining(reason),
+      });
+    });
+
+    it('accepts a horizon exactly an hour after the signed deadline (D-21)', async () => {
+      const validUntil = BigInt(
+        NOW_SECONDS +
+          EVM_CONSTANTS.VOUCHER_MAX_LIFETIME_SECONDS +
+          EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS,
+      );
+      const tx = (await builder.authorizeIntent(PAYER_ACCOUNT, {
+        ...TERMS,
+        validUntil,
+      })) as Eip155TypedDataRequest;
+      expect(tx.message).toMatchObject({
+        validUntil,
+        deadline: BigInt(NOW_SECONDS + EVM_CONSTANTS.VOUCHER_MAX_LIFETIME_SECONDS),
       });
     });
 
