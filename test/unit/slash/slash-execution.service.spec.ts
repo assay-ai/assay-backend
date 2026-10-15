@@ -2958,6 +2958,7 @@ describe('sweepAdminCancels', () => {
     );
     executor.appliedMinor = '400000';
     const stale = { ...proposals.rows.get('p1')! };
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
 
     await service.reproposeAtRevisedPenalty('org_1', 'p1', NOW);
     // The other replica read the row before the bump.
@@ -2969,6 +2970,9 @@ describe('sweepAdminCancels', () => {
 
     expect(proposals.rows.get('p1')!.chainEpoch).toBe(1);
     expect(executor.proposed).toHaveLength(1);
+    // R2-9: the loser says so.
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('lost the epoch compare-and-set'));
+    log.mockRestore();
   });
 
   it('S-2: does not re-propose an overturned case whose cancel landed', async () => {
