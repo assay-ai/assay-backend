@@ -454,6 +454,33 @@ describe('SlashChainRulingService', () => {
       const { service } = build();
       await expect(service.recordCancelled(cancelled('c'.repeat(64)))).resolves.toBe(false);
     });
+
+    it.each(['WITHDRAWN', 'DISPUTE_UNRESOLVED'])(
+      'R3-1: a %s superseded earlier-epoch record touches only its part, never the case',
+      async (reason) => {
+        const { service, parts, proposal, events, closed, partlyWon } = build('UPHELD');
+        proposal.chainEpoch = 1;
+        Object.assign(parts.get(ID_A)!, { chainEpoch: 1 });
+        Object.assign(parts.get(ID_B)!, {
+          chainStatus: 'DISPUTED',
+          chainDisputedAt: new Date('2026-10-15T00:00:00Z'),
+          chainLastError: 'SupersededEpoch',
+        });
+        await service.recordCancelled(cancelled(ID_B, reason as never));
+
+        expect(parts.get(ID_B)).toMatchObject({ chainStatus: 'CANCELLED' });
+        expect(proposal.chainDisputeWonAt ?? null).toBeNull();
+        expect(proposal).toMatchObject({ status: 'UPHELD', chainStatus: 'PENDING' });
+        expect(closed).toEqual([]);
+        expect(partlyWon).toEqual([]);
+        const entries = events.filter((event) => event.kind === 'CHAIN_CANCELLED');
+        expect(entries).toHaveLength(1);
+        const summary = (entries[0] as { summary?: string }).summary ?? '';
+        expect(summary).not.toMatch(/ruled for the provider/);
+        expect(summary).toMatch(/earlier proposal/);
+        expect(entries[0].detail).toMatchObject({ superseded: true });
+      },
+    );
   });
 
   describe('SlashExecuted, whoever sent it (BUG-R13-D-03)', () => {
