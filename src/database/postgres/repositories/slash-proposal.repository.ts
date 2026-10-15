@@ -228,9 +228,10 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .where('organization_id = :organizationId', { organizationId })
       .andWhere('id = :id', { id })
       .andWhere('status IN (:...expectedFrom)', { expectedFrom });
-    const result = await (expectedApplied === null
-      ? query.andWhere('applied_amount IS NULL')
-      : query.andWhere('applied_amount = :expectedApplied', { expectedApplied })
+    const result = await (
+      expectedApplied === null
+        ? query.andWhere('applied_amount IS NULL')
+        : query.andWhere('applied_amount = :expectedApplied', { expectedApplied })
     ).execute();
     return result.affected ?? 0;
   }
