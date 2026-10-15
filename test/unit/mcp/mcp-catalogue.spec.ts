@@ -3,6 +3,7 @@ import { FreeQuotaService } from '@modules/free-tier/services/free-quota.service
 import {
   X402_FREE_QUOTA,
   X402_PAID_ALTERNATIVE,
+  X402_PAID_ON_THIS_CHAIN,
   X402_PRICE,
   X402_PRICING_MODE,
   X402_QUALITY_RATE,
@@ -31,7 +32,7 @@ import {
   buildTool,
   usdc,
 } from '../tool/helpers/routing-fixtures';
-import { FakeFreeQuota, buildMcpHarness } from './helpers/mcp-harness';
+import { CHAIN_ID, FakeFreeQuota, buildMcpHarness } from './helpers/mcp-harness';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 
@@ -636,5 +637,59 @@ describe('McpCatalogueService — one tool cannot break the list', () => {
     const listed = await catalogue.listTools();
 
     expect(listed.map((descriptor) => descriptor.name)).toEqual(['good']);
+  });
+});
+
+describe('McpCatalogueService — a viewer whose chain offers no paid rail (review #2, L6)', () => {
+  const invoker = new ScriptedInvoker({});
+  // The harness settles on Solana, which ships with `rails: []`.
+  const SOLANA_VIEWER = {
+    organizationId: 'org-viewer',
+    agentId: 'agent-viewer',
+    chainId: CHAIN_ID,
+  };
+
+  it('a PAID tool is still listed, but not priced as buyable from that chain', async () => {
+    const { catalogue } = buildMcpHarness({
+      bindings: [buildBinding('provider-a')],
+      providers: [buildProvider('provider-a')],
+      invoker,
+    });
+
+    const [descriptor] = await catalogue.listTools(SOLANA_VIEWER);
+    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+
+    expect(price.display).toContain('paid calls are off on this chain');
+    expect(descriptor.annotations[X402_PAID_ON_THIS_CHAIN]).toBe(false);
+    expect(descriptor._meta[X402_PAID_ON_THIS_CHAIN]).toBe(false);
+  });
+
+  it('a FREEMIUM tool advertises its free allowance only, with no paid alternative', async () => {
+    const { catalogue } = buildMcpHarness({
+      bindings: [buildBinding('provider-a', { pricingMode: PricingMode.FREEMIUM })],
+      providers: [buildProvider('provider-a')],
+      invoker,
+    });
+
+    const [descriptor] = await catalogue.listTools(SOLANA_VIEWER);
+    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+
+    expect(price.display).not.toContain('then');
+    expect(descriptor.annotations).not.toHaveProperty(X402_PAID_ALTERNATIVE);
+    expect(descriptor.annotations[X402_PAID_ON_THIS_CHAIN]).toBe(false);
+  });
+
+  it('a viewer with no chain carries no flag', async () => {
+    const { catalogue } = buildMcpHarness({
+      bindings: [buildBinding('provider-a')],
+      providers: [buildProvider('provider-a')],
+      invoker,
+    });
+
+    const [descriptor] = await catalogue.listTools({
+      organizationId: 'org-viewer',
+      agentId: 'agent-viewer',
+    });
+    expect(descriptor.annotations).not.toHaveProperty(X402_PAID_ON_THIS_CHAIN);
   });
 });

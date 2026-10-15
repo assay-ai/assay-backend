@@ -239,6 +239,20 @@ export class McpToolCallService {
         );
       }
 
+      // `FREEMIUM` exhausted on a chain with no paid rail (Solana: `rails: []`):
+      // there is nothing to fall through to, so the agent gets the quota
+      // error and its reset time — not `CHAIN_RAIL_NOT_OFFERED`, which would
+      // not tell it that free calls come back at midnight (review #2, L6).
+      if (decision.kind === 'REFUSED' && !paidRailOffered(session.chainId)) {
+        throw McpErrors.quotaExceeded(
+          buildFreeQuotaErrorContext({
+            refusal: { ...decision, fallThroughToPaid: false },
+            toolId: tool.id,
+            paidPrice: null,
+          }),
+        );
+      }
+
       // `FREEMIUM` exhausted, or no free-capable binding could serve — *"fall
       // through to the paid path"*, which is the entire commercial point of the
       // mode and must require no reconfiguration from the agent. Execution
@@ -1803,6 +1817,11 @@ export function delegationHint(session: McpSession): string {
         `authorised on chain`
     : `. The payer (${session.agentAccount}) may sign, or a delegate key the payer authorised ` +
         `on chain once it is bound to this credential (POST /agents/me/delegate)`;
+}
+
+/** Whether `chainId` offers any paid rail (`chain-metadata.ts`'s `rails`). */
+function paidRailOffered(chainId: ChainId): boolean {
+  return offersRail(chainId, 'A') || offersRail(chainId, 'B');
 }
 
 function namespaceOf(chainId: ChainId): string {
