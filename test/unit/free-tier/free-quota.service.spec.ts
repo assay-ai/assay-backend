@@ -387,3 +387,87 @@ describe('FreeQuotaService — bindings at their published revision', () => {
     ).resolves.not.toBeNull();
   });
 });
+
+describe('FreeQuotaService — reserve: parallel calls cannot overspend (review M5)', () => {
+  const input = {
+    organizationId: ORGANIZATION_ID,
+    agentId: AGENT_ID,
+    toolId: TOOL_ID,
+    pricingMode: PricingMode.FREE as const,
+  };
+
+  it('lets exactly one of N parallel calls take the last platform-daily place', async () => {
+    const { service, records } = buildFreeQuotaHarness({ platformAgentDailyLimit: 5 });
+    for (let i = 0; i < 4; i += 1) {
+      records.rows.push({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        toolId: TOOL_ID,
+        bindingId: 'b1',
+        createdAt: new Date(T0),
+      });
+    }
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 6 }, () => service.reservePlatform(input)),
+    );
+
+    expect(outcomes.filter((o) => o.kind === 'RESERVED')).toHaveLength(1);
+    const refused = outcomes.filter((o) => o.kind === 'REFUSED');
+    expect(refused).toHaveLength(5);
+    for (const o of refused) {
+      if (o.kind === 'REFUSED') expect(o.limit).toBe(FreeQuotaLimitKind.PLATFORM_AGENT_DAILY);
+    }
+  });
+
+  it('holds the per-minute burst guard under parallel calls', async () => {
+    const { service } = buildFreeQuotaHarness({ platformRateLimitPerMinute: 2 });
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 5 }, () => service.reservePlatform(input)),
+    );
+
+    expect(outcomes.filter((o) => o.kind === 'RESERVED')).toHaveLength(2);
+    const refused = outcomes.find((o) => o.kind === 'REFUSED');
+    if (refused?.kind === 'REFUSED') {
+      expect(refused.limit).toBe(FreeQuotaLimitKind.PLATFORM_RATE_LIMIT);
+    }
+  });
+
+  it('gives a place back on release, so an unserved call does not spend the quota', async () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 1 });
+
+    const first = await service.reservePlatform(input);
+    expect(first.kind).toBe('RESERVED');
+    expect((await service.reservePlatform(input)).kind).toBe('REFUSED');
+
+    if (first.kind === 'RESERVED') await first.release();
+    expect((await service.reservePlatform(input)).kind).toBe('RESERVED');
+  });
+
+  it('refuses a binding place once its per-agent quota is taken, even in parallel', async () => {
+    const { service } = buildFreeQuotaHarness();
+    const binding = { id: 'b1', freeQuotaPerAgent: 1, freeDailyBudget: 100 };
+
+    const places = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        service.reserveBinding({ organizationId: ORGANIZATION_ID, agentId: AGENT_ID, binding }),
+      ),
+    );
+
+    expect(places.filter((p) => p !== null)).toHaveLength(1);
+  });
+
+  it('refuses a binding place once its daily budget is taken across agents', async () => {
+    const { service } = buildFreeQuotaHarness();
+    const binding = { id: 'b1', freeQuotaPerAgent: 10, freeDailyBudget: 2 };
+
+    const places = await Promise.all(
+      ['a1', 'a2', 'a3'].map((agentId) =>
+        service.reserveBinding({ organizationId: ORGANIZATION_ID, agentId, binding }),
+      ),
+    );
+
+    expect(places.filter((p) => p !== null)).toHaveLength(2);
+  });
+});

@@ -44,7 +44,12 @@ import {
   validateAgainstSchema,
 } from '@modules/tool/domain/mapping';
 import { buildFreeQuotaErrorContext } from '@modules/free-tier/services/free-quota-refusal.util';
-import { FreeQuotaService } from '@modules/free-tier/services/free-quota.service';
+import {
+  FreeQuotaDecision,
+  FreeQuotaLimitKind,
+  FreeQuotaReservation,
+  FreeQuotaService,
+} from '@modules/free-tier/services/free-quota.service';
 import { ToolCallRecordWriter } from '@modules/free-tier/services/tool-call-record-writer.service';
 import { SpendPolicyEnforcementService } from '@modules/spend-policy/services/spend-policy-enforcement.service';
 import { ToolErrorCode, ToolErrors } from '@modules/tool/errors/tool.errors';
@@ -190,12 +195,23 @@ export class McpToolCallService {
     // is the only reason nobody had hit it.
     const freeMode = freePricingMode(quote.pricingMode);
     if (freeMode) {
-      const decision = await this.freeQuota.check({
+      const quotaInput = {
         organizationId: session.organizationId,
         agentId: session.agentId,
         toolId: tool.id,
         pricingMode: freeMode,
-      });
+      };
+      let decision: FreeQuotaDecision = await this.freeQuota.check(quotaInput);
+
+      // The check is a read; the platform places are TAKEN here, atomically,
+      // before anything is routed, so parallel calls cannot all fit into the
+      // last one (review 2026-10-15, M5). Given back below if nothing served.
+      let platformPlaces: FreeQuotaReservation | null = null;
+      if (decision.kind === 'ALLOWED') {
+        const reserved = await this.freeQuota.reservePlatform(quotaInput);
+        if (reserved.kind === 'RESERVED') platformPlaces = reserved;
+        else decision = reserved;
+      }
 
       // Free first. Inside the quota the call is relayed among the
       // free-capable bindings only (`callClass: 'FREE'`), whether or not the
@@ -203,9 +219,15 @@ export class McpToolCallService {
       // `FREEMIUM` precisely so that their presence cannot switch the free tier
       // off. `null` means no free-capable binding could take it and the tool
       // has paid supply: fall through below.
-      if (decision.kind === 'ALLOWED') {
-        const served = await this.relay(session, tool, freeMode, price, args, callId);
+      if (platformPlaces) {
+        const served = await this.relay(session, tool, freeMode, price, args, callId).catch(
+          async (error: unknown) => {
+            await platformPlaces.release();
+            throw error;
+          },
+        );
         if (served) return served;
+        await platformPlaces.release();
       }
 
       // `FREE` exhausted. There is no paid binding behind this tool to fall
@@ -757,6 +779,17 @@ export class McpToolCallService {
     callId: string,
   ): Promise<McpCallOutcome | null> {
     const startedAt = Date.now();
+    // Each binding's own quota place is taken on the binding about to be
+    // dialled (`RoutingContext.reserveFreeQuota`): a binding whose quota is
+    // spent is never drawn (review M4), and parallel calls cannot overspend it
+    // (M5). Only the binding that served keeps its place.
+    const places = new Map<string, FreeQuotaReservation>();
+    let quotaShed = 0;
+    const releaseAllBut = async (keep: string | null) => {
+      await Promise.all(
+        [...places].filter(([id]) => id !== keep).map(([, place]) => place.release()),
+      );
+    };
     const routed = await this.router
       .route({
         toolId: tool.id,
@@ -766,13 +799,47 @@ export class McpToolCallService {
         // platform short on it: `withdrawingChains` is empty here on purpose, and
         // this path deliberately does not read the escrow.
         // `FREE`: a call nobody is charged for never reaches a `PAID` binding.
-        context: { ...routingContextOf(session, this.enabledChains, []), callClass: 'FREE' },
+        context: {
+          ...routingContextOf(session, this.enabledChains, []),
+          callClass: 'FREE',
+          reserveFreeQuota: async (binding) => {
+            const place = await this.freeQuota.reserveBinding({
+              organizationId: session.organizationId,
+              agentId: session.agentId,
+              binding,
+            });
+            if (place) places.set(binding.id, place);
+            else quotaShed += 1;
+            return place;
+          },
+        },
       })
-      .catch((error: unknown) => {
-        if (pricingMode === PricingMode.FREEMIUM && isRefusedBeforeDialling(error)) return null;
+      .catch(async (error: unknown) => {
+        await releaseAllBut(null);
+        if (isRefusedBeforeDialling(error)) {
+          if (pricingMode === PricingMode.FREEMIUM) return null;
+          // `FREE`, and the only supply left had no quota for this agent:
+          // that is the quota answer, not a supply problem.
+          if (quotaShed > 0) {
+            throw McpErrors.quotaExceeded(
+              buildFreeQuotaErrorContext({
+                refusal: {
+                  kind: 'REFUSED',
+                  limit: FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+                  resetsAt: new Date(new Date().setUTCHours(24, 0, 0, 0)),
+                  fallThroughToPaid: false,
+                },
+                toolId: tool.id,
+                paidPrice: null,
+              }),
+            );
+          }
+        }
         throw agentFacing(error, null);
       });
     if (!routed) return null;
+    // Failover abandoned the earlier bindings: their places go back.
+    await releaseAllBut(routed.binding.id);
     const latencyMs = Date.now() - startedAt;
 
     // Written for every classified attempt, `REQUEST_ERROR` included: the
@@ -805,14 +872,8 @@ export class McpToolCallService {
       }),
     });
 
-    // Against the binding that actually served, not the one first drawn:
-    // failover abandons the first, and charging its quota for a call it never
-    // answered would exhaust a provider's goodwill on somebody else's outage.
-    await this.freeQuota.consume({
-      organizationId: session.organizationId,
-      agentId: session.agentId,
-      bindingId: routed.binding.id,
-    });
+    // The quota was spent by the reservations above — the platform places in
+    // `call`, this binding's place in the router — so nothing is counted here.
 
     // Counted on the free path too. The exploration floor measures what has
     // been *observed* of a binding, and a free call is an observation.

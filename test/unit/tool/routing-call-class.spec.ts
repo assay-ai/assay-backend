@@ -188,3 +188,65 @@ describe('routing by call class', () => {
     expect(offer.price).toEqual(usdc('0.05'));
   });
 });
+
+/**
+ * Review 2026-10-15 M4: a free call never reaches a binding whose OWN quota is
+ * spent. The caller reserves the place on the binding about to be dialled; a
+ * binding with no room is shed and the draw runs again over what is left.
+ */
+describe('routing a free call by each binding’s own quota', () => {
+  const A = 'provider-a';
+  const B = 'provider-b';
+
+  function freeHarness() {
+    const invoker = new ScriptedInvoker({
+      'binding-provider-a': async () => ok('a'),
+      'binding-provider-b': async () => ok('b'),
+    });
+    const { router } = buildRouter({
+      bindings: [
+        buildBinding(A, { pricingMode: PricingMode.FREEMIUM }),
+        buildBinding(B, { pricingMode: PricingMode.FREE, priceAmount: '0' }),
+      ],
+      providers: [buildProvider(A), buildProvider(B)],
+      stakes: { [A]: usdc(1000) },
+      invoker,
+      random: seededRandom(5),
+    });
+    return { router, invoker };
+  }
+
+  it('never dials a binding whose quota has no room for this agent', async () => {
+    const { router, invoker } = freeHarness();
+    const reserveFreeQuota = jest.fn(async (binding: { id: string }) =>
+      binding.id === 'binding-provider-a' ? null : { release: async () => undefined },
+    );
+
+    for (let index = 0; index < 50; index += 1) {
+      const routed = await router.route({
+        toolId: TOOL_ID,
+        callId: `call-${index}`,
+        input: { query: 'x' },
+        context: routingContext({ callClass: 'FREE', reserveFreeQuota }),
+      });
+      expect(routed.providerId).toBe(B);
+    }
+    expect(invoker.providerIds).not.toContain(A);
+  });
+
+  it('refuses before dialling when no free binding has room', async () => {
+    const { router, invoker } = freeHarness();
+
+    const refusal = await router
+      .route({
+        toolId: TOOL_ID,
+        callId: 'call',
+        input: { query: 'x' },
+        context: routingContext({ callClass: 'FREE', reserveFreeQuota: async () => null }),
+      })
+      .catch((error: unknown) => error);
+
+    expect((refusal as AppError).errorCode).toBe(ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING);
+    expect(invoker.invocations).toHaveLength(0);
+  });
+});
