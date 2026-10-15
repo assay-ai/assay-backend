@@ -58,6 +58,13 @@ export const X402_ESCROW_ABI = parseAbi([
    */
   'function delegationOf(address payer, address delegate) view returns (Delegation)',
   'function delegatesOf(address payer) view returns (address[])',
+  /**
+   * D-21 (assay-evm f814629): the caps `_redeem` applies NOW — a cap the payer
+   * lowered less than `TIGHTEN_DELAY_SECONDS` ago still counts, and a revoked
+   * delegate signs for that long. Delegate caps `0` = that delegate cannot sign
+   * now. Absent before the upgrade; `EvmTightenDelayProbe` calls it to tell.
+   */
+  'function effectiveCapsOf(address payer, address delegate) view returns (uint64 maxVoucherAmount, uint64 maxPerWindow, uint64 delegateMaxVoucherAmount, uint64 delegateMaxPerWindow)',
   'function authorizeDelegateBySig(address payer, address delegate, uint64 maxVoucherAmount, uint64 maxPerWindow, uint64 validUntil, uint64 nonce, uint64 deadline, bytes sig)',
   'function revokeDelegateBySig(address payer, address delegate, uint64 nonce, uint64 deadline, bytes sig)',
   'event Deposited(address indexed buyer, address indexed funder, uint64 amount, uint128 balance)',

@@ -17,6 +17,8 @@ export const NO_UNSETTLED_TOTALS: UnsettledVoucherTotals = {
 export function guardOver(
   totals: UnsettledVoucherTotals = NO_UNSETTLED_TOTALS,
   config?: Record<string, string>,
+  /** Whether the payer's escrow has the tighten delay (D-21); the guard then stands down. */
+  tightenDelay = false,
 ) {
   let holds = 0;
   const repository = {
@@ -28,7 +30,9 @@ export function guardOver(
   };
   const configService = config ? { get: (key: string) => config[key] } : undefined;
   return {
-    guard: new UnsettledVoucherGuard(repository as never, configService as never),
+    guard: new UnsettledVoucherGuard(repository as never, configService as never, {
+      holdsTightening: async () => tightenDelay,
+    }),
     repository,
   };
 }

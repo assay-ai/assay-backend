@@ -27,6 +27,13 @@ export const EVM_CONSTANTS = {
   MAX_REDEEM_BATCH: 64,
   /** `Constants.sol:38` — `WITHDRAW_DELAY_SECONDS = 3600`. */
   WITHDRAW_DELAY_SECONDS: 3_600,
+  /**
+   * `Constants.sol:66` — `TIGHTEN_DELAY_SECONDS = WITHDRAW_DELAY_SECONDS` (D-21).
+   * A payer's tightening (revoke, shorter horizon, lower caps) binds a voucher
+   * that was already valid only this long after it lands, and every delegate
+   * grant needs `validUntil >= now + this` (`DelegateValidUntilInvalid`).
+   */
+  TIGHTEN_DELAY_SECONDS: 3_600,
   /** `Constants.sol:41` — `REDEEM_GRACE_SECONDS = 30 * 60`. */
   REDEEM_GRACE_SECONDS: 1_800,
   /** `Constants.sol:47` — `VOUCHER_MAX_LIFETIME_SECONDS = 5 * 60`. */
