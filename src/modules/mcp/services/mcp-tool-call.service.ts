@@ -791,6 +791,10 @@ export class McpToolCallService {
     // (M5). Only the binding that served keeps its place.
     const places = new Map<string, FreeQuotaReservation>();
     let quotaShed = 0;
+    // Which dial shed a binding: the per-agent quota wins the answer when
+    // any binding hit it, since it is the one this agent can do nothing
+    // about but wait (both reset at the next UTC midnight).
+    let shedLimit: FreeQuotaLimitKind | null = null;
     const releaseAllBut = async (keep: string | null) => {
       await Promise.all(
         [...places].filter(([id]) => id !== keep).map(([, place]) => place.release()),
@@ -813,6 +817,9 @@ export class McpToolCallService {
               organizationId: session.organizationId,
               agentId: session.agentId,
               binding,
+              onFull: (limit) => {
+                if (shedLimit !== FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY) shedLimit = limit;
+              },
             });
             if (place) places.set(binding.id, place);
             else quotaShed += 1;
@@ -826,15 +833,20 @@ export class McpToolCallService {
           if (pricingMode === PricingMode.FREEMIUM) return null;
           // `FREE`, and the only supply left had no quota for this agent:
           // that is the quota answer, not a supply problem.
+          // The dial that actually shed it, through the same refusal (and
+          // notification) as the pre-flight check (review #2, L2).
           if (quotaShed > 0) {
             throw McpErrors.quotaExceeded(
               buildFreeQuotaErrorContext({
-                refusal: {
-                  kind: 'REFUSED',
-                  limit: FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
-                  resetsAt: new Date(new Date().setUTCHours(24, 0, 0, 0)),
-                  fallThroughToPaid: false,
-                },
+                refusal: this.freeQuota.bindingQuotaRefusal(
+                  {
+                    organizationId: session.organizationId,
+                    agentId: session.agentId,
+                    toolId: tool.id,
+                    pricingMode: PricingMode.FREE,
+                  },
+                  shedLimit ?? FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+                ),
                 toolId: tool.id,
                 paidPrice: null,
               }),

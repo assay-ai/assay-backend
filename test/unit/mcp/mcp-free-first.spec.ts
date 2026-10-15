@@ -271,6 +271,27 @@ describe('McpToolCallService — free first, then paid', () => {
     expect(h.freeQuota.platformPlaces.map((p) => p.released)).toEqual([true]);
   });
 
+  it('L2: names the dial that shed it — a spent daily budget — and builds it through refuse()', async () => {
+    const h = buildMcpHarness({
+      bindings: [buildBinding(FREE_PROVIDER, { pricingMode: PricingMode.FREE, priceAmount: '0' })],
+      providers: [buildProvider(FREE_PROVIDER)],
+      stakes: {},
+      invoker: new ScriptedInvoker({ [`binding-${FREE_PROVIDER}`]: async () => ok() }),
+    });
+    h.freeQuota.noRoomFor.add(`binding-${FREE_PROVIDER}`);
+    h.freeQuota.fullOn.set(`binding-${FREE_PROVIDER}`, FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET);
+
+    const refusal = (await h.calls
+      .call(SESSION, TOOL_NAME, ARGS)
+      .catch((e: unknown) => e)) as AppError;
+
+    expect(refusal.errorCode).toBe('MCP_QUOTA_EXCEEDED');
+    expect(h.freeQuota.bindingRefusals).toEqual([FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET]);
+    expect(JSON.stringify((refusal as unknown as { context?: unknown }).context)).toContain(
+      FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET,
+    );
+  });
+
   it('falls through to paid when a parallel call took the last platform place (M5)', async () => {
     const h = harness();
     h.freeQuota.platformRefusal = {
