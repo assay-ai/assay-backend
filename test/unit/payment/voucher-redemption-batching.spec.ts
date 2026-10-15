@@ -113,7 +113,10 @@ function build(
     releaseHold: jest.fn().mockResolvedValue(true),
   };
   const ledger = { appendNow: jest.fn().mockResolvedValue(undefined) };
-  const payments = { findAwaitingRedemption: jest.fn().mockResolvedValue(rows) };
+  const payments = {
+    findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
+    lapseRedemption: jest.fn().mockResolvedValue(undefined),
+  };
 
   const service = new VoucherRedemptionService(
     payments as never,
@@ -126,7 +129,7 @@ function build(
     chainState as never,
   );
 
-  return { service, redeemer, intents, ledger, emitted };
+  return { service, redeemer, intents, ledger, payments, emitted };
 }
 
 describe('VoucherRedemptionService batch forming', () => {
@@ -205,17 +208,20 @@ describe('VoucherRedemptionService batch forming', () => {
     // `outcomes[i]` is `requests[i]`'s. Getting this wrong retires the wrong
     // hold and pays the wrong provider — and every row here is otherwise
     // identical, so only the index distinguishes them.
-    const { service, redeemer, intents, ledger } = build([pending(1, ALICE), pending(2, BOB)], 64);
+    const { service, redeemer, intents, ledger, payments } = build(
+      [pending(1, ALICE), pending(2, BOB)],
+      64,
+    );
     redeemer.outcomes['2'] = RedeemOutcomeKind.UNREDEEMABLE;
 
     await service.run(USDC);
 
     expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(1);
     expect(intents.commitRedeemedHold).toHaveBeenCalledWith(ORG, 'intent-1', 'sig-1');
-    // The unredeemable one is absorbed: the buyer keeps their money and the
-    // provider is credited out of platform funds.
-    expect(ledger.appendNow).toHaveBeenCalledTimes(1);
-    expect(ledger.appendNow.mock.calls[0][0]).toMatchObject({ intentId: 'intent-2' });
+    // The unredeemable one is buyer debt: its hold stays open, nobody credited.
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledTimes(1);
+    expect(payments.lapseRedemption.mock.calls[0][1]).toBe('intent-2');
   });
 
   it('stops the whole pass on PAUSED rather than forming another batch', async () => {

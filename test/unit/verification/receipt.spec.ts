@@ -266,6 +266,63 @@ describe('ReceiptService — listed and charged, always both, even when equal', 
 
     expect(receipt.listedPrice.amount).toBe('1000');
     expect(receipt.chargedPrice.amount).toBe('0');
+    // Not withheld: the frontend's "listed − charged = withheld" does not hold (M4).
+    expect(receipt.withheld.amount).toBe('0');
+    expect(receipt.forfeited).toBe(true);
+    expect(receipt.debt).toBeNull();
+    expect(receipt.chargeNote).toBe('provider_forfeit:ProviderBelowMinimumStake');
+  });
+
+  it('an OUTSTANDING buyer debt is charged (held) and says so', async () => {
+    const { service } = build(
+      buildIntent({
+        status: PaymentIntentStatus.SETTLED,
+        priceAmount: '1000',
+        holdReleasedAt: null,
+        redemptionLapsedAt: new Date('2026-10-16T00:00:00Z'),
+        redemptionLastError: 'DelegateIsRevoked',
+      }),
+      buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt.chargedPrice.amount).toBe('1000');
+    expect(receipt.forfeited).toBe(false);
+    expect(receipt.debt).toBe('OUTSTANDING');
+    expect(receipt.chargeNote).toBe('DelegateIsRevoked');
+  });
+
+  it('a WRITTEN_OFF debt is not charged, and is not a forfeit', async () => {
+    const { service } = build(
+      buildIntent({
+        status: PaymentIntentStatus.SETTLED,
+        priceAmount: '1000',
+        holdReleasedAt: new Date('2026-11-16T00:00:00Z'),
+        redemptionLapsedAt: new Date('2026-10-16T00:00:00Z'),
+        redemptionLastError: 'uncollected:DelegateIsRevoked',
+      }),
+      buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt.chargedPrice.amount).toBe('0');
+    expect(receipt.forfeited).toBe(false);
+    expect(receipt.debt).toBe('WRITTEN_OFF');
+  });
+
+  it('a plain SETTLED call carries no flag', async () => {
+    const { service } = build(
+      buildIntent({ status: PaymentIntentStatus.SETTLED, priceAmount: '1000' }),
+      buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt.forfeited).toBe(false);
+    expect(receipt.debt).toBeNull();
+    expect(receipt.chargeNote).toBeNull();
   });
 
   it('charges nothing on a REFUNDED call — withheld equals the full listed price', async () => {

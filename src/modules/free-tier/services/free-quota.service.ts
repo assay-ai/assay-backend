@@ -108,6 +108,8 @@ export interface FreeQuotaBindingReserveInput {
   readonly organizationId: string;
   readonly agentId: string;
   readonly binding: Pick<ToolBinding, 'id' | 'freeQuotaPerAgent' | 'freeDailyBudget'>;
+  /** Told WHICH of the binding's dials had no room, when one had none (review #2, L2). */
+  readonly onFull?: (limit: FreeQuotaLimitKind) => void;
 }
 
 /** `{ remaining, limit, resetsAt }` — the shape `tools/list` publishes as `x402/freeQuota`. */
@@ -256,8 +258,11 @@ export class FreeQuotaService {
     if (candidates.length === 0) return null;
 
     const resetsAt = nextUtcMidnight();
-    let best: FreeQuotaRemaining | null = null;
-
+    // Summed over the bindings and capped by the platform's per-agent daily
+    // headroom — the same arithmetic as the published N
+    // (`freeCallsPerDay`), so `tools/list` never shows "15 free per day"
+    // beside "remaining 10 / limit 10" (review #2, L3).
+    let remaining = 0;
     for (const binding of candidates) {
       const perAgentLimit = binding.freeQuotaPerAgent ?? this.config.defaultPerAgentDailyLimit;
       const budgetLimit = binding.freeDailyBudget ?? this.config.defaultProviderDailyBudget;
@@ -265,16 +270,15 @@ export class FreeQuotaService {
       const perAgentUsed = await this.readAgentBindingDaily(organizationId, agentId, binding.id);
       const budgetUsed = await this.readBindingBudget(binding.id);
 
-      const perAgentRemaining = clampRemaining(perAgentLimit, perAgentUsed);
-      const budgetRemaining = clampRemaining(budgetLimit, budgetUsed);
-      const remaining = Math.min(perAgentRemaining, budgetRemaining);
-
-      if (!best || remaining > best.remaining) {
-        best = { remaining, limit: perAgentLimit, resetsAt };
-      }
+      remaining += Math.min(
+        clampRemaining(perAgentLimit, perAgentUsed),
+        clampRemaining(budgetLimit, budgetUsed),
+      );
     }
+    const platform = await this.platformRemaining(organizationId, agentId);
+    const limit = freeCallsPerDay(candidates, this.config) ?? 0;
 
-    return best;
+    return { remaining: Math.min(remaining, platform.remaining, limit), limit, resetsAt };
   }
 
   /**
@@ -403,7 +407,10 @@ export class FreeQuotaService {
       () =>
         this.records.countForAgentBindingSince(organizationId, agentId, binding.id, utcDayStart()),
     );
-    if (perAgent.kind === 'FULL') return null;
+    if (perAgent.kind === 'FULL') {
+      input.onFull?.(FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY);
+      return null;
+    }
 
     const budget = await this.reserveDaily(
       this.bindingBudgetKey(binding.id),
@@ -412,6 +419,7 @@ export class FreeQuotaService {
     );
     if (budget.kind === 'FULL') {
       await perAgent.release();
+      input.onFull?.(FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET);
       return null;
     }
 
@@ -439,9 +447,16 @@ export class FreeQuotaService {
       }
       const after = await this.redis.incr(key);
       const release = async () => {
-        await this.redis.decr(key).catch((error: unknown) => {
+        try {
+          // A key the cache evicted while the place was held comes back from
+          // `DECR` as -1, with no TTL — and a counter that then restarts below
+          // zero hands out the day's quota again (review #2, L1). Below zero
+          // means the key was gone: drop it, and the next call hydrates the
+          // day's count from Postgres, the source of truth.
+          if ((await this.redis.decr(key)) < 0) await this.redis.del(key);
+        } catch (error) {
           this.logger.warn(`${key}: reserved place not given back. ${describe(error)}`);
-        });
+        }
       };
       if (after > limit) {
         await release();
@@ -761,6 +776,16 @@ export class FreeQuotaService {
     } catch (error) {
       this.logger.warn(`${key}: call not counted. ${describe(error)}`);
     }
+  }
+
+  /**
+   * The refusal for a free call every free binding of which was shed for its
+   * own quota (`reserveBinding`'s `onFull`): the same refusal, and the same
+   * `FREE_QUOTA_EXHAUSTED` notification, as {@link check} gives (review #2,
+   * L2). Both provider dials reset at the next UTC midnight.
+   */
+  bindingQuotaRefusal(input: FreeQuotaCheckInput, limit: FreeQuotaLimitKind): FreeQuotaRefused {
+    return this.refuse(limit, nextUtcMidnight(), input);
   }
 
   private refuse(

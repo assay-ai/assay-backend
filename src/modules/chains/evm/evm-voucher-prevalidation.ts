@@ -101,7 +101,7 @@ export function decayWindow(state: {
  * The redeemer pin and the pause come first because `redeemVoucher` and
  * `redeemVoucherBatch` both check them **before** calling `_redeem` at all — so
  * a paused program refuses a zero-amount voucher with `ProgramPaused`, and a job
- * that reported `ZeroAmount` would absorb a hold the chain never rejected.
+ * that reported `ZeroAmount` would close a hold the chain never rejected.
  *
  * Returns the `Errors.sol` NAME the chain would raise, or `null` for a voucher
  * that would settle. Getting the order wrong does not break correctness — it

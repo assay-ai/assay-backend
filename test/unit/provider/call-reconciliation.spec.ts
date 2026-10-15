@@ -53,17 +53,22 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
       expected: CallReconciliationClass.PROVIDER_FORFEITED,
     },
     {
-      name: 'PAID + SETTLED, credited from platform funds → PLATFORM_ABSORBED',
-      input: { callClass: 'PAID', status: 'SETTLED', platformAbsorbed: true },
-      expected: CallReconciliationClass.PLATFORM_ABSORBED,
+      name: 'PAID + SETTLED, debt written off (or legacy absorb) → PAID_UNCOLLECTED',
+      input: { callClass: 'PAID', status: 'SETTLED', uncollected: true, credited: false },
+      expected: CallReconciliationClass.PAID_UNCOLLECTED,
     },
     {
-      name: 'an open hold wins over an absorbed flag → PAID_AWAITING_REDEMPTION',
+      name: 'PAID + SETTLED, voucher lapsed into buyer debt → PAID_BUYER_DEBT',
+      input: { callClass: 'PAID', status: 'SETTLED', debtOutstanding: true, credited: false },
+      expected: CallReconciliationClass.PAID_BUYER_DEBT,
+    },
+    {
+      name: 'an open hold wins over an uncollected flag → PAID_AWAITING_REDEMPTION',
       input: {
         callClass: 'PAID',
         status: 'SETTLED',
         awaitingRedemption: true,
-        platformAbsorbed: true,
+        uncollected: true,
       },
       expected: CallReconciliationClass.PAID_AWAITING_REDEMPTION,
     },

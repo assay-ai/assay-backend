@@ -204,6 +204,14 @@ export interface ChainAdapter {
     signer: AccountId,
   ): boolean;
 
+  /**
+   * A voucher as the EIP-712 request a WALLET signs, on chains where the
+   * voucher IS typed data (eip155): what a console hands the payer's wallet to
+   * settle a buyer debt with a replacement voucher. The digest it signs is
+   * `buildVoucherMessage`'s. Optional: absent on chains without one.
+   */
+  voucherTypedData?(voucher: Voucher): ProofTypedData;
+
   // ── Delegate binding proof (agent payment delegation) ────────────────────
 
   /**

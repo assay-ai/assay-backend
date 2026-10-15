@@ -71,19 +71,15 @@ import {
  * needed to find the bug, and a reconciler with write access to balances is a
  * second, unreviewed way for money to move.
  *
- * ## One known cause of a REAL breach that is not a bug
+ * ## The platform never owes a provider
  *
- * When a redemption comes back `VoucherSeqNotIncreasing`, the job writes
- * `HOLD_RELEASE` — the buyer keeps their money — and credits the provider from
- * **platform** funds with a `PROVIDER_CREDIT` marked `platform_absorbed`. That
- * credit has no deposit behind it, so on the next tick the journal genuinely
- * owes more than the vault holds and `reserves_breach` fires. It is not a false
- * positive: the platform really does owe money no buyer paid, and the remedy is
- * to fund the vault, not to find a missing entry. `voucher_unredeemable`
- * (CRITICAL) fires at the moment of absorption, so the alert always has that one
- * in front of it — the summary below says so, because an on-call engineer
- * meeting this at 3am otherwise spends the first hour looking for a bug that is
- * not there.
+ * An unredeemable rail-B voucher no longer credits anybody: the provider
+ * forfeits it, or it becomes buyer debt (the buyer's hold stays open) and is
+ * paid from the buyer's escrow once re-signed, or written off. So no ledger
+ * entry is ever written that the vault must fund for a provider, and the
+ * legacy `platform_absorbed:` credits written before that are not counted as a
+ * liability (`LedgerEntryRepository.sumPaidAtRedemption`). A breach here is a
+ * real discrepancy to investigate.
  *
  * ## Why it does not throw on a breach
  *
@@ -491,9 +487,7 @@ export class ReconciliationService {
             `(agents ${format(liabilities.agentLiabilities, decimals)}, ` +
             `providers ${format(liabilities.providerPayable, decimals)}, ` +
             `platform ${format(liabilities.platformFees, decimals)}). ` +
-            `Halt payouts and freeze withdrawals. If voucher_unredeemable fired recently, a ` +
-            `platform-absorbed PROVIDER_CREDIT is the cause and this debt is real: fund the ` +
-            `vault rather than hunting a missing entry.`,
+            `Halt payouts and freeze withdrawals, and find the entry the vault does not back.`,
           details: { ...details, shortfall: shortfall.toString() },
         },
       ];
