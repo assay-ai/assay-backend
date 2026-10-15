@@ -490,6 +490,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         .where('proposal.status NOT IN (:...done)', {
           done: ['OVERTURNED', 'REVERSED', 'WAIVED', 'CANCELLED'],
         })
+        // Review N-2: never an EVM case. Its records are decided only on chain,
+        // and an overturn here would stop this platform executing them.
+        .andWhere('proposal.asset_id NOT LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
         .andWhere('proposal.root_cause_key = :defectKey', { defectKey })
         .andWhere('proposal.proposed_at >= :from', { from })
         .andWhere('proposal.proposed_at <= :to', { to })
@@ -655,10 +658,21 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         providerIds: [...new Set(providerIds)],
       })
       // An arbiter's on-chain uphold makes the case UPHELD (`CHAIN_ARBITER`)
-      // and an on-chain execution EXECUTED, so both count here.
-      .andWhere('proposal.status IN (:...upheld)', {
-        upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'],
-      })
+      // and an on-chain execution EXECUTED, so both count here. Review N-4:
+      // so does a case any record of which was executed (disputed or not,
+      // whoever sent it), and one whose undisputed record lapsed (expired
+      // unexecuted: nobody ruled for the provider). Not a reversed case.
+      .andWhere(
+        `proposal.status <> 'REVERSED' AND (` +
+          'proposal.status IN (:...upheld) OR proposal.executed_at IS NOT NULL OR ' +
+          'EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
+          'WHERE part.organization_id = proposal.organization_id ' +
+          'AND part.proposal_id = proposal.id AND (' +
+          "part.chain_status = 'EXECUTED' OR (part.chain_status = 'CANCELLED' " +
+          "AND part.cancel_reason IN ('EXPIRED', 'VERIFIER_UNAVAILABLE') " +
+          'AND part.chain_disputed_at IS NULL))))',
+        { upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'] },
+      )
       .andWhere(
         'COALESCE(proposal.executed_at, proposal.resolved_at, proposal.proposed_at) >= :since',
         { since },
@@ -666,6 +680,29 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .groupBy('proposal.provider_id')
       .getRawMany()) as { providerId: string; count: string }[];
     return new Map(rows.map((row) => [row.providerId, Number(row.count)]));
+  }
+
+  /**
+   * Review N-3: EVM cases still open from the in-app objection era
+   * (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`) whose records reached the
+   * chain. No queue, sweep or action reaches them any more; the scheduler
+   * re-derives each from its records once at start-up.
+   */
+  async findOpenOnChainCases(limit: number): Promise<ChainSweepRow[]> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.organization_id', 'organizationId')
+      .addSelect('proposal.id', 'id')
+      .where('proposal.status IN (:...open)', {
+        open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
+      })
+      .andWhere('proposal.asset_id LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
+      .andWhere('proposal.chain_status NOT IN (:...unproposed)', {
+        unproposed: ['NONE', 'PROPOSING'],
+      })
+      .orderBy('proposal.proposed_at', 'ASC')
+      .limit(limit)
+      .getRawMany<ChainSweepRow>();
   }
 
   async findChainDisputedBefore(disputedBefore: Date, limit: number): Promise<ChainSweepRow[]> {

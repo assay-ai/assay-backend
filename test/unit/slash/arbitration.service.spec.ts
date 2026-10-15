@@ -1459,6 +1459,24 @@ describe('ArbitrationService', () => {
       expect(ctx.overrides.performed).toEqual([]);
     });
 
+    it.each([SlashProposalStatus.PROPOSED, SlashProposalStatus.UPHELD])(
+      'N-2: refuses an S-1 suspension from %s: only the arbiter cancels an EVM record',
+      async (status) => {
+        const ctx = build();
+        seedEvm(ctx, status);
+
+        await expect(
+          ctx.service.suspend(ADJUDICATOR as never, 'org_1', 'p1', 'S1_OPERATOR_HOLD', NOTE),
+        ).rejects.toMatchObject({
+          errorCode: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
+          statusCode: 409,
+          message: expect.stringContaining('cancelSlash'),
+        });
+        expect(ctx.proposals.rows.get('p1')!).toMatchObject({ status, chainStatus: 'PENDING' });
+        expect(ctx.overrides.performed).toEqual([]);
+      },
+    );
+
     it('refuses an S-8 extension', async () => {
       const ctx = build();
       seedEvm(ctx, SlashProposalStatus.PROPOSED);
@@ -1504,6 +1522,20 @@ describe('ArbitrationService', () => {
           transactionHash: null,
         }),
       ).toBe(false);
+    });
+
+    it('N-3: upholds an open case whose record stands undisputed on chain, and closes the objection', async () => {
+      const ctx = build();
+      const dispute = seedEvm(ctx, SlashProposalStatus.UNDER_REVIEW);
+
+      expect(await ctx.service.recordChainStanding('org_1', 'p1')).toBe(true);
+      expect(ctx.proposals.rows.get('p1')!).toMatchObject({
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+        outcome: null,
+      });
+      expect(dispute).toMatchObject({ state: 'REJECTED', resolvedBy: 'chain:undisputed' });
+      expect(await ctx.service.recordChainStanding('org_1', 'p1')).toBe(false);
     });
 
     it('leaves a Solana case to its own decision', async () => {

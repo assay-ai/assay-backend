@@ -1155,11 +1155,12 @@ export class EvmSlashExecutor
 
   /**
    * Refuse to sign a record the verifier key would not live to execute
-   * (review S-7): the key must outlive `now + slashDelaySeconds + the 7-day
-   * execution grace`, read live. A record signed later than that could never
-   * execute — `executeSlash` re-checks the key — and would sit on the
-   * provider's stake until it is expired. Refused retryably: the case is
-   * proposed once a rotated key signs.
+   * (review S-7): the key must outlive `now + slashDelaySeconds + the 30-day
+   * dispute window + the 7-day execution grace`, read live. A dispute can
+   * freeze the record up to 30 days before an uphold restarts the grace, and a
+   * key that lapses meanwhile ends the record as `VerifierUnavailable` — read
+   * as the provider's win. `executeSlash` re-checks the key. Refused
+   * retryably: the case is proposed once a rotated key signs.
    */
   private async assertVerifierOutlivesRecord(chainId: ChainId): Promise<void> {
     const [verifier, delaySeconds] = await Promise.all([
@@ -1176,13 +1177,14 @@ export class EvmSlashExecutor
     const needed =
       BigInt(Math.floor(this.config.now() / 1000)) +
       BigInt(delaySeconds) +
+      BigInt(EVM_CONSTANTS.DISPUTE_TIMEOUT_SECONDS) +
       RECORD_EXECUTION_GRACE_SECONDS;
     if (expiresAt > needed) return;
     throw ChainErrors.configValueInvalid({
       variable: `the on-chain expiry of verifier key ${verifier} on ${chainId}`,
       accepted:
         `later than ${new Date(Number(needed) * 1000).toISOString()} (now + the slash delay + ` +
-        `the 7-day execution grace); rotate the key before proposing`,
+        `the 30-day dispute window + the 7-day execution grace); rotate the key before proposing`,
     });
   }
 

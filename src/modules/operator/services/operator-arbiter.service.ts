@@ -43,6 +43,20 @@ export class OperatorArbiterService {
     });
   }
 
+  /**
+   * Review N-5: the unsigned call of an APPROVED `A-11`, again — for the
+   * arbiter's wallet on the arbiter page, after the approver's tab is gone.
+   * Rebuilt deterministically from the approved payload; refused once the
+   * address is blocked on chain (the call was executed).
+   */
+  async approvedBlockCall(approvalId: string): Promise<SlashContractCall> {
+    const row = await this.approvals.requireApproved(approvalId, ARBITER_BLOCK_APPROVAL_ACTION);
+    return this.disputes.rebuildArbiterBlock(
+      row.payload.chainId as string,
+      row.payload.account as string,
+    );
+  }
+
   async block(
     context: ArbiterIntentContext,
     chainId: string,

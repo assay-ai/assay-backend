@@ -28,11 +28,13 @@ import { SlashProposalService } from './slash-proposal.service';
  *   execution window). The case's mirror stays `PENDING` while any live part
  *   is pending — those parts keep executing — and becomes `DISPUTED` only
  *   when every live part is; `chain_disputed_parts` counts the disputed ones,
- *   so a partly disputed case reads honestly. A case still `PROPOSED` becomes
- *   `DISPUTED` (`ArbitrationService.fileDisputeFromChain`) and waits for the
- *   arbiter, with no platform deadline. A case already decided keeps its
- *   decision; the console shows the part "disputed on chain", waiting for the
- *   arbiter.
+ *   so a partly disputed case reads honestly. A case still `PROPOSED` stays
+ *   `PROPOSED` while any part stands undisputed (review N-1: the undisputed
+ *   sweep upholds it at the door and the executor sends those parts), and
+ *   becomes `DISPUTED` (`ArbitrationService.fileDisputeFromChain`) only once
+ *   every live part is disputed; it then waits for the arbiter, with no
+ *   platform deadline. A case already decided keeps its decision; the console
+ *   shows the part "disputed on chain", waiting for the arbiter.
  * - **`SlashUpheld`** — the arbiter ruled against the provider. The part goes
  *   back to `PENDING` at the `executableAt` the EVENT carries (never assumed
  *   to be "now"), and the case's mirror and count follow. The ruling is the
@@ -45,12 +47,19 @@ import { SlashProposalService } from './slash-proposal.service';
  *   closes AT ONCE (it used to stay `DISPUTED` until the 30-day sweep, which
  *   then said, falsely, that the arbiter never ruled).
  *
+ * After every event the case follows its records ({@link followRecords}),
+ * so it always reaches a terminal state: EXECUTED once nothing stands and a
+ * part executed, CANCELLED once nothing stands and none did.
+ *
  * A case whose cancel is already requested (`CANCEL_REQUESTED`) keeps that
  * mirror: `cancelSlash` accepts a disputed record, and only the 30-day clock
  * is noted. An `UPHELD` case behind that mirror is a downward recalculation
  * (review S-2): its cancel is the platform's own, never a provider win, and
  * the case is left open for `sweepAdminCancels` to re-propose. Idempotent — the watcher re-reads a range after any failure.
  */
+/** `chain_last_error` of a record of an earlier epoch that landed late (review N-9). */
+const SUPERSEDED_EPOCH = 'SupersededEpoch';
+
 @Injectable()
 export class SlashChainRulingService implements SlashChainRulingsPort {
   private readonly logger = new Logger(SlashChainRulingService.name);
@@ -105,18 +114,9 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
           executableAt: event.executableAt.toISOString(),
         },
       });
-      // DISPUTED: the arbiter rules on chain.
-      await this.arbitration
-        ?.fileDisputeFromChain(proposal.organizationId, proposal.id, {
-          requestId: event.requestId,
-          transactionHash: event.transactionHash,
-        })
-        .catch((error: unknown) => {
-          this.logger.error(
-            `slash case ${proposal.id} was disputed on chain but could not be moved into review`,
-            error instanceof Error ? error.stack : String(error),
-          );
-        });
+    }
+    if (part.chainEpoch === proposal.chainEpoch) {
+      await this.followRecords(proposal, event);
     }
     return true;
   }
@@ -153,6 +153,7 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
             error instanceof Error ? error.stack : String(error),
           );
         });
+      await this.followRecords(proposal, event);
     }
 
     if (moved) {
@@ -232,26 +233,45 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     const proposal = await this.proposals.findOneScoped(part.organizationId, part.proposalId);
     if (!proposal) return false;
 
-    // Idempotent: our own expire already wrote it, or the watcher re-read.
-    if (!['PENDING', 'DISPUTED', 'REFUSED'].includes(part.chainStatus)) return true;
-    const wasDisputed = part.chainStatus === 'DISPUTED';
-    await this.parts.updatePart(part.organizationId, part.id, {
-      chainStatus: 'CANCELLED',
-      cancelledAt: event.cancelledAt,
-    });
-
     // Review S-2: the platform's own cancel of a downward recalculation (an
     // UPHELD case only ever has its cancel requested by
     // `reproposeAtRevisedPenalty`). It is neither a ruling for the provider nor
     // a reason to close the case: the decided, lower figure is re-proposed by
     // `sweepAdminCancels` once every part is off the chain. A dispute that ran
     // out unruled is still the provider's win.
+    // Review N-9: never a cancel of a record that stood DISPUTED (the
+    // arbiter's ruling for the provider), nor on a case the provider already
+    // won a dispute of.
     const recalculating =
       proposal.status === SlashProposalStatus.UPHELD &&
       proposal.chainStatus === ChainProposalStatus.CANCEL_REQUESTED &&
-      event.reason !== 'DISPUTE_UNRESOLVED';
-
+      event.reason !== 'DISPUTE_UNRESOLVED' &&
+      part.chainStatus !== 'DISPUTED' &&
+      !proposal.chainDisputeWonAt;
     const ruledForProvider = event.reason === 'WITHDRAWN' && !recalculating;
+    const because = ruledForProvider
+      ? 'the arbiter ruled for the provider on chain (cancelSlash)'
+      : `its on-chain record was expired (${event.reason})`;
+
+    // Idempotent: our own expire already wrote it, or the watcher re-read. The
+    // case still follows its records (review N-1): an expire the sweep wrote
+    // first must not leave the case open.
+    if (!['PENDING', 'DISPUTED', 'REFUSED'].includes(part.chainStatus)) {
+      if (part.chainStatus === 'CANCELLED' && !part.cancelReason) {
+        await this.parts.updatePart(part.organizationId, part.id, { cancelReason: event.reason });
+      }
+      if (part.chainEpoch === proposal.chainEpoch) {
+        await this.followRecords(proposal, event, { because, recalculating });
+      }
+      return true;
+    }
+    const wasDisputed = part.chainStatus === 'DISPUTED';
+    await this.parts.updatePart(part.organizationId, part.id, {
+      chainStatus: 'CANCELLED',
+      cancelledAt: event.cancelledAt,
+      cancelReason: event.reason,
+    });
+
     // The provider won its dispute (B7): the record was cancelled while it
     // stood DISPUTED, or expired unruled. Remembered on the case so it is
     // never proposed again.
@@ -284,44 +304,85 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     });
 
     if (part.chainEpoch !== proposal.chainEpoch) return true;
-    const parts = await this.parts.findForEpoch(
-      proposal.organizationId,
-      proposal.id,
-      proposal.chainEpoch,
-    );
-    const standing = parts.some((row: SlashProposalPartEntity) =>
-      ['PENDING', 'DISPUTED'].includes(row.chainStatus),
-    );
-    const executed = parts.some((row: SlashProposalPartEntity) => row.chainStatus === 'EXECUTED');
-    if (standing || executed) {
-      await this.mirrorParts(proposal, {});
-      return true;
-    }
-    if (recalculating) {
+    await this.mirrorParts(proposal, {});
+    await this.followRecords(proposal, event, { because, recalculating });
+    return true;
+  }
+
+  /**
+   * Review N-1: the case follows its current-epoch records, so a dispute on
+   * one record never holds another and the case always reaches a terminal
+   * state. Idempotent; every branch is a compare-and-set on the case status.
+   *
+   * - **Nothing stands** (no part `PENDING` or `DISPUTED`): `EXECUTED` when any
+   *   part executed (the executor's completion, `mirrorChainExecution`, with
+   *   the summed amounts), else closed `CANCELLED` — unless the cancel was the
+   *   platform's own recalculation (S-2), left to `sweepAdminCancels`.
+   * - **Only disputed parts stand**: a case still `PROPOSED` becomes
+   *   `DISPUTED` and waits for the arbiter.
+   * - **A part stands pending** (never disputed, or upheld): it executes at its
+   *   door. A `PROPOSED` case is upheld there by the undisputed sweep; an open
+   *   `DISPUTED` / `UNDER_REVIEW` / `AWAITING_SECOND` case (an older in-app
+   *   objection, or a straggler re-adopted) is upheld now, so the executor
+   *   sends it. The executor sends every pending part whatever its siblings.
+   */
+  async followRecords(
+    proposal: SlashProposalEntity,
+    chain: { readonly requestId?: string; readonly transactionHash: string | null },
+    closing?: { readonly because: string; readonly recalculating: boolean },
+  ): Promise<void> {
+    const fresh =
+      (await this.proposals.findOneScoped(proposal.organizationId, proposal.id)) ?? proposal;
+    const parts = await this.parts.findForEpoch(fresh.organizationId, fresh.id, fresh.chainEpoch);
+    if (parts.length === 0) return;
+    const has = (status: string) =>
+      parts.some((row: SlashProposalPartEntity) => row.chainStatus === status);
+    const scope = { organizationId: fresh.organizationId, id: fresh.id };
+
+    if (!has('PENDING') && !has('DISPUTED')) {
+      // A part not yet on chain (or still being proposed) may still land.
+      if (has('NONE')) return;
+      if (has('EXECUTED')) {
+        await this.execution?.mirrorChainExecution(fresh, chain.transactionHash);
+        return;
+      }
+      if (fresh.chainStatus === ChainProposalStatus.CANCELLED) return;
+      if (fresh.chainDisputedParts !== 0) {
+        await this.proposals.update(scope, { chainDisputedParts: 0 });
+      }
       // Left `CANCEL_REQUESTED` for `sweepAdminCancels`, which mirrors the
       // cancel and re-proposes the decided figure.
-      await this.proposals.update(
-        { organizationId: proposal.organizationId, id: proposal.id },
-        { chainDisputedParts: 0 },
-      );
-      return true;
+      if (closing?.recalculating) return;
+      const because = closing?.because ?? 'every one of its on-chain records was cancelled';
+      if (this.execution) {
+        await this.execution.closeCancelledOnChain(fresh, because);
+      } else {
+        await this.proposals.update(scope, {
+          chainStatus: ChainProposalStatus.CANCELLED,
+          chainDisputedParts: 0,
+        });
+      }
+      return;
     }
-    const because = ruledForProvider
-      ? 'the arbiter ruled for the provider on chain (cancelSlash)'
-      : `its on-chain record was expired (${event.reason})`;
-    await this.proposals.update(
-      { organizationId: proposal.organizationId, id: proposal.id },
-      { chainDisputedParts: 0 },
-    );
-    if (this.execution) {
-      await this.execution.closeCancelledOnChain(proposal, because);
-    } else {
-      await this.proposals.update(
-        { organizationId: proposal.organizationId, id: proposal.id },
-        { chainStatus: ChainProposalStatus.CANCELLED, chainDisputedParts: 0 },
+
+    const move = has('PENDING')
+      ? this.arbitration?.recordChainStanding(fresh.organizationId, fresh.id)
+      : fresh.status === SlashProposalStatus.PROPOSED
+        ? this.arbitration?.fileDisputeFromChain(fresh.organizationId, fresh.id, {
+            requestId:
+              chain.requestId ??
+              parts.find((row: SlashProposalPartEntity) => row.chainStatus === 'DISPUTED')
+                ?.chainRequestId ??
+              fresh.chainRequestId,
+            transactionHash: chain.transactionHash,
+          })
+        : undefined;
+    await Promise.resolve(move).catch((error: unknown) => {
+      this.logger.error(
+        `slash case ${fresh.id} could not follow its on-chain records`,
+        error instanceof Error ? error.stack : String(error),
       );
-    }
-    return true;
+    });
   }
 
   /**
@@ -353,10 +414,18 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
         chainLastError: null,
       });
     }
-    if (part && part.chainEpoch !== proposal.chainEpoch) return true;
-    if (part) await this.mirrorParts(proposal, {});
-
-    if (this.execution) {
+    if (part && part.chainEpoch !== proposal.chainEpoch) {
+      this.logger.error(
+        `CRITICAL: slash record ${event.requestId} of an earlier epoch of case ${proposal.id} ` +
+          `was executed on chain (${event.appliedMinor}); the same calls may have been charged ` +
+          'twice and need a human',
+      );
+      return true;
+    }
+    if (part) {
+      await this.mirrorParts(proposal, {});
+      await this.followRecords(proposal, event);
+    } else if (this.execution) {
       await this.execution.mirrorChainExecution(proposal, event.transactionHash);
     }
     return true;
@@ -377,17 +446,48 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
   async recordLateProposal(event: SlashChainProposedEvent): Promise<boolean> {
     const part = await this.parts.findOneByChainRequestId(event.requestId);
     if (!part) return false;
-    if (part.chainStatus !== 'REFUSED' || part.chainLastError?.startsWith('RecordMismatch')) {
+    if (
+      !['REFUSED', 'NONE'].includes(part.chainStatus) ||
+      part.chainLastError?.startsWith('RecordMismatch')
+    ) {
       return true;
     }
     const proposal = await this.proposals.findOneScoped(part.organizationId, part.proposalId);
     if (!proposal) return false;
-    if (part.chainEpoch !== proposal.chainEpoch || !this.execution) {
+    if (part.chainEpoch !== proposal.chainEpoch) {
+      // Review N-9: a record of an earlier epoch stands beside the current
+      // one, over the same calls, so executing both would charge them twice.
+      // It is not re-adopted: no sweep of this platform executes it (they
+      // read the current epoch only), and the arbiter is asked to cancel it.
+      await this.parts.updatePart(part.organizationId, part.id, {
+        chainStatus: 'PENDING',
+        chainExecutableAt: event.executableAt,
+        chainLastError: SUPERSEDED_EPOCH,
+      });
+      this.logger.error(
+        `CRITICAL: slash record ${event.requestId} of an earlier epoch of case ${proposal.id} ` +
+          `landed on chain after the case was re-proposed; it would charge the same calls ` +
+          `twice. The arbiter must cancel it (cancelSlash) before ${event.executableAt.toISOString()}`,
+      );
+      await this.timeline(proposal, new Date(), 'CHAIN_SUPERSEDED_RECORD', {
+        summary:
+          'A record of an earlier proposal of this case landed on chain late. It is not ' +
+          'executed by Assay, and the arbiter is asked to cancel it so the same calls are not ' +
+          'charged twice',
+        detail: {
+          requestId: event.requestId,
+          transactionHash: event.transactionHash,
+          executableAt: event.executableAt.toISOString(),
+        },
+      });
+      return true;
+    }
+    // A current-epoch part still `NONE` is the proposer's own to adopt.
+    if (part.chainStatus !== 'REFUSED') return true;
+    if (!this.execution) {
       this.logger.warn(
         `slash part ${event.requestId} (case ${proposal.id}) was given up on but its record ` +
-          `landed on chain; it is not re-adopted here (${
-            this.execution ? 'an earlier epoch' : 'no slash execution in this process'
-          })`,
+          'landed on chain; it is not re-adopted here (no slash execution in this process)',
       );
       return true;
     }
@@ -404,6 +504,38 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       },
     });
     return true;
+  }
+
+  /**
+   * Review N-3: EVM cases left open by the in-app objection era (`DISPUTED`,
+   * `UNDER_REVIEW`, `AWAITING_SECOND`) that no queue, sweep or action reaches
+   * any more. Each case's records are re-read from the chain onto its parts,
+   * and the case then follows them ({@link followRecords}): a record standing
+   * undisputed makes it `UPHELD` for the executor, a case with nothing
+   * standing closes, and one whose every record is disputed on chain stays for
+   * the arbiter. Run once when the scheduler starts; idempotent. Returns how
+   * many cases moved.
+   */
+  async reconcileOpenCases(limit: number): Promise<number> {
+    const rows = await this.proposals.findOpenOnChainCases(limit);
+    let moved = 0;
+    for (const row of rows) {
+      try {
+        const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (!proposal) continue;
+        await this.execution?.reconcileRecord(proposal);
+        await this.mirrorParts(proposal, {});
+        await this.followRecords(proposal, { transactionHash: null });
+        const after = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (after && after.status !== proposal.status) moved += 1;
+      } catch (error) {
+        this.logger.error(
+          `slash case ${row.id}: its on-chain records could not be re-read at start-up`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    }
+    return moved;
   }
 
   private async timeline(

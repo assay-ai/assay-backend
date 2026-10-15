@@ -377,6 +377,7 @@ export class FakeSlashProposals {
       .filter(
         (row) =>
           !['OVERTURNED', 'REVERSED', 'WAIVED', 'CANCELLED'].includes(row.status) &&
+          !String(row.assetId).startsWith('eip155:') &&
           row.rootCauseKey === defectKey &&
           row.proposedAt >= from &&
           row.proposedAt <= to,
@@ -435,11 +436,19 @@ export class FakeSlashProposals {
    * (`transitionIfIn` / `claimChainStatus`) has already won the row.
    */
   async update(
-    criteria: { readonly organizationId: string; readonly id: string },
+    criteria: {
+      readonly organizationId: string;
+      readonly id: string;
+      /** A compare-and-set on the epoch, as the real `WHERE` would apply it. */
+      readonly chainEpoch?: number;
+    },
     patch: Partial<SlashProposalEntity>,
   ): Promise<{ affected: number }> {
     const row = this.rows.get(criteria.id);
     if (!row || row.organizationId !== criteria.organizationId) return { affected: 0 };
+    if (criteria.chainEpoch !== undefined && row.chainEpoch !== criteria.chainEpoch) {
+      return { affected: 0 };
+    }
     Object.assign(row, patch);
     return { affected: 1 };
   }

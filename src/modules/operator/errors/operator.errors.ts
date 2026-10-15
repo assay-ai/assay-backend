@@ -31,6 +31,7 @@ export enum OperatorErrorCode {
   OPERATOR_CHANGE_EMPTY = 'OPERATOR_CHANGE_EMPTY',
   OPERATOR_APPROVAL_NOT_FOUND = 'OPERATOR_APPROVAL_NOT_FOUND',
   OPERATOR_APPROVAL_NOT_PENDING = 'OPERATOR_APPROVAL_NOT_PENDING',
+  OPERATOR_APPROVAL_NOT_APPROVED = 'OPERATOR_APPROVAL_NOT_APPROVED',
   OPERATOR_APPROVAL_PAYLOAD_MISMATCH = 'OPERATOR_APPROVAL_PAYLOAD_MISMATCH',
 }
 
@@ -247,6 +248,15 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
     statusCode: 409,
     message: (context?: Record<string, any>) =>
       `This approval is no longer pending${context?.status ? ` (${context.status})` : ''}`,
+  },
+  /** Review N-5: the approved action's result was asked for, but it is not an approved one. */
+  approvalNotApproved: {
+    code: OperatorErrorCode.OPERATOR_APPROVAL_NOT_APPROVED,
+    statusCode: 409,
+    publicContext: ['status', 'action'],
+    message: (context?: Record<string, any>) =>
+      `This approval is not an approved ${context?.expected ?? 'action'}` +
+      `${context?.status ? ` (${context.status} ${context?.action ?? ''})`.trimEnd() : ''}`,
   },
   /** The stored payload no longer matches its hash. A platform fault, never a caller's. */
   approvalPayloadMismatch: {

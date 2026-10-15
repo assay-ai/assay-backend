@@ -1,7 +1,8 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 
 import { ArbitrationService } from '../services/arbitration.service';
+import { SlashChainRulingService } from '../services/slash-chain-ruling.service';
 import { SlashExecutionService } from '../services/slash-execution.service';
 import { SlashProposalService } from '../services/slash-proposal.service';
 
@@ -60,6 +61,9 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  * the reason to keep it here is that these steps have to agree about
  * order.
  */
+/** How many old open EVM cases the start-up pass re-derives (review N-3). */
+const OPEN_EVM_CASES_PER_START = 1000;
+
 @Injectable()
 export class SlashLifecycleJob {
   private readonly logger = new Logger(SlashLifecycleJob.name);
@@ -68,10 +72,15 @@ export class SlashLifecycleJob {
     private readonly proposals: SlashProposalService,
     private readonly execution: SlashExecutionService,
     private readonly arbitration: ArbitrationService,
+    @Optional() private readonly rulings: SlashChainRulingService | null = null,
   ) {}
+
+  /** Review N-3: the start-up pass over old open EVM cases ran. */
+  private openEvmCasesReconciled = false;
 
   @Cron(CronExpression.EVERY_MINUTE)
   async handleTick(): Promise<void> {
+    await this.reconcileOpenEvmCases();
     await this.sweepUndisputed();
     await this.sweepPlatformMisses();
     // Before `executeDue`, so a case upheld by the sweep above reaches the
@@ -91,6 +100,29 @@ export class SlashLifecycleJob {
     // Last. Cleanup for a crashed submit, and it must never delay a live
     // judgement to do it.
     await this.reconcileExecuting();
+  }
+
+  /**
+   * Once per scheduler process, on its first tick (review N-3): EVM cases
+   * still open from the in-app objection era are re-derived from their
+   * on-chain records, so each reaches a live or terminal state. Retried on the
+   * next tick only if the pass itself failed.
+   */
+  private async reconcileOpenEvmCases(): Promise<void> {
+    if (this.openEvmCasesReconciled || !this.rulings) return;
+    try {
+      const moved = await this.rulings.reconcileOpenCases(OPEN_EVM_CASES_PER_START);
+      this.openEvmCasesReconciled = true;
+      if (moved > 0) {
+        this.logger.warn(`${moved} open EVM slash case(s) re-derived from their on-chain records.`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Open EVM case reconciliation aborted: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
   }
 
   private async sweepUndisputed(): Promise<void> {

@@ -1,7 +1,9 @@
 import { DISPUTE_TIMEOUT_MS } from '@modules/slash/constants/slash.constants';
 import {
+  disputeByOf,
   disputesOnChain,
   OnChainDisputeMirror,
+  OnChainRecordMirror,
   OnChainDisputeState,
   onChainDisputeState,
 } from '@modules/slash/domain/on-chain-dispute';
@@ -81,6 +83,91 @@ describe('the on-chain dispute', () => {
       ],
     ])('reads %s', (_name, patch, expected) => {
       expect(state(patch)).toBe(expected);
+    });
+  });
+
+  describe('per record (review N-4)', () => {
+    const DOOR = new Date('2026-10-20T00:00:00Z');
+    const record = (patch: Partial<OnChainRecordMirror>): OnChainRecordMirror => ({
+      chainStatus: 'PENDING',
+      chainDisputedAt: null,
+      chainExecutableAt: DOOR,
+      cancelReason: null,
+      ...patch,
+    });
+    const of = (records: OnChainRecordMirror[]) =>
+      onChainDisputeState(mirror({ records }), DISPUTE_TIMEOUT_MS);
+
+    it('is not UPHELD after the arbiter cancelled one part while the others stand undisputed', () => {
+      const records = [
+        record({
+          chainStatus: 'CANCELLED',
+          chainDisputedAt: DISPUTED_AT,
+          cancelReason: 'WITHDRAWN',
+        }),
+        record({}),
+      ];
+      // The case mirror says PENDING with a dispute date behind it.
+      expect(
+        onChainDisputeState(mirror({ chainDisputedAt: DISPUTED_AT, records }), DISPUTE_TIMEOUT_MS),
+      ).toBe(OnChainDisputeState.PENDING);
+    });
+
+    it('reads DISPUTED while any part is disputed, UPHELD only when every pending part was', () => {
+      expect(
+        of([record({ chainStatus: 'DISPUTED', chainDisputedAt: DISPUTED_AT }), record({})]),
+      ).toBe(OnChainDisputeState.DISPUTED);
+      expect(of([record({ chainDisputedAt: DISPUTED_AT })])).toBe(OnChainDisputeState.UPHELD);
+    });
+
+    it('reads EXECUTED when any part executed and nothing stands', () => {
+      expect(
+        of([
+          record({ chainStatus: 'EXECUTED' }),
+          record({
+            chainStatus: 'CANCELLED',
+            chainDisputedAt: DISPUTED_AT,
+            cancelReason: 'WITHDRAWN',
+          }),
+        ]),
+      ).toBe(OnChainDisputeState.EXECUTED);
+    });
+
+    it('tells an undisputed record that lapsed from a cancel and from an unruled dispute', () => {
+      expect(of([record({ chainStatus: 'CANCELLED', cancelReason: 'EXPIRED' })])).toBe(
+        OnChainDisputeState.LAPSED,
+      );
+      expect(of([record({ chainStatus: 'CANCELLED', cancelReason: 'VERIFIER_UNAVAILABLE' })])).toBe(
+        OnChainDisputeState.LAPSED,
+      );
+      expect(of([record({ chainStatus: 'CANCELLED', cancelReason: 'WITHDRAWN' })])).toBe(
+        OnChainDisputeState.CANCELLED,
+      );
+      expect(
+        of([
+          record({
+            chainStatus: 'CANCELLED',
+            chainDisputedAt: DISPUTED_AT,
+            cancelReason: 'DISPUTE_UNRESOLVED',
+          }),
+        ]),
+      ).toBe(OnChainDisputeState.EXPIRED);
+    });
+
+    it('can still be disputed while any part stands pending and was never disputed', () => {
+      const earlier = new Date('2026-10-19T00:00:00Z');
+      expect(
+        disputeByOf([
+          record({
+            chainStatus: 'DISPUTED',
+            chainDisputedAt: DISPUTED_AT,
+            chainExecutableAt: earlier,
+          }),
+          record({}),
+        ]),
+      ).toEqual(DOOR);
+      expect(disputeByOf([record({ chainDisputedAt: DISPUTED_AT })])).toBeNull();
+      expect(disputeByOf([record({ chainStatus: 'EXECUTED' })])).toBeNull();
     });
   });
 });

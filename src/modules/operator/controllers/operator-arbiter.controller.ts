@@ -1,4 +1,15 @@
-import { Body, Controller, Get, HttpCode, Post, Query, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
 
@@ -115,6 +126,23 @@ export class OperatorArbiterController {
       body.account,
     );
     return answerOrQueued(response, isApprovalQueued(result) ? result : toDto(result));
+  }
+
+  /**
+   * Review N-5: the unsigned `setBlocked` of an APPROVED `A-11`, rebuilt from
+   * the approved payload so the arbiter's wallet can sign it after the
+   * approver's tab is gone. Builds only and writes nothing; 409 once the
+   * address is blocked on chain.
+   */
+  @Get('blocks/:approvalId/call')
+  @RequireRoles(OperatorRole.ADJL, OperatorRole.SRE, OperatorRole.TRE)
+  @ApiOperation({ summary: 'The unsigned on-chain block of an approved A-11, for the arbiter' })
+  @ApiResponse({ status: 200, type: SlashContractCallDto })
+  @ApiResponse({ status: 409, description: 'Not an approved block, or already blocked' })
+  async approvedBlock(
+    @Param('approvalId', new ParseUUIDPipe()) approvalId: string,
+  ): Promise<SlashContractCallDto> {
+    return toDto(await this.arbiter.approvedBlockCall(approvalId));
   }
 }
 
