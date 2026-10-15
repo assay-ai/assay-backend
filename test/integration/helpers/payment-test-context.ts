@@ -3,6 +3,10 @@ import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migration
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
 import { VoucherAdmissionPause1759600000005 } from '@database/postgres/migrations/1759600000005-voucher-admission-pause';
 import { VoucherAdmissionPausePerRequest1759600000006 } from '@database/postgres/migrations/1759600000006-voucher-admission-pause-per-request';
+import { PaymentIntentRedemptionTxRefs1760200000000 } from '@database/postgres/migrations/1760200000000-payment-intent-redemption-tx-refs';
+import { PaymentIntentRedemptionLastError1760600000000 } from '@database/postgres/migrations/1760600000000-payment-intent-redemption-last-error';
+import { PaymentIntentRedemptionLapsed1760700000000 } from '@database/postgres/migrations/1760700000000-payment-intent-redemption-lapsed';
+import { PaymentIntentDebtReplacing1760800000000 } from '@database/postgres/migrations/1760800000000-payment-intent-debt-replacing';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
@@ -17,6 +21,8 @@ import { CreatePaymentIntents1755200000000 } from '@database/postgres/migrations
 import { AddVoucherNonce1755300000000 } from '@database/postgres/migrations/1755300000000-add-voucher-nonce';
 import { VoucherRedemptionFields1759100000002 } from '@database/postgres/migrations/1759100000002-voucher-redemption-fields';
 import { RoutedPaymentIntents1755600000000 } from '@database/postgres/migrations/1755600000000-routed-payment-intents';
+import { CreateVerificationPolicies1755700000000 } from '@database/postgres/migrations/1755700000000-create-verification-policies';
+import { CreateVerificationRecords1755800000000 } from '@database/postgres/migrations/1755800000000-create-verification-records';
 import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migrations/1755900000000-timestamptz-timestamps';
 import { CreateApiSurfaceTables1756000000000 } from '@database/postgres/migrations/1756000000000-create-api-surface-tables';
 import { CreateProviderRegistrationTables1756600000000 } from '@database/postgres/migrations/1756600000000-create-provider-registration-tables';
@@ -141,6 +147,11 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // this harness. `withheld-test-context.ts` and `judge-path-test-context.ts`
       // have always included it; this one is now consistent with them.
       RoutedPaymentIntents1755600000000,
+      // `verification_records`: the verdict-deadline sweep
+      // (`findDueForVerdictDeadline`) skips a row whose verdict already
+      // decided a REFUND or VOID, so the expiry sweep reads this table.
+      CreateVerificationPolicies1755700000000,
+      CreateVerificationRecords1755800000000,
       // `call_id` / `call_class` are `NOT NULL`, so every intent this
       // context creates needs the migration in before the first insert.
       CallIdAndCallClass1756800000000,
@@ -197,6 +208,13 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // `voucher_admission_pauses`, which the voucher admission reads (BUG-D1-07).
       VoucherAdmissionPause1759600000005,
       VoucherAdmissionPausePerRequest1759600000006,
+      // `redemption_tx_refs`, `redemption_last_error`, `redemption_lapsed_at`,
+      // `redemption_replaced_at` and `voucher_resource`, all mapped by
+      // `PaymentIntentEntity` (redemption tracking and buyer debt).
+      PaymentIntentRedemptionTxRefs1760200000000,
+      PaymentIntentRedemptionLastError1760600000000,
+      PaymentIntentRedemptionLapsed1760700000000,
+      PaymentIntentDebtReplacing1760800000000,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',
