@@ -113,7 +113,7 @@ function bindingRow(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEnti
   } as ToolBindingEntity;
 }
 
-function buildTester(row: ToolBindingEntity) {
+function buildTester(row: ToolBindingEntity, tool = buildTool()) {
   const saved: unknown[] = [];
 
   const editor = { loadEditable: jest.fn(async () => row) } as unknown as BindingEditorService;
@@ -125,7 +125,7 @@ function buildTester(row: ToolBindingEntity) {
   } as unknown as BindingTestRunRepository;
 
   const catalogue: ToolCataloguePort = {
-    findTool: jest.fn(async () => buildTool()),
+    findTool: jest.fn(async () => tool),
     listTools: jest.fn(),
     findBindings: jest.fn(),
   };
@@ -225,6 +225,31 @@ describe('BindingMappingTesterService — an endpoint that behaves', () => {
       outcome: BindingTestOutcome.PASSED,
       failedLayer: null,
     });
+  });
+
+  it('is not a pass when every check was skipped: no schema, no rule that applied', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { answer: 'forty-two' } }));
+    };
+
+    // No output schema and no stored policy: the schema stage is
+    // NOT_APPLICABLE and the deterministic stage has no rule to apply, so the
+    // engine's verdict is PASS on zero evaluated checks.
+    const { tester, saved } = buildTester(bindingRow(), buildTool({ outputSchema: undefined }));
+    const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
+      query: 'q',
+    });
+
+    expect(report.verification?.verdict).toBe(VerdictStatus.PASS);
+    expect(stage(report, VerificationStage.SCHEMA).status).toBe(StageStatus.NOT_APPLICABLE);
+    expect(layer(report, BindingTestLayer.VERIFICATION)).toMatchObject({
+      status: BindingTestLayerStatus.INCONCLUSIVE,
+      code: 'no_check_evaluated',
+    });
+    expect(report.outcome).toBe(BindingTestOutcome.FAILED);
+    expect(report.failedLayer).toBe(BindingTestLayer.VERIFICATION);
+    expect(saved[0]).toMatchObject({ outcome: BindingTestOutcome.FAILED });
   });
 
   it('reports the URL it built, with header names only — never their values', async () => {
