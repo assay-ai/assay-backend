@@ -6,7 +6,6 @@ import {
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
-import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import {
   MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
   REDEEM_GRACE_SECONDS,
@@ -35,8 +34,9 @@ import { addBlock, blocklistOf, noBlocks } from '../helpers/blocklist';
  *
  *  - the ORDER, because `seq_high` advancing past an undecided hold is what
  *    breaks the in-flight gap between acceptance and redemption;
- *  - who bears an unredeemable voucher — the buyer keeps their money and the
- *    provider is still paid, so neither of them does;
+ *  - who bears an unredeemable voucher — never the platform: the provider
+ *    forfeits when it caused it, otherwise the call becomes buyer debt (the
+ *    hold stays open and nobody is credited);
  *  - that a paused program stops the pass rather than burning a fee per hold.
  */
 
@@ -126,6 +126,8 @@ function build(rows: RedeemableIntent[], blocklist = noBlocks()) {
   const payments = {
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
     recordRedemptionError: jest.fn().mockResolvedValue(undefined),
+    lapseRedemption: jest.fn().mockResolvedValue(undefined),
+    recordProviderBlocks: jest.fn().mockResolvedValue(undefined),
   };
 
   const service = new VoucherRedemptionService(
@@ -219,28 +221,19 @@ describe('VoucherRedemptionService.run', () => {
     );
   });
 
-  it('gives the money back to the BUYER and charges the platform when a voucher is unredeemable', async () => {
-    const { service, redeemer, alerts, intents, ledger } = build([pending(1)]);
+  it('turns an unredeemable voucher into BUYER DEBT: hold kept open, nobody credited, pages', async () => {
+    const { service, redeemer, alerts, intents, ledger, payments } = build([pending(1)]);
     redeemer.outcome = RedeemOutcomeKind.UNREDEEMABLE;
     redeemer.programError = 'VoucherTooOld';
 
     await service.run(USDC);
 
-    // The buyer keeps the money — a release, never a commit.
-    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    // The buyer's hold stays OPEN — neither released nor committed — and the
+    // platform credits nobody: the buyer owes the call until it re-signs.
+    expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
-
-    // And the provider is still paid, out of the platform's own funds.
-    expect(ledger.appendNow).toHaveBeenCalledWith(
-      expect.objectContaining({
-        organizationId: PROVIDER_ORG,
-        accountId: PROVIDER_ACCOUNT,
-        entryType: LedgerEntryType.PROVIDER_CREDIT,
-        intentId: 'intent-1',
-      }),
-    );
-    expect(ledger.appendNow.mock.calls[0][0].money.amount).toBe('800000');
-    expect(ledger.appendNow.mock.calls[0][0].chainTxRef).toContain('platform_absorbed');
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherTooOld');
 
     expect(alerts.emitted).toContainEqual(
       expect.objectContaining({
@@ -248,25 +241,24 @@ describe('VoucherRedemptionService.run', () => {
         severity: AlertSeverity.CRITICAL,
       }),
     );
+    expect(alerts.emitted[0].summary).toContain('buyer debt');
+    expect(alerts.emitted[0].summary).not.toContain('platform pays the provider');
   });
 
-  it('credits the provider BEFORE releasing the buyer, so a crash between them is recoverable', async () => {
-    // Releasing first would take the row out of `findAwaitingRedemption`, and
-    // the provider would never be paid. This way a crash leaves the row where
-    // the next pass finds it, and the credit's own unique index refuses a
-    // second one.
-    const order: string[] = [];
-    const { service, redeemer, intents, ledger } = build([pending(1)]);
-    redeemer.outcome = RedeemOutcomeKind.UNREDEEMABLE;
-    ledger.appendNow.mockImplementation(async () => void order.push('credit'));
-    intents.releaseHold.mockImplementation(async () => {
-      order.push('release');
-      return true;
-    });
-
-    await service.run(USDC);
-
-    expect(order).toEqual(['credit', 'release']);
+  it('never writes a platform_absorbed credit, whatever the refusal', async () => {
+    for (const programError of [
+      'DelegateIsRevoked',
+      'DelegateIsExpired',
+      'VoucherExpired',
+      'VoucherSeqNotIncreasing',
+      null,
+    ]) {
+      const { service, redeemer, ledger } = build([pending(1)]);
+      redeemer.outcome = RedeemOutcomeKind.UNREDEEMABLE;
+      redeemer.programError = programError;
+      await service.run(USDC);
+      expect(ledger.appendNow).not.toHaveBeenCalled();
+    }
   });
 
   it('stops the whole pass when the program is paused, without burning a fee per hold', async () => {
@@ -311,8 +303,8 @@ describe('VoucherRedemptionService.run', () => {
   });
 
   it('lets a buyer’s next voucher through once the earlier one is settled', async () => {
-    // `UNREDEEMABLE` closes the hold and nothing will ever redeem that seq, so
-    // there is nothing left for a later seq to step over.
+    // `UNREDEEMABLE` lapses that seq — nothing will ever redeem it (a
+    // replacement takes a new seq) — so there is nothing left to step over.
     const { service, redeemer } = build([pending(1), pending(2)]);
     redeemer.outcome = RedeemOutcomeKind.UNREDEEMABLE;
 
@@ -430,6 +422,23 @@ function realisticBuild(all: RedeemableIntent[], blocklist = noBlocks()) {
     ),
     recordRedemptionError: jest.fn(async (_org: string, id: string, error: string) => {
       lastErrors.set(id, error);
+    }),
+    // A lapsed row leaves the queue and keeps its hold (it is not released).
+    lapseRedemption: jest.fn(async (_org: string, id: string, cause: string) => {
+      lastErrors.set(id, cause);
+      open.delete(id);
+    }),
+    recordProviderBlocks: jest.fn(async (_asset: string, blocked: RedemptionExclusions) => {
+      for (const row of all) {
+        if (!open.has(row.id)) continue;
+        const cause = blocked.organizationIds.includes(row.providerId ?? '')
+          ? 'ProviderBlocked'
+          : walletKey(row.providerAccount) !== null &&
+              blocked.walletKeys.includes(walletKey(row.providerAccount)!)
+            ? 'PayeeBlocked'
+            : null;
+        if (cause && !lastErrors.has(row.id)) lastErrors.set(row.id, cause);
+      }
     }),
   };
   const service = new VoucherRedemptionService(
@@ -591,12 +600,17 @@ describe('VoucherRedemptionService.run, with a party blocked', () => {
     expect(ledger.appendNow).not.toHaveBeenCalled();
   });
 
-  it('AUDIT E-2: past its on-chain expiry a held voucher is absorbed: provider paid, buyer not charged', async () => {
-    // Owner decision: the platform bears a voucher held past its expiry.
+  it('blocking a buyer freezes collection; past expiry after the unblock it is buyer debt', async () => {
+    // Owner rule: the platform never pays. While blocked the hold is frozen
+    // and the provider is not paid; after the unblock the dead voucher is debt.
     const blocklist = blocklistOf({ kind: BlockSubjectKind.WALLET, subject: BUYER });
-    const { service, calls, ledger, intents, setNow } = realisticBuild([pending(1)], blocklist);
+    const { service, calls, ledger, intents, payments, setNow } = realisticBuild(
+      [pending(1)],
+      blocklist,
+    );
     await service.run(USDC);
     expect(calls).toEqual([]);
+    expect(intents.releaseHold).not.toHaveBeenCalled();
 
     setNow(NOW_SECONDS + 3600); // the block lasted an hour
     await blocklist.applied({
@@ -606,11 +620,10 @@ describe('VoucherRedemptionService.run, with a party blocked', () => {
     });
     await service.run(USDC);
     expect(calls).toHaveLength(1);
-    expect(ledger.appendNow).toHaveBeenCalledWith(
-      expect.objectContaining({ entryType: LedgerEntryType.PROVIDER_CREDIT }),
-    );
-    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherExpired');
   });
 
   it('AUDIT E-1: a blocked payer with a full batch of holds does not starve another buyer', async () => {
@@ -717,8 +730,8 @@ describe('VoucherRedemptionService.run, provider forfeit on a stake below the mi
     expect(ledger.appendNow).not.toHaveBeenCalled();
   });
 
-  it('does not forfeit a VoucherExpired whose last refusal was the buyer’s (still absorbed until step 9)', async () => {
-    const { service, redeemer, ledger } = build([
+  it('does not forfeit a VoucherExpired whose last refusal was the buyer’s: buyer debt', async () => {
+    const { service, redeemer, ledger, intents, payments } = build([
       pending(1, { redemptionLastError: 'EscrowInsufficient' }),
     ]);
     redeemer.outcome = RedeemOutcomeKind.UNREDEEMABLE;
@@ -726,9 +739,9 @@ describe('VoucherRedemptionService.run, provider forfeit on a stake below the mi
 
     await service.run(USDC);
 
-    expect(ledger.appendNow).toHaveBeenCalledWith(
-      expect.objectContaining({ entryType: LedgerEntryType.PROVIDER_CREDIT }),
-    );
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'EscrowInsufficient');
   });
 
   it('unstake during the window: retried, then forfeited at expiry — no credit, hold released', async () => {

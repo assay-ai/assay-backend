@@ -664,8 +664,8 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
    *
    * One table, consulted by both the pre-validation path and the revert path, so
    * the two cannot disagree about what a name means. An **unnamed** refusal is
-   * `RETRY` and never `UNREDEEMABLE`: absorbing a hold because we could not read
-   * the reason is how a buyer is charged for nothing.
+   * `RETRY` and never `UNREDEEMABLE`: closing a hold because we could not read
+   * the reason is how a buyer is put in debt for nothing.
    */
   private outcomeFor(name: string | null, signature: string | null): RedeemOutcome {
     const programError = name ?? 'UNKNOWN_REVERT:none';

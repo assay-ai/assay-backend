@@ -224,7 +224,7 @@ describe('ProviderEarningsService — earned means credited (committed hold)', (
     // A forfeit RELEASES the hold, which also sets hold_released_at; only the
     // forfeit marker tells it from a commit.
     expect(CREDITED_SQL).toContain(FORFEITED_SQL);
-    expect(CREDITED_SQL).toMatch(/AND NOT COALESCE\(/);
+    expect(CREDITED_SQL).toMatch(/AND NOT \(COALESCE\(/);
     expect(FORFEITED_SQL).toContain("'provider_forfeit:%'");
   });
 });

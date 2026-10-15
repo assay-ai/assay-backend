@@ -3,7 +3,7 @@
  *
  * The deadline this races is `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` (2,220s ≈ 37
  * minutes) — after which the program refuses the voucher outright and the
- * platform absorbs the call — so a five-minute cadence would spend an eighth of
+ * call becomes buyer debt — so a five-minute cadence would spend an eighth of
  * the budget sitting in a queue. Written out rather than
  * `CronExpression.EVERY_MINUTE` for the reason `RECONCILIATION_CRON` is: the
  * cadence a runbook quotes should be greppable as a literal.
@@ -41,16 +41,19 @@ export const LANDING_SETTLE_SECONDS = 600;
 /**
  * How long past {@link LANDING_SETTLE_SECONDS} a refused voucher's landing may
  * stay unknown — the lookup itself keeps failing — before it pages (round-two
- * review R2-6). The hold stays open either way: absorbing it without an
- * answer could pay the provider twice.
+ * review R2-6). The hold stays open either way: closing it without an
+ * answer could charge the buyer twice.
  */
 export const LANDING_UNKNOWN_ALERT_SECONDS = 3 * 3_600;
 
 export const VOUCHER_REDEMPTION_ALERTS = {
   /**
-   * The chain refused a voucher permanently. The buyer keeps their money and
-   * the platform pays the provider out of its own funds, so this is a direct,
-   * silent cost — CRITICAL because nothing else reports it.
+   * The chain refused a voucher permanently for a reason that is not the
+   * provider's, so the served call became BUYER DEBT: the buyer's hold stays
+   * open, nobody is credited, and the payer's paid calls are refused until the
+   * buyer signs a replacement voucher. The platform pays nothing — CRITICAL
+   * because a collection failure is what an outage or a buyer exploit looks
+   * like from here.
    */
   UNREDEEMABLE: 'voucher_unredeemable',
   /**
@@ -65,18 +68,25 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    *
    * CRITICAL and not WARN: nothing redeems until a human acts, every rail-B
    * hold stays open meanwhile, and each one is on a clock —
-   * `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` — after which the platform pays the
-   * provider itself. An outage that silently converts into a bill is the shape
-   * of failure the alert catalogue exists for.
+   * `MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS` — after which the call becomes buyer
+   * debt the buyer must re-sign. An outage that silently converts into debt is
+   * the shape of failure the alert catalogue exists for.
    */
   MISCONFIGURED: 'voucher_redemption_misconfigured',
   /**
    * The chain refused a voucher and, long after the landing window, whether
    * one of its own transactions redeemed it still cannot be read (the lookup
-   * keeps failing). Nothing absorbs or commits the hold until a human or the
+   * keeps failing). Nothing closes or commits the hold until a human or the
    * RPC answers, so it would otherwise stay open in silence.
    */
   LANDING_UNKNOWN: 'voucher_redemption_landing_unknown',
+  /**
+   * An open buyer debt was not settled within {@link BUYER_DEBT_WRITE_OFF_DAYS}
+   * and was written off: the buyer's hold is released and the provider is not
+   * paid. Nobody owes anything afterwards — WARN, so a buyer that walks away
+   * from its debts is seen.
+   */
+  DEBT_WRITTEN_OFF: 'voucher_debt_written_off',
   /**
    * The provider forfeited a voucher it caused to fail: its stake fell below
    * the program's minimum, or the provider or its payee is blocked. The buyer's
@@ -93,3 +103,17 @@ export const VOUCHER_REDEMPTION_ALERTS = {
  * `FORFEITED_SQL` in `payment-intent.repository.ts` matches the same literal.
  */
 export const PROVIDER_FORFEIT_PREFIX = 'provider_forfeit:';
+
+/**
+ * What `redemption_last_error` carries once an open buyer debt is WRITTEN OFF,
+ * followed by the refusal the voucher lapsed on. `WRITTEN_OFF_SQL` in
+ * `payment-intent.repository.ts` matches the same literal.
+ */
+export const UNCOLLECTED_PREFIX = 'uncollected:';
+
+/**
+ * Days an open buyer debt waits for its replacement voucher before it is
+ * written off: the hold is released and the provider is not paid (owner
+ * decision, no-platform-debt design step 10). Counted from the FIRST lapse.
+ */
+export const BUYER_DEBT_WRITE_OFF_DAYS = 30;
