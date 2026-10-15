@@ -168,11 +168,12 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // Cached in process and rate limited per address.
   ['modules/catalogue/controllers/public-catalogue.controller.ts', 3],
   // The Explorer's "not charged" feed. Platform-wide paid calls that ended
-  // without a charge, and 30-day totals. Against the three bars: the payload
-  // is tool, provider name, listed price, a reason and a minute — the
-  // repository selects no intent, call, buyer, agent, hold or transaction
-  // identifier, and the spec pins the exact key set; there is no caller to
-  // scope it to; and the claim it backs is made to visitors without accounts.
+  // without a charge, and 30-day totals. The payload is tool, provider name,
+  // listed price, a reason and a UTC day; no intent, call, buyer, agent, hold
+  // or transaction identifier is selected, and the spec pins the key set.
+  // Rows are at least 24 h old, each tool's published rows come from at least
+  // five established buyers, totals cover complete days only, and only
+  // publicly listed providers are named — see `PublicNotChargedService`.
   ['modules/catalogue/controllers/public-not-charged.controller.ts', 1],
 ]);
 

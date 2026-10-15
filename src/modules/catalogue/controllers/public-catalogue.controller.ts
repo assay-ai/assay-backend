@@ -34,7 +34,14 @@ const TTL_SECONDS = 30;
  *   is held to a per-minute window by `PublicReadRateLimitInterceptor`. The
  *   only input is a UUID path parameter, validated before the handler runs.
  *
- * The signed-in `/catalogue/*` is unchanged.
+ * The signed-in `/catalogue/*` is unchanged. *
+ * ## Deployment: client addresses
+ *
+ * The per-address limit keys on `request.ip`, so `API_TRUST_PROXY_HOPS` must
+ * equal the real number of proxies in front of the API (Cloudflare plus a load
+ * balancer is 2). The Explorer is a static export and calls these routes from
+ * each visitor's browser, so there is no shared frontend-server address.
+ * A refused request gets `429` with `Retry-After`.
  */
 @ApiTags('Public')
 @UseInterceptors(PublicReadRateLimitInterceptor)

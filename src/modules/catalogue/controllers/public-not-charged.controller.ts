@@ -16,14 +16,22 @@ import { PublicNotChargedService } from '../services/public-not-charged.service'
  * a visitor who has no account yet — asking them to sign up before showing the
  * evidence would ask them to trust the claim first. The payload is
  * platform-wide and names no buyer: tool, provider name, listed price, a
- * reason, and the minute. `PublicNotChargedService` documents the projection,
+ * reason, and the UTC day. `PublicNotChargedService` documents the projection,
  * and the repository never selects an identifier to begin with.
  *
- * A tool's events are published only when at least five different buyers
- * stand behind them (the k-anonymity rule on `PublicNotChargedService`).
+ * Rows are at least 24 h old and dated to the UTC day; each tool's published
+ * rows come from at least five distinct established buyers; totals cover
+ * complete UTC days. The full rule is on `PublicNotChargedService`.
  *
  * Cached in process for 60 s by the service, held to a per-address window by
- * `PublicReadRateLimitInterceptor`, and takes no input at all.
+ * `PublicReadRateLimitInterceptor`, and takes no input at all. *
+ * ## Deployment: client addresses
+ *
+ * The per-address limit keys on `request.ip`, so `API_TRUST_PROXY_HOPS` must
+ * equal the real number of proxies in front of the API (Cloudflare plus a load
+ * balancer is 2). The Explorer is a static export and calls these routes from
+ * each visitor's browser, so there is no shared frontend-server address.
+ * A refused request gets `429` with `Retry-After`.
  */
 @ApiTags('Public')
 @UseInterceptors(PublicReadRateLimitInterceptor)
@@ -36,8 +44,8 @@ export class PublicNotChargedController {
   @ApiOperation({
     summary: 'Recent paid calls that were not charged, and 30-day totals — no authentication',
     description:
-      'Platform-wide and anonymised: tool, provider name, listed price, reason and the minute ' +
-      'of the call. No buyer, organization, agent, call or transaction identifiers. A tool is ' +
+      'Platform-wide and anonymised: tool, provider name, listed price, reason and the UTC day ' +
+      'of the call (rows at least 24 h old). No buyer, organization, agent, call or transaction identifiers. A tool is ' +
       'listed only when at least `minBuyers` different buyers had calls not charged on it.',
   })
   @ApiResponse({ status: 200, type: PublicNotChargedResponseDto })

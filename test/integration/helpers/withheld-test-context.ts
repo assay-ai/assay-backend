@@ -2,6 +2,8 @@ import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
 import { VoucherAdmissionPause1759600000005 } from '@database/postgres/migrations/1759600000005-voucher-admission-pause';
+import { CreateOrganizationsAndAgents1757900000000 } from '@database/postgres/migrations/1757900000000-create-organizations-and-agents';
+import { PublicExplorerIndex1760400000000 } from '@database/postgres/migrations/1760400000000-public-explorer-index';
 import { PaymentIntentRedemptionTxRefs1760200000000 } from '@database/postgres/migrations/1760200000000-payment-intent-redemption-tx-refs';
 import { VoucherAdmissionPausePerRequest1759600000006 } from '@database/postgres/migrations/1759600000006-voucher-admission-pause-per-request';
 import { randomBytes, randomUUID } from 'node:crypto';
@@ -180,6 +182,10 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
       VoucherAdmissionPausePerRequest1759600000006,
       // `payment_intents.redemption_tx_refs`, mapped by `PaymentIntentEntity`.
       PaymentIntentRedemptionTxRefs1760200000000,
+      // `organizations`, which the public Explorer's buyer-eligibility rule
+      // reads, and the partial index its 30-day scans use.
+      CreateOrganizationsAndAgents1757900000000,
+      PublicExplorerIndex1760400000000,
     ],
     synchronize: false,
     logging: process.env.WITHHELD_TEST_LOGGING === 'true',

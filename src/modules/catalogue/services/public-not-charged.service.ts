@@ -1,12 +1,10 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Injectable } from '@nestjs/common';
 
-import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import {
   NotChargedCallRow,
   NotChargedTotalsRow,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
-import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 
 import { NOT_CHARGED_REASON_TEXT, notChargedReason } from '../domain/not-charged-reason';
 import { TtlCache } from '../domain/ttl-cache';
@@ -15,51 +13,61 @@ import {
   PublicNotChargedResponseDto,
   PublicNotChargedTotalsDto,
 } from '../dto/get-public-not-charged.dto';
+import { PublicCatalogueService } from './public-catalogue.service';
 
 export const NOT_CHARGED_WINDOW_DAYS = 30;
 export const NOT_CHARGED_RECENT_LIMIT = 20;
+/** Candidates read per load; the k rule chooses the published rows from these. */
+export const NOT_CHARGED_CANDIDATE_LIMIT = 500;
 /** How long one answer is reused. The route is public, so it must be cheap. */
 export const NOT_CHARGED_CACHE_MS = 60_000;
-/**
- * The k-anonymity floor: the fewest distinct buyer organizations that must
- * stand behind a published figure. See {@link PublicNotChargedService}.
- */
+/** The k-anonymity floor: distinct eligible buyers behind any published figure. */
 export const NOT_CHARGED_MIN_BUYERS = 5;
+/** A row is published only once it is at least this old. */
+export const NOT_CHARGED_MIN_AGE_MS = 24 * 60 * 60 * 1000;
+/** A buyer organization counts toward k only once it is at least this old. */
+export const NOT_CHARGED_MIN_BUYER_AGE_MS = 7 * 24 * 60 * 60 * 1000;
 
-const MINUTE_MS = 60_000;
-const DAY_MS = 24 * 60 * MINUTE_MS;
+const DAY_MS = 24 * 60 * 60 * 1000;
 
 /**
- * The public "not charged" feed: recent paid calls the platform did not
- * charge for, and 30-day totals.
+ * The public "not charged" feed: paid calls the platform did not charge for,
+ * and 30-day totals, readable by anybody.
  *
- * Platform-wide by design — see `PaymentIntentRepository.findRecentNotCharged`
- * for why the read crosses tenants. This service adds names (tool, provider)
- * and the plain-language reason, and nothing keyed to a caller.
+ * Platform-wide by design — see `PaymentIntentRepository.findNotChargedCandidates`
+ * for why the read crosses tenants. Everything below exists so that the feed
+ * cannot be used to learn what any one buyer did.
  *
- * ## The k-anonymity rule
+ * ## Rows
  *
- * An anonymised row is still identifying when only one buyer could have made
- * it: on a tool one organization uses, "get_weather failed its check at 09:41"
- * is that organization's activity. So, with k = {@link NOT_CHARGED_MIN_BUYERS}:
+ * - **Delayed and coarse.** Only calls at least 24 h old are published, dated
+ *   to the UTC day (`day: 'YYYY-MM-DD'`), never to the minute.
+ * - **Eligible buyers only.** A call counts only when its organization was
+ *   created at least 7 days ago and has at least one charged paid call. That
+ *   raises the cost of lifting a tool over k with throwaway organizations.
+ * - **k on what is actually published.** With k = {@link NOT_CHARGED_MIN_BUYERS},
+ *   the published rows of each tool must come from at least k distinct buyers.
+ *   The service picks the newest {@link NOT_CHARGED_RECENT_LIMIT} candidates,
+ *   drops every tool whose rows in that selection come from fewer than k
+ *   buyers, and repeats until the selection is stable — so the rule holds on
+ *   the response itself, not on a wider set the response was cut from.
+ * - **Listed providers only.** A row whose provider is not on the public
+ *   provider list (ACTIVE, not blocked, serving) is dropped, never named.
  *
- * - **Rows.** A tool's not-charged calls are listed only when, within the
- *   window, they came from at least k distinct buyer organizations. Otherwise
- *   none of that tool's calls are listed.
- * - **Totals.** An asset's row is counted only when at least k distinct buyers
- *   made paid calls in it. Otherwise it is left out of every total.
+ * ## Totals
  *
- * Whenever either rule removes something, `withheldForPrivacy` is true, so the
- * page never presents a suppressed figure as "nothing happened". The counts
- * the rule reads are distinct-organization counts computed in SQL; no
- * organization id ever leaves the repository.
+ * Computed over **complete UTC days** only — `[today − 30 d, today)` — so they
+ * change once a day and cannot be differenced minute by minute to isolate a
+ * single call. An asset is counted only when at least k eligible buyers made
+ * paid calls in it.
+ *
+ * `withheldForPrivacy` is true whenever either rule removed something, so the
+ * page never reads a suppressed figure as "nothing happened".
  *
  * ## Cached in memory, per process
  *
- * One answer is reused for {@link NOT_CHARGED_CACHE_MS}, and concurrent
- * requests share the one in flight. The queries scan a 30-day slice of
- * `payment_intents` across every tenant; an unauthenticated route that ran
- * them per request would be a free amplifier.
+ * One answer per {@link NOT_CHARGED_CACHE_MS}; concurrent requests share the
+ * load in flight.
  */
 @Injectable()
 export class PublicNotChargedService {
@@ -67,8 +75,7 @@ export class PublicNotChargedService {
 
   constructor(
     private readonly intents: PaymentIntentRepository,
-    private readonly providers: ProviderRepository,
-    @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
+    private readonly catalogue: PublicCatalogueService,
   ) {}
 
   read(now: Date = new Date()): Promise<PublicNotChargedResponseDto> {
@@ -76,54 +83,78 @@ export class PublicNotChargedService {
   }
 
   private async load(now: Date): Promise<PublicNotChargedResponseDto> {
-    const since = toMinute(new Date(now.getTime() - NOT_CHARGED_WINDOW_DAYS * DAY_MS));
+    const today = startOfUtcDay(now);
+    const since = new Date(today.getTime() - NOT_CHARGED_WINDOW_DAYS * DAY_MS);
+    const buyerCreatedBefore = new Date(now.getTime() - NOT_CHARGED_MIN_BUYER_AGE_MS);
+    const rowsBefore = new Date(now.getTime() - NOT_CHARGED_MIN_AGE_MS);
 
-    const [buyersByTool, totals, tools] = await Promise.all([
-      this.intents.countNotChargedBuyersByTool(since),
-      this.intents.summarizeNotCharged(since),
+    const [candidates, totals, providers, tools] = await Promise.all([
+      this.intents.findNotChargedCandidates(
+        { from: since, to: rowsBefore, buyerCreatedBefore },
+        NOT_CHARGED_CANDIDATE_LIMIT,
+      ),
+      this.intents.summarizeNotCharged({ from: since, to: today, buyerCreatedBefore }),
+      this.catalogue.listProviders(),
       this.catalogue.listTools(),
     ]);
 
-    const publishable = buyersByTool
-      .filter((tool) => tool.buyers >= NOT_CHARGED_MIN_BUYERS)
-      .map((tool) => tool.toolId);
-    const rows = await this.intents.findRecentNotCharged(
-      since,
-      NOT_CHARGED_RECENT_LIMIT,
-      publishable,
-    );
+    const providerNames = new Map(providers.providers.map((p) => [p.providerId, p.name]));
+    const toolNames = new Map(tools.tools.map((tool) => [tool.id, tool.name]));
 
-    const toolNames = new Map(tools.map((tool) => [tool.id, tool.name]));
-    const providerNames = await this.providerNames(rows);
+    const named = candidates.filter(
+      (row) => row.providerId !== null && providerNames.has(row.providerId),
+    );
+    const { published, suppressed } = selectKAnonymous(
+      named,
+      NOT_CHARGED_RECENT_LIMIT,
+      NOT_CHARGED_MIN_BUYERS,
+    );
     const counted = totals.filter((row) => row.buyers >= NOT_CHARGED_MIN_BUYERS);
 
     return {
       windowDays: NOT_CHARGED_WINDOW_DAYS,
       since: since.toISOString(),
+      until: today.toISOString(),
       minBuyers: NOT_CHARGED_MIN_BUYERS,
-      withheldForPrivacy:
-        publishable.length < buyersByTool.length || counted.length < totals.length,
+      withheldForPrivacy: suppressed || counted.length < totals.length,
       totals: foldTotals(counted),
-      recent: rows.flatMap((row) => {
+      recent: published.flatMap((row) => {
         const call = toCall(row, toolNames, providerNames);
         return call ? [call] : [];
       }),
     };
   }
+}
 
-  /** At most {@link NOT_CHARGED_RECENT_LIMIT} distinct lookups, concurrently. */
-  private async providerNames(
-    rows: readonly NotChargedCallRow[],
-  ): Promise<ReadonlyMap<string, string>> {
-    const ids = [...new Set(rows.map((row) => row.providerId).filter((id): id is string => !!id))];
-    const found = await Promise.all(
-      ids.map((organizationId) => this.providers.findOne({ where: { organizationId } })),
-    );
-    const names = new Map<string, string>();
-    found.forEach((row) => {
-      if (row) names.set(row.organizationId, row.legalName);
-    });
-    return names;
+/**
+ * The newest `limit` rows such that every tool among them is backed by at
+ * least `k` distinct buyers **within the selection itself**.
+ *
+ * Greedy and monotone: take the newest `limit` rows of the tools still
+ * allowed, ban every tool that falls short of `k` there, and repeat. A ban is
+ * never lifted, so the loop ends after at most one pass per tool.
+ * `suppressed` is true when any candidate row was left out by a ban.
+ */
+export function selectKAnonymous(
+  rows: readonly NotChargedCallRow[],
+  limit: number,
+  k: number,
+): { published: NotChargedCallRow[]; suppressed: boolean } {
+  const banned = new Set<string>();
+
+  for (;;) {
+    const selection = rows.filter((row) => !banned.has(row.toolId)).slice(0, limit);
+
+    const buyersByTool = new Map<string, Set<string>>();
+    for (const row of selection) {
+      const buyers = buyersByTool.get(row.toolId) ?? new Set<string>();
+      buyers.add(row.buyer);
+      buyersByTool.set(row.toolId, buyers);
+    }
+
+    const short = [...buyersByTool].filter(([, buyers]) => buyers.size < k);
+    if (short.length === 0) return { published: selection, suppressed: banned.size > 0 };
+    for (const [toolId] of short) banned.add(toolId);
   }
 }
 
@@ -147,22 +178,23 @@ function toCall(
   providerNames: ReadonlyMap<string, string>,
 ): PublicNotChargedCallDto | null {
   const outcome = notChargedReason(row);
-  if (!outcome) return null;
+  const providerName = row.providerId ? providerNames.get(row.providerId) : undefined;
+  if (!outcome || providerName === undefined) return null;
 
-  // Built field by field, never spread from the row, so a column added to the
-  // query later cannot reach the public payload by accident.
+  // Built field by field, never spread from the row: `buyer` and any column
+  // added to the query later cannot reach the public payload by accident.
   return {
     toolId: row.toolId,
     toolName: toolNames.get(row.toolId) ?? row.toolId,
-    providerName: row.providerId ? (providerNames.get(row.providerId) ?? null) : null,
+    providerName,
     price: { amount: row.priceAmount.toString(), asset: row.asset, decimals: row.decimals },
     reason: outcome.reason,
     reasonText: NOT_CHARGED_REASON_TEXT[outcome.reason],
     bucket: outcome.bucket,
-    at: toMinute(row.createdAt).toISOString(),
+    day: row.createdAt.toISOString().slice(0, 10),
   };
 }
 
-function toMinute(value: Date): Date {
-  return new Date(Math.floor(value.getTime() / MINUTE_MS) * MINUTE_MS);
+function startOfUtcDay(value: Date): Date {
+  return new Date(Math.floor(value.getTime() / DAY_MS) * DAY_MS);
 }

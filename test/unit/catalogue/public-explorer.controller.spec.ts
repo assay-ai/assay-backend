@@ -30,6 +30,7 @@ describe('public Explorer routes need no authentication', () => {
     read: jest.fn(async () => ({
       windowDays: 30,
       since: '2026-09-15T00:00:00.000Z',
+      until: '2026-10-15T00:00:00.000Z',
       minBuyers: 5,
       withheldForPrivacy: false,
       totals: { callsChecked: 0, callsNotCharged: 0, callsFailedCheck: 0, amountNotCharged: [] },
