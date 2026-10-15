@@ -30,13 +30,14 @@ import { SlashProposalService } from './slash-proposal.service';
  *   execution window). The case's mirror stays `PENDING` while any live part
  *   is pending — those parts keep executing — and becomes `DISPUTED` only
  *   when every live part is; `chain_disputed_parts` counts the disputed ones,
- *   so a partly disputed case reads honestly. A case still `PROPOSED` stays
- *   `PROPOSED` while any part stands undisputed (review N-1: the undisputed
- *   sweep upholds it at the door and the executor sends those parts), and
- *   becomes `DISPUTED` (`ArbitrationService.fileDisputeFromChain`) only once
- *   every live part is disputed; it then waits for the arbiter, with no
- *   platform deadline. A case already decided keeps its decision; the console
- *   shows the part "disputed on chain", waiting for the arbiter.
+ *   so a partly disputed case reads honestly. A case still `PROPOSED`
+ *   becomes `DISPUTED` (`ArbitrationService.fileDisputeFromChain`) at its
+ *   first disputed part (review R3-5), so the dispute row exists when that
+ *   part is later won or upheld; parts standing undisputed still execute
+ *   (review N-1: the case is upheld for the executor once they pass their
+ *   door). Every part disputed, it waits for the arbiter, with no platform
+ *   deadline. A case already decided keeps its decision; the console shows
+ *   the part "disputed on chain", waiting for the arbiter.
  * - **`SlashUpheld`** — the arbiter ruled against the provider. The part goes
  *   back to `PENDING` at the `executableAt` the EVENT carries (never assumed
  *   to be "now"), and the case's mirror and count follow. The ruling is the
@@ -295,10 +296,9 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     // current-epoch records.
     if (part.chainEpoch !== proposal.chainEpoch) {
       await this.timeline(proposal, event.cancelledAt, 'CHAIN_CANCELLED', {
-        summary:
-          `A superseded record of an earlier proposal of this case was ${
-            event.reason === 'WITHDRAWN' ? 'cancelled (cancelSlash)' : `expired (${event.reason})`
-          } on chain and its reservation released; the current proposal is not affected`,
+        summary: `A superseded record of an earlier proposal of this case was ${
+          event.reason === 'WITHDRAWN' ? 'cancelled (cancelSlash)' : `expired (${event.reason})`
+        } on chain and its reservation released; the current proposal is not affected`,
         detail: {
           requestId: event.requestId,
           reason: event.reason,
@@ -356,12 +356,16 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
    *   the summed amounts; a dispute the provider won in part reads
    *   `PARTIALLY_UPHELD`, review R2-3), else closed `CANCELLED` — unless the cancel was the
    *   platform's own recalculation (S-2), left to `sweepAdminCancels`.
-   * - **Only disputed parts stand**: a case still `PROPOSED` becomes
-   *   `DISPUTED` and waits for the arbiter. So does one the platform labelled
-   *   `UPHELD` / `AUTO_UNDISPUTED` before the dispute was mirrored, with
-   *   nothing executed (review R2-2, `ArbitrationService.reopenForChainDispute`).
+   * - **A part stands disputed on a `PROPOSED` case**: it becomes `DISPUTED`
+   *   (its dispute row opened), whatever its siblings (review R3-5).
+   * - **Only disputed parts stand**: the case waits for the arbiter. One the
+   *   platform labelled `UPHELD` / `AUTO_UNDISPUTED` before the dispute was
+   *   mirrored (or the executor holds, `EXECUTING`), with nothing executed,
+   *   goes back to `DISPUTED` (review R2-2 / R3-5,
+   *   `ArbitrationService.reopenForChainDispute`).
    * - **A part stands pending** (never disputed, or upheld): it executes at its
-   *   door. A `PROPOSED` case is upheld there by the undisputed sweep. An open
+   *   door. A `PROPOSED` case with no disputed part is upheld there by the
+   *   undisputed sweep. An open
    *   `DISPUTED` / `UNDER_REVIEW` / `AWAITING_SECOND` case (an older in-app
    *   objection, or a straggler re-adopted) is upheld so the executor sends
    *   it: as the arbiter's uphold (`CHAIN_ARBITER`) when a pending part was
@@ -431,19 +435,27 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       transactionHash: chain.transactionHash,
     };
     const settled = Date.now() - CHAIN_DISPUTE_SETTLE_MS;
+    // Review R3-5: a `PROPOSED` case opens its dispute at the first disputed
+    // record, whatever its siblings, so a partly won dispute has its row.
+    // Undisputed siblings still execute: the case is upheld for the executor
+    // once they pass their door (the pending branch below, on a later tick).
+    const reopenable =
+      (fresh.status === SlashProposalStatus.UPHELD ||
+        fresh.status === SlashProposalStatus.EXECUTING) &&
+      !has('EXECUTED');
     const move =
-      pending.length > 0
-        ? pending.some((row) => row.chainDisputedAt)
-          ? this.arbitration?.recordChainUphold(fresh.organizationId, fresh.id, {
-              arbiter: null,
-              transactionHash: chain.transactionHash,
-            })
-          : pending.every((row) => (row.chainExecutableAt?.getTime() ?? Infinity) <= settled)
-            ? this.arbitration?.recordChainStanding(fresh.organizationId, fresh.id)
-            : undefined
-        : fresh.status === SlashProposalStatus.PROPOSED
-          ? this.arbitration?.fileDisputeFromChain(fresh.organizationId, fresh.id, disputedChain)
-          : fresh.status === SlashProposalStatus.UPHELD && !has('EXECUTED')
+      fresh.status === SlashProposalStatus.PROPOSED && has('DISPUTED')
+        ? this.arbitration?.fileDisputeFromChain(fresh.organizationId, fresh.id, disputedChain)
+        : pending.length > 0
+          ? pending.some((row) => row.chainDisputedAt)
+            ? this.arbitration?.recordChainUphold(fresh.organizationId, fresh.id, {
+                arbiter: null,
+                transactionHash: chain.transactionHash,
+              })
+            : pending.every((row) => (row.chainExecutableAt?.getTime() ?? Infinity) <= settled)
+              ? this.arbitration?.recordChainStanding(fresh.organizationId, fresh.id)
+              : undefined
+          : reopenable
             ? this.arbitration?.reopenForChainDispute(fresh.organizationId, fresh.id, disputedChain)
             : undefined;
     await Promise.resolve(move).catch((error: unknown) => {
