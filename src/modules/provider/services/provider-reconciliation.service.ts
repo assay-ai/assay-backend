@@ -112,7 +112,8 @@ const CLASS_NOTES: Record<CallReconciliationClass, string> = {
   [CallReconciliationClass.PAID_UNCREDITED]: 'verification found FAIL — not credited, see verdicts',
   [CallReconciliationClass.FREE]: 'relay path, no payment machinery',
   [CallReconciliationClass.TEST]: 'your own dry runs — charges nobody',
-  [CallReconciliationClass.EXPLORATION]: 'NEW-binding traffic, we paid for it',
+  [CallReconciliationClass.EXPLORATION]:
+    'NEW-binding trial traffic: the buyer paid; verification sampled at platform cost',
   [CallReconciliationClass.EXCLUDED]:
     'griefing attribution — credited, not counted against your SLA',
   [CallReconciliationClass.SYSTEM_ERROR]: 'upstream 5xx / timeout',
