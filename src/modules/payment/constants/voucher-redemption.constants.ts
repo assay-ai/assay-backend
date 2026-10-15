@@ -85,3 +85,11 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    */
   PROVIDER_FORFEIT: 'voucher_provider_forfeit',
 } as const;
+
+/**
+ * What `redemption_last_error` carries once the provider forfeited the
+ * voucher, followed by the cause: a program error (`ProviderBelowMinimumStake`)
+ * or a block (`ProviderBlocked`, `PayeeBlocked`, `PayeeBlockedOnChain`).
+ * `FORFEITED_SQL` in `payment-intent.repository.ts` matches the same literal.
+ */
+export const PROVIDER_FORFEIT_PREFIX = 'provider_forfeit:';

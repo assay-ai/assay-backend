@@ -1,3 +1,4 @@
+import { offerSolanaRailAInThisSuite } from '../helpers/solana-rail-b';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import {
   IneligibilityReason,
@@ -227,6 +228,10 @@ describe('a buyer with a standing withdrawal is not quoted on that chain', () =>
  * `tools/call` loop over a real escrow reader and assert on the outcome.
  */
 describe('tools/call reads the escrow and refuses a withdrawing buyer', () => {
+  // Solana has no paid rail by default (review 2026-10-15, C1); these cases
+  // pin the rail-A code that is kept for when it is switched back on.
+  offerSolanaRailAInThisSuite();
+
   const ARGS = { query: 'moon landing' };
   const SCRIPT = { 'binding-provider-a': () => Promise.resolve(ok('forty-two')) };
 

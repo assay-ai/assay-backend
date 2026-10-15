@@ -19,7 +19,7 @@ import {
   usdc,
 } from '../tool/helpers/routing-fixtures';
 import { CHAIN_ID, SESSION, buildMcpHarness } from './helpers/mcp-harness';
-import { offerSolanaRailBInThisSuite } from '../helpers/solana-rail-b';
+import { offerSolanaRailsInThisSuite } from '../helpers/solana-rail-b';
 
 /**
  * Free first, then paid — one tool with free-capable AND paid supply.
@@ -38,9 +38,10 @@ import { offerSolanaRailBInThisSuite } from '../helpers/solana-rail-b';
  * without a voucher the buyer signs.
  */
 describe('McpToolCallService — free first, then paid', () => {
-  // The rail-B cases run on the Solana harness session; rail B is off there
-  // by default (no-platform-debt step 3), so this suite re-opens it.
-  offerSolanaRailBInThisSuite();
+  // The paid cases run on the Solana harness session; Solana has no paid rail
+  // by default (no-platform-debt step 3, review 2026-10-15 C1), so this suite
+  // re-opens both.
+  offerSolanaRailsInThisSuite('A', 'B');
 
   const ARGS = { query: 'moon landing' };
   const TOOL_NAME = 'Search the web';
@@ -206,5 +207,60 @@ describe('McpToolCallService — free first, then paid', () => {
     await expect(h.calls.call(SESSION, TOOL_NAME, ARGS)).rejects.toBeInstanceOf(AppError);
     expect(h.freeQuota.checked[0]).toMatchObject({ pricingMode: PricingMode.FREE });
     expect(h.intents.rows.size).toBe(0);
+  });
+
+  // ── review 2026-10-15: M4 (per-binding quota in routing) and M5 (atomic places)
+
+  it('falls through to paid when the free binding the check saw has no room for this agent (M4)', async () => {
+    const h = harness();
+    h.freeQuota.noRoomFor.add(`binding-${FREE_PROVIDER}`);
+
+    const outcome = await h.calls.call(SESSION, TOOL_NAME, ARGS);
+
+    if (outcome.kind !== 'RESULT') throw new Error('expected a RESULT');
+    expect(outcome.receipt.providerId).toBe(PAID_PROVIDER);
+    expect(h.invoker.bindingIds).toEqual([`binding-${PAID_PROVIDER}`]);
+    // Nothing was served free, so the platform place was given back.
+    expect(h.freeQuota.platformPlaces.map((p) => p.released)).toEqual([true]);
+  });
+
+  it('answers QUOTA_EXCEEDED on a FREE-only tool whose binding has no room (M4)', async () => {
+    const h = buildMcpHarness({
+      bindings: [buildBinding(FREE_PROVIDER, { pricingMode: PricingMode.FREE, priceAmount: '0' })],
+      providers: [buildProvider(FREE_PROVIDER)],
+      stakes: {},
+      invoker: new ScriptedInvoker({ [`binding-${FREE_PROVIDER}`]: async () => ok() }),
+    });
+    h.freeQuota.noRoomFor.add(`binding-${FREE_PROVIDER}`);
+
+    const refusal = await h.calls.call(SESSION, TOOL_NAME, ARGS).catch((e: unknown) => e);
+
+    expect((refusal as AppError).errorCode).toBe('MCP_QUOTA_EXCEEDED');
+    expect(h.freeQuota.platformPlaces.map((p) => p.released)).toEqual([true]);
+  });
+
+  it('falls through to paid when a parallel call took the last platform place (M5)', async () => {
+    const h = harness();
+    h.freeQuota.platformRefusal = {
+      kind: 'REFUSED',
+      limit: FreeQuotaLimitKind.PLATFORM_AGENT_DAILY,
+      resetsAt: new Date('2026-10-17T00:00:00.000Z'),
+      fallThroughToPaid: true,
+    };
+
+    const outcome = await h.calls.call(SESSION, TOOL_NAME, ARGS);
+
+    if (outcome.kind !== 'RESULT') throw new Error('expected a RESULT');
+    expect(outcome.receipt.providerId).toBe(PAID_PROVIDER);
+    expect(h.freeQuota.places).toEqual([]);
+  });
+
+  it('keeps the places of a served free call', async () => {
+    const h = harness();
+
+    await h.calls.call(SESSION, TOOL_NAME, ARGS);
+
+    expect(h.freeQuota.platformPlaces.map((p) => p.released)).toEqual([false]);
+    expect(h.freeQuota.consumed).toEqual([`binding-${FREE_PROVIDER}`]);
   });
 });

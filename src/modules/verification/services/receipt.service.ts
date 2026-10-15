@@ -6,6 +6,7 @@ import { VerificationRecordEntity } from '@database/postgres/entities/verificati
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { isWithheldIntent } from '@modules/ledger/domain/withheld';
+import { PROVIDER_FORFEIT_PREFIX } from '@modules/payment/constants/voucher-redemption.constants';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -66,8 +67,11 @@ export class ReceiptService {
     // so. `listedPrice` and `chargedPrice` are both always present, even when
     // equal: never show one number where the product's value lives in the
     // gap between two.
+    // A voucher the provider forfeited was never collected: the buyer was not
+    // charged, although the call is SETTLED (review 2026-10-15, M2).
+    const forfeited = intent.redemptionLastError?.startsWith(PROVIDER_FORFEIT_PREFIX) ?? false;
     const chargedPrice =
-      intent.status === PaymentIntentStatus.SETTLED
+      intent.status === PaymentIntentStatus.SETTLED && !forfeited
         ? listedPrice
         : MoneyUtil.zero(asset, intent.decimals);
 

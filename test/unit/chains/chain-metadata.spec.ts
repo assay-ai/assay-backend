@@ -194,28 +194,25 @@ describe('assertChainMetadata — the boot gate', () => {
   });
 
   /**
-   * The rule: *"`SUPPORTED_RAILS` is per-chain: Solana offers A
-   * only (rail B is off until its program has the tighten-delay rule), 4663
-   * ships B only."* Declared here because it is a property of what the deployment
-   * offers on that chain; enforced in `tool/`.
+   * The rule: Solana offers no paid rail today (rail B is off until its
+   * program has the tighten-delay rule, and rail A is off while B is —
+   * review 2026-10-15 C1), 4663 ships B only. Declared here because it is a
+   * property of what the deployment offers on that chain; enforced in `tool/`
+   * and `mcp/`.
    */
   describe('rails', () => {
-    it('is B only on Robinhood Chain, and both on Solana', () => {
+    it('is B only on Robinhood Chain, and empty on Solana', () => {
       expect(chainMetadata(RHC_TESTNET).rails).toEqual(['B']);
       // Rail B is off on Solana until the Anchor program binds a buyer's
       // tightening to already-signed vouchers only after a delay, as the EVM
-      // contract will (no-platform-debt design §3, step 5).
-      expect(chainMetadata(DEVNET).rails).toEqual(['A']);
-      expect(chainMetadata(MAINNET).rails).toEqual(['A']);
+      // contract will (no-platform-debt design §3, step 5). Rail A spends a
+      // ledger mirror the buyer can withdraw from under it, so it is off too.
+      expect(chainMetadata(DEVNET).rails).toEqual([]);
+      expect(chainMetadata(MAINNET).rails).toEqual([]);
     });
 
-    it('is non-empty on every described chain — a chain with no rail cannot be paid on', () => {
-      for (const chainId of describedChains()) {
-        expect({ chainId, rails: chainMetadata(chainId).rails.length }).not.toEqual({
-          chainId,
-          rails: 0,
-        });
-      }
+    it('boots with a chain that offers no paid rail: it serves free calls only', () => {
+      expect(() => assertChainMetadata([DEVNET])).not.toThrow();
     });
   });
 });

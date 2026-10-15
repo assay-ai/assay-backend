@@ -328,7 +328,11 @@ describe('McpCatalogueService — free-tier annotations', () => {
     const harness = buildMcpHarness({
       tool,
       bindings: [
-        buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' }),
+        buildBinding('provider-a', {
+          pricingMode: PricingMode.FREE,
+          priceAmount: '0',
+          freeQuotaPerAgent: 100,
+        }),
         buildBinding('provider-b', { priceAmount: usdc('0.02').amount }),
       ],
       providers: [buildProvider('provider-a'), buildProvider('provider-b')],
@@ -336,7 +340,6 @@ describe('McpCatalogueService — free-tier annotations', () => {
       stakes: { 'provider-b': usdc(1000) },
       invoker,
     });
-    harness.freeQuota.setAllowance(tool.id, 100);
 
     const [descriptor] = await harness.catalogue.listTools();
     const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
@@ -344,7 +347,9 @@ describe('McpCatalogueService — free-tier annotations', () => {
     expect(descriptor.annotations[X402_PRICING_MODE]).toBe(PricingMode.FREEMIUM);
     // The amount is still the hold — the paid supply's price, never the FREE zero.
     expect(price.amount).toBe(usdc('0.02').amount);
-    expect(price.display).toBe('100 free per day, then up to $0.02');
+    // One paid binding: one price, no range — the FREE one is not part of
+    // what a paid call can cost (review 2026-10-15, L2).
+    expect(price.display).toBe('100 free per day, then $0.02');
     expect(descriptor.annotations[X402_PAID_ALTERNATIVE]).toBe(tool.name);
   });
 
@@ -352,16 +357,36 @@ describe('McpCatalogueService — free-tier annotations', () => {
     const tool = buildTool();
     const harness = buildMcpHarness({
       tool,
-      bindings: [buildBinding('provider-a', { pricingMode: PricingMode.FREEMIUM })],
+      bindings: [
+        buildBinding('provider-a', { pricingMode: PricingMode.FREEMIUM, freeQuotaPerAgent: 25 }),
+      ],
       providers: [buildProvider('provider-a')],
       invoker,
     });
-    harness.freeQuota.setAllowance(tool.id, 25);
 
     const [descriptor] = await harness.catalogue.listTools();
     const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
 
     expect(price.display).toBe('25 free per day, then $0.05');
+  });
+
+  it('sums the free allowances of the routable free bindings, capped by the platform ceiling', async () => {
+    const tool = buildTool();
+    const harness = buildMcpHarness({
+      tool,
+      bindings: [
+        buildBinding('provider-a', { pricingMode: PricingMode.FREEMIUM, freeQuotaPerAgent: 600 }),
+        buildBinding('provider-b', { pricingMode: PricingMode.FREEMIUM, freeQuotaPerAgent: 700 }),
+      ],
+      providers: [buildProvider('provider-a'), buildProvider('provider-b')],
+      invoker,
+    });
+
+    const [descriptor] = await harness.catalogue.listTools();
+    const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation;
+
+    // 600 + 700, capped at the platform's 1,000 a day; two paid bindings → a range.
+    expect(price.display).toBe('1000 free per day, then up to $0.05');
   });
 
   it('a FREE-only tool publishes no x402/paidAlternative — no cross-tool pairing exists to name', async () => {

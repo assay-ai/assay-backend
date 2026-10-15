@@ -124,12 +124,10 @@ export class McpCatalogueService {
 
     // The "N" of a FREEMIUM tool's "N free per day, then $X". The same figure
     // for every agent, so it is published with or without a viewer.
-    const freeAllowances = await Promise.all(
-      quotes.map((quote) =>
-        quote && quote.pricingMode === PricingMode.FREEMIUM
-          ? this.freeQuota.dailyAllowanceForTool(quote.tool.id)
-          : Promise.resolve(null),
-      ),
+    const freeAllowances = quotes.map((quote) =>
+      quote && quote.pricingMode === PricingMode.FREEMIUM
+        ? this.freeQuota.dailyAllowance(quote.freeBindings ?? [])
+        : null,
     );
 
     const listed: McpToolDescriptor[] = [];
@@ -245,7 +243,12 @@ function describe(
   const { tool } = quote;
 
   const annotations: Record<string, unknown> = {
-    [X402_PRICE]: priceAnnotation(price, quote.pricingMode, quote.routableBindings, freePerDay),
+    [X402_PRICE]: priceAnnotation(
+      price,
+      quote.pricingMode,
+      quote.paidBindings ?? quote.routableBindings,
+      freePerDay,
+    ),
     [X402_TIER]: tierLabel(tool.tier),
     // Every response class other than `DATA_RESULT` releases the hold rather
     // than committing it (`RESPONSE_CLASS_CONSEQUENCE`), so this is a property
@@ -329,7 +332,8 @@ function describe(
 function priceAnnotation(
   price: Money,
   mode: PricingMode | null,
-  routableBindings: number,
+  /** Bindings that can be charged: a FREE one beside them makes no range (L2). */
+  paidBindings: number,
   freePerDay: number | null,
 ): McpPriceAnnotation {
   if (mode === PricingMode.FREE) {
@@ -337,7 +341,7 @@ function priceAnnotation(
   }
 
   const shown = displayPrice(price);
-  const paid = routableBindings > 1 ? `up to ${shown}` : shown;
+  const paid = paidBindings > 1 ? `up to ${shown}` : shown;
   return {
     amount: price.amount,
     asset: price.asset,

@@ -252,6 +252,22 @@ describe('ReceiptService — listed and charged, always both, even when equal', 
     expect(receipt.withheld).toEqual({ amount: '0', asset: USDC, decimals: 6 });
   });
 
+  it('charges nothing on a SETTLED call whose voucher the provider forfeited (review M2)', async () => {
+    const { service } = build(
+      buildIntent({
+        status: PaymentIntentStatus.SETTLED,
+        priceAmount: '1000',
+        redemptionLastError: 'provider_forfeit:ProviderBelowMinimumStake',
+      }),
+      buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt.listedPrice.amount).toBe('1000');
+    expect(receipt.chargedPrice.amount).toBe('0');
+  });
+
   it('charges nothing on a REFUNDED call — withheld equals the full listed price', async () => {
     const { service } = build(
       buildIntent({ status: PaymentIntentStatus.REFUNDED, priceAmount: '1000' }),
