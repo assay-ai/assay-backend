@@ -234,3 +234,27 @@ describe('readDomainMismatches', () => {
     expect(mismatches.map((row) => row.contract)).toEqual(['X402Escrow', 'X402Stake']);
   });
 });
+
+describe('EvmChainStateService.isBlockedLive — the whose-address read (review M1)', () => {
+  beforeEach(() => jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined));
+  afterEach(() => jest.restoreAllMocks());
+
+  it('reads the contract live, even when the cache knows nothing', async () => {
+    const { service, reads } = build({ live: { blocked: [BLOCKED.toLowerCase()] } });
+    await service.refresh();
+
+    await expect(service.isBlockedLive(`${CHAIN}:${BLOCKED}`)).resolves.toBe(true);
+    await expect(service.isBlockedLive(`${CHAIN}:${BUYER}`)).resolves.toBe(false);
+    expect(reads).toEqual(['blocked', 'blocked']);
+  });
+
+  it('answers null when the read fails or the account is not on an EVM chain', async () => {
+    const { service } = build({ live: { fails: true } });
+    await expect(service.isBlockedLive(`${CHAIN}:${BLOCKED}`)).resolves.toBeNull();
+    await expect(
+      service.isBlockedLive(
+        'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:9B2yKCsMTQNbMjJU3wvwhKxjvtpA6TmmbeLtPV4Totpo',
+      ),
+    ).resolves.toBeNull();
+  });
+});

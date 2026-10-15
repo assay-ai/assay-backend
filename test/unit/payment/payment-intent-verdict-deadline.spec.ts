@@ -7,7 +7,10 @@ import {
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { MCP_VERIFICATION_DEADLINE_REASON } from '@modules/mcp/constants/mcp.constants';
-import { PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS } from '@modules/payment/constants/payment-intent.constants';
+import {
+  PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
+  PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
+} from '@modules/payment/constants/payment-intent.constants';
 import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
   REDEEM_GRACE_SECONDS,
@@ -90,6 +93,7 @@ describe('PaymentIntentExpiryService — the deadline on verdicts', () => {
     expect(repo.findDueForVerdictDeadline).toHaveBeenCalledWith(
       NOW,
       PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
+      PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
       expect.any(Number),
     );
     expect(intents.resolve).toHaveBeenCalledWith(
@@ -158,6 +162,19 @@ describe('PaymentIntentExpiryService — the deadline on verdicts', () => {
     expect(PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS).toBe(900);
     expect(redeemableFor).toBeGreaterThanOrEqual(10 * 60);
   });
+
+  it('stops settling a margin before the chain would refuse the voucher (H1)', () => {
+    // Past this bound the voucher would come back `VoucherExpired`; the row is
+    // left to the hold backstop, which releases the hold and pays nobody.
+    const chainRefusesAt = CLOCK_SKEW_TOLERANCE_SECONDS + REDEEM_GRACE_SECONDS;
+    expect(PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBeLessThan(chainRefusesAt);
+    expect(chainRefusesAt - PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBeGreaterThanOrEqual(
+      5 * 60,
+    );
+    expect(PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBeGreaterThan(
+      PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
+    );
+  });
 });
 
 describe('PaymentIntentRepository.findDueForVerdictDeadline — the query', () => {
@@ -180,7 +197,7 @@ describe('PaymentIntentRepository.findDueForVerdictDeadline — the query', () =
       .mockImplementation(((alias: string) =>
         dataSource.createQueryBuilder(PaymentIntentEntity, alias)) as never);
 
-    await repo.findDueForVerdictDeadline(NOW, 900, 50);
+    await repo.findDueForVerdictDeadline(NOW, 900, 1_620, 50);
     return captured;
   }
 
@@ -202,5 +219,24 @@ describe('PaymentIntentRepository.findDueForVerdictDeadline — the query', () =
     expect(flat).toMatch(/"intent"\."voucher_seq" IS NOT NULL/);
     expect(flat).toMatch(/"intent"\."voucher_signature" IS NOT NULL/);
     expect(flat).toMatch(/LIMIT 50/);
+  });
+
+  it('has an upper bound: never a row the chain would already refuse (H1)', async () => {
+    const { sql, params } = await rendered();
+    const flat = sql.replace(/\s+/g, ' ');
+
+    expect(flat).toMatch(/"intent"\."expires_at" > /);
+    expect(Object.values(params)).toEqual(
+      expect.arrayContaining([new Date(NOW.getTime() - 1_620_000)]),
+    );
+  });
+
+  it('skips a row whose verification already computed a REFUND or VOID outcome (L6)', async () => {
+    const { sql } = await rendered();
+    const flat = sql.replace(/\s+/g, ' ');
+
+    expect(flat).toMatch(
+      /NOT EXISTS \(SELECT 1 FROM verification_records vr WHERE vr\.intent_id = "?intent"?\."?id"? AND vr\.settlement_outcome IS NOT NULL AND vr\.settlement_outcome <> 'SETTLE'\)/,
+    );
   });
 });

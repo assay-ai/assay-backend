@@ -47,6 +47,12 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
       expected: CallReconciliationClass.PAID_CREDITED,
     },
     {
+      // Review 2026-10-15 M2: the hold was released, nobody was credited.
+      name: 'PAID + SETTLED, forfeited by the provider → PROVIDER_FORFEITED (not credited)',
+      input: { callClass: 'PAID', status: 'SETTLED', forfeited: true, credited: false },
+      expected: CallReconciliationClass.PROVIDER_FORFEITED,
+    },
+    {
       name: 'PAID + SETTLED, credited from platform funds → PLATFORM_ABSORBED',
       input: { callClass: 'PAID', status: 'SETTLED', platformAbsorbed: true },
       expected: CallReconciliationClass.PLATFORM_ABSORBED,
@@ -169,7 +175,7 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
     );
   });
 
-  it('is total: every declared class is reachable, and CALL_RECONCILIATION_CLASSES lists all eleven', () => {
+  it('is total: every declared class is reachable, and CALL_RECONCILIATION_CLASSES lists all twelve', () => {
     const reached = new Set(CASES.map((c) => c.expected));
     for (const member of Object.values(CallReconciliationClass)) {
       expect(reached.has(member)).toBe(true);

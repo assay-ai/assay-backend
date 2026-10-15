@@ -518,8 +518,12 @@ describe('VoucherRedemptionService.run, with a party blocked', () => {
 
   it('forfeits at once a voucher whose payee is blocked on chain', async () => {
     const { payments, intents, ledger } = realisticBuild([pending(1)]);
+    // Only the payee is blocked: a realistic gate answers for the parties it
+    // is asked about, and the payer-side hold no longer asks about the payee.
     const chainState = {
-      holdReason: jest.fn().mockResolvedValue('the payee is blocked on chain'),
+      holdReason: jest.fn(async (_door: unknown, parties: { role: string }[]) =>
+        parties.some((party) => party.role === 'PAYEE') ? 'the payee is blocked on chain' : null,
+      ),
       blockedAccounts: jest.fn().mockResolvedValue([PROVIDER_ACCOUNT.toLowerCase()]),
     };
     const redeemer = new FakeRedeemer();

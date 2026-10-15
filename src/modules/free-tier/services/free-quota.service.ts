@@ -16,6 +16,7 @@ import {
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import { FREE_QUOTA_CONFIG, FreeQuotaConfig } from '../config/free-quota.config';
+import { FreeBindingDials, freeCallsPerDay } from '../domain/free-calls-per-day';
 import { TOOL_CALL_RECORD_RETENTION_DAYS } from '../constants/free-quota.constants';
 
 // ---------------------------------------------------------------------------
@@ -95,6 +96,20 @@ export interface FreeQuotaConsumeInput {
   readonly bindingId: string;
 }
 
+/** Places taken by {@link FreeQuotaService.reservePlatform} or `reserveBinding`. */
+export interface FreeQuotaReservation {
+  readonly kind: 'RESERVED';
+  /** Gives every place back. Never throws; a second call is a no-op. */
+  release(): Promise<void>;
+}
+
+/** The binding a free call is about to be dialled on, and the agent it is for. */
+export interface FreeQuotaBindingReserveInput {
+  readonly organizationId: string;
+  readonly agentId: string;
+  readonly binding: Pick<ToolBinding, 'id' | 'freeQuotaPerAgent' | 'freeDailyBudget'>;
+}
+
 /** `{ remaining, limit, resetsAt }` — the shape `tools/list` publishes as `x402/freeQuota`. */
 export interface FreeQuotaRemaining {
   readonly remaining: number;
@@ -114,7 +129,16 @@ export interface FreeQuotaRemaining {
  *   Rate limit (platform)                         ──  platform-rate window
  * ```
  *
- * ## `check` is pure inspection; `consume` is the only write
+ * ## `check` is pure inspection; the call path RESERVES
+ *
+ * The MCP call path no longer checks and then consumes after the fact: N
+ * parallel calls would all pass the check before any consume (review
+ * 2026-10-15, M5). It takes its places atomically before the call —
+ * {@link reservePlatform} before routing, {@link reserveBinding} on the binding
+ * the router is about to dial, so a binding whose own quota is spent is never
+ * drawn (M4) — and releases them when nothing was served. {@link consume} stays
+ * for callers that count after the fact. The rest of this section describes
+ * {@link check} and {@link consume}.
  *
  * Same split as `BindingCeilingService`, for the same reason: {@link check} is
  * called from `tools/list` (every agent, every poll, no call happening) as
@@ -254,25 +278,15 @@ export class FreeQuotaService {
   }
 
   /**
-   * How many free calls a day one agent is offered on this tool — the most
-   * generous per-agent allowance among its `FREE`/`FREEMIUM` `ACTIVE`
-   * bindings, the platform default standing in for one the provider left unset.
-   * `null` when no binding of the tool serves free calls.
-   *
-   * What `tools/list` prints as *"N free per day, then $X"*. Nobody's own
-   * count: the same figure for every agent, so it can be published without a
-   * viewer, unlike {@link remainingForTool}. The platform's own per-agent daily
-   * ceiling still applies on top, across every free tool.
+   * How many free calls a day one agent is offered on a tool — what
+   * `tools/list` prints as *"N free per day, then $X"*. From the quote's
+   * routable free-capable bindings at their published revision, summed and
+   * capped by the platform's per-agent daily ceiling: see
+   * {@link freeCallsPerDay} (review 2026-10-15, L2). `null` when none serves
+   * free calls. Nobody's own count, so it is published without a viewer.
    */
-  async dailyAllowanceForTool(toolId: string): Promise<number | null> {
-    const candidates = await this.freeBindings(toolId);
-    if (candidates.length === 0) return null;
-
-    return Math.max(
-      ...candidates.map(
-        (binding) => binding.freeQuotaPerAgent ?? this.config.defaultPerAgentDailyLimit,
-      ),
-    );
+  dailyAllowance(bindings: readonly FreeBindingDials[]): number | null {
+    return freeCallsPerDay(bindings, this.config);
   }
 
   /** Platform per-agent daily headroom — `GET /free-quota`'s `platform` field. */
@@ -330,7 +344,155 @@ export class FreeQuotaService {
     return rows.filter((row): row is FreeQuotaRemaining & { toolId: string } => row !== null);
   }
 
-  // ── consume — the only method that writes ───────────────────────────────
+  // ── reserve — atomic places taken BEFORE the call (review 2026-10-15, M5) ──
+
+  /**
+   * Takes this call's place in the two platform limits — the per-minute burst
+   * guard and the per-agent daily ceiling — atomically, before anything is
+   * routed.
+   *
+   * `check` then `consume` let N parallel calls all read the same count and
+   * all fit, overrunning every limit by up to N. Here each call INCRs first and
+   * looks at the result: one over the limit gives its place straight back and
+   * is refused, so N parallel calls with one place left produce exactly one
+   * free call. The caller releases the places when the call is not served.
+   *
+   * Same fail directions as {@link check}: an unreadable rate window permits,
+   * and an unreadable daily counter falls back to the read-through check
+   * (Postgres), which refuses only when that cannot answer either.
+   */
+  async reservePlatform(
+    input: FreeQuotaCheckInput,
+  ): Promise<FreeQuotaReservation | FreeQuotaRefused> {
+    const rate = await this.reserveRate(input.agentId);
+    if (rate.kind === 'FULL') {
+      return this.refuse(FreeQuotaLimitKind.PLATFORM_RATE_LIMIT, rate.resetsAt, input);
+    }
+
+    const daily = await this.reserveDaily(
+      this.platformDailyKey(input.agentId),
+      this.config.platformAgentDailyLimit,
+      () => this.records.countForAgentSince(input.organizationId, input.agentId, utcDayStart()),
+    );
+    if (daily.kind === 'FULL') {
+      await rate.release();
+      return this.refuse(FreeQuotaLimitKind.PLATFORM_AGENT_DAILY, nextUtcMidnight(), input);
+    }
+    if (daily.kind === 'UNAVAILABLE') {
+      const refusedUntil = await this.checkPlatformDaily(input.organizationId, input.agentId);
+      if (refusedUntil) {
+        await rate.release();
+        return this.refuse(FreeQuotaLimitKind.PLATFORM_AGENT_DAILY, refusedUntil, input);
+      }
+    }
+
+    return reservationOf([rate.release, daily.release]);
+  }
+
+  /**
+   * Takes this call's place in one binding's own limits — the provider's
+   * per-agent quota and its daily budget — atomically, on the binding about to
+   * be dialled. `null` when either has no room (both places are given back).
+   * Fails open, like the provider limits in {@link check}.
+   */
+  async reserveBinding(input: FreeQuotaBindingReserveInput): Promise<FreeQuotaReservation | null> {
+    const { organizationId, agentId, binding } = input;
+    const perAgent = await this.reserveDaily(
+      this.agentBindingDailyKey(agentId, binding.id),
+      binding.freeQuotaPerAgent ?? this.config.defaultPerAgentDailyLimit,
+      () =>
+        this.records.countForAgentBindingSince(organizationId, agentId, binding.id, utcDayStart()),
+    );
+    if (perAgent.kind === 'FULL') return null;
+
+    const budget = await this.reserveDaily(
+      this.bindingBudgetKey(binding.id),
+      binding.freeDailyBudget ?? this.config.defaultProviderDailyBudget,
+      () => this.records.countForBindingSince(binding.id, utcDayStart()),
+    );
+    if (budget.kind === 'FULL') {
+      await perAgent.release();
+      return null;
+    }
+
+    return reservationOf([perAgent.release, budget.release]);
+  }
+
+  /**
+   * One place in a daily counter: hydrate on a miss (the day's count so far,
+   * from Postgres), then `INCR`; over the limit gives it back with `DECR`.
+   */
+  private async reserveDaily(
+    key: string,
+    limit: number,
+    hydrate: () => Promise<number>,
+  ): Promise<
+    | { readonly kind: 'RESERVED'; readonly release: () => Promise<void> }
+    | { readonly kind: 'FULL' }
+    | { readonly kind: 'UNAVAILABLE'; readonly release: () => Promise<void> }
+  > {
+    const noop = async () => undefined;
+    try {
+      if ((await this.redis.exists(key)) !== 1) {
+        const count = await hydrate();
+        await this.redis.set(key, String(count), 'EX', secondsUntilNextUtcDay(), 'NX');
+      }
+      const after = await this.redis.incr(key);
+      const release = async () => {
+        await this.redis.decr(key).catch((error: unknown) => {
+          this.logger.warn(`${key}: reserved place not given back. ${describe(error)}`);
+        });
+      };
+      if (after > limit) {
+        await release();
+        return { kind: 'FULL' };
+      }
+      return { kind: 'RESERVED', release };
+    } catch (error) {
+      this.logger.warn(`${key}: place not reserved. ${describe(error)}`);
+      return { kind: 'UNAVAILABLE', release: noop };
+    }
+  }
+
+  /** One place in the per-minute window: trim, `ZADD`, then count, in one `MULTI`. */
+  private async reserveRate(
+    agentId: string,
+  ): Promise<
+    | { readonly kind: 'RESERVED'; readonly release: () => Promise<void> }
+    | { readonly kind: 'FULL'; readonly resetsAt: Date }
+  > {
+    const key = this.platformRateKey(agentId);
+    const now = Date.now();
+    const windowMs = this.rateWindowMs();
+    const member = `${now}:${randomUUID()}`;
+    const release = async () => {
+      await this.redis.zrem(key, member).catch((error: unknown) => {
+        this.logger.warn(`agent ${agentId}: rate place not given back. ${describe(error)}`);
+      });
+    };
+    try {
+      const results = await this.redis
+        .multi()
+        .zremrangebyscore(key, '-inf', String(now - windowMs))
+        .zadd(key, now, member)
+        .pexpire(key, windowMs)
+        // After the trim, every member left is inside the window.
+        .zcard(key)
+        .exec();
+      const count = Number(results?.[3]?.[1] ?? 0);
+      if (count > this.config.platformRateLimitPerMinute) {
+        await release();
+        return { kind: 'FULL', resetsAt: new Date(now + windowMs) };
+      }
+      return { kind: 'RESERVED', release };
+    } catch (error) {
+      // Transient by construction — see the class doc. A blip permits.
+      this.logger.warn(`agent ${agentId}: rate place not reserved, permitting. ${describe(error)}`);
+      return { kind: 'RESERVED', release: async () => undefined };
+    }
+  }
+
+  // ── consume — the after-the-fact write (callers that do not reserve) ─────
 
   /**
    * Spend one call against every counter it belongs to, on the binding that
@@ -663,6 +825,19 @@ export class FreeQuotaService {
 // ---------------------------------------------------------------------------
 // Pure helpers
 // ---------------------------------------------------------------------------
+
+/** One reservation over several places, released at most once. */
+function reservationOf(releases: ReadonlyArray<() => Promise<void>>): FreeQuotaReservation {
+  let released = false;
+  return {
+    kind: 'RESERVED',
+    async release() {
+      if (released) return;
+      released = true;
+      await Promise.all(releases.map((release) => release()));
+    },
+  };
+}
 
 function clampRemaining(limit: number, used: number | null): number {
   if (used === null) return limit; // unreadable → the permissive figure, matching the fail-open provider dials

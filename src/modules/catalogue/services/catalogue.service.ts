@@ -11,6 +11,7 @@ import { ToolBindingRepository } from '@database/postgres/repositories/tool-bind
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { FREE_QUOTA_CONFIG, FreeQuotaConfig } from '@modules/free-tier/config/free-quota.config';
+import { freeCallsPerDay } from '@modules/free-tier/domain/free-calls-per-day';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { RoutingContext } from '@modules/tool/domain/routing';
@@ -255,10 +256,14 @@ export class CatalogueService {
         pricingMode: quote.pricingMode,
         freeCallsPerDay:
           quote.pricingMode === PricingMode.FREE || quote.pricingMode === PricingMode.FREEMIUM
-            ? freeCallsPerDay(own, this.freeQuota.defaultPerAgentDailyLimit)
+            ? // The router's routable free-capable bindings at their published
+              // revision, capped by the platform ceiling — never raw draft rows,
+              // so this and `tools/list` print the same N (review L2).
+              freeCallsPerDay(quote.freeBindings ?? [], this.freeQuota)
             : null,
         routable: quote.price !== null,
         routableBindings: quote.routableBindings,
+        paidBindings: quote.paidBindings ?? 0,
         unroutableReason: quote.unroutableReason,
         // The settles-elsewhere caveat, off the router's own union — the same value and the
         // same spelling `tools/list` publishes as `x402/settlementChains`. NOT
@@ -430,26 +435,6 @@ function toQualityDto(counters: ProviderQualityCounters | null): CatalogueQualit
     measuredCalls: counters.verifiedCalls,
     failedCalls: counters.failedCalls,
   };
-}
-
-/**
- * The free calls a day one agent gets on a tool before it pays — the most
- * generous per-agent allowance among its `FREE`/`FREEMIUM` bindings, the
- * platform default standing in for one the provider left unset. The figure
- * `tools/list` prints as *"N free per day, then $X"*. `null` when no binding
- * serves free calls.
- */
-function freeCallsPerDay(
-  bindings: readonly ToolBindingEntity[],
-  defaultPerAgent: number,
-): number | null {
-  const allowances = bindings
-    .filter(
-      (binding) =>
-        binding.pricingMode === PricingMode.FREE || binding.pricingMode === PricingMode.FREEMIUM,
-    )
-    .map((binding) => binding.freeQuotaPerAgent ?? defaultPerAgent);
-  return allowances.length > 0 ? Math.max(...allowances) : null;
 }
 
 /**

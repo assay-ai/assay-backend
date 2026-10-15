@@ -1,3 +1,5 @@
+import { DEFAULT_FREE_QUOTA_CONFIG } from '@modules/free-tier/config/free-quota.config';
+import { FreeBindingDials, freeCallsPerDay } from '@modules/free-tier/domain/free-calls-per-day';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import {
@@ -403,31 +405,41 @@ export class FakeBindingCallCounter {
 
 /**
  * `FreeQuotaService`, reduced to the reads `McpCatalogueService.listTools`
- * calls: `remainingForTool` and `dailyAllowanceForTool`. Set per tool with
- * `setRemaining` / `setAllowance`; unset tools answer `null`, matching the
+ * calls: `remainingForTool` and `dailyAllowance`. Set per tool with
+ * `setRemaining`; unset tools answer `null`, matching the
  * "omit rather than publish a number that is nobody's" rule.
  */
 export class FakeFreeQuota {
   private readonly remaining = new Map<string, FreeQuotaRemaining>();
-  private readonly allowances = new Map<string, number>();
 
   /** Set by a test that wants the relay path refused. Default: everything allowed. */
   decision: FreeQuotaDecision = { kind: 'ALLOWED' };
   /** Every `check` this run, so a test can assert the pricing mode it was asked about. */
   readonly checked: FreeQuotaCheckInput[] = [];
-  /** Every `consume` this run, so a test can assert the binding that was charged. */
-  readonly consumed: string[] = [];
+  /**
+   * Bindings whose quota place was taken and KEPT this run (a binding place
+   * given back on failover or on a refusal is not here), so a test can assert
+   * the binding that was charged.
+   */
+  get consumed(): string[] {
+    return this.places.filter((place) => !place.released).map((place) => place.bindingId);
+  }
+  /** Every binding place taken, released or not, in order. */
+  readonly places: { bindingId: string; released: boolean }[] = [];
+  /** Platform places taken; `released` once given back. */
+  readonly platformPlaces: { released: boolean }[] = [];
+  /** Bindings whose own quota has no room left (`reserveBinding` answers null). */
+  readonly noRoomFor = new Set<string>();
+  /** Set to refuse the platform reservation (e.g. the last place was taken in parallel). */
+  platformRefusal: FreeQuotaDecision | null = null;
 
   setRemaining(toolId: string, value: FreeQuotaRemaining): void {
     this.remaining.set(toolId, value);
   }
 
-  setAllowance(toolId: string, perDay: number): void {
-    this.allowances.set(toolId, perDay);
-  }
-
-  dailyAllowanceForTool(toolId: string): Promise<number | null> {
-    return Promise.resolve(this.allowances.get(toolId) ?? null);
+  /** The real arithmetic, over the quote's bindings, with the platform defaults. */
+  dailyAllowance(bindings: readonly FreeBindingDials[]): number | null {
+    return freeCallsPerDay(bindings, DEFAULT_FREE_QUOTA_CONFIG);
   }
 
   remainingForTool(
@@ -443,9 +455,28 @@ export class FakeFreeQuota {
     return Promise.resolve(this.decision);
   }
 
-  consume(input: { bindingId: string }): Promise<void> {
-    this.consumed.push(input.bindingId);
-    return Promise.resolve();
+  async reservePlatform(_input: FreeQuotaCheckInput) {
+    if (this.platformRefusal) return this.platformRefusal;
+    const place = { released: false };
+    this.platformPlaces.push(place);
+    return {
+      kind: 'RESERVED' as const,
+      release: async () => {
+        place.released = true;
+      },
+    };
+  }
+
+  async reserveBinding(input: { binding: { id: string } }) {
+    if (this.noRoomFor.has(input.binding.id)) return null;
+    const place = { bindingId: input.binding.id, released: false };
+    this.places.push(place);
+    return {
+      kind: 'RESERVED' as const,
+      release: async () => {
+        place.released = true;
+      },
+    };
   }
 }
 
