@@ -99,8 +99,11 @@ export interface ReceiptsSummaryRow {
 
 /**
  * One paid call that ended without a charge, as the public Explorer reads it.
- * Carries no identifier of the call, the buyer or the hold — see
- * `PaymentIntentRepository.findRecentNotCharged`.
+ *
+ * Carries no identifier of the call, the hold or the buyer. `buyer` is an
+ * opaque digest of the buying organization, present only so the service can
+ * apply the k-anonymity rule to the rows it is about to publish; it is never
+ * copied into a response. See `PaymentIntentRepository.findNotChargedCandidates`.
  */
 export interface NotChargedCallRow {
   readonly toolId: string;
@@ -112,12 +115,16 @@ export interface NotChargedCallRow {
   readonly decimals: number;
   readonly priceAmount: bigint;
   readonly createdAt: Date;
+  /** md5 of the buying organization id. In-process only — never published. */
+  readonly buyer: string;
 }
 
-/** Distinct buyers behind one tool's not-charged calls. A count, never an id. */
-export interface NotChargedToolBuyersRow {
-  readonly toolId: string;
-  readonly buyers: number;
+/** The Explorer's query window, and who counts as a buyer within it. */
+export interface NotChargedWindow {
+  readonly from: Date;
+  readonly to: Date;
+  /** A buyer organization must have been created at or before this instant. */
+  readonly buyerCreatedBefore: Date;
 }
 
 /** Platform-wide totals for one asset over the Explorer's window. */
@@ -126,13 +133,25 @@ export interface NotChargedTotalsRow {
   readonly decimals: number;
   /** Paid calls with a hold that reached a final outcome, charged or not. */
   readonly calls: number;
-  /** Distinct buying organizations behind `calls` — a count, never an id. */
+  /** Distinct ELIGIBLE buying organizations behind `calls` — a count, never an id. */
   readonly buyers: number;
   readonly notChargedCalls: number;
   /** The `REFUNDED` subset: the result failed verification. */
   readonly failedCheckCalls: number;
   readonly notChargedAmount: bigint;
 }
+
+/**
+ * The organizations that count as buyers for the Explorer's k-anonymity rule:
+ * created at least a week ago, and with at least one charged paid call. Both
+ * raise the cost of lifting a tool over k with throwaway organizations.
+ * Bound parameters: `:buyerCreatedBefore`, `:paid`, `:settledStatus`.
+ */
+const ELIGIBLE_BUYER_SQL =
+  `intent.organization_id IN (SELECT o.id FROM organizations o ` +
+  `WHERE o.created_at <= :buyerCreatedBefore AND EXISTS (` +
+  `SELECT 1 FROM payment_intents s WHERE s.organization_id = o.id ` +
+  `AND s.call_class = :paid AND s.status = :settledStatus))`;
 
 /** Mirrors `PaymentIntentCallClass.PAID`, kept local like the statuses below. */
 const PAID_CALL_CLASS = 'PAID';
@@ -1387,30 +1406,25 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * The most recent paid calls that ended without a charge, platform-wide, for
-   * the public Explorer's "not charged" feed.
+   * Candidate rows for the public Explorer's "not charged" feed: paid calls
+   * that ended without a charge in `[from, to)`, made by an eligible buyer
+   * ({@link ELIGIBLE_BUYER_SQL}), newest first, at most `limit`.
    *
    * **Deliberately cross-organization**, and there is no tenant to scope it to:
    * the route is served with no session, and the claim it backs — *you do not
-   * pay for results you cannot use* — is a statement about the platform, not
-   * about any one buyer. What keeps that safe is the projection: tool, provider,
-   * the outcome columns, the listed price and the time. No intent id, call id,
-   * organization, agent, account, hold, body or transaction reference is
-   * selected, so none can leak through a later mapping mistake.
+   * pay for results you cannot use* — is a statement about the platform. What
+   * keeps that safe is the projection and the service's k-anonymity rule: no
+   * intent, call, organization, agent, account, hold, body or transaction
+   * reference is selected; the buyer appears only as an md5 digest, used in
+   * process to count distinct buyers and never published.
    *
    * "Not charged" is exactly {@link WITHHELD_STATUSES} with a hold, the same
-   * definition `GET /withheld` and the receipts summary use, restricted to
-   * `PAID` calls so a free call is never shown as money given back.
+   * definition `GET /withheld` uses, restricted to `PAID` calls.
    */
-  async findRecentNotCharged(
-    since: Date,
+  async findNotChargedCandidates(
+    window: NotChargedWindow,
     limit: number,
-    toolIds: readonly string[],
   ): Promise<NotChargedCallRow[]> {
-    // Only tools the caller has cleared for publication (the k-anonymity rule
-    // lives in `PublicNotChargedService`). No tools, no rows — and no query.
-    if (toolIds.length === 0) return [];
-
     const rows = await this.createQueryBuilder('intent')
       .select('intent.toolId', 'toolId')
       .addSelect('intent.providerId', 'providerId')
@@ -1421,12 +1435,17 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.decimals', 'decimals')
       .addSelect('intent.priceAmount', 'priceAmount')
       .addSelect('intent.createdAt', 'createdAt')
+      .addSelect('md5(intent.organization_id::text)', 'buyer')
       .where('intent.organizationId IS NOT NULL')
       .andWhere('intent.callClass = :paid', { paid: PAID_CALL_CLASS })
       .andWhere('intent.holdId IS NOT NULL')
       .andWhere('intent.status IN (:...statuses)', { statuses: WITHHELD_STATUSES })
-      .andWhere(`${CREATED_AT} >= :since`, { since })
-      .andWhere('intent.toolId IN (:...toolIds)', { toolIds })
+      .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
+      .andWhere(`${CREATED_AT} < :to`, { to: window.to })
+      .andWhere(ELIGIBLE_BUYER_SQL, {
+        buyerCreatedBefore: window.buyerCreatedBefore,
+        settledStatus: SETTLED_STATUS,
+      })
       .orderBy('intent.createdAt', 'DESC')
       .limit(limit)
       .getRawMany<{
@@ -1439,6 +1458,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         decimals: string | number;
         priceAmount: string;
         createdAt: Date;
+        buyer: string;
       }>();
 
     return rows.map((row) => ({
@@ -1451,48 +1471,29 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       decimals: Number(row.decimals),
       priceAmount: BigInt(row.priceAmount),
       createdAt: new Date(row.createdAt),
+      buyer: row.buyer,
     }));
   }
 
   /**
-   * For each tool with a not-charged paid call since `since`: how many distinct
-   * buying organizations those calls came from. The input to the Explorer's
-   * k-anonymity rule — a tool's events are published only when enough
-   * different buyers stand behind them that no single buyer can be singled out.
+   * Per-asset totals behind the same feed over `[from, to)`: paid calls that
+   * reached a final outcome, how many were not charged, how many of those
+   * failed verification, the listed value not charged, and how many ELIGIBLE
+   * buyers stand behind the asset (the input to the per-asset k rule).
    *
    * **Deliberately cross-organization**, for the reason given on
-   * {@link findRecentNotCharged}; the projection is a tool id and a count.
+   * {@link findNotChargedCandidates}; the projection is counts and sums per
+   * asset, naming nobody.
    */
-  async countNotChargedBuyersByTool(since: Date): Promise<NotChargedToolBuyersRow[]> {
-    const rows = await this.createQueryBuilder('intent')
-      .select('intent.toolId', 'toolId')
-      .addSelect('COUNT(DISTINCT intent.organizationId)', 'buyers')
-      .where('intent.organizationId IS NOT NULL')
-      .andWhere('intent.callClass = :paid', { paid: PAID_CALL_CLASS })
-      .andWhere('intent.holdId IS NOT NULL')
-      .andWhere('intent.status IN (:...statuses)', { statuses: WITHHELD_STATUSES })
-      .andWhere(`${CREATED_AT} >= :since`, { since })
-      .groupBy('intent.toolId')
-      .getRawMany<{ toolId: string; buyers: string }>();
-
-    return rows.map((row) => ({ toolId: row.toolId, buyers: Number(row.buyers) }));
-  }
-
-  /**
-   * Per-asset totals behind the same feed: paid calls that reached a final
-   * outcome since `since`, how many of them were not charged, how many of those
-   * failed verification, and the listed value not charged.
-   *
-   * **Deliberately cross-organization**, for the reason given on
-   * {@link findRecentNotCharged}; the projection is counts and sums per asset,
-   * naming nobody.
-   */
-  async summarizeNotCharged(since: Date): Promise<NotChargedTotalsRow[]> {
+  async summarizeNotCharged(window: NotChargedWindow): Promise<NotChargedTotalsRow[]> {
     const rows = await this.createQueryBuilder('intent')
       .select('intent.assetId', 'asset')
       .addSelect('intent.decimals', 'decimals')
       .addSelect('COUNT(*)', 'calls')
-      .addSelect('COUNT(DISTINCT intent.organizationId)', 'buyers')
+      .addSelect(
+        `COUNT(DISTINCT CASE WHEN ${ELIGIBLE_BUYER_SQL} THEN intent.organization_id END)`,
+        'buyers',
+      )
       .addSelect(
         'COUNT(*) FILTER (WHERE intent.status IN (:...withheldStatuses))',
         'notChargedCalls',
@@ -1509,8 +1510,14 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.status IN (:...finalStatuses)', {
         finalStatuses: [SETTLED_STATUS, ...WITHHELD_STATUSES],
       })
-      .andWhere(`${CREATED_AT} >= :since`, { since })
-      .setParameters({ withheldStatuses: WITHHELD_STATUSES, refundedStatus: REFUNDED_STATUS })
+      .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
+      .andWhere(`${CREATED_AT} < :to`, { to: window.to })
+      .setParameters({
+        withheldStatuses: WITHHELD_STATUSES,
+        refundedStatus: REFUNDED_STATUS,
+        settledStatus: SETTLED_STATUS,
+        buyerCreatedBefore: window.buyerCreatedBefore,
+      })
       .groupBy('intent.assetId')
       .addGroupBy('intent.decimals')
       .orderBy('intent.assetId', 'ASC')

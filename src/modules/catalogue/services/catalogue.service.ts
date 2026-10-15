@@ -97,8 +97,19 @@ export class CatalogueService {
    * still answers, with no tools — see {@link getProvider}.
    */
   private async listedBindings(): Promise<ToolBindingEntity[]> {
-    const bindings = await this.bindings.findActiveBindings();
-    return bindings.filter((binding) => !this.blocklist.organizationBlock(binding.organizationId));
+    const bindings = (await this.bindings.findActiveBindings()).filter(
+      (binding) => !this.blocklist.organizationBlock(binding.organizationId),
+    );
+
+    // A SUSPENDED or UNBONDING provider takes no new traffic — the router
+    // refuses it — so its bindings are left out of every list and count here,
+    // exactly like a PAUSED binding: a catalogue row is an invitation to call.
+    const rows = await this.providerRows([
+      ...new Set(bindings.map((binding) => binding.organizationId)),
+    ]);
+    return bindings.filter(
+      (binding) => rows.get(binding.organizationId)?.status === ProviderStatus.ACTIVE,
+    );
   }
 
   async listProviders(): Promise<CatalogueProviderListDto> {
@@ -121,10 +132,6 @@ export class CatalogueService {
       // impossible state — and a card reading "unknown provider, $0.25 a call"
       // is worse than one fewer card.
       .filter((providerId) => rows.has(providerId))
-      // A SUSPENDED or UNBONDING provider takes no new traffic — the router
-      // refuses it — so listing it would be an invitation the platform cannot
-      // honour, the same rule that keeps a PAUSED binding off this list.
-      .filter((providerId) => rows.get(providerId)?.status === ProviderStatus.ACTIVE)
       .map((providerId) =>
         this.toProviderDto(
           rows.get(providerId) as ProviderEntity,

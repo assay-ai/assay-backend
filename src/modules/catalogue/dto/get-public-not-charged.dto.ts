@@ -12,19 +12,20 @@ import { PublicMoneyDto } from './public-catalogue.dto';
  * ## What is on the wire, and what never is
  *
  * Each recent row is the tool, the provider's registered name, the listed
- * price, why it was not charged, and the minute it happened. There is no
- * intent id, call id, buyer organization, agent, account, hold, request or
- * response body, and no transaction reference — the repository does not even
- * select them. The timestamp is truncated to the minute so it cannot be joined
- * back to a buyer's own receipt by exact time.
+ * price, why it was not charged, and the UTC day it happened — published only
+ * once at least 24 h old. There is no intent id, call id, buyer organization,
+ * agent, account, hold, request or response body, and no transaction
+ * reference.
  *
  * ## k-anonymity
  *
- * A row is listed only for a tool whose not-charged calls in the window came
- * from at least `minBuyers` different buyer organizations, and an asset's
- * totals are counted only when at least `minBuyers` buyers made paid calls in
- * it. Below that floor a single buyer's activity could be read off the feed,
- * so it is left out and `withheldForPrivacy` says so.
+ * A buyer counts only when its organization is at least 7 days old and has a
+ * charged paid call. Each tool's published rows must come from at least
+ * `minBuyers` such buyers, counted on the rows actually published; an asset's
+ * totals are counted only when `minBuyers` such buyers made paid calls in it.
+ * Totals cover complete UTC days only. Whatever falls below the floor is left
+ * out, and `withheldForPrivacy` says so. The rule is documented in full on
+ * `PublicNotChargedService`.
  */
 export class PublicNotChargedCallDto {
   @ApiProperty({
@@ -36,11 +37,11 @@ export class PublicNotChargedCallDto {
   toolName: string;
 
   @ApiProperty({
-    type: String,
-    nullable: true,
-    description: 'The serving provider’s registered name; null when no provider was named.',
+    description:
+      'The serving provider’s registered name. Rows whose provider is not on the public ' +
+      'provider list are not published at all.',
   })
-  providerName: string | null;
+  providerName: string;
 
   @ApiProperty({ type: PublicMoneyDto, description: 'The listed price that was not charged.' })
   price: PublicMoneyDto;
@@ -59,8 +60,11 @@ export class PublicNotChargedCallDto {
   })
   bucket: WithheldBucket;
 
-  @ApiProperty({ description: 'When the call was made, ISO-8601 truncated to the minute (UTC).' })
-  at: string;
+  @ApiProperty({
+    example: '2026-10-14',
+    description: 'UTC day the call was made. Rows are published only once at least 24 h old.',
+  })
+  day: string;
 }
 
 export class PublicNotChargedTotalsDto {
@@ -88,8 +92,15 @@ export class PublicNotChargedResponseDto {
   @ApiProperty({ example: 30, description: 'Length of the totals window, in days.' })
   windowDays: number;
 
-  @ApiProperty({ description: 'Start of the window, ISO-8601 truncated to the minute.' })
+  @ApiProperty({ description: 'Start of the totals window: a UTC midnight, ISO-8601.' })
   since: string;
+
+  @ApiProperty({
+    description:
+      'End of the totals window (exclusive): the start of today, UTC. Totals cover complete ' +
+      'days only, so they change once a day.',
+  })
+  until: string;
 
   @ApiProperty({
     example: 5,

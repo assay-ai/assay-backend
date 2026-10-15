@@ -538,6 +538,9 @@ describe('GET /catalogue/tools', () => {
         binding({ organizationId: 'provider-b' }),
         binding({ organizationId: 'provider-b' }),
       ],
+      // Both registered and ACTIVE: a binding whose provider has no ACTIVE
+      // row is not listed at all.
+      providers: [provider(), provider({ organizationId: 'provider-b', legalName: 'B' })],
     });
 
     const { tools } = await service.listTools();
@@ -832,6 +835,30 @@ describe('PublicCatalogueService', () => {
         },
       }).service,
     );
+
+  /** L1: a suspended provider's bindings are absent from every tool figure, too. */
+  it('leaves suspended and blocked providers out of every tool count and floor', async () => {
+    const service = new PublicCatalogueService(
+      build({
+        bindings: [
+          binding({ organizationId: OPEN, priceAmount: '250000' }),
+          binding({ organizationId: SUSPENDED, priceAmount: '1000' }),
+          binding({ organizationId: BLOCKED, priceAmount: '2000' }),
+        ],
+        providers: [
+          provider({ organizationId: OPEN }),
+          provider({ organizationId: SUSPENDED, status: 'SUSPENDED' }),
+          provider({ organizationId: BLOCKED }),
+        ],
+        blocklist: blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: BLOCKED }),
+      }).service,
+    );
+
+    const weather = (await service.listTools()).tools.find((tool) => tool.id === WEATHER.id);
+
+    expect(weather?.providerCount).toBe(1);
+    expect(weather?.fromPrice?.amount).toBe('250000');
+  });
 
   it('lists only ACTIVE, unblocked providers with an ACTIVE binding', async () => {
     const { providers } = await publicService().listProviders();
