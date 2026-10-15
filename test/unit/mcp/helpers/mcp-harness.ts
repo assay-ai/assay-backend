@@ -1,6 +1,7 @@
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import {
+  FreeQuotaCheckInput,
   FreeQuotaRemaining,
   FreeQuotaDecision,
   FreeQuotaService,
@@ -47,6 +48,7 @@ import { NextSeq, EscrowSeqService } from '@modules/payment/services/escrow-seq.
 import { VoucherService } from '@modules/payment/services/voucher.service';
 
 import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
+import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 
 import { STAKE_ASSET, buildRouter, buildTool, usdc } from '../../tool/helpers/routing-fixtures';
 import { noBlocks } from '../../helpers/blocklist';
@@ -400,21 +402,32 @@ export class FakeBindingCallCounter {
 }
 
 /**
- * `FreeQuotaService`, reduced to the one read `McpCatalogueService.listTools`
- * calls: `remainingForTool`. Set per tool with
- * `setRemaining`; unset tools answer `null`, matching the "omit rather than
- * publish a number that is nobody's" rule.
+ * `FreeQuotaService`, reduced to the reads `McpCatalogueService.listTools`
+ * calls: `remainingForTool` and `dailyAllowanceForTool`. Set per tool with
+ * `setRemaining` / `setAllowance`; unset tools answer `null`, matching the
+ * "omit rather than publish a number that is nobody's" rule.
  */
 export class FakeFreeQuota {
   private readonly remaining = new Map<string, FreeQuotaRemaining>();
+  private readonly allowances = new Map<string, number>();
 
   /** Set by a test that wants the relay path refused. Default: everything allowed. */
   decision: FreeQuotaDecision = { kind: 'ALLOWED' };
+  /** Every `check` this run, so a test can assert the pricing mode it was asked about. */
+  readonly checked: FreeQuotaCheckInput[] = [];
   /** Every `consume` this run, so a test can assert the binding that was charged. */
   readonly consumed: string[] = [];
 
   setRemaining(toolId: string, value: FreeQuotaRemaining): void {
     this.remaining.set(toolId, value);
+  }
+
+  setAllowance(toolId: string, perDay: number): void {
+    this.allowances.set(toolId, perDay);
+  }
+
+  dailyAllowanceForTool(toolId: string): Promise<number | null> {
+    return Promise.resolve(this.allowances.get(toolId) ?? null);
   }
 
   remainingForTool(
@@ -425,7 +438,8 @@ export class FakeFreeQuota {
     return Promise.resolve(this.remaining.get(toolId) ?? null);
   }
 
-  check(): Promise<FreeQuotaDecision> {
+  check(input: FreeQuotaCheckInput): Promise<FreeQuotaDecision> {
+    this.checked.push(input);
     return Promise.resolve(this.decision);
   }
 
@@ -660,6 +674,7 @@ export interface McpHarnessOptions {
 }
 
 export interface McpHarness {
+  readonly router: ProviderRouterService;
   readonly catalogue: McpCatalogueService;
   readonly calls: McpToolCallService;
   readonly servers: McpServerFactory;
@@ -735,6 +750,7 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
   );
 
   return {
+    router,
     catalogue,
     calls,
     servers: new McpServerFactory(catalogue, calls),

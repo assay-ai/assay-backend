@@ -122,6 +122,16 @@ export class McpCatalogueService {
       ),
     );
 
+    // The "N" of a FREEMIUM tool's "N free per day, then $X". The same figure
+    // for every agent, so it is published with or without a viewer.
+    const freeAllowances = await Promise.all(
+      quotes.map((quote) =>
+        quote && quote.pricingMode === PricingMode.FREEMIUM
+          ? this.freeQuota.dailyAllowanceForTool(quote.tool.id)
+          : Promise.resolve(null),
+      ),
+    );
+
     const listed: McpToolDescriptor[] = [];
     quotes.forEach((quote, index) => {
       if (!quote) return;
@@ -133,7 +143,7 @@ export class McpCatalogueService {
         return;
       }
 
-      listed.push(describe(quote, quote.price, freeQuotas[index]));
+      listed.push(describe(quote, quote.price, freeQuotas[index], freeAllowances[index]));
     });
 
     return listed;
@@ -230,11 +240,12 @@ function describe(
   quote: ToolQuote,
   price: Money,
   freeQuota: FreeQuotaRemaining | null,
+  freePerDay: number | null,
 ): McpToolDescriptor {
   const { tool } = quote;
 
   const annotations: Record<string, unknown> = {
-    [X402_PRICE]: priceAnnotation(price, quote.pricingMode, quote.routableBindings),
+    [X402_PRICE]: priceAnnotation(price, quote.pricingMode, quote.routableBindings, freePerDay),
     [X402_TIER]: tierLabel(tool.tier),
     // Every response class other than `DATA_RESULT` releases the hold rather
     // than committing it (`RESPONSE_CLASS_CONSEQUENCE`), so this is a property
@@ -302,25 +313,38 @@ function describe(
 /**
  * `free` is a display value, not a price of zero dressed up.
  *
- * Free and freemium tools carry `amount: "0"` with `display: "free"`, so a model can prefer
- * one without parsing an amount against an asset's scale.
+ * A `FREE` tool displays `"free"`, so a model can prefer one without parsing an
+ * amount against an asset's scale.
  */
 /**
  * `amount` is the quote: the dearest eligible binding, which is what a call is
  * held for and the most it can be charged. The charge is the price of the
  * binding that serves, so when more than one binding could serve, `display`
  * says `"up to $0.10"` rather than claiming a price the call may undercut.
+ *
+ * A `FREEMIUM` tool is free first, then paid, so its `display` leads with the
+ * free allowance: `"100 free per day, then up to $0.10"`. `amount` stays the
+ * paid quote — what a call past the quota is held for.
  */
 function priceAnnotation(
   price: Money,
   mode: PricingMode | null,
   routableBindings: number,
+  freePerDay: number | null,
 ): McpPriceAnnotation {
-  const display = mode === PricingMode.FREE ? 'free' : displayPrice(price);
+  if (mode === PricingMode.FREE) {
+    return { amount: price.amount, asset: price.asset, display: 'free' };
+  }
+
+  const shown = displayPrice(price);
+  const paid = routableBindings > 1 ? `up to ${shown}` : shown;
   return {
     amount: price.amount,
     asset: price.asset,
-    display: mode !== PricingMode.FREE && routableBindings > 1 ? `up to ${display}` : display,
+    display:
+      mode === PricingMode.FREEMIUM
+        ? `${freePerDay === null ? 'free tier' : `${freePerDay} free per day`}, then ${paid}`
+        : paid,
   };
 }
 

@@ -253,6 +253,28 @@ export class FreeQuotaService {
     return best;
   }
 
+  /**
+   * How many free calls a day one agent is offered on this tool — the most
+   * generous per-agent allowance among its `FREE`/`FREEMIUM` `ACTIVE`
+   * bindings, the platform default standing in for one the provider left unset.
+   * `null` when no binding of the tool serves free calls.
+   *
+   * What `tools/list` prints as *"N free per day, then $X"*. Nobody's own
+   * count: the same figure for every agent, so it can be published without a
+   * viewer, unlike {@link remainingForTool}. The platform's own per-agent daily
+   * ceiling still applies on top, across every free tool.
+   */
+  async dailyAllowanceForTool(toolId: string): Promise<number | null> {
+    const candidates = await this.freeBindings(toolId);
+    if (candidates.length === 0) return null;
+
+    return Math.max(
+      ...candidates.map(
+        (binding) => binding.freeQuotaPerAgent ?? this.config.defaultPerAgentDailyLimit,
+      ),
+    );
+  }
+
   /** Platform per-agent daily headroom — `GET /free-quota`'s `platform` field. */
   async platformRemaining(organizationId: string, agentId: string): Promise<FreeQuotaRemaining> {
     const used = await this.readThroughDaily(this.platformDailyKey(agentId), () =>

@@ -332,6 +332,26 @@ describe('FreeQuotaService — consume()', () => {
   });
 });
 
+describe('FreeQuotaService — dailyAllowanceForTool()', () => {
+  it('is the most generous per-agent allowance among the free-capable bindings', async () => {
+    const { service } = buildFreeQuotaHarness({}, [
+      buildBindingRow('b1', { freeQuotaPerAgent: 25 }),
+      // Unset: the platform default (100 in these fixtures) applies.
+      buildBindingRow('b2', { pricingMode: PricingMode.FREEMIUM, freeQuotaPerAgent: null }),
+    ]);
+
+    await expect(service.dailyAllowanceForTool(TOOL_ID)).resolves.toBe(100);
+  });
+
+  it('is null when no binding of the tool serves free calls', async () => {
+    const { service } = buildFreeQuotaHarness({}, [
+      buildBindingRow('b1', { pricingMode: PricingMode.PAID, priceAmount: '50000' }),
+    ]);
+
+    await expect(service.dailyAllowanceForTool(TOOL_ID)).resolves.toBeNull();
+  });
+});
+
 describe('FreeQuotaService — bindings at their published revision', () => {
   // A live PAID binding whose unpublished draft says FREE is still PAID on the
   // wire (`toServedToolBindings`), so it must not be counted as free supply.
