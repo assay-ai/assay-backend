@@ -69,6 +69,18 @@ const CLAIMABLE_STATUSES: readonly SlashProposalStatus[] = Object.freeze([
 ]);
 
 /**
+ * Review R2-2 / R3-5: the statuses a case wrongly labelled `AUTO_UNDISPUTED`
+ * reopens from when a dispute is mirrored after the label. `EXECUTING` too:
+ * the executor's claim on a case whose every standing record is disputed
+ * can only be refused on chain, and its return to `UPHELD` is never followed
+ * again, so the label would stay wrong.
+ */
+const REOPENABLE_STATUSES: readonly SlashProposalStatus[] = Object.freeze([
+  SlashProposalStatus.UPHELD,
+  SlashProposalStatus.EXECUTING,
+]);
+
+/**
  * A recalculated penalty as it must arrive: minor units, digits only, positive,
  * no leading zero. The same pattern `DecideCaseBodyDto` enforces.
  */
@@ -291,8 +303,12 @@ export class ArbitrationService {
    * provider won on chain (the arbiter's cancel, or a dispute nobody ruled
    * on: `chainDisputeWonAt`). The objection succeeded in part, so its row
    * reads `PARTIALLY_UPHELD` — whichever chain path closed it first (the
-   * arbiter's uphold of the other record, or the execution). A dispute a
-   * person decided (`ADJUDICATOR`) is left alone. Returns whether it changed.
+   * arbiter's uphold of the other record, or the execution). Its outcome is
+   * `UPHELD_RECALCULATED`, the pair `ARBITRATION_STATE_MAP` produces (review
+   * R3-6): the judgement stood at a lower figure, the chain's sum of what
+   * executed. Nothing acts on a dispute row's outcome, and the case's own
+   * `outcome` is not changed. A dispute a person decided (`ADJUDICATOR`) is
+   * left alone. Returns whether it changed.
    */
   async recordPartialChainWin(organizationId: string, proposalId: string): Promise<boolean> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
@@ -305,8 +321,8 @@ export class ArbitrationService {
     await this.disputes.update(
       { organizationId, id: dispute.id },
       {
-        state: DisputeResolutionState.PARTIALLY_UPHELD,
-        outcome: ArbitrationOutcome.UPHELD,
+        state: ARBITRATION_STATE_MAP[ArbitrationOutcome.UPHELD_RECALCULATED],
+        outcome: ArbitrationOutcome.UPHELD_RECALCULATED,
         resolutionKind: dispute.resolutionKind ?? ResolutionKind.AUTO_CHAIN_EXECUTED,
         resolvedAt: dispute.resolvedAt ?? new Date(),
         resolvedBy: dispute.resolvedBy ?? 'chain:executeSlash',
@@ -325,8 +341,10 @@ export class ArbitrationService {
    * path closed, reopened) and `DISPUTE_FILED` on the timeline. Money does not
    * move here: the chain refuses to execute a disputed record.
    *
-   * Only `UPHELD` with `AUTO_UNDISPUTED` and no execution; an arbiter's uphold
-   * (`CHAIN_ARBITER`) is never undone. Returns whether the case moved.
+   * Only `UPHELD` (or the executor's `EXECUTING`, review R3-5) with
+   * `AUTO_UNDISPUTED` and no execution, and the write is a compare-and-set on
+   * that label; an arbiter's uphold (`CHAIN_ARBITER`) is never undone. Returns
+   * whether the case moved.
    */
   async reopenForChainDispute(
     organizationId: string,
@@ -336,7 +354,7 @@ export class ArbitrationService {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
     if (
       !disputesOnChain(proposal.assetId) ||
-      proposal.status !== SlashProposalStatus.UPHELD ||
+      !REOPENABLE_STATUSES.includes(proposal.status as SlashProposalStatus) ||
       proposal.resolutionKind !== ResolutionKind.AUTO_UNDISPUTED ||
       proposal.executedAt
     ) {
@@ -368,15 +386,17 @@ export class ArbitrationService {
     }
     // An in-app objection of the older era, closed by `recordChainStanding`.
     const now = new Date();
-    const affected = await this.proposals.transitionIfIn(
+    const affected = await this.proposals.transitionIfInResolvedAs(
       organizationId,
       proposalId,
-      [SlashProposalStatus.UPHELD],
+      REOPENABLE_STATUSES,
+      ResolutionKind.AUTO_UNDISPUTED,
       {
         status: SlashProposalStatus.DISPUTED,
         resolutionKind: null,
         resolvedAt: null,
         platformDecisionDueAt: null,
+        chainClaimedAt: null,
       },
     );
     if (affected === 0) return false;
@@ -462,12 +482,17 @@ export class ArbitrationService {
     options: { readonly reopen?: boolean } = {},
   ): Promise<{ proposal: SlashProposalEntity; dispute: DisputeEntity }> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
-    const from = options.reopen ? SlashProposalStatus.UPHELD : SlashProposalStatus.PROPOSED;
+    const from: readonly SlashProposalStatus[] = options.reopen
+      ? REOPENABLE_STATUSES
+      : [SlashProposalStatus.PROPOSED];
 
     if (proposal.disputeId) {
       throw SlashErrors.alreadyDisputed({ disputeId: proposal.disputeId });
     }
-    if (proposal.status !== from) {
+    if (
+      !from.includes(proposal.status as SlashProposalStatus) ||
+      (options.reopen && proposal.resolutionKind !== ResolutionKind.AUTO_UNDISPUTED)
+    ) {
       throw SlashErrors.notDisputable({ status: proposal.status });
     }
     // Checked separately from the state so the provider is told *why*. "Wrong
@@ -509,13 +534,24 @@ export class ArbitrationService {
 
     const savedDispute = await this.disputes.save(dispute);
 
-    const affected = await this.proposals.transitionIfIn(organizationId, proposal.id, [from], {
+    const patch = {
       status: SlashProposalStatus.DISPUTED,
       disputedAt: now,
       disputeId: savedDispute.id,
       platformDecisionDueAt: platformDueAt,
-      ...(options.reopen ? { resolutionKind: null, resolvedAt: null } : {}),
-    });
+      ...(options.reopen ? { resolutionKind: null, resolvedAt: null, chainClaimedAt: null } : {}),
+    };
+    // Review R3-5: a reopen is a compare-and-set on the label it read, so a
+    // concurrent relabel to `CHAIN_ARBITER` is never undone.
+    const affected = options.reopen
+      ? await this.proposals.transitionIfInResolvedAs(
+          organizationId,
+          proposal.id,
+          from,
+          ResolutionKind.AUTO_UNDISPUTED,
+          patch,
+        )
+      : await this.proposals.transitionIfIn(organizationId, proposal.id, from, patch);
     if (affected === 0) {
       // Lost a race with the undisputed sweeper. The dispute row stays — it is
       // evidence that the provider did answer, and deleting it would leave the

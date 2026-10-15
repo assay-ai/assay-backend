@@ -185,6 +185,58 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 
   /**
+   * {@link transitionIfIn} that also requires the resolution kind the caller
+   * read (review R3-5: a reopen of an `AUTO_UNDISPUTED` case must not undo a
+   * concurrent relabel to `CHAIN_ARBITER`).
+   */
+  async transitionIfInResolvedAs(
+    organizationId: string,
+    id: string,
+    expectedFrom: readonly string[],
+    expectedKind: string,
+    patch: Partial<SlashProposalEntity> & { status: string },
+  ): Promise<number> {
+    const result = await this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .update()
+      .set(patch)
+      .where('organization_id = :organizationId', { organizationId })
+      .andWhere('id = :id', { id })
+      .andWhere('status IN (:...expectedFrom)', { expectedFrom })
+      .andWhere('resolution_kind = :expectedKind', { expectedKind })
+      .execute();
+    return result.affected ?? 0;
+  }
+
+  /**
+   * Review R3-2: a late-part refold's money columns, compare-and-set on the
+   * status AND the `applied_amount` the caller read (`null` for none), so two
+   * concurrent refolds (the watcher's and the stranded-part sweep's) neither
+   * lower the amount nor count a part twice: the loser writes nothing.
+   */
+  async refoldAmountsIf(
+    organizationId: string,
+    id: string,
+    expectedFrom: readonly string[],
+    expectedApplied: string | null,
+    patch: Pick<SlashProposalEntity, 'appliedAmount' | 'platformAmount' | 'agentAmount'>,
+  ): Promise<number> {
+    const query = this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .update()
+      .set(patch)
+      .where('organization_id = :organizationId', { organizationId })
+      .andWhere('id = :id', { id })
+      .andWhere('status IN (:...expectedFrom)', { expectedFrom });
+    const result = await (
+      expectedApplied === null
+        ? query.andWhere('applied_amount IS NULL')
+        : query.andWhere('applied_amount = :expectedApplied', { expectedApplied })
+    ).execute();
+    return result.affected ?? 0;
+  }
+
+  /**
    * `→ REVERSED`, once and only once, for a case whose money actually moved.
    *
    * Self-check #4 — *"overturning the same verdict twice is blocked"* — is enforced in

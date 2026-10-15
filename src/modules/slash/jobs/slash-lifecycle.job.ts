@@ -1,5 +1,7 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
+
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
 import { ArbitrationService } from '../services/arbitration.service';
 import { SlashChainRulingService } from '../services/slash-chain-ruling.service';
@@ -72,6 +74,17 @@ const OPEN_EVM_CASE_RETRIES = 5;
 /** How many open EVM cases past their door one tick follows (review R2-2). */
 const OPEN_EVM_CASES_PER_TICK = 100;
 
+/**
+ * Review R3-3: how long one tick may hold the overlap guard. A tick still
+ * running after this is taken as hung (an RPC or database call with no
+ * timeout): a human is paged and the next tick runs, so one stalled call
+ * cannot stop every sweep until undisputed records lapse past their grace.
+ */
+export const SLASH_TICK_MAX_MS = 10 * 60_000;
+
+/** Review R3-3: the page for a hung lifecycle tick. */
+export const SLASH_TICK_HUNG_ALERT = 'slash_lifecycle_tick_hung';
+
 @Injectable()
 export class SlashLifecycleJob {
   private readonly logger = new Logger(SlashLifecycleJob.name);
@@ -81,6 +94,7 @@ export class SlashLifecycleJob {
     private readonly execution: SlashExecutionService,
     private readonly arbitration: ArbitrationService,
     @Optional() private readonly rulings: SlashChainRulingService | null = null,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
 
   /** Review N-3 / R2-5: the start-up pass over old open EVM cases has read its last page. */
@@ -96,21 +110,59 @@ export class SlashLifecycleJob {
    * Review R2-5: `@nestjs/schedule` does not stop a `@Cron` handler from
    * starting while its previous run is still going. A tick slower than a
    * minute (a long chain read) would run every step twice beside itself, so
-   * a tick that finds the previous one still running does nothing.
+   * a tick that finds the previous one still running does nothing — unless
+   * that one has run longer than {@link SLASH_TICK_MAX_MS} (review R3-3): it
+   * is then paged as hung and the guard is taken over, so one stalled call
+   * never wedges the scheduler. `null` when no tick runs; the start time
+   * also names the holder, so a hung tick settling late frees nothing.
    */
-  private ticking = false;
+  private tickStartedAt: number | null = null;
 
   @Cron(CronExpression.EVERY_MINUTE)
   async handleTick(): Promise<void> {
-    if (this.ticking) {
-      this.logger.warn('The previous slash lifecycle tick is still running; this one is skipped.');
-      return;
+    const now = Date.now();
+    if (this.tickStartedAt !== null) {
+      const runningMs = now - this.tickStartedAt;
+      if (runningMs <= SLASH_TICK_MAX_MS) {
+        this.logger.warn(
+          'The previous slash lifecycle tick is still running; this one is skipped.',
+        );
+        return;
+      }
+      await this.pageHungTick(this.tickStartedAt, runningMs);
     }
-    this.ticking = true;
+    const startedAt = now;
+    this.tickStartedAt = startedAt;
     try {
       await this.runTick();
     } finally {
-      this.ticking = false;
+      if (this.tickStartedAt === startedAt) this.tickStartedAt = null;
+    }
+  }
+
+  private async pageHungTick(startedAt: number, runningMs: number): Promise<void> {
+    const since = new Date(startedAt).toISOString();
+    this.logger.error(
+      `CRITICAL: a slash lifecycle tick started at ${since} has run ${Math.round(runningMs / 1000)}s ` +
+        'and looks hung; the next tick runs beside it',
+    );
+    try {
+      await this.alerts?.emit({
+        severity: AlertSeverity.CRITICAL,
+        name: SLASH_TICK_HUNG_ALERT,
+        summary:
+          `A slash lifecycle tick started at ${since} has not finished after ` +
+          `${Math.round(runningMs / 60_000)} minutes; a call in it is likely stuck with no ` +
+          'timeout. Later ticks run beside it; the stuck call needs a look',
+        details: { startedAt: since, runningMs },
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: since,
+      });
+    } catch (error) {
+      this.logger.error(
+        'The hung slash lifecycle tick could not be paged',
+        error instanceof Error ? error.stack : String(error),
+      );
     }
   }
 

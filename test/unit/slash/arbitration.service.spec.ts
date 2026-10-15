@@ -1,6 +1,10 @@
 import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
-import { ArbitrationOutcome, ResolutionKind } from '@modules/slash/domain/arbitration';
+import {
+  ARBITRATION_STATE_MAP,
+  ArbitrationOutcome,
+  ResolutionKind,
+} from '@modules/slash/domain/arbitration';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
 import { SlashErrorCode } from '@modules/slash/errors/slash.errors';
 import { ArbitrationService } from '@modules/slash/services/arbitration.service';
@@ -166,6 +170,8 @@ function build(config = TEST_SLASH_CONFIG) {
   const events = new FakeSlashEvents();
   const notifications = new FakeNotifications();
   const disputes = new Map<string, DisputeEntity>();
+  /** Every patch written to a dispute row, for review R3-6's pair check. */
+  const disputeWrites: Record<string, unknown>[] = [];
 
   const disputeRepo = {
     save: async (row: DisputeEntity) => {
@@ -175,6 +181,7 @@ function build(config = TEST_SLASH_CONFIG) {
     },
     update: async (criteria: { id: string }, patch: Record<string, unknown>) => {
       const row = disputes.get(criteria.id);
+      disputeWrites.push(patch);
       if (row) Object.assign(row, patch);
       return { affected: row ? 1 : 0 };
     },
@@ -214,7 +221,17 @@ function build(config = TEST_SLASH_CONFIG) {
     execution as never,
   );
 
-  return { proposals, events, notifications, disputes, overrides, execution, service, claimTx };
+  return {
+    proposals,
+    events,
+    notifications,
+    disputes,
+    disputeWrites,
+    overrides,
+    execution,
+    service,
+    claimTx,
+  };
 }
 
 /**
@@ -1604,6 +1621,60 @@ describe('ArbitrationService', () => {
       ).toBe(false);
     });
 
+    it('R3-5: the reopen is a compare-and-set on AUTO_UNDISPUTED, not only a read of it', async () => {
+      for (const disputeId of [null, 'd_1']) {
+        const ctx = build();
+        seedEvm(ctx, SlashProposalStatus.PROPOSED);
+        const row = ctx.proposals.rows.get('p1')!;
+        Object.assign(row, {
+          status: SlashProposalStatus.UPHELD,
+          resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+          resolvedAt: new Date('2026-10-18T12:10:00Z'),
+          disputeId,
+        });
+        // The read sees AUTO_UNDISPUTED; a concurrent arbiter relabel lands
+        // before the write.
+        const stale = { ...row };
+        row.resolutionKind = ResolutionKind.CHAIN_ARBITER;
+        jest.spyOn(ctx.proposals, 'findOneScoped').mockResolvedValueOnce(stale as never);
+
+        await ctx.service
+          .reopenForChainDispute('org_1', 'p1', {
+            requestId: 'a'.repeat(64),
+            transactionHash: null,
+          })
+          .catch(() => false);
+        expect(row).toMatchObject({
+          status: SlashProposalStatus.UPHELD,
+          resolutionKind: ResolutionKind.CHAIN_ARBITER,
+        });
+      }
+    });
+
+    it('R3-5: a dispute mirrored while the executor holds the case (EXECUTING) still reopens it', async () => {
+      const ctx = build();
+      seedEvm(ctx, SlashProposalStatus.PROPOSED);
+      Object.assign(ctx.proposals.rows.get('p1')!, {
+        status: SlashProposalStatus.EXECUTING,
+        resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+        resolvedAt: new Date('2026-10-18T12:10:00Z'),
+        chainClaimedAt: new Date('2026-10-18T12:11:00Z'),
+        chainStatus: 'DISPUTED',
+      });
+
+      expect(
+        await ctx.service.reopenForChainDispute('org_1', 'p1', {
+          requestId: 'a'.repeat(64),
+          transactionHash: null,
+        }),
+      ).toBe(true);
+      expect(ctx.proposals.rows.get('p1')!).toMatchObject({
+        status: SlashProposalStatus.DISPUTED,
+        resolutionKind: null,
+        chainClaimedAt: null,
+      });
+    });
+
     it('R2-2: never reopens an arbiter-upheld or executed case', async () => {
       for (const patch of [
         { resolutionKind: ResolutionKind.CHAIN_ARBITER },
@@ -1644,10 +1715,44 @@ describe('ArbitrationService', () => {
       expect(await ctx.service.recordPartialChainWin('org_1', 'p1')).toBe(true);
       expect(dispute).toMatchObject({
         state: 'PARTIALLY_UPHELD',
+        outcome: ArbitrationOutcome.UPHELD_RECALCULATED,
         resolutionKind: ResolutionKind.CHAIN_ARBITER,
         resolvedBy: 'chain:upholdSlash:0xabc',
       });
       expect(await ctx.service.recordPartialChainWin('org_1', 'p1')).toBe(false);
+    });
+
+    it('R3-6: every state/outcome pair the chain paths write is one the outcome map produces', async () => {
+      const ctx = build();
+      seedEvm(ctx, SlashProposalStatus.DISPUTED);
+      await ctx.service.recordChainUphold('org_1', 'p1', {
+        arbiter: '0xabc',
+        transactionHash: null,
+      });
+      ctx.proposals.rows.get('p1')!.chainDisputeWonAt = new Date('2026-10-19T00:00:00Z');
+      await ctx.service.recordPartialChainWin('org_1', 'p1');
+
+      const other = build();
+      seedEvm(other, SlashProposalStatus.DISPUTED);
+      await other.service.recordChainStanding('org_1', 'p1');
+      await other.service.recordChainUphold('org_1', 'p1', {
+        arbiter: '0xabc',
+        transactionHash: null,
+      });
+      other.proposals.rows.get('p1')!.chainDisputeWonAt = new Date('2026-10-19T00:00:00Z');
+      await other.service.recordPartialChainWin('org_1', 'p1');
+
+      const rows = [...ctx.disputes.values(), ...other.disputes.values()];
+      const pairs = [...ctx.disputeWrites, ...other.disputeWrites, ...rows]
+        .filter((row) => row.state != null && row.outcome != null)
+        .map((row) => [row.outcome, row.state]);
+      expect(pairs.length).toBeGreaterThan(0);
+      for (const [outcome, state] of pairs) {
+        expect([outcome, ARBITRATION_STATE_MAP[outcome as ArbitrationOutcome]]).toEqual([
+          outcome,
+          state,
+        ]);
+      }
     });
 
     it('leaves a Solana case to its own decision', async () => {

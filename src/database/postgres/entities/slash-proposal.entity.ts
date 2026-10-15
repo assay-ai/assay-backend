@@ -153,6 +153,20 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   })
   platformAmount: string | null;
 
+  /**
+   * Review R3-2: the harmed agents' share a late-part refold has accounted, in
+   * minor units, so the next refold reports only the difference. Null until a
+   * refold writes it. Paid on chain by the contract; never booked.
+   */
+  @Column({
+    name: 'agent_amount',
+    type: 'numeric',
+    precision: 78,
+    scale: 0,
+    nullable: true,
+  })
+  agentAmount: string | null;
+
   @Column({ name: 'asset_id', type: 'varchar', length: 256 })
   assetId: string;
 
