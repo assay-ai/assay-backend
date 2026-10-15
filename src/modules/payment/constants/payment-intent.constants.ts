@@ -34,6 +34,20 @@ export const PAYMENT_INTENT_EXPIRY_SWEEP_CRON = CronExpression.EVERY_MINUTE;
  */
 export const PAYMENT_INTENT_EXPIRY_SWEEP_BATCH = 200;
 
+/**
+ * The deadline on verdicts, in seconds past the voucher's `expiresAt`.
+ *
+ * A rail-B intent still `VERIFYING` this long after its voucher's `expiresAt`
+ * is settled as served and unverified by the expiry sweep — the rule a failed
+ * verification enqueue already follows. The chain accepts the voucher until
+ * `expiresAt + CLOCK_SKEW_TOLERANCE_SECONDS + REDEEM_GRACE_SECONDS` (120 +
+ * 1,800 s), so settling at 900 s leaves the per-minute redemption job about
+ * 17 minutes to collect it. Without it a late verdict (judge queue backed up,
+ * worker down) left a served call whose voucher could no longer be redeemed
+ * (no-platform-debt design, A13).
+ */
+export const PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS = 900;
+
 /** Written to `status_reason` so the row itself says who moved it and why. */
 export const PAYMENT_INTENT_EXPIRY_REASON =
   'expiry sweep: expiresAt elapsed before the call reached a terminal state';

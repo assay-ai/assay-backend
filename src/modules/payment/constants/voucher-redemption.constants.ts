@@ -77,4 +77,11 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    * RPC answers, so it would otherwise stay open in silence.
    */
   LANDING_UNKNOWN: 'voucher_redemption_landing_unknown',
+  /**
+   * The provider forfeited a voucher it caused to fail: its stake fell below
+   * the program's minimum, or the provider or its payee is blocked. The buyer's
+   * hold is released and nobody is credited, so it costs the platform nothing —
+   * WARN, so a provider that keeps forfeiting is seen.
+   */
+  PROVIDER_FORFEIT: 'voucher_provider_forfeit',
 } as const;

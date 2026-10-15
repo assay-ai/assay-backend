@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
+import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import {
@@ -32,6 +33,7 @@ import {
   ok,
   usdc,
 } from '../tool/helpers/routing-fixtures';
+import { offerSolanaRailBInThisSuite } from '../helpers/solana-rail-b';
 import { CHAIN_ID, SESSION, buildMcpHarness, fakeVoucherSignature } from './helpers/mcp-harness';
 
 /**
@@ -108,6 +110,8 @@ async function requirementOf(h: ReturnType<typeof harness>): Promise<VoucherRequ
 }
 
 describe('rail B over MCP', () => {
+  offerSolanaRailBInThisSuite();
+
   describe('the requirement — what the buyer must sign', () => {
     it('answers an unpaid rail-B call with PAYMENT_REQUIRED and everything a voucher binds', async () => {
       const h = harness();
@@ -570,5 +574,23 @@ describe('rail B over MCP', () => {
       });
       expect(invoker.invocations).toHaveLength(0);
     });
+  });
+});
+
+describe('rail B over MCP on Solana, with the real rail table', () => {
+  it('refuses a rail-B call before asking for a voucher: rail B is switched off on Solana', async () => {
+    const h = harness();
+
+    await expect(
+      h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        voucher: null,
+      }),
+    ).rejects.toMatchObject({ errorCode: ChainErrorCode.CHAIN_RAIL_NOT_OFFERED });
+    expect(h.invoker.providerIds).toEqual([]);
+  });
+
+  it('still takes rail A on Solana when no rail is asked for', () => {
+    expect(chooseRail(CHAIN_ID, null, false)).toBe(PaymentRail.RAIL_A_PER_CALL);
   });
 });

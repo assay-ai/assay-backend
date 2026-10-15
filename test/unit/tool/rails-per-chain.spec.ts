@@ -5,7 +5,8 @@ import { PaymentRail, railName } from '@modules/payment/ports/payment.types';
 import { AppError } from '@shared/errors/app-errors';
 
 /**
- * The rule: *"`SUPPORTED_RAILS` is per-chain: Solana keeps A and B, 4663 ships B
+ * The rule: *"`SUPPORTED_RAILS` is per-chain: Solana offers A only
+ * (rail B is off until its program has the tighten-delay rule), 4663 ships B
  * only. The 402 response on 4663 never advertises a rail A scheme, and the
  * router never selects one."*
  *
@@ -17,8 +18,11 @@ describe('each chain is held to its own rails', () => {
     expect(chainMetadata(CHAIN_IDS.ROBINHOOD_TESTNET).rails).toEqual(['B']);
   });
 
-  it('and Solana still offers both', () => {
-    expect(chainMetadata(CHAIN_IDS.SOLANA_DEVNET).rails).toEqual(['A', 'B']);
+  it('and Solana offers rail A only, until its program has the tighten-delay rule', () => {
+    // Rail B on Solana let a buyer's own transaction kill an admitted voucher,
+    // and the platform paid the provider. Off until the Anchor program binds
+    // a tightening to already-signed vouchers only after a delay.
+    expect(chainMetadata(CHAIN_IDS.SOLANA_DEVNET).rails).toEqual(['A']);
   });
 
   it('no intent built for an eip155 chain may name a rail A scheme', () => {
@@ -53,7 +57,7 @@ describe('each chain is held to its own rails', () => {
     ).not.toThrow();
   });
 
-  it('and Solana still accepts both rails', () => {
+  it('and Solana accepts rail A and refuses rail B', () => {
     // The second control: an implementation that refused rail A everywhere also
     // passes the two above.
     expect(() =>
@@ -61,7 +65,7 @@ describe('each chain is held to its own rails', () => {
     ).not.toThrow();
     expect(() =>
       assertRailOffered(CHAIN_IDS.SOLANA_DEVNET, railName(PaymentRail.RAIL_B_VOUCHER)),
-    ).not.toThrow();
+    ).toThrow(expect.objectContaining({ errorCode: ChainErrorCode.CHAIN_RAIL_NOT_OFFERED }));
   });
 
   it('refuses a chain with no metadata row at all', () => {

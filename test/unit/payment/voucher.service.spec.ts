@@ -1,3 +1,4 @@
+import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import {
@@ -9,6 +10,7 @@ import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import { RedeemVoucherInput } from '@modules/payment/ports/voucher.types';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { offerSolanaRailBInThisSuite } from '../helpers/solana-rail-b';
 
 import {
   OTHER_ESCROW,
@@ -31,6 +33,8 @@ import {
  * verification passes whether or not the binding works.
  */
 describe('VoucherService', () => {
+  offerSolanaRailBInThisSuite();
+
   let harness: VoucherHarness;
 
   beforeEach(() => {
@@ -653,3 +657,16 @@ describe('VoucherService', () => {
 async function expectRejectedWith(promise: Promise<unknown>, code: PaymentErrorCode) {
   await expectErrorCodeAsync(() => promise, code);
 }
+
+describe('VoucherService on Solana, with the real rail table', () => {
+  it('refuses a rail-B voucher: rail B is switched off on Solana', async () => {
+    const harness = createVoucherHarness();
+    const { input } = harness.voucherFor();
+
+    await expectErrorCodeAsync(
+      () => harness.service.redeem(input),
+      ChainErrorCode.CHAIN_RAIL_NOT_OFFERED,
+    );
+    expect(harness.intents.created).toHaveLength(0);
+  });
+});

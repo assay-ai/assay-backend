@@ -540,6 +540,19 @@ describe('SolanaVoucherRedeemer.redeem', () => {
     });
   });
 
+  it('classifies a provider stake below the minimum as RETRY, as on EVM', async () => {
+    // The provider may top its stake back up inside the window. If it does
+    // not, the voucher comes back VoucherExpired and VoucherRedemptionService
+    // reads this last refusal to make the provider forfeit it.
+    const { redeemer, feePayer } = harness();
+    feePayer.refuseWithProgramError(codeOf('ProviderBelowMinimumStake'));
+
+    await expect(redeemer.redeem(requestFor())).resolves.toMatchObject({
+      kind: RedeemOutcomeKind.RETRY,
+      programError: 'ProviderBelowMinimumStake',
+    });
+  });
+
   it('classifies an RPC timeout as RETRY and a paused program as PAUSED', async () => {
     const { redeemer, feePayer } = harness();
     feePayer.failWith = new Error('socket hang up');

@@ -252,6 +252,16 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   redemptionTxRefs: string[];
 
   /**
+   * The last program error a redemption attempt of this rail-B voucher was
+   * refused with (`PaymentIntentRepository.recordRedemptionError`), or
+   * `provider_forfeit:<cause>` once the provider forfeited it. Read when the
+   * chain answers `VoucherExpired`, which no longer says why the voucher was
+   * not redeemed in time. NULL on rail A and on a voucher never refused.
+   */
+  @Column({ name: 'redemption_last_error', type: 'text', nullable: true })
+  redemptionLastError: string | null;
+
+  /**
    * The agent credential that made the call, when the caller had one (the MCP
    * path). Several credentials of one agent are several delegate keys, so
    * spend is split by it as well as by agent. Null on rows written before the
