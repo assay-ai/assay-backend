@@ -18,6 +18,12 @@ import {
 } from '@shared/api';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import {
+  CollectionState,
+  collectionStateOf,
+  debtStateOf,
+  isChargedWhenSettled,
+} from '../domain/collection';
 import { ListToolCallsQueryDto, ToolCallDto } from '../dto/list-tool-calls.dto';
 import { PaymentErrors } from '../errors/payment.errors';
 import { PaymentIntentStatus } from '../ports/payment.types';
@@ -160,14 +166,16 @@ export class ToolCallsService {
   private toDto(intent: PaymentIntentEntity, verdict: VerdictStatus | null): ToolCallDto {
     const asset = intent.assetId as AssetId;
     const listedPrice = MoneyUtil.of(intent.priceAmount, asset, intent.decimals);
-    // Mirrors `ReceiptService`'s rule (`verification/services/receipt.service.ts`):
-    // charged is the listed price once `SETTLED`, zero otherwise — never
-    // `listed - withheld`, and never inferred any other way, so this list and
-    // the receipt endpoint cannot disagree about the same call.
+    // The same rule as `ReceiptService` (`verification/services/receipt.service.ts`),
+    // through the same predicate (`domain/collection.ts`): charged is the
+    // listed price once `SETTLED` — unless the provider forfeited it or the
+    // debt was written off — zero otherwise. Never `listed - withheld`, so
+    // this list and the receipt cannot disagree about the same call (M4).
     const chargedPrice: Money =
-      intent.status === PaymentIntentStatus.SETTLED
+      intent.status === PaymentIntentStatus.SETTLED && isChargedWhenSettled(intent)
         ? listedPrice
         : MoneyUtil.zero(asset, intent.decimals);
+    const settled = intent.status === PaymentIntentStatus.SETTLED;
 
     return {
       intentId: intent.id,
@@ -176,6 +184,8 @@ export class ToolCallsService {
       status: intent.status as PaymentIntentStatus,
       price: toMoneyDto(listedPrice),
       charged: toMoneyDto(chargedPrice),
+      forfeited: settled && collectionStateOf(intent) === CollectionState.PROVIDER_FORFEITED,
+      debt: settled ? debtStateOf(intent) : null,
       verdict,
       createdAt: intent.createdAt,
     };

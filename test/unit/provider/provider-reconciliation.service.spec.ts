@@ -30,7 +30,8 @@ interface GroupRow {
   providerAmount: string;
   platformFee: string;
   awaitingRedemption?: boolean;
-  platformAbsorbed?: boolean;
+  uncollected?: boolean;
+  debtOutstanding?: boolean;
   holdCommitted?: boolean;
 }
 
@@ -112,18 +113,19 @@ describe('ProviderReconciliationService — scoping', () => {
 });
 
 describe('ProviderReconciliationService — every class present, exhaustive by construction', () => {
-  it('lists all twelve classes at a real zero for an empty window', async () => {
+  it('lists all thirteen classes at a real zero for an empty window', async () => {
     const { service } = build([]);
 
     const result = await service.getReconciliation(PROVIDER, WINDOW);
 
-    expect(result.classBreakdown).toHaveLength(12);
+    expect(result.classBreakdown).toHaveLength(13);
     const classes = result.classBreakdown.map((r) => r.class).sort();
     expect(classes).toEqual(
       [
         CallReconciliationClass.PAID_CREDITED,
         CallReconciliationClass.PAID_AWAITING_REDEMPTION,
-        CallReconciliationClass.PLATFORM_ABSORBED,
+        CallReconciliationClass.PAID_BUYER_DEBT,
+        CallReconciliationClass.PAID_UNCOLLECTED,
         CallReconciliationClass.PROVIDER_FORFEITED,
         CallReconciliationClass.PAID_UNCREDITED,
         CallReconciliationClass.FREE,
@@ -316,26 +318,39 @@ describe('ProviderReconciliationService — rail B awaiting redemption', () => {
     expect(result.net).toEqual({ amount: '5040', asset: USDC, decimals: 6 });
   });
 
-  it('a platform-absorbed group is its own class: credited to the provider, no fee taken', async () => {
+  it('an uncollected group (written-off debt, legacy absorb) is its own class: no money', async () => {
     const { service } = build([
+      // Not committed, so the query sums nothing for it.
       group({
         calls: '4',
-        credited: '400',
-        providerAmount: '360',
-        platformFee: '40',
-        platformAbsorbed: true,
+        credited: '0',
+        providerAmount: '0',
+        platformFee: '0',
+        uncollected: true,
+        holdCommitted: false,
       }),
       group({ calls: '1', credited: '100', providerAmount: '90', platformFee: '10' }),
     ]);
 
     const result = await service.getReconciliation(PROVIDER, WINDOW);
-    const absorbed = classOf(result.classBreakdown, CallReconciliationClass.PLATFORM_ABSORBED);
+    const uncollected = classOf(result.classBreakdown, CallReconciliationClass.PAID_UNCOLLECTED);
 
-    expect(absorbed.calls).toBe(4);
-    expect(absorbed.credited).toEqual({ amount: '360', asset: USDC, decimals: 6 });
-    expect(classOf(result.classBreakdown, CallReconciliationClass.PAID_CREDITED).calls).toBe(1);
+    expect(uncollected.calls).toBe(4);
+    expect(uncollected.credited).toEqual({ amount: '0', asset: USDC, decimals: 6 });
     expect(result.platformTake).toEqual({ amount: '10', asset: USDC, decimals: 6 });
-    expect(result.net).toEqual({ amount: '450', asset: USDC, decimals: 6 });
+    expect(result.net).toEqual({ amount: '90', asset: USDC, decimals: 6 });
+  });
+
+  it('an open buyer debt is its own class, counted as calls and kept out of money', async () => {
+    const { service } = build([
+      group({ calls: '2', debtOutstanding: true, holdCommitted: false }),
+      group({ calls: '1', credited: '100', providerAmount: '90', platformFee: '10' }),
+    ]);
+
+    const result = await service.getReconciliation(PROVIDER, WINDOW);
+
+    expect(classOf(result.classBreakdown, CallReconciliationClass.PAID_BUYER_DEBT).calls).toBe(2);
+    expect(result.net).toEqual({ amount: '90', asset: USDC, decimals: 6 });
   });
 });
 
