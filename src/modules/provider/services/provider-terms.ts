@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 
 import { Money } from '@modules/chains/ports/money.types';
+import { platformTakeRatePercent } from '@modules/mcp/services/mcp-pricing.config';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { loadMinimumStakeParameters } from './provider-stake.service';
@@ -65,8 +66,9 @@ export function loadProviderTerms(config: ConfigService): ProviderTerms {
   const payoutTermsVersion = config.get<string>('PROVIDER_TERMS_PAYOUT_VERSION') ?? 'v1.0';
   const slashPolicyVersion = config.get<string>('PROVIDER_TERMS_SLASH_POLICY_VERSION') ?? 'v1.0';
 
-  // Presentation value only; the amount charged per call is `PLATFORM_FEE_BPS`.
-  const takeRatePercent = config.get<string>('PROVIDER_TERMS_TAKE_RATE_PERCENT') ?? '10';
+  // The rate a call is actually charged at (`PLATFORM_FEE_BPS`), not a second,
+  // display-only setting that could disagree with it (R17-R-03).
+  const takeRatePercent = platformTakeRatePercent(config);
   const reserveHeldUsd = config.get<string>('PROVIDER_TERMS_RESERVE_HELD_USD') ?? '0.00';
   const clawback = config.get<string>('PROVIDER_TERMS_CLAWBACK') ?? 'never';
   const slashTrigger = config.get<string>('PROVIDER_TERMS_SLASH_TRIGGER') ?? 'DATA_FAIL only';
