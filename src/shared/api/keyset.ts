@@ -278,3 +278,41 @@ export const asInstant = (get: (row: any) => Date | string) => (row: any) => {
 /** Serialiser for a `numeric`/`bigint` column — the exact decimal string, never a `Number`. */
 export const asExactNumber = (get: (row: any) => string | number | bigint) => (row: any) =>
   String(get(row));
+
+/**
+ * A cursor for a list whose order is a composite key rather than one sortable
+ * column — the operator's Penalties list orders by next deadline, then amount,
+ * then age, which no single `SortableField` can express.
+ *
+ * The same codec and the same sort stamp as {@link paginate}'s cursors, so a
+ * cursor from another ordering is refused the same way; the position's parts
+ * travel as a JSON array of strings in `sortValue`. The caller binds each part
+ * with a cast, so it still has to check each part's shape before use — a value
+ * that does not cast is a 400 there, not a 500 at the database.
+ */
+export function encodeCompositeCursor(parts: readonly string[], id: string, sort: string): string {
+  return encodeCursor({ sortValue: JSON.stringify(parts), id }, sort);
+}
+
+/** The inverse of {@link encodeCompositeCursor}: exactly `arity` string parts, or `API_INVALID_CURSOR`. */
+export function decodeCompositeCursor(
+  cursor: string,
+  sort: string,
+  arity: number,
+): { parts: string[]; id: string } {
+  const { sortValue, id } = decodeCursor(cursor, sort);
+  let parts: unknown;
+  try {
+    parts = JSON.parse(sortValue);
+  } catch {
+    throw ApiErrors.invalidCursor({ detail: 'malformed position' });
+  }
+  if (
+    !Array.isArray(parts) ||
+    parts.length !== arity ||
+    !parts.every((part) => typeof part === 'string')
+  ) {
+    throw ApiErrors.invalidCursor({ detail: 'malformed position' });
+  }
+  return { parts: parts as string[], id };
+}
