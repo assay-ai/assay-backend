@@ -19,6 +19,7 @@ import {
   usdc,
 } from '../tool/helpers/routing-fixtures';
 import { CHAIN_ID, SESSION, buildMcpHarness } from './helpers/mcp-harness';
+import { offerSolanaRailBInThisSuite } from '../helpers/solana-rail-b';
 
 /**
  * Free first, then paid — one tool with free-capable AND paid supply.
@@ -37,6 +38,10 @@ import { CHAIN_ID, SESSION, buildMcpHarness } from './helpers/mcp-harness';
  * without a voucher the buyer signs.
  */
 describe('McpToolCallService — free first, then paid', () => {
+  // The rail-B cases run on the Solana harness session; rail B is off there
+  // by default (no-platform-debt step 3), so this suite re-opens it.
+  offerSolanaRailBInThisSuite();
+
   const ARGS = { query: 'moon landing' };
   const TOOL_NAME = 'Search the web';
   const FREE_PROVIDER = 'provider-a';
