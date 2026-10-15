@@ -4,7 +4,8 @@ import { ValidationPipe, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder, SwaggerCustomOptions } from '@nestjs/swagger';
 import { Reflector } from '@nestjs/core';
-import { assertTrustProxyHopsConfigured } from '@config/app.config';
+import { assertTrustProxyHopsConfigured, parseCorsAllowedOrigins } from '@config/app.config';
+import { applyHttpSecurity } from '@shared/security/security-headers';
 import { AppApiModule } from './app.module';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
@@ -36,6 +37,9 @@ async function bootstrapApi() {
   assertTrustProxyHopsConfigured();
   app.set('trust proxy', configService.get<number>('app.api.trustProxyHops') ?? 0);
 
+  // Security headers, and no `X-Powered-By` (R17-R-02).
+  applyHttpSecurity(app);
+
   // Global prefix
   app.setGlobalPrefix('api');
   app.enableVersioning({
@@ -44,6 +48,12 @@ async function bootstrapApi() {
   });
 
   // CORS
+  //
+  // `origin` is the `CORS_ALLOWED_ORIGINS` allowlist, never `*`: with
+  // `credentials: true` a wildcard would let any website call the API as the
+  // signed-in user. Only a listed origin is reflected back; outside production
+  // the default is the local dashboards on :4000-:4005, and production refuses
+  // to start without the variable (`parseCorsAllowedOrigins`).
   //
   // `exposedHeaders` is not decoration. A cross-origin browser client can read
   // only the seven CORS-safelisted response headers unless the server names the
@@ -70,7 +80,7 @@ async function bootstrapApi() {
   // session headers; the two services expose different things and neither list
   // is the other's.
   app.enableCors({
-    origin: '*',
+    origin: parseCorsAllowedOrigins(),
     credentials: true,
     exposedHeaders: [
       'Content-Disposition',

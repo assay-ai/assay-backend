@@ -97,6 +97,66 @@ export function assertTrustProxyHopsConfigured(
   }
 }
 
+/**
+ * The browser origins a dashboard runs on locally: the console apps on ports
+ * 4000-4005, by name and by loopback address. They are the default only
+ * outside production; production has no default (see `parseCorsAllowedOrigins`).
+ */
+export const DEV_CORS_ALLOWED_ORIGINS: readonly string[] = [
+  4000, 4001, 4002, 4003, 4004, 4005,
+].flatMap((port) => [`http://localhost:${port}`, `http://127.0.0.1:${port}`]);
+
+/**
+ * `CORS_ALLOWED_ORIGINS`: a comma-separated list of exact origins
+ * (`scheme://host[:port]`, no path, no trailing slash) whose browser pages may
+ * call the API with credentials. Only a listed origin is reflected in
+ * `Access-Control-Allow-Origin`; any other origin gets no CORS headers and the
+ * browser refuses to read the response.
+ *
+ * `*` is refused: together with `Access-Control-Allow-Credentials: true` it
+ * would let any website make calls as the signed-in user (R17-R-02).
+ *
+ * Unset or blank: the local dashboard origins (`DEV_CORS_ALLOWED_ORIGINS`)
+ * outside production, and a refusal to start in production, where an unset
+ * value almost always means "forgot" and would otherwise leave the dashboard
+ * broken in a way that only shows in a browser.
+ */
+export function parseCorsAllowedOrigins(
+  raw: string | undefined = process.env.CORS_ALLOWED_ORIGINS,
+  nodeEnv: string | undefined = process.env.NODE_ENV,
+): string[] {
+  if (raw === undefined || raw.trim() === '') {
+    if (nodeEnv === 'production') {
+      throw new Error(
+        'CORS_ALLOWED_ORIGINS must be set when NODE_ENV=production: a comma-separated list ' +
+          'of the dashboard origins, e.g. https://app.example.com',
+      );
+    }
+    return [...DEV_CORS_ALLOWED_ORIGINS];
+  }
+  const origins = raw
+    .split(',')
+    .map((entry) => entry.trim())
+    .filter((entry) => entry !== '');
+  for (const origin of origins) {
+    if (origin === '*') {
+      throw new Error('CORS_ALLOWED_ORIGINS must list exact origins; "*" is not allowed');
+    }
+    let parsed: URL;
+    try {
+      parsed = new URL(origin);
+    } catch {
+      throw new Error(`CORS_ALLOWED_ORIGINS has an entry that is not an origin: "${origin}"`);
+    }
+    if (parsed.origin !== origin) {
+      throw new Error(
+        `CORS_ALLOWED_ORIGINS entries must be bare origins like "${parsed.origin}", got "${origin}"`,
+      );
+    }
+  }
+  return origins;
+}
+
 const appConfig = registerAs('app', () => {
   validateConfig(process.env, AppEnvVariables);
 
