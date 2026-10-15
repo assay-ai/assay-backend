@@ -412,6 +412,58 @@ describe('SlashLifecycleJob — open EVM cases from the in-app objection era (re
 
     expect(started).toBe(1);
   });
+
+  it('R3-3: a tick hung past the limit pages once and no longer holds the scheduler', async () => {
+    jest.useFakeTimers({ now: new Date('2026-10-16T00:00:00Z'), doNotFake: ['setImmediate'] });
+    try {
+      let started = 0;
+      const releases: (() => void)[] = [];
+      const alerts: { severity: string; name: string; dedupeKey?: string }[] = [];
+      const proposals = new FakeSlashProposals();
+      const execution = new FakeSlashExecution();
+      const job = new SlashLifecycleJob(
+        proposals as never,
+        execution as never,
+        {} as never,
+        {
+          followOpenCasesPastDoor: async () => 0,
+          reconcileCases: async () => ({ moved: 0, failed: [] }),
+          reconcileOpenCases: async () => {
+            started += 1;
+            await new Promise<void>((resolve) => releases.push(resolve));
+            return { moved: 0, failed: [], next: null };
+          },
+        } as never,
+        { emit: async (alert: (typeof alerts)[number]) => void alerts.push(alert) } as never,
+      );
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      const hung = job.handleTick();
+      await new Promise((resolve) => setImmediate(resolve));
+      jest.setSystemTime(new Date('2026-10-16T00:05:00Z'));
+      await job.handleTick(); // within the limit: skipped, no page
+      expect(alerts).toEqual([]);
+
+      jest.setSystemTime(new Date('2026-10-16T00:11:00Z'));
+      const next = job.handleTick(); // past the limit: page, and run
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(alerts).toEqual([
+        expect.objectContaining({ severity: 'CRITICAL', name: 'slash_lifecycle_tick_hung' }),
+      ]);
+      expect(started).toBe(2);
+
+      // The hung tick settling late does not free the guard of the new one.
+      releases[0]();
+      await hung;
+      await job.handleTick();
+      expect(started).toBe(2);
+      releases[1]();
+      await next;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
 });
 
 describe('SlashLifecycleJob — open EVM cases past their door (review R2-2)', () => {
