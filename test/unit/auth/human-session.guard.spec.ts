@@ -90,6 +90,7 @@ describe('human-only control writes', () => {
     buildIntent: jest.fn(),
     submitRelayedIntent: jest.fn(),
     unsettledVouchers: jest.fn(async () => null),
+    tightenDelaySeconds: jest.fn(async () => 0),
   };
   // Agent payment delegation: the payer's control over what its agent may
   // spend. Every route, the read included, is the person's and never the agent's.
@@ -98,6 +99,7 @@ describe('human-only control writes', () => {
     authorizeIntent: jest.fn(),
     revokeIntent: jest.fn(),
     list: jest.fn(async () => []),
+    tightenDelaySeconds: jest.fn(async () => 0),
     submit: jest.fn(),
   };
 

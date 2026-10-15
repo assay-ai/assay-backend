@@ -169,7 +169,8 @@ export class WithdrawalService {
 
     // Lowering the escrow's limits below what its served, unredeemed payments
     // need strands them — every signer's, delegates' included (BUG-D1-07).
-    // Refused here, before the wallet is asked, unless acknowledged.
+    // Refused here, before the wallet is asked, unless acknowledged — or not at
+    // all on an escrow with the tighten delay (D-21), where it cannot strand.
     const before =
       input.kind === EscrowIntentKind.SET_LIMITS
         ? await this.escrows.get(organizationId, account, asset)
@@ -177,10 +178,9 @@ export class WithdrawalService {
     if (before !== null && input.limits !== null) {
       const check = limitsCheck(account, asset, before, input.limits);
       if (check !== null) {
-        this.unsettled.assertNotStranding(
-          await this.unsettled.read(check.scope),
+        await this.unsettled.refuseIfStranding(
+          check.scope,
           check.lowered,
-          asset,
           input.acknowledgeUnsettled === true,
         );
       }
@@ -336,6 +336,15 @@ export class WithdrawalService {
     const escrow = await this.escrows.get(organizationId, account, asset);
     const scope = escrowWindowScope(account, asset, escrow);
     return scope === null ? null : this.unsettled.read(scope);
+  }
+
+  /**
+   * How long a tightening of this payer's escrow waits before it binds a
+   * voucher already signed: `TIGHTEN_DELAY_SECONDS` on an escrow with D-21,
+   * else `0` (it binds at once, and can strand what is unsettled).
+   */
+  tightenDelaySeconds(account: AccountId): Promise<number> {
+    return this.unsettled.tightenDelaySeconds(account);
   }
 
   /**

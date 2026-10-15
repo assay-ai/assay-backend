@@ -153,7 +153,6 @@ describe('redemption queue with blocked parties, against a real database', () =>
     const service = new VoucherRedemptionService(
       payments,
       { commitRedeemedHold: jest.fn(), releaseHold: jest.fn() } as never,
-      { appendNow: jest.fn() } as never,
       redeemer as never,
       { emit: async () => undefined } as never,
       blocklistOf({ kind: BlockSubjectKind.WALLET, subject: BLOCKED }),
