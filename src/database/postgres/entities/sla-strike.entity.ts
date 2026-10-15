@@ -148,10 +148,12 @@ export class SlaStrikeEntity extends OrganizationScopedEntityWithoutSoftDelete {
   /**
    * `estimated_bad × avg_price × multiplier`, minor units. **Uncapped.**
    *
-   * The per-window `min(formula, max($5, 100 × price))` and the 10%-of-stake
-   * daily cap are enforced on chain against a signed attestation. A second,
-   * unsigned copy of a consensus rule in Postgres is how the two come to
-   * disagree the first time one is tuned. `MIN_SLASH_PENALTY` and its
+   * The caps live on chain only: `proposeSlash` refuses a penalty above the
+   * attested `penaltyAmount`, and the rolling window admits at most
+   * `slashCapBps` of the stake at risk. Nothing applies a per-window
+   * `min(formula, max($5, 100 × price))` cap. A second, unsigned copy of a
+   * chain rule in Postgres is how the two come to disagree the first time one
+   * is tuned. `MIN_SLASH_PENALTY` and its
    * carry-forward are the same: whether a finding is worth adjudicating is a
    * property of the proposal, not of the observation.
    */

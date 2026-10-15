@@ -399,13 +399,14 @@ export interface StrikeArithmetic {
  * strike for a window that did not breach is not a smaller mistake than a wrong
  * number in one.
  *
- * **The caps are not applied here.** There are two — `min(formula, max($5, 100 ×
- * price))` per window, and 10% of stake per provider per day — and both already
- * exist on chain, where they are enforced against a signed attestation. Re-applying them here
- * would put a second, unsigned copy of a consensus rule in the backend, and the
- * two copies would disagree the first time one of them was tuned. What this
- * records is the **formula result**; the slash-proposal flow is what turns it
- * into a proposal and meets the caps.
+ * **No cap is applied here.** What this records is the **formula result**; the
+ * slash-proposal flow is what turns it into a proposal. The caps that exist
+ * are on chain: `proposeSlash` refuses a penalty above the attested
+ * `penaltyAmount`, and the provider's rolling window admits at most
+ * `slashCapBps` of the stake at risk (`prorata-slash.ts`). Nothing — here, in
+ * the proposal flow or on chain — applies a per-window
+ * `min(formula, max($5, 100 × price))` cap; that figure is a design note, not
+ * an enforced limit.
  *
  * Likewise `MIN_SLASH_PENALTY` and its carry-forward: a strike below the
  * de-minimis floor is still a strike and is still recorded here. Deciding that
