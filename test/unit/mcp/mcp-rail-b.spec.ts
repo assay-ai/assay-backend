@@ -417,8 +417,10 @@ describe('rail B over MCP', () => {
       expect(chooseRail(CHAIN_IDS.ROBINHOOD_TESTNET, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
     });
 
-    it('keeps rail A as the default where it is offered, so existing agents are unchanged', () => {
-      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false)).toBe(PaymentRail.RAIL_A_PER_CALL);
+    it('takes rail A as the default only where it is offered', () => {
+      // This suite re-opens rail B on Solana, not rail A, so with nothing asked
+      // for the call goes to rail B.
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
     });
 
     it('takes rail B whenever a voucher is presented, or the agent asks for it', () => {
@@ -590,7 +592,29 @@ describe('rail B over MCP on Solana, with the real rail table', () => {
     expect(h.invoker.providerIds).toEqual([]);
   });
 
-  it('still takes rail A on Solana when no rail is asked for', () => {
-    expect(chooseRail(CHAIN_ID, null, false)).toBe(PaymentRail.RAIL_A_PER_CALL);
+  it('refuses a paid call on Solana with a 4xx when no rail is asked for: Solana has no paid rail', async () => {
+    const h = harness();
+
+    const refusal = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS).catch((e: unknown) => e);
+    expect(refusal).toMatchObject({ errorCode: ChainErrorCode.CHAIN_RAIL_NOT_OFFERED });
+    expect((refusal as { statusCode: number }).statusCode).toBeGreaterThanOrEqual(400);
+    expect((refusal as { statusCode: number }).statusCode).toBeLessThan(500);
+    expect(h.invoker.providerIds).toEqual([]);
+  });
+
+  it('refuses an explicit rail-A call on Solana with a 4xx, before any intent exists', async () => {
+    const h = harness();
+
+    const refusal = await h.calls
+      .call(RAIL_B_SESSION, TOOL_NAME, ARGS, { rail: PaymentRail.RAIL_A_PER_CALL, voucher: null })
+      .catch((e: unknown) => e);
+    expect(refusal).toMatchObject({ errorCode: ChainErrorCode.CHAIN_RAIL_NOT_OFFERED });
+    expect((refusal as { statusCode: number }).statusCode).toBe(409);
+    expect(h.invoker.providerIds).toEqual([]);
+    expect(h.intents.rows.size).toBe(0);
+  });
+
+  it('takes no paid rail on Solana by default: chooseRail falls to B, which is refused', () => {
+    expect(chooseRail(CHAIN_ID, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
   });
 });
