@@ -63,6 +63,7 @@ export class DebtVoucherIntentResponseDto {
   debt: BuyerDebtDto;
 
   @ApiProperty({
+    type: Object,
     description:
       'The unsigned voucher (`payer`, `payTo`, `provider`, `amount`, `resource`, `requestHash`, ' +
       '`seq`, `issuedAt`, `expiresAt`) — the same shape an agent signs for ' +
@@ -94,6 +95,7 @@ export class DebtVoucherIntentResponseDto {
 /** Body of `POST /escrow/debts/:intentId/voucher`. */
 export class SettleDebtBodyDto {
   @ApiProperty({
+    type: Object,
     description: 'The voucher `POST /escrow/debts/:intentId/voucher-intent` answered, unchanged.',
   })
   @IsObject()
