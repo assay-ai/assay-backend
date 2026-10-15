@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { Brackets, DataSource, EntityManager, In, SelectQueryBuilder } from 'typeorm';
 
+import { CHAIN_DISPUTE_SETTLE_MS } from '@modules/slash/constants/slash.constants';
 import { ON_CHAIN_DISPUTE_ASSET_PREFIX } from '@modules/slash/domain/on-chain-dispute';
 
 import { SlashProposalEntity } from '../entities/slash-proposal.entity';
@@ -39,6 +40,11 @@ export interface UndisputedProposalRow {
   readonly id: string;
   /** The deadline that passed: `respond_by_at`, or `chain_executable_at` on EVM. */
   readonly respondByAt: Date;
+  /**
+   * EVM: a current record of the case was disputed and then upheld by the
+   * arbiter on chain, so the case's uphold is the arbiter's (`CHAIN_ARBITER`).
+   */
+  readonly arbiterUpheld?: boolean;
 }
 
 /** A case whose **platform** window has elapsed with no decision. */
@@ -398,15 +404,27 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     // The deadline that passed: the in-app `respond_by_at` (Solana), or on EVM
     // the record's own door, `chain_executable_at`, with the record still
     // `PENDING` (not disputed on chain). The on-chain door is the only EVM
-    // clock; no delivery starts it.
+    // clock; no delivery starts it. Review R2-2: on EVM every current part
+    // still pending and never disputed must be past its own door by
+    // `CHAIN_DISPUTE_SETTLE_MS`, so a dispute sent just before the door is
+    // mirrored before the case is labelled undisputed.
     const deadline =
       `CASE WHEN proposal.asset_id LIKE :onChain ` +
       `THEN proposal.chain_executable_at ELSE proposal.respond_by_at END`;
+    const settled = new Date(now.getTime() - CHAIN_DISPUTE_SETTLE_MS);
     return this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.organization_id', 'organizationId')
       .addSelect('proposal.id', 'id')
       .addSelect(deadline, 'respondByAt')
+      .addSelect(
+        'EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
+          'WHERE part.organization_id = proposal.organization_id ' +
+          'AND part.proposal_id = proposal.id AND part.chain_epoch = proposal.chain_epoch ' +
+          "AND part.chain_status IN ('PENDING', 'EXECUTED') " +
+          'AND part.chain_disputed_at IS NOT NULL)',
+        'arbiterUpheld',
+      )
       .where('proposal.status = :proposed', { proposed: 'PROPOSED' })
       .andWhere(
         new Brackets((where) =>
@@ -418,11 +436,17 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
             .orWhere(
               "proposal.asset_id LIKE :onChain AND proposal.chain_status = 'PENDING' " +
                 'AND proposal.chain_executable_at IS NOT NULL ' +
-                'AND proposal.chain_executable_at <= :now',
+                'AND proposal.chain_executable_at <= :settled ' +
+                'AND NOT EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
+                'WHERE part.organization_id = proposal.organization_id ' +
+                'AND part.proposal_id = proposal.id ' +
+                'AND part.chain_epoch = proposal.chain_epoch ' +
+                "AND part.chain_status = 'PENDING' AND part.chain_disputed_at IS NULL " +
+                'AND part.chain_executable_at > :settled)',
             ),
         ),
       )
-      .setParameters({ now, onChain: ON_CHAIN_DISPUTE_LIKE })
+      .setParameters({ now, settled, onChain: ON_CHAIN_DISPUTE_LIKE })
       .orderBy(deadline, 'ASC')
       .limit(limit)
       .getRawMany<UndisputedProposalRow>();
@@ -640,16 +664,41 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 
   /**
-   * Per provider, the slash cases upheld or executed since `since` (owner
+   * Per provider, the slash cases the provider LOST since `since` (owner
    * decision C4: repeat offenders are banned with the blocklist, so the
-   * arbiter page shows the count). Cross-tenant on purpose, like the arbiter
-   * queue it feeds; `provider_id` is the provider organization.
+   * arbiter page shows the count as `upheldViolations30d`). Cross-tenant on
+   * purpose, like the arbiter queue it feeds; `provider_id` is the provider
+   * organization.
+   *
+   * What counts (review R2-1):
+   *
+   * - **EVM** — only what the chain decided against the provider: a record of
+   *   the case EXECUTED (any epoch, whoever sent it; the case's own
+   *   `executed_at` says the same), or the arbiter's on-chain uphold
+   *   (`resolution_kind = 'CHAIN_ARBITER'`) while the case still stands
+   *   upheld. A case the platform only labelled upheld (`AUTO_UNDISPUTED`)
+   *   counts once a record of it executes, not before.
+   * - **Solana** — the in-app decision is the decision there: a case upheld,
+   *   executing or executed, or one whose judgement was executed.
+   *
+   * Never counted: a case closed in the provider's favour (`OVERTURNED`,
+   * `WAIVED`, `REVERSED`), and no cancelled record at all — neither a
+   * verifier-key lapse (`VERIFIER_UNAVAILABLE`, which voids a case for reasons
+   * that say nothing about the provider) nor a record that expired because
+   * the platform did not execute it in time (`EXPIRED`, which the contract
+   * treats as the provider's favour). An arbiter-upheld record that then
+   * expired unexecuted leaves its case `CANCELLED`, so it is not counted
+   * either.
    */
   async countUpheldViolationsByProvider(
     providerIds: readonly string[],
     since: Date,
   ): Promise<Map<string, number>> {
     if (providerIds.length === 0) return new Map();
+    const executed =
+      'proposal.executed_at IS NOT NULL OR EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
+      'WHERE part.organization_id = proposal.organization_id ' +
+      "AND part.proposal_id = proposal.id AND part.chain_status = 'EXECUTED')";
     const rows = (await this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.provider_id', 'providerId')
@@ -657,21 +706,13 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .where('proposal.provider_id IN (:...providerIds)', {
         providerIds: [...new Set(providerIds)],
       })
-      // An arbiter's on-chain uphold makes the case UPHELD (`CHAIN_ARBITER`)
-      // and an on-chain execution EXECUTED, so both count here. Review N-4:
-      // so does a case any record of which was executed (disputed or not,
-      // whoever sent it), and one whose undisputed record lapsed (expired
-      // unexecuted: nobody ruled for the provider). Not a reversed case.
+      .andWhere('proposal.status NOT IN (:...providerWon)', {
+        providerWon: ['OVERTURNED', 'WAIVED', 'REVERSED'],
+      })
       .andWhere(
-        `proposal.status <> 'REVERSED' AND (` +
-          'proposal.status IN (:...upheld) OR proposal.executed_at IS NOT NULL OR ' +
-          'EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
-          'WHERE part.organization_id = proposal.organization_id ' +
-          'AND part.proposal_id = proposal.id AND (' +
-          "part.chain_status = 'EXECUTED' OR (part.chain_status = 'CANCELLED' " +
-          "AND part.cancel_reason IN ('EXPIRED', 'VERIFIER_UNAVAILABLE') " +
-          'AND part.chain_disputed_at IS NULL))))',
-        { upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'] },
+        `((${executed}) OR (proposal.status IN (:...upheld) AND (` +
+          "proposal.resolution_kind = 'CHAIN_ARBITER' OR proposal.asset_id NOT LIKE :onChain)))",
+        { upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'], onChain: ON_CHAIN_DISPUTE_LIKE },
       )
       .andWhere(
         'COALESCE(proposal.executed_at, proposal.resolved_at, proposal.proposed_at) >= :since',
@@ -686,9 +727,46 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * Review N-3: EVM cases still open from the in-app objection era
    * (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`) whose records reached the
    * chain. No queue, sweep or action reaches them any more; the scheduler
-   * re-derives each from its records once at start-up.
+   * re-derives each from its records after it starts. One page in
+   * `(proposed_at, id)` order after `after` (review R2-5: the pass pages until
+   * a page comes back empty, so more than one page of them is reached).
    */
-  async findOpenOnChainCases(limit: number): Promise<ChainSweepRow[]> {
+  async findOpenOnChainCases(
+    limit: number,
+    after: { readonly proposedAt: Date; readonly id: string } | null = null,
+  ): Promise<(ChainSweepRow & { proposedAt: Date })[]> {
+    const query = this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.organization_id', 'organizationId')
+      .addSelect('proposal.id', 'id')
+      .addSelect('proposal.proposed_at', 'proposedAt')
+      .where('proposal.status IN (:...open)', {
+        open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
+      })
+      .andWhere('proposal.asset_id LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
+      .andWhere('proposal.chain_status NOT IN (:...unproposed)', {
+        unproposed: ['NONE', 'PROPOSING'],
+      });
+    if (after) {
+      query.andWhere('(proposal.proposed_at, proposal.id) > (:afterAt, :afterId)', {
+        afterAt: after.proposedAt,
+        afterId: after.id,
+      });
+    }
+    return query
+      .orderBy('proposal.proposed_at', 'ASC')
+      .addOrderBy('proposal.id', 'ASC')
+      .limit(limit)
+      .getRawMany<ChainSweepRow & { proposedAt: Date }>();
+  }
+
+  /**
+   * Review R2-2: open EVM cases (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`)
+   * whose mirror stands `PENDING` with its door at or before `settledBefore`
+   * — the latest door of the case's pending records. The scheduler follows
+   * their records again every tick.
+   */
+  async findOpenOnChainPastDoor(settledBefore: Date, limit: number): Promise<ChainSweepRow[]> {
     return this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.organization_id', 'organizationId')
@@ -697,10 +775,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
       })
       .andWhere('proposal.asset_id LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
-      .andWhere('proposal.chain_status NOT IN (:...unproposed)', {
-        unproposed: ['NONE', 'PROPOSING'],
-      })
-      .orderBy('proposal.proposed_at', 'ASC')
+      .andWhere("proposal.chain_status = 'PENDING'")
+      .andWhere('proposal.chain_executable_at <= :settledBefore', { settledBefore })
+      .orderBy('proposal.chain_executable_at', 'ASC')
       .limit(limit)
       .getRawMany<ChainSweepRow>();
   }

@@ -120,7 +120,13 @@ describe('the on-chain dispute', () => {
       expect(of([record({ chainDisputedAt: DISPUTED_AT })])).toBe(OnChainDisputeState.UPHELD);
     });
 
-    it('reads EXECUTED when any part executed and nothing stands', () => {
+    it('reads EXECUTED when every record executed and nothing stands', () => {
+      expect(of([record({ chainStatus: 'EXECUTED' }), record({ chainStatus: 'EXECUTED' })])).toBe(
+        OnChainDisputeState.EXECUTED,
+      );
+    });
+
+    it('R2-3: reads PARTIALLY_EXECUTED when a record executed and another was cancelled', () => {
       expect(
         of([
           record({ chainStatus: 'EXECUTED' }),
@@ -130,7 +136,7 @@ describe('the on-chain dispute', () => {
             cancelReason: 'WITHDRAWN',
           }),
         ]),
-      ).toBe(OnChainDisputeState.EXECUTED);
+      ).toBe(OnChainDisputeState.PARTIALLY_EXECUTED);
     });
 
     it('tells an undisputed record that lapsed from a cancel and from an unruled dispute', () => {
@@ -152,6 +158,19 @@ describe('the on-chain dispute', () => {
           }),
         ]),
       ).toBe(OnChainDisputeState.EXPIRED);
+    });
+
+    it('R2-8: reads a cancel whose reason was never recorded as unknown, not as the arbiter’s', () => {
+      expect(of([record({ chainStatus: 'CANCELLED', cancelReason: null })])).toBe(
+        OnChainDisputeState.RELEASED,
+      );
+      // A known arbiter cancel still says so.
+      expect(
+        of([
+          record({ chainStatus: 'CANCELLED', cancelReason: null }),
+          record({ chainStatus: 'CANCELLED', cancelReason: 'WITHDRAWN' }),
+        ]),
+      ).toBe(OnChainDisputeState.CANCELLED);
     });
 
     it('can still be disputed while any part stands pending and was never disputed', () => {

@@ -732,6 +732,45 @@ describe('SlashCaseService.buildCase — the clocks of an EVM case', () => {
     });
   });
 
+  it('R2-3: shows a mixed case as executed in part, with the records cancelled for the provider', async () => {
+    const { service, proposals, strikes, windows, bindings } = build([
+      {
+        chainStatus: 'EXECUTED',
+        chainDisputedAt: new Date('2026-08-11T00:00:00Z'),
+        chainExecutableAt: DOOR,
+        cancelReason: null,
+      },
+      {
+        chainStatus: 'CANCELLED',
+        chainDisputedAt: new Date('2026-08-11T00:00:00Z'),
+        chainExecutableAt: DOOR,
+        cancelReason: 'WITHDRAWN',
+      },
+    ]);
+    proposals.seed(
+      buildProposal({
+        id: 'p1',
+        organizationId: ORG,
+        status: 'EXECUTED',
+        assetId: EVM_ASSET,
+        chainStatus: 'EXECUTED',
+        chainExecutableAt: DOOR,
+        chainDisputedAt: new Date('2026-08-11T00:00:00Z'),
+      }),
+    );
+    strikes.seed(buildStrike({ id: 'strike_1', organizationId: ORG }));
+    windows.seed(buildWindow({ id: 'window_1', organizationId: ORG }));
+    bindings.seed(buildBinding({ id: TEST_BINDING_ID, organizationId: ORG }));
+
+    const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
+
+    expect(clocks).toMatchObject({
+      chainState: 'PARTIALLY_EXECUTED',
+      chainRecords: 2,
+      cancelledRecords: 1,
+    });
+  });
+
   it('keeps the in-app clocks on Solana', async () => {
     const { service, proposals, strikes, windows, bindings } = build();
     proposals.seed(buildProposal({ id: 'p1', organizationId: ORG }));

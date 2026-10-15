@@ -964,6 +964,39 @@ export class ArbiterRulingBodyDto {
   ticketRef?: string;
 }
 
+/**
+ * Review R2-6: `S-13`, the arbiter's guarded `cancelSlash` of ONE superseded
+ * earlier-epoch record (`GET /operator/arbiter/superseded`).
+ */
+export class ArbiterSupersededCancelBodyDto {
+  @ApiProperty({ example: 'eip155:46630' })
+  @IsString()
+  @Matches(/^eip155:[0-9]+$/, { message: 'chainId must be an eip155 CAIP-2 chain id' })
+  chainId: string;
+
+  @ApiProperty({ description: 'The superseded record, 0x + 64 hex' })
+  @IsString()
+  @Matches(/^0x[0-9a-fA-F]{64}$/, { message: 'requestId must be 0x + 64 hex' })
+  requestId: string;
+
+  @ApiProperty()
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 4096)
+  note: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
 /** `A-11` — the arbiter's on-chain block of one address. Block only. */
 export class ArbiterBlockBodyDto {
   @ApiProperty({ example: 'eip155:46630' })

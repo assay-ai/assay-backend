@@ -129,7 +129,14 @@ export const SLASH_PROPOSAL_TRANSITIONS: Readonly<
     SlashProposalStatus.UNDER_REVIEW, // the second objected
     SlashProposalStatus.CANCELLED,
   ],
-  [SlashProposalStatus.UPHELD]: [SlashProposalStatus.EXECUTING, SlashProposalStatus.CANCELLED],
+  [SlashProposalStatus.UPHELD]: [
+    SlashProposalStatus.EXECUTING,
+    SlashProposalStatus.CANCELLED,
+    // EVM only (review R2-2): a case labelled AUTO_UNDISPUTED whose dispute on
+    // chain was mirrored only after the label, with nothing executed. Not a
+    // second decision: nobody had decided it.
+    SlashProposalStatus.DISPUTED,
+  ],
   [SlashProposalStatus.EXECUTING]: [
     SlashProposalStatus.EXECUTED,
     SlashProposalStatus.UPHELD, // the transaction failed; the case is executable again

@@ -1,10 +1,12 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { SlashProposalPartEntity } from '@database/postgres/entities/slash-proposal-part.entity';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
+import { CHAIN_DISPUTE_SETTLE_MS } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import {
@@ -60,6 +62,9 @@ import { SlashProposalService } from './slash-proposal.service';
 /** `chain_last_error` of a record of an earlier epoch that landed late (review N-9). */
 const SUPERSEDED_EPOCH = 'SupersededEpoch';
 
+/** Review R2-6: the page for a superseded earlier-epoch record standing on chain. */
+export const SLASH_RECORD_SUPERSEDED_ALERT = 'slash_record_superseded';
+
 @Injectable()
 export class SlashChainRulingService implements SlashChainRulingsPort {
   private readonly logger = new Logger(SlashChainRulingService.name);
@@ -70,6 +75,7 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     private readonly lifecycle: SlashProposalService,
     @Optional() private readonly arbitration: ArbitrationService | null = null,
     @Optional() private readonly execution: SlashExecutionService | null = null,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
 
   async recordDisputed(event: SlashChainDisputedEvent): Promise<boolean> {
@@ -78,7 +84,15 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     const proposal = await this.proposals.findOneScoped(part.organizationId, part.proposalId);
     if (!proposal) return false;
 
-    const first = part.chainStatus !== 'DISPUTED' && part.chainDisputedAt === null;
+    // Review R2-2: "first" is the timeline's, not the part's. A chain read
+    // (the executor's `SlashNotPending`, the stranded-part sweep) may already
+    // have mirrored the dispute onto the part before this event arrived.
+    const first = !(await this.lifecycle.hasTimelineEntry(
+      proposal.organizationId,
+      proposal.id,
+      'CHAIN_DISPUTED',
+      event.requestId,
+    ));
     if (part.chainStatus === 'PENDING' || part.chainStatus === 'REFUSED') {
       await this.parts.updatePart(part.organizationId, part.id, {
         chainStatus: 'DISPUTED',
@@ -316,15 +330,23 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
    *
    * - **Nothing stands** (no part `PENDING` or `DISPUTED`): `EXECUTED` when any
    *   part executed (the executor's completion, `mirrorChainExecution`, with
-   *   the summed amounts), else closed `CANCELLED` — unless the cancel was the
+   *   the summed amounts; a dispute the provider won in part reads
+   *   `PARTIALLY_UPHELD`, review R2-3), else closed `CANCELLED` — unless the cancel was the
    *   platform's own recalculation (S-2), left to `sweepAdminCancels`.
    * - **Only disputed parts stand**: a case still `PROPOSED` becomes
-   *   `DISPUTED` and waits for the arbiter.
+   *   `DISPUTED` and waits for the arbiter. So does one the platform labelled
+   *   `UPHELD` / `AUTO_UNDISPUTED` before the dispute was mirrored, with
+   *   nothing executed (review R2-2, `ArbitrationService.reopenForChainDispute`).
    * - **A part stands pending** (never disputed, or upheld): it executes at its
-   *   door. A `PROPOSED` case is upheld there by the undisputed sweep; an open
+   *   door. A `PROPOSED` case is upheld there by the undisputed sweep. An open
    *   `DISPUTED` / `UNDER_REVIEW` / `AWAITING_SECOND` case (an older in-app
-   *   objection, or a straggler re-adopted) is upheld now, so the executor
-   *   sends it. The executor sends every pending part whatever its siblings.
+   *   objection, or a straggler re-adopted) is upheld so the executor sends
+   *   it: as the arbiter's uphold (`CHAIN_ARBITER`) when a pending part was
+   *   disputed before (review R2-10), else as `AUTO_UNDISPUTED` — and that
+   *   only once every pending undisputed part is past its door by
+   *   `CHAIN_DISPUTE_SETTLE_MS` (review R2-2; {@link followOpenCasesPastDoor}
+   *   comes back for it). The executor sends every pending part whatever its
+   *   siblings.
    */
   async followRecords(
     proposal: SlashProposalEntity,
@@ -344,6 +366,17 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       if (has('NONE')) return;
       if (has('EXECUTED')) {
         await this.execution?.mirrorChainExecution(fresh, chain.transactionHash);
+        // Review R2-3: executed in part, won in part — the dispute says so.
+        if (has('CANCELLED')) {
+          await Promise.resolve(
+            this.arbitration?.recordPartialChainWin(fresh.organizationId, fresh.id),
+          ).catch((error: unknown) => {
+            this.logger.error(
+              `slash case ${fresh.id}: its partly won dispute could not be recorded`,
+              error instanceof Error ? error.stack : String(error),
+            );
+          });
+        }
         return;
       }
       if (fresh.chainStatus === ChainProposalStatus.CANCELLED) return;
@@ -365,18 +398,31 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       return;
     }
 
-    const move = has('PENDING')
-      ? this.arbitration?.recordChainStanding(fresh.organizationId, fresh.id)
-      : fresh.status === SlashProposalStatus.PROPOSED
-        ? this.arbitration?.fileDisputeFromChain(fresh.organizationId, fresh.id, {
-            requestId:
-              chain.requestId ??
-              parts.find((row: SlashProposalPartEntity) => row.chainStatus === 'DISPUTED')
-                ?.chainRequestId ??
-              fresh.chainRequestId,
-            transactionHash: chain.transactionHash,
-          })
-        : undefined;
+    const pending = parts.filter((row: SlashProposalPartEntity) => row.chainStatus === 'PENDING');
+    const disputedChain = {
+      requestId:
+        chain.requestId ??
+        parts.find((row: SlashProposalPartEntity) => row.chainStatus === 'DISPUTED')
+          ?.chainRequestId ??
+        fresh.chainRequestId,
+      transactionHash: chain.transactionHash,
+    };
+    const settled = Date.now() - CHAIN_DISPUTE_SETTLE_MS;
+    const move =
+      pending.length > 0
+        ? pending.some((row) => row.chainDisputedAt)
+          ? this.arbitration?.recordChainUphold(fresh.organizationId, fresh.id, {
+              arbiter: null,
+              transactionHash: chain.transactionHash,
+            })
+          : pending.every((row) => (row.chainExecutableAt?.getTime() ?? Infinity) <= settled)
+            ? this.arbitration?.recordChainStanding(fresh.organizationId, fresh.id)
+            : undefined
+        : fresh.status === SlashProposalStatus.PROPOSED
+          ? this.arbitration?.fileDisputeFromChain(fresh.organizationId, fresh.id, disputedChain)
+          : fresh.status === SlashProposalStatus.UPHELD && !has('EXECUTED')
+            ? this.arbitration?.reopenForChainDispute(fresh.organizationId, fresh.id, disputedChain)
+            : undefined;
     await Promise.resolve(move).catch((error: unknown) => {
       this.logger.error(
         `slash case ${fresh.id} could not follow its on-chain records`,
@@ -394,7 +440,9 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
    *
    * Idempotent with the executor's own mirror and with itself: a part already
    * `EXECUTED` is not rewritten, and a case already `EXECUTED` (or in the
-   * executor's hands, `EXECUTING`) is not moved again.
+   * executor's hands, `EXECUTING`) is not moved again. A late part of a case
+   * already `EXECUTED` is folded into its money columns, with the same
+   * compensation step (`SlashExecutionService.refoldLatePart`, review R2-4).
    */
   async recordExecuted(event: SlashChainExecutedEvent): Promise<boolean> {
     const part = await this.parts.findOneByChainRequestId(event.requestId);
@@ -425,6 +473,8 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     if (part) {
       await this.mirrorParts(proposal, {});
       await this.followRecords(proposal, event);
+      // Review R2-4: a late part of a case already closed EXECUTED.
+      await this.execution?.refoldLatePart(proposal, event.transactionHash);
     } else if (this.execution) {
       await this.execution.mirrorChainExecution(proposal, event.transactionHash);
     }
@@ -469,6 +519,25 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
           `landed on chain after the case was re-proposed; it would charge the same calls ` +
           `twice. The arbiter must cancel it (cancelSlash) before ${event.executableAt.toISOString()}`,
       );
+      // Review R2-6: a page, not only a log line. The arbiter page lists the
+      // record with its guarded cancel (`GET /operator/arbiter/superseded`).
+      await this.alerts?.emit({
+        severity: AlertSeverity.CRITICAL,
+        name: SLASH_RECORD_SUPERSEDED_ALERT,
+        summary:
+          `A slash record of an earlier proposal of case ${proposal.id} landed on chain late; ` +
+          'it would charge the same calls twice. The arbiter must cancel it (arbiter page, ' +
+          `superseded records) before ${event.executableAt.toISOString()}`,
+        details: {
+          chainId: event.chainId,
+          requestId: `0x${event.requestId}`,
+          proposalId: proposal.id,
+          organizationId: proposal.organizationId,
+          executableAt: event.executableAt.toISOString(),
+        },
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: `${event.chainId}:${event.requestId}`,
+      });
       await this.timeline(proposal, new Date(), 'CHAIN_SUPERSEDED_RECORD', {
         summary:
           'A record of an earlier proposal of this case landed on chain late. It is not ' +
@@ -513,12 +582,39 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
    * and the case then follows them ({@link followRecords}): a record standing
    * undisputed makes it `UPHELD` for the executor, a case with nothing
    * standing closes, and one whose every record is disputed on chain stays for
-   * the arbiter. Run once when the scheduler starts; idempotent. Returns how
-   * many cases moved.
+   * the arbiter. Idempotent.
+   *
+   * One page after `after` (review R2-5): `next` is the cursor of the
+   * following page, `null` once this page was the last, and `failed` the
+   * cases whose read failed, for {@link reconcileCases} to retry.
    */
-  async reconcileOpenCases(limit: number): Promise<number> {
-    const rows = await this.proposals.findOpenOnChainCases(limit);
+  async reconcileOpenCases(
+    limit: number,
+    after: { readonly proposedAt: Date; readonly id: string } | null = null,
+  ): Promise<{
+    moved: number;
+    failed: { organizationId: string; id: string }[];
+    next: { proposedAt: Date; id: string } | null;
+  }> {
+    const rows = await this.proposals.findOpenOnChainCases(limit, after);
+    const { moved, failed } = await this.reconcileCases(rows);
+    const last = rows[rows.length - 1];
+    return {
+      moved,
+      failed,
+      next:
+        rows.length < limit || !last
+          ? null
+          : { proposedAt: new Date(last.proposedAt), id: last.id },
+    };
+  }
+
+  /** {@link reconcileOpenCases} for the given cases: re-read, then follow. */
+  async reconcileCases(
+    rows: readonly { readonly organizationId: string; readonly id: string }[],
+  ): Promise<{ moved: number; failed: { organizationId: string; id: string }[] }> {
     let moved = 0;
+    const failed: { organizationId: string; id: string }[] = [];
     for (const row of rows) {
       try {
         const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
@@ -529,8 +625,40 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
         const after = await this.proposals.findOneScoped(row.organizationId, row.id);
         if (after && after.status !== proposal.status) moved += 1;
       } catch (error) {
+        failed.push({ organizationId: row.organizationId, id: row.id });
         this.logger.error(
-          `slash case ${row.id}: its on-chain records could not be re-read at start-up`,
+          `slash case ${row.id}: its on-chain records could not be re-read; retried later`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
+    }
+    return { moved, failed };
+  }
+
+  /**
+   * Review R2-2: open EVM cases (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`)
+   * a record of which stands pending past its door by
+   * `CHAIN_DISPUTE_SETTLE_MS`. {@link followRecords} leaves such a case open
+   * until every undisputed record has settled, and no event comes back for
+   * it; every tick follows them again. No chain read: the parts are mirrored
+   * already. Returns how many cases moved.
+   */
+  async followOpenCasesPastDoor(now: Date, limit: number): Promise<number> {
+    const rows = await this.proposals.findOpenOnChainPastDoor(
+      new Date(now.getTime() - CHAIN_DISPUTE_SETTLE_MS),
+      limit,
+    );
+    let moved = 0;
+    for (const row of rows) {
+      try {
+        const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (!proposal) continue;
+        await this.followRecords(proposal, { transactionHash: null });
+        const after = await this.proposals.findOneScoped(row.organizationId, row.id);
+        if (after && after.status !== proposal.status) moved += 1;
+      } catch (error) {
+        this.logger.error(
+          `slash case ${row.id}: following its on-chain records past their door failed`,
           error instanceof Error ? error.stack : String(error),
         );
       }
