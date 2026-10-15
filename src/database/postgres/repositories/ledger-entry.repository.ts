@@ -273,10 +273,11 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
   }
 
   /**
-   * `HOLD_RELEASE` entries whose hold's intent does not point back at that
-   * hold — see `domain/withheld.ts` for exactly why this shape of row exists
-   * and why it must be named rather than folded silently into `withheld` —
-   * and the remainder released when a hold is committed below its amount.
+   * Per asset, the `HOLD_RELEASE` entries whose hold's intent does not point
+   * back at that hold — see `domain/withheld.ts` for exactly why this shape of
+   * row exists and why it must be named rather than folded silently into
+   * `withheld` — and the remainder released when a hold is committed below its
+   * amount.
    *
    * The join is honest rather than inferred: it walks `ledger_entries` →
    * `ledger_holds` (the hold the release resolved) → `payment_intents` (the
@@ -286,6 +287,11 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
    * (`intent.hold_id IS NULL`), which is exactly the `secureFunds` race the
    * domain comment names.
    *
+   * Aggregated in SQL: one row per asset, and at most `maxListedIds` orphan
+   * hold ids. A remainder exists for every call served below its hold, so a
+   * row per entry made every `GET /balances` load the account's whole release
+   * history (round-two review N-8). The sums are the same terms as before.
+   *
    * `payment_intents` belongs to a different domain, and this is the one place
    * the ledger reads it directly rather than through a port: the alternative —
    * asking the payment domain for "every intent whose hold does not match its
@@ -293,10 +299,18 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
    * nothing, since the fact being checked is intrinsically about how the two
    * tables agree.
    */
-  async findOrphanedHoldReleases(
+  async summarizeOrphanedHoldReleases(
     organizationId: string,
     period: JournalPeriod = {},
-  ): Promise<OrphanedHoldRelease[]> {
+    maxListedIds = 100,
+  ): Promise<OrphanedHoldReleaseSummary[]> {
+    // A release on its intent's own COMMITTED hold is the remainder of a
+    // charge below the hold — the quote less the serving binding's price —
+    // returned at settlement. Not withheld value either: the call was
+    // charged. Reported as its own term and not as an orphan (final review N-8).
+    const remainder = `(hold.status = 'COMMITTED' AND intent.hold_id IS NOT NULL AND intent.hold_id = hold.id)`;
+    const listed = Math.max(0, Math.trunc(maxListedIds));
+
     const qb = this.createQueryBuilder('entry')
       .innerJoin(
         'ledger_holds',
@@ -308,18 +322,20 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
         'intent',
         'intent.id = hold.intent_id AND intent.organization_id = entry.organization_id',
       )
-      .select('entry.holdId', 'holdId')
-      .addSelect('entry.assetId', 'asset')
+      .select('entry.assetId', 'asset')
       .addSelect('entry.decimals', 'decimals')
-      .addSelect('entry.amount', 'amount')
-      // A release on its intent's own COMMITTED hold is the remainder of a
-      // charge below the hold — the quote less the serving binding's price —
-      // returned at settlement. Not withheld value either: the call was
-      // charged. Flagged, so it is reported as its own term and not as an
-      // orphan (final review N-8).
       .addSelect(
-        `(hold.status = 'COMMITTED' AND intent.hold_id IS NOT NULL AND intent.hold_id = hold.id)`,
-        'settlementRemainder',
+        `COALESCE(SUM(entry.amount) FILTER (WHERE ${remainder}), 0)`,
+        'settlementRemainders',
+      )
+      .addSelect(
+        `COALESCE(SUM(entry.amount) FILTER (WHERE NOT ${remainder}), 0)`,
+        'orphanedReleases',
+      )
+      .addSelect(`COUNT(*) FILTER (WHERE NOT ${remainder})`, 'orphanedHoldCount')
+      .addSelect(
+        `(array_agg(entry.hold_id ORDER BY entry.seq) FILTER (WHERE NOT ${remainder}))[1:${listed}]`,
+        'orphanedHoldIds',
       )
       .where('entry.organizationId = :organizationId', { organizationId })
       .andWhere('entry.entryType = :entryType', { entryType: HOLD_RELEASE_ENTRY_TYPE })
@@ -334,20 +350,22 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
       qb.andWhere('entry.createdAt < :to', { to: period.to });
     }
 
-    const rows = await qb.getRawMany<{
-      holdId: string;
+    const rows = await qb.groupBy('entry.assetId').addGroupBy('entry.decimals').getRawMany<{
       asset: string;
       decimals: string;
-      amount: string;
-      settlementRemainder: boolean | string;
+      settlementRemainders: string;
+      orphanedReleases: string;
+      orphanedHoldCount: string;
+      orphanedHoldIds: string[] | null;
     }>();
 
     return rows.map((row) => ({
-      holdId: row.holdId,
       asset: row.asset,
       decimals: Number(row.decimals),
-      amount: BigInt(row.amount),
-      settlementRemainder: row.settlementRemainder === true || row.settlementRemainder === 't',
+      settlementRemainders: BigInt(row.settlementRemainders),
+      orphanedReleases: BigInt(row.orphanedReleases),
+      orphanedHoldCount: Number(row.orphanedHoldCount),
+      orphanedHoldIds: row.orphanedHoldIds ?? [],
     }));
   }
 
@@ -425,17 +443,21 @@ export interface EntryTypeAssetTotal {
  * `domain/withheld.ts` for why this term exists rather than being tolerated as
  * an unexplained delta.
  */
-export interface OrphanedHoldRelease {
-  readonly holdId: string;
+export interface OrphanedHoldReleaseSummary {
   readonly asset: string;
   readonly decimals: number;
-  readonly amount: bigint;
   /**
-   * The remainder released on the intent's own COMMITTED hold when the call
+   * `Σ` the remainders released on intents' own COMMITTED holds when a call
    * was charged below its hold. Expected on every cheaper serve, so it is
    * reported apart from the real orphans.
    */
-  readonly settlementRemainder: boolean;
+  readonly settlementRemainders: bigint;
+  /** `Σ` the releases whose hold's intent does not point back at that hold. */
+  readonly orphanedReleases: bigint;
+  /** How many such releases. */
+  readonly orphanedHoldCount: number;
+  /** The holds of the first of them, oldest first, at most the caller's cap. */
+  readonly orphanedHoldIds: readonly string[];
 }
 
 /** The `(from, to]` window a payout run swept — see `ProviderPayoutEntity`. */

@@ -282,7 +282,7 @@ export class McpToolCallService {
     // The cap check and the hold it allows run under the agent's spend lock:
     // read and reserve as one step, so concurrent calls cannot all read the
     // same spend-so-far and all fit (review 2026-10-15 P-6).
-    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async () => {
+    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async (held) => {
       const spendPolicyVersion = await this.spendPolicy.assertCallAllowed({
         organizationId: session.organizationId,
         agentId: session.agentId,
@@ -343,6 +343,10 @@ export class McpToolCallService {
         chainId: session.chainId,
       });
 
+      // Still ours? Otherwise the next call of this agent may already have
+      // summed its spend without this hold (round-two review N-4). The intent
+      // stays in `CREATED` with nothing reserved, for the expiry sweep.
+      await held();
       const unaffordable = await this.secureFunds(session, intent, price);
       return { intent, unaffordable };
     });
@@ -468,7 +472,7 @@ export class McpToolCallService {
     // A charge like any other, so the same gate that caps rail A caps this —
     // against the hash the voucher signs, which is this call's identity here.
     // Checked and held under the agent's spend lock, as on rail A (P-6).
-    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async () => {
+    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async (held) => {
       await this.spendPolicy.assertCallAllowed({
         organizationId: session.organizationId,
         agentId: session.agentId,
@@ -498,6 +502,8 @@ export class McpToolCallService {
             // The same read as the withdraw gate above: the escrow's own limits
             // bind this voucher at redemption, so they are applied before serving.
             escrow: reading,
+            // After the voucher's chain reads, before its intent and hold (N-4).
+            beforeHold: held,
           }),
           unaffordable: null,
         };

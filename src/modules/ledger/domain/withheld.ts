@@ -312,6 +312,8 @@ export function reconcileWithheld(input: {
   readonly holdReleaseTotal: Money;
   readonly orphanedReleases: Money;
   readonly orphanedHoldIds: readonly string[];
+  /** Every orphan, when `orphanedHoldIds` was already capped; its length otherwise. */
+  readonly orphanedHoldCount?: number;
   readonly settlementRemainders: Money;
 }): WithheldReconciliation {
   const difference =
@@ -325,7 +327,7 @@ export function reconcileWithheld(input: {
     holdReleaseTotal: input.holdReleaseTotal,
     orphanedReleases: input.orphanedReleases,
     orphanedHoldIds: input.orphanedHoldIds.slice(0, MAX_LISTED_ORPHANED_HOLD_IDS),
-    orphanedHoldCount: input.orphanedHoldIds.length,
+    orphanedHoldCount: input.orphanedHoldCount ?? input.orphanedHoldIds.length,
     settlementRemainders: input.settlementRemainders,
     ok: difference === 0n,
     difference: difference.toString(),

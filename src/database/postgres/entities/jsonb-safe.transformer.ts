@@ -31,6 +31,10 @@ import { ValueTransformer } from 'typeorm';
  * mark and undoes the three escapes, so every reader — the judge, the evidence
  * sealer, a dispute replay — sees the bytes that were served, and a digest
  * recomputed from a read matches the one taken before the write.
+ *
+ * Raw SQL sees the encoded form. A script that reads these columns with
+ * `query()` instead of through the entity must apply {@link
+ * jsonbSafeTransformer}`.from` itself before it hashes or compares anything.
  */
 export const JSONB_ESCAPE_MARK = '';
 
@@ -44,8 +48,18 @@ function mapJson(value: unknown, map: (text: string) => string): unknown {
   if (Array.isArray(value)) return value.map((item) => mapJson(item, map));
   if (!isPlainObject(value)) return value;
 
+  // `defineProperty`, not `out[key] = …`: assignment treats a `__proto__` key
+  // as the prototype setter, so the key would vanish from what is stored and
+  // its value would be inherited instead (round-two review R2-1).
   const out: Record<string, unknown> = {};
-  for (const [key, item] of Object.entries(value)) out[map(key)] = mapJson(item, map);
+  for (const [key, item] of Object.entries(value)) {
+    Object.defineProperty(out, map(key), {
+      value: mapJson(item, map),
+      enumerable: true,
+      writable: true,
+      configurable: true,
+    });
+  }
   return out;
 }
 
@@ -77,6 +91,15 @@ function encodeString(text: string): string {
   return JSONB_ESCAPE_MARK + body;
 }
 
+/**
+ * Decodes only what {@link encodeString} could have written, and returns
+ * anything else exactly as stored. A string that starts with the mark but was
+ * written before this transformer existed — or by raw SQL — is not an encoded
+ * one, and guessing at it would silently change it (round-two review R2-2):
+ * a dangling `\`, an unknown escape, a `\u` that is not four lowercase hex
+ * digits of a surrogate, or a body the encoder would have written differently
+ * all read back unchanged.
+ */
 function decodeString(text: string): string {
   if (!text.startsWith(JSONB_ESCAPE_MARK)) return text;
 
@@ -87,18 +110,19 @@ function decodeString(text: string): string {
       continue;
     }
     const next = text[i + 1];
-    if (next === '0') {
+    if (next === '\\') {
+      out += '\\';
+      i += 1;
+    } else if (next === '0') {
       out += '\u0000';
       i += 1;
-    } else if (next === 'u') {
+    } else if (next === 'u' && /^d[89a-f][0-9a-f]{2}$/.test(text.slice(i + 2, i + 6))) {
       out += String.fromCharCode(parseInt(text.slice(i + 2, i + 6), 16));
       i += 5;
-    } else {
-      out += next;
-      i += 1;
-    }
+    } else return text;
   }
-  return out;
+  // The encoding is canonical, so a body it did not produce is not one of ours.
+  return encodeString(out) === text ? out : text;
 }
 
 function needsEscape(text: string): boolean {

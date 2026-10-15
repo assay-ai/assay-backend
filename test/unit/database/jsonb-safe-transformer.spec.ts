@@ -62,6 +62,50 @@ describe('jsonbSafeTransformer', () => {
     expect(jsonbSafeTransformer.to(null)).toBeNull();
   });
 
+  /**
+   * Round-two review R2-1: `out[key] = …` on a plain `{}` treats `__proto__`
+   * as the prototype setter, so the key vanished from what was stored.
+   */
+  it('keeps "__proto__" and "constructor" as own keys, both ways', () => {
+    const served = JSON.parse(
+      '{"__proto__":{"hidden":"x"},"constructor":"c","ok":1,"n":{"__proto__":[1]}}',
+    ) as Record<string, unknown>;
+
+    for (const mapped of [jsonbSafeTransformer.to(served), jsonbSafeTransformer.from(served)]) {
+      const object = mapped as Record<string, unknown>;
+      expect(Object.keys(object)).toEqual(['__proto__', 'constructor', 'ok', 'n']);
+      expect(Object.getOwnPropertyDescriptor(object, '__proto__')?.value).toEqual({ hidden: 'x' });
+      expect((object as { hidden?: unknown }).hidden).toBeUndefined();
+      expect(JSON.stringify(mapped)).toBe(JSON.stringify(served));
+    }
+  });
+
+  /**
+   * Round-two review R2-2: a string stored before the transformer existed may
+   * start with U+E000 without being an encoded one. Decoding is total: only a
+   * body the encoder could have produced is decoded, anything else reads back
+   * as stored.
+   */
+  it.each([
+    ['a trailing backslash', `${JSONB_ESCAPE_MARK}ends with \\`],
+    ['an unknown escape', `${JSONB_ESCAPE_MARK}a\\qb`],
+    ['a short \\u escape', `${JSONB_ESCAPE_MARK}x\\u12`],
+    ['a \\u escape of a non-surrogate', `${JSONB_ESCAPE_MARK}\\u0041`],
+    ['an uppercase \\u escape', `${JSONB_ESCAPE_MARK}\\uD800`],
+    ['a mark with nothing to escape', `${JSONB_ESCAPE_MARK}plain`],
+    ['escaped surrogates that form a pair', `${JSONB_ESCAPE_MARK}\\ud83d\\ude00`],
+  ])('reads a legacy string with %s back unchanged', (_label, stored) => {
+    expect(jsonbSafeTransformer.from(stored)).toBe(stored);
+    expect(jsonbSafeTransformer.from(jsonbSafeTransformer.to(stored))).toBe(stored);
+  });
+
+  it('round-trips an ordinary string that starts with the mark', () => {
+    const original = `${JSONB_ESCAPE_MARK}private use \\ ok`;
+    const stored = jsonbSafeTransformer.to(original) as string;
+    expect(stored).not.toBe(original);
+    expect(jsonbSafeTransformer.from(stored)).toBe(original);
+  });
+
   it.each([
     [VerificationRecordEntity, 'request'],
     [VerificationRecordEntity, 'response'],
