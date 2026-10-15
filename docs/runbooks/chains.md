@@ -211,6 +211,23 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   - An arbiter's `cancelSlash(Batch)` (`SlashCancelled`) is mirrored at once:
     the part is `CANCELLED`, and the case closes as soon as nothing of it
     stands and nothing executed.
+  - **CRITICAL `slash_record_superseded`**: a record of an earlier proposal of a
+    case landed late and would charge the same calls twice. The arbiter page
+    lists it under superseded records; the arbiter cancels it before its
+    `executableAt`. Its cancel or expiry changes only that record, never the
+    current case. **CRITICAL `slash_superseded_record_executed`**: one executed
+    anyway (an actual double charge); a human settles it with the provider.
+  - The `409` on `POST /operator/arbiter/superseded/cancel-intent` for a record
+    that is not superseded is a convenience against mistakes on that panel, not
+    a boundary: any single S-13 operator (`ADJL`/`TRE`) can prepare a cancel of
+    any pending or disputed record through `ruling-intent`. The control is the
+    arbiter's key, held by a person, which signs every cancel; only the
+    arbiter or the admin can cancel on chain. The arbiter checks each unsigned
+    cancel against the case before signing.
+- **CRITICAL `slash_lifecycle_tick_hung`**: a slash lifecycle tick in the
+  scheduler has run over 10 minutes (a call with no timeout). Later ticks run
+  beside it; find the stuck call (RPC or database) and restart the scheduler if
+  it stays stuck.
 - **WARN `evm_verifier_key_expiring`** (hourly): a verifier key that still has
   open (`Pending` or `Disputed`) slash records expires within 45 days, or
   already has. Records signed by an expired key can never execute, so rotate:
