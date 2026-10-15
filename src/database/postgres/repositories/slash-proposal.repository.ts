@@ -727,23 +727,37 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * Review N-3: EVM cases still open from the in-app objection era
    * (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`) whose records reached the
    * chain. No queue, sweep or action reaches them any more; the scheduler
-   * re-derives each from its records once at start-up.
+   * re-derives each from its records after it starts. One page in
+   * `(proposed_at, id)` order after `after` (review R2-5: the pass pages until
+   * a page comes back empty, so more than one page of them is reached).
    */
-  async findOpenOnChainCases(limit: number): Promise<ChainSweepRow[]> {
-    return this.manager
+  async findOpenOnChainCases(
+    limit: number,
+    after: { readonly proposedAt: Date; readonly id: string } | null = null,
+  ): Promise<(ChainSweepRow & { proposedAt: Date })[]> {
+    const query = this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.organization_id', 'organizationId')
       .addSelect('proposal.id', 'id')
+      .addSelect('proposal.proposed_at', 'proposedAt')
       .where('proposal.status IN (:...open)', {
         open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
       })
       .andWhere('proposal.asset_id LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
       .andWhere('proposal.chain_status NOT IN (:...unproposed)', {
         unproposed: ['NONE', 'PROPOSING'],
-      })
+      });
+    if (after) {
+      query.andWhere('(proposal.proposed_at, proposal.id) > (:afterAt, :afterId)', {
+        afterAt: after.proposedAt,
+        afterId: after.id,
+      });
+    }
+    return query
       .orderBy('proposal.proposed_at', 'ASC')
+      .addOrderBy('proposal.id', 'ASC')
       .limit(limit)
-      .getRawMany<ChainSweepRow>();
+      .getRawMany<ChainSweepRow & { proposedAt: Date }>();
   }
 
   /**

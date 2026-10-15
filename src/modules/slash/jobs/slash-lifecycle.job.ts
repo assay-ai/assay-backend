@@ -22,9 +22,11 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  *
  * ## Order within one tick
  *
- * `sweepUndisputed` → `sweepPlatformMisses` → `proposeDue` → `executeDue` →
- * `requestCancelsForClosedCases` → `sweepAdminCancels` → `reconcileExecuting`,
- * and the order is load-bearing, not cosmetic:
+ * `sweepUndisputed` → (EVM: `followOpenCasesPastDoor`) → `sweepPlatformMisses`
+ * → `proposeDue` → `executeDue` → `requestCancelsForClosedCases` →
+ * `sweepAdminCancels` → `sweepUnresolvedDisputes` → `reconcileExecuting` →
+ * (EVM: one page of the start-up `reconcileOpenCases`), and the order is
+ * load-bearing, not cosmetic:
  *
  * - The sweepers run first because either can change what is due for the
  *   chain steps below them on the very same tick: a case `sweepUndisputed`
@@ -61,8 +63,11 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  * the reason to keep it here is that these steps have to agree about
  * order.
  */
-/** How many old open EVM cases the start-up pass re-derives (review N-3). */
-const OPEN_EVM_CASES_PER_START = 1000;
+/** One page of old open EVM cases the start-up pass re-derives per tick (review N-3, R2-5). */
+const OPEN_EVM_CASES_PAGE = 200;
+
+/** How many later ticks a case whose re-read failed is retried on (review R2-5). */
+const OPEN_EVM_CASE_RETRIES = 5;
 
 /** How many open EVM cases past their door one tick follows (review R2-2). */
 const OPEN_EVM_CASES_PER_TICK = 100;
@@ -78,12 +83,38 @@ export class SlashLifecycleJob {
     @Optional() private readonly rulings: SlashChainRulingService | null = null,
   ) {}
 
-  /** Review N-3: the start-up pass over old open EVM cases ran. */
+  /** Review N-3 / R2-5: the start-up pass over old open EVM cases has read its last page. */
   private openEvmCasesReconciled = false;
+  /** Where that pass resumes on the next tick. */
+  private openEvmCursor: { proposedAt: Date; id: string } | null = null;
+  /** Cases whose re-read failed, and how many retries each has had. */
+  private readonly openEvmRetries = new Map<
+    string,
+    { row: { organizationId: string; id: string }; attempts: number }
+  >();
+  /**
+   * Review R2-5: `@nestjs/schedule` does not stop a `@Cron` handler from
+   * starting while its previous run is still going. A tick slower than a
+   * minute (a long chain read) would run every step twice beside itself, so
+   * a tick that finds the previous one still running does nothing.
+   */
+  private ticking = false;
 
   @Cron(CronExpression.EVERY_MINUTE)
   async handleTick(): Promise<void> {
-    await this.reconcileOpenEvmCases();
+    if (this.ticking) {
+      this.logger.warn('The previous slash lifecycle tick is still running; this one is skipped.');
+      return;
+    }
+    this.ticking = true;
+    try {
+      await this.runTick();
+    } finally {
+      this.ticking = false;
+    }
+  }
+
+  private async runTick(): Promise<void> {
     await this.sweepUndisputed();
     // Review R2-2: open EVM cases left open until their records settled.
     await this.followOpenEvmCasesPastDoor();
@@ -102,22 +133,54 @@ export class SlashLifecycleJob {
     await this.sweepAdminCancels();
     // D-19: disputed records nobody ruled on within 30 days.
     await this.sweepUnresolvedDisputes();
-    // Last. Cleanup for a crashed submit, and it must never delay a live
-    // judgement to do it.
+    // Cleanup for a crashed submit, and it must never delay a live judgement
+    // to do it.
     await this.reconcileExecuting();
+    // Review R2-5: last, one page per tick, so the first tick's sweeps never
+    // wait behind it.
+    await this.reconcileOpenEvmCases();
   }
 
   /**
-   * Once per scheduler process, on its first tick (review N-3): EVM cases
-   * still open from the in-app objection era are re-derived from their
-   * on-chain records, so each reaches a live or terminal state. Retried on the
-   * next tick only if the pass itself failed.
+   * Once per scheduler process (review N-3): EVM cases still open from the
+   * in-app objection era are re-derived from their on-chain records, so each
+   * reaches a live or terminal state. Review R2-5: one page per tick, resumed
+   * from a cursor until a page comes back empty (a failed page is read again
+   * from the same cursor); a case whose re-read failed is retried on each of
+   * the next {@link OPEN_EVM_CASE_RETRIES} ticks, then left with an error.
    */
   private async reconcileOpenEvmCases(): Promise<void> {
-    if (this.openEvmCasesReconciled || !this.rulings) return;
+    if (!this.rulings) return;
     try {
-      const moved = await this.rulings.reconcileOpenCases(OPEN_EVM_CASES_PER_START);
-      this.openEvmCasesReconciled = true;
+      let moved = 0;
+      if (!this.openEvmCasesReconciled) {
+        const page = await this.rulings.reconcileOpenCases(OPEN_EVM_CASES_PAGE, this.openEvmCursor);
+        moved += page.moved;
+        for (const row of page.failed) {
+          this.openEvmRetries.set(row.id, { row, attempts: 0 });
+        }
+        this.openEvmCursor = page.next;
+        this.openEvmCasesReconciled = page.next === null;
+      } else if (this.openEvmRetries.size > 0) {
+        const entries = [...this.openEvmRetries.values()];
+        const retried = await this.rulings.reconcileCases(entries.map((entry) => entry.row));
+        moved += retried.moved;
+        const stillFailing = new Set(retried.failed.map((row) => row.id));
+        for (const entry of entries) {
+          if (!stillFailing.has(entry.row.id)) {
+            this.openEvmRetries.delete(entry.row.id);
+            continue;
+          }
+          entry.attempts += 1;
+          if (entry.attempts >= OPEN_EVM_CASE_RETRIES) {
+            this.openEvmRetries.delete(entry.row.id);
+            this.logger.error(
+              `Open EVM slash case ${entry.row.id} could not be re-derived from its records ` +
+                `after ${entry.attempts} retries; it is left for the next scheduler start.`,
+            );
+          }
+        }
+      }
       if (moved > 0) {
         this.logger.warn(`${moved} open EVM slash case(s) re-derived from their on-chain records.`);
       }
