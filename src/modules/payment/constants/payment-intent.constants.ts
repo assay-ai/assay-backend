@@ -1,6 +1,9 @@
 import { CronExpression } from '@nestjs/schedule';
 
-import { REDEEM_GRACE_SECONDS } from './voucher-redemption.constants';
+import {
+  REDEEM_GRACE_SECONDS,
+  REDEMPTION_DEADLINE_MARGIN_SECONDS,
+} from './voucher-redemption.constants';
 
 /**
  * How long an intent may sit unresolved before the sweep expires it.
@@ -53,23 +56,25 @@ export const PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS = 900;
 
 /**
  * How long before the chain's redemption deadline a voucher must still have
- * when its intent settles to be handed to the redemption job: 600 s, ten
- * redemption passes — room for a payer's earlier seq in RETRY, a backlog over
- * one batch, or a short pause (review 2026-10-15 #2, M3).
+ * when its intent settles to be handed to the redemption job: 60 s, one
+ * redemption pass (`VOUCHER_REDEMPTION_CRON` runs every minute). Any earlier
+ * and the chain would still redeem it, so a passing verdict that lands then is
+ * collected normally rather than turned into debt (review-buyer-debt M2). The
+ * redemption job lapses it itself if the chain refuses it after all.
  */
-export const PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS = 600;
+export const PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS = REDEMPTION_DEADLINE_MARGIN_SECONDS;
 
 /**
  * The latest a rail-B intent may settle, in seconds past its voucher's
  * `expiresAt`, and still be handed to the redemption job: the chain's deadline
  * (`expiresAt + REDEEM_GRACE_SECONDS`, no skew on EVM) less
- * {@link PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS} — 1,200 s.
+ * {@link PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS} — 1,740 s.
  *
  * A passing verdict that lands later — the worker or the sweep was down — is
  * still applied (`SETTLED`: the call was served), but its voucher is NOT handed
  * to the redemption job to die on `VoucherExpired`: `PaymentIntentService.resolve`
- * turns it into buyer debt at once (the hold stays open, nobody is credited, the
- * buyer re-signs). The platform never pays for a late verdict.
+ * turns it into buyer debt in the same statement (the hold stays open, nobody
+ * is credited, the buyer re-signs). The platform never pays for a late verdict.
  */
 export const PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS =
   REDEEM_GRACE_SECONDS - PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS;

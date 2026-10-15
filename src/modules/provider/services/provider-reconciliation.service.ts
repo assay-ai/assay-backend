@@ -9,6 +9,7 @@ import {
   FORFEITED_SQL,
   DEBT_OUTSTANDING_SQL,
   PLATFORM_ABSORBED_SQL,
+  VOIDED_SQL,
   WRITTEN_OFF_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
@@ -54,6 +55,8 @@ interface ReconciliationGroupRow {
   readonly holdCommitted: boolean | string;
   /** `FORFEITED_SQL`: the provider forfeited — same driver caveat (and may be NULL). */
   readonly forfeited: boolean | string | null;
+  /** `VOIDED_SQL`: a debt voided by a late rejecting verdict — same caveat. */
+  readonly voided?: boolean | string | null;
   readonly calls: string;
   /** `Σ price_amount` over this group's `SETTLED` rows. */
   readonly credited: string;
@@ -220,6 +223,7 @@ export class ProviderReconciliationService {
           uncollected: row.uncollected === true || row.uncollected === 'true',
           debtOutstanding: row.debtOutstanding === true || row.debtOutstanding === 'true',
           forfeited: row.forfeited === true || row.forfeited === 'true',
+          voided: row.voided === true || row.voided === 'true',
           credited: !(row.holdCommitted === false || row.holdCommitted === 'false'),
         });
         // `CALL_RECONCILIATION_CLASSES` pre-seeds every member above, so this
@@ -322,6 +326,7 @@ export class ProviderReconciliationService {
       .addSelect(DEBT_OUTSTANDING_SQL, 'debtOutstanding')
       .addSelect(CREDITED_SQL, 'holdCommitted')
       .addSelect(FORFEITED_SQL, 'forfeited')
+      .addSelect(VOIDED_SQL, 'voided')
       .addSelect('COUNT(*)', 'calls')
       // Money only for committed holds (`CREDITED_SQL`), the same rule as
       // `ProviderEarningsService`, so gross / take / net match `PROVIDER_CREDIT`.
@@ -361,6 +366,7 @@ export class ProviderReconciliationService {
       .addGroupBy(DEBT_OUTSTANDING_SQL)
       .addGroupBy(CREDITED_SQL)
       .addGroupBy(FORFEITED_SQL)
+      .addGroupBy(VOIDED_SQL)
       .getRawMany<ReconciliationGroupRow>();
   }
 

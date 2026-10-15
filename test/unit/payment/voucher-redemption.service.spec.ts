@@ -775,3 +775,65 @@ describe('VoucherRedemptionService.run, provider forfeit on a stake below the mi
     expect(ledger.appendNow).not.toHaveBeenCalled();
   });
 });
+
+/**
+ * Review-buyer-debt M3: an honest revoke or cap change made every in-flight
+ * call buyer debt at once, and a re-grant before the deadline did not undo it.
+ * The delegate and cap refusals are now retried until one pass before the
+ * voucher's on-chain deadline.
+ */
+describe('VoucherRedemptionService — a buyer tightening is retried until the deadline', () => {
+  it.each([
+    'DelegateIsRevoked',
+    'DelegateIsExpired',
+    'DelegateVoucherExceedsPerCallLimit',
+    'EscrowWindowLimitExceeded',
+  ])('%s mid-window: kept, recorded, retried — not debt', async (programError) => {
+    const { service, redeemer, payments, intents } = build([pending(1)]);
+    redeemer.outcome = RedeemOutcomeKind.RETRY;
+    redeemer.programError = programError;
+
+    await service.run(USDC);
+
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(ORG, 'intent-1', programError);
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+  });
+
+  it('a re-grant before the deadline redeems the same voucher on the next pass', async () => {
+    const first = build([pending(1)]);
+    first.redeemer.outcome = RedeemOutcomeKind.RETRY;
+    first.redeemer.programError = 'DelegateIsRevoked';
+    await first.service.run(USDC);
+
+    const second = build([pending(1, { redemptionLastError: 'DelegateIsRevoked' })]);
+    await second.service.run(USDC);
+
+    expect(second.intents.commitRedeemedHold).toHaveBeenCalledWith(ORG, 'intent-1', 'sig-1');
+    expect(second.payments.lapseRedemption).not.toHaveBeenCalled();
+  });
+
+  it('still refused one pass before the deadline: it becomes buyer debt then', async () => {
+    // expiresAt + 1,800 - 60 s is now: the last pass that could redeem it.
+    const expiresAt = new Date((NOW_SECONDS - REDEEM_GRACE_SECONDS + 60) * 1000);
+    const { service, redeemer, payments, intents } = build([pending(1, { expiresAt })]);
+    redeemer.outcome = RedeemOutcomeKind.RETRY;
+    redeemer.programError = 'DelegateIsRevoked';
+
+    await service.run(USDC);
+
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'DelegateIsRevoked');
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+  });
+
+  it('a stake refusal is not a buyer tightening: still retried at the deadline', async () => {
+    const expiresAt = new Date((NOW_SECONDS - REDEEM_GRACE_SECONDS + 60) * 1000);
+    const { service, redeemer, payments } = build([pending(1, { expiresAt })]);
+    redeemer.outcome = RedeemOutcomeKind.RETRY;
+    redeemer.programError = 'ProviderBelowMinimumStake';
+
+    await service.run(USDC);
+
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+  });
+});

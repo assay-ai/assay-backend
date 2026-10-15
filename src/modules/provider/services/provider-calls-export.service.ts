@@ -8,6 +8,7 @@ import {
 } from '@database/postgres/repositories/payment-intent.repository';
 import { isAssetId } from '@modules/chains/ports/caip.types';
 import {
+  DEBT_VOIDED_PREFIX,
   PROVIDER_FORFEIT_PREFIX,
   UNCOLLECTED_PREFIX,
 } from '@modules/payment/constants/voucher-redemption.constants';
@@ -191,8 +192,12 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
       row.absorbedReason !== null ||
       (row.redemptionLastError?.startsWith(UNCOLLECTED_PREFIX) ?? false),
     forfeited: row.redemptionLastError?.startsWith(PROVIDER_FORFEIT_PREFIX) ?? false,
+    voided: row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false,
     credited: row.credited,
   });
+  // A debt voided by a late rejecting verdict: nothing collected or credited.
+  const voided =
+    row.status === 'SETTLED' && (row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false);
   // Forfeited by the provider: nothing was collected, credited or taken.
   const forfeited = classification === CallReconciliationClass.PROVIDER_FORFEITED;
   // Never collected (a written-off debt, or a legacy absorb): nothing was
@@ -209,7 +214,7 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     row.toolId,
     row.status,
     classification,
-    forfeited || (uncollected && row.absorbedReason === null)
+    forfeited || voided || (uncollected && row.absorbedReason === null)
       ? row.redemptionLastError
       : uncollected
         ? `${UNCOLLECTED_PREFIX}legacy_platform_absorbed:${row.absorbedReason}`
@@ -219,8 +224,8 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
             ? (row.statusReason ?? 'settled, no credit recorded')
             : row.statusReason,
     row.verificationVerdict,
-    forfeited || uncollected ? '0' : row.providerAmount,
-    forfeited || uncollected ? '0' : row.platformFee,
+    forfeited || uncollected || voided ? '0' : row.providerAmount,
+    forfeited || uncollected || voided ? '0' : row.platformFee,
     row.priceAmount,
     row.asset,
     row.decimals,
