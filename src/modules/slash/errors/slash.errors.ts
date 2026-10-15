@@ -491,15 +491,17 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
         : '; you can dispute once its record is on chain'),
   },
   /**
-   * An off-chain decision (claim, decide, second, extension) on an EVM case.
-   * The arbiter's on-chain ruling is the only decision for it.
+   * An off-chain decision (claim, decide, second, extension, S-1 suspension)
+   * on an EVM case. Its records are decided only on chain: the arbiter's
+   * ruling on a dispute, or execution after `executableAt`.
    */
   arbiterRulesOnChain: {
     code: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
     statusCode: 409,
     message: (context?: Record<string, any>) =>
-      `Cannot ${context?.action ?? 'decide'} this case off chain: it is disputed on chain and ` +
-      'the arbiter rules on it there (upholdSlash / cancelSlash, from the arbiter page)',
+      `Cannot ${context?.action ?? 'decide'} this case off chain: an EVM penalty is decided ` +
+      'only on chain. The arbiter rules there (upholdSlash), and only the arbiter can stop it, ' +
+      'by cancelling its record on chain (cancelSlash, from the arbiter page)',
   },
   chainBatchRefused: {
     code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,

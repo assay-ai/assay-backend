@@ -705,6 +705,7 @@ export class SlashPartsService {
           await this.parts.updatePart(part.organizationId, part.id, {
             chainStatus: 'CANCELLED',
             cancelledAt: expired.cancelledAt,
+            cancelReason: expired.reason ?? null,
           });
         } catch (error) {
           this.logger.error(
@@ -827,6 +828,7 @@ export class SlashPartsService {
         await this.parts.updatePart(part.organizationId, part.id, {
           chainStatus: 'CANCELLED',
           cancelledAt: result.cancelledAt,
+          cancelReason: result.reason ?? null,
         });
       } catch (error) {
         failure ??= error;
@@ -952,6 +954,7 @@ export class SlashPartsService {
               await this.parts.updatePart(part.organizationId, part.id, {
                 chainStatus: 'CANCELLED',
                 cancelledAt: result.cancelledAt,
+                cancelReason: result.reason ?? null,
                 chainLastError: null,
               });
               expired += 1;
@@ -987,6 +990,7 @@ export class SlashPartsService {
             await this.parts.updatePart(part.organizationId, part.id, {
               chainStatus: 'CANCELLED',
               cancelledAt: result.cancelledAt,
+              cancelReason: result.reason ?? null,
               chainLastError: null,
             });
             expired += 1;

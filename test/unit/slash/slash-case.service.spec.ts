@@ -123,7 +123,7 @@ class FakeCaseRead {
   }
 }
 
-function build() {
+function build(parts: Record<string, unknown>[] | null = null) {
   const proposals = new FakeSlashProposals();
   const events = new FakeSlashProposalEvents();
   const notifications = new FakeNotifications();
@@ -158,6 +158,7 @@ function build() {
     caseRead as never,
     stakeService as never,
     catalogue as never,
+    (parts ? { findForEpoch: async () => parts } : null) as never,
   );
 
   return {
@@ -688,6 +689,47 @@ describe('SlashCaseService.buildCase — the clocks of an EVM case', () => {
     const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
 
     expect(clocks).toMatchObject({ chainState: 'DISPUTED', disputeBy: null, runningClock: 'NONE' });
+  });
+
+  it('N-4: reads a partly disputed case per record, with its undisputed part still disputable', async () => {
+    const { service, proposals, strikes, windows, bindings } = build([
+      // The arbiter cancelled the disputed part; the other part stands.
+      {
+        chainStatus: 'CANCELLED',
+        chainDisputedAt: new Date('2026-08-11T00:00:00Z'),
+        chainExecutableAt: DOOR,
+        cancelReason: 'WITHDRAWN',
+      },
+      {
+        chainStatus: 'PENDING',
+        chainDisputedAt: null,
+        chainExecutableAt: DOOR,
+        cancelReason: null,
+      },
+    ]);
+    proposals.seed(
+      buildProposal({
+        id: 'p1',
+        organizationId: ORG,
+        status: 'DISPUTED',
+        assetId: EVM_ASSET,
+        chainStatus: 'PENDING',
+        chainExecutableAt: DOOR,
+        chainDisputedAt: new Date('2026-08-11T00:00:00Z'),
+      }),
+    );
+    strikes.seed(buildStrike({ id: 'strike_1', organizationId: ORG }));
+    windows.seed(buildWindow({ id: 'window_1', organizationId: ORG }));
+    bindings.seed(buildBinding({ id: TEST_BINDING_ID, organizationId: ORG }));
+
+    const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
+
+    // Not "UPHELD" (the case mirror's dispute date), and not past disputing.
+    expect(clocks).toMatchObject({
+      chainState: 'PENDING',
+      disputeBy: DOOR,
+      runningClock: 'PROVIDER',
+    });
   });
 
   it('keeps the in-app clocks on Solana', async () => {
