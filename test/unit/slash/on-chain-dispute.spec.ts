@@ -160,6 +160,19 @@ describe('the on-chain dispute', () => {
       ).toBe(OnChainDisputeState.EXPIRED);
     });
 
+    it('R2-8: reads a cancel whose reason was never recorded as unknown, not as the arbiter’s', () => {
+      expect(of([record({ chainStatus: 'CANCELLED', cancelReason: null })])).toBe(
+        OnChainDisputeState.RELEASED,
+      );
+      // A known arbiter cancel still says so.
+      expect(
+        of([
+          record({ chainStatus: 'CANCELLED', cancelReason: null }),
+          record({ chainStatus: 'CANCELLED', cancelReason: 'WITHDRAWN' }),
+        ]),
+      ).toBe(OnChainDisputeState.CANCELLED);
+    });
+
     it('can still be disputed while any part stands pending and was never disputed', () => {
       const earlier = new Date('2026-10-19T00:00:00Z');
       expect(

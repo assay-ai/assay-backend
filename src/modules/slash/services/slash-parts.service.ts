@@ -1109,7 +1109,16 @@ export class SlashPartsService {
             executedAt: part.executedAt ?? record.executedAt ?? new Date(),
           }
         : {}),
-      ...(record.status === 'CANCELLED' ? { cancelledAt: record.cancelledAt ?? new Date() } : {}),
+      ...(record.status === 'CANCELLED'
+        ? {
+            cancelledAt: part.cancelledAt ?? record.cancelledAt ?? new Date(),
+            // Review R2-8: the reason the read observed, never a guess; a
+            // known reason is not overwritten.
+            ...(record.cancelReason && !part.cancelReason
+              ? { cancelReason: record.cancelReason }
+              : {}),
+          }
+        : {}),
     });
   }
 }
