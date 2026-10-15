@@ -214,9 +214,11 @@ export interface CallExportCursor {
 /**
  * The parties the redemption queue leaves out, from the cached blocklists.
  *
- * - `organizationIds`: blocked organizations (payer or provider), lower-case uuids.
+ * - `organizationIds`: blocked organizations, lower-case uuids; the query matches
+ *   them against the payer's organization only.
  * - `walletKeys`: the platform blocklist's namespace-wide wallet keys
- *   (`subjectKey`, e.g. `eip155:0xabc…`, Solana as written).
+ *   (`subjectKey`, e.g. `eip155:0xabc…`, Solana as written), matched against
+ *   the payer and the delegate.
  * - `chainAccounts`: CAIP-10 accounts the ON-CHAIN blocklist refuses on this
  *   asset's chain, confirmed live (compared lower-case; EVM only).
  */
@@ -252,6 +254,8 @@ export interface RedeemableIntent {
   readonly providerId: string | null;
   readonly providerAmount: string;
   readonly platformFee: string;
+  /** See `PaymentIntentEntity.redemptionLastError`. */
+  readonly redemptionLastError: string | null;
 }
 
 export interface DuePaymentIntent {
@@ -668,6 +672,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.providerId', 'providerId')
       .addSelect('intent.providerAmount', 'providerAmount')
       .addSelect('intent.platformFee', 'platformFee')
+      .addSelect('intent.redemptionLastError', 'redemptionLastError')
       .where('intent.organizationId IS NOT NULL')
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.rail = :rail', { rail })
@@ -710,14 +715,18 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // the payer's later seqs through, and redeeming one of those advances
       // `seq_high` past the held one and kills it. Done in the query, BEFORE
       // the LIMIT, so held rows can never fill the pass (audit E-1).
+      //
+      // Payer-side parties only — the payer's organization, the payer and the
+      // delegate. A blocked provider or payee is NOT left out: the pass makes
+      // that provider forfeit the voucher at once (`VoucherRedemptionService`),
+      // which closes the row, so it can neither wait nor fill a pass.
       const blockedParty = (alias: string) => {
         const key = (column: string) =>
           `(split_part(${alias}.${column}, ':', 1) || ':' || CASE WHEN split_part(${alias}.${column}, ':', 1) = 'eip155' ` +
           `THEN lower(split_part(${alias}.${column}, ':', 3)) ELSE split_part(${alias}.${column}, ':', 3) END)`;
         return [
           `${alias}.organization_id::text = ANY(:blockedOrgs)`,
-          `${alias}.provider_id::text = ANY(:blockedOrgs)`,
-          ...['agent_account', 'provider_account', 'voucher_delegate'].flatMap((column) => [
+          ...['agent_account', 'voucher_delegate'].flatMap((column) => [
             `${key(column)} = ANY(:blockedWalletKeys)`,
             `lower(${alias}.${column}) = ANY(:blockedChainAccounts)`,
           ]),
@@ -764,6 +773,19 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         WHERE "organization_id" = $1 AND "id" = $2
           AND NOT ($3::text = ANY("redemption_tx_refs"))`,
       [organizationId, id, txRef],
+    );
+  }
+
+  /**
+   * Records why the last redemption attempt of this intent was refused, or
+   * `provider_forfeit:<cause>` once the provider forfeited it. Overwrites. See
+   * `redemptionLastError` on the entity.
+   */
+  async recordRedemptionError(organizationId: string, id: string, error: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents" SET "redemption_last_error" = $3
+        WHERE "organization_id" = $1 AND "id" = $2`,
+      [organizationId, id, error],
     );
   }
 
