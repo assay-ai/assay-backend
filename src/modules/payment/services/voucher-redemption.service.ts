@@ -734,6 +734,9 @@ export class VoucherRedemptionService {
       },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       dedupeKey: row.id,
+      // Once a day per intent: the lookup is retried every pass, and an RPC
+      // outage with N stuck intents must not page N times an hour.
+      suppressionWindowSeconds: 24 * 60 * 60,
     });
   }
 
