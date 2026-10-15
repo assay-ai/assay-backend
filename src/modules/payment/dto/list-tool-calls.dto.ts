@@ -78,14 +78,16 @@ export class ToolCallDto {
 
   @ApiPropertyOptional({
     nullable: true,
-    enum: ['OUTSTANDING', 'WRITTEN_OFF'],
+    enum: ['OUTSTANDING', 'WRITTEN_OFF', 'VOIDED'],
     description:
       'Buyer debt: `OUTSTANDING` — the payment could not be collected, the price stays held and ' +
       'the payer must sign a replacement voucher (GET /escrow/debts) before paid calls work ' +
-      'again; `WRITTEN_OFF` — never settled, the hold was released and the provider not paid. ' +
-      'Null otherwise',
+      'again (also while a signed replacement is being collected); `WRITTEN_OFF` — never ' +
+      'settled, the hold was released and the provider not paid, and paid calls stay refused ' +
+      'until it is signed; `VOIDED` — the call failed verification after it had become debt: ' +
+      'not charged, nobody paid. Null otherwise',
   })
-  debt: 'OUTSTANDING' | 'WRITTEN_OFF' | null;
+  debt: 'OUTSTANDING' | 'WRITTEN_OFF' | 'VOIDED' | null;
 
   @ApiPropertyOptional({
     nullable: true,

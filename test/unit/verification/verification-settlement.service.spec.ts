@@ -185,6 +185,20 @@ class FakePaymentIntents {
     this.rows.set(id, updated);
     return updated;
   }
+
+  /** Intents that are buyer debt (lapsed, not being replaced) — what `voidDebt` acts on. */
+  readonly debts = new Set<string>();
+  readonly voided: Array<{ id: string; outcome: string }> = [];
+
+  /** `PaymentIntentService.voidDebt`: a debt's hold released, nobody credited. */
+  async voidDebt(organizationId: string, id: string, outcome: string): Promise<boolean> {
+    const row = this.rows.get(id);
+    if (!row || !this.debts.has(id) || !row.holdId) return false;
+    await this.ledger.releaseHold(organizationId, row.holdId);
+    this.rows.set(id, { ...row, holdReleasedAt: new Date() });
+    this.voided.push({ id, outcome });
+    return true;
+  }
 }
 
 /** Only `update()` — the one method the repair path calls directly. */
@@ -918,6 +932,61 @@ describe('VerificationSettlementService.judgeAndSettle', () => {
     expect(ledger.appliedCommits).toBe(0);
     expect(intents.rows.get(INTENT_ID)?.status).toBe(PaymentIntentStatus.SETTLED);
     expect(intents.rows.get(INTENT_ID)?.holdReleasedAt).toBeNull();
+    // Asked, but it is not debt (awaiting redemption): nothing voided.
+    expect(intents.voided).toEqual([]);
+  });
+
+  it('M2: a late REFUND for a call that became buyer debt voids the debt — buyer not charged', async () => {
+    const { service, ledger, intents, records } = harness();
+    intents.seed(
+      baseIntent({
+        status: PaymentIntentStatus.SETTLED,
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        holdReleasedAt: null,
+      }),
+    );
+    intents.debts.add(INTENT_ID);
+    records.seedPending(INTENT_ID, {
+      state: VerificationRecordState.JUDGED,
+      verdictStatus: VerdictStatus.FAIL,
+      decisionPolicyId: 'decision-1',
+      decisionPolicyVersion: 1,
+      evaluatedAt: new Date(),
+      stages: [],
+      settlementOutcome: VerdictOutcome.REFUND,
+    });
+
+    await service.judgeAndSettle(ORG, INTENT_ID);
+
+    expect(intents.voided).toEqual([{ id: INTENT_ID, outcome: VerdictOutcome.REFUND }]);
+    expect(ledger.appliedReleases).toBe(1);
+    expect(ledger.appliedCommits).toBe(0);
+    expect(intents.rows.get(INTENT_ID)?.status).toBe(PaymentIntentStatus.SETTLED);
+  });
+
+  it('M2: a late PASS for a debt is not a void — the buyer still owes the served call', async () => {
+    const { service, intents, records } = harness();
+    intents.seed(
+      baseIntent({
+        status: PaymentIntentStatus.SETTLED,
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        holdReleasedAt: null,
+      }),
+    );
+    intents.debts.add(INTENT_ID);
+    records.seedPending(INTENT_ID, {
+      state: VerificationRecordState.JUDGED,
+      verdictStatus: VerdictStatus.PASS,
+      decisionPolicyId: 'decision-1',
+      decisionPolicyVersion: 1,
+      evaluatedAt: new Date(),
+      stages: [],
+      settlementOutcome: VerdictOutcome.SETTLE,
+    });
+
+    await service.judgeAndSettle(ORG, INTENT_ID);
+
+    expect(intents.voided).toEqual([]);
   });
 
   it('drops the wakeup when no record exists, without throwing', async () => {

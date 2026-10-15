@@ -10,6 +10,7 @@ import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
 import { ProviderSlashHoldRepository } from '@database/postgres/repositories/provider-slash-hold.repository';
 import {
+  DebtCloseTarget,
   OpenVoucherTotals,
   OutstandingDebt,
   PaymentIntentRepository,
@@ -30,6 +31,7 @@ import {
   PAYMENT_INTENT_TTL_MS,
   PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
 } from '../constants/payment-intent.constants';
+import { DEBT_VOIDED_PREFIX } from '../constants/voucher-redemption.constants';
 import { HoldEffect, requirePaymentIntentTransition } from '../domain/payment-intent-transitions';
 import { PaymentErrors } from '../errors/payment.errors';
 import {
@@ -197,6 +199,7 @@ export class PaymentIntentService {
       voucherSeq: input.voucherSeq ?? null,
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,
+      voucherResource: input.voucherResource ?? null,
       voucherIssuedAt: input.voucherIssuedAt === undefined ? null : String(input.voucherIssuedAt),
       voucherDelegate: input.voucherDelegate ?? null,
       credentialId: input.credentialId ?? null,
@@ -328,6 +331,9 @@ export class PaymentIntentService {
       ...(context.classification !== undefined ? { classification: context.classification } : {}),
       ...(context.verificationVerdict !== undefined
         ? { verificationVerdict: context.verificationVerdict }
+        : {}),
+      ...(context.lapseCause !== undefined
+        ? { redemptionLapsedAt: new Date(), redemptionLastError: context.lapseCause }
         : {}),
     });
 
@@ -467,7 +473,23 @@ export class PaymentIntentService {
       });
     }
 
-    const intent = await this.transition(organizationId, intentId, from, to, context);
+    // A rail-B verdict too late for its voucher settles AS DEBT, in the same
+    // statement as the status move (review-buyer-debt L3): written as two, a
+    // redemption pass reading the row in between broadcast a voucher that was
+    // then lapsed with a transaction in flight. Read first — the decision
+    // needs the voucher's `expiresAt` — which costs one read per settle.
+    let lapseCause: string | undefined;
+    if (rule.holdEffect === HoldEffect.COMMIT && to === PaymentIntentStatus.SETTLED) {
+      const current = await this.findById(organizationId, intentId);
+      if (current.rail === PaymentRail.RAIL_B_VOUCHER && this.pastRedemptionLatest(current)) {
+        lapseCause = LATE_VERDICT_LAPSE_CAUSE;
+      }
+    }
+
+    const intent = await this.transition(organizationId, intentId, from, to, {
+      ...context,
+      ...(lapseCause ? { lapseCause } : {}),
+    });
 
     if (rule.holdEffect === HoldEffect.NONE || !intent.holdId) {
       return intent;
@@ -490,19 +512,21 @@ export class PaymentIntentService {
       // `hold_released_at` stays null, which `repairHoldEffect` must read as
       // *awaiting redemption* rather than as a lost commit — see its own guard.
       //
-      // Not when the verdict came too late for the voucher (review #2, M3):
-      // past `expiresAt + PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS` the
-      // chain may refuse it before a pass gets to it. The call was served, so
-      // it is still SETTLED — as buyer debt at once: the hold stays open,
-      // nobody is credited, and the buyer re-signs (never a platform payment).
-      if (to === PaymentIntentStatus.SETTLED && this.pastRedemptionLatest(intent)) {
-        await this.intents.lapseRedemption(organizationId, intentId, LATE_VERDICT_LAPSE_CAUSE);
+      // Not when the verdict came too late for the voucher (review #2, M3;
+      // review-buyer-debt M2): past `expiresAt +
+      // PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS` — one redemption pass
+      // before the chain's own deadline — no pass can collect it. The call was
+      // served, so it is still SETTLED, as buyer debt at once (the lapse was
+      // written with the status above): the hold stays open, nobody is
+      // credited, and the buyer re-signs (never a platform payment). Earlier
+      // than that the redemption job gets its chance, and lapses it itself if
+      // the chain refuses.
+      if (lapseCause) {
         this.logger.warn(
           `Intent ${intentId}: settled ${Math.floor(
             (Date.now() - intent.expiresAt.getTime()) / 1000,
           )}s after its voucher expired — too late to redeem; it is buyer debt`,
         );
-        return this.findById(organizationId, intentId);
       }
       return intent;
     }
@@ -635,6 +659,93 @@ export class PaymentIntentService {
     );
 
     return resolution.applied;
+  }
+
+  /**
+   * Writes off one buyer debt (review-buyer-debt M1): the `uncollected:` mark
+   * and the hold release commit together, in one ledger transaction under the
+   * payer's admission lock, and only while the row is still exactly that debt
+   * (`PaymentIntentRepository.markWrittenOff`). `false` — nothing marked,
+   * nothing released — when it changed underneath: settled, replaced, or
+   * written off already.
+   *
+   * The write-off ends the hold and the provider's wait. It does NOT end the
+   * payer's refusal while the contract change is not shipped (H1 interim): see
+   * `DEBT_REFUSING_SQL`.
+   */
+  async writeOffDebt(target: DebtCloseTarget, reason: string, before: Date): Promise<boolean> {
+    const resolution = await this.ledger.releaseHoldIf(
+      target.organizationId,
+      target.holdId,
+      (runner) => this.intents.markWrittenOff(runner, target, reason, before),
+    );
+    return resolution !== null;
+  }
+
+  /**
+   * Voids a buyer debt whose verdict came back FAIL / REFUND / VOID after the
+   * call had been settled as served and unverified (review-buyer-debt M2): the
+   * hold is released (no-op if it was written off already), nobody is
+   * credited, the buyer is not charged and its refusal ends. In one ledger
+   * transaction under the payer's lock. `false` when the intent is not such a
+   * debt — awaiting redemption normally, or its replacement is in flight.
+   */
+  async voidDebt(organizationId: string, intentId: string, outcome: string): Promise<boolean> {
+    const intent = await this.findById(organizationId, intentId);
+    if (
+      intent.rail !== PaymentRail.RAIL_B_VOUCHER ||
+      intent.status !== PaymentIntentStatus.SETTLED ||
+      !intent.holdId
+    ) {
+      return false;
+    }
+    const target: DebtCloseTarget = {
+      organizationId,
+      id: intentId,
+      payer: intent.agentAccount,
+      holdId: intent.holdId,
+    };
+    const resolution = await this.ledger.releaseHoldIf(organizationId, intent.holdId, (runner) =>
+      this.intents.markDebtVoided(runner, target, `${DEBT_VOIDED_PREFIX}${outcome}`),
+    );
+    if (resolution === null) return false;
+    this.logger.warn(
+      `Intent ${intentId}: judged ${outcome} after it had become buyer debt — the debt is ` +
+        `voided: the hold is released, nobody is credited, the buyer is not charged`,
+    );
+    return true;
+  }
+
+  /**
+   * Opens a NEW hold for a written-off debt the buyer is re-signing (H1
+   * interim): the write-off released the old one, and the redemption commits a
+   * hold. Priced against the chain like any rail-B hold (`secureFunds`).
+   * Returns its id; the caller hands it to `replaceLapsedVoucher` and releases
+   * it again if the replacement is refused.
+   */
+  async reopenDebtHold(debt: OutstandingDebt): Promise<string> {
+    const price = MoneyUtil.of(debt.priceAmount, debt.assetId as AssetId, debt.decimals);
+    await this.escrowGate.assertAffordable(
+      debt.organizationId,
+      debt.agentAccount as AccountId,
+      price,
+      {
+        rail: PaymentRail.RAIL_B_VOUCHER,
+      },
+    );
+    const hold = await this.ledger.createHold({
+      organizationId: debt.organizationId,
+      accountId: debt.agentAccount as AccountId,
+      money: price,
+      intentId: debt.id,
+      expiresAt: new Date(Date.now() + PAYMENT_INTENT_HOLD_TTL_MS),
+    });
+    return hold.id;
+  }
+
+  /** Releases a hold {@link reopenDebtHold} opened that no row took. */
+  async releaseUnusedHold(organizationId: string, holdId: string): Promise<void> {
+    await this.ledger.releaseHold(organizationId, holdId);
   }
 
   private async resolveReplay(

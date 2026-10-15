@@ -88,6 +88,13 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    */
   DEBT_WRITTEN_OFF: 'voucher_debt_written_off',
   /**
+   * The verdict-deadline sweep settled served calls whose verdict came too
+   * late for their vouchers, so they became buyer debt at once
+   * (review-buyer-debt M2). One page per incident: a backlog in verification
+   * is what this looks like, and every affected buyer is refused paid calls.
+   */
+  VERDICT_DEADLINE_DEBT: 'voucher_verdict_deadline_debt',
+  /**
    * The provider forfeited a voucher it caused to fail: its stake fell below
    * the program's minimum, or the provider or its payee is blocked. The buyer's
    * hold is released and nobody is credited, so it costs the platform nothing —
@@ -110,6 +117,25 @@ export const PROVIDER_FORFEIT_PREFIX = 'provider_forfeit:';
  * `payment-intent.repository.ts` matches the same literal.
  */
 export const UNCOLLECTED_PREFIX = 'uncollected:';
+
+/**
+ * What `redemption_last_error` carries once a buyer debt is VOIDED: a FAIL /
+ * REFUND / VOID verdict arrived after the call had been settled as served and
+ * unverified, and had become debt (review-buyer-debt M2). The hold is
+ * released, nobody is credited and the buyer is not charged. Followed by the
+ * verdict's outcome. `VOIDED_SQL` in `payment-intent.repository.ts` matches the
+ * same literal.
+ */
+export const DEBT_VOIDED_PREFIX = 'voided:';
+
+/**
+ * How close to a voucher's on-chain deadline (`expiresAt + REDEEM_GRACE_SECONDS`)
+ * the platform stops waiting on it: one redemption pass. A verdict that lands
+ * later settles as debt at once, and a voucher still refused by a buyer
+ * tightening (a revoked or expired delegate, a lowered cap) that late becomes
+ * debt instead of waiting for `VoucherExpired` (review-buyer-debt M2, M3).
+ */
+export const REDEMPTION_DEADLINE_MARGIN_SECONDS = 60;
 
 /**
  * Days an open buyer debt waits for its replacement voucher before it is

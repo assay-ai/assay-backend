@@ -172,6 +172,9 @@ export class InMemoryIntentWriter {
   /** Set by a test: `buyer_escrows.next_seq` as the admission re-reads it under the lock (S2-2). */
   nextSeq: bigint | null = null;
 
+  /** Set by a test: debts of the payer as the admission counts them under the lock (L8). */
+  debts: number | undefined = undefined;
+
   async isVoucherSeqUsed(
     _organizationId: string,
     account: AccountId,
@@ -237,6 +240,7 @@ export class InMemoryIntentWriter {
         pausedFor: this.pausedFor,
         nextSeq: this.nextSeq,
         maxSeq: this.maxSeq(admission.scope.payer),
+        debts: this.debts,
       });
     }
 

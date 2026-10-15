@@ -78,6 +78,8 @@ export enum PaymentErrorCode {
   //    owes (no-platform-debt design, steps 9 and 10).
   PAYMENT_DEBT_OUTSTANDING = 'PAYMENT_DEBT_OUTSTANDING',
   PAYMENT_DEBT_NOT_FOUND = 'PAYMENT_DEBT_NOT_FOUND',
+  /** A replacement for this debt was accepted and is being collected; nothing to sign. */
+  PAYMENT_DEBT_REPLACEMENT_PENDING = 'PAYMENT_DEBT_REPLACEMENT_PENDING',
 }
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
@@ -206,13 +208,27 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `each is settled: sign the replacement voucher from GET /escrow/debts and send it to ` +
       `POST /escrow/debts/{intentId}/voucher. Free calls still work; nothing was charged`,
   },
-  /** No open debt with this id for this payer: settled already, written off, or not theirs. */
+  /**
+   * No debt with this id that this session can settle: settled already,
+   * voided, owed by another wallet, or — signed by an agent's delegate —
+   * another agent's call (settle it with the payer's wallet).
+   */
   debtNotFound: {
     code: PaymentErrorCode.PAYMENT_DEBT_NOT_FOUND,
     statusCode: 404,
     message: (context?: Record<string, any>) =>
-      `No open debt ${context?.intentId ?? ''} for this payer — it was settled already, ` +
-      `written off, or belongs to another account`,
+      `No debt ${context?.intentId ?? ''} this session can settle — it was settled already, ` +
+      `belongs to another account, or (signed by an agent's delegate) to another agent: ` +
+      `settle it with the payer's wallet`,
+  },
+  /** The debt's replacement voucher was accepted and is being collected; wait for it. */
+  debtReplacementPending: {
+    code: PaymentErrorCode.PAYMENT_DEBT_REPLACEMENT_PENDING,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Debt ${context?.intentId ?? ''} already has a replacement voucher being collected ` +
+      `from the escrow (about a minute). Nothing to sign; if the collection fails it is ` +
+      `listed as an open debt again`,
   },
   voucherAdmissionPaused: {
     code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,

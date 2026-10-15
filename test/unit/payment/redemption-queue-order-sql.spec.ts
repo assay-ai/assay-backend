@@ -91,3 +91,21 @@ describe('PaymentIntentRepository.findAwaitingRedemption — blocked parties', (
     expect(guard).not.toMatch(/held\.provider_account/);
   });
 });
+
+describe('PaymentIntentRepository.findAwaitingRedemption — buyer debt', () => {
+  it('M4: takes back a debt whose replacement was accepted, and no other debt', async () => {
+    const { sql } = await rendered();
+    const flat = sql.replace(/\s+/g, ' ');
+    expect(flat).toMatch(
+      /\("intent"\."redemption_lapsed_at" IS NULL OR "intent"\."redemption_replaced_at" IS NOT NULL\)/,
+    );
+  });
+
+  it('L2: never redeems a row closed for good (forfeit, write-off, void), released or not', async () => {
+    const { sql } = await rendered();
+    const flat = sql.replace(/\s+/g, ' ');
+    expect(flat).toMatch(
+      /"intent"\."redemption_last_error" IS NULL OR NOT \("intent"\."redemption_last_error" LIKE 'provider_forfeit:%' OR "intent"\."redemption_last_error" LIKE 'uncollected:%' OR "intent"\."redemption_last_error" LIKE 'voided:%'\)/,
+    );
+  });
+});
