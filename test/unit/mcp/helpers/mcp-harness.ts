@@ -415,8 +415,22 @@ export class FakeFreeQuota {
   decision: FreeQuotaDecision = { kind: 'ALLOWED' };
   /** Every `check` this run, so a test can assert the pricing mode it was asked about. */
   readonly checked: FreeQuotaCheckInput[] = [];
-  /** Every `consume` this run, so a test can assert the binding that was charged. */
-  readonly consumed: string[] = [];
+  /**
+   * Bindings whose quota place was taken and KEPT this run (a binding place
+   * given back on failover or on a refusal is not here), so a test can assert
+   * the binding that was charged.
+   */
+  get consumed(): string[] {
+    return this.places.filter((place) => !place.released).map((place) => place.bindingId);
+  }
+  /** Every binding place taken, released or not, in order. */
+  readonly places: { bindingId: string; released: boolean }[] = [];
+  /** Platform places taken; `released` once given back. */
+  readonly platformPlaces: { released: boolean }[] = [];
+  /** Bindings whose own quota has no room left (`reserveBinding` answers null). */
+  readonly noRoomFor = new Set<string>();
+  /** Set to refuse the platform reservation (e.g. the last place was taken in parallel). */
+  platformRefusal: FreeQuotaDecision | null = null;
 
   setRemaining(toolId: string, value: FreeQuotaRemaining): void {
     this.remaining.set(toolId, value);
@@ -443,9 +457,28 @@ export class FakeFreeQuota {
     return Promise.resolve(this.decision);
   }
 
-  consume(input: { bindingId: string }): Promise<void> {
-    this.consumed.push(input.bindingId);
-    return Promise.resolve();
+  async reservePlatform(_input: FreeQuotaCheckInput) {
+    if (this.platformRefusal) return this.platformRefusal;
+    const place = { released: false };
+    this.platformPlaces.push(place);
+    return {
+      kind: 'RESERVED' as const,
+      release: async () => {
+        place.released = true;
+      },
+    };
+  }
+
+  async reserveBinding(input: { binding: { id: string } }) {
+    if (this.noRoomFor.has(input.binding.id)) return null;
+    const place = { bindingId: input.binding.id, released: false };
+    this.places.push(place);
+    return {
+      kind: 'RESERVED' as const,
+      release: async () => {
+        place.released = true;
+      },
+    };
   }
 }
 

@@ -574,8 +574,16 @@ export class ProviderRouterService {
       if (!picked) return { picked: null, rejected, settlementChainOf };
 
       const binding = picked.candidate.binding;
+      // A free call's quota first: a binding with no room for this agent is
+      // shed before it costs the provider a ceiling token.
+      const place = context.reserveFreeQuota ? await context.reserveFreeQuota(binding) : null;
+      if (context.reserveFreeQuota && place === null) {
+        shed.set(binding.id, CeilingKind.FREE_QUOTA);
+        continue;
+      }
       const refused = await this.ceilings.consume(binding);
       if (refused === null) return { picked, rejected, settlementChainOf };
+      await place?.release();
 
       this.logger.debug(
         `binding ${binding.id} (provider ${binding.providerId}) reached its declared ` +
