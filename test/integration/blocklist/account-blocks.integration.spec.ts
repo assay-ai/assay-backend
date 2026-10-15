@@ -529,7 +529,13 @@ describe('account blocks, against a real database and Redis', () => {
       expect(JSON.stringify(machine.body)).toContain('AUTH_ORGANIZATION_SUSPENDED');
 
       await ops.unblock(sre, block.id, { reasonCode: 'X', note: NOTE }, 'ops-adjl');
-      expect((await lookup('machine')).status).toBe(200);
+      expect((await lookup('person')).status).toBe(200);
+      expect((await unmarked('person')).status).toBe(200);
+      // Lifted, the machine credential is past the blocklist, and refused only
+      // because provider account controls take a signed-in person (2bba278).
+      const unblockedMachine = await lookup('machine');
+      expect(unblockedMachine.status).toBe(403);
+      expect(JSON.stringify(unblockedMachine.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
     } finally {
       await app.close();
     }
