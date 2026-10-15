@@ -50,6 +50,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
   const events: { kind: string; detail?: Record<string, unknown> }[] = [];
   const reopened: string[] = [];
   const partlyWon: string[] = [];
+  const refolded: string[] = [];
   const filed: string[] = [];
   const closed: string[] = [];
   const mirrored: string[] = [];
@@ -124,6 +125,8 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     {
       mirrorChainExecution: async (_case: unknown, hash: string | null) =>
         void mirrored.push(hash ?? 'none'),
+      refoldLatePart: async (_case: unknown, hash: string | null) =>
+        void refolded.push(hash ?? 'none'),
       reconcileRecord: async (entry: { id: string }) => {
         reconciled.push(entry.id);
         // As the real one: the landed record is mirrored onto its part.
@@ -156,6 +159,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     released,
     reopened,
     partlyWon,
+    refolded,
   };
 }
 
@@ -482,6 +486,14 @@ describe('SlashChainRulingService', () => {
       });
       await service.recordExecuted(executed(ID_A));
       expect(parts.get(ID_A)).toMatchObject({ appliedAmount: '400', executionSignature: '0xown' });
+    });
+
+    it('R2-4: a late part paid by somebody else re-sums an already executed case', async () => {
+      const { service, parts, refolded } = build('EXECUTED');
+      Object.assign(parts.get(ID_B)!, { chainStatus: 'EXECUTED', appliedAmount: '400' });
+      await service.recordExecuted(executed(ID_A));
+      expect(parts.get(ID_A)).toMatchObject({ chainStatus: 'EXECUTED', appliedAmount: '500' });
+      expect(refolded).toEqual(['0xfeed']);
     });
 
     it('answers false for a record nobody planned', async () => {

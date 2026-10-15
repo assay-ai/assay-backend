@@ -435,7 +435,9 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
    *
    * Idempotent with the executor's own mirror and with itself: a part already
    * `EXECUTED` is not rewritten, and a case already `EXECUTED` (or in the
-   * executor's hands, `EXECUTING`) is not moved again.
+   * executor's hands, `EXECUTING`) is not moved again. A late part of a case
+   * already `EXECUTED` is folded into its money columns, with the same
+   * compensation step (`SlashExecutionService.refoldLatePart`, review R2-4).
    */
   async recordExecuted(event: SlashChainExecutedEvent): Promise<boolean> {
     const part = await this.parts.findOneByChainRequestId(event.requestId);
@@ -466,6 +468,8 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     if (part) {
       await this.mirrorParts(proposal, {});
       await this.followRecords(proposal, event);
+      // Review R2-4: a late part of a case already closed EXECUTED.
+      await this.execution?.refoldLatePart(proposal, event.transactionHash);
     } else if (this.execution) {
       await this.execution.mirrorChainExecution(proposal, event.transactionHash);
     }
