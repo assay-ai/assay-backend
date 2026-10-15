@@ -52,12 +52,14 @@ without its `A-9` register entry is an intervention nobody can audit.
 **A held voucher does not survive a long block.** The redemption queue leaves every voucher with a
 blocked party (and the same payer's later vouchers) out of its query, so a blocked party never
 delays anyone else's redemption. The chain refuses a voucher `REDEEM_GRACE_SECONDS` (30 min) after
-its expiry, about 35 minutes after the call. **By owner decision, a voucher still held past that
-point is absorbed by the platform**: after the unblock the next pass meets `VoucherExpired`, the
-platform pays the provider out of its own funds (`PROVIDER_CREDIT` with
-`chainTxRef = platform_absorbed:VoucherExpired`, CRITICAL alert `voucher_unredeemable`) and the
-buyer's hold is released, so the buyer is not charged. A block shorter than ~35 minutes resumes
-normally.
+its expiry, about 35 minutes after the call. **The platform never pays for it**: a voucher still
+held past that point becomes **buyer debt** after the unblock (the next pass meets `VoucherExpired`,
+CRITICAL alert `voucher_unredeemable`): the buyer's hold stays open, nobody is credited, and the
+payer's paid calls are refused (`PAYMENT_DEBT_OUTSTANDING`) until it signs a replacement voucher. A
+provider-side block forfeits instead (the buyer is not charged, the provider is not paid). **Blocking
+a buyer freezes collection, and the 30-day write-off clock with it**: a debt of a blocked payer,
+payer organization or delegate is not written off while the block stands. A block shorter than ~35
+minutes resumes normally. See [`buyer-debt-deploy.md`](buyer-debt-deploy.md).
 
 **Read-only access stays open for people, by decision.** A blocked person can still sign in and
 read the account's own data, so they can see that, and why, they are blocked. `GET
