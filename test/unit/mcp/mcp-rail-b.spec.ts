@@ -11,6 +11,7 @@ import {
   X402_RECEIPT,
   X402_VOUCHER,
 } from '@modules/mcp/constants/mcp.constants';
+import { McpErrorCode, McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
   McpFailureCode,
@@ -21,6 +22,7 @@ import { VOUCHER_MAX_TTL_SECONDS } from '@modules/payment/constants/voucher.cons
 import { computeRequestHash } from '@modules/payment/domain/request-hash';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { PaymentIntentStatus, PaymentRail } from '@modules/payment/ports/payment.types';
+import { VelocityViolationKind } from '@modules/spend-policy/services/spend-policy-velocity.service';
 
 import {
   PAYOUT_ACCOUNT,
@@ -279,6 +281,23 @@ describe('rail B over MCP', () => {
 
       expect(h.spendPolicy.checked).toHaveLength(1);
       expect(h.spendPolicy.uncheckedOutsideLock).toBe(0);
+    });
+
+    /** Round-two review N-4: no hold is written by a section that lost its lock. */
+    it('secures nothing once the spend lock is lost, and refuses retryably', async () => {
+      const h = harness();
+      const requirement = await requirementOf(h);
+      h.spendPolicy.lockLost = McpErrors.velocityLimitExceeded({
+        reason: VelocityViolationKind.UNAVAILABLE,
+        retryAfter: 1,
+      });
+
+      await expect(
+        h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement)),
+      ).rejects.toMatchObject({ errorCode: McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED });
+      expect(h.spendPolicy.lockConfirmations).toBe(1);
+      expect(h.intents.only).toBeUndefined();
+      expect(h.ledger.kinds).toEqual([]);
     });
 
     it('is still a charge the spend policy sees, against the voucher request hash', async () => {

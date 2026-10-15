@@ -198,8 +198,18 @@ export class SpendPolicyEnforcementService {
    * Redis unreachable, or the lock still busy after
    * {@link AGENT_SPEND_LOCK_WAIT_MS}, is a retryable velocity refusal, and
    * nothing was reserved.
+   *
+   * `fn` is handed `assertLockHeld`, which it awaits just before it writes the
+   * hold. A renewal that finds the lock gone is otherwise silent — an event
+   * loop stalled past the TTL lets the next call of this agent in — so the
+   * section confirms by token that it still owns the lock, and is refused
+   * with the same retryable velocity error, reserving nothing, if it does not
+   * (round-two review N-4).
    */
-  async withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  async withAgentSpendLock<T>(
+    agentId: string,
+    fn: (assertLockHeld: () => Promise<void>) => Promise<T>,
+  ): Promise<T> {
     const token = randomUUID();
     const deadline = Date.now() + AGENT_SPEND_LOCK_WAIT_MS;
     for (;;) {
@@ -229,8 +239,24 @@ export class SpendPolicyEnforcementService {
       void this.velocity.renewAgentSpendLock(agentId, token, AGENT_SPEND_LOCK_TTL_MS);
     }, AGENT_SPEND_LOCK_RENEW_MS);
     renewal.unref();
+    const assertLockHeld = async (): Promise<void> => {
+      let held: boolean;
+      try {
+        held = await this.velocity.holdsAgentSpendLock(agentId, token, AGENT_SPEND_LOCK_TTL_MS);
+      } catch (error) {
+        this.logger.warn(`agent ${agentId}: spend lock ownership unknown. ${describe(error)}`);
+        held = false;
+      }
+      if (!held) {
+        this.logger.warn(`agent ${agentId}: spend lock lost before the hold; refusing the call`);
+        throw McpErrors.velocityLimitExceeded({
+          reason: VelocityViolationKind.UNAVAILABLE,
+          retryAfter: 1,
+        });
+      }
+    };
     try {
-      return await fn();
+      return await fn(assertLockHeld);
     } finally {
       clearInterval(renewal);
       await this.velocity.unlockAgentSpend(agentId, token);

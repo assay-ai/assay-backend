@@ -9,6 +9,8 @@ import { McpFailureCode } from '@modules/mcp/services/mcp-tool-call.service';
 import { PaymentIntentStatus, PaymentRail } from '@modules/payment/ports/payment.types';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
 import { AppError } from '@shared/errors/app-errors';
+import { McpErrorCode, McpErrors } from '@modules/mcp/errors/mcp.errors';
+import { VelocityViolationKind } from '@modules/spend-policy/services/spend-policy-velocity.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import {
@@ -754,5 +756,21 @@ describe('McpToolCallService — the paid call loop', () => {
     expect(h.ledger.kinds.filter((kind) => kind === 'HOLD_CREATE')).toHaveLength(1);
     expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
     expect(h.spendPolicy.uncheckedOutsideLock).toBe(0);
+  });
+
+  /** Round-two review N-4: no hold is written by a section that lost its lock. */
+  it('writes no hold once the spend lock is lost, and refuses retryably', async () => {
+    const h = harness({ 'binding-provider-a': () => Promise.resolve(ok()) });
+    h.spendPolicy.lockLost = McpErrors.velocityLimitExceeded({
+      reason: VelocityViolationKind.UNAVAILABLE,
+      retryAfter: 1,
+    });
+
+    await expectErrorCodeAsync(
+      () => h.calls.call(SESSION, 'Search the web', ARGS),
+      McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED,
+    );
+    expect(h.spendPolicy.lockConfirmations).toBe(1);
+    expect(h.ledger.kinds).toEqual([]);
   });
 });

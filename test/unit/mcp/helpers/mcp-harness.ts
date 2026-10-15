@@ -470,12 +470,24 @@ export class FakeSpendPolicy {
   holdCap: { readonly max: number; readonly held: () => number } | null = null;
   /** Calls that ran the check outside {@link withAgentSpendLock}. */
   uncheckedOutsideLock = 0;
+  /** Set by a test: the lock lapsed mid-section, so the ownership check refuses. */
+  lockLost: Error | null = null;
+  /** How many sections confirmed they still held the lock. */
+  lockConfirmations = 0;
 
   private readonly locks = new Map<string, Promise<unknown>>();
   private depth = 0;
 
   /** The real lock's guarantee, in process: one critical section per agent at a time. */
-  withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  withAgentSpendLock<T>(
+    agentId: string,
+    section: (assertLockHeld: () => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    const fn = () =>
+      section(() => {
+        this.lockConfirmations += 1;
+        return this.lockLost ? Promise.reject(this.lockLost) : Promise.resolve();
+      });
     const previous = this.locks.get(agentId) ?? Promise.resolve();
     const run = previous.then(
       async () => {
