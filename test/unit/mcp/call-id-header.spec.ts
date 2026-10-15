@@ -27,6 +27,11 @@ import { EgressHttpClient } from '@shared/network/egress';
 import { buildBinding, buildProvider, usdc } from '../tool/helpers/routing-fixtures';
 import { SESSION, buildMcpHarness } from './helpers/mcp-harness';
 
+// This spec dials a real local socket inside the parallel unit suite. On a
+// two-core CI runner it has timed out under load (TOOL_ALL_BINDINGS_FAILED, the
+// assertion never reached); retrying keeps the assertion and drops the timing flake.
+jest.retryTimes(2, { logErrorsBeforeRetry: true });
+
 const PROVIDER_ADDRESS = '93.184.216.34';
 
 const lookup = jest.fn(async (hostname: string) => {
