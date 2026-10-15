@@ -124,7 +124,6 @@ function build(
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
     releaseHold: jest.fn().mockResolvedValue(true),
   };
-  const ledger = { appendNow: jest.fn().mockResolvedValue(undefined) };
   const payments = {
     findAwaitingRedemption: jest
       .fn()
@@ -142,13 +141,12 @@ function build(
   const service = new VoucherRedemptionService(
     payments as never,
     intents as never,
-    ledger as never,
     redeemer as never,
     alerts as never,
     blocklist,
     () => clock.nowSeconds * 1000,
   );
-  return { service, intents, ledger, payments, alerts };
+  return { service, intents, payments, alerts };
 }
 
 describe('VoucherRedemptionService — a landing this process did not observe', () => {
@@ -156,7 +154,7 @@ describe('VoucherRedemptionService — a landing this process did not observe', 
     const redeemer = new ChainRedeemer(async () => {
       throw new Error('WaitForTransactionReceiptTimeoutError');
     });
-    const { service, intents, ledger, payments } = build(redeemer);
+    const { service, intents, payments } = build(redeemer);
 
     await service.run(USDC);
     expect(payments.recordRedemptionTxRef).toHaveBeenCalledTimes(1);
@@ -169,14 +167,13 @@ describe('VoucherRedemptionService — a landing this process did not observe', 
       'intent-1',
       redeemer.landed.get('1'),
     );
-    expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
   });
 
   it('overlapping passes: the second one finds the first one’s transaction instead of absorbing', async () => {
     let release!: () => void;
     const redeemer = new ChainRedeemer(() => new Promise<void>((resolve) => (release = resolve)));
-    const { service, intents, ledger } = build(redeemer);
+    const { service, intents } = build(redeemer);
 
     const first = service.run(USDC);
     await new Promise((resolve) => setImmediate(resolve));
@@ -186,7 +183,6 @@ describe('VoucherRedemptionService — a landing this process did not observe', 
     await Promise.all([first, second]);
 
     expect(redeemer.sends).toBe(1);
-    expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(intents.commitRedeemedHold).toHaveBeenCalledWith(
       'org-1',
@@ -199,12 +195,11 @@ describe('VoucherRedemptionService — a landing this process did not observe', 
     const redeemer = new ChainRedeemer(async () => {
       throw new Error('timeout');
     });
-    const { service, intents, ledger } = build(redeemer);
+    const { service, intents } = build(redeemer);
     await service.run(USDC);
     redeemer.pendingLookup = true;
     await service.run(USDC);
 
-    expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
   });
@@ -214,7 +209,7 @@ describe('VoucherRedemptionService — a landing this process did not observe', 
       throw new Error('WaitForTransactionReceiptTimeoutError');
     });
     const blocklist = noBlocks();
-    const { service, intents, ledger } = build(redeemer, undefined, blocklist);
+    const { service, intents } = build(redeemer, undefined, blocklist);
     await service.run(USDC);
     expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
 
@@ -228,17 +223,15 @@ describe('VoucherRedemptionService — a landing this process did not observe', 
       redeemer.landed.get('1'),
     );
     expect(intents.releaseHold).not.toHaveBeenCalled();
-    expect(ledger.appendNow).not.toHaveBeenCalled();
   });
 
   it('turns into buyer debt a voucher none of whose own transactions landed', async () => {
     const redeemer = new ChainRedeemer(async () => undefined);
     redeemer.seqHigh = 5n; // a higher seq of this payer already landed
-    const { service, intents, ledger, payments } = build(redeemer);
+    const { service, intents, payments } = build(redeemer);
     await service.run(USDC);
 
     expect(redeemer.sends).toBe(0);
-    expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(payments.lapseRedemption).toHaveBeenCalledWith(
       'org-1',
@@ -262,7 +255,7 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
       throw new Error('WaitForTransactionReceiptTimeoutError');
     });
     const clock = { nowSeconds: NOW };
-    const { service, intents, ledger } = build(redeemer, clock);
+    const { service, intents } = build(redeemer, clock);
     await service.run(USDC);
 
     redeemer.expired = true;
@@ -274,7 +267,6 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
       'intent-1',
       redeemer.landed.get('1'),
     );
-    expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
   });
 
@@ -288,21 +280,19 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
       throw new Error('WaitForTransactionReceiptTimeoutError');
     });
     const clock = { nowSeconds: NOW };
-    const { service, intents, ledger, payments } = build(redeemer, clock);
+    const { service, intents, payments } = build(redeemer, clock);
     await service.run(USDC);
 
     redeemer.lagging = true;
     redeemer.expired = true;
     clock.nowSeconds = PAST_DEADLINE;
     await service.run(USDC);
-    expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
 
     expect(payments.lapseRedemption).not.toHaveBeenCalled();
 
     clock.nowSeconds = PAST_DEADLINE + 3_600;
     await service.run(USDC);
-    expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(payments.lapseRedemption).toHaveBeenCalledWith('org-1', 'intent-1', 'VoucherExpired');
   });
@@ -318,7 +308,7 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
       throw new Error('WaitForTransactionReceiptTimeoutError');
     });
     const clock = { nowSeconds: NOW };
-    const { service, intents, ledger, alerts } = build(redeemer, clock);
+    const { service, intents, alerts } = build(redeemer, clock);
     await service.run(USDC);
 
     redeemer.pendingLookup = true;
@@ -344,7 +334,6 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
         }),
       ],
     ]);
-    expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
   });

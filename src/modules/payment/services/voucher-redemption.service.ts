@@ -13,7 +13,6 @@ import {
 import { BlockedRole, BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId } from '@modules/chains/ports/caip.types';
-import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -199,11 +198,9 @@ export class VoucherRedemptionService {
 
   constructor(
     private readonly payments: PaymentIntentRepository,
+    // This job credits a provider only through `commitRedeemedHold`, out of a
+    // redemption that landed: it holds no ledger to write anything else with.
     private readonly intents: PaymentIntentService,
-    // Never written to here: this job credits a provider only through
-    // `commitRedeemedHold`, out of a redemption that landed. Kept injected so
-    // the wiring (and every spec that asserts "nothing was credited") stays put.
-    private readonly ledger: LedgerService,
     @Inject(VOUCHER_REDEEMER) private readonly redeemer: VoucherRedeemerPort,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     private readonly blocklist: AccountBlocklistService,
