@@ -521,15 +521,27 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
   /**
    * Rail-B intents still `VERIFYING` more than `deadlineSeconds` past their
-   * voucher's `expiresAt` — the deadline on verdicts (see
-   * `PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS`). Only rows with a voucher the
-   * redemption job can submit (seq and signature recorded) and an open hold:
-   * settling anything else would leave a SETTLED hold nothing ever closes.
+   * voucher's `expiresAt`, and less than `latestSeconds` past it — the deadline
+   * on verdicts (see `PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS`). Only rows with
+   * a voucher the redemption job can submit (seq and signature recorded) and
+   * an open hold: settling anything else would leave a SETTLED hold nothing
+   * ever closes.
+   *
+   * The upper bound (`latestSeconds`) keeps the sweep off vouchers the chain
+   * would already refuse: those are left to the hold backstop, which releases
+   * the buyer's hold and pays nobody (review 2026-10-15, H1).
+   *
+   * A row whose verification already computed a REFUND or VOID outcome that
+   * `resolve()` has not applied yet is skipped: the sweep must not overtake a
+   * verdict that rejected the call (review 2026-10-15, L6). The verification
+   * worker applies it, or the backstop releases the hold.
+   *
    * Cross-tenant like the other sweep reads, oldest first, bounded by `limit`.
    */
   async findDueForVerdictDeadline(
     now: Date,
     deadlineSeconds: number,
+    latestSeconds: number,
     limit: number,
   ): Promise<DuePaymentIntent[]> {
     return this.selectSweepCandidates()
@@ -539,10 +551,19 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.expiresAt < :cutoff', {
         cutoff: new Date(now.getTime() - deadlineSeconds * 1000),
       })
+      .andWhere('intent.expiresAt > :latest', {
+        latest: new Date(now.getTime() - latestSeconds * 1000),
+      })
       .andWhere('intent.holdId IS NOT NULL')
       .andWhere('intent.holdReleasedAt IS NULL')
       .andWhere('intent.voucherSeq IS NOT NULL')
       .andWhere('intent.voucherSignature IS NOT NULL')
+      .andWhere(
+        `NOT EXISTS (SELECT 1 FROM verification_records vr
+           WHERE vr.intent_id = intent.id
+             AND vr.settlement_outcome IS NOT NULL
+             AND vr.settlement_outcome <> 'SETTLE')`,
+      )
       .orderBy('intent.expiresAt', 'ASC')
       .limit(limit)
       .getRawMany<DuePaymentIntent>();

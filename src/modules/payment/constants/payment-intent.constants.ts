@@ -48,6 +48,21 @@ export const PAYMENT_INTENT_EXPIRY_SWEEP_BATCH = 200;
  */
 export const PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS = 900;
 
+/**
+ * The latest the verdict-deadline sweep still settles, in seconds past the
+ * voucher's `expiresAt`.
+ *
+ * The chain refuses a voucher after `expiresAt + CLOCK_SKEW_TOLERANCE_SECONDS +
+ * REDEEM_GRACE_SECONDS` (1,920 s). Settling a row the chain already refuses
+ * hands the redemption job a `VoucherExpired` it cannot collect, so the sweep
+ * stops this margin (300 s, five redemption passes) before that. Older rows are
+ * left to the 24-hour hold backstop, which releases the buyer's hold and pays
+ * nobody (review 2026-10-15, H1). Kept here rather than imported from
+ * `voucher-redemption.constants.ts` so the arithmetic is in one line:
+ * 120 + 1,800 - 300.
+ */
+export const PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS = 120 + 1_800 - 300;
+
 /** Written to `status_reason` so the row itself says who moved it and why. */
 export const PAYMENT_INTENT_EXPIRY_REASON =
   'expiry sweep: expiresAt elapsed before the call reached a terminal state';
