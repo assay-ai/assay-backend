@@ -10,6 +10,7 @@ import {
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
+import { FREE_QUOTA_CONFIG, FreeQuotaConfig } from '@modules/free-tier/config/free-quota.config';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { RoutingContext } from '@modules/tool/domain/routing';
@@ -23,7 +24,7 @@ import {
   ProviderStakePort,
 } from '@modules/provider/ports/provider-stake.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { Tool } from '@modules/tool/ports/tool.types';
+import { PricingMode, Tool } from '@modules/tool/ports/tool.types';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
 
@@ -83,6 +84,7 @@ export class CatalogueService {
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
     private readonly blocklist: AccountBlocklistService,
+    @Inject(FREE_QUOTA_CONFIG) private readonly freeQuota: FreeQuotaConfig,
   ) {}
 
   /**
@@ -251,6 +253,10 @@ export class CatalogueService {
         fromPrice: cheapest(own),
         price: quote.price ? toMoneyDto(quote.price) : null,
         pricingMode: quote.pricingMode,
+        freeCallsPerDay:
+          quote.pricingMode === PricingMode.FREE || quote.pricingMode === PricingMode.FREEMIUM
+            ? freeCallsPerDay(own, this.freeQuota.defaultPerAgentDailyLimit)
+            : null,
         routable: quote.price !== null,
         routableBindings: quote.routableBindings,
         unroutableReason: quote.unroutableReason,
@@ -424,6 +430,26 @@ function toQualityDto(counters: ProviderQualityCounters | null): CatalogueQualit
     measuredCalls: counters.verifiedCalls,
     failedCalls: counters.failedCalls,
   };
+}
+
+/**
+ * The free calls a day one agent gets on a tool before it pays — the most
+ * generous per-agent allowance among its `FREE`/`FREEMIUM` bindings, the
+ * platform default standing in for one the provider left unset. The figure
+ * `tools/list` prints as *"N free per day, then $X"*. `null` when no binding
+ * serves free calls.
+ */
+function freeCallsPerDay(
+  bindings: readonly ToolBindingEntity[],
+  defaultPerAgent: number,
+): number | null {
+  const allowances = bindings
+    .filter(
+      (binding) =>
+        binding.pricingMode === PricingMode.FREE || binding.pricingMode === PricingMode.FREEMIUM,
+    )
+    .map((binding) => binding.freeQuotaPerAgent ?? defaultPerAgent);
+  return allowances.length > 0 ? Math.max(...allowances) : null;
 }
 
 /**

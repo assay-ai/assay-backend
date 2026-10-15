@@ -1,4 +1,5 @@
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
+import { FreeQuotaLimitKind } from '@modules/free-tier/services/free-quota.service';
 import {
   MCP_UNROUTABLE_REASON,
   MCP_VERIFICATION_ENQUEUE_FAILED_REASON,
@@ -282,20 +283,21 @@ describe('McpToolCallService — the paid call loop', () => {
   /**
    * The hole `evaluatePayoutGate` used to leave, now closed by the router.
    *
-   * A tool with both a FREE and a PAID binding quotes as paid, so the call takes
-   * the paid path and creates an intent. The router used to be free to draw the
-   * FREE binding, which the payout and stake gates exempt — observed on devnet:
-   * an agent charged $0.088 for a call a $0 binding served, by a provider nobody
-   * had bonded or checked. A paid call is now routed with `callClass: 'PAID'`,
-   * which leaves FREE bindings out of the pool.
+   * A tool with both a FREE and a PAID binding is free first, then paid: once
+   * the agent's free quota is gone the call takes the paid path and creates an
+   * intent. The router used to be free to draw the FREE binding for it, which
+   * the payout and stake gates exempt — observed on devnet: an agent charged
+   * $0.088 for a call a $0 binding served, by a provider nobody had bonded or
+   * checked. A paid call is now routed with `callClass: 'PAID'`, which leaves
+   * FREE bindings out of the pool.
    */
   function freeBindingBesideAPaidOne() {
-    return buildMcpHarness({
+    const harness = buildMcpHarness({
       bindings: [
         // Drawn first under `random: () => 0` if it were in the pool. Free, so
         // the payout gate exempts it; its provider has proved nothing.
         buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' }),
-        // What makes the tool quote as PAID, and what the agent is held for.
+        // The paid supply: what the agent is held for past its free quota.
         buildBinding('provider-b'),
       ],
       providers: [
@@ -308,6 +310,14 @@ describe('McpToolCallService — the paid call loop', () => {
       }),
       random: () => 0,
     });
+    // Past the free quota: the call falls through to the paid path.
+    harness.freeQuota.decision = {
+      kind: 'REFUSED',
+      limit: FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+      resetsAt: new Date('2026-10-17T00:00:00.000Z'),
+      fallThroughToPaid: true,
+    };
+    return harness;
   }
 
   it('never routes a paid call to a FREE binding, so the paid provider serves it', async () => {

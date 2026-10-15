@@ -12,7 +12,7 @@ import {
 } from '@modules/ledger/ports/escrow-balance-reader.port';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { VOUCHER_MAX_TTL_SECONDS } from '@modules/payment/constants/voucher.constants';
-import { PaymentErrors } from '@modules/payment/errors/payment.errors';
+import { PaymentErrorCode, PaymentErrors } from '@modules/payment/errors/payment.errors';
 import {
   RequestCall,
   computeRequestHash,
@@ -197,22 +197,31 @@ export class McpToolCallService {
         pricingMode: freeMode,
       });
 
+      // Free first. Inside the quota the call is relayed among the
+      // free-capable bindings only (`callClass: 'FREE'`), whether or not the
+      // tool also has `PAID` providers — `quotedPricingMode` quotes such a tool
+      // `FREEMIUM` precisely so that their presence cannot switch the free tier
+      // off. `null` means no free-capable binding could take it and the tool
+      // has paid supply: fall through below.
       if (decision.kind === 'ALLOWED') {
-        return this.relay(session, tool, freeMode, price, args, callId);
+        const served = await this.relay(session, tool, freeMode, price, args, callId);
+        if (served) return served;
       }
 
       // `FREE` exhausted. There is no paid binding behind this tool to fall
       // through to, so the agent gets the error and the reset time — and the
       // refusal costs nothing, because nothing was created to unwind.
-      if (!decision.fallThroughToPaid) {
+      if (decision.kind === 'REFUSED' && !decision.fallThroughToPaid) {
         throw McpErrors.quotaExceeded(
           buildFreeQuotaErrorContext({ refusal: decision, toolId: tool.id, paidPrice: null }),
         );
       }
 
-      // `FREEMIUM` exhausted — *"fall through to the paid path"*, which is the
-      // entire commercial point of the mode and must require no
-      // reconfiguration from the agent. Execution simply continues below.
+      // `FREEMIUM` exhausted, or no free-capable binding could serve — *"fall
+      // through to the paid path"*, which is the entire commercial point of the
+      // mode and must require no reconfiguration from the agent. Execution
+      // simply continues below, among `PAID` and `FREEMIUM` bindings only, and
+      // on rail B nothing is charged without a voucher the buyer signs.
     }
 
     // ── The buyer's chain ─────────────────────────────────────────────────
@@ -728,6 +737,16 @@ export class McpToolCallService {
    * outcome. On the paid path the catch exists to release a hold; here there
    * is nothing to release, and `TOOL_ALL_BINDINGS_FAILED` reaching the agent
    * unchanged is the same answer with less machinery.
+   *
+   * ## `null`: free first, then paid
+   *
+   * On a `FREEMIUM` quote — free-capable supply beside paid supply — a refusal
+   * the router makes **before dialling anyone** (no free-capable binding is
+   * eligible) returns `null`, and the caller falls through to the paid path.
+   * A failure after a free provider was dialled still propagates: re-running
+   * the call as a paid one the agent never asked for would be a surprise
+   * charge for somebody else's outage. On a `FREE` quote there is no paid
+   * supply, so every refusal propagates.
    */
   private async relay(
     session: McpSession,
@@ -736,7 +755,7 @@ export class McpToolCallService {
     quoted: Money,
     args: JsonObject,
     callId: string,
-  ): Promise<McpCallOutcome> {
+  ): Promise<McpCallOutcome | null> {
     const startedAt = Date.now();
     const routed = await this.router
       .route({
@@ -750,8 +769,10 @@ export class McpToolCallService {
         context: { ...routingContextOf(session, this.enabledChains, []), callClass: 'FREE' },
       })
       .catch((error: unknown) => {
+        if (pricingMode === PricingMode.FREEMIUM && isRefusedBeforeDialling(error)) return null;
         throw agentFacing(error, null);
       });
+    if (!routed) return null;
     const latencyMs = Date.now() - startedAt;
 
     // Written for every classified attempt, `REQUEST_ERROR` included: the
@@ -1309,6 +1330,20 @@ interface RouterLastAttempt {
 
 function isAllBindingsFailed(error: unknown): error is AppError<[Record<string, any>?]> {
   return error instanceof AppError && error.errorCode === ToolErrorCode.TOOL_ALL_BINDINGS_FAILED;
+}
+
+/**
+ * A routing refusal made before any provider was dialled — the router's
+ * `unroutable` codes. Only these let a free call fall through to the paid
+ * path: nothing happened yet, so nothing is repeated at the agent's expense.
+ */
+function isRefusedBeforeDialling(error: unknown): boolean {
+  return (
+    error instanceof AppError &&
+    (error.errorCode === ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING ||
+      error.errorCode === ToolErrorCode.TOOL_PROVIDER_SLASH_HOLD ||
+      error.errorCode === PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN)
+  );
 }
 
 function lastAttemptOf(error: unknown): RouterLastAttempt | null {
