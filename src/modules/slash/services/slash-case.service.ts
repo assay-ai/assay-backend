@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 
 import { SlaStrikeEntity } from '@database/postgres/entities/sla-strike.entity';
 import { SlaWindowCallEntity } from '@database/postgres/entities/sla-window-call.entity';
@@ -14,6 +14,7 @@ import {
 } from '@database/postgres/repositories/sla-window-call.repository';
 import { SlaWindowRepository } from '@database/postgres/repositories/sla-window.repository';
 import { SlashCaseReadRepository } from '@database/postgres/repositories/slash-case-read.repository';
+import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalEventRepository } from '@database/postgres/repositories/slash-proposal-event.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AssetId } from '@modules/chains/ports/caip.types';
@@ -35,9 +36,11 @@ import {
 import { DISPUTE_TIMEOUT_MS } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import {
+  disputeByOf,
   disputesOnChain,
   OnChainDisputeState,
   onChainDisputeState,
+  OnChainRecordMirror,
 } from '../domain/on-chain-dispute';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import {
@@ -89,6 +92,7 @@ export class SlashCaseService {
     private readonly caseRead: SlashCaseReadRepository,
     private readonly stakeService: ProviderStakeService,
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
+    @Optional() private readonly parts: SlashProposalPartRepository | null = null,
   ) {}
 
   /** The case screen and the case brief in one response — see the class comment. */
@@ -140,7 +144,20 @@ export class SlashCaseService {
       ? await this.buildChangeOverlay(organizationId, proposal.bindingId, window, calls)
       : null;
 
-    const clocks = computeClocks(proposal, new Date());
+    // Review N-4: an EVM case reads its state per record, not from one
+    // case-level timestamp.
+    const records =
+      this.parts && disputesOnChain(proposal.assetId)
+        ? (
+            await this.parts.findForEpoch(organizationId, proposal.id, proposal.chainEpoch ?? 0)
+          ).map((part) => ({
+            chainStatus: part.chainStatus,
+            chainDisputedAt: part.chainDisputedAt,
+            chainExecutableAt: part.chainExecutableAt,
+            cancelReason: part.cancelReason ?? null,
+          }))
+        : undefined;
+    const clocks = computeClocks(proposal, new Date(), records);
     const proposalDto = buildProposalDto(proposal, binding, tool, window, clocks);
     const arithmetic = buildArithmeticRows(strike, proposal, calls);
     const inaction = await this.buildInaction(proposal);
@@ -470,7 +487,11 @@ function toEventDto(event: SlashProposalEventEntity): SlashProposalEventDto {
   };
 }
 
-function computeClocks(proposal: SlashProposalEntity, now: Date): SlashProposalClocksDto {
+function computeClocks(
+  proposal: SlashProposalEntity,
+  now: Date,
+  records?: readonly OnChainRecordMirror[],
+): SlashProposalClocksDto {
   let runningClock: 'PROVIDER' | 'PLATFORM' | 'NONE' = 'NONE';
   let deadline: Date | null = null;
 
@@ -484,15 +505,20 @@ function computeClocks(proposal: SlashProposalEntity, now: Date): SlashProposalC
       chainDisputedAt: proposal.chainDisputedAt ?? null,
       chainDisputeWonAt: proposal.chainDisputeWonAt ?? null,
       chainDisputedParts: proposal.chainDisputedParts ?? 0,
+      records,
     },
     DISPUTE_TIMEOUT_MS,
   );
-  const disputeBy =
-    onChain &&
-    proposal.status === SlashProposalStatus.PROPOSED &&
-    chainState === OnChainDisputeState.PENDING
-      ? (proposal.chainExecutableAt ?? null)
-      : null;
+  // Per record when the records are at hand (review N-4): a part disputed, or
+  // a case moved on, does not close the window of a sibling still pending.
+  const disputeBy = !onChain
+    ? null
+    : records && records.length > 0
+      ? disputeByOf(records)
+      : proposal.status === SlashProposalStatus.PROPOSED &&
+          chainState === OnChainDisputeState.PENDING
+        ? (proposal.chainExecutableAt ?? null)
+        : null;
 
   if (onChain) {
     if (disputeBy && disputeBy.getTime() > now.getTime()) {
@@ -535,6 +561,8 @@ function computeClocks(proposal: SlashProposalEntity, now: Date): SlashProposalC
     disputeOnChain: onChain,
     chainState,
     disputeBy,
+    chainRecords: records?.length ?? 0,
+    cancelledRecords: records?.filter((record) => record.chainStatus === 'CANCELLED').length ?? 0,
   };
 }
 

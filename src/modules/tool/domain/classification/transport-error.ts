@@ -54,8 +54,11 @@ const KIND_BY_CODE: ReadonlyArray<readonly [RegExp, TransportErrorKind]> = [
   [/^EGRESS_DNS_FAILED$/, TransportErrorKind.DNS_FAILURE],
   [/^EGRESS_CONNECTION_FAILED$/, TransportErrorKind.CONNECTION_RESET],
   [/^EGRESS_RESPONSE_TOO_LARGE$/, TransportErrorKind.BODY_TRUNCATED],
+  // Its own kind so the provider is told why (https required in production)
+  // rather than an UNKNOWN transport failure.
+  [/^EGRESS_SCHEME_NOT_ALLOWED$/, TransportErrorKind.SCHEME_NOT_ALLOWED],
   [
-    /^EGRESS_(URL_INVALID|SCHEME_NOT_ALLOWED|BLOCKED_ADDRESS|REDIRECT_INVALID|TOO_MANY_REDIRECTS)$/,
+    /^EGRESS_(URL_INVALID|BLOCKED_ADDRESS|REDIRECT_INVALID|TOO_MANY_REDIRECTS)$/,
     TransportErrorKind.UNKNOWN,
   ],
 

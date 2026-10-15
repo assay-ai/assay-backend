@@ -1,5 +1,6 @@
 import { Column, Entity, Index } from 'typeorm';
 
+import { jsonbSafeTransformer } from './jsonb-safe.transformer';
 import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped.entity';
 
 /**
@@ -65,7 +66,8 @@ export class EvidencePackEntity extends OrganizationScopedEntityWithoutSoftDelet
   seq: string;
 
   /** The sealed document. See the class comment for what belongs in it. */
-  @Column({ name: 'core', type: 'jsonb' })
+  // Escaped reversibly, so a judged body that holds U+0000 can still be sealed.
+  @Column({ name: 'core', type: 'jsonb', transformer: jsonbSafeTransformer })
   core: Record<string, unknown>;
 
   /** `sha256:`-prefixed digest of the request body, or null when there was none. */

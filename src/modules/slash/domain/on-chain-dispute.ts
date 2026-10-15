@@ -33,8 +33,38 @@ export enum OnChainDisputeState {
   CANCELLED = 'CANCELLED',
   /** Executed on chain: the penalty was taken. */
   EXECUTED = 'EXECUTED',
+  /**
+   * Review R2-3: nothing stands, at least one record executed and at least one
+   * was cancelled or expired on chain — the penalty was taken in part, and
+   * nothing was taken for the cancelled records (the arbiter's cancel, an
+   * unruled dispute, or a lapse; the case's `cancelledRecords` counts them).
+   */
+  PARTIALLY_EXECUTED = 'PARTIALLY_EXECUTED',
   /** The dispute went unruled for its 30 days and was expired; nothing taken. */
   EXPIRED = 'EXPIRED',
+  /**
+   * Review N-4: never executed, then expired (the execution grace ran out, or
+   * the verifier key stopped being valid) — never disputed, or disputed and
+   * upheld by the arbiter but not executed in time. Nobody ruled for the
+   * provider in the end; nothing was taken.
+   */
+  LAPSED = 'LAPSED',
+  /**
+   * Review R2-8: cancelled or expired on chain for a reason this platform
+   * never recorded (a row from before cancel reasons were kept, or a cancel
+   * whose event was not seen). Unknown — never read as the arbiter's cancel;
+   * nothing was taken.
+   */
+  RELEASED = 'RELEASED',
+}
+
+/** One on-chain record of the case (a part of the current epoch), as mirrored. */
+export interface OnChainRecordMirror {
+  readonly chainStatus: string;
+  readonly chainDisputedAt: Date | null;
+  readonly chainExecutableAt: Date | null;
+  /** `SlashCancelled.reason`, for a cancelled record. */
+  readonly cancelReason: string | null;
 }
 
 export interface OnChainDisputeMirror {
@@ -43,12 +73,67 @@ export interface OnChainDisputeMirror {
   readonly chainDisputedAt: Date | null;
   readonly chainDisputeWonAt: Date | null;
   readonly chainDisputedParts: number;
+  /** The case's current-epoch records; when given, the state is derived from them. */
+  readonly records?: readonly OnChainRecordMirror[];
+}
+
+/**
+ * Review N-4: the case's state from its records, never from one case-level
+ * timestamp. DISPUTED while any record is; UPHELD only when every pending
+ * record was disputed before (it can only be executed now); PENDING while a
+ * record stands undisputed; once nothing stands, EXECUTED when every record
+ * executed and PARTIALLY_EXECUTED when some were cancelled too (review R2-3);
+ * otherwise by the cancel reasons: EXPIRED (a dispute nobody ruled
+ * on), CANCELLED (the arbiter's or admin's cancelSlash), LAPSED (expired
+ * unexecuted), RELEASED (a reason never recorded: unknown, review R2-8).
+ */
+function stateOfRecords(records: readonly OnChainRecordMirror[]): OnChainDisputeState | null {
+  const with_ = (status: string) => records.filter((record) => record.chainStatus === status);
+  const pending = with_('PENDING');
+  if (with_('DISPUTED').length > 0) return OnChainDisputeState.DISPUTED;
+  if (pending.length > 0) {
+    return pending.every((record) => record.chainDisputedAt)
+      ? OnChainDisputeState.UPHELD
+      : OnChainDisputeState.PENDING;
+  }
+  const cancelled = with_('CANCELLED');
+  if (with_('EXECUTED').length > 0) {
+    return cancelled.length > 0
+      ? OnChainDisputeState.PARTIALLY_EXECUTED
+      : OnChainDisputeState.EXECUTED;
+  }
+  if (cancelled.length === 0) return null;
+  if (cancelled.some((record) => record.cancelReason === 'DISPUTE_UNRESOLVED')) {
+    return OnChainDisputeState.EXPIRED;
+  }
+  if (cancelled.some((record) => record.cancelReason === 'WITHDRAWN')) {
+    return OnChainDisputeState.CANCELLED;
+  }
+  if (cancelled.some((record) => !record.cancelReason)) return OnChainDisputeState.RELEASED;
+  return OnChainDisputeState.LAPSED;
+}
+
+/**
+ * Review N-4: the provider may dispute on chain until the earliest door of a
+ * record still pending and never disputed (a record is disputed at most
+ * once), whatever its siblings or the case status say. `null` when none.
+ */
+export function disputeByOf(records: readonly OnChainRecordMirror[]): Date | null {
+  const doors = records
+    .filter((record) => record.chainStatus === 'PENDING' && !record.chainDisputedAt)
+    .map((record) => record.chainExecutableAt)
+    .filter((date): date is Date => date instanceof Date)
+    .map((date) => date.getTime());
+  return doors.length > 0 ? new Date(Math.min(...doors)) : null;
 }
 
 /**
  * The record's state from the watcher-mirrored columns, or `null` when the
  * case is not an EVM case or no record stands on chain yet.
  *
+ * - With the case's records ({@link OnChainDisputeMirror.records}) the state
+ *   is derived per record (review N-4); the rules below are the fallback for
+ *   a case whose records are not at hand.
  * - `EXPIRED` is told from `CANCELLED` by its timing: the provider's win
  *   (`chainDisputeWonAt`) landed at least `disputeTimeoutMs` after the
  *   dispute. A record that lapsed undisputed reads `CANCELLED`.
@@ -60,6 +145,10 @@ export function onChainDisputeState(
   disputeTimeoutMs: number,
 ): OnChainDisputeState | null {
   if (!disputesOnChain(mirror.assetId)) return null;
+  if (mirror.records && mirror.records.length > 0) {
+    const derived = stateOfRecords(mirror.records);
+    if (derived) return derived;
+  }
   switch (mirror.chainStatus) {
     case ChainProposalStatus.EXECUTED:
       return OnChainDisputeState.EXECUTED;

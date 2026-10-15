@@ -150,6 +150,8 @@ describe('DbCredentialMcpSessionSource — the credential a user actually create
 
     expect(session).toEqual({
       credentialId: 'cred-42',
+      // the id names a stored `agent_credentials` row (N-1)
+      storedCredential: true,
       organizationId: 'org-1',
       agentId: 'agent-1',
       agentAccount: ACCOUNT,

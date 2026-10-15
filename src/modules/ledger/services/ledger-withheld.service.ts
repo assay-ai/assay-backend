@@ -10,6 +10,7 @@ import { Money } from '@modules/chains/ports/money.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
+  MAX_LISTED_ORPHANED_HOLD_IDS,
   WITHHELD_BUCKET_LABEL,
   WITHHELD_STATUS_BUCKET,
   WithheldBucket,
@@ -107,7 +108,8 @@ export class LedgerWithheldService {
 
   /**
    * Both sides, folded into the honest identity
-   * `holdReleaseTotal == withheld + orphanedReleases` — see `domain/withheld.ts`.
+   * `holdReleaseTotal == withheld + settlementRemainders + orphanedReleases` — see
+   * `domain/withheld.ts`.
    */
   async reconcile(
     organizationId: string,
@@ -115,20 +117,35 @@ export class LedgerWithheldService {
     decimals: number,
     period: WithheldPeriod = {},
   ): Promise<WithheldReconciliation> {
-    const [withheld, holdReleaseTotal, orphans] = await Promise.all([
+    const [withheld, holdReleaseTotal, summaries] = await Promise.all([
       this.withheldFromIntents(organizationId, asset, decimals, period),
       this.withheldFromJournal(organizationId, asset, decimals, period),
-      this.entries.findOrphanedHoldReleases(organizationId, period),
+      this.entries.summarizeOrphanedHoldReleases(
+        organizationId,
+        period,
+        MAX_LISTED_ORPHANED_HOLD_IDS,
+      ),
     ]);
 
-    const orphansForAsset = orphans.filter((orphan) => orphan.asset === asset);
-    const orphanedAtomic = orphansForAsset.reduce((total, orphan) => total + orphan.amount, 0n);
+    const forAsset = summaries.filter((summary) => summary.asset === asset);
+    const sum = (term: (row: (typeof forAsset)[number]) => bigint) =>
+      forAsset.reduce((total, row) => total + term(row), 0n);
 
     return reconcileWithheld({
       withheld,
       holdReleaseTotal,
-      orphanedReleases: MoneyUtil.of(orphanedAtomic, asset, decimals),
-      orphanedHoldIds: orphansForAsset.map((orphan) => orphan.holdId),
+      orphanedReleases: MoneyUtil.of(
+        sum((row) => row.orphanedReleases),
+        asset,
+        decimals,
+      ),
+      orphanedHoldIds: forAsset.flatMap((row) => row.orphanedHoldIds),
+      orphanedHoldCount: forAsset.reduce((total, row) => total + row.orphanedHoldCount, 0),
+      settlementRemainders: MoneyUtil.of(
+        sum((row) => row.settlementRemainders),
+        asset,
+        decimals,
+      ),
     });
   }
 }

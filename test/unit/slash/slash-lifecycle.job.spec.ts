@@ -317,3 +317,179 @@ describe('SlashLifecycleJob — the closed-case repair', () => {
     error.mockRestore();
   });
 });
+
+describe('SlashLifecycleJob — open EVM cases from the in-app objection era (review N-3, R2-5)', () => {
+  const row = (id: string) => ({ organizationId: 'org', id });
+
+  function buildWithRulings(rulings: Record<string, unknown>, steps: string[] = []) {
+    const proposals = new FakeSlashProposals((name) => steps.push(name));
+    const execution = new FakeSlashExecution((name) => steps.push(name));
+    const job = new SlashLifecycleJob(
+      proposals as never,
+      execution as never,
+      {} as never,
+      { followOpenCasesPastDoor: async () => 0, ...rulings } as never,
+    );
+    jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    return job;
+  }
+
+  it('re-derives them page by page after the sweeps, until a page comes back empty', async () => {
+    const steps: string[] = [];
+    const cursors: unknown[] = [];
+    let calls = 0;
+    const job = buildWithRulings(
+      {
+        reconcileOpenCases: async (_limit: number, after: unknown) => {
+          calls += 1;
+          cursors.push(after ?? null);
+          steps.push('reconcileOpenCases');
+          if (calls === 1) throw new Error('rpc down'); // retried from the same cursor
+          return calls < 4
+            ? {
+                moved: 1,
+                failed: [],
+                next: { proposedAt: new Date(calls * 1000), id: `c${calls}` },
+              }
+            : { moved: 0, failed: [], next: null };
+        },
+        reconcileCases: async () => ({ moved: 0, failed: [] }),
+      },
+      steps,
+    );
+
+    for (let tick = 0; tick < 6; tick += 1) await job.handleTick();
+
+    expect(calls).toBe(4);
+    expect(cursors).toEqual([
+      null,
+      null,
+      { proposedAt: new Date(2000), id: 'c2' },
+      { proposedAt: new Date(3000), id: 'c3' },
+    ]);
+    // Last in the tick: the sweeps of the first tick do not wait behind it.
+    expect(steps.indexOf('reconcileOpenCases')).toBeGreaterThan(
+      steps.indexOf('reconcileExecuting'),
+    );
+  });
+
+  it('retries a case whose read failed on later ticks, a bounded number of times', async () => {
+    const retried: string[][] = [];
+    const job = buildWithRulings({
+      reconcileOpenCases: async () => ({ moved: 0, failed: [row('a'), row('b')], next: null }),
+      reconcileCases: async (rows: { id: string }[]) => {
+        retried.push(rows.map((entry) => entry.id));
+        // `a` reads fine on its first retry; `b` never does.
+        return { moved: 1, failed: rows.filter((entry) => entry.id === 'b') };
+      },
+    });
+
+    for (let tick = 0; tick < 10; tick += 1) await job.handleTick();
+
+    expect(retried[0]).toEqual(['a', 'b']);
+    expect(retried.slice(1).every((ids) => ids.length === 1 && ids[0] === 'b')).toBe(true);
+    expect(retried.length).toBeLessThanOrEqual(5);
+  });
+
+  it('never runs two ticks at once in one process', async () => {
+    let release: () => void = () => undefined;
+    let started = 0;
+    const job = buildWithRulings({
+      reconcileOpenCases: async () => {
+        started += 1;
+        await new Promise<void>((resolve) => (release = resolve));
+        return { moved: 0, failed: [], next: null };
+      },
+      reconcileCases: async () => ({ moved: 0, failed: [] }),
+    });
+
+    const first = job.handleTick();
+    await new Promise((resolve) => setImmediate(resolve));
+    await job.handleTick(); // overlaps the first: skipped
+    release();
+    await first;
+
+    expect(started).toBe(1);
+  });
+
+  it('R3-3: a tick hung past the limit pages once and no longer holds the scheduler', async () => {
+    jest.useFakeTimers({ now: new Date('2026-10-16T00:00:00Z'), doNotFake: ['setImmediate'] });
+    try {
+      let started = 0;
+      const releases: (() => void)[] = [];
+      const alerts: { severity: string; name: string; dedupeKey?: string }[] = [];
+      const proposals = new FakeSlashProposals();
+      const execution = new FakeSlashExecution();
+      const job = new SlashLifecycleJob(
+        proposals as never,
+        execution as never,
+        {} as never,
+        {
+          followOpenCasesPastDoor: async () => 0,
+          reconcileCases: async () => ({ moved: 0, failed: [] }),
+          reconcileOpenCases: async () => {
+            started += 1;
+            await new Promise<void>((resolve) => releases.push(resolve));
+            return { moved: 0, failed: [], next: null };
+          },
+        } as never,
+        { emit: async (alert: (typeof alerts)[number]) => void alerts.push(alert) } as never,
+      );
+      jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      const hung = job.handleTick();
+      await new Promise((resolve) => setImmediate(resolve));
+      jest.setSystemTime(new Date('2026-10-16T00:05:00Z'));
+      await job.handleTick(); // within the limit: skipped, no page
+      expect(alerts).toEqual([]);
+
+      jest.setSystemTime(new Date('2026-10-16T00:16:00Z'));
+      const next = job.handleTick(); // past the limit: page, and run
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(alerts).toEqual([
+        expect.objectContaining({ severity: 'CRITICAL', name: 'slash_lifecycle_tick_hung' }),
+      ]);
+      expect(started).toBe(2);
+
+      // The hung tick settling late does not free the guard of the new one.
+      releases[0]();
+      await hung;
+      await job.handleTick();
+      expect(started).toBe(2);
+      releases[1]();
+      await next;
+    } finally {
+      jest.useRealTimers();
+    }
+  });
+});
+
+describe('SlashLifecycleJob — open EVM cases past their door (review R2-2)', () => {
+  it('follows their records every tick, right after the undisputed sweep', async () => {
+    const steps: string[] = [];
+    const proposals = new FakeSlashProposals((name) => steps.push(name));
+    const execution = new FakeSlashExecution((name) => steps.push(name));
+    const rulings = {
+      reconcileOpenCases: async () => ({ moved: 0, failed: [], next: null }),
+      followOpenCasesPastDoor: async () => {
+        steps.push('followOpenCasesPastDoor');
+        return 1;
+      },
+    };
+    const job = new SlashLifecycleJob(
+      proposals as never,
+      execution as never,
+      {} as never,
+      rulings as never,
+    );
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+    await job.handleTick();
+    await job.handleTick();
+
+    expect(steps.filter((step) => step === 'followOpenCasesPastDoor')).toHaveLength(2);
+    expect(steps.indexOf('followOpenCasesPastDoor')).toBe(steps.indexOf('sweepUndisputed') + 1);
+  });
+});

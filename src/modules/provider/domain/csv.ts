@@ -41,3 +41,16 @@ export function csvRow(values: ReadonlyArray<string | number | null | undefined>
 export function csvLine(values: ReadonlyArray<string | number | null | undefined>): string {
   return `${csvRow(values)}\r\n`;
 }
+
+/**
+ * The file name a per-call export downloads as: `assay-calls-<from>_<to>.csv`.
+ *
+ * The bounds are ISO timestamps, and `:` is not allowed in a file name on
+ * Windows (and is shown as `/` by macOS Finder), so every character outside
+ * `[0-9A-Za-z._-]` becomes `-`. Quotes can therefore never reach the
+ * `Content-Disposition` value this is put in.
+ */
+export function callsExportFilename(from: string, to: string): string {
+  const safe = (value: string) => value.replace(/[^0-9A-Za-z._-]/g, '-');
+  return `assay-calls-${safe(from)}_${safe(to)}.csv`;
+}

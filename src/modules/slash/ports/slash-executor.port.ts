@@ -279,8 +279,15 @@ export interface SlashRecordSnapshot {
   readonly executableAt: Date;
   /** `null` until the judgement executes — never `new Date(0)`. */
   readonly executedAt: Date | null;
-  /** `null` unless the judgement was cancelled or expired. */
+  /** `null` unless the judgement was cancelled or expired (and, on EVM, its event was found). */
   readonly cancelledAt: Date | null;
+  /**
+   * Review R2-8: why a `CANCELLED` record was cancelled, when the read could
+   * tell (EVM: `SlashCancelled.reason` of its event — `WITHDRAWN`, `EXPIRED`,
+   * `VERIFIER_UNAVAILABLE`, `DISPUTE_UNRESOLVED`). Absent or `null` when it
+   * could not; the watcher's own `SlashCancelled` fills it in then.
+   */
+  readonly cancelReason?: string | null;
   /**
    * EVM only (D-19): when the provider called `disputeSlash`, or `null`. A
    * `DISPUTED` record becomes expirable at `disputedAt + 30 d`, not on the

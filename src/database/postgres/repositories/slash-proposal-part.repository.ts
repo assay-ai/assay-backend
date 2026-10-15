@@ -94,6 +94,50 @@ export class SlashProposalPartRepository extends OrganizationScopedRepository<Sl
   }
 
   /**
+   * Review R2-6: records of an EARLIER epoch of their case that landed on
+   * chain late and still stand (`PENDING` or `DISPUTED`), marked
+   * `SupersededEpoch` by the watcher. They cover the same calls as the
+   * current epoch's records, so the arbiter is asked to cancel each; nothing
+   * of this platform executes them. Across tenants, soonest door first.
+   */
+  async findSupersededStanding(limit: number): Promise<
+    {
+      requestId: string;
+      proposalId: string;
+      organizationId: string;
+      providerId: string;
+      assetId: string;
+      chainStatus: string;
+      chainEpoch: number;
+      caseChainEpoch: number;
+      penaltyAmount: string;
+      chainReserved: string | null;
+      chainExecutableAt: Date | null;
+    }[]
+  > {
+    return this.manager
+      .createQueryBuilder(SlashProposalPartEntity, 'part')
+      .innerJoin('slash_proposals', 'proposal', 'proposal.id = part.proposal_id')
+      .select('part.chain_request_id', 'requestId')
+      .addSelect('part.proposal_id', 'proposalId')
+      .addSelect('part.organization_id', 'organizationId')
+      .addSelect('proposal.provider_id', 'providerId')
+      .addSelect('proposal.asset_id', 'assetId')
+      .addSelect('part.chain_status', 'chainStatus')
+      .addSelect('part.chain_epoch', 'chainEpoch')
+      .addSelect('proposal.chain_epoch', 'caseChainEpoch')
+      .addSelect('part.penalty_amount', 'penaltyAmount')
+      .addSelect('part.chain_reserved', 'chainReserved')
+      .addSelect('part.chain_executable_at', 'chainExecutableAt')
+      .where("part.chain_last_error = 'SupersededEpoch'")
+      .andWhere("part.chain_status IN ('PENDING', 'DISPUTED')")
+      .andWhere('part.chain_epoch < proposal.chain_epoch')
+      .orderBy('part.chain_executable_at', 'ASC')
+      .limit(limit)
+      .getRawMany();
+  }
+
+  /**
    * Every on-chain slash record this platform has standing (`PENDING` or
    * `DISPUTED`), across tenants, with its asset: the current epoch's parts of
    * partitioned cases and the single records of the others. For the

@@ -1,4 +1,5 @@
 import { Column, Entity, Index } from 'typeorm';
+import { jsonbSafeTransformer } from './jsonb-safe.transformer';
 import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped.entity';
 
 /**
@@ -66,11 +67,23 @@ export class VerificationRecordEntity extends OrganizationScopedEntityWithoutSof
   // ── Evidence in ───────────────────────────────────────────────────────────
 
   /** The agent's arguments. Read by rules gated on the request. */
-  @Column({ name: 'request', type: 'jsonb', nullable: true })
+  @Column({
+    name: 'request',
+    type: 'jsonb',
+    nullable: true,
+    // U+0000 and lone surrogates are escaped reversibly — see the transformer.
+    transformer: jsonbSafeTransformer,
+  })
   request: unknown;
 
   /** The provider's response **after** the binding's response mapping. */
-  @Column({ name: 'response', type: 'jsonb', nullable: true })
+  @Column({
+    name: 'response',
+    type: 'jsonb',
+    nullable: true,
+    // U+0000 and lone surrogates are escaped reversibly — see the transformer.
+    transformer: jsonbSafeTransformer,
+  })
   response: unknown;
 
   /** The tool's `outputSchema` as it stood at call time, so a replay is honest. */
@@ -164,19 +177,19 @@ export class VerificationRecordEntity extends OrganizationScopedEntityWithoutSof
    * absent row reads as a tick to anyone scanning a list — so the absence is
    * impossible at the storage layer rather than guarded at each renderer.
    */
-  @Column({ name: 'stages', type: 'jsonb', nullable: true })
+  @Column({ name: 'stages', type: 'jsonb', nullable: true, transformer: jsonbSafeTransformer })
   stages: unknown;
 
   /** Every declared verifier's vote, in declaration order. */
-  @Column({ name: 'verifiers', type: 'jsonb', nullable: true })
+  @Column({ name: 'verifiers', type: 'jsonb', nullable: true, transformer: jsonbSafeTransformer })
   verifiers: unknown;
 
   /** The quorum arithmetic, so a receipt can show its working. */
-  @Column({ name: 'tally', type: 'jsonb', nullable: true })
+  @Column({ name: 'tally', type: 'jsonb', nullable: true, transformer: jsonbSafeTransformer })
   tally: unknown;
 
   /** Which clause decided, or the `otherwise` default. */
-  @Column({ name: 'decided_by', type: 'jsonb', nullable: true })
+  @Column({ name: 'decided_by', type: 'jsonb', nullable: true, transformer: jsonbSafeTransformer })
   decidedBy: unknown;
 
   /** The instant the verdict was evaluated at — injected, never `now()`. */

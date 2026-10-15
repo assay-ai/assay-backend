@@ -26,7 +26,9 @@ describe('ProviderConnectivityController GET :providerId/verification', () => {
     app = moduleRef.createNestApplication();
     app.useGlobalPipes(new ValidationPipe({ transform: true }));
     await app.init();
-  });
+    // Compiling a Nest module inside the parallel suite has taken longer than the
+    // default 5 s on a two-core CI runner, which failed both tests below.
+  }, 30_000);
 
   afterAll(async () => {
     await app.close();

@@ -739,8 +739,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // (review 2026-10-15 P-4). Redeeming it first advances `seq_high` past
       // the lower one, which then dies on `VoucherSeqNotIncreasing` and is paid
       // by the platform. Bounded: the lower one settles (and goes first),
-      // or ends REFUNDED/VOIDED/EXPIRED (only a hole), or hits the hold
-      // backstop. Per payer account, not per asset: the seq is the escrow's.
+      // or ends REFUNDED/VOIDED/EXPIRED (only a hole), or passes its own
+      // redemption window (final review N-1): past `expires_at` + grace the
+      // chain refuses it anyway, so it is only a hole, and waiting on it to
+      // the 24 h hold backstop would let every later voucher expire too.
+      // Per payer account, not per asset: the seq is the escrow's.
       .andWhere(
         `NOT EXISTS (
            SELECT 1 FROM payment_intents earlier
@@ -749,6 +752,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
               AND earlier.rail = :rail
               AND earlier.voucher_seq IS NOT NULL
               AND earlier.voucher_seq < intent.voucher_seq
+              AND earlier.expires_at > now() - interval '${REDEEM_GRACE_SECONDS} seconds'
               AND (earlier.status IN (:...earlierOpenStatuses)
                    OR (earlier.status = 'CREATED' AND earlier.expires_at > now()))
          )`,

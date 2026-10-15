@@ -118,8 +118,13 @@ export class ProviderConnectivityService {
    */
   check(organizationId: string, endpoint?: string): Promise<ConnectivityCheckResultDto> {
     // Bounded like the mapping tester: an unthrottled probe of any public URL
-    // from the platform's egress IPs is a scanner anyone can borrow.
-    return this.limiter.run(organizationId, () => this.checkUnlimited(organizationId, endpoint));
+    // from the platform's egress IPs is a scanner anyone can borrow. Its own
+    // process-wide pool, so slow tester runs cannot starve it (review N-3).
+    return this.limiter.run(
+      organizationId,
+      () => this.checkUnlimited(organizationId, endpoint),
+      'connectivity',
+    );
   }
 
   private async checkUnlimited(

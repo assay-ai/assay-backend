@@ -56,7 +56,10 @@ import {
   ToolQuote,
   bindingPrice,
 } from '@modules/tool/services/provider-router.service';
-import { VerificationSettlementService } from '@modules/verification/services/verification-settlement.service';
+import {
+  EnqueueVerificationInput,
+  VerificationSettlementService,
+} from '@modules/verification/services/verification-settlement.service';
 import { AppError } from '@shared/errors/app-errors';
 import { BaseError } from '@shared/errors/base.error';
 import { MoneyUtil } from '@utils/money.util';
@@ -72,7 +75,7 @@ import {
   MCP_VOIDED_REASON,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
-import { McpCallerKind, McpSession } from '../ports/mcp-session.port';
+import { McpSession, storedCredentialIdOf } from '../ports/mcp-session.port';
 import { McpCatalogueService } from './mcp-catalogue.service';
 import { MCP_PRICING, McpPricingConfig } from './mcp-pricing.config';
 
@@ -279,7 +282,7 @@ export class McpToolCallService {
     // The cap check and the hold it allows run under the agent's spend lock:
     // read and reserve as one step, so concurrent calls cannot all read the
     // same spend-so-far and all fit (review 2026-10-15 P-6).
-    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async () => {
+    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async (held) => {
       const spendPolicyVersion = await this.spendPolicy.assertCallAllowed({
         organizationId: session.organizationId,
         agentId: session.agentId,
@@ -340,6 +343,10 @@ export class McpToolCallService {
         chainId: session.chainId,
       });
 
+      // Still ours? Otherwise the next call of this agent may already have
+      // summed its spend without this hold (round-two review N-4). The intent
+      // stays in `CREATED` with nothing reserved, for the expiry sweep.
+      await held();
       const unaffordable = await this.secureFunds(session, intent, price);
       return { intent, unaffordable };
     });
@@ -465,7 +472,7 @@ export class McpToolCallService {
     // A charge like any other, so the same gate that caps rail A caps this —
     // against the hash the voucher signs, which is this call's identity here.
     // Checked and held under the agent's spend lock, as on rail A (P-6).
-    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async () => {
+    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async (held) => {
       await this.spendPolicy.assertCallAllowed({
         organizationId: session.organizationId,
         agentId: session.agentId,
@@ -495,6 +502,8 @@ export class McpToolCallService {
             // The same read as the withdraw gate above: the escrow's own limits
             // bind this voucher at redemption, so they are applied before serving.
             escrow: reading,
+            // After the voucher's chain reads, before its intent and hold (N-4).
+            beforeHold: held,
           }),
           unaffordable: null,
         };
@@ -1015,11 +1024,11 @@ export class McpToolCallService {
    * - Everything else is durably recorded and handed to
    *   `VerificationSettlementService`'s worker via {@link
    *   VerificationSettlementService.enqueue}. If the record or the enqueue
-   *   fails, the agent still gets its data back — that is the safe direction
-   *   to fail in — and the intent is voided at once, releasing the hold:
-   *   `ledger_holds.expires_at` has no reader anywhere, so nothing else would
-   *   ever return that money. A bookkeeping failure must still never replace
-   *   the agent's successful result with an error.
+   *   fails twice, the agent still gets its data back — a bookkeeping failure
+   *   must never replace a successful result with an error — and the intent
+   *   is settled as served, unverified, so the hold is committed rather than
+   *   stranded. It is never voided: that made the call free, and a buyer could
+   *   provoke the failure (final review N-3).
    */
   private async resolveDataResult(
     session: McpSession,
@@ -1106,43 +1115,56 @@ export class McpToolCallService {
       }
     }
 
-    try {
-      await this.settlement.enqueue({
-        organizationId: session.organizationId,
-        intentId: verifying.id,
-        toolId: routed.tool.id,
-        // Verification judges a provider's answer against a tool's contract and
-        // its consequences land on the provider's stake, so `providerId` is the
-        // identity this payload needs. No binding: adding one would put a
-        // second copy of the routing fact into a queue that outlives the call,
-        // and the intent it names already carries the authoritative one.
-        providerId: routed.providerId,
-        request: args,
-        response: routed.output,
-        outputSchema: routed.tool.outputSchema,
-      });
-    } catch (error) {
-      // Nothing would ever judge this intent, so nothing would ever return
-      // the hold: void it now — no charge, no strike. The agent keeps the
-      // data; the provider is unpaid for a call the platform failed to record.
-      this.logger.error(
-        `Intent ${verifying.id}: data returned but verification could not be durably enqueued — ` +
-          `voiding the intent and releasing its hold. ${describe(error)}`,
+    const handoff: EnqueueVerificationInput = {
+      organizationId: session.organizationId,
+      intentId: verifying.id,
+      toolId: routed.tool.id,
+      // Verification judges a provider's answer against a tool's contract and
+      // its consequences land on the provider's stake, so `providerId` is the
+      // identity this payload needs. No binding: adding one would put a
+      // second copy of the routing fact into a queue that outlives the call,
+      // and the intent it names already carries the authoritative one.
+      providerId: routed.providerId,
+      request: args,
+      response: routed.output,
+      outputSchema: routed.tool.outputSchema,
+    };
+
+    // Once more on failure: `enqueue` is idempotent on the intent id, so a
+    // retry after a write that did land is a no-op, not a second record.
+    const enqueued = await this.settlement
+      .enqueue(handoff)
+      .catch(() => this.settlement.enqueue(handoff))
+      .then(
+        () => true,
+        (error: unknown) => {
+          this.logger.error(
+            `Intent ${verifying.id}: data returned but verification could not be durably ` +
+              `enqueued — settling the call as served, unverified. ${describe(error)}`,
+          );
+          return false;
+        },
       );
-      try {
-        return await this.intents.resolve(
-          session.organizationId,
-          verifying.id,
-          PaymentIntentStatus.VERIFYING,
-          PaymentIntentStatus.VOIDED,
-          { reason: MCP_VERIFICATION_ENQUEUE_FAILED_REASON },
-        );
-      } catch (voidError) {
-        this.logger.error(
-          `Intent ${verifying.id}: void after a failed enqueue did not land — the intent is ` +
-            `stuck in VERIFYING and its hold must be released by hand. ${describe(voidError)}`,
-        );
-      }
+    if (enqueued) return verifying;
+
+    // Nothing will ever judge this intent. It is settled as served rather than
+    // voided (final review N-3): the agent has the data, and a void here was a
+    // free call any buyer could choose by making the write fail.
+    try {
+      return await this.intents.resolve(
+        session.organizationId,
+        verifying.id,
+        PaymentIntentStatus.VERIFYING,
+        PaymentIntentStatus.SETTLED,
+        { reason: MCP_VERIFICATION_ENQUEUE_FAILED_REASON, settledAmount: verifying.price },
+      );
+    } catch (settleError) {
+      // The hold stays open on a VERIFYING intent; only the 24-hour backstop
+      // acts on it after this.
+      this.logger.error(
+        `Intent ${verifying.id}: settling after a failed enqueue did not land — the intent ` +
+          `stays in VERIFYING with its hold open. ${describe(settleError)}`,
+      );
     }
 
     return verifying;
@@ -1674,9 +1696,9 @@ function namespaceOf(chainId: ChainId): string {
 
 /**
  * The agent credential behind the session (`agent_credentials.id`), or null
- * for a person's or a config session, whose `credentialId` names no stored
- * credential.
+ * for a person's or a config session (machine ones included), whose
+ * `credentialId` names no stored credential and is not a uuid (review N-1).
  */
 function credentialOf(session: McpSession): string | null {
-  return session.callerKind === McpCallerKind.AGENT ? session.credentialId : null;
+  return storedCredentialIdOf(session);
 }

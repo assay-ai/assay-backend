@@ -23,6 +23,8 @@ import { randomBytes } from 'node:crypto';
 import { INestApplicationContext, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import { getDataSourceToken } from '@nestjs/typeorm';
+import { DataSource } from 'typeorm';
 
 import { databaseConfig } from '@config/database.config';
 import { redisConfig } from '@config/redis.config';
@@ -34,6 +36,7 @@ import {
   AGENT_CREDENTIAL_STORED_PREFIX_LENGTH,
   AGENT_CREDENTIAL_TOKEN_PREFIX,
 } from '@modules/account/constants/agent-credential-token.constants';
+import { loadMcpCredentials } from '@modules/mcp/services/config-mcp-session.source';
 import { digestToken } from '@shared/crypto/token-digest';
 
 @Module({
@@ -257,4 +260,106 @@ export async function mintScriptIdentity(
   );
 
   return { organizationId: agent.organizationId, agentId: agent.id, token, accountId };
+}
+
+/**
+ * A **person** session for the provider routes, from a config-file record.
+ *
+ * Every provider write — registration, stake authority, payout address,
+ * endpoint, bindings, stake intents, slash acknowledge and dispute — sits
+ * behind `HumanSessionGuard`, which refuses the `AGENT` session a token from
+ * {@link mintScriptIdentity} resolves to (review A-1, N-2). The suite cannot
+ * mint a Privy login, so the person is a record in the API server's
+ * `MCP_CREDENTIALS_FILE` marked `"kind": "human"`, and `envVar` names its
+ * token. The API must run with `AUTH_SESSION_SOURCE=both` so it reads that
+ * file beside the database credentials.
+ *
+ * The record's organization and agent rows are created here when they do not
+ * exist yet, with the record's own ids, so the session names a real tenant.
+ * An organization that is **already a provider** is refused before anything
+ * is funded: steps 1–4 register and stake from scratch, so each full run needs
+ * a fresh record (a new organization id in the file, and an API restart to
+ * load it).
+ *
+ * The token is read from the environment and never logged.
+ */
+export async function adoptConfigPersonIdentity(
+  app: INestApplicationContext,
+  envVar: string,
+  label: string,
+): Promise<ScriptIdentity> {
+  const token = process.env[envVar];
+  if (!token) {
+    throw new Error(
+      `${envVar} is not set. Provider routes accept only a person session, so this script ` +
+        `needs a token from the API server's MCP_CREDENTIALS_FILE whose record is marked ` +
+        `"kind": "human" and names an organization that is not a provider yet ` +
+        `(AUTH_SESSION_SOURCE=both on the server).`,
+    );
+  }
+
+  // The API server's own loader, so this refuses exactly what the server refuses.
+  const record = loadMcpCredentials(process.env.MCP_CREDENTIALS_FILE)[token];
+  if (!record) {
+    throw new Error(
+      `${envVar} is not a token in MCP_CREDENTIALS_FILE (${process.env.MCP_CREDENTIALS_FILE ?? 'unset'})`,
+    );
+  }
+  if (record.kind !== 'human') {
+    throw new Error(
+      `${envVar} names credential ${record.credentialId}, which is not marked "kind": "human" ` +
+        `and so resolves as an agent; provider routes refuse it`,
+    );
+  }
+
+  const dataSource = app.get<DataSource>(getDataSourceToken('postgres'));
+  const registered: unknown[] = await dataSource.query(
+    'SELECT 1 FROM providers WHERE organization_id = $1',
+    [record.organizationId],
+  );
+  if (registered.length > 0) {
+    throw new Error(
+      `organization ${record.organizationId} (credential ${record.credentialId}) is already a ` +
+        `provider. This run registers and stakes from scratch: add a fresh "kind": "human" ` +
+        `record with a new organization id, restart the API server, and point ${envVar} at it.`,
+    );
+  }
+
+  await dataSource.query(
+    `INSERT INTO organizations (id, name, status, created_via)
+     VALUES ($1, $2, 'ACTIVE', 'DEVNET_SCRIPT')
+     ON CONFLICT (id) DO NOTHING`,
+    [record.organizationId, `devnet-acceptance-${label}`],
+  );
+  await dataSource.query(
+    `INSERT INTO agents
+       (id, organization_id, privy_user_id, label, status, primary_account_id, chain_id)
+     VALUES ($1, $2, $3, $4, 'ACTIVE', $5, $6)
+     ON CONFLICT (id) DO NOTHING`,
+    [
+      record.agentId,
+      record.organizationId,
+      `did:devnet-script:${label}-${randomBytes(8).toString('hex')}`,
+      `devnet-acceptance-${label}`,
+      record.agentAccount,
+      record.chainId,
+    ],
+  );
+  const owner: Array<{ organization_id: string }> = await dataSource.query(
+    'SELECT organization_id FROM agents WHERE id = $1',
+    [record.agentId],
+  );
+  if (owner[0]?.organization_id !== record.organizationId) {
+    throw new Error(
+      `agent ${record.agentId} of credential ${record.credentialId} belongs to another ` +
+        `organization than the record says (${record.organizationId})`,
+    );
+  }
+
+  return {
+    organizationId: record.organizationId,
+    agentId: record.agentId,
+    token,
+    accountId: record.agentAccount,
+  };
 }

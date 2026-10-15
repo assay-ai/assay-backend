@@ -1,7 +1,10 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron, CronExpression } from '@nestjs/schedule';
 
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
+
 import { ArbitrationService } from '../services/arbitration.service';
+import { SlashChainRulingService } from '../services/slash-chain-ruling.service';
 import { SlashExecutionService } from '../services/slash-execution.service';
 import { SlashProposalService } from '../services/slash-proposal.service';
 
@@ -21,9 +24,11 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  *
  * ## Order within one tick
  *
- * `sweepUndisputed` → `sweepPlatformMisses` → `proposeDue` → `executeDue` →
- * `requestCancelsForClosedCases` → `sweepAdminCancels` → `reconcileExecuting`,
- * and the order is load-bearing, not cosmetic:
+ * `sweepUndisputed` → (EVM: `followOpenCasesPastDoor`) → `sweepPlatformMisses`
+ * → `proposeDue` → `executeDue` → `requestCancelsForClosedCases` →
+ * `sweepAdminCancels` → `sweepUnresolvedDisputes` → `reconcileExecuting` →
+ * (EVM: one page of the start-up `reconcileOpenCases`), and the order is
+ * load-bearing, not cosmetic:
  *
  * - The sweepers run first because either can change what is due for the
  *   chain steps below them on the very same tick: a case `sweepUndisputed`
@@ -60,6 +65,28 @@ import { SlashProposalService } from '../services/slash-proposal.service';
  * the reason to keep it here is that these steps have to agree about
  * order.
  */
+/** One page of old open EVM cases the start-up pass re-derives per tick (review N-3, R2-5). */
+const OPEN_EVM_CASES_PAGE = 200;
+
+/** How many later ticks a case whose re-read failed is retried on (review R2-5). */
+const OPEN_EVM_CASE_RETRIES = 5;
+
+/** How many open EVM cases past their door one tick follows (review R2-2). */
+const OPEN_EVM_CASES_PER_TICK = 100;
+
+/**
+ * Review R3-3: how long one tick may hold the overlap guard. A tick still
+ * running after this is taken as hung (an RPC or database call with no
+ * timeout): a human is paged and the next tick runs, so one stalled call
+ * cannot stop every sweep until undisputed records lapse past their grace.
+ */
+// Review R4-2: above CHAIN_CLAIM_STALE_MS (10 min), so a slow tick is not taken
+// over while its own executor claim still counts as live.
+export const SLASH_TICK_MAX_MS = 15 * 60_000;
+
+/** Review R3-3: the page for a hung lifecycle tick. */
+export const SLASH_TICK_HUNG_ALERT = 'slash_lifecycle_tick_hung';
+
 @Injectable()
 export class SlashLifecycleJob {
   private readonly logger = new Logger(SlashLifecycleJob.name);
@@ -68,11 +95,83 @@ export class SlashLifecycleJob {
     private readonly proposals: SlashProposalService,
     private readonly execution: SlashExecutionService,
     private readonly arbitration: ArbitrationService,
+    @Optional() private readonly rulings: SlashChainRulingService | null = null,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
+
+  /** Review N-3 / R2-5: the start-up pass over old open EVM cases has read its last page. */
+  private openEvmCasesReconciled = false;
+  /** Where that pass resumes on the next tick. */
+  private openEvmCursor: { proposedAt: Date; id: string } | null = null;
+  /** Cases whose re-read failed, and how many retries each has had. */
+  private readonly openEvmRetries = new Map<
+    string,
+    { row: { organizationId: string; id: string }; attempts: number }
+  >();
+  /**
+   * Review R2-5: `@nestjs/schedule` does not stop a `@Cron` handler from
+   * starting while its previous run is still going. A tick slower than a
+   * minute (a long chain read) would run every step twice beside itself, so
+   * a tick that finds the previous one still running does nothing — unless
+   * that one has run longer than {@link SLASH_TICK_MAX_MS} (review R3-3): it
+   * is then paged as hung and the guard is taken over, so one stalled call
+   * never wedges the scheduler. `null` when no tick runs; the start time
+   * also names the holder, so a hung tick settling late frees nothing.
+   */
+  private tickStartedAt: number | null = null;
 
   @Cron(CronExpression.EVERY_MINUTE)
   async handleTick(): Promise<void> {
+    const now = Date.now();
+    if (this.tickStartedAt !== null) {
+      const runningMs = now - this.tickStartedAt;
+      if (runningMs <= SLASH_TICK_MAX_MS) {
+        this.logger.warn(
+          'The previous slash lifecycle tick is still running; this one is skipped.',
+        );
+        return;
+      }
+      await this.pageHungTick(this.tickStartedAt, runningMs);
+    }
+    const startedAt = now;
+    this.tickStartedAt = startedAt;
+    try {
+      await this.runTick();
+    } finally {
+      if (this.tickStartedAt === startedAt) this.tickStartedAt = null;
+    }
+  }
+
+  private async pageHungTick(startedAt: number, runningMs: number): Promise<void> {
+    const since = new Date(startedAt).toISOString();
+    this.logger.error(
+      `CRITICAL: a slash lifecycle tick started at ${since} has run ${Math.round(runningMs / 1000)}s ` +
+        'and looks hung; the next tick runs beside it',
+    );
+    try {
+      await this.alerts?.emit({
+        severity: AlertSeverity.CRITICAL,
+        name: SLASH_TICK_HUNG_ALERT,
+        summary:
+          `A slash lifecycle tick started at ${since} has not finished after ` +
+          `${Math.round(runningMs / 60_000)} minutes; a call in it is likely stuck with no ` +
+          'timeout. Later ticks run beside it; the stuck call needs a look',
+        details: { startedAt: since, runningMs },
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: since,
+      });
+    } catch (error) {
+      this.logger.error(
+        'The hung slash lifecycle tick could not be paged',
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
+  }
+
+  private async runTick(): Promise<void> {
     await this.sweepUndisputed();
+    // Review R2-2: open EVM cases left open until their records settled.
+    await this.followOpenEvmCasesPastDoor();
     await this.sweepPlatformMisses();
     // Before `executeDue`, so a case upheld by the sweep above reaches the
     // chain on the same tick that decided it. The on-chain 72h starts as early
@@ -88,9 +187,84 @@ export class SlashLifecycleJob {
     await this.sweepAdminCancels();
     // D-19: disputed records nobody ruled on within 30 days.
     await this.sweepUnresolvedDisputes();
-    // Last. Cleanup for a crashed submit, and it must never delay a live
-    // judgement to do it.
+    // Cleanup for a crashed submit, and it must never delay a live judgement
+    // to do it.
     await this.reconcileExecuting();
+    // Review R2-5: last, one page per tick, so the first tick's sweeps never
+    // wait behind it.
+    await this.reconcileOpenEvmCases();
+  }
+
+  /**
+   * Once per scheduler process (review N-3): EVM cases still open from the
+   * in-app objection era are re-derived from their on-chain records, so each
+   * reaches a live or terminal state. Review R2-5: one page per tick, resumed
+   * from a cursor until a page comes back empty (a failed page is read again
+   * from the same cursor); a case whose re-read failed is retried on each of
+   * the next {@link OPEN_EVM_CASE_RETRIES} ticks, then left with an error.
+   */
+  private async reconcileOpenEvmCases(): Promise<void> {
+    if (!this.rulings) return;
+    try {
+      let moved = 0;
+      if (!this.openEvmCasesReconciled) {
+        const page = await this.rulings.reconcileOpenCases(OPEN_EVM_CASES_PAGE, this.openEvmCursor);
+        moved += page.moved;
+        for (const row of page.failed) {
+          this.openEvmRetries.set(row.id, { row, attempts: 0 });
+        }
+        this.openEvmCursor = page.next;
+        this.openEvmCasesReconciled = page.next === null;
+      } else if (this.openEvmRetries.size > 0) {
+        const entries = [...this.openEvmRetries.values()];
+        const retried = await this.rulings.reconcileCases(entries.map((entry) => entry.row));
+        moved += retried.moved;
+        const stillFailing = new Set(retried.failed.map((row) => row.id));
+        for (const entry of entries) {
+          if (!stillFailing.has(entry.row.id)) {
+            this.openEvmRetries.delete(entry.row.id);
+            continue;
+          }
+          entry.attempts += 1;
+          if (entry.attempts >= OPEN_EVM_CASE_RETRIES) {
+            this.openEvmRetries.delete(entry.row.id);
+            this.logger.error(
+              `Open EVM slash case ${entry.row.id} could not be re-derived from its records ` +
+                `after ${entry.attempts} retries; it is left for the next scheduler start.`,
+            );
+          }
+        }
+      }
+      if (moved > 0) {
+        this.logger.warn(`${moved} open EVM slash case(s) re-derived from their on-chain records.`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Open EVM case reconciliation aborted: ${
+          error instanceof Error ? error.message : String(error)
+        }`,
+      );
+    }
+  }
+
+  /**
+   * Review R2-2: an open EVM case a record of which stands pending is upheld
+   * for the executor only once every undisputed record is past its door by
+   * the settle margin, and no chain event comes back for it then; this
+   * follows such cases' mirrored records again. No chain read.
+   */
+  private async followOpenEvmCasesPastDoor(): Promise<void> {
+    if (!this.rulings) return;
+    try {
+      const moved = await this.rulings.followOpenCasesPastDoor(new Date(), OPEN_EVM_CASES_PER_TICK);
+      if (moved > 0) {
+        this.logger.log(`${moved} open EVM slash case(s) followed their records past the door.`);
+      }
+    } catch (error) {
+      this.logger.error(
+        `Following open EVM cases aborted: ${error instanceof Error ? error.message : String(error)}`,
+      );
+    }
   }
 
   private async sweepUndisputed(): Promise<void> {

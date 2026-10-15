@@ -2,6 +2,7 @@ import type { Redis } from 'ioredis';
 
 import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
 import {
+  AGENT_SPEND_LOCK_RENEW_MS,
   AGENT_SPEND_LOCK_TTL_MS,
   AGENT_SPEND_LOCK_WAIT_MS,
   SpendPolicyEnforcementService,
@@ -94,5 +95,80 @@ describe('SpendPolicyEnforcementService.withAgentSpendLock', () => {
     expect(fn).not.toHaveBeenCalled();
     // Someone else's lock is not ours to release.
     expect(redis.strings.get('spend-policy:velocity:spend-lock:agent-1')).toBe('someone-else');
+  });
+
+  /**
+   * Final review N-4: on rail B the locked section reads the chain (the
+   * voucher signer), and a slow RPC could outlast the 15 s TTL, letting a
+   * second call of the same agent in before the first one's hold existed.
+   * The lock is now renewed for as long as its holder runs.
+   */
+  it('keeps the lock alive past its TTL while the section is still running', async () => {
+    jest.useFakeTimers();
+    let finish!: () => void;
+    const section = service.withAgentSpendLock(
+      'agent-1',
+      () => new Promise<void>((resolve) => (finish = resolve)),
+    );
+    await jest.advanceTimersByTimeAsync(AGENT_SPEND_LOCK_TTL_MS * 3);
+
+    const renewals = redis.commands.filter((c) => c.startsWith('renew ')).length;
+    expect(renewals).toBeGreaterThanOrEqual(
+      Math.floor((AGENT_SPEND_LOCK_TTL_MS * 3) / AGENT_SPEND_LOCK_RENEW_MS),
+    );
+    expect(AGENT_SPEND_LOCK_RENEW_MS).toBeLessThan(AGENT_SPEND_LOCK_TTL_MS / 2);
+
+    finish();
+    await section;
+    const after = redis.commands.length;
+    await jest.advanceTimersByTimeAsync(AGENT_SPEND_LOCK_TTL_MS);
+    // Released, and no longer renewed.
+    expect(lockKey()).toBeUndefined();
+    expect(redis.commands.slice(after).filter((c) => c.startsWith('renew '))).toEqual([]);
+  });
+
+  /**
+   * Round-two review N-4: a renewal that found the lock gone was ignored, so
+   * a holder stalled past the TTL still wrote its hold while another call of
+   * the same agent ran its cap check. The section confirms it still owns the
+   * lock just before the hold, and is refused retryably if it does not.
+   */
+  it('confirms ownership before the hold, and refuses retryably once the lock is lost', async () => {
+    const key = 'spend-policy:velocity:spend-lock:agent-1';
+    const wrote: string[] = [];
+
+    await service.withAgentSpendLock('agent-1', async (assertLockHeld) => {
+      await assertLockHeld();
+      wrote.push('held');
+    });
+    expect(wrote).toEqual(['held']);
+
+    await expect(
+      service.withAgentSpendLock('agent-1', async (assertLockHeld) => {
+        redis.strings.set(key, 'someone-else'); // lapsed, and claimed by the next call
+        await assertLockHeld();
+        wrote.push('stale');
+      }),
+    ).rejects.toMatchObject({ errorCode: McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED });
+    expect(wrote).toEqual(['held']);
+    expect(redis.strings.get(key)).toBe('someone-else');
+  });
+
+  it('refuses retryably when ownership cannot be confirmed because Redis is down', async () => {
+    await expect(
+      service.withAgentSpendLock('agent-1', async (assertLockHeld) => {
+        redis.down = true;
+        await assertLockHeld();
+      }),
+    ).rejects.toMatchObject({ errorCode: McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED });
+    redis.down = false;
+  });
+
+  it('does not renew a lock someone else now holds', async () => {
+    const velocity = new SpendPolicyVelocityService(redis as unknown as Redis);
+    redis.strings.set('spend-policy:velocity:spend-lock:agent-1', 'someone-else');
+    redis.expiries.set('spend-policy:velocity:spend-lock:agent-1', 1);
+    await velocity.renewAgentSpendLock('agent-1', 'mine', AGENT_SPEND_LOCK_TTL_MS);
+    expect(redis.expiries.get('spend-policy:velocity:spend-lock:agent-1')).toBe(1);
   });
 });

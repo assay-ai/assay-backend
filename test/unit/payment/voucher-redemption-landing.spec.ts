@@ -5,6 +5,11 @@ import { SCHEDULE_CRON_OPTIONS } from '@nestjs/schedule/dist/schedule.constants'
 
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
+import {
+  LANDING_SETTLE_SECONDS,
+  LANDING_UNKNOWN_ALERT_SECONDS,
+  VOUCHER_REDEMPTION_ALERTS,
+} from '@modules/payment/constants/voucher-redemption.constants';
 import { VoucherRedemptionJob } from '@modules/payment/jobs/voucher-redemption.job';
 import {
   RedeemOutcome,
@@ -12,6 +17,7 @@ import {
   RedeemVoucherRequest,
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
+import { AlertAggregation, AlertSeverity } from '@shared/alerting';
 
 import { noBlocks } from '../helpers/blocklist';
 
@@ -62,6 +68,10 @@ class ChainRedeemer {
   /** Hashes that redeemed a voucher, by seq. */
   readonly landed = new Map<string, string>();
   pendingLookup = false;
+  /** The chain's clock has passed the voucher's deadline: `VoucherExpired` comes first. */
+  expired = false;
+  /** A lagging RPC node: it has never seen any transaction. */
+  lagging = false;
 
   constructor(private readonly receipt: () => Promise<void>) {}
 
@@ -70,6 +80,13 @@ class ChainRedeemer {
   }
 
   async redeem(r: RedeemVoucherRequest): Promise<RedeemOutcome> {
+    if (this.expired) {
+      return {
+        kind: RedeemOutcomeKind.UNREDEEMABLE,
+        signature: null,
+        programError: 'VoucherExpired',
+      };
+    }
     if (BigInt(r.seq) <= this.seqHigh) {
       return {
         kind: RedeemOutcomeKind.UNREDEEMABLE,
@@ -88,12 +105,13 @@ class ChainRedeemer {
 
   async findLanding(r: RedeemVoucherRequest, refs: readonly string[]): Promise<string | null> {
     if (this.pendingLookup) throw new Error('still pending');
+    if (this.lagging) return null;
     const hash = this.landed.get(r.seq);
     return hash !== undefined && refs.includes(hash) ? hash : null;
   }
 }
 
-function build(redeemer: ChainRedeemer) {
+function build(redeemer: ChainRedeemer, clock: { nowSeconds: number } = { nowSeconds: NOW }) {
   const refs = new Map<string, string[]>();
   const intents = {
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
@@ -119,9 +137,9 @@ function build(redeemer: ChainRedeemer) {
     redeemer as never,
     alerts as never,
     noBlocks(),
-    () => NOW * 1000,
+    () => clock.nowSeconds * 1000,
   );
-  return { service, intents, ledger, payments };
+  return { service, intents, ledger, payments, alerts };
 }
 
 describe('VoucherRedemptionService — a landing this process did not observe', () => {
@@ -193,6 +211,107 @@ describe('VoucherRedemptionService — a landing this process did not observe', 
       expect.objectContaining({ chainTxRef: 'platform_absorbed:VoucherSeqNotIncreasing' }),
     );
     expect(intents.releaseHold).toHaveBeenCalled();
+  });
+});
+
+describe('VoucherRedemptionService — every refusal, and a lagging node', () => {
+  /** Past the voucher's on-chain deadline (`expires_at` + skew + grace). */
+  const PAST_DEADLINE = NOW + 300 + 120 + 1_800 + 1;
+
+  /**
+   * Final review N-2: prevalidation answers `VoucherExpired` before it looks at
+   * `seq_high`, so a landed-but-unobserved redemption retried late was
+   * absorbed through the other refusal.
+   */
+  it('looks for its own landing on VoucherExpired too, and absorbs nothing', async () => {
+    const redeemer = new ChainRedeemer(async () => {
+      throw new Error('WaitForTransactionReceiptTimeoutError');
+    });
+    const clock = { nowSeconds: NOW };
+    const { service, intents, ledger } = build(redeemer, clock);
+    await service.run(USDC);
+
+    redeemer.expired = true;
+    clock.nowSeconds = PAST_DEADLINE + 3_600;
+    await service.run(USDC);
+
+    expect(intents.commitRedeemedHold).toHaveBeenCalledWith(
+      'org-1',
+      'intent-1',
+      redeemer.landed.get('1'),
+    );
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+  });
+
+  /**
+   * Final review N-7: a node a few blocks behind says "not found" for a mined
+   * hash. That is "unknown" until the recorded transaction is old enough that
+   * every node would have it; only then is the voucher absorbed.
+   */
+  it('treats "not found" as unknown while its own transaction is recent', async () => {
+    const redeemer = new ChainRedeemer(async () => {
+      throw new Error('WaitForTransactionReceiptTimeoutError');
+    });
+    const clock = { nowSeconds: NOW };
+    const { service, intents, ledger } = build(redeemer, clock);
+    await service.run(USDC);
+
+    redeemer.lagging = true;
+    redeemer.expired = true;
+    clock.nowSeconds = PAST_DEADLINE;
+    await service.run(USDC);
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+
+    clock.nowSeconds = PAST_DEADLINE + 3_600;
+    await service.run(USDC);
+    expect(ledger.appendNow).toHaveBeenCalledWith(
+      expect.objectContaining({ chainTxRef: 'platform_absorbed:VoucherExpired' }),
+    );
+    expect(intents.releaseHold).toHaveBeenCalled();
+  });
+
+  /**
+   * Round-two review R2-6: a landing lookup that keeps failing (a pruned RPC,
+   * an outage) left the row at the head of the queue with its hold open, and
+   * nothing absorbed or alerted. Past the landing window plus
+   * {@link LANDING_UNKNOWN_ALERT_SECONDS} it pages; the hold still stays open.
+   */
+  it('pages once the landing has stayed unknown long past the window, absorbing nothing', async () => {
+    const redeemer = new ChainRedeemer(async () => {
+      throw new Error('WaitForTransactionReceiptTimeoutError');
+    });
+    const clock = { nowSeconds: NOW };
+    const { service, intents, ledger, alerts } = build(redeemer, clock);
+    await service.run(USDC);
+
+    redeemer.pendingLookup = true;
+    redeemer.expired = true;
+    const unknown = () =>
+      alerts.emit.mock.calls.filter(
+        ([alert]) => alert.name === VOUCHER_REDEMPTION_ALERTS.LANDING_UNKNOWN,
+      );
+
+    clock.nowSeconds = PAST_DEADLINE + LANDING_SETTLE_SECONDS + LANDING_UNKNOWN_ALERT_SECONDS - 60;
+    await service.run(USDC);
+    expect(unknown()).toEqual([]);
+
+    clock.nowSeconds = PAST_DEADLINE + LANDING_SETTLE_SECONDS + LANDING_UNKNOWN_ALERT_SECONDS;
+    await service.run(USDC);
+    expect(unknown()).toEqual([
+      [
+        expect.objectContaining({
+          severity: AlertSeverity.CRITICAL,
+          aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+          dedupeKey: 'intent-1',
+          details: expect.objectContaining({ intentId: 'intent-1', seq: '1' }),
+        }),
+      ],
+    ]);
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
   });
 });
 

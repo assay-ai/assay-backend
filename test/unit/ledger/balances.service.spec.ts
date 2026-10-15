@@ -42,6 +42,8 @@ function emptyReconciliation(): WithheldReconciliation {
     holdReleaseTotal: zero,
     orphanedReleases: zero,
     orphanedHoldIds: [],
+    orphanedHoldCount: 0,
+    settlementRemainders: zero,
     ok: true,
     difference: '0',
   };
@@ -348,7 +350,7 @@ describe('GET /balances with a row in an asset the registry does not know', () =
   function realWithheld(): LedgerWithheldService {
     const entries = {
       sumEntryTypeByAsset: jest.fn().mockResolvedValue([]),
-      findOrphanedHoldReleases: jest.fn().mockResolvedValue([]),
+      summarizeOrphanedHoldReleases: jest.fn().mockResolvedValue([]),
     };
     const intents = { sumWithheldByAssetAndStatus: jest.fn().mockResolvedValue([]) };
     return new LedgerWithheldService(entries as never, intents as never);
