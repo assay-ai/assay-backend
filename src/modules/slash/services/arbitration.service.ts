@@ -291,8 +291,12 @@ export class ArbitrationService {
    * provider won on chain (the arbiter's cancel, or a dispute nobody ruled
    * on: `chainDisputeWonAt`). The objection succeeded in part, so its row
    * reads `PARTIALLY_UPHELD` — whichever chain path closed it first (the
-   * arbiter's uphold of the other record, or the execution). A dispute a
-   * person decided (`ADJUDICATOR`) is left alone. Returns whether it changed.
+   * arbiter's uphold of the other record, or the execution). Its outcome is
+   * `UPHELD_RECALCULATED`, the pair `ARBITRATION_STATE_MAP` produces (review
+   * R3-6): the judgement stood at a lower figure, the chain's sum of what
+   * executed. Nothing acts on a dispute row's outcome, and the case's own
+   * `outcome` is not changed. A dispute a person decided (`ADJUDICATOR`) is
+   * left alone. Returns whether it changed.
    */
   async recordPartialChainWin(organizationId: string, proposalId: string): Promise<boolean> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
@@ -305,8 +309,8 @@ export class ArbitrationService {
     await this.disputes.update(
       { organizationId, id: dispute.id },
       {
-        state: DisputeResolutionState.PARTIALLY_UPHELD,
-        outcome: ArbitrationOutcome.UPHELD,
+        state: ARBITRATION_STATE_MAP[ArbitrationOutcome.UPHELD_RECALCULATED],
+        outcome: ArbitrationOutcome.UPHELD_RECALCULATED,
         resolutionKind: dispute.resolutionKind ?? ResolutionKind.AUTO_CHAIN_EXECUTED,
         resolvedAt: dispute.resolvedAt ?? new Date(),
         resolvedBy: dispute.resolvedBy ?? 'chain:executeSlash',
