@@ -1559,7 +1559,10 @@ describe('ArbitrationService', () => {
       });
       // Idempotent.
       expect(
-        await ctx.service.recordChainUphold('org_1', 'p1', { arbiter: null, transactionHash: null }),
+        await ctx.service.recordChainUphold('org_1', 'p1', {
+          arbiter: null,
+          transactionHash: null,
+        }),
       ).toBe(false);
     });
 
@@ -1629,7 +1632,10 @@ describe('ArbitrationService', () => {
     it('R2-3: closes the dispute PARTIALLY_UPHELD when a record executed and another was won', async () => {
       const ctx = build();
       const dispute = seedEvm(ctx, SlashProposalStatus.DISPUTED);
-      await ctx.service.recordChainUphold('org_1', 'p1', { arbiter: '0xabc', transactionHash: null });
+      await ctx.service.recordChainUphold('org_1', 'p1', {
+        arbiter: '0xabc',
+        transactionHash: null,
+      });
       expect(dispute.state).toBe('REJECTED');
       // Nothing won yet: nothing to change.
       expect(await ctx.service.recordPartialChainWin('org_1', 'p1')).toBe(false);

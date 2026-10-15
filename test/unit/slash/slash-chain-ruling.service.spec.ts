@@ -510,7 +510,10 @@ describe('SlashChainRulingService', () => {
   describe('open EVM cases from the in-app objection era (review N-3)', () => {
     it('re-reads the records and upholds a case whose record stands undisputed', async () => {
       const { service, proposal, reconciled, released } = build('UNDER_REVIEW');
-      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({ moved: 1, failed: [] });
+      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({
+        moved: 1,
+        failed: [],
+      });
       expect(reconciled).toEqual(['case']);
       expect(released).toEqual(['case']);
       expect(proposal.status).toBe('UPHELD');

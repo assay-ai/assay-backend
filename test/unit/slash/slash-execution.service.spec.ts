@@ -3988,7 +3988,10 @@ describe('SlashExecutionService.refoldLatePart (review R2-4)', () => {
   }
 
   it('re-sums the case from its executed parts and runs the compensation step once', async () => {
-    const { service, proposals } = buildWithParts({ appliedMinor: '800', platformAmountMinor: '240' });
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
     const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
     jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
 
@@ -4010,7 +4013,10 @@ describe('SlashExecutionService.refoldLatePart (review R2-4)', () => {
   });
 
   it('leaves a case that is not closed EXECUTED alone', async () => {
-    const { service, proposals } = buildWithParts({ appliedMinor: '800', platformAmountMinor: '240' });
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
     proposals.rows.get('p1')!.status = SlashProposalStatus.UPHELD;
     await expect(service.refoldLatePart(proposals.rows.get('p1')!, null)).resolves.toBe(false);
     expect(proposals.rows.get('p1')!.appliedAmount).toBe('500');

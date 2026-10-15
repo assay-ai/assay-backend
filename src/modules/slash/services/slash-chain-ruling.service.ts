@@ -603,7 +603,9 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       moved,
       failed,
       next:
-        rows.length < limit || !last ? null : { proposedAt: new Date(last.proposedAt), id: last.id },
+        rows.length < limit || !last
+          ? null
+          : { proposedAt: new Date(last.proposedAt), id: last.id },
     };
   }
 
