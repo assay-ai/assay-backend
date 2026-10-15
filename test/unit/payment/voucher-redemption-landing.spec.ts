@@ -5,6 +5,11 @@ import { SCHEDULE_CRON_OPTIONS } from '@nestjs/schedule/dist/schedule.constants'
 
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
+import {
+  LANDING_SETTLE_SECONDS,
+  LANDING_UNKNOWN_ALERT_SECONDS,
+  VOUCHER_REDEMPTION_ALERTS,
+} from '@modules/payment/constants/voucher-redemption.constants';
 import { VoucherRedemptionJob } from '@modules/payment/jobs/voucher-redemption.job';
 import {
   RedeemOutcome,
@@ -12,6 +17,7 @@ import {
   RedeemVoucherRequest,
 } from '@modules/payment/ports/voucher-redeemer.port';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
+import { AlertAggregation, AlertSeverity } from '@shared/alerting';
 
 import { noBlocks } from '../helpers/blocklist';
 
@@ -133,7 +139,7 @@ function build(redeemer: ChainRedeemer, clock: { nowSeconds: number } = { nowSec
     noBlocks(),
     () => clock.nowSeconds * 1000,
   );
-  return { service, intents, ledger, payments };
+  return { service, intents, ledger, payments, alerts };
 }
 
 describe('VoucherRedemptionService — a landing this process did not observe', () => {
@@ -264,6 +270,48 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
       expect.objectContaining({ chainTxRef: 'platform_absorbed:VoucherExpired' }),
     );
     expect(intents.releaseHold).toHaveBeenCalled();
+  });
+
+  /**
+   * Round-two review R2-6: a landing lookup that keeps failing (a pruned RPC,
+   * an outage) left the row at the head of the queue with its hold open, and
+   * nothing absorbed or alerted. Past the landing window plus
+   * {@link LANDING_UNKNOWN_ALERT_SECONDS} it pages; the hold still stays open.
+   */
+  it('pages once the landing has stayed unknown long past the window, absorbing nothing', async () => {
+    const redeemer = new ChainRedeemer(async () => {
+      throw new Error('WaitForTransactionReceiptTimeoutError');
+    });
+    const clock = { nowSeconds: NOW };
+    const { service, intents, ledger, alerts } = build(redeemer, clock);
+    await service.run(USDC);
+
+    redeemer.pendingLookup = true;
+    redeemer.expired = true;
+    const unknown = () =>
+      alerts.emit.mock.calls.filter(
+        ([alert]) => alert.name === VOUCHER_REDEMPTION_ALERTS.LANDING_UNKNOWN,
+      );
+
+    clock.nowSeconds = PAST_DEADLINE + LANDING_SETTLE_SECONDS + LANDING_UNKNOWN_ALERT_SECONDS - 60;
+    await service.run(USDC);
+    expect(unknown()).toEqual([]);
+
+    clock.nowSeconds = PAST_DEADLINE + LANDING_SETTLE_SECONDS + LANDING_UNKNOWN_ALERT_SECONDS;
+    await service.run(USDC);
+    expect(unknown()).toEqual([
+      [
+        expect.objectContaining({
+          severity: AlertSeverity.CRITICAL,
+          aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+          dedupeKey: 'intent-1',
+          details: expect.objectContaining({ intentId: 'intent-1', seq: '1' }),
+        }),
+      ],
+    ]);
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
   });
 });
 

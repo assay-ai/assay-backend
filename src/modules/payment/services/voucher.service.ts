@@ -148,6 +148,7 @@ export class VoucherService {
     ]);
     this.assertWithinEscrowLimit(voucher, input);
     await this.assertIssuedSeq(voucher, input);
+    await input.beforeHold?.();
 
     return this.record(voucher, input, delegation);
   }
