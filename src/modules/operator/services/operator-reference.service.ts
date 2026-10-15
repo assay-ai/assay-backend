@@ -13,6 +13,7 @@ import {
   PROVIDER_REGISTRY,
   ProviderRegistryPort,
 } from '@modules/provider/ports/provider-registry.port';
+import { platformTakeRatePercent } from '@modules/mcp/services/mcp-pricing.config';
 import { loadMinimumStakeParameters } from '@modules/provider/services/provider-stake.service';
 import {
   RegisteredVerifierStatus,
@@ -152,7 +153,8 @@ export class OperatorReferenceService {
    * second, independently-typed copy of the same numbers.
    */
   async listEconomicParameters(): Promise<EconomicParameterRowDto[]> {
-    const takeRatePercent = this.config.get<string>('PROVIDER_TERMS_TAKE_RATE_PERCENT') ?? '10';
+    // `PLATFORM_FEE_BPS`, the rate a call is charged at (R17-R-03).
+    const takeRatePercent = platformTakeRatePercent(this.config);
     const penaltySplitRaw =
       this.config.get<string>('PROVIDER_TERMS_PENALTY_SPLIT') ?? '60 / 30 / 10';
     const stakeParameters = loadMinimumStakeParameters(this.config);
