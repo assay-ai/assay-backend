@@ -425,8 +425,16 @@ export class ArbitrationService {
    * the case becomes `UPHELD` (`AUTO_UNDISPUTED`, no outcome: nobody ruled)
    * and the executor sends it. An open in-app objection is closed with it: it
    * never froze the record. Returns whether the case moved.
+   *
+   * Review R4-1: while another record of the case still stands disputed, its
+   * dispute row stays open — the arbiter has not ruled on that record, and the
+   * row closes when it does (uphold, cancel or expiry).
    */
-  async recordChainStanding(organizationId: string, proposalId: string): Promise<boolean> {
+  async recordChainStanding(
+    organizationId: string,
+    proposalId: string,
+    options: { readonly disputeStillOpen?: boolean } = {},
+  ): Promise<boolean> {
     const proposal = await this.lifecycle.require(organizationId, proposalId);
     if (!disputesOnChain(proposal.assetId)) return false;
     const now = new Date();
@@ -442,7 +450,7 @@ export class ArbitrationService {
       },
     );
     if (affected === 0) return false;
-    if (proposal.disputeId) {
+    if (proposal.disputeId && !options.disputeStillOpen) {
       await this.disputes.update(
         { organizationId, id: proposal.disputeId, resolvedAt: IsNull() },
         {

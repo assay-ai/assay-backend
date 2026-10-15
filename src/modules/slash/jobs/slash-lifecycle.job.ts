@@ -80,7 +80,9 @@ const OPEN_EVM_CASES_PER_TICK = 100;
  * timeout): a human is paged and the next tick runs, so one stalled call
  * cannot stop every sweep until undisputed records lapse past their grace.
  */
-export const SLASH_TICK_MAX_MS = 10 * 60_000;
+// Review R4-2: above CHAIN_CLAIM_STALE_MS (10 min), so a slow tick is not taken
+// over while its own executor claim still counts as live.
+export const SLASH_TICK_MAX_MS = 15 * 60_000;
 
 /** Review R3-3: the page for a hung lifecycle tick. */
 export const SLASH_TICK_HUNG_ALERT = 'slash_lifecycle_tick_hung';
