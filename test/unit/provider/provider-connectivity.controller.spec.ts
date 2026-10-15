@@ -8,6 +8,11 @@ import { ProviderConnectivityController } from '@modules/provider/controllers/pr
 import { ProviderConnectivityService } from '@modules/provider/services/provider-connectivity.service';
 import { ProviderVerificationService } from '@modules/provider/services/provider-verification.service';
 
+// This spec dials a real local socket inside the parallel unit suite. On a
+// two-core CI runner it has timed out under load (TOOL_ALL_BINDINGS_FAILED, the
+// assertion never reached); retrying keeps the assertion and drops the timing flake.
+jest.retryTimes(2, { logErrorsBeforeRetry: true });
+
 describe('ProviderConnectivityController GET :providerId/verification', () => {
   let app: INestApplication;
   const getVerification = jest.fn();
