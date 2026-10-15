@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { Brackets, DataSource, EntityManager, In, SelectQueryBuilder } from 'typeorm';
 
+import { OperatorCaseStatus } from '@modules/operator/domain/operator-case-status';
+import { DISPUTE_TIMEOUT_MS } from '@modules/slash/constants/slash.constants';
 import { ON_CHAIN_DISPUTE_ASSET_PREFIX } from '@modules/slash/domain/on-chain-dispute';
 
 import { SlashProposalEntity } from '../entities/slash-proposal.entity';
@@ -9,6 +11,72 @@ import { OrganizationScopedRepository } from './organization-scoped.repository';
 
 /** EVM assets, whose cases are disputed and ruled on chain only (`disputesOnChain`). */
 const ON_CHAIN_DISPUTE_LIKE = `${ON_CHAIN_DISPUTE_ASSET_PREFIX}%`;
+
+/**
+ * {@link OperatorCaseStatus} from the two status columns, in the console's
+ * precedence (`case-flow.ts`, `chain-stage.ts`): money that moved wins, then a
+ * cancel waiting for its signature, then a closed case, then a live dispute.
+ * The order of the arms is the definition — reorder them and an executed
+ * penalty whose case was later suspended would read as cancelled.
+ *
+ * `EXPIRED` is the 30-day dispute sweep's footprint: a case voided by the
+ * chain (`AUTO_CHAIN_VOIDED`) whose record was disputed and is now cancelled.
+ * A permanent chain refusal is voided too, but leaves `chain_status = REFUSED`.
+ */
+const OPERATOR_CASE_STATUS_SQL = `CASE
+  WHEN p.status = 'REVERSED' THEN 'COMPENSATED'
+  WHEN p.chain_status = 'EXECUTED' OR p.status IN ('EXECUTED', 'EXECUTING') THEN 'EXECUTED'
+  WHEN p.chain_status = 'CANCEL_REQUESTED' THEN 'CANCEL_REQUESTED'
+  WHEN p.status = 'CANCELLED' AND p.resolution_kind = 'AUTO_CHAIN_VOIDED'
+       AND p.chain_status = 'CANCELLED' AND p.chain_disputed_at IS NOT NULL THEN 'EXPIRED'
+  WHEN p.chain_status IN ('CANCELLED', 'REFUSED')
+       OR p.status IN ('OVERTURNED', 'WAIVED', 'CANCELLED') THEN 'CANCELLED'
+  WHEN p.chain_status = 'DISPUTED'
+       OR (p.chain_status = 'PENDING' AND p.chain_disputed_parts > 0) THEN 'CHAIN_DISPUTED'
+  WHEN p.status IN ('DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND') THEN 'DISPUTED'
+  ELSE 'PROPOSED'
+END`;
+
+/**
+ * The next instant something happens to the penalty on its own, by status
+ * (`$1` is the dispute timeout in seconds). A dispute lapses 30 days after it
+ * was raised; a cancel under a disputed record lapses the same way, and one
+ * under a `Pending` record must be signed before the record turns executable;
+ * an undisputed penalty is executable from the later of Assay's floor and the
+ * chain's own time. Closed penalties have none.
+ */
+const OPERATOR_CASE_DEADLINE_SQL = `CASE s.status
+  WHEN 'CHAIN_DISPUTED' THEN s.chain_disputed_at + make_interval(secs => $1::int)
+  WHEN 'CANCEL_REQUESTED' THEN CASE
+    WHEN s.chain_disputed_at IS NOT NULL AND s.chain_disputed_parts > 0
+      THEN s.chain_disputed_at + make_interval(secs => $1::int)
+    ELSE s.chain_executable_at END
+  WHEN 'PROPOSED' THEN GREATEST(s.chain_executable_at, s.earliest_execution_at)
+  WHEN 'DISPUTED' THEN s.platform_decision_due_at
+  ELSE NULL
+END`;
+
+/** A position in {@link SlashProposalRepository.findOperatorCasePage}'s order, as text. */
+export interface OperatorCaseKey {
+  readonly k1: string;
+  readonly k2: string;
+  readonly k3: string;
+  readonly id: string;
+}
+
+export interface OperatorCaseListRow extends OperatorCaseKey {
+  readonly providerId: string;
+  readonly bindingId: string;
+  /** The binding's catalogue tool id; null when the binding row is gone. */
+  readonly toolId: string | null;
+  readonly penaltyAmount: string;
+  readonly assetId: string;
+  readonly decimals: number;
+  readonly status: OperatorCaseStatus;
+  readonly proposedAt: Date;
+  readonly disputedAt: Date | null;
+  readonly nextDeadline: Date | null;
+}
 
 /**
  * One row of the adjudication queue, projected.
@@ -386,6 +454,100 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       })
       .andWhere('proposal.platform_decision_due_at IS NOT NULL')
       .andWhere('proposal.asset_id NOT LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE });
+  }
+
+  /**
+   * One page of every penalty, for the operator console's Penalties list.
+   *
+   * Cross-organization like {@link queueQueryBuilder}: an operator has no
+   * tenant. Reads only the columns the list shows plus the ones its status and
+   * deadline are derived from — never the beneficiary, the signatures, the
+   * decision's operators or the binding's endpoint (the join reads the
+   * binding's `tool_id` and nothing else).
+   *
+   * ## Order
+   *
+   * Next deadline first, then the larger penalty, then the newest — the
+   * queue's "time remaining, then amount, not FIFO", extended to rows with no
+   * deadline (closed ones), which follow, newest first. One composite key,
+   * every part ascending so a single row-value comparison is the keyset:
+   *
+   * ```text
+   * (COALESCE(deadline, 'infinity'), deadline ? -amount : 0, -epoch(proposed_at), id)
+   * ```
+   *
+   * Each part is selected as text and handed back cast to its type, so the
+   * cursor round-trips the exact value Postgres compared (microseconds and
+   * all) rather than a JavaScript `Date`'s milliseconds.
+   *
+   * ## Indexes
+   *
+   * `providerId` seeks `idx_slash_proposals_provider_proposed_at`. The status
+   * and deadline are derived, so a status filter is evaluated per row; at
+   * penalty volumes (each one is a provider's SLA breach, not a call) that is
+   * a scan of a small table with a top-N sort under `LIMIT`, and it keeps the
+   * list and the case screen on one definition rather than two.
+   */
+  async findOperatorCasePage(params: {
+    readonly statuses?: readonly OperatorCaseStatus[];
+    readonly providerId?: string;
+    readonly after?: OperatorCaseKey | null;
+    readonly limit: number;
+  }): Promise<OperatorCaseListRow[]> {
+    const args: unknown[] = [Math.floor(DISPUTE_TIMEOUT_MS / 1000)];
+    const bind = (value: unknown): string => {
+      args.push(value);
+      return `$${args.length}`;
+    };
+
+    const inner: string[] = [];
+    if (params.providerId) inner.push(`p.provider_id = ${bind(params.providerId)}::uuid`);
+
+    const outer: string[] = [];
+    if (params.statuses && params.statuses.length > 0) {
+      outer.push(`d.status = ANY(${bind([...params.statuses])}::text[])`);
+    }
+    if (params.after) {
+      outer.push(
+        `(d.k1, d.k2, d.k3, d.id) > (` +
+          `${bind(params.after.k1)}::timestamptz, ${bind(params.after.k2)}::numeric, ` +
+          `${bind(params.after.k3)}::numeric, ${bind(params.after.id)}::uuid)`,
+      );
+    }
+    const limit = bind(params.limit);
+
+    const sql = `
+      WITH s AS (
+        SELECT p.id, p.provider_id, p.binding_id, p.penalty_amount, p.asset_id, p.decimals,
+               p.proposed_at, p.chain_disputed_at, p.chain_disputed_parts,
+               p.chain_executable_at, p.earliest_execution_at, p.platform_decision_due_at,
+               ${OPERATOR_CASE_STATUS_SQL} AS status
+          FROM slash_proposals p
+         ${inner.length > 0 ? `WHERE ${inner.join(' AND ')}` : ''}
+      ), n AS (
+        SELECT s.*, ${OPERATOR_CASE_DEADLINE_SQL} AS next_deadline FROM s
+      ), d AS (
+        SELECT n.*,
+               COALESCE(n.next_deadline, 'infinity'::timestamptz) AS k1,
+               CASE WHEN n.next_deadline IS NULL THEN 0 ELSE -n.penalty_amount END AS k2,
+               -EXTRACT(EPOCH FROM n.proposed_at) AS k3
+          FROM n
+      )
+      SELECT d.id AS "id", d.provider_id AS "providerId", d.binding_id AS "bindingId",
+             b.tool_id AS "toolId", d.penalty_amount::text AS "penaltyAmount",
+             d.asset_id AS "assetId", d.decimals AS "decimals", d.status AS "status",
+             d.proposed_at AS "proposedAt", d.chain_disputed_at AS "disputedAt",
+             d.next_deadline AS "nextDeadline",
+             CASE WHEN d.k1 = 'infinity'::timestamptz THEN 'infinity'
+                  ELSE to_char(d.k1 AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "k1",
+             d.k2::text AS "k2", d.k3::text AS "k3"
+        FROM d
+        LEFT JOIN tool_bindings b ON b.id = d.binding_id
+       ${outer.length > 0 ? `WHERE ${outer.join(' AND ')}` : ''}
+       ORDER BY d.k1, d.k2, d.k3, d.id
+       LIMIT ${limit}`;
+
+    return (await this.manager.query(sql, args)) as OperatorCaseListRow[];
   }
 
   /**

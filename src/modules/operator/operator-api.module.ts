@@ -4,6 +4,7 @@ import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
+import { ToolModule } from '@modules/tool/tool.module';
 
 import { OperatorApprovalsController } from './controllers/operator-approvals.controller';
 import { OperatorArbiterController } from './controllers/operator-arbiter.controller';
@@ -19,6 +20,7 @@ import { AdjudicationQueueService } from './services/adjudication-queue.service'
 import { OperatorAccountBlockService } from './services/operator-account-block.service';
 import { OperatorApprovalService } from './services/operator-approval.service';
 import { OperatorArbiterService } from './services/operator-arbiter.service';
+import { OperatorCaseListService } from './services/operator-case-list.service';
 import { OperatorCaseService } from './services/operator-case.service';
 import { OperatorDirectoryService } from './services/operator-directory.service';
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
@@ -52,7 +54,10 @@ import { OperatorReferenceService } from './services/operator-reference.service'
   // panel — the on-chain allowlist is the only authority on which keys the
   // settlement program will accept, so the panel reads it rather than the
   // local custody table alone.
-  imports: [OperatorModule, SlashModule, ProviderModule, ChainsModule, BlocklistModule],
+  //
+  // `ToolModule` supplies `TOOL_CATALOGUE`, so the Penalties list names each
+  // penalty's tool from the catalogue the case brief reads too.
+  imports: [OperatorModule, SlashModule, ProviderModule, ChainsModule, BlocklistModule, ToolModule],
   controllers: [
     OperatorApprovalsController,
     OperatorArbiterController,
@@ -69,6 +74,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     OperatorAccountBlockService,
     OperatorApprovalService,
     OperatorArbiterService,
+    OperatorCaseListService,
     OperatorCaseService,
     OperatorDirectoryService,
     // `V-7`. `ProviderRepository` needs no import here — `PostgresModule` is

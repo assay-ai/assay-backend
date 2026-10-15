@@ -31,11 +31,13 @@ import {
   SecondSignatureBodyDto,
   SuspendProposalBodyDto,
 } from '../dto/operator-console.dto';
+import { ListOperatorCasesQueryDto, OperatorCaseListRowDto } from '../dto/operator-case-list.dto';
 import { Override, OverrideExempt } from '../decorators/override.decorator';
 import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
 import { answerOrQueued } from './approval-response';
 import { OperatorOverrideGuard } from '../guards/operator-override.guard';
 import { OperatorSession } from '../ports/operator-session.port';
+import { OperatorCaseListService } from '../services/operator-case-list.service';
 import { OperatorCaseService } from '../services/operator-case.service';
 import { OperatorService } from '../services/operator.service';
 
@@ -74,6 +76,7 @@ export class OperatorCasesController {
   constructor(
     private readonly cases: OperatorCaseService,
     private readonly operators: OperatorService,
+    private readonly caseList: OperatorCaseListService,
   ) {}
 
   @Get('me')
@@ -102,6 +105,26 @@ export class OperatorCasesController {
     @Query() query: ListQueueQueryDto,
   ): Promise<CursorPageDto<AdjudicationQueueRowDto>> {
     return this.cases.listQueue(operator, query);
+  }
+
+  /**
+   * Every penalty, by where it stands now — the console's Penalties list.
+   *
+   * Read-only and open to every operator role, like the queue: Support and
+   * on-call need to find a penalty as much as an adjudicator does. One fixed
+   * order (next deadline, then amount, then newest), for the queue's reason:
+   * the list must not be re-sortable into one that lets the urgent ones lapse.
+   * A static segment, so it never reaches `cases/:proposalId`'s UUID pipe.
+   */
+  @Get('cases')
+  @ApiOperation({
+    summary: 'Every penalty, next deadline first, filterable by status and provider',
+  })
+  @ApiCursorPage(OperatorCaseListRowDto)
+  async listCases(
+    @Query() query: ListOperatorCasesQueryDto,
+  ): Promise<CursorPageDto<OperatorCaseListRowDto>> {
+    return this.caseList.list(query);
   }
 
   @Get('cases/:proposalId')
