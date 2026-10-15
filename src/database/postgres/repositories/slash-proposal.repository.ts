@@ -16,15 +16,20 @@ import { OrganizationScopedRepository } from './organization-scoped.repository';
 const ON_CHAIN_DISPUTE_LIKE = `${ON_CHAIN_DISPUTE_ASSET_PREFIX}%`;
 
 /**
- * {@link OperatorCaseStatus} from the two status columns, in the console's
- * precedence (`case-flow.ts`, `chain-stage.ts`): money that moved wins, then a
- * cancel waiting for its signature, then a closed case, then a live dispute.
- * The order of the arms is the definition — reorder them and an executed
- * penalty whose case was later suspended would read as cancelled.
+ * {@link OperatorCaseStatus} from the proposal's columns: `operatorCaseStatusOf`
+ * (`operator-case-status.ts`, the definition, in the console case screen's
+ * precedence) written in SQL. `operator-case-list.integration.spec.ts` runs
+ * both over the same rows; change them together. The order of the arms is the
+ * definition — reorder them and an executed penalty whose case was later
+ * suspended would read as cancelled.
  *
- * `EXPIRED` is the 30-day dispute sweep's footprint: a case voided by the
- * chain (`AUTO_CHAIN_VOIDED`) whose record was disputed and is now cancelled.
- * A permanent chain refusal is voided too, but leaves `chain_status = REFUSED`.
+ * - `EXPIRED` is the 30-day dispute sweep's footprint: a case voided by the
+ *   chain (`AUTO_CHAIN_VOIDED`) whose record was disputed and is now
+ *   cancelled. The arbiter's `cancelSlash` closes as `CHAIN_ARBITER` instead.
+ * - A chain refusal (`REFUSED`) on a case still open is not on chain, not
+ *   cancelled; a refused case is voided, and its status says cancelled.
+ * - The off-chain `DISPUTED` is non-EVM only: an EVM case left in an
+ *   objection status with no part disputed any more reads by its record.
  */
 const OPERATOR_CASE_STATUS_SQL = `CASE
   WHEN p.status = 'REVERSED' THEN 'COMPENSATED'
@@ -32,21 +37,23 @@ const OPERATOR_CASE_STATUS_SQL = `CASE
   WHEN p.chain_status = 'CANCEL_REQUESTED' THEN 'CANCEL_REQUESTED'
   WHEN p.status = 'CANCELLED' AND p.resolution_kind = 'AUTO_CHAIN_VOIDED'
        AND p.chain_status = 'CANCELLED' AND p.chain_disputed_at IS NOT NULL THEN 'EXPIRED'
-  WHEN p.chain_status IN ('CANCELLED', 'REFUSED')
+  WHEN p.chain_status = 'CANCELLED'
        OR p.status IN ('OVERTURNED', 'WAIVED', 'CANCELLED') THEN 'CANCELLED'
   WHEN p.chain_status = 'DISPUTED'
        OR (p.chain_status = 'PENDING' AND p.chain_disputed_parts > 0) THEN 'CHAIN_DISPUTED'
-  WHEN p.status IN ('DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND') THEN 'DISPUTED'
+  WHEN p.status IN ('DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND')
+       AND p.asset_id NOT LIKE '${ON_CHAIN_DISPUTE_LIKE}' THEN 'DISPUTED'
   ELSE 'PROPOSED'
 END`;
 
 /**
  * The next instant something happens to the penalty on its own, by status
- * (`$1` is the dispute timeout in seconds). A dispute lapses 30 days after it
- * was raised; a cancel under a disputed record lapses the same way, and one
- * under a `Pending` record must be signed before the record turns executable;
- * an undisputed penalty is executable from the later of Assay's floor and the
- * chain's own time. Closed penalties have none.
+ * (`$1` is the dispute timeout in seconds): `operatorCaseDeadlineOf` in SQL.
+ * A dispute lapses 30 days after it was raised; a cancel under a disputed
+ * record lapses the same way, and one under a `Pending` record must be signed
+ * before the record turns executable; an undisputed penalty is executable
+ * from the case screen's `executableAt` — the chain's own time when the record
+ * is on chain, else Assay's floor. Closed penalties have none.
  */
 const OPERATOR_CASE_DEADLINE_SQL = `CASE s.status
   WHEN 'CHAIN_DISPUTED' THEN s.chain_disputed_at + make_interval(secs => $1::int)
@@ -54,7 +61,7 @@ const OPERATOR_CASE_DEADLINE_SQL = `CASE s.status
     WHEN s.chain_disputed_at IS NOT NULL AND s.chain_disputed_parts > 0
       THEN s.chain_disputed_at + make_interval(secs => $1::int)
     ELSE s.chain_executable_at END
-  WHEN 'PROPOSED' THEN GREATEST(s.chain_executable_at, s.earliest_execution_at)
+  WHEN 'PROPOSED' THEN COALESCE(s.chain_executable_at, s.earliest_execution_at)
   WHEN 'DISPUTED' THEN s.platform_decision_due_at
   ELSE NULL
 END`;
