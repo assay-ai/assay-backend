@@ -19,7 +19,9 @@ import {
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
 import { AlertAggregation, AlertSeverity } from '@shared/alerting';
 
-import { noBlocks } from '../helpers/blocklist';
+import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+
+import { addBlock, noBlocks } from '../helpers/blocklist';
 
 /**
  * REGRESSION (review 2026-10-15 P-1): a redemption that LANDED but was not
@@ -33,6 +35,7 @@ import { noBlocks } from '../helpers/blocklist';
 
 const USDC = ASSET_IDS.USDC_SOLANA_DEVNET;
 const NOW = 1_800_000_000;
+const PROVIDER_ORG_UUID = '44444444-4444-4444-8444-444444444444';
 
 function row() {
   return {
@@ -51,7 +54,7 @@ function row() {
     voucherDelegate: null,
     expiresAt: new Date((NOW + 300) * 1000),
     holdId: randomUUID(),
-    providerId: 'prov-org',
+    providerId: PROVIDER_ORG_UUID,
     providerAmount: '800000',
     platformFee: '200000',
   };
@@ -111,7 +114,11 @@ class ChainRedeemer {
   }
 }
 
-function build(redeemer: ChainRedeemer, clock: { nowSeconds: number } = { nowSeconds: NOW }) {
+function build(
+  redeemer: ChainRedeemer,
+  clock: { nowSeconds: number } = { nowSeconds: NOW },
+  blocklist = noBlocks(),
+) {
   const refs = new Map<string, string[]>();
   const intents = {
     commitRedeemedHold: jest.fn().mockResolvedValue(undefined),
@@ -128,6 +135,7 @@ function build(redeemer: ChainRedeemer, clock: { nowSeconds: number } = { nowSec
       refs.set(id, [...(refs.get(id) ?? []), ref]);
     }),
     findRedemptionTxRefs: jest.fn(async (_org: string, id: string) => refs.get(id) ?? []),
+    recordRedemptionError: jest.fn().mockResolvedValue(undefined),
   };
   const alerts = { emit: jest.fn().mockResolvedValue(undefined) };
   const service = new VoucherRedemptionService(
@@ -136,7 +144,7 @@ function build(redeemer: ChainRedeemer, clock: { nowSeconds: number } = { nowSec
     ledger as never,
     redeemer as never,
     alerts as never,
-    noBlocks(),
+    blocklist,
     () => clock.nowSeconds * 1000,
   );
   return { service, intents, ledger, payments, alerts };
@@ -198,6 +206,28 @@ describe('VoucherRedemptionService — a landing this process did not observe', 
     expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+  });
+
+  it('a provider blocked after its voucher landed unobserved: committed, not forfeited', async () => {
+    const redeemer = new ChainRedeemer(async () => {
+      throw new Error('WaitForTransactionReceiptTimeoutError');
+    });
+    const blocklist = noBlocks();
+    const { service, intents, ledger } = build(redeemer, undefined, blocklist);
+    await service.run(USDC);
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: PROVIDER_ORG_UUID });
+    await service.run(USDC);
+
+    expect(redeemer.sends).toBe(1);
+    expect(intents.commitRedeemedHold).toHaveBeenCalledWith(
+      'org-1',
+      'intent-1',
+      redeemer.landed.get('1'),
+    );
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(ledger.appendNow).not.toHaveBeenCalled();
   });
 
   it('still absorbs a voucher none of whose own transactions landed', async () => {

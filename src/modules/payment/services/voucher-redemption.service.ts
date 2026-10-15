@@ -48,6 +48,20 @@ import { PaymentIntentService } from './payment-intent.service';
 export const PLATFORM_ABSORBED_TX_REF_PREFIX = 'platform_absorbed:';
 
 /**
+ * What `redemption_last_error` carries once the provider forfeited the
+ * voucher, followed by the cause: a program error (`ProviderBelowMinimumStake`)
+ * or a block (`ProviderBlocked`, `PayeeBlocked`, `PayeeBlockedOnChain`).
+ */
+export const PROVIDER_FORFEIT_PREFIX = 'provider_forfeit:';
+
+/**
+ * Refusals the PROVIDER causes. A voucher that dies of one — refused with it
+ * outright, or `VoucherExpired` after being retried on it — is forfeited by the
+ * provider: the buyer's hold is released and nobody is credited.
+ */
+const PROVIDER_CAUSED_ERRORS: ReadonlySet<string> = new Set(['ProviderBelowMinimumStake']);
+
+/**
  * `findLanding` looked at this intent's own transactions and none of them
  * redeemed it — as far as the node that answered can see. See
  * {@link VoucherRedemptionService.pastLandingWindow}.
@@ -100,12 +114,23 @@ const NOT_FOUND_YET = Symbol('NOT_FOUND_YET');
  *
  * The credit is written **before** the release, and the order is not
  * cosmetic — see {@link absorb}.
+ *
+ * ## Unless the provider caused it: the provider forfeits
+ *
+ * A voucher that dies because of the provider — its bonded stake fell below
+ * the minimum (it unstaked, or was slashed), or the provider or its payee is
+ * blocked — is never paid by the platform. The buyer's hold is released and
+ * nobody is credited ({@link forfeit}). A block on the provider side forfeits
+ * at once rather than waiting for the voucher to expire; a stake refusal is
+ * retried until the deadline first, because the provider may top it up.
  */
 @Injectable()
 export class VoucherRedemptionService {
   private readonly logger = new Logger(VoucherRedemptionService.name);
   /** Payers already logged as held in this pass: one line per payer, not per row. */
   private readonly loggedHolds = new Set<string>();
+  /** This pass's on-chain blocked accounts, lower-case CAIP-10 — see {@link exclusions}. */
+  private chainBlocked: ReadonlySet<string> = new Set();
 
   constructor(
     private readonly payments: PaymentIntentRepository,
@@ -164,6 +189,11 @@ export class VoucherRedemptionService {
     }
 
     for (const row of pending) {
+      const forfeit = await this.forfeitIfProviderBlocked(row);
+      if (forfeit !== null) {
+        if (!forfeit.settled) blocked.add(row.agentAccount);
+        continue;
+      }
       if (await this.held(row)) {
         blocked.add(row.agentAccount);
         continue;
@@ -242,6 +272,11 @@ export class VoucherRedemptionService {
       const carried: RedeemableIntent[] = [];
 
       for (const row of queue) {
+        const forfeit = await this.forfeitIfProviderBlocked(row);
+        if (forfeit !== null) {
+          if (!forfeit.settled) blocked.add(row.agentAccount);
+          continue;
+        }
         if (await this.held(row)) {
           blocked.add(row.agentAccount);
           continue;
@@ -333,9 +368,10 @@ export class VoucherRedemptionService {
    * about what is redeemable or about which bytes go on the wire.
    */
   /**
-   * Whether a party to this voucher is on the account blocklist — the payer's
-   * organization or account, the provider or its payout account, or the
-   * delegate that signed.
+   * Whether a payer-side party to this voucher is on the account blocklist —
+   * the payer's organization or account, or the delegate that signed. A
+   * blocked provider or payee is not held: the provider forfeits the voucher
+   * at once (see {@link forfeitIfProviderBlocked}).
    *
    * A held row is not refused, released or absorbed at once: it keeps its
    * hold and is found again on the next pass after the block is lifted. The
@@ -371,6 +407,7 @@ export class VoucherRedemptionService {
         chainAccounts = [];
       }
     }
+    this.chainBlocked = new Set(chainAccounts.map((account) => account.toLowerCase()));
     return { organizationIds, walletKeys, chainAccounts };
   }
 
@@ -423,8 +460,6 @@ export class VoucherRedemptionService {
         subject: row.organizationId,
       },
       { role: BlockedRole.PAYER, kind: BlockSubjectKind.WALLET, subject: row.agentAccount },
-      { role: BlockedRole.PROVIDER, kind: BlockSubjectKind.ORGANIZATION, subject: row.providerId },
-      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: row.providerAccount },
       { role: BlockedRole.DELEGATE, kind: BlockSubjectKind.WALLET, subject: row.voucherDelegate },
     ]);
     if (!blocked) return false;
@@ -434,6 +469,53 @@ export class VoucherRedemptionService {
         `hold; past its on-chain expiry it is absorbed by the platform.`,
     );
     return true;
+  }
+
+  /**
+   * The provider-side block on this voucher, as the forfeit cause, or `null`:
+   * the provider's organization or its payee wallet on the platform blocklist,
+   * or the payee on this pass's confirmed on-chain blocklist.
+   */
+  private providerBlockCause(row: RedeemableIntent): string | null {
+    const blocked = this.blocklist.firstBlocked([
+      { role: BlockedRole.PROVIDER, kind: BlockSubjectKind.ORGANIZATION, subject: row.providerId },
+      { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: row.providerAccount },
+    ]);
+    if (blocked) {
+      return blocked.role === BlockedRole.PROVIDER ? 'ProviderBlocked' : 'PayeeBlocked';
+    }
+    if (row.providerAccount && this.chainBlocked.has(row.providerAccount.toLowerCase())) {
+      return 'PayeeBlockedOnChain';
+    }
+    return null;
+  }
+
+  /**
+   * Forfeits at once a voucher whose provider or payee is blocked (finding
+   * 14): holding it until it expired ended in {@link absorb}, so the platform
+   * paid a blocked provider. `null` when no provider-side block applies.
+   *
+   * Goes through {@link closeUnredeemable}, so a transaction this intent
+   * already recorded is looked for on chain first — a voucher that landed is
+   * committed, not forfeited. `settled: false` (the payer's later seqs wait)
+   * only when the row cannot be built or the attempt threw.
+   */
+  private async forfeitIfProviderBlocked(
+    row: RedeemableIntent,
+  ): Promise<{ settled: boolean } | null> {
+    const cause = this.providerBlockCause(row);
+    if (cause === null) return null;
+    try {
+      const built = this.toRequest(row);
+      if (!built) return { settled: false };
+      return await this.closeUnredeemable(row, built.request, cause, true);
+    } catch (error) {
+      this.logger.error(
+        `Forfeit of intent ${row.id} (seq ${row.voucherSeq}) for ${cause} threw: ` +
+          `${describe(error)}. The hold stays open for the next pass.`,
+      );
+      return { settled: false };
+    }
   }
 
   private toRequest(
@@ -509,39 +591,35 @@ export class VoucherRedemptionService {
 
       case RedeemOutcomeKind.RETRY:
         await this.warnIfOverdue(row, issuedAt, outcome.programError);
+        // Kept so the `VoucherExpired` that ends a run of retries can still
+        // say why (see `PROVIDER_CAUSED_ERRORS`). A bare RPC failure names no
+        // program error and says nothing about the voucher, so it does not
+        // overwrite one that did.
+        if (outcome.programError !== null) {
+          await this.payments.recordRedemptionError(
+            row.organizationId,
+            row.id,
+            outcome.programError,
+          );
+        }
         // Not settled: this buyer's later vouchers wait a tick. See the class
         // comment — going ahead of a retryable seq makes it unredeemable.
         return { stop: false, settled: false };
 
       case RedeemOutcomeKind.UNREDEEMABLE: {
-        // Every refusal, not only `VoucherSeqNotIncreasing`: a voucher that
-        // ALREADY landed gets that one, or `VoucherExpired` when the retry
-        // comes after its deadline, which is checked first (final review N-2).
-        // Absorbing it pays the provider a second time (review 2026-10-15 P-1).
-        // The seq is dead on chain whatever the answer, so while it waits the
-        // payer's later vouchers may go ahead (`settled: true`).
-        const landing = await this.findLanding(row, request);
-        if (landing === undefined) {
-          await this.reportLandingUnknown(row, outcome.programError);
-          return { stop: false, settled: true };
-        }
-        if (landing !== null && landing !== NOT_FOUND_YET) {
-          await this.intents.commitRedeemedHold(row.organizationId, row.id, landing);
-          return { stop: false, settled: true };
-        }
-        if (landing === NOT_FOUND_YET && !this.pastLandingWindow(row)) {
-          this.logger.warn(
-            `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${outcome.programError ?? 'unknown'} ` +
-              `and the chain does not show its own transactions yet. Not absorbed before ` +
-              `${LANDING_SETTLE_SECONDS}s past its redemption deadline: a lagging node ` +
-              `answers "not found" for a mined one (final review N-7).`,
-          );
-          return { stop: false, settled: true };
-        }
-        await this.absorb(row, outcome.programError);
-        // Settled, in the only sense this loop cares about: the hold is closed
-        // and nothing will ever redeem this seq, so it cannot be stepped over.
-        return { stop: false, settled: true };
+        // `VoucherExpired` ends a run of retries and no longer says why; the
+        // refusal recorded on the last RETRY does.
+        const cause =
+          outcome.programError === 'VoucherExpired'
+            ? (row.redemptionLastError ?? outcome.programError)
+            : outcome.programError;
+        const providerCaused = cause !== null && PROVIDER_CAUSED_ERRORS.has(cause);
+        return this.closeUnredeemable(
+          row,
+          request,
+          providerCaused ? cause : outcome.programError,
+          providerCaused,
+        );
       }
 
       case RedeemOutcomeKind.PAUSED:
@@ -560,6 +638,100 @@ export class VoucherRedemptionService {
         await this.reportMisconfiguration(row, outcome.programError);
         return { stop: true, settled: false };
     }
+  }
+
+  /**
+   * Closes a voucher nothing will redeem from here: committed with the
+   * transaction that already landed it if there is one, else forfeited by the
+   * provider (`forfeit`) or absorbed by the platform.
+   *
+   * Every refusal, not only `VoucherSeqNotIncreasing`: a voucher that ALREADY
+   * landed gets that one, or `VoucherExpired` when the retry comes after its
+   * deadline, which is checked first (final review N-2). Closing it without
+   * looking pays the provider a second time (review 2026-10-15 P-1). The seq
+   * is dead on chain — or, for a forfeit, never going to be redeemed — so
+   * while it waits the payer's later vouchers may go ahead (`settled: true`).
+   */
+  private async closeUnredeemable(
+    row: RedeemableIntent,
+    request: RedeemVoucherRequest,
+    cause: string | null,
+    forfeit: boolean,
+  ): Promise<{ stop: boolean; settled: boolean }> {
+    const landing = await this.findLanding(row, request);
+    if (landing === undefined) {
+      await this.reportLandingUnknown(row, cause);
+      return { stop: false, settled: true };
+    }
+    if (landing !== null && landing !== NOT_FOUND_YET) {
+      await this.intents.commitRedeemedHold(row.organizationId, row.id, landing);
+      return { stop: false, settled: true };
+    }
+    if (landing === NOT_FOUND_YET && !this.pastLandingWindow(row)) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${cause ?? 'unknown'} ` +
+          `and the chain does not show its own transactions yet. Not closed before ` +
+          `${LANDING_SETTLE_SECONDS}s past its redemption deadline: a lagging node ` +
+          `answers "not found" for a mined one (final review N-7).`,
+      );
+      return { stop: false, settled: true };
+    }
+    if (forfeit) {
+      await this.forfeit(row, cause ?? 'unknown');
+    } else {
+      await this.absorb(row, cause);
+    }
+    // Settled, in the only sense this loop cares about: the hold is closed
+    // and nothing will ever redeem this seq, so it cannot be stepped over.
+    return { stop: false, settled: true };
+  }
+
+  /**
+   * The provider caused the voucher to fail, so the provider is not paid: the
+   * buyer's hold is released and **nothing is credited to anyone** — the
+   * platform pays nothing either.
+   *
+   * The reason is written **before** the release: `findAwaitingRedemption`
+   * selects on `hold_released_at IS NULL`, so a crash between the two leaves
+   * the row where the next pass finds it and forfeits again, and releasing an
+   * already released hold is a no-op.
+   */
+  private async forfeit(row: RedeemableIntent, cause: string): Promise<void> {
+    const price = MoneyUtil.of(row.priceAmount, row.assetId as AssetId, row.decimals);
+
+    await this.payments.recordRedemptionError(
+      row.organizationId,
+      row.id,
+      `${PROVIDER_FORFEIT_PREFIX}${cause}`,
+    );
+
+    await this.intents.releaseHold({
+      organizationId: row.organizationId,
+      id: row.id,
+      holdId: row.holdId,
+    });
+
+    this.logger.warn(
+      `Intent ${row.id} (seq ${row.voucherSeq}): the provider forfeits ${MoneyUtil.format(price)} ` +
+        `(${cause}). The buyer's hold is released and nobody is credited.`,
+    );
+    await this.alerts.emit({
+      severity: AlertSeverity.WARN,
+      name: VOUCHER_REDEMPTION_ALERTS.PROVIDER_FORFEIT,
+      summary:
+        `A provider forfeits a voucher it caused to fail (${cause}) — the buyer is not ` +
+        `charged ${MoneyUtil.format(price)} and the platform pays nothing`,
+      details: {
+        intentId: row.id,
+        buyer: row.agentAccount,
+        provider: row.providerAccount ?? 'unknown',
+        providerId: row.providerId ?? 'unknown',
+        seq: row.voucherSeq,
+        forfeited: MoneyUtil.format(price),
+        cause,
+      },
+      aggregation: AlertAggregation.PER_EVENT,
+    });
   }
 
   /**

@@ -61,6 +61,7 @@ function pending(
     providerId: PROVIDER_ORG,
     providerAmount: '800000',
     platformFee: '200000',
+    redemptionLastError: null,
     ...overrides,
   } as RedeemableIntent;
 }

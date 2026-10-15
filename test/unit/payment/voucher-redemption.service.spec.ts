@@ -18,11 +18,14 @@ import {
   RedeemOutcomeKind,
   RedeemVoucherRequest,
 } from '@modules/payment/ports/voucher-redeemer.port';
-import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
+import {
+  PROVIDER_FORFEIT_PREFIX,
+  VoucherRedemptionService,
+} from '@modules/payment/services/voucher-redemption.service';
 import { Alert, AlertSeverity } from '@shared/alerting';
 import { BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
 
-import { blocklistOf, noBlocks } from '../helpers/blocklist';
+import { addBlock, blocklistOf, noBlocks } from '../helpers/blocklist';
 
 /**
  * `VoucherRedemptionService` — what happens to a rail-B hold after the verdict
@@ -68,6 +71,7 @@ function pending(seq: number, overrides: Partial<RedeemableIntent> = {}): Redeem
     providerId: PROVIDER_ORG,
     providerAmount: '800000',
     platformFee: '200000',
+    redemptionLastError: null,
     ...overrides,
   };
 }
@@ -119,7 +123,10 @@ function build(rows: RedeemableIntent[], blocklist = noBlocks()) {
     releaseHold: jest.fn().mockResolvedValue(true),
   };
   const ledger = { appendNow: jest.fn().mockResolvedValue(undefined) };
-  const payments = { findAwaitingRedemption: jest.fn().mockResolvedValue(rows) };
+  const payments = {
+    findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
+    recordRedemptionError: jest.fn().mockResolvedValue(undefined),
+  };
 
   const service = new VoucherRedemptionService(
     payments as never,
@@ -347,6 +354,9 @@ describe('VoucherRedemptionService.run', () => {
  */
 function realisticBuild(all: RedeemableIntent[], blocklist = noBlocks()) {
   let now = NOW_SECONDS;
+  /** The provider's bonded stake is below the program's minimum (it unstaked). */
+  let stakeBelowMinimum = false;
+  const lastErrors = new Map<string, string>();
   const calls: RedeemVoucherRequest[] = [];
   const redeemer = {
     maxBatchSize: 1,
@@ -360,6 +370,13 @@ function realisticBuild(all: RedeemableIntent[], blocklist = noBlocks()) {
           kind: RedeemOutcomeKind.UNREDEEMABLE,
           signature: null,
           programError: 'VoucherExpired',
+        };
+      }
+      if (stakeBelowMinimum) {
+        return {
+          kind: RedeemOutcomeKind.RETRY,
+          signature: null,
+          programError: 'ProviderBelowMinimumStake',
         };
       }
       return {
@@ -380,12 +397,15 @@ function realisticBuild(all: RedeemableIntent[], blocklist = noBlocks()) {
   const payments = {
     findAwaitingRedemption: jest.fn(
       async (_a: string, _s: string, _r: string, limit: number, exclude?: RedemptionExclusions) => {
-        const live = all.filter((row) => open.has(row.id));
+        const live = all
+          .filter((row) => open.has(row.id))
+          .map((row) => ({ ...row, redemptionLastError: lastErrors.get(row.id) ?? null }));
+        // Payer-side parties only: a blocked provider or payee is returned and
+        // forfeited by the pass, not left waiting in the queue.
         const blockedRow = (row: RedeemableIntent) =>
           !!exclude &&
           (exclude.organizationIds.includes(row.organizationId) ||
-            exclude.organizationIds.includes(row.providerId ?? '') ||
-            [row.agentAccount, row.providerAccount, row.voucherDelegate].some(
+            [row.agentAccount, row.voucherDelegate].some(
               (account) =>
                 (walletKey(account) !== null && exclude.walletKeys.includes(walletKey(account)!)) ||
                 (!!account && exclude.chainAccounts.includes(account.toLowerCase())),
@@ -408,6 +428,9 @@ function realisticBuild(all: RedeemableIntent[], blocklist = noBlocks()) {
           .slice(0, limit);
       },
     ),
+    recordRedemptionError: jest.fn(async (_org: string, id: string, error: string) => {
+      lastErrors.set(id, error);
+    }),
   };
   const service = new VoucherRedemptionService(
     payments as never,
@@ -418,7 +441,15 @@ function realisticBuild(all: RedeemableIntent[], blocklist = noBlocks()) {
     blocklist,
     () => now * 1000,
   );
-  return { service, calls, intents, ledger, payments, setNow: (s: number) => (now = s) };
+  return {
+    service,
+    calls,
+    intents,
+    ledger,
+    payments,
+    setNow: (s: number) => (now = s),
+    setStakeBelowMinimum: (below: boolean) => (stakeBelowMinimum = below),
+  };
 }
 
 describe('VoucherRedemptionService.run, with a party blocked', () => {
@@ -437,33 +468,106 @@ describe('VoucherRedemptionService.run, with a party blocked', () => {
     expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(1);
   });
 
-  it('holds a voucher whose provider is blocked, and the payer’s later seqs behind it', async () => {
-    const { service, redeemer } = build(
+  it('forfeits at once a voucher whose provider is blocked, and redeems the payer’s later seqs', async () => {
+    // Finding 14: holding it until it expired used to end in absorb(), so the
+    // platform paid a banned provider. The provider forfeits instead: the
+    // buyer's hold is released and nobody is credited.
+    const { service, redeemer, intents, ledger, payments, alerts } = build(
       [pending(1, { providerId: PROVIDER_UUID }), pending(2), pending(3)],
       blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: PROVIDER_UUID }),
     );
 
     await service.run(USDC);
 
-    // Redeeming seq 2 would make seq 1 unredeemable for ever.
-    expect(redeemer.calls).toEqual([]);
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(intents.releaseHold).toHaveBeenCalledWith(expect.objectContaining({ id: 'intent-1' }));
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      `${PROVIDER_FORFEIT_PREFIX}ProviderBlocked`,
+    );
+    expect(alerts.emitted).toContainEqual(
+      expect.objectContaining({
+        name: VOUCHER_REDEMPTION_ALERTS.PROVIDER_FORFEIT,
+        severity: AlertSeverity.WARN,
+      }),
+    );
+    // A forfeited seq is never redeemed, so the later ones may go.
+    expect(redeemer.calls.map((call) => call.seq)).toEqual(['2', '3']);
   });
 
-  it('holds a voucher whose payee wallet or delegate is blocked', async () => {
-    const delegate = `${CHAIN_IDS.SOLANA_DEVNET}:DeLeGaTe1111111111111111111111111111111111`;
-    const payee = build(
+  it('forfeits at once a voucher whose payee wallet is blocked', async () => {
+    const { service, redeemer, intents, ledger, payments } = build(
       [pending(1)],
       blocklistOf({ kind: BlockSubjectKind.WALLET, subject: PROVIDER_ACCOUNT }),
     );
-    await payee.service.run(USDC);
-    expect(payee.redeemer.calls).toEqual([]);
 
+    await service.run(USDC);
+
+    expect(redeemer.calls).toEqual([]);
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      `${PROVIDER_FORFEIT_PREFIX}PayeeBlocked`,
+    );
+  });
+
+  it('forfeits at once a voucher whose payee is blocked on chain', async () => {
+    const { payments, intents, ledger } = realisticBuild([pending(1)]);
+    const chainState = {
+      holdReason: jest.fn().mockResolvedValue('the payee is blocked on chain'),
+      blockedAccounts: jest.fn().mockResolvedValue([PROVIDER_ACCOUNT.toLowerCase()]),
+    };
+    const redeemer = new FakeRedeemer();
+    const service = new VoucherRedemptionService(
+      payments as never,
+      intents as never,
+      ledger as never,
+      redeemer as never,
+      new FakeAlerts() as never,
+      noBlocks(),
+      () => NOW_SECONDS * 1000,
+      chainState as never,
+    );
+
+    await service.run(USDC);
+
+    expect(redeemer.calls).toEqual([]);
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      `${PROVIDER_FORFEIT_PREFIX}PayeeBlockedOnChain`,
+    );
+  });
+
+  it('blocked payee: the next pass after the block releases the hold, with no credit', async () => {
+    const blocklist = noBlocks();
+    const { service, calls, intents, ledger } = realisticBuild([pending(1), pending(2)], blocklist);
+    addBlock(blocklist, { kind: BlockSubjectKind.WALLET, subject: PROVIDER_ACCOUNT });
+
+    await service.run(USDC);
+
+    expect(calls).toEqual([]);
+    expect(intents.releaseHold).toHaveBeenCalledTimes(2);
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+  });
+
+  it('still holds a voucher whose delegate is blocked (a payer-side block, E-2)', async () => {
+    const delegate = `${CHAIN_IDS.SOLANA_DEVNET}:DeLeGaTe1111111111111111111111111111111111`;
     const signer = build(
       [pending(1, { voucherDelegate: delegate })],
       blocklistOf({ kind: BlockSubjectKind.WALLET, subject: delegate }),
     );
     await signer.service.run(USDC);
     expect(signer.redeemer.calls).toEqual([]);
+    expect(signer.intents.releaseHold).not.toHaveBeenCalled();
   });
 
   it('resumes after a short block, inside the voucher’s on-chain life', async () => {
@@ -549,5 +653,108 @@ describe('VoucherRedemptionService.run, with a party blocked', () => {
     expect(payments.findAwaitingRedemption.mock.calls[0][4].chainAccounts).toEqual([
       BUYER.toLowerCase(),
     ]);
+  });
+});
+
+describe('VoucherRedemptionService.run, provider forfeit on a stake below the minimum', () => {
+  it('records the program error of every RETRY that names one, and not a bare RPC failure', async () => {
+    const { service, redeemer, payments } = build([pending(1)]);
+    redeemer.outcome = RedeemOutcomeKind.RETRY;
+    redeemer.programError = 'ProviderBelowMinimumStake';
+    await service.run(USDC);
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      'ProviderBelowMinimumStake',
+    );
+
+    const rpc = build([pending(1)]);
+    rpc.redeemer.outcome = RedeemOutcomeKind.RETRY;
+    await rpc.service.run(USDC);
+    expect(rpc.payments.recordRedemptionError).not.toHaveBeenCalled();
+  });
+
+  it('forfeits an UNREDEEMABLE ProviderBelowMinimumStake: hold released, nobody credited', async () => {
+    const { service, redeemer, intents, ledger, alerts, payments } = build([pending(1)]);
+    redeemer.outcome = RedeemOutcomeKind.UNREDEEMABLE;
+    redeemer.programError = 'ProviderBelowMinimumStake';
+
+    await service.run(USDC);
+
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      `${PROVIDER_FORFEIT_PREFIX}ProviderBelowMinimumStake`,
+    );
+    expect(alerts.emitted).toContainEqual(
+      expect.objectContaining({
+        name: VOUCHER_REDEMPTION_ALERTS.PROVIDER_FORFEIT,
+        severity: AlertSeverity.WARN,
+      }),
+    );
+    expect(alerts.emitted.map((alert) => alert.name)).not.toContain(
+      VOUCHER_REDEMPTION_ALERTS.UNREDEEMABLE,
+    );
+  });
+
+  it('forfeits a VoucherExpired whose last refusal was ProviderBelowMinimumStake', async () => {
+    const { service, redeemer, intents, ledger } = build([
+      pending(1, { redemptionLastError: 'ProviderBelowMinimumStake' }),
+    ]);
+    redeemer.outcome = RedeemOutcomeKind.UNREDEEMABLE;
+    redeemer.programError = 'VoucherExpired';
+
+    await service.run(USDC);
+
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+  });
+
+  it('does not forfeit a VoucherExpired whose last refusal was the buyer’s (still absorbed until step 9)', async () => {
+    const { service, redeemer, ledger } = build([
+      pending(1, { redemptionLastError: 'EscrowInsufficient' }),
+    ]);
+    redeemer.outcome = RedeemOutcomeKind.UNREDEEMABLE;
+    redeemer.programError = 'VoucherExpired';
+
+    await service.run(USDC);
+
+    expect(ledger.appendNow).toHaveBeenCalledWith(
+      expect.objectContaining({ entryType: LedgerEntryType.PROVIDER_CREDIT }),
+    );
+  });
+
+  it('unstake during the window: retried, then forfeited at expiry — no credit, hold released', async () => {
+    const { service, calls, intents, ledger, setNow, setStakeBelowMinimum } = realisticBuild([
+      pending(1),
+    ]);
+    setStakeBelowMinimum(true);
+
+    await service.run(USDC);
+    expect(calls).toHaveLength(1);
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+
+    setNow(NOW_SECONDS + 3600); // past expiresAt + grace: the chain says VoucherExpired
+    await service.run(USDC);
+
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(intents.commitRedeemedHold).not.toHaveBeenCalled();
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+  });
+
+  it('pays the provider normally when it restakes inside the window', async () => {
+    const { service, intents, ledger, setStakeBelowMinimum } = realisticBuild([pending(1)]);
+    setStakeBelowMinimum(true);
+    await service.run(USDC);
+
+    setStakeBelowMinimum(false);
+    await service.run(USDC);
+
+    expect(intents.commitRedeemedHold).toHaveBeenCalledTimes(1);
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(ledger.appendNow).not.toHaveBeenCalled();
   });
 });
