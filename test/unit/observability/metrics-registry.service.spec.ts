@@ -22,11 +22,11 @@ describe('MetricsRegistryService', () => {
     const textA = await a.metricsText();
     const textB = await b.metricsText();
 
-    expect(textA).toContain('x402_egress_blocked_total{reason="PRIVATE"} 1');
+    expect(textA).toContain('assay_egress_blocked_total{reason="PRIVATE"} 1');
     // `b`'s definition (HELP/TYPE) is still present — every instance
     // registers the same metric names — but no *sample* line, since nothing
     // was ever recorded against it. That is the "absent, not zero" contract.
-    expect(textB).not.toMatch(/x402_egress_blocked_total\{/);
+    expect(textB).not.toMatch(/assay_egress_blocked_total\{/);
   });
 
   it('records an egress block under its reason label', async () => {
@@ -38,8 +38,8 @@ describe('MetricsRegistryService', () => {
 
     const text = await registry.metricsText();
 
-    expect(text).toContain('x402_egress_blocked_total{reason="LOOPBACK"} 2');
-    expect(text).toContain('x402_egress_blocked_total{reason="PRIVATE"} 1');
+    expect(text).toContain('assay_egress_blocked_total{reason="LOOPBACK"} 2');
+    expect(text).toContain('assay_egress_blocked_total{reason="PRIVATE"} 1');
   });
 
   it('emits no series for a Counter/Histogram that was never recorded — the "absent, not zero" contract', async () => {
@@ -49,8 +49,8 @@ describe('MetricsRegistryService', () => {
 
     // HELP/TYPE lines are always emitted (they describe the metric, not a
     // sample); what must be absent is any line carrying a sample value.
-    expect(text).not.toMatch(/x402_egress_blocked_total\{/);
-    expect(text).not.toMatch(/x402_platform_added_latency_ms_bucket/);
+    expect(text).not.toMatch(/assay_egress_blocked_total\{/);
+    expect(text).not.toMatch(/assay_platform_added_latency_ms_bucket/);
   });
 
   it('observes platform-added latency into per-binding histogram buckets', async () => {
@@ -61,9 +61,9 @@ describe('MetricsRegistryService', () => {
     const text = await registry.metricsText();
 
     expect(text).toContain(
-      'x402_platform_added_latency_ms_bucket{le="20",bindingId="binding-a"} 1',
+      'assay_platform_added_latency_ms_bucket{le="20",bindingId="binding-a"} 1',
     );
-    expect(text).toContain('x402_platform_added_latency_ms_sum{bindingId="binding-a"} 18');
+    expect(text).toContain('assay_platform_added_latency_ms_sum{bindingId="binding-a"} 18');
   });
 
   it('sets DB-backed gauges and reports them at their own value, not accumulated', async () => {
@@ -74,7 +74,7 @@ describe('MetricsRegistryService', () => {
 
     const text = await registry.metricsText();
 
-    expect(text).toContain('x402_verification_false_positive_rate 0.02');
+    expect(text).toContain('assay_verification_false_positive_rate 0.02');
   });
 
   it('reports the signal-status gate gauge per labelled signal', async () => {
@@ -85,7 +85,7 @@ describe('MetricsRegistryService', () => {
 
     const text = await registry.metricsText();
 
-    expect(text).toContain('x402_signal_status{signal="tool_call_success_rate"} 1');
-    expect(text).toContain('x402_signal_status{signal="reserve_health:usdc"} 2');
+    expect(text).toContain('assay_signal_status{signal="tool_call_success_rate"} 1');
+    expect(text).toContain('assay_signal_status{signal="reserve_health:usdc"} 2');
   });
 });

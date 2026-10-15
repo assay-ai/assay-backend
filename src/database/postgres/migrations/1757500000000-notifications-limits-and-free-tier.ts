@@ -252,7 +252,7 @@ export class NotificationsLimitsAndFreeTier1757500000000 implements MigrationInt
         "verdict"         varchar(32),
         "expires_at"      timestamptz   NOT NULL,
         CONSTRAINT "pk_tool_call_records" PRIMARY KEY ("id"),
-        -- The same id the provider saw as X-X402-Call-Id. Unique so
+        -- The same id the provider saw as X-Assay-Call-Id. Unique so
         -- a retried write cannot double-count a free call against its quota.
         CONSTRAINT "uq_tool_call_records_call_id" UNIQUE ("call_id"),
         CONSTRAINT "chk_tool_call_records_pricing_mode"

@@ -75,6 +75,12 @@ export enum ResolutionKind {
    * (objection `REJECTED`, outcome `UPHELD`); it names no adjudicator.
    */
   AUTO_CHAIN_EXECUTED = 'AUTO_CHAIN_EXECUTED',
+  /**
+   * EVM: the arbiter ruled on chain (`upholdSlash`), the one decision for a
+   * disputed record. The arbiter is a person-held wallet and not an operator
+   * row, so it names no adjudicator and writes no outcome on the case.
+   */
+  CHAIN_ARBITER = 'CHAIN_ARBITER',
 }
 
 /** What follows from an outcome, automatically and without a second decision. */

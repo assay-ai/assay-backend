@@ -3,7 +3,7 @@
  * corrupts silently rather than throwing, so this is a round-trip test: parse
  * back what was written and get the original value.
  */
-import { csvField, csvLine, csvRow } from '@modules/provider/domain/csv';
+import { callsExportFilename, csvField, csvLine, csvRow } from '@modules/provider/domain/csv';
 
 /** A minimal RFC 4180 parser, independent of the encoder, for the round-trip tests. */
 function parseCsvLine(line: string): string[] {
@@ -40,6 +40,19 @@ function parseCsvLine(line: string): string[] {
 }
 
 describe('csvField', () => {
+  // Review P-10: a field a spreadsheet would evaluate as a formula.
+  it.each(['=HYPERLINK("http://x")', '+1+1', '-2+3', '@SUM(A1)', '\tcmd'])(
+    'neutralises %j with a leading quote',
+    (value) => {
+      expect(parseCsvLine(csvField(value))[0]).toBe(`'${value}`);
+    },
+  );
+
+  it('leaves a plain signed amount alone', () => {
+    expect(csvField('-0.05')).toBe('-0.05');
+    expect(csvField(-12)).toBe('-12');
+  });
+
   it('leaves a plain value unquoted', () => {
     expect(csvField('tool-search-web')).toBe('tool-search-web');
   });
@@ -88,5 +101,18 @@ describe('csvRow / csvLine — round trip', () => {
 
   it('csvLine terminates with CRLF', () => {
     expect(csvLine(['a', 'b'])).toBe('a,b\r\n');
+  });
+});
+
+// BUG-R16-V1-02: the export downloaded as `calls-<from>_<to>.csv` with colons in it.
+describe('callsExportFilename', () => {
+  it('names the file assay-calls-<from>_<to>.csv with no colon in it', () => {
+    expect(callsExportFilename('2026-10-01T00:00:00.000Z', '2026-10-16T00:00:00.000Z')).toBe(
+      'assay-calls-2026-10-01T00-00-00.000Z_2026-10-16T00-00-00.000Z.csv',
+    );
+  });
+
+  it('cannot put a quote into the Content-Disposition value', () => {
+    expect(callsExportFilename('a"b', 'c;d')).toBe('assay-calls-a-b_c-d.csv');
   });
 });

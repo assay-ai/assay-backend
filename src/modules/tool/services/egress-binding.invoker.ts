@@ -1,8 +1,17 @@
 import { Injectable } from '@nestjs/common';
 
 import { EgressHttpClient } from '@shared/network/egress/egress-http.client';
-import { isEgressError } from '@shared/network/egress/egress.errors';
-import { UNTRUSTED_EGRESS_POLICY, withLimits } from '@shared/network/egress/egress.policy';
+import {
+  EgressError,
+  EgressFailureKind,
+  isEgressError,
+} from '@shared/network/egress/egress.errors';
+import {
+  EgressPolicy,
+  UNTRUSTED_EGRESS_POLICY,
+  bindingEndpointProtocols,
+  withLimits,
+} from '@shared/network/egress/egress.policy';
 
 import {
   ProviderResponse,
@@ -60,27 +69,27 @@ export class EgressBindingInvoker implements BindingInvokerPort {
       const response = await this.http.request({
         url: buildUrl(binding.endpoint, upstream),
         method: upstream.method,
-        // `x-x402-call-id` is spread in *last*, after `upstream.headers` — a
+        // `x-assay-call-id` is spread in *last*, after `upstream.headers` — a
         // binding is a provider-authored mapping, and a provider
         // that could set this header itself could spoof the correlation id
         // the whole point of the call id is to make unforgeable. `EgressHttpClient`
         // lower-cases every header name before it sends anything
         // (`normalizeHeaders`), so this also wins against a differently-cased
-        // duplicate (`X-X402-Call-Id`) coming out of `upstream.headers` — the
+        // duplicate (`X-Assay-Call-Id`) coming out of `upstream.headers` — the
         // last write for a given lower-cased key is the one that reaches the
         // wire, and this object literal places it last either way.
         headers: {
           accept: 'application/json',
           ...(body === undefined ? {} : { 'content-type': 'application/json' }),
           ...upstream.headers,
-          'x-x402-call-id': callId,
+          'x-assay-call-id': callId,
         },
         body,
         // Every deadline collapses to the attempt's budget. The per-hop figures
         // exist so a redirect chain cannot multiply the wait, and the router
         // has already reconciled `timeoutMs` against the request's total — so
         // the correct value for all three is the same one.
-        policy: withLimits(UNTRUSTED_EGRESS_POLICY, {
+        policy: withLimits(bindingPolicy(), {
           headersTimeoutMs: timeoutMs,
           bodyTimeoutMs: timeoutMs,
           totalTimeoutMs: timeoutMs,
@@ -110,6 +119,19 @@ export class EgressBindingInvoker implements BindingInvokerPort {
 }
 
 /**
+ * `UNTRUSTED_EGRESS_POLICY`, narrowed to https in production. Read per call so
+ * the rule covers rows saved before it existed, not just new DTOs: such a row
+ * fails with `TRANSPORT_HTTPS_REQUIRED`, and
+ * `scripts/deploy/list-http-bindings.sql` lists them.
+ */
+function bindingPolicy(): EgressPolicy {
+  return Object.freeze({
+    ...UNTRUSTED_EGRESS_POLICY,
+    allowedProtocols: Object.freeze([...bindingEndpointProtocols()]),
+  });
+}
+
+/**
  * `binding.endpoint` + the mapped path and query.
  *
  * The endpoint is the provider's own URL, unchanged, and may itself carry a
@@ -122,6 +144,19 @@ function buildUrl(endpoint: string, upstream: UpstreamRequest): string {
   const base = endpoint.replace(/\/+$/, '');
   const path = upstream.path ? `/${upstream.path.replace(/^\/+/, '')}` : '';
   const url = new URL(`${base}${path}`);
+
+  // Dot segments are resolved by `new URL`, so a mapped path can climb out of
+  // the endpoint's prefix while still carrying the provider's credentials.
+  // `interpolatePath` refuses `.`/`..` values; this is the backstop for any
+  // other route to the same place.
+  const prefix = new URL(base).pathname.replace(/\/+$/, '');
+  if (url.pathname !== prefix && !url.pathname.startsWith(`${prefix}/`)) {
+    throw new EgressError(
+      EgressFailureKind.URL_INVALID,
+      `the mapped path leaves the endpoint's path prefix "${prefix}"`,
+      { url: url.href },
+    );
+  }
 
   for (const [name, value] of Object.entries(upstream.query)) {
     url.searchParams.set(name, value);

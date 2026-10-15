@@ -30,12 +30,25 @@ export interface McpCredentialRecord {
   readonly agentAccount: AccountId;
   readonly chainId: ChainId;
   readonly label?: string;
+  /**
+   * `"human"` when a person uses this token, as the local stack's dashboard
+   * logins do. Anything else resolves as a machine (`AGENT`): an agent process
+   * handed a config token is not a person, and a file that forgets to say is
+   * trusted as little as possible (review A-2).
+   */
+  readonly kind?: 'human';
 }
 
 /** `token → credential`. Empty by default: no token is valid until one is configured. */
 export type McpCredentialSnapshot = Readonly<Record<string, McpCredentialRecord>>;
 
 export const EMPTY_MCP_CREDENTIALS: McpCredentialSnapshot = Object.freeze({});
+
+/** Shorter than this is a guessable demo string, not a credential (same rule as the operator file). */
+export const MIN_CONFIG_TOKEN_LENGTH = 32;
+
+/** The stacks the committed demo file, whose tokens are short, is for. */
+const DEVELOPMENT_ENVIRONMENTS: ReadonlySet<string> = new Set(['development', 'local', 'test']);
 
 /**
  * Load the snapshot named by `MCP_CREDENTIALS_FILE`, or nothing.
@@ -50,13 +63,52 @@ export const EMPTY_MCP_CREDENTIALS: McpCredentialSnapshot = Object.freeze({});
  * everyone) and are opposite for an operator, so the one that means "you
  * configured this and it did not load" must not degrade quietly into the one
  * that means "nothing is configured".
+ *
+ * **Never in production, and weak tokens only in development** (review A-2).
+ * The seed file is committed to git and its tokens are short readable
+ * strings, so a deployment that loaded it would hand every reader of the
+ * repository a session. `NODE_ENV=production` refuses any credentials file at
+ * boot; any other environment outside development refuses a token shorter
+ * than {@link MIN_CONFIG_TOKEN_LENGTH}.
  */
-export function loadMcpCredentials(path = process.env.MCP_CREDENTIALS_FILE): McpCredentialSnapshot {
+export function loadMcpCredentials(
+  path = process.env.MCP_CREDENTIALS_FILE,
+  nodeEnv = process.env.NODE_ENV,
+): McpCredentialSnapshot {
   if (!path) return EMPTY_MCP_CREDENTIALS;
+
+  if (nodeEnv === 'production') {
+    throw new Error(
+      `MCP_CREDENTIALS_FILE (${path}) is refused when NODE_ENV=production: ` +
+        'config credentials are for development stacks only',
+    );
+  }
 
   const parsed: unknown = JSON.parse(readFileSync(path, 'utf8'));
   if (typeof parsed !== 'object' || parsed === null || Array.isArray(parsed)) {
     throw new Error(`MCP_CREDENTIALS_FILE (${path}) must contain a JSON object of token → record`);
+  }
+
+  const records = Object.entries(parsed as Record<string, { kind?: unknown } | null>);
+  // Neither message names the token: it is the secret.
+  if (
+    !DEVELOPMENT_ENVIRONMENTS.has(nodeEnv ?? '') &&
+    records.some(([token]) => token.length < MIN_CONFIG_TOKEN_LENGTH)
+  ) {
+    throw new Error(
+      `MCP_CREDENTIALS_FILE (${path}) holds a token shorter than ${MIN_CONFIG_TOKEN_LENGTH} ` +
+        `characters, which only a development stack accepts (NODE_ENV=${nodeEnv ?? 'unset'})`,
+    );
+  }
+  const badKind = records.find(
+    ([, record]) => record?.kind !== undefined && record.kind !== 'human',
+  );
+  if (badKind) {
+    throw new Error(
+      `MCP_CREDENTIALS_FILE (${path}): credential ${JSON.stringify(
+        (badKind[1] as { credentialId?: unknown }).credentialId ?? null,
+      )} has kind ${JSON.stringify(badKind[1]?.kind)}; the only kind is "human"`,
+    );
   }
 
   return Object.freeze(parsed as McpCredentialSnapshot);
@@ -98,7 +150,8 @@ export class ConfigMcpSessionSource implements McpSessionPort {
       agentAccount: record.agentAccount,
       chainId: record.chainId,
       label: record.label ?? null,
-      callerKind: McpCallerKind.CONFIG,
+      // A person only when the record says so — see `McpCredentialRecord.kind`.
+      callerKind: record.kind === 'human' ? McpCallerKind.CONFIG : McpCallerKind.AGENT,
     });
   }
 

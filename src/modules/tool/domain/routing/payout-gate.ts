@@ -41,15 +41,11 @@ import { IneligibilityReason, RoutingCandidate } from './routing.types';
  * and the quota has not been checked at selection time, so guessing free would
  * route a charged call to an unpayable provider.
  *
- * What this does not cover: a tool with *both* `FREE` and paid bindings quotes
- * as paid (`quotedPricingMode`), takes the paid path, and may then draw the
- * `FREE` binding — which this gate exempted. That call is charged and credits a
- * provider this gate never checked. The hole is inherited from
- * `evaluateStakeGate`, which exempts the same candidate from the stake floor
- * for the same reason, and closing it means deciding a paid call's payee
- * eligibility from the *tool's* supply rather than the binding's — a routing
- * change wider than this one. Recorded rather than papered over; the guard in
- * `PaymentIntentService.resolve()` still refuses that commit loudly.
+ * The exemption is safe only because a `FREE` binding never serves a charged
+ * call: a tool with *both* `FREE` and paid bindings quotes as paid, and the
+ * router then routes it with `RoutingContext.callClass = 'PAID'`, which leaves
+ * every `FREE` binding out of the pool before this gate runs. The same rule is
+ * what makes `evaluateStakeGate`'s `FREE` exemption safe.
  */
 
 export type PayoutGateVerdict =

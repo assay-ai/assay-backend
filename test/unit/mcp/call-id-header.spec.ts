@@ -1,5 +1,5 @@
 /**
- * `X-X402-Call-Id` end to end — a real HTTP server, the real
+ * `X-Assay-Call-Id` end to end — a real HTTP server, the real
  * `ProviderRouterService`, the real `EgressBindingInvoker`, and the real
  * `McpToolCallService`. Only the payment-intent store and the ledger are
  * fakes (see `mcp-harness.ts`'s own doc comment for why that split is the
@@ -7,7 +7,7 @@
  *
  * The thing under test is that the id minted once by `McpToolCallService.call()`
  * is the *same* value that: (a) lands on the payment intent, and (b) arrives
- * on the wire as the `X-X402-Call-Id` header a provider's own access log would
+ * on the wire as the `X-Assay-Call-Id` header a provider's own access log would
  * record. A mock invoker cannot prove (b) — this is why `binding-invoker.spec.ts`
  * and this file both use a real socket instead of a script.
  *
@@ -67,7 +67,7 @@ function realInvoker(): EgressBindingInvoker {
   );
 }
 
-describe('X-X402-Call-Id reaches the upstream endpoint', () => {
+describe('X-Assay-Call-Id reaches the upstream endpoint', () => {
   it('the header the provider receives equals the call id recorded on the intent', async () => {
     const { calls, intents } = buildMcpHarness({
       bindings: [
@@ -100,10 +100,10 @@ describe('X-X402-Call-Id reaches the upstream endpoint', () => {
     expect(intent.status).toBe(PaymentIntentStatus.VERIFYING);
 
     // (b): the wire and the payment record agree, byte-identical.
-    expect(receivedHeaders['x-x402-call-id']).toBe(intent.callId);
+    expect(receivedHeaders['x-assay-call-id']).toBe(intent.callId);
 
     // The id is genuinely independent of the intent's own id — the whole
     // point of the call-id design (see the migration's doc comment).
-    expect(receivedHeaders['x-x402-call-id']).not.toBe(intent.id);
+    expect(receivedHeaders['x-assay-call-id']).not.toBe(intent.id);
   });
 });

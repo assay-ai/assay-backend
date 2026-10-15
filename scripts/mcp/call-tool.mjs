@@ -9,7 +9,7 @@
  * `scripts/mcp/session.ts` drives the same transport but is hard-wired to the
  * seed credentials in `credentials.json`. This one takes the token as an
  * argument, which is the only way to exercise a credential a *user* minted in
- * the UI (`x402_sk_live_…`, `DbCredentialMcpSessionSource`) — the path a real
+ * the UI (`assay_sk_live_…`, `DbCredentialMcpSessionSource`) — the path a real
  * agent takes, and the one the demo runbook walks.
  *
  * The client is the reference SDK `Client` over Streamable HTTP for the reason

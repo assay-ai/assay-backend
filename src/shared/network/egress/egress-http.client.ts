@@ -109,8 +109,23 @@ export type EgressConnectOverride = (
 const REWRITE_TO_GET = new Set([301, 302, 303]);
 const REDIRECT_STATUSES = new Set([301, 302, 303, 307, 308]);
 
-/** Headers we never forward across an origin change. */
-const CREDENTIAL_HEADERS = ['authorization', 'cookie', 'proxy-authorization'];
+/**
+ * The only headers forwarded across an origin change.
+ *
+ * An allowlist, not a list of credential names: a provider binding
+ * authenticates upstream with whatever header its API uses (`x-api-key`,
+ * `x-auth-token`, …), and a blocklist of the well-known ones lets every other
+ * one follow a redirect to a host nobody vetted.
+ */
+const CROSS_ORIGIN_HEADERS = new Set([
+  'accept',
+  'accept-encoding',
+  'accept-language',
+  'content-type',
+  'content-length',
+  'user-agent',
+  'x-assay-call-id',
+]);
 
 interface HopResponse {
   readonly kind: 'response';
@@ -182,7 +197,7 @@ export class EgressHttpClient {
       );
 
       if (origin !== null && target.url.origin !== origin) {
-        headers = stripCredentials(headers);
+        headers = crossOriginHeaders(headers);
       }
       origin = target.url.origin;
 
@@ -201,6 +216,7 @@ export class EgressHttpClient {
 
       const next = resolveLocation(outcome.location, target.url);
       this.logger.debug(`${outcome.status} ${target.url.href} → ${next}`);
+      assertRedirectAllowed(target.url, new URL(next), outcome.status, body !== undefined);
 
       if (REWRITE_TO_GET.has(outcome.status) && method !== 'HEAD') {
         method = 'GET';
@@ -530,10 +546,36 @@ function normalizeHeaders(headers?: Readonly<Record<string, string>>): Record<st
   return out;
 }
 
-function stripCredentials(headers: Record<string, string>): Record<string, string> {
-  const out = { ...headers };
-  for (const name of CREDENTIAL_HEADERS) delete out[name];
+function crossOriginHeaders(headers: Record<string, string>): Record<string, string> {
+  const out: Record<string, string> = {};
+  for (const [name, value] of Object.entries(headers)) {
+    if (CROSS_ORIGIN_HEADERS.has(name)) out[name] = value;
+  }
   return out;
+}
+
+/**
+ * Refuse the redirects that would leak what the first hop was trusted with.
+ *
+ * - `https:` → `http:` on any hop: the request, and whatever credentials are
+ *   still on it, would cross the network in clear.
+ * - A `307`/`308` to another origin while a body is being sent: those
+ *   statuses keep the method and body, so the buyer's payload would be
+ *   replayed to a host nobody chose.
+ */
+export function assertRedirectAllowed(from: URL, to: URL, status: number, hasBody: boolean): void {
+  if (from.protocol === 'https:' && to.protocol === 'http:') {
+    throw new EgressError(EgressFailureKind.REDIRECT_INVALID, 'refused an https → http redirect', {
+      url: from.href,
+    });
+  }
+  if (hasBody && !REWRITE_TO_GET.has(status) && from.origin !== to.origin) {
+    throw new EgressError(
+      EgressFailureKind.REDIRECT_INVALID,
+      `refused a ${status} redirect that would resend the request body to another origin`,
+      { url: from.href },
+    );
+  }
 }
 
 function withoutBodyHeaders(headers: Record<string, string>): Record<string, string> {

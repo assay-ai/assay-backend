@@ -47,7 +47,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * gap is what "you have unpublished changes" is, and it is also what stops an
  * edit made after a green tester run from reaching traffic without a new run.
  *
- * **`uq_binding_test_runs_call_id`** — the tester mints a real `X-X402-Call-Id`
+ * **`uq_binding_test_runs_call_id`** — the tester mints a real `X-Assay-Call-Id`
  * and sends it upstream. A provider who finds an unexplained call id in their
  * own logs must be able to resolve it to *something*; a sandbox run has no
  * `payment_intents` row (it must not — see `BindingMappingTesterService`), so

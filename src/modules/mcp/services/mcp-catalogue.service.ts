@@ -234,7 +234,7 @@ function describe(
   const { tool } = quote;
 
   const annotations: Record<string, unknown> = {
-    [X402_PRICE]: priceAnnotation(price, quote.pricingMode),
+    [X402_PRICE]: priceAnnotation(price, quote.pricingMode, quote.routableBindings),
     [X402_TIER]: tierLabel(tool.tier),
     // Every response class other than `DATA_RESULT` releases the hold rather
     // than committing it (`RESPONSE_CLASS_CONSEQUENCE`), so this is a property
@@ -305,11 +305,22 @@ function describe(
  * Free and freemium tools carry `amount: "0"` with `display: "free"`, so a model can prefer
  * one without parsing an amount against an asset's scale.
  */
-function priceAnnotation(price: Money, mode: PricingMode | null): McpPriceAnnotation {
+/**
+ * `amount` is the quote: the dearest eligible binding, which is what a call is
+ * held for and the most it can be charged. The charge is the price of the
+ * binding that serves, so when more than one binding could serve, `display`
+ * says `"up to $0.10"` rather than claiming a price the call may undercut.
+ */
+function priceAnnotation(
+  price: Money,
+  mode: PricingMode | null,
+  routableBindings: number,
+): McpPriceAnnotation {
+  const display = mode === PricingMode.FREE ? 'free' : displayPrice(price);
   return {
     amount: price.amount,
     asset: price.asset,
-    display: mode === PricingMode.FREE ? 'free' : displayPrice(price),
+    display: mode !== PricingMode.FREE && routableBindings > 1 ? `up to ${display}` : display,
   };
 }
 

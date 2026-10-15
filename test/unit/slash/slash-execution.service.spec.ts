@@ -782,12 +782,18 @@ function row(overrides: Partial<Parameters<FakeSlashProposals['seed']>[0]> & { i
 
 describe("the propose sweep's selection contract", () => {
   it('never proposes for a case the provider has not been told about', async () => {
-    // respond_by_at is null until a channel confirms delivery. Proposing then
+    // notified_at is null until a channel confirms delivery. Proposing then
     // would reserve a provider's stake for a case they cannot answer, and the
     // delivery-confirmed deadline exists precisely so a dead webhook does not cost them their window.
     const proposals = new FakeSlashProposals();
     proposals.seed(
-      row({ id: 'undelivered', status: 'PROPOSED', respondByAt: null, chainStatus: 'NONE' }),
+      row({
+        id: 'undelivered',
+        status: 'PROPOSED',
+        notifiedAt: null,
+        respondByAt: null,
+        chainStatus: 'NONE',
+      }),
     );
     proposals.seed(
       row({
@@ -2916,6 +2922,71 @@ describe('sweepAdminCancels', () => {
     expect(proposals.rows.get('p1')!.chainStatus).toBe('CANCELLED');
   });
 
+  it('S-2: re-proposes a downward recalculation once its cancel has landed', async () => {
+    // The second half of `reproposeAtRevisedPenalty` used to have no caller:
+    // the decided, lower penalty was never put back on chain.
+    const { service, proposals, executor } = build();
+    proposals.seed(
+      standing({
+        id: 'p1',
+        status: 'UPHELD',
+        chainStatus: 'CANCEL_REQUESTED',
+        penaltyAmount: '400000',
+      }),
+    );
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'CANCELLED', executedAt: null, cancelledAt: hoursFromNow(-1) });
+    executor.appliedMinor = '400000';
+
+    await expect(service.sweepAdminCancels(NOW)).resolves.toMatchObject({ mirrored: 1 });
+
+    const saved = proposals.rows.get('p1')!;
+    expect(saved.chainEpoch).toBe(1);
+    expect(saved.chainRequestId).toBe(deriveChainRequestId({ id: 'p1', chainEpoch: 1 }));
+    expect(executor.proposed).toEqual([
+      expect.objectContaining({
+        requestId: deriveChainRequestId({ id: 'p1', chainEpoch: 1 }),
+        penaltyMinor: '400000',
+      }),
+    ]);
+  });
+
+  it('N-9: bumps the epoch by compare-and-set, so a second scheduler holding the old row does nothing', async () => {
+    const { service, proposals, executor } = build();
+    proposals.seed(
+      standing({ id: 'p1', status: 'UPHELD', chainStatus: 'CANCELLED', penaltyAmount: '400000' }),
+    );
+    executor.appliedMinor = '400000';
+    const stale = { ...proposals.rows.get('p1')! };
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+
+    await service.reproposeAtRevisedPenalty('org_1', 'p1', NOW);
+    // The other replica read the row before the bump.
+    await (
+      service as unknown as {
+        reproposeAfterCancellation: (row: unknown, now: Date) => Promise<void>;
+      }
+    ).reproposeAfterCancellation(stale, NOW);
+
+    expect(proposals.rows.get('p1')!.chainEpoch).toBe(1);
+    expect(executor.proposed).toHaveLength(1);
+    // R2-9: the loser says so.
+    expect(log).toHaveBeenCalledWith(expect.stringContaining('lost the epoch compare-and-set'));
+    log.mockRestore();
+  });
+
+  it('S-2: does not re-propose an overturned case whose cancel landed', async () => {
+    const { service, proposals, executor } = build();
+    proposals.seed(standing({ id: 'p1', chainStatus: 'CANCEL_REQUESTED' }));
+    executor.readRecordImpl = async () =>
+      chainRecord({ status: 'CANCELLED', executedAt: null, cancelledAt: hoursFromNow(-1) });
+
+    await service.sweepAdminCancels(NOW);
+
+    expect(proposals.rows.get('p1')!.chainEpoch).toBe(0);
+    expect(executor.proposed).toHaveLength(0);
+  });
+
   it('leaves a record nobody has signed for alone while its grace is running', async () => {
     const { service, proposals, executor } = build();
     proposals.seed(standing({ id: 'p1', chainStatus: 'CANCEL_REQUESTED' }));
@@ -3499,6 +3570,38 @@ describe('the fleet sweep asks for the chain reservation to be released too', ()
     expect(events.kinds().filter((kind) => kind === 'CHAIN_CANCEL_REQUESTED')).toHaveLength(1);
   });
 
+  it('N-2: never reaches an EVM case, whose records are decided only on chain', async () => {
+    const { service, proposals } = build();
+    proposals.seed(
+      standing({
+        id: 'source',
+        status: 'OVERTURNED',
+        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
+        rootCauseKey: 'mapping/v3',
+        proposedAt: RECENTLY,
+        chainStatus: 'CANCELLED',
+      }),
+    );
+    proposals.seed(
+      standing({
+        id: 'evm',
+        status: 'UPHELD',
+        assetId: 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3',
+        rootCauseKey: 'mapping/v3',
+        proposedAt: RECENTLY,
+      }),
+    );
+
+    await service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
+      defectKey: 'mapping/v3',
+      lookbackHours: 72,
+      reasonCode: 'S11_PLATFORM_DEFECT',
+      note: 'the v3 binding dropped a field on every tool it touched',
+    });
+
+    expect(proposals.rows.get('evm')!).toMatchObject({ status: 'UPHELD', chainStatus: 'PENDING' });
+  });
+
   /**
    * A sweep carries a decision to other cases, so a case with no decision has
    * nothing to carry. That is a wrong-status refusal, and it used to be
@@ -3834,5 +3937,123 @@ describe('the dispute upgrade (D-19)', () => {
       status: SlashProposalStatus.CANCELLED,
     });
     expect(proposals.rows.get('p2')!.chainStatus).toBe('DISPUTED');
+  });
+});
+
+describe('SlashExecutionService.refoldLatePart (review R2-4)', () => {
+  function buildWithParts(totals: { appliedMinor: string; platformAmountMinor: string }) {
+    const compensation = { distribute: jest.fn().mockResolvedValue(0) };
+    const ctx = build({ compensation });
+    const parts = {
+      appliesTo: () => true,
+      executedTotals: jest.fn(async () => ({
+        ...totals,
+        agentAmountMinor: '420',
+        agentAmountAfterMinor: '180',
+        executed: 2,
+      })),
+    };
+    const service = new SlashExecutionService(
+      ctx.proposals as never,
+      ctx.enrolments as never,
+      { complete: jest.fn(), fail: jest.fn() } as never,
+      new SlashProposalService(
+        ctx.proposals as never,
+        ctx.events as never,
+        ctx.notifications as never,
+        TEST_SLASH_CONFIG,
+      ),
+      ctx.overrides as never,
+      ctx.notifications as never,
+      TEST_SLASH_CONFIG,
+      ctx.executor,
+      null,
+      compensation as never,
+      null,
+      parts as never,
+    );
+    ctx.proposals.seed({
+      id: 'p1',
+      organizationId: 'org_1',
+      status: SlashProposalStatus.EXECUTED,
+      assetId: 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3',
+      windowId: 'window_1',
+      penaltyAmount: '1000',
+      appliedAmount: '500',
+      platformAmount: '150',
+      executedAt: new Date('2026-10-18T00:00:00Z'),
+      chainStatus: 'EXECUTED',
+    });
+    return { ...ctx, service, parts };
+  }
+
+  it('re-sums the case from its executed parts and runs the compensation step once', async () => {
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+    await expect(service.refoldLatePart(proposals.rows.get('p1')!, '0xlate')).resolves.toBe(true);
+    expect(proposals.rows.get('p1')!).toMatchObject({
+      status: SlashProposalStatus.EXECUTED,
+      appliedAmount: '800',
+      platformAmount: '240',
+    });
+    const compensated = () =>
+      log.mock.calls.filter(([line]) => String(line).includes('paid on chain to the harmed agents'))
+        .length;
+    expect(compensated()).toBe(1);
+
+    // Idempotent: the case already says what the parts say.
+    await expect(service.refoldLatePart(proposals.rows.get('p1')!, '0xlate')).resolves.toBe(false);
+    expect(compensated()).toBe(1);
+    log.mockRestore();
+  });
+
+  it('R3-2: a second late part reports only its own agent share, and records the total', async () => {
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
+    // A first refold already accounted 300 of the agents' share.
+    Object.assign(proposals.rows.get('p1')!, { agentAmount: '300' });
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+    await expect(service.refoldLatePart(proposals.rows.get('p1')!, '0xlate')).resolves.toBe(true);
+    expect(proposals.rows.get('p1')!).toMatchObject({ appliedAmount: '800', agentAmount: '420' });
+    const lines = log.mock.calls.map(([line]) => String(line));
+    expect(lines.some((line) => line.includes(': 120 paid on chain'))).toBe(true);
+    log.mockRestore();
+  });
+
+  it('R3-2: a refold that read a stale amount never lowers or re-counts the case', async () => {
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    // The watcher read 500 applied; the sweep meanwhile folded more parts in.
+    const stale = { ...proposals.rows.get('p1')! };
+    Object.assign(proposals.rows.get('p1')!, { appliedAmount: '900', platformAmount: '270' });
+    jest.spyOn(proposals, 'findOneScoped').mockResolvedValueOnce(stale as never);
+
+    await expect(service.refoldLatePart(stale as never, '0xlate')).resolves.toBe(false);
+    expect(proposals.rows.get('p1')!).toMatchObject({
+      appliedAmount: '900',
+      platformAmount: '270',
+    });
+  });
+
+  it('leaves a case that is not closed EXECUTED alone', async () => {
+    const { service, proposals } = buildWithParts({
+      appliedMinor: '800',
+      platformAmountMinor: '240',
+    });
+    proposals.rows.get('p1')!.status = SlashProposalStatus.UPHELD;
+    await expect(service.refoldLatePart(proposals.rows.get('p1')!, null)).resolves.toBe(false);
+    expect(proposals.rows.get('p1')!.appliedAmount).toBe('500');
   });
 });

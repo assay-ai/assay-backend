@@ -10,6 +10,7 @@ import { OperatorSignInService } from '@modules/operator/auth/operator-sign-in.s
 import { WalletOperatorSessionSource } from '@modules/operator/auth/wallet-operator-session.source';
 import {
   OPERATOR_AUTH_MAX_FAILURES,
+  OPERATOR_CHALLENGE_MAX_PER_WINDOW,
   OperatorAuthThrottle,
 } from '@modules/operator/services/operator-auth-throttle.service';
 import { OperatorService } from '@modules/operator/services/operator.service';
@@ -230,23 +231,45 @@ describe('OperatorSignInService — sign in with a wallet', () => {
     await expect(ctx.signIn.logout(token)).resolves.toBeUndefined();
   });
 
-  it('throttles failed verifications per wallet, across addresses', async () => {
+  it('never locks a wallet out: real challenges signed badly by strangers do not count against it', async () => {
     const ctx = build();
     const account = await operatorWallet(ctx);
 
-    for (let attempt = 0; attempt < OPERATOR_AUTH_MAX_FAILURES; attempt += 1) {
+    for (let attempt = 0; attempt < OPERATOR_AUTH_MAX_FAILURES + 2; attempt += 1) {
       const { message } = await ctx.signIn.challenge(account.address, `198.51.100.${attempt}`);
       await ctx.signIn
         .verify(message, await wallet().signMessage({ message }), `198.51.100.${attempt}`)
         .catch(() => undefined);
     }
 
-    // Even with a good signature, from a fresh address.
+    // The operator, from their own address, still signs in.
     const { message } = await ctx.signIn.challenge(account.address, '192.0.2.1');
-    await expectErrorCodeAsync(
-      async () => ctx.signIn.verify(message, await account.signMessage({ message }), '192.0.2.1'),
-      'OPERATOR_AUTH_RATE_LIMITED',
+    const signedIn = await ctx.signIn.verify(
+      message,
+      await account.signMessage({ message }),
+      '192.0.2.1',
     );
+    expect(signedIn.token).toBeTruthy();
+  });
+
+  it('does not count a made-up message against the wallet it names', async () => {
+    const ctx = build();
+    const victim = await operatorWallet(ctx);
+    const { message: real } = await ctx.signIn.challenge(victim.address, '192.0.2.1');
+
+    for (let attempt = 0; attempt < OPERATOR_AUTH_MAX_FAILURES; attempt += 1) {
+      const forged = real.replace(/Nonce: \w+/, `Nonce: forged${attempt}nonce`);
+      await ctx.signIn
+        .verify(forged, await wallet().signMessage({ message: forged }), `198.51.100.${attempt}`)
+        .catch(() => undefined);
+    }
+
+    const result = await ctx.signIn.verify(
+      real,
+      await victim.signMessage({ message: real }),
+      '192.0.2.1',
+    );
+    expect(result.operator.walletAddress).toBe(victim.address.toLowerCase());
   });
 
   it('throttles failed verifications per client address, across wallets', async () => {
@@ -264,6 +287,53 @@ describe('OperatorSignInService — sign in with a wallet', () => {
       () => ctx.signIn.challenge(wallet().address, IP),
       'OPERATOR_AUTH_RATE_LIMITED',
     );
+  });
+
+  it('throttles challenge issuance per client address', async () => {
+    const ctx = build();
+    for (let i = 0; i < OPERATOR_CHALLENGE_MAX_PER_WINDOW; i += 1) {
+      await ctx.signIn.challenge(wallet().address, IP);
+    }
+
+    await expectErrorCodeAsync(
+      () => ctx.signIn.challenge(wallet().address, IP),
+      'OPERATOR_AUTH_RATE_LIMITED',
+    );
+    // Another address is not affected, and the victim's wallet still gets one.
+    await expect(ctx.signIn.challenge(wallet().address, '192.0.2.1')).resolves.toBeDefined();
+  });
+
+  it('logs a sign-in and a refusal with the wallet and the address, never the token', async () => {
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const ctx = build();
+    const account = await operatorWallet(ctx);
+    const wallet_ = account.address.toLowerCase();
+
+    const first = await ctx.signIn.challenge(account.address, IP);
+    await ctx.signIn
+      .verify(first.message, await wallet().signMessage({ message: first.message }), IP)
+      .catch(() => undefined);
+    const { message } = await ctx.signIn.challenge(account.address, IP);
+    const { token, operator } = await ctx.signIn.verify(
+      message,
+      await account.signMessage({ message }),
+      IP,
+    );
+    await ctx.signIn.logout(token);
+
+    const warned = warn.mock.calls.map((call) => String(call[0]));
+    expect(warned).toEqual([expect.stringMatching(/sign-in refused.*signature.*/)]);
+    expect(warned[0]).toContain(wallet_);
+    expect(warned[0]).toContain(IP);
+    const logged = log.mock.calls.map((call) => String(call[0]));
+    expect(logged).toEqual([
+      expect.stringContaining(`operator signed in: ${operator.id}`),
+      `operator signed out: ${operator.id}`,
+    ]);
+    expect(logged[0]).toContain(wallet_);
+    expect(logged[0]).toContain(IP);
+    expect([...warned, ...logged].join('\n')).not.toContain(token);
   });
 
   it('refuses every sign-in when no domain is configured', async () => {

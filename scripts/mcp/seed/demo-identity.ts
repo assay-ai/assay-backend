@@ -80,7 +80,7 @@ async function main(): Promise<void> {
     let org = await organizations.findOne({ where: { id: DEMO_ORG_ID } });
     if (!org) {
       org = new OrganizationEntity();
-      Object.assign(org, { id: DEMO_ORG_ID, name: 'x402 public demo' });
+      Object.assign(org, { id: DEMO_ORG_ID, name: 'Assay public demo' });
       org = await organizations.save(org);
     }
 

@@ -6,7 +6,10 @@
  * they are constants rather than literals scattered through the builders.
  */
 
-/** The price the agent is quoted, and will be charged, for one call. */
+/**
+ * The price the agent is quoted for one call: the most it can be charged, and
+ * what it is held for. The charge is the price of the binding that serves.
+ */
 export const X402_PRICE = 'x402/price';
 /** `unverified` | `verified` | `guaranteed` — the tool's verification tier. */
 export const X402_TIER = 'x402/tier';
@@ -60,7 +63,7 @@ export const X402_PAID_ALTERNATIVE = 'x402/paidAlternative';
  *
  * Published even though the tool name would suffice to call it: an MCP tool is
  * addressed by `name`, while every receipt, intent and journal entry references the uuid. An
- * agent reconciling its own spend against `x402_list_receipts` (or against the
+ * agent reconciling its own spend against `assay_list_receipts` (or against the
  * REST API) has no other way to join the two.
  */
 export const X402_TOOL_ID = 'x402/toolId';
@@ -167,6 +170,16 @@ export const MCP_FORWARDED_TO_VERIFICATION_REASON = 'mcp: forwarded to asynchron
  */
 export const MCP_SCHEMA_CONTRACT_VIOLATION_REASON =
   'mcp: refunded — the provider response failed the tool outputSchema';
+
+/**
+ * Written on `VERIFYING → SETTLED` when a `DATA_RESULT` could not be handed to
+ * the verification worker — the record write or the enqueue threw twice.
+ * Nothing would ever judge the intent, and the agent already has the data, so
+ * the call settles as served, unverified. Never a void: a buyer who could make
+ * the write fail would otherwise choose a free call (final review N-3).
+ */
+export const MCP_VERIFICATION_ENQUEUE_FAILED_REASON =
+  'mcp: settled unverified — the response could not be handed to verification';
 
 /** Written when the provider's outcome earns no charge. */
 export const MCP_VOIDED_REASON = 'mcp: provider outcome was not a DATA_RESULT';

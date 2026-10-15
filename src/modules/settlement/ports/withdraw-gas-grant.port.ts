@@ -52,6 +52,13 @@ export enum GasGrantRefusal {
   /** The transfer was sent and the chain refused it. Nothing was funded. */
   TRANSFER_FAILED = 'TRANSFER_FAILED',
   /**
+   * The address has code — a contract, or an EIP-7702-delegated EOA. The grant
+   * is a bare 21 000-gas transfer, which such an account can make revert every
+   * time, and a reverted grant writes no row: it could be asked for again and
+   * again, each one burning the relayer's gas (review 2026-10-15 P-7).
+   */
+  ACCOUNT_HAS_CODE = 'ACCOUNT_HAS_CODE',
+  /**
    * Another process holds the durable reservation for this address right now.
    *
    * **Not `ALREADY_GRANTED`**, and the difference is the whole point: nothing

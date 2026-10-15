@@ -1,7 +1,7 @@
 import { MigrationInterface, QueryRunner } from 'typeorm';
 
 /**
- * `X-X402-Call-Id` on every upstream request, plus the intrinsic
+ * `X-Assay-Call-Id` on every upstream request, plus the intrinsic
  * classification a per-call export needs and cannot recover after the fact.
  *
  * ## `call_id`: independent of `id`, not a rename of it

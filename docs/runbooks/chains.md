@@ -185,6 +185,12 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   **CRITICAL `evm_proxy_upgraded`** on an ERC-1967 `Upgraded` of the Config,
   Stake or Escrow proxy: only the owner key can do this; confirm it, and record
   the new implementation (`escrowImplementation`).
+  **CRITICAL `evm_eip712_domain_mismatch`**: the Escrow or Stake proxy's live
+  `DOMAIN_SEPARATOR()` is not the domain the backend signs under
+  (`EVM_DOMAIN_NAME`, version `"2"`). Checked at boot and on the chain-state
+  poll in every process; until they match, vouchers on that chain are refused
+  `CHAIN_DOMAIN_MISMATCH` and no slash attestation is signed. Ship the backend
+  and the contract upgrade on the same name; the guard lifts by itself.
   **WARN `evm_config_pause_toggled`** on `PauseToggled`, and
   **WARN `evm_admin_unblocked_address`** on `BlockedSet(false)` (only the admin
   can unblock — the dangerous direction): confirm with the admin.
@@ -205,6 +211,23 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   - An arbiter's `cancelSlash(Batch)` (`SlashCancelled`) is mirrored at once:
     the part is `CANCELLED`, and the case closes as soon as nothing of it
     stands and nothing executed.
+  - **CRITICAL `slash_record_superseded`**: a record of an earlier proposal of a
+    case landed late and would charge the same calls twice. The arbiter page
+    lists it under superseded records; the arbiter cancels it before its
+    `executableAt`. Its cancel or expiry changes only that record, never the
+    current case. **CRITICAL `slash_superseded_record_executed`**: one executed
+    anyway (an actual double charge); a human settles it with the provider.
+  - The `409` on `POST /operator/arbiter/superseded/cancel-intent` for a record
+    that is not superseded is a convenience against mistakes on that panel, not
+    a boundary: any single S-13 operator (`ADJL`/`TRE`) can prepare a cancel of
+    any pending or disputed record through `ruling-intent`. The control is the
+    arbiter's key, held by a person, which signs every cancel; only the
+    arbiter or the admin can cancel on chain. The arbiter checks each unsigned
+    cancel against the case before signing.
+- **CRITICAL `slash_lifecycle_tick_hung`**: a slash lifecycle tick in the
+  scheduler has run over 10 minutes (a call with no timeout). Later ticks run
+  beside it; find the stuck call (RPC or database) and restart the scheduler if
+  it stays stuck.
 - **WARN `evm_verifier_key_expiring`** (hourly): a verifier key that still has
   open (`Pending` or `Disputed`) slash records expires within 45 days, or
   already has. Records signed by an expired key can never execute, so rotate:
@@ -214,7 +237,7 @@ assumed). The arbiter must be appointed: every cancel and ruling is built for th
   slash event): a provider's paid bindings are not routed or quoted on a chain, and no payment
   intent names it there, while any of these holds for its stake on that chain:
   `SLASH_WINDOW_FULL` (an upheld record is due and its last execute was refused
-  `SlashWindowNotDrained`: execution pays the whole reservation or waits), `STAKE_FULLY_RESERVED` (`pendingSlash ≥ atRisk − penaltyAmount`) or
+  `SlashWindowNotDrained`: execution pays the whole reservation or waits), `STAKE_FULLY_RESERVED` (`atRisk − pendingSlash < penaltyAmount`, leaving out records frozen by an on-chain dispute) or
   `BONDED_BELOW_MINIMUM`. Buyers are routed to another provider; with none left the call fails
   `TOOL_PROVIDER_SLASH_HOLD` (and an intent `PAYMENT_PROVIDER_SLASH_HOLD`). It lifts by itself after
   two consecutive clear checks. WARN in the log on a hold, INFO on a release; the provider sees

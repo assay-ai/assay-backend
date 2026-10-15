@@ -252,6 +252,7 @@ export class CatalogueService {
         price: quote.price ? toMoneyDto(quote.price) : null,
         pricingMode: quote.pricingMode,
         routable: quote.price !== null,
+        routableBindings: quote.routableBindings,
         unroutableReason: quote.unroutableReason,
         // The settles-elsewhere caveat, off the router's own union — the same value and the
         // same spelling `tools/list` publishes as `x402/settlementChains`. NOT

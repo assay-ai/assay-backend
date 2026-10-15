@@ -92,7 +92,8 @@ export function evaluateStakeGate(
   // binding serves both free and paid calls, so at selection time — before a
   // quota has been checked — we cannot know which this call will be, and
   // guessing wrong in the permissive direction routes a paid call to an
-  // unbonded provider.
+  // unbonded provider. `FREE` itself is safe to exempt because a paid call
+  // never reaches a `FREE` binding (`RoutingContext.callClass`).
   if (binding.pricingMode === PricingMode.FREE) {
     return { passed: true, minimum: null };
   }

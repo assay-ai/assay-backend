@@ -1,14 +1,20 @@
 import { DataSource } from 'typeorm';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
+import { LedgerEntryEntity } from '@database/postgres/entities/ledger-entry.entity';
 import {
   EntryTypeAssetTotal,
   LedgerEntryRepository,
+  OrphanedHoldReleaseSummary,
 } from '@database/postgres/repositories/ledger-entry.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
-import { WITHHELD_STATUSES, WithheldBucket } from '@modules/ledger/domain/withheld';
+import {
+  MAX_LISTED_ORPHANED_HOLD_IDS,
+  WITHHELD_STATUSES,
+  WithheldBucket,
+} from '@modules/ledger/domain/withheld';
 import { LedgerWithheldService } from '@modules/ledger/services/ledger-withheld.service';
 
 const ORG = 'org-11111111-1111-4111-8111-111111111111';
@@ -36,9 +42,27 @@ const USDC_DECIMALS = 6;
 function fakeEntries(overrides: Partial<LedgerEntryRepository> = {}): LedgerEntryRepository {
   return {
     sumEntryTypeByAsset: jest.fn().mockResolvedValue([]),
-    findOrphanedHoldReleases: jest.fn().mockResolvedValue([]),
+    summarizeOrphanedHoldReleases: jest.fn().mockResolvedValue([]),
     ...overrides,
   } as unknown as LedgerEntryRepository;
+}
+
+/** One asset's pre-aggregated orphan and remainder terms, as the repository returns them. */
+function orphanSummary(input: {
+  settlementRemainders?: bigint;
+  orphanedReleases?: bigint;
+  ids?: string[];
+  count?: number;
+}): OrphanedHoldReleaseSummary {
+  const ids = input.ids ?? [];
+  return {
+    asset: USDC,
+    decimals: USDC_DECIMALS,
+    settlementRemainders: input.settlementRemainders ?? 0n,
+    orphanedReleases: input.orphanedReleases ?? 0n,
+    orphanedHoldCount: input.count ?? ids.length,
+    orphanedHoldIds: ids,
+  };
 }
 
 function fakeIntents(overrides: Partial<PaymentIntentRepository> = {}): PaymentIntentRepository {
@@ -164,11 +188,9 @@ describe('LedgerWithheldService — reconcile', () => {
           .mockResolvedValue([
             { asset: USDC, decimals: USDC_DECIMALS, amount: 12_500n, entries: 2 },
           ]),
-        findOrphanedHoldReleases: jest
+        summarizeOrphanedHoldReleases: jest
           .fn()
-          .mockResolvedValue([
-            { holdId: 'hold-orphan-1', asset: USDC, decimals: USDC_DECIMALS, amount: 2_500n },
-          ]),
+          .mockResolvedValue([orphanSummary({ orphanedReleases: 2_500n, ids: ['hold-orphan-1'] })]),
       },
     });
 
@@ -190,10 +212,10 @@ describe('LedgerWithheldService — reconcile', () => {
           .mockResolvedValue([
             { asset: USDC, decimals: USDC_DECIMALS, amount: 250_000n, entries: 1 },
           ]),
-        findOrphanedHoldReleases: jest
+        summarizeOrphanedHoldReleases: jest
           .fn()
           .mockResolvedValue([
-            { holdId: 'hold-orphan-only', asset: USDC, decimals: USDC_DECIMALS, amount: 250_000n },
+            orphanSummary({ orphanedReleases: 250_000n, ids: ['hold-orphan-only'] }),
           ]),
       },
     });
@@ -208,6 +230,66 @@ describe('LedgerWithheldService — reconcile', () => {
     expect(reconciliation.ok).toBe(true);
   });
 
+  /**
+   * Final review N-8: a rail-A call served below its quote releases the
+   * remainder on a COMMITTED hold. That used to be listed as an orphan, one per
+   * call, so a real orphan was lost in the list and `GET /balances` grew
+   * without bound. It is its own term now, and the list is bounded.
+   */
+  it('counts a settlement remainder as its own term, not as an orphan', async () => {
+    const { service } = build({
+      intents: { sumWithheldByAssetAndStatus: jest.fn().mockResolvedValue([]) },
+      entries: {
+        sumEntryTypeByAsset: jest
+          .fn()
+          .mockResolvedValue([
+            { asset: USDC, decimals: USDC_DECIMALS, amount: 3_500n, entries: 2 },
+          ]),
+        summarizeOrphanedHoldReleases: jest.fn().mockResolvedValue([
+          orphanSummary({
+            settlementRemainders: 3_000n,
+            orphanedReleases: 500n,
+            ids: ['hold-orphan'],
+          }),
+          // Another asset's terms are not this one's.
+          { ...orphanSummary({ orphanedReleases: 9n, ids: ['x'] }), asset: 'other' },
+        ]),
+      },
+    });
+
+    const reconciliation = await service.reconcile(ORG, USDC, USDC_DECIMALS);
+
+    expect(reconciliation.orphanedHoldIds).toEqual(['hold-orphan']);
+    expect(reconciliation.orphanedHoldCount).toBe(1);
+    expect(reconciliation.orphanedReleases.amount).toBe('500');
+    expect(reconciliation.settlementRemainders.amount).toBe('3000');
+    expect(reconciliation.ok).toBe(true);
+  });
+
+  it('bounds the listed orphan ids, and still counts every one', async () => {
+    const count = MAX_LISTED_ORPHANED_HOLD_IDS + 50;
+    // The repository lists at most the cap; the count is every orphan.
+    const ids = Array.from({ length: MAX_LISTED_ORPHANED_HOLD_IDS }, (_, i) => `hold-${i}`);
+    const { service } = build({
+      entries: {
+        sumEntryTypeByAsset: jest
+          .fn()
+          .mockResolvedValue([
+            { asset: USDC, decimals: USDC_DECIMALS, amount: BigInt(count), entries: 1 },
+          ]),
+        summarizeOrphanedHoldReleases: jest
+          .fn()
+          .mockResolvedValue([orphanSummary({ orphanedReleases: BigInt(count), ids, count })]),
+      },
+    });
+
+    const reconciliation = await service.reconcile(ORG, USDC, USDC_DECIMALS);
+
+    expect(reconciliation.orphanedHoldIds).toHaveLength(MAX_LISTED_ORPHANED_HOLD_IDS);
+    expect(reconciliation.orphanedHoldCount).toBe(count);
+    expect(reconciliation.ok).toBe(true);
+  });
+
   it('reports ok: false with a non-zero difference when a release truly is unaccounted for', async () => {
     const { service } = build({
       intents: { sumWithheldByAssetAndStatus: jest.fn().mockResolvedValue([]) },
@@ -218,7 +300,7 @@ describe('LedgerWithheldService — reconcile', () => {
             { asset: USDC, decimals: USDC_DECIMALS, amount: 250_000n, entries: 1 },
           ]),
         // No orphan reported for a release that exists — the negative control.
-        findOrphanedHoldReleases: jest.fn().mockResolvedValue([]),
+        summarizeOrphanedHoldReleases: jest.fn().mockResolvedValue([]),
       },
     });
 
@@ -256,6 +338,7 @@ describe('PaymentIntentRepository.sumWithheldByAssetAndStatus — the query itse
     for (const method of [
       'select',
       'addSelect',
+      'leftJoin',
       'where',
       'andWhere',
       'groupBy',
@@ -296,6 +379,16 @@ describe('PaymentIntentRepository.sumWithheldByAssetAndStatus — the query itse
     expect(holdPredicate).toBeDefined();
   });
 
+  it('sums the hold, not the price — a rail-A refund gives back the whole quote', async () => {
+    const { repository, calls } = buildRepository();
+
+    await repository.sumWithheldByAssetAndStatus(ORG);
+
+    expect(calls.find((call) => call.method === 'leftJoin')?.args[0]).toBe('ledger_holds');
+    const amount = calls.find((call) => call.method === 'addSelect' && call.args[1] === 'amount');
+    expect(amount?.args[0]).toContain('hold.amount');
+  });
+
   it('restricts status to WITHHELD_STATUSES, never retyping the list', async () => {
     const { repository, calls } = buildRepository();
 
@@ -318,5 +411,102 @@ describe('PaymentIntentRepository.sumWithheldByAssetAndStatus — the query itse
         call.method === 'where' && call.args[0] === 'intent.organizationId = :organizationId',
     );
     expect(orgPredicate?.args[1]).toEqual({ organizationId: ORG });
+  });
+});
+
+/**
+ * Round-two review N-8: the orphan query returned one row per remainder — a
+ * row for every call served below its hold — so each `GET /balances` loaded
+ * the account's whole release history. It aggregates in SQL now: one row per
+ * asset, and at most {@link MAX_LISTED_ORPHANED_HOLD_IDS} ids.
+ */
+describe('LedgerEntryRepository.summarizeOrphanedHoldReleases — the query itself', () => {
+  function buildRepository(rows: unknown[]) {
+    const calls: { method: string; args: unknown[] }[] = [];
+    const builder: Record<string, unknown> = {};
+    for (const method of [
+      'select',
+      'addSelect',
+      'innerJoin',
+      'where',
+      'andWhere',
+      'groupBy',
+      'addGroupBy',
+      'setParameters',
+    ]) {
+      builder[method] = (...args: unknown[]) => {
+        calls.push({ method, args });
+        return builder;
+      };
+    }
+    builder.getRawMany = jest.fn().mockResolvedValue(rows);
+    builder.getQuery = () => 'SELECT * FROM ledger_entries WHERE organization_id = $1';
+
+    const manager = {
+      createQueryBuilder: jest.fn().mockReturnValue(builder),
+      connection: {
+        getMetadata: () => ({ target: LedgerEntryEntity, name: 'LedgerEntryEntity' }),
+      },
+    };
+    const dataSource = { manager } as unknown as DataSource;
+    return { repository: new LedgerEntryRepository(dataSource), calls };
+  }
+
+  it('aggregates per asset and selects no per-entry column', async () => {
+    const { repository, calls } = buildRepository([]);
+
+    await repository.summarizeOrphanedHoldReleases(ORG);
+
+    const grouped = calls.filter((c) => c.method === 'groupBy' || c.method === 'addGroupBy');
+    expect(grouped.map((c) => c.args[0])).toEqual(['entry.assetId', 'entry.decimals']);
+    const selected = calls
+      .filter((c) => c.method === 'select' || c.method === 'addSelect')
+      .map((c) => [c.args[1], String(c.args[0])]);
+    for (const [alias, expression] of selected) {
+      if (alias === 'asset' || alias === 'decimals') continue;
+      expect(expression).toMatch(/^(COALESCE\(SUM|COUNT|\(array_agg)/);
+    }
+    const ids = selected.find(([alias]) => alias === 'orphanedHoldIds')?.[1];
+    expect(ids).toContain(`[1:${MAX_LISTED_ORPHANED_HOLD_IDS}]`);
+  });
+
+  it('maps the aggregate row', async () => {
+    const { repository } = buildRepository([
+      {
+        asset: USDC,
+        decimals: '6',
+        settlementRemainders: '3000',
+        orphanedReleases: '500',
+        orphanedHoldCount: '2',
+        orphanedHoldIds: ['hold-a', 'hold-b'],
+      },
+      {
+        asset: 'other',
+        decimals: '6',
+        settlementRemainders: '1',
+        orphanedReleases: '0',
+        orphanedHoldCount: '0',
+        orphanedHoldIds: null,
+      },
+    ]);
+
+    await expect(repository.summarizeOrphanedHoldReleases(ORG)).resolves.toEqual([
+      {
+        asset: USDC,
+        decimals: 6,
+        settlementRemainders: 3_000n,
+        orphanedReleases: 500n,
+        orphanedHoldCount: 2,
+        orphanedHoldIds: ['hold-a', 'hold-b'],
+      },
+      {
+        asset: 'other',
+        decimals: 6,
+        settlementRemainders: 1n,
+        orphanedReleases: 0n,
+        orphanedHoldCount: 0,
+        orphanedHoldIds: [],
+      },
+    ]);
   });
 });

@@ -132,6 +132,18 @@ describe('resolveSort', () => {
       ApiErrorCode.API_UNKNOWN_SORT_FIELD,
     );
   });
+
+  // `sortable` is a plain object, so a bare index also finds what it inherits
+  // from `Object.prototype`. `sort=constructor` used to pass the allowlist and
+  // then fail as a 500 on an `undefined` column.
+  it.each(['constructor', 'toString', 'valueOf', '__proto__', 'hasOwnProperty'])(
+    'refuses the inherited property %s',
+    (sort) => {
+      expect(raisedCode(() => resolveSort(query({ sort }), SPEC))).toBe(
+        ApiErrorCode.API_UNKNOWN_SORT_FIELD,
+      );
+    },
+  );
 });
 
 describe('applyTimeWindow', () => {

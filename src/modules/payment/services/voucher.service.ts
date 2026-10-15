@@ -148,6 +148,7 @@ export class VoucherService {
     ]);
     this.assertWithinEscrowLimit(voucher, input);
     await this.assertIssuedSeq(voucher, input);
+    await input.beforeHold?.();
 
     return this.record(voucher, input, delegation);
   }
@@ -578,6 +579,18 @@ export class VoucherService {
         actual: voucher.seq,
       });
     }
+
+    // The chain admits a voucher on `seq > seqHigh` and nothing else. One at
+    // or below it can never be redeemed: served, it would be absorbed and the
+    // platform would pay for the call (review 2026-10-15 P-2). After the
+    // replay check, so a seq refused here was never used: stale, retryable
+    // with a fresh seq (final review N-6).
+    if (input.escrow && BigInt(voucher.seq) <= input.escrow.seqHigh) {
+      throw PaymentErrors.voucherSeqStale({
+        account: input.agentAccount,
+        actual: voucher.seq,
+      });
+    }
   }
 
   // ── 6. Record ────────────────────────────────────────────────────────────
@@ -733,6 +746,24 @@ export class VoucherService {
             account: input.agentAccount,
             actual: voucher.seq,
           });
+        }
+        // Below a seq already admitted for this payer and still bound for the
+        // chain: that one's redemption advances `seqHigh` past this one, which
+        // then dies and is paid by the platform (review 2026-10-15 P-2). Under
+        // the payer's lock, so two admissions cannot both pass it. Equal is
+        // this very seq admitted by a concurrent call — a replay; below is a
+        // seq never used, signed out of order beside a parallel call — stale,
+        // retryable with a fresh seq (final review N-6).
+        if (
+          open.maxSeq !== undefined &&
+          open.maxSeq !== null &&
+          BigInt(voucher.seq) <= open.maxSeq
+        ) {
+          const refusal =
+            BigInt(voucher.seq) === open.maxSeq
+              ? PaymentErrors.voucherSeqAlreadyUsed
+              : PaymentErrors.voucherSeqStale;
+          throw refusal({ account: input.agentAccount, actual: voucher.seq });
         }
         if (escrow !== null) {
           const used = escrowCarried + open.escrow;

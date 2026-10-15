@@ -33,6 +33,7 @@ import {
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { ConnectivityOutcome } from '@modules/provider/ports/provider-registration.types';
 import { ProviderConnectivityService } from '@modules/provider/services/provider-connectivity.service';
+import { ProviderEgressLimiter } from '@modules/provider/services/provider-egress-limiter.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 
@@ -109,6 +110,7 @@ class FakeConnectivityCheckRepository {
 /** DNS never touches the real network — only `dns-failure.provider.test` is unmapped. */
 const ZONE: Readonly<Record<string, { address: string; family: 4 | 6 }>> = {
   'edge.provider.test': { address: '93.184.216.34', family: 4 },
+  'postgres.internal': { address: '10.20.3.4', family: 4 },
 };
 
 const fakeLookup = jest.fn(async (hostname: string) => {
@@ -132,6 +134,7 @@ function buildHarness() {
     checks.asRepository(),
     http as unknown as EgressHttpClient,
     EGRESS_IPS,
+    new ProviderEgressLimiter(),
     fakeLookup,
   );
 
@@ -167,6 +170,25 @@ describe('a live endpoint that answers', () => {
     expect(providers.rows.get(ORG)?.endpoint).toBe(PUBLIC_ENDPOINT);
     expect(checks.rows).toHaveLength(1);
     expect(checks.rows[0].outcome).toBe(ConnectivityOutcome.REACHABLE);
+  });
+
+  it('takes its slot from the connectivity pool, not the tester pool (N-3)', async () => {
+    const { service, providers, http } = buildHarness();
+    providers.seed(ORG, null);
+    http.request.mockResolvedValue({
+      status: 200,
+      headers: {},
+      body: '{}',
+      bytes: 2,
+      url: PUBLIC_ENDPOINT,
+      redirects: 0,
+    });
+    const run = jest.spyOn(ProviderEgressLimiter.prototype, 'run');
+
+    await service.check(ORG, PUBLIC_ENDPOINT);
+
+    expect(run).toHaveBeenCalledWith(ORG, expect.any(Function), 'connectivity');
+    run.mockRestore();
   });
 
   it('401 → still REACHABLE — auth is not this check’s business', async () => {
@@ -258,6 +280,18 @@ describe('an endpoint resolving to a blocked address — proving the egress guar
     // Never reached the client — the refusal happened at the pre-flight resolve.
     expect(http.request).not.toHaveBeenCalled();
     expect(checks.rows[0].outcome).toBe(ConnectivityOutcome.BLOCKED);
+  });
+
+  // Review P-9: the detail is returned to the caller; it must not name the
+  // private address an internal hostname resolves to.
+  it('does not reveal the internal address a hostname resolves to', async () => {
+    const { service } = buildHarness();
+
+    const result = await service.check(ORG, 'https://postgres.internal/');
+
+    expect(result.failureCode).toBe('EGRESS_BLOCKED_ADDRESS');
+    expect(result.detail).not.toContain('10.20.3.4');
+    expect(result.detail).not.toContain('10.0.0.0/8');
   });
 
   it('refuses PUT /providers/me/endpoint the same way — a dead endpoint is not savable', async () => {

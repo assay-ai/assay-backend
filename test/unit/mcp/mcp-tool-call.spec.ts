@@ -1,11 +1,16 @@
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
-import { MCP_UNROUTABLE_REASON } from '@modules/mcp/constants/mcp.constants';
+import {
+  MCP_UNROUTABLE_REASON,
+  MCP_VERIFICATION_ENQUEUE_FAILED_REASON,
+} from '@modules/mcp/constants/mcp.constants';
 import { ResponseClass } from '@modules/tool/domain/classification';
 import { PricingMode } from '@modules/tool/ports/tool.types';
 import { McpFailureCode } from '@modules/mcp/services/mcp-tool-call.service';
 import { PaymentIntentStatus, PaymentRail } from '@modules/payment/ports/payment.types';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
 import { AppError } from '@shared/errors/app-errors';
+import { McpErrorCode, McpErrors } from '@modules/mcp/errors/mcp.errors';
+import { VelocityViolationKind } from '@modules/spend-policy/services/spend-policy-velocity.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import {
@@ -131,25 +136,46 @@ describe('McpToolCallService — the paid call loop', () => {
     expect(enqueued.outputSchema).toBeDefined();
   });
 
-  it('still returns the result to the agent when the enqueue fails', async () => {
-    const { calls, intents } = harness(
+  it('retries a failed enqueue once, and keeps the hold for the worker when the retry lands', async () => {
+    let attempts = 0;
+    const { calls, intents, ledger, settlement } = harness(
+      { 'binding-provider-a': () => Promise.resolve(ok('forty-two')) },
+      {
+        settlementBehaviour: () =>
+          ++attempts === 1 ? Promise.reject(new Error('blip')) : Promise.resolve(),
+      },
+    );
+
+    const outcome = await calls.call(SESSION, 'Search the web', ARGS);
+
+    expect(outcome.kind).toBe('RESULT');
+    expect(settlement.calls).toHaveLength(2);
+    expect(intents.only.status).toBe(PaymentIntentStatus.VERIFYING);
+    expect(ledger.kinds).toEqual(['HOLD_CREATE']);
+  });
+
+  /**
+   * Final review N-3: an enqueue failure used to VOID the intent — no charge —
+   * while the data still went back, and a buyer could provoke that failure at
+   * will (a `\u0000` in an argument). A call that returned data is never made
+   * free by a failure to record it: it settles as served, unverified.
+   */
+  it('still returns the result when the enqueue keeps failing, and settles the call as served', async () => {
+    const { calls, intents, ledger } = harness(
       { 'binding-provider-a': () => Promise.resolve(ok('forty-two')) },
       { settlementBehaviour: () => Promise.reject(new Error('durable store unavailable')) },
     );
 
     const outcome = await calls.call(SESSION, 'Search the web', ARGS);
 
-    // A bookkeeping failure must never replace the agent's already-successful
-    // result: the data still comes back, and the receipt tells the truth —
-    // `VERIFYING`. There is no backstop underneath that (nothing reads
-    // `ledger_holds.expires_at`), so the hold is stuck until somebody retries
-    // the enqueue by hand — which is why the error is logged rather than
-    // swallowed.
     expect(outcome.kind).toBe('RESULT');
     if (outcome.kind !== 'RESULT') return;
     expect(outcome.output).toEqual({ answer: 'forty-two' });
-    expect(outcome.receipt.status).toBe(PaymentIntentStatus.VERIFYING);
-    expect(intents.only.status).toBe(PaymentIntentStatus.VERIFYING);
+    expect(outcome.receipt.status).toBe(PaymentIntentStatus.SETTLED);
+    expect(intents.only.status).toBe(PaymentIntentStatus.SETTLED);
+    expect(intents.only.statusReason).toBe(MCP_VERIFICATION_ENQUEUE_FAILED_REASON);
+    expect(ledger.kinds).not.toContain('HOLD_RELEASE');
+    expect(ledger.kinds).toContain('HOLD_COMMIT');
   });
 
   it('records the provider only once the router has produced one', async () => {
@@ -254,25 +280,20 @@ describe('McpToolCallService — the paid call loop', () => {
   });
 
   /**
-   * The hole `evaluatePayoutGate` deliberately leaves, and what happens
-   * in it.
+   * The hole `evaluatePayoutGate` used to leave, now closed by the router.
    *
    * A tool with both a FREE and a PAID binding quotes as paid, so the call takes
-   * the paid path and creates an intent — and the router may then draw the FREE
-   * binding, which the payout gate exempts. Observed on devnet: an agent charged
-   * $0.088 for a call a $0 binding served.
-   *
-   * The first version of this fix wrote `providerAccount ?? undefined`, and
-   * `transition()` reads `undefined` as "leave the column alone" — so the row
-   * hit `chk_payment_intents_settled_names_payee`, a raw `23514` propagated out
-   * of `call()` through an un-caught `await`, and the agent lost data a provider
-   * had already served. These three tests exist so that cannot come back.
+   * the paid path and creates an intent. The router used to be free to draw the
+   * FREE binding, which the payout and stake gates exempt — observed on devnet:
+   * an agent charged $0.088 for a call a $0 binding served, by a provider nobody
+   * had bonded or checked. A paid call is now routed with `callClass: 'PAID'`,
+   * which leaves FREE bindings out of the pool.
    */
-  function unpayableFreeBindingDrawnOnAPaidTool() {
+  function freeBindingBesideAPaidOne() {
     return buildMcpHarness({
       bindings: [
-        // Drawn first under `random: () => 0`. Free, so the payout gate exempts
-        // it; its provider has proved nothing.
+        // Drawn first under `random: () => 0` if it were in the pool. Free, so
+        // the payout gate exempts it; its provider has proved nothing.
         buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' }),
         // What makes the tool quote as PAID, and what the agent is held for.
         buildBinding('provider-b'),
@@ -283,58 +304,23 @@ describe('McpToolCallService — the paid call loop', () => {
       ],
       invoker: new ScriptedInvoker({
         'binding-provider-a': () => Promise.resolve(ok('served free')),
-        'binding-provider-b': () => Promise.resolve(ok('never reached')),
+        'binding-provider-b': () => Promise.resolve(ok('served paid')),
       }),
       random: () => 0,
     });
   }
 
-  it('hands the agent its data when the serving provider cannot be paid', async () => {
-    const { calls, intents } = unpayableFreeBindingDrawnOnAPaidTool();
+  it('never routes a paid call to a FREE binding, so the paid provider serves it', async () => {
+    const { calls, intents, bindingCalls } = freeBindingBesideAPaidOne();
 
     const outcome = await calls.call(SESSION, 'Search the web', ARGS);
 
-    // The invariant this file states three times, and the one the first draft
-    // of the payee fix broke: a bookkeeping problem must never replace a result the
-    // provider already served.
     expect(outcome.kind).toBe('RESULT');
     if (outcome.kind !== 'RESULT') return;
-    expect(outcome.output).toEqual({ answer: 'served free' });
-    expect(intents.only.providerId).toBe('provider-a');
-  });
-
-  it('voids rather than charging, and the receipt says nothing was charged', async () => {
-    const { calls, intents, ledger } = unpayableFreeBindingDrawnOnAPaidTool();
-
-    const outcome = await calls.call(SESSION, 'Search the web', ARGS);
-    if (outcome.kind !== 'RESULT') throw new Error('expected a RESULT');
-
-    expect(intents.only.status).toBe(PaymentIntentStatus.VOIDED);
-    expect(outcome.receipt.status).toBe(PaymentIntentStatus.VOIDED);
-    // Zero, not the quoted price. A receipt reporting a charge for a call the
-    // agent was not charged for is the same class of untruth as the stale
-    // comments the payee fix deleted.
-    expect(outcome.receipt.charged.amount).toBe('0');
-
-    // And the money actually went back — no `HOLD_COMMIT`, and nothing left
-    // reserved. There is no sweeper underneath this to catch a leak.
-    expect(ledger.kinds).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
-  });
-
-  it('never reaches VERIFYING, so the CHECK is never the thing that stops it', async () => {
-    const { calls, intents, settlement, bindingCalls } = unpayableFreeBindingDrawnOnAPaidTool();
-
-    await calls.call(SESSION, 'Search the web', ARGS);
-
-    // The decision is taken before the transition, not caught after it fails.
-    // Relying on the database to refuse would mean relying on an exception
-    // thrown from inside an `await` nobody catches.
-    expect(intents.transitions).not.toContain(`→ ${PaymentIntentStatus.VERIFYING}`);
-    // Nothing was handed to the verification worker either — there is no
-    // settlement to verify.
-    expect(settlement.calls).toEqual([]);
-    // The binding still served the call, so it still counts toward exploration.
-    expect(bindingCalls.recorded).toEqual(['binding-provider-a']);
+    expect(outcome.output).toEqual({ answer: 'served paid' });
+    expect(intents.only.providerId).toBe('provider-b');
+    expect(intents.only.status).toBe(PaymentIntentStatus.VERIFYING);
+    expect(bindingCalls.recorded).toEqual(['binding-provider-b']);
   });
 
   it('refuses to route a PAID binding whose provider has proved no payout address', async () => {
@@ -744,5 +730,47 @@ describe('McpToolCallService — the paid call loop', () => {
     );
 
     expect(ledger.kinds).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
+  });
+
+  /**
+   * REGRESSION (review 2026-10-15 P-6): the caps were read, and the hold
+   * written, as separate steps — so N concurrent calls all read the same
+   * spend-so-far and all fit. The check and the hold now run under the agent's
+   * spend lock: the second call's check sees the first call's hold.
+   */
+  it('lets concurrent calls of one agent overshoot no cap', async () => {
+    const h = harness({
+      'binding-provider-a': () => Promise.resolve(ok()),
+      'binding-provider-a#2': () => Promise.resolve(ok()),
+    });
+    h.spendPolicy.holdCap = {
+      max: 1,
+      held: () => h.ledger.kinds.filter((kind) => kind === 'HOLD_CREATE').length,
+    };
+
+    const results = await Promise.allSettled([
+      h.calls.call(SESSION, 'Search the web', ARGS),
+      h.calls.call(SESSION, 'Search the web', { query: 'another' }),
+    ]);
+
+    expect(h.ledger.kinds.filter((kind) => kind === 'HOLD_CREATE')).toHaveLength(1);
+    expect(results.filter((result) => result.status === 'rejected')).toHaveLength(1);
+    expect(h.spendPolicy.uncheckedOutsideLock).toBe(0);
+  });
+
+  /** Round-two review N-4: no hold is written by a section that lost its lock. */
+  it('writes no hold once the spend lock is lost, and refuses retryably', async () => {
+    const h = harness({ 'binding-provider-a': () => Promise.resolve(ok()) });
+    h.spendPolicy.lockLost = McpErrors.velocityLimitExceeded({
+      reason: VelocityViolationKind.UNAVAILABLE,
+      retryAfter: 1,
+    });
+
+    await expectErrorCodeAsync(
+      () => h.calls.call(SESSION, 'Search the web', ARGS),
+      McpErrorCode.MCP_VELOCITY_LIMIT_EXCEEDED,
+    );
+    expect(h.spendPolicy.lockConfirmations).toBe(1);
+    expect(h.ledger.kinds).toEqual([]);
   });
 });

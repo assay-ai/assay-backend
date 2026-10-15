@@ -89,7 +89,7 @@ describe('redact', () => {
   });
 
   it('blanks a forbidden key at the top level, structurally — not by scanning the rendered string', () => {
-    const result = redact({ intentId: 'pi_1', token: 'x402_live_secret' }) as Record<
+    const result = redact({ intentId: 'pi_1', token: 'assay_live_secret' }) as Record<
       string,
       unknown
     >;
@@ -110,12 +110,12 @@ describe('redact', () => {
 
   it('keeps prefix and tokenHash alongside a redacted sibling', () => {
     const result = redact({
-      prefix: 'x402_live_8f',
+      prefix: 'assay_live_8f',
       tokenHash: 'abcd1234',
-      token: 'x402_live_8fK2secretvalue',
+      token: 'assay_live_8fK2secretvalue',
     }) as Record<string, unknown>;
 
-    expect(result.prefix).toBe('x402_live_8f');
+    expect(result.prefix).toBe('assay_live_8f');
     expect(result.tokenHash).toBe('abcd1234');
     expect(result.token).toBe(REDACTED);
   });

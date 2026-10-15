@@ -705,6 +705,7 @@ export class SlashPartsService {
           await this.parts.updatePart(part.organizationId, part.id, {
             chainStatus: 'CANCELLED',
             cancelledAt: expired.cancelledAt,
+            cancelReason: expired.reason ?? null,
           });
         } catch (error) {
           this.logger.error(
@@ -799,6 +800,48 @@ export class SlashPartsService {
   }
 
   /**
+   * Review R2-4: what the case's current-epoch parts say was taken, summed
+   * from the stored parts alone (no chain read): the applied, agent and
+   * platform amounts of every `EXECUTED` part, and the latest execution's
+   * signature. `executed` is how many parts executed; `agentAmountAfterMinor`
+   * is the agent share of the parts executed after `since` (the late ones).
+   */
+  async executedTotals(
+    proposal: SlashProposalEntity,
+    since: Date | null = null,
+  ): Promise<{
+    appliedMinor: string;
+    agentAmountMinor: string;
+    agentAmountAfterMinor: string;
+    platformAmountMinor: string;
+    signature: string | null;
+    executed: number;
+  }> {
+    const parts = await this.parts.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      proposal.chainEpoch,
+    );
+    const executed = parts.filter((part) => part.chainStatus === 'EXECUTED');
+    const sum = (pick: (part: SlashProposalPartEntity) => string | null) =>
+      executed.reduce((total, part) => total + BigInt(pick(part) ?? '0'), 0n).toString();
+    const latest = [...executed].sort(
+      (left, right) => (right.executedAt?.getTime() ?? 0) - (left.executedAt?.getTime() ?? 0),
+    )[0];
+    return {
+      appliedMinor: sum((part) => part.appliedAmount),
+      agentAmountMinor: sum((part) => part.agentAmount),
+      agentAmountAfterMinor: executed
+        .filter((part) => !since || (part.executedAt?.getTime() ?? 0) > since.getTime())
+        .reduce((total, part) => total + BigInt(part.agentAmount ?? '0'), 0n)
+        .toString(),
+      platformAmountMinor: sum((part) => part.platformAmount),
+      signature: latest?.executionSignature ?? null,
+      executed: executed.length,
+    };
+  }
+
+  /**
    * `expireSlash` on every part still pending. Throws — so the caller does
    * NOT mirror the case `CANCELLED` — if any part of the case executed: that
    * is money that moved, and the next sweep's read records it as such.
@@ -827,6 +870,7 @@ export class SlashPartsService {
         await this.parts.updatePart(part.organizationId, part.id, {
           chainStatus: 'CANCELLED',
           cancelledAt: result.cancelledAt,
+          cancelReason: result.reason ?? null,
         });
       } catch (error) {
         failure ??= error;
@@ -952,6 +996,7 @@ export class SlashPartsService {
               await this.parts.updatePart(part.organizationId, part.id, {
                 chainStatus: 'CANCELLED',
                 cancelledAt: result.cancelledAt,
+                cancelReason: result.reason ?? null,
                 chainLastError: null,
               });
               expired += 1;
@@ -987,6 +1032,7 @@ export class SlashPartsService {
             await this.parts.updatePart(part.organizationId, part.id, {
               chainStatus: 'CANCELLED',
               cancelledAt: result.cancelledAt,
+              cancelReason: result.reason ?? null,
               chainLastError: null,
             });
             expired += 1;
@@ -1063,7 +1109,16 @@ export class SlashPartsService {
             executedAt: part.executedAt ?? record.executedAt ?? new Date(),
           }
         : {}),
-      ...(record.status === 'CANCELLED' ? { cancelledAt: record.cancelledAt ?? new Date() } : {}),
+      ...(record.status === 'CANCELLED'
+        ? {
+            cancelledAt: part.cancelledAt ?? record.cancelledAt ?? new Date(),
+            // Review R2-8: the reason the read observed, never a guess; a
+            // known reason is not overwritten.
+            ...(record.cancelReason && !part.cancelReason
+              ? { cancelReason: record.cancelReason }
+              : {}),
+          }
+        : {}),
     });
   }
 }

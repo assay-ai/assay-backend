@@ -54,12 +54,25 @@ export interface SlashChainExecutedEvent {
   readonly transactionHash: string | null;
 }
 
+/**
+ * `SlashProposed` at the request id of a part this platform had given up on
+ * (`REFUSED`): a straggler whose transaction landed after the give-up (review
+ * S-5). The record is re-read and the part re-adopted.
+ */
+export interface SlashChainProposedEvent {
+  readonly chainId: ChainId;
+  readonly requestId: string;
+  readonly executableAt: Date;
+  readonly transactionHash: string | null;
+}
+
 export interface SlashChainRulingsPort {
   /** Returns whether the request id belongs to a case this platform planned. */
   recordDisputed(event: SlashChainDisputedEvent): Promise<boolean>;
   recordUpheld(event: SlashChainUpheldEvent): Promise<boolean>;
   recordCancelled(event: SlashChainCancelledEvent): Promise<boolean>;
   recordExecuted(event: SlashChainExecutedEvent): Promise<boolean>;
+  recordLateProposal(event: SlashChainProposedEvent): Promise<boolean>;
 }
 
 export const SLASH_CHAIN_RULINGS = 'SLASH_CHAIN_RULINGS';

@@ -56,6 +56,18 @@ export class NamespaceVoucherRedeemer implements VoucherRedeemerPort {
     return implementationFor(this.byNamespace, request.payer).redeem(request);
   }
 
+  /**
+   * The payer's chain's answer, or `null` (no landing found) on a chain whose
+   * redeemer cannot look — which keeps that chain's refusal absorbed as before.
+   */
+  async findLanding(
+    request: RedeemVoucherRequest,
+    txRefs: readonly string[],
+  ): Promise<string | null> {
+    const redeemer = implementationFor(this.byNamespace, request.payer);
+    return redeemer.findLanding ? redeemer.findLanding(request, txRefs) : null;
+  }
+
   async redeemBatch(requests: readonly RedeemVoucherRequest[]): Promise<readonly RedeemOutcome[]> {
     if (requests.length === 0) return [];
 

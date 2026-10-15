@@ -15,6 +15,7 @@ import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { AccountId, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { PayoutProofChallenge } from '@modules/chains/ports/payout-proof.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { AuditActor, AuditLogWriter, auditActorOf } from '@shared/audit';
 
 import { ChainEnrolmentStatus } from '../ports/chain-enrolment.port';
 import {
@@ -83,6 +84,7 @@ export class ProviderPayoutAddressService {
     private readonly config: ConfigService,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     private readonly blocklist: AccountBlocklistService,
+    private readonly audit: AuditLogWriter,
   ) {}
 
   /**
@@ -223,7 +225,7 @@ export class ProviderPayoutAddressService {
     // 5. Consume the nonce and write the proof onto the enrolment, in one
     //    transaction — see the class comment for why the consume is a CAS
     //    UPDATE rather than trusting the read in step 3.
-    await this.consumeAndStore(row, account, proof, provedAt);
+    await this.consumeAndStore(row, account, proof, provedAt, auditActorOf(session));
 
     return { payoutAccountId: account, provedAt, proof };
   }
@@ -233,6 +235,7 @@ export class ProviderPayoutAddressService {
     account: AccountId,
     proof: PayoutProof,
     provedAt: Date,
+    actor: AuditActor,
   ): Promise<void> {
     await this.dataSource.transaction(async (manager) => {
       // Both writes below go through `manager` directly rather than through
@@ -265,6 +268,11 @@ export class ProviderPayoutAddressService {
       // CAIP-10 and its prefix is the chain the provider actually proved.
       const chainId = chainIdOf(account);
 
+      // The address being replaced, for the audit entry below.
+      const previous = await manager.findOne(ProviderChainEnrolmentEntity, {
+        where: { organizationId: row.organizationId, chainId },
+      });
+
       await manager
         .createQueryBuilder()
         .insert()
@@ -293,6 +301,19 @@ export class ProviderPayoutAddressService {
           ['organization_id', 'chain_id'],
         )
         .execute();
+
+      // Where the provider is paid is the one change an attacker most wants
+      // to make quietly (review A-1). It lands in the owner's audit log in
+      // this transaction, with the address it replaced, or not at all.
+      await this.audit.record(manager, {
+        organizationId: row.organizationId,
+        actor,
+        action: 'payout_address.updated',
+        resourceType: 'provider_chain_enrolment',
+        resourceId: chainId,
+        before: { payoutAccountId: previous?.payoutAccountId ?? null },
+        after: { payoutAccountId: account },
+      });
     });
 
     this.logger.log(`payout address proved for organization ${row.organizationId}`);

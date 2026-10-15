@@ -30,6 +30,7 @@ import {
   UNTRUSTED_EGRESS_POLICY,
   withLimits,
 } from '@shared/network/egress';
+import { assertRedirectAllowed } from '@shared/network/egress/egress-http.client';
 import {
   ResponseClass,
   canEverSlash,
@@ -210,7 +211,7 @@ describe('case 2 — a URL pointing at instance metadata', () => {
 // ---------------------------------------------------------------------------
 
 describe('case 3 — a hostname that resolves to an internal address', () => {
-  it('blocks it, naming the address DNS actually returned', async () => {
+  it('blocks it, recording the address DNS returned but not naming it in the message', async () => {
     const error = await expectEgressError(
       clientWithoutConnect().request({ url: 'http://internal.provider.test/v1/search' }),
     );
@@ -218,7 +219,11 @@ describe('case 3 — a hostname that resolves to an internal address', () => {
     expect(error.kind).toBe(EgressFailureKind.BLOCKED_ADDRESS);
     expect(error.addressReason).toBe(BlockedAddressReason.PRIVATE);
     expect(error.address).toBe('10.0.0.5');
-    expect(error.message).toContain('10.0.0.5');
+    // Review P-9: the message reaches the caller; a private address in it is
+    // an internal DNS oracle.
+    expect(error.message).not.toContain('10.0.0.5');
+    expect(error.message).not.toContain('10.0.0.0/8');
+    expect(error.message).toContain('non-public address');
   });
 
   it('blocks a hostname whose DNS answer resolves to metadata', async () => {
@@ -340,6 +345,96 @@ describe('case 4 — a redirect from a public address to an internal one', () =>
 
     expect(seen[0]).toBe('Bearer platform-secret');
     expect(seen[1]).toBeUndefined();
+  });
+
+  // Review P-7: provider API keys travel in headers nobody can enumerate.
+  it('forwards only an allowlist of headers when the redirect changes origin', async () => {
+    const seen: http.IncomingHttpHeaders[] = [];
+    handler = (req, res) => {
+      seen.push(req.headers);
+      if (req.url === '/start') {
+        res.writeHead(302, { location: 'http://cdn.provider.test/final' });
+        res.end();
+        return;
+      }
+      res.end('{}');
+    };
+
+    await clientWithLocalConnect().request({
+      url: 'http://edge.provider.test/start',
+      headers: {
+        'x-api-key': 'provider-secret',
+        accept: 'application/json',
+        'x-assay-call-id': 'c1',
+      },
+    });
+
+    expect(seen[0]['x-api-key']).toBe('provider-secret');
+    expect(seen[1]['x-api-key']).toBeUndefined();
+    expect(seen[1].accept).toBe('application/json');
+    expect(seen[1]['x-assay-call-id']).toBe('c1');
+  });
+
+  it('keeps provider headers on a same-origin redirect', async () => {
+    const seen: Array<string | string[] | undefined> = [];
+    handler = (req, res) => {
+      seen.push(req.headers['x-api-key']);
+      if (req.url === '/start') {
+        res.writeHead(302, { location: '/final' });
+        res.end();
+        return;
+      }
+      res.end('{}');
+    };
+
+    await clientWithLocalConnect().request({
+      url: 'http://edge.provider.test/start',
+      headers: { 'x-api-key': 'provider-secret' },
+    });
+
+    expect(seen).toEqual(['provider-secret', 'provider-secret']);
+  });
+
+  it.each([[307], [308]])(
+    'refuses a %i that would resend the body to another origin',
+    async (status) => {
+      const paths: Array<string | undefined> = [];
+      handler = (req, res) => {
+        paths.push(req.url);
+        res.writeHead(status, { location: 'http://cdn.provider.test/collect' });
+        res.end();
+      };
+
+      const error = await expectEgressError(
+        clientWithLocalConnect().request({
+          url: 'http://edge.provider.test/start',
+          method: 'POST',
+          body: '{"secret":"buyer"}',
+        }),
+      );
+
+      expect(error.kind).toBe(EgressFailureKind.REDIRECT_INVALID);
+      expect(paths).toEqual(['/start']);
+    },
+  );
+
+  it('refuses an https → http downgrade on any hop', () => {
+    expect(() =>
+      assertRedirectAllowed(
+        new URL('https://edge.provider.test/a'),
+        new URL('http://edge.provider.test/b'),
+        302,
+        false,
+      ),
+    ).toThrow(EgressError);
+    expect(() =>
+      assertRedirectAllowed(
+        new URL('http://edge.provider.test/a'),
+        new URL('https://cdn.provider.test/b'),
+        302,
+        false,
+      ),
+    ).not.toThrow();
   });
 
   it('stops at maxRedirects rather than looping', async () => {

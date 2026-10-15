@@ -13,11 +13,23 @@
 export function csvField(value: string | number | null | undefined): string {
   if (value === null || value === undefined) return '';
 
-  const text = String(value);
+  const text = neutraliseFormula(String(value));
   if (/[",\r\n]/.test(text)) {
     return `"${text.replace(/"/g, '""')}"`;
   }
   return text;
+}
+
+/**
+ * Prefix `'` to a field a spreadsheet would run as a formula (`=`, `+`, `-`,
+ * `@`, or a leading tab / carriage return) — CSV injection, OWASP's
+ * recommended neutralisation. A plain signed number (`-0.05`) is left alone:
+ * it is data, and a finance export must not turn amounts into text.
+ */
+function neutraliseFormula(text: string): string {
+  if (!/^[=+\-@\t\r]/.test(text)) return text;
+  if (/^[+-]?\d+(\.\d+)?$/.test(text)) return text;
+  return `'${text}`;
 }
 
 /** One CSV row (no trailing newline) from already-ordered field values. */
@@ -28,4 +40,17 @@ export function csvRow(values: ReadonlyArray<string | number | null | undefined>
 /** A CSV line, `\r\n`-terminated per RFC 4180 — the terminator most spreadsheet tools expect. */
 export function csvLine(values: ReadonlyArray<string | number | null | undefined>): string {
   return `${csvRow(values)}\r\n`;
+}
+
+/**
+ * The file name a per-call export downloads as: `assay-calls-<from>_<to>.csv`.
+ *
+ * The bounds are ISO timestamps, and `:` is not allowed in a file name on
+ * Windows (and is shown as `/` by macOS Finder), so every character outside
+ * `[0-9A-Za-z._-]` becomes `-`. Quotes can therefore never reach the
+ * `Content-Disposition` value this is put in.
+ */
+export function callsExportFilename(from: string, to: string): string {
+  const safe = (value: string) => value.replace(/[^0-9A-Za-z._-]/g, '-');
+  return `assay-calls-${safe(from)}_${safe(to)}.csv`;
 }

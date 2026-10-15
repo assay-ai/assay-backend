@@ -9,7 +9,10 @@ import { ArbitrationOutcome, isOverturn, ResolutionKind } from './arbitration';
  * and a service that decides it inline will eventually decide it twice.
  */
 export enum SlashProposalStatus {
-  /** Issued. The provider may object until `respondByAt`. */
+  /**
+   * Issued. The provider may object until `respondByAt` (Solana) or dispute
+   * on chain until the record's `chainExecutableAt` (EVM).
+   */
   PROPOSED = 'PROPOSED',
   /** The provider objected inside their window. Our clock starts here. */
   DISPUTED = 'DISPUTED',
@@ -116,6 +119,7 @@ export const SLASH_PROPOSAL_TRANSITIONS: Readonly<
   ],
   [SlashProposalStatus.UNDER_REVIEW]: [
     SlashProposalStatus.AWAITING_SECOND,
+    SlashProposalStatus.UPHELD, // EVM: the arbiter upheld on chain (CHAIN_ARBITER)
     SlashProposalStatus.OVERTURNED, // we missed our own deadline
     SlashProposalStatus.CANCELLED,
   ],
@@ -125,7 +129,14 @@ export const SLASH_PROPOSAL_TRANSITIONS: Readonly<
     SlashProposalStatus.UNDER_REVIEW, // the second objected
     SlashProposalStatus.CANCELLED,
   ],
-  [SlashProposalStatus.UPHELD]: [SlashProposalStatus.EXECUTING, SlashProposalStatus.CANCELLED],
+  [SlashProposalStatus.UPHELD]: [
+    SlashProposalStatus.EXECUTING,
+    SlashProposalStatus.CANCELLED,
+    // EVM only (review R2-2): a case labelled AUTO_UNDISPUTED whose dispute on
+    // chain was mirrored only after the label, with nothing executed. Not a
+    // second decision: nobody had decided it.
+    SlashProposalStatus.DISPUTED,
+  ],
   [SlashProposalStatus.EXECUTING]: [
     SlashProposalStatus.EXECUTED,
     SlashProposalStatus.UPHELD, // the transaction failed; the case is executable again

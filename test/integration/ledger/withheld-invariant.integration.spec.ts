@@ -164,6 +164,7 @@ describe('withheld reconciles to Σ HOLD_RELEASE', () => {
       holdReleaseTotal: context.usdc(holdReleaseAtomic),
       orphanedReleases: context.usdc(orphans.total),
       orphanedHoldIds: orphans.holdIds,
+      settlementRemainders: context.usdc(0n),
     });
 
     // The headline. Reported with the difference so a failure says by how much
@@ -288,6 +289,7 @@ describe('withheld reconciles to Σ HOLD_RELEASE', () => {
       holdReleaseTotal: context.usdc(holdReleaseAtomic),
       orphanedReleases: context.usdc(orphans.total),
       orphanedHoldIds: orphans.holdIds,
+      settlementRemainders: context.usdc(0n),
     });
     expect(reconciliation.ok).toBe(true);
     expect(reconciliation.difference).toBe('0');
@@ -305,6 +307,7 @@ describe('withheld reconciles to Σ HOLD_RELEASE', () => {
       holdReleaseTotal: context.usdc(250_000n),
       orphanedReleases: context.usdc(0n),
       orphanedHoldIds: [],
+      settlementRemainders: context.usdc(0n),
     });
 
     expect(reconciliation.ok).toBe(false);

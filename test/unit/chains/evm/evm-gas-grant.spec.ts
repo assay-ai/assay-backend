@@ -117,6 +117,8 @@ describe('EvmGasGrantService', () => {
     withdrawAvailableAt: number;
   };
   let buyerBalance: bigint;
+  /** The buyer address's code: `undefined` is a plain EOA. */
+  let buyerCode: `0x${string}` | undefined;
   let relayerBalance: bigint;
   let feePerGas: bigint;
   /**
@@ -154,6 +156,7 @@ describe('EvmGasGrantService', () => {
     chainSeconds = BigInt(NOW_SECONDS);
     serverSeconds = NOW_SECONDS;
     buyerBalance = 0n;
+    buyerCode = undefined;
     relayerBalance = CAPS.relayerFloatLowWaterWei * 100n;
     feePerGas = FEE_PER_GAS;
     grants = new FakeGrants();
@@ -191,6 +194,7 @@ describe('EvmGasGrantService', () => {
             }),
             getBalance: async () => buyerBalance,
             getBlock: async () => ({ timestamp: chainSeconds }),
+            getCode: async () => buyerCode,
           },
         ],
       ]),
@@ -647,6 +651,31 @@ describe('EvmGasGrantService', () => {
     expect(await grants.hasGranted(BUYER)).toBe(false);
   });
 
+  /**
+   * REGRESSION (review 2026-10-15 P-7): a contract or an EIP-7702-delegated
+   * account makes the 21 000-gas transfer revert, a reverted grant writes no
+   * row, and the buyer could ask again for ever on the relayer's gas.
+   */
+  it.each([
+    ['an EIP-7702-delegated EOA', `0xef0100${'12'.repeat(20)}`],
+    ['a contract', '0x6080604052'],
+  ])('refuses %s before anything is sent', async (_label, code) => {
+    buyerCode = code as `0x${string}`;
+
+    const outcome = await service.grantWithdrawGas(ORGANIZATION, BUYER);
+
+    expect(outcome).toEqual({ kind: 'REFUSED', reason: GasGrantRefusal.ACCOUNT_HAS_CODE });
+    expect(sendValue).not.toHaveBeenCalled();
+    expect(grants.rows).toHaveLength(0);
+  });
+
+  it('grants to an account whose code is the empty 0x', async () => {
+    buyerCode = '0x';
+    await expect(service.grantWithdrawGas(ORGANIZATION, BUYER)).resolves.toMatchObject({
+      kind: 'GRANTED',
+    });
+  });
+
   // ── The reading door, and the chain ──────────────────────────────────────
 
   it('refuses a mixed-case address whose EIP-55 checksum does not verify', async () => {
@@ -789,6 +818,7 @@ describe('EvmGasGrantService', () => {
             }),
             getBalance: async () => buyerBalance,
             getBlock: async () => ({ timestamp: chainSeconds }),
+            getCode: async () => buyerCode,
           },
         ],
       ]),

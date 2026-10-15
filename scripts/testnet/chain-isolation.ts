@@ -26,7 +26,7 @@
  *   "args": { "latitude": 21.03, "longitude": 105.85 },
  *   "excludedProviders": ["<provider org id whose bindings settle only on a disabled chain>"],
  *   "buyers": [
- *     { "chainId": "eip155:46630", "token": "x402_sk_live_…", "expectCall": "PAYMENT_NO_SETTLEABLE_CHAIN" }
+ *     { "chainId": "eip155:46630", "token": "assay_sk_live_…", "expectCall": "PAYMENT_NO_SETTLEABLE_CHAIN" }
  *   ]
  * }]
  * ```

@@ -1,8 +1,10 @@
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 import { ValidationPipe, VersioningType } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 import { SwaggerModule, DocumentBuilder, SwaggerCustomOptions } from '@nestjs/swagger';
 import { Reflector } from '@nestjs/core';
+import { assertTrustProxyHopsConfigured } from '@config/app.config';
 import { AppApiModule } from './app.module';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
@@ -15,13 +17,24 @@ import { SingleFlightInterceptor } from '@shared/interceptors/single-flight.inte
 import { StructuredLogger } from '@shared/observability';
 
 async function bootstrapApi() {
-  const app = await NestFactory.create(AppApiModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppApiModule, {
     logger: new StructuredLogger(),
   });
   const configService = app.get(ConfigService);
 
   // Get config
   const port = configService.get<number>('app.api.port');
+
+  // Client address
+  //
+  // `request.ip` is what the operator sign-in throttle counts against. Behind
+  // a load balancer it is the balancer's address unless Express is told how
+  // many proxies to trust, and then every caller shares one counter. Production
+  // sets `API_TRUST_PROXY_HOPS` to the number of proxies in front of the API;
+  // locally it is 0 and `X-Forwarded-For` is ignored (`parseTrustProxyHops`).
+  // Production refuses to start with it unset; `.env` is loaded by now.
+  assertTrustProxyHopsConfigured();
+  app.set('trust proxy', configService.get<number>('app.api.trustProxyHops') ?? 0);
 
   // Global prefix
   app.setGlobalPrefix('api');
@@ -35,15 +48,15 @@ async function bootstrapApi() {
   // `exposedHeaders` is not decoration. A cross-origin browser client can read
   // only the seven CORS-safelisted response headers unless the server names the
   // rest, so without this list `GET /providers/me/calls/export` reaches the
-  // console as a CSV body with no metadata: `X-X402-Export-Row-Count`,
-  // `X-X402-Export-Total-Matching`, `X-X402-Export-Truncated` and even the
+  // console as a CSV body with no metadata: `X-Assay-Export-Row-Count`,
+  // `X-Assay-Export-Total-Matching`, `X-Assay-Export-Truncated` and even the
   // filename in `Content-Disposition` are silently dropped by the browser, with
   // no error anywhere.
   //
-  // The three `X-X402-Export-*` headers are `docs/api-list-contract.md`'s
+  // The three `X-Assay-Export-*` headers are `docs/api-list-contract.md`'s
   // no-silent-caps rule applied to a response the JSON envelope cannot wrap —
   // they are the only way the export says how many rows it returned and whether
-  // it hit its cap. A client that cannot read `X-X402-Export-Truncated` has to
+  // it hit its cap. A client that cannot read `X-Assay-Export-Truncated` has to
   // either show nothing or assume `false`, and assuming `false` tells a provider
   // their financial export is complete on exactly the evidence that it might not
   // be. That is the failure mode this list exists to prevent.
@@ -61,9 +74,9 @@ async function bootstrapApi() {
     credentials: true,
     exposedHeaders: [
       'Content-Disposition',
-      'X-X402-Export-Total-Matching',
-      'X-X402-Export-Row-Count',
-      'X-X402-Export-Truncated',
+      'X-Assay-Export-Total-Matching',
+      'X-Assay-Export-Row-Count',
+      'X-Assay-Export-Truncated',
     ],
   });
 

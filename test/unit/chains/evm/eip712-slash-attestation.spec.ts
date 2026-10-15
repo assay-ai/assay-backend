@@ -18,7 +18,7 @@ import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp2
  * ```
  * cast keccak "SlashAttestation(bytes32 requestId,…,uint64 expiresAt)"            # typehash
  * cast keccak "$(cast abi-encode 'f(bytes32,bytes32,bytes32,uint256,address)' \
- *   $EIP712_DOMAIN_TYPEHASH $(cast keccak 'x402 Settlement') $(cast keccak '2') 46630 $STAKE)"
+ *   $EIP712_DOMAIN_TYPEHASH $(cast keccak 'Assay Settlement') $(cast keccak '2') 46630 $STAKE)"
  * cast keccak "$(cast abi-encode 'f(bytes32,bytes32,address,address,uint8,uint64,bytes32,uint64,uint64)' …)"
  * cast keccak $(cast concat-hex 0x1901 $DOMAIN_SEPARATOR $STRUCT_HASH)
  * ```
@@ -55,7 +55,7 @@ describe('SlashAttestation agrees with assay-evm/src/Types.sol', () => {
 
   it('produces the digest cast produced', () => {
     expect(hashSlashAttestation(ATTESTATION, DOMAIN)).toBe(
-      '0xe9252eb8f42b7ff4f8e0d9809a25b5ba8e4470d43273afaf7e18ce9db6e13032',
+      '0xfbcd4977888a6d79b323d1246293228a5c232d072e69079a894dc5446487ed38',
     );
   });
 

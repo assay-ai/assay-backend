@@ -23,6 +23,12 @@
  *   window — is reached in production only from a real judged payment, and
  *   there is no route that would let 800 of them be posted over HTTP. See
  *   `runStep8Seed`.
+ * - **The provider is a person, not a minted agent.** Provider writes are
+ *   behind `HumanSessionGuard`, so the provider's token is
+ *   `ACCEPTANCE_PROVIDER_PERSON_TOKEN`: a `"kind": "human"` record of the API
+ *   server's `MCP_CREDENTIALS_FILE` (`AUTH_SESSION_SOURCE=both`), naming an
+ *   organization that is not a provider yet — a fresh record per full run.
+ *   The buyer is still minted. See `adoptConfigPersonIdentity`.
  * - **That context is also what loads `.env.local`.** `-r dotenv/config` on
  *   the command line loads `.env` and only `.env`; `.env.local` reaches
  *   `process.env` solely because `@nestjs/config`'s
@@ -347,6 +353,7 @@ import { type SlaWindowSeedCall, seedSlaWindowCalls } from '../demo/lib/seed-sla
 import { explainProgramError, type Sender } from '../settlement/lib/sender';
 import { AcceptanceHttpError, createApiClient } from './lib/acceptance-http';
 import {
+  adoptConfigPersonIdentity,
   bootIdentityContext,
   borrowOrganizationCredential,
   mintScriptIdentity,
@@ -665,7 +672,7 @@ const ACCEPTANCE_RESPONSE_MAPPING = {
  * the body `User-Agent header cannot be empty, use a unique identifier` — their
  * published terms of service ask every client to identify itself.
  * `EgressBindingInvoker` sets only `accept`, `content-type` and
- * `x-x402-call-id`, so without this the tester fails at the **CLASSIFICATION**
+ * `x-assay-call-id`, so without this the tester fails at the **CLASSIFICATION**
  * layer with `REQUEST_REJECTED` (observed live, 2026-08-25, on the first run of
  * this step). Worse than failing, it fails *intermittently*: an earlier probe of
  * the identical binding got 200, so their enforcement is not uniform across
@@ -675,7 +682,7 @@ const ACCEPTANCE_RESPONSE_MAPPING = {
  * says a header the endpoint needs is *"the provider's own, injected by the
  * caller into `headers`"*. The value identifies this suite honestly and invents
  * no contact address; note it cannot spoof anything, because the invoker spreads
- * `x-x402-call-id` in **after** the mapping's headers, deliberately.
+ * `x-assay-call-id` in **after** the mapping's headers, deliberately.
  *
  * Verified against the live API: all five tester layers PASSED,
  * `policySource=STORED_POLICY` (`get_weather.default` v1), and the
@@ -6548,12 +6555,23 @@ async function main(): Promise<void> {
     await step(report, STEP_0B, () => assertStakeSourceIsChain(identityApp));
 
     // Named for the actor, not the step: each identity belongs to one actor for
-    // the whole run, and both persist as org/agent/credential rows in real
-    // Postgres. Two separate organizations — that separation is what makes
-    // every later assertion about money crossing between them mean anything.
-    const providerIdentity = await mintScriptIdentity(identityApp, 'provider');
+    // the whole run, and both persist as org/agent rows in real Postgres. Two
+    // separate organizations — that separation is what makes every later
+    // assertion about money crossing between them mean anything.
+    //
+    // The provider is a PERSON: every provider write is behind
+    // `HumanSessionGuard`, which refuses a minted agent credential (review
+    // N-2). Its token is a `"kind": "human"` record of the server's
+    // `MCP_CREDENTIALS_FILE`, named by ACCEPTANCE_PROVIDER_PERSON_TOKEN, and
+    // a fresh one per full run — see `adoptConfigPersonIdentity`. Adopted
+    // before any signer is funded, so a stale record costs nothing.
+    const providerIdentity = await adoptConfigPersonIdentity(
+      identityApp,
+      'ACCEPTANCE_PROVIDER_PERSON_TOKEN',
+      'provider',
+    );
     console.log(
-      `minted provider identity: organizationId=${providerIdentity.organizationId} ` +
+      `provider person identity: organizationId=${providerIdentity.organizationId} ` +
         `agentId=${providerIdentity.agentId}`,
     );
 

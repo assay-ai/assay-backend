@@ -60,6 +60,7 @@ import {
 } from '@modules/provider/ports/provider-stake.port';
 import { BindingEditorService } from '@modules/provider/services/binding-editor.service';
 import { BindingMappingTesterService } from '@modules/provider/services/binding-mapping-tester.service';
+import { ProviderEgressLimiter } from '@modules/provider/services/provider-egress-limiter.service';
 import { BindingPauseService } from '@modules/provider/services/binding-pause.service';
 import { BindingPublishService } from '@modules/provider/services/binding-publish.service';
 import { DbChainEnrolmentSource } from '@modules/provider/services/db-chain-enrolment.source';
@@ -331,7 +332,14 @@ export async function createBindingEditorTestContext(
     [STAKE_CHAIN],
     new Map([[STAKE_CHAIN, MINIMUM_STAKE]]),
   );
-  const tester = new BindingMappingTesterService(editor, runs, catalogue, invoker, policies);
+  const tester = new BindingMappingTesterService(
+    editor,
+    runs,
+    catalogue,
+    invoker,
+    policies,
+    new ProviderEgressLimiter(),
+  );
   const publisher = new BindingPublishService(
     editor,
     runs,

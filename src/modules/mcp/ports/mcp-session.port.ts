@@ -25,6 +25,15 @@ export interface McpSession {
    */
   readonly credentialId: string;
 
+  /**
+   * True only when {@link credentialId} is the id of a stored
+   * `agent_credentials` row — set by `DbCredentialMcpSessionSource` and no
+   * other source. A config-file machine token is also `AGENT`, but its id is
+   * a free-form label, so anything that writes or looks up the credential by
+   * id reads it through {@link storedCredentialIdOf} (review N-1).
+   */
+  readonly storedCredential?: boolean;
+
   readonly organizationId: string;
   readonly agentId: string;
   /** CAIP-10. The ledger account this session's calls are charged to. */
@@ -68,6 +77,15 @@ export interface McpSession {
   readonly blocked?: SessionBlock | null;
 }
 
+/**
+ * The `agent_credentials.id` behind the session, or null when no stored
+ * credential backs it: a person's login, or a config-file token (person or
+ * machine), whose `credentialId` names no row and is not a uuid.
+ */
+export function storedCredentialIdOf(session: McpSession): string | null {
+  return session.storedCredential === true ? session.credentialId : null;
+}
+
 /** Which party of a session is blocked. */
 export interface SessionBlock {
   readonly role: BlockedRole;
@@ -78,12 +96,15 @@ export interface SessionBlock {
 export enum McpCallerKind {
   /** A Privy access token — a person signed in to the dashboard. */
   HUMAN = 'HUMAN',
-  /** An agent machine credential (`x402_sk_live_…`, `agent_credentials`). */
+  /** An agent machine credential (`assay_sk_live_…`, `agent_credentials`). */
   AGENT = 'AGENT',
   /**
-   * A token from `MCP_CREDENTIALS_FILE`. The config file stands in for the
-   * human login it predates — tests, local stacks and `yarn demo:seed` drive
-   * the dashboard with these — so it is treated as a human session.
+   * A token from `MCP_CREDENTIALS_FILE` whose record is marked
+   * `"kind": "human"`. The config file stands in for the human login it
+   * predates — tests, local stacks and `yarn demo:seed` drive the dashboard
+   * with these — so such a token is treated as a human session. An unmarked
+   * record resolves as {@link AGENT} instead, and no credentials file loads
+   * in production (review A-2).
    */
   CONFIG = 'CONFIG',
 }

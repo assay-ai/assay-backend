@@ -212,19 +212,23 @@ export class CatalogueToolDto {
   fromPrice: CatalogueMoneyDto | null;
 
   /**
-   * What a call would actually be held for, straight from `ProviderRouterService.quote`.
+   * What a call would actually be held for, straight from `ProviderRouterService.quote`
+   * — and so the most it can be charged.
    *
    * It is **not** {@link fromPrice}, and the gap is deliberate rather than a
    * rounding difference: the router quotes the *dearest* eligible binding, so
-   * that the hold covers whichever provider failover lands on. Publishing only
-   * the floor would under-quote every call the moment a second provider joined
-   * at a higher price; publishing only the quote would hide how cheap the
-   * market's floor is. Both, named for what they are.
+   * that the hold covers whichever provider failover lands on. The charge is
+   * the price of the binding that serves, somewhere between the two, and the
+   * rest of the hold is returned. Publishing only the floor would hide the
+   * worst case; publishing only the quote would hide how cheap the market's
+   * floor is. Both, named for what they are.
    */
   @ApiPropertyOptional({
     type: CatalogueMoneyDto,
     nullable: true,
-    description: 'The routed quote — dearest eligible binding. null when nothing is routable.',
+    description:
+      'The routed quote — dearest eligible binding, the most a call is charged (it pays the ' +
+      'serving binding). null when nothing is routable.',
   })
   price: CatalogueMoneyDto | null;
 
@@ -233,6 +237,21 @@ export class CatalogueToolDto {
 
   @ApiProperty({ description: 'Whether a call placed now would find a provider.' })
   routable: boolean;
+
+  /**
+   * How many bindings the quote was taken over — `ProviderRouterService.quote`'s
+   * own count. `tools/list` prints its price as "up to $X" when this is above
+   * one, because the call pays the serving binding, which may be cheaper than
+   * the hold. The catalogue publishes the count so a screen can say the same.
+   * Not `providerCount`: a listed provider the router cannot use right now
+   * (a stake on another asset, a ceiling hit) is in that and not in this.
+   */
+  @ApiProperty({
+    description:
+      'Bindings the router could serve this tool from right now — the set the quote is the ' +
+      'dearest of. 0 when nothing is routable.',
+  })
+  routableBindings: number;
 
   @ApiPropertyOptional({
     type: String,

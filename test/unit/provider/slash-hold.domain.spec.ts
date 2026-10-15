@@ -29,11 +29,22 @@ describe('slashHoldReasons', () => {
     expect(slashHoldReasons(healthy, { recordWaiting: false, windowRefused: true })).toEqual([]);
   });
 
-  it('2. pendingSlash >= atRisk - penaltyAmount', () => {
-    expect(slashHoldReasons({ ...healthy, pendingSlash: 99_000_000n }, idle)).toEqual([
+  it('2. atRisk - pendingSlash < penaltyAmount', () => {
+    expect(slashHoldReasons({ ...healthy, pendingSlash: 99_000_001n }, idle)).toEqual([
       SlashHoldReason.STAKE_FULLY_RESERVED,
     ]);
-    expect(slashHoldReasons({ ...healthy, pendingSlash: 98_999_999n }, idle)).toEqual([]);
+    // Free stake of exactly one penalty still backs it (review S-6).
+    expect(slashHoldReasons({ ...healthy, pendingSlash: 99_000_000n }, idle)).toEqual([]);
+  });
+
+  it('2. leaves out the reservations of records frozen by an on-chain dispute', () => {
+    const reserved = { ...healthy, pendingSlash: 100_000_000n };
+    expect(slashHoldReasons(reserved, idle)).toEqual([SlashHoldReason.STAKE_FULLY_RESERVED]);
+    expect(slashHoldReasons({ ...reserved, disputedReserved: 1_000_000n }, idle)).toEqual([]);
+    // Never below zero.
+    expect(slashHoldReasons({ ...healthy, pendingSlash: 1n, disputedReserved: 5n }, idle)).toEqual(
+      [],
+    );
   });
 
   it('3. bonded < minimumStake', () => {

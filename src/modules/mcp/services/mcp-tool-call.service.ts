@@ -25,6 +25,7 @@ import {
   PaymentIntent,
   PaymentIntentCallClass,
   PaymentIntentStatus,
+  PaymentIntentTransitionContext,
   PaymentRail,
   railName,
 } from '@modules/payment/ports/payment.types';
@@ -53,8 +54,12 @@ import {
   ProviderRouterService,
   RoutedCall,
   ToolQuote,
+  bindingPrice,
 } from '@modules/tool/services/provider-router.service';
-import { VerificationSettlementService } from '@modules/verification/services/verification-settlement.service';
+import {
+  EnqueueVerificationInput,
+  VerificationSettlementService,
+} from '@modules/verification/services/verification-settlement.service';
 import { AppError } from '@shared/errors/app-errors';
 import { BaseError } from '@shared/errors/base.error';
 import { MoneyUtil } from '@utils/money.util';
@@ -66,10 +71,11 @@ import {
   MCP_SCHEMA_CONTRACT_VIOLATION_REASON,
   MCP_UNPAYABLE_PROVIDER_REASON,
   MCP_UNROUTABLE_REASON,
+  MCP_VERIFICATION_ENQUEUE_FAILED_REASON,
   MCP_VOIDED_REASON,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
-import { McpCallerKind, McpSession } from '../ports/mcp-session.port';
+import { McpSession, storedCredentialIdOf } from '../ports/mcp-session.port';
 import { McpCatalogueService } from './mcp-catalogue.service';
 import { MCP_PRICING, McpPricingConfig } from './mcp-pricing.config';
 
@@ -163,7 +169,7 @@ export class McpToolCallService {
     // Minted once, here, for the whole call — not per attempt. Failover
     // excludes the whole provider (`ProviderRouterService`'s own doc comment),
     // so a given provider sees at most one request per call, and this is the
-    // id that request carries as `X-X402-Call-Id`. Threaded through
+    // id that request carries as `X-Assay-Call-Id`. Threaded through
     // `intents.create` (so it lands on the payment record the export reads)
     // and through `router.route` (so it reaches `EgressBindingInvoker`) —
     // both from this one value, which is what guarantees the header on the
@@ -238,7 +244,7 @@ export class McpToolCallService {
       chooseRail(session.chainId, payment.rail, payment.voucher !== null) ===
       PaymentRail.RAIL_B_VOUCHER
     ) {
-      return this.callOnRailB(session, tool, price, args, callId, payment.voucher);
+      return this.callOnRailB(session, tool, args, callId, payment.voucher);
     }
 
     // Hoisted out of `intents.create` below, because two things now need the
@@ -273,67 +279,79 @@ export class McpToolCallService {
     // be swept.
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_A_PER_CALL));
 
-    const spendPolicyVersion = await this.spendPolicy.assertCallAllowed({
-      organizationId: session.organizationId,
-      agentId: session.agentId,
-      toolId: tool.id,
-      price,
-      requestHash,
-    });
+    // The cap check and the hold it allows run under the agent's spend lock:
+    // read and reserve as one step, so concurrent calls cannot all read the
+    // same spend-so-far and all fit (review 2026-10-15 P-6).
+    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async (held) => {
+      const spendPolicyVersion = await this.spendPolicy.assertCallAllowed({
+        organizationId: session.organizationId,
+        agentId: session.agentId,
+        toolId: tool.id,
+        price,
+        requestHash,
+      });
 
-    const intent = await this.intents.create({
-      organizationId: session.organizationId,
-      agentId: session.agentId,
-      agentAccount: session.agentAccount,
-      // Which of the agent's credentials paid — two credentials are two keys.
-      credentialId: credentialOf(session),
-      // No provider yet, and none can be named: the router picks one below and
-      // failover may change it. Nor the payout account, nor the binding, for
-      // exactly the same reason and at exactly the same grain. All three are
-      // written by the transition out of `PROVIDER_EXECUTING`, which is the
-      // first moment the answer is final — see `resolveDataResult`.
-      toolId: tool.id,
-      // Rail A, not rail B: rail B means a signed voucher and there is no
-      // signature here — the MCP server spends the agent's ledger balance on the
-      // strength of its bearer token. Recording it as rail B would claim a
-      // voucher nonce was spent, and the database would refuse the row for the
-      // good reason that no nonce exists.
-      //
-      // Rail A names no `payTo` and cannot: an escrow is debited only by
-      // `redeem_voucher`, which needs the buyer's ed25519 signature over 239
-      // bytes, and an MCP session has no key. "Rail A uses the same payTo"
-      // describes the x402-over-HTTP rail, not this one. While
-      // ESCROW_SPEND_GATE_ENABLED is on, `EscrowSpendGate` refuses a rail-A
-      // intent outright rather than spending a mirror balance.
-      //
-      // `assertRailOffered` above is what makes "4663 ships rail B only" a
-      // rule rather than a table nobody reads. It is asserted HERE, at the site
-      // that CHOOSES the rail, not where `payment_intents.rail` is written: the
-      // writer records a decision already made, and a check there would refuse a
-      // row after the money path had committed to it.
-      rail: PaymentRail.RAIL_A_PER_CALL,
-      callId,
-      // `quote.pricingMode` is the aggregate over every *eligible* binding at
-      // quote time (`ProviderRouterService.quote`'s "dearest eligible
-      // binding" reasoning) — routing has not run yet, so it is the best
-      // information available at creation time, same as `price` itself.
-      // `FREEMIUM` is folded into `PAID` here, matching the router's own
-      // "gated like PAID" rule: the free quota has not been checked,
-      // so this call may well be charged.
-      callClass:
-        quote.pricingMode === PricingMode.FREE
-          ? PaymentIntentCallClass.FREE
-          : PaymentIntentCallClass.PAID,
-      price,
-      platformFee: this.platformFee(price),
-      requestHash,
-      // The receipt's link to the policy that governed this call.
-      spendPolicyVersion,
-      chainId: session.chainId,
-    });
+      const intent = await this.intents.create({
+        organizationId: session.organizationId,
+        agentId: session.agentId,
+        agentAccount: session.agentAccount,
+        // Which of the agent's credentials paid — two credentials are two keys.
+        credentialId: credentialOf(session),
+        // No provider yet, and none can be named: the router picks one below and
+        // failover may change it. Nor the payout account, nor the binding, for
+        // exactly the same reason and at exactly the same grain. All three are
+        // written by the transition out of `PROVIDER_EXECUTING`, which is the
+        // first moment the answer is final — see `resolveDataResult`.
+        toolId: tool.id,
+        // Rail A, not rail B: rail B means a signed voucher and there is no
+        // signature here — the MCP server spends the agent's ledger balance on the
+        // strength of its bearer token. Recording it as rail B would claim a
+        // voucher nonce was spent, and the database would refuse the row for the
+        // good reason that no nonce exists.
+        //
+        // Rail A names no `payTo` and cannot: an escrow is debited only by
+        // `redeem_voucher`, which needs the buyer's ed25519 signature over 239
+        // bytes, and an MCP session has no key. "Rail A uses the same payTo"
+        // describes the x402-over-HTTP rail, not this one. While
+        // ESCROW_SPEND_GATE_ENABLED is on, `EscrowSpendGate` refuses a rail-A
+        // intent outright rather than spending a mirror balance.
+        //
+        // `assertRailOffered` above is what makes "4663 ships rail B only" a
+        // rule rather than a table nobody reads. It is asserted HERE, at the site
+        // that CHOOSES the rail, not where `payment_intents.rail` is written: the
+        // writer records a decision already made, and a check there would refuse a
+        // row after the money path had committed to it.
+        rail: PaymentRail.RAIL_A_PER_CALL,
+        callId,
+        // `quote.pricingMode` is the aggregate over every *eligible* binding at
+        // quote time (`ProviderRouterService.quote`'s "dearest eligible
+        // binding" reasoning) — routing has not run yet, so it is the best
+        // information available at creation time. So is `price`, which is the
+        // hold: `servedCharge` re-prices the intent once a binding has served.
+        // `FREEMIUM` is folded into `PAID` here, matching the router's own
+        // "gated like PAID" rule: the free quota has not been checked,
+        // so this call may well be charged.
+        callClass:
+          quote.pricingMode === PricingMode.FREE
+            ? PaymentIntentCallClass.FREE
+            : PaymentIntentCallClass.PAID,
+        price,
+        platformFee: this.platformFee(price),
+        requestHash,
+        // The receipt's link to the policy that governed this call.
+        spendPolicyVersion,
+        chainId: session.chainId,
+      });
 
-    const unaffordable = await this.secureFunds(session, intent, price);
-    if (unaffordable) return unaffordable;
+      // Still ours? Otherwise the next call of this agent may already have
+      // summed its spend without this hold (round-two review N-4). The intent
+      // stays in `CREATED` with nothing reserved, for the expiry sweep.
+      await held();
+      const unaffordable = await this.secureFunds(session, intent, price);
+      return { intent, unaffordable };
+    });
+    if (admitted.unaffordable) return admitted.unaffordable;
+    const intent = admitted.intent;
 
     const executing = await this.intents.transition(
       session.organizationId,
@@ -372,7 +390,6 @@ export class McpToolCallService {
   private async callOnRailB(
     session: McpSession,
     tool: Tool,
-    price: Money,
     args: JsonObject,
     callId: string,
     payment: McpVoucherPayment | null,
@@ -387,6 +404,7 @@ export class McpToolCallService {
     const context: RoutingContext = {
       ...routingContextOf(session, this.enabledChains, withdrawing),
       onlyProviderId: payment?.providerId,
+      callClass: 'PAID',
     };
 
     const offer = await this.router.offer(tool.id, context);
@@ -399,6 +417,13 @@ export class McpToolCallService {
         reason: `provider ${offer.providerId} has no payout account on ${offer.settlementChain}`,
       });
     }
+
+    // The offered provider's own price, not the quote. The voucher is signed
+    // for an exact amount and pays this provider and no other, so the buyer
+    // pays what the binding that serves charges — the rule rail A applies at
+    // settlement. On the retry the re-drawn offer must name the same price, or
+    // `VoucherService` refuses the signed amount.
+    const price = offer.price;
 
     const call = voucherCallOf(tool, args);
     const requestHash = computeRequestHash({
@@ -446,42 +471,51 @@ export class McpToolCallService {
 
     // A charge like any other, so the same gate that caps rail A caps this —
     // against the hash the voucher signs, which is this call's identity here.
-    await this.spendPolicy.assertCallAllowed({
-      organizationId: session.organizationId,
-      agentId: session.agentId,
-      toolId: tool.id,
-      price,
-      requestHash,
-    });
-
-    let intent: PaymentIntent;
-    try {
-      intent = await this.vouchers.redeem({
+    // Checked and held under the agent's spend lock, as on rail A (P-6).
+    const admitted = await this.spendPolicy.withAgentSpendLock(session.agentId, async (held) => {
+      await this.spendPolicy.assertCallAllowed({
         organizationId: session.organizationId,
-        signed: payment.signed,
-        call,
         agentId: session.agentId,
-        agentAccount: session.agentAccount,
-        providerId: offer.providerId,
-        providerAccount: offer.providerAccount,
         toolId: tool.id,
-        resource: call.path,
-        escrowPda,
         price,
-        platformFee: this.platformFee(price),
-        chainId: session.chainId,
-        boundDelegate: session.delegateAccount ?? null,
-        credentialId: credentialOf(session),
-        // The same read as the withdraw gate above: the escrow's own limits
-        // bind this voucher at redemption, so they are applied before serving.
-        escrow: reading,
+        requestHash,
       });
-    } catch (error) {
-      if (!isInsufficientBalance(error)) throw error;
-      // The intent exists in `CREATED` with nothing reserved; the expiry sweep
-      // closes it, exactly as on rail A. Its id is not surfaced by `redeem`.
-      return this.insufficientFunds(session, null, price);
-    }
+
+      try {
+        return {
+          intent: await this.vouchers.redeem({
+            organizationId: session.organizationId,
+            signed: payment.signed,
+            call,
+            agentId: session.agentId,
+            agentAccount: session.agentAccount,
+            providerId: offer.providerId,
+            providerAccount: offer.providerAccount,
+            toolId: tool.id,
+            resource: call.path,
+            escrowPda,
+            price,
+            platformFee: this.platformFee(price),
+            chainId: session.chainId,
+            boundDelegate: session.delegateAccount ?? null,
+            credentialId: credentialOf(session),
+            // The same read as the withdraw gate above: the escrow's own limits
+            // bind this voucher at redemption, so they are applied before serving.
+            escrow: reading,
+            // After the voucher's chain reads, before its intent and hold (N-4).
+            beforeHold: held,
+          }),
+          unaffordable: null,
+        };
+      } catch (error) {
+        if (!isInsufficientBalance(error)) throw error;
+        // The intent exists in `CREATED` with nothing reserved; the expiry sweep
+        // closes it, exactly as on rail A. Its id is not surfaced by `redeem`.
+        return { intent: null, unaffordable: await this.insufficientFunds(session, null, price) };
+      }
+    });
+    if (admitted.intent === null) return admitted.unaffordable;
+    const intent: PaymentIntent = admitted.intent;
 
     const executing = await this.intents.transition(
       session.organizationId,
@@ -712,7 +746,8 @@ export class McpToolCallService {
         // A FREE call collects nothing, so a standing withdrawal cannot leave the
         // platform short on it: `withdrawingChains` is empty here on purpose, and
         // this path deliberately does not read the escrow.
-        context: routingContextOf(session, this.enabledChains, []),
+        // `FREE`: a call nobody is charged for never reaches a `PAID` binding.
+        context: { ...routingContextOf(session, this.enabledChains, []), callClass: 'FREE' },
       })
       .catch((error: unknown) => {
         throw agentFacing(error, null);
@@ -844,6 +879,8 @@ export class McpToolCallService {
         context: {
           ...routingContextOf(session, this.enabledChains, await this.withdrawingChains(session)),
           onlyProviderId,
+          // A charged call is served only by a staked, payable paid binding.
+          callClass: 'PAID',
         },
       });
     } catch (error) {
@@ -924,8 +961,10 @@ export class McpToolCallService {
       // that has not happened, or never will, is wrong in the way that matters
       // most to the agent.
       charged: resolved.status === PaymentIntentStatus.SETTLED ? resolved.price : zero,
-      // What is reserved against the agent's balance pending the verdict.
-      held: isAwaitingVerdict(resolved.status) ? resolved.price : zero,
+      // What is reserved against the agent's balance pending the verdict: the
+      // hold, taken at the quote before the intent was re-priced to the
+      // binding that served.
+      held: isAwaitingVerdict(resolved.status) ? intent.price : zero,
       status: resolved.status,
       toolId: tool.id,
       // Read back off the row rather than off `routed`, so the receipt cannot
@@ -985,13 +1024,11 @@ export class McpToolCallService {
    * - Everything else is durably recorded and handed to
    *   `VerificationSettlementService`'s worker via {@link
    *   VerificationSettlementService.enqueue}. If the record or the enqueue
-   *   fails, the agent still gets its data back — that is the safe direction
-   *   to fail in — but the intent then stays in `VERIFYING` with the agent's
-   *   money held and **nothing returns it**: `ledger_holds.expires_at` has no
-   *   reader anywhere, so the "24-hour hold expiry" this comment used to
-   *   name as the backstop does not exist. A bookkeeping failure must still
-   *   never replace the agent's successful result with an error; it must be
-   *   found in the log below and retried by hand.
+   *   fails twice, the agent still gets its data back — a bookkeeping failure
+   *   must never replace a successful result with an error — and the intent
+   *   is settled as served, unverified, so the hold is committed rather than
+   *   stranded. It is never voided: that made the call free, and a buyer could
+   *   provoke the failure (final review N-3).
    */
   private async resolveDataResult(
     session: McpSession,
@@ -1038,6 +1075,8 @@ export class McpToolCallService {
         // classification this transition is recording — so there is nothing to
         // look up and nothing to re-derive.
         bindingId: routed.binding.id,
+        // The price of that binding, on the same edge — see `servedCharge`.
+        ...this.servedCharge(intent, routed),
         classification: routed.classification.responseClass,
         reason: MCP_FORWARDED_TO_VERIFICATION_REASON,
       },
@@ -1076,30 +1115,84 @@ export class McpToolCallService {
       }
     }
 
+    const handoff: EnqueueVerificationInput = {
+      organizationId: session.organizationId,
+      intentId: verifying.id,
+      toolId: routed.tool.id,
+      // Verification judges a provider's answer against a tool's contract and
+      // its consequences land on the provider's stake, so `providerId` is the
+      // identity this payload needs. No binding: adding one would put a
+      // second copy of the routing fact into a queue that outlives the call,
+      // and the intent it names already carries the authoritative one.
+      providerId: routed.providerId,
+      request: args,
+      response: routed.output,
+      outputSchema: routed.tool.outputSchema,
+    };
+
+    // Once more on failure: `enqueue` is idempotent on the intent id, so a
+    // retry after a write that did land is a no-op, not a second record.
+    const enqueued = await this.settlement
+      .enqueue(handoff)
+      .catch(() => this.settlement.enqueue(handoff))
+      .then(
+        () => true,
+        (error: unknown) => {
+          this.logger.error(
+            `Intent ${verifying.id}: data returned but verification could not be durably ` +
+              `enqueued — settling the call as served, unverified. ${describe(error)}`,
+          );
+          return false;
+        },
+      );
+    if (enqueued) return verifying;
+
+    // Nothing will ever judge this intent. It is settled as served rather than
+    // voided (final review N-3): the agent has the data, and a void here was a
+    // free call any buyer could choose by making the write fail.
     try {
-      await this.settlement.enqueue({
-        organizationId: session.organizationId,
-        intentId: verifying.id,
-        toolId: routed.tool.id,
-        // Verification judges a provider's answer against a tool's contract and
-        // its consequences land on the provider's stake, so `providerId` is the
-        // identity this payload needs. No binding: adding one would put a
-        // second copy of the routing fact into a queue that outlives the call,
-        // and the intent it names already carries the authoritative one.
-        providerId: routed.providerId,
-        request: args,
-        response: routed.output,
-        outputSchema: routed.tool.outputSchema,
-      });
-    } catch (error) {
+      return await this.intents.resolve(
+        session.organizationId,
+        verifying.id,
+        PaymentIntentStatus.VERIFYING,
+        PaymentIntentStatus.SETTLED,
+        { reason: MCP_VERIFICATION_ENQUEUE_FAILED_REASON, settledAmount: verifying.price },
+      );
+    } catch (settleError) {
+      // The hold stays open on a VERIFYING intent; only the 24-hour backstop
+      // acts on it after this.
       this.logger.error(
-        `Intent ${verifying.id}: data returned but verification could not be durably enqueued — ` +
-          `the intent is stuck in VERIFYING and its hold will NOT be returned automatically. ` +
-          `${describe(error)}`,
+        `Intent ${verifying.id}: settling after a failed enqueue did not land — the intent ` +
+          `stays in VERIFYING with its hold open. ${describe(settleError)}`,
       );
     }
 
     return verifying;
+  }
+
+  /**
+   * Rail A: what the buyer is charged — the price of the binding that served.
+   *
+   * The intent was created and held at the quote, the dearest eligible
+   * binding, because routing had not run. Now it has, so the intent is
+   * re-priced to `routed.binding`'s own price and fee, and settlement commits
+   * that and releases the rest of the hold. Never above the hold: a binding
+   * whose price rose between the quote and the call is charged at the hold,
+   * because the quote is the most the agent agreed to pay.
+   *
+   * Nothing on rail B, whose voucher already signs the offered binding's own
+   * price and pays exactly that on chain.
+   */
+  private servedCharge(
+    intent: PaymentIntent,
+    routed: RoutedCall,
+  ): Pick<PaymentIntentTransitionContext, 'charge'> {
+    if (intent.rail !== PaymentRail.RAIL_A_PER_CALL) return {};
+
+    const served = bindingPrice(routed.binding);
+    if (served.asset !== intent.price.asset || !MoneyUtil.lessThan(served, intent.price)) return {};
+
+    return { charge: { price: served, platformFee: this.platformFee(served) } };
   }
 
   /**
@@ -1110,12 +1203,13 @@ export class McpToolCallService {
    * `evaluatePayoutGate` refuses any candidate whose provider has proved no
    * payout address on the chain the call settles on — except a
    * `FREE` binding, which is exempt because the relay
-   * path creates no payment intent. But a tool with *both* free and paid
-   * bindings quotes as paid (`quotedPricingMode`), takes the paid path, and can
-   * then draw the free binding. That call is charged, and its provider was
-   * never checked. It is the one hole the gate leaves open, it is real — a
-   * devnet run was observed charging $0.088 for a call a $0 binding served —
-   * and this is where it lands.
+   * path creates no payment intent. A tool with *both* free and paid bindings
+   * quotes as paid and takes the paid path, and the router used to be able to
+   * draw the free binding — a devnet run was observed charging $0.088 for a
+   * call a $0 binding served. A paid call is now routed with
+   * `callClass: 'PAID'`, which leaves FREE bindings out of the pool, so this is
+   * a guard for a catalogue that changed under the call rather than a path
+   * routing takes.
    *
    * ## Why voiding, and not any of the alternatives
    *
@@ -1137,11 +1231,6 @@ export class McpToolCallService {
    * edge `HoldEffect.RELEASE` and its own doc calls it *"no charge and no
    * strike"*. There is no strike to make here — the provider did nothing wrong,
    * they served the call their free binding offered.
-   *
-   * This is a mitigation, not the fix. The fix is for a paid call's payee
-   * eligibility to be decided from the tool's supply rather than the binding's,
-   * which is a routing change; until then this bounds the damage to "the
-   * platform served one call for free".
    */
   private async voidUnpayable(
     session: McpSession,
@@ -1607,9 +1696,9 @@ function namespaceOf(chainId: ChainId): string {
 
 /**
  * The agent credential behind the session (`agent_credentials.id`), or null
- * for a person's or a config session, whose `credentialId` names no stored
- * credential.
+ * for a person's or a config session (machine ones included), whose
+ * `credentialId` names no stored credential and is not a uuid (review N-1).
  */
 function credentialOf(session: McpSession): string | null {
-  return session.callerKind === McpCallerKind.AGENT ? session.credentialId : null;
+  return storedCredentialIdOf(session);
 }

@@ -488,19 +488,29 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — no policy exists',
 });
 
 describe('SpendPolicyEnforcementService.assertCallAllowed — asset mismatch', () => {
-  it('skips every money-based check when the call is priced in a different asset than the policy', async () => {
-    const { service, usage } = build({
+  /**
+   * REGRESSION (review 2026-10-15 P-9): a call priced in another asset used to
+   * skip every money check, so a typo in the policy's asset switched off every
+   * cap while the policy screen still showed them. It is refused instead.
+   */
+  it('refuses a call priced in a different asset than the policy, before velocity', async () => {
+    const { service, usage, velocity } = build({
       findLive: jest.fn().mockResolvedValue(
         policyRow({ perCallMax: '1', dailyCap: '1', monthlyCap: '1' }), // would refuse any real amount
       ),
     });
 
     const otherAsset = 'solana:testnet/token:SomeOtherMint111111111111111111111111111' as AssetId;
-    const version = await service.assertCallAllowed(
-      input({ price: { amount: '999999999', asset: otherAsset, decimals: DECIMALS } }),
-    );
+    await expect(
+      service.assertCallAllowed(
+        input({ price: { amount: '999999999', asset: otherAsset, decimals: DECIMALS } }),
+      ),
+    ).rejects.toMatchObject({
+      errorCode: McpErrorCode.MCP_SPEND_LIMIT_EXCEEDED,
+      context: { limitType: 'asset_mismatch' },
+    });
 
-    expect(version).toBe(3);
     expect(usage.spendSoFar).not.toHaveBeenCalled();
+    expect(velocity.consume).not.toHaveBeenCalled();
   });
 });

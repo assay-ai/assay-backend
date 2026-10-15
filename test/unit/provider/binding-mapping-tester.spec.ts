@@ -11,6 +11,7 @@ import {
 } from '@modules/provider/ports/binding-test.types';
 import { BindingEditorService } from '@modules/provider/services/binding-editor.service';
 import { BindingMappingTesterService } from '@modules/provider/services/binding-mapping-tester.service';
+import { ProviderEgressLimiter } from '@modules/provider/services/provider-egress-limiter.service';
 import { ResponseClass } from '@modules/tool/domain/classification';
 import { MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
@@ -140,7 +141,14 @@ function buildTester(row: ToolBindingEntity) {
   );
 
   return {
-    tester: new BindingMappingTesterService(editor, runs, catalogue, invoker, policies),
+    tester: new BindingMappingTesterService(
+      editor,
+      runs,
+      catalogue,
+      invoker,
+      policies,
+      new ProviderEgressLimiter(),
+    ),
     saved,
   };
 }
@@ -203,7 +211,7 @@ describe('BindingMappingTesterService — an endpoint that behaves', () => {
     // The endpoint's own path prefix survives — `/api` + the mapped `/search`.
     expect(received?.url).toBe('/api/search');
     expect(received?.body).toBe('{"q":"the ultimate question"}');
-    expect(received?.headers['x-x402-call-id']).toBe(report.callId);
+    expect(received?.headers['x-assay-call-id']).toBe(report.callId);
 
     // And the run is on the record, against the revision it exercised.
     expect(saved).toHaveLength(1);

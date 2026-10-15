@@ -9,10 +9,10 @@ describe('digestToken', () => {
   });
 
   it('is stable across calls', () => {
-    expect(digestToken('x402_sk_live_abc')).toBe(digestToken('x402_sk_live_abc'));
+    expect(digestToken('assay_sk_live_abc')).toBe(digestToken('assay_sk_live_abc'));
   });
 
   it('separates two tokens differing by one character', () => {
-    expect(digestToken('x402_sk_live_abc')).not.toBe(digestToken('x402_sk_live_abd'));
+    expect(digestToken('assay_sk_live_abc')).not.toBe(digestToken('assay_sk_live_abd'));
   });
 });
