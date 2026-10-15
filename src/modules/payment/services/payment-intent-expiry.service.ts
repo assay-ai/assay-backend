@@ -1,19 +1,24 @@
-import { Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import {
   DuePaymentIntent,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { MCP_VERIFICATION_DEADLINE_REASON } from '@modules/mcp/constants/mcp.constants';
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
 import {
   PAYMENT_INTENT_EXPIRY_REASON,
   PAYMENT_INTENT_EXPIRY_SWEEP_BATCH,
   PAYMENT_INTENT_HOLD_BACKSTOP_REASON,
   PAYMENT_INTENT_HOLD_REPAIR_REASON,
-  PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
   PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
 } from '../constants/payment-intent.constants';
+import {
+  BUYER_DEBT_WRITE_OFF_DAYS,
+  UNCOLLECTED_PREFIX,
+  VOUCHER_REDEMPTION_ALERTS,
+} from '../constants/voucher-redemption.constants';
 import { PaymentErrorCode } from '../errors/payment.errors';
 import {
   HoldEffect,
@@ -35,6 +40,8 @@ export interface PaymentIntentSweepReport {
   readonly verdictDeadlineSettled: number;
   /** Holds returned by the repair pass, i.e. left open by an earlier pass that died. */
   readonly repaired: number;
+  /** Buyer debts written off: unsettled for `BUYER_DEBT_WRITE_OFF_DAYS`, provider not paid. */
+  readonly debtsWrittenOff: number;
   /** Intents this pass could not finish. They are retried on the next one. */
   readonly failed: number;
 }
@@ -86,6 +93,7 @@ export class PaymentIntentExpiryService {
   constructor(
     private readonly intents: PaymentIntentRepository,
     private readonly paymentIntents: PaymentIntentService,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
 
   async sweep(
@@ -139,13 +147,25 @@ export class PaymentIntentExpiryService {
     }
 
     const { repaired, repairFailures } = await this.repair(limit);
+    const writeOff = await this.writeOffDebts(now, limit);
+    failed += writeOff.failed;
+    const debtsWrittenOff = writeOff.writtenOff;
 
     const verdictDeadlineSettled = deadline.settled;
-    if (expired || backstopped || verdictDeadlineSettled || repaired || failed || repairFailures) {
+    if (
+      expired ||
+      backstopped ||
+      verdictDeadlineSettled ||
+      repaired ||
+      debtsWrittenOff ||
+      failed ||
+      repairFailures
+    ) {
       this.logger.log(
         `Expiry sweep: ${expired} expired, ${backstopped} backstopped, ` +
           `${verdictDeadlineSettled} settled past the verdict deadline, ` +
-          `${holdsReleased} holds released, ${repaired} repaired, ${failed + repairFailures} failed`,
+          `${holdsReleased} holds released, ${repaired} repaired, ` +
+          `${debtsWrittenOff} debts written off, ${failed + repairFailures} failed`,
       );
     }
 
@@ -155,8 +175,80 @@ export class PaymentIntentExpiryService {
       verdictDeadlineSettled,
       holdsReleased,
       repaired,
+      debtsWrittenOff,
       failed: failed + repairFailures,
     };
+  }
+
+  /**
+   * Writes off buyer debts unsettled for {@link BUYER_DEBT_WRITE_OFF_DAYS}
+   * since they lapsed (owner decision, no-platform-debt design step 10): the
+   * buyer's hold is released and **the provider is not paid** — nobody owes
+   * anything afterwards, the platform least of all. Recorded on the intent as
+   * `uncollected:<cause>` BEFORE the release, so a crash between the two
+   * leaves an open hold the next pass writes off again (the release is
+   * idempotent).
+   */
+  private async writeOffDebts(
+    now: Date,
+    limit: number,
+  ): Promise<{ writtenOff: number; failed: number }> {
+    const before = new Date(now.getTime() - BUYER_DEBT_WRITE_OFF_DAYS * 24 * 3_600_000);
+    const due = await this.intents.findDueForWriteOff(before, limit);
+    let writtenOff = 0;
+    let failed = 0;
+    for (const candidate of due) {
+      try {
+        const intent = await this.paymentIntents.findById(candidate.organizationId, candidate.id);
+        const cause = (await this.lapseCauseOf(candidate)) ?? 'unknown';
+        const reason = cause.startsWith(UNCOLLECTED_PREFIX)
+          ? cause
+          : `${UNCOLLECTED_PREFIX}${cause}`;
+        await this.intents.markWrittenOff(candidate.organizationId, candidate.id, reason);
+        if (candidate.holdId) {
+          await this.paymentIntents.releaseHold({
+            organizationId: candidate.organizationId,
+            id: candidate.id,
+            holdId: candidate.holdId,
+          });
+        }
+        writtenOff += 1;
+        this.logger.warn(
+          `Intent ${candidate.id}: buyer debt unsettled for ${BUYER_DEBT_WRITE_OFF_DAYS} days — ` +
+            `written off (${reason}). The buyer's hold is released and the provider is not paid.`,
+        );
+        await this.alerts
+          ?.emit({
+            severity: AlertSeverity.WARN,
+            name: VOUCHER_REDEMPTION_ALERTS.DEBT_WRITTEN_OFF,
+            summary:
+              `A buyer debt was not settled within ${BUYER_DEBT_WRITE_OFF_DAYS} days and was ` +
+              `written off: the provider is not paid, and nobody owes it`,
+            details: {
+              intentId: candidate.id,
+              buyer: intent.agentAccount,
+              providerId: intent.providerId ?? 'unknown',
+              amount: `${intent.price.amount} ${intent.price.asset}`,
+              reason,
+            },
+            aggregation: AlertAggregation.PER_EVENT,
+          })
+          .catch(() => undefined);
+      } catch (error) {
+        failed += 1;
+        this.logger.error(`Intent ${candidate.id}: debt write-off failed. ${describe(error)}`);
+      }
+    }
+    return { writtenOff, failed };
+  }
+
+  /** The refusal the debt lapsed on, as recorded on the intent. */
+  private async lapseCauseOf(candidate: DuePaymentIntent): Promise<string | null> {
+    const entity = await this.intents.findOneBy({
+      organizationId: candidate.organizationId,
+      id: candidate.id,
+    });
+    return entity?.redemptionLastError ?? null;
   }
 
   /**
@@ -164,7 +256,9 @@ export class PaymentIntentExpiryService {
    * its deadline — the same `VERIFYING → SETTLED` the MCP path takes when the
    * verification enqueue fails, with its own reason. The hold stays open:
    * `resolve()` never commits a rail-B hold, and the redemption job collects
-   * it from the buyer's escrow.
+   * it from the buyer's escrow — or, for a row already past the latest its
+   * voucher can be redeemed (`PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS`),
+   * `resolve()` makes it buyer debt at once.
    *
    * Idempotent through the status compare-and-swap. A verdict that lands
    * first wins and this candidate is skipped (a lost race, not a failure); a
@@ -177,7 +271,6 @@ export class PaymentIntentExpiryService {
     const overdue = await this.intents.findDueForVerdictDeadline(
       now,
       PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
-      PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
       limit,
     );
 

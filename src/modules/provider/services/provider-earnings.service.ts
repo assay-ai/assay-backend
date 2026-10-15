@@ -2,8 +2,11 @@ import { Injectable } from '@nestjs/common';
 
 import {
   CREDITED_SQL,
+  DEBT_OUTSTANDING_SQL,
+  FORFEITED_SQL,
   PLATFORM_ABSORBED_SQL,
   PaymentIntentRepository,
+  WRITTEN_OFF_SQL,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
@@ -31,8 +34,12 @@ interface EarningsRow {
   readonly platformFee: string;
   readonly withheld: string;
   readonly withheldCalls: string;
-  readonly absorbed: string;
-  readonly absorbedCalls: string;
+  readonly forfeited: string;
+  readonly forfeitedCalls: string;
+  readonly debtOutstanding: string;
+  readonly debtOutstandingCalls: string;
+  readonly uncollected: string;
+  readonly uncollectedCalls: string;
 }
 
 interface Figures {
@@ -41,8 +48,12 @@ interface Figures {
   readonly platformFee: bigint;
   readonly withheld: bigint;
   readonly withheldCalls: number;
-  readonly absorbed: bigint;
-  readonly absorbedCalls: number;
+  readonly forfeited: bigint;
+  readonly forfeitedCalls: number;
+  readonly debtOutstanding: bigint;
+  readonly debtOutstandingCalls: number;
+  readonly uncollected: bigint;
+  readonly uncollectedCalls: number;
 }
 
 const ZERO_FIGURES: Figures = {
@@ -51,8 +62,12 @@ const ZERO_FIGURES: Figures = {
   platformFee: 0n,
   withheld: 0n,
   withheldCalls: 0,
-  absorbed: 0n,
-  absorbedCalls: 0,
+  forfeited: 0n,
+  forfeitedCalls: 0,
+  debtOutstanding: 0n,
+  debtOutstandingCalls: 0,
+  uncollected: 0n,
+  uncollectedCalls: 0,
 };
 
 /**
@@ -87,7 +102,9 @@ export class ProviderEarningsService {
     // `PROVIDER_CREDIT` is written (`CREDITED_SQL`). A rail-B call is credited
     // when `redeem_voucher` lands, not when the verdict settles it, and a
     // SETTLED row with no committed hold credited nobody — so the figure
-    // matches the earnings ledger.
+    // matches the earnings ledger. The platform never pays or owes a provider:
+    // forfeited, outstanding-debt and uncollected calls are reported apart and
+    // are not earned.
     const qb = this.intents
       .createQueryBuilder('intent')
       .select(groupExpr, 'key')
@@ -99,26 +116,44 @@ export class ProviderEarningsService {
           `THEN intent.providerAmount ELSE 0 END), 0)`,
         'earned',
       )
-      // An absorbed credit took no fee: no redemption ran, so nothing was
-      // split. Counting its nominal `platform_fee` here reported a take the
-      // `PLATFORM_FEE` journal never received.
+      // Credited only (`CREDITED_SQL`), and so out of the buyer's escrow: a
+      // call that was not collected took no fee either.
       .addSelect(
         `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND ${CREDITED_SQL} ` +
-          `AND NOT ${PLATFORM_ABSORBED_SQL} THEN intent.platformFee ELSE 0 END), 0)`,
+          `THEN intent.platformFee ELSE 0 END), 0)`,
         'platformFee',
       )
-      // The slice of `earned` the platform owes rather than the chain paid: a
-      // served call whose voucher could never be redeemed. It is in `earned`
-      // (the provider is credited) and NOT in the provider's wallet.
+      // The provider caused the payment to fail: nobody pays it.
       .addSelect(
-        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND ${CREDITED_SQL} ` +
-          `AND ${PLATFORM_ABSORBED_SQL} THEN intent.providerAmount ELSE 0 END), 0)`,
-        'absorbed',
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND COALESCE(${FORFEITED_SQL}, false) ` +
+          `THEN intent.providerAmount ELSE 0 END), 0)`,
+        'forfeited',
       )
       .addSelect(
-        `COUNT(*) FILTER (WHERE intent.status = :settledStatus AND ${CREDITED_SQL} ` +
-          `AND ${PLATFORM_ABSORBED_SQL})`,
-        'absorbedCalls',
+        `COUNT(*) FILTER (WHERE intent.status = :settledStatus AND COALESCE(${FORFEITED_SQL}, false))`,
+        'forfeitedCalls',
+      )
+      // Buyer debt still open: held in the buyer's escrow, paid once re-signed.
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND ${DEBT_OUTSTANDING_SQL} ` +
+          `THEN intent.providerAmount ELSE 0 END), 0)`,
+        'debtOutstanding',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE intent.status = :settledStatus AND ${DEBT_OUTSTANDING_SQL})`,
+        'debtOutstandingCalls',
+      )
+      // Never collected: a written-off debt, or a legacy absorb (nobody owes it).
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND NOT COALESCE(${FORFEITED_SQL}, false) ` +
+          `AND (COALESCE(${WRITTEN_OFF_SQL}, false) OR ${PLATFORM_ABSORBED_SQL}) ` +
+          `THEN intent.providerAmount ELSE 0 END), 0)`,
+        'uncollected',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE intent.status = :settledStatus AND NOT COALESCE(${FORFEITED_SQL}, false) ` +
+          `AND (COALESCE(${WRITTEN_OFF_SQL}, false) OR ${PLATFORM_ABSORBED_SQL}))`,
+        'uncollectedCalls',
       )
       .addSelect(
         `COALESCE(SUM(CASE WHEN intent.status IN (:...withheldStatuses) AND intent.holdId IS NOT NULL ` +
@@ -193,8 +228,12 @@ function toFigures(row: EarningsRow): Figures {
     platformFee: BigInt(row.platformFee),
     withheld: BigInt(row.withheld),
     withheldCalls: Number(row.withheldCalls),
-    absorbed: BigInt(row.absorbed),
-    absorbedCalls: Number(row.absorbedCalls),
+    forfeited: BigInt(row.forfeited),
+    forfeitedCalls: Number(row.forfeitedCalls),
+    debtOutstanding: BigInt(row.debtOutstanding),
+    debtOutstandingCalls: Number(row.debtOutstandingCalls),
+    uncollected: BigInt(row.uncollected),
+    uncollectedCalls: Number(row.uncollectedCalls),
   };
 }
 
@@ -205,8 +244,12 @@ function addFigures(a: Figures, b: Figures): Figures {
     platformFee: a.platformFee + b.platformFee,
     withheld: a.withheld + b.withheld,
     withheldCalls: a.withheldCalls + b.withheldCalls,
-    absorbed: a.absorbed + b.absorbed,
-    absorbedCalls: a.absorbedCalls + b.absorbedCalls,
+    forfeited: a.forfeited + b.forfeited,
+    forfeitedCalls: a.forfeitedCalls + b.forfeitedCalls,
+    debtOutstanding: a.debtOutstanding + b.debtOutstanding,
+    debtOutstandingCalls: a.debtOutstandingCalls + b.debtOutstandingCalls,
+    uncollected: a.uncollected + b.uncollected,
+    uncollectedCalls: a.uncollectedCalls + b.uncollectedCalls,
   };
 }
 
@@ -233,7 +276,11 @@ function toFiguresDto(
     platformFee: money(figures.platformFee),
     withheld: money(figures.withheld),
     withheldCalls: figures.withheldCalls,
-    absorbed: money(figures.absorbed),
-    absorbedCalls: figures.absorbedCalls,
+    forfeited: money(figures.forfeited),
+    forfeitedCalls: figures.forfeitedCalls,
+    debtOutstanding: money(figures.debtOutstanding),
+    debtOutstandingCalls: figures.debtOutstandingCalls,
+    uncollected: money(figures.uncollected),
+    uncollectedCalls: figures.uncollectedCalls,
   };
 }

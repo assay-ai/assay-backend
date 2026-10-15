@@ -11,6 +11,7 @@ import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.
 import { ProviderSlashHoldRepository } from '@database/postgres/repositories/provider-slash-hold.repository';
 import {
   OpenVoucherTotals,
+  OutstandingDebt,
   PaymentIntentRepository,
   VoucherAdmissionScope,
 } from '@database/postgres/repositories/payment-intent.repository';
@@ -23,9 +24,11 @@ import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
+  LATE_VERDICT_LAPSE_CAUSE,
   PAYMENT_INTENT_FUNDS_SECURED_REASON,
   PAYMENT_INTENT_HOLD_TTL_MS,
   PAYMENT_INTENT_TTL_MS,
+  PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
 } from '../constants/payment-intent.constants';
 import { HoldEffect, requirePaymentIntentTransition } from '../domain/payment-intent-transitions';
 import { PaymentErrors } from '../errors/payment.errors';
@@ -260,6 +263,18 @@ export class PaymentIntentService {
    * A rail-B intent whose funds could not be secured stops reserving its place
    * in the payer's windows (see `PaymentIntentRepository.insertAdmittedVoucherIntent`).
    */
+  /**
+   * The payer's open buyer debts (lapsed vouchers, hold still open), oldest
+   * first — see `PaymentIntentRepository.findOutstandingDebts`.
+   */
+  async findOutstandingDebts(
+    organizationId: string,
+    payer: string,
+    limit?: number,
+  ): Promise<OutstandingDebt[]> {
+    return this.intents.findOutstandingDebts(organizationId, payer, limit);
+  }
+
   async abandonUnsecuredVoucher(organizationId: string, intentId: string): Promise<void> {
     await this.intents.abandonUnsecuredVoucherIntent(organizationId, intentId);
   }
@@ -474,6 +489,21 @@ export class PaymentIntentService {
       // `commitRedeemedHold` below, and it supplies the signature. Until then
       // `hold_released_at` stays null, which `repairHoldEffect` must read as
       // *awaiting redemption* rather than as a lost commit — see its own guard.
+      //
+      // Not when the verdict came too late for the voucher (review #2, M3):
+      // past `expiresAt + PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS` the
+      // chain may refuse it before a pass gets to it. The call was served, so
+      // it is still SETTLED — as buyer debt at once: the hold stays open,
+      // nobody is credited, and the buyer re-signs (never a platform payment).
+      if (to === PaymentIntentStatus.SETTLED && this.pastRedemptionLatest(intent)) {
+        await this.intents.lapseRedemption(organizationId, intentId, LATE_VERDICT_LAPSE_CAUSE);
+        this.logger.warn(
+          `Intent ${intentId}: settled ${Math.floor(
+            (Date.now() - intent.expiresAt.getTime()) / 1000,
+          )}s after its voucher expired — too late to redeem; it is buyer debt`,
+        );
+        return this.findById(organizationId, intentId);
+      }
       return intent;
     }
 
@@ -504,6 +534,14 @@ export class PaymentIntentService {
     await this.intents.update({ organizationId, id: intentId }, { holdReleasedAt: new Date() });
 
     return this.findById(organizationId, intentId);
+  }
+
+  /** Whether a rail-B voucher is past the latest it may settle and still be redeemed. */
+  private pastRedemptionLatest(intent: PaymentIntent): boolean {
+    return (
+      Date.now() >
+      intent.expiresAt.getTime() + PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS * 1000
+    );
   }
 
   /**

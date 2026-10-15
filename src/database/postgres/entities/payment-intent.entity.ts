@@ -262,6 +262,18 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   redemptionLastError: string | null;
 
   /**
+   * When this served rail-B call became BUYER DEBT: its voucher can no longer
+   * be redeemed for a reason that is not the provider's, so the hold stays
+   * open and nobody is credited until the buyer signs a replacement voucher
+   * (which clears this) or the debt is written off after 30 days
+   * (`redemption_last_error = 'uncollected:<cause>'`, hold released). While set
+   * with the hold open, the payer's paid calls are refused
+   * (`PAYMENT_DEBT_OUTSTANDING`). NULL otherwise.
+   */
+  @Column({ name: 'redemption_lapsed_at', type: 'timestamptz', nullable: true })
+  redemptionLapsedAt: Date | null;
+
+  /**
    * The agent credential that made the call, when the caller had one (the MCP
    * path). Several credentials of one agent are several delegate keys, so
    * spend is split by it as well as by agent. Null on rows written before the

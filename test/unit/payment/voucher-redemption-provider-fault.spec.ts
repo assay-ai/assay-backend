@@ -98,6 +98,8 @@ function build(rows: RedeemableIntent[], options: Options = {}) {
   const payments = {
     findAwaitingRedemption: jest.fn().mockResolvedValue(rows),
     recordRedemptionError: jest.fn().mockResolvedValue(undefined),
+    lapseRedemption: jest.fn().mockResolvedValue(undefined),
+    recordProviderBlocks: jest.fn().mockResolvedValue(undefined),
   };
   const service = new VoucherRedemptionService(
     payments as never,
@@ -206,7 +208,7 @@ describe('VoucherRedemptionService — a provider blocked on chain forfeits (M1)
     expect(credited(ledger)).toBe(false);
   });
 
-  it('forfeits, not absorbs, a voucher that expired while its payee block was recorded', async () => {
+  it('forfeits, not lapses, a voucher that expired while its payee block was recorded', async () => {
     // The block was lifted after the voucher's deadline; the recorded cause
     // still decides.
     const { service, intents, ledger } = build(
@@ -240,14 +242,15 @@ describe('VoucherRedemptionService — provider fault is read live at close time
 
     expect(intents.releaseHold).toHaveBeenCalledTimes(1);
     expect(credited(ledger)).toBe(false);
+    // Both causes are kept: the provider's, and the refusal that closed it (L5).
     expect(payments.recordRedemptionError).toHaveBeenCalledWith(
       ORG,
       'intent-1',
-      `${PROVIDER_FORFEIT_PREFIX}ProviderBelowMinimumStake`,
+      `${PROVIDER_FORFEIT_PREFIX}ProviderBelowMinimumStake (refused EscrowWindowLimitExceeded)`,
     );
   });
 
-  it('asks the live stake before ANY absorb, not only after VoucherExpired', async () => {
+  it('asks the live stake before ANY lapse, not only after VoucherExpired', async () => {
     const { service, intents, ledger } = build([row()], {
       outcome: RedeemOutcomeKind.UNREDEEMABLE,
       programError: 'DelegateIsRevoked',
@@ -260,8 +263,8 @@ describe('VoucherRedemptionService — provider fault is read live at close time
     expect(credited(ledger)).toBe(false);
   });
 
-  it('keeps the hold open when the stake cannot be read — never absorbs on a failed read', async () => {
-    const { service, intents, ledger } = build([row()], {
+  it('keeps the hold open when the stake cannot be read, inside the landing window', async () => {
+    const { service, intents, ledger, payments } = build([row()], {
       outcome: RedeemOutcomeKind.UNREDEEMABLE,
       programError: 'VoucherExpired',
       belowMinimum: new Error('rpc down'),
@@ -270,11 +273,31 @@ describe('VoucherRedemptionService — provider fault is read live at close time
     await service.run(USDC);
 
     expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
     expect(credited(ledger)).toBe(false);
   });
 
-  it('still absorbs (existing, non-provider cause) when the provider is clean right now', async () => {
-    const { service, ledger } = build([row()], {
+  it('L4: a stake read still failing past the landing window is neutral — buyer debt', async () => {
+    // Past `expiresAt + skew + grace + LANDING_SETTLE_SECONDS`.
+    const { service, intents, ledger, payments } = build(
+      [row({ expiresAt: new Date((NOW - 3 * 3600) * 1000) })],
+      {
+        outcome: RedeemOutcomeKind.UNREDEEMABLE,
+        programError: 'VoucherExpired',
+        belowMinimum: new Error('rpc down'),
+      },
+    );
+
+    await service.run(USDC);
+
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(credited(ledger)).toBe(false);
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherExpired');
+  });
+
+  it('N3: VoucherExpired with no recorded cause and a clean provider is buyer debt', async () => {
+    // A late verdict, an outage or a payer block lifted after the deadline.
+    const { service, intents, ledger, payments } = build([row()], {
       outcome: RedeemOutcomeKind.UNREDEEMABLE,
       programError: 'VoucherExpired',
       belowMinimum: false,
@@ -282,7 +305,51 @@ describe('VoucherRedemptionService — provider fault is read live at close time
 
     await service.run(USDC);
 
-    expect(credited(ledger)).toBe(true);
+    expect(credited(ledger)).toBe(false);
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(ORG, 'intent-1', 'VoucherExpired');
+  });
+
+  it('N1/M1: a recorded ProviderBelowMinimumStake forfeits whatever the closing refusal is', async () => {
+    // The provider unstaked (recorded), the buyer then revoked, and the
+    // provider re-bonded: the chain answers DelegateIsRevoked, the live stake
+    // reads fine — the recorded provider cause still decides.
+    const { service, intents, ledger, payments } = build(
+      [row({ redemptionLastError: 'ProviderBelowMinimumStake' })],
+      {
+        outcome: RedeemOutcomeKind.UNREDEEMABLE,
+        programError: 'DelegateIsRevoked',
+        belowMinimum: false,
+      },
+    );
+
+    await service.run(USDC);
+
+    expect(credited(ledger)).toBe(false);
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
+    expect(payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      `${PROVIDER_FORFEIT_PREFIX}ProviderBelowMinimumStake`,
+    );
+  });
+
+  it('M1: a stored provider_forfeit (release lost in a crash) forfeits again, never lapses', async () => {
+    const { service, intents, ledger, payments } = build(
+      [row({ redemptionLastError: `${PROVIDER_FORFEIT_PREFIX}PayeeBlocked` })],
+      {
+        outcome: RedeemOutcomeKind.UNREDEEMABLE,
+        programError: 'VoucherExpired',
+        belowMinimum: false,
+      },
+    );
+
+    await service.run(USDC);
+
+    expect(credited(ledger)).toBe(false);
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(intents.releaseHold).toHaveBeenCalledTimes(1);
   });
 
   it('never lets a later refusal overwrite a recorded provider-caused one', async () => {
@@ -315,5 +382,36 @@ describe('VoucherRedemptionService — a blocked buyer freezes collection (L4)',
     expect(calls).toEqual([]);
     expect(intents.releaseHold).not.toHaveBeenCalled();
     expect(credited(ledger)).toBe(false);
+  });
+
+  it('M2: records the provider block while held, so the close after both unblocks forfeits', async () => {
+    const blocklist = noBlocks();
+    addBlock(blocklist, { kind: BlockSubjectKind.WALLET, subject: BUYER });
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: PROVIDER_ORG });
+    const pass1 = build([row()], { blocklist });
+
+    await pass1.service.run(USDC);
+
+    expect(pass1.calls).toEqual([]);
+    expect(pass1.intents.releaseHold).not.toHaveBeenCalled();
+    expect(pass1.payments.recordRedemptionError).toHaveBeenCalledWith(
+      ORG,
+      'intent-1',
+      'ProviderBlocked',
+    );
+    // ...and the whole queue gets the same sticky cause, frozen rows included.
+    expect(pass1.payments.recordProviderBlocks).toHaveBeenCalled();
+
+    // Both blocks lifted after the deadline: the recorded cause decides.
+    const pass2 = build([row({ redemptionLastError: 'ProviderBlocked' })], {
+      outcome: RedeemOutcomeKind.UNREDEEMABLE,
+      programError: 'VoucherExpired',
+      belowMinimum: false,
+    });
+    await pass2.service.run(USDC);
+
+    expect(credited(pass2.ledger)).toBe(false);
+    expect(pass2.payments.lapseRedemption).not.toHaveBeenCalled();
+    expect(pass2.intents.releaseHold).toHaveBeenCalledTimes(1);
   });
 });

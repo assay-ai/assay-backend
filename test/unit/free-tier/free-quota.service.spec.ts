@@ -384,6 +384,28 @@ describe('FreeQuotaService — bindings at their published revision', () => {
     await expect(service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID)).resolves.toBeNull();
   });
 
+  it('L3: remaining and limit are summed over the bindings, like the published N', async () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 1000 }, [
+      buildBindingRow('b1', { freeQuotaPerAgent: 10, freeDailyBudget: 1000 }),
+      buildBindingRow('b2', { freeQuotaPerAgent: 5, freeDailyBudget: 1000 }),
+    ]);
+
+    await expect(
+      service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID),
+    ).resolves.toMatchObject({ remaining: 15, limit: 15 });
+  });
+
+  it('L3: capped by the platform per-agent daily headroom', async () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 12 }, [
+      buildBindingRow('b1', { freeQuotaPerAgent: 10, freeDailyBudget: 1000 }),
+      buildBindingRow('b2', { freeQuotaPerAgent: 5, freeDailyBudget: 1000 }),
+    ]);
+
+    await expect(
+      service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID),
+    ).resolves.toMatchObject({ remaining: 12, limit: 12 });
+  });
+
   it('still counts a FREE binding at its published revision', async () => {
     const { service } = buildFreeQuotaHarness({}, [
       buildBindingRow('b1', { mappingVersion: 1, publishedVersion: 1 }),
@@ -450,6 +472,58 @@ describe('FreeQuotaService — reserve: parallel calls cannot overspend (review 
 
     if (first.kind === 'RESERVED') await first.release();
     expect((await service.reservePlatform(input)).kind).toBe('RESERVED');
+  });
+
+  it('L2: says which dial was full — the per-agent quota, then the daily budget', async () => {
+    const { service } = buildFreeQuotaHarness();
+    const full: string[] = [];
+    const reserve = (
+      agentId: string,
+      binding: { id: string; freeQuotaPerAgent: number; freeDailyBudget: number },
+    ) =>
+      service.reserveBinding({
+        organizationId: ORGANIZATION_ID,
+        agentId,
+        binding,
+        onFull: (limit) => full.push(limit),
+      });
+
+    const perAgent = { id: 'b1', freeQuotaPerAgent: 1, freeDailyBudget: 100 };
+    expect(await reserve(AGENT_ID, perAgent)).not.toBeNull();
+    expect(await reserve(AGENT_ID, perAgent)).toBeNull();
+    const budget = { id: 'b2', freeQuotaPerAgent: 10, freeDailyBudget: 1 };
+    expect(await reserve(AGENT_ID, budget)).not.toBeNull();
+    expect(await reserve('another-agent', budget)).toBeNull();
+
+    expect(full).toEqual([
+      FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+      FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET,
+    ]);
+  });
+
+  it('L1: a release after the cache evicted the key does not restart the quota below zero', async () => {
+    const { service, redis, records } = buildFreeQuotaHarness();
+    const binding = { id: 'b1', freeQuotaPerAgent: 1, freeDailyBudget: 100 };
+    const reserve = () =>
+      service.reserveBinding({ organizationId: ORGANIZATION_ID, agentId: AGENT_ID, binding });
+
+    const held = await reserve();
+    expect(held).not.toBeNull();
+    // The call is served and recorded, then the cache evicts every counter
+    // before the reservation's release runs.
+    records.rows.push({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      toolId: TOOL_ID,
+      bindingId: 'b1',
+      createdAt: new Date(T0),
+    });
+    redis.flush();
+    await held!.release();
+
+    expect([...redis.strings.values()].some((value) => Number(value) < 0)).toBe(false);
+    // The next call hydrates from Postgres (one recorded call) and is refused.
+    expect(await reserve()).toBeNull();
   });
 
   it('refuses a binding place once its per-agent quota is taken, even in parallel', async () => {

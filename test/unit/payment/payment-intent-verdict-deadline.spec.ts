@@ -8,6 +8,7 @@ import {
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { MCP_VERIFICATION_DEADLINE_REASON } from '@modules/mcp/constants/mcp.constants';
 import {
+  PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS,
   PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
   PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
 } from '@modules/payment/constants/payment-intent.constants';
@@ -54,6 +55,7 @@ function build(candidates: DuePaymentIntent[]) {
     findDueForVerdictDeadline: jest.fn(async () =>
       candidates.filter((row) => status.get(row.id) === PaymentIntentStatus.VERIFYING),
     ),
+    findDueForWriteOff: jest.fn().mockResolvedValue([]),
   };
   const intents = {
     findById: jest.fn(async (_org: string, id: string) => ({
@@ -93,7 +95,6 @@ describe('PaymentIntentExpiryService — the deadline on verdicts', () => {
     expect(repo.findDueForVerdictDeadline).toHaveBeenCalledWith(
       NOW,
       PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
-      PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
       expect.any(Number),
     );
     expect(intents.resolve).toHaveBeenCalledWith(
@@ -155,25 +156,24 @@ describe('PaymentIntentExpiryService — the deadline on verdicts', () => {
   });
 
   it('leaves the redemption job time to collect before the chain refuses the voucher', () => {
-    // The voucher is redeemable until expiresAt + skew + grace; the sweep
-    // settles at expiresAt + deadline, and the redemption cron runs every minute.
-    const redeemableFor =
-      CLOCK_SKEW_TOLERANCE_SECONDS + REDEEM_GRACE_SECONDS - PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS;
+    // The EVM contract redeems until expiresAt + grace with NO skew
+    // (X402Escrow.sol:784); the sweep settles at expiresAt + deadline, and the
+    // redemption cron runs every minute.
+    const redeemableFor = REDEEM_GRACE_SECONDS - PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS;
     expect(PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS).toBe(900);
     expect(redeemableFor).toBeGreaterThanOrEqual(10 * 60);
   });
 
-  it('stops settling a margin before the chain would refuse the voucher (H1)', () => {
-    // Past this bound the voucher would come back `VoucherExpired`; the row is
-    // left to the hold backstop, which releases the hold and pays nobody.
-    const chainRefusesAt = CLOCK_SKEW_TOLERANCE_SECONDS + REDEEM_GRACE_SECONDS;
-    expect(PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBeLessThan(chainRefusesAt);
-    expect(chainRefusesAt - PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBeGreaterThanOrEqual(
-      5 * 60,
+  it('M3: the latest a voucher is handed to redemption is derived from the chain deadline', () => {
+    // No skew on the chain side: the old 120 + 1,800 - 300 left 180 s, not 300.
+    expect(PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBe(
+      REDEEM_GRACE_SECONDS - PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS,
     );
+    expect(REDEEM_GRACE_SECONDS - PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBe(600);
     expect(PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS).toBeGreaterThan(
       PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
     );
+    expect(CLOCK_SKEW_TOLERANCE_SECONDS).toBeGreaterThan(0); // and not part of the bound
   });
 });
 
@@ -197,7 +197,7 @@ describe('PaymentIntentRepository.findDueForVerdictDeadline — the query', () =
       .mockImplementation(((alias: string) =>
         dataSource.createQueryBuilder(PaymentIntentEntity, alias)) as never);
 
-    await repo.findDueForVerdictDeadline(NOW, 900, 1_620, 50);
+    await repo.findDueForVerdictDeadline(NOW, 900, 50);
     return captured;
   }
 
@@ -221,14 +221,13 @@ describe('PaymentIntentRepository.findDueForVerdictDeadline — the query', () =
     expect(flat).toMatch(/LIMIT 50/);
   });
 
-  it('has an upper bound: never a row the chain would already refuse (H1)', async () => {
-    const { sql, params } = await rendered();
+  it('M3: has no upper bound — a row past the redeemable latest settles into buyer debt', async () => {
+    // `PaymentIntentService.resolve` lapses it; leaving it to the 24 h backstop
+    // released the hold of a call that was served.
+    const { sql } = await rendered();
     const flat = sql.replace(/\s+/g, ' ');
 
-    expect(flat).toMatch(/"intent"\."expires_at" > /);
-    expect(Object.values(params)).toEqual(
-      expect.arrayContaining([new Date(NOW.getTime() - 1_620_000)]),
-    );
+    expect(flat).not.toMatch(/"intent"\."expires_at" > /);
   });
 
   it('skips a row whose verification already computed a REFUND or VOID outcome (L6)', async () => {
@@ -237,6 +236,86 @@ describe('PaymentIntentRepository.findDueForVerdictDeadline — the query', () =
 
     expect(flat).toMatch(
       /NOT EXISTS \(SELECT 1 FROM verification_records vr WHERE vr\.intent_id = "?intent"?\."?id"? AND vr\.settlement_outcome IS NOT NULL AND vr\.settlement_outcome <> 'SETTLE'\)/,
+    );
+  });
+});
+
+describe('PaymentIntentExpiryService — buyer debt write-off (design step 10)', () => {
+  function writeOffBuild(candidates: DuePaymentIntent[], lastError: string | null) {
+    const order: string[] = [];
+    const repo = {
+      findDueForExpiry: jest.fn().mockResolvedValue([]),
+      findDueForHoldBackstop: jest.fn().mockResolvedValue([]),
+      findExpiredWithUnreleasedHold: jest.fn().mockResolvedValue([]),
+      findDueForVerdictDeadline: jest.fn().mockResolvedValue([]),
+      findDueForWriteOff: jest.fn().mockResolvedValue(candidates),
+      findOneBy: jest.fn().mockResolvedValue({ redemptionLastError: lastError }),
+      markWrittenOff: jest.fn(async () => {
+        order.push('mark');
+        return true;
+      }),
+    };
+    const intents = {
+      findById: jest.fn(async (_org: string, id: string) => ({
+        id,
+        agentAccount: 'eip155:46630:0xbuyer',
+        providerId: 'provider-1',
+        price: PRICE,
+      })),
+      releaseHold: jest.fn(async () => {
+        order.push('release');
+        return true;
+      }),
+    };
+    const alerts = { emit: jest.fn().mockResolvedValue(undefined) };
+    const service = new PaymentIntentExpiryService(repo as never, intents as never, alerts);
+    return { service, repo, intents, alerts, order };
+  }
+
+  it('asks for debts lapsed more than 30 days ago', async () => {
+    const { service, repo } = writeOffBuild([], null);
+    await service.sweep(NOW);
+    expect(repo.findDueForWriteOff).toHaveBeenCalledWith(
+      new Date(NOW.getTime() - 30 * 24 * 3_600_000),
+      expect.any(Number),
+    );
+  });
+
+  it('records uncollected:<cause> BEFORE releasing the hold, credits nobody, and warns', async () => {
+    const { service, repo, intents, alerts, order } = writeOffBuild(
+      [{ ...due('debt-1'), status: PaymentIntentStatus.SETTLED }],
+      'DelegateIsRevoked',
+    );
+
+    const report = await service.sweep(NOW);
+
+    expect(repo.markWrittenOff).toHaveBeenCalledWith(
+      'org-1',
+      'debt-1',
+      'uncollected:DelegateIsRevoked',
+    );
+    expect(intents.releaseHold).toHaveBeenCalledWith({
+      organizationId: 'org-1',
+      id: 'debt-1',
+      holdId: 'hold-debt-1',
+    });
+    expect(order).toEqual(['mark', 'release']);
+    expect(report).toMatchObject({ debtsWrittenOff: 1, failed: 0 });
+    expect(alerts.emit).toHaveBeenCalledWith(
+      expect.objectContaining({ name: 'voucher_debt_written_off' }),
+    );
+  });
+
+  it('a write-off retried after a crash keeps a single uncollected: prefix', async () => {
+    const { service, repo } = writeOffBuild(
+      [{ ...due('debt-1'), status: PaymentIntentStatus.SETTLED }],
+      'uncollected:VoucherExpired',
+    );
+    await service.sweep(NOW);
+    expect(repo.markWrittenOff).toHaveBeenCalledWith(
+      'org-1',
+      'debt-1',
+      'uncollected:VoucherExpired',
     );
   });
 });

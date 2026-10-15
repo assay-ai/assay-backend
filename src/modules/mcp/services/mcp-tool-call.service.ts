@@ -239,6 +239,20 @@ export class McpToolCallService {
         );
       }
 
+      // `FREEMIUM` exhausted on a chain with no paid rail (Solana: `rails: []`):
+      // there is nothing to fall through to, so the agent gets the quota
+      // error and its reset time — not `CHAIN_RAIL_NOT_OFFERED`, which would
+      // not tell it that free calls come back at midnight (review #2, L6).
+      if (decision.kind === 'REFUSED' && !paidRailOffered(session.chainId)) {
+        throw McpErrors.quotaExceeded(
+          buildFreeQuotaErrorContext({
+            refusal: { ...decision, fallThroughToPaid: false },
+            toolId: tool.id,
+            paidPrice: null,
+          }),
+        );
+      }
+
       // `FREEMIUM` exhausted, or no free-capable binding could serve — *"fall
       // through to the paid path"*, which is the entire commercial point of the
       // mode and must require no reconfiguration from the agent. Execution
@@ -309,6 +323,7 @@ export class McpToolCallService {
     // exactly such a chain. Refused BEFORE the intent exists, so nothing has to
     // be swept.
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_A_PER_CALL));
+    await this.vouchers.assertNoOutstandingDebt(session.organizationId, session.agentAccount);
 
     // The cap check and the hold it allows run under the agent's spend lock:
     // read and reserve as one step, so concurrent calls cannot all read the
@@ -426,6 +441,11 @@ export class McpToolCallService {
     payment: McpVoucherPayment | null,
   ): Promise<McpCallOutcome> {
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_B_VOUCHER));
+    // A payer that owes for served calls whose vouchers lapsed gets no paid
+    // call — not even a requirement — until it signs the replacements
+    // (`PAYMENT_DEBT_OUTSTANDING`, no-platform-debt design step 9). Free calls
+    // never reach here.
+    await this.vouchers.assertNoOutstandingDebt(session.organizationId, session.agentAccount);
 
     const asset = chainMetadata(session.chainId).settlementAsset as AssetId;
     // One read of the buyer's escrow serves the withdraw gate AND the seq
@@ -785,6 +805,10 @@ export class McpToolCallService {
     // (M5). Only the binding that served keeps its place.
     const places = new Map<string, FreeQuotaReservation>();
     let quotaShed = 0;
+    // Which dial shed a binding: the per-agent quota wins the answer when
+    // any binding hit it, since it is the one this agent can do nothing
+    // about but wait (both reset at the next UTC midnight).
+    let shedLimit: FreeQuotaLimitKind | null = null;
     const releaseAllBut = async (keep: string | null) => {
       await Promise.all(
         [...places].filter(([id]) => id !== keep).map(([, place]) => place.release()),
@@ -807,6 +831,9 @@ export class McpToolCallService {
               organizationId: session.organizationId,
               agentId: session.agentId,
               binding,
+              onFull: (limit) => {
+                if (shedLimit !== FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY) shedLimit = limit;
+              },
             });
             if (place) places.set(binding.id, place);
             else quotaShed += 1;
@@ -820,15 +847,20 @@ export class McpToolCallService {
           if (pricingMode === PricingMode.FREEMIUM) return null;
           // `FREE`, and the only supply left had no quota for this agent:
           // that is the quota answer, not a supply problem.
+          // The dial that actually shed it, through the same refusal (and
+          // notification) as the pre-flight check (review #2, L2).
           if (quotaShed > 0) {
             throw McpErrors.quotaExceeded(
               buildFreeQuotaErrorContext({
-                refusal: {
-                  kind: 'REFUSED',
-                  limit: FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
-                  resetsAt: new Date(new Date().setUTCHours(24, 0, 0, 0)),
-                  fallThroughToPaid: false,
-                },
+                refusal: this.freeQuota.bindingQuotaRefusal(
+                  {
+                    organizationId: session.organizationId,
+                    agentId: session.agentId,
+                    toolId: tool.id,
+                    pricingMode: PricingMode.FREE,
+                  },
+                  shedLimit ?? FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+                ),
                 toolId: tool.id,
                 paidPrice: null,
               }),
@@ -1785,6 +1817,11 @@ export function delegationHint(session: McpSession): string {
         `authorised on chain`
     : `. The payer (${session.agentAccount}) may sign, or a delegate key the payer authorised ` +
         `on chain once it is bound to this credential (POST /agents/me/delegate)`;
+}
+
+/** Whether `chainId` offers any paid rail (`chain-metadata.ts`'s `rails`). */
+function paidRailOffered(chainId: ChainId): boolean {
+  return offersRail(chainId, 'A') || offersRail(chainId, 'B');
 }
 
 function namespaceOf(chainId: ChainId): string {

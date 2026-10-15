@@ -142,12 +142,46 @@ export class GetReceiptResponseDto {
 
   @ApiProperty({
     type: MoneyDto,
-    description: 'Zero for every non-SETTLED terminal status. Always present, even when equal',
+    description:
+      'Zero for every non-SETTLED status, and for a SETTLED call the provider forfeited or ' +
+      'whose debt was written off. Always present, even when equal',
   })
   chargedPrice: MoneyDto;
 
-  @ApiProperty({ type: MoneyDto, description: 'listedPrice − chargedPrice' })
+  @ApiProperty({
+    type: MoneyDto,
+    description:
+      'What the refund guarantee kept back (REFUNDED / VOIDED / EXPIRED with a hold). NOT ' +
+      '`listedPrice − chargedPrice`: a forfeited or written-off call has both zero',
+  })
   withheld: MoneyDto;
+
+  @ApiProperty({
+    description:
+      'SETTLED (the verdict passed), but the provider caused the payment to fail and forfeited ' +
+      'it: not charged, nobody paid. Show "not charged: the provider forfeited"',
+  })
+  forfeited: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    enum: ['OUTSTANDING', 'WRITTEN_OFF'],
+    description:
+      'Buyer debt. `OUTSTANDING`: the payment could not be collected; the price stays held and ' +
+      'is charged once the payer signs a replacement voucher (GET /escrow/debts) — paid calls ' +
+      'are refused until then. `WRITTEN_OFF`: never settled; not charged, provider not paid',
+  })
+  debt: 'OUTSTANDING' | 'WRITTEN_OFF' | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    type: String,
+    description:
+      'Why a SETTLED call is not (yet) charged as usual — the recorded cause, e.g. ' +
+      '`provider_forfeit:ProviderBelowMinimumStake`, `uncollected:DelegateIsRevoked`, or the ' +
+      'lapse cause of an outstanding debt. Null otherwise',
+  })
+  chargeNote: string | null;
 
   @ApiProperty({ type: ReceiptVerdictDto })
   verdict: ReceiptVerdictDto;

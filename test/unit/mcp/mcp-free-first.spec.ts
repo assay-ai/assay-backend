@@ -154,6 +154,38 @@ describe('McpToolCallService — free first, then paid', () => {
     expect(h.intents.rows.size).toBe(0);
   });
 
+  it('still serves a free call while the payer has an open buyer debt', async () => {
+    const h = harness();
+    h.intents.debts = [
+      {
+        id: 'intent-debt-1',
+        organizationId: RAIL_B_SESSION.organizationId,
+        agentAccount: RAIL_B_SESSION.agentAccount,
+        providerId: PAID_PROVIDER,
+        providerAccount: null,
+        toolId: 'tool-1',
+        chainId: CHAIN_ID,
+        assetId: 'x',
+        decimals: 6,
+        priceAmount: '1',
+        requestHash: 'h',
+        voucherResourceHash: null,
+        voucherSeq: '1',
+        lapsedAt: new Date(),
+        cause: 'VoucherExpired',
+        createdAt: new Date(),
+      },
+    ];
+
+    const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      voucher: null,
+    });
+
+    if (outcome.kind !== 'RESULT') throw new Error('expected a RESULT');
+    expect(outcome.receipt.charged.amount).toBe('0');
+  });
+
   it('falls through to the paid path when no free-capable binding can take the call', async () => {
     const h = harness();
     // The free binding drops out between the quote and the call — at its
@@ -239,6 +271,27 @@ describe('McpToolCallService — free first, then paid', () => {
     expect(h.freeQuota.platformPlaces.map((p) => p.released)).toEqual([true]);
   });
 
+  it('L2: names the dial that shed it — a spent daily budget — and builds it through refuse()', async () => {
+    const h = buildMcpHarness({
+      bindings: [buildBinding(FREE_PROVIDER, { pricingMode: PricingMode.FREE, priceAmount: '0' })],
+      providers: [buildProvider(FREE_PROVIDER)],
+      stakes: {},
+      invoker: new ScriptedInvoker({ [`binding-${FREE_PROVIDER}`]: async () => ok() }),
+    });
+    h.freeQuota.noRoomFor.add(`binding-${FREE_PROVIDER}`);
+    h.freeQuota.fullOn.set(`binding-${FREE_PROVIDER}`, FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET);
+
+    const refusal = (await h.calls
+      .call(SESSION, TOOL_NAME, ARGS)
+      .catch((e: unknown) => e)) as AppError;
+
+    expect(refusal.errorCode).toBe('MCP_QUOTA_EXCEEDED');
+    expect(h.freeQuota.bindingRefusals).toEqual([FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET]);
+    expect(JSON.stringify((refusal as unknown as { context?: unknown }).context)).toContain(
+      FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET,
+    );
+  });
+
   it('falls through to paid when a parallel call took the last platform place (M5)', async () => {
     const h = harness();
     h.freeQuota.platformRefusal = {
@@ -262,5 +315,38 @@ describe('McpToolCallService — free first, then paid', () => {
 
     expect(h.freeQuota.platformPlaces.map((p) => p.released)).toEqual([false]);
     expect(h.freeQuota.consumed).toEqual([`binding-${FREE_PROVIDER}`]);
+  });
+});
+
+describe('McpToolCallService — FREEMIUM on a chain with no paid rail (review #2, L6)', () => {
+  // Solana as shipped: `rails: []`. No rail is re-opened here.
+  it('answers MCP_QUOTA_EXCEEDED with the reset time, not CHAIN_RAIL_NOT_OFFERED', async () => {
+    const invoker = new ScriptedInvoker({
+      'binding-provider-a': async () => ok('free'),
+      'binding-provider-b': async () => ok('paid'),
+    });
+    const h = buildMcpHarness({
+      bindings: [
+        buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' }),
+        buildBinding('provider-b', { priceAmount: usdc('0.05').amount }),
+      ],
+      providers: [buildProvider('provider-a'), buildProvider('provider-b')],
+      stakes: { 'provider-b': usdc(1000) },
+      invoker,
+    });
+    h.freeQuota.decision = {
+      kind: 'REFUSED',
+      limit: FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+      resetsAt: new Date('2026-10-17T00:00:00.000Z'),
+      fallThroughToPaid: true,
+    };
+
+    const refusal = (await h.calls
+      .call(SESSION, 'Search the web', { query: 'moon landing' })
+      .catch((e: unknown) => e)) as AppError & { context?: Record<string, unknown> };
+
+    expect(refusal.errorCode).toBe('MCP_QUOTA_EXCEEDED');
+    expect(JSON.stringify(refusal.context)).toContain('2026-10-17T00:00:00.000Z');
+    expect(invoker.invocations).toHaveLength(0);
   });
 });

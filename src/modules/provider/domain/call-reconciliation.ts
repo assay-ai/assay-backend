@@ -75,12 +75,20 @@ export enum CallReconciliationClass {
    */
   PAID_AWAITING_REDEMPTION = 'PAID_AWAITING_REDEMPTION',
   /**
-   * Rail B: verified and credited, but the voucher could never be redeemed
-   * (`DelegateIsRevoked`, …), so the credit came out of platform funds and no
-   * platform fee was taken. Reported apart from `PAID_CREDITED` because the
-   * chain holds no redemption for it.
+   * Rail B: verified and `SETTLED`, but the voucher lapsed for a reason that
+   * is not the provider's (a buyer tightening, an outage, a late verdict), so
+   * the call is BUYER DEBT: the buyer's hold is still open, nobody is credited
+   * yet, and the provider is paid from the buyer's escrow once the buyer signs
+   * a replacement voucher. The platform never pays it.
    */
-  PLATFORM_ABSORBED = 'PLATFORM_ABSORBED',
+  PAID_BUYER_DEBT = 'PAID_BUYER_DEBT',
+  /**
+   * Rail B: verified and `SETTLED`, but never collected from the buyer — the
+   * debt was written off after 30 days (or, for historical rows, the platform
+   * absorbed it before buyer debt existed). The provider is not paid and no fee
+   * was taken; nothing is owed by anyone.
+   */
+  PAID_UNCOLLECTED = 'PAID_UNCOLLECTED',
   /**
    * Rail B: verified and `SETTLED`, but the provider caused the voucher to
    * fail (stake below the minimum, or blocked), so it forfeited the call: the
@@ -119,8 +127,13 @@ export interface CallReconciliationCandidate {
    * redeemed on chain. Optional; absent means not awaiting.
    */
   readonly awaitingRedemption?: boolean;
-  /** Credited from platform funds (`platform_absorbed:` credit). Optional; absent means not. */
-  readonly platformAbsorbed?: boolean;
+  /**
+   * Never collected from the buyer: a written-off debt (`uncollected:` cause)
+   * or a legacy `platform_absorbed:` credit. Optional; absent means not.
+   */
+  readonly uncollected?: boolean;
+  /** Open buyer debt (`redemption_lapsed_at`, hold open). Optional; absent means not. */
+  readonly debtOutstanding?: boolean;
   /** The provider forfeited the voucher (`provider_forfeit:` cause). Optional; absent means not. */
   readonly forfeited?: boolean;
   /**
@@ -165,16 +178,16 @@ export function classifyForReconciliation(
   switch (candidate.status) {
     case 'SETTLED':
       if (candidate.awaitingRedemption) return CallReconciliationClass.PAID_AWAITING_REDEMPTION;
-      // Before `credited`: a forfeited row is not credited, and it is not an
-      // unresolved PENDING either — it is closed, and nobody was paid.
+      if (candidate.debtOutstanding) return CallReconciliationClass.PAID_BUYER_DEBT;
+      // Before `credited`: a forfeited or uncollected row is not credited, and
+      // it is not an unresolved PENDING either — it is closed, and nobody was paid.
       if (candidate.forfeited) return CallReconciliationClass.PROVIDER_FORFEITED;
+      if (candidate.uncollected) return CallReconciliationClass.PAID_UNCOLLECTED;
       // Settled with no credit behind it: the money side is unresolved, and
       // calling it PAID_CREDITED would claim a credit the ledger does not hold
       // (BUG-R2-V3-03). The earnings report counts it as neither earned nor withheld.
       if (candidate.credited === false) return CallReconciliationClass.PENDING;
-      return candidate.platformAbsorbed
-        ? CallReconciliationClass.PLATFORM_ABSORBED
-        : CallReconciliationClass.PAID_CREDITED;
+      return CallReconciliationClass.PAID_CREDITED;
     case 'REFUNDED':
       return CallReconciliationClass.PAID_UNCREDITED;
     case 'VOIDED':
