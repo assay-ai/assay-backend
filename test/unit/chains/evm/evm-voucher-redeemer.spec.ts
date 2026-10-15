@@ -423,9 +423,11 @@ describe('EvmVoucherRedeemer', () => {
     ['MalleableSignature', RedeemOutcomeKind.UNREDEEMABLE],
     ['VoucherSeqGapTooLarge', RedeemOutcomeKind.UNREDEEMABLE],
     ['DelegateWindowLimitExceeded', RedeemOutcomeKind.RETRY],
-    ['DelegateVoucherExceedsPerCallLimit', RedeemOutcomeKind.UNREDEEMABLE],
-    ['DelegateIsRevoked', RedeemOutcomeKind.UNREDEEMABLE],
-    ['DelegateIsExpired', RedeemOutcomeKind.UNREDEEMABLE],
+    // A re-grant or a raised cap before the deadline revives the same voucher,
+    // so these are retried until then (review-buyer-debt M3).
+    ['DelegateVoucherExceedsPerCallLimit', RedeemOutcomeKind.RETRY],
+    ['DelegateIsRevoked', RedeemOutcomeKind.RETRY],
+    ['DelegateIsExpired', RedeemOutcomeKind.RETRY],
     ['EscrowInsufficient', RedeemOutcomeKind.RETRY],
     ['VoucherNotYetValid', RedeemOutcomeKind.RETRY],
     ['ProviderBelowMinimumStake', RedeemOutcomeKind.RETRY],
@@ -599,7 +601,7 @@ describe('EvmVoucherRedeemer', () => {
       const outcome = await redeemer.redeem(request(0));
       expect(sendCall).not.toHaveBeenCalled();
       expect(outcome).toMatchObject({
-        kind: RedeemOutcomeKind.UNREDEEMABLE,
+        kind: RedeemOutcomeKind.RETRY,
         programError: 'DelegateIsRevoked',
       });
     });
@@ -632,19 +634,19 @@ describe('EvmVoucherRedeemer', () => {
     };
 
     it.each([
-      ['revoked', { ...live, revoked: true }, 'DelegateIsRevoked', RedeemOutcomeKind.UNREDEEMABLE],
+      ['revoked', { ...live, revoked: true }, 'DelegateIsRevoked', RedeemOutcomeKind.RETRY],
       [
         'lapsed',
         { ...live, validUntil: BigInt(NOW - 1) },
         'DelegateIsExpired',
-        RedeemOutcomeKind.UNREDEEMABLE,
+        RedeemOutcomeKind.RETRY,
       ],
       ['never authorised', { validUntil: 0n }, 'SignerIsNotPayer', RedeemOutcomeKind.UNREDEEMABLE],
       [
         'over its per-voucher cap',
         { ...live, maxVoucherAmount: 999_999n },
         'DelegateVoucherExceedsPerCallLimit',
-        RedeemOutcomeKind.UNREDEEMABLE,
+        RedeemOutcomeKind.RETRY,
       ],
       [
         'over its window',
@@ -678,7 +680,7 @@ describe('EvmVoucherRedeemer', () => {
       expect((decoded.args as unknown as unknown[][])[0]).toHaveLength(2);
       expect(outcomes.map((o) => o.kind)).toEqual([
         RedeemOutcomeKind.REDEEMED,
-        RedeemOutcomeKind.UNREDEEMABLE,
+        RedeemOutcomeKind.RETRY,
         RedeemOutcomeKind.REDEEMED,
       ]);
     });

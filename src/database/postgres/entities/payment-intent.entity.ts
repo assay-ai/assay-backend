@@ -274,6 +274,25 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   redemptionLapsedAt: Date | null;
 
   /**
+   * When the buyer's REPLACEMENT voucher for this debt was accepted
+   * (`PaymentIntentRepository.replaceLapsedVoucher`). The row is back in the
+   * redemption queue, but it is still debt: `redemption_lapsed_at` is kept (the
+   * write-off clock does not restart) and the payer's paid calls stay refused
+   * until the replacement is collected. Cleared when the replacement lapses
+   * too. NULL otherwise.
+   */
+  @Column({ name: 'redemption_replaced_at', type: 'timestamptz', nullable: true })
+  redemptionReplacedAt: Date | null;
+
+  /**
+   * The `resource` the rail-B voucher signed (`/mcp/tools/<name>`), so a
+   * debt's replacement can be built after the tool was renamed or deleted.
+   * NULL on rail A and on rows written before the column.
+   */
+  @Column({ name: 'voucher_resource', type: 'text', nullable: true })
+  voucherResource: string | null;
+
+  /**
    * The agent credential that made the call, when the caller had one (the MCP
    * path). Several credentials of one agent are several delegate keys, so
    * spend is split by it as well as by agent. Null on rows written before the

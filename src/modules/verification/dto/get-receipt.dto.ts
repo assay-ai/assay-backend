@@ -165,13 +165,15 @@ export class GetReceiptResponseDto {
 
   @ApiPropertyOptional({
     nullable: true,
-    enum: ['OUTSTANDING', 'WRITTEN_OFF'],
+    enum: ['OUTSTANDING', 'WRITTEN_OFF', 'VOIDED'],
     description:
       'Buyer debt. `OUTSTANDING`: the payment could not be collected; the price stays held and ' +
       'is charged once the payer signs a replacement voucher (GET /escrow/debts) — paid calls ' +
-      'are refused until then. `WRITTEN_OFF`: never settled; not charged, provider not paid',
+      'are refused until then. `WRITTEN_OFF`: never settled; not charged, provider not paid, ' +
+      'and paid calls stay refused until it is signed. `VOIDED`: the call failed verification ' +
+      'after it had become debt; not charged, nobody paid',
   })
-  debt: 'OUTSTANDING' | 'WRITTEN_OFF' | null;
+  debt: 'OUTSTANDING' | 'WRITTEN_OFF' | 'VOIDED' | null;
 
   @ApiPropertyOptional({
     nullable: true,

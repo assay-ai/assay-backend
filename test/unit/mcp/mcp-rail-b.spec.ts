@@ -130,6 +130,10 @@ describe('rail B over MCP', () => {
       lapsedAt: new Date('2026-10-16T00:00:00Z'),
       cause: 'DelegateIsRevoked',
       createdAt: new Date('2026-10-15T23:30:00Z'),
+      agentId: 'agent-1',
+      voucherResource: null,
+      replacedAt: null,
+      writtenOff: false,
     };
 
     it('refuses a paid call with PAYMENT_DEBT_OUTSTANDING before any requirement or seq', async () => {

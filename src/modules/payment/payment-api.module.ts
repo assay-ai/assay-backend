@@ -5,6 +5,7 @@ import Redis from 'ioredis';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { FeePayerSignerModule } from '@modules/chains/facilitator/signing/fee-payer-signer.module';
 import { McpModule } from '@modules/mcp/mcp.module';
+import { SpendPolicyModule } from '@modules/spend-policy/spend-policy.module';
 import { RedisDemoRateLimiter } from '@modules/mcp/services/redis-demo-rate-limiter.service';
 import { ToolModule } from '@modules/tool/tool.module';
 
@@ -48,8 +49,17 @@ import { NextSeqService } from './services/next-seq.service';
  */
 @Module({
   // `ToolModule` for `TOOL_CATALOGUE`: a debt's replacement voucher names the
-  // tool's resource, and the intent keeps only the tool id.
-  imports: [PaymentModule, McpModule, ChainsModule, FeePayerSignerModule, ToolModule],
+  // tool's resource, and an intent older than `voucher_resource` keeps only the
+  // tool id. `SpendPolicyModule`: a delegate-signed replacement meets the
+  // agent's spend policy (review-buyer-debt M4).
+  imports: [
+    PaymentModule,
+    McpModule,
+    ChainsModule,
+    FeePayerSignerModule,
+    ToolModule,
+    SpendPolicyModule,
+  ],
   controllers: [ToolCallsController, DepositsController, EscrowController],
   providers: [
     NextSeqService,

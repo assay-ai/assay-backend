@@ -2,8 +2,12 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import {
   DuePaymentIntent,
+  NO_REDEMPTION_EXCLUSIONS,
   PaymentIntentRepository,
+  RedemptionExclusions,
 } from '@database/postgres/repositories/payment-intent.repository';
+import { BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { MCP_VERIFICATION_DEADLINE_REASON } from '@modules/mcp/constants/mcp.constants';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
@@ -12,6 +16,7 @@ import {
   PAYMENT_INTENT_EXPIRY_SWEEP_BATCH,
   PAYMENT_INTENT_HOLD_BACKSTOP_REASON,
   PAYMENT_INTENT_HOLD_REPAIR_REASON,
+  PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
   PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
 } from '../constants/payment-intent.constants';
 import {
@@ -42,6 +47,11 @@ export interface PaymentIntentSweepReport {
   readonly repaired: number;
   /** Buyer debts written off: unsettled for `BUYER_DEBT_WRITE_OFF_DAYS`, provider not paid. */
   readonly debtsWrittenOff: number;
+  /**
+   * Forfeited, written-off or voided rows whose hold release had not landed,
+   * released now (review-buyer-debt L2). Counted in `repaired` too.
+   */
+  readonly closedReleased?: number;
   /** Intents this pass could not finish. They are retried on the next one. */
   readonly failed: number;
 }
@@ -94,6 +104,10 @@ export class PaymentIntentExpiryService {
     private readonly intents: PaymentIntentRepository,
     private readonly paymentIntents: PaymentIntentService,
     @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
+    // The platform blocklist: a blocked payer's debt is not written off
+    // (blocking freezes collection, review-buyer-debt L1). Optional so a
+    // spec that builds the sweep by hand need not stand one up.
+    @Optional() private readonly blocklist: AccountBlocklistService | null = null,
   ) {}
 
   async sweep(
@@ -146,7 +160,10 @@ export class PaymentIntentExpiryService {
       }
     }
 
-    const { repaired, repairFailures } = await this.repair(limit);
+    const repairedOpen = await this.repair(limit);
+    const closed = await this.releaseClosed(limit);
+    const repaired = repairedOpen.repaired + closed.released;
+    const repairFailures = repairedOpen.repairFailures + closed.failed;
     const writeOff = await this.writeOffDebts(now, limit);
     failed += writeOff.failed;
     const debtsWrittenOff = writeOff.writtenOff;
@@ -176,46 +193,69 @@ export class PaymentIntentExpiryService {
       holdsReleased,
       repaired,
       debtsWrittenOff,
+      closedReleased: closed.released,
       failed: failed + repairFailures,
     };
   }
 
   /**
    * Writes off buyer debts unsettled for {@link BUYER_DEBT_WRITE_OFF_DAYS}
-   * since they lapsed (owner decision, no-platform-debt design step 10): the
-   * buyer's hold is released and **the provider is not paid** — nobody owes
-   * anything afterwards, the platform least of all. Recorded on the intent as
-   * `uncollected:<cause>` BEFORE the release, so a crash between the two
-   * leaves an open hold the next pass writes off again (the release is
-   * idempotent).
+   * since they FIRST lapsed (owner decision, no-platform-debt design step 10):
+   * the buyer's hold is released and **the provider is not paid** — the
+   * platform pays nothing.
+   *
+   * The `uncollected:<cause>` mark and the release commit in ONE ledger
+   * transaction under the payer's admission lock, and only while the row is
+   * still the debt this pass read (review-buyer-debt M1): a replacement the
+   * buyer signed in between, or a debt settled meanwhile, is skipped — its
+   * hold is never released under it.
+   *
+   * Not written off: a debt whose replacement is being collected, and the
+   * debt of a payer, payer organization or delegate that is BLOCKED —
+   * blocking a buyer freezes collection, the clock included (L1); it is
+   * written off on the first pass after the block is lifted.
+   *
+   * A written-off debt still refuses the payer's paid calls (H1 interim, see
+   * `DEBT_REFUSING_SQL`), and the buyer can still settle it.
    */
   private async writeOffDebts(
     now: Date,
     limit: number,
   ): Promise<{ writtenOff: number; failed: number }> {
     const before = new Date(now.getTime() - BUYER_DEBT_WRITE_OFF_DAYS * 24 * 3_600_000);
-    const due = await this.intents.findDueForWriteOff(before, limit);
+    const due = await this.intents.findDueForWriteOff(before, limit, this.blockedPayers());
     let writtenOff = 0;
     let failed = 0;
     for (const candidate of due) {
       try {
+        if (!candidate.holdId) continue;
         const intent = await this.paymentIntents.findById(candidate.organizationId, candidate.id);
         const cause = (await this.lapseCauseOf(candidate)) ?? 'unknown';
         const reason = cause.startsWith(UNCOLLECTED_PREFIX)
           ? cause
           : `${UNCOLLECTED_PREFIX}${cause}`;
-        await this.intents.markWrittenOff(candidate.organizationId, candidate.id, reason);
-        if (candidate.holdId) {
-          await this.paymentIntents.releaseHold({
+        const done = await this.paymentIntents.writeOffDebt(
+          {
             organizationId: candidate.organizationId,
             id: candidate.id,
+            payer: candidate.agentAccount ?? intent.agentAccount,
             holdId: candidate.holdId,
-          });
+          },
+          reason,
+          before,
+        );
+        if (!done) {
+          this.logger.log(
+            `Intent ${candidate.id}: no longer the debt this pass read (settled, replaced or ` +
+              `written off meanwhile) — not written off, hold left alone`,
+          );
+          continue;
         }
         writtenOff += 1;
         this.logger.warn(
           `Intent ${candidate.id}: buyer debt unsettled for ${BUYER_DEBT_WRITE_OFF_DAYS} days — ` +
-            `written off (${reason}). The buyer's hold is released and the provider is not paid.`,
+            `written off (${reason}). The buyer's hold is released and the provider is not paid; ` +
+            `the payer's paid calls stay refused until it re-signs.`,
         );
         await this.alerts
           ?.emit({
@@ -223,7 +263,7 @@ export class PaymentIntentExpiryService {
             name: VOUCHER_REDEMPTION_ALERTS.DEBT_WRITTEN_OFF,
             summary:
               `A buyer debt was not settled within ${BUYER_DEBT_WRITE_OFF_DAYS} days and was ` +
-              `written off: the provider is not paid, and nobody owes it`,
+              `written off: the provider is not paid, and the payer stays refused paid calls`,
             details: {
               intentId: candidate.id,
               buyer: intent.agentAccount,
@@ -240,6 +280,52 @@ export class PaymentIntentExpiryService {
       }
     }
     return { writtenOff, failed };
+  }
+
+  /** The platform's standing payer-side blocks, in the shape the queue reads take. */
+  private blockedPayers(): RedemptionExclusions {
+    if (!this.blocklist) return NO_REDEMPTION_EXCLUSIONS;
+    const organizationIds: string[] = [];
+    const walletKeys: string[] = [];
+    for (const hit of this.blocklist.list()) {
+      const key = subjectKey(hit.subjectKind, hit.subject);
+      if (!key) continue;
+      (hit.subjectKind === BlockSubjectKind.ORGANIZATION ? organizationIds : walletKeys).push(key);
+    }
+    return { organizationIds, walletKeys, chainAccounts: [] };
+  }
+
+  /**
+   * Releases the hold of a rail-B row closed for good — the provider
+   * forfeited it, or its debt was written off or voided — whose release never
+   * landed (a crash between the mark and the release). The redemption queue
+   * leaves such rows out, so this is what finishes them (review-buyer-debt
+   * L2). The release is idempotent.
+   */
+  private async releaseClosed(limit: number): Promise<{ released: number; failed: number }> {
+    const closed = await this.intents.findClosedWithOpenHold(limit);
+    let released = 0;
+    let failed = 0;
+    for (const candidate of closed) {
+      try {
+        await this.paymentIntents.releaseHold({
+          organizationId: candidate.organizationId,
+          id: candidate.id,
+          holdId: candidate.holdId as string,
+        });
+        released += 1;
+        this.logger.warn(
+          `Intent ${candidate.id}: closed (forfeited, written off or voided) with its hold ` +
+            `still open; hold ${candidate.holdId} released`,
+        );
+      } catch (error) {
+        failed += 1;
+        this.logger.error(
+          `Intent ${candidate.id}: could not release the hold of a closed row. ${describe(error)}`,
+        );
+      }
+    }
+    return { released, failed };
   }
 
   /** The refusal the debt lapsed on, as recorded on the intent. */
@@ -262,7 +348,19 @@ export class PaymentIntentExpiryService {
    *
    * Idempotent through the status compare-and-swap. A verdict that lands
    * first wins and this candidate is skipped (a lost race, not a failure); a
-   * verdict that lands after loses its own CAS and moves no money.
+   * verdict that lands after loses its own CAS — and, if it is a FAIL /
+   * REFUND / VOID for a row that became debt, VOIDS that debt
+   * (`PaymentIntentService.voidDebt`, review-buyer-debt M2): the buyer is
+   * never asked to pay for a call that failed verification.
+   *
+   * Only `VERIFYING` rows, i.e. calls the provider answered: there is no upper
+   * bound on age, because a served call is the buyer's to pay (as debt when it
+   * is too late to redeem). A call that was never served — still
+   * `FUNDS_SECURED` or `PROVIDER_EXECUTING` — is never settled here; the
+   * 24-hour hold backstop releases it, as before. So does a `VERIFYING` row
+   * whose verification already rejected the call (the repository leaves it
+   * out). Settling rows past the redemption latest pages once per incident,
+   * so a stuck verification worker does not quietly put buyers in debt.
    */
   private async settleOverdueVerdicts(
     now: Date,
@@ -276,9 +374,14 @@ export class PaymentIntentExpiryService {
 
     let settled = 0;
     let failed = 0;
+    let asDebt = 0;
     for (const candidate of overdue) {
       try {
         const intent = await this.paymentIntents.findById(candidate.organizationId, candidate.id);
+        const tooLate =
+          intent.expiresAt instanceof Date &&
+          now.getTime() >
+            intent.expiresAt.getTime() + PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS * 1000;
         await this.paymentIntents.resolve(
           candidate.organizationId,
           candidate.id,
@@ -287,9 +390,11 @@ export class PaymentIntentExpiryService {
           { reason: MCP_VERIFICATION_DEADLINE_REASON, settledAmount: intent.price },
         );
         settled += 1;
+        if (tooLate) asDebt += 1;
         this.logger.warn(
           `Intent ${candidate.id}: no verdict ${PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS}s after ` +
-            `its voucher expired — settled as served, unverified, for redemption`,
+            `its voucher expired — settled as served, unverified, ` +
+            `${tooLate ? 'as buyer debt (too late to redeem)' : 'for redemption'}`,
         );
       } catch (error) {
         if (isInvalidStateTransition(error)) continue;
@@ -298,6 +403,20 @@ export class PaymentIntentExpiryService {
           `Intent ${candidate.id}: verdict-deadline settle failed. ${describe(error)}`,
         );
       }
+    }
+    if (asDebt > 0) {
+      await this.alerts
+        ?.emit({
+          severity: AlertSeverity.WARN,
+          name: VOUCHER_REDEMPTION_ALERTS.VERDICT_DEADLINE_DEBT,
+          summary:
+            `${asDebt} served call(s) had no verdict until past their voucher's redemption ` +
+            `deadline and became buyer debt — is the verification worker down?`,
+          details: { count: asDebt },
+          aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+          dedupeKey: VOUCHER_REDEMPTION_ALERTS.VERDICT_DEADLINE_DEBT,
+        })
+        .catch(() => undefined);
     }
     return { settled, failed };
   }

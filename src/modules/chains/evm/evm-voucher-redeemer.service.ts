@@ -103,12 +103,6 @@ const UNREDEEMABLE: ReadonlySet<string> = new Set([
   'InvalidSignature',
   'MalleableSignature',
   'BadSignatureV',
-  // Agent payment delegation. Only a NEW grant by the payer revives any of
-  // these, and the payer then decides afresh; retrying until the voucher's
-  // deadline only re-broadcasts a known refusal (review S2-2).
-  'DelegateIsRevoked',
-  'DelegateIsExpired',
-  'DelegateVoucherExceedsPerCallLimit',
 ]);
 
 /**
@@ -125,6 +119,14 @@ const RETRYABLE: ReadonlySet<string> = new Set([
   // A delegate's window decays. Pre-validation and the simulation before every
   // send keep the retry from costing gas: nothing is broadcast until it fits.
   'DelegateWindowLimitExceeded',
+  // Agent payment delegation, tightened by the payer. A re-grant or a raised
+  // cap before the voucher's deadline makes the SAME signed voucher valid
+  // again, so these are retried until then rather than turned into buyer
+  // debt at once (review-buyer-debt M3). Pre-validation refuses them before
+  // any send, so the retries cost no gas.
+  'DelegateIsRevoked',
+  'DelegateIsExpired',
+  'DelegateVoucherExceedsPerCallLimit',
 ]);
 
 /** `r || s || v`, 65 bytes. */
