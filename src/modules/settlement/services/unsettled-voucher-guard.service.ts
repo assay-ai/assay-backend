@@ -58,8 +58,9 @@ export interface UnsettledScope {
  *
  * Both the escrow's limits and a delegate's grant are applied by the chain at
  * REDEMPTION, minutes after the call was served. A buyer who lowers either
- * below what those payments need makes the chain refuse them, and the
- * platform pays the provider. Two defences, both here:
+ * below what those payments need makes the chain refuse them, and the calls
+ * become buyer debt the buyer must re-sign (the platform never pays them).
+ * Two defences, both here:
  *
  * - **Refuse, unless acknowledged.** The intent route (before the wallet is
  *   asked) and the submit route (before the relayer spends gas) compare the

@@ -24,9 +24,9 @@ export enum RedeemOutcomeKind {
    * `redeem_voucher.rent_payer` must equal `Config.redeemer`, so a process
    * paying with any other key is refused `NotRedeemer` on **every** hold it
    * touches. Filing that as `RETRY` would hammer one misconfiguration once a
-   * minute for ever and file nothing; as `UNREDEEMABLE` it would hand every
-   * buyer their money back and pay every provider out of platform funds for a
-   * fault that a single `update_config` fixes. It is neither: the vouchers are
+   * minute for ever and file nothing; as `UNREDEEMABLE` it would turn every
+   * served call into buyer debt for a fault that a single `update_config`
+   * fixes. It is neither: the vouchers are
    * all still good and none of them may be attempted again until somebody acts.
    */
   MISCONFIGURED = 'MISCONFIGURED',
@@ -158,7 +158,7 @@ export interface VoucherRedeemerPort {
    * minimum RIGHT NOW — a live read, not a cache. Throws when it cannot tell.
    *
    * Asked when a voucher is closed unredeemed: a provider below the minimum
-   * forfeits instead of being paid by the platform, whatever error the last
+   * forfeits instead of becoming buyer debt, whatever error the last
    * retry happened to record (review 2026-10-15, M3). Optional: a chain
    * without it decides from the recorded refusals alone.
    */

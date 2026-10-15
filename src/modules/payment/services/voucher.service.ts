@@ -874,7 +874,7 @@ export class VoucherService {
         }
         // Below a seq already admitted for this payer and still bound for the
         // chain: that one's redemption advances `seqHigh` past this one, which
-        // then dies and is paid by the platform (review 2026-10-15 P-2). Under
+        // then dies and lapses into buyer debt (review 2026-10-15 P-2). Under
         // the payer's lock, so two admissions cannot both pass it. Equal is
         // this very seq admitted by a concurrent call — a replay; below is a
         // seq never used, signed out of order beside a parallel call — stale,

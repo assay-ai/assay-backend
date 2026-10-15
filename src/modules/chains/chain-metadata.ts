@@ -64,7 +64,8 @@ export interface ChainMetadata {
    * Rail A is off on Solana for as long as rail B is. Rail A spends a ledger
    * mirror of the buyer's own escrow and never debits the escrow on chain, so
    * a buyer can withdraw the deposit and keep the calls it paid for, and the
-   * provider credit is then money the platform owes (review 2026-10-15, C1).
+   * provider credit then has no buyer money behind it (review 2026-10-15, C1);
+   * the platform never pays it.
    * An empty list means the chain serves free calls only: every paid call is
    * refused with `CHAIN_RAIL_NOT_OFFERED` (4xx) before an intent exists.
    *
