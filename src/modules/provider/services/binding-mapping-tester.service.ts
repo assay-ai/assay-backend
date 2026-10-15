@@ -26,7 +26,8 @@ import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-cata
 import { Tool, ToolBinding } from '@modules/tool/ports/tool.types';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
 import { PolicyMode, VerificationPolicy } from '@modules/verification/domain/policy.types';
-import { StageResult } from '@modules/verification/domain/stage';
+import { RuleOutcome } from '@modules/verification/domain/rules/rule.types';
+import { StageResult, VerificationStage, stageRan } from '@modules/verification/domain/stage';
 import { creditsProvider, isProviderAtFault } from '@modules/verification/domain/verdict';
 import { verify } from '@modules/verification/domain/engine';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
@@ -282,6 +283,20 @@ export class BindingMappingTesterService {
         firstFailingStageDetail(verification.stages) ?? `Verification returned ${verdict}.`,
         MappingFault.PROVIDER,
       );
+    } else if (
+      verdict !== null &&
+      creditsProvider(verdict) &&
+      !evaluatedAnyCheck(verification.stages)
+    ) {
+      // Every check was skipped: no schema to hold the response against and no
+      // rule that applied. The engine still says `PASS` (nothing objected), but
+      // nothing was judged either, and `TESTER_PASSED` must not rest on that.
+      layers.inconclusive(
+        BindingTestLayer.VERIFICATION,
+        'no_check_evaluated',
+        'Verification evaluated no check: the tool declares no output schema and no ' +
+          'verification rule applied to this response.',
+      );
     } else if (verdict !== null && creditsProvider(verdict)) {
       layers.passed(BindingTestLayer.VERIFICATION);
     } else {
@@ -504,6 +519,20 @@ function rawBodyOf(response: ProviderResponse): string | null {
     default:
       return null;
   }
+}
+
+/**
+ * Whether verification actually judged something: a stage that ran (schema,
+ * semantic), or at least one deterministic rule that applied. The
+ * deterministic stage reports `PASSED` with a score of 1 when no rule applied,
+ * so its stage status alone does not say a check was evaluated.
+ */
+export function evaluatedAnyCheck(stages: readonly StageResult[]): boolean {
+  return stages.some((stage) =>
+    stage.stage === VerificationStage.DETERMINISTIC_RULES
+      ? (stage.rules ?? []).some((rule) => rule.outcome !== RuleOutcome.NOT_APPLICABLE)
+      : stageRan(stage.status),
+  );
 }
 
 function firstFailingStageCode(stages: readonly StageResult[]): string | null {
