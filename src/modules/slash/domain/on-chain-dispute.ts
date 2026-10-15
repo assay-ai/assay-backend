@@ -114,6 +114,18 @@ function stateOfRecords(records: readonly OnChainRecordMirror[]): OnChainDispute
 }
 
 /**
+ * Whether the case's records, once nothing of them stands, were closed by the
+ * arbiter's (or admin's) `cancelSlash` rather than expired: the case state
+ * from its records is {@link OnChainDisputeState.CANCELLED}. The same
+ * precedence the case screen's `chainState` uses, so a closure recorded from
+ * this reads the same as the screen (an unruled dispute among the records
+ * makes it EXPIRED, not cancelled).
+ */
+export function cancelledByArbiter(records: readonly OnChainRecordMirror[]): boolean {
+  return records.length > 0 && stateOfRecords(records) === OnChainDisputeState.CANCELLED;
+}
+
+/**
  * Review N-4: the provider may dispute on chain until the earliest door of a
  * record still pending and never disputed (a record is disputed at most
  * once), whatever its siblings or the case status say. `null` when none.

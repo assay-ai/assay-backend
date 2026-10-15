@@ -1338,6 +1338,58 @@ describe('proposeDue', () => {
     expect(saved.chainLastError).toBe('VerifierRevoked');
   });
 
+  describe('closeCancelledOnChain (audit D3)', () => {
+    const disputedCase = (overrides: Record<string, unknown> = {}) =>
+      proposable({
+        id: 'p1',
+        status: 'DISPUTED',
+        chainStatus: 'DISPUTED',
+        ...overrides,
+      });
+
+    it("records the arbiter's cancelSlash as CHAIN_ARBITER, not as a chain void", async () => {
+      const { service, proposals } = build();
+      proposals.seed(disputedCase());
+      await service.closeCancelledOnChain(proposals.rows.get('p1')!, 'arbiter', {
+        byArbiter: true,
+      });
+      const saved = proposals.rows.get('p1')!;
+      expect(saved.status).toBe(SlashProposalStatus.CANCELLED);
+      expect(saved.resolutionKind).toBe(ResolutionKind.CHAIN_ARBITER);
+      expect(saved.chainStatus).toBe('CANCELLED');
+      expect(saved.outcome).toBeNull();
+      expect(saved.resolvedAt).not.toBeNull();
+    });
+
+    it('keeps AUTO_CHAIN_VOIDED for an expiry', async () => {
+      const { service, proposals } = build();
+      proposals.seed(disputedCase());
+      await service.closeCancelledOnChain(proposals.rows.get('p1')!, 'expired');
+      expect(proposals.rows.get('p1')!.resolutionKind).toBe(ResolutionKind.AUTO_CHAIN_VOIDED);
+    });
+
+    it("keeps AUTO_CHAIN_VOIDED beside an adjudicator's outcome (the DB constraint)", async () => {
+      const { service, proposals } = build();
+      proposals.seed(
+        disputedCase({
+          status: 'UPHELD',
+          chainStatus: 'PENDING',
+          outcome: ArbitrationOutcome.UPHELD,
+          resolutionKind: ResolutionKind.ADJUDICATOR,
+          resolvedAt: new Date('2026-08-19T00:00:00Z'),
+          decidedByOperatorId: 'op_1',
+        }),
+      );
+      await service.closeCancelledOnChain(proposals.rows.get('p1')!, 'arbiter', {
+        byArbiter: true,
+      });
+      const saved = proposals.rows.get('p1')!;
+      expect(saved.status).toBe(SlashProposalStatus.CANCELLED);
+      expect(saved.outcome).toBe(ArbitrationOutcome.UPHELD);
+      expect(saved.resolutionKind).toBe(ResolutionKind.AUTO_CHAIN_VOIDED);
+    });
+  });
+
   it('leaves a transient failure claimed so the stale sweep retries it', async () => {
     const { service, proposals, executor } = build();
     proposals.seed(proposable({ id: 'p1' }));

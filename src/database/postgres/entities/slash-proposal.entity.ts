@@ -347,7 +347,8 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
 
   /**
    * `ADJUDICATOR` | `AUTO_UNDISPUTED` | `AUTO_PLATFORM_MISS` | `AUTO_DE_MINIMIS`
-   * | `AUTO_CHAIN_VOIDED`.
+   * | `AUTO_CHAIN_VOIDED` | `CHAIN_ARBITER` (the arbiter's on-chain uphold, or
+   * on a `CANCELLED` case its `cancelSlash`).
    */
   @Column({ name: 'resolution_kind', type: 'varchar', length: 24, nullable: true })
   resolutionKind: string | null;

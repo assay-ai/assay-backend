@@ -8,6 +8,7 @@ import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/
 
 import { CHAIN_DISPUTE_SETTLE_MS } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
+import { cancelledByArbiter } from '../domain/on-chain-dispute';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import {
   SlashChainCancelledEvent,
@@ -415,7 +416,18 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       if (closing?.recalculating) return;
       const because = closing?.because ?? 'every one of its on-chain records was cancelled';
       if (this.execution) {
-        await this.execution.closeCancelledOnChain(fresh, because);
+        // The arbiter's cancelSlash, told from an expiry by the records'
+        // cancel reasons (the case screen's `chainState` rule): recorded as
+        // the arbiter's ruling, not read as "Expired" (audit D3).
+        const byArbiter = cancelledByArbiter(
+          parts.map((row: SlashProposalPartEntity) => ({
+            chainStatus: row.chainStatus,
+            chainDisputedAt: row.chainDisputedAt ?? null,
+            chainExecutableAt: row.chainExecutableAt ?? null,
+            cancelReason: row.cancelReason ?? null,
+          })),
+        );
+        await this.execution.closeCancelledOnChain(fresh, because, { byArbiter });
       } else {
         await this.proposals.update(scope, {
           chainStatus: ChainProposalStatus.CANCELLED,

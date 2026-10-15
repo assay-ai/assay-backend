@@ -1,5 +1,6 @@
 import { DISPUTE_TIMEOUT_MS } from '@modules/slash/constants/slash.constants';
 import {
+  cancelledByArbiter,
   disputeByOf,
   disputesOnChain,
   OnChainDisputeMirror,
@@ -188,5 +189,42 @@ describe('the on-chain dispute', () => {
       expect(disputeByOf([record({ chainDisputedAt: DISPUTED_AT })])).toBeNull();
       expect(disputeByOf([record({ chainStatus: 'EXECUTED' })])).toBeNull();
     });
+  });
+});
+
+describe('cancelledByArbiter (audit D3)', () => {
+  const cancelled = (cancelReason: string | null, disputed = true): OnChainRecordMirror => ({
+    chainStatus: 'CANCELLED',
+    chainDisputedAt: disputed ? DISPUTED_AT : null,
+    chainExecutableAt: null,
+    cancelReason,
+  });
+
+  it("is the arbiter's cancel when a record was withdrawn and none expired unruled", () => {
+    expect(cancelledByArbiter([cancelled('WITHDRAWN')])).toBe(true);
+    expect(cancelledByArbiter([cancelled('WITHDRAWN'), cancelled('EXPIRED', false)])).toBe(true);
+  });
+
+  it('is an expiry when any record expired unruled, a lapse, or an unknown reason', () => {
+    expect(cancelledByArbiter([cancelled('WITHDRAWN'), cancelled('DISPUTE_UNRESOLVED')])).toBe(
+      false,
+    );
+    expect(cancelledByArbiter([cancelled('EXPIRED')])).toBe(false);
+    expect(cancelledByArbiter([cancelled(null)])).toBe(false);
+    expect(cancelledByArbiter([])).toBe(false);
+  });
+
+  it('is not a closure while a record still stands', () => {
+    expect(
+      cancelledByArbiter([
+        cancelled('WITHDRAWN'),
+        {
+          chainStatus: 'PENDING',
+          chainDisputedAt: null,
+          chainExecutableAt: null,
+          cancelReason: null,
+        },
+      ]),
+    ).toBe(false);
   });
 });
