@@ -1,6 +1,8 @@
 import { NestFactory } from '@nestjs/core';
 import { ValidationPipe } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { parseCorsAllowedOrigins } from '@config/app.config';
+import { applyHttpSecurity } from '@shared/security/security-headers';
 import { AppWebSocketModule } from './app.module';
 import { RedisIoAdapter } from 'src/websocket/adapters/redis-io.adapter';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
@@ -22,9 +24,11 @@ async function bootstrapWebSocket() {
   await redisIoAdapter.connectToRedis();
   app.useWebSocketAdapter(redisIoAdapter);
 
-  // CORS for WebSocket
+  applyHttpSecurity(app);
+
+  // CORS for WebSocket: the same allowlist as the API (`CORS_ALLOWED_ORIGINS`).
   app.enableCors({
-    origin: '*',
+    origin: parseCorsAllowedOrigins(),
     credentials: true,
   });
 

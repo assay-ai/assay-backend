@@ -1,4 +1,5 @@
 import type { GatewayMetadata } from '@nestjs/websockets';
+import { parseCorsAllowedOrigins } from '@config/app.config';
 
 /**
  * Constants for time intervals
@@ -17,8 +18,9 @@ export const getGatewayOptions = (namespace?: string): GatewayMetadata => {
     maxHttpBufferSize: 1e7, // 10mb
     allowEIO3: true, // Allow Engine.IO v3 clients
     allowUpgrades: true, // Allow transport upgrades
+    // The API's allowlist (`CORS_ALLOWED_ORIGINS`), never `*` with credentials.
     cors: {
-      origin: '*',
+      origin: parseCorsAllowedOrigins(),
       credentials: true,
     },
   };
