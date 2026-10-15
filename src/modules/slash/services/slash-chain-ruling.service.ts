@@ -65,6 +65,9 @@ const SUPERSEDED_EPOCH = 'SupersededEpoch';
 /** Review R2-6: the page for a superseded earlier-epoch record standing on chain. */
 export const SLASH_RECORD_SUPERSEDED_ALERT = 'slash_record_superseded';
 
+/** Review R3-7: the page for a superseded record that executed (a double charge). */
+export const SLASH_SUPERSEDED_EXECUTED_ALERT = 'slash_superseded_record_executed';
+
 @Injectable()
 export class SlashChainRulingService implements SlashChainRulingsPort {
   private readonly logger = new Logger(SlashChainRulingService.name);
@@ -488,6 +491,25 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
           `was executed on chain (${event.appliedMinor}); the same calls may have been charged ` +
           'twice and need a human',
       );
+      // Review R3-7: an actual double charge pages a human, once per record.
+      await this.alerts?.emit({
+        severity: AlertSeverity.CRITICAL,
+        name: SLASH_SUPERSEDED_EXECUTED_ALERT,
+        summary:
+          `A superseded slash record of an earlier proposal of case ${proposal.id} was ` +
+          `executed on chain (${event.appliedMinor}); the same calls may have been charged ` +
+          'twice and need a human',
+        details: {
+          chainId: event.chainId,
+          requestId: `0x${event.requestId}`,
+          proposalId: proposal.id,
+          organizationId: proposal.organizationId,
+          appliedMinor: event.appliedMinor,
+          transactionHash: event.transactionHash,
+        },
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: `${event.chainId}:${event.requestId}`,
+      });
       return true;
     }
     if (part) {

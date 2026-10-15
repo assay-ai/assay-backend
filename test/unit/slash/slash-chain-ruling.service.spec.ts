@@ -528,6 +528,23 @@ describe('SlashChainRulingService', () => {
       expect(refolded).toEqual(['0xfeed']);
     });
 
+    it('R3-7: pages a human when a superseded record executes (a double charge), once per record', async () => {
+      const { service, parts, proposal, alerts, mirrored, refolded } = build('EXECUTED');
+      proposal.chainEpoch = 1;
+      Object.assign(parts.get(ID_B)!, { chainLastError: 'SupersededEpoch' });
+      await service.recordExecuted(executed(ID_B));
+      expect(alerts).toEqual([
+        expect.objectContaining({
+          severity: 'CRITICAL',
+          name: 'slash_superseded_record_executed',
+          aggregation: 'ONCE_PER_INCIDENT',
+          dedupeKey: `${CHAIN}:${ID_B}`,
+        }),
+      ]);
+      expect(mirrored).toEqual([]);
+      expect(refolded).toEqual([]);
+    });
+
     it('answers false for a record nobody planned', async () => {
       const { service } = build();
       await expect(service.recordExecuted(executed('c'.repeat(64)))).resolves.toBe(false);
