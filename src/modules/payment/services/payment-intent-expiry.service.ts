@@ -11,6 +11,7 @@ import {
   PAYMENT_INTENT_EXPIRY_SWEEP_BATCH,
   PAYMENT_INTENT_HOLD_BACKSTOP_REASON,
   PAYMENT_INTENT_HOLD_REPAIR_REASON,
+  PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
   PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
 } from '../constants/payment-intent.constants';
 import { PaymentErrorCode } from '../errors/payment.errors';
@@ -176,6 +177,7 @@ export class PaymentIntentExpiryService {
     const overdue = await this.intents.findDueForVerdictDeadline(
       now,
       PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS,
+      PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
       limit,
     );
 
