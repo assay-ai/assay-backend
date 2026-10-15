@@ -23,6 +23,12 @@ export interface ProviderEgressLimits {
    * check has a 10 s budget and a tiny body, so its slots are cheap.
    */
   readonly globalConnectivityConcurrent: number;
+  /**
+   * Connectivity checks one organization may have in flight, inside
+   * {@link perOrganizationConcurrent}. One, so filling the connectivity pool
+   * takes as many accounts as it has slots (round-two review R2-4).
+   */
+  readonly perOrganizationConnectivityConcurrent: number;
   /** Calls one organization may start per {@link windowMs}. */
   readonly perOrganizationPerWindow: number;
   readonly windowMs: number;
@@ -32,7 +38,9 @@ export const DEFAULT_PROVIDER_EGRESS_LIMITS: ProviderEgressLimits = Object.freez
   perOrganizationConcurrent: 2,
   // ~15 MB per tester slot at most; 16 takes eight accounts to fill (N-3).
   globalConcurrent: 16,
-  globalConnectivityConcurrent: 8,
+  // One check per organization: sixteen accounts to fill it (R2-4).
+  globalConnectivityConcurrent: 16,
+  perOrganizationConnectivityConcurrent: 1,
   perOrganizationPerWindow: 20,
   windowMs: 60_000,
 });
@@ -51,6 +59,7 @@ export type ProviderEgressPool = 'tester' | 'connectivity';
 @Injectable()
 export class ProviderEgressLimiter {
   private readonly inFlight = new Map<string, number>();
+  private readonly connectivityInFlight = new Map<string, number>();
   private readonly started = new Map<string, number[]>();
   private readonly total: Record<ProviderEgressPool, number> = { tester: 0, connectivity: 0 };
 
@@ -84,6 +93,12 @@ export class ProviderEgressLimiter {
         reason: 'too many in flight for this organization',
       });
     }
+    const checking = this.connectivityInFlight.get(organizationId) ?? 0;
+    if (pool === 'connectivity' && checking >= limits.perOrganizationConnectivityConcurrent) {
+      throw ProviderErrors.egressRateLimited({
+        reason: 'a connectivity check is already running for this organization',
+      });
+    }
     const poolLimit =
       pool === 'connectivity' ? limits.globalConnectivityConcurrent : limits.globalConcurrent;
     if (this.total[pool] >= poolLimit) {
@@ -94,11 +109,17 @@ export class ProviderEgressLimiter {
     this.started.set(organizationId, recent);
     this.inFlight.set(organizationId, active + 1);
     this.total[pool] += 1;
+    if (pool === 'connectivity') this.connectivityInFlight.set(organizationId, checking + 1);
 
     try {
       return await work();
     } finally {
       this.total[pool] -= 1;
+      if (pool === 'connectivity') {
+        const checks = (this.connectivityInFlight.get(organizationId) ?? 1) - 1;
+        if (checks > 0) this.connectivityInFlight.set(organizationId, checks);
+        else this.connectivityInFlight.delete(organizationId);
+      }
       const left = (this.inFlight.get(organizationId) ?? 1) - 1;
       if (left > 0) this.inFlight.set(organizationId, left);
       else this.inFlight.delete(organizationId);
