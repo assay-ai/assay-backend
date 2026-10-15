@@ -1555,6 +1555,19 @@ describe('ArbitrationService', () => {
       expect(await ctx.service.recordChainStanding('org_1', 'p1')).toBe(false);
     });
 
+    it('R4-1: keeps the dispute row open while another record still stands disputed', async () => {
+      const ctx = build();
+      const dispute = seedEvm(ctx, SlashProposalStatus.UNDER_REVIEW);
+
+      expect(await ctx.service.recordChainStanding('org_1', 'p1', { disputeStillOpen: true })).toBe(
+        true,
+      );
+      expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.UPHELD);
+      expect(dispute.resolvedAt ?? null).toBeNull();
+      expect(dispute.resolvedBy ?? null).toBeNull();
+      expect(dispute.state).not.toBe('REJECTED');
+    });
+
     it('R2-2 / R2-10: relabels an AUTO_UNDISPUTED case CHAIN_ARBITER on the arbiter uphold', async () => {
       const ctx = build();
       seedEvm(ctx, SlashProposalStatus.PROPOSED);

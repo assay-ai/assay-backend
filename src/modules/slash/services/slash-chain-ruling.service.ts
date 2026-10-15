@@ -453,7 +453,9 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
                 transactionHash: chain.transactionHash,
               })
             : pending.every((row) => (row.chainExecutableAt?.getTime() ?? Infinity) <= settled)
-              ? this.arbitration?.recordChainStanding(fresh.organizationId, fresh.id)
+              ? this.arbitration?.recordChainStanding(fresh.organizationId, fresh.id, {
+                  disputeStillOpen: has('DISPUTED'),
+                })
               : undefined
           : reopenable
             ? this.arbitration?.reopenForChainDispute(fresh.organizationId, fresh.id, disputedChain)

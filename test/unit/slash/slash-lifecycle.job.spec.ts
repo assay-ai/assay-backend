@@ -445,7 +445,7 @@ describe('SlashLifecycleJob — open EVM cases from the in-app objection era (re
       await job.handleTick(); // within the limit: skipped, no page
       expect(alerts).toEqual([]);
 
-      jest.setSystemTime(new Date('2026-10-16T00:11:00Z'));
+      jest.setSystemTime(new Date('2026-10-16T00:16:00Z'));
       const next = job.handleTick(); // past the limit: page, and run
       await new Promise((resolve) => setImmediate(resolve));
       expect(alerts).toEqual([
