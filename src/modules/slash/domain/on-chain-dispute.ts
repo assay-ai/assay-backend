@@ -43,11 +43,19 @@ export enum OnChainDisputeState {
   /** The dispute went unruled for its 30 days and was expired; nothing taken. */
   EXPIRED = 'EXPIRED',
   /**
-   * Review N-4: never disputed and never executed, then expired (the
-   * execution grace ran out, or the verifier key stopped being valid). Nobody
-   * ruled for the provider; nothing was taken.
+   * Review N-4: never executed, then expired (the execution grace ran out, or
+   * the verifier key stopped being valid) — never disputed, or disputed and
+   * upheld by the arbiter but not executed in time. Nobody ruled for the
+   * provider in the end; nothing was taken.
    */
   LAPSED = 'LAPSED',
+  /**
+   * Review R2-8: cancelled or expired on chain for a reason this platform
+   * never recorded (a row from before cancel reasons were kept, or a cancel
+   * whose event was not seen). Unknown — never read as the arbiter's cancel;
+   * nothing was taken.
+   */
+  RELEASED = 'RELEASED',
 }
 
 /** One on-chain record of the case (a part of the current epoch), as mirrored. */
@@ -77,7 +85,7 @@ export interface OnChainDisputeMirror {
  * executed and PARTIALLY_EXECUTED when some were cancelled too (review R2-3);
  * otherwise by the cancel reasons: EXPIRED (a dispute nobody ruled
  * on), CANCELLED (the arbiter's or admin's cancelSlash), LAPSED (expired
- * undisputed).
+ * unexecuted), RELEASED (a reason never recorded: unknown, review R2-8).
  */
 function stateOfRecords(records: readonly OnChainRecordMirror[]): OnChainDisputeState | null {
   const with_ = (status: string) => records.filter((record) => record.chainStatus === status);
@@ -98,9 +106,10 @@ function stateOfRecords(records: readonly OnChainRecordMirror[]): OnChainDispute
   if (cancelled.some((record) => record.cancelReason === 'DISPUTE_UNRESOLVED')) {
     return OnChainDisputeState.EXPIRED;
   }
-  if (cancelled.some((record) => record.cancelReason === 'WITHDRAWN' || !record.cancelReason)) {
+  if (cancelled.some((record) => record.cancelReason === 'WITHDRAWN')) {
     return OnChainDisputeState.CANCELLED;
   }
+  if (cancelled.some((record) => !record.cancelReason)) return OnChainDisputeState.RELEASED;
   return OnChainDisputeState.LAPSED;
 }
 

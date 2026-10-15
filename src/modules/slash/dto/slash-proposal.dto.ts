@@ -126,8 +126,9 @@ export class SlashProposalClocksDto {
       'UPHELD when every pending record was disputed and upheld, PENDING while one stands ' +
       'undisputed, EXECUTED once every record executed, PARTIALLY_EXECUTED once some executed ' +
       'and the others were cancelled or expired, else CANCELLED (cancelSlash), ' +
-      'EXPIRED (a dispute nobody ruled on) or LAPSED (an undisputed record that expired ' +
-      'unexecuted). Null off EVM or before a record stands on chain.',
+      'EXPIRED (a dispute nobody ruled on), LAPSED (a record that expired unexecuted) or ' +
+      'RELEASED (cancelled for a reason never recorded). Null off EVM or before a record ' +
+      'stands on chain.',
   })
   chainState: OnChainDisputeState | null;
 
