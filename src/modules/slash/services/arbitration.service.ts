@@ -22,6 +22,7 @@ import {
   ArbitrationOutcome,
   CURRENT_RUBRIC_VERSION,
   DisputeClaimType,
+  DisputeResolutionState,
   isOverturn,
   OUTCOME_CONSEQUENCE,
   reasonCodesAreValid,
@@ -278,6 +279,35 @@ export class ArbitrationService {
         },
       );
     }
+    return true;
+  }
+
+  /**
+   * Review R2-3: the case closed with a record executed and another the
+   * provider won on chain (the arbiter's cancel, or a dispute nobody ruled
+   * on: `chainDisputeWonAt`). The objection succeeded in part, so its row
+   * reads `PARTIALLY_UPHELD` — whichever chain path closed it first (the
+   * arbiter's uphold of the other record, or the execution). A dispute a
+   * person decided (`ADJUDICATOR`) is left alone. Returns whether it changed.
+   */
+  async recordPartialChainWin(organizationId: string, proposalId: string): Promise<boolean> {
+    const proposal = await this.lifecycle.require(organizationId, proposalId);
+    if (!disputesOnChain(proposal.assetId) || !proposal.disputeId || !proposal.chainDisputeWonAt) {
+      return false;
+    }
+    const dispute = await this.disputes.findOneBy({ organizationId, id: proposal.disputeId });
+    if (!dispute || dispute.state === DisputeResolutionState.PARTIALLY_UPHELD) return false;
+    if (dispute.resolvedBy && !dispute.resolvedBy.startsWith('chain:')) return false;
+    await this.disputes.update(
+      { organizationId, id: dispute.id },
+      {
+        state: DisputeResolutionState.PARTIALLY_UPHELD,
+        outcome: ArbitrationOutcome.UPHELD,
+        resolutionKind: dispute.resolutionKind ?? ResolutionKind.AUTO_CHAIN_EXECUTED,
+        resolvedAt: dispute.resolvedAt ?? new Date(),
+        resolvedBy: dispute.resolvedBy ?? 'chain:executeSlash',
+      },
+    );
     return true;
   }
 
