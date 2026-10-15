@@ -321,6 +321,23 @@ export class SpendPolicyVelocityService {
     }
   }
 
+  /**
+   * `true` when `token` still holds the lock, and pushes its expiry `ttlMs`
+   * out — the same compare-and-renew as {@link renewAgentSpendLock}, but its
+   * answer is the point. Rejects when Redis cannot be reached: the caller
+   * cannot tell whether it still owns the lock and fails closed.
+   */
+  async holdsAgentSpendLock(agentId: string, token: string, ttlMs: number): Promise<boolean> {
+    const renewed = await this.redis.eval(
+      RENEW_LOCK_SCRIPT,
+      1,
+      this.spendLockKey(agentId),
+      token,
+      String(ttlMs),
+    );
+    return Number(renewed) === 1;
+  }
+
   private spendLockKey(agentId: string): string {
     return `${KEY_PREFIX}spend-lock:${agentId}`;
   }
