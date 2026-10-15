@@ -52,6 +52,7 @@ import {
   X402_CONFIG_ABI,
   X402_CONFIG_ARBITER_ABI,
   X402_STAKE_ABI,
+  X402_SLASH_WATCH_EVENTS_ABI,
   X402_STAKE_SLASH_ABI,
 } from './abi/x402.abi';
 import { evmDomain } from './eip712/domain';
@@ -88,6 +89,19 @@ export interface EvmSlashClient {
     to: `0x${string}`;
     data: `0x${string}`;
   }): Promise<bigint>;
+  /**
+   * Review R2-8: the two reads that find a cancelled record's `SlashCancelled`
+   * (its reason). Optional: a client without them reads the reason as unknown.
+   */
+  getBlockNumber?(args?: { cacheTime?: number }): Promise<bigint>;
+  getContractEvents?(args: {
+    address: `0x${string}`;
+    abi: typeof X402_SLASH_WATCH_EVENTS_ABI;
+    eventName: 'SlashCancelled';
+    args: { requestId: `0x${string}` };
+    fromBlock: bigint;
+    toBlock: bigint;
+  }): Promise<readonly { args: { reason?: number; cancelledAt?: bigint } }[]>;
   getTransactionReceipt(args: { hash: `0x${string}` }): Promise<{
     status: 'success' | 'reverted';
     blockNumber: bigint;
@@ -168,6 +182,11 @@ const RECORD_EXECUTION_GRACE_SECONDS = 7n * 86_400n;
 
 const SUBMITTER_IDENTITY = 'evm-slash-executor';
 const PROPOSE_ATTESTATION_PURPOSE = 'settlement.evm.propose_slash.attestation';
+
+/** Review R2-8: blocks per `eth_getLogs` when looking up a cancel's event (the watcher's chunk). */
+const CANCEL_LOOKUP_CHUNK = 2_000n;
+/** Review R2-8: how many chunks back that lookup reads at most. */
+const CANCEL_LOOKUP_CHUNKS = 5;
 
 /**
  * `SlashExecutorPort` for `eip155` — `X402Stake`'s two-phase slash.
@@ -293,13 +312,63 @@ export class EvmSlashExecutor
       proposedAt: secondsToDate(record.proposedAt),
       executableAt: secondsToDate(record.executableAt),
       executedAt: record.executedAt === 0n ? null : secondsToDate(record.executedAt),
-      cancelledAt: null,
+      ...(status === 'CANCELLED' ? await this.cancelOf(chainId, requestId) : { cancelledAt: null }),
       disputedAt: record.disputedAt === 0n ? null : secondsToDate(record.disputedAt),
       beneficiary: getAddress(record.beneficiary),
       policy: record.policy,
       verifier: getAddress(record.verifier),
       ...(await this.verifierStanding(chainId, record.verifier)),
     };
+  }
+
+  /**
+   * Review R2-8: a cancelled record's reason and time, off its own
+   * `SlashCancelled` event (the record keeps neither). Read newest blocks
+   * first, {@link CANCEL_LOOKUP_CHUNK} blocks per `eth_getLogs`, at most
+   * {@link CANCEL_LOOKUP_CHUNKS} chunks back: a chain read observes a cancel
+   * soon after it lands, and an older one is the watcher's to mirror. Not
+   * found, or the read failed: the reason stays unknown (`null`), never
+   * guessed.
+   */
+  private async cancelOf(
+    chainId: ChainId,
+    requestId: string,
+  ): Promise<{ cancelledAt: Date | null; cancelReason: string | null }> {
+    const unknown = { cancelledAt: null, cancelReason: null };
+    const client = this.client(chainId);
+    if (!client.getBlockNumber || !client.getContractEvents) return unknown;
+    try {
+      const head = await client.getBlockNumber({ cacheTime: 0 });
+      let toBlock = head;
+      for (let chunk = 0; chunk < CANCEL_LOOKUP_CHUNKS; chunk += 1) {
+        const fromBlock = toBlock >= CANCEL_LOOKUP_CHUNK ? toBlock - CANCEL_LOOKUP_CHUNK + 1n : 0n;
+        const logs = await client.getContractEvents({
+          address: this.deployment(chainId).stake,
+          abi: X402_SLASH_WATCH_EVENTS_ABI,
+          eventName: 'SlashCancelled',
+          args: { requestId: bytes32(requestId) },
+          fromBlock,
+          toBlock,
+        });
+        const found = logs[logs.length - 1];
+        if (found?.args.reason !== undefined) {
+          return {
+            cancelReason: cancelReasonFromEvm(Number(found.args.reason)),
+            cancelledAt:
+              found.args.cancelledAt !== undefined ? secondsToDate(found.args.cancelledAt) : null,
+          };
+        }
+        if (fromBlock === 0n) break;
+        toBlock = fromBlock - 1n;
+      }
+    } catch (error) {
+      this.logger.warn(
+        `slash record ${requestId}: its SlashCancelled could not be read (${
+          error instanceof Error ? error.message : String(error)
+        }); its cancel reason stays unknown`,
+      );
+    }
+    return unknown;
   }
 
   /**
@@ -1155,11 +1224,12 @@ export class EvmSlashExecutor
 
   /**
    * Refuse to sign a record the verifier key would not live to execute
-   * (review S-7): the key must outlive `now + slashDelaySeconds + the 7-day
-   * execution grace`, read live. A record signed later than that could never
-   * execute — `executeSlash` re-checks the key — and would sit on the
-   * provider's stake until it is expired. Refused retryably: the case is
-   * proposed once a rotated key signs.
+   * (review S-7): the key must outlive `now + slashDelaySeconds + the 30-day
+   * dispute window + the 7-day execution grace`, read live. A dispute can
+   * freeze the record up to 30 days before an uphold restarts the grace, and a
+   * key that lapses meanwhile ends the record as `VerifierUnavailable` — read
+   * as the provider's win. `executeSlash` re-checks the key. Refused
+   * retryably: the case is proposed once a rotated key signs.
    */
   private async assertVerifierOutlivesRecord(chainId: ChainId): Promise<void> {
     const [verifier, delaySeconds] = await Promise.all([
@@ -1176,13 +1246,14 @@ export class EvmSlashExecutor
     const needed =
       BigInt(Math.floor(this.config.now() / 1000)) +
       BigInt(delaySeconds) +
+      BigInt(EVM_CONSTANTS.DISPUTE_TIMEOUT_SECONDS) +
       RECORD_EXECUTION_GRACE_SECONDS;
     if (expiresAt > needed) return;
     throw ChainErrors.configValueInvalid({
       variable: `the on-chain expiry of verifier key ${verifier} on ${chainId}`,
       accepted:
         `later than ${new Date(Number(needed) * 1000).toISOString()} (now + the slash delay + ` +
-        `the 7-day execution grace); rotate the key before proposing`,
+        `the 30-day dispute window + the 7-day execution grace); rotate the key before proposing`,
     });
   }
 

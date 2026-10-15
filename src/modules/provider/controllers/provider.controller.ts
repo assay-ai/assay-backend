@@ -6,6 +6,7 @@ import { NoCacheHeader } from '@shared/decorators/cache-header.decorator';
 import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
+import { callsExportFilename } from '../domain/csv';
 import { GetProviderCallsExportQueryDto } from '../dto/get-provider-calls-export.dto';
 import {
   GetProviderEarningsQueryDto,
@@ -153,7 +154,7 @@ export class ProviderController {
     res.setHeader('Content-Type', 'text/csv; charset=utf-8');
     res.setHeader(
       'Content-Disposition',
-      `attachment; filename="calls-${query.from}_${query.to}.csv"`,
+      `attachment; filename="${callsExportFilename(query.from, query.to)}"`,
     );
     // Visible-cap headers — `docs/api-list-contract.md`'s no-silent-caps
     // principle, applied to a response shape the JSON envelope cannot carry

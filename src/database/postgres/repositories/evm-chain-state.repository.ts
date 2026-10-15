@@ -64,6 +64,16 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
   }
 
   /** Every address the chain ever named on `chainId` — what a reconcile re-checks. */
+  /** One address's row on one chain (lower-cased), or `null` when the chain never named it. */
+  async findBlockedAddress(
+    chainId: string,
+    address: string,
+  ): Promise<EvmBlockedAddressEntity | null> {
+    return this.manager.findOne(EvmBlockedAddressEntity, {
+      where: { chainId, address: address.toLowerCase() },
+    });
+  }
+
   async findKnownAddresses(chainId: string): Promise<EvmBlockedAddressEntity[]> {
     return this.manager.find(EvmBlockedAddressEntity, { where: { chainId } });
   }

@@ -95,4 +95,11 @@ export interface RedeemVoucherInput {
    * pre-checked.
    */
   readonly escrow?: EscrowChainBalance | null;
+
+  /**
+   * Awaited after every check and before the intent and its hold are written:
+   * the MCP caller's spend-lock ownership check (round-two review N-4). A
+   * rejection refuses the voucher with nothing recorded.
+   */
+  readonly beforeHold?: () => Promise<void>;
 }

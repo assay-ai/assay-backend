@@ -19,7 +19,11 @@ import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
+  CLOCK_SKEW_TOLERANCE_SECONDS,
+  LANDING_SETTLE_SECONDS,
+  LANDING_UNKNOWN_ALERT_SECONDS,
   MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+  REDEEM_GRACE_SECONDS,
   VOUCHER_REDEMPTION_ALERTS,
   VOUCHER_REDEMPTION_BATCH,
 } from '../constants/voucher-redemption.constants';
@@ -43,8 +47,12 @@ import { PaymentIntentService } from './payment-intent.service';
  */
 export const PLATFORM_ABSORBED_TX_REF_PREFIX = 'platform_absorbed:';
 
-/** The chain's refusal of `seq <= seqHigh` — and the answer a voucher that already landed gets. */
-const SEQ_NOT_INCREASING = 'VoucherSeqNotIncreasing';
+/**
+ * `findLanding` looked at this intent's own transactions and none of them
+ * redeemed it — as far as the node that answered can see. See
+ * {@link VoucherRedemptionService.pastLandingWindow}.
+ */
+const NOT_FOUND_YET = Symbol('NOT_FOUND_YET');
 
 /**
  * Turns each passed rail-B hold into money that has actually moved.
@@ -506,17 +514,29 @@ export class VoucherRedemptionService {
         return { stop: false, settled: false };
 
       case RedeemOutcomeKind.UNREDEEMABLE: {
-        if (outcome.programError === SEQ_NOT_INCREASING) {
-          // Also what a voucher that ALREADY landed gets. Absorbing that one
-          // pays the provider a second time (review 2026-10-15 P-1).
-          const landing = await this.findLanding(row, request);
-          if (landing === undefined) {
-            return { stop: false, settled: false };
-          }
-          if (landing !== null) {
-            await this.intents.commitRedeemedHold(row.organizationId, row.id, landing);
-            return { stop: false, settled: true };
-          }
+        // Every refusal, not only `VoucherSeqNotIncreasing`: a voucher that
+        // ALREADY landed gets that one, or `VoucherExpired` when the retry
+        // comes after its deadline, which is checked first (final review N-2).
+        // Absorbing it pays the provider a second time (review 2026-10-15 P-1).
+        // The seq is dead on chain whatever the answer, so while it waits the
+        // payer's later vouchers may go ahead (`settled: true`).
+        const landing = await this.findLanding(row, request);
+        if (landing === undefined) {
+          await this.reportLandingUnknown(row, outcome.programError);
+          return { stop: false, settled: true };
+        }
+        if (landing !== null && landing !== NOT_FOUND_YET) {
+          await this.intents.commitRedeemedHold(row.organizationId, row.id, landing);
+          return { stop: false, settled: true };
+        }
+        if (landing === NOT_FOUND_YET && !this.pastLandingWindow(row)) {
+          this.logger.warn(
+            `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${outcome.programError ?? 'unknown'} ` +
+              `and the chain does not show its own transactions yet. Not absorbed before ` +
+              `${LANDING_SETTLE_SECONDS}s past its redemption deadline: a lagging node ` +
+              `answers "not found" for a mined one (final review N-7).`,
+          );
+          return { stop: false, settled: true };
         }
         await this.absorb(row, outcome.programError);
         // Settled, in the only sense this loop cares about: the hold is closed
@@ -543,10 +563,11 @@ export class VoucherRedemptionService {
   }
 
   /**
-   * The transaction that already redeemed this voucher, `null` when the chain
-   * shows none of this intent's recorded transactions did, or `undefined` when
-   * that cannot be told yet (a transaction still pending, an RPC that did not
-   * answer) — the hold then stays open for the next pass.
+   * The transaction that already redeemed this voucher; `null` when this
+   * intent recorded none; {@link NOT_FOUND_YET} when it recorded some and the
+   * chain shows none of them redeemed it; or `undefined` when that cannot be
+   * told yet (a transaction still pending, an RPC that did not answer) — the
+   * hold then stays open for the next pass.
    *
    * The references are read from the database now, not from the queue row: a
    * pass that overlapped this one may have recorded its transaction after the
@@ -556,20 +577,40 @@ export class VoucherRedemptionService {
   private async findLanding(
     row: RedeemableIntent,
     request: RedeemVoucherRequest,
-  ): Promise<string | null | undefined> {
+  ): Promise<string | typeof NOT_FOUND_YET | null | undefined> {
     if (!this.redeemer.findLanding) return null;
     try {
       const refs = await this.payments.findRedemptionTxRefs(row.organizationId, row.id);
       if (refs.length === 0) return null;
-      return await this.redeemer.findLanding(request, refs);
+      return (await this.redeemer.findLanding(request, refs)) ?? NOT_FOUND_YET;
     } catch (error) {
       this.logger.warn(
-        `Intent ${row.id} (seq ${row.voucherSeq}) was refused VoucherSeqNotIncreasing, and ` +
-          `whether one of its own transactions redeemed it is not known yet: ${describe(error)}. ` +
-          `The hold stays open.`,
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused, and whether one of its own ` +
+          `transactions redeemed it is not known yet: ${describe(error)}. The hold stays open.`,
       );
       return undefined;
     }
+  }
+
+  /**
+   * Whether every transaction this intent recorded is old enough that any RPC
+   * node would have it. None is broadcast after the voucher's on-chain
+   * deadline (`expires_at` + skew + grace) — prevalidation refuses it first —
+   * so {@link LANDING_SETTLE_SECONDS} past that deadline is a safe age for all
+   * of them.
+   */
+  private pastLandingWindow(row: RedeemableIntent): boolean {
+    return Math.floor(this.now() / 1000) >= this.landingDeadline(row);
+  }
+
+  /** Unix seconds at which {@link pastLandingWindow} turns true. */
+  private landingDeadline(row: RedeemableIntent): number {
+    return (
+      Math.floor(row.expiresAt.getTime() / 1000) +
+      CLOCK_SKEW_TOLERANCE_SECONDS +
+      REDEEM_GRACE_SECONDS +
+      LANDING_SETTLE_SECONDS
+    );
   }
 
   /**
@@ -655,6 +696,47 @@ export class VoucherRedemptionService {
       },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       dedupeKey: VOUCHER_REDEMPTION_ALERTS.MISCONFIGURED,
+    });
+  }
+
+  /**
+   * A refused voucher whose landing has stayed unknown — {@link findLanding}
+   * keeps throwing — long past {@link pastLandingWindow}: CRITICAL, once per
+   * intent. The hold is left open, as it must be without an answer, but no
+   * longer in silence (round-two review R2-6).
+   */
+  private async reportLandingUnknown(
+    row: RedeemableIntent,
+    programError: string | null,
+  ): Promise<void> {
+    const overdueSeconds = Math.floor(this.now() / 1000) - this.landingDeadline(row);
+    if (overdueSeconds < LANDING_UNKNOWN_ALERT_SECONDS) {
+      return;
+    }
+
+    this.logger.error(
+      `CRITICAL: intent ${row.id} (seq ${row.voucherSeq}) was refused ` +
+        `${programError ?? 'unknown'} and whether it landed is still unknown ` +
+        `${overdueSeconds}s past its landing window. Its hold stays open until the chain answers.`,
+    );
+    await this.alerts.emit({
+      severity: AlertSeverity.CRITICAL,
+      name: VOUCHER_REDEMPTION_ALERTS.LANDING_UNKNOWN,
+      summary:
+        `A refused rail-B voucher's landing is still unknown ${overdueSeconds}s past its ` +
+        `landing window; its hold stays open`,
+      details: {
+        intentId: row.id,
+        buyer: row.agentAccount,
+        seq: row.voucherSeq,
+        overdueSeconds,
+        lastRefusal: programError ?? 'none',
+      },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: row.id,
+      // Once a day per intent: the lookup is retried every pass, and an RPC
+      // outage with N stuck intents must not page N times an hour.
+      suppressionWindowSeconds: 24 * 60 * 60,
     });
   }
 

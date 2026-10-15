@@ -1,5 +1,8 @@
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
-import { ProviderEgressLimiter } from '@modules/provider/services/provider-egress-limiter.service';
+import {
+  DEFAULT_PROVIDER_EGRESS_LIMITS,
+  ProviderEgressLimiter,
+} from '@modules/provider/services/provider-egress-limiter.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 
@@ -11,6 +14,8 @@ describe('ProviderEgressLimiter', () => {
   const LIMITS = {
     perOrganizationConcurrent: 2,
     globalConcurrent: 3,
+    globalConnectivityConcurrent: 1,
+    perOrganizationConnectivityConcurrent: 1,
     perOrganizationPerWindow: 4,
     windowMs: 60_000,
   };
@@ -51,6 +56,92 @@ describe('ProviderEgressLimiter', () => {
       ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
     );
 
+    g.open();
+    await Promise.all(running);
+  });
+
+  it('keeps connectivity checks in a pool of their own: a full tester pool does not deny them (N-3)', async () => {
+    const limiter = new ProviderEgressLimiter(LIMITS);
+    const g = gate();
+    const testers = [
+      limiter.run('org-a', () => g.promise),
+      limiter.run('org-b', () => g.promise),
+      limiter.run('org-c', () => g.promise),
+    ];
+
+    const check = limiter.run('org-d', () => g.promise, 'connectivity');
+    // ...and the connectivity pool is capped on its own.
+    await expectErrorCodeAsync(
+      () => limiter.run('org-e', () => Promise.resolve(), 'connectivity'),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+    await expectErrorCodeAsync(
+      () => limiter.run('org-e', () => Promise.resolve()),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+
+    g.open();
+    await Promise.all([...testers, check]);
+  });
+
+  it('counts both pools against one organization', async () => {
+    const limiter = new ProviderEgressLimiter({ ...LIMITS, globalConnectivityConcurrent: 3 });
+    const g = gate();
+    const running = [
+      limiter.run('org-a', () => g.promise),
+      limiter.run('org-a', () => g.promise, 'connectivity'),
+    ];
+
+    await expectErrorCodeAsync(
+      () => limiter.run('org-a', () => Promise.resolve(), 'connectivity'),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+
+    g.open();
+    await Promise.all(running);
+  });
+
+  /**
+   * Round-two review R2-4: with two checks per organization, four accounts
+   * held all eight connectivity slots open against a stalling endpoint. One
+   * check per organization and a pool of sixteen need sixteen.
+   */
+  it('lets one organization hold one connectivity check at a time', async () => {
+    const limiter = new ProviderEgressLimiter();
+    const g = gate();
+    const check = limiter.run('org-a', () => g.promise, 'connectivity');
+
+    await expectErrorCodeAsync(
+      () => limiter.run('org-a', () => Promise.resolve(), 'connectivity'),
+      ProviderErrorCode.PROVIDER_EGRESS_RATE_LIMITED,
+    );
+    // The organization's other slot is still there for the tester.
+    const tester = limiter.run('org-a', () => g.promise);
+
+    g.open();
+    await Promise.all([check, tester]);
+  });
+
+  it('takes at least eight organizations to fill the default connectivity pool', async () => {
+    const limiter = new ProviderEgressLimiter();
+    const g = gate();
+    const running: Promise<unknown>[] = [];
+    let organizations = 0;
+    for (;;) {
+      const org = `org-${organizations}`;
+      const before = running.length;
+      for (let i = 0; i < DEFAULT_PROVIDER_EGRESS_LIMITS.perOrganizationConcurrent; i += 1) {
+        running.push(limiter.run(org, () => g.promise, 'connectivity').catch((error) => error));
+      }
+      await new Promise((resolve) => setImmediate(resolve));
+      const settled = await Promise.all(
+        running.slice(before).map((p) => Promise.race([p, Promise.resolve('running')])),
+      );
+      if (settled.every((outcome) => outcome !== 'running')) break; // all refused: the pool is full
+      organizations += 1;
+    }
+
+    expect(organizations).toBeGreaterThanOrEqual(8);
     g.open();
     await Promise.all(running);
   });

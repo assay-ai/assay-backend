@@ -109,6 +109,43 @@ describe('EvmSlashExecutor — the dispute upgrade (D-19)', () => {
     });
   });
 
+  it('R2-8: reads a cancelled record’s reason and time off its SlashCancelled event', async () => {
+    const { chain, executor } = build();
+    await executor.propose(proposal(1));
+    chain.record(requestId(1))!.status = 3;
+    const asked: { fromBlock: bigint; toBlock: bigint; args: unknown }[] = [];
+    Object.assign(chain.client, {
+      getBlockNumber: async () => 9_000n,
+      getContractEvents: async (args: { fromBlock: bigint; toBlock: bigint; args: unknown }) => {
+        asked.push(args);
+        return args.fromBlock <= 5_500n && 5_500n <= args.toBlock
+          ? [{ eventName: 'SlashCancelled', args: { reason: 0, cancelledAt: 1_760_000_000n } }]
+          : [];
+      },
+    });
+
+    await expect(executor.readRecord(requestId(1), PROVIDER, CHAIN)).resolves.toMatchObject({
+      status: 'CANCELLED',
+      cancelReason: 'WITHDRAWN',
+      cancelledAt: new Date(1_760_000_000_000),
+    });
+    // Newest blocks first, one bounded chunk at a time, by the record's id.
+    expect(asked[0]).toMatchObject({ toBlock: 9_000n, args: { requestId: `0x${requestId(1)}` } });
+    expect(asked.length).toBeLessThanOrEqual(5);
+  });
+
+  it('R2-8: leaves the reason unknown when the event is out of reach', async () => {
+    const { chain, executor } = build();
+    await executor.propose(proposal(1));
+    chain.record(requestId(1))!.status = 3;
+    await expect(executor.readRecord(requestId(1), PROVIDER, CHAIN)).resolves.toMatchObject({
+      status: 'CANCELLED',
+      cancelledAt: null,
+    });
+    const read = await executor.readRecord(requestId(1), PROVIDER, CHAIN);
+    expect(read?.cancelReason ?? null).toBeNull();
+  });
+
   it('reads the live slash delay, and throws (never assumes 72 h) when it cannot', async () => {
     const { chain, executor } = build();
     chain.slashDelay = 600n;

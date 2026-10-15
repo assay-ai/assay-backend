@@ -565,6 +565,19 @@ describe('GET /catalogue/tools', () => {
     expect(tools[0].price).toEqual({ amount: '250000', asset: ASSET, decimals: 6 });
   });
 
+  // BUG-R16-B3-03: a screen needs the router's count to say "up to $X" the way
+  // tools/list does — providerCount includes a provider the router cannot use.
+  it('publishes how many bindings the quote was taken over', async () => {
+    const { service } = build({
+      bindings: [binding({ priceAmount: '5000' }), binding({ priceAmount: '250000' })],
+      quotes: { get_weather: quote({ routableBindings: 1 }) },
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].routableBindings).toBe(1);
+  });
+
   it('says a tool is unroutable, and why, instead of hiding it', async () => {
     const { service } = build({
       bindings: [binding()],

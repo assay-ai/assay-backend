@@ -141,6 +141,7 @@ export class DbCredentialMcpSessionSource implements McpSessionPort {
 
     return {
       credentialId: credential.id,
+      storedCredential: true,
       organizationId: credential.organizationId,
       agentId: agent.id,
       agentAccount: agent.primaryAccountId as AccountId,

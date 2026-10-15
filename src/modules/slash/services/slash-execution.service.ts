@@ -919,6 +919,79 @@ export class SlashExecutionService {
   }
 
   /**
+   * Review R2-4: a part of a case already closed `EXECUTED` (or `REVERSED`)
+   * executed late — by this platform's stranded-part sweep or by anybody
+   * (`executeSlash` is permissionless). The case's money columns are re-summed
+   * from its executed current-epoch parts, and the compensation step the
+   * normal completion runs is run for what the late part added.
+   *
+   * Idempotent: a case whose columns already say what its parts say is left
+   * alone, so neither a re-read event nor the sweep and the watcher both
+   * seeing the same part writes or compensates twice. Never throws; returns
+   * whether the case changed.
+   */
+  async refoldLatePart(
+    proposal: SlashProposalEntity,
+    transactionHash: string | null,
+  ): Promise<boolean> {
+    if (!this.parts?.appliesTo(proposal)) return false;
+    try {
+      const fresh =
+        (await this.proposals.findOneScoped(proposal.organizationId, proposal.id)) ?? proposal;
+      const closed: readonly string[] = [
+        SlashProposalStatus.EXECUTED,
+        SlashProposalStatus.REVERSED,
+      ];
+      if (!closed.includes(fresh.status) || !fresh.executedAt) return false;
+      const totals = await this.parts.executedTotals(fresh, fresh.executedAt);
+      const before = BigInt(fresh.appliedAmount ?? '0');
+      const after = BigInt(totals.appliedMinor);
+      if (totals.executed === 0 || after <= before) return false;
+      // Review R3-2: every figure is a difference from what the case already
+      // accounted. The agents' share before the first refold is that of the
+      // parts executed by the time the case closed.
+      const agentBefore =
+        fresh.agentAmount !== null && fresh.agentAmount !== undefined
+          ? BigInt(fresh.agentAmount)
+          : BigInt(totals.agentAmountMinor) - BigInt(totals.agentAmountAfterMinor);
+      // Compare-and-set on the amount read too: a concurrent refold that saw
+      // more parts wins, and this one writes nothing (never a lower amount).
+      const moved = await this.proposals.refoldAmountsIf(
+        fresh.organizationId,
+        fresh.id,
+        [fresh.status],
+        fresh.appliedAmount ?? null,
+        {
+          appliedAmount: totals.appliedMinor,
+          platformAmount: totals.platformAmountMinor,
+          agentAmount: totals.agentAmountMinor,
+        },
+      );
+      if (moved === 0) return false;
+      this.logger.warn(
+        `slash case ${fresh.id}: a late part executed; the case now records ` +
+          `${totals.appliedMinor} applied (was ${before})`,
+      );
+      await this.compensate(fresh, {
+        signature: transactionHash ?? totals.signature ?? fresh.chainRequestId,
+        appliedMinor: (after - before).toString(),
+        agentAmountMinor: (BigInt(totals.agentAmountMinor) - agentBefore).toString(),
+        platformAmountMinor: (
+          BigInt(totals.platformAmountMinor) - BigInt(fresh.platformAmount ?? '0')
+        ).toString(),
+        executedAt: new Date(),
+      });
+      return true;
+    } catch (error) {
+      this.logger.error(
+        `slash case ${proposal.id}: a late part's execution could not be folded into the case`,
+        error instanceof Error ? error.stack : String(error),
+      );
+      return false;
+    }
+  }
+
+  /**
    * Every standing record of the case was cancelled ON CHAIN by somebody else
    * — the arbiter's `cancelSlash` (a ruling for the provider) or an
    * `expireSlash` — and nothing of it executed (audit E-6). Closes the case at
@@ -1633,16 +1706,7 @@ export class SlashExecutionService {
       // A late part paid now: the closed case's money columns follow the chain.
       for (const id of swept.executedCases) {
         const entry = cases.find((candidate) => candidate.proposal.id === id);
-        if (!entry) continue;
-        const view = await this.parts.readRecord(entry.proposal, entry.provider);
-        if (!view) continue;
-        await this.proposals.update(
-          { organizationId: entry.proposal.organizationId, id },
-          { appliedAmount: view.appliedMinor, platformAmount: view.platformAmountMinor },
-        );
-        this.logger.warn(
-          `slash case ${id}: a late part executed; the case now records ${view.appliedMinor} applied`,
-        );
+        if (entry) await this.refoldLatePart(entry.proposal, null);
       }
       if (swept.expired > 0 || swept.executed > 0) {
         this.logger.warn(
@@ -2465,8 +2529,11 @@ export class SlashExecutionService {
       // `NONE` is also the recovery: if the propose below throws, the row is
       // exactly what `findAwaitingChainProposal` selects, and the next sweep
       // re-proposes it under this same fresh id.
-      await this.proposals.update(
-        { organizationId, id: proposalId },
+      //
+      // A compare-and-set on the epoch this call read (review N-9): a second
+      // scheduler holding the same row loses here instead of bumping again.
+      const bumped = await this.proposals.update(
+        { organizationId, id: proposalId, chainEpoch: proposal.chainEpoch },
         {
           chainEpoch,
           chainRequestId,
@@ -2481,6 +2548,15 @@ export class SlashExecutionService {
           chainLastError: null,
         },
       );
+      if (!bumped.affected) {
+        // Review R2-9: the other side of the compare-and-set bumped first and
+        // proposes the new epoch; this one has nothing left to do.
+        this.logger.log(
+          `slash case ${proposalId}: lost the epoch compare-and-set at epoch ` +
+            `${proposal.chainEpoch}; another scheduler re-proposes it`,
+        );
+        return;
+      }
 
       // Re-read: `update()` does not refresh the entity it was handed, and
       // `proposeOne` signs for whatever `chainRequestId` the row carries.

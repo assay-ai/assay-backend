@@ -1,4 +1,15 @@
-import { Body, Controller, Get, HttpCode, Post, Query, Res, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  ParseUUIDPipe,
+  Post,
+  Query,
+  Res,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 import { Response } from 'express';
 
@@ -14,6 +25,7 @@ import { OperatorRole } from '../domain/override-register';
 import {
   ArbiterBlockBodyDto,
   ArbiterRulingBodyDto,
+  ArbiterSupersededCancelBodyDto,
   ArbiterTermsQueryDto,
 } from '../dto/operator-console.dto';
 import { OperatorOverrideGuard } from '../guards/operator-override.guard';
@@ -50,6 +62,48 @@ export class OperatorArbiterController {
   @ApiOperation({ summary: 'Every slash record disputed on chain, oldest dispute first' })
   async disputed() {
     return { items: await this.disputes.disputedOnChain() };
+  }
+
+  /**
+   * Review R2-6: records of an earlier epoch of their case that landed late
+   * and still stand. Each would charge the same calls twice if executed; the
+   * arbiter cancels it (`superseded/cancel-intent`).
+   */
+  @Get('superseded')
+  @ApiOperation({ summary: 'Superseded earlier-epoch slash records still standing on chain' })
+  async superseded() {
+    return { items: await this.disputes.supersededOnChain() };
+  }
+
+  /**
+   * Review R2-6: `S-13`, the arbiter's `cancelSlashBatch` of one superseded
+   * record. 409 when the id is not a superseded record standing on the chain.
+   */
+  @Post('superseded/cancel-intent')
+  @Override('S-13')
+  @RequireRoles(OperatorRole.ADJL, OperatorRole.TRE)
+  @HttpCode(200)
+  @ApiOperation({ summary: "Build the arbiter's unsigned cancel of a superseded slash record" })
+  @ApiResponse({ status: 200, type: SlashContractCallDto })
+  @ApiResponse({ status: 409, description: 'Not a superseded record, or no arbiter appointed' })
+  @ApiResponse({ status: 422, description: 'The chain would refuse the cancel' })
+  async supersededCancel(
+    @CurrentOperator() operator: OperatorSession,
+    @Body() body: ArbiterSupersededCancelBodyDto,
+  ): Promise<SlashContractCallDto> {
+    return toDto(
+      await this.disputes.supersededCancel(
+        {
+          operator,
+          reasonCode: body.reasonCode,
+          note: body.note,
+          ticketRef: body.ticketRef ?? null,
+          requestId: RequestContext.getServerRequestId(),
+        },
+        body.chainId,
+        body.requestId,
+      ),
+    );
   }
 
   /** `S-13` — the arbiter's `upholdSlashBatch` or `cancelSlashBatch`, 1 to 64 ids. */
@@ -115,6 +169,23 @@ export class OperatorArbiterController {
       body.account,
     );
     return answerOrQueued(response, isApprovalQueued(result) ? result : toDto(result));
+  }
+
+  /**
+   * Review N-5: the unsigned `setBlocked` of an APPROVED `A-11`, rebuilt from
+   * the approved payload so the arbiter's wallet can sign it after the
+   * approver's tab is gone. Builds only and writes nothing; 409 once the
+   * address is blocked on chain.
+   */
+  @Get('blocks/:approvalId/call')
+  @RequireRoles(OperatorRole.ADJL, OperatorRole.SRE, OperatorRole.TRE)
+  @ApiOperation({ summary: 'The unsigned on-chain block of an approved A-11, for the arbiter' })
+  @ApiResponse({ status: 200, type: SlashContractCallDto })
+  @ApiResponse({ status: 409, description: 'Not an approved block, or already blocked' })
+  async approvedBlock(
+    @Param('approvalId', new ParseUUIDPipe()) approvalId: string,
+  ): Promise<SlashContractCallDto> {
+    return toDto(await this.arbiter.approvedBlockCall(approvalId));
   }
 }
 

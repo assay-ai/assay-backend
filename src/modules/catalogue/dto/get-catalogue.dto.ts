@@ -238,6 +238,21 @@ export class CatalogueToolDto {
   @ApiProperty({ description: 'Whether a call placed now would find a provider.' })
   routable: boolean;
 
+  /**
+   * How many bindings the quote was taken over — `ProviderRouterService.quote`'s
+   * own count. `tools/list` prints its price as "up to $X" when this is above
+   * one, because the call pays the serving binding, which may be cheaper than
+   * the hold. The catalogue publishes the count so a screen can say the same.
+   * Not `providerCount`: a listed provider the router cannot use right now
+   * (a stake on another asset, a ceiling hit) is in that and not in this.
+   */
+  @ApiProperty({
+    description:
+      'Bindings the router could serve this tool from right now — the set the quote is the ' +
+      'dearest of. 0 when nothing is routable.',
+  })
+  routableBindings: number;
+
   @ApiPropertyOptional({
     type: String,
     nullable: true,

@@ -8,7 +8,7 @@ import {
 } from '@database/postgres/repositories/slash-proposal.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { NotificationRequest } from '@modules/notification/ports/notification.port';
-import { SlashConfig } from '@modules/slash/constants/slash.constants';
+import { CHAIN_DISPUTE_SETTLE_MS, SlashConfig } from '@modules/slash/constants/slash.constants';
 
 /**
  * Hand-written fakes, matching `test/unit/provider/helpers/`.
@@ -38,6 +38,9 @@ export class FakeSlashProposals {
   readonly reversalManagers: unknown[] = [];
 
   readonly rows = new Map<string, SlashProposalEntity>();
+
+  /** Cases one of whose current records the arbiter upheld on chain (`arbiterUpheld`). */
+  readonly arbiterUpheld = new Set<string>();
 
   /** Records every CAS attempt, so a test can prove which predicate refused. */
   readonly transitions: { id: string; from: readonly string[]; to: string; affected: number }[] =
@@ -164,6 +167,43 @@ export class FakeSlashProposals {
     return affected;
   }
 
+  /** `refoldAmountsIf`: compare-and-set on the status and the applied amount. */
+  async refoldAmountsIf(
+    organizationId: string,
+    id: string,
+    expectedFrom: readonly string[],
+    expectedApplied: string | null,
+    patch: Partial<SlashProposalEntity>,
+  ): Promise<number> {
+    const row = this.rows.get(id);
+    if (
+      !row ||
+      row.organizationId !== organizationId ||
+      !expectedFrom.includes(row.status) ||
+      (row.appliedAmount ?? null) !== expectedApplied
+    ) {
+      return 0;
+    }
+    Object.assign(row, patch);
+    return 1;
+  }
+
+  /** {@link transitionIfIn} that also requires the resolution kind. */
+  async transitionIfInResolvedAs(
+    organizationId: string,
+    id: string,
+    expectedFrom: readonly string[],
+    expectedKind: string,
+    patch: Partial<SlashProposalEntity> & { status: string },
+  ): Promise<number> {
+    const row = this.rows.get(id);
+    if (row && row.resolutionKind !== expectedKind) {
+      this.transitions.push({ id, from: expectedFrom, to: patch.status, affected: 0 });
+      return 0;
+    }
+    return this.transitionIfIn(organizationId, id, expectedFrom, patch);
+  }
+
   /**
    * Mirrors `SlashProposalRepository.markReversedIfExecuted`, predicate for
    * predicate. The money columns are what decide it — a case the chain executed
@@ -216,12 +256,20 @@ export class FakeSlashProposals {
             : null
           : row.respondByAt,
       }))
-      .filter(({ row, deadline }) => row.status === 'PROPOSED' && deadline && deadline <= now)
+      .filter(
+        ({ row, deadline }) =>
+          row.status === 'PROPOSED' &&
+          deadline &&
+          // As the real query: an EVM door counts once the settle margin passed.
+          deadline.getTime() + (row.assetId.startsWith('eip155:') ? CHAIN_DISPUTE_SETTLE_MS : 0) <=
+            now.getTime(),
+      )
       .slice(0, limit)
       .map(({ row, deadline }) => ({
         organizationId: row.organizationId,
         id: row.id,
         respondByAt: deadline as Date,
+        arbiterUpheld: this.arbiterUpheld.has(row.id),
       }));
   }
 
@@ -377,6 +425,7 @@ export class FakeSlashProposals {
       .filter(
         (row) =>
           !['OVERTURNED', 'REVERSED', 'WAIVED', 'CANCELLED'].includes(row.status) &&
+          !String(row.assetId).startsWith('eip155:') &&
           row.rootCauseKey === defectKey &&
           row.proposedAt >= from &&
           row.proposedAt <= to,
@@ -435,11 +484,19 @@ export class FakeSlashProposals {
    * (`transitionIfIn` / `claimChainStatus`) has already won the row.
    */
   async update(
-    criteria: { readonly organizationId: string; readonly id: string },
+    criteria: {
+      readonly organizationId: string;
+      readonly id: string;
+      /** A compare-and-set on the epoch, as the real `WHERE` would apply it. */
+      readonly chainEpoch?: number;
+    },
     patch: Partial<SlashProposalEntity>,
   ): Promise<{ affected: number }> {
     const row = this.rows.get(criteria.id);
     if (!row || row.organizationId !== criteria.organizationId) return { affected: 0 };
+    if (criteria.chainEpoch !== undefined && row.chainEpoch !== criteria.chainEpoch) {
+      return { affected: 0 };
+    }
     Object.assign(row, patch);
     return { affected: 1 };
   }

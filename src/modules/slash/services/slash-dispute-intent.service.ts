@@ -151,6 +151,61 @@ export class SlashDisputeIntentService {
     });
   }
 
+  /**
+   * Review R2-6: the earlier-epoch records that landed late and still stand
+   * (`SupersededEpoch`). Each would charge the same calls a second time if
+   * executed, so the arbiter page lists them for a cancel
+   * ({@link supersededCancel}); nothing of this platform executes them.
+   */
+  async supersededOnChain(limit = 200) {
+    const rows = await this.parts.findSupersededStanding(limit);
+    return rows.map((row) => ({
+      requestId: `0x${row.requestId}`,
+      proposalId: row.proposalId,
+      providerId: row.providerId,
+      chainId: chainOfAsset(row.assetId),
+      chainStatus: row.chainStatus,
+      recordEpoch: Number(row.chainEpoch),
+      caseEpoch: Number(row.caseChainEpoch),
+      penaltyAmount: String(row.penaltyAmount),
+      reservedAmount: row.chainReserved === null ? null : String(row.chainReserved),
+      executableAt: row.chainExecutableAt ? new Date(row.chainExecutableAt).toISOString() : null,
+    }));
+  }
+
+  /**
+   * Review R2-6: `S-13`, the arbiter's `cancelSlashBatch` of ONE superseded
+   * record, built and logged like any arbiter ruling. Guarded: the id must be
+   * a superseded record still standing (409 otherwise), so this route cannot
+   * be used to cancel a live record of the current epoch — that is the
+   * ordinary ruling's, on the disputes list.
+   */
+  async supersededCancel(
+    context: ArbiterIntentContext,
+    chainId: string,
+    requestId: string,
+  ): Promise<SlashContractCall> {
+    const chain = this.evmChain(chainId);
+    const id = requestId.replace(/^0x/, '').toLowerCase();
+    const superseded = (await this.parts.findSupersededStanding(1000)).find(
+      (row) => row.requestId.toLowerCase() === id && chainOfAsset(row.assetId) === chain,
+    );
+    if (!superseded) {
+      throw SlashErrors.recordNotSuperseded({ requestId, chainId: chain });
+    }
+    const built = await this.port().buildRulingBatch({
+      chainId: chain,
+      ruling: 'CANCEL',
+      requestIds: [requestId],
+    });
+    const call = this.accepted(built, 'cancelSlashBatch');
+    return this.logged(context, 'S-13', 'slash_record_batch', call, {
+      ruling: 'CANCEL',
+      superseded: true,
+      proposalId: superseded.proposalId,
+    });
+  }
+
   async chainTerms(chainId: string): Promise<SlashChainTerms> {
     return this.port().chainTerms(this.evmChain(chainId));
   }
@@ -208,6 +263,16 @@ export class SlashDisputeIntentService {
     return this.logged(context, 'A-11', 'chain_blocklist', call, {
       account: account.toLowerCase(),
     });
+  }
+
+  /**
+   * Review N-5: the same `setBlocked(account, true)` an approved `A-11` built,
+   * rebuilt from the approval's own payload for the arbiter to sign. It writes
+   * no second register entry (the approval's is the record), and it is
+   * refused once the address is blocked: the call was executed.
+   */
+  async rebuildArbiterBlock(chainId: string, account: string): Promise<SlashContractCall> {
+    return this.port().buildBlock({ chainId: this.evmChain(chainId), account });
   }
 
   private accepted(built: SlashBatchBuild, functionName: string): SlashContractCall {

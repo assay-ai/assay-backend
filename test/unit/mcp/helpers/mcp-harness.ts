@@ -190,8 +190,14 @@ export class FakeIntents {
   pausedFor: number | null = null;
 
   create(input: CreatePaymentIntentInput, admission?: VoucherAdmission): Promise<PaymentIntent> {
-    if (admission && this.pausedFor !== null) {
-      admission.admit({ escrow: 0n, delegate: 0n, pausedFor: this.pausedFor });
+    if (admission) {
+      // The highest seq of the payer already admitted, as the locked read sees it.
+      const seqs = [...this.rows.values()]
+        .filter((row) => row.agentAccount === input.agentAccount && row.voucherSeq)
+        .filter((row) => !this.abandoned.includes(row.id))
+        .map((row) => BigInt(row.voucherSeq as string));
+      const maxSeq = seqs.length > 0 ? seqs.reduce((a, b) => (a > b ? a : b)) : null;
+      admission.admit({ escrow: 0n, delegate: 0n, pausedFor: this.pausedFor, maxSeq });
     }
     const id = `intent-${++this.sequence}`;
     const intent: PaymentIntent = {
@@ -464,12 +470,24 @@ export class FakeSpendPolicy {
   holdCap: { readonly max: number; readonly held: () => number } | null = null;
   /** Calls that ran the check outside {@link withAgentSpendLock}. */
   uncheckedOutsideLock = 0;
+  /** Set by a test: the lock lapsed mid-section, so the ownership check refuses. */
+  lockLost: Error | null = null;
+  /** How many sections confirmed they still held the lock. */
+  lockConfirmations = 0;
 
   private readonly locks = new Map<string, Promise<unknown>>();
   private depth = 0;
 
   /** The real lock's guarantee, in process: one critical section per agent at a time. */
-  withAgentSpendLock<T>(agentId: string, fn: () => Promise<T>): Promise<T> {
+  withAgentSpendLock<T>(
+    agentId: string,
+    section: (assertLockHeld: () => Promise<void>) => Promise<T>,
+  ): Promise<T> {
+    const fn = () =>
+      section(() => {
+        this.lockConfirmations += 1;
+        return this.lockLost ? Promise.reject(this.lockLost) : Promise.resolve();
+      });
     const previous = this.locks.get(agentId) ?? Promise.resolve();
     const run = previous.then(
       async () => {
