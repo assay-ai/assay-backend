@@ -21,6 +21,12 @@ function row(overrides: Partial<ReceiptsSummaryRow>): ReceiptsSummaryRow {
     chargedTotal: 0n,
     withheldTotal: 0n,
     refundedCalls: 0,
+    notChargedTotal: 0n,
+    notChargedCalls: 0,
+    owedTotal: 0n,
+    owedCalls: 0,
+    inProgressTotal: 0n,
+    inProgressCalls: 0,
     ...overrides,
   };
 }
@@ -128,8 +134,62 @@ describe('ReceiptSummaryService — group totals reconcile exactly to the overal
       listedTotal: { amount: '0', asset: '', decimals: 0 },
       chargedTotal: { amount: '0', asset: '', decimals: 0 },
       withheldTotal: { amount: '0', asset: '', decimals: 0 },
+      notChargedTotal: { amount: '0', asset: '', decimals: 0 },
+      notChargedCalls: 0,
+      owedTotal: { amount: '0', asset: '', decimals: 0 },
+      owedCalls: 0,
+      inProgressTotal: { amount: '0', asset: '', decimals: 0 },
+      inProgressCalls: 0,
       failRate: null,
     });
+  });
+
+  it('carries not charged and owed so listed = charged + not charged + owed (R17b-B-01)', async () => {
+    // The R17b seed's tool: 7 charged, 1 open debt, 3 withheld, 1 forfeited,
+    // 1 voided debt.
+    const rows: ReceiptsSummaryRow[] = [
+      row({
+        key: 'tool-1',
+        calls: 13,
+        listedTotal: 3_000_000n,
+        chargedTotal: 1_500_000n,
+        withheldTotal: 750_000n,
+        notChargedTotal: 1_250_000n,
+        notChargedCalls: 5,
+        owedTotal: 250_000n,
+        owedCalls: 1,
+      }),
+      row({
+        key: 'tool-2',
+        calls: 3,
+        listedTotal: 300_000n,
+        chargedTotal: 100_000n,
+        notChargedTotal: 100_000n,
+        notChargedCalls: 1,
+        inProgressTotal: 100_000n,
+        inProgressCalls: 1,
+      }),
+    ];
+    const { service } = build({ current: rows });
+
+    const summary = await service.getSummary(ORG, {
+      ...WINDOW,
+      groupBy: ReceiptsSummaryGroupBy.TOOL,
+    });
+
+    for (const figures of [...summary.groups, summary.totals]) {
+      expect(
+        BigInt(figures.chargedTotal.amount) +
+          BigInt(figures.notChargedTotal.amount) +
+          BigInt(figures.owedTotal.amount) +
+          BigInt(figures.inProgressTotal.amount),
+      ).toBe(BigInt(figures.listedTotal.amount));
+    }
+    expect(summary.totals.notChargedTotal.amount).toBe('1350000');
+    expect(summary.totals.notChargedCalls).toBe(6);
+    expect(summary.totals.owedTotal.amount).toBe('250000');
+    expect(summary.totals.owedCalls).toBe(1);
+    expect(summary.totals.inProgressCalls).toBe(1);
   });
 });
 
@@ -214,6 +274,8 @@ describe('ReceiptSummaryService — compareTo=previous_period', () => {
     expect(comparison?.deltaListedTotal).toEqual({ amount: '2000', asset: USDC, decimals: 6 });
     expect(comparison?.deltaChargedTotal).toEqual({ amount: '2000', asset: USDC, decimals: 6 });
     expect(comparison?.deltaWithheldTotal).toEqual({ amount: '0', asset: USDC, decimals: 6 });
+    expect(comparison?.deltaNotChargedTotal).toEqual({ amount: '0', asset: USDC, decimals: 6 });
+    expect(comparison?.deltaOwedTotal).toEqual({ amount: '0', asset: USDC, decimals: 6 });
   });
 
   it('treats a group with no previous-window match as a comparison against zero', async () => {
