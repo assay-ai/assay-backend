@@ -2,6 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { Brackets, DataSource, EntityManager, In, SelectQueryBuilder } from 'typeorm';
 
+import { CHAIN_DISPUTE_SETTLE_MS } from '@modules/slash/constants/slash.constants';
 import { ON_CHAIN_DISPUTE_ASSET_PREFIX } from '@modules/slash/domain/on-chain-dispute';
 
 import { SlashProposalEntity } from '../entities/slash-proposal.entity';
@@ -39,6 +40,11 @@ export interface UndisputedProposalRow {
   readonly id: string;
   /** The deadline that passed: `respond_by_at`, or `chain_executable_at` on EVM. */
   readonly respondByAt: Date;
+  /**
+   * EVM: a current record of the case was disputed and then upheld by the
+   * arbiter on chain, so the case's uphold is the arbiter's (`CHAIN_ARBITER`).
+   */
+  readonly arbiterUpheld?: boolean;
 }
 
 /** A case whose **platform** window has elapsed with no decision. */
@@ -398,15 +404,27 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
     // The deadline that passed: the in-app `respond_by_at` (Solana), or on EVM
     // the record's own door, `chain_executable_at`, with the record still
     // `PENDING` (not disputed on chain). The on-chain door is the only EVM
-    // clock; no delivery starts it.
+    // clock; no delivery starts it. Review R2-2: on EVM every current part
+    // still pending and never disputed must be past its own door by
+    // `CHAIN_DISPUTE_SETTLE_MS`, so a dispute sent just before the door is
+    // mirrored before the case is labelled undisputed.
     const deadline =
       `CASE WHEN proposal.asset_id LIKE :onChain ` +
       `THEN proposal.chain_executable_at ELSE proposal.respond_by_at END`;
+    const settled = new Date(now.getTime() - CHAIN_DISPUTE_SETTLE_MS);
     return this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.organization_id', 'organizationId')
       .addSelect('proposal.id', 'id')
       .addSelect(deadline, 'respondByAt')
+      .addSelect(
+        'EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
+          'WHERE part.organization_id = proposal.organization_id ' +
+          'AND part.proposal_id = proposal.id AND part.chain_epoch = proposal.chain_epoch ' +
+          "AND part.chain_status IN ('PENDING', 'EXECUTED') " +
+          'AND part.chain_disputed_at IS NOT NULL)',
+        'arbiterUpheld',
+      )
       .where('proposal.status = :proposed', { proposed: 'PROPOSED' })
       .andWhere(
         new Brackets((where) =>
@@ -418,11 +436,17 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
             .orWhere(
               "proposal.asset_id LIKE :onChain AND proposal.chain_status = 'PENDING' " +
                 'AND proposal.chain_executable_at IS NOT NULL ' +
-                'AND proposal.chain_executable_at <= :now',
+                'AND proposal.chain_executable_at <= :settled ' +
+                'AND NOT EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
+                'WHERE part.organization_id = proposal.organization_id ' +
+                'AND part.proposal_id = proposal.id ' +
+                'AND part.chain_epoch = proposal.chain_epoch ' +
+                "AND part.chain_status = 'PENDING' AND part.chain_disputed_at IS NULL " +
+                'AND part.chain_executable_at > :settled)',
             ),
         ),
       )
-      .setParameters({ now, onChain: ON_CHAIN_DISPUTE_LIKE })
+      .setParameters({ now, settled, onChain: ON_CHAIN_DISPUTE_LIKE })
       .orderBy(deadline, 'ASC')
       .limit(limit)
       .getRawMany<UndisputedProposalRow>();
@@ -718,6 +742,28 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         unproposed: ['NONE', 'PROPOSING'],
       })
       .orderBy('proposal.proposed_at', 'ASC')
+      .limit(limit)
+      .getRawMany<ChainSweepRow>();
+  }
+
+  /**
+   * Review R2-2: open EVM cases (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`)
+   * whose mirror stands `PENDING` with its door at or before `settledBefore`
+   * — the latest door of the case's pending records. The scheduler follows
+   * their records again every tick.
+   */
+  async findOpenOnChainPastDoor(settledBefore: Date, limit: number): Promise<ChainSweepRow[]> {
+    return this.manager
+      .createQueryBuilder(SlashProposalEntity, 'proposal')
+      .select('proposal.organization_id', 'organizationId')
+      .addSelect('proposal.id', 'id')
+      .where('proposal.status IN (:...open)', {
+        open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
+      })
+      .andWhere('proposal.asset_id LIKE :onChain', { onChain: ON_CHAIN_DISPUTE_LIKE })
+      .andWhere("proposal.chain_status = 'PENDING'")
+      .andWhere('proposal.chain_executable_at <= :settledBefore', { settledBefore })
+      .orderBy('proposal.chain_executable_at', 'ASC')
       .limit(limit)
       .getRawMany<ChainSweepRow>();
   }

@@ -1538,6 +1538,94 @@ describe('ArbitrationService', () => {
       expect(await ctx.service.recordChainStanding('org_1', 'p1')).toBe(false);
     });
 
+    it('R2-2 / R2-10: relabels an AUTO_UNDISPUTED case CHAIN_ARBITER on the arbiter uphold', async () => {
+      const ctx = build();
+      seedEvm(ctx, SlashProposalStatus.PROPOSED);
+      Object.assign(ctx.proposals.rows.get('p1')!, {
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+        resolvedAt: new Date('2026-10-18T12:10:00Z'),
+      });
+
+      expect(
+        await ctx.service.recordChainUphold('org_1', 'p1', {
+          arbiter: '0xAbC',
+          transactionHash: '0xdef',
+        }),
+      ).toBe(true);
+      expect(ctx.proposals.rows.get('p1')!).toMatchObject({
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.CHAIN_ARBITER,
+      });
+      // Idempotent.
+      expect(
+        await ctx.service.recordChainUphold('org_1', 'p1', { arbiter: null, transactionHash: null }),
+      ).toBe(false);
+    });
+
+    it('R2-2: reopens an AUTO_UNDISPUTED case as DISPUTED when a dispute is mirrored after it', async () => {
+      const ctx = build();
+      seedEvm(ctx, SlashProposalStatus.PROPOSED);
+      Object.assign(ctx.proposals.rows.get('p1')!, {
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+        resolvedAt: new Date('2026-10-18T12:10:00Z'),
+        chainStatus: 'DISPUTED',
+      });
+
+      const reopened = await ctx.service.reopenForChainDispute('org_1', 'p1', {
+        requestId: 'a'.repeat(64),
+        transactionHash: '0xabc',
+      });
+
+      expect(reopened).toBe(true);
+      const row = ctx.proposals.rows.get('p1')!;
+      expect(row).toMatchObject({
+        status: SlashProposalStatus.DISPUTED,
+        resolutionKind: null,
+        resolvedAt: null,
+        platformDecisionDueAt: null,
+      });
+      expect(row.disputeId).not.toBeNull();
+      expect(ctx.disputes.get(row.disputeId!)).toMatchObject({
+        state: 'OPEN',
+        openedBy: 'chain:disputeSlash',
+      });
+      expect(ctx.events.kinds()).toContain('DISPUTE_FILED');
+      // Once only.
+      expect(
+        await ctx.service.reopenForChainDispute('org_1', 'p1', {
+          requestId: 'a'.repeat(64),
+          transactionHash: null,
+        }),
+      ).toBe(false);
+    });
+
+    it('R2-2: never reopens an arbiter-upheld or executed case', async () => {
+      for (const patch of [
+        { resolutionKind: ResolutionKind.CHAIN_ARBITER },
+        {
+          resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+          executedAt: new Date('2026-10-18T12:20:00Z'),
+        },
+      ]) {
+        const ctx = build();
+        seedEvm(ctx, SlashProposalStatus.PROPOSED);
+        Object.assign(ctx.proposals.rows.get('p1')!, {
+          status: SlashProposalStatus.UPHELD,
+          resolvedAt: new Date('2026-10-18T12:10:00Z'),
+          ...patch,
+        });
+        expect(
+          await ctx.service.reopenForChainDispute('org_1', 'p1', {
+            requestId: 'a'.repeat(64),
+            transactionHash: null,
+          }),
+        ).toBe(false);
+        expect(ctx.proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.UPHELD);
+      }
+    });
+
     it('leaves a Solana case to its own decision', async () => {
       const ctx = build();
       seedDisputed(ctx);

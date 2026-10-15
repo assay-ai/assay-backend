@@ -402,19 +402,25 @@ export class SlashProposalService {
    *
    * Only `PROPOSED` cases with a `respond_by_at` are eligible, which is the
    * same thing as saying only cases the provider was actually told about.
+   *
+   * EVM (review R2-2, R2-10): the query admits a case only once every record
+   * still pending undisputed has passed its door by `CHAIN_DISPUTE_SETTLE_MS`.
+   * A case one of whose records the arbiter already upheld on chain (it was
+   * disputed, and stands again) is the arbiter's uphold, `CHAIN_ARBITER`.
    */
   async sweepUndisputed(now: Date = new Date()): Promise<number> {
     const due = await this.proposals.findUndisputedPast(now, this.config.sweepBatchSize);
     let closed = 0;
 
     for (const row of due) {
+      const arbiter = row.arbiterUpheld === true;
       const affected = await this.proposals.transitionIfIn(
         row.organizationId,
         row.id,
         [SlashProposalStatus.PROPOSED],
         {
           status: SlashProposalStatus.UPHELD,
-          resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+          resolutionKind: arbiter ? ResolutionKind.CHAIN_ARBITER : ResolutionKind.AUTO_UNDISPUTED,
           resolvedAt: now,
           countsAsFalsePositive: false,
         },
@@ -429,8 +435,11 @@ export class SlashProposalService {
         kind: 'AUTO_CLOSED',
         actorType: 'system',
         actorId: null,
-        summary: `No dispute was filed by ${row.respondByAt.toISOString()}; the proposal stands`,
-        detail: { respondByAt: row.respondByAt.toISOString() },
+        summary: arbiter
+          ? `The arbiter upheld a disputed record of this case on chain, and no other record ` +
+            `was disputed by ${row.respondByAt.toISOString()}; the proposal stands`
+          : `No dispute was filed by ${row.respondByAt.toISOString()}; the proposal stands`,
+        detail: { respondByAt: row.respondByAt.toISOString(), arbiterUpheld: arbiter },
       });
     }
 
@@ -541,6 +550,25 @@ export class SlashProposalService {
    * an operator claiming a case. Those have no register entry to commit
    * alongside, so there is nothing for the row to be atomic *with*.
    */
+  /**
+   * Whether the case's timeline already has a `kind` entry for the on-chain
+   * record `requestId` (review R2-2: the watcher's "disputed on chain" entry
+   * is written once per record, whatever a chain read mirrored before it).
+   */
+  async hasTimelineEntry(
+    organizationId: string,
+    proposalId: string,
+    kind: string,
+    requestId: string,
+  ): Promise<boolean> {
+    const rows = await this.events.findForProposal(organizationId, proposalId);
+    return rows.some(
+      (row) =>
+        row.kind === kind &&
+        (row.detail as Record<string, unknown> | null)?.requestId === requestId,
+    );
+  }
+
   async appendEventDirect(entry: {
     organizationId: string;
     proposalId: string;

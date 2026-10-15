@@ -349,3 +349,31 @@ describe('SlashLifecycleJob — open EVM cases from the in-app objection era (re
     expect(steps.slice(0, 2)).toEqual(['reconcileOpenCases', 'sweepUndisputed']);
   });
 });
+
+describe('SlashLifecycleJob — open EVM cases past their door (review R2-2)', () => {
+  it('follows their records every tick, right after the undisputed sweep', async () => {
+    const steps: string[] = [];
+    const proposals = new FakeSlashProposals((name) => steps.push(name));
+    const execution = new FakeSlashExecution((name) => steps.push(name));
+    const rulings = {
+      reconcileOpenCases: async () => 0,
+      followOpenCasesPastDoor: async () => {
+        steps.push('followOpenCasesPastDoor');
+        return 1;
+      },
+    };
+    const job = new SlashLifecycleJob(
+      proposals as never,
+      execution as never,
+      {} as never,
+      rulings as never,
+    );
+    jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+
+    await job.handleTick();
+    await job.handleTick();
+
+    expect(steps.filter((step) => step === 'followOpenCasesPastDoor')).toHaveLength(2);
+    expect(steps.indexOf('followOpenCasesPastDoor')).toBe(steps.indexOf('sweepUndisputed') + 1);
+  });
+});

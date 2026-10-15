@@ -302,8 +302,34 @@ describe('SlashProposalService', () => {
       });
 
       expect(await service.sweepUndisputed(new Date('2026-08-12T09:13:00Z'))).toBe(0);
-      expect(await service.sweepUndisputed(new Date('2026-08-12T09:15:00Z'))).toBe(1);
-      expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.UPHELD);
+      // R2-2: past the door, but a dispute sent just before it may not be
+      // confirmed in the watcher's view yet.
+      expect(await service.sweepUndisputed(new Date('2026-08-12T09:15:00Z'))).toBe(0);
+      expect(await service.sweepUndisputed(new Date('2026-08-12T09:25:00Z'))).toBe(1);
+      expect(proposals.rows.get('p1')!).toMatchObject({
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+      });
+    });
+
+    it('R2-10: labels the uphold CHAIN_ARBITER when the arbiter already upheld a record of it', async () => {
+      const { service, proposals, events } = build();
+      proposals.seed({
+        id: 'p1',
+        organizationId: 'org_1',
+        status: SlashProposalStatus.PROPOSED,
+        assetId: EVM_ASSET,
+        chainStatus: 'PENDING',
+        chainExecutableAt: new Date('2026-08-12T09:14:00Z'),
+      });
+      proposals.arbiterUpheld.add('p1');
+
+      expect(await service.sweepUndisputed(new Date('2026-08-12T09:25:00Z'))).toBe(1);
+      expect(proposals.rows.get('p1')!).toMatchObject({
+        status: SlashProposalStatus.UPHELD,
+        resolutionKind: ResolutionKind.CHAIN_ARBITER,
+      });
+      expect(events.rows.at(-1)!.summary).toContain('arbiter');
     });
 
     it('never upholds an EVM case whose record is disputed on chain', async () => {
