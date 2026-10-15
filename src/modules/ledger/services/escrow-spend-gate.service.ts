@@ -53,20 +53,19 @@ export interface Spendable {
 /**
  * Prices a call against the buyer's on-chain escrow, not the ledger.
  *
- * ## Ships off
+ * ## The flag governs rail A only
  *
- * `ESCROW_SPEND_GATE_ENABLED` defaults to disabled. While it
- * is off, `assertAffordable` authorises nothing and
- * `PaymentIntentService.secureFunds` keeps taking spend from the ledger's own
- * `LEDGER_INSUFFICIENT_AVAILABLE_BALANCE` CHECK alone — exactly today's
- * behaviour. Turning the gate on is a cutover with its own runbook; this
- * class is what the runbook's last step switches on, not something a deploy
- * flips by accident.
+ * `ESCROW_SPEND_GATE_ENABLED` defaults to disabled, and all it decides is
+ * whether a rail-A intent is refused (see below). Turning it on is a cutover
+ * with its own runbook, not something a deploy flips by accident.
  *
- * **One check runs either way**: a buyer with a standing `request_withdraw` is
- * refused whatever the flag says. See {@link assertAffordable} — the flag
- * decides who may spend an escrow, not whether an escrow on its way out may be
- * spent at all.
+ * **Rail B is always priced against the chain**, whatever the flag says. A
+ * rail-B voucher is collected from the buyer's escrow and from nothing else,
+ * so a voucher the escrow cannot cover is a served call nobody can be charged
+ * for. The ledger mirror cannot answer that question: nothing writes a
+ * `WITHDRAWAL` entry, so after `request_withdraw` → wait → `withdraw` the
+ * mirror still shows the old balance while the escrow is empty (A6 in the
+ * no-platform-debt review). See {@link assertAffordable}.
  *
  * ## Rail A has no rail here
  *
@@ -138,30 +137,30 @@ export class EscrowSpendGateService {
    * `createHold`, so an unaffordable call never opens a hold it then has to
    * release.
    *
-   * ## The withdrawal check is NOT behind the flag
+   * ## Rail B is NOT behind the flag
    *
-   * Everything else here is a no-op while {@link enabled} is `false`. The
-   * standing-withdrawal refusal is not, and the asymmetry is the point.
+   * The flag decides only whether a rail-A intent is refused. For rail B
+   * every check here runs whatever it says — no escrow, a standing
+   * withdrawal, and a price over the chain balance net of open holds are all
+   * refused.
    *
    * On chain, `request_withdraw` → wait `WITHDRAW_DELAY_SECONDS` → `withdraw`
    * is deliberately **not** blocked by pending redemptions: the program lets a
    * buyer leave without asking the platform's permission, which is the whole
    * custody guarantee. So a buyer can request a withdrawal, wait out the hour,
    * spend the escrow on calls in the meantime, and `withdraw` before the
-   * redemption cron lands any of the vouchers those calls produced. Every one
-   * of them then dies `EscrowInsufficient`, the calls are already served, and
-   * the platform pays the providers out of its own funds.
+   * redemption cron lands any of the vouchers those calls produced. And once
+   * `withdraw` has landed, `withdrawRequested` is back to zero and only the
+   * chain balance shows the escrow is empty — the ledger mirror does not,
+   * because nothing writes a `WITHDRAWAL` entry. Either way every voucher
+   * admitted dies `EscrowInsufficient` after its call was served.
    *
    * Nothing on chain stops that and nothing is meant to. The backend refusing
-   * to *serve* an escrow with a standing withdrawal is the whole control, and a
-   * control that only runs when a cutover flag is on is not a control — this
-   * gate ships off, so gating the standing-withdrawal check behind it would have left the hole open
-   * for exactly as long as the flag stayed off, which is today.
+   * to *serve* a voucher the escrow cannot cover is the whole control, and a
+   * control that only runs when a cutover flag is on is not a control.
    *
-   * It costs one `EscrowBalanceReaderPort.read`, which is cached for
-   * `ESCROW_BALANCE_CACHE_TTL_MS` — and is the same read the rest of this
-   * method already makes when the gate is on, so with the gate on it costs
-   * nothing at all.
+   * It costs one `EscrowBalanceReaderPort.read`, cached for
+   * `ESCROW_BALANCE_CACHE_TTL_MS`, and one sum over open holds.
    */
   async assertAffordable(
     organizationId: string,
@@ -169,28 +168,21 @@ export class EscrowSpendGateService {
     price: Money,
     context: { readonly rail: PaymentRail },
   ): Promise<void> {
-    if (this.enabled && context.rail === PaymentRail.RAIL_A_PER_CALL) {
-      // No signature exists for this call, so no `redeem_voucher` can
-      // ever debit an escrow for it. Still behind the flag: a rail-A call has
-      // no escrow to have a withdrawal standing on, so the standing-withdrawal
-      // check does not reach it, and refusing it here with the gate off would
-      // stop every MCP rail-A call on the platform.
-      throw PaymentErrors.escrowNotOpen({ account });
-    }
-
     if (context.rail === PaymentRail.RAIL_A_PER_CALL) {
+      if (this.enabled) {
+        // No signature exists for this call, so no `redeem_voucher` can
+        // ever debit an escrow for it. Behind the flag: a rail-A call has no
+        // escrow to price, and refusing it here with the gate off would stop
+        // every MCP rail-A call on the platform.
+        throw PaymentErrors.escrowNotOpen({ account });
+      }
       return;
     }
 
     const reading = await this.reader.read(account, price.asset as AssetId);
 
     if (!reading) {
-      if (!this.enabled) {
-        // No escrow, gate off: today's behaviour, the ledger decides. There is
-        // no escrow for a withdrawal to be standing on either, so the
-        // standing-withdrawal check has nothing to say about this call.
-        return;
-      }
+      // No escrow means nothing a voucher could ever be redeemed against.
       throw PaymentErrors.escrowNotOpen({ account });
     }
 
@@ -201,18 +193,12 @@ export class EscrowSpendGateService {
       //
       // The failure this refuses: the voucher is accepted, the buyer's
       // `withdraw()` lands first, the escrow drains, and `redeem_voucher` dies
-      // with `EscrowInsufficient` — the call served, the money gone, and the
-      // shortfall on the platform rather than on the buyer. Checked before the
-      // amount, because it is not a question of how much is there — and
-      // unconditionally, because see the method comment.
+      // with `EscrowInsufficient` — the call served, the money gone. Checked
+      // before the amount, because it is not a question of how much is there.
       throw PaymentErrors.withdrawalPending({
         account,
         availableAt: reading.withdrawAvailableAt || undefined,
       });
-    }
-
-    if (!this.enabled) {
-      return;
     }
 
     const result = await this.netOfHolds(account, price.asset as AssetId, reading);

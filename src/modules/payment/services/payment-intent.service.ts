@@ -353,8 +353,9 @@ export class PaymentIntentService {
     // this throws before any row is written, so an unaffordable call never
     // opens a hold it then has to release — the same argument
     // `McpToolCallService` makes for running the spend policy before this
-    // method at all. A no-op while `ESCROW_SPEND_GATE_ENABLED` is not `'true'`
-    // — see `EscrowSpendGateService`'s class comment.
+    // method at all. Rail B is always priced against the chain; the
+    // `ESCROW_SPEND_GATE_ENABLED` flag governs only the rail-A refusal — see
+    // `EscrowSpendGateService`'s class comment.
     await this.escrowGate.assertAffordable(organizationId, intent.agentAccount, intent.price, {
       rail: intent.rail,
     });

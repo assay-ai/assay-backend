@@ -96,7 +96,7 @@ export interface RelayedEscrowIntentResult {
  * | freeze on `isFrozen(asset)` | KEPT — see below |
  * | nonce reservation (Redis) | gone; `BuyerEscrow.withdraw_requested` is a single slot on chain, so a replay overwrites rather than duplicates |
  * | Squads proposal | gone; the buyer signs `withdraw` themselves |
- * | `WITHDRAWAL` ledger debit | written by the reconciler from the observed `total_withdrawn` delta, because the backend no longer sees the transaction land |
+ * | `WITHDRAWAL` ledger debit | gone — nothing writes one, so the ledger mirror keeps the pre-withdrawal balance; `EscrowSpendGateService` prices every rail-B call against the chain instead |
  *
  * **The freeze stays, and it is the only platform-side veto left.** A
  * reserves breach means the books and the chain disagree, and continuing to
