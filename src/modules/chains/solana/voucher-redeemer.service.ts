@@ -106,9 +106,9 @@ interface SettlementConfigFacts {
  * accepts redemptions from, the second that the program was initialised
  * without one at all. Neither is a property of the voucher in hand — every
  * voucher on the platform is refused identically until an admin acts — so
- * neither may be retried (a fee per hold per pass, for ever) and neither may be
- * absorbed (the buyer keeps their money and the platform pays the provider, for
- * a fault that `update_config` fixes in one transaction).
+ * neither may be retried (a fee per hold per pass, for ever) and neither may
+ * close the voucher (it would become buyer debt for a fault that
+ * `update_config` fixes in one transaction).
  *
  * {@link SolanaVoucherRedeemer.assertRedeemer} is supposed to catch the first
  * of these before a transaction is ever built. This set is what happens when it
@@ -554,13 +554,14 @@ export class SolanaVoucherRedeemer implements VoucherRedeemerPort {
    *
    * There is no `VoucherAlreadyRedeemed` any more. A resubmission of a voucher
    * that already landed comes back as `VoucherSeqNotIncreasing`, which is
-   * terminal — so a confirmation this process did not see is absorbed by the
-   * platform rather than double-paying. The redemption job's per-buyer ordering
-   * is what keeps that case rare.
+   * terminal — and Solana has no `findLanding`, so a confirmation this process
+   * did not see becomes buyer debt the buyer may then pay twice. Rail B is off
+   * on Solana (`rails: []`) until it has the EVM landing lookup; the redemption
+   * job's per-buyer ordering is what keeps the case rare.
    *
    * Unrecognised is `RETRY`, and the asymmetry is deliberate. Mis-filing a
-   * retryable refusal as `UNREDEEMABLE` pays a provider out of platform funds
-   * for a call the buyer would have paid for; mis-filing a terminal one as
+   * retryable refusal as `UNREDEEMABLE` turns a call the buyer would have paid
+   * for into buyer debt it must re-sign; mis-filing a terminal one as
    * `RETRY` costs a fee per pass until the hold's own deadline ends it. The
    * second is bounded and visible in a log; the first is silent.
    */
@@ -585,7 +586,7 @@ export class SolanaVoucherRedeemer implements VoucherRedeemerPort {
     if (programError !== null && UNREDEEMABLE_ERRORS.has(programError)) {
       this.logger.error(
         `redeem_voucher seq ${request.seq} for ${request.payer} refused permanently: ` +
-          `${programError}. The platform absorbs this call.`,
+          `${programError}. The call becomes buyer debt (or the provider forfeits it).`,
       );
       return { kind: RedeemOutcomeKind.UNREDEEMABLE, signature: null, programError };
     }

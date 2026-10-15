@@ -581,8 +581,8 @@ export class VoucherService {
     }
 
     // The chain admits a voucher on `seq > seqHigh` and nothing else. One at
-    // or below it can never be redeemed: served, it would be absorbed and the
-    // platform would pay for the call (review 2026-10-15 P-2). After the
+    // or below it can never be redeemed: served, it would lapse into buyer
+    // debt (review 2026-10-15 P-2). After the
     // replay check, so a seq refused here was never used: stale, retryable
     // with a fresh seq (final review N-6).
     if (input.escrow && BigInt(voucher.seq) <= input.escrow.seqHigh) {

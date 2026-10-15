@@ -136,6 +136,7 @@ function build(
     }),
     findRedemptionTxRefs: jest.fn(async (_org: string, id: string) => refs.get(id) ?? []),
     recordRedemptionError: jest.fn().mockResolvedValue(undefined),
+    lapseRedemption: jest.fn().mockResolvedValue(undefined),
   };
   const alerts = { emit: jest.fn().mockResolvedValue(undefined) };
   const service = new VoucherRedemptionService(
@@ -230,17 +231,20 @@ describe('VoucherRedemptionService — a landing this process did not observe', 
     expect(ledger.appendNow).not.toHaveBeenCalled();
   });
 
-  it('still absorbs a voucher none of whose own transactions landed', async () => {
+  it('turns into buyer debt a voucher none of whose own transactions landed', async () => {
     const redeemer = new ChainRedeemer(async () => undefined);
     redeemer.seqHigh = 5n; // a higher seq of this payer already landed
-    const { service, intents, ledger } = build(redeemer);
+    const { service, intents, ledger, payments } = build(redeemer);
     await service.run(USDC);
 
     expect(redeemer.sends).toBe(0);
-    expect(ledger.appendNow).toHaveBeenCalledWith(
-      expect.objectContaining({ chainTxRef: 'platform_absorbed:VoucherSeqNotIncreasing' }),
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith(
+      'org-1',
+      'intent-1',
+      'VoucherSeqNotIncreasing',
     );
-    expect(intents.releaseHold).toHaveBeenCalled();
   });
 });
 
@@ -277,14 +281,14 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
   /**
    * Final review N-7: a node a few blocks behind says "not found" for a mined
    * hash. That is "unknown" until the recorded transaction is old enough that
-   * every node would have it; only then is the voucher absorbed.
+   * every node would have it; only then does the voucher become buyer debt.
    */
   it('treats "not found" as unknown while its own transaction is recent', async () => {
     const redeemer = new ChainRedeemer(async () => {
       throw new Error('WaitForTransactionReceiptTimeoutError');
     });
     const clock = { nowSeconds: NOW };
-    const { service, intents, ledger } = build(redeemer, clock);
+    const { service, intents, ledger, payments } = build(redeemer, clock);
     await service.run(USDC);
 
     redeemer.lagging = true;
@@ -294,12 +298,13 @@ describe('VoucherRedemptionService — every refusal, and a lagging node', () =>
     expect(ledger.appendNow).not.toHaveBeenCalled();
     expect(intents.releaseHold).not.toHaveBeenCalled();
 
+    expect(payments.lapseRedemption).not.toHaveBeenCalled();
+
     clock.nowSeconds = PAST_DEADLINE + 3_600;
     await service.run(USDC);
-    expect(ledger.appendNow).toHaveBeenCalledWith(
-      expect.objectContaining({ chainTxRef: 'platform_absorbed:VoucherExpired' }),
-    );
-    expect(intents.releaseHold).toHaveBeenCalled();
+    expect(ledger.appendNow).not.toHaveBeenCalled();
+    expect(intents.releaseHold).not.toHaveBeenCalled();
+    expect(payments.lapseRedemption).toHaveBeenCalledWith('org-1', 'intent-1', 'VoucherExpired');
   });
 
   /**

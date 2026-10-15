@@ -147,9 +147,9 @@ export interface VoucherRedeemerPort {
    * is still pending, or the RPC did not answer).
    *
    * Asked when a voucher comes back `VoucherSeqNotIncreasing`: that is also what
-   * a voucher that ALREADY landed gets, and absorbing it would pay the provider
-   * a second time (review 2026-10-15 P-1). Optional: a chain without it has
-   * that refusal absorbed as before.
+   * a voucher that ALREADY landed gets, and closing it as buyer debt would
+   * charge the buyer a second time (review 2026-10-15 P-1). Optional: a chain
+   * without it has that refusal closed at once.
    */
   findLanding?(request: RedeemVoucherRequest, txRefs: readonly string[]): Promise<string | null>;
 
