@@ -40,6 +40,7 @@ import {
   RELAYED_ESCROW_INTENT,
   RelayedEscrowIntentPort,
 } from '@modules/settlement/ports/relayed-escrow-intent.port';
+import { TIGHTEN_DELAY } from '@modules/settlement/ports/tighten-delay.port';
 import {
   WITHDRAW_GAS_GRANT,
   WithdrawGasGrantPort,
@@ -98,6 +99,7 @@ import { EvmModule } from './evm/evm.module';
 import { EvmChainAdapter } from './evm/evm-chain.adapter';
 import { EvmEscrowBalanceReader } from './evm/evm-escrow-balance-reader.service';
 import { EvmEscrowIntentBuilder } from './evm/evm-escrow-intent-builder.service';
+import { EvmTightenDelayProbe } from './evm/evm-tighten-delay.probe';
 import { EvmGasGrantService } from './evm/evm-gas-grant.service';
 import { EvmRelayedEscrowIntentSubmitter } from './evm/evm-relayed-escrow-intent.service';
 import { EvmStakeReader } from './evm/evm-stake-reader.service';
@@ -507,6 +509,16 @@ import {
 
     {
       /**
+       * Whether a payer's escrow makes a tightening wait (assay-evm D-21). Only
+       * an EVM escrow can; the probe answers `false` for any chain it has no
+       * escrow on (Solana included), which keeps the strand guard there.
+       */
+      provide: TIGHTEN_DELAY,
+      useExisting: EvmTightenDelayProbe,
+    },
+
+    {
+      /**
        * The submit half of the relayed escrow intents.
        *
        * The mirror image of the entry below: `EvmRelayedEscrowIntentSubmitter`
@@ -620,6 +632,7 @@ import {
     ESCROW_INTENT_BUILDER,
     ESCROW_DELEGATION,
     RELAYED_ESCROW_INTENT,
+    TIGHTEN_DELAY,
     WITHDRAW_GAS_GRANT,
     DEPOSIT_REQUIREMENTS_BUILDER,
   ],

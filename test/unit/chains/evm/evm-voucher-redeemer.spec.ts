@@ -117,6 +117,12 @@ interface ChainState {
   simulatedFrom: string[];
   /** The `eth_call` itself fails (an outage, no revert data). */
   simulateOutage: boolean;
+  /** Whether the escrow has the tighten delay (D-21), as the probe reports it. */
+  tightenDelay: boolean;
+  /** `payer:delegate` (lower case) → what `effectiveCapsOf` answers, when set. */
+  effective: Record<string, readonly [bigint, bigint, bigint, bigint]>;
+  /** Every function the multicalls read, in order. */
+  read: string[];
 }
 
 function harness(overrides: Partial<ChainState> = {}) {
@@ -131,6 +137,9 @@ function harness(overrides: Partial<ChainState> = {}) {
     simulated: [],
     simulatedFrom: [],
     simulateOutage: false,
+    tightenDelay: false,
+    effective: {},
+    read: [],
     ...overrides,
   };
 
@@ -159,6 +168,24 @@ function harness(overrides: Partial<ChainState> = {}) {
           ...(state.delegations[key] ?? {}),
         };
       }
+      case 'effectiveCapsOf': {
+        const key = `${String(args[0]).toLowerCase()}:${String(args[1]).toLowerCase()}`;
+        if (state.effective[key]) return state.effective[key];
+        const escrow = answer('escrowOf', [args[0]]) as Record<string, bigint>;
+        const grant = answer('delegationOf', args) as {
+          maxVoucherAmount: bigint;
+          maxPerWindow: bigint;
+          validUntil: bigint;
+          revoked: boolean;
+        };
+        const canSign = grant.validUntil >= BigInt(NOW) && !grant.revoked;
+        return [
+          escrow.maxVoucherAmount,
+          escrow.maxPerWindow,
+          canSign ? grant.maxVoucherAmount : 0n,
+          canSign ? grant.maxPerWindow : 0n,
+        ];
+      }
       case 'redeemVoucher':
       case 'redeemVoucherBatch':
         state.simulated.push(functionName);
@@ -180,7 +207,11 @@ function harness(overrides: Partial<ChainState> = {}) {
       if (from !== undefined) state.simulatedFrom.push(from);
       return answer(args.functionName, args.args);
     },
-    multicall: async (args) => args.contracts.map((c) => answer(c.functionName, c.args)),
+    multicall: async (args) =>
+      args.contracts.map((c) => {
+        state.read.push(c.functionName);
+        return answer(c.functionName, c.args);
+      }),
   };
 
   const sendCall = jest.fn<Promise<EvmRelayResult>, [EvmRelayedCall]>().mockResolvedValue({
@@ -214,6 +245,7 @@ function harness(overrides: Partial<ChainState> = {}) {
     redeemerPort,
     alerts,
     { now: () => NOW * 1000 },
+    { isLive: async () => state.tightenDelay },
   );
 
   return { redeemer, sendCall, emitted, state };
@@ -683,6 +715,83 @@ describe('EvmVoucherRedeemer', () => {
         RedeemOutcomeKind.RETRY,
         RedeemOutcomeKind.REDEEMED,
       ]);
+    });
+  });
+
+  describe('on an escrow with the tighten delay (D-21), reads the EFFECTIVE caps', () => {
+    const DELEGATE = '0x5555555555555555555555555555555555555555';
+    const grantKey = (index: number) => `${payerAddress(index).toLowerCase()}:${DELEGATE}`;
+    const ownKey = (index: number) =>
+      `${payerAddress(index).toLowerCase()}:0x0000000000000000000000000000000000000000`;
+    const live = {
+      maxVoucherAmount: 2_000_000n,
+      maxPerWindow: 5_000_000n,
+      validUntil: BigInt(NOW + 3600),
+      listPosition: 1,
+    };
+
+    it('does not ask effectiveCapsOf before the upgrade is seen', async () => {
+      const { redeemer, state } = harness();
+      await redeemer.redeem(request(0));
+      expect(state.read).not.toContain('effectiveCapsOf');
+    });
+
+    it('redeems a voucher over a cap the payer lowered less than an hour ago', async () => {
+      const { redeemer, sendCall, state } = harness({ tightenDelay: true });
+      // Stored per-voucher cap lowered to 0.5; the chain still holds 2 for an hour.
+      state.escrows[payerAddress(0).toLowerCase()] = { maxVoucherAmount: 500_000n };
+      state.effective[ownKey(0)] = [2_000_000n, 10_000_000n, 0n, 0n];
+      const outcome = await redeemer.redeem(request(0));
+      expect(state.read).toContain('effectiveCapsOf');
+      expect(outcome.kind).toBe(RedeemOutcomeKind.REDEEMED);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+    });
+
+    it('still refuses over the stored cap once no hold is left', async () => {
+      const { redeemer, sendCall, state } = harness({ tightenDelay: true });
+      state.escrows[payerAddress(0).toLowerCase()] = { maxVoucherAmount: 500_000n };
+      const outcome = await redeemer.redeem(request(0));
+      expect(outcome).toMatchObject({ programError: 'VoucherExceedsPerCallLimit' });
+      expect(sendCall).not.toHaveBeenCalled();
+    });
+
+    it('redeems a revoked delegate’s voucher inside the grace, and batches it', async () => {
+      const { redeemer, sendCall, state } = harness({ tightenDelay: true });
+      state.delegations[grantKey(0)] = { ...live, revoked: true };
+      state.effective[grantKey(0)] = [2_000_000n, 10_000_000n, 2_000_000n, 5_000_000n];
+      const outcomes = await redeemer.redeemBatch([
+        request(0, { delegate: toAccountId(TESTNET, getAddress(DELEGATE)) }),
+        request(1),
+      ]);
+      expect(outcomes.map((o) => o.kind)).toEqual([
+        RedeemOutcomeKind.REDEEMED,
+        RedeemOutcomeKind.REDEEMED,
+      ]);
+      expect(sendCall).toHaveBeenCalledTimes(1);
+    });
+
+    it('names a revoked delegate past its grace DelegateIsRevoked, retried (M3)', async () => {
+      const { redeemer, sendCall, state } = harness({ tightenDelay: true });
+      state.delegations[grantKey(0)] = { ...live, revoked: true };
+      const outcome = await redeemer.redeem(
+        request(0, { delegate: toAccountId(TESTNET, getAddress(DELEGATE)) }),
+      );
+      expect(outcome).toMatchObject({
+        kind: RedeemOutcomeKind.RETRY,
+        programError: 'DelegateIsRevoked',
+      });
+      expect(sendCall).not.toHaveBeenCalled();
+    });
+
+    it('applies the delegate’s held caps, not its lowered stored ones', async () => {
+      const { redeemer, sendCall, state } = harness({ tightenDelay: true });
+      state.delegations[grantKey(0)] = { ...live, maxVoucherAmount: 500_000n };
+      state.effective[grantKey(0)] = [2_000_000n, 10_000_000n, 2_000_000n, 5_000_000n];
+      const outcome = await redeemer.redeem(
+        request(0, { delegate: toAccountId(TESTNET, getAddress(DELEGATE)) }),
+      );
+      expect(outcome.kind).toBe(RedeemOutcomeKind.REDEEMED);
+      expect(sendCall).toHaveBeenCalledTimes(1);
     });
   });
 

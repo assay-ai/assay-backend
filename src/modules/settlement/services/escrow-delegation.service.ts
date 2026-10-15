@@ -3,12 +3,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { AccountId, AssetId, parseAccountId, toAccountId } from '@modules/chains/ports/caip.types';
 import { UnsignedChainTransaction } from '@modules/chains/ports/unsigned-chain-transaction';
 
-import {
-  LoweredCaps,
-  loweredCaps,
-  lowersAnything,
-  UnsettledVouchers,
-} from '../domain/unsettled-vouchers';
+import { LoweredCaps, loweredCaps, UnsettledVouchers } from '../domain/unsettled-vouchers';
 import {
   DelegationTerms,
   ESCROW_DELEGATION,
@@ -78,12 +73,10 @@ export class EscrowDelegationService {
   ): Promise<UnsignedChainTransaction> {
     await this.withdrawals.assertRelayRoom(organizationId, account);
     // Lowering a cap below what the delegate's served, unredeemed payments need
-    // strands them (BUG-D1-07): refused here, before the wallet is asked.
+    // strands them (BUG-D1-07): refused here, before the wallet is asked —
+    // unless the escrow has the tighten delay (D-21), where it cannot strand.
     const { scope, lowered } = await this.standing(account, terms);
-    if (lowersAnything(lowered)) {
-      const unsettled = await this.unsettled.read(scope);
-      this.unsettled.assertNotStranding(unsettled, lowered, scope.asset, acknowledgeUnsettled);
-    }
+    await this.unsettled.refuseIfStranding(scope, lowered, acknowledgeUnsettled);
     return this.delegation.authorizeIntent(account, terms);
   }
 
@@ -94,6 +87,11 @@ export class EscrowDelegationService {
   ): Promise<UnsignedChainTransaction> {
     await this.withdrawals.assertRelayRoom(organizationId, account);
     return this.delegation.revokeIntent(account, delegateOn(account, delegate));
+  }
+
+  /** See {@link WithdrawalService.tightenDelaySeconds}. */
+  tightenDelaySeconds(account: AccountId): Promise<number> {
+    return this.withdrawals.tightenDelaySeconds(account);
   }
 
   /** The standing delegations, each with its unsettled payments (BUG-D1-07). */
@@ -132,7 +130,9 @@ export class EscrowDelegationService {
     // relayed (BUG-D1-07). Only this delegate's: a change to its grant cannot
     // strand the payer's own vouchers or another delegate's. A revocation is
     // never refused for it — revoking is the brake, and its in-flight risk is
-    // accepted — but it is relayed under the pause too.
+    // accepted — but it is relayed under the pause too. On an escrow with the
+    // tighten delay (D-21) the guard stands down and this is a plain relay: a
+    // revoked key's signed vouchers stay collectable for an hour.
     let submission;
     if (
       intent.kind === EscrowDelegationKind.AUTHORIZE_DELEGATE ||

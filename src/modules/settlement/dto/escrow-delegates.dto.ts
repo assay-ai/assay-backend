@@ -65,7 +65,9 @@ export class CreateDelegateIntentBodyDto {
 
   @ApiProperty({
     description:
-      "Unix seconds. The delegate's authority lapses after this instant; at most 365 days out.",
+      "Unix seconds. The delegate's authority lapses after this instant. At least an hour " +
+      "after the issued request's deadline (chain time + 300 s), so at least 3,900 s past " +
+      "the chain's clock (assay-evm D-21), and at most 365 days out.",
     example: '1792000000',
   })
   @IsString()
@@ -78,7 +80,8 @@ export class CreateDelegateIntentBodyDto {
     description:
       'BUG-D1-07. True accepts that this change lowers a cap below what payments still being ' +
       'settled need, so the chain will refuse them and their providers go unpaid by the chain. ' +
-      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`.',
+      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`. Ignored on ' +
+      'an escrow whose `tightenDelaySeconds` is above 0: nothing is refused there.',
   })
   @IsOptional()
   @IsBoolean()
@@ -147,7 +150,8 @@ export class SubmitAuthorizeDelegateBodyDto {
     description:
       'BUG-D1-07. True accepts that this change lowers a cap below what payments still being ' +
       'settled need, so the chain will refuse them and their providers go unpaid by the chain. ' +
-      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`.',
+      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`. Ignored on ' +
+      'an escrow whose `tightenDelaySeconds` is above 0: nothing is refused there.',
   })
   @IsOptional()
   @IsBoolean()
@@ -218,8 +222,9 @@ export class EscrowDelegateDto {
   @ApiProperty({
     type: UnsettledVouchersDto,
     description:
-      'Payments this key signed that the chain has not redeemed yet (BUG-D1-07). Lowering a ' +
-      'cap below what they need, or revoking, leaves them unredeemable.',
+      'Payments this key signed that the chain has not redeemed yet (BUG-D1-07). Where ' +
+      '`tightenDelaySeconds` is 0, lowering a cap below what they need, or revoking, leaves ' +
+      'them unredeemable; otherwise they stay collectable for that long.',
   })
   unsettled: UnsettledVouchersDto;
 }
@@ -231,6 +236,16 @@ export class ListEscrowDelegatesResponseDto {
 
   @ApiProperty({ type: [EscrowDelegateDto] })
   delegates: EscrowDelegateDto[];
+
+  @ApiProperty({
+    description:
+      'How long a tightening (revoking a key, a shorter expiry, lower caps) waits before it ' +
+      'binds a payment already signed: 3600 on an escrow that keeps signed payments ' +
+      'collectable (assay-evm D-21) — nothing unsettled can then be stranded and no change ' +
+      'is refused for it — and 0 where a tightening binds at once (BUG-D1-07 applies).',
+    example: 3600,
+  })
+  tightenDelaySeconds: number;
 }
 
 export class DelegateIntentResponseDto {

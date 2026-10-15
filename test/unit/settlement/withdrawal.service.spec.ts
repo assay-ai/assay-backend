@@ -556,6 +556,17 @@ describe('WithdrawalService — lowering escrow limits with payments in flight (
     ).resolves.toBeDefined();
   });
 
+  it('refuses nothing on an escrow with the tighten delay (D-21): it cannot strand', async () => {
+    const { service } = buildHarness({
+      guard: guardOver(inFlight, undefined, true).guard,
+      escrowGet: jest.fn(async () => standing()),
+      buildIntent: jest.fn(async () => TRANSACTION),
+    });
+    await expect(
+      service.buildIntent(ORG, ACCOUNT, USDC, setLimits(400_000n, 2_500_000n)),
+    ).resolves.toBeDefined();
+  });
+
   it('never refuses a raise, whatever is in flight', async () => {
     const { service } = buildHarness({
       guard: guardOver({ ...inFlight, total: 50_000_000n }).guard,

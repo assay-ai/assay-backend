@@ -90,6 +90,13 @@ const ESCROW_PINS: readonly Pin[] = [
     '((uint64 maxVoucherAmount,uint64 maxPerWindow,uint64 spentInWindow,uint64 windowStartedAt,uint64 validUntil,uint32 listPosition,bool revoked))',
   ],
   ['0x7de5b8ed', 'delegatesOf(address)', '(address[])'],
+  // D-21 (assay-evm f814629): `toFunctionSelector` of the source signature; the
+  // checked-in artifact predates it, so there is no `.methodIdentifiers` entry yet.
+  [
+    '0x6f1cea19',
+    'effectiveCapsOf(address,address)',
+    '(uint64 maxVoucherAmount,uint64 maxPerWindow,uint64 delegateMaxVoucherAmount,uint64 delegateMaxPerWindow)',
+  ],
   [
     '0x2365427e',
     'authorizeDelegateBySig(address,address,uint64,uint64,uint64,uint64,uint64,bytes)',
