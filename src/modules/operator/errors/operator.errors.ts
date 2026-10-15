@@ -33,6 +33,7 @@ export enum OperatorErrorCode {
   OPERATOR_APPROVAL_NOT_PENDING = 'OPERATOR_APPROVAL_NOT_PENDING',
   OPERATOR_APPROVAL_NOT_APPROVED = 'OPERATOR_APPROVAL_NOT_APPROVED',
   OPERATOR_APPROVAL_PAYLOAD_MISMATCH = 'OPERATOR_APPROVAL_PAYLOAD_MISMATCH',
+  OPERATOR_APPROVAL_CALL_STALE = 'OPERATOR_APPROVAL_CALL_STALE',
 }
 
 export type OperatorErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -257,6 +258,19 @@ export const OperatorErrors = createDomainErrorFactory('OPERATOR', {
     message: (context?: Record<string, any>) =>
       `This approval is not an approved ${context?.expected ?? 'action'}` +
       `${context?.status ? ` (${context.status} ${context?.action ?? ''})`.trimEnd() : ''}`,
+  },
+  /**
+   * Review R2-7: an approved action's result is no longer handed out again —
+   * the approval is older than the approvals' expiry, or what it approved was
+   * already carried out and later undone. A fresh request is needed.
+   */
+  approvalCallStale: {
+    code: OperatorErrorCode.OPERATOR_APPROVAL_CALL_STALE,
+    statusCode: 409,
+    publicContext: ['reason'],
+    message: (context?: Record<string, any>) =>
+      `This approval's call is no longer handed out${context?.reason ? `: ${context.reason}` : ''}` +
+      '. Request the action again',
   },
   /** The stored payload no longer matches its hash. A platform fault, never a caller's. */
   approvalPayloadMismatch: {

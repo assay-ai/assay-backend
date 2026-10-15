@@ -1,5 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsIn, IsOptional } from 'class-validator';
+import { IsIn, IsOptional, IsString, Matches } from 'class-validator';
 
 import type { OperatorApprovalStatus } from '@database/postgres/entities/operator-approval.entity';
 import { ListQueryDto } from '@shared/api/dto/list-query.dto';
@@ -26,6 +26,15 @@ export class ListOperatorApprovalsQueryDto extends ListQueryDto {
   @IsOptional()
   @IsIn(STATUSES)
   status?: OperatorApprovalStatus;
+
+  @ApiPropertyOptional({
+    description: 'Only approvals of this action, e.g. `arbiter.block` (review R2-7)',
+    example: 'arbiter.block',
+  })
+  @IsOptional()
+  @IsString()
+  @Matches(/^[a-z][a-z0-9_.-]{0,63}$/, { message: 'action must be a lower-case action name' })
+  action?: string;
 }
 
 export class OperatorApprovalDto {

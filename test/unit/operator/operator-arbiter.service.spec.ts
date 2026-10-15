@@ -6,7 +6,10 @@ import {
 } from '@modules/operator/domain/override-register';
 import { ApprovalQueuedDto } from '@modules/operator/dto/operator-approval.dto';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
-import { OperatorApprovalService } from '@modules/operator/services/operator-approval.service';
+import {
+  APPROVAL_TTL_MS,
+  OperatorApprovalService,
+} from '@modules/operator/services/operator-approval.service';
 import {
   ARBITER_BLOCK_APPROVAL_ACTION,
   OperatorArbiterService,
@@ -15,6 +18,7 @@ import { OverrideLogService } from '@modules/operator/services/override-log.serv
 import { SlashDisputeIntentService } from '@modules/slash/services/slash-dispute-intent.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
+import { fakeQueryBuilder } from '../provider/helpers/fake-query-builder';
 
 const CHAIN = 'eip155:46630';
 const ACCOUNT = '0xA271A3407D3302f4b4Fbe469b9188487cedd7d45';
@@ -42,7 +46,7 @@ const SRE = operator('op-sre', [OperatorRole.SRE]);
 const LEAD = operator('op-adjl', [OperatorRole.ADJL]);
 const TRE = operator('op-tre', [OperatorRole.TRE]);
 
-function build() {
+function build(options: { blocked?: Record<string, unknown> } = {}) {
   const runner = {
     connect: async () => undefined,
     startTransaction: async () => undefined,
@@ -83,7 +87,11 @@ function build() {
     {} as never,
     { buildBlock } as never,
   );
-  const service = new OperatorArbiterService(disputes, approvals);
+  const chainState = {
+    findBlockedAddress: async (_chainId: string, address: string) =>
+      options.blocked && options.blocked.address === address.toLowerCase() ? options.blocked : null,
+  };
+  const service = new OperatorArbiterService(disputes, approvals, chainState as never);
   return { service, entries, queued, buildBlock, stored };
 }
 
@@ -149,6 +157,7 @@ describe('A-11 — the approved block call, fetched again (review N-5)', () => {
     id: 'appr-1',
     action: ARBITER_BLOCK_APPROVAL_ACTION,
     status: 'APPROVED',
+    decidedAt: new Date(),
     payload: { chainId: CHAIN, account: ACCOUNT, reasonCode: 'LEAKED_KEY', note: NOTE },
     ...patch,
   });
@@ -184,6 +193,51 @@ describe('A-11 — the approved block call, fetched again (review N-5)', () => {
     );
   });
 
+  it('R2-7: refuses an approval decided longer ago than the approvals expiry', async () => {
+    const { service, stored, buildBlock } = build();
+    stored.set(
+      'appr-1',
+      approved({ decidedAt: new Date(Date.now() - APPROVAL_TTL_MS - 60_000) }),
+    );
+    await expectErrorCodeAsync(
+      () => service.approvedBlockCall('appr-1'),
+      'OPERATOR_APPROVAL_CALL_STALE',
+    );
+    expect(buildBlock).not.toHaveBeenCalled();
+  });
+
+  it('R2-7: refuses an approval whose block was executed and later lifted', async () => {
+    const decidedAt = new Date(Date.now() - 60 * 60_000);
+    const { service, stored, buildBlock } = build({
+      blocked: {
+        address: ACCOUNT.toLowerCase(),
+        blocked: false,
+        updatedAt: new Date(decidedAt.getTime() + 30 * 60_000),
+      },
+    });
+    stored.set('appr-1', approved({ decidedAt }));
+    await expectErrorCodeAsync(
+      () => service.approvedBlockCall('appr-1'),
+      'OPERATOR_APPROVAL_CALL_STALE',
+    );
+    expect(buildBlock).not.toHaveBeenCalled();
+  });
+
+  it('R2-7: still rebuilds when the address was unblocked before the approval', async () => {
+    const decidedAt = new Date(Date.now() - 60 * 60_000);
+    const { service, stored } = build({
+      blocked: {
+        address: ACCOUNT.toLowerCase(),
+        blocked: false,
+        updatedAt: new Date(decidedAt.getTime() - 60_000),
+      },
+    });
+    stored.set('appr-1', approved({ decidedAt }));
+    await expect(service.approvedBlockCall('appr-1')).resolves.toMatchObject({
+      functionName: 'setBlocked',
+    });
+  });
+
   it('passes the chain refusal on once the address is blocked: the call was executed', async () => {
     const { service, stored, buildBlock } = build();
     stored.set('appr-1', approved());
@@ -193,5 +247,26 @@ describe('A-11 — the approved block call, fetched again (review N-5)', () => {
     await expect(service.approvedBlockCall('appr-1')).rejects.toMatchObject({
       errorCode: 'CHAIN_ADDRESS_ALREADY_BLOCKED',
     });
+  });
+});
+
+describe('the approvals list (review R2-7)', () => {
+  it('filters by action on the server', async () => {
+    const fake = fakeQueryBuilder<Record<string, unknown>>([]);
+    const approvals = new OperatorApprovalService(
+      { expireStale: async () => 0, createQueryBuilder: () => fake.qb } as never,
+      { find: async () => [] } as never,
+      {} as never,
+    );
+    await approvals.list({
+      status: 'APPROVED',
+      action: ARBITER_BLOCK_APPROVAL_ACTION,
+      limit: 50,
+    } as never);
+    expect(fake.wheres).toEqual(
+      expect.arrayContaining([
+        { sql: 'approval.action = :action', params: { action: ARBITER_BLOCK_APPROVAL_ACTION } },
+      ]),
+    );
   });
 });
