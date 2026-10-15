@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+
 import { SlashChainRulingService } from '@modules/slash/services/slash-chain-ruling.service';
 
 /**
@@ -508,27 +510,61 @@ describe('SlashChainRulingService', () => {
   describe('open EVM cases from the in-app objection era (review N-3)', () => {
     it('re-reads the records and upholds a case whose record stands undisputed', async () => {
       const { service, proposal, reconciled, released } = build('UNDER_REVIEW');
-      await expect(service.reconcileOpenCases(100)).resolves.toBe(1);
+      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({ moved: 1, failed: [] });
       expect(reconciled).toEqual(['case']);
       expect(released).toEqual(['case']);
       expect(proposal.status).toBe('UPHELD');
       // Nothing left to move.
-      await expect(service.reconcileOpenCases(100)).resolves.toBe(0);
+      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({ moved: 0 });
     });
 
     it('leaves a case whose every record is disputed on chain to the arbiter', async () => {
       const { service, parts, proposal, released, closed } = build('AWAITING_SECOND');
       for (const part of parts.values()) Object.assign(part, { chainStatus: 'DISPUTED' });
-      await expect(service.reconcileOpenCases(100)).resolves.toBe(0);
+      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({ moved: 0 });
       expect(proposal.status).toBe('AWAITING_SECOND');
       expect(released).toEqual([]);
       expect(closed).toEqual([]);
     });
 
+    it('R2-5: pages past one page, and hands back the cases whose read failed', async () => {
+      const { service, proposal } = build('UNDER_REVIEW');
+      const pageOf = (id: string, at: string) => ({
+        organizationId: 'org',
+        id,
+        proposedAt: new Date(at),
+      });
+      const asked: unknown[] = [];
+      Object.assign((service as unknown as { proposals: Record<string, unknown> }).proposals, {
+        findOpenOnChainCases: async (limit: number, after: unknown) => {
+          asked.push(after ?? null);
+          return after ? [] : [pageOf('case', '2026-10-01T00:00:00Z')].slice(0, limit);
+        },
+      });
+      Object.assign((service as unknown as { execution: Record<string, unknown> }).execution, {
+        reconcileRecord: async () => {
+          throw new Error('rpc down');
+        },
+      });
+      jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+
+      const first = await service.reconcileOpenCases(1);
+      expect(first.failed).toEqual([{ organizationId: 'org', id: 'case' }]);
+      expect(first.next).toEqual({ proposedAt: new Date('2026-10-01T00:00:00Z'), id: 'case' });
+      expect(proposal.status).toBe('UNDER_REVIEW');
+
+      const second = await service.reconcileOpenCases(1, first.next);
+      expect(second.next).toBeNull();
+      expect(asked).toEqual([null, first.next]);
+      await expect(service.reconcileCases(first.failed)).resolves.toMatchObject({
+        failed: [{ organizationId: 'org', id: 'case' }],
+      });
+    });
+
     it('closes a case whose records were all cancelled on chain', async () => {
       const { service, parts, proposal, closed } = build('DISPUTED');
       for (const part of parts.values()) Object.assign(part, { chainStatus: 'CANCELLED' });
-      await expect(service.reconcileOpenCases(100)).resolves.toBe(1);
+      await expect(service.reconcileOpenCases(100)).resolves.toMatchObject({ moved: 1 });
       expect(closed).toHaveLength(1);
       expect(proposal.status).toBe('CANCELLED');
     });

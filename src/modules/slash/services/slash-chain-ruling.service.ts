@@ -582,12 +582,37 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
    * and the case then follows them ({@link followRecords}): a record standing
    * undisputed makes it `UPHELD` for the executor, a case with nothing
    * standing closes, and one whose every record is disputed on chain stays for
-   * the arbiter. Run once when the scheduler starts; idempotent. Returns how
-   * many cases moved.
+   * the arbiter. Idempotent.
+   *
+   * One page after `after` (review R2-5): `next` is the cursor of the
+   * following page, `null` once this page was the last, and `failed` the
+   * cases whose read failed, for {@link reconcileCases} to retry.
    */
-  async reconcileOpenCases(limit: number): Promise<number> {
-    const rows = await this.proposals.findOpenOnChainCases(limit);
+  async reconcileOpenCases(
+    limit: number,
+    after: { readonly proposedAt: Date; readonly id: string } | null = null,
+  ): Promise<{
+    moved: number;
+    failed: { organizationId: string; id: string }[];
+    next: { proposedAt: Date; id: string } | null;
+  }> {
+    const rows = await this.proposals.findOpenOnChainCases(limit, after);
+    const { moved, failed } = await this.reconcileCases(rows);
+    const last = rows[rows.length - 1];
+    return {
+      moved,
+      failed,
+      next:
+        rows.length < limit || !last ? null : { proposedAt: new Date(last.proposedAt), id: last.id },
+    };
+  }
+
+  /** {@link reconcileOpenCases} for the given cases: re-read, then follow. */
+  async reconcileCases(
+    rows: readonly { readonly organizationId: string; readonly id: string }[],
+  ): Promise<{ moved: number; failed: { organizationId: string; id: string }[] }> {
     let moved = 0;
+    const failed: { organizationId: string; id: string }[] = [];
     for (const row of rows) {
       try {
         const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
@@ -598,13 +623,14 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
         const after = await this.proposals.findOneScoped(row.organizationId, row.id);
         if (after && after.status !== proposal.status) moved += 1;
       } catch (error) {
+        failed.push({ organizationId: row.organizationId, id: row.id });
         this.logger.error(
-          `slash case ${row.id}: its on-chain records could not be re-read at start-up`,
+          `slash case ${row.id}: its on-chain records could not be re-read; retried later`,
           error instanceof Error ? error.stack : String(error),
         );
       }
     }
-    return moved;
+    return { moved, failed };
   }
 
   /**
