@@ -95,6 +95,20 @@ export interface ReceiptsSummaryRow {
   readonly withheldTotal: bigint;
   /** Calls that landed `REFUNDED` — the numerator of `failRate`. */
   readonly refundedCalls: number;
+  /**
+   * The buyer was not charged: refunded, voided or expired, or served but never
+   * collected (forfeited, written off, voided debt). Every finished call that is
+   * neither charged nor owed, so `listed = charged + notCharged + owed + inProgress`
+   * holds by construction.
+   */
+  readonly notChargedTotal: bigint;
+  readonly notChargedCalls: number;
+  /** Served, payment not collected yet: an open buyer debt. Neither charged nor not charged. */
+  readonly owedTotal: bigint;
+  readonly owedCalls: number;
+  /** Not finished yet (`CREATED`, `FUNDS_SECURED`, `PROVIDER_EXECUTING`, `VERIFYING`). */
+  readonly inProgressTotal: bigint;
+  readonly inProgressCalls: number;
 }
 
 /**
@@ -221,6 +235,24 @@ export const PLATFORM_ABSORBED_REASON_SQL =
 export const NOT_COLLECTED_SQL =
   `(COALESCE(${FORFEITED_SQL}, false) OR COALESCE(${WRITTEN_OFF_SQL}, false) ` +
   `OR COALESCE(${VOIDED_SQL}, false) OR ${PLATFORM_ABSORBED_SQL})`;
+
+/**
+ * `GET /receipts/summary`'s buckets. Every call is in exactly one, so
+ * `listed = charged + notCharged + owed + inProgress`:
+ *
+ * - charged: served and collected (or being collected): `SETTLED`, not
+ *   {@link NOT_COLLECTED_SQL}, not an open debt.
+ * - owed: served, payment not collected yet — an open buyer debt
+ *   ({@link DEBT_OUTSTANDING_SQL}). The buyer has not been charged and has not
+ *   been let off either, so it is neither of the other two (R17b-B-01).
+ * - in progress: not finished yet.
+ * - not charged: the rest — `REFUNDED`, `VOIDED`, `EXPIRED`, and a served call
+ *   that was never collected (forfeited, written off, voided debt). Derived by
+ *   subtraction so it cannot drift from the other three.
+ */
+const SUMMARY_OWED_SQL = `(intent.status = '${SETTLED_STATUS}' AND ${DEBT_OUTSTANDING_SQL} AND NOT ${NOT_COLLECTED_SQL})`;
+const SUMMARY_CHARGED_SQL = `(intent.status = '${SETTLED_STATUS}' AND NOT ${DEBT_OUTSTANDING_SQL} AND NOT ${NOT_COLLECTED_SQL})`;
+const SUMMARY_IN_PROGRESS_SQL = `(intent.status IN ('CREATED', 'FUNDS_SECURED', 'PROVIDER_EXECUTING', 'VERIFYING'))`;
 
 /**
  * Read on a `SETTLED` intent: the provider has been credited OUT OF THE
@@ -1654,12 +1686,23 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('COUNT(*)', 'calls')
       .addSelect('COALESCE(SUM(intent.priceAmount), 0)', 'listedTotal')
       .addSelect(
-        // A forfeited voucher, a written-off debt and a legacy absorb were
-        // never collected: the buyer was not charged (review #2, M4).
-        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus ` +
-          `AND NOT ${NOT_COLLECTED_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
+        // A forfeited voucher, a written-off or voided debt and a legacy absorb
+        // were never collected: the buyer was not charged (review #2, M4). An
+        // open debt is owed, not charged (R17b-B-01).
+        `COALESCE(SUM(CASE WHEN ${SUMMARY_CHARGED_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
         'chargedTotal',
       )
+      .addSelect(`COUNT(*) FILTER (WHERE ${SUMMARY_CHARGED_SQL})`, 'chargedCalls')
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN ${SUMMARY_OWED_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
+        'owedTotal',
+      )
+      .addSelect(`COUNT(*) FILTER (WHERE ${SUMMARY_OWED_SQL})`, 'owedCalls')
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN ${SUMMARY_IN_PROGRESS_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
+        'inProgressTotal',
+      )
+      .addSelect(`COUNT(*) FILTER (WHERE ${SUMMARY_IN_PROGRESS_SQL})`, 'inProgressCalls')
       .addSelect(
         'COALESCE(SUM(CASE WHEN intent.status IN (:...withheldStatuses) AND intent.holdId IS NOT NULL ' +
           'THEN intent.priceAmount ELSE 0 END), 0)',
@@ -1670,7 +1713,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
       .andWhere(`${CREATED_AT} < :to`, { to: window.to })
       .setParameters({
-        settledStatus: SETTLED_STATUS,
         refundedStatus: REFUNDED_STATUS,
         withheldStatuses: WITHHELD_STATUSES,
       });
@@ -1697,18 +1739,38 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         chargedTotal: string;
         withheldTotal: string;
         refundedCalls: string;
+        chargedCalls: string;
+        owedTotal: string;
+        owedCalls: string;
+        inProgressTotal: string;
+        inProgressCalls: string;
       }>();
 
-    return rows.map((row) => ({
-      key: row.key,
-      asset: row.asset,
-      decimals: Number(row.decimals),
-      calls: Number(row.calls),
-      listedTotal: BigInt(row.listedTotal),
-      chargedTotal: BigInt(row.chargedTotal),
-      withheldTotal: BigInt(row.withheldTotal),
-      refundedCalls: Number(row.refundedCalls),
-    }));
+    return rows.map((row) => {
+      const listedTotal = BigInt(row.listedTotal);
+      const chargedTotal = BigInt(row.chargedTotal);
+      const owedTotal = BigInt(row.owedTotal);
+      const inProgressTotal = BigInt(row.inProgressTotal);
+      const calls = Number(row.calls);
+      const owedCalls = Number(row.owedCalls);
+      const inProgressCalls = Number(row.inProgressCalls);
+      return {
+        key: row.key,
+        asset: row.asset,
+        decimals: Number(row.decimals),
+        calls,
+        listedTotal,
+        chargedTotal,
+        withheldTotal: BigInt(row.withheldTotal),
+        refundedCalls: Number(row.refundedCalls),
+        notChargedTotal: listedTotal - chargedTotal - owedTotal - inProgressTotal,
+        notChargedCalls: calls - Number(row.chargedCalls) - owedCalls - inProgressCalls,
+        owedTotal,
+        owedCalls,
+        inProgressTotal,
+        inProgressCalls,
+      };
+    });
   }
 
   private applyPeriod(
