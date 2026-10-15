@@ -640,16 +640,41 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
   }
 
   /**
-   * Per provider, the slash cases upheld or executed since `since` (owner
+   * Per provider, the slash cases the provider LOST since `since` (owner
    * decision C4: repeat offenders are banned with the blocklist, so the
-   * arbiter page shows the count). Cross-tenant on purpose, like the arbiter
-   * queue it feeds; `provider_id` is the provider organization.
+   * arbiter page shows the count as `upheldViolations30d`). Cross-tenant on
+   * purpose, like the arbiter queue it feeds; `provider_id` is the provider
+   * organization.
+   *
+   * What counts (review R2-1):
+   *
+   * - **EVM** — only what the chain decided against the provider: a record of
+   *   the case EXECUTED (any epoch, whoever sent it; the case's own
+   *   `executed_at` says the same), or the arbiter's on-chain uphold
+   *   (`resolution_kind = 'CHAIN_ARBITER'`) while the case still stands
+   *   upheld. A case the platform only labelled upheld (`AUTO_UNDISPUTED`)
+   *   counts once a record of it executes, not before.
+   * - **Solana** — the in-app decision is the decision there: a case upheld,
+   *   executing or executed, or one whose judgement was executed.
+   *
+   * Never counted: a case closed in the provider's favour (`OVERTURNED`,
+   * `WAIVED`, `REVERSED`), and no cancelled record at all — neither a
+   * verifier-key lapse (`VERIFIER_UNAVAILABLE`, which voids a case for reasons
+   * that say nothing about the provider) nor a record that expired because
+   * the platform did not execute it in time (`EXPIRED`, which the contract
+   * treats as the provider's favour). An arbiter-upheld record that then
+   * expired unexecuted leaves its case `CANCELLED`, so it is not counted
+   * either.
    */
   async countUpheldViolationsByProvider(
     providerIds: readonly string[],
     since: Date,
   ): Promise<Map<string, number>> {
     if (providerIds.length === 0) return new Map();
+    const executed =
+      'proposal.executed_at IS NOT NULL OR EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
+      'WHERE part.organization_id = proposal.organization_id ' +
+      "AND part.proposal_id = proposal.id AND part.chain_status = 'EXECUTED')";
     const rows = (await this.manager
       .createQueryBuilder(SlashProposalEntity, 'proposal')
       .select('proposal.provider_id', 'providerId')
@@ -657,21 +682,13 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
       .where('proposal.provider_id IN (:...providerIds)', {
         providerIds: [...new Set(providerIds)],
       })
-      // An arbiter's on-chain uphold makes the case UPHELD (`CHAIN_ARBITER`)
-      // and an on-chain execution EXECUTED, so both count here. Review N-4:
-      // so does a case any record of which was executed (disputed or not,
-      // whoever sent it), and one whose undisputed record lapsed (expired
-      // unexecuted: nobody ruled for the provider). Not a reversed case.
+      .andWhere('proposal.status NOT IN (:...providerWon)', {
+        providerWon: ['OVERTURNED', 'WAIVED', 'REVERSED'],
+      })
       .andWhere(
-        `proposal.status <> 'REVERSED' AND (` +
-          'proposal.status IN (:...upheld) OR proposal.executed_at IS NOT NULL OR ' +
-          'EXISTS (SELECT 1 FROM slash_proposal_parts part ' +
-          'WHERE part.organization_id = proposal.organization_id ' +
-          'AND part.proposal_id = proposal.id AND (' +
-          "part.chain_status = 'EXECUTED' OR (part.chain_status = 'CANCELLED' " +
-          "AND part.cancel_reason IN ('EXPIRED', 'VERIFIER_UNAVAILABLE') " +
-          'AND part.chain_disputed_at IS NULL))))',
-        { upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'] },
+        `((${executed}) OR (proposal.status IN (:...upheld) AND (` +
+          "proposal.resolution_kind = 'CHAIN_ARBITER' OR proposal.asset_id NOT LIKE :onChain)))",
+        { upheld: ['UPHELD', 'EXECUTING', 'EXECUTED'], onChain: ON_CHAIN_DISPUTE_LIKE },
       )
       .andWhere(
         'COALESCE(proposal.executed_at, proposal.resolved_at, proposal.proposed_at) >= :since',
