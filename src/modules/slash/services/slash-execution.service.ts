@@ -2536,7 +2536,15 @@ export class SlashExecutionService {
           chainLastError: null,
         },
       );
-      if (!bumped.affected) return;
+      if (!bumped.affected) {
+        // Review R2-9: the other side of the compare-and-set bumped first and
+        // proposes the new epoch; this one has nothing left to do.
+        this.logger.log(
+          `slash case ${proposalId}: lost the epoch compare-and-set at epoch ` +
+            `${proposal.chainEpoch}; another scheduler re-proposes it`,
+        );
+        return;
+      }
 
       // Re-read: `update()` does not refresh the entity it was handed, and
       // `proposeOne` signs for whatever `chainRequestId` the row carries.
