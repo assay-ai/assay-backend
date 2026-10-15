@@ -384,6 +384,28 @@ describe('FreeQuotaService — bindings at their published revision', () => {
     await expect(service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID)).resolves.toBeNull();
   });
 
+  it('L3: remaining and limit are summed over the bindings, like the published N', async () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 1000 }, [
+      buildBindingRow('b1', { freeQuotaPerAgent: 10, freeDailyBudget: 1000 }),
+      buildBindingRow('b2', { freeQuotaPerAgent: 5, freeDailyBudget: 1000 }),
+    ]);
+
+    await expect(
+      service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID),
+    ).resolves.toMatchObject({ remaining: 15, limit: 15 });
+  });
+
+  it('L3: capped by the platform per-agent daily headroom', async () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 12 }, [
+      buildBindingRow('b1', { freeQuotaPerAgent: 10, freeDailyBudget: 1000 }),
+      buildBindingRow('b2', { freeQuotaPerAgent: 5, freeDailyBudget: 1000 }),
+    ]);
+
+    await expect(
+      service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID),
+    ).resolves.toMatchObject({ remaining: 12, limit: 12 });
+  });
+
   it('still counts a FREE binding at its published revision', async () => {
     const { service } = buildFreeQuotaHarness({}, [
       buildBindingRow('b1', { mappingVersion: 1, publishedVersion: 1 }),

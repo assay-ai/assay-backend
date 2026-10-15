@@ -317,3 +317,36 @@ describe('McpToolCallService — free first, then paid', () => {
     expect(h.freeQuota.consumed).toEqual([`binding-${FREE_PROVIDER}`]);
   });
 });
+
+describe('McpToolCallService — FREEMIUM on a chain with no paid rail (review #2, L6)', () => {
+  // Solana as shipped: `rails: []`. No rail is re-opened here.
+  it('answers MCP_QUOTA_EXCEEDED with the reset time, not CHAIN_RAIL_NOT_OFFERED', async () => {
+    const invoker = new ScriptedInvoker({
+      'binding-provider-a': async () => ok('free'),
+      'binding-provider-b': async () => ok('paid'),
+    });
+    const h = buildMcpHarness({
+      bindings: [
+        buildBinding('provider-a', { pricingMode: PricingMode.FREE, priceAmount: '0' }),
+        buildBinding('provider-b', { priceAmount: usdc('0.05').amount }),
+      ],
+      providers: [buildProvider('provider-a'), buildProvider('provider-b')],
+      stakes: { 'provider-b': usdc(1000) },
+      invoker,
+    });
+    h.freeQuota.decision = {
+      kind: 'REFUSED',
+      limit: FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+      resetsAt: new Date('2026-10-17T00:00:00.000Z'),
+      fallThroughToPaid: true,
+    };
+
+    const refusal = (await h.calls
+      .call(SESSION, 'Search the web', { query: 'moon landing' })
+      .catch((e: unknown) => e)) as AppError & { context?: Record<string, unknown> };
+
+    expect(refusal.errorCode).toBe('MCP_QUOTA_EXCEEDED');
+    expect(JSON.stringify(refusal.context)).toContain('2026-10-17T00:00:00.000Z');
+    expect(invoker.invocations).toHaveLength(0);
+  });
+});

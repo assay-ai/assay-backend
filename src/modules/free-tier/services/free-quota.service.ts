@@ -258,8 +258,11 @@ export class FreeQuotaService {
     if (candidates.length === 0) return null;
 
     const resetsAt = nextUtcMidnight();
-    let best: FreeQuotaRemaining | null = null;
-
+    // Summed over the bindings and capped by the platform's per-agent daily
+    // headroom — the same arithmetic as the published N
+    // (`freeCallsPerDay`), so `tools/list` never shows "15 free per day"
+    // beside "remaining 10 / limit 10" (review #2, L3).
+    let remaining = 0;
     for (const binding of candidates) {
       const perAgentLimit = binding.freeQuotaPerAgent ?? this.config.defaultPerAgentDailyLimit;
       const budgetLimit = binding.freeDailyBudget ?? this.config.defaultProviderDailyBudget;
@@ -267,16 +270,15 @@ export class FreeQuotaService {
       const perAgentUsed = await this.readAgentBindingDaily(organizationId, agentId, binding.id);
       const budgetUsed = await this.readBindingBudget(binding.id);
 
-      const perAgentRemaining = clampRemaining(perAgentLimit, perAgentUsed);
-      const budgetRemaining = clampRemaining(budgetLimit, budgetUsed);
-      const remaining = Math.min(perAgentRemaining, budgetRemaining);
-
-      if (!best || remaining > best.remaining) {
-        best = { remaining, limit: perAgentLimit, resetsAt };
-      }
+      remaining += Math.min(
+        clampRemaining(perAgentLimit, perAgentUsed),
+        clampRemaining(budgetLimit, budgetUsed),
+      );
     }
+    const platform = await this.platformRemaining(organizationId, agentId);
+    const limit = freeCallsPerDay(candidates, this.config) ?? 0;
 
-    return best;
+    return { remaining: Math.min(remaining, platform.remaining, limit), limit, resetsAt };
   }
 
   /**

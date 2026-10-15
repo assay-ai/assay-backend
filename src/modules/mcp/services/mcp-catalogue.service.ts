@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
+import { offersRail } from '@modules/chains/chain-metadata';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { ChainId } from '@modules/chains/ports/caip.types';
@@ -17,6 +18,7 @@ import {
   X402_FREE_QUOTA,
   X402_P95_LATENCY_MS,
   X402_PAID_ALTERNATIVE,
+  X402_PAID_ON_THIS_CHAIN,
   X402_PRICE,
   X402_PRICING_MODE,
   X402_QUALITY_RATE,
@@ -130,6 +132,10 @@ export class McpCatalogueService {
         : null,
     );
 
+    // A chain with no paid rail (Solana: `rails: []`) cannot buy a priced
+    // tool. Still listed — see above — but not priced as buyable (L6).
+    const paidOnViewerChain = viewer?.chainId ? paidRailOffered(viewer.chainId) : true;
+
     const listed: McpToolDescriptor[] = [];
     quotes.forEach((quote, index) => {
       if (!quote) return;
@@ -141,7 +147,9 @@ export class McpCatalogueService {
         return;
       }
 
-      listed.push(describe(quote, quote.price, freeQuotas[index], freeAllowances[index]));
+      listed.push(
+        describe(quote, quote.price, freeQuotas[index], freeAllowances[index], paidOnViewerChain),
+      );
     });
 
     return listed;
@@ -239,6 +247,7 @@ function describe(
   price: Money,
   freeQuota: FreeQuotaRemaining | null,
   freePerDay: number | null,
+  paidOnThisChain = true,
 ): McpToolDescriptor {
   const { tool } = quote;
 
@@ -248,6 +257,7 @@ function describe(
       quote.pricingMode,
       quote.paidBindings ?? quote.routableBindings,
       freePerDay,
+      paidOnThisChain,
     ),
     [X402_TIER]: tierLabel(tool.tier),
     // Every response class other than `DATA_RESULT` releases the hold rather
@@ -296,9 +306,12 @@ function describe(
     // already quoted above. FREE has no paid path through this catalogue at
     // all — see `X402_PAID_ALTERNATIVE`'s own doc comment — so it publishes
     // no key rather than a fabricated one.
-    if (quote.pricingMode === PricingMode.FREEMIUM) {
+    if (quote.pricingMode === PricingMode.FREEMIUM && paidOnThisChain) {
       annotations[X402_PAID_ALTERNATIVE] = tool.name;
     }
+  }
+  if (!paidOnThisChain && quote.pricingMode !== PricingMode.FREE) {
+    annotations[X402_PAID_ON_THIS_CHAIN] = false;
   }
 
   return {
@@ -335,6 +348,7 @@ function priceAnnotation(
   /** Bindings that can be charged: a FREE one beside them makes no range (L2). */
   paidBindings: number,
   freePerDay: number | null,
+  paidOnThisChain = true,
 ): McpPriceAnnotation {
   if (mode === PricingMode.FREE) {
     return { amount: price.amount, asset: price.asset, display: 'free' };
@@ -342,14 +356,29 @@ function priceAnnotation(
 
   const shown = displayPrice(price);
   const paid = paidBindings > 1 ? `up to ${shown}` : shown;
+  const free = freePerDay === null ? 'free tier' : `${freePerDay} free per day`;
+  if (!paidOnThisChain) {
+    // Paid calls are off on the viewer's chain: never advertise a price it
+    // cannot pay (review #2, L6). `amount` is still the quote, for reference.
+    return {
+      amount: price.amount,
+      asset: price.asset,
+      display:
+        mode === PricingMode.FREEMIUM
+          ? `${free} (paid calls are off on this chain)`
+          : `${paid} (paid calls are off on this chain)`,
+    };
+  }
   return {
     amount: price.amount,
     asset: price.asset,
-    display:
-      mode === PricingMode.FREEMIUM
-        ? `${freePerDay === null ? 'free tier' : `${freePerDay} free per day`}, then ${paid}`
-        : paid,
+    display: mode === PricingMode.FREEMIUM ? `${free}, then ${paid}` : paid,
   };
+}
+
+/** Whether `chainId` offers any paid rail (`chain-metadata.ts`'s `rails`). */
+function paidRailOffered(chainId: ChainId): boolean {
+  return offersRail(chainId, 'A') || offersRail(chainId, 'B');
 }
 
 /**
