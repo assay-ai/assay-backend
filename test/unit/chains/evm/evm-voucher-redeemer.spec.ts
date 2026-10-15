@@ -294,6 +294,14 @@ describe('EvmVoucherRedeemer', () => {
     expect(outcomes.map((o) => o.kind)).toEqual(['RETRY', 'RETRY']);
   });
 
+  it('reads the provider stake against the minimum live (review M3)', async () => {
+    const below = harness({ minimumStake: 60_000_000n });
+    await expect(below.redeemer.providerBelowMinimumStake(request(0))).resolves.toBe(true);
+
+    const fine = harness();
+    await expect(fine.redeemer.providerBelowMinimumStake(request(0))).resolves.toBe(false);
+  });
+
   it('retries SINGLY when the batch reverts, and never re-submits the batch', async () => {
     const { redeemer, sendCall } = harness();
     sendCall.mockResolvedValueOnce({

@@ -58,8 +58,25 @@ export const PROVIDER_FORFEIT_PREFIX = 'provider_forfeit:';
  * Refusals the PROVIDER causes. A voucher that dies of one — refused with it
  * outright, or `VoucherExpired` after being retried on it — is forfeited by the
  * provider: the buyer's hold is released and nobody is credited.
+ *
+ * The block causes are this service's own names (see {@link forfeit}); they are
+ * recorded on the intent like a program error so a voucher that is still
+ * inside its landing window when the block is seen is forfeited, not absorbed,
+ * when it finally closes — even if the block was lifted in between.
  */
-const PROVIDER_CAUSED_ERRORS: ReadonlySet<string> = new Set(['ProviderBelowMinimumStake']);
+const PROVIDER_CAUSED_ERRORS: ReadonlySet<string> = new Set([
+  'ProviderBelowMinimumStake',
+  'ProviderBlocked',
+  'PayeeBlocked',
+  'PayeeBlockedOnChain',
+]);
+
+function isProviderCaused(error: string | null): error is string {
+  return error !== null && PROVIDER_CAUSED_ERRORS.has(error);
+}
+
+/** The program error the EVM contract reverts with for any blocked party (D-19). */
+const ADDRESS_BLOCKED = 'AddressBlocked';
 
 /**
  * `findLanding` looked at this intent's own transactions and none of them
@@ -123,6 +140,13 @@ const NOT_FOUND_YET = Symbol('NOT_FOUND_YET');
  * nobody is credited ({@link forfeit}). A block on the provider side forfeits
  * at once rather than waiting for the voucher to expire; a stake refusal is
  * retried until the deadline first, because the provider may top it up.
+ *
+ * Before ANY absorb the provider is checked live — stake against the chain's
+ * minimum, and blocks — and a provider at fault right now forfeits instead.
+ * A provider-caused refusal, once recorded on the intent, is never overwritten
+ * by a later one from elsewhere, so a provider that dipped below its minimum
+ * while the voucher was live cannot top up afterwards and be paid by the
+ * platform (review 2026-10-15, M1 and M3).
  */
 @Injectable()
 export class VoucherRedemptionService {
@@ -131,6 +155,11 @@ export class VoucherRedemptionService {
   private readonly loggedHolds = new Set<string>();
   /** This pass's on-chain blocked accounts, lower-case CAIP-10 — see {@link exclusions}. */
   private chainBlocked: ReadonlySet<string> = new Set();
+  /**
+   * Whether {@link chainBlocked} could be read this pass. When it could not,
+   * the payee is asked live per row instead of being taken as unblocked.
+   */
+  private chainBlockedKnown = true;
 
   constructor(
     private readonly payments: PaymentIntentRepository,
@@ -189,13 +218,15 @@ export class VoucherRedemptionService {
     }
 
     for (const row of pending) {
+      // Payer side first: a blocked buyer freezes collection, and that freeze
+      // must hold even when the provider is blocked too (review L4).
+      if (await this.held(row)) {
+        blocked.add(row.agentAccount);
+        continue;
+      }
       const forfeit = await this.forfeitIfProviderBlocked(row);
       if (forfeit !== null) {
         if (!forfeit.settled) blocked.add(row.agentAccount);
-        continue;
-      }
-      if (await this.held(row)) {
-        blocked.add(row.agentAccount);
         continue;
       }
       if (blocked.has(row.agentAccount)) {
@@ -272,13 +303,14 @@ export class VoucherRedemptionService {
       const carried: RedeemableIntent[] = [];
 
       for (const row of queue) {
+        // Payer side first — see the per-row loop in `run` (review L4).
+        if (await this.held(row)) {
+          blocked.add(row.agentAccount);
+          continue;
+        }
         const forfeit = await this.forfeitIfProviderBlocked(row);
         if (forfeit !== null) {
           if (!forfeit.settled) blocked.add(row.agentAccount);
-          continue;
-        }
-        if (await this.held(row)) {
-          blocked.add(row.agentAccount);
           continue;
         }
         if (blocked.has(row.agentAccount)) {
@@ -371,7 +403,9 @@ export class VoucherRedemptionService {
    * Whether a payer-side party to this voucher is on the account blocklist —
    * the payer's organization or account, or the delegate that signed. A
    * blocked provider or payee is not held: the provider forfeits the voucher
-   * at once (see {@link forfeitIfProviderBlocked}).
+   * at once (see {@link forfeitIfProviderBlocked}). Checked BEFORE the
+   * provider side, so a voucher whose payer and provider are both blocked
+   * stays frozen until the payer's block is lifted (review 2026-10-15, L4).
    *
    * A held row is not refused, released or absorbed at once: it keeps its
    * hold and is found again on the next pass after the block is lifted. The
@@ -400,11 +434,13 @@ export class VoucherRedemptionService {
       (hit.subjectKind === BlockSubjectKind.ORGANIZATION ? organizationIds : walletKeys).push(key);
     }
     let chainAccounts: readonly string[] = [];
+    this.chainBlockedKnown = true;
     if (this.chainState?.blockedAccounts) {
       try {
         chainAccounts = await this.chainState.blockedAccounts(asset.split('/')[0]);
       } catch {
         chainAccounts = [];
+        this.chainBlockedKnown = false;
       }
     }
     this.chainBlocked = new Set(chainAccounts.map((account) => account.toLowerCase()));
@@ -425,23 +461,26 @@ export class VoucherRedemptionService {
   }
 
   /**
-   * Whether the CHAIN would refuse this voucher right now: the program is
-   * paused, or the payer, the payee or the delegate is on the on-chain
-   * blocklist (`assertActive(payer, provider, delegate)` in `_redeem`).
+   * Whether the CHAIN would refuse this voucher right now for a reason that is
+   * not the provider's: the program is paused, or the payer or the delegate is
+   * on the on-chain blocklist (`assertActive(payer, provider, delegate)` in
+   * `_redeem`).
+   *
+   * The PAYEE is deliberately not asked here: a payee blocked on chain is the
+   * provider's side, so the provider forfeits ({@link forfeitIfProviderBlocked})
+   * rather than the voucher being held until it expires and is absorbed
+   * (review 2026-10-15, M1).
    *
    * Held before batching so one bad voucher does not revert the whole atomic
    * `redeemVoucherBatch` — the same hold as the platform's own blocklist: the
    * row keeps its hold and is retried on the next pass after the unpause or
-   * unblock, and once past its on-chain expiry it is absorbed by the platform
-   * (the provider is paid, the buyer is not charged; see {@link held}). The
-   * gate answers only on a LIVE confirmation of what the cache says, so a
-   * stale cache never holds a voucher the chain would redeem.
+   * unblock. The gate answers only on a LIVE confirmation of what the cache
+   * says, so a stale cache never holds a voucher the chain would redeem.
    */
   private async heldByChain(row: RedeemableIntent): Promise<boolean> {
     if (!this.chainState) return false;
     const reason = await this.chainState.holdReason(ChainDoor.REDEEM, [
       { role: 'PAYER', account: row.agentAccount },
-      { role: 'PAYEE', account: row.providerAccount },
       { role: 'DELEGATE', account: row.voucherDelegate },
     ]);
     if (!reason) return false;
@@ -474,9 +513,11 @@ export class VoucherRedemptionService {
   /**
    * The provider-side block on this voucher, as the forfeit cause, or `null`:
    * the provider's organization or its payee wallet on the platform blocklist,
-   * or the payee on this pass's confirmed on-chain blocklist.
+   * or the payee on the on-chain blocklist — this pass's confirmed snapshot,
+   * or a live read of the payee when the snapshot could not be read (review
+   * 2026-10-15, M1).
    */
-  private providerBlockCause(row: RedeemableIntent): string | null {
+  private async providerBlockCause(row: RedeemableIntent): Promise<string | null> {
     const blocked = this.blocklist.firstBlocked([
       { role: BlockedRole.PROVIDER, kind: BlockSubjectKind.ORGANIZATION, subject: row.providerId },
       { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: row.providerAccount },
@@ -484,9 +525,37 @@ export class VoucherRedemptionService {
     if (blocked) {
       return blocked.role === BlockedRole.PROVIDER ? 'ProviderBlocked' : 'PayeeBlocked';
     }
-    if (row.providerAccount && this.chainBlocked.has(row.providerAccount.toLowerCase())) {
+    if (!row.providerAccount) return null;
+    if (this.chainBlocked.has(row.providerAccount.toLowerCase())) {
       return 'PayeeBlockedOnChain';
     }
+    if (!this.chainBlockedKnown && (await this.isBlockedLive(row.providerAccount)) === true) {
+      return 'PayeeBlockedOnChain';
+    }
+    return null;
+  }
+
+  /** A live on-chain blocklist read; `null` when it cannot be told. */
+  private async isBlockedLive(account: string | null): Promise<boolean | null> {
+    if (!account || !this.chainState?.isBlockedLive) return null;
+    return this.chainState.isBlockedLive(account);
+  }
+
+  /**
+   * Whose address an `AddressBlocked` revert is about. The contract does not
+   * say, so each party is read live: `'PAYER'` when the payer or the delegate
+   * is blocked (the voucher is held, as for any payer-side block), `'PAYEE'`
+   * when only the payee is (the provider forfeits), `null` when it cannot be
+   * told (retried).
+   */
+  private async addressBlockedSide(row: RedeemableIntent): Promise<'PAYER' | 'PAYEE' | null> {
+    const [payer, delegate, payee] = await Promise.all([
+      this.isBlockedLive(row.agentAccount),
+      row.voucherDelegate ? this.isBlockedLive(row.voucherDelegate) : Promise.resolve(false),
+      this.isBlockedLive(row.providerAccount),
+    ]);
+    if (payer === true || delegate === true) return 'PAYER';
+    if (payee === true && payer === false && delegate === false) return 'PAYEE';
     return null;
   }
 
@@ -503,7 +572,7 @@ export class VoucherRedemptionService {
   private async forfeitIfProviderBlocked(
     row: RedeemableIntent,
   ): Promise<{ settled: boolean } | null> {
-    const cause = this.providerBlockCause(row);
+    const cause = await this.providerBlockCause(row);
     if (cause === null) return null;
     try {
       const built = this.toRequest(row);
@@ -591,11 +660,23 @@ export class VoucherRedemptionService {
 
       case RedeemOutcomeKind.RETRY:
         await this.warnIfOverdue(row, issuedAt, outcome.programError);
+        // The EVM contract reverts `AddressBlocked` for ANY blocked party. A
+        // payee the snapshot missed is the provider's side: forfeit, never
+        // retry it into `VoucherExpired` and absorb (review 2026-10-15, M1).
+        if (
+          outcome.programError === ADDRESS_BLOCKED &&
+          (await this.addressBlockedSide(row)) === 'PAYEE'
+        ) {
+          return this.closeUnredeemable(row, request, 'PayeeBlockedOnChain', true);
+        }
         // Kept so the `VoucherExpired` that ends a run of retries can still
         // say why (see `PROVIDER_CAUSED_ERRORS`). A bare RPC failure names no
         // program error and says nothing about the voucher, so it does not
-        // overwrite one that did.
-        if (outcome.programError !== null) {
+        // overwrite one that did — and nothing overwrites a provider-caused
+        // one: once the provider has been seen at fault for this voucher, a
+        // later refusal from elsewhere must not turn its forfeit into a
+        // platform-paid absorb (review 2026-10-15, M3).
+        if (outcome.programError !== null && !isProviderCaused(row.redemptionLastError)) {
           await this.payments.recordRedemptionError(
             row.organizationId,
             row.id,
@@ -658,6 +739,11 @@ export class VoucherRedemptionService {
     cause: string | null,
     forfeit: boolean,
   ): Promise<{ stop: boolean; settled: boolean }> {
+    if (forfeit && isProviderCaused(cause) && row.redemptionLastError !== cause) {
+      // Recorded before anything else: if the voucher is not closed this pass
+      // (landing window), the cause survives a block lifted in the meantime.
+      await this.payments.recordRedemptionError(row.organizationId, row.id, cause);
+    }
     const landing = await this.findLanding(row, request);
     if (landing === undefined) {
       await this.reportLandingUnknown(row, cause);
@@ -678,12 +764,59 @@ export class VoucherRedemptionService {
     }
     if (forfeit) {
       await this.forfeit(row, cause ?? 'unknown');
+      return { stop: false, settled: true };
+    }
+
+    // About to pay the provider out of platform funds. Not if the provider is
+    // at fault right now: asked LIVE, not taken from whatever the last retry
+    // recorded (review 2026-10-15, M3/M1). Unknown → the hold stays open and
+    // the next pass asks again; absorbing on a failed read is how the
+    // platform pays a provider below its minimum stake.
+    const fault = await this.providerFaultNow(row, request);
+    if (fault === undefined) {
+      this.logger.warn(
+        `Intent ${row.id} (seq ${row.voucherSeq}) was refused ${cause ?? 'unknown'}, and ` +
+          `whether its provider is at fault could not be read. The hold stays open.`,
+      );
+      return { stop: false, settled: true };
+    }
+    if (fault !== null) {
+      await this.forfeit(row, fault);
     } else {
       await this.absorb(row, cause);
     }
     // Settled, in the only sense this loop cares about: the hold is closed
     // and nothing will ever redeem this seq, so it cannot be stepped over.
     return { stop: false, settled: true };
+  }
+
+  /**
+   * Why the provider is at fault for this voucher right now, as a forfeit
+   * cause; `null` when it is not; `undefined` when that cannot be told.
+   *
+   * - its bonded stake is below the chain's minimum (a live read through the
+   *   redeemer; a chain without one is not asked), or
+   * - it or its payee is blocked (the platform blocklist, this pass's on-chain
+   *   snapshot, or a live read of the payee).
+   */
+  private async providerFaultNow(
+    row: RedeemableIntent,
+    request: RedeemVoucherRequest,
+  ): Promise<string | null | undefined> {
+    const blocked = await this.providerBlockCause(row);
+    if (blocked !== null) return blocked;
+    if ((await this.isBlockedLive(row.providerAccount)) === true) return 'PayeeBlockedOnChain';
+    if (!this.redeemer.providerBelowMinimumStake) return null;
+    try {
+      return (await this.redeemer.providerBelowMinimumStake(request))
+        ? 'ProviderBelowMinimumStake'
+        : null;
+    } catch (error) {
+      this.logger.warn(
+        `Intent ${row.id}: the provider's stake could not be read live: ${describe(error)}`,
+      );
+      return undefined;
+    }
   }
 
   /**
