@@ -332,23 +332,30 @@ describe('FreeQuotaService — consume()', () => {
   });
 });
 
-describe('FreeQuotaService — dailyAllowanceForTool()', () => {
-  it('is the most generous per-agent allowance among the free-capable bindings', async () => {
-    const { service } = buildFreeQuotaHarness({}, [
-      buildBindingRow('b1', { freeQuotaPerAgent: 25 }),
-      // Unset: the platform default (100 in these fixtures) applies.
-      buildBindingRow('b2', { pricingMode: PricingMode.FREEMIUM, freeQuotaPerAgent: null }),
-    ]);
+describe('FreeQuotaService — dailyAllowance() (review L2)', () => {
+  it('sums each binding’s per-agent quota, never above its budget, capped by the platform', () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 1_000 });
 
-    await expect(service.dailyAllowanceForTool(TOOL_ID)).resolves.toBe(100);
+    expect(
+      service.dailyAllowance([
+        { freeQuotaPerAgent: 25, freeDailyBudget: null },
+        // Unset: the platform default per-agent quota (100 in these fixtures).
+        { freeQuotaPerAgent: null, freeDailyBudget: null },
+        // A budget below the per-agent quota is what one agent can really get.
+        { freeQuotaPerAgent: 500, freeDailyBudget: 10 },
+      ]),
+    ).toBe(135);
+    expect(
+      service.dailyAllowance([
+        { freeQuotaPerAgent: 900, freeDailyBudget: null },
+        { freeQuotaPerAgent: 900, freeDailyBudget: null },
+      ]),
+    ).toBe(1_000);
   });
 
-  it('is null when no binding of the tool serves free calls', async () => {
-    const { service } = buildFreeQuotaHarness({}, [
-      buildBindingRow('b1', { pricingMode: PricingMode.PAID, priceAmount: '50000' }),
-    ]);
-
-    await expect(service.dailyAllowanceForTool(TOOL_ID)).resolves.toBeNull();
+  it('is null when no routable binding serves free calls', () => {
+    const { service } = buildFreeQuotaHarness();
+    expect(service.dailyAllowance([])).toBeNull();
   });
 });
 

@@ -268,6 +268,18 @@ export class CatalogueToolDto {
   })
   routableBindings: number;
 
+  /**
+   * How many of {@link routableBindings} can be charged (`PAID` or
+   * `FREEMIUM`). "up to $X" is about these: a `FREE` binding beside one paid
+   * binding does not make the paid price a range (review 2026-10-15, L2).
+   */
+  @ApiProperty({
+    description:
+      'Routable bindings that can be charged (PAID or FREEMIUM). Print "up to" only when ' +
+      'this is above one.',
+  })
+  paidBindings: number;
+
   @ApiPropertyOptional({
     type: String,
     nullable: true,

@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
+import { FreeBindingDials } from '@modules/free-tier/domain/free-calls-per-day';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { MoneyUtil } from '@utils/money.util';
@@ -432,6 +433,13 @@ export class ProviderRouterService {
       ),
       pricingMode,
       routableBindings: eligible.length,
+      paidBindings: priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE).length,
+      freeBindings: eligible
+        .filter(({ binding }) => binding.pricingMode !== PricingMode.PAID)
+        .map(({ binding }) => ({
+          freeQuotaPerAgent: binding.freeQuotaPerAgent ?? null,
+          freeDailyBudget: binding.freeDailyBudget ?? null,
+        })),
       settlementChains,
       p95LatencyMs: weightedMean(weighted, (c) => c.provider.stats.p95LatencyMs),
       qualityRate: weightedMean(weighted, (c) =>
@@ -948,6 +956,19 @@ export interface ToolQuote {
    */
   readonly pricingMode: PricingMode | null;
   readonly routableBindings: number;
+  /**
+   * How many of the priced bindings can be CHARGED (`PAID` or `FREEMIUM`) —
+   * what "up to $X" is about: a `FREE` binding beside one paid binding does
+   * not make the paid price a range (review 2026-10-15, L2). Absent on a
+   * quote with no routable supply.
+   */
+  readonly paidBindings?: number;
+  /**
+   * The published free dials of every routable free-capable (`FREE` or
+   * `FREEMIUM`) binding — what `freeCallsPerDay` sums. Absent on a quote with
+   * no routable supply.
+   */
+  readonly freeBindings?: readonly FreeBindingDials[];
   /**
    * Every chain a routable binding of this tool could settle on, for the caller
    * to render against the buyer's own chains. Empty when none.

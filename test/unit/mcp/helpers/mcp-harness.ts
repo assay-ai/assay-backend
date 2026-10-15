@@ -1,3 +1,5 @@
+import { DEFAULT_FREE_QUOTA_CONFIG } from '@modules/free-tier/config/free-quota.config';
+import { FreeBindingDials, freeCallsPerDay } from '@modules/free-tier/domain/free-calls-per-day';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import {
@@ -403,13 +405,12 @@ export class FakeBindingCallCounter {
 
 /**
  * `FreeQuotaService`, reduced to the reads `McpCatalogueService.listTools`
- * calls: `remainingForTool` and `dailyAllowanceForTool`. Set per tool with
- * `setRemaining` / `setAllowance`; unset tools answer `null`, matching the
+ * calls: `remainingForTool` and `dailyAllowance`. Set per tool with
+ * `setRemaining`; unset tools answer `null`, matching the
  * "omit rather than publish a number that is nobody's" rule.
  */
 export class FakeFreeQuota {
   private readonly remaining = new Map<string, FreeQuotaRemaining>();
-  private readonly allowances = new Map<string, number>();
 
   /** Set by a test that wants the relay path refused. Default: everything allowed. */
   decision: FreeQuotaDecision = { kind: 'ALLOWED' };
@@ -436,12 +437,9 @@ export class FakeFreeQuota {
     this.remaining.set(toolId, value);
   }
 
-  setAllowance(toolId: string, perDay: number): void {
-    this.allowances.set(toolId, perDay);
-  }
-
-  dailyAllowanceForTool(toolId: string): Promise<number | null> {
-    return Promise.resolve(this.allowances.get(toolId) ?? null);
+  /** The real arithmetic, over the quote's bindings, with the platform defaults. */
+  dailyAllowance(bindings: readonly FreeBindingDials[]): number | null {
+    return freeCallsPerDay(bindings, DEFAULT_FREE_QUOTA_CONFIG);
   }
 
   remainingForTool(
