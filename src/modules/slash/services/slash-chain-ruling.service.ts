@@ -286,6 +286,27 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       cancelReason: event.reason,
     });
 
+    // Review R3-1: a record of an earlier epoch (superseded by a re-proposal)
+    // speaks only for its own part. Its cancel or expiry is the platform's
+    // duplicate cleaned up, not a ruling on the case, which follows only its
+    // current-epoch records.
+    if (part.chainEpoch !== proposal.chainEpoch) {
+      await this.timeline(proposal, event.cancelledAt, 'CHAIN_CANCELLED', {
+        summary:
+          `A superseded record of an earlier proposal of this case was ${
+            event.reason === 'WITHDRAWN' ? 'cancelled (cancelSlash)' : `expired (${event.reason})`
+          } on chain and its reservation released; the current proposal is not affected`,
+        detail: {
+          requestId: event.requestId,
+          reason: event.reason,
+          transactionHash: event.transactionHash,
+          cancelledAt: event.cancelledAt.toISOString(),
+          superseded: true,
+        },
+      });
+      return true;
+    }
+
     // The provider won its dispute (B7): the record was cancelled while it
     // stood DISPUTED, or expired unruled. Remembered on the case so it is
     // never proposed again.
@@ -317,7 +338,6 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       },
     });
 
-    if (part.chainEpoch !== proposal.chainEpoch) return true;
     await this.mirrorParts(proposal, {});
     await this.followRecords(proposal, event, { because, recalculating });
     return true;
