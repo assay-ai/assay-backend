@@ -6,6 +6,7 @@ import { ChainsModule } from '@modules/chains/chains.module';
 import { FeePayerSignerModule } from '@modules/chains/facilitator/signing/fee-payer-signer.module';
 import { McpModule } from '@modules/mcp/mcp.module';
 import { RedisDemoRateLimiter } from '@modules/mcp/services/redis-demo-rate-limiter.service';
+import { ToolModule } from '@modules/tool/tool.module';
 
 import { NEXT_SEQ_RATE_LIMITER, NEXT_SEQ_RATE_LIMITS } from './constants/escrow-seq.constants';
 
@@ -13,6 +14,7 @@ import { DepositsController } from './controllers/deposits.controller';
 import { EscrowController } from './controllers/escrow.controller';
 import { ToolCallsController } from './controllers/tool-calls.controller';
 import { PaymentModule } from './payment.module';
+import { BuyerDebtService } from './services/buyer-debt.service';
 import { NextSeqService } from './services/next-seq.service';
 
 /**
@@ -45,10 +47,13 @@ import { NextSeqService } from './services/next-seq.service';
  * line.
  */
 @Module({
-  imports: [PaymentModule, McpModule, ChainsModule, FeePayerSignerModule],
+  // `ToolModule` for `TOOL_CATALOGUE`: a debt's replacement voucher names the
+  // tool's resource, and the intent keeps only the tool id.
+  imports: [PaymentModule, McpModule, ChainsModule, FeePayerSignerModule, ToolModule],
   controllers: [ToolCallsController, DepositsController, EscrowController],
   providers: [
     NextSeqService,
+    BuyerDebtService,
     {
       // `GET /escrow/next-seq`'s throttle (review S2-2): the demo's sliding
       // window under its own keys, on its own connection for the reason

@@ -323,6 +323,8 @@ export interface LapsedVoucherReplacement {
   readonly issuedAt: number;
   readonly delegate: string | null;
   readonly expiresAt: Date;
+  /** The chain's hash of the replacement's `resource` (the tool may have been renamed). */
+  readonly resourceHash: string;
 }
 
 export interface DuePaymentIntent {
@@ -594,9 +596,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * an open hold: settling anything else would leave a SETTLED hold nothing
    * ever closes.
    *
-   * The upper bound (`latestSeconds`) keeps the sweep off vouchers the chain
-   * would already refuse: those are left to the hold backstop, which releases
-   * the buyer's hold and pays nobody (review 2026-10-15, H1).
+   * There is no upper bound any more: a row past the latest its voucher can
+   * still be redeemed is settled too, and `PaymentIntentService.resolve` makes
+   * it buyer debt at once rather than handing a dead voucher to the redemption
+   * job (review 2026-10-15 #2, M3). Before, such rows were left to the 24-hour
+   * backstop, which released the hold of a call that was served.
    *
    * A row whose verification already computed a REFUND or VOID outcome that
    * `resolve()` has not applied yet is skipped: the sweep must not overtake a
@@ -608,7 +612,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   async findDueForVerdictDeadline(
     now: Date,
     deadlineSeconds: number,
-    latestSeconds: number,
     limit: number,
   ): Promise<DuePaymentIntent[]> {
     return this.selectSweepCandidates()
@@ -617,9 +620,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
       .andWhere('intent.expiresAt < :cutoff', {
         cutoff: new Date(now.getTime() - deadlineSeconds * 1000),
-      })
-      .andWhere('intent.expiresAt > :latest', {
-        latest: new Date(now.getTime() - latestSeconds * 1000),
       })
       .andWhere('intent.holdId IS NOT NULL')
       .andWhere('intent.holdReleasedAt IS NULL')
@@ -1108,7 +1108,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       const result = (await manager.query(
         `UPDATE "payment_intents"
             SET "voucher_seq" = $4, "voucher_signature" = $5, "voucher_issued_at" = $6,
-                "voucher_delegate" = $7, "expires_at" = $8,
+                "voucher_delegate" = $7, "expires_at" = $8, "voucher_resource_hash" = $9,
                 "redemption_tx_refs" = '{}', "redemption_last_error" = NULL,
                 "redemption_lapsed_at" = NULL
           WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3
@@ -1124,6 +1124,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
           replacement.issuedAt,
           replacement.delegate,
           replacement.expiresAt,
+          replacement.resourceHash,
         ],
       )) as [unknown[], number] | unknown[];
       return affected(result) > 0;

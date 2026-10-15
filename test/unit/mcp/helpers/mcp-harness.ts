@@ -1,3 +1,4 @@
+import { OutstandingDebt } from '@database/postgres/repositories/payment-intent.repository';
 import { DEFAULT_FREE_QUOTA_CONFIG } from '@modules/free-tier/config/free-quota.config';
 import { FreeBindingDials, freeCallsPerDay } from '@modules/free-tier/domain/free-calls-per-day';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
@@ -187,6 +188,19 @@ export class FakeIntents {
         row.organizationId === organizationId &&
         row.agentAccount === account &&
         row.voucherSeq === seq,
+    );
+  }
+
+  /**
+   * Set by a test: the payer's open buyer debts (lapsed vouchers), as
+   * `PaymentIntentService.findOutstandingDebts` returns them.
+   */
+  debts: OutstandingDebt[] = [];
+
+  /** `PaymentIntentService.findOutstandingDebts`. */
+  async findOutstandingDebts(organizationId: string, payer: string): Promise<OutstandingDebt[]> {
+    return this.debts.filter(
+      (debt) => debt.organizationId === organizationId || debt.agentAccount === payer,
     );
   }
 
