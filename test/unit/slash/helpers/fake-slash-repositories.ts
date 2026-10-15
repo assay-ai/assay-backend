@@ -224,8 +224,7 @@ export class FakeSlashProposals {
           row.status === 'PROPOSED' &&
           deadline &&
           // As the real query: an EVM door counts once the settle margin passed.
-          deadline.getTime() +
-            (row.assetId.startsWith('eip155:') ? CHAIN_DISPUTE_SETTLE_MS : 0) <=
+          deadline.getTime() + (row.assetId.startsWith('eip155:') ? CHAIN_DISPUTE_SETTLE_MS : 0) <=
             now.getTime(),
       )
       .slice(0, limit)

@@ -938,7 +938,10 @@ export class SlashExecutionService {
     try {
       const fresh =
         (await this.proposals.findOneScoped(proposal.organizationId, proposal.id)) ?? proposal;
-      const closed: readonly string[] = [SlashProposalStatus.EXECUTED, SlashProposalStatus.REVERSED];
+      const closed: readonly string[] = [
+        SlashProposalStatus.EXECUTED,
+        SlashProposalStatus.REVERSED,
+      ];
       if (!closed.includes(fresh.status) || !fresh.executedAt) return false;
       const totals = await this.parts.executedTotals(fresh, fresh.executedAt);
       const before = BigInt(fresh.appliedAmount ?? '0');

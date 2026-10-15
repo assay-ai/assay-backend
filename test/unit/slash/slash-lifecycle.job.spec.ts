@@ -347,7 +347,11 @@ describe('SlashLifecycleJob — open EVM cases from the in-app objection era (re
           steps.push('reconcileOpenCases');
           if (calls === 1) throw new Error('rpc down'); // retried from the same cursor
           return calls < 4
-            ? { moved: 1, failed: [], next: { proposedAt: new Date(calls * 1000), id: `c${calls}` } }
+            ? {
+                moved: 1,
+                failed: [],
+                next: { proposedAt: new Date(calls * 1000), id: `c${calls}` },
+              }
             : { moved: 0, failed: [], next: null };
         },
         reconcileCases: async () => ({ moved: 0, failed: [] }),
@@ -365,7 +369,9 @@ describe('SlashLifecycleJob — open EVM cases from the in-app objection era (re
       { proposedAt: new Date(3000), id: 'c3' },
     ]);
     // Last in the tick: the sweeps of the first tick do not wait behind it.
-    expect(steps.indexOf('reconcileOpenCases')).toBeGreaterThan(steps.indexOf('reconcileExecuting'));
+    expect(steps.indexOf('reconcileOpenCases')).toBeGreaterThan(
+      steps.indexOf('reconcileExecuting'),
+    );
   });
 
   it('retries a case whose read failed on later ticks, a bounded number of times', async () => {

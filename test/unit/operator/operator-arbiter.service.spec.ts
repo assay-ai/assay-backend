@@ -195,10 +195,7 @@ describe('A-11 — the approved block call, fetched again (review N-5)', () => {
 
   it('R2-7: refuses an approval decided longer ago than the approvals expiry', async () => {
     const { service, stored, buildBlock } = build();
-    stored.set(
-      'appr-1',
-      approved({ decidedAt: new Date(Date.now() - APPROVAL_TTL_MS - 60_000) }),
-    );
+    stored.set('appr-1', approved({ decidedAt: new Date(Date.now() - APPROVAL_TTL_MS - 60_000) }));
     await expectErrorCodeAsync(
       () => service.approvedBlockCall('appr-1'),
       'OPERATOR_APPROVAL_CALL_STALE',

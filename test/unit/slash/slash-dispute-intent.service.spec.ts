@@ -202,8 +202,8 @@ describe('SlashDisputeIntentService — superseded earlier-epoch records (review
     expect(logged[0].context).toMatchObject({ code: 'S-13' });
     expect(logged[0].after).toMatchObject({ ruling: 'CANCEL', superseded: true });
 
-    await expect(service.supersededCancel(context, CHAIN, `0x${'b'.repeat(64)}`)).rejects.toMatchObject(
-      { statusCode: 409 },
-    );
+    await expect(
+      service.supersededCancel(context, CHAIN, `0x${'b'.repeat(64)}`),
+    ).rejects.toMatchObject({ statusCode: 409 });
   });
 });

@@ -312,9 +312,7 @@ export class EvmSlashExecutor
       proposedAt: secondsToDate(record.proposedAt),
       executableAt: secondsToDate(record.executableAt),
       executedAt: record.executedAt === 0n ? null : secondsToDate(record.executedAt),
-      ...(status === 'CANCELLED'
-        ? await this.cancelOf(chainId, requestId)
-        : { cancelledAt: null }),
+      ...(status === 'CANCELLED' ? await this.cancelOf(chainId, requestId) : { cancelledAt: null }),
       disputedAt: record.disputedAt === 0n ? null : secondsToDate(record.disputedAt),
       beneficiary: getAddress(record.beneficiary),
       policy: record.policy,

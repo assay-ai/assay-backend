@@ -271,7 +271,11 @@ export class ArbitrationService {
     if (relabelled === 0) return false;
     if (fresh.disputeId) {
       await this.disputes.update(
-        { organizationId: fresh.organizationId, id: fresh.disputeId, resolvedBy: 'chain:undisputed' },
+        {
+          organizationId: fresh.organizationId,
+          id: fresh.disputeId,
+          resolvedBy: 'chain:undisputed',
+        },
         {
           outcome: ArbitrationOutcome.UPHELD,
           resolutionKind: ResolutionKind.CHAIN_ARBITER,
@@ -505,18 +509,13 @@ export class ArbitrationService {
 
     const savedDispute = await this.disputes.save(dispute);
 
-    const affected = await this.proposals.transitionIfIn(
-      organizationId,
-      proposal.id,
-      [from],
-      {
-        status: SlashProposalStatus.DISPUTED,
-        disputedAt: now,
-        disputeId: savedDispute.id,
-        platformDecisionDueAt: platformDueAt,
-        ...(options.reopen ? { resolutionKind: null, resolvedAt: null } : {}),
-      },
-    );
+    const affected = await this.proposals.transitionIfIn(organizationId, proposal.id, [from], {
+      status: SlashProposalStatus.DISPUTED,
+      disputedAt: now,
+      disputeId: savedDispute.id,
+      platformDecisionDueAt: platformDueAt,
+      ...(options.reopen ? { resolutionKind: null, resolvedAt: null } : {}),
+    });
     if (affected === 0) {
       // Lost a race with the undisputed sweeper. The dispute row stays — it is
       // evidence that the provider did answer, and deleting it would leave the
