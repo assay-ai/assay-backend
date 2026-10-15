@@ -38,6 +38,14 @@ export const MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS =
  */
 export const LANDING_SETTLE_SECONDS = 600;
 
+/**
+ * How long past {@link LANDING_SETTLE_SECONDS} a refused voucher's landing may
+ * stay unknown — the lookup itself keeps failing — before it pages (round-two
+ * review R2-6). The hold stays open either way: absorbing it without an
+ * answer could pay the provider twice.
+ */
+export const LANDING_UNKNOWN_ALERT_SECONDS = 3 * 3_600;
+
 export const VOUCHER_REDEMPTION_ALERTS = {
   /**
    * The chain refused a voucher permanently. The buyer keeps their money and
@@ -62,4 +70,11 @@ export const VOUCHER_REDEMPTION_ALERTS = {
    * of failure the alert catalogue exists for.
    */
   MISCONFIGURED: 'voucher_redemption_misconfigured',
+  /**
+   * The chain refused a voucher and, long after the landing window, whether
+   * one of its own transactions redeemed it still cannot be read (the lookup
+   * keeps failing). Nothing absorbs or commits the hold until a human or the
+   * RPC answers, so it would otherwise stay open in silence.
+   */
+  LANDING_UNKNOWN: 'voucher_redemption_landing_unknown',
 } as const;

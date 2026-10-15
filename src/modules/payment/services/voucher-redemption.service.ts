@@ -21,6 +21,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import {
   CLOCK_SKEW_TOLERANCE_SECONDS,
   LANDING_SETTLE_SECONDS,
+  LANDING_UNKNOWN_ALERT_SECONDS,
   MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
   REDEEM_GRACE_SECONDS,
   VOUCHER_REDEMPTION_ALERTS,
@@ -521,6 +522,7 @@ export class VoucherRedemptionService {
         // payer's later vouchers may go ahead (`settled: true`).
         const landing = await this.findLanding(row, request);
         if (landing === undefined) {
+          await this.reportLandingUnknown(row, outcome.programError);
           return { stop: false, settled: true };
         }
         if (landing !== null && landing !== NOT_FOUND_YET) {
@@ -598,11 +600,17 @@ export class VoucherRedemptionService {
    * of them.
    */
   private pastLandingWindow(row: RedeemableIntent): boolean {
-    const deadline =
+    return Math.floor(this.now() / 1000) >= this.landingDeadline(row);
+  }
+
+  /** Unix seconds at which {@link pastLandingWindow} turns true. */
+  private landingDeadline(row: RedeemableIntent): number {
+    return (
       Math.floor(row.expiresAt.getTime() / 1000) +
       CLOCK_SKEW_TOLERANCE_SECONDS +
-      REDEEM_GRACE_SECONDS;
-    return Math.floor(this.now() / 1000) >= deadline + LANDING_SETTLE_SECONDS;
+      REDEEM_GRACE_SECONDS +
+      LANDING_SETTLE_SECONDS
+    );
   }
 
   /**
@@ -688,6 +696,44 @@ export class VoucherRedemptionService {
       },
       aggregation: AlertAggregation.ONCE_PER_INCIDENT,
       dedupeKey: VOUCHER_REDEMPTION_ALERTS.MISCONFIGURED,
+    });
+  }
+
+  /**
+   * A refused voucher whose landing has stayed unknown — {@link findLanding}
+   * keeps throwing — long past {@link pastLandingWindow}: CRITICAL, once per
+   * intent. The hold is left open, as it must be without an answer, but no
+   * longer in silence (round-two review R2-6).
+   */
+  private async reportLandingUnknown(
+    row: RedeemableIntent,
+    programError: string | null,
+  ): Promise<void> {
+    const overdueSeconds = Math.floor(this.now() / 1000) - this.landingDeadline(row);
+    if (overdueSeconds < LANDING_UNKNOWN_ALERT_SECONDS) {
+      return;
+    }
+
+    this.logger.error(
+      `CRITICAL: intent ${row.id} (seq ${row.voucherSeq}) was refused ` +
+        `${programError ?? 'unknown'} and whether it landed is still unknown ` +
+        `${overdueSeconds}s past its landing window. Its hold stays open until the chain answers.`,
+    );
+    await this.alerts.emit({
+      severity: AlertSeverity.CRITICAL,
+      name: VOUCHER_REDEMPTION_ALERTS.LANDING_UNKNOWN,
+      summary:
+        `A refused rail-B voucher's landing is still unknown ${overdueSeconds}s past its ` +
+        `landing window; its hold stays open`,
+      details: {
+        intentId: row.id,
+        buyer: row.agentAccount,
+        seq: row.voucherSeq,
+        overdueSeconds,
+        lastRefusal: programError ?? 'none',
+      },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: row.id,
     });
   }
 
