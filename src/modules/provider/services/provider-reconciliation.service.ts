@@ -6,6 +6,7 @@ import { ConfigService } from '@nestjs/config';
 import {
   AWAITING_REDEMPTION_SQL,
   CREDITED_SQL,
+  FORFEITED_SQL,
   PLATFORM_ABSORBED_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
@@ -44,6 +45,8 @@ interface ReconciliationGroupRow {
   readonly platformAbsorbed: boolean | string;
   /** `CREDITED_SQL`: the hold was committed — same driver caveat. */
   readonly holdCommitted: boolean | string;
+  /** `FORFEITED_SQL`: the provider forfeited — same driver caveat (and may be NULL). */
+  readonly forfeited: boolean | string | null;
   readonly calls: string;
   /** `Σ price_amount` over this group's `SETTLED` rows. */
   readonly credited: string;
@@ -87,6 +90,8 @@ const CLASS_NOTES: Record<CallReconciliationClass, string> = {
     'passed — credited once the voucher is redeemed on chain',
   [CallReconciliationClass.PLATFORM_ABSORBED]:
     'voucher could not be redeemed — owed to you by the platform, no fee taken',
+  [CallReconciliationClass.PROVIDER_FORFEITED]:
+    'voucher not collected because of your stake or a block — forfeited, not credited',
   [CallReconciliationClass.PAID_UNCREDITED]: 'verification found FAIL — not credited, see verdicts',
   [CallReconciliationClass.FREE]: 'relay path, no payment machinery',
   [CallReconciliationClass.TEST]: 'your own dry runs — charges nobody',
@@ -203,6 +208,7 @@ export class ProviderReconciliationService {
           classification: row.classification as ResponseClassValue,
           awaitingRedemption,
           platformAbsorbed: row.platformAbsorbed === true || row.platformAbsorbed === 'true',
+          forfeited: row.forfeited === true || row.forfeited === 'true',
           credited: !(row.holdCommitted === false || row.holdCommitted === 'false'),
         });
         // `CALL_RECONCILIATION_CLASSES` pre-seeds every member above, so this
@@ -300,6 +306,7 @@ export class ProviderReconciliationService {
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
       .addSelect(PLATFORM_ABSORBED_SQL, 'platformAbsorbed')
       .addSelect(CREDITED_SQL, 'holdCommitted')
+      .addSelect(FORFEITED_SQL, 'forfeited')
       .addSelect('COUNT(*)', 'calls')
       // Money only for committed holds (`CREDITED_SQL`), the same rule as
       // `ProviderEarningsService`, so gross / take / net match `PROVIDER_CREDIT`.
@@ -337,6 +344,7 @@ export class ProviderReconciliationService {
       .addGroupBy(AWAITING_REDEMPTION_SQL)
       .addGroupBy(PLATFORM_ABSORBED_SQL)
       .addGroupBy(CREDITED_SQL)
+      .addGroupBy(FORFEITED_SQL)
       .getRawMany<ReconciliationGroupRow>();
   }
 

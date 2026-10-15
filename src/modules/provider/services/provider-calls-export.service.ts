@@ -7,6 +7,7 @@ import {
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { isAssetId } from '@modules/chains/ports/caip.types';
+import { PROVIDER_FORFEIT_PREFIX } from '@modules/payment/constants/voucher-redemption.constants';
 import {
   CallReconciliationClass,
   classifyForReconciliation,
@@ -183,8 +184,11 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     classification: row.classification as 'DATA_RESULT' | 'SYSTEM_ERROR' | 'REQUEST_ERROR' | null,
     awaitingRedemption: row.awaitingRedemption,
     platformAbsorbed: row.absorbedReason !== null,
+    forfeited: row.redemptionLastError?.startsWith(PROVIDER_FORFEIT_PREFIX) ?? false,
     credited: row.credited,
   });
+  // Forfeited by the provider: nothing was collected, credited or taken.
+  const forfeited = classification === CallReconciliationClass.PROVIDER_FORFEITED;
   // SETTLED but classified PENDING: no credit was written for it.
   const uncredited = row.status === 'SETTLED' && classification === CallReconciliationClass.PENDING;
   // Paid from platform funds: nothing was redeemed, so no fee was taken, and
@@ -200,12 +204,14 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     classification,
     absorbed
       ? row.absorbedReason
-      : uncredited
-        ? (row.statusReason ?? 'settled, no credit recorded')
-        : row.statusReason,
+      : forfeited
+        ? row.redemptionLastError
+        : uncredited
+          ? (row.statusReason ?? 'settled, no credit recorded')
+          : row.statusReason,
     row.verificationVerdict,
-    row.providerAmount,
-    absorbed ? '0' : row.platformFee,
+    forfeited ? '0' : row.providerAmount,
+    absorbed || forfeited ? '0' : row.platformFee,
     row.priceAmount,
     row.asset,
     row.decimals,
