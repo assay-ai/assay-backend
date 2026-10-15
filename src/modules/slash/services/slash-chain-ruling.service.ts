@@ -1,9 +1,10 @@
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { SlashProposalPartEntity } from '@database/postgres/entities/slash-proposal-part.entity';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
 import { CHAIN_DISPUTE_SETTLE_MS } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
@@ -61,6 +62,9 @@ import { SlashProposalService } from './slash-proposal.service';
 /** `chain_last_error` of a record of an earlier epoch that landed late (review N-9). */
 const SUPERSEDED_EPOCH = 'SupersededEpoch';
 
+/** Review R2-6: the page for a superseded earlier-epoch record standing on chain. */
+export const SLASH_RECORD_SUPERSEDED_ALERT = 'slash_record_superseded';
+
 @Injectable()
 export class SlashChainRulingService implements SlashChainRulingsPort {
   private readonly logger = new Logger(SlashChainRulingService.name);
@@ -71,6 +75,7 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
     private readonly lifecycle: SlashProposalService,
     @Optional() private readonly arbitration: ArbitrationService | null = null,
     @Optional() private readonly execution: SlashExecutionService | null = null,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
 
   async recordDisputed(event: SlashChainDisputedEvent): Promise<boolean> {
@@ -514,6 +519,25 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
           `landed on chain after the case was re-proposed; it would charge the same calls ` +
           `twice. The arbiter must cancel it (cancelSlash) before ${event.executableAt.toISOString()}`,
       );
+      // Review R2-6: a page, not only a log line. The arbiter page lists the
+      // record with its guarded cancel (`GET /operator/arbiter/superseded`).
+      await this.alerts?.emit({
+        severity: AlertSeverity.CRITICAL,
+        name: SLASH_RECORD_SUPERSEDED_ALERT,
+        summary:
+          `A slash record of an earlier proposal of case ${proposal.id} landed on chain late; ` +
+          'it would charge the same calls twice. The arbiter must cancel it (arbiter page, ' +
+          `superseded records) before ${event.executableAt.toISOString()}`,
+        details: {
+          chainId: event.chainId,
+          requestId: `0x${event.requestId}`,
+          proposalId: proposal.id,
+          organizationId: proposal.organizationId,
+          executableAt: event.executableAt.toISOString(),
+        },
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: `${event.chainId}:${event.requestId}`,
+      });
       await this.timeline(proposal, new Date(), 'CHAIN_SUPERSEDED_RECORD', {
         summary:
           'A record of an earlier proposal of this case landed on chain late. It is not ' +

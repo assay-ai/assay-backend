@@ -45,6 +45,8 @@ export enum SlashErrorCode {
   SLASH_DISPUTE_ON_CHAIN_ONLY = 'SLASH_DISPUTE_ON_CHAIN_ONLY',
   /** An EVM case: the arbiter rules on chain, there is no off-chain decision. */
   SLASH_ARBITER_RULES_ON_CHAIN = 'SLASH_ARBITER_RULES_ON_CHAIN',
+  /** Review R2-6: the superseded-record cancel was asked for a record that is not one. */
+  SLASH_RECORD_NOT_SUPERSEDED = 'SLASH_RECORD_NOT_SUPERSEDED',
 }
 
 export type SlashErrorCodesArePrefixed = AssertDomainErrorCodes<'SLASH', `${SlashErrorCode}`>;
@@ -502,6 +504,19 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
       `Cannot ${context?.action ?? 'decide'} this case off chain: an EVM penalty is decided ` +
       'only on chain. The arbiter rules there (upholdSlash), and only the arbiter can stop it, ' +
       'by cancelling its record on chain (cancelSlash, from the arbiter page)',
+  },
+  /**
+   * Review R2-6: the guarded cancel of a superseded earlier-epoch record was
+   * asked for an id that is not one standing on that chain (a live record of
+   * the current epoch is ruled on from the disputes list instead).
+   */
+  recordNotSuperseded: {
+    code: SlashErrorCode.SLASH_RECORD_NOT_SUPERSEDED,
+    statusCode: 409,
+    publicContext: ['requestId', 'chainId'],
+    message: (context?: Record<string, any>) =>
+      `Record ${context?.requestId ?? ''} is not a superseded earlier-epoch record standing on ` +
+      `${context?.chainId ?? 'this chain'}; nothing was built`,
   },
   chainBatchRefused: {
     code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,
