@@ -209,6 +209,27 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
     }
   }
 
+  async isBlockedLive(account: string): Promise<boolean | null> {
+    const parsed = evmParty({ role: 'ACCOUNT', account });
+    if (!parsed) return null;
+    const client = this.clients.get(parsed.chainId);
+    const deployment = this.deployments.get(parsed.chainId);
+    if (!client || !deployment) return null;
+    try {
+      return Boolean(
+        await client.readContract({
+          address: deployment.config,
+          abi: X402_CONFIG_ABI,
+          functionName: 'blocked',
+          args: [parsed.address],
+        }),
+      );
+    } catch (error) {
+      this.logger.warn(`could not read blocked(${account}) live: ${describe(error)}`);
+      return null;
+    }
+  }
+
   async blockedAccounts(chainId: string): Promise<readonly string[]> {
     const snapshot = this.chains.get(chainId);
     if (!snapshot || snapshot.blocked.size === 0) return [];

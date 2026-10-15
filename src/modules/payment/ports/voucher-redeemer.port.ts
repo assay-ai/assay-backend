@@ -152,6 +152,17 @@ export interface VoucherRedeemerPort {
    * that refusal absorbed as before.
    */
   findLanding?(request: RedeemVoucherRequest, txRefs: readonly string[]): Promise<string | null>;
+
+  /**
+   * Whether the voucher's provider has less bonded stake than the chain's
+   * minimum RIGHT NOW — a live read, not a cache. Throws when it cannot tell.
+   *
+   * Asked when a voucher is closed unredeemed: a provider below the minimum
+   * forfeits instead of being paid by the platform, whatever error the last
+   * retry happened to record (review 2026-10-15, M3). Optional: a chain
+   * without it decides from the recorded refusals alone.
+   */
+  providerBelowMinimumStake?(request: RedeemVoucherRequest): Promise<boolean>;
 }
 
 export const VOUCHER_REDEEMER = 'VOUCHER_REDEEMER';

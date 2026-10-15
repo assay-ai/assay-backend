@@ -243,6 +243,16 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     return this.outcomeFor(result.revertReason, null);
   }
 
+  /**
+   * The provider's bonded stake against `params().minimumStake`, read live in
+   * the same multicall the pre-validator uses, so the two cannot disagree on
+   * what "below the minimum" means.
+   */
+  async providerBelowMinimumStake(request: RedeemVoucherRequest): Promise<boolean> {
+    const [state] = await this.readState(this.chainOf(request), [request]);
+    return state.providerBonded < state.minimumStake;
+  }
+
   async redeemBatch(requests: readonly RedeemVoucherRequest[]): Promise<readonly RedeemOutcome[]> {
     if (requests.length === 0) {
       return [];
