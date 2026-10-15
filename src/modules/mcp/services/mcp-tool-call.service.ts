@@ -309,6 +309,7 @@ export class McpToolCallService {
     // exactly such a chain. Refused BEFORE the intent exists, so nothing has to
     // be swept.
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_A_PER_CALL));
+    await this.vouchers.assertNoOutstandingDebt(session.organizationId, session.agentAccount);
 
     // The cap check and the hold it allows run under the agent's spend lock:
     // read and reserve as one step, so concurrent calls cannot all read the
@@ -426,6 +427,11 @@ export class McpToolCallService {
     payment: McpVoucherPayment | null,
   ): Promise<McpCallOutcome> {
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_B_VOUCHER));
+    // A payer that owes for served calls whose vouchers lapsed gets no paid
+    // call — not even a requirement — until it signs the replacements
+    // (`PAYMENT_DEBT_OUTSTANDING`, no-platform-debt design step 9). Free calls
+    // never reach here.
+    await this.vouchers.assertNoOutstandingDebt(session.organizationId, session.agentAccount);
 
     const asset = chainMetadata(session.chainId).settlementAsset as AssetId;
     // One read of the buyer's escrow serves the withdraw gate AND the seq

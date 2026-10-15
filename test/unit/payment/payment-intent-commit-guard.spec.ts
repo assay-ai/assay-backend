@@ -103,6 +103,13 @@ class FakeIntentRepository {
   insert(): Promise<void> {
     throw new Error('not reachable from resolve()');
   }
+
+  /** `lapseRedemption`: buyer debt — the hold stays open, the cause is recorded. */
+  readonly lapsed = new Map<string, string>();
+  lapseRedemption(_organizationId: string, id: string, cause: string): Promise<void> {
+    this.lapsed.set(id, cause);
+    return Promise.resolve();
+  }
 }
 
 class RecordingLedger {
@@ -329,6 +336,45 @@ describe('PaymentIntentService — a rail-B hold is retired by the redemption', 
     expect(settled.holdReleasedAt).toBeNull();
     expect(ledger.credited).toEqual([]);
     expect(intents.rows.get(intent.id).holdReleasedAt).toBeNull();
+  });
+
+  it('M3: a verdict past the redeemable latest settles as buyer debt, never for redemption', async () => {
+    const { service, ledger, intents, organizationId, verifying } = harness();
+    // Expired 25 minutes ago: past expiresAt + 1,200 s, inside the chain's 1,800 s.
+    const intent = verifying({
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      expiresAt: new Date(Date.now() - 25 * 60_000),
+    });
+
+    const settled = await service.resolve(
+      organizationId,
+      intent.id,
+      PaymentIntentStatus.VERIFYING,
+      PaymentIntentStatus.SETTLED,
+    );
+
+    expect(settled.status).toBe(PaymentIntentStatus.SETTLED);
+    expect(settled.holdReleasedAt).toBeNull();
+    expect(ledger.credited).toEqual([]);
+    expect(ledger.released).toEqual([]);
+    expect(intents.lapsed.get(intent.id)).toBe('VerdictPastRedemptionDeadline');
+  });
+
+  it('a timely rail-B verdict is not lapsed', async () => {
+    const { service, intents, organizationId, verifying } = harness();
+    const intent = verifying({
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      expiresAt: new Date(Date.now() - 10 * 60_000),
+    });
+
+    await service.resolve(
+      organizationId,
+      intent.id,
+      PaymentIntentStatus.VERIFYING,
+      PaymentIntentStatus.SETTLED,
+    );
+
+    expect(intents.lapsed.size).toBe(0);
   });
 
   it('still commits a rail-A hold inline — there is no voucher to redeem', async () => {

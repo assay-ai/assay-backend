@@ -154,6 +154,38 @@ describe('McpToolCallService — free first, then paid', () => {
     expect(h.intents.rows.size).toBe(0);
   });
 
+  it('still serves a free call while the payer has an open buyer debt', async () => {
+    const h = harness();
+    h.intents.debts = [
+      {
+        id: 'intent-debt-1',
+        organizationId: RAIL_B_SESSION.organizationId,
+        agentAccount: RAIL_B_SESSION.agentAccount,
+        providerId: PAID_PROVIDER,
+        providerAccount: null,
+        toolId: 'tool-1',
+        chainId: CHAIN_ID,
+        assetId: 'x',
+        decimals: 6,
+        priceAmount: '1',
+        requestHash: 'h',
+        voucherResourceHash: null,
+        voucherSeq: '1',
+        lapsedAt: new Date(),
+        cause: 'VoucherExpired',
+        createdAt: new Date(),
+      },
+    ];
+
+    const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      voucher: null,
+    });
+
+    if (outcome.kind !== 'RESULT') throw new Error('expected a RESULT');
+    expect(outcome.receipt.charged.amount).toBe('0');
+  });
+
   it('falls through to the paid path when no free-capable binding can take the call', async () => {
     const h = harness();
     // The free binding drops out between the quote and the call — at its

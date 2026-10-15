@@ -73,6 +73,11 @@ export enum PaymentErrorCode {
   PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED = 'PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED',
   /** The payer is tightening its caps right now; retry shortly (BUG-D1-07). */
   PAYMENT_VOUCHER_ADMISSION_PAUSED = 'PAYMENT_VOUCHER_ADMISSION_PAUSED',
+
+  // ── Buyer debt: a served call whose voucher lapsed and that the buyer still
+  //    owes (no-platform-debt design, steps 9 and 10).
+  PAYMENT_DEBT_OUTSTANDING = 'PAYMENT_DEBT_OUTSTANDING',
+  PAYMENT_DEBT_NOT_FOUND = 'PAYMENT_DEBT_NOT_FOUND',
 }
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
@@ -185,6 +190,30 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
    * once the change has landed and `VOUCHER_ADMISSION_CHAIN_LAG_MS` has passed
    * (an RPC node may still answer with the old caps until then, BUG-R3-J-04).
    */
+  /**
+   * The payer owes for served calls whose vouchers lapsed (buyer debt). Paid
+   * calls are refused until the buyer signs a replacement voucher for each
+   * one (`GET /escrow/debts`, `POST /escrow/debts/:intentId/voucher`); free
+   * calls are unaffected. `debts` lists them, oldest first.
+   */
+  debtOutstanding: {
+    code: PaymentErrorCode.PAYMENT_DEBT_OUTSTANDING,
+    statusCode: 402,
+    message: (context?: Record<string, any>) =>
+      `This payer owes for ${context?.count ?? 'some'} served call(s) whose payment could not ` +
+      `be collected` +
+      `${context?.owed ? ` (${context.owed} in total)` : ''}. Paid calls are refused until ` +
+      `each is settled: sign the replacement voucher from GET /escrow/debts and send it to ` +
+      `POST /escrow/debts/{intentId}/voucher. Free calls still work; nothing was charged`,
+  },
+  /** No open debt with this id for this payer: settled already, written off, or not theirs. */
+  debtNotFound: {
+    code: PaymentErrorCode.PAYMENT_DEBT_NOT_FOUND,
+    statusCode: 404,
+    message: (context?: Record<string, any>) =>
+      `No open debt ${context?.intentId ?? ''} for this payer — it was settled already, ` +
+      `written off, or belongs to another account`,
+  },
   voucherAdmissionPaused: {
     code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,
     statusCode: 503,

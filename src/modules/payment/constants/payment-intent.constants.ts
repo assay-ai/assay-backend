@@ -1,5 +1,7 @@
 import { CronExpression } from '@nestjs/schedule';
 
+import { REDEEM_GRACE_SECONDS } from './voucher-redemption.constants';
+
 /**
  * How long an intent may sit unresolved before the sweep expires it.
  *
@@ -39,29 +41,41 @@ export const PAYMENT_INTENT_EXPIRY_SWEEP_BATCH = 200;
  *
  * A rail-B intent still `VERIFYING` this long after its voucher's `expiresAt`
  * is settled as served and unverified by the expiry sweep — the rule a failed
- * verification enqueue already follows. The chain accepts the voucher until
- * `expiresAt + CLOCK_SKEW_TOLERANCE_SECONDS + REDEEM_GRACE_SECONDS` (120 +
- * 1,800 s), so settling at 900 s leaves the per-minute redemption job about
- * 17 minutes to collect it. Without it a late verdict (judge queue backed up,
- * worker down) left a served call whose voucher could no longer be redeemed
+ * verification enqueue already follows. The EVM contract accepts the voucher
+ * until `expiresAt + REDEEM_GRACE_SECONDS` (1,800 s) with NO clock-skew
+ * allowance (`X402Escrow.sol:784`, mirrored by `evm-voucher-prevalidation.ts`),
+ * so settling at 900 s leaves the per-minute redemption job about 15 minutes to
+ * collect it. Without it a late verdict (judge queue backed up, worker down)
+ * left a served call whose voucher could no longer be redeemed
  * (no-platform-debt design, A13).
  */
 export const PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS = 900;
 
 /**
- * The latest the verdict-deadline sweep still settles, in seconds past the
- * voucher's `expiresAt`.
- *
- * The chain refuses a voucher after `expiresAt + CLOCK_SKEW_TOLERANCE_SECONDS +
- * REDEEM_GRACE_SECONDS` (1,920 s). Settling a row the chain already refuses
- * hands the redemption job a `VoucherExpired` it cannot collect, so the sweep
- * stops this margin (300 s, five redemption passes) before that. Older rows are
- * left to the 24-hour hold backstop, which releases the buyer's hold and pays
- * nobody (review 2026-10-15, H1). Kept here rather than imported from
- * `voucher-redemption.constants.ts` so the arithmetic is in one line:
- * 120 + 1,800 - 300.
+ * How long before the chain's redemption deadline a voucher must still have
+ * when its intent settles to be handed to the redemption job: 600 s, ten
+ * redemption passes — room for a payer's earlier seq in RETRY, a backlog over
+ * one batch, or a short pause (review 2026-10-15 #2, M3).
  */
-export const PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS = 120 + 1_800 - 300;
+export const PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS = 600;
+
+/**
+ * The latest a rail-B intent may settle, in seconds past its voucher's
+ * `expiresAt`, and still be handed to the redemption job: the chain's deadline
+ * (`expiresAt + REDEEM_GRACE_SECONDS`, no skew on EVM) less
+ * {@link PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS} — 1,200 s.
+ *
+ * A passing verdict that lands later — the worker or the sweep was down — is
+ * still applied (`SETTLED`: the call was served), but its voucher is NOT handed
+ * to the redemption job to die on `VoucherExpired`: `PaymentIntentService.resolve`
+ * turns it into buyer debt at once (the hold stays open, nobody is credited, the
+ * buyer re-signs). The platform never pays for a late verdict.
+ */
+export const PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS =
+  REDEEM_GRACE_SECONDS - PAYMENT_INTENT_REDEMPTION_MARGIN_SECONDS;
+
+/** What `redemption_last_error` names when a verdict settled past the latest above. */
+export const LATE_VERDICT_LAPSE_CAUSE = 'VerdictPastRedemptionDeadline';
 
 /** Written to `status_reason` so the row itself says who moved it and why. */
 export const PAYMENT_INTENT_EXPIRY_REASON =
