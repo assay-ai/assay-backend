@@ -167,6 +167,27 @@ export class FakeSlashProposals {
     return affected;
   }
 
+  /** `refoldAmountsIf`: compare-and-set on the status and the applied amount. */
+  async refoldAmountsIf(
+    organizationId: string,
+    id: string,
+    expectedFrom: readonly string[],
+    expectedApplied: string | null,
+    patch: Partial<SlashProposalEntity>,
+  ): Promise<number> {
+    const row = this.rows.get(id);
+    if (
+      !row ||
+      row.organizationId !== organizationId ||
+      !expectedFrom.includes(row.status) ||
+      (row.appliedAmount ?? null) !== expectedApplied
+    ) {
+      return 0;
+    }
+    Object.assign(row, patch);
+    return 1;
+  }
+
   /** {@link transitionIfIn} that also requires the resolution kind. */
   async transitionIfInResolvedAs(
     organizationId: string,
