@@ -5,10 +5,12 @@ import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import {
   FreeQuotaCheckInput,
+  FreeQuotaLimitKind,
   FreeQuotaRemaining,
   FreeQuotaDecision,
   FreeQuotaService,
 } from '@modules/free-tier/services/free-quota.service';
+import { PricingMode } from '@modules/tool/ports/tool.types';
 import { LedgerErrors } from '@modules/ledger/errors/ledger.errors';
 import {
   EscrowBalanceReaderPort,
@@ -481,8 +483,31 @@ export class FakeFreeQuota {
     };
   }
 
-  async reserveBinding(input: { binding: { id: string } }) {
-    if (this.noRoomFor.has(input.binding.id)) return null;
+  /** Which dial each `noRoomFor` binding is full on (default: the per-agent quota). */
+  readonly fullOn = new Map<string, FreeQuotaLimitKind>();
+  /** Every refusal built for a call whose free bindings were all shed. */
+  readonly bindingRefusals: FreeQuotaLimitKind[] = [];
+
+  bindingQuotaRefusal(input: FreeQuotaCheckInput, limit: FreeQuotaLimitKind) {
+    this.bindingRefusals.push(limit);
+    return {
+      kind: 'REFUSED' as const,
+      limit,
+      resetsAt: new Date(new Date().setUTCHours(24, 0, 0, 0)),
+      fallThroughToPaid: input.pricingMode === PricingMode.FREEMIUM,
+    };
+  }
+
+  async reserveBinding(input: {
+    binding: { id: string };
+    onFull?: (limit: FreeQuotaLimitKind) => void;
+  }) {
+    if (this.noRoomFor.has(input.binding.id)) {
+      input.onFull?.(
+        this.fullOn.get(input.binding.id) ?? FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+      );
+      return null;
+    }
     const place = { bindingId: input.binding.id, released: false };
     this.places.push(place);
     return {
