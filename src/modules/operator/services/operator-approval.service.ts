@@ -140,6 +140,7 @@ export class OperatorApprovalService {
     await this.approvals.expireStale();
     const qb = this.approvals.createQueryBuilder('approval');
     if (query.status) qb.andWhere('approval.status = :status', { status: query.status });
+    if (query.action) qb.andWhere('approval.action = :action', { action: query.action });
     const page = await paginate(qb, query, APPROVAL_LIST);
     return new CursorPageDto(await this.toDtos(page.items), page.pageInfo.nextCursor);
   }
