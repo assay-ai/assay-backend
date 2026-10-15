@@ -76,9 +76,12 @@ export enum ResolutionKind {
    */
   AUTO_CHAIN_EXECUTED = 'AUTO_CHAIN_EXECUTED',
   /**
-   * EVM: the arbiter ruled on chain (`upholdSlash`), the one decision for a
-   * disputed record. The arbiter is a person-held wallet and not an operator
-   * row, so it names no adjudicator and writes no outcome on the case.
+   * EVM: the arbiter ruled on chain, the one decision for a disputed record —
+   * `upholdSlash` on an `UPHELD` / `EXECUTING` / `EXECUTED` case, or
+   * `cancelSlash` on a `CANCELLED` one (audit D3: told from an unruled
+   * dispute's expiry, which stays `AUTO_CHAIN_VOIDED`). The arbiter is a
+   * person-held wallet and not an operator row, so it names no adjudicator and
+   * writes no outcome on the case.
    */
   CHAIN_ARBITER = 'CHAIN_ARBITER',
 }

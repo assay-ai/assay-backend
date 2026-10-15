@@ -56,6 +56,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
   const alerts: { severity: string; name: string }[] = [];
   const filed: string[] = [];
   const closed: string[] = [];
+  const closedByArbiter: boolean[] = [];
   const mirrored: string[] = [];
   const reconciled: string[] = [];
   const upheld: string[] = [];
@@ -145,8 +146,13 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
           }
         }
       },
-      closeCancelledOnChain: async (_case: unknown, because: string) => {
+      closeCancelledOnChain: async (
+        _case: unknown,
+        because: string,
+        options?: { byArbiter?: boolean },
+      ) => {
         closed.push(because);
+        closedByArbiter.push(options?.byArbiter === true);
         proposal.chainStatus = 'CANCELLED';
         proposal.status = 'CANCELLED';
       },
@@ -160,6 +166,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     events,
     filed,
     closed,
+    closedByArbiter,
     mirrored,
     reconciled,
     upheld,
@@ -288,6 +295,44 @@ describe('SlashChainRulingService', () => {
       transactionHash: '0xdef',
     });
     expect(closed).toHaveLength(1);
+  });
+
+  it("D3: an arbiter's cancelSlash of every record closes the case as the arbiter's ruling", async () => {
+    const { service, closed, closedByArbiter } = build();
+    await service.recordDisputed(disputed(ID_A));
+    await service.recordDisputed(disputed(ID_B));
+    for (const requestId of [ID_A, ID_B]) {
+      await service.recordCancelled({
+        chainId: CHAIN,
+        requestId,
+        reason: 'WITHDRAWN',
+        cancelledAt: new Date('2026-10-16T00:00:00Z'),
+        transactionHash: '0xdef',
+      });
+    }
+    expect(closed).toHaveLength(1);
+    expect(closedByArbiter).toEqual([true]);
+  });
+
+  it('D3: an unruled dispute among the records closes the case as an expiry', async () => {
+    const { service, closedByArbiter } = build();
+    await service.recordDisputed(disputed(ID_A));
+    await service.recordDisputed(disputed(ID_B));
+    await service.recordCancelled({
+      chainId: CHAIN,
+      requestId: ID_A,
+      reason: 'WITHDRAWN',
+      cancelledAt: new Date('2026-10-16T00:00:00Z'),
+      transactionHash: '0xdef',
+    });
+    await service.recordCancelled({
+      chainId: CHAIN,
+      requestId: ID_B,
+      reason: 'DISPUTE_UNRESOLVED' as never,
+      cancelledAt: new Date('2026-11-15T00:00:00Z'),
+      transactionHash: '0xdef',
+    });
+    expect(closedByArbiter).toEqual([false]);
   });
 
   it('marks the case DISPUTED only when every live part is disputed', async () => {

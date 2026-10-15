@@ -1040,7 +1040,12 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         .andWhere('proposal.status IN (:...closed)', {
           closed: [...CLOSED_WITHOUT_PENALTY_STATUSES],
         })
-        .andWhere(`proposal.resolution_kind IS DISTINCT FROM 'AUTO_CHAIN_VOIDED'`)
+        // Nor a case the arbiter's on-chain cancel closed (`CHAIN_ARBITER` on a
+        // closed case): its record is already cancelled, only the mirror lags.
+        .andWhere(
+          `(proposal.resolution_kind IS NULL OR ` +
+            `proposal.resolution_kind NOT IN ('AUTO_CHAIN_VOIDED', 'CHAIN_ARBITER'))`,
+        )
         .orderBy('proposal.chain_executable_at', 'ASC')
         .limit(limit)
         .getRawMany<ChainSweepRow>()

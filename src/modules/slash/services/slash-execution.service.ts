@@ -997,12 +997,25 @@ export class SlashExecutionService {
    * `expireSlash` — and nothing of it executed (audit E-6). Closes the case at
    * once, with the chain mirror `CANCELLED`; a case already closed only gets
    * the mirror. Never throws past the closure.
+   *
+   * `byArbiter` (the records' state is `CANCELLED`, `cancelledByArbiter`): the
+   * arbiter ruled for the provider, recorded as `CHAIN_ARBITER` so the case
+   * is not read as expired (`AUTO_CHAIN_VOIDED` after a dispute). A case that
+   * already carries an adjudicator's outcome keeps `AUTO_CHAIN_VOIDED`, the
+   * only automatic kind `chk_slash_proposals_outcome_needs_adjudicator`
+   * admits beside an outcome.
    */
-  async closeCancelledOnChain(proposal: SlashProposalEntity, because: string): Promise<void> {
+  async closeCancelledOnChain(
+    proposal: SlashProposalEntity,
+    because: string,
+    options: { readonly byArbiter?: boolean } = {},
+  ): Promise<void> {
+    const byArbiter = options.byArbiter === true && !proposal.outcome;
     await this.voidCase(
       proposal,
       { status: ChainProposalStatus.CANCELLED, lastError: null },
       because,
+      byArbiter ? ResolutionKind.CHAIN_ARBITER : ResolutionKind.AUTO_CHAIN_VOIDED,
     );
   }
 
@@ -1015,6 +1028,9 @@ export class SlashExecutionService {
       readonly mirroredByCaller?: boolean;
     },
     because: string,
+    resolutionKind:
+      | ResolutionKind.AUTO_CHAIN_VOIDED
+      | ResolutionKind.CHAIN_ARBITER = ResolutionKind.AUTO_CHAIN_VOIDED,
   ): Promise<void> {
     // One clock for the closure and its timeline entry. Two `new Date()` calls
     // would put `resolved_at` and `occurred_at` milliseconds apart, and a case
@@ -1033,7 +1049,7 @@ export class SlashExecutionService {
       CHAIN_VOIDABLE_STATUSES,
       {
         status: SlashProposalStatus.CANCELLED,
-        resolutionKind: ResolutionKind.AUTO_CHAIN_VOIDED,
+        resolutionKind,
         resolvedAt: now,
         countsAsFalsePositive: false,
       },
@@ -1089,8 +1105,11 @@ export class SlashExecutionService {
           // is our incident, not their vocabulary; the name is in the timeline
           // entry and the log, which is where an operator reads.
           body:
-            'The penalty could not be applied on chain, so it is cancelled and nothing was ' +
-            'taken. ' +
+            (resolutionKind === ResolutionKind.CHAIN_ARBITER
+              ? 'The arbiter ruled for you on chain, so the penalty is cancelled and nothing ' +
+                'was taken. '
+              : 'The penalty could not be applied on chain, so it is cancelled and nothing was ' +
+                'taken. ') +
             (heldUntil
               ? `The on-chain record still holds the stake it reserved. Nothing can be taken ` +
                 `from that reservation now, and it is released when the record expires after ` +
