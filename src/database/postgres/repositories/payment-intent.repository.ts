@@ -220,10 +220,16 @@ export interface CallExportRow {
   readonly awaitingRedemption: boolean;
   /** {@link CREDITED_SQL}: the hold was committed. Only meaningful on a `SETTLED` row. */
   readonly credited: boolean;
-  /** Why the credit came out of platform funds, or `null` — see {@link PLATFORM_ABSORBED_REASON_SQL}. */
+  /** A LEGACY platform-absorbed credit's reason, or `null` — see {@link PLATFORM_ABSORBED_REASON_SQL}. */
   readonly absorbedReason: string | null;
-  /** `provider_forfeit:<cause>` when the provider forfeited — see {@link FORFEITED_SQL}. */
+  /**
+   * `provider_forfeit:<cause>` when the provider forfeited ({@link FORFEITED_SQL}),
+   * `uncollected:<cause>` once a debt was written off ({@link WRITTEN_OFF_SQL}),
+   * or the lapse cause of an open debt.
+   */
   readonly redemptionLastError: string | null;
+  /** {@link DEBT_OUTSTANDING_SQL}: an open buyer debt — passed, not collected yet. */
+  readonly debtOutstanding: boolean;
   readonly createdAt: Date;
 }
 
@@ -1472,6 +1478,14 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.agentId = :agentId', { agentId })
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.status IN (:...statuses)', { statuses: SPEND_COUNTING_STATUSES })
+      // A settled call the buyer was never charged for — the provider
+      // forfeited it, or its debt was written off — spent nothing, so it does
+      // not count against the caps (review #2, M4). An OUTSTANDING debt does:
+      // the buyer still owes it. Legacy absorbs are left to their few rows.
+      .andWhere(
+        `NOT (intent.status = '${SETTLED_STATUS}' AND (COALESCE(${FORFEITED_SQL}, false) ` +
+          `OR COALESCE(${WRITTEN_OFF_SQL}, false)))`,
+      )
       .andWhere('intent.createdAt >= :monthStart', { monthStart })
       .setParameters({ hourStart, dayStart })
       .getRawOne<{ thisHour: string; today: string; thisMonth: string }>();
@@ -1508,9 +1522,10 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('COUNT(*)', 'calls')
       .addSelect('COALESCE(SUM(intent.priceAmount), 0)', 'listedTotal')
       .addSelect(
-        // A forfeited voucher was never collected: the buyer was not charged.
+        // A forfeited voucher, a written-off debt and a legacy absorb were
+        // never collected: the buyer was not charged (review #2, M4).
         `COALESCE(SUM(CASE WHEN intent.status = :settledStatus ` +
-          `AND NOT COALESCE(${FORFEITED_SQL}, false) THEN intent.priceAmount ELSE 0 END), 0)`,
+          `AND NOT ${NOT_COLLECTED_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
         'chargedTotal',
       )
       .addSelect(
@@ -1665,6 +1680,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect(CREDITED_SQL, 'credited')
       .addSelect(PLATFORM_ABSORBED_REASON_SQL, 'absorbedReason')
       .addSelect('intent.redemptionLastError', 'redemptionLastError')
+      .addSelect(DEBT_OUTSTANDING_SQL, 'debtOutstanding')
       .addSelect('intent.createdAt', 'createdAt');
 
     if (after) {
@@ -1697,6 +1713,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         credited: boolean | string;
         absorbedReason: string | null;
         redemptionLastError: string | null;
+        debtOutstanding: boolean | string;
         createdAt: Date;
       }>();
 
@@ -1705,6 +1722,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       decimals: Number(row.decimals),
       awaitingRedemption: row.awaitingRedemption === true || row.awaitingRedemption === 'true',
       credited: row.credited === true || row.credited === 'true',
+      debtOutstanding: row.debtOutstanding === true || row.debtOutstanding === 'true',
     }));
   }
 

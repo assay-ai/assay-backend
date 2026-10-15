@@ -64,9 +64,28 @@ export class ToolCallDto {
   @ApiProperty({
     type: MoneyDto,
     description:
-      'What the agent actually paid — zero until SETTLED, always present even when equal',
+      'What the agent actually paid — zero until SETTLED, and zero for a SETTLED call the ' +
+      'provider forfeited or whose debt was written off. Always present, even when equal',
   })
   charged: MoneyDto;
+
+  @ApiProperty({
+    description:
+      'SETTLED, but the provider caused the payment to fail and forfeited it: the buyer is not ' +
+      'charged (`charged` is zero) and nobody was paid',
+  })
+  forfeited: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    enum: ['OUTSTANDING', 'WRITTEN_OFF'],
+    description:
+      'Buyer debt: `OUTSTANDING` — the payment could not be collected, the price stays held and ' +
+      'the payer must sign a replacement voucher (GET /escrow/debts) before paid calls work ' +
+      'again; `WRITTEN_OFF` — never settled, the hold was released and the provider not paid. ' +
+      'Null otherwise',
+  })
+  debt: 'OUTSTANDING' | 'WRITTEN_OFF' | null;
 
   @ApiPropertyOptional({
     nullable: true,
