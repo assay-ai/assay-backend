@@ -11,12 +11,12 @@ answer later. A separate goal removes them once nobody is consulting them.
 
 ## What each one demonstrates
 
-| Module | Read it when you need |
-|---|---|
-| `posts/` | The **full feature pattern**: a BullMQ-split module trio (`posts.module` shared / `posts-api.module` / `posts-worker.module`), a typed publisher + processor pair, a paginated query builder, an error catalog, DTO-per-endpoint, and `WebSocketEmitterService` emitting from a service. |
-| `demo/` | The **minimal** version of that same trio — the smallest thing that proves BullMQ + Bull Board wiring end to end (`POST /api/v1/demo/ping`). Start here, not in `posts/`. |
-| `auth/` | Passport JWT registration: `JwtStrategy`, `JwtModule.registerAsync` reading `jwt.config`, and the `JwtAuthGuard` in `@shared/guards`. |
-| `schedule/` | An `@nestjs/schedule` `@Cron` job that injects a repository — the scheduler-process pattern. |
+| Module      | Read it when you need                                                                                                                                                                                                                                                                    |
+| ----------- | ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------- |
+| `posts/`    | The **full feature pattern**: a BullMQ-split module trio (`posts.module` shared / `posts-api.module` / `posts-worker.module`), a typed publisher + processor pair, a paginated query builder, an error catalog, DTO-per-endpoint, and `WebSocketEmitterService` emitting from a service. |
+| `demo/`     | The **minimal** version of that same trio — the smallest thing that proves BullMQ + Bull Board wiring end to end (`POST /api/v1/demo/ping`). Start here, not in `posts/`.                                                                                                                |
+| `auth/`     | Passport JWT registration: `JwtStrategy`, `JwtModule.registerAsync` reading `jwt.config`, and the `JwtAuthGuard` in `@shared/guards`.                                                                                                                                                    |
+| `schedule/` | An `@nestjs/schedule` `@Cron` job that injects a repository — the scheduler-process pattern.                                                                                                                                                                                             |
 
 Two more sample files stay outside this folder because they are registered with
 the TypeORM infrastructure rather than with a module:

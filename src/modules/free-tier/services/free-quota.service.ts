@@ -16,6 +16,7 @@ import {
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import { FREE_QUOTA_CONFIG, FreeQuotaConfig } from '../config/free-quota.config';
+import { FreeBindingDials, freeCallsPerDay } from '../domain/free-calls-per-day';
 import { TOOL_CALL_RECORD_RETENTION_DAYS } from '../constants/free-quota.constants';
 
 // ---------------------------------------------------------------------------
@@ -277,25 +278,15 @@ export class FreeQuotaService {
   }
 
   /**
-   * How many free calls a day one agent is offered on this tool — the most
-   * generous per-agent allowance among its `FREE`/`FREEMIUM` `ACTIVE`
-   * bindings, the platform default standing in for one the provider left unset.
-   * `null` when no binding of the tool serves free calls.
-   *
-   * What `tools/list` prints as *"N free per day, then $X"*. Nobody's own
-   * count: the same figure for every agent, so it can be published without a
-   * viewer, unlike {@link remainingForTool}. The platform's own per-agent daily
-   * ceiling still applies on top, across every free tool.
+   * How many free calls a day one agent is offered on a tool — what
+   * `tools/list` prints as *"N free per day, then $X"*. From the quote's
+   * routable free-capable bindings at their published revision, summed and
+   * capped by the platform's per-agent daily ceiling: see
+   * {@link freeCallsPerDay} (review 2026-10-15, L2). `null` when none serves
+   * free calls. Nobody's own count, so it is published without a viewer.
    */
-  async dailyAllowanceForTool(toolId: string): Promise<number | null> {
-    const candidates = await this.freeBindings(toolId);
-    if (candidates.length === 0) return null;
-
-    return Math.max(
-      ...candidates.map(
-        (binding) => binding.freeQuotaPerAgent ?? this.config.defaultPerAgentDailyLimit,
-      ),
-    );
+  dailyAllowance(bindings: readonly FreeBindingDials[]): number | null {
+    return freeCallsPerDay(bindings, this.config);
   }
 
   /** Platform per-agent daily headroom — `GET /free-quota`'s `platform` field. */
