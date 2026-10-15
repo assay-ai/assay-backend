@@ -1626,6 +1626,24 @@ describe('ArbitrationService', () => {
       }
     });
 
+    it('R2-3: closes the dispute PARTIALLY_UPHELD when a record executed and another was won', async () => {
+      const ctx = build();
+      const dispute = seedEvm(ctx, SlashProposalStatus.DISPUTED);
+      await ctx.service.recordChainUphold('org_1', 'p1', { arbiter: '0xabc', transactionHash: null });
+      expect(dispute.state).toBe('REJECTED');
+      // Nothing won yet: nothing to change.
+      expect(await ctx.service.recordPartialChainWin('org_1', 'p1')).toBe(false);
+
+      ctx.proposals.rows.get('p1')!.chainDisputeWonAt = new Date('2026-10-19T00:00:00Z');
+      expect(await ctx.service.recordPartialChainWin('org_1', 'p1')).toBe(true);
+      expect(dispute).toMatchObject({
+        state: 'PARTIALLY_UPHELD',
+        resolutionKind: ResolutionKind.CHAIN_ARBITER,
+        resolvedBy: 'chain:upholdSlash:0xabc',
+      });
+      expect(await ctx.service.recordPartialChainWin('org_1', 'p1')).toBe(false);
+    });
+
     it('leaves a Solana case to its own decision', async () => {
       const ctx = build();
       seedDisputed(ctx);

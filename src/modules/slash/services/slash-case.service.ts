@@ -561,6 +561,8 @@ function computeClocks(
     disputeOnChain: onChain,
     chainState,
     disputeBy,
+    chainRecords: records?.length ?? 0,
+    cancelledRecords: records?.filter((record) => record.chainStatus === 'CANCELLED').length ?? 0,
   };
 }
 

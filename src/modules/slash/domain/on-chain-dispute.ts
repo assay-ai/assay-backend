@@ -33,6 +33,13 @@ export enum OnChainDisputeState {
   CANCELLED = 'CANCELLED',
   /** Executed on chain: the penalty was taken. */
   EXECUTED = 'EXECUTED',
+  /**
+   * Review R2-3: nothing stands, at least one record executed and at least one
+   * was cancelled or expired on chain — the penalty was taken in part, and
+   * nothing was taken for the cancelled records (the arbiter's cancel, an
+   * unruled dispute, or a lapse; the case's `cancelledRecords` counts them).
+   */
+  PARTIALLY_EXECUTED = 'PARTIALLY_EXECUTED',
   /** The dispute went unruled for its 30 days and was expired; nothing taken. */
   EXPIRED = 'EXPIRED',
   /**
@@ -66,8 +73,9 @@ export interface OnChainDisputeMirror {
  * Review N-4: the case's state from its records, never from one case-level
  * timestamp. DISPUTED while any record is; UPHELD only when every pending
  * record was disputed before (it can only be executed now); PENDING while a
- * record stands undisputed; EXECUTED once nothing stands and a record
- * executed; otherwise by the cancel reasons: EXPIRED (a dispute nobody ruled
+ * record stands undisputed; once nothing stands, EXECUTED when every record
+ * executed and PARTIALLY_EXECUTED when some were cancelled too (review R2-3);
+ * otherwise by the cancel reasons: EXPIRED (a dispute nobody ruled
  * on), CANCELLED (the arbiter's or admin's cancelSlash), LAPSED (expired
  * undisputed).
  */
@@ -80,8 +88,12 @@ function stateOfRecords(records: readonly OnChainRecordMirror[]): OnChainDispute
       ? OnChainDisputeState.UPHELD
       : OnChainDisputeState.PENDING;
   }
-  if (with_('EXECUTED').length > 0) return OnChainDisputeState.EXECUTED;
   const cancelled = with_('CANCELLED');
+  if (with_('EXECUTED').length > 0) {
+    return cancelled.length > 0
+      ? OnChainDisputeState.PARTIALLY_EXECUTED
+      : OnChainDisputeState.EXECUTED;
+  }
   if (cancelled.length === 0) return null;
   if (cancelled.some((record) => record.cancelReason === 'DISPUTE_UNRESOLVED')) {
     return OnChainDisputeState.EXPIRED;

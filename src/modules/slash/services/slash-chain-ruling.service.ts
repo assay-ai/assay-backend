@@ -325,7 +325,8 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
    *
    * - **Nothing stands** (no part `PENDING` or `DISPUTED`): `EXECUTED` when any
    *   part executed (the executor's completion, `mirrorChainExecution`, with
-   *   the summed amounts), else closed `CANCELLED` — unless the cancel was the
+   *   the summed amounts; a dispute the provider won in part reads
+   *   `PARTIALLY_UPHELD`, review R2-3), else closed `CANCELLED` — unless the cancel was the
    *   platform's own recalculation (S-2), left to `sweepAdminCancels`.
    * - **Only disputed parts stand**: a case still `PROPOSED` becomes
    *   `DISPUTED` and waits for the arbiter. So does one the platform labelled
@@ -360,6 +361,17 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
       if (has('NONE')) return;
       if (has('EXECUTED')) {
         await this.execution?.mirrorChainExecution(fresh, chain.transactionHash);
+        // Review R2-3: executed in part, won in part — the dispute says so.
+        if (has('CANCELLED')) {
+          await Promise.resolve(
+            this.arbitration?.recordPartialChainWin(fresh.organizationId, fresh.id),
+          ).catch((error: unknown) => {
+            this.logger.error(
+              `slash case ${fresh.id}: its partly won dispute could not be recorded`,
+              error instanceof Error ? error.stack : String(error),
+            );
+          });
+        }
         return;
       }
       if (fresh.chainStatus === ChainProposalStatus.CANCELLED) return;

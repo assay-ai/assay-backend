@@ -49,6 +49,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
   };
   const events: { kind: string; detail?: Record<string, unknown> }[] = [];
   const reopened: string[] = [];
+  const partlyWon: string[] = [];
   const filed: string[] = [];
   const closed: string[] = [];
   const mirrored: string[] = [];
@@ -100,6 +101,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
         proposal.status = 'UPHELD';
         return true;
       },
+      recordPartialChainWin: async (_org: string, id: string) => void partlyWon.push(id),
       reopenForChainDispute: async (_org: string, id: string) => {
         // As the real one: only a case the platform labelled undisputed.
         if (proposal.status !== 'UPHELD' || proposal.resolutionKind !== 'AUTO_UNDISPUTED') {
@@ -153,6 +155,7 @@ function build(caseStatus = 'PROPOSED', chainStatus = 'PENDING') {
     upheld,
     released,
     reopened,
+    partlyWon,
   };
 }
 
@@ -242,6 +245,22 @@ describe('SlashChainRulingService', () => {
     expect(mirrored).toEqual(['0xdef']);
     expect(closed).toEqual([]);
     expect(proposal.status).not.toBe('CANCELLED');
+  });
+
+  it('R2-3: a case executed in part and won in part closes its dispute accordingly', async () => {
+    const { service, parts, proposal, mirrored, partlyWon } = build('UPHELD');
+    await service.recordDisputed(disputed(ID_A));
+    Object.assign(parts.get(ID_B)!, { chainStatus: 'EXECUTED' });
+    await service.recordCancelled({
+      chainId: CHAIN,
+      requestId: ID_A,
+      reason: 'WITHDRAWN',
+      cancelledAt: new Date('2026-10-16T00:00:00Z'),
+      transactionHash: '0xdef',
+    });
+    expect(proposal.chainDisputeWonAt).toEqual(new Date('2026-10-16T00:00:00Z'));
+    expect(mirrored).toEqual(['0xdef']);
+    expect(partlyWon).toEqual(['case']);
   });
 
   it('N-1: a re-read of a cancel already mirrored still settles the case', async () => {
