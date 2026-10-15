@@ -16,6 +16,7 @@ import { PaymentIntentService } from '@modules/payment/services/payment-intent.s
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { addBlock, blocklistOf, SeededBlock } from '../helpers/blocklist';
+import { offerSolanaRailBInThisSuite } from '../helpers/solana-rail-b';
 import { createVoucherHarness, PROVIDER } from '../payment/helpers/voucher-harness';
 
 /**
@@ -130,6 +131,8 @@ describe('EscrowSeqService.allocate, with the payer blocked', () => {
 });
 
 describe('VoucherService.redeem, with a party blocked', () => {
+  offerSolanaRailBInThisSuite();
+
   it('refuses a voucher whose payer is blocked, only AFTER its signature is checked', async () => {
     const blocklist = blocklistOf();
     const harness = createVoucherHarness(blocklist);

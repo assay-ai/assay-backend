@@ -51,9 +51,15 @@ export interface ChainMetadata {
    */
   readonly settlementAsset: AssetId;
   /**
-   * Supported rails are per-chain: Solana keeps A and B, 4663 ships B only.
+   * Supported rails are per-chain: Solana offers A only, 4663 ships B only.
    * The 402 response on 4663 never advertises a rail A scheme, and the router
    * never selects one.
+   *
+   * Rail B is off on Solana until the Anchor program has the same rule as the
+   * EVM contract: a buyer's tightening (lower limits) binds an already-signed
+   * voucher only after a delay. Without it a buyer's own transaction can kill
+   * an admitted voucher after the call was served (no-platform-debt design,
+   * §1 B and §4 step 3).
    *
    * Declared here because it describes the deployment's offer on that chain,
    * and read in `tool/` — a table nothing reads is a comment with a type
@@ -68,13 +74,13 @@ const CHAIN_METADATA: Readonly<Record<string, ChainMetadata>> = {
     displayName: 'Solana mainnet',
     explorerBaseUrl: 'https://explorer.solana.com',
     settlementAsset: ASSET_IDS.USDC_SOLANA_MAINNET,
-    rails: ['A', 'B'],
+    rails: ['A'],
   },
   [CHAIN_IDS.SOLANA_DEVNET]: {
     displayName: 'Solana devnet',
     explorerBaseUrl: 'https://explorer.solana.com/?cluster=devnet',
     settlementAsset: ASSET_IDS.USDC_SOLANA_DEVNET,
-    rails: ['A', 'B'],
+    rails: ['A'],
   },
   // `eip155:4663` — Robinhood Chain MAINNET — is absent on purpose, and the
   // absence is load-bearing: the mainnet token address is unknown, so no
@@ -226,7 +232,7 @@ export function assertChainMetadata(enabled: readonly ChainId[]): void {
 /**
  * The rail this chain is being asked to settle on is one it offers.
  *
- * Supported rails are per-chain: Solana keeps A and B, 4663 ships B only. The
+ * Supported rails are per-chain: Solana offers A only, 4663 ships B only. The
  * 402 response on 4663 never advertises a rail A scheme, and the router never
  * selects one. `ChainMetadata.rails` declares that, and this function is where
  * the declaration becomes binding, and it is called at the site that *decides* a rail for an intent
