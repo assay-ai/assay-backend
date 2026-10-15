@@ -14,6 +14,7 @@ import {
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderPayoutRepository } from '@database/postgres/repositories/provider-payout.repository';
+import { platformTakeRatePercent } from '@modules/mcp/services/mcp-pricing.config';
 import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
 import {
   CALL_RECONCILIATION_CLASSES,
@@ -76,7 +77,10 @@ interface BatchTotalsRow {
 /** Accumulator for one {@link CallReconciliationClass}. */
 interface ClassAccumulator {
   calls: number;
+  /** Σ provider_amount — net of the platform fee. */
   credited: bigint;
+  /** Σ price_amount — before the platform fee. */
+  gross: bigint;
 }
 
 /**
@@ -198,7 +202,7 @@ export class ProviderReconciliationService {
       asset === null ? null : { amount: amount.toString(), asset, decimals };
 
     const buckets = new Map<CallReconciliationClass, ClassAccumulator>(
-      CALL_RECONCILIATION_CLASSES.map((cls) => [cls, { calls: 0, credited: 0n }]),
+      CALL_RECONCILIATION_CLASSES.map((cls) => [cls, { calls: 0, credited: 0n, gross: 0n }]),
     );
 
     let callCount = 0;
@@ -254,6 +258,7 @@ export class ProviderReconciliationService {
         const platformFee = BigInt(row.platformFee);
         bucket.calls += calls;
         bucket.credited += providerAmount;
+        bucket.gross += priceAmount;
 
         grossAmount += priceAmount;
         netAmount += providerAmount;
@@ -275,6 +280,7 @@ export class ProviderReconciliationService {
         calls: bucket.calls,
         share: callCount === 0 ? 0 : bucket.calls / callCount,
         credited: money(bucket.credited),
+        gross: money(bucket.gross),
         note: CLASS_NOTES[cls],
       };
     });
@@ -282,9 +288,11 @@ export class ProviderReconciliationService {
     const batchCount = batchRows.reduce((total, row) => total + Number(row.count), 0);
     const batchPaid = batchRows.reduce((total, row) => total + BigInt(row.paid), 0n);
 
-    const platformTakeRatePercent = Number(
-      this.config.get<string>('PROVIDER_TERMS_TAKE_RATE_PERCENT') ?? '10',
-    );
+    // The rate a call is charged at today (`PLATFORM_FEE_BPS`, the value
+    // `MCP_PRICING` splits every live call with): this number sits next to the
+    // real Σ platform_fee, and only the charged rate is one that sum can be
+    // checked against (R17-R-03).
+    const takeRatePercent = platformTakeRatePercent(this.config);
 
     return {
       from: query.from,
@@ -294,7 +302,7 @@ export class ProviderReconciliationService {
       classBreakdown,
       unexplained: { calls: unexplainedCalls, reference: unexplainedReference },
       gross: money(grossAmount),
-      platformTakeRatePercent,
+      platformTakeRatePercent: takeRatePercent,
       platformTake: money(platformTakeAmount),
       net: money(netAmount),
       batches: {

@@ -269,6 +269,42 @@ describe('ProviderReconciliationService — "settled to you" is net of the platf
     );
     expect(sumOfRows.toString()).toBe(result.net?.amount);
   });
+
+  // R17-R-03: the class column is net, so a client summing it and labelling
+  // the total "gross" was wrong by exactly the fee. Each row carries its gross.
+  it('gives each class its gross, and the class gross rows sum to gross', async () => {
+    const { service } = build([
+      group({
+        callClass: 'PAID',
+        status: 'SETTLED',
+        calls: '3',
+        credited: '3000',
+        providerAmount: '2700',
+        platformFee: '300',
+      }),
+      group({
+        callClass: 'EXPLORATION',
+        status: 'SETTLED',
+        calls: '1',
+        credited: '1000',
+        providerAmount: '900',
+        platformFee: '100',
+      }),
+    ]);
+
+    const result = await service.getReconciliation(PROVIDER, WINDOW);
+
+    const paid = classOf(result.classBreakdown, CallReconciliationClass.PAID_CREDITED);
+    const exploration = classOf(result.classBreakdown, CallReconciliationClass.EXPLORATION);
+    expect(paid.gross).toEqual({ amount: '3000', asset: USDC, decimals: 6 });
+    expect(exploration.gross).toEqual({ amount: '1000', asset: USDC, decimals: 6 });
+    const grossOfRows = result.classBreakdown.reduce(
+      (total, row) => total + BigInt(row.gross?.amount ?? '0'),
+      0n,
+    );
+    expect(grossOfRows.toString()).toBe(result.gross?.amount);
+    expect(result.gross).toEqual({ amount: '4000', asset: USDC, decimals: 6 });
+  });
 });
 
 describe('ProviderReconciliationService — rail B awaiting redemption', () => {
@@ -514,7 +550,7 @@ describe('ProviderReconciliationService — invalid range', () => {
 });
 
 describe('ProviderReconciliationService — platform take rate', () => {
-  it('defaults to 10%, the same default provider-terms.ts uses for PROVIDER_TERMS_TAKE_RATE_PERCENT', async () => {
+  it('defaults to 10%, the DEFAULT_PLATFORM_FEE_BPS live calls are charged at', async () => {
     const { service } = build([]);
 
     const result = await service.getReconciliation(PROVIDER, WINDOW);
@@ -522,11 +558,23 @@ describe('ProviderReconciliationService — platform take rate', () => {
     expect(result.platformTakeRatePercent).toBe(10);
   });
 
-  it('reads the configured rate rather than hardcoding it', async () => {
-    const { service } = build([], [], { PROVIDER_TERMS_TAKE_RATE_PERCENT: '15' });
+  it('reads the charged rate PLATFORM_FEE_BPS, in percent', async () => {
+    const { service } = build([], [], { PLATFORM_FEE_BPS: '1250' });
 
     const result = await service.getReconciliation(PROVIDER, WINDOW);
 
-    expect(result.platformTakeRatePercent).toBe(15);
+    expect(result.platformTakeRatePercent).toBe(12.5);
+  });
+
+  // R17-R-03: the retired display-only setting no longer moves the rate.
+  it('ignores the retired PROVIDER_TERMS_TAKE_RATE_PERCENT', async () => {
+    const { service } = build([], [], {
+      PROVIDER_TERMS_TAKE_RATE_PERCENT: '20',
+      PLATFORM_FEE_BPS: '1000',
+    });
+
+    const result = await service.getReconciliation(PROVIDER, WINDOW);
+
+    expect(result.platformTakeRatePercent).toBe(10);
   });
 });
