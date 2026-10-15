@@ -83,7 +83,8 @@ docs/                 architecture, ADRs, runbooks, API conventions
 - [`docs/architecture.md`](docs/architecture.md) — architecture and code conventions
 - [`docs/api-list-contract.md`](docs/api-list-contract.md) — the list/pagination contract
 - [`docs/mapping-format.md`](docs/mapping-format.md) — the binding mapping format
-- [`docs/runbooks/`](docs/runbooks/) — operational runbooks
+- [`docs/runbooks/`](docs/runbooks/) — operational runbooks; deploying buyer debt (migration order, no rollback past it):
+  [`docs/runbooks/buyer-debt-deploy.md`](docs/runbooks/buyer-debt-deploy.md)
 - [`docs/acceptance-criteria.md`](docs/acceptance-criteria.md) — per-chain acceptance criteria
 - [`kora/README.md`](kora/README.md) — running the Kora fee payer. `kora/kora.toml` allows only the default devnet USDC mint; a deployment that overrides `SOLANA_DEVNET_USDC_MINT` must add its mint there.
 - [`scripts/README.md`](scripts/README.md) — the script set
