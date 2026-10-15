@@ -97,20 +97,44 @@ describe('EscrowSpendGateService.assertAffordable', () => {
     expect(parseEscrowSpendGateEnabled('true')).toBe(true);
   });
 
-  it('authorises nothing while disabled — a rail-B call passes on any balance', async () => {
-    // The ledger's own CHECK is what prices the call while the gate is off.
-    // The chain IS read (see the F5 block below), and its answer decides
-    // nothing except whether a withdrawal is standing.
+  it('prices a rail-B call against the chain even while disabled (A6)', async () => {
+    // The flag governs only the rail-A refusal. A rail-B voucher is collected
+    // from the escrow alone, so admitting one the escrow cannot cover leaves a
+    // served call nobody can be charged for.
     const { gate } = buildGate({
       enabled: false,
       reading: reading({ balance: MoneyUtil.of(1n, USDC, USDC_DECIMALS) }),
     });
 
-    await expect(
-      gate.assertAffordable(ORG, ACCOUNT, MoneyUtil.of(999_000_000n, USDC, USDC_DECIMALS), {
-        rail: PaymentRail.RAIL_B_VOUCHER,
+    await expectErrorCodeAsync(
+      () =>
+        gate.assertAffordable(ORG, ACCOUNT, MoneyUtil.of(999_000_000n, USDC, USDC_DECIMALS), {
+          rail: PaymentRail.RAIL_B_VOUCHER,
+        }),
+      LedgerErrorCode.LEDGER_INSUFFICIENT_AVAILABLE_BALANCE,
+    );
+  });
+
+  it('refuses a withdrawn escrow behind a stale ledger mirror while disabled (A6)', async () => {
+    // request_withdraw, wait the hour, withdraw: `withdrawRequested` is back
+    // to 0 and the chain balance is 0, but nothing writes a WITHDRAWAL entry,
+    // so the ledger mirror still shows the old balance. Only the chain read
+    // can see that the money is gone.
+    const { gate } = buildGate({
+      enabled: false,
+      reading: reading({
+        balance: MoneyUtil.of(0n, USDC, USDC_DECIMALS),
+        withdrawRequested: 0n,
       }),
-    ).resolves.toBeUndefined();
+    });
+
+    await expectErrorCodeAsync(
+      () =>
+        gate.assertAffordable(ORG, ACCOUNT, MoneyUtil.of(1n, USDC, USDC_DECIMALS), {
+          rail: PaymentRail.RAIL_B_VOUCHER,
+        }),
+      LedgerErrorCode.LEDGER_INSUFFICIENT_AVAILABLE_BALANCE,
+    );
   });
 
   it('does not read the chain for a rail-A call while disabled', async () => {
@@ -125,14 +149,25 @@ describe('EscrowSpendGateService.assertAffordable', () => {
     expect(reader.read).not.toHaveBeenCalled();
   });
 
-  it('serves a buyer with no escrow while disabled, rather than refusing them', async () => {
-    // Today's behaviour, unchanged: with no escrow there is nothing for a
-    // withdrawal to stand on, so F5 does not reach this call.
+  it('refuses a rail-B call with no escrow even while disabled', async () => {
+    // No escrow means nothing a voucher could ever be redeemed against.
+    const { gate } = buildGate({ enabled: false, reading: null });
+
+    await expectErrorCodeAsync(
+      () =>
+        gate.assertAffordable(ORG, ACCOUNT, MoneyUtil.of(1n, USDC, USDC_DECIMALS), {
+          rail: PaymentRail.RAIL_B_VOUCHER,
+        }),
+      PaymentErrorCode.PAYMENT_ESCROW_NOT_OPEN,
+    );
+  });
+
+  it('still lets a rail-A call through while disabled — the flag governs only rail A', async () => {
     const { gate } = buildGate({ enabled: false, reading: null });
 
     await expect(
       gate.assertAffordable(ORG, ACCOUNT, MoneyUtil.of(1n, USDC, USDC_DECIMALS), {
-        rail: PaymentRail.RAIL_B_VOUCHER,
+        rail: PaymentRail.RAIL_A_PER_CALL,
       }),
     ).resolves.toBeUndefined();
   });
@@ -253,13 +288,11 @@ describe('EscrowSpendGateService.assertAffordable', () => {
     );
   });
 
-  it('does not price the call while disabled — F5 refuses, the ledger still decides the rest', async () => {
-    // With the gate off the amount check stays off: a buyer whose escrow is
-    // short is served (the ledger's CHECK is the authority), and only the
-    // withdrawal flag is consulted.
+  it('passes a rail-B call within the spendable amount while disabled', async () => {
     const { gate, holds } = buildGate({
       enabled: false,
-      reading: reading({ balance: MoneyUtil.of(1n, USDC, USDC_DECIMALS) }),
+      reading: reading({ balance: MoneyUtil.of(10_000_000n, USDC, USDC_DECIMALS) }),
+      openHoldsAtomic: 1_000_000n,
     });
 
     await expect(
@@ -267,7 +300,7 @@ describe('EscrowSpendGateService.assertAffordable', () => {
         rail: PaymentRail.RAIL_B_VOUCHER,
       }),
     ).resolves.toBeUndefined();
-    expect(holds.sumOpenByAccount).not.toHaveBeenCalled();
+    expect(holds.sumOpenByAccount).toHaveBeenCalled();
   });
 
   it('refuses the withdrawal-pending escrow before pricing it, so a rich buyer is refused too', async () => {
