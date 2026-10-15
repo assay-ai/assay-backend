@@ -23,6 +23,7 @@ import {
   LANDING_SETTLE_SECONDS,
   LANDING_UNKNOWN_ALERT_SECONDS,
   MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+  PROVIDER_FORFEIT_PREFIX,
   REDEEM_GRACE_SECONDS,
   VOUCHER_REDEMPTION_ALERTS,
   VOUCHER_REDEMPTION_BATCH,
@@ -47,12 +48,8 @@ import { PaymentIntentService } from './payment-intent.service';
  */
 export const PLATFORM_ABSORBED_TX_REF_PREFIX = 'platform_absorbed:';
 
-/**
- * What `redemption_last_error` carries once the provider forfeited the
- * voucher, followed by the cause: a program error (`ProviderBelowMinimumStake`)
- * or a block (`ProviderBlocked`, `PayeeBlocked`, `PayeeBlockedOnChain`).
- */
-export const PROVIDER_FORFEIT_PREFIX = 'provider_forfeit:';
+// Re-exported: callers and specs have always imported it from here.
+export { PROVIDER_FORFEIT_PREFIX };
 
 /**
  * Refusals the PROVIDER causes. A voucher that dies of one — refused with it

@@ -112,18 +112,19 @@ describe('ProviderReconciliationService — scoping', () => {
 });
 
 describe('ProviderReconciliationService — every class present, exhaustive by construction', () => {
-  it('lists all eleven classes at a real zero for an empty window', async () => {
+  it('lists all twelve classes at a real zero for an empty window', async () => {
     const { service } = build([]);
 
     const result = await service.getReconciliation(PROVIDER, WINDOW);
 
-    expect(result.classBreakdown).toHaveLength(11);
+    expect(result.classBreakdown).toHaveLength(12);
     const classes = result.classBreakdown.map((r) => r.class).sort();
     expect(classes).toEqual(
       [
         CallReconciliationClass.PAID_CREDITED,
         CallReconciliationClass.PAID_AWAITING_REDEMPTION,
         CallReconciliationClass.PLATFORM_ABSORBED,
+        CallReconciliationClass.PROVIDER_FORFEITED,
         CallReconciliationClass.PAID_UNCREDITED,
         CallReconciliationClass.FREE,
         CallReconciliationClass.TEST,

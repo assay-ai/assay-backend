@@ -1,5 +1,6 @@
 import {
   CREDITED_SQL,
+  FORFEITED_SQL,
   PLATFORM_ABSORBED_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
@@ -217,6 +218,14 @@ describe('ProviderEarningsService — earned means credited (committed hold)', (
     }
     expect(CREDITED_SQL).toMatch(/hold_id IS NOT NULL/);
     expect(CREDITED_SQL).toMatch(/hold_released_at IS NOT NULL/);
+  });
+
+  it('never counts a voucher the provider forfeited as earned (review M2)', () => {
+    // A forfeit RELEASES the hold, which also sets hold_released_at; only the
+    // forfeit marker tells it from a commit.
+    expect(CREDITED_SQL).toContain(FORFEITED_SQL);
+    expect(CREDITED_SQL).toMatch(/AND NOT COALESCE\(/);
+    expect(FORFEITED_SQL).toContain("'provider_forfeit:%'");
   });
 });
 

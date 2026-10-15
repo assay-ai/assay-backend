@@ -81,6 +81,12 @@ export enum CallReconciliationClass {
    * chain holds no redemption for it.
    */
   PLATFORM_ABSORBED = 'PLATFORM_ABSORBED',
+  /**
+   * Rail B: verified and `SETTLED`, but the provider caused the voucher to
+   * fail (stake below the minimum, or blocked), so it forfeited the call: the
+   * buyer's hold was released, nobody was credited and no fee was taken.
+   */
+  PROVIDER_FORFEITED = 'PROVIDER_FORFEITED',
   /** A `DATA_RESULT` that verification found `FAIL` — not credited, a strike recorded. */
   PAID_UNCREDITED = 'PAID_UNCREDITED',
   /** The relay path — no payment machinery ever ran, regardless of what `status` says. */
@@ -115,6 +121,8 @@ export interface CallReconciliationCandidate {
   readonly awaitingRedemption?: boolean;
   /** Credited from platform funds (`platform_absorbed:` credit). Optional; absent means not. */
   readonly platformAbsorbed?: boolean;
+  /** The provider forfeited the voucher (`provider_forfeit:` cause). Optional; absent means not. */
+  readonly forfeited?: boolean;
   /**
    * Whether the `SETTLED` intent's hold was committed, which is when
    * `PROVIDER_CREDIT` is written (`CREDITED_SQL`). Optional; absent means
@@ -157,6 +165,9 @@ export function classifyForReconciliation(
   switch (candidate.status) {
     case 'SETTLED':
       if (candidate.awaitingRedemption) return CallReconciliationClass.PAID_AWAITING_REDEMPTION;
+      // Before `credited`: a forfeited row is not credited, and it is not an
+      // unresolved PENDING either — it is closed, and nobody was paid.
+      if (candidate.forfeited) return CallReconciliationClass.PROVIDER_FORFEITED;
       // Settled with no credit behind it: the money side is unresolved, and
       // calling it PAID_CREDITED would claim a credit the ledger does not hold
       // (BUG-R2-V3-03). The earnings report counts it as neither earned nor withheld.

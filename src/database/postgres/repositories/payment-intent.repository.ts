@@ -135,7 +135,21 @@ export const AWAITING_REDEMPTION_SQL =
  * commit failed after the status moved (see `resolve`'s "What a failure
  * leaves behind") — neither credited anyone.
  */
-export const CREDITED_SQL = `(intent.hold_id IS NOT NULL AND intent.hold_released_at IS NOT NULL)`;
+/**
+ * Read on a `SETTLED` intent: the provider FORFEITED the voucher — it caused
+ * the voucher to fail (stake below the minimum, or blocked), so the buyer's
+ * hold was released and nobody was credited. The literal is
+ * `VoucherRedemptionService`'s `PROVIDER_FORFEIT_PREFIX`.
+ */
+export const FORFEITED_SQL = `(intent.redemption_last_error LIKE 'provider_forfeit:%')`;
+
+/**
+ * A forfeited intent's hold was released, not committed, so it is left out
+ * (review 2026-10-15, M2): `hold_released_at` alone cannot tell the two apart.
+ */
+export const CREDITED_SQL =
+  `(intent.hold_id IS NOT NULL AND intent.hold_released_at IS NOT NULL ` +
+  `AND NOT COALESCE(${FORFEITED_SQL}, false))`;
 
 /**
  * Read on a credited intent: the credit came out of **platform** funds, not
@@ -187,6 +201,8 @@ export interface CallExportRow {
   readonly credited: boolean;
   /** Why the credit came out of platform funds, or `null` — see {@link PLATFORM_ABSORBED_REASON_SQL}. */
   readonly absorbedReason: string | null;
+  /** `provider_forfeit:<cause>` when the provider forfeited — see {@link FORFEITED_SQL}. */
+  readonly redemptionLastError: string | null;
   readonly createdAt: Date;
 }
 
@@ -1226,7 +1242,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('COUNT(*)', 'calls')
       .addSelect('COALESCE(SUM(intent.priceAmount), 0)', 'listedTotal')
       .addSelect(
-        'COALESCE(SUM(CASE WHEN intent.status = :settledStatus THEN intent.priceAmount ELSE 0 END), 0)',
+        // A forfeited voucher was never collected: the buyer was not charged.
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus ` +
+          `AND NOT COALESCE(${FORFEITED_SQL}, false) THEN intent.priceAmount ELSE 0 END), 0)`,
         'chargedTotal',
       )
       .addSelect(
@@ -1380,6 +1398,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
       .addSelect(CREDITED_SQL, 'credited')
       .addSelect(PLATFORM_ABSORBED_REASON_SQL, 'absorbedReason')
+      .addSelect('intent.redemptionLastError', 'redemptionLastError')
       .addSelect('intent.createdAt', 'createdAt');
 
     if (after) {
@@ -1411,6 +1430,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         awaitingRedemption: boolean | string;
         credited: boolean | string;
         absorbedReason: string | null;
+        redemptionLastError: string | null;
         createdAt: Date;
       }>();
 
