@@ -86,8 +86,8 @@ export interface VoucherRedeemerRpcClient {
  * must still handle: the program admits a voucher iff `seq > escrow.seq_high`, so a
  * lower seq that lands after a higher one is dead and no retry revives it. The
  * rest are the buyer's own limits, none of which a retry moves. When one of
- * these comes back the buyer keeps their money and the platform pays the
- * provider — see `VoucherRedemptionService`. The provider's stake is not here:
+ * these comes back the call becomes buyer debt and the platform pays nothing —
+ * see `VoucherRedemptionService`. The provider's stake is not here:
  * it is retried, and a voucher that expires on it is forfeited by the provider.
  */
 /** The two `Config` addresses this class needs, from one read. */
