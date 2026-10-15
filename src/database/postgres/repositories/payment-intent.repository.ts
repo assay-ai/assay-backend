@@ -520,6 +520,35 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
+   * Rail-B intents still `VERIFYING` more than `deadlineSeconds` past their
+   * voucher's `expiresAt` — the deadline on verdicts (see
+   * `PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS`). Only rows with a voucher the
+   * redemption job can submit (seq and signature recorded) and an open hold:
+   * settling anything else would leave a SETTLED hold nothing ever closes.
+   * Cross-tenant like the other sweep reads, oldest first, bounded by `limit`.
+   */
+  async findDueForVerdictDeadline(
+    now: Date,
+    deadlineSeconds: number,
+    limit: number,
+  ): Promise<DuePaymentIntent[]> {
+    return this.selectSweepCandidates()
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.status = :verifying', { verifying: 'VERIFYING' })
+      .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
+      .andWhere('intent.expiresAt < :cutoff', {
+        cutoff: new Date(now.getTime() - deadlineSeconds * 1000),
+      })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('intent.voucherSeq IS NOT NULL')
+      .andWhere('intent.voucherSignature IS NOT NULL')
+      .orderBy('intent.expiresAt', 'ASC')
+      .limit(limit)
+      .getRawMany<DuePaymentIntent>();
+  }
+
+  /**
    * Intents already expired whose hold was never released.
    *
    * The repair half of the sweep. A pass that expires an intent and then dies
