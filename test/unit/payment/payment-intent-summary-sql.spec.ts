@@ -11,7 +11,20 @@ import {
  * a fragment like `intent.providerId::text` survives untouched and Postgres
  * rejects it — something no mock of the repository can catch.
  */
-async function renderedSql(groupBy: ReceiptsSummaryGroupBy): Promise<string> {
+async function renderedSql(
+  groupBy: ReceiptsSummaryGroupBy,
+  raw: Record<string, string>[] = [],
+): Promise<string> {
+  return (await run(groupBy, raw)).sql;
+}
+
+async function run(
+  groupBy: ReceiptsSummaryGroupBy,
+  raw: Record<string, string>[] = [],
+): Promise<{
+  sql: string;
+  rows: Awaited<ReturnType<PaymentIntentRepository['summarizeReceipts']>>;
+}> {
   const dataSource = new DataSource({ type: 'postgres', entities: [PaymentIntentEntity] });
   // Builds entity metadata without opening a connection.
   await (dataSource as unknown as { buildMetadatas(): Promise<void> }).buildMetadatas();
@@ -23,7 +36,7 @@ async function renderedSql(groupBy: ReceiptsSummaryGroupBy): Promise<string> {
     const qb = (original as (...a: unknown[]) => any)(...args);
     qb.getRawMany = async function () {
       captured = this.getQuery();
-      return [];
+      return raw;
     };
     return qb;
   }) as never);
@@ -32,11 +45,11 @@ async function renderedSql(groupBy: ReceiptsSummaryGroupBy): Promise<string> {
     .mockImplementation(((alias: string) =>
       dataSource.createQueryBuilder(PaymentIntentEntity, alias)) as never);
 
-  await repo.summarizeReceipts('org_1', groupBy, {
+  const rows = await repo.summarizeReceipts('org_1', groupBy, {
     from: new Date('2026-10-01T00:00:00Z'),
     to: new Date('2026-10-12T00:00:00Z'),
   });
-  return captured;
+  return { sql: captured, rows };
 }
 
 describe('PaymentIntentRepository.summarizeReceipts SQL', () => {
@@ -69,5 +82,44 @@ describe('PaymentIntentRepository.summarizeReceipts SQL', () => {
   it('orders every grouping by its key so a daily series is chronological', async () => {
     const sql = await renderedSql(ReceiptsSummaryGroupBy.DAY);
     expect(sql).toMatch(/ORDER BY to_char\(.*'YYYY-MM-DD'\) ASC/);
+  });
+
+  it('leaves an open buyer debt out of charged and counts it as owed (R17b-B-01)', async () => {
+    const sql = await renderedSql(ReceiptsSummaryGroupBy.TOOL);
+    const charged = sql.slice(0, sql.indexOf('"chargedTotal"'));
+    expect(charged).toContain(
+      'NOT ("intent"."redemption_lapsed_at" IS NOT NULL AND "intent"."hold_released_at" IS NULL)',
+    );
+    expect(sql).toContain('"owedTotal"');
+    expect(sql).toContain('"inProgressTotal"');
+  });
+
+  it('derives not charged as listed minus charged, owed and in progress', async () => {
+    const { rows } = await run(ReceiptsSummaryGroupBy.TOOL, [
+      {
+        key: 'tool-1',
+        asset: 'asset',
+        decimals: '6',
+        calls: '13',
+        listedTotal: '3000000',
+        chargedTotal: '1500000',
+        chargedCalls: '7',
+        owedTotal: '250000',
+        owedCalls: '1',
+        inProgressTotal: '0',
+        inProgressCalls: '0',
+        withheldTotal: '750000',
+        refundedCalls: '0',
+      },
+    ]);
+    expect(rows[0]).toMatchObject({
+      chargedTotal: 1_500_000n,
+      owedTotal: 250_000n,
+      owedCalls: 1,
+      // 3 withheld + the forfeited call + the voided debt.
+      notChargedTotal: 1_250_000n,
+      notChargedCalls: 5,
+      withheldTotal: 750_000n,
+    });
   });
 });
