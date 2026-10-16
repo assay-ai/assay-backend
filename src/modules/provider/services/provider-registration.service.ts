@@ -423,15 +423,15 @@ function isUniqueViolation(error: unknown): boolean {
 /**
  * `Intl.supportedValuesOf('timeZone')` returns CLDR's canonical spellings,
  * and CLDR canonicalises several zones to their *deprecated* IANA alias
- * rather than the current primary name. Since tzdata 2022b, `Asia/Kolkata`
+ * rather than the current primary name. `Asia/Kolkata`
  * is the primary IANA identifier and `Asia/Calcutta` is the backward-compat
  * alias — but this ICU build's canonical list has it backwards, so checking
  * membership in that list alone rejected a provider's own correct, current
  * timezone. Found during provider onboarding: a
- * Kolkata provider was refused with "Not an IANA time zone:
- * Asia/Kolkata", a message that is factually wrong — it *is* the IANA
- * name, just not this list's canonical spelling of it. The same mismatch
- * hits `Asia/Kolkata`, `Europe/Kyiv` and `America/Nuuk`, among others.
+ * provider was refused with "Not an IANA time zone: Asia/Kolkata", a message
+ * that is factually wrong — it *is* the IANA name, just not this list's
+ * canonical spelling of it. The same mismatch hits `Europe/Kyiv` and
+ * `America/Nuuk`, among others.
  *
  * `Intl.DateTimeFormat` construction is the runtime's own answer to "can I
  * compute in this zone", which is the only property this check needs, and it

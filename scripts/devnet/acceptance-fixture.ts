@@ -101,8 +101,7 @@ async function main(): Promise<void> {
       legalName: `Stake Witness ${suffix}`,
       technicalContact: { name: 'Witness Bot', email: `tech-${suffix}@example.test` },
       ownerContact: { name: 'Witness Owner', email: `owner-${suffix}@example.test` },
-      // NOT `Asia/Kolkata` — that spelling is refused by the timezone validation.
-      timezone: 'Asia/Calcutta',
+      timezone: 'Europe/Paris',
       acceptedTerms: {
         providerAgreementVersion: process.env.PROVIDER_TERMS_AGREEMENT_VERSION ?? 'v1.0',
         payoutTermsVersion: process.env.PROVIDER_TERMS_PAYOUT_VERSION ?? 'v1.0',

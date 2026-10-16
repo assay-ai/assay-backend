@@ -653,8 +653,8 @@ const ACCEPTANCE_RESPONSE_MAPPING = {
  *
  * **`$.current.time` is offset-less** — a live response reads
  * `"time": "2026-08-25T03:30"` — and `FRESHNESS` parses such a value with
- * `Date.parse`, which reads it as **local** time. On a UTC+5:30 host, for example,
- * that places an honest observation seven hours in the past, against `get_weather.default`'s
+ * `Date.parse`, which reads it as **local** time. On a host ahead of UTC,
+ * that places an honest observation hours in the past, against `get_weather.default`'s
  * `maxAgeMs: 10800000` (three hours) — a `stale_timestamp` FAIL, a red tester,
  * and a publish gate that refuses `TESTER_PASSED`. This is a known, open
  * timestamp-timezone defect, and this exact pair hits it. Anyone can reproduce
@@ -1629,7 +1629,7 @@ async function runStep1(ctx: SuiteContext): Promise<string> {
     legalName: 'Devnet Acceptance Provider',
     technicalContact: { name: 'Acceptance Bot', email: 'accept-tech@example.test' },
     ownerContact: { name: 'Acceptance Owner', email: 'accept-owner@example.test' },
-    timezone: 'Asia/Calcutta', // NOT Asia/Kolkata — that spelling is rejected
+    timezone: 'Europe/Paris',
     acceptedTerms: currentTermsVersions(),
   } satisfies RegisterProviderBodyDto);
 

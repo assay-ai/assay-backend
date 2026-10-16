@@ -4,7 +4,7 @@
  * the only way to prove that rather than assert it is to run where the local
  * day and the UTC day disagree.
  */
-process.env.TZ = 'Asia/Kolkata';
+process.env.TZ = 'Pacific/Kiritimati';
 
 import { FreeQuotaLimitKind } from '@modules/free-tier/services/free-quota.service';
 import { PricingMode } from '@modules/tool/ports/tool.types';
@@ -110,7 +110,7 @@ describe('FreeQuotaService — check()', () => {
 
   it('resets the platform daily counter at the UTC boundary, not the local one', async () => {
     const { service, records } = buildFreeQuotaHarness({ platformAgentDailyLimit: 1 });
-    records.append('b1', new Date(T0)); // 2026-08-20T10:00Z — 17:00 in Asia/Kolkata
+    records.append('b1', new Date(T0)); // 2026-08-20T10:00Z — 00:00 on the 21st in Pacific/Kiritimati
 
     const stillExhausted = await service.check({
       organizationId: ORGANIZATION_ID,

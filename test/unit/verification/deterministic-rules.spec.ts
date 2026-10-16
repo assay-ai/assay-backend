@@ -253,15 +253,15 @@ describe('FRESHNESS', () => {
       ['offset-less date-time with millis', '2026-08-24T00:00:00.000'],
       ['date-only', '2026-08-24'],
       ['explicit Z', '2026-08-24T00:00:00Z'],
-    ])('passes for %s on a UTC+5:30 host', (_label, observedAt) => {
-      process.env.TZ = 'Asia/Kolkata';
+    ])('passes for %s on a host not in UTC', (_label, observedAt) => {
+      process.env.TZ = 'Pacific/Kiritimati';
       const result = evaluateRule(rule, input({ observedAt }, { evaluatedAt: AT }));
       expect(result.outcome).toBe(RuleOutcome.PASSED);
     });
 
     it('still honours a real offset rather than assuming UTC', () => {
       process.env.TZ = 'UTC';
-      // Midnight at +05:30 is 18:30 the previous day UTC — 7h05m before `AT`,
+      // Midnight at +05:30 is 18:30 the previous day UTC — 5h35m before `AT`,
       // past the one-hour ceiling. Assuming UTC everywhere would pass this.
       const result = evaluateRule(
         rule,
@@ -271,7 +271,7 @@ describe('FRESHNESS', () => {
     });
 
     it('still refuses a value that is not a timestamp', () => {
-      process.env.TZ = 'Asia/Kolkata';
+      process.env.TZ = 'Pacific/Kiritimati';
       const result = evaluateRule(rule, input({ observedAt: 'iso8601' }, { evaluatedAt: AT }));
       expect(result.outcome).toBe(RuleOutcome.MISAPPLIED);
     });

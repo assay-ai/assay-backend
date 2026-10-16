@@ -629,13 +629,13 @@ describe('ProviderRegistrationService — updateAccount', () => {
  * ('timeZone')` lists CLDR's canonical spellings, which for several zones
  * are the *deprecated* IANA alias rather than the current primary name (tzdata
  * 2022b renamed these). Checking membership in that list alone rejected a
- * provider's own correct, current timezone — found live when a Kolkata
- * City provider was refused `Asia/Kolkata` with a message claiming it
- * "is not an IANA time zone", which is false.
+ * provider's own correct, current timezone — found live when a provider was
+ * refused `Asia/Kolkata` with a message claiming it "is not an IANA time
+ * zone", which is false.
  */
 describe('ProviderRegistrationService — timezone validation', () => {
-  const modernPrimaries = ['Asia/Kolkata', 'Asia/Kolkata', 'Europe/Kyiv', 'America/Nuuk'];
-  const deprecatedAliases = ['Asia/Calcutta', 'Asia/Calcutta', 'Europe/Kiev', 'America/Godthab'];
+  const modernPrimaries = ['Asia/Kolkata', 'Europe/Kyiv', 'America/Nuuk'];
+  const deprecatedAliases = ['Asia/Calcutta', 'Europe/Kiev', 'America/Godthab'];
   const ordinaryZones = ['Europe/Oslo', 'America/New_York'];
 
   it.each([...modernPrimaries, ...deprecatedAliases, ...ordinaryZones])(
@@ -653,7 +653,7 @@ describe('ProviderRegistrationService — timezone validation', () => {
   it.each([
     ['empty string', ''],
     ['not a zone at all', 'Not/AZone'],
-    ['a raw UTC offset, not an IANA identifier', 'UTC+5:30'],
+    ['a raw UTC offset, not an IANA identifier', 'UTC+5'],
     ['a space instead of the required underscore', 'America/Los Angeles'],
     ['a non-string', 42 as unknown as string],
   ])('rejects %s (%p) -> PROVIDER_TIMEZONE_UNKNOWN', async (_label, timezone) => {
