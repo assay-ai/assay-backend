@@ -172,6 +172,7 @@ describe('McpToolCallService — free first, then paid', () => {
         voucherResourceHash: null,
         voucherSeq: '1',
         lapsedAt: new Date(),
+        expiresAt: new Date(),
         cause: 'VoucherExpired',
         createdAt: new Date(),
         agentId: 'agent-1',
