@@ -95,6 +95,12 @@ export class ToolBindingEntity extends OrganizationScopedEntityWithoutSoftDelete
   @Column({ name: 'free_quota_per_agent', type: 'int', nullable: true })
   freeQuotaPerAgent: number | null;
 
+  /**
+   * The most free calls this binding serves per day, across all agents — a call
+   * **count**, not money (BUG-R17g-01). `null` is the platform default
+   * (`DEFAULT_PROVIDER_DAILY_BUDGET`). The `numeric(78,0)` column is historical;
+   * the API bounds the value to a positive int4.
+   */
   @Column({ name: 'free_daily_budget', type: 'numeric', precision: 78, scale: 0, nullable: true })
   freeDailyBudget: string | null;
 

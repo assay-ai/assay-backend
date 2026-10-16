@@ -430,29 +430,32 @@ describe('BindingEditorService — a charging mode needs a price above zero', ()
   });
 });
 
-describe('BindingEditorService — free-tier limits the API can return exactly', () => {
-  it('refuses a freeDailyBudget above Number.MAX_SAFE_INTEGER on create and update', async () => {
-    const tooLarge = '9007199254740993';
-    const { service, written } = build(row());
-
-    await expectErrorCodeAsync(
-      () => service.create(PROVIDER, SUBJECT, body({ freeDailyBudget: tooLarge })),
-      ProviderErrorCode.PROVIDER_BINDING_FREE_LIMIT_TOO_LARGE,
-    );
-    await expectErrorCodeAsync(
-      () => service.update(PROVIDER, SUBJECT, row().id, { freeDailyBudget: tooLarge }),
-      ProviderErrorCode.PROVIDER_BINDING_FREE_LIMIT_TOO_LARGE,
-    );
-    expect(written).toEqual([]);
-  });
-
-  it('accepts Number.MAX_SAFE_INTEGER itself', async () => {
+describe('BindingEditorService — free-tier limits are call counts', () => {
+  it('stores freeDailyBudget as a call count and reads it back as the same number', async () => {
     const { service } = build(row());
 
-    const saved = await service.update(PROVIDER, SUBJECT, row().id, {
-      freeDailyBudget: String(Number.MAX_SAFE_INTEGER),
-    });
-    expect(saved.freeDailyBudget).toBe(Number.MAX_SAFE_INTEGER);
+    const saved = await service.update(PROVIDER, SUBJECT, row().id, { freeDailyBudget: 80 });
+    expect(saved.freeDailyBudget).toBe(80);
+
+    const cleared = await service.update(PROVIDER, SUBJECT, row().id, { freeDailyBudget: null });
+    expect(cleared.freeDailyBudget).toBeNull();
+  });
+
+  it('refuses a freeDailyBudget that is not a positive whole number of calls', async () => {
+    for (const value of ['5000000', 1.5, 0, -1, 2_147_483_648]) {
+      expect(await invalidProperties(UpdateToolBindingBodyDto, { freeDailyBudget: value })).toEqual(
+        ['freeDailyBudget'],
+      );
+      expect(await invalidProperties(SaveToolBindingBodyDto, { freeDailyBudget: value })).toContain(
+        'freeDailyBudget',
+      );
+    }
+    expect(
+      await invalidProperties(UpdateToolBindingBodyDto, { freeDailyBudget: 2_147_483_647 }),
+    ).toEqual([]);
+    expect(await invalidProperties(UpdateToolBindingBodyDto, { freeDailyBudget: null })).toEqual(
+      [],
+    );
   });
 
   it('refuses a freeQuotaPerAgent beyond the int column', async () => {

@@ -141,10 +141,22 @@ export class SaveToolBindingBodyDto {
   @Max(INT4_MAX)
   freeQuotaPerAgent?: number | null;
 
-  @ApiPropertyOptional({ nullable: true, description: 'Daily free spend cap, in minor units.' })
+  @ApiPropertyOptional({
+    type: Number,
+    nullable: true,
+    minimum: 1,
+    maximum: INT4_MAX,
+    example: 5000,
+    description:
+      'The most free calls this binding serves per day, across all agents (a call count, ' +
+      'not money). `FREEMIUM` and `FREE` only. Resets at 00:00 UTC. `null` means the ' +
+      'platform default. `freeQuotaPerAgent` caps each agent; this caps the binding.',
+  })
   @IsOptional()
-  @Matches(/^\d+$/, { message: 'freeDailyBudget must be an integer in minor units' })
-  freeDailyBudget?: string | null;
+  @IsInt({ message: 'freeDailyBudget must be a whole number of free calls per day' })
+  @Min(1)
+  @Max(INT4_MAX)
+  freeDailyBudget?: number | null;
 
   @ApiProperty({ description: 'The failure rate this provider declares, e.g. 0.05 for 5%.' })
   @IsNumber()
@@ -277,10 +289,13 @@ export class UpdateToolBindingBodyDto {
   @Max(INT4_MAX)
   freeQuotaPerAgent?: number | null;
 
-  @ApiPropertyOptional({ nullable: true })
+  /** See {@link SaveToolBindingBodyDto.freeDailyBudget}. `null` clears it back to the default. */
+  @ApiPropertyOptional({ type: Number, nullable: true, minimum: 1, maximum: INT4_MAX })
   @IsOptional()
-  @Matches(/^\d+$/, { message: 'freeDailyBudget must be an integer in minor units' })
-  freeDailyBudget?: string | null;
+  @IsInt({ message: 'freeDailyBudget must be a whole number of free calls per day' })
+  @Min(1)
+  @Max(INT4_MAX)
+  freeDailyBudget?: number | null;
 
   @ApiPropertyOptional()
   @IsOptional()
