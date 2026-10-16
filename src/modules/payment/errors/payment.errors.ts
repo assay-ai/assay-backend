@@ -80,6 +80,10 @@ export enum PaymentErrorCode {
   PAYMENT_DEBT_NOT_FOUND = 'PAYMENT_DEBT_NOT_FOUND',
   /** A replacement for this debt was accepted and is being collected; nothing to sign. */
   PAYMENT_DEBT_REPLACEMENT_PENDING = 'PAYMENT_DEBT_REPLACEMENT_PENDING',
+  /** The lapsed voucher is not past its on-chain deadline yet; settle it after `replaceableAt`. */
+  PAYMENT_DEBT_NOT_YET_REPLACEABLE = 'PAYMENT_DEBT_NOT_YET_REPLACEABLE',
+  /** The database refused the replacement (the debt changed meanwhile); nothing was changed. */
+  PAYMENT_DEBT_REPLACEMENT_REFUSED = 'PAYMENT_DEBT_REPLACEMENT_REFUSED',
 }
 
 export type PaymentErrorCodesArePrefixed = AssertDomainErrorCodes<'PAYMENT', `${PaymentErrorCode}`>;
@@ -229,6 +233,32 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `Debt ${context?.intentId ?? ''} already has a replacement voucher being collected ` +
       `from the escrow (about a minute). Nothing to sign; if the collection fails it is ` +
       `listed as an open debt again`,
+  },
+  /**
+   * The debt lapsed before its voucher's on-chain deadline (a refusal that is
+   * not `VoucherExpired`), and until that deadline has passed the old voucher
+   * could still be redeemed: a replacement then would charge the buyer twice.
+   */
+  debtNotYetReplaceable: {
+    code: PaymentErrorCode.PAYMENT_DEBT_NOT_YET_REPLACEABLE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Debt ${context?.intentId ?? ''} cannot be settled yet: its original voucher is still ` +
+      `inside its on-chain redemption window. Settle it after ` +
+      `${context?.replaceableAt ?? 'the window closes'}; nothing was changed`,
+  },
+  /**
+   * The database refused the replacement write (for example the debt's row
+   * changed between the checks and the write). Nothing was changed: list the
+   * debts again and, if it is still open, ask for a new voucher-intent.
+   */
+  debtReplacementRefused: {
+    code: PaymentErrorCode.PAYMENT_DEBT_REPLACEMENT_REFUSED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The replacement voucher for debt ${context?.intentId ?? ''} was refused and nothing was ` +
+      `changed. List the debts again (GET /escrow/debts) and, if it is still open, ask for a ` +
+      `new voucher-intent and sign again`,
   },
   voucherAdmissionPaused: {
     code: PaymentErrorCode.PAYMENT_VOUCHER_ADMISSION_PAUSED,

@@ -21,7 +21,9 @@ const DEBT_NOT_FOUND_DESCRIPTION =
   'owed by another wallet (settle it from that wallet’s session), or another agent’s call ' +
   'signed by this agent’s delegate (settle it with the payer wallet).';
 const DEBT_PENDING_DESCRIPTION =
-  'PAYMENT_DEBT_REPLACEMENT_PENDING — a replacement for this debt is being collected already.';
+  'PAYMENT_DEBT_REPLACEMENT_PENDING — a replacement for this debt is being collected already; ' +
+  'PAYMENT_DEBT_NOT_YET_REPLACEABLE — its original voucher is still inside its on-chain ' +
+  'redemption window: settle it after `replaceableAt`.';
 
 @ApiTags('Escrow')
 @ApiBearerAuth()
@@ -98,9 +100,10 @@ export class EscrowController {
   @ApiResponse({ status: 201, type: SettleDebtResponseDto })
   @ApiResponse({
     status: 400,
-    description: 'PAYMENT_VOUCHER_MALFORMED / _BINDING_MISMATCH / PAYMENT_REQUEST_HASH_MISMATCH',
+    description:
+      'PAYMENT_VOUCHER_MALFORMED / _BINDING_MISMATCH / PAYMENT_REQUEST_HASH_MISMATCH; ' +
+      'PAYMENT_VOUCHER_SIGNATURE_INVALID (not signed by the payer or its bound delegate)',
   })
-  @ApiResponse({ status: 401, description: 'PAYMENT_VOUCHER_SIGNATURE_INVALID' })
   @ApiResponse({ status: 404, description: DEBT_NOT_FOUND_DESCRIPTION })
   @ApiResponse({
     status: 402,
@@ -110,7 +113,9 @@ export class EscrowController {
     status: 409,
     description:
       'PAYMENT_VOUCHER_SEQ_* — ask for a new voucher-intent and sign again; ' +
-      'PAYMENT_DEBT_REPLACEMENT_PENDING; PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED / ' +
+      'PAYMENT_DEBT_REPLACEMENT_PENDING; PAYMENT_DEBT_NOT_YET_REPLACEABLE (retry after ' +
+      '`replaceableAt`); PAYMENT_DEBT_REPLACEMENT_REFUSED (the debt changed meanwhile: list ' +
+      'it again); PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED / ' +
       'PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED (the window is full: retry later)',
   })
   @ApiResponse({ status: 503, description: 'PAYMENT_VOUCHER_ADMISSION_PAUSED — retry shortly' })

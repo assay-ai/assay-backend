@@ -143,3 +143,15 @@ export const REDEMPTION_DEADLINE_MARGIN_SECONDS = 60;
  * decision, no-platform-debt design step 10). Counted from the FIRST lapse.
  */
 export const BUYER_DEBT_WRITE_OFF_DAYS = 30;
+
+/**
+ * How long past a debt's lapsed voucher's `expiresAt` its replacement may be
+ * accepted: `REDEEM_GRACE_SECONDS` (the contract refuses the voucher after
+ * `expiresAt + grace`) + `CLOCK_SKEW_TOLERANCE_SECONDS` (a block clock ahead of
+ * ours). Before then the old voucher may still be redeemable — a debt can
+ * lapse before its deadline — and a replacement at a higher seq redeemed after
+ * it would charge the buyer twice. `trg_payment_intents_voucher_seq_immutable`
+ * (migration 1760900000000) enforces the same 1,920 s.
+ */
+export const DEBT_REPLACEABLE_AFTER_EXPIRY_SECONDS =
+  REDEEM_GRACE_SECONDS + CLOCK_SKEW_TOLERANCE_SECONDS;
