@@ -353,6 +353,7 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     expect(sum(later, 'notChargedCalls') - sum(before, 'notChargedCalls')).toBe(1);
     expect(await rowsOf(rowsWindow, TOOL)).toHaveLength(1);
   });
+
   /**
    * The reason split is computed in SQL; it must give each call the same
    * reason the feed's rows get from `notChargedReason()`, never count a call
@@ -415,5 +416,85 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     expect(
       mine.reduce((t, r) => t + r.buyers, 0) - mineBefore.reduce((t, r) => t + r.buyers, 0),
     ).toBe(1);
+  });
+  /**
+   * Every reason the split can name, each driven through the columns the feed
+   * reads, plus a legacy absorb: a SETTLED row with a `platform_absorbed:`
+   * credit and a NULL `redemption_last_error`. That NULL once made the
+   * failed-check test NULL, so the row fell out of the split and the cells
+   * stopped adding up to the totals.
+   */
+  it('gives every reason, and a legacy absorb, the reason the rows carry', async () => {
+    const window = wideWindow();
+    const reasonsBefore = await context.repository.summarizeNotChargedReasons(window);
+    const totalsBefore = await context.repository.summarizeNotCharged(window);
+
+    const TOOL = randomUUID();
+    await buyer(10);
+    await paidCall(TOOL);
+
+    const set = (id: string, columns: string) =>
+      context.dataSource.query(`UPDATE payment_intents SET ${columns} WHERE id = $1`, [id]);
+    await set(await call(TOOL, 'VOIDED'), `classification = 'SYSTEM_ERROR'`);
+    await set(await call(TOOL, 'VOIDED'), `classification = 'REQUEST_ERROR'`);
+    await set(
+      await call(TOOL, 'VOIDED'),
+      `classification = 'DATA_RESULT', verification_verdict = 'MISAPPLIED'`,
+    );
+    await call(TOOL, 'VOIDED');
+    await set(await call(TOOL, 'VOIDED'), `status = 'EXPIRED', classification = NULL`);
+
+    const absorbed = await collected(await call(TOOL, 'SETTLED'));
+    await set(absorbed, `redemption_last_error = NULL`);
+    await context.dataSource.query(
+      `INSERT INTO ledger_entries
+         (organization_id, account_id, entry_type, amount, asset_id, decimals, intent_id, chain_tx_ref)
+       SELECT provider_id, $2, 'PROVIDER_CREDIT', price_amount, asset_id, decimals, id, $3
+         FROM payment_intents WHERE id = $1`,
+      [absorbed, context.account(`provider-${PROVIDER}`), `platform_absorbed:${randomUUID()}`],
+    );
+
+    const reasonsAfter = await context.repository.summarizeNotChargedReasons(window);
+    const totalsAfter = await context.repository.summarizeNotCharged(window);
+
+    const byReason = (list: typeof reasonsAfter) => {
+      const map = new Map<string, number>();
+      for (const r of list) map.set(r.reason, (map.get(r.reason) ?? 0) + r.calls);
+      return map;
+    };
+    const before = byReason(reasonsBefore);
+    const delta = new Map(
+      [...byReason(reasonsAfter)]
+        .map(([reason, calls]) => [reason, calls - (before.get(reason) ?? 0)] as const)
+        .filter(([, calls]) => calls !== 0),
+    );
+
+    const rows = await rowsOf(window, TOOL);
+    expect(rows.find((row) => row.status === 'SETTLED')?.settledCause).toBe('ABSORBED');
+    const expected = new Map<string, number>();
+    for (const row of rows) {
+      const outcome = notChargedReason(row);
+      if (!outcome || outcome.reason === 'FAILED_CHECK') continue;
+      expected.set(outcome.reason, (expected.get(outcome.reason) ?? 0) + 1);
+    }
+
+    const one = (reason: string) => [reason, 1] as const;
+    expect(expected).toEqual(
+      new Map([
+        one('PROVIDER_ERROR'),
+        one('REQUEST_REJECTED'),
+        one('OUT_OF_SCOPE'),
+        one('NO_USABLE_RESULT'),
+        one('EXPIRED'),
+        one('NOT_COLLECTED'),
+      ]),
+    );
+    expect(delta).toEqual(expected);
+
+    // The absorb is not a failed check, and every cell still adds up.
+    expect(sum(totalsAfter, 'notChargedCalls') - sum(totalsBefore, 'notChargedCalls')).toBe(6);
+    expect(sum(totalsAfter, 'failedCheckCalls') - sum(totalsBefore, 'failedCheckCalls')).toBe(0);
+    const cells = reasonsAfter.reduce((total, row) => total + row.calls, 0);
+    expect(cells).toBe(sum(totalsAfter, 'notChargedCalls') - sum(totalsAfter, 'failedCheckCalls'));
   });
 });

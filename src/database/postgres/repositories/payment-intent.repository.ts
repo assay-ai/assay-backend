@@ -2250,7 +2250,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('COUNT(*)', 'calls')
       .addSelect('COUNT(DISTINCT intent.organization_id)', 'buyers')
       .addSelect(`COUNT(*) FILTER (WHERE ${NOT_CHARGED_SQL})`, 'notChargedCalls')
-      .addSelect(`COUNT(*) FILTER (WHERE ${FAILED_CHECK_SQL})`, 'failedCheckCalls')
+      // COALESCE: a legacy absorb has a NULL `redemption_last_error`, which makes
+      // FAILED_CHECK_SQL NULL; it is not a failed check, here and in the split.
+      .addSelect(`COUNT(*) FILTER (WHERE COALESCE(${FAILED_CHECK_SQL}, false))`, 'failedCheckCalls')
       .addSelect(
         `COALESCE(SUM(CASE WHEN ${NOT_CHARGED_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
         'notChargedAmount',
@@ -2320,7 +2322,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.holdId IS NOT NULL')
       .andWhere(FINAL_OUTCOME_SQL)
       .andWhere(NOT_CHARGED_SQL)
-      .andWhere(`NOT ${FAILED_CHECK_SQL}`)
+      .andWhere(`NOT COALESCE(${FAILED_CHECK_SQL}, false)`)
       .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
       .andWhere(`${CREATED_AT} < :to`, { to: window.to })
       .andWhere(ELIGIBLE_BUYER_SQL)

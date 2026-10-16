@@ -43,7 +43,13 @@ export class PublicNotChargedCallDto {
   })
   providerName: string;
 
-  @ApiProperty({ type: PublicMoneyDto, description: 'The listed price that was not charged.' })
+  @ApiProperty({
+    type: PublicMoneyDto,
+    description:
+      'What the call would have cost and was not charged: the price of the binding that ' +
+      'served it, or, when none served, the amount held for it (the quote, the dearest ' +
+      "eligible binding), which can be above the tool's lowest listed price.",
+  })
   price: PublicMoneyDto;
 
   @ApiProperty({ enum: NotChargedReason, description: 'Stable key for the reason.' })
@@ -98,23 +104,28 @@ export class PublicNotChargedTotalsDto {
   })
   callsNotCharged: number;
 
-  @ApiProperty({ description: 'Of the not-charged calls, those whose result failed verification.' })
+  @ApiProperty({
+    description:
+      'Of the not-charged calls, those whose result failed verification. Held to the per-asset ' +
+      '`minBuyers` rule only, not to a `minBuyers` rule of its own.',
+  })
   callsFailedCheck: number;
 
   @ApiProperty({
     type: [PublicNotChargedReasonCountDto],
     description:
-      'The not-charged calls that did not fail the check, by reason, largest first. A reason is ' +
-      'listed only when every part of its figure comes from at least `minBuyers` buyers; ' +
-      'everything else is in `callsNotChargedOther`. Never lists FAILED_CHECK.',
+      'The not-charged calls that did not fail the check, by reason, largest first. Reasons are ' +
+      'listed only when every asset × reason cell comes from at least `minBuyers` buyers; if any ' +
+      'cell falls short, the list is empty. Each count is rounded down to a multiple of 10 and ' +
+      'the remainder is in `callsNotChargedOther`. Never lists FAILED_CHECK.',
   })
   notChargedByReason: PublicNotChargedReasonCountDto[];
 
   @ApiProperty({
     description:
       'Not-charged calls that did not fail the check and are not in `notChargedByReason`: ' +
-      'reasons too rare to list on their own under the `minBuyers` rule, plus the smallest ' +
-      'listed reason whenever anything is here, so this figure never isolates a small group. ' +
+      'everything when a reason could not be listed under the `minBuyers` rule, otherwise the ' +
+      'remainders left by rounding the listed reasons down to tens. ' +
       '`callsFailedCheck + Σ notChargedByReason + callsNotChargedOther = callsNotCharged`.',
   })
   callsNotChargedOther: number;
