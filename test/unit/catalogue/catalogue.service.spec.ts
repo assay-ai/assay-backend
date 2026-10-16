@@ -990,9 +990,11 @@ describe('PublicCatalogueService', () => {
     for (const tool of tools) {
       expect(Object.keys(tool).sort()).toEqual([
         'description',
+        'freeCallsPerDay',
         'fromPrice',
         'id',
         'name',
+        'paidBindings',
         'price',
         'pricingMode',
         'providerCount',

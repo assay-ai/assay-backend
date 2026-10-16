@@ -1,3 +1,4 @@
+import type { NotChargedSettledCause } from '@database/postgres/repositories/payment-intent.repository';
 import { WITHHELD_STATUS_BUCKET, WithheldBucket } from '@modules/ledger/domain/withheld';
 
 /**
@@ -27,6 +28,13 @@ export enum NotChargedReason {
   NO_USABLE_RESULT = 'NO_USABLE_RESULT',
   /** `EXPIRED` with funds reserved: the call did not finish in time. */
   EXPIRED = 'EXPIRED',
+  /**
+   * `SETTLED`, but the payment was never collected and the buyer does not owe
+   * it: the provider forfeited the voucher (it caused it to fail), or a legacy
+   * platform-absorbed credit. A written-off buyer debt is NOT this — the buyer
+   * still owes it, so it never reaches the feed.
+   */
+  NOT_COLLECTED = 'NOT_COLLECTED',
 }
 
 export const NOT_CHARGED_REASON_TEXT: Readonly<Record<NotChargedReason, string>> = Object.freeze({
@@ -41,12 +49,19 @@ export const NOT_CHARGED_REASON_TEXT: Readonly<Record<NotChargedReason, string>>
   [NotChargedReason.NO_USABLE_RESULT]:
     'The call ended without a usable result, so it was not charged.',
   [NotChargedReason.EXPIRED]: 'The call did not finish in time, so the held amount was released.',
+  [NotChargedReason.NOT_COLLECTED]:
+    'The provider could not collect payment for this call, so the buyer was not charged.',
 });
 
 export interface NotChargedOutcome {
   readonly status: string;
   readonly classification: string | null;
   readonly verificationVerdict: string | null;
+  /**
+   * Set only on a `SETTLED` row that is in the feed (`NotChargedSettledCause`):
+   * a fixed label of its collection outcome, never the raw cause text.
+   */
+  readonly settledCause?: NotChargedSettledCause | null;
 }
 
 /**
@@ -57,6 +72,8 @@ export interface NotChargedOutcome {
 export function notChargedReason(
   outcome: NotChargedOutcome,
 ): { reason: NotChargedReason; bucket: WithheldBucket } | null {
+  if (outcome.status === 'SETTLED') return settledReason(outcome);
+
   const bucket = WITHHELD_STATUS_BUCKET[outcome.status];
   if (!bucket) return null;
 
@@ -73,4 +90,29 @@ export function notChargedReason(
     return { reason: NotChargedReason.REQUEST_REJECTED, bucket };
   }
   return { reason: NotChargedReason.NO_USABLE_RESULT, bucket };
+}
+
+/**
+ * A served call the buyer was not charged for and does not owe. A buyer debt
+ * voided by a late REFUND verdict is the guarantee firing, exactly like
+ * `REFUNDED`; one voided by a VOID verdict reads like `VOIDED`. A `SETTLED`
+ * row with no cause is a charged or owed call and is never published.
+ */
+function settledReason(
+  outcome: NotChargedOutcome,
+): { reason: NotChargedReason; bucket: WithheldBucket } | null {
+  switch (outcome.settledCause) {
+    case 'VOIDED_REFUND':
+      return { reason: NotChargedReason.FAILED_CHECK, bucket: WithheldBucket.FAILED_VERIFICATION };
+    case 'VOIDED_VOID':
+      return notChargedReason({ ...outcome, status: 'VOIDED', settledCause: null });
+    case 'FORFEITED':
+    case 'ABSORBED':
+      return {
+        reason: NotChargedReason.NOT_COLLECTED,
+        bucket: WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
+      };
+    default:
+      return null;
+  }
 }

@@ -40,6 +40,7 @@ function row(overrides: Partial<NotChargedCallRow> = {}): NotChargedCallRow {
     priceAmount: 250000n,
     // Newest first, as the repository returns them.
     createdAt: new Date(Date.parse('2026-10-13T23:00:00.000Z') - seq * 60_000),
+    settledCause: null,
     buyer: `buyer-${seq}`,
     ...overrides,
   };
@@ -409,4 +410,61 @@ describe('notChargedReason', () => {
       }),
     ).toBeNull();
   });
+  it('has no reason for an owed call: open or written-off buyer debt carries no cause', () => {
+    // The repository derives `settledCause` as NULL for an open debt and for a
+    // written-off one (`uncollected:`), so neither can be published as "not charged".
+    expect(
+      notChargedReason({
+        status: 'SETTLED',
+        classification: 'DATA_RESULT',
+        verificationVerdict: null,
+        settledCause: null,
+      }),
+    ).toBeNull();
+  });
+
+  it.each([
+    [
+      'VOIDED_REFUND',
+      'DATA_RESULT',
+      'FAIL',
+      NotChargedReason.FAILED_CHECK,
+      WithheldBucket.FAILED_VERIFICATION,
+    ],
+    [
+      'VOIDED_VOID',
+      'DATA_RESULT',
+      'MISAPPLIED',
+      NotChargedReason.OUT_OF_SCOPE,
+      WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
+    ],
+    [
+      'VOIDED_VOID',
+      'SYSTEM_ERROR',
+      null,
+      NotChargedReason.PROVIDER_ERROR,
+      WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
+    ],
+    [
+      'FORFEITED',
+      'DATA_RESULT',
+      'PASS',
+      NotChargedReason.NOT_COLLECTED,
+      WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
+    ],
+    [
+      'ABSORBED',
+      'DATA_RESULT',
+      'PASS',
+      NotChargedReason.NOT_COLLECTED,
+      WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
+    ],
+  ] as const)(
+    'SETTLED with cause %s / %s / %s → %s',
+    (settledCause, classification, verificationVerdict, reason, bucket) => {
+      expect(
+        notChargedReason({ status: 'SETTLED', classification, verificationVerdict, settledCause }),
+      ).toEqual({ reason, bucket });
+    },
+  );
 });
