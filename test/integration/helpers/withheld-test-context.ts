@@ -201,7 +201,10 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
   });
 
   await dataSource.initialize();
-  await dataSource.runMigrations();
+  // `'each'`, as `postgres.data-source.ts` does: `PublicExplorerIndex1760400000000`
+  // builds its index CONCURRENTLY with `transaction = false`, which the default
+  // `'all'` mode refuses.
+  await dataSource.runMigrations({ transaction: 'each' });
 
   const balanceRepository = new AccountBalanceRepository(dataSource);
   const entries = new LedgerEntryRepository(dataSource);
