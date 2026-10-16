@@ -1,6 +1,6 @@
 import { Inject, Injectable } from '@nestjs/common';
 
-import { chainMetadata } from '@modules/chains/chain-metadata';
+import { assertRailOffered, chainMetadata } from '@modules/chains/chain-metadata';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import {
   ESCROW_BALANCE_READER,
@@ -10,6 +10,7 @@ import { RedisDemoRateLimiter } from '@modules/mcp/services/redis-demo-rate-limi
 
 import { NEXT_SEQ_RATE_LIMITER, NEXT_SEQ_RATE_LIMITS } from '../constants/escrow-seq.constants';
 import { PaymentErrors } from '../errors/payment.errors';
+import { PaymentRail, railName } from '../ports/payment.types';
 import { EscrowSeqService, NextSeq } from './escrow-seq.service';
 
 /**
@@ -37,6 +38,9 @@ export class NextSeqService {
     chainId: ChainId,
     credentialId: string,
   ): Promise<NextSeq> {
+    // A seq only builds a rail-B voucher: refuse a chain without rail B before
+    // the rate limiter and the escrow read, as `VoucherService.record` does.
+    assertRailOffered(chainId, railName(PaymentRail.RAIL_B_VOUCHER));
     const rate = await this.rateLimiter.take(`credential:${credentialId}`);
     if (!rate.allowed) {
       throw PaymentErrors.nextSeqRateLimited({

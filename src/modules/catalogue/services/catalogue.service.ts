@@ -189,13 +189,25 @@ export class CatalogueService {
             name: names.get(binding.toolId) ?? binding.toolId,
             pricingMode: binding.pricingMode,
             price: money(binding),
-            // What the free tier would grant: the binding's own figure, else
-            // the platform default `FreeQuotaService` falls back to. Null for
-            // a PAID binding, which has no free tier at all.
+            // What the free tier would grant one agent here: its per-agent
+            // quota, never more than the binding's daily free-call budget (a
+            // call COUNT across all agents, BUG-R17g-01), each falling back to
+            // the platform default `FreeQuotaService` uses, and capped by the
+            // platform's per-agent ceiling. Null for a PAID binding, which has
+            // no free tier at all.
             freeCallsPerAgentPerDay:
               binding.pricingMode === PricingMode.PAID
                 ? null
-                : (binding.freeQuotaPerAgent ?? this.freeQuota.defaultPerAgentDailyLimit),
+                : freeCallsPerDay(
+                    [
+                      {
+                        freeQuotaPerAgent: binding.freeQuotaPerAgent,
+                        freeDailyBudget:
+                          binding.freeDailyBudget == null ? null : Number(binding.freeDailyBudget),
+                      },
+                    ],
+                    this.freeQuota,
+                  ),
           }),
         )
         .sort((a, b) => a.name.localeCompare(b.name)),

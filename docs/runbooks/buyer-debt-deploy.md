@@ -1,8 +1,13 @@
 # Runbook: Deploying buyer debt (no platform debt)
 
 **Use when:** deploying any build that contains buyer debt (migrations `1760600000000`,
-`1760700000000` and `1760800000000`) onto a database or a fleet that ran an older build, or when
-someone asks to roll such a deploy back.
+`1760700000000`, `1760800000000` and `1760900000000`) onto a database or a fleet that ran an older
+build, or when someone asks to roll such a deploy back.
+
+`1760900000000` relaxes `trg_payment_intents_voucher_seq_immutable` for exactly one write: a
+lapsed debt's replacement voucher, at a higher seq, once the old voucher is past its on-chain
+deadline (`expires_at` + 1,920 s). Without it every `POST /escrow/debts/:id/voucher` fails, so no
+debt can be settled (BUG-R17f-01). Its `down` restores the strict trigger and nothing else.
 
 Buyer debt replaced `absorb()`: an unredeemable rail-B voucher no longer credits the provider from
 platform funds. The provider forfeits it when it caused the failure; otherwise the call becomes
@@ -73,10 +78,10 @@ SELECT
   dropping `redemption_replaced_at` loses which debts are being collected.
 - **`migration:revert` order.** `1760400000000` is shared by `public-explorer-index` and
   `slash-part-cancel-reason`. TypeORM matches executed migrations by name, so both run, but on a
-  database that had already run `1760600000000`-`1760800000000` they run after them, and the
+  database that had already run `1760600000000`-`1760900000000` they run after them, and the
   executed-at order is what `migration:revert` undoes. The first revert after this deploy
   therefore drops the Explorer index (or the slash cancel reason), not
-  `PaymentIntentDebtReplacing`. Check `SELECT * FROM migrations ORDER BY id DESC LIMIT 3` before
+  `VoucherSeqDebtReplacement` or `PaymentIntentDebtReplacing`. Check `SELECT * FROM migrations ORDER BY id DESC LIMIT 3` before
   reverting anything.
 - If the new build must be stopped, stop it and fix forward. If an older build must run anyway,
   first write off or release every open debt by hand, then stop its scheduler before it starts.
