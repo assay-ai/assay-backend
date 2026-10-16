@@ -1,6 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { NotChargedWindow } from '@database/postgres/repositories/payment-intent.repository';
+import { notChargedReason } from '@modules/catalogue/domain/not-charged-reason';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 
 import { WithheldTestContext, createWithheldTestContext } from '../helpers/withheld-test-context';
@@ -351,5 +352,68 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     expect(sum(later, 'calls') - sum(before, 'calls')).toBe(1);
     expect(sum(later, 'notChargedCalls') - sum(before, 'notChargedCalls')).toBe(1);
     expect(await rowsOf(rowsWindow, TOOL)).toHaveLength(1);
+  });
+  /**
+   * The reason split is computed in SQL; it must give each call the same
+   * reason the feed's rows get from `notChargedReason()`, never count a call
+   * that failed the check, and add up to `notChargedCalls − failedCheckCalls`.
+   */
+  it('splits not-charged calls by the same reason the rows carry', async () => {
+    const window = wideWindow();
+    const reasonsBefore = await context.repository.summarizeNotChargedReasons(window);
+    const totalsBefore = await context.repository.summarizeNotCharged(window);
+
+    const TOOL = randomUUID();
+    await buyer(10);
+    await paidCall(TOOL);
+    await call(TOOL, 'REFUNDED');
+    await call(TOOL, 'VOIDED');
+    await call(TOOL, 'VOIDED');
+    await collection(await call(TOOL, 'SETTLED'), 'FORFEITED');
+    await collection(await call(TOOL, 'SETTLED'), 'VOIDED_VOID');
+    await collection(await call(TOOL, 'SETTLED'), 'VOIDED_REFUND');
+    // Owed, never counted.
+    await collection(await call(TOOL, 'SETTLED'), 'WRITTEN_OFF');
+
+    const reasonsAfter = await context.repository.summarizeNotChargedReasons(window);
+    const totalsAfter = await context.repository.summarizeNotCharged(window);
+
+    const byReason = (list: typeof reasonsAfter) => {
+      const map = new Map<string, number>();
+      for (const r of list) map.set(r.reason, (map.get(r.reason) ?? 0) + r.calls);
+      return map;
+    };
+    const before = byReason(reasonsBefore);
+    const after = byReason(reasonsAfter);
+    const delta = new Map(
+      [...after].map(([reason, calls]) => [reason, calls - (before.get(reason) ?? 0)]),
+    );
+    const expected = new Map<string, number>();
+    for (const row of await rowsOf(window, TOOL)) {
+      const outcome = notChargedReason(row);
+      if (!outcome || outcome.reason === 'FAILED_CHECK') continue;
+      expected.set(outcome.reason, (expected.get(outcome.reason) ?? 0) + 1);
+    }
+
+    expect(expected).toEqual(
+      new Map([
+        ['NO_USABLE_RESULT', 2],
+        ['NOT_COLLECTED', 2],
+      ]),
+    );
+    for (const [reason, calls] of expected) expect(delta.get(reason)).toBe(calls);
+    expect(delta.get('FAILED_CHECK')).toBeUndefined();
+    expect([...delta.values()].reduce((a, b) => a + b, 0)).toBe(4);
+
+    // Platform-wide, the cells add up to the totals' not-charged minus failed check.
+    const cells = reasonsAfter.reduce((total, row) => total + row.calls, 0);
+    expect(cells).toBe(sum(totalsAfter, 'notChargedCalls') - sum(totalsAfter, 'failedCheckCalls'));
+    expect(sum(totalsAfter, 'notChargedCalls') - sum(totalsBefore, 'notChargedCalls')).toBe(6);
+    // Buyers are counted per cell: one buyer here.
+    const mine = reasonsAfter.filter((row) => row.reason === 'NOT_COLLECTED');
+    const mineBefore = reasonsBefore.filter((row) => row.reason === 'NOT_COLLECTED');
+    expect(
+      mine.reduce((t, r) => t + r.buyers, 0) - mineBefore.reduce((t, r) => t + r.buyers, 0),
+    ).toBe(1);
   });
 });

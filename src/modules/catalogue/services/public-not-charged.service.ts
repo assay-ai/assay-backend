@@ -2,14 +2,20 @@ import { Injectable } from '@nestjs/common';
 
 import {
   NotChargedCallRow,
+  NotChargedReasonTotalsRow,
   NotChargedTotalsRow,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 
-import { NOT_CHARGED_REASON_TEXT, notChargedReason } from '../domain/not-charged-reason';
+import {
+  NOT_CHARGED_REASON_TEXT,
+  NotChargedReason,
+  notChargedReason,
+} from '../domain/not-charged-reason';
 import { TtlCache } from '../domain/ttl-cache';
 import {
   PublicNotChargedCallDto,
+  PublicNotChargedReasonCountDto,
   PublicNotChargedResponseDto,
   PublicNotChargedTotalsDto,
 } from '../dto/get-public-not-charged.dto';
@@ -71,6 +77,12 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * figure covers eligible buyers only, and an asset is counted only when at
  * least k of them made paid calls in it.
  *
+ * The not-charged calls that did not fail the check are also split by reason
+ * ({@link foldReasons}): a reason is named only when every cell (asset ×
+ * reason) behind its figure comes from at least k eligible buyers. The rest is
+ * one "other" figure, and when anything is in it the smallest named reason is
+ * folded in too, so "other" is never a figure backed by fewer than k buyers.
+ *
  * `withheldForPrivacy` is true whenever a rule removed something — a tool or
  * asset under k, or a row whose provider is not listed — so the page never
  * reads a suppressed figure as "nothing happened".
@@ -98,7 +110,18 @@ export class PublicNotChargedService {
     const since = new Date(today.getTime() - NOT_CHARGED_WINDOW_DAYS * DAY_MS);
     const rowsBefore = new Date(now.getTime() - NOT_CHARGED_MIN_AGE_MS);
 
-    const [candidates, totals, providers, tools] = await Promise.all([
+    // Totals: every input — the call, its outcome, the buyer's age and its
+    // collected call — is cut at the start of today (UTC), so they are a
+    // function of the date alone.
+    const totalsWindow = {
+      from: since,
+      to: today,
+      outcomeBefore: today,
+      buyerCreatedBefore: new Date(today.getTime() - NOT_CHARGED_MIN_BUYER_AGE_MS),
+      buyerCollectedBefore: today,
+    };
+
+    const [candidates, totals, reasons, providers, tools] = await Promise.all([
       // Rows: created AND resolved at least 24 h ago.
       this.intents.findNotChargedCandidates(
         {
@@ -110,16 +133,8 @@ export class PublicNotChargedService {
         },
         NOT_CHARGED_CANDIDATE_LIMIT,
       ),
-      // Totals: every input — the call, its outcome, the buyer's age and its
-      // collected call — is cut at the start of today (UTC), so they are a
-      // function of the date alone.
-      this.intents.summarizeNotCharged({
-        from: since,
-        to: today,
-        outcomeBefore: today,
-        buyerCreatedBefore: new Date(today.getTime() - NOT_CHARGED_MIN_BUYER_AGE_MS),
-        buyerCollectedBefore: today,
-      }),
+      this.intents.summarizeNotCharged(totalsWindow),
+      this.intents.summarizeNotChargedReasons(totalsWindow),
       this.catalogue.listProviders(),
       this.catalogue.listTools(),
     ]);
@@ -136,6 +151,13 @@ export class PublicNotChargedService {
       NOT_CHARGED_MIN_BUYERS,
     );
     const counted = totals.filter((row) => row.buyers >= NOT_CHARGED_MIN_BUYERS);
+    const folded = foldTotals(counted);
+    const split = foldReasons(
+      reasons,
+      counted,
+      folded.callsNotCharged - folded.callsFailedCheck,
+      NOT_CHARGED_MIN_BUYERS,
+    );
 
     return {
       windowDays: NOT_CHARGED_WINDOW_DAYS,
@@ -143,8 +165,15 @@ export class PublicNotChargedService {
       until: today.toISOString(),
       minBuyers: NOT_CHARGED_MIN_BUYERS,
       withheldForPrivacy:
-        suppressed || named.length < candidates.length || counted.length < totals.length,
-      totals: foldTotals(counted),
+        suppressed ||
+        named.length < candidates.length ||
+        counted.length < totals.length ||
+        split.suppressed,
+      totals: {
+        ...folded,
+        notChargedByReason: split.byReason,
+        callsNotChargedOther: split.other,
+      },
       recent: published.flatMap((row) => {
         const call = toCall(row, toolNames, providerNames);
         return call ? [call] : [];
@@ -186,7 +215,9 @@ export function selectKAnonymous(
 }
 
 /** Adds the per-asset rows into the totals; amounts stay one entry per asset. */
-export function foldTotals(rows: readonly NotChargedTotalsRow[]): PublicNotChargedTotalsDto {
+export function foldTotals(
+  rows: readonly NotChargedTotalsRow[],
+): Omit<PublicNotChargedTotalsDto, 'notChargedByReason' | 'callsNotChargedOther'> {
   return {
     callsChecked: rows.reduce((sum, row) => sum + row.calls, 0),
     callsNotCharged: rows.reduce((sum, row) => sum + row.notChargedCalls, 0),
@@ -197,6 +228,58 @@ export function foldTotals(rows: readonly NotChargedTotalsRow[]): PublicNotCharg
       decimals: row.decimals,
     })),
   };
+}
+
+/**
+ * The per-reason split of the not-charged calls that did not fail the check,
+ * held to the k rule reason by reason.
+ *
+ * - Only cells of assets already counted in the totals (`counted`) are read.
+ * - A reason's figure is the sum of its cells backed by at least `k` buyers;
+ *   a cell below `k` goes to `other`. Cells are per asset, so a reason is
+ *   named only where each part of its figure clears the floor on its own.
+ * - Complementary suppression: when `other` holds anything, the smallest named
+ *   reason is folded into it as well, so `other` always contains a cell of at
+ *   least `k` buyers and can never be read as one small group's figure (nor
+ *   recovered by subtracting the named reasons from the published total).
+ * - When the cells do not add up to `expectedOther` (the totals' own
+ *   `notCharged − failedCheck`), nothing is named: the split is dropped rather
+ *   than published inconsistent with the totals beside it.
+ *
+ * `suppressed` is true when a cell below `k` was folded away.
+ */
+export function foldReasons(
+  rows: readonly NotChargedReasonTotalsRow[],
+  counted: readonly NotChargedTotalsRow[],
+  expectedOther: number,
+  k: number,
+): { byReason: PublicNotChargedReasonCountDto[]; other: number; suppressed: boolean } {
+  const assetKey = (row: { asset: string; decimals: number }) => `${row.asset}|${row.decimals}`;
+  const countedAssets = new Set(counted.map(assetKey));
+  const cells = rows.filter((row) => countedAssets.has(assetKey(row)) && row.calls > 0);
+
+  const total = cells.reduce((sum, row) => sum + row.calls, 0);
+  if (total !== expectedOther) {
+    return { byReason: [], other: Math.max(0, expectedOther), suppressed: false };
+  }
+
+  const named = new Map<string, number>();
+  let other = 0;
+  for (const cell of cells) {
+    if (cell.buyers >= k) named.set(cell.reason, (named.get(cell.reason) ?? 0) + cell.calls);
+    else other += cell.calls;
+  }
+  const suppressed = other > 0;
+
+  const byReason = [...named]
+    .map(([reason, calls]) => ({ reason: reason as NotChargedReason, calls }))
+    // Largest first; ties in a fixed order so the answer is stable.
+    .sort((a, b) => b.calls - a.calls || a.reason.localeCompare(b.reason));
+
+  const smallest = suppressed ? byReason.pop() : undefined;
+  if (smallest) other += smallest.calls;
+
+  return { byReason, other, suppressed };
 }
 
 function toCall(

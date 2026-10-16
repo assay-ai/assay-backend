@@ -193,6 +193,36 @@ export interface NotChargedTotalsRow {
   readonly notChargedAmount: bigint;
 }
 
+/**
+ * Why a not-charged call that did NOT fail the check ended without a charge —
+ * the `NotChargedReason` keys other than `FAILED_CHECK`, derived in SQL by
+ * {@link NOT_CHARGED_OTHER_REASON_SQL} with the same precedence as the
+ * domain's `notChargedReason()`. Kept as literals here so the repository takes
+ * no import edge on the catalogue module; a unit spec pins them to the enum.
+ */
+export const NOT_CHARGED_OTHER_REASONS = [
+  'OUT_OF_SCOPE',
+  'PROVIDER_ERROR',
+  'REQUEST_REJECTED',
+  'NO_USABLE_RESULT',
+  'EXPIRED',
+  'NOT_COLLECTED',
+] as const;
+export type NotChargedOtherReason = (typeof NOT_CHARGED_OTHER_REASONS)[number];
+
+/**
+ * One cell of the not-charged reason breakdown: an asset and a reason, the
+ * calls in it, and how many distinct ELIGIBLE buyers stand behind them — a
+ * count, never an id. The input to the per-reason k rule.
+ */
+export interface NotChargedReasonTotalsRow {
+  readonly asset: string;
+  readonly decimals: number;
+  readonly reason: NotChargedOtherReason;
+  readonly calls: number;
+  readonly buyers: number;
+}
+
 /** Mirrors `PaymentIntentCallClass.PAID`, kept local like the statuses below. */
 const PAID_CALL_CLASS = 'PAID';
 
@@ -421,6 +451,21 @@ const NOT_CHARGED_SQL = `(intent.status IN (:...withheldStatuses) OR ${NOT_CHARG
 const FAILED_CHECK_SQL =
   `(intent.status = :refundedStatus OR (${NOT_CHARGED_SETTLED_SQL} ` +
   `AND intent.redemption_last_error = 'voided:REFUND'))`;
+
+/**
+ * The reason of a not-charged call that is NOT {@link FAILED_CHECK_SQL}, as
+ * `notChargedReason()` reads it: a remaining `SETTLED` row (forfeit, debt
+ * voided by a VOID verdict, legacy absorb) is `NOT_COLLECTED`; `EXPIRED` is
+ * itself; a `VOIDED` row is read from its verdict, then its classification.
+ * Only meaningful on a row that matches `NOT_CHARGED_SQL AND NOT FAILED_CHECK_SQL`.
+ */
+const NOT_CHARGED_OTHER_REASON_SQL =
+  `CASE WHEN intent.status = '${SETTLED_STATUS}' THEN 'NOT_COLLECTED' ` +
+  `WHEN intent.status = 'EXPIRED' THEN 'EXPIRED' ` +
+  `WHEN intent.verification_verdict = 'MISAPPLIED' THEN 'OUT_OF_SCOPE' ` +
+  `WHEN intent.classification = 'SYSTEM_ERROR' THEN 'PROVIDER_ERROR' ` +
+  `WHEN intent.classification = 'REQUEST_ERROR' THEN 'REQUEST_REJECTED' ` +
+  `ELSE 'NO_USABLE_RESULT' END`;
 
 /**
  * The Explorer's "final outcome, recorded before the cut-off": the hold was
@@ -2248,6 +2293,63 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       notChargedCalls: Number(row.notChargedCalls),
       failedCheckCalls: Number(row.failedCheckCalls),
       notChargedAmount: BigInt(row.notChargedAmount),
+    }));
+  }
+
+  /**
+   * The not-charged calls of {@link summarizeNotCharged} that did not fail the
+   * check, per asset and reason ({@link NOT_CHARGED_OTHER_REASON_SQL}), each
+   * with its distinct eligible buyers so the service can hold every published
+   * reason to the k rule on its own. Same window, same eligible buyers, same
+   * final-outcome cut as the totals, so the cells add up to
+   * `notChargedCalls - failedCheckCalls` per asset.
+   *
+   * **Deliberately cross-organization**, for the reason given on
+   * {@link findNotChargedCandidates}; the projection is counts per asset and
+   * reason, naming nobody.
+   */
+  async summarizeNotChargedReasons(window: NotChargedWindow): Promise<NotChargedReasonTotalsRow[]> {
+    const rows = await this.createQueryBuilder('intent')
+      .select('intent.assetId', 'asset')
+      .addSelect('intent.decimals', 'decimals')
+      .addSelect(NOT_CHARGED_OTHER_REASON_SQL, 'reason')
+      .addSelect('COUNT(*)', 'calls')
+      .addSelect('COUNT(DISTINCT intent.organization_id)', 'buyers')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.callClass = :paid', { paid: PAID_CALL_CLASS })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere(FINAL_OUTCOME_SQL)
+      .andWhere(NOT_CHARGED_SQL)
+      .andWhere(`NOT ${FAILED_CHECK_SQL}`)
+      .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
+      .andWhere(`${CREATED_AT} < :to`, { to: window.to })
+      .andWhere(ELIGIBLE_BUYER_SQL)
+      .setParameters({
+        withheldStatuses: WITHHELD_STATUSES,
+        refundedStatus: REFUNDED_STATUS,
+        settledStatus: SETTLED_STATUS,
+        outcomeBefore: window.outcomeBefore,
+        buyerCreatedBefore: window.buyerCreatedBefore,
+        buyerCollectedBefore: window.buyerCollectedBefore,
+      })
+      .groupBy('intent.assetId')
+      .addGroupBy('intent.decimals')
+      .addGroupBy('3')
+      .orderBy('intent.assetId', 'ASC')
+      .getRawMany<{
+        asset: string;
+        decimals: string | number;
+        reason: NotChargedOtherReason;
+        calls: string;
+        buyers: string;
+      }>();
+
+    return rows.map((row) => ({
+      asset: row.asset,
+      decimals: Number(row.decimals),
+      reason: row.reason,
+      calls: Number(row.calls),
+      buyers: Number(row.buyers),
     }));
   }
 
