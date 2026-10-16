@@ -30,6 +30,7 @@
  *       npx ts-node -r tsconfig-paths/register scripts/testnet/e2-delegation-anvil.ts
  */
 import { writeFileSync } from 'node:fs';
+import { resolve } from 'node:path';
 
 import {
   createPublicClient,
@@ -64,11 +65,12 @@ import { RelayedEscrowIntent } from '@modules/settlement/ports/relayed-escrow-in
 import { MoneyUtil } from '@shared/utils/money.util';
 
 const RPC = process.env.E2_RPC_URL ?? 'http://127.0.0.1:8547';
+// Defaults assume the e2e workspace sits next to this repo; override with the env vars.
 const EVIDENCE =
   process.env.E2_EVIDENCE ??
-  '/path/to/workspace/e2e/apps/evidence/delegation-anvil-proof.json';
+  resolve(__dirname, '../../../e2e/apps/evidence/delegation-anvil-proof.json');
 const CLI_LIB =
-  process.env.E2_AGENT_CLI_LIB ?? '/path/to/workspace/e2e/apps/agent-cli/lib.mjs';
+  process.env.E2_AGENT_CLI_LIB ?? resolve(__dirname, '../../../e2e/apps/agent-cli/lib.mjs');
 
 const CHAIN: ChainId = 'eip155:46630' as ChainId;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11';
