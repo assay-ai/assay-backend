@@ -48,12 +48,25 @@ import { TtlCache } from '../domain/ttl-cache';
 /** How long one market read is reused, signed-in and public alike. */
 export const CATALOGUE_CACHE_MS = 30_000;
 
-/** The listed market: what {@link CatalogueService.listedMarket} reads once per window. */
+/** The listed market: what {@link CatalogueService.loadMarket} reads once per window. */
 interface ListedMarket {
   /** Every listed binding, at its published revision. */
   readonly bindings: readonly ToolBinding[];
   /** The provider rows behind {@link bindings} — ACTIVE providers only. */
   readonly rows: ReadonlyMap<string, ProviderEntity>;
+}
+
+/**
+ * One cache window: the market read once, and the two lists derived from that
+ * same read. The lists are built lazily — a reader of providers does not pay
+ * for the tool quotes — but once built they live and die with the market that
+ * produced them, so no answer is older than one window and no two answers in
+ * a window disagree about which bindings are listed.
+ */
+interface CatalogueWindow {
+  readonly market: ListedMarket;
+  providers?: Promise<CatalogueProviderListDto>;
+  tools?: Promise<CatalogueToolListDto>;
 }
 
 /**
@@ -102,24 +115,25 @@ interface ListedMarket {
  *
  * Nothing here depends on the caller — no session, no organization — so every
  * answer is shared by every reader, signed-in and public. The listed market
- * (bindings + provider rows), the provider list and the tool list are each
- * loaded at most once per {@link CATALOGUE_CACHE_MS}, and concurrent readers
- * share a load in flight. A provider detail for a listed provider is derived
- * from those, so requesting every listed id costs no query beyond the one
- * market read; only an unlisted id still reads its own row.
+ * (bindings + provider rows) is ONE cache entry per {@link CATALOGUE_CACHE_MS},
+ * and the provider list and the tool list are memoised on that entry rather
+ * than cached on their own clocks: a separate 30s cache on top of a market that
+ * may itself be 30s old stacked to a minute of staleness, and three independent
+ * caches let a detail page pair a fresh card with an older tool set. Concurrent
+ * readers share every load in flight. A provider detail for a listed provider is
+ * derived from the window, so requesting every listed id costs no query beyond
+ * the one market read; only an unlisted id still reads its own row.
  */
 @Injectable()
 export class CatalogueService {
   private readonly logger = new Logger(CatalogueService.name);
-  private readonly market = new TtlCache<ListedMarket>(CATALOGUE_CACHE_MS);
-  private readonly providerList = new TtlCache<CatalogueProviderListDto>(CATALOGUE_CACHE_MS);
-  private readonly toolList = new TtlCache<CatalogueToolListDto>(CATALOGUE_CACHE_MS);
+  private readonly windows = new TtlCache<CatalogueWindow>(CATALOGUE_CACHE_MS);
 
   constructor(
     private readonly bindings: ToolBindingRepository,
     private readonly versions: BindingVersionRepository,
     private readonly providers: ProviderRepository,
-    private readonly windows: SlaWindowRepository,
+    private readonly slaWindows: SlaWindowRepository,
     private readonly router: ProviderRouterService,
     @Inject(PROVIDER_STAKE_SOURCE) private readonly stakes: ProviderStakePort,
     @Inject(CHAIN_ENROLMENT_SOURCE) private readonly enrolments: ChainEnrolmentPort,
@@ -138,40 +152,67 @@ export class CatalogueService {
    * every list and count, exactly as if it had paused them all. Its own page
    * still answers, with no tools — see {@link getProvider}.
    */
-  private listedMarket(): Promise<ListedMarket> {
-    return this.market.get('all', async () => {
-      const rows = (await this.bindings.findActiveBindings()).filter(
-        (row) => !this.blocklist.organizationBlock(row.organizationId),
-      );
-      // As traffic is served, not as the row reads now: an unpublished draft
-      // must not show on a public page. A drifted row with no published snapshot
-      // comes back DRAFT and is dropped, exactly as the router drops it.
-      const served = (await toServedToolBindings(rows, this.versions)).filter(
-        (binding) => binding.status === BindingStatus.ACTIVE,
-      );
+  private async loadMarket(): Promise<ListedMarket> {
+    const rows = (await this.bindings.findActiveBindings()).filter(
+      (row) => !this.blocklist.organizationBlock(row.organizationId),
+    );
+    // As traffic is served, not as the row reads now: an unpublished draft
+    // must not show on a public page. A drifted row with no published snapshot
+    // comes back DRAFT and is dropped, exactly as the router drops it.
+    const served = (await toServedToolBindings(rows, this.versions)).filter(
+      (binding) => binding.status === BindingStatus.ACTIVE,
+    );
 
-      // A SUSPENDED or UNBONDING provider takes no new traffic — the router
-      // refuses it — so its bindings are left out of every list and count here,
-      // exactly like a PAUSED binding: a catalogue row is an invitation to call.
-      const providers = await this.providerRows([
-        ...new Set(served.map((binding) => binding.providerId)),
-      ]);
-      const active = new Map(
-        [...providers].filter(([, row]) => row.status === ProviderStatus.ACTIVE),
-      );
-      return {
-        bindings: served.filter((binding) => active.has(binding.providerId)),
-        rows: active,
-      };
-    });
+    // A SUSPENDED or UNBONDING provider takes no new traffic — the router
+    // refuses it — so its bindings are left out of every list and count here,
+    // exactly like a PAUSED binding: a catalogue row is an invitation to call.
+    const providers = await this.providerRows([
+      ...new Set(served.map((binding) => binding.providerId)),
+    ]);
+    const active = new Map(
+      [...providers].filter(([, row]) => row.status === ProviderStatus.ACTIVE),
+    );
+    return {
+      bindings: served.filter((binding) => active.has(binding.providerId)),
+      rows: active,
+    };
+  }
+
+  /** The current window — one market read, shared by every reader in it. */
+  private window(): Promise<CatalogueWindow> {
+    return this.windows.get('all', async () => ({ market: await this.loadMarket() }));
   }
 
   listProviders(): Promise<CatalogueProviderListDto> {
-    return this.providerList.get('all', () => this.loadProviders());
+    return this.window().then((window) => this.providersOf(window));
   }
 
-  private async loadProviders(): Promise<CatalogueProviderListDto> {
-    const { bindings, rows } = await this.listedMarket();
+  /** The window's provider list, built once from the window's own market. */
+  private providersOf(window: CatalogueWindow): Promise<CatalogueProviderListDto> {
+    if (!window.providers) {
+      const load = this.loadProviders(window.market);
+      window.providers = load;
+      // A failed derivation is not served for the rest of the window.
+      load.catch(() => {
+        if (window.providers === load) window.providers = undefined;
+      });
+    }
+    return window.providers;
+  }
+
+  /** The window's tool list, built once from the window's own market. */
+  private toolsOf(window: CatalogueWindow): Promise<CatalogueToolListDto> {
+    if (!window.tools) {
+      const load = this.loadTools(window.market);
+      window.tools = load;
+      load.catch(() => {
+        if (window.tools === load) window.tools = undefined;
+      });
+    }
+    return window.tools;
+  }
+
+  private async loadProviders({ bindings, rows }: ListedMarket): Promise<CatalogueProviderListDto> {
     const byProvider = groupBy(bindings, (binding) => binding.providerId);
     const providerIds = [...byProvider.keys()];
 
@@ -179,7 +220,7 @@ export class CatalogueService {
 
     const [stakes, quality] = await Promise.all([
       this.cardStakes(providerIds),
-      this.windows.qualityByProvider(providerIds),
+      this.slaWindows.qualityByProvider(providerIds),
     ]);
 
     const providers = providerIds
@@ -214,13 +255,14 @@ export class CatalogueService {
    * the id exists, which is the leak `surface-consistency.spec.ts` bans.
    */
   async getProvider(providerId: string): Promise<CatalogueProviderDetailDto> {
-    // A listed provider's card is already in the cached list, and its bindings
-    // in the cached market: no query of its own.
-    const [{ providers }, { bindings }, tools] = await Promise.all([
-      this.listProviders(),
-      this.listedMarket(),
+    // A listed provider's card and its bindings come from ONE window, so the
+    // card's counts and `toolIds` always match its `tools`; no query of its own.
+    const window = await this.window();
+    const [{ providers }, tools] = await Promise.all([
+      this.providersOf(window),
       this.catalogue.listTools(),
     ]);
+    const { bindings } = window.market;
     const card = providers.find((provider) => provider.providerId === providerId);
     const names = new Map(tools.map((tool: Tool) => [tool.id, tool.name]));
 
@@ -239,7 +281,7 @@ export class CatalogueService {
 
     const [stakes, quality] = await Promise.all([
       this.cardStakes([providerId]),
-      this.windows.qualityByProvider([providerId]),
+      this.slaWindows.qualityByProvider([providerId]),
     ]);
 
     return {
@@ -295,14 +337,11 @@ export class CatalogueService {
    * provider's rate limit.
    */
   listTools(): Promise<CatalogueToolListDto> {
-    return this.toolList.get('all', () => this.loadTools());
+    return this.window().then((window) => this.toolsOf(window));
   }
 
-  private async loadTools(): Promise<CatalogueToolListDto> {
-    const [{ bindings }, contracts] = await Promise.all([
-      this.listedMarket(),
-      this.catalogue.listTools(),
-    ]);
+  private async loadTools({ bindings }: ListedMarket): Promise<CatalogueToolListDto> {
+    const contracts = await this.catalogue.listTools();
 
     const byTool = groupBy(bindings, (binding) => binding.toolId);
     const listed = contracts.filter((tool: Tool) => byTool.has(tool.id));

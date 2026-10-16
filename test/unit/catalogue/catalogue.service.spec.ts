@@ -1206,6 +1206,79 @@ describe('the catalogue, query counts within one cache window', () => {
 });
 
 /**
+ * Review 2026-10-17 P3: the provider list and the tool list used to cache on
+ * their own 30s clocks on top of a market cache that could itself be 30s old,
+ * and a detail page read all three separately. Now one window holds the market
+ * and both lists derived from it.
+ */
+describe('the catalogue, one consistent window', () => {
+  const ID = '4d4d4d4d-4444-4444-8444-444444444444';
+
+  afterEach(() => jest.restoreAllMocks());
+
+  function wired() {
+    let now = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    // Mutated in place: `findActiveBindings` reads it on every call.
+    const rows = [binding({ organizationId: ID, toolId: WEATHER.id })];
+    const wiredService = build({ bindings: rows, providers: [provider({ organizationId: ID })] });
+    return {
+      ...wiredService,
+      rows,
+      advance: (ms: number) => {
+        now += ms;
+      },
+    };
+  }
+
+  it('a provider detail’s tools always match its card’s counts and toolIds', async () => {
+    const { service, rows, advance } = wired();
+
+    await service.listTools();
+    rows.push(binding({ organizationId: ID, toolId: RATE.id }));
+    advance(CATALOGUE_CACHE_MS / 2);
+    await service.listProviders();
+    rows.push(binding({ organizationId: ID, toolId: RATE.id, priceAmount: '100000' }));
+
+    for (const step of [0, CATALOGUE_CACHE_MS / 2 + 1, 1, CATALOGUE_CACHE_MS]) {
+      advance(step);
+      const detail = await service.getProvider(ID);
+      expect(detail.tools).toHaveLength(detail.activeBindings);
+      expect([...new Set(detail.tools.map((tool) => tool.toolId))].sort()).toEqual(detail.toolIds);
+    }
+  });
+
+  it('no list is ever more than one window older than the market', async () => {
+    const { service, rows, advance } = wired();
+
+    // The market is read first through the tool list; the provider list is
+    // first asked for late in that same window.
+    await service.listTools();
+    rows.push(binding({ organizationId: ID, toolId: RATE.id }));
+    advance(CATALOGUE_CACHE_MS - 1);
+    const late = await service.listProviders();
+    expect(late.providers[0].activeBindings).toBe(1);
+
+    advance(2);
+    const fresh = await service.listProviders();
+    expect(fresh.providers[0].activeBindings).toBe(2);
+    expect(fresh.providers[0].toolIds).toEqual([RATE.id, WEATHER.id].sort());
+    const tools = await service.listTools();
+    expect(tools.tools.map((tool) => tool.id).sort()).toEqual([RATE.id, WEATHER.id].sort());
+  });
+
+  it('shares one in-flight market read between lists and details', async () => {
+    const { service, bindings, providers, windows } = wired();
+
+    await Promise.all([service.listProviders(), service.listTools(), service.getProvider(ID)]);
+
+    expect(bindings.findActiveBindings).toHaveBeenCalledTimes(1);
+    expect(providers.find).toHaveBeenCalledTimes(1);
+    expect(windows.qualityByProvider).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
  * A saved-but-unpublished draft lives on the same `tool_bindings` row as the
  * live binding, while traffic is served from the published `binding_versions`
  * snapshot. Every catalogue figure — signed-in and public — must be the
