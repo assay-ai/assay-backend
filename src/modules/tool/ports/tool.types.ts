@@ -120,6 +120,7 @@ export interface ToolBinding {
   readonly settlementChains: readonly ChainId[];
 
   readonly freeQuotaPerAgent: number | null;
+  /** Free calls per day across all agents (a count, not money); `null` = platform default. */
   readonly freeDailyBudget: number | null;
 
   /**
