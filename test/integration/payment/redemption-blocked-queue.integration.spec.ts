@@ -125,26 +125,19 @@ describe('redemption queue with blocked parties, against a real database', () =>
     expect(rows.map((row) => row.agentAccount)).toEqual([HONEST, HONEST, HONEST]);
   });
 
-  it('a blocked provider holds its row and the same payer’s later seqs, not earlier ones', async () => {
-    const rows = await find({
-      organizationIds: [otherProvider],
-      walletKeys: [],
-      chainAccounts: [],
-    });
-    const honest = rows.filter((row) => row.agentAccount === HONEST);
-    expect(rows).toHaveLength(VOUCHER_REDEMPTION_BATCH);
-    // Only the provider is excluded here, so the unblocked BLOCKED payer fills
-    // the batch again; the point is the next query.
-    expect(honest).toEqual([]);
-
+  it('a blocked provider or payee does not hold its row: the pass forfeits it instead', async () => {
+    // Finding 14: holding a provider-blocked row until it expired ended in the
+    // platform paying the provider. The row is returned, so the pass can make
+    // the provider forfeit it at once, and the payer's later seqs come too.
     const onlyHonest = await find({
       organizationIds: [otherProvider],
-      walletKeys: ['eip155:0x0000000000000000000000000000000000000abc'],
-      chainAccounts: [],
+      walletKeys: [
+        'eip155:0x0000000000000000000000000000000000000abc',
+        `eip155:${OTHER_PAYEE.split(':')[2].toLowerCase()}`,
+      ],
+      chainAccounts: [OTHER_PAYEE.toLowerCase()],
     });
-    // seq 1 (to the unblocked provider) goes; seq 2 (the blocked provider) is
-    // held, and seq 3 is held behind it so it cannot advance seq_high past 2.
-    expect(onlyHonest.map((row) => row.voucherSeq)).toEqual(['1']);
+    expect(onlyHonest.map((row) => row.voucherSeq)).toEqual(['1', '2', '3']);
   });
 
   it('the redemption pass redeems the honest buyer behind more than a batch of held rows', async () => {
@@ -160,7 +153,6 @@ describe('redemption queue with blocked parties, against a real database', () =>
     const service = new VoucherRedemptionService(
       payments,
       { commitRedeemedHold: jest.fn(), releaseHold: jest.fn() } as never,
-      { appendNow: jest.fn() } as never,
       redeemer as never,
       { emit: async () => undefined } as never,
       blocklistOf({ kind: BlockSubjectKind.WALLET, subject: BLOCKED }),

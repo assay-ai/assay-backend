@@ -10,6 +10,8 @@ import {
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
+import { FREE_QUOTA_CONFIG, FreeQuotaConfig } from '@modules/free-tier/config/free-quota.config';
+import { freeCallsPerDay } from '@modules/free-tier/domain/free-calls-per-day';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { RoutingContext } from '@modules/tool/domain/routing';
@@ -23,7 +25,7 @@ import {
   ProviderStakePort,
 } from '@modules/provider/ports/provider-stake.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { Tool } from '@modules/tool/ports/tool.types';
+import { PricingMode, Tool } from '@modules/tool/ports/tool.types';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
 
@@ -83,6 +85,7 @@ export class CatalogueService {
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
     private readonly blocklist: AccountBlocklistService,
+    @Inject(FREE_QUOTA_CONFIG) private readonly freeQuota: FreeQuotaConfig,
   ) {}
 
   /**
@@ -251,8 +254,16 @@ export class CatalogueService {
         fromPrice: cheapest(own),
         price: quote.price ? toMoneyDto(quote.price) : null,
         pricingMode: quote.pricingMode,
+        freeCallsPerDay:
+          quote.pricingMode === PricingMode.FREE || quote.pricingMode === PricingMode.FREEMIUM
+            ? // The router's routable free-capable bindings at their published
+              // revision, capped by the platform ceiling — never raw draft rows,
+              // so this and `tools/list` print the same N (review L2).
+              freeCallsPerDay(quote.freeBindings ?? [], this.freeQuota)
+            : null,
         routable: quote.price !== null,
         routableBindings: quote.routableBindings,
+        paidBindings: quote.paidBindings ?? 0,
         unroutableReason: quote.unroutableReason,
         // The settles-elsewhere caveat, off the router's own union — the same value and the
         // same spelling `tools/list` publishes as `x402/settlementChains`. NOT

@@ -173,6 +173,61 @@ describe('prevalidateVoucher', () => {
   });
 });
 
+describe('prevalidateVoucher — a delegate-signed voucher', () => {
+  const GRANT = {
+    maxVoucherAmount: 1_000_000n,
+    maxPerWindow: 5_000_000n,
+    spentInWindow: 0n,
+    windowStartedAt: NOW - 3_600,
+    validUntil: BigInt(NOW + 86_400),
+    revoked: false,
+  };
+  const withGrant = (patch: Partial<typeof GRANT> & { canSign?: boolean }) => ({
+    ...STATE,
+    delegation: { ...GRANT, ...patch },
+  });
+
+  it('accepts a live grant, before and after the tighten delay', () => {
+    expect(prevalidateVoucher(GOOD, withGrant({}))).toBeNull();
+    expect(prevalidateVoucher(GOOD, withGrant({ canSign: true }))).toBeNull();
+  });
+
+  it('without the tighten delay, a revocation is final at once', () => {
+    expect(prevalidateVoucher(GOOD, withGrant({ revoked: true }))).toBe('DelegateIsRevoked');
+  });
+
+  it('with it (D-21), a revoked grant the chain says can still sign is redeemable', () => {
+    // The voucher was signed before the revocation; `effectiveCapsOf` gives
+    // the held caps until revocation + TIGHTEN_DELAY_SECONDS.
+    expect(prevalidateVoucher(GOOD, withGrant({ revoked: true, canSign: true }))).toBeNull();
+  });
+
+  it('names a grant that cannot sign by why: revoked, else expired', () => {
+    expect(prevalidateVoucher(GOOD, withGrant({ revoked: true, canSign: false }))).toBe(
+      'DelegateIsRevoked',
+    );
+    expect(prevalidateVoucher(GOOD, withGrant({ canSign: false }))).toBe('DelegateIsExpired');
+  });
+
+  it('keeps nowSeconds > validUntil as DelegateIsExpired whatever the chain answered', () => {
+    const lapsed = { validUntil: BigInt(NOW - 1) };
+    expect(prevalidateVoucher(GOOD, withGrant({ ...lapsed, canSign: true }))).toBe(
+      'DelegateIsExpired',
+    );
+    expect(prevalidateVoucher(GOOD, withGrant(lapsed))).toBe('DelegateIsExpired');
+  });
+
+  it('a grant never written is not a delegate at all', () => {
+    expect(prevalidateVoucher(GOOD, withGrant({ validUntil: 0n }))).toBe('SignerIsNotPayer');
+  });
+
+  it('applies the caps it is given — the effective ones once the chain has D-21', () => {
+    expect(prevalidateVoucher(GOOD, withGrant({ maxVoucherAmount: 999_999n }))).toBe(
+      'DelegateVoucherExceedsPerCallLimit',
+    );
+  });
+});
+
 describe('decayWindow', () => {
   /**
    * `Window.decay` in `assay-evm/src/libraries/Window.sol`, ported verbatim from

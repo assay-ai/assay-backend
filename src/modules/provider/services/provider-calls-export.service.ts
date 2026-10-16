@@ -8,6 +8,11 @@ import {
 } from '@database/postgres/repositories/payment-intent.repository';
 import { isAssetId } from '@modules/chains/ports/caip.types';
 import {
+  DEBT_VOIDED_PREFIX,
+  PROVIDER_FORFEIT_PREFIX,
+  UNCOLLECTED_PREFIX,
+} from '@modules/payment/constants/voucher-redemption.constants';
+import {
   CallReconciliationClass,
   classifyForReconciliation,
 } from '@modules/provider/domain/call-reconciliation';
@@ -108,7 +113,7 @@ export class ProviderCallsExportService {
       }
 
       const last = page[page.length - 1];
-      after = { createdAt: last.createdAt, id: last.id };
+      after = { createdAt: last.createdAtExact, id: last.id };
 
       if (page.length < take) break;
     }
@@ -182,14 +187,25 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
       | 'EXPIRED',
     classification: row.classification as 'DATA_RESULT' | 'SYSTEM_ERROR' | 'REQUEST_ERROR' | null,
     awaitingRedemption: row.awaitingRedemption,
-    platformAbsorbed: row.absorbedReason !== null,
+    debtOutstanding: row.debtOutstanding,
+    uncollected:
+      row.absorbedReason !== null ||
+      (row.redemptionLastError?.startsWith(UNCOLLECTED_PREFIX) ?? false),
+    forfeited: row.redemptionLastError?.startsWith(PROVIDER_FORFEIT_PREFIX) ?? false,
+    voided: row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false,
     credited: row.credited,
   });
+  // A debt voided by a late rejecting verdict: nothing collected or credited.
+  const voided =
+    row.status === 'SETTLED' && (row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false);
+  // Forfeited by the provider: nothing was collected, credited or taken.
+  const forfeited = classification === CallReconciliationClass.PROVIDER_FORFEITED;
+  // Never collected (a written-off debt, or a legacy absorb): nothing was
+  // credited or taken, and nobody owes it — the platform never pays.
+  const uncollected = classification === CallReconciliationClass.PAID_UNCOLLECTED;
   // SETTLED but classified PENDING: no credit was written for it.
   const uncredited = row.status === 'SETTLED' && classification === CallReconciliationClass.PENDING;
-  // Paid from platform funds: nothing was redeemed, so no fee was taken, and
-  // the reason is the program error the redemption came back with.
-  const absorbed = classification === CallReconciliationClass.PLATFORM_ABSORBED;
+  const debt = classification === CallReconciliationClass.PAID_BUYER_DEBT;
 
   return [
     row.callId,
@@ -198,14 +214,18 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     row.toolId,
     row.status,
     classification,
-    absorbed
-      ? row.absorbedReason
-      : uncredited
-        ? (row.statusReason ?? 'settled, no credit recorded')
-        : row.statusReason,
+    forfeited || voided || (uncollected && row.absorbedReason === null)
+      ? row.redemptionLastError
+      : uncollected
+        ? `${UNCOLLECTED_PREFIX}legacy_platform_absorbed:${row.absorbedReason}`
+        : debt
+          ? `buyer_debt:${row.redemptionLastError ?? 'unknown'}`
+          : uncredited
+            ? (row.statusReason ?? 'settled, no credit recorded')
+            : row.statusReason,
     row.verificationVerdict,
-    row.providerAmount,
-    absorbed ? '0' : row.platformFee,
+    forfeited || uncollected || voided ? '0' : row.providerAmount,
+    forfeited || uncollected || voided ? '0' : row.platformFee,
     row.priceAmount,
     row.asset,
     row.decimals,

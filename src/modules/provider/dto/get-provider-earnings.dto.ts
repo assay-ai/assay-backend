@@ -34,8 +34,11 @@ export class GetProviderEarningsQueryDto {
  *
  * `earned` and `platformFee` are both `Σ` over credited `SETTLED` intents only —
  * `payment_intents.provider_amount` / `.platform_fee` respectively, which the
- * `provider_amount + platform_fee = price_amount` CHECK keeps in lockstep —
- * except that `platformFee` leaves out `absorbed` calls, which took no fee.
+ * `provider_amount + platform_fee = price_amount` CHECK keeps in lockstep.
+ * Credited means paid out of the BUYER's escrow: the platform never pays or
+ * owes a provider, so a call that was not collected (`forfeited`,
+ * `uncollected`) is in neither, and an open buyer debt (`debtOutstanding`) is
+ * not earned until the buyer settles it.
  * `withheld` is the earnings screen's "withheld itemised with reasons": `Σ
  * provider_amount` over intents that reached a terminal state paying the
  * provider nothing (`REFUNDED`, `VOIDED`, `EXPIRED`, restricted to intents that
@@ -78,14 +81,41 @@ export class ProviderEarningsFiguresDto {
     type: MoneyDto,
     nullable: true,
     description:
-      'The part of `earned` credited from platform funds because the voucher could never be ' +
-      'redeemed (the buyer kept the money). Owed to the provider by the platform; it never ' +
-      'reached the provider wallet on chain. `null` — see `earned`.',
+      'Σ provider_amount over SETTLED calls the provider FORFEITED: it caused the payment to ' +
+      'fail (stake below the minimum, or blocked), so the buyer was not charged and nobody — ' +
+      'the platform included — pays it. Not in `earned`. `null` — see `earned`.',
   })
-  absorbed: MoneyDto | null;
+  forfeited: MoneyDto | null;
 
-  @ApiProperty({ description: 'Calls counted in `absorbed`' })
-  absorbedCalls: number;
+  @ApiProperty({ description: 'Calls counted in `forfeited`' })
+  forfeitedCalls: number;
+
+  @ApiProperty({
+    type: MoneyDto,
+    nullable: true,
+    description:
+      'Σ provider_amount over SETTLED calls whose payment is BUYER DEBT: it could not be ' +
+      'collected yet, the price is still held in the buyer’s escrow, and the provider is paid ' +
+      'from it once the buyer signs a replacement voucher (or never, if the debt is written ' +
+      'off after 30 days). Not in `earned`. `null` — see `earned`.',
+  })
+  debtOutstanding: MoneyDto | null;
+
+  @ApiProperty({ description: 'Calls counted in `debtOutstanding`' })
+  debtOutstandingCalls: number;
+
+  @ApiProperty({
+    type: MoneyDto,
+    nullable: true,
+    description:
+      'Σ provider_amount over SETTLED calls never collected: a buyer debt written off after 30 ' +
+      'days (and historical calls absorbed before buyer debt existed). Nobody owes it. Not in ' +
+      '`earned`. `null` — see `earned`.',
+  })
+  uncollected: MoneyDto | null;
+
+  @ApiProperty({ description: 'Calls counted in `uncollected`' })
+  uncollectedCalls: number;
 }
 
 export class ProviderEarningsGroupDto extends ProviderEarningsFiguresDto {

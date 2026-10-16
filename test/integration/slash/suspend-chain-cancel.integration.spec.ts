@@ -17,7 +17,6 @@ import { ChainNamespace } from '@modules/chains/ports/caip.types';
 import { OperatorRole } from '@modules/operator/domain/override-register';
 import { OperatorSession } from '@modules/operator/ports/operator-session.port';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
-import { ArbitrationOutcome, DisputeClaimType } from '@modules/slash/domain/arbitration';
 import { SlashErrorCode } from '@modules/slash/errors/slash.errors';
 import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
@@ -39,14 +38,16 @@ import {
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
 
 /**
- * A suspension, and what it does about the record standing on chain — over a
- * real Postgres built from every migration and the `X402Stake` emulator.
+ * A case closed in the app while its record stands on chain — over a real
+ * Postgres built from every migration and the `X402Stake` emulator.
  *
- * A case is proposed on chain about a minute after the provider is told, so a
- * suspended case usually has a `Pending` record with the provider's stake
- * reserved, and `executeSlash` is permissionless once the timelock passes. The
- * suspension has to ask for the cancel, the lifecycle has to repair a request
- * that was lost or raced, and an execution that beats the cancel has to be
+ * An EVM case is no longer suspended off chain (review N-2: the arbiter's
+ * `cancelSlash` is the way to stop it), and that refusal must write nothing.
+ * Cases closed in the app before that are still in the database with a
+ * `Pending` record and the provider's stake reserved, and `executeSlash` is
+ * permissionless once the timelock passes: the repair tick has to ask for
+ * their cancel, a case closed while its proposal is in flight has to end
+ * `CANCEL_REQUESTED`, and an execution that beats the cancel has to be
  * recorded as what it was.
  */
 const DATABASE = 'x402_suspend_chain_cancel_test';
@@ -57,18 +58,14 @@ const PROVIDER = '0xA271A3407D3302f4b4Fbe469b9188487cedd7d45';
 const PROVIDER_2 = '0x2222222222222222222222222222222222222223';
 const A = `${CHAIN}:0x976ea74026e726554db657fa54763abd0c3a0aa9`;
 const B = `${CHAIN}:0x64fecbe18e8998cb2990bce631a042f8e2be1659`;
-const HOUR = 3_600_000;
 const PENALTY = 200_000n;
-const NOTE = 'n'.repeat(120);
 
-describe('suspending a case with a record standing on chain, against a real database', () => {
+describe('a closed case with a record standing on chain, against a real database', () => {
   let dataSource: DataSource;
   let chain: FakeStakeChain;
   let evm: EvmSlashExecutor;
   let services: ProRataSlashServices;
   let arbitration: ArbitrationService;
-  /** The same arbitration service with no chain half: the request that is never made. */
-  let arbitrationWithoutChain: ArbitrationService;
   let adjudicator: OperatorSession;
 
   beforeAll(async () => {
@@ -136,7 +133,6 @@ describe('suspending a case with a record standing on chain, against a real data
       new NamespaceSlashCapsReader(new Map([[ChainNamespace.EIP155, evm]])),
     );
     arbitration = arbitrationOver(services.execution);
-    arbitrationWithoutChain = arbitrationOver(null);
   });
 
   function arbitrationOver(execution: SlashExecutionService | null): ArbitrationService {
@@ -206,11 +202,8 @@ describe('suspending a case with a record standing on chain, against a real data
       [proposalId],
     )) as { kind: string; detail: Record<string, unknown> }[];
 
-  const suspend = (
-    service: ArbitrationService,
-    seeded: { organizationId: string; proposalId: string },
-  ) =>
-    service.suspend(
+  const suspend = (seeded: { organizationId: string; proposalId: string }) =>
+    arbitration.suspend(
       adjudicator,
       seeded.organizationId,
       seeded.proposalId,
@@ -218,87 +211,74 @@ describe('suspending a case with a record standing on chain, against a real data
       'held while the mapping is checked',
     );
 
-  it('asks for the on-chain cancel, and the cancel transaction can then be built', async () => {
+  /**
+   * A case this platform closed while its record stood on chain, before
+   * review N-2 refused EVM suspensions: what `S-1` wrote (`CANCELLED`, no
+   * outcome, no resolution), and no cancel request — the request that was lost.
+   * Such cases are still in the database, and the repair tick is what asks for
+   * their on-chain cancel.
+   */
+  const closeInApp = (seeded: { proposalId: string }) =>
+    dataSource.query(
+      `UPDATE slash_proposals
+          SET status = 'CANCELLED', resolution_kind = NULL, resolved_at = NULL, outcome = NULL
+        WHERE id = $1`,
+      [seeded.proposalId],
+    );
+
+  it('refuses to suspend an EVM case off chain, and writes nothing (review N-2)', async () => {
     const seeded = await standing();
+    const before = await row(seeded.proposalId);
+    const timeline = await events(seeded.proposalId);
     const sends = chain.sent.length;
 
-    await suspend(arbitration, seeded);
-
-    expect(await row(seeded.proposalId)).toMatchObject({
-      status: 'CANCELLED',
-      chain_status: 'CANCEL_REQUESTED',
+    await expect(suspend(seeded)).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
     });
-    expect((await events(seeded.proposalId)).map((event) => event.kind)).toEqual(
-      expect.arrayContaining(['CANCELLED', 'CHAIN_CANCEL_REQUESTED']),
-    );
 
-    const parts = await services.partsRepository.findForEpoch(
-      seeded.organizationId,
-      seeded.proposalId,
-      0,
-    );
-    const intent = await services.execution.buildCancelIntent(
-      seeded.organizationId,
-      seeded.proposalId,
-    );
-    expect(intent).toMatchObject({ admin: FAKE_ARBITER, signerRole: 'ARBITER' });
-    expect(parts.map((part) => part.chainRequestId)).toContain(intent.requestId);
-
-    // Requested and built — nothing was signed or sent, and the record stands.
+    expect(await row(seeded.proposalId)).toEqual(before);
+    expect(await events(seeded.proposalId)).toEqual(timeline);
     expect(chain.sent).toHaveLength(sends);
-    for (const part of parts) expect(chain.record(part.chainRequestId)?.status).toBe(1);
-    // The admin-cancel sweep now watches it; this platform will not execute it.
-    expect(await services.execution.sweepAdminCancels(nowOf())).toEqual({
-      mirrored: 0,
-      expired: 0,
-      waiting: 1,
-    });
-    chain.now += BigInt(73 * 3600);
-    expect(await services.execution.executeDue(nowOf())).toEqual({
-      executed: 0,
-      voided: 0,
-      failed: 0,
-    });
-  });
-
-  it('asks for nothing when no record stands on chain, and none is proposed afterwards', async () => {
-    const seeded = await seed();
-
-    await suspend(arbitration, seeded);
-
-    expect(await row(seeded.proposalId)).toMatchObject({
-      status: 'CANCELLED',
-      chain_status: 'NONE',
-    });
-    expect(await services.execution.proposeDue(nowOf())).toEqual({
-      proposed: 0,
-      refused: 0,
-      failed: 0,
-    });
-    expect(chain.sent).toHaveLength(0);
+    // Nothing was asked of the arbiter: the record stands and is executed as usual.
     await expect(
       services.execution.buildCancelIntent(seeded.organizationId, seeded.proposalId),
     ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION });
+    expect(await services.execution.requestCancelsForClosedCases()).toBe(0);
+  });
+
+  it('refuses to suspend an EVM case with nothing on chain yet, and still proposes it', async () => {
+    const seeded = await seed();
+
+    await expect(suspend(seeded)).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
+    });
+
+    expect(await row(seeded.proposalId)).toMatchObject({
+      status: 'PROPOSED',
+      chain_status: 'NONE',
+    });
+    expect(await services.execution.proposeDue(nowOf())).toMatchObject({ proposed: 1 });
+    expect((await row(seeded.proposalId)).chain_status).toBe('PENDING');
   });
 
   describe('the repair tick', () => {
-    it('asks for the cancel of a suspended case whose request was lost', async () => {
+    it('asks for the cancel of a case closed in the app whose record still stands', async () => {
       const seeded = await standing();
-      await suspend(arbitrationWithoutChain, seeded);
-      expect(await row(seeded.proposalId)).toMatchObject({
-        status: 'CANCELLED',
-        chain_status: 'PENDING',
-      });
+      await closeInApp(seeded);
       // Watched by nothing, which is the gap.
       expect(await services.execution.sweepAdminCancels(nowOf())).toEqual({
         mirrored: 0,
         expired: 0,
         waiting: 0,
       });
+      const sends = chain.sent.length;
 
       expect(await services.execution.requestCancelsForClosedCases()).toBe(1);
 
-      expect((await row(seeded.proposalId)).chain_status).toBe('CANCEL_REQUESTED');
+      expect(await row(seeded.proposalId)).toMatchObject({
+        status: 'CANCELLED',
+        chain_status: 'CANCEL_REQUESTED',
+      });
       // Idempotent: nothing left to find, and one timeline entry.
       expect(await services.execution.requestCancelsForClosedCases()).toBe(0);
       expect(
@@ -306,26 +286,44 @@ describe('suspending a case with a record standing on chain, against a real data
           (event) => event.kind === 'CHAIN_CANCEL_REQUESTED',
         ),
       ).toHaveLength(1);
-      await expect(
-        services.execution.buildCancelIntent(seeded.organizationId, seeded.proposalId),
-      ).resolves.toMatchObject({ admin: FAKE_ARBITER });
+
+      const parts = await services.partsRepository.findForEpoch(
+        seeded.organizationId,
+        seeded.proposalId,
+        0,
+      );
+      const intent = await services.execution.buildCancelIntent(
+        seeded.organizationId,
+        seeded.proposalId,
+      );
+      expect(intent).toMatchObject({ admin: FAKE_ARBITER, signerRole: 'ARBITER' });
+      expect(parts.map((part) => part.chainRequestId)).toContain(intent.requestId);
+
+      // Requested and built — nothing was signed or sent, and the record stands.
+      expect(chain.sent).toHaveLength(sends);
+      for (const part of parts) expect(chain.record(part.chainRequestId)?.status).toBe(1);
+      // The admin-cancel sweep now watches it; this platform will not execute it.
+      expect(await services.execution.sweepAdminCancels(nowOf())).toEqual({
+        mirrored: 0,
+        expired: 0,
+        waiting: 1,
+      });
+      chain.now += BigInt(73 * 3600);
+      expect(await services.execution.executeDue(nowOf())).toEqual({
+        executed: 0,
+        voided: 0,
+        failed: 0,
+      });
     });
 
     it('does the same for an overturned case', async () => {
-      // The emulator's clock is not the wall clock, and an objection is filed
-      // against the wall clock: keep the response window open for it.
-      const seeded = await standing({ respondByAt: new Date(Date.now() + HOUR) });
-      await arbitrationWithoutChain.fileDispute(seeded.organizationId, seeded.proposalId, {
-        claimType: DisputeClaimType.AGENT_GRIEFING,
-        reason: 'one agent sent every failing call',
-        evidence: [],
-        openedBy: 'provider@example.test',
-      });
-      await arbitrationWithoutChain.decide(adjudicator, seeded.organizationId, seeded.proposalId, {
-        outcome: ArbitrationOutcome.OVERTURNED_GRIEFING,
-        reasonCodes: ['SINGLE_AGENT_CONCENTRATION'],
-        note: NOTE,
-      });
+      const seeded = await standing();
+      // The in-app era's platform-miss overturn: closed in the provider's favour.
+      await dataSource.query(
+        `UPDATE slash_proposals SET status = 'OVERTURNED', resolution_kind = 'AUTO_PLATFORM_MISS',
+           resolved_at = now() WHERE id = $1`,
+        [seeded.proposalId],
+      );
       expect(await row(seeded.proposalId)).toMatchObject({
         status: 'OVERTURNED',
         chain_status: 'PENDING',
@@ -355,14 +353,14 @@ describe('suspending a case with a record standing on chain, against a real data
     });
   });
 
-  it('ends CANCEL_REQUESTED when the suspension lands while the proposal is in flight', async () => {
+  it('ends CANCEL_REQUESTED when the case is closed while the proposal is in flight', async () => {
     const seeded = await seed();
     const propose = services.parts.propose.bind(services.parts);
     jest.spyOn(services.parts, 'propose').mockImplementation(async (proposal, provider) => {
       const result = await propose(proposal, provider);
-      // The record is on chain; the mirror is not written yet. The suspension
-      // finds PROPOSING and has nothing to cancel.
-      await suspend(arbitration, seeded);
+      // The record is on chain; the mirror is not written yet. The case is
+      // closed now, at PROPOSING, with nothing to cancel yet.
+      await closeInApp(seeded);
       expect(await row(seeded.proposalId)).toMatchObject({
         status: 'CANCELLED',
         chain_status: 'PROPOSING',
@@ -380,9 +378,10 @@ describe('suspending a case with a record standing on chain, against a real data
     ).resolves.toMatchObject({ admin: FAKE_ARBITER });
   });
 
-  it('records a third party executing the suspended case before the cancel was signed', async () => {
+  it('records a third party executing a closed case before the cancel was signed', async () => {
     const seeded = await standing();
-    await suspend(arbitration, seeded);
+    await closeInApp(seeded);
+    expect(await services.execution.requestCancelsForClosedCases()).toBe(1);
     const parts = await services.partsRepository.findForEpoch(
       seeded.organizationId,
       seeded.proposalId,
@@ -403,7 +402,7 @@ describe('suspending a case with a record standing on chain, against a real data
     await services.execution.sweepAdminCancels(nowOf());
 
     const saved = await row(seeded.proposalId);
-    // The suspension stands, and the money that moved is on the row beside it.
+    // The closure stands, and the money that moved is on the row beside it.
     expect(saved).toMatchObject({
       status: 'CANCELLED',
       chain_status: 'EXECUTED',

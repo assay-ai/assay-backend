@@ -61,11 +61,22 @@ export class ReconciliationClassRowDto {
     type: MoneyDto,
     nullable: true,
     description:
-      'Σ provider_amount over this class’s SETTLED rows — what reached the provider, net of ' +
-      'the platform fee; the rows sum to `net` below. ' +
-      '`null` only when the whole window has no resolvable asset (see `asset` on the response).',
+      'NET. Σ provider_amount over this class’s SETTLED rows with a committed hold — what ' +
+      'reached the provider, after the platform fee; the rows sum to `net` below, not to ' +
+      '`gross`. `null` only when the whole window has no resolvable asset (see `asset` on the ' +
+      'response).',
   })
   credited: MoneyDto | null;
+
+  @ApiProperty({
+    type: MoneyDto,
+    nullable: true,
+    description:
+      'GROSS. Σ price_amount over the same rows as `credited` — what the buyer was billed, ' +
+      'before the platform fee. The rows sum to `gross` on the response; `gross − credited` ' +
+      'is the platform fee taken on this class. `null` exactly when `credited` is.',
+  })
+  gross: MoneyDto | null;
 
   @ApiProperty({ description: 'The one-line reason a human reads next to the number' })
   note: string;
@@ -156,30 +167,39 @@ export class GetProviderReconciliationResponseDto {
     type: MoneyDto,
     nullable: true,
     description:
-      'Σ price_amount over the SETTLED rows — what was billed for this window ' +
-      '(`net + platformTake`)',
+      'GROSS. Σ price_amount over the SETTLED rows with a committed hold — what buyers were ' +
+      'billed for this window, before the platform fee. Equals `net + platformTake` and the ' +
+      'sum of `classBreakdown[].gross` (not of `classBreakdown[].credited`, which is net).',
   })
   gross: MoneyDto | null;
 
   @ApiProperty({
     description:
-      'The configured take rate (`PROVIDER_TERMS_TAKE_RATE_PERCENT`, same source `GET ' +
-      '/providers/me` reads), for display next to `platformTake`. `platformTake` itself is the ' +
-      'real Σ platform_fee, not `gross × this rate` — the two agreeing is what "verified" means.',
+      'The take rate calls are charged at today, in percent: `PLATFORM_FEE_BPS / 100` (default ' +
+      '1000 bps = 10), the value every live call is split with. `platformTake` is not derived ' +
+      'from it: it is the real Σ platform_fee stored on each call when it was priced, so the ' +
+      'observed rate `platformTake / gross` equals this one only when every call in the window ' +
+      'was charged at the current rate. A difference means calls priced under another rate ' +
+      '(a rate change inside the window, or data written with a different PLATFORM_FEE_BPS).',
   })
   platformTakeRatePercent: number;
 
   @ApiProperty({
     type: MoneyDto,
     nullable: true,
-    description: 'Σ platform_fee over the same SETTLED rows as `gross`',
+    description:
+      'PLATFORM TAKE. Σ platform_fee over the same rows as `gross` — the fee actually taken, ' +
+      'per call, at the rate each call was priced at. `gross − net`, exactly.',
   })
   platformTake: MoneyDto | null;
 
   @ApiProperty({
     type: MoneyDto,
     nullable: true,
-    description: 'Σ provider_amount over the same SETTLED rows — `gross − platformTake`, exactly',
+    description:
+      'NET. Σ provider_amount over the same rows as `gross` — what the provider is owed after ' +
+      'the platform fee. `gross − platformTake`, exactly, and the sum of ' +
+      '`classBreakdown[].credited`.',
   })
   net: MoneyDto | null;
 

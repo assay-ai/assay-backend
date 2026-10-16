@@ -54,6 +54,17 @@ export interface ChainStateGatePort {
    * so a blocked party cannot fill a pass and starve every other buyer (E-1).
    */
   blockedAccounts?(chainId: string): Promise<readonly string[]>;
+  /**
+   * Whether `account` (CAIP-10) is on its chain's on-chain blocklist, read
+   * LIVE from the contract — no cache in front. `null` when it cannot be told
+   * (the read failed, or the chain has no blocklist). Never throws.
+   *
+   * Used where the chain refused with `AddressBlocked` without saying whose
+   * address, and where this pass's blocklist snapshot could not be read: the
+   * cause decides whether the provider forfeits or the payer's voucher is held
+   * (review 2026-10-15, M1).
+   */
+  isBlockedLive?(account: string): Promise<boolean | null>;
 }
 
 export const CHAIN_STATE_GATE = 'CHAIN_STATE_GATE';

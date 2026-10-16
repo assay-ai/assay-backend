@@ -275,58 +275,7 @@ export class SpendPolicyEnforcementService {
       return null;
     }
 
-    // 1. Paused — "a human stopped this", checked before anything else can
-    // give a different, wrong reason.
-    if (policy.paused) {
-      throw McpErrors.policyAgentPaused({ agentId });
-    }
-
-    // 2. Allowlist — `NULL` = every tool, `[]` = no tool (the entity's own
-    // doc comment).
-    if (policy.allowedTools !== null && !policy.allowedTools.includes(toolId)) {
-      throw McpErrors.toolNotAllowed({ toolId, allowedTools: policy.allowedTools });
-    }
-
-    // Fails CLOSED on an asset the policy is not denominated in (review
-    // 2026-10-15 P-9). Skipping the money checks here used to switch off every
-    // cap — per-call, approval, hourly, daily, monthly — while
-    // `GET /spend-policy` still showed them. See the class doc.
-    if (price.asset !== policy.assetId) {
-      this.logger.warn(
-        `agent ${agentId}: call priced in ${price.asset} but the policy is denominated in ` +
-          `${policy.assetId}; refusing it rather than running it with no money limit`,
-      );
-      throw McpErrors.spendLimitExceeded({
-        limitType: 'asset_mismatch',
-        asset: policy.assetId,
-      });
-    }
-
-    // 3. Per-call ceiling.
-    if (policy.perCallMax !== null) {
-      const limit = MoneyUtil.of(policy.perCallMax, policy.assetId as AssetId, policy.decimals);
-      if (MoneyUtil.greaterThan(price, limit)) {
-        throw McpErrors.spendLimitExceeded({
-          limitType: 'per_call',
-          limit: limit.amount,
-          asset: limit.asset,
-        });
-      }
-    }
-
-    // 3b. Approval threshold. There is no approval flow to ask, so a call above
-    // it is refused: an approval nobody can give resolves to DENY, never ALLOW.
-    // Before velocity, like the per-call ceiling, so a refused call is not counted.
-    if (policy.requireApprovalAbove !== null) {
-      const threshold = MoneyUtil.of(
-        policy.requireApprovalAbove,
-        policy.assetId as AssetId,
-        policy.decimals,
-      );
-      if (MoneyUtil.greaterThan(price, threshold)) {
-        throw McpErrors.approvalRequired({ threshold: threshold.amount, asset: threshold.asset });
-      }
-    }
+    this.assertPolicyAdmits(policy, agentId, toolId, price);
 
     // 4. Velocity — calls/minute, calls/hour, duplicate-hash (attempts).
     const violation = await this.velocity.consume(agentId, requestHash, {
@@ -420,6 +369,91 @@ export class SpendPolicyEnforcementService {
   }
 
   // ── Resolution and seeding ──────────────────────────────────────────────
+
+  /**
+   * What a DEBT REPLACEMENT voucher signed by this agent's delegate must pass
+   * (`BuyerDebtService.settle`, review-buyer-debt M4): the agent is not paused,
+   * and the amount fits the policy's asset, per-call ceiling and approval
+   * threshold — the checks a call of that price would meet before any money
+   * moved. Not the allowlist (paying for a call already served is not calling
+   * the tool again), not velocity (the request hash was consumed by the call
+   * itself) and not the hourly / daily / monthly caps (an outstanding debt
+   * already counts in them: adding it again would count it twice). The payer's
+   * own wallet signing is the owner paying and is not an agent's spend.
+   */
+  async assertReplacementAllowed(input: {
+    readonly organizationId: string;
+    readonly agentId: string;
+    readonly price: Money;
+  }): Promise<void> {
+    const policy = await this.resolveLivePolicy(input.organizationId, input.agentId, input.price);
+    if (!policy) return;
+    this.assertPolicyAdmits(policy, input.agentId, null, input.price);
+  }
+
+  /**
+   * The pause, the allowlist (`toolId` null: not asked), the asset, the
+   * per-call ceiling and the approval threshold, in that order.
+   */
+  private assertPolicyAdmits(
+    policy: SpendPolicyEntity,
+    agentId: string,
+    toolId: string | null,
+    price: Money,
+  ): void {
+    // 1. Paused — "a human stopped this", checked before anything else can
+    // give a different, wrong reason.
+    if (policy.paused) {
+      throw McpErrors.policyAgentPaused({ agentId });
+    }
+
+    // 2. Allowlist — `NULL` = every tool, `[]` = no tool (the entity's own
+    // doc comment).
+    if (toolId !== null && policy.allowedTools !== null && !policy.allowedTools.includes(toolId)) {
+      throw McpErrors.toolNotAllowed({ toolId, allowedTools: policy.allowedTools });
+    }
+
+    // Fails CLOSED on an asset the policy is not denominated in (review
+    // 2026-10-15 P-9). Skipping the money checks here used to switch off every
+    // cap — per-call, approval, hourly, daily, monthly — while
+    // `GET /spend-policy` still showed them. See the class doc.
+    if (price.asset !== policy.assetId) {
+      this.logger.warn(
+        `agent ${agentId}: call priced in ${price.asset} but the policy is denominated in ` +
+          `${policy.assetId}; refusing it rather than running it with no money limit`,
+      );
+      throw McpErrors.spendLimitExceeded({
+        limitType: 'asset_mismatch',
+        asset: policy.assetId,
+      });
+    }
+
+    // 3. Per-call ceiling.
+    if (policy.perCallMax !== null) {
+      const limit = MoneyUtil.of(policy.perCallMax, policy.assetId as AssetId, policy.decimals);
+      if (MoneyUtil.greaterThan(price, limit)) {
+        throw McpErrors.spendLimitExceeded({
+          limitType: 'per_call',
+          limit: limit.amount,
+          asset: limit.asset,
+        });
+      }
+    }
+
+    // 3b. Approval threshold. There is no approval flow to ask, so a call above
+    // it is refused: an approval nobody can give resolves to DENY, never ALLOW.
+    // Before velocity, like the per-call ceiling, so a refused call is not counted.
+    if (policy.requireApprovalAbove !== null) {
+      const threshold = MoneyUtil.of(
+        policy.requireApprovalAbove,
+        policy.assetId as AssetId,
+        policy.decimals,
+      );
+      if (MoneyUtil.greaterThan(price, threshold)) {
+        throw McpErrors.approvalRequired({ threshold: threshold.amount, asset: threshold.asset });
+      }
+    }
+  }
 
   private async resolveLivePolicy(
     organizationId: string,

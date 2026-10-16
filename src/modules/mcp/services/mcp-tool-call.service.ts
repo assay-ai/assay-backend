@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
-import { assertRailOffered, chainMetadata } from '@modules/chains/chain-metadata';
+import { assertRailOffered, chainMetadata, offersRail } from '@modules/chains/chain-metadata';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { LedgerErrorCode } from '@modules/ledger/errors/ledger.errors';
@@ -12,7 +12,7 @@ import {
 } from '@modules/ledger/ports/escrow-balance-reader.port';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { VOUCHER_MAX_TTL_SECONDS } from '@modules/payment/constants/voucher.constants';
-import { PaymentErrors } from '@modules/payment/errors/payment.errors';
+import { PaymentErrorCode, PaymentErrors } from '@modules/payment/errors/payment.errors';
 import {
   RequestCall,
   computeRequestHash,
@@ -44,7 +44,12 @@ import {
   validateAgainstSchema,
 } from '@modules/tool/domain/mapping';
 import { buildFreeQuotaErrorContext } from '@modules/free-tier/services/free-quota-refusal.util';
-import { FreeQuotaService } from '@modules/free-tier/services/free-quota.service';
+import {
+  FreeQuotaDecision,
+  FreeQuotaLimitKind,
+  FreeQuotaReservation,
+  FreeQuotaService,
+} from '@modules/free-tier/services/free-quota.service';
 import { ToolCallRecordWriter } from '@modules/free-tier/services/tool-call-record-writer.service';
 import { SpendPolicyEnforcementService } from '@modules/spend-policy/services/spend-policy-enforcement.service';
 import { ToolErrorCode, ToolErrors } from '@modules/tool/errors/tool.errors';
@@ -190,29 +195,69 @@ export class McpToolCallService {
     // is the only reason nobody had hit it.
     const freeMode = freePricingMode(quote.pricingMode);
     if (freeMode) {
-      const decision = await this.freeQuota.check({
+      const quotaInput = {
         organizationId: session.organizationId,
         agentId: session.agentId,
         toolId: tool.id,
         pricingMode: freeMode,
-      });
+      };
+      let decision: FreeQuotaDecision = await this.freeQuota.check(quotaInput);
 
+      // The check is a read; the platform places are TAKEN here, atomically,
+      // before anything is routed, so parallel calls cannot all fit into the
+      // last one (review 2026-10-15, M5). Given back below if nothing served.
+      let platformPlaces: FreeQuotaReservation | null = null;
       if (decision.kind === 'ALLOWED') {
-        return this.relay(session, tool, freeMode, price, args, callId);
+        const reserved = await this.freeQuota.reservePlatform(quotaInput);
+        if (reserved.kind === 'RESERVED') platformPlaces = reserved;
+        else decision = reserved;
+      }
+
+      // Free first. Inside the quota the call is relayed among the
+      // free-capable bindings only (`callClass: 'FREE'`), whether or not the
+      // tool also has `PAID` providers — `quotedPricingMode` quotes such a tool
+      // `FREEMIUM` precisely so that their presence cannot switch the free tier
+      // off. `null` means no free-capable binding could take it and the tool
+      // has paid supply: fall through below.
+      if (platformPlaces) {
+        const served = await this.relay(session, tool, freeMode, price, args, callId).catch(
+          async (error: unknown) => {
+            await platformPlaces.release();
+            throw error;
+          },
+        );
+        if (served) return served;
+        await platformPlaces.release();
       }
 
       // `FREE` exhausted. There is no paid binding behind this tool to fall
       // through to, so the agent gets the error and the reset time — and the
       // refusal costs nothing, because nothing was created to unwind.
-      if (!decision.fallThroughToPaid) {
+      if (decision.kind === 'REFUSED' && !decision.fallThroughToPaid) {
         throw McpErrors.quotaExceeded(
           buildFreeQuotaErrorContext({ refusal: decision, toolId: tool.id, paidPrice: null }),
         );
       }
 
-      // `FREEMIUM` exhausted — *"fall through to the paid path"*, which is the
-      // entire commercial point of the mode and must require no
-      // reconfiguration from the agent. Execution simply continues below.
+      // `FREEMIUM` exhausted on a chain with no paid rail (Solana: `rails: []`):
+      // there is nothing to fall through to, so the agent gets the quota
+      // error and its reset time — not `CHAIN_RAIL_NOT_OFFERED`, which would
+      // not tell it that free calls come back at midnight (review #2, L6).
+      if (decision.kind === 'REFUSED' && !paidRailOffered(session.chainId)) {
+        throw McpErrors.quotaExceeded(
+          buildFreeQuotaErrorContext({
+            refusal: { ...decision, fallThroughToPaid: false },
+            toolId: tool.id,
+            paidPrice: null,
+          }),
+        );
+      }
+
+      // `FREEMIUM` exhausted, or no free-capable binding could serve — *"fall
+      // through to the paid path"*, which is the entire commercial point of the
+      // mode and must require no reconfiguration from the agent. Execution
+      // simply continues below, among `PAID` and `FREEMIUM` bindings only, and
+      // on rail B nothing is charged without a voucher the buyer signs.
     }
 
     // ── The buyer's chain ─────────────────────────────────────────────────
@@ -278,6 +323,7 @@ export class McpToolCallService {
     // exactly such a chain. Refused BEFORE the intent exists, so nothing has to
     // be swept.
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_A_PER_CALL));
+    await this.vouchers.assertNoOutstandingDebt(session.organizationId, session.agentAccount);
 
     // The cap check and the hold it allows run under the agent's spend lock:
     // read and reserve as one step, so concurrent calls cannot all read the
@@ -395,6 +441,11 @@ export class McpToolCallService {
     payment: McpVoucherPayment | null,
   ): Promise<McpCallOutcome> {
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_B_VOUCHER));
+    // A payer that owes for served calls whose vouchers lapsed gets no paid
+    // call — not even a requirement — until it signs the replacements
+    // (`PAYMENT_DEBT_OUTSTANDING`, no-platform-debt design step 9). Free calls
+    // never reach here.
+    await this.vouchers.assertNoOutstandingDebt(session.organizationId, session.agentAccount);
 
     const asset = chainMetadata(session.chainId).settlementAsset as AssetId;
     // One read of the buyer's escrow serves the withdraw gate AND the seq
@@ -728,6 +779,16 @@ export class McpToolCallService {
    * outcome. On the paid path the catch exists to release a hold; here there
    * is nothing to release, and `TOOL_ALL_BINDINGS_FAILED` reaching the agent
    * unchanged is the same answer with less machinery.
+   *
+   * ## `null`: free first, then paid
+   *
+   * On a `FREEMIUM` quote — free-capable supply beside paid supply — a refusal
+   * the router makes **before dialling anyone** (no free-capable binding is
+   * eligible) returns `null`, and the caller falls through to the paid path.
+   * A failure after a free provider was dialled still propagates: re-running
+   * the call as a paid one the agent never asked for would be a surprise
+   * charge for somebody else's outage. On a `FREE` quote there is no paid
+   * supply, so every refusal propagates.
    */
   private async relay(
     session: McpSession,
@@ -736,8 +797,23 @@ export class McpToolCallService {
     quoted: Money,
     args: JsonObject,
     callId: string,
-  ): Promise<McpCallOutcome> {
+  ): Promise<McpCallOutcome | null> {
     const startedAt = Date.now();
+    // Each binding's own quota place is taken on the binding about to be
+    // dialled (`RoutingContext.reserveFreeQuota`): a binding whose quota is
+    // spent is never drawn (review M4), and parallel calls cannot overspend it
+    // (M5). Only the binding that served keeps its place.
+    const places = new Map<string, FreeQuotaReservation>();
+    let quotaShed = 0;
+    // Which dial shed a binding: the per-agent quota wins the answer when
+    // any binding hit it, since it is the one this agent can do nothing
+    // about but wait (both reset at the next UTC midnight).
+    let shedLimit: FreeQuotaLimitKind | null = null;
+    const releaseAllBut = async (keep: string | null) => {
+      await Promise.all(
+        [...places].filter(([id]) => id !== keep).map(([, place]) => place.release()),
+      );
+    };
     const routed = await this.router
       .route({
         toolId: tool.id,
@@ -747,11 +823,55 @@ export class McpToolCallService {
         // platform short on it: `withdrawingChains` is empty here on purpose, and
         // this path deliberately does not read the escrow.
         // `FREE`: a call nobody is charged for never reaches a `PAID` binding.
-        context: { ...routingContextOf(session, this.enabledChains, []), callClass: 'FREE' },
+        context: {
+          ...routingContextOf(session, this.enabledChains, []),
+          callClass: 'FREE',
+          reserveFreeQuota: async (binding) => {
+            const place = await this.freeQuota.reserveBinding({
+              organizationId: session.organizationId,
+              agentId: session.agentId,
+              binding,
+              onFull: (limit) => {
+                if (shedLimit !== FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY) shedLimit = limit;
+              },
+            });
+            if (place) places.set(binding.id, place);
+            else quotaShed += 1;
+            return place;
+          },
+        },
       })
-      .catch((error: unknown) => {
+      .catch(async (error: unknown) => {
+        await releaseAllBut(null);
+        if (isRefusedBeforeDialling(error)) {
+          if (pricingMode === PricingMode.FREEMIUM) return null;
+          // `FREE`, and the only supply left had no quota for this agent:
+          // that is the quota answer, not a supply problem.
+          // The dial that actually shed it, through the same refusal (and
+          // notification) as the pre-flight check (review #2, L2).
+          if (quotaShed > 0) {
+            throw McpErrors.quotaExceeded(
+              buildFreeQuotaErrorContext({
+                refusal: this.freeQuota.bindingQuotaRefusal(
+                  {
+                    organizationId: session.organizationId,
+                    agentId: session.agentId,
+                    toolId: tool.id,
+                    pricingMode: PricingMode.FREE,
+                  },
+                  shedLimit ?? FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+                ),
+                toolId: tool.id,
+                paidPrice: null,
+              }),
+            );
+          }
+        }
         throw agentFacing(error, null);
       });
+    if (!routed) return null;
+    // Failover abandoned the earlier bindings: their places go back.
+    await releaseAllBut(routed.binding.id);
     const latencyMs = Date.now() - startedAt;
 
     // Written for every classified attempt, `REQUEST_ERROR` included: the
@@ -784,14 +904,8 @@ export class McpToolCallService {
       }),
     });
 
-    // Against the binding that actually served, not the one first drawn:
-    // failover abandons the first, and charging its quota for a call it never
-    // answered would exhaust a provider's goodwill on somebody else's outage.
-    await this.freeQuota.consume({
-      organizationId: session.organizationId,
-      agentId: session.agentId,
-      bindingId: routed.binding.id,
-    });
+    // The quota was spent by the reservations above — the platform places in
+    // `call`, this binding's place in the router — so nothing is counted here.
 
     // Counted on the free path too. The exploration floor measures what has
     // been *observed* of a binding, and a free call is an observation.
@@ -1311,6 +1425,20 @@ function isAllBindingsFailed(error: unknown): error is AppError<[Record<string, 
   return error instanceof AppError && error.errorCode === ToolErrorCode.TOOL_ALL_BINDINGS_FAILED;
 }
 
+/**
+ * A routing refusal made before any provider was dialled — the router's
+ * `unroutable` codes. Only these let a free call fall through to the paid
+ * path: nothing happened yet, so nothing is repeated at the agent's expense.
+ */
+function isRefusedBeforeDialling(error: unknown): boolean {
+  return (
+    error instanceof AppError &&
+    (error.errorCode === ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING ||
+      error.errorCode === ToolErrorCode.TOOL_PROVIDER_SLASH_HOLD ||
+      error.errorCode === PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN)
+  );
+}
+
 function lastAttemptOf(error: unknown): RouterLastAttempt | null {
   if (!isAllBindingsFailed(error)) return null;
   const last = error.context?.lastAttempt as RouterLastAttempt | undefined;
@@ -1521,8 +1649,9 @@ export type VoucherSigner = 'payer' | 'delegate';
  * A presented voucher is rail B by definition, and an explicit `x402/rail`
  * wins next (a rail the chain does not offer is refused downstream by
  * `assertRailOffered`, naming the rails it does). With neither, rail A where
- * the chain offers it — so every existing agent on Solana is unchanged — and
- * rail B where it is all there is.
+ * the chain offers it, and rail B otherwise — which on a chain with no paid
+ * rail (Solana today) is refused with `CHAIN_RAIL_NOT_OFFERED` (4xx) before
+ * anything is created.
  */
 export function chooseRail(
   chainId: ChainId,
@@ -1531,7 +1660,7 @@ export function chooseRail(
 ): PaymentRail {
   if (hasVoucher) return PaymentRail.RAIL_B_VOUCHER;
   if (requested) return requested;
-  return chainMetadata(chainId).rails.includes(railName(PaymentRail.RAIL_A_PER_CALL))
+  return offersRail(chainId, railName(PaymentRail.RAIL_A_PER_CALL))
     ? PaymentRail.RAIL_A_PER_CALL
     : PaymentRail.RAIL_B_VOUCHER;
 }
@@ -1688,6 +1817,11 @@ export function delegationHint(session: McpSession): string {
         `authorised on chain`
     : `. The payer (${session.agentAccount}) may sign, or a delegate key the payer authorised ` +
         `on chain once it is bound to this credential (POST /agents/me/delegate)`;
+}
+
+/** Whether `chainId` offers any paid rail (`chain-metadata.ts`'s `rails`). */
+function paidRailOffered(chainId: ChainId): boolean {
+  return offersRail(chainId, 'A') || offersRail(chainId, 'B');
 }
 
 function namespaceOf(chainId: ChainId): string {

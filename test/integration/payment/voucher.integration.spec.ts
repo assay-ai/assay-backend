@@ -8,6 +8,7 @@ import {
 } from '@modules/payment/ports/payment.types';
 
 import { expectErrorCodeAsync } from '../../unit/helpers/expect-error-code';
+import { offerSolanaRailBInThisSuite } from '../../unit/helpers/solana-rail-b';
 import { VoucherTestContext, createVoucherTestContext } from '../helpers/voucher-test-context';
 
 /** Postgres `check_violation` — distinct from `23505`, the unique-index one. */
@@ -28,6 +29,10 @@ const CHECK_VIOLATION_CODE = '23514';
  *    not a mock that always answers `true`.
  */
 describe('Voucher redemption — real Postgres, real Redis', () => {
+  // Rail B is switched off on Solana until its program has the delay rule;
+  // this suite pins the Postgres guarantees of the kept code path.
+  offerSolanaRailBInThisSuite();
+
   let context: VoucherTestContext;
 
   beforeAll(async () => {

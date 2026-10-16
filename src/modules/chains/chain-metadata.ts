@@ -51,14 +51,27 @@ export interface ChainMetadata {
    */
   readonly settlementAsset: AssetId;
   /**
-   * Supported rails are per-chain: Solana keeps A and B, 4663 ships B only.
-   * The 402 response on 4663 never advertises a rail A scheme, and the router
-   * never selects one.
+   * Supported rails are per-chain: Solana offers none today, 4663 ships B
+   * only. The 402 response on 4663 never advertises a rail A scheme, and the
+   * router never selects one.
+   *
+   * Rail B is off on Solana until the Anchor program has the same rule as the
+   * EVM contract: a buyer's tightening (lower limits) binds an already-signed
+   * voucher only after a delay. Without it a buyer's own transaction can kill
+   * an admitted voucher after the call was served (no-platform-debt design,
+   * §1 B and §4 step 3).
+   *
+   * Rail A is off on Solana for as long as rail B is. Rail A spends a ledger
+   * mirror of the buyer's own escrow and never debits the escrow on chain, so
+   * a buyer can withdraw the deposit and keep the calls it paid for, and the
+   * provider credit then has no buyer money behind it (review 2026-10-15, C1);
+   * the platform never pays it.
+   * An empty list means the chain serves free calls only: every paid call is
+   * refused with `CHAIN_RAIL_NOT_OFFERED` (4xx) before an intent exists.
    *
    * Declared here because it describes the deployment's offer on that chain,
-   * and read in `tool/` — a table nothing reads is a comment with a type
-   * annotation. {@link assertChainMetadata} refuses an empty list, which is the
-   * shape a half-finished config edit produces.
+   * and read in `tool/` and `mcp/` — a table nothing reads is a comment with a
+   * type annotation.
    */
   readonly rails: readonly PaymentRailName[];
 }
@@ -68,13 +81,15 @@ const CHAIN_METADATA: Readonly<Record<string, ChainMetadata>> = {
     displayName: 'Solana mainnet',
     explorerBaseUrl: 'https://explorer.solana.com',
     settlementAsset: ASSET_IDS.USDC_SOLANA_MAINNET,
-    rails: ['A', 'B'],
+    // No paid rail: see `ChainMetadata.rails`. Free calls still work.
+    rails: [],
   },
   [CHAIN_IDS.SOLANA_DEVNET]: {
     displayName: 'Solana devnet',
     explorerBaseUrl: 'https://explorer.solana.com/?cluster=devnet',
     settlementAsset: ASSET_IDS.USDC_SOLANA_DEVNET,
-    rails: ['A', 'B'],
+    // No paid rail: see `ChainMetadata.rails`. Free calls still work.
+    rails: [],
   },
   // `eip155:4663` — Robinhood Chain MAINNET — is absent on purpose, and the
   // absence is load-bearing: the mainnet token address is unknown, so no
@@ -210,24 +225,15 @@ export function assertChainMetadata(enabled: readonly ChainId[]): void {
         'platform does not have',
     });
   }
-
-  // A chain that offers no rail is a chain nothing can be paid on. Cheap, and
-  // it is the shape a half-finished edit to `rails` produces.
-  const railless = enabled.filter((chainId) => CHAIN_METADATA[chainId].rails.length === 0);
-  if (railless.length > 0) {
-    throw ChainErrors.enabledChainsInvalid({
-      variable: ENABLED_CHAINS_ENV,
-      value: railless.join(','),
-      accepted: 'a chain with at least one entry in its chain-metadata.ts `rails` list',
-    });
-  }
+  // An empty `rails` list is allowed: it is a chain that serves free calls only
+  // (Solana today, see `ChainMetadata.rails`).
 }
 
 /**
  * The rail this chain is being asked to settle on is one it offers.
  *
- * Supported rails are per-chain: Solana keeps A and B, 4663 ships B only. The
- * 402 response on 4663 never advertises a rail A scheme, and the router never
+ * Supported rails are per-chain: Solana offers none today, 4663 ships B only.
+ * The 402 response on 4663 never advertises a rail A scheme, and the router never
  * selects one. `ChainMetadata.rails` declares that, and this function is where
  * the declaration becomes binding, and it is called at the site that *decides* a rail for an intent
  * rather than at the site that records one.
@@ -242,6 +248,11 @@ export function assertChainMetadata(enabled: readonly ChainId[]): void {
  * answered "yes" for an undescribed chain would make that refusal reachable
  * only at boot.
  */
+/** Whether this chain offers `rail` — the boolean form of {@link assertRailOffered}. */
+export function offersRail(chainId: ChainId, rail: PaymentRailName): boolean {
+  return chainMetadata(chainId).rails.includes(rail);
+}
+
 export function assertRailOffered(chainId: ChainId, rail: PaymentRailName): void {
   const { rails } = chainMetadata(chainId);
   if (!rails.includes(rail)) {

@@ -10,6 +10,7 @@ import { VOUCHER_ADMISSION_CHAIN_LAG_MS } from '@modules/payment/constants/vouch
 import {
   tighteningHoldMs,
   TIGHTENING_ADMISSION_SETTLE_MS,
+  UnsettledVoucherGuard,
 } from '@modules/settlement/services/unsettled-voucher-guard.service';
 import {
   DEFAULT_EVM_RELAYER_TIMING,
@@ -328,6 +329,44 @@ describe('UnsettledVoucherGuard', () => {
       }),
     ).resolves.toBe('ok');
     expect(repository.holdVoucherAdmission).not.toHaveBeenCalled();
+  });
+
+  describe('on an escrow with the tighten delay (D-21) it stands down', () => {
+    it('relays a stranding change unacknowledged, with no admission pause', async () => {
+      const { guard, repository } = guardOver(totals, undefined, true);
+      await expect(
+        guard.relayTightening({
+          scope,
+          lowered: { maxPerWindow: 2_000_000n, revoked: true },
+          acknowledged: false,
+          deadline: deadline(),
+          relay: async () => 'landed',
+        }),
+      ).resolves.toBe('landed');
+      expect(repository.holdVoucherAdmission).not.toHaveBeenCalled();
+    });
+
+    it('refuses nothing on the intent route, and reads nothing', async () => {
+      const { guard, repository } = guardOver(totals, undefined, true);
+      await expect(
+        guard.refuseIfStranding(scope, { maxPerWindow: 2_000_000n }, false),
+      ).resolves.toBeUndefined();
+      expect(repository.unsettledVouchers).not.toHaveBeenCalled();
+      await expect(guard.tightenDelaySeconds(PAYER)).resolves.toBe(3_600);
+    });
+
+    it('stays up until the delay is seen: the same change is refused without it', async () => {
+      const { guard } = guardOver(totals);
+      await expect(
+        guard.refuseIfStranding(scope, { maxPerWindow: 2_000_000n }, false),
+      ).rejects.toMatchObject({ errorCode: 'SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK' });
+      await expect(guard.tightenDelaySeconds(PAYER)).resolves.toBe(0);
+    });
+
+    it('stays up when no tighten-delay port is wired at all', async () => {
+      const guard = new UnsettledVoucherGuard({} as never);
+      await expect(guard.standsDown(PAYER)).resolves.toBe(false);
+    });
   });
 
   /** Review finding 13: an API started before the migration would refuse every voucher. */

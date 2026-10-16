@@ -66,8 +66,15 @@ export class EscrowDelegatesController {
   @ApiResponse({ status: 200, type: ListEscrowDelegatesResponseDto })
   async list(@CurrentSession() session: McpSession): Promise<ListEscrowDelegatesResponseDto> {
     const asset = await this.delegation.assetFor(session.agentAccount);
-    const delegates = await this.delegation.list(session.agentAccount);
-    return { account: session.agentAccount, delegates: delegates.map((d) => toDto(d, asset)) };
+    const [delegates, tightenDelaySeconds] = await Promise.all([
+      this.delegation.list(session.agentAccount),
+      this.delegation.tightenDelaySeconds(session.agentAccount),
+    ]);
+    return {
+      account: session.agentAccount,
+      delegates: delegates.map((d) => toDto(d, asset)),
+      tightenDelaySeconds,
+    };
   }
 
   /** `POST /escrow/delegates/intent` — the `AuthorizeDelegate` request the payer signs. */

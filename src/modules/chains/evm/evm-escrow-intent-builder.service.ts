@@ -304,9 +304,16 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
    * so a payer is never asked to sign something the chain refuses: the
    * delegate is an address on the payer's chain and not the payer, both caps
    * are non-zero with the per-call cap inside the window cap, neither cap
-   * exceeds the escrow's OWN current ceiling, and `validUntil` is in the future
-   * by the chain's clock and at most `MAX_DELEGATION_LIFETIME_SECONDS` out. The
-   * chain re-checks all of it; this is the diagnosis, the chain is the rule.
+   * exceeds the escrow's OWN current ceiling, and `validUntil` is at least
+   * `TIGHTEN_DELAY_SECONDS` past the signed request's `deadline` and at most
+   * `MAX_DELEGATION_LIFETIME_SECONDS` past the chain's clock. The chain re-checks
+   * all of it; this is the diagnosis, the chain is the rule.
+   *
+   * The horizon floor is D-21's `validUntil >= now + TIGHTEN_DELAY_SECONDS`,
+   * measured from the DEADLINE rather than from now: the relayer may land the
+   * signature any time until then, and the chain judges `now` at that block.
+   * It is applied before the upgrade too — a stricter request the old escrow
+   * also accepts — so the console has one rule on both contracts.
    */
   async authorizeIntent(
     account: AccountId,
@@ -346,13 +353,16 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
           `per voucher and ${escrow.maxPerWindow ?? 0n} per window; set the escrow limits first`,
       });
     }
+    const deadline = this.deadline(chainId, chainSeconds);
+    const earliest = deadline + BigInt(EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS);
     if (
-      validUntil <= chainSeconds ||
+      validUntil < earliest ||
       validUntil - chainSeconds > BigInt(EVM_CONSTANTS.MAX_DELEGATION_LIFETIME_SECONDS)
     ) {
       throw SettlementErrors.delegationInvalid({
         reason:
-          'DelegateValidUntilInvalid — validUntil must be in the future and at most ' +
+          `DelegateValidUntilInvalid — validUntil must be at least ${earliest} (an hour after ` +
+          `this request's deadline, ${deadline}) and at most ` +
           `${EVM_CONSTANTS.MAX_DELEGATION_LIFETIME_SECONDS / 86_400} days out`,
       });
     }
@@ -380,7 +390,7 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
         maxPerWindow,
         validUntil,
         nonce: escrow.authNonce,
-        deadline: this.deadline(chainId, chainSeconds),
+        deadline,
       },
       this.domain(chainId, deployment),
     );

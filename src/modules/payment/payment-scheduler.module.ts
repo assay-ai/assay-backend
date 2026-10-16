@@ -43,9 +43,9 @@ import { VoucherRedemptionService } from './services/voucher-redemption.service'
   // this import the redemption pass fails at its first submission naming
   // exactly this line.
   // `LedgerModule` for the same reason as `ChainsModule`:
-  // `VoucherRedemptionService` injects `LedgerService` to write the
-  // platform-absorbed `PROVIDER_CREDIT`, and `PaymentModule` imports the ledger
-  // without re-exporting it.
+  // `VoucherRedemptionService` injects `LedgerService` (it no longer writes
+  // through it: the platform never pays a provider), and `PaymentModule`
+  // imports the ledger without re-exporting it.
   imports: [PaymentModule, ChainsModule, LedgerModule, FeePayerSignerModule, BlocklistModule],
   providers: [
     PaymentIntentExpiryJob,

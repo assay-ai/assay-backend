@@ -1,10 +1,16 @@
+import { OutstandingDebt } from '@database/postgres/repositories/payment-intent.repository';
+import { DEFAULT_FREE_QUOTA_CONFIG } from '@modules/free-tier/config/free-quota.config';
+import { FreeBindingDials, freeCallsPerDay } from '@modules/free-tier/domain/free-calls-per-day';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import {
+  FreeQuotaCheckInput,
+  FreeQuotaLimitKind,
   FreeQuotaRemaining,
   FreeQuotaDecision,
   FreeQuotaService,
 } from '@modules/free-tier/services/free-quota.service';
+import { PricingMode } from '@modules/tool/ports/tool.types';
 import { LedgerErrors } from '@modules/ledger/errors/ledger.errors';
 import {
   EscrowBalanceReaderPort,
@@ -47,6 +53,7 @@ import { NextSeq, EscrowSeqService } from '@modules/payment/services/escrow-seq.
 import { VoucherService } from '@modules/payment/services/voucher.service';
 
 import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
+import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 
 import { STAKE_ASSET, buildRouter, buildTool, usdc } from '../../tool/helpers/routing-fixtures';
 import { noBlocks } from '../../helpers/blocklist';
@@ -183,6 +190,19 @@ export class FakeIntents {
         row.organizationId === organizationId &&
         row.agentAccount === account &&
         row.voucherSeq === seq,
+    );
+  }
+
+  /**
+   * Set by a test: the payer's open buyer debts (lapsed vouchers), as
+   * `PaymentIntentService.findOutstandingDebts` returns them.
+   */
+  debts: OutstandingDebt[] = [];
+
+  /** `PaymentIntentService.findOutstandingDebts`. */
+  async findOutstandingDebts(organizationId: string, payer: string): Promise<OutstandingDebt[]> {
+    return this.debts.filter(
+      (debt) => debt.organizationId === organizationId || debt.agentAccount === payer,
     );
   }
 
@@ -400,21 +420,42 @@ export class FakeBindingCallCounter {
 }
 
 /**
- * `FreeQuotaService`, reduced to the one read `McpCatalogueService.listTools`
- * calls: `remainingForTool`. Set per tool with
- * `setRemaining`; unset tools answer `null`, matching the "omit rather than
- * publish a number that is nobody's" rule.
+ * `FreeQuotaService`, reduced to the reads `McpCatalogueService.listTools`
+ * calls: `remainingForTool` and `dailyAllowance`. Set per tool with
+ * `setRemaining`; unset tools answer `null`, matching the
+ * "omit rather than publish a number that is nobody's" rule.
  */
 export class FakeFreeQuota {
   private readonly remaining = new Map<string, FreeQuotaRemaining>();
 
   /** Set by a test that wants the relay path refused. Default: everything allowed. */
   decision: FreeQuotaDecision = { kind: 'ALLOWED' };
-  /** Every `consume` this run, so a test can assert the binding that was charged. */
-  readonly consumed: string[] = [];
+  /** Every `check` this run, so a test can assert the pricing mode it was asked about. */
+  readonly checked: FreeQuotaCheckInput[] = [];
+  /**
+   * Bindings whose quota place was taken and KEPT this run (a binding place
+   * given back on failover or on a refusal is not here), so a test can assert
+   * the binding that was charged.
+   */
+  get consumed(): string[] {
+    return this.places.filter((place) => !place.released).map((place) => place.bindingId);
+  }
+  /** Every binding place taken, released or not, in order. */
+  readonly places: { bindingId: string; released: boolean }[] = [];
+  /** Platform places taken; `released` once given back. */
+  readonly platformPlaces: { released: boolean }[] = [];
+  /** Bindings whose own quota has no room left (`reserveBinding` answers null). */
+  readonly noRoomFor = new Set<string>();
+  /** Set to refuse the platform reservation (e.g. the last place was taken in parallel). */
+  platformRefusal: FreeQuotaDecision | null = null;
 
   setRemaining(toolId: string, value: FreeQuotaRemaining): void {
     this.remaining.set(toolId, value);
+  }
+
+  /** The real arithmetic, over the quote's bindings, with the platform defaults. */
+  dailyAllowance(bindings: readonly FreeBindingDials[]): number | null {
+    return freeCallsPerDay(bindings, DEFAULT_FREE_QUOTA_CONFIG);
   }
 
   remainingForTool(
@@ -425,13 +466,56 @@ export class FakeFreeQuota {
     return Promise.resolve(this.remaining.get(toolId) ?? null);
   }
 
-  check(): Promise<FreeQuotaDecision> {
+  check(input: FreeQuotaCheckInput): Promise<FreeQuotaDecision> {
+    this.checked.push(input);
     return Promise.resolve(this.decision);
   }
 
-  consume(input: { bindingId: string }): Promise<void> {
-    this.consumed.push(input.bindingId);
-    return Promise.resolve();
+  async reservePlatform(_input: FreeQuotaCheckInput) {
+    if (this.platformRefusal) return this.platformRefusal;
+    const place = { released: false };
+    this.platformPlaces.push(place);
+    return {
+      kind: 'RESERVED' as const,
+      release: async () => {
+        place.released = true;
+      },
+    };
+  }
+
+  /** Which dial each `noRoomFor` binding is full on (default: the per-agent quota). */
+  readonly fullOn = new Map<string, FreeQuotaLimitKind>();
+  /** Every refusal built for a call whose free bindings were all shed. */
+  readonly bindingRefusals: FreeQuotaLimitKind[] = [];
+
+  bindingQuotaRefusal(input: FreeQuotaCheckInput, limit: FreeQuotaLimitKind) {
+    this.bindingRefusals.push(limit);
+    return {
+      kind: 'REFUSED' as const,
+      limit,
+      resetsAt: new Date(new Date().setUTCHours(24, 0, 0, 0)),
+      fallThroughToPaid: input.pricingMode === PricingMode.FREEMIUM,
+    };
+  }
+
+  async reserveBinding(input: {
+    binding: { id: string };
+    onFull?: (limit: FreeQuotaLimitKind) => void;
+  }) {
+    if (this.noRoomFor.has(input.binding.id)) {
+      input.onFull?.(
+        this.fullOn.get(input.binding.id) ?? FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+      );
+      return null;
+    }
+    const place = { bindingId: input.binding.id, released: false };
+    this.places.push(place);
+    return {
+      kind: 'RESERVED' as const,
+      release: async () => {
+        place.released = true;
+      },
+    };
   }
 }
 
@@ -660,6 +744,7 @@ export interface McpHarnessOptions {
 }
 
 export interface McpHarness {
+  readonly router: ProviderRouterService;
   readonly catalogue: McpCatalogueService;
   readonly calls: McpToolCallService;
   readonly servers: McpServerFactory;
@@ -735,6 +820,7 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
   );
 
   return {
+    router,
     catalogue,
     calls,
     servers: new McpServerFactory(catalogue, calls),

@@ -49,6 +49,20 @@ Then open `http://localhost:3000/api/docs`.
 `.env.example` documents every variable. `ENABLED_CHAINS` is required (the example enables Solana
 devnet); see [`docs/runbooks/chains.md`](docs/runbooks/chains.md).
 
+### Environment for production
+
+`NODE_ENV=production` (the `Dockerfile` default) makes some variables required; the processes
+refuse to start without them:
+
+- `CORS_ALLOWED_ORIGINS`: a comma-separated list of the exact browser origins
+  (`scheme://host[:port]`, no path, no trailing slash) allowed to call the API and the WebSocket
+  server with credentials. List every frontend origin: the custom domains and the `*.pages.dev`
+  origins of the production and develop Pages projects. Wildcards and `*` are refused. An origin
+  that is not listed gets no CORS headers, so every browser call from it fails, public explorer
+  reads included. Outside production the default is the local dashboards on `:3000`,
+  `:4000`-`:4005` and `:4020` (`localhost` and `127.0.0.1`).
+- `API_TRUST_PROXY_HOPS`: the number of proxies in front of the API (`0` is allowed).
+
 ## Tests
 
 ```bash
@@ -83,7 +97,8 @@ docs/                 architecture, ADRs, runbooks, API conventions
 - [`docs/architecture.md`](docs/architecture.md) — architecture and code conventions
 - [`docs/api-list-contract.md`](docs/api-list-contract.md) — the list/pagination contract
 - [`docs/mapping-format.md`](docs/mapping-format.md) — the binding mapping format
-- [`docs/runbooks/`](docs/runbooks/) — operational runbooks
+- [`docs/runbooks/`](docs/runbooks/) — operational runbooks; deploying buyer debt (migration order, no rollback past it):
+  [`docs/runbooks/buyer-debt-deploy.md`](docs/runbooks/buyer-debt-deploy.md)
 - [`docs/acceptance-criteria.md`](docs/acceptance-criteria.md) — per-chain acceptance criteria
 - [`kora/README.md`](kora/README.md) — running the Kora fee payer. `kora/kora.toml` allows only the default devnet USDC mint; a deployment that overrides `SOLANA_DEVNET_USDC_MINT` must add its mint there.
 - [`scripts/README.md`](scripts/README.md) — the script set

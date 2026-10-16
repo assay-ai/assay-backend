@@ -6,7 +6,8 @@
  * rolling window (its decayed counter plus this voucher), and, for a
  * delegate-signed one, the delegate's authority and `validUntil`. Lower a cap
  * below what the served-but-unredeemed vouchers need, and the chain refuses
- * them; the provider was served and the platform absorbs the loss.
+ * them; the provider was served and the call becomes buyer debt (the platform
+ * never pays it).
  *
  * Pure: no I/O, no clock. The figures come from the chain read and the
  * platform's own `payment_intents`; the decision is here so the intent routes,

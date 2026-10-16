@@ -276,6 +276,8 @@ export interface CreatePaymentIntentInput {
    */
   readonly voucherSignature?: string | null;
   readonly voucherResourceHash?: string | null;
+  /** The `resource` string the voucher signed, kept so a debt can be re-signed later. */
+  readonly voucherResource?: string | null;
   readonly voucherIssuedAt?: number | null;
   /** The DELEGATE key that signed, when it was not the payer (CAIP-10). */
   readonly voucherDelegate?: string | null;
@@ -351,4 +353,11 @@ export interface PaymentIntentTransitionContext {
   readonly settledAmount?: Money;
   readonly classification?: string;
   readonly verificationVerdict?: string;
+  /**
+   * Makes the settled rail-B call BUYER DEBT in the same statement as the
+   * status move (`redemption_lapsed_at`, `redemption_last_error` = this
+   * cause): a verdict too late for its voucher (review-buyer-debt L3). Set by
+   * `PaymentIntentService.resolve` only.
+   */
+  readonly lapseCause?: string;
 }

@@ -144,6 +144,28 @@ describe('AccountBlocklistService', () => {
     await service.onModuleDestroy();
   });
 
+  it('subscribes only once the subscriber is ready, never during its ready check', async () => {
+    const { service, subscriber } = build();
+    // ioredis between the socket coming up and its `INFO` ready check
+    // answering: a SUBSCRIBE sent now would break the check and be lost.
+    const ready: (() => void)[] = [];
+    Object.assign(subscriber, {
+      status: 'connect',
+      once: (event: string, listener: () => void) => {
+        if (event === 'ready') ready.push(listener);
+      },
+    });
+
+    const booted = service.onModuleInit();
+    await flush();
+    expect(subscriber.subscribed).toEqual([]);
+
+    ready.forEach((listener) => listener());
+    await booted;
+    expect(subscriber.subscribed).toEqual([CHANNEL]);
+    await service.onModuleDestroy();
+  });
+
   it('polls on its own, so a lost message delays a block by one interval at most', async () => {
     jest.useFakeTimers();
     try {
