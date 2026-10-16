@@ -8,7 +8,11 @@ import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { depositAssetFor } from '../domain/deposit-asset';
-import { resolveDepositChain, sessionAccounts } from '../domain/deposit-chain';
+import {
+  assertDepositChainOffersPaidRail,
+  resolveDepositChain,
+  sessionAccounts,
+} from '../domain/deposit-chain';
 import { asPayloadChainId } from '../domain/deposit-wire';
 import {
   CreateDepositBodyDto,
@@ -113,6 +117,7 @@ export class DepositsController {
     status: 409,
     description:
       'This buyer has no linked account on the named chain (`PAYMENT_DEPOSIT_ACCOUNT_NOT_LINKED`), ' +
+      'the chain offers no paid rail and takes no deposit (`CHAIN_RAIL_NOT_OFFERED`), ' +
       'or had no escrow open and the chain could not confirm opening one',
   })
   @ApiResponse({
@@ -127,6 +132,8 @@ export class DepositsController {
     // linked account, required once they have two. `sessionAccounts` is the
     // single seam that changes when `agent_accounts` lands.
     const account = resolveDepositChain(sessionAccounts(session), body.chainId);
+    // A chain with no paid rail takes no deposit: refused before any escrow work.
+    assertDepositChainOffersPaidRail(account.chainId);
 
     // The asset is not a request field and never will be — a deposit is the
     // chain's DECLARED settlement asset (USDC on the Solana chains, USDG on
