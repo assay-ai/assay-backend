@@ -52,8 +52,8 @@ async function bootstrapApi() {
   // `origin` is the `CORS_ALLOWED_ORIGINS` allowlist, never `*`: with
   // `credentials: true` a wildcard would let any website call the API as the
   // signed-in user. Only a listed origin is reflected back; outside production
-  // the default is the local dashboards on :4000-:4005, and production refuses
-  // to start without the variable (`parseCorsAllowedOrigins`).
+  // the default is the local dashboards on :3000, :4000-:4005 and :4020, and
+  // production refuses to start without the variable (`parseCorsAllowedOrigins`).
   //
   // `exposedHeaders` is not decoration. A cross-origin browser client can read
   // only the seven CORS-safelisted response headers unless the server names the
