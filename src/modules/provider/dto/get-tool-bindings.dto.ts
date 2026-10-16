@@ -74,7 +74,13 @@ export class ToolBindingDetailDto extends ToolBindingSummaryDto {
   @ApiPropertyOptional({ nullable: true })
   freeQuotaPerAgent: number | null;
 
-  @ApiPropertyOptional({ nullable: true })
+  @ApiPropertyOptional({
+    type: Number,
+    nullable: true,
+    description:
+      'The most free calls this binding serves per day, across all agents (a call count, ' +
+      'not money). `null` means the platform default.',
+  })
   freeDailyBudget: number | null;
 
   @ApiProperty({ description: 'The declared SLA failure rate, e.g. 0.05 for 5%' })

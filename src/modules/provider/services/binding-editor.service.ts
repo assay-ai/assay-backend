@@ -196,7 +196,6 @@ export class BindingEditorService {
     // one fact: an asset the platform does not know has no decimals, and a
     // price with no scale is not a price.
     assertKnownAsset(body.assetId);
-    assertFreeLimitsRepresentable(body.freeDailyBudget);
     assertPriceMatchesMode(body.pricingMode, body.priceAmount);
 
     const row = new ToolBindingEntity();
@@ -215,7 +214,7 @@ export class BindingEditorService {
     // requires the field, so an omission is a 400 and not a guess.
     row.settlementChains = body.settlementChains;
     row.freeQuotaPerAgent = body.freeQuotaPerAgent ?? null;
-    row.freeDailyBudget = body.freeDailyBudget ?? null;
+    row.freeDailyBudget = freeDailyBudgetColumn(body.freeDailyBudget ?? null);
     row.slaFailureRate = String(body.slaFailureRate);
     row.timeoutMs = body.timeoutMs;
     // `?? null` and not `?? 0`: an undeclared ceiling is the absence of one,
@@ -299,7 +298,9 @@ export class BindingEditorService {
     if (body.pricingMode !== undefined) row.pricingMode = body.pricingMode;
     if (body.priceAmount !== undefined) row.priceAmount = body.priceAmount;
     if (body.freeQuotaPerAgent !== undefined) row.freeQuotaPerAgent = body.freeQuotaPerAgent;
-    if (body.freeDailyBudget !== undefined) row.freeDailyBudget = body.freeDailyBudget;
+    if (body.freeDailyBudget !== undefined) {
+      row.freeDailyBudget = freeDailyBudgetColumn(body.freeDailyBudget);
+    }
     if (body.slaFailureRate !== undefined) row.slaFailureRate = String(body.slaFailureRate);
     if (body.timeoutMs !== undefined) row.timeoutMs = body.timeoutMs;
     // `undefined` leaves the ceiling alone, `null` clears it. Assigned before
@@ -310,7 +311,6 @@ export class BindingEditorService {
     if (row.pricingMode === PricingMode.FREE) row.priceAmount = '0';
     // After the merge, so `{ pricingMode: 'PAID' }` against a stored zero and
     // `{ priceAmount: '0' }` against a stored PAID are both caught.
-    assertFreeLimitsRepresentable(body.freeDailyBudget);
     assertPriceMatchesMode(row.pricingMode as PricingMode, row.priceAmount);
 
     // Answered against what was read, not against what the caller sent: a
@@ -624,12 +624,11 @@ function assertPriceMatchesMode(pricingMode: PricingMode, priceAmount: string): 
   }
 }
 
-/** The read side returns the budget as a JSON number, so it must survive `Number()` exactly. */
-function assertFreeLimitsRepresentable(freeDailyBudget: string | null | undefined): void {
-  if (freeDailyBudget != null && BigInt(freeDailyBudget) > BigInt(Number.MAX_SAFE_INTEGER)) {
-    throw ProviderErrors.bindingFreeLimitTooLarge({
-      field: 'freeDailyBudget',
-      max: String(Number.MAX_SAFE_INTEGER),
-    });
-  }
+/**
+ * `free_daily_budget` is a call count (free calls per day across all agents) kept in
+ * its original `numeric(78,0)` column, which TypeORM reads and writes as a string.
+ * The DTO already bounds it to a positive int4, so the string is always exact.
+ */
+function freeDailyBudgetColumn(calls: number | null): string | null {
+  return calls === null ? null : String(calls);
 }
