@@ -94,6 +94,21 @@ describe('PaymentIntentRepository.summarizeReceipts SQL', () => {
     expect(sql).toContain('"inProgressTotal"');
   });
 
+  it('counts a written-off debt as owed, not as not charged (final review M2)', async () => {
+    const sql = await renderedSql(ReceiptsSummaryGroupBy.TOOL);
+    const owedStart = sql.indexOf('"chargedCalls"');
+    const owed = sql.slice(owedStart, sql.indexOf('"owedTotal"'));
+    expect(owed).toContain(
+      `OR COALESCE(("intent"."redemption_last_error" LIKE 'uncollected:%'), false)`,
+    );
+    expect(owed).toContain(
+      `NOT COALESCE(("intent"."redemption_last_error" LIKE 'provider_forfeit:%'), false)`,
+    );
+    expect(owed).toContain(
+      `NOT COALESCE(("intent"."redemption_last_error" LIKE 'voided:%'), false)`,
+    );
+  });
+
   it('derives not charged as listed minus charged, owed and in progress', async () => {
     const { rows } = await run(ReceiptsSummaryGroupBy.TOOL, [
       {

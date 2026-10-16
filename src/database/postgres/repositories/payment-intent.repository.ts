@@ -243,15 +243,23 @@ export const NOT_COLLECTED_SQL =
  *
  * - charged: served and collected (or being collected): `SETTLED`, not
  *   {@link NOT_COLLECTED_SQL}, not an open debt.
- * - owed: served, payment not collected yet — an open buyer debt
- *   ({@link DEBT_OUTSTANDING_SQL}). The buyer has not been charged and has not
- *   been let off either, so it is neither of the other two (R17b-B-01).
+ * - owed: served, payment not collected yet, and the buyer still owes it — an
+ *   open buyer debt ({@link DEBT_OUTSTANDING_SQL}) or a WRITTEN-OFF one
+ *   ({@link WRITTEN_OFF_SQL}). The buyer has not been charged and has not been
+ *   let off either, so it is neither of the other two (R17b-B-01). A write-off
+ *   only ends the provider's wait (it is uncollected on the provider side);
+ *   the buyer's paid calls stay refused until it re-signs, so it is still owed
+ *   (final review M2).
  * - in progress: not finished yet.
  * - not charged: the rest — `REFUNDED`, `VOIDED`, `EXPIRED`, and a served call
- *   that was never collected (forfeited, written off, voided debt). Derived by
- *   subtraction so it cannot drift from the other three.
+ *   that was never collected and is not owed (forfeited, voided debt, legacy
+ *   absorb). Derived by subtraction so it cannot drift from the other three.
  */
-const SUMMARY_OWED_SQL = `(intent.status = '${SETTLED_STATUS}' AND ${DEBT_OUTSTANDING_SQL} AND NOT ${NOT_COLLECTED_SQL})`;
+const SUMMARY_OWED_SQL =
+  `(intent.status = '${SETTLED_STATUS}' ` +
+  `AND (${DEBT_OUTSTANDING_SQL} OR COALESCE(${WRITTEN_OFF_SQL}, false)) ` +
+  `AND NOT COALESCE(${FORFEITED_SQL}, false) AND NOT COALESCE(${VOIDED_SQL}, false) ` +
+  `AND NOT ${PLATFORM_ABSORBED_SQL})`;
 const SUMMARY_CHARGED_SQL = `(intent.status = '${SETTLED_STATUS}' AND NOT ${DEBT_OUTSTANDING_SQL} AND NOT ${NOT_COLLECTED_SQL})`;
 const SUMMARY_IN_PROGRESS_SQL = `(intent.status IN ('CREATED', 'FUNDS_SECURED', 'PROVIDER_EXECUTING', 'VERIFYING'))`;
 
@@ -1696,7 +1704,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect(
         // A forfeited voucher, a written-off or voided debt and a legacy absorb
         // were never collected: the buyer was not charged (review #2, M4). An
-        // open debt is owed, not charged (R17b-B-01).
+        // open or written-off debt is owed, not charged (R17b-B-01, final M2).
         `COALESCE(SUM(CASE WHEN ${SUMMARY_CHARGED_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
         'chargedTotal',
       )
