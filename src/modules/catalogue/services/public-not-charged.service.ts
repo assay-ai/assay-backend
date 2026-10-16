@@ -40,11 +40,17 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *
  * ## Rows
  *
- * - **Delayed and coarse.** Only calls at least 24 h old are published, dated
- *   to the UTC day (`day: 'YYYY-MM-DD'`), never to the minute.
+ * - **Delayed and coarse.** Only calls created at least 24 h ago AND whose
+ *   outcome (the hold release) was recorded at least 24 h ago are published,
+ *   dated to the UTC day of the call (`day: 'YYYY-MM-DD'`), never to the
+ *   minute. Gating on the outcome too means a late forfeit or voided debt on
+ *   an old call surfaces a day later, not the minute it happens.
  * - **Eligible buyers only.** A call counts only when its organization was
- *   created at least 7 days ago and has at least one charged paid call. That
- *   raises the cost of lifting a tool over k with throwaway organizations.
+ *   created at least 7 days ago and has at least one paid call whose payment
+ *   was collected (and so can never be reversed). That raises the cost of
+ *   lifting a tool over k with throwaway organizations, and eligibility never
+ *   goes backwards, so a buyer falling into debt cannot flip a tool or asset
+ *   across k.
  * - **k on what is actually published.** With k = {@link NOT_CHARGED_MIN_BUYERS},
  *   the published rows of each tool must come from at least k distinct buyers.
  *   The service picks the newest {@link NOT_CHARGED_RECENT_LIMIT} candidates,
@@ -56,13 +62,18 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  *
  * ## Totals
  *
- * Computed over **complete UTC days** only — `[today − 30 d, today)` — so they
- * change once a day and cannot be differenced minute by minute to isolate a
- * single call. An asset is counted only when at least k eligible buyers made
- * paid calls in it.
+ * Computed over **complete UTC days** only: calls created in
+ * `[today − 30 d, today)` whose outcome was final before `today` (00:00 UTC),
+ * by buyers that were eligible as of `today`. Every input is cut at the same
+ * day boundary, so the totals change once a day and cannot be differenced
+ * minute by minute to isolate a single call. A call still awaiting payment, or
+ * an open or written-off buyer debt, is not counted until it resolves. Every
+ * figure covers eligible buyers only, and an asset is counted only when at
+ * least k of them made paid calls in it.
  *
- * `withheldForPrivacy` is true whenever either rule removed something, so the
- * page never reads a suppressed figure as "nothing happened".
+ * `withheldForPrivacy` is true whenever a rule removed something — a tool or
+ * asset under k, or a row whose provider is not listed — so the page never
+ * reads a suppressed figure as "nothing happened".
  *
  * ## Cached in memory, per process
  *
@@ -85,15 +96,30 @@ export class PublicNotChargedService {
   private async load(now: Date): Promise<PublicNotChargedResponseDto> {
     const today = startOfUtcDay(now);
     const since = new Date(today.getTime() - NOT_CHARGED_WINDOW_DAYS * DAY_MS);
-    const buyerCreatedBefore = new Date(now.getTime() - NOT_CHARGED_MIN_BUYER_AGE_MS);
     const rowsBefore = new Date(now.getTime() - NOT_CHARGED_MIN_AGE_MS);
 
     const [candidates, totals, providers, tools] = await Promise.all([
+      // Rows: created AND resolved at least 24 h ago.
       this.intents.findNotChargedCandidates(
-        { from: since, to: rowsBefore, buyerCreatedBefore },
+        {
+          from: since,
+          to: rowsBefore,
+          outcomeBefore: rowsBefore,
+          buyerCreatedBefore: new Date(now.getTime() - NOT_CHARGED_MIN_BUYER_AGE_MS),
+          buyerCollectedBefore: rowsBefore,
+        },
         NOT_CHARGED_CANDIDATE_LIMIT,
       ),
-      this.intents.summarizeNotCharged({ from: since, to: today, buyerCreatedBefore }),
+      // Totals: every input — the call, its outcome, the buyer's age and its
+      // collected call — is cut at the start of today (UTC), so they are a
+      // function of the date alone.
+      this.intents.summarizeNotCharged({
+        from: since,
+        to: today,
+        outcomeBefore: today,
+        buyerCreatedBefore: new Date(today.getTime() - NOT_CHARGED_MIN_BUYER_AGE_MS),
+        buyerCollectedBefore: today,
+      }),
       this.catalogue.listProviders(),
       this.catalogue.listTools(),
     ]);
@@ -116,7 +142,8 @@ export class PublicNotChargedService {
       since: since.toISOString(),
       until: today.toISOString(),
       minBuyers: NOT_CHARGED_MIN_BUYERS,
-      withheldForPrivacy: suppressed || counted.length < totals.length,
+      withheldForPrivacy:
+        suppressed || named.length < candidates.length || counted.length < totals.length,
       totals: foldTotals(counted),
       recent: published.flatMap((row) => {
         const call = toCall(row, toolNames, providerNames);

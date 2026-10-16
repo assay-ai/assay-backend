@@ -157,17 +157,32 @@ export type NotChargedSettledCause = 'FORFEITED' | 'VOIDED_REFUND' | 'VOIDED_VOI
 
 /** The Explorer's query window, and who counts as a buyer within it. */
 export interface NotChargedWindow {
+  /** Calls created in `[from, to)`. */
   readonly from: Date;
   readonly to: Date;
+  /**
+   * The call's outcome must be final and recorded strictly before this
+   * instant (`hold_released_at`), so a late forfeit or voided debt on an old
+   * call surfaces only once this cut-off passes it — never inside one cache
+   * period (audit 2026-10-17 P2-3).
+   */
+  readonly outcomeBefore: Date;
   /** A buyer organization must have been created at or before this instant. */
   readonly buyerCreatedBefore: Date;
+  /** A buyer organization must have a call collected strictly before this instant. */
+  readonly buyerCollectedBefore: Date;
 }
 
 /** Platform-wide totals for one asset over the Explorer's window. */
 export interface NotChargedTotalsRow {
   readonly asset: string;
   readonly decimals: number;
-  /** Paid calls with a hold that reached a final outcome, charged or not. */
+  /**
+   * Paid calls of eligible buyers whose outcome is final and can no longer
+   * change ({@link FINAL_OUTCOME_SQL}): collected, or not charged. An open or
+   * written-off buyer debt, and a call still awaiting redemption, are not
+   * counted until they resolve.
+   */
   readonly calls: number;
   /** Distinct ELIGIBLE buying organizations behind `calls` — a count, never an id. */
   readonly buyers: number;
@@ -177,33 +192,6 @@ export interface NotChargedTotalsRow {
   readonly failedCheckCalls: number;
   readonly notChargedAmount: bigint;
 }
-
-/**
- * The organizations that count as buyers for the Explorer's k-anonymity rule:
- * created at least a week ago, and with at least one CHARGED paid call. Both
- * raise the cost of lifting a tool over k with throwaway organizations.
- *
- * "Charged" is the receipts summary's charged bucket (`SUMMARY_CHARGED_SQL`)
- * spelled on the alias `s`: `SETTLED`, not an open buyer debt, and not
- * forfeited, written off, voided or legacy-absorbed. A `SETTLED` row alone is
- * not enough since buyer debt: an organization that never paid — its only
- * served call lapsed into debt — must not count toward k. Literals rather than
- * the `intent.`-aliased constants below, which this subquery cannot reuse.
- * Bound parameters: `:buyerCreatedBefore`, `:paid`, `:settledStatus`.
- */
-const ELIGIBLE_BUYER_SQL =
-  `intent.organization_id IN (SELECT o.id FROM organizations o ` +
-  `WHERE o.created_at <= :buyerCreatedBefore AND EXISTS (` +
-  `SELECT 1 FROM payment_intents s WHERE s.organization_id = o.id ` +
-  `AND s.call_class = :paid AND s.status = :settledStatus ` +
-  `AND NOT (s.redemption_lapsed_at IS NOT NULL AND s.hold_released_at IS NULL) ` +
-  `AND NOT COALESCE(s.redemption_last_error LIKE 'provider_forfeit:%' ` +
-  `OR s.redemption_last_error LIKE 'uncollected:%' ` +
-  `OR s.redemption_last_error LIKE 'voided:%', false) ` +
-  `AND NOT EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
-  `WHERE absorbed.organization_id = s.provider_id AND absorbed.intent_id = s.id ` +
-  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
-  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')))`;
 
 /** Mirrors `PaymentIntentCallClass.PAID`, kept local like the statuses below. */
 const PAID_CALL_CLASS = 'PAID';
@@ -290,6 +278,37 @@ const CLOSED_OUTCOME_SQL = (alias: string): string =>
   `(${alias}.redemption_last_error LIKE 'provider_forfeit:%' ` +
   `OR ${alias}.redemption_last_error LIKE 'uncollected:%' ` +
   `OR ${alias}.redemption_last_error LIKE 'voided:%')`;
+
+/**
+ * The organizations that count as buyers for the Explorer's k-anonymity rule:
+ * created at least a week ago, and with at least one paid call whose payment
+ * was COLLECTED before `:buyerCollectedBefore`. Both raise the cost of lifting
+ * a tool over k with throwaway organizations.
+ *
+ * "Collected" is {@link CREDITED_SQL} spelled on the alias `s`: `SETTLED`, the
+ * hold committed (released, and not by a forfeit, write-off, void or legacy
+ * absorb). That is deliberately stricter than the receipts summary's
+ * "charged" bucket, which also holds a rail-B call still awaiting redemption:
+ * such a call can later lapse into buyer debt, and an organization whose only
+ * call did would lose eligibility retroactively — the tool or asset would
+ * drop under k and the change would reveal a buyer debt (audit 2026-10-17
+ * P2-2). A collected call never changes again, so eligibility only ever goes
+ * forwards; and the time bound pins it to the caller's cut-off.
+ * Bound parameters: `:buyerCreatedBefore`, `:buyerCollectedBefore`, `:paid`,
+ * `:settledStatus`.
+ */
+const ELIGIBLE_BUYER_SQL =
+  `intent.organization_id IN (SELECT o.id FROM organizations o ` +
+  `WHERE o.created_at <= :buyerCreatedBefore AND EXISTS (` +
+  `SELECT 1 FROM payment_intents s WHERE s.organization_id = o.id ` +
+  `AND s.call_class = :paid AND s.status = :settledStatus ` +
+  `AND s.hold_id IS NOT NULL AND s.hold_released_at IS NOT NULL ` +
+  `AND s.hold_released_at < :buyerCollectedBefore ` +
+  `AND NOT COALESCE(${CLOSED_OUTCOME_SQL('s')}, false) ` +
+  `AND NOT EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
+  `WHERE absorbed.organization_id = s.provider_id AND absorbed.intent_id = s.id ` +
+  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
+  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')))`;
 
 /**
  * Read on a credited intent: a LEGACY credit out of platform funds
@@ -402,6 +421,25 @@ const NOT_CHARGED_SQL = `(intent.status IN (:...withheldStatuses) OR ${NOT_CHARG
 const FAILED_CHECK_SQL =
   `(intent.status = :refundedStatus OR (${NOT_CHARGED_SETTLED_SQL} ` +
   `AND intent.redemption_last_error = 'voided:REFUND'))`;
+
+/**
+ * The Explorer's "final outcome, recorded before the cut-off": the hold was
+ * released before `:outcomeBefore`, and the call is either not charged
+ * ({@link NOT_CHARGED_SQL}) or collected ({@link CREDITED_SQL}). Both are
+ * terminal. Every other paid call — awaiting redemption, an open buyer debt,
+ * a written-off debt (the buyer can still re-sign it) — is left out, so a
+ * change in its state cannot move a published figure, and debt state is never
+ * readable from the totals.
+ *
+ * Known residual: a debt voided AFTER it was written off keeps the write-off's
+ * `hold_released_at` (`markDebtVoided` only fills it when empty), so it moves
+ * into "not charged" at void time with an older timestamp. That needs a late
+ * verdict arriving after `BUYER_DEBT_WRITE_OFF_DAYS`, which is not expected.
+ * Bound parameters: `:outcomeBefore`, `:...withheldStatuses`.
+ */
+const FINAL_OUTCOME_SQL =
+  `(intent.hold_released_at IS NOT NULL AND intent.hold_released_at < :outcomeBefore ` +
+  `AND (${NOT_CHARGED_SQL} OR (intent.status = '${SETTLED_STATUS}' AND ${CREDITED_SQL})))`;
 
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
@@ -2069,8 +2107,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
   /**
    * Candidate rows for the public Explorer's "not charged" feed: paid calls
-   * that ended without a charge in `[from, to)`, made by an eligible buyer
-   * ({@link ELIGIBLE_BUYER_SQL}), newest first, at most `limit`.
+   * created in `[from, to)` that ended without a charge, whose outcome (the
+   * hold release) was recorded before `outcomeBefore`, made by an eligible
+   * buyer ({@link ELIGIBLE_BUYER_SQL}), newest first, at most `limit`.
    *
    * **Deliberately cross-organization**, and there is no tenant to scope it to:
    * the route is served with no session, and the claim it backs — *you do not
@@ -2108,8 +2147,13 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere(NOT_CHARGED_SQL, { withheldStatuses: WITHHELD_STATUSES })
       .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
       .andWhere(`${CREATED_AT} < :to`, { to: window.to })
+      .andWhere('intent.hold_released_at IS NOT NULL')
+      .andWhere('intent.hold_released_at < :outcomeBefore', {
+        outcomeBefore: window.outcomeBefore,
+      })
       .andWhere(ELIGIBLE_BUYER_SQL, {
         buyerCreatedBefore: window.buyerCreatedBefore,
+        buyerCollectedBefore: window.buyerCollectedBefore,
         settledStatus: SETTLED_STATUS,
       })
       .orderBy('intent.createdAt', 'DESC')
@@ -2144,10 +2188,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * Per-asset totals behind the same feed over `[from, to)`: paid calls that
-   * reached a final outcome, how many were not charged, how many of those
-   * failed verification, the listed value not charged, and how many ELIGIBLE
-   * buyers stand behind the asset (the input to the per-asset k rule).
+   * Per-asset totals behind the same feed over `[from, to)`, for ELIGIBLE
+   * buyers only: paid calls whose outcome was final before `outcomeBefore`
+   * ({@link FINAL_OUTCOME_SQL}), how many were not charged, how many of those
+   * failed verification, the listed value not charged, and how many buyers
+   * stand behind the asset (the input to the per-asset k rule).
    *
    * **Deliberately cross-organization**, for the reason given on
    * {@link findNotChargedCandidates}; the projection is counts and sums per
@@ -2158,10 +2203,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .select('intent.assetId', 'asset')
       .addSelect('intent.decimals', 'decimals')
       .addSelect('COUNT(*)', 'calls')
-      .addSelect(
-        `COUNT(DISTINCT CASE WHEN ${ELIGIBLE_BUYER_SQL} THEN intent.organization_id END)`,
-        'buyers',
-      )
+      .addSelect('COUNT(DISTINCT intent.organization_id)', 'buyers')
       .addSelect(`COUNT(*) FILTER (WHERE ${NOT_CHARGED_SQL})`, 'notChargedCalls')
       .addSelect(`COUNT(*) FILTER (WHERE ${FAILED_CHECK_SQL})`, 'failedCheckCalls')
       .addSelect(
@@ -2171,16 +2213,19 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .where('intent.organizationId IS NOT NULL')
       .andWhere('intent.callClass = :paid', { paid: PAID_CALL_CLASS })
       .andWhere('intent.holdId IS NOT NULL')
-      .andWhere('intent.status IN (:...finalStatuses)', {
-        finalStatuses: [SETTLED_STATUS, ...WITHHELD_STATUSES],
-      })
+      .andWhere(FINAL_OUTCOME_SQL)
       .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
       .andWhere(`${CREATED_AT} < :to`, { to: window.to })
+      // Every figure is over eligible buyers only, the same population the k
+      // rule counts (audit 2026-10-17 P3-1).
+      .andWhere(ELIGIBLE_BUYER_SQL)
       .setParameters({
         withheldStatuses: WITHHELD_STATUSES,
         refundedStatus: REFUNDED_STATUS,
         settledStatus: SETTLED_STATUS,
+        outcomeBefore: window.outcomeBefore,
         buyerCreatedBefore: window.buyerCreatedBefore,
+        buyerCollectedBefore: window.buyerCollectedBefore,
       })
       .groupBy('intent.assetId')
       .addGroupBy('intent.decimals')

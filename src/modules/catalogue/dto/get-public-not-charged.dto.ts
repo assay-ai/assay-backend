@@ -13,14 +13,14 @@ import { PublicMoneyDto } from './public-catalogue.dto';
  *
  * Each recent row is the tool, the provider's registered name, the listed
  * price, why it was not charged, and the UTC day it happened — published only
- * once at least 24 h old. There is no intent id, call id, buyer organization,
+ * once the call and its outcome are both at least 24 h old. There is no intent id, call id, buyer organization,
  * agent, account, hold, request or response body, and no transaction
  * reference.
  *
  * ## k-anonymity
  *
  * A buyer counts only when its organization is at least 7 days old and has a
- * charged paid call. Each tool's published rows must come from at least
+ * paid call whose payment was collected (so eligibility never goes backwards). Each tool's published rows must come from at least
  * `minBuyers` such buyers, counted on the rows actually published; an asset's
  * totals are counted only when `minBuyers` such buyers made paid calls in it.
  * Totals cover complete UTC days only. Whatever falls below the floor is left
@@ -56,14 +56,16 @@ export class PublicNotChargedCallDto {
     enum: WithheldBucket,
     description:
       'FAILED_VERIFICATION is the guarantee firing; PROVIDER_OR_PLATFORM_ERROR is a call that ' +
-      'never produced usable data, or whose payment the provider could not collect ' +
+      'never produced usable data, or whose payment was not collected ' +
       '(NOT_COLLECTED). Never merge the two.',
   })
   bucket: WithheldBucket;
 
   @ApiProperty({
     example: '2026-10-14',
-    description: 'UTC day the call was made. Rows are published only once at least 24 h old.',
+    description:
+      'UTC day the call was made. Rows are published only once the call and its outcome are ' +
+      'both at least 24 h old.',
   })
   day: string;
 }
@@ -71,8 +73,9 @@ export class PublicNotChargedCallDto {
 export class PublicNotChargedTotalsDto {
   @ApiProperty({
     description:
-      'Paid calls that reached a final outcome in the window — charged or not. Free calls are ' +
-      'not counted.',
+      'Paid calls made in the window by eligible buyers whose outcome was final before the end ' +
+      'of the window — collected or not charged. Calls still awaiting payment and owed calls ' +
+      'are not counted until they resolve. Free calls are not counted.',
   })
   callsChecked: number;
 

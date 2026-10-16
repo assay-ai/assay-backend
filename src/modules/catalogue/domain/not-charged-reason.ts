@@ -30,9 +30,13 @@ export enum NotChargedReason {
   EXPIRED = 'EXPIRED',
   /**
    * `SETTLED`, but the payment was never collected and the buyer does not owe
-   * it: the provider forfeited the voucher (it caused it to fail), or a legacy
-   * platform-absorbed credit. A written-off buyer debt is NOT this — the buyer
-   * still owes it, so it never reaches the feed.
+   * it: the provider forfeited the voucher (it caused it to fail), a buyer debt
+   * voided by a late VOID verdict, or a legacy platform-absorbed credit. The
+   * text is neutral on purpose: a legacy absorb was usually a buyer-side
+   * failure, and a VOID can follow a served call, so neither "the provider
+   * could not collect" nor "no usable result" is true of every row. A
+   * written-off buyer debt is NOT this — the buyer still owes it, so it never
+   * reaches the feed.
    */
   NOT_COLLECTED = 'NOT_COLLECTED',
 }
@@ -50,7 +54,7 @@ export const NOT_CHARGED_REASON_TEXT: Readonly<Record<NotChargedReason, string>>
     'The call ended without a usable result, so it was not charged.',
   [NotChargedReason.EXPIRED]: 'The call did not finish in time, so the held amount was released.',
   [NotChargedReason.NOT_COLLECTED]:
-    'The provider could not collect payment for this call, so the buyer was not charged.',
+    'Payment for this call was not collected, so the buyer was not charged.',
 });
 
 export interface NotChargedOutcome {
@@ -95,8 +99,11 @@ export function notChargedReason(
 /**
  * A served call the buyer was not charged for and does not owe. A buyer debt
  * voided by a late REFUND verdict is the guarantee firing, exactly like
- * `REFUNDED`; one voided by a VOID verdict reads like `VOIDED`. A `SETTLED`
- * row with no cause is a charged or owed call and is never published.
+ * `REFUNDED`. One voided by a VOID verdict is `NOT_COLLECTED`, not a `VOIDED`
+ * reading of the row: the late VOID does not rewrite `classification` or
+ * `verification_verdict`, so those still describe a served call and would
+ * produce an untrue reason. A `SETTLED` row with no cause is a charged or owed
+ * call and is never published.
  */
 function settledReason(
   outcome: NotChargedOutcome,
@@ -105,7 +112,6 @@ function settledReason(
     case 'VOIDED_REFUND':
       return { reason: NotChargedReason.FAILED_CHECK, bucket: WithheldBucket.FAILED_VERIFICATION };
     case 'VOIDED_VOID':
-      return notChargedReason({ ...outcome, status: 'VOIDED', settledCause: null });
     case 'FORFEITED':
     case 'ABSORBED':
       return {

@@ -19,7 +19,7 @@ import { PublicNotChargedService } from '../services/public-not-charged.service'
  * reason, and the UTC day. `PublicNotChargedService` documents the projection,
  * and the repository never selects an identifier to begin with.
  *
- * Rows are at least 24 h old and dated to the UTC day; each tool's published
+ * Rows (the call and its outcome) are at least 24 h old and dated to the UTC day; each tool's published
  * rows come from at least five distinct established buyers; totals cover
  * complete UTC days. The full rule is on `PublicNotChargedService`.
  *
@@ -45,7 +45,7 @@ export class PublicNotChargedController {
     summary: 'Recent paid calls that were not charged, and 30-day totals — no authentication',
     description:
       'Platform-wide and anonymised: tool, provider name, listed price, reason and the UTC day ' +
-      'of the call (rows at least 24 h old). No buyer, organization, agent, call or transaction identifiers. A tool is ' +
+      'of the call (rows whose call and outcome are at least 24 h old). No buyer, organization, agent, call or transaction identifiers. A tool is ' +
       'listed only when at least `minBuyers` different buyers had calls not charged on it.',
   })
   @ApiResponse({ status: 200, type: PublicNotChargedResponseDto })

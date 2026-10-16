@@ -4,7 +4,11 @@ import {
   NotChargedWindow,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
-import { NotChargedReason, notChargedReason } from '@modules/catalogue/domain/not-charged-reason';
+import {
+  NOT_CHARGED_REASON_TEXT,
+  NotChargedReason,
+  notChargedReason,
+} from '@modules/catalogue/domain/not-charged-reason';
 import { PublicCatalogueService } from '@modules/catalogue/services/public-catalogue.service';
 import {
   NOT_CHARGED_CACHE_MS,
@@ -154,24 +158,30 @@ describe('PublicNotChargedService', () => {
     });
   });
 
-  it('reads rows at least 24 h old, totals over complete UTC days, buyers at least 7 days old', async () => {
+  it('reads rows whose call and outcome are 24 h old, totals cut at 00:00 UTC, buyers 7 days old', async () => {
     const { service, intents } = build([]);
 
     const body = await service.read(NOW);
 
-    const buyerCreatedBefore = new Date('2026-10-08T10:00:30.000Z');
+    const rowsBefore = new Date('2026-10-14T10:00:30.000Z');
     expect(intents.findNotChargedCandidates).toHaveBeenCalledWith(
       {
         from: new Date('2026-09-15T00:00:00.000Z'),
-        to: new Date('2026-10-14T10:00:30.000Z'),
-        buyerCreatedBefore,
+        to: rowsBefore,
+        outcomeBefore: rowsBefore,
+        buyerCreatedBefore: new Date('2026-10-08T10:00:30.000Z'),
+        buyerCollectedBefore: rowsBefore,
       },
       expect.any(Number),
     );
+    // Every input of the totals is cut at the same UTC day boundary.
+    const today = new Date('2026-10-15T00:00:00.000Z');
     expect(intents.summarizeNotCharged).toHaveBeenCalledWith({
       from: new Date('2026-09-15T00:00:00.000Z'),
-      to: new Date('2026-10-15T00:00:00.000Z'),
-      buyerCreatedBefore,
+      to: today,
+      outcomeBefore: today,
+      buyerCreatedBefore: new Date('2026-10-08T00:00:00.000Z'),
+      buyerCollectedBefore: today,
     });
     expect(body).toMatchObject({
       windowDays: 30,
@@ -192,6 +202,8 @@ describe('PublicNotChargedService', () => {
 
     expect(body.recent).toHaveLength(5);
     expect(body.recent.every((call) => call.providerName === 'Open-Meteo Demo BV')).toBe(true);
+    // Something was left out, so the page must not read the list as complete.
+    expect(body.withheldForPrivacy).toBe(true);
   });
 
   it('publishes at most 20 rows', async () => {
@@ -431,18 +443,27 @@ describe('notChargedReason', () => {
       NotChargedReason.FAILED_CHECK,
       WithheldBucket.FAILED_VERIFICATION,
     ],
+    // A late VOID does not rewrite classification or verdict, so they must
+    // not decide the reason: it is the neutral NOT_COLLECTED whatever they say.
+    [
+      'VOIDED_VOID',
+      'DATA_RESULT',
+      'PASS',
+      NotChargedReason.NOT_COLLECTED,
+      WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
+    ],
     [
       'VOIDED_VOID',
       'DATA_RESULT',
       'MISAPPLIED',
-      NotChargedReason.OUT_OF_SCOPE,
+      NotChargedReason.NOT_COLLECTED,
       WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
     ],
     [
       'VOIDED_VOID',
       'SYSTEM_ERROR',
       null,
-      NotChargedReason.PROVIDER_ERROR,
+      NotChargedReason.NOT_COLLECTED,
       WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
     ],
     [
@@ -467,4 +488,12 @@ describe('notChargedReason', () => {
       ).toEqual({ reason, bucket });
     },
   );
+});
+
+describe('reason wording', () => {
+  it('says NOT_COLLECTED neutrally: true of a forfeit, a voided debt and a legacy absorb', () => {
+    expect(NOT_CHARGED_REASON_TEXT[NotChargedReason.NOT_COLLECTED]).toBe(
+      'Payment for this call was not collected, so the buyer was not charged.',
+    );
+  });
 });
