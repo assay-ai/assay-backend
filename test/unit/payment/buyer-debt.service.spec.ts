@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+import { QueryFailedError } from 'typeorm';
+
 import {
   LapsedVoucherReplacement,
   OpenVoucherTotals,
@@ -131,6 +133,7 @@ function build() {
     voucherSeq: '3',
     voucherResource: null,
     lapsedAt: new Date('2026-10-16T00:00:00Z'),
+    expiresAt: new Date('2026-10-15T23:55:00Z'),
     cause: 'DelegateIsRevoked',
     replacedAt: null,
     writtenOff: false,
@@ -238,9 +241,49 @@ describe('BuyerDebtService — settling a debt with a replacement voucher', () =
         state: 'OPEN',
         lapsedAt: '2026-10-16T00:00:00.000Z',
         writeOffAt: '2026-11-15T00:00:00.000Z',
+        // expiresAt + 1,800 s grace + 120 s skew.
+        replaceableAt: '2026-10-16T00:27:00.000Z',
         replacedAt: null,
       }),
     ]);
+  });
+
+  it('BUG-R17f-01: refuses a debt whose voucher is still inside its on-chain window, before any seq', async () => {
+    const { service, session, debt, debts, payments } = build();
+    // Lapsed early (a permanent refusal): the old voucher stays redeemable
+    // until expiresAt + grace, so a replacement could be charged on top of it.
+    const expiresAt = new Date(Date.now() - 60_000);
+    debts[0] = { ...debt, expiresAt };
+    const allocate = (service as unknown as { seqs: { allocate: jest.Mock } }).seqs.allocate;
+
+    await expect(service.voucherIntent(session, debt.id)).rejects.toMatchObject({
+      errorCode: PaymentErrorCode.PAYMENT_DEBT_NOT_YET_REPLACEABLE,
+      statusCode: 409,
+    });
+    expect(allocate).not.toHaveBeenCalled();
+    const [listed] = await service.list(session);
+    expect(listed.replaceableAt).toBe(new Date(expiresAt.getTime() + 1_920_000).toISOString());
+    expect(payments.replaceLapsedVoucher).not.toHaveBeenCalled();
+  });
+
+  it('BUG-R17f-01: a database refusal of the replacement is a 409, not a 500, and gives the hold back', async () => {
+    const { service, session, debt, debts, payments, intents, sign } = build();
+    debts[0] = { ...debt, writtenOff: true, cause: 'uncollected:VoucherExpired' };
+    const { voucher } = await service.voucherIntent(session, debt.id);
+    payments.replaceLapsedVoucher.mockRejectedValueOnce(
+      new QueryFailedError('UPDATE "payment_intents" …', [], {
+        code: '23514',
+        message: 'payment_intents.voucher_seq is immutable',
+      } as unknown as Error),
+    );
+
+    await expect(
+      service.settle(session, debt.id, { voucher, signature: sign(voucher) }),
+    ).rejects.toMatchObject({
+      errorCode: PaymentErrorCode.PAYMENT_DEBT_REPLACEMENT_REFUSED,
+      statusCode: 409,
+    });
+    expect(intents.releaseUnusedHold).toHaveBeenCalledWith(debt.organizationId, 'hold-reopened');
   });
 
   it('builds the replacement: the served call’s own terms, a fresh seq, and EIP-712 typed data', async () => {

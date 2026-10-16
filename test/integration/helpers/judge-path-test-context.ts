@@ -7,6 +7,7 @@ import { PaymentIntentRedemptionTxRefs1760200000000 } from '@database/postgres/m
 import { PaymentIntentRedemptionLastError1760600000000 } from '@database/postgres/migrations/1760600000000-payment-intent-redemption-last-error';
 import { PaymentIntentRedemptionLapsed1760700000000 } from '@database/postgres/migrations/1760700000000-payment-intent-redemption-lapsed';
 import { PaymentIntentDebtReplacing1760800000000 } from '@database/postgres/migrations/1760800000000-payment-intent-debt-replacing';
+import { VoucherSeqDebtReplacement1760900000000 } from '@database/postgres/migrations/1760900000000-voucher-seq-debt-replacement';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
@@ -196,6 +197,7 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
       PaymentIntentRedemptionLastError1760600000000,
       PaymentIntentRedemptionLapsed1760700000000,
       PaymentIntentDebtReplacing1760800000000,
+      VoucherSeqDebtReplacement1760900000000,
     ],
     synchronize: false,
     logging: false,

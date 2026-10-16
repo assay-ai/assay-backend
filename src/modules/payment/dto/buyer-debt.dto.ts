@@ -55,6 +55,14 @@ export class BuyerDebtDto {
   })
   writeOffAt: string;
 
+  @ApiProperty({
+    description:
+      'From when the debt can be settled (ISO 8601): its original voucher is past its on-chain ' +
+      'redemption window, so it can never be redeemed besides the replacement. Usually already ' +
+      'past; a debt that lapsed early (not `VoucherExpired`) waits up to about 37 minutes.',
+  })
+  replaceableAt: string;
+
   @ApiPropertyOptional({
     nullable: true,
     type: String,
