@@ -1,9 +1,12 @@
 import { Test } from '@nestjs/testing';
 import { ValidationPipe, type INestApplication } from '@nestjs/common';
+import { INTERCEPTORS_METADATA } from '@nestjs/common/constants';
 import request from 'supertest';
 
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
+import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
+import { CatalogueController } from '@modules/catalogue/controllers/catalogue.controller';
 import { PublicCatalogueController } from '@modules/catalogue/controllers/public-catalogue.controller';
 import { PublicNotChargedController } from '@modules/catalogue/controllers/public-not-charged.controller';
 import { PublicCatalogueService } from '@modules/catalogue/services/public-catalogue.service';
@@ -93,4 +96,19 @@ describe('public Explorer routes need no authentication', () => {
     expect(res.status).toBe(500);
     expect(JSON.stringify(res.body)).not.toMatch(/ECONNREFUSED|10\.0\.0\.7|at .*\.ts/);
   });
+});
+
+/**
+ * The signed-in `/catalogue/*` reads the same shared market as the public
+ * routes, so it is throttled the same way (review 2026-10-17).
+ */
+describe('the signed-in catalogue is rate limited', () => {
+  it.each([CatalogueController, PublicCatalogueController, PublicNotChargedController])(
+    '%p has PublicReadRateLimitInterceptor attached',
+    (controller) => {
+      const interceptors = (Reflect.getMetadata(INTERCEPTORS_METADATA, controller) ??
+        []) as unknown[];
+      expect(interceptors).toContain(PublicReadRateLimitInterceptor);
+    },
+  );
 });
