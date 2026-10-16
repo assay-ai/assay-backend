@@ -113,7 +113,7 @@ export class ProviderCallsExportService {
       }
 
       const last = page[page.length - 1];
-      after = { createdAt: last.createdAt, id: last.id };
+      after = { createdAt: last.createdAtExact, id: last.id };
 
       if (page.length < take) break;
     }

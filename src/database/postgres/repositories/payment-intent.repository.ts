@@ -4,6 +4,7 @@ import { DataSource, EntityManager, IsNull, QueryRunner, SelectQueryBuilder } fr
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
 import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
+import { exactInstantSql } from '@shared/api';
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
 
@@ -268,11 +269,18 @@ export interface CallExportRow {
   /** {@link DEBT_OUTSTANDING_SQL}: an open buyer debt — passed, not collected yet. */
   readonly debtOutstanding: boolean;
   readonly createdAt: Date;
+  /**
+   * `created_at` at full microsecond precision ({@link exactInstantSql}) — the
+   * keyset position. `createdAt` is a `Date`, truncated to the millisecond, and
+   * a cursor built from it re-reads the boundary row on every page.
+   */
+  readonly createdAtExact: string;
 }
 
 /** A keyset position for {@link PaymentIntentRepository.findCallsPageForExport}. */
 export interface CallExportCursor {
-  readonly createdAt: Date;
+  /** The last emitted row's {@link CallExportRow.createdAtExact} — never a `Date`. */
+  readonly createdAt: string;
   readonly id: string;
 }
 
@@ -1813,12 +1821,17 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect(PLATFORM_ABSORBED_REASON_SQL, 'absorbedReason')
       .addSelect('intent.redemptionLastError', 'redemptionLastError')
       .addSelect(DEBT_OUTSTANDING_SQL, 'debtOutstanding')
-      .addSelect('intent.createdAt', 'createdAt');
+      .addSelect('intent.createdAt', 'createdAt')
+      .addSelect(exactInstantSql('intent.created_at'), 'createdAtExact');
 
+    // Row-value form, as `paginate()` builds it. The position must be the
+    // exact microsecond value: a millisecond `Date` here sorts *before* the
+    // row it came from, so every page re-read its predecessor's last row and
+    // the `rowCount` budget ran out with the window's tail never emitted
+    // (BUG-R17b-P-01: 48 pages, 48 duplicates, the last 48 calls missing).
     if (after) {
       qb.andWhere(
-        `(intent.created_at > :afterCreatedAt OR ` +
-          `(intent.created_at = :afterCreatedAt AND intent.id > :afterId))`,
+        '(intent.created_at, intent.id) > (:afterCreatedAt::timestamptz, :afterId::uuid)',
         { afterCreatedAt: after.createdAt, afterId: after.id },
       );
     }
@@ -1847,6 +1860,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         redemptionLastError: string | null;
         debtOutstanding: boolean | string;
         createdAt: Date;
+        createdAtExact: string;
       }>();
 
     return rows.map((row) => ({
