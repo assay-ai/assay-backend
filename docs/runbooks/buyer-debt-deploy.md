@@ -77,11 +77,12 @@ SELECT
   makes every debt look like a voucher awaiting redemption again, which an old build absorbs; and
   dropping `redemption_replaced_at` loses which debts are being collected.
 - **`migration:revert` order.** `1760400000000` is shared by `public-explorer-index` and
-  `slash-part-cancel-reason`. TypeORM matches executed migrations by name, so both run, but on a
-  database that had already run `1760600000000`-`1760900000000` they run after them, and the
+  `slash-part-cancel-reason`. `slash-part-cancel-reason` was already on main, so it ran long
+  ago. TypeORM matches executed migrations by name, so `public-explorer-index` still runs, but on
+  a database that had already run `1760600000000`-`1760900000000` it runs after them, and the
   executed-at order is what `migration:revert` undoes. The first revert after this deploy
-  therefore drops the Explorer index (or the slash cancel reason), not
-  `VoucherSeqDebtReplacement` or `PaymentIntentDebtReplacing`. Check `SELECT * FROM migrations ORDER BY id DESC LIMIT 3` before
+  therefore drops the Explorer index, not `VoucherSeqDebtReplacement` or
+  `PaymentIntentDebtReplacing`. Check `SELECT * FROM migrations ORDER BY id DESC LIMIT 3` before
   reverting anything.
 - If the new build must be stopped, stop it and fix forward. If an older build must run anyway,
   first write off or release every open debt by hand, then stop its scheduler before it starts.

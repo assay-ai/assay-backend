@@ -1,6 +1,11 @@
+import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
-import { DEFAULT_FREE_QUOTA_CONFIG } from '@modules/free-tier/config/free-quota.config';
+import {
+  DEFAULT_FREE_QUOTA_CONFIG,
+  FreeQuotaConfig,
+} from '@modules/free-tier/config/free-quota.config';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import {
   ProviderQualityCounters,
@@ -90,6 +95,9 @@ function binding(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity 
     priceAmount: '250000',
     assetId: ASSET,
     status: 'ACTIVE',
+    // Nullable columns read back as `null`, never `undefined`.
+    freeQuotaPerAgent: null,
+    freeDailyBudget: null,
     ...overrides,
   } as ToolBindingEntity;
 }
@@ -152,6 +160,13 @@ interface Wiring {
   /** `stakeKey(providerId, chainId)` → staked amount. Absent means "not known". */
   readonly stakesByChain?: Readonly<Record<string, Money>>;
   readonly blocklist?: AccountBlocklistService;
+  /**
+   * The published `binding_versions` snapshots the store holds. A binding
+   * whose `publishedVersion` differs from its `mappingVersion` is served (and
+   * so listed) at the snapshot here, never at the row's draft fields.
+   */
+  readonly versions?: BindingVersionEntity[];
+  readonly freeQuota?: FreeQuotaConfig;
 }
 
 function build(wiring: Wiring = {}) {
@@ -160,6 +175,20 @@ function build(wiring: Wiring = {}) {
   const bindings = {
     findActiveBindings: jest.fn(async () => wiring.bindings ?? []),
   } as unknown as ToolBindingRepository;
+
+  // Answers `find({ where: [...] })` the way TypeORM does for an OR of
+  // conditions: every snapshot matching any one of them on all its keys.
+  const versions = {
+    find: jest.fn(async ({ where }: { where: Partial<BindingVersionEntity>[] }) =>
+      (wiring.versions ?? []).filter((snapshot) =>
+        where.some((condition) =>
+          Object.entries(condition).every(
+            ([key, value]) => snapshot[key as keyof BindingVersionEntity] === value,
+          ),
+        ),
+      ),
+    ),
+  } as unknown as BindingVersionRepository;
 
   const providers = {
     findOne: jest.fn(
@@ -235,6 +264,7 @@ function build(wiring: Wiring = {}) {
     enrolments,
     service: new CatalogueService(
       bindings,
+      versions,
       providers,
       windows,
       router,
@@ -246,7 +276,7 @@ function build(wiring: Wiring = {}) {
       // chain set.
       [CHAIN, OTHER_CHAIN],
       wiring.blocklist ?? noBlocks(),
-      DEFAULT_FREE_QUOTA_CONFIG,
+      wiring.freeQuota ?? DEFAULT_FREE_QUOTA_CONFIG,
     ),
   };
 }
@@ -794,12 +824,10 @@ describe('GET /catalogue/providers/:providerId', () => {
   /**
    * The free tier a binding grants, so a visitor can see it before signing up:
    * the binding's own quota when it set one, the platform default otherwise,
-   * and nothing for a PAID binding.
-   */
-  /**
-   * `freeDailyBudget` is a daily free-call COUNT across all agents
-   * (BUG-R17g-01), so one agent can never get more free calls on a binding
-   * than its budget: the per-agent figure is capped by it.
+   * and nothing for a PAID binding. `freeDailyBudget` is a daily free-call
+   * COUNT across all agents (BUG-R17g-01), so one agent can never get more
+   * free calls on a binding than its budget: the per-agent figure is capped
+   * by it.
    */
   it('caps the free calls per agent per day by the binding’s daily free-call budget', async () => {
     const { service } = build({
@@ -844,6 +872,30 @@ describe('GET /catalogue/providers/:providerId', () => {
       [WEATHER.id]: 7,
       [RATE.id]: DEFAULT_FREE_QUOTA_CONFIG.defaultPerAgentDailyLimit,
     });
+  });
+
+  it('falls back to the platform default budget when the binding sets none', async () => {
+    const { service } = build({
+      bindings: [binding({ pricingMode: 'FREEMIUM', freeQuotaPerAgent: 4, freeDailyBudget: null })],
+      freeQuota: { ...DEFAULT_FREE_QUOTA_CONFIG, defaultProviderDailyBudget: 2 },
+    });
+
+    const detail = await service.getProvider('provider-a');
+
+    expect(detail.tools[0].freeCallsPerAgentPerDay).toBe(2);
+  });
+
+  it('never states more than the platform per-agent ceiling', async () => {
+    const { service } = build({
+      bindings: [
+        binding({ pricingMode: 'FREE', freeQuotaPerAgent: 500, freeDailyBudget: '10000' }),
+      ],
+      freeQuota: { ...DEFAULT_FREE_QUOTA_CONFIG, platformAgentDailyLimit: 25 },
+    });
+
+    const detail = await service.getProvider('provider-a');
+
+    expect(detail.tools[0].freeCallsPerAgentPerDay).toBe(25);
   });
 
   /**
@@ -1047,5 +1099,126 @@ describe('PublicCatalogueService', () => {
     await service.getProvider(OPEN);
 
     expect(spy).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * A saved-but-unpublished draft lives on the same `tool_bindings` row as the
+ * live binding, while traffic is served from the published `binding_versions`
+ * snapshot. Every catalogue figure — signed-in and public — must be the
+ * published one until the provider publishes (audit 2026-10-17b, P2-1).
+ */
+describe('the catalogue, with an unpublished draft on a live binding', () => {
+  const BINDING_ID = 'binding-drafted';
+
+  function snapshot(overrides: Partial<BindingVersionEntity> = {}): BindingVersionEntity {
+    return {
+      organizationId: 'provider-a',
+      bindingId: BINDING_ID,
+      mappingVersion: 1,
+      endpoint: 'https://example.test/weather',
+      requestMapping: {},
+      responseMapping: {},
+      pricingMode: 'FREEMIUM',
+      priceAmount: '250000',
+      assetId: ASSET,
+      timeoutMs: 5000,
+      ...overrides,
+    } as BindingVersionEntity;
+  }
+
+  /** A row at draft revision 2 on top of published revision 1. */
+  function drafted(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity {
+    return binding({
+      id: BINDING_ID,
+      mappingVersion: 2,
+      publishedVersion: 1,
+      freeQuotaPerAgent: 7,
+      freeDailyBudget: null,
+      ...overrides,
+    });
+  }
+
+  it('FREEMIUM published, PAID draft: provider detail and fromPrice stay FREEMIUM at $0.25', async () => {
+    const { service } = build({
+      bindings: [drafted({ pricingMode: 'PAID', priceAmount: '100000' })],
+      versions: [snapshot({ pricingMode: 'FREEMIUM', priceAmount: '250000' })],
+    });
+
+    const detail = await service.getProvider('provider-a');
+    const { providers } = await service.listProviders();
+    const { tools } = await service.listTools();
+
+    const published = { amount: '250000', asset: ASSET, decimals: 6 };
+    expect(detail.tools).toEqual([
+      {
+        toolId: WEATHER.id,
+        name: WEATHER.name,
+        pricingMode: 'FREEMIUM',
+        price: published,
+        freeCallsPerAgentPerDay: 7,
+      },
+    ]);
+    expect(detail.fromPrice).toEqual(published);
+    expect(providers[0].fromPrice).toEqual(published);
+    expect(tools.find((tool) => tool.id === WEATHER.id)?.fromPrice).toEqual(published);
+  });
+
+  it('PAID published, FREEMIUM draft: no free calls are advertised', async () => {
+    const { service } = build({
+      bindings: [drafted({ pricingMode: 'FREEMIUM', priceAmount: '100000' })],
+      versions: [snapshot({ pricingMode: 'PAID', priceAmount: '250000' })],
+    });
+
+    const detail = await service.getProvider('provider-a');
+
+    expect(detail.tools[0]).toMatchObject({
+      pricingMode: 'PAID',
+      price: { amount: '250000' },
+      freeCallsPerAgentPerDay: null,
+    });
+  });
+
+  it('the public provider detail shows the published terms, not the draft', async () => {
+    const { service } = build({
+      bindings: [drafted({ pricingMode: 'PAID', priceAmount: '100000' })],
+      versions: [snapshot({ pricingMode: 'FREEMIUM', priceAmount: '250000' })],
+    });
+    const publicCatalogue = new PublicCatalogueService(service);
+
+    const detail = await publicCatalogue.getProvider('provider-a');
+
+    expect(detail.tools[0]).toMatchObject({
+      pricingMode: 'FREEMIUM',
+      price: { amount: '250000' },
+      freeCallsPerAgentPerDay: 7,
+    });
+  });
+
+  it('shows the new terms once the draft is published', async () => {
+    const { service } = build({
+      bindings: [drafted({ pricingMode: 'PAID', priceAmount: '100000', publishedVersion: 2 })],
+      versions: [snapshot({ pricingMode: 'FREEMIUM', priceAmount: '250000' })],
+    });
+
+    const detail = await service.getProvider('provider-a');
+
+    expect(detail.tools[0]).toMatchObject({
+      pricingMode: 'PAID',
+      price: { amount: '100000' },
+      freeCallsPerAgentPerDay: null,
+    });
+  });
+
+  /** Fails closed, as the router does: there are no published terms to show. */
+  it('leaves out a drifted binding whose published snapshot is missing', async () => {
+    const { service } = build({ bindings: [drafted()], versions: [] });
+
+    const detail = await service.getProvider('provider-a');
+    const { providers } = await service.listProviders();
+
+    expect(detail.tools).toEqual([]);
+    expect(detail.activeBindings).toBe(0);
+    expect(providers).toEqual([]);
   });
 });
