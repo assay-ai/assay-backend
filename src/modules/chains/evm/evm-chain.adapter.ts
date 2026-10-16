@@ -47,7 +47,7 @@ import {
 } from '../ports/x402.types';
 import { X402_ESCROW_ABI } from './abi/x402.abi';
 import { evmDomain } from './eip712/domain';
-import { EvmVoucher, hashVoucher } from './eip712/voucher';
+import { EvmVoucher, hashVoucher, voucherTypedData } from './eip712/voucher';
 import { EVM_DEPOSIT_METHOD, EvmDeployment } from './evm.constants';
 import {
   hashPayoutProof,
@@ -539,6 +539,37 @@ export class EvmChainAdapter implements ChainAdapter {
   buildVoucherMessage(voucher: Voucher): Uint8Array {
     const { chainId } = this.parseAccountId(voucher.payer);
     return hexToBytes(hashVoucher(...this.voucherTypedDataArgs(voucher, chainId)));
+  }
+
+  /**
+   * The voucher as a wallet's `signTypedData` request: the same struct and
+   * domain {@link buildVoucherMessage} hashes, every integer a decimal string
+   * so it survives JSON.
+   */
+  voucherTypedData(voucher: Voucher): ProofTypedData {
+    const { chainId } = this.parseAccountId(voucher.payer);
+    const [message, domain] = this.voucherTypedDataArgs(voucher, chainId);
+    const typed = voucherTypedData(message, domain);
+    return {
+      domain: {
+        name: String(typed.domain.name),
+        version: String(typed.domain.version),
+        chainId: String(typed.domain.chainId),
+        verifyingContract: String(typed.domain.verifyingContract),
+      },
+      types: typed.types,
+      primaryType: typed.primaryType,
+      message: {
+        payer: message.payer,
+        provider: message.provider,
+        amount: message.amount.toString(),
+        resourceHash: message.resourceHash,
+        requestHash: message.requestHash,
+        seq: message.seq.toString(),
+        issuedAt: message.issuedAt.toString(),
+        expiresAt: message.expiresAt.toString(),
+      },
+    };
   }
 
   /**

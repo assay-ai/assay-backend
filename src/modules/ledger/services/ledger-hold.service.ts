@@ -120,6 +120,30 @@ export class LedgerHoldService {
     return this.resolve(organizationId, holdId, LedgerHoldStatus.RELEASED);
   }
 
+  /**
+   * Releases the hold only if `guard` — run FIRST, in the same transaction —
+   * says so, and returns `null` (nothing written, nothing released) when it
+   * does not. The guard is the caller's own write that decides the release,
+   * e.g. marking a buyer debt written off only while it is still one
+   * (review-buyer-debt M1): the mark and the release then commit together or
+   * not at all, and a row that changed underneath is left alone. An already
+   * released hold is the usual no-op (`applied: false`), after the guard ran.
+   */
+  async releaseHoldIf(
+    organizationId: string,
+    holdId: string,
+    guard: (queryRunner: QueryRunner) => Promise<boolean>,
+  ): Promise<HoldResolution | null> {
+    return runInLedgerTransaction(
+      this.dataSource,
+      async (queryRunner) => {
+        if (!(await guard(queryRunner))) return null;
+        return this.resolveWithin(queryRunner, organizationId, holdId, LedgerHoldStatus.RELEASED);
+      },
+      this.logger,
+    );
+  }
+
   /** Consumes the reservation; the value leaves the account. Idempotent. */
   async commitHold(organizationId: string, holdId: string): Promise<HoldResolution> {
     return this.resolve(organizationId, holdId, LedgerHoldStatus.COMMITTED);
@@ -340,57 +364,64 @@ export class LedgerHoldService {
   ): Promise<HoldResolution> {
     return runInLedgerTransaction(
       this.dataSource,
-      async (queryRunner) => {
-        const row = await this.holds.lockById(organizationId, holdId, queryRunner);
-        if (!row) {
-          throw LedgerErrors.holdNotFound({ holdId });
-        }
-
-        const decision = decideHoldTransition(row.status as LedgerHoldStatus, to, {
-          holdId,
-          intentId: row.intentId,
-        });
-
-        if (decision.kind === 'NOOP') {
-          // Already in the requested state. No entry, no delta, no second
-          // refund — and `applied: false` so the caller can tell.
-          return { hold: toLedgerHold(row), applied: false };
-        }
-
-        const entry = this.journal.prepare({
-          organizationId,
-          accountId: row.accountId as LedgerAccountId,
-          entryType: decision.entryType,
-          money: MoneyUtil.of(row.amount, row.assetId as AssetId, row.decimals),
-          intentId: row.intentId,
-          holdId,
-        });
-
-        await this.journal.applyEntries(queryRunner, organizationId, [entry]);
-
-        const affected = await this.holds.resolveIfOpen(
-          organizationId,
-          holdId,
-          decision.to,
-          entry.id,
-          queryRunner,
-        );
-        if (affected !== 1) {
-          throw LedgerErrors.holdAlreadyResolved({
-            holdId,
-            intentId: row.intentId,
-            resolution: 'resolved by a concurrent writer',
-            requested: decision.to.toLowerCase(),
-          });
-        }
-
-        return {
-          hold: await this.readHold(organizationId, holdId, queryRunner),
-          applied: true,
-        };
-      },
+      (queryRunner) => this.resolveWithin(queryRunner, organizationId, holdId, to),
       this.logger,
     );
+  }
+
+  private async resolveWithin(
+    queryRunner: QueryRunner,
+    organizationId: string,
+    holdId: string,
+    to: HoldResolutionKind,
+  ): Promise<HoldResolution> {
+    const row = await this.holds.lockById(organizationId, holdId, queryRunner);
+    if (!row) {
+      throw LedgerErrors.holdNotFound({ holdId });
+    }
+
+    const decision = decideHoldTransition(row.status as LedgerHoldStatus, to, {
+      holdId,
+      intentId: row.intentId,
+    });
+
+    if (decision.kind === 'NOOP') {
+      // Already in the requested state. No entry, no delta, no second
+      // refund — and `applied: false` so the caller can tell.
+      return { hold: toLedgerHold(row), applied: false };
+    }
+
+    const entry = this.journal.prepare({
+      organizationId,
+      accountId: row.accountId as LedgerAccountId,
+      entryType: decision.entryType,
+      money: MoneyUtil.of(row.amount, row.assetId as AssetId, row.decimals),
+      intentId: row.intentId,
+      holdId,
+    });
+
+    await this.journal.applyEntries(queryRunner, organizationId, [entry]);
+
+    const affected = await this.holds.resolveIfOpen(
+      organizationId,
+      holdId,
+      decision.to,
+      entry.id,
+      queryRunner,
+    );
+    if (affected !== 1) {
+      throw LedgerErrors.holdAlreadyResolved({
+        holdId,
+        intentId: row.intentId,
+        resolution: 'resolved by a concurrent writer',
+        requested: decision.to.toLowerCase(),
+      });
+    }
+
+    return {
+      hold: await this.readHold(organizationId, holdId, queryRunner),
+      applied: true,
+    };
   }
 
   private async readHold(

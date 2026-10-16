@@ -6,6 +6,9 @@ import { CreateOrganizationsAndAgents1757900000000 } from '@database/postgres/mi
 import { PublicExplorerIndex1760400000000 } from '@database/postgres/migrations/1760400000000-public-explorer-index';
 import { PaymentIntentRedemptionTxRefs1760200000000 } from '@database/postgres/migrations/1760200000000-payment-intent-redemption-tx-refs';
 import { VoucherAdmissionPausePerRequest1759600000006 } from '@database/postgres/migrations/1759600000006-voucher-admission-pause-per-request';
+import { PaymentIntentRedemptionLastError1760600000000 } from '@database/postgres/migrations/1760600000000-payment-intent-redemption-last-error';
+import { PaymentIntentRedemptionLapsed1760700000000 } from '@database/postgres/migrations/1760700000000-payment-intent-redemption-lapsed';
+import { PaymentIntentDebtReplacing1760800000000 } from '@database/postgres/migrations/1760800000000-payment-intent-debt-replacing';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
@@ -180,8 +183,13 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
       // `voucher_admission_pauses`, which the voucher admission reads (BUG-D1-07).
       VoucherAdmissionPause1759600000005,
       VoucherAdmissionPausePerRequest1759600000006,
-      // `payment_intents.redemption_tx_refs`, mapped by `PaymentIntentEntity`.
+      // `redemption_tx_refs`, `redemption_last_error`, `redemption_lapsed_at`,
+      // `redemption_replaced_at` and `voucher_resource`, all mapped by
+      // `PaymentIntentEntity` (redemption tracking and buyer debt).
       PaymentIntentRedemptionTxRefs1760200000000,
+      PaymentIntentRedemptionLastError1760600000000,
+      PaymentIntentRedemptionLapsed1760700000000,
+      PaymentIntentDebtReplacing1760800000000,
       // `organizations`, which the public Explorer's buyer-eligibility rule
       // reads, and the partial index its 30-day scans use.
       CreateOrganizationsAndAgents1757900000000,

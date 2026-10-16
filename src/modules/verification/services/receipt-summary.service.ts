@@ -26,6 +26,12 @@ interface Figures {
   readonly listedTotal: bigint;
   readonly chargedTotal: bigint;
   readonly withheldTotal: bigint;
+  readonly notChargedTotal: bigint;
+  readonly notChargedCalls: number;
+  readonly owedTotal: bigint;
+  readonly owedCalls: number;
+  readonly inProgressTotal: bigint;
+  readonly inProgressCalls: number;
 }
 
 const ZERO_FIGURES: Figures = {
@@ -34,6 +40,12 @@ const ZERO_FIGURES: Figures = {
   listedTotal: 0n,
   chargedTotal: 0n,
   withheldTotal: 0n,
+  notChargedTotal: 0n,
+  notChargedCalls: 0,
+  owedTotal: 0n,
+  owedCalls: 0,
+  inProgressTotal: 0n,
+  inProgressCalls: 0,
 };
 
 /**
@@ -160,6 +172,12 @@ function toFigures(row: ReceiptsSummaryRow): Figures {
     listedTotal: row.listedTotal,
     chargedTotal: row.chargedTotal,
     withheldTotal: row.withheldTotal,
+    notChargedTotal: row.notChargedTotal,
+    notChargedCalls: row.notChargedCalls,
+    owedTotal: row.owedTotal,
+    owedCalls: row.owedCalls,
+    inProgressTotal: row.inProgressTotal,
+    inProgressCalls: row.inProgressCalls,
   };
 }
 
@@ -170,6 +188,12 @@ function addFigures(a: Figures, b: Figures): Figures {
     listedTotal: a.listedTotal + b.listedTotal,
     chargedTotal: a.chargedTotal + b.chargedTotal,
     withheldTotal: a.withheldTotal + b.withheldTotal,
+    notChargedTotal: a.notChargedTotal + b.notChargedTotal,
+    notChargedCalls: a.notChargedCalls + b.notChargedCalls,
+    owedTotal: a.owedTotal + b.owedTotal,
+    owedCalls: a.owedCalls + b.owedCalls,
+    inProgressTotal: a.inProgressTotal + b.inProgressTotal,
+    inProgressCalls: a.inProgressCalls + b.inProgressCalls,
   };
 }
 
@@ -188,6 +212,12 @@ function toFiguresDto(
     listedTotal: money(figures.listedTotal),
     chargedTotal: money(figures.chargedTotal),
     withheldTotal: money(figures.withheldTotal),
+    notChargedTotal: money(figures.notChargedTotal),
+    notChargedCalls: figures.notChargedCalls,
+    owedTotal: money(figures.owedTotal),
+    owedCalls: figures.owedCalls,
+    inProgressTotal: money(figures.inProgressTotal),
+    inProgressCalls: figures.inProgressCalls,
     failRate: figures.calls === 0 ? null : figures.refundedCalls / figures.calls,
   };
 }
@@ -205,6 +235,8 @@ function toComparisonDto(
     deltaListedTotal: signed(current.listedTotal - previous.listedTotal),
     deltaChargedTotal: signed(current.chargedTotal - previous.chargedTotal),
     deltaWithheldTotal: signed(current.withheldTotal - previous.withheldTotal),
+    deltaNotChargedTotal: signed(current.notChargedTotal - previous.notChargedTotal),
+    deltaOwedTotal: signed(current.owedTotal - previous.owedTotal),
   };
 }
 

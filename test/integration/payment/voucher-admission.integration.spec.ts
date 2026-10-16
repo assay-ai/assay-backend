@@ -186,8 +186,27 @@ describe('Voucher admission — concurrent vouchers against one window (BUG-D1-0
     };
   }
 
-  async function race(inputs: RedeemVoucherInput[]) {
-    const results = await Promise.allSettled(inputs.map((each) => service.redeem(each)));
+  /**
+   * Presents every voucher at once. The payer's lock admits them in arrival
+   * order, not seq order, and a voucher below a seq already admitted is
+   * refused `PAYMENT_VOUCHER_SEQ_STALE` (review 2026-10-15 P-2, final review
+   * N-6) — retryable with a fresh seq, which is what an agent does, so the
+   * race re-signs it. What is left is the window's answer.
+   */
+  async function race(makers: Array<() => RedeemVoucherInput>) {
+    const present = async (make: () => RedeemVoucherInput) => {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await service.redeem(make());
+        } catch (error) {
+          const stale =
+            (error as { errorCode?: string }).errorCode ===
+            PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE;
+          if (!stale || attempt >= 10) throw error;
+        }
+      }
+    };
+    const results = await Promise.allSettled(makers.map(present));
     const admitted = results.filter((result) => result.status === 'fulfilled');
     const refused = results
       .filter((result): result is PromiseRejectedResult => result.status === 'rejected')
@@ -199,7 +218,7 @@ describe('Voucher admission — concurrent vouchers against one window (BUG-D1-0
     // 0.5 per voucher, 1.3 per window: room for two.
     grant(500_000n, 1_300_000n);
     const { admitted, refused } = await race(
-      Array.from({ length: 5 }, () => input(delegate, 500_000n)),
+      Array.from({ length: 5 }, () => () => input(delegate, 500_000n)),
     );
 
     expect(admitted).toHaveLength(2);
@@ -216,7 +235,7 @@ describe('Voucher admission — concurrent vouchers against one window (BUG-D1-0
   it("admits exactly what fits the escrow's own window on the payer's own key", async () => {
     const reading = escrow({ maxPerWindow: 1_300_000n });
     const { admitted, refused } = await race(
-      Array.from({ length: 5 }, () => input(payer, 500_000n, reading)),
+      Array.from({ length: 5 }, () => () => input(payer, 500_000n, reading)),
     );
 
     expect(admitted).toHaveLength(2);
@@ -228,9 +247,9 @@ describe('Voucher admission — concurrent vouchers against one window (BUG-D1-0
     const reading = escrow({ maxPerWindow: 1_500_000n });
     await service.redeem(input(payer, 500_000n, reading));
     const { admitted, refused } = await race([
-      input(delegate, 500_000n, reading),
-      input(delegate, 500_000n, reading),
-      input(delegate, 500_000n, reading),
+      () => input(delegate, 500_000n, reading),
+      () => input(delegate, 500_000n, reading),
+      () => input(delegate, 500_000n, reading),
     ]);
 
     expect(admitted).toHaveLength(2);

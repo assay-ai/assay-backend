@@ -75,11 +75,72 @@ export class ReceiptsSummaryFigures {
   @ApiProperty({ type: MoneyDto })
   listedTotal: MoneyDto;
 
-  @ApiProperty({ type: MoneyDto })
+  /**
+   * Served and collected (or being collected). An open or written-off buyer
+   * debt is not in here: it is {@link owedTotal}.
+   */
+  @ApiProperty({
+    type: MoneyDto,
+    description:
+      'Served and collected, or being collected. Excludes open and written-off buyer debt ' +
+      '(owedTotal).',
+  })
   chargedTotal: MoneyDto;
 
-  @ApiProperty({ type: MoneyDto })
+  /**
+   * The guarantee's `withheld`: the price of `REFUNDED` / `VOIDED` / `EXPIRED`
+   * calls that had a hold — the figure that reconciles to `Σ HOLD_RELEASE`.
+   * It is part of {@link notChargedTotal}, not all of it.
+   */
+  @ApiProperty({
+    type: MoneyDto,
+    description: 'Held then released without a charge (REFUNDED / VOIDED / EXPIRED with a hold)',
+  })
   withheldTotal: MoneyDto;
+
+  /**
+   * Everything the buyer was not charged for and does not owe: refunded,
+   * voided and expired calls, and served calls that were never collected and
+   * are not owed (forfeited by the provider, voided debt). A written-off debt
+   * is not in here: the buyer still owes it ({@link owedTotal}).
+   *
+   * `listedTotal = chargedTotal + notChargedTotal + owedTotal + inProgressTotal`,
+   * exactly, in every group and in `totals` (R17b-B-01).
+   */
+  @ApiProperty({
+    type: MoneyDto,
+    description:
+      'Not charged: refunded / voided / expired, or served but never collected and not owed ' +
+      '(forfeited, voided debt). listed = charged + notCharged + owed + inProgress.',
+  })
+  notChargedTotal: MoneyDto;
+
+  @ApiProperty({ description: 'Calls in notChargedTotal' })
+  notChargedCalls: number;
+
+  /**
+   * Served, payment not collected yet, and still owed by the buyer: an open
+   * buyer debt, or a written-off one (the write-off ends the provider's wait,
+   * not the buyer's debt: paid calls stay refused until it re-signs). Neither
+   * charged nor not charged.
+   */
+  @ApiProperty({
+    type: MoneyDto,
+    description:
+      'Buyer debt, open or written off: served, payment not collected yet, still owed by the ' +
+      'buyer (neither charged nor not charged)',
+  })
+  owedTotal: MoneyDto;
+
+  @ApiProperty({ description: 'Calls in owedTotal' })
+  owedCalls: number;
+
+  /** Calls not finished yet, at their listed price. */
+  @ApiProperty({ type: MoneyDto, description: 'Calls not finished yet, at their listed price' })
+  inProgressTotal: MoneyDto;
+
+  @ApiProperty({ description: 'Calls in inProgressTotal' })
+  inProgressCalls: number;
 
   /**
    * Calls this group refunded — the numerator of {@link failRate}, published
@@ -139,6 +200,12 @@ export class ReceiptsSummaryComparison extends ReceiptsSummaryFigures {
 
   @ApiProperty({ type: SignedAmountDto })
   deltaWithheldTotal: SignedAmountDto;
+
+  @ApiProperty({ type: SignedAmountDto })
+  deltaNotChargedTotal: SignedAmountDto;
+
+  @ApiProperty({ type: SignedAmountDto })
+  deltaOwedTotal: SignedAmountDto;
 }
 
 export class ReceiptsSummaryGroupDto extends ReceiptsSummaryFigures {

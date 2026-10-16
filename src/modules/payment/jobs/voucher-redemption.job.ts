@@ -17,12 +17,12 @@ import { VoucherRedemptionService } from '../services/voucher-redemption.service
  * replica. **Ticks never overlap** (`waitForCompletion`): one pass can outlast
  * the minute — a receipt waits up to 180 s — and a second pass over the same
  * rows would lose to `VoucherSeqNotIncreasing` on a voucher the first one had
- * just redeemed. That is not a fee: the loser used to absorb it and pay the
- * provider a second time (review 2026-10-15 P-1). A tick that comes due while
+ * just redeemed. That is not a fee: the loser would close it as buyer debt and
+ * charge the buyer a second time (review 2026-10-15 P-1). A tick that comes due while
  * a pass runs is skipped, and the next one after it finds the rows. Across
  * processes the single-instance rule is what prevents it, and
  * `VoucherRedemptionService` checks the chain for the voucher's own
- * transaction before it absorbs anything as the second line.
+ * transaction before it closes anything as the second line.
  *
  * The handler cannot throw: `run` catches per hold, and the loop below catches
  * anything left so one asset's problem cannot stop the next asset being

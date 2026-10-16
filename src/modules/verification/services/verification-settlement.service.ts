@@ -366,8 +366,11 @@ export class VerificationSettlementService {
 
     if (!isTerminalPaymentIntentStatus(intent.status)) {
       await this.transitionIntent(organizationId, intent, record, outcome);
-    } else if (intent.holdReleasedAt === null) {
-      await this.repairHoldEffect(organizationId, intent);
+    } else {
+      await this.voidLateRejectedDebt(organizationId, intent, outcome);
+      if (intent.holdReleasedAt === null) {
+        await this.repairHoldEffect(organizationId, intent);
+      }
     }
     // Terminal and the hold is already resolved: nothing left to do but mark
     // the record, below.
@@ -454,10 +457,35 @@ export class VerificationSettlementService {
       // `settle()` would have taken, so a hold that did not make it across
       // before the loser's own `resolve()` call still gets closed.
       const fresh = await this.intents.findById(organizationId, record.intentId);
+      await this.voidLateRejectedDebt(organizationId, fresh, outcome);
       if (fresh.holdReleasedAt === null) {
         await this.repairHoldEffect(organizationId, fresh);
       }
     }
+  }
+
+  /**
+   * A verdict that REJECTS the call (REFUND or VOID) arriving after the
+   * verdict-deadline sweep settled it as served and unverified: if the call
+   * has become buyer debt, the debt is VOIDED — the hold is released, nobody
+   * is credited, the buyer is not charged and its paid calls are no longer
+   * refused for it (review-buyer-debt M2). A row still awaiting redemption is
+   * left as it is (the rule a failed verification enqueue already follows),
+   * and so is a debt whose replacement is being collected.
+   */
+  private async voidLateRejectedDebt(
+    organizationId: string,
+    intent: PaymentIntent,
+    outcome: VerdictOutcome,
+  ): Promise<void> {
+    if (
+      outcome === VerdictOutcome.SETTLE ||
+      intent.status !== PaymentIntentStatus.SETTLED ||
+      intent.rail !== PaymentRail.RAIL_B_VOUCHER
+    ) {
+      return;
+    }
+    await this.intents.voidDebt(organizationId, intent.id, outcome);
   }
 
   /**

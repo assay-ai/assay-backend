@@ -24,6 +24,7 @@ export {
   asExactNumber,
   encodeCompositeCursor,
   decodeCompositeCursor,
+  exactInstantSql,
 } from './keyset';
 export type { ListSpec, SortableField } from './keyset';
 export { paginateArray } from './paginate-array';

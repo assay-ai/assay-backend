@@ -52,12 +52,38 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
 
+  saveOriginals();
   install();
 });
 
 afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  // Node built-ins are shared by every spec file a Jest worker runs, so a guard left installed
+  // here broke the next file's supertest calls (provider-connectivity on the CI runner).
+  restoreOriginals();
 });
+
+/* eslint-disable @typescript-eslint/no-require-imports */
+const realModules = {
+  http: require('node:http') as Record<string, unknown>,
+  https: require('node:https') as Record<string, unknown>,
+  http2: require('node:http2') as Record<string, unknown>,
+};
+/* eslint-enable @typescript-eslint/no-require-imports */
+const saved: Array<[Record<string, unknown>, string, unknown]> = [];
+
+function saveOriginals(): void {
+  for (const m of [realModules.http, realModules.https]) {
+    for (const key of ['request', 'get', 'ClientRequest']) saved.push([m, key, m[key]]);
+  }
+  saved.push([realModules.http2, 'connect', realModules.http2.connect]);
+  const globals = globalThis as Record<string, unknown>;
+  for (const key of ['fetch', 'WebSocket']) saved.push([globals, key, globals[key]]);
+}
+
+function restoreOriginals(): void {
+  for (const [target, key, value] of saved) target[key] = value;
+}
 
 describe('the flag', () => {
   const original = process.env;

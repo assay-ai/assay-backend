@@ -59,6 +59,16 @@ export const X402_FREE_QUOTA = 'x402/freeQuota';
 export const X402_PAID_ALTERNATIVE = 'x402/paidAlternative';
 
 /**
+ * `false` when the VIEWER's chain offers no paid rail (Solana today:
+ * `rails: []`), so a priced tool cannot be bought from where this agent is:
+ * a `PAID` tool's display says so, and a `FREEMIUM` tool advertises only its
+ * free allowance (no "then $X", no `x402/paidAlternative`). Absent otherwise —
+ * including with no viewer — so a missing key means paid calls are possible
+ * (review 2026-10-15 #2, L6).
+ */
+export const X402_PAID_ON_THIS_CHAIN = 'x402/paidOnThisChain';
+
+/**
  * The platform's own id for the tool.
  *
  * Published even though the tool name would suffice to call it: an MCP tool is
@@ -146,6 +156,7 @@ export const DUPLICATED_INTO_META = [
   X402_PRICING_MODE,
   X402_FREE_QUOTA,
   X402_PAID_ALTERNATIVE,
+  X402_PAID_ON_THIS_CHAIN,
 ] as const;
 
 /** Written to `status_reason` when the MCP server hands a call to the router. */
@@ -180,6 +191,17 @@ export const MCP_SCHEMA_CONTRACT_VIOLATION_REASON =
  */
 export const MCP_VERIFICATION_ENQUEUE_FAILED_REASON =
   'mcp: settled unverified — the response could not be handed to verification';
+
+/**
+ * Written on `VERIFYING → SETTLED` by the expiry sweep when a rail-B intent's
+ * verdict has not arrived `PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS` after its
+ * voucher's `expiresAt`. Settled as served, unverified — the rule
+ * {@link MCP_VERIFICATION_ENQUEUE_FAILED_REASON} follows — so the voucher is
+ * still redeemed before the chain's deadline. A verdict that lands later loses
+ * the compare-and-swap and moves no money.
+ */
+export const MCP_VERIFICATION_DEADLINE_REASON =
+  'mcp: settled unverified — no verdict before the voucher redemption deadline';
 
 /** Written when the provider's outcome earns no charge. */
 export const MCP_VOIDED_REASON = 'mcp: provider outcome was not a DATA_RESULT';

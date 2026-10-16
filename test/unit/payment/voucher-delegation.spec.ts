@@ -21,6 +21,15 @@ import { deployment, EvmSigner, generateSigner } from '../chains/evm/evm-fixture
 import { FakeEscrowSeqService, InMemoryIntentWriter } from './helpers/voucher-harness';
 import { noBlocks } from '../helpers/blocklist';
 
+/** Cleanups registered by a test, run after it whether it passed or not. */
+const cleanups: Array<() => void> = [];
+const afterThisTest = (fn: () => void): void => {
+  cleanups.push(fn);
+};
+afterEach(() => {
+  while (cleanups.length > 0) cleanups.pop()!();
+});
+
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
 const USDG = ASSET_IDS.USDG_ROBINHOOD_TESTNET;
 const DEPLOYMENT = deployment(CHAIN);
@@ -246,6 +255,27 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
   });
 
   /**
+   * Review-buyer-debt L8: the debt check before the admission runs outside the
+   * payer's lock. A voucher of the payer that lapsed meanwhile is counted again
+   * under the lock, and refuses the call with nothing reserved.
+   */
+  describe('a debt that appears while the call is being admitted', () => {
+    it('refuses it under the lock, by name, and reserves nothing', async () => {
+      intents.debts = 1;
+      await expect(service.redeem(input(payer, { escrow: escrow() }))).rejects.toMatchObject({
+        errorCode: PaymentErrorCode.PAYMENT_DEBT_OUTSTANDING,
+        context: { count: 1 },
+      });
+      expect(intents.created).toHaveLength(0);
+
+      intents.debts = 0;
+      await expect(service.redeem(input(payer, { escrow: escrow() }))).resolves.toMatchObject({
+        status: PaymentIntentStatus.FUNDS_SECURED,
+      });
+    });
+  });
+
+  /**
    * REGRESSION (review S2-2): a seq rewind between the up-front `wasIssued`
    * read and the locked insert makes this seq not issued any more. The
    * admission re-reads `next_seq` under the payer's lock and refuses it.
@@ -359,6 +389,10 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
      * refused.
      */
     it('refuses a delegate voucher whose expiresAt == validUntil (the chain would refuse it inside the grace)', async () => {
+      // Exact to the second: freeze the clock, or a second boundary crossed between
+      // here and the voucher's own `Date.now()` (a slow CI runner) moves expiresAt.
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.now());
+      afterThisTest(() => clock.mockRestore());
       const now = Math.floor(Date.now() / 1000);
       chain.grant(payer.address, delegate.address, { validUntil: BigInt(now + 240) });
       await rejects(
@@ -369,6 +403,10 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
     });
 
     it('requires the delegation to cover the whole redeemable life: expiresAt + grace, to the second', async () => {
+      // Exact to the second: freeze the clock, or a second boundary crossed between
+      // here and the voucher's own `Date.now()` (a slow CI runner) moves expiresAt.
+      const clock = jest.spyOn(Date, 'now').mockReturnValue(Date.now());
+      afterThisTest(() => clock.mockRestore());
       const now = Math.floor(Date.now() / 1000);
       const expiresAt = now + 240;
       const grace = EVM_CONSTANTS.REDEEM_GRACE_SECONDS;

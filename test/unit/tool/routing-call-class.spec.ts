@@ -23,8 +23,10 @@ import {
  *   floor and from the payout gate, so it must never take a call that is charged.
  * - A free call is served only by a `FREE` or `FREEMIUM` binding — never by a
  *   `PAID` one, whose provider would serve with no intent and be paid nothing.
- * - The quote is `PAID` whenever any eligible binding is `PAID`, whatever order
- *   the catalogue lists them in.
+ * - The quote is `FREEMIUM` whenever free-capable supply (`FREE` or
+ *   `FREEMIUM`) sits beside paid supply (`PAID` or `FREEMIUM`): the call is
+ *   free first, inside the agent's quota, then paid. `PAID` only when nothing
+ *   eligible can serve a free call, `FREE` only when nothing can be charged.
  * - The rail-B offer carries the offered binding's own price, which is what the
  *   voucher is signed for.
  */
@@ -92,11 +94,71 @@ describe('routing by call class', () => {
     }
   });
 
-  it('quotes PAID when any eligible binding is PAID, whatever the catalogue order', async () => {
+  it('quotes FREEMIUM when a FREEMIUM binding sits beside a PAID one, in either order', async () => {
+    for (const order of [
+      [buildBinding(A, { pricingMode: PricingMode.FREEMIUM }), buildBinding(B)],
+      [buildBinding(B), buildBinding(A, { pricingMode: PricingMode.FREEMIUM })],
+    ]) {
+      const { router } = buildRouter({
+        bindings: order,
+        providers: [buildProvider(A), buildProvider(B)],
+        stakes: { [A]: usdc(1000), [B]: usdc(1000) },
+        invoker: new ScriptedInvoker({}),
+      });
+
+      const quote = await router.quote(TOOL_ID, ROUTING_CONTEXT);
+      expect(quote?.pricingMode).toBe(PricingMode.FREEMIUM);
+    }
+  });
+
+  it('quotes FREEMIUM for FREE beside PAID, priced at the paid binding alone', async () => {
     const { router } = buildRouter({
-      bindings: [buildBinding(A, { pricingMode: PricingMode.FREEMIUM }), buildBinding(B)],
+      bindings: [
+        buildBinding(A, { pricingMode: PricingMode.FREE, priceAmount: '0' }),
+        buildBinding(B, { priceAmount: usdc('0.02').amount }),
+      ],
+      providers: [buildProvider(A), buildProvider(B)],
+      // A has no stake: the FREE exemption admits it for free calls only.
+      stakes: { [B]: usdc(1000) },
+      invoker: new ScriptedInvoker({}),
+    });
+
+    const quote = await router.quote(TOOL_ID, ROUTING_CONTEXT);
+    expect(quote?.pricingMode).toBe(PricingMode.FREEMIUM);
+    // The hold is the paid supply's price: a FREE binding is never charged for.
+    expect(quote?.price).toEqual(usdc('0.02'));
+  });
+
+  it('quotes PAID when no eligible binding can serve a free call', async () => {
+    const { router } = buildRouter({
+      bindings: [buildBinding(A), buildBinding(B)],
       providers: [buildProvider(A), buildProvider(B)],
       stakes: { [A]: usdc(1000), [B]: usdc(1000) },
+      invoker: new ScriptedInvoker({}),
+    });
+
+    const quote = await router.quote(TOOL_ID, ROUTING_CONTEXT);
+    expect(quote?.pricingMode).toBe(PricingMode.PAID);
+  });
+
+  it('quotes FREE when nothing eligible can be charged', async () => {
+    const { router } = buildRouter({
+      bindings: [buildBinding(A, { pricingMode: PricingMode.FREE, priceAmount: '0' })],
+      providers: [buildProvider(A)],
+      stakes: {},
+      invoker: new ScriptedInvoker({}),
+    });
+
+    const quote = await router.quote(TOOL_ID, ROUTING_CONTEXT);
+    expect(quote?.pricingMode).toBe(PricingMode.FREE);
+  });
+
+  it('quotes PAID when the only free-capable binding is ineligible', async () => {
+    const { router } = buildRouter({
+      // A is FREEMIUM, so it is gated as paid, and it has no stake.
+      bindings: [buildBinding(A, { pricingMode: PricingMode.FREEMIUM }), buildBinding(B)],
+      providers: [buildProvider(A), buildProvider(B)],
+      stakes: { [B]: usdc(1000) },
       invoker: new ScriptedInvoker({}),
     });
 
@@ -124,5 +186,67 @@ describe('routing by call class', () => {
     );
     expect(offer.providerId).toBe(A);
     expect(offer.price).toEqual(usdc('0.05'));
+  });
+});
+
+/**
+ * Review 2026-10-15 M4: a free call never reaches a binding whose OWN quota is
+ * spent. The caller reserves the place on the binding about to be dialled; a
+ * binding with no room is shed and the draw runs again over what is left.
+ */
+describe('routing a free call by each binding’s own quota', () => {
+  const A = 'provider-a';
+  const B = 'provider-b';
+
+  function freeHarness() {
+    const invoker = new ScriptedInvoker({
+      'binding-provider-a': async () => ok('a'),
+      'binding-provider-b': async () => ok('b'),
+    });
+    const { router } = buildRouter({
+      bindings: [
+        buildBinding(A, { pricingMode: PricingMode.FREEMIUM }),
+        buildBinding(B, { pricingMode: PricingMode.FREE, priceAmount: '0' }),
+      ],
+      providers: [buildProvider(A), buildProvider(B)],
+      stakes: { [A]: usdc(1000) },
+      invoker,
+      random: seededRandom(5),
+    });
+    return { router, invoker };
+  }
+
+  it('never dials a binding whose quota has no room for this agent', async () => {
+    const { router, invoker } = freeHarness();
+    const reserveFreeQuota = jest.fn(async (binding: { id: string }) =>
+      binding.id === 'binding-provider-a' ? null : { release: async () => undefined },
+    );
+
+    for (let index = 0; index < 50; index += 1) {
+      const routed = await router.route({
+        toolId: TOOL_ID,
+        callId: `call-${index}`,
+        input: { query: 'x' },
+        context: routingContext({ callClass: 'FREE', reserveFreeQuota }),
+      });
+      expect(routed.providerId).toBe(B);
+    }
+    expect(invoker.providerIds).not.toContain(A);
+  });
+
+  it('refuses before dialling when no free binding has room', async () => {
+    const { router, invoker } = freeHarness();
+
+    const refusal = await router
+      .route({
+        toolId: TOOL_ID,
+        callId: 'call',
+        input: { query: 'x' },
+        context: routingContext({ callClass: 'FREE', reserveFreeQuota: async () => null }),
+      })
+      .catch((error: unknown) => error);
+
+    expect((refusal as AppError).errorCode).toBe(ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING);
+    expect(invoker.invocations).toHaveLength(0);
   });
 });

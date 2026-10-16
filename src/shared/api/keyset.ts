@@ -232,8 +232,42 @@ export async function paginate<T extends ObjectLiteral>(
    */
   qb.limit(query.limit + 1);
 
-  const rows = await qb.getMany();
-  return toPage(rows, query.limit, sort, spec);
+  if (sort.field.type !== 'timestamptz') {
+    const rows = await qb.getMany();
+    return toPage(rows, query.limit, sort, spec);
+  }
+
+  // A `timestamptz` is stored to the microsecond and a JS `Date` keeps only
+  // the millisecond, so a cursor serialised from the entity is up to 999 µs
+  // *before* the row it names: ascending, the boundary row (and any row in
+  // the same millisecond) is served again; descending, rows in that
+  // millisecond after the boundary fall out of the list. The cursor is taken
+  // from Postgres' own rendering of the value instead — see `exactInstantSql`.
+  qb.addSelect(exactInstantSql(sort.field.column), EXACT_SORT_VALUE);
+  const { entities, raw } = await qb.getRawAndEntities();
+  const exact = new Map<string, string>();
+  for (const row of raw as Array<Record<string, unknown>>) {
+    const id = row[`${spec.alias}_id`];
+    const value = row[EXACT_SORT_VALUE];
+    if (id != null && typeof value === 'string') exact.set(String(id), value);
+  }
+  return toPage(entities, query.limit, sort, spec, (row) => exact.get(String(row.id)));
+}
+
+/** Raw-result alias {@link paginate} reads the exact sort value under. */
+const EXACT_SORT_VALUE = '__keyset_sort_value';
+
+/**
+ * SQL rendering a `timestamptz` as an ISO-8601 UTC instant at full
+ * microsecond precision, e.g. `2026-10-14T12:58:54.786123Z`.
+ *
+ * Any keyset cursor over a `timestamptz` must carry this, not a `Date`'s
+ * `toISOString()`: the `Date` truncates to the millisecond, and a position
+ * that is not the row's exact value repeats or skips rows at every page
+ * boundary (BUG-R17b-P-01). Cast back with `::timestamptz` in the predicate.
+ */
+export function exactInstantSql(column: string): string {
+  return `to_char(${column} AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`;
 }
 
 /**
@@ -246,12 +280,17 @@ export async function paginate<T extends ObjectLiteral>(
  * came from is not the client's business.
  *
  * Pass `rows` with the extra `limit + 1`-th element still on it.
+ *
+ * `exactSortValueOf`, when given and it has a value for the row, overrides the
+ * field's own `valueOf` for the cursor — {@link paginate} uses it to hand over
+ * a `timestamptz` at the microsecond precision a `Date` cannot hold.
  */
 export function toPage<T>(
   rows: T[],
   limit: number,
   sort: Pick<ResolvedSort, 'field' | 'spec'>,
   _spec?: ListSpec,
+  exactSortValueOf?: (row: any) => string | undefined,
 ): CursorPageDto<T> {
   const hasMore = rows.length > limit;
   const items = hasMore ? rows.slice(0, limit) : rows;
@@ -262,7 +301,7 @@ export function toPage<T>(
 
   const last = items[items.length - 1] as any;
   const nextCursor = encodeCursor(
-    { sortValue: sort.field.valueOf(last), id: String(last.id) },
+    { sortValue: exactSortValueOf?.(last) ?? sort.field.valueOf(last), id: String(last.id) },
     sort.spec,
   );
 

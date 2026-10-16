@@ -88,8 +88,16 @@ class FakeIntentRepository {
       return Promise.resolve(0);
     }
     this.rows.set(intentId, { ...row, ...patch, status: to } as PaymentIntentEntity);
+    this.transitions.push({ id: intentId, to, patch });
     return Promise.resolve(1);
   }
+
+  /** Every status move, with what it wrote in the same statement. */
+  readonly transitions: Array<{
+    id: string;
+    to: PaymentIntentStatus;
+    patch: Partial<PaymentIntentEntity>;
+  }> = [];
 
   update(
     where: { organizationId: string; id: string },
@@ -102,6 +110,13 @@ class FakeIntentRepository {
 
   insert(): Promise<void> {
     throw new Error('not reachable from resolve()');
+  }
+
+  /** `lapseRedemption`: must NOT be how a late verdict lapses (L3) — see the spec below. */
+  readonly lapsed = new Map<string, string>();
+  lapseRedemption(_organizationId: string, id: string, cause: string): Promise<void> {
+    this.lapsed.set(id, cause);
+    return Promise.resolve();
   }
 }
 
@@ -329,6 +344,79 @@ describe('PaymentIntentService — a rail-B hold is retired by the redemption', 
     expect(settled.holdReleasedAt).toBeNull();
     expect(ledger.credited).toEqual([]);
     expect(intents.rows.get(intent.id).holdReleasedAt).toBeNull();
+  });
+
+  it('M3: a verdict past the redeemable latest settles as buyer debt, never for redemption', async () => {
+    const { service, ledger, intents, organizationId, verifying } = harness();
+    // Expired 29.5 minutes ago: inside the chain's 1,800 s, but past the last
+    // redemption pass (expiresAt + 1,740 s).
+    const intent = verifying({
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      expiresAt: new Date(Date.now() - 1_770_000),
+    });
+
+    const settled = await service.resolve(
+      organizationId,
+      intent.id,
+      PaymentIntentStatus.VERIFYING,
+      PaymentIntentStatus.SETTLED,
+    );
+
+    expect(settled.status).toBe(PaymentIntentStatus.SETTLED);
+    expect(settled.holdReleasedAt).toBeNull();
+    expect(ledger.credited).toEqual([]);
+    expect(ledger.released).toEqual([]);
+    // L3: the lapse is written by the SAME statement that moves the status —
+    // no second write a redemption pass could read in between.
+    expect(intents.transitions).toEqual([
+      expect.objectContaining({
+        id: intent.id,
+        to: PaymentIntentStatus.SETTLED,
+        patch: expect.objectContaining({
+          redemptionLastError: 'VerdictPastRedemptionDeadline',
+          redemptionLapsedAt: expect.any(Date),
+        }),
+      }),
+    ]);
+    expect(intents.lapsed.size).toBe(0);
+  });
+
+  it('M2: a PASS between +1,200 s and +1,740 s still goes to redemption, not to debt', async () => {
+    const { service, intents, organizationId, verifying } = harness();
+    // 25 minutes: the chain still redeems it for five more.
+    const intent = verifying({
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      expiresAt: new Date(Date.now() - 25 * 60_000),
+    });
+
+    await service.resolve(
+      organizationId,
+      intent.id,
+      PaymentIntentStatus.VERIFYING,
+      PaymentIntentStatus.SETTLED,
+    );
+
+    expect(intents.transitions[0].patch).not.toHaveProperty('redemptionLapsedAt');
+    expect(intents.rows.get(intent.id)?.redemptionLapsedAt ?? null).toBeNull();
+    expect(intents.lapsed.size).toBe(0);
+  });
+
+  it('a timely rail-B verdict is not lapsed', async () => {
+    const { service, intents, organizationId, verifying } = harness();
+    const intent = verifying({
+      rail: PaymentRail.RAIL_B_VOUCHER,
+      expiresAt: new Date(Date.now() - 10 * 60_000),
+    });
+
+    await service.resolve(
+      organizationId,
+      intent.id,
+      PaymentIntentStatus.VERIFYING,
+      PaymentIntentStatus.SETTLED,
+    );
+
+    expect(intents.lapsed.size).toBe(0);
+    expect(intents.transitions[0].patch).not.toHaveProperty('redemptionLapsedAt');
   });
 
   it('still commits a rail-A hold inline — there is no voucher to redeem', async () => {

@@ -3,7 +3,14 @@ import { SelectQueryBuilder } from 'typeorm';
 import { encodeCursor, decodeCursor } from '@shared/api/cursor';
 import { ListQueryDto, SortDirection } from '@shared/api/dto/list-query.dto';
 import { ApiErrorCode } from '@shared/api/errors/api.errors';
-import { ListSpec, applyTimeWindow, asInstant, paginate, resolveSort } from '@shared/api/keyset';
+import {
+  ListSpec,
+  applyTimeWindow,
+  asInstant,
+  exactInstantSql,
+  paginate,
+  resolveSort,
+} from '@shared/api/keyset';
 import { BaseError } from '@shared/errors/base.error';
 
 interface Row {
@@ -37,9 +44,11 @@ const SPEC: ListSpec = {
  * confirm the rows come back in order but would not show a `>=` that repeats
  * one row per page, which is the failure this code is most likely to have.
  */
-function fakeQueryBuilder(rows: Row[]) {
+function fakeQueryBuilder(rows: Row[], raw: Array<Record<string, unknown>> = []) {
   const wheres: Array<{ sql: string; params: Record<string, unknown> }> = [];
   const orders: Array<[string, string]> = [];
+  const selects: Array<{ expr: string; alias?: string }> = [];
+  const executed: string[] = [];
   let taken = 0;
 
   const qb = {
@@ -59,8 +68,17 @@ function fakeQueryBuilder(rows: Row[]) {
       taken = n;
       return qb;
     },
+    addSelect(expr: string, alias?: string) {
+      selects.push({ expr, alias });
+      return qb;
+    },
     async getMany() {
+      executed.push('getMany');
       return rows;
+    },
+    async getRawAndEntities() {
+      executed.push('getRawAndEntities');
+      return { entities: rows, raw };
     },
   };
 
@@ -68,6 +86,8 @@ function fakeQueryBuilder(rows: Row[]) {
     qb: qb as unknown as SelectQueryBuilder<Row>,
     wheres,
     orders,
+    selects,
+    executed,
     get taken() {
       return taken;
     },
@@ -317,6 +337,67 @@ describe('paginate', () => {
       );
 
       expect(decodeCursor(page.pageInfo.nextCursor!, 'amount:asc').sort).toBe('amount:asc');
+    });
+  });
+
+  // BUG-R17b-P-01. Postgres stores `timestamptz` to the microsecond; a `Date`
+  // keeps the millisecond. A cursor built from the entity sits up to 999 µs
+  // before the row it names, so ascending pages re-serve the boundary row and
+  // descending pages skip rows in the same millisecond.
+  describe('a timestamptz cursor is the exact stored instant, not the Date', () => {
+    function microRows(): { rows: Row[]; raw: Array<Record<string, unknown>> } {
+      const rows = rowsAt(11);
+      const raw = rows.map((row, index) => ({
+        intent_id: row.id,
+        __keyset_sort_value: row.createdAt.toISOString().replace('Z', `${100 + index}Z`),
+      }));
+      return { rows, raw };
+    }
+
+    it('selects the column at microsecond precision alongside the entities', async () => {
+      const { rows, raw } = microRows();
+      const fake = fakeQueryBuilder(rows, raw);
+      await paginate(fake.qb, query({ limit: 10 }), SPEC);
+
+      expect(fake.selects).toEqual([
+        { expr: exactInstantSql('intent.created_at'), alias: '__keyset_sort_value' },
+      ]);
+      expect(fake.executed).toEqual(['getRawAndEntities']);
+    });
+
+    it('stamps the cursor with the microsecond value of the last row', async () => {
+      const { rows, raw } = microRows();
+      const fake = fakeQueryBuilder(rows, raw);
+      const page = await paginate(fake.qb, query({ limit: 10 }), SPEC);
+
+      const decoded = decodeCursor(page.pageInfo.nextCursor!, 'createdAt:desc');
+      expect(decoded.id).toBe(rows[9].id);
+      expect(decoded.sortValue).toBe('2026-08-15T10:00:09.000109Z');
+      expect(decoded.sortValue).not.toBe(rows[9].createdAt.toISOString());
+    });
+
+    it('falls back to the field serialiser when the raw value is missing', async () => {
+      const rows = rowsAt(11);
+      const fake = fakeQueryBuilder(rows, []);
+      const page = await paginate(fake.qb, query({ limit: 10 }), SPEC);
+
+      expect(decodeCursor(page.pageInfo.nextCursor!, 'createdAt:desc').sortValue).toBe(
+        rows[9].createdAt.toISOString(),
+      );
+    });
+
+    it('leaves non-timestamp sorts on a plain entity read', async () => {
+      const fake = fakeQueryBuilder(rowsAt(11));
+      await paginate(fake.qb, query({ limit: 10, sort: 'amount' }), SPEC);
+
+      expect(fake.selects).toEqual([]);
+      expect(fake.executed).toEqual(['getMany']);
+    });
+
+    it('renders UTC with six fractional digits', () => {
+      expect(exactInstantSql('t.c')).toBe(
+        `to_char(t.c AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"')`,
+      );
     });
   });
 

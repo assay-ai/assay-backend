@@ -2,6 +2,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
+import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import {
@@ -32,6 +33,7 @@ import {
   ok,
   usdc,
 } from '../tool/helpers/routing-fixtures';
+import { offerSolanaRailBInThisSuite } from '../helpers/solana-rail-b';
 import { CHAIN_ID, SESSION, buildMcpHarness, fakeVoucherSignature } from './helpers/mcp-harness';
 
 /**
@@ -108,6 +110,79 @@ async function requirementOf(h: ReturnType<typeof harness>): Promise<VoucherRequ
 }
 
 describe('rail B over MCP', () => {
+  offerSolanaRailBInThisSuite();
+
+  describe('buyer debt (no-platform-debt design, step 9)', () => {
+    const DEBT = {
+      id: 'intent-debt-1',
+      organizationId: RAIL_B_SESSION.organizationId,
+      agentAccount: AGENT,
+      providerId: 'provider-a',
+      providerAccount: PAYOUT_ACCOUNT,
+      toolId: 'tool-1',
+      chainId: CHAIN_ID,
+      assetId: PRICE.asset,
+      decimals: PRICE.decimals,
+      priceAmount: PRICE.amount,
+      requestHash: `sha256:${'cd'.repeat(32)}`,
+      voucherResourceHash: 'ab'.repeat(32),
+      voucherSeq: '3',
+      lapsedAt: new Date('2026-10-16T00:00:00Z'),
+      cause: 'DelegateIsRevoked',
+      createdAt: new Date('2026-10-15T23:30:00Z'),
+      agentId: 'agent-1',
+      voucherResource: null,
+      replacedAt: null,
+      writtenOff: false,
+    };
+
+    it('refuses a paid call with PAYMENT_DEBT_OUTSTANDING before any requirement or seq', async () => {
+      const h = harness();
+      h.intents.debts = [DEBT];
+
+      const refused = await h.calls
+        .call(RAIL_B_SESSION, TOOL_NAME, ARGS, { rail: PaymentRail.RAIL_B_VOUCHER, voucher: null })
+        .then(
+          () => null,
+          (error: unknown) => error as { errorCode?: string; context?: Record<string, unknown> },
+        );
+
+      expect(refused?.errorCode).toBe(PaymentErrorCode.PAYMENT_DEBT_OUTSTANDING);
+      expect(refused?.context).toMatchObject({
+        count: 1,
+        debts: [
+          expect.objectContaining({
+            intentId: 'intent-debt-1',
+            amount: { amount: PRICE.amount, asset: PRICE.asset, decimals: PRICE.decimals },
+            writeOffAt: '2026-11-15T00:00:00.000Z',
+          }),
+        ],
+      });
+      expect(h.invoker.invocations).toHaveLength(0);
+    });
+
+    it('refuses a debt of another wallet of the same organization too', async () => {
+      const h = harness();
+      h.intents.debts = [
+        { ...DEBT, agentAccount: `${CHAIN_ID}:Other11111111111111111111111111111111111` },
+      ];
+
+      await expect(
+        h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+          rail: PaymentRail.RAIL_B_VOUCHER,
+          voucher: null,
+        }),
+      ).rejects.toMatchObject({ errorCode: PaymentErrorCode.PAYMENT_DEBT_OUTSTANDING });
+    });
+
+    it('serves paid calls again once no debt is open', async () => {
+      const h = harness();
+      h.intents.debts = [];
+      const requirement = await requirementOf(h);
+      expect(requirement.seq).toBeDefined();
+    });
+  });
+
   describe('the requirement — what the buyer must sign', () => {
     it('answers an unpaid rail-B call with PAYMENT_REQUIRED and everything a voucher binds', async () => {
       const h = harness();
@@ -413,8 +488,10 @@ describe('rail B over MCP', () => {
       expect(chooseRail(CHAIN_IDS.ROBINHOOD_TESTNET, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
     });
 
-    it('keeps rail A as the default where it is offered, so existing agents are unchanged', () => {
-      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false)).toBe(PaymentRail.RAIL_A_PER_CALL);
+    it('takes rail A as the default only where it is offered', () => {
+      // This suite re-opens rail B on Solana, not rail A, so with nothing asked
+      // for the call goes to rail B.
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
     });
 
     it('takes rail B whenever a voucher is presented, or the agent asks for it', () => {
@@ -570,5 +647,45 @@ describe('rail B over MCP', () => {
       });
       expect(invoker.invocations).toHaveLength(0);
     });
+  });
+});
+
+describe('rail B over MCP on Solana, with the real rail table', () => {
+  it('refuses a rail-B call before asking for a voucher: rail B is switched off on Solana', async () => {
+    const h = harness();
+
+    await expect(
+      h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, {
+        rail: PaymentRail.RAIL_B_VOUCHER,
+        voucher: null,
+      }),
+    ).rejects.toMatchObject({ errorCode: ChainErrorCode.CHAIN_RAIL_NOT_OFFERED });
+    expect(h.invoker.providerIds).toEqual([]);
+  });
+
+  it('refuses a paid call on Solana with a 4xx when no rail is asked for: Solana has no paid rail', async () => {
+    const h = harness();
+
+    const refusal = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS).catch((e: unknown) => e);
+    expect(refusal).toMatchObject({ errorCode: ChainErrorCode.CHAIN_RAIL_NOT_OFFERED });
+    expect((refusal as { statusCode: number }).statusCode).toBeGreaterThanOrEqual(400);
+    expect((refusal as { statusCode: number }).statusCode).toBeLessThan(500);
+    expect(h.invoker.providerIds).toEqual([]);
+  });
+
+  it('refuses an explicit rail-A call on Solana with a 4xx, before any intent exists', async () => {
+    const h = harness();
+
+    const refusal = await h.calls
+      .call(RAIL_B_SESSION, TOOL_NAME, ARGS, { rail: PaymentRail.RAIL_A_PER_CALL, voucher: null })
+      .catch((e: unknown) => e);
+    expect(refusal).toMatchObject({ errorCode: ChainErrorCode.CHAIN_RAIL_NOT_OFFERED });
+    expect((refusal as { statusCode: number }).statusCode).toBe(409);
+    expect(h.invoker.providerIds).toEqual([]);
+    expect(h.intents.rows.size).toBe(0);
+  });
+
+  it('takes no paid rail on Solana by default: chooseRail falls to B, which is refused', () => {
+    expect(chooseRail(CHAIN_ID, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
   });
 });

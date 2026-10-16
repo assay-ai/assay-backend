@@ -34,7 +34,7 @@ import {
   stakeKey,
 } from '@modules/provider/ports/provider-stake.port';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { Tool, ToolTier } from '@modules/tool/ports/tool.types';
+import { PricingMode, Tool, ToolTier } from '@modules/tool/ports/tool.types';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
 
@@ -529,6 +529,68 @@ describe('GET /catalogue/tools', () => {
     const { tools } = await service.listTools();
 
     expect(tools.map((tool) => tool.id)).toEqual(['get_weather']);
+  });
+
+  /**
+   * Free first, then paid: a FREEMIUM tool is listed with the free calls a day
+   * an agent gets before it pays — summed over the ROUTABLE free-capable
+   * bindings the quote names at their published revision, the platform default
+   * standing in for one left unset, capped by the platform ceiling. Never the
+   * raw (draft) binding rows (review 2026-10-15, L2).
+   */
+  it('publishes the free calls per day of a FREEMIUM tool, from the quote', async () => {
+    const { service } = build({
+      bindings: [
+        // Draft values on the raw rows: not what is served, so not published.
+        binding({ pricingMode: 'FREE', priceAmount: '0', freeQuotaPerAgent: 999 }),
+        binding({ organizationId: 'provider-b', pricingMode: 'FREEMIUM', freeQuotaPerAgent: 999 }),
+        binding({ organizationId: 'provider-c' }),
+      ],
+      quotes: {
+        get_weather: quote({
+          pricingMode: PricingMode.FREEMIUM,
+          routableBindings: 3,
+          paidBindings: 2,
+          freeBindings: [
+            { freeQuotaPerAgent: 30, freeDailyBudget: null },
+            { freeQuotaPerAgent: 10, freeDailyBudget: null },
+          ],
+        }),
+      },
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].freeCallsPerDay).toBe(40);
+    expect(tools[0].paidBindings).toBe(2);
+  });
+
+  it('falls back to the platform default allowance for a binding that set none', async () => {
+    const { service } = build({
+      bindings: [binding({ pricingMode: 'FREE', priceAmount: '0', freeQuotaPerAgent: null })],
+      quotes: {
+        get_weather: quote({
+          pricingMode: PricingMode.FREE,
+          freeBindings: [{ freeQuotaPerAgent: null, freeDailyBudget: null }],
+        }),
+      },
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].freeCallsPerDay).toBe(DEFAULT_FREE_QUOTA_CONFIG.defaultPerAgentDailyLimit);
+  });
+
+  it('publishes no free calls for a tool quoted PAID', async () => {
+    const { service } = build({
+      // A FREEMIUM binding routing refused: the quote has no free supply.
+      bindings: [binding({ pricingMode: 'FREEMIUM', freeQuotaPerAgent: 10 }), binding()],
+      quotes: { get_weather: quote({ pricingMode: PricingMode.PAID }) },
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].freeCallsPerDay).toBeNull();
   });
 
   it('counts distinct providers, not bindings', async () => {

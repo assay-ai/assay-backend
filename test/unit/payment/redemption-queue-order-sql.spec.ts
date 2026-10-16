@@ -12,7 +12,9 @@ import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redempt
  * and seq n then died on `VoucherSeqNotIncreasing` and was paid by the
  * platform. A row now waits while a LOWER seq of its payer is still open.
  */
-async function rendered(): Promise<{ sql: string; params: Record<string, unknown> }> {
+async function rendered(
+  exclude?: Parameters<PaymentIntentRepository['findAwaitingRedemption']>[4],
+): Promise<{ sql: string; params: Record<string, unknown> }> {
   const dataSource = new DataSource({ type: 'postgres', entities: [PaymentIntentEntity] });
   await (dataSource as unknown as { buildMetadatas(): Promise<void> }).buildMetadatas();
 
@@ -32,7 +34,13 @@ async function rendered(): Promise<{ sql: string; params: Record<string, unknown
     .mockImplementation(((alias: string) =>
       dataSource.createQueryBuilder(PaymentIntentEntity, alias)) as never);
 
-  await repo.findAwaitingRedemption('eip155:46630/erc20:0xabc', 'SETTLED', 'RAIL_B_VOUCHER', 100);
+  await repo.findAwaitingRedemption(
+    'eip155:46630/erc20:0xabc',
+    'SETTLED',
+    'RAIL_B_VOUCHER',
+    100,
+    exclude,
+  );
   return captured;
 }
 
@@ -64,6 +72,40 @@ describe('PaymentIntentRepository.findAwaitingRedemption — seq order', () => {
     const guard = sql.replace(/\s+/g, ' ');
     expect(guard).toMatch(
       new RegExp(`earlier\\.expires_at > now\\(\\) - interval '${REDEEM_GRACE_SECONDS} seconds'`),
+    );
+  });
+});
+
+describe('PaymentIntentRepository.findAwaitingRedemption — blocked parties', () => {
+  it('leaves out payer-side blocks only; a provider or payee block reaches the pass to forfeit', async () => {
+    const { sql } = await rendered({
+      organizationIds: ['11111111-1111-4111-8111-111111111111'],
+      walletKeys: ['eip155:0xabc'],
+      chainAccounts: ['eip155:46630:0xabc'],
+    });
+    const guard = sql.replace(/\s+/g, ' ');
+    expect(guard).toMatch(/held\.organization_id::text = ANY\(/);
+    expect(guard).toMatch(/held\.agent_account/);
+    expect(guard).toMatch(/held\.voucher_delegate/);
+    expect(guard).not.toMatch(/held\.provider_id/);
+    expect(guard).not.toMatch(/held\.provider_account/);
+  });
+});
+
+describe('PaymentIntentRepository.findAwaitingRedemption — buyer debt', () => {
+  it('M4: takes back a debt whose replacement was accepted, and no other debt', async () => {
+    const { sql } = await rendered();
+    const flat = sql.replace(/\s+/g, ' ');
+    expect(flat).toMatch(
+      /\("intent"\."redemption_lapsed_at" IS NULL OR "intent"\."redemption_replaced_at" IS NOT NULL\)/,
+    );
+  });
+
+  it('L2: never redeems a row closed for good (forfeit, write-off, void), released or not', async () => {
+    const { sql } = await rendered();
+    const flat = sql.replace(/\s+/g, ' ');
+    expect(flat).toMatch(
+      /"intent"\."redemption_last_error" IS NULL OR NOT \("intent"\."redemption_last_error" LIKE 'provider_forfeit:%' OR "intent"\."redemption_last_error" LIKE 'uncollected:%' OR "intent"\."redemption_last_error" LIKE 'voided:%'\)/,
     );
   });
 });

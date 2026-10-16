@@ -11,10 +11,10 @@ import {
 } from '@modules/chains/multiplex/namespace-slash-executor';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { ChainNamespace } from '@modules/chains/ports/caip.types';
+import { CHAIN_DISPUTE_SETTLE_MS } from '@modules/slash/constants/slash.constants';
 import { slashPartRequestId } from '@modules/slash/domain/prorata-slash';
 import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
 import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
-import { DisputeClaimType } from '@modules/slash/domain/arbitration';
 import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashChainRulingService } from '@modules/slash/services/slash-chain-ruling.service';
 import { SlashDisputeIntentService } from '@modules/slash/services/slash-dispute-intent.service';
@@ -59,6 +59,14 @@ const B = `${CHAIN}:0x64fecbe18e8998cb2990bce631a042f8e2be1659`;
 const C = `${CHAIN}:0xd30814fd3916fc7fc6ea87d4c429f7b0b7cc4d1d`;
 const D = `${CHAIN}:0x1111111111111111111111111111111111111114`;
 const HOUR = 3_600_000;
+
+/**
+ * When an undisputed EVM case is labelled UPHELD: at its record's own door
+ * (72 h after the proposal), once a dispute sent just before it has had
+ * `CHAIN_DISPUTE_SETTLE_MS` to be mirrored. No delivery clock applies on EVM
+ * (owner decision 2026-10-14, the on-chain dispute is the only dispute).
+ */
+const UNDISPUTED_AFTER_MS = 72 * 3_600_000 + CHAIN_DISPUTE_SETTLE_MS;
 
 describe('pro-rata EVM slash, against a real database', () => {
   let dataSource: DataSource;
@@ -231,7 +239,7 @@ describe('pro-rata EVM slash, against a real database', () => {
     chain.sent.length = 0;
 
     // Undisputed past the response window → UPHELD.
-    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + UNDISPUTED_AFTER_MS));
     // Not before the door.
     chain.now += BigInt(71 * 3600);
     expect(await services.execution.executeDue(nowOf())).toEqual({
@@ -297,7 +305,7 @@ describe('pro-rata EVM slash, against a real database', () => {
   it('reconciles a case from its parts after a crash between send and record', async () => {
     const seeded = await seedWindow(250_001n);
     await services.execution.proposeDue(nowOf());
-    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + UNDISPUTED_AFTER_MS));
     chain.now += BigInt(73 * 3600);
     const proposal = await load(seeded);
 
@@ -407,7 +415,7 @@ describe('pro-rata EVM slash, against a real database', () => {
   it('AUDIT E-4: a dispute on one part freezes only that part; the others execute and the upheld one is paid later', async () => {
     const seeded = await seedWindow(250_001n);
     await services.execution.proposeDue(nowOf());
-    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + UNDISPUTED_AFTER_MS));
     const proposal = await load(seeded);
     const parts = await services.partsRepository.findForEpoch(
       proposal.organizationId,
@@ -523,7 +531,7 @@ describe('pro-rata EVM slash, against a real database', () => {
   it('C4/C5: the arbiter queue shows the beneficiary evidence and the provider’s upheld violations', async () => {
     const seeded = await seedWindow(250_001n);
     await services.execution.proposeDue(nowOf());
-    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + UNDISPUTED_AFTER_MS));
     const proposal = await load(seeded);
     const [partB] = await services.partsRepository.findForEpoch(
       proposal.organizationId,
@@ -547,8 +555,9 @@ describe('pro-rata EVM slash, against a real database', () => {
     expect(items[0]).toMatchObject({
       requestId: `0x${partB.chainRequestId}`,
       beneficiary: B,
-      // The case was upheld off chain by the sweep: one violation in 30 days.
-      upheldViolations30d: 1,
+      // Labelled upheld by the sweep only (AUTO_UNDISPUTED): on EVM only what
+      // the chain decided counts, so not before a record executes (review R2-1).
+      upheldViolations30d: 0,
       beneficiaryEvidence: {
         payer: B,
         failedCalls: 1,
@@ -589,7 +598,7 @@ describe('pro-rata EVM slash, against a real database', () => {
     it('closes an UPHELD case EXECUTED when a keeper executes every part', async () => {
       const seeded = await seedWindow(250_001n);
       await services.execution.proposeDue(nowOf());
-      await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+      await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + UNDISPUTED_AFTER_MS));
       chain.now += BigInt(73 * 3600);
       const proposal = await load(seeded);
       expect(proposal.status).toBe('UPHELD');
@@ -647,7 +656,7 @@ describe('pro-rata EVM slash, against a real database', () => {
     it('books nothing twice when the backend’s own executor already mirrored it', async () => {
       const seeded = await seedWindow(250_001n);
       await services.execution.proposeDue(nowOf());
-      await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+      await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + UNDISPUTED_AFTER_MS));
       chain.now += BigInt(73 * 3600);
       expect((await services.execution.executeDue(nowOf())).executed).toBe(1);
       const proposal = await load(seeded);
@@ -710,18 +719,19 @@ describe('pro-rata EVM slash, against a real database', () => {
         TEST_SLASH_CONFIG,
         services.execution,
       );
-      // The seed's clock is the fake chain's; the objection window is measured
-      // in wall time, so open it wide enough for the provider to object now.
-      await dataSource.query(
-        `UPDATE slash_proposals SET respond_by_at = now() + interval '1 day' WHERE id = $1`,
-        [seeded.proposalId],
+      // On EVM the only dispute is the provider's `disputeSlash`; the watcher
+      // opens the case's dispute row from it (no in-app objection, 3a2b376).
+      const [disputedPart] = await services.partsRepository.findForEpoch(
+        seeded.organizationId,
+        seeded.proposalId,
+        0,
       );
-      const { dispute } = await arbitration.fileDispute(seeded.organizationId, seeded.proposalId, {
-        claimType: DisputeClaimType.AGENT_GRIEFING,
-        reason: 'one agent sent every failing call',
-        evidence: [],
-        openedBy: 'provider@example.test',
-      });
+      const opened = await arbitration.fileDisputeFromChain(
+        seeded.organizationId,
+        seeded.proposalId,
+        { requestId: disputedPart.chainRequestId, transactionHash: null },
+      );
+      const dispute = { id: opened!.disputeId as string };
       chain.now += BigInt(73 * 3600);
       const proposal = await load(seeded);
       expect(proposal.status).toBe('DISPUTED');
@@ -825,7 +835,7 @@ describe('pro-rata EVM slash, against a real database', () => {
       proposal.id,
       0,
     );
-    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + 49 * HOUR));
+    await services.lifecycle.sweepUndisputed(new Date(nowOf().getTime() + UNDISPUTED_AFTER_MS));
     chain.now += BigInt(73 * 3600);
 
     // The case executed while one part was given up on (its record landed later).

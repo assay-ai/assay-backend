@@ -332,6 +332,33 @@ describe('FreeQuotaService — consume()', () => {
   });
 });
 
+describe('FreeQuotaService — dailyAllowance() (review L2)', () => {
+  it('sums each binding’s per-agent quota, never above its budget, capped by the platform', () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 1_000 });
+
+    expect(
+      service.dailyAllowance([
+        { freeQuotaPerAgent: 25, freeDailyBudget: null },
+        // Unset: the platform default per-agent quota (100 in these fixtures).
+        { freeQuotaPerAgent: null, freeDailyBudget: null },
+        // A budget below the per-agent quota is what one agent can really get.
+        { freeQuotaPerAgent: 500, freeDailyBudget: 10 },
+      ]),
+    ).toBe(135);
+    expect(
+      service.dailyAllowance([
+        { freeQuotaPerAgent: 900, freeDailyBudget: null },
+        { freeQuotaPerAgent: 900, freeDailyBudget: null },
+      ]),
+    ).toBe(1_000);
+  });
+
+  it('is null when no routable binding serves free calls', () => {
+    const { service } = buildFreeQuotaHarness();
+    expect(service.dailyAllowance([])).toBeNull();
+  });
+});
+
 describe('FreeQuotaService — bindings at their published revision', () => {
   // A live PAID binding whose unpublished draft says FREE is still PAID on the
   // wire (`toServedToolBindings`), so it must not be counted as free supply.
@@ -357,6 +384,28 @@ describe('FreeQuotaService — bindings at their published revision', () => {
     await expect(service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID)).resolves.toBeNull();
   });
 
+  it('L3: remaining and limit are summed over the bindings, like the published N', async () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 1000 }, [
+      buildBindingRow('b1', { freeQuotaPerAgent: 10, freeDailyBudget: 1000 }),
+      buildBindingRow('b2', { freeQuotaPerAgent: 5, freeDailyBudget: 1000 }),
+    ]);
+
+    await expect(
+      service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID),
+    ).resolves.toMatchObject({ remaining: 15, limit: 15 });
+  });
+
+  it('L3: capped by the platform per-agent daily headroom', async () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 12 }, [
+      buildBindingRow('b1', { freeQuotaPerAgent: 10, freeDailyBudget: 1000 }),
+      buildBindingRow('b2', { freeQuotaPerAgent: 5, freeDailyBudget: 1000 }),
+    ]);
+
+    await expect(
+      service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID),
+    ).resolves.toMatchObject({ remaining: 12, limit: 12 });
+  });
+
   it('still counts a FREE binding at its published revision', async () => {
     const { service } = buildFreeQuotaHarness({}, [
       buildBindingRow('b1', { mappingVersion: 1, publishedVersion: 1 }),
@@ -365,5 +414,141 @@ describe('FreeQuotaService — bindings at their published revision', () => {
     await expect(
       service.remainingForTool(ORGANIZATION_ID, AGENT_ID, TOOL_ID),
     ).resolves.not.toBeNull();
+  });
+});
+
+describe('FreeQuotaService — reserve: parallel calls cannot overspend (review M5)', () => {
+  const input = {
+    organizationId: ORGANIZATION_ID,
+    agentId: AGENT_ID,
+    toolId: TOOL_ID,
+    pricingMode: PricingMode.FREE as const,
+  };
+
+  it('lets exactly one of N parallel calls take the last platform-daily place', async () => {
+    const { service, records } = buildFreeQuotaHarness({ platformAgentDailyLimit: 5 });
+    for (let i = 0; i < 4; i += 1) {
+      records.rows.push({
+        organizationId: ORGANIZATION_ID,
+        agentId: AGENT_ID,
+        toolId: TOOL_ID,
+        bindingId: 'b1',
+        createdAt: new Date(T0),
+      });
+    }
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 6 }, () => service.reservePlatform(input)),
+    );
+
+    expect(outcomes.filter((o) => o.kind === 'RESERVED')).toHaveLength(1);
+    const refused = outcomes.filter((o) => o.kind === 'REFUSED');
+    expect(refused).toHaveLength(5);
+    for (const o of refused) {
+      if (o.kind === 'REFUSED') expect(o.limit).toBe(FreeQuotaLimitKind.PLATFORM_AGENT_DAILY);
+    }
+  });
+
+  it('holds the per-minute burst guard under parallel calls', async () => {
+    const { service } = buildFreeQuotaHarness({ platformRateLimitPerMinute: 2 });
+
+    const outcomes = await Promise.all(
+      Array.from({ length: 5 }, () => service.reservePlatform(input)),
+    );
+
+    expect(outcomes.filter((o) => o.kind === 'RESERVED')).toHaveLength(2);
+    const refused = outcomes.find((o) => o.kind === 'REFUSED');
+    if (refused?.kind === 'REFUSED') {
+      expect(refused.limit).toBe(FreeQuotaLimitKind.PLATFORM_RATE_LIMIT);
+    }
+  });
+
+  it('gives a place back on release, so an unserved call does not spend the quota', async () => {
+    const { service } = buildFreeQuotaHarness({ platformAgentDailyLimit: 1 });
+
+    const first = await service.reservePlatform(input);
+    expect(first.kind).toBe('RESERVED');
+    expect((await service.reservePlatform(input)).kind).toBe('REFUSED');
+
+    if (first.kind === 'RESERVED') await first.release();
+    expect((await service.reservePlatform(input)).kind).toBe('RESERVED');
+  });
+
+  it('L2: says which dial was full — the per-agent quota, then the daily budget', async () => {
+    const { service } = buildFreeQuotaHarness();
+    const full: string[] = [];
+    const reserve = (
+      agentId: string,
+      binding: { id: string; freeQuotaPerAgent: number; freeDailyBudget: number },
+    ) =>
+      service.reserveBinding({
+        organizationId: ORGANIZATION_ID,
+        agentId,
+        binding,
+        onFull: (limit) => full.push(limit),
+      });
+
+    const perAgent = { id: 'b1', freeQuotaPerAgent: 1, freeDailyBudget: 100 };
+    expect(await reserve(AGENT_ID, perAgent)).not.toBeNull();
+    expect(await reserve(AGENT_ID, perAgent)).toBeNull();
+    const budget = { id: 'b2', freeQuotaPerAgent: 10, freeDailyBudget: 1 };
+    expect(await reserve(AGENT_ID, budget)).not.toBeNull();
+    expect(await reserve('another-agent', budget)).toBeNull();
+
+    expect(full).toEqual([
+      FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+      FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET,
+    ]);
+  });
+
+  it('L1: a release after the cache evicted the key does not restart the quota below zero', async () => {
+    const { service, redis, records } = buildFreeQuotaHarness();
+    const binding = { id: 'b1', freeQuotaPerAgent: 1, freeDailyBudget: 100 };
+    const reserve = () =>
+      service.reserveBinding({ organizationId: ORGANIZATION_ID, agentId: AGENT_ID, binding });
+
+    const held = await reserve();
+    expect(held).not.toBeNull();
+    // The call is served and recorded, then the cache evicts every counter
+    // before the reservation's release runs.
+    records.rows.push({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      toolId: TOOL_ID,
+      bindingId: 'b1',
+      createdAt: new Date(T0),
+    });
+    redis.flush();
+    await held!.release();
+
+    expect([...redis.strings.values()].some((value) => Number(value) < 0)).toBe(false);
+    // The next call hydrates from Postgres (one recorded call) and is refused.
+    expect(await reserve()).toBeNull();
+  });
+
+  it('refuses a binding place once its per-agent quota is taken, even in parallel', async () => {
+    const { service } = buildFreeQuotaHarness();
+    const binding = { id: 'b1', freeQuotaPerAgent: 1, freeDailyBudget: 100 };
+
+    const places = await Promise.all(
+      Array.from({ length: 4 }, () =>
+        service.reserveBinding({ organizationId: ORGANIZATION_ID, agentId: AGENT_ID, binding }),
+      ),
+    );
+
+    expect(places.filter((p) => p !== null)).toHaveLength(1);
+  });
+
+  it('refuses a binding place once its daily budget is taken across agents', async () => {
+    const { service } = buildFreeQuotaHarness();
+    const binding = { id: 'b1', freeQuotaPerAgent: 10, freeDailyBudget: 2 };
+
+    const places = await Promise.all(
+      ['a1', 'a2', 'a3'].map((agentId) =>
+        service.reserveBinding({ organizationId: ORGANIZATION_ID, agentId, binding }),
+      ),
+    );
+
+    expect(places.filter((p) => p !== null)).toHaveLength(2);
   });
 });
