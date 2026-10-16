@@ -7,7 +7,7 @@ import { DEV_CORS_ALLOWED_ORIGINS, parseCorsAllowedOrigins } from '@config/app.c
 import { applyHttpSecurity } from '@shared/security/security-headers';
 
 describe('CORS_ALLOWED_ORIGINS (R17-R-02)', () => {
-  it('defaults to the local dashboards on :4000-:4005 outside production', () => {
+  it('defaults to the local dashboards on :3000, :4000-:4005 and :4020 outside production', () => {
     for (const env of [undefined, 'development', 'local', 'test']) {
       const origins = parseCorsAllowedOrigins(undefined, env);
       expect(origins).toEqual([...DEV_CORS_ALLOWED_ORIGINS]);
@@ -15,6 +15,10 @@ describe('CORS_ALLOWED_ORIGINS (R17-R-02)', () => {
     expect(DEV_CORS_ALLOWED_ORIGINS).toContain('http://localhost:4000');
     expect(DEV_CORS_ALLOWED_ORIGINS).toContain('http://localhost:4005');
     expect(DEV_CORS_ALLOWED_ORIGINS).toContain('http://127.0.0.1:4003');
+    expect(DEV_CORS_ALLOWED_ORIGINS).toContain('http://localhost:4020');
+    expect(DEV_CORS_ALLOWED_ORIGINS).toContain('http://127.0.0.1:4020');
+    expect(DEV_CORS_ALLOWED_ORIGINS).toContain('http://localhost:3000');
+    expect(DEV_CORS_ALLOWED_ORIGINS).toContain('http://127.0.0.1:3000');
     expect(DEV_CORS_ALLOWED_ORIGINS).not.toContain('http://localhost:4006');
   });
 

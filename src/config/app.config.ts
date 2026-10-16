@@ -99,11 +99,13 @@ export function assertTrustProxyHopsConfigured(
 
 /**
  * The browser origins a dashboard runs on locally: the console apps on ports
- * 4000-4005, by name and by loopback address. They are the default only
- * outside production; production has no default (see `parseCorsAllowedOrigins`).
+ * 4000-4005, the frontend's static-export check on 4020 (`DEPLOY.md`) and its
+ * Docker run on 3000 (README), by name and by loopback address. They are the
+ * default only outside production; production has no default (see
+ * `parseCorsAllowedOrigins`).
  */
 export const DEV_CORS_ALLOWED_ORIGINS: readonly string[] = [
-  4000, 4001, 4002, 4003, 4004, 4005,
+  3000, 4000, 4001, 4002, 4003, 4004, 4005, 4020,
 ].flatMap((port) => [`http://localhost:${port}`, `http://127.0.0.1:${port}`]);
 
 /**
