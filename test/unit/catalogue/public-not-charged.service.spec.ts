@@ -1,5 +1,7 @@
 import {
+  NOT_CHARGED_OTHER_REASONS,
   NotChargedCallRow,
+  NotChargedReasonTotalsRow,
   NotChargedTotalsRow,
   NotChargedWindow,
   PaymentIntentRepository,
@@ -15,6 +17,7 @@ import {
   NOT_CHARGED_MIN_BUYERS,
   NOT_CHARGED_RECENT_LIMIT,
   PublicNotChargedService,
+  foldReasons,
   foldTotals,
   selectKAnonymous,
 } from '@modules/catalogue/services/public-not-charged.service';
@@ -67,10 +70,26 @@ function totalsRow(overrides: Partial<NotChargedTotalsRow> = {}): NotChargedTota
   };
 }
 
-function build(rows: NotChargedCallRow[], totals: NotChargedTotalsRow[] = []) {
+function reasonRow(overrides: Partial<NotChargedReasonTotalsRow> = {}): NotChargedReasonTotalsRow {
+  return {
+    asset: SOLANA_USDC,
+    decimals: 6,
+    reason: 'PROVIDER_ERROR',
+    calls: 10,
+    buyers: 6,
+    ...overrides,
+  };
+}
+
+function build(
+  rows: NotChargedCallRow[],
+  totals: NotChargedTotalsRow[] = [],
+  reasons: NotChargedReasonTotalsRow[] = [],
+) {
   const intents = {
     findNotChargedCandidates: jest.fn(async (_window: NotChargedWindow, _limit: number) => rows),
     summarizeNotCharged: jest.fn(async (_window: NotChargedWindow) => totals),
+    summarizeNotChargedReasons: jest.fn(async (_window: NotChargedWindow) => reasons),
   };
   const catalogue = {
     listProviders: jest.fn(async () => ({
@@ -115,6 +134,8 @@ describe('PublicNotChargedService', () => {
       'callsChecked',
       'callsFailedCheck',
       'callsNotCharged',
+      'callsNotChargedOther',
+      'notChargedByReason',
     ]);
     expect(Object.keys(body.totals.amountNotCharged[0]).sort()).toEqual([
       'amount',
@@ -176,13 +197,16 @@ describe('PublicNotChargedService', () => {
     );
     // Every input of the totals is cut at the same UTC day boundary.
     const today = new Date('2026-10-15T00:00:00.000Z');
-    expect(intents.summarizeNotCharged).toHaveBeenCalledWith({
+    const totalsWindow = {
       from: new Date('2026-09-15T00:00:00.000Z'),
       to: today,
       outcomeBefore: today,
       buyerCreatedBefore: new Date('2026-10-08T00:00:00.000Z'),
       buyerCollectedBefore: today,
-    });
+    };
+    expect(intents.summarizeNotCharged).toHaveBeenCalledWith(totalsWindow);
+    // The reason split reads exactly the totals' window.
+    expect(intents.summarizeNotChargedReasons).toHaveBeenCalledWith(totalsWindow);
     expect(body).toMatchObject({
       windowDays: 30,
       since: '2026-09-15T00:00:00.000Z',
@@ -317,6 +341,9 @@ describe('the k-anonymity rule', () => {
       callsNotCharged: 4,
       callsFailedCheck: 1,
       amountNotCharged: [{ amount: '1000000', asset: SOLANA_USDC, decimals: 6 }],
+      // No reason cells given: the split does not add up, so nothing is named.
+      notChargedByReason: [],
+      callsNotChargedOther: 3,
     });
     expect(body.withheldForPrivacy).toBe(true);
   });
@@ -325,6 +352,159 @@ describe('the k-anonymity rule', () => {
     const { service } = build(fromBuyers(8), [totalsRow()]);
 
     expect((await service.read(NOW)).withheldForPrivacy).toBe(false);
+  });
+});
+
+/**
+ * The reason split of the not-charged calls that did not fail the check. Each
+ * named reason is its own published figure, so each is held to k on its own,
+ * and the "other" remainder must never isolate a group smaller than k.
+ */
+describe('foldReasons — the not-charged split by reason', () => {
+  const K = NOT_CHARGED_MIN_BUYERS;
+  const counted = [totalsRow()];
+
+  it('names every reason backed by k buyers, largest first', () => {
+    const split = foldReasons(
+      [
+        reasonRow({ reason: 'NOT_COLLECTED', calls: 5, buyers: K }),
+        reasonRow({ reason: 'PROVIDER_ERROR', calls: 60, buyers: 9 }),
+        reasonRow({ reason: 'NO_USABLE_RESULT', calls: 6, buyers: 6 }),
+      ],
+      counted,
+      71,
+      K,
+    );
+
+    expect(split).toEqual({
+      byReason: [
+        { reason: NotChargedReason.PROVIDER_ERROR, calls: 60 },
+        { reason: NotChargedReason.NO_USABLE_RESULT, calls: 6 },
+        { reason: NotChargedReason.NOT_COLLECTED, calls: 5 },
+      ],
+      other: 0,
+      suppressed: false,
+    });
+  });
+
+  it('folds a reason under k into "other", and the smallest named reason with it', () => {
+    const split = foldReasons(
+      [
+        reasonRow({ reason: 'PROVIDER_ERROR', calls: 60, buyers: 9 }),
+        reasonRow({ reason: 'NO_USABLE_RESULT', calls: 8, buyers: 6 }),
+        // One buyer, forfeited three times: never a figure of its own, and
+        // never recoverable as "total minus the named reasons".
+        reasonRow({ reason: 'NOT_COLLECTED', calls: 3, buyers: 1 }),
+      ],
+      counted,
+      71,
+      K,
+    );
+
+    expect(split).toEqual({
+      byReason: [{ reason: NotChargedReason.PROVIDER_ERROR, calls: 60 }],
+      other: 11,
+      suppressed: true,
+    });
+  });
+
+  it('names nothing when the only named reason would have to be folded', () => {
+    const split = foldReasons(
+      [
+        reasonRow({ reason: 'PROVIDER_ERROR', calls: 60, buyers: 9 }),
+        reasonRow({ reason: 'EXPIRED', calls: 2, buyers: 2 }),
+      ],
+      counted,
+      62,
+      K,
+    );
+
+    expect(split).toEqual({ byReason: [], other: 62, suppressed: true });
+  });
+
+  it('holds k per asset cell, not on a sum of cells across assets', () => {
+    const evm = totalsRow({ asset: EVM_USDC });
+    const split = foldReasons(
+      [
+        // 3 + 3 buyers could be the same 3 buyers: not k.
+        reasonRow({ reason: 'NOT_COLLECTED', calls: 4, buyers: 3 }),
+        reasonRow({ asset: EVM_USDC, reason: 'NOT_COLLECTED', calls: 4, buyers: 3 }),
+        reasonRow({ reason: 'PROVIDER_ERROR', calls: 20, buyers: 7 }),
+        reasonRow({ asset: EVM_USDC, reason: 'PROVIDER_ERROR', calls: 10, buyers: 5 }),
+        reasonRow({ reason: 'NO_USABLE_RESULT', calls: 9, buyers: 8 }),
+      ],
+      [totalsRow(), evm],
+      47,
+      K,
+    );
+
+    expect(split).toEqual({
+      byReason: [{ reason: NotChargedReason.PROVIDER_ERROR, calls: 30 }],
+      other: 17,
+      suppressed: true,
+    });
+  });
+
+  it('reads only assets the totals counted', () => {
+    const split = foldReasons(
+      [
+        reasonRow({ reason: 'PROVIDER_ERROR', calls: 10, buyers: 6 }),
+        reasonRow({ asset: EVM_USDC, reason: 'EXPIRED', calls: 4, buyers: 6 }),
+      ],
+      counted,
+      10,
+      K,
+    );
+
+    expect(split).toEqual({
+      byReason: [{ reason: NotChargedReason.PROVIDER_ERROR, calls: 10 }],
+      other: 0,
+      suppressed: false,
+    });
+  });
+
+  it('names nothing when the cells disagree with the totals', () => {
+    const split = foldReasons([reasonRow({ calls: 10, buyers: 6 })], counted, 12, K);
+
+    expect(split).toEqual({ byReason: [], other: 12, suppressed: false });
+  });
+
+  it('is empty on a quiet deployment', () => {
+    expect(foldReasons([], [], 0, K)).toEqual({ byReason: [], other: 0, suppressed: false });
+  });
+
+  it('uses the NotChargedReason keys, and never FAILED_CHECK', () => {
+    const keys = Object.values(NotChargedReason) as string[];
+    for (const reason of NOT_CHARGED_OTHER_REASONS) expect(keys).toContain(reason);
+    expect(NOT_CHARGED_OTHER_REASONS).not.toContain(NotChargedReason.FAILED_CHECK);
+    expect([...NOT_CHARGED_OTHER_REASONS, NotChargedReason.FAILED_CHECK].sort()).toEqual(
+      [...keys].sort(),
+    );
+  });
+
+  it('is on the wire, and a reason under k flags the response as withheld', async () => {
+    const { service } = build(
+      fromBuyers(8),
+      [totalsRow({ notChargedCalls: 12, failedCheckCalls: 2 })],
+      [
+        reasonRow({ reason: 'PROVIDER_ERROR', calls: 6, buyers: 6 }),
+        reasonRow({ reason: 'NO_USABLE_RESULT', calls: 3, buyers: 5 }),
+        reasonRow({ reason: 'NOT_COLLECTED', calls: 1, buyers: 1 }),
+      ],
+    );
+
+    const body = await service.read(NOW);
+
+    expect(body.totals.notChargedByReason).toEqual([
+      { reason: NotChargedReason.PROVIDER_ERROR, calls: 6 },
+    ]);
+    expect(body.totals.callsNotChargedOther).toBe(4);
+    expect(body.withheldForPrivacy).toBe(true);
+    expect(
+      body.totals.callsFailedCheck +
+        body.totals.notChargedByReason.reduce((sum, r) => sum + r.calls, 0) +
+        body.totals.callsNotChargedOther,
+    ).toBe(body.totals.callsNotCharged);
   });
 });
 

@@ -70,6 +70,17 @@ export class PublicNotChargedCallDto {
   day: string;
 }
 
+export class PublicNotChargedReasonCountDto {
+  @ApiProperty({
+    enum: NotChargedReason,
+    description: 'A reason other than FAILED_CHECK, which has its own figure (`callsFailedCheck`).',
+  })
+  reason: NotChargedReason;
+
+  @ApiProperty({ description: 'Not-charged calls in the window for this reason.' })
+  calls: number;
+}
+
 export class PublicNotChargedTotalsDto {
   @ApiProperty({
     description:
@@ -89,6 +100,24 @@ export class PublicNotChargedTotalsDto {
 
   @ApiProperty({ description: 'Of the not-charged calls, those whose result failed verification.' })
   callsFailedCheck: number;
+
+  @ApiProperty({
+    type: [PublicNotChargedReasonCountDto],
+    description:
+      'The not-charged calls that did not fail the check, by reason, largest first. A reason is ' +
+      'listed only when every part of its figure comes from at least `minBuyers` buyers; ' +
+      'everything else is in `callsNotChargedOther`. Never lists FAILED_CHECK.',
+  })
+  notChargedByReason: PublicNotChargedReasonCountDto[];
+
+  @ApiProperty({
+    description:
+      'Not-charged calls that did not fail the check and are not in `notChargedByReason`: ' +
+      'reasons too rare to list on their own under the `minBuyers` rule, plus the smallest ' +
+      'listed reason whenever anything is here, so this figure never isolates a small group. ' +
+      '`callsFailedCheck + Σ notChargedByReason + callsNotChargedOther = callsNotCharged`.',
+  })
+  callsNotChargedOther: number;
 
   @ApiProperty({
     type: [PublicMoneyDto],
