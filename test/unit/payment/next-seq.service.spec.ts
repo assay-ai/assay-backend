@@ -1,5 +1,6 @@
 import { NextSeqService } from '@modules/payment/services/next-seq.service';
 import { DemoRateDecision } from '@modules/mcp/domain/demo-rate-limit';
+import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 
@@ -65,5 +66,19 @@ describe('NextSeqService.issue (GET /escrow/next-seq)', () => {
     );
     expect(seqs.allocate).not.toHaveBeenCalled();
     expect(escrow.read).not.toHaveBeenCalled();
+  });
+
+  it('refuses a chain without rail B (Solana) with 409, before the limiter or the chain', async () => {
+    const { service, seqs, escrow, limiter } = build(true);
+    const solana = CHAIN_IDS.SOLANA_DEVNET;
+    const account = toAccountId(solana, 'AgentAccount1111111111111111111111111111111');
+
+    await expectErrorCodeAsync(
+      () => service.issue(ORG, account, solana, 'cred-1'),
+      ChainErrorCode.CHAIN_RAIL_NOT_OFFERED,
+    );
+    expect(limiter.take).not.toHaveBeenCalled();
+    expect(escrow.read).not.toHaveBeenCalled();
+    expect(seqs.allocate).not.toHaveBeenCalled();
   });
 });
