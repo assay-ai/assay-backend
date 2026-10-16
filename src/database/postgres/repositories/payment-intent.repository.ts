@@ -130,9 +130,30 @@ export interface NotChargedCallRow {
   readonly decimals: number;
   readonly priceAmount: bigint;
   readonly createdAt: Date;
+  /**
+   * Why a `SETTLED` row is in the feed at all ({@link NOT_CHARGED_SETTLED_SQL}),
+   * `null` for a `REFUNDED` / `VOIDED` / `EXPIRED` row. A fixed label derived
+   * in SQL — never the raw `redemption_last_error`, whose cause text stays out
+   * of the process as well as the response.
+   */
+  readonly settledCause: NotChargedSettledCause | null;
   /** md5 of the buying organization id. In-process only — never published. */
   readonly buyer: string;
 }
+
+/**
+ * A served (`SETTLED`) paid call the buyer was nevertheless not charged for and
+ * does not owe — the `notCharged` share of `GET /receipts/summary` beyond the
+ * withheld statuses:
+ *
+ * - `FORFEITED`: the provider caused the voucher to fail ({@link FORFEITED_SQL}).
+ * - `VOIDED_REFUND` / `VOIDED_VOID`: a buyer debt voided by a late REFUND or
+ *   VOID verdict ({@link VOIDED_SQL}).
+ * - `ABSORBED`: a legacy platform-absorbed credit ({@link PLATFORM_ABSORBED_SQL}).
+ *
+ * A WRITTEN-OFF debt is not here: the buyer still owes it (receipts `owed`).
+ */
+export type NotChargedSettledCause = 'FORFEITED' | 'VOIDED_REFUND' | 'VOIDED_VOID' | 'ABSORBED';
 
 /** The Explorer's query window, and who counts as a buyer within it. */
 export interface NotChargedWindow {
@@ -150,23 +171,39 @@ export interface NotChargedTotalsRow {
   readonly calls: number;
   /** Distinct ELIGIBLE buying organizations behind `calls` — a count, never an id. */
   readonly buyers: number;
+  /** Withheld statuses plus `SETTLED` rows not charged and not owed (`NOT_CHARGED_SETTLED_SQL`). */
   readonly notChargedCalls: number;
-  /** The `REFUNDED` subset: the result failed verification. */
+  /** The subset that failed verification: `REFUNDED`, or a debt voided by a late REFUND verdict. */
   readonly failedCheckCalls: number;
   readonly notChargedAmount: bigint;
 }
 
 /**
  * The organizations that count as buyers for the Explorer's k-anonymity rule:
- * created at least a week ago, and with at least one charged paid call. Both
+ * created at least a week ago, and with at least one CHARGED paid call. Both
  * raise the cost of lifting a tool over k with throwaway organizations.
+ *
+ * "Charged" is the receipts summary's charged bucket (`SUMMARY_CHARGED_SQL`)
+ * spelled on the alias `s`: `SETTLED`, not an open buyer debt, and not
+ * forfeited, written off, voided or legacy-absorbed. A `SETTLED` row alone is
+ * not enough since buyer debt: an organization that never paid — its only
+ * served call lapsed into debt — must not count toward k. Literals rather than
+ * the `intent.`-aliased constants below, which this subquery cannot reuse.
  * Bound parameters: `:buyerCreatedBefore`, `:paid`, `:settledStatus`.
  */
 const ELIGIBLE_BUYER_SQL =
   `intent.organization_id IN (SELECT o.id FROM organizations o ` +
   `WHERE o.created_at <= :buyerCreatedBefore AND EXISTS (` +
   `SELECT 1 FROM payment_intents s WHERE s.organization_id = o.id ` +
-  `AND s.call_class = :paid AND s.status = :settledStatus))`;
+  `AND s.call_class = :paid AND s.status = :settledStatus ` +
+  `AND NOT (s.redemption_lapsed_at IS NOT NULL AND s.hold_released_at IS NULL) ` +
+  `AND NOT COALESCE(s.redemption_last_error LIKE 'provider_forfeit:%' ` +
+  `OR s.redemption_last_error LIKE 'uncollected:%' ` +
+  `OR s.redemption_last_error LIKE 'voided:%', false) ` +
+  `AND NOT EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
+  `WHERE absorbed.organization_id = s.provider_id AND absorbed.intent_id = s.id ` +
+  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
+  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')))`;
 
 /** Mirrors `PaymentIntentCallClass.PAID`, kept local like the statuses below. */
 const PAID_CALL_CLASS = 'PAID';
@@ -336,6 +373,35 @@ const SUMMARY_IN_PROGRESS_SQL = `(intent.status IN ('CREATED', 'FUNDS_SECURED', 
 export const CREDITED_SQL =
   `(intent.hold_id IS NOT NULL AND intent.hold_released_at IS NOT NULL ` +
   `AND NOT ${NOT_COLLECTED_SQL})`;
+
+/**
+ * The public Explorer's "not charged" share of `SETTLED` rows: served, never
+ * collected, and NOT owed — forfeited, voided debt, legacy absorb. Exactly
+ * {@link NOT_COLLECTED_SQL} without {@link WRITTEN_OFF_SQL}: a written-off debt
+ * is still owed by the buyer (receipts `owed`), so the feed never calls it
+ * "not charged". With the withheld statuses this is the receipts summary's
+ * `notCharged` bucket.
+ */
+const NOT_CHARGED_SETTLED_SQL =
+  `(intent.status = '${SETTLED_STATUS}' AND NOT COALESCE(${WRITTEN_OFF_SQL}, false) ` +
+  `AND (COALESCE(${FORFEITED_SQL}, false) OR COALESCE(${VOIDED_SQL}, false) ` +
+  `OR ${PLATFORM_ABSORBED_SQL}))`;
+
+/** {@link NotChargedSettledCause} for a row, `NULL` when it is not {@link NOT_CHARGED_SETTLED_SQL}. */
+const NOT_CHARGED_SETTLED_CAUSE_SQL =
+  `CASE WHEN NOT ${NOT_CHARGED_SETTLED_SQL} THEN NULL ` +
+  `WHEN COALESCE(${FORFEITED_SQL}, false) THEN 'FORFEITED' ` +
+  `WHEN intent.redemption_last_error = 'voided:REFUND' THEN 'VOIDED_REFUND' ` +
+  `WHEN COALESCE(${VOIDED_SQL}, false) THEN 'VOIDED_VOID' ` +
+  `ELSE 'ABSORBED' END`;
+
+/** Every paid call the Explorer reports as not charged: withheld statuses, or {@link NOT_CHARGED_SETTLED_SQL}. */
+const NOT_CHARGED_SQL = `(intent.status IN (:...withheldStatuses) OR ${NOT_CHARGED_SETTLED_SQL})`;
+
+/** The guarantee firing: `REFUNDED`, or a buyer debt voided by a late REFUND verdict. */
+const FAILED_CHECK_SQL =
+  `(intent.status = :refundedStatus OR (${NOT_CHARGED_SETTLED_SQL} ` +
+  `AND intent.redemption_last_error = 'voided:REFUND'))`;
 
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
@@ -2014,8 +2080,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * reference is selected; the buyer appears only as an md5 digest, used in
    * process to count distinct buyers and never published.
    *
-   * "Not charged" is exactly {@link WITHHELD_STATUSES} with a hold, the same
-   * definition `GET /withheld` uses, restricted to `PAID` calls.
+   * "Not charged" is {@link WITHHELD_STATUSES} with a hold — the definition
+   * `GET /withheld` uses — plus the `SETTLED` rows the buyer was not charged
+   * for and does not owe ({@link NOT_CHARGED_SETTLED_SQL}), restricted to
+   * `PAID` calls: together the receipts summary's `notCharged` bucket. An open
+   * or written-off buyer debt is owed, never listed here.
    */
   async findNotChargedCandidates(
     window: NotChargedWindow,
@@ -2031,11 +2100,12 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.decimals', 'decimals')
       .addSelect('intent.priceAmount', 'priceAmount')
       .addSelect('intent.createdAt', 'createdAt')
+      .addSelect(NOT_CHARGED_SETTLED_CAUSE_SQL, 'settledCause')
       .addSelect('md5(intent.organization_id::text)', 'buyer')
       .where('intent.organizationId IS NOT NULL')
       .andWhere('intent.callClass = :paid', { paid: PAID_CALL_CLASS })
       .andWhere('intent.holdId IS NOT NULL')
-      .andWhere('intent.status IN (:...statuses)', { statuses: WITHHELD_STATUSES })
+      .andWhere(NOT_CHARGED_SQL, { withheldStatuses: WITHHELD_STATUSES })
       .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
       .andWhere(`${CREATED_AT} < :to`, { to: window.to })
       .andWhere(ELIGIBLE_BUYER_SQL, {
@@ -2054,6 +2124,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         decimals: string | number;
         priceAmount: string;
         createdAt: Date;
+        settledCause: NotChargedSettledCause | null;
         buyer: string;
       }>();
 
@@ -2067,6 +2138,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       decimals: Number(row.decimals),
       priceAmount: BigInt(row.priceAmount),
       createdAt: new Date(row.createdAt),
+      settledCause: row.settledCause ?? null,
       buyer: row.buyer,
     }));
   }
@@ -2090,14 +2162,10 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         `COUNT(DISTINCT CASE WHEN ${ELIGIBLE_BUYER_SQL} THEN intent.organization_id END)`,
         'buyers',
       )
+      .addSelect(`COUNT(*) FILTER (WHERE ${NOT_CHARGED_SQL})`, 'notChargedCalls')
+      .addSelect(`COUNT(*) FILTER (WHERE ${FAILED_CHECK_SQL})`, 'failedCheckCalls')
       .addSelect(
-        'COUNT(*) FILTER (WHERE intent.status IN (:...withheldStatuses))',
-        'notChargedCalls',
-      )
-      .addSelect('COUNT(*) FILTER (WHERE intent.status = :refundedStatus)', 'failedCheckCalls')
-      .addSelect(
-        'COALESCE(SUM(CASE WHEN intent.status IN (:...withheldStatuses) ' +
-          'THEN intent.priceAmount ELSE 0 END), 0)',
+        `COALESCE(SUM(CASE WHEN ${NOT_CHARGED_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
         'notChargedAmount',
       )
       .where('intent.organizationId IS NOT NULL')

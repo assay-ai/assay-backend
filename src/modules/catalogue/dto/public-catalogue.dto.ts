@@ -151,6 +151,24 @@ export class PublicToolDto {
   @ApiProperty({ type: String, nullable: true, description: 'FREE | FREEMIUM | PAID' })
   pricingMode: string | null;
 
+  /** `CatalogueToolDto.freeCallsPerDay`: free calls one agent gets a day before a call is paid. */
+  @ApiProperty({
+    type: Number,
+    nullable: true,
+    description:
+      'Free calls per agent per day before a call is paid (FREE and FREEMIUM tools); ' +
+      'null for a PAID tool.',
+  })
+  freeCallsPerDay: number | null;
+
+  /** `CatalogueToolDto.paidBindings`: print "up to {price}" only when this is above one. */
+  @ApiProperty({
+    description:
+      'Routable bindings that can be charged (PAID or FREEMIUM). Print "up to" only when ' +
+      'this is above one.',
+  })
+  paidBindings: number;
+
   @ApiProperty({ description: 'Whether a call placed now would find a provider.' })
   routable: boolean;
 

@@ -117,6 +117,8 @@ function toPublicTool(tool: CatalogueToolDto): PublicToolDto {
     fromPrice: tool.fromPrice ? toPublicMoney(tool.fromPrice) : null,
     price: tool.price ? toPublicMoney(tool.price) : null,
     pricingMode: tool.pricingMode,
+    freeCallsPerDay: tool.freeCallsPerDay,
+    paidBindings: tool.paidBindings,
     routable: tool.routable,
     settlementChains: tool.settlementChains ? [...tool.settlementChains] : null,
   };

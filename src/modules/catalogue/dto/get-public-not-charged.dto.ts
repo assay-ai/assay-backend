@@ -56,7 +56,8 @@ export class PublicNotChargedCallDto {
     enum: WithheldBucket,
     description:
       'FAILED_VERIFICATION is the guarantee firing; PROVIDER_OR_PLATFORM_ERROR is a call that ' +
-      'never produced usable data. Never merge the two.',
+      'never produced usable data, or whose payment the provider could not collect ' +
+      '(NOT_COLLECTED). Never merge the two.',
   })
   bucket: WithheldBucket;
 
@@ -75,7 +76,12 @@ export class PublicNotChargedTotalsDto {
   })
   callsChecked: number;
 
-  @ApiProperty({ description: 'Of those, calls that ended without a charge.' })
+  @ApiProperty({
+    description:
+      'Of those, calls that ended without a charge and are not owed: refunded, voided, ' +
+      'expired, or served but never collected (forfeited, voided debt). An open or ' +
+      'written-off buyer debt is owed and is not counted here.',
+  })
   callsNotCharged: number;
 
   @ApiProperty({ description: 'Of the not-charged calls, those whose result failed verification.' })

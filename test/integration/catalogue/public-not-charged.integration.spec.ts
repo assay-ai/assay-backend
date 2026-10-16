@@ -39,7 +39,7 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
   }
 
   /** One paid call by the CURRENT organization, driven to `outcome`. */
-  async function call(toolId: string, outcome: 'REFUNDED' | 'VOIDED' | 'SETTLED'): Promise<void> {
+  async function call(toolId: string, outcome: 'REFUNDED' | 'VOIDED' | 'SETTLED'): Promise<string> {
     const { organizationId } = context;
     const account = context.account(`buyer-${randomUUID()}`);
     await context.fund(account, 10_000_000n);
@@ -66,7 +66,7 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
         PaymentIntentStatus.VOIDED,
         { reason: 'provider error', providerId: PROVIDER },
       );
-      return;
+      return intent.id;
     }
 
     await context.intents.resolve(
@@ -89,6 +89,35 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
         reason: outcome === 'SETTLED' ? 'verification passed' : 'verification failed',
         verificationVerdict: outcome === 'SETTLED' ? 'PASS' : 'FAIL',
       },
+    );
+    return intent.id;
+  }
+
+  /**
+   * Puts a SETTLED row into one of main's buyer-debt / forfeit states, the way
+   * `VoucherRedemptionService` and `PaymentIntentService` leave it: the
+   * columns only, since the feed reads nothing else.
+   */
+  async function collection(
+    intentId: string,
+    state: 'FORFEITED' | 'OPEN_DEBT' | 'WRITTEN_OFF' | 'VOIDED_REFUND' | 'VOIDED_VOID',
+  ): Promise<void> {
+    const lapsed = state !== 'FORFEITED';
+    const released = state !== 'OPEN_DEBT';
+    const cause = {
+      FORFEITED: 'provider_forfeit:ProviderBelowMinimumStake',
+      OPEN_DEBT: 'DelegateIsRevoked',
+      WRITTEN_OFF: 'uncollected:DelegateIsRevoked',
+      VOIDED_REFUND: 'voided:REFUND',
+      VOIDED_VOID: 'voided:VOID',
+    }[state];
+    await context.dataSource.query(
+      `UPDATE payment_intents
+          SET redemption_last_error = $2,
+              redemption_lapsed_at = CASE WHEN $3::boolean THEN now() ELSE NULL END,
+              hold_released_at = CASE WHEN $4::boolean THEN now() ELSE NULL END
+        WHERE id = $1`,
+      [intentId, cause, lapsed, released],
     );
   }
 
@@ -134,12 +163,14 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
       'decimals',
       'priceAmount',
       'providerId',
+      'settledCause',
       'status',
       'toolId',
       'verificationVerdict',
     ]);
     expect(rows[0]).toMatchObject({
       status: 'REFUNDED',
+      settledCause: null,
       priceAmount: 250_000n,
       providerId: PROVIDER,
     });
@@ -158,5 +189,53 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     expect(sum(after, 'failedCheckCalls') - sum(before, 'failedCheckCalls')).toBe(4);
     expect(amount(after) - amount(before)).toBe(5n * 250_000n);
     expect(sum(after, 'buyers') - sum(before, 'buyers')).toBe(3);
+  });
+
+  it('lists a forfeited or voided-debt call as not charged, never an owed one', async () => {
+    const window: NotChargedWindow = {
+      from: new Date(Date.now() - 2 * DAY_MS),
+      to: new Date(Date.now() + 2 * DAY_MS),
+      buyerCreatedBefore: new Date(Date.now() - 7 * DAY_MS),
+    };
+    const before = await context.repository.summarizeNotCharged(window);
+
+    const TOOL = randomUUID();
+    // One eligible buyer (a charged call) with one call in every collection state.
+    await buyer(10);
+    await call(TOOL, 'SETTLED');
+    await collection(await call(TOOL, 'SETTLED'), 'FORFEITED');
+    await collection(await call(TOOL, 'SETTLED'), 'VOIDED_REFUND');
+    await collection(await call(TOOL, 'SETTLED'), 'VOIDED_VOID');
+    await collection(await call(TOOL, 'SETTLED'), 'OPEN_DEBT');
+    await collection(await call(TOOL, 'SETTLED'), 'WRITTEN_OFF');
+
+    // An old organization whose only served calls became buyer debt: it never
+    // paid, so it is not an eligible buyer and its refund is not read.
+    await buyer(30);
+    await collection(await call(TOOL, 'SETTLED'), 'OPEN_DEBT');
+    await collection(await call(TOOL, 'SETTLED'), 'WRITTEN_OFF');
+    await call(TOOL, 'REFUNDED');
+
+    const rows = (await context.repository.findNotChargedCandidates(window, 500)).filter(
+      (row) => row.toolId === TOOL,
+    );
+    expect(rows.map((row) => `${row.status}:${row.settledCause}`).sort()).toEqual([
+      'SETTLED:FORFEITED',
+      'SETTLED:VOIDED_REFUND',
+      'SETTLED:VOIDED_VOID',
+    ]);
+
+    const after = await context.repository.summarizeNotCharged(window);
+    const sum = (
+      list: typeof after,
+      key: 'calls' | 'notChargedCalls' | 'failedCheckCalls' | 'buyers',
+    ) => list.reduce((total, row) => total + row[key], 0);
+
+    // 9 final calls; not charged = forfeited + two voided debts + the refund
+    // (totals are not eligibility-gated); the owed ones are in neither.
+    expect(sum(after, 'calls') - sum(before, 'calls')).toBe(9);
+    expect(sum(after, 'notChargedCalls') - sum(before, 'notChargedCalls')).toBe(4);
+    expect(sum(after, 'failedCheckCalls') - sum(before, 'failedCheckCalls')).toBe(2);
+    expect(sum(after, 'buyers') - sum(before, 'buyers')).toBe(1);
   });
 });
