@@ -58,7 +58,7 @@ export class NamespaceVoucherRedeemer implements VoucherRedeemerPort {
 
   /**
    * The payer's chain's answer, or `null` (no landing found) on a chain whose
-   * redeemer cannot look — which keeps that chain's refusal absorbed as before.
+   * redeemer cannot look — which closes that chain's refusal at once, as before.
    */
   async findLanding(
     request: RedeemVoucherRequest,

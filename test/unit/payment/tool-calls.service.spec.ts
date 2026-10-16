@@ -149,6 +149,45 @@ describe('ToolCallsService.list', () => {
     expect(page.items[0].price).toEqual({ amount: '1000000', asset: USDC, decimals: 6 });
     expect(page.items[0].charged).toEqual({ amount: '0', asset: USDC, decimals: 6 });
   });
+  it('M4: a SETTLED call the provider forfeited is not charged, and says so — as on the receipt', async () => {
+    const { service } = buildHarness([
+      intentRow({ redemptionLastError: 'provider_forfeit:PayeeBlocked' }),
+    ]);
+    const page = await service.list(ORGANIZATION_ID, baseQuery());
+
+    expect(page.items[0].charged).toEqual({ amount: '0', asset: USDC, decimals: 6 });
+    expect(page.items[0].forfeited).toBe(true);
+    expect(page.items[0].debt).toBeNull();
+  });
+
+  it('M4: an outstanding buyer debt is charged and flagged; a written-off one is not charged', async () => {
+    const { service } = buildHarness([
+      intentRow({
+        id: 'debt-open',
+        redemptionLapsedAt: new Date(),
+        holdReleasedAt: null,
+        redemptionLastError: 'VoucherExpired',
+      }),
+      intentRow({
+        id: 'debt-gone',
+        redemptionLapsedAt: new Date(),
+        holdReleasedAt: new Date(),
+        redemptionLastError: 'uncollected:VoucherExpired',
+      }),
+    ]);
+    const page = await service.list(ORGANIZATION_ID, baseQuery());
+
+    expect(page.items[0]).toMatchObject({
+      debt: 'OUTSTANDING',
+      forfeited: false,
+      charged: { amount: '1000000' },
+    });
+    expect(page.items[1]).toMatchObject({
+      debt: 'WRITTEN_OFF',
+      forfeited: false,
+      charged: { amount: '0' },
+    });
+  });
 });
 
 describe('ToolCallsService.getOne', () => {

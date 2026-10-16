@@ -1,9 +1,10 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager, IsNull, SelectQueryBuilder } from 'typeorm';
+import { DataSource, EntityManager, IsNull, QueryRunner, SelectQueryBuilder } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
 import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
+import { exactInstantSql } from '@shared/api';
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
 
@@ -95,6 +96,20 @@ export interface ReceiptsSummaryRow {
   readonly withheldTotal: bigint;
   /** Calls that landed `REFUNDED` — the numerator of `failRate`. */
   readonly refundedCalls: number;
+  /**
+   * The buyer was not charged: refunded, voided or expired, or served but never
+   * collected (forfeited, written off, voided debt). Every finished call that is
+   * neither charged nor owed, so `listed = charged + notCharged + owed + inProgress`
+   * holds by construction.
+   */
+  readonly notChargedTotal: bigint;
+  readonly notChargedCalls: number;
+  /** Served, payment not collected yet: an open buyer debt. Neither charged nor not charged. */
+  readonly owedTotal: bigint;
+  readonly owedCalls: number;
+  /** Not finished yet (`CREATED`, `FUNDS_SECURED`, `PROVIDER_EXECUTING`, `VERIFYING`). */
+  readonly inProgressTotal: bigint;
+  readonly inProgressCalls: number;
 }
 
 /**
@@ -117,35 +132,82 @@ const REFUNDED_STATUS = 'REFUNDED';
 /**
  * A rail-B intent whose hold is still open. `resolve()` leaves it open on
  * `SETTLED` and only `commitRedeemedHold` — after `redeem_voucher` lands —
- * retires it and writes `PROVIDER_CREDIT`.
+ * retires it and writes `PROVIDER_CREDIT`. A debt whose replacement voucher
+ * was accepted (`redemption_replaced_at`) is awaiting redemption again.
  */
 export const AWAITING_REDEMPTION_SQL =
   `(intent.rail = 'RAIL_B_VOUCHER' AND intent.hold_id IS NOT NULL ` +
-  `AND intent.hold_released_at IS NULL)`;
+  `AND intent.hold_released_at IS NULL ` +
+  `AND (intent.redemption_lapsed_at IS NULL OR intent.redemption_replaced_at IS NOT NULL))`;
 
 /**
- * Read on a `SETTLED` intent: the provider has been credited — its hold was
- * committed, which is exactly when `PROVIDER_CREDIT` is written (rail A inline
- * in `PaymentIntentService.resolve`, rail B in `commitRedeemedHold` once
- * `redeem_voucher` lands). Every "earned" figure filters on this, so it
- * matches the earnings ledger by construction.
- *
- * Strictly narrower than `NOT` {@link AWAITING_REDEMPTION_SQL}: it also
- * leaves out a `SETTLED` row with no hold at all, or a rail-A row whose
- * commit failed after the status moved (see `resolve`'s "What a failure
- * leaves behind") — neither credited anyone.
+ * Read on a `SETTLED` intent: the provider FORFEITED the voucher — it caused
+ * the voucher to fail (stake below the minimum, or blocked), so the buyer's
+ * hold was released and nobody was credited. The literal is
+ * `VoucherRedemptionService`'s `PROVIDER_FORFEIT_PREFIX`.
  */
-export const CREDITED_SQL = `(intent.hold_id IS NOT NULL AND intent.hold_released_at IS NOT NULL)`;
+export const FORFEITED_SQL = `(intent.redemption_last_error LIKE 'provider_forfeit:%')`;
 
 /**
- * Read on a credited intent: the credit came out of **platform** funds, not
- * out of a redemption. `VoucherRedemptionService.absorb` writes it when a
- * voucher can never be redeemed (`VoucherSeqNotIncreasing`, a revoked
- * delegate, …): the buyer keeps the money, the provider is owed the
- * `provider_amount` by the platform, and nothing moved on chain — so no
- * platform fee was taken either. The literal is that service's
- * `PLATFORM_ABSORBED_TX_REF_PREFIX`; the credit's `organization_id` is the
- * provider's, which is what puts the probe on `idx_ledger_entries_intent_id`.
+ * Read on a `SETTLED` intent: BUYER DEBT, still open. The voucher lapsed for a
+ * reason that is not the provider's, the buyer's hold is still open (so the
+ * amount stays out of the buyer's spendable balance), nobody is credited yet,
+ * and the payer's paid calls are refused until the buyer signs a replacement
+ * voucher (no-platform-debt design, steps 9 and 10).
+ */
+export const DEBT_OUTSTANDING_SQL = `(intent.redemption_lapsed_at IS NOT NULL AND intent.hold_released_at IS NULL)`;
+
+/**
+ * Read on a `SETTLED` intent: buyer debt WRITTEN OFF — not settled within
+ * `BUYER_DEBT_WRITE_OFF_DAYS`, so the hold was released and the provider is
+ * not paid. The literal is `UNCOLLECTED_PREFIX`
+ * (`voucher-redemption.constants.ts`).
+ */
+export const WRITTEN_OFF_SQL = `(intent.redemption_last_error LIKE 'uncollected:%')`;
+
+/**
+ * Read on a `SETTLED` intent: buyer debt VOIDED — a FAIL / REFUND / VOID
+ * verdict arrived after the call had been settled as served and unverified
+ * and had become debt (review-buyer-debt M2): the hold was released, nobody
+ * is credited, the buyer is not charged. The literal is `DEBT_VOIDED_PREFIX`
+ * (`voucher-redemption.constants.ts`).
+ */
+export const VOIDED_SQL = `(intent.redemption_last_error LIKE 'voided:%')`;
+
+/**
+ * The payer's paid calls are refused while ANY of its rows matches this (raw
+ * column names, no alias): an open debt, a debt whose replacement is not
+ * collected yet, or — until the contract change ships (H1 interim) — a debt
+ * that was WRITTEN OFF. The write-off ends the hold and the provider's wait;
+ * it never ends the refusal. Re-signing (`replaceLapsedVoucher`) is the only
+ * way out, and then the provider is paid normally. A voided or forfeited row,
+ * and a collected replacement, have their hold released and no `uncollected:`
+ * mark, so they stop refusing. `idx_payment_intents_open_debt` has exactly
+ * this predicate.
+ */
+export const DEBT_REFUSING_SQL =
+  `("redemption_lapsed_at" IS NOT NULL ` +
+  `AND ("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%'))`;
+
+/** A `redemption_last_error` that closed the row for good: nothing may redeem it any more. */
+const CLOSED_OUTCOME_SQL = (alias: string): string =>
+  `(${alias}.redemption_last_error LIKE 'provider_forfeit:%' ` +
+  `OR ${alias}.redemption_last_error LIKE 'uncollected:%' ` +
+  `OR ${alias}.redemption_last_error LIKE 'voided:%')`;
+
+/**
+ * Read on a credited intent: a LEGACY credit out of platform funds
+ * (`platform_absorbed:<error>`), written before buyer debt replaced it. Nothing
+ * writes one any more: the platform never pays or owes a provider. Kept only to
+ * label the historical rows, which are reported as uncollected (the buyer's
+ * hold was released and no buyer money backs the credit). The credit's
+ * `organization_id` is the provider's, which puts the probe on
+ * `idx_ledger_entries_intent_id`.
+ *
+ * RECONCILIATION FLAG (review-buyer-debt L4): these credits are labelled, not
+ * reversed — no money moves — so they still sit in the provider's ledger
+ * balance. Any payout writer must leave them out; see
+ * `docs/runbooks/buyer-debt-deploy.md` §4 for the query that lists them.
  */
 export const PLATFORM_ABSORBED_SQL =
   `EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
@@ -154,9 +216,9 @@ export const PLATFORM_ABSORBED_SQL =
   `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')`;
 
 /**
- * The same credit as {@link PLATFORM_ABSORBED_SQL}, read for its reason (the
- * program error after the prefix, e.g. `DelegateIsRevoked`); `NULL` when the
- * call was not absorbed. One credit per intent (partial unique index).
+ * The same legacy credit as {@link PLATFORM_ABSORBED_SQL}, read for its reason
+ * (the program error after the prefix, e.g. `DelegateIsRevoked`); `NULL` when
+ * the call was not absorbed. One credit per intent (partial unique index).
  */
 export const PLATFORM_ABSORBED_REASON_SQL =
   `(SELECT substring(absorbed.chain_tx_ref FROM 19) ` + // after the 18-char prefix
@@ -164,6 +226,57 @@ export const PLATFORM_ABSORBED_REASON_SQL =
   `WHERE absorbed.organization_id = intent.provider_id AND absorbed.intent_id = intent.id ` +
   `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
   `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%' LIMIT 1)`;
+
+/**
+ * Read on a `SETTLED` intent: the buyer was NOT charged although the verdict
+ * passed — the provider forfeited, the debt was written off, or (legacy) the
+ * platform absorbed it. The one predicate every buyer-facing "charged" figure
+ * and the spend caps leave out (review 2026-10-15 #2, M4).
+ */
+export const NOT_COLLECTED_SQL =
+  `(COALESCE(${FORFEITED_SQL}, false) OR COALESCE(${WRITTEN_OFF_SQL}, false) ` +
+  `OR COALESCE(${VOIDED_SQL}, false) OR ${PLATFORM_ABSORBED_SQL})`;
+
+/**
+ * `GET /receipts/summary`'s buckets. Every call is in exactly one, so
+ * `listed = charged + notCharged + owed + inProgress`:
+ *
+ * - charged: served and collected (or being collected): `SETTLED`, not
+ *   {@link NOT_COLLECTED_SQL}, not an open debt.
+ * - owed: served, payment not collected yet, and the buyer still owes it — an
+ *   open buyer debt ({@link DEBT_OUTSTANDING_SQL}) or a WRITTEN-OFF one
+ *   ({@link WRITTEN_OFF_SQL}). The buyer has not been charged and has not been
+ *   let off either, so it is neither of the other two (R17b-B-01). A write-off
+ *   only ends the provider's wait (it is uncollected on the provider side);
+ *   the buyer's paid calls stay refused until it re-signs, so it is still owed
+ *   (final review M2).
+ * - in progress: not finished yet.
+ * - not charged: the rest — `REFUNDED`, `VOIDED`, `EXPIRED`, and a served call
+ *   that was never collected and is not owed (forfeited, voided debt, legacy
+ *   absorb). Derived by subtraction so it cannot drift from the other three.
+ */
+const SUMMARY_OWED_SQL =
+  `(intent.status = '${SETTLED_STATUS}' ` +
+  `AND (${DEBT_OUTSTANDING_SQL} OR COALESCE(${WRITTEN_OFF_SQL}, false)) ` +
+  `AND NOT COALESCE(${FORFEITED_SQL}, false) AND NOT COALESCE(${VOIDED_SQL}, false) ` +
+  `AND NOT ${PLATFORM_ABSORBED_SQL})`;
+const SUMMARY_CHARGED_SQL = `(intent.status = '${SETTLED_STATUS}' AND NOT ${DEBT_OUTSTANDING_SQL} AND NOT ${NOT_COLLECTED_SQL})`;
+const SUMMARY_IN_PROGRESS_SQL = `(intent.status IN ('CREATED', 'FUNDS_SECURED', 'PROVIDER_EXECUTING', 'VERIFYING'))`;
+
+/**
+ * Read on a `SETTLED` intent: the provider has been credited OUT OF THE
+ * BUYER'S ESCROW — its hold was committed, which is exactly when
+ * `PROVIDER_CREDIT` is written (rail A inline in `PaymentIntentService.resolve`,
+ * rail B in `commitRedeemedHold` once `redeem_voucher` lands). Every "earned"
+ * figure filters on this, so it matches the earnings ledger by construction.
+ *
+ * A released hold is not a committed one: a forfeit, a write-off and a legacy
+ * absorb all released the buyer's hold and are left out (review 2026-10-15, M2;
+ * review #2, M4).
+ */
+export const CREDITED_SQL =
+  `(intent.hold_id IS NOT NULL AND intent.hold_released_at IS NOT NULL ` +
+  `AND NOT ${NOT_COLLECTED_SQL})`;
 
 export interface CallExportRow {
   /** The payment intent's own id — the platform's key for the money. */
@@ -185,14 +298,29 @@ export interface CallExportRow {
   readonly awaitingRedemption: boolean;
   /** {@link CREDITED_SQL}: the hold was committed. Only meaningful on a `SETTLED` row. */
   readonly credited: boolean;
-  /** Why the credit came out of platform funds, or `null` — see {@link PLATFORM_ABSORBED_REASON_SQL}. */
+  /** A LEGACY platform-absorbed credit's reason, or `null` — see {@link PLATFORM_ABSORBED_REASON_SQL}. */
   readonly absorbedReason: string | null;
+  /**
+   * `provider_forfeit:<cause>` when the provider forfeited ({@link FORFEITED_SQL}),
+   * `uncollected:<cause>` once a debt was written off ({@link WRITTEN_OFF_SQL}),
+   * or the lapse cause of an open debt.
+   */
+  readonly redemptionLastError: string | null;
+  /** {@link DEBT_OUTSTANDING_SQL}: an open buyer debt — passed, not collected yet. */
+  readonly debtOutstanding: boolean;
   readonly createdAt: Date;
+  /**
+   * `created_at` at full microsecond precision ({@link exactInstantSql}) — the
+   * keyset position. `createdAt` is a `Date`, truncated to the millisecond, and
+   * a cursor built from it re-reads the boundary row on every page.
+   */
+  readonly createdAtExact: string;
 }
 
 /** A keyset position for {@link PaymentIntentRepository.findCallsPageForExport}. */
 export interface CallExportCursor {
-  readonly createdAt: Date;
+  /** The last emitted row's {@link CallExportRow.createdAtExact} — never a `Date`. */
+  readonly createdAt: string;
   readonly id: string;
 }
 
@@ -214,9 +342,11 @@ export interface CallExportCursor {
 /**
  * The parties the redemption queue leaves out, from the cached blocklists.
  *
- * - `organizationIds`: blocked organizations (payer or provider), lower-case uuids.
+ * - `organizationIds`: blocked organizations, lower-case uuids; the query matches
+ *   them against the payer's organization only.
  * - `walletKeys`: the platform blocklist's namespace-wide wallet keys
- *   (`subjectKey`, e.g. `eip155:0xabc…`, Solana as written).
+ *   (`subjectKey`, e.g. `eip155:0xabc…`, Solana as written), matched against
+ *   the payer and the delegate.
  * - `chainAccounts`: CAIP-10 accounts the ON-CHAIN blocklist refuses on this
  *   asset's chain, confirmed live (compared lower-case; EVM only).
  */
@@ -252,6 +382,53 @@ export interface RedeemableIntent {
   readonly providerId: string | null;
   readonly providerAmount: string;
   readonly platformFee: string;
+  /** See `PaymentIntentEntity.redemptionLastError`. */
+  readonly redemptionLastError: string | null;
+}
+
+/** One buyer debt that refuses paid calls — see {@link PaymentIntentRepository.findOutstandingDebts}. */
+export interface OutstandingDebt {
+  readonly id: string;
+  readonly organizationId: string;
+  /** The agent that made the call: only its own delegate may re-sign it. */
+  readonly agentId: string;
+  readonly agentAccount: string;
+  readonly providerId: string | null;
+  readonly providerAccount: string | null;
+  readonly toolId: string;
+  readonly chainId: string;
+  readonly assetId: string;
+  readonly decimals: number;
+  readonly priceAmount: string;
+  readonly requestHash: string;
+  readonly voucherResourceHash: string | null;
+  readonly voucherSeq: string | null;
+  /** The `resource` the voucher signed, or `null` on rows older than the column. */
+  readonly voucherResource: string | null;
+  /** The FIRST lapse: the write-off clock, never restarted by a replacement. */
+  readonly lapsedAt: Date;
+  /**
+   * The refusal the voucher lapsed on (`VoucherExpired`, `DelegateIsRevoked`,
+   * …), or `uncollected:<cause>` once written off.
+   */
+  readonly cause: string | null;
+  /** When a replacement voucher was accepted and is waiting to be collected, or `null`. */
+  readonly replacedAt: Date | null;
+  /** Written off (hold released, provider not paid) — still refusing paid calls (H1 interim). */
+  readonly writtenOff: boolean;
+  readonly createdAt: Date;
+}
+
+/** The replacement voucher's fields — see {@link PaymentIntentRepository.replaceLapsedVoucher}. */
+export interface LapsedVoucherReplacement {
+  readonly seq: string;
+  readonly signature: string;
+  readonly issuedAt: number;
+  readonly delegate: string | null;
+  readonly expiresAt: Date;
+  /** The replacement's `resource`, and the chain's hash of it (the tool may have been renamed). */
+  readonly resource: string;
+  readonly resourceHash: string;
 }
 
 export interface DuePaymentIntent {
@@ -259,6 +436,18 @@ export interface DuePaymentIntent {
   readonly id: string;
   readonly status: string;
   readonly holdId: string | null;
+  /** The payer account — selected by the reads whose writes take the payer's lock. */
+  readonly agentAccount?: string;
+}
+
+/** The row a debt close (write-off, void) must still be — see `markWrittenOff`. */
+export interface DebtCloseTarget {
+  readonly organizationId: string;
+  readonly id: string;
+  /** The payer account: the admission lock is keyed on it. */
+  readonly payer: string;
+  /** The hold the pass read; a row that has since taken another is not closed. */
+  readonly holdId: string;
 }
 
 /**
@@ -333,6 +522,11 @@ export interface VoucherAdmissionScope {
   readonly escrowSince: Date;
   /** When the delegate's counter was read off the chain (minus a lag margin). */
   readonly delegateSince?: Date | null;
+  /**
+   * The calling organization: its debts, and the payer account's, are counted
+   * under the lock ({@link OpenVoucherTotals.debts}). Omitted, they are not.
+   */
+  readonly organizationId?: string | null;
 }
 
 /** `Σ price_amount` of the vouchers the chain's counters do not hold yet. */
@@ -364,6 +558,14 @@ export interface OpenVoucherTotals {
    * (review 2026-10-15 P-2).
    */
   readonly maxSeq?: bigint | null;
+  /**
+   * How many rows of the payer account or of the organization refuse paid
+   * calls ({@link DEBT_REFUSING_SQL}), read under the lock so a voucher that
+   * lapsed during this admission is seen (review-buyer-debt L8). Not read for a
+   * replacement (the debt being settled is one of them) or without
+   * `scope.organizationId`.
+   */
+  readonly debts?: number;
 }
 
 /** What {@link PaymentIntentRepository.holdVoucherAdmission} pauses, and for how long. */
@@ -511,6 +713,54 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere(`hold.status = 'OPEN'`)
       .andWhere('hold.expires_at < :now', { now })
       .orderBy('hold.expires_at', 'ASC')
+      .limit(limit)
+      .getRawMany<DuePaymentIntent>();
+  }
+
+  /**
+   * Rail-B intents still `VERIFYING` more than `deadlineSeconds` past their
+   * voucher's `expiresAt`, and less than `latestSeconds` past it — the deadline
+   * on verdicts (see `PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS`). Only rows with
+   * a voucher the redemption job can submit (seq and signature recorded) and
+   * an open hold: settling anything else would leave a SETTLED hold nothing
+   * ever closes.
+   *
+   * There is no upper bound any more: a row past the latest its voucher can
+   * still be redeemed is settled too, and `PaymentIntentService.resolve` makes
+   * it buyer debt at once rather than handing a dead voucher to the redemption
+   * job (review 2026-10-15 #2, M3). Before, such rows were left to the 24-hour
+   * backstop, which released the hold of a call that was served.
+   *
+   * A row whose verification already computed a REFUND or VOID outcome that
+   * `resolve()` has not applied yet is skipped: the sweep must not overtake a
+   * verdict that rejected the call (review 2026-10-15, L6). The verification
+   * worker applies it, or the backstop releases the hold.
+   *
+   * Cross-tenant like the other sweep reads, oldest first, bounded by `limit`.
+   */
+  async findDueForVerdictDeadline(
+    now: Date,
+    deadlineSeconds: number,
+    limit: number,
+  ): Promise<DuePaymentIntent[]> {
+    return this.selectSweepCandidates()
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.status = :verifying', { verifying: 'VERIFYING' })
+      .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
+      .andWhere('intent.expiresAt < :cutoff', {
+        cutoff: new Date(now.getTime() - deadlineSeconds * 1000),
+      })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('intent.voucherSeq IS NOT NULL')
+      .andWhere('intent.voucherSignature IS NOT NULL')
+      .andWhere(
+        `NOT EXISTS (SELECT 1 FROM verification_records vr
+           WHERE vr.intent_id = intent.id
+             AND vr.settlement_outcome IS NOT NULL
+             AND vr.settlement_outcome <> 'SETTLE')`,
+      )
+      .orderBy('intent.expiresAt', 'ASC')
       .limit(limit)
       .getRawMany<DuePaymentIntent>();
   }
@@ -668,6 +918,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.providerId', 'providerId')
       .addSelect('intent.providerAmount', 'providerAmount')
       .addSelect('intent.platformFee', 'platformFee')
+      .addSelect('intent.redemptionLastError', 'redemptionLastError')
       .where('intent.organizationId IS NOT NULL')
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.rail = :rail', { rail })
@@ -676,6 +927,15 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.holdReleasedAt IS NULL')
       .andWhere('intent.voucherSeq IS NOT NULL')
       .andWhere('intent.voucherSignature IS NOT NULL')
+      // Buyer debt: the voucher is dead and nothing will redeem it until the
+      // buyer signs a replacement (`replaceLapsedVoucher` sets
+      // `redemption_replaced_at`, keeping the lapse for the write-off clock).
+      .andWhere('(intent.redemptionLapsedAt IS NULL OR intent.redemptionReplacedAt IS NOT NULL)')
+      // A forfeit, a write-off or a void is closed for good, even if its hold
+      // release did not land (a crash between the mark and the release): it
+      // must never be redeemed, or the buyer pays for a call reported as not
+      // charged (review-buyer-debt L2). The expiry sweep finishes the release.
+      .andWhere(`(intent.redemption_last_error IS NULL OR NOT ${CLOSED_OUTCOME_SQL('intent')})`)
       // A row waits while a LOWER seq of its payer is still in flight or open
       // (review 2026-10-15 P-4). Redeeming it first advances `seq_high` past
       // the lower one, which then dies on `VoucherSeqNotIncreasing` and is paid
@@ -710,19 +970,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // the payer's later seqs through, and redeeming one of those advances
       // `seq_high` past the held one and kills it. Done in the query, BEFORE
       // the LIMIT, so held rows can never fill the pass (audit E-1).
-      const blockedParty = (alias: string) => {
-        const key = (column: string) =>
-          `(split_part(${alias}.${column}, ':', 1) || ':' || CASE WHEN split_part(${alias}.${column}, ':', 1) = 'eip155' ` +
-          `THEN lower(split_part(${alias}.${column}, ':', 3)) ELSE split_part(${alias}.${column}, ':', 3) END)`;
-        return [
-          `${alias}.organization_id::text = ANY(:blockedOrgs)`,
-          `${alias}.provider_id::text = ANY(:blockedOrgs)`,
-          ...['agent_account', 'provider_account', 'voucher_delegate'].flatMap((column) => [
-            `${key(column)} = ANY(:blockedWalletKeys)`,
-            `lower(${alias}.${column}) = ANY(:blockedChainAccounts)`,
-          ]),
-        ].join(' OR ');
-      };
+      //
+      // Payer-side parties only — the payer's organization, the payer and the
+      // delegate. A blocked provider or payee is NOT left out: the pass makes
+      // that provider forfeit the voucher at once (`VoucherRedemptionService`),
+      // which closes the row, so it can neither wait nor fill a pass.
       query.andWhere(
         `NOT EXISTS (
            SELECT 1 FROM payment_intents held
@@ -735,14 +987,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
               AND held.hold_released_at IS NULL
               AND held.voucher_seq IS NOT NULL
               AND held.voucher_signature IS NOT NULL
+              AND (held.redemption_lapsed_at IS NULL OR held.redemption_replaced_at IS NOT NULL)
               AND held.voucher_seq <= intent.voucher_seq
-              AND (${blockedParty('held')})
+              AND (${blockedPartySql('held')})
          )`,
-        {
-          blockedOrgs: [...exclude.organizationIds],
-          blockedWalletKeys: [...exclude.walletKeys],
-          blockedChainAccounts: exclude.chainAccounts.map((account) => account.toLowerCase()),
-        },
+        blockedPartyParams(exclude),
       );
     }
 
@@ -767,6 +1016,19 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
     );
   }
 
+  /**
+   * Records why the last redemption attempt of this intent was refused, or
+   * `provider_forfeit:<cause>` once the provider forfeited it. Overwrites. See
+   * `redemptionLastError` on the entity.
+   */
+  async recordRedemptionError(organizationId: string, id: string, error: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents" SET "redemption_last_error" = $3
+        WHERE "organization_id" = $1 AND "id" = $2`,
+      [organizationId, id, error],
+    );
+  }
+
   /** The transactions {@link recordRedemptionTxRef} recorded for this intent, oldest first. */
   async findRedemptionTxRefs(organizationId: string, id: string): Promise<string[]> {
     const [row] = (await this.manager.query(
@@ -775,6 +1037,314 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       [organizationId, id],
     )) as Array<{ refs: string[] | null }>;
     return row?.refs ?? [];
+  }
+
+  /**
+   * Records a PROVIDER-side block as the sticky redemption cause of every
+   * rail-B voucher of `assetId` still awaiting redemption whose provider
+   * organization, payee wallet (`walletKeys`, the blocklist's namespace keys)
+   * or on-chain payee (`chainAccounts`, lower-case CAIP-10) is blocked — held
+   * or not (review 2026-10-15 #2, M2). A voucher whose PAYER is blocked too is
+   * left out of the queue and frozen, so without this the provider's block was
+   * never recorded and, lifted before the payer's, cost the provider nothing.
+   *
+   * Never overwrites a cause already provider-caused (the first one stands) or
+   * a closed outcome (`provider_forfeit:`, `uncollected:`). One statement per
+   * pass; a no-op when nothing is blocked.
+   */
+  async recordProviderBlocks(
+    assetId: string,
+    blocked: RedemptionExclusions,
+    providerCaused: readonly string[],
+  ): Promise<void> {
+    if (
+      blocked.organizationIds.length === 0 &&
+      blocked.walletKeys.length === 0 &&
+      blocked.chainAccounts.length === 0
+    ) {
+      return;
+    }
+    const payeeKey =
+      `(split_part("provider_account", ':', 1) || ':' || CASE WHEN split_part("provider_account", ':', 1) = 'eip155' ` +
+      `THEN lower(split_part("provider_account", ':', 3)) ELSE split_part("provider_account", ':', 3) END)`;
+    await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "redemption_last_error" = CASE
+                WHEN "provider_id"::text = ANY($2::text[]) THEN 'ProviderBlocked'
+                WHEN ${payeeKey} = ANY($3::text[]) THEN 'PayeeBlocked'
+                ELSE 'PayeeBlockedOnChain' END
+        WHERE "organization_id" IS NOT NULL
+          AND "asset_id" = $1
+          AND "rail" = 'RAIL_B_VOUCHER'
+          AND "status" = 'SETTLED'
+          AND "hold_id" IS NOT NULL
+          AND "hold_released_at" IS NULL
+          AND ("redemption_lapsed_at" IS NULL OR "redemption_replaced_at" IS NOT NULL)
+          AND ("redemption_last_error" IS NULL OR NOT (
+                "redemption_last_error" = ANY($5::text[])
+                OR "redemption_last_error" LIKE 'provider_forfeit:%'
+                OR "redemption_last_error" LIKE 'uncollected:%'
+                OR "redemption_last_error" LIKE 'voided:%'))
+          AND ("provider_id"::text = ANY($2::text[])
+               OR ${payeeKey} = ANY($3::text[])
+               OR lower("provider_account") = ANY($4::text[]))`,
+      [
+        assetId,
+        [...blocked.organizationIds],
+        [...blocked.walletKeys],
+        blocked.chainAccounts.map((account) => account.toLowerCase()),
+        [...providerCaused],
+      ],
+    );
+  }
+
+  /**
+   * Turns a served rail-B call into BUYER DEBT: its voucher can no longer be
+   * redeemed for a reason that is not the provider's. The hold stays OPEN, so
+   * the amount stays out of the buyer's spendable balance, and nobody is
+   * credited. `redemption_lapsed_at` keeps the FIRST lapse, so neither a row
+   * lapsed twice nor a replacement that lapsed again restarts its write-off
+   * clock (review-buyer-debt M4); a replacement that lapses is plain debt again
+   * (`redemption_replaced_at` cleared). Only an open hold lapses.
+   */
+  async lapseRedemption(organizationId: string, id: string, cause: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "redemption_lapsed_at" = COALESCE("redemption_lapsed_at", now()),
+              "redemption_replaced_at" = NULL,
+              "redemption_last_error" = $3
+        WHERE "organization_id" = $1 AND "id" = $2 AND "hold_released_at" IS NULL`,
+      [organizationId, id, cause],
+    );
+  }
+
+  /**
+   * The payer's debts that refuse its paid calls ({@link DEBT_REFUSING_SQL}):
+   * rows of the payer ACCOUNT (any organization — the escrow is the account's)
+   * or of the organization (any of its payer accounts), oldest lapse first.
+   * Read on every paid call (`PAYMENT_DEBT_OUTSTANDING`) and by
+   * `GET /escrow/debts`; `idx_payment_intents_open_debt` holds only these rows.
+   *
+   * `manager`: the payer's admission transaction, when the caller holds its
+   * lock (review-buyer-debt L8).
+   */
+  async findOutstandingDebts(
+    organizationId: string,
+    payer: string,
+    limit = 50,
+    manager: EntityManager = this.manager,
+  ): Promise<OutstandingDebt[]> {
+    const rows = (await manager.query(
+      `SELECT ${OUTSTANDING_DEBT_COLUMNS}
+         FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL
+          AND ${DEBT_REFUSING_SQL}
+          AND ("agent_account" = $2 OR "organization_id" = $1)
+        ORDER BY "redemption_lapsed_at" ASC, "id" ASC
+        LIMIT $3`,
+      [organizationId, payer, limit],
+    )) as RawOutstandingDebt[];
+    return rows.map(toOutstandingDebt);
+  }
+
+  /**
+   * One debt of `payer` by id, whatever its age or how many others there are
+   * (review-buyer-debt L5): `null` unless it still refuses paid calls.
+   */
+  async findOutstandingDebt(payer: string, id: string): Promise<OutstandingDebt | null> {
+    const [row] = (await this.manager.query(
+      `SELECT ${OUTSTANDING_DEBT_COLUMNS}
+         FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL
+          AND "id" = $1 AND "agent_account" = $2
+          AND ${DEBT_REFUSING_SQL}`,
+      [id, payer],
+    )) as RawOutstandingDebt[];
+    return row ? toOutstandingDebt(row) : null;
+  }
+
+  /**
+   * Open buyer debts that lapsed before `before`: the write-off pass's
+   * candidates. Cross-tenant like the other sweep reads, oldest first.
+   *
+   * Left out: a debt whose replacement is being collected (it lapses again,
+   * keeping its first lapse, if the replacement fails), and a debt whose
+   * payer, payer organization or delegate is BLOCKED — blocking a buyer
+   * freezes collection, the write-off clock included (review-buyer-debt L1).
+   */
+  async findDueForWriteOff(
+    before: Date,
+    limit: number,
+    exclude: RedemptionExclusions = NO_REDEMPTION_EXCLUSIONS,
+  ): Promise<DuePaymentIntent[]> {
+    const query = this.selectSweepCandidates()
+      .addSelect('intent.agentAccount', 'agentAccount')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.redemptionLapsedAt IS NOT NULL')
+      .andWhere('intent.redemptionLapsedAt < :before', { before })
+      .andWhere('intent.redemptionReplacedAt IS NULL')
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL');
+    if (hasExclusions(exclude)) {
+      query.andWhere(`NOT (${blockedPartySql('intent')})`, blockedPartyParams(exclude));
+    }
+    return query.orderBy('intent.redemptionLapsedAt', 'ASC').limit(limit).getRawMany();
+  }
+
+  /**
+   * Writes off one open debt INSIDE the ledger transaction that releases its
+   * hold (review-buyer-debt M1), under the payer's admission lock — the lock
+   * `replaceLapsedVoucher` takes — so a replacement cannot slip in between.
+   * Records `uncollected:<cause>` and the release in one statement, and only
+   * if the row is still exactly the debt the pass read: lapsed before
+   * `before`, not being replaced, the same hold, still open. `false` (the
+   * caller must not release anything) when it changed: settled, replaced, or
+   * written off already.
+   */
+  async markWrittenOff(
+    runner: QueryRunner,
+    target: DebtCloseTarget,
+    reason: string,
+    before: Date,
+  ): Promise<boolean> {
+    await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `voucher-admission:${target.payer}`,
+    ]);
+    const result = (await runner.query(
+      `UPDATE "payment_intents"
+          SET "redemption_last_error" = $5, "hold_released_at" = now()
+        WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3 AND "hold_id" = $4
+          AND "redemption_lapsed_at" IS NOT NULL AND "redemption_lapsed_at" < $6
+          AND "redemption_replaced_at" IS NULL
+          AND "hold_released_at" IS NULL
+        RETURNING "id"`,
+      [target.organizationId, target.id, target.payer, target.holdId, reason, before],
+    )) as [unknown[], number] | unknown[];
+    return affected(result) > 0;
+  }
+
+  /**
+   * Voids a buyer debt whose call was judged FAIL / REFUND / VOID after it had
+   * been settled as served and unverified (review-buyer-debt M2): the buyer is
+   * not charged and nobody is credited. Inside the ledger transaction that
+   * releases the hold, under the payer's admission lock. Only an open debt
+   * (hold open) or a written-off one (hold already released — the release is
+   * then a no-op), never a debt whose replacement is being collected: that
+   * voucher may already be on its way to the chain. `false` when nothing
+   * matched.
+   */
+  async markDebtVoided(
+    runner: QueryRunner,
+    target: DebtCloseTarget,
+    reason: string,
+  ): Promise<boolean> {
+    await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `voucher-admission:${target.payer}`,
+    ]);
+    const result = (await runner.query(
+      `UPDATE "payment_intents"
+          SET "redemption_last_error" = $5,
+              "hold_released_at" = COALESCE("hold_released_at", now())
+        WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3 AND "hold_id" = $4
+          AND "status" = 'SETTLED' AND "rail" = 'RAIL_B_VOUCHER'
+          AND "redemption_lapsed_at" IS NOT NULL
+          AND "redemption_replaced_at" IS NULL
+          AND ("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%')
+        RETURNING "id"`,
+      [target.organizationId, target.id, target.payer, target.holdId, reason],
+    )) as [unknown[], number] | unknown[];
+    return affected(result) > 0;
+  }
+
+  /**
+   * Rail-B rows closed for good — forfeited, written off or voided — whose
+   * hold release never landed (a crash between the mark and the release):
+   * the expiry sweep releases them. The redemption queue already leaves them
+   * out (review-buyer-debt L2).
+   */
+  async findClosedWithOpenHold(limit: number): Promise<DuePaymentIntent[]> {
+    return this.selectSweepCandidates()
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
+      .andWhere('intent.status = :settled', { settled: SETTLED_STATUS })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(CLOSED_OUTCOME_SQL('intent'))
+      .limit(limit)
+      .getRawMany<DuePaymentIntent>();
+  }
+
+  /**
+   * Swaps a debt's lapsed voucher for the buyer's REPLACEMENT and puts the row
+   * back in the redemption queue — under the payer's admission lock, with the
+   * SAME admission checks as a new voucher (review-buyer-debt M4): `admit`
+   * sees the payer's windows (escrow and delegate, this debt's own row left
+   * out), any admission pause, `next_seq` and the highest live seq, exactly as
+   * {@link insertAdmittedVoucherIntent} reads them.
+   *
+   * The row stays DEBT until the replacement is collected:
+   * `redemption_lapsed_at` is kept (the write-off clock never restarts) and
+   * `redemption_replaced_at` is set, so the payer's paid calls stay refused
+   * ({@link DEBT_REFUSING_SQL}) until `commitRedeemedHold` commits the hold.
+   *
+   * A WRITTEN-OFF debt is re-signed too (H1 interim): its hold was released,
+   * so the caller opens a new one first and passes it as `reopenHoldId`; the
+   * row takes it and loses its `uncollected:` mark, and the provider is paid
+   * normally once the replacement lands.
+   *
+   * `false` when the row is no longer a debt of this payer that can be
+   * replaced (settled, being replaced already, voided). The old voucher's
+   * transaction references are cleared: none of them carries the new voucher,
+   * and a debt lapses only once its own transactions are known not to have
+   * landed.
+   */
+  async replaceLapsedVoucher(
+    organizationId: string,
+    id: string,
+    payer: string,
+    replacement: LapsedVoucherReplacement,
+    admission: { scope: VoucherAdmissionScope; admit: (open: OpenVoucherTotals) => void },
+    reopenHoldId: string | null = null,
+  ): Promise<boolean> {
+    return this.manager.transaction(async (manager) => {
+      await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+        `voucher-admission:${payer}`,
+      ]);
+      admission.admit(await readVoucherAdmission(manager, admission.scope, id));
+      const result = (await manager.query(
+        `UPDATE "payment_intents"
+            SET "voucher_seq" = $4, "voucher_signature" = $5, "voucher_issued_at" = $6,
+                "voucher_delegate" = $7, "expires_at" = $8, "voucher_resource_hash" = $9,
+                "voucher_resource" = $10,
+                "redemption_tx_refs" = '{}', "redemption_last_error" = NULL,
+                "redemption_replaced_at" = now(),
+                "hold_id" = COALESCE($11::uuid, "hold_id"),
+                "hold_released_at" = CASE WHEN $11::uuid IS NULL THEN "hold_released_at" ELSE NULL END
+          WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3
+            AND "status" = 'SETTLED' AND "rail" = 'RAIL_B_VOUCHER'
+            AND "redemption_lapsed_at" IS NOT NULL AND "redemption_replaced_at" IS NULL
+            AND (($11::uuid IS NULL AND "hold_released_at" IS NULL
+                  AND ("redemption_last_error" IS NULL
+                       OR NOT ${CLOSED_OUTCOME_SQL('"payment_intents"')}))
+              OR ($11::uuid IS NOT NULL AND "hold_released_at" IS NOT NULL
+                  AND "redemption_last_error" LIKE 'uncollected:%'))
+          RETURNING "id"`,
+        [
+          organizationId,
+          id,
+          payer,
+          replacement.seq,
+          replacement.signature,
+          replacement.issuedAt,
+          replacement.delegate,
+          replacement.expiresAt,
+          replacement.resourceHash,
+          replacement.resource,
+          reopenHoldId,
+        ],
+      )) as [unknown[], number] | unknown[];
+      return affected(result) > 0;
+    });
   }
 
   /**
@@ -787,7 +1357,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * decayed counter, every voucher this platform has accepted and the chain has
    * not counted yet. Read and insert as two statements, five concurrent calls
    * all read the same total and all fit; four of them were then refused at
-   * redemption and the platform paid the providers.
+   * redemption.
    *
    * Here the two happen under `pg_advisory_xact_lock` keyed on the PAYER, in
    * one transaction: the next admission for the same payer waits until this
@@ -833,69 +1403,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
         `voucher-admission:${scope.payer}`,
       ]);
-      const [totals] = (await manager.query(
-        `SELECT
-           COALESCE(SUM("price_amount") FILTER (WHERE ${OPEN_VOUCHER_SQL('$4')}), 0)::text AS "escrow",
-           COALESCE(SUM("price_amount") FILTER (
-             WHERE "voucher_delegate" = $3 AND ${OPEN_VOUCHER_SQL('$5')}
-           ), 0)::text AS "delegate"
-         FROM "payment_intents"
-         WHERE "organization_id" IS NOT NULL
-           AND "agent_account" = $1
-           AND "asset_id" = $2
-           AND "rail" = 'RAIL_B_VOUCHER'
-           AND ("hold_released_at" IS NULL OR "hold_released_at" >= LEAST($4::timestamptz, $5::timestamptz))`,
-        [
-          scope.payer,
-          scope.assetId,
-          scope.delegate,
-          scope.escrowSince,
-          scope.delegateSince ?? scope.escrowSince,
-        ],
-      )) as Array<{ escrow: string; delegate: string }>;
-      // Any live pause over this voucher (BUG-D1-07): one per tightening, the
-      // payer's own (`delegate IS NULL`) or this delegate's. Live while its
-      // relay is pending, and after it landed for as long as this admission's
-      // chain read (`$4`, already lagged) predates the landing — the read saw
-      // the OLD caps, however late this insert comes.
-      const [pause] = (await manager.query(
-        `SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM (MAX("paused_until") - now()))))::int AS "paused_for"
-           FROM "voucher_admission_pauses"
-          WHERE "payer_account" = $1
-            AND ("delegate" IS NULL OR ($2::text IS NOT NULL AND lower("delegate") = lower($2::text)))
-            AND ("paused_until" > now() OR ("landed_at" IS NOT NULL AND "landed_at" > $3::timestamptz))
-         HAVING COUNT(*) > 0`,
-        [
-          scope.payer,
-          scope.delegate,
-          earliest(scope.escrowSince, scope.delegateSince ?? scope.escrowSince),
-        ],
-      )) as Array<{ paused_for: number }>;
-      const [escrowRow] = (await manager.query(
-        `SELECT "next_seq"::text AS "next_seq" FROM "buyer_escrows" WHERE "account_id" = $1`,
-        [scope.payer],
-      )) as Array<{ next_seq: string }>;
-      // Every asset: a seq is the payer account's, not the asset's.
-      const [highest] = (await manager.query(
-        `SELECT MAX("voucher_seq")::text AS "max_seq"
-           FROM "payment_intents"
-          WHERE "organization_id" IS NOT NULL
-            AND "agent_account" = $1
-            AND "rail" = 'RAIL_B_VOUCHER'
-            AND "voucher_seq" IS NOT NULL
-            AND ("status" IN (${[...OPEN_HOLD_STATUSES, SETTLED_STATUS]
-              .map((status) => `'${status}'`)
-              .join(', ')})
-                 OR ("status" = 'CREATED' AND "expires_at" > now()))`,
-        [scope.payer],
-      )) as Array<{ max_seq: string | null }>;
-      admit({
-        escrow: BigInt(totals?.escrow ?? '0'),
-        delegate: scope.delegate === null ? 0n : BigInt(totals?.delegate ?? '0'),
-        pausedFor: pause ? Number(pause.paused_for) : null,
-        nextSeq: escrowRow ? BigInt(escrowRow.next_seq) : null,
-        maxSeq: highest?.max_seq ? BigInt(highest.max_seq) : null,
-      });
+      admit(await readVoucherAdmission(manager, scope, null));
       await manager.insert(PaymentIntentEntity, row);
     });
   }
@@ -971,6 +1479,38 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   /** The pause's relay was refused by name: nothing landed, so its pause goes now. */
   async releaseVoucherAdmissionPause(pauseId: string): Promise<void> {
     await this.manager.query(`DELETE FROM "voucher_admission_pauses" WHERE "id" = $1`, [pauseId]);
+  }
+
+  /**
+   * Throws unless the buyer-debt columns exist (migrations `1760600000000`,
+   * `1760700000000` and `1760800000000`). Every paid call reads them
+   * (`findOutstandingDebts`) and the redemption job writes them, so a process
+   * started before the migrations would answer every paid call with a 500 —
+   * this refuses the boot instead (review-buyer-debt H2). A database with no
+   * `payment_intents` at all is left alone, as for the pause table below.
+   */
+  async assertBuyerDebtSchema(): Promise<void> {
+    const required = [
+      'redemption_last_error',
+      'redemption_lapsed_at',
+      'redemption_replaced_at',
+      'voucher_resource',
+    ];
+    const [row] = (await this.manager.query(
+      `SELECT to_regclass('payment_intents') IS NOT NULL AS "intents",
+              (SELECT COUNT(*)::int FROM information_schema.columns
+                WHERE table_schema = current_schema() AND table_name = 'payment_intents'
+                  AND column_name = ANY($1::text[])) AS "columns"`,
+      [required],
+    )) as Array<{ intents: boolean; columns: number }>;
+    if (row?.intents && Number(row.columns) !== required.length) {
+      throw new Error(
+        'payment_intents is missing the buyer-debt columns: run the migrations ' +
+          '(PaymentIntentRedemptionLastError1760600000000, PaymentIntentRedemptionLapsed1760700000000, ' +
+          'PaymentIntentDebtReplacing1760800000000) before starting any process ' +
+          '(docs/runbooks/buyer-debt-deploy.md)',
+      );
+    }
   }
 
   /**
@@ -1118,6 +1658,14 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.agentId = :agentId', { agentId })
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.status IN (:...statuses)', { statuses: SPEND_COUNTING_STATUSES })
+      // A settled call the buyer was never charged for — the provider
+      // forfeited it, or its debt was written off or voided — spent nothing, so it does
+      // not count against the caps (review #2, M4). An OUTSTANDING debt does:
+      // the buyer still owes it. Legacy absorbs are left to their few rows.
+      .andWhere(
+        `NOT (intent.status = '${SETTLED_STATUS}' AND (COALESCE(${FORFEITED_SQL}, false) ` +
+          `OR COALESCE(${WRITTEN_OFF_SQL}, false) OR COALESCE(${VOIDED_SQL}, false)))`,
+      )
       .andWhere('intent.createdAt >= :monthStart', { monthStart })
       .setParameters({ hourStart, dayStart })
       .getRawOne<{ thisHour: string; today: string; thisMonth: string }>();
@@ -1154,9 +1702,23 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('COUNT(*)', 'calls')
       .addSelect('COALESCE(SUM(intent.priceAmount), 0)', 'listedTotal')
       .addSelect(
-        'COALESCE(SUM(CASE WHEN intent.status = :settledStatus THEN intent.priceAmount ELSE 0 END), 0)',
+        // A forfeited voucher, a written-off or voided debt and a legacy absorb
+        // were never collected: the buyer was not charged (review #2, M4). An
+        // open or written-off debt is owed, not charged (R17b-B-01, final M2).
+        `COALESCE(SUM(CASE WHEN ${SUMMARY_CHARGED_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
         'chargedTotal',
       )
+      .addSelect(`COUNT(*) FILTER (WHERE ${SUMMARY_CHARGED_SQL})`, 'chargedCalls')
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN ${SUMMARY_OWED_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
+        'owedTotal',
+      )
+      .addSelect(`COUNT(*) FILTER (WHERE ${SUMMARY_OWED_SQL})`, 'owedCalls')
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN ${SUMMARY_IN_PROGRESS_SQL} THEN intent.priceAmount ELSE 0 END), 0)`,
+        'inProgressTotal',
+      )
+      .addSelect(`COUNT(*) FILTER (WHERE ${SUMMARY_IN_PROGRESS_SQL})`, 'inProgressCalls')
       .addSelect(
         'COALESCE(SUM(CASE WHEN intent.status IN (:...withheldStatuses) AND intent.holdId IS NOT NULL ' +
           'THEN intent.priceAmount ELSE 0 END), 0)',
@@ -1167,7 +1729,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
       .andWhere(`${CREATED_AT} < :to`, { to: window.to })
       .setParameters({
-        settledStatus: SETTLED_STATUS,
         refundedStatus: REFUNDED_STATUS,
         withheldStatuses: WITHHELD_STATUSES,
       });
@@ -1194,18 +1755,38 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         chargedTotal: string;
         withheldTotal: string;
         refundedCalls: string;
+        chargedCalls: string;
+        owedTotal: string;
+        owedCalls: string;
+        inProgressTotal: string;
+        inProgressCalls: string;
       }>();
 
-    return rows.map((row) => ({
-      key: row.key,
-      asset: row.asset,
-      decimals: Number(row.decimals),
-      calls: Number(row.calls),
-      listedTotal: BigInt(row.listedTotal),
-      chargedTotal: BigInt(row.chargedTotal),
-      withheldTotal: BigInt(row.withheldTotal),
-      refundedCalls: Number(row.refundedCalls),
-    }));
+    return rows.map((row) => {
+      const listedTotal = BigInt(row.listedTotal);
+      const chargedTotal = BigInt(row.chargedTotal);
+      const owedTotal = BigInt(row.owedTotal);
+      const inProgressTotal = BigInt(row.inProgressTotal);
+      const calls = Number(row.calls);
+      const owedCalls = Number(row.owedCalls);
+      const inProgressCalls = Number(row.inProgressCalls);
+      return {
+        key: row.key,
+        asset: row.asset,
+        decimals: Number(row.decimals),
+        calls,
+        listedTotal,
+        chargedTotal,
+        withheldTotal: BigInt(row.withheldTotal),
+        refundedCalls: Number(row.refundedCalls),
+        notChargedTotal: listedTotal - chargedTotal - owedTotal - inProgressTotal,
+        notChargedCalls: calls - Number(row.chargedCalls) - owedCalls - inProgressCalls,
+        owedTotal,
+        owedCalls,
+        inProgressTotal,
+        inProgressCalls,
+      };
+    });
   }
 
   private applyPeriod(
@@ -1308,12 +1889,19 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
       .addSelect(CREDITED_SQL, 'credited')
       .addSelect(PLATFORM_ABSORBED_REASON_SQL, 'absorbedReason')
-      .addSelect('intent.createdAt', 'createdAt');
+      .addSelect('intent.redemptionLastError', 'redemptionLastError')
+      .addSelect(DEBT_OUTSTANDING_SQL, 'debtOutstanding')
+      .addSelect('intent.createdAt', 'createdAt')
+      .addSelect(exactInstantSql('intent.created_at'), 'createdAtExact');
 
+    // Row-value form, as `paginate()` builds it. The position must be the
+    // exact microsecond value: a millisecond `Date` here sorts *before* the
+    // row it came from, so every page re-read its predecessor's last row and
+    // the `rowCount` budget ran out with the window's tail never emitted
+    // (BUG-R17b-P-01: 48 pages, 48 duplicates, the last 48 calls missing).
     if (after) {
       qb.andWhere(
-        `(intent.created_at > :afterCreatedAt OR ` +
-          `(intent.created_at = :afterCreatedAt AND intent.id > :afterId))`,
+        '(intent.created_at, intent.id) > (:afterCreatedAt::timestamptz, :afterId::uuid)',
         { afterCreatedAt: after.createdAt, afterId: after.id },
       );
     }
@@ -1339,7 +1927,10 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         awaitingRedemption: boolean | string;
         credited: boolean | string;
         absorbedReason: string | null;
+        redemptionLastError: string | null;
+        debtOutstanding: boolean | string;
         createdAt: Date;
+        createdAtExact: string;
       }>();
 
     return rows.map((row) => ({
@@ -1347,6 +1938,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       decimals: Number(row.decimals),
       awaitingRedemption: row.awaitingRedemption === true || row.awaitingRedemption === 'true',
       credited: row.credited === true || row.credited === 'true',
+      debtOutstanding: row.debtOutstanding === true || row.debtOutstanding === 'true',
     }));
   }
 
@@ -1379,6 +1971,130 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
     return qb;
   }
+}
+
+/**
+ * What a rail-B admission under the payer's lock must see
+ * ({@link OpenVoucherTotals}): the vouchers the chain's window counters do not
+ * hold yet (escrow and delegate), any live admission pause, the payer's
+ * `next_seq`, and the highest seq still bound for the chain.
+ *
+ * `replacing`: the id of a debt whose voucher is being REPLACED
+ * (`replaceLapsedVoucher`). Its own row is left out of every figure — its old
+ * voucher is dead and the replacement is the one being admitted — and so are
+ * other lapsed vouchers that are not being replaced: they will never reach the
+ * chain, so they cannot be stepped over.
+ */
+async function readVoucherAdmission(
+  manager: EntityManager,
+  scope: VoucherAdmissionScope,
+  replacing: string | null,
+): Promise<OpenVoucherTotals> {
+  const [totals] = (await manager.query(
+    `SELECT
+       COALESCE(SUM("price_amount") FILTER (WHERE ${OPEN_VOUCHER_SQL('$4')}), 0)::text AS "escrow",
+       COALESCE(SUM("price_amount") FILTER (
+         WHERE "voucher_delegate" = $3 AND ${OPEN_VOUCHER_SQL('$5')}
+       ), 0)::text AS "delegate"
+     FROM "payment_intents"
+     WHERE "organization_id" IS NOT NULL
+       AND "agent_account" = $1
+       AND "asset_id" = $2
+       AND "rail" = 'RAIL_B_VOUCHER'
+       AND ($6::uuid IS NULL OR "id" <> $6::uuid)
+       AND ("hold_released_at" IS NULL OR "hold_released_at" >= LEAST($4::timestamptz, $5::timestamptz))`,
+    [
+      scope.payer,
+      scope.assetId,
+      scope.delegate,
+      scope.escrowSince,
+      scope.delegateSince ?? scope.escrowSince,
+      replacing,
+    ],
+  )) as Array<{ escrow: string; delegate: string }>;
+  // Any live pause over this voucher (BUG-D1-07): one per tightening, the
+  // payer's own (`delegate IS NULL`) or this delegate's. Live while its
+  // relay is pending, and after it landed for as long as this admission's
+  // chain read (`$3`, already lagged) predates the landing — the read saw
+  // the OLD caps, however late this insert comes.
+  const [pause] = (await manager.query(
+    `SELECT GREATEST(1, CEIL(EXTRACT(EPOCH FROM (MAX("paused_until") - now()))))::int AS "paused_for"
+       FROM "voucher_admission_pauses"
+      WHERE "payer_account" = $1
+        AND ("delegate" IS NULL OR ($2::text IS NOT NULL AND lower("delegate") = lower($2::text)))
+        AND ("paused_until" > now() OR ("landed_at" IS NOT NULL AND "landed_at" > $3::timestamptz))
+     HAVING COUNT(*) > 0`,
+    [
+      scope.payer,
+      scope.delegate,
+      earliest(scope.escrowSince, scope.delegateSince ?? scope.escrowSince),
+    ],
+  )) as Array<{ paused_for: number }>;
+  const [escrowRow] = (await manager.query(
+    `SELECT "next_seq"::text AS "next_seq" FROM "buyer_escrows" WHERE "account_id" = $1`,
+    [scope.payer],
+  )) as Array<{ next_seq: string }>;
+  // Every asset: a seq is the payer account's, not the asset's.
+  const [highest] = (await manager.query(
+    `SELECT MAX("voucher_seq")::text AS "max_seq"
+       FROM "payment_intents"
+      WHERE "organization_id" IS NOT NULL
+        AND "agent_account" = $1
+        AND "rail" = 'RAIL_B_VOUCHER'
+        AND "voucher_seq" IS NOT NULL
+        AND ($2::uuid IS NULL OR ("id" <> $2::uuid
+             AND ("redemption_lapsed_at" IS NULL OR "redemption_replaced_at" IS NOT NULL)))
+        AND ("status" IN (${[...OPEN_HOLD_STATUSES, SETTLED_STATUS]
+          .map((status) => `'${status}'`)
+          .join(', ')})
+             OR ("status" = 'CREATED' AND "expires_at" > now()))`,
+    [scope.payer, replacing],
+  )) as Array<{ max_seq: string | null }>;
+  let debts: number | undefined;
+  if (replacing === null && scope.organizationId) {
+    const [owed] = (await manager.query(
+      `SELECT COUNT(*)::int AS "debts" FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL AND ${DEBT_REFUSING_SQL}
+          AND ("agent_account" = $1 OR "organization_id" = $2)`,
+      [scope.payer, scope.organizationId],
+    )) as Array<{ debts: number }>;
+    debts = Number(owed?.debts ?? 0);
+  }
+  return {
+    debts,
+    escrow: BigInt(totals?.escrow ?? '0'),
+    delegate: scope.delegate === null ? 0n : BigInt(totals?.delegate ?? '0'),
+    pausedFor: pause ? Number(pause.paused_for) : null,
+    nextSeq: escrowRow ? BigInt(escrowRow.next_seq) : null,
+    maxSeq: highest?.max_seq ? BigInt(highest.max_seq) : null,
+  };
+}
+
+const OUTSTANDING_DEBT_COLUMNS =
+  `"id", "organization_id" AS "organizationId", "agent_id" AS "agentId", ` +
+  `"agent_account" AS "agentAccount", "provider_id" AS "providerId", ` +
+  `"provider_account" AS "providerAccount", "tool_id" AS "toolId", "chain_id" AS "chainId", ` +
+  `"asset_id" AS "assetId", "decimals", "price_amount"::text AS "priceAmount", ` +
+  `"request_hash" AS "requestHash", "voucher_resource_hash" AS "voucherResourceHash", ` +
+  `"voucher_seq"::text AS "voucherSeq", "voucher_resource" AS "voucherResource", ` +
+  `"redemption_lapsed_at" AS "lapsedAt", "redemption_last_error" AS "cause", ` +
+  `"redemption_replaced_at" AS "replacedAt", ` +
+  `COALESCE("redemption_last_error" LIKE 'uncollected:%', false) AS "writtenOff", ` +
+  `"created_at" AS "createdAt"`;
+
+type RawOutstandingDebt = Omit<OutstandingDebt, 'writtenOff' | 'decimals'> & {
+  readonly writtenOff: boolean | string;
+  readonly decimals: number | string;
+};
+
+function toOutstandingDebt(row: RawOutstandingDebt): OutstandingDebt {
+  return {
+    ...row,
+    decimals: Number(row.decimals),
+    replacedAt: row.replacedAt ?? null,
+    voucherResource: row.voucherResource ?? null,
+    writtenOff: row.writtenOff === true || row.writtenOff === 'true',
+  };
 }
 
 async function readUnsettledVouchers(
@@ -1420,4 +2136,46 @@ async function readUnsettledVouchers(
       latest === null ? null : new Date(latest.getTime() + REDEEM_GRACE_SECONDS * 1000),
     redeemedSince: BigInt(row?.redeemedSince ?? '0'),
   };
+}
+
+/**
+ * Whether a payer-side party of the row aliased `alias` is blocked: the
+ * payer's organization, the payer or the delegate (by blocklist key or by
+ * on-chain account). Named parameters: {@link blockedPartyParams}.
+ */
+function blockedPartySql(alias: string): string {
+  const key = (column: string) =>
+    `(split_part(${alias}.${column}, ':', 1) || ':' || CASE WHEN split_part(${alias}.${column}, ':', 1) = 'eip155' ` +
+    `THEN lower(split_part(${alias}.${column}, ':', 3)) ELSE split_part(${alias}.${column}, ':', 3) END)`;
+  return [
+    `${alias}.organization_id::text = ANY(:blockedOrgs)`,
+    ...['agent_account', 'voucher_delegate'].flatMap((column) => [
+      `${key(column)} = ANY(:blockedWalletKeys)`,
+      `lower(${alias}.${column}) = ANY(:blockedChainAccounts)`,
+    ]),
+  ].join(' OR ');
+}
+
+function blockedPartyParams(exclude: RedemptionExclusions): Record<string, string[]> {
+  return {
+    blockedOrgs: [...exclude.organizationIds],
+    blockedWalletKeys: [...exclude.walletKeys],
+    blockedChainAccounts: exclude.chainAccounts.map((account) => account.toLowerCase()),
+  };
+}
+
+function hasExclusions(exclude: RedemptionExclusions): boolean {
+  return (
+    exclude.organizationIds.length > 0 ||
+    exclude.walletKeys.length > 0 ||
+    exclude.chainAccounts.length > 0
+  );
+}
+
+/** Rows a raw `UPDATE … RETURNING` touched, across the driver's two result shapes. */
+function affected(result: [unknown[], number] | unknown[]): number {
+  if (Array.isArray(result) && result.length === 2 && typeof result[1] === 'number') {
+    return result[1];
+  }
+  return Array.isArray(result) ? result.length : 0;
 }

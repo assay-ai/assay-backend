@@ -5,6 +5,7 @@ import { ChainsModule } from '@modules/chains/chains.module';
 import { LedgerModule } from '@modules/ledger/ledger.module';
 import { NotificationModule } from '@modules/notification/notification.module';
 
+import { BuyerDebtSchemaCheck } from './services/buyer-debt-schema-check.service';
 import { DepositFinalityService } from './services/deposit-finality.service';
 import { EscrowSeqService } from './services/escrow-seq.service';
 import { DepositIntentExpiryService } from './services/deposit-intent-expiry.service';
@@ -49,6 +50,8 @@ import { VoucherService } from './services/voucher.service';
   // not re-exported — same reasoning as `LedgerModule`.
   imports: [LedgerModule, ChainsModule, NotificationModule, BlocklistModule],
   providers: [
+    // Boot refuses a schema without the buyer-debt columns (review-buyer-debt H2).
+    BuyerDebtSchemaCheck,
     PaymentIntentService,
     PaymentIntentExpiryService,
     VoucherService,

@@ -1,6 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 
+import { applyHttpSecurity } from '@shared/security/security-headers';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { StructuredLogger } from '@shared/observability';
 import { LoggingInterceptor } from '@shared/interceptors/logging.interceptor';
@@ -36,10 +37,12 @@ async function bootstrapMcp() {
   // An MCP client may be a browser-hosted agent. `Authorization` has to be
   // allowed explicitly — it is not a CORS-safelisted request header — and
   // `mcp-session-id` / `mcp-protocol-version` are the Streamable HTTP headers a
-  // client must be able to send and read back.
+  // client must be able to send and read back. Any origin, but without
+  // credentials: the bearer token is a header, not a cookie, so nothing is
+  // lost, and `*` with credentials is the pairing R17-R-02 removed.
+  applyHttpSecurity(app);
   app.enableCors({
     origin: '*',
-    credentials: true,
     allowedHeaders: ['content-type', 'authorization', 'mcp-session-id', 'mcp-protocol-version'],
     exposedHeaders: ['mcp-session-id', 'mcp-protocol-version'],
   });

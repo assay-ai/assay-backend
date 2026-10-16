@@ -452,14 +452,30 @@ describe('Lowering caps with vouchers in flight (BUG-D1-07)', () => {
     grant(500_000n, 100_000_000n);
     let open!: () => void;
     chain.gate = new Promise<void>((resolve) => (open = resolve));
-    const early = Array.from({ length: 4 }, () => service.redeem(input(delegate, 100_000n)));
+    // Released together, the early four reach the payer's lock in any order,
+    // and one below a seq already admitted is refused PAYMENT_VOUCHER_SEQ_STALE
+    // (final review N-6): retryable with a fresh seq, which an agent does.
+    const admitRetryingStale = async () => {
+      for (let attempt = 0; ; attempt += 1) {
+        try {
+          return await service.redeem(input(delegate, 100_000n));
+        } catch (error) {
+          const stale =
+            (error as { errorCode?: string }).errorCode ===
+            PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE;
+          if (!stale || attempt >= 10) throw error;
+        }
+      }
+    };
+    const early = Array.from({ length: 4 }, admitRetryingStale);
     while (chain.waiting < 4) await new Promise((resolve) => setImmediate(resolve));
     open();
     await Promise.all(early); // admitted before the hold
     let openLate!: () => void;
     chain.gate = new Promise<void>((resolve) => (openLate = resolve));
+    const lateBase = chain.waiting;
     const late = Array.from({ length: 4 }, () => service.redeem(input(delegate, 100_000n)));
-    while (chain.waiting < 8) await new Promise((resolve) => setImmediate(resolve));
+    while (chain.waiting < lateBase + 4) await new Promise((resolve) => setImmediate(resolve));
 
     const { pauseId, totals } = await context.repository.holdVoucherAdmission(
       { payer: payer.account, delegate: delegate.account, holdSeconds: 60 },

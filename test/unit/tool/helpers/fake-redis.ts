@@ -101,6 +101,17 @@ export class FakeRedis {
     return Promise.resolve(next);
   }
 
+  del(key: string): Promise<number> {
+    try {
+      this.guard(`del ${key}`);
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    const had = this.strings.delete(key);
+    this.expiries.delete(key);
+    return Promise.resolve(had ? 1 : 0);
+  }
+
   expire(key: string, seconds: number): Promise<number> {
     try {
       this.guard(`expire ${key}`);

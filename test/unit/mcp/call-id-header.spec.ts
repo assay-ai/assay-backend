@@ -1,3 +1,4 @@
+import { offerSolanaRailAInThisSuite } from '../helpers/solana-rail-b';
 /**
  * `X-Assay-Call-Id` end to end — a real HTTP server, the real
  * `ProviderRouterService`, the real `EgressBindingInvoker`, and the real
@@ -73,6 +74,10 @@ function realInvoker(): EgressBindingInvoker {
 }
 
 describe('X-Assay-Call-Id reaches the upstream endpoint', () => {
+  // Solana has no paid rail by default (review 2026-10-15, C1); these cases
+  // pin the rail-A code that is kept for when it is switched back on.
+  offerSolanaRailAInThisSuite();
+
   it('the header the provider receives equals the call id recorded on the intent', async () => {
     const { calls, intents } = buildMcpHarness({
       bindings: [

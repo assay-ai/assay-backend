@@ -6,10 +6,15 @@ import { ConfigService } from '@nestjs/config';
 import {
   AWAITING_REDEMPTION_SQL,
   CREDITED_SQL,
+  FORFEITED_SQL,
+  DEBT_OUTSTANDING_SQL,
   PLATFORM_ABSORBED_SQL,
+  VOIDED_SQL,
+  WRITTEN_OFF_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderPayoutRepository } from '@database/postgres/repositories/provider-payout.repository';
+import { platformTakeRatePercent } from '@modules/mcp/services/mcp-pricing.config';
 import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
 import {
   CALL_RECONCILIATION_CLASSES,
@@ -29,6 +34,9 @@ import {
 import { ProviderErrors } from '../errors/provider.errors';
 
 const SETTLED_STATUS = 'SETTLED';
+
+/** Never collected from the buyer: a written-off debt, or a legacy platform absorb. */
+const UNCOLLECTED_GROUP_SQL = `(COALESCE(${WRITTEN_OFF_SQL}, false) OR ${PLATFORM_ABSORBED_SQL})`;
 const RECORDED_PAYOUT_STATUS = 'RECORDED';
 
 /** One `(call_class, status, classification, asset, decimals)` group, still atomic-unit strings. */
@@ -40,10 +48,16 @@ interface ReconciliationGroupRow {
   readonly decimals: string;
   /** Rail B, hold still open — Postgres returns a boolean, some drivers a string. */
   readonly awaitingRedemption: boolean | string;
-  /** Credited from platform funds — same driver caveat. */
-  readonly platformAbsorbed: boolean | string;
+  /** Never collected: a written-off debt or a legacy absorb — same driver caveat. */
+  readonly uncollected: boolean | string | null;
+  /** Open buyer debt — same driver caveat. */
+  readonly debtOutstanding: boolean | string | null;
   /** `CREDITED_SQL`: the hold was committed — same driver caveat. */
   readonly holdCommitted: boolean | string;
+  /** `FORFEITED_SQL`: the provider forfeited — same driver caveat (and may be NULL). */
+  readonly forfeited: boolean | string | null;
+  /** `VOIDED_SQL`: a debt voided by a late rejecting verdict — same caveat. */
+  readonly voided?: boolean | string | null;
   readonly calls: string;
   /** `Σ price_amount` over this group's `SETTLED` rows. */
   readonly credited: string;
@@ -63,7 +77,10 @@ interface BatchTotalsRow {
 /** Accumulator for one {@link CallReconciliationClass}. */
 interface ClassAccumulator {
   calls: number;
+  /** Σ provider_amount — net of the platform fee. */
   credited: bigint;
+  /** Σ price_amount — before the platform fee. */
+  gross: bigint;
 }
 
 /**
@@ -85,12 +102,18 @@ const CLASS_NOTES: Record<CallReconciliationClass, string> = {
   [CallReconciliationClass.PAID_CREDITED]: 'settled to you',
   [CallReconciliationClass.PAID_AWAITING_REDEMPTION]:
     'passed — credited once the voucher is redeemed on chain',
-  [CallReconciliationClass.PLATFORM_ABSORBED]:
-    'voucher could not be redeemed — owed to you by the platform, no fee taken',
+  [CallReconciliationClass.PAID_BUYER_DEBT]:
+    'passed — the buyer’s payment could not be collected yet; credited from the buyer’s ' +
+    'escrow once the buyer re-signs it',
+  [CallReconciliationClass.PAID_UNCOLLECTED]:
+    'passed — the buyer never paid and the debt was written off; not credited, no fee taken',
+  [CallReconciliationClass.PROVIDER_FORFEITED]:
+    'voucher not collected because of your stake or a block — forfeited, not credited',
   [CallReconciliationClass.PAID_UNCREDITED]: 'verification found FAIL — not credited, see verdicts',
   [CallReconciliationClass.FREE]: 'relay path, no payment machinery',
   [CallReconciliationClass.TEST]: 'your own dry runs — charges nobody',
-  [CallReconciliationClass.EXPLORATION]: 'NEW-binding traffic, we paid for it',
+  [CallReconciliationClass.EXPLORATION]:
+    'NEW-binding trial traffic: the buyer paid; verification sampled at platform cost',
   [CallReconciliationClass.EXCLUDED]:
     'griefing attribution — credited, not counted against your SLA',
   [CallReconciliationClass.SYSTEM_ERROR]: 'upstream 5xx / timeout',
@@ -180,7 +203,7 @@ export class ProviderReconciliationService {
       asset === null ? null : { amount: amount.toString(), asset, decimals };
 
     const buckets = new Map<CallReconciliationClass, ClassAccumulator>(
-      CALL_RECONCILIATION_CLASSES.map((cls) => [cls, { calls: 0, credited: 0n }]),
+      CALL_RECONCILIATION_CLASSES.map((cls) => [cls, { calls: 0, credited: 0n, gross: 0n }]),
     );
 
     let callCount = 0;
@@ -202,7 +225,10 @@ export class ProviderReconciliationService {
           status: row.status as IntentStatusValue,
           classification: row.classification as ResponseClassValue,
           awaitingRedemption,
-          platformAbsorbed: row.platformAbsorbed === true || row.platformAbsorbed === 'true',
+          uncollected: row.uncollected === true || row.uncollected === 'true',
+          debtOutstanding: row.debtOutstanding === true || row.debtOutstanding === 'true',
+          forfeited: row.forfeited === true || row.forfeited === 'true',
+          voided: row.voided === true || row.voided === 'true',
           credited: !(row.holdCommitted === false || row.holdCommitted === 'false'),
         });
         // `CALL_RECONCILIATION_CLASSES` pre-seeds every member above, so this
@@ -213,7 +239,10 @@ export class ProviderReconciliationService {
 
         // Not credited yet: counted as calls, kept out of every settled figure
         // until the redemption lands and the earnings ledger holds the credit.
-        if (cls === CallReconciliationClass.PAID_AWAITING_REDEMPTION) {
+        if (
+          cls === CallReconciliationClass.PAID_AWAITING_REDEMPTION ||
+          cls === CallReconciliationClass.PAID_BUYER_DEBT
+        ) {
           bucket.calls += calls;
           continue;
         }
@@ -225,11 +254,12 @@ export class ProviderReconciliationService {
         // `unexplained` whole rather than half-counted.
         const priceAmount = BigInt(row.credited);
         const providerAmount = BigInt(row.providerAmount);
-        // An absorbed call took no fee: nothing was redeemed.
-        const platformFee =
-          cls === CallReconciliationClass.PLATFORM_ABSORBED ? 0n : BigInt(row.platformFee);
+        // Money is summed for committed holds only (`CREDITED_SQL`), so a
+        // forfeited or uncollected group carries zeros here.
+        const platformFee = BigInt(row.platformFee);
         bucket.calls += calls;
         bucket.credited += providerAmount;
+        bucket.gross += priceAmount;
 
         grossAmount += priceAmount;
         netAmount += providerAmount;
@@ -251,6 +281,7 @@ export class ProviderReconciliationService {
         calls: bucket.calls,
         share: callCount === 0 ? 0 : bucket.calls / callCount,
         credited: money(bucket.credited),
+        gross: money(bucket.gross),
         note: CLASS_NOTES[cls],
       };
     });
@@ -258,9 +289,11 @@ export class ProviderReconciliationService {
     const batchCount = batchRows.reduce((total, row) => total + Number(row.count), 0);
     const batchPaid = batchRows.reduce((total, row) => total + BigInt(row.paid), 0n);
 
-    const platformTakeRatePercent = Number(
-      this.config.get<string>('PROVIDER_TERMS_TAKE_RATE_PERCENT') ?? '10',
-    );
+    // The rate a call is charged at today (`PLATFORM_FEE_BPS`, the value
+    // `MCP_PRICING` splits every live call with): this number sits next to the
+    // real Σ platform_fee, and only the charged rate is one that sum can be
+    // checked against (R17-R-03).
+    const takeRatePercent = platformTakeRatePercent(this.config);
 
     return {
       from: query.from,
@@ -270,7 +303,7 @@ export class ProviderReconciliationService {
       classBreakdown,
       unexplained: { calls: unexplainedCalls, reference: unexplainedReference },
       gross: money(grossAmount),
-      platformTakeRatePercent,
+      platformTakeRatePercent: takeRatePercent,
       platformTake: money(platformTakeAmount),
       net: money(netAmount),
       batches: {
@@ -298,8 +331,11 @@ export class ProviderReconciliationService {
       .addSelect('intent.assetId', 'asset')
       .addSelect('intent.decimals', 'decimals')
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
-      .addSelect(PLATFORM_ABSORBED_SQL, 'platformAbsorbed')
+      .addSelect(UNCOLLECTED_GROUP_SQL, 'uncollected')
+      .addSelect(DEBT_OUTSTANDING_SQL, 'debtOutstanding')
       .addSelect(CREDITED_SQL, 'holdCommitted')
+      .addSelect(FORFEITED_SQL, 'forfeited')
+      .addSelect(VOIDED_SQL, 'voided')
       .addSelect('COUNT(*)', 'calls')
       // Money only for committed holds (`CREDITED_SQL`), the same rule as
       // `ProviderEarningsService`, so gross / take / net match `PROVIDER_CREDIT`.
@@ -335,8 +371,11 @@ export class ProviderReconciliationService {
       .addGroupBy('intent.assetId')
       .addGroupBy('intent.decimals')
       .addGroupBy(AWAITING_REDEMPTION_SQL)
-      .addGroupBy(PLATFORM_ABSORBED_SQL)
+      .addGroupBy(UNCOLLECTED_GROUP_SQL)
+      .addGroupBy(DEBT_OUTSTANDING_SQL)
       .addGroupBy(CREDITED_SQL)
+      .addGroupBy(FORFEITED_SQL)
+      .addGroupBy(VOIDED_SQL)
       .getRawMany<ReconciliationGroupRow>();
   }
 

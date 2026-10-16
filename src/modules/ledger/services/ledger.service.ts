@@ -1,4 +1,5 @@
 import { Injectable } from '@nestjs/common';
+import { QueryRunner } from 'typeorm';
 
 import { AssetId } from '@modules/chains/ports/caip.types';
 
@@ -109,6 +110,15 @@ export class LedgerService implements LedgerPort {
 
   releaseHold(organizationId: string, holdId: string): Promise<HoldResolution> {
     return this.holds.releaseHold(organizationId, holdId);
+  }
+
+  /** See `LedgerHoldService.releaseHoldIf`: the release only if `guard`, in its transaction, says so. */
+  releaseHoldIf(
+    organizationId: string,
+    holdId: string,
+    guard: (queryRunner: QueryRunner) => Promise<boolean>,
+  ): Promise<HoldResolution | null> {
+    return this.holds.releaseHoldIf(organizationId, holdId, guard);
   }
 
   commitHold(organizationId: string, holdId: string): Promise<HoldResolution> {

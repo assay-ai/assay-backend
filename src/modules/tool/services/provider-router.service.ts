@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
+import { FreeBindingDials } from '@modules/free-tier/domain/free-calls-per-day';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { MoneyUtil } from '@utils/money.util';
@@ -432,6 +433,13 @@ export class ProviderRouterService {
       ),
       pricingMode,
       routableBindings: eligible.length,
+      paidBindings: priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE).length,
+      freeBindings: eligible
+        .filter(({ binding }) => binding.pricingMode !== PricingMode.PAID)
+        .map(({ binding }) => ({
+          freeQuotaPerAgent: binding.freeQuotaPerAgent ?? null,
+          freeDailyBudget: binding.freeDailyBudget ?? null,
+        })),
       settlementChains,
       p95LatencyMs: weightedMean(weighted, (c) => c.provider.stats.p95LatencyMs),
       qualityRate: weightedMean(weighted, (c) =>
@@ -574,8 +582,16 @@ export class ProviderRouterService {
       if (!picked) return { picked: null, rejected, settlementChainOf };
 
       const binding = picked.candidate.binding;
+      // A free call's quota first: a binding with no room for this agent is
+      // shed before it costs the provider a ceiling token.
+      const place = context.reserveFreeQuota ? await context.reserveFreeQuota(binding) : null;
+      if (context.reserveFreeQuota && place === null) {
+        shed.set(binding.id, CeilingKind.FREE_QUOTA);
+        continue;
+      }
       const refused = await this.ceilings.consume(binding);
       if (refused === null) return { picked, rejected, settlementChainOf };
+      await place?.release();
 
       this.logger.debug(
         `binding ${binding.id} (provider ${binding.providerId}) reached its declared ` +
@@ -933,9 +949,26 @@ export interface ToolQuote {
    * is the serving binding's own price. See `pricedOnQuotedChain`.
    */
   readonly price: Money | null;
-  /** `FREE` when every eligible binding is free, `PAID` when any is paid, else `FREEMIUM`. */
+  /**
+   * `FREE` when no eligible binding can be charged, `PAID` when none can serve
+   * a free call, else `FREEMIUM` — free first, inside the agent's quota, then
+   * paid. See `quotedPricingMode`.
+   */
   readonly pricingMode: PricingMode | null;
   readonly routableBindings: number;
+  /**
+   * How many of the priced bindings can be CHARGED (`PAID` or `FREEMIUM`) —
+   * what "up to $X" is about: a `FREE` binding beside one paid binding does
+   * not make the paid price a range (review 2026-10-15, L2). Absent on a
+   * quote with no routable supply.
+   */
+  readonly paidBindings?: number;
+  /**
+   * The published free dials of every routable free-capable (`FREE` or
+   * `FREEMIUM`) binding — what `freeCallsPerDay` sums. Absent on a quote with
+   * no routable supply.
+   */
+  readonly freeBindings?: readonly FreeBindingDials[];
   /**
    * Every chain a routable binding of this tool could settle on, for the caller
    * to render against the buyer's own chains. Empty when none.
@@ -1232,21 +1265,25 @@ export function bindingPrice(binding: ToolBinding): Money {
 }
 
 /**
- * The call class the eligible supply is quoted as.
+ * The call class the eligible supply is quoted as — free first, then paid.
  *
  * - `FREE` only if the agent cannot be charged by any eligible binding.
- * - `PAID` as soon as any eligible binding is `PAID`, whatever order the
- *   catalogue lists them in. A free call is never routed to a `PAID` binding,
- *   so quoting `FREEMIUM` here would offer free calls the `FREEMIUM` supply
- *   alone has to carry, and used to hand them to a `PAID` provider who was then
- *   paid nothing.
- * - `FREEMIUM` otherwise: the free quota decides whether the call is free.
+ * - `PAID` only if no eligible binding can serve a free call (every one is
+ *   `PAID`).
+ * - `FREEMIUM` otherwise: free-capable supply (`FREE` or `FREEMIUM`) sits beside
+ *   paid supply (`PAID` or `FREEMIUM`), so the agent's free quota decides
+ *   whether the call is free. Inside it the call is routed with `callClass:
+ *   'FREE'`, among the free-capable bindings only; past it, or when none of
+ *   them can serve, it falls through to the paid path with `callClass: 'PAID'`.
+ *   A free call still never reaches a `PAID` binding (`servesCallClass`), which
+ *   is what used to make the whole tool `PAID` as soon as one `PAID` binding
+ *   joined — and let any provider switch off a rival's free tier by doing so.
  */
 function quotedPricingMode(eligible: readonly RoutingCandidate[]): PricingMode {
   const modes = new Set(eligible.map(({ binding }) => binding.pricingMode));
-  if (modes.has(PricingMode.PAID)) return PricingMode.PAID;
-  if (modes.has(PricingMode.FREEMIUM)) return PricingMode.FREEMIUM;
-  return PricingMode.FREE;
+  if (!modes.has(PricingMode.FREE) && !modes.has(PricingMode.FREEMIUM)) return PricingMode.PAID;
+  if (!modes.has(PricingMode.PAID) && !modes.has(PricingMode.FREEMIUM)) return PricingMode.FREE;
+  return PricingMode.FREEMIUM;
 }
 
 /**

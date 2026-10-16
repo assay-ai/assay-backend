@@ -47,17 +47,34 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
       expected: CallReconciliationClass.PAID_CREDITED,
     },
     {
-      name: 'PAID + SETTLED, credited from platform funds → PLATFORM_ABSORBED',
-      input: { callClass: 'PAID', status: 'SETTLED', platformAbsorbed: true },
-      expected: CallReconciliationClass.PLATFORM_ABSORBED,
+      // Review 2026-10-15 M2: the hold was released, nobody was credited.
+      name: 'PAID + SETTLED, forfeited by the provider → PROVIDER_FORFEITED (not credited)',
+      input: { callClass: 'PAID', status: 'SETTLED', forfeited: true, credited: false },
+      expected: CallReconciliationClass.PROVIDER_FORFEITED,
     },
     {
-      name: 'an open hold wins over an absorbed flag → PAID_AWAITING_REDEMPTION',
+      name: 'PAID + SETTLED, debt written off (or legacy absorb) → PAID_UNCOLLECTED',
+      input: { callClass: 'PAID', status: 'SETTLED', uncollected: true, credited: false },
+      expected: CallReconciliationClass.PAID_UNCOLLECTED,
+    },
+    {
+      // Review-buyer-debt M2: judged FAIL after it had become debt — voided.
+      name: 'PAID + SETTLED, buyer debt voided by a late rejecting verdict → PAID_UNCREDITED',
+      input: { callClass: 'PAID', status: 'SETTLED', voided: true, credited: false },
+      expected: CallReconciliationClass.PAID_UNCREDITED,
+    },
+    {
+      name: 'PAID + SETTLED, voucher lapsed into buyer debt → PAID_BUYER_DEBT',
+      input: { callClass: 'PAID', status: 'SETTLED', debtOutstanding: true, credited: false },
+      expected: CallReconciliationClass.PAID_BUYER_DEBT,
+    },
+    {
+      name: 'an open hold wins over an uncollected flag → PAID_AWAITING_REDEMPTION',
       input: {
         callClass: 'PAID',
         status: 'SETTLED',
         awaitingRedemption: true,
-        platformAbsorbed: true,
+        uncollected: true,
       },
       expected: CallReconciliationClass.PAID_AWAITING_REDEMPTION,
     },
@@ -169,7 +186,7 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
     );
   });
 
-  it('is total: every declared class is reachable, and CALL_RECONCILIATION_CLASSES lists all eleven', () => {
+  it('is total: every declared class is reachable, and CALL_RECONCILIATION_CLASSES lists all twelve', () => {
     const reached = new Set(CASES.map((c) => c.expected));
     for (const member of Object.values(CallReconciliationClass)) {
       expect(reached.has(member)).toBe(true);

@@ -148,6 +148,17 @@ export interface RoutingCandidate {
 export enum CeilingKind {
   MAX_RPS = 'MAX_RPS',
   MAX_DAILY_CALLS = 'MAX_DAILY_CALLS',
+  /**
+   * The binding's own free quota (per agent, or its daily budget) has no room
+   * for this call. Shed like a ceiling: only on a free call, and only at the
+   * reservation, never at filter time (review 2026-10-15, M4).
+   */
+  FREE_QUOTA = 'FREE_QUOTA',
+}
+
+/** A free-quota place taken for one call on one binding; given back if unused. */
+export interface FreeQuotaPlace {
+  release(): Promise<void>;
 }
 
 /**
@@ -385,6 +396,15 @@ export interface RoutingContext {
    * what decides the call class, so it has to see the whole supply.
    */
   readonly callClass?: RoutingCallClass;
+  /**
+   * A free call's per-binding quota, reserved by the caller on the binding
+   * about to be dialled — beside the ceiling token, in `selectAndReserve`.
+   * `null` means the binding has no room: it is shed and the draw runs again
+   * over what is left, so the router never sends a free call to a binding
+   * whose own quota is spent (review 2026-10-15, M4), and parallel calls
+   * cannot all fit into the last place (M5). Absent on paid calls.
+   */
+  readonly reserveFreeQuota?: (binding: ToolBinding) => Promise<FreeQuotaPlace | null>;
   /**
    * The chains the buyer can pay from RIGHT NOW. Supplied, never inferred.
    *

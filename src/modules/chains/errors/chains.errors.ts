@@ -369,25 +369,39 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
    * A payment rail was chosen for a chain whose `chain-metadata.ts` row does not
    * offer it.
    *
-   * Supported rails are per-chain: Solana keeps A and B, 4663 ships B only. The
-   * 402 response on 4663 never advertises a rail A scheme, and the router never
-   * selects one. This error is the reader that makes `ChainMetadata.rails` more
-   * than a declaration.
+   * Supported rails are per-chain: Solana offers none today (rail B is off
+   * until its program has the tighten-delay rule, and rail A is off while B
+   * is), 4663 ships B only. The 402
+   * response on 4663 never advertises a rail A scheme, and the router never
+   * selects one. This error is the reader that makes `ChainMetadata.rails`
+   * more than a declaration.
    *
-   * **500, not 400.** No caller supplies a rail: the platform picks one from the
-   * code path the request happened to arrive on, so a rail the chain does not
-   * offer is our own wiring being wrong on a chain we enabled. A 4xx would blame
-   * a buyer for it and would land in the status class nobody alerts on.
+   * **4xx, not 500.** The rail is the caller's choice: an agent sends
+   * `x402/rail` or a voucher, or it calls a paid tool on a chain whose list is
+   * empty (Solana today: free calls only). Every site that asserts this runs
+   * before an intent exists, so nothing is left to clean up and the caller
+   * can act on the answer — pay on a chain in `offered`, or call free tools.
+   * Not retryable: the same request gets the same answer.
    *
-   * `offered` is in the context because the operator fixing it wants the whole
-   * row, not the one value that failed.
+   * `offered` is in the context so the caller sees the whole row, not the one
+   * value that failed.
    */
   railNotOffered: {
     code: ChainErrorCode.CHAIN_RAIL_NOT_OFFERED,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `Chain ${context?.chainId} does not offer payment rail ${context?.rail}` +
-      `${context?.offered ? ` — it offers [${(context.offered as string[]).join(', ')}]` : ''}`,
+    statusCode: 409,
+    message: (context?: Record<string, any>) => {
+      const offered = (context?.offered as string[] | undefined) ?? null;
+      if (offered && offered.length === 0) {
+        return (
+          `Chain ${context?.chainId} offers no paid rail right now: only free calls ` +
+          `can be served on it. Pay on another chain, or call a free tool.`
+        );
+      }
+      return (
+        `Chain ${context?.chainId} does not offer payment rail ${context?.rail}` +
+        `${offered ? ` — it offers [${offered.join(', ')}]` : ''}`
+      );
+    },
   },
   /**
    * A configuration value this module reads is missing or unusable.

@@ -1,6 +1,9 @@
 import {
   CREDITED_SQL,
+  DEBT_OUTSTANDING_SQL,
+  FORFEITED_SQL,
   PLATFORM_ABSORBED_SQL,
+  WRITTEN_OFF_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
@@ -26,8 +29,12 @@ interface Row {
   platformFee: string;
   withheld: string;
   withheldCalls: string;
-  absorbed: string;
-  absorbedCalls: string;
+  forfeited: string;
+  forfeitedCalls: string;
+  debtOutstanding: string;
+  debtOutstandingCalls: string;
+  uncollected: string;
+  uncollectedCalls: string;
 }
 
 function row(overrides: Partial<Row>): Row {
@@ -40,8 +47,12 @@ function row(overrides: Partial<Row>): Row {
     platformFee: '0',
     withheld: '0',
     withheldCalls: '0',
-    absorbed: '0',
-    absorbedCalls: '0',
+    forfeited: '0',
+    forfeitedCalls: '0',
+    debtOutstanding: '0',
+    debtOutstandingCalls: '0',
+    uncollected: '0',
+    uncollectedCalls: '0',
     ...overrides,
   };
 }
@@ -218,19 +229,29 @@ describe('ProviderEarningsService — earned means credited (committed hold)', (
     expect(CREDITED_SQL).toMatch(/hold_id IS NOT NULL/);
     expect(CREDITED_SQL).toMatch(/hold_released_at IS NOT NULL/);
   });
+
+  it('never counts a voucher the provider forfeited as earned (review M2)', () => {
+    // A forfeit RELEASES the hold, which also sets hold_released_at; only the
+    // forfeit marker tells it from a commit.
+    expect(CREDITED_SQL).toContain(FORFEITED_SQL);
+    expect(CREDITED_SQL).toMatch(/AND NOT \(COALESCE\(/);
+    expect(FORFEITED_SQL).toContain("'provider_forfeit:%'");
+  });
 });
 
-describe('ProviderEarningsService — a platform-absorbed credit is not a redemption', () => {
-  // BUG-J-POSTP-01: four served calls whose vouchers died (`DelegateIsRevoked`)
-  // were credited from platform funds and shown as "already in your wallet".
-  it('reports the absorbed slice of `earned` apart, and takes no fee on it', async () => {
+describe('ProviderEarningsService — the platform never pays or owes a provider (M4)', () => {
+  it('reports forfeited, outstanding-debt and uncollected calls apart from earned', async () => {
     const { service, fake } = build([
       row({
         calls: '51',
-        earned: '4590000',
+        earned: '4230000',
         platformFee: '470000',
-        absorbed: '360000',
-        absorbedCalls: '4',
+        forfeited: '90000',
+        forfeitedCalls: '1',
+        debtOutstanding: '180000',
+        debtOutstandingCalls: '2',
+        uncollected: '360000',
+        uncollectedCalls: '4',
       }),
     ]);
 
@@ -239,22 +260,29 @@ describe('ProviderEarningsService — a platform-absorbed credit is not a redemp
       groupBy: ProviderEarningsGroupBy.TOOL,
     });
 
-    expect(earnings.totals.earned.amount).toBe('4590000');
-    expect(earnings.totals.absorbed).toEqual({ amount: '360000', asset: USDC, decimals: 6 });
-    expect(earnings.totals.absorbedCalls).toBe(4);
-    expect(earnings.groups[0].absorbedCalls).toBe(4);
+    expect(earnings.totals.earned.amount).toBe('4230000');
+    expect(earnings.totals.forfeited).toEqual({ amount: '90000', asset: USDC, decimals: 6 });
+    expect(earnings.totals.forfeitedCalls).toBe(1);
+    expect(earnings.totals.debtOutstanding).toEqual({ amount: '180000', asset: USDC, decimals: 6 });
+    expect(earnings.totals.debtOutstandingCalls).toBe(2);
+    expect(earnings.totals.uncollected).toEqual({ amount: '360000', asset: USDC, decimals: 6 });
+    expect(earnings.groups[0].uncollectedCalls).toBe(4);
+    expect(earnings.totals).not.toHaveProperty('absorbed');
 
     const expr = (alias: string) => fake.selects.find((s) => s.alias === alias)?.expr ?? '';
-    expect(expr('platformFee')).toContain(`NOT ${PLATFORM_ABSORBED_SQL}`);
-    expect(expr('absorbed')).toContain(CREDITED_SQL);
-    expect(expr('absorbed')).toContain(`AND ${PLATFORM_ABSORBED_SQL}`);
-    expect(expr('absorbedCalls')).toContain(PLATFORM_ABSORBED_SQL);
-    // The marker `VoucherRedemptionService.absorb` writes, on the provider's credit.
-    expect(PLATFORM_ABSORBED_SQL).toMatch(/'PROVIDER_CREDIT'/);
+    // Earned and the fee are credited-only, and credited leaves every
+    // non-collected call out — a legacy absorb included.
+    expect(expr('earned')).toContain(CREDITED_SQL);
+    expect(expr('platformFee')).toContain(CREDITED_SQL);
+    expect(CREDITED_SQL).toContain(PLATFORM_ABSORBED_SQL);
+    expect(expr('forfeited')).toContain(FORFEITED_SQL);
+    expect(expr('debtOutstanding')).toContain(DEBT_OUTSTANDING_SQL);
+    expect(expr('uncollected')).toContain(WRITTEN_OFF_SQL);
+    expect(expr('uncollected')).toContain(PLATFORM_ABSORBED_SQL);
     expect(PLATFORM_ABSORBED_SQL).toContain(`'${PLATFORM_ABSORBED_TX_REF_PREFIX}%'`);
   });
 
-  it('is a null absorbed amount, and a zero count, for an empty undenominated window', async () => {
+  it('is null amounts, and zero counts, for an empty undenominated window', async () => {
     const { service } = build([]);
 
     const earnings = await service.getEarnings(PROVIDER, {
@@ -262,7 +290,9 @@ describe('ProviderEarningsService — a platform-absorbed credit is not a redemp
       groupBy: ProviderEarningsGroupBy.DAY,
     });
 
-    expect(earnings.totals.absorbed).toBeNull();
-    expect(earnings.totals.absorbedCalls).toBe(0);
+    expect(earnings.totals.forfeited).toBeNull();
+    expect(earnings.totals.uncollected).toBeNull();
+    expect(earnings.totals.debtOutstanding).toBeNull();
+    expect(earnings.totals.forfeitedCalls).toBe(0);
   });
 });

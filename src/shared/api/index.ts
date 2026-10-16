@@ -15,7 +15,15 @@ export {
 } from './dto/list-query.dto';
 export { encodeCursor, decodeCursor } from './cursor';
 export type { CursorPosition, DecodedCursor } from './cursor';
-export { paginate, toPage, resolveSort, applyTimeWindow, asInstant, asExactNumber } from './keyset';
+export {
+  paginate,
+  toPage,
+  resolveSort,
+  applyTimeWindow,
+  asInstant,
+  asExactNumber,
+  exactInstantSql,
+} from './keyset';
 export type { ListSpec, SortableField } from './keyset';
 export { paginateArray } from './paginate-array';
 export { ApiCursorPage } from './swagger/api-cursor-page.decorator';

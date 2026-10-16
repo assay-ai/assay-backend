@@ -1,5 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
-import { decodeEventLog, encodeFunctionData, getAddress, isAddress } from 'viem';
+import { decodeEventLog, encodeFunctionData, getAddress, isAddress, zeroAddress } from 'viem';
 
 import {
   RedeemOutcome,
@@ -24,6 +24,7 @@ import {
 import { isRevert } from './evm-voucher-authority';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { EVM_REDEEMER, EvmRelayerPort } from './ports/evm-relayer.port';
+import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
 
 /**
  * The gas a redemption transaction is given, as `base + perVoucher × n`.
@@ -63,8 +64,7 @@ export interface EvmVoucherRedeemerConfig {
  *
  * Every hold on the platform is refused identically until a human acts, so
  * `RETRY` would burn a fee per hold per pass for ever and `UNREDEEMABLE` would
- * hand every buyer their money back — and pay every provider out of platform
- * funds — for a fault one `updateConfig` fixes.
+ * turn every served call into buyer debt for a fault one `updateConfig` fixes.
  *
  * The three batch-shape errors are here because they are this job's own bugs
  * rather than a chain condition, and because a table that omits an error cannot
@@ -85,8 +85,8 @@ const MISCONFIGURATION: ReadonlySet<string> = new Set([
  *
  * The window and sequence refusals are facts about a voucher that is already
  * signed, and the four signature refusals are facts about bytes that are already
- * fixed. When one comes back the buyer keeps their money and the platform pays
- * the provider anyway — the rule is that neither party bears it.
+ * fixed. When one comes back the call becomes buyer debt: the buyer's hold is
+ * released, the provider is not credited, and the platform pays nothing.
  */
 const UNREDEEMABLE: ReadonlySet<string> = new Set([
   'ZeroAmount',
@@ -103,12 +103,6 @@ const UNREDEEMABLE: ReadonlySet<string> = new Set([
   'InvalidSignature',
   'MalleableSignature',
   'BadSignatureV',
-  // Agent payment delegation. Only a NEW grant by the payer revives any of
-  // these, and the payer then decides afresh; retrying until the voucher's
-  // deadline only re-broadcasts a known refusal (review S2-2).
-  'DelegateIsRevoked',
-  'DelegateIsExpired',
-  'DelegateVoucherExceedsPerCallLimit',
 ]);
 
 /**
@@ -125,6 +119,17 @@ const RETRYABLE: ReadonlySet<string> = new Set([
   // A delegate's window decays. Pre-validation and the simulation before every
   // send keep the retry from costing gas: nothing is broadcast until it fits.
   'DelegateWindowLimitExceeded',
+  // Agent payment delegation, tightened by the payer. A re-grant or a raised
+  // cap before the voucher's deadline makes the SAME signed voucher valid
+  // again, so these are retried until then rather than turned into buyer
+  // debt at once (review-buyer-debt M3). Pre-validation refuses them before
+  // any send, so the retries cost no gas. On an escrow with the tighten delay
+  // (D-21) a voucher signed before the tightening is not refused at all for
+  // TIGHTEN_DELAY_SECONDS, which outlives its deadline; these then fire only
+  // for a voucher admitted against a stale read, under the same rule.
+  'DelegateIsRevoked',
+  'DelegateIsExpired',
+  'DelegateVoucherExceedsPerCallLimit',
 ]);
 
 /** `r || s || v`, 65 bytes. */
@@ -198,6 +203,11 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     @Inject(EVM_REDEEMER) private readonly redeemer: EvmRelayerPort,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     private readonly config: EvmVoucherRedeemerConfig,
+    /**
+     * Whether the chain's escrow has the tighten delay (D-21). Absent, every
+     * chain is read the pre-upgrade way: stored caps, a revocation final at once.
+     */
+    private readonly tightenDelay: Pick<EvmTightenDelayProbe, 'isLive'> | null = null,
   ) {}
 
   async redeem(request: RedeemVoucherRequest): Promise<RedeemOutcome> {
@@ -241,6 +251,16 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
       return { kind: RedeemOutcomeKind.REDEEMED, signature: result.hash, programError: null };
     }
     return this.outcomeFor(result.revertReason, null);
+  }
+
+  /**
+   * The provider's bonded stake against `params().minimumStake`, read live in
+   * the same multicall the pre-validator uses, so the two cannot disagree on
+   * what "below the minimum" means.
+   */
+  async providerBelowMinimumStake(request: RedeemVoucherRequest): Promise<boolean> {
+    const [state] = await this.readState(this.chainOf(request), [request]);
+    return state.providerBonded < state.minimumStake;
   }
 
   async redeemBatch(requests: readonly RedeemVoucherRequest[]): Promise<readonly RedeemOutcome[]> {
@@ -446,7 +466,11 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
 
   /**
    * `msg.sender`, `paused()`, every payer's escrow and every provider's bonded
-   * stake — in **one** `multicall`.
+   * stake — in **one** `multicall`. On an escrow with the tighten delay (D-21)
+   * the same multicall also asks `effectiveCapsOf(payer, delegate)` per item:
+   * the caps `_redeem` applies NOW, and whether the delegate can still sign
+   * (`docs/gas.md`'s prevalidation rule). The window COUNTERS still come from
+   * `escrowOf` / `delegationOf`, which is where the chain keeps them.
    *
    * Rule 3 above is the chain's: `params()` is read once for the whole batch, so
    * every item settles against one parameter set. Reading it once here is the
@@ -464,6 +488,10 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
 
     const payers = requests.map((request) => this.addressOf(request.payer, chainId));
     const providers = requests.map((request) => this.addressOf(request.provider, chainId));
+    const effective = (await this.tightenDelay?.isLive(chainId)) ?? false;
+    const signers = requests.map((request) =>
+      request.delegate ? this.addressOf(request.delegate, chainId) : zeroAddress,
+    );
 
     const [redeemerAddress, results] = await Promise.all([
       this.redeemer.address(chainId),
@@ -483,12 +511,20 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
             functionName: 'bondedOf',
             args: [provider] as readonly unknown[],
           })),
+          ...(effective
+            ? payers.map((payer, index) => ({
+                address: getAddress(deployment.escrow),
+                abi: X402_ESCROW_ABI,
+                functionName: 'effectiveCapsOf',
+                args: [payer, signers[index]] as readonly unknown[],
+              }))
+            : []),
         ],
         allowFailure: false,
       }),
     ]);
 
-    const expected = 2 + payers.length + providers.length;
+    const expected = 2 + payers.length + providers.length + (effective ? payers.length : 0);
     if (results.length !== expected) {
       throw ChainErrors.rpcReplyMalformed({
         method: 'multicall(redeem state)',
@@ -505,6 +541,17 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
     const redeemerIsUs =
       getAddress(parseAccountId(redeemerAddress).address) === getAddress(params.redeemer);
     const nowSeconds = Math.floor(this.config.now() / 1000);
+
+    // `[maxVoucherAmount, maxPerWindow, delegateMaxVoucherAmount, delegateMaxPerWindow]`.
+    const effectiveCaps = (index: number) =>
+      effective
+        ? (results[2 + payers.length + providers.length + index] as readonly [
+            bigint,
+            bigint,
+            bigint,
+            bigint,
+          ])
+        : null;
 
     const delegated = requests
       .map((request, index) => ({ request, index }))
@@ -532,13 +579,16 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
           validUntil: bigint;
           revoked: boolean;
         };
+        const caps = effectiveCaps(index);
         grants.set(index, {
-          maxVoucherAmount: grant.maxVoucherAmount,
-          maxPerWindow: grant.maxPerWindow,
+          // Delegate caps 0 = the grant cannot sign now (`effectiveCapsOf`).
+          maxVoucherAmount: caps ? caps[2] : grant.maxVoucherAmount,
+          maxPerWindow: caps ? caps[3] : grant.maxPerWindow,
           spentInWindow: grant.spentInWindow,
           windowStartedAt: Number(grant.windowStartedAt),
           validUntil: grant.validUntil,
           revoked: grant.revoked,
+          ...(caps ? { canSign: caps[2] > 0n } : {}),
         });
       });
     }
@@ -553,13 +603,14 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
         windowStartedAt: bigint;
       };
       const bonded = results[2 + payers.length + index] as bigint;
+      const caps = effectiveCaps(index);
       return {
         nowSeconds,
         paused,
         redeemerIsUs,
         seqHigh: escrow.seqHigh,
-        maxVoucherAmount: escrow.maxVoucherAmount,
-        maxPerWindow: escrow.maxPerWindow,
+        maxVoucherAmount: caps ? caps[0] : escrow.maxVoucherAmount,
+        maxPerWindow: caps ? caps[1] : escrow.maxPerWindow,
         spentInWindow: escrow.spentInWindow,
         windowStartedAt: Number(escrow.windowStartedAt),
         balance: escrow.balance,
@@ -654,8 +705,8 @@ export class EvmVoucherRedeemer implements VoucherRedeemerPort {
    *
    * One table, consulted by both the pre-validation path and the revert path, so
    * the two cannot disagree about what a name means. An **unnamed** refusal is
-   * `RETRY` and never `UNREDEEMABLE`: absorbing a hold because we could not read
-   * the reason is how a buyer is charged for nothing.
+   * `RETRY` and never `UNREDEEMABLE`: closing a hold because we could not read
+   * the reason is how a buyer is put in debt for nothing.
    */
   private outcomeFor(name: string | null, signature: string | null): RedeemOutcome {
     const programError = name ?? 'UNKNOWN_REVERT:none';

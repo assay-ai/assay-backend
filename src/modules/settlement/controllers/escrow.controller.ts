@@ -162,14 +162,14 @@ export class EscrowController {
   @ApiResponse({ status: 200, type: GetEscrowUnsettledResponseDto })
   async unsettled(@CurrentSession() session: McpSession): Promise<GetEscrowUnsettledResponseDto> {
     const asset = await this.escrows.assetFor(session.agentAccount);
-    const unsettled = await this.withdrawals.unsettledVouchers(
-      session.organizationId,
-      session.agentAccount,
-      asset,
-    );
+    const [unsettled, tightenDelaySeconds] = await Promise.all([
+      this.withdrawals.unsettledVouchers(session.organizationId, session.agentAccount, asset),
+      this.withdrawals.tightenDelaySeconds(session.agentAccount),
+    ]);
     return {
       account: session.agentAccount,
       unsettled: unsettled === null ? null : toUnsettledDto(unsettled, asset),
+      tightenDelaySeconds,
     };
   }
 

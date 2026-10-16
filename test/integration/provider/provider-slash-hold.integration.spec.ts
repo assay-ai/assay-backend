@@ -140,7 +140,8 @@ describe('provider slash hold, against a real database', () => {
 
   it('2. holds when the free stake cannot back another penalty', async () => {
     const providerOrg = await seed();
-    stake.pendingSlash = 99_000_000n;
+    // Free stake exactly one penalty still backs it (review S-6): one unit less.
+    stake.pendingSlash = 99_000_001n;
     await monitor().tick();
     expect(await holds.findHeld([providerOrg])).toEqual([
       expect.objectContaining({ reasons: ['STAKE_FULLY_RESERVED'] }),
@@ -191,7 +192,7 @@ describe('provider slash hold, against a real database', () => {
 
   it('resumes after two consecutive clear checks', async () => {
     const providerOrg = await seed();
-    stake.pendingSlash = 99_000_000n;
+    stake.pendingSlash = 99_000_001n;
     await monitor().tick();
     stake.pendingSlash = 0n;
     await monitor().tick();

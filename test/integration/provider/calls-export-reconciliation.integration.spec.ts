@@ -306,7 +306,7 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
     ).toBe(true);
   });
 
-  it('a platform-absorbed call is PLATFORM_ABSORBED, with its reason and no fee', async () => {
+  it('a legacy platform-absorbed call is PAID_UNCOLLECTED: no money, nobody owes it', async () => {
     const PROVIDER_ID = context.id('absorbed:provider');
     const PROVIDER_ACCOUNT = context.account('absorbed-provider');
     const AGENT_ACCOUNT = context.account('absorbed-agent');
@@ -334,7 +334,7 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
       `redeem-${redeemed.id}`,
     );
 
-    // What `VoucherRedemptionService.absorb` does for an unredeemable voucher.
+    // What the removed `VoucherRedemptionService.absorb` wrote (legacy rows).
     const absorbed = await settle('absorbed-revoked');
     await context.ledger.appendNow({
       organizationId: PROVIDER_ID,
@@ -361,9 +361,9 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
     // 1 intent_id · 5 classification · 6 reason · 8 provider_amount · 9 platform_fee
     const byIntent = new Map(rows.map((row) => [row[1], row]));
     const absorbedRow = byIntent.get(absorbed.id);
-    expect(absorbedRow?.[5]).toBe(CallReconciliationClass.PLATFORM_ABSORBED);
-    expect(absorbedRow?.[6]).toBe('DelegateIsRevoked');
-    expect(absorbedRow?.[8]).toBe(absorbed.providerAmount.amount);
+    expect(absorbedRow?.[5]).toBe(CallReconciliationClass.PAID_UNCOLLECTED);
+    expect(absorbedRow?.[6]).toBe('uncollected:legacy_platform_absorbed:DelegateIsRevoked');
+    expect(absorbedRow?.[8]).toBe('0');
     expect(absorbedRow?.[9]).toBe('0');
     expect(byIntent.get(redeemed.id)?.[5]).toBe(CallReconciliationClass.PAID_CREDITED);
 
@@ -377,7 +377,7 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
       rows.reduce((sum, row) => sum + BigInt(row[column] as string), 0n).toString();
     expect(total(9)).toBe(earnings.totals.platformFee?.amount);
     expect(total(8)).toBe(earnings.totals.earned?.amount);
-    expect(earnings.totals.absorbed?.amount).toBe(absorbed.providerAmount.amount);
+    expect(earnings.totals.uncollected?.amount).toBe(absorbed.providerAmount.amount);
   });
 
   it('a settled call nobody was credited for is PENDING, not PAID_CREDITED', async () => {
