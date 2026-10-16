@@ -1,3 +1,5 @@
+import { offersRail } from '@modules/chains/chain-metadata';
+import { ChainErrors } from '@modules/chains/errors/chains.errors';
 import { AccountId, ChainId, isChainId } from '@modules/chains/ports/caip.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
@@ -75,13 +77,20 @@ export function resolveDepositChain(
   requested: string | undefined,
 ): LinkedAccount {
   const chains = accounts.map((account) => account.chainId).join(', ');
+  // What `NOT_LINKED` recommends: only chains a deposit is accepted on. A
+  // free-calls-only chain (Solana today) is linked but takes no deposit.
+  const depositable = accounts
+    .map((account) => account.chainId)
+    .filter(offersPaidRail)
+    .join(', ');
+  const notLinked = { chains: depositable, noDepositChain: depositable === '' };
 
   if (requested === undefined) {
     if (accounts.length === 1) {
       return accounts[0];
     }
     if (accounts.length === 0) {
-      throw PaymentErrors.depositAccountNotLinked({ chains });
+      throw PaymentErrors.depositAccountNotLinked(notLinked);
     }
     throw PaymentErrors.depositChainRequired({ chains });
   }
@@ -91,7 +100,24 @@ export function resolveDepositChain(
     : undefined;
 
   if (!match) {
-    throw PaymentErrors.depositAccountNotLinked({ chainId: requested, chains });
+    throw PaymentErrors.depositAccountNotLinked({ chainId: requested, ...notLinked });
   }
   return match;
+}
+
+/** Whether `chainId` offers any paid rail, which is what makes a deposit spendable. */
+function offersPaidRail(chainId: ChainId): boolean {
+  return offersRail(chainId, 'A') || offersRail(chainId, 'B');
+}
+
+/**
+ * Refuses a deposit on a chain that offers no paid rail (Solana today: free
+ * calls only). An escrow funded there holds a balance no call can spend, so
+ * the refusal runs before any escrow or requirement work. Withdrawals are not
+ * gated by this.
+ */
+export function assertDepositChainOffersPaidRail(chainId: ChainId): void {
+  if (!offersPaidRail(chainId)) {
+    throw ChainErrors.railNotOffered({ chainId, rail: 'deposit', offered: [] });
+  }
 }
