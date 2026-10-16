@@ -3,16 +3,17 @@ import { In, IsNull } from 'typeorm';
 
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
 import { ProviderStakeGraceEntity } from '@database/postgres/entities/provider-stake-grace.entity';
-import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { ProviderStakeGraceRepository } from '@database/postgres/repositories/provider-stake-grace.repository';
 import { StakeSnapshotRepository } from '@database/postgres/repositories/stake-snapshot.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
-import { AccountId, AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
+import { AccountId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { MinimumStakeParameters } from '@modules/tool/domain/routing/routing.types';
 import { minimumStakeFor } from '@modules/tool/domain/routing/stake-gate';
-import { PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingStatus, PricingMode, ToolBinding } from '@modules/tool/ports/tool.types';
+import { toServedToolBindings } from '@modules/tool/services/database-tool-catalogue';
 import {
   NOTIFICATION_PORT,
   NotificationEvent,
@@ -89,6 +90,7 @@ export class StakeMonitorService {
   constructor(
     private readonly providers: ProviderRepository,
     private readonly bindings: ToolBindingRepository,
+    private readonly versions: BindingVersionRepository,
     private readonly grace: ProviderStakeGraceRepository,
     @Inject(PROVIDER_STAKE_SOURCE) private readonly stakes: ProviderStakePort,
     @Inject(PROVIDER_REGISTRY) private readonly registry: ProviderRegistryPort,
@@ -143,14 +145,14 @@ export class StakeMonitorService {
     // `ENABLED_CHAINS` names one. The fix is a sweep over
     // `binding.settlementChains` with one reading per chain, and it belongs
     // with the work that enables a second chain on one binding.
-    const bindingList = await this.bindings.findActivePaidBindings();
+    const bindingList = await this.watchedBindings();
     const stakeKeys = [
       ...new Map(
         bindingList.map((binding) => {
-          const chainId = chainIdOf(binding.assetId as AssetId);
+          const chainId = chainIdOf(binding.assetId);
           return [
-            stakeKey(binding.organizationId, chainId),
-            { providerId: binding.organizationId, chainId },
+            stakeKey(binding.providerId, chainId),
+            { providerId: binding.providerId, chainId },
           ] as const;
         }),
       ).values(),
@@ -164,7 +166,7 @@ export class StakeMonitorService {
       this.enrolments.enrolmentsOf(providerIds),
     ]);
 
-    const bindingsByProvider = groupBy(bindings, (binding) => binding.organizationId);
+    const bindingsByProvider = groupBy(bindings, (binding) => binding.providerId);
     const openByBinding = new Map(openRows.map((row) => [row.bindingId, row]));
 
     // The fleet's bonded stake (for proof of reserves), read once per sweep.
@@ -218,6 +220,39 @@ export class StakeMonitorService {
     }
   }
 
+  /**
+   * Every binding the grace clock watches, **at its published revision**.
+   *
+   * A draft and a live binding are the same `tool_bindings` row: the editor
+   * writes an unpublished price, pricing mode or asset straight onto it and
+   * leaves `published_version` behind, while the router keeps serving the
+   * published `binding_versions` snapshot. Reading the row's fields here let a
+   * saved-but-unpublished price move the floor — open a grace countdown, or
+   * cure one — against terms no call is being served at. The requirement is
+   * about the traffic that is actually flowing, so it is read through
+   * {@link toServedToolBindings}, the router's own mapping, in one batched
+   * lookup for every drifted row.
+   *
+   * The pricing filter therefore runs **after** the mapping, not in SQL: a
+   * draft that switches a published PAID binding to FREE must not drop it from
+   * the watch, and a draft that makes a published FREE binding paid must not
+   * add it. `ACTIVE` is the row's own status (outside the revision), and a
+   * published revision with no snapshot comes back `DRAFT` — fail-closed in the
+   * router, so not traffic grace protects either.
+   *
+   * The publish gate deliberately reads the other side: `BindingPublishService`
+   * evaluates the stake gate on the row's draft terms, because publishing is
+   * the moment those terms become served.
+   */
+  private async watchedBindings(): Promise<ToolBinding[]> {
+    const rows = await this.bindings.findActiveBindings();
+    const served = await toServedToolBindings(rows, this.versions);
+    return served.filter(
+      (binding) =>
+        binding.status === BindingStatus.ACTIVE && binding.pricingMode !== PricingMode.FREE,
+    );
+  }
+
   // ── Job 1: grace ─────────────────────────────────────────────────────────
 
   /**
@@ -234,14 +269,14 @@ export class StakeMonitorService {
    */
   private async reviewGrace(
     provider: ProviderEntity,
-    bindings: readonly ToolBindingEntity[],
+    bindings: readonly ToolBinding[],
     stakeReadings: ReadonlyMap<string, ProviderStake>,
     override: Money | undefined,
     openByBinding: ReadonlyMap<string, ProviderStakeGraceEntity>,
     now: Date,
   ): Promise<void> {
     for (const binding of bindings) {
-      // `FREE` never reaches here (the query excludes it) and `FREEMIUM` does,
+      // `FREE` never reaches here (`watchedBindings` excludes it) and `FREEMIUM` does,
       // exactly as `evaluateStakeGate` treats them: the same binding serves
       // both free and paid calls, and at this point we cannot know which.
       if (binding.pricingMode === PricingMode.FREE) {
@@ -265,8 +300,8 @@ export class StakeMonitorService {
       // it is the expression in this file that most needs the per-chain sweep
       // when a second chain goes live.
       const staked =
-        stakeReadings.get(stakeKey(provider.organizationId, chainIdOf(binding.assetId as AssetId)))
-          ?.staked ?? null;
+        stakeReadings.get(stakeKey(provider.organizationId, chainIdOf(binding.assetId)))?.staked ??
+        null;
 
       // `STAKE_UNKNOWN` is not a shortfall. See the class comment. The asset is
       // compared against the REQUIREMENT rather than against the floor, because
@@ -349,7 +384,7 @@ export class StakeMonitorService {
    * method are the only description of what "at once" means. Adding the column
    * without running them is how three surfaces quietly disagree on day one.
    */
-  private requirementFor(binding: ToolBindingEntity, override: Money | undefined): Money | null {
+  private requirementFor(binding: ToolBinding, override: Money | undefined): Money | null {
     if (override) {
       // Checked first, exactly as the gate checks it: a negotiated floor is a
       // number the platform agreed outright, so it needs no price and no
@@ -376,7 +411,7 @@ export class StakeMonitorService {
 
   private async openGrace(
     provider: ProviderEntity,
-    binding: ToolBindingEntity,
+    binding: ToolBinding,
     staked: Money,
     required: Money,
     now: Date,
@@ -524,7 +559,7 @@ export class StakeMonitorService {
    */
   private async warnIfHeadroomLow(
     provider: ProviderEntity,
-    binding: ToolBindingEntity,
+    binding: ToolBinding,
     staked: Money,
     required: Money,
   ): Promise<void> {

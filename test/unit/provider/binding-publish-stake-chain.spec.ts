@@ -55,6 +55,8 @@ describe('BindingPublishService — the stake floor is the binding’s own chain
     chainId: ChainId;
     enabled: readonly ChainId[];
     stakedWhole: string;
+    /** Row fields to override — a live binding carrying an unpublished draft. */
+    row?: Partial<ToolBindingEntity>;
   }) {
     const row = {
       id: BINDING,
@@ -77,6 +79,7 @@ describe('BindingPublishService — the stake floor is the binding’s own chain
       status: BindingStatus.DRAFT,
       mappingVersion: 1,
       publishedVersion: null,
+      ...input.row,
     } as unknown as ToolBindingEntity;
 
     const stakes = {
@@ -124,7 +127,7 @@ describe('BindingPublishService — the stake floor is the binding’s own chain
       { loadEditable: jest.fn().mockResolvedValue(row) } as unknown as BindingEditorService,
       {
         findLatestForRevision: jest.fn().mockResolvedValue({
-          mappingVersion: 1,
+          mappingVersion: row.mappingVersion,
           outcome: 'PASSED',
           failedLayer: null,
           createdAt: new Date(),
@@ -178,5 +181,35 @@ describe('BindingPublishService — the stake floor is the binding’s own chain
       expect(stake?.code).toBe(IneligibilityReason.STAKE_BELOW_MINIMUM);
       expect(check.publishable).toBe(false);
     });
+  });
+
+  /**
+   * The publish gate reads the row's DRAFT terms on purpose: publishing is the
+   * moment they become served, so the stake they need must be there first. The
+   * stake monitor reads the published revision instead (see
+   * `stake-monitor-published-terms.spec.ts`); this pins the other half.
+   */
+  it('checks a re-publish against the NEW draft price, not the published one', async () => {
+    const check = await build({
+      assetId: SOLANA_ASSET,
+      chainId: SOLANA,
+      enabled: [SOLANA],
+      // $60 covers the published $0.01 (floor $50) but not the draft $0.10
+      // (1000× = $100).
+      stakedWhole: '60',
+      row: {
+        status: BindingStatus.ACTIVE,
+        priceAmount: '100000',
+        mappingVersion: 2,
+        publishedVersion: 1,
+      },
+    }).check(ORG, BINDING);
+
+    const stake = check.requirements.find(
+      (r) => r.requirement === PublishRequirement.STAKE_AT_MINIMUM_ON_EVERY_CHAIN,
+    );
+    expect(stake?.met).toBe(false);
+    expect(stake?.code).toBe(IneligibilityReason.STAKE_BELOW_MINIMUM);
+    expect(check.publishable).toBe(false);
   });
 });

@@ -44,52 +44,24 @@ export class ToolBindingRepository extends OrganizationScopedRepository<ToolBind
   }
 
   /**
-   * Every ACTIVE binding that requires stake, from every provider.
-   *
-   * The stake monitor's input. Deliberately narrower than {@link findByTool} in
-   * both directions, and both narrowings are decisions rather than
-   * optimisations:
-   *
-   * - **`ACTIVE` only.** A grace period protects traffic that is already
-   *   flowing; it does not open the door. A `DRAFT`, `PAUSED` or `SUSPENDED`
-   *   binding takes no paid traffic, so a countdown against it would be a
-   *   promise about nothing — and it would consume the one open row per binding
-   *   that the real thing needs when the binding goes live.
-   * - **`FREE` excluded.** Nothing settles on a free call, so no defection
-   *   profits and no stake is required. `evaluateStakeGate` exempts it, and a
-   *   monitor that did not would open grace rows against a floor of zero.
-   *   `FREEMIUM` is *included*, exactly as the gate includes it: the same
-   *   binding serves both free and paid calls.
-   *
-   * Cross-organization for the same reason as {@link findByTool} — the caller
-   * is a scheduler sweeping the whole deployment once, not a tenant asking
-   * about itself.
-   */
-  async findActivePaidBindings(): Promise<ToolBindingEntity[]> {
-    return this.createQueryBuilder('binding')
-      .where('binding.organizationId IS NOT NULL')
-      .andWhere('binding.status = :status', { status: 'ACTIVE' })
-      .andWhere('binding.pricingMode != :free', { free: 'FREE' })
-      .orderBy('binding.organizationId', 'ASC')
-      .addOrderBy('binding.id', 'ASC')
-      .getMany();
-  }
-
-  /**
    * Every ACTIVE binding, from every provider, in every pricing mode.
    *
-   * The catalogue's input, and deliberately a different question from both
-   * neighbours above:
+   * The input of both the catalogue and the stake monitor, and deliberately a
+   * different question from {@link findByTool}:
    *
-   * - **`ACTIVE` only**, unlike {@link findByTool}. A catalogue row is an
-   *   invitation to call: listing a `DRAFT` or `PAUSED` binding advertises a
-   *   provider the router would reject, which is a promise the platform cannot
-   *   keep. The distinction `findByTool` preserves — "no provider" versus
-   *   "every provider is paused" — matters on a receipt explaining a refusal,
-   *   and does not matter in a shop window.
-   * - **`FREE` included**, unlike {@link findActivePaidBindings}. That method
-   *   excludes it because nothing settles on a free call so no stake is
-   *   required; a buyer browsing wants the free ones most of all.
+   * - **`ACTIVE` only.** A catalogue row is an invitation to call: listing a
+   *   `DRAFT` or `PAUSED` binding advertises a provider the router would
+   *   reject, which is a promise the platform cannot keep. A grace period
+   *   protects traffic that is already flowing, so a countdown against a
+   *   binding taking no traffic would be a promise about nothing. The
+   *   distinction `findByTool` preserves — "no provider" versus "every
+   *   provider is paused" — matters on a receipt explaining a refusal, and
+   *   does not matter to either caller.
+   * - **No pricing filter.** `pricing_mode` on the row may be an unpublished
+   *   draft, so whether a binding is free is only knowable after the row is
+   *   mapped to its published revision (`toServedToolBindings`). The stake
+   *   monitor drops `FREE` after that mapping; a buyer browsing wants the free
+   *   ones most of all.
    *
    * Cross-organization for the same reason as {@link findByTool}: the caller is
    * a buyer asking what the platform can serve, and scoping that to their own
