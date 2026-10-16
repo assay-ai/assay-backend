@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { QueryFailedError } from 'typeorm';
 
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
 import {
@@ -19,6 +20,7 @@ import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-cata
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { NEXT_SEQ_RATE_LIMITER, NEXT_SEQ_RATE_LIMITS } from '../constants/escrow-seq.constants';
+import { DEBT_REPLACEABLE_AFTER_EXPIRY_SECONDS } from '../constants/voucher-redemption.constants';
 import { VOUCHER_MAX_TTL_SECONDS } from '../constants/voucher.constants';
 import { PaymentErrors } from '../errors/payment.errors';
 import { SignedVoucher } from '../ports/voucher.types';
@@ -49,6 +51,8 @@ export interface BuyerDebtView {
   readonly state: BuyerDebtState;
   readonly lapsedAt: string;
   readonly writeOffAt: string;
+  /** From when it can be settled: its voucher is past its on-chain deadline. */
+  readonly replaceableAt: string;
   /** When the replacement being collected was accepted (`REPLACING` only). */
   readonly replacedAt: string | null;
   readonly createdAt: string;
@@ -255,6 +259,16 @@ export class BuyerDebtService {
           actual: voucher.seq,
         });
       }
+      // Any other refusal by the database — the voucher_seq trigger (the row
+      // changed since `ownDebt` read it), a constraint — changed nothing: a
+      // 409 the buyer can act on, not a 500 (BUG-R17f-01).
+      if (error instanceof QueryFailedError) {
+        this.logger.warn(
+          `Debt ${intentId}: the replacement seq ${voucher.seq} was refused by the database: ` +
+            `${error.message}`,
+        );
+        throw PaymentErrors.debtReplacementRefused({ intentId });
+      }
       throw error;
     }
     if (!replaced) {
@@ -296,7 +310,9 @@ export class BuyerDebtService {
   /**
    * The session payer's own debt — read by id, whatever its age or how many
    * others it has (review-buyer-debt L5) — or `PAYMENT_DEBT_NOT_FOUND`;
-   * `PAYMENT_DEBT_REPLACEMENT_PENDING` while a replacement is being collected.
+   * `PAYMENT_DEBT_REPLACEMENT_PENDING` while a replacement is being collected;
+   * `PAYMENT_DEBT_NOT_YET_REPLACEABLE` while its voucher could still be
+   * redeemed on chain (before any seq is allocated or a hold reopened).
    */
   private async ownDebt(session: McpSession, intentId: string): Promise<OutstandingDebt> {
     const debt = await this.payments.findOutstandingDebt(session.agentAccount, intentId);
@@ -312,6 +328,13 @@ export class BuyerDebtService {
     }
     if (debt.replacedAt !== null) {
       throw PaymentErrors.debtReplacementPending({ intentId });
+    }
+    const replaceableAt = replaceableAtOf(debt);
+    if (Date.now() <= replaceableAt.getTime()) {
+      throw PaymentErrors.debtNotYetReplaceable({
+        intentId,
+        replaceableAt: replaceableAt.toISOString(),
+      });
     }
     return debt;
   }
@@ -355,6 +378,20 @@ export class BuyerDebtService {
   }
 }
 
+/**
+ * When the debt's current voucher is past its on-chain deadline (`expiresAt +
+ * REDEEM_GRACE_SECONDS`, plus clock skew), so it can never be redeemed and a
+ * replacement at a higher seq cannot charge the buyer twice. A debt lapsed on
+ * `VoucherExpired` is past it already; one lapsed earlier (a permanent refusal,
+ * a buyer tightening at the margin) waits for it. The voucher_seq trigger
+ * (migration 1760900000000) enforces the same bound.
+ */
+function replaceableAtOf(debt: OutstandingDebt): Date {
+  return new Date(
+    new Date(debt.expiresAt).getTime() + DEBT_REPLACEABLE_AFTER_EXPIRY_SECONDS * 1000,
+  );
+}
+
 function stateOf(debt: OutstandingDebt): BuyerDebtState {
   if (debt.replacedAt !== null) return 'REPLACING';
   return debt.writtenOff ? 'WRITTEN_OFF' : 'OPEN';
@@ -371,6 +408,7 @@ function toView(debt: OutstandingDebt): BuyerDebtView {
     state: stateOf(debt),
     lapsedAt: new Date(debt.lapsedAt).toISOString(),
     writeOffAt: writeOffAt(debt.lapsedAt).toISOString(),
+    replaceableAt: replaceableAtOf(debt).toISOString(),
     replacedAt: debt.replacedAt ? new Date(debt.replacedAt).toISOString() : null,
     createdAt: new Date(debt.createdAt).toISOString(),
   };
