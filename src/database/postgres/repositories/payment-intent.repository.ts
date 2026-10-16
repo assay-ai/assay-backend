@@ -615,6 +615,8 @@ export interface OutstandingDebt {
   readonly voucherResource: string | null;
   /** The FIRST lapse: the write-off clock, never restarted by a replacement. */
   readonly lapsedAt: Date;
+  /** The current voucher's `expiresAt`: it stays redeemable on chain until grace after it. */
+  readonly expiresAt: Date;
   /**
    * The refusal the voucher lapsed on (`VoucherExpired`, `DelegateIsRevoked`,
    * …), or `uncollected:<cause>` once written off.
@@ -1501,7 +1503,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * normally once the replacement lands.
    *
    * `false` when the row is no longer a debt of this payer that can be
-   * replaced (settled, being replaced already, voided). The old voucher's
+   * replaced (settled, being replaced already, voided). Writing the new seq
+   * passes `trg_payment_intents_voucher_seq_immutable` only while the old
+   * voucher is past its on-chain deadline (migration 1760900000000): the
+   * caller checks that first, and the trigger's `check_violation` is the
+   * backstop. The old voucher's
    * transaction references are cleared: none of them carries the new voucher,
    * and a debt lapses only once its own transactions are known not to have
    * landed.
@@ -2490,7 +2496,8 @@ const OUTSTANDING_DEBT_COLUMNS =
   `"asset_id" AS "assetId", "decimals", "price_amount"::text AS "priceAmount", ` +
   `"request_hash" AS "requestHash", "voucher_resource_hash" AS "voucherResourceHash", ` +
   `"voucher_seq"::text AS "voucherSeq", "voucher_resource" AS "voucherResource", ` +
-  `"redemption_lapsed_at" AS "lapsedAt", "redemption_last_error" AS "cause", ` +
+  `"redemption_lapsed_at" AS "lapsedAt", "expires_at" AS "expiresAt", ` +
+  `"redemption_last_error" AS "cause", ` +
   `"redemption_replaced_at" AS "replacedAt", ` +
   `COALESCE("redemption_last_error" LIKE 'uncollected:%', false) AS "writtenOff", ` +
   `"created_at" AS "createdAt"`;

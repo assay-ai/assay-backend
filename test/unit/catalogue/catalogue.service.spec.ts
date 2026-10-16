@@ -796,6 +796,37 @@ describe('GET /catalogue/providers/:providerId', () => {
    * the binding's own quota when it set one, the platform default otherwise,
    * and nothing for a PAID binding.
    */
+  /**
+   * `freeDailyBudget` is a daily free-call COUNT across all agents
+   * (BUG-R17g-01), so one agent can never get more free calls on a binding
+   * than its budget: the per-agent figure is capped by it.
+   */
+  it('caps the free calls per agent per day by the binding’s daily free-call budget', async () => {
+    const { service } = build({
+      bindings: [
+        binding({
+          toolId: WEATHER.id,
+          pricingMode: 'FREEMIUM',
+          freeQuotaPerAgent: 7,
+          freeDailyBudget: '5',
+        }),
+        binding({
+          toolId: RATE.id,
+          pricingMode: 'FREE',
+          freeQuotaPerAgent: 3,
+          freeDailyBudget: '5000',
+        }),
+      ],
+      tools: [WEATHER, RATE],
+    });
+
+    const detail = await service.getProvider('provider-a');
+
+    expect(
+      Object.fromEntries(detail.tools.map((tool) => [tool.toolId, tool.freeCallsPerAgentPerDay])),
+    ).toEqual({ [WEATHER.id]: 5, [RATE.id]: 3 });
+  });
+
   it('states the free calls per agent per day, falling back to the platform default', async () => {
     const { service } = build({
       bindings: [
