@@ -6,6 +6,7 @@ import { SwaggerModule, DocumentBuilder, SwaggerCustomOptions } from '@nestjs/sw
 import { Reflector } from '@nestjs/core';
 import { assertTrustProxyHopsConfigured, parseCorsAllowedOrigins } from '@config/app.config';
 import { applyHttpSecurity } from '@shared/security/security-headers';
+import { buildApiCorsOptionsDelegate } from '@shared/security/cors-policy';
 import { AppApiModule } from './app.module';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
@@ -49,19 +50,29 @@ async function bootstrapApi() {
 
   // CORS
   //
-  // `origin` is the `CORS_ALLOWED_ORIGINS` allowlist, never `*`: with
-  // `credentials: true` a wildcard would let any website call the API as the
-  // signed-in user. Only a listed origin is reflected back; outside production
-  // the default is the local dashboards on :3000, :4000-:4005 and :4020, and
-  // production refuses to start without the variable (`parseCorsAllowedOrigins`).
+  // Two policies, chosen per request (`src/shared/security/cors-policy.ts`):
   //
-  // `exposedHeaders` is not decoration. A cross-origin browser client can read
-  // only the seven CORS-safelisted response headers unless the server names the
-  // rest, so without this list `GET /providers/me/calls/export` reaches the
-  // console as a CSV body with no metadata: `X-Assay-Export-Row-Count`,
-  // `X-Assay-Export-Total-Matching`, `X-Assay-Export-Truncated` and even the
-  // filename in `Content-Disposition` are silently dropped by the browser, with
-  // no error anywhere.
+  // - Reads of `/api/v1/public/*` get a fixed `Access-Control-Allow-Origin: *`
+  //   with no credentials and only GET/HEAD/OPTIONS. Those responses are
+  //   CDN-cacheable (`CDN-Cache-Control: public`) and Cloudflare does not key
+  //   on `Vary: Origin`; an origin-reflecting header there would let whichever
+  //   request fills the cache decide CORS for every visitor.
+  //
+  // - Everything else uses the `CORS_ALLOWED_ORIGINS` allowlist, never `*`:
+  //   with `credentials: true` a wildcard would let any website call the API
+  //   as the signed-in user. Only a listed origin is reflected back; outside
+  //   production the default is the local dashboards on :3000, :4000-:4005 and
+  //   :4020, and production refuses to start without the variable
+  //   (`parseCorsAllowedOrigins`).
+  //
+  // `exposedHeaders` (`API_EXPOSED_HEADERS`) is not decoration. A cross-origin
+  // browser client can read only the seven CORS-safelisted response headers
+  // unless the server names the rest, so without this list
+  // `GET /providers/me/calls/export` reaches the console as a CSV body with no
+  // metadata: `X-Assay-Export-Row-Count`, `X-Assay-Export-Total-Matching`,
+  // `X-Assay-Export-Truncated` and even the filename in `Content-Disposition`
+  // are silently dropped by the browser, with no error anywhere. `Retry-After`
+  // is exposed so a client can show how long a 429 asks it to wait.
   //
   // The three `X-Assay-Export-*` headers are `docs/api-list-contract.md`'s
   // no-silent-caps rule applied to a response the JSON envelope cannot wrap —
@@ -71,24 +82,14 @@ async function bootstrapApi() {
   // their financial export is complete on exactly the evidence that it might not
   // be. That is the failure mode this list exists to prevent.
   //
-  // Nothing else on this surface needs adding. `Content-Type`, `Cache-Control`,
-  // `Pragma` and `Expires` — the other headers any handler here sets — are
-  // already safelisted. `CDN-Cache-Control` and `Vary` are instructions to
+  // `Content-Type`, `Cache-Control`, `Pragma` and `Expires` are already
+  // safelisted. `CDN-Cache-Control` and `Vary` are instructions to
   // intermediaries and no browser client reads them.
   //
   // `src/bootstrap/mcp/main.ts` sets its own list for the Streamable HTTP
   // session headers; the two services expose different things and neither list
   // is the other's.
-  app.enableCors({
-    origin: parseCorsAllowedOrigins(),
-    credentials: true,
-    exposedHeaders: [
-      'Content-Disposition',
-      'X-Assay-Export-Total-Matching',
-      'X-Assay-Export-Row-Count',
-      'X-Assay-Export-Truncated',
-    ],
-  });
+  app.enableCors(buildApiCorsOptionsDelegate(parseCorsAllowedOrigins()));
 
   // Validation
   app.useGlobalPipes(
