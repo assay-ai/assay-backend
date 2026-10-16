@@ -514,6 +514,12 @@ describe('SpendPolicyService.history', () => {
       async getMany() {
         return [policyRow()];
       },
+      addSelect() {
+        return qb;
+      },
+      async getRawAndEntities() {
+        return { entities: [policyRow()], raw: [] };
+      },
     };
     const { service, policies } = build({ existsBy });
     (policies.createQueryBuilder as jest.Mock).mockReturnValue(qb);
@@ -550,6 +556,12 @@ describe('SpendPolicyService.history', () => {
       },
       async getMany() {
         return [policyRow({ agentId: null })];
+      },
+      addSelect() {
+        return qb;
+      },
+      async getRawAndEntities() {
+        return { entities: [policyRow({ agentId: null })], raw: [] };
       },
     };
     const { service, policies } = build({ existsBy });
