@@ -10,7 +10,7 @@
  * UTC, which is most CI containers — i.e. it would pass against a
  * `getDate()`-based implementation on exactly the machine that matters.
  */
-process.env.TZ = 'Asia/Kolkata';
+process.env.TZ = 'Pacific/Kiritimati';
 
 import type { Redis } from 'ioredis';
 
@@ -287,9 +287,9 @@ describe('BindingCeilingService — consuming a token', () => {
 
 describe('BindingCeilingService — the daily quota resets on the UTC day', () => {
   it('keys the counter on the UTC calendar day, not a local one', async () => {
-    // 00:30 on the 21st in `Asia/Kolkata` (UTC+5:30), which is still 17:30 on
-    // the 20th UTC. A `getDate()`-based key would say `2026-08-21` here.
-    jest.setSystemTime(new Date('2026-08-20T17:30:00.000Z'));
+    // 00:30 on the 21st in `Pacific/Kiritimati` (UTC+14), which is still 10:30
+    // on the 20th UTC. A `getDate()`-based key would say `2026-08-21` here.
+    jest.setSystemTime(new Date('2026-08-20T10:30:00.000Z'));
     const binding = buildBinding('b1', { maxDailyCalls: 1 });
 
     await ceilings.consume(binding);
@@ -301,16 +301,16 @@ describe('BindingCeilingService — the daily quota resets on the UTC day', () =
   it('resets the daily counter on the UTC day, not a local one', async () => {
     const binding = buildBinding('b1', { maxDailyCalls: 1 });
 
-    // Spend the day's single call at 16:30Z.
-    jest.setSystemTime(new Date('2026-08-20T16:30:00.000Z'));
+    // Spend the day's single call at 09:30Z (23:30 on the 20th locally).
+    jest.setSystemTime(new Date('2026-08-20T09:30:00.000Z'));
     expect(await ceilings.consume(binding)).toBeNull();
     expect(await ceilings.read(binding)).toBe(CeilingKind.MAX_DAILY_CALLS);
 
-    // Local midnight has passed — 00:30 on the 21st in `Asia/Kolkata` —
+    // Local midnight has passed — 00:30 on the 21st in `Pacific/Kiritimati` —
     // and nothing resets. Two providers with the same declared ceiling get the
     // same limit during the same hour, whatever timezone either of them sits
     // in, which is the only version anybody can reconcile.
-    jest.setSystemTime(new Date('2026-08-20T17:30:00.000Z'));
+    jest.setSystemTime(new Date('2026-08-20T10:30:00.000Z'));
     expect(await ceilings.read(binding)).toBe(CeilingKind.MAX_DAILY_CALLS);
 
     // UTC midnight, and the allowance is back.

@@ -35,8 +35,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * ## Why `USING ... AT TIME ZONE 'UTC'` and not a bare cast
  *
  * A bare `ALTER COLUMN ... TYPE timestamptz` interprets each existing naive
- * value in the **session** time zone. Run on a UTC+5:30 connection that would
- * rewrite every historical row seven hours off — silently, irreversibly, and
+ * value in the **session** time zone. Run on a connection not in UTC that would
+ * rewrite every historical row by the session offset — silently, irreversibly, and
  * across the money tables. `AT TIME ZONE 'UTC'` states what the stored
  * wall-clock actually is, so the migration produces the same instants no matter
  * which host applies it. That property is the whole reason this is written by

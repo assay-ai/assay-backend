@@ -16,7 +16,7 @@ import {
  * for most of this schema's life every table inherited that. The value stored
  * was UTC wall-clock — a UTC database writing `now()` — but the column did not
  * *say* so, and nothing downstream could tell. Two things broke as a result,
- * both invisible on a UTC host and both found by running on a UTC+5:30 one:
+ * both invisible on a UTC host and both found by running on a host not in UTC:
  *
  * 1. **node-postgres read it back as local time.** A row written at `03:00Z`
  *    was published over HTTP as `20:00Z` the previous day. Every `createdAt`

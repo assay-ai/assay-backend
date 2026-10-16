@@ -249,7 +249,7 @@ describe('SLA window domain', () => {
 
     it('closes at the same instant in every time zone', () => {
       // Opened 22:30 UTC — the same wall clock is the previous day in Los
-      // Angeles and the next day in Kiritimati, and 05:30 the next morning in
+      // Angeles and the next day in Kiritimati, and 04:00 the next morning in
       // Kolkata. A calendar-day window would have put these calls in
       // three different buckets.
       const openedAt = new Date('2026-08-10T22:30:00.000Z');
