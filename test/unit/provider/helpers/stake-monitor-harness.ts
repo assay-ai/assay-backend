@@ -1,6 +1,8 @@
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
 import { ProviderStakeGraceEntity } from '@database/postgres/entities/provider-stake-grace.entity';
+import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { ProviderStakeGraceRepository } from '@database/postgres/repositories/provider-stake-grace.repository';
 import { StakeSnapshotRepository } from '@database/postgres/repositories/stake-snapshot.repository';
@@ -166,7 +168,8 @@ export function stakeMap(entries: [string, string][]): ReadonlyMap<string, Provi
 export interface Harness {
   readonly service: StakeMonitorService;
   readonly providers: { findAllProviders: jest.Mock };
-  readonly bindings: { findActivePaidBindings: jest.Mock };
+  readonly bindings: { findActiveBindings: jest.Mock };
+  readonly versions: { find: jest.Mock };
   readonly grace: { find: jest.Mock; insert: jest.Mock; update: jest.Mock };
   readonly stakes: { stakeOn: jest.Mock };
   readonly enrolments: { enrolmentsOf: jest.Mock };
@@ -181,6 +184,8 @@ export function harness(
   overrides: {
     providers?: ProviderEntity[];
     bindings?: ToolBindingEntity[];
+    /** Published `binding_versions` snapshots, for bindings carrying an unpublished draft. */
+    versions?: BindingVersionEntity[];
     graceRows?: ProviderStakeGraceEntity[];
     stakes?: ReadonlyMap<string, ProviderStake>;
     onChain?: ReadonlyMap<AccountId, OnChainStake>;
@@ -189,8 +194,25 @@ export function harness(
   } = {},
 ): Harness {
   const providers = { findAllProviders: jest.fn().mockResolvedValue(overrides.providers ?? []) };
+  // The ACTIVE rows in every pricing mode — the monitor filters `FREE` itself,
+  // after mapping each row to its published revision.
   const bindings = {
-    findActivePaidBindings: jest.fn().mockResolvedValue(overrides.bindings ?? []),
+    findActiveBindings: jest.fn().mockResolvedValue(overrides.bindings ?? []),
+  };
+  // Answers `toServedToolBindings`' batched lookup: one OR'd `where` entry per
+  // drifted row, matched field by field.
+  const versions = {
+    find: jest.fn(({ where }: { where: Partial<BindingVersionEntity>[] }) =>
+      Promise.resolve(
+        (overrides.versions ?? []).filter((snapshot) =>
+          where.some((clause) =>
+            Object.entries(clause).every(
+              ([key, value]) => snapshot[key as keyof BindingVersionEntity] === value,
+            ),
+          ),
+        ),
+      ),
+    ),
   };
   const grace = {
     find: jest.fn().mockResolvedValue(overrides.graceRows ?? []),
@@ -255,6 +277,7 @@ export function harness(
   const service = new StakeMonitorService(
     providers as unknown as ProviderRepository,
     bindings as unknown as ToolBindingRepository,
+    versions as unknown as BindingVersionRepository,
     grace as unknown as ProviderStakeGraceRepository,
     stakes as unknown as ProviderStakePort,
     registry as unknown as ProviderRegistryPort,
@@ -275,6 +298,7 @@ export function harness(
     service,
     providers,
     bindings,
+    versions,
     grace,
     stakes,
     enrolments,

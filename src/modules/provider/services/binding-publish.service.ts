@@ -253,6 +253,11 @@ export class BindingPublishService {
     organizationId: string,
     row: ToolBindingEntity,
   ): Promise<{ candidate: RoutingCandidate; settlementChains: readonly ChainId[] }> {
+    // The row's DRAFT terms, on purpose — not `toServedToolBindings`. Publishing
+    // is the moment the draft becomes the served revision, so this gate must
+    // ask whether the stake covers the terms about to go live. Everything that
+    // watches traffic already flowing (the router, the stake monitor, the
+    // Capital screen) reads the published revision instead.
     const binding = toToolBinding(row);
     // The binding's own declaration, and no derivation of it. The chain a
     // binding settles on is a column now, not a fact about the

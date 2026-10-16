@@ -352,8 +352,11 @@ export class ProviderStakeService {
   /**
    * The provider's ACTIVE bindings that require stake, ordered for the screen.
    *
-   * Both filters match `ToolBindingRepository.findActivePaidBindings`, which is
-   * what the stake monitor opens grace rows from — so every binding listed here
+   * Both filters match `StakeMonitorService.watchedBindings`, which is what the
+   * stake monitor opens grace rows from, and both run on the binding **as
+   * served** (`findBindings` maps each row to its published revision), exactly
+   * as the monitor's do — so an unpublished draft price moves neither the
+   * screen's requirement nor the monitor's. Every binding listed here
    * is one that could have a row, and every row can be attached to a listed
    * binding. A screen built off a wider set would show countdowns against
    * bindings the monitor never watches.

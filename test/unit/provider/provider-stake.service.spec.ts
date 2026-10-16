@@ -437,7 +437,7 @@ describe('ProviderStakeService — the requirement', () => {
   });
 
   it('excludes DRAFT, PAUSED and SUSPENDED bindings', async () => {
-    // The filter matches `findActivePaidBindings`, which is what the stake
+    // The filter matches `StakeMonitorService.watchedBindings`, which is what the stake
     // monitor opens grace rows from. A non-ACTIVE binding leaking in here would
     // put a requirement — and possibly a countdown — against a binding taking
     // no paid traffic and that the monitor never watches.
