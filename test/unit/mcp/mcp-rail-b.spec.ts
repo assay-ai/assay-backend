@@ -128,6 +128,7 @@ describe('rail B over MCP', () => {
       voucherResourceHash: 'ab'.repeat(32),
       voucherSeq: '3',
       lapsedAt: new Date('2026-10-16T00:00:00Z'),
+      expiresAt: new Date('2026-10-15T23:55:00Z'),
       cause: 'DelegateIsRevoked',
       createdAt: new Date('2026-10-15T23:30:00Z'),
       agentId: 'agent-1',

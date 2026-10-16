@@ -1,8 +1,13 @@
 # Runbook: Deploying buyer debt (no platform debt)
 
 **Use when:** deploying any build that contains buyer debt (migrations `1760600000000`,
-`1760700000000` and `1760800000000`) onto a database or a fleet that ran an older build, or when
-someone asks to roll such a deploy back.
+`1760700000000`, `1760800000000` and `1760900000000`) onto a database or a fleet that ran an older
+build, or when someone asks to roll such a deploy back.
+
+`1760900000000` relaxes `trg_payment_intents_voucher_seq_immutable` for exactly one write: a
+lapsed debt's replacement voucher, at a higher seq, once the old voucher is past its on-chain
+deadline (`expires_at` + 1,920 s). Without it every `POST /escrow/debts/:id/voucher` fails, so no
+debt can be settled (BUG-R17f-01). Its `down` restores the strict trigger and nothing else.
 
 Buyer debt replaced `absorb()`: an unredeemable rail-B voucher no longer credits the provider from
 platform funds. The provider forfeits it when it caused the failure; otherwise the call becomes
