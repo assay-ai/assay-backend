@@ -252,6 +252,47 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   redemptionTxRefs: string[];
 
   /**
+   * The last program error a redemption attempt of this rail-B voucher was
+   * refused with (`PaymentIntentRepository.recordRedemptionError`), or
+   * `provider_forfeit:<cause>` once the provider forfeited it. Read when the
+   * chain answers `VoucherExpired`, which no longer says why the voucher was
+   * not redeemed in time. NULL on rail A and on a voucher never refused.
+   */
+  @Column({ name: 'redemption_last_error', type: 'text', nullable: true })
+  redemptionLastError: string | null;
+
+  /**
+   * When this served rail-B call became BUYER DEBT: its voucher can no longer
+   * be redeemed for a reason that is not the provider's, so the hold stays
+   * open and nobody is credited until the buyer signs a replacement voucher
+   * (which clears this) or the debt is written off after 30 days
+   * (`redemption_last_error = 'uncollected:<cause>'`, hold released). While set
+   * with the hold open, the payer's paid calls are refused
+   * (`PAYMENT_DEBT_OUTSTANDING`). NULL otherwise.
+   */
+  @Column({ name: 'redemption_lapsed_at', type: 'timestamptz', nullable: true })
+  redemptionLapsedAt: Date | null;
+
+  /**
+   * When the buyer's REPLACEMENT voucher for this debt was accepted
+   * (`PaymentIntentRepository.replaceLapsedVoucher`). The row is back in the
+   * redemption queue, but it is still debt: `redemption_lapsed_at` is kept (the
+   * write-off clock does not restart) and the payer's paid calls stay refused
+   * until the replacement is collected. Cleared when the replacement lapses
+   * too. NULL otherwise.
+   */
+  @Column({ name: 'redemption_replaced_at', type: 'timestamptz', nullable: true })
+  redemptionReplacedAt: Date | null;
+
+  /**
+   * The `resource` the rail-B voucher signed (`/mcp/tools/<name>`), so a
+   * debt's replacement can be built after the tool was renamed or deleted.
+   * NULL on rail A and on rows written before the column.
+   */
+  @Column({ name: 'voucher_resource', type: 'text', nullable: true })
+  voucherResource: string | null;
+
+  /**
    * The agent credential that made the call, when the caller had one (the MCP
    * path). Several credentials of one agent are several delegate keys, so
    * spend is split by it as well as by agent. Null on rows written before the

@@ -37,6 +37,12 @@ import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.const
  * 182: uint256 internal constant MAX_SLASH_BATCH = 64;
  * ```
  *
+ * and, on 2026-10-16 at assay-evm f814629 (signed means collectable, D-21):
+ *
+ * ```
+ *  66: uint64 internal constant TIGHTEN_DELAY_SECONDS = WITHDRAW_DELAY_SECONDS;
+ * ```
+ *
  * **State the limit rather than overstate the check.** This suite cannot catch
  * the Solidity moving; the deployment-record comparison is what does that.
  * What it does catch is the other direction, which is the one that happens:
@@ -58,6 +64,7 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
     ['MAX_SIGNATURE_LIFETIME_SECONDS', 3_600],
     ['MAX_SLASH_BATCH', 64],
     ['DISPUTE_TIMEOUT_SECONDS', 30 * 86_400],
+    ['TIGHTEN_DELAY_SECONDS', 3_600],
   ])('%s is %i', (name, value) => {
     expect(EVM_CONSTANTS[name as keyof typeof EVM_CONSTANTS]).toBe(value);
   });
@@ -78,6 +85,7 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
       'MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS',
       'REDEEM_GRACE_SECONDS',
       'SLASH_WINDOW_SECONDS',
+      'TIGHTEN_DELAY_SECONDS',
       'VOUCHER_MAX_LIFETIME_SECONDS',
       'WITHDRAW_DELAY_SECONDS',
     ]);
@@ -119,6 +127,15 @@ describe('the constants copied from assay-evm/src/Constants.sol', () => {
     // — the backend's refusal to quote against a standing request — and a
     // reader needs both to see why 3,600 is not an arbitrary hour.
     expect(EVM_CONSTANTS.WITHDRAW_DELAY_SECONDS).toBeGreaterThan(
+      EVM_CONSTANTS.MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
+    );
+  });
+
+  it('a tightening outlives every voucher valid when it lands', () => {
+    // D-21: the hold on lowered caps and a revoked grant's grace both last
+    // TIGHTEN_DELAY_SECONDS, so it must exceed the longest a voucher stays
+    // redeemable — the reason the strand guard is not needed once it is live.
+    expect(EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS).toBeGreaterThan(
       EVM_CONSTANTS.MAX_VOUCHER_REDEEMABLE_LIFE_SECONDS,
     );
   });

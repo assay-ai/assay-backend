@@ -27,9 +27,8 @@ import { PublicNotChargedService } from './services/public-not-charged.service';
 @Module({
   // `ChainsModule` for `ENABLED_CHAINS` alone: this catalogue is anonymous, so
   // the `RoutingContext` it quotes with names every chain the deployment offers
-  // rather than a buyer's.
-  // `FreeTierModule` for `FREE_QUOTA_CONFIG`: a binding with no quota of its
-  // own grants the platform default, and the catalogue says which.
+  // rather than a buyer's. `FreeTierModule` for `FREE_QUOTA_CONFIG` alone: the
+  // default per-agent allowance behind a tool's published free calls per day.
   imports: [ChainsModule, ToolModule, ProviderModule, BlocklistModule, FreeTierModule],
   providers: [CatalogueService, PublicCatalogueService, PublicNotChargedService],
   exports: [CatalogueService, PublicCatalogueService, PublicNotChargedService],

@@ -23,3 +23,15 @@ export const MCP_PRICING = 'MCP_PRICING';
 
 /** 10%, the code default for the platform fee. Configurable via `PLATFORM_FEE_BPS`. */
 export const DEFAULT_PLATFORM_FEE_BPS = 1000;
+
+/**
+ * The platform take rate in percent, from `PLATFORM_FEE_BPS` — the one source
+ * for every surface that prints the rate (provider terms, operator economics,
+ * provider reconciliation), so none of them can state a rate that differs from
+ * what a call is charged (R17-R-03). `1000` bps → `10`, `1250` → `12.5`.
+ */
+export function platformTakeRatePercent(config: {
+  get<T = string>(key: string): T | undefined;
+}): number {
+  return Number(config.get<string>('PLATFORM_FEE_BPS') ?? String(DEFAULT_PLATFORM_FEE_BPS)) / 100;
+}

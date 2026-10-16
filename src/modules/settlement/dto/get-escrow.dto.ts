@@ -212,6 +212,16 @@ export class GetEscrowUnsettledResponseDto {
       'own window. `null` when the chain could not be read: unknown, not none.',
   })
   unsettled: UnsettledVouchersDto | null;
+
+  @ApiProperty({
+    description:
+      'How long a tightening (revoking a key, a shorter expiry, lower caps) waits before it ' +
+      'binds a payment already signed: 3600 on an escrow that keeps signed payments ' +
+      'collectable (assay-evm D-21) — nothing unsettled can then be stranded and no change ' +
+      'is refused for it — and 0 where a tightening binds at once (BUG-D1-07 applies).',
+    example: 3600,
+  })
+  tightenDelaySeconds: number;
 }
 
 export function toUnsettledDto(u: UnsettledVouchers, asset: AssetId): UnsettledVouchersDto {

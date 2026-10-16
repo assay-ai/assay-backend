@@ -3,6 +3,10 @@ import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migration
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
 import { VoucherAdmissionPause1759600000005 } from '@database/postgres/migrations/1759600000005-voucher-admission-pause';
 import { VoucherAdmissionPausePerRequest1759600000006 } from '@database/postgres/migrations/1759600000006-voucher-admission-pause-per-request';
+import { PaymentIntentRedemptionTxRefs1760200000000 } from '@database/postgres/migrations/1760200000000-payment-intent-redemption-tx-refs';
+import { PaymentIntentRedemptionLastError1760600000000 } from '@database/postgres/migrations/1760600000000-payment-intent-redemption-last-error';
+import { PaymentIntentRedemptionLapsed1760700000000 } from '@database/postgres/migrations/1760700000000-payment-intent-redemption-lapsed';
+import { PaymentIntentDebtReplacing1760800000000 } from '@database/postgres/migrations/1760800000000-payment-intent-debt-replacing';
 import { BuyerEscrowSeqRewind1759600000007 } from '@database/postgres/migrations/1759600000007-buyer-escrow-seq-rewind';
 import { randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
@@ -128,6 +132,13 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
       VoucherAdmissionPausePerRequest1759600000006,
       // The gated rewind of `next_seq` (review S2-2).
       BuyerEscrowSeqRewind1759600000007,
+      // `redemption_tx_refs`, `redemption_last_error`, `redemption_lapsed_at`,
+      // `redemption_replaced_at` and `voucher_resource`, all mapped by
+      // `PaymentIntentEntity` (redemption tracking and buyer debt).
+      PaymentIntentRedemptionTxRefs1760200000000,
+      PaymentIntentRedemptionLastError1760600000000,
+      PaymentIntentRedemptionLapsed1760700000000,
+      PaymentIntentDebtReplacing1760800000000,
     ],
     synchronize: false,
     logging: process.env.ESCROW_SEQ_TEST_LOGGING === 'true',

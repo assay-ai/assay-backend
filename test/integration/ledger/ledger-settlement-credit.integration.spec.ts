@@ -143,7 +143,7 @@ describe('ledger settlement credit — commitHoldAndCredit', () => {
     expect(MoneyUtil.toAtomic(providerBalance.available)).toBe(450n);
   });
 
-  it('providerAmount + platformFee disagreeing with the committed hold rejects with LEDGER_SETTLEMENT_CREDIT_MISMATCH and writes nothing', async () => {
+  it('providerAmount + platformFee above the committed hold rejects with LEDGER_SETTLEMENT_CREDIT_MISMATCH and writes nothing', async () => {
     const agentOrg = randomUUID();
     const providerOrg = randomUUID();
     const agent = context.account('agent-mismatch');
@@ -165,7 +165,9 @@ describe('ledger settlement credit — commitHoldAndCredit', () => {
           providerOrganizationId: providerOrg,
           providerAccountId: provider,
           providerAmount: context.usdc(900n),
-          platformFee: context.usdc(50n), // 900 + 50 = 950, not 1000
+          // 900 + 150 = 1050, above the 1000 held. A credit BELOW the hold is
+          // allowed: the remainder is released (a re-priced rail-A call).
+          platformFee: context.usdc(150n),
           intentId,
           chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
         }),

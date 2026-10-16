@@ -19,6 +19,8 @@ import { OperatorApprovalService } from '@modules/operator/services/operator-app
 import { OperatorCaseService } from '@modules/operator/services/operator-case.service';
 import { OperatorService } from '@modules/operator/services/operator.service';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
+import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
+import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { ArbitrationOutcome, DisputeClaimType } from '@modules/slash/domain/arbitration';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
 import { SlashErrorCode } from '@modules/slash/errors/slash.errors';
@@ -26,7 +28,6 @@ import { ArbitrationService } from '@modules/slash/services/arbitration.service'
 import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
 import { SlashProposalService } from '@modules/slash/services/slash-proposal.service';
 
-import { CHAIN } from '../../unit/chains/evm/helpers/fake-stake-chain';
 import { freshMigratedDatabase, TEST_SLASH_CONFIG } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
 import { approvalFor } from '../helpers/operator-approval';
@@ -42,9 +43,13 @@ import { approvalFor } from '../helpers/operator-approval';
  * cannot show a row that was written before the error was thrown.
  */
 const DATABASE = 'x402_operator_case_guards_test';
-const ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
-const STAKE_AUTHORITY = `${CHAIN}:0xA271A3407D3302f4b4Fbe469b9188487cedd7d45`;
-const AGENT = `${CHAIN}:0x976ea74026e726554db657fa54763abd0c3a0aa9`;
+// A Solana case: the in-app objection and the operator's off-chain decision
+// apply only there. An EVM case is disputed and ruled on chain alone (owner
+// decision 2026-10-14, `disputesOnChain`), so these flows refuse it.
+const CHAIN = CHAIN_IDS.SOLANA_MAINNET;
+const ASSET = ASSET_IDS.USDC_SOLANA_MAINNET;
+const STAKE_AUTHORITY = `${CHAIN}:9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM`;
+const AGENT = `${CHAIN}:H9ityXJKWiwTni6DD5kEA1Hrqi4CSkBU4RyPx1FyHqPp`;
 const PENALTY = 1_000_000n;
 const NOTE = 'n'.repeat(120);
 

@@ -6,6 +6,12 @@ import { VerificationRecordEntity } from '@database/postgres/entities/verificati
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { isWithheldIntent } from '@modules/ledger/domain/withheld';
+import {
+  CollectionState,
+  collectionStateOf,
+  debtStateOf,
+  isChargedWhenSettled,
+} from '@modules/payment/domain/collection';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -66,8 +72,14 @@ export class ReceiptService {
     // so. `listedPrice` and `chargedPrice` are both always present, even when
     // equal: never show one number where the product's value lives in the
     // gap between two.
+    // A voucher the provider forfeited, or a debt written off, was never
+    // collected: the buyer was not charged although the call is SETTLED
+    // (review 2026-10-15, M2; review #2, M4). The same predicate as the call
+    // list (`payment/domain/collection.ts`).
+    const settled = intent.status === PaymentIntentStatus.SETTLED;
+    const collection = collectionStateOf(intent);
     const chargedPrice =
-      intent.status === PaymentIntentStatus.SETTLED
+      settled && isChargedWhenSettled(intent)
         ? listedPrice
         : MoneyUtil.zero(asset, intent.decimals);
 
@@ -93,6 +105,10 @@ export class ReceiptService {
       listedPrice: toMoneyDto(listedPrice),
       chargedPrice: toMoneyDto(chargedPrice),
       withheld: toMoneyDto(withheld),
+      forfeited: settled && collection === CollectionState.PROVIDER_FORFEITED,
+      debt: settled ? debtStateOf(intent) : null,
+      chargeNote:
+        settled && collection !== CollectionState.NORMAL ? intent.redemptionLastError : null,
       verdict: buildVerdict(record),
       stages: buildStages(record),
       policy: buildPolicy(record),

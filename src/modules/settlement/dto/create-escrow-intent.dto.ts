@@ -43,7 +43,8 @@ export class SetEscrowLimitsBodyDto {
     description:
       'BUG-D1-07. True accepts that this change lowers a cap below what payments still being ' +
       'settled need, so the chain will refuse them and their providers go unpaid by the chain. ' +
-      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`.',
+      'Without it such a change is refused `SETTLEMENT_UNSETTLED_VOUCHERS_AT_RISK`. Ignored on ' +
+      'an escrow whose `GET /escrow/unsettled` `tightenDelaySeconds` is above 0: nothing is refused there.',
   })
   @IsOptional()
   @IsBoolean()

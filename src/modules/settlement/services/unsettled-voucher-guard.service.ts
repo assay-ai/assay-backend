@@ -1,4 +1,4 @@
-import { Injectable, Logger, OnApplicationBootstrap, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnApplicationBootstrap, Optional } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
@@ -9,6 +9,7 @@ import {
   readEvmRelayerTiming,
   relayedSendBudgetMs,
 } from '@modules/chains/evm/evm-relayer-timing';
+import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 import { VOUCHER_ADMISSION_CHAIN_LAG_MS } from '@modules/payment/constants/voucher.constants';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -20,6 +21,7 @@ import {
   UnsettledVouchers,
 } from '../domain/unsettled-vouchers';
 import { SettlementErrors } from '../errors/settlement.errors';
+import { TIGHTEN_DELAY, TightenDelayPort } from '../ports/tighten-delay.port';
 
 /**
  * How long admission stays paused AFTER a tightening landed, on the database's
@@ -58,8 +60,9 @@ export interface UnsettledScope {
  *
  * Both the escrow's limits and a delegate's grant are applied by the chain at
  * REDEMPTION, minutes after the call was served. A buyer who lowers either
- * below what those payments need makes the chain refuse them, and the
- * platform pays the provider. Two defences, both here:
+ * below what those payments need makes the chain refuse them, and the calls
+ * become buyer debt the buyer must re-sign (the platform never pays them).
+ * Two defences, both here:
  *
  * - **Refuse, unless acknowledged.** The intent route (before the wallet is
  *   asked) and the submit route (before the relayer spends gas) compare the
@@ -76,6 +79,17 @@ export interface UnsettledScope {
  *
  * A change that lowers nothing is passed straight through: a raise cannot
  * strand anything that fits today.
+ *
+ * ## It stands down on an escrow with the tighten delay (assay-evm D-21)
+ *
+ * There a tightening binds an already-valid voucher only `TIGHTEN_DELAY_SECONDS`
+ * (3,600 s) after it lands — longer than any voucher stays redeemable — so it
+ * can no longer strand one, and a voucher admitted against a read taken just
+ * before the landing is covered too. Both defences are then skipped: nothing is
+ * refused, nothing needs acknowledging, and no admission pause is written.
+ * Whether a payer's escrow has it is asked of {@link TightenDelayPort} on each
+ * change, so the guard keeps protecting until the upgrade is seen and stands
+ * down as soon as it is; this whole class goes once every chain has it.
  */
 @Injectable()
 export class UnsettledVoucherGuard implements OnApplicationBootstrap {
@@ -85,6 +99,9 @@ export class UnsettledVoucherGuard implements OnApplicationBootstrap {
   constructor(
     private readonly intents: PaymentIntentRepository,
     @Optional() config?: ConfigService,
+    @Optional()
+    @Inject(TIGHTEN_DELAY)
+    private readonly tightenDelay: TightenDelayPort | null = null,
   ) {
     this.timing = readEvmRelayerTiming((key) =>
       config ? config.get<string>(key) : process.env[key],
@@ -106,6 +123,33 @@ export class UnsettledVoucherGuard implements OnApplicationBootstrap {
     return beside(totals, scope.carried);
   }
 
+  /**
+   * Whether `payer`'s escrow makes a tightening wait (D-21), so this guard has
+   * nothing to protect there. False when unknown: the guard then stays up.
+   */
+  async standsDown(payer: AccountId): Promise<boolean> {
+    return (await this.tightenDelay?.holdsTightening(payer)) ?? false;
+  }
+
+  /** `TIGHTEN_DELAY_SECONDS` where {@link standsDown}, else `0`. */
+  async tightenDelaySeconds(payer: AccountId): Promise<number> {
+    return (await this.standsDown(payer)) ? EVM_CONSTANTS.TIGHTEN_DELAY_SECONDS : 0;
+  }
+
+  /**
+   * The intent-route check: reads the unsettled vouchers in `scope` and refuses
+   * when `lowered` would strand one, unless acknowledged. Nothing is read when
+   * the change lowers nothing or the escrow has the tighten delay.
+   */
+  async refuseIfStranding(
+    scope: UnsettledScope,
+    lowered: LoweredCaps,
+    acknowledged: boolean,
+  ): Promise<void> {
+    if (!lowersAnything(lowered) || (await this.standsDown(scope.payer))) return;
+    this.assertNotStranding(await this.read(scope), lowered, scope.asset, acknowledged);
+  }
+
   /** Refuses when `lowered` strands an unsettled voucher and the buyer did not acknowledge it. */
   assertNotStranding(
     unsettled: UnsettledVouchers,
@@ -125,7 +169,8 @@ export class UnsettledVoucherGuard implements OnApplicationBootstrap {
   /**
    * Relays a change under its own admission pause, after the last check.
    * `relay` runs only when nothing would be stranded (or the buyer
-   * acknowledged it). A change that lowers nothing is relayed as is.
+   * acknowledged it). A change that lowers nothing, or one on an escrow with
+   * the tighten delay, is relayed as is.
    *
    * The pause is this request's alone (one row; another request's outcome
    * cannot end it) and covers only what the change can strand: one delegate's
@@ -148,7 +193,7 @@ export class UnsettledVoucherGuard implements OnApplicationBootstrap {
     readonly relay: () => Promise<T>;
   }): Promise<T> {
     const { scope, lowered } = args;
-    if (!lowersAnything(lowered)) return args.relay();
+    if (!lowersAnything(lowered) || (await this.standsDown(scope.payer))) return args.relay();
 
     const lagSeconds = VOUCHER_ADMISSION_CHAIN_LAG_MS / 1000;
     const { pauseId, totals } = await this.intents.holdVoucherAdmission(

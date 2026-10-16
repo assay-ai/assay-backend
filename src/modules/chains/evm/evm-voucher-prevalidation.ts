@@ -14,6 +14,11 @@ export interface PrevalidationState {
   /** `msg.sender == p.redeemer`: whether the relayer is the key the contract accepts. */
   readonly redeemerIsUs: boolean;
   readonly seqHigh: bigint;
+  /**
+   * The escrow's caps as `_redeem` applies them: on an escrow with the tighten
+   * delay (D-21) the EFFECTIVE caps from `effectiveCapsOf` — a cap lowered less
+   * than `TIGHTEN_DELAY_SECONDS` ago still counts — else the stored ones.
+   */
   readonly maxVoucherAmount: bigint;
   readonly maxPerWindow: bigint;
   readonly spentInWindow: bigint;
@@ -23,19 +28,28 @@ export interface PrevalidationState {
   readonly providerBonded: bigint;
   readonly minimumStake: bigint;
   /**
-   * The signing delegate's on-chain grant (`delegationOf(payer, delegate)`),
-   * when the voucher was signed by a delegate; absent for the payer's own key.
+   * The signing delegate's on-chain grant (`delegationOf(payer, delegate)`,
+   * caps from `effectiveCapsOf` once the escrow has the tighten delay), when
+   * the voucher was signed by a delegate; absent for the payer's own key.
    */
   readonly delegation?: PrevalidationDelegation | null;
 }
 
 export interface PrevalidationDelegation {
+  /** Stored caps, or the effective ones (D-21) when {@link canSign} is set. */
   readonly maxVoucherAmount: bigint;
   readonly maxPerWindow: bigint;
   readonly spentInWindow: bigint;
   readonly windowStartedAt: number;
   readonly validUntil: bigint;
   readonly revoked: boolean;
+  /**
+   * The chain's own answer to "can this grant sign now" — `effectiveCapsOf`
+   * gives delegate caps `0` when it cannot (D-21: a revoked grant still signs
+   * for `TIGHTEN_DELAY_SECONDS` after the revocation). Absent on an escrow
+   * without the tighten delay, where a revoked grant is dead at once.
+   */
+  readonly canSign?: boolean;
 }
 
 /**
@@ -101,7 +115,7 @@ export function decayWindow(state: {
  * The redeemer pin and the pause come first because `redeemVoucher` and
  * `redeemVoucherBatch` both check them **before** calling `_redeem` at all — so
  * a paused program refuses a zero-amount voucher with `ProgramPaused`, and a job
- * that reported `ZeroAmount` would absorb a hold the chain never rejected.
+ * that reported `ZeroAmount` would close a hold the chain never rejected.
  *
  * Returns the `Errors.sol` NAME the chain would raise, or `null` for a voucher
  * that would settle. Getting the order wrong does not break correctness — it
@@ -137,12 +151,18 @@ export function prevalidateVoucher(voucher: EvmVoucher, state: PrevalidationStat
   }
 
   // The authority, where `_voucherAuthority` decides it (agent payment
-  // delegation): a delegate-signed voucher needs a live grant at THIS block.
+  // delegation): a delegate-signed voucher needs a grant that can sign at THIS
+  // block. `_canSign`: not past `validUntil` and, if revoked, still inside the
+  // grace the chain reports (D-21); without the tighten delay a revocation is
+  // final at once. A grant that cannot sign is named `DelegateIsRevoked` if it
+  // was revoked and `DelegateIsExpired` if not — the contract's naming.
   const delegation = state.delegation ?? null;
   if (delegation !== null) {
     if (delegation.validUntil === 0n) return 'SignerIsNotPayer';
-    if (delegation.revoked) return 'DelegateIsRevoked';
-    if (BigInt(state.nowSeconds) > delegation.validUntil) return 'DelegateIsExpired';
+    const canSign =
+      BigInt(state.nowSeconds) <= delegation.validUntil &&
+      (delegation.canSign ?? !delegation.revoked);
+    if (!canSign) return delegation.revoked ? 'DelegateIsRevoked' : 'DelegateIsExpired';
   }
 
   if (voucher.amount > state.maxVoucherAmount) return 'VoucherExceedsPerCallLimit';

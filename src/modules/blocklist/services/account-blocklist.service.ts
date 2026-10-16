@@ -129,9 +129,11 @@ export class AccountBlocklistService implements OnModuleInit, OnModuleDestroy {
         this.logger.warn(`Blocklist refresh on broadcast failed: ${describe(error)}`);
       });
     });
-    const subscribed = this.subscriber.subscribe(this.config.channel).catch((error: unknown) => {
-      this.logger.warn(`Blocklist could not subscribe to changes: ${describe(error)}`);
-    });
+    const subscribed = untilReady(this.subscriber)
+      .then(() => this.subscriber.subscribe(this.config.channel))
+      .catch((error: unknown) => {
+        this.logger.warn(`Blocklist could not subscribe to changes: ${describe(error)}`);
+      });
     let bound: NodeJS.Timeout | undefined;
     await Promise.race([
       subscribed,
@@ -273,6 +275,22 @@ export class AccountBlocklistService implements OnModuleInit, OnModuleDestroy {
     // Three writes in a row overtook the read; the next poll or message will
     // settle it, and the local writes are already applied.
   }
+}
+
+/**
+ * Resolves once `client` may be put in subscriber mode.
+ *
+ * ioredis sends a command at once while the socket is up and its ready check
+ * (`INFO`) is still in flight (status `connect`). A `SUBSCRIBE` sent then puts
+ * the connection in subscriber mode before the `INFO` goes out, the ready check
+ * fails, and the client reconnects and reports ready WITHOUT the subscription:
+ * the instance never hears another block until it restarts, only its poll. The
+ * boot read above is about as long as that window, so it was hit in practice.
+ * In every other state the command is queued until ready, or sent when ready.
+ */
+function untilReady(client: Redis): Promise<void> {
+  if (client.status !== 'connect') return Promise.resolve();
+  return new Promise((resolve) => client.once('ready', () => resolve()));
 }
 
 function toHit(row: ActiveBlockRow): BlockHit {

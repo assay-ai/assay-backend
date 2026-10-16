@@ -2,6 +2,7 @@ import { ValidationPipe } from '@nestjs/common';
 import { NestFactory } from '@nestjs/core';
 import { ConfigService } from '@nestjs/config';
 
+import { applyHttpSecurity } from '@shared/security/security-headers';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { StructuredLogger } from '@shared/observability';
 import { LoggingInterceptor } from '@shared/interceptors/logging.interceptor';
@@ -31,7 +32,12 @@ async function bootstrapFacilitator() {
 
   const port = configService.get<number>('app.facilitator.port');
 
-  app.enableCors({ origin: '*', credentials: true });
+  applyHttpSecurity(app);
+
+  // Any origin, but without credentials: an x402 client authenticates with the
+  // payment payload, never a cookie, and `*` with credentials would be refused
+  // by browsers anyway (R17-R-02).
+  app.enableCors({ origin: '*' });
 
   app.useGlobalPipes(
     new ValidationPipe({
