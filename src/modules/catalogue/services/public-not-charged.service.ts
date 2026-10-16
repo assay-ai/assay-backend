@@ -88,15 +88,23 @@ const logger = new Logger('PublicNotChargedService');
  * (Folding only the short cells would let a reader recover them by
  * elimination across days.) Each named count is rounded down to a multiple of
  * {@link NOT_CHARGED_REASON_STEP}; the remainders go to "other", so the parts
- * still add up to `callsNotCharged − callsFailedCheck`.
+ * still add up to `callsNotCharged − callsFailedCheck`. Reasons are named only
+ * when at least two survive the rounding: with one, named + other would be the
+ * exact count of that single reason, and the rounding would hide nothing.
  *
  * `callsFailedCheck` is held only to the per-asset k rule, not to a k of its
  * own: it is the guarantee firing, the one figure the page exists to show.
  *
  * Accepted residual: the totals still move once a day, so the day-over-day
  * delta of an aggregate (calls checked, not charged, failed check, other) can
- * be read, as before the split. A named reason adds nothing finer than that:
- * it moves only in steps of {@link NOT_CHARGED_REASON_STEP} calls.
+ * be read, as before the split; a named reason moves in steps of
+ * {@link NOT_CHARGED_REASON_STEP} calls. A reader who archives the `recent`
+ * feed and subtracts its rows from the named reason counts (as can already be
+ * done with `callsFailedCheck`) can estimate, to within that rounding, the
+ * per-reason not-charged calls of tools the feed suppresses. The all-or-nothing
+ * rule itself reveals one bit: that some cell is under k. Padding a cell over
+ * k with sybil buyers is the generic limit of k-anonymity, bounded here by the
+ * buyer eligibility rules above, not removed.
  *
  * `withheldForPrivacy` is true whenever a rule removed something — a tool or
  * asset under k, or a row whose provider is not listed — so the page never
@@ -255,9 +263,11 @@ export function foldTotals(
  *   differencing.
  * - Otherwise each reason's calls are rounded down to a multiple of `step`
  *   and the remainder goes to `other`; a reason that rounds to 0 is not listed.
+ * - Fewer than two reasons left after rounding: none is named (`suppressed`).
+ *   One named reason plus `other` would give that reason's exact count.
  * - When the cells do not add up to `expectedOther` (the totals' own
- *   `notCharged − failedCheck`), nothing is named: the split is dropped rather
- *   than published inconsistent with the totals beside it.
+ *   `notCharged − failedCheck`), nothing is named (`suppressed`): the split is
+ *   dropped rather than published inconsistent with the totals beside it.
  */
 export function foldReasons(
   rows: readonly NotChargedReasonTotalsRow[],
@@ -275,7 +285,7 @@ export function foldReasons(
     logger.warn(
       `Not-charged reason cells add up to ${total}, totals say ${expectedOther}; split not published`,
     );
-    return { byReason: [], other: Math.max(0, expectedOther), suppressed: false };
+    return { byReason: [], other: Math.max(0, expectedOther), suppressed: true };
   }
 
   if (cells.some((cell) => cell.buyers < k)) {
@@ -295,6 +305,11 @@ export function foldReasons(
     byReason.push({ reason: reason as NotChargedReason, calls: rounded });
     other -= rounded;
   }
+  // One named reason would be exact: named + other is all of it.
+  if (byReason.length < 2) {
+    return { byReason: [], other: total, suppressed: total > 0 };
+  }
+
   // Largest first; ties in a fixed order so the answer is stable.
   byReason.sort((a, b) => b.calls - a.calls || a.reason.localeCompare(b.reason));
 
