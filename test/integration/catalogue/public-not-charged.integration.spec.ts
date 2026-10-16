@@ -96,11 +96,13 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
   /**
    * Puts a SETTLED row into one of main's buyer-debt / forfeit states, the way
    * `VoucherRedemptionService` and `PaymentIntentService` leave it: the
-   * columns only, since the feed reads nothing else.
+   * columns only, since the feed reads nothing else. `releasedAt` is when the
+   * hold was released (the outcome time); `now()` by default.
    */
   async function collection(
     intentId: string,
     state: 'FORFEITED' | 'OPEN_DEBT' | 'WRITTEN_OFF' | 'VOIDED_REFUND' | 'VOIDED_VOID',
+    releasedAt: Date | null = null,
   ): Promise<void> {
     const lapsed = state !== 'FORFEITED';
     const released = state !== 'OPEN_DEBT';
@@ -115,9 +117,50 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
       `UPDATE payment_intents
           SET redemption_last_error = $2,
               redemption_lapsed_at = CASE WHEN $3::boolean THEN now() ELSE NULL END,
-              hold_released_at = CASE WHEN $4::boolean THEN now() ELSE NULL END
+              hold_released_at = CASE WHEN $4::boolean THEN COALESCE($5::timestamptz, now())
+                                      ELSE NULL END
         WHERE id = $1`,
-      [intentId, cause, lapsed, released],
+      [intentId, cause, lapsed, released, releasedAt],
+    );
+  }
+
+  /**
+   * A rail-B SETTLED row whose voucher was redeemed: `commitRedeemedHold`
+   * commits the hold and stamps `hold_released_at`. Until then the call is
+   * awaiting redemption and could still lapse into debt.
+   */
+  async function collected(intentId: string, at: Date | null = null): Promise<string> {
+    await context.dataSource.query(
+      `UPDATE payment_intents SET hold_released_at = COALESCE($2::timestamptz, now()) WHERE id = $1`,
+      [intentId, at],
+    );
+    return intentId;
+  }
+
+  /** A paid call by the current organization that was served and collected. */
+  async function paidCall(toolId: string, at: Date | null = null): Promise<string> {
+    return collected(await call(toolId, 'SETTLED'), at);
+  }
+
+  /** Wide on every side; see the first case. */
+  function wideWindow(): NotChargedWindow {
+    return {
+      from: new Date(Date.now() - 10 * DAY_MS),
+      to: new Date(Date.now() + 2 * DAY_MS),
+      outcomeBefore: new Date(Date.now() + 2 * DAY_MS),
+      buyerCreatedBefore: new Date(Date.now() - 7 * DAY_MS),
+      buyerCollectedBefore: new Date(Date.now() + 2 * DAY_MS),
+    };
+  }
+
+  const sum = (
+    list: Awaited<ReturnType<WithheldTestContext['repository']['summarizeNotCharged']>>,
+    key: 'calls' | 'notChargedCalls' | 'failedCheckCalls' | 'buyers',
+  ) => list.reduce((total, row) => total + row[key], 0);
+
+  async function rowsOf(window: NotChargedWindow, toolId: string) {
+    return (await context.repository.findNotChargedCandidates(window, 500)).filter(
+      (row) => row.toolId === toolId,
     );
   }
 
@@ -126,31 +169,25 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     // migration, so `created_at` is a local wall-clock time and a tight window
     // would depend on the host's time zone. The 24 h delay and the complete-day
     // cut are the service's, tested in its unit spec.
-    const window: NotChargedWindow = {
-      from: new Date(Date.now() - 2 * DAY_MS),
-      to: new Date(Date.now() + 2 * DAY_MS),
-      buyerCreatedBefore: new Date(Date.now() - 7 * DAY_MS),
-    };
+    const window = wideWindow();
     const before = await context.repository.summarizeNotCharged(window);
 
     const TOOL = randomUUID();
-    // Three eligible buyers: old enough, and each with a charged paid call.
+    // Three eligible buyers: old enough, and each with a collected paid call.
     for (let i = 0; i < 3; i += 1) {
       await buyer(10);
-      await call(TOOL, 'SETTLED');
+      await paidCall(TOOL);
       await call(TOOL, 'REFUNDED');
     }
-    // A sybil: brand new, though it has a charged call.
+    // A sybil: brand new, though it has a collected call.
     await buyer(0);
-    await call(TOOL, 'SETTLED');
+    await paidCall(TOOL);
     await call(TOOL, 'REFUNDED');
     // An old organization that has never been charged.
     await buyer(30);
     await call(TOOL, 'VOIDED');
 
-    const rows = (await context.repository.findNotChargedCandidates(window, 500)).filter(
-      (row) => row.toolId === TOOL,
-    );
+    const rows = await rowsOf(window, TOOL);
 
     expect(rows).toHaveLength(3);
     expect(new Set(rows.map((row) => row.buyer)).size).toBe(3);
@@ -176,38 +213,34 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     });
 
     const after = await context.repository.summarizeNotCharged(window);
-    const sum = (
-      list: typeof after,
-      key: 'calls' | 'notChargedCalls' | 'failedCheckCalls' | 'buyers',
-    ) => list.reduce((total, row) => total + row[key], 0);
     const amount = (list: typeof after) =>
       list.reduce((total, row) => total + row.notChargedAmount, 0n);
 
-    // Totals count every paid call; only the buyer count is eligibility-gated.
-    expect(sum(after, 'calls') - sum(before, 'calls')).toBe(9);
-    expect(sum(after, 'notChargedCalls') - sum(before, 'notChargedCalls')).toBe(5);
-    expect(sum(after, 'failedCheckCalls') - sum(before, 'failedCheckCalls')).toBe(4);
-    expect(amount(after) - amount(before)).toBe(5n * 250_000n);
+    // Every figure counts eligible buyers only, the population k is counted on
+    // (audit P3-1): the sybil's and the never-charged organization's calls are
+    // in none of them.
+    expect(sum(after, 'calls') - sum(before, 'calls')).toBe(6);
+    expect(sum(after, 'notChargedCalls') - sum(before, 'notChargedCalls')).toBe(3);
+    expect(sum(after, 'failedCheckCalls') - sum(before, 'failedCheckCalls')).toBe(3);
+    expect(amount(after) - amount(before)).toBe(3n * 250_000n);
     expect(sum(after, 'buyers') - sum(before, 'buyers')).toBe(3);
   });
 
   it('lists a forfeited or voided-debt call as not charged, never an owed one', async () => {
-    const window: NotChargedWindow = {
-      from: new Date(Date.now() - 2 * DAY_MS),
-      to: new Date(Date.now() + 2 * DAY_MS),
-      buyerCreatedBefore: new Date(Date.now() - 7 * DAY_MS),
-    };
+    const window = wideWindow();
     const before = await context.repository.summarizeNotCharged(window);
 
     const TOOL = randomUUID();
-    // One eligible buyer (a charged call) with one call in every collection state.
+    // One eligible buyer (a collected call) with one call in every collection state.
     await buyer(10);
-    await call(TOOL, 'SETTLED');
+    await paidCall(TOOL);
     await collection(await call(TOOL, 'SETTLED'), 'FORFEITED');
     await collection(await call(TOOL, 'SETTLED'), 'VOIDED_REFUND');
     await collection(await call(TOOL, 'SETTLED'), 'VOIDED_VOID');
     await collection(await call(TOOL, 'SETTLED'), 'OPEN_DEBT');
     await collection(await call(TOOL, 'SETTLED'), 'WRITTEN_OFF');
+    // Served, voucher not redeemed yet: not final, so not counted either.
+    await call(TOOL, 'SETTLED');
 
     // An old organization whose only served calls became buyer debt: it never
     // paid, so it is not an eligible buyer and its refund is not read.
@@ -216,9 +249,7 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     await collection(await call(TOOL, 'SETTLED'), 'WRITTEN_OFF');
     await call(TOOL, 'REFUNDED');
 
-    const rows = (await context.repository.findNotChargedCandidates(window, 500)).filter(
-      (row) => row.toolId === TOOL,
-    );
+    const rows = await rowsOf(window, TOOL);
     expect(rows.map((row) => `${row.status}:${row.settledCause}`).sort()).toEqual([
       'SETTLED:FORFEITED',
       'SETTLED:VOIDED_REFUND',
@@ -226,16 +257,99 @@ describe('PaymentIntentRepository — the public not-charged feed', () => {
     ]);
 
     const after = await context.repository.summarizeNotCharged(window);
-    const sum = (
-      list: typeof after,
-      key: 'calls' | 'notChargedCalls' | 'failedCheckCalls' | 'buyers',
-    ) => list.reduce((total, row) => total + row[key], 0);
 
-    // 9 final calls; not charged = forfeited + two voided debts + the refund
-    // (totals are not eligibility-gated); the owed ones are in neither.
-    expect(sum(after, 'calls') - sum(before, 'calls')).toBe(9);
-    expect(sum(after, 'notChargedCalls') - sum(before, 'notChargedCalls')).toBe(4);
-    expect(sum(after, 'failedCheckCalls') - sum(before, 'failedCheckCalls')).toBe(2);
+    // Final calls of the eligible buyer: collected + forfeited + two voided
+    // debts. The open debt, the written-off debt and the call awaiting
+    // redemption can still change, so they are in no figure — debt state is
+    // never readable from the totals.
+    expect(sum(after, 'calls') - sum(before, 'calls')).toBe(4);
+    expect(sum(after, 'notChargedCalls') - sum(before, 'notChargedCalls')).toBe(3);
+    expect(sum(after, 'failedCheckCalls') - sum(before, 'failedCheckCalls')).toBe(1);
     expect(sum(after, 'buyers') - sum(before, 'buyers')).toBe(1);
+  });
+
+  /**
+   * Audit P2-2: eligibility only ever goes forwards. A buyer counts on a
+   * COLLECTED call, which nothing can reverse; a call still awaiting
+   * redemption does not count, so its later lapse into debt cannot drop a
+   * buyer and flip a tool or asset across k.
+   */
+  it('counts a buyer on a collected call only, so a later debt never drops it', async () => {
+    const window = wideWindow();
+
+    // A: its only paid call is awaiting redemption. Not eligible.
+    const TOOL_A = randomUUID();
+    await buyer(10);
+    const awaiting = await call(TOOL_A, 'SETTLED');
+    await call(TOOL_A, 'REFUNDED');
+    expect(await rowsOf(window, TOOL_A)).toHaveLength(0);
+    // ...and still not eligible after that call lapses into debt: no flip.
+    await collection(awaiting, 'OPEN_DEBT');
+    expect(await rowsOf(window, TOOL_A)).toHaveLength(0);
+
+    // B: one collected call. Eligible, and stays eligible when a later call
+    // lapses into debt and is then written off.
+    const TOOL_B = randomUUID();
+    await buyer(10);
+    await paidCall(TOOL_B);
+    await call(TOOL_B, 'REFUNDED');
+    expect(await rowsOf(window, TOOL_B)).toHaveLength(1);
+    const later = await call(TOOL_B, 'SETTLED');
+    await collection(later, 'OPEN_DEBT');
+    expect(await rowsOf(window, TOOL_B)).toHaveLength(1);
+    await collection(later, 'WRITTEN_OFF');
+    expect(await rowsOf(window, TOOL_B)).toHaveLength(1);
+
+    // C: a collected call, but collected after the caller's cut-off.
+    const TOOL_C = randomUUID();
+    await buyer(10);
+    await paidCall(TOOL_C, new Date(Date.now() + DAY_MS));
+    await call(TOOL_C, 'REFUNDED');
+    expect(await rowsOf({ ...window, buyerCollectedBefore: new Date() }, TOOL_C)).toHaveLength(0);
+    expect(await rowsOf(window, TOOL_C)).toHaveLength(1);
+  });
+
+  /**
+   * Audit P2-3: the window is on the OUTCOME as well as the call. A debt on an
+   * old call voided "now" must not move today's totals or appear in the rows
+   * until the outcome itself passes the cut-off.
+   */
+  it('counts an outcome only once it is older than the cut-off', async () => {
+    const TOOL = randomUUID();
+    await buyer(10);
+    await paidCall(TOOL, new Date(Date.now() - 3 * DAY_MS));
+    const old = await call(TOOL, 'SETTLED');
+    await context.dataSource.query(
+      `UPDATE payment_intents SET created_at = created_at - interval '5 days' WHERE id = $1`,
+      [old],
+    );
+
+    // "Today" started an hour ago; rows must be resolved a day ago.
+    const today = new Date(Date.now() - 60 * 60 * 1000);
+    const totalsWindow: NotChargedWindow = {
+      ...wideWindow(),
+      outcomeBefore: today,
+      buyerCollectedBefore: today,
+    };
+    const rowsWindow: NotChargedWindow = {
+      ...wideWindow(),
+      outcomeBefore: new Date(Date.now() - DAY_MS),
+      buyerCollectedBefore: new Date(Date.now() - DAY_MS),
+    };
+
+    const before = await context.repository.summarizeNotCharged(totalsWindow);
+    await collection(old, 'VOIDED_VOID'); // voided now
+    const after = await context.repository.summarizeNotCharged(totalsWindow);
+
+    expect(sum(after, 'calls')).toBe(sum(before, 'calls'));
+    expect(sum(after, 'notChargedCalls')).toBe(sum(before, 'notChargedCalls'));
+    expect(await rowsOf(rowsWindow, TOOL)).toHaveLength(0);
+
+    // Once the outcome is older than both cut-offs, it is counted and listed.
+    await collection(old, 'VOIDED_VOID', new Date(Date.now() - 2 * DAY_MS));
+    const later = await context.repository.summarizeNotCharged(totalsWindow);
+    expect(sum(later, 'calls') - sum(before, 'calls')).toBe(1);
+    expect(sum(later, 'notChargedCalls') - sum(before, 'notChargedCalls')).toBe(1);
+    expect(await rowsOf(rowsWindow, TOOL)).toHaveLength(1);
   });
 });
