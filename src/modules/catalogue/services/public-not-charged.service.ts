@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
 import {
   NotChargedCallRow,
@@ -33,8 +33,12 @@ export const NOT_CHARGED_MIN_BUYERS = 5;
 export const NOT_CHARGED_MIN_AGE_MS = 24 * 60 * 60 * 1000;
 /** A buyer organization counts toward k only once it is at least this old. */
 export const NOT_CHARGED_MIN_BUYER_AGE_MS = 7 * 24 * 60 * 60 * 1000;
+/** A named reason's call count is rounded down to a multiple of this. */
+export const NOT_CHARGED_REASON_STEP = 10;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
+
+const logger = new Logger('PublicNotChargedService');
 
 /**
  * The public "not charged" feed: paid calls the platform did not charge for,
@@ -78,10 +82,21 @@ const DAY_MS = 24 * 60 * 60 * 1000;
  * least k of them made paid calls in it.
  *
  * The not-charged calls that did not fail the check are also split by reason
- * ({@link foldReasons}): a reason is named only when every cell (asset ×
- * reason) behind its figure comes from at least k eligible buyers. The rest is
- * one "other" figure, and when anything is in it the smallest named reason is
- * folded in too, so "other" is never a figure backed by fewer than k buyers.
+ * ({@link foldReasons}), all or nothing: reasons are named only when EVERY
+ * counted cell (asset × reason) comes from at least k eligible buyers; if any
+ * cell falls short, no reason is named and the whole figure is one "other".
+ * (Folding only the short cells would let a reader recover them by
+ * elimination across days.) Each named count is rounded down to a multiple of
+ * {@link NOT_CHARGED_REASON_STEP}; the remainders go to "other", so the parts
+ * still add up to `callsNotCharged − callsFailedCheck`.
+ *
+ * `callsFailedCheck` is held only to the per-asset k rule, not to a k of its
+ * own: it is the guarantee firing, the one figure the page exists to show.
+ *
+ * Accepted residual: the totals still move once a day, so the day-over-day
+ * delta of an aggregate (calls checked, not charged, failed check, other) can
+ * be read, as before the split. A named reason adds nothing finer than that:
+ * it moves only in steps of {@link NOT_CHARGED_REASON_STEP} calls.
  *
  * `withheldForPrivacy` is true whenever a rule removed something — a tool or
  * asset under k, or a row whose provider is not listed — so the page never
@@ -231,28 +246,25 @@ export function foldTotals(
 }
 
 /**
- * The per-reason split of the not-charged calls that did not fail the check,
- * held to the k rule reason by reason.
+ * The per-reason split of the not-charged calls that did not fail the check.
  *
  * - Only cells of assets already counted in the totals (`counted`) are read.
- * - A reason's figure is the sum of its cells backed by at least `k` buyers;
- *   a cell below `k` goes to `other`. Cells are per asset, so a reason is
- *   named only where each part of its figure clears the floor on its own.
- * - Complementary suppression: when `other` holds anything, the smallest named
- *   reason is folded into it as well, so `other` always contains a cell of at
- *   least `k` buyers and can never be read as one small group's figure (nor
- *   recovered by subtracting the named reasons from the published total).
+ * - All or nothing: when any cell is backed by fewer than `k` buyers, no
+ *   reason is named and everything is `other` (`suppressed`). Naming the rest
+ *   would leave the short cell recoverable by elimination and day-over-day
+ *   differencing.
+ * - Otherwise each reason's calls are rounded down to a multiple of `step`
+ *   and the remainder goes to `other`; a reason that rounds to 0 is not listed.
  * - When the cells do not add up to `expectedOther` (the totals' own
  *   `notCharged − failedCheck`), nothing is named: the split is dropped rather
  *   than published inconsistent with the totals beside it.
- *
- * `suppressed` is true when a cell below `k` was folded away.
  */
 export function foldReasons(
   rows: readonly NotChargedReasonTotalsRow[],
   counted: readonly NotChargedTotalsRow[],
   expectedOther: number,
   k: number,
+  step: number = NOT_CHARGED_REASON_STEP,
 ): { byReason: PublicNotChargedReasonCountDto[]; other: number; suppressed: boolean } {
   const assetKey = (row: { asset: string; decimals: number }) => `${row.asset}|${row.decimals}`;
   const countedAssets = new Set(counted.map(assetKey));
@@ -260,26 +272,33 @@ export function foldReasons(
 
   const total = cells.reduce((sum, row) => sum + row.calls, 0);
   if (total !== expectedOther) {
+    logger.warn(
+      `Not-charged reason cells add up to ${total}, totals say ${expectedOther}; split not published`,
+    );
     return { byReason: [], other: Math.max(0, expectedOther), suppressed: false };
   }
 
-  const named = new Map<string, number>();
-  let other = 0;
-  for (const cell of cells) {
-    if (cell.buyers >= k) named.set(cell.reason, (named.get(cell.reason) ?? 0) + cell.calls);
-    else other += cell.calls;
+  if (cells.some((cell) => cell.buyers < k)) {
+    return { byReason: [], other: total, suppressed: true };
   }
-  const suppressed = other > 0;
 
-  const byReason = [...named]
-    .map(([reason, calls]) => ({ reason: reason as NotChargedReason, calls }))
-    // Largest first; ties in a fixed order so the answer is stable.
-    .sort((a, b) => b.calls - a.calls || a.reason.localeCompare(b.reason));
+  const byReasonCalls = new Map<string, number>();
+  for (const cell of cells) {
+    byReasonCalls.set(cell.reason, (byReasonCalls.get(cell.reason) ?? 0) + cell.calls);
+  }
 
-  const smallest = suppressed ? byReason.pop() : undefined;
-  if (smallest) other += smallest.calls;
+  const byReason: PublicNotChargedReasonCountDto[] = [];
+  let other = total;
+  for (const [reason, calls] of byReasonCalls) {
+    const rounded = Math.floor(calls / step) * step;
+    if (rounded === 0) continue;
+    byReason.push({ reason: reason as NotChargedReason, calls: rounded });
+    other -= rounded;
+  }
+  // Largest first; ties in a fixed order so the answer is stable.
+  byReason.sort((a, b) => b.calls - a.calls || a.reason.localeCompare(b.reason));
 
-  return { byReason, other, suppressed };
+  return { byReason, other, suppressed: false };
 }
 
 function toCall(
