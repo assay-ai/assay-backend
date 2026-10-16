@@ -1,7 +1,7 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
-import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import {
   ProviderQualityCounters,
@@ -26,7 +26,8 @@ import {
   ProviderStakePort,
 } from '@modules/provider/ports/provider-stake.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { PricingMode, Tool } from '@modules/tool/ports/tool.types';
+import { BindingStatus, PricingMode, Tool, ToolBinding } from '@modules/tool/ports/tool.types';
+import { toServedToolBindings } from '@modules/tool/services/database-tool-catalogue';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
 
@@ -64,6 +65,18 @@ import {
  * they serve. Two consequences, both wanted: a provider with nothing published
  * cannot appear, and the query count does not grow with the registry.
  *
+ * ## Every figure is the published revision's
+ *
+ * A draft and a live binding are the same `tool_bindings` row: the editor
+ * writes an unpublished edit straight onto it, and traffic keeps being served
+ * from the published `binding_versions` snapshot until the provider publishes
+ * again. So the rows are mapped through `toServedToolBindings` — the router's
+ * own mapping — before anything is read off them. Price, pricing mode,
+ * `fromPrice` and the free-tier figure are therefore what an agent is actually
+ * served, never a saved-but-unpublished draft; and a binding whose published
+ * snapshot is missing comes back non-`ACTIVE` and is left out, as the router
+ * leaves it out.
+ *
  * ## The reads are one wave
  *
  * Stake, quality and the provider rows are fetched concurrently over the id set
@@ -78,6 +91,7 @@ export class CatalogueService {
 
   constructor(
     private readonly bindings: ToolBindingRepository,
+    private readonly versions: BindingVersionRepository,
     private readonly providers: ProviderRepository,
     private readonly windows: SlaWindowRepository,
     private readonly router: ProviderRouterService,
@@ -90,32 +104,39 @@ export class CatalogueService {
   ) {}
 
   /**
-   * Every `ACTIVE` binding of a provider that is not blocked.
+   * Every `ACTIVE` binding of a provider that is not blocked, at its
+   * published revision.
    *
    * The catalogue reads bindings directly rather than through routing, so the
    * blocklist is applied here: a blocked provider's bindings are absent from
    * every list and count, exactly as if it had paused them all. Its own page
    * still answers, with no tools — see {@link getProvider}.
    */
-  private async listedBindings(): Promise<ToolBindingEntity[]> {
-    const bindings = (await this.bindings.findActiveBindings()).filter(
-      (binding) => !this.blocklist.organizationBlock(binding.organizationId),
+  private async listedBindings(): Promise<ToolBinding[]> {
+    const rows = (await this.bindings.findActiveBindings()).filter(
+      (row) => !this.blocklist.organizationBlock(row.organizationId),
+    );
+    // As traffic is served, not as the row reads now: an unpublished draft
+    // must not show on a public page. A drifted row with no published snapshot
+    // comes back DRAFT and is dropped, exactly as the router drops it.
+    const bindings = (await toServedToolBindings(rows, this.versions)).filter(
+      (binding) => binding.status === BindingStatus.ACTIVE,
     );
 
     // A SUSPENDED or UNBONDING provider takes no new traffic — the router
     // refuses it — so its bindings are left out of every list and count here,
     // exactly like a PAUSED binding: a catalogue row is an invitation to call.
-    const rows = await this.providerRows([
-      ...new Set(bindings.map((binding) => binding.organizationId)),
+    const providers = await this.providerRows([
+      ...new Set(bindings.map((binding) => binding.providerId)),
     ]);
     return bindings.filter(
-      (binding) => rows.get(binding.organizationId)?.status === ProviderStatus.ACTIVE,
+      (binding) => providers.get(binding.providerId)?.status === ProviderStatus.ACTIVE,
     );
   }
 
   async listProviders(): Promise<CatalogueProviderListDto> {
     const bindings = await this.listedBindings();
-    const byProvider = groupBy(bindings, (binding) => binding.organizationId);
+    const byProvider = groupBy(bindings, (binding) => binding.providerId);
     const providerIds = [...byProvider.keys()];
 
     if (providerIds.length === 0) return { providers: [] };
@@ -165,7 +186,7 @@ export class CatalogueService {
     if (!row) throw ProviderErrors.providerNotFound({ providerId });
 
     const all = await this.listedBindings();
-    const own = all.filter((binding) => binding.organizationId === providerId);
+    const own = all.filter((binding) => binding.providerId === providerId);
 
     const [stakes, quality, tools] = await Promise.all([
       this.cardStakes([providerId]),
@@ -202,8 +223,7 @@ export class CatalogueService {
                     [
                       {
                         freeQuotaPerAgent: binding.freeQuotaPerAgent,
-                        freeDailyBudget:
-                          binding.freeDailyBudget == null ? null : Number(binding.freeDailyBudget),
+                        freeDailyBudget: binding.freeDailyBudget ?? null,
                       },
                     ],
                     this.freeQuota,
@@ -281,7 +301,7 @@ export class CatalogueService {
         name: tool.name,
         description: tool.description,
         tier: tool.tier,
-        providerCount: new Set(own.map((binding) => binding.organizationId)).size,
+        providerCount: new Set(own.map((binding) => binding.providerId)).size,
         fromPrice: cheapest(own),
         price: quote.price ? toMoneyDto(quote.price) : null,
         pricingMode: quote.pricingMode,
@@ -432,7 +452,7 @@ export class CatalogueService {
 
   private toProviderDto(
     row: ProviderEntity,
-    own: readonly ToolBindingEntity[],
+    own: readonly ToolBinding[],
     stake: readonly CatalogueChainStakeDto[],
     counters: ProviderQualityCounters | null,
   ): CatalogueProviderDto {
@@ -469,7 +489,7 @@ function toQualityDto(counters: ProviderQualityCounters | null): CatalogueQualit
 }
 
 /**
- * Cheapest `ACTIVE` binding, compared as integers.
+ * Cheapest `ACTIVE` binding at its published price, compared as integers.
  *
  * `price_amount` is `numeric(78,0)` and arrives as a string, so the comparison
  * is `BigInt` rather than `Number` — a price beyond 2^53 minor units compares
@@ -478,8 +498,8 @@ function toQualityDto(counters: ProviderQualityCounters | null): CatalogueQualit
  * min across them is meaningful; the asset is carried on the answer rather
  * than assumed by the reader.
  */
-function cheapest(bindings: readonly ToolBindingEntity[]): CatalogueMoneyDto | null {
-  let best: ToolBindingEntity | null = null;
+function cheapest(bindings: readonly ToolBinding[]): CatalogueMoneyDto | null {
+  let best: ToolBinding | null = null;
 
   for (const binding of bindings) {
     if (!best || BigInt(binding.priceAmount) < BigInt(best.priceAmount)) best = binding;
@@ -488,7 +508,7 @@ function cheapest(bindings: readonly ToolBindingEntity[]): CatalogueMoneyDto | n
   return best ? money(best) : null;
 }
 
-function money(binding: ToolBindingEntity): CatalogueMoneyDto {
+function money(binding: ToolBinding): CatalogueMoneyDto {
   return toMoneyDto(
     MoneyUtil.of(binding.priceAmount, binding.assetId as AssetId, decimalsOf(binding.assetId)),
   );
