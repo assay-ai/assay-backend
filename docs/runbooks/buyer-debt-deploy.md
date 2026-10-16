@@ -44,7 +44,12 @@ SELECT
 2. **Run the migrations** (`yarn migration:run:prod`; `start:prod` runs them first too). The
    processes refuse to boot without them (`PaymentIntentRepository.assertBuyerDebtSchema`): every
    paid call reads the debt columns, so without them every paid call would fail with a 500.
-3. Start the API, MCP and scheduler processes of the new build.
+3. Start the API, MCP and scheduler processes of the new build. Set `CORS_ALLOWED_ORIGINS` on the
+   API and WebSocket processes first: with `NODE_ENV=production` (the `Dockerfile` default) they
+   refuse to start without it. List every exact frontend origin, comma-separated: the custom
+   domains and the `*.pages.dev` origins of the production and develop Pages projects (for
+   example `https://app.example.com,https://assay-frontend.pages.dev`). Wildcards are not
+   supported; an origin left off gets no CORS headers and every browser call from it fails.
 4. Ship the frontend change (debt banner, "Sign to settle", the debt states `OPEN`, `REPLACING`,
    `WRITTEN_OFF`) with or before the backend. Without it a human buyer can settle only through the
    REST API (`GET /escrow/debts`, `POST /escrow/debts/:id/voucher-intent`,
