@@ -19,7 +19,7 @@ import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
  * `git show <ref>:<path>` from the assay-evm checkout, never from whatever its
  * working tree happens to have checked out.
  *
- * - `ASSAY_EVM_REF` (default `feat/agent-delegation`): the branch or commit
+ * - `ASSAY_EVM_REF` (default `main`): the branch or commit
  *   that will be deployed.
  * - `ASSAY_EVM_DIR`: the checkout. Default: `assay-evm` beside this repo, or
  *   beside its parent (a worktree under `.wt/`).
@@ -28,7 +28,7 @@ import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
  * checkout; the suite then skips and says so. The hand-written pins in
  * `abi-selectors.spec.ts` and `constants-pin.spec.ts` still run everywhere.
  */
-const REF = process.env.ASSAY_EVM_REF || 'feat/agent-delegation';
+const REF = process.env.ASSAY_EVM_REF || 'main';
 const REPO = resolve(__dirname, '../../../..');
 const DIR = [
   process.env.ASSAY_EVM_DIR,
