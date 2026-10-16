@@ -44,6 +44,15 @@ SELECT
 2. **Run the migrations** (`yarn migration:run:prod`; `start:prod` runs them first too). The
    processes refuse to boot without them (`PaymentIntentRepository.assertBuyerDebtSchema`): every
    paid call reads the debt columns, so without them every paid call would fail with a 500.
+   The public Explorer index (`1760400000000-public-explorer-index`) is built with
+   `CREATE INDEX CONCURRENTLY IF NOT EXISTS` outside a transaction, so it does not block writes to
+   `payment_intents`; on a large table it can still take a while. To keep it out of the deploy
+   window, build it by hand beforehand with the same statement:
+   `CREATE INDEX CONCURRENTLY IF NOT EXISTS "idx_payment_intents_paid_held_created" ON
+   "payment_intents" ("created_at") WHERE "call_class" = 'PAID' AND "hold_id" IS NOT NULL;`
+   The migration then finds it and does nothing. If a concurrent build fails, Postgres leaves an
+   INVALID index; the migration drops and rebuilds it. A database that already ran the earlier,
+   blocking version of this migration skips it (same name and timestamp).
 3. Start the API, MCP and scheduler processes of the new build. Set `CORS_ALLOWED_ORIGINS` on the
    API and WebSocket processes first: with `NODE_ENV=production` (the `Dockerfile` default) they
    refuse to start without it. List every exact frontend origin, comma-separated: the custom
@@ -62,6 +71,13 @@ SELECT
 - **Never run the `down` of `1760700000000` or `1760800000000`.** Dropping `redemption_lapsed_at`
   makes every debt look like a voucher awaiting redemption again, which an old build absorbs; and
   dropping `redemption_replaced_at` loses which debts are being collected.
+- **`migration:revert` order.** `1760400000000` is shared by `public-explorer-index` and
+  `slash-part-cancel-reason`. TypeORM matches executed migrations by name, so both run, but on a
+  database that had already run `1760600000000`-`1760800000000` they run after them, and the
+  executed-at order is what `migration:revert` undoes. The first revert after this deploy
+  therefore drops the Explorer index (or the slash cancel reason), not
+  `PaymentIntentDebtReplacing`. Check `SELECT * FROM migrations ORDER BY id DESC LIMIT 3` before
+  reverting anything.
 - If the new build must be stopped, stop it and fix forward. If an older build must run anyway,
   first write off or release every open debt by hand, then stop its scheduler before it starts.
 
