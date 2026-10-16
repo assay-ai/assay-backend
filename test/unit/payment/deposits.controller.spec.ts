@@ -3,6 +3,7 @@ import { AccountId, ChainId, CHAIN_IDS, toAccountId } from '@modules/chains/port
 import { PaymentRequirements } from '@modules/chains/ports/x402.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { DepositsController } from '@modules/payment/controllers/deposits.controller';
+import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import { DepositRequirementsBuilderPort } from '@modules/payment/ports/deposit-requirements.port';
 import { DepositIntent, DepositIntentStatus } from '@modules/payment/ports/deposit.types';
@@ -54,6 +55,9 @@ function session(overrides?: Partial<McpSession>): McpSession {
     ...overrides,
   };
 }
+
+/** Deposits are taken only on a chain with a paid rail, so `create` runs on the EVM chain. */
+const evmSession = () => session({ chainId: ROBINHOOD_TESTNET, agentAccount: EVM_AGENT_ACCOUNT });
 
 function requirements(extra?: Record<string, unknown>): PaymentRequirements {
   return {
@@ -128,7 +132,7 @@ describe('DepositsController.create', () => {
   it('takes every identity field from the session and only the amount from the body', async () => {
     const { controller, deposits } = buildHarness();
 
-    await controller.create(session(), { amount: '5000000' });
+    await controller.create(evmSession(), { amount: '5000000' });
 
     // Not `objectContaining`: the assertion is as much about what is *absent*
     // — there is no field on this call the request body could have supplied.
@@ -136,22 +140,22 @@ describe('DepositsController.create', () => {
     expect(deposits.createDeposit).toHaveBeenCalledWith({
       organizationId: ORGANIZATION_ID,
       agentId: AGENT_ID,
-      agentAccount: AGENT_ACCOUNT,
-      chainId: SOLANA_DEVNET,
-      amount: MoneyUtil.of(5_000_000n, USDC, 6),
+      agentAccount: EVM_AGENT_ACCOUNT,
+      chainId: ROBINHOOD_TESTNET,
+      amount: MoneyUtil.of(5_000_000n, USDG, 6),
     });
   });
 
   it('hands the builder the intent’s scale and the session’s chain, and returns its answer', async () => {
     const { controller, requirementsBuilder } = buildHarness();
 
-    const response = await controller.create(session(), { amount: '5000000' });
+    const response = await controller.create(evmSession(), { amount: '5000000' });
 
     expect(response.depositId).toBe(DEPOSIT_ID);
     expect(response.expiresAt).toBe('2026-08-23T10:00:00.000Z');
     expect(requirementsBuilder.build).toHaveBeenCalledTimes(1);
     expect(requirementsBuilder.build).toHaveBeenCalledWith({
-      chainId: SOLANA_DEVNET,
+      chainId: ROBINHOOD_TESTNET,
       requirements: requirements(),
       decimals: 6,
     });
@@ -161,10 +165,10 @@ describe('DepositsController.create', () => {
   it('takes the chain from the session when the body names none', async () => {
     const { controller, deposits } = buildHarness();
 
-    await controller.create(session(), { amount: '5000000' });
+    await controller.create(evmSession(), { amount: '5000000' });
 
     expect(deposits.createDeposit).toHaveBeenCalledWith(
-      expect.objectContaining({ chainId: SOLANA_DEVNET, agentAccount: AGENT_ACCOUNT }),
+      expect.objectContaining({ chainId: ROBINHOOD_TESTNET, agentAccount: EVM_AGENT_ACCOUNT }),
     );
   });
 
@@ -180,7 +184,6 @@ describe('DepositsController.create', () => {
    * USDG.
    */
   it.each([
-    { label: 'Solana devnet', chainId: SOLANA_DEVNET, account: AGENT_ACCOUNT, asset: USDC },
     {
       label: 'Robinhood testnet',
       chainId: ROBINHOOD_TESTNET,
@@ -203,6 +206,19 @@ describe('DepositsController.create', () => {
         amount: MoneyUtil.of(5_000_000n, row.asset, 6),
       }),
     );
+  });
+
+  it('refuses a free-calls-only chain (Solana) with CHAIN_RAIL_NOT_OFFERED, before the service', async () => {
+    // Solana offers no paid rail: an escrow funded there holds a balance no call can spend.
+    // The refusal comes before `createDeposit`, which may open an escrow on chain.
+    const { controller, deposits, requirementsBuilder } = buildHarness();
+
+    await expectErrorCodeAsync(
+      () => controller.create(session(), { amount: '5000000' }),
+      ChainErrorCode.CHAIN_RAIL_NOT_OFFERED,
+    );
+    expect(deposits.createDeposit).not.toHaveBeenCalled();
+    expect(requirementsBuilder.build).not.toHaveBeenCalled();
   });
 
   it('refuses a chainId the session has no account on, and never calls the service', async () => {

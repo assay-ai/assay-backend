@@ -1,11 +1,14 @@
 import { AccountId, CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
+  assertDepositChainOffersPaidRail,
   LinkedAccount,
   resolveDepositChain,
   sessionAccounts,
 } from '@modules/payment/domain/deposit-chain';
+import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
+import { BaseError } from '@shared/errors/base.error';
 
 import { expectErrorCode } from '../helpers/expect-error-code';
 
@@ -88,6 +91,49 @@ describe('resolveDepositChain — chainId required only with two or more account
       () => resolveDepositChain([], undefined),
       PaymentErrorCode.PAYMENT_DEPOSIT_ACCOUNT_NOT_LINKED,
     );
+  });
+});
+
+describe('deposits only on a chain with a paid rail', () => {
+  const EVM = CHAIN_IDS.ROBINHOOD_TESTNET;
+  const EVM_ACCOUNT: AccountId = toAccountId(EVM, '0x9965507D1a55bcC2695C58ba16FB37d819B0A4dc');
+
+  function thrown(fn: () => unknown): BaseError {
+    try {
+      fn();
+    } catch (error) {
+      return error as BaseError;
+    }
+    throw new Error('expected a throw');
+  }
+
+  it('refuses a free-calls-only chain (Solana) with CHAIN_RAIL_NOT_OFFERED', () => {
+    expectErrorCode(
+      () => assertDepositChainOffersPaidRail(DEVNET),
+      ChainErrorCode.CHAIN_RAIL_NOT_OFFERED,
+    );
+  });
+
+  it('accepts the EVM chain, which offers rail B', () => {
+    expect(() => assertDepositChainOffersPaidRail(EVM)).not.toThrow();
+  });
+
+  it('NOT_LINKED recommends only chains that take deposits', () => {
+    const accounts: readonly LinkedAccount[] = [
+      { chainId: DEVNET, accountId: DEVNET_ACCOUNT },
+      { chainId: EVM, accountId: EVM_ACCOUNT },
+    ];
+    const error = thrown(() => resolveDepositChain(accounts, MAINNET));
+    expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_ACCOUNT_NOT_LINKED);
+    expect(error.message).toContain(`You can deposit on: ${EVM}`);
+    expect(error.message).not.toContain(DEVNET);
+  });
+
+  it('NOT_LINKED says deposits are unavailable when only free-calls-only chains are linked', () => {
+    const error = thrown(() => resolveDepositChain(ONE, EVM));
+    expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_DEPOSIT_ACCOUNT_NOT_LINKED);
+    expect(error.message).not.toContain('You can deposit on');
+    expect(error.message).toContain('Deposits are not available on the linked chains');
   });
 });
 

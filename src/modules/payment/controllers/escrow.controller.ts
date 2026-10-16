@@ -170,7 +170,12 @@ export class EscrowController {
     description: 'The issued sequence number',
     type: GetNextSeqResponseDto,
   })
-  @ApiResponse({ status: 409, description: 'No escrow is open for this account' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'No escrow is open for this account, or the chain does not offer rail B ' +
+      '(`CHAIN_RAIL_NOT_OFFERED`)',
+  })
   @ApiResponse({ status: 429, description: 'Too many sequence numbers requested' })
   async nextSeq(@CurrentSession() session: McpSession): Promise<GetNextSeqResponseDto> {
     const next = await this.nextSeqs.issue(

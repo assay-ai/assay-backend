@@ -435,7 +435,8 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     message: (context?: Record<string, any>) =>
       `No linked account on that chain` +
       `${context?.chainId ? `: ${context.chainId}` : ''}` +
-      `${context?.chains ? `. You can deposit on: ${context.chains}` : ''}`,
+      `${context?.chains ? `. You can deposit on: ${context.chains}` : ''}` +
+      `${context?.noDepositChain ? '. Deposits are not available on the linked chains' : ''}`,
   },
   /**
    * The amount named an asset that is not the chain's settlement asset.
