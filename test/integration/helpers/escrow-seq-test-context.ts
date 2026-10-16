@@ -7,6 +7,7 @@ import { PaymentIntentRedemptionTxRefs1760200000000 } from '@database/postgres/m
 import { PaymentIntentRedemptionLastError1760600000000 } from '@database/postgres/migrations/1760600000000-payment-intent-redemption-last-error';
 import { PaymentIntentRedemptionLapsed1760700000000 } from '@database/postgres/migrations/1760700000000-payment-intent-redemption-lapsed';
 import { PaymentIntentDebtReplacing1760800000000 } from '@database/postgres/migrations/1760800000000-payment-intent-debt-replacing';
+import { VoucherSeqDebtReplacement1760900000000 } from '@database/postgres/migrations/1760900000000-voucher-seq-debt-replacement';
 import { BuyerEscrowSeqRewind1759600000007 } from '@database/postgres/migrations/1759600000007-buyer-escrow-seq-rewind';
 import { randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
@@ -139,6 +140,7 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
       PaymentIntentRedemptionLastError1760600000000,
       PaymentIntentRedemptionLapsed1760700000000,
       PaymentIntentDebtReplacing1760800000000,
+      VoucherSeqDebtReplacement1760900000000,
     ],
     synchronize: false,
     logging: process.env.ESCROW_SEQ_TEST_LOGGING === 'true',

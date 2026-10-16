@@ -38,8 +38,11 @@ describe('buyer debt SQL, against a real database', () => {
     dataSource = await freshMigratedDatabase(DATABASE);
     payments = new PaymentIntentRepository(dataSource);
     // Seeded as rows, not through the voucher path: the foreign keys are what
-    // the voucher path satisfies, and these tests are about the queries.
+    // the voucher path satisfies, and these tests are about the queries. Only
+    // the foreign keys' (system) triggers are off: every trigger the
+    // migrations define — the voucher_seq one above all (BUG-R17f-01) — runs.
     await dataSource.query(`ALTER TABLE payment_intents DISABLE TRIGGER ALL`);
+    await dataSource.query(`ALTER TABLE payment_intents ENABLE TRIGGER USER`);
   }, 300_000);
   afterAll(async () => dataSource?.destroy());
 
@@ -49,8 +52,16 @@ describe('buyer debt SQL, against a real database', () => {
     payer = `${CHAIN}:0x${suffix}`;
   });
 
-  /** A served, settled rail-B call whose hold is still open: awaiting redemption. */
-  async function seedSettled(seq: number): Promise<{ id: string; holdId: string }> {
+  /**
+   * A served, settled rail-B call whose hold is still open: awaiting
+   * redemption. Its voucher expired an hour ago — past its on-chain deadline
+   * (`expires_at` + 1,800 s grace + 120 s skew), as a debt's voucher is by
+   * the time it can be replaced — unless `expiresIn` says otherwise.
+   */
+  async function seedSettled(
+    seq: number,
+    expiresIn = `-1 hour`,
+  ): Promise<{ id: string; holdId: string }> {
     const id = randomUUID();
     const holdId = randomUUID();
     await dataSource.query(
@@ -60,7 +71,7 @@ describe('buyer debt SQL, against a real database', () => {
          platform_fee, request_hash, chain_id, expires_at, voucher_seq, voucher_signature,
          voucher_resource_hash, voucher_issued_at, hold_id)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PAID', $11, 6, 1000, 800, 200,
-               $12, $13, now() + interval '5 minutes', $14, $15, $16, $17, $18)`,
+               $12, $13, now() + $19::interval, $14, $15, $16, $17, $18)`,
       [
         id,
         org,
@@ -80,6 +91,7 @@ describe('buyer debt SQL, against a real database', () => {
         `sha256:${'cd'.repeat(32)}`,
         String(Math.floor(Date.now() / 1000)),
         holdId,
+        expiresIn,
       ],
     );
     return { id, holdId };
@@ -243,6 +255,84 @@ describe('buyer debt SQL, against a real database', () => {
     expect(await payments.findDueForWriteOff(new Date(Date.now() - 5 * DAY_MS), 100)).toEqual(
       expect.arrayContaining([expect.objectContaining({ id })]),
     );
+  });
+
+  describe('BUG-R17f-01: the voucher_seq trigger, with the real triggers on', () => {
+    const IMMUTABLE = /voucher_seq is immutable/;
+    const setSeq = (id: string, seq: number, replacedAt: 'now()' | 'NULL' = 'now()') =>
+      dataSource.query(
+        `UPDATE payment_intents
+            SET "voucher_seq" = $2, "redemption_replaced_at" = ${replacedAt}
+          WHERE "id" = $1`,
+        [id, String(seq)],
+      );
+    const seqOf = async (id: string) => (await row(id)).voucher_seq;
+
+    it('is installed by 1760900000000 and enabled', async () => {
+      const [trigger] = (await dataSource.query(
+        `SELECT t.tgenabled, p.prosrc
+           FROM pg_trigger t JOIN pg_proc p ON p.oid = t.tgfoid
+          WHERE t.tgname = 'trg_payment_intents_voucher_seq_immutable'`,
+      )) as Array<{ tgenabled: string; prosrc: string }>;
+      expect(trigger.tgenabled).toBe('O');
+      expect(trigger.prosrc).toContain('redemption_lapsed_at');
+      expect(trigger.prosrc).toContain("interval '1920 seconds'");
+    });
+
+    it('refuses a seq change on a voucher that is not a lapsed debt', async () => {
+      const { id } = await seedSettled(1);
+      await expect(setSeq(id, 2)).rejects.toThrow(IMMUTABLE);
+      await expect(setSeq(id, 2, 'NULL')).rejects.toThrow(IMMUTABLE);
+      expect(await seqOf(id)).toBe('1');
+    });
+
+    it('refuses a seq change on a debt outside the replacement UPDATE', async () => {
+      const { id } = await seedSettled(1);
+      await payments.lapseRedemption(org, id, 'VoucherExpired');
+      // Not marked as a replacement.
+      await expect(setSeq(id, 2, 'NULL')).rejects.toThrow(IMMUTABLE);
+      // Clearing the seq.
+      await expect(
+        dataSource.query(`UPDATE payment_intents SET "voucher_seq" = NULL WHERE "id" = $1`, [id]),
+      ).rejects.toThrow(IMMUTABLE);
+      expect(await seqOf(id)).toBe('1');
+    });
+
+    it('refuses a lower or equal replacement seq', async () => {
+      const { id } = await seedSettled(5);
+      await payments.lapseRedemption(org, id, 'VoucherExpired');
+      await expect(setSeq(id, 4)).rejects.toThrow(IMMUTABLE);
+      await expect(replace(id, 3)).rejects.toThrow(IMMUTABLE);
+      expect(await seqOf(id)).toBe('5');
+      expect((await row(id)).redemption_replaced_at).toBeNull();
+    });
+
+    it('refuses to change the seq of a debt already being replaced', async () => {
+      const { id } = await seedSettled(1);
+      await payments.lapseRedemption(org, id, 'VoucherExpired');
+      expect(await replace(id, 2)).toBe(true);
+      await expect(setSeq(id, 3)).rejects.toThrow(IMMUTABLE);
+      expect(await seqOf(id)).toBe('2');
+    });
+
+    it('refuses to replace a debt whose old voucher is still inside its on-chain window', async () => {
+      // Lapsed early (e.g. a permanent refusal) — expired ten minutes ago, so
+      // redeemable on chain for another twenty: a replacement would let the
+      // buyer be charged twice.
+      const { id } = await seedSettled(1, '-10 minutes');
+      await payments.lapseRedemption(org, id, 'EscrowWindowLimitExceeded');
+      await expect(replace(id, 2)).rejects.toMatchObject({ driverError: { code: '23514' } });
+      expect(await seqOf(id)).toBe('1');
+      expect((await row(id)).redemption_replaced_at).toBeNull();
+
+      // Past expires_at + 1,920 s it goes through.
+      await dataSource.query(
+        `UPDATE payment_intents SET "expires_at" = now() - interval '1921 seconds' WHERE "id" = $1`,
+        [id],
+      );
+      expect(await replace(id, 2)).toBe(true);
+      expect(await seqOf(id)).toBe('2');
+    });
   });
 
   it('counts the debts of the payer account and of the organization, nobody else', async () => {
@@ -420,8 +510,21 @@ describe('buyer debt migrations, down and up again', () => {
       }>
     )[0].name;
 
-  it('reverts 1760800000000, 1760700000000 and 1760600000000 one by one and reapplies them', async () => {
+  const seqTriggerSource = async () =>
+    (
+      (await dataSource.query(
+        `SELECT prosrc FROM pg_proc WHERE proname = 'assert_voucher_seq_is_immutable'`,
+      )) as Array<{ prosrc: string }>
+    )[0].prosrc;
+
+  it('reverts 1760900000000 … 1760600000000 one by one and reapplies them', async () => {
+    expect(await last()).toBe('VoucherSeqDebtReplacement1760900000000');
+    expect(await seqTriggerSource()).toContain('redemption_lapsed_at');
+
+    await dataSource.undoLastMigration({ transaction: 'each' });
     expect(await last()).toBe('PaymentIntentDebtReplacing1760800000000');
+    expect(await seqTriggerSource()).not.toContain('redemption_lapsed_at');
+
     expect(await columns()).toEqual([
       'redemption_lapsed_at',
       'redemption_last_error',
@@ -450,7 +553,9 @@ describe('buyer debt migrations, down and up again', () => {
       'PaymentIntentRedemptionLastError1760600000000',
       'PaymentIntentRedemptionLapsed1760700000000',
       'PaymentIntentDebtReplacing1760800000000',
+      'VoucherSeqDebtReplacement1760900000000',
     ]);
+    expect(await seqTriggerSource()).toContain('redemption_lapsed_at');
     expect(await columns()).toEqual([
       'redemption_lapsed_at',
       'redemption_last_error',
