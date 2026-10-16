@@ -22,7 +22,10 @@ import {
   chainIdOf,
 } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
-import { CatalogueService } from '@modules/catalogue/services/catalogue.service';
+import {
+  CATALOGUE_CACHE_MS,
+  CatalogueService,
+} from '@modules/catalogue/services/catalogue.service';
 import { PublicCatalogueService } from '@modules/catalogue/services/public-catalogue.service';
 import { X402_SETTLEMENT_CHAINS } from '@modules/mcp/constants/mcp.constants';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
@@ -195,6 +198,10 @@ function build(wiring: Wiring = {}) {
       async ({ where }: { where: { organizationId: string } }) =>
         rows.find((row) => row.organizationId === where.organizationId) ?? null,
     ),
+    // `find({ where: { organizationId: In(ids) } })` — the batched read.
+    find: jest.fn(async ({ where }: { where: { organizationId: { value: string[] } } }) =>
+      rows.filter((row) => where.organizationId.value.includes(row.organizationId)),
+    ),
   } as unknown as ProviderRepository;
 
   const windows = {
@@ -262,6 +269,9 @@ function build(wiring: Wiring = {}) {
     router,
     stakes,
     enrolments,
+    bindings,
+    providers,
+    windows,
     service: new CatalogueService(
       bindings,
       versions,
@@ -1090,15 +1100,108 @@ describe('PublicCatalogueService', () => {
   });
 
   it('serves a repeat request from its cache', async () => {
-    const service = publicService();
-    const inner = (service as unknown as { catalogue: CatalogueService }).catalogue;
-    const spy = jest.spyOn(inner, 'listProviders');
+    const wired = build({
+      bindings: [binding({ organizationId: OPEN })],
+      providers: [provider({ organizationId: OPEN })],
+    });
+    const service = new PublicCatalogueService(wired.service);
 
     await service.listProviders();
     await service.listProviders();
     await service.getProvider(OPEN);
+    await service.listTools();
 
-    expect(spy).toHaveBeenCalledTimes(1);
+    expect(wired.bindings.findActiveBindings).toHaveBeenCalledTimes(1);
+    expect(wired.windows.qualityByProvider).toHaveBeenCalledTimes(1);
+  });
+});
+
+/**
+ * Review 2026-10-17 P2: a public detail for every listed id used to rescan the
+ * whole market per id and read each provider row with its own query. Every
+ * answer now derives from one market read per window.
+ */
+describe('the catalogue, query counts within one cache window', () => {
+  const IDS = [
+    '1a1a1a1a-1111-4111-8111-111111111111',
+    '2b2b2b2b-2222-4222-8222-222222222222',
+    '3c3c3c3c-3333-4333-8333-333333333333',
+  ];
+
+  function wired() {
+    return build({
+      bindings: IDS.map((organizationId) => binding({ organizationId })),
+      providers: IDS.map((organizationId, index) =>
+        provider({ organizationId, legalName: `Provider ${index}` }),
+      ),
+    });
+  }
+
+  afterEach(() => jest.restoreAllMocks());
+
+  it('reads every provider row in ONE batched query, never one per provider', async () => {
+    const { service, providers } = wired();
+
+    await service.listProviders();
+
+    expect(providers.find).toHaveBeenCalledTimes(1);
+    expect(providers.findOne).not.toHaveBeenCalled();
+  });
+
+  it('public detail for K listed ids costs one market load, and no per-id query', async () => {
+    const { service, bindings, providers, windows, enrolments } = wired();
+    const publicCatalogue = new PublicCatalogueService(service);
+
+    const details = await Promise.all(IDS.map((id) => publicCatalogue.getProvider(id)));
+    await Promise.all(IDS.map((id) => publicCatalogue.getProvider(id)));
+
+    expect(details.map((detail) => detail.providerId)).toEqual(IDS);
+    expect(bindings.findActiveBindings).toHaveBeenCalledTimes(1);
+    expect(providers.find).toHaveBeenCalledTimes(1);
+    expect(providers.findOne).not.toHaveBeenCalled();
+    expect(windows.qualityByProvider).toHaveBeenCalledTimes(1);
+    expect(enrolments.enrolmentsOf).toHaveBeenCalledTimes(1);
+  });
+
+  it('a public 404 on an unlisted id does no query of its own', async () => {
+    const { service, bindings, providers } = wired();
+    const publicCatalogue = new PublicCatalogueService(service);
+    await publicCatalogue.listProviders();
+
+    await expectErrorCodeAsync(
+      () => publicCatalogue.getProvider('99999999-9999-4999-8999-999999999999'),
+      ProviderErrorCode.PROVIDER_NOT_FOUND,
+    );
+
+    expect(bindings.findActiveBindings).toHaveBeenCalledTimes(1);
+    expect(providers.findOne).not.toHaveBeenCalled();
+  });
+
+  it('the signed-in catalogue shares the same market read across lists and details', async () => {
+    const { service, bindings, providers, windows } = wired();
+
+    await Promise.all([service.listProviders(), service.listTools(), service.listTools()]);
+    for (const id of IDS) await service.getProvider(id);
+
+    expect(bindings.findActiveBindings).toHaveBeenCalledTimes(1);
+    expect(providers.find).toHaveBeenCalledTimes(1);
+    expect(providers.findOne).not.toHaveBeenCalled();
+    expect(windows.qualityByProvider).toHaveBeenCalledTimes(1);
+  });
+
+  it('loads the market again once the window has passed', async () => {
+    let now = 1_000_000;
+    jest.spyOn(Date, 'now').mockImplementation(() => now);
+    const { service, bindings } = wired();
+
+    await service.listProviders();
+    now += CATALOGUE_CACHE_MS - 1;
+    await service.listProviders();
+    expect(bindings.findActiveBindings).toHaveBeenCalledTimes(1);
+
+    now += 2;
+    await service.listProviders();
+    expect(bindings.findActiveBindings).toHaveBeenCalledTimes(2);
   });
 });
 
@@ -1220,5 +1323,20 @@ describe('the catalogue, with an unpublished draft on a live binding', () => {
     expect(detail.tools).toEqual([]);
     expect(detail.activeBindings).toBe(0);
     expect(providers).toEqual([]);
+  });
+  /** The asset (and so the scale) is the published revision's, not the draft's. */
+  it('a draft that changes the asset keeps the published asset and its decimals', async () => {
+    const { service } = build({
+      bindings: [drafted({ assetId: OTHER_ASSET, priceAmount: '100000' })],
+      versions: [snapshot({ assetId: ASSET, priceAmount: '250000' })],
+    });
+
+    const detail = await service.getProvider('provider-a');
+    const { tools } = await service.listTools();
+
+    const published = { amount: '250000', asset: ASSET, decimals: 6 };
+    expect(detail.tools[0].price).toEqual(published);
+    expect(detail.fromPrice).toEqual(published);
+    expect(tools.find((tool) => tool.id === WEATHER.id)?.fromPrice).toEqual(published);
   });
 });

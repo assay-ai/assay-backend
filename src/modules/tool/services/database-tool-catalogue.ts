@@ -154,6 +154,20 @@ export async function toServedToolBindings(
     drifted.length === 0
       ? []
       : await versions.find({
+          // Only what `toServedToolBinding` reads, plus the lookup keys — not
+          // the authoring and audit columns of every snapshot.
+          select: {
+            organizationId: true,
+            bindingId: true,
+            mappingVersion: true,
+            endpoint: true,
+            requestMapping: true,
+            responseMapping: true,
+            pricingMode: true,
+            priceAmount: true,
+            assetId: true,
+            timeoutMs: true,
+          },
           where: drifted.map((row) => ({
             organizationId: row.organizationId,
             bindingId: row.id,

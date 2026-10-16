@@ -1,7 +1,8 @@
-import { Controller, Get, Param, UseGuards } from '@nestjs/common';
+import { Controller, Get, Param, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { SessionAuthGuard } from '@shared/auth';
+import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 import {
   CatalogueProviderDetailDto,
@@ -39,10 +40,19 @@ import { CatalogueService } from '../services/catalogue.service';
  * Same decision, and the same reason, as `ToolCataloguePort.listTools()` and
  * `GET /tools`: the market is tens of rows, and a cursor with nothing behind it
  * is an API that changes twice. When the port gains paging, so does this.
+ *
+ * ## Bounded cost
+ *
+ * Anyone can sign up, so a session is no bound on its own. Answers come from
+ * `CatalogueService`'s 30 s in-process cache (shared with the public routes —
+ * nothing here is per caller), and each address is held to the same per-minute
+ * window as the public reads by `PublicReadRateLimitInterceptor`. The guard runs
+ * first, so an unauthenticated request is refused before it is counted.
  */
 @ApiTags('Catalogue')
 @ApiBearerAuth()
 @UseGuards(SessionAuthGuard)
+@UseInterceptors(PublicReadRateLimitInterceptor)
 @Controller('catalogue')
 export class CatalogueController {
   constructor(private readonly catalogue: CatalogueService) {}
