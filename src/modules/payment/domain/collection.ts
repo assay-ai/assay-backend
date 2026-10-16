@@ -22,8 +22,10 @@ import {
  *   are refused until it signs a replacement. Charged: the money is the buyer's
  *   to pay, and it is held.
  * - `WRITTEN_OFF`: an outstanding debt not settled within 30 days; the hold
- *   was released, the buyer is not charged and the provider is not paid. Its
- *   paid calls stay refused until it re-signs (H1 interim); once re-signed the
+ *   was released and the provider is not paid (uncollected, on the provider
+ *   side). The buyer is not charged but STILL OWES it: its paid calls stay
+ *   refused until it re-signs (H1 interim), so the receipts summary counts it
+ *   under owed, never under not charged (final review M2). Once re-signed the
  *   row is `DEBT_OUTSTANDING` again until collected.
  * - `VOIDED`: a debt whose call was judged FAIL / REFUND / VOID after it had
  *   been settled as served and unverified; the hold was released, the buyer is
