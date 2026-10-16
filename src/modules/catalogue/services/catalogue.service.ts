@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
+import { In } from 'typeorm';
 
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
@@ -42,6 +43,18 @@ import {
   CatalogueToolDto,
   CatalogueToolListDto,
 } from '../dto/get-catalogue.dto';
+import { TtlCache } from '../domain/ttl-cache';
+
+/** How long one market read is reused, signed-in and public alike. */
+export const CATALOGUE_CACHE_MS = 30_000;
+
+/** The listed market: what {@link CatalogueService.listedMarket} reads once per window. */
+interface ListedMarket {
+  /** Every listed binding, at its published revision. */
+  readonly bindings: readonly ToolBinding[];
+  /** The provider rows behind {@link bindings} — ACTIVE providers only. */
+  readonly rows: ReadonlyMap<string, ProviderEntity>;
+}
 
 /**
  * The buyer's catalogue — see `dto/get-catalogue.dto.ts` for the
@@ -84,10 +97,23 @@ import {
  * ports were written batched for exactly this (`stakeOn` takes an array;
  * `qualityByProvider` takes an array), and a per-provider loop here would turn
  * a 21-row catalogue into 63 round trips.
+ *
+ * ## Cached in process, once per market
+ *
+ * Nothing here depends on the caller — no session, no organization — so every
+ * answer is shared by every reader, signed-in and public. The listed market
+ * (bindings + provider rows), the provider list and the tool list are each
+ * loaded at most once per {@link CATALOGUE_CACHE_MS}, and concurrent readers
+ * share a load in flight. A provider detail for a listed provider is derived
+ * from those, so requesting every listed id costs no query beyond the one
+ * market read; only an unlisted id still reads its own row.
  */
 @Injectable()
 export class CatalogueService {
   private readonly logger = new Logger(CatalogueService.name);
+  private readonly market = new TtlCache<ListedMarket>(CATALOGUE_CACHE_MS);
+  private readonly providerList = new TtlCache<CatalogueProviderListDto>(CATALOGUE_CACHE_MS);
+  private readonly toolList = new TtlCache<CatalogueToolListDto>(CATALOGUE_CACHE_MS);
 
   constructor(
     private readonly bindings: ToolBindingRepository,
@@ -112,37 +138,46 @@ export class CatalogueService {
    * every list and count, exactly as if it had paused them all. Its own page
    * still answers, with no tools — see {@link getProvider}.
    */
-  private async listedBindings(): Promise<ToolBinding[]> {
-    const rows = (await this.bindings.findActiveBindings()).filter(
-      (row) => !this.blocklist.organizationBlock(row.organizationId),
-    );
-    // As traffic is served, not as the row reads now: an unpublished draft
-    // must not show on a public page. A drifted row with no published snapshot
-    // comes back DRAFT and is dropped, exactly as the router drops it.
-    const bindings = (await toServedToolBindings(rows, this.versions)).filter(
-      (binding) => binding.status === BindingStatus.ACTIVE,
-    );
+  private listedMarket(): Promise<ListedMarket> {
+    return this.market.get('all', async () => {
+      const rows = (await this.bindings.findActiveBindings()).filter(
+        (row) => !this.blocklist.organizationBlock(row.organizationId),
+      );
+      // As traffic is served, not as the row reads now: an unpublished draft
+      // must not show on a public page. A drifted row with no published snapshot
+      // comes back DRAFT and is dropped, exactly as the router drops it.
+      const served = (await toServedToolBindings(rows, this.versions)).filter(
+        (binding) => binding.status === BindingStatus.ACTIVE,
+      );
 
-    // A SUSPENDED or UNBONDING provider takes no new traffic — the router
-    // refuses it — so its bindings are left out of every list and count here,
-    // exactly like a PAUSED binding: a catalogue row is an invitation to call.
-    const providers = await this.providerRows([
-      ...new Set(bindings.map((binding) => binding.providerId)),
-    ]);
-    return bindings.filter(
-      (binding) => providers.get(binding.providerId)?.status === ProviderStatus.ACTIVE,
-    );
+      // A SUSPENDED or UNBONDING provider takes no new traffic — the router
+      // refuses it — so its bindings are left out of every list and count here,
+      // exactly like a PAUSED binding: a catalogue row is an invitation to call.
+      const providers = await this.providerRows([
+        ...new Set(served.map((binding) => binding.providerId)),
+      ]);
+      const active = new Map(
+        [...providers].filter(([, row]) => row.status === ProviderStatus.ACTIVE),
+      );
+      return {
+        bindings: served.filter((binding) => active.has(binding.providerId)),
+        rows: active,
+      };
+    });
   }
 
-  async listProviders(): Promise<CatalogueProviderListDto> {
-    const bindings = await this.listedBindings();
+  listProviders(): Promise<CatalogueProviderListDto> {
+    return this.providerList.get('all', () => this.loadProviders());
+  }
+
+  private async loadProviders(): Promise<CatalogueProviderListDto> {
+    const { bindings, rows } = await this.listedMarket();
     const byProvider = groupBy(bindings, (binding) => binding.providerId);
     const providerIds = [...byProvider.keys()];
 
     if (providerIds.length === 0) return { providers: [] };
 
-    const [rows, stakes, quality] = await Promise.all([
-      this.providerRows(providerIds),
+    const [stakes, quality] = await Promise.all([
       this.cardStakes(providerIds),
       this.windows.qualityByProvider(providerIds),
     ]);
@@ -179,59 +214,72 @@ export class CatalogueService {
    * the id exists, which is the leak `surface-consistency.spec.ts` bans.
    */
   async getProvider(providerId: string): Promise<CatalogueProviderDetailDto> {
+    // A listed provider's card is already in the cached list, and its bindings
+    // in the cached market: no query of its own.
+    const [{ providers }, { bindings }, tools] = await Promise.all([
+      this.listProviders(),
+      this.listedMarket(),
+      this.catalogue.listTools(),
+    ]);
+    const card = providers.find((provider) => provider.providerId === providerId);
+    const names = new Map(tools.map((tool: Tool) => [tool.id, tool.name]));
+
+    if (card) {
+      const own = bindings.filter((binding) => binding.providerId === providerId);
+      return { ...card, tools: this.toolRows(own, names) };
+    }
+
+    // Not listed — paused everything, suspended, blocked, or not registered.
+    // Its listed bindings are none by definition, so `tools` is empty.
     const row = await this.providers.findOne({
       where: { organizationId: providerId },
     });
 
     if (!row) throw ProviderErrors.providerNotFound({ providerId });
 
-    const all = await this.listedBindings();
-    const own = all.filter((binding) => binding.providerId === providerId);
-
-    const [stakes, quality, tools] = await Promise.all([
+    const [stakes, quality] = await Promise.all([
       this.cardStakes([providerId]),
       this.windows.qualityByProvider([providerId]),
-      this.catalogue.listTools(),
     ]);
 
-    const names = new Map(tools.map((tool: Tool) => [tool.id, tool.name]));
-
     return {
-      ...this.toProviderDto(
-        row,
-        own,
-        stakes.get(providerId) ?? [],
-        quality.get(providerId) ?? null,
-      ),
-      tools: own
-        .map(
-          (binding): CatalogueProviderToolDto => ({
-            toolId: binding.toolId,
-            name: names.get(binding.toolId) ?? binding.toolId,
-            pricingMode: binding.pricingMode,
-            price: money(binding),
-            // What the free tier would grant one agent here: its per-agent
-            // quota, never more than the binding's daily free-call budget (a
-            // call COUNT across all agents, BUG-R17g-01), each falling back to
-            // the platform default `FreeQuotaService` uses, and capped by the
-            // platform's per-agent ceiling. Null for a PAID binding, which has
-            // no free tier at all.
-            freeCallsPerAgentPerDay:
-              binding.pricingMode === PricingMode.PAID
-                ? null
-                : freeCallsPerDay(
-                    [
-                      {
-                        freeQuotaPerAgent: binding.freeQuotaPerAgent,
-                        freeDailyBudget: binding.freeDailyBudget ?? null,
-                      },
-                    ],
-                    this.freeQuota,
-                  ),
-          }),
-        )
-        .sort((a, b) => a.name.localeCompare(b.name)),
+      ...this.toProviderDto(row, [], stakes.get(providerId) ?? [], quality.get(providerId) ?? null),
+      tools: [],
     };
+  }
+
+  private toolRows(
+    own: readonly ToolBinding[],
+    names: ReadonlyMap<string, string>,
+  ): CatalogueProviderToolDto[] {
+    return own
+      .map(
+        (binding): CatalogueProviderToolDto => ({
+          toolId: binding.toolId,
+          name: names.get(binding.toolId) ?? binding.toolId,
+          pricingMode: binding.pricingMode,
+          price: money(binding),
+          // What the free tier would grant one agent here: its per-agent
+          // quota, never more than the binding's daily free-call budget (a
+          // call COUNT across all agents, BUG-R17g-01), each falling back to
+          // the platform default `FreeQuotaService` uses, and capped by the
+          // platform's per-agent ceiling. Null for a PAID binding, which has
+          // no free tier at all.
+          freeCallsPerAgentPerDay:
+            binding.pricingMode === PricingMode.PAID
+              ? null
+              : freeCallsPerDay(
+                  [
+                    {
+                      freeQuotaPerAgent: binding.freeQuotaPerAgent,
+                      freeDailyBudget: binding.freeDailyBudget ?? null,
+                    },
+                  ],
+                  this.freeQuota,
+                ),
+        }),
+      )
+      .sort((a, b) => a.name.localeCompare(b.name));
   }
 
   /**
@@ -246,9 +294,13 @@ export class CatalogueService {
    * a ceiling token — see its own comment — so browsing cannot exhaust a
    * provider's rate limit.
    */
-  async listTools(): Promise<CatalogueToolListDto> {
-    const [bindings, contracts] = await Promise.all([
-      this.listedBindings(),
+  listTools(): Promise<CatalogueToolListDto> {
+    return this.toolList.get('all', () => this.loadTools());
+  }
+
+  private async loadTools(): Promise<CatalogueToolListDto> {
+    const [{ bindings }, contracts] = await Promise.all([
+      this.listedMarket(),
       this.catalogue.listTools(),
     ]);
 
@@ -344,20 +396,19 @@ export class CatalogueService {
    * other than the caller's — legal because `providerId === organizationId`,
    * and the same idiom `ProviderVerificationService.getVerifications` uses to
    * answer "is this provider verified?" about a provider who is, by definition,
-   * never the caller. No `IS NOT NULL` escape hatch is involved.
+   * never the caller. No `IS NOT NULL` escape hatch is involved. One `IN`
+   * query for the whole set, never one per provider.
    */
   private async providerRows(
     providerIds: readonly string[],
   ): Promise<ReadonlyMap<string, ProviderEntity>> {
-    const rows = await Promise.all(
-      providerIds.map((organizationId) => this.providers.findOne({ where: { organizationId } })),
-    );
+    if (providerIds.length === 0) return new Map();
 
-    return new Map(
-      rows
-        .filter((row): row is ProviderEntity => row !== null)
-        .map((row) => [row.organizationId, row]),
-    );
+    const rows = await this.providers.find({
+      where: { organizationId: In([...providerIds]) },
+    });
+
+    return new Map(rows.map((row) => [row.organizationId, row]));
   }
 
   /**
