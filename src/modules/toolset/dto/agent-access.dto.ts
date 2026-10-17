@@ -32,13 +32,23 @@ export class AllowedToolsetInputDto {
   @ApiPropertyOptional({
     nullable: true,
     description:
-      '`null` follows the latest — your own tool sets only. A pinned version is for another ' +
-      "organization's tool set (sharing arrives later), so it is refused for now.",
+      '"Lock to vN". `null` follows the latest — offered only for your own tool sets (their ' +
+      "Draft) and Official ones. Another organization's tool set must be pinned, so a new " +
+      'version never widens access until you move the pin.',
   })
   @IsOptional()
   @IsInt()
   @Min(1)
   version?: number | null;
+
+  @ApiPropertyOptional({
+    description:
+      "Another organization's link-only tool set: the token from its link, proving you can see it. " +
+      'Not stored.',
+  })
+  @IsOptional()
+  @Matches(/^[a-z0-9_-]{22,32}$/)
+  unlistedToken?: string;
 
   @ApiPropertyOptional({
     default: true,
@@ -179,8 +189,32 @@ export class AllowedToolsetDto {
   @ApiProperty({ nullable: true })
   slug: string | null;
 
-  @ApiProperty({ description: 'The tool set was deleted by its owner; it allows nothing now' })
+  @ApiProperty({
+    description:
+      "Deleted by its owner. Your own: it allows nothing now. Another organization's: the " +
+      'pinned version still allows the same tools ("Tool set deleted by its owner").',
+  })
   deleted: boolean;
+
+  @ApiProperty({ nullable: true, description: "The owner's public name; `assay` for Official" })
+  handle: string | null;
+
+  @ApiProperty({ description: 'Owned by your organization' })
+  own: boolean;
+
+  @ApiProperty({
+    enum: ['ACTIVE', 'DELETED', 'NOT_SHARED', 'REMOVED'],
+    description:
+      'NOT_SHARED: its owner stopped sharing it — a `viaUrlOnly` entry stops working when its URL ' +
+      'stops serving; REMOVED: taken down, allows nothing',
+  })
+  status: string;
+
+  @ApiProperty({
+    nullable: true,
+    description: 'The newest version you could move the pin to — the "Update available" chip',
+  })
+  latestVersion: number | null;
 }
 
 export class AgentRulesDto {

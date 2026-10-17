@@ -34,8 +34,8 @@ function build(
   };
   const credentials = { findOneBy: jest.fn(async () => credential) };
   const toolsets = {
-    findOwnedByIds: jest.fn(async (_org: string, ids: string[]) =>
-      ids.map((id) => ({ id, deletedAt: null, removedAt: null })),
+    findAnyByIds: jest.fn(async (ids: string[]) =>
+      ids.map((id) => ({ id, ownerOrgId: ORG, deletedAt: null, removedAt: null })),
     ),
   };
   const entries = {
@@ -43,13 +43,16 @@ function build(
       ids.includes(TOOLSET) ? [{ toolsetId: TOOLSET, toolId: 'tool-in-kit' }] : [],
     ),
   };
-  const epochs = { current: jest.fn(async () => epoch) } as unknown as AccessEpochService;
+  const epochs = {
+    currentWithSharing: jest.fn(async () => epoch),
+  } as unknown as AccessEpochService;
   const resolver = new AccessResolver(
     policies as never,
     credentials as never,
     toolsets as never,
     entries as never,
     epochs,
+    { findPairs: async () => [] } as never,
     () => now,
   );
   return {
@@ -57,7 +60,7 @@ function build(
     reads,
     bump: () => (epoch = String(Number(epoch) + 1)),
     advance: (ms: number) => (now += ms),
-    breakRedis: () => (epochs.current as jest.Mock).mockResolvedValue(null),
+    breakRedis: () => (epochs.currentWithSharing as jest.Mock).mockResolvedValue(null),
   };
 }
 

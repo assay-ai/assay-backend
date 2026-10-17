@@ -4,6 +4,7 @@ import { AgentCredentialEntity } from '@database/postgres/entities/agent-credent
 import { SpendPolicyEntity } from '@database/postgres/entities/spend-policy.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
+import { ToolsetVersionRepository } from '@database/postgres/repositories/toolset-sharing.repository';
 import {
   ToolsetEntryRepository,
   ToolsetRepository,
@@ -44,11 +45,10 @@ export const ACCESS_CACHE_MAX_ENTRIES = 50_000;
  *
  * Read from the live spend policy (the agent row, else the organization
  * row) and the credential's own narrowing; the toolsets either names are
- * expanded into their tool ids from the Draft (T1 has no published versions,
- * so a reference pinned to a version allows nothing — fail closed). A
- * toolset of another organization is never read: in T1 there is no sharing,
- * so such a reference cannot have been written, and reading one would be a
- * cross-tenant read.
+ * expanded into their tool ids — the Draft or a published snapshot, see
+ * {@link toolsOfToolsets}. Another organization's toolset is read only as
+ * the immutable version the reference pins, which was visible to this
+ * organization when the reference was written.
  *
  * Cached against the organization's access epoch, which every write to a
  * policy, a credential's narrowing or a toolset's Draft bumps — so a revoke or
@@ -64,6 +64,7 @@ export class AccessResolver {
     private readonly toolsets: ToolsetRepository,
     private readonly entries: ToolsetEntryRepository,
     private readonly epochs: AccessEpochService,
+    private readonly versions: ToolsetVersionRepository,
     @Optional() @Inject(ACCESS_CLOCK) private readonly now: () => number = Date.now,
   ) {
     this.cache = new BoundedTtlCache(ACCESS_CACHE_MAX_ENTRIES, ACCESS_CACHE_TTL_MS, now);
@@ -79,7 +80,9 @@ export class AccessResolver {
     credentialId: string | null,
   ): Promise<ResolvedAccess> {
     const key = `${organizationId}:${agentId}:${credentialId ?? '-'}`;
-    const epoch = await this.epochs.current(organizationId);
+    // Another organization's shared toolset (an Official one followed at its
+    // latest, a takedown) changes under the sharing epoch, not this org's.
+    const epoch = await this.epochs.currentWithSharing(organizationId);
     const cached = this.cache.get(key);
     if (epoch !== null && cached?.epoch === epoch) return cached.value;
 
@@ -122,7 +125,19 @@ export class AccessResolver {
     };
   }
 
-  /** Each referenced toolset's tools, by reference. Unknown, deleted or pinned → none. */
+  /**
+   * Each referenced toolset's tools, by reference (design spec §7.7):
+   *
+   * ```text
+   * own toolset        version null → its Draft; n → the snapshot of v n; deleted → none
+   * Official           version null → its latest shared version; n → v n
+   * another org's      n → the snapshot of v n, kept even when deleted; null → none
+   * taken down, unknown → none (fail closed)
+   * ```
+   *
+   * A pinned snapshot is immutable, so a new version never widens access and
+   * a delete never silently narrows another organization's.
+   */
   private async toolsOfToolsets(
     organizationId: string,
     refs: readonly AllowedToolsetRef[],
@@ -130,17 +145,52 @@ export class AccessResolver {
     const ids = [...new Set(refs.map((ref) => ref.toolsetId))];
     if (ids.length === 0) return () => [];
 
-    const owned = (await this.toolsets.findOwnedByIds(organizationId, ids)).filter(
-      (toolset) => toolset.deletedAt === null && toolset.removedAt === null,
+    const found = new Map(
+      (await this.toolsets.findAnyByIds(ids)).map((toolset) => [toolset.id, toolset]),
     );
-    const rows = await this.entries.findByToolsets(owned.map((toolset) => toolset.id));
-    const byToolset = new Map<string, string[]>();
+    const drafts = [...found.values()].filter(
+      (toolset) =>
+        toolset.ownerOrgId === organizationId &&
+        toolset.deletedAt === null &&
+        toolset.removedAt === null,
+    );
+    const rows = await this.entries.findByToolsets(drafts.map((toolset) => toolset.id));
+    const draftTools = new Map<string, string[]>();
     for (const row of rows) {
-      const list = byToolset.get(row.toolsetId) ?? [];
+      const list = draftTools.get(row.toolsetId) ?? [];
       list.push(row.toolId);
-      byToolset.set(row.toolsetId, list);
+      draftTools.set(row.toolsetId, list);
     }
-    return (ref) => (ref.version === null ? (byToolset.get(ref.toolsetId) ?? []) : []);
+
+    const versionOf = (ref: AllowedToolsetRef): number | null => {
+      const toolset = found.get(ref.toolsetId);
+      if (!toolset || toolset.removedAt) return null;
+      if (toolset.ownerOrgId === organizationId) {
+        return toolset.deletedAt ? null : ref.version;
+      }
+      if (ref.version !== null) return ref.version;
+      return toolset.ownerOrgId === null ? toolset.lastSharedVersion : null;
+    };
+    const pairs = refs.flatMap((ref) => {
+      const version = versionOf(ref);
+      return version === null ? [] : [{ toolsetId: ref.toolsetId, version }];
+    });
+    const snapshots = new Map(
+      (await this.versions.findPairs(pairs)).map((row) => [
+        `${row.toolsetId}@${row.version}`,
+        row.toolIds,
+      ]),
+    );
+
+    return (ref) => {
+      const toolset = found.get(ref.toolsetId);
+      if (!toolset || toolset.removedAt) return [];
+      if (toolset.ownerOrgId === organizationId && ref.version === null) {
+        return draftTools.get(ref.toolsetId) ?? [];
+      }
+      const version = versionOf(ref);
+      return version === null ? [] : (snapshots.get(`${ref.toolsetId}@${version}`) ?? []);
+    };
   }
 }
 

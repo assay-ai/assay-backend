@@ -30,14 +30,36 @@ export interface McpEndpointView {
   readonly baseToolIds: readonly string[] | null;
   /** The entry rules of the toolset this URL serves, by tool id. */
   readonly entryRules: ReadonlyMap<string, EntryRoutingRules>;
+  /**
+   * The served toolset's own settings — the Draft's on `/my/{slug}`, the
+   * version snapshot's everywhere else. `null` on URLs with no toolset.
+   */
+  readonly settings: ToolsetSettings | null;
+  /** Set when a shared URL serves only through a grace period or a rename alias. */
+  readonly notice: ViewNotice | null;
+}
+
+export interface ToolsetSettings {
+  readonly discovery: string;
+  readonly searchThreshold: number;
+  readonly pinnedTools: readonly string[];
+}
+
+export interface ViewNotice {
+  /** `_meta["assay/sharingEnds"]`: the URL stops serving then. */
+  readonly sharingEndsAt: Date | null;
+  /** `_meta["assay/renamed"]`: the handle in the URL is an old one; this is the current. */
+  readonly renamedTo: string | null;
 }
 
 export interface ViewToolset {
   readonly id: string;
   readonly slug: string;
   readonly name: string;
-  /** `null` — the Draft. A published version is T2. */
+  /** The published version served, or `null` for the Draft (`/my/{slug}`). */
   readonly version: number | null;
+  /** Set on a URL with no `@n`: it follows the latest version (`_meta["assay/toolsetVersion"]`). */
+  readonly latest: boolean;
 }
 
 /** The fields of a `toolset_entries` row the rules are built from. */
@@ -119,4 +141,22 @@ export function selectViewTools(
 export function servesPricingMode(filter: ViewFilter, mode: PricingMode | null): boolean {
   if (!filter.free) return true;
   return mode === PricingMode.FREE || mode === PricingMode.FREEMIUM;
+}
+
+/**
+ * The `_meta` a list result carries for its URL (design spec §7.4):
+ * `assay/toolsetVersion` on a latest URL, `assay/sharingEnds` while a shared
+ * URL serves only through a grace period, `assay/renamed` on an old handle.
+ */
+export function listMetaOf(view: McpEndpointView | null | undefined): Record<string, unknown> {
+  const meta: Record<string, unknown> = {};
+  if (!view) return meta;
+  if (view.toolset?.latest && view.toolset.version !== null) {
+    meta['assay/toolsetVersion'] = view.toolset.version;
+  }
+  if (view.notice?.sharingEndsAt) {
+    meta['assay/sharingEnds'] = view.notice.sharingEndsAt.toISOString();
+  }
+  if (view.notice?.renamedTo) meta['assay/renamed'] = { to: view.notice.renamedTo };
+  return meta;
 }

@@ -9,6 +9,7 @@ import { AgentCredentialRepository } from '@database/postgres/repositories/agent
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import { ToolsetVersionRepository } from '@database/postgres/repositories/toolset-sharing.repository';
 import { ToolsetRepository } from '@database/postgres/repositories/toolset.repository';
 import { AccountErrors } from '@modules/account/errors/account.errors';
 import { chainMetadata } from '@modules/chains/chain-metadata';
@@ -37,9 +38,14 @@ import {
   UpdateCredentialAccessBodyDto,
 } from '../dto/agent-access.dto';
 import { ToolsetErrors } from '../errors/toolset.errors';
+import { OFFICIAL_HANDLE } from '../domain/handle';
+import { isShared, listedInCatalogue } from '../domain/sharing';
+import { HandlesService } from './handles.service';
+import { sharingStateOf } from './sharing-row';
+import { visibleToOthers } from './toolset-publishing.service';
 import { AccessEpochService } from './access-epoch.service';
 import { AccessResolver, agentRulesOf } from './access.resolver';
-import { ConnectUrlsService } from './connect-urls.service';
+import { ConnectUrlsService, ServerInUseRow } from './connect-urls.service';
 import { TOOLSET_LIMITS } from './toolsets.service';
 
 /**
@@ -73,6 +79,8 @@ export class AgentAccessService {
     private readonly config: ConfigService,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
+    private readonly versions: ToolsetVersionRepository,
+    private readonly handles: HandlesService,
   ) {}
 
   /** `readerAgentId`: a machine credential's own agent, which is all it may read. */
@@ -96,7 +104,12 @@ export class AgentAccessService {
     actor: AuditActor,
   ): Promise<AgentAccessDto> {
     const agent = await this.requireAgent(organizationId, agentId);
-    const access = await this.validateAccess(organizationId, body);
+    const current = await this.policies.findLive(organizationId, agentId);
+    const access = await this.validateAccess(
+      organizationId,
+      body,
+      readAllowedToolsets(current?.allowedToolsets),
+    );
     await this.write(
       organizationId,
       agentId,
@@ -125,6 +138,7 @@ export class AgentAccessService {
 
     let everything = false;
     const toolsetRefs: AllowedToolsetRef[] = [];
+    const candidates: ServerInUseRow[] = [];
     const toolIds = new Set<string>();
     for (const server of servers) {
       const { path, filter } = server.parsed;
@@ -144,9 +158,10 @@ export class AgentAccessService {
         continue;
       }
       if (server.toolsetId && !toolsetRefs.some((ref) => ref.toolsetId === server.toolsetId)) {
-        toolsetRefs.push({ toolsetId: server.toolsetId, version: null, viaUrlOnly: true });
+        candidates.push(server);
       }
     }
+    toolsetRefs.push(...(await this.connectedRefs(organizationId, candidates)));
 
     const access: Partial<AccessFields> = everything
       ? { accessMode: AccessMode.ALL }
@@ -164,6 +179,51 @@ export class AgentAccessService {
       actor,
     );
     return { ...(await this.get(organizationId, agentId)), everything };
+  }
+
+  /**
+   * The toolsets behind servers in use, pinned to the versions those URLs
+   * serve (§7.7). Own: as the URL says (Draft, or `@n`). Official: as the URL
+   * says (latest, or `@n`). Another organization's: pinned to the URL's
+   * version, else the version its calls were served, else the last shared one
+   * — and only when the agent actually called through it or the organization
+   * can see it now, so a handed-out URL naming somebody's private toolset
+   * grants and reveals nothing.
+   */
+  private async connectedRefs(
+    organizationId: string,
+    servers: readonly ServerInUseRow[],
+  ): Promise<AllowedToolsetRef[]> {
+    const found = new Map(
+      (await this.toolsets.findAnyByIds(servers.map((s) => s.toolsetId as string))).map((t) => [
+        t.id,
+        t,
+      ]),
+    );
+    const now = new Date();
+    const refs: AllowedToolsetRef[] = [];
+    for (const server of servers) {
+      const toolset = found.get(server.toolsetId as string);
+      if (!toolset || toolset.removedAt) continue;
+      if (refs.some((ref) => ref.toolsetId === toolset.id)) continue;
+      if (toolset.ownerOrgId === organizationId) {
+        if (toolset.deletedAt) continue;
+        refs.push({ toolsetId: toolset.id, version: server.toolsetVersion, viaUrlOnly: true });
+        continue;
+      }
+      const { path } = server.parsed;
+      const token = path.kind === McpPathKind.UNLISTED_TOOLSET ? path.token : undefined;
+      const visible = visibleToOthers(sharingStateOf(toolset), token, now);
+      if (!visible && server.lastCallAt === null) continue;
+      const pathVersion = 'version' in path ? (path as { version: number | null }).version : null;
+      const version =
+        toolset.ownerOrgId === null
+          ? pathVersion
+          : (server.toolsetVersion ?? toolset.lastSharedVersion);
+      if (toolset.ownerOrgId !== null && version === null) continue;
+      refs.push({ toolsetId: toolset.id, version, viaUrlOnly: true });
+    }
+    return refs;
   }
 
   async getCredential(organizationId: string, credentialId: string): Promise<CredentialAccessDto> {
@@ -190,7 +250,11 @@ export class AgentAccessService {
             allowedToolsets:
               body.allowedToolsets === undefined
                 ? readAllowedToolsets(credential.allowedToolsets)
-                : await this.validateToolsets(organizationId, body.allowedToolsets ?? []),
+                : await this.validateToolsets(
+                    organizationId,
+                    body.allowedToolsets ?? [],
+                    readAllowedToolsets(credential.allowedToolsets),
+                  ),
             allowedToolIds:
               body.allowedToolIds === undefined
                 ? (credential.allowedToolIds ?? [])
@@ -246,6 +310,7 @@ export class AgentAccessService {
   private async validateAccess(
     organizationId: string,
     body: UpdateAgentAccessBodyDto,
+    held: readonly AllowedToolsetRef[],
   ): Promise<Partial<AccessFields>> {
     // Omitted keeps a value; a `null` list clears it; `accessMode` has no null.
     const access: Partial<AccessFields> = {};
@@ -256,6 +321,7 @@ export class AgentAccessService {
       access.allowedToolsets = await this.validateToolsets(
         organizationId,
         body.allowedToolsets ?? [],
+        held,
       );
     }
     if (body.allowedToolIds !== undefined) {
@@ -279,36 +345,93 @@ export class AgentAccessService {
   }
 
   /**
-   * Own, live toolsets only, each following its Draft. Another organization's
-   * toolset can be allowed only at a pinned version once sharing exists (T2);
-   * until then a pin names a version that does not exist.
+   * The pinned-access rules (design spec §7.7, FR-3):
+   *
+   * - your own live toolset: follow its Draft (`version: null`) or pin a
+   *   published version;
+   * - an Official toolset that is listed: follow its latest or pin one;
+   * - another organization's: pinned only, to a version published while it
+   *   was shared, and only when this organization can see it — PUBLIC and
+   *   listed (or in its public grace period), or link-only with the link's
+   *   current token. Anything else is the same "unknown" as a missing id.
+   *
+   * A reference already held, unchanged (same toolset and version), is kept
+   * as it is even when its toolset was deleted or stopped being shared since:
+   * editing another field never silently drops it.
    */
   private async validateToolsets(
     organizationId: string,
     input: readonly AllowedToolsetInputDto[],
+    held: readonly AllowedToolsetRef[] = [],
   ): Promise<AllowedToolsetRef[]> {
-    const ids = [...new Set(input.map((ref) => ref.toolsetId))];
-    const live = new Set(
-      (await this.toolsets.findOwnedByIds(organizationId, ids))
-        .filter((toolset) => toolset.deletedAt === null)
-        .map((toolset) => toolset.id),
+    const byId = new Map<string, AllowedToolsetInputDto>();
+    for (const ref of input) byId.set(ref.toolsetId, ref);
+    const ids = [...byId.keys()];
+    const found = new Map(
+      (await this.toolsets.findAnyByIds(ids)).map((toolset) => [toolset.id, toolset]),
     );
-    const unknown = ids.filter((id) => !live.has(id));
+    const now = new Date();
+
+    const unknown: string[] = [];
+    const unpinned: string[] = [];
+    const noVersion: string[] = [];
+    const out: AllowedToolsetRef[] = [];
+    for (const id of ids) {
+      const ref = byId.get(id) as AllowedToolsetInputDto;
+      const version = ref.version ?? null;
+      const viaUrlOnly = ref.viaUrlOnly !== false;
+      if (held.some((h) => h.toolsetId === id && h.version === version)) {
+        out.push({ toolsetId: id, version, viaUrlOnly });
+        continue;
+      }
+
+      const toolset = found.get(id);
+      const own = toolset?.ownerOrgId === organizationId;
+      const official = toolset !== undefined && toolset.ownerOrgId === null;
+      if (!toolset || toolset.deletedAt || toolset.removedAt) {
+        unknown.push(id);
+        continue;
+      }
+      if (!own) {
+        const state = sharingStateOf(toolset);
+        const visible = official
+          ? listedInCatalogue(state)
+          : visibleToOthers(state, ref.unlistedToken, now);
+        if (!visible) {
+          unknown.push(id);
+          continue;
+        }
+        if (version === null && !official) {
+          unpinned.push(id);
+          continue;
+        }
+      }
+      if (version !== null) {
+        const newest = own ? toolset.latestVersion : toolset.lastSharedVersion;
+        if (!newest || version > newest || !(await this.versions.findVersion(id, version))) {
+          noVersion.push(id);
+          continue;
+        }
+      }
+      out.push({ toolsetId: id, version, viaUrlOnly });
+    }
+
     if (unknown.length > 0) {
       throw ToolsetErrors.accessInvalid({ reason: 'unknown tool sets', toolsetIds: unknown });
     }
-    const pinned = input.filter((ref) => ref.version !== undefined && ref.version !== null);
-    if (pinned.length > 0) {
+    if (unpinned.length > 0) {
       throw ToolsetErrors.accessInvalid({
-        reason: 'a tool set version does not exist yet; follow the latest (version: null)',
-        toolsetIds: pinned.map((ref) => ref.toolsetId),
+        reason: "another organization's tool set is allowed at a pinned version only; set version",
+        toolsetIds: unpinned,
       });
     }
-    return ids.map((toolsetId) => ({
-      toolsetId,
-      version: null,
-      viaUrlOnly: input.find((ref) => ref.toolsetId === toolsetId)?.viaUrlOnly !== false,
-    }));
+    if (noVersion.length > 0) {
+      throw ToolsetErrors.accessInvalid({
+        reason: 'a tool set version does not exist',
+        toolsetIds: noVersion,
+      });
+    }
+    return out;
   }
 
   private async validateToolIds(toolIds: readonly string[]): Promise<string[]> {
@@ -401,22 +524,63 @@ export class AgentAccessService {
     refs: readonly AllowedToolsetRef[],
   ): Promise<AllowedToolsetDto[]> {
     const found = new Map(
-      (
-        await this.toolsets.findOwnedByIds(
-          organizationId,
-          refs.map((ref) => ref.toolsetId),
-        )
-      ).map((toolset) => [toolset.id, toolset]),
+      (await this.toolsets.findAnyByIds(refs.map((ref) => ref.toolsetId))).map((toolset) => [
+        toolset.id,
+        toolset,
+      ]),
     );
+    const handles = await this.handles.handlesOf(
+      [...found.values()].flatMap((toolset) => (toolset.ownerOrgId ? [toolset.ownerOrgId] : [])),
+    );
+    // Another organization's toolset is named as the pinned version names
+    // itself: its current name may be a later, unseen version's.
+    const pinned = new Map(
+      (
+        await this.versions.findPairs(
+          refs.flatMap((ref) =>
+            ref.version !== null ? [{ toolsetId: ref.toolsetId, version: ref.version }] : [],
+          ),
+        )
+      ).map((row) => [`${row.toolsetId}@${row.version}`, row.name]),
+    );
+
     return refs.map((ref) => {
       const toolset = found.get(ref.toolsetId);
+      const own = toolset?.ownerOrgId === organizationId;
+      const state = toolset ? sharingStateOf(toolset) : null;
+      const status = !toolset
+        ? 'DELETED'
+        : toolset.removedAt
+          ? 'REMOVED'
+          : toolset.deletedAt
+            ? 'DELETED'
+            : !own && state && !isShared(state)
+              ? 'NOT_SHARED'
+              : 'ACTIVE';
+      const publiclyVisible = !!state && (toolset?.ownerOrgId === null || isShared(state));
       return {
         toolsetId: ref.toolsetId,
         version: ref.version,
         viaUrlOnly: ref.viaUrlOnly,
-        name: toolset?.name ?? null,
+        name: own
+          ? (toolset?.name ?? null)
+          : (pinned.get(`${ref.toolsetId}@${ref.version}`) ?? (toolset ? toolset.name : null)),
         slug: toolset?.slug ?? null,
         deleted: !toolset || toolset.deletedAt !== null,
+        handle: !toolset
+          ? null
+          : toolset.ownerOrgId === null
+            ? OFFICIAL_HANDLE
+            : (handles.get(toolset.ownerOrgId) ?? null),
+        own,
+        status,
+        latestVersion: !toolset
+          ? null
+          : own
+            ? toolset.latestVersion
+            : publiclyVisible && status === 'ACTIVE'
+              ? toolset.lastSharedVersion
+              : null,
       };
     });
   }
