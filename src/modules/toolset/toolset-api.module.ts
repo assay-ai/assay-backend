@@ -6,6 +6,7 @@ import {
   AgentAccessController,
   CredentialAccessController,
 } from './controllers/agent-access.controller';
+import { HandlesController } from './controllers/handles.controller';
 import { RefusedCallsController } from './controllers/refused-calls.controller';
 import { ToolsetsController } from './controllers/toolsets.controller';
 import { ToolsetModule } from './toolset.module';
@@ -21,6 +22,7 @@ import { ToolsetModule } from './toolset.module';
     AgentAccessController,
     CredentialAccessController,
     RefusedCallsController,
+    HandlesController,
   ],
 })
 export class ToolsetApiModule {}

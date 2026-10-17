@@ -24,6 +24,7 @@ function build(options: { owned?: number; tools?: number } = {}) {
       countOwned: async () => options.owned ?? 0,
       findOwned: async () => null,
       findOwnedBySlug: async () => null,
+      findHolderOfSlug: async () => null,
       slugsLike: async () => [],
     } as never,
     { findByToolsets: async () => [] } as never,
@@ -32,6 +33,7 @@ function build(options: { owned?: number; tools?: number } = {}) {
     { record: async () => undefined } as never,
     { transaction: async () => ({ id: 'never' }) } as never,
     { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' },
+    { handlesOf: async () => new Map() } as never,
   );
   return { service, tools };
 }

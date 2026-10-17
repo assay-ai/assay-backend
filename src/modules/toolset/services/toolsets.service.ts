@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, IsNull } from 'typeorm';
 
@@ -27,7 +27,18 @@ import {
   UpdateToolsetBodyDto,
 } from '../dto/toolset.dto';
 import { ToolsetErrors } from '../errors/toolset.errors';
+import {
+  SharingTransitionError,
+  ToolsetVisibility,
+  applySharing,
+  isShared,
+  sharingEndsAt,
+} from '../domain/sharing';
+import { OFFICIAL_HANDLE } from '../domain/handle';
 import { AccessEpochService } from './access-epoch.service';
+import { HandlesService } from './handles.service';
+import { sharingPatchOf, sharingStateOf } from './sharing-row';
+import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
 
 /** Limits of design spec §7.13. Beyond one the REST API answers 429. */
 export const TOOLSET_LIMITS = Object.freeze({
@@ -69,6 +80,8 @@ export class ToolsetsService {
     private readonly audit: AuditLogWriter,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
+    private readonly handles: HandlesService,
+    @Optional() @Inject(TOOLSET_CLOCK) private readonly now: ToolsetClock = systemClock,
   ) {}
 
   async list(
@@ -82,7 +95,8 @@ export class ToolsetsService {
     const page = await paginate(qb, query, TOOLSET_LIST);
 
     const counts = await this.entryCounts(page.items.map((toolset) => toolset.id));
-    return page.map((toolset) => this.toSummary(toolset, counts.get(toolset.id) ?? 0));
+    const handle = (await this.handles.handlesOf([organizationId])).get(organizationId) ?? null;
+    return page.map((toolset) => this.toSummary(toolset, counts.get(toolset.id) ?? 0, handle));
   }
 
   async get(organizationId: string, id: string): Promise<ToolsetDto> {
@@ -153,6 +167,8 @@ export class ToolsetsService {
     const patch: Partial<ToolsetEntity> = {};
     if (body.name !== undefined) patch.name = body.name;
     if (body.slug !== undefined && body.slug !== toolset.slug) {
+      // Shared URLs and pinned versions name the slug: it is fixed from the first share.
+      if (toolset.firstSharedAt) throw ToolsetErrors.slugLocked();
       patch.slug = await this.requireFreeSlug(organizationId, body.slug);
     }
     if (body.description !== undefined) patch.description = body.description;
@@ -225,17 +241,32 @@ export class ToolsetsService {
   }
 
   /**
-   * Soft delete. In T1 nothing outside the organization can use a toolset,
-   * so there is no grace period: its URL stops serving at once, and an access
-   * policy that allowed it now allows none of its tools (fail closed).
+   * Soft delete (design spec §7.7). When other organizations used the toolset
+   * in the last 30 days or allow it in their access, its shared URLs keep
+   * serving the last version for 90 days, as after Stop sharing; otherwise
+   * they stop at once. Pinned access of other organizations keeps its
+   * snapshot either way. The owner's own access to it allows nothing from now
+   * (fail closed).
    */
   async delete(organizationId: string, id: string, actor: AuditActor): Promise<void> {
     const toolset = await this.requireOwned(organizationId, id);
+    const usedByOthers = await this.usedByOthers(organizationId, toolset.id);
+    const state = sharingStateOf(toolset);
+    const wasShared = isShared(state) || state.graceUntil !== null;
+    let next;
+    try {
+      next = applySharing(state, { kind: 'DELETE', usedByOthers }, this.now());
+    } catch (error) {
+      if (error instanceof SharingTransitionError) {
+        throw ToolsetErrors.sharingRefused({ refusal: error.refusal });
+      }
+      throw error;
+    }
     await this.dataSource.transaction(async (manager) => {
       await manager.update(
         ToolsetEntity,
         { id: toolset.id, ownerOrgId: organizationId, deletedAt: IsNull() },
-        { deletedAt: new Date() },
+        sharingPatchOf(next),
       );
       await this.audit.record(manager, {
         organizationId,
@@ -243,11 +274,33 @@ export class ToolsetsService {
         action: 'toolset.deleted',
         resourceType: 'toolset',
         resourceId: toolset.id,
-        before: { slug: toolset.slug, name: toolset.name },
-        after: null,
+        before: { slug: toolset.slug, name: toolset.name, visibility: toolset.visibility },
+        after: { graceUntil: next.graceUntil?.toISOString() ?? null },
       });
     });
     await this.epochs.bump(organizationId);
+    if (wasShared) await this.epochs.bumpShared();
+  }
+
+  /** Other organizations called it in the last 30 days, or allow it in their access. */
+  private async usedByOthers(organizationId: string, toolsetId: string): Promise<boolean> {
+    const ref = JSON.stringify([{ toolsetId }]);
+    const [row] = (await this.dataSource.query(
+      `SELECT (
+         EXISTS (SELECT 1 FROM payment_intents
+                  WHERE toolset_id = $1 AND organization_id <> $2
+                    AND created_at > now() - interval '30 days')
+         OR EXISTS (SELECT 1 FROM tool_call_records
+                     WHERE toolset_id = $1 AND organization_id <> $2
+                       AND created_at > now() - interval '30 days')
+         OR EXISTS (SELECT 1 FROM spend_policies
+                     WHERE organization_id <> $2 AND allowed_toolsets @> $3::jsonb)
+         OR EXISTS (SELECT 1 FROM agent_credentials
+                     WHERE organization_id <> $2 AND allowed_toolsets @> $3::jsonb)
+       ) AS used`,
+      [toolsetId, organizationId, ref],
+    )) as { used: boolean }[];
+    return row?.used === true;
   }
 
   // ── Validation ────────────────────────────────────────────────────────────
@@ -338,7 +391,7 @@ export class ToolsetsService {
   }
 
   private async requireFreeSlug(organizationId: string, slug: string): Promise<string> {
-    if (await this.toolsets.findOwnedBySlug(organizationId, slug)) {
+    if (await this.toolsets.findHolderOfSlug(organizationId, slug)) {
       throw ToolsetErrors.slugTaken({
         slug,
         suggestion: await this.freeSlug(organizationId, slug),
@@ -409,13 +462,28 @@ export class ToolsetsService {
     const tools = new Map(
       (await this.tools.findByIds(rows.map((row) => row.toolId))).map((tool) => [tool.id, tool]),
     );
+    const handle =
+      toolset.ownerOrgId === null
+        ? OFFICIAL_HANDLE
+        : ((await this.handles.handlesOf([toolset.ownerOrgId])).get(toolset.ownerOrgId) ?? null);
     return {
-      ...this.toSummary(toolset, rows.length),
+      ...this.toSummary(toolset, rows.length, handle),
       entries: rows.map((row) => toEntryDto(row, tools.get(row.toolId))),
     };
   }
 
-  private toSummary(toolset: ToolsetEntity, toolCount: number): ToolsetSummaryDto {
+  private toSummary(
+    toolset: ToolsetEntity,
+    toolCount: number,
+    handle: string | null,
+  ): ToolsetSummaryDto {
+    const state = sharingStateOf(toolset);
+    const base = this.host.mcpPublicUrl;
+    const latest = toolset.latestVersion;
+    const publicUrl =
+      handle && toolset.visibility === ToolsetVisibility.PUBLIC
+        ? `${base}/@${handle}/${toolset.slug}`
+        : null;
     return {
       id: toolset.id,
       slug: toolset.slug,
@@ -428,10 +496,37 @@ export class ToolsetsService {
       discovery: toolset.discovery,
       searchThreshold: toolset.searchThreshold,
       pinnedTools: toolset.pinnedTools,
-      mcpUrl: `${this.host.mcpPublicUrl}/my/${toolset.slug}`,
+      mcpUrl: `${base}/my/${toolset.slug}`,
       toolCount,
       createdAt: new Date(toolset.createdAt).toISOString(),
       updatedAt: new Date(toolset.updatedAt).toISOString(),
+      publisherKind: toolset.publisherKind,
+      handle,
+      listingStatus: toolset.listingStatus,
+      latestVersion: latest,
+      sharingEndsAt:
+        (sharingEndsAt(state, 'PUBLIC') ?? sharingEndsAt(state, 'UNLISTED'))?.toISOString() ?? null,
+      delisted: toolset.delistedAt !== null,
+      removed: toolset.removedAt !== null,
+      urls: {
+        draft: `${base}/my/${toolset.slug}`,
+        myPinned: latest ? `${base}/my/${toolset.slug}@${latest}` : null,
+        public: publicUrl,
+        publicPinned:
+          publicUrl && toolset.lastSharedVersion
+            ? `${publicUrl}@${toolset.lastSharedVersion}`
+            : null,
+        unlisted:
+          toolset.unlistedToken && isShared(state) ? `${base}/u/${toolset.unlistedToken}` : null,
+        unlistedPinned:
+          toolset.unlistedToken && isShared(state) && toolset.lastSharedVersion
+            ? `${base}/u/${toolset.unlistedToken}@${toolset.lastSharedVersion}`
+            : null,
+      },
+      unlistedToken: isShared(state) ? toolset.unlistedToken : null,
+      forkedFrom: toolset.forkedFromId
+        ? { toolsetId: toolset.forkedFromId, version: toolset.forkedFromVersion }
+        : null,
     };
   }
 }

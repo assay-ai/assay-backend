@@ -122,6 +122,13 @@ export enum NotificationEvent {
    */
   CALL_REFUSED_REPEATEDLY = 'call.refused_repeatedly',
 
+  /**
+   * A newer version of a shared toolset an agent of this organization used in
+   * the last 30 days (design spec FR-17), with the diff. At most one per
+   * toolset per 7 days; `ToolsetNoticesService` is the producer.
+   */
+  TOOLSET_UPDATE_AVAILABLE = 'toolset.update_available',
+
   // ── Credentials and signing ─────────────────────────────────────────────
   SESSION_EXPIRING = 'session.expiring',
   SESSION_EXPIRED = 'session.expired',

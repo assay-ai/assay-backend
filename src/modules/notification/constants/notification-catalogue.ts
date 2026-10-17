@@ -137,6 +137,14 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       aggregation: NotificationAggregation.ONCE_PER_UTC_DAY,
       nonSuppressible: false,
     },
+    [NotificationEvent.TOOLSET_UPDATE_AVAILABLE]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      // The 7-day digest rule is the producer's (`toolset_notice_log`); this
+      // keeps one version from ever reaching an organization twice.
+      aggregation: NotificationAggregation.ONCE,
+      nonSuppressible: false,
+    },
     [NotificationEvent.AGENT_PAUSED]: {
       severity: NotificationSeverity.WARNING,
       channels: EVERYTHING,

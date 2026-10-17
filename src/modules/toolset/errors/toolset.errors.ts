@@ -11,6 +11,17 @@ export enum ToolsetErrorCode {
   TOOLSET_LIMIT_EXCEEDED = 'TOOLSET_LIMIT_EXCEEDED',
   TOOLSET_ACCESS_INVALID = 'TOOLSET_ACCESS_INVALID',
   TOOLSET_REFUSED_CALL_NOT_FOUND = 'TOOLSET_REFUSED_CALL_NOT_FOUND',
+  TOOLSET_HANDLE_INVALID = 'TOOLSET_HANDLE_INVALID',
+  TOOLSET_HANDLE_TAKEN = 'TOOLSET_HANDLE_TAKEN',
+  TOOLSET_HANDLE_LOCKED = 'TOOLSET_HANDLE_LOCKED',
+  TOOLSET_HANDLE_REQUIRED = 'TOOLSET_HANDLE_REQUIRED',
+  TOOLSET_HANDLE_CLAIM_REFUSED = 'TOOLSET_HANDLE_CLAIM_REFUSED',
+  TOOLSET_SHARING_REFUSED = 'TOOLSET_SHARING_REFUSED',
+  TOOLSET_NOT_PUBLISHABLE = 'TOOLSET_NOT_PUBLISHABLE',
+  TOOLSET_VERSION_NOT_FOUND = 'TOOLSET_VERSION_NOT_FOUND',
+  TOOLSET_SLUG_LOCKED = 'TOOLSET_SLUG_LOCKED',
+  TOOLSET_REPORT_DUPLICATE = 'TOOLSET_REPORT_DUPLICATE',
+  TOOLSET_REPORT_TARGET_NOT_FOUND = 'TOOLSET_REPORT_TARGET_NOT_FOUND',
 }
 
 export type ToolsetErrorCodesArePrefixed = AssertDomainErrorCodes<'TOOLSET', `${ToolsetErrorCode}`>;
@@ -50,6 +61,78 @@ export const ToolsetErrors = createDomainErrorFactory('TOOLSET', {
     message: (context?: Record<string, any>) =>
       `Invalid access policy${context?.reason ? `: ${context.reason}` : ''}`,
     publicContext: ['reason', 'toolIds', 'toolsetIds', 'tools'],
+  },
+  handleInvalid: {
+    code: ToolsetErrorCode.TOOLSET_HANDLE_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      context?.reason === 'RESERVED'
+        ? 'This public name is reserved'
+        : 'A public name is 3–24 characters: lowercase letters, digits and "-", starting with a letter',
+    publicContext: ['reason'],
+  },
+  /** Taken by another organization, or held after a rename or a takedown. */
+  handleTaken: {
+    code: ToolsetErrorCode.TOOLSET_HANDLE_TAKEN,
+    statusCode: 409,
+    message: (_context?: Record<string, any>) => 'This public name is taken',
+    publicContext: ['suggestions'],
+  },
+  handleLocked: {
+    code: ToolsetErrorCode.TOOLSET_HANDLE_LOCKED,
+    statusCode: 409,
+    message: () => 'Your public name is in use by a shared tool set; ask support to rename it',
+  },
+  handleRequired: {
+    code: ToolsetErrorCode.TOOLSET_HANDLE_REQUIRED,
+    statusCode: 409,
+    message: () => 'Choose a public name before sharing',
+  },
+  /** `NOT_VERIFIED` (fund once first) | `CLAIM_LIMIT` (3 organizations per person per 30 days). */
+  handleClaimRefused: {
+    code: ToolsetErrorCode.TOOLSET_HANDLE_CLAIM_REFUSED,
+    statusCode: 403,
+    message: (context?: Record<string, any>) =>
+      context?.reason === 'CLAIM_LIMIT'
+        ? 'You have claimed public names for 3 organizations in the last 30 days'
+        : 'Add funds once before choosing a public name',
+    publicContext: ['reason'],
+  },
+  /** A share-state change the state machine refuses (`refusal`). */
+  sharingRefused: {
+    code: ToolsetErrorCode.TOOLSET_SHARING_REFUSED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This tool set cannot be changed that way${context?.refusal ? ` (${context.refusal})` : ''}`,
+    publicContext: ['refusal'],
+  },
+  notPublishable: {
+    code: ToolsetErrorCode.TOOLSET_NOT_PUBLISHABLE,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `This tool set cannot be published${context?.reason ? `: ${context.reason}` : ''}`,
+    publicContext: ['reason', 'toolIds'],
+  },
+  versionNotFound: {
+    code: ToolsetErrorCode.TOOLSET_VERSION_NOT_FOUND,
+    statusCode: 404,
+    message: () => 'Tool set version not found',
+  },
+  slugLocked: {
+    code: ToolsetErrorCode.TOOLSET_SLUG_LOCKED,
+    statusCode: 409,
+    message: () => 'The slug of a tool set that has been shared cannot change',
+  },
+  reportDuplicate: {
+    code: ToolsetErrorCode.TOOLSET_REPORT_DUPLICATE,
+    statusCode: 409,
+    message: () => 'Your organization already has an open report about this',
+  },
+  /** The same 404 for a missing target and one the reporter cannot see. */
+  reportTargetNotFound: {
+    code: ToolsetErrorCode.TOOLSET_REPORT_TARGET_NOT_FOUND,
+    statusCode: 404,
+    message: () => 'Nothing to report was found',
   },
   refusedCallNotFound: {
     code: ToolsetErrorCode.TOOLSET_REFUSED_CALL_NOT_FOUND,

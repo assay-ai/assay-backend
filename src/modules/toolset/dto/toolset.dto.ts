@@ -282,6 +282,37 @@ export class ToolsetEntryDto {
   onEmpty: OnEmpty;
 }
 
+export class ToolsetUrlsDto {
+  @ApiProperty({ description: 'The live Draft, `/my/{slug}`; keys of your organization only' })
+  draft: string;
+
+  @ApiProperty({ nullable: true, description: '"Lock to vN": `/my/{slug}@{latest}`' })
+  myPinned: string | null;
+
+  @ApiProperty({ nullable: true, description: '`/@{handle}/{slug}` while PUBLIC' })
+  public: string | null;
+
+  @ApiProperty({ nullable: true, description: '`/@{handle}/{slug}@{latest}` while PUBLIC' })
+  publicPinned: string | null;
+
+  @ApiProperty({
+    nullable: true,
+    description: '`/u/{token}` while shared — the link is the permission',
+  })
+  unlisted: string | null;
+
+  @ApiProperty({ nullable: true, description: '`/u/{token}@{latest}` while shared' })
+  unlistedPinned: string | null;
+}
+
+export class ForkedFromDto {
+  @ApiProperty()
+  toolsetId: string;
+
+  @ApiProperty({ nullable: true, description: "`null`: copied from its owner's Draft" })
+  version: number | null;
+}
+
 export class ToolsetSummaryDto {
   @ApiProperty()
   id: string;
@@ -331,6 +362,43 @@ export class ToolsetSummaryDto {
 
   @ApiProperty()
   updatedAt: string;
+
+  @ApiProperty({ enum: ['USER', 'PLATFORM', 'PROVIDER'], description: 'The badge' })
+  publisherKind: string;
+
+  @ApiProperty({ nullable: true, description: 'Your public name, when it is claimed' })
+  handle: string | null;
+
+  @ApiProperty({ nullable: true, enum: ['LISTED', 'DELISTED'] })
+  listingStatus: string | null;
+
+  @ApiProperty({ nullable: true, description: 'The newest published version; `null` before v1' })
+  latestVersion: number | null;
+
+  @ApiProperty({
+    nullable: true,
+    description: 'Old shared URLs keep serving until then ("This tool set stops working on …")',
+  })
+  sharingEndsAt: string | null;
+
+  @ApiProperty({ description: 'An operator delisted it; ask to be relisted' })
+  delisted: boolean;
+
+  @ApiProperty({ description: 'Taken down for abuse: only `/my/` serves' })
+  removed: boolean;
+
+  @ApiProperty({ type: ToolsetUrlsDto })
+  urls: ToolsetUrlsDto;
+
+  @ApiProperty({ nullable: true, description: 'The link-only token while shared; owners only' })
+  unlistedToken: string | null;
+
+  @ApiProperty({
+    type: ForkedFromDto,
+    nullable: true,
+    description: '"Copied from @handle/slug vN"',
+  })
+  forkedFrom: ForkedFromDto | null;
 }
 
 export class ToolsetDto extends ToolsetSummaryDto {
