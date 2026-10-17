@@ -203,29 +203,28 @@ function displayOf(meta: Record<string, unknown> | undefined): string | null {
   return price?.display ?? null;
 }
 
-function warningsOf(
+export function warningsOf(
   tools: readonly PreviewToolDto[],
   ignored: readonly string[],
 ): PreviewWarningDto[] {
   const warnings: PreviewWarningDto[] = [];
-  const add = (code: string, names: string[]) => {
-    if (names.length > 0) warnings.push({ code, tools: names });
+  const add = (code: string, about: PreviewWarningDto['tools']) => {
+    if (about.length > 0) warnings.push({ code, tools: about });
   };
+  const ref = (tool: PreviewToolDto) => ({ toolId: tool.toolId, name: tool.name });
   add(
     'NO_BACKUP_PROVIDER',
-    tools.filter((tool) => tool.listed && tool.providerCount === 1).map((tool) => tool.name),
+    tools.filter((tool) => tool.listed && tool.providerCount === 1).map(ref),
   );
-  add(
-    'BLOCKED_BY_ACCESS',
-    tools.filter((tool) => !tool.allowed).map((tool) => tool.name),
-  );
-  add(
-    'NO_PROVIDER_FITS',
-    tools.filter((tool) => tool.allowed && tool.noProviderFits).map((tool) => tool.name),
-  );
+  add('BLOCKED_BY_ACCESS', tools.filter((tool) => !tool.allowed).map(ref));
+  add('NO_PROVIDER_FITS', tools.filter((tool) => tool.allowed && tool.noProviderFits).map(ref));
   if (tools.length > 0 && !tools.some((tool) => tool.allowed)) {
     warnings.push({ code: 'NOTHING_ALLOWED', tools: [] });
   }
-  add('IGNORED_TOOLS', [...ignored]);
+  // An ignored `?tools=` name matches no tool this URL serves, so it has no id.
+  add(
+    'IGNORED_TOOLS',
+    ignored.map((name) => ({ toolId: null, name })),
+  );
   return warnings;
 }

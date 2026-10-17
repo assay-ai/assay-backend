@@ -29,6 +29,24 @@ export class ProviderRepository extends OrganizationScopedRepository<ProviderEnt
   }
 
   /**
+   * Provider id (`organization_id`) → its display name (`legal_name`), for the
+   * ids given — a buyer's refused call names the providers its rules dropped.
+   *
+   * Cross-organization by nature: the providers are other tenants, and the
+   * projection is the public name the catalogue already shows and nothing
+   * else. Suspended and exited providers keep their row, so a name survives a
+   * delisting.
+   */
+  async findDisplayNames(providerIds: readonly string[]): Promise<Map<string, string>> {
+    if (providerIds.length === 0) return new Map();
+    const rows = await this.createQueryBuilder('provider')
+      .select(['provider.organizationId', 'provider.legalName'])
+      .where('provider.organizationId IN (:...providerIds)', { providerIds: [...providerIds] })
+      .getMany();
+    return new Map(rows.map((row) => [row.organizationId, row.legalName]));
+  }
+
+  /**
    * Providers that have not yet proved a stake authority.
    *
    * **This is the gate on the stake cutover, and it is why the method exists at

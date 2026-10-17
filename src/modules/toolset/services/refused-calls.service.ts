@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { ToolCallRecordEntity } from '@database/postgres/entities/tool-call-record.entity';
+import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
 import { CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
 
@@ -28,7 +29,10 @@ const REFUSED_LIST: ListSpec = {
 /** The refused calls of the organization, newest first — the Calls page's "Refused" filter. */
 @Injectable()
 export class RefusedCallsService {
-  constructor(private readonly records: ToolCallRecordRepository) {}
+  constructor(
+    private readonly records: ToolCallRecordRepository,
+    private readonly providers: ProviderRepository,
+  ) {}
 
   async list(
     organizationId: string,
@@ -41,18 +45,34 @@ export class RefusedCallsService {
     if (query.agentId) qb.andWhere('record.agent_id = :agentId', { agentId: query.agentId });
 
     const page = await paginate(qb, query, REFUSED_LIST);
-    return page.map(toDto);
+    const names = await this.providerNames(page.items);
+    return page.map((row) => toDto(row, names));
   }
 
   async get(organizationId: string, callId: string): Promise<RefusedCallDto> {
     const row = await this.records.findOneBy({ organizationId, callId });
     if (!row || !row.refusalCode) throw ToolsetErrors.refusedCallNotFound();
-    return toDto(row);
+    return toDto(row, await this.providerNames([row]));
+  }
+
+  /** One read for every provider the rows name, by id. */
+  private providerNames(rows: readonly ToolCallRecordEntity[]): Promise<Map<string, string>> {
+    const ids = new Set<string>();
+    for (const row of rows) for (const provider of providersOf(row)) ids.add(provider.providerId);
+    return this.providers.findDisplayNames([...ids]);
   }
 }
 
-function toDto(row: ToolCallRecordEntity): RefusedCallDto {
-  const providers = (row.refusalDetail?.providers as RefusedProviderDto[] | undefined) ?? [];
+function providersOf(row: ToolCallRecordEntity): Omit<RefusedProviderDto, 'providerName'>[] {
+  const providers = row.refusalDetail?.providers;
+  return Array.isArray(providers) ? (providers as Omit<RefusedProviderDto, 'providerName'>[]) : [];
+}
+
+function toDto(row: ToolCallRecordEntity, names: ReadonlyMap<string, string>): RefusedCallDto {
+  const providers = providersOf(row).map((provider) => ({
+    ...provider,
+    providerName: names.get(provider.providerId) ?? null,
+  }));
   return {
     callId: row.callId,
     agentId: row.agentId,
