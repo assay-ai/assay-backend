@@ -275,6 +275,7 @@ function build(wiring: Wiring = {}) {
   };
 
   return {
+    catalogue,
     router,
     stakes,
     enrolments,
@@ -1013,6 +1014,39 @@ describe('PublicCatalogueService', () => {
       }).service,
     );
 
+  it('versions: each listed provider’s declared optional fields, never a suspended or blocked one', async () => {
+    const wired = build({
+      bindings: [
+        binding({
+          organizationId: OPEN,
+          toolVersionRange: '^1 || ^2',
+          providesOutputFields: ['uv_index'],
+          supportsInputFields: ['units'],
+        }),
+        binding({ organizationId: BLOCKED, providesOutputFields: ['blocked_field'] }),
+        binding({ organizationId: SUSPENDED, providesOutputFields: ['suspended_field'] }),
+      ],
+      providers: [
+        provider({ organizationId: OPEN }),
+        provider({ organizationId: BLOCKED, legalName: 'Blocked BV' }),
+        provider({ organizationId: SUSPENDED, legalName: 'Suspended BV', status: 'SUSPENDED' }),
+      ],
+      blocklist: blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: BLOCKED }),
+    });
+    (wired.catalogue.findTool as jest.Mock).mockResolvedValue(WEATHER);
+
+    const versions = await new PublicCatalogueService(wired.service).toolVersions(WEATHER.id);
+    expect(versions.providers).toEqual([
+      {
+        providerId: OPEN,
+        legalName: 'Open-Meteo Demo BV',
+        servedMajors: [1, 2],
+        providesOutputFields: ['uv_index'],
+        supportsInputFields: ['units'],
+      },
+    ]);
+  });
+
   /** L1: a suspended provider's bindings are absent from every tool figure, too. */
   it('leaves suspended and blocked providers out of every tool count and floor', async () => {
     const service = new PublicCatalogueService(
@@ -1102,6 +1136,10 @@ describe('PublicCatalogueService', () => {
         'price',
         'pricingMode',
         'providerCount',
+        'replacementMajor',
+        'replacementName',
+        'replacementToolId',
+        'replacementVersion',
         'routable',
         'settlementChains',
         'summary',

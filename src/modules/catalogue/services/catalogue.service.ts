@@ -2,12 +2,15 @@ import {
   ToolContractVersionDto,
   ToolVersionBriefDto,
   ToolVersionListDto,
+  ToolVersionProviderDto,
 } from '@modules/tool/dto/tool-contract-version.dto';
 import {
+  contractReplacementOf,
   contractVersionsOf,
   currentContractVersion,
   versionOf,
 } from '@modules/tool/domain/contract/contract-versions';
+import { bindingRange } from '@modules/tool/domain/contract/version-range';
 import { ToolErrors } from '@modules/tool/errors/tool.errors';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { In } from 'typeorm';
@@ -68,7 +71,7 @@ import { TtlCache } from '../domain/ttl-cache';
 export const CATALOGUE_CACHE_MS = 30_000;
 
 /** The listed market: what {@link CatalogueService.loadMarket} reads once per window. */
-interface ListedMarket {
+export interface ListedMarket {
   /** Every listed binding, at its published revision. */
   readonly bindings: readonly ToolBinding[];
   /** The provider rows behind {@link bindings} — ACTIVE providers only. */
@@ -364,6 +367,8 @@ export class CatalogueService {
 
     const byTool = groupBy(bindings, (binding) => binding.toolId);
     const listed = contracts.filter((tool: Tool) => byTool.has(tool.id));
+    // A replacement tool is named only when it is itself a LISTED tool.
+    const publicTools = new Set(contracts.filter(isListedTool).map((tool: Tool) => tool.id));
 
     // Every chain this deployment offers, on both sides of the intersection —
     // the catalogue is anonymous and has no buyer to narrow to, and a tool
@@ -410,7 +415,7 @@ export class CatalogueService {
         id: tool.id,
         name: tool.name,
         description: tool.description,
-        ...versionFieldsOf(tool),
+        ...versionFieldsOf(tool, (toolId) => publicTools.has(toolId)),
         tier: tool.tier,
         category: categoryOf(tool),
         tags: [...(tool.tags ?? [])],
@@ -460,6 +465,7 @@ export class CatalogueService {
     // Only the LISTED catalogue: an UNLISTED tool's contract is its link's to share.
     if (!tool || !isListedTool(tool)) throw ToolErrors.toolNotFound({ toolId });
     const current = currentContractVersion(tool);
+    const { market } = await this.window();
     return {
       toolId: tool.id,
       name: tool.name,
@@ -467,6 +473,7 @@ export class CatalogueService {
       versions: contractVersionsOf(tool).map((version) =>
         ToolContractVersionDto.of(version, tool.currentVersion ?? current?.version),
       ),
+      providers: providerDeclarationsOf(market, tool.id),
     };
   }
 
@@ -699,26 +706,80 @@ function byQualityThenName(a: CatalogueProviderDto, b: CatalogueProviderDto): nu
 }
 
 /** The contract-version half of a catalogue tool card (T3). */
-export function versionFieldsOf(tool: Tool): {
+export function versionFieldsOf(
+  tool: Tool,
+  isPublicTool: (toolId: string) => boolean = () => true,
+): {
   summary: string;
   version: string | null;
   versions: ToolVersionBriefDto[];
   deprecatedMajors: number[];
+  replacementToolId: string | null;
+  replacementName: string | null;
+  replacementMajor: number | null;
+  replacementVersion: string | null;
 } {
   const current = currentContractVersion(tool);
   const versions = contractVersionsOf(tool);
+  const deprecatedMajors = [
+    ...new Set(
+      versions
+        .filter((version) => version.status === ToolVersionStatus.DEPRECATED)
+        .map((version) => version.major),
+    ),
+  ].sort((a, b) => a - b);
+  // What replaces the newest deprecated major; never a tool the catalogue does not list.
+  const found =
+    deprecatedMajors.length > 0
+      ? contractReplacementOf(tool, { major: deprecatedMajors[deprecatedMajors.length - 1] })
+      : null;
+  const replacement =
+    found && (found.toolId === tool.id || isPublicTool(found.toolId)) ? found : null;
   return {
     summary: versionOf(tool).summary,
     version: current?.semver ?? null,
     versions: versions.map((version) =>
       ToolVersionBriefDto.of(version, tool.currentVersion ?? current?.version),
     ),
-    deprecatedMajors: [
-      ...new Set(
-        versions
-          .filter((version) => version.status === ToolVersionStatus.DEPRECATED)
-          .map((version) => version.major),
-      ),
-    ].sort((a, b) => a - b),
+    deprecatedMajors,
+    replacementToolId: replacement?.toolId ?? null,
+    replacementName: replacement?.name ?? null,
+    replacementMajor: replacement?.major ?? null,
+    replacementVersion: replacement?.semver ?? null,
   };
+}
+
+/**
+ * What each listed provider declares for `toolId`, from the window's market
+ * (listed providers' ACTIVE bindings at their published revision only).
+ */
+export function providerDeclarationsOf(
+  market: ListedMarket,
+  toolId: string,
+): ToolVersionProviderDto[] {
+  const byProvider = groupBy(
+    market.bindings.filter((binding) => binding.toolId === toolId),
+    (binding) => binding.providerId,
+  );
+  const rows: ToolVersionProviderDto[] = [];
+  for (const [providerId, own] of byProvider) {
+    const row = market.rows.get(providerId);
+    if (!row) continue;
+    rows.push({
+      providerId,
+      legalName: row.legalName,
+      servedMajors: sortedUnion(own.flatMap((binding) => bindingRange(binding.toolVersionRange))),
+      providesOutputFields: sortedUnion(
+        own.flatMap((binding) => binding.providesOutputFields ?? []),
+      ),
+      supportsInputFields: sortedUnion(own.flatMap((binding) => binding.supportsInputFields ?? [])),
+    });
+  }
+  return rows.sort((a, b) => a.legalName.localeCompare(b.legalName));
+}
+
+function sortedUnion<T extends number | string>(items: readonly T[]): T[] {
+  return [...new Set(items)].sort((a, b) =>
+    typeof a === 'number' && typeof b === 'number' ? a - b : String(a).localeCompare(String(b)),
+  );
 }

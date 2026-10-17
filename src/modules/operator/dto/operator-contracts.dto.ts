@@ -248,6 +248,16 @@ export class ContractDraftDto {
   @ApiProperty({ type: String, nullable: true })
   changelog: string | null;
 
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    format: 'uuid',
+    description:
+      'The operator id who last saved the draft (its creator when never edited); `null` for ' +
+      'a seeded version. That operator cannot approve its publish (two-person rule).',
+  })
+  editedBy: string | null;
+
   @ApiProperty({ format: 'date-time' })
   updatedAt: Date;
 }

@@ -134,6 +134,12 @@ export interface RuleRejection {
   readonly detail: string;
   /** The contract fields behind an `UNSUPPORTED_INPUT_FIELD` or `MISSING_OUTPUT_FIELD`. */
   readonly fields?: readonly string[];
+  /** `CONTRACT_VERSION_MISMATCH`: the majors the binding's range covers. */
+  readonly servedMajors?: readonly number[];
+  /** `CONTRACT_VERSION_MISMATCH`: the major of the version the call is routed at. */
+  readonly requestedMajor?: number;
+  /** `CONTRACT_VERSION_MISMATCH`: the majors the call may use; `null` when unconstrained. */
+  readonly requestedRange?: readonly number[] | null;
 }
 
 export const NO_RULES: RoutingRules = Object.freeze({ agent: null, entry: null });

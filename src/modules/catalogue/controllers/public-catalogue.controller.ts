@@ -97,7 +97,9 @@ export class PublicCatalogueController {
     mustRevalidate: true,
   })
   @ApiOperation({
-    summary: 'A tool’s published contract versions and changelog — no authentication',
+    summary:
+      'A tool’s published contract versions and changelog, and the majors and optional ' +
+      'fields each listed provider declares — no authentication',
     description:
       'Newest first, with schemas, optional fields, examples, status (DEPRECATED with its ' +
       'sunset) and changelog. A draft tool is a 404.',

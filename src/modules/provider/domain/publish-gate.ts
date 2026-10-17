@@ -90,6 +90,12 @@ export interface PublishRequirementResult {
   readonly code: string | null;
   /** One human sentence with the specifics — the shortfall, the failed layer. */
   readonly detail: string | null;
+  /**
+   * T3: the contract major a tester requirement was asked for — one entry per
+   * major in the binding's range, met or not. `null` on every other
+   * requirement, and on a tester requirement asked without majors.
+   */
+  readonly major?: number | null;
 }
 
 export interface PublishCheck {
@@ -148,7 +154,7 @@ export function evaluatePublishGate(input: PublishGateInput): PublishCheck {
     ...perMajor(input, testerPassedRequirement, PublishRequirement.TESTER_PASSED),
     ...payoutRequirements(input),
     ...stakeRequirements(input),
-  ];
+  ].map((result) => ({ ...result, major: result.major ?? null }));
 
   return {
     publishable: requirements.every((requirement) => requirement.met),
@@ -158,14 +164,15 @@ export function evaluatePublishGate(input: PublishGateInput): PublishCheck {
 
 /**
  * A tester requirement asked once per contract major in the binding's range:
- * met → one entry; unmet → one entry per failing major, naming it.
+ * one entry per major, met or not, each carrying its `major` (unmet ones
+ * also name it in `detail`), so the checklist shows every major's own result.
  */
 function perMajor(
   input: PublishGateInput,
   requirementOf: (input: PublishGateInput) => PublishRequirementResult,
   requirement: PublishRequirement,
 ): readonly PublishRequirementResult[] {
-  if (!input.runsByMajor) return [requirementOf(input)];
+  if (!input.runsByMajor) return [{ ...requirementOf(input), major: null }];
   if (input.runsByMajor.size === 0) {
     return [
       {
@@ -173,17 +180,18 @@ function perMajor(
         met: false,
         code: 'no_contract_major',
         detail: 'This binding serves no contract major, so there is nothing to test it against.',
+        major: null,
       },
     ];
   }
-  const failures: PublishRequirementResult[] = [];
-  for (const [major, run] of [...input.runsByMajor].sort(([a], [b]) => a - b)) {
-    const result = requirementOf({ ...input, latestRun: run, runsByMajor: undefined });
-    if (!result.met) {
-      failures.push({ ...result, detail: `Contract v${major}: ${result.detail ?? ''}`.trim() });
-    }
-  }
-  return failures.length > 0 ? failures : [{ requirement, met: true, code: null, detail: null }];
+  return [...input.runsByMajor]
+    .sort(([a], [b]) => a - b)
+    .map(([major, run]) => {
+      const result = requirementOf({ ...input, latestRun: run, runsByMajor: undefined });
+      return result.met
+        ? { ...result, major }
+        : { ...result, major, detail: `Contract v${major}: ${result.detail ?? ''}`.trim() };
+    });
 }
 
 function testerRunRequirement(input: PublishGateInput): PublishRequirementResult {
