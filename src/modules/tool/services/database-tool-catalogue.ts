@@ -6,6 +6,7 @@ import { BindingVersionRepository } from '@database/postgres/repositories/bindin
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 
+import { assertNoReservedToolNames } from '../domain/reserved-tool-names';
 import { ToolCataloguePort } from '../ports/tool-catalogue.port';
 import { BindingStatus, PricingMode, Tool, ToolBinding } from '../ports/tool.types';
 import { TOOL_CATALOGUE_SNAPSHOT, ToolCatalogueSnapshot } from './in-memory-tool-catalogue';
@@ -45,6 +46,10 @@ export class DatabaseToolCatalogue implements ToolCataloguePort {
     private readonly bindings: ToolBindingRepository,
     private readonly versions: BindingVersionRepository,
   ) {
+    assertNoReservedToolNames(
+      snapshot.tools.map((tool) => tool.name),
+      'tool catalogue',
+    );
     this.tools = new Map(snapshot.tools.map((tool) => [tool.id, tool]));
   }
 
