@@ -13,6 +13,12 @@ export enum McpErrorCode {
   MCP_CREDENTIAL_REVOKED = 'MCP_CREDENTIAL_REVOKED',
   MCP_SESSION_NOT_FOUND = 'MCP_SESSION_NOT_FOUND',
   MCP_QUOTA_EXCEEDED = 'MCP_QUOTA_EXCEEDED',
+  /**
+   * The path of an MCP URL is not one the host serves, or names something
+   * this credential cannot see — another organization's toolset is the same
+   * 404 as a missing one, so its existence does not leak (design spec §7.4).
+   */
+  MCP_URL_NOT_FOUND = 'MCP_URL_NOT_FOUND',
 
   // ── the public live demo ─────────────────────────────────────────────────
   MCP_DEMO_QUERY_INVALID = 'MCP_DEMO_QUERY_INVALID',
@@ -40,13 +46,6 @@ export enum McpErrorCode {
    * measured in rolls over on its own.
    */
   MCP_VELOCITY_LIMIT_EXCEEDED = 'MCP_VELOCITY_LIMIT_EXCEEDED',
-  /**
-   * `spend_policies.allowed_tools` does not include this tool. Not one of the
-   * UI's four limit codes (those are about caps, velocity, funds and pause);
-   * added here because the allowlist is a fifth, distinct refusal reason that
-   * none of those four codes can honestly carry.
-   */
-  MCP_TOOL_NOT_ALLOWED = 'MCP_TOOL_NOT_ALLOWED',
 }
 
 export type McpErrorCodesArePrefixed = AssertDomainErrorCodes<'MCP', `${McpErrorCode}`>;
@@ -102,6 +101,11 @@ export const McpErrors = createDomainErrorFactory('MCP', {
     message: (context?: Record<string, any>) =>
       `MCP session not found${context?.sessionId ? `: ${context.sessionId}` : ''}`,
   },
+  urlNotFound: {
+    code: McpErrorCode.MCP_URL_NOT_FOUND,
+    statusCode: 404,
+    message: () => 'No MCP server at this URL',
+  },
   quotaExceeded: {
     code: McpErrorCode.MCP_QUOTA_EXCEEDED,
     statusCode: 429,
@@ -145,14 +149,6 @@ export const McpErrors = createDomainErrorFactory('MCP', {
       `nothing was charged` +
       `${context?.retryAfter ? `, retry after ${context.retryAfter}s` : ''}`,
   },
-  /** The tool allowlist. See `McpErrorCode.MCP_TOOL_NOT_ALLOWED`. */
-  toolNotAllowed: {
-    code: McpErrorCode.MCP_TOOL_NOT_ALLOWED,
-    statusCode: 403,
-    message: (context?: Record<string, any>) =>
-      `Tool is not on this agent's spend-policy allowlist${context?.toolId ? `: ${context.toolId}` : ''}`,
-  },
-
   // ── the public live demo ─────────────────────────────────────────────────
 
   /** Free text needs a bound; there is one here and a rate limit behind it. */

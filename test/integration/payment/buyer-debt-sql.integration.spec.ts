@@ -518,6 +518,18 @@ describe('buyer debt migrations, down and up again', () => {
     )[0].prosrc;
 
   it('reverts 1760900000000 … 1760600000000 one by one and reapplies them', async () => {
+    // The migrations after these sit on top of them: undo those first.
+    const later = [
+      'CallAttributionAndConnectUrls1761000000003',
+      'CreateToolsets1761000000002',
+      'AccessPolicyAndAgentRules1761000000001',
+      'CreateTools1761000000000',
+    ];
+    for (const name of later) {
+      expect(await last()).toBe(name);
+      await dataSource.undoLastMigration({ transaction: 'each' });
+    }
+
     expect(await last()).toBe('VoucherSeqDebtReplacement1760900000000');
     expect(await seqTriggerSource()).toContain('redemption_lapsed_at');
 
@@ -554,6 +566,7 @@ describe('buyer debt migrations, down and up again', () => {
       'PaymentIntentRedemptionLapsed1760700000000',
       'PaymentIntentDebtReplacing1760800000000',
       'VoucherSeqDebtReplacement1760900000000',
+      ...[...later].reverse(),
     ]);
     expect(await seqTriggerSource()).toContain('redemption_lapsed_at');
     expect(await columns()).toEqual([
