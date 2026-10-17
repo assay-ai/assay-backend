@@ -163,6 +163,36 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
     });
   });
 
+  describe('one logical call retried with a new voucher (idempotency key, G2.1)', () => {
+    // `voucherFor` mints a fresh agent per voucher; a key is scoped per agent.
+    const agentId = randomUUID();
+    it('answers the second voucher with the first intent and holds nothing for it', async () => {
+      const first = { ...context.voucherFor(), agentId, idempotencyKey: 'call-1' };
+      const second = { ...context.voucherFor(), agentId, idempotencyKey: 'call-1' };
+
+      const paid = await context.vouchers.redeem(first);
+      const retried = await context.vouchers.redeem(second);
+
+      expect(retried.id).toBe(paid.id);
+      expect(retried.voucherSeq).toBe(first.signed.voucher.seq);
+      expect(await countIntentsWithSeq(context.payer, second.signed.voucher.seq)).toBe(0);
+      expect(await context.held(context.payer)).toBe(1_000_000n);
+    });
+
+    it('lets exactly one of two simultaneous vouchers with one key hold the price', async () => {
+      const first = { ...context.voucherFor(), agentId, idempotencyKey: 'call-2' };
+      const second = { ...context.voucherFor(), agentId, idempotencyKey: 'call-2' };
+
+      const [a, b] = await Promise.all([
+        context.vouchers.redeem(first),
+        context.vouchers.redeem(second),
+      ]);
+
+      expect(a.id).toBe(b.id);
+      expect(await context.held(context.payer)).toBe(1_000_000n);
+    });
+  });
+
   describe('the schema refuses what the service would never write', () => {
     it('rejects a rail-B intent with neither a voucher nonce nor a voucher seq', async () => {
       // `trg_payment_intents_rail_b_has_nonce`, widened with sequenced vouchers to accept

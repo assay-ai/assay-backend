@@ -18,13 +18,16 @@ import { PaymentRail } from '@modules/payment/ports/payment.types';
 
 import {
   X402_ERROR,
+  X402_IDEMPOTENCY_KEY,
   X402_PAYMENT_REQUIRED,
   X402_RAIL,
   X402_RECEIPT,
+  X402_REPLAYED,
   X402_VOUCHER,
 } from '../constants/mcp.constants';
 import { ToolAccessErrorCode } from '@modules/tool/errors/tool-access.errors';
 
+import { parseIdempotencyKey } from '../domain/idempotency';
 import { McpErrorCode } from '../errors/mcp.errors';
 import { McpScope } from '../ports/mcp-scope';
 import { McpSession } from '../ports/mcp-session.port';
@@ -109,6 +112,9 @@ export class McpServerFactory {
           (args ?? {}) as JsonObject,
           paymentOf(meta),
           scope,
+          // Validated here, before anything runs: a malformed key is refused
+          // with `MCP_IDEMPOTENCY_KEY_INVALID` and nothing is charged.
+          parseIdempotencyKey(meta?.[X402_IDEMPOTENCY_KEY]),
         );
         return toCallToolResult(outcome);
       } catch (error) {
@@ -263,7 +269,11 @@ function toCallToolResult(outcome: McpCallOutcome): CallToolResult {
     // and a client that read that schema will validate against this — omitting
     // it makes the SDK reject an otherwise perfectly good result.
     structuredContent: outcome.output as Record<string, unknown>,
-    _meta: { [X402_RECEIPT]: receiptPayload(outcome.receipt) },
+    _meta: {
+      [X402_RECEIPT]: receiptPayload(outcome.receipt),
+      // Only on a replay: a first answer carries no `x402/replayed` at all.
+      ...(outcome.replayed ? { [X402_REPLAYED]: true } : {}),
+    },
   };
 }
 

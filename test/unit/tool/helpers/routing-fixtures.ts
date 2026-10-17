@@ -43,6 +43,7 @@ import {
   ToolBinding,
   ToolTier,
 } from '@modules/tool/ports/tool.types';
+import { BindingAttemptRecorder } from '@modules/tool/services/binding-attempt-recorder.service';
 import { BindingCallCounterService } from '@modules/tool/services/binding-call-counter.service';
 import { BindingCeilingService } from '@modules/tool/services/binding-ceiling.service';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
@@ -563,6 +564,8 @@ export interface RouterHarnessOptions {
   readonly invoker: BindingInvokerPort;
   readonly random?: () => number;
   readonly config?: Partial<RouterConfig>;
+  /** The observed-stats recorder. Absent: the router records nothing, as before it existed. */
+  readonly observations?: BindingAttemptRecorder;
 }
 
 export interface RouterHarness {
@@ -654,6 +657,7 @@ export function buildRouter(options: RouterHarnessOptions): RouterHarness {
     // Defaults to "always draw the first entry", which makes selection
     // deterministic for every test that is not about the distribution.
     options.random ?? (() => 0),
+    options.observations ?? null,
   );
 
   return { router, config, graceSource, ceilings, redis, callCounter };

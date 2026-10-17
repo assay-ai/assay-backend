@@ -23,6 +23,14 @@ import { McpToolCallService } from '@modules/mcp/services/mcp-tool-call.service'
 import { DEFAULT_PLATFORM_FEE_BPS } from '@modules/mcp/services/mcp-pricing.config';
 import { McpServerFactory } from '@modules/mcp/services/mcp-server.factory';
 import {
+  DEFAULT_MCP_IDEMPOTENCY_CONFIG,
+  McpIdempotencyConfig,
+  McpIdempotencyStore,
+} from '@modules/mcp/services/mcp-idempotency.store';
+import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
+import { PaymentErrors } from '@modules/payment/errors/payment.errors';
+import { IDEMPOTENCY_RELEASED_STATUSES } from '@modules/payment/services/payment-intent.service';
+import {
   PaymentIntent,
   PaymentIntentStatus,
   PaymentIntentTransitionContext,
@@ -57,6 +65,7 @@ import { ProviderRouterService } from '@modules/tool/services/provider-router.se
 
 import { STAKE_ASSET, buildRouter, buildTool, usdc } from '../../tool/helpers/routing-fixtures';
 import { noBlocks } from '../../helpers/blocklist';
+import { FakeIdempotencyRedis } from './fake-idempotency-redis';
 
 /**
  * The MCP loop, assembled from the real services and two fakes.
@@ -210,6 +219,20 @@ export class FakeIntents {
   pausedFor: number | null = null;
 
   create(input: CreatePaymentIntentInput, admission?: VoucherAdmission): Promise<PaymentIntent> {
+    // `idx_payment_intents_idempotency_key`, in the fake: one LIVE intent per
+    // (organization, agent, key), and a replay with another request hash is
+    // a collision — `PaymentIntentService.resolveReplay`'s two answers.
+    if (input.idempotencyKey) {
+      const live = this.liveByKey(input.organizationId, input.agentId, input.idempotencyKey);
+      if (live) {
+        if (live.requestHash !== input.requestHash) {
+          return Promise.reject(
+            PaymentErrors.idempotencyKeyReused({ idempotencyKey: input.idempotencyKey }),
+          );
+        }
+        return Promise.resolve(live);
+      }
+    }
     if (admission) {
       // The highest seq of the payer already admitted, as the locked read sees it.
       const seqs = [...this.rows.values()]
@@ -262,6 +285,35 @@ export class FakeIntents {
     this.rows.set(id, intent);
     this.transitions.push(`→ ${PaymentIntentStatus.CREATED}`);
     return Promise.resolve(intent);
+  }
+
+  /** `PaymentIntentService.findLiveByIdempotencyKey`. */
+  readonly keyLookups: string[] = [];
+  findLiveByIdempotencyKey(
+    organizationId: string,
+    agentId: string,
+    key: string,
+  ): Promise<PaymentIntent | null> {
+    this.keyLookups.push(key);
+    return Promise.resolve(this.liveByKey(organizationId, agentId, key));
+  }
+
+  private liveByKey(organizationId: string, agentId: string, key: string): PaymentIntent | null {
+    return (
+      [...this.rows.values()].find(
+        (row) =>
+          row.organizationId === organizationId &&
+          row.agentId === agentId &&
+          row.idempotencyKey === key &&
+          !IDEMPOTENCY_RELEASED_STATUSES.includes(row.status),
+      ) ?? null
+    );
+  }
+
+  /** Set by a test: an intent's age, as `createdAt` would show it. */
+  age(intentId: string, ms: number): void {
+    const row = this.rows.get(intentId) as PaymentIntent;
+    this.rows.set(intentId, { ...row, createdAt: new Date(Date.now() - ms) });
   }
 
   findById(_organizationId: string, intentId: string): Promise<PaymentIntent> {
@@ -380,6 +432,8 @@ export class FakeIntents {
  */
 export class FakeSettlement {
   readonly calls: EnqueueVerificationInput[] = [];
+  /** Set by a test: the retention sweep scrubbed the recorded bodies. */
+  scrubbed = false;
 
   /**
    * Overridable per test, so "the enqueue fails" is a one-line harness option
@@ -741,6 +795,12 @@ export interface McpHarnessOptions {
    * buyer who has only ever spent the ledger mirror actually has.
    */
   readonly escrow?: FakeEscrowReader;
+  /**
+   * The Redis behind `x402/idempotency-key`. Pass one to share it between two
+   * harnesses — two tools, one agent, one Redis.
+   */
+  readonly idempotencyRedis?: FakeIdempotencyRedis;
+  readonly idempotencyConfig?: Partial<McpIdempotencyConfig>;
 }
 
 export interface McpHarness {
@@ -757,6 +817,8 @@ export interface McpHarness {
   readonly toolCallRecords: FakeToolCallRecords;
   readonly escrow: FakeEscrowReader;
   readonly seqs: FakeEscrowSeqs;
+  /** The Redis behind `McpIdempotencyStore` (`x402/idempotency-key`). */
+  readonly idempotencyRedis: FakeIdempotencyRedis;
 }
 
 export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
@@ -802,6 +864,8 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
     noBlocks(),
   );
 
+  const idempotencyRedis = options.idempotencyRedis ?? new FakeIdempotencyRedis();
+  const idempotencyConfig = { ...DEFAULT_MCP_IDEMPOTENCY_CONFIG, ...options.idempotencyConfig };
   const calls = new McpToolCallService(
     catalogue,
     router,
@@ -817,6 +881,19 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
     escrow,
     { platformFeeBps: options.platformFeeBps ?? DEFAULT_PLATFORM_FEE_BPS },
     [CHAIN_ID],
+    // The real store over a fake Redis: claim, replay and release run as in
+    // production. Untouched by every call that carries no key.
+    new McpIdempotencyStore(idempotencyRedis as never, idempotencyConfig),
+    idempotencyConfig,
+    // The verification record a served call's response is durably written to:
+    // what `enqueue` was handed, unless a test scrubbed it.
+    {
+      findByIntentId: async (_organizationId: string, intentId: string) => {
+        const handed = settlement.calls.find((call) => call.intentId === intentId);
+        if (!handed) return null;
+        return { intentId, response: settlement.scrubbed ? null : handed.response };
+      },
+    } as unknown as VerificationRecordRepository,
   );
 
   return {
@@ -833,6 +910,7 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
     toolCallRecords,
     escrow,
     seqs,
+    idempotencyRedis,
   };
 }
 

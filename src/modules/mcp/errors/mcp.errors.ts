@@ -19,6 +19,12 @@ export enum McpErrorCode {
    * 404 as a missing one, so its existence does not leak (design spec §7.4).
    */
   MCP_URL_NOT_FOUND = 'MCP_URL_NOT_FOUND',
+  /**
+   * `_meta["x402/idempotency-key"]` is not a printable ASCII string of 1 to
+   * 128 characters. Refused before anything runs, so nothing is charged; not
+   * retryable unchanged.
+   */
+  MCP_IDEMPOTENCY_KEY_INVALID = 'MCP_IDEMPOTENCY_KEY_INVALID',
 
   // ── the public live demo ─────────────────────────────────────────────────
   MCP_DEMO_QUERY_INVALID = 'MCP_DEMO_QUERY_INVALID',
@@ -105,6 +111,13 @@ export const McpErrors = createDomainErrorFactory('MCP', {
     code: McpErrorCode.MCP_URL_NOT_FOUND,
     statusCode: 404,
     message: () => 'No MCP server at this URL',
+  },
+  idempotencyKeyInvalid: {
+    code: McpErrorCode.MCP_IDEMPOTENCY_KEY_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Invalid _meta["x402/idempotency-key"]` +
+      `${context?.reason ? `: ${context.reason}` : ''}. Nothing was charged.`,
   },
   quotaExceeded: {
     code: McpErrorCode.MCP_QUOTA_EXCEEDED,
