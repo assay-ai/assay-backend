@@ -121,11 +121,22 @@ export class McpUrlPreviewDto {
   })
   viewFilter: Record<string, unknown> | null;
 
-  @ApiProperty({ enum: ['FULL', 'SEARCH'], description: 'FULL until search mode ships (T2)' })
+  @ApiProperty({
+    enum: ['FULL', 'SEARCH'],
+    description: 'How `tools/list` presents this URL for this agent, AUTO already decided',
+  })
   discovery: 'FULL' | 'SEARCH';
 
-  @ApiProperty({ description: 'What `tools/list` returns here for this agent' })
+  @ApiProperty({
+    description: 'What `tools/list` returns here for this agent (SEARCH: pinned + 3 meta tools)',
+  })
   listedCount: number;
+
+  @ApiProperty({ description: 'Tools this agent can reach here: listed, or through search' })
+  reachableCount: number;
+
+  @ApiProperty({ type: [String], description: 'The names `tools/list` returns, in order' })
+  listedTools: string[];
 
   @ApiProperty({ description: 'Approximate tokens the listed definitions cost a model' })
   estimatedTokens: number;
@@ -173,6 +184,14 @@ export class ServerInUseDto {
 
   @ApiProperty({ enum: ['FULL', 'SEARCH'] })
   discovery: 'FULL' | 'SEARCH';
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      'For a server that shows every tool: the same URL in search mode, for "Switch to ' +
+      'search" when servers are over budget. `null` when it already searches.',
+  })
+  searchUrl: string | null;
 
   @ApiProperty({ nullable: true })
   lastCallAt: string | null;
