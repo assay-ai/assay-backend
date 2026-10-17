@@ -85,9 +85,18 @@ const WEATHER: Tool = {
   outputSchema: { type: 'object' },
   verificationPolicyId: 'policy-default',
   tier: ToolTier.VERIFIED,
+  category: 'weather',
+  tags: ['temperature'],
 };
 
-const RATE: Tool = { ...WEATHER, id: 'get_rate', name: 'get_rate', tier: ToolTier.UNVERIFIED };
+const RATE: Tool = {
+  ...WEATHER,
+  id: 'get_rate',
+  name: 'get_rate',
+  tier: ToolTier.UNVERIFIED,
+  category: 'finance',
+  tags: ['currency'],
+};
 
 function binding(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity {
   return {
@@ -1082,6 +1091,7 @@ describe('PublicCatalogueService', () => {
 
     for (const tool of tools) {
       expect(Object.keys(tool).sort()).toEqual([
+        'category',
         'description',
         'freeCallsPerDay',
         'fromPrice',
@@ -1093,10 +1103,38 @@ describe('PublicCatalogueService', () => {
         'providerCount',
         'routable',
         'settlementChains',
+        'tags',
         'tier',
       ]);
     }
     expect(JSON.stringify(tools)).not.toContain('10.0.0.7');
+  });
+
+  it('carries each tool\u2019s category and tags, and filters on ?category= over the cached list', async () => {
+    const wired = build({
+      bindings: [binding({ organizationId: OPEN })],
+      providers: [provider({ organizationId: OPEN })],
+    });
+    const service = new PublicCatalogueService(wired.service);
+
+    const all = await service.listTools();
+    expect(all.tools.map((tool) => [tool.name, tool.category, tool.tags])).toEqual(
+      expect.arrayContaining([['get_weather', 'weather', ['temperature']]]),
+    );
+
+    const weather = await service.listTools('weather');
+    expect(weather.tools.map((tool) => tool.name)).toEqual(['get_weather']);
+    expect((await service.listTools('no-such-topic')).tools).toEqual([]);
+
+    // The filter runs over the same cached read.
+    expect(wired.bindings.findActiveBindings).toHaveBeenCalledTimes(1);
+
+    // The signed-in list carries them too.
+    const signedIn = await wired.service.listTools();
+    expect(signedIn.tools.find((tool) => tool.id === 'get_weather')).toMatchObject({
+      category: 'weather',
+      tags: ['temperature'],
+    });
   });
 
   it('serves a repeat request from its cache', async () => {

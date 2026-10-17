@@ -1,4 +1,4 @@
-import { Controller, Get, Param, UseInterceptors } from '@nestjs/common';
+import { Controller, Get, Param, Query, UseInterceptors } from '@nestjs/common';
 import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { CacheHeader } from '@shared/decorators/cache-header.decorator';
@@ -6,6 +6,7 @@ import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read
 
 import { GetCatalogueProviderParamsDto } from '../dto/get-catalogue.dto';
 import {
+  ListPublicToolsQueryDto,
   PublicProviderDetailDto,
   PublicProviderListDto,
   PublicToolListDto,
@@ -75,12 +76,15 @@ export class PublicCatalogueController {
   })
   @ApiOperation({
     summary: 'Every tool at least one provider serves — no authentication',
-    description: 'Each tool with its provider count, the market floor and the routed price.',
+    description:
+      'Each tool with its category, tags, provider count, the market floor and the routed ' +
+      'price. `?category=` keeps one topic.',
   })
   @ApiResponse({ status: 200, type: PublicToolListDto })
+  @ApiResponse({ status: 400, description: 'category is not a category slug.' })
   @ApiResponse({ status: 429, description: 'Too many requests from this address.' })
-  async listTools(): Promise<PublicToolListDto> {
-    return this.catalogue.listTools();
+  async listTools(@Query() query: ListPublicToolsQueryDto): Promise<PublicToolListDto> {
+    return this.catalogue.listTools(query.category);
   }
 
   /** After the two literal routes, for the reason `CatalogueController` gives. */

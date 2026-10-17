@@ -27,7 +27,13 @@ import {
   ProviderStakePort,
 } from '@modules/provider/ports/provider-stake.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingStatus, PricingMode, Tool, ToolBinding } from '@modules/tool/ports/tool.types';
+import {
+  BindingStatus,
+  PricingMode,
+  Tool,
+  ToolBinding,
+  categoryOf,
+} from '@modules/tool/ports/tool.types';
 import { toServedToolBindings } from '@modules/tool/services/database-tool-catalogue';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
@@ -392,6 +398,8 @@ export class CatalogueService {
         name: tool.name,
         description: tool.description,
         tier: tool.tier,
+        category: categoryOf(tool),
+        tags: [...(tool.tags ?? [])],
         providerCount: new Set(own.map((binding) => binding.providerId)).size,
         fromPrice: cheapest(own),
         price: quote.price ? toMoneyDto(quote.price) : null,

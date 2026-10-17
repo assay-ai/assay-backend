@@ -1,4 +1,5 @@
-import { ApiProperty } from '@nestjs/swagger';
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { IsOptional, Matches } from 'class-validator';
 
 import { ToolTier } from '@modules/tool/ports/tool.types';
 
@@ -135,6 +136,15 @@ export class PublicToolDto {
   @ApiProperty({ enum: ToolTier })
   tier: ToolTier;
 
+  @ApiProperty({
+    example: 'weather',
+    description: 'The tool’s topic (`tools.category`), as `?category=` filters on.',
+  })
+  category: string;
+
+  @ApiProperty({ type: [String], example: ['temperature', 'conditions'] })
+  tags: string[];
+
   @ApiProperty({ description: 'Distinct providers serving this tool.' })
   providerCount: number;
 
@@ -183,4 +193,15 @@ export class PublicToolDto {
 export class PublicToolListDto {
   @ApiProperty({ type: [PublicToolDto] })
   tools: PublicToolDto[];
+}
+
+/** `GET /public/catalogue/tools?category=` — one topic of the catalogue. */
+export class ListPublicToolsQueryDto {
+  @ApiPropertyOptional({
+    example: 'weather',
+    description: 'Only tools in this category. Unknown categories answer an empty list.',
+  })
+  @IsOptional()
+  @Matches(/^[a-z][a-z0-9-]{1,63}$/)
+  category?: string;
 }

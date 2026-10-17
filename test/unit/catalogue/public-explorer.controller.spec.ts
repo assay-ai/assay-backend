@@ -76,6 +76,18 @@ describe('public Explorer routes need no authentication', () => {
     expect(handler()).toHaveBeenCalled();
   });
 
+  it('passes ?category= to the service, and refuses a malformed one with 400', async () => {
+    catalogue.listTools.mockClear();
+    const ok = await request(app.getHttpServer()).get('/public/catalogue/tools?category=weather');
+    expect(ok.status).toBe(200);
+    expect(catalogue.listTools).toHaveBeenCalledWith('weather');
+
+    const bad = await request(app.getHttpServer()).get(
+      '/public/catalogue/tools?category=Not%20One',
+    );
+    expect(bad.status).toBe(400);
+  });
+
   it('does not swallow /public/catalogue/tools into the provider route', async () => {
     catalogue.getProvider.mockClear();
 
