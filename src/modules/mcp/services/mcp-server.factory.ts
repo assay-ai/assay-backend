@@ -1,13 +1,12 @@
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
-  CallToolRequestSchema,
   CallToolResult,
-  ListToolsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
+  ListToolsResult,
+  ProtocolError,
+  Server,
+} from '@modelcontextprotocol/server';
 
 import { JsonObject } from '@modules/tool/domain/mapping';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
@@ -85,14 +84,20 @@ export class McpServerFactory {
     // JSON only and there is no stream to send one on (design spec §7.4).
     const server = new Server(
       { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },
-      { capabilities: { tools: { listChanged: false } } },
+      {
+        capabilities: { tools: { listChanged: false } },
+        // Protocol 2026-07-28 only: a list result carries `ttlMs`, private to
+        // this client — the list depends on the credential and the URL. A
+        // 2025-era response never carries either field (design spec §7.4).
+        cacheHints: { 'tools/list': { ttlMs: MCP_LIST_TTL_MS, cacheScope: 'private' } },
+      },
     );
 
     // The viewer is passed, not omitted: `x402/freeQuota` is *this agent's*
     // remaining allowance, and a catalogue listed without a viewer publishes no
     // quota at all — which reads to an agent as "this tool has no free tier"
     // rather than as "we did not look".
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    server.setRequestHandler('tools/list', async () => {
       // 60 lists a minute per credential and URL (§7.13). A JSON-RPC error,
       // since a list has no result to carry `x402/error` in.
       if (scope && this.limiter) {
@@ -101,7 +106,7 @@ export class McpServerFactory {
           MCP_RATE_LIMITS.listsPerMinute,
         );
         if (!rate.allowed) {
-          throw new McpError(MCP_RATE_LIMITED_ERROR_CODE, RATE_LIMITED_MESSAGE, {
+          throw new ProtocolError(MCP_RATE_LIMITED_ERROR_CODE, RATE_LIMITED_MESSAGE, {
             code: ToolAccessErrorCode.RATE_LIMITED,
             retryAfterMs: rate.retryAfterMs,
           });
@@ -120,10 +125,14 @@ export class McpServerFactory {
       );
       // An unknown name in `?tools=` is ignored, and said so (§7.4).
       const ignored = scope ? await this.catalogue.ignoredTools(scope) : [];
-      return ignored.length > 0 ? { tools, _meta: { [ASSAY_IGNORED_TOOLS]: ignored } } : { tools };
+      // The descriptors carry `x402/*` annotations outside the SDK's closed
+      // `ToolAnnotations` set; see `McpToolDescriptor`.
+      const result =
+        ignored.length > 0 ? { tools, _meta: { [ASSAY_IGNORED_TOOLS]: ignored } } : { tools };
+      return result as unknown as ListToolsResult;
     });
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler('tools/call', async (request) => {
       const { name, arguments: args, _meta: meta } = request.params;
       const startedAt = Date.now();
       void this.recorder?.markFirstCall(session, scope).catch(() => undefined);
@@ -232,6 +241,9 @@ export class McpServerFactory {
 // ---------------------------------------------------------------------------
 
 export const MCP_SERVER_NAME = 'assay';
+
+/** `ttlMs` on a 2026-07-28 `tools/list` result: clients re-list after a minute. */
+export const MCP_LIST_TTL_MS = 60_000;
 
 /** `_meta["assay/ignoredTools"]` on a list: `?tools=` names this URL does not serve. */
 export const ASSAY_IGNORED_TOOLS = 'assay/ignoredTools';

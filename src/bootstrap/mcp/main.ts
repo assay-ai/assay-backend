@@ -38,13 +38,21 @@ async function bootstrapMcp() {
   // An MCP client may be a browser-hosted agent. `Authorization` has to be
   // allowed explicitly — it is not a CORS-safelisted request header — and
   // `mcp-session-id` / `mcp-protocol-version` are the Streamable HTTP headers a
-  // client must be able to send and read back. Any origin, but without
+  // client must be able to send and read back, and `mcp-method` / `mcp-name`
+  // the ones protocol 2026-07-28 adds to every request. Any origin, but without
   // credentials: the bearer token is a header, not a cookie, so nothing is
   // lost, and `*` with credentials is the pairing R17-R-02 removed.
   applyHttpSecurity(app);
   app.enableCors({
     origin: '*',
-    allowedHeaders: ['content-type', 'authorization', 'mcp-session-id', 'mcp-protocol-version'],
+    allowedHeaders: [
+      'content-type',
+      'authorization',
+      'mcp-session-id',
+      'mcp-protocol-version',
+      'mcp-method',
+      'mcp-name',
+    ],
     exposedHeaders: ['mcp-session-id', 'mcp-protocol-version'],
   });
 
