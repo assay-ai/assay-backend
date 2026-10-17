@@ -68,6 +68,28 @@ describe('credentialHeaderProblems', () => {
   });
 });
 
+describe('credentialHeaderProblems — messages', () => {
+  it('rejects an empty set', () => {
+    expect(credentialHeaderProblems([])).toEqual([
+      'At least one header is required (use DELETE to remove the set)',
+    ]);
+  });
+  it('identifies an invalid name by position and never echoes it', () => {
+    const secret = 'Authorization: Bearer sk-live-123';
+    const problems = credentialHeaderProblems([
+      { name: 'X-Ok', value: 'v' },
+      { name: 'X-Ok2', value: 'v' },
+      { name: secret, value: 'v' },
+    ]);
+    expect(problems).toEqual(['Header #3: invalid name']);
+    expect(JSON.stringify(problems)).not.toContain('sk-live');
+  });
+  it('does not echo an invalid name in value problems either', () => {
+    const problems = credentialHeaderProblems([{ name: 'bad name sk-1', value: 'a\nb' }]);
+    expect(JSON.stringify(problems)).not.toContain('sk-1');
+  });
+});
+
 describe('originOf', () => {
   it('lowercases and drops default ports and paths', () => {
     expect(originOf('https://API.x.test:443/a?b')).toBe('https://api.x.test');
