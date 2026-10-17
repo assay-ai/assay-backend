@@ -38,7 +38,6 @@ import { ProviderEgressLimiter } from '@modules/provider/services/provider-egres
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 
 const ORG = 'org-11111111-1111-4111-8111-111111111111';
-const EGRESS_IPS = ['203.0.113.10', '203.0.113.11', '203.0.113.12'];
 
 // A public-looking literal IP (example.com's, reused from
 // `egress-http.client.spec.ts` — real, public, and it will never route
@@ -133,7 +132,6 @@ function buildHarness() {
     providers.asRepository(),
     checks.asRepository(),
     http as unknown as EgressHttpClient,
-    EGRESS_IPS,
     new ProviderEgressLimiter(),
     fakeLookup,
   );
@@ -304,37 +302,6 @@ describe('an endpoint resolving to a blocked address — proving the egress guar
     );
 
     expect(providers.rows.get(ORG)?.endpoint).toBeNull();
-  });
-});
-
-// ---------------------------------------------------------------------------
-// egressIps — published and stored
-// ---------------------------------------------------------------------------
-
-describe('the published egress IPs', () => {
-  it('are stamped onto every check row, whatever the outcome', async () => {
-    const { service, checks, http } = buildHarness();
-
-    await service.check(ORG, 'http://api.vesseldata.example/v2/ais'); // BLOCKED
-    http.request.mockResolvedValue({
-      status: 200,
-      headers: {},
-      body: '{}',
-      bytes: 2,
-      url: PUBLIC_ENDPOINT,
-      redirects: 0,
-    });
-    await service.check(ORG, PUBLIC_ENDPOINT); // REACHABLE
-
-    expect(checks.rows).toHaveLength(2);
-    for (const row of checks.rows) {
-      expect(row.egressIps).toEqual(EGRESS_IPS);
-    }
-  });
-
-  it('is returned by egressIps() for the console to render', () => {
-    const { service } = buildHarness();
-    expect(service.egressIps()).toEqual(EGRESS_IPS);
   });
 });
 

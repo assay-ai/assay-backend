@@ -9,7 +9,6 @@ import {
   CheckConnectivityResponseDto,
   DeclareEndpointBodyDto,
 } from '../dto/check-connectivity.dto';
-import { GetEgressIpsResponseDto } from '../dto/get-egress-ips.dto';
 import {
   GetProviderVerificationParamsDto,
   GetProviderVerificationResponseDto,
@@ -18,25 +17,11 @@ import { ProviderConnectivityService } from '../services/provider-connectivity.s
 import { ProviderVerificationService } from '../services/provider-verification.service';
 
 /**
- * The connectivity check and egress-IP publication, and the `verified` label's
- * read side.
+ * The connectivity check and the `verified` label's read side.
  *
  * A separate controller from `provider.controller.ts` (`@Controller('providers
  * /me')`) rather than an addition to it, so the two concerns stay
  * independent.
- *
- * ## Route ordering
- *
- * Nest/Express match by method **and** path shape, not just prefix, so
- * `GET providers/egress-ips` (one static segment) and
- * `GET providers/:providerId/verification` (two segments, the second a
- * literal) never actually collide — different segment counts rule it out
- * regardless of declaration order. `egress-ips` is still declared first, so
- * that stays true even if `verification` is ever renamed to a bare
- * `:providerId` with no second segment, which *would* shadow a one-segment
- * literal declared after it. Declaring the literal route first is the form
- * that stays correct under that future edit; relying on segment-count being
- * permanent is not.
  */
 @ApiTags('Provider')
 @ApiBearerAuth()
@@ -89,13 +74,6 @@ export class ProviderConnectivityController {
   ): Promise<CheckConnectivityResponseDto> {
     const result = await this.connectivity.declareEndpoint(session.organizationId, body.endpoint);
     return { ...result, saved: true };
-  }
-
-  @Get('egress-ips')
-  @ApiOperation({ summary: 'The fixed egress IPs to allowlist, if this deployment has any' })
-  @ApiResponse({ status: 200, type: GetEgressIpsResponseDto })
-  async getEgressIps(): Promise<GetEgressIpsResponseDto> {
-    return { egressIps: this.connectivity.egressIps() };
   }
 
   @Get(':providerId/verification')

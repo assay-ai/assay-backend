@@ -34,6 +34,7 @@ import { ToolBindingRepository } from '@database/postgres/repositories/tool-bind
 import { CreateLedger1755100000000 } from '@database/postgres/migrations/1755100000000-create-ledger';
 import { CreatePaymentIntents1755200000000 } from '@database/postgres/migrations/1755200000000-create-payment-intents';
 import { CreateProviderRegistrationTables1756600000000 } from '@database/postgres/migrations/1756600000000-create-provider-registration-tables';
+import { DropConnectivityEgressIps1762000000000 } from '@database/postgres/migrations/1762000000000-drop-connectivity-egress-ips';
 import { ProviderEarningsAndPayouts1756700000000 } from '@database/postgres/migrations/1756700000000-provider-earnings-and-payouts';
 import { CreateToolBindingTables1756900000000 } from '@database/postgres/migrations/1756900000000-create-tool-binding-tables';
 import { ProviderStakeAuthority1757000000000 } from '@database/postgres/migrations/1757000000000-provider-stake-authority';
@@ -239,6 +240,7 @@ export async function createBindingEditorTestContext(
     migrations: [
       CreateLedger1755100000000,
       CreateProviderRegistrationTables1756600000000,
+      DropConnectivityEgressIps1762000000000,
       // `ProviderEntity` gained `payout_threshold_override` here, and TypeORM
       // inserts every mapped column — so the row this context writes needs the
       // schema that has it, even though payouts are no part of this suite.

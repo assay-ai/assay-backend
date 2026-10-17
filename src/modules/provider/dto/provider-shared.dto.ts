@@ -130,12 +130,6 @@ export class ConnectivityCheckResultDto {
   @ApiPropertyOptional({ nullable: true })
   detail: string | null;
 
-  @ApiProperty({
-    type: [String],
-    description: 'The addresses to allowlist, as published at the time of this check',
-  })
-  egressIps: string[];
-
   @ApiProperty({ description: 'ISO-8601, UTC' })
   checkedAt: string;
 }
@@ -189,7 +183,6 @@ export function toConnectivityDto(
     failureKind: check.failureKind ?? null,
     failureCode: check.failureCode ?? null,
     detail: check.detail ?? null,
-    egressIps: check.egressIps ?? [],
     checkedAt: check.createdAt.toISOString(),
   };
 }

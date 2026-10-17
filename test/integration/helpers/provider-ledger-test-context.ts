@@ -15,6 +15,7 @@ import { ProviderChainEnrolmentRepository } from '@database/postgres/repositorie
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { CreateLedger1755100000000 } from '@database/postgres/migrations/1755100000000-create-ledger';
 import { CreateProviderRegistrationTables1756600000000 } from '@database/postgres/migrations/1756600000000-create-provider-registration-tables';
+import { DropConnectivityEgressIps1762000000000 } from '@database/postgres/migrations/1762000000000-drop-connectivity-egress-ips';
 import { ProviderEarningsAndPayouts1756700000000 } from '@database/postgres/migrations/1756700000000-provider-earnings-and-payouts';
 import { ProviderStakeAuthority1757000000000 } from '@database/postgres/migrations/1757000000000-provider-stake-authority';
 import { ProviderStakeAuthorityFormat1757250000000 } from '@database/postgres/migrations/1757250000000-provider-stake-authority-format';
@@ -122,6 +123,7 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
     migrations: [
       CreateLedger1755100000000,
       CreateProviderRegistrationTables1756600000000,
+      DropConnectivityEgressIps1762000000000,
       ProviderEarningsAndPayouts1756700000000,
       // The stake-authority migration put `stake_authority`, `stake_proof` and `stake_proved_at`
       // on `ProviderEntity`, and TypeORM names every mapped column in its

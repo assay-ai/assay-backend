@@ -1785,8 +1785,7 @@ async function runStep2(ctx: SuiteContext): Promise<string> {
 
   return (
     `endpoint=${result.endpoint} outcome=${result.outcome} saved=${result.saved} ` +
-    `status=${result.statusCode ?? 'none'} latencyMs=${result.latencyMs ?? 'none'} ` +
-    `egressIps=[${result.egressIps.join(', ')}]`
+    `status=${result.statusCode ?? 'none'} latencyMs=${result.latencyMs ?? 'none'}`
   );
 }
 
