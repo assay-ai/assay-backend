@@ -6,6 +6,8 @@ import { AgentConnectUrlRepository } from '@database/postgres/repositories/agent
 import { ToolsetRepository } from '@database/postgres/repositories/toolset.repository';
 import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
 
+import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
+
 import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
 import {
   EndpointKind,
@@ -51,7 +53,8 @@ interface AttributionGroup {
  */
 @Injectable()
 export class ConnectUrlsService {
-  private readonly firstCallsSeen = new Set<string>();
+  /** URLs whose first call this process already stamped; bounded, and re-checked hourly. */
+  private readonly firstCallsSeen = new BoundedTtlCache<true>(50_000, 60 * 60 * 1_000);
 
   constructor(
     private readonly connectUrls: AgentConnectUrlRepository,
@@ -96,7 +99,7 @@ export class ConnectUrlsService {
     if (this.firstCallsSeen.has(key)) return;
     try {
       await this.connectUrls.markFirstCall(organizationId, agentId, canonical);
-      this.firstCallsSeen.add(key);
+      this.firstCallsSeen.set(key, true);
     } catch {
       // Bookkeeping; a missed stamp leaves the row "waiting" until the next call.
     }
@@ -193,6 +196,9 @@ export class ConnectUrlsService {
     agentId: string,
     since: Date,
   ): Promise<AttributionGroup[]> {
+    // A refused call is not a server in use: an agent calling a URL it may not
+    // use must not be able to steer "only what's connected" onto it.
+    const servedOnly = table === 'tool_call_records' ? 'AND "refusal_code" IS NULL' : '';
     return this.dataSource.query(
       `SELECT "endpoint_kind", "toolset_id", "toolset_version", "view_filter",
               max("created_at") AS "last_call_at"
@@ -201,6 +207,7 @@ export class ConnectUrlsService {
           AND "agent_id" = $2
           AND "created_at" >= $3
           AND "endpoint_kind" IS NOT NULL
+          ${servedOnly}
         GROUP BY "endpoint_kind", "toolset_id", "toolset_version", "view_filter"`,
       [organizationId, agentId, since],
     );

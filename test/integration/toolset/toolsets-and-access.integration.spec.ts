@@ -446,6 +446,24 @@ describe('toolsets and access, against a real database and Redis', () => {
         accessAllows(await s.resolver.resolve(sessionOf(orgA, agentA)), WEATHER.id, null),
       ).toBe(true);
 
+      // A PATCH that omits `accessMode` keeps the narrowing and its lists.
+      await s.access.patchCredential(orgA, credentialId, {}, ACTOR);
+      const kept = await s.access.getCredential(orgA, credentialId);
+      expect(kept).toMatchObject({
+        accessMode: AccessMode.RESTRICTED,
+        allowedToolIds: [GEOCODE.id],
+      });
+      await s.access.patchCredential(
+        orgA,
+        credentialId,
+        { allowedToolIds: [GEOCODE.id, WEATHER.id] },
+        ACTOR,
+      );
+      expect(await s.access.getCredential(orgA, credentialId)).toMatchObject({
+        accessMode: AccessMode.RESTRICTED,
+        allowedToolIds: [GEOCODE.id, WEATHER.id],
+      });
+
       await s.access.patchCredential(orgA, credentialId, { accessMode: null }, ACTOR);
       expect(
         accessAllows(
@@ -506,6 +524,45 @@ describe('toolsets and access, against a real database and Redis', () => {
 
     it('lists a handed-out URL as waiting, and a called-through URL with its last call', async () => {
       const s = services();
+      // A served (free) call through `/?tools=get_weather`; the refused call
+      // above came through the same URL and must not count as a server in use.
+      await s.records.write({
+        organizationId: orgA,
+        agentId: agentA,
+        callId: randomUUID(),
+        toolId: WEATHER.id,
+        bindingId: null,
+        providerId: null,
+        pricingMode: 'FREE' as never,
+        classification: 'DATA_RESULT' as never,
+        latencyMs: 12,
+        requestHash: null,
+        attribution: {
+          endpointKind: EndpointKind.ROOT,
+          toolsetId: null,
+          toolsetVersion: null,
+          endpointHandle: null,
+          viewFilter: { tools: ['get_weather'] },
+        },
+      });
+      await s.records.writeRefusal({
+        organizationId: orgA,
+        agentId: agentA,
+        callId: randomUUID(),
+        toolId: GEOCODE.id,
+        toolName: 'geocode_place',
+        refusalCode: 'TOOL_NOT_ALLOWED',
+        refusalLayer: RefusalLayer.AGENT_LIMITS,
+        refusalDetail: null,
+        latencyMs: 1,
+        attribution: {
+          endpointKind: EndpointKind.ROOT,
+          toolsetId: null,
+          toolsetVersion: null,
+          endpointHandle: null,
+          viewFilter: { tools: ['geocode_place'] },
+        },
+      });
       await s.connectUrls.record(orgA, agentA, {
         url: 'https://mcp.example.com/my/WEATHER-DESK/',
         serverName: 'weather',
@@ -522,13 +579,16 @@ describe('toolsets and access, against a real database and Redis', () => {
             firstCallAt: null,
             lastCallAt: null,
           }),
-          // The refused call above came through `/?tools=get_weather`.
           expect.objectContaining({
             canonicalUrl: 'https://mcp.example.com/?tools=get_weather',
             endpointKind: EndpointKind.ROOT,
             handedOutAt: null,
           }),
         ]),
+      );
+
+      expect(rows.map((row) => row.canonicalUrl)).not.toContain(
+        'https://mcp.example.com/?tools=geocode_place',
       );
 
       await s.connectUrls.markFirstCall(orgA, agentA, 'https://mcp.example.com/my/weather-desk');
