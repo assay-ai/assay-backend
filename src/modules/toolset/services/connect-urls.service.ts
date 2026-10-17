@@ -9,7 +9,9 @@ import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
 import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
 
 import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
+import { servesPublicPath, servesUnlistedPath } from '../domain/sharing';
 import { HandlesService } from './handles.service';
+import { sharingStateOf } from './sharing-row';
 import {
   EndpointKind,
   McpPathKind,
@@ -199,11 +201,22 @@ export class ConnectUrlsService {
     );
   }
 
-  /** The toolset behind a handed-out `/@…` or `/u/…` URL, or `null`. */
+  /**
+   * The toolset behind a handed-out `/@…` or `/u/…` URL, or `null` — only
+   * while that URL serves it. A URL anyone may hand to the Connect sheet must
+   * not turn into an oracle: a PRIVATE, UNLISTED-by-slug, deleted or removed
+   * toolset answers exactly like one that does not exist.
+   */
   private async sharedToolsetIdOf(parsed: ParsedMcpUrl): Promise<string | null> {
     const { path } = parsed;
+    const now = new Date();
     if (path.kind === McpPathKind.UNLISTED_TOOLSET) {
-      return (await this.toolsets.findByUnlistedToken(path.token))?.id ?? null;
+      const toolset = await this.toolsets.findByUnlistedToken(path.token);
+      return toolset &&
+        toolset.unlistedToken === path.token &&
+        servesUnlistedPath(sharingStateOf(toolset), now)
+        ? toolset.id
+        : null;
     }
     if (path.kind !== McpPathKind.PUBLIC_TOOLSET) return null;
     const owner = await this.handles.resolve(path.handle);
@@ -212,7 +225,7 @@ export class ConnectUrlsService {
       owner.kind === 'OFFICIAL' ? null : owner.organizationId,
       path.slug,
     );
-    return toolset?.id ?? null;
+    return toolset && servesPublicPath(sharingStateOf(toolset), now) ? toolset.id : null;
   }
 
   private attributionGroups(

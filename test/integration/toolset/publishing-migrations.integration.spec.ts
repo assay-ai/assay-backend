@@ -89,8 +89,8 @@ describe('toolset publishing migrations: up, down, up', () => {
     );
     await dataSource.query(
       `INSERT INTO toolset_versions (toolset_id, version, entries, tool_ids, discovery,
-                                     search_threshold, pinned_tools, name)
-       VALUES ($1, 1, '[]', '{}', 'AUTO', 25, '{}', 'Kit')`,
+                                     search_threshold, pinned_tools, name, shared_as)
+       VALUES ($1, 1, '[]', '{}', 'AUTO', 25, '{}', 'Kit', 'PUBLIC')`,
       [toolset.id],
     );
     await expect(

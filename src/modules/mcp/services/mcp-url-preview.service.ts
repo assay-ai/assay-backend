@@ -8,6 +8,7 @@ import { ChainId } from '@modules/chains/ports/caip.types';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { categoryOf } from '@modules/tool/ports/tool.types';
 import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
+import { McpPathKind } from '@modules/toolset/domain/mcp-url';
 import { attributionOf } from '@modules/toolset/domain/attribution';
 import { ParsedMcpUrl, viewFilterRecord } from '@modules/toolset/domain/mcp-url';
 import { selectViewTools, servesPricingMode } from '@modules/toolset/domain/view';
@@ -94,7 +95,12 @@ export class McpUrlPreviewService {
         return {
           canonicalUrl: row.canonicalUrl,
           endpointKind: row.endpointKind,
-          toolsetId: preview?.toolsetId ?? row.toolsetId,
+          // Only what the URL serves to this organization now — never the id
+          // behind a URL that stopped serving (or never served) it, unless the
+          // toolset is the organization's own.
+          toolsetId:
+            preview?.toolsetId ??
+            (row.parsed.path.kind === McpPathKind.MY_TOOLSET ? row.toolsetId : null),
           name: preview?.toolsetName ?? row.serverName ?? 'assay',
           serverName: row.serverName,
           client: row.client,

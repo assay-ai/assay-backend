@@ -296,3 +296,46 @@ function widerGrace(
 ): ToolsetVisibility.UNLISTED | ToolsetVisibility.PUBLIC {
   return current === ToolsetVisibility.PUBLIC ? ToolsetVisibility.PUBLIC : next;
 }
+
+/**
+ * Which published versions a kind of shared URL may serve (review P1): a
+ * `/@…` URL only versions published as PUBLIC, a `/u/` link versions
+ * published as UNLISTED or PUBLIC. A version published PRIVATE — or one
+ * published UNLISTED during a PUBLIC grace period — never reaches a URL that
+ * was not shared that way, whatever its number.
+ */
+export type SharedPathKind = 'PUBLIC' | 'UNLISTED';
+
+export function versionServes(sharedAs: string | null | undefined, path: SharedPathKind): boolean {
+  if (path === 'PUBLIC') return sharedAs === ToolsetVisibility.PUBLIC;
+  return sharedAs === ToolsetVisibility.PUBLIC || sharedAs === ToolsetVisibility.UNLISTED;
+}
+
+/** The newest version a kind of shared URL serves: what it serves without `@n`. */
+export function newestServed(
+  toolset: { readonly lastPublicVersion: number | null; readonly lastSharedVersion: number | null },
+  path: SharedPathKind,
+): number | null {
+  return path === 'PUBLIC' ? toolset.lastPublicVersion : toolset.lastSharedVersion;
+}
+
+/**
+ * How another organization reaches a toolset now: through its link (the
+ * current token, while `/u/` serves), through its `/@…` URL, or not at all.
+ * The link is the wider of the two, so it wins when both hold.
+ */
+export function sharedPathFor(
+  state: SharingState,
+  token: string | undefined,
+  now: Date,
+): SharedPathKind | null {
+  if (
+    token !== undefined &&
+    state.unlistedToken !== null &&
+    token === state.unlistedToken &&
+    servesUnlistedPath(state, now)
+  ) {
+    return 'UNLISTED';
+  }
+  return servesPublicPath(state, now) ? 'PUBLIC' : null;
+}

@@ -93,9 +93,13 @@ export class ToolsetEntity {
   @Column({ name: 'first_shared_at', type: 'timestamptz', nullable: true })
   firstSharedAt: Date | null;
 
-  /** The newest version published while shared: shared URLs never serve past it. */
+  /** The newest version published as UNLISTED or PUBLIC: `/u/` links never serve past it. */
   @Column({ name: 'last_shared_version', type: 'int', nullable: true })
   lastSharedVersion: number | null;
+
+  /** The newest version published as PUBLIC: `/@…` URLs never serve past it. */
+  @Column({ name: 'last_public_version', type: 'int', nullable: true })
+  lastPublicVersion: number | null;
 
   /** An operator's standing delist; cleared by a relist or a revert. */
   @Column({ name: 'delisted_at', type: 'timestamptz', nullable: true })

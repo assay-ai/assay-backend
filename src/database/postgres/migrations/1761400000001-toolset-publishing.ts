@@ -9,9 +9,10 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   slug is held for good, even after a delete: a recreated toolset with the
  *   same slug would otherwise answer `/@handle/slug@1` with different tools.
  *   The live-slug index becomes "live, or ever shared".
- * - `last_shared_version`: the newest version published while shared. Shared
- *   URLs never serve past it, so a version published privately during a grace
- *   period never reaches a shared URL.
+ * - `last_shared_version` / `last_public_version`: the newest version
+ *   published as UNLISTED or PUBLIC, and as PUBLIC. A `/u/` URL's latest is
+ *   the first, a `/@…` URL's the second, so neither ever serves a version that
+ *   was not shared that way.
  * - `delisted_at`: an operator's delist stands until relisted or reverted, so
  *   an owner cannot relist by stopping and sharing again.
  * - A platform (Official) slug is unique among platform toolsets: `NULL`
@@ -21,7 +22,10 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *
  * ## `toolset_versions`
  *
- * Immutable snapshots (a trigger refuses UPDATE and DELETE): entries with
+ * Immutable snapshots (a trigger refuses UPDATE and DELETE): `shared_as`,
+ * the visibility the version was published with — a `/@…` URL serves only
+ * PUBLIC ones, a `/u/` link UNLISTED or PUBLIC ones, never a PRIVATE one —
+ * and entries with
  * their rules, discovery mode, search threshold, pinned tools, name,
  * description, icon. `tool_ids` repeats the entries' tool ids so access
  * resolution reads one array. Kept for as long as the toolset row exists,
@@ -36,7 +40,10 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * already rounded and k-checked: the only table pages read), and
  * `moderation_cutoffs` — an operator's delist or takedown that takes effect
  * at once and is reverted unless a second operator confirms it by
- * `confirm_by` (FR-18).
+ * `confirm_by` (FR-18). A cutoff stands while `reverted_at` is null —
+ * pending (`confirmed_at` null) or confirmed — and at most one stands per
+ * target and action; a reassigned handle's takedown is closed (`REASSIGNED`)
+ * so its new holder can be taken down in turn.
  */
 export class ToolsetPublishing1761400000001 implements MigrationInterface {
   name = 'ToolsetPublishing1761400000001';
@@ -47,6 +54,7 @@ export class ToolsetPublishing1761400000001 implements MigrationInterface {
         ADD COLUMN "first_shared_at" timestamptz NULL,
         ADD COLUMN "delisted_at"     timestamptz NULL,
         ADD COLUMN "last_shared_version" integer NULL,
+        ADD COLUMN "last_public_version" integer NULL,
         ADD CONSTRAINT "chk_toolsets_listing"
           CHECK (("visibility" = 'PUBLIC') = ("listing_status" IS NOT NULL)),
         ADD CONSTRAINT "chk_toolsets_grace"
@@ -90,6 +98,7 @@ export class ToolsetPublishing1761400000001 implements MigrationInterface {
         "description"      varchar(280)  NULL,
         "icon"             varchar(32)   NULL,
         "changelog"        varchar(500)  NULL,
+        "shared_as"        varchar(16)   NOT NULL,
         "published_at"     timestamptz   NOT NULL DEFAULT now(),
         CONSTRAINT "pk_toolset_versions" PRIMARY KEY ("toolset_id", "version"),
         CONSTRAINT "fk_toolset_versions_toolset"
@@ -98,7 +107,9 @@ export class ToolsetPublishing1761400000001 implements MigrationInterface {
         CONSTRAINT "chk_toolset_versions_discovery"
           CHECK ("discovery" IN ('AUTO', 'FULL', 'SEARCH')),
         CONSTRAINT "chk_toolset_versions_pinned" CHECK (cardinality("pinned_tools") <= 5),
-        CONSTRAINT "chk_toolset_versions_entries" CHECK (jsonb_typeof("entries") = 'array')
+        CONSTRAINT "chk_toolset_versions_entries" CHECK (jsonb_typeof("entries") = 'array'),
+        CONSTRAINT "chk_toolset_versions_shared_as"
+          CHECK ("shared_as" IN ('PRIVATE', 'UNLISTED', 'PUBLIC'))
       )
     `);
     await queryRunner.query(
@@ -218,7 +229,7 @@ export class ToolsetPublishing1761400000001 implements MigrationInterface {
         CONSTRAINT "chk_moderation_cutoffs_reverted"
           CHECK (("reverted_at" IS NULL) = ("revert_reason" IS NULL)
                  AND ("revert_reason" IS NULL
-                      OR "revert_reason" IN ('EXPIRED', 'REJECTED', 'LIFTED')))
+                      OR "revert_reason" IN ('EXPIRED', 'REJECTED', 'LIFTED', 'REASSIGNED')))
       )
     `);
     await queryRunner.query(`
@@ -254,6 +265,7 @@ export class ToolsetPublishing1761400000001 implements MigrationInterface {
         DROP CONSTRAINT "chk_toolsets_unlisted_token",
         DROP CONSTRAINT "chk_toolsets_grace",
         DROP CONSTRAINT "chk_toolsets_listing",
+        DROP COLUMN "last_public_version",
         DROP COLUMN "last_shared_version",
         DROP COLUMN "delisted_at",
         DROP COLUMN "first_shared_at"

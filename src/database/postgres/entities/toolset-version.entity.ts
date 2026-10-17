@@ -41,6 +41,10 @@ export class ToolsetVersionEntity {
   @Column({ name: 'changelog', type: 'varchar', length: 500, nullable: true })
   changelog: string | null;
 
+  /** `PRIVATE` | `UNLISTED` | `PUBLIC`: the visibility it was published with. */
+  @Column({ name: 'shared_as', type: 'varchar', length: 16 })
+  sharedAs: string;
+
   @Column({ name: 'published_at', type: 'timestamptz' })
   publishedAt: Date;
 }
