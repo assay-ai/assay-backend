@@ -15,8 +15,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * not across every row: a deleted toolset keeps its row (calls and access
  * policies name it) and must not hold its slug forever.
  */
-export class CreateToolsets1761000000002 implements MigrationInterface {
-  name = 'CreateToolsets1761000000002';
+export class CreateToolsets1761200000002 implements MigrationInterface {
+  name = 'CreateToolsets1761200000002';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`

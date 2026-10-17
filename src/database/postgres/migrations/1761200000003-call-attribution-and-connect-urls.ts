@@ -30,8 +30,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * an agent, for "Waiting for first call" and the remembered client tab.
  * Nothing is enforced from it.
  */
-export class CallAttributionAndConnectUrls1761000000003 implements MigrationInterface {
-  name = 'CallAttributionAndConnectUrls1761000000003';
+export class CallAttributionAndConnectUrls1761200000003 implements MigrationInterface {
+  name = 'CallAttributionAndConnectUrls1761200000003';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     for (const table of ['payment_intents', 'tool_call_records']) {
