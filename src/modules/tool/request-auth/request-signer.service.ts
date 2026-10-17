@@ -80,7 +80,10 @@ export class RequestSignerService {
   signWith(req: SignableRequest, params: SignatureParams): Record<string, string> {
     if (!this.active) return {};
     const out: Record<string, string> = {};
-    let headers = req.headers;
+    // A caller-supplied digest is never signed: drop it, then add the computed one.
+    let headers: Record<string, string> = Object.fromEntries(
+      Object.entries(req.headers).filter(([k]) => k.toLowerCase() !== 'content-digest'),
+    );
     if (req.body !== undefined) {
       out['Content-Digest'] = contentDigest(req.body);
       headers = { ...headers, 'content-digest': out['Content-Digest'] };
