@@ -159,6 +159,37 @@ export class ToolVersionBriefDto {
   }
 }
 
+/**
+ * What one listed provider declares for a tool: the majors it serves and the
+ * optional fields it returns and accepts. Only providers in the catalogue's
+ * provider listing (ACTIVE, not blocked, an ACTIVE binding at its published
+ * revision) appear. A provider with several bindings shows their union.
+ */
+export class ToolVersionProviderDto {
+  @ApiProperty()
+  providerId: string;
+
+  @ApiProperty({ description: 'As in the catalogue provider listing' })
+  legalName: string;
+
+  @ApiProperty({ type: [Number], example: [1, 2], description: 'Contract majors it serves' })
+  servedMajors: number[];
+
+  @ApiProperty({
+    type: [String],
+    example: ['uv_index'],
+    description: 'Optional output fields it returns (`provides_output_fields`)',
+  })
+  providesOutputFields: string[];
+
+  @ApiProperty({
+    type: [String],
+    example: ['units'],
+    description: 'Optional input fields it accepts (`supports_input_fields`)',
+  })
+  supportsInputFields: string[];
+}
+
 /** A tool's published versions with their changelog, newest first. */
 export class ToolVersionListDto {
   @ApiProperty()
@@ -172,4 +203,12 @@ export class ToolVersionListDto {
 
   @ApiProperty({ type: [ToolContractVersionDto] })
   versions: ToolContractVersionDto[];
+
+  @ApiProperty({
+    type: [ToolVersionProviderDto],
+    description:
+      'Per listed provider serving the tool: the majors and optional fields it declares, ' +
+      'sorted by legal name',
+  })
+  providers: ToolVersionProviderDto[];
 }

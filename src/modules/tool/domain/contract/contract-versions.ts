@@ -295,20 +295,57 @@ export function deprecationOf(
 }
 
 /**
+ * What replaces a version, structured: the tool to call (another tool, or
+ * this one at another major), its name, and the version it is served at.
+ * `major`/`semver` are `null` for a replacement tool with no served version.
+ */
+export interface ContractReplacement {
+  readonly toolId: string;
+  readonly name: string;
+  readonly major: number | null;
+  readonly semver: string | null;
+}
+
+/**
  * What replaces `tool` at `version`: the replacement tool when one is named,
- * else the current version when it is newer, else `null`.
+ * else the current version when it is newer, else the newest newer servable
+ * major, else `null`.
+ */
+export function contractReplacementOf(
+  tool: Tool,
+  version: Pick<ToolContractVersion, 'major'>,
+): ContractReplacement | null {
+  if (tool.replacementToolId && tool.replacementToolName) {
+    return {
+      toolId: tool.replacementToolId,
+      name: tool.replacementToolName,
+      major: tool.replacementToolVersion?.major ?? null,
+      semver: tool.replacementToolVersion?.semver ?? null,
+    };
+  }
+  const current = currentContractVersion(tool);
+  const target =
+    current && current.major !== version.major && isServable(current)
+      ? current
+      : contractVersionsOf(tool).find(
+          (candidate) => candidate.major > version.major && isServable(candidate),
+        );
+  return target
+    ? { toolId: tool.id, name: tool.name, major: target.major, semver: target.semver }
+    : null;
+}
+
+/**
+ * {@link contractReplacementOf} as the text notices and refusals show: the
+ * replacement tool's name, or `name@N (vX.Y.Z)` for another major of `tool`.
  */
 export function replacementOf(
   tool: Tool,
   version: Pick<ToolContractVersion, 'major'>,
 ): string | null {
-  if (tool.replacementToolName) return tool.replacementToolName;
-  const current = currentContractVersion(tool);
-  if (current && current.major !== version.major && isServable(current)) {
-    return `${tool.name}@${current.major} (v${current.semver})`;
-  }
-  const newer = contractVersionsOf(tool).find(
-    (candidate) => candidate.major > version.major && isServable(candidate),
-  );
-  return newer ? `${tool.name}@${newer.major} (v${newer.semver})` : null;
+  const replacement = contractReplacementOf(tool, version);
+  if (!replacement) return null;
+  return replacement.toolId === tool.id
+    ? `${replacement.name}@${replacement.major} (v${replacement.semver})`
+    : replacement.name;
 }

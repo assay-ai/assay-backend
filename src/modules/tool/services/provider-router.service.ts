@@ -77,6 +77,7 @@ import {
   NO_CONTRACT_REQUEST,
   candidateVersions,
   effectiveOutputSchema,
+  contractReplacementOf,
   replacementOf,
   toolAtVersion,
   versionOf,
@@ -1321,6 +1322,12 @@ export interface RuleRejectionDetail {
   readonly rule?: RuleRejectionReason;
   /** On `UNSUPPORTED_INPUT_FIELD` and `MISSING_OUTPUT_FIELD`, the fields. */
   readonly fields?: readonly string[];
+  /** On `CONTRACT_VERSION_MISMATCH`: the majors the binding serves. */
+  readonly servedMajors?: readonly number[];
+  /** On `CONTRACT_VERSION_MISMATCH`: the major the call was routed at. */
+  readonly requestedMajor?: number;
+  /** On `CONTRACT_VERSION_MISMATCH`: the majors the call may use; `null` when unconstrained. */
+  readonly requestedRange?: readonly number[] | null;
 }
 
 export interface RoutedCall {
@@ -1919,11 +1926,14 @@ export function contractRefused(
   context?: RoutingContext,
 ): Error {
   if (refusal === ContractRefusal.RETIRED) {
+    const major = retiredMajorOf(context);
     return ToolAccessErrors.contractVersionRetired({
       details: {
         toolId: tool.id,
         name: tool.name,
-        replacement: contractReplacement(tool, context),
+        replacement: replacementOf(tool, { major }),
+        // The same, structured: what the console links to (GET /refused-calls).
+        replacementTool: contractReplacementOf(tool, { major }),
       },
     });
   }
@@ -1932,9 +1942,13 @@ export function contractRefused(
 
 /** What replaces the versions a call may use. */
 function contractReplacement(tool: Tool, context?: RoutingContext): string | null {
+  return replacementOf(tool, { major: retiredMajorOf(context) });
+}
+
+/** The newest major the call may use (`0` when its range is unconstrained). */
+function retiredMajorOf(context?: RoutingContext): number {
   const range = context?.contract?.range ?? null;
-  const major = range && range.length > 0 ? range[range.length - 1] : 0;
-  return replacementOf(tool, { major });
+  return range && range.length > 0 ? range[range.length - 1] : 0;
 }
 
 function toRuleRejectionDetail(rejection: RuleRejection): RuleRejectionDetail {
@@ -1944,6 +1958,11 @@ function toRuleRejectionDetail(rejection: RuleRejection): RuleRejectionDetail {
     source: rejection.source,
     detail: rejection.detail,
     ...(rejection.fields ? { fields: [...rejection.fields] } : {}),
+    ...(rejection.servedMajors ? { servedMajors: [...rejection.servedMajors] } : {}),
+    ...(rejection.requestedMajor !== undefined ? { requestedMajor: rejection.requestedMajor } : {}),
+    ...(rejection.requestedRange !== undefined
+      ? { requestedRange: rejection.requestedRange ? [...rejection.requestedRange] : null }
+      : {}),
   };
 }
 

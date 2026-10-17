@@ -223,6 +223,30 @@ export class CatalogueToolDto {
   })
   deprecatedMajors: number[];
 
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'What replaces the deprecated majors: the tool to call (this tool at a newer major, or ' +
+      'the operator-named replacement tool, only when it is LISTED). `null` with no deprecated ' +
+      'major or no replacement.',
+  })
+  replacementToolId: string | null;
+
+  @ApiProperty({ type: String, nullable: true, example: 'get_weather' })
+  replacementName: string | null;
+
+  @ApiProperty({ type: Number, nullable: true, example: 2, description: 'The major to call it at' })
+  replacementMajor: number | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: '2.0.0',
+    description: 'The replacement’s served version',
+  })
+  replacementVersion: string | null;
+
   @ApiProperty({ enum: ToolTier })
   tier: ToolTier;
 

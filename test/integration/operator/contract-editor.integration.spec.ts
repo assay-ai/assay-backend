@@ -193,6 +193,8 @@ describe('the operator contract editor, against a real database', () => {
   it('the first version publishes as 1.0.0 with a second operator, and becomes current', async () => {
     const saved = await editor.saveDraft(author, toolId, DRAFT);
     expect(saved.draft).toMatchObject({ nextSemver: '1.0.0', baseSemver: null, problems: [] });
+    // The UI warns that the last editor cannot approve.
+    expect(saved.draft!.editedBy).toBe(author.operatorId);
 
     // The author cannot approve their own publish.
     const queued = await editor.publish(author, toolId, saved.draft!.version, ACTION, null);
@@ -421,6 +423,40 @@ describe('the operator contract editor, against a real database', () => {
     expect(tool).toEqual({ name: 'tide_times_for_a_harbour', status: 'DRAFT' });
   });
 
+  it('an acknowledged request leaves the default queue and is listed with ?status=ACKNOWLEDGED', async () => {
+    const [org] = await dataSource.query(
+      `INSERT INTO organizations (name, created_via) VALUES ('Example acker', 'TEST') RETURNING id`,
+    );
+    const [request] = await dataSource.query(
+      `INSERT INTO tool_requests (organization_id, title, description, first_response_due_at)
+       VALUES ($1, 'Ferry departures', 'Next ferries from a port.', now() + interval '2 days')
+       RETURNING id`,
+      [org.id],
+    );
+    const queue = new ToolRequestQueueService(
+      new ToolRequestRepository(dataSource),
+      new ToolRepository(dataSource),
+    );
+    const ids = async (status?: ToolRequestStatus[]) =>
+      (await queue.listQueue({ limit: 100, order: 'asc', status } as never)).items.map(
+        (row) => row.id,
+      );
+
+    expect(await ids()).toContain(request.id);
+    await queue.answer(author.operatorId, request.id, { status: ToolRequestStatus.ACKNOWLEDGED });
+
+    expect(await ids()).not.toContain(request.id);
+    expect(await ids([ToolRequestStatus.ACKNOWLEDGED])).toContain(request.id);
+    expect(await ids([ToolRequestStatus.OPEN])).not.toContain(request.id);
+
+    // ...and accepted from there.
+    const accepted = await queue.answer(author.operatorId, request.id, {
+      status: ToolRequestStatus.ACCEPTED,
+      resolutionNote: 'Accepted later from the acknowledged list.',
+    });
+    expect(accepted.status).toBe(ToolRequestStatus.ACCEPTED);
+  });
+
   it('the local and test seed owns version 1.0.0 of a seeded tool and points current at it', async () => {
     const id = randomUUID();
     const tools = new ToolRepository(dataSource);
@@ -491,6 +527,7 @@ describe('the operator contract editor, against a real database', () => {
     await editor.discardDraft(author, id);
     const replaced = await editor.saveDraft(approver, id, DRAFT);
     expect(replaced.draft!.version).toBeGreaterThan(draftVersion);
+    expect(replaced.draft!.editedBy).toBe(approver.operatorId);
 
     // The operator who last edited the draft is not its second person.
     const again = (await editor.publish(author, id, replaced.draft!.version, ACTION, null)) as {

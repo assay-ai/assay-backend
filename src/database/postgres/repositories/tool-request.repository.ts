@@ -59,11 +59,15 @@ export class ToolRequestRepository extends OrganizationScopedRepository<ToolRequ
    * not every request ever filed. A request already answered belongs to the
    * requester's own history (`GET /tool-requests/:id`), not to a queue an
    * operator is meant to work down.
+   *
+   * With `statuses`, the requests in those states instead (`?status=`), so an
+   * ACKNOWLEDGED request can be found again and accepted from the queue.
    */
-  queueQueryBuilder(): SelectQueryBuilder<ToolRequestEntity> {
-    return this.manager
-      .createQueryBuilder(ToolRequestEntity, 'request')
-      .where('request.first_responded_at IS NULL');
+  queueQueryBuilder(statuses?: readonly string[]): SelectQueryBuilder<ToolRequestEntity> {
+    const qb = this.manager.createQueryBuilder(ToolRequestEntity, 'request');
+    return statuses && statuses.length > 0
+      ? qb.where('request.status IN (:...statuses)', { statuses: [...statuses] })
+      : qb.where('request.first_responded_at IS NULL');
   }
 
   /**

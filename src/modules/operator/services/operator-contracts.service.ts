@@ -803,6 +803,8 @@ function draftOf(
     verificationPolicyId: row.verificationPolicyId,
     tier: row.tier as ToolTier | null,
     changelog: row.changelog,
+    // The same operator the publish approval refuses as approver.
+    editedBy: row.editedBy ?? row.createdBy ?? null,
     updatedAt: row.updatedAt,
   };
 }

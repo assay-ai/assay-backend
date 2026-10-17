@@ -51,11 +51,59 @@ export class RefusedProviderDto {
   })
   fields?: string[];
 
-  @ApiProperty()
+  @ApiPropertyOptional({
+    type: [Number],
+    description: 'On CONTRACT_VERSION_MISMATCH: the contract majors the binding serves, e.g. `[1]`',
+  })
+  servedMajors?: number[];
+
+  @ApiPropertyOptional({
+    description: 'On CONTRACT_VERSION_MISMATCH: the contract major the call was routed at',
+  })
+  requestedMajor?: number;
+
+  @ApiPropertyOptional({
+    type: [Number],
+    nullable: true,
+    description:
+      'On CONTRACT_VERSION_MISMATCH: the majors the call may use (toolset entry range and ' +
+      '`?tools=name@N` pin); `null` when unconstrained',
+  })
+  requestedRange?: number[] | null;
+
+  @ApiProperty({ description: 'Human-readable; the structured fields above are what to render' })
   detail: string;
 
   @ApiPropertyOptional({ description: 'On PAYEE_NO_LONGER_ELIGIBLE: the rule it now fails' })
   rule?: string;
+}
+
+/** What to call instead of a retired contract version. */
+export class RefusedCallReplacementDto {
+  @ApiProperty({ description: 'The tool to call: another tool, or the same tool at another major' })
+  toolId: string;
+
+  @ApiProperty({ description: 'Its name' })
+  name: string;
+
+  @ApiProperty({ nullable: true, description: 'The major to call it at; `null` if unknown' })
+  major: number | null;
+
+  @ApiProperty({ nullable: true, description: 'Its served version, e.g. `2.0.0`' })
+  semver: string | null;
+
+  @ApiProperty({ description: 'As the agent was told, e.g. `get_weather@2 (v2.0.0)`' })
+  label: string;
+}
+
+/** The refusal's structured details, per code. */
+export class RefusedCallDetailsDto {
+  @ApiPropertyOptional({
+    type: RefusedCallReplacementDto,
+    nullable: true,
+    description: 'On CONTRACT_VERSION_RETIRED: what replaces it; `null` when nothing does',
+  })
+  replacement?: RefusedCallReplacementDto | null;
 }
 
 /** One call refused before anything was charged (design spec §7.10, "refused calls"). */
@@ -91,6 +139,9 @@ export class RefusedCallDto {
     description: 'On NO_PROVIDER_MATCHES_RULES and UNSUPPORTED_INPUT_FIELD',
   })
   providers: RefusedProviderDto[];
+
+  @ApiProperty({ type: RefusedCallDetailsDto })
+  details: RefusedCallDetailsDto;
 
   @ApiProperty({ enum: EndpointKind, nullable: true })
   endpointKind: EndpointKind | null;
