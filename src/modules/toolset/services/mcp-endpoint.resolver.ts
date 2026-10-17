@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 
 import {
   ToolsetEntryRepository,
@@ -6,6 +6,8 @@ import {
 } from '@database/postgres/repositories/toolset.repository';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { EntryRoutingRules } from '@modules/tool/domain/routing';
+import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
+import { categoryOf } from '@modules/tool/ports/tool.types';
 
 import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
 
@@ -21,7 +23,7 @@ import {
   endpointKindOf,
   withoutDefaultDiscovery,
 } from '../domain/mcp-url';
-import { McpEndpointView, entryRulesOf } from '../domain/view';
+import { DEFAULT_SEARCH_THRESHOLD, McpEndpointView, entryRulesOf } from '../domain/view';
 import { AccessEpochService } from './access-epoch.service';
 import { ACCESS_CACHE_TTL_MS } from './access.resolver';
 
@@ -43,13 +45,14 @@ export const ENDPOINT_CACHE_MAX_ENTRIES = 10_000;
  * A parsed MCP URL → what it serves, for the organization asking
  * (design spec §7.4, "Resolution rules").
  *
- * T1 serves `/` and `/my/{slug}` (the live Draft). The other forms parse —
- * so their canonical URLs and browser redirects are already final — and
- * answer the same 404 here until the phase that serves them:
+ * Served: `/` (the whole catalogue, SEARCH by default), `/c/{category}` (one
+ * topic, AUTO) and `/my/{slug}` (the live Draft, the toolset's own discovery
+ * settings). The other forms parse — so their canonical URLs and browser
+ * redirects are already final — and answer the same 404 here until the phase
+ * that serves them:
  *
  * ```text
  * /my/{slug}@n          T2  published versions
- * /c/{category}         T2
  * /@{handle}/{slug}[@n] T2  PUBLIC toolsets
  * /u/{token}[@n]        T2  UNLISTED toolsets
  * /@{handle}            T4  provider tools
@@ -76,6 +79,9 @@ export class McpEndpointResolver {
     private readonly entries: ToolsetEntryRepository,
     private readonly epochs: AccessEpochService,
     @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
+    // The catalogue a `/c/{category}` path is checked against. Optional so a
+    // hand-built resolver needs none; without it any well-formed topic resolves.
+    @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue?: ToolCataloguePort,
   ) {}
 
   /** The view `parsed` serves to `organizationId`, or `MCP_URL_NOT_FOUND`. */
@@ -92,6 +98,11 @@ export class McpEndpointResolver {
         handle: null,
         baseToolIds: null,
         entryRules: new Map(),
+        discovery: {
+          mode: DiscoveryMode.SEARCH,
+          searchThreshold: DEFAULT_SEARCH_THRESHOLD,
+          pinnedTools: this.host.rootPinnedTools ?? [],
+        },
         defaultDiscovery: null,
       };
     }
@@ -123,12 +134,39 @@ export class McpEndpointResolver {
         if (path.version !== null) throw McpErrors.urlNotFound();
         return this.myToolsetView(organizationId, path);
       case McpPathKind.CATEGORY:
+        return this.categoryView(path);
       case McpPathKind.HANDLE:
       case McpPathKind.PUBLIC_TOOLSET:
       case McpPathKind.UNLISTED_TOOLSET:
       default:
         throw McpErrors.urlNotFound();
     }
+  }
+
+  /** `/c/{category}`: every LISTED tool in one topic; a topic no tool has is a 404. */
+  private async categoryView(
+    path: Extract<McpPath, { kind: McpPathKind.CATEGORY }>,
+  ): Promise<BaseView> {
+    if (this.catalogue) {
+      const tools = await this.catalogue.listTools();
+      if (!tools.some((tool) => categoryOf(tool) === path.category)) throw McpErrors.urlNotFound();
+    }
+    return {
+      path,
+      kind: endpointKindOf(path),
+      toolset: null,
+      handle: null,
+      baseToolIds: null,
+      baseCategory: path.category,
+      entryRules: new Map(),
+      discovery: {
+        mode: DiscoveryMode.AUTO,
+        searchThreshold: DEFAULT_SEARCH_THRESHOLD,
+        pinnedTools: [],
+      },
+      // `staticDiscoveryDefault` already dropped `discovery=auto` while parsing.
+      defaultDiscovery: null,
+    };
   }
 
   private async myToolsetView(
@@ -152,6 +190,11 @@ export class McpEndpointResolver {
       handle: null,
       baseToolIds: rows.map((row) => row.toolId),
       entryRules,
+      discovery: {
+        mode: toolset.discovery.toLowerCase() as DiscoveryMode,
+        searchThreshold: toolset.searchThreshold,
+        pinnedTools: toolset.pinnedTools ?? [],
+      },
       defaultDiscovery: toolset.discovery.toLowerCase() as DiscoveryMode,
     };
   }

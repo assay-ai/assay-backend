@@ -6,6 +6,7 @@ describe('loadMcpHostConfig', () => {
     expect(loadMcpHostConfig({ NODE_ENV: 'development' })).toEqual({
       mcpPublicUrl: 'http://localhost:3200',
       webAppUrl: 'http://localhost:4000',
+      rootPinnedTools: [],
     });
   });
 
@@ -13,7 +14,11 @@ describe('loadMcpHostConfig', () => {
     expect(() => loadMcpHostConfig({ NODE_ENV: 'production' })).toThrow(/WEB_APP_URL/);
     expect(
       loadMcpHostConfig({ NODE_ENV: 'production', WEB_APP_URL: 'https://app.example.com' }),
-    ).toEqual({ mcpPublicUrl: 'https://mcp.assay.ai', webAppUrl: 'https://app.example.com' });
+    ).toEqual({
+      mcpPublicUrl: 'https://mcp.assay.ai',
+      webAppUrl: 'https://app.example.com',
+      rootPinnedTools: [],
+    });
   });
 
   it('accepts a bare origin, with or without a trailing slash', () => {
@@ -28,5 +33,18 @@ describe('loadMcpHostConfig', () => {
       /bare origin/,
     );
     expect(() => loadMcpHostConfig({ WEB_APP_URL: 'not a url' })).toThrow(/not a URL/);
+  });
+
+  it('reads the root pinned tools: names, deduplicated, at most 5', () => {
+    expect(
+      loadMcpHostConfig({ MCP_ROOT_PINNED_TOOLS: ' get_weather, geocode_place ,get_weather' })
+        .rootPinnedTools,
+    ).toEqual(['get_weather', 'geocode_place']);
+    expect(() => loadMcpHostConfig({ MCP_ROOT_PINNED_TOOLS: 'a1,b1,c1,d1,e1,f1' })).toThrow(
+      /at most 5/,
+    );
+    expect(() => loadMcpHostConfig({ MCP_ROOT_PINNED_TOOLS: 'Not A Tool' })).toThrow(
+      /not a tool name/,
+    );
   });
 });
