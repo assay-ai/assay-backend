@@ -13,6 +13,12 @@ export enum McpErrorCode {
   MCP_CREDENTIAL_REVOKED = 'MCP_CREDENTIAL_REVOKED',
   MCP_SESSION_NOT_FOUND = 'MCP_SESSION_NOT_FOUND',
   MCP_QUOTA_EXCEEDED = 'MCP_QUOTA_EXCEEDED',
+  /**
+   * `_meta["x402/idempotency-key"]` is not a printable ASCII string of 1 to
+   * 128 characters. Refused before anything runs, so nothing is charged; not
+   * retryable unchanged.
+   */
+  MCP_IDEMPOTENCY_KEY_INVALID = 'MCP_IDEMPOTENCY_KEY_INVALID',
 
   // ── the public live demo ─────────────────────────────────────────────────
   MCP_DEMO_QUERY_INVALID = 'MCP_DEMO_QUERY_INVALID',
@@ -101,6 +107,13 @@ export const McpErrors = createDomainErrorFactory('MCP', {
     statusCode: 404,
     message: (context?: Record<string, any>) =>
       `MCP session not found${context?.sessionId ? `: ${context.sessionId}` : ''}`,
+  },
+  idempotencyKeyInvalid: {
+    code: McpErrorCode.MCP_IDEMPOTENCY_KEY_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Invalid _meta["x402/idempotency-key"]` +
+      `${context?.reason ? `: ${context.reason}` : ''}. Nothing was charged.`,
   },
   quotaExceeded: {
     code: McpErrorCode.MCP_QUOTA_EXCEEDED,

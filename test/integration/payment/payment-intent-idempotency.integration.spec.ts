@@ -1,5 +1,5 @@
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
-import { PaymentIntent } from '@modules/payment/ports/payment.types';
+import { PaymentIntent, PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import { BaseError } from '@shared/errors/base.error';
 
 import { PaymentTestContext, createPaymentTestContext } from '../helpers/payment-test-context';
@@ -106,6 +106,120 @@ describe('payment intent idempotency — a retry must never become a second char
     expect(replay.status).toBe(secured.status);
     expect(replay.holdId).toBe(secured.holdId);
     // One hold, therefore one reservation — the replay charged nothing again.
+    expect(await context.held(first.agentAccount)).toBe(1_000_000n);
+  });
+
+  /** CREATED → FUNDS_SECURED → PROVIDER_EXECUTING, the state a routed call is voided from. */
+  async function executing(intent: PaymentIntent): Promise<PaymentIntent> {
+    await context.fund(intent.agentAccount, 5_000_000n);
+    await context.intents.secureFunds(context.organizationId, intent.id);
+    return context.intents.transition(
+      context.organizationId,
+      intent.id,
+      PaymentIntentStatus.FUNDS_SECURED,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+    );
+  }
+
+  // ── G2.1: a key is held only while its intent may still charge ───────────
+
+  it('a voided intent releases its key: the retry creates a fresh intent', async () => {
+    const first = await context.createIntent('idem-voided', { idempotencyKey: 'key-voided' });
+    await executing(first);
+    await context.intents.resolve(
+      context.organizationId,
+      first.id,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+      PaymentIntentStatus.VOIDED,
+      { reason: 'test: provider failed' },
+    );
+
+    const retry = await context.createIntent('idem-voided', { idempotencyKey: 'key-voided' });
+
+    expect(retry.id).not.toBe(first.id);
+    expect(retry.status).toBe(PaymentIntentStatus.CREATED);
+    expect(await intentCount('idem-voided')).toBe(2);
+    // The hold the void released stays released; only the retry may hold now.
+    expect(await context.held(first.agentAccount)).toBe(0n);
+  });
+
+  it('a refunded intent releases its key, and its hold stays released', async () => {
+    const first = await context.createIntent('idem-refunded', { idempotencyKey: 'key-refunded' });
+    await executing(first);
+    await context.intents.resolve(
+      context.organizationId,
+      first.id,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+      PaymentIntentStatus.VERIFYING,
+      { reason: 'test: served' },
+    );
+    await context.intents.resolve(
+      context.organizationId,
+      first.id,
+      PaymentIntentStatus.VERIFYING,
+      PaymentIntentStatus.REFUNDED,
+      { reason: 'test: verification failed', verificationVerdict: 'SCHEMA_FAIL' },
+    );
+    expect(await context.held(first.agentAccount)).toBe(0n);
+
+    const retry = await context.createIntent('idem-refunded', { idempotencyKey: 'key-refunded' });
+
+    expect(retry.id).not.toBe(first.id);
+    expect(await intentCount('idem-refunded')).toBe(2);
+    expect(
+      await context.intents.findLiveByIdempotencyKey(
+        context.organizationId,
+        context.id('idem-refunded:agent'),
+        'key-refunded',
+      ),
+    ).toMatchObject({ id: retry.id });
+  });
+
+  it('an expired intent releases its key too', async () => {
+    const first = await context.createIntent('idem-expired', { idempotencyKey: 'key-expired' });
+    await context.intents.transition(
+      context.organizationId,
+      first.id,
+      PaymentIntentStatus.CREATED,
+      PaymentIntentStatus.EXPIRED,
+      { reason: 'test: funds not secured' },
+    );
+
+    const retry = await context.createIntent('idem-expired', { idempotencyKey: 'key-expired' });
+
+    expect(retry.id).not.toBe(first.id);
+    expect(await intentCount('idem-expired')).toBe(2);
+  });
+
+  it('after a void and a retry, the key replays the LIVE intent, not the dead one', async () => {
+    const first = await context.createIntent('idem-live', { idempotencyKey: 'key-live' });
+    await executing(first);
+    await context.intents.resolve(
+      context.organizationId,
+      first.id,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+      PaymentIntentStatus.VOIDED,
+    );
+    const retry = await context.createIntent('idem-live', { idempotencyKey: 'key-live' });
+
+    const [third, fourth] = await Promise.all([
+      context.createIntent('idem-live', { idempotencyKey: 'key-live' }),
+      context.createIntent('idem-live', { idempotencyKey: 'key-live' }),
+    ]);
+
+    expect(third.id).toBe(retry.id);
+    expect(fourth.id).toBe(retry.id);
+    expect(await intentCount('idem-live')).toBe(2);
+  });
+
+  it('an intent still executing keeps its key: the retry gets that intent and no second hold', async () => {
+    const first = await context.createIntent('idem-running', { idempotencyKey: 'key-running' });
+    await executing(first);
+
+    const retry = await context.createIntent('idem-running', { idempotencyKey: 'key-running' });
+
+    expect(retry.id).toBe(first.id);
+    expect(retry.status).toBe(PaymentIntentStatus.PROVIDER_EXECUTING);
     expect(await context.held(first.agentAccount)).toBe(1_000_000n);
   });
 

@@ -517,7 +517,12 @@ describe('buyer debt migrations, down and up again', () => {
       )) as Array<{ prosrc: string }>
     )[0].prosrc;
 
-  it('reverts 1760900000000 … 1760600000000 one by one and reapplies them', async () => {
+  it('reverts 1761000000000 … 1760600000000 one by one and reapplies them', async () => {
+    // The idempotency index (G2.1) sits on top of the buyer-debt migrations
+    // and touches none of their objects; it is reverted first to reach them.
+    expect(await last()).toBe('IdempotencyKeyLiveIntents1761000000000');
+    // No wrapping transaction: its down() rebuilds the index CONCURRENTLY.
+    await dataSource.undoLastMigration({ transaction: 'none' });
     expect(await last()).toBe('VoucherSeqDebtReplacement1760900000000');
     expect(await seqTriggerSource()).toContain('redemption_lapsed_at');
 
@@ -554,6 +559,7 @@ describe('buyer debt migrations, down and up again', () => {
       'PaymentIntentRedemptionLapsed1760700000000',
       'PaymentIntentDebtReplacing1760800000000',
       'VoucherSeqDebtReplacement1760900000000',
+      'IdempotencyKeyLiveIntents1761000000000',
     ]);
     expect(await seqTriggerSource()).toContain('redemption_lapsed_at');
     expect(await columns()).toEqual([
