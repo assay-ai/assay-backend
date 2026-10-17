@@ -342,4 +342,81 @@ describe('DbProviderRegistry', () => {
       expect(state?.payoutAccountByChain.size).toBe(0);
     });
   });
+
+  describe('with observed stats (binding_stats)', () => {
+    function statsRow(bindingId: string, overrides: Record<string, unknown> = {}) {
+      return {
+        bindingId,
+        providerId: PROVIDER_A,
+        attempts: 200,
+        availableAttempts: 150,
+        latencySamples: 150,
+        p50LatencyMs: 300,
+        p95LatencyMs: 2_000,
+        verdicts: 100,
+        passedVerdicts: 90,
+        ...overrides,
+      };
+    }
+
+    function withStats(rows: Record<string, unknown>[], minSampleSize = 50) {
+      const { find } = build();
+      const findByProviders = jest.fn(async () => rows);
+      const registry = new DbProviderRegistry(
+        { find } as unknown as ProviderRepository,
+        { enrolmentsOf: async () => new Map() } as unknown as ChainEnrolmentPort,
+        noBlocks(),
+        null,
+        { findByProviders } as never,
+        { windowSize: 1000, minSampleSize, maxAgeMs: 1 },
+      );
+      return { registry, findByProviders };
+    }
+
+    it('returns the measured stats, per binding and pooled per provider, in the same batch', async () => {
+      const { registry, findByProviders } = withStats([
+        statsRow('binding-a'),
+        statsRow('binding-b', {
+          attempts: 800,
+          availableAttempts: 800,
+          latencySamples: 0,
+          p50LatencyMs: null,
+          p95LatencyMs: null,
+          verdicts: 0,
+          passedVerdicts: 0,
+        }),
+      ]);
+
+      const state = (await registry.findRoutingStates([PROVIDER_A])).get(PROVIDER_A);
+
+      expect(findByProviders).toHaveBeenCalledWith([PROVIDER_A]);
+      expect(state?.bindingStats?.get('binding-a')).toEqual({
+        availabilityRate: 0.75,
+        paidQualityRate: 0.9,
+        p50LatencyMs: 300,
+        p95LatencyMs: 2_000,
+      });
+      expect(state?.bindingStats?.get('binding-b')).toEqual({ availabilityRate: 1 });
+      // Pooled by counts: (150 + 800) / (200 + 800).
+      expect(state?.stats.availabilityRate).toBe(0.95);
+      expect(state?.stats.paidQualityRate).toBe(0.9);
+      expect(state?.stats.p95LatencyMs).toBe(2_000);
+    });
+
+    it('keeps the neutral prior below the minimum sample — empty stats, no binding entry', async () => {
+      const { registry } = withStats([statsRow('binding-a')], 500);
+
+      const state = (await registry.findRoutingStates([PROVIDER_A])).get(PROVIDER_A);
+
+      expect(state?.stats).toEqual({});
+      expect(state?.bindingStats?.has('binding-a')).toBe(false);
+    });
+
+    it('returns empty stats when no stats source is wired, as before the pipeline', async () => {
+      const { registry } = build();
+      const state = (await registry.findRoutingStates([PROVIDER_A])).get(PROVIDER_A);
+      expect(state?.stats).toEqual({});
+      expect(state?.bindingStats?.size).toBe(0);
+    });
+  });
 });
