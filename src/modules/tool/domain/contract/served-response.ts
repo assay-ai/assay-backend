@@ -12,6 +12,7 @@ import { isObjectNode, isPathNode } from '../mapping/normalize';
 import { mapResponse } from '../mapping/response-mapper';
 import { mappingFaultOf } from '../mapping/mapping-fault';
 import { ToolBinding, ToolContractVersion } from '../../ports/tool.types';
+import { enforcedOutputs } from './contract-versions';
 
 /**
  * A provider's response mapped into the contract at one version, holding the
@@ -32,8 +33,10 @@ export function mapServedResponse(
   version: Pick<ToolContractVersion, 'outputSchema' | 'optionalOutputFields'>,
   binding: Pick<ToolBinding, 'providesOutputFields'>,
   context?: MappingContext,
+  /** The toolset entry's "must return", held like a declared field. */
+  requireOutputFields: readonly string[] = [],
 ): JsonValue {
-  const declared = declaredOutputs(version, binding);
+  const declared = enforcedOutputs(version, binding, requireOutputFields);
   let document: JsonValue;
   try {
     document = mapResponse(declared.length > 0 ? optionalised(spec, declared) : spec, upstream, {
