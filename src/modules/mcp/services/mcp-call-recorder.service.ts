@@ -10,6 +10,12 @@ import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { RefusalLayer } from '@modules/toolset/domain/attribution';
 import { ConnectUrlsService } from '@modules/toolset/services/connect-urls.service';
+import {
+  NOTIFICATION_PORT,
+  NotificationEvent,
+  NotificationPort,
+} from '@modules/notification/ports/notification.port';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { AppError } from '@shared/errors/app-errors';
 
 import { McpScope } from '../ports/mcp-scope';
@@ -29,6 +35,10 @@ const REFUSAL_LAYER: Readonly<Record<string, RefusalLayer>> = Object.freeze({
   [ToolErrorCode.TOOL_PROVIDER_SLASH_HOLD]: RefusalLayer.SERVER,
   [PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN]: RefusalLayer.SERVER,
 });
+
+/** The same refusal this many times within {@link REPEAT_WINDOW_SECONDS} alerts the owner. */
+export const REPEAT_ALERT_THRESHOLD = 5;
+export const REPEAT_WINDOW_SECONDS = 60 * 60;
 
 /** What the MCP server adds to a refusal's `_meta["x402/error"]`. */
 export interface RefusalNotice {
@@ -51,6 +61,8 @@ export class McpCallRecorder {
     private readonly records: ToolCallRecordWriter,
     @Optional() private readonly connectUrls?: ConnectUrlsService,
     @Optional() @Inject(MCP_HOST_CONFIG) private readonly host?: McpHostConfig,
+    @Optional() private readonly cache?: CacheService,
+    @Optional() @Inject(NOTIFICATION_PORT) private readonly notifications?: NotificationPort,
   ) {}
 
   /** Records `error` as a refused call when it is one; returns what the agent is told. */
@@ -79,8 +91,40 @@ export class McpCallRecorder {
       latencyMs: Date.now() - startedAt,
       attribution: scope?.attribution ?? null,
     });
+    await this.alertOnRepeat(session, toolName, error.errorCode);
 
     return { callId, fixUrl: this.fixUrlOf(error.errorCode, session, callId) };
+  }
+
+  /**
+   * The owner is told when the same refusal repeats: the fifth one for the
+   * same agent, tool and code within an hour is the edge, seen here, where
+   * the count is. Best effort — an alert never changes an outcome.
+   */
+  private async alertOnRepeat(session: McpSession, toolName: string, code: string): Promise<void> {
+    if (!this.cache || !this.notifications) return;
+    try {
+      const key = `assay:refusal-repeat:${session.agentId}:${toolName}:${code}`;
+      const redis = this.cache.getRedisClient();
+      const count = await redis.incr(key);
+      if (count === 1) await redis.expire(key, REPEAT_WINDOW_SECONDS);
+      if (count !== REPEAT_ALERT_THRESHOLD) return;
+
+      await this.notifications.notify({
+        organizationId: session.organizationId,
+        event: NotificationEvent.CALL_REFUSED_REPEATEDLY,
+        title: `Calls to ${toolName} keep being refused`,
+        body:
+          `Agent ${session.agentId} was refused ${REPEAT_ALERT_THRESHOLD} times within an hour ` +
+          `calling ${toolName} (${code}). Nothing was charged.`,
+        subjectType: 'agent',
+        subjectId: session.agentId,
+        payload: { toolName, code },
+        dedupeKey: `${session.agentId}:${toolName}:${code}`,
+      });
+    } catch {
+      // Bookkeeping; the refusal itself already reached the agent.
+    }
   }
 
   async markFirstCall(session: McpSession, scope: McpScope | undefined): Promise<void> {
