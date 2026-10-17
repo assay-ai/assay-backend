@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { NotificationModule } from '@modules/notification/notification.module';
 
+import { BindingStatsRefreshJob } from './jobs/binding-stats-refresh.job';
 import { StakeMonitorJob } from './jobs/stake-monitor.job';
 import {
   STAKE_GRACE_PERIOD_MS,
@@ -17,6 +18,7 @@ import {
   PROVIDER_MINIMUM_STAKE_PARAMETERS,
   loadMinimumStakeParameters,
 } from './services/provider-stake.service';
+import { BindingStatsService } from './services/binding-stats.service';
 import { StakeMonitorService } from './services/stake-monitor.service';
 
 /**
@@ -98,3 +100,18 @@ export class ProviderStakeMonitorSchedulerModule {}
   providers: [SlaWindowSweepJob],
 })
 export class ProviderSlaWindowSweepSchedulerModule {}
+
+/**
+ * Scheduler-only half of the observed stats — the five-minute refresh of
+ * `binding_stats` from `binding_attempts` and the verdicts.
+ *
+ * Here and nowhere else for the reason the two modules above give: one pass
+ * per deployment. `ProviderModule` supplies `BINDING_STATS_CONFIG`, the same
+ * value `DbProviderRegistry` reads its minimum sample from; the repositories
+ * arrive with the `@Global()` `PostgresModule`.
+ */
+@Module({
+  imports: [ProviderModule],
+  providers: [BindingStatsService, BindingStatsRefreshJob],
+})
+export class ProviderBindingStatsSchedulerModule {}

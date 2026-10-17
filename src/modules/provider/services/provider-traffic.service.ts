@@ -1,5 +1,9 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 
+import {
+  BindingAttemptRepository,
+  DailyLatencyRow,
+} from '@database/postgres/repositories/binding-attempt.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 
@@ -69,7 +73,12 @@ interface AgentTrafficRow {
  */
 @Injectable()
 export class ProviderTrafficService {
-  constructor(private readonly intents: PaymentIntentRepository) {}
+  constructor(
+    private readonly intents: PaymentIntentRepository,
+    // The per-day latency, from the router's `binding_attempts`. Optional:
+    // without it the latency fields stay `null`, as they were before.
+    @Optional() private readonly attempts: BindingAttemptRepository | null = null,
+  ) {}
 
   async getTraffic(
     providerId: string,
@@ -99,7 +108,11 @@ export class ProviderTrafficService {
       .addGroupBy('intent.status')
       .getRawMany<AgentTrafficRow>();
 
-    const buckets = foldIntoBuckets(dayRows);
+    // Not narrowed by `agentId`: an attempt row records the binding and the
+    // provider, not who called, so this is the provider's latency that day.
+    const latencyRows = (await this.attempts?.dailyPaidLatency(providerId, from, to)) ?? [];
+
+    const buckets = foldIntoBuckets(dayRows, latencyRows);
     const totalCalls = buckets.reduce((total, bucket) => total + bucket.calls, 0);
     const agentBreakdown = foldIntoAgentBreakdown(agentRows, AGENT_BREAKDOWN_LIMIT);
 
@@ -135,8 +148,12 @@ export class ProviderTrafficService {
   }
 }
 
-function foldIntoBuckets(rows: readonly TrafficRow[]): ProviderTrafficBucketDto[] {
+function foldIntoBuckets(
+  rows: readonly TrafficRow[],
+  latencyRows: readonly DailyLatencyRow[],
+): ProviderTrafficBucketDto[] {
   const byDay = new Map<string, Map<string, number>>();
+  const latencyByDay = new Map(latencyRows.map((row) => [row.day, row]));
 
   for (const row of rows) {
     const perStatus = byDay.get(row.day) ?? new Map<string, number>();
@@ -155,7 +172,14 @@ function foldIntoBuckets(rows: readonly TrafficRow[]): ProviderTrafficBucketDto[
       );
       const calls = byStatus.reduce((total, entry) => total + entry.calls, 0);
 
-      return { day, calls, byStatus, p50LatencyMs: null, p95LatencyMs: null };
+      const latency = latencyByDay.get(day);
+      return {
+        day,
+        calls,
+        byStatus,
+        p50LatencyMs: latency?.p50LatencyMs ?? null,
+        p95LatencyMs: latency?.p95LatencyMs ?? null,
+      };
     });
 }
 

@@ -1,4 +1,4 @@
-import { ProviderTier } from '@modules/provider/ports/provider.types';
+import { ProviderStats, ProviderTier } from '@modules/provider/ports/provider.types';
 import { MONEY_MAX_ATOMIC_UNITS } from '@utils/money.util';
 
 import { PricingMode } from '../../ports/tool.types';
@@ -73,7 +73,7 @@ export function scoreCandidates(
 
   return candidates.map((candidate, index) => {
     const { binding, provider } = candidate;
-    const stats = provider.stats;
+    const stats = statsOf(candidate);
 
     // Free and paid traffic route on separate quality rates. A provider running
     // a deliberately degraded free tier is legitimate; mixing the two would let
@@ -108,6 +108,23 @@ export function scoreCandidates(
 
     return { candidate, score, components };
   });
+}
+
+/**
+ * The stats a candidate is scored on: its binding's own, field by field, over
+ * its provider's pooled figure.
+ *
+ * Per field rather than all-or-nothing because each field has its own sample:
+ * a binding with 300 attempts and 12 verdicts has a measured availability and
+ * an unmeasured quality, and the provider's pooled quality is a better answer
+ * for the second than the neutral prior. A field neither level measured is
+ * absent, and `scoreCandidates` scores it `NEUTRAL_PRIOR`.
+ *
+ * Exported because the quote publishes the same figures it routes on.
+ */
+export function statsOf(candidate: RoutingCandidate): ProviderStats {
+  const own = candidate.provider.bindingStats?.get(candidate.binding.id);
+  return own ? { ...candidate.provider.stats, ...own } : candidate.provider.stats;
 }
 
 /**
