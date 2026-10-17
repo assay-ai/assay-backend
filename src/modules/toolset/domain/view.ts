@@ -115,13 +115,22 @@ export function entryContractOf(entry: {
  */
 export function contractRequestOf(
   view: Pick<McpEndpointView, 'entryContracts' | 'filter'>,
-  tool: Pick<Tool, 'id' | 'name'>,
+  tool: Tool,
 ): ContractRequest {
   const entry = view.entryContracts?.get(tool.id) ?? null;
-  const pin = view.filter.tools?.find(
-    (selector) => selector.name === tool.name && selector.major !== null,
-  );
-  const range = intersectRanges(entry?.range ?? null, pin ? [pin.major as number] : null);
+  const entryRange = entry?.range ?? null;
+  const selectors = (view.filter.tools ?? []).filter((selector) => selector.name === tool.name);
+  // A plain selector serves the tool unpinned; otherwise the pin is every
+  // major the URL names that the view did not ignore (one that exists, and
+  // inside the entry's range) — the same test `selectViewTools` applies.
+  let pin: number[] | null = null;
+  if (selectors.length > 0 && selectors.every((selector) => selector.major !== null)) {
+    const majors = new Set(contractVersionsOf(tool).map((version) => version.major));
+    pin = selectors
+      .map((selector) => selector.major as number)
+      .filter((major) => majors.has(major) && (entryRange === null || entryRange.includes(major)));
+  }
+  const range = intersectRanges(entryRange, pin);
   return { range, requireOutputFields: entry?.requireOutputFields ?? [] };
 }
 

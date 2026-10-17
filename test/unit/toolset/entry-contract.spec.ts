@@ -157,6 +157,22 @@ describe('?tools=name@N and entry ranges in the view', () => {
       range: [2],
       requireOutputFields: ['uv'],
     });
+    // A plain selector beside an ignored pin serves the tool unpinned, as listed.
+    const both = {
+      tools: [
+        { name: 'get_weather', major: null },
+        { name: 'get_weather', major: 9 },
+      ],
+    };
+    expect(contractRequestOf({ filter: both } as never, weather).range).toBeNull();
+    // Two real pins are their union.
+    const two = {
+      tools: [
+        { name: 'get_weather', major: 1 },
+        { name: 'get_weather', major: 2 },
+      ],
+    };
+    expect(contractRequestOf({ filter: two } as never, weather).range).toEqual([1, 2]);
     expect(contractRequestOf({ filter: filter(null) } as never, weather)).toEqual({
       range: null,
       requireOutputFields: [],

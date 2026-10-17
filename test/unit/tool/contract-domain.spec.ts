@@ -358,6 +358,21 @@ describe('candidate versions (§7.3)', () => {
     expect(usedOptionalInputs(withUnits, ['latitude', 'units'])).toEqual(['units']);
   });
 
+  it('an argument only an older major defines never pushes an unpinned call down to it', () => {
+    const old = v({
+      inputSchema: {
+        type: 'object',
+        properties: { ...SHAPE.inputSchema.properties, legacy: { type: 'string' } },
+      },
+    });
+    const result = candidateVersions(tool([v200, old], 3), {
+      range: null,
+      requireOutputFields: [],
+      argumentNames: ['latitude', 'legacy'],
+    });
+    expect(result.versions.map((x) => x.semver)).toEqual(['2.0.0', '1.0.0']);
+  });
+
   it('current version, deprecation meta and replacement', () => {
     const t = tool([v200, deprecated], 3);
     expect(currentContractVersion(t)?.semver).toBe('2.0.0');

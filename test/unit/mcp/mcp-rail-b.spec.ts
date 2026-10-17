@@ -211,6 +211,8 @@ describe('rail B over MCP', () => {
         provider: PAYOUT_ACCOUNT,
         providerId: 'provider-a',
         amount: { amount: PRICE.amount, asset: PRICE.asset, decimals: 6 },
+        // T3: the contract version the offer was drawn at; the retry echoes it.
+        contractVersion: 1,
         resource: RESOURCE,
         requestHash: computeRequestHash({
           method: 'POST',

@@ -318,4 +318,41 @@ describe('MCP calls at a contract version', () => {
     expect(h.intents.rows.size).toBe(0);
     expect(h.invoker.invocations).toHaveLength(0);
   });
+
+  it('a rail-B retry is held to the contract version its offer named, or refused before any charge', async () => {
+    const h = harness();
+    const retry = {
+      rail: null,
+      voucher: {
+        signed: { voucher: {} as never, signature: 'unchecked-before-the-offer' },
+        providerId: 'rich',
+        // v2.0.0: `rich` serves only ^1, so the payee cannot serve it.
+        contractVersion: 3,
+      },
+    };
+    await expect(
+      h.calls.call(
+        { ...SESSION },
+        TOOL_NAME,
+        { query: 'x' },
+        { ...retry, rail: 'RAIL_B_VOUCHER' as never },
+        scopeOf(rootView()),
+      ),
+    ).rejects.toMatchObject({
+      errorCode: ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES,
+      context: {
+        details: {
+          providers: [
+            expect.objectContaining({
+              providerId: 'rich',
+              reason: 'PAYEE_NO_LONGER_ELIGIBLE',
+              rule: 'CONTRACT_VERSION_MISMATCH',
+            }),
+          ],
+        },
+      },
+    });
+    expect(h.intents.rows.size).toBe(0);
+    expect(h.invoker.invocations).toHaveLength(0);
+  });
 });

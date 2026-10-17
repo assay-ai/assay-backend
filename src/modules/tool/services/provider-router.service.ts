@@ -522,7 +522,8 @@ export class ProviderRouterService {
    * The contract version a call is served at (design spec §7.3, "Contract
    * version"): the most preferred version the call may use that has at least
    * one eligible binding under the contract's hard constraints and the merged
-   * rules (FALLBACK_BEST included). Judged on the whole pool of the call's
+   * rules; only when no version has one under the entry's own preferences is
+   * FALLBACK_BEST considered, again over every version. Judged on the whole pool of the call's
    * class with no pin and no failover exclusion, so `offer()`, the voucher
    * retry and every failover attempt agree. When no version has one, the most
    * preferred is returned and the refusal reports its rejections.
@@ -543,11 +544,19 @@ export class ProviderRouterService {
       onlyProviderId: undefined,
       excludeProviderIds: [],
     };
-    for (const version of versions) {
-      const { kept } = applyContractGate(pool, version, request);
-      if (kept.length === 0) continue;
-      if (this.eligibleUnderRules(kept, unpinned, now).eligible.length > 0) {
-        return { version, refusal: null };
+    // Two passes: the strict rules first over every version, and only when
+    // none qualifies the FALLBACK_BEST rules. A fallback at a higher version
+    // must never win over a version the entry's preferences accept.
+    const passes: (RoutingRules | undefined)[] = [context.rules];
+    if (fallsBack(context.rules))
+      passes.push(withoutEntryPreferences(context.rules as RoutingRules));
+    for (const rules of passes) {
+      for (const version of versions) {
+        const { kept } = applyContractGate(pool, version, request);
+        if (kept.length === 0) continue;
+        if (this.eligibleUnder(kept, unpinned, rules, now).eligible.length > 0) {
+          return { version, refusal: null };
+        }
       }
     }
     return { version: versions[0], refusal: null };
