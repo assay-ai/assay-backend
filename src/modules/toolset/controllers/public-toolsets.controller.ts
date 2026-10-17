@@ -1,0 +1,109 @@
+import {
+  Body,
+  Controller,
+  Get,
+  HttpCode,
+  Param,
+  Post,
+  Query,
+  UseInterceptors,
+} from '@nestjs/common';
+import { ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
+
+import { CacheHeader } from '@shared/decorators/cache-header.decorator';
+import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
+
+import {
+  ListPublicToolsetsQueryDto,
+  PublicCategoryListDto,
+  PublicHandleParamDto,
+  PublicHandleProfileDto,
+  PublicToolsetByTokenBodyDto,
+  PublicToolsetListDto,
+  PublicToolsetPageDto,
+  PublicToolsetPathDto,
+  PublicToolsetVersionListDto,
+} from '../dto/public-toolsets.dto';
+import {
+  PUBLIC_TOOLSETS_CACHE_MS,
+  PublicToolsetsService,
+} from '../services/public-toolsets.service';
+
+const CACHE = {
+  maxAge: PUBLIC_TOOLSETS_CACHE_MS / 1000,
+  staleWhileRevalidate: 0,
+  staleIfError: 0,
+  mustRevalidate: true,
+};
+
+/**
+ * The toolset catalogue without an account (design spec §7.9), on the same
+ * terms as `/public/catalogue`: no guard, an allowlist of fields
+ * (`dto/public-toolsets.dto.ts`), a 30 s in-process cache and a per-address
+ * limit. Only PUBLIC, LISTED toolsets answer by name; a link-only one answers
+ * only `POST …/by-token`, with the token in the body so it stays out of logs.
+ */
+@ApiTags('Public')
+@UseInterceptors(PublicReadRateLimitInterceptor)
+@Controller('public')
+export class PublicToolsetsController {
+  constructor(private readonly toolsets: PublicToolsetsService) {}
+
+  @Get('toolsets')
+  @CacheHeader(CACHE)
+  @ApiOperation({
+    summary: 'Listed tool sets — official, provider, community; popular, trending, new',
+  })
+  @ApiResponse({ status: 200, type: PublicToolsetListDto })
+  @ApiResponse({ status: 429, description: 'Too many requests from this address.' })
+  async list(@Query() query: ListPublicToolsetsQueryDto): Promise<PublicToolsetListDto> {
+    return this.toolsets.list(query);
+  }
+
+  @Post('toolsets/by-token')
+  @HttpCode(200)
+  @ApiOperation({
+    summary: 'A link-only tool set’s page; the token from the link is the permission',
+  })
+  @ApiResponse({ status: 200, type: PublicToolsetPageDto })
+  @ApiResponse({ status: 404, description: 'No tool set serves this link. Says nothing more.' })
+  async byToken(@Body() body: PublicToolsetByTokenBodyDto): Promise<PublicToolsetPageDto> {
+    return this.toolsets.byToken(body.token, body.v);
+  }
+
+  @Get('toolsets/@:handle/:slug/versions')
+  @CacheHeader(CACHE)
+  @ApiOperation({ summary: 'A listed tool set’s published versions, newest first' })
+  @ApiResponse({ status: 200, type: PublicToolsetVersionListDto })
+  async versions(@Param() params: PublicToolsetPathDto): Promise<PublicToolsetVersionListDto> {
+    return this.toolsets.versionsOf(params.handle, params.slug);
+  }
+
+  @Get('toolsets/@:handle/:slug')
+  @CacheHeader(CACHE)
+  @ApiOperation({ summary: 'A listed tool set’s page: tools, rules, weekly figures, MCP URLs' })
+  @ApiResponse({ status: 200, type: PublicToolsetPageDto })
+  @ApiResponse({
+    status: 404,
+    description: 'Not a listed tool set. Says nothing about whether it exists.',
+  })
+  async page(@Param() params: PublicToolsetPathDto): Promise<PublicToolsetPageDto> {
+    return this.toolsets.page(params.handle, params.slug);
+  }
+
+  @Get('handles/:handle')
+  @CacheHeader(CACHE)
+  @ApiOperation({ summary: 'A public name’s profile: its listed tool sets (and, later, tools)' })
+  @ApiResponse({ status: 200, type: PublicHandleProfileDto })
+  async profile(@Param() params: PublicHandleParamDto): Promise<PublicHandleProfileDto> {
+    return this.toolsets.profile(params.handle);
+  }
+
+  @Get('categories')
+  @CacheHeader(CACHE)
+  @ApiOperation({ summary: 'Categories with their listed tools and tool sets' })
+  @ApiResponse({ status: 200, type: PublicCategoryListDto })
+  async categories(): Promise<PublicCategoryListDto> {
+    return this.toolsets.categories();
+  }
+}

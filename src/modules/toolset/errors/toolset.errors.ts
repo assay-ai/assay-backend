@@ -22,6 +22,12 @@ export enum ToolsetErrorCode {
   TOOLSET_SLUG_LOCKED = 'TOOLSET_SLUG_LOCKED',
   TOOLSET_REPORT_DUPLICATE = 'TOOLSET_REPORT_DUPLICATE',
   TOOLSET_REPORT_TARGET_NOT_FOUND = 'TOOLSET_REPORT_TARGET_NOT_FOUND',
+  TOOLSET_REPORT_NOT_FOUND = 'TOOLSET_REPORT_NOT_FOUND',
+  TOOLSET_CUTOFF_NOT_FOUND = 'TOOLSET_CUTOFF_NOT_FOUND',
+  TOOLSET_CUTOFF_NOT_PENDING = 'TOOLSET_CUTOFF_NOT_PENDING',
+  TOOLSET_CUTOFF_SELF_CONFIRM = 'TOOLSET_CUTOFF_SELF_CONFIRM',
+  TOOLSET_HANDLE_NOT_FOUND = 'TOOLSET_HANDLE_NOT_FOUND',
+  TOOLSET_HANDLE_REASSIGN_REFUSED = 'TOOLSET_HANDLE_REASSIGN_REFUSED',
 }
 
 export type ToolsetErrorCodesArePrefixed = AssertDomainErrorCodes<'TOOLSET', `${ToolsetErrorCode}`>;
@@ -133,6 +139,42 @@ export const ToolsetErrors = createDomainErrorFactory('TOOLSET', {
     code: ToolsetErrorCode.TOOLSET_REPORT_TARGET_NOT_FOUND,
     statusCode: 404,
     message: () => 'Nothing to report was found',
+  },
+  reportNotFound: {
+    code: ToolsetErrorCode.TOOLSET_REPORT_NOT_FOUND,
+    statusCode: 404,
+    message: () => 'Report not found',
+  },
+  cutoffNotFound: {
+    code: ToolsetErrorCode.TOOLSET_CUTOFF_NOT_FOUND,
+    statusCode: 404,
+    message: () => 'Cutoff not found',
+  },
+  /** Already confirmed or reverted. */
+  cutoffNotPending: {
+    code: ToolsetErrorCode.TOOLSET_CUTOFF_NOT_PENDING,
+    statusCode: 409,
+    message: (_context?: Record<string, any>) =>
+      'This cutoff is no longer waiting for confirmation',
+    publicContext: ['status'],
+  },
+  /** FR-18: the second operator must be somebody else. */
+  cutoffSelfConfirm: {
+    code: ToolsetErrorCode.TOOLSET_CUTOFF_SELF_CONFIRM,
+    statusCode: 409,
+    message: () => 'A cutoff is confirmed by a second operator, not the one who made it',
+  },
+  handleNotFound: {
+    code: ToolsetErrorCode.TOOLSET_HANDLE_NOT_FOUND,
+    statusCode: 404,
+    message: () => 'Handle not found',
+  },
+  handleReassignRefused: {
+    code: ToolsetErrorCode.TOOLSET_HANDLE_REASSIGN_REFUSED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The handle cannot be reassigned${context?.reason ? `: ${context.reason}` : ''}`,
+    publicContext: ['reason'],
   },
   refusedCallNotFound: {
     code: ToolsetErrorCode.TOOLSET_REFUSED_CALL_NOT_FOUND,
