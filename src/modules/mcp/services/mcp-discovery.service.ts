@@ -23,6 +23,8 @@ import {
   GET_TOOL,
   GET_TOOL_INPUT,
   MetaToolDefinition,
+  SEARCH_CATEGORY_MAX_LENGTH,
+  SEARCH_QUERY_MAX_BYTES,
   SEARCH_QUERY_MAX_LENGTH,
   SEARCH_RESPONSE_MAX_BYTES,
   SEARCH_TOOLS,
@@ -73,6 +75,9 @@ export interface SearchResult {
   readonly freeCallsLeftToday?: number | null;
   readonly score: number;
   readonly inputSchema?: Record<string, unknown>;
+  /** `detail: full` only: the schema did not fit the 256 KB cap; `get_tool` has it. */
+  readonly inputSchemaOmitted?: boolean;
+  readonly note?: string;
 }
 
 /** `search_tools`'s output (design spec §7.4). */
@@ -167,37 +172,40 @@ export class McpDiscoveryService {
       : entries;
     const ranked = rankBm25(request.query, candidates.map(documentOf));
 
-    const results: SearchResult[] = [];
-    // The text block repeats the structured output, so the output may use
-    // half of the response cap (less a margin for the envelope).
-    const budget = Math.floor((SEARCH_RESPONSE_MAX_BYTES - 2_048) / 2);
-    let used = byteLength({
-      results: [],
-      categories,
-      total: ranked.length,
-      nextCursor: 'x'.repeat(600),
-      limitApplied: request.limit,
-    });
+    const page: SearchResult[] = [];
     for (const hit of ranked.slice(position.offset, position.offset + request.limit)) {
-      const result = await this.resultOf(hit.item, hit.score, request.detail, viewer);
-      const size = byteLength(result) + 1;
-      // At least one result per page, or paging could never move on.
-      if (results.length > 0 && used + size > budget) break;
-      results.push(result);
-      used += size;
+      page.push(await this.resultOf(hit.item, hit.score, request.detail, viewer));
     }
 
-    const nextOffset = position.offset + results.length;
-    return {
-      results,
-      categories,
-      total: ranked.length,
-      nextCursor:
-        results.length > 0 && nextOffset < ranked.length
-          ? this.cursors.next(binding, position, nextOffset)
-          : null,
-      limitApplied: request.limit,
+    const assemble = (results: SearchResult[]): SearchOutput => {
+      const nextOffset = position.offset + results.length;
+      return {
+        results,
+        categories,
+        total: ranked.length,
+        nextCursor:
+          results.length > 0 && nextOffset < ranked.length
+            ? this.cursors.next(binding, position, nextOffset)
+            : null,
+        limitApplied: request.limit,
+      };
     };
+
+    // The 256 KB cap is hard and measured on the real output, cursor
+    // included: fewer results first (paging goes on from the cursor), and a
+    // single result that is still too large loses its input schema, which
+    // get_tool returns on its own.
+    let output = assemble(page);
+    while (responseBytes(output) > SEARCH_RESPONSE_MAX_BYTES && page.length > 1) {
+      page.pop();
+      output = assemble(page);
+    }
+    if (responseBytes(output) > SEARCH_RESPONSE_MAX_BYTES && page[0]?.inputSchema) {
+      const { inputSchema: _omitted, ...rest } = page[0];
+      page[0] = { ...rest, inputSchemaOmitted: true, note: SCHEMA_OMITTED_NOTE };
+      output = assemble(page);
+    }
+    return output;
   }
 
   /** `get_tool`. Free; 120 a minute per agent. Only a tool in view ∩ access. */
@@ -251,16 +259,28 @@ export class McpDiscoveryService {
     if (typeof args.query !== 'string') {
       throw ToolErrors.argumentsInvalid({ detail: '/query is required without a cursor' });
     }
-    if (args.query.length > SEARCH_QUERY_MAX_LENGTH) {
+    const query = withoutControlCharacters(args.query);
+    if (query.length > SEARCH_QUERY_MAX_LENGTH || byteLength(query) > SEARCH_QUERY_MAX_BYTES) {
       throw ToolErrors.argumentsInvalid({
-        detail: `/query is longer than ${SEARCH_QUERY_MAX_LENGTH} characters`,
+        detail:
+          `/query is longer than ${SEARCH_QUERY_MAX_LENGTH} characters ` +
+          `or ${SEARCH_QUERY_MAX_BYTES} UTF-8 bytes`,
+      });
+    }
+    const category =
+      typeof args.category === 'string'
+        ? withoutControlCharacters(args.category).toLowerCase()
+        : null;
+    if (category !== null && category.length > SEARCH_CATEGORY_MAX_LENGTH) {
+      throw ToolErrors.argumentsInvalid({
+        detail: `/category is longer than ${SEARCH_CATEGORY_MAX_LENGTH} characters`,
       });
     }
     const detail = (args.detail as SearchDetail | undefined) ?? 'summary';
     return {
       request: {
-        query: args.query,
-        category: typeof args.category === 'string' ? args.category.toLowerCase() : null,
+        query,
+        category,
         detail,
         limit: limitFor(detail, args.limit as number | undefined),
       },
@@ -353,7 +373,23 @@ function viewerOf(session: McpSession): McpCatalogueViewer {
 }
 
 function byteLength(value: unknown): number {
-  return Buffer.byteLength(JSON.stringify(value));
+  return Buffer.byteLength(typeof value === 'string' ? value : JSON.stringify(value));
+}
+
+/** The CallToolResult around `output`: its JSON twice (text and structured), plus the envelope. */
+function responseBytes(output: SearchOutput): number {
+  return 2 * byteLength(output) + RESPONSE_ENVELOPE_BYTES;
+}
+
+/** JSON-RPC envelope, content wrapper and `_meta` around a search result, generously. */
+const RESPONSE_ENVELOPE_BYTES = 2_048;
+
+const SCHEMA_OMITTED_NOTE =
+  'The input schema is too large for one search response; read it with get_tool.';
+
+/** Control characters say nothing to a search and only bloat a cursor: each becomes a space. */
+function withoutControlCharacters(text: string): string {
+  return text.replace(/\p{Cc}/gu, ' ');
 }
 
 /** A meta tool's arguments against its schema: the same error a tool's own arguments get. */

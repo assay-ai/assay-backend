@@ -64,7 +64,12 @@ interface Payload {
 }
 
 const DOMAIN = 'assay-search-cursor:v1.';
-const MAX_CURSOR_LENGTH = 4_096;
+/**
+ * Far above the largest cursor issued: a 500-character, 1,500-byte query (all
+ * `"` or a backslash, each escaped to two bytes, is the worst case), a 64-character
+ * category and the fixed fields come to under 3 KB once encoded.
+ */
+export const MAX_CURSOR_LENGTH = 8_192;
 const DETAILS: readonly SearchDetail[] = ['names', 'summary', 'full'];
 
 export class SearchCursorCodec {

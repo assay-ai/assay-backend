@@ -1,4 +1,5 @@
 import { JsonSchema } from '@modules/tool/domain/mapping';
+import { RESERVED_TOOL_NAMES } from '@modules/tool/domain/reserved-tool-names';
 import {
   DiscoveryMode,
   defaultDiscoveryFor,
@@ -31,9 +32,14 @@ export const SEARCH_TOOLS = 'search_tools';
 export const GET_TOOL = 'get_tool';
 export const CALL_TOOL = 'call_tool';
 
-export const META_TOOL_NAMES: ReadonlySet<string> = new Set([SEARCH_TOOLS, GET_TOOL, CALL_TOOL]);
+/** The same set no catalogue tool may take (`RESERVED_TOOL_NAMES`). */
+export const META_TOOL_NAMES: ReadonlySet<string> = RESERVED_TOOL_NAMES;
 
 export const SEARCH_QUERY_MAX_LENGTH = 500;
+/** The same query in UTF-8, after control characters became spaces: what a cursor carries. */
+export const SEARCH_QUERY_MAX_BYTES = 1_500;
+/** As long as a category name can be (`^[a-z][a-z0-9-]{1,63}$`). */
+export const SEARCH_CATEGORY_MAX_LENGTH = 64;
 export const SEARCH_LIMIT_MAX = 50;
 /** `limit` when omitted (or below 1), by `detail` (§7.4). */
 export const SEARCH_DEFAULT_LIMITS: Readonly<Record<SearchDetail, number>> = Object.freeze({
