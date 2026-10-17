@@ -365,18 +365,22 @@ export class ToolsetStatsService {
   }
 }
 
-/** Every identity an organization holds, as one CTE: Privy users, wallets, funding accounts. */
+/**
+ * Every identity an organization holds, as one CTE: Privy users, and the
+ * on-chain accounts it acts or funds from. A wallet and a funding account are
+ * the same kind of identity — one key controls both — so they share a prefix.
+ */
 const IDENTITY_SQL = `
   WITH identities AS (
     SELECT organization_id AS org_id, 'privy:' || privy_user_id AS identity FROM agents
     UNION
-    SELECT organization_id, 'wallet:' || primary_account_id FROM agents
+    SELECT organization_id, 'account:' || primary_account_id FROM agents
      WHERE primary_account_id IS NOT NULL
     UNION
-    SELECT organization_id, 'fund:' || agent_account FROM deposit_intents
+    SELECT organization_id, 'account:' || agent_account FROM deposit_intents
      WHERE status = 'SETTLED'
     UNION
-    SELECT organization_id, 'fund:' || account_id FROM buyer_escrows
+    SELECT organization_id, 'account:' || account_id FROM buyer_escrows
   )`;
 
 export function utcDay(date: Date): Date {

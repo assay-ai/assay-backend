@@ -8,7 +8,6 @@ import {
   ToolsetVersionRepository,
 } from '@database/postgres/repositories/toolset-sharing.repository';
 import { ToolsetRepository } from '@database/postgres/repositories/toolset.repository';
-import { TtlCache } from '@modules/catalogue/domain/ttl-cache';
 
 import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
 import { OFFICIAL_HANDLE } from '../domain/handle';
@@ -26,6 +25,7 @@ import {
   PublicToolsetVersionListDto,
 } from '../dto/public-toolsets.dto';
 import { ToolsetErrors } from '../errors/toolset.errors';
+import { AccessEpochService } from './access-epoch.service';
 import { HandlesService } from './handles.service';
 import { sharingStateOf } from './sharing-row';
 import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
@@ -69,7 +69,8 @@ interface ListedRow {
  */
 @Injectable()
 export class PublicToolsetsService {
-  private readonly listed = new TtlCache<ListedRow[]>(PUBLIC_TOOLSETS_CACHE_MS);
+  /** One slot: the newest epoch's list replaces the previous one. */
+  private listed: { key: string; expiresAt: number; value: Promise<ListedRow[]> } | null = null;
 
   constructor(
     private readonly toolsets: ToolsetRepository,
@@ -78,6 +79,7 @@ export class PublicToolsetsService {
     private readonly handles: HandlesService,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
+    private readonly epochs: AccessEpochService,
     @Optional() @Inject(TOOLSET_CLOCK) private readonly now: ToolsetClock = systemClock,
   ) {}
 
@@ -259,10 +261,29 @@ export class PublicToolsetsService {
     return row;
   }
 
-  private listedRows(): Promise<ListedRow[]> {
-    return this.listed.get('all', async () => {
-      const rows = (await this.dataSource.query(
-        `SELECT t.id, t.owner_org_id AS "ownerOrgId", t.publisher_kind AS "publisherKind",
+  /**
+   * Every listed toolset, cached under the sharing epoch: a delist, a takedown
+   * or a stop-sharing leaves the catalogue at once on every instance, and the
+   * 30 s window only bounds an unreadable epoch.
+   */
+  private async listedRows(): Promise<ListedRow[]> {
+    const key = (await this.epochs.currentShared()) ?? 'unreadable';
+    const at = Date.now();
+    if (this.listed && this.listed.key === key && this.listed.expiresAt > at) {
+      return this.listed.value;
+    }
+    const value = this.loadListed();
+    const slot = { key, expiresAt: at + PUBLIC_TOOLSETS_CACHE_MS, value };
+    this.listed = slot;
+    value.catch(() => {
+      if (this.listed === slot) this.listed = null;
+    });
+    return value;
+  }
+
+  private async loadListed(): Promise<ListedRow[]> {
+    const rows = (await this.dataSource.query(
+      `SELECT t.id, t.owner_org_id AS "ownerOrgId", t.publisher_kind AS "publisherKind",
                 t.slug, t.category, t.tags, t.first_shared_at AS "firstSharedAt",
                 t.created_at AS "createdAt", t.last_shared_version AS version,
                 t.visibility, t.listing_status AS "listingStatus", t.removed_at AS "removedAt",
@@ -276,48 +297,47 @@ export class PublicToolsetsService {
           WHERE t.visibility = 'PUBLIC' AND t.listing_status = 'LISTED'
             AND t.removed_at IS NULL AND t.deleted_at IS NULL
             AND (t.owner_org_id IS NULL OR (o.handle IS NOT NULL AND o.handle_status = 'ACTIVE'))`,
-        [OFFICIAL_HANDLE],
-      )) as (Omit<
-        ListedRow,
-        'entries' | 'popularScore' | 'trendingScore' | 'figures' | 'weekStart'
-      > & {
-        entries: unknown;
-        visibility: string;
-        listingStatus: string;
-        removedAt: Date | null;
-        deletedAt: Date | null;
-      })[];
-      // The query already filters; the state machine has the last word.
-      const listed = rows.filter((row) =>
-        listedInCatalogue(sharingStateOf(row as unknown as ToolsetEntity)),
-      );
-      const stats = await this.stats.latestFor(listed.map((row) => row.id));
-      return listed.map((row) => {
-        const published = stats.get(row.id);
-        return {
-          id: row.id,
-          ownerOrgId: row.ownerOrgId,
-          publisherKind: row.publisherKind,
-          slug: row.slug,
-          category: row.category,
-          tags: row.tags ?? [],
-          firstSharedAt: row.firstSharedAt,
-          createdAt: row.createdAt,
-          version: Number(row.version),
-          handle: row.handle,
-          name: row.name,
-          description: row.description,
-          icon: row.icon,
-          toolIds: row.toolIds,
-          entries: readSnapshotEntries(row.entries),
-          publishedAt: row.publishedAt,
-          changelog: row.changelog,
-          popularScore: published?.popularScore ?? 0,
-          trendingScore: published?.trendingScore ?? 0,
-          figures: published?.figures ?? null,
-          weekStart: published?.weekStart ?? null,
-        };
-      });
+      [OFFICIAL_HANDLE],
+    )) as (Omit<
+      ListedRow,
+      'entries' | 'popularScore' | 'trendingScore' | 'figures' | 'weekStart'
+    > & {
+      entries: unknown;
+      visibility: string;
+      listingStatus: string;
+      removedAt: Date | null;
+      deletedAt: Date | null;
+    })[];
+    // The query already filters; the state machine has the last word.
+    const listed = rows.filter((row) =>
+      listedInCatalogue(sharingStateOf(row as unknown as ToolsetEntity)),
+    );
+    const stats = await this.stats.latestFor(listed.map((row) => row.id));
+    return listed.map((row) => {
+      const published = stats.get(row.id);
+      return {
+        id: row.id,
+        ownerOrgId: row.ownerOrgId,
+        publisherKind: row.publisherKind,
+        slug: row.slug,
+        category: row.category,
+        tags: row.tags ?? [],
+        firstSharedAt: row.firstSharedAt,
+        createdAt: row.createdAt,
+        version: Number(row.version),
+        handle: row.handle,
+        name: row.name,
+        description: row.description,
+        icon: row.icon,
+        toolIds: row.toolIds,
+        entries: readSnapshotEntries(row.entries),
+        publishedAt: row.publishedAt,
+        changelog: row.changelog,
+        popularScore: published?.popularScore ?? 0,
+        trendingScore: published?.trendingScore ?? 0,
+        figures: published?.figures ?? null,
+        weekStart: published?.weekStart ?? null,
+      };
     });
   }
 
