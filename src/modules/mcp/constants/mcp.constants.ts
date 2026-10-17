@@ -118,6 +118,40 @@ export const X402_RAIL = 'x402/rail';
 export const X402_VOUCHER = 'x402/voucher';
 
 /**
+ * Request `_meta` (both rails, and free calls): a client-chosen key that names
+ * one logical call, so a retry after a timeout or a dropped connection is not
+ * charged twice and gets the first call's result back (G2.1).
+ *
+ * - **Format**: a printable ASCII string (`0x20`–`0x7E`) of 1 to 128
+ *   characters. Anything else is refused with `MCP_IDEMPOTENCY_KEY_INVALID`
+ *   before the call runs, and nothing is charged. A UUID per logical call is
+ *   the intended use.
+ * - **Absent**: the call runs exactly as before. No key is derived from the
+ *   arguments: two genuine identical calls must both run.
+ * - **Scope**: per agent. The key is bound to the tool and to a hash of the
+ *   canonical JSON of the arguments; the same key with another tool or other
+ *   arguments is refused with `IDEMPOTENCY_KEY_REUSED`, and nothing is
+ *   charged.
+ * - **Replay**: a key whose call returned a result answers with that stored
+ *   result, marked `_meta["x402/replayed"] = true`, and charges nothing again
+ *   — on rail B no new voucher is held or redeemed, and a free call takes no
+ *   second quota place. The receipt's `status` is re-read, so it may have
+ *   moved on (`VERIFYING` → `SETTLED`). Results are kept for
+ *   `MCP_IDEMPOTENCY_TTL_SECONDS` (default 900, 15 minutes) and only in Redis.
+ * - **In flight**: while the first attempt is still running, a retry gets
+ *   `IN_PROGRESS` with `retryable: true` and `retryAfterMs`.
+ * - **Failed without a charge** (voided, refused, not served, a rail-B
+ *   `PAYMENT_REQUIRED`): the key is released, and the retry runs as a fresh
+ *   attempt. This is also how rail B's two-step handshake works with one key.
+ * - **Result gone** (past the retention window, or Redis lost it) while the
+ *   payment record still holds the key: `IDEMPOTENCY_RESULT_UNAVAILABLE`, with
+ *   the `intentId` of the original charge. Nothing is charged again.
+ */
+export const X402_IDEMPOTENCY_KEY = 'x402/idempotency-key';
+/** Result `_meta`: `true` when the result is a stored replay of an earlier attempt. */
+export const X402_REPLAYED = 'x402/replayed';
+
+/**
  * Why the price and the receipt are published **twice** — in `annotations` and
  * again in `_meta`.
  *
