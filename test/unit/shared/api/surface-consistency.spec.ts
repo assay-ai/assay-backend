@@ -175,6 +175,17 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // five established buyers, totals cover complete days only, and only
   // publicly listed providers are named — see `PublicNotChargedService`.
   ['modules/catalogue/controllers/public-not-charged.controller.ts', 1],
+  // The toolset catalogue (design spec §7.9): listed tool sets, one listed
+  // tool set's page and versions, a public name's profile, the categories, and
+  // the link-only page by token. Only PUBLIC, LISTED tool sets answer by name,
+  // at the newest version published while shared — never the Draft — and
+  // everything else is the same 404 as a missing slug. The by-token route
+  // takes the token in a POST body (never a URL, so never a log line) and
+  // answers only while that token serves `/u/`. Fields are copied through
+  // their own allowlisted DTOs (`public-toolsets.dto.ts`); no owner,
+  // reporter or buyer id is selected, and figures are the weekly k = 5 table.
+  // Cached in process and rate limited per address.
+  ['modules/toolset/controllers/public-toolsets.controller.ts', 6],
 ]);
 
 /**
@@ -390,6 +401,10 @@ describe('REST surface consistency', () => {
       'modules/operator/controllers/operator-arbiter.controller.ts',
       'modules/operator/controllers/operator-blocks.controller.ts',
       'modules/operator/controllers/operator-cases.controller.ts',
+      // `A-15`–`A-23`: delisting and taking down tool sets and public names,
+      // renames and reassignments, and the reports queue. The subject is a
+      // publisher who is never the caller.
+      'modules/operator/controllers/operator-moderation.controller.ts',
       // `A-12`–`A-14`, the operator directory. Operators have no tenant.
       'modules/operator/controllers/operator-operators.controller.ts',
       'modules/operator/controllers/operator-override-log.controller.ts',

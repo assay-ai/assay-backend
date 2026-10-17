@@ -5,10 +5,12 @@ import { ChainsModule } from '@modules/chains/chains.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
 import { ToolModule } from '@modules/tool/tool.module';
+import { ToolsetModule } from '@modules/toolset/toolset.module';
 
 import { OperatorApprovalsController } from './controllers/operator-approvals.controller';
 import { OperatorArbiterController } from './controllers/operator-arbiter.controller';
 import { OperatorBlocksController } from './controllers/operator-blocks.controller';
+import { OperatorModerationController } from './controllers/operator-moderation.controller';
 import { OperatorCasesController } from './controllers/operator-cases.controller';
 import { OperatorReferenceController } from './controllers/operator-reference.controller';
 import { OperatorOperatorsController } from './controllers/operator-operators.controller';
@@ -23,6 +25,7 @@ import { OperatorArbiterService } from './services/operator-arbiter.service';
 import { OperatorCaseListService } from './services/operator-case-list.service';
 import { OperatorCaseService } from './services/operator-case.service';
 import { OperatorDirectoryService } from './services/operator-directory.service';
+import { OperatorModerationService } from './services/operator-moderation.service';
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
 import { PlatformHealthService } from './services/platform-health.service';
 import { OperatorReferenceService } from './services/operator-reference.service';
@@ -57,11 +60,22 @@ import { OperatorReferenceService } from './services/operator-reference.service'
   //
   // `ToolModule` supplies `TOOL_CATALOGUE`, so the Penalties list names each
   // penalty's tool from the catalogue the case brief reads too.
-  imports: [OperatorModule, SlashModule, ProviderModule, ChainsModule, BlocklistModule, ToolModule],
+  // `ToolsetModule` supplies the toolset and handle moderation writes the
+  // moderation controller runs inside the register's transaction.
+  imports: [
+    OperatorModule,
+    SlashModule,
+    ProviderModule,
+    ChainsModule,
+    BlocklistModule,
+    ToolModule,
+    ToolsetModule,
+  ],
   controllers: [
     OperatorApprovalsController,
     OperatorArbiterController,
     OperatorBlocksController,
+    OperatorModerationController,
     OperatorCasesController,
     OperatorOperatorsController,
     OperatorOverrideLogController,
@@ -77,6 +91,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     OperatorCaseListService,
     OperatorCaseService,
     OperatorDirectoryService,
+    OperatorModerationService,
     // `V-7`. `ProviderRepository` needs no import here — `PostgresModule` is
     // `@Global()`, and `OverrideLogService` already comes in with
     // `OperatorModule`.
