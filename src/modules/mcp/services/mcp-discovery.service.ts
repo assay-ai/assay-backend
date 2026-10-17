@@ -201,8 +201,13 @@ export class McpDiscoveryService {
       output = assemble(page);
     }
     if (responseBytes(output) > SEARCH_RESPONSE_MAX_BYTES && page[0]?.inputSchema) {
-      const { inputSchema: _omitted, ...rest } = page[0];
-      page[0] = { ...rest, inputSchemaOmitted: true, note: SCHEMA_OMITTED_NOTE };
+      const slim: Record<string, unknown> = { ...page[0] };
+      delete slim.inputSchema;
+      page[0] = {
+        ...(slim as unknown as SearchResult),
+        inputSchemaOmitted: true,
+        note: SCHEMA_OMITTED_NOTE,
+      };
       output = assemble(page);
     }
     return output;
