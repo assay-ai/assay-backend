@@ -96,3 +96,10 @@ export const PAYMENT_INTENT_HOLD_REPAIR_REASON =
 
 /** Written when funds are secured — the edge that opens the hold. */
 export const PAYMENT_INTENT_FUNDS_SECURED_REASON = 'payment authorised; ledger hold opened';
+
+/**
+ * Written when a keyed call's intent could not secure its funds and is expired
+ * at once, so its idempotency key is free for the agent's retry (G2.1).
+ */
+export const PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON =
+  'funds not secured: expired at once to release the idempotency key';
