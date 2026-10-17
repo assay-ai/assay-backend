@@ -201,6 +201,15 @@ export class CatalogueToolDto {
   @ApiProperty({ enum: ToolTier })
   tier: ToolTier;
 
+  @ApiProperty({
+    example: 'weather',
+    description: 'The tool’s topic (`tools.category`), as `?category=` filters on.',
+  })
+  category: string;
+
+  @ApiProperty({ type: [String], example: ['temperature', 'conditions'] })
+  tags: string[];
+
   @ApiProperty({ description: 'Distinct providers with an ACTIVE binding for this tool.' })
   providerCount: number;
 

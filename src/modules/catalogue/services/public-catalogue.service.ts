@@ -59,9 +59,14 @@ export class PublicCatalogueService {
     return { providers: providers.map(toPublicProvider) };
   }
 
-  async listTools(): Promise<PublicToolListDto> {
+  /** Every listed tool, or one category's — filtered over the same cached list. */
+  async listTools(category?: string): Promise<PublicToolListDto> {
     const { tools } = await this.catalogue.listTools();
-    return { tools: tools.map(toPublicTool) };
+    return {
+      tools: tools
+        .filter((tool) => category === undefined || tool.category === category)
+        .map(toPublicTool),
+    };
   }
 
   async getProvider(providerId: string): Promise<PublicProviderDetailDto> {
@@ -107,6 +112,8 @@ function toPublicTool(tool: CatalogueToolDto): PublicToolDto {
     name: tool.name,
     description: tool.description,
     tier: tool.tier,
+    category: tool.category,
+    tags: [...tool.tags],
     providerCount: tool.providerCount,
     fromPrice: tool.fromPrice ? toPublicMoney(tool.fromPrice) : null,
     price: tool.price ? toPublicMoney(tool.price) : null,
