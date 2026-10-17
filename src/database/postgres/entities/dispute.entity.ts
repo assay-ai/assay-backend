@@ -188,4 +188,58 @@ export class DisputeEntity extends OrganizationScopedEntityWithoutSoftDelete {
   /** Required when the second objects: an objection must also record a reason. */
   @Column({ name: 'second_note', type: 'varchar', length: 2048, nullable: true })
   secondNote: string | null;
+
+  // ── Buyer call disputes (G3.B1) ───────────────────────────────────────────
+  //
+  // A buyer disputing one paid call. Set together at filing (`chk_disputes_
+  // call_is_whole`); every column below is null on every other kind of row.
+
+  /** The disputed call. Non-null exactly on a buyer call dispute. */
+  @Column({ name: 'intent_id', type: 'uuid', nullable: true })
+  intentId: string | null;
+
+  /** The call's verdict, when it has one. */
+  @Column({ name: 'verdict_id', type: 'uuid', nullable: true })
+  verdictId: string | null;
+
+  @Column({ name: 'binding_id', type: 'uuid', nullable: true })
+  bindingId: string | null;
+
+  @Column({ name: 'tool_id', type: 'varchar', length: 128, nullable: true })
+  toolId: string | null;
+
+  /**
+   * The provider the buyer disputes. Not `providerId`, which names a provider
+   * that FILED a dispute.
+   */
+  @Column({ name: 'respondent_provider_id', type: 'uuid', nullable: true })
+  respondentProviderId: string | null;
+
+  /**
+   * What the decision rests on, copied at filing: the call's input and output
+   * (while retention still kept them), the verdict, and the evidence pack's
+   * digests. The evidence bodies are scrubbed after their retention window, so
+   * a decision must not depend on reading them later.
+   */
+  @Column({ name: 'evidence_snapshot', type: 'jsonb', nullable: true })
+  evidenceSnapshot: Record<string, unknown> | null;
+
+  /** The provider's one reply, written before the decision. */
+  @Column({ name: 'provider_response', type: 'varchar', length: 1000, nullable: true })
+  providerResponse: string | null;
+
+  @Column({ name: 'provider_responded_at', type: 'timestamptz', nullable: true })
+  providerRespondedAt: Date | null;
+
+  /** `UNCOLLECTED_EARNINGS` | `PROVIDER_STAKE` | `NONE`. Set on an upheld decision. */
+  @Column({ name: 'refund_source', type: 'varchar', length: 24, nullable: true })
+  refundSource: string | null;
+
+  /** `PENDING` | `REFUNDED` | `NOT_CHARGED` | `STAKE_CLAIM_OPEN`. */
+  @Column({ name: 'refund_state', type: 'varchar', length: 24, nullable: true })
+  refundState: string | null;
+
+  /** What the upheld decision owes the buyer, in minor units of `assetId`. */
+  @Column({ name: 'refund_amount', type: 'numeric', precision: 78, scale: 0, nullable: true })
+  refundAmount: string | null;
 }
