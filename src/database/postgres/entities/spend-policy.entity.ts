@@ -102,7 +102,7 @@ export class SpendPolicyEntity extends OrganizationScopedEntityWithoutSoftDelete
   @Column({ name: 'access_mode', type: 'varchar', length: 16, default: 'ALL' })
   accessMode: string;
 
-  /** `[{ toolsetId, version, viaUrlOnly }]` — see `AllowedToolsetRef`. */
+  /** `[{ toolsetId, version, viaUrlOnly, via?, linkHash? }]` — see `AllowedToolsetRef`. */
   @Column({ name: 'allowed_toolsets', type: 'jsonb', default: () => `'[]'::jsonb` })
   allowedToolsets: unknown[];
 

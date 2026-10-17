@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import { AgentRoutingRules } from '@modules/tool/domain/routing';
 
 /**
@@ -34,6 +36,23 @@ export interface AllowedToolsetRef {
   readonly version: number | null;
   /** Its tools are allowed only through that toolset's own URL. */
   readonly viaUrlOnly: boolean;
+  /**
+   * How another organization's toolset was reached when the pin was taken:
+   * `PUBLIC` (its `/@…` URL) or `LINK` (its `/u/` link). Absent for the
+   * organization's own toolsets and Official ones. Update notices and the
+   * "Update available" chip follow it, so a pin never learns about a version
+   * shared in a way its holder can no longer see.
+   */
+  readonly via?: PinPath | null;
+  /** `LINK` pins: a digest of the token they were taken with — never the token. */
+  readonly linkHash?: string | null;
+}
+
+export type PinPath = 'PUBLIC' | 'LINK';
+
+/** The digest a `LINK` pin stores: enough to tell whether the link is still the same one. */
+export function linkHashOf(token: string): string {
+  return createHash('sha256').update(`assay-link:${token}`).digest('hex').slice(0, 32);
 }
 
 /** An allowed toolset with the tools it holds at the referenced version. */
@@ -124,13 +143,15 @@ export function readAllowedToolsets(value: unknown): AllowedToolsetRef[] {
   if (!Array.isArray(value)) return [];
   return value.flatMap((element): AllowedToolsetRef[] => {
     if (typeof element !== 'object' || element === null) return [];
-    const { toolsetId, version, viaUrlOnly } = element as Record<string, unknown>;
+    const { toolsetId, version, viaUrlOnly, via, linkHash } = element as Record<string, unknown>;
     if (typeof toolsetId !== 'string') return [];
     return [
       {
         toolsetId,
         version: typeof version === 'number' ? version : null,
         viaUrlOnly: viaUrlOnly !== false,
+        ...(via === 'PUBLIC' || via === 'LINK' ? { via } : {}),
+        ...(typeof linkHash === 'string' ? { linkHash } : {}),
       },
     ];
   });
