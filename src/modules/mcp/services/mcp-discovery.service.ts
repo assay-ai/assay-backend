@@ -35,8 +35,8 @@ import {
   metaToolDefinitions,
   pinnedNames,
   pinnedWithin,
-  summaryOf,
 } from '../domain/discovery';
+import { versionOf } from '@modules/tool/domain/contract/contract-versions';
 import {
   CursorBinding,
   SearchCursorCodec,
@@ -51,6 +51,7 @@ import {
   McpCatalogueViewer,
   McpPriceAnnotation,
   McpToolDescriptor,
+  contractMetaOf,
 } from './mcp-catalogue.service';
 import {
   MCP_RATE_CLOCK,
@@ -70,6 +71,8 @@ export interface DiscoveryListing {
 export interface SearchResult {
   readonly name: string;
   readonly summary?: string;
+  /** The contract version a call would use (`1.2.0`). */
+  readonly version?: string;
   readonly kind?: string;
   readonly price?: string | null;
   readonly freeCallsLeftToday?: number | null;
@@ -158,13 +161,9 @@ export class McpDiscoveryService {
     const { request } = position;
     const viewer = viewerOf(session);
 
-    const scoped = await this.catalogue.scopedTools(scope);
-    const listed = await this.catalogue.listTools(viewer, scope, { freeQuota: false });
-    const byName = new Map(scoped.map((tool) => [tool.name, tool]));
-    const entries = listed.flatMap((descriptor) => {
-      const tool = byName.get(descriptor.name);
-      return tool ? [{ tool, descriptor }] : [];
-    });
+    // Each tool at the contract version a call would use: its stored
+    // summary, its schemas (T3).
+    const entries: Entry[] = await this.catalogue.listQuoted(viewer, scope, { freeQuota: false });
 
     const categories = categoriesOf(entries.map((entry) => entry.tool));
     const candidates = request.category
@@ -223,30 +222,36 @@ export class McpDiscoveryService {
     await this.limit(getToolKey(session.agentId), MCP_RATE_LIMITS.getToolsPerMinute);
 
     const name = args.name as string;
-    const tool = (await this.catalogue.scopedTools(scope)).find(
+    const scoped = (await this.catalogue.scopedTools(scope)).find(
       (candidate) => candidate.name === name,
     );
     const viewer = viewerOf(session);
-    const [descriptor] = tool
-      ? await this.catalogue.listTools(viewer, scope, { onlyToolIds: new Set([tool.id]) })
+    const [entry] = scoped
+      ? await this.catalogue.listQuoted(viewer, scope, { onlyToolIds: new Set([scoped.id]) })
       : [];
     // Not served here, not allowed, unknown, or listed nowhere for want of a
     // provider: one answer for all, so nothing outside view ∩ access leaks.
-    if (!tool || !descriptor) throw ToolAccessErrors.notInToolset({ details: { name } });
+    if (!scoped || !entry) throw ToolAccessErrors.notInToolset({ details: { name } });
 
+    // The tool at the contract version a call through this URL would use now.
+    const { tool, descriptor } = entry;
+    const version = versionOf(tool);
     const price = (descriptor.annotations[X402_PRICE] as McpPriceAnnotation | undefined) ?? null;
     return {
       name: tool.name,
       kind: kindOf(tool),
       category: categoryOf(tool),
       tags: [...(tool.tags ?? [])],
-      summary: summaryOf(tool.description),
-      description: tool.description,
+      summary: version.summary,
+      description: version.description,
       inputSchema: tool.inputSchema,
       outputSchema: tool.outputSchema,
-      examples: [],
-      // Every contract has one major until versions arrive (T3).
-      version: 1,
+      optionalInputFields: [...version.optionalInputFields],
+      optionalOutputFields: [...version.optionalOutputFields],
+      examples: version.examples.map((example) => ({ ...example })),
+      version: version.semver,
+      ...(version.changelog ? { changelog: version.changelog } : {}),
+      ...contractMetaOf(tool),
       tier: String(tool.tier).toLowerCase(),
       price,
       noProviderFits: descriptor.annotations[ASSAY_NO_PROVIDER_FITS] === true,
@@ -304,7 +309,8 @@ export class McpDiscoveryService {
     if (detail === 'names') return { name: entry.tool.name, score };
     const result: SearchResult = {
       name: entry.tool.name,
-      summary: summaryOf(entry.tool.description),
+      summary: versionOf(entry.tool).summary,
+      version: versionOf(entry.tool).semver,
       kind: kindOf(entry.tool),
       price: priceText(entry.descriptor),
       freeCallsLeftToday: await this.freeCallsLeft(viewer, entry.tool, entry.descriptor),
@@ -345,7 +351,7 @@ function documentOf(entry: Entry): SearchDocument<Entry> {
     key: tool.name,
     fields: [
       { text: tool.name, weight: 3 },
-      { text: summaryOf(tool.description), weight: 2 },
+      { text: versionOf(tool).summary, weight: 2 },
       { text: tool.description, weight: 1 },
       { text: argumentText(tool.inputSchema), weight: 1 },
       { text: (tool.tags ?? []).join(' '), weight: 2 },

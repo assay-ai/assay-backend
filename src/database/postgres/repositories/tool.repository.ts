@@ -13,6 +13,21 @@ export interface ToolSeedRow {
   readonly name: string;
   readonly category: string;
   readonly tags: readonly string[];
+  /** Version 1.0.0 of the contract, which the seed owns (design spec §11.2). */
+  readonly version?: ToolSeedVersion;
+}
+
+/** The seeded contract, written as `tool_versions` version 1 (`1.0.0`, ACTIVE). */
+export interface ToolSeedVersion {
+  readonly summary: string;
+  readonly description: string;
+  readonly inputSchema: unknown;
+  readonly outputSchema: unknown;
+  readonly optionalInputFields: readonly string[];
+  readonly optionalOutputFields: readonly string[];
+  readonly examples: readonly unknown[];
+  readonly verificationPolicyId: string | null;
+  readonly tier: string | null;
 }
 
 /**
@@ -56,6 +71,66 @@ export class ToolRepository extends AbstractRepository<ToolEntity> {
              "tags" = EXCLUDED."tags",
              "updated_at" = now()`,
       values,
+    );
+
+    const versioned = rows.filter((row) => row.version);
+    if (versioned.length === 0) return;
+    await this.upsertSeededVersions(versioned);
+  }
+
+  /**
+   * Version 1.0.0 of each seeded contract, refreshed from the seed on every
+   * boot: the seed owns version 1 of a seeded tool (local runs and tests,
+   * §13 D4). Every later version is the operator editor's. A tool with no
+   * current version is pointed at it.
+   */
+  private async upsertSeededVersions(rows: readonly ToolSeedRow[]): Promise<void> {
+    const values: unknown[] = [];
+    const tuples = rows.map((row, index) => {
+      const v = row.version as ToolSeedVersion;
+      const base = index * 10;
+      values.push(
+        row.id,
+        v.summary,
+        v.description,
+        JSON.stringify(v.inputSchema),
+        JSON.stringify(v.outputSchema),
+        [...v.optionalInputFields],
+        [...v.optionalOutputFields],
+        JSON.stringify(v.examples),
+        v.verificationPolicyId,
+        v.tier,
+      );
+      const p = (n: number) => `$${base + n}`;
+      return (
+        `(${p(1)}::uuid, 1, '1.0.0', 1, ${p(2)}, ${p(3)}, ${p(4)}::jsonb, ${p(5)}::jsonb, ` +
+        `${p(6)}::text[], ${p(7)}::text[], ${p(8)}::jsonb, ${p(9)}, ${p(10)}, 'ACTIVE', now())`
+      );
+    });
+
+    await this.query(
+      `INSERT INTO "tool_versions"
+         ("tool_id", "version", "semver", "major", "summary", "description", "input_schema",
+          "output_schema", "optional_input_fields", "optional_output_fields", "examples",
+          "verification_policy_id", "tier", "status", "published_at")
+       VALUES ${tuples.join(', ')}
+       ON CONFLICT ("tool_id", "version") DO UPDATE
+         SET "summary" = EXCLUDED."summary",
+             "description" = EXCLUDED."description",
+             "input_schema" = EXCLUDED."input_schema",
+             "output_schema" = EXCLUDED."output_schema",
+             "optional_input_fields" = EXCLUDED."optional_input_fields",
+             "optional_output_fields" = EXCLUDED."optional_output_fields",
+             "examples" = EXCLUDED."examples",
+             "verification_policy_id" = EXCLUDED."verification_policy_id",
+             "tier" = EXCLUDED."tier",
+             "updated_at" = now()`,
+      values,
+    );
+    await this.query(
+      `UPDATE "tools" SET "current_version" = 1, "updated_at" = now()
+        WHERE "id" = ANY($1::uuid[]) AND "current_version" IS NULL`,
+      [rows.map((row) => row.id)],
     );
   }
 

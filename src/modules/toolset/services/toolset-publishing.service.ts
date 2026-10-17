@@ -493,6 +493,7 @@ export class ToolsetPublishingService {
               }
             : null,
         minQuality: row.minQuality === null ? null : Number(row.minQuality),
+        toolVersionRange: row.toolVersionRange ?? null,
         requireOutputFields: [...row.requireOutputFields],
         onEmpty: row.onEmpty,
       })),
@@ -574,6 +575,7 @@ function entryRowOf(
     maxPriceAssetId: entry.maxPrice?.asset ?? null,
     maxPriceDecimals: entry.maxPrice?.decimals ?? null,
     minQuality: entry.minQuality === null ? null : String(entry.minQuality),
+    toolVersionRange: entry.toolVersionRange ?? null,
     requireOutputFields: [...entry.requireOutputFields],
     onEmpty: entry.onEmpty,
   };

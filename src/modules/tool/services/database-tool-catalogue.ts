@@ -6,24 +6,23 @@ import { BindingVersionRepository } from '@database/postgres/repositories/bindin
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 
-import { assertNoReservedToolNames } from '../domain/reserved-tool-names';
+import { TOOL_CONTRACTS, ToolContractsPort } from '../ports/tool-contracts.port';
 import { ToolCataloguePort } from '../ports/tool-catalogue.port';
 import { BindingStatus, PricingMode, Tool, ToolBinding } from '../ports/tool.types';
-import { TOOL_CATALOGUE_SNAPSHOT, ToolCatalogueSnapshot } from './in-memory-tool-catalogue';
 
 /**
- * The catalogue, half seeded and half stored.
+ * The catalogue, from the database.
  *
  * ```text
- * findTool / listTools   the seed        the tool contract — ours to author
- * findBindings           tool_bindings   one provider's implementation — theirs
+ * findTool / listTools   tools + tool_versions   the tool contract — ours to author
+ * findBindings           tool_bindings           one provider's implementation — theirs
  * ```
  *
- * That split is deliberate, not a transitional state. A tool's
- * `inputSchema`, `outputSchema` and verification policy are the contract the
- * router substitutes providers *against*; they are authored by the platform
- * (the seeded launch catalogue) and a provider must not be
- * able to move them. A binding is the opposite: it is the provider's own
+ * The split is deliberate. A tool's `inputSchema`, `outputSchema` and
+ * verification policy are the contract the router substitutes providers
+ * *against*; they are authored by the platform (the operator contract
+ * editor, two-person, design spec §7.5) and a provider must not be able to
+ * move them. A binding is the opposite: it is the provider's own
  * adaptation of their own endpoint, it changes without a deploy, and until
  * this class existed there was nowhere for it to live except a seed file that
  * only an operator could edit — which made "open registration" true
@@ -39,26 +38,18 @@ import { TOOL_CATALOGUE_SNAPSHOT, ToolCatalogueSnapshot } from './in-memory-tool
  */
 @Injectable()
 export class DatabaseToolCatalogue implements ToolCataloguePort {
-  private readonly tools: ReadonlyMap<string, Tool>;
-
   constructor(
-    @Inject(TOOL_CATALOGUE_SNAPSHOT) snapshot: ToolCatalogueSnapshot,
+    @Inject(TOOL_CONTRACTS) private readonly contracts: ToolContractsPort,
     private readonly bindings: ToolBindingRepository,
     private readonly versions: BindingVersionRepository,
-  ) {
-    assertNoReservedToolNames(
-      snapshot.tools.map((tool) => tool.name),
-      'tool catalogue',
-    );
-    this.tools = new Map(snapshot.tools.map((tool) => [tool.id, tool]));
-  }
+  ) {}
 
   findTool(toolId: string): Promise<Tool | null> {
-    return Promise.resolve(this.tools.get(toolId) ?? null);
+    return this.contracts.findContract(toolId);
   }
 
   listTools(): Promise<readonly Tool[]> {
-    return Promise.resolve([...this.tools.values()]);
+    return this.contracts.listContracts();
   }
 
   /**
@@ -73,7 +64,7 @@ export class DatabaseToolCatalogue implements ToolCataloguePort {
    * {@link toServedToolBindings}.
    */
   async findBindings(toolId: string): Promise<readonly ToolBinding[]> {
-    if (!this.tools.has(toolId)) return [];
+    if (!(await this.contracts.findContract(toolId))) return [];
 
     const rows = await this.bindings.findByTool(toolId);
     return toServedToolBindings(rows, this.versions);
@@ -119,6 +110,9 @@ export function toToolBinding(row: ToolBindingEntity): ToolBinding {
     slaFailureRate: Number(row.slaFailureRate),
     timeoutMs: row.timeoutMs,
     status: row.status as BindingStatus,
+    toolVersionRange: row.toolVersionRange ?? '^1',
+    providesOutputFields: [...(row.providesOutputFields ?? [])],
+    supportsInputFields: [...(row.supportsInputFields ?? [])],
     version: row.mappingVersion,
   };
 }
@@ -172,6 +166,9 @@ export async function toServedToolBindings(
             priceAmount: true,
             assetId: true,
             timeoutMs: true,
+            toolVersionRange: true,
+            providesOutputFields: true,
+            supportsInputFields: true,
           },
           where: drifted.map((row) => ({
             organizationId: row.organizationId,
@@ -232,6 +229,11 @@ function toServedToolBinding(
     priceAmount: published.priceAmount,
     assetId: published.assetId as AssetId,
     timeoutMs: published.timeoutMs,
+    // The contract range and declared fields are terms of the revision: an
+    // unpublished edit to them must not change what routing serves.
+    toolVersionRange: published.toolVersionRange ?? '^1',
+    providesOutputFields: [...(published.providesOutputFields ?? [])],
+    supportsInputFields: [...(published.supportsInputFields ?? [])],
     version: published.mappingVersion,
   };
 }
