@@ -67,10 +67,15 @@ export async function seedOfficialToolsets(
     )) as unknown[];
     if (exists.length > 0) continue;
 
+    // Each entry routes to the tool's current major, as a Draft entry added
+    // through the API would (design spec §7.2, T3).
     const tools = (await dataSource.query(
-      `SELECT id, name FROM tools WHERE name = ANY($1) AND visibility = 'LISTED' AND status = 'ACTIVE'`,
+      `SELECT t.id, t.name, v.major
+         FROM tools t
+         LEFT JOIN tool_versions v ON v.tool_id = t.id AND v.version = t.current_version
+        WHERE t.name = ANY($1) AND t.visibility = 'LISTED' AND t.status = 'ACTIVE'`,
       [[...seed.tools]],
-    )) as { id: string; name: string }[];
+    )) as { id: string; name: string; major: number | null }[];
     const ordered = seed.tools.flatMap((name) => tools.filter((tool) => tool.name === name));
     if (ordered.length === 0) continue;
     const names = new Set(ordered.map((tool) => tool.name));
@@ -88,8 +93,9 @@ export async function seedOfficialToolsets(
       )) as { id: string }[];
       for (const [position, tool] of ordered.entries()) {
         await manager.query(
-          `INSERT INTO toolset_entries (toolset_id, position, tool_id) VALUES ($1, $2, $3)`,
-          [toolset.id, position, tool.id],
+          `INSERT INTO toolset_entries (toolset_id, position, tool_id, tool_version_range)
+           VALUES ($1, $2, $3, $4)`,
+          [toolset.id, position, tool.id, `^${tool.major ?? 1}`],
         );
       }
       const entries = ordered.map((tool) => ({
@@ -100,6 +106,7 @@ export async function seedOfficialToolsets(
         minTier: null,
         maxPrice: null,
         minQuality: null,
+        toolVersionRange: `^${tool.major ?? 1}`,
         requireOutputFields: [],
         onEmpty: 'FAIL',
       }));
