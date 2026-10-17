@@ -602,7 +602,7 @@ describe('get_tool', () => {
       description: 'Current temperature at a point.',
       inputSchema: { type: 'object' },
       outputSchema: { type: 'object' },
-      version: 1,
+      version: '1.0.0',
       examples: [],
       price: { display: '$0.01' },
       freeCallsLeftToday: null,

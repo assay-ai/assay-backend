@@ -1,9 +1,10 @@
 import { Injectable, Logger, Optional } from '@nestjs/common';
-import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, Not, In } from 'typeorm';
+import { In, Not } from 'typeorm';
 
 import { ToolEntity } from '@database/postgres/entities/tool.entity';
 import { ToolVersionEntity } from '@database/postgres/entities/tool-version.entity';
+import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import { ToolVersionRepository } from '@database/postgres/repositories/tool-version.repository';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { readEpoch } from '@shared/cache/redis-cache/epoch-counter';
 
@@ -55,7 +56,8 @@ export class DatabaseToolContracts implements ToolContractsPort {
   private loading: Promise<Snapshot> | null = null;
 
   constructor(
-    @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    private readonly toolRows: ToolRepository,
+    private readonly versionRows: ToolVersionRepository,
     @Optional() private readonly cache?: CacheService,
   ) {}
 
@@ -97,13 +99,13 @@ export class DatabaseToolContracts implements ToolContractsPort {
   }
 
   private async load(epoch: string | null): Promise<Snapshot> {
-    const rows = await this.dataSource.getRepository(ToolEntity).find({
+    const rows = await this.toolRows.find({
       where: { status: Not(In([ToolStatus.DRAFT, ToolStatus.REMOVED])) },
     });
     const versions =
       rows.length === 0
         ? []
-        : await this.dataSource.getRepository(ToolVersionEntity).find({
+        : await this.versionRows.find({
             where: {
               toolId: In(rows.map((row) => row.id)),
               status: Not(ToolVersionStatus.DRAFT),

@@ -5,6 +5,7 @@ import { ToolBindingRepository } from '@database/postgres/repositories/tool-bind
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { chainIdOf } from '@modules/chains/ports/caip.types';
 import { DatabaseToolCatalogue } from '@modules/tool/services/database-tool-catalogue';
+import { staticToolContracts } from '@modules/tool/ports/tool-contracts.port';
 import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 
 import { buildTool } from './helpers/routing-fixtures';
@@ -95,7 +96,7 @@ describe('DatabaseToolCatalogue — serves the published revision', () => {
         ),
     };
     const catalogue = new DatabaseToolCatalogue(
-      { tools: [TOOL], bindings: [] },
+      staticToolContracts([TOOL]),
       { findByTool: jest.fn().mockResolvedValue(rows) } as unknown as ToolBindingRepository,
       versions as unknown as BindingVersionRepository,
     );
