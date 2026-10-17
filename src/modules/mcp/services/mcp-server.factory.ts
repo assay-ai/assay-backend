@@ -402,11 +402,27 @@ function paymentOf(meta: Record<string, unknown> | undefined): McpPayment {
     });
   }
 
+  const contractVersion = envelope.contractVersion;
+  if (
+    contractVersion !== undefined &&
+    contractVersion !== null &&
+    !(
+      typeof contractVersion === 'number' &&
+      Number.isInteger(contractVersion) &&
+      contractVersion >= 1
+    )
+  ) {
+    throw PaymentErrors.voucherMalformed({
+      field: X402_VOUCHER,
+      reason: 'contractVersion, when present, is a positive integer',
+    });
+  }
   return {
     rail,
     voucher: {
       signed: { voucher: envelope.voucher as never, signature: envelope.signature },
       providerId: envelope.providerId,
+      ...(typeof contractVersion === 'number' ? { contractVersion } : {}),
     },
   };
 }

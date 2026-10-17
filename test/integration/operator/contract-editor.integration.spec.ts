@@ -381,6 +381,17 @@ describe('the operator contract editor, against a real database', () => {
       ['RETIRED', 'RETIRED'],
     );
     expect(notices.map((notice) => notice.event)).toContain(NotificationEvent.TOOL_VERSION_RETIRED);
+
+    // A retired (or deprecated) major takes no new minor: it would escape its sunset.
+    expect(
+      await codeOf(
+        editor.saveDraft(author, toolId, {
+          ...DRAFT,
+          description: 'A late fix to v1.',
+          baseVersion: v1.version,
+        }),
+      ),
+    ).toBe(ToolErrorCode.TOOL_CONTRACT_STATE);
   });
 
   it('an accepted tool request creates a DRAFT tool, named from the title', async () => {

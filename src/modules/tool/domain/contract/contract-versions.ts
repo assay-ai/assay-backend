@@ -202,7 +202,14 @@ function fittingArguments(
   if (names.length === 0 || versions.length < 2) return versions;
   const defines = (version: ToolContractVersion, name: string) =>
     Object.prototype.hasOwnProperty.call(version.inputSchema.properties ?? {}, name);
-  const known = names.filter((name) => versions.some((version) => defines(version, name)));
+  // Known to the most preferred major only: an argument that only an older
+  // major defines (a field a new major removed or renamed) must not push the
+  // call down to that major while the preferred one can serve; it is left to
+  // the schema check there instead.
+  const preferredMajor = versions[0].major;
+  const known = names.filter((name) =>
+    versions.some((version) => version.major === preferredMajor && defines(version, name)),
+  );
   const fitting = versions.filter((version) => known.every((name) => defines(version, name)));
   return fitting.length > 0 ? fitting : [versions[0]];
 }

@@ -695,6 +695,21 @@ function nextSemver(
       reason: `a new major is drafted against the newest version (v${highest}), not v${base.semver}`,
     });
   }
+  // A deprecated or retired major takes no new version: it is on its way
+  // out, and a version published there would escape its sunset.
+  if (
+    bump !== VersionBump.MAJOR &&
+    published.some(
+      (version) =>
+        version.major === base.major &&
+        (version.status === ToolVersionStatus.DEPRECATED ||
+          version.status === ToolVersionStatus.RETIRED),
+    )
+  ) {
+    throw ToolErrors.contractState({
+      reason: `v${base.major} is deprecated; draft a change to the newest major instead`,
+    });
+  }
   const next = bumpSemver(parseSemver(base.semver), bump);
   const text = formatSemver(next);
   if (published.some((version) => version.semver === text)) {

@@ -46,7 +46,7 @@ export function rulesFor(scope: McpScope, toolId: string): RoutingRules {
  * What a call of `tool` through this URL asks of the contract (T3): the
  * entry's range and required outputs, narrowed by a `?tools=name@N` pin.
  */
-export function contractFor(scope: McpScope, tool: Pick<Tool, 'id' | 'name'>): ContractRequest {
+export function contractFor(scope: McpScope, tool: Tool): ContractRequest {
   return contractRequestOf(scope.view, tool);
 }
 

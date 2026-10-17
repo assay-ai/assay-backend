@@ -403,3 +403,45 @@ describe('declared optional outputs at call time', () => {
     expect(ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING).toBeDefined();
   });
 });
+
+describe('review fixes: version choice and declared outputs', () => {
+  it('a FALLBACK_BEST at a higher version never beats a version the entry accepts', async () => {
+    // Range ^1 || ^2, ONLY [plain] (a ^1 binding): v2 is reachable only by
+    // falling back to `next`, v1 strictly by `plain`. v1 wins.
+    const { router } = harness({});
+    const routed = await route(router, {
+      contract: contract({ range: [1, 2] }),
+      rules: {
+        agent: null,
+        entry: {
+          mode: ProviderMode.ONLY,
+          providerIds: ['plain'],
+          minTier: null,
+          maxPrice: null,
+          minQuality: null,
+          onEmpty: OnEmpty.FALLBACK_BEST,
+        },
+      },
+    });
+    expect(routed.providerId).toBe('plain');
+    expect(routed.fellBack).toBeUndefined();
+    expect(routed.tool.version?.major).toBe(1);
+  });
+
+  it('a declared output mapped below the top level and missing is the provider’s fault, not a failover', async () => {
+    const nested = buildBinding('rich', {
+      toolVersionRange: '^1',
+      providesOutputFields: ['uv_index'],
+      responseMapping: { answer: { $path: '$.answer' }, uv_index: { $path: '$.uv.value' } },
+    });
+    const { router, invoker } = harness({
+      bindings: [nested, plain],
+      responses: { rich: { answer: 'r' } },
+    });
+    const routed = await route(router);
+    expect(routed.providerId).toBe('rich');
+    expect(routed.output).toBeNull();
+    expect(routed.classification.responseClass).toBe(ResponseClass.DATA_RESULT);
+    expect(invoker.providerIds).toEqual(['rich']);
+  });
+});

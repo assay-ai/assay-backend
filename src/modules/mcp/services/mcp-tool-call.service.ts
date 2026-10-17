@@ -70,7 +70,6 @@ import {
 import {
   ContractRequest,
   NO_CONTRACT_REQUEST,
-  versionOf,
 } from '@modules/tool/domain/contract/contract-versions';
 import {
   EnqueueVerificationInput,
@@ -495,13 +494,12 @@ export class McpToolCallService {
       contract: { ...(scoped.contract ?? NO_CONTRACT_REQUEST), argumentNames: Object.keys(args) },
     };
     const quote = await this.requireQuote(tool, session, asked);
-    // Every later phase — relay, offer, voucher retry, route — serves the
-    // contract version this quote priced and the arguments are checked
-    // against, never one the supply moved to in between.
-    const plan: CallPlan = {
-      ...asked,
-      contract: { ...(asked.contract as ContractRequest), version: versionOf(quote.tool).version },
-    };
+    // Not pinned to the quote's version: the quote sees every call class and
+    // chain, and each phase below — the free relay, the paid route, the rail-B
+    // offer — chooses its version among the bindings of its own class and the
+    // buyer's chain, under the same hard constraints. A rail-B retry is held
+    // to the version its offer named (`x402/voucher.contractVersion`).
+    const plan: CallPlan = asked;
 
     this.requireValidArguments(quote.tool, args);
 
@@ -827,8 +825,16 @@ export class McpToolCallService {
     // The offer and the voucher retry run under the same merged rules as the
     // call, so the buyer is only ever asked to sign for a provider the rules
     // allow; a pinned payee they now drop is `PAYEE_NO_LONGER_ELIGIBLE`.
+    // The retry is held to the contract version its offer named, as it is to
+    // the payee: the buyer signed for a call at that version. Echoed like
+    // `providerId`, it proves nothing and only chooses the re-draw; a version
+    // no longer servable refuses the retry before anything is charged.
+    const contract =
+      payment?.contractVersion !== undefined
+        ? { ...(plan.contract ?? NO_CONTRACT_REQUEST), version: payment.contractVersion }
+        : plan.contract;
     const context: RoutingContext = {
-      ...routingContextOf(session, this.enabledChains, withdrawing, plan.rules, plan.contract),
+      ...routingContextOf(session, this.enabledChains, withdrawing, plan.rules, contract),
       onlyProviderId: payment?.providerId,
       callClass: 'PAID',
     };
@@ -876,6 +882,7 @@ export class McpToolCallService {
         provider: offer.providerAccount,
         providerId: offer.providerId,
         amount: { amount: price.amount, asset: price.asset, decimals: price.decimals },
+        ...(offer.contractVersion !== undefined ? { contractVersion: offer.contractVersion } : {}),
         resource: call.path,
         requestHash,
         seq,
@@ -961,7 +968,18 @@ export class McpToolCallService {
       { reason: MCP_FORWARDED_REASON },
     );
 
-    return this.route(session, tool, executing, args, callId, plan, offer.providerId);
+    return this.route(
+      session,
+      tool,
+      executing,
+      args,
+      callId,
+      {
+        ...plan,
+        contract: { ...(contract ?? NO_CONTRACT_REQUEST), version: offer.contractVersion },
+      },
+      offer.providerId,
+    );
   }
 
   /**
@@ -2052,6 +2070,12 @@ export interface McpVoucherPayment {
   readonly signed: SignedVoucher;
   /** The `providerId` the requirement named — picks the re-draw, proves nothing. */
   readonly providerId: string;
+  /**
+   * The `contractVersion` the requirement named (T3): the retry is served at
+   * that contract version or refused. Absent from an older client: the
+   * version is chosen again.
+   */
+  readonly contractVersion?: number;
 }
 
 export const NO_PAYMENT: McpPayment = Object.freeze({ rail: null, voucher: null });
@@ -2074,6 +2098,12 @@ export interface VoucherRequirement {
   readonly provider: AccountId;
   readonly providerId: string;
   readonly amount: Money;
+  /**
+   * The contract version (`tool_versions.version`) the offer was drawn at
+   * (T3). Echo it in `x402/voucher.contractVersion`: the retry is served at
+   * this version or refused, never at another.
+   */
+  readonly contractVersion?: number;
   readonly resource: string;
   readonly requestHash: string;
   readonly seq: string;
