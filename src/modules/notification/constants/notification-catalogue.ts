@@ -254,6 +254,25 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       // story; and the half they would miss is the one with the money in it.
       nonSuppressible: true,
     },
+    [NotificationEvent.CALL_DISPUTE_OPENED]: {
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      // The provider's one chance to reply comes before the decision.
+      nonSuppressible: false,
+    },
+    [NotificationEvent.CALL_DISPUTE_RESPONDED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_ONLY,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.CALL_DISPUTE_DECIDED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
     [NotificationEvent.PROVIDER_SLASH_EXECUTED]: {
       severity: NotificationSeverity.CRITICAL,
       channels: EVERYTHING,

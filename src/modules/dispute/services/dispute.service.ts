@@ -57,9 +57,9 @@ const slashObjectionState = (dispute: DisputeEntity): string =>
  * `POST /disputes/:id/acknowledge`, `POST /disputes/:id/withdraw`.
  *
  * Opening, acknowledging, withdrawing and reading — **not** adjudication.
- * Who reviews a dispute, on what SLA, and how a partial overturn restores
- * stake are not implemented here; `resolvedAt` / `resolvedBy` / `resolutionNote` /
- * `restoredAmount` are columns this service never writes.
+ * A buyer's dispute over its own call or verdict is refused here and filed
+ * through `CallDisputeService` (`POST /call-disputes`), which an operator
+ * decides; a provider's objection to a penalty is decided on its slash case.
  */
 @Injectable()
 export class DisputeService {
@@ -248,7 +248,9 @@ export class DisputeService {
       case DisputeSubjectType.PAYMENT_INTENT: {
         if (!isUUID(subjectId)) throw notFound();
         const asPayer = await this.paymentIntents.findOneBy({ organizationId, id: subjectId });
-        if (asPayer) return null;
+        // A buyer's dispute over its own call goes through `POST /call-disputes`,
+        // the path that reaches a decision (G3.B1).
+        if (asPayer) throw DisputeErrors.useCallDisputes({});
         const asProvider = await this.paymentIntents
           .createQueryBuilder('intent')
           .where('intent.organizationId IS NOT NULL')
@@ -264,7 +266,7 @@ export class DisputeService {
           organizationId,
           id: subjectId,
         });
-        if (asPayer) return null;
+        if (asPayer) throw DisputeErrors.useCallDisputes({});
         const asProvider = await this.verificationRecords
           .createQueryBuilder('record')
           .where('record.organizationId IS NOT NULL')
