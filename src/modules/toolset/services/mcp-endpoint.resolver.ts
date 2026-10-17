@@ -24,7 +24,14 @@ import {
   endpointKindOf,
   withoutDefaultDiscovery,
 } from '../domain/mcp-url';
-import { servesPublicPath, servesUnlistedPath, sharingEndsAt } from '../domain/sharing';
+import {
+  SharedPathKind,
+  newestServed,
+  servesPublicPath,
+  servesUnlistedPath,
+  sharingEndsAt,
+  versionServes,
+} from '../domain/sharing';
 import { readSnapshotEntries } from '../domain/snapshot';
 import { McpEndpointView, StoredEntryRule, ViewNotice, entryRulesOf } from '../domain/view';
 import { AccessEpochService } from './access-epoch.service';
@@ -221,9 +228,9 @@ export class McpEndpointResolver {
     const state = sharingStateOf(toolset);
     if (!servesPublicPath(state, this.now())) throw McpErrors.urlNotFound();
 
-    const version = path.version ?? toolset.lastSharedVersion;
+    const version = path.version ?? toolset.lastPublicVersion;
     if (!version) throw McpErrors.urlNotFound();
-    return this.versionView(path, toolset, await this.requireVersion(toolset, version, true), {
+    return this.versionView(path, toolset, await this.requireVersion(toolset, version, 'PUBLIC'), {
       handle: path.handle,
       latest: path.version === null,
       notice: noticeOf(
@@ -249,23 +256,34 @@ export class McpEndpointResolver {
 
     const version = path.version ?? toolset.lastSharedVersion;
     if (!version) throw McpErrors.urlNotFound();
-    return this.versionView(path, toolset, await this.requireVersion(toolset, version, true), {
-      handle: null,
-      latest: path.version === null,
-      notice: noticeOf(sharingEndsAt(state, 'UNLISTED'), null, null),
-    });
+    return this.versionView(
+      path,
+      toolset,
+      await this.requireVersion(toolset, version, 'UNLISTED'),
+      {
+        handle: null,
+        latest: path.version === null,
+        notice: noticeOf(sharingEndsAt(state, 'UNLISTED'), null, null),
+      },
+    );
   }
 
-  /** `shared`: a shared URL, which never serves past the last version published while shared. */
+  /**
+   * The version row, or 404. `shared`: a shared URL kind, which serves only
+   * versions published that way (`shared_as`) and never past its newest — a
+   * version published PRIVATE, or UNLISTED during a PUBLIC grace period, never
+   * reaches a URL that was not shared that way.
+   */
   private async requireVersion(
     toolset: ToolsetEntity,
     version: number,
-    shared = false,
+    shared: SharedPathKind | null = null,
   ): Promise<ToolsetVersionEntity> {
-    const newest = shared ? toolset.lastSharedVersion : toolset.latestVersion;
+    const newest = shared ? newestServed(toolset, shared) : toolset.latestVersion;
     if (newest === null || version > newest) throw McpErrors.urlNotFound();
     const row = await this.versions.findVersion(toolset.id, version);
     if (!row) throw McpErrors.urlNotFound();
+    if (shared && !versionServes(row.sharedAs, shared)) throw McpErrors.urlNotFound();
     return row;
   }
 

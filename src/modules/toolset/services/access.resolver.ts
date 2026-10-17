@@ -130,7 +130,7 @@ export class AccessResolver {
    *
    * ```text
    * own toolset        version null → its Draft; n → the snapshot of v n; deleted → none
-   * Official           version null → its latest shared version; n → v n
+   * Official           version null → its latest PUBLIC version; n → v n
    * another org's      n → the snapshot of v n, kept even when deleted; null → none
    * taken down, unknown → none (fail closed)
    * ```
@@ -169,7 +169,7 @@ export class AccessResolver {
         return toolset.deletedAt ? null : ref.version;
       }
       if (ref.version !== null) return ref.version;
-      return toolset.ownerOrgId === null ? toolset.lastSharedVersion : null;
+      return toolset.ownerOrgId === null ? toolset.lastPublicVersion : null;
     };
     const pairs = refs.flatMap((ref) => {
       const version = versionOf(ref);

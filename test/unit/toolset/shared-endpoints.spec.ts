@@ -51,15 +51,21 @@ describe('McpEndpointResolver — shared toolsets', () => {
       firstSharedAt: NOW,
       latestVersion: 3,
       lastSharedVersion: 2,
+      lastPublicVersion: 2,
       ...overrides,
     };
+    const shared = (overrides.sharedAs as string[] | undefined) ?? ['PUBLIC', 'PUBLIC', 'PRIVATE'];
     const versions: Record<number, unknown> = {
-      1: version(1, [entry('t1')]),
-      2: version(2, [entry('t1'), entry('t2', { providerMode: 'ONLY', providerIds: ['p1'] })]),
-      3: version(3, [entry('t9')]),
+      1: version(1, [entry('t1')], shared[0]),
+      2: version(
+        2,
+        [entry('t1'), entry('t2', { providerMode: 'ONLY', providerIds: ['p1'] })],
+        shared[1],
+      ),
+      3: version(3, [entry('t9')], shared[2]),
     };
     const reads = { slug: 0 };
-    let shared = 1;
+    let sharedEpoch = 1;
     const resolver = new McpEndpointResolver(
       {
         findOwnedBySlug: async (org: string, slug: string) =>
@@ -76,7 +82,7 @@ describe('McpEndpointResolver — shared toolsets', () => {
       { findByToolsets: async () => [] } as never,
       {
         current: async () => '1',
-        currentShared: async () => String(shared),
+        currentShared: async () => String(sharedEpoch),
       } as unknown as AccessEpochService,
       { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' },
       { findVersion: async (_id: string, n: number) => versions[n] ?? null } as never,
@@ -87,7 +93,7 @@ describe('McpEndpointResolver — shared toolsets', () => {
       } as never,
       () => NOW,
     );
-    return { resolver, toolset, reads, bumpShared: () => (shared += 1) };
+    return { resolver, toolset, reads, bumpShared: () => (sharedEpoch += 1) };
   }
 
   function ownerHandle(): ResolvedHandle {
@@ -100,10 +106,11 @@ describe('McpEndpointResolver — shared toolsets', () => {
     };
   }
 
-  function version(n: number, entries: unknown[]) {
+  function version(n: number, entries: unknown[], sharedAs = 'PUBLIC') {
     return {
       toolsetId: 'ts-1',
       version: n,
+      sharedAs,
       entries,
       toolIds: (entries as { toolId: string }[]).map((e) => e.toolId),
       discovery: 'FULL',
@@ -214,6 +221,35 @@ describe('McpEndpointResolver — shared toolsets', () => {
     expect((await resolve(resolver, '/my/kit@3', OWNER)).toolset?.version).toBe(3);
     await expect(resolve(resolver, '/my/kit@3', OTHER)).rejects.toMatchObject(notFound);
     await expect(resolve(resolver, '/my/kit@4', OWNER)).rejects.toMatchObject(notFound);
+  });
+
+  it('never serves a version published PRIVATE, even below the newest shared one', async () => {
+    const { resolver } = build({
+      sharedAs: ['PRIVATE', 'PRIVATE', 'PUBLIC'],
+      lastSharedVersion: 3,
+      lastPublicVersion: 3,
+    } as Partial<Row>);
+    expect((await resolve(resolver, '/@acme/kit')).toolset?.version).toBe(3);
+    await expect(resolve(resolver, '/@acme/kit@1')).rejects.toMatchObject(notFound);
+    await expect(resolve(resolver, '/@acme/kit@2')).rejects.toMatchObject(notFound);
+    await expect(resolve(resolver, `/u/${TOKEN}@2`)).rejects.toMatchObject(notFound);
+    // The owner's own /my/ serves every version.
+    expect((await resolve(resolver, '/my/kit@1', OWNER)).toolset?.version).toBe(1);
+  });
+
+  it('a PUBLIC grace never serves content published UNLISTED on /@ URLs', async () => {
+    const { resolver } = build({
+      visibility: 'UNLISTED',
+      listingStatus: null,
+      graceVisibility: 'PUBLIC',
+      graceUntil: new Date(NOW.getTime() + SHARING_GRACE_MS),
+      sharedAs: ['PUBLIC', 'PUBLIC', 'UNLISTED'],
+      lastSharedVersion: 3,
+      lastPublicVersion: 2,
+    } as Partial<Row>);
+    expect((await resolve(resolver, '/@acme/kit')).toolset?.version).toBe(2);
+    await expect(resolve(resolver, '/@acme/kit@3')).rejects.toMatchObject(notFound);
+    expect((await resolve(resolver, `/u/${TOKEN}`)).toolset?.version).toBe(3);
   });
 
   it('caches a shared view once for every organization, until the sharing epoch moves', async () => {

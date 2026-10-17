@@ -25,9 +25,9 @@ import {
   ToolsetVisibility,
   applySharing,
   isShared,
-  listedInCatalogue,
-  servesPublicPath,
-  servesUnlistedPath,
+  newestServed,
+  sharedPathFor,
+  versionServes,
 } from '../domain/sharing';
 import { SnapshotEntry, ToolsetSnapshot, changelogOf, diffSnapshots } from '../domain/snapshot';
 import {
@@ -140,6 +140,7 @@ export class ToolsetPublishingService {
         description: snapshot.description,
         icon: snapshot.icon,
         changelog,
+        sharedAs: next.visibility,
         publishedAt: now,
       });
       await manager.update(
@@ -149,6 +150,8 @@ export class ToolsetPublishingService {
           ...sharingPatchOf(next),
           latestVersion: version,
           lastSharedVersion: isShared(next) ? version : toolset.lastSharedVersion,
+          lastPublicVersion:
+            next.visibility === ToolsetVisibility.PUBLIC ? version : toolset.lastPublicVersion,
           updatedAt: now,
         },
       );
@@ -276,20 +279,25 @@ export class ToolsetPublishingService {
 
     let snapshot: ToolsetSnapshot;
     let version: number | null;
-    if (own && !source.deletedAt && body.version === undefined) {
+    // A taken-down source is copied by nobody, its owner included: a copy
+    // would be a way around the takedown.
+    if (source.removedAt) throw ToolsetErrors.notFound();
+    if (own && source.deletedAt) throw ToolsetErrors.notFound();
+    if (own && body.version === undefined) {
       snapshot = await this.snapshotOfDraft(this.dataSource.manager, source);
       version = null;
     } else {
-      if (!own && !visibleToOthers(sharingStateOf(source), body.unlistedToken, now)) {
-        throw ToolsetErrors.notFound();
-      }
-      if (own && source.deletedAt) throw ToolsetErrors.notFound();
-      // Another organization sees only what was published while shared.
-      const newest = own ? source.latestVersion : source.lastSharedVersion;
+      // Another organization sees only versions shared the way it reaches the
+      // toolset: PUBLIC ones through `/@…`, UNLISTED or PUBLIC ones by link.
+      const path = own ? null : sharedPathFor(sharingStateOf(source), body.unlistedToken, now);
+      if (!own && !path) throw ToolsetErrors.notFound();
+      const newest = path ? newestServed(source, path) : source.latestVersion;
       version = body.version ?? newest;
       if (!version || !newest || version > newest) throw ToolsetErrors.versionNotFound();
       const row = await this.versions.findVersion(source.id, version);
-      if (!row) throw ToolsetErrors.versionNotFound();
+      if (!row || (path && !versionServes(row.sharedAs, path))) {
+        throw ToolsetErrors.versionNotFound();
+      }
       snapshot = snapshotOfVersion(row);
     }
 
@@ -347,6 +355,8 @@ export class ToolsetPublishingService {
         pinnedTools: snapshot.pinnedTools.filter((tool) => keptNames.has(tool)),
         forkedFromId: source.id,
         forkedFromVersion: version,
+        // A delist stands on copies too: copying is no way back into the catalogue.
+        delistedAt: source.delistedAt,
       });
       if (kept.length > 0) {
         await manager.insert(
@@ -532,13 +542,7 @@ export function visibleToOthers(
   token: string | undefined,
   now: Date,
 ): boolean {
-  if (listedInCatalogue(state) || servesPublicPath(state, now)) return true;
-  return (
-    token !== undefined &&
-    state.unlistedToken !== null &&
-    token === state.unlistedToken &&
-    servesUnlistedPath(state, now)
-  );
+  return sharedPathFor(state, token, now) !== null;
 }
 
 /** Why a copy leaves this tool out, or `null` to keep it. */

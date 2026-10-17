@@ -39,10 +39,16 @@ import {
 } from '../dto/agent-access.dto';
 import { ToolsetErrors } from '../errors/toolset.errors';
 import { OFFICIAL_HANDLE } from '../domain/handle';
-import { isShared, listedInCatalogue } from '../domain/sharing';
+import {
+  SharedPathKind,
+  isShared,
+  listedInCatalogue,
+  newestServed,
+  sharedPathFor,
+  versionServes,
+} from '../domain/sharing';
 import { HandlesService } from './handles.service';
 import { sharingStateOf } from './sharing-row';
-import { visibleToOthers } from './toolset-publishing.service';
 import { AccessEpochService } from './access-epoch.service';
 import { AccessResolver, agentRulesOf } from './access.resolver';
 import { ConnectUrlsService, ServerInUseRow } from './connect-urls.service';
@@ -212,16 +218,28 @@ export class AgentAccessService {
         continue;
       }
       const { path } = server.parsed;
-      const token = path.kind === McpPathKind.UNLISTED_TOOLSET ? path.token : undefined;
-      const visible = visibleToOthers(sharingStateOf(toolset), token, now);
-      if (!visible && server.lastCallAt === null) continue;
       const pathVersion = 'version' in path ? (path as { version: number | null }).version : null;
-      const version =
-        toolset.ownerOrgId === null
-          ? pathVersion
-          : (server.toolsetVersion ?? toolset.lastSharedVersion);
-      if (toolset.ownerOrgId !== null && version === null) continue;
-      refs.push({ toolsetId: toolset.id, version, viaUrlOnly: true });
+      if (server.lastCallAt !== null && server.toolsetVersion !== null) {
+        // It was served to this agent through a shared URL: pin what it got
+        // (an Official set followed at its latest when the URL followed it).
+        const version =
+          toolset.ownerOrgId === null && pathVersion === null ? null : server.toolsetVersion;
+        refs.push({ toolsetId: toolset.id, version, viaUrlOnly: true });
+        continue;
+      }
+      // Only handed out: it must be shared to this organization now, and the
+      // pinned version one that was shared that way.
+      const token = path.kind === McpPathKind.UNLISTED_TOOLSET ? path.token : undefined;
+      const kind = sharedPathFor(sharingStateOf(toolset), token, now);
+      if (!kind) continue;
+      if (toolset.ownerOrgId === null && pathVersion === null) {
+        refs.push({ toolsetId: toolset.id, version: null, viaUrlOnly: true });
+        continue;
+      }
+      const version = pathVersion ?? newestServed(toolset, kind);
+      const row = version ? await this.versions.findVersion(toolset.id, version) : null;
+      if (!row || !versionServes(row.sharedAs, kind)) continue;
+      refs.push({ toolsetId: toolset.id, version: row.version, viaUrlOnly: true });
     }
     return refs;
   }
@@ -392,12 +410,15 @@ export class AgentAccessService {
         unknown.push(id);
         continue;
       }
+      let path: SharedPathKind | null = null;
       if (!own) {
         const state = sharingStateOf(toolset);
-        const visible = official
+        path = official
           ? listedInCatalogue(state)
-          : visibleToOthers(state, ref.unlistedToken, now);
-        if (!visible) {
+            ? 'PUBLIC'
+            : null
+          : sharedPathFor(state, ref.unlistedToken, now);
+        if (!path) {
           unknown.push(id);
           continue;
         }
@@ -407,8 +428,12 @@ export class AgentAccessService {
         }
       }
       if (version !== null) {
-        const newest = own ? toolset.latestVersion : toolset.lastSharedVersion;
-        if (!newest || version > newest || !(await this.versions.findVersion(id, version))) {
+        // Another organization pins only a version shared the way it sees the
+        // toolset: never a PRIVATE one, never an UNLISTED one without the link.
+        const newest = path ? newestServed(toolset, path) : toolset.latestVersion;
+        const row =
+          newest && version <= newest ? await this.versions.findVersion(id, version) : null;
+        if (!row || (path && !versionServes(row.sharedAs, path))) {
           noVersion.push(id);
           continue;
         }
@@ -579,7 +604,7 @@ export class AgentAccessService {
           : own
             ? toolset.latestVersion
             : publiclyVisible && status === 'ACTIVE'
-              ? toolset.lastSharedVersion
+              ? toolset.lastPublicVersion
               : null,
       };
     });

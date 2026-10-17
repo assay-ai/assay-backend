@@ -80,9 +80,9 @@ export async function seedOfficialToolsets(
       const [toolset] = (await manager.query(
         `INSERT INTO toolsets (owner_org_id, publisher_kind, slug, name, description, category,
                                tags, icon, visibility, listing_status, discovery, pinned_tools,
-                               latest_version, last_shared_version, first_shared_at)
+                               latest_version, last_shared_version, last_public_version, first_shared_at)
          VALUES (NULL, 'PLATFORM', $1, $2, $3, $4, $5, $6, 'PUBLIC', 'LISTED', 'AUTO', $7,
-                 1, 1, now())
+                 1, 1, 1, now())
          RETURNING id`,
         [seed.slug, seed.name, seed.description, seed.category, [...seed.tags], seed.icon, pinned],
       )) as { id: string }[];
@@ -106,8 +106,8 @@ export async function seedOfficialToolsets(
       await manager.query(
         `INSERT INTO toolset_versions (toolset_id, version, entries, tool_ids, discovery,
                                        search_threshold, pinned_tools, name, description, icon,
-                                       changelog)
-         VALUES ($1, 1, $2::jsonb, $3::uuid[], 'AUTO', 25, $4, $5, $6, $7, $8)`,
+                                       changelog, shared_as)
+         VALUES ($1, 1, $2::jsonb, $3::uuid[], 'AUTO', 25, $4, $5, $6, $7, $8, 'PUBLIC')`,
         [
           toolset.id,
           JSON.stringify(entries),

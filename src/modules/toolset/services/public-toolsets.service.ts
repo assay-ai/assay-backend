@@ -11,7 +11,12 @@ import { ToolsetRepository } from '@database/postgres/repositories/toolset.repos
 
 import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
 import { OFFICIAL_HANDLE } from '../domain/handle';
-import { listedInCatalogue, servesUnlistedPath, sharingEndsAt } from '../domain/sharing';
+import {
+  listedInCatalogue,
+  servesUnlistedPath,
+  sharingEndsAt,
+  versionServes,
+} from '../domain/sharing';
 import { SnapshotEntry, readSnapshotEntries } from '../domain/snapshot';
 import {
   ListPublicToolsetsQueryDto,
@@ -143,8 +148,9 @@ export class PublicToolsetsService {
 
   async versionsOf(handle: string, slug: string): Promise<PublicToolsetVersionListDto> {
     const row = await this.findListed(handle, slug);
+    // Only what `/@…` serves: versions published as PUBLIC, none past the newest.
     const versions = (await this.versions.listVersions(row.id)).filter(
-      (version) => version.version <= row.version,
+      (version) => version.version <= row.version && versionServes(version.sharedAs, 'PUBLIC'),
     );
     return {
       versions: versions.map((version) => ({
@@ -172,7 +178,7 @@ export class PublicToolsetsService {
     const version = v ?? newest;
     if (!version || !newest || version > newest) throw ToolsetErrors.versionNotFound();
     const row = await this.versions.findVersion(toolset.id, version);
-    if (!row) throw ToolsetErrors.versionNotFound();
+    if (!row || !versionServes(row.sharedAs, 'UNLISTED')) throw ToolsetErrors.versionNotFound();
 
     const entries = readSnapshotEntries(row.entries);
     const removed = await this.removedTools(entries.map((entry) => entry.toolId));
@@ -285,7 +291,7 @@ export class PublicToolsetsService {
     const rows = (await this.dataSource.query(
       `SELECT t.id, t.owner_org_id AS "ownerOrgId", t.publisher_kind AS "publisherKind",
                 t.slug, t.category, t.tags, t.first_shared_at AS "firstSharedAt",
-                t.created_at AS "createdAt", t.last_shared_version AS version,
+                t.created_at AS "createdAt", t.last_public_version AS version,
                 t.visibility, t.listing_status AS "listingStatus", t.removed_at AS "removedAt",
                 t.deleted_at AS "deletedAt",
                 COALESCE(o.handle, $1) AS handle,
@@ -293,7 +299,8 @@ export class PublicToolsetsService {
                 v.published_at AS "publishedAt", v.changelog
            FROM toolsets t
            LEFT JOIN organizations o ON o.id = t.owner_org_id
-           JOIN toolset_versions v ON v.toolset_id = t.id AND v.version = t.last_shared_version
+           JOIN toolset_versions v ON v.toolset_id = t.id AND v.version = t.last_public_version
+                                AND v.shared_as = 'PUBLIC'
           WHERE t.visibility = 'PUBLIC' AND t.listing_status = 'LISTED'
             AND t.removed_at IS NULL AND t.deleted_at IS NULL
             AND (t.owner_org_id IS NULL OR (o.handle IS NOT NULL AND o.handle_status = 'ACTIVE'))`,

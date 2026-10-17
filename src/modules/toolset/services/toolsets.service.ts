@@ -513,8 +513,8 @@ export class ToolsetsService {
         myPinned: latest ? `${base}/my/${toolset.slug}@${latest}` : null,
         public: publicUrl,
         publicPinned:
-          publicUrl && toolset.lastSharedVersion
-            ? `${publicUrl}@${toolset.lastSharedVersion}`
+          publicUrl && toolset.lastPublicVersion
+            ? `${publicUrl}@${toolset.lastPublicVersion}`
             : null,
         unlisted:
           toolset.unlistedToken && isShared(state) ? `${base}/u/${toolset.unlistedToken}` : null,
