@@ -106,3 +106,70 @@ export class ToolContractVersionDto {
     };
   }
 }
+
+/** `_meta["assay/deprecated"]`, as the catalogue shows it. */
+export class ToolDeprecationDto {
+  @ApiProperty({ format: 'date-time', example: '2027-02-01T00:00:00.000Z' })
+  sunsetAt: string;
+
+  @ApiProperty({ type: String, nullable: true, example: 'get_weather@2 (v2.0.0)' })
+  replacement: string | null;
+}
+
+/** One published version in a listing: no schemas, just what a card shows. */
+export class ToolVersionBriefDto {
+  @ApiProperty({ example: 2 })
+  version: number;
+
+  @ApiProperty({ example: '1.1.0' })
+  semver: string;
+
+  @ApiProperty({ example: 1 })
+  major: number;
+
+  @ApiProperty({ enum: ToolVersionStatus })
+  status: ToolVersionStatus;
+
+  @ApiProperty({ type: String, nullable: true, format: 'date-time' })
+  sunsetAt: Date | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  changelog: string | null;
+
+  @ApiProperty({ type: String, nullable: true, format: 'date-time' })
+  publishedAt: Date | null;
+
+  @ApiProperty()
+  isCurrent: boolean;
+
+  static of(
+    version: ToolContractVersion,
+    currentVersion: number | null | undefined,
+  ): ToolVersionBriefDto {
+    return {
+      version: version.version,
+      semver: version.semver,
+      major: version.major,
+      status: version.status,
+      sunsetAt: version.sunsetAt,
+      changelog: version.changelog,
+      publishedAt: version.publishedAt,
+      isCurrent: currentVersion != null && version.version === currentVersion,
+    };
+  }
+}
+
+/** A tool's published versions with their changelog, newest first. */
+export class ToolVersionListDto {
+  @ApiProperty()
+  toolId: string;
+
+  @ApiProperty({ example: 'get_weather' })
+  name: string;
+
+  @ApiProperty({ type: String, nullable: true, example: '1.1.0' })
+  currentVersion: string | null;
+
+  @ApiProperty({ type: [ToolContractVersionDto] })
+  versions: ToolContractVersionDto[];
+}
