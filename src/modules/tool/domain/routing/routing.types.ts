@@ -4,6 +4,7 @@ import { ProviderRoutingState } from '@modules/provider/ports/provider.types';
 import { ProviderStake } from '@modules/provider/ports/provider-stake.port';
 
 import { ToolBinding } from '../../ports/tool.types';
+import type { RoutingRules } from './rules';
 
 /**
  * Routing — the types the decision is made over.
@@ -439,6 +440,13 @@ export interface RoutingContext {
    * management.
    */
   readonly withdrawingChains: readonly ChainId[];
+  /**
+   * The buyer's provider rules for this call: the agent's, and the toolset
+   * entry's when the call came through a toolset URL (`rules.ts`). Kept apart
+   * from {@link excludeProviderIds}, which stays the failover exclusion, so a
+   * refusal can name whose rule dropped a provider. Absent means no rules.
+   */
+  readonly rules?: RoutingRules;
   /** `ENABLED_CHAINS`, by name — `filterEligible` is pure and injects nothing. */
   readonly enabledChains: readonly ChainId[];
   /**

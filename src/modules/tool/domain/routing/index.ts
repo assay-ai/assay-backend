@@ -45,3 +45,4 @@ export * from './eligibility';
 export * from './score';
 export * from './weights';
 export * from './weighted-pick';
+export * from './rules';

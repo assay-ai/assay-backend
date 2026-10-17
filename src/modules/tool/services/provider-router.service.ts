@@ -48,11 +48,16 @@ import {
   EligibilityResult,
   Ineligible,
   IneligibilityReason,
+  OnEmpty,
   RoutingCandidate,
   RoutingContext,
   RoutingRandom,
+  RoutingRules,
+  RuleRejection,
+  RuleRejectionReason,
   StakeGateVerdict,
   WeightedCandidate,
+  applyRules,
   applyStakeGrace,
   chooseSettlementChain,
   settleableChains,
@@ -61,9 +66,11 @@ import {
   payoutAccountOn,
   pickWeighted,
   scoreCandidates,
+  withoutEntryPreferences,
 } from '../domain/routing';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 
+import { ToolAccessErrors } from '../errors/tool-access.errors';
 import { ToolErrors } from '../errors/tool.errors';
 import { BINDING_INVOKER, BindingInvokerPort } from '../ports/binding-invoker.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '../ports/tool-catalogue.port';
@@ -223,6 +230,8 @@ export class ProviderRouterService {
       const {
         picked: selection,
         rejected,
+        ruleRejected,
+        fellBack,
         settlementChainOf,
       } = await this.selectAndReserve(
         candidates,
@@ -236,7 +245,7 @@ export class ProviderRouterService {
         // entirely on whether we have tried anything yet — see the two codes'
         // doc comments; one is a supply problem and one is an outage.
         if (attempts.length === 0) {
-          throw unroutable(request.toolId, rejected, routing);
+          throw unroutable(request.toolId, rejected, routing, ruleRejected);
         }
 
         throw allBindingsFailed(
@@ -308,6 +317,9 @@ export class ProviderRouterService {
           response: outcome.response,
           output: outcome.output,
           attempts,
+          // FALLBACK_BEST dropped the toolset entry's preferences to serve
+          // this call; the receipt says so.
+          ...(fellBack ? { fellBack: true } : {}),
         };
       }
 
@@ -372,7 +384,94 @@ export class ProviderRouterService {
     const tool = await this.catalogue.findTool(toolId);
     if (!tool) return null;
 
-    const candidates = await this.gatherCandidates(toolId);
+    return this.quoteFromCandidates(tool, await this.gatherCandidates(toolId), context);
+  }
+
+  /**
+   * Every candidate behind a tool, gathered exactly as a call gathers them —
+   * the I/O half of {@link quote}, which the quote index caches so that
+   * `tools/list` never reads the registry or the chain per tool.
+   */
+  async snapshotCandidates(toolId: string): Promise<RoutingCandidate[]> {
+    return this.gatherCandidates(toolId);
+  }
+
+  /**
+   * {@link quote} over candidates already gathered: pure, so the quote index
+   * can price a listing under each viewer's own rules from one snapshot.
+   *
+   * The buyer's rules (`context.rules`) are applied before the gates, the
+   * same way {@link select} applies them, and FALLBACK_BEST is honoured the
+   * same way. A quote the rules empty has no price and carries the rule
+   * rejections, which is "No provider fits your limits" to the caller.
+   */
+  quoteFromCandidates(
+    tool: Tool,
+    candidates: readonly RoutingCandidate[],
+    context: RoutingContext,
+  ): ToolQuote {
+    const ruled = this.eligibleUnderRules(candidates, context, new Date());
+    if (ruled.eligible.length === 0) {
+      return {
+        tool,
+        price: null,
+        pricingMode: null,
+        routableBindings: 0,
+        settlementChains: [],
+        p95LatencyMs: null,
+        qualityRate: null,
+        unroutableReason: summariseRejections(ruled.rejected, ruled.ruleRejected),
+        ...(ruled.ruleRejected.length > 0
+          ? { ruleRejections: ruled.ruleRejected.map(toRuleRejectionDetail) }
+          : {}),
+      };
+    }
+
+    return this.priceEligible(tool, ruled.eligible, context, ruled.fellBack);
+  }
+
+  /**
+   * The rules, then the gates, then grace — with FALLBACK_BEST re-running the
+   * gates under the agent's rules alone when the entry's left nothing.
+   */
+  private eligibleUnderRules(
+    candidates: readonly RoutingCandidate[],
+    context: RoutingContext,
+    now: Date,
+  ): EligibleUnderRules {
+    const first = this.eligibleUnder(candidates, context, context.rules, now);
+    if (first.eligible.length > 0 || !fallsBack(context.rules)) return first;
+
+    const fallback = this.eligibleUnder(
+      candidates,
+      context,
+      withoutEntryPreferences(context.rules as RoutingRules),
+      now,
+    );
+    return fallback.eligible.length > 0 ? { ...fallback, fellBack: true } : fallback;
+  }
+
+  private eligibleUnder(
+    candidates: readonly RoutingCandidate[],
+    context: RoutingContext,
+    rules: RoutingRules | undefined,
+    now: Date,
+  ): EligibleUnderRules {
+    const { kept, rejected: ruleRejected } = applyRules(candidates, rules);
+    const { eligible, rejected, settlementChainOf } = reinstateGraced(
+      kept,
+      filterEligible(kept, this.config.minimumStakeByChain, context),
+      now,
+    );
+    return { eligible, rejected, settlementChainOf, ruleRejected, fellBack: false };
+  }
+
+  private priceEligible(
+    tool: Tool,
+    eligible: readonly RoutingCandidate[],
+    context: RoutingContext,
+    fellBack: boolean,
+  ): ToolQuote {
     // Same two steps as {@link select}, in the same order, through the same
     // helper. That is the whole reason `reinstateGraced` is a function rather
     // than three lines inlined into selection: a quote that called only
@@ -393,25 +492,6 @@ export class ProviderRouterService {
     // per quote would drain a provider's declared allowance on traffic that
     // never reaches their endpoint. `consume` is called from
     // {@link selectAndReserve} and nowhere else.
-    const { eligible, rejected } = reinstateGraced(
-      candidates,
-      filterEligible(candidates, this.config.minimumStakeByChain, context),
-      new Date(),
-    );
-
-    if (eligible.length === 0) {
-      return {
-        tool,
-        price: null,
-        pricingMode: null,
-        routableBindings: 0,
-        settlementChains: [],
-        p95LatencyMs: null,
-        qualityRate: null,
-        unroutableReason: summariseRejections(rejected),
-      };
-    }
-
     const weighted = computeWeights(scoreCandidates(eligible, this.config.weights));
 
     // The union over the routable set, for the caller to render against the
@@ -423,6 +503,7 @@ export class ProviderRouterService {
     ];
     const priced = pricedOnQuotedChain(eligible, settlementChains, context);
     const pricingMode = quotedPricingMode(priced);
+    const chargeable = priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE);
 
     return {
       tool,
@@ -448,6 +529,8 @@ export class ProviderRouterService {
           : c.provider.stats.paidQualityRate,
       ),
       unroutableReason: null,
+      cheapestPrice: chargeable.length > 0 ? cheapestPrice(chargeable) : null,
+      ...(fellBack ? { fellBack: true } : {}),
     };
   }
 
@@ -473,8 +556,12 @@ export class ProviderRouterService {
    */
   async offer(toolId: string, context: RoutingContext): Promise<RoutingOffer> {
     const candidates = await this.gatherCandidates(toolId);
-    const { picked, rejected, settlementChainOf } = this.select(candidates, context, new Date());
-    if (!picked) throw unroutable(toolId, rejected, context);
+    const { picked, rejected, ruleRejected, fellBack, settlementChainOf } = this.select(
+      candidates,
+      context,
+      new Date(),
+    );
+    if (!picked) throw unroutable(toolId, rejected, context, ruleRejected);
 
     const settlementChain = settlementChainOf.get(picked.candidate.binding.id);
     return {
@@ -482,6 +569,7 @@ export class ProviderRouterService {
       providerAccount: payoutAccountOn(picked.candidate.provider, settlementChain),
       settlementChain,
       price: bindingPrice(picked.candidate.binding),
+      ...(fellBack ? { fellBack: true } : {}),
     };
   }
 
@@ -519,22 +607,33 @@ export class ProviderRouterService {
     // and a free call never reaches a `PAID` one (whose provider it cannot pay).
     // Dropped from the pool rather than rejected, so a refusal names the
     // reasons the remaining supply failed rather than the other class's.
+    //
+    // The buyer's rules run on that pool, before the gates, and the same way
+    // in both payment phases: `offer()` draws under them, and the voucher
+    // retry's pool is `onlyProviderId ∩ allowProviderIds` minus the rule
+    // exclusions. A pinned payee the rules now drop is
+    // `PAYEE_NO_LONGER_ELIGIBLE` (see `unroutable`).
     const pool = candidates.filter(
       (candidate) =>
         (!context.onlyProviderId || candidate.binding.providerId === context.onlyProviderId) &&
         servesCallClass(candidate.binding, context.callClass),
     );
-    const { eligible, rejected, settlementChainOf } = reinstateGraced(
-      pool,
-      filterEligible(pool, this.config.minimumStakeByChain, context),
-      now,
-    );
+    const { eligible, rejected, ruleRejected, fellBack, settlementChainOf } =
+      this.eligibleUnderRules(pool, context, now);
 
-    if (eligible.length === 0) return { picked: null, rejected, settlementChainOf };
+    if (eligible.length === 0) {
+      return { picked: null, rejected, ruleRejected, fellBack, settlementChainOf };
+    }
 
     const scored = scoreCandidates(eligible, this.config.weights);
     const weighted = computeWeights(scored, this.config.maxProviderShare);
-    return { picked: pickWeighted(weighted, this.random), rejected, settlementChainOf };
+    return {
+      picked: pickWeighted(weighted, this.random),
+      rejected,
+      ruleRejected,
+      fellBack,
+      settlementChainOf,
+    };
   }
 
   /**
@@ -568,18 +667,19 @@ export class ProviderRouterService {
     shed: Map<string, CeilingKind>,
     now: Date,
   ): Promise<Selection> {
-    let lastRejected: readonly Ineligible[] = [];
-    let lastChains: ReadonlyMap<string, ChainId> = new Map();
+    let last: Selection = {
+      picked: null,
+      rejected: [],
+      ruleRejected: [],
+      fellBack: false,
+      settlementChainOf: new Map(),
+    };
 
     for (let pass = 0; pass <= candidates.length; pass += 1) {
-      const { picked, rejected, settlementChainOf } = this.select(
-        withShed(candidates, shed),
-        context,
-        now,
-      );
-      lastRejected = rejected;
-      lastChains = settlementChainOf;
-      if (!picked) return { picked: null, rejected, settlementChainOf };
+      const selection = this.select(withShed(candidates, shed), context, now);
+      last = selection;
+      const { picked } = selection;
+      if (!picked) return { ...selection, picked: null };
 
       const binding = picked.candidate.binding;
       // A free call's quota first: a binding with no room for this agent is
@@ -590,7 +690,7 @@ export class ProviderRouterService {
         continue;
       }
       const refused = await this.ceilings.consume(binding);
-      if (refused === null) return { picked, rejected, settlementChainOf };
+      if (refused === null) return selection;
       await place?.release();
 
       this.logger.debug(
@@ -600,7 +700,7 @@ export class ProviderRouterService {
       shed.set(binding.id, refused);
     }
 
-    return { picked: null, rejected: lastRejected, settlementChainOf: lastChains };
+    return { ...last, picked: null };
   }
 
   /**
@@ -984,6 +1084,29 @@ export interface ToolQuote {
   readonly qualityRate: number | null;
   /** Why there is no price, or `null` when there is one. */
   readonly unroutableReason: string | null;
+  /**
+   * The cheapest chargeable binding left under the rules, for the "From $X"
+   * line of a listing. `null` when every binding left is FREE; absent on a
+   * quote with no routable supply.
+   */
+  readonly cheapestPrice?: Money | null;
+  /**
+   * What the buyer's rules dropped, on a quote they emptied: the price is then
+   * `null` and the listing says "No provider fits your limits".
+   */
+  readonly ruleRejections?: readonly RuleRejectionDetail[];
+  /** FALLBACK_BEST was applied to price this. */
+  readonly fellBack?: boolean;
+}
+
+/** One provider the rules dropped, as a refusal or a listing reports it (FR-6). */
+export interface RuleRejectionDetail {
+  readonly providerId: string;
+  readonly reason: RuleRejectionReason;
+  readonly source: RuleRejection['source'];
+  readonly detail: string;
+  /** On `PAYEE_NO_LONGER_ELIGIBLE`, the rule the pinned payee now fails. */
+  readonly rule?: RuleRejectionReason;
 }
 
 export interface RoutedCall {
@@ -1027,6 +1150,8 @@ export interface RoutedCall {
   readonly output: JsonValue | null;
   /** Every attempt, in order. The last one is the outcome above. */
   readonly attempts: readonly RoutingAttempt[];
+  /** True when FALLBACK_BEST dropped the toolset entry's preferences to serve this. */
+  readonly fellBack?: boolean;
 }
 
 /** Who {@link ProviderRouterService.offer} would route to, where it settles, and at what price. */
@@ -1036,14 +1161,27 @@ export interface RoutingOffer {
   readonly settlementChain: ChainId;
   /** The offered binding's own price — what a rail-B voucher is signed for. */
   readonly price: Money;
+  /** True when FALLBACK_BEST decided the offer; the retry decides it the same way. */
+  readonly fellBack?: boolean;
 }
 
 interface Selection {
   readonly picked: WeightedCandidate | null;
   /** Everything that did not survive the gates, for the error message. */
   readonly rejected: readonly Ineligible[];
+  /** Everything the buyer's rules dropped before the gates ran. */
+  readonly ruleRejected: readonly RuleRejection[];
+  /** FALLBACK_BEST was applied. */
+  readonly fellBack: boolean;
   /** `bindingId` → the chain the gates ran on, carried out rather than re-derived. */
   readonly settlementChainOf: ReadonlyMap<string, ChainId>;
+}
+
+interface EligibleUnderRules extends Pick<EligibilityResult, 'settlementChainOf'> {
+  readonly eligible: readonly RoutingCandidate[];
+  readonly rejected: readonly Ineligible[];
+  readonly ruleRejected: readonly RuleRejection[];
+  readonly fellBack: boolean;
 }
 
 interface AttemptOutcome {
@@ -1071,7 +1209,24 @@ function unroutable(
   toolId: string,
   rejected: readonly Ineligible[],
   routing: RoutingContext,
+  ruleRejected: readonly RuleRejection[] = [],
 ): Error {
+  // The buyer's rules dropped a provider: say so, with each provider's reason
+  // and whose rule it was (FR-6), rather than a supply error the buyer cannot
+  // act on. On the voucher retry the only candidate is the pinned payee, and
+  // its rejection is `PAYEE_NO_LONGER_ELIGIBLE`: not charged, the voucher is
+  // not redeemed, and the agent asks for a new offer.
+  if (ruleRejected.length > 0) {
+    const details = ruleRejected
+      .map(toRuleRejectionDetail)
+      .map((detail) =>
+        routing.onlyProviderId && detail.providerId === routing.onlyProviderId
+          ? { ...detail, reason: RuleRejectionReason.PAYEE_NO_LONGER_ELIGIBLE, rule: detail.reason }
+          : detail,
+      );
+    return noProviderMatchesRules(toolId, details);
+  }
+
   const allChainRejected =
     rejected.length > 0 &&
     rejected.every((r) => r.reason === IneligibilityReason.CHAIN_NOT_SETTLEABLE);
@@ -1488,13 +1643,51 @@ function dearestRejectedPrice(rejected: readonly Ineligible[]): Money | null {
     );
 }
 
-function summariseRejections(rejected: readonly Ineligible[]): string {
-  if (rejected.length === 0) return 'no bindings';
+function summariseRejections(
+  rejected: readonly Ineligible[],
+  ruleRejected: readonly RuleRejection[] = [],
+): string {
+  if (rejected.length === 0 && ruleRejected.length === 0) return 'no bindings';
 
   const counts = new Map<string, number>();
-  for (const item of rejected) {
+  for (const item of [...ruleRejected, ...rejected]) {
     counts.set(item.reason, (counts.get(item.reason) ?? 0) + 1);
   }
 
   return [...counts.entries()].map(([reason, count]) => `${count} ${reason}`).join(', ');
+}
+
+/**
+ * `NO_PROVIDER_MATCHES_RULES`, carrying each provider's reason and source.
+ * Exported for the MCP call path, which raises it from a quote the rules
+ * emptied before any intent exists.
+ */
+export function noProviderMatchesRules(
+  toolId: string,
+  providers: readonly RuleRejectionDetail[],
+): Error {
+  return ToolAccessErrors.noProviderMatchesRules({ details: { toolId, providers } });
+}
+
+function toRuleRejectionDetail(rejection: RuleRejection): RuleRejectionDetail {
+  return {
+    providerId: rejection.candidate.binding.providerId,
+    reason: rejection.reason,
+    source: rejection.source,
+    detail: rejection.detail,
+  };
+}
+
+/** Whether the entry asked to fall back to Assay's pick when its rules leave nobody. */
+function fallsBack(rules: RoutingRules | undefined): boolean {
+  return rules?.entry?.onEmpty === OnEmpty.FALLBACK_BEST;
+}
+
+/** The cheapest binding, as `Money` — the "From $X" a listing shows. */
+function cheapestPrice(eligible: readonly RoutingCandidate[]): Money {
+  let cheapest = eligible[0].binding;
+  for (const { binding } of eligible) {
+    if (BigInt(binding.priceAmount) < BigInt(cheapest.priceAmount)) cheapest = binding;
+  }
+  return bindingPrice(cheapest);
 }
