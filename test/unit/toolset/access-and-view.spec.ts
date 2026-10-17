@@ -159,6 +159,17 @@ describe('views — what a URL serves before access', () => {
     ).toEqual(['t2', 't3']);
   });
 
+  it('/c/{category} serves one topic, and ?category= can only narrow it further', () => {
+    const topic = (query: string) =>
+      selectViewTools(
+        { baseToolIds: null, baseCategory: 'maps', filter: parseMcpUrl(`/c/maps${query}`)!.filter },
+        catalogue,
+      ).tools.map((t) => t.id);
+    expect(topic('')).toEqual(['t2']);
+    expect(topic('?category=maps,crypto')).toEqual(['t2']);
+    expect(topic('?category=crypto')).toEqual([]);
+  });
+
   it('filters only ever narrow: an empty toolset stays empty whatever the filter names', () => {
     const filter = parseMcpUrl('/?tools=get_weather&category=weather')!.filter;
     expect(selectViewTools({ baseToolIds: [], filter }, catalogue).tools).toEqual([]);

@@ -9,6 +9,8 @@ import {
 } from '@database/postgres/repositories/toolset.repository';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { EntryRoutingRules } from '@modules/tool/domain/routing';
+import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
+import { categoryOf, isListedTool } from '@modules/tool/ports/tool.types';
 
 import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
 
@@ -21,6 +23,7 @@ import {
   ViewFilter,
   canonicalPath,
   canonicalUrl,
+  defaultDiscoveryFor,
   endpointKindOf,
   withoutDefaultDiscovery,
 } from '../domain/mcp-url';
@@ -33,7 +36,13 @@ import {
   versionServes,
 } from '../domain/sharing';
 import { readSnapshotEntries } from '../domain/snapshot';
-import { McpEndpointView, StoredEntryRule, ViewNotice, entryRulesOf } from '../domain/view';
+import {
+  DEFAULT_SEARCH_THRESHOLD,
+  McpEndpointView,
+  StoredEntryRule,
+  ViewNotice,
+  entryRulesOf,
+} from '../domain/view';
 import { AccessEpochService } from './access-epoch.service';
 import { ACCESS_CACHE_TTL_MS } from './access.resolver';
 import { HandlesService } from './handles.service';
@@ -66,9 +75,13 @@ export const ENDPOINT_CACHE_MAX_ENTRIES = 10_000;
  * /my/{slug}@n            the org's own published version n
  * /@{handle}/{slug}[@n]   PUBLIC and LISTED, or in its PUBLIC grace period — else 404
  * /u/{token}[@n]          the shared toolset holding this token, or one in grace — else 404
+ * /c/{category}           every LISTED tool of one topic; a topic no tool has is a 404
  * /@{handle}              T4 (provider tools): 404
- * /c/{category}           the discovery half of T2
  * ```
+ *
+ * Every view carries its discovery settings (`view.discovery`): the root's
+ * SEARCH with its pinned tools, a topic's AUTO, the Draft's own on
+ * `/my/{slug}`, and the published snapshot's on every versioned path.
  *
  * Every refusal is the **same** 404 as a missing slug: a PRIVATE or UNLISTED
  * toolset behind a guessable `/@handle/slug`, another organization's `/my/`,
@@ -94,6 +107,9 @@ export class McpEndpointResolver {
     @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
     private readonly versions: ToolsetVersionRepository,
     private readonly handles: HandlesService,
+    // The catalogue a `/c/{category}` path is checked against. Optional so a
+    // hand-built resolver needs none; without it any well-formed topic resolves.
+    @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue?: ToolCataloguePort,
     @Optional() @Inject(TOOLSET_CLOCK) private readonly now: ToolsetClock = systemClock,
   ) {}
 
@@ -111,7 +127,11 @@ export class McpEndpointResolver {
         handle: null,
         baseToolIds: null,
         entryRules: new Map(),
-        settings: null,
+        discovery: {
+          mode: DiscoveryMode.SEARCH,
+          searchThreshold: DEFAULT_SEARCH_THRESHOLD,
+          pinnedTools: this.host.rootPinnedTools ?? [],
+        },
         notice: null,
         defaultDiscovery: null,
       };
@@ -147,7 +167,10 @@ export class McpEndpointResolver {
 
   private withFilter(base: BaseView, filter: ViewFilter): McpEndpointView {
     const { defaultDiscovery, ...view } = base;
-    const canonical = withoutDefaultDiscovery(filter, defaultDiscovery);
+    const canonical = withoutDefaultDiscovery(
+      filter,
+      defaultDiscoveryFor(filter, defaultDiscovery),
+    );
     return {
       ...view,
       filter: canonical,
@@ -164,10 +187,41 @@ export class McpEndpointResolver {
       case McpPathKind.UNLISTED_TOOLSET:
         return this.unlistedToolsetView(path);
       case McpPathKind.CATEGORY:
+        return this.categoryView(path);
       case McpPathKind.HANDLE:
       default:
         throw McpErrors.urlNotFound();
     }
+  }
+
+  /** `/c/{category}`: every LISTED tool in one topic; a topic no tool has is a 404. */
+  private async categoryView(
+    path: Extract<McpPath, { kind: McpPathKind.CATEGORY }>,
+  ): Promise<BaseView> {
+    if (this.catalogue) {
+      const tools = await this.catalogue.listTools();
+      // Only the LISTED catalogue: a topic held by unlisted tools alone is
+      // the same 404 as one no tool has, so it reveals nothing.
+      const listed = tools.filter(isListedTool);
+      if (!listed.some((tool) => categoryOf(tool) === path.category)) throw McpErrors.urlNotFound();
+    }
+    return {
+      path,
+      kind: endpointKindOf(path),
+      toolset: null,
+      handle: null,
+      baseToolIds: null,
+      baseCategory: path.category,
+      entryRules: new Map(),
+      discovery: {
+        mode: DiscoveryMode.AUTO,
+        searchThreshold: DEFAULT_SEARCH_THRESHOLD,
+        pinnedTools: [],
+      },
+      notice: null,
+      // `staticDiscoveryDefault` already dropped `discovery=auto` while parsing.
+      defaultDiscovery: null,
+    };
   }
 
   private async myToolsetView(
@@ -205,10 +259,10 @@ export class McpEndpointResolver {
       handle: null,
       baseToolIds: rows.map((row) => row.toolId),
       entryRules,
-      settings: {
-        discovery: toolset.discovery,
+      discovery: {
+        mode: toolset.discovery.toLowerCase() as DiscoveryMode,
         searchThreshold: toolset.searchThreshold,
-        pinnedTools: toolset.pinnedTools,
+        pinnedTools: toolset.pinnedTools ?? [],
       },
       notice: null,
       defaultDiscovery: toolset.discovery.toLowerCase() as DiscoveryMode,
@@ -322,10 +376,12 @@ export class McpEndpointResolver {
       handle: options.handle,
       baseToolIds: snapshot.map((entry) => entry.toolId),
       entryRules,
-      settings: {
-        discovery: row.discovery,
+      // The snapshot's own discovery settings: a published version serves
+      // the mode, threshold and pinned tools it was published with.
+      discovery: {
+        mode: row.discovery.toLowerCase() as DiscoveryMode,
         searchThreshold: row.searchThreshold,
-        pinnedTools: row.pinnedTools,
+        pinnedTools: row.pinnedTools ?? [],
       },
       notice: options.notice,
       defaultDiscovery: row.discovery.toLowerCase() as DiscoveryMode,

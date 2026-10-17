@@ -91,6 +91,7 @@ describe('McpEndpointResolver — shared toolsets', () => {
         handlesOf: async () =>
           handle?.kind === 'ORG' ? new Map([[OWNER, 'acme']]) : new Map<string, string>(),
       } as never,
+      undefined,
       () => NOW,
     );
     return { resolver, toolset, reads, bumpShared: () => (sharedEpoch += 1) };
@@ -132,7 +133,7 @@ describe('McpEndpointResolver — shared toolsets', () => {
     expect(view.toolset).toMatchObject({ id: 'ts-1', version: 2, latest: true, name: 'Kit v2' });
     expect(view.baseToolIds).toEqual(['t1', 't2']);
     expect(view.entryRules.get('t2')?.providerIds).toEqual(['p1']);
-    expect(view.settings).toEqual({ discovery: 'FULL', searchThreshold: 10, pinnedTools: ['t1'] });
+    expect(view.discovery).toEqual({ mode: 'full', searchThreshold: 10, pinnedTools: ['t1'] });
     expect(view.handle).toBe('acme');
     expect(view.notice).toBeNull();
     expect(view.canonicalUrl).toBe('https://mcp.example.com/@acme/kit');

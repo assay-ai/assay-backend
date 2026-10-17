@@ -149,7 +149,6 @@ describe('rail B, a voucher for a payee the rules drop', () => {
         latest: false,
       },
       handle: null,
-      settings: { discovery: 'AUTO', searchThreshold: 25, pinnedTools: [] },
       notice: null,
       baseToolIds: [TOOL_ID],
       entryRules: new Map([
