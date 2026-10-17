@@ -28,6 +28,13 @@ export enum ToolAccessErrorCode {
   RATE_LIMITED = 'RATE_LIMITED',
   /** A `search_tools` cursor that expired, was altered, or belongs to another key or URL. */
   INVALID_CURSOR = 'INVALID_CURSOR',
+  /**
+   * T3: every contract version the call may use is retired. The message
+   * names the replacement (`details.replacement`).
+   */
+  CONTRACT_VERSION_RETIRED = 'CONTRACT_VERSION_RETIRED',
+  /** T3: the arguments use an optional input no allowed provider supports. */
+  UNSUPPORTED_INPUT_FIELD = 'UNSUPPORTED_INPUT_FIELD',
   /** `POST /mcp-urls/preview` was given something that is not an MCP URL of this host. */
   URL_NOT_RECOGNISED = 'URL_NOT_RECOGNISED',
 }
@@ -38,6 +45,18 @@ export const TOOL_REMOVED_MESSAGE = 'This tool was removed by its maker.';
 export const NO_PROVIDER_MATCHES_RULES_MESSAGE = 'No provider fits your limits.';
 export const RATE_LIMITED_MESSAGE = 'Too many requests. Try again shortly.';
 export const INVALID_CURSOR_MESSAGE = 'This search expired. Search again.';
+
+/** "This version of the tool was retired. Use {replacement}." (design spec §7.4). */
+export function contractVersionRetiredMessage(replacement: unknown): string {
+  return typeof replacement === 'string' && replacement.length > 0
+    ? `This version of the tool was retired. Use ${replacement}.`
+    : 'This version of the tool was retired.';
+}
+
+/** "No allowed provider supports {field}." (design spec §7.4). */
+export function unsupportedInputFieldMessage(fields: readonly string[]): string {
+  return `No allowed provider supports ${fields.length > 0 ? fields.join(', ') : 'this input'}.`;
+}
 
 export const ToolAccessErrors = createErrorFactory({
   notInToolset: {
@@ -69,6 +88,18 @@ export const ToolAccessErrors = createErrorFactory({
     code: ToolAccessErrorCode.INVALID_CURSOR,
     statusCode: 400,
     message: (_context?: Record<string, any>) => INVALID_CURSOR_MESSAGE,
+  },
+  contractVersionRetired: {
+    code: ToolAccessErrorCode.CONTRACT_VERSION_RETIRED,
+    statusCode: 410,
+    message: (context?: Record<string, any>) =>
+      contractVersionRetiredMessage(context?.details?.replacement),
+  },
+  unsupportedInputField: {
+    code: ToolAccessErrorCode.UNSUPPORTED_INPUT_FIELD,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      unsupportedInputFieldMessage((context?.details?.fields as string[] | undefined) ?? []),
   },
   urlNotRecognised: {
     code: ToolAccessErrorCode.URL_NOT_RECOGNISED,

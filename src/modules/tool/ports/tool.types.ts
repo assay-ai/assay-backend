@@ -96,6 +96,68 @@ export interface Tool {
    * Only a LISTED tool is part of the catalogue-wide views (`/`, `/c/…`).
    */
   readonly visibility?: ToolVisibility;
+  /**
+   * The contract version every field above is taken from (design spec §7.5):
+   * `tools.current_version` on a catalogue read, the routed version on a
+   * call. Absent on a hand-built fixture, which reads as 1.0.0.
+   */
+  readonly version?: ToolContractVersion;
+  /**
+   * Every published version (ACTIVE, DEPRECATED and RETIRED; never a DRAFT),
+   * newest first. Absent on a hand-built fixture: the tool's own fields are
+   * then its one version, 1.0.0 (`contractVersionsOf`).
+   */
+  readonly versions?: readonly ToolContractVersion[];
+  /** `tools.current_version`; absent reads as the newest ACTIVE version. */
+  readonly currentVersion?: number | null;
+  /** `tools.status`. Absent reads as ACTIVE. */
+  readonly status?: ToolStatus;
+  /** The tool deprecation and retirement notices point to, by name. */
+  readonly replacementToolName?: string | null;
+}
+
+/** `tool_versions.status`. */
+export enum ToolVersionStatus {
+  DRAFT = 'DRAFT',
+  ACTIVE = 'ACTIVE',
+  DEPRECATED = 'DEPRECATED',
+  RETIRED = 'RETIRED',
+}
+
+/** One worked example of a call, shown by `get_tool` and the catalogue. */
+export interface ToolExample {
+  readonly title?: string;
+  readonly arguments: Record<string, unknown>;
+  readonly result?: unknown;
+}
+
+/**
+ * One version of a tool's contract (`tool_versions`).
+ *
+ * `version` is the sequence number (`tools.current_version` names one);
+ * `semver` and `major` are what ranges and people read. The core fields are
+ * every schema property not listed in `optionalInputFields` /
+ * `optionalOutputFields`; a binding serves the core and opts in to the
+ * optional ones it declares.
+ */
+export interface ToolContractVersion {
+  readonly version: number;
+  readonly semver: string;
+  readonly major: number;
+  /** At most 200 characters; the only text `tools/list` sends. */
+  readonly summary: string;
+  readonly description: string;
+  readonly inputSchema: JsonSchema;
+  readonly outputSchema: JsonSchema;
+  readonly optionalInputFields: readonly string[];
+  readonly optionalOutputFields: readonly string[];
+  readonly examples: readonly ToolExample[];
+  readonly verificationPolicyId: string;
+  readonly tier: ToolTier;
+  readonly status: ToolVersionStatus;
+  readonly sunsetAt: Date | null;
+  readonly changelog: string | null;
+  readonly publishedAt: Date | null;
 }
 
 /** `tools.visibility`. */
@@ -124,8 +186,9 @@ export enum ToolKind {
   PROVIDER = 'PROVIDER',
 }
 
-/** `tools.status`. */
+/** `tools.status`. `DRAFT`: no version published yet, so not in any catalogue. */
 export enum ToolStatus {
+  DRAFT = 'DRAFT',
   ACTIVE = 'ACTIVE',
   DEPRECATED = 'DEPRECATED',
   RETIRED = 'RETIRED',
@@ -195,6 +258,16 @@ export interface ToolBinding {
   readonly slaFailureRate: number;
   readonly timeoutMs: number;
   readonly status: BindingStatus;
+
+  /**
+   * The contract majors this binding serves (`^1`, `^1 || ^2`). Absent reads
+   * as `^1`, the column default.
+   */
+  readonly toolVersionRange?: string;
+  /** Optional output fields this binding promises; absent reads as none. */
+  readonly providesOutputFields?: readonly string[];
+  /** Optional input fields this binding supports; absent reads as none. */
+  readonly supportsInputFields?: readonly string[];
 
   /**
    * Which stored revision of the mappings this is.

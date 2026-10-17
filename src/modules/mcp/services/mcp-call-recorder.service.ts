@@ -26,6 +26,7 @@ import { McpSession } from '../ports/mcp-session.port';
 const REFUSAL_LAYER: Readonly<Record<string, RefusalLayer>> = Object.freeze({
   [ToolAccessErrorCode.TOOL_NOT_IN_TOOLSET]: RefusalLayer.SERVER,
   [ToolAccessErrorCode.TOOL_REMOVED]: RefusalLayer.SERVER,
+  [ToolAccessErrorCode.CONTRACT_VERSION_RETIRED]: RefusalLayer.SERVER,
   [ToolAccessErrorCode.TOOL_NOT_ALLOWED]: RefusalLayer.AGENT_LIMITS,
   [McpErrorCode.MCP_POLICY_AGENT_PAUSED]: RefusalLayer.AGENT_LIMITS,
   [McpErrorCode.MCP_SPEND_LIMIT_EXCEEDED]: RefusalLayer.AGENT_LIMITS,
@@ -167,11 +168,23 @@ export class McpCallRecorder {
 function layerOf(error: AppError<unknown[]>): RefusalLayer | null {
   if (error.errorCode === ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES) {
     const details = error.context?.details as { providers?: { source: RuleSource }[] } | undefined;
-    return rejectionLayer(details?.providers ?? []) === RuleSource.AGENT
-      ? RefusalLayer.AGENT_LIMITS
-      : RefusalLayer.TOOLSET_RULES;
+    return layerOfSource(rejectionLayer(details?.providers ?? []));
+  }
+  if (error.errorCode === ToolAccessErrorCode.UNSUPPORTED_INPUT_FIELD) {
+    const details = error.context?.details as { providers?: { source: RuleSource }[] } | undefined;
+    const source = rejectionLayer(details?.providers ?? []);
+    return source === RuleSource.AGENT || source === RuleSource.TOOLSET
+      ? layerOfSource(source)
+      : RefusalLayer.SERVER;
   }
   return REFUSAL_LAYER[error.errorCode] ?? null;
+}
+
+/** The refused-call layer a rule source files under: the request and a migration are the server's. */
+function layerOfSource(source: RuleSource): RefusalLayer {
+  if (source === RuleSource.AGENT) return RefusalLayer.AGENT_LIMITS;
+  if (source === RuleSource.TOOLSET) return RefusalLayer.TOOLSET_RULES;
+  return RefusalLayer.SERVER;
 }
 
 /** A tool name an agent sent, reduced to what a tool name may contain, at most 48 characters. */
