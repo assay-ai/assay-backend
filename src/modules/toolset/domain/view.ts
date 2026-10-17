@@ -1,7 +1,7 @@
 import { ProviderTier } from '@modules/provider/ports/provider.types';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { EntryRoutingRules, OnEmpty, ProviderMode } from '@modules/tool/domain/routing';
-import { PricingMode, Tool, categoryOf } from '@modules/tool/ports/tool.types';
+import { PricingMode, Tool, categoryOf, isListedTool } from '@modules/tool/ports/tool.types';
 import { MoneyUtil } from '@utils/money.util';
 
 import { DiscoveryMode, EndpointKind, McpPath, ViewFilter } from './mcp-url';
@@ -112,7 +112,9 @@ export function selectViewTools(
         const tool = byId.get(id);
         return tool ? [tool] : [];
       })
-    : [...catalogue];
+    : // The catalogue-wide views serve the LISTED catalogue only: an UNLISTED
+      // or PRIVATE tool is reachable only through a toolset that holds it.
+      catalogue.filter(isListedTool);
 
   const ignored: string[] = [];
   if (view.filter.tools) {

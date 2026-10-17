@@ -7,7 +7,7 @@ import {
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { EntryRoutingRules } from '@modules/tool/domain/routing';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { categoryOf } from '@modules/tool/ports/tool.types';
+import { categoryOf, isListedTool } from '@modules/tool/ports/tool.types';
 
 import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
 
@@ -153,7 +153,10 @@ export class McpEndpointResolver {
   ): Promise<BaseView> {
     if (this.catalogue) {
       const tools = await this.catalogue.listTools();
-      if (!tools.some((tool) => categoryOf(tool) === path.category)) throw McpErrors.urlNotFound();
+      // Only the LISTED catalogue: a topic held by unlisted tools alone is
+      // the same 404 as one no tool has, so it reveals nothing.
+      const listed = tools.filter(isListedTool);
+      if (!listed.some((tool) => categoryOf(tool) === path.category)) throw McpErrors.urlNotFound();
     }
     return {
       path,

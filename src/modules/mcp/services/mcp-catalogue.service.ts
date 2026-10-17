@@ -87,9 +87,15 @@ export class McpCatalogueService {
     return remaining ? remaining.remaining : null;
   }
 
-  /** The `?tools=` names this URL does not serve, for `_meta["assay/ignoredTools"]`. */
+  /**
+   * The `?tools=` names this URL does not serve to this caller, for
+   * `_meta["assay/ignoredTools"]`: measured against view ∩ access, so a tool
+   * the caller may not use reads exactly like one that does not exist.
+   */
   async ignoredTools(scope: McpScope): Promise<readonly string[]> {
-    return selectViewTools(scope.view, await this.catalogue.listTools()).ignoredTools;
+    const { tools, ignoredTools } = selectViewTools(scope.view, await this.catalogue.listTools());
+    const refused = tools.filter((tool) => !scopeAllows(scope, tool.id)).map((tool) => tool.name);
+    return [...ignoredTools, ...refused].sort();
   }
 
   /**
