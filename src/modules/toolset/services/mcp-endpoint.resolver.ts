@@ -20,6 +20,7 @@ import {
   ViewFilter,
   canonicalPath,
   canonicalUrl,
+  defaultDiscoveryFor,
   endpointKindOf,
   withoutDefaultDiscovery,
 } from '../domain/mcp-url';
@@ -119,7 +120,10 @@ export class McpEndpointResolver {
 
   private withFilter(base: BaseView, filter: ViewFilter): McpEndpointView {
     const { defaultDiscovery, ...view } = base;
-    const canonical = withoutDefaultDiscovery(filter, defaultDiscovery);
+    const canonical = withoutDefaultDiscovery(
+      filter,
+      defaultDiscoveryFor(filter, defaultDiscovery),
+    );
     return {
       ...view,
       filter: canonical,
