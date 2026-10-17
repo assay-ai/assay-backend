@@ -17,13 +17,12 @@ import {
 import { LedgerBalanceService } from './ledger-balance.service';
 import { LedgerHoldService } from './ledger-hold.service';
 import { LedgerJournalService } from './ledger-journal.service';
-import { LedgerWriterService } from './ledger-writer.service';
 
 /**
  * `LedgerPort`, assembled.
  *
- * The four services behind it are split by *what can go wrong*, not by noun:
- * the journal owns atomicity, the writer owns throughput, holds own the state
+ * The three services behind it are split by *what can go wrong*, not by noun:
+ * the journal owns atomicity, holds own the state
  * machine, and balances own the cache being provably redundant. This class
  * exists so no caller has to know which of those it is talking to.
  *
@@ -41,7 +40,6 @@ import { LedgerWriterService } from './ledger-writer.service';
 export class LedgerService implements LedgerPort {
   constructor(
     private readonly journal: LedgerJournalService,
-    private readonly writer: LedgerWriterService,
     private readonly balances: LedgerBalanceService,
     private readonly holds: LedgerHoldService,
   ) {}
@@ -50,19 +48,6 @@ export class LedgerService implements LedgerPort {
 
   appendNow(input: AppendEntryInput): Promise<JournalEntry> {
     return this.journal.appendNow(input);
-  }
-
-  append(input: AppendEntryInput): void {
-    this.writer.append(input);
-  }
-
-  flush(): Promise<number> {
-    return this.writer.flush();
-  }
-
-  /** Entries still in memory, not yet durable. */
-  get buffered(): number {
-    return this.writer.pending;
   }
 
   readJournal(

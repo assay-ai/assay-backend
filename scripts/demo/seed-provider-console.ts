@@ -1033,21 +1033,17 @@ interface PayoutPlan {
  * `GET /providers/me/payouts` lists `PAYOUT` ledger entries **with a
  * `batch_id`** (`ProviderPayoutsService`). Nothing in `src/` can write one:
  *
- * - `LedgerWriterService.append` — the only writer that stamps a `batch_id`,
- *   inside `flush()` — **refuses `PAYOUT` outright** (`LEDGER_ENTRY_NOT_BUFFERABLE`:
- *   "can reduce a balance and must be written through, not buffered");
  * - `LedgerService.appendNow` — what `ProviderPayoutBatchService.record()`
  *   actually calls — has no `batchId` on its input at all;
  * - `ledger_entries` refuses `UPDATE`, so it cannot be stamped afterwards.
  *
- * So the writer and the reader disagree, and the payouts screen is empty for
+ * So the payout writer and the reader disagree, and the payouts screen is empty for
  * every payout the platform will ever make. Seeding around that with a raw
  * `INSERT` would leave `account_balances` unfolded and make the reconciler
- * disagree with the journal, so this takes the same two public journal calls
- * `LedgerWriterService.flushOnce` takes — `prepare(input, batchId)` then
- * `applyEntries` inside `runInLedgerTransaction` — with the batch id chosen up
- * front rather than minted inside `flush()`. The balance moves, the snapshot
- * folds, and the row is exactly what a working batch would have written.
+ * disagree with the journal, so this takes the two public journal calls
+ * `prepare(input, batchId)` then `applyEntries` inside
+ * `runInLedgerTransaction`, with the batch id chosen up front. The balance moves,
+ * the snapshot folds, and the row is exactly what a working batch would have written.
  */
 const PAYOUTS: readonly PayoutPlan[] = [
   { weeksAgo: 3, amount: 3_000_000n, callCount: 41, status: 'RECORDED' },

@@ -57,7 +57,6 @@ import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.se
 import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service';
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import {
   ProviderChainStakeKey,
   ProviderStake,
@@ -322,10 +321,8 @@ export async function createBindingEditorTestContext(
     new AccountBalanceRepository(dataSource),
     dataSource,
   );
-  const writer = new LedgerWriterService(journal, dataSource);
   const ledger = new LedgerService(
     journal,
-    writer,
     new LedgerBalanceService(new AccountBalanceRepository(dataSource), journal),
     new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource),
   );
@@ -396,14 +393,6 @@ export async function createBindingEditorTestContext(
     organizationId: randomUUID(),
 
     async reset(): Promise<void> {
-      for (let attempt = 0; attempt < 5 && writer.pending > 0; attempt += 1) {
-        try {
-          await writer.flush();
-        } catch {
-          // A batch a previous test abandoned is that test's business.
-        }
-      }
-      writer.drainQuarantine();
       context.organizationId = randomUUID();
     },
 
