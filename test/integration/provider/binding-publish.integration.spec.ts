@@ -300,6 +300,50 @@ describe('binding editor → mapping tester → publish gate', () => {
     expect(mine?.version).toBe(1);
   });
 
+  it('publish deletes the credential sets of origins the binding no longer uses, and reports publishedEndpoint', async () => {
+    const OLD = 'http://provider.example.com';
+    const NEW = 'http://other.example.com';
+    const binding = await context.editor.create(context.organizationId, SUBJECT, body());
+    expect(
+      (await context.bindingsList.getBinding(context.organizationId, binding.id)).publishedEndpoint,
+    ).toBeNull();
+    await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'q' });
+    await context.publisher.publish(context.organizationId, SUBJECT, binding.id);
+    await context.vault.put(
+      context.organizationId,
+      binding.id,
+      OLD,
+      [{ name: 'X-K', value: 'a' }],
+      SUBJECT,
+    );
+
+    // Move the draft to another origin; the old set stays until the next publish.
+    const moved = await context.editor.update(context.organizationId, SUBJECT, binding.id, {
+      endpoint: `${NEW}/api`,
+    });
+    expect(moved.publishedEndpoint).toBe(`${OLD}/api`);
+    const detail = await context.bindingsList.getBinding(context.organizationId, binding.id);
+    expect(detail.endpoint).toBe(`${NEW}/api`);
+    expect(detail.publishedEndpoint).toBe(`${OLD}/api`);
+    await context.vault.put(
+      context.organizationId,
+      binding.id,
+      NEW,
+      [{ name: 'X-K', value: 'b' }],
+      SUBJECT,
+    );
+    expect(
+      (await context.vault.list(context.organizationId, binding.id)).map((s) => s.origin).sort(),
+    ).toEqual([NEW, OLD].sort());
+
+    await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'q' });
+    const published = await context.publisher.publish(context.organizationId, SUBJECT, binding.id);
+    expect(published.publishedEndpoint).toBe(`${NEW}/api`);
+
+    const left = await context.vault.list(context.organizationId, binding.id);
+    expect(left.map((s) => s.origin)).toEqual([NEW]);
+  });
+
   it('refuses a second publish of a revision already live', async () => {
     const binding = await context.editor.create(context.organizationId, SUBJECT, body());
     await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'x' });

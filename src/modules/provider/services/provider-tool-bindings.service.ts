@@ -7,6 +7,7 @@ import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
@@ -60,6 +61,7 @@ export class ProviderToolBindingsService {
     private readonly bindings: ToolBindingRepository,
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
     private readonly config: ConfigService,
+    private readonly versions: BindingVersionRepository,
   ) {}
 
   async listBindings(
@@ -83,7 +85,7 @@ export class ProviderToolBindingsService {
       throw ProviderErrors.bindingNotFound({ bindingId });
     }
 
-    return toDetailDto(row);
+    return toDetailDto(row, await publishedEndpointOf(this.versions, row));
   }
 
   /**
@@ -196,9 +198,13 @@ function toSummaryDto(row: ToolBindingEntity): ToolBindingSummaryDto {
  * to do it. Two mappers answering one question is how the read and the write
  * end up disagreeing about whether a provider has unpublished edits.
  */
-export function toDetailDto(row: ToolBindingEntity): ToolBindingDetailDto {
+export function toDetailDto(
+  row: ToolBindingEntity,
+  publishedEndpoint: string | null,
+): ToolBindingDetailDto {
   return {
     ...toSummaryDto(row),
+    publishedEndpoint,
     authMode: row.authMode as BindingAuthMode,
     requestMapping: row.requestMapping,
     responseMapping: row.responseMapping,
@@ -216,4 +222,20 @@ export function toDetailDto(row: ToolBindingEntity): ToolBindingDetailDto {
     // never been published is wholly unpublished.
     hasUnpublishedChanges: row.publishedVersion !== row.mappingVersion,
   };
+}
+
+/** The endpoint stored in the revision currently published, or null when never published. */
+export async function publishedEndpointOf(
+  versions: Pick<BindingVersionRepository, 'findOne'>,
+  row: Pick<ToolBindingEntity, 'organizationId' | 'id' | 'publishedVersion'>,
+): Promise<string | null> {
+  if (row.publishedVersion === null || row.publishedVersion === undefined) return null;
+  const published = await versions.findOne({
+    where: {
+      organizationId: row.organizationId,
+      bindingId: row.id,
+      mappingVersion: row.publishedVersion,
+    },
+  });
+  return published?.endpoint ?? null;
 }

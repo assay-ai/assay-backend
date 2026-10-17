@@ -1,5 +1,7 @@
 import { ConfigService } from '@nestjs/config';
 
+import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
@@ -51,7 +53,16 @@ function row(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity {
   } as ToolBindingEntity;
 }
 
-function build(rows: ToolBindingEntity[]) {
+function build(rows: ToolBindingEntity[], revisions: Partial<BindingVersionEntity>[] = []) {
+  const versions = {
+    findOne: jest.fn(
+      async ({ where }: { where: { bindingId: string; mappingVersion: number } }) =>
+        (revisions.find(
+          (v) => v.bindingId === where.bindingId && v.mappingVersion === where.mappingVersion,
+        ) ?? null) as BindingVersionEntity | null,
+    ),
+  } as unknown as BindingVersionRepository;
+
   const repository = {
     findOne: jest.fn(async ({ where }: { where: { organizationId: string; id: string } }) => {
       return (
@@ -72,7 +83,10 @@ function build(rows: ToolBindingEntity[]) {
   } as ToolCataloguePort;
   const config = { get: jest.fn().mockReturnValue(undefined) } as unknown as ConfigService;
 
-  return { service: new ProviderToolBindingsService(repository, catalogue, config), repository };
+  return {
+    service: new ProviderToolBindingsService(repository, catalogue, config, versions),
+    repository,
+  };
 }
 
 describe('ProviderToolBindingsService.getBinding — 404, never 403, across providers', () => {
@@ -155,5 +169,30 @@ describe('ProviderToolBindingsService.getBinding — the published revision', ()
 
     expect(detail.publishedVersion).toBeNull();
     expect(detail.hasUnpublishedChanges).toBe(true);
+  });
+});
+
+describe('ProviderToolBindingsService.getBinding — publishedEndpoint', () => {
+  it('reads the endpoint of the revision that is published, not the draft', async () => {
+    const { service } = build(
+      [row({ endpoint: 'https://new.example.com/v2', mappingVersion: 4, publishedVersion: 3 })],
+      [
+        { bindingId: 'bnd-1', mappingVersion: 3, endpoint: 'https://old.example.com/v1' },
+        { bindingId: 'bnd-1', mappingVersion: 4, endpoint: 'https://new.example.com/v2' },
+      ],
+    );
+
+    const detail = await service.getBinding(PROVIDER, 'bnd-1');
+
+    expect(detail.endpoint).toBe('https://new.example.com/v2');
+    expect(detail.publishedEndpoint).toBe('https://old.example.com/v1');
+  });
+
+  it('is null for a binding that was never published', async () => {
+    const { service } = build([
+      row({ status: BindingStatus.DRAFT, publishedVersion: null, publishedAt: null }),
+    ]);
+
+    expect((await service.getBinding(PROVIDER, 'bnd-1')).publishedEndpoint).toBeNull();
   });
 });

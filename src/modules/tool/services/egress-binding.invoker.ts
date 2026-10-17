@@ -100,6 +100,7 @@ export class EgressBindingInvoker implements BindingInvokerPort {
     // provider's, and nothing is sent.
     const method = upstream.method.toUpperCase();
     let headers: Record<string, string>;
+    let stage = 'credential lookup failed';
     try {
       const credentials = await this.vault.headersFor(
         binding.providerId,
@@ -107,13 +108,14 @@ export class EgressBindingInvoker implements BindingInvokerPort {
         originOf(url),
       );
       headers = outboundHeaders(upstream.headers, credentials, callId, body !== undefined);
+      stage = 'request signing failed';
       const signature = await this.signer.sign({ method, url, headers, body });
       for (const [name, value] of Object.entries(signature)) setHeader(headers, name, value);
     } catch (error) {
       return {
         status: 0,
         body: { kind: ResponseBodyKind.EMPTY },
-        transportError: platformUnavailable(error),
+        transportError: platformUnavailable(error, stage),
       };
     }
 

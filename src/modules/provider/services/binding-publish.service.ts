@@ -28,6 +28,8 @@ import {
   evaluatePublishGate,
   unmetRequirements,
 } from '../domain/publish-gate';
+import { CredentialVaultService } from '../credentials/credential-vault.service';
+import { originOf } from '../credentials/credential-rules';
 import { PublishCheckDto, PublishedToolBindingDto } from '../dto/publish-tool-binding.dto';
 import { ProviderErrors } from '../errors/provider.errors';
 import { BindingTestLayer, BindingTestOutcome } from '../ports/binding-test.types';
@@ -91,6 +93,9 @@ export class BindingPublishService {
     // major. Optional only for hand-built harnesses, which then gate on the
     // newest run as before.
     @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue?: ToolCataloguePort,
+    // Prunes credential sets whose origin the new revision no longer uses.
+    // Optional only for hand-built harnesses that never reach `publish`.
+    @Optional() private readonly vault?: CredentialVaultService,
   ) {}
 
   /** The publish checklist, read before the button is pressed. */
@@ -172,12 +177,16 @@ export class BindingPublishService {
         });
       }
 
+      // The published endpoint is the draft's at this moment, so any credential
+      // set for another origin can never be sent again: drop it with the stamp.
+      await this.vault?.pruneExcept(manager, organizationId, bindingId, [originOf(row.endpoint)]);
+
       return updated;
     });
 
     this.logger.log(`Binding ${bindingId} published at revision ${row.mappingVersion}`);
 
-    return { ...toSavedDto(saved), publishedAt };
+    return { ...toSavedDto(saved, saved.endpoint), publishedAt };
   }
 
   private async evaluate(organizationId: string, row: ToolBindingEntity): Promise<PublishCheck> {

@@ -417,6 +417,7 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
   function setup(options: {
     credentials?: Array<{ name: string; value: string }>;
     vaultError?: unknown;
+    signerError?: unknown;
     mappingHeaders?: Record<string, { $const: string }>;
     method?: 'GET' | 'POST';
   }) {
@@ -445,6 +446,7 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
     const signed: SignableRequest[] = [];
     const signer = {
       sign: jest.fn(async (req: SignableRequest) => {
+        if (options.signerError) throw options.signerError;
         signed.push(req);
         return {
           ...(req.body === undefined ? {} : { 'Content-Digest': 'sha-256=:digest:' }),
@@ -586,5 +588,26 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
       responseClass: ResponseClass.SYSTEM_ERROR,
       reason: ClassificationReason.PLATFORM_UNAVAILABLE,
     });
+  });
+
+  it('keeps raw error text out of the detail when the vault throws a non-AppError', async () => {
+    const { run } = setup({ vaultError: new Error('connection to 10.0.0.5 refused') });
+    const response = await run();
+    expect(response.transportError?.kind).toBe(TransportErrorKind.PLATFORM_UNAVAILABLE);
+    expect(response.transportError?.detail).toBe('credential lookup failed');
+    expect(response.transportError?.detail).not.toContain('10.0.0.5');
+  });
+
+  it('keeps raw error text out of the detail when the signer throws a non-AppError', async () => {
+    const { run } = setup({ signerError: new Error('key file /secrets/ed25519 unreadable') });
+    const response = await run();
+    expect(response.transportError?.detail).toBe('request signing failed');
+  });
+
+  it('keeps the fixed message of an AppError', async () => {
+    const error = ProviderErrors.credentialVaultUnavailable({ reason: 'key not loaded' });
+    const { run } = setup({ vaultError: error });
+    const response = await run();
+    expect(response.transportError?.detail).toBe(error.message);
   });
 });
