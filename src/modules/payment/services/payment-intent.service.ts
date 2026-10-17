@@ -5,6 +5,7 @@ import {
 } from '@modules/chains/ports/chain-state-gate.port';
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { In, Not } from 'typeorm';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
@@ -62,6 +63,29 @@ const VOUCHER_NONCE_CONSTRAINT = 'idx_payment_intents_voucher_nonce';
 const VOUCHER_SEQ_CONSTRAINT = 'uq_payment_intents_account_voucher_seq';
 
 /**
+ * The partial unique index on `(organization_id, agent_id, idempotency_key)`,
+ * and the name it is rebuilt under while migration 1761000000000 swaps it.
+ */
+const IDEMPOTENCY_KEY_CONSTRAINTS: ReadonlySet<string> = new Set([
+  'idx_payment_intents_idempotency_key',
+  'idx_payment_intents_idempotency_key_staged',
+]);
+
+/**
+ * The statuses whose intent no longer holds its idempotency key: the agent was
+ * not charged (`VOIDED`, `EXPIRED`, `REFUNDED`), so a retry with the same key
+ * is a fresh attempt. Mirrors the predicate of
+ * `idx_payment_intents_idempotency_key` (migration 1761000000000) — the index
+ * is the guarantee, and this list only lets {@link PaymentIntentService} read
+ * back the one row the index still arbitrates.
+ */
+export const IDEMPOTENCY_RELEASED_STATUSES: readonly PaymentIntentStatus[] = [
+  PaymentIntentStatus.VOIDED,
+  PaymentIntentStatus.EXPIRED,
+  PaymentIntentStatus.REFUNDED,
+];
+
+/**
  * What a rail-B voucher's intent must fit before it is written: the scope of
  * the vouchers the chain has not counted yet, and the check against them,
  * which throws to refuse. Run under the payer's lock, atomically with the
@@ -115,6 +139,11 @@ export class PaymentIntentService {
    * A key replayed against a *different* request is not a retry — it is a
    * collision, and it is refused rather than silently answered with the first
    * request's intent.
+   *
+   * A key is held only while its intent may still charge the agent: once the
+   * intent is `VOIDED`, `EXPIRED` or `REFUNDED` the index releases it (see
+   * {@link IDEMPOTENCY_RELEASED_STATUSES}), and the same key creates a new
+   * intent. A failed call that cost nothing can therefore be retried.
    *
    * **No intent names a blocked party.** Every new payment, on every rail,
    * starts here, so this is the one place the account blocklist refuses the
@@ -209,47 +238,94 @@ export class PaymentIntentService {
       verificationVerdict: null,
     };
 
-    try {
-      if (admission) {
-        await this.intents.insertAdmittedVoucherIntent(row, admission.scope, admission.admit);
-      } else {
-        await this.intents.insert(row);
-      }
-    } catch (error) {
-      const violation = error as { code?: string; constraint?: string };
-      if (violation?.code !== UNIQUE_VIOLATION_CODE) {
-        throw error;
-      }
+    // Twice at most, and only for one race: see the end of the catch block.
+    for (let attempt = 0; ; attempt += 1) {
+      try {
+        await this.insertRow(row, admission);
+        break;
+      } catch (error) {
+        const violation = error as { code?: string; constraint?: string };
+        if (violation?.code !== UNIQUE_VIOLATION_CODE) {
+          throw error;
+        }
 
-      // Two unique indexes can refuse this insert and they mean opposite
-      // things, so the constraint name decides rather than the presence of a
-      // key. A voucher nonce collision is a **replay** — the authorization has
-      // already been spent and there is nothing to return — while an
-      // idempotency collision is a **retry**, and the caller wants the intent
-      // the first copy created. Inferring one from the other would answer a
-      // replayed voucher with someone's earlier intent.
-      if (violation.constraint === VOUCHER_NONCE_CONSTRAINT) {
-        throw PaymentErrors.voucherNonceReplayed({ nonce: row.voucherNonce });
+        // Two unique indexes can refuse this insert and they mean opposite
+        // things, so the constraint name decides rather than the presence of a
+        // key. A voucher nonce collision is a **replay** — the authorization has
+        // already been spent and there is nothing to return — while an
+        // idempotency collision is a **retry**, and the caller wants the intent
+        // the first copy created. Inferring one from the other would answer a
+        // replayed voucher with someone's earlier intent.
+        if (violation.constraint === VOUCHER_NONCE_CONSTRAINT) {
+          throw PaymentErrors.voucherNonceReplayed({ nonce: row.voucherNonce });
+        }
+        // Voucher v2's replay guard: `VoucherService.assertIssuedSeq` already
+        // confirmed the seq was issued to this account and not yet used before
+        // this insert ran, so a collision here means a second call reached the
+        // insert for the same `(account, seq)` first — a genuine concurrent
+        // replay. The seq WAS issued, so this is "already used", never
+        // "not issued".
+        if (violation.constraint === VOUCHER_SEQ_CONSTRAINT) {
+          throw PaymentErrors.voucherSeqAlreadyUsed({
+            account: row.agentAccount,
+            actual: row.voucherSeq,
+          });
+        }
+        // Any other unique index (or no key at all) is not a retry, and is
+        // not answered as one.
+        if (
+          !row.idempotencyKey ||
+          (violation.constraint && !IDEMPOTENCY_KEY_CONSTRAINTS.has(violation.constraint))
+        ) {
+          throw error;
+        }
+        const live = await this.findLiveByIdempotencyKey(
+          input.organizationId,
+          input.agentId,
+          row.idempotencyKey,
+        );
+        if (live) return this.resolveReplay(input, row.idempotencyKey, live);
+        // The row that refused this insert left the index — voided, expired or
+        // refunded — before it could be read back, so the key is free now and
+        // the insert is tried once more. A second refusal with nothing live to
+        // read is not a race any longer.
+        if (attempt >= 1) {
+          throw PaymentErrors.idempotencyKeyReused({ idempotencyKey: row.idempotencyKey });
+        }
       }
-      // Voucher v2's replay guard: `VoucherService.assertIssuedSeq` already
-      // confirmed the seq was issued to this account and not yet used before
-      // this insert ran, so a collision here means a second call reached the
-      // insert for the same `(account, seq)` first — a genuine concurrent
-      // replay. The seq WAS issued, so this is "already used", never
-      // "not issued".
-      if (violation.constraint === VOUCHER_SEQ_CONSTRAINT) {
-        throw PaymentErrors.voucherSeqAlreadyUsed({
-          account: row.agentAccount,
-          actual: row.voucherSeq,
-        });
-      }
-      if (!row.idempotencyKey) {
-        throw error;
-      }
-      return this.resolveReplay(input, row.idempotencyKey);
     }
 
     return this.findById(input.organizationId, row.id as string);
+  }
+
+  private async insertRow(
+    row: Partial<PaymentIntentEntity>,
+    admission: VoucherAdmission | undefined,
+  ): Promise<void> {
+    if (admission) {
+      await this.intents.insertAdmittedVoucherIntent(row, admission.scope, admission.admit);
+    } else {
+      await this.intents.insert(row);
+    }
+  }
+
+  /**
+   * The intent that holds this idempotency key — the one live row the partial
+   * unique index arbitrates (`VOIDED`, `EXPIRED` and `REFUNDED` rows have
+   * released it) — or null when the key is free.
+   */
+  async findLiveByIdempotencyKey(
+    organizationId: string,
+    agentId: string,
+    idempotencyKey: string,
+  ): Promise<PaymentIntent | null> {
+    const row = await this.intents.findOneBy({
+      organizationId,
+      agentId,
+      idempotencyKey,
+      status: Not(In([...IDEMPOTENCY_RELEASED_STATUSES])),
+    });
+    return row ? toPaymentIntent(row) : null;
   }
 
   /**
@@ -748,22 +824,15 @@ export class PaymentIntentService {
     await this.ledger.releaseHold(organizationId, holdId);
   }
 
-  private async resolveReplay(
+  /**
+   * The live row that refused the insert: the same request is a retry and
+   * gets that intent back; another request under the same key is a collision.
+   */
+  private resolveReplay(
     input: CreatePaymentIntentInput,
     idempotencyKey: string,
-  ): Promise<PaymentIntent> {
-    const existing = await this.intents.findOneBy({
-      organizationId: input.organizationId,
-      agentId: input.agentId,
-      idempotencyKey,
-    });
-
-    if (!existing) {
-      // The unique violation came from some other index. Do not pretend the
-      // request was a replay of something we cannot find.
-      throw PaymentErrors.idempotencyKeyReused({ idempotencyKey });
-    }
-
+    existing: PaymentIntent,
+  ): PaymentIntent {
     if (existing.requestHash !== input.requestHash) {
       throw PaymentErrors.idempotencyKeyReused({
         idempotencyKey,
@@ -772,7 +841,7 @@ export class PaymentIntentService {
       });
     }
 
-    return toPaymentIntent(existing);
+    return existing;
   }
 }
 

@@ -80,7 +80,7 @@ describe('the gas grant is once per address, against a real unique index', () =>
     });
 
     await dataSource.initialize();
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
 
     grants = new EvmGasGrantRepository(dataSource);
   }, 300_000);

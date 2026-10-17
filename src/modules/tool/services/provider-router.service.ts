@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { FreeBindingDials } from '@modules/free-tier/domain/free-calls-per-day';
@@ -67,6 +67,7 @@ import {
   pickWeighted,
   scoreCandidates,
   withoutEntryPreferences,
+  statsOf,
 } from '../domain/routing';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 
@@ -75,6 +76,7 @@ import { ToolErrors } from '../errors/tool.errors';
 import { BINDING_INVOKER, BindingInvokerPort } from '../ports/binding-invoker.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '../ports/tool-catalogue.port';
 import { PricingMode, Tool, ToolBinding } from '../ports/tool.types';
+import { BindingAttemptRecorder } from './binding-attempt-recorder.service';
 import { BindingCallCounterService } from './binding-call-counter.service';
 import { BindingCeilingService } from './binding-ceiling.service';
 import { ROUTER_CONFIG, ROUTING_RANDOM, RouterConfig } from './routing.config';
@@ -159,6 +161,9 @@ export class ProviderRouterService {
     private readonly ceilings: BindingCeilingService,
     @Inject(ROUTER_CONFIG) private readonly config: RouterConfig,
     @Inject(ROUTING_RANDOM) private readonly random: RoutingRandom,
+    // The observed-stats write (`binding_attempts`). Optional: a composition
+    // without it routes exactly as before and simply measures nothing.
+    @Optional() private readonly observations: BindingAttemptRecorder | null = null,
   ) {}
 
   /**
@@ -288,6 +293,23 @@ export class ProviderRouterService {
       };
       attempts.push(record);
 
+      // Every attempt, the failed-over ones included — they are the
+      // provider-caused failures availability measures, and nothing else
+      // records them. Synchronous and buffered: see `BindingAttemptRecorder`.
+      // `maxBudgetMs` is the longest this binding can EVER be given — a
+      // binding may declare more time than a whole request is allowed — so a
+      // timeout on it is the provider's, and only a budget earlier attempts
+      // ate into is not.
+      this.observations?.record({
+        binding,
+        classification: outcome.classification,
+        elapsedMs: record.elapsedMs,
+        timeoutMs,
+        maxBudgetMs: Math.min(binding.timeoutMs, this.config.totalDeadlineMs),
+        callClass: routing.callClass,
+        buyerOrganizationId: routing.buyerOrganizationId,
+      });
+
       if (!isRetryable(outcome.classification.responseClass)) {
         return {
           tool,
@@ -376,9 +398,11 @@ export class ProviderRouterService {
    * should expect from calling this endpoint rather than a property of the
    * supplier list.
    *
-   * Both are `null` when nothing has been measured. The router writes no
-   * reputation, so today they are whatever the config stand-in was seeded with,
-   * and `null` is the honest answer for a tool nobody has scored.
+   * Both are `null` when nothing has been measured. The figures are the ones
+   * the candidates are scored on (`statsOf`): each binding's observed window
+   * from `binding_stats`, falling back to its provider's pooled one, and absent
+   * below the minimum sample size — so `null` is the honest answer for a tool
+   * nobody has measured yet.
    */
   async quote(toolId: string, context: RoutingContext): Promise<ToolQuote | null> {
     const tool = await this.catalogue.findTool(toolId);
@@ -522,11 +546,11 @@ export class ProviderRouterService {
           freeDailyBudget: binding.freeDailyBudget ?? null,
         })),
       settlementChains,
-      p95LatencyMs: weightedMean(weighted, (c) => c.provider.stats.p95LatencyMs),
+      p95LatencyMs: weightedMean(weighted, (c) => statsOf(c).p95LatencyMs),
       qualityRate: weightedMean(weighted, (c) =>
         c.binding.pricingMode === PricingMode.FREE
-          ? c.provider.stats.freeQualityRate
-          : c.provider.stats.paidQualityRate,
+          ? statsOf(c).freeQualityRate
+          : statsOf(c).paidQualityRate,
       ),
       unroutableReason: null,
       cheapestPrice: chargeable.length > 0 ? cheapestPrice(chargeable) : null,

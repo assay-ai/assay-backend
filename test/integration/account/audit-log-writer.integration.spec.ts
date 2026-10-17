@@ -69,7 +69,7 @@ describe('audit_log_entries — the writer and its call sites', () => {
       migrationsRun: false,
     });
     await dataSource.initialize();
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
 
     writer = new AuditLogWriter(dataSource);
     reader = new AuditLogService(new AuditLogEntryRepository(dataSource));

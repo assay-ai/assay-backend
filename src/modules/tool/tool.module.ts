@@ -9,6 +9,7 @@ import { loadMinimumStakeByChain } from '@modules/provider/services/provider-sta
 import { NetworkModule } from '@shared/network/network.module';
 
 import { BINDING_INVOKER } from './ports/binding-invoker.port';
+import { BindingAttemptRecorder } from './services/binding-attempt-recorder.service';
 import { BindingCallCounterService } from './services/binding-call-counter.service';
 import { BindingCeilingService } from './services/binding-ceiling.service';
 import { loadToolCatalogue } from './services/catalogue-seed';
@@ -53,6 +54,7 @@ import {
  *   └── STAKE_GRACE_SOURCE      an open grace row          (`provider_stake_grace`)
  *   └── BindingCallCounterService  lifetime calls per binding  → the exploration floor
  *   └── BindingCeilingService      declared ceilings           → shed, and spend the token
+ *   └── BindingAttemptRecorder     every attempt it is owed    → `binding_attempts` → stats
  *   └── BINDING_INVOKER         the actual HTTP call
  * ```
  *
@@ -133,6 +135,12 @@ import {
     // wave as the registry and the stake source, and `selectAndReserve` spends
     // exactly one token, after the draw, on the binding about to be dialled.
     BindingCeilingService,
+
+    // Every attempt the provider is accountable for, into `binding_attempts`
+    // — the raw window the scheduler's stats refresh turns into
+    // `ProviderStats`. `BindingAttemptRepository` comes from the `@Global`
+    // `PostgresModule`.
+    BindingAttemptRecorder,
 
     // Production randomness. Bound rather than called directly so that the
     // traffic split is a testable claim — see `pickWeighted`.

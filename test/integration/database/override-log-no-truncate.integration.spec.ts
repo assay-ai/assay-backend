@@ -30,7 +30,7 @@ describe('override_log_entries refuses TRUNCATE', () => {
       migrationsRun: false,
     });
     await dataSource.initialize();
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
   }, 300_000);
 
   afterAll(async () => {

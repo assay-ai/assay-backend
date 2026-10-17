@@ -30,6 +30,11 @@ import {
   MCP_PRICING,
   McpPricingConfig,
 } from './services/mcp-pricing.config';
+import {
+  MCP_IDEMPOTENCY_CONFIG,
+  McpIdempotencyStore,
+  mcpIdempotencyConfigFactory,
+} from './services/mcp-idempotency.store';
 import { McpServerFactory } from './services/mcp-server.factory';
 import { McpToolCallService } from './services/mcp-tool-call.service';
 import { CallAttributionWriter } from './services/call-attribution.writer';
@@ -140,6 +145,19 @@ import { McpCallRecorder } from './services/mcp-call-recorder.service';
       inject: [ConfigService],
     },
 
+    {
+      // `_meta["x402/idempotency-key"]`: how long a keyed call's result stays
+      // replayable — the retry window, default 900 s, at most 3600 s — and the
+      // largest output kept, default 256 KB. A bad value fails the boot.
+      provide: MCP_IDEMPOTENCY_CONFIG,
+      useFactory: (config: ConfigService) =>
+        mcpIdempotencyConfigFactory(
+          config.get<string>('MCP_IDEMPOTENCY_TTL_SECONDS'),
+          config.get<string>('MCP_IDEMPOTENCY_MAX_RESULT_BYTES'),
+        ),
+      inject: [ConfigService],
+    },
+    McpIdempotencyStore,
     McpCatalogueService,
     McpToolCallService,
     McpServerFactory,

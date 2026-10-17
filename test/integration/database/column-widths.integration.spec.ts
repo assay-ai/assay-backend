@@ -78,7 +78,7 @@ describe('column widths, against a database built from the migrations', () => {
     });
 
     await dataSource.initialize();
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
   }, 300_000);
 
   afterAll(async () => {

@@ -23,6 +23,7 @@ import {
 import { Voucher } from '@modules/chains/ports/x402.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import { PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON } from '../constants/payment-intent.constants';
 import { BUYER_DEBT_WRITE_OFF_DAYS } from '../constants/voucher-redemption.constants';
 import {
   VOUCHER_ADMISSION_CHAIN_LAG_MS,
@@ -35,6 +36,7 @@ import { PaymentErrors } from '../errors/payment.errors';
 import {
   PaymentIntent,
   PaymentIntentCallClass,
+  PaymentIntentStatus,
   PaymentRail,
   railName,
 } from '../ports/payment.types';
@@ -131,6 +133,10 @@ export class VoucherService {
    * Returns the intent in `FUNDS_SECURED`. There is no half-way outcome: either
    * the voucher was good and the money is reserved, or nothing happened and
    * this threw.
+   *
+   * The one exception is a keyed call (`input.idempotencyKey`) whose key an
+   * earlier attempt already holds: that attempt's intent comes back as it is,
+   * with another `voucherSeq`, and this voucher reserves nothing.
    */
   async redeem(input: RedeemVoucherInput): Promise<PaymentIntent> {
     const { voucher, signature } = input.signed;
@@ -807,15 +813,23 @@ export class VoucherService {
         // the next delegate-signed call sees it before it reaches the chain.
         voucherDelegate: delegate,
         credentialId: input.credentialId ?? null,
-        // No idempotency key on this path, deliberately. The seq *is* rail B's
-        // idempotency key, and it is stricter: a replayed voucher is refused
-        // rather than answered with the original intent, which is what the
-        // single-use requirement asks for. Carrying both would leave two unique
-        // indexes racing to report the same replay under different error codes.
+        // The seq is rail B's replay guard for the VOUCHER: a replayed voucher
+        // is refused rather than answered with the original intent, which is
+        // what the single-use requirement asks for. The idempotency key is a
+        // different guard, for the CALL: an MCP client that retries one logical
+        // call (G2.1) signs a new voucher with a new seq, and the key is what
+        // says it is the same call. Null unless the caller passed one.
+        idempotencyKey: input.idempotencyKey ?? null,
         expiresAt: new Date(voucher.expiresAt * 1000),
       },
       this.admission(voucher, input, delegation),
     );
+
+    // The key's unique index answered with the intent an earlier attempt of
+    // this call created: that attempt holds (or held) the money, and this
+    // voucher must not be held or redeemed a second time. Returned untouched,
+    // so the caller can tell it apart by its seq.
+    if (input.idempotencyKey && intent.voucherSeq !== voucher.seq) return intent;
 
     try {
       return await this.intents.secureFunds(input.organizationId, intent.id);
@@ -830,6 +844,25 @@ export class VoucherService {
               `window count; it frees at the voucher's deadline. ${describe(abandonError)}`,
           );
         });
+      // A keyed call must not leave its key held by an intent that charged
+      // nothing, or the agent's retry after topping up would be answered as a
+      // replay until the sweep ran. `EXPIRED` releases it at once.
+      if (input.idempotencyKey) {
+        await this.intents
+          .transition(
+            input.organizationId,
+            intent.id,
+            PaymentIntentStatus.CREATED,
+            PaymentIntentStatus.EXPIRED,
+            { reason: PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON },
+          )
+          .catch((expireError: unknown) => {
+            this.logger.warn(
+              `Intent ${intent.id}: funds not secured and its idempotency key could not be ` +
+                `released; it frees at the expiry sweep. ${describe(expireError)}`,
+            );
+          });
+      }
       throw error;
     }
   }

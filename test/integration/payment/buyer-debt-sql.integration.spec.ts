@@ -517,17 +517,23 @@ describe('buyer debt migrations, down and up again', () => {
       )) as Array<{ prosrc: string }>
     )[0].prosrc;
 
-  it('reverts 1760900000000 … 1760600000000 one by one and reapplies them', async () => {
-    // The migrations after these sit on top of them: undo those first.
+  it('reverts the migrations after 1760900000000, then 1760900000000 … 1760600000000, and reapplies them', async () => {
+    // The migrations after these sit on top of them and touch none of their
+    // objects: undo those first, newest first.
     const later = [
       'CallAttributionAndConnectUrls1761200000003',
       'CreateToolsets1761200000002',
       'AccessPolicyAndAgentRules1761200000001',
       'CreateTools1761200000000',
+      'BindingObservations1761100000000',
+      'IdempotencyKeyLiveIntents1761000000000',
     ];
     for (const name of later) {
       expect(await last()).toBe(name);
-      await dataSource.undoLastMigration({ transaction: 'each' });
+      // No wrapping transaction where a down() rebuilds an index CONCURRENTLY.
+      await dataSource.undoLastMigration({
+        transaction: name === 'IdempotencyKeyLiveIntents1761000000000' ? 'none' : 'each',
+      });
     }
 
     expect(await last()).toBe('VoucherSeqDebtReplacement1760900000000');

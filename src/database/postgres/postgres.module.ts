@@ -93,6 +93,10 @@ import { EvmChainStateEntity } from './entities/evm-chain-state.entity';
 import { ProviderSlashHoldEntity } from './entities/provider-slash-hold.entity';
 import { EvmChainStateRepository } from './repositories/evm-chain-state.repository';
 import { ProviderSlashHoldRepository } from './repositories/provider-slash-hold.repository';
+import { BindingAttemptEntity } from './entities/binding-attempt.entity';
+import { BindingStatsEntity } from './entities/binding-stats.entity';
+import { BindingAttemptRepository } from './repositories/binding-attempt.repository';
+import { BindingStatsRepository } from './repositories/binding-stats.repository';
 import { OperatorRepository } from './repositories/operator.repository';
 import { OperatorApprovalRepository } from './repositories/operator-approval.repository';
 // Due process for taking money.
@@ -172,6 +176,8 @@ const entities = [
   EvmChainStateEntity,
   ProviderSlashHoldEntity,
   EvmBlockedAddressEntity,
+  BindingAttemptEntity,
+  BindingStatsEntity,
 ];
 const repositories = [
   PostRepository,
@@ -228,6 +234,8 @@ const repositories = [
   AccountBlockRepository,
   EvmChainStateRepository,
   ProviderSlashHoldRepository,
+  BindingAttemptRepository,
+  BindingStatsRepository,
   SlashCaseReadRepository,
   PlatformMetricsRepository,
 ];
