@@ -50,16 +50,29 @@ describe('x402/idempotency-key — the key and its record', () => {
   });
 
   describe('mcpIdempotencyConfigFactory', () => {
-    it('defaults the retry window to 15 minutes', () => {
-      expect(mcpIdempotencyConfigFactory(undefined).resultTtlSeconds).toBe(900);
+    it('defaults to a 15-minute window and a 256 KB result cap', () => {
+      expect(mcpIdempotencyConfigFactory(undefined, undefined)).toMatchObject({
+        resultTtlSeconds: 900,
+        maxResultBytes: 262_144,
+      });
+      expect(mcpIdempotencyConfigFactory('', '').resultTtlSeconds).toBe(900);
     });
 
-    it.each([[''], ['0'], ['-5'], ['soon']])('falls back on %p', (raw) => {
-      expect(mcpIdempotencyConfigFactory(raw).resultTtlSeconds).toBe(900);
+    it('reads both variables', () => {
+      expect(mcpIdempotencyConfigFactory(' 1800 ', '1024')).toMatchObject({
+        resultTtlSeconds: 1800,
+        maxResultBytes: 1024,
+      });
     });
 
-    it('reads MCP_IDEMPOTENCY_TTL_SECONDS', () => {
-      expect(mcpIdempotencyConfigFactory(' 1800 ').resultTtlSeconds).toBe(1800);
+    it('accepts the one-hour ceiling and fails the boot above it', () => {
+      expect(mcpIdempotencyConfigFactory('3600').resultTtlSeconds).toBe(3600);
+      expect(() => mcpIdempotencyConfigFactory('3601')).toThrow(/at most 3600/);
+    });
+
+    it.each([['0'], ['-5'], ['soon'], ['1.5']])('fails the boot on %p', (raw) => {
+      expect(() => mcpIdempotencyConfigFactory(raw)).toThrow(/positive integer/);
+      expect(() => mcpIdempotencyConfigFactory(undefined, raw)).toThrow(/positive integer/);
     });
   });
 

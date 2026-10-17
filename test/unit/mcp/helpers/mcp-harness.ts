@@ -24,8 +24,10 @@ import { DEFAULT_PLATFORM_FEE_BPS } from '@modules/mcp/services/mcp-pricing.conf
 import { McpServerFactory } from '@modules/mcp/services/mcp-server.factory';
 import {
   DEFAULT_MCP_IDEMPOTENCY_CONFIG,
+  McpIdempotencyConfig,
   McpIdempotencyStore,
 } from '@modules/mcp/services/mcp-idempotency.store';
+import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 import { IDEMPOTENCY_RELEASED_STATUSES } from '@modules/payment/services/payment-intent.service';
 import {
@@ -221,13 +223,7 @@ export class FakeIntents {
     // (organization, agent, key), and a replay with another request hash is
     // a collision — `PaymentIntentService.resolveReplay`'s two answers.
     if (input.idempotencyKey) {
-      const live = [...this.rows.values()].find(
-        (row) =>
-          row.organizationId === input.organizationId &&
-          row.agentId === input.agentId &&
-          row.idempotencyKey === input.idempotencyKey &&
-          !IDEMPOTENCY_RELEASED_STATUSES.includes(row.status),
-      );
+      const live = this.liveByKey(input.organizationId, input.agentId, input.idempotencyKey);
       if (live) {
         if (live.requestHash !== input.requestHash) {
           return Promise.reject(
@@ -289,6 +285,35 @@ export class FakeIntents {
     this.rows.set(id, intent);
     this.transitions.push(`→ ${PaymentIntentStatus.CREATED}`);
     return Promise.resolve(intent);
+  }
+
+  /** `PaymentIntentService.findLiveByIdempotencyKey`. */
+  readonly keyLookups: string[] = [];
+  findLiveByIdempotencyKey(
+    organizationId: string,
+    agentId: string,
+    key: string,
+  ): Promise<PaymentIntent | null> {
+    this.keyLookups.push(key);
+    return Promise.resolve(this.liveByKey(organizationId, agentId, key));
+  }
+
+  private liveByKey(organizationId: string, agentId: string, key: string): PaymentIntent | null {
+    return (
+      [...this.rows.values()].find(
+        (row) =>
+          row.organizationId === organizationId &&
+          row.agentId === agentId &&
+          row.idempotencyKey === key &&
+          !IDEMPOTENCY_RELEASED_STATUSES.includes(row.status),
+      ) ?? null
+    );
+  }
+
+  /** Set by a test: an intent's age, as `createdAt` would show it. */
+  age(intentId: string, ms: number): void {
+    const row = this.rows.get(intentId) as PaymentIntent;
+    this.rows.set(intentId, { ...row, createdAt: new Date(Date.now() - ms) });
   }
 
   findById(_organizationId: string, intentId: string): Promise<PaymentIntent> {
@@ -407,6 +432,8 @@ export class FakeIntents {
  */
 export class FakeSettlement {
   readonly calls: EnqueueVerificationInput[] = [];
+  /** Set by a test: the retention sweep scrubbed the recorded bodies. */
+  scrubbed = false;
 
   /**
    * Overridable per test, so "the enqueue fails" is a one-line harness option
@@ -773,6 +800,7 @@ export interface McpHarnessOptions {
    * harnesses — two tools, one agent, one Redis.
    */
   readonly idempotencyRedis?: FakeIdempotencyRedis;
+  readonly idempotencyConfig?: Partial<McpIdempotencyConfig>;
 }
 
 export interface McpHarness {
@@ -837,6 +865,7 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
   );
 
   const idempotencyRedis = options.idempotencyRedis ?? new FakeIdempotencyRedis();
+  const idempotencyConfig = { ...DEFAULT_MCP_IDEMPOTENCY_CONFIG, ...options.idempotencyConfig };
   const calls = new McpToolCallService(
     catalogue,
     router,
@@ -854,8 +883,17 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
     [CHAIN_ID],
     // The real store over a fake Redis: claim, replay and release run as in
     // production. Untouched by every call that carries no key.
-    new McpIdempotencyStore(idempotencyRedis as never, DEFAULT_MCP_IDEMPOTENCY_CONFIG),
-    DEFAULT_MCP_IDEMPOTENCY_CONFIG,
+    new McpIdempotencyStore(idempotencyRedis as never, idempotencyConfig),
+    idempotencyConfig,
+    // The verification record a served call's response is durably written to:
+    // what `enqueue` was handed, unless a test scrubbed it.
+    {
+      findByIntentId: async (_organizationId: string, intentId: string) => {
+        const handed = settlement.calls.find((call) => call.intentId === intentId);
+        if (!handed) return null;
+        return { intentId, response: settlement.scrubbed ? null : handed.response };
+      },
+    } as unknown as VerificationRecordRepository,
   );
 
   return {

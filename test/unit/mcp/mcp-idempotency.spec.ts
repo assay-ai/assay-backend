@@ -19,6 +19,7 @@ import {
   VoucherRequirement,
 } from '@modules/mcp/services/mcp-tool-call.service';
 import { PaymentIntentStatus, PaymentRail } from '@modules/payment/ports/payment.types';
+import { FreeQuotaLimitKind } from '@modules/free-tier/services/free-quota.service';
 import { PricingMode } from '@modules/tool/ports/tool.types';
 import { ProviderResponse } from '@modules/tool/domain/classification/classification.types';
 import { MoneyUtil } from '@utils/money.util';
@@ -140,8 +141,16 @@ describe('McpToolCallService — idempotency keys', () => {
 
       expect(h.invoker.invocations).toHaveLength(1);
       expect(h.intents.rows.size).toBe(1);
-      expect(holds(h)).toBe(1);
       expect(h.spendPolicy.checked).toHaveLength(1);
+      // The money, exactly: one hold of the price, committed once, settled at
+      // the price; the first receipt held it and charged nothing yet.
+      expect(first.receipt.held).toEqual(intent.price);
+      expect(MoneyUtil.isZero(first.receipt.charged)).toBe(true);
+      expect(h.ledger.events).toEqual([
+        { kind: 'HOLD_CREATE', intentId: intent.id, money: intent.price },
+        { kind: 'HOLD_COMMIT', holdId: 'hold-1' },
+      ]);
+      expect(h.intents.only.status).toBe(PaymentIntentStatus.SETTLED);
     });
 
     it('answers IN_PROGRESS, retryable, while the first attempt is still running', async () => {
@@ -155,9 +164,9 @@ describe('McpToolCallService — idempotency keys', () => {
 
       expect(retry).toMatchObject({
         kind: 'ERROR',
-        code: McpFailureCode.IN_PROGRESS,
+        code: McpFailureCode.IDEMPOTENCY_IN_PROGRESS,
         retryable: true,
-        detail: { retryAfterMs: expect.any(Number) },
+        detail: { retryAfter: 1 },
       });
       expect(h.intents.rows.size).toBe(1);
       expect(holds(h)).toBe(1);
@@ -280,11 +289,33 @@ describe('McpToolCallService — idempotency keys', () => {
       expect(h.idempotencyRedis.commands).toHaveLength(0);
     });
 
-    it('when Redis lost the record, the payment index still refuses a second charge', async () => {
+    it('when Redis lost the record, rebuilds the result from the verification record, no second charge', async () => {
       const h = harness();
       const first = await keyed(h);
       if (first.kind !== 'RESULT') throw new Error('expected a RESULT');
       h.idempotencyRedis.flush();
+
+      const retry = await keyed(h);
+
+      expect(retry).toMatchObject({
+        kind: 'RESULT',
+        replayed: true,
+        output: first.output,
+        receipt: { intentId: first.receipt.intentId, status: PaymentIntentStatus.VERIFYING },
+      });
+      expect(h.invoker.invocations).toHaveLength(1);
+      expect(h.intents.rows.size).toBe(1);
+      expect(holds(h)).toBe(1);
+      expect(h.settlement.calls).toHaveLength(1);
+      expect(h.spendPolicy.checked).toHaveLength(1);
+    });
+
+    it('when Redis lost the record and the response was scrubbed, answers RESULT_UNAVAILABLE', async () => {
+      const h = harness();
+      const first = await keyed(h);
+      if (first.kind !== 'RESULT') throw new Error('expected a RESULT');
+      h.idempotencyRedis.flush();
+      h.settlement.scrubbed = true;
 
       const retry = await keyed(h);
 
@@ -294,11 +325,40 @@ describe('McpToolCallService — idempotency keys', () => {
         retryable: false,
         intentId: first.receipt.intentId,
       });
-      expect(h.invoker.invocations).toHaveLength(1);
-      expect(h.intents.rows.size).toBe(1);
       expect(holds(h)).toBe(1);
       // A failure that cost nothing: the record is released, not stored.
       expect(h.idempotencyRedis.strings.size).toBe(0);
+    });
+
+    it('does not rebuild a result older than the retry window', async () => {
+      const h = harness();
+      await keyed(h);
+      h.idempotencyRedis.flush();
+      h.intents.age(h.intents.only.id, 16 * 60_000);
+
+      await expect(keyed(h)).resolves.toMatchObject({
+        code: McpFailureCode.IDEMPOTENCY_RESULT_UNAVAILABLE,
+      });
+    });
+
+    it('stores a marker, not the output, for a result over the size cap', async () => {
+      const h = harness(() => Promise.resolve(ok('x'.repeat(2048))), {
+        idempotencyConfig: { maxResultBytes: 1024 },
+      });
+      const first = await keyed(h);
+      if (first.kind !== 'RESULT') throw new Error('expected a RESULT');
+
+      expect([...h.idempotencyRedis.strings.values()].join('')).not.toContain('xxxx');
+      const retry = await keyed(h);
+
+      expect(retry).toMatchObject({
+        kind: 'ERROR',
+        code: McpFailureCode.IDEMPOTENCY_RESULT_UNAVAILABLE,
+        retryable: false,
+        intentId: first.receipt.intentId,
+      });
+      expect(holds(h)).toBe(1);
+      expect(h.invoker.invocations).toHaveLength(1);
     });
 
     it('when Redis lost the record of a call still running, the payment index answers IN_PROGRESS', async () => {
@@ -312,7 +372,7 @@ describe('McpToolCallService — idempotency keys', () => {
 
       expect(retry).toMatchObject({
         kind: 'ERROR',
-        code: McpFailureCode.IN_PROGRESS,
+        code: McpFailureCode.IDEMPOTENCY_IN_PROGRESS,
         retryable: true,
         intentId: h.intents.only.id,
       });
@@ -328,7 +388,96 @@ describe('McpToolCallService — idempotency keys', () => {
       await expect(keyed(h)).resolves.toMatchObject({ kind: 'RESULT' });
       const retry = await keyed(h);
 
-      expect(retry).toMatchObject({ code: McpFailureCode.IDEMPOTENCY_RESULT_UNAVAILABLE });
+      expect(retry).toMatchObject({ kind: 'RESULT', replayed: true });
+      expect(holds(h)).toBe(1);
+      expect(h.invoker.invocations).toHaveLength(1);
+    });
+
+    it('with Redis down, two concurrent attempts hold the price once and dial once', async () => {
+      let answer: (response: ProviderResponse) => void = () => undefined;
+      const h = harness(() => new Promise<ProviderResponse>((resolve) => (answer = resolve)));
+      h.idempotencyRedis.down = true;
+
+      const [a, b] = [keyed(h), keyed(h)];
+      await waitFor(() => h.invoker.invocations.length === 1);
+      const second = await b;
+      answer(ok());
+      const first = await a;
+
+      expect(first).toMatchObject({ kind: 'RESULT' });
+      expect(second).toMatchObject({
+        kind: 'ERROR',
+        code: McpFailureCode.IDEMPOTENCY_IN_PROGRESS,
+        intentId: h.intents.only.id,
+      });
+      expect(h.intents.rows.size).toBe(1);
+      expect(holds(h)).toBe(1);
+      expect(h.invoker.invocations).toHaveLength(1);
+    });
+
+    it('answers IDEMPOTENCY_ATTEMPT_STALLED, terminal, for an intent stuck in PROVIDER_EXECUTING past the lease', async () => {
+      const h = harness(() => new Promise<ProviderResponse>(() => undefined));
+      void keyed(h);
+      await waitFor(() => h.invoker.invocations.length === 1);
+      // The process died: its Redis lease lapsed, and the intent is old.
+      h.idempotencyRedis.flush();
+      h.intents.age(h.intents.only.id, 121_000);
+
+      const retry = await keyed(h);
+
+      expect(retry).toMatchObject({
+        kind: 'ERROR',
+        code: McpFailureCode.IDEMPOTENCY_ATTEMPT_STALLED,
+        retryable: false,
+        intentId: h.intents.only.id,
+        detail: { status: PaymentIntentStatus.PROVIDER_EXECUTING },
+      });
+      expect(holds(h)).toBe(1);
+      expect(h.spendPolicy.checked).toHaveLength(1);
+    });
+
+    it('expires a CREATED intent an attempt left behind when it threw, so the retry runs', async () => {
+      const h = harness();
+      h.spendPolicy.lockLost = new Error('spend lock lost');
+
+      await expect(keyed(h)).rejects.toThrow('spend lock lost');
+      expect(h.intents.only.status).toBe(PaymentIntentStatus.EXPIRED);
+      expect(h.ledger.events).toHaveLength(0);
+
+      h.spendPolicy.lockLost = null;
+      await expect(keyed(h)).resolves.toMatchObject({ kind: 'RESULT' });
+      expect(holds(h)).toBe(1);
+    });
+
+    it('lets a lease lapse while the call runs: the retry is IN_PROGRESS, then the result replays', async () => {
+      let answer: (response: ProviderResponse) => void = () => undefined;
+      const h = harness(() => new Promise<ProviderResponse>((resolve) => (answer = resolve)));
+      const first = keyed(h);
+      await waitFor(() => h.invoker.invocations.length === 1);
+      for (const key of [...h.idempotencyRedis.strings.keys()]) h.idempotencyRedis.expire(key);
+
+      const retry = await keyed(h);
+      expect(retry).toMatchObject({
+        code: McpFailureCode.IDEMPOTENCY_IN_PROGRESS,
+        intentId: h.intents.only.id,
+      });
+
+      answer(ok());
+      await expect(first).resolves.toMatchObject({ kind: 'RESULT' });
+      // The first attempt still stores its result into the free key.
+      await expect(keyed(h)).resolves.toMatchObject({ kind: 'RESULT', replayed: true });
+      expect(holds(h)).toBe(1);
+      expect(h.invoker.invocations).toHaveLength(1);
+    });
+
+    it('never counts a replay or a poll toward velocity', async () => {
+      const h = harness();
+      await keyed(h);
+      for (let i = 0; i < 6; i += 1) await keyed(h);
+      h.idempotencyRedis.flush();
+      for (let i = 0; i < 6; i += 1) await keyed(h);
+
+      expect(h.spendPolicy.checked).toHaveLength(1);
       expect(holds(h)).toBe(1);
     });
   });
@@ -404,8 +553,13 @@ describe('McpToolCallService — idempotency keys', () => {
       // Short-circuited before `redeem`: no intent for the new seq, one hold.
       expect(h.intents.rows.size).toBe(1);
       expect([...h.intents.rows.values()].some((row) => row.voucherSeq === second.seq)).toBe(false);
-      expect(holds(h)).toBe(1);
       expect(h.invoker.invocations).toHaveLength(1);
+      // The money: one hold, of the voucher's exact amount, and one hand-off
+      // to verification — the only path to a redemption — for the first seq.
+      expect(h.ledger.events).toEqual([
+        { kind: 'HOLD_CREATE', intentId: h.intents.only.id, money: requirement.amount },
+      ]);
+      expect(h.settlement.calls.map((call) => call.intentId)).toEqual([h.intents.only.id]);
     });
 
     it('step one with a key whose call already completed replays it instead of a new requirement', async () => {
@@ -431,12 +585,15 @@ describe('McpToolCallService — idempotency keys', () => {
       const retry = await keyed(h, KEY, ARGS, RAIL_B, paying(second));
 
       expect(retry).toMatchObject({
-        kind: 'ERROR',
-        code: McpFailureCode.IDEMPOTENCY_RESULT_UNAVAILABLE,
-        intentId: paid.receipt.intentId,
+        kind: 'RESULT',
+        replayed: true,
+        output: { answer: 'forty-two' },
+        receipt: { intentId: paid.receipt.intentId },
       });
       expect(h.intents.rows.size).toBe(1);
+      expect([...h.intents.rows.values()].some((row) => row.voucherSeq === second.seq)).toBe(false);
       expect(holds(h)).toBe(1);
+      expect(h.settlement.calls).toHaveLength(1);
       expect(h.invoker.invocations).toHaveLength(1);
     });
   });
@@ -470,6 +627,89 @@ describe('McpToolCallService — idempotency keys', () => {
       expect(h.toolCallRecords.written).toHaveLength(1);
       expect(h.invoker.invocations).toHaveLength(1);
       expect(h.intents.rows.size).toBe(0);
+    });
+
+    it('has no payment backstop: with the Redis record lost, a retry runs again (never charged)', async () => {
+      const h = harness(undefined, {
+        bindings: [
+          buildBinding('provider-a', {
+            pricingMode: PricingMode.FREE,
+            priceAmount: '0',
+            freeQuotaPerAgent: 100,
+          }),
+        ],
+      });
+      await keyed(h);
+      h.idempotencyRedis.flush();
+
+      const again = await keyed(h);
+
+      expect(again).toMatchObject({ kind: 'RESULT' });
+      expect(again.kind === 'RESULT' && again.replayed).toBeFalsy();
+      expect(h.invoker.invocations).toHaveLength(2);
+      expect(h.freeQuota.platformPlaces).toHaveLength(2);
+      expect(h.intents.rows.size).toBe(0);
+      expect(h.ledger.events).toHaveLength(0);
+    });
+  });
+
+  describe('freemium falling through to rail B', () => {
+    const AGENT: AccountId = `${CHAIN_ID}:Agent2222222222222222222222222222222222222` as AccountId;
+    const RAIL_B: McpSession = { ...SESSION, agentAccount: AGENT };
+
+    it('runs the paid handshake under one key and replays it with no second quota check', async () => {
+      const h = harness(undefined, {
+        bindings: [
+          buildBinding('provider-a', { pricingMode: PricingMode.FREEMIUM, freeQuotaPerAgent: 1 }),
+        ],
+      });
+      h.freeQuota.decision = {
+        kind: 'REFUSED',
+        limit: FreeQuotaLimitKind.PLATFORM_AGENT_DAILY,
+        resetsAt: new Date(Date.now() + 3_600_000),
+        fallThroughToPaid: true,
+      } as never;
+      const ask: McpPayment = { rail: PaymentRail.RAIL_B_VOUCHER, voucher: null };
+
+      const required = await keyed(h, KEY, ARGS, RAIL_B, ask);
+      if (required.kind !== 'ERROR') throw new Error('expected a requirement');
+      expect(required.code).toBe(McpFailureCode.PAYMENT_REQUIRED);
+      const requirement = required.detail.paymentRequired as VoucherRequirement;
+      const now = Math.floor(Date.now() / 1000);
+      const voucher: Voucher = {
+        payer: requirement.payer,
+        payTo: requirement.payTo,
+        provider: requirement.provider,
+        amount: requirement.amount,
+        resource: requirement.resource,
+        requestHash: requirement.requestHash,
+        seq: requirement.seq,
+        issuedAt: now,
+        expiresAt: now + 120,
+      };
+      const pay: McpPayment = {
+        rail: null,
+        voucher: {
+          signed: { voucher, signature: fakeVoucherSignature(voucher.payer) },
+          providerId: requirement.providerId,
+        },
+      };
+
+      const paid = await keyed(h, KEY, ARGS, RAIL_B, pay);
+      expect(paid).toMatchObject({
+        kind: 'RESULT',
+        receipt: { status: PaymentIntentStatus.VERIFYING },
+      });
+      const checks = h.freeQuota.checked.length;
+
+      await expect(keyed(h, KEY, ARGS, RAIL_B, pay)).resolves.toMatchObject({
+        kind: 'RESULT',
+        replayed: true,
+      });
+      expect(h.freeQuota.checked).toHaveLength(checks);
+      expect(h.intents.rows.size).toBe(1);
+      expect(h.intents.only.rail).toBe(PaymentRail.RAIL_B_VOUCHER);
+      expect(holds(h)).toBe(1);
     });
   });
 
