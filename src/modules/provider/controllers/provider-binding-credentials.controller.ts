@@ -14,7 +14,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
-import { credentialHeaderProblems, originOf } from '../credentials/credential-rules';
+import { assertCredentialPut } from '../credentials/credential-rules';
 import { CredentialVaultService } from '../credentials/credential-vault.service';
 import {
   CredentialSetSummaryDto,
@@ -22,7 +22,6 @@ import {
   PutBindingCredentialsBodyDto,
 } from '../dto/binding-credentials.dto';
 import { GetToolBindingParamsDto } from '../dto/get-tool-bindings.dto';
-import { ProviderErrors } from '../errors/provider.errors';
 import { BindingEditorService } from '../services/binding-editor.service';
 
 /**
@@ -69,17 +68,12 @@ export class ProviderBindingCredentialsController {
   ): Promise<CredentialSetSummaryDto> {
     const row = await this.editor.loadEditable(session.organizationId, params.id);
 
-    const allowed = [originOf(row.endpoint)];
-    const published = await this.editor.publishedEndpoint(row);
-    if (published) allowed.push(originOf(published));
-    if (!allowed.includes(body.origin)) {
-      throw ProviderErrors.credentialOriginMismatch();
-    }
-
-    const problems = credentialHeaderProblems(body.headers);
-    if (problems.length > 0) {
-      throw ProviderErrors.invalidCredentialHeaders({ problems });
-    }
+    assertCredentialPut(
+      row.endpoint,
+      await this.editor.publishedEndpoint(row),
+      body.origin,
+      body.headers,
+    );
 
     return this.vault.put(
       session.organizationId,

@@ -107,6 +107,9 @@ const CONTROLLERS = SURFACE_FILES.filter((file) => file.endsWith('.controller.ts
  * what was reviewed.
  */
 const PUBLIC_SURFACE = new Map<string, number>([
+  // The public half of the keys that sign outbound provider requests (JWKS).
+  // One route, no tenant, nothing secret: a verifier fetches it unauthenticated.
+  ['bootstrap/api/request-keys.controller.ts', 1],
   // Proof of reserves. Four aggregates, one already-public vault
   // address, a count, and four rows of the same aggregates.
   ['modules/settlement/controllers/public-reserves.controller.ts', 1],
