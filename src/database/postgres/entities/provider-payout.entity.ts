@@ -72,10 +72,8 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
  * per-call export joins on this window
  * (`ledger_entries.seq BETWEEN provider_payouts.from_seq + 1 AND provider_payouts.to_seq`,
  * filtered to `entry_type = 'PROVIDER_CREDIT'`), not on
- * `ledger_entries.batch_id` — that column already means "the writer's flush
- * batch" for every *bufferable* entry type, and repurposing it a second way for
- * `PROVIDER_CREDIT` would collide with the meaning `LedgerWriterService`
- * already gives it. `batch_id` on *this* table means something else again — see
+ * `ledger_entries.batch_id` — repurposing that column for
+ * `PROVIDER_CREDIT` would give it a second meaning. `batch_id` on *this* table means something else again — see
  * below — which is exactly the ambiguity the seq window avoids.
  *
  * ## `batch_id` here is the run, not the flush

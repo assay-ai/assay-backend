@@ -31,7 +31,6 @@ import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.se
 import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service';
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
@@ -181,10 +180,9 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
   const chainEnrolmentRepository = new ProviderChainEnrolmentRepository(dataSource);
 
   const journal = new LedgerJournalService(entryRepository, balanceRepository, dataSource);
-  const writer = new LedgerWriterService(journal, dataSource);
   const balances = new LedgerBalanceService(balanceRepository, journal);
   const holds = new LedgerHoldService(holdRepository, journal, dataSource);
-  const ledger = new LedgerService(journal, writer, balances, holds);
+  const ledger = new LedgerService(journal, balances, holds);
 
   const context: ProviderLedgerTestContext = {
     ledger,

@@ -42,7 +42,6 @@ import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service'
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import {
   PaymentIntent,
   PaymentIntentCallClass,
@@ -213,12 +212,7 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
   const journal = new LedgerJournalService(entries, balanceRepository, dataSource);
   const balances = new LedgerBalanceService(balanceRepository, journal);
   const holds = new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource);
-  const ledger = new LedgerService(
-    journal,
-    new LedgerWriterService(journal, dataSource),
-    balances,
-    holds,
-  );
+  const ledger = new LedgerService(journal, balances, holds);
 
   const repository = new PaymentIntentRepository(dataSource);
   const intents = new PaymentIntentService(repository, ledger, DISABLED_ESCROW_GATE, noBlocks());

@@ -17,18 +17,17 @@ import { LedgerHoldService } from './services/ledger-hold.service';
 import { LedgerJournalService } from './services/ledger-journal.service';
 import { LedgerService } from './services/ledger.service';
 import { LedgerWithheldService } from './services/ledger-withheld.service';
-import { LedgerWriterService } from './services/ledger-writer.service';
 
 /**
  * Ledger domain — the off-chain source of truth for value.
  *
- * Scope: append-only journal, derived balances, holds and batch writes; `withheld`;
+ * Scope: append-only journal, derived balances, holds; `withheld`;
  * reconciliation against on-chain state.
  *
  * The repositories are provided globally by `PostgresModule`, so this module
  * declares only the services. `LedgerService` is the port every other domain
- * talks to; the five services behind it are exported as well because the
- * scheduler needs `LedgerWriterService.flush()`, the reconciler needs
+ * talks to; the services behind it are exported as well because the
+ * reconciler needs
  * `LedgerBalanceService.verifySnapshots()` directly, and `ledger-api.module.ts`
  * needs `LedgerWithheldService` for the balances endpoint's reconciliation —
  * routing all of those through the facade would widen it for three callers.
@@ -51,7 +50,6 @@ import { LedgerWriterService } from './services/ledger-writer.service';
   imports: [NotificationModule, ChainsModule],
   providers: [
     LedgerJournalService,
-    LedgerWriterService,
     LedgerBalanceService,
     LedgerHoldService,
     LedgerWithheldService,
@@ -72,7 +70,6 @@ import { LedgerWriterService } from './services/ledger-writer.service';
   exports: [
     LedgerService,
     LedgerJournalService,
-    LedgerWriterService,
     LedgerBalanceService,
     LedgerHoldService,
     LedgerWithheldService,

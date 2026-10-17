@@ -222,7 +222,6 @@ async function main(): Promise<void> {
 
     if (settledTxSig && observedAmount) {
       section('7. Ledger state after + assertion');
-      await ledger.flush();
       const after = await ledger.getBalance(demo.organizationId, agentAccount, asset);
       console.log(
         `balance after:       available=${after.available.amount} held=${after.held.amount} pending=${after.pending.amount}`,

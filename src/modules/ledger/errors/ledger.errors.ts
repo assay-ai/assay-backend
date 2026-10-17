@@ -14,8 +14,6 @@ export enum LedgerErrorCode {
   LEDGER_RECONCILIATION_MISMATCH = 'LEDGER_RECONCILIATION_MISMATCH',
   LEDGER_NEGATIVE_BALANCE = 'LEDGER_NEGATIVE_BALANCE',
   LEDGER_INVALID_ACCOUNT_ID = 'LEDGER_INVALID_ACCOUNT_ID',
-  LEDGER_ENTRY_NOT_BUFFERABLE = 'LEDGER_ENTRY_NOT_BUFFERABLE',
-  LEDGER_BATCH_FLUSH_FAILED = 'LEDGER_BATCH_FLUSH_FAILED',
   LEDGER_HOLD_ALREADY_OPEN = 'LEDGER_HOLD_ALREADY_OPEN',
   LEDGER_SNAPSHOT_DRIFT = 'LEDGER_SNAPSHOT_DRIFT',
   LEDGER_UNKNOWN_ENTRY_TYPE = 'LEDGER_UNKNOWN_ENTRY_TYPE',
@@ -107,24 +105,6 @@ export const LedgerErrors = createDomainErrorFactory('LEDGER', {
     statusCode: 400,
     message: (context?: Record<string, any>) =>
       `Not a ledger account id (expected CAIP-10 or a platform account): ${context?.value}`,
-  },
-  entryNotBufferable: {
-    code: LedgerErrorCode.LEDGER_ENTRY_NOT_BUFFERABLE,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `Entry type ${context?.entryType} can reduce a balance and must be written through, not buffered`,
-  },
-  /**
-   * A batch failed and was applied in full by nobody. The message says so
-   * explicitly because the first question asked when this fires at 3am is
-   * "did half of it land?".
-   */
-  batchFlushFailed: {
-    code: LedgerErrorCode.LEDGER_BATCH_FLUSH_FAILED,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `Ledger batch ${context?.batchId ?? '(unknown)'} of ${context?.size ?? '?'} entries was rolled back in full; no entry in it was applied` +
-      `${context?.cause ? `: ${context.cause}` : ''}`,
   },
   /**
    * A stored `entry_type` this build has no balance effect for — a row written
