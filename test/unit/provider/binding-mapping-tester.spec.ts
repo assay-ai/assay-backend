@@ -16,7 +16,7 @@ import { ResponseClass } from '@modules/tool/domain/classification';
 import { MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
-import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
+import { plainInvoker } from '../tool/helpers/routing-fixtures';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 import { StageStatus, VerificationStage } from '@modules/verification/domain/stage';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
@@ -137,7 +137,7 @@ function buildTester(row: ToolBindingEntity, tool = buildTool()) {
     resolveForTraffic: jest.fn(async () => null),
   } as unknown as DecisionPolicyService;
 
-  const invoker = new EgressBindingInvoker(
+  const invoker = plainInvoker(
     new EgressHttpClient(lookup, (target) => ({
       address: '127.0.0.1',
       family: 4,
