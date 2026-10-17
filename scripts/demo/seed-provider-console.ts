@@ -66,6 +66,7 @@ import { createHash } from 'node:crypto';
 import { readFileSync } from 'node:fs';
 import { join } from 'node:path';
 
+import { seedOfficialToolsets } from './lib/official-toolsets';
 import { NestFactory } from '@nestjs/core';
 import { getDataSourceToken } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
@@ -346,6 +347,10 @@ async function main(): Promise<void> {
   // 6. Earnings out. Needs the credits from step 5 to already be in the ledger.
   const paid = await seedPayouts(payouts, journal, dataSource);
   log(`payouts   ${paid} provider_payouts rows`);
+
+  // 7. Official tool sets, so the catalogue's "Tool sets" tab is not empty.
+  const officialSets = await seedOfficialToolsets(dataSource);
+  log(`toolsets  ${officialSets} official tool sets created`);
 
   await report(dataSource);
 

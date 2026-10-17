@@ -44,6 +44,7 @@
     "mcp:session": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/mcp/session.ts",
     "mcp:policies": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/mcp/policies.ts",
     "demo:seed": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/demo/seed-provider-console.ts",
+    "demo:toolsets": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/demo/seed-official-toolsets.ts",
     "demo:slash-case": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/demo/seed-slash-case.ts",
     "operator:add": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/operator/operators.ts add",
     "operator:list": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/operator/operators.ts list",
