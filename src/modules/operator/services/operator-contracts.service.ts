@@ -1,7 +1,10 @@
+import { createHash } from 'node:crypto';
+
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 
+import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { ToolVersionEntity } from '@database/postgres/entities/tool-version.entity';
 import { ToolEntity } from '@database/postgres/entities/tool.entity';
@@ -56,7 +59,8 @@ import {
   SaveContractDraftBodyDto,
 } from '../dto/operator-contracts.dto';
 import { OperatorApprover, OperatorSession } from '../ports/operator-session.port';
-import { OperatorApprovalService } from './operator-approval.service';
+import { OperatorErrors } from '../errors/operator.errors';
+import { OperatorApprovalService, canonicalJson } from './operator-approval.service';
 import { OverrideLogService } from './override-log.service';
 
 export const PUBLISH_VERSION_APPROVAL_ACTION = 'tool_version.publish';
@@ -89,6 +93,7 @@ export class OperatorContractsService {
     private readonly versions: ToolVersionRepository,
     private readonly overrides: OverrideLogService,
     private readonly approvals: OperatorApprovalService,
+    private readonly approvalRows: OperatorApprovalRepository,
     private readonly router: ProviderRouterService,
     private readonly lifecycle: ContractLifecycleService,
     @Inject(TOOL_CONTRACT_CHANGES) private readonly changes: ToolContractChanges,
@@ -105,6 +110,7 @@ export class OperatorContractsService {
           payload.body as ContractActionBodyDto,
           requestId,
           approver,
+          payload.contentHash as string | undefined,
         ),
     });
     approvals.register(MOVE_CURRENT_VERSION_APPROVAL_ACTION, {
@@ -192,8 +198,9 @@ export class OperatorContractsService {
     const problems = contractProblems(shape);
     if (problems.length > 0) throw ToolErrors.contractInvalid({ problems });
 
+    await this.assertNoPendingPublish(row.id);
     await this.inDraftTransaction(async (manager) => {
-      await lockTool(manager, row.id);
+      const locked = await lockTool(manager, row.id);
       const versions = await manager.find(ToolVersionEntity, { where: { toolId: row.id } });
       const published = versions.filter((version) => version.status !== ToolVersionStatus.DRAFT);
       if (body.baseVersion !== undefined) {
@@ -227,26 +234,56 @@ export class OperatorContractsService {
         await manager.update(
           ToolVersionEntity,
           { toolId: row.id, version: existing.version },
-          { ...fields, updatedAt: new Date() },
+          { ...fields, editedBy: operator.operatorId, updatedAt: new Date() },
         );
       } else {
+        // A number is never handed out twice, discarded drafts included: an
+        // approval names a version, and a reused one would name new content.
         const highest = versions.reduce((max, version) => Math.max(max, version.version), 0);
+        const number = Math.max(highest, locked.lastVersionNumber ?? 0) + 1;
         await manager.insert(ToolVersionEntity, {
           ...fields,
           toolId: row.id,
-          version: highest + 1,
+          version: number,
           status: ToolVersionStatus.DRAFT,
           createdBy: operator.operatorId,
+          editedBy: operator.operatorId,
         });
+        await manager.update(ToolEntity, { id: row.id }, { lastVersionNumber: number });
       }
     });
+    this.logger.log(`${row.name}: draft saved by operator ${operator.operatorId}`);
     return this.get(row.id);
   }
 
-  async discardDraft(toolId: string): Promise<OperatorToolDto> {
+  async discardDraft(operator: OperatorSession, toolId: string): Promise<OperatorToolDto> {
     const row = await this.requireTool(toolId);
+    await this.assertNoPendingPublish(row.id);
     await this.versions.delete({ toolId: row.id, status: ToolVersionStatus.DRAFT });
+    this.logger.log(`${row.name}: draft discarded by operator ${operator.operatorId}`);
     return this.get(row.id);
+  }
+
+  /**
+   * A draft is frozen while its publish waits for a second operator: the
+   * approval is for the content that was queued, and an edit or a discard in
+   * between would have the approver sign for something else (review P1-1).
+   * Reject the pending request first to change the draft.
+   */
+  private async assertNoPendingPublish(toolId: string): Promise<void> {
+    await this.approvalRows.expireStale();
+    const pending = await this.approvalRows.findOne({
+      where: {
+        action: PUBLISH_VERSION_APPROVAL_ACTION,
+        target: `tool:${toolId}`,
+        status: 'PENDING',
+      },
+    });
+    if (pending) {
+      throw ToolErrors.contractState({
+        reason: `a publish of this draft awaits a second operator (approval ${pending.id}); reject it to edit`,
+      });
+    }
   }
 
   // ── P-10 publish (two-person) ─────────────────────────────────────────────
@@ -258,6 +295,8 @@ export class OperatorContractsService {
     body: ContractActionBodyDto,
     requestId: string | null,
     approver: OperatorApprover | null = null,
+    /** The draft content the queued request was for; re-checked under the lock. */
+    contentHash?: string,
   ): Promise<OperatorToolDto | ApprovalQueuedDto> {
     const row = await this.requireTool(toolId);
     // Checked before queueing, so a request no one could approve is refused at once.
@@ -290,6 +329,16 @@ export class OperatorContractsService {
           const current = versions.find((v) => v.version === version);
           if (!current || current.status !== ToolVersionStatus.DRAFT) {
             throw ToolErrors.contractState({ reason: `version ${version} is no longer a draft` });
+          }
+          // The approval is for content, not a number (review P1-1).
+          const hash = draftContentHash(current);
+          if (approver && hash !== contentHash) {
+            throw ToolErrors.contractState({
+              reason: 'the draft changed after its publish was requested; request it again',
+            });
+          }
+          if (approver && approver.operatorId === (current.editedBy ?? current.createdBy)) {
+            throw OperatorErrors.selfApprovalRefused({ code: 'P-10' });
           }
           const shape = shapeOfVersion(current);
           const problems = contractProblems(shape);
@@ -337,6 +386,7 @@ export class OperatorContractsService {
             after: {
               status: 'ACTIVE',
               semver,
+              contentHash: hash,
               currentVersion: movesCurrent ? version : tool.currentVersion,
             },
           };
@@ -355,7 +405,12 @@ export class OperatorContractsService {
       {
         action: PUBLISH_VERSION_APPROVAL_ACTION,
         target: `tool:${row.id}`,
-        payload: { toolId: row.id, version, body: { ...body } },
+        payload: {
+          toolId: row.id,
+          version,
+          contentHash: draftContentHash(draft),
+          body: { ...body },
+        },
         requester: operator,
       },
       attempt,
@@ -780,6 +835,21 @@ function suggestedCurrent(
     }
   }
   return null;
+}
+
+/** SHA-256 of everything a draft would publish: what a P-10 approval is for. */
+export function draftContentHash(row: ToolVersionEntity): string {
+  return createHash('sha256')
+    .update(
+      canonicalJson({
+        version: row.version,
+        semver: row.semver,
+        shape: shapeOfVersion(row),
+        changelog: row.changelog ?? null,
+      }),
+      'utf8',
+    )
+    .digest('hex');
 }
 
 /** The tool row, locked for the rest of the transaction. */

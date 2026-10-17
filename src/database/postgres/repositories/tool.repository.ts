@@ -128,8 +128,11 @@ export class ToolRepository extends AbstractRepository<ToolEntity> {
       values,
     );
     await this.query(
-      `UPDATE "tools" SET "current_version" = 1, "updated_at" = now()
-        WHERE "id" = ANY($1::uuid[]) AND "current_version" IS NULL`,
+      `UPDATE "tools"
+          SET "current_version" = coalesce("current_version", 1),
+              "last_version_number" = greatest("last_version_number", 1),
+              "updated_at" = now()
+        WHERE "id" = ANY($1::uuid[])`,
       [rows.map((row) => row.id)],
     );
   }
