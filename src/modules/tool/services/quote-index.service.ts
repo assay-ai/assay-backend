@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { readEpoch } from '@shared/cache/redis-cache/epoch-counter';
 
 import { RoutingCandidate, RoutingContext } from '../domain/routing';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '../ports/tool-catalogue.port';
@@ -36,10 +37,11 @@ interface IndexEntry {
  * Kept fresh two ways:
  *
  * - **Age.** An entry older than {@link QUOTE_INDEX_MAX_AGE_MS} is reloaded
- *   before it is used, so stake and tier changes (which arrive from the chain
- *   and the stats pipeline, not from a write here) show within a minute.
- * - **Binding writes.** `ToolBindingChangeSubscriber` bumps a Redis epoch on
- *   every `tool_bindings` insert, update or delete, in whichever process made
+ *   before it is used, so a stake moved on chain between two stake-monitor
+ *   passes shows within a minute.
+ * - **Writes.** `QuoteIndexInvalidationSubscriber` bumps a Redis epoch on every
+ *   write to a binding, a provider (status, tier), an enrolment, a slash hold,
+ *   a stake grace row or a stake-monitor snapshot, in whichever process made
  *   it; a listing that sees a new epoch reloads everything it reads.
  *
  * A call never reads this. `tools/call` gathers its own candidates, so a stale
@@ -152,7 +154,7 @@ export class QuoteIndexService {
   private async readEpoch(): Promise<string | null> {
     if (!this.cache) return null;
     try {
-      return await this.cache.getRaw(QUOTE_INDEX_EPOCH_KEY);
+      return await readEpoch(this.cache.getRedisClient(), QUOTE_INDEX_EPOCH_KEY);
     } catch {
       // Redis down: the age bound alone keeps the index fresh.
       return null;

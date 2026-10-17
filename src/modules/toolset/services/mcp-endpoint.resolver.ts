@@ -7,12 +7,16 @@ import {
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { EntryRoutingRules } from '@modules/tool/domain/routing';
 
+import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
+
 import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
 import {
   DiscoveryMode,
   McpPath,
   McpPathKind,
   ParsedMcpUrl,
+  ViewFilter,
+  canonicalPath,
   canonicalUrl,
   endpointKindOf,
   withoutDefaultDiscovery,
@@ -21,11 +25,19 @@ import { McpEndpointView, entryRulesOf } from '../domain/view';
 import { AccessEpochService } from './access-epoch.service';
 import { ACCESS_CACHE_TTL_MS } from './access.resolver';
 
+/** What a path serves, before any view filter. */
+type BaseView = Omit<McpEndpointView, 'canonicalUrl' | 'filter'> & {
+  /** The discovery mode a `discovery=` equal to is the default, and drops out. */
+  readonly defaultDiscovery: DiscoveryMode | null;
+};
+
 interface CachedView {
   readonly epoch: string;
-  readonly at: number;
-  readonly view: McpEndpointView;
+  readonly view: BaseView;
 }
+
+/** Base views kept per process: organizations × the toolsets they serve. */
+export const ENDPOINT_CACHE_MAX_ENTRIES = 10_000;
 
 /**
  * A parsed MCP URL → what it serves, for the organization asking
@@ -46,12 +58,18 @@ interface CachedView {
  * Each is one `case` in {@link resolvePath}. A toolset of another
  * organization is the same 404 as a missing one.
  *
- * Cached per organization and canonical URL, against the organization's
- * access epoch, which a Draft edit bumps.
+ * The base view (what the path serves, before any filter) is cached per
+ * organization and canonical path, against the organization's access epoch,
+ * which a Draft edit bumps, in a bounded LRU. The view filters are applied
+ * after the lookup, so `?tools=` variants an agent invents never multiply the
+ * entries.
  */
 @Injectable()
 export class McpEndpointResolver {
-  private readonly cache = new Map<string, CachedView>();
+  private readonly cache = new BoundedTtlCache<CachedView>(
+    ENDPOINT_CACHE_MAX_ENTRIES,
+    ACCESS_CACHE_TTL_MS,
+  );
 
   constructor(
     private readonly toolsets: ToolsetRepository,
@@ -62,43 +80,48 @@ export class McpEndpointResolver {
 
   /** The view `parsed` serves to `organizationId`, or `MCP_URL_NOT_FOUND`. */
   async resolve(organizationId: string, parsed: ParsedMcpUrl): Promise<McpEndpointView> {
-    if (parsed.path.kind === McpPathKind.ROOT) return this.rootView(parsed);
+    return this.withFilter(await this.baseView(organizationId, parsed.path), parsed.filter);
+  }
 
-    const key = `${organizationId}:${canonicalUrl(this.host.mcpPublicUrl, parsed)}`;
-    const epoch = await this.epochs.current(organizationId);
-    const cached = this.cache.get(key);
-    if (epoch !== null && cached?.epoch === epoch && Date.now() - cached.at < ACCESS_CACHE_TTL_MS) {
-      return cached.view;
+  private async baseView(organizationId: string, path: McpPath): Promise<BaseView> {
+    if (path.kind === McpPathKind.ROOT) {
+      return {
+        path,
+        kind: endpointKindOf(path),
+        toolset: null,
+        handle: null,
+        baseToolIds: null,
+        entryRules: new Map(),
+        defaultDiscovery: null,
+      };
     }
 
-    const view = await this.resolvePath(organizationId, parsed.path, parsed);
-    if (epoch !== null) this.cache.set(key, { epoch, at: Date.now(), view });
+    const key = `${organizationId}:${canonicalPath(path)}`;
+    const epoch = await this.epochs.current(organizationId);
+    const cached = this.cache.get(key);
+    if (epoch !== null && cached?.epoch === epoch) return cached.view;
+
+    const view = await this.resolvePath(organizationId, path);
+    if (epoch !== null) this.cache.set(key, { epoch, view });
     return view;
   }
 
-  private rootView(parsed: ParsedMcpUrl): McpEndpointView {
+  private withFilter(base: BaseView, filter: ViewFilter): McpEndpointView {
+    const { defaultDiscovery, ...view } = base;
+    const canonical = withoutDefaultDiscovery(filter, defaultDiscovery);
     return {
-      canonicalUrl: canonicalUrl(this.host.mcpPublicUrl, parsed),
-      path: parsed.path,
-      kind: endpointKindOf(parsed.path),
-      filter: parsed.filter,
-      toolset: null,
-      handle: null,
-      baseToolIds: null,
-      entryRules: new Map(),
+      ...view,
+      filter: canonical,
+      canonicalUrl: canonicalUrl(this.host.mcpPublicUrl, { path: base.path, filter: canonical }),
     };
   }
 
-  private async resolvePath(
-    organizationId: string,
-    path: McpPath,
-    parsed: ParsedMcpUrl,
-  ): Promise<McpEndpointView> {
+  private async resolvePath(organizationId: string, path: McpPath): Promise<BaseView> {
     switch (path.kind) {
       case McpPathKind.MY_TOOLSET:
         // A published version is T2: no version exists yet, so a pin is a 404.
         if (path.version !== null) throw McpErrors.urlNotFound();
-        return this.myToolsetView(organizationId, path.slug, parsed);
+        return this.myToolsetView(organizationId, path);
       case McpPathKind.CATEGORY:
       case McpPathKind.HANDLE:
       case McpPathKind.PUBLIC_TOOLSET:
@@ -110,10 +133,9 @@ export class McpEndpointResolver {
 
   private async myToolsetView(
     organizationId: string,
-    slug: string,
-    parsed: ParsedMcpUrl,
-  ): Promise<McpEndpointView> {
-    const toolset = await this.toolsets.findOwnedBySlug(organizationId, slug);
+    path: Extract<McpPath, { kind: McpPathKind.MY_TOOLSET }>,
+  ): Promise<BaseView> {
+    const toolset = await this.toolsets.findOwnedBySlug(organizationId, path.slug);
     if (!toolset) throw McpErrors.urlNotFound();
 
     const rows = await this.entries.findByToolsets([toolset.id]);
@@ -123,20 +145,14 @@ export class McpEndpointResolver {
       if (rules) entryRules.set(row.toolId, rules);
     }
 
-    // `discovery=` equal to the toolset's own mode is its default, and drops
-    // out of the canonical URL.
-    const own = toolset.discovery.toLowerCase() as DiscoveryMode;
-    const canonical = { ...parsed, filter: withoutDefaultDiscovery(parsed.filter, own) };
-
     return {
-      canonicalUrl: canonicalUrl(this.host.mcpPublicUrl, canonical),
-      path: parsed.path,
-      kind: endpointKindOf(parsed.path),
-      filter: canonical.filter,
+      path,
+      kind: endpointKindOf(path),
       toolset: { id: toolset.id, slug: toolset.slug, name: toolset.name, version: null },
       handle: null,
       baseToolIds: rows.map((row) => row.toolId),
       entryRules,
+      defaultDiscovery: toolset.discovery.toLowerCase() as DiscoveryMode,
     };
   }
 }
