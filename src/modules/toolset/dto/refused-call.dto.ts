@@ -24,6 +24,12 @@ export class RefusedProviderDto {
   providerId: string;
 
   @ApiProperty({
+    nullable: true,
+    description: 'The provider’s display name, also after it was delisted; `null` if unknown',
+  })
+  providerName: string | null;
+
+  @ApiProperty({
     description:
       'NOT_IN_ALLOWED_PROVIDERS | EXCLUDED_BY_TOOLSET | EXCLUDED_BY_AGENT | BELOW_MIN_TIER | ' +
       'ABOVE_MAX_PRICE | BELOW_MIN_QUALITY | PAYEE_NO_LONGER_ELIGIBLE',

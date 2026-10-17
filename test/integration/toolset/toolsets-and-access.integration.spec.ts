@@ -8,6 +8,7 @@ import { DataSource } from 'typeorm';
 import { AgentConnectUrlRepository } from '@database/postgres/repositories/agent-connect-url.repository';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
+import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
 import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
@@ -122,7 +123,10 @@ describe('toolsets and access, against a real database and Redis', () => {
         [CHAIN],
       ),
       records: new ToolCallRecordWriter(new ToolCallRecordRepository(dataSource)),
-      refused: new RefusedCallsService(new ToolCallRecordRepository(dataSource)),
+      refused: new RefusedCallsService(
+        new ToolCallRecordRepository(dataSource),
+        new ProviderRepository(dataSource),
+      ),
       recordsRepo: new ToolCallRecordRepository(dataSource),
     };
   }
@@ -514,7 +518,14 @@ describe('toolsets and access, against a real database and Redis', () => {
           refusalCode: 'NO_PROVIDER_MATCHES_RULES',
           refusalLayer: RefusalLayer.AGENT_LIMITS,
           charged: false,
-          providers: [expect.objectContaining({ reason: 'EXCLUDED_BY_AGENT', source: 'AGENT' })],
+          // No registered provider by that id: the name reads as null, not as an error.
+          providers: [
+            expect.objectContaining({
+              reason: 'EXCLUDED_BY_AGENT',
+              source: 'AGENT',
+              providerName: null,
+            }),
+          ],
         }),
       ]);
       expect((await errorOf(s.refused.get(orgB, callId)))?.status).toBe(404);

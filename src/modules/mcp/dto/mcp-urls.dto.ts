@@ -72,6 +72,18 @@ export class PreviewToolDto {
   noProviderFits: boolean;
 }
 
+/** A tool a warning is about: its id and the name an agent sees. */
+export class PreviewWarningToolDto {
+  @ApiProperty({
+    nullable: true,
+    description: '`null` for an ignored `?tools=` name matching no tool',
+  })
+  toolId: string | null;
+
+  @ApiProperty()
+  name: string;
+}
+
 export class PreviewWarningDto {
   @ApiProperty({
     enum: [
@@ -84,8 +96,8 @@ export class PreviewWarningDto {
   })
   code: string;
 
-  @ApiProperty({ type: [String], description: 'The tool names it is about' })
-  tools: string[];
+  @ApiProperty({ type: [PreviewWarningToolDto], description: 'The tools it is about' })
+  tools: PreviewWarningToolDto[];
 }
 
 export class McpUrlPreviewDto {
