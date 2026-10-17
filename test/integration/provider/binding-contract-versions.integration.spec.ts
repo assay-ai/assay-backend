@@ -91,11 +91,6 @@ function goodEndpoint(_req: http.IncomingMessage, res: http.ServerResponse): voi
   res.end(JSON.stringify({ data: { answer: 'forty-two' } }));
 }
 
-function rubbishEndpoint(_req: http.IncomingMessage, res: http.ServerResponse): void {
-  res.writeHead(200, { 'content-type': 'application/json' });
-  res.end(JSON.stringify({ nothing: 'the mapping can find' }));
-}
-
 function body(overrides: Partial<SaveToolBindingBodyDto> = {}): SaveToolBindingBodyDto {
   return {
     toolId: TOOL.id,
