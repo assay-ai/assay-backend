@@ -46,7 +46,7 @@ export class ToolsetEntity {
   @Column({ name: 'icon', type: 'varchar', length: 32, nullable: true })
   icon: string | null;
 
-  /** `PRIVATE` | `UNLISTED` | `PUBLIC`. Only `PRIVATE` exists until sharing (T2). */
+  /** `PRIVATE` | `UNLISTED` | `PUBLIC` — see `domain/sharing.ts`. */
   @Column({ name: 'visibility', type: 'varchar', length: 16, default: 'PRIVATE' })
   visibility: string;
 
@@ -88,6 +88,14 @@ export class ToolsetEntity {
 
   @Column({ name: 'forked_from_version', type: 'int', nullable: true })
   forkedFromVersion: number | null;
+
+  /** The first UNLISTED or PUBLIC share; from then on the slug is held for good. */
+  @Column({ name: 'first_shared_at', type: 'timestamptz', nullable: true })
+  firstSharedAt: Date | null;
+
+  /** An operator's standing delist; cleared by a relist or a revert. */
+  @Column({ name: 'delisted_at', type: 'timestamptz', nullable: true })
+  delistedAt: Date | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;

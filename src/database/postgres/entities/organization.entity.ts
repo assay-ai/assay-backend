@@ -59,4 +59,19 @@ export class OrganizationEntity extends AbstractEntityWithoutSoftDelete {
    */
   @Column({ name: 'created_via', type: 'varchar', length: 32 })
   createdVia: string;
+
+  /**
+   * The public namespace, `@acme` (design spec §7.1): lowercase, unique
+   * ignoring case. Never an email, a wallet or a real name.
+   */
+  @Column({ name: 'handle', type: 'varchar', length: 24, nullable: true })
+  handle: string | null;
+
+  /** Set by the first UNLISTED or PUBLIC share; after it only an operator renames. */
+  @Column({ name: 'handle_locked_at', type: 'timestamptz', nullable: true })
+  handleLockedAt: Date | null;
+
+  /** `ACTIVE` | `FROZEN` — a frozen handle serves nothing. `null` without a handle. */
+  @Column({ name: 'handle_status', type: 'varchar', length: 16, nullable: true })
+  handleStatus: string | null;
 }
