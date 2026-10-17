@@ -30,10 +30,16 @@ import { RoutingCandidate } from './routing.types';
  * The router records none of them anywhere but the refusal it returns.
  */
 
-/** Which party a rule came from. */
+/**
+ * Which party a rule came from. `REQUEST` and `MIGRATION` are the contract's
+ * hard constraints (T3): an optional input the call's arguments use, and a
+ * binding whose version range does not cover the contract version chosen.
+ */
 export enum RuleSource {
   AGENT = 'AGENT',
   TOOLSET = 'TOOLSET',
+  REQUEST = 'REQUEST',
+  MIGRATION = 'MIGRATION',
 }
 
 /** Why the rules dropped a candidate. Never a provider-quality reason. */
@@ -52,6 +58,12 @@ export enum RuleRejectionReason {
   BELOW_MIN_QUALITY = 'BELOW_MIN_QUALITY',
   /** Rail B: the payee the voucher pins fails the rules at retry time. */
   PAYEE_NO_LONGER_ELIGIBLE = 'PAYEE_NO_LONGER_ELIGIBLE',
+  /** T3: the binding does not declare an output the toolset entry requires. */
+  MISSING_OUTPUT_FIELD = 'MISSING_OUTPUT_FIELD',
+  /** T3: the binding does not support an optional input the arguments use. */
+  UNSUPPORTED_INPUT_FIELD = 'UNSUPPORTED_INPUT_FIELD',
+  /** T3: the binding's version range does not cover the chosen contract version. */
+  CONTRACT_VERSION_MISMATCH = 'CONTRACT_VERSION_MISMATCH',
 }
 
 /** `BEST` (Assay picks), `ONLY` these providers, or all `EXCEPT` these. */
@@ -120,6 +132,8 @@ export interface RuleRejection {
   readonly reason: RuleRejectionReason;
   readonly source: RuleSource;
   readonly detail: string;
+  /** The contract fields behind an `UNSUPPORTED_INPUT_FIELD` or `MISSING_OUTPUT_FIELD`. */
+  readonly fields?: readonly string[];
 }
 
 export const NO_RULES: RoutingRules = Object.freeze({ agent: null, entry: null });
@@ -287,12 +301,20 @@ export function applyRules(
 /**
  * The refusal layer a set of rule rejections belongs to: the agent's limits
  * whenever one of them is the agent's (they apply on every URL, so they are
- * the setting to look at first), otherwise the toolset's rules.
+ * the setting to look at first), then the toolset's rules, and otherwise the
+ * request or the contract migration — which the caller files under the
+ * server, since no limit of the buyer's caused them.
  */
 export function rejectionLayer(rejections: readonly Pick<RuleRejection, 'source'>[]): RuleSource {
-  return rejections.some((rejection) => rejection.source === RuleSource.AGENT)
-    ? RuleSource.AGENT
-    : RuleSource.TOOLSET;
+  if (rejections.some((rejection) => rejection.source === RuleSource.AGENT))
+    return RuleSource.AGENT;
+  if (rejections.some((rejection) => rejection.source === RuleSource.TOOLSET)) {
+    return RuleSource.TOOLSET;
+  }
+  if (rejections.some((rejection) => rejection.source === RuleSource.REQUEST)) {
+    return RuleSource.REQUEST;
+  }
+  return rejections.length > 0 ? RuleSource.MIGRATION : RuleSource.TOOLSET;
 }
 
 function stricter<T>(

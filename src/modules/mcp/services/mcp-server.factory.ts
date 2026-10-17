@@ -353,6 +353,8 @@ const SPEC_REFUSAL_CODES: ReadonlySet<string> = new Set<string>([
   ToolAccessErrorCode.TOOL_NOT_ALLOWED,
   ToolAccessErrorCode.TOOL_REMOVED,
   ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES,
+  ToolAccessErrorCode.CONTRACT_VERSION_RETIRED,
+  ToolAccessErrorCode.UNSUPPORTED_INPUT_FIELD,
   ToolAccessErrorCode.RATE_LIMITED,
   ToolAccessErrorCode.INVALID_CURSOR,
 ]);
