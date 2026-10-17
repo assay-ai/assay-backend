@@ -20,7 +20,8 @@ import { UNLISTED_TOKEN_RE } from './toolset-publishing.dto';
  *
  * ## What is never here
  *
- * Owner and reporter organization ids, the unlisted token (except on the
+ * Owner and reporter organization ids, a toolset id where the path that
+ * answered does not serve the toolset, the unlisted token (except on the
  * by-token page, which the caller sent it to), grace and moderation columns,
  * the Draft, buyer identities, the publisher dashboard.
  */
@@ -99,6 +100,36 @@ export class PublicToolsetByTokenBodyDto {
   @IsInt()
   @Min(1)
   v?: number;
+
+  @ApiPropertyOptional({
+    minimum: 1,
+    description: 'Also return `diff` from this version to `v`; both must be served by the link',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  diffFrom?: number;
+}
+
+export class PublicToolsetVersionPathDto extends PublicToolsetPathDto {
+  @ApiProperty({ minimum: 1, example: 3 })
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  v: number;
+}
+
+export class PublicToolsetVersionQueryDto {
+  @ApiPropertyOptional({
+    minimum: 1,
+    description: 'Also return `diff` from this version; it must be served on `/@…` too',
+  })
+  @IsOptional()
+  @Type(() => Number)
+  @IsInt()
+  @Min(1)
+  diffFrom?: number;
 }
 
 export class PublicFigureDto {
@@ -147,6 +178,14 @@ export class PublicToolsetUrlsDto {
 }
 
 export class PublicToolsetCardDto {
+  @ApiProperty({
+    format: 'uuid',
+    description:
+      'For `POST /toolsets/:id/copy`, reports and access. Only on a toolset served on the path ' +
+      'that answered (listed, or the link the caller holds); those calls re-check it by id.',
+  })
+  id: string;
+
   @ApiProperty({ example: 'acme' })
   handle: string;
 
@@ -188,6 +227,13 @@ export class PublicToolsetCardDto {
 
   @ApiProperty({ type: PublicToolsetUrlsDto })
   mcpUrls: PublicToolsetUrlsDto;
+
+  @ApiProperty({
+    description:
+      '"Routes to the publisher\'s own provider": for at least one tool, the published rules ' +
+      "leave only providers of the publisher's organization (by effect, whatever the mode)",
+  })
+  routesToPublisher: boolean;
 }
 
 export class PublicToolsetListDto {
@@ -222,6 +268,32 @@ export class PublicToolsetEntryDto {
 
   @ApiProperty({ description: 'No longer served (removed or retired): "Removed"' })
   removed: boolean;
+
+  @ApiProperty({ description: 'A tool not reviewed for the catalogue: "Not reviewed"' })
+  notReviewed: boolean;
+}
+
+export class PublicToolsetDiffDto {
+  @ApiProperty()
+  from: number;
+
+  @ApiProperty()
+  to: number;
+
+  @ApiProperty({ type: [String], description: 'Tool names' })
+  added: string[];
+
+  @ApiProperty({ type: [String], description: 'Tool names' })
+  removed: string[];
+
+  @ApiProperty({ type: [String], description: 'Tools in both whose provider rules differ' })
+  rulesChanged: string[];
+
+  @ApiProperty({
+    type: [String],
+    description: 'discovery, searchThreshold, pinnedTools, name, description, icon',
+  })
+  settingsChanged: string[];
 }
 
 export class PublicForkedFromDto {
@@ -244,6 +316,16 @@ export class PublicToolsetPageDto extends PublicToolsetCardDto {
 
   @ApiProperty({ type: [PublicToolsetEntryDto] })
   entries: PublicToolsetEntryDto[];
+
+  @ApiProperty({ description: 'Any entry is "Not reviewed"' })
+  notReviewed: boolean;
+
+  @ApiProperty({
+    type: PublicToolsetDiffDto,
+    nullable: true,
+    description: 'Only on `POST …/by-token` with `diffFrom`',
+  })
+  diff: PublicToolsetDiffDto | null;
 
   @ApiProperty({ type: PublicToolsetStatsDto })
   stats: PublicToolsetStatsDto;
@@ -274,6 +356,37 @@ export class PublicToolsetVersionDto {
 
   @ApiProperty()
   toolCount: number;
+}
+
+/** One version served on `/@…`, with its snapshot: what a follower is offered. */
+export class PublicToolsetVersionDetailDto extends PublicToolsetVersionDto {
+  @ApiProperty()
+  name: string;
+
+  @ApiProperty({ nullable: true })
+  description: string | null;
+
+  @ApiProperty({ nullable: true })
+  icon: string | null;
+
+  @ApiProperty({ type: [String] })
+  toolIds: string[];
+
+  @ApiProperty({ type: [PublicToolsetEntryDto] })
+  entries: PublicToolsetEntryDto[];
+
+  @ApiProperty({ description: 'Any entry is "Not reviewed"' })
+  notReviewed: boolean;
+
+  @ApiProperty({ description: 'As on the card, for this version' })
+  routesToPublisher: boolean;
+
+  @ApiProperty({
+    type: PublicToolsetDiffDto,
+    nullable: true,
+    description: 'From `diffFrom` to this version; `null` without `diffFrom`',
+  })
+  diff: PublicToolsetDiffDto | null;
 }
 
 export class PublicToolsetVersionListDto {

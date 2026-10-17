@@ -2,6 +2,7 @@ import { Inject, Injectable, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
+import { ToolsetVersionEntity } from '@database/postgres/entities/toolset-version.entity';
 import { ToolsetEntity } from '@database/postgres/entities/toolset.entity';
 import {
   ToolsetStatsRepository,
@@ -17,16 +18,20 @@ import {
   sharingEndsAt,
   versionServes,
 } from '../domain/sharing';
-import { SnapshotEntry, readSnapshotEntries } from '../domain/snapshot';
+import { ServingBinding, routesToPublisher } from '../domain/self-routing';
+import { SnapshotEntry, diffSnapshots, readSnapshotEntries } from '../domain/snapshot';
 import {
   ListPublicToolsetsQueryDto,
   PublicCategoryListDto,
   PublicFigureDto,
   PublicHandleProfileDto,
   PublicToolsetCardDto,
+  PublicToolsetDiffDto,
+  PublicToolsetEntryDto,
   PublicToolsetListDto,
   PublicToolsetPageDto,
   PublicToolsetStatsDto,
+  PublicToolsetVersionDetailDto,
   PublicToolsetVersionListDto,
 } from '../dto/public-toolsets.dto';
 import { ToolsetErrors } from '../errors/toolset.errors';
@@ -34,6 +39,7 @@ import { AccessEpochService } from './access-epoch.service';
 import { HandlesService } from './handles.service';
 import { sharingStateOf } from './sharing-row';
 import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
+import { snapshotOfVersion } from './version-mapping';
 
 /** One public answer is reused for this long; matches the public catalogue. */
 export const PUBLIC_TOOLSETS_CACHE_MS = 30_000;
@@ -60,6 +66,15 @@ interface ListedRow {
   readonly trendingScore: number;
   readonly figures: Record<string, unknown> | null;
   readonly weekStart: string | null;
+  readonly routesToPublisher: boolean;
+}
+
+/** What the public pages say about the tools of a snapshot. */
+interface ToolFlags {
+  /** Removed, retired or gone: "Removed". */
+  readonly removed: ReadonlySet<string>;
+  /** Not reviewed for the catalogue: "Not reviewed". */
+  readonly notReviewed: ReadonlySet<string>;
 }
 
 /**
@@ -126,20 +141,14 @@ export class PublicToolsetsService {
 
   async page(handle: string, slug: string): Promise<PublicToolsetPageDto> {
     const row = await this.findListed(handle, slug);
-    const removed = await this.removedTools(row.entries.map((entry) => entry.toolId));
+    const entries = entriesOf(row.entries, await this.toolFlags(row.entries));
     return {
       ...this.card(row),
       changelog: row.changelog,
       publishedAt: new Date(row.publishedAt).toISOString(),
-      entries: row.entries.map((entry) => ({
-        toolId: entry.toolId,
-        toolName: entry.toolName,
-        providerMode: entry.providerMode,
-        providerCount: entry.providerIds.length,
-        minTier: entry.minTier,
-        onEmpty: entry.onEmpty,
-        removed: removed.has(entry.toolId),
-      })),
+      entries,
+      notReviewed: entries.some((entry) => entry.notReviewed),
+      diff: null,
       stats: statsOf(row.figures, row.weekStart),
       forkedFrom: await this.forkedFromOf(row.id),
       sharingEndsAt: null,
@@ -162,8 +171,57 @@ export class PublicToolsetsService {
     };
   }
 
+  /**
+   * One version a listed toolset's `/@…` URLs serve, with its snapshot, and
+   * the diff from `diffFrom` when asked. A version `/@…` does not serve
+   * (published PRIVATE or UNLISTED, or past the newest) is the same 404 as a
+   * missing one, as `diffFrom` is.
+   */
+  async versionOf(
+    handle: string,
+    slug: string,
+    v: number,
+    diffFrom: number | undefined,
+  ): Promise<PublicToolsetVersionDetailDto> {
+    const row = await this.findListed(handle, slug);
+    const served = async (version: number) => {
+      const found =
+        version <= row.version ? await this.versions.findVersion(row.id, version) : null;
+      if (!found || !versionServes(found.sharedAs, 'PUBLIC')) {
+        throw ToolsetErrors.versionNotFound();
+      }
+      return found;
+    };
+    const version = await served(v);
+    const from = diffFrom === undefined ? null : await served(diffFrom);
+    const snapshot = readSnapshotEntries(version.entries);
+    const entries = entriesOf(snapshot, await this.toolFlags(snapshot));
+    return {
+      version: version.version,
+      publishedAt: new Date(version.publishedAt).toISOString(),
+      changelog: version.changelog,
+      toolCount: version.toolIds.length,
+      name: version.name,
+      description: version.description,
+      icon: version.icon,
+      toolIds: [...version.toolIds],
+      entries,
+      notReviewed: entries.some((entry) => entry.notReviewed),
+      routesToPublisher: routesToPublisher(
+        snapshot,
+        row.ownerOrgId,
+        await this.servingBindings(snapshot.map((entry) => entry.toolId)),
+      ),
+      diff: from ? diffOf(from, version) : null,
+    };
+  }
+
   /** A link-only toolset's page; the token is the permission. */
-  async byToken(token: string, v: number | undefined): Promise<PublicToolsetPageDto> {
+  async byToken(
+    token: string,
+    v: number | undefined,
+    diffFrom?: number,
+  ): Promise<PublicToolsetPageDto> {
     const toolset = await this.toolsets.findByUnlistedToken(token);
     const now = this.now();
     if (!toolset || toolset.unlistedToken !== token) throw ToolsetErrors.notFound();
@@ -177,15 +235,25 @@ export class PublicToolsetsService {
     const newest = toolset.lastSharedVersion;
     const version = v ?? newest;
     if (!version || !newest || version > newest) throw ToolsetErrors.versionNotFound();
-    const row = await this.versions.findVersion(toolset.id, version);
-    if (!row || !versionServes(row.sharedAs, 'UNLISTED')) throw ToolsetErrors.versionNotFound();
+    // Only versions the link serves: published UNLISTED or PUBLIC, none past its newest.
+    const served = async (n: number) => {
+      const found = n <= newest ? await this.versions.findVersion(toolset.id, n) : null;
+      if (!found || !versionServes(found.sharedAs, 'UNLISTED')) {
+        throw ToolsetErrors.versionNotFound();
+      }
+      return found;
+    };
+    const row = await served(version);
+    const from = diffFrom === undefined ? null : await served(diffFrom);
 
-    const entries = readSnapshotEntries(row.entries);
-    const removed = await this.removedTools(entries.map((entry) => entry.toolId));
+    const snapshot = readSnapshotEntries(row.entries);
+    const entries = entriesOf(snapshot, await this.toolFlags(snapshot));
     const base = `${this.host.mcpPublicUrl}/u/${token}`;
     const stats = (await this.stats.latestFor([toolset.id])).get(toolset.id);
     const ends = sharingEndsAt(state, 'UNLISTED');
     return {
+      // The caller holds the link, so it may name the toolset by id.
+      id: toolset.id,
       handle,
       slug: toolset.slug,
       name: row.name,
@@ -203,17 +271,16 @@ export class PublicToolsetsService {
         pinned: `${base}@${row.version}`,
         recommended: `${base}@${row.version}`,
       },
+      routesToPublisher: routesToPublisher(
+        snapshot,
+        toolset.ownerOrgId,
+        await this.servingBindings(snapshot.map((entry) => entry.toolId)),
+      ),
       changelog: row.changelog,
       publishedAt: new Date(row.publishedAt).toISOString(),
-      entries: entries.map((entry) => ({
-        toolId: entry.toolId,
-        toolName: entry.toolName,
-        providerMode: entry.providerMode,
-        providerCount: entry.providerIds.length,
-        minTier: entry.minTier,
-        onEmpty: entry.onEmpty,
-        removed: removed.has(entry.toolId),
-      })),
+      entries,
+      notReviewed: entries.some((entry) => entry.notReviewed),
+      diff: from ? diffOf(from, row) : null,
       stats: statsOf(stats?.figures ?? null, stats?.weekStart ?? null),
       forkedFrom: await this.forkedFromOf(toolset.id),
       sharingEndsAt: ends ? ends.toISOString() : null,
@@ -320,8 +387,13 @@ export class PublicToolsetsService {
       listedInCatalogue(sharingStateOf(row as unknown as ToolsetEntity)),
     );
     const stats = await this.stats.latestFor(listed.map((row) => row.id));
+    const snapshots = new Map(listed.map((row) => [row.id, readSnapshotEntries(row.entries)]));
+    const bindings = await this.servingBindings(
+      [...snapshots.values()].flatMap((entries) => entries.map((entry) => entry.toolId)),
+    );
     return listed.map((row) => {
       const published = stats.get(row.id);
+      const entries = snapshots.get(row.id) ?? [];
       return {
         id: row.id,
         ownerOrgId: row.ownerOrgId,
@@ -337,13 +409,14 @@ export class PublicToolsetsService {
         description: row.description,
         icon: row.icon,
         toolIds: row.toolIds,
-        entries: readSnapshotEntries(row.entries),
+        entries,
         publishedAt: row.publishedAt,
         changelog: row.changelog,
         popularScore: published?.popularScore ?? 0,
         trendingScore: published?.trendingScore ?? 0,
         figures: published?.figures ?? null,
         weekStart: published?.weekStart ?? null,
+        routesToPublisher: routesToPublisher(entries, row.ownerOrgId, bindings),
       };
     });
   }
@@ -353,6 +426,8 @@ export class PublicToolsetsService {
     const pinned = `${latest}@${row.version}`;
     const badge = badgeOf(row);
     return {
+      // Listed: served on `/@…`, so naming it by id reveals nothing more.
+      id: row.id,
       handle: row.handle,
       slug: row.slug,
       name: row.name,
@@ -368,20 +443,46 @@ export class PublicToolsetsService {
       // Official sets follow their latest; anyone else's is pinned, so a
       // publisher cannot silently add a paid tool to other people's agents.
       mcpUrls: { latest, pinned, recommended: badge === 'OFFICIAL' ? latest : pinned },
+      routesToPublisher: row.routesToPublisher,
     };
   }
 
-  private async removedTools(toolIds: readonly string[]): Promise<Set<string>> {
-    if (toolIds.length === 0) return new Set();
+  /**
+   * Removed (or gone) and not-reviewed tools of a snapshot. "Not reviewed" is
+   * a tool outside the LISTED catalogue — an UNLISTED provider tool (§7.6),
+   * which only a link-only set may hold. Every tool a listed set holds is
+   * LISTED, so it is `false` there until provider tools arrive (T4).
+   */
+  private async toolFlags(entries: readonly SnapshotEntry[]): Promise<ToolFlags> {
+    const toolIds = [...new Set(entries.map((entry) => entry.toolId))];
+    if (toolIds.length === 0) return { removed: new Set(), notReviewed: new Set() };
     const rows = (await this.dataSource.query(
-      `SELECT id FROM tools WHERE id = ANY($1::uuid[]) AND status IN ('REMOVED', 'RETIRED')`,
-      [[...toolIds]],
-    )) as { id: string }[];
-    const known = (await this.dataSource.query(`SELECT id FROM tools WHERE id = ANY($1::uuid[])`, [
-      [...toolIds],
-    ])) as { id: string }[];
-    const present = new Set(known.map((row) => row.id));
-    return new Set([...rows.map((row) => row.id), ...toolIds.filter((id) => !present.has(id))]);
+      `SELECT id, status, visibility FROM tools WHERE id = ANY($1::uuid[])`,
+      [toolIds],
+    )) as { id: string; status: string; visibility: string }[];
+    const found = new Map(rows.map((row) => [row.id, row]));
+    const removed = new Set<string>();
+    const notReviewed = new Set<string>();
+    for (const id of toolIds) {
+      const tool = found.get(id);
+      if (!tool || tool.status === 'REMOVED' || tool.status === 'RETIRED') removed.add(id);
+      else if (tool.visibility !== 'LISTED') notReviewed.add(id);
+    }
+    return { removed, notReviewed };
+  }
+
+  /** The bindings serving these tools now, for the self-routing disclosure. */
+  private async servingBindings(toolIds: readonly string[]): Promise<ServingBinding[]> {
+    const ids = [...new Set(toolIds)];
+    if (ids.length === 0) return [];
+    const rows = (await this.dataSource.query(
+      `SELECT tool_id AS "toolId", organization_id AS "providerId",
+              price_amount::text AS "priceAmount", asset_id AS "assetId"
+         FROM tool_bindings
+        WHERE tool_id = ANY($1::uuid[]) AND status = 'ACTIVE'`,
+      [ids],
+    )) as ServingBinding[];
+    return rows;
   }
 
   /** The source of a copy, named only when the source is itself listed. */
@@ -392,6 +493,32 @@ export class PublicToolsetsService {
     if (!source) return null;
     return { handle: source.handle, slug: source.slug, version: toolset.forkedFromVersion };
   }
+}
+
+function entriesOf(entries: readonly SnapshotEntry[], flags: ToolFlags): PublicToolsetEntryDto[] {
+  return entries.map((entry) => ({
+    toolId: entry.toolId,
+    toolName: entry.toolName,
+    providerMode: entry.providerMode,
+    providerCount: entry.providerIds.length,
+    minTier: entry.minTier,
+    onEmpty: entry.onEmpty,
+    removed: flags.removed.has(entry.toolId),
+    notReviewed: flags.notReviewed.has(entry.toolId),
+  }));
+}
+
+/** The diff between two served versions, field by field. */
+function diffOf(from: ToolsetVersionEntity, to: ToolsetVersionEntity): PublicToolsetDiffDto {
+  const diff = diffSnapshots(snapshotOfVersion(from), snapshotOfVersion(to));
+  return {
+    from: from.version,
+    to: to.version,
+    added: [...diff.added],
+    removed: [...diff.removed],
+    rulesChanged: [...diff.rulesChanged],
+    settingsChanged: [...diff.settingsChanged],
+  };
 }
 
 function badgeOf(row: { ownerOrgId: string | null; publisherKind: string }): string {

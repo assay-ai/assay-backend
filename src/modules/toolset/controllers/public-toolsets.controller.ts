@@ -22,7 +22,10 @@ import {
   PublicToolsetListDto,
   PublicToolsetPageDto,
   PublicToolsetPathDto,
+  PublicToolsetVersionDetailDto,
   PublicToolsetVersionListDto,
+  PublicToolsetVersionPathDto,
+  PublicToolsetVersionQueryDto,
 } from '../dto/public-toolsets.dto';
 import {
   PUBLIC_TOOLSETS_CACHE_MS,
@@ -64,11 +67,18 @@ export class PublicToolsetsController {
   @HttpCode(200)
   @ApiOperation({
     summary: 'A link-only tool set’s page; the token from the link is the permission',
+    description:
+      '`v` picks a version the link serves (published UNLISTED or PUBLIC); `diffFrom` adds the ' +
+      'diff from another version the link serves.',
   })
   @ApiResponse({ status: 200, type: PublicToolsetPageDto })
-  @ApiResponse({ status: 404, description: 'No tool set serves this link. Says nothing more.' })
+  @ApiResponse({
+    status: 404,
+    description: 'No tool set serves this link, or the link serves no such version.',
+  })
+  @ApiResponse({ status: 429, description: 'Too many requests from this address.' })
   async byToken(@Body() body: PublicToolsetByTokenBodyDto): Promise<PublicToolsetPageDto> {
-    return this.toolsets.byToken(body.token, body.v);
+    return this.toolsets.byToken(body.token, body.v, body.diffFrom);
   }
 
   @Get('toolsets/@:handle/:slug/versions')
@@ -77,6 +87,27 @@ export class PublicToolsetsController {
   @ApiResponse({ status: 200, type: PublicToolsetVersionListDto })
   async versions(@Param() params: PublicToolsetPathDto): Promise<PublicToolsetVersionListDto> {
     return this.toolsets.versionsOf(params.handle, params.slug);
+  }
+
+  @Get('toolsets/@:handle/:slug/versions/:v')
+  @CacheHeader(CACHE)
+  @ApiOperation({
+    summary: 'One version a listed tool set serves on `/@…`: its tools and rules, and a diff',
+    description:
+      'Only versions published as PUBLIC, none past the newest. `?diffFrom=` adds the diff from ' +
+      'another such version, for "Update available".',
+  })
+  @ApiResponse({ status: 200, type: PublicToolsetVersionDetailDto })
+  @ApiResponse({
+    status: 404,
+    description: 'Not a listed tool set, or `/@…` serves no such version. Says nothing more.',
+  })
+  @ApiResponse({ status: 429, description: 'Too many requests from this address.' })
+  async version(
+    @Param() params: PublicToolsetVersionPathDto,
+    @Query() query: PublicToolsetVersionQueryDto,
+  ): Promise<PublicToolsetVersionDetailDto> {
+    return this.toolsets.versionOf(params.handle, params.slug, params.v, query.diffFrom);
   }
 
   @Get('toolsets/@:handle/:slug')

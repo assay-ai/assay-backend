@@ -102,6 +102,10 @@ export class McpUrlPreviewService {
           },
         );
         const discovery = preview?.discovery ?? 'FULL';
+        // Only for a URL that serves now, on the path the URL itself names.
+        const update = preview
+          ? await this.connectUrls.updateFor(organizationId, row.parsed)
+          : null;
         return {
           canonicalUrl: row.canonicalUrl,
           endpointKind: row.endpointKind,
@@ -126,8 +130,9 @@ export class McpUrlPreviewService {
           firstCallAt: row.firstCallAt ? new Date(row.firstCallAt).toISOString() : null,
           waitingForFirstCall: row.handedOutAt !== null && !row.firstCallAt && !row.lastCallAt,
           available: preview !== null,
-          // Versions arrive with publishing (T2).
-          updateAvailable: false,
+          updateAvailable: update !== null,
+          latestVersion: update?.latestVersion ?? null,
+          latestUrl: update?.latestUrl ?? null,
         };
       }),
     );

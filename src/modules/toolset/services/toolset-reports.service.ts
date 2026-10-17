@@ -50,6 +50,10 @@ export class ToolsetReportsService {
       if (!toolset || own || !visibleToOthers(sharingStateOf(toolset), body.unlistedToken, now)) {
         throw ToolsetErrors.reportTargetNotFound();
       }
+      // A frozen handle stops reports by id as much as its URLs: no oracle.
+      if (!(await this.handles.ownerHandleActive(toolset.ownerOrgId))) {
+        throw ToolsetErrors.reportTargetNotFound();
+      }
       target = { toolsetId: toolset.id };
     } else if (body.toolId) {
       const [tool] = await this.tools.findByIds([body.toolId]);
