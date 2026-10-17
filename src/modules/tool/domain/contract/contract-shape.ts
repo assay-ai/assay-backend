@@ -98,6 +98,19 @@ function sideProblems(
       problems.push(`optional ${side} field "${name}" cannot also be required`);
     }
   }
+  // Core means required (review P1-2): an output field is either one every
+  // binding must return, or optional and opt-in. A third kind — core but
+  // allowed to be missing — is a promise nobody is held to, and a toolset
+  // entry that requires it would pay for an answer without it.
+  if (side === 'output') {
+    for (const name of Object.keys(properties)) {
+      if (!required.has(name) && !optional.includes(name)) {
+        problems.push(
+          `output field "${name}" is neither required nor optional: make it required, or list it in optionalOutputFields`,
+        );
+      }
+    }
+  }
   problems.push(...annotationProblems(side, schema, ''));
   return problems;
 }

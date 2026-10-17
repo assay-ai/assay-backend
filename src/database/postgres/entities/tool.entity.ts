@@ -57,6 +57,10 @@ export class ToolEntity {
   @Column({ name: 'current_version', type: 'int', nullable: true })
   currentVersion: number | null;
 
+  /** The highest version number ever handed out, discarded drafts included: never reused. */
+  @Column({ name: 'last_version_number', type: 'int', default: 0 })
+  lastVersionNumber: number;
+
   /** Named by deprecation and retirement notices when another tool replaces this one. */
   @Column({ name: 'replacement_tool_id', type: 'uuid', nullable: true })
   replacementToolId: string | null;

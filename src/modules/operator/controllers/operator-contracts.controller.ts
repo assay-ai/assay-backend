@@ -104,8 +104,11 @@ export class OperatorContractsController {
   @RequireRoles(OperatorRole.POL, OperatorRole.POLA)
   @ApiOperation({ summary: 'Discard the DRAFT version' })
   @ApiResponse({ status: 200, type: OperatorToolDto })
-  async discardDraft(@Param() params: ToolIdParamDto): Promise<OperatorToolDto> {
-    return this.contracts.discardDraft(params.id);
+  async discardDraft(
+    @CurrentOperator() operator: OperatorSession,
+    @Param() params: ToolIdParamDto,
+  ): Promise<OperatorToolDto> {
+    return this.contracts.discardDraft(operator, params.id);
   }
 
   @Post(':id/versions/:version/publish')

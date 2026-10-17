@@ -112,6 +112,7 @@ describe('the operator contract editor, against a real database', () => {
       versions,
       overrides,
       approvals,
+      approvalRows,
       router,
       lifecycle,
       changeSignal,
@@ -280,7 +281,8 @@ describe('the operator contract editor, against a real database', () => {
         approvals.approve((queued as { approvalId: string }).approvalId, approver, null),
       ),
     ).toBe(ToolErrorCode.TOOL_CONTRACT_NO_CHANGES);
-    await editor.discardDraft(toolId);
+    await approvals.reject((queued as { approvalId: string }).approvalId, author);
+    await editor.discardDraft(author, toolId);
   });
 
   it('moving current_version is two-person; then the old major can be deprecated, not the current one', async () => {
@@ -452,5 +454,50 @@ describe('the operator contract editor, against a real database', () => {
       status: 'ACTIVE',
     });
     expect(served?.version?.examples).toEqual([{ arguments: {} }]);
+  });
+
+  it('a queued publish approves the queued content: no edit, no discard, no reuse, no editor as approver (P1-1)', async () => {
+    const created = await editor.createTool({ name: 'get_guarded_example', category: 'misc' });
+    const id = created.id;
+    const saved = await editor.saveDraft(author, id, DRAFT);
+    const draftVersion = saved.draft!.version;
+    const queued = (await editor.publish(author, id, draftVersion, ACTION, null)) as {
+      approvalId: string;
+    };
+    expect(isApprovalQueued(queued)).toBe(true);
+
+    // Frozen while pending.
+    expect(await codeOf(editor.saveDraft(author, id, { ...DRAFT, summary: 'Breaking.' }))).toBe(
+      ToolErrorCode.TOOL_CONTRACT_STATE,
+    );
+    expect(await codeOf(editor.discardDraft(author, id))).toBe(ToolErrorCode.TOOL_CONTRACT_STATE);
+
+    // A change that slipped past the API is caught by the content hash.
+    await dataSource.query(
+      `UPDATE tool_versions SET summary = 'Changed behind the queue.' WHERE tool_id = $1 AND version = $2`,
+      [id, draftVersion],
+    );
+    expect(await codeOf(approvals.approve(queued.approvalId, approver, null))).toBe(
+      ToolErrorCode.TOOL_CONTRACT_STATE,
+    );
+    const [still] = (await dataSource.query(
+      `SELECT status FROM tool_versions WHERE tool_id = $1 AND version = $2`,
+      [id, draftVersion],
+    )) as { status: string }[];
+    expect(still.status).toBe('DRAFT');
+
+    // Discard and replace: never the same number again.
+    await approvals.reject(queued.approvalId, author);
+    await editor.discardDraft(author, id);
+    const replaced = await editor.saveDraft(approver, id, DRAFT);
+    expect(replaced.draft!.version).toBeGreaterThan(draftVersion);
+
+    // The operator who last edited the draft is not its second person.
+    const again = (await editor.publish(author, id, replaced.draft!.version, ACTION, null)) as {
+      approvalId: string;
+    };
+    expect(await codeOf(approvals.approve(again.approvalId, approver, null))).toBe(
+      'OPERATOR_SELF_APPROVAL_REFUSED',
+    );
   });
 });

@@ -1,3 +1,5 @@
+import { ChainId } from '@modules/chains/ports/caip.types';
+
 import { JsonSchema } from '../mapping/schema-validator';
 import {
   Tool,
@@ -43,6 +45,12 @@ export interface ContractRequest {
    * against and the hold was priced from. Still bounded by `range`.
    */
   readonly version?: number;
+  /**
+   * The chains the version is chosen for, when the caller's context names
+   * more (a quote asks about every chain to SHOW where a tool settles, but
+   * the version it picks must be one the buyer's own chain can be served at).
+   */
+  readonly versionChains?: readonly ChainId[];
 }
 
 export const NO_CONTRACT_REQUEST: ContractRequest = Object.freeze({
@@ -224,13 +232,32 @@ function fittingArguments(
 export function effectiveOutputSchema(
   version: Pick<ToolContractVersion, 'outputSchema' | 'optionalOutputFields'>,
   binding: Pick<ToolBinding, 'providesOutputFields'>,
+  /** A toolset entry's "must return": held to it as well (review P1-2). */
+  requireOutputFields: readonly string[] = [],
 ): JsonSchema {
+  const enforced = enforcedOutputs(version, binding, requireOutputFields);
+  if (enforced.length === 0) return version.outputSchema;
+  const required = [...new Set([...(version.outputSchema.required ?? []), ...enforced])];
+  return { ...version.outputSchema, required };
+}
+
+/**
+ * The outputs a call holds a binding to beyond the contract's `required`: the
+ * optional ones it declares, and those the toolset entry requires that the
+ * version defines.
+ */
+export function enforcedOutputs(
+  version: Pick<ToolContractVersion, 'outputSchema' | 'optionalOutputFields'>,
+  binding: Pick<ToolBinding, 'providesOutputFields'>,
+  requireOutputFields: readonly string[] = [],
+): readonly string[] {
   const declared = (binding.providesOutputFields ?? []).filter((field) =>
     version.optionalOutputFields.includes(field),
   );
-  if (declared.length === 0) return version.outputSchema;
-  const required = [...new Set([...(version.outputSchema.required ?? []), ...declared])];
-  return { ...version.outputSchema, required };
+  const required = requireOutputFields.filter((field) => hasOutputField(version, field));
+  return [...new Set([...declared, ...required])].filter(
+    (field) => !(version.outputSchema.required ?? []).includes(field),
+  );
 }
 
 /** The optional inputs of `version` among a call's argument names. */

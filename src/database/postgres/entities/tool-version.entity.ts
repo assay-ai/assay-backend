@@ -85,6 +85,10 @@ export class ToolVersionEntity {
   @Column({ name: 'created_by', type: 'uuid', nullable: true })
   createdBy: string | null;
 
+  /** The operator who last saved the draft; never the publish's second person. */
+  @Column({ name: 'edited_by', type: 'uuid', nullable: true })
+  editedBy: string | null;
+
   /** The operator who requested the publish (a second one approved it). */
   @Column({ name: 'published_by', type: 'uuid', nullable: true })
   publishedBy: string | null;

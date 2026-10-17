@@ -311,6 +311,9 @@
           }
         }
       },
+      "optionalOutputFields": [
+        "title"
+      ],
       "verificationPolicyId": "extract_page_text.default",
       "tier": "VERIFIED"
     },
