@@ -238,21 +238,27 @@ export class AgentAccessService {
     organizationId: string,
     body: UpdateAgentAccessBodyDto,
   ): Promise<Partial<AccessFields>> {
+    // Omitted keeps a value; a `null` list clears it; `accessMode` has no null.
     const access: Partial<AccessFields> = {};
-    if (body.accessMode !== undefined) access.accessMode = body.accessMode;
+    if (body.accessMode !== undefined && body.accessMode !== null) {
+      access.accessMode = body.accessMode;
+    }
     if (body.allowedToolsets !== undefined) {
-      access.allowedToolsets = await this.validateToolsets(organizationId, body.allowedToolsets);
+      access.allowedToolsets = await this.validateToolsets(
+        organizationId,
+        body.allowedToolsets ?? [],
+      );
     }
     if (body.allowedToolIds !== undefined) {
-      access.allowedToolIds = await this.validateToolIds(body.allowedToolIds);
+      access.allowedToolIds = await this.validateToolIds(body.allowedToolIds ?? []);
     }
     if (body.pinnedTools !== undefined) {
-      access.pinnedTools = await this.validatePinned(body.pinnedTools);
+      access.pinnedTools = await this.validatePinned(body.pinnedTools ?? []);
     }
     if (body.rules) {
       const { rules } = body;
       if (rules.excludeProviderIds !== undefined) {
-        access.ruleExcludeProviderIds = [...new Set(rules.excludeProviderIds)];
+        access.ruleExcludeProviderIds = [...new Set(rules.excludeProviderIds ?? [])];
       }
       if (rules.maxPrice !== undefined) access.ruleMaxPrice = rules.maxPrice;
       if (rules.minTier !== undefined) access.ruleMinTier = rules.minTier;

@@ -36,7 +36,7 @@ import {
   isRetryable,
 } from '@modules/tool/domain/classification';
 import { RoutingContext, RoutingRules } from '@modules/tool/domain/routing';
-import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
+import { ToolAccessErrorCode, ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
 import { CallAttribution } from '@modules/toolset/domain/attribution';
 import {
   JsonObject,
@@ -1505,6 +1505,7 @@ function isRefusedBeforeDialling(error: unknown): boolean {
   return (
     error instanceof AppError &&
     (error.errorCode === ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING ||
+      error.errorCode === ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES ||
       error.errorCode === ToolErrorCode.TOOL_PROVIDER_SLASH_HOLD ||
       error.errorCode === PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN)
   );
