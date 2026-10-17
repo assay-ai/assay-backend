@@ -94,4 +94,18 @@ export class AgentCredentialEntity extends OrganizationScopedEntity {
 
   @Column({ name: 'delegate_bound_at', type: 'timestamptz', nullable: true })
   delegateBoundAt: Date | null;
+
+  /**
+   * Per-key narrowing of the agent's access (API only, design spec §7.7).
+   * `NULL` narrows nothing; otherwise a second grant intersected with the
+   * agent's, so a key can only ever narrow.
+   */
+  @Column({ name: 'access_mode', type: 'varchar', length: 16, nullable: true })
+  accessMode: string | null;
+
+  @Column({ name: 'allowed_toolsets', type: 'jsonb', nullable: true })
+  allowedToolsets: unknown[] | null;
+
+  @Column({ name: 'allowed_tool_ids', type: 'uuid', array: true, nullable: true })
+  allowedToolIds: string[] | null;
 }

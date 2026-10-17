@@ -46,7 +46,7 @@ function policyRow(overrides: Partial<SpendPolicyEntity> = {}): SpendPolicyEntit
     maxCallsPerHour: null,
     maxCallsPerMinute: 60,
     maxSpendPerHour: '5000000',
-    allowedTools: null,
+    accessMode: 'ALL',
     requireApprovalAbove: '2000000',
     paused: false,
     changedBy: 'system',
@@ -134,32 +134,18 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — order and pause', 
   });
 });
 
-describe('SpendPolicyEnforcementService.assertCallAllowed — allowlist', () => {
-  it('2. refuses a tool not on the allowlist with MCP_TOOL_NOT_ALLOWED', async () => {
-    const { service, velocity } = build({
-      findLive: jest.fn().mockResolvedValue(policyRow({ allowedTools: ['other-tool'] })),
-    });
-
-    const code = await errorCodeOf(() => service.assertCallAllowed(input({ toolId: TOOL })));
-
-    expect(code).toBe(McpErrorCode.MCP_TOOL_NOT_ALLOWED);
-    expect(velocity.consume).not.toHaveBeenCalled();
-  });
-
-  it('permits a tool that is on the allowlist', async () => {
+describe('SpendPolicyEnforcementService.assertCallAllowed — which tools', () => {
+  // The access policy decides which tools an agent may call, before a call is
+  // priced (`AccessResolver`); this gate only weighs money, so a RESTRICTED row
+  // changes nothing here.
+  it('does not refuse a call on the access policy, which is enforced earlier', async () => {
     const { service } = build({
-      findLive: jest.fn().mockResolvedValue(policyRow({ allowedTools: [TOOL, 'other-tool'] })),
+      findLive: jest
+        .fn()
+        .mockResolvedValue(policyRow({ accessMode: 'RESTRICTED', allowedToolIds: [] })),
     });
 
     await expect(service.assertCallAllowed(input({ toolId: TOOL }))).resolves.toBe(3);
-  });
-
-  it('null allowedTools means every tool is permitted', async () => {
-    const { service } = build({
-      findLive: jest.fn().mockResolvedValue(policyRow({ allowedTools: null })),
-    });
-
-    await expect(service.assertCallAllowed(input())).resolves.toBe(3);
   });
 });
 

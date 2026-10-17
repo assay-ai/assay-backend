@@ -433,13 +433,12 @@ describe('SpendPolicyService.patch — audit log (BUG-R2-B4-01)', () => {
  */
 describe('SpendPolicyService.patch — a request that changes nothing (BUG-R8-A-01)', () => {
   const current = () =>
-    policyRow({ policyVersion: 18, dailyCap: '10000000', allowedTools: ['search'], paused: false });
+    policyRow({ policyVersion: 18, dailyCap: '10000000', pinnedTools: ['search'], paused: false });
 
   it.each([
     ['the same value for one field', { dailyCap: '10000000' }],
     ['an empty body', {}],
     ['every field restated', { perCallMax: '500000', dailyCap: '10000000', paused: false }],
-    ['the same allowlist', { allowedTools: ['search'] }],
     ['null for a limit that is already unset', { maxSpendPerHour: null }],
     ['the same asset', { assetId: USDC, decimals: DECIMALS }],
     ['only a changedBy, which is ignored', { changedBy: 'someone@example.com' }],
@@ -459,7 +458,6 @@ describe('SpendPolicyService.patch — a request that changes nothing (BUG-R8-A-
   it.each([
     ['a different value', { dailyCap: '10000001' }],
     ['a cleared limit', { dailyCap: null }],
-    ['a narrower allowlist', { allowedTools: [] }],
     ['a pause', { paused: true }],
     ['a reason, which is itself something to record', { changeReason: 'reviewed, unchanged' }],
   ])('still writes a version for %s', async (_name, patch) => {

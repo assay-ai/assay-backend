@@ -39,9 +39,6 @@ export class SpendPolicyHistoryEntryDto {
   @ApiProperty({ type: MoneyDto, nullable: true, description: 'Spend-per-hour limit' })
   maxSpendPerHour: MoneyDto | null;
 
-  @ApiProperty({ type: [String], nullable: true, description: 'Tool allowlist' })
-  allowedTools: string[] | null;
-
   @ApiProperty({ type: MoneyDto, nullable: true })
   requireApprovalAbove: MoneyDto | null;
 

@@ -63,7 +63,6 @@ export interface AssertCallAllowedInput {
  *
  * ```text
  *  1. paused?                      → MCP_POLICY_AGENT_PAUSED     (not retryable)
- *  2. tool on the allowlist?       → MCP_TOOL_NOT_ALLOWED        (not retryable)
  *  3. per-call ceiling?            → MCP_SPEND_LIMIT_EXCEEDED    (not retryable)
  *  3b. above requireApprovalAbove? → MCP_APPROVAL_REQUIRED       (not retryable)
  *  4. velocity (min/hr/dup)        → MCP_VELOCITY_LIMIT_EXCEEDED (retryable)
@@ -82,11 +81,9 @@ export interface AssertCallAllowedInput {
  * exhausted would see `MCP_SPEND_LIMIT_EXCEEDED` and never learn a human
  * intervened.
  *
- * **Allowlist before any money math.** `MCP_TOOL_NOT_ALLOWED` is a
- * configuration fact — this tool is categorically off-limits for this agent —
- * and it is cheaper to decide (an array membership test) than every check
- * below it. There is also no sense in which "you're $0.01 over budget" is a
- * more useful answer than "this tool isn't on your list" when both are true.
+ * **Which tools an agent may call is not decided here.** The access policy
+ * (`access_*` on this same row) is enforced before the call is priced, by the
+ * MCP server's access check, so a refused tool never reaches a money check.
  *
  * **Per-call before velocity, velocity before the period caps.** Each check
  * is strictly narrower in scope than the next: per-call looks at nothing but
@@ -151,7 +148,7 @@ export interface AssertCallAllowedInput {
  * A `spend_policies` row denominates every limit in one asset
  * (`spend_policies.asset_id`). If this call's `price.asset` differs from the
  * resolved policy's asset, the call is **refused** (`MCP_SPEND_LIMIT_EXCEEDED`,
- * `limitType: 'asset_mismatch'`), after the pause and the allowlist.
+ * `limitType: 'asset_mismatch'`), after the pause.
  * `MoneyUtil` refuses to compare two different assets, and coercing one into
  * the other's units is not this service's job — but skipping the money checks,
  * as this once did, ran the call with no cap at all while the policy screen
@@ -264,7 +261,7 @@ export class SpendPolicyEnforcementService {
   }
 
   async assertCallAllowed(input: AssertCallAllowedInput): Promise<number | null> {
-    const { organizationId, agentId, toolId, price, requestHash } = input;
+    const { organizationId, agentId, price, requestHash } = input;
 
     const policy = await this.resolveLivePolicy(organizationId, agentId, price);
     if (!policy) {
@@ -275,7 +272,7 @@ export class SpendPolicyEnforcementService {
       return null;
     }
 
-    this.assertPolicyAdmits(policy, agentId, toolId, price);
+    this.assertPolicyAdmits(policy, agentId, price);
 
     // 4. Velocity — calls/minute, calls/hour, duplicate-hash (attempts).
     const violation = await this.velocity.consume(agentId, requestHash, {
@@ -375,7 +372,7 @@ export class SpendPolicyEnforcementService {
    * (`BuyerDebtService.settle`, review-buyer-debt M4): the agent is not paused,
    * and the amount fits the policy's asset, per-call ceiling and approval
    * threshold — the checks a call of that price would meet before any money
-   * moved. Not the allowlist (paying for a call already served is not calling
+   * moved. Not the access policy (paying for a call already served is not calling
    * the tool again), not velocity (the request hash was consumed by the call
    * itself) and not the hourly / daily / monthly caps (an outstanding debt
    * already counts in them: adding it again would count it twice). The payer's
@@ -388,29 +385,15 @@ export class SpendPolicyEnforcementService {
   }): Promise<void> {
     const policy = await this.resolveLivePolicy(input.organizationId, input.agentId, input.price);
     if (!policy) return;
-    this.assertPolicyAdmits(policy, input.agentId, null, input.price);
+    this.assertPolicyAdmits(policy, input.agentId, input.price);
   }
 
-  /**
-   * The pause, the allowlist (`toolId` null: not asked), the asset, the
-   * per-call ceiling and the approval threshold, in that order.
-   */
-  private assertPolicyAdmits(
-    policy: SpendPolicyEntity,
-    agentId: string,
-    toolId: string | null,
-    price: Money,
-  ): void {
+  /** The pause, the asset, the per-call ceiling and the approval threshold, in that order. */
+  private assertPolicyAdmits(policy: SpendPolicyEntity, agentId: string, price: Money): void {
     // 1. Paused — "a human stopped this", checked before anything else can
     // give a different, wrong reason.
     if (policy.paused) {
       throw McpErrors.policyAgentPaused({ agentId });
-    }
-
-    // 2. Allowlist — `NULL` = every tool, `[]` = no tool (the entity's own
-    // doc comment).
-    if (toolId !== null && policy.allowedTools !== null && !policy.allowedTools.includes(toolId)) {
-      throw McpErrors.toolNotAllowed({ toolId, allowedTools: policy.allowedTools });
     }
 
     // Fails CLOSED on an asset the policy is not denominated in (review
@@ -479,6 +462,25 @@ export class SpendPolicyEnforcementService {
     return this.policies.findLive(organizationId, agentId);
   }
 
+  /**
+   * The organization default, seeded from the documented defaults when none
+   * exists yet — for a write that must land on top of it (the access policy
+   * of an agent that has never made a call) rather than replace it with an
+   * uncapped agent row.
+   */
+  async ensureOrganizationDefault(
+    organizationId: string,
+    asset: AssetId,
+    decimals: number,
+  ): Promise<void> {
+    if (await this.policies.findLive(organizationId)) return;
+    try {
+      await this.seedOrganizationDefault(organizationId, MoneyUtil.of('0', asset, decimals));
+    } catch (error) {
+      if (!isUniqueViolation(error)) throw error;
+    }
+  }
+
   /** The documented defaults, written once as the organization default. */
   private async seedOrganizationDefault(organizationId: string, price: Money): Promise<void> {
     const decimals = price.decimals;
@@ -497,7 +499,6 @@ export class SpendPolicyEnforcementService {
         SPEND_POLICY_DOLLAR_DEFAULTS.maxSpendPerHourCents,
         decimals,
       ),
-      allowedTools: null,
       requireApprovalAbove: centsToAtomicUnits(
         SPEND_POLICY_DOLLAR_DEFAULTS.requireApprovalAboveCents,
         decimals,

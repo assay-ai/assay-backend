@@ -94,20 +94,45 @@ export class SpendPolicyEntity extends OrganizationScopedEntityWithoutSoftDelete
   maxSpendPerHour: string | null;
 
   /**
-   * The tools this scope may call at all.
-   *
-   * `NULL` means *every* tool, matching
-   * `SpendPolicy.allowedTools: readonly string[] | null`. An empty array is
-   * therefore a different and meaningful thing: no tool is allowed, a stop that
-   * does not destroy the caps that would say why.
-   * `chk_spend_policies_allowed_tools_array` keeps it an array either way.
-   *
-   * Enforced here at the gateway. The same list belongs in the Privy signer
-   * policy, where a platform bug cannot exceed it — until then this is an
-   * application-level check and must not be described as more than that.
+   * What this scope may call, whatever URL the call arrives through (design
+   * spec §7.7). `ALL` by default; `RESTRICTED` allows {@link allowedToolsets}
+   * and {@link allowedToolIds} only. Replaces the old `allowed_tools` list.
+   * Enforced on every MCP call (`AccessResolver`), never only on the list.
    */
-  @Column({ name: 'allowed_tools', type: 'jsonb', nullable: true })
-  allowedTools: string[] | null;
+  @Column({ name: 'access_mode', type: 'varchar', length: 16, default: 'ALL' })
+  accessMode: string;
+
+  /** `[{ toolsetId, version, viaUrlOnly }]` — see `AllowedToolsetRef`. */
+  @Column({ name: 'allowed_toolsets', type: 'jsonb', default: () => `'[]'::jsonb` })
+  allowedToolsets: unknown[];
+
+  @Column({ name: 'allowed_tool_ids', type: 'uuid', array: true, default: () => `'{}'::uuid[]` })
+  allowedToolIds: string[];
+
+  /** Agent rule: providers this scope never routes to. */
+  @Column({
+    name: 'rule_exclude_provider_ids',
+    type: 'uuid',
+    array: true,
+    default: () => `'{}'::uuid[]`,
+  })
+  ruleExcludeProviderIds: string[];
+
+  /** Agent rule: the most one call may cost, in atomic units of {@link assetId}. */
+  @Column({ name: 'rule_max_price', type: 'numeric', precision: 78, scale: 0, nullable: true })
+  ruleMaxPrice: string | null;
+
+  /** Agent rule: the lowest `ProviderTier` a call may be routed to. */
+  @Column({ name: 'rule_min_tier', type: 'varchar', length: 16, nullable: true })
+  ruleMinTier: string | null;
+
+  /** Agent rule: 0..1. Stored; no effect until backlog G1.1. */
+  @Column({ name: 'rule_min_quality', type: 'numeric', precision: 4, scale: 3, nullable: true })
+  ruleMinQuality: string | null;
+
+  /** "Always loaded" on search URLs (T2), at most 5 tool names. */
+  @Column({ name: 'pinned_tools', type: 'text', array: true, default: () => `'{}'::text[]` })
+  pinnedTools: string[];
 
   /** Above this, `tools/call` elicits user approval instead of spending. */
   @Column({
