@@ -1,6 +1,7 @@
 import { Injectable, Logger } from '@nestjs/common';
 
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { readEpoch } from '@shared/cache/redis-cache/epoch-counter';
 
 /**
  * One counter per organization that every cached access or MCP view of that
@@ -10,6 +11,9 @@ import { CacheService } from '@shared/cache/redis-cache/cache.service';
  * bumps it, and every MCP instance sees the new value on its next request:
  * invalidation is immediate and cross-instance without a broadcast. The 60 s
  * TTL on the cached values is only a backstop.
+ *
+ * A missing key is created from the clock, never read as a constant, so an
+ * evicted counter cannot make old entries match again (`readEpoch`).
  *
  * Fails safe both ways: an unreadable counter reads as "no cache", so the
  * value is recomputed rather than served stale; a failed bump is logged and
@@ -24,7 +28,7 @@ export class AccessEpochService {
   /** The organization's current epoch, or `null` when it cannot be read. */
   async current(organizationId: string): Promise<string | null> {
     try {
-      return (await this.cache.getRaw(epochKey(organizationId))) ?? '0';
+      return await readEpoch(this.cache.getRedisClient(), epochKey(organizationId));
     } catch {
       return null;
     }

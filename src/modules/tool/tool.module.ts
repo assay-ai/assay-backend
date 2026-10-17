@@ -22,7 +22,7 @@ import {
 } from './services/in-memory-tool-catalogue';
 import { ProviderRouterService } from './services/provider-router.service';
 import { QuoteIndexService } from './services/quote-index.service';
-import { ToolBindingChangeSubscriber } from './services/tool-binding-change.subscriber';
+import { QuoteIndexInvalidationSubscriber } from './services/quote-index-invalidation.subscriber';
 import { ToolRegistrySeeder } from './services/tool-registry.seeder';
 import {
   DEFAULT_ROUTER_TUNING,
@@ -149,9 +149,9 @@ import {
     ProviderRouterService,
 
     // What `tools/list` and the Connect preview price from: candidates cached
-    // per tool, reloaded every minute and on every binding write.
+    // per tool, reloaded every minute and on every write a price depends on.
     QuoteIndexService,
-    ToolBindingChangeSubscriber,
+    QuoteIndexInvalidationSubscriber,
   ],
   // `BINDING_INVOKER` is exported for the mapping tester, which dials a
   // provider's endpoint through the *same* invoker production uses, rather

@@ -12,6 +12,7 @@ import { AssetId } from '@modules/chains/ports/caip.types';
 import { McpSession, storedCredentialIdOf } from '@modules/mcp/ports/mcp-session.port';
 import { ProviderTier } from '@modules/provider/ports/provider.types';
 import { AgentRoutingRules } from '@modules/tool/domain/routing';
+import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
 import { MoneyUtil } from '@utils/money.util';
 
 import {
@@ -31,9 +32,11 @@ export const ACCESS_CLOCK = 'ACCESS_CLOCK';
 
 interface CachedAccess {
   readonly epoch: string;
-  readonly at: number;
   readonly value: ResolvedAccess;
 }
+
+/** Credentials kept per process; the coldest goes first. */
+export const ACCESS_CACHE_MAX_ENTRIES = 50_000;
 
 /**
  * An agent's access, its key's narrowing and its agent rules, resolved once
@@ -53,7 +56,7 @@ interface CachedAccess {
  */
 @Injectable()
 export class AccessResolver {
-  private readonly cache = new Map<string, CachedAccess>();
+  private readonly cache: BoundedTtlCache<CachedAccess>;
 
   constructor(
     private readonly policies: SpendPolicyRepository,
@@ -62,7 +65,9 @@ export class AccessResolver {
     private readonly entries: ToolsetEntryRepository,
     private readonly epochs: AccessEpochService,
     @Optional() @Inject(ACCESS_CLOCK) private readonly now: () => number = Date.now,
-  ) {}
+  ) {
+    this.cache = new BoundedTtlCache(ACCESS_CACHE_MAX_ENTRIES, ACCESS_CACHE_TTL_MS, now);
+  }
 
   resolve(session: McpSession): Promise<ResolvedAccess> {
     return this.resolveFor(session.organizationId, session.agentId, storedCredentialIdOf(session));
@@ -76,17 +81,10 @@ export class AccessResolver {
     const key = `${organizationId}:${agentId}:${credentialId ?? '-'}`;
     const epoch = await this.epochs.current(organizationId);
     const cached = this.cache.get(key);
-    if (
-      epoch !== null &&
-      cached &&
-      cached.epoch === epoch &&
-      this.now() - cached.at < ACCESS_CACHE_TTL_MS
-    ) {
-      return cached.value;
-    }
+    if (epoch !== null && cached?.epoch === epoch) return cached.value;
 
     const value = await this.load(organizationId, agentId, credentialId);
-    if (epoch !== null) this.cache.set(key, { epoch, at: this.now(), value });
+    if (epoch !== null) this.cache.set(key, { epoch, value });
     return value;
   }
 

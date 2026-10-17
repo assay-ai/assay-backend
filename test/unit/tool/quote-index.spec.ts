@@ -38,8 +38,14 @@ describe('QuoteIndexService', () => {
     let now = 1_000_000;
     let epoch: string | null = '1';
     const cache = {
-      getRaw: jest.fn(async (key: string) => (key === QUOTE_INDEX_EPOCH_KEY ? epoch : null)),
-      getRedisClient: () => ({ incr: async () => (epoch = String(Number(epoch) + 1)) }),
+      getRedisClient: () => ({
+        get: async (key: string) => (key === QUOTE_INDEX_EPOCH_KEY ? epoch : null),
+        set: async (_key: string, value: string) => {
+          epoch ??= value;
+          return 'OK';
+        },
+        incr: async () => (epoch = String(Number(epoch) + 1)),
+      }),
     } as unknown as CacheService;
     const index = new QuoteIndexService(
       router as ProviderRouterService,
@@ -99,6 +105,16 @@ describe('QuoteIndexService', () => {
     await index.bumpEpoch();
     await index.quote(TOOL_ID, ROUTING_CONTEXT);
     expect(gathers).toHaveBeenCalledTimes(3);
+  });
+
+  it('an evicted epoch key never matches the entries cached before it', async () => {
+    const { index, gathers, setEpoch } = build();
+    setEpoch(null);
+    await index.quote(TOOL_ID, ROUTING_CONTEXT);
+    // Redis lost the key: the next read creates a new one from the clock.
+    setEpoch(null);
+    await index.quote(TOOL_ID, ROUTING_CONTEXT);
+    expect(gathers).toHaveBeenCalledTimes(2);
   });
 
   it('shares one load among concurrent listings', async () => {
