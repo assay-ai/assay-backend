@@ -39,7 +39,9 @@ import { readSnapshotEntries } from '../domain/snapshot';
 import {
   DEFAULT_SEARCH_THRESHOLD,
   McpEndpointView,
+  EntryContract,
   StoredEntryRule,
+  entryContractOf,
   ViewNotice,
   entryRulesOf,
 } from '../domain/view';
@@ -241,9 +243,12 @@ export class McpEndpointResolver {
 
     const rows = await this.entries.findByToolsets([toolset.id]);
     const entryRules = new Map<string, EntryRoutingRules>();
+    const entryContracts = new Map<string, EntryContract>();
     for (const row of rows) {
       const rules = entryRulesOf(row);
       if (rules) entryRules.set(row.toolId, rules);
+      const contract = entryContractOf(row);
+      if (contract) entryContracts.set(row.toolId, contract);
     }
 
     return {
@@ -259,6 +264,7 @@ export class McpEndpointResolver {
       handle: null,
       baseToolIds: rows.map((row) => row.toolId),
       entryRules,
+      entryContracts,
       discovery: {
         mode: toolset.discovery.toLowerCase() as DiscoveryMode,
         searchThreshold: toolset.searchThreshold,
@@ -349,7 +355,10 @@ export class McpEndpointResolver {
   ): BaseView {
     const snapshot = readSnapshotEntries(row.entries);
     const entryRules = new Map<string, EntryRoutingRules>();
+    const entryContracts = new Map<string, EntryContract>();
     for (const entry of snapshot) {
+      const contract = entryContractOf(entry);
+      if (contract) entryContracts.set(entry.toolId, contract);
       const stored: StoredEntryRule = {
         providerMode: entry.providerMode,
         providerIds: entry.providerIds,
@@ -376,6 +385,7 @@ export class McpEndpointResolver {
       handle: options.handle,
       baseToolIds: snapshot.map((entry) => entry.toolId),
       entryRules,
+      entryContracts,
       // The snapshot's own discovery settings: a published version serves
       // the mode, threshold and pinned tools it was published with.
       discovery: {

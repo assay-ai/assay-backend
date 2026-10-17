@@ -64,8 +64,14 @@ import {
   RoutedCall,
   ToolQuote,
   bindingPrice,
-  noProviderMatchesRules,
+  contractRefused,
+  ruleRefusal,
 } from '@modules/tool/services/provider-router.service';
+import {
+  ContractRequest,
+  NO_CONTRACT_REQUEST,
+  versionOf,
+} from '@modules/tool/domain/contract/contract-versions';
 import {
   EnqueueVerificationInput,
   VerificationSettlementService,
@@ -86,7 +92,7 @@ import {
 } from '../constants/mcp.constants';
 import { argumentsFingerprint } from '../domain/idempotency';
 import { McpErrors } from '../errors/mcp.errors';
-import { McpScope, forcesFree, rulesFor } from '../ports/mcp-scope';
+import { McpScope, contractFor, forcesFree, rulesFor } from '../ports/mcp-scope';
 import { McpSession, storedCredentialIdOf } from '../ports/mcp-session.port';
 import { CallAttributionWriter } from './call-attribution.writer';
 import { McpCatalogueService } from './mcp-catalogue.service';
@@ -480,10 +486,24 @@ export class McpToolCallService {
     idempotencyKey: string | null,
     scope?: McpScope,
   ): Promise<McpCallOutcome> {
-    const plan = planOf(scope, tool.id);
-    const quote = await this.requireQuote(tool, session, plan.rules);
+    const scoped = planOf(scope, tool);
+    // The call's argument names join its contract request: an optional input
+    // they use routes only to providers that support it (§7.5), in the quote
+    // that sets the hold and in every routing phase after it.
+    const asked: CallPlan = {
+      ...scoped,
+      contract: { ...(scoped.contract ?? NO_CONTRACT_REQUEST), argumentNames: Object.keys(args) },
+    };
+    const quote = await this.requireQuote(tool, session, asked);
+    // Every later phase — relay, offer, voucher retry, route — serves the
+    // contract version this quote priced and the arguments are checked
+    // against, never one the supply moved to in between.
+    const plan: CallPlan = {
+      ...asked,
+      contract: { ...(asked.contract as ContractRequest), version: versionOf(quote.tool).version },
+    };
 
-    this.requireValidArguments(tool, args);
+    this.requireValidArguments(quote.tool, args);
 
     // Minted once, here, for the whole call — not per attempt. Failover
     // excludes the whole provider (`ProviderRouterService`'s own doc comment),
@@ -808,7 +828,7 @@ export class McpToolCallService {
     // call, so the buyer is only ever asked to sign for a provider the rules
     // allow; a pinned payee they now drop is `PAYEE_NO_LONGER_ELIGIBLE`.
     const context: RoutingContext = {
-      ...routingContextOf(session, this.enabledChains, withdrawing, plan.rules),
+      ...routingContextOf(session, this.enabledChains, withdrawing, plan.rules, plan.contract),
       onlyProviderId: payment?.providerId,
       callClass: 'PAID',
     };
@@ -984,8 +1004,9 @@ export class McpToolCallService {
   private async requireQuote(
     tool: Tool,
     session: McpSession,
-    rules?: RoutingRules,
+    plan: CallPlan = UNSCOPED_PLAN,
   ): Promise<ToolQuote> {
+    const { rules, contract } = plan;
     // A quote is not narrowed to the buyer's chains, and a CALL is: the
     // catalogue must SHOW a tool that settles elsewhere rather than hide it, so
     // the quote asks about every chain this deployment offers and reports
@@ -1002,6 +1023,9 @@ export class McpToolCallService {
       enabledChains: this.enabledChains,
       // The hold is the dearest provider the rules leave, never one they drop.
       rules,
+      // At the contract version the call may use, among the bindings that
+      // serve it, support its optional inputs and return its required outputs.
+      ...(contract ? { contract } : {}),
     });
 
     // `findByName` resolved it a moment ago, so a null quote means the
@@ -1009,10 +1033,23 @@ export class McpToolCallService {
     // for something that never existed.
     if (!quote) throw McpErrors.toolNotFound({ name: tool.name });
 
+    // No contract version this call may use can serve it: retired (naming
+    // the replacement) or never existed. Refused before any intent exists.
+    if (!quote.price && quote.contractRefusal) {
+      throw contractRefused(tool, quote.contractRefusal.refusal, {
+        payerChains: [],
+        withdrawingChains: [],
+        enabledChains: [],
+        defaultChainId: null,
+        ...(contract ? { contract } : {}),
+      });
+    }
+
     // The rules left no provider: refused before any intent exists, with each
-    // provider's reason and whose rule it was (FR-6).
+    // provider's reason and whose rule it was (FR-6) — or, when an optional
+    // input the arguments use is what nobody supports, UNSUPPORTED_INPUT_FIELD.
     if (!quote.price && quote.ruleRejections && quote.ruleRejections.length > 0) {
-      throw noProviderMatchesRules(tool.id, quote.ruleRejections);
+      throw ruleRefusal(tool.id, quote.ruleRejections);
     }
 
     if (!quote.price) {
@@ -1202,7 +1239,7 @@ export class McpToolCallService {
         // this path deliberately does not read the escrow.
         // `FREE`: a call nobody is charged for never reaches a `PAID` binding.
         context: {
-          ...routingContextOf(session, this.enabledChains, [], plan.rules),
+          ...routingContextOf(session, this.enabledChains, [], plan.rules, plan.contract),
           callClass: 'FREE',
           reserveFreeQuota: async (binding) => {
             const place = await this.freeQuota.reserveBinding({
@@ -1377,6 +1414,7 @@ export class McpToolCallService {
             this.enabledChains,
             await this.withdrawingChains(session),
             plan.rules,
+            plan.contract,
           ),
           onlyProviderId,
           // A charged call is served only by a staked, payable paid binding.
@@ -1822,6 +1860,7 @@ function isRefusedBeforeDialling(error: unknown): boolean {
     error instanceof AppError &&
     (error.errorCode === ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING ||
       error.errorCode === ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES ||
+      error.errorCode === ToolAccessErrorCode.UNSUPPORTED_INPUT_FIELD ||
       error.errorCode === ToolErrorCode.TOOL_PROVIDER_SLASH_HOLD ||
       error.errorCode === PaymentErrorCode.PAYMENT_NO_SETTLEABLE_CHAIN)
   );
@@ -2275,9 +2314,12 @@ function routingContextOf(
   withdrawingChains: readonly ChainId[],
   /** The merged entry and agent rules of a scoped call; absent off the MCP host. */
   rules?: RoutingRules,
+  /** What the call asks of the contract (T3): range, required outputs, arguments, version. */
+  contract?: ContractRequest,
 ): RoutingContext {
   return {
     ...(rules ? { rules } : {}),
+    ...(contract ? { contract } : {}),
     payerChains: [session.chainId],
     defaultChainId: session.chainId,
     enabledChains,
@@ -2334,9 +2376,13 @@ function credentialOf(session: McpSession): string | null {
   return storedCredentialIdOf(session);
 }
 
-/** What a scoped call carries through every phase: its rules, `?free=1`, and its URL. */
+/**
+ * What a scoped call carries through every phase: its rules, its contract
+ * request (T3), `?free=1`, and its URL.
+ */
 interface CallPlan {
   readonly rules: RoutingRules | undefined;
+  readonly contract?: ContractRequest;
   readonly forceFree: boolean;
   readonly attribution: CallAttribution | null;
 }
@@ -2347,10 +2393,11 @@ const UNSCOPED_PLAN: CallPlan = Object.freeze({
   attribution: null,
 });
 
-function planOf(scope: McpScope | undefined, toolId: string): CallPlan {
+function planOf(scope: McpScope | undefined, tool: Tool): CallPlan {
   if (!scope) return UNSCOPED_PLAN;
   return {
-    rules: rulesFor(scope, toolId),
+    rules: rulesFor(scope, tool.id),
+    contract: contractFor(scope, tool),
     forceFree: forcesFree(scope),
     attribution: scope.attribution,
   };
