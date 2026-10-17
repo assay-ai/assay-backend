@@ -128,6 +128,15 @@ export enum NotificationEvent {
    * toolset per 7 days; `ToolsetNoticesService` is the producer.
    */
   TOOLSET_UPDATE_AVAILABLE = 'toolset.update_available',
+  /**
+   * A contract major this organization calls through, or serves a binding
+   * on, was deprecated: it runs until `sunsetAt` (at least 90 days), then
+   * retires (design spec §7.5). Names the replacement.
+   * `ContractLifecycleService` is the producer.
+   */
+  TOOL_VERSION_DEPRECATED = 'tool_version.deprecated',
+  /** That major reached its sunset and no longer serves calls. */
+  TOOL_VERSION_RETIRED = 'tool_version.retired',
 
   // ── Credentials and signing ─────────────────────────────────────────────
   SESSION_EXPIRING = 'session.expiring',

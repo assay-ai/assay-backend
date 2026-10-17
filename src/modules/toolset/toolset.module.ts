@@ -11,6 +11,7 @@ import { AccessEpochService } from './services/access-epoch.service';
 import { AccessResolver } from './services/access.resolver';
 import { AgentAccessService } from './services/agent-access.service';
 import { ConnectUrlsService } from './services/connect-urls.service';
+import { ContractLifecycleService } from './services/contract-lifecycle.service';
 import { HandlesService } from './services/handles.service';
 import { McpEndpointResolver } from './services/mcp-endpoint.resolver';
 import { RefusedCallsService } from './services/refused-calls.service';
@@ -66,6 +67,7 @@ import { ToolsetsService } from './services/toolsets.service';
     ToolsetModerationService,
     ToolsetStatsService,
     PublicToolsetsService,
+    ContractLifecycleService,
   ],
   exports: [
     MCP_HOST_CONFIG,
@@ -83,6 +85,7 @@ import { ToolsetsService } from './services/toolsets.service';
     ToolsetModerationService,
     ToolsetStatsService,
     PublicToolsetsService,
+    ContractLifecycleService,
   ],
 })
 export class ToolsetModule {}

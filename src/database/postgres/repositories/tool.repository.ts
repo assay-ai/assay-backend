@@ -134,6 +134,40 @@ export class ToolRepository extends AbstractRepository<ToolEntity> {
     );
   }
 
+  /**
+   * A new STANDARD tool with no published version: status DRAFT, in no
+   * catalogue until its first version is published (design spec §7.5). The
+   * name is refused by `uq_tools_name` when taken.
+   */
+  async insertDraft(input: {
+    readonly name: string;
+    readonly category: string;
+    readonly tags: readonly string[];
+  }): Promise<ToolEntity> {
+    assertNoReservedToolNames([input.name], 'tools insert');
+    const [row] = (await this.query(
+      `INSERT INTO "tools" ("id", "name", "kind", "category", "tags", "visibility", "status")
+       VALUES (gen_random_uuid(), $1, 'STANDARD', $2, $3::text[], 'LISTED', 'DRAFT')
+       RETURNING "id"`,
+      [input.name, input.category, [...input.tags]],
+    )) as { id: string }[];
+    return (await this.findOne({ where: { id: row.id } })) as ToolEntity;
+  }
+
+  /** `base`, or `base_2`, `base_3` … — the first name no tool holds. */
+  async freeName(base: string): Promise<string> {
+    const rows = (await this.query(`SELECT "name" FROM "tools" WHERE "name" LIKE $1`, [
+      `${base.replace(/[%_]/g, (c) => `\\${c}`)}%`,
+    ])) as { name: string }[];
+    const taken = new Set(rows.map((row) => row.name));
+    if (!taken.has(base)) return base;
+    for (let n = 2; ; n += 1) {
+      const suffix = `_${n}`;
+      const candidate = `${base.slice(0, 48 - suffix.length)}${suffix}`;
+      if (!taken.has(candidate)) return candidate;
+    }
+  }
+
   async findByIds(ids: readonly string[]): Promise<ToolEntity[]> {
     if (ids.length === 0) return [];
     return this.find({ where: { id: In([...ids]) } });

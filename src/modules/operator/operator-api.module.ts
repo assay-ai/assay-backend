@@ -11,6 +11,7 @@ import { OperatorApprovalsController } from './controllers/operator-approvals.co
 import { OperatorArbiterController } from './controllers/operator-arbiter.controller';
 import { OperatorBlocksController } from './controllers/operator-blocks.controller';
 import { OperatorModerationController } from './controllers/operator-moderation.controller';
+import { OperatorContractsController } from './controllers/operator-contracts.controller';
 import { OperatorCasesController } from './controllers/operator-cases.controller';
 import { OperatorReferenceController } from './controllers/operator-reference.controller';
 import { OperatorOperatorsController } from './controllers/operator-operators.controller';
@@ -26,6 +27,7 @@ import { OperatorCaseListService } from './services/operator-case-list.service';
 import { OperatorCaseService } from './services/operator-case.service';
 import { OperatorDirectoryService } from './services/operator-directory.service';
 import { OperatorModerationService } from './services/operator-moderation.service';
+import { OperatorContractsService } from './services/operator-contracts.service';
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
 import { PlatformHealthService } from './services/platform-health.service';
 import { OperatorReferenceService } from './services/operator-reference.service';
@@ -76,6 +78,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     OperatorArbiterController,
     OperatorBlocksController,
     OperatorModerationController,
+    OperatorContractsController,
     OperatorCasesController,
     OperatorOperatorsController,
     OperatorOverrideLogController,
@@ -92,6 +95,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     OperatorCaseService,
     OperatorDirectoryService,
     OperatorModerationService,
+    OperatorContractsService,
     // `V-7`. `ProviderRepository` needs no import here — `PostgresModule` is
     // `@Global()`, and `OverrideLogService` already comes in with
     // `OperatorModule`.

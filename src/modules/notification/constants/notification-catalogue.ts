@@ -145,6 +145,19 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       aggregation: NotificationAggregation.ONCE,
       nonSuppressible: false,
     },
+    [NotificationEvent.TOOL_VERSION_DEPRECATED]: {
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      // One per tool major per organization: the producer's dedupe key.
+      aggregation: NotificationAggregation.ONCE,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.TOOL_VERSION_RETIRED]: {
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.ONCE,
+      nonSuppressible: false,
+    },
     [NotificationEvent.AGENT_PAUSED]: {
       severity: NotificationSeverity.WARNING,
       channels: EVERYTHING,

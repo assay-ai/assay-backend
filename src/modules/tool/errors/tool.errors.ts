@@ -20,11 +20,57 @@ export enum ToolErrorCode {
   TOOL_PROVIDER_SLASH_HOLD = 'TOOL_PROVIDER_SLASH_HOLD',
   TOOL_ALL_BINDINGS_FAILED = 'TOOL_ALL_BINDINGS_FAILED',
   TOOL_UPSTREAM_TIMEOUT = 'TOOL_UPSTREAM_TIMEOUT',
+  /** T3, the contract editor: a version that cannot be a contract (`details.problems`). */
+  TOOL_CONTRACT_INVALID = 'TOOL_CONTRACT_INVALID',
+  /** T3: the action does not fit the tool's or the version's state (`details.reason`). */
+  TOOL_CONTRACT_STATE = 'TOOL_CONTRACT_STATE',
+  /** T3: another tool holds the name. */
+  TOOL_CONTRACT_NAME_TAKEN = 'TOOL_CONTRACT_NAME_TAKEN',
+  /** T3: the draft is identical to the version it is based on. */
+  TOOL_CONTRACT_NO_CHANGES = 'TOOL_CONTRACT_NO_CHANGES',
+  /** T3: no such version of this tool. */
+  TOOL_VERSION_NOT_FOUND = 'TOOL_VERSION_NOT_FOUND',
 }
 
 export type ToolErrorCodesArePrefixed = AssertDomainErrorCodes<'TOOL', `${ToolErrorCode}`>;
 
 export const ToolErrors = createDomainErrorFactory('TOOL', {
+  contractInvalid: {
+    code: ToolErrorCode.TOOL_CONTRACT_INVALID,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Not a valid contract` +
+      `${Array.isArray(context?.problems) && context.problems.length ? `: ${context.problems.join('; ')}` : ''}`,
+    publicContext: ['problems'],
+  },
+  contractState: {
+    code: ToolErrorCode.TOOL_CONTRACT_STATE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Not possible in this state${context?.reason ? `: ${context.reason}` : ''}`,
+    publicContext: ['reason'],
+  },
+  contractNameTaken: {
+    code: ToolErrorCode.TOOL_CONTRACT_NAME_TAKEN,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `A tool is already named ${context?.name ?? 'that'}` +
+      `${context?.suggestion ? `; ${context.suggestion} is free` : ''}`,
+    publicContext: ['name', 'suggestion'],
+  },
+  contractNoChanges: {
+    code: ToolErrorCode.TOOL_CONTRACT_NO_CHANGES,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `The draft is identical to v${context?.base ?? '?'}; there is nothing to publish`,
+    publicContext: ['base'],
+  },
+  versionNotFound: {
+    code: ToolErrorCode.TOOL_VERSION_NOT_FOUND,
+    statusCode: 404,
+    message: (context?: Record<string, any>) =>
+      `No such version${context?.version ? `: ${context.version}` : ''}`,
+  },
   toolNotFound: {
     code: ToolErrorCode.TOOL_NOT_FOUND,
     statusCode: 404,
