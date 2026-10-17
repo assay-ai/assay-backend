@@ -1,5 +1,8 @@
 import { Module } from '@nestjs/common';
 
+import { EnabledChainsModule } from '@modules/chains/enabled-chains.module';
+import { ToolModule } from '@modules/tool/tool.module';
+
 import { AgentServersController, McpUrlsController } from './controllers/mcp-urls.controller';
 import { McpModule } from './mcp.module';
 import { McpUrlPreviewService } from './services/mcp-url-preview.service';
@@ -10,7 +13,9 @@ import { McpUrlPreviewService } from './services/mcp-url-preview.service';
  * itself and is mounted only by the MCP service.
  */
 @Module({
-  imports: [McpModule],
+  // `ToolModule` for the catalogue and the quote index the preview prices
+  // from; `EnabledChainsModule` for the chains it quotes on.
+  imports: [McpModule, ToolModule, EnabledChainsModule],
   controllers: [McpUrlsController, AgentServersController],
   providers: [McpUrlPreviewService],
 })
