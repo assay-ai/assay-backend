@@ -26,6 +26,7 @@ import { CreateApiSurfaceTables1756000000000 } from '@database/postgres/migratio
 import { RoutedPaymentIntents1755600000000 } from '@database/postgres/migrations/1755600000000-routed-payment-intents';
 import { CallIdAndCallClass1756800000000 } from '@database/postgres/migrations/1756800000000-call-id-and-call-class';
 import { CreateToolBindingTables1756900000000 } from '@database/postgres/migrations/1756900000000-create-tool-binding-tables';
+import { ToolBindingAuthMode1762000000002 } from '@database/postgres/migrations/1762000000002-tool-binding-auth-mode';
 import { BindingTrafficControls1757200000000 } from '@database/postgres/migrations/1757200000000-binding-traffic-controls';
 import { NotificationsLimitsAndFreeTier1757500000000 } from '@database/postgres/migrations/1757500000000-notifications-limits-and-free-tier';
 import { SettledIntentsNamePayee1758100000000 } from '@database/postgres/migrations/1758100000000-settled-intents-name-payee';
@@ -195,6 +196,7 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
       // reads, and the partial index its 30-day scans use.
       CreateOrganizationsAndAgents1757900000000,
       PublicExplorerIndex1760400000000,
+      ToolBindingAuthMode1762000000002,
     ],
     synchronize: false,
     logging: process.env.WITHHELD_TEST_LOGGING === 'true',

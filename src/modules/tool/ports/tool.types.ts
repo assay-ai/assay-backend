@@ -20,6 +20,14 @@ export enum ToolTier {
   GUARANTEED = 'GUARANTEED',
 }
 
+/** How a binding authenticates to the provider endpoint. Descriptive; not a versioned term. */
+export enum BindingAuthMode {
+  NONE = 'NONE',
+  API_KEY = 'API_KEY',
+  SIGNATURE = 'SIGNATURE',
+  BOTH = 'BOTH',
+}
+
 export enum BindingStatus {
   /** Written but never published — not routable, editable freely. */
   DRAFT = 'DRAFT',

@@ -11,14 +11,20 @@ import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { evaluateStakeGate } from '@modules/tool/domain/routing/stake-gate';
 import { MinimumStakeByChain, RoutingCandidate } from '@modules/tool/domain/routing/routing.types';
-import { MappingDirection } from '@modules/tool/domain/mapping/mapping.types';
+import { MappingDirection, RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 import { checkResponseAgainstSchema } from '@modules/tool/domain/mapping/contract-check';
 import {
   inspectRequestMapping,
   inspectResponseMapping,
 } from '@modules/tool/domain/mapping/mapping-validator';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingStatus, PricingMode, Tool, ToolBinding } from '@modules/tool/ports/tool.types';
+import {
+  BindingAuthMode,
+  BindingStatus,
+  PricingMode,
+  Tool,
+  ToolBinding,
+} from '@modules/tool/ports/tool.types';
 import { canonicalJson } from '@shared/crypto/canonical-json';
 
 import {
@@ -29,6 +35,7 @@ import {
 import { ProviderRoutingState } from '../ports/provider.types';
 import { ValidateMappingBodyDto, ValidateMappingResponseDto } from '../dto/validate-mapping.dto';
 import { ProviderErrors } from '../errors/provider.errors';
+import { credentialQueryKeys, secretConstantHeaders } from '../credentials/credential-rules';
 import {
   CHAIN_ENROLMENT_SOURCE,
   ChainEnrolmentPort,
@@ -198,6 +205,7 @@ export class BindingEditorService {
     const context = { toolId: body.toolId, providerId: organizationId };
     const request = inspectRequestMapping(body.requestMapping, context);
     const requestMapping = request.spec;
+    assertNoCredentialsInMapping(body.endpoint, requestMapping);
     const responseMapping = inspectResponseMapping(body.responseMapping, context).spec;
     // The contract half (T3): the majors served — the tool's current major
     // unless named — and the optional fields promised, checked against every
@@ -230,6 +238,7 @@ export class BindingEditorService {
     row.toolVersionRange = toolVersionRange;
     row.providesOutputFields = terms.providesOutputFields;
     row.supportsInputFields = terms.supportsInputFields;
+    row.authMode = body.authMode ?? BindingAuthMode.NONE;
     row.pricingMode = body.pricingMode;
     row.priceAmount = body.pricingMode === PricingMode.FREE ? '0' : body.priceAmount;
     row.assetId = body.assetId;
@@ -301,6 +310,10 @@ export class BindingEditorService {
       }).spec;
     }
 
+    if (body.requestMapping !== undefined || body.endpoint !== undefined) {
+      assertNoCredentialsInMapping(body.endpoint ?? row.endpoint, row.requestMapping);
+    }
+
     if (body.responseMapping !== undefined) {
       const context = { toolId: row.toolId, bindingId: row.id, providerId: organizationId };
       row.responseMapping = inspectResponseMapping(body.responseMapping, context).spec;
@@ -347,6 +360,8 @@ export class BindingEditorService {
     // offered on no chain is unroutable in a way no screen explains.
     if (body.settlementChains !== undefined) row.settlementChains = body.settlementChains;
     if (body.endpoint !== undefined) row.endpoint = body.endpoint;
+    // Outside `VERSIONED_FIELDS`: a descriptive setting, not a term of the revision.
+    if (body.authMode !== undefined) row.authMode = body.authMode;
     if (body.pricingMode !== undefined) row.pricingMode = body.pricingMode;
     if (body.priceAmount !== undefined) row.priceAmount = body.priceAmount;
     if (body.freeQuotaPerAgent !== undefined) row.freeQuotaPerAgent = body.freeQuotaPerAgent;
@@ -683,6 +698,14 @@ function snapshotOf(row: ToolBindingEntity, authoredBy: string): BindingVersionE
  * until someone writes a real body here.
  */
 export const toSavedDto: (row: ToolBindingEntity) => SavedToolBindingDto = toDetailDto;
+
+/** Refuses credentials in the endpoint query, constant query entries, and secret-looking constant headers. */
+function assertNoCredentialsInMapping(endpoint: string, mapping: RequestMappingSpec): void {
+  const keys = credentialQueryKeys(endpoint, mapping);
+  if (keys.length > 0) throw ProviderErrors.credentialInQuery({ keys });
+  const headers = secretConstantHeaders(mapping);
+  if (headers.length > 0) throw ProviderErrors.secretInMapping({ headers });
+}
 
 function dedupe(values: readonly string[]): string[] {
   return [...new Set(values)].sort();

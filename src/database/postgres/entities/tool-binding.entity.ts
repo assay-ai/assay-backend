@@ -71,6 +71,10 @@ export class ToolBindingEntity extends OrganizationScopedEntityWithoutSoftDelete
   @Column({ name: 'pricing_mode', type: 'varchar', length: 16 })
   pricingMode: string;
 
+  /** `BindingAuthMode`. Not a versioned field: changing it never bumps `mappingVersion`. */
+  @Column({ name: 'auth_mode', type: 'varchar', length: 16, default: 'NONE' })
+  authMode: string;
+
   /** Minor units, as a string — `numeric(78,0)`, like every other money column. */
   @Column({ name: 'price_amount', type: 'numeric', precision: 78, scale: 0 })
   priceAmount: string;

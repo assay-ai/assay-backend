@@ -14,7 +14,7 @@ import {
 import { MappingDirection } from '@modules/tool/domain/mapping/mapping.types';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import {
@@ -355,6 +355,44 @@ describe('BindingEditorService.create — what gets stored', () => {
     // dispute argues over the price that was in force, not today's.
     expect(snapshot.priceAmount).toBe('50000');
     expect(snapshot.publishedAt).toBeNull();
+  });
+
+  it('refuses a credential-like key in the endpoint query, and writes nothing', async () => {
+    const { service, written } = build();
+
+    await expectErrorCodeAsync(
+      () => service.create(PROVIDER, SUBJECT, body({ endpoint: 'https://x.test?apikey=1' })),
+      ProviderErrorCode.PROVIDER_CREDENTIAL_IN_QUERY,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('refuses a secret-looking constant header on update', async () => {
+    const { service, written } = build(row());
+
+    await expectErrorCodeAsync(
+      () =>
+        service.update(PROVIDER, SUBJECT, row().id, {
+          requestMapping: {
+            method: 'POST',
+            path: '/search',
+            headers: { Authorization: { $const: 'Bearer x' } },
+            body: { q: '$.query' },
+          },
+        }),
+      ProviderErrorCode.PROVIDER_SECRET_IN_MAPPING,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('changes authMode without bumping the revision', async () => {
+    const { service } = build(row());
+    const saved = await service.update(PROVIDER, SUBJECT, row().id, {
+      authMode: BindingAuthMode.API_KEY,
+    });
+
+    expect(saved.authMode).toBe('API_KEY');
+    expect(saved.version).toBe(3);
   });
 
   it('prices a FREE binding at zero whatever the caller sent', async () => {
