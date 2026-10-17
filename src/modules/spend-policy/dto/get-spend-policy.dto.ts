@@ -102,15 +102,6 @@ export class SpendPolicyDto {
   maxSpendPerHour: MoneyDto | null;
 
   @ApiProperty({
-    type: [String],
-    nullable: true,
-    description:
-      'Tool allowlist. `null` = every tool is allowed. `[]` = no tool is allowed — a stop ' +
-      'distinct from pausing (see `paused`)',
-  })
-  allowedTools: string[] | null;
-
-  @ApiProperty({
     type: MoneyDto,
     nullable: true,
     description: 'Above this, the call elicits approval instead of spending',

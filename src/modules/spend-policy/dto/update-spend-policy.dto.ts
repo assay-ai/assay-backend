@@ -1,6 +1,5 @@
 import { ApiPropertyOptional } from '@nestjs/swagger';
 import {
-  IsArray,
   IsBoolean,
   IsInt,
   IsOptional,
@@ -90,18 +89,6 @@ export class UpdateSpendPolicyDto {
   @IsOptional()
   @Matches(ATOMIC_AMOUNT_RE)
   maxSpendPerHour?: string | null;
-
-  @ApiPropertyOptional({
-    type: [String],
-    nullable: true,
-    description:
-      'Tool allowlist. `null` (or omitted on the first version) allows every tool. `[]` allows ' +
-      'none. An explicit `null` on a later PATCH clears a narrower list back to "every tool"',
-  })
-  @IsOptional()
-  @IsArray()
-  @IsString({ each: true })
-  allowedTools?: string[] | null;
 
   @ApiPropertyOptional({
     nullable: true,
