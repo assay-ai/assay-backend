@@ -126,7 +126,7 @@ describe('MCP URLs — the canonical query', () => {
 
   it('keeps free=1 only, and a contract pin on a tool', () => {
     expect(canonical('/?free=0')).toBe(`${BASE}/`);
-    expect(canonical('/?free=true')).toBe(`${BASE}/`);
+    expect(canonical('/?free=1&free=0')).toBe(`${BASE}/`);
     expect(canonical('/?tools=get_weather@1')).toBe(`${BASE}/?tools=get_weather@1`);
   });
 
@@ -135,6 +135,10 @@ describe('MCP URLs — the canonical query', () => {
     expect(parseMcpUrl(`/?tools=${names}`)).toBeNull();
     expect(parseMcpUrl('/?tools=Not A Tool')).toBeNull();
     expect(parseMcpUrl('/?discovery=everything')).toBeNull();
+    // `free=` is `0` or `1`; anything else is refused like an unknown `discovery=`.
+    for (const value of ['true', 'yes', '', '2']) {
+      expect(parseMcpUrl(`/?free=${value}`)).toBeNull();
+    }
   });
 
   it('stores only the filters that differ from the default, and reads them back', () => {

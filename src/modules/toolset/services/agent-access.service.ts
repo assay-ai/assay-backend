@@ -180,14 +180,23 @@ export class AgentAccessService {
   ): Promise<CredentialAccessDto> {
     const credential = await this.requireCredential(organizationId, credentialId);
 
-    const narrows = body.accessMode === AccessMode.RESTRICTED;
-    const values = narrows
-      ? {
-          accessMode: AccessMode.RESTRICTED,
-          allowedToolsets: await this.validateToolsets(organizationId, body.allowedToolsets ?? []),
-          allowedToolIds: await this.validateToolIds(body.allowedToolIds ?? []),
-        }
-      : { accessMode: null, allowedToolsets: null, allowedToolIds: null };
+    // An omitted field keeps its value; `accessMode: null` (or ALL) removes
+    // the narrowing whole.
+    const mode = body.accessMode === undefined ? credential.accessMode : body.accessMode;
+    const values =
+      mode === AccessMode.RESTRICTED
+        ? {
+            accessMode: AccessMode.RESTRICTED,
+            allowedToolsets:
+              body.allowedToolsets === undefined
+                ? readAllowedToolsets(credential.allowedToolsets)
+                : await this.validateToolsets(organizationId, body.allowedToolsets ?? []),
+            allowedToolIds:
+              body.allowedToolIds === undefined
+                ? (credential.allowedToolIds ?? [])
+                : await this.validateToolIds(body.allowedToolIds ?? []),
+          }
+        : { accessMode: null, allowedToolsets: null, allowedToolIds: null };
 
     await this.dataSource.transaction(async (manager) => {
       await manager.update(AgentCredentialEntity, { organizationId, id: credential.id }, values);

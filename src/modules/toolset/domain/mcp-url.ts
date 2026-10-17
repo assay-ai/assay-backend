@@ -431,8 +431,11 @@ function parseQuery(raw: string): ViewFilter | null {
     categories = [...new Set(categoryTexts)].sort(compare);
   }
 
-  const freeValues = params.getAll('free');
-  const free = freeValues.length > 0 && freeValues[freeValues.length - 1].trim() === '1';
+  // `0` or `1` and nothing else: a `free=true` silently read as "not free"
+  // would serve paid tools to a URL its author meant to be free only.
+  const freeValues = params.getAll('free').map((value) => value.trim());
+  if (freeValues.some((value) => value !== '0' && value !== '1')) return null;
+  const free = freeValues.length > 0 && freeValues[freeValues.length - 1] === '1';
 
   const discoveryValues = params.getAll('discovery');
   let discovery: DiscoveryMode | null = null;
