@@ -1,3 +1,4 @@
+import { ToolVersionBriefDto } from '@modules/tool/dto/tool-contract-version.dto';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsUUID } from 'class-validator';
 
@@ -198,6 +199,30 @@ export class CatalogueToolDto {
   @ApiProperty()
   description: string;
 
+  @ApiProperty({ description: 'The current version’s summary (at most 200 characters).' })
+  summary: string;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: '1.1.0',
+    description: 'tools.current_version',
+  })
+  version: string | null;
+
+  @ApiProperty({
+    type: [ToolVersionBriefDto],
+    description: 'Every published version, newest first, with status, sunset and changelog.',
+  })
+  versions: ToolVersionBriefDto[];
+
+  @ApiProperty({
+    type: [Number],
+    example: [1],
+    description: 'Majors that are DEPRECATED (still serving until their sunset).',
+  })
+  deprecatedMajors: number[];
+
   @ApiProperty({ enum: ToolTier })
   tier: ToolTier;
 
@@ -396,4 +421,10 @@ export class GetCatalogueProviderParamsDto {
   @ApiProperty({ description: 'The provider id.' })
   @IsUUID()
   providerId: string;
+}
+
+export class GetCatalogueToolParamsDto {
+  @ApiProperty({ description: 'The tool id (`tools.id`).' })
+  @IsUUID()
+  toolId: string;
 }

@@ -1,3 +1,4 @@
+import { ToolVersionListDto } from '@modules/tool/dto/tool-contract-version.dto';
 import { Injectable } from '@nestjs/common';
 
 import { ProviderErrors } from '@modules/provider/errors/provider.errors';
@@ -69,6 +70,11 @@ export class PublicCatalogueService {
     };
   }
 
+  /** A catalogue tool's published versions and changelog. */
+  async toolVersions(toolId: string): Promise<ToolVersionListDto> {
+    return this.catalogue.toolVersions(toolId);
+  }
+
   async getProvider(providerId: string): Promise<PublicProviderDetailDto> {
     // The cached list decides first, so an unlisted id is a 404 with no query.
     const { providers } = await this.catalogue.listProviders();
@@ -111,6 +117,10 @@ function toPublicTool(tool: CatalogueToolDto): PublicToolDto {
     id: tool.id,
     name: tool.name,
     description: tool.description,
+    summary: tool.summary,
+    version: tool.version,
+    versions: tool.versions.map((version) => ({ ...version })),
+    deprecatedMajors: [...tool.deprecatedMajors],
     tier: tool.tier,
     category: tool.category,
     tags: [...tool.tags],
