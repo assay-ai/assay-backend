@@ -2,7 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsUUID } from 'class-validator';
 
 import { ListQueryDto } from '@shared/api';
-import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
 /**
@@ -79,6 +79,9 @@ export class ToolBindingDetailDto extends ToolBindingSummaryDto {
 
   @ApiProperty({ type: [String], description: 'Optional inputs this revision passes on.' })
   supportsInputFields: string[];
+
+  @ApiProperty({ enum: BindingAuthMode, description: 'How the endpoint authenticates calls.' })
+  authMode: BindingAuthMode;
 
   @ApiProperty({ description: "How the tool input maps to this provider's request shape" })
   requestMapping: unknown;

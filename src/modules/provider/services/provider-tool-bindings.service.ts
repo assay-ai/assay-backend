@@ -12,7 +12,7 @@ import { AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { platformAssetFrom } from '@modules/chains/platform-asset';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingStatus, PricingMode, Tool } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus, PricingMode, Tool } from '@modules/tool/ports/tool.types';
 import { CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
 
 import {
@@ -199,6 +199,7 @@ function toSummaryDto(row: ToolBindingEntity): ToolBindingSummaryDto {
 export function toDetailDto(row: ToolBindingEntity): ToolBindingDetailDto {
   return {
     ...toSummaryDto(row),
+    authMode: row.authMode as BindingAuthMode,
     requestMapping: row.requestMapping,
     responseMapping: row.responseMapping,
     freeQuotaPerAgent: row.freeQuotaPerAgent,

@@ -39,6 +39,7 @@ import { CreateProviderRegistrationTables1756600000000 } from '@database/postgre
 import { DropConnectivityEgressIps1762000000000 } from '@database/postgres/migrations/1762000000000-drop-connectivity-egress-ips';
 import { ProviderEarningsAndPayouts1756700000000 } from '@database/postgres/migrations/1756700000000-provider-earnings-and-payouts';
 import { CreateToolBindingTables1756900000000 } from '@database/postgres/migrations/1756900000000-create-tool-binding-tables';
+import { ToolBindingAuthMode1762000000002 } from '@database/postgres/migrations/1762000000002-tool-binding-auth-mode';
 import { ProviderStakeAuthority1757000000000 } from '@database/postgres/migrations/1757000000000-provider-stake-authority';
 import { CreateProviderChainEnrolments1759300000001 } from '@database/postgres/migrations/1759300000001-create-provider-chain-enrolments';
 import { DropProviderPayoutColumns1759300000002 } from '@database/postgres/migrations/1759300000002-drop-provider-payout-columns';
@@ -307,6 +308,7 @@ export async function createBindingEditorTestContext(
       // its snapshots and its tester runs.
       BindingContractTerms1761500000001,
       CreateBindingCredentials1762000000001,
+      ToolBindingAuthMode1762000000002,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',

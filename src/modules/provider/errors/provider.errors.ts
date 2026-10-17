@@ -228,6 +228,12 @@ export enum ProviderErrorCode {
   PROVIDER_CREDENTIAL_VAULT_UNAVAILABLE = 'PROVIDER_CREDENTIAL_VAULT_UNAVAILABLE',
   /** No active vault key is configured, so credentials cannot be stored. */
   PROVIDER_CREDENTIAL_VAULT_NOT_CONFIGURED = 'PROVIDER_CREDENTIAL_VAULT_NOT_CONFIGURED',
+  /** A credential-like key sits in the endpoint query or a constant mapping query entry. */
+  PROVIDER_CREDENTIAL_IN_QUERY = 'PROVIDER_CREDENTIAL_IN_QUERY',
+  /** A secret-looking header is set to a constant in a request mapping. */
+  PROVIDER_SECRET_IN_MAPPING = 'PROVIDER_SECRET_IN_MAPPING',
+  /** A credential header set breaks the name, value or size rules. */
+  PROVIDER_INVALID_CREDENTIAL_HEADERS = 'PROVIDER_INVALID_CREDENTIAL_HEADERS',
 }
 
 export type ProviderErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -697,5 +703,27 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     code: ProviderErrorCode.PROVIDER_CREDENTIAL_VAULT_NOT_CONFIGURED,
     statusCode: 503,
     message: () => `Credential storage is not configured on this deployment (no active vault key)`,
+  },
+  credentialInQuery: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_IN_QUERY,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Credential-like query parameter${(context?.keys?.length ?? 0) === 1 ? '' : 's'}: ` +
+      `${(context?.keys ?? []).join(', ')}. ` +
+      `URLs are logged by proxies, CDNs and servers and leak through browser history and ` +
+      `Referer headers. Send the key as a header: Authentication → API key.`,
+  },
+  secretInMapping: {
+    code: ProviderErrorCode.PROVIDER_SECRET_IN_MAPPING,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `${context?.headers?.length ? `Header ${context.headers.join(', ')}: ` : ''}` +
+      `Move this header to Authentication → API key; mappings are stored in plain text.`,
+  },
+  invalidCredentialHeaders: {
+    code: ProviderErrorCode.PROVIDER_INVALID_CREDENTIAL_HEADERS,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Invalid credential headers: ${(context?.problems ?? []).join('; ')}`,
   },
 });

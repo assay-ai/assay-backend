@@ -32,6 +32,7 @@ import { DropConnectivityEgressIps1762000000000 } from '@database/postgres/migra
 import { ProviderEarningsAndPayouts1756700000000 } from '@database/postgres/migrations/1756700000000-provider-earnings-and-payouts';
 import { CallIdAndCallClass1756800000000 } from '@database/postgres/migrations/1756800000000-call-id-and-call-class';
 import { CreateToolBindingTables1756900000000 } from '@database/postgres/migrations/1756900000000-create-tool-binding-tables';
+import { ToolBindingAuthMode1762000000002 } from '@database/postgres/migrations/1762000000002-tool-binding-auth-mode';
 import { BindingTrafficControls1757200000000 } from '@database/postgres/migrations/1757200000000-binding-traffic-controls';
 import { NotificationsLimitsAndFreeTier1757500000000 } from '@database/postgres/migrations/1757500000000-notifications-limits-and-free-tier';
 import { SettledIntentsNamePayee1758100000000 } from '@database/postgres/migrations/1758100000000-settled-intents-name-payee';
@@ -222,6 +223,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // The idempotency index narrowed to live intents (G2.1): a voided,
       // expired or refunded intent releases its key.
       IdempotencyKeyLiveIntents1761000000000,
+      ToolBindingAuthMode1762000000002,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',
