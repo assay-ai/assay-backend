@@ -132,12 +132,20 @@ export interface PublishGateInput {
   readonly payoutByChain: ReadonlyMap<ChainId, PayoutGateVerdict>;
   /** The router's own stake verdict, one per settlement chain. */
   readonly stakeByChain: ReadonlyMap<ChainId, StakeGateVerdict>;
+  /**
+   * T3: the newest run at this revision **per contract major the binding
+   * serves** (`tool_version_range`), `null` for a major never tested. When
+   * given, the two tester requirements are asked once per major (§7.5: a
+   * major needs a re-map and a passing test run for that major), and
+   * {@link latestRun} is not read.
+   */
+  readonly runsByMajor?: ReadonlyMap<number, PublishGateTestRun | null>;
 }
 
 export function evaluatePublishGate(input: PublishGateInput): PublishCheck {
   const requirements = [
-    testerRunRequirement(input),
-    testerPassedRequirement(input),
+    ...perMajor(input, testerRunRequirement, PublishRequirement.TESTER_RUN),
+    ...perMajor(input, testerPassedRequirement, PublishRequirement.TESTER_PASSED),
     ...payoutRequirements(input),
     ...stakeRequirements(input),
   ];
@@ -146,6 +154,36 @@ export function evaluatePublishGate(input: PublishGateInput): PublishCheck {
     publishable: requirements.every((requirement) => requirement.met),
     requirements,
   };
+}
+
+/**
+ * A tester requirement asked once per contract major in the binding's range:
+ * met → one entry; unmet → one entry per failing major, naming it.
+ */
+function perMajor(
+  input: PublishGateInput,
+  requirementOf: (input: PublishGateInput) => PublishRequirementResult,
+  requirement: PublishRequirement,
+): readonly PublishRequirementResult[] {
+  if (!input.runsByMajor) return [requirementOf(input)];
+  if (input.runsByMajor.size === 0) {
+    return [
+      {
+        requirement,
+        met: false,
+        code: 'no_contract_major',
+        detail: 'This binding serves no contract major, so there is nothing to test it against.',
+      },
+    ];
+  }
+  const failures: PublishRequirementResult[] = [];
+  for (const [major, run] of [...input.runsByMajor].sort(([a], [b]) => a - b)) {
+    const result = requirementOf({ ...input, latestRun: run, runsByMajor: undefined });
+    if (!result.met) {
+      failures.push({ ...result, detail: `Contract v${major}: ${result.detail ?? ''}`.trim() });
+    }
+  }
+  return failures.length > 0 ? failures : [{ requirement, met: true, code: null, detail: null }];
 }
 
 function testerRunRequirement(input: PublishGateInput): PublishRequirementResult {

@@ -12,16 +12,16 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   `tools.replacement_tool_id`, named by deprecation and retirement notices.
  *   `tools.status` gains `DRAFT`: a tool with no published version yet (an
  *   accepted tool request, a contract being drafted).
- * - `tool_bindings` (and their `binding_versions` snapshots): the contract
- *   majors a binding serves and the optional fields it declares.
- * - `binding_test_runs.tool_version`: which contract version a tester run
- *   checked, so the publish gate can ask for a green run per major.
+ * - `toolset_entries.tool_version_range` is checked to be a range of majors.
  * - `tool_requests.tool_id`: the DRAFT tool an accepted request created.
  *
  * Nothing runs in production (§11.2), so nothing is converted: bindings take
  * the column defaults (`^1`, no declared fields) and the seed writes version
  * 1.0.0 of each seeded tool at boot (local and tests only, §13 D4).
  */
+/** A range of contract majors, `^1` or `^1 || ^2`, as a Postgres regex literal. */
+export const VERSION_RANGE_SQL = `'^\\^[0-9]{1,4}( \\|\\| \\^[0-9]{1,4})*$'`;
+
 export class ToolVersions1761500000000 implements MigrationInterface {
   name = 'ToolVersions1761500000000';
 
@@ -96,25 +96,12 @@ export class ToolVersions1761500000000 implements MigrationInterface {
           FOREIGN KEY ("id", "current_version") REFERENCES "tool_versions" ("tool_id", "version")
     `);
 
-    const range = `'^\\^[0-9]{1,4}( \\|\\| \\^[0-9]{1,4})*$'`;
-    for (const table of ['tool_bindings', 'binding_versions']) {
-      await queryRunner.query(`
-        ALTER TABLE "${table}"
-          ADD COLUMN "tool_version_range" varchar(32) NOT NULL DEFAULT '^1',
-          ADD COLUMN "provides_output_fields" text[] NOT NULL DEFAULT '{}',
-          ADD COLUMN "supports_input_fields" text[] NOT NULL DEFAULT '{}',
-          ADD CONSTRAINT "chk_${table}_tool_version_range" CHECK ("tool_version_range" ~ ${range})
-      `);
-    }
     await queryRunner.query(`
       ALTER TABLE "toolset_entries"
         ADD CONSTRAINT "chk_toolset_entries_tool_version_range"
-          CHECK ("tool_version_range" IS NULL OR "tool_version_range" ~ ${range})
+          CHECK ("tool_version_range" IS NULL OR "tool_version_range" ~ ${VERSION_RANGE_SQL})
     `);
 
-    await queryRunner.query(
-      `ALTER TABLE "binding_test_runs" ADD COLUMN "tool_version" integer NULL`,
-    );
     await queryRunner.query(`
       ALTER TABLE "tool_requests"
         ADD COLUMN "tool_id" uuid NULL,
@@ -128,19 +115,9 @@ export class ToolVersions1761500000000 implements MigrationInterface {
         DROP CONSTRAINT "fk_tool_requests_tool",
         DROP COLUMN "tool_id"
     `);
-    await queryRunner.query(`ALTER TABLE "binding_test_runs" DROP COLUMN "tool_version"`);
     await queryRunner.query(
       `ALTER TABLE "toolset_entries" DROP CONSTRAINT "chk_toolset_entries_tool_version_range"`,
     );
-    for (const table of ['binding_versions', 'tool_bindings']) {
-      await queryRunner.query(`
-        ALTER TABLE "${table}"
-          DROP CONSTRAINT "chk_${table}_tool_version_range",
-          DROP COLUMN "supports_input_fields",
-          DROP COLUMN "provides_output_fields",
-          DROP COLUMN "tool_version_range"
-      `);
-    }
     await queryRunner.query(`ALTER TABLE "tools" DROP CONSTRAINT "fk_tools_current_version"`);
     await queryRunner.query(`DROP TABLE "tool_versions"`);
     // A DRAFT tool has no place in the old status set.

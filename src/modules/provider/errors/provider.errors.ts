@@ -172,6 +172,13 @@ export enum ProviderErrorCode {
   PROVIDER_BINDING_NOT_FOUND = 'PROVIDER_BINDING_NOT_FOUND',
   /** `POST /providers/me/tool-bindings` — this provider already implements that tool. */
   PROVIDER_BINDING_ALREADY_EXISTS = 'PROVIDER_BINDING_ALREADY_EXISTS',
+  /**
+   * T3: the binding's contract range or declared optional fields do not fit
+   * the contract — a major with no published version, a field that is not
+   * an optional field of the contract, an input the request mapping never
+   * reads, or a tester version outside the range.
+   */
+  PROVIDER_BINDING_CONTRACT_MISMATCH = 'PROVIDER_BINDING_CONTRACT_MISMATCH',
   /** The `toolId` names no tool in the catalogue. A binding needs a contract to map onto. */
   PROVIDER_BINDING_TOOL_UNKNOWN = 'PROVIDER_BINDING_TOOL_UNKNOWN',
   /** `PATCH`/`POST …/publish` on a `SUSPENDED` binding — the platform took it down. */
@@ -548,6 +555,14 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `You already have a binding for this tool` +
       `${context?.toolId ? `: ${context.toolId}` : ''}. Edit that one, or suspend it first.`,
+  },
+  bindingContractMismatch: {
+    code: ProviderErrorCode.PROVIDER_BINDING_CONTRACT_MISMATCH,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `This binding does not fit the tool's contract` +
+      `${Array.isArray(context?.problems) && context.problems.length > 0 ? `: ${context.problems.join('; ')}` : ''}`,
+    publicContext: ['problems'],
   },
   bindingToolUnknown: {
     code: ProviderErrorCode.PROVIDER_BINDING_TOOL_UNKNOWN,
