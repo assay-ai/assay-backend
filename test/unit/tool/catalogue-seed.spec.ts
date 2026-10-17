@@ -206,7 +206,11 @@ describe('loadToolCatalogue — settlementChains', () => {
     name: 'search_web',
     description: 'Returns web results for a query.',
     inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
-    outputSchema: { type: 'object', properties: { answer: { type: 'string' } } },
+    outputSchema: {
+      type: 'object',
+      properties: { answer: { type: 'string' } },
+      required: ['answer'],
+    },
     verificationPolicyId: 'policy-default',
     tier: 'VERIFIED',
   };
