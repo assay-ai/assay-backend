@@ -1,5 +1,6 @@
 import { ConfigService } from '@nestjs/config';
 
+import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { chainIdOf } from '@modules/chains/ports/caip.types';
@@ -74,7 +75,12 @@ function build(tools: readonly Tool[], values: Record<string, string> = {}) {
   const bindings = {} as unknown as ToolBindingRepository;
 
   return {
-    service: new ProviderToolBindingsService(bindings, catalogue, configOf(values)),
+    service: new ProviderToolBindingsService(
+      bindings,
+      catalogue,
+      configOf(values),
+      {} as unknown as BindingVersionRepository,
+    ),
     catalogue,
   };
 }

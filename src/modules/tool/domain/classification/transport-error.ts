@@ -9,6 +9,8 @@
  * value. If the call path caught something, the call failed.
  */
 
+import { BaseError } from '@shared/errors/base.error';
+
 import { TransportError, TransportErrorKind } from './classification.types';
 
 /**
@@ -191,14 +193,18 @@ function errorName(value: unknown): string {
 }
 
 /**
- * Assay could not prepare the call (the credential vault failed), so nothing
- * was sent. A platform fault: classified `PLATFORM_UNAVAILABLE`, never counted
- * against the provider.
+ * Assay could not prepare the call (the credential vault or the signer
+ * failed), so nothing was sent. A platform fault: classified
+ * `PLATFORM_UNAVAILABLE`, never counted against the provider.
+ *
+ * `detail` reaches buyers (MCP evidence) and tester reports, so it is fixed
+ * copy: an `AppError`'s message is safe, but any other throw (a driver error
+ * naming a host, say) is replaced by `fallbackDetail`.
  */
-export function platformUnavailable(error: unknown): TransportError {
+export function platformUnavailable(error: unknown, fallbackDetail: string): TransportError {
   return {
     kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
     partialBody: null,
-    detail: stringField(error, 'message') ?? errorName(error),
+    detail: error instanceof BaseError ? error.message : fallbackDetail,
   };
 }

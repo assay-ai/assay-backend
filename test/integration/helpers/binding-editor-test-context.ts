@@ -1,3 +1,4 @@
+import { randomBytes } from 'node:crypto';
 import { BindingContractTerms1761500000001 } from '@database/postgres/migrations/1761500000001-binding-contract-terms';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
@@ -74,6 +75,8 @@ import { BindingPauseService } from '@modules/provider/services/binding-pause.se
 import { BindingPublishService } from '@modules/provider/services/binding-publish.service';
 import { DbChainEnrolmentSource } from '@modules/provider/services/db-chain-enrolment.source';
 import { DbProviderRegistry } from '@modules/provider/services/db-provider-registry';
+import { BindingCredentialRepository } from '@database/postgres/repositories/binding-credential.repository';
+import { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
 import { ProviderToolBindingsService } from '@modules/provider/services/provider-tool-bindings.service';
 import { MinimumStakeParameters } from '@modules/tool/domain/routing/routing.types';
 import { BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
@@ -171,6 +174,8 @@ export interface BindingEditorTestContext {
   readonly editor: BindingEditorService;
   readonly tester: BindingMappingTesterService;
   readonly publisher: BindingPublishService;
+  /** A vault over the test database, wired into the publisher for credential pruning. */
+  readonly vault: CredentialVaultService;
   /** The pause button — the provider's own, never the health breaker's. */
   readonly pauser: BindingPauseService;
   readonly bindingsList: ProviderToolBindingsService;
@@ -365,6 +370,11 @@ export async function createBindingEditorTestContext(
     policies,
     new ProviderEgressLimiter(),
   );
+  const vaultKek = { keyId: 'ctx-kek', key: randomBytes(32) };
+  const vault = new CredentialVaultService(new BindingCredentialRepository(dataSource), {
+    active: vaultKek,
+    byId: new Map([[vaultKek.keyId, vaultKek]]),
+  });
   const publisher = new BindingPublishService(
     editor,
     runs,
@@ -377,6 +387,7 @@ export async function createBindingEditorTestContext(
     new Map([[STAKE_CHAIN, MINIMUM_STAKE]]),
     dataSource,
     catalogue,
+    vault,
   );
 
   const context: BindingEditorTestContext = {
@@ -384,6 +395,7 @@ export async function createBindingEditorTestContext(
     editor,
     tester,
     publisher,
+    vault,
     pauser: new BindingPauseService(editor, bindings),
     // Three constructor arguments since the catalogue endpoint landed;
     // this call site had only ever passed one, which is why every suite on this
@@ -391,7 +403,12 @@ export async function createBindingEditorTestContext(
     // holds, and `ConfigService` falls back to `PLATFORM_STAKE_ASSET_ID`'s
     // default when the variable is unset — neither is exercised by the binding
     // list, which is all this context uses the service for.
-    bindingsList: new ProviderToolBindingsService(bindings, catalogue, new ConfigService()),
+    bindingsList: new ProviderToolBindingsService(
+      bindings,
+      catalogue,
+      new ConfigService(),
+      versions,
+    ),
     catalogue,
     stakes,
     ledger,

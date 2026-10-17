@@ -234,6 +234,8 @@ export enum ProviderErrorCode {
   PROVIDER_SECRET_IN_MAPPING = 'PROVIDER_SECRET_IN_MAPPING',
   /** A credential header set breaks the name, value or size rules. */
   PROVIDER_INVALID_CREDENTIAL_HEADERS = 'PROVIDER_INVALID_CREDENTIAL_HEADERS',
+  /** A credential set names an origin the binding does not use (draft or published endpoint). */
+  PROVIDER_CREDENTIAL_ORIGIN_MISMATCH = 'PROVIDER_CREDENTIAL_ORIGIN_MISMATCH',
 }
 
 export type ProviderErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -725,5 +727,11 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     statusCode: 400,
     message: (context?: Record<string, any>) =>
       `Invalid credential headers: ${(context?.problems ?? []).join('; ')}`,
+  },
+  credentialOriginMismatch: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_MISMATCH,
+    statusCode: 400,
+    message: () =>
+      `Credentials can only be stored for the origin of this binding's endpoint (draft or published).`,
   },
 });

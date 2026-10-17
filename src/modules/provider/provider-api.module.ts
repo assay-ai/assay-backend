@@ -11,6 +11,7 @@ import { VerificationModule } from '@modules/verification/verification.module';
 import { AuditLogModule } from '@shared/audit';
 
 import { CredentialVaultModule } from './credentials/credential-vault.module';
+import { ProviderBindingCredentialsController } from './controllers/provider-binding-credentials.controller';
 import { ProviderConnectivityController } from './controllers/provider-connectivity.controller';
 import { ProviderPayoutAddressController } from './controllers/provider-payout-address.controller';
 import { ProviderPayoutsController } from './controllers/provider-payouts.controller';
@@ -126,6 +127,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderController,
     ProviderPayoutsController,
     ProviderToolBindingsController,
+    ProviderBindingCredentialsController,
     ProviderVerdictsController,
     ProviderReconciliationController,
     ProviderPolicyChangesController,

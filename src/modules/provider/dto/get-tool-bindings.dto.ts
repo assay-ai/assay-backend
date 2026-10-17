@@ -66,6 +66,15 @@ export class ToolBindingSummaryDto {
 
 export class ToolBindingDetailDto extends ToolBindingSummaryDto {
   @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The endpoint of the published revision, or null when the binding was never published. ' +
+      "Credentials may be stored for its origin as well as the draft endpoint's.",
+  })
+  publishedEndpoint: string | null;
+
+  @ApiProperty({
     example: '^1',
     description: 'The contract majors this revision serves (T3). Each needs a green tester run.',
   })

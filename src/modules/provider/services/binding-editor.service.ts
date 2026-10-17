@@ -45,7 +45,7 @@ import {
 import { PROVIDER_STAKE_SOURCE, ProviderStakePort, stakeKey } from '../ports/provider-stake.port';
 import { PROVIDER_MINIMUM_STAKE_BY_CHAIN } from './provider-stake.service';
 
-import { toDetailDto } from './provider-tool-bindings.service';
+import { publishedEndpointOf, toDetailDto } from './provider-tool-bindings.service';
 import { assertBindingContract, defaultBindingRange } from '../domain/binding-contract';
 
 /**
@@ -284,7 +284,7 @@ export class BindingEditorService {
       return inserted;
     }, body.toolId);
 
-    return toSavedDto(saved);
+    return toSavedDto(saved, null);
   }
 
   async update(
@@ -425,10 +425,24 @@ export class BindingEditorService {
       if (revised) {
         await manager.save(BindingVersionEntity, snapshotOf(updated, subject));
       }
-      return updated;
+      return {
+        row: updated,
+        publishedEndpoint: await publishedEndpointOf(
+          { findOne: (options) => manager.findOne(BindingVersionEntity, options) },
+          updated,
+        ),
+      };
     }, row.toolId);
 
-    return toSavedDto(saved);
+    return toSavedDto(saved.row, saved.publishedEndpoint);
+  }
+
+  /** The endpoint of the published revision, or null when never published. */
+  async publishedEndpoint(row: ToolBindingEntity): Promise<string | null> {
+    return publishedEndpointOf(
+      { findOne: (options) => this.dataSource.manager.findOne(BindingVersionEntity, options) },
+      row,
+    );
   }
 
   /**
@@ -697,7 +711,10 @@ function snapshotOf(row: ToolBindingEntity, authoredBy: string): BindingVersionE
  * so a save-only field cannot be added and silently left unset; the build stops
  * until someone writes a real body here.
  */
-export const toSavedDto: (row: ToolBindingEntity) => SavedToolBindingDto = toDetailDto;
+export const toSavedDto: (
+  row: ToolBindingEntity,
+  publishedEndpoint: string | null,
+) => SavedToolBindingDto = toDetailDto;
 
 /** Refuses credentials in the endpoint query, constant query entries, and secret-looking constant headers. */
 function assertNoCredentialsInMapping(endpoint: string, mapping: RequestMappingSpec): void {

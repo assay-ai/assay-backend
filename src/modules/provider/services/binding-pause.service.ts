@@ -89,7 +89,7 @@ export class BindingPauseService {
         `${body?.reason ? `: ${body.reason.slice(0, 280)}` : ''}`,
     );
 
-    return toPausedDto(saved);
+    return toPausedDto(saved, await this.editor.publishedEndpoint(saved));
   }
 
   /**
@@ -128,13 +128,16 @@ export class BindingPauseService {
 
     this.logger.log(`Binding ${bindingId} resumed at revision ${saved.publishedVersion}`);
 
-    return toPausedDto(saved);
+    return toPausedDto(saved, await this.editor.publishedEndpoint(saved));
   }
 }
 
-function toPausedDto(row: ToolBindingEntity): PausedToolBindingDto {
+function toPausedDto(
+  row: ToolBindingEntity,
+  publishedEndpoint: string | null,
+): PausedToolBindingDto {
   return {
-    ...toSavedDto(row),
+    ...toSavedDto(row, publishedEndpoint),
     pauseReason: row.pauseReason as BindingPauseReason | null,
     pausedAt: row.pausedAt,
   };
