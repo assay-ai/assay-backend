@@ -514,6 +514,49 @@ describe('search_tools', () => {
     );
   });
 
+  it('holds the 256 KB cap with a single huge full result: the schema is dropped, get_tool has it', async () => {
+    const giant = {
+      ...tool('giant_tool', 'misc', [], 'Giant.'),
+      inputSchema: {
+        type: 'object',
+        properties: { query: { type: 'string', description: 'x'.repeat(400_000) } },
+      },
+    } as Tool;
+    const { client } = await connect(scopeOf(view('/')), { tools: [giant] });
+    const result = await call(client, 'search_tools', { query: 'giant', detail: 'full', limit: 1 });
+    const found = output(result);
+    expect(found.results).toHaveLength(1);
+    expect(found.results[0]).toMatchObject({
+      name: 'giant_tool',
+      inputSchemaOmitted: true,
+      note: expect.stringContaining('get_tool'),
+    });
+    expect(found.results[0].inputSchema).toBeUndefined();
+    expect(Buffer.byteLength(JSON.stringify(result))).toBeLessThanOrEqual(
+      SEARCH_RESPONSE_MAX_BYTES,
+    );
+  });
+
+  it('a maximal query pages: control characters become spaces and the cursor reads back', async () => {
+    const many = Array.from({ length: 3 }, (_, n) => tool(`misc_${n}`, 'misc', [], 'Misc.'));
+    const { client } = await connect(scopeOf(view('/')), { tools: many });
+    for (const filler of ['\u0001', '"', '\\', '語']) {
+      const query = `misc ${filler.repeat(495)}`;
+      const first = output(
+        await call(client, 'search_tools', { query, detail: 'names', limit: 1 }),
+      );
+      expect(first.total).toBe(3);
+      expect(first.nextCursor).toEqual(expect.any(String));
+      const second = output(await call(client, 'search_tools', { cursor: first.nextCursor }));
+      expect(second.results).toHaveLength(1);
+    }
+    expect(
+      errorCode(
+        await call(client, 'search_tools', { query: 'q'.repeat(400) + '\u0001'.repeat(101) }),
+      ),
+    ).toBe('TOOL_ARGUMENTS_INVALID');
+  });
+
   it('refuses a query over 500 characters, and a search with neither query nor cursor', async () => {
     const { client } = await connect(scopeOf(view('/')));
     expect(errorCode(await call(client, 'search_tools', { query: 'q'.repeat(501) }))).toBe(

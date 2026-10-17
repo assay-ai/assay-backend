@@ -249,6 +249,18 @@ describe('MCP discovery, against a real database and Redis', () => {
     chainId: session.chainId,
   });
 
+  it('the database refuses a tool named after a meta tool', async () => {
+    for (const name of ['search_tools', 'get_tool', 'call_tool']) {
+      await expect(
+        dataSource.query(
+          `INSERT INTO tools (id, name, kind, category, visibility, status)
+           VALUES ($1, $2, 'STANDARD', 'misc', 'LISTED', 'ACTIVE')`,
+          [randomUUID(), name],
+        ),
+      ).rejects.toThrow(/chk_tools_name_not_reserved/);
+    }
+  });
+
   it('a SEARCH toolset lists its own pins, then the agent pins written through its access', async () => {
     const s = services();
     const session = sessionOf(orgA, agentA);
