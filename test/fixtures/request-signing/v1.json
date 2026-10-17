@@ -129,6 +129,79 @@
           "Signature": "assay=:JFI+KlU5PPBjQBjRfIxIOLKtGWQBJUCuqKXImpwGhdBc0pI1x1bmduIem5p9AcCtPml1vj8/Xad+ieIc2fAlCQ==:"
         }
       }
+    },
+    {
+      "name": "explicit-default-port",
+      "request": {
+        "method": "POST",
+        "url": "https://API.Example.test:443/v1/search?q=a%20b",
+        "headers": {
+          "x-assay-call-id": "c-1"
+        },
+        "body": "{\"q\":\"a b\"}"
+      },
+      "params": {
+        "created": 1760700000,
+        "expires": 1760700300,
+        "nonce": "BgYGBgYGBgYGBgYGBgYGBg",
+        "keyId": "test-2026-10"
+      },
+      "expected": {
+        "signatureBase": "\"@method\": POST\n\"@authority\": api.example.test\n\"@path\": /v1/search\n\"@query\": ?q=a%20b\n\"content-digest\": sha-256=:dm7Bv3nwO4zfpapceY8ZEGZiaYiTOc8C3j72DLhHCSw=:\n\"x-assay-call-id\": c-1\n\"@signature-params\": (\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\" \"x-assay-call-id\");created=1760700000;expires=1760700300;nonce=\"BgYGBgYGBgYGBgYGBgYGBg\";keyid=\"test-2026-10\";alg=\"ed25519\";tag=\"assay-request\"",
+        "headers": {
+          "Content-Digest": "sha-256=:dm7Bv3nwO4zfpapceY8ZEGZiaYiTOc8C3j72DLhHCSw=:",
+          "Signature-Input": "assay=(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\" \"x-assay-call-id\");created=1760700000;expires=1760700300;nonce=\"BgYGBgYGBgYGBgYGBgYGBg\";keyid=\"test-2026-10\";alg=\"ed25519\";tag=\"assay-request\"",
+          "Signature": "assay=:211qLS8Q6po+RVn4KWLbK+BW4qJupH6Ds9fw56msd9YhUhUD7efSKtFhgoicsuQ2yWcJDq8mXPBa25imAaZICw==:"
+        }
+      }
+    },
+    {
+      "name": "utf8-body",
+      "request": {
+        "method": "POST",
+        "url": "https://api.example.test/v1/search",
+        "headers": {
+          "x-assay-call-id": "c-1"
+        },
+        "body": "{\"q\":\"café ✓\"}"
+      },
+      "params": {
+        "created": 1760700000,
+        "expires": 1760700300,
+        "nonce": "BwcHBwcHBwcHBwcHBwcHBw",
+        "keyId": "test-2026-10"
+      },
+      "expected": {
+        "signatureBase": "\"@method\": POST\n\"@authority\": api.example.test\n\"@path\": /v1/search\n\"@query\": ?\n\"content-digest\": sha-256=:DY/GlBmJlYCZa60wVlaQv8wVcyVGfI4/gywwzcx9Usk=:\n\"x-assay-call-id\": c-1\n\"@signature-params\": (\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\" \"x-assay-call-id\");created=1760700000;expires=1760700300;nonce=\"BwcHBwcHBwcHBwcHBwcHBw\";keyid=\"test-2026-10\";alg=\"ed25519\";tag=\"assay-request\"",
+        "headers": {
+          "Content-Digest": "sha-256=:DY/GlBmJlYCZa60wVlaQv8wVcyVGfI4/gywwzcx9Usk=:",
+          "Signature-Input": "assay=(\"@method\" \"@authority\" \"@path\" \"@query\" \"content-digest\" \"x-assay-call-id\");created=1760700000;expires=1760700300;nonce=\"BwcHBwcHBwcHBwcHBwcHBw\";keyid=\"test-2026-10\";alg=\"ed25519\";tag=\"assay-request\"",
+          "Signature": "assay=:O5cEZ52HxL6MW32jJpfDLbHjs1OsUuQPfoSxujDObkn12kuC7tNPiHt5n4BXJZnNjBHwntUcNbJIcblCdd8cDQ==:"
+        }
+      }
+    },
+    {
+      "name": "mixed-case-call-id-header",
+      "request": {
+        "method": "GET",
+        "url": "https://api.example.test/v1/ping",
+        "headers": {
+          "X-Assay-Call-Id": "c-1"
+        }
+      },
+      "params": {
+        "created": 1760700000,
+        "expires": 1760700300,
+        "nonce": "CAgICAgICAgICAgICAgICA",
+        "keyId": "test-2026-10"
+      },
+      "expected": {
+        "signatureBase": "\"@method\": GET\n\"@authority\": api.example.test\n\"@path\": /v1/ping\n\"@query\": ?\n\"x-assay-call-id\": c-1\n\"@signature-params\": (\"@method\" \"@authority\" \"@path\" \"@query\" \"x-assay-call-id\");created=1760700000;expires=1760700300;nonce=\"CAgICAgICAgICAgICAgICA\";keyid=\"test-2026-10\";alg=\"ed25519\";tag=\"assay-request\"",
+        "headers": {
+          "Signature-Input": "assay=(\"@method\" \"@authority\" \"@path\" \"@query\" \"x-assay-call-id\");created=1760700000;expires=1760700300;nonce=\"CAgICAgICAgICAgICAgICA\";keyid=\"test-2026-10\";alg=\"ed25519\";tag=\"assay-request\"",
+          "Signature": "assay=:mo2LlRkgikkFeYnXIumC9lvnZMJUCKsV1PEIZOxyZZUYW0pxVq4UOJfuO8FGdtv4bCf34Zxq3NUKURI70XjmCw==:"
+        }
+      }
     }
   ]
 }

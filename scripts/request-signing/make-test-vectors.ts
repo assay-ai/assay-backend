@@ -53,6 +53,32 @@ const inputs: Array<{ name: string; request: SignableRequest }> = [
       body: '',
     },
   },
+  {
+    name: 'explicit-default-port',
+    request: {
+      method: 'POST',
+      url: 'https://API.Example.test:443/v1/search?q=a%20b',
+      headers: callId,
+      body: '{"q":"a b"}',
+    },
+  },
+  {
+    name: 'utf8-body',
+    request: {
+      method: 'POST',
+      url: 'https://api.example.test/v1/search',
+      headers: callId,
+      body: '{"q":"café ✓"}',
+    },
+  },
+  {
+    name: 'mixed-case-call-id-header',
+    request: {
+      method: 'GET',
+      url: 'https://api.example.test/v1/ping',
+      headers: { 'X-Assay-Call-Id': 'c-1' },
+    },
+  },
 ];
 
 const cases = inputs.map(({ name, request }, i) => {

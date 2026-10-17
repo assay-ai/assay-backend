@@ -47,6 +47,13 @@ describe('RequestSignerService', () => {
     expect(h['Content-Digest']).toBeUndefined();
   });
 
+  it('ignores a stale caller-supplied content-digest', async () => {
+    const stale = { ...req, headers: { ...req.headers, 'Content-Digest': 'sha-256=:AAAA:' } };
+    const h = await signer.sign(stale, NOW);
+    expect(h['Content-Digest']).not.toBe('sha-256=:AAAA:');
+    expect(h['Content-Digest']).toBe((await signer.sign(req, NOW))['Content-Digest']);
+  });
+
   it('publishes a JWKS', () => {
     const k = signer.jwks().keys[0];
     expect(k).toMatchObject({
@@ -63,7 +70,7 @@ describe('RequestSignerService', () => {
     const prev = process.env.NODE_ENV;
     process.env.NODE_ENV = 'production';
     try {
-      expect(() => new RequestSignerService([])).toThrow();
+      expect(() => new RequestSignerService([])).toThrow(/PROVIDER_REQUEST_SIGNING_KEYS/);
     } finally {
       process.env.NODE_ENV = prev;
     }
