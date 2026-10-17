@@ -5,6 +5,8 @@ import { applyHttpSecurity } from '@shared/security/security-headers';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { StructuredLogger } from '@shared/observability';
 import { LoggingInterceptor } from '@shared/interceptors/logging.interceptor';
+import { loadMcpDiscoveryConfig } from '@modules/mcp/config/mcp-discovery.config';
+
 import { AppMcpModule } from './app.module';
 
 /**
@@ -29,6 +31,10 @@ import { AppMcpModule } from './app.module';
  * JSON-RPC error from a server that does not know who is calling.
  */
 async function bootstrapMcp() {
+  // Fails the boot, not the first paged search, when the cursor secret is
+  // missing in production.
+  loadMcpDiscoveryConfig();
+
   const app = await NestFactory.create(AppMcpModule, {
     logger: new StructuredLogger(),
   });

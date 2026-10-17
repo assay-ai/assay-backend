@@ -11,6 +11,10 @@ export const MCP_RATE_LIMITS = Object.freeze({
   refusalsPerMinute: 60,
   /** Refused calls written to `tool_call_records` per agent; the rest are only counted. */
   refusalRowsPerMinute: 20,
+  /** `search_tools`, per agent, across every URL. */
+  searchesPerMinute: 30,
+  /** `get_tool`, per agent, across every URL. */
+  getToolsPerMinute: 120,
 });
 
 const WINDOW_MS = 60_000;
@@ -85,6 +89,16 @@ export class McpRateLimiter {
 export function listKey(credentialId: string, canonicalUrl: string): string {
   const url = createHash('sha256').update(canonicalUrl).digest('hex').slice(0, 32);
   return `list:${credentialId}:${url}`;
+}
+
+/** An agent's `search_tools` calls. */
+export function searchKey(agentId: string): string {
+  return `search:${agentId}`;
+}
+
+/** An agent's `get_tool` calls. */
+export function getToolKey(agentId: string): string {
+  return `get-tool:${agentId}`;
 }
 
 /** An agent's refused calls. */
