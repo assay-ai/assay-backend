@@ -67,6 +67,10 @@ export class OrganizationEntity extends AbstractEntityWithoutSoftDelete {
   @Column({ name: 'handle', type: 'varchar', length: 24, nullable: true })
   handle: string | null;
 
+  /** `handleSkeleton(handle)`: unique, so no two handles read alike. */
+  @Column({ name: 'handle_skeleton', type: 'varchar', length: 24, nullable: true })
+  handleSkeleton: string | null;
+
   /** Set by the first UNLISTED or PUBLIC share; after it only an operator renames. */
   @Column({ name: 'handle_locked_at', type: 'timestamptz', nullable: true })
   handleLockedAt: Date | null;

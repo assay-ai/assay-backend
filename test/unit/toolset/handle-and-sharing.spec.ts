@@ -19,6 +19,7 @@ import {
   servesUnlistedPath,
   sharingEndsAt,
 } from '@modules/toolset/domain/sharing';
+import { pinPathOf, pinReaches } from '@modules/toolset/domain/pin';
 
 describe('handles (design spec §7.1)', () => {
   it.each([
@@ -51,16 +52,27 @@ describe('handles (design spec §7.1)', () => {
     'supp0rt-team',
     'x402-labs',
     'goassay',
+    'assayofficial',
+    'admins',
+    'the-staff',
   ])('refuses %s as a look-alike of a reserved name', (handle) => {
     expect(handleRefusal(handle)).toBe('RESERVED');
   });
 
-  it.each(['acme', 'weather-tools', 'my-maps', 'apiary', 'helpful-bot', 'orbit'])(
-    'accepts %s, which only shares letters with a reserved word',
-    (handle) => {
-      expect(handleRefusal(handle)).toBeNull();
-    },
-  );
+  it.each([
+    'acme',
+    'weather-tools',
+    'my-maps',
+    'apiary',
+    'helpful-bot',
+    'orbit',
+    'ecosystem-labs',
+    'badminton-club',
+    'staffing-co',
+    'supportive-friends',
+  ])('accepts %s, which only shares letters with a reserved word', (handle) => {
+    expect(handleRefusal(handle)).toBeNull();
+  });
 
   it('reserves every category the catalogue uses', () => {
     expect(handleRefusal('robotics', ['robotics'])).toBe('RESERVED');
@@ -237,5 +249,44 @@ describe('sharing state machine (design spec §7.7)', () => {
     const s = apply(unlisted, { kind: 'SHARE', visibility: ToolsetVisibility.PRIVATE });
     expect(s.visibility).toBe(ToolsetVisibility.PRIVATE);
     expect(s.graceVisibility).toBe(ToolsetVisibility.UNLISTED);
+  });
+});
+
+describe('how a pin reaches its toolset (review N1)', () => {
+  const now = new Date('2026-10-17T12:00:00Z');
+  const TOKEN = 'abcdefghijklmnopqrstuvwxyz';
+  const base: SharingState = {
+    visibility: ToolsetVisibility.UNLISTED,
+    listingStatus: null,
+    graceVisibility: null,
+    graceUntil: null,
+    unlistedToken: TOKEN,
+    removedAt: null,
+    deletedAt: null,
+    delistedAt: null,
+    firstSharedAt: now,
+  };
+
+  it('a link pin reaches it only through the same link', () => {
+    const pin = pinPathOf('UNLISTED', TOKEN);
+    expect(pin.via).toBe('LINK');
+    expect(pin.linkHash).not.toContain(TOKEN);
+    expect(pinReaches(pin, base, now)).toBe('UNLISTED');
+    expect(
+      pinReaches(pin, { ...base, unlistedToken: 'zyxwvutsrqponmlkjihgfedcba' }, now),
+    ).toBeNull();
+    expect(pinReaches(pin, { ...base, removedAt: now }, now)).toBeNull();
+  });
+
+  it('a /@ pin reaches it only while /@ serves', () => {
+    const pin = pinPathOf('PUBLIC', undefined);
+    expect(pinReaches(pin, base, now)).toBeNull();
+    expect(
+      pinReaches(
+        pin,
+        { ...base, visibility: ToolsetVisibility.PUBLIC, listingStatus: ListingStatus.LISTED },
+        now,
+      ),
+    ).toBe('PUBLIC');
   });
 });

@@ -290,7 +290,10 @@ export class ToolsetPublishingService {
       // Another organization sees only versions shared the way it reaches the
       // toolset: PUBLIC ones through `/@…`, UNLISTED or PUBLIC ones by link.
       const path = own ? null : sharedPathFor(sharingStateOf(source), body.unlistedToken, now);
-      if (!own && !path) throw ToolsetErrors.notFound();
+      // A frozen handle stops copies by id as much as its URLs.
+      if (!own && (!path || !(await this.handles.ownerHandleActive(source.ownerOrgId)))) {
+        throw ToolsetErrors.notFound();
+      }
       const newest = path ? newestServed(source, path) : source.latestVersion;
       version = body.version ?? newest;
       if (!version || !newest || version > newest) throw ToolsetErrors.versionNotFound();

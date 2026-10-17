@@ -133,6 +133,21 @@ describe('toolset publishing, against a real database and Redis', () => {
     );
   }
 
+  const toldBefore = new Map<string, number>();
+  /**
+   * Update notices for `toolsetId` sent since the last call: publishing sends
+   * them after it commits, so wait for them to settle. The 7-day log is
+   * cleared, so each publish is judged on visibility alone.
+   */
+  async function toldSince(s: ReturnType<typeof services>, toolsetId: string): Promise<number> {
+    await new Promise((resolve) => setTimeout(resolve, 300));
+    const total = s.sent.filter((notice) => notice.subjectId === toolsetId).length;
+    const fresh = total - (toldBefore.get(toolsetId) ?? 0);
+    toldBefore.set(toolsetId, total);
+    await dataSource.query(`DELETE FROM toolset_notice_log WHERE toolset_id = $1`, [toolsetId]);
+    return fresh;
+  }
+
   /** An agent of `organizationId` that funded from `account` (a settled deposit). */
   async function fund(organizationId: string, account: string): Promise<string> {
     const agentId = await agent(organizationId);
@@ -1096,7 +1111,7 @@ describe('toolset publishing, against a real database and Redis', () => {
       expect(ids).toEqual([null, null]);
     });
 
-    it('a revoked link holder gets no update notice; a pin holder does', async () => {
+    it('a link pin is told of new link versions only while it holds the current link', async () => {
       const s = services();
       const created = await s.toolsets.create(
         owner,
@@ -1110,23 +1125,16 @@ describe('toolset publishing, against a real database and Redis', () => {
         ACTOR,
       );
       await freeCall(viewer, viewerAgent, created.id, 1);
-      await s.publishing.rotateToken(owner, created.id, ACTOR);
-      await s.toolsets.replaceEntries(owner, created.id, [{ toolId: GEOCODE.id }], ACTOR);
+      // A caller with no pin is never told of a link-only version.
       await s.publishing.publish(
         owner,
         created.id,
         { visibility: ToolsetVisibility.UNLISTED },
         ACTOR,
       );
-      expect(await s.notices.onPublished(created.id, 2)).toBe(0);
+      expect(await toldSince(s, created.id)).toBe(0);
 
-      // A pin taken with the link it had: still told.
-      await dataSource.query(`DELETE FROM toolset_notice_log WHERE toolset_id = $1`, [created.id]);
-      await dataSource.query(`UPDATE toolsets SET unlisted_token = $2 WHERE id = $1`, [
-        created.id,
-        v1.toolset.unlistedToken,
-      ]);
-      await s.epochs.bumpShared();
+      // Pinned through the link: told of the next link version…
       await s.access.patch(
         viewer,
         viewerAgent,
@@ -1141,7 +1149,165 @@ describe('toolset publishing, against a real database and Redis', () => {
         },
         ACTOR,
       );
-      expect(await s.notices.onPublished(created.id, 2)).toBe(1);
+      expect((await s.access.get(viewer, viewerAgent)).allowedToolsets[0]).toMatchObject({
+        status: 'ACTIVE',
+        latestVersion: 2,
+      });
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.UNLISTED },
+        ACTOR,
+      );
+      expect(await toldSince(s, created.id)).toBe(1);
+
+      // …until the token is rotated: that pin no longer reaches the toolset.
+      const rotated = await s.publishing.rotateToken(owner, created.id, ACTOR);
+      await dataSource.query(`DELETE FROM toolset_notice_log WHERE toolset_id = $1`, [created.id]);
+      await s.toolsets.replaceEntries(owner, created.id, [{ toolId: GEOCODE.id }], ACTOR);
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.UNLISTED },
+        ACTOR,
+      );
+      expect(await toldSince(s, created.id)).toBe(0);
+      expect((await s.access.get(viewer, viewerAgent)).allowedToolsets[0]).toMatchObject({
+        status: 'NOT_SHARED',
+        latestVersion: null,
+      });
+
+      // Pinned again with the new link: told again.
+      await s.access.patch(
+        viewer,
+        viewerAgent,
+        {
+          allowedToolsets: [
+            {
+              toolsetId: created.id,
+              version: 1,
+              unlistedToken: rotated.toolset.unlistedToken as string,
+            },
+          ],
+        },
+        ACTOR,
+      );
+      await s.notices.onPublished(created.id, 4);
+      expect(await toldSince(s, created.id)).toBe(1);
+    });
+
+    it('a pin taken through /@ learns nothing of a version published UNLISTED', async () => {
+      const s = services();
+      const created = await s.toolsets.create(
+        owner,
+        { name: 'Went private', slug: 'went-private', entries: [{ toolId: WEATHER.id }] },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.PUBLIC },
+        ACTOR,
+      );
+      await freeCall(viewer, viewerAgent, created.id, 1);
+      await s.access.patch(
+        viewer,
+        viewerAgent,
+        { allowedToolsets: [{ toolsetId: created.id, version: 1 }] },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.UNLISTED },
+        ACTOR,
+      );
+      expect(await toldSince(s, created.id)).toBe(0);
+      // The "Update available" chip stays on the last PUBLIC version.
+      expect(
+        (await s.access.get(viewer, viewerAgent)).allowedToolsets.find(
+          (ref) => ref.toolsetId === created.id,
+        ),
+      ).toMatchObject({ latestVersion: 1 });
+      // Back to PUBLIC: told again.
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.PUBLIC },
+        ACTOR,
+      );
+      expect(await toldSince(s, created.id)).toBe(1);
+    });
+
+    it('a frozen handle stops copies, pins and handed-out links by id', async () => {
+      const s = services();
+      const frozenOrg = await org('Frozen');
+      await verify(frozenOrg);
+      const frozenAgent = await agent(frozenOrg);
+      await s.handles.claim(session(frozenOrg, frozenAgent), 'frozen-co', ACTOR);
+      const created = await s.toolsets.create(
+        frozenOrg,
+        { name: 'Cold', slug: 'cold', entries: [{ toolId: WEATHER.id }] },
+        ACTOR,
+      );
+      const shared = await s.publishing.publish(
+        frozenOrg,
+        created.id,
+        { visibility: ToolsetVisibility.UNLISTED },
+        ACTOR,
+      );
+      const token = shared.toolset.unlistedToken as string;
+      await s.publishing.publish(
+        frozenOrg,
+        created.id,
+        { visibility: ToolsetVisibility.PUBLIC },
+        ACTOR,
+      );
+      await dataSource.transaction((manager) =>
+        s.moderation.cutoffHandle(manager, {
+          handle: 'frozen-co',
+          operatorId: OPERATOR_1,
+          note: 'frozen for the test',
+        }),
+      );
+      await s.moderation.afterCommit([frozenOrg]);
+
+      expect(await errorOf(s.publishing.copy(viewer, created.id, {}, ACTOR))).toMatchObject({
+        code: ToolsetErrorCode.TOOLSET_NOT_FOUND,
+      });
+      expect(
+        await errorOf(
+          s.access.patch(
+            viewer,
+            viewerAgent,
+            { allowedToolsets: [{ toolsetId: created.id, version: 1, unlistedToken: token }] },
+            ACTOR,
+          ),
+        ),
+      ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_ACCESS_INVALID });
+      await s.connectUrls.record(viewer, viewerAgent, {
+        url: `https://mcp.example.com/u/${token}`,
+        serverName: null,
+        client: null,
+      });
+      const row = (await s.connectUrls.serversInUse(viewer, viewerAgent)).find((r) =>
+        r.canonicalUrl.endsWith(`/u/${token}`),
+      );
+      expect(row?.toolsetId).toBeNull();
+    });
+
+    it('refuses a handle that reads like another organization’s', async () => {
+      const s = services();
+      const first = await org('Look-alike 1');
+      const second = await org('Look-alike 2');
+      await verify(first);
+      await verify(second);
+      await s.handles.claim(session(first, await agent(first)), 'stripe', ACTOR);
+      for (const lookAlike of ['strlpe', 'str1pe', 's-tripe']) {
+        expect(
+          await errorOf(s.handles.claim(session(second, await agent(second)), lookAlike, ACTOR)),
+        ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_HANDLE_TAKEN });
+      }
     });
 
     it('lets concurrent claims take one name once, and keeps the gate under a race', async () => {

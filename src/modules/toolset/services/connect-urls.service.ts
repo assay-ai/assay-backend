@@ -214,7 +214,8 @@ export class ConnectUrlsService {
       const toolset = await this.toolsets.findByUnlistedToken(path.token);
       return toolset &&
         toolset.unlistedToken === path.token &&
-        servesUnlistedPath(sharingStateOf(toolset), now)
+        servesUnlistedPath(sharingStateOf(toolset), now) &&
+        (await this.handles.ownerHandleActive(toolset.ownerOrgId))
         ? toolset.id
         : null;
     }

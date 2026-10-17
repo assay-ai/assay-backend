@@ -41,12 +41,12 @@ import { ToolsetErrors } from '../errors/toolset.errors';
 import { OFFICIAL_HANDLE } from '../domain/handle';
 import {
   SharedPathKind,
-  isShared,
   listedInCatalogue,
   newestServed,
   sharedPathFor,
   versionServes,
 } from '../domain/sharing';
+import { pinPathOf, pinReaches } from '../domain/pin';
 import { HandlesService } from './handles.service';
 import { sharingStateOf } from './sharing-row';
 import { AccessEpochService } from './access-epoch.service';
@@ -217,19 +217,23 @@ export class AgentAccessService {
         refs.push({ toolsetId: toolset.id, version: server.toolsetVersion, viaUrlOnly: true });
         continue;
       }
+      if (!(await this.handles.ownerHandleActive(toolset.ownerOrgId))) continue;
       const { path } = server.parsed;
       const pathVersion = 'version' in path ? (path as { version: number | null }).version : null;
+      const token = path.kind === McpPathKind.UNLISTED_TOOLSET ? path.token : undefined;
+      // How this pin reaches the toolset: through its link or its `/@…` URL.
+      const taken =
+        toolset.ownerOrgId === null ? {} : pinPathOf(token ? 'UNLISTED' : 'PUBLIC', token);
       if (server.lastCallAt !== null && server.toolsetVersion !== null) {
         // It was served to this agent through a shared URL: pin what it got
         // (an Official set followed at its latest when the URL followed it).
         const version =
           toolset.ownerOrgId === null && pathVersion === null ? null : server.toolsetVersion;
-        refs.push({ toolsetId: toolset.id, version, viaUrlOnly: true });
+        refs.push({ toolsetId: toolset.id, version, viaUrlOnly: true, ...taken });
         continue;
       }
       // Only handed out: it must be shared to this organization now, and the
       // pinned version one that was shared that way.
-      const token = path.kind === McpPathKind.UNLISTED_TOOLSET ? path.token : undefined;
       const kind = sharedPathFor(sharingStateOf(toolset), token, now);
       if (!kind) continue;
       if (toolset.ownerOrgId === null && pathVersion === null) {
@@ -239,7 +243,7 @@ export class AgentAccessService {
       const version = pathVersion ?? newestServed(toolset, kind);
       const row = version ? await this.versions.findVersion(toolset.id, version) : null;
       if (!row || !versionServes(row.sharedAs, kind)) continue;
-      refs.push({ toolsetId: toolset.id, version: row.version, viaUrlOnly: true });
+      refs.push({ toolsetId: toolset.id, version: row.version, viaUrlOnly: true, ...taken });
     }
     return refs;
   }
@@ -398,8 +402,14 @@ export class AgentAccessService {
       const ref = byId.get(id) as AllowedToolsetInputDto;
       const version = ref.version ?? null;
       const viaUrlOnly = ref.viaUrlOnly !== false;
-      if (held.some((h) => h.toolsetId === id && h.version === version)) {
-        out.push({ toolsetId: id, version, viaUrlOnly });
+      // A link sent again is a fresh proof, so the pin is taken anew with it.
+      const kept =
+        ref.unlistedToken === undefined
+          ? held.find((h) => h.toolsetId === id && h.version === version)
+          : undefined;
+      if (kept) {
+        // Unchanged: it keeps how it was taken.
+        out.push({ ...kept, viaUrlOnly });
         continue;
       }
 
@@ -418,7 +428,9 @@ export class AgentAccessService {
             ? 'PUBLIC'
             : null
           : sharedPathFor(state, ref.unlistedToken, now);
-        if (!path) {
+        // A frozen handle stops every way into its organization's toolsets,
+        // by id as much as by URL.
+        if (!path || !(await this.handles.ownerHandleActive(toolset.ownerOrgId))) {
           unknown.push(id);
           continue;
         }
@@ -438,7 +450,11 @@ export class AgentAccessService {
           continue;
         }
       }
-      out.push({ toolsetId: id, version, viaUrlOnly });
+      out.push(
+        own || official || !path
+          ? { toolsetId: id, version, viaUrlOnly }
+          : { toolsetId: id, version, viaUrlOnly, ...pinPathOf(path, ref.unlistedToken) },
+      );
     }
 
     if (unknown.length > 0) {
@@ -569,20 +585,26 @@ export class AgentAccessService {
       ).map((row) => [`${row.toolsetId}@${row.version}`, row.name]),
     );
 
+    const now = new Date();
     return refs.map((ref) => {
       const toolset = found.get(ref.toolsetId);
       const own = toolset?.ownerOrgId === organizationId;
       const state = toolset ? sharingStateOf(toolset) : null;
+      // How this pin reaches the toolset now: through the `/@…` URL or the
+      // same link it was taken with — the newest version on that path is
+      // what "Update available" offers, and nothing else.
+      const handleActive =
+        !!toolset && (toolset.ownerOrgId === null || handles.has(toolset.ownerOrgId));
+      const reach = !own && state && handleActive ? pinReaches(ref, state, now) : null;
       const status = !toolset
         ? 'DELETED'
         : toolset.removedAt
           ? 'REMOVED'
           : toolset.deletedAt
             ? 'DELETED'
-            : !own && state && !isShared(state)
+            : !own && !reach
               ? 'NOT_SHARED'
               : 'ACTIVE';
-      const publiclyVisible = !!state && (toolset?.ownerOrgId === null || isShared(state));
       return {
         toolsetId: ref.toolsetId,
         version: ref.version,
@@ -603,8 +625,8 @@ export class AgentAccessService {
           ? null
           : own
             ? toolset.latestVersion
-            : publiclyVisible && status === 'ACTIVE'
-              ? toolset.lastPublicVersion
+            : reach && status === 'ACTIVE'
+              ? newestServed(toolset, reach)
               : null,
       };
     });
