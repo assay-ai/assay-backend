@@ -365,10 +365,10 @@ describe('a scoped MCP URL — tools/list and the error shape', () => {
 
   it('lists view ∩ access only', async () => {
     const restricted = buildGrant(AccessMode.RESTRICTED, [], [], () => []);
-    const { client } = await connect(scopeOf(rootView(), { agent: restricted }));
+    const { client } = await connect(scopeOf(rootView('?discovery=full'), { agent: restricted }));
     expect((await client.listTools()).tools).toEqual([]);
 
-    const open = await connect(scopeOf(rootView()));
+    const open = await connect(scopeOf(rootView('?discovery=full')));
     const [tool] = (await open.client.listTools()).tools;
     expect(tool.name).toBe(TOOL_NAME);
     expect(tool.description).toContain('From $0.05 per call');
@@ -383,7 +383,7 @@ describe('a scoped MCP URL — tools/list and the error shape', () => {
 
   it('lists a tool the rules leave no provider for as "No provider fits your limits", unpriced', async () => {
     const { client } = await connect(
-      scopeOf(rootView(), {
+      scopeOf(rootView('?discovery=full'), {
         rules: { excludeProviderIds: ['p1'], maxPrice: null, minTier: null, minQuality: null },
       }),
     );
@@ -478,7 +478,7 @@ describe('a scoped MCP URL — tools/list and the error shape', () => {
 
   it('?free=1 does not list a paid tool the rules left unpriced', async () => {
     const { client } = await connect(
-      scopeOf(rootView('?free=1'), {
+      scopeOf(rootView('?free=1&discovery=full'), {
         rules: { excludeProviderIds: ['p1'], maxPrice: null, minTier: null, minQuality: null },
       }),
     );

@@ -35,6 +35,7 @@ import {
   McpIdempotencyStore,
   mcpIdempotencyConfigFactory,
 } from './services/mcp-idempotency.store';
+import { McpDiscoveryService } from './services/mcp-discovery.service';
 import { McpServerFactory } from './services/mcp-server.factory';
 import { McpToolCallService } from './services/mcp-tool-call.service';
 import { CallAttributionWriter } from './services/call-attribution.writer';
@@ -161,6 +162,7 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
     McpIdempotencyStore,
     McpCatalogueService,
     McpToolCallService,
+    McpDiscoveryService,
     McpServerFactory,
     CallAttributionWriter,
     McpCallRecorder,
