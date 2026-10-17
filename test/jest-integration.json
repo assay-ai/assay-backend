@@ -29,5 +29,6 @@
   "maxWorkers": 1,
   "setupFiles": [
     "<rootDir>/setup-env.ts"
-  ]
+  ],
+  "workerIdleMemoryLimit": "1GB"
 }
