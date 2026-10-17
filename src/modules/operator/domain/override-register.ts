@@ -219,6 +219,24 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     reversible: false,
     implemented: true,
   }),
+  /**
+   * Decide a buyer's dispute over one paid call (G3.B1): uphold (refund, and
+   * the call counts against the binding's quality) or reject, with a note.
+   * Single review below `CALL_DISPUTE_TWO_PERSON_THRESHOLD_MINOR`; an upheld
+   * decision owing at least that much is raised to two-person for that
+   * occurrence (`escalateToTwoPerson`), like `S-3`.
+   */
+  'S-14': define({
+    code: 'S-14',
+    family: OverrideFamily.SLASHING,
+    action: 'call_dispute.decided',
+    label: 'Decide a buyer’s dispute over a paid call',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    approval: ApprovalMode.SINGLE,
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    reversible: false,
+    implemented: true,
+  }),
   // Enumerated, not built. Each needs a resource the arbitration flow does not create.
   'S-4': define({
     code: 'S-4',
