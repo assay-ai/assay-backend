@@ -74,7 +74,7 @@ export class LedgerJournalService {
     private readonly notifications?: NotificationPort,
   ) {}
 
-  /** Assigns identity and validates an input before it can be written or buffered. */
+  /** Assigns identity and validates an input before it can be written. */
   prepare(input: AppendEntryInput, batchId: string | null = null): PreparedEntry {
     if (!isLedgerAccountId(input.accountId)) {
       throw LedgerErrors.invalidAccountId({ value: input.accountId });
@@ -116,13 +116,13 @@ export class LedgerJournalService {
    * Writes entries and moves the snapshots they imply — atomically.
    *
    * Runs inside the caller's transaction so a hold's entry and the hold row
-   * itself commit together, and so a batch of five hundred entries is one
+   * itself commit together, and so a batch of entries is one
    * all-or-nothing unit.
    *
    * The sequence is fixed: materialise the rows, lock them **in key order**,
    * check every resulting bucket, then write. Checking before the lock would be
    * a time-of-check-to-time-of-use bug; locking in an unstable order would
-   * deadlock two flushes touching the same accounts in different orders.
+   * deadlock two transactions touching the same accounts in different orders.
    */
   async applyEntries(
     queryRunner: QueryRunner,

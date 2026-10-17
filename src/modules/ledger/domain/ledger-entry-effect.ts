@@ -92,28 +92,3 @@ export function isZeroDelta(delta: BalanceDelta): boolean {
 export function sumDeltas(deltas: readonly BalanceDelta[]): BalanceDelta {
   return deltas.reduce(addDelta, ZERO_DELTA);
 }
-
-/**
- * Whether an entry of this type may sit in the write buffer.
- *
- * A type is bufferable exactly when none of its buckets can fall — which is the
- * same thing as saying it can never overdraw an account, which is the same
- * thing as saying it needs no balance check and no row lock to be correct.
- *
- * The asymmetry is direct: a crash losing a buffered `PROVIDER_CREDIT` costs
- * the platform a reconciliation entry, while a crash losing a `HOLD_CREATE`
- * lets an agent overspend. The rule is derived from the effect table rather
- * than listed by hand so a new entry type cannot be added to the buffer by
- * omission.
- */
-export function isBufferable(entryType: LedgerEntryType): boolean {
-  const effect = LEDGER_ENTRY_EFFECTS[entryType];
-  return effect.available >= 0 && effect.held >= 0 && effect.pending >= 0;
-}
-
-export const BUFFERABLE_ENTRY_TYPES: readonly LedgerEntryType[] =
-  Object.values(LedgerEntryType).filter(isBufferable);
-
-export const WRITE_THROUGH_ENTRY_TYPES: readonly LedgerEntryType[] = Object.values(
-  LedgerEntryType,
-).filter((type) => !isBufferable(type));

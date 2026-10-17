@@ -1,10 +1,7 @@
 import {
-  BUFFERABLE_ENTRY_TYPES,
   LEDGER_ENTRY_EFFECTS,
-  WRITE_THROUGH_ENTRY_TYPES,
   addDelta,
   deltaOf,
-  isBufferable,
   isZeroDelta,
   sumDeltas,
 } from '@modules/ledger/domain/ledger-entry-effect';
@@ -38,46 +35,6 @@ describe('LEDGER_ENTRY_EFFECTS — the exhaustive effect table', () => {
     expect(() => deltaOf(bogus, 1n)).toThrow();
   });
 });
-
-describe('isBufferable — derived from the effect table, not asserted', () => {
-  it('is true for a type if and only if none of its bucket deltas is negative', () => {
-    for (const type of ALL_TYPES) {
-      const effect = LEDGER_ENTRY_EFFECTS[type];
-      const expected = effect.available >= 0 && effect.held >= 0 && effect.pending >= 0;
-      expect(isBufferable(type)).toBe(expected);
-    }
-  });
-
-  it('excludes exactly the seven types that can reduce a bucket', () => {
-    const notBufferable = [
-      LedgerEntryType.HOLD_CREATE,
-      LedgerEntryType.HOLD_RELEASE,
-      LedgerEntryType.HOLD_COMMIT,
-      LedgerEntryType.PAYOUT,
-      LedgerEntryType.WITHDRAWAL,
-      LedgerEntryType.DEPOSIT_CONFIRM,
-      LedgerEntryType.DEPOSIT_REJECT,
-    ];
-    for (const type of notBufferable) {
-      expect(isBufferable(type)).toBe(false);
-    }
-    for (const type of ALL_TYPES) {
-      if (!notBufferable.includes(type)) {
-        expect(isBufferable(type)).toBe(true);
-      }
-    }
-  });
-
-  it('BUFFERABLE_ENTRY_TYPES and WRITE_THROUGH_ENTRY_TYPES partition the whole enum exactly once each', () => {
-    expect(BUFFERABLE_ENTRY_TYPES.length + WRITE_THROUGH_ENTRY_TYPES.length).toBe(ALL_TYPES.length);
-    const union = new Set([...BUFFERABLE_ENTRY_TYPES, ...WRITE_THROUGH_ENTRY_TYPES]);
-    expect(union.size).toBe(ALL_TYPES.length);
-    for (const type of BUFFERABLE_ENTRY_TYPES) {
-      expect(WRITE_THROUGH_ENTRY_TYPES).not.toContain(type);
-    }
-  });
-});
-
 describe('deltaOf — boundary: a zero-amount entry is a no-op delta', () => {
   it('every entry type at amount 0 folds to the zero delta, regardless of direction', () => {
     for (const type of ALL_TYPES) {
