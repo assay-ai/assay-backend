@@ -12,9 +12,10 @@ import {
 
 import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
 import { OFFICIAL_HANDLE } from '../domain/handle';
-import { ToolsetVisibility } from '../domain/sharing';
+import { ToolsetVisibility, servesPublicPath, versionServes } from '../domain/sharing';
 import { SnapshotDiff, diffSnapshots } from '../domain/snapshot';
 import { HandlesService } from './handles.service';
+import { sharingStateOf } from './sharing-row';
 import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
 import { snapshotOfVersion } from './version-mapping';
 
@@ -74,20 +75,42 @@ export class ToolsetNoticesService {
     )) as { orgId: string; fromVersion: number }[];
     if (recipients.length === 0) return 0;
 
+    // Only organizations that can still see the toolset: anyone, when the new
+    // version serves on its `/@…` URL; otherwise only those holding a pin to
+    // it. A revoked link holder (the token was rotated) learns nothing new.
+    const listed =
+      servesPublicPath(sharingStateOf(toolset), this.now()) &&
+      versionServes(target.sharedAs, 'PUBLIC');
+    let eligible = recipients;
+    if (!listed) {
+      const pinned = new Set(
+        (
+          (await this.dataSource.query(
+            `SELECT organization_id AS "orgId" FROM spend_policies
+              WHERE organization_id = ANY($1::uuid[]) AND allowed_toolsets @> $2::jsonb
+             UNION
+             SELECT organization_id FROM agent_credentials
+              WHERE organization_id = ANY($1::uuid[]) AND allowed_toolsets @> $2::jsonb`,
+            [recipients.map((row) => row.orgId), JSON.stringify([{ toolsetId }])],
+          )) as { orgId: string }[]
+        ).map((row) => row.orgId),
+      );
+      eligible = recipients.filter((row) => pinned.has(row.orgId));
+    }
+    if (eligible.length === 0) return 0;
+
     const handle =
       toolset.ownerOrgId === null
         ? OFFICIAL_HANDLE
         : ((await this.handles.handlesOf([toolset.ownerOrgId])).get(toolset.ownerOrgId) ?? null);
     const label = handle ? `@${handle}/${toolset.slug}` : toolset.name;
     const url =
-      handle && toolset.visibility === ToolsetVisibility.PUBLIC
-        ? `${this.host.mcpPublicUrl}/@${handle}/${toolset.slug}@${version}`
-        : null;
+      handle && listed ? `${this.host.mcpPublicUrl}/@${handle}/${toolset.slug}@${version}` : null;
     const targetSnapshot = snapshotOfVersion(target);
     const diffs = new Map<number, SnapshotDiff>();
 
     let sent = 0;
-    for (const { orgId, fromVersion } of recipients) {
+    for (const { orgId, fromVersion } of eligible) {
       const recent = (await this.dataSource.query(
         `SELECT 1 FROM toolset_notice_log
           WHERE org_id = $1 AND toolset_id = $2 AND sent_at > $3 LIMIT 1`,

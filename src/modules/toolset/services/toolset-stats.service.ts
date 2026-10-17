@@ -249,11 +249,15 @@ export class ToolsetStatsService {
       cell.notCharged += group.notCharged;
       byTool.set(group.toolId, cell);
     }
+    // Every org count goes through the same sybil discount as the public
+    // figures: two accounts of one party never make a cell clear k.
+    const links = await this.identityLinks([...new Set(groups.map((group) => group.orgId))]);
+    const parties = (orgs: Iterable<string>) => independentParties([...orgs], links);
     const tools: RawToolCell[] = [...byTool.entries()]
       .map(([toolId, cell]) => ({
         toolId,
         toolName: names.get(toolId) ?? '',
-        orgs: cell.orgs.size,
+        orgs: parties(cell.orgs),
         calls: cell.calls,
         errors: cell.errors,
         notCharged: cell.notCharged,
@@ -275,15 +279,17 @@ export class ToolsetStatsService {
     }
     const versions: RawVersionCell[] = published.map(({ version, publishedAt }) => {
       const at = new Date(publishedAt).getTime();
-      const onIt = [...lastByOrg.values()].filter((group) => group.version === version).length;
+      const onIt = parties(
+        [...lastByOrg.values()].filter((group) => group.version === version).map((g) => g.orgId),
+      );
       const before = new Set(
         groups
           .filter((group) => group.version === version - 1 && group.firstAt.getTime() < at)
           .map((group) => group.orgId),
       );
-      const stopped = [...before].filter(
-        (org) => (lastByOrg.get(org)?.lastAt.getTime() ?? 0) < at,
-      ).length;
+      const stopped = parties(
+        [...before].filter((org) => (lastByOrg.get(org)?.lastAt.getTime() ?? 0) < at),
+      );
       return { version, orgs: onIt, stoppedOrgs: version > 1 ? stopped : 0 };
     });
     return { tools, versions };

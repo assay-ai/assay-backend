@@ -1,6 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager, IsNull, LessThanOrEqual, Not } from 'typeorm';
+import { DataSource, EntityManager, IsNull } from 'typeorm';
 
 import { ModerationCutoffEntity } from '@database/postgres/entities/moderation-cutoff.entity';
 import { OrgHandleHistoryEntity } from '@database/postgres/entities/org-handle-history.entity';
@@ -43,6 +43,8 @@ export enum CutoffRevertReason {
   REJECTED = 'REJECTED',
   /** Lifted later, after it was confirmed. */
   LIFTED = 'LIFTED',
+  /** A handle takedown whose handle was reassigned: closed, so the new holder starts clean. */
+  REASSIGNED = 'REASSIGNED',
 }
 
 /**
@@ -291,6 +293,21 @@ export class ToolsetModerationService {
     if (!(await this.handles.isVerified(to.id))) {
       throw ToolsetErrors.handleReassignRefused({ reason: 'the organization is not verified' });
     }
+    // Only a takedown two operators agreed on moves a public name: a pending
+    // one may still be reverted, and the name would then be in other hands.
+    const standing = await manager
+      .createQueryBuilder(ModerationCutoffEntity, 'cutoff')
+      .setLock('pessimistic_write')
+      .where('cutoff.target_type = :type', { type: CutoffTarget.HANDLE })
+      .andWhere('cutoff.target_id = :handle', { handle })
+      .andWhere('cutoff.action = :action', { action: CutoffAction.TAKEDOWN })
+      .andWhere('cutoff.reverted_at IS NULL')
+      .getOne();
+    if (!standing?.confirmedAt) {
+      throw ToolsetErrors.handleReassignRefused({
+        reason: 'the takedown is not confirmed by a second operator yet',
+      });
+    }
 
     const now = this.now();
     await manager.update(
@@ -313,8 +330,13 @@ export class ToolsetModerationService {
       reassignedToOrgId: to.id,
       reassignedAt: now,
     });
-    // A takedown cutoff still waiting for its confirmation stays as it is:
-    // reverting it later finds the handle in other hands and restores nothing.
+    // The takedown has done its job; closing it lets the new holder be taken
+    // down later like anyone else.
+    await manager.update(
+      ModerationCutoffEntity,
+      { id: standing.id },
+      { revertedAt: now, revertedBy: null, revertReason: CutoffRevertReason.REASSIGNED },
+    );
     return { fromOrganizationId: from.id };
   }
 
@@ -360,22 +382,45 @@ export class ToolsetModerationService {
     return reverted;
   }
 
-  /** Scheduler: end grace periods that are over; a link that served only through one is cleared. */
+  /**
+   * Scheduler: end grace periods that are over; a link that served only
+   * through one is cleared. Each row is locked and recomputed from what it
+   * holds now, and only the grace columns and the token are written — a
+   * rotation or a share that landed since the scan is never overwritten.
+   */
   async expireGrace(): Promise<number> {
     const now = this.now();
-    const due = await this.dataSource.manager.find(ToolsetEntity, {
-      where: { graceUntil: LessThanOrEqual(now) },
-      take: 500,
-    });
-    for (const toolset of due) {
-      await this.dataSource.manager.update(
-        ToolsetEntity,
-        { id: toolset.id, graceUntil: Not(IsNull()) },
-        sharingPatchOf(applySharing(sharingStateOf(toolset), { kind: 'EXPIRE_GRACE' }, now)),
-      );
+    const due = (await this.dataSource.query(
+      `SELECT id FROM toolsets WHERE grace_until <= $1 ORDER BY grace_until LIMIT 500`,
+      [now],
+    )) as { id: string }[];
+    let ended = 0;
+    for (const { id } of due) {
+      const changed = await this.dataSource.transaction(async (manager) => {
+        const toolset = await manager
+          .createQueryBuilder(ToolsetEntity, 'toolset')
+          .setLock('pessimistic_write')
+          .where('toolset.id = :id', { id })
+          .getOne();
+        if (!toolset) return false;
+        const before = sharingStateOf(toolset);
+        const next = applySharing(before, { kind: 'EXPIRE_GRACE' }, now);
+        if (next === before) return false;
+        await manager.update(
+          ToolsetEntity,
+          { id },
+          {
+            graceVisibility: next.graceVisibility,
+            graceUntil: next.graceUntil,
+            unlistedToken: next.unlistedToken,
+          },
+        );
+        return true;
+      });
+      if (changed) ended += 1;
     }
-    if (due.length > 0) await this.afterCommit();
-    return due.length;
+    if (ended > 0) await this.afterCommit();
+    return ended;
   }
 
   private async insertCutoff(

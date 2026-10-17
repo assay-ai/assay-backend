@@ -109,8 +109,12 @@ export function publicFigures(current: RawWindow, previous: RawWindow | null): P
 /**
  * The catalogue's "Popular" order: retained orgs, never raw installs (§7.8).
  * Active orgs break ties, at a weight no retained org can be outvoted by.
+ * Zero below k orgs.
  */
 export function popularScore(window: RawWindow): number {
+  // Below k the order would rank what the figures withhold: every such
+  // toolset scores the same.
+  if (window.activeOrgs < K_ANONYMITY) return 0;
   return window.retainedOrgs + window.activeOrgs / 1_000_000;
 }
 
