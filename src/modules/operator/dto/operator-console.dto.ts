@@ -404,7 +404,7 @@ const MINOR_UNITS_PATTERN = /^[1-9]\d{0,39}$/;
 /** The single reason code of an operator action: required, and not blank. */
 export const ReasonCode = () => applyDecorators(Trimmed(), IsString(), IsNotEmpty(), MaxLength(64));
 
-const QueryBoolean = () =>
+export const QueryBoolean = () =>
   Transform(({ value }: { value: unknown }) => {
     if (value === 'true') return true;
     if (value === 'false') return false;

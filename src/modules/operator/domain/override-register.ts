@@ -514,6 +514,110 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     reversible: true,
     implemented: true,
   }),
+  /**
+   * Toolset and handle moderation (design spec FR-15, FR-18). A delist or a
+   * takedown is one operator's act and takes effect at once — abuse that
+   * needs stopping cannot wait for a second person — and a different
+   * operator confirms it within 72 hours (`A-18`) or it is reverted
+   * automatically. Renaming a locked handle and reassigning a taken-down one
+   * move a public name between organizations, so they are two-person.
+   */
+  'A-15': define({
+    code: 'A-15',
+    family: OverrideFamily.ACCESS,
+    action: 'toolset.delisted',
+    label: 'Delist a public tool set (confirmed by a second operator within 72 h)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  'A-16': define({
+    code: 'A-16',
+    family: OverrideFamily.ACCESS,
+    action: 'toolset.taken_down',
+    label: 'Take down a tool set for abuse (confirmed by a second operator within 72 h)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  'A-17': define({
+    code: 'A-17',
+    family: OverrideFamily.ACCESS,
+    action: 'handle.taken_down',
+    label: 'Take down a public name for abuse (confirmed by a second operator within 72 h)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  'A-18': define({
+    code: 'A-18',
+    family: OverrideFamily.ACCESS,
+    action: 'moderation_cutoff.confirmed',
+    label: 'Confirm another operator’s delist or takedown',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    // The second person is this route's caller, checked to differ from the
+    // operator who acted; the register cannot express "not that person".
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+  'A-19': define({
+    code: 'A-19',
+    family: OverrideFamily.ACCESS,
+    action: 'moderation_cutoff.reverted',
+    label: 'Reject a pending delist or takedown, or lift a confirmed one',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    // Raised to TWO_PERSON when lifting a cutoff two people already agreed on.
+    approval: ApprovalMode.SINGLE,
+    approverRoles: [OperatorRole.ADJL],
+    reversible: true,
+    implemented: true,
+  }),
+  'A-20': define({
+    code: 'A-20',
+    family: OverrideFamily.ACCESS,
+    action: 'toolset.relisted',
+    label: 'Relist a delisted tool set the owner fixed',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
+  'A-21': define({
+    code: 'A-21',
+    family: OverrideFamily.ACCESS,
+    action: 'handle.renamed',
+    label: 'Rename a locked public name (old name kept as an alias for 90 days)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SUP],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    reversible: false,
+    implemented: true,
+  }),
+  'A-22': define({
+    code: 'A-22',
+    family: OverrideFamily.ACCESS,
+    action: 'handle.reassigned',
+    label: 'Reassign a taken-down public name to another verified organization',
+    roles: [OperatorRole.ADJL, OperatorRole.CMP],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJL, OperatorRole.CMP],
+    reversible: false,
+    implemented: true,
+  }),
+  'A-23': define({
+    code: 'A-23',
+    family: OverrideFamily.ACCESS,
+    action: 'toolset_report.resolved',
+    label: 'Resolve a report about a tool set, a tool or a public name',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SUP],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
 });
 
 /** Every code, ordered by family then numerically — the console's own order. */
