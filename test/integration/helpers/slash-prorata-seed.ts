@@ -75,13 +75,20 @@ export async function seedProRataCase(
     [org, chainId, input.stakeAuthority],
   );
 
+  // `tool_bindings.tool_id` references `tools` (1761000000000).
+  await dataSource.query(
+    `INSERT INTO tools (id, name, kind, category, visibility, status)
+     VALUES ($1, $2, 'STANDARD', 'testing', 'LISTED', 'ACTIVE')`,
+    [toolId, `slash_tool_${toolId.replace(/-/g, '').slice(0, 24)}`],
+  );
+
   await dataSource.query(
     `INSERT INTO tool_bindings
        (id, organization_id, tool_id, endpoint, request_mapping, response_mapping, pricing_mode,
         price_amount, asset_id, sla_failure_rate, timeout_ms, settlement_chains, status)
      VALUES ($1, $2, $3, 'https://example.invalid', '{}'::jsonb, '{}'::jsonb, 'PAID',
              100000, $4, 0.02, 1000, ARRAY[$5]::varchar[], 'DRAFT')`,
-    [bindingId, org, `tool-${input.label ?? bindingId.slice(0, 8)}`, input.assetId, chainId],
+    [bindingId, org, toolId, input.assetId, chainId],
   );
 
   const failedCount = input.agents.reduce((sum, agent) => sum + agent.failed.length, 0);
