@@ -42,7 +42,8 @@ import {
   classifyTransportError,
   isRetryable,
 } from '../domain/classification';
-import { JsonObject, JsonValue, mapResponse, mappingFaultOf } from '../domain/mapping';
+import { JsonObject, JsonValue, mappingFaultOf } from '../domain/mapping';
+import { mapServedResponse } from '../domain/contract/served-response';
 import {
   CeilingKind,
   EligibilityResult,
@@ -78,6 +79,7 @@ import {
   effectiveOutputSchema,
   replacementOf,
   toolAtVersion,
+  versionOf,
 } from '../domain/contract/contract-versions';
 
 import { ToolAccessErrors } from '../errors/tool-access.errors';
@@ -1084,10 +1086,16 @@ export class ProviderRouterService {
     }
 
     try {
-      const output = mapResponse(binding.responseMapping, response.body.value, {
-        outputSchema: tool.outputSchema,
-        context: { toolId: tool.id, bindingId: binding.id, providerId: binding.providerId },
-      });
+      // The routed contract version, holding this binding to every optional
+      // output it declares: a declared field that is missing is the
+      // provider's contract violation, never a mapping fault to fail over on.
+      const output = mapServedResponse(
+        binding.responseMapping,
+        response.body.value,
+        versionOf(tool),
+        binding,
+        { toolId: tool.id, bindingId: binding.id, providerId: binding.providerId },
+      );
       return { response, classification, output };
     } catch (error) {
       const fault = mappingFaultOf(error);

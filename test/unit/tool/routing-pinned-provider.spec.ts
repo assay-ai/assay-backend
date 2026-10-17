@@ -42,6 +42,9 @@ describe('pinning a call to the provider a voucher names', () => {
         settlementChain: PAYOUT_CHAIN,
         // The offered binding's own price — what the voucher is signed for.
         price: usdc('0.05'),
+        // The contract version the offer was drawn at (T3): a tool built
+        // without versions is its own version 1.
+        contractVersion: 1,
       });
     });
 

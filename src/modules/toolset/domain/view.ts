@@ -99,7 +99,7 @@ export interface EntryContract {
 
 /** A stored entry's range and required outputs, or `null` when it sets neither. */
 export function entryContractOf(entry: {
-  readonly toolVersionRange: string | null;
+  readonly toolVersionRange?: string | null;
   readonly requireOutputFields: readonly string[];
 }): EntryContract | null {
   const range = parseVersionRange(entry.toolVersionRange);

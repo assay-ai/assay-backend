@@ -181,11 +181,30 @@ export function candidateVersions(
       : [];
   }
 
-  if (versions.length > 0) return { versions, refusal: null };
+  if (versions.length > 0) return { versions: fittingArguments(versions, request), refusal: null };
   return {
     versions,
     refusal: inRange.length > 0 ? ContractRefusal.RETIRED : ContractRefusal.NO_VERSION,
   };
+}
+
+/**
+ * The candidate versions that define every argument the call uses that any of
+ * them defines: an input a newer minor added is never served by an older
+ * version that would ignore it (§7.5, "never dropped silently"). An argument
+ * no candidate defines is left to the schema check, as before versions.
+ */
+function fittingArguments(
+  versions: readonly ToolContractVersion[],
+  request: ContractRequest,
+): readonly ToolContractVersion[] {
+  const names = request.argumentNames ?? [];
+  if (names.length === 0 || versions.length < 2) return versions;
+  const defines = (version: ToolContractVersion, name: string) =>
+    Object.prototype.hasOwnProperty.call(version.inputSchema.properties ?? {}, name);
+  const known = names.filter((name) => versions.some((version) => defines(version, name)));
+  const fitting = versions.filter((version) => known.every((name) => defines(version, name)));
+  return fitting.length > 0 ? fitting : [versions[0]];
 }
 
 /**

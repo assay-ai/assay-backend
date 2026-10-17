@@ -32,6 +32,7 @@ import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-g
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import { ToolVersionRepository } from '@database/postgres/repositories/tool-version.repository';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
@@ -83,7 +84,12 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
   providers: [
     { provide: ToolBindingRepository, useValue: { findByTool: async () => [] } },
     // `ToolRegistrySeeder` mirrors the seeded tools into `tools` at boot.
-    { provide: ToolRepository, useValue: { upsertSeeded: async () => undefined } },
+    {
+      provide: ToolRepository,
+      useValue: { upsertSeeded: async () => undefined, find: async () => [] },
+    },
+    // `DatabaseToolContracts` reads the contracts from `tool_versions` (T3).
+    { provide: ToolVersionRepository, useValue: { find: async () => [] } },
     // `DatabaseToolCatalogue` reads published revisions from `binding_versions`.
     { provide: BindingVersionRepository, useValue: { find: async () => [] } },
     // `ChainsModule` imports `EvmModule`, whose `EvmGasGrantService`
@@ -141,6 +147,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
   exports: [
     ToolBindingRepository,
     ToolRepository,
+    ToolVersionRepository,
     BindingVersionRepository,
     EvmGasGrantRepository,
     EvmChainStateRepository,
