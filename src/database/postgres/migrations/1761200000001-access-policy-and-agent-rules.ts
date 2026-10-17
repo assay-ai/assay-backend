@@ -24,8 +24,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * A key can only narrow its agent's access: the three columns are `NULL`
  * (narrow nothing) or a second grant that is intersected with the agent's.
  */
-export class AccessPolicyAndAgentRules1761000000001 implements MigrationInterface {
-  name = 'AccessPolicyAndAgentRules1761000000001';
+export class AccessPolicyAndAgentRules1761200000001 implements MigrationInterface {
+  name = 'AccessPolicyAndAgentRules1761200000001';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(

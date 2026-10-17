@@ -75,7 +75,7 @@ export async function seedProRataCase(
     [org, chainId, input.stakeAuthority],
   );
 
-  // `tool_bindings.tool_id` references `tools` (1761000000000).
+  // `tool_bindings.tool_id` references `tools` (1761200000000).
   await dataSource.query(
     `INSERT INTO tools (id, name, kind, category, visibility, status)
      VALUES ($1, $2, 'STANDARD', 'testing', 'LISTED', 'ACTIVE')`,
