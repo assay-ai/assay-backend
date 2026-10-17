@@ -1,3 +1,4 @@
+import { BindingAttemptRepository } from '@database/postgres/repositories/binding-attempt.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { ProviderTrafficService } from '@modules/provider/services/provider-traffic.service';
@@ -74,13 +75,42 @@ describe('ProviderTrafficService — bucket folding', () => {
     expect(day2.calls).toBe(3);
   });
 
-  it('leaves latency null — no per-day latency source exists', async () => {
+  it('leaves latency null when no attempt source is wired', async () => {
     const { service } = build([{ day: '2026-08-01', status: 'SETTLED', calls: '1' }]);
 
     const traffic = await service.getTraffic(PROVIDER, WINDOW);
 
     expect(traffic.buckets[0].p50LatencyMs).toBeNull();
     expect(traffic.buckets[0].p95LatencyMs).toBeNull();
+  });
+
+  it('fills each day’s latency from the router’s attempts, and null on a day with none', async () => {
+    const dayFake = fakeQueryBuilder([
+      { day: '2026-08-01', status: 'SETTLED', calls: '4' },
+      { day: '2026-08-02', status: 'SETTLED', calls: '1' },
+    ]);
+    const agentFake = fakeQueryBuilder([]);
+    const intents = fakeRepository([
+      dayFake.qb,
+      agentFake.qb,
+    ]) as unknown as PaymentIntentRepository;
+    const dailyPaidLatency = jest.fn(async () => [
+      { day: '2026-08-01', p50LatencyMs: 180, p95LatencyMs: 950 },
+    ]);
+    const service = new ProviderTrafficService(intents, {
+      dailyPaidLatency,
+    } as unknown as BindingAttemptRepository);
+
+    const traffic = await service.getTraffic(PROVIDER, WINDOW);
+
+    expect(dailyPaidLatency).toHaveBeenCalledWith(
+      PROVIDER,
+      new Date(WINDOW.from),
+      new Date(WINDOW.to),
+    );
+    const [day1, day2] = traffic.buckets;
+    expect([day1.p50LatencyMs, day1.p95LatencyMs]).toEqual([180, 950]);
+    expect([day2.p50LatencyMs, day2.p95LatencyMs]).toEqual([null, null]);
   });
 
   it('an empty window is an empty bucket list, not an error', async () => {
