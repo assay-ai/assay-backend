@@ -92,6 +92,7 @@ describe('binding stats, against a real database', () => {
     buyerOrg: string;
     verdict: string;
     lifecycle?: string | null;
+    disputeOutcome?: 'UPHELD' | 'REJECTED';
   }): Promise<void> {
     const intentId = randomUUID();
     const toolId = randomUUID();
@@ -99,9 +100,9 @@ describe('binding stats, against a real database', () => {
       `INSERT INTO payment_intents
          (id, organization_id, status, agent_id, agent_account, provider_id, binding_id, tool_id,
           rail, asset_id, decimals, price_amount, provider_amount, platform_fee, request_hash,
-          chain_id, expires_at, call_id, call_class, provider_account)
+          chain_id, expires_at, call_id, call_class, provider_account, dispute_outcome)
        VALUES ($1, $2, $13, $3, $4, $5, $6, $7, 'RAIL_A_PER_CALL', $8, 6, 1000, 1000, 0,
-               $9, $10, now() + interval '1 day', $11, 'PAID', $12)`,
+               $9, $10, now() + interval '1 day', $11, 'PAID', $12, $14)`,
       [
         intentId,
         input.buyerOrg,
@@ -117,6 +118,7 @@ describe('binding stats, against a real database', () => {
         // An intent that never named a provider cannot name a payee either.
         input.providerId ? PAYEE : null,
         input.providerId ? 'SETTLED' : 'VOIDED',
+        input.disputeOutcome ?? null,
       ],
     );
     await dataSource.query(
@@ -382,6 +384,86 @@ describe('binding stats, against a real database', () => {
 
       expect(await snapshot(binding)).toEqual(
         expect.objectContaining({ verdicts: 15, passedVerdicts: 5 }),
+      );
+    });
+  });
+
+  describe('upheld buyer disputes (G3.B1)', () => {
+    it('counts an upheld call as a failed sample, a rejected one not at all', async () => {
+      const provider = randomUUID();
+      const binding = randomUUID();
+      for (let i = 0; i < 6; i += 1) {
+        await seedVerdict({
+          bindingId: binding,
+          providerId: provider,
+          buyerOrg: randomUUID(),
+          verdict: 'PASS',
+        });
+      }
+      // A PASS the buyer won a dispute over is not a pass.
+      await seedVerdict({
+        bindingId: binding,
+        providerId: provider,
+        buyerOrg: randomUUID(),
+        verdict: 'PASS',
+        disputeOutcome: 'UPHELD',
+      });
+      // An unverified call is not a quality sample — unless a dispute over it was upheld.
+      await seedVerdict({
+        bindingId: binding,
+        providerId: provider,
+        buyerOrg: randomUUID(),
+        verdict: 'UNVERIFIED',
+        disputeOutcome: 'UPHELD',
+      });
+      await seedVerdict({
+        bindingId: binding,
+        providerId: provider,
+        buyerOrg: randomUUID(),
+        verdict: 'UNVERIFIED',
+        disputeOutcome: 'REJECTED',
+      });
+      await seedVerdict({
+        bindingId: binding,
+        providerId: provider,
+        buyerOrg: randomUUID(),
+        verdict: 'PASS',
+        disputeOutcome: 'REJECTED',
+      });
+
+      await service(1000, 1, 20).refresh(NOW);
+
+      expect(await snapshot(binding)).toEqual(
+        expect.objectContaining({ verdicts: 9, passedVerdicts: 7 }),
+      );
+    });
+
+    it('keeps one buyer’s upheld disputes inside the per-buyer cap', async () => {
+      const provider = randomUUID();
+      const binding = randomUUID();
+      const loud = randomUUID();
+      for (let i = 0; i < 30; i += 1) {
+        await seedVerdict({
+          bindingId: binding,
+          providerId: provider,
+          buyerOrg: loud,
+          verdict: 'PASS',
+          disputeOutcome: 'UPHELD',
+        });
+      }
+      for (let i = 0; i < 10; i += 1) {
+        await seedVerdict({
+          bindingId: binding,
+          providerId: provider,
+          buyerOrg: randomUUID(),
+          verdict: 'PASS',
+        });
+      }
+
+      await service(1000, 1, 5).refresh(NOW);
+
+      expect(await snapshot(binding)).toEqual(
+        expect.objectContaining({ verdicts: 15, passedVerdicts: 10 }),
       );
     });
   });
