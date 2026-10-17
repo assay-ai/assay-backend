@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { EnabledChainsModule } from '@modules/chains/enabled-chains.module';
+import { NotificationModule } from '@modules/notification/notification.module';
 import { SpendPolicyModule } from '@modules/spend-policy/spend-policy.module';
 import { ToolModule } from '@modules/tool/tool.module';
 import { AuditLogModule } from '@shared/audit';
@@ -10,8 +11,11 @@ import { AccessEpochService } from './services/access-epoch.service';
 import { AccessResolver } from './services/access.resolver';
 import { AgentAccessService } from './services/agent-access.service';
 import { ConnectUrlsService } from './services/connect-urls.service';
+import { HandlesService } from './services/handles.service';
 import { McpEndpointResolver } from './services/mcp-endpoint.resolver';
 import { RefusedCallsService } from './services/refused-calls.service';
+import { ToolsetNoticesService } from './services/toolset-notices.service';
+import { ToolsetPublishingService } from './services/toolset-publishing.service';
 import { ToolsetsService } from './services/toolsets.service';
 
 /**
@@ -32,7 +36,7 @@ import { ToolsetsService } from './services/toolsets.service';
  * are `toolset-api.module.ts`. It never imports `McpModule`, which imports it.
  */
 @Module({
-  imports: [ToolModule, SpendPolicyModule, AuditLogModule, EnabledChainsModule],
+  imports: [ToolModule, SpendPolicyModule, AuditLogModule, EnabledChainsModule, NotificationModule],
   providers: [
     { provide: MCP_HOST_CONFIG, useFactory: () => loadMcpHostConfig() },
     AccessEpochService,
@@ -42,6 +46,9 @@ import { ToolsetsService } from './services/toolsets.service';
     AgentAccessService,
     ConnectUrlsService,
     RefusedCallsService,
+    HandlesService,
+    ToolsetPublishingService,
+    ToolsetNoticesService,
   ],
   exports: [
     MCP_HOST_CONFIG,
@@ -52,6 +59,9 @@ import { ToolsetsService } from './services/toolsets.service';
     AgentAccessService,
     ConnectUrlsService,
     RefusedCallsService,
+    HandlesService,
+    ToolsetPublishingService,
+    ToolsetNoticesService,
   ],
 })
 export class ToolsetModule {}

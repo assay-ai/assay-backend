@@ -9,6 +9,9 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   slug is held for good, even after a delete: a recreated toolset with the
  *   same slug would otherwise answer `/@handle/slug@1` with different tools.
  *   The live-slug index becomes "live, or ever shared".
+ * - `last_shared_version`: the newest version published while shared. Shared
+ *   URLs never serve past it, so a version published privately during a grace
+ *   period never reaches a shared URL.
  * - `delisted_at`: an operator's delist stands until relisted or reverted, so
  *   an owner cannot relist by stopping and sharing again.
  * - A platform (Official) slug is unique among platform toolsets: `NULL`
@@ -43,6 +46,7 @@ export class ToolsetPublishing1761400000001 implements MigrationInterface {
       ALTER TABLE "toolsets"
         ADD COLUMN "first_shared_at" timestamptz NULL,
         ADD COLUMN "delisted_at"     timestamptz NULL,
+        ADD COLUMN "last_shared_version" integer NULL,
         ADD CONSTRAINT "chk_toolsets_listing"
           CHECK (("visibility" = 'PUBLIC') = ("listing_status" IS NOT NULL)),
         ADD CONSTRAINT "chk_toolsets_grace"
@@ -250,6 +254,7 @@ export class ToolsetPublishing1761400000001 implements MigrationInterface {
         DROP CONSTRAINT "chk_toolsets_unlisted_token",
         DROP CONSTRAINT "chk_toolsets_grace",
         DROP CONSTRAINT "chk_toolsets_listing",
+        DROP COLUMN "last_shared_version",
         DROP COLUMN "delisted_at",
         DROP COLUMN "first_shared_at"
     `);

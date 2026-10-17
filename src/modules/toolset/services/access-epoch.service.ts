@@ -34,6 +34,41 @@ export class AccessEpochService {
     }
   }
 
+  /**
+   * The organization's epoch combined with the sharing epoch: what a cached
+   * access or view that may read another organization's shared toolset is
+   * keyed on. `null` when either cannot be read.
+   */
+  async currentWithSharing(organizationId: string): Promise<string | null> {
+    const [own, shared] = await Promise.all([this.current(organizationId), this.currentShared()]);
+    return own === null || shared === null ? null : `${own}:${shared}`;
+  }
+
+  /**
+   * One counter for everything shared across organizations: a publish, a
+   * share-state change, a takedown, a handle change. Rare writes, so one
+   * global counter is enough, and a shared URL's view is cached once for
+   * every organization against it.
+   */
+  async currentShared(): Promise<string | null> {
+    try {
+      return await readEpoch(this.cache.getRedisClient(), SHARED_EPOCH_KEY);
+    } catch {
+      return null;
+    }
+  }
+
+  async bumpShared(): Promise<void> {
+    try {
+      await this.cache.getRedisClient().incr(SHARED_EPOCH_KEY);
+    } catch (error) {
+      this.logger.warn(
+        'sharing epoch not bumped; cached shared views last until their TTL. ' +
+          (error instanceof Error ? error.message : String(error)),
+      );
+    }
+  }
+
   async bump(organizationId: string): Promise<void> {
     try {
       await this.cache.getRedisClient().incr(epochKey(organizationId));
@@ -45,6 +80,8 @@ export class AccessEpochService {
     }
   }
 }
+
+export const SHARED_EPOCH_KEY = 'assay:access-epoch:shared';
 
 export function epochKey(organizationId: string): string {
   return `assay:access-epoch:${organizationId}`;

@@ -10,6 +10,7 @@ import {
 } from '@modules/toolset/controllers/agent-access.controller';
 import { ToolsetsController } from '@modules/toolset/controllers/toolsets.controller';
 import { AgentAccessService } from '@modules/toolset/services/agent-access.service';
+import { ToolsetPublishingService } from '@modules/toolset/services/toolset-publishing.service';
 import { ToolsetsService } from '@modules/toolset/services/toolsets.service';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
@@ -45,6 +46,15 @@ describe('toolset REST contract', () => {
     replaceEntries: jest.fn(async () => ({ id: 'replaced' })),
     delete: jest.fn(),
   };
+  const publishing = {
+    publish: jest.fn(async () => ({ version: { version: 1 } })),
+    unpublish: jest.fn(),
+    rotateToken: jest.fn(),
+    listVersions: jest.fn(async () => []),
+    getVersion: jest.fn(),
+    copy: jest.fn(async () => ({ excluded: [] })),
+    ownStats: jest.fn(),
+  };
   const access = {
     get: jest.fn(async () => ({ agentId: AGENT })),
     patch: jest.fn(async () => ({ agentId: AGENT })),
@@ -59,6 +69,7 @@ describe('toolset REST contract', () => {
       providers: [
         { provide: ToolsetsService, useValue: toolsets },
         { provide: AgentAccessService, useValue: access },
+        { provide: ToolsetPublishingService, useValue: publishing },
         {
           provide: MCP_SESSION_SOURCE,
           useValue: {
