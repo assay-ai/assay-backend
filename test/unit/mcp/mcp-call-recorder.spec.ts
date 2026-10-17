@@ -62,6 +62,30 @@ describe('McpCallRecorder', () => {
       }),
       RefusalLayer.AGENT_LIMITS,
     ],
+    // T3: a contract version mismatch alone is the server's (a migration),
+    // never the buyer's limits; a required output is the toolset's rule.
+    [
+      ToolAccessErrors.noProviderMatchesRules({
+        details: { providers: [{ source: 'MIGRATION' }] },
+      }),
+      RefusalLayer.SERVER,
+    ],
+    [
+      ToolAccessErrors.noProviderMatchesRules({
+        details: { providers: [{ source: 'MIGRATION' }, { source: 'TOOLSET' }] },
+      }),
+      RefusalLayer.TOOLSET_RULES,
+    ],
+    [
+      ToolAccessErrors.unsupportedInputField({
+        details: { fields: ['units'], providers: [{ source: 'REQUEST' }] },
+      }),
+      RefusalLayer.SERVER,
+    ],
+    [
+      ToolAccessErrors.contractVersionRetired({ details: { replacement: 'x@2' } }),
+      RefusalLayer.SERVER,
+    ],
   ])('records %s on its layer', async (error, layer) => {
     const { recorder, writes } = build();
     await recorder.recordRefusal(SESSION, undefined, 'get_weather', error, Date.now());
