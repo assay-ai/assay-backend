@@ -129,3 +129,26 @@ export function openCredentialSet(
     dek.fill(0);
   }
 }
+
+/**
+ * Re-wraps a set's DEK under another KEK. `ciphertext` and `iv` are untouched,
+ * so the plaintext headers are never opened. The AAD is the same one the set
+ * was sealed with.
+ */
+export function rewrapDek(
+  sealed: SealedCredentialSet,
+  from: Kek,
+  to: Kek,
+  aad: string,
+): SealedCredentialSet {
+  if (to.key.length !== KEY_BYTES) {
+    throw new Error('credential vault: KEK must be 32 bytes');
+  }
+  const dek = decrypt(from.key, sealed.dekIv, sealed.wrappedDek, aad);
+  try {
+    const wrapped = encrypt(to.key, dek, aad);
+    return { ...sealed, kekId: to.keyId, wrappedDek: wrapped.output, dekIv: wrapped.iv };
+  } finally {
+    dek.fill(0);
+  }
+}
