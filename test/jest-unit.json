@@ -33,5 +33,7 @@
   "setupFiles": [
     "<rootDir>/setup-env.ts"
   ],
-  "globalSetup": "<rootDir>/global-setup-tz.ts"
+  "globalSetup": "<rootDir>/global-setup-tz.ts",
+  "maxWorkers": 4,
+  "workerIdleMemoryLimit": "1GB"
 }
