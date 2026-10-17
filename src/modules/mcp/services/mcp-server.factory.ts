@@ -155,7 +155,13 @@ export class McpServerFactory {
       if (scope && META_TOOL_NAMES.has(name)) {
         return this.callMetaTool(session, scope, name, (args ?? {}) as JsonObject, meta);
       }
-      return this.callTool(session, scope, name, (args ?? {}) as JsonObject, meta);
+      return this.callTool(
+        session,
+        scope,
+        () => ({ name, args: (args ?? {}) as JsonObject }),
+        meta,
+        name,
+      );
     });
 
     return server;
@@ -169,12 +175,15 @@ export class McpServerFactory {
   private async callTool(
     session: McpSession,
     scope: McpScope | undefined,
-    name: string,
-    args: JsonObject,
+    resolveCall: () => InnerCall,
     meta: Record<string, unknown> | undefined,
+    nameBeforeResolved: string,
   ): Promise<CallToolResult> {
     const startedAt = Date.now();
     void this.recorder?.markFirstCall(session, scope).catch(() => undefined);
+    // The name a refusal is recorded and reported under: the tool's once
+    // known, `call_tool` when its own arguments were the problem.
+    let name = nameBeforeResolved;
 
     try {
       // An agent past its refusal limit gets RATE_LIMITED for the rest of
@@ -187,6 +196,12 @@ export class McpServerFactory {
         );
         if (!rate.allowed) throw ToolAccessErrors.rateLimited({ retryAfterMs: rate.retryAfterMs });
       }
+
+      const call = resolveCall();
+      name = call.name;
+      const args = call.args;
+      // A meta tool is never a catalogue tool, whichever door asked for it.
+      if (META_TOOL_NAMES.has(name)) throw ToolAccessErrors.notInToolset({ details: { name } });
 
       const outcome = await this.calls.call(
         session,
@@ -235,19 +250,24 @@ export class McpServerFactory {
           return structuredResult(await this.discovery.search(session, scope, args));
         case GET_TOOL:
           return structuredResult(await this.discovery.getTool(session, scope, args));
-        default: {
-          validateAgainstSchema(args, CALL_TOOL_INPUT, {
-            direction: MappingDirection.REQUEST,
-            fault: MappingFault.AGENT,
-            context: { toolId: CALL_TOOL },
-          });
-          const inner = args.name as string;
-          const innerArgs = (args.arguments ?? {}) as JsonObject;
-          if (META_TOOL_NAMES.has(inner)) {
-            throw ToolAccessErrors.notInToolset({ details: { name: inner } });
-          }
-          return await this.callTool(session, scope, inner, innerArgs, meta);
-        }
+        default:
+          // call_tool's own refusals (no name, arguments not an object, a meta
+          // tool as the inner call) go through the same refusal limit and
+          // refused-call record as the inner call's.
+          return await this.callTool(
+            session,
+            scope,
+            () => {
+              validateAgainstSchema(args, CALL_TOOL_INPUT, {
+                direction: MappingDirection.REQUEST,
+                fault: MappingFault.AGENT,
+                context: { toolId: CALL_TOOL },
+              });
+              return { name: args.name as string, args: (args.arguments ?? {}) as JsonObject };
+            },
+            meta,
+            CALL_TOOL,
+          );
       }
     } catch (error) {
       return this.toErrorResult(session, name, error);
@@ -332,6 +352,12 @@ const SPEC_REFUSAL_CODES: ReadonlySet<string> = new Set<string>([
   ToolAccessErrorCode.RATE_LIMITED,
   ToolAccessErrorCode.INVALID_CURSOR,
 ]);
+
+/** The call a `tools/call` or a `call_tool` names. */
+interface InnerCall {
+  readonly name: string;
+  readonly args: JsonObject;
+}
 
 /** JSON-RPC's implementation-defined server error range: a rate-limited list. */
 export const MCP_RATE_LIMITED_ERROR_CODE = -32029;
