@@ -52,7 +52,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       migrationsRun: false,
     });
     await dataSource.initialize();
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
 
     redis = new Redis({
       host: process.env.REDIS_HOST || 'localhost',
@@ -221,7 +221,8 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       const [last] = (await dataSource.query(
         `SELECT "name" FROM "migrations" ORDER BY "timestamp" DESC, "id" DESC LIMIT 1`,
       )) as Array<{ name: string }>;
-      await dataSource.undoLastMigration({ transaction: 'all' });
+      // No wrapping transaction: some down() steps drop an index CONCURRENTLY.
+      await dataSource.undoLastMigration({ transaction: 'none' });
       if (last?.name === 'AgentCredentialDelegateUnique1759600000002') break;
     }
     const key = `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`;
@@ -240,7 +241,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       `UPDATE "agent_credentials" SET "delegate_account" = $2, "delegate_bound_at" = now(), "revoked_at" = now(), "revoked_by" = 'test' WHERE "id" = $1`,
       [revoked, key],
     );
-    await dataSource.runMigrations({ transaction: 'all' });
+    await dataSource.runMigrations({ transaction: 'each' });
 
     const rows: { id: string; delegate_account: string | null }[] = await dataSource.query(
       `SELECT "id", "delegate_account" FROM "agent_credentials" WHERE "id" = ANY($1)`,
