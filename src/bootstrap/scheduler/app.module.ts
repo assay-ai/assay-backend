@@ -31,6 +31,7 @@ import { VerificationSchedulerModule } from '@modules/verification/verification-
 import { AccountSchedulerModule } from '@modules/account/account-scheduler.module';
 import { FreeTierSchedulerModule } from '@modules/free-tier/free-tier-scheduler.module';
 import { EvmSchedulerModule } from '@modules/chains/evm/evm-scheduler.module';
+import { ToolsetSchedulerModule } from '@modules/toolset/toolset-scheduler.module';
 
 // Starter reference modules — see src/modules/_examples/README.md
 import { ExamplesSchedulerModule } from '@modules/_examples/examples-scheduler.module';
@@ -94,6 +95,8 @@ import { NetworkModule } from '@shared/network/network.module';
     // the float is one account per chain, and one reading of it per API replica
     // would page five times for one dry relayer.
     EvmSchedulerModule,
+    // Toolsets: grace and moderation-cutoff sweeps, daily and weekly usage stats.
+    ToolsetSchedulerModule,
     // Starter reference modules — off by default in production
     ...(areExamplesEnabled() ? [ExamplesSchedulerModule] : []),
   ],
