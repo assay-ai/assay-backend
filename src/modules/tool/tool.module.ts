@@ -20,6 +20,8 @@ import {
   TOOL_CATALOGUE_SNAPSHOT,
 } from './services/in-memory-tool-catalogue';
 import { ProviderRouterService } from './services/provider-router.service';
+import { QuoteIndexService } from './services/quote-index.service';
+import { ToolBindingChangeSubscriber } from './services/tool-binding-change.subscriber';
 import { ToolRegistrySeeder } from './services/tool-registry.seeder';
 import {
   DEFAULT_ROUTER_TUNING,
@@ -137,6 +139,11 @@ import {
     { provide: ROUTING_RANDOM, useValue: cryptoRandom },
 
     ProviderRouterService,
+
+    // What `tools/list` and the Connect preview price from: candidates cached
+    // per tool, reloaded every minute and on every binding write.
+    QuoteIndexService,
+    ToolBindingChangeSubscriber,
   ],
   // `BINDING_INVOKER` is exported for the mapping tester, which dials a
   // provider's endpoint through the *same* invoker production uses, rather
@@ -146,6 +153,12 @@ import {
   // at the point that writes `payment_intents.binding_id`, which is the MCP
   // loop's own transition, not anywhere inside routing. Counting where the
   // router *selects* would charge a binding that failover then abandoned.
-  exports: [ProviderRouterService, TOOL_CATALOGUE, BINDING_INVOKER, BindingCallCounterService],
+  exports: [
+    ProviderRouterService,
+    QuoteIndexService,
+    TOOL_CATALOGUE,
+    BINDING_INVOKER,
+    BindingCallCounterService,
+  ],
 })
 export class ToolModule {}
