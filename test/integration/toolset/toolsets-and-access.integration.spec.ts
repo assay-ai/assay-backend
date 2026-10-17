@@ -5,23 +5,13 @@ import Redis from 'ioredis';
 import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
-import { AgentConnectUrlRepository } from '@database/postgres/repositories/agent-connect-url.repository';
-import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
-import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
-import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
 import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
-import {
-  ToolsetEntryRepository,
-  ToolsetRepository,
-} from '@database/postgres/repositories/toolset.repository';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { ToolCallRecordWriter } from '@modules/free-tier/services/tool-call-record-writer.service';
 import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
-import { SpendPolicyEnforcementService } from '@modules/spend-policy/services/spend-policy-enforcement.service';
-import { SpendPolicyService } from '@modules/spend-policy/services/spend-policy.service';
 import { ProviderMode } from '@modules/tool/domain/routing';
 import { ToolTier } from '@modules/tool/ports/tool.types';
 import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
@@ -29,15 +19,7 @@ import { AccessMode, accessAllows } from '@modules/toolset/domain/access';
 import { RefusalLayer } from '@modules/toolset/domain/attribution';
 import { EndpointKind, parseMcpUrl } from '@modules/toolset/domain/mcp-url';
 import { ToolsetErrorCode } from '@modules/toolset/errors/toolset.errors';
-import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
-import { AccessResolver } from '@modules/toolset/services/access.resolver';
-import { AgentAccessService } from '@modules/toolset/services/agent-access.service';
-import { ConnectUrlsService } from '@modules/toolset/services/connect-urls.service';
-import { McpEndpointResolver } from '@modules/toolset/services/mcp-endpoint.resolver';
 import { RefusedCallsService } from '@modules/toolset/services/refused-calls.service';
-import { ToolsetsService } from '@modules/toolset/services/toolsets.service';
-import { AuditLogWriter } from '@shared/audit';
-import { CacheService } from '@shared/cache/redis-cache/cache.service';
 
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 import { toolsetTestContext } from '../helpers/toolset-test-context';
