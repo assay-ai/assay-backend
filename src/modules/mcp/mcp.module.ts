@@ -39,6 +39,7 @@ import { McpServerFactory } from './services/mcp-server.factory';
 import { McpToolCallService } from './services/mcp-tool-call.service';
 import { CallAttributionWriter } from './services/call-attribution.writer';
 import { McpCallRecorder } from './services/mcp-call-recorder.service';
+import { McpRateLimiter } from './services/mcp-rate-limiter.service';
 
 /**
  * MCP domain — the interface agents actually call.
@@ -163,6 +164,7 @@ import { McpCallRecorder } from './services/mcp-call-recorder.service';
     McpServerFactory,
     CallAttributionWriter,
     McpCallRecorder,
+    McpRateLimiter,
   ],
   exports: [
     McpCatalogueService,

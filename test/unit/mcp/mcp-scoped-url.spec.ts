@@ -9,7 +9,13 @@ import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
 import { McpScope } from '@modules/mcp/ports/mcp-scope';
 import { ASSAY_NO_PROVIDER_FITS } from '@modules/mcp/services/mcp-catalogue.service';
 import { McpCallRecorder } from '@modules/mcp/services/mcp-call-recorder.service';
-import { ASSAY_IGNORED_TOOLS, McpServerFactory } from '@modules/mcp/services/mcp-server.factory';
+import { MCP_RATE_LIMITS, McpRateLimiter } from '@modules/mcp/services/mcp-rate-limiter.service';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import {
+  ASSAY_IGNORED_TOOLS,
+  MCP_RATE_LIMITED_ERROR_CODE,
+  McpServerFactory,
+} from '@modules/mcp/services/mcp-server.factory';
 import { ProviderTier } from '@modules/provider/ports/provider.types';
 import { OnEmpty, ProviderMode, RoutingRules } from '@modules/tool/domain/routing';
 import { ToolAccessErrorCode } from '@modules/tool/errors/tool-access.errors';
@@ -343,13 +349,13 @@ describe('a scoped MCP URL — ?free=1 never charges', () => {
 describe('a scoped MCP URL — tools/list and the error shape', () => {
   offerSolanaRailsInThisSuite('A', 'B');
 
-  async function connect(scope: McpScope, recorder?: McpCallRecorder) {
+  async function connect(scope: McpScope, recorder?: McpCallRecorder, limiter?: McpRateLimiter) {
     const h = buildMcpHarness({
       bindings: [buildBinding('p1')],
       providers: [buildProvider('p1')],
       invoker: new ScriptedInvoker({ 'binding-p1': async () => ok() }),
     });
-    const servers = new McpServerFactory(h.catalogue, h.calls, recorder);
+    const servers = new McpServerFactory(h.catalogue, h.calls, recorder, limiter);
     const server = servers.create(SESSION, scope);
     const client = new Client({ name: 'test-agent', version: '0.0.0' });
     const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
@@ -453,6 +459,60 @@ describe('a scoped MCP URL — tools/list and the error shape', () => {
     expect(writes[0]).toMatchObject({
       refusalLayer: RefusalLayer.TOOLSET_RULES,
       attribution: { endpointKind: 'TOOLSET', toolsetId: TOOLSET_ID, toolsetVersion: null },
+    });
+  });
+
+  function limiter() {
+    const counters = new Map<string, number>();
+    const redis = {
+      incr: async (key: string) => {
+        counters.set(key, (counters.get(key) ?? 0) + 1);
+        return counters.get(key);
+      },
+      pexpire: async () => 1,
+      get: async (key: string) => (counters.has(key) ? String(counters.get(key)) : null),
+      expire: async () => 1,
+    };
+    return new McpRateLimiter({ getRedisClient: () => redis } as unknown as CacheService, () => 0);
+  }
+
+  it('?free=1 does not list a paid tool the rules left unpriced', async () => {
+    const { client } = await connect(
+      scopeOf(rootView('?free=1'), {
+        rules: { excludeProviderIds: ['p1'], maxPrice: null, minTier: null, minQuality: null },
+      }),
+    );
+    expect((await client.listTools()).tools).toEqual([]);
+  });
+
+  it(`answers RATE_LIMITED beyond ${MCP_RATE_LIMITS.listsPerMinute} lists a minute per credential and URL`, async () => {
+    const { client } = await connect(scopeOf(rootView()), undefined, limiter());
+    for (let n = 0; n < MCP_RATE_LIMITS.listsPerMinute; n += 1) await client.listTools();
+    await expect(client.listTools()).rejects.toMatchObject({
+      code: MCP_RATE_LIMITED_ERROR_CODE,
+      data: { code: 'RATE_LIMITED', retryAfterMs: expect.any(Number) },
+    });
+  });
+
+  it(`answers RATE_LIMITED, before anything runs, once an agent has ${MCP_RATE_LIMITS.refusalsPerMinute} refusals in a minute`, async () => {
+    const rate = limiter();
+    const recorder = new McpCallRecorder(
+      { writeRefusal: async () => undefined } as unknown as ToolCallRecordWriter,
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+      rate,
+    );
+    const { client } = await connect(scopeOf(rootView('?tools=nope_tool')), recorder, rate);
+    for (let n = 0; n < MCP_RATE_LIMITS.refusalsPerMinute; n += 1) {
+      await client.callTool({ name: 'nope_tool', arguments: {} });
+    }
+    const result = (await client.callTool({ name: 'nope_tool', arguments: {} })) as CallToolResult;
+    expect(result._meta?.[X402_ERROR]).toMatchObject({
+      code: 'RATE_LIMITED',
+      retryable: true,
+      retryAfterMs: expect.any(Number),
     });
   });
 });
