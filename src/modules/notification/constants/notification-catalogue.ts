@@ -129,6 +129,14 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       aggregation: NotificationAggregation.ONCE_PER_INCIDENT,
       nonSuppressible: false,
     },
+    [NotificationEvent.CALL_REFUSED_REPEATEDLY]: {
+      severity: NotificationSeverity.WARNING,
+      channels: [NotificationChannel.IN_APP, NotificationChannel.PUSH],
+      // The producer sees the edge (the fifth refusal in an hour); the day
+      // keeps a looping agent from paging its owner every hour.
+      aggregation: NotificationAggregation.ONCE_PER_UTC_DAY,
+      nonSuppressible: false,
+    },
     [NotificationEvent.AGENT_PAUSED]: {
       severity: NotificationSeverity.WARNING,
       channels: EVERYTHING,

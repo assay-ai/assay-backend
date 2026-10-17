@@ -115,6 +115,12 @@ export enum NotificationEvent {
   SPEND_THRESHOLD_CROSSED = 'spend.threshold_crossed',
   VELOCITY_ANOMALY = 'velocity.anomaly',
   AGENT_PAUSED = 'agent.paused',
+  /**
+   * The same refusal — same agent, tool and code — five times within an hour
+   * (design spec §7.10): an agent stuck on a limit or a rule it cannot fix.
+   * `McpCallRecorder` is the producer.
+   */
+  CALL_REFUSED_REPEATEDLY = 'call.refused_repeatedly',
 
   // ── Credentials and signing ─────────────────────────────────────────────
   SESSION_EXPIRING = 'session.expiring',
