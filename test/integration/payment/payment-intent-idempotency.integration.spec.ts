@@ -143,6 +143,38 @@ describe('payment intent idempotency — a retry must never become a second char
     expect(await context.held(first.agentAccount)).toBe(0n);
   });
 
+  it('a refunded intent releases its key, and its hold stays released', async () => {
+    const first = await context.createIntent('idem-refunded', { idempotencyKey: 'key-refunded' });
+    await executing(first);
+    await context.intents.resolve(
+      context.organizationId,
+      first.id,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+      PaymentIntentStatus.VERIFYING,
+      { reason: 'test: served' },
+    );
+    await context.intents.resolve(
+      context.organizationId,
+      first.id,
+      PaymentIntentStatus.VERIFYING,
+      PaymentIntentStatus.REFUNDED,
+      { reason: 'test: verification failed', verificationVerdict: 'SCHEMA_FAIL' },
+    );
+    expect(await context.held(first.agentAccount)).toBe(0n);
+
+    const retry = await context.createIntent('idem-refunded', { idempotencyKey: 'key-refunded' });
+
+    expect(retry.id).not.toBe(first.id);
+    expect(await intentCount('idem-refunded')).toBe(2);
+    expect(
+      await context.intents.findLiveByIdempotencyKey(
+        context.organizationId,
+        context.id('idem-refunded:agent'),
+        'key-refunded',
+      ),
+    ).toMatchObject({ id: retry.id });
+  });
+
   it('an expired intent releases its key too', async () => {
     const first = await context.createIntent('idem-expired', { idempotencyKey: 'key-expired' });
     await context.intents.transition(
