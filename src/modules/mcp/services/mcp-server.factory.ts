@@ -1,15 +1,19 @@
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
-  CallToolRequestSchema,
   CallToolResult,
-  ListToolsRequestSchema,
-  McpError,
-} from '@modelcontextprotocol/sdk/types.js';
+  ListToolsResult,
+  ProtocolError,
+  Server,
+} from '@modelcontextprotocol/server';
 
-import { JsonObject } from '@modules/tool/domain/mapping';
+import {
+  JsonObject,
+  MappingDirection,
+  MappingFault,
+  validateAgainstSchema,
+} from '@modules/tool/domain/mapping';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { AppError } from '@shared/errors/app-errors';
 import { BaseError } from '@shared/errors/base.error';
@@ -32,12 +36,20 @@ import {
   ToolAccessErrors,
 } from '@modules/tool/errors/tool-access.errors';
 
+import {
+  CALL_TOOL,
+  CALL_TOOL_INPUT,
+  GET_TOOL,
+  META_TOOL_NAMES,
+  SEARCH_TOOLS,
+} from '../domain/discovery';
 import { parseIdempotencyKey } from '../domain/idempotency';
 import { McpErrorCode } from '../errors/mcp.errors';
 import { McpScope } from '../ports/mcp-scope';
 import { McpSession } from '../ports/mcp-session.port';
 import { McpCallRecorder, RefusalNotice } from './mcp-call-recorder.service';
-import { McpCatalogueService, displayPrice } from './mcp-catalogue.service';
+import { McpCatalogueService, McpCatalogueViewer, displayPrice } from './mcp-catalogue.service';
+import { McpDiscoveryService } from './mcp-discovery.service';
 import { MCP_RATE_LIMITS, McpRateLimiter, listKey, refusalKey } from './mcp-rate-limiter.service';
 import {
   McpCallOutcome,
@@ -73,7 +85,14 @@ export class McpServerFactory {
     @Optional() private readonly recorder?: McpCallRecorder,
     // The §7.13 limits on this host. Optional so a hand-built harness has none.
     @Optional() private readonly limiter?: McpRateLimiter,
-  ) {}
+    // Discovery modes and the meta tools. Optional so a hand-built harness
+    // gets one over the same catalogue and limiter.
+    @Optional() discovery?: McpDiscoveryService,
+  ) {
+    this.discovery = discovery ?? new McpDiscoveryService(catalogue, limiter);
+  }
+
+  private readonly discovery: McpDiscoveryService;
 
   /**
    * `scope` is what this URL serves and what this caller may use (`McpScope`):
@@ -85,14 +104,20 @@ export class McpServerFactory {
     // JSON only and there is no stream to send one on (design spec §7.4).
     const server = new Server(
       { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },
-      { capabilities: { tools: { listChanged: false } } },
+      {
+        capabilities: { tools: { listChanged: false } },
+        // Protocol 2026-07-28 only: a list result carries `ttlMs`, private to
+        // this client — the list depends on the credential and the URL. A
+        // 2025-era response never carries either field (design spec §7.4).
+        cacheHints: { 'tools/list': { ttlMs: MCP_LIST_TTL_MS, cacheScope: 'private' } },
+      },
     );
 
     // The viewer is passed, not omitted: `x402/freeQuota` is *this agent's*
     // remaining allowance, and a catalogue listed without a viewer publishes no
     // quota at all — which reads to an agent as "this tool has no free tier"
     // rather than as "we did not look".
-    server.setRequestHandler(ListToolsRequestSchema, async () => {
+    server.setRequestHandler('tools/list', async () => {
       // 60 lists a minute per credential and URL (§7.13). A JSON-RPC error,
       // since a list has no result to carry `x402/error` in.
       if (scope && this.limiter) {
@@ -101,73 +126,152 @@ export class McpServerFactory {
           MCP_RATE_LIMITS.listsPerMinute,
         );
         if (!rate.allowed) {
-          throw new McpError(MCP_RATE_LIMITED_ERROR_CODE, RATE_LIMITED_MESSAGE, {
+          throw new ProtocolError(MCP_RATE_LIMITED_ERROR_CODE, RATE_LIMITED_MESSAGE, {
             code: ToolAccessErrorCode.RATE_LIMITED,
             retryAfterMs: rate.retryAfterMs,
           });
         }
       }
 
-      const tools = await this.catalogue.listTools(
-        {
-          organizationId: session.organizationId,
-          agentId: session.agentId,
-          // Rule 1 of `chooseSettlementChain`: a multi-chain tool is quoted as
-          // settling on the chain this agent's own call would take. It narrows nothing.
-          chainId: session.chainId,
-        },
-        scope,
-      );
+      const viewer = viewerOf(session);
+      // FULL or SEARCH by the URL's discovery mode (§7.4). Without a scope
+      // (harnesses that predate URLs) the whole catalogue, as before.
+      const tools = scope
+        ? (await this.discovery.list(viewer, scope)).tools
+        : await this.catalogue.listTools(viewer, scope);
       // An unknown name in `?tools=` is ignored, and said so (§7.4).
       const ignored = scope ? await this.catalogue.ignoredTools(scope) : [];
-      return ignored.length > 0 ? { tools, _meta: { [ASSAY_IGNORED_TOOLS]: ignored } } : { tools };
+      // The descriptors carry `x402/*` annotations outside the SDK's closed
+      // `ToolAnnotations` set; see `McpToolDescriptor`.
+      const result =
+        ignored.length > 0 ? { tools, _meta: { [ASSAY_IGNORED_TOOLS]: ignored } } : { tools };
+      return result as unknown as ListToolsResult;
     });
 
-    server.setRequestHandler(CallToolRequestSchema, async (request) => {
+    server.setRequestHandler('tools/call', async (request) => {
       const { name, arguments: args, _meta: meta } = request.params;
-      const startedAt = Date.now();
-      void this.recorder?.markFirstCall(session, scope).catch(() => undefined);
-
-      try {
-        // An agent past its refusal limit gets RATE_LIMITED for the rest of
-        // the minute before anything runs (§7.13): a loop of refused calls is
-        // cheap for it and must not be cheap for the server.
-        if (this.limiter) {
-          const rate = await this.limiter.exceeded(
-            refusalKey(session.agentId),
-            MCP_RATE_LIMITS.refusalsPerMinute,
-          );
-          if (!rate.allowed)
-            throw ToolAccessErrors.rateLimited({ retryAfterMs: rate.retryAfterMs });
-        }
-
-        const outcome = await this.calls.call(
-          session,
-          name,
-          (args ?? {}) as JsonObject,
-          paymentOf(meta),
-          scope,
-          // Validated here, before anything runs: a malformed key is refused
-          // with `MCP_IDEMPOTENCY_KEY_INVALID` and nothing is charged.
-          parseIdempotencyKey(meta?.[X402_IDEMPOTENCY_KEY]),
-        );
-        return toCallToolResult(outcome);
-      } catch (error) {
-        const notice = await this.recorder
-          ?.recordRefusal(session, scope, name, error, startedAt)
-          .catch(() => null);
-        // Everything that can go wrong with a *tool call* is reported inside
-        // the result, not as a JSON-RPC error. The distinction the
-        // specification draws is between "the protocol failed" and "the tool
-        // did not succeed", and an unaffordable call, an unknown tool or bad
-        // arguments are all the second: the model that made the call is
-        // supposed to read them and decide what to do, and a transport-level
-        // error is not something a model gets to see.
-        return this.toErrorResult(session, name, error, notice ?? null);
+      // The meta tools are served on every scoped URL and listed only in
+      // SEARCH mode, so a client holding an older list keeps working.
+      if (scope && META_TOOL_NAMES.has(name)) {
+        return this.callMetaTool(session, scope, name, (args ?? {}) as JsonObject, meta);
       }
+      return this.callTool(
+        session,
+        scope,
+        () => ({ name, args: (args ?? {}) as JsonObject }),
+        meta,
+        name,
+      );
     });
 
     return server;
+  }
+
+  /**
+   * The `tools/call` pipeline: the refusal limit, then view, access, rules,
+   * spend policy, payment (both rails), the idempotency key and attribution
+   * (`McpToolCallService`). `call_tool` runs exactly this, for its inner call.
+   */
+  private async callTool(
+    session: McpSession,
+    scope: McpScope | undefined,
+    resolveCall: () => InnerCall,
+    meta: Record<string, unknown> | undefined,
+    nameBeforeResolved: string,
+  ): Promise<CallToolResult> {
+    const startedAt = Date.now();
+    void this.recorder?.markFirstCall(session, scope).catch(() => undefined);
+    // The name a refusal is recorded and reported under: the tool's once
+    // known, `call_tool` when its own arguments were the problem.
+    let name = nameBeforeResolved;
+
+    try {
+      // An agent past its refusal limit gets RATE_LIMITED for the rest of
+      // the minute before anything runs (§7.13): a loop of refused calls is
+      // cheap for it and must not be cheap for the server.
+      if (this.limiter) {
+        const rate = await this.limiter.exceeded(
+          refusalKey(session.agentId),
+          MCP_RATE_LIMITS.refusalsPerMinute,
+        );
+        if (!rate.allowed) throw ToolAccessErrors.rateLimited({ retryAfterMs: rate.retryAfterMs });
+      }
+
+      const call = resolveCall();
+      name = call.name;
+      const args = call.args;
+      // A meta tool is never a catalogue tool, whichever door asked for it.
+      if (META_TOOL_NAMES.has(name)) throw ToolAccessErrors.notInToolset({ details: { name } });
+
+      const outcome = await this.calls.call(
+        session,
+        name,
+        args,
+        paymentOf(meta),
+        scope,
+        // Validated here, before anything runs: a malformed key is refused
+        // with `MCP_IDEMPOTENCY_KEY_INVALID` and nothing is charged.
+        parseIdempotencyKey(meta?.[X402_IDEMPOTENCY_KEY]),
+      );
+      return toCallToolResult(outcome);
+    } catch (error) {
+      const notice = await this.recorder
+        ?.recordRefusal(session, scope, name, error, startedAt)
+        .catch(() => null);
+      // Everything that can go wrong with a *tool call* is reported inside
+      // the result, not as a JSON-RPC error. The distinction the
+      // specification draws is between "the protocol failed" and "the tool
+      // did not succeed", and an unaffordable call, an unknown tool or bad
+      // arguments are all the second: the model that made the call is
+      // supposed to read them and decide what to do, and a transport-level
+      // error is not something a model gets to see.
+      return this.toErrorResult(session, name, error, notice ?? null);
+    }
+  }
+
+  /**
+   * `search_tools`, `get_tool` and `call_tool` (§7.4). The first two are free
+   * reads of view ∩ access and are not recorded as calls. `call_tool` is a
+   * door, not a tool: its inner call goes through {@link callTool} with the
+   * same scope and the request's own `_meta` (`x402/rail`, `x402/voucher`,
+   * `x402/idempotency-key`), and its result — `_meta` included — comes back
+   * unchanged. A meta tool is never an inner call.
+   */
+  private async callMetaTool(
+    session: McpSession,
+    scope: McpScope,
+    name: string,
+    args: JsonObject,
+    meta: Record<string, unknown> | undefined,
+  ): Promise<CallToolResult> {
+    try {
+      switch (name) {
+        case SEARCH_TOOLS:
+          return structuredResult(await this.discovery.search(session, scope, args));
+        case GET_TOOL:
+          return structuredResult(await this.discovery.getTool(session, scope, args));
+        default:
+          // call_tool's own refusals (no name, arguments not an object, a meta
+          // tool as the inner call) go through the same refusal limit and
+          // refused-call record as the inner call's.
+          return await this.callTool(
+            session,
+            scope,
+            () => {
+              validateAgainstSchema(args, CALL_TOOL_INPUT, {
+                direction: MappingDirection.REQUEST,
+                fault: MappingFault.AGENT,
+                context: { toolId: CALL_TOOL },
+              });
+              return { name: args.name as string, args: (args.arguments ?? {}) as JsonObject };
+            },
+            meta,
+            CALL_TOOL,
+          );
+      }
+    } catch (error) {
+      return this.toErrorResult(session, name, error);
+    }
   }
 
   private toErrorResult(
@@ -233,6 +337,9 @@ export class McpServerFactory {
 
 export const MCP_SERVER_NAME = 'assay';
 
+/** `ttlMs` on a 2026-07-28 `tools/list` result: clients re-list after a minute. */
+export const MCP_LIST_TTL_MS = 60_000;
+
 /** `_meta["assay/ignoredTools"]` on a list: `?tools=` names this URL does not serve. */
 export const ASSAY_IGNORED_TOOLS = 'assay/ignoredTools';
 
@@ -243,7 +350,14 @@ const SPEC_REFUSAL_CODES: ReadonlySet<string> = new Set<string>([
   ToolAccessErrorCode.TOOL_REMOVED,
   ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES,
   ToolAccessErrorCode.RATE_LIMITED,
+  ToolAccessErrorCode.INVALID_CURSOR,
 ]);
+
+/** The call a `tools/call` or a `call_tool` names. */
+interface InnerCall {
+  readonly name: string;
+  readonly args: JsonObject;
+}
 
 /** JSON-RPC's implementation-defined server error range: a rate-limited list. */
 export const MCP_RATE_LIMITED_ERROR_CODE = -32029;
@@ -291,6 +405,24 @@ function paymentOf(meta: Record<string, unknown> | undefined): McpPayment {
   };
 }
 export const MCP_SERVER_VERSION = '0.1.0';
+
+function viewerOf(session: McpSession): McpCatalogueViewer {
+  return {
+    organizationId: session.organizationId,
+    agentId: session.agentId,
+    // Rule 1 of `chooseSettlementChain`: a multi-chain tool is quoted as
+    // settling on the chain this agent's own call would take. It narrows nothing.
+    chainId: session.chainId,
+  };
+}
+
+/** A meta tool's answer: the JSON as text for every client, and as `structuredContent`. */
+function structuredResult(output: object): CallToolResult {
+  return {
+    content: [{ type: 'text', text: JSON.stringify(output) }],
+    structuredContent: output as Record<string, unknown>,
+  };
+}
 
 function toCallToolResult(outcome: McpCallOutcome): CallToolResult {
   if (outcome.kind === 'ERROR') {

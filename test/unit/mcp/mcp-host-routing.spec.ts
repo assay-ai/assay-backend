@@ -2,8 +2,7 @@ import { INestApplication, Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
-import { Server } from '@modelcontextprotocol/sdk/server/index.js';
-import { ListToolsRequestSchema } from '@modelcontextprotocol/sdk/types.js';
+import { Server } from '@modelcontextprotocol/server';
 
 import { McpController } from '@modules/mcp/controllers/mcp.controller';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
@@ -54,9 +53,12 @@ describe('the MCP host — routing', () => {
               created.push({ session, scope });
               const server = new Server(
                 { name: 'assay', version: '0.1.0' },
-                { capabilities: { tools: {} } },
+                {
+                  capabilities: { tools: { listChanged: false } },
+                  cacheHints: { 'tools/list': { ttlMs: 60_000, cacheScope: 'private' } },
+                },
               );
-              server.setRequestHandler(ListToolsRequestSchema, async () => ({ tools: [] }));
+              server.setRequestHandler('tools/list', async () => ({ tools: [] }));
               return server;
             },
           },
@@ -173,5 +175,92 @@ describe('the MCP host — routing', () => {
         path: { kind: McpPathKind.PUBLIC_TOOLSET, handle: 'acme', slug: 'kit', version: null },
       }),
     );
+  });
+
+  describe('protocol eras (SDK v2, design spec §7.4)', () => {
+    const MODERN_META = {
+      'io.modelcontextprotocol/protocolVersion': '2026-07-28',
+      'io.modelcontextprotocol/clientInfo': { name: 'test', version: '1' },
+      'io.modelcontextprotocol/clientCapabilities': {},
+    };
+
+    const post = (body: { method: string; [key: string]: unknown }, version?: string) => {
+      const call = request(app.getHttpServer())
+        .post('/')
+        .set('Authorization', `Bearer ${TOKEN}`)
+        .set('Accept', 'application/json, text/event-stream')
+        .set('Content-Type', 'application/json');
+      if (version) call.set('MCP-Protocol-Version', version);
+      // The 2026-07-28 revision names the method in a header as well.
+      if (version === '2026-07-28') call.set('Mcp-Method', body.method);
+      return call.send(body);
+    };
+
+    it('a 2026-07-28 client gets ttlMs and a private cache scope on tools/list', async () => {
+      const response = await post(
+        { jsonrpc: '2.0', id: 7, method: 'tools/list', params: { _meta: MODERN_META } },
+        '2026-07-28',
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.result).toMatchObject({
+        tools: [],
+        ttlMs: 60_000,
+        cacheScope: 'private',
+      });
+    });
+
+    it('server/discover advertises tools without list_changed', async () => {
+      const response = await post(
+        { jsonrpc: '2.0', id: 8, method: 'server/discover', params: { _meta: MODERN_META } },
+        '2026-07-28',
+      );
+      expect(response.body.result).toMatchObject({
+        supportedVersions: ['2026-07-28'],
+        capabilities: { tools: { listChanged: false } },
+      });
+    });
+
+    it('an older client is served as before: JSON, no TTL, the same tools', async () => {
+      const init = await post({
+        jsonrpc: '2.0',
+        id: 0,
+        method: 'initialize',
+        params: {
+          protocolVersion: '2025-11-25',
+          capabilities: {},
+          clientInfo: { name: 'old', version: '1' },
+        },
+      });
+      expect(init.status).toBe(200);
+      expect(init.headers['content-type']).toContain('application/json');
+      expect(init.body.result).toMatchObject({
+        protocolVersion: '2025-11-25',
+        capabilities: { tools: { listChanged: false } },
+      });
+      expect(init.headers['mcp-session-id']).toBeUndefined();
+
+      const list = await post({ jsonrpc: '2.0', id: 1, method: 'tools/list' }, '2025-11-25');
+      expect(list.body.result).toEqual({ tools: [] });
+    });
+
+    it('GET and DELETE are 405: no stream, no session', async () => {
+      for (const method of ['get', 'delete'] as const) {
+        const response = await request(app.getHttpServer())
+          [method]('/')
+          .set('Authorization', `Bearer ${TOKEN}`)
+          .set('Accept', 'text/event-stream');
+        expect({ method, status: response.status }).toEqual({ method, status: 405 });
+        expect(response.headers.allow).toBe('POST');
+      }
+    });
+
+    it('a POST that is not JSON is 415', async () => {
+      const response = await request(app.getHttpServer())
+        .post('/')
+        .set('Authorization', `Bearer ${TOKEN}`)
+        .set('Content-Type', 'text/plain')
+        .send('hello');
+      expect(response.status).toBe(415);
+    });
   });
 });
