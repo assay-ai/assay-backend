@@ -381,6 +381,46 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     implemented: false,
   }),
 
+  /**
+   * Standard tool contracts (design spec §7.5, FR-15). Drafting changes
+   * nothing served and is not an override; what reaches traffic is. A
+   * published version and a moved current version change what every buyer
+   * and binding is held to, so both are two-person. A deprecation only
+   * starts a sunset at least 90 days out, and is one operator's act.
+   */
+  'P-10': define({
+    code: 'P-10',
+    family: OverrideFamily.POLICY,
+    action: 'tool_version.published',
+    label: 'Publish a standard tool contract version',
+    roles: [OperatorRole.POL, OperatorRole.POLA],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.POLA],
+    reversible: false,
+    implemented: true,
+  }),
+  'P-11': define({
+    code: 'P-11',
+    family: OverrideFamily.POLICY,
+    action: 'tool.current_version_moved',
+    label: 'Move the contract version unpinned URLs serve',
+    roles: [OperatorRole.POL, OperatorRole.POLA],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.POLA],
+    reversible: true,
+    implemented: true,
+  }),
+  'P-12': define({
+    code: 'P-12',
+    family: OverrideFamily.POLICY,
+    action: 'tool_version.deprecated',
+    label: 'Deprecate a contract major (sunset at least 90 days out)',
+    roles: [OperatorRole.POL, OperatorRole.POLA],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+
   // ── A · Access and routing ───────────────────────────────────────────────
   'A-2': define({
     code: 'A-2',

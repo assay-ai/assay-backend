@@ -40,4 +40,21 @@ export class BindingTestRunRepository extends OrganizationScopedRepository<Bindi
 
     return rows[0] ?? null;
   }
+
+  /**
+   * The newest run at one revision **per contract version tested**, newest
+   * first — what the publish gate reads to find a run for each major in the
+   * binding's range (T3).
+   */
+  async findForRevision(
+    organizationId: string,
+    bindingId: string,
+    mappingVersion: number,
+  ): Promise<BindingTestRunEntity[]> {
+    return this.find({
+      where: { organizationId, bindingId, mappingVersion },
+      order: { createdAt: 'DESC' },
+      take: 200,
+    });
+  }
 }

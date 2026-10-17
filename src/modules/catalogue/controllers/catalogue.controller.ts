@@ -1,3 +1,4 @@
+import { ToolVersionListDto } from '@modules/tool/dto/tool-contract-version.dto';
 import { Controller, Get, Param, UseGuards, UseInterceptors } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
@@ -9,6 +10,7 @@ import {
   CatalogueProviderListDto,
   CatalogueToolListDto,
   GetCatalogueProviderParamsDto,
+  GetCatalogueToolParamsDto,
 } from '../dto/get-catalogue.dto';
 import { CatalogueService } from '../services/catalogue.service';
 
@@ -77,6 +79,18 @@ export class CatalogueController {
   @ApiResponse({ status: 200, type: CatalogueToolListDto })
   async listTools(): Promise<CatalogueToolListDto> {
     return this.catalogue.listTools();
+  }
+
+  @Get('tools/:toolId/versions')
+  @ApiOperation({
+    summary:
+      'A tool’s published contract versions, newest first: schemas, optional fields, ' +
+      'examples, status, sunset and changelog',
+  })
+  @ApiResponse({ status: 200, type: ToolVersionListDto })
+  @ApiResponse({ status: 404, description: 'TOOL_NOT_FOUND' })
+  async toolVersions(@Param() params: GetCatalogueToolParamsDto): Promise<ToolVersionListDto> {
+    return this.catalogue.toolVersions(params.toolId);
   }
 
   /**

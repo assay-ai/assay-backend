@@ -44,6 +44,8 @@ export function versionDtoOf(row: ToolsetVersionEntity): ToolsetVersionDto {
       maxPrice: entry.maxPrice ? { ...entry.maxPrice } : null,
       minQuality: entry.minQuality,
       onEmpty: entry.onEmpty,
+      toolVersionRange: entry.toolVersionRange ?? null,
+      requireOutputFields: [...entry.requireOutputFields],
     })),
   };
 }

@@ -1,7 +1,11 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Optional } from '@nestjs/common';
 
 import { ToolRequestEntity } from '@database/postgres/entities/tool-request.entity';
 import { ToolRequestRepository } from '@database/postgres/repositories/tool-request.repository';
+import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
+import { isReservedToolName } from '@modules/tool/domain/reserved-tool-names';
+import { ToolErrors } from '@modules/tool/errors/tool.errors';
 import { CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
 
 import {
@@ -39,7 +43,12 @@ const QUEUE_LIST: ListSpec = {
  */
 @Injectable()
 export class ToolRequestQueueService {
-  constructor(private readonly requests: ToolRequestRepository) {}
+  constructor(
+    private readonly requests: ToolRequestRepository,
+    // Optional so a harness that answers tickets without a catalogue still
+    // builds; production always has it (`PostgresModule` is global).
+    @Optional() private readonly tools?: ToolRepository,
+  ) {}
 
   /**
    * The queue. Cross-organization, like `SlashProposalRepository
@@ -109,8 +118,16 @@ export class ToolRequestQueueService {
       patch.resolutionNote = body.resolutionNote as string;
     }
 
+    // An accepted request creates a DRAFT standard tool (design spec §7.5):
+    // in no catalogue until an operator drafts and publishes its first version.
+    if (to === ToolRequestStatus.ACCEPTED && this.tools && !current.toolId) {
+      patch.toolId = (await this.draftToolFor(current, body)).id;
+    }
+
     const affected = await this.requests.transitionIfIn(organizationId, id, [from], patch);
     if (affected === 0) {
+      // Somebody else answered first: the draft this attempt made is nobody's.
+      if (patch.toolId) await this.tools?.delete({ id: patch.toolId, status: 'DRAFT' });
       throw ToolRequestErrors.invalidTransition({ from, to });
     }
 
@@ -118,6 +135,29 @@ export class ToolRequestQueueService {
     // Cannot be null: the row we just updated within the same transaction
     // boundary is the row we are about to re-read.
     return ToolRequestDto.fromEntity(saved as ToolRequestEntity);
+  }
+
+  private async draftToolFor(
+    request: ToolRequestEntity,
+    body: AnswerToolRequestBodyDto,
+  ): Promise<{ id: string }> {
+    const tools = this.tools as ToolRepository;
+    const name = body.toolName ?? (await tools.freeName(toolNameOf(request.title)));
+    if (isReservedToolName(name)) {
+      throw ToolErrors.contractInvalid({ problems: [`"${name}" cannot name a standard tool`] });
+    }
+    try {
+      return await tools.insertDraft({
+        name,
+        category: body.toolCategory ?? 'uncategorised',
+        tags: [],
+      });
+    } catch (error) {
+      if ((error as { code?: string })?.code === UNIQUE_VIOLATION_CODE) {
+        throw ToolErrors.contractNameTaken({ name, suggestion: await tools.freeName(name) });
+      }
+      throw error;
+    }
   }
 
   /** The brief an operator reads before answering. Cross-organization by id. */
@@ -130,4 +170,17 @@ export class ToolRequestQueueService {
 
     return ToolRequestDto.fromEntity(entity);
   }
+}
+
+/** A request title as a standard tool name: snake_case, a letter first, at most 48 characters. */
+export function toolNameOf(title: string): string {
+  const words = title
+    .normalize('NFKD')
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .replace(/_+/g, '_');
+  const name = /^[a-z]/.test(words) ? words : `tool_${words}`;
+  const trimmed = name.slice(0, 48).replace(/_+$/g, '');
+  return trimmed.length >= 2 ? trimmed : 'requested_tool';
 }

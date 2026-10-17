@@ -505,6 +505,8 @@ function entriesOf(entries: readonly SnapshotEntry[], flags: ToolFlags): PublicT
     onEmpty: entry.onEmpty,
     removed: flags.removed.has(entry.toolId),
     notReviewed: flags.notReviewed.has(entry.toolId),
+    toolVersionRange: entry.toolVersionRange ?? null,
+    requireOutputFields: [...entry.requireOutputFields],
   }));
 }
 

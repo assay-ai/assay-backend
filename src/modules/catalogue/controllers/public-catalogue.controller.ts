@@ -5,6 +5,8 @@ import { CacheHeader } from '@shared/decorators/cache-header.decorator';
 import { PublicReadRateLimitInterceptor } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 import { GetCatalogueProviderParamsDto } from '../dto/get-catalogue.dto';
+import { ToolVersionListDto } from '@modules/tool/dto/tool-contract-version.dto';
+import { GetCatalogueToolParamsDto } from '../dto/get-catalogue.dto';
 import {
   ListPublicToolsQueryDto,
   PublicProviderDetailDto,
@@ -85,6 +87,26 @@ export class PublicCatalogueController {
   @ApiResponse({ status: 429, description: 'Too many requests from this address.' })
   async listTools(@Query() query: ListPublicToolsQueryDto): Promise<PublicToolListDto> {
     return this.catalogue.listTools(query.category);
+  }
+
+  @Get('tools/:toolId/versions')
+  @CacheHeader({
+    maxAge: TTL_SECONDS,
+    staleWhileRevalidate: 0,
+    staleIfError: 0,
+    mustRevalidate: true,
+  })
+  @ApiOperation({
+    summary: 'A tool’s published contract versions and changelog — no authentication',
+    description:
+      'Newest first, with schemas, optional fields, examples, status (DEPRECATED with its ' +
+      'sunset) and changelog. A draft tool is a 404.',
+  })
+  @ApiResponse({ status: 200, type: ToolVersionListDto })
+  @ApiResponse({ status: 404, description: 'TOOL_NOT_FOUND' })
+  @ApiResponse({ status: 429, description: 'Too many requests from this address.' })
+  async toolVersions(@Param() params: GetCatalogueToolParamsDto): Promise<ToolVersionListDto> {
+    return this.catalogue.toolVersions(params.toolId);
   }
 
   /** After the two literal routes, for the reason `CatalogueController` gives. */

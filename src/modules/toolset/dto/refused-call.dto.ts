@@ -32,12 +32,24 @@ export class RefusedProviderDto {
   @ApiProperty({
     description:
       'NOT_IN_ALLOWED_PROVIDERS | EXCLUDED_BY_TOOLSET | EXCLUDED_BY_AGENT | BELOW_MIN_TIER | ' +
-      'ABOVE_MAX_PRICE | BELOW_MIN_QUALITY | PAYEE_NO_LONGER_ELIGIBLE',
+      'ABOVE_MAX_PRICE | BELOW_MIN_QUALITY | PAYEE_NO_LONGER_ELIGIBLE | MISSING_OUTPUT_FIELD | ' +
+      'UNSUPPORTED_INPUT_FIELD | CONTRACT_VERSION_MISMATCH (T3; never a provider-quality event)',
   })
   reason: string;
 
-  @ApiProperty({ enum: ['AGENT', 'TOOLSET'], description: 'Whose rule dropped it' })
+  @ApiProperty({
+    enum: ['AGENT', 'TOOLSET', 'REQUEST', 'MIGRATION'],
+    description:
+      'Whose rule dropped it: the agent’s limits, the tool set entry, the call’s own ' +
+      'arguments (an optional input) or a contract version the binding does not serve',
+  })
   source: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'On MISSING_OUTPUT_FIELD and UNSUPPORTED_INPUT_FIELD: the fields',
+  })
+  fields?: string[];
 
   @ApiProperty()
   detail: string;
@@ -62,7 +74,8 @@ export class RefusedCallDto {
 
   @ApiProperty({
     description:
-      'TOOL_NOT_IN_TOOLSET | TOOL_NOT_ALLOWED | NO_PROVIDER_MATCHES_RULES | TOOL_REMOVED, or ' +
+      'TOOL_NOT_IN_TOOLSET | TOOL_NOT_ALLOWED | NO_PROVIDER_MATCHES_RULES | TOOL_REMOVED | ' +
+      'CONTRACT_VERSION_RETIRED | UNSUPPORTED_INPUT_FIELD, or ' +
       'a spend-limit, quota or supply refusal (MCP_SPEND_LIMIT_EXCEEDED, MCP_QUOTA_EXCEEDED, …)',
   })
   refusalCode: string;
@@ -73,7 +86,10 @@ export class RefusedCallDto {
   @ApiProperty({ description: 'Never charged; always false' })
   charged: false;
 
-  @ApiProperty({ type: [RefusedProviderDto], description: 'On NO_PROVIDER_MATCHES_RULES' })
+  @ApiProperty({
+    type: [RefusedProviderDto],
+    description: 'On NO_PROVIDER_MATCHES_RULES and UNSUPPORTED_INPUT_FIELD',
+  })
   providers: RefusedProviderDto[];
 
   @ApiProperty({ enum: EndpointKind, nullable: true })

@@ -35,6 +35,14 @@ export class BindingTestRunEntity extends OrganizationScopedEntityWithoutSoftDel
   @Column({ name: 'mapping_version', type: 'int' })
   mappingVersion: number;
 
+  /**
+   * The contract version (`tool_versions.version`) the run was checked
+   * against; `null` on a run recorded before contracts had versions. The
+   * publish gate wants a green run per major in the binding's range.
+   */
+  @Column({ name: 'tool_version', type: 'int', nullable: true })
+  toolVersion: number | null;
+
   /** The id sent upstream as `X-Assay-Call-Id`. Unique platform-wide. */
   @Column({ name: 'call_id', type: 'uuid' })
   callId: string;

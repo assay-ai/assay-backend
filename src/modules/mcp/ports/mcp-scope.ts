@@ -1,7 +1,9 @@
 import { CallAttribution } from '@modules/toolset/domain/attribution';
 import { ResolvedAccess, accessAllows } from '@modules/toolset/domain/access';
-import { McpEndpointView } from '@modules/toolset/domain/view';
+import { McpEndpointView, contractRequestOf } from '@modules/toolset/domain/view';
 import { RoutingRules } from '@modules/tool/domain/routing';
+import { ContractRequest } from '@modules/tool/domain/contract/contract-versions';
+import { Tool } from '@modules/tool/ports/tool.types';
 
 /**
  * What one MCP request may see and call: the URL's view and the caller's
@@ -38,6 +40,14 @@ export function rulesFor(scope: McpScope, toolId: string): RoutingRules {
     agent: scope.access.rules,
     entry: scope.view.entryRules.get(toolId) ?? null,
   };
+}
+
+/**
+ * What a call of `tool` through this URL asks of the contract (T3): the
+ * entry's range and required outputs, narrowed by a `?tools=name@N` pin.
+ */
+export function contractFor(scope: McpScope, tool: Tool): ContractRequest {
+  return contractRequestOf(scope.view, tool);
 }
 
 /** Whether every call through this URL is forced into the FREE call class (`?free=1`). */

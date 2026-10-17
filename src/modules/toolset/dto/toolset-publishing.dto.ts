@@ -125,6 +125,12 @@ export class ToolsetVersionEntryDto {
 
   @ApiProperty({ enum: ['FAIL', 'FALLBACK_BEST'] })
   onEmpty: string;
+
+  @ApiProperty({ type: String, nullable: true, example: '^1' })
+  toolVersionRange: string | null;
+
+  @ApiProperty({ type: [String] })
+  requireOutputFields: string[];
 }
 
 export class ToolsetVersionDto extends ToolsetVersionSummaryDto {

@@ -1092,6 +1092,7 @@ describe('PublicCatalogueService', () => {
     for (const tool of tools) {
       expect(Object.keys(tool).sort()).toEqual([
         'category',
+        'deprecatedMajors',
         'description',
         'freeCallsPerDay',
         'fromPrice',
@@ -1103,8 +1104,11 @@ describe('PublicCatalogueService', () => {
         'providerCount',
         'routable',
         'settlementChains',
+        'summary',
         'tags',
         'tier',
+        'version',
+        'versions',
       ]);
     }
     expect(JSON.stringify(tools)).not.toContain('10.0.0.7');

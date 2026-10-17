@@ -165,8 +165,11 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // sets pinned in the catalogue spec), so a field added to the signed-in
   // catalogue does not reach anonymous readers. The detail route answers only
   // for providers the public list shows; every other id is the same 404.
-  // Cached in process and rate limited per address.
-  ['modules/catalogue/controllers/public-catalogue.controller.ts', 3],
+  // Cached in process and rate limited per address. The fourth route (T3) is
+  // a LISTED tool's published contract versions and changelog: the same
+  // documents `tools/list` and `get_tool` send any key, never a draft, never
+  // an UNLISTED tool, and nothing about a caller.
+  ['modules/catalogue/controllers/public-catalogue.controller.ts', 4],
   // The Explorer's "not charged" feed. Platform-wide paid calls that ended
   // without a charge, and 30-day totals. The payload is tool, provider name,
   // listed price, a reason and a UTC day; no intent, call, buyer, agent, hold
@@ -407,6 +410,9 @@ describe('REST surface consistency', () => {
       // renames and reassignments, and the reports queue. The subject is a
       // publisher who is never the caller.
       'modules/operator/controllers/operator-moderation.controller.ts',
+      // `P-10`–`P-12`, the standard contract editor. A STANDARD tool is the
+      // platform's: nobody's tenant.
+      'modules/operator/controllers/operator-contracts.controller.ts',
       // `A-12`–`A-14`, the operator directory. Operators have no tenant.
       'modules/operator/controllers/operator-operators.controller.ts',
       'modules/operator/controllers/operator-override-log.controller.ts',

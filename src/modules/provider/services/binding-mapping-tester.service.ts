@@ -18,12 +18,20 @@ import {
   MappingFault,
   UpstreamRequest,
   mapRequest,
-  mapResponse,
   mappingFaultOf,
 } from '@modules/tool/domain/mapping';
 import { BINDING_INVOKER, BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { Tool, ToolBinding } from '@modules/tool/ports/tool.types';
+import { Tool, ToolBinding, ToolContractVersion } from '@modules/tool/ports/tool.types';
+import {
+  contractVersionsOf,
+  effectiveOutputSchema,
+  isServable,
+  toolAtVersion,
+  versionOf,
+} from '@modules/tool/domain/contract/contract-versions';
+import { mapServedResponse } from '@modules/tool/domain/contract/served-response';
+import { bindingRange } from '@modules/tool/domain/contract/version-range';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
 import { PolicyMode, VerificationPolicy } from '@modules/verification/domain/policy.types';
 import { RuleOutcome } from '@modules/verification/domain/rules/rule.types';
@@ -122,9 +130,10 @@ export class BindingMappingTesterService {
     subject: string,
     bindingId: string,
     input: JsonObject,
+    toolVersion?: number,
   ): Promise<BindingTestReportDto> {
     return this.limiter.run(organizationId, () =>
-      this.runUnlimited(organizationId, subject, bindingId, input),
+      this.runUnlimited(organizationId, subject, bindingId, input, toolVersion),
     );
   }
 
@@ -133,22 +142,31 @@ export class BindingMappingTesterService {
     subject: string,
     bindingId: string,
     input: JsonObject,
+    toolVersion?: number,
   ): Promise<BindingTestReportDto> {
     const row = await this.editor.loadEditable(organizationId, bindingId);
-    const tool = await this.catalogue.findTool(row.toolId);
-    if (!tool) {
+    const catalogued = await this.catalogue.findTool(row.toolId);
+    if (!catalogued) {
       throw ProviderErrors.bindingToolUnknown({ toolId: row.toolId });
     }
+
+    // The contract version this run checks the draft against (T3): the one
+    // asked for, inside the binding's range, or the newest of its highest
+    // major. Publishing needs a green run per major in the range.
+    const version = testedVersion(catalogued, row.toolVersionRange ?? '^1', toolVersion);
+    const tool = toolAtVersion(catalogued, version);
 
     const binding = toToolBinding(row);
     const callId = randomUUID();
     const report = await this.execute(tool, binding, input, callId);
 
-    await this.record(organizationId, subject, row, input, report);
+    await this.record(organizationId, subject, row, input, report, version.version);
 
     return {
       ...report,
       mappingVersion: row.mappingVersion,
+      toolVersion: version.version,
+      toolVersionSemver: version.semver,
       request: report.request && {
         ...report.request,
         headerNames: [...report.request.headerNames],
@@ -262,10 +280,15 @@ export class BindingMappingTesterService {
 
     let mapped: JsonValue;
     try {
-      mapped = mapResponse(binding.responseMapping, response.body.value, {
-        outputSchema: tool.outputSchema,
+      // As a live call maps it: the tested version's core fields, and every
+      // optional output this binding declares, which must be there.
+      mapped = mapServedResponse(
+        binding.responseMapping,
+        response.body.value,
+        versionOf(tool),
+        binding,
         context,
-      });
+      );
       layers.passed(BindingTestLayer.RESPONSE_MAPPING);
     } catch (error) {
       layers.failed(BindingTestLayer.RESPONSE_MAPPING, error);
@@ -273,7 +296,7 @@ export class BindingMappingTesterService {
     }
 
     // ---- 5. VERIFICATION ----------------------------------------------------
-    const verification = await this.verifyMapped(tool, mapped, input);
+    const verification = await this.verifyMapped(tool, binding, mapped, input);
     const verdict = verification.verdict;
 
     if (verdict !== null && isProviderAtFault(verdict)) {
@@ -323,6 +346,7 @@ export class BindingMappingTesterService {
    */
   private async verifyMapped(
     tool: Tool,
+    binding: ToolBinding,
     mapped: JsonValue,
     input: JsonObject,
   ): Promise<BindingTestVerificationView> {
@@ -335,7 +359,7 @@ export class BindingMappingTesterService {
       // for. The engine only carries this through onto the verdict.
       intentId: `test:${tool.id}`,
       policy,
-      outputSchema: tool.outputSchema,
+      outputSchema: effectiveOutputSchema(versionOf(tool), binding),
       response: mapped,
       request: input,
       evaluatedAt: new Date(),
@@ -358,11 +382,13 @@ export class BindingMappingTesterService {
     row: ToolBindingEntity,
     input: JsonObject,
     report: BindingTestReport,
+    toolVersion: number,
   ): Promise<void> {
     const entity = new BindingTestRunEntity();
     entity.organizationId = organizationId;
     entity.bindingId = row.id;
     entity.mappingVersion = row.mappingVersion;
+    entity.toolVersion = toolVersion;
     entity.callId = report.callId;
     entity.outcome = report.outcome;
     entity.failedLayer = report.failedLayer;
@@ -375,6 +401,33 @@ export class BindingMappingTesterService {
       `Tester run ${report.outcome} for binding ${row.id} revision ${row.mappingVersion}`,
     );
   }
+}
+
+/**
+ * The contract version a tester run checks against: `requested` when it is a
+ * servable version inside the binding's range, else the newest servable
+ * version of the range's highest major that has one.
+ */
+export function testedVersion(tool: Tool, range: string, requested?: number): ToolContractVersion {
+  const majors = bindingRange(range);
+  const servable = contractVersionsOf(tool).filter(
+    (version) => isServable(version) && majors.includes(version.major),
+  );
+  if (requested !== undefined) {
+    const chosen = servable.find((version) => version.version === requested);
+    if (!chosen) {
+      throw ProviderErrors.bindingContractMismatch({
+        problems: [`contract version ${requested} is not a published version in ${range}`],
+      });
+    }
+    return chosen;
+  }
+  if (servable.length === 0) {
+    throw ProviderErrors.bindingContractMismatch({
+      problems: [`no published contract version in ${range} to test against`],
+    });
+  }
+  return servable[0];
 }
 
 /**

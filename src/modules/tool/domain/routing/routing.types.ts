@@ -5,6 +5,7 @@ import { ProviderStake } from '@modules/provider/ports/provider-stake.port';
 
 import { ToolBinding } from '../../ports/tool.types';
 import type { RoutingRules } from './rules';
+import type { ContractRequest } from '../contract/contract-versions';
 
 /**
  * Routing — the types the decision is made over.
@@ -457,6 +458,13 @@ export interface RoutingContext {
    * refusal can name whose rule dropped a provider. Absent means no rules.
    */
   readonly rules?: RoutingRules;
+  /**
+   * What the call asks of the contract (T3): the majors it may use, the
+   * outputs the toolset entry requires and the call's argument names. Hard
+   * constraints, applied before the rules and kept by FALLBACK_BEST. Absent
+   * means the default major, nothing required, no arguments.
+   */
+  readonly contract?: ContractRequest;
   /** `ENABLED_CHAINS`, by name — `filterEligible` is pure and injects nothing. */
   readonly enabledChains: readonly ChainId[];
   /**

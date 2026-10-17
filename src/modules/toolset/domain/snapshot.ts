@@ -20,6 +20,8 @@ export interface SnapshotEntry {
     readonly decimals: number;
   } | null;
   readonly minQuality: number | null;
+  /** T3: the contract majors this entry routes to (`^N`); `null` follows the current major. */
+  readonly toolVersionRange?: string | null;
   readonly requireOutputFields: readonly string[];
   readonly onEmpty: string;
 }
@@ -65,6 +67,7 @@ export function readSnapshotEntries(value: unknown): SnapshotEntry[] {
             ? { amount: price.amount, asset: price.asset, decimals: Number(price.decimals) }
             : null,
         minQuality: typeof e.minQuality === 'number' ? e.minQuality : null,
+        ...(typeof e.toolVersionRange === 'string' ? { toolVersionRange: e.toolVersionRange } : {}),
         requireOutputFields: Array.isArray(e.requireOutputFields)
           ? e.requireOutputFields.map(String)
           : [],
@@ -131,6 +134,7 @@ function ruleKey(entry: SnapshotEntry): string {
     entry.minTier,
     entry.maxPrice,
     entry.minQuality,
+    entry.toolVersionRange ?? null,
     [...entry.requireOutputFields].sort(),
     entry.onEmpty,
   ]);

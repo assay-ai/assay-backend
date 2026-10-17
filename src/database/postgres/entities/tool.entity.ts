@@ -8,9 +8,9 @@ import { Column, CreateDateColumn, Entity, PrimaryColumn, UpdateDateColumn } fro
  * The id is the seed's own uuid, never generated, because every binding,
  * intent and verdict already names it.
  *
- * Schemas and descriptions are not here yet. In T1 the seed still carries the
- * contract and `ToolRegistrySeeder` mirrors its identity into this table at
- * boot; `tool_versions` (T3) moves the contract into the database.
+ * The contract itself — schemas, summary, examples — is in `tool_versions`
+ * (T3). The database is the source of truth; the seed only upserts version
+ * 1.0.0 of each seeded tool at boot, for local runs and tests (§13 D4).
  */
 @Entity('tools')
 export class ToolEntity {
@@ -45,9 +45,21 @@ export class ToolEntity {
   @Column({ name: 'review_note', type: 'varchar', length: 1000, nullable: true })
   reviewNote: string | null;
 
-  /** `ACTIVE` | `DEPRECATED` | `RETIRED` | `REMOVED` — `ToolStatus`. */
+  /** `DRAFT` | `ACTIVE` | `DEPRECATED` | `RETIRED` | `REMOVED` — `ToolStatus`. */
   @Column({ name: 'status', type: 'varchar', length: 16 })
   status: string;
+
+  /**
+   * The version unpinned URLs default to (`tool_versions.version`), or `null`
+   * before the first publish. Moved by an operator, two-person, for a new
+   * major; by the publish itself for a minor or patch of the current major.
+   */
+  @Column({ name: 'current_version', type: 'int', nullable: true })
+  currentVersion: number | null;
+
+  /** Named by deprecation and retirement notices when another tool replaces this one. */
+  @Column({ name: 'replacement_tool_id', type: 'uuid', nullable: true })
+  replacementToolId: string | null;
 
   @CreateDateColumn({ name: 'created_at', type: 'timestamptz' })
   createdAt: Date;
