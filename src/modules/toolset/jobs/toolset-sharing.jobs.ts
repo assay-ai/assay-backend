@@ -3,8 +3,9 @@ import { Cron } from '@nestjs/schedule';
 
 import { ToolsetModerationService } from '../services/toolset-moderation.service';
 import { ToolsetStatsService } from '../services/toolset-stats.service';
+import { ContractLifecycleService } from '../services/contract-lifecycle.service';
 
-/** Every 15 minutes: expired grace periods and unconfirmed cutoffs. */
+/** Every 15 minutes: expired grace periods, unconfirmed cutoffs, contract sunsets. */
 export const TOOLSET_SWEEP_CRON = '*/15 * * * *';
 /** Nightly, 00:30 UTC: the daily raw windows. */
 export const TOOLSET_STATS_DAILY_CRON = '30 0 * * *';
@@ -24,6 +25,7 @@ export class ToolsetSharingJobs {
   constructor(
     private readonly moderation: ToolsetModerationService,
     private readonly stats: ToolsetStatsService,
+    private readonly contracts: ContractLifecycleService,
   ) {}
 
   @Cron(TOOLSET_SWEEP_CRON, { timeZone: 'UTC' })
@@ -34,6 +36,10 @@ export class ToolsetSharingJobs {
       if (reverted || expired) {
         this.logger.log(`cutoffs reverted=${reverted} grace periods ended=${expired}`);
       }
+    });
+    // Deprecated contract versions whose sunset passed retire (design spec §7.5).
+    await this.guard('contract retirement', async () => {
+      await this.contracts.retireDue();
     });
   }
 
