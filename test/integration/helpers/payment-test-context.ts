@@ -8,6 +8,7 @@ import { PaymentIntentRedemptionLastError1760600000000 } from '@database/postgre
 import { PaymentIntentRedemptionLapsed1760700000000 } from '@database/postgres/migrations/1760700000000-payment-intent-redemption-lapsed';
 import { PaymentIntentDebtReplacing1760800000000 } from '@database/postgres/migrations/1760800000000-payment-intent-debt-replacing';
 import { VoucherSeqDebtReplacement1760900000000 } from '@database/postgres/migrations/1760900000000-voucher-seq-debt-replacement';
+import { IdempotencyKeyLiveIntents1761000000000 } from '@database/postgres/migrations/1761000000000-idempotency-key-live-intents';
 import { randomBytes, randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
@@ -217,6 +218,9 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       PaymentIntentRedemptionLapsed1760700000000,
       PaymentIntentDebtReplacing1760800000000,
       VoucherSeqDebtReplacement1760900000000,
+      // The idempotency index narrowed to live intents (G2.1): a voided,
+      // expired or refunded intent releases its key.
+      IdempotencyKeyLiveIntents1761000000000,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',
@@ -228,7 +232,10 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
   // truncated between tests: `ledger_entries` refuses DELETE and TRUNCATE by
   // design, and a fresh `organizationId` per test isolates better than a
   // cleanup step the schema is built to prevent.
-  await dataSource.runMigrations();
+  // One transaction per migration: 1761000000000 builds its index
+  // CONCURRENTLY (`transaction = false`), which a single wrapping transaction
+  // refuses.
+  await dataSource.runMigrations({ transaction: 'each' });
 
   const balanceRepository = new AccountBalanceRepository(dataSource);
   const journal = new LedgerJournalService(
