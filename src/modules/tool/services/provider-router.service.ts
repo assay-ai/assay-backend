@@ -61,6 +61,7 @@ import {
   payoutAccountOn,
   pickWeighted,
   scoreCandidates,
+  statsOf,
 } from '../domain/routing';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
 
@@ -364,9 +365,11 @@ export class ProviderRouterService {
    * should expect from calling this endpoint rather than a property of the
    * supplier list.
    *
-   * Both are `null` when nothing has been measured. The router writes no
-   * reputation, so today they are whatever the config stand-in was seeded with,
-   * and `null` is the honest answer for a tool nobody has scored.
+   * Both are `null` when nothing has been measured. The figures are the ones
+   * the candidates are scored on (`statsOf`): each binding's observed window
+   * from `binding_stats`, falling back to its provider's pooled one, and absent
+   * below the minimum sample size — so `null` is the honest answer for a tool
+   * nobody has measured yet.
    */
   async quote(toolId: string, context: RoutingContext): Promise<ToolQuote | null> {
     const tool = await this.catalogue.findTool(toolId);
@@ -441,11 +444,11 @@ export class ProviderRouterService {
           freeDailyBudget: binding.freeDailyBudget ?? null,
         })),
       settlementChains,
-      p95LatencyMs: weightedMean(weighted, (c) => c.provider.stats.p95LatencyMs),
+      p95LatencyMs: weightedMean(weighted, (c) => statsOf(c).p95LatencyMs),
       qualityRate: weightedMean(weighted, (c) =>
         c.binding.pricingMode === PricingMode.FREE
-          ? c.provider.stats.freeQualityRate
-          : c.provider.stats.paidQualityRate,
+          ? statsOf(c).freeQualityRate
+          : statsOf(c).paidQualityRate,
       ),
       unroutableReason: null,
     };

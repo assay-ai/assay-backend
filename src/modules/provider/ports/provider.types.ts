@@ -41,12 +41,17 @@ export enum ProviderStatus {
  * a real score. See `NEUTRAL_PRIOR` in `domain/routing/score.ts`.
  */
 export interface ProviderStats {
-  /** `1 − SYSTEM_ERROR rate`, rolling 24h. Shared across free and paid. */
+  /**
+   * `1 − SYSTEM_ERROR rate` over the provider-caused attempts in the window
+   * (the last `BINDING_STATS_WINDOW_SIZE` attempts, none older than 7 days).
+   * Shared across free and paid. See `attributeAttempt` for what counts.
+   */
   readonly availabilityRate?: number;
-  /** `PASS / DATA_RESULT` on paid calls, rolling 7d. */
+  /** `PASS / (PASS + FAIL)` over the window's paid verdicts, shadow policies excluded. */
   readonly paidQualityRate?: number;
-  /** `PASS / DATA_RESULT` on free calls, rolling 7d. */
+  /** `PASS / DATA_RESULT` on free calls. Not measured: free calls are not verified yet. */
   readonly freeQualityRate?: number;
+  /** Over the window's `DATA_RESULT` attempts and full-budget timeouts. */
   readonly p50LatencyMs?: number;
   readonly p95LatencyMs?: number;
   readonly callsServed?: number;
@@ -66,7 +71,24 @@ export interface ProviderRoutingState {
   readonly providerId: string;
   readonly status: ProviderStatus;
   readonly tier: ProviderTier;
+  /**
+   * Pooled over every binding this provider has — the provider's figure, as
+   * its profile shows it. The router prefers {@link bindingStats}.
+   */
   readonly stats: ProviderStats;
+
+  /**
+   * The same stats per binding, keyed by binding id: what the router scores a
+   * candidate on, field by field, falling back to {@link stats} where the
+   * binding has too little data of its own (`statsOf` in
+   * `tool/domain/routing/score.ts`).
+   *
+   * Per binding because two bindings of one provider can be two different
+   * endpoints, one healthy and one broken, and scoring both on the pooled
+   * figure would keep sending the broken one its share. Absent or missing a
+   * key: nothing measured for that binding.
+   */
+  readonly bindingStats?: ReadonlyMap<string, ProviderStats>;
 
   /**
    * Where this provider is paid, per chain — their ACTIVE enrolments.
