@@ -209,6 +209,8 @@ const NO_ALERTS = { emit: async (): Promise<void> => undefined };
 
 export async function createBindingEditorTestContext(
   invoker: BindingInvokerPort,
+  /** The contract the bindings implement; {@link TOOL} (one implicit version) by default. */
+  tool: Tool = TOOL,
 ): Promise<BindingEditorTestContext> {
   const database = await ensureTestDatabase(
     process.env.BINDING_TEST_DATABASE || `${process.env.DATABASE_NAME || 'app'}_binding_test`,
@@ -328,7 +330,7 @@ export async function createBindingEditorTestContext(
     new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource),
   );
 
-  const catalogue = new DatabaseToolCatalogue(staticToolContracts([TOOL]), bindings, versions);
+  const catalogue = new DatabaseToolCatalogue(staticToolContracts([tool]), bindings, versions);
   const stakes = new MutableStakeSource();
 
   // No policy is registered for any tool yet, which is also what production
