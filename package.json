@@ -194,7 +194,9 @@
       "**/*.(t|j)s"
     ],
     "coverageDirectory": "../coverage",
-    "testEnvironment": "node"
+    "testEnvironment": "node",
+    "maxWorkers": 4,
+    "workerIdleMemoryLimit": "1GB"
   },
   "lint-staged": {
     "*.ts": [
