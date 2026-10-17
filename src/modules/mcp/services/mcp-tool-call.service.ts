@@ -11,6 +11,7 @@ import {
   EscrowBalanceReaderPort,
 } from '@modules/ledger/ports/escrow-balance-reader.port';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
+import { PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON } from '@modules/payment/constants/payment-intent.constants';
 import { VOUCHER_MAX_TTL_SECONDS } from '@modules/payment/constants/voucher.constants';
 import { PaymentErrorCode, PaymentErrors } from '@modules/payment/errors/payment.errors';
 import {
@@ -79,10 +80,16 @@ import {
   MCP_VERIFICATION_ENQUEUE_FAILED_REASON,
   MCP_VOIDED_REASON,
 } from '../constants/mcp.constants';
+import { argumentsFingerprint } from '../domain/idempotency';
 import { McpErrors } from '../errors/mcp.errors';
 import { McpSession, storedCredentialIdOf } from '../ports/mcp-session.port';
 import { McpCatalogueService } from './mcp-catalogue.service';
 import { MCP_PRICING, McpPricingConfig } from './mcp-pricing.config';
+import {
+  MCP_IDEMPOTENCY_CONFIG,
+  McpIdempotencyConfig,
+  McpIdempotencyStore,
+} from './mcp-idempotency.store';
 
 /**
  * `tools/call` — one paid tool call, end to end.
@@ -158,15 +165,194 @@ export class McpToolCallService {
     @Inject(ESCROW_BALANCE_READER) private readonly escrow: EscrowBalanceReaderPort,
     @Inject(MCP_PRICING) private readonly pricing: McpPricingConfig,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
+    // `_meta["x402/idempotency-key"]`: the replay record of a keyed call.
+    private readonly idempotency: McpIdempotencyStore,
+    @Inject(MCP_IDEMPOTENCY_CONFIG) private readonly idempotencyConfig: McpIdempotencyConfig,
   ) {}
 
+  /**
+   * One `tools/call`. `idempotencyKey` is the validated
+   * `_meta["x402/idempotency-key"]`, or `null` — and `null` runs the call
+   * exactly as it ran before keys existed.
+   */
   async call(
     session: McpSession,
     name: string,
     args: JsonObject,
     payment: McpPayment = NO_PAYMENT,
+    idempotencyKey: string | null = null,
   ): Promise<McpCallOutcome> {
     const tool = await this.catalogue.findByName(name);
+    if (idempotencyKey === null) return this.run(session, tool, args, payment, null);
+    return this.callKeyed(session, tool, args, payment, idempotencyKey);
+  }
+
+  // ── Idempotency (G2.1) ────────────────────────────────────────────────────
+
+  /**
+   * A keyed call: at most one attempt runs, and at most one is charged.
+   *
+   * ```text
+   *  claim the key (Redis)       other tool / other args → IDEMPOTENCY_KEY_REUSED
+   *                              still running           → IN_PROGRESS (retryable)
+   *                              returned a result       → that result, replayed
+   *  run the call                the key reaches `intents.create` / `redeem`
+   *    ├─ RESULT                 stored for the retry window
+   *    └─ anything else          released: it charged nothing, so a retry is a
+   *                              fresh attempt (a rail-B PAYMENT_REQUIRED too)
+   * ```
+   *
+   * Everything here runs before the free/paid fork, so a replay takes no
+   * free-quota place, opens no hold and redeems no voucher.
+   *
+   * The Redis record is the fast path and the only home of the stored
+   * result. The guarantee against a second CHARGE is the payment record's
+   * partial unique index on the same key (see {@link replayedIntent}), which
+   * still holds when the record is gone.
+   */
+  private async callKeyed(
+    session: McpSession,
+    tool: Tool,
+    args: JsonObject,
+    payment: McpPayment,
+    idempotencyKey: string,
+  ): Promise<McpCallOutcome> {
+    const claim = await this.idempotency.claim<McpStoredResult>({
+      organizationId: session.organizationId,
+      agentId: session.agentId,
+      key: idempotencyKey,
+      toolId: tool.id,
+      fingerprint: argumentsFingerprint(args),
+    });
+
+    if (claim.kind === 'CONFLICT') return keyReused(tool, claim.reason);
+    if (claim.kind === 'IN_PROGRESS') return inProgress(claim.retryAfterMs, null);
+    if (claim.kind === 'REPLAY') return this.replay(session, claim.result);
+
+    // `UNAVAILABLE`: Redis did not answer. The call runs; the payment index
+    // still refuses a second charge on the paid paths.
+    const handle = claim.kind === 'CLAIMED' ? claim.handle : null;
+
+    let outcome: McpCallOutcome;
+    try {
+      outcome = await this.run(session, tool, args, payment, idempotencyKey);
+    } catch (error) {
+      if (handle) await this.idempotency.release(handle);
+      // The payment record holds this key for a different request (tool,
+      // arguments or price) — the record that would have said so was lost.
+      if (isPaymentKeyReused(error)) return keyReused(tool, 'REQUEST');
+      throw error;
+    }
+
+    if (handle) {
+      if (outcome.kind === 'RESULT') {
+        await this.idempotency.complete<McpStoredResult>(handle, {
+          output: outcome.output,
+          receipt: outcome.receipt,
+        });
+      } else {
+        await this.idempotency.release(handle);
+      }
+    }
+    return outcome;
+  }
+
+  /**
+   * The stored result of an earlier attempt, with its receipt's status read
+   * again — a call stored at `VERIFYING` may have `SETTLED` since, and the
+   * receipt is the agent's record of what it paid. Read failures keep the
+   * stored receipt: a stale status is better than losing the result.
+   */
+  private async replay(session: McpSession, stored: McpStoredResult): Promise<McpCallOutcome> {
+    const receipt = stored.receipt;
+    if (!receipt.intentId) {
+      return { kind: 'RESULT', output: stored.output, receipt, replayed: true };
+    }
+
+    try {
+      const intent = await this.intents.findById(session.organizationId, receipt.intentId);
+      const zero = MoneyUtil.zero(intent.price.asset, intent.price.decimals);
+      const held = MoneyUtil.isZero(receipt.held) ? intent.price : receipt.held;
+      return {
+        kind: 'RESULT',
+        output: stored.output,
+        receipt: {
+          ...receipt,
+          status: intent.status,
+          charged: intent.status === PaymentIntentStatus.SETTLED ? intent.price : zero,
+          held: isAwaitingVerdict(intent.status) ? held : zero,
+        },
+        replayed: true,
+      };
+    } catch (error) {
+      this.logger.warn(
+        `Intent ${receipt.intentId}: replaying a stored result with its stored receipt; ` +
+          `the intent could not be read. ${describe(error)}`,
+      );
+      return { kind: 'RESULT', output: stored.output, receipt, replayed: true };
+    }
+  }
+
+  /**
+   * `intents.create` (or `redeem`) answered with the intent an EARLIER attempt
+   * of this keyed call created — the partial unique index on
+   * `(organization_id, agent_id, idempotency_key)` did the arbitration. That
+   * attempt holds the money, so this one charges nothing and routes nothing.
+   *
+   * Reached when the Redis record was lost or its lease lapsed. The result of
+   * a completed attempt lived only in that record, so it cannot be replayed
+   * from here; the agent gets the intent id of the charge instead.
+   */
+  private replayedIntent(intent: PaymentIntent): McpCallOutcome {
+    this.logger.log(
+      `Intent ${intent.id}: a keyed retry matched this intent (${intent.status}); not charged again`,
+    );
+    if (!isPastProvider(intent.status)) {
+      return inProgress(this.idempotencyConfig.retryAfterMs, intent.id);
+    }
+    return {
+      kind: 'ERROR',
+      code: McpFailureCode.IDEMPOTENCY_RESULT_UNAVAILABLE,
+      retryable: false,
+      message:
+        `This idempotency key's call already completed (intent ${intent.id}, ${intent.status}), ` +
+        `and its result is no longer stored. Nothing was charged again; use a new key to call again.`,
+      intentId: intent.id,
+      detail: { status: intent.status },
+    };
+  }
+
+  /**
+   * A keyed rail-A call whose funds could not be secured: its intent is moved
+   * to `EXPIRED` at once, so the key is free for the retry the agent makes
+   * after topping up rather than held until the expiry sweep. Best effort.
+   */
+  private async releaseUnfundedKey(session: McpSession, intent: PaymentIntent): Promise<void> {
+    await this.intents
+      .transition(
+        session.organizationId,
+        intent.id,
+        PaymentIntentStatus.CREATED,
+        PaymentIntentStatus.EXPIRED,
+        { reason: PAYMENT_INTENT_UNFUNDED_KEY_RELEASE_REASON },
+      )
+      .catch((error: unknown) => {
+        this.logger.warn(
+          `Intent ${intent.id}: funds not secured and its idempotency key could not be ` +
+            `released; it frees at the expiry sweep. ${describe(error)}`,
+        );
+      });
+  }
+
+  // ── One attempt ───────────────────────────────────────────────────────────
+
+  private async run(
+    session: McpSession,
+    tool: Tool,
+    args: JsonObject,
+    payment: McpPayment,
+    idempotencyKey: string | null,
+  ): Promise<McpCallOutcome> {
     const quote = await this.requireQuote(tool, session);
 
     this.requireValidArguments(tool, args);
@@ -289,7 +475,7 @@ export class McpToolCallService {
       chooseRail(session.chainId, payment.rail, payment.voucher !== null) ===
       PaymentRail.RAIL_B_VOUCHER
     ) {
-      return this.callOnRailB(session, tool, args, callId, payment.voucher);
+      return this.callOnRailB(session, tool, args, callId, payment.voucher, idempotencyKey);
     }
 
     // Hoisted out of `intents.create` below, because two things now need the
@@ -387,16 +573,27 @@ export class McpToolCallService {
         // The receipt's link to the policy that governed this call.
         spendPolicyVersion,
         chainId: session.chainId,
+        // The agent's `x402/idempotency-key`, or null. The unique index on it
+        // is what keeps one live intent per key — see `replayedIntent`.
+        idempotencyKey,
       });
+
+      // An earlier attempt of this keyed call created that intent (its call
+      // id is not this attempt's): it holds the money, so nothing is held here.
+      if (intent.callId !== callId) return { intent, unaffordable: null, replayed: true };
 
       // Still ours? Otherwise the next call of this agent may already have
       // summed its spend without this hold (round-two review N-4). The intent
       // stays in `CREATED` with nothing reserved, for the expiry sweep.
       await held();
       const unaffordable = await this.secureFunds(session, intent, price);
-      return { intent, unaffordable };
+      return { intent, unaffordable, replayed: false };
     });
-    if (admitted.unaffordable) return admitted.unaffordable;
+    if (admitted.replayed) return this.replayedIntent(admitted.intent);
+    if (admitted.unaffordable) {
+      if (idempotencyKey) await this.releaseUnfundedKey(session, admitted.intent);
+      return admitted.unaffordable;
+    }
     const intent = admitted.intent;
 
     const executing = await this.intents.transition(
@@ -439,6 +636,7 @@ export class McpToolCallService {
     args: JsonObject,
     callId: string,
     payment: McpVoucherPayment | null,
+    idempotencyKey: string | null,
   ): Promise<McpCallOutcome> {
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_B_VOUCHER));
     // A payer that owes for served calls whose vouchers lapsed gets no paid
@@ -555,6 +753,9 @@ export class McpToolCallService {
             escrow: reading,
             // After the voucher's chain reads, before its intent and hold (N-4).
             beforeHold: held,
+            // The CALL's key, beside the voucher's seq: a retry of this call
+            // signs a new voucher, and the key is what says it is the same call.
+            idempotencyKey,
           }),
           unaffordable: null,
         };
@@ -567,6 +768,12 @@ export class McpToolCallService {
     });
     if (admitted.intent === null) return admitted.unaffordable;
     const intent: PaymentIntent = admitted.intent;
+
+    // `redeem` answered with an earlier attempt's intent (another seq): this
+    // voucher was neither held nor recorded, and will never be redeemed.
+    if (idempotencyKey && intent.voucherSeq !== payment.signed.voucher.seq) {
+      return this.replayedIntent(intent);
+    }
 
     const executing = await this.intents.transition(
       session.organizationId,
@@ -1585,6 +1792,24 @@ export enum McpFailureCode {
    * shape, and a different one is not what failed.
    */
   PROVIDER_CONTRACT_VIOLATION = 'PROVIDER_CONTRACT_VIOLATION',
+  /**
+   * `x402/idempotency-key` already names a different call of this agent —
+   * another tool, other arguments, or (once its replay record is gone) another
+   * price. Nothing ran and nothing was charged; not retryable with this key.
+   */
+  IDEMPOTENCY_KEY_REUSED = 'IDEMPOTENCY_KEY_REUSED',
+  /**
+   * An earlier attempt with this `x402/idempotency-key` is still running.
+   * Nothing was charged for this one; retry after `retryAfterMs` to get the
+   * first attempt's result.
+   */
+  IN_PROGRESS = 'IN_PROGRESS',
+  /**
+   * The key's call already completed and was charged (`intentId`), but its
+   * result is no longer stored (past the retry window, or the replay record
+   * was lost). Nothing was charged again; not retryable with this key.
+   */
+  IDEMPOTENCY_RESULT_UNAVAILABLE = 'IDEMPOTENCY_RESULT_UNAVAILABLE',
 }
 
 /** What the agent said about paying, read off the request's `_meta`. */
@@ -1731,6 +1956,11 @@ export type McpCallOutcome =
       /** The provider's response, mapped into the tool's `outputSchema`. */
       readonly output: JsonValue | null;
       readonly receipt: McpReceipt;
+      /**
+       * `true` when this is an earlier attempt's stored result, answered for a
+       * retry with the same `x402/idempotency-key` (`_meta["x402/replayed"]`).
+       */
+      readonly replayed?: boolean;
     }
   | {
       readonly kind: 'ERROR';
@@ -1747,9 +1977,59 @@ export type McpCallOutcome =
       readonly detail: Record<string, unknown>;
     };
 
+/** What a keyed call keeps for its replay: the result, as the agent got it. */
+export interface McpStoredResult {
+  readonly output: JsonValue | null;
+  readonly receipt: McpReceipt;
+}
+
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
+
+/** The statuses an intent reaches only once a provider has answered. */
+function isPastProvider(status: PaymentIntentStatus): boolean {
+  return status === PaymentIntentStatus.VERIFYING || status === PaymentIntentStatus.SETTLED;
+}
+
+function isPaymentKeyReused(error: unknown): boolean {
+  return (
+    error instanceof BaseError &&
+    error.errorCode === PaymentErrorCode.PAYMENT_IDEMPOTENCY_KEY_REUSED
+  );
+}
+
+function keyReused(tool: Tool, reason: 'TOOL' | 'ARGUMENTS' | 'REQUEST'): McpCallOutcome {
+  const what =
+    reason === 'TOOL'
+      ? 'a call to another tool'
+      : reason === 'ARGUMENTS'
+        ? `a call to ${tool.name} with other arguments`
+        : `a different request to ${tool.name}`;
+  return {
+    kind: 'ERROR',
+    code: McpFailureCode.IDEMPOTENCY_KEY_REUSED,
+    retryable: false,
+    message:
+      `This idempotency key was already used for ${what}. Nothing was run or charged; ` +
+      `use a new key for a new call.`,
+    intentId: null,
+    detail: { reason },
+  };
+}
+
+function inProgress(retryAfterMs: number, intentId: string | null): McpCallOutcome {
+  return {
+    kind: 'ERROR',
+    code: McpFailureCode.IN_PROGRESS,
+    retryable: true,
+    message:
+      `An earlier call with this idempotency key is still running. Nothing was charged for ` +
+      `this one; retry with the same key to get its result.`,
+    intentId,
+    detail: { retryAfterMs },
+  };
+}
 
 function isInsufficientBalance(error: unknown): boolean {
   return (

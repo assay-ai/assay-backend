@@ -29,6 +29,11 @@ import {
   MCP_PRICING,
   McpPricingConfig,
 } from './services/mcp-pricing.config';
+import {
+  MCP_IDEMPOTENCY_CONFIG,
+  McpIdempotencyStore,
+  mcpIdempotencyConfigFactory,
+} from './services/mcp-idempotency.store';
 import { McpServerFactory } from './services/mcp-server.factory';
 import { McpToolCallService } from './services/mcp-tool-call.service';
 
@@ -134,6 +139,15 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
       inject: [ConfigService],
     },
 
+    {
+      // `_meta["x402/idempotency-key"]`: how long a keyed call's result stays
+      // replayable — the retry window. Default 900 s (15 minutes).
+      provide: MCP_IDEMPOTENCY_CONFIG,
+      useFactory: (config: ConfigService) =>
+        mcpIdempotencyConfigFactory(config.get<string>('MCP_IDEMPOTENCY_TTL_SECONDS')),
+      inject: [ConfigService],
+    },
+    McpIdempotencyStore,
     McpCatalogueService,
     McpToolCallService,
     McpServerFactory,
