@@ -1791,6 +1791,8 @@ function routingContextOf(
     // path passes `[]` (a free call collects nothing), the paid path passes
     // `McpToolCallService.withdrawingChains`.
     withdrawingChains,
+    // For the observed stats only: a self-call is left out of them.
+    buyerOrganizationId: session.organizationId,
   };
 }
 
