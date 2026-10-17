@@ -42,29 +42,41 @@ describe('binding stats, against a real database', () => {
     );
   });
 
-  function service(windowSize = 1000, minSampleSize = 50) {
+  function service(windowSize = 1000, minSampleSize = 50, maxPerBuyer = 20) {
     return new BindingStatsService(attempts, stats, {
       ...DEFAULT_BINDING_STATS_CONFIG,
       windowSize,
       minSampleSize,
+      maxPerBuyer,
     });
   }
 
-  /** `count` attempts on one binding, `ageMs` old, the newest last. */
+  interface SeedAttempt {
+    readonly available: boolean;
+    readonly latencyMs: number | null;
+    /** Defaults to a fresh organization per row, so the per-buyer cap stays out of the way. */
+    readonly buyer?: string;
+    readonly callClass?: string;
+  }
+
+  /** Attempts on one binding, `ageMs` old, the newest last. */
   async function seedAttempts(
     bindingId: string,
     providerId: string,
-    rows: readonly { available: boolean; latencyMs: number | null }[],
+    rows: readonly SeedAttempt[],
     ageMs = 60_000,
   ): Promise<void> {
     for (const [index, row] of rows.entries()) {
       await dataSource.query(
         `INSERT INTO binding_attempts
-           (binding_id, provider_id, call_class, available, latency_ms, reason, created_at)
-         VALUES ($1, $2, 'PAID', $3, $4, $5, $6)`,
+           (binding_id, provider_id, buyer_organization_id, call_class, available, latency_ms,
+            reason, created_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
         [
           bindingId,
           providerId,
+          row.buyer ?? randomUUID(),
+          row.callClass ?? 'PAID',
           row.available,
           row.latencyMs,
           row.available ? 'OK' : 'UPSTREAM_SERVER_ERROR',
@@ -76,7 +88,7 @@ describe('binding stats, against a real database', () => {
 
   async function seedVerdict(input: {
     bindingId: string;
-    providerId: string;
+    providerId: string | null;
     buyerOrg: string;
     verdict: string;
     lifecycle?: string | null;
@@ -88,7 +100,7 @@ describe('binding stats, against a real database', () => {
          (id, organization_id, status, agent_id, agent_account, provider_id, binding_id, tool_id,
           rail, asset_id, decimals, price_amount, provider_amount, platform_fee, request_hash,
           chain_id, expires_at, call_id, call_class, provider_account)
-       VALUES ($1, $2, 'SETTLED', $3, $4, $5, $6, $7, 'RAIL_A_PER_CALL', $8, 6, 1000, 1000, 0,
+       VALUES ($1, $2, $13, $3, $4, $5, $6, $7, 'RAIL_A_PER_CALL', $8, 6, 1000, 1000, 0,
                $9, $10, now() + interval '1 day', $11, 'PAID', $12)`,
       [
         intentId,
@@ -102,7 +114,9 @@ describe('binding stats, against a real database', () => {
         `sha256:${createHash('sha256').update(intentId).digest('hex')}`,
         'eip155:46630',
         `call-${intentId}`,
-        PAYEE,
+        // An intent that never named a provider cannot name a payee either.
+        input.providerId ? PAYEE : null,
+        input.providerId ? 'SETTLED' : 'VOIDED',
       ],
     );
     await dataSource.query(
@@ -271,5 +285,104 @@ describe('binding stats, against a real database', () => {
     );
 
     expect(rows).toEqual([{ day: '2026-10-17', p50LatencyMs: 100, p95LatencyMs: 300 }]);
+  });
+
+  describe('exclusions and the per-buyer cap, in the SQL', () => {
+    it('caps each buyer’s attempts, so one buyer looping voided failures cannot sink a binding', async () => {
+      const provider = randomUUID();
+      const binding = randomUUID();
+      const attacker = randomUUID();
+      // 60 honest successes from 60 buyers, then 500 failures from one.
+      await seedAttempts(
+        binding,
+        provider,
+        Array.from({ length: 60 }, () => ({ available: true, latencyMs: 10 })),
+        3_600_000,
+      );
+      await seedAttempts(
+        binding,
+        provider,
+        Array.from({ length: 500 }, () => ({ available: false, latencyMs: null, buyer: attacker })),
+      );
+
+      await service(1000, 50, 20).refresh(NOW);
+
+      // 60 + at most 20 of the attacker's 500.
+      expect(await snapshot(binding)).toEqual(
+        expect.objectContaining({ attempts: 80, availableAttempts: 60 }),
+      );
+      // And the prune kept the honest buyers' rows: the flood evicted nobody.
+      const [{ count }] = await dataSource.query(
+        `SELECT count(*)::int AS count FROM binding_attempts WHERE buyer_organization_id <> $1`,
+        [attacker],
+      );
+      expect(count).toBe(60);
+    });
+
+    it('caps one buyer’s successes the same way — no washing a window full', async () => {
+      const provider = randomUUID();
+      const binding = randomUUID();
+      const ally = randomUUID();
+      await seedAttempts(
+        binding,
+        provider,
+        Array.from({ length: 300 }, () => ({ available: true, latencyMs: 5, buyer: ally })),
+      );
+
+      await service(1000, 50, 20).refresh(NOW);
+
+      // 20 observations: below the minimum sample, so the provider stays unmeasured.
+      expect(await snapshot(binding)).toEqual(expect.objectContaining({ attempts: 20 }));
+    });
+
+    it('ignores free attempts and self-calls even if a row got in', async () => {
+      const provider = randomUUID();
+      const binding = randomUUID();
+      await seedAttempts(binding, provider, [
+        { available: false, latencyMs: null, callClass: 'FREE' },
+        { available: false, latencyMs: null, buyer: provider },
+        { available: true, latencyMs: 7 },
+      ]);
+
+      await service(1000, 1).refresh(NOW);
+
+      expect(await snapshot(binding)).toEqual(
+        expect.objectContaining({ attempts: 1, availableAttempts: 1 }),
+      );
+    });
+
+    it('caps each buyer’s verdicts, and drops intents with no provider', async () => {
+      const provider = randomUUID();
+      const binding = randomUUID();
+      const loud = randomUUID();
+      for (let i = 0; i < 30; i += 1) {
+        await seedVerdict({
+          bindingId: binding,
+          providerId: provider,
+          buyerOrg: loud,
+          verdict: 'FAIL',
+        });
+      }
+      for (let i = 0; i < 5; i += 1) {
+        await seedVerdict({
+          bindingId: binding,
+          providerId: provider,
+          buyerOrg: randomUUID(),
+          verdict: 'PASS',
+        });
+      }
+      await seedVerdict({
+        bindingId: binding,
+        providerId: null,
+        buyerOrg: randomUUID(),
+        verdict: 'FAIL',
+      });
+
+      await service(1000, 1, 10).refresh(NOW);
+
+      expect(await snapshot(binding)).toEqual(
+        expect.objectContaining({ verdicts: 15, passedVerdicts: 5 }),
+      );
+    });
   });
 });

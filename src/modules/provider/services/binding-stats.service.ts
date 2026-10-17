@@ -28,9 +28,11 @@ export interface BindingStatsRefreshResult {
  * `binding_stats`.
  *
  * ```text
- *   prune   binding_attempts outside the window (older than 7 days, past the last N)
+ *   prune   binding_attempts outside the window (older than 7 days, past a
+ *           buyer's last K on the binding, past the binding's last N)
  *   read    each binding's attempt window      ─┐  two aggregate statements,
- *   read    each binding's last N verdicts     ─┘  not one per binding
+ *   read    each binding's verdict window      ─┘  not one per binding;
+ *           both: at most K per buyer, then the last N
  *   write   binding_stats, replaced whole, in one transaction
  * ```
  *
@@ -56,12 +58,17 @@ export class BindingStatsService {
     const since = new Date(now.getTime() - this.config.maxAgeMs);
 
     // Prune first, so the table the aggregate reads is the window itself.
-    const pruned = await this.attempts.prune(this.config.windowSize, since);
+    const pruned = await this.attempts.prune(
+      this.config.windowSize,
+      this.config.maxPerBuyer,
+      since,
+    );
 
     const [attemptWindows, verdictWindows] = await Promise.all([
-      this.attempts.aggregateWindows(this.config.windowSize, since),
+      this.attempts.aggregateWindows(this.config.windowSize, this.config.maxPerBuyer, since),
       this.stats.aggregateVerdictWindows({
         windowSize: this.config.windowSize,
+        maxPerBuyer: this.config.maxPerBuyer,
         since,
         qualityStatuses: QUALITY_STATUSES,
         passStatus: VerdictStatus.PASS,

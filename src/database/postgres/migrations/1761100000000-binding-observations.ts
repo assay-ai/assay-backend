@@ -24,6 +24,7 @@ export class BindingObservations1761100000000 implements MigrationInterface {
         "id"          uuid         NOT NULL DEFAULT gen_random_uuid(),
         "binding_id"  uuid         NOT NULL,
         "provider_id" uuid         NOT NULL,
+        "buyer_organization_id" uuid NOT NULL,
         "call_class"  varchar(8),
         "available"   boolean      NOT NULL,
         "latency_ms"  integer,
@@ -36,6 +37,12 @@ export class BindingObservations1761100000000 implements MigrationInterface {
     await queryRunner.query(
       `CREATE INDEX "idx_binding_attempts_binding_created"
          ON "binding_attempts" ("binding_id", "created_at" DESC)`,
+    );
+    // The per-buyer cap ranks within (binding, buyer), and the prune keeps
+    // each buyer's own last rows, so one buyer's flood cannot push others out.
+    await queryRunner.query(
+      `CREATE INDEX "idx_binding_attempts_binding_buyer_created"
+         ON "binding_attempts" ("binding_id", "buyer_organization_id", "created_at" DESC)`,
     );
     await queryRunner.query(
       `CREATE INDEX "idx_binding_attempts_provider_created"
@@ -73,9 +80,19 @@ export class BindingObservations1761100000000 implements MigrationInterface {
     await queryRunner.query(
       `CREATE INDEX "idx_binding_stats_provider" ON "binding_stats" ("provider_id")`,
     );
+
+    // The verdict half of the refresh reads the last 7 days of judged records
+    // every five minutes. Partial, like `idx_verification_records_unsettled`,
+    // over exactly the states it reads.
+    await queryRunner.query(
+      `CREATE INDEX "idx_verification_records_judged_created"
+         ON "verification_records" ("created_at")
+         WHERE "state" IN ('JUDGED', 'SETTLED')`,
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    await queryRunner.query(`DROP INDEX IF EXISTS "idx_verification_records_judged_created"`);
     await queryRunner.query(`DROP TABLE IF EXISTS "binding_stats"`);
     await queryRunner.query(`DROP TABLE IF EXISTS "binding_attempts"`);
   }

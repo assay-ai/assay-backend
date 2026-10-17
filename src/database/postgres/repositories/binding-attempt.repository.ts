@@ -9,6 +9,7 @@ import { AbstractRepository } from './abstract.repository';
 export interface BindingAttemptInput {
   readonly bindingId: string;
   readonly providerId: string;
+  readonly buyerOrganizationId: string;
   readonly callClass: string | null;
   readonly available: boolean;
   readonly latencyMs: number | null;
@@ -45,24 +46,34 @@ export class BindingAttemptRepository extends AbstractRepository<BindingAttemptE
     super(BindingAttemptEntity, dataSource);
   }
 
-  async append(attempt: BindingAttemptInput): Promise<void> {
+  /** One multi-row `INSERT` for a batch the recorder buffered. */
+  async appendMany(attempts: readonly BindingAttemptInput[]): Promise<void> {
+    if (attempts.length === 0) return;
     await this.manager
       .createQueryBuilder()
       .insert()
       .into(BindingAttemptEntity)
-      .values({ ...attempt })
+      .values(attempts.map((attempt) => ({ ...attempt })))
       .execute();
   }
 
   /**
-   * Each binding's last `windowSize` attempts no older than `since`, as
-   * counts and the two latency percentiles.
+   * Each binding's window, as counts and the two latency percentiles.
+   *
+   * Two caps, in this order: each buyer organization's last `maxPerBuyer`
+   * attempts on the binding, then the binding's last `windowSize` of what is
+   * left, none older than `since`. The first is what stops one buyer — whose
+   * voided failures cost it nothing — from filling a competitor's window.
    *
    * `percentile_disc` rather than `percentile_cont`: the answer is a latency
    * some call actually had, not an interpolation between two. Both ignore the
    * `NULL` latencies of attempts that were not latency samples.
    */
-  async aggregateWindows(windowSize: number, since: Date): Promise<BindingAttemptWindowRow[]> {
+  async aggregateWindows(
+    windowSize: number,
+    maxPerBuyer: number,
+    since: Date,
+  ): Promise<BindingAttemptWindowRow[]> {
     const rows: Record<string, unknown>[] = await this.manager.query(
       `SELECT w.binding_id AS "bindingId",
               w.provider_id AS "providerId",
@@ -72,14 +83,23 @@ export class BindingAttemptRepository extends AbstractRepository<BindingAttemptE
               percentile_disc(0.5) WITHIN GROUP (ORDER BY w.latency_ms) AS "p50LatencyMs",
               percentile_disc(0.95) WITHIN GROUP (ORDER BY w.latency_ms) AS "p95LatencyMs"
          FROM (
-           SELECT binding_id, provider_id, available, latency_ms,
-                  row_number() OVER (PARTITION BY binding_id ORDER BY created_at DESC, id DESC) AS rn
-             FROM binding_attempts
-            WHERE created_at >= $1
+           SELECT c.*,
+                  row_number() OVER (PARTITION BY c.binding_id
+                                     ORDER BY c.created_at DESC, c.id DESC) AS rn
+             FROM (
+               SELECT id, binding_id, provider_id, available, latency_ms, created_at,
+                      row_number() OVER (PARTITION BY binding_id, buyer_organization_id
+                                         ORDER BY created_at DESC, id DESC) AS rb
+                 FROM binding_attempts
+                WHERE created_at >= $1
+                  AND call_class = 'PAID'
+                  AND buyer_organization_id <> provider_id
+             ) c
+            WHERE c.rb <= $3
          ) w
         WHERE w.rn <= $2
         GROUP BY w.binding_id, w.provider_id`,
-      [since, windowSize],
+      [since, windowSize, maxPerBuyer],
     );
     return rows.map((row) => ({
       bindingId: String(row.bindingId),
@@ -93,10 +113,14 @@ export class BindingAttemptRepository extends AbstractRepository<BindingAttemptE
   }
 
   /**
-   * Drop everything outside the window: rows older than `before`, and rows
-   * past each binding's last `windowSize`. Returns how many went.
+   * Drop everything no window will read again: rows older than `before`, rows
+   * past a buyer's last `maxPerBuyer` on a binding, and rows past the
+   * binding's last `windowSize` of what remains — the same two caps
+   * {@link aggregateWindows} applies, so the table is the window. Each buyer
+   * keeps its own rows, so a flood from one buyer cannot evict another's.
+   * Returns how many went.
    */
-  async prune(windowSize: number, before: Date): Promise<number> {
+  async prune(windowSize: number, maxPerBuyer: number, before: Date): Promise<number> {
     const aged = await this.manager.query(`DELETE FROM binding_attempts WHERE created_at < $1`, [
       before,
     ]);
@@ -104,14 +128,22 @@ export class BindingAttemptRepository extends AbstractRepository<BindingAttemptE
       `DELETE FROM binding_attempts a
         USING (
           SELECT id FROM (
-            SELECT id,
-                   row_number() OVER (PARTITION BY binding_id ORDER BY created_at DESC, id DESC) AS rn
-              FROM binding_attempts
+            SELECT id, rb,
+                   CASE WHEN rb <= $2
+                        THEN row_number() OVER (PARTITION BY binding_id, rb <= $2
+                                                ORDER BY created_at DESC, id DESC)
+                   END AS rn
+              FROM (
+                SELECT id, binding_id, created_at,
+                       row_number() OVER (PARTITION BY binding_id, buyer_organization_id
+                                          ORDER BY created_at DESC, id DESC) AS rb
+                  FROM binding_attempts
+              ) ranked
           ) r
-           WHERE r.rn > $1
+           WHERE r.rb > $2 OR r.rn > $1
         ) old
         WHERE a.id = old.id`,
-      [windowSize],
+      [windowSize, maxPerBuyer],
     );
     return affected(aged) + affected(overflow);
   }

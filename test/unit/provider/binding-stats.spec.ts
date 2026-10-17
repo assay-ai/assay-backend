@@ -191,10 +191,18 @@ describe('binding stats', () => {
       );
     });
 
-    it('reads both settings', () => {
-      expect(load({ BINDING_STATS_WINDOW_SIZE: '200', BINDING_STATS_MIN_SAMPLE: '20' })).toEqual(
-        expect.objectContaining({ windowSize: 200, minSampleSize: 20 }),
-      );
+    it('reads all three settings', () => {
+      expect(
+        load({
+          BINDING_STATS_WINDOW_SIZE: '200',
+          BINDING_STATS_MIN_SAMPLE: '20',
+          BINDING_STATS_MAX_PER_BUYER: '5',
+        }),
+      ).toEqual(expect.objectContaining({ windowSize: 200, minSampleSize: 20, maxPerBuyer: 5 }));
+    });
+
+    it('caps one buyer at 20 attempts by default', () => {
+      expect(load({}).maxPerBuyer).toBe(20);
     });
 
     it.each([
@@ -206,6 +214,8 @@ describe('binding stats', () => {
       // A minimum above the window could never be met: every provider pinned
       // to the neutral prior forever.
       [{ BINDING_STATS_WINDOW_SIZE: '100', BINDING_STATS_MIN_SAMPLE: '101' }],
+      [{ BINDING_STATS_MAX_PER_BUYER: '0' }],
+      [{ BINDING_STATS_WINDOW_SIZE: '100', BINDING_STATS_MAX_PER_BUYER: '101' }],
     ])('refuses to boot on %j', (env) => {
       expect(() => load(env)).toThrow(/BINDING_STATS_/);
     });

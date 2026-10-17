@@ -368,7 +368,7 @@ describe('DbProviderRegistry', () => {
         noBlocks(),
         null,
         { findByProviders } as never,
-        { windowSize: 1000, minSampleSize, maxAgeMs: 1 },
+        { windowSize: 1000, minSampleSize, maxPerBuyer: 20, maxAgeMs: 1 },
       );
       return { registry, findByProviders };
     }
