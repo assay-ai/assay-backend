@@ -521,7 +521,8 @@ describe('buyer debt migrations, down and up again', () => {
     // The idempotency index (G2.1) sits on top of the buyer-debt migrations
     // and touches none of their objects; it is reverted first to reach them.
     expect(await last()).toBe('IdempotencyKeyLiveIntents1761000000000');
-    await dataSource.undoLastMigration({ transaction: 'each' });
+    // No wrapping transaction: its down() rebuilds the index CONCURRENTLY.
+    await dataSource.undoLastMigration({ transaction: 'none' });
     expect(await last()).toBe('VoucherSeqDebtReplacement1760900000000');
     expect(await seqTriggerSource()).toContain('redemption_lapsed_at');
 

@@ -232,7 +232,10 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
   // truncated between tests: `ledger_entries` refuses DELETE and TRUNCATE by
   // design, and a fresh `organizationId` per test isolates better than a
   // cleanup step the schema is built to prevent.
-  await dataSource.runMigrations();
+  // One transaction per migration: 1761000000000 builds its index
+  // CONCURRENTLY (`transaction = false`), which a single wrapping transaction
+  // refuses.
+  await dataSource.runMigrations({ transaction: 'each' });
 
   const balanceRepository = new AccountBalanceRepository(dataSource);
   const journal = new LedgerJournalService(
