@@ -6,6 +6,9 @@ import { ToolEntity } from '@database/postgres/entities/tool.entity';
 import { ToolsetEntryEntity } from '@database/postgres/entities/toolset-entry.entity';
 import { ToolsetEntity } from '@database/postgres/entities/toolset.entity';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import { ToolVersionEntity } from '@database/postgres/entities/tool-version.entity';
+import { ToolVersionRepository } from '@database/postgres/repositories/tool-version.repository';
+import { formatVersionRange, parseVersionRange } from '@modules/tool/domain/contract/version-range';
 import {
   ToolsetEntryRepository,
   ToolsetRepository,
@@ -13,7 +16,7 @@ import {
 import { getAssetMetadata, isRegisteredAsset } from '@modules/chains/ports/asset-registry';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { OnEmpty, ProviderMode } from '@modules/tool/domain/routing';
-import { ToolStatus } from '@modules/tool/ports/tool.types';
+import { ToolStatus, ToolVersionStatus } from '@modules/tool/ports/tool.types';
 import { CursorPageDto, ListQueryDto, ListSpec, asInstant, paginate } from '@shared/api';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
@@ -76,6 +79,7 @@ export class ToolsetsService {
     private readonly toolsets: ToolsetRepository,
     private readonly entries: ToolsetEntryRepository,
     private readonly tools: ToolRepository,
+    private readonly toolVersions: ToolVersionRepository,
     private readonly epochs: AccessEpochService,
     private readonly audit: AuditLogWriter,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
@@ -209,7 +213,14 @@ export class ToolsetsService {
     actor: AuditActor,
   ): Promise<ToolsetDto> {
     const toolset = await this.requireOwned(organizationId, id);
-    const entries = await this.validateEntries(input);
+    // An entry re-sent without a range keeps the one it has (T3).
+    const stored = new Map(
+      (await this.entries.findByToolsets([toolset.id])).map((row) => [
+        row.toolId,
+        row.toolVersionRange,
+      ]),
+    );
+    const entries = await this.validateEntries(input, stored);
     const names = new Set(entries.map((entry) => entry.tool.name));
 
     await this.dataSource.transaction(async (manager) => {
@@ -305,7 +316,10 @@ export class ToolsetsService {
 
   // ── Validation ────────────────────────────────────────────────────────────
 
-  private async validateEntries(input: readonly ToolsetEntryInputDto[]): Promise<ValidEntry[]> {
+  private async validateEntries(
+    input: readonly ToolsetEntryInputDto[],
+    storedRanges: ReadonlyMap<string, string | null> = new Map(),
+  ): Promise<ValidEntry[]> {
     if (input.length > TOOLSET_LIMITS.entriesPerToolset) {
       throw ToolsetErrors.limitExceeded({
         limit: 'entriesPerToolset',
@@ -330,7 +344,21 @@ export class ToolsetsService {
       throw ToolsetErrors.invalid({ reason: 'unknown or unavailable tools', toolIds: unknown });
     }
 
+    // The contract half of each entry (T3): the range of majors it routes
+    // to and the outputs it requires, checked against the published versions.
+    const versions = new Map<string, ToolVersionEntity[]>();
+    for (const row of await this.toolVersions.findByTools(ids)) {
+      if (row.status === ToolVersionStatus.DRAFT) continue;
+      versions.set(row.toolId, [...(versions.get(row.toolId) ?? []), row]);
+    }
+
     return input.map((entry) => {
+      const contract = entryContractTerms(
+        entry,
+        tools.get(entry.toolId) as ToolEntity,
+        versions.get(entry.toolId) ?? [],
+        storedRanges.get(entry.toolId) ?? null,
+      );
       const mode = entry.providerMode ?? ProviderMode.BEST;
       const providerIds = dedupe(entry.providerIds ?? []);
       if (mode === ProviderMode.BEST && providerIds.length > 0) {
@@ -371,6 +399,7 @@ export class ToolsetsService {
         maxPrice,
         minQuality: entry.minQuality ?? null,
         onEmpty: entry.onEmpty ?? OnEmpty.FAIL,
+        ...contract,
       };
     });
   }
@@ -432,6 +461,8 @@ export class ToolsetsService {
         maxPriceDecimals: entry.maxPrice?.decimals ?? null,
         minQuality: entry.minQuality === null ? null : String(entry.minQuality),
         onEmpty: entry.onEmpty,
+        toolVersionRange: entry.toolVersionRange,
+        requireOutputFields: entry.requireOutputFields,
       })),
     );
   }
@@ -540,6 +571,70 @@ interface ValidEntry {
   readonly maxPrice: { amount: string; asset: string; decimals: number } | null;
   readonly minQuality: number | null;
   readonly onEmpty: OnEmpty;
+  readonly toolVersionRange: string | null;
+  readonly requireOutputFields: string[];
+}
+
+/**
+ * An entry's contract range and required outputs (T3, design spec §7.2):
+ * the range named, else the stored one, else `^N` of the tool's current
+ * major; every major in it must have a published version that still serves,
+ * and every required output must be a field of the contract in that range.
+ */
+export function entryContractTerms(
+  entry: Pick<ToolsetEntryInputDto, 'toolId' | 'toolVersionRange' | 'requireOutputFields'>,
+  tool: Pick<ToolEntity, 'currentVersion'>,
+  versions: readonly Pick<ToolVersionEntity, 'version' | 'major' | 'status' | 'outputSchema'>[],
+  storedRange: string | null,
+): { toolVersionRange: string | null; requireOutputFields: string[] } {
+  const servable = versions.filter(
+    (version) =>
+      version.status === ToolVersionStatus.ACTIVE ||
+      version.status === ToolVersionStatus.DEPRECATED,
+  );
+  const current =
+    versions.find((version) => version.version === tool.currentVersion) ??
+    [...servable].sort((a, b) => b.version - a.version)[0];
+  const text = entry.toolVersionRange ?? storedRange ?? (current ? `^${current.major}` : null);
+  const range = text === null ? null : parseVersionRange(text);
+  if (text !== null && !range) {
+    throw ToolsetErrors.invalid({
+      reason: `"${text}" is not a version range (write ^1, or ^1 || ^2)`,
+      toolIds: [entry.toolId],
+    });
+  }
+  const majors = range ?? [];
+  const missing = majors.filter((major) => !servable.some((version) => version.major === major));
+  if (missing.length > 0) {
+    throw ToolsetErrors.invalid({
+      reason: `no published version serves ${missing.map((major) => `v${major}`).join(', ')}`,
+      toolIds: [entry.toolId],
+    });
+  }
+
+  const required = dedupe(entry.requireOutputFields ?? []);
+  const inRange = servable.filter(
+    (version) => majors.length === 0 || majors.includes(version.major),
+  );
+  const unknownFields = required.filter(
+    (field) =>
+      !inRange.some((version) =>
+        Object.prototype.hasOwnProperty.call(
+          (version.outputSchema as { properties?: Record<string, unknown> }).properties ?? {},
+          field,
+        ),
+      ),
+  );
+  if (unknownFields.length > 0) {
+    throw ToolsetErrors.invalid({
+      reason: `not an output of this tool: ${unknownFields.join(', ')}`,
+      toolIds: [entry.toolId],
+    });
+  }
+  return {
+    toolVersionRange: range ? formatVersionRange(range) : null,
+    requireOutputFields: required,
+  };
 }
 
 function toEntryDto(row: ToolsetEntryEntity, tool: ToolEntity | undefined): ToolsetEntryDto {
@@ -557,6 +652,8 @@ function toEntryDto(row: ToolsetEntryEntity, tool: ToolEntity | undefined): Tool
         : null,
     minQuality: row.minQuality === null ? null : Number(row.minQuality),
     onEmpty: row.onEmpty as OnEmpty,
+    toolVersionRange: row.toolVersionRange ?? null,
+    requireOutputFields: [...(row.requireOutputFields ?? [])],
   };
 }
 

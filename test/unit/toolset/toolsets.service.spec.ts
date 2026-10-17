@@ -29,6 +29,8 @@ function build(options: { owned?: number; tools?: number } = {}) {
     } as never,
     { findByToolsets: async () => [] } as never,
     { findByIds: async (ids: string[]) => tools.filter((tool) => ids.includes(tool.id)) } as never,
+    // T3: no published versions, so every entry follows the current major (none).
+    { findByTools: async () => [] } as never,
     { bump: async () => undefined } as never,
     { record: async () => undefined } as never,
     { transaction: async () => ({ id: 'never' }) } as never,

@@ -7,6 +7,7 @@ import { AgentRepository } from '@database/postgres/repositories/agent.repositor
 import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import { ToolVersionRepository } from '@database/postgres/repositories/tool-version.repository';
 import {
   ModerationCutoffRepository,
   OrgHandleClaimRepository,
@@ -85,6 +86,7 @@ export function toolsetTestContext(options: ToolsetTestContextOptions) {
     toolsets,
     entries,
     tools,
+    new ToolVersionRepository(dataSource),
     epochs,
     audit,
     dataSource,

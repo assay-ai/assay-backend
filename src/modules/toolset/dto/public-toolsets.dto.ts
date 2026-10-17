@@ -222,6 +222,12 @@ export class PublicToolsetEntryDto {
 
   @ApiProperty({ description: 'No longer served (removed or retired): "Removed"' })
   removed: boolean;
+
+  @ApiProperty({ type: String, nullable: true, example: '^1', description: 'Contract majors (T3)' })
+  toolVersionRange: string | null;
+
+  @ApiProperty({ type: [String], description: '"Must return": required output fields (T3)' })
+  requireOutputFields: string[];
 }
 
 export class PublicForkedFromDto {

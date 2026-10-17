@@ -113,6 +113,37 @@ export class ToolsetEntryInputDto {
   @IsOptional()
   @IsIn(Object.values(OnEmpty))
   onEmpty?: OnEmpty;
+
+  @ApiPropertyOptional({
+    example: '^1',
+    maxLength: 32,
+    description:
+      'The contract majors this entry routes to (T3): `^1`, or `^1 || ^2`. When omitted, ' +
+      "an entry already in the Draft keeps its range and a new one gets the tool's current " +
+      'major. FALLBACK_BEST never leaves it.',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^\^\d{1,4}(\s*\|\|\s*\^\d{1,4})*$/, {
+    message: 'toolVersionRange must be a range of majors, e.g. ^1 or ^1 || ^2',
+  })
+  toolVersionRange?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['uv_index'],
+    description:
+      '"Must return": output fields every serving provider must return (T3). A hard ' +
+      'constraint: providers that do not declare an optional one are skipped, and ' +
+      'FALLBACK_BEST keeps it.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(20)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  requireOutputFields?: string[];
 }
 
 export class CreateToolsetBodyDto {
@@ -280,6 +311,17 @@ export class ToolsetEntryDto {
 
   @ApiProperty({ enum: OnEmpty })
   onEmpty: OnEmpty;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: '^1',
+    description: 'The contract majors this entry routes to; null follows the current major.',
+  })
+  toolVersionRange: string | null;
+
+  @ApiProperty({ type: [String], description: '"Must return": required output fields.' })
+  requireOutputFields: string[];
 }
 
 export class ToolsetUrlsDto {
