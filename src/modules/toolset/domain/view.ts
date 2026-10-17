@@ -1,6 +1,15 @@
 import { ProviderTier } from '@modules/provider/ports/provider.types';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { EntryRoutingRules, OnEmpty, ProviderMode } from '@modules/tool/domain/routing';
+import {
+  ContractRequest,
+  contractVersionsOf,
+} from '@modules/tool/domain/contract/contract-versions';
+import {
+  VersionRange,
+  intersectRanges,
+  parseVersionRange,
+} from '@modules/tool/domain/contract/version-range';
 import { PricingMode, Tool, categoryOf, isListedTool } from '@modules/tool/ports/tool.types';
 import { MoneyUtil } from '@utils/money.util';
 
@@ -30,6 +39,11 @@ export interface McpEndpointView {
   readonly baseToolIds: readonly string[] | null;
   /** The entry rules of the toolset this URL serves, by tool id. */
   readonly entryRules: ReadonlyMap<string, EntryRoutingRules>;
+  /**
+   * T3: each entry's contract range and required outputs, by tool id. Absent
+   * or missing an id means the default major and nothing required.
+   */
+  readonly entryContracts?: ReadonlyMap<string, EntryContract>;
   /**
    * `/c/{category}`: the path's own topic, applied like `?category=` (and
    * intersected with it). Absent or `null` elsewhere.
@@ -76,6 +90,50 @@ export interface ViewToolset {
   readonly latest: boolean;
 }
 
+/** A toolset entry's contract constraints (T3): hard, kept by FALLBACK_BEST. */
+export interface EntryContract {
+  /** `tool_version_range`; `null` follows the tool's current major. */
+  readonly range: VersionRange | null;
+  readonly requireOutputFields: readonly string[];
+}
+
+/** A stored entry's range and required outputs, or `null` when it sets neither. */
+export function entryContractOf(entry: {
+  readonly toolVersionRange?: string | null;
+  readonly requireOutputFields: readonly string[];
+}): EntryContract | null {
+  const range = parseVersionRange(entry.toolVersionRange);
+  const required = [...(entry.requireOutputFields ?? [])];
+  if (!range && required.length === 0) return null;
+  return { range, requireOutputFields: required };
+}
+
+/**
+ * What a call of `tool` through this URL asks of the contract: the entry's
+ * range intersected with a `?tools=name@N` pin, and the entry's required
+ * outputs. `range: []` when the two do not meet — no version can serve it.
+ */
+export function contractRequestOf(
+  view: Pick<McpEndpointView, 'entryContracts' | 'filter'>,
+  tool: Tool,
+): ContractRequest {
+  const entry = view.entryContracts?.get(tool.id) ?? null;
+  const entryRange = entry?.range ?? null;
+  const selectors = (view.filter.tools ?? []).filter((selector) => selector.name === tool.name);
+  // A plain selector serves the tool unpinned; otherwise the pin is every
+  // major the URL names that the view did not ignore (one that exists, and
+  // inside the entry's range) — the same test `selectViewTools` applies.
+  let pin: number[] | null = null;
+  if (selectors.length > 0 && selectors.every((selector) => selector.major !== null)) {
+    const majors = new Set(contractVersionsOf(tool).map((version) => version.major));
+    pin = selectors
+      .map((selector) => selector.major as number)
+      .filter((major) => majors.has(major) && (entryRange === null || entryRange.includes(major)));
+  }
+  const range = intersectRanges(entryRange, pin);
+  return { range, requireOutputFields: entry?.requireOutputFields ?? [] };
+}
+
 /** The fields of a `toolset_entries` row the rules are built from. */
 export interface StoredEntryRule {
   readonly providerMode: string;
@@ -115,7 +173,7 @@ export function entryRulesOf(entry: StoredEntryRule): EntryRoutingRules | null {
 
 /** The view's tools from `catalogue`, in the URL's order, and the `?tools=` names it ignored. */
 export function selectViewTools(
-  view: Pick<McpEndpointView, 'baseToolIds' | 'filter' | 'baseCategory'>,
+  view: Pick<McpEndpointView, 'baseToolIds' | 'filter' | 'baseCategory' | 'entryContracts'>,
   catalogue: readonly Tool[],
 ): { readonly tools: readonly Tool[]; readonly ignoredTools: readonly string[] } {
   const byId = new Map(catalogue.map((tool) => [tool.id, tool]));
@@ -132,11 +190,22 @@ export function selectViewTools(
   if (view.filter.tools) {
     const names = new Set<string>();
     for (const selector of view.filter.tools) {
-      // Every tool has one contract major until versions arrive (T3), so a
-      // pin to any other major names nothing that exists.
-      if (selector.major !== null && selector.major !== 1) {
-        ignored.push(`${selector.name}@${selector.major}`);
-        continue;
+      // A pin to a major the tool has no version of, or one outside the
+      // toolset entry's range, names nothing this URL can serve (T3).
+      if (selector.major !== null) {
+        const tool = tools.find((candidate) => candidate.name === selector.name);
+        const entryRange = tool ? (view.entryContracts?.get(tool.id)?.range ?? null) : null;
+        const majors = tool
+          ? new Set(contractVersionsOf(tool).map((version) => version.major))
+          : null;
+        if (
+          !tool ||
+          !majors?.has(selector.major) ||
+          (entryRange !== null && !entryRange.includes(selector.major))
+        ) {
+          ignored.push(`${selector.name}@${selector.major}`);
+          continue;
+        }
       }
       names.add(selector.name);
     }

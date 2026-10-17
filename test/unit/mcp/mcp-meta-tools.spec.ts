@@ -602,7 +602,7 @@ describe('get_tool', () => {
       description: 'Current temperature at a point.',
       inputSchema: { type: 'object' },
       outputSchema: { type: 'object' },
-      version: 1,
+      version: '1.0.0',
       examples: [],
       price: { display: '$0.01' },
       freeCallsLeftToday: null,
@@ -647,5 +647,87 @@ describe('get_tool', () => {
     const refused = await call(client, 'get_tool', {});
     expect(refused.isError).toBe(true);
     expect(JSON.stringify(refused._meta)).toContain('name');
+  });
+});
+
+describe('contract versions in discovery (T3)', () => {
+  offerSolanaRailsInThisSuite('A', 'B');
+
+  const sunset = new Date('2027-02-01T00:00:00Z');
+  const base = tool(
+    'get_weather',
+    'weather',
+    ['temperature'],
+    'A long description. '.repeat(20),
+    'latitude',
+  );
+  const deprecatedV1 = {
+    version: 1,
+    semver: '1.0.0',
+    major: 1,
+    summary: 'Temperature now (stored summary).',
+    description: 'The full v1 documentation.',
+    inputSchema: base.inputSchema,
+    outputSchema: base.outputSchema,
+    optionalInputFields: [],
+    optionalOutputFields: ['uvIndex'],
+    examples: [{ title: 'Lisbon', arguments: { latitude: 38.7 } }],
+    verificationPolicyId: 'policy-default',
+    tier: ToolTier.VERIFIED,
+    status: 'DEPRECATED' as never,
+    sunsetAt: sunset,
+    changelog: 'First version.',
+    publishedAt: new Date('2026-01-01T00:00:00Z'),
+  };
+  const v2 = {
+    ...deprecatedV1,
+    version: 2,
+    semver: '2.0.0',
+    major: 2,
+    status: 'ACTIVE' as never,
+    sunsetAt: null,
+    summary: 'Temperature now, v2.',
+  };
+  // The tool as a pinned `@1` URL's quote resolves it: at the deprecated version.
+  const pinned: Tool = {
+    ...base,
+    description: deprecatedV1.description,
+    versions: [v2, deprecatedV1],
+    currentVersion: 2,
+    version: deprecatedV1,
+  };
+
+  it('tools/list sends the stored summary, never the description, and marks a deprecated version', async () => {
+    const { client } = await connect(scopeOf(view('/?discovery=full')), { tools: [pinned] });
+    const [listed] = (await client.listTools()).tools;
+    expect(listed.description?.startsWith('Temperature now (stored summary).\n\n')).toBe(true);
+    expect(listed.description).not.toContain('A long description');
+    expect(listed._meta?.['assay/deprecated']).toEqual({
+      sunsetAt: sunset.toISOString(),
+      replacement: 'get_weather@2 (v2.0.0)',
+    });
+  });
+
+  it('get_tool serves the stored summary, description, examples, optional fields and version', async () => {
+    const { client } = await connect(scopeOf(view('/')), { tools: [pinned] });
+    expect(output(await call(client, 'get_tool', { name: 'get_weather' }))).toMatchObject({
+      summary: 'Temperature now (stored summary).',
+      description: 'The full v1 documentation.',
+      version: '1.0.0',
+      changelog: 'First version.',
+      examples: [{ title: 'Lisbon', arguments: { latitude: 38.7 } }],
+      optionalOutputFields: ['uvIndex'],
+      'assay/deprecated': { sunsetAt: sunset.toISOString() },
+    });
+  });
+
+  it('search_tools ranks on and returns the stored summary and version', async () => {
+    const { client } = await connect(scopeOf(view('/')), { tools: [pinned] });
+    const found = output(await call(client, 'search_tools', { query: 'stored summary' }));
+    expect(found.results[0]).toMatchObject({
+      name: 'get_weather',
+      summary: 'Temperature now (stored summary).',
+      version: '1.0.0',
+    });
   });
 });

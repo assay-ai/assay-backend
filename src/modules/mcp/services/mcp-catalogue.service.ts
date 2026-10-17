@@ -15,6 +15,11 @@ import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provide
 import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
 import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
 import { RoutingContext } from '@modules/tool/domain/routing';
+import {
+  deprecationOf,
+  replacementOf,
+  versionOf,
+} from '@modules/tool/domain/contract/contract-versions';
 import { selectViewTools, servesPricingMode } from '@modules/toolset/domain/view';
 import { MoneyUtil } from '@utils/money.util';
 
@@ -32,7 +37,7 @@ import {
   X402_TOOL_ID,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
-import { McpScope, rulesFor, scopeAllows } from '../ports/mcp-scope';
+import { McpScope, contractFor, rulesFor, scopeAllows } from '../ports/mcp-scope';
 
 /**
  * `tools/list` — the catalogue an agent decides from.
@@ -133,6 +138,20 @@ export class McpCatalogueService {
     scope?: McpScope,
     options: McpListOptions = {},
   ): Promise<McpToolDescriptor[]> {
+    return (await this.listQuoted(viewer, scope, options)).map((entry) => entry.descriptor);
+  }
+
+  /**
+   * {@link listTools}, each descriptor beside the tool it describes **at the
+   * contract version a call through this URL would use** — what `get_tool`
+   * and `search_tools` read their schemas, summary, examples and version
+   * from, so the list, the search and the call agree (§7.3).
+   */
+  async listQuoted(
+    viewer?: McpCatalogueViewer,
+    scope?: McpScope,
+    options: McpListOptions = {},
+  ): Promise<McpQuotedTool[]> {
     // The URL's view, then the agent's access: `tools/list` returns view ∩
     // access, and prices each tool under the rules a call through this URL
     // would be routed under. Without a scope (the REST surfaces), the whole
@@ -174,9 +193,20 @@ export class McpCatalogueService {
       // out. The refusal, when it comes, comes from the CALL path.
       withdrawingChains: [],
     };
+    // Each tool is priced under the rules and at the contract version a call
+    // through this URL would use, so the listed schema and price are the
+    // ones the call gets (§7.3, "Contract version").
+    const byId = new Map(tools.map((tool) => [tool.id, tool]));
     const quoted = await this.quotes.quoteMany(
       tools.map((tool) => tool.id),
-      (toolId) => (scope ? { ...context, rules: rulesFor(scope, toolId) } : context),
+      (toolId) =>
+        scope
+          ? {
+              ...context,
+              rules: rulesFor(scope, toolId),
+              contract: contractFor(scope, byId.get(toolId) as Tool),
+            }
+          : context,
     );
     const quotes = tools.map((tool) => quoted.get(tool.id) ?? null);
 
@@ -200,7 +230,7 @@ export class McpCatalogueService {
     // tool. Still listed — see above — but not priced as buyable (L6).
     const paidOnViewerChain = viewer?.chainId ? paidRailOffered(viewer.chainId) : true;
 
-    const listed: McpToolDescriptor[] = [];
+    const listed: McpQuotedTool[] = [];
     quotes.forEach((quote, index) => {
       if (!quote) return;
 
@@ -212,7 +242,7 @@ export class McpCatalogueService {
         // The agent's or the toolset's rules left no provider: listed, and
         // saying so, because the tool exists and the fix is the agent's.
         if (quote.ruleRejections && quote.ruleRejections.length > 0) {
-          listed.push(describeNoProviderFits(quote));
+          listed.push({ tool: quote.tool, descriptor: describeNoProviderFits(quote) });
           return;
         }
         this.logger.debug(
@@ -221,9 +251,16 @@ export class McpCatalogueService {
         return;
       }
 
-      listed.push(
-        describe(quote, quote.price, freeQuotas[index], freeAllowances[index], paidOnViewerChain),
-      );
+      listed.push({
+        tool: quote.tool,
+        descriptor: describe(
+          quote,
+          quote.price,
+          freeQuotas[index],
+          freeAllowances[index],
+          paidOnViewerChain,
+        ),
+      });
     });
 
     return listed;
@@ -274,6 +311,12 @@ export interface McpListOptions {
   readonly freeQuota?: boolean;
   /** Price only these tools (still within view ∩ access): a SEARCH list's pinned ones. */
   readonly onlyToolIds?: ReadonlySet<string>;
+}
+
+/** One listed tool: its descriptor, and the tool at the contract version it describes. */
+export interface McpQuotedTool {
+  readonly tool: Tool;
+  readonly descriptor: McpToolDescriptor;
 }
 
 /** Who is asking `tools/list` — see {@link McpCatalogueService.listTools}. */
@@ -401,14 +444,29 @@ function describe(
 
   return {
     name: tool.name,
-    description: `${tool.description}\n\n${priceLine(quote, price, freePerDay)}`,
+    // The version's stored summary (at most 200 characters), never the full
+    // description: that is `get_tool`'s (§7.4).
+    description: `${versionOf(tool).summary}\n\n${priceLine(quote, price, freePerDay)}`,
     inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
     outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
     annotations,
     // The copy an SDK client keeps. Same values, same keys — a client reading
     // one and a client reading the other must never see different prices.
-    _meta: { ...annotations },
+    _meta: { ...annotations, ...contractMetaOf(tool) },
   };
+}
+
+/** `_meta["assay/deprecated"]`: the contract version this URL serves is deprecated. */
+export const ASSAY_DEPRECATED = 'assay/deprecated';
+
+/**
+ * The contract `_meta` of a listed or described tool: `assay/deprecated`
+ * (`{ sunsetAt, replacement }`) when the version served is deprecated.
+ */
+export function contractMetaOf(tool: Tool): Record<string, unknown> {
+  const version = versionOf(tool);
+  const deprecated = deprecationOf(version, replacementOf(tool, version));
+  return deprecated ? { [ASSAY_DEPRECATED]: deprecated } : {};
 }
 
 /**
@@ -439,11 +497,11 @@ function describeNoProviderFits(quote: ToolQuote): McpToolDescriptor {
   };
   return {
     name: tool.name,
-    description: `${tool.description}\n\nNo provider fits your limits.`,
+    description: `${versionOf(tool).summary}\n\nNo provider fits your limits.`,
     inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
     outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
     annotations,
-    _meta: { ...annotations },
+    _meta: { ...annotations, ...contractMetaOf(tool) },
   };
 }
 

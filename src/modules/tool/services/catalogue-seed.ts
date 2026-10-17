@@ -4,6 +4,8 @@ import { isRegisteredAsset, registeredAssets } from '@modules/chains/ports/asset
 import { ChainId, isChainId } from '@modules/chains/ports/caip.types';
 
 import { normalizeRequestMapping, normalizeResponseMapping } from '../domain/mapping';
+import { contractProblems } from '../domain/contract/contract-shape';
+import { summaryOf } from '../domain/contract/contract-versions';
 import { assertNoReservedToolNames } from '../domain/reserved-tool-names';
 import { Tool, ToolBinding, UNCATEGORISED } from '../ports/tool.types';
 import { EMPTY_TOOL_CATALOGUE, ToolCatalogueSnapshot } from './in-memory-tool-catalogue';
@@ -186,6 +188,29 @@ function withCategory(tool: Tool, source: string): Tool {
   const tags = tool.tags ?? [];
   if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== 'string' || !TAG_RE.test(tag))) {
     throw new Error(`${source}: tool ${tool.name} has tags that are not each ${TAG_RE}`);
+  }
+
+  // The seed writes version 1.0.0 of the contract (design spec §11.2), so it
+  // is held to what the contract editor holds a version to.
+  const seeded = tool as Tool & {
+    summary?: string;
+    optionalInputFields?: string[];
+    optionalOutputFields?: string[];
+    examples?: unknown[];
+  };
+  const problems = contractProblems({
+    summary: seeded.summary ?? summaryOf(tool.description ?? ''),
+    description: tool.description ?? '',
+    inputSchema: tool.inputSchema,
+    outputSchema: tool.outputSchema,
+    optionalInputFields: seeded.optionalInputFields ?? [],
+    optionalOutputFields: seeded.optionalOutputFields ?? [],
+    examples: seeded.examples ?? [],
+    verificationPolicyId: tool.verificationPolicyId ?? null,
+    tier: tool.tier ?? null,
+  });
+  if (problems.length > 0) {
+    throw new Error(`${source}: tool ${tool.name} is not a valid contract: ${problems.join('; ')}`);
   }
 
   return { ...tool, category, tags: [...new Set(tags)] };

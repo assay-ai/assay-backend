@@ -62,6 +62,26 @@ export class BindingVersionEntity extends OrganizationScopedEntityWithoutSoftDel
   @Column({ name: 'timeout_ms', type: 'int' })
   timeoutMs: number;
 
+  /** The revision's contract range and declared optional fields (T3). */
+  @Column({ name: 'tool_version_range', type: 'varchar', length: 32, default: '^1' })
+  toolVersionRange: string;
+
+  @Column({
+    name: 'provides_output_fields',
+    type: 'text',
+    array: true,
+    default: () => `'{}'::text[]`,
+  })
+  providesOutputFields: string[];
+
+  @Column({
+    name: 'supports_input_fields',
+    type: 'text',
+    array: true,
+    default: () => `'{}'::text[]`,
+  })
+  supportsInputFields: string[];
+
   /** Who saved this revision. A session subject, not a display name. */
   @Column({ name: 'authored_by', type: 'varchar', length: 128 })
   authoredBy: string;

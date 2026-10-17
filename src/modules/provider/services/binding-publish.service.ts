@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -14,6 +14,12 @@ import {
 import { MinimumStakeByChain, RoutingCandidate } from '@modules/tool/domain/routing/routing.types';
 import { BindingStatus } from '@modules/tool/ports/tool.types';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
+import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
+import {
+  contractVersionsOf,
+  currentContractVersion,
+} from '@modules/tool/domain/contract/contract-versions';
+import { bindingRange } from '@modules/tool/domain/contract/version-range';
 
 import {
   PublishCheck,
@@ -80,6 +86,10 @@ export class BindingPublishService {
     @Inject(PROVIDER_MINIMUM_STAKE_BY_CHAIN)
     private readonly minimumStakeByChain: MinimumStakeByChain,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    // The contract versions a run's `tool_version` names, to group runs by
+    // major. Optional only for hand-built harnesses, which then gate on the
+    // newest run as before.
+    @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue?: ToolCataloguePort,
   ) {}
 
   /** The publish checklist, read before the button is pressed. */
@@ -170,8 +180,9 @@ export class BindingPublishService {
   }
 
   private async evaluate(organizationId: string, row: ToolBindingEntity): Promise<PublishCheck> {
-    const [latestRun, built] = await Promise.all([
+    const [latestRun, runsByMajor, built] = await Promise.all([
       this.latestRun(organizationId, row),
+      this.runsByMajor(organizationId, row),
       this.candidate(organizationId, row),
     ]);
     const { candidate, settlementChains } = built;
@@ -215,7 +226,44 @@ export class BindingPublishService {
       latestRun,
       payoutByChain,
       stakeByChain,
+      runsByMajor,
     });
+  }
+
+  /**
+   * The newest run at this revision for each contract major the binding
+   * serves (T3, §7.5: a major needs a passing test run for that major). A run
+   * recorded without a contract version counts for the tool's current major.
+   */
+  private async runsByMajor(
+    organizationId: string,
+    row: ToolBindingEntity,
+  ): Promise<Map<number, PublishGateTestRun | null> | undefined> {
+    if (!this.catalogue) return undefined;
+    const majors = bindingRange(row.toolVersionRange ?? '^1');
+    const [tool, runs] = await Promise.all([
+      this.catalogue.findTool(row.toolId),
+      this.runs.findForRevision(organizationId, row.id, row.mappingVersion),
+    ]);
+    const majorOf = new Map(
+      (tool ? contractVersionsOf(tool) : []).map((version) => [version.version, version.major]),
+    );
+    const fallbackMajor = tool ? (currentContractVersion(tool)?.major ?? 1) : 1;
+
+    const byMajor = new Map<number, PublishGateTestRun | null>(
+      majors.map((major) => [major, null]),
+    );
+    for (const run of runs) {
+      const major = run.toolVersion == null ? fallbackMajor : majorOf.get(run.toolVersion);
+      if (major === undefined || !byMajor.has(major) || byMajor.get(major)) continue;
+      byMajor.set(major, {
+        mappingVersion: run.mappingVersion,
+        outcome: run.outcome as BindingTestOutcome,
+        failedLayer: run.failedLayer as BindingTestLayer | null,
+        ranAt: run.createdAt,
+      });
+    }
+    return byMajor;
   }
 
   private async latestRun(

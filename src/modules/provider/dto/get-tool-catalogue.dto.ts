@@ -1,3 +1,4 @@
+import { ToolContractVersionDto } from '@modules/tool/dto/tool-contract-version.dto';
 import { ApiProperty } from '@nestjs/swagger';
 
 import { ToolTier } from '@modules/tool/ports/tool.types';
@@ -86,6 +87,22 @@ export class CatalogueToolDto {
     description: 'JSON Schema the response mapping must satisfy. The contract itself.',
   })
   outputSchema: unknown;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: '1.1.0',
+    description: 'The contract version unpinned URLs serve; a new binding defaults to its major.',
+  })
+  currentVersion: string | null;
+
+  @ApiProperty({
+    type: [ToolContractVersionDto],
+    description:
+      'Every published version, newest first, with its optional fields — what a binding ' +
+      'chooses its range (`^1 || ^2`) and its declared fields from.',
+  })
+  versions: ToolContractVersionDto[];
 }
 
 /** The asset this deployment prices and settles in. One, for the MVP. */

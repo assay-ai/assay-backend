@@ -109,19 +109,12 @@ export function limitFor(detail: SearchDetail, requested: number | undefined): n
   return Math.min(SEARCH_LIMIT_MAX, Math.floor(requested));
 }
 
-/** A one-line summary of a description: whole sentences up to 200 characters. */
-export function summaryOf(description: string): string {
-  const text = description.replace(/\s+/g, ' ').trim();
-  if (text.length <= SUMMARY_MAX_LENGTH) return text;
-  const sentences = text.match(/[^.!?]+[.!?]+(\s|$)/g) ?? [];
-  let summary = '';
-  for (const sentence of sentences) {
-    if ((summary + sentence).trim().length > SUMMARY_MAX_LENGTH) break;
-    summary += sentence;
-  }
-  if (summary.trim().length > 0) return summary.trim();
-  return `${text.slice(0, SUMMARY_MAX_LENGTH - 1).trimEnd()}…`;
-}
+/**
+ * A one-line summary of a description: whole sentences up to 200 characters.
+ * The contract's own `summary` is what discovery serves (T3); this is how a
+ * version without one, and the seed, derive it.
+ */
+export { summaryOf } from '@modules/tool/domain/contract/contract-versions';
 
 /** Argument names and their descriptions, for the search index. */
 export function argumentText(schema: JsonSchema | undefined): string {

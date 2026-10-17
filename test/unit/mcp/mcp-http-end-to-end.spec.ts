@@ -136,7 +136,7 @@ describe('discovery end to end over HTTP', () => {
     });
 
     const described = await client.callTool({ name: 'get_tool', arguments: { name: TOOL_NAME } });
-    expect(described.structuredContent).toMatchObject({ name: TOOL_NAME, version: 1 });
+    expect(described.structuredContent).toMatchObject({ name: TOOL_NAME, version: '1.0.0' });
 
     const called = await client.callTool({
       name: 'call_tool',

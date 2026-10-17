@@ -182,6 +182,33 @@ export class ToolBindingEntity extends OrganizationScopedEntityWithoutSoftDelete
   pauseReason: string | null;
 
   /**
+   * The contract majors this binding serves: `^1`, or `^1 || ^2` (design spec
+   * §7.2, §7.5). Each major in it needs a green tester run at the revision
+   * being published, and its mapping is checked against that major's
+   * contract at save.
+   */
+  @Column({ name: 'tool_version_range', type: 'varchar', length: 32, default: '^1' })
+  toolVersionRange: string;
+
+  /** The contract's optional output fields this binding promises to return. */
+  @Column({
+    name: 'provides_output_fields',
+    type: 'text',
+    array: true,
+    default: () => `'{}'::text[]`,
+  })
+  providesOutputFields: string[];
+
+  /** The contract's optional input fields this binding passes on to its endpoint. */
+  @Column({
+    name: 'supports_input_fields',
+    type: 'text',
+    array: true,
+    default: () => `'{}'::text[]`,
+  })
+  supportsInputFields: string[];
+
+  /**
    * When the pause began, written alongside {@link pauseReason}.
    *
    * Only the reason is constrained. This is a timestamp for a countdown and a

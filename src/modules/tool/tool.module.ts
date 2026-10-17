@@ -15,6 +15,11 @@ import { BindingCeilingService } from './services/binding-ceiling.service';
 import { loadToolCatalogue } from './services/catalogue-seed';
 import { TOOL_CATALOGUE } from './ports/tool-catalogue.port';
 import { DatabaseToolCatalogue } from './services/database-tool-catalogue';
+import {
+  DatabaseToolContracts,
+  ToolContractChangesService,
+} from './services/database-tool-contracts';
+import { TOOL_CONTRACT_CHANGES, TOOL_CONTRACTS } from './ports/tool-contracts.port';
 import { EgressBindingInvoker } from './services/egress-binding.invoker';
 import {
   InMemoryToolCatalogue,
@@ -87,6 +92,14 @@ import {
     // The seeded tools, mirrored into `tools` at boot so bindings and toolsets
     // can reference them (`fk_tool_bindings_tool`).
     ToolRegistrySeeder,
+
+    // Contracts come from `tools` and `tool_versions` (T3): the source of
+    // truth. The seed above only upserts version 1.0.0 of seeded tools, for
+    // local runs and tests.
+    DatabaseToolContracts,
+    { provide: TOOL_CONTRACTS, useExisting: DatabaseToolContracts },
+    ToolContractChangesService,
+    { provide: TOOL_CONTRACT_CHANGES, useExisting: ToolContractChangesService },
 
     // Bindings come from `tool_bindings`, written by the provider's own
     // console. `ToolBindingRepository` resolves out of the `@Global`
@@ -165,6 +178,8 @@ import {
     ProviderRouterService,
     QuoteIndexService,
     TOOL_CATALOGUE,
+    TOOL_CONTRACTS,
+    TOOL_CONTRACT_CHANGES,
     BINDING_INVOKER,
     BindingCallCounterService,
   ],

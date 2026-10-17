@@ -145,6 +145,7 @@ export class ProviderToolBindingsController {
       subjectOf(session),
       params.id,
       body.input as JsonObject,
+      body.toolVersion,
     );
   }
 

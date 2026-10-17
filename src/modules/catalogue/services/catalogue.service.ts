@@ -1,3 +1,14 @@
+import {
+  ToolContractVersionDto,
+  ToolVersionBriefDto,
+  ToolVersionListDto,
+} from '@modules/tool/dto/tool-contract-version.dto';
+import {
+  contractVersionsOf,
+  currentContractVersion,
+  versionOf,
+} from '@modules/tool/domain/contract/contract-versions';
+import { ToolErrors } from '@modules/tool/errors/tool.errors';
 import { Inject, Injectable, Logger } from '@nestjs/common';
 import { In } from 'typeorm';
 
@@ -33,6 +44,8 @@ import {
   Tool,
   ToolBinding,
   categoryOf,
+  ToolVersionStatus,
+  isListedTool,
 } from '@modules/tool/ports/tool.types';
 import { toServedToolBindings } from '@modules/tool/services/database-tool-catalogue';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
@@ -397,6 +410,7 @@ export class CatalogueService {
         id: tool.id,
         name: tool.name,
         description: tool.description,
+        ...versionFieldsOf(tool),
         tier: tool.tier,
         category: categoryOf(tool),
         tags: [...(tool.tags ?? [])],
@@ -434,6 +448,26 @@ export class CatalogueService {
     });
 
     return { tools: tools.sort((a, b) => a.name.localeCompare(b.name)) };
+  }
+
+  /**
+   * A served tool's published versions and their changelog (design spec §7.5:
+   * the deprecation shows in the catalogue). Any tool in the catalogue, served
+   * or not right now; a DRAFT tool is in none and is a 404.
+   */
+  async toolVersions(toolId: string): Promise<ToolVersionListDto> {
+    const tool = await this.catalogue.findTool(toolId);
+    // Only the LISTED catalogue: an UNLISTED tool's contract is its link's to share.
+    if (!tool || !isListedTool(tool)) throw ToolErrors.toolNotFound({ toolId });
+    const current = currentContractVersion(tool);
+    return {
+      toolId: tool.id,
+      name: tool.name,
+      currentVersion: current?.semver ?? null,
+      versions: contractVersionsOf(tool).map((version) =>
+        ToolContractVersionDto.of(version, tool.currentVersion ?? current?.version),
+      ),
+    };
   }
 
   /**
@@ -662,4 +696,29 @@ function byQualityThenName(a: CatalogueProviderDto, b: CatalogueProviderDto): nu
 
   if (left !== right) return right - left;
   return a.legalName.localeCompare(b.legalName);
+}
+
+/** The contract-version half of a catalogue tool card (T3). */
+export function versionFieldsOf(tool: Tool): {
+  summary: string;
+  version: string | null;
+  versions: ToolVersionBriefDto[];
+  deprecatedMajors: number[];
+} {
+  const current = currentContractVersion(tool);
+  const versions = contractVersionsOf(tool);
+  return {
+    summary: versionOf(tool).summary,
+    version: current?.semver ?? null,
+    versions: versions.map((version) =>
+      ToolVersionBriefDto.of(version, tool.currentVersion ?? current?.version),
+    ),
+    deprecatedMajors: [
+      ...new Set(
+        versions
+          .filter((version) => version.status === ToolVersionStatus.DEPRECATED)
+          .map((version) => version.major),
+      ),
+    ].sort((a, b) => a - b),
+  };
 }
