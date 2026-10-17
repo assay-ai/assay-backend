@@ -14,6 +14,7 @@ import {
   HandleHistoryReason,
   HandleStatus,
   handleRefusal,
+  handleSkeleton,
   normalizeHandle,
 } from '../domain/handle';
 import { SharingAction, SharingTransitionError, applySharing } from '../domain/sharing';
@@ -252,9 +253,14 @@ export class ToolsetModerationService {
     }
     const now = this.now();
     const aliasUntil = new Date(now.getTime() + HANDLE_ALIAS_MS);
-    await manager.update(OrganizationEntity, { id: org.id }, { handle: next });
+    await manager.update(
+      OrganizationEntity,
+      { id: org.id },
+      { handle: next, handleSkeleton: handleSkeleton(next) },
+    );
     await manager.insert(OrgHandleHistoryEntity, {
       oldHandle: handle,
+      oldSkeleton: handleSkeleton(handle),
       orgId: org.id,
       reason: HandleHistoryReason.RENAME,
       newHandle: next,
@@ -313,15 +319,16 @@ export class ToolsetModerationService {
     await manager.update(
       OrganizationEntity,
       { id: from.id },
-      { handle: null, handleStatus: null, handleLockedAt: null },
+      { handle: null, handleSkeleton: null, handleStatus: null, handleLockedAt: null },
     );
     await manager.update(
       OrganizationEntity,
       { id: to.id },
-      { handle, handleStatus: HandleStatus.ACTIVE },
+      { handle, handleSkeleton: handleSkeleton(handle), handleStatus: HandleStatus.ACTIVE },
     );
     await manager.insert(OrgHandleHistoryEntity, {
       oldHandle: handle,
+      oldSkeleton: handleSkeleton(handle),
       orgId: from.id,
       reason: HandleHistoryReason.TAKEDOWN,
       newHandle: null,

@@ -21,6 +21,7 @@ import {
   OFFICIAL_HANDLE,
   claimGateAllows,
   handleRefusal,
+  handleSkeleton,
   handleSuggestions,
   normalizeHandle,
 } from '../domain/handle';
@@ -126,7 +127,11 @@ export class HandlesService {
         const changed = await manager
           .createQueryBuilder()
           .update(OrganizationEntity)
-          .set({ handle, handleStatus: HandleStatus.ACTIVE })
+          .set({
+            handle,
+            handleSkeleton: handleSkeleton(handle),
+            handleStatus: HandleStatus.ACTIVE,
+          })
           .where('id = :organizationId', { organizationId })
           .andWhere('handle_locked_at IS NULL')
           .andWhere(`(handle_status IS NULL OR handle_status <> 'FROZEN')`)
@@ -222,6 +227,16 @@ export class HandlesService {
     };
   }
 
+  /**
+   * Whether a toolset of `ownerOrgId` may be reached at all by another
+   * organization: Official, or its owner's handle is active. A frozen (taken
+   * down) or missing handle stops every way in — URL, id, pin or copy.
+   */
+  async ownerHandleActive(ownerOrgId: string | null): Promise<boolean> {
+    if (ownerOrgId === null) return true;
+    return (await this.handlesOf([ownerOrgId])).has(ownerOrgId);
+  }
+
   /** The active handle of each organization, for building URLs and pages. */
   async handlesOf(organizationIds: readonly string[]): Promise<Map<string, string>> {
     const ids = [...new Set(organizationIds)];
@@ -262,13 +277,17 @@ export class HandlesService {
     handle: string,
     exceptOrganizationId: string | null,
   ): Promise<boolean> {
+    // By name and by skeleton: a handle that reads like a current or held
+    // one (`strlpe` beside `stripe`) is taken too.
     const [row] = (await manager.query(
       `SELECT
          EXISTS (SELECT 1 FROM organizations
-                  WHERE lower(handle) = $1 AND ($2::uuid IS NULL OR id <> $2::uuid)) AS current,
+                  WHERE (lower(handle) = $1 OR handle_skeleton = $3)
+                    AND ($2::uuid IS NULL OR id <> $2::uuid)) AS current,
          EXISTS (SELECT 1 FROM org_handle_history
-                  WHERE lower(old_handle) = $1 AND reassigned_at IS NULL) AS held`,
-      [handle, exceptOrganizationId],
+                  WHERE (lower(old_handle) = $1 OR old_skeleton = $3)
+                    AND reassigned_at IS NULL) AS held`,
+      [handle, exceptOrganizationId, handleSkeleton(handle)],
     )) as { current: boolean; held: boolean }[];
     return !row.current && !row.held;
   }

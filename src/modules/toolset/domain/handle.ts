@@ -96,10 +96,11 @@ export enum HandleHistoryReason {
 export type HandleRefusal = 'FORMAT' | 'RESERVED';
 
 /**
- * Words a handle may not contain at all, in any spelling that looks like
- * them: names that claim to speak for the platform (`assay-ai`,
- * `official-tools`, `supp0rt`). The short reserved words (`u`, `my`, `api`)
- * are matched whole only — containing them is ordinary.
+ * Words that claim to speak for the platform. A handle is refused when one
+ * of its `-`-separated parts reads as one of them, alone or with at most two
+ * extra characters (`assay-ai`, `assay0`, `my-official-kit`, `supp0rt-team`),
+ * so an ordinary word that merely contains one (`ecosystem`, `badminton`,
+ * `staffing`) stays free.
  */
 export const IMPERSONATION_WORDS: readonly string[] = [
   'assay',
@@ -116,6 +117,12 @@ export const IMPERSONATION_WORDS: readonly string[] = [
   'security',
   'x402',
 ];
+
+/** The platform's own names: no handle may even start with one (`assayofficial`). */
+export const BRAND_WORDS: readonly string[] = ['assay', 'goassay'];
+
+/** Extra characters a part may carry and still read as an impersonation word. */
+const IMPERSONATION_SLACK = 2;
 
 /**
  * A handle's look-alike skeleton: what it reads as once the separators and
@@ -149,8 +156,10 @@ export function handleSkeleton(handle: string): string {
  * Availability (taken, held) is the database's question, not this one.
  *
  * Reserved: a reserved word or a category, or anything that reads as one
- * (`he1p`, `we4ther`); or anything containing an impersonation word in any
- * look-alike spelling (`assay-ai`, `assay0`, `offlcial-tools`).
+ * (`he1p`, `we4ther`); a part that reads as an impersonation word, give or
+ * take two characters (`assay-ai`, `assay0`, `offlcial-tools`); anything
+ * starting with the platform's name. Look-alikes of other organizations'
+ * handles are refused by availability (`handle_skeleton`), not here.
  */
 export function handleRefusal(
   handle: string,
@@ -161,8 +170,15 @@ export function handleRefusal(
   for (const word of [...RESERVED_HANDLES, ...RESERVED_CATEGORY_NAMES, ...categories]) {
     if (word === handle || handleSkeleton(word) === skeleton) return 'RESERVED';
   }
-  for (const word of IMPERSONATION_WORDS) {
-    if (skeleton.includes(handleSkeleton(word))) return 'RESERVED';
+  for (const part of handle.split('-').filter(Boolean).map(handleSkeleton)) {
+    for (const word of IMPERSONATION_WORDS.map(handleSkeleton)) {
+      const extra = part.length - word.length;
+      if (extra < 0 || extra > IMPERSONATION_SLACK) continue;
+      if (part.startsWith(word) || part.endsWith(word)) return 'RESERVED';
+    }
+  }
+  for (const word of BRAND_WORDS.map(handleSkeleton)) {
+    if (skeleton.startsWith(word)) return 'RESERVED';
   }
   return null;
 }

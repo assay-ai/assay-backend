@@ -8,7 +8,9 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `handle` (lowercase, the spec's format), `handle_locked_at` (set by the
  * first UNLISTED or PUBLIC share; after it a rename goes through an operator)
  * and `handle_status` (`ACTIVE` | `FROZEN` — a takedown freezes it, and every
- * URL under it stops). Unique ignoring case.
+ * URL under it stops). Unique ignoring case, and unique by `handle_skeleton`
+ * — the name with look-alikes folded (`strlpe` reads as `stripe`) — so no
+ * organization can take a name that reads as another's.
  *
  * ## `org_handle_history`
  *
@@ -36,8 +38,11 @@ export class OrgHandles1761400000000 implements MigrationInterface {
         ADD COLUMN "handle"           varchar(24) NULL,
         ADD COLUMN "handle_locked_at" timestamptz NULL,
         ADD COLUMN "handle_status"    varchar(16) NULL,
+        ADD COLUMN "handle_skeleton"  varchar(24) NULL,
         ADD CONSTRAINT "chk_organizations_handle"
           CHECK ("handle" IS NULL OR "handle" ~ '^[a-z][a-z0-9-]{2,23}$'),
+        ADD CONSTRAINT "chk_organizations_handle_skeleton"
+          CHECK (("handle" IS NULL) = ("handle_skeleton" IS NULL)),
         ADD CONSTRAINT "chk_organizations_handle_status"
           CHECK (("handle" IS NULL) = ("handle_status" IS NULL)
                  AND ("handle_status" IS NULL OR "handle_status" IN ('ACTIVE', 'FROZEN')))
@@ -46,11 +51,16 @@ export class OrgHandles1761400000000 implements MigrationInterface {
       CREATE UNIQUE INDEX "uq_organizations_handle"
         ON "organizations" (lower("handle")) WHERE "handle" IS NOT NULL
     `);
+    await queryRunner.query(`
+      CREATE UNIQUE INDEX "uq_organizations_handle_skeleton"
+        ON "organizations" ("handle_skeleton") WHERE "handle_skeleton" IS NOT NULL
+    `);
 
     await queryRunner.query(`
       CREATE TABLE "org_handle_history" (
         "id"                   uuid         NOT NULL DEFAULT gen_random_uuid(),
         "old_handle"           varchar(24)  NOT NULL,
+        "old_skeleton"         varchar(24)  NOT NULL,
         "org_id"               uuid         NOT NULL,
         "reason"               varchar(16)  NOT NULL,
         "new_handle"           varchar(24)  NULL,
@@ -70,6 +80,10 @@ export class OrgHandles1761400000000 implements MigrationInterface {
     await queryRunner.query(`
       CREATE UNIQUE INDEX "uq_org_handle_history_held"
         ON "org_handle_history" (lower("old_handle")) WHERE "reassigned_at" IS NULL
+    `);
+    await queryRunner.query(`
+      CREATE INDEX "idx_org_handle_history_held_skeleton"
+        ON "org_handle_history" ("old_skeleton") WHERE "reassigned_at" IS NULL
     `);
     await queryRunner.query(
       `CREATE INDEX "idx_org_handle_history_org" ON "org_handle_history" ("org_id", "changed_at")`,
@@ -93,11 +107,14 @@ export class OrgHandles1761400000000 implements MigrationInterface {
   public async down(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`DROP TABLE "org_handle_claims"`);
     await queryRunner.query(`DROP TABLE "org_handle_history"`);
+    await queryRunner.query(`DROP INDEX "uq_organizations_handle_skeleton"`);
     await queryRunner.query(`DROP INDEX "uq_organizations_handle"`);
     await queryRunner.query(`
       ALTER TABLE "organizations"
+        DROP CONSTRAINT "chk_organizations_handle_skeleton",
         DROP CONSTRAINT "chk_organizations_handle_status",
         DROP CONSTRAINT "chk_organizations_handle",
+        DROP COLUMN "handle_skeleton",
         DROP COLUMN "handle_status",
         DROP COLUMN "handle_locked_at",
         DROP COLUMN "handle"

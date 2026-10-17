@@ -13,6 +13,10 @@ export class OrgHandleHistoryEntity {
   @Column({ name: 'old_handle', type: 'varchar', length: 24 })
   oldHandle: string;
 
+  /** `handleSkeleton(old_handle)`: a held name blocks its look-alikes too. */
+  @Column({ name: 'old_skeleton', type: 'varchar', length: 24 })
+  oldSkeleton: string;
+
   @Column({ name: 'org_id', type: 'uuid' })
   orgId: string;
 
