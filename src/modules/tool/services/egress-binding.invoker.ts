@@ -72,7 +72,7 @@ export class EgressBindingInvoker implements BindingInvokerPort {
   ) {}
 
   async invoke(invocation: BindingInvocation): Promise<ProviderResponse> {
-    const { tool, binding, input, timeoutMs, callId } = invocation;
+    const { tool, binding, input, timeoutMs, callId, omit } = invocation;
 
     // Outside the try. A failure here is the agent's arguments or our mapping,
     // not the provider's endpoint, and converting it into a `transportError`
@@ -102,15 +102,15 @@ export class EgressBindingInvoker implements BindingInvokerPort {
     let headers: Record<string, string>;
     let stage = 'credential lookup failed';
     try {
-      const credentials = await this.vault.headersFor(
-        binding.providerId,
-        binding.id,
-        originOf(url),
-      );
+      const credentials = omit?.credentials
+        ? []
+        : await this.vault.headersFor(binding.providerId, binding.id, originOf(url));
       headers = outboundHeaders(upstream.headers, credentials, callId, body !== undefined);
       stage = 'request signing failed';
-      const signature = await this.signer.sign({ method, url, headers, body });
-      for (const [name, value] of Object.entries(signature)) setHeader(headers, name, value);
+      if (!omit?.signature) {
+        const signature = await this.signer.sign({ method, url, headers, body });
+        for (const [name, value] of Object.entries(signature)) setHeader(headers, name, value);
+      }
     } catch (error) {
       return {
         status: 0,

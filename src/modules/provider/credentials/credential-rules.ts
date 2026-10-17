@@ -61,24 +61,32 @@ const SECRET_HEADER_NAMES: ReadonlySet<string> = new Set([
 /** Human-readable problems with a credential header set; `[]` when valid. */
 export function credentialHeaderProblems(headers: readonly CredentialHeader[]): string[] {
   const problems: string[] = [];
+  if (headers.length === 0) {
+    problems.push('At least one header is required (use DELETE to remove the set)');
+  }
   if (headers.length > MAX_HEADERS) {
     problems.push(`At most ${MAX_HEADERS} headers per set`);
   }
   const seen = new Set<string>();
-  for (const { name, value } of headers) {
+  for (const [index, { name, value }] of headers.entries()) {
+    // An invalid name is identified by position, never echoed: a pasted secret
+    // (`Authorization: Bearer ...`) must not come back in a response or a log.
+    const label = `Header #${index + 1}`;
     const lower = name.toLowerCase();
     if (name.length === 0 || name.length > MAX_NAME_CHARS || !TOKEN_RE.test(name)) {
-      problems.push(`Invalid header name: ${JSON.stringify(name)}`);
+      problems.push(`${label}: invalid name`);
     } else if (RESERVED_NAMES.has(lower) || lower.startsWith('x-assay-')) {
       problems.push(`Reserved header name: ${name}`);
     }
-    if (seen.has(lower)) problems.push(`Duplicate header name: ${name}`);
+    const valid = !(name.length === 0 || name.length > MAX_NAME_CHARS || !TOKEN_RE.test(name));
+    const shown = valid ? `Header ${name}` : label;
+    if (seen.has(lower)) problems.push(`Duplicate header name: ${valid ? name : label}`);
     seen.add(lower);
     if (!VALUE_RE.test(value)) {
-      problems.push(`Header ${name}: value must be printable ASCII (no CR, LF or NUL)`);
+      problems.push(`${shown}: value must be printable ASCII (no CR, LF or NUL)`);
     }
     if (Buffer.byteLength(value, 'utf8') > MAX_VALUE_BYTES) {
-      problems.push(`Header ${name}: value exceeds ${MAX_VALUE_BYTES} bytes`);
+      problems.push(`${shown}: value exceeds ${MAX_VALUE_BYTES} bytes`);
     }
   }
   return problems;

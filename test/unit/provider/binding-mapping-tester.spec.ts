@@ -8,6 +8,7 @@ import {
   BindingTestLayerStatus,
   BindingTestOutcome,
   BindingTestPolicySource,
+  BindingTestWarningCode,
 } from '@modules/provider/ports/binding-test.types';
 import { BindingEditorService } from '@modules/provider/services/binding-editor.service';
 import { BindingMappingTesterService } from '@modules/provider/services/binding-mapping-tester.service';
@@ -15,7 +16,8 @@ import { ProviderEgressLimiter } from '@modules/provider/services/provider-egres
 import { ResponseClass } from '@modules/tool/domain/classification';
 import { MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
+import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 import { plainInvoker } from '../tool/helpers/routing-fixtures';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 import { StageStatus, VerificationStage } from '@modules/verification/domain/stage';
@@ -105,6 +107,7 @@ function bindingRow(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEnti
     freeDailyBudget: null,
     slaFailureRate: '0.02000',
     timeoutMs: 30_000,
+    authMode: BindingAuthMode.API_KEY,
     status: BindingStatus.DRAFT,
     mappingVersion: 1,
     publishedVersion: null,
@@ -113,7 +116,11 @@ function bindingRow(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEnti
   } as ToolBindingEntity;
 }
 
-function buildTester(row: ToolBindingEntity, tool = buildTool()) {
+function buildTester(
+  row: ToolBindingEntity,
+  tool = buildTool(),
+  invokerOverride?: BindingInvokerPort,
+) {
   const saved: unknown[] = [];
 
   const editor = { loadEditable: jest.fn(async () => row) } as unknown as BindingEditorService;
@@ -137,13 +144,15 @@ function buildTester(row: ToolBindingEntity, tool = buildTool()) {
     resolveForTraffic: jest.fn(async () => null),
   } as unknown as DecisionPolicyService;
 
-  const invoker = plainInvoker(
-    new EgressHttpClient(lookup, (target) => ({
-      address: '127.0.0.1',
-      family: 4,
-      port: target.port === 80 ? port : target.port,
-    })),
-  );
+  const invoker =
+    invokerOverride ??
+    plainInvoker(
+      new EgressHttpClient(lookup, (target) => ({
+        address: '127.0.0.1',
+        family: 4,
+        port: target.port === 80 ? port : target.port,
+      })),
+    );
 
   return {
     tester: new BindingMappingTesterService(
@@ -181,7 +190,10 @@ describe('BindingMappingTesterService — an endpoint that behaves', () => {
       res.end(JSON.stringify({ data: { answer: 'forty-two' }, meta: { ms: 12 } }));
     };
 
-    const { tester, saved } = buildTester(bindingRow());
+    const { tester, saved } = buildTester(
+      // NONE: no probe, so `received` below is the main request.
+      bindingRow({ authMode: BindingAuthMode.NONE }),
+    );
     const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
       query: 'the ultimate question',
     });
@@ -378,5 +390,93 @@ describe('BindingMappingTesterService — an endpoint that returns rubbish', () 
     );
     expect(received).toBeNull();
     expect(report.request).toBeNull();
+  });
+});
+
+describe('BindingMappingTesterService — unauthenticated probes', () => {
+  const ID = 'a3f1c2d4-0000-4000-8000-000000000001';
+  const ok = {
+    status: 200,
+    body: { kind: 'JSON', value: { data: { answer: 'x' } } },
+    headers: { 'content-type': 'application/json' },
+  };
+
+  function fake(answer: (omit: unknown) => { status: number }) {
+    const invoke = jest.fn(async (invocation: { omit?: unknown }) => ({
+      ...ok,
+      ...answer(invocation.omit),
+    }));
+    return { invoke, invoker: { invoke } as unknown as BindingInvokerPort };
+  }
+
+  const run = (mode: BindingAuthMode, invoker: BindingInvokerPort) =>
+    buildTester(bindingRow({ authMode: mode }), buildTool(), invoker).tester.run(
+      PROVIDER,
+      SUBJECT,
+      ID,
+      { query: 'q' },
+    );
+
+  it('SIGNATURE: warns ACCEPTS_UNSIGNED when the unsigned probe is answered 200, outcome still PASSED', async () => {
+    const { invoker, invoke } = fake(() => ({ status: 200 }));
+    const report = await run(BindingAuthMode.SIGNATURE, invoker);
+    expect(report.outcome).toBe(BindingTestOutcome.PASSED);
+    expect(report.warnings).toEqual([
+      {
+        code: BindingTestWarningCode.ACCEPTS_UNSIGNED,
+        message: 'Your endpoint accepted a request without an Assay signature.',
+      },
+    ]);
+    expect(invoke).toHaveBeenCalledTimes(2);
+    expect(invoke.mock.calls[1][0].omit).toEqual({ signature: true });
+  });
+
+  it('has no warnings when the probe is refused with 401', async () => {
+    const { invoker } = fake((omit) => ({ status: omit ? 401 : 200 }));
+    const report = await run(BindingAuthMode.SIGNATURE, invoker);
+    expect(report.outcome).toBe(BindingTestOutcome.PASSED);
+    expect(report.warnings).toEqual([]);
+  });
+
+  it('BOTH: probes signature and credentials separately', async () => {
+    const { invoker, invoke } = fake(() => ({ status: 200 }));
+    const report = await run(BindingAuthMode.BOTH, invoker);
+    expect(report.warnings.map((w) => w.code)).toEqual([
+      BindingTestWarningCode.ACCEPTS_UNSIGNED,
+      BindingTestWarningCode.ACCEPTS_WITHOUT_CREDENTIALS,
+    ]);
+    expect(invoke.mock.calls.map((c) => c[0].omit)).toEqual([
+      undefined,
+      { signature: true },
+      { credentials: true },
+    ]);
+  });
+
+  it('API_KEY: warns ACCEPTS_WITHOUT_CREDENTIALS', async () => {
+    const { invoker } = fake(() => ({ status: 200 }));
+    const report = await run(BindingAuthMode.API_KEY, invoker);
+    expect(report.warnings[0].message).toBe(
+      'Your endpoint accepted a request without your API key.',
+    );
+  });
+
+  it('NONE: warns NO_AUTHENTICATION with exactly one invoke', async () => {
+    const { invoker, invoke } = fake(() => ({ status: 200 }));
+    const report = await run(BindingAuthMode.NONE, invoker);
+    expect(report.warnings).toEqual([
+      {
+        code: BindingTestWarningCode.NO_AUTHENTICATION,
+        message: 'Anyone who learns your endpoint URL can call it directly, without paying.',
+      },
+    ]);
+    expect(invoke).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not probe when the main run fails', async () => {
+    const { invoker, invoke } = fake(() => ({ status: 500 }));
+    const report = await run(BindingAuthMode.BOTH, invoker);
+    expect(report.outcome).toBe(BindingTestOutcome.FAILED);
+    expect(report.warnings).toEqual([]);
+    expect(invoke).toHaveBeenCalledTimes(1);
   });
 });
