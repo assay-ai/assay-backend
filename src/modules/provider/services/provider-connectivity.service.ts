@@ -20,7 +20,6 @@ import {
 import { ConnectivityCheckResultDto, toConnectivityDto } from '../dto/provider-shared.dto';
 import { ProviderErrors } from '../errors/provider.errors';
 import { ConnectivityOutcome } from '../ports/provider-registration.types';
-import { PROVIDER_EGRESS_IPS } from './egress-ips';
 import { ProviderEgressLimiter } from './provider-egress-limiter.service';
 
 /**
@@ -98,7 +97,6 @@ export class ProviderConnectivityService {
     private readonly providers: ProviderRepository,
     private readonly checks: ProviderConnectivityCheckRepository,
     private readonly http: EgressHttpClient,
-    @Inject(PROVIDER_EGRESS_IPS) private readonly egressIpList: string[],
     private readonly limiter: ProviderEgressLimiter,
     // Unbound in production, exactly like `EgressHttpClient`'s own constructor
     // — see `EGRESS_DNS_LOOKUP`'s doc comment. Reused here rather than
@@ -118,7 +116,7 @@ export class ProviderConnectivityService {
    */
   check(organizationId: string, endpoint?: string): Promise<ConnectivityCheckResultDto> {
     // Bounded like the mapping tester: an unthrottled probe of any public URL
-    // from the platform's egress IPs is a scanner anyone can borrow. Its own
+    // from the platform is a scanner anyone can borrow. Its own
     // process-wide pool, so slow tester runs cannot starve it (review N-3).
     return this.limiter.run(
       organizationId,
@@ -132,8 +130,6 @@ export class ProviderConnectivityService {
     endpoint?: string,
   ): Promise<ConnectivityCheckResultDto> {
     const target = endpoint ?? (await this.savedEndpoint(organizationId));
-    const egressIps = this.egressIps();
-
     const probe = await this.probe(target);
 
     const row = await this.checks.save(
@@ -146,7 +142,6 @@ export class ProviderConnectivityService {
         failureKind: probe.failureKind,
         failureCode: probe.failureCode,
         detail: probe.detail,
-        egressIps,
       }),
     );
 
@@ -209,11 +204,6 @@ export class ProviderConnectivityService {
     }
 
     return result;
-  }
-
-  /** The allowlist to publish (the onboarding IP list). See `egress-ips.ts`. */
-  egressIps(): string[] {
-    return this.egressIpList;
   }
 
   // ── Internals ───────────────────────────────────────────────────────────

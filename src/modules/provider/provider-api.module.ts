@@ -27,7 +27,6 @@ import { ProviderVerdictsController } from './controllers/provider-verdicts.cont
 import { ProviderController } from './controllers/provider.controller';
 import { ProviderModule } from './provider.module';
 import { SlaWindowModule } from './sla-window.module';
-import { PROVIDER_EGRESS_IPS, loadEgressIps } from './services/egress-ips';
 import { ProviderCallsExportService } from './services/provider-calls-export.service';
 import { ProviderConnectivityService } from './services/provider-connectivity.service';
 import { ProviderEarningsService } from './services/provider-earnings.service';
@@ -135,7 +134,6 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
   ],
   providers: [
     { provide: PROVIDER_TERMS, useFactory: loadProviderTerms, inject: [ConfigService] },
-    { provide: PROVIDER_EGRESS_IPS, useFactory: loadEgressIps, inject: [ConfigService] },
     ProviderRegistrationService,
     ProviderPayoutAddressService,
     ProviderStakeAuthorityService,

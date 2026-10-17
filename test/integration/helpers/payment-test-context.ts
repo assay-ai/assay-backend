@@ -28,6 +28,7 @@ import { CreateVerificationRecords1755800000000 } from '@database/postgres/migra
 import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migrations/1755900000000-timestamptz-timestamps';
 import { CreateApiSurfaceTables1756000000000 } from '@database/postgres/migrations/1756000000000-create-api-surface-tables';
 import { CreateProviderRegistrationTables1756600000000 } from '@database/postgres/migrations/1756600000000-create-provider-registration-tables';
+import { DropConnectivityEgressIps1762000000000 } from '@database/postgres/migrations/1762000000000-drop-connectivity-egress-ips';
 import { ProviderEarningsAndPayouts1756700000000 } from '@database/postgres/migrations/1756700000000-provider-earnings-and-payouts';
 import { CallIdAndCallClass1756800000000 } from '@database/postgres/migrations/1756800000000-call-id-and-call-class';
 import { CreateToolBindingTables1756900000000 } from '@database/postgres/migrations/1756900000000-create-tool-binding-tables';
@@ -166,6 +167,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // The earnings-ledger migration adds a column to `providers`, so its own table has to exist.
       CreateApiSurfaceTables1756000000000,
       CreateProviderRegistrationTables1756600000000,
+      DropConnectivityEgressIps1762000000000,
       // The partial unique index behind `commitHoldAndCredit`'s
       // idempotency. `PaymentIntentService.resolve()` now takes that path on
       // the COMMIT edge, so a context that omits this migration would exercise

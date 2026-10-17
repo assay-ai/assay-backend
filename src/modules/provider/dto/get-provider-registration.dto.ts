@@ -103,12 +103,6 @@ export class GetProviderRegistrationResponseDto {
   @ApiProperty({ type: ProviderTermsSummaryDto })
   terms: ProviderTermsSummaryDto;
 
-  @ApiProperty({
-    type: [String],
-    description: 'The addresses to allowlist, published now. Empty when the platform has none.',
-  })
-  egressIps: string[];
-
   @ApiPropertyOptional({
     type: ConnectivityCheckResultDto,
     nullable: true,
