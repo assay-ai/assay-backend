@@ -1,3 +1,8 @@
+import { ToolContractVersionDto } from '@modules/tool/dto/tool-contract-version.dto';
+import {
+  contractVersionsOf,
+  currentContractVersion,
+} from '@modules/tool/domain/contract/contract-versions';
 import { Inject, Injectable } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
@@ -151,6 +156,7 @@ function settlementAsset(config: ConfigService): AssetId {
  * that must not be allowed to drift from the catalogue's own copy.
  */
 function toCatalogueToolDto(tool: Tool): CatalogueToolDto {
+  const current = currentContractVersion(tool);
   return {
     id: tool.id,
     name: tool.name,
@@ -158,6 +164,10 @@ function toCatalogueToolDto(tool: Tool): CatalogueToolDto {
     tier: tool.tier,
     inputSchema: tool.inputSchema,
     outputSchema: tool.outputSchema,
+    currentVersion: current?.semver ?? null,
+    versions: contractVersionsOf(tool).map((version) =>
+      ToolContractVersionDto.of(version, tool.currentVersion ?? current?.version),
+    ),
   };
 }
 
@@ -198,6 +208,9 @@ export function toDetailDto(row: ToolBindingEntity): ToolBindingDetailDto {
     maxRps: row.maxRps,
     maxDailyCalls: row.maxDailyCalls,
     publishedVersion: row.publishedVersion,
+    toolVersionRange: row.toolVersionRange ?? '^1',
+    providesOutputFields: [...(row.providesOutputFields ?? [])],
+    supportsInputFields: [...(row.supportsInputFields ?? [])],
     // `null !== 1` is `true`, and that is the answer wanted: a binding that has
     // never been published is wholly unpublished.
     hasUnpublishedChanges: row.publishedVersion !== row.mappingVersion,

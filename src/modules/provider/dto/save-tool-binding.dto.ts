@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
+  ArrayMaxSize,
   ArrayNotEmpty,
   IsArray,
   IsIn,
@@ -194,6 +195,50 @@ export class SaveToolBindingBodyDto {
    * different deadline changes what served a call.
    */
   @ApiPropertyOptional({
+    example: '^1',
+    maxLength: 32,
+    description:
+      'The contract majors this binding serves: `^1`, or `^1 || ^2`. Defaults to the ' +
+      "tool's current major. Each major needs a green tester run before publishing.",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^\^\d{1,4}(\s*\|\|\s*\^\d{1,4})*$/, {
+    message: 'toolVersionRange must be a range of majors, e.g. ^1 or ^1 || ^2',
+  })
+  toolVersionRange?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['uv_index'],
+    description:
+      "The contract's optional output fields this binding returns. Routing sends calls " +
+      'that require one only here, and a declared field missing from a response is a ' +
+      'contract violation.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  providesOutputFields?: string[];
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['units'],
+    description:
+      "The contract's optional input fields this binding passes to its endpoint. A call " +
+      'that uses one is routed only to bindings that support it.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  supportsInputFields?: string[];
+
+  @ApiPropertyOptional({
     nullable: true,
     minimum: 1,
     description:
@@ -303,6 +348,50 @@ export class UpdateToolBindingBodyDto {
   @Min(0)
   @Max(1)
   slaFailureRate?: number;
+
+  @ApiPropertyOptional({
+    example: '^1',
+    maxLength: 32,
+    description:
+      'The contract majors this binding serves: `^1`, or `^1 || ^2`. Defaults to the ' +
+      "tool's current major. Each major needs a green tester run before publishing.",
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(32)
+  @Matches(/^\^\d{1,4}(\s*\|\|\s*\^\d{1,4})*$/, {
+    message: 'toolVersionRange must be a range of majors, e.g. ^1 or ^1 || ^2',
+  })
+  toolVersionRange?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['uv_index'],
+    description:
+      "The contract's optional output fields this binding returns. Routing sends calls " +
+      'that require one only here, and a declared field missing from a response is a ' +
+      'contract violation.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  providesOutputFields?: string[];
+
+  @ApiPropertyOptional({
+    type: [String],
+    example: ['units'],
+    description:
+      "The contract's optional input fields this binding passes to its endpoint. A call " +
+      'that uses one is routed only to bindings that support it.',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(64)
+  @IsString({ each: true })
+  @MaxLength(64, { each: true })
+  supportsInputFields?: string[];
 
   @ApiPropertyOptional()
   @IsOptional()

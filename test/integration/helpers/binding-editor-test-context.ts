@@ -1,3 +1,4 @@
+import { BindingContractTerms1761500000001 } from '@database/postgres/migrations/1761500000001-binding-contract-terms';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -74,6 +75,7 @@ import { ProviderToolBindingsService } from '@modules/provider/services/provider
 import { MinimumStakeParameters } from '@modules/tool/domain/routing/routing.types';
 import { BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
+import { staticToolContracts } from '@modules/tool/ports/tool-contracts.port';
 import { Tool, ToolTier } from '@modules/tool/ports/tool.types';
 import { DatabaseToolCatalogue } from '@modules/tool/services/database-tool-catalogue';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
@@ -295,6 +297,9 @@ export async function createBindingEditorTestContext(
       PaymentIntentRedemptionLapsed1760700000000,
       PaymentIntentDebtReplacing1760800000000,
       VoucherSeqDebtReplacement1760900000000,
+      // T3: the binding's contract range and declared fields, on the binding,
+      // its snapshots and its tester runs.
+      BindingContractTerms1761500000001,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',
@@ -323,7 +328,7 @@ export async function createBindingEditorTestContext(
     new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource),
   );
 
-  const catalogue = new DatabaseToolCatalogue({ tools: [TOOL], bindings: [] }, bindings, versions);
+  const catalogue = new DatabaseToolCatalogue(staticToolContracts([TOOL]), bindings, versions);
   const stakes = new MutableStakeSource();
 
   // No policy is registered for any tool yet, which is also what production
@@ -364,6 +369,7 @@ export async function createBindingEditorTestContext(
     ),
     new Map([[STAKE_CHAIN, MINIMUM_STAKE]]),
     dataSource,
+    catalogue,
   );
 
   const context: BindingEditorTestContext = {

@@ -1,0 +1,108 @@
+import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+
+import { ToolContractVersion, ToolTier, ToolVersionStatus } from '../ports/tool.types';
+
+/** One worked example of a call. */
+export class ToolExampleDto {
+  @ApiPropertyOptional({ example: 'Weather in Lisbon' })
+  title?: string;
+
+  @ApiProperty({ type: 'object', additionalProperties: true, example: { latitude: 38.72 } })
+  arguments: Record<string, unknown>;
+
+  @ApiPropertyOptional({ type: 'object', additionalProperties: true })
+  result?: unknown;
+}
+
+/**
+ * One published version of a tool's contract (design spec §7.2
+ * `tool_versions`, §7.5): what the catalogue, the provider binding editor and
+ * the operator editor show per version.
+ */
+export class ToolContractVersionDto {
+  @ApiProperty({
+    description: 'Sequence number within the tool (`tools.current_version`).',
+    example: 2,
+  })
+  version: number;
+
+  @ApiProperty({ example: '1.1.0' })
+  semver: string;
+
+  @ApiProperty({ example: 1 })
+  major: number;
+
+  @ApiProperty({ enum: ToolVersionStatus })
+  status: ToolVersionStatus;
+
+  @ApiProperty({ description: 'At most 200 characters: the only text tools/list sends.' })
+  summary: string;
+
+  @ApiProperty()
+  description: string;
+
+  @ApiProperty({ type: 'object', additionalProperties: true })
+  inputSchema: unknown;
+
+  @ApiProperty({ type: 'object', additionalProperties: true })
+  outputSchema: unknown;
+
+  @ApiProperty({
+    type: [String],
+    description: 'Inputs a call may use; routed only to bindings that support them.',
+  })
+  optionalInputFields: string[];
+
+  @ApiProperty({
+    type: [String],
+    description: 'Outputs a binding may declare; a toolset entry may require them.',
+  })
+  optionalOutputFields: string[];
+
+  @ApiProperty({ type: [ToolExampleDto] })
+  examples: ToolExampleDto[];
+
+  @ApiProperty({ enum: ToolTier })
+  tier: ToolTier;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    format: 'date-time',
+    description: 'DEPRECATED and RETIRED only.',
+  })
+  sunsetAt: Date | null;
+
+  @ApiProperty({ type: String, nullable: true })
+  changelog: string | null;
+
+  @ApiProperty({ type: String, nullable: true, format: 'date-time' })
+  publishedAt: Date | null;
+
+  @ApiProperty({ description: 'Unpinned URLs serve this version.' })
+  isCurrent: boolean;
+
+  static of(
+    version: ToolContractVersion,
+    currentVersion: number | null | undefined,
+  ): ToolContractVersionDto {
+    return {
+      version: version.version,
+      semver: version.semver,
+      major: version.major,
+      status: version.status,
+      summary: version.summary,
+      description: version.description,
+      inputSchema: version.inputSchema,
+      outputSchema: version.outputSchema,
+      optionalInputFields: [...version.optionalInputFields],
+      optionalOutputFields: [...version.optionalOutputFields],
+      examples: version.examples.map((example) => ({ ...example })),
+      tier: version.tier,
+      sunsetAt: version.sunsetAt,
+      changelog: version.changelog,
+      publishedAt: version.publishedAt,
+      isCurrent: currentVersion != null && version.version === currentVersion,
+    };
+  }
+}

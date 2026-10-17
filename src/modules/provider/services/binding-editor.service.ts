@@ -39,6 +39,7 @@ import { PROVIDER_STAKE_SOURCE, ProviderStakePort, stakeKey } from '../ports/pro
 import { PROVIDER_MINIMUM_STAKE_BY_CHAIN } from './provider-stake.service';
 
 import { toDetailDto } from './provider-tool-bindings.service';
+import { assertBindingContract, defaultBindingRange } from '../domain/binding-contract';
 
 /**
  * The fields a revision is *about*.
@@ -91,6 +92,13 @@ const VERSIONED_FIELDS = [
   'assetId',
   'settlementChains',
   'timeoutMs',
+  // T3: the contract majors served and the optional fields promised are terms
+  // of the revision too — a new major needs a re-map and a green tester run
+  // for that major (§7.5), and a newly promised field is checked on every
+  // call, so neither may reach traffic without a publish.
+  'toolVersionRange',
+  'providesOutputFields',
+  'supportsInputFields',
 ] as const;
 
 /**
@@ -188,9 +196,24 @@ export class BindingEditorService {
     }
 
     const context = { toolId: body.toolId, providerId: organizationId };
-    const requestMapping = inspectRequestMapping(body.requestMapping, context).spec;
+    const request = inspectRequestMapping(body.requestMapping, context);
+    const requestMapping = request.spec;
     const responseMapping = inspectResponseMapping(body.responseMapping, context).spec;
-    checkResponseAgainstSchema(responseMapping, tool.outputSchema, context);
+    // The contract half (T3): the majors served — the tool's current major
+    // unless named — and the optional fields promised, checked against every
+    // major in the range; the response mapping must write each major's core
+    // fields plus the declared outputs.
+    const terms = {
+      toolVersionRange: body.toolVersionRange ?? defaultBindingRange(tool),
+      providesOutputFields: dedupe(body.providesOutputFields ?? []),
+      supportsInputFields: dedupe(body.supportsInputFields ?? []),
+    };
+    const toolVersionRange = assertBindingContract(
+      tool,
+      terms,
+      { responseMapping, requestSelectors: request.selectors },
+      context,
+    );
 
     // Refused here rather than by `class-validator`, because the two facts are
     // one fact: an asset the platform does not know has no decimals, and a
@@ -204,6 +227,9 @@ export class BindingEditorService {
     row.endpoint = body.endpoint;
     row.requestMapping = requestMapping;
     row.responseMapping = responseMapping;
+    row.toolVersionRange = toolVersionRange;
+    row.providesOutputFields = terms.providesOutputFields;
+    row.supportsInputFields = terms.supportsInputFields;
     row.pricingMode = body.pricingMode;
     row.priceAmount = body.pricingMode === PricingMode.FREE ? '0' : body.priceAmount;
     row.assetId = body.assetId;
@@ -278,9 +304,35 @@ export class BindingEditorService {
     if (body.responseMapping !== undefined) {
       const context = { toolId: row.toolId, bindingId: row.id, providerId: organizationId };
       row.responseMapping = inspectResponseMapping(body.responseMapping, context).spec;
-      checkResponseAgainstSchema(
-        row.responseMapping,
-        (await this.tool(row.toolId)).outputSchema,
+    }
+    if (body.toolVersionRange !== undefined) row.toolVersionRange = body.toolVersionRange;
+    if (body.providesOutputFields !== undefined) {
+      row.providesOutputFields = dedupe(body.providesOutputFields);
+    }
+    if (body.supportsInputFields !== undefined) {
+      row.supportsInputFields = dedupe(body.supportsInputFields);
+    }
+    // The contract check runs again whenever anything it reads changed: a
+    // mapping, the range, or a declared field.
+    if (
+      body.requestMapping !== undefined ||
+      body.responseMapping !== undefined ||
+      body.toolVersionRange !== undefined ||
+      body.providesOutputFields !== undefined ||
+      body.supportsInputFields !== undefined
+    ) {
+      const context = { toolId: row.toolId, bindingId: row.id, providerId: organizationId };
+      row.toolVersionRange = assertBindingContract(
+        await this.tool(row.toolId),
+        {
+          toolVersionRange: row.toolVersionRange ?? '^1',
+          providesOutputFields: row.providesOutputFields ?? [],
+          supportsInputFields: row.supportsInputFields ?? [],
+        },
+        {
+          responseMapping: row.responseMapping,
+          requestSelectors: inspectRequestMapping(row.requestMapping, context).selectors,
+        },
         context,
       );
     }
@@ -514,7 +566,16 @@ export class BindingEditorService {
  * the two `jsonb` mappings and the five scalars alike.
  */
 function versionedSnapshot(row: ToolBindingEntity): string {
-  return JSON.stringify(VERSIONED_FIELDS.map((field) => row[field]));
+  return JSON.stringify(VERSIONED_FIELDS.map((field) => termOf(row, field)));
+}
+
+/** A versioned field, with the T3 contract terms read at their column defaults when unset. */
+function termOf(row: ToolBindingEntity, field: (typeof VERSIONED_FIELDS)[number]): unknown {
+  if (field === 'toolVersionRange') return row.toolVersionRange ?? '^1';
+  if (field === 'providesOutputFields' || field === 'supportsInputFields') {
+    return [...(row[field] ?? [])].sort();
+  }
+  return row[field];
 }
 
 /**
@@ -557,6 +618,9 @@ function sameTerms(row: ToolBindingEntity, snapshot: BindingVersionEntity): bool
       String(source.priceAmount),
       source.assetId,
       source.timeoutMs,
+      source.toolVersionRange ?? '^1',
+      [...(source.providesOutputFields ?? [])].sort(),
+      [...(source.supportsInputFields ?? [])].sort(),
     ]);
   return terms(row) === terms(snapshot);
 }
@@ -588,6 +652,9 @@ function snapshotOf(row: ToolBindingEntity, authoredBy: string): BindingVersionE
   snapshot.priceAmount = row.priceAmount;
   snapshot.assetId = row.assetId;
   snapshot.timeoutMs = row.timeoutMs;
+  snapshot.toolVersionRange = row.toolVersionRange ?? '^1';
+  snapshot.providesOutputFields = [...(row.providesOutputFields ?? [])];
+  snapshot.supportsInputFields = [...(row.supportsInputFields ?? [])];
   snapshot.authoredBy = authoredBy;
   snapshot.publishedAt = null;
   snapshot.publishedBy = null;
@@ -616,6 +683,10 @@ function snapshotOf(row: ToolBindingEntity, authoredBy: string): BindingVersionE
  * until someone writes a real body here.
  */
 export const toSavedDto: (row: ToolBindingEntity) => SavedToolBindingDto = toDetailDto;
+
+function dedupe(values: readonly string[]): string[] {
+  return [...new Set(values)].sort();
+}
 
 /** `FREE` is the only mode allowed to cost nothing; `PAID` and `FREEMIUM` both charge past the free tier. */
 function assertPriceMatchesMode(pricingMode: PricingMode, priceAmount: string): void {
