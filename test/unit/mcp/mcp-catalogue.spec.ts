@@ -448,7 +448,12 @@ describe('McpCatalogueService — where a tool settles', () => {
 
     const catalogue = new McpCatalogueService(
       new InMemoryToolCatalogue({ tools: [tool], bindings: [] }),
-      { quote: () => Promise.resolve(quote) } as unknown as ProviderRouterService,
+      // The catalogue prices from the quote index, which reads the router's
+      // candidate snapshot and prices it with `quoteFromCandidates`.
+      {
+        snapshotCandidates: () => Promise.resolve([]),
+        quoteFromCandidates: () => quote,
+      } as unknown as ProviderRouterService,
       new FakeFreeQuota() as unknown as FreeQuotaService,
       [CHAIN_IDS.SOLANA_DEVNET],
     );
@@ -613,23 +618,26 @@ describe('McpCatalogueService — one tool cannot break the list', () => {
   it('omits a tool whose quote throws and lists the others', async () => {
     const good = buildTool({ id: 'good', name: 'good' });
     const bad = buildTool({ id: 'bad', name: 'bad' });
-    const quoteOf = (toolId: string): Promise<ToolQuote> =>
-      toolId === 'bad'
-        ? Promise.reject(new Error('catalogue defect'))
-        : Promise.resolve({
-            tool: good,
-            price: usdc('0.05'),
-            pricingMode: PricingMode.PAID,
-            routableBindings: 1,
-            settlementChains: [CHAIN_IDS.SOLANA_DEVNET],
-            p95LatencyMs: null,
-            qualityRate: null,
-            unroutableReason: null,
-          });
+    const quote: ToolQuote = {
+      tool: good,
+      price: usdc('0.05'),
+      pricingMode: PricingMode.PAID,
+      routableBindings: 1,
+      settlementChains: [CHAIN_IDS.SOLANA_DEVNET],
+      p95LatencyMs: null,
+      qualityRate: null,
+      unroutableReason: null,
+    };
+    // The bad tool's snapshot cannot be gathered; the good one is priced.
+    const router = {
+      snapshotCandidates: (toolId: string) =>
+        toolId === 'bad' ? Promise.reject(new Error('catalogue defect')) : Promise.resolve([]),
+      quoteFromCandidates: () => quote,
+    };
 
     const catalogue = new McpCatalogueService(
       new InMemoryToolCatalogue({ tools: [bad, good], bindings: [] }),
-      { quote: quoteOf } as unknown as ProviderRouterService,
+      router as unknown as ProviderRouterService,
       new FakeFreeQuota() as unknown as FreeQuotaService,
       [CHAIN_IDS.SOLANA_DEVNET],
     );

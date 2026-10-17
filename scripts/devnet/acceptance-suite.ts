@@ -420,7 +420,7 @@ const STEP_9 = '9 — the compensation intent puts back exactly what was taken';
  * when only the port moved.
  */
 function mcpUrl(): string {
-  return process.env.ACCEPTANCE_MCP_URL ?? `http://127.0.0.1:${process.env.MCP_PORT ?? '3200'}/mcp`;
+  return process.env.ACCEPTANCE_MCP_URL ?? `http://127.0.0.1:${process.env.MCP_PORT ?? '3200'}/`;
 }
 
 /** How this run identifies itself in `initialize`. Cosmetic; it reaches the server's logs. */

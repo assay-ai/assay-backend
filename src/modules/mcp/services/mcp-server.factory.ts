@@ -1,5 +1,5 @@
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 
 import { Server } from '@modelcontextprotocol/sdk/server/index.js';
 import {
@@ -23,8 +23,12 @@ import {
   X402_RECEIPT,
   X402_VOUCHER,
 } from '../constants/mcp.constants';
+import { ToolAccessErrorCode } from '@modules/tool/errors/tool-access.errors';
+
 import { McpErrorCode } from '../errors/mcp.errors';
+import { McpScope } from '../ports/mcp-scope';
 import { McpSession } from '../ports/mcp-session.port';
+import { McpCallRecorder, RefusalNotice } from './mcp-call-recorder.service';
 import { McpCatalogueService, displayPrice } from './mcp-catalogue.service';
 import {
   McpCallOutcome,
@@ -55,30 +59,48 @@ export class McpServerFactory {
   constructor(
     private readonly catalogue: McpCatalogueService,
     private readonly calls: McpToolCallService,
+    // Refused-call rows and the first-call stamp. Optional so a hand-built
+    // harness needs none; it never changes an outcome.
+    @Optional() private readonly recorder?: McpCallRecorder,
   ) {}
 
-  create(session: McpSession): Server {
+  /**
+   * `scope` is what this URL serves and what this caller may use (`McpScope`):
+   * `tools/list` returns view ∩ access, and every `tools/call` is checked
+   * against both again. Absent only in harnesses that predate URLs.
+   */
+  create(session: McpSession, scope?: McpScope): Server {
+    // The server sends no `notifications/tools/list_changed`: responses are
+    // JSON only and there is no stream to send one on (design spec §7.4).
     const server = new Server(
       { name: MCP_SERVER_NAME, version: MCP_SERVER_VERSION },
-      { capabilities: { tools: {} } },
+      { capabilities: { tools: { listChanged: false } } },
     );
 
     // The viewer is passed, not omitted: `x402/freeQuota` is *this agent's*
     // remaining allowance, and a catalogue listed without a viewer publishes no
     // quota at all — which reads to an agent as "this tool has no free tier"
     // rather than as "we did not look".
-    server.setRequestHandler(ListToolsRequestSchema, async () => ({
-      tools: await this.catalogue.listTools({
-        organizationId: session.organizationId,
-        agentId: session.agentId,
-        // Rule 1 of `chooseSettlementChain`: a multi-chain tool is quoted as
-        // settling on the chain this agent's own call would take. It narrows nothing.
-        chainId: session.chainId,
-      }),
-    }));
+    server.setRequestHandler(ListToolsRequestSchema, async () => {
+      const tools = await this.catalogue.listTools(
+        {
+          organizationId: session.organizationId,
+          agentId: session.agentId,
+          // Rule 1 of `chooseSettlementChain`: a multi-chain tool is quoted as
+          // settling on the chain this agent's own call would take. It narrows nothing.
+          chainId: session.chainId,
+        },
+        scope,
+      );
+      // An unknown name in `?tools=` is ignored, and said so (§7.4).
+      const ignored = scope ? await this.catalogue.ignoredTools(scope) : [];
+      return ignored.length > 0 ? { tools, _meta: { [ASSAY_IGNORED_TOOLS]: ignored } } : { tools };
+    });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {
       const { name, arguments: args, _meta: meta } = request.params;
+      const startedAt = Date.now();
+      void this.recorder?.markFirstCall(session, scope).catch(() => undefined);
 
       try {
         const outcome = await this.calls.call(
@@ -86,9 +108,13 @@ export class McpServerFactory {
           name,
           (args ?? {}) as JsonObject,
           paymentOf(meta),
+          scope,
         );
         return toCallToolResult(outcome);
       } catch (error) {
+        const notice = await this.recorder
+          ?.recordRefusal(session, scope, name, error, startedAt)
+          .catch(() => null);
         // Everything that can go wrong with a *tool call* is reported inside
         // the result, not as a JSON-RPC error. The distinction the
         // specification draws is between "the protocol failed" and "the tool
@@ -96,14 +122,19 @@ export class McpServerFactory {
         // arguments are all the second: the model that made the call is
         // supposed to read them and decide what to do, and a transport-level
         // error is not something a model gets to see.
-        return this.toErrorResult(session, name, error);
+        return this.toErrorResult(session, name, error, notice ?? null);
       }
     });
 
     return server;
   }
 
-  private toErrorResult(session: McpSession, name: string, error: unknown): CallToolResult {
+  private toErrorResult(
+    session: McpSession,
+    name: string,
+    error: unknown,
+    notice: RefusalNotice | null = null,
+  ): CallToolResult {
     if (!(error instanceof BaseError)) {
       // Not ours, so nothing about it is safe to describe. `AllExceptionsFilter`
       // would have said `INTERNAL_SERVER_ERROR` and nothing else; this says the
@@ -119,6 +150,20 @@ export class McpServerFactory {
     }
 
     this.logger.warn(`${session.credentialId}: ${name} → ${error.errorCode}: ${error.message}`);
+
+    // The spec's agent-facing refusals (design spec §7.4, "Errors"): the plain
+    // message, the fix page and the structured details, on `x402/error`.
+    if (SPEC_REFUSAL_CODES.has(error.errorCode)) {
+      const context = error instanceof AppError && error.context ? error.context : {};
+      return errorResult(error.message, {
+        code: error.errorCode,
+        message: error.message,
+        retryable: false,
+        ...(notice?.fixUrl ? { fixUrl: notice.fixUrl } : {}),
+        ...(notice ? { callId: notice.callId } : {}),
+        ...(context.details ? { details: context.details } : {}),
+      });
+    }
 
     return errorResult(error.message, {
       // Spread before `code`/`retryable` so neither can be shadowed by a
@@ -144,6 +189,17 @@ export class McpServerFactory {
 // ---------------------------------------------------------------------------
 
 export const MCP_SERVER_NAME = 'assay';
+
+/** `_meta["assay/ignoredTools"]` on a list: `?tools=` names this URL does not serve. */
+export const ASSAY_IGNORED_TOOLS = 'assay/ignoredTools';
+
+/** The codes of design spec §7.4's error table that this phase raises. */
+const SPEC_REFUSAL_CODES: ReadonlySet<string> = new Set<string>([
+  ToolAccessErrorCode.TOOL_NOT_IN_TOOLSET,
+  ToolAccessErrorCode.TOOL_NOT_ALLOWED,
+  ToolAccessErrorCode.TOOL_REMOVED,
+  ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES,
+]);
 
 /**
  * The request's `_meta` → what the agent said about paying (rail B).
@@ -243,6 +299,8 @@ function receiptPayload(receipt: McpReceipt): Record<string, unknown> {
     providerId: receipt.providerId,
     classification: receipt.classification,
     attempts: receipt.attempts,
+    // FALLBACK_BEST dropped the toolset entry's provider preferences.
+    ...(receipt.fellBack ? { fellBack: true } : {}),
   };
 }
 

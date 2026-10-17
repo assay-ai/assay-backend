@@ -27,7 +27,7 @@ if (!token) {
   process.exit(1);
 }
 
-const url = process.env.MCP_DEMO_URL ?? 'http://127.0.0.1:3200/mcp';
+const url = process.env.MCP_DEMO_URL ?? 'http://127.0.0.1:3200/';
 const args = JSON.parse(rawArgs ?? '{}');
 
 const transport = new StreamableHTTPClientTransport(new URL(url), {

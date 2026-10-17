@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { assertRailOffered, chainMetadata, offersRail } from '@modules/chains/chain-metadata';
@@ -35,7 +35,9 @@ import {
   ResponseClass,
   isRetryable,
 } from '@modules/tool/domain/classification';
-import { RoutingContext } from '@modules/tool/domain/routing';
+import { RoutingContext, RoutingRules } from '@modules/tool/domain/routing';
+import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
+import { CallAttribution } from '@modules/toolset/domain/attribution';
 import {
   JsonObject,
   JsonValue,
@@ -60,6 +62,7 @@ import {
   RoutedCall,
   ToolQuote,
   bindingPrice,
+  noProviderMatchesRules,
 } from '@modules/tool/services/provider-router.service';
 import {
   EnqueueVerificationInput,
@@ -80,7 +83,9 @@ import {
   MCP_VOIDED_REASON,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
+import { McpScope, forcesFree, rulesFor } from '../ports/mcp-scope';
 import { McpSession, storedCredentialIdOf } from '../ports/mcp-session.port';
+import { CallAttributionWriter } from './call-attribution.writer';
 import { McpCatalogueService } from './mcp-catalogue.service';
 import { MCP_PRICING, McpPricingConfig } from './mcp-pricing.config';
 
@@ -158,16 +163,30 @@ export class McpToolCallService {
     @Inject(ESCROW_BALANCE_READER) private readonly escrow: EscrowBalanceReaderPort,
     @Inject(MCP_PRICING) private readonly pricing: McpPricingConfig,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
+    // Stamps which MCP URL a paid call came through on its intent. Optional so
+    // a hand-built harness needs none.
+    @Optional() private readonly attribution?: CallAttributionWriter,
   ) {}
 
+  /**
+   * `scope` is the URL's view and the caller's access (`McpScope`): the tool
+   * must be in the view (`TOOL_NOT_IN_TOOLSET`) and allowed
+   * (`TOOL_NOT_ALLOWED`), and it is quoted, offered and routed under the
+   * entry's and the agent's rules. Absent only off the MCP host (the public
+   * demo), where the whole catalogue is the view.
+   */
   async call(
     session: McpSession,
     name: string,
     args: JsonObject,
     payment: McpPayment = NO_PAYMENT,
+    scope?: McpScope,
   ): Promise<McpCallOutcome> {
-    const tool = await this.catalogue.findByName(name);
-    const quote = await this.requireQuote(tool, session);
+    const tool = scope
+      ? await this.catalogue.admit(name, scope)
+      : await this.catalogue.findByName(name);
+    const plan = planOf(scope, tool.id);
+    const quote = await this.requireQuote(tool, session, plan.rules);
 
     this.requireValidArguments(tool, args);
 
@@ -194,6 +213,11 @@ export class McpToolCallService {
     // genuinely free binding answered `409`. No demo binding was free, which
     // is the only reason nobody had hit it.
     const freeMode = freePricingMode(quote.pricingMode);
+    // `?free=1` serves only what can be free, and a paid tool is not in its
+    // view (FR-2).
+    if (plan.forceFree && !freeMode) {
+      throw ToolAccessErrors.notInToolset({ details: { name: tool.name } });
+    }
     if (freeMode) {
       const quotaInput = {
         organizationId: session.organizationId,
@@ -220,7 +244,7 @@ export class McpToolCallService {
       // off. `null` means no free-capable binding could take it and the tool
       // has paid supply: fall through below.
       if (platformPlaces) {
-        const served = await this.relay(session, tool, freeMode, price, args, callId).catch(
+        const served = await this.relay(session, tool, freeMode, price, args, callId, plan).catch(
           async (error: unknown) => {
             await platformPlaces.release();
             throw error;
@@ -228,6 +252,25 @@ export class McpToolCallService {
         );
         if (served) return served;
         await platformPlaces.release();
+      }
+
+      // `?free=1` forces the FREE call class: it never falls through to paid.
+      // An exhausted quota is the ordinary quota refusal; no free-capable
+      // provider is the ordinary supply refusal. Nothing is charged either way.
+      if (plan.forceFree) {
+        if (decision.kind === 'REFUSED') {
+          throw McpErrors.quotaExceeded(
+            buildFreeQuotaErrorContext({
+              refusal: { ...decision, fallThroughToPaid: false },
+              toolId: tool.id,
+              paidPrice: null,
+            }),
+          );
+        }
+        throw ToolErrors.noEligibleBinding({
+          toolId: tool.id,
+          reason: 'no provider can serve this call free, and this URL serves free calls only',
+        });
       }
 
       // `FREE` exhausted. There is no paid binding behind this tool to fall
@@ -289,7 +332,7 @@ export class McpToolCallService {
       chooseRail(session.chainId, payment.rail, payment.voucher !== null) ===
       PaymentRail.RAIL_B_VOUCHER
     ) {
-      return this.callOnRailB(session, tool, args, callId, payment.voucher);
+      return this.callOnRailB(session, tool, args, callId, payment.voucher, plan);
     }
 
     // Hoisted out of `intents.create` below, because two things now need the
@@ -398,6 +441,7 @@ export class McpToolCallService {
     });
     if (admitted.unaffordable) return admitted.unaffordable;
     const intent = admitted.intent;
+    await this.attribution?.stampIntent(session.organizationId, intent.id, plan.attribution);
 
     const executing = await this.intents.transition(
       session.organizationId,
@@ -407,7 +451,7 @@ export class McpToolCallService {
       { reason: MCP_FORWARDED_REASON },
     );
 
-    return this.route(session, tool, executing, args, callId);
+    return this.route(session, tool, executing, args, callId, plan);
   }
 
   // ── Rail B ────────────────────────────────────────────────────────────────
@@ -439,6 +483,7 @@ export class McpToolCallService {
     args: JsonObject,
     callId: string,
     payment: McpVoucherPayment | null,
+    plan: CallPlan = UNSCOPED_PLAN,
   ): Promise<McpCallOutcome> {
     assertRailOffered(session.chainId, railName(PaymentRail.RAIL_B_VOUCHER));
     // A payer that owes for served calls whose vouchers lapsed gets no paid
@@ -452,8 +497,11 @@ export class McpToolCallService {
     // floor, and it throws rather than degrading — see `withdrawingChains`.
     const reading = await this.escrow.read(session.agentAccount, asset);
     const withdrawing = reading && reading.withdrawRequested > 0n ? [session.chainId] : [];
+    // The offer and the voucher retry run under the same merged rules as the
+    // call, so the buyer is only ever asked to sign for a provider the rules
+    // allow; a pinned payee they now drop is `PAYEE_NO_LONGER_ELIGIBLE`.
     const context: RoutingContext = {
-      ...routingContextOf(session, this.enabledChains, withdrawing),
+      ...routingContextOf(session, this.enabledChains, withdrawing, plan.rules),
       onlyProviderId: payment?.providerId,
       callClass: 'PAID',
     };
@@ -567,6 +615,7 @@ export class McpToolCallService {
     });
     if (admitted.intent === null) return admitted.unaffordable;
     const intent: PaymentIntent = admitted.intent;
+    await this.attribution?.stampIntent(session.organizationId, intent.id, plan.attribution);
 
     const executing = await this.intents.transition(
       session.organizationId,
@@ -576,7 +625,7 @@ export class McpToolCallService {
       { reason: MCP_FORWARDED_REASON },
     );
 
-    return this.route(session, tool, executing, args, callId, offer.providerId);
+    return this.route(session, tool, executing, args, callId, plan, offer.providerId);
   }
 
   /**
@@ -616,7 +665,11 @@ export class McpToolCallService {
 
   // ── Before any money moves ────────────────────────────────────────────────
 
-  private async requireQuote(tool: Tool, session: McpSession): Promise<ToolQuote> {
+  private async requireQuote(
+    tool: Tool,
+    session: McpSession,
+    rules?: RoutingRules,
+  ): Promise<ToolQuote> {
     // A quote is not narrowed to the buyer's chains, and a CALL is: the
     // catalogue must SHOW a tool that settles elsewhere rather than hide it, so
     // the quote asks about every chain this deployment offers and reports
@@ -631,12 +684,20 @@ export class McpToolCallService {
       withdrawingChains: [],
       defaultChainId: session.chainId,
       enabledChains: this.enabledChains,
+      // The hold is the dearest provider the rules leave, never one they drop.
+      rules,
     });
 
     // `findByName` resolved it a moment ago, so a null quote means the
     // catalogue changed underneath this call rather than that the agent asked
     // for something that never existed.
     if (!quote) throw McpErrors.toolNotFound({ name: tool.name });
+
+    // The rules left no provider: refused before any intent exists, with each
+    // provider's reason and whose rule it was (FR-6).
+    if (!quote.price && quote.ruleRejections && quote.ruleRejections.length > 0) {
+      throw noProviderMatchesRules(tool.id, quote.ruleRejections);
+    }
 
     if (!quote.price) {
       throw ToolErrors.noEligibleBinding({
@@ -797,6 +858,7 @@ export class McpToolCallService {
     quoted: Money,
     args: JsonObject,
     callId: string,
+    plan: CallPlan = UNSCOPED_PLAN,
   ): Promise<McpCallOutcome | null> {
     const startedAt = Date.now();
     // Each binding's own quota place is taken on the binding about to be
@@ -824,7 +886,7 @@ export class McpToolCallService {
         // this path deliberately does not read the escrow.
         // `FREE`: a call nobody is charged for never reaches a `PAID` binding.
         context: {
-          ...routingContextOf(session, this.enabledChains, []),
+          ...routingContextOf(session, this.enabledChains, [], plan.rules),
           callClass: 'FREE',
           reserveFreeQuota: async (binding) => {
             const place = await this.freeQuota.reserveBinding({
@@ -902,6 +964,7 @@ export class McpToolCallService {
         amount: '0',
         asset: quoted.asset,
       }),
+      attribution: plan.attribution,
     });
 
     // The quota was spent by the reservations above — the platform places in
@@ -927,6 +990,7 @@ export class McpToolCallService {
       providerId: routed.providerId,
       classification: classification.responseClass,
       attempts: routed.attempts.length,
+      ...(routed.fellBack ? { fellBack: true } : {}),
     };
 
     if (classification.responseClass !== ResponseClass.DATA_RESULT) {
@@ -980,6 +1044,7 @@ export class McpToolCallService {
     intent: PaymentIntent,
     args: JsonObject,
     callId: string,
+    plan: CallPlan = UNSCOPED_PLAN,
     /** Rail B: the provider the voucher pays. Nobody else may serve it. */
     onlyProviderId?: string,
   ): Promise<McpCallOutcome> {
@@ -991,7 +1056,12 @@ export class McpToolCallService {
         input: args,
         callId,
         context: {
-          ...routingContextOf(session, this.enabledChains, await this.withdrawingChains(session)),
+          ...routingContextOf(
+            session,
+            this.enabledChains,
+            await this.withdrawingChains(session),
+            plan.rules,
+          ),
           onlyProviderId,
           // A charged call is served only by a staked, payable paid binding.
           callClass: 'PAID',
@@ -1087,6 +1157,7 @@ export class McpToolCallService {
       providerId: resolved.providerId,
       classification: classification.responseClass,
       attempts: routed.attempts.length,
+      ...(routed.fellBack ? { fellBack: true } : {}),
     };
 
     // A `DATA_RESULT` the mapping could not turn into the tool's contract. The
@@ -1723,6 +1794,8 @@ export interface McpReceipt {
   readonly providerId: string | null;
   readonly classification: ResponseClass;
   readonly attempts: number;
+  /** FALLBACK_BEST dropped the toolset entry's provider preferences to serve this call. */
+  readonly fellBack?: boolean;
 }
 
 export type McpCallOutcome =
@@ -1781,8 +1854,11 @@ function routingContextOf(
   session: McpSession,
   enabledChains: readonly ChainId[],
   withdrawingChains: readonly ChainId[],
+  /** The merged entry and agent rules of a scoped call; absent off the MCP host. */
+  rules?: RoutingRules,
 ): RoutingContext {
   return {
+    ...(rules ? { rules } : {}),
     payerChains: [session.chainId],
     defaultChainId: session.chainId,
     enabledChains,
@@ -1835,4 +1911,26 @@ function namespaceOf(chainId: ChainId): string {
  */
 function credentialOf(session: McpSession): string | null {
   return storedCredentialIdOf(session);
+}
+
+/** What a scoped call carries through every phase: its rules, `?free=1`, and its URL. */
+interface CallPlan {
+  readonly rules: RoutingRules | undefined;
+  readonly forceFree: boolean;
+  readonly attribution: CallAttribution | null;
+}
+
+const UNSCOPED_PLAN: CallPlan = Object.freeze({
+  rules: undefined,
+  forceFree: false,
+  attribution: null,
+});
+
+function planOf(scope: McpScope | undefined, toolId: string): CallPlan {
+  if (!scope) return UNSCOPED_PLAN;
+  return {
+    rules: rulesFor(scope, toolId),
+    forceFree: forcesFree(scope),
+    attribution: scope.attribution,
+  };
 }

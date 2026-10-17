@@ -314,10 +314,16 @@ describe('the MCP endpoint, for a blocked person', () => {
         }),
       ),
       { create } as never,
+      { resolve: jest.fn() } as never,
+      { resolve: jest.fn() } as never,
+      { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' },
     );
 
     await expect(
-      controller.handle({ headers: { authorization: 'Bearer t' } } as never, {} as never),
+      controller.handle(
+        { method: 'POST', originalUrl: '/', headers: { authorization: 'Bearer t' } } as never,
+        {} as never,
+      ),
     ).rejects.toMatchObject({ errorCode: AccountErrorCode.ACCOUNT_BLOCKED });
     expect(create).not.toHaveBeenCalled();
   });

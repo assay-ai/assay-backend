@@ -1,78 +1,117 @@
-import { All, Controller, Inject, Logger, Req, Res } from '@nestjs/common';
+import { All, Controller, Inject, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 
 import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
 
 import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
+import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
+import { attributionOf } from '@modules/toolset/domain/attribution';
+import {
+  browserRedirectTarget,
+  canonicalUrl,
+  isBrowserRequest,
+  parseMcpUrl,
+} from '@modules/toolset/domain/mcp-url';
+import { AccessResolver } from '@modules/toolset/services/access.resolver';
+import { McpEndpointResolver } from '@modules/toolset/services/mcp-endpoint.resolver';
 
 import { MCP_BEARER_PREFIX } from '../constants/mcp.constants';
+import { McpErrors } from '../errors/mcp.errors';
+import { McpScope } from '../ports/mcp-scope';
 import { MCP_SESSION_SOURCE, McpSessionPort } from '../ports/mcp-session.port';
 import { McpServerFactory } from '../services/mcp-server.factory';
 
 /**
- * The Streamable HTTP transport.
+ * The Streamable HTTP transport, on every path of the MCP host
+ * (`mcp.assay.ai`, design spec §7.4).
  *
- * Stateless per request apart from
- * the session token, so the service scales horizontally with no sticky
- * sessions. That is what `sessionIdGenerator: undefined` selects — the SDK's
- * stateless mode, where each request carries its own initialisation and nothing
- * is remembered between them.
+ * Each URL is its own MCP server: `/` serves the whole catalogue and
+ * `/my/{slug}` the organization's own toolset; the forms later phases serve
+ * parse already and answer 404 until then. One key works on every URL.
+ *
+ * ```text
+ * request ─▶ parse the URL (canonical form)        unknown form        → 404
+ *         ─▶ a browser? (before auth)              302 to the web app
+ *         ─▶ authenticate                           no or bad token     → 401
+ *         ─▶ resolve the URL for this org           not here / not his  → 404
+ *         ─▶ resolve the caller's access (cached, invalidated on write)
+ *         ─▶ one MCP server bound to session + scope, for this request only
+ * ```
+ *
+ * Stateless per request apart from the session token, so the service scales
+ * horizontally with no sticky sessions — `sessionIdGenerator: undefined`.
  *
  * ## Why this bypasses the platform's HTTP conventions
  *
- * Everything else in the API returns `{ data, statusCode, message }` through
- * `TransformInterceptor`, and every failure returns the one `ErrorResponse`
- * shape. Neither is true here, and neither can be: the body of every request
- * and response on this route is JSON-RPC 2.0, defined by the MCP
- * specification, and a client that reached this endpoint is validating it
- * against that specification. Writing to `@Res()` directly is what keeps the
- * interceptor's hands off it.
- *
- * The one thing that is *not* bypassed is authentication. It happens here,
- * before a transport exists, so an unauthenticated request is refused with the
- * platform's ordinary `401` rather than being answered in JSON-RPC by a server
- * that does not know who is calling.
+ * Every body here is JSON-RPC 2.0, defined by the MCP specification, so
+ * nothing goes through `TransformInterceptor` and the response is written to
+ * `@Res()` directly. What is *not* bypassed is everything that happens before
+ * a transport exists: an unknown URL, a missing token and another
+ * organization's toolset leave as the platform's ordinary `404` / `401`.
  *
  * ## `@All` rather than `@Post`
  *
  * Streamable HTTP uses `GET` for the server-to-client stream and `DELETE` to
- * end a session, and the SDK's transport answers all three — including
- * answering `GET` and `DELETE` with a *protocol-correct* `405` in stateless
- * mode. Routing only `POST` here would have Nest answer those with its own
- * `404`, which an MCP client cannot interpret.
+ * end a session, and the SDK answers both with a protocol-correct `405` in
+ * stateless mode; routing only `POST` would have Nest answer them with a
+ * `404` an MCP client cannot interpret.
+ *
+ * `/health` is the MCP service's own `HealthcheckController`, registered by
+ * the root module before this catch-all, so it keeps answering.
  */
-@Controller('mcp')
+@Controller()
 export class McpController {
-  private readonly logger = new Logger(McpController.name);
-
   constructor(
     @Inject(MCP_SESSION_SOURCE) private readonly sessions: McpSessionPort,
     private readonly servers: McpServerFactory,
+    private readonly endpoints: McpEndpointResolver,
+    private readonly access: AccessResolver,
+    @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
   ) {}
 
-  @All()
+  @All('{*path}')
   async handle(@Req() request: Request, @Res() response: Response): Promise<void> {
+    const parsed = parseMcpUrl(request.originalUrl);
+
+    // A person's browser gets the web page for this URL, before any
+    // authentication: a browser has no token, and a 401 would explain
+    // nothing. The redirect itself reveals nothing private.
+    if (isBrowserRequest(request)) {
+      const target = browserRedirectTarget(
+        this.host.webAppUrl,
+        parsed,
+        parsed ? canonicalUrl(this.host.mcpPublicUrl, parsed) : null,
+      );
+      response.redirect(302, target);
+      return;
+    }
+
+    if (!parsed) throw McpErrors.urlNotFound();
+
     const session = await this.sessions.resolve(bearerToken(request));
     // A blocked person's session exists so the dashboard can read; nothing on
     // this endpoint is a read of the account's own data — `tools/list` is the
     // shop and `tools/call` spends — so it is refused whole.
     if (session.blocked) throw sessionBlockedError(session.blocked);
 
-    const server = this.servers.create(session);
+    const view = await this.endpoints.resolve(session.organizationId, parsed);
+    const scope: McpScope = {
+      view,
+      access: await this.access.resolve(session),
+      attribution: attributionOf(view),
+    };
+
+    const server = this.servers.create(session, scope);
     const transport = new StreamableHTTPServerTransport({
       // Stateless. See the class comment.
       sessionIdGenerator: undefined,
-      // Answer with a plain JSON body rather than an SSE stream. Nothing here
-      // streams — a tool call is one request and one result — and an SSE
-      // response would hold the connection open for a client that has already
-      // got everything it asked for.
+      // A plain JSON body rather than an SSE stream: a tool call is one
+      // request and one result.
       enableJsonResponse: true,
     });
 
-    // Both are per-request and must not outlive it. Without this a client that
-    // disconnects mid-call leaks a transport and a server per abandoned
-    // request, which is a slow leak driven by exactly the traffic we cannot
-    // control.
+    // Both are per-request and must not outlive it; a client that disconnects
+    // mid-call would otherwise leak a transport and a server.
     response.on('close', () => {
       void transport.close();
       void server.close();
@@ -80,20 +119,15 @@ export class McpController {
 
     await server.connect(transport);
 
-    // The body is passed explicitly because Nest has already parsed it. The
-    // transport would otherwise read the stream a second time and find it
-    // consumed.
+    // Nest has already parsed the body; the transport would otherwise read the
+    // stream a second time and find it consumed.
     await transport.handleRequest(request, response, request.body);
   }
 }
 
 /**
- * `Authorization: Bearer <token>`, or nothing.
- *
- * Returns `null` for every malformed variant rather than trying to salvage one.
- * The session source treats a missing token and an invalid token identically,
- * so there is nothing to gain from telling the two apart here — and a header
- * parser that guesses is a header parser that accepts something it should not.
+ * `Authorization: Bearer <token>`, or nothing. Every malformed variant is
+ * `null`: a missing token and an invalid one are refused identically.
  */
 function bearerToken(request: Request): string | null {
   const header = request.headers.authorization;
