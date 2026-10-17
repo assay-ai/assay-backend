@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, In } from 'typeorm';
 
+import { assertNoReservedToolNames } from '@modules/tool/domain/reserved-tool-names';
+
 import { ToolEntity } from '../entities/tool.entity';
 import { AbstractRepository } from './abstract.repository';
 
@@ -33,6 +35,10 @@ export class ToolRepository extends AbstractRepository<ToolEntity> {
    */
   async upsertSeeded(rows: readonly ToolSeedRow[]): Promise<void> {
     if (rows.length === 0) return;
+    assertNoReservedToolNames(
+      rows.map((row) => row.name),
+      'tools upsert',
+    );
 
     const values: unknown[] = [];
     const tuples = rows.map((row, index) => {

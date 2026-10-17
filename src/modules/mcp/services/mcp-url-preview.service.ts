@@ -9,7 +9,14 @@ import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-cata
 import { categoryOf } from '@modules/tool/ports/tool.types';
 import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
 import { attributionOf } from '@modules/toolset/domain/attribution';
-import { ParsedMcpUrl, viewFilterRecord } from '@modules/toolset/domain/mcp-url';
+import {
+  DiscoveryMode,
+  ParsedMcpUrl,
+  defaultDiscoveryFor,
+  staticDiscoveryDefault,
+  viewFilterRecord,
+  withoutDefaultDiscovery,
+} from '@modules/toolset/domain/mcp-url';
 import { selectViewTools, servesPricingMode } from '@modules/toolset/domain/view';
 import { AccessResolver } from '@modules/toolset/services/access.resolver';
 import { ConnectUrlsService } from '@modules/toolset/services/connect-urls.service';
@@ -26,6 +33,7 @@ import {
 import { McpErrorCode } from '../errors/mcp.errors';
 import { McpScope, rulesFor, scopeAllows } from '../ports/mcp-scope';
 import { McpCatalogueService } from './mcp-catalogue.service';
+import { McpDiscoveryService } from './mcp-discovery.service';
 
 /** "Over budget": servers that show every tool, adding up to more than this (§7.10). */
 export const SHOW_ALL_TOOL_BUDGET = 25;
@@ -53,6 +61,7 @@ export class McpUrlPreviewService {
     private readonly quotes: QuoteIndexService,
     private readonly config: ConfigService,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
+    private readonly discovery: McpDiscoveryService,
   ) {}
 
   async preview(organizationId: string, url: string, agentId: string): Promise<McpUrlPreviewDto> {
@@ -91,6 +100,7 @@ export class McpUrlPreviewService {
             throw error;
           },
         );
+        const discovery = preview?.discovery ?? 'FULL';
         return {
           canonicalUrl: row.canonicalUrl,
           endpointKind: row.endpointKind,
@@ -100,7 +110,11 @@ export class McpUrlPreviewService {
           client: row.client,
           toolCount: preview?.listedCount ?? null,
           estimatedTokens: preview?.estimatedTokens ?? null,
-          discovery: 'FULL',
+          discovery,
+          searchUrl:
+            preview && discovery === 'FULL'
+              ? await this.searchUrlOf(organizationId, row.parsed)
+              : null,
           lastCallAt: row.lastCallAt?.toISOString() ?? null,
           handedOutAt: row.handedOutAt ? new Date(row.handedOutAt).toISOString() : null,
           firstCallAt: row.firstCallAt ? new Date(row.firstCallAt).toISOString() : null,
@@ -139,12 +153,16 @@ export class McpUrlPreviewService {
       defaultChainId: chainId,
       enabledChains: this.enabledChains,
     };
-    const [quotes, listed] = await Promise.all([
+    const viewer = { organizationId, agentId, chainId };
+    const [quotes, listed, listing] = await Promise.all([
       this.quotes.quoteMany(
         inView.map((tool) => tool.id),
         (toolId) => ({ ...context, rules: rulesFor(scope, toolId) }),
       ),
-      this.catalogue.listTools({ organizationId, agentId, chainId }, scope),
+      this.catalogue.listTools(viewer, scope),
+      // Exactly what `tools/list` returns here: every tool, or (SEARCH) the
+      // pinned tools and the three meta tools.
+      this.discovery.list(viewer, scope),
     ]);
     const listedNames = new Set(listed.map((descriptor) => descriptor.name));
 
@@ -173,14 +191,27 @@ export class McpUrlPreviewService {
       toolsetName: view.toolset?.name ?? null,
       viewFilter: viewFilterRecord(view.filter),
       // T1 lists every tool on every URL; search mode is T2.
-      discovery: 'FULL',
-      listedCount: listed.length,
-      estimatedTokens: Math.ceil(JSON.stringify(listed).length / CHARS_PER_TOKEN),
+      discovery: listing.mode === DiscoveryMode.SEARCH ? 'SEARCH' : 'FULL',
+      listedCount: listing.tools.length,
+      reachableCount: listed.length,
+      listedTools: listing.tools.map((tool) => tool.name),
+      estimatedTokens: Math.ceil(JSON.stringify(listing.tools).length / CHARS_PER_TOKEN),
       freeOnly: view.filter.free,
       tools,
       ignoredTools: [...ignoredTools],
       warnings: warningsOf(tools, ignoredTools),
     };
+  }
+
+  /** The URL with `discovery=search` (dropped again when search is its default). */
+  private async searchUrlOf(organizationId: string, parsed: ParsedMcpUrl): Promise<string> {
+    const searching = { ...parsed.filter, discovery: DiscoveryMode.SEARCH };
+    const filter = withoutDefaultDiscovery(
+      searching,
+      defaultDiscoveryFor(searching, staticDiscoveryDefault(parsed.path)),
+    );
+    const view = await this.endpoints.resolve(organizationId, { ...parsed, filter });
+    return view.canonicalUrl;
   }
 
   private async requireAgent(organizationId: string, agentId: string) {

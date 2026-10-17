@@ -91,6 +91,23 @@ export interface Tool {
   readonly category?: string;
   /** Search keywords. Never sent to a model on their own. */
   readonly tags?: readonly string[];
+  /**
+   * `tools.visibility`. Absent reads as LISTED: every seeded STANDARD tool is.
+   * Only a LISTED tool is part of the catalogue-wide views (`/`, `/c/…`).
+   */
+  readonly visibility?: ToolVisibility;
+}
+
+/** `tools.visibility`. */
+export enum ToolVisibility {
+  PRIVATE = 'PRIVATE',
+  UNLISTED = 'UNLISTED',
+  LISTED = 'LISTED',
+}
+
+/** Whether `tool` is in the public catalogue. */
+export function isListedTool(tool: Pick<Tool, 'visibility'>): boolean {
+  return (tool.visibility ?? ToolVisibility.LISTED) === ToolVisibility.LISTED;
 }
 
 /** The category of a tool that declares none. */

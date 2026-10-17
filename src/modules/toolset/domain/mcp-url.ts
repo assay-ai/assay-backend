@@ -134,7 +134,13 @@ export function parseMcpUrl(pathAndQuery: string): ParsedMcpUrl | null {
   const filter = parseQuery(rawQuery);
   if (!filter) return null;
 
-  return { path, filter: withoutDefaultDiscovery(filter, staticDiscoveryDefault(path)) };
+  return {
+    path,
+    filter: withoutDefaultDiscovery(
+      filter,
+      defaultDiscoveryFor(filter, staticDiscoveryDefault(path)),
+    ),
+  };
 }
 
 /** A full URL (`https://mcp.example.com/my/x?…`) → parsed, when it is on `base`'s origin. */
@@ -259,6 +265,19 @@ export function staticDiscoveryDefault(path: McpPath): DiscoveryMode | null {
     default:
       return null;
   }
+}
+
+/**
+ * The discovery mode a URL defaults to, given its filters: a `?tools=`
+ * selection (at most 50 names) on a URL that would search is listed like
+ * AUTO instead, so `/?tools=a,b` serves exactly those tools (§8.2 C) and
+ * `discovery=search` there is not a default to drop. FULL and AUTO stay.
+ */
+export function defaultDiscoveryFor(
+  filter: Pick<ViewFilter, 'tools'>,
+  pathDefault: DiscoveryMode | null,
+): DiscoveryMode | null {
+  return filter.tools && pathDefault === DiscoveryMode.SEARCH ? DiscoveryMode.AUTO : pathDefault;
 }
 
 /** `discovery=` dropped when it equals `defaultMode` (a parameter equal to the default). */
