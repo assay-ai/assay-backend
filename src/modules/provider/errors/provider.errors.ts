@@ -224,6 +224,10 @@ export enum ProviderErrorCode {
   PROVIDER_INVALID_TIME_RANGE = 'PROVIDER_INVALID_TIME_RANGE',
   /** A report window spans more than one asset with no `?asset=` filter to disambiguate. */
   PROVIDER_MULTIPLE_ASSETS = 'PROVIDER_MULTIPLE_ASSETS',
+  /** Stored credentials cannot be decrypted right now (key missing or ciphertext failed authentication). */
+  PROVIDER_CREDENTIAL_VAULT_UNAVAILABLE = 'PROVIDER_CREDENTIAL_VAULT_UNAVAILABLE',
+  /** No active vault key is configured, so credentials cannot be stored. */
+  PROVIDER_CREDENTIAL_VAULT_NOT_CONFIGURED = 'PROVIDER_CREDENTIAL_VAULT_NOT_CONFIGURED',
 }
 
 export type ProviderErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -680,5 +684,18 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `The requested window spans more than one asset (${context?.assets ?? '?'})` +
       ` — pass ?asset= to pick one`,
+  },
+  credentialVaultUnavailable: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_VAULT_UNAVAILABLE,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `Stored provider credentials could not be decrypted` +
+      `${context?.reason ? ` (${context.reason})` : ''}` +
+      `. The call was not sent.`,
+  },
+  credentialVaultNotConfigured: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_VAULT_NOT_CONFIGURED,
+    statusCode: 503,
+    message: () => `Credential storage is not configured on this deployment (no active vault key)`,
   },
 });

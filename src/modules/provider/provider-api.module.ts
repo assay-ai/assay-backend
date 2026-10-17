@@ -10,6 +10,7 @@ import { ToolModule } from '@modules/tool/tool.module';
 import { VerificationModule } from '@modules/verification/verification.module';
 import { AuditLogModule } from '@shared/audit';
 
+import { CredentialVaultModule } from './credentials/credential-vault.module';
 import { ProviderConnectivityController } from './controllers/provider-connectivity.controller';
 import { ProviderPayoutAddressController } from './controllers/provider-payout-address.controller';
 import { ProviderPayoutsController } from './controllers/provider-payouts.controller';
@@ -112,6 +113,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderModule,
     BlocklistModule,
     ToolModule,
+    CredentialVaultModule,
     McpModule,
     ChainsModule,
     VerificationModule,

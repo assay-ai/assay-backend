@@ -4,6 +4,7 @@ import { ConfigService } from '@nestjs/config';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
+import { CredentialVaultModule } from '@modules/provider/credentials/credential-vault.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { loadMinimumStakeByChain } from '@modules/provider/services/provider-stake.service';
 import { NetworkModule } from '@shared/network/network.module';
@@ -80,7 +81,7 @@ import {
   // factory asserts at boot that every chain this deployment offers has a stake
   // floor. `ProviderModule` already imports it, but does not re-export
   // it — and a module imports what it uses.
-  imports: [ChainsModule, NetworkModule, ProviderModule],
+  imports: [ChainsModule, NetworkModule, ProviderModule, CredentialVaultModule],
   providers: [
     // The **tool contract** half of the catalogue: empty unless an operator
     // points `TOOL_CATALOGUE_SEED_FILE` at one. Still a seed on purpose — a

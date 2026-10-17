@@ -53,6 +53,7 @@ import { ProviderRepository } from './repositories/provider.repository';
 import { ProviderPayoutChallengeRepository } from './repositories/provider-payout-challenge.repository';
 import { ProviderConnectivityCheckRepository } from './repositories/provider-connectivity-check.repository';
 import { ProviderPayoutRepository } from './repositories/provider-payout.repository';
+import { BindingCredentialEntity } from './entities/binding-credential.entity';
 import { ToolBindingEntity } from './entities/tool-binding.entity';
 import { ToolEntity } from './entities/tool.entity';
 import { ToolVersionEntity } from './entities/tool-version.entity';
@@ -61,6 +62,7 @@ import { ToolsetEntity } from './entities/toolset.entity';
 import { ToolsetEntryEntity } from './entities/toolset-entry.entity';
 import { BindingVersionEntity } from './entities/binding-version.entity';
 import { BindingTestRunEntity } from './entities/binding-test-run.entity';
+import { BindingCredentialRepository } from './repositories/binding-credential.repository';
 import { ToolBindingRepository } from './repositories/tool-binding.repository';
 import { ToolRepository } from './repositories/tool.repository';
 import { ToolVersionRepository } from './repositories/tool-version.repository';
@@ -158,6 +160,7 @@ const entities = [
   ToolsetEntryEntity,
   AgentConnectUrlEntity,
   ToolBindingEntity,
+  BindingCredentialEntity,
   BindingVersionEntity,
   BindingTestRunEntity,
   ProviderStakeGraceEntity,
@@ -219,6 +222,7 @@ const repositories = [
   ToolsetEntryRepository,
   AgentConnectUrlRepository,
   ToolBindingRepository,
+  BindingCredentialRepository,
   BindingVersionRepository,
   BindingTestRunRepository,
   ProviderStakeGraceRepository,
