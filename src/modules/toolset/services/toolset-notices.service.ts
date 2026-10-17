@@ -14,6 +14,8 @@ import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
 import { OFFICIAL_HANDLE } from '../domain/handle';
 import { ToolsetVisibility, servesPublicPath, versionServes } from '../domain/sharing';
 import { SnapshotDiff, diffSnapshots } from '../domain/snapshot';
+import { readAllowedToolsets } from '../domain/access';
+import { pinReaches } from '../domain/pin';
 import { HandlesService } from './handles.service';
 import { sharingStateOf } from './sharing-row';
 import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
@@ -75,27 +77,38 @@ export class ToolsetNoticesService {
     )) as { orgId: string; fromVersion: number }[];
     if (recipients.length === 0) return 0;
 
-    // Only organizations that can still see the toolset: anyone, when the new
-    // version serves on its `/@…` URL; otherwise only those holding a pin to
-    // it. A revoked link holder (the token was rotated) learns nothing new.
-    const listed =
-      servesPublicPath(sharingStateOf(toolset), this.now()) &&
-      versionServes(target.sharedAs, 'PUBLIC');
+    // Only organizations that can see the NEW version the way they reach the
+    // toolset (review N1): anyone when it serves on the `/@…` URL; otherwise
+    // only holders of a pin that still reaches it by a path serving the new
+    // version — the same link (a rotated token is a different link) for a
+    // version shared by link. A pin taken through `/@…` learns nothing of a
+    // version published UNLISTED, and a revoked link holder nothing at all.
+    const state = sharingStateOf(toolset);
+    const now = this.now();
+    if (!(await this.handles.ownerHandleActive(toolset.ownerOrgId))) return 0;
+    const listed = servesPublicPath(state, now) && versionServes(target.sharedAs, 'PUBLIC');
     let eligible = recipients;
     if (!listed) {
-      const pinned = new Set(
-        (
-          (await this.dataSource.query(
-            `SELECT organization_id AS "orgId" FROM spend_policies
-              WHERE organization_id = ANY($1::uuid[]) AND allowed_toolsets @> $2::jsonb
-             UNION
-             SELECT organization_id FROM agent_credentials
-              WHERE organization_id = ANY($1::uuid[]) AND allowed_toolsets @> $2::jsonb`,
-            [recipients.map((row) => row.orgId), JSON.stringify([{ toolsetId }])],
-          )) as { orgId: string }[]
-        ).map((row) => row.orgId),
+      const rows = (await this.dataSource.query(
+        `SELECT organization_id AS "orgId", allowed_toolsets AS refs FROM spend_policies
+          WHERE organization_id = ANY($1::uuid[]) AND allowed_toolsets @> $2::jsonb
+         UNION ALL
+         SELECT organization_id, allowed_toolsets FROM agent_credentials
+          WHERE organization_id = ANY($1::uuid[]) AND allowed_toolsets @> $2::jsonb`,
+        [recipients.map((row) => row.orgId), JSON.stringify([{ toolsetId }])],
+      )) as { orgId: string; refs: unknown }[];
+      const reached = new Set(
+        rows
+          .filter((row) =>
+            readAllowedToolsets(row.refs).some((ref) => {
+              if (ref.toolsetId !== toolsetId) return false;
+              const path = pinReaches(ref, state, now);
+              return path !== null && versionServes(target.sharedAs, path);
+            }),
+          )
+          .map((row) => row.orgId),
       );
-      eligible = recipients.filter((row) => pinned.has(row.orgId));
+      eligible = recipients.filter((row) => reached.has(row.orgId));
     }
     if (eligible.length === 0) return 0;
 

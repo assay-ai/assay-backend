@@ -33,6 +33,7 @@ interface CallGroup {
 interface StatsToolset {
   readonly id: string;
   readonly ownerOrgId: string | null;
+  /** The latest version for "On latest": the `/@…` page's, else the link's. */
   readonly lastSharedVersion: number | null;
 }
 
@@ -364,7 +365,10 @@ export class ToolsetStatsService {
 
   private async statsToolsets(): Promise<StatsToolset[]> {
     return (await this.dataSource.query(
-      `SELECT id, owner_org_id AS "ownerOrgId", last_shared_version AS "lastSharedVersion"
+      // "On latest" means what the `/@…` page calls latest; a toolset that was
+      // never public falls back to the newest version its link serves.
+      `SELECT id, owner_org_id AS "ownerOrgId",
+              COALESCE(last_public_version, last_shared_version) AS "lastSharedVersion"
          FROM toolsets
         WHERE first_shared_at IS NOT NULL OR owner_org_id IS NULL`,
     )) as StatsToolset[];
