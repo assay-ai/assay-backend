@@ -131,7 +131,16 @@ export function toolsetTestContext(options: ToolsetTestContextOptions) {
     publishing,
     notices,
     sent,
-    endpoints: new McpEndpointResolver(toolsets, entries, epochs, host, versions, handles, clock),
+    endpoints: new McpEndpointResolver(
+      toolsets,
+      entries,
+      epochs,
+      host,
+      versions,
+      handles,
+      options.catalogue,
+      clock,
+    ),
     access: new AgentAccessService(
       new AgentRepository(dataSource),
       credentials,

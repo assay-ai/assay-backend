@@ -1,10 +1,10 @@
 import { ProviderTier } from '@modules/provider/ports/provider.types';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { EntryRoutingRules, OnEmpty, ProviderMode } from '@modules/tool/domain/routing';
-import { PricingMode, Tool, categoryOf } from '@modules/tool/ports/tool.types';
+import { PricingMode, Tool, categoryOf, isListedTool } from '@modules/tool/ports/tool.types';
 import { MoneyUtil } from '@utils/money.util';
 
-import { EndpointKind, McpPath, ViewFilter } from './mcp-url';
+import { DiscoveryMode, EndpointKind, McpPath, ViewFilter } from './mcp-url';
 
 /**
  * What one MCP URL serves, before access (design spec §7.3):
@@ -31,18 +31,20 @@ export interface McpEndpointView {
   /** The entry rules of the toolset this URL serves, by tool id. */
   readonly entryRules: ReadonlyMap<string, EntryRoutingRules>;
   /**
-   * The served toolset's own settings — the Draft's on `/my/{slug}`, the
-   * version snapshot's everywhere else. `null` on URLs with no toolset.
+   * `/c/{category}`: the path's own topic, applied like `?category=` (and
+   * intersected with it). Absent or `null` elsewhere.
    */
-  readonly settings: ToolsetSettings | null;
+  readonly baseCategory?: string | null;
+  /**
+   * How `tools/list` presents this URL (§7.4, "Discovery modes"), before a
+   * `?discovery=` override: the Draft's settings on `/my/{slug}`, the
+   * published snapshot's on `/my/{slug}@n`, `/@…` and `/u/…`. Absent means
+   * the path's static default with no pins — see `discoveryOf` — so a
+   * resolver case that predates T2 still serves a sensible list.
+   */
+  readonly discovery?: ViewDiscovery;
   /** Set when a shared URL serves only through a grace period or a rename alias. */
-  readonly notice: ViewNotice | null;
-}
-
-export interface ToolsetSettings {
-  readonly discovery: string;
-  readonly searchThreshold: number;
-  readonly pinnedTools: readonly string[];
+  readonly notice?: ViewNotice | null;
 }
 
 export interface ViewNotice {
@@ -51,6 +53,18 @@ export interface ViewNotice {
   /** `_meta["assay/renamed"]`: the handle in the URL is an old one; this is the current. */
   readonly renamedTo: string | null;
 }
+
+/** A URL's discovery settings: the toolset's, or the path's defaults. */
+export interface ViewDiscovery {
+  readonly mode: DiscoveryMode;
+  /** AUTO turns to SEARCH above this many tools in view ∩ access. */
+  readonly searchThreshold: number;
+  /** The URL's "Always loaded" names (the toolset's, or the root's), at most 5. */
+  readonly pinnedTools: readonly string[];
+}
+
+/** The default `search_threshold` (design spec §13 D2). */
+export const DEFAULT_SEARCH_THRESHOLD = 25;
 
 export interface ViewToolset {
   readonly id: string;
@@ -101,7 +115,7 @@ export function entryRulesOf(entry: StoredEntryRule): EntryRoutingRules | null {
 
 /** The view's tools from `catalogue`, in the URL's order, and the `?tools=` names it ignored. */
 export function selectViewTools(
-  view: Pick<McpEndpointView, 'baseToolIds' | 'filter'>,
+  view: Pick<McpEndpointView, 'baseToolIds' | 'filter' | 'baseCategory'>,
   catalogue: readonly Tool[],
 ): { readonly tools: readonly Tool[]; readonly ignoredTools: readonly string[] } {
   const byId = new Map(catalogue.map((tool) => [tool.id, tool]));
@@ -110,7 +124,9 @@ export function selectViewTools(
         const tool = byId.get(id);
         return tool ? [tool] : [];
       })
-    : [...catalogue];
+    : // The catalogue-wide views serve the LISTED catalogue only: an UNLISTED
+      // or PRIVATE tool is reachable only through a toolset that holds it.
+      catalogue.filter(isListedTool);
 
   const ignored: string[] = [];
   if (view.filter.tools) {
@@ -132,6 +148,10 @@ export function selectViewTools(
   if (view.filter.categories) {
     const categories = new Set(view.filter.categories);
     tools = tools.filter((tool) => categories.has(categoryOf(tool)));
+  }
+
+  if (view.baseCategory) {
+    tools = tools.filter((tool) => categoryOf(tool) === view.baseCategory);
   }
 
   return { tools, ignoredTools: ignored.sort() };

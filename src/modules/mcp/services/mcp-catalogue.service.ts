@@ -67,9 +67,35 @@ export class McpCatalogueService {
     this.quotes = quotes ?? new QuoteIndexService(router, catalogue);
   }
 
-  /** The `?tools=` names this URL does not serve, for `_meta["assay/ignoredTools"]`. */
+  /**
+   * View ∩ access, unpriced: every tool this URL serves that this caller may
+   * call. The one set `tools/list`, `search_tools` and `get_tool` all draw
+   * from, so none of them can ever show a tool the others would hide.
+   */
+  async scopedTools(scope: McpScope): Promise<readonly Tool[]> {
+    const { tools } = selectViewTools(scope.view, await this.catalogue.listTools());
+    return tools.filter((tool) => scopeAllows(scope, tool.id));
+  }
+
+  /** This agent's free calls left today on a FREE or FREEMIUM tool, or `null`. */
+  async freeCallsLeft(viewer: McpCatalogueViewer, toolId: string): Promise<number | null> {
+    const remaining = await this.freeQuota.remainingForTool(
+      viewer.organizationId,
+      viewer.agentId,
+      toolId,
+    );
+    return remaining ? remaining.remaining : null;
+  }
+
+  /**
+   * The `?tools=` names this URL does not serve to this caller, for
+   * `_meta["assay/ignoredTools"]`: measured against view ∩ access, so a tool
+   * the caller may not use reads exactly like one that does not exist.
+   */
   async ignoredTools(scope: McpScope): Promise<readonly string[]> {
-    return selectViewTools(scope.view, await this.catalogue.listTools()).ignoredTools;
+    const { tools, ignoredTools } = selectViewTools(scope.view, await this.catalogue.listTools());
+    const refused = tools.filter((tool) => !scopeAllows(scope, tool.id)).map((tool) => tool.name);
+    return [...ignoredTools, ...refused].sort();
   }
 
   /**
@@ -102,15 +128,19 @@ export class McpCatalogueService {
    * carries `x402/pricingMode`; it simply omits `x402/freeQuota` rather than
    * publish a number that is nobody's.
    */
-  async listTools(viewer?: McpCatalogueViewer, scope?: McpScope): Promise<McpToolDescriptor[]> {
+  async listTools(
+    viewer?: McpCatalogueViewer,
+    scope?: McpScope,
+    options: McpListOptions = {},
+  ): Promise<McpToolDescriptor[]> {
     // The URL's view, then the agent's access: `tools/list` returns view ∩
     // access, and prices each tool under the rules a call through this URL
     // would be routed under. Without a scope (the REST surfaces), the whole
     // catalogue with no rules.
-    const catalogue = await this.catalogue.listTools();
-    const tools = scope
-      ? selectViewTools(scope.view, catalogue).tools.filter((tool) => scopeAllows(scope, tool.id))
-      : catalogue;
+    const all = scope ? await this.scopedTools(scope) : await this.catalogue.listTools();
+    const tools = options.onlyToolIds
+      ? all.filter((tool) => options.onlyToolIds.has(tool.id))
+      : all;
     // **Not narrowed to the viewer's chain, deliberately.** A tool that
     // settles somewhere the buyer holds nothing must be LISTED and marked, not
     // hidden — hiding it makes the platform look like it lacks the tool —
@@ -152,7 +182,7 @@ export class McpCatalogueService {
 
     const freeQuotas = await Promise.all(
       quotes.map((quote) =>
-        viewer && quote && isFreeOrFreemium(quote.pricingMode)
+        viewer && quote && options.freeQuota !== false && isFreeOrFreemium(quote.pricingMode)
           ? this.freeQuota.remainingForTool(viewer.organizationId, viewer.agentId, quote.tool.id)
           : Promise.resolve(null),
       ),
@@ -234,6 +264,17 @@ export class McpCatalogueService {
 // ---------------------------------------------------------------------------
 // The descriptor
 // ---------------------------------------------------------------------------
+
+/** How {@link McpCatalogueService.listTools} prices. */
+export interface McpListOptions {
+  /**
+   * `false` skips the per-agent `x402/freeQuota` read: `search_tools` ranks the
+   * whole view and reads the quota only for the page it returns.
+   */
+  readonly freeQuota?: boolean;
+  /** Price only these tools (still within view ∩ access): a SEARCH list's pinned ones. */
+  readonly onlyToolIds?: ReadonlySet<string>;
+}
 
 /** Who is asking `tools/list` — see {@link McpCatalogueService.listTools}. */
 export interface McpCatalogueViewer {

@@ -1,8 +1,6 @@
 import { All, Controller, Inject, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 
-import { StreamableHTTPServerTransport } from '@modelcontextprotocol/sdk/server/streamableHttp.js';
-
 import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
 import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { attributionOf } from '@modules/toolset/domain/attribution';
@@ -19,6 +17,7 @@ import { MCP_BEARER_PREFIX } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
 import { McpScope } from '../ports/mcp-scope';
 import { MCP_SESSION_SOURCE, McpSessionPort } from '../ports/mcp-session.port';
+import { McpHttpBridge } from '../services/mcp-http-bridge';
 import { McpServerFactory } from '../services/mcp-server.factory';
 
 /**
@@ -36,10 +35,11 @@ import { McpServerFactory } from '../services/mcp-server.factory';
  *         ─▶ resolve the URL for this org           not here / not his  → 404
  *         ─▶ resolve the caller's access (cached, invalidated on write)
  *         ─▶ one MCP server bound to session + scope, for this request only
+ *            (protocol 2026-07-28 or a 2025-era client: `McpHttpBridge`)
  * ```
  *
- * Stateless per request apart from the session token, so the service scales
- * horizontally with no sticky sessions — `sessionIdGenerator: undefined`.
+ * Sessionless: nothing is carried between requests but the session token, so
+ * the service scales horizontally with no sticky sessions.
  *
  * ## Why this bypasses the platform's HTTP conventions
  *
@@ -52,22 +52,26 @@ import { McpServerFactory } from '../services/mcp-server.factory';
  * ## `@All` rather than `@Post`
  *
  * Streamable HTTP uses `GET` for the server-to-client stream and `DELETE` to
- * end a session, and the SDK answers both with a protocol-correct `405` in
- * stateless mode; routing only `POST` would have Nest answer them with a
- * `404` an MCP client cannot interpret.
+ * end a session; the bridge answers both with a protocol-correct `405`,
+ * where routing only `POST` would have Nest answer them with a `404` an MCP
+ * client cannot interpret.
  *
  * `/health` is the MCP service's own `HealthcheckController`, registered by
  * the root module before this catch-all, so it keeps answering.
  */
 @Controller()
 export class McpController {
+  private readonly bridge: McpHttpBridge;
+
   constructor(
     @Inject(MCP_SESSION_SOURCE) private readonly sessions: McpSessionPort,
     private readonly servers: McpServerFactory,
     private readonly endpoints: McpEndpointResolver,
     private readonly access: AccessResolver,
     @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
-  ) {}
+  ) {
+    this.bridge = new McpHttpBridge((session, scope) => this.servers.create(session, scope));
+  }
 
   @All('{*path}')
   async handle(@Req() request: Request, @Res() response: Response): Promise<void> {
@@ -101,27 +105,7 @@ export class McpController {
       attribution: attributionOf(view),
     };
 
-    const server = this.servers.create(session, scope);
-    const transport = new StreamableHTTPServerTransport({
-      // Stateless. See the class comment.
-      sessionIdGenerator: undefined,
-      // A plain JSON body rather than an SSE stream: a tool call is one
-      // request and one result.
-      enableJsonResponse: true,
-    });
-
-    // Both are per-request and must not outlive it; a client that disconnects
-    // mid-call would otherwise leak a transport and a server.
-    response.on('close', () => {
-      void transport.close();
-      void server.close();
-    });
-
-    await server.connect(transport);
-
-    // Nest has already parsed the body; the transport would otherwise read the
-    // stream a second time and find it consumed.
-    await transport.handleRequest(request, response, request.body);
+    await this.bridge.serve(request, response, { session, scope });
   }
 }
 

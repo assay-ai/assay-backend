@@ -4,7 +4,7 @@ import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.enti
 import { AgentEntity } from '@database/postgres/entities/agent.entity';
 import { QuoteIndexInvalidationSubscriber } from '@modules/tool/services/quote-index-invalidation.subscriber';
 import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
-import { parseMcpUrl } from '@modules/toolset/domain/mcp-url';
+import { DiscoveryMode, parseMcpUrl } from '@modules/toolset/domain/mcp-url';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { McpEndpointResolver } from '@modules/toolset/services/mcp-endpoint.resolver';
 
@@ -14,8 +14,8 @@ const TOOLSET = {
   slug: 'research',
   name: 'Research',
   discovery: 'FULL',
-  searchThreshold: 25,
-  pinnedTools: [],
+  searchThreshold: 12,
+  pinnedTools: ['get_weather'],
 };
 
 /** The base view is cached once per path; filters are applied after the lookup. */
@@ -31,12 +31,74 @@ describe('McpEndpointResolver', () => {
       } as never,
       { findByToolsets: async () => [] } as never,
       { current: async () => '7', currentShared: async () => '1' } as unknown as AccessEpochService,
-      { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' },
+      {
+        mcpPublicUrl: 'https://mcp.example.com',
+        webAppUrl: 'https://app.example.com',
+        rootPinnedTools: ['geocode_place'],
+      },
       { findVersion: async () => null } as never,
       { resolve: async () => null, handlesOf: async () => new Map() } as never,
+      {
+        findTool: async () => null,
+        findBindings: async () => [],
+        listTools: async () => [
+          { id: 't1', name: 'get_weather', category: 'weather' },
+          { id: 't2', name: 'geocode_place', category: 'maps' },
+        ],
+      } as never,
     );
     return { resolver, lookups };
   }
+
+  it('serves the root in SEARCH, with the root pinned tools', async () => {
+    const { resolver } = build();
+    const view = await resolver.resolve(ORG, parseMcpUrl('/')!);
+    expect(view.discovery).toEqual({
+      mode: DiscoveryMode.SEARCH,
+      searchThreshold: 25,
+      pinnedTools: ['geocode_place'],
+    });
+  });
+
+  it('serves /c/{category}: the whole catalogue narrowed to one topic, AUTO', async () => {
+    const { resolver } = build();
+    const view = await resolver.resolve(ORG, parseMcpUrl('/c/weather?discovery=auto')!);
+    expect(view).toMatchObject({
+      canonicalUrl: 'https://mcp.example.com/c/weather',
+      kind: 'CATEGORY',
+      baseToolIds: null,
+      baseCategory: 'weather',
+      toolset: null,
+      discovery: { mode: DiscoveryMode.AUTO, searchThreshold: 25, pinnedTools: [] },
+    });
+    const full = await resolver.resolve(ORG, parseMcpUrl('/c/weather?discovery=full')!);
+    expect(full.canonicalUrl).toBe('https://mcp.example.com/c/weather?discovery=full');
+  });
+
+  it('answers 404 for a topic no tool has', async () => {
+    const { resolver } = build();
+    await expect(resolver.resolve(ORG, parseMcpUrl('/c/astrology')!)).rejects.toMatchObject({
+      errorCode: McpErrorCode.MCP_URL_NOT_FOUND,
+    });
+  });
+
+  it('serves /my/{slug} with its toolset’s discovery mode, threshold and pins', async () => {
+    const { resolver } = build();
+    const view = await resolver.resolve(ORG, parseMcpUrl('/my/research')!);
+    expect(view.discovery).toEqual({
+      mode: DiscoveryMode.FULL,
+      searchThreshold: 12,
+      pinnedTools: ['get_weather'],
+    });
+  });
+
+  it('keeps discovery=search beside a ?tools= selection on the root (it lists as AUTO)', async () => {
+    const { resolver } = build();
+    const view = await resolver.resolve(ORG, parseMcpUrl('/?tools=get_weather&discovery=search')!);
+    expect(view.canonicalUrl).toBe('https://mcp.example.com/?tools=get_weather&discovery=search');
+    const plain = await resolver.resolve(ORG, parseMcpUrl('/?tools=get_weather&discovery=auto')!);
+    expect(plain.canonicalUrl).toBe('https://mcp.example.com/?tools=get_weather');
+  });
 
   it('shares one cached base view across every filter variant of a path', async () => {
     const { resolver, lookups } = build();

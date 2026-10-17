@@ -180,7 +180,7 @@ export const X402_REPLAYED = 'x402/replayed';
  * different readers: `annotations` for anything reading raw JSON-RPC or the
  * published catalogue, `_meta` for the SDKs.
  *
- * Verified against `@modelcontextprotocol/sdk` 1.30.0 — `ToolSchema.annotations`
+ * Verified against `@modelcontextprotocol/sdk` 1.30.0 (and still so for the v2 clients) — `ToolSchema.annotations`
  * is `$strip`, `ToolSchema._meta` is `Record<string, unknown>`. Do not "clean
  * this up" by dropping either copy without re-checking that both are still
  * true.

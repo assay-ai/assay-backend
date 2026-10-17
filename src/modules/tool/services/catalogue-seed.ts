@@ -4,6 +4,7 @@ import { isRegisteredAsset, registeredAssets } from '@modules/chains/ports/asset
 import { ChainId, isChainId } from '@modules/chains/ports/caip.types';
 
 import { normalizeRequestMapping, normalizeResponseMapping } from '../domain/mapping';
+import { assertNoReservedToolNames } from '../domain/reserved-tool-names';
 import { Tool, ToolBinding, UNCATEGORISED } from '../ports/tool.types';
 import { EMPTY_TOOL_CATALOGUE, ToolCatalogueSnapshot } from './in-memory-tool-catalogue';
 
@@ -173,6 +174,7 @@ function withCategory(tool: Tool, source: string): Tool {
         `(snake_case, at most 48 characters, no "__")`,
     );
   }
+  assertNoReservedToolNames([tool.name], source);
 
   const category = tool.category ?? UNCATEGORISED;
   if (!CATEGORY_RE.test(category)) {
