@@ -174,6 +174,7 @@ export function toolsetTestContext(options: ToolsetTestContextOptions) {
       handles,
       dataSource,
       host,
+      epochs,
       clock,
     ),
   };
