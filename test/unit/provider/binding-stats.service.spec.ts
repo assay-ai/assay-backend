@@ -42,17 +42,18 @@ describe('BindingStatsService.refresh', () => {
     const service = new BindingStatsService(
       attempts as unknown as BindingAttemptRepository,
       stats as unknown as BindingStatsRepository,
-      { windowSize: 1000, minSampleSize: 50, maxAgeMs: 7 * 24 * 60 * 60 * 1000 },
+      { windowSize: 1000, minSampleSize: 50, maxPerBuyer: 20, maxAgeMs: 7 * 24 * 60 * 60 * 1000 },
     );
 
     await expect(service.refresh(NOW)).resolves.toEqual({ bindings: 1, pruned: 7 });
 
     // The prune runs first, so the aggregate reads the window itself.
     expect(calls).toEqual(['prune', 'aggregate']);
-    expect(attempts.prune).toHaveBeenCalledWith(1000, WEEK_AGO);
-    expect(attempts.aggregateWindows).toHaveBeenCalledWith(1000, WEEK_AGO);
+    expect(attempts.prune).toHaveBeenCalledWith(1000, 20, WEEK_AGO);
+    expect(attempts.aggregateWindows).toHaveBeenCalledWith(1000, 20, WEEK_AGO);
     expect(stats.aggregateVerdictWindows).toHaveBeenCalledWith({
       windowSize: 1000,
+      maxPerBuyer: 20,
       since: WEEK_AGO,
       qualityStatuses: ['PASS', 'FAIL'],
       passStatus: 'PASS',

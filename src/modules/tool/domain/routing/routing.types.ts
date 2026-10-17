@@ -400,10 +400,10 @@ export interface RoutingContext {
    * The buying organization, for the observed stats only.
    *
    * Read by `attributeAttempt` and by nothing that decides routing: an attempt
-   * whose buyer IS the provider is a self-call, and leaving it out of the
-   * stats is what stops a provider from buying itself a good availability or
-   * latency figure. Absent on a quote, which dials nobody; an attempt with no
-   * buyer named is counted as an ordinary one.
+   * whose buyer IS the provider is a self-call and is left out, and the
+   * refresh caps how many attempts any one buyer adds to a binding's window.
+   * Absent on a quote, which dials nobody; an attempt with no buyer named is
+   * not counted at all, because the cap cannot be applied to it.
    */
   readonly buyerOrganizationId?: string;
   /**

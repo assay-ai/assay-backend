@@ -4,10 +4,11 @@ import { ConfigService } from '@nestjs/config';
  * The numbers the observed-stats pipeline (`binding_attempts` →
  * `binding_stats` → `ProviderStats`) is tuned by.
  *
- * Two of them are environment settings because an operator may need to move
+ * Three of them are environment settings because an operator may need to move
  * them during an incident — a shorter window reacts faster to a provider that
  * just broke, a larger minimum sample is the lever when one noisy hour is
- * moving traffic it should not. Both are validated at boot: a window of zero
+ * moving traffic it should not, a smaller per-buyer cap is the lever when one
+ * buyer is pushing a binding around. All are validated at boot: a window of zero
  * or a minimum sample above the window would silently pin every provider to
  * `NEUTRAL_PRIOR` forever, which is the bug this pipeline exists to end.
  */
@@ -17,6 +18,17 @@ export const BINDING_STATS_WINDOW_SIZE_ENV = 'BINDING_STATS_WINDOW_SIZE';
 
 /** `BINDING_STATS_MIN_SAMPLE`: below this many observations a rate stays unmeasured. */
 export const BINDING_STATS_MIN_SAMPLE_ENV = 'BINDING_STATS_MIN_SAMPLE';
+
+/** `BINDING_STATS_MAX_PER_BUYER`: the most attempts (and verdicts) one buyer organization adds to a binding's window. */
+export const BINDING_STATS_MAX_PER_BUYER_ENV = 'BINDING_STATS_MAX_PER_BUYER';
+
+/**
+ * 20. With the default minimum sample of 50, no figure is measured until at
+ * least three buyer organizations have called the binding, and no single
+ * buyer — a competitor looping a voided failure, or an ally looping a cheap
+ * success — moves a full window by more than 2%.
+ */
+export const DEFAULT_BINDING_STATS_MAX_PER_BUYER = 20;
 
 /** The last 1,000 attempts — the same order as `EXPLORATION_CALL_THRESHOLD`. */
 export const DEFAULT_BINDING_STATS_WINDOW_SIZE = 1000;
@@ -55,17 +67,19 @@ export const BINDING_STATS_CONFIG = Symbol('BINDING_STATS_CONFIG');
 export interface BindingStatsConfig {
   readonly windowSize: number;
   readonly minSampleSize: number;
+  readonly maxPerBuyer: number;
   readonly maxAgeMs: number;
 }
 
 export const DEFAULT_BINDING_STATS_CONFIG: BindingStatsConfig = Object.freeze({
   windowSize: DEFAULT_BINDING_STATS_WINDOW_SIZE,
   minSampleSize: DEFAULT_BINDING_STATS_MIN_SAMPLE,
+  maxPerBuyer: DEFAULT_BINDING_STATS_MAX_PER_BUYER,
   maxAgeMs: BINDING_STATS_MAX_AGE_MS,
 });
 
 /**
- * Reads and validates the two settings. Throws — refusing to boot — on a value
+ * Reads and validates the three settings. Throws — refusing to boot — on a value
  * that is not a whole number in range, rather than falling back: an operator
  * who set the variable meant something, and silently running on the default
  * would hide that it was not applied.
@@ -85,7 +99,14 @@ export function loadBindingStatsConfig(config: ConfigService): BindingStatsConfi
     1,
     windowSize,
   );
-  return { windowSize, minSampleSize, maxAgeMs: BINDING_STATS_MAX_AGE_MS };
+  const maxPerBuyer = readWholeNumber(
+    config.get<string>(BINDING_STATS_MAX_PER_BUYER_ENV),
+    Math.min(DEFAULT_BINDING_STATS_MAX_PER_BUYER, windowSize),
+    BINDING_STATS_MAX_PER_BUYER_ENV,
+    1,
+    windowSize,
+  );
+  return { windowSize, minSampleSize, maxPerBuyer, maxAgeMs: BINDING_STATS_MAX_AGE_MS };
 }
 
 function readWholeNumber(

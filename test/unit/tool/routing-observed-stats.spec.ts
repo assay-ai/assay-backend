@@ -1,4 +1,7 @@
-import { BindingAttemptRepository } from '@database/postgres/repositories/binding-attempt.repository';
+import {
+  BindingAttemptInput,
+  BindingAttemptRepository,
+} from '@database/postgres/repositories/binding-attempt.repository';
 import { BindingStatsRow } from '@database/postgres/repositories/binding-stats.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import {
@@ -29,6 +32,7 @@ import {
   buildCandidate,
   buildProvider,
   buildRouter,
+  hang,
   ok,
   seededRandom,
   status,
@@ -202,8 +206,20 @@ describe('routing on observed stats', () => {
   });
 
   describe('recording attempts', () => {
+    function recorder() {
+      const rows: BindingAttemptInput[] = [];
+      const appendMany = jest.fn(async (batch: readonly BindingAttemptInput[]) => {
+        rows.push(...batch);
+      });
+      const observations = new BindingAttemptRecorder(
+        { appendMany } as unknown as BindingAttemptRepository,
+        { capacity: 10_000, batchSize: 10_000, flushIntervalMs: 60_000 },
+      );
+      return { rows, observations };
+    }
+
     async function routeWith(buyerOrganizationId: string) {
-      const append = jest.fn(async () => undefined);
+      const { rows, observations } = recorder();
       const invoker = new ScriptedInvoker({
         [`binding-${A}`]: async () => status(503, { error: 'overloaded' }),
         [`binding-${B}`]: async () => ok(),
@@ -213,7 +229,7 @@ describe('routing on observed stats', () => {
         providers: [buildProvider(A), buildProvider(B)],
         stakes,
         invoker,
-        observations: new BindingAttemptRecorder({ append } as unknown as BindingAttemptRepository),
+        observations,
       });
       await router.route({
         toolId: TOOL_ID,
@@ -221,28 +237,23 @@ describe('routing on observed stats', () => {
         input: { query: 'x' },
         context: { ...ROUTING_CONTEXT, callClass: 'PAID', buyerOrganizationId },
       });
-      // The write is off the caller's path; let it land.
-      await new Promise((resolve) => setImmediate(resolve));
-      return append;
+      await observations.flush();
+      return rows;
     }
 
     it('records every attempt, the failed-over one included', async () => {
-      const append = await routeWith('org-buyer');
+      const rows = await routeWith('org-buyer');
 
-      expect(append).toHaveBeenCalledTimes(2);
-      expect(append).toHaveBeenNthCalledWith(
-        1,
+      expect(rows).toEqual([
         expect.objectContaining({
           bindingId: `binding-${A}`,
           providerId: A,
+          buyerOrganizationId: 'org-buyer',
           available: false,
           latencyMs: null,
           callClass: 'PAID',
           reason: ClassificationReason.UPSTREAM_SERVER_ERROR,
         }),
-      );
-      expect(append).toHaveBeenNthCalledWith(
-        2,
         expect.objectContaining({
           bindingId: `binding-${B}`,
           providerId: B,
@@ -250,14 +261,125 @@ describe('routing on observed stats', () => {
           latencyMs: expect.any(Number),
           reason: ClassificationReason.OK,
         }),
-      );
+      ]);
     });
 
     it('leaves out the attempt a provider served to its own organization', async () => {
-      const append = await routeWith(B);
+      const rows = await routeWith(B);
 
-      expect(append).toHaveBeenCalledTimes(1);
-      expect(append).toHaveBeenCalledWith(expect.objectContaining({ providerId: A }));
+      expect(rows).toEqual([expect.objectContaining({ providerId: A })]);
+    });
+
+    it('confines the damage to the provider that failed: its fallback is recorded healthy', async () => {
+      // A fails every call; B serves every failover. Over a window, only A's
+      // availability falls — B is never charged for the calls it rescued.
+      const { rows, observations } = recorder();
+      const invoker = new ScriptedInvoker({
+        [`binding-${A}`]: async () => status(503),
+        [`binding-${B}`]: async () => ok(),
+      });
+      const { router } = buildRouter({
+        bindings: [buildBinding(A), buildBinding(B)],
+        providers: [buildProvider(A), buildProvider(B)],
+        stakes,
+        invoker,
+        observations,
+        random: seededRandom(3),
+      });
+      for (let call = 0; call < 200; call += 1) {
+        await router.route({
+          toolId: TOOL_ID,
+          callId: 'test-call-id',
+          input: { query: 'x' },
+          context: {
+            ...ROUTING_CONTEXT,
+            callClass: 'PAID',
+            buyerOrganizationId: `buyer-${call % 7}`,
+          },
+        });
+      }
+      await observations.flush();
+
+      const rate = (providerId: string) => {
+        const own = rows.filter((row) => row.providerId === providerId);
+        return own.filter((row) => row.available).length / own.length;
+      };
+      expect(rows.some((row) => row.providerId === A)).toBe(true);
+      expect(rate(A)).toBe(0);
+      expect(rate(B)).toBe(1);
+    });
+
+    describe('timeouts against the request deadline', () => {
+      async function timeoutRows(bindingTimeoutMs: number, totalDeadlineMs: number) {
+        const { rows, observations } = recorder();
+        const invoker = new ScriptedInvoker({ [`binding-${A}`]: hang });
+        const { router } = buildRouter({
+          bindings: [buildBinding(A, { timeoutMs: bindingTimeoutMs })],
+          providers: [buildProvider(A)],
+          stakes,
+          invoker,
+          observations,
+          config: { totalDeadlineMs },
+        });
+        await router
+          .route({
+            toolId: TOOL_ID,
+            callId: 'test-call-id',
+            input: { query: 'x' },
+            context: { ...ROUTING_CONTEXT, callClass: 'PAID', buyerOrganizationId: 'org-buyer' },
+          })
+          .catch(() => undefined);
+        await observations.flush();
+        return rows;
+      }
+
+      it('counts a hang on a binding that declares more time than the request allows', async () => {
+        // The binding declares 1,000 ms behind a 150 ms request deadline: the
+        // router clips the attempt to ~150 ms, and that is the most this
+        // binding can ever get, so the hang is the provider's.
+        const rows = await timeoutRows(1_000, 150);
+        expect(rows).toEqual([
+          expect.objectContaining({
+            available: false,
+            reason: ClassificationReason.TRANSPORT_TIMEOUT,
+            latencyMs: expect.any(Number),
+          }),
+        ]);
+      });
+
+      it('does not count a timeout on a budget a failed-over attempt had eaten into', async () => {
+        const { rows, observations } = recorder();
+        const invoker = new ScriptedInvoker({
+          [`binding-${A}`]: () =>
+            new Promise((resolve) => setTimeout(() => resolve(status(503)), 700)),
+          [`binding-${B}`]: hang,
+        });
+        const { router } = buildRouter({
+          bindings: [buildBinding(A, { timeoutMs: 1_000 }), buildBinding(B, { timeoutMs: 1_000 })],
+          providers: [buildProvider(A), buildProvider(B)],
+          stakes,
+          invoker,
+          observations,
+          config: { totalDeadlineMs: 1_000 },
+        });
+        await router
+          .route({
+            toolId: TOOL_ID,
+            callId: 'test-call-id',
+            input: { query: 'x' },
+            context: { ...ROUTING_CONTEXT, callClass: 'PAID', buyerOrganizationId: 'org-buyer' },
+          })
+          .catch(() => undefined);
+        await observations.flush();
+
+        // A's 503 counts; B, left ~300 ms of its 1,000, is not blamed.
+        expect(rows).toEqual([
+          expect.objectContaining({
+            providerId: A,
+            reason: ClassificationReason.UPSTREAM_SERVER_ERROR,
+          }),
+        ]);
+      });
     });
   });
 });

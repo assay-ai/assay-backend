@@ -28,6 +28,8 @@ export interface BindingVerdictWindowRow {
 
 export interface VerdictWindowQuery {
   readonly windowSize: number;
+  /** The most verdicts one buyer organization adds to a binding's window. */
+  readonly maxPerBuyer: number;
   readonly since: Date;
   /** The verdict statuses that move the quality metric (`PASS`, `FAIL`). */
   readonly qualityStatuses: readonly string[];
@@ -61,12 +63,18 @@ export class BindingStatsRepository extends AbstractRepository<BindingStatsEntit
   }
 
   /**
-   * Each binding's last `windowSize` quality-bearing verdicts since `since`.
+   * Each binding's quality-bearing verdicts since `since`: each buyer
+   * organization's last `maxPerBuyer`, then the binding's last `windowSize`
+   * of those — the same two caps as the attempt window.
    *
    * Left out: shadow-policy verdicts (no economic effect, so no routing effect
    * either — a bad rule in shadow must not move traffic before it is
    * promoted); self-calls, where the buying organization is the provider; and
-   * intents that never named a binding.
+   * intents that never named a binding or a provider.
+   *
+   * The scan is bounded by `idx_verification_records_judged_created` (the
+   * last 7 days of judged records); the ranking bounds each binding to its
+   * last `windowSize`.
    */
   async aggregateVerdictWindows(query: VerdictWindowQuery): Promise<BindingVerdictWindowRow[]> {
     const rows: Record<string, unknown>[] = await this.manager.query(
@@ -75,21 +83,36 @@ export class BindingStatsRepository extends AbstractRepository<BindingStatsEntit
               count(*)::int AS "verdicts",
               count(*) FILTER (WHERE v.verdict_status = $4)::int AS "passedVerdicts"
          FROM (
-           SELECT i.binding_id, i.provider_id, r.verdict_status,
-                  row_number() OVER (PARTITION BY i.binding_id ORDER BY r.created_at DESC, r.id DESC) AS rn
-             FROM verification_records r
-             JOIN payment_intents i ON i.id = r.intent_id
-            WHERE r.state IN ('JUDGED', 'SETTLED')
-              AND r.created_at >= $1
-              AND r.verdict_status = ANY($3)
-              AND (r.lifecycle IS NULL OR r.lifecycle <> 'SHADOW')
-              AND i.binding_id IS NOT NULL
-              AND i.provider_id IS NOT NULL
-              AND i.organization_id <> i.provider_id
+           SELECT c.*,
+                  row_number() OVER (PARTITION BY c.binding_id
+                                     ORDER BY c.created_at DESC, c.id DESC) AS rn
+             FROM (
+               SELECT r.id, r.created_at, i.binding_id, i.provider_id, r.verdict_status,
+                      row_number() OVER (PARTITION BY i.binding_id, r.organization_id
+                                         ORDER BY r.created_at DESC, r.id DESC) AS rb
+                 FROM verification_records r
+                 JOIN payment_intents i ON i.id = r.intent_id
+                WHERE r.state IN ('JUDGED', 'SETTLED')
+                  AND r.created_at >= $1
+                  AND r.verdict_status = ANY($3)
+                  AND (r.lifecycle IS NULL OR r.lifecycle <> 'SHADOW')
+                  AND i.binding_id IS NOT NULL
+                  AND i.provider_id IS NOT NULL
+                  AND r.organization_id IS NOT NULL
+                  AND r.organization_id <> i.provider_id
+                  AND i.organization_id <> i.provider_id
+             ) c
+            WHERE c.rb <= $5
          ) v
         WHERE v.rn <= $2
         GROUP BY v.binding_id, v.provider_id`,
-      [query.since, query.windowSize, [...query.qualityStatuses], query.passStatus],
+      [
+        query.since,
+        query.windowSize,
+        [...query.qualityStatuses],
+        query.passStatus,
+        query.maxPerBuyer,
+      ],
     );
     return rows.map((row) => ({
       bindingId: String(row.bindingId),

@@ -124,7 +124,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
     { provide: PaymentIntentRepository, useValue: { countCallsByBinding: async () => 0 } },
     // `BindingAttemptRecorder` appends every attempt the provider is
     // accountable for to `binding_attempts`, the observed stats' raw window.
-    { provide: BindingAttemptRepository, useValue: { append: async () => undefined } },
+    { provide: BindingAttemptRepository, useValue: { appendMany: async () => undefined } },
     {
       provide: REDIS_CACHE_CLIENT,
       useValue: {

@@ -286,12 +286,17 @@ export class ProviderRouterService {
 
       // Every attempt, the failed-over ones included — they are the
       // provider-caused failures availability measures, and nothing else
-      // records them. Not awaited: see `BindingAttemptRecorder`.
-      void this.observations?.record({
+      // records them. Synchronous and buffered: see `BindingAttemptRecorder`.
+      // `maxBudgetMs` is the longest this binding can EVER be given — a
+      // binding may declare more time than a whole request is allowed — so a
+      // timeout on it is the provider's, and only a budget earlier attempts
+      // ate into is not.
+      this.observations?.record({
         binding,
         classification: outcome.classification,
         elapsedMs: record.elapsedMs,
         timeoutMs,
+        maxBudgetMs: Math.min(binding.timeoutMs, this.config.totalDeadlineMs),
         callClass: routing.callClass,
         buyerOrganizationId: routing.buyerOrganizationId,
       });

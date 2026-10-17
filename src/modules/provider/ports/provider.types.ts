@@ -42,16 +42,18 @@ export enum ProviderStatus {
  */
 export interface ProviderStats {
   /**
-   * `1 − SYSTEM_ERROR rate` over the provider-caused attempts in the window
-   * (the last `BINDING_STATS_WINDOW_SIZE` attempts, none older than 7 days).
-   * Shared across free and paid. See `attributeAttempt` for what counts.
+   * `1 − SYSTEM_ERROR rate` over the provider-caused PAID attempts in the
+   * window: at most `BINDING_STATS_MAX_PER_BUYER` per buyer organization, then
+   * the last `BINDING_STATS_WINDOW_SIZE`, none older than 7 days. Free calls
+   * do not count — they cost the caller nothing to repeat. See
+   * `attributeAttempt` for what counts.
    */
   readonly availabilityRate?: number;
-  /** `PASS / (PASS + FAIL)` over the window's paid verdicts, shadow policies excluded. */
+  /** `PASS / (PASS + FAIL)` over the window's paid verdicts (same per-buyer cap), shadow policies excluded. */
   readonly paidQualityRate?: number;
   /** `PASS / DATA_RESULT` on free calls. Not measured: free calls are not verified yet. */
   readonly freeQualityRate?: number;
-  /** Over the window's `DATA_RESULT` attempts and full-budget timeouts. */
+  /** Over the window's paid `DATA_RESULT` attempts and full-budget timeouts. */
   readonly p50LatencyMs?: number;
   readonly p95LatencyMs?: number;
   readonly callsServed?: number;
