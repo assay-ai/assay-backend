@@ -40,6 +40,7 @@ import { AuditLogWriter } from '@shared/audit';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
+import { toolsetTestContext } from '../helpers/toolset-test-context';
 
 const DATABASE = 'x402_toolsets_access_test';
 const HOST = { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' };
@@ -82,46 +83,9 @@ describe('toolsets and access, against a real database and Redis', () => {
   function services() {
     const redis = new Redis(redisOptions());
     redises.push(redis);
-    const cache = new CacheService(redis);
-    const epochs = new AccessEpochService(cache);
-    const toolsets = new ToolsetRepository(dataSource);
-    const entries = new ToolsetEntryRepository(dataSource);
-    const tools = new ToolRepository(dataSource);
-    const policies = new SpendPolicyRepository(dataSource);
-    const credentials = new AgentCredentialRepository(dataSource);
-    const audit = new AuditLogWriter(dataSource);
-    const resolver = new AccessResolver(policies, credentials, toolsets, entries, epochs);
-    const connectUrls = new ConnectUrlsService(
-      new AgentConnectUrlRepository(dataSource),
-      toolsets,
-      dataSource,
-      HOST,
-    );
     const catalogue = new InMemoryToolCatalogue({ tools: TOOLS, bindings: [] });
     return {
-      epochs,
-      resolver,
-      connectUrls,
-      toolsets: new ToolsetsService(toolsets, entries, tools, epochs, audit, dataSource, HOST),
-      endpoints: new McpEndpointResolver(toolsets, entries, epochs, HOST),
-      access: new AgentAccessService(
-        new AgentRepository(dataSource),
-        credentials,
-        policies,
-        new SpendPolicyService(policies, dataSource, audit),
-        new SpendPolicyEnforcementService(policies, null as never, null as never, null as never),
-        toolsets,
-        tools,
-        catalogue,
-        { quoteMany: async () => new Map() } as never,
-        resolver,
-        epochs,
-        connectUrls,
-        audit,
-        { get: () => undefined } as never,
-        dataSource,
-        [CHAIN],
-      ),
+      ...toolsetTestContext({ dataSource, redis, host: HOST, catalogue, chainId: CHAIN }),
       records: new ToolCallRecordWriter(new ToolCallRecordRepository(dataSource)),
       refused: new RefusedCallsService(
         new ToolCallRecordRepository(dataSource),
