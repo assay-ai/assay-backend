@@ -54,9 +54,11 @@ import { ProviderPayoutChallengeRepository } from './repositories/provider-payou
 import { ProviderConnectivityCheckRepository } from './repositories/provider-connectivity-check.repository';
 import { ProviderPayoutRepository } from './repositories/provider-payout.repository';
 import { ToolBindingEntity } from './entities/tool-binding.entity';
+import { ToolEntity } from './entities/tool.entity';
 import { BindingVersionEntity } from './entities/binding-version.entity';
 import { BindingTestRunEntity } from './entities/binding-test-run.entity';
 import { ToolBindingRepository } from './repositories/tool-binding.repository';
+import { ToolRepository } from './repositories/tool.repository';
 import { BindingVersionRepository } from './repositories/binding-version.repository';
 import { BindingTestRunRepository } from './repositories/binding-test-run.repository';
 import { ProviderStakeGraceEntity } from './entities/provider-stake-grace.entity';
@@ -135,6 +137,7 @@ const entities = [
   ProviderPayoutChallengeEntity,
   ProviderConnectivityCheckEntity,
   ProviderPayoutEntity,
+  ToolEntity,
   ToolBindingEntity,
   BindingVersionEntity,
   BindingTestRunEntity,
@@ -188,6 +191,7 @@ const repositories = [
   ProviderPayoutChallengeRepository,
   ProviderConnectivityCheckRepository,
   ProviderPayoutRepository,
+  ToolRepository,
   ToolBindingRepository,
   BindingVersionRepository,
   BindingTestRunRepository,

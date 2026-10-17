@@ -82,6 +82,37 @@ export interface Tool {
   readonly outputSchema: JsonSchema;
   readonly verificationPolicyId: string;
   readonly tier: ToolTier;
+  /**
+   * The topic a view filter (`?category=`) and a toolset's inferred category
+   * read: `^[a-z][a-z0-9-]{1,63}$`. Optional on the type so hand-built
+   * fixtures stay valid; the seed loader always sets it, and a tool without
+   * one reads as {@link UNCATEGORISED}.
+   */
+  readonly category?: string;
+  /** Search keywords. Never sent to a model on their own. */
+  readonly tags?: readonly string[];
+}
+
+/** The category of a tool that declares none. */
+export const UNCATEGORISED = 'uncategorised';
+
+/** `tool.category`, never undefined. */
+export function categoryOf(tool: Pick<Tool, 'category'>): string {
+  return tool.category ?? UNCATEGORISED;
+}
+
+/** `tools.kind`. Only STANDARD exists until provider tools (T4). */
+export enum ToolKind {
+  STANDARD = 'STANDARD',
+  PROVIDER = 'PROVIDER',
+}
+
+/** `tools.status`. */
+export enum ToolStatus {
+  ACTIVE = 'ACTIVE',
+  DEPRECATED = 'DEPRECATED',
+  RETIRED = 'RETIRED',
+  REMOVED = 'REMOVED',
 }
 
 /**

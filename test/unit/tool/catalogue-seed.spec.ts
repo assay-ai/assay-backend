@@ -203,7 +203,7 @@ describe('loadToolCatalogue — settlementChains', () => {
 
   const TOOL = {
     id: 'search_web',
-    name: 'Search the web',
+    name: 'search_web',
     description: 'Returns web results for a query.',
     inputSchema: { type: 'object', properties: { query: { type: 'string' } } },
     outputSchema: { type: 'object', properties: { answer: { type: 'string' } } },

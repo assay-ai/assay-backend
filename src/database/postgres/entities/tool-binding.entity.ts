@@ -44,13 +44,10 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
 @Index('idx_tool_bindings_tool_id_status', ['toolId', 'status'])
 export class ToolBindingEntity extends OrganizationScopedEntityWithoutSoftDelete {
   /**
-   * The tool this implements, from the catalogue seed.
-   *
-   * `varchar`, not `uuid`: seeded tool ids are operator-defined strings
-   * (the seed format, and `GetToolBindingParamsDto` already says so).
-   * There is no `tools` table to reference — see the migration for why.
+   * The tool this implements: `tools.id` (`fk_tool_bindings_tool`). The seeded
+   * tools are mirrored into `tools` at boot by `ToolRegistrySeeder`.
    */
-  @Column({ name: 'tool_id', type: 'varchar', length: 128 })
+  @Column({ name: 'tool_id', type: 'uuid' })
   toolId: string;
 
   /** The provider's own URL, unchanged. `requestMapping.path` is appended to it. */
