@@ -5,6 +5,7 @@ import {
 } from '@modules/chains/ports/chain-state-gate.port';
 import { randomUUID } from 'node:crypto';
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { In, Not } from 'typeorm';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
@@ -62,6 +63,20 @@ const VOUCHER_NONCE_CONSTRAINT = 'idx_payment_intents_voucher_nonce';
 const VOUCHER_SEQ_CONSTRAINT = 'uq_payment_intents_account_voucher_seq';
 
 /**
+ * The statuses whose intent no longer holds its idempotency key: the agent was
+ * not charged (`VOIDED`, `EXPIRED`, `REFUNDED`), so a retry with the same key
+ * is a fresh attempt. Mirrors the predicate of
+ * `idx_payment_intents_idempotency_key` (migration 1761000000000) — the index
+ * is the guarantee, and this list only lets {@link PaymentIntentService} read
+ * back the one row the index still arbitrates.
+ */
+export const IDEMPOTENCY_RELEASED_STATUSES: readonly PaymentIntentStatus[] = [
+  PaymentIntentStatus.VOIDED,
+  PaymentIntentStatus.EXPIRED,
+  PaymentIntentStatus.REFUNDED,
+];
+
+/**
  * What a rail-B voucher's intent must fit before it is written: the scope of
  * the vouchers the chain has not counted yet, and the check against them,
  * which throws to refuse. Run under the payer's lock, atomically with the
@@ -115,6 +130,11 @@ export class PaymentIntentService {
    * A key replayed against a *different* request is not a retry — it is a
    * collision, and it is refused rather than silently answered with the first
    * request's intent.
+   *
+   * A key is held only while its intent may still charge the agent: once the
+   * intent is `VOIDED`, `EXPIRED` or `REFUNDED` the index releases it (see
+   * {@link IDEMPOTENCY_RELEASED_STATUSES}), and the same key creates a new
+   * intent. A failed call that cost nothing can therefore be retried.
    *
    * **No intent names a blocked party.** Every new payment, on every rail,
    * starts here, so this is the one place the account blocklist refuses the
@@ -752,10 +772,14 @@ export class PaymentIntentService {
     input: CreatePaymentIntentInput,
     idempotencyKey: string,
   ): Promise<PaymentIntent> {
+    // The live row only: an earlier attempt with this key that was voided,
+    // expired or refunded is outside the index and is not what refused this
+    // insert.
     const existing = await this.intents.findOneBy({
       organizationId: input.organizationId,
       agentId: input.agentId,
       idempotencyKey,
+      status: Not(In([...IDEMPOTENCY_RELEASED_STATUSES])),
     });
 
     if (!existing) {
