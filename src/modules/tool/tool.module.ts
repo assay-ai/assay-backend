@@ -8,6 +8,13 @@ import { CredentialVaultModule } from '@modules/provider/credentials/credential-
 import { ProviderModule } from '@modules/provider/provider.module';
 import { loadMinimumStakeByChain } from '@modules/provider/services/provider-stake.service';
 import { NetworkModule } from '@shared/network/network.module';
+import { takeEnvSigningKeys } from '@modules/verification/signing/backends/env-key-source';
+
+import { RequestSignerService } from './request-auth/request-signer.service';
+import {
+  PROVIDER_REQUEST_SIGNING_KEYS_ENV,
+  REQUEST_SIGNING_KEYS,
+} from './request-auth/request-signing.keys';
 
 import { BINDING_INVOKER } from './ports/binding-invoker.port';
 import { BindingAttemptRecorder } from './services/binding-attempt-recorder.service';
@@ -108,6 +115,13 @@ import {
     DatabaseToolCatalogue,
     { provide: TOOL_CATALOGUE, useExisting: DatabaseToolCatalogue },
 
+    // Ed25519 request signing: keys read once from the environment and deleted from it.
+    {
+      provide: REQUEST_SIGNING_KEYS,
+      useFactory: () => takeEnvSigningKeys(process.env, PROVIDER_REQUEST_SIGNING_KEYS_ENV),
+    },
+    RequestSignerService,
+
     EgressBindingInvoker,
     { provide: BINDING_INVOKER, useExisting: EgressBindingInvoker },
 
@@ -183,6 +197,8 @@ import {
     TOOL_CONTRACT_CHANGES,
     BINDING_INVOKER,
     BindingCallCounterService,
+    REQUEST_SIGNING_KEYS,
+    RequestSignerService,
   ],
 })
 export class ToolModule {}
