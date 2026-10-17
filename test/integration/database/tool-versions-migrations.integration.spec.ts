@@ -74,9 +74,20 @@ describe('tool version migrations: up, down, up', () => {
     'tools.replacement_tool_id',
   ];
 
+  /** Migrations after the T3 ones, newest first. */
+  const LATER = ['CallDisputes1761800000000'];
+
   it('applies, reverts the three T3 migrations, and applies them again', async () => {
     await dataSource.runMigrations({ transaction: 'each' });
     expect(await columns()).toEqual(ALL);
+    // Later migrations sit on top of these and touch none of their objects.
+    for (const name of LATER) {
+      const [last] = (await dataSource.query(
+        `SELECT name FROM migrations ORDER BY id DESC LIMIT 1`,
+      )) as { name: string }[];
+      expect(last.name).toBe(name);
+      await dataSource.undoLastMigration({ transaction: 'each' });
+    }
 
     const applied = (await dataSource.query(
       `SELECT name FROM migrations ORDER BY id DESC LIMIT 3`,
