@@ -136,16 +136,28 @@ export const X402_VOUCHER = 'x402/voucher';
  *   result, marked `_meta["x402/replayed"] = true`, and charges nothing again
  *   — on rail B no new voucher is held or redeemed, and a free call takes no
  *   second quota place. The receipt's `status` is re-read, so it may have
- *   moved on (`VERIFYING` → `SETTLED`). Results are kept for
- *   `MCP_IDEMPOTENCY_TTL_SECONDS` (default 900, 15 minutes) and only in Redis.
+ *   moved on (`VERIFYING` → `SETTLED`). Results are kept in Redis for
+ *   `MCP_IDEMPOTENCY_TTL_SECONDS` (default 900, at most 3600) when their JSON
+ *   is at most `MCP_IDEMPOTENCY_MAX_RESULT_BYTES` (default 256 KB).
  * - **In flight**: while the first attempt is still running, a retry gets
- *   `IN_PROGRESS` with `retryable: true` and `retryAfterMs`.
+ *   `IDEMPOTENCY_IN_PROGRESS` with `retryable: true` and `retryAfter`
+ *   (seconds). Replays and polls never count toward velocity limits.
  * - **Failed without a charge** (voided, refused, not served, a rail-B
  *   `PAYMENT_REQUIRED`): the key is released, and the retry runs as a fresh
  *   attempt. This is also how rail B's two-step handshake works with one key.
- * - **Result gone** (past the retention window, or Redis lost it) while the
- *   payment record still holds the key: `IDEMPOTENCY_RESULT_UNAVAILABLE`, with
- *   the `intentId` of the original charge. Nothing is charged again.
+ * - **Paid calls when the Redis record is gone** (lost, or its lease lapsed):
+ *   the payment record still holds the key, so nothing is charged twice. A
+ *   served call is rebuilt from its verification record while that keeps the
+ *   response and the call is inside the retry window; otherwise
+ *   `IDEMPOTENCY_RESULT_UNAVAILABLE` with the `intentId`, as for a result too
+ *   large to keep. An attempt that stopped before its provider answered and is
+ *   older than any live call gets `IDEMPOTENCY_ATTEMPT_STALLED`.
+ * - **Free calls, and freemium calls served inside the quota, have no such
+ *   backstop**: they create no payment record, so if Redis loses the record (a flush, an eviction, an outage)
+ *   the retry runs again and takes a second free-quota place. It is never
+ *   charged: a free call costs the agent nothing either way. (A freemium
+ *   call that fell through to a paid rail has a payment record and the paid
+ *   backstop.)
  */
 export const X402_IDEMPOTENCY_KEY = 'x402/idempotency-key';
 /** Result `_meta`: `true` when the result is a stored replay of an earlier attempt. */

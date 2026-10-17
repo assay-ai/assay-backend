@@ -141,10 +141,14 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
 
     {
       // `_meta["x402/idempotency-key"]`: how long a keyed call's result stays
-      // replayable — the retry window. Default 900 s (15 minutes).
+      // replayable — the retry window, default 900 s, at most 3600 s — and the
+      // largest output kept, default 256 KB. A bad value fails the boot.
       provide: MCP_IDEMPOTENCY_CONFIG,
       useFactory: (config: ConfigService) =>
-        mcpIdempotencyConfigFactory(config.get<string>('MCP_IDEMPOTENCY_TTL_SECONDS')),
+        mcpIdempotencyConfigFactory(
+          config.get<string>('MCP_IDEMPOTENCY_TTL_SECONDS'),
+          config.get<string>('MCP_IDEMPOTENCY_MAX_RESULT_BYTES'),
+        ),
       inject: [ConfigService],
     },
     McpIdempotencyStore,

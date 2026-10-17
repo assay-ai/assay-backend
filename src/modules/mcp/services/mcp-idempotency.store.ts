@@ -13,39 +13,77 @@ import { idempotencyKeyDigest } from '../domain/idempotency';
 export interface McpIdempotencyConfig {
   /**
    * How long a completed call's result stays replayable: the retry window.
-   * `MCP_IDEMPOTENCY_TTL_SECONDS`, default 900 (15 minutes).
+   * `MCP_IDEMPOTENCY_TTL_SECONDS`, default 900 (15 minutes), at most
+   * {@link MCP_IDEMPOTENCY_MAX_TTL_SECONDS} — a stored output is a provider's
+   * response held in memory, and the window is for retries, not storage.
    */
   readonly resultTtlSeconds: number;
+  /**
+   * The largest output kept for a replay, in bytes of its JSON.
+   * `MCP_IDEMPOTENCY_MAX_RESULT_BYTES`, default 262144 (256 KB). A larger one
+   * is not stored; a marker is, and a replay answers
+   * `IDEMPOTENCY_RESULT_UNAVAILABLE` with the intent id.
+   */
+  readonly maxResultBytes: number;
   /**
    * How long an attempt that never reported back holds its key. Longer than
    * the router's whole deadline (`ROUTER_TOTAL_DEADLINE_MS`, 30 s), so a live
    * call cannot lose its claim; short enough that a crashed process does not
-   * hold a key for the whole retry window. After it lapses, the payment
-   * record's own index still answers a paid retry.
+   * hold a key for the whole retry window. A payment intent older than this
+   * that is still not past its provider is reported as stalled.
    */
   readonly inFlightLeaseMs: number;
-  /** What an `IN_PROGRESS` answer tells the agent to wait before retrying. */
-  readonly retryAfterMs: number;
+  /**
+   * What `IDEMPOTENCY_IN_PROGRESS` tells the agent to wait, in whole seconds —
+   * the `retryAfter` convention of the platform's other refusals.
+   */
+  readonly retryAfterSeconds: number;
 }
 
 export const MCP_IDEMPOTENCY_CONFIG = Symbol('MCP_IDEMPOTENCY_CONFIG');
 
+/** The longest retry window a deployment may configure: one hour. */
+export const MCP_IDEMPOTENCY_MAX_TTL_SECONDS = 3600;
+
 export const DEFAULT_MCP_IDEMPOTENCY_CONFIG: McpIdempotencyConfig = {
   resultTtlSeconds: 15 * 60,
+  maxResultBytes: 256 * 1024,
   inFlightLeaseMs: 120_000,
-  retryAfterMs: 1_000,
+  retryAfterSeconds: 1,
 };
 
-/** `MCP_IDEMPOTENCY_TTL_SECONDS`; a missing, zero, negative or non-numeric value falls back. */
-export function mcpIdempotencyConfigFactory(raw: string | undefined): McpIdempotencyConfig {
-  const seconds = Number((raw ?? '').trim());
+/**
+ * `MCP_IDEMPOTENCY_TTL_SECONDS` and `MCP_IDEMPOTENCY_MAX_RESULT_BYTES`.
+ * Unset falls back to the default. A value that is not a positive integer, or
+ * a window above {@link MCP_IDEMPOTENCY_MAX_TTL_SECONDS}, fails the boot rather
+ * than being quietly replaced: an operator who asked for a day of retention
+ * must hear that it was refused.
+ */
+export function mcpIdempotencyConfigFactory(
+  ttlSeconds: string | undefined,
+  maxResultBytes?: string | undefined,
+): McpIdempotencyConfig {
+  const ttl = positiveInteger('MCP_IDEMPOTENCY_TTL_SECONDS', ttlSeconds);
+  if (ttl !== null && ttl > MCP_IDEMPOTENCY_MAX_TTL_SECONDS) {
+    throw new Error(
+      `MCP_IDEMPOTENCY_TTL_SECONDS must be at most ${MCP_IDEMPOTENCY_MAX_TTL_SECONDS}, got ${ttl}`,
+    );
+  }
+  const bytes = positiveInteger('MCP_IDEMPOTENCY_MAX_RESULT_BYTES', maxResultBytes);
   return {
     ...DEFAULT_MCP_IDEMPOTENCY_CONFIG,
-    resultTtlSeconds:
-      raw !== undefined && Number.isFinite(seconds) && seconds > 0
-        ? Math.floor(seconds)
-        : DEFAULT_MCP_IDEMPOTENCY_CONFIG.resultTtlSeconds,
+    resultTtlSeconds: ttl ?? DEFAULT_MCP_IDEMPOTENCY_CONFIG.resultTtlSeconds,
+    maxResultBytes: bytes ?? DEFAULT_MCP_IDEMPOTENCY_CONFIG.maxResultBytes,
   };
+}
+
+function positiveInteger(name: string, raw: string | undefined): number | null {
+  if (raw === undefined || raw.trim() === '') return null;
+  const value = Number(raw.trim());
+  if (!Number.isInteger(value) || value <= 0) {
+    throw new Error(`${name} must be a positive integer, got "${raw}"`);
+  }
+  return value;
 }
 
 export const MCP_IDEMPOTENCY_KEY_PREFIX = 'mcp:idem:';
@@ -74,7 +112,7 @@ export type McpIdempotencyClaim<T> =
   /** An earlier attempt returned a result: answer with it, charge nothing. */
   | { readonly kind: 'REPLAY'; readonly result: T }
   /** An earlier attempt is still running. */
-  | { readonly kind: 'IN_PROGRESS'; readonly retryAfterMs: number }
+  | { readonly kind: 'IN_PROGRESS'; readonly retryAfterSeconds: number }
   /** The key belongs to another tool or other arguments. */
   | { readonly kind: 'CONFLICT'; readonly reason: 'TOOL' | 'ARGUMENTS' }
   /**
@@ -186,16 +224,16 @@ export class McpIdempotencyStore {
         if (!existing) {
           // Not ours to interpret. Refusing is safer than overwriting: the
           // agent can retry with a new key.
-          return { kind: 'IN_PROGRESS', retryAfterMs: this.config.retryAfterMs };
+          return { kind: 'IN_PROGRESS', retryAfterSeconds: this.config.retryAfterSeconds };
         }
         if (existing.toolId !== scope.toolId) return { kind: 'CONFLICT', reason: 'TOOL' };
         if (existing.fingerprint !== scope.fingerprint) {
           return { kind: 'CONFLICT', reason: 'ARGUMENTS' };
         }
         if (existing.state === 'DONE') return { kind: 'REPLAY', result: existing.result as T };
-        return { kind: 'IN_PROGRESS', retryAfterMs: this.config.retryAfterMs };
+        return { kind: 'IN_PROGRESS', retryAfterSeconds: this.config.retryAfterSeconds };
       }
-      return { kind: 'IN_PROGRESS', retryAfterMs: this.config.retryAfterMs };
+      return { kind: 'IN_PROGRESS', retryAfterSeconds: this.config.retryAfterSeconds };
     } catch (error) {
       this.logger.warn(
         `agent ${scope.agentId}: idempotency record unreadable, running without the replay ` +
