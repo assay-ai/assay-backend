@@ -22,6 +22,7 @@ import { ROUTER_CONFIG, ROUTING_RANDOM, RouterConfig } from '@modules/tool/servi
 import { ToolModule } from '@modules/tool/tool.module';
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { BindingAttemptRepository } from '@database/postgres/repositories/binding-attempt.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { ALERT_PORT } from '@shared/alerting';
@@ -121,6 +122,9 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
     // cache *client* rather than `CacheService` — the counter runs `INCR`,
     // which the JSON-serialising wrapper does not expose.
     { provide: PaymentIntentRepository, useValue: { countCallsByBinding: async () => 0 } },
+    // `BindingAttemptRecorder` appends every attempt the provider is
+    // accountable for to `binding_attempts`, the observed stats' raw window.
+    { provide: BindingAttemptRepository, useValue: { append: async () => undefined } },
     {
       provide: REDIS_CACHE_CLIENT,
       useValue: {
@@ -143,6 +147,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
     ALERT_PORT,
     CacheService,
     PaymentIntentRepository,
+    BindingAttemptRepository,
     REDIS_CACHE_CLIENT,
   ],
 })

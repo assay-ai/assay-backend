@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { FreeBindingDials } from '@modules/free-tier/domain/free-calls-per-day';
@@ -69,6 +69,7 @@ import { ToolErrors } from '../errors/tool.errors';
 import { BINDING_INVOKER, BindingInvokerPort } from '../ports/binding-invoker.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '../ports/tool-catalogue.port';
 import { PricingMode, Tool, ToolBinding } from '../ports/tool.types';
+import { BindingAttemptRecorder } from './binding-attempt-recorder.service';
 import { BindingCallCounterService } from './binding-call-counter.service';
 import { BindingCeilingService } from './binding-ceiling.service';
 import { ROUTER_CONFIG, ROUTING_RANDOM, RouterConfig } from './routing.config';
@@ -153,6 +154,9 @@ export class ProviderRouterService {
     private readonly ceilings: BindingCeilingService,
     @Inject(ROUTER_CONFIG) private readonly config: RouterConfig,
     @Inject(ROUTING_RANDOM) private readonly random: RoutingRandom,
+    // The observed-stats write (`binding_attempts`). Optional: a composition
+    // without it routes exactly as before and simply measures nothing.
+    @Optional() private readonly observations: BindingAttemptRecorder | null = null,
   ) {}
 
   /**
@@ -279,6 +283,18 @@ export class ProviderRouterService {
         classification: outcome.classification,
       };
       attempts.push(record);
+
+      // Every attempt, the failed-over ones included — they are the
+      // provider-caused failures availability measures, and nothing else
+      // records them. Not awaited: see `BindingAttemptRecorder`.
+      void this.observations?.record({
+        binding,
+        classification: outcome.classification,
+        elapsedMs: record.elapsedMs,
+        timeoutMs,
+        callClass: routing.callClass,
+        buyerOrganizationId: routing.buyerOrganizationId,
+      });
 
       if (!isRetryable(outcome.classification.responseClass)) {
         return {
