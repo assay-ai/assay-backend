@@ -45,6 +45,21 @@ import {
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 import { PostgresModule } from '@database/postgres/postgres.module';
 import { McpApiModule } from '@modules/mcp/mcp-api.module';
+import { McpController } from '@modules/mcp/controllers/mcp.controller';
+import {
+  AgentServersController,
+  McpUrlsController,
+} from '@modules/mcp/controllers/mcp-urls.controller';
+import { McpHttpModule } from '@modules/mcp/mcp-http.module';
+import { McpUrlsApiModule } from '@modules/mcp/mcp-urls-api.module';
+import { McpUrlPreviewService } from '@modules/mcp/services/mcp-url-preview.service';
+import {
+  AgentAccessController,
+  CredentialAccessController,
+} from '@modules/toolset/controllers/agent-access.controller';
+import { RefusedCallsController } from '@modules/toolset/controllers/refused-calls.controller';
+import { ToolsetsController } from '@modules/toolset/controllers/toolsets.controller';
+import { ToolsetApiModule } from '@modules/toolset/toolset-api.module';
 import { PublicDemoService } from '@modules/mcp/services/public-demo.service';
 import { DEMO_RATE_REDIS } from '@modules/mcp/services/redis-demo-rate-limiter.service';
 import { SIGNING_RATE_REDIS } from '@modules/verification/signing/signing.constants';
@@ -387,6 +402,82 @@ describe('McpApiModule wiring', () => {
       killSwitchRedis.disconnect();
       killSwitchSubscriber.disconnect();
       for (const token of [SIGNING_RATE_REDIS, DEMO_RATE_REDIS]) {
+        try {
+          app.get<Redis>(token, { strict: false }).disconnect();
+        } catch {
+          // Not part of this graph.
+        }
+      }
+      await app.close().catch(() => undefined);
+    }
+  });
+});
+
+/**
+ * The toolset routes on the API host, the Connect preview, and the MCP host
+ * itself — each built as a container, because a DI edge is only ever proved
+ * that way (the preview once asked for `TOOL_CATALOGUE` from a module that did
+ * not import it, and every unit test passed).
+ */
+@Module({
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env.local', '.env'] }),
+    StubRepositoriesModule,
+    StubPostgresModule,
+    ToolsetApiModule,
+    McpUrlsApiModule,
+    McpHttpModule,
+  ],
+})
+class ToolsetWiringHarnessModule {}
+
+describe('toolset, Connect preview and MCP host wiring', () => {
+  jest.setTimeout(30_000);
+
+  const BOOT_ENV: Readonly<Record<string, string>> = {
+    ENABLED_CHAINS: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+  };
+  const savedEnv: Record<string, string | undefined> = {};
+  beforeAll(() => {
+    for (const [key, value] of Object.entries(BOOT_ENV)) {
+      savedEnv[key] = process.env[key];
+      process.env[key] = value;
+    }
+  });
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('resolves the controllers and every service behind them', async () => {
+    const app = await Test.createTestingModule({ imports: [ToolsetWiringHarnessModule] })
+      .overrideModule(PostgresModule)
+      .useModule(StubPostgresModule)
+      .compile()
+      .catch((error: unknown) => error as Error);
+
+    if (app instanceof Error) {
+      expect(app.message).not.toMatch(/can't resolve dependencies|Nest can not resolve/i);
+      return;
+    }
+
+    try {
+      for (const token of [
+        ToolsetsController,
+        AgentAccessController,
+        CredentialAccessController,
+        RefusedCallsController,
+        McpUrlsController,
+        AgentServersController,
+        McpController,
+        McpUrlPreviewService,
+      ]) {
+        expect(app.get(token, { strict: false })).toBeInstanceOf(token);
+      }
+    } finally {
+      for (const token of [KILL_SWITCH_REDIS, KILL_SWITCH_SUBSCRIBER, SIGNING_RATE_REDIS]) {
         try {
           app.get<Redis>(token, { strict: false }).disconnect();
         } catch {
