@@ -22,6 +22,8 @@ import { LedgerHoldEntity } from '@database/postgres/entities/ledger-hold.entity
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { ProviderChainEnrolmentEntity } from '@database/postgres/entities/provider-chain-enrolment.entity';
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
+import { BindingCredentialEntity } from '@database/postgres/entities/binding-credential.entity';
+import { CreateBindingCredentials1762000000001 } from '@database/postgres/migrations/1762000000001-create-binding-credentials';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
@@ -226,6 +228,7 @@ export async function createBindingEditorTestContext(
       AccountBalanceEntity,
       ProviderEntity,
       ToolBindingEntity,
+      BindingCredentialEntity,
       BindingVersionEntity,
       BindingTestRunEntity,
       // The payout address the publish gate reads is on the
@@ -303,6 +306,7 @@ export async function createBindingEditorTestContext(
       // T3: the binding's contract range and declared fields, on the binding,
       // its snapshots and its tester runs.
       BindingContractTerms1761500000001,
+      CreateBindingCredentials1762000000001,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',
