@@ -25,7 +25,7 @@
  *
  * ```bash
  * set -a; . path/to/e2-buyer.env; set +a
- * E2_MCP_URL=https://mcp.example.com/mcp E2_API_URL=https://api.example.com/api/v1 \
+ * E2_MCP_URL=https://mcp.example.com/ E2_API_URL=https://api.example.com/api/v1 \
  *   E2_MCP_TOKEN=assay_sk_live_… E2_DEPOSIT_ATOMIC=5000000 yarn testnet:e2-mcp
  * ```
  */
@@ -53,7 +53,7 @@ import { ChainId, parseAccountId } from '@modules/chains/ports/caip.types';
  * The deployment under test. No default on purpose: a script that pays real (testnet) money must
  * be told which platform it is paying, rather than guessing one.
  */
-const MCP_URL = requiredEndpoint('E2_MCP_URL', 'https://mcp.example.com/mcp');
+const MCP_URL = requiredEndpoint('E2_MCP_URL', 'https://mcp.example.com/');
 const API_URL = requiredEndpoint('E2_API_URL', 'https://api.example.com/api/v1');
 const RPC_URL = process.env.E2_RPC_URL ?? 'https://rpc.testnet.chain.robinhood.com';
 const TOOL = process.env.E2_TOOL ?? 'get_weather';

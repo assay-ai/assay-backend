@@ -20,7 +20,7 @@
  *   "name": "solana-mainnet-only",
  *   "criteria": ["S4", "E7"],
  *   "apiUrl": "http://localhost:38081/api/v1",
- *   "mcpUrl": "http://localhost:38201/mcp",
+ *   "mcpUrl": "http://localhost:38201/",
  *   "enabledChains": ["solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp"],
  *   "tool": "get_weather",
  *   "args": { "latitude": 21.03, "longitude": 105.85 },

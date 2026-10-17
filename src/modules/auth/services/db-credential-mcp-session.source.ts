@@ -20,7 +20,7 @@ const ACTIVE = 'ACTIVE';
  * `POST /agents/:agentId/credentials` mints these and stores only their
  * SHA-256 (`agent_credentials.token_hash`) — but originally nothing read that
  * column. A credential a user creates in the UI has been
- * rejected by `POST /mcp` since the day it was mintable. This class is what
+ * rejected by the MCP endpoint since the day it was mintable. This class is what
  * closes that: the same digest the writer computes (`digestToken`, shared
  * so the two paths cannot drift), looked up through
  * `AgentCredentialRepository.findByTokenHash` — the deliberate cross-tenant

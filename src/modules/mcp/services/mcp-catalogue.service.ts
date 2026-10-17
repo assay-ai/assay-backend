@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { offersRail } from '@modules/chains/chain-metadata';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
@@ -12,6 +12,10 @@ import {
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { PricingMode, Tool, ToolTier } from '@modules/tool/ports/tool.types';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
+import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
+import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
+import { RoutingContext } from '@modules/tool/domain/routing';
+import { selectViewTools, servesPricingMode } from '@modules/toolset/domain/view';
 import { MoneyUtil } from '@utils/money.util';
 
 import {
@@ -28,6 +32,7 @@ import {
   X402_TOOL_ID,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
+import { McpScope, rulesFor, scopeAllows } from '../ports/mcp-scope';
 
 /**
  * `tools/list` — the catalogue an agent decides from.
@@ -48,13 +53,39 @@ import { McpErrors } from '../errors/mcp.errors';
 @Injectable()
 export class McpCatalogueService {
   private readonly logger = new Logger(McpCatalogueService.name);
+  private readonly quotes: QuoteIndexService;
 
   constructor(
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
-    private readonly router: ProviderRouterService,
+    router: ProviderRouterService,
     private readonly freeQuota: FreeQuotaService,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
-  ) {}
+    // The quote index every listing prices from. Optional only so a harness
+    // that builds this class by hand gets a private one over the same router.
+    @Optional() quotes?: QuoteIndexService,
+  ) {
+    this.quotes = quotes ?? new QuoteIndexService(router, catalogue);
+  }
+
+  /** The `?tools=` names this URL does not serve, for `_meta["assay/ignoredTools"]`. */
+  async ignoredTools(scope: McpScope): Promise<readonly string[]> {
+    return selectViewTools(scope.view, await this.catalogue.listTools()).ignoredTools;
+  }
+
+  /**
+   * The tool `name` names at this URL, for a call — or `TOOL_NOT_IN_TOOLSET`
+   * (not served here, including a name that exists nowhere) and then
+   * `TOOL_NOT_ALLOWED` (served here, refused by the agent's access).
+   */
+  async admit(name: string, scope: McpScope): Promise<Tool> {
+    const { tools } = selectViewTools(scope.view, await this.catalogue.listTools());
+    const tool = tools.find((candidate) => candidate.name === name);
+    if (!tool) throw ToolAccessErrors.notInToolset({ details: { name } });
+    if (!scopeAllows(scope, tool.id)) {
+      throw ToolAccessErrors.notAllowed({ details: { name, toolId: tool.id } });
+    }
+    return tool;
+  }
 
   /**
    * Every tool that can actually be called, priced.
@@ -71,8 +102,15 @@ export class McpCatalogueService {
    * carries `x402/pricingMode`; it simply omits `x402/freeQuota` rather than
    * publish a number that is nobody's.
    */
-  async listTools(viewer?: McpCatalogueViewer): Promise<McpToolDescriptor[]> {
-    const tools = await this.catalogue.listTools();
+  async listTools(viewer?: McpCatalogueViewer, scope?: McpScope): Promise<McpToolDescriptor[]> {
+    // The URL's view, then the agent's access: `tools/list` returns view ∩
+    // access, and prices each tool under the rules a call through this URL
+    // would be routed under. Without a scope (the REST surfaces), the whole
+    // catalogue with no rules.
+    const catalogue = await this.catalogue.listTools();
+    const tools = scope
+      ? selectViewTools(scope.view, catalogue).tools.filter((tool) => scopeAllows(scope, tool.id))
+      : catalogue;
     // **Not narrowed to the viewer's chain, deliberately.** A tool that
     // settles somewhere the buyer holds nothing must be LISTED and marked, not
     // hidden — hiding it makes the platform look like it lacks the tool —
@@ -92,29 +130,25 @@ export class McpCatalogueService {
     // whose quote throws has no honest price, so it is omitted exactly like a
     // tool with no routable supply, and the failure is logged for whoever owns
     // it. Its own `tools/call` still reports the real error.
-    const quotes = await Promise.all(
-      tools.map((tool) =>
-        this.router
-          .quote(tool.id, {
-            payerChains: this.enabledChains,
-            defaultChainId: viewer?.chainId ?? null,
-            enabledChains: this.enabledChains,
-            // A catalogue is not an offer to be paid. A tool
-            // must be SHOWN rather than hidden when the reader cannot pay for it,
-            // and a standing withdrawal is the buyer's cash management — hiding a
-            // tool for it would make the listing flicker as they move money in and
-            // out. The refusal, when it comes, comes from the CALL path.
-            withdrawingChains: [],
-          })
-          .catch((error: unknown): null => {
-            this.logger.warn(
-              `${tool.name} (${tool.id}): omitted from tools/list — quote failed: ` +
-                (error instanceof Error ? error.message : String(error)),
-            );
-            return null;
-          }),
-      ),
+    //
+    // Priced from the quote index, never `router.quote()`: no registry or
+    // chain read per tool per listing (NFR-2).
+    const context: RoutingContext = {
+      payerChains: this.enabledChains,
+      defaultChainId: viewer?.chainId ?? null,
+      enabledChains: this.enabledChains,
+      // A catalogue is not an offer to be paid. A tool
+      // must be SHOWN rather than hidden when the reader cannot pay for it,
+      // and a standing withdrawal is the buyer's cash management — hiding a
+      // tool for it would make the listing flicker as they move money in and
+      // out. The refusal, when it comes, comes from the CALL path.
+      withdrawingChains: [],
+    };
+    const quoted = await this.quotes.quoteMany(
+      tools.map((tool) => tool.id),
+      (toolId) => (scope ? { ...context, rules: rulesFor(scope, toolId) } : context),
     );
+    const quotes = tools.map((tool) => quoted.get(tool.id) ?? null);
 
     const freeQuotas = await Promise.all(
       quotes.map((quote) =>
@@ -141,11 +175,20 @@ export class McpCatalogueService {
       if (!quote) return;
 
       if (!quote.price) {
+        // The agent's or the toolset's rules left no provider: listed, and
+        // saying so, because the tool exists and the fix is the agent's.
+        if (quote.ruleRejections && quote.ruleRejections.length > 0) {
+          listed.push(describeNoProviderFits(quote));
+          return;
+        }
         this.logger.debug(
           `${quote.tool.name}: omitted from tools/list — ${quote.unroutableReason ?? 'no price'}`,
         );
         return;
       }
+
+      // `?free=1` serves only tools that can be free.
+      if (scope && !servesPricingMode(scope.view.filter, quote.pricingMode)) return;
 
       listed.push(
         describe(quote, quote.price, freeQuotas[index], freeAllowances[index], paidOnViewerChain),
@@ -316,12 +359,48 @@ function describe(
 
   return {
     name: tool.name,
-    description: tool.description,
+    description: `${tool.description}\n\n${priceLine(quote, price, freePerDay)}`,
     inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
     outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
     annotations,
     // The copy an SDK client keeps. Same values, same keys — a client reading
     // one and a client reading the other must never see different prices.
+    _meta: { ...annotations },
+  };
+}
+
+/**
+ * The one stable line a description ends with (design spec §7.4): the lowest
+ * price the rules leave and the free allowance. Never the free calls left
+ * today, which change on every call and would make the list unstable.
+ */
+function priceLine(quote: ToolQuote, price: Money, freePerDay: number | null): string {
+  if (quote.pricingMode === PricingMode.FREE) return 'Free';
+  const from = `From ${displayPrice(quote.cheapestPrice ?? price)} per call`;
+  if (quote.pricingMode !== PricingMode.FREEMIUM) return from;
+  return freePerDay === null
+    ? `${from} · free calls each day`
+    : `${from} · ${freePerDay} free calls a day`;
+}
+
+/** `assay/noProviderFits`: the rules left no provider for this tool. */
+export const ASSAY_NO_PROVIDER_FITS = 'assay/noProviderFits';
+
+/** A tool the agent's or the toolset's rules leave no provider for. Listed, unpriced. */
+function describeNoProviderFits(quote: ToolQuote): McpToolDescriptor {
+  const { tool } = quote;
+  const annotations: Record<string, unknown> = {
+    [X402_TIER]: tierLabel(tool.tier),
+    [X402_TOOL_ID]: tool.id,
+    [X402_SETTLEMENT_CHAINS]: [],
+    [ASSAY_NO_PROVIDER_FITS]: true,
+  };
+  return {
+    name: tool.name,
+    description: `${tool.description}\n\nNo provider fits your limits.`,
+    inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
+    outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
+    annotations,
     _meta: { ...annotations },
   };
 }

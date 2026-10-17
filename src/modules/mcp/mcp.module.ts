@@ -15,6 +15,7 @@ import { createSessionSource } from '@modules/auth/services/composite-mcp-sessio
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
 import { PrivyMcpSessionSource } from '@modules/auth/services/privy-mcp-session.source';
 import { ToolModule } from '@modules/tool/tool.module';
+import { ToolsetModule } from '@modules/toolset/toolset.module';
 import { VerificationModule } from '@modules/verification/verification.module';
 
 import { MCP_SESSION_SOURCE } from './ports/mcp-session.port';
@@ -31,6 +32,8 @@ import {
 } from './services/mcp-pricing.config';
 import { McpServerFactory } from './services/mcp-server.factory';
 import { McpToolCallService } from './services/mcp-tool-call.service';
+import { CallAttributionWriter } from './services/call-attribution.writer';
+import { McpCallRecorder } from './services/mcp-call-recorder.service';
 
 /**
  * MCP domain — the interface agents actually call.
@@ -82,6 +85,9 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
     // `LedgerModule`, which both need it for their own producers.
     SpendPolicyModule,
     FreeTierModule,
+    // What each MCP URL serves and what each caller may use: the view, the
+    // access policy and the agent rules a call is checked and routed under.
+    ToolsetModule,
   ],
   providers: [
     // Empty until an operator points `MCP_CREDENTIALS_FILE` at a file. An empty
@@ -137,7 +143,15 @@ import { McpToolCallService } from './services/mcp-tool-call.service';
     McpCatalogueService,
     McpToolCallService,
     McpServerFactory,
+    CallAttributionWriter,
+    McpCallRecorder,
   ],
-  exports: [McpCatalogueService, McpToolCallService, McpServerFactory, MCP_SESSION_SOURCE],
+  exports: [
+    McpCatalogueService,
+    McpToolCallService,
+    McpServerFactory,
+    MCP_SESSION_SOURCE,
+    ToolsetModule,
+  ],
 })
 export class McpModule {}

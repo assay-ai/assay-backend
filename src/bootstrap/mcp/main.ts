@@ -11,10 +11,11 @@ import { AppMcpModule } from './app.module';
  * The MCP server process — the interface agents actually reach the
  * platform through.
  *
- * **No `setGlobalPrefix`, no versioning.** The route is exactly `/mcp`, because
- * that is a URL an operator pastes into an agent's configuration and an MCP
- * client sends JSON-RPC to. `/api/v1/mcp` would work equally well as HTTP and
- * would be one more thing every integration has to be told.
+ * **No `setGlobalPrefix`, no versioning, no `/mcp`.** The service is its own
+ * host (`mcp.assay.ai`, `MCP_PUBLIC_URL`) and every path at its root is an MCP
+ * server: `/` is the whole catalogue, `/my/{slug}` a toolset (design spec
+ * §7.4). A URL an operator pastes into an agent's configuration is as short as
+ * it can be, and the subdomain already says what the host is for.
  *
  * **No `ValidationPipe`, no `TransformInterceptor`.** Every body on this route
  * is JSON-RPC 2.0 and is validated by the MCP SDK against the specification;
@@ -61,7 +62,7 @@ async function bootstrapMcp() {
   await app.listen(port);
 
   console.log(`
-  🔌 [MCP SERVER] Streamable HTTP transport on: http://localhost:${port}/mcp
+  🔌 [MCP SERVER] Streamable HTTP transport on every path of: http://localhost:${port}/
   `);
 }
 

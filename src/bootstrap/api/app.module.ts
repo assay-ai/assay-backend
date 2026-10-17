@@ -46,6 +46,8 @@ import { McpModule } from '@modules/mcp/mcp.module';
 import { AccountApiModule } from '@modules/account/account-api.module';
 import { AuthApiModule } from '@modules/auth/auth-api.module';
 import { SpendPolicyApiModule } from '@modules/spend-policy/spend-policy-api.module';
+import { ToolsetApiModule } from '@modules/toolset/toolset-api.module';
+import { McpUrlsApiModule } from '@modules/mcp/mcp-urls-api.module';
 import { NotificationApiModule } from '@modules/notification/notification-api.module';
 import { FreeTierApiModule } from '@modules/free-tier/free-tier-api.module';
 import { DisputeApiModule } from '@modules/dispute/dispute-api.module';
@@ -151,6 +153,9 @@ import { NetworkModule } from '@shared/network/network.module';
     // stops one being built).
     AuthApiModule,
     SpendPolicyApiModule,
+    // Toolsets, access policies, the Connect preview and Servers in use.
+    ToolsetApiModule,
+    McpUrlsApiModule,
     // The notification channel registry and per-event preferences,
     // and `GET /free-quota`. `NotificationApiModule` is the settings surface;
     // the notification *feed* is still `AccountApiModule`'s.
