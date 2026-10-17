@@ -95,6 +95,10 @@ function preview(): McpUrlPreviewService {
     {
       canonicalise: (url: string) => ({ parsed: parseMcpUrl(url.slice(HOST.length))! }),
       serversInUse: async () => rows,
+      updateFor: async (_org: string, parsed: { filter: { discovery?: string | null } }) =>
+        parsed.filter.discovery === 'full'
+          ? { latestVersion: 4, latestUrl: `${HOST}/my/kit@4` }
+          : null,
     } as never,
     { resolve } as never,
     {
@@ -152,6 +156,17 @@ describe('the Connect preview and Servers in use — discovery', () => {
         'FULL',
         `${HOST}/?tools=geocode_place,get_weather&discovery=search`,
       ],
+    ]);
+  });
+
+  it('Servers in use fills latestVersion and latestUrl only with an update available', async () => {
+    const { servers } = await preview().serversInUse(ORG, AGENT);
+    expect(
+      servers.map((server) => [server.updateAvailable, server.latestVersion, server.latestUrl]),
+    ).toEqual([
+      [false, null, null],
+      [true, 4, `${HOST}/my/kit@4`],
+      [false, null, null],
     ]);
   });
 });

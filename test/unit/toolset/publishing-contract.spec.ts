@@ -67,6 +67,7 @@ describe('toolset publishing REST contract', () => {
     list: jest.fn(async () => ({ toolsets: [], total: 0 })),
     page: jest.fn(async () => ({})),
     versionsOf: jest.fn(async () => ({ versions: [] })),
+    versionOf: jest.fn(async () => ({})),
     byToken: jest.fn(async () => ({})),
     profile: jest.fn(async () => ({})),
     categories: jest.fn(async () => ({ categories: [] })),
@@ -189,6 +190,26 @@ describe('toolset publishing REST contract', () => {
       200,
     );
     expect((await http().post('/public/toolsets/by-token').send({ token: 'x' })).status).toBe(400);
+  });
+
+  it('serves one version by number, with an optional diffFrom, on the same public terms', async () => {
+    expect((await http().get('/public/toolsets/@acme/twitter-kit/versions/3')).status).toBe(200);
+    expect(publicToolsets.versionOf).toHaveBeenLastCalledWith('acme', 'twitter-kit', 3, undefined);
+    expect(
+      (await http().get('/public/toolsets/@acme/twitter-kit/versions/3?diffFrom=1')).status,
+    ).toBe(200);
+    expect(publicToolsets.versionOf).toHaveBeenLastCalledWith('acme', 'twitter-kit', 3, 1);
+    for (const path of ['versions/0', 'versions/x', 'versions/2?diffFrom=0', 'versions/2?a=1']) {
+      expect((await http().get(`/public/toolsets/@acme/twitter-kit/${path}`)).status).toBe(400);
+    }
+    expect(
+      (await http().post('/public/toolsets/by-token').send({ token: TOKEN, v: 3, diffFrom: 2 }))
+        .status,
+    ).toBe(200);
+    expect(publicToolsets.byToken).toHaveBeenLastCalledWith(TOKEN, 3, 2);
+    expect(
+      (await http().post('/public/toolsets/by-token').send({ token: TOKEN, diffFrom: 0 })).status,
+    ).toBe(400);
   });
 });
 

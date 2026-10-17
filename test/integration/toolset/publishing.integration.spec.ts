@@ -921,13 +921,17 @@ describe('toolset publishing, against a real database and Redis', () => {
           'category',
           'changelog',
           'description',
+          'diff',
           'entries',
           'forkedFrom',
           'handle',
           'icon',
+          'id',
           'mcpUrls',
           'name',
+          'notReviewed',
           'publishedAt',
+          'routesToPublisher',
           'sharingEndsAt',
           'slug',
           'stats',
@@ -1349,6 +1353,303 @@ describe('toolset publishing, against a real database and Redis', () => {
         [user],
       );
       expect(claims).toBe(3);
+    });
+  });
+
+  describe('the public contract the catalogue pages read', () => {
+    let owner: string;
+    let ownerAgent: string;
+    let rival: string;
+    let viewer: string;
+    let viewerAgent: string;
+    let gapTool: string;
+    let ownTool: string; // owner's UNLISTED provider tool
+
+    async function bind(organizationId: string, toolId: string, price = 1000): Promise<void> {
+      await dataSource.query(
+        `INSERT INTO tool_bindings
+           (organization_id, tool_id, endpoint, request_mapping, response_mapping, pricing_mode,
+            price_amount, asset_id, sla_failure_rate, timeout_ms, settlement_chains, status,
+            published_version, published_at)
+         VALUES ($1, $2, 'https://provider.example.com', '{}'::jsonb, '{}'::jsonb, 'PAID',
+                 $3, 'x', 0.02, 1000, ARRAY['solana:x']::varchar[], 'ACTIVE', 1, now())`,
+        [organizationId, toolId, price],
+      );
+    }
+
+    beforeAll(async () => {
+      const s = services();
+      owner = await org('Gaps owner');
+      await verify(owner);
+      ownerAgent = await agent(owner);
+      await s.handles.claim(session(owner, ownerAgent), 'gaps-co', ACTOR);
+      rival = await org('Gaps rival');
+      viewer = await org('Gaps viewer');
+      viewerAgent = await agent(viewer);
+      gapTool = randomUUID();
+      await dataSource.query(
+        `INSERT INTO tools (id, name, kind, category, visibility, status)
+         VALUES ($1, 'gaps_lookup', 'STANDARD', 'testing', 'LISTED', 'ACTIVE')`,
+        [gapTool],
+      );
+      ownTool = randomUUID();
+      await dataSource.query(
+        `INSERT INTO tools (id, name, kind, owner_org_id, category, visibility, status)
+         VALUES ($1, 'gaps__own_api', 'PROVIDER', $2, 'testing', 'UNLISTED', 'ACTIVE')`,
+        [ownTool, owner],
+      );
+      await bind(owner, gapTool);
+      await bind(rival, gapTool);
+    });
+
+    it('names a listed set by id and flags self-routing by the effect of its rules', async () => {
+      const s = services();
+      const created = await s.toolsets.create(
+        owner,
+        { name: 'Routed', slug: 'routed', entries: [{ toolId: gapTool }] },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.PUBLIC },
+        ACTOR,
+      );
+      const before = (await services().publicToolsets.list({})).toolsets.find(
+        (card) => card.slug === 'routed',
+      );
+      expect(before).toMatchObject({ id: created.id, routesToPublisher: false });
+
+      // All but the rival: only the publisher is left, whatever the mode says.
+      await s.toolsets.replaceEntries(
+        owner,
+        created.id,
+        [{ toolId: gapTool, providerMode: 'EXCLUDE' as never, providerIds: [rival] }],
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.PUBLIC },
+        ACTOR,
+      );
+      const page = await services().publicToolsets.page('gaps-co', 'routed');
+      expect(page).toMatchObject({
+        id: created.id,
+        version: 2,
+        routesToPublisher: true,
+        notReviewed: false,
+        diff: null,
+      });
+      expect(page.entries.map((entry) => entry.notReviewed)).toEqual([false]);
+
+      // Each served version, with its snapshot and a real diff.
+      const v2 = await s.publicToolsets.versionOf('gaps-co', 'routed', 2, 1);
+      expect(v2).toMatchObject({
+        version: 2,
+        name: 'Routed',
+        toolIds: [gapTool],
+        routesToPublisher: true,
+        notReviewed: false,
+        diff: { from: 1, to: 2, added: [], removed: [], rulesChanged: ['gaps_lookup'] },
+      });
+      expect(v2.entries[0]).toMatchObject({ providerMode: 'EXCLUDE', providerCount: 1 });
+      expect(await s.publicToolsets.versionOf('gaps-co', 'routed', 1, undefined)).toMatchObject({
+        routesToPublisher: false,
+        diff: null,
+      });
+
+      // Servers in use: a URL pinned to @1 is offered @2 on its own path.
+      expect(await s.connectUrls.updateFor(viewer, parseMcpUrl('/@gaps-co/routed@1')!)).toEqual({
+        latestVersion: 2,
+        latestUrl: 'https://mcp.example.com/@gaps-co/routed@2',
+      });
+      for (const url of ['/@gaps-co/routed', '/@gaps-co/routed@2']) {
+        expect(await s.connectUrls.updateFor(viewer, parseMcpUrl(url)!)).toBeNull();
+      }
+      expect(await s.connectUrls.updateFor(owner, parseMcpUrl('/my/routed@1')!)).toEqual({
+        latestVersion: 2,
+        latestUrl: 'https://mcp.example.com/my/routed@2',
+      });
+      // `/my/` names the caller's own toolsets only.
+      expect(await s.connectUrls.updateFor(viewer, parseMcpUrl('/my/routed@1')!)).toBeNull();
+    });
+
+    it('gives no id, version or diff for anything /@… does not serve', async () => {
+      const s = services();
+      const staged = await s.toolsets.create(
+        owner,
+        { name: 'Gaps staged', slug: 'gaps-staged', entries: [{ toolId: gapTool }] },
+        ACTOR,
+      );
+      for (const visibility of [
+        ToolsetVisibility.PRIVATE,
+        ToolsetVisibility.PRIVATE,
+        ToolsetVisibility.PUBLIC,
+      ]) {
+        await s.publishing.publish(owner, staged.id, { visibility }, ACTOR);
+      }
+      const notFound = { code: ToolsetErrorCode.TOOLSET_VERSION_NOT_FOUND, status: 404 };
+      for (const [v, from] of [
+        [1, undefined],
+        [2, undefined],
+        [4, undefined],
+        [3, 1],
+        [3, 4],
+      ] as const) {
+        expect(
+          await errorOf(s.publicToolsets.versionOf('gaps-co', 'gaps-staged', v, from)),
+        ).toMatchObject(notFound);
+      }
+      expect(await s.publicToolsets.versionOf('gaps-co', 'gaps-staged', 3, 3)).toMatchObject({
+        version: 3,
+        diff: { from: 3, to: 3, added: [], removed: [], rulesChanged: [] },
+      });
+      // An update on `/@…` is only ever a version `/@…` serves.
+      expect(
+        (await s.connectUrls.updateFor(viewer, parseMcpUrl('/@gaps-co/gaps-staged@1')!))
+          ?.latestVersion,
+      ).toBe(3);
+
+      // A private set and a link-only set: the same 404 as a missing slug, no card.
+      const hidden = await s.toolsets.create(
+        owner,
+        { name: 'Gaps hidden', slug: 'gaps-hidden', entries: [{ toolId: gapTool }] },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        hidden.id,
+        { visibility: ToolsetVisibility.PRIVATE },
+        ACTOR,
+      );
+      const linked = await s.toolsets.create(
+        owner,
+        { name: 'Gaps linked', slug: 'gaps-linked', entries: [{ toolId: gapTool }] },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        linked.id,
+        { visibility: ToolsetVisibility.UNLISTED },
+        ACTOR,
+      );
+      for (const slug of ['gaps-hidden', 'gaps-linked', 'gaps-missing']) {
+        expect(
+          await errorOf(s.publicToolsets.versionOf('gaps-co', slug, 1, undefined)),
+        ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_NOT_FOUND, status: 404 });
+      }
+      const ids = (await services().publicToolsets.list({})).toolsets.map((card) => card.id);
+      expect(ids).not.toContain(hidden.id);
+      expect(ids).not.toContain(linked.id);
+      expect(ids).toContain(staged.id);
+    });
+
+    it('by-token names the set to its link holder, flags unreviewed tools, and diffs served versions', async () => {
+      const s = services();
+      const created = await s.toolsets.create(
+        owner,
+        { name: 'Gaps link', slug: 'gaps-link', entries: [{ toolId: gapTool }] },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.PRIVATE },
+        ACTOR,
+      );
+      await dataSource.query(
+        `INSERT INTO toolset_entries (toolset_id, position, tool_id) VALUES ($1, 1, $2)`,
+        [created.id, ownTool],
+      );
+      const v2 = await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.UNLISTED },
+        ACTOR,
+      );
+      const token = v2.toolset.unlistedToken as string;
+      await s.toolsets.replaceEntries(owner, created.id, [{ toolId: gapTool }], ACTOR);
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.UNLISTED },
+        ACTOR,
+      );
+
+      const page = await s.publicToolsets.byToken(token, 2, undefined);
+      expect(page).toMatchObject({ id: created.id, version: 2, notReviewed: true, diff: null });
+      expect(page.entries.map((entry) => [entry.toolId, entry.notReviewed])).toEqual([
+        [gapTool, false],
+        [ownTool, true],
+      ]);
+      // A BEST entry with a rival binding, and a tool with no binding: no self-routing.
+      expect(page.routesToPublisher).toBe(false);
+      expect(await s.publicToolsets.byToken(token, 3, 2)).toMatchObject({
+        version: 3,
+        notReviewed: false,
+        diff: { from: 2, to: 3, removed: ['gaps__own_api'], added: [] },
+      });
+      // v1 was published PRIVATE: neither served nor diffable by the link.
+      for (const [v, from] of [
+        [1, undefined],
+        [3, 1],
+        [4, undefined],
+      ] as const) {
+        expect(await errorOf(s.publicToolsets.byToken(token, v, from))).toMatchObject({
+          code: ToolsetErrorCode.TOOLSET_VERSION_NOT_FOUND,
+        });
+      }
+      // The link's own path rules for "Update available".
+      expect(await s.connectUrls.updateFor(viewer, parseMcpUrl(`/u/${token}@2`)!)).toEqual({
+        latestVersion: 3,
+        latestUrl: `https://mcp.example.com/u/${token}@3`,
+      });
+    });
+
+    it('a frozen handle stops reports by id too', async () => {
+      const s = services();
+      const frozen = await org('Gaps frozen');
+      await verify(frozen);
+      await s.handles.claim(session(frozen, await agent(frozen)), 'gaps-frozen', ACTOR);
+      const created = await s.toolsets.create(
+        frozen,
+        { name: 'Gaps cold', slug: 'gaps-cold', entries: [{ toolId: gapTool }] },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        frozen,
+        created.id,
+        { visibility: ToolsetVisibility.PUBLIC },
+        ACTOR,
+      );
+      expect(await s.connectUrls.updateFor(viewer, parseMcpUrl('/@gaps-frozen/gaps-cold@1')!)).toBe(
+        null,
+      );
+      await dataSource.transaction((manager) =>
+        s.moderation.cutoffHandle(manager, {
+          handle: 'gaps-frozen',
+          operatorId: OPERATOR_1,
+          note: 'frozen for the test',
+        }),
+      );
+      await s.moderation.afterCommit([frozen]);
+      expect(
+        await errorOf(s.reports.create(viewer, { toolsetId: created.id, reason: 'spam spam' })),
+      ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_REPORT_TARGET_NOT_FOUND });
+      expect(await errorOf(s.publishing.copy(viewer, created.id, {}, ACTOR))).toMatchObject({
+        code: ToolsetErrorCode.TOOLSET_NOT_FOUND,
+      });
+      expect(
+        await errorOf(
+          s.access.patch(
+            viewer,
+            viewerAgent,
+            { allowedToolsets: [{ toolsetId: created.id, version: 1 }] },
+            ACTOR,
+          ),
+        ),
+      ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_ACCESS_INVALID });
     });
   });
 });

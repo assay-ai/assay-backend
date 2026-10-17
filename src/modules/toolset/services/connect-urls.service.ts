@@ -9,7 +9,7 @@ import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
 import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
 
 import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
-import { servesPublicPath, servesUnlistedPath } from '../domain/sharing';
+import { newestServed, servesPublicPath, servesUnlistedPath } from '../domain/sharing';
 import { HandlesService } from './handles.service';
 import { sharingStateOf } from './sharing-row';
 import {
@@ -199,6 +199,57 @@ export class ConnectUrlsService {
     return [...rows.values()].sort(
       (a, b) => recency(b) - recency(a) || a.canonicalUrl.localeCompare(b.canonicalUrl),
     );
+  }
+
+  /**
+   * "Update available" for a URL pinned to `@n` (design spec §7.10): the
+   * newest version **on that URL's own path** — `/@…` offers only versions
+   * published PUBLIC, a link only what that link serves, `/my/` the owner's
+   * newest — with the same URL at it. `null` when the URL follows its latest,
+   * does not serve now, or is already at the newest. Never a version the path
+   * does not serve, so it tells nobody more than the URL itself would.
+   */
+  async updateFor(
+    organizationId: string,
+    parsed: ParsedMcpUrl,
+  ): Promise<{ latestVersion: number; latestUrl: string } | null> {
+    const { path } = parsed;
+    const now = new Date();
+    let newest: number | null = null;
+    let handle: string | null = null;
+    if (path.kind === McpPathKind.MY_TOOLSET && path.version !== null) {
+      const [toolset] = await this.toolsets.findOwnedBySlugs(organizationId, [path.slug]);
+      if (toolset && !toolset.deletedAt) newest = toolset.latestVersion;
+    } else if (path.kind === McpPathKind.UNLISTED_TOOLSET && path.version !== null) {
+      const toolset = await this.toolsets.findByUnlistedToken(path.token);
+      if (
+        toolset &&
+        toolset.unlistedToken === path.token &&
+        servesUnlistedPath(sharingStateOf(toolset), now) &&
+        (await this.handles.ownerHandleActive(toolset.ownerOrgId))
+      ) {
+        newest = newestServed(toolset, 'UNLISTED');
+      }
+    } else if (path.kind === McpPathKind.PUBLIC_TOOLSET && path.version !== null) {
+      const owner = await this.handles.resolve(path.handle);
+      const toolset = owner
+        ? await this.toolsets.findHolderOfSlug(
+            owner.kind === 'OFFICIAL' ? null : owner.organizationId,
+            path.slug,
+          )
+        : null;
+      if (owner && toolset && servesPublicPath(sharingStateOf(toolset), now)) {
+        newest = newestServed(toolset, 'PUBLIC');
+        handle = owner.kind === 'ORG' ? (owner.renamedTo ?? path.handle) : path.handle;
+      }
+    }
+    const pinned = 'version' in path ? (path as { version: number | null }).version : null;
+    if (newest === null || pinned === null || newest <= pinned) return null;
+    const next = {
+      ...parsed,
+      path: { ...path, version: newest, ...(handle ? { handle } : {}) } as typeof path,
+    };
+    return { latestVersion: newest, latestUrl: canonicalUrl(this.host.mcpPublicUrl, next) };
   }
 
   /**

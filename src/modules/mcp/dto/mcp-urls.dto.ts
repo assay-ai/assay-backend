@@ -208,8 +208,21 @@ export class ServerInUseDto {
   @ApiProperty({ description: 'Whether the URL still serves anything' })
   available: boolean;
 
-  @ApiProperty({ description: 'A newer tool set version exists (versions arrive in T2)' })
+  @ApiProperty({
+    description:
+      'The URL is pinned to `@n` and a newer version is served on its own path: `/@…` only ' +
+      'versions published PUBLIC, a link what that link serves, `/my/` the newest',
+  })
   updateAvailable: boolean;
+
+  @ApiProperty({ nullable: true, description: 'Set only when `updateAvailable`' })
+  latestVersion: number | null;
+
+  @ApiProperty({
+    nullable: true,
+    description: 'This URL at `latestVersion`, for "Copy v4 URL"; set only when `updateAvailable`',
+  })
+  latestUrl: string | null;
 }
 
 export class ServersInUseDto {

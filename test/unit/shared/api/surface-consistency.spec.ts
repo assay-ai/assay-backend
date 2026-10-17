@@ -176,16 +176,18 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // publicly listed providers are named — see `PublicNotChargedService`.
   ['modules/catalogue/controllers/public-not-charged.controller.ts', 1],
   // The toolset catalogue (design spec §7.9): listed tool sets, one listed
-  // tool set's page and versions, a public name's profile, the categories, and
-  // the link-only page by token. Only PUBLIC, LISTED tool sets answer by name,
-  // at the newest version published while shared — never the Draft — and
-  // everything else is the same 404 as a missing slug. The by-token route
+  // tool set's page and versions, one version it serves (with a diff between
+  // two served ones), a public name's profile, the categories, and the
+  // link-only page by token. Only PUBLIC, LISTED tool sets answer by name, at
+  // the newest version published while shared — never the Draft, never a
+  // version `/@…` does not serve — and everything else is the same 404 as a
+  // missing slug. A toolset id appears only where that path serves it. The by-token route
   // takes the token in a POST body (never a URL, so never a log line) and
   // answers only while that token serves `/u/`. Fields are copied through
   // their own allowlisted DTOs (`public-toolsets.dto.ts`); no owner,
   // reporter or buyer id is selected, and figures are the weekly k = 5 table.
   // Cached in process and rate limited per address.
-  ['modules/toolset/controllers/public-toolsets.controller.ts', 6],
+  ['modules/toolset/controllers/public-toolsets.controller.ts', 7],
 ]);
 
 /**
