@@ -1,5 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
+import { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
+import { originOf } from '@modules/provider/credentials/credential-rules';
 import { EgressHttpClient } from '@shared/network/egress/egress-http.client';
 import {
   EgressError,
@@ -17,10 +19,12 @@ import {
   ProviderResponse,
   ResponseBodyKind,
   classifyTransportError,
+  platformUnavailable,
   readResponseBody,
 } from '../domain/classification';
 import { UpstreamRequest, mapRequest } from '../domain/mapping';
 import { BindingInvocation, BindingInvokerPort } from '../ports/binding-invoker.port';
+import { RequestSignerService } from '../request-auth/request-signer.service';
 
 /**
  * The production {@link BindingInvokerPort} — the call path the mapping engine
@@ -46,10 +50,26 @@ import { BindingInvocation, BindingInvokerPort } from '../ports/binding-invoker.
  *    by strangers (open registration with no approval), which makes
  *    every one of these calls an SSRF vector. `UNTRUSTED_EGRESS_POLICY` is the
  *    default and is not relaxed here.
+ *
+ * It also authenticates the call both ways: the binding's vault credential
+ * headers (for exactly the request's origin) and the Assay request signature.
+ * Header order on the wire:
+ *
+ * ```text
+ * defaults → mapping headers → credential headers → x-assay-call-id
+ *          → content-digest / signature-input / signature
+ * ```
+ *
+ * A vault failure is a platform fault: the call is not sent and the outcome is
+ * a `PLATFORM_UNAVAILABLE` transport error, never counted against the provider.
  */
 @Injectable()
 export class EgressBindingInvoker implements BindingInvokerPort {
-  constructor(private readonly http: EgressHttpClient) {}
+  constructor(
+    private readonly http: EgressHttpClient,
+    private readonly vault: CredentialVaultService,
+    private readonly signer: RequestSignerService,
+  ) {}
 
   async invoke(invocation: BindingInvocation): Promise<ProviderResponse> {
     const { tool, binding, input, timeoutMs, callId } = invocation;
@@ -65,25 +85,43 @@ export class EgressBindingInvoker implements BindingInvokerPort {
 
     const body = upstream.body === undefined ? undefined : JSON.stringify(upstream.body);
 
+    let url: string;
+    try {
+      url = buildUrl(binding.endpoint, upstream);
+    } catch (error) {
+      return transportFailure(error);
+    }
+
+    // Preparing the call: the vault lookup for exactly this URL's origin, and
+    // the signature over exactly what is handed to `EgressHttpClient` — the
+    // same URL string (the client sends `pathname + search` of `new URL(url)`,
+    // the same parse the signer uses), method, headers and body. A failure
+    // here means Assay could not prepare the call: our fault, never the
+    // provider's, and nothing is sent.
+    const method = upstream.method.toUpperCase();
+    let headers: Record<string, string>;
+    try {
+      const credentials = await this.vault.headersFor(
+        binding.providerId,
+        binding.id,
+        originOf(url),
+      );
+      headers = outboundHeaders(upstream.headers, credentials, callId, body !== undefined);
+      const signature = await this.signer.sign({ method, url, headers, body });
+      for (const [name, value] of Object.entries(signature)) setHeader(headers, name, value);
+    } catch (error) {
+      return {
+        status: 0,
+        body: { kind: ResponseBodyKind.EMPTY },
+        transportError: platformUnavailable(error),
+      };
+    }
+
     try {
       const response = await this.http.request({
-        url: buildUrl(binding.endpoint, upstream),
-        method: upstream.method,
-        // `x-assay-call-id` is spread in *last*, after `upstream.headers` — a
-        // binding is a provider-authored mapping, and a provider
-        // that could set this header itself could spoof the correlation id
-        // the whole point of the call id is to make unforgeable. `EgressHttpClient`
-        // lower-cases every header name before it sends anything
-        // (`normalizeHeaders`), so this also wins against a differently-cased
-        // duplicate (`X-Assay-Call-Id`) coming out of `upstream.headers` — the
-        // last write for a given lower-cased key is the one that reaches the
-        // wire, and this object literal places it last either way.
-        headers: {
-          accept: 'application/json',
-          ...(body === undefined ? {} : { 'content-type': 'application/json' }),
-          ...upstream.headers,
-          'x-assay-call-id': callId,
-        },
+        url,
+        method,
+        headers,
         body,
         // Every deadline collapses to the attempt's budget. The per-hop figures
         // exist so a redirect chain cannot multiply the wait, and the router
@@ -102,20 +140,56 @@ export class EgressBindingInvoker implements BindingInvokerPort {
         body: readResponseBody(response.body, response.headers['content-type']),
       };
     } catch (error) {
-      // Resolve, do not reject — see `BindingInvokerPort.invoke`. The bytes
-      // that arrived before the failure are carried for diagnostics and are
-      // never parsed: a truncated body is byte-identical to a provider
-      // answering half a question, and only one of those readings can cost them
-      // their stake.
-      const partialBody = isEgressError(error) ? error.partialBody : null;
-
-      return {
-        status: 0,
-        body: { kind: ResponseBodyKind.EMPTY },
-        transportError: classifyTransportError(error, partialBody),
-      };
+      return transportFailure(error);
     }
   }
+}
+
+/**
+ * Resolve, do not reject — see `BindingInvokerPort.invoke`. The bytes that
+ * arrived before the failure are carried for diagnostics and are never parsed:
+ * a truncated body is byte-identical to a provider answering half a question,
+ * and only one of those readings can cost them their stake.
+ */
+function transportFailure(error: unknown): ProviderResponse {
+  const partialBody = isEgressError(error) ? error.partialBody : null;
+  return {
+    status: 0,
+    body: { kind: ResponseBodyKind.EMPTY },
+    transportError: classifyTransportError(error, partialBody),
+  };
+}
+
+/**
+ * The request headers, lower-cased, in wire order: defaults → mapping →
+ * credentials → `x-assay-call-id`. The signature headers are appended after.
+ *
+ * Every write removes the name first, so a later layer wins against an
+ * earlier one whatever its case, and lands in its own layer's position.
+ * `x-assay-call-id` is written last: a binding is a provider-authored mapping
+ * and its credentials are provider-supplied, and neither may spoof the
+ * correlation id the call id exists to make unforgeable. (Credential names
+ * starting `x-assay-` are also refused at write time.)
+ */
+function outboundHeaders(
+  mapped: Readonly<Record<string, string>>,
+  credentials: ReadonlyArray<{ name: string; value: string }>,
+  callId: string,
+  hasBody: boolean,
+): Record<string, string> {
+  const headers: Record<string, string> = { accept: 'application/json' };
+  if (hasBody) headers['content-type'] = 'application/json';
+  for (const [name, value] of Object.entries(mapped)) setHeader(headers, name, value);
+  for (const { name, value } of credentials) setHeader(headers, name, value);
+  setHeader(headers, 'x-assay-call-id', callId);
+  return headers;
+}
+
+/** Sets `name` (lower-cased) at the end of `headers`, replacing any same-named entry. */
+function setHeader(headers: Record<string, string>, name: string, value: string): void {
+  const key = name.toLowerCase();
+  delete headers[key];
+  headers[key] = value;
 }
 
 /**

@@ -25,7 +25,7 @@ import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { EgressHttpClient } from '@shared/network/egress';
 
-import { buildBinding, buildProvider, usdc } from '../tool/helpers/routing-fixtures';
+import { buildBinding, buildProvider, plainInvoker, usdc } from '../tool/helpers/routing-fixtures';
 import { SESSION, buildMcpHarness } from './helpers/mcp-harness';
 
 // This spec dials a real local socket inside the parallel unit suite. On a
@@ -64,7 +64,7 @@ afterAll(async () => {
 });
 
 function realInvoker(): EgressBindingInvoker {
-  return new EgressBindingInvoker(
+  return plainInvoker(
     new EgressHttpClient(lookup, (target) => ({
       address: '127.0.0.1',
       family: 4,

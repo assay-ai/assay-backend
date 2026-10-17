@@ -189,3 +189,16 @@ function build(
 function errorName(value: unknown): string {
   return stringField(value, 'name') ?? 'UnknownError';
 }
+
+/**
+ * Assay could not prepare the call (the credential vault failed), so nothing
+ * was sent. A platform fault: classified `PLATFORM_UNAVAILABLE`, never counted
+ * against the provider.
+ */
+export function platformUnavailable(error: unknown): TransportError {
+  return {
+    kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+    partialBody: null,
+    detail: stringField(error, 'message') ?? errorName(error),
+  };
+}
