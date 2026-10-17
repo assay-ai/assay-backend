@@ -18,6 +18,7 @@ import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-cata
 import {
   contractVersionsOf,
   currentContractVersion,
+  isServable,
 } from '@modules/tool/domain/contract/contract-versions';
 import { bindingRange } from '@modules/tool/domain/contract/version-range';
 
@@ -245,17 +246,23 @@ export class BindingPublishService {
       this.catalogue.findTool(row.toolId),
       this.runs.findForRevision(organizationId, row.id, row.mappingVersion),
     ]);
-    const majorOf = new Map(
-      (tool ? contractVersionsOf(tool) : []).map((version) => [version.version, version.major]),
-    );
-    const fallbackMajor = tool ? (currentContractVersion(tool)?.major ?? 1) : 1;
+    // Each major's run must be at its NEWEST published version (review P2-2):
+    // a run at an old minor never checked the fields a later minor added. A
+    // run recorded without a contract version counts as one at the current.
+    const versions = tool ? contractVersionsOf(tool).filter(isServable) : [];
+    const newestOf = new Map<number, number>();
+    for (const version of versions) {
+      if (!newestOf.has(version.major)) newestOf.set(version.major, version.version);
+    }
+    const currentNumber = tool ? (currentContractVersion(tool)?.version ?? 1) : 1;
 
     const byMajor = new Map<number, PublishGateTestRun | null>(
       majors.map((major) => [major, null]),
     );
     for (const run of runs) {
-      const major = run.toolVersion == null ? fallbackMajor : majorOf.get(run.toolVersion);
-      if (major === undefined || !byMajor.has(major) || byMajor.get(major)) continue;
+      const tested = run.toolVersion ?? currentNumber;
+      const major = majors.find((m) => newestOf.get(m) === tested);
+      if (major === undefined || byMajor.get(major)) continue;
       byMajor.set(major, {
         mappingVersion: run.mappingVersion,
         outcome: run.outcome as BindingTestOutcome,

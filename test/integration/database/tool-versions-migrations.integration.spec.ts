@@ -53,7 +53,9 @@ describe('tool version migrations: up, down, up', () => {
               OR (table_name IN ('tool_bindings', 'binding_versions')
                   AND column_name IN ('tool_version_range', 'provides_output_fields'))
               OR (table_name = 'binding_test_runs' AND column_name = 'tool_version')
-              OR (table_name = 'tool_requests' AND column_name = 'tool_id'))
+              OR (table_name = 'tool_requests' AND column_name = 'tool_id')
+              OR (table_name = 'tools' AND column_name = 'last_version_number')
+              OR (table_name = 'tool_versions' AND column_name = 'edited_by'))
           ORDER BY 1`,
       )) as { c: string }[]
     ).map((row) => row.c);
@@ -65,23 +67,27 @@ describe('tool version migrations: up, down, up', () => {
     'tool_bindings.provides_output_fields',
     'tool_bindings.tool_version_range',
     'tool_requests.tool_id',
+    'tool_versions.edited_by',
     'tool_versions.semver',
     'tools.current_version',
+    'tools.last_version_number',
     'tools.replacement_tool_id',
   ];
 
-  it('applies, reverts both T3 migrations, and applies them again', async () => {
+  it('applies, reverts the three T3 migrations, and applies them again', async () => {
     await dataSource.runMigrations({ transaction: 'each' });
     expect(await columns()).toEqual(ALL);
 
     const applied = (await dataSource.query(
-      `SELECT name FROM migrations ORDER BY id DESC LIMIT 2`,
+      `SELECT name FROM migrations ORDER BY id DESC LIMIT 3`,
     )) as { name: string }[];
     expect(applied.map((row) => row.name).sort()).toEqual([
       'BindingContractTerms1761500000001',
+      'ToolDraftIntegrity1761600000000',
       'ToolVersions1761500000000',
     ]);
 
+    await dataSource.undoLastMigration({ transaction: 'each' });
     await dataSource.undoLastMigration({ transaction: 'each' });
     await dataSource.undoLastMigration({ transaction: 'each' });
     expect(await columns()).toEqual([]);

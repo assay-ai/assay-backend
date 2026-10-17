@@ -307,9 +307,10 @@ export class ProviderRouterService {
       // The contract at the routed version, with this binding's declared
       // optional outputs made required: a declared field that comes back
       // missing is a provider contract violation like a missing core field.
+      const mustReturn = routing.contract?.requireOutputFields ?? [];
       const servedTool: Tool = {
         ...versionTool,
-        outputSchema: effectiveOutputSchema(version, binding),
+        outputSchema: effectiveOutputSchema(version, binding, mustReturn),
       };
       const outcome = await this.attempt(
         servedTool,
@@ -317,6 +318,7 @@ export class ProviderRouterService {
         request.input,
         timeoutMs,
         request.callId,
+        mustReturn,
       );
 
       const record: RoutingAttempt = {
@@ -541,6 +543,7 @@ export class ProviderRouterService {
 
     const unpinned: RoutingContext = {
       ...context,
+      ...(request.versionChains ? { payerChains: request.versionChains } : {}),
       onlyProviderId: undefined,
       excludeProviderIds: [],
     };
@@ -1034,6 +1037,7 @@ export class ProviderRouterService {
     input: JsonObject,
     timeoutMs: number,
     callId: string,
+    mustReturn: readonly string[] = [],
   ): Promise<AttemptOutcome> {
     let response: ProviderResponse;
 
@@ -1078,7 +1082,7 @@ export class ProviderRouterService {
       return { response, classification, output: null };
     }
 
-    return this.mapIntoContract(tool, binding, response, classification);
+    return this.mapIntoContract(tool, binding, response, classification, mustReturn);
   }
 
   private mapIntoContract(
@@ -1086,6 +1090,7 @@ export class ProviderRouterService {
     binding: ToolBinding,
     response: ProviderResponse,
     classification: Classification,
+    mustReturn: readonly string[] = [],
   ): AttemptOutcome {
     // Only a JSON body reaches here: the classifier's body gate has already
     // sent an empty or non-JSON body to `SYSTEM_ERROR`, and this narrowing
@@ -1104,6 +1109,7 @@ export class ProviderRouterService {
         versionOf(tool),
         binding,
         { toolId: tool.id, bindingId: binding.id, providerId: binding.providerId },
+        mustReturn,
       );
       return { response, classification, output };
     } catch (error) {

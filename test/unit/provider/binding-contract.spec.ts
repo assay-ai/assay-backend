@@ -240,3 +240,42 @@ describe('the publish gate, per contract major', () => {
     );
   });
 });
+
+describe('the publish gate wants each major tested at its newest version (P2-2)', () => {
+  it('a run at an older minor does not count', async () => {
+    const { BindingPublishService } =
+      await import('@modules/provider/services/binding-publish.service');
+    const V1_1 = { ...V1, version: 3, semver: '1.1.0' };
+    const tool = { ...TOOL, versions: [V2, V1_1, V1], currentVersion: 3 };
+    const run = (toolVersion: number) => ({
+      mappingVersion: 4,
+      toolVersion,
+      outcome: BindingTestOutcome.PASSED,
+      failedLayer: null,
+      createdAt: new Date('2026-10-01T00:00:00Z'),
+    });
+    const service = new BindingPublishService(
+      {} as never,
+      { findForRevision: async () => [run(1)] } as never,
+      {} as never,
+      {} as never,
+      new Map(),
+      {} as never,
+      { findTool: async () => tool } as never,
+    );
+    const at = (runs: unknown[]) =>
+      (
+        service as unknown as {
+          runsByMajor: (o: string, r: unknown) => Promise<Map<number, unknown>>;
+        }
+      ).runsByMajor.call(
+        Object.assign(Object.create(service), {
+          runs: { findForRevision: async () => runs },
+        }),
+        'org',
+        { id: 'b', toolId: 't', toolVersionRange: '^1', mappingVersion: 4 },
+      );
+    expect((await at([run(1)])).get(1)).toBeNull();
+    expect((await at([run(3)])).get(1)).toMatchObject({ outcome: BindingTestOutcome.PASSED });
+  });
+});

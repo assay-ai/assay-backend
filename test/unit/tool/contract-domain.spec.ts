@@ -219,6 +219,26 @@ describe('contract shape checks', () => {
     expect(contractProblems(SHAPE)).toEqual([]);
   });
 
+  it('core means required: an output field is required or optional, never neither (P1-2)', () => {
+    const loose = withOutput({ temperatureC: { type: 'number' }, title: { type: 'string' } }, [
+      'temperatureC',
+    ]);
+    expect(contractProblems(loose)).toEqual([
+      expect.stringContaining('output field "title" is neither required nor optional'),
+    ]);
+    expect(contractProblems({ ...loose, optionalOutputFields: ['title'] })).toEqual([]);
+    // Inputs may still be core and not required (a parameter with a default).
+    expect(
+      contractProblems({
+        ...SHAPE,
+        inputSchema: {
+          ...SHAPE.inputSchema,
+          properties: { ...SHAPE.inputSchema.properties, units: { type: 'string' } },
+        },
+      }),
+    ).toEqual([]);
+  });
+
   it('refuses what cannot be a contract', () => {
     const problems = contractProblems({
       ...SHAPE,
@@ -421,6 +441,28 @@ describe('declared optional outputs', () => {
       errorCode: ToolErrorCode.TOOL_MAPPING_REQUIRED_FIELD_MISSING,
       context: { fault: 'PROVIDER', field: 'uvIndex' },
     });
+  });
+
+  it('a toolset entry’s "must return" is held at call time too, even on a field not in required (P1-2)', () => {
+    const loose = v({
+      outputSchema: {
+        type: 'object',
+        properties: { temperatureC: { type: 'number' }, title: { type: 'string' } },
+        required: ['temperatureC'],
+      },
+    });
+    const spec = { temperatureC: { $path: '$.t' }, title: { $path: '$.title' } };
+    expect(effectiveOutputSchema(loose, { providesOutputFields: [] }, ['title']).required).toEqual([
+      'temperatureC',
+      'title',
+    ]);
+    let error: unknown;
+    try {
+      mapServedResponse(spec, { t: 20 }, loose, { providesOutputFields: [] }, undefined, ['title']);
+    } catch (caught) {
+      error = caught;
+    }
+    expect(error).toMatchObject({ context: { fault: 'PROVIDER', field: 'title' } });
   });
 
   it('summaries are whole sentences up to 200 characters', () => {

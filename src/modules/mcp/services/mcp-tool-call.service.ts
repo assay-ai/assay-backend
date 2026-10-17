@@ -1042,8 +1042,10 @@ export class McpToolCallService {
       // The hold is the dearest provider the rules leave, never one they drop.
       rules,
       // At the contract version the call may use, among the bindings that
-      // serve it, support its optional inputs and return its required outputs.
-      ...(contract ? { contract } : {}),
+      // serve it, support its optional inputs and return its required outputs
+      // — chosen for the buyer's own chain, though priced and reported over
+      // every chain (review P2-1).
+      contract: { ...(contract ?? NO_CONTRACT_REQUEST), versionChains: [session.chainId] },
     });
 
     // `findByName` resolved it a moment ago, so a null quote means the
