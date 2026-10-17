@@ -20,6 +20,7 @@ import {
   TOOL_CATALOGUE_SNAPSHOT,
 } from './services/in-memory-tool-catalogue';
 import { ProviderRouterService } from './services/provider-router.service';
+import { ToolRegistrySeeder } from './services/tool-registry.seeder';
 import {
   DEFAULT_ROUTER_TUNING,
   ROUTER_CONFIG,
@@ -79,6 +80,9 @@ import {
     // tests that construct `InMemoryToolCatalogue` directly.
     { provide: TOOL_CATALOGUE_SNAPSHOT, useFactory: () => loadToolCatalogue() },
     InMemoryToolCatalogue,
+    // The seeded tools, mirrored into `tools` at boot so bindings and toolsets
+    // can reference them (`fk_tool_bindings_tool`).
+    ToolRegistrySeeder,
 
     // Bindings come from `tool_bindings`, written by the provider's own
     // console. `ToolBindingRepository` resolves out of the `@Global`

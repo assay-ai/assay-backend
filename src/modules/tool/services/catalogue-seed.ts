@@ -4,7 +4,7 @@ import { isRegisteredAsset, registeredAssets } from '@modules/chains/ports/asset
 import { ChainId, isChainId } from '@modules/chains/ports/caip.types';
 
 import { normalizeRequestMapping, normalizeResponseMapping } from '../domain/mapping';
-import { Tool, ToolBinding } from '../ports/tool.types';
+import { Tool, ToolBinding, UNCATEGORISED } from '../ports/tool.types';
 import { EMPTY_TOOL_CATALOGUE, ToolCatalogueSnapshot } from './in-memory-tool-catalogue';
 
 /**
@@ -62,7 +62,7 @@ export function loadToolCatalogue(
     throw new Error(`${source} must be a JSON object with "tools" and "bindings" arrays`);
   }
 
-  const tools = document.tools as Tool[];
+  const tools = (document.tools as Tool[]).map((tool) => withCategory(tool, source));
   const bindings = (document.bindings as RawBinding[]).map((binding) => ({
     ...binding,
     requestMapping: normalizeRequestMapping(binding.requestMapping),
@@ -152,6 +152,41 @@ export function loadToolCatalogue(
  */
 function settleableChains(): ReadonlySet<ChainId> {
   return new Set(registeredAssets().map((asset) => asset.chainId));
+}
+
+const STANDARD_TOOL_NAME_RE = /^[a-z][a-z0-9_]{1,47}$/;
+const CATEGORY_RE = /^[a-z][a-z0-9-]{1,63}$/;
+const TAG_RE = /^[a-z0-9][a-z0-9-]{0,31}$/;
+
+/**
+ * A seeded tool with its `category` and `tags` checked, and defaulted when the
+ * document omits them (hand-written test seeds do).
+ *
+ * Checked here for the reason assets are: `tools` refuses a malformed name or
+ * category with a CHECK, and the refusal would surface in the boot-time upsert,
+ * far from the file that is wrong.
+ */
+function withCategory(tool: Tool, source: string): Tool {
+  if (!STANDARD_TOOL_NAME_RE.test(tool.name) || tool.name.includes('__')) {
+    throw new Error(
+      `${source}: tool ${tool.id} is named "${tool.name}", which is not a standard tool name ` +
+        `(snake_case, at most 48 characters, no "__")`,
+    );
+  }
+
+  const category = tool.category ?? UNCATEGORISED;
+  if (!CATEGORY_RE.test(category)) {
+    throw new Error(
+      `${source}: tool ${tool.name} has category "${category}", expected ${CATEGORY_RE}`,
+    );
+  }
+
+  const tags = tool.tags ?? [];
+  if (!Array.isArray(tags) || tags.some((tag) => typeof tag !== 'string' || !TAG_RE.test(tag))) {
+    throw new Error(`${source}: tool ${tool.name} has tags that are not each ${TAG_RE}`);
+  }
+
+  return { ...tool, category, tags: [...new Set(tags)] };
 }
 
 /** A binding as written in the seed: mappings still in sugar form. */
