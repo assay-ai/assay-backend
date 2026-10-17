@@ -407,4 +407,39 @@ describe('the operator contract editor, against a real database', () => {
     ])) as { name: string; status: string }[];
     expect(tool).toEqual({ name: 'tide_times_for_a_harbour', status: 'DRAFT' });
   });
+
+  it('the local and test seed owns version 1.0.0 of a seeded tool and points current at it', async () => {
+    const id = randomUUID();
+    const tools = new ToolRepository(dataSource);
+    const seed = {
+      id,
+      name: 'get_seeded_example',
+      category: 'misc',
+      tags: ['example'],
+      version: {
+        summary: 'A seeded example.',
+        description: 'A seeded example tool.',
+        inputSchema: { type: 'object', properties: {} },
+        outputSchema: OUTPUT,
+        optionalInputFields: [],
+        optionalOutputFields: [],
+        examples: [{ arguments: {} }],
+        verificationPolicyId: 'policy-default',
+        tier: 'VERIFIED',
+      },
+    };
+    await tools.upsertSeeded([seed]);
+    // A second boot refreshes version 1 from the seed and changes nothing else.
+    await tools.upsertSeeded([{ ...seed, version: { ...seed.version, summary: 'Refreshed.' } }]);
+    contracts.invalidate();
+
+    const served = await contracts.findContract(id);
+    expect(served).toMatchObject({ name: 'get_seeded_example', currentVersion: 1 });
+    expect(served?.version).toMatchObject({
+      semver: '1.0.0',
+      summary: 'Refreshed.',
+      status: 'ACTIVE',
+    });
+    expect(served?.version?.examples).toEqual([{ arguments: {} }]);
+  });
 });
