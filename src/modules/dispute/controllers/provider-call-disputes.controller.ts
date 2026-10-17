@@ -3,7 +3,7 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
-import { CurrentSession, SessionAuthGuard } from '@shared/auth';
+import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 
 import {
   CallDisputeDetailDto,
@@ -50,7 +50,9 @@ export class ProviderCallDisputesController {
     return this.disputes.getForProvider(session.organizationId, params.id);
   }
 
+  /** Person-only, like every provider write (review A-1): an agent key cannot answer for it. */
   @Post(':id/respond')
+  @UseGuards(HumanSessionGuard)
   @ApiOperation({ summary: 'Reply once, before the decision' })
   @ApiResponse({ status: 201, type: CallDisputeDetailDto })
   @ApiResponse({ status: 404, description: 'No such dispute over a call this provider served' })

@@ -36,7 +36,7 @@ import { answerOrQueued } from './approval-response';
 /**
  * `GET /operator/call-disputes`, `GET /operator/call-disputes/:id`,
  * `POST /operator/call-disputes/:id/decide`,
- * `GET /operator/call-disputes/buyers/:organizationId`.
+ * `GET /operator/call-disputes/buyers/:buyerId` (a buyer organization id).
  *
  * The queue of buyer disputes over paid calls (G3.B1), across tenants. Every
  * row carries the buyer's recent dispute history, so a buyer whose disputes
@@ -62,13 +62,11 @@ export class OperatorCallDisputesController {
     return this.disputes.listForOperator(query);
   }
 
-  @Get('buyers/:organizationId')
+  @Get('buyers/:buyerId')
   @ApiOperation({ summary: 'One buyer’s dispute history and filing limit' })
   @ApiResponse({ status: 200, type: BuyerDisputeHistoryDto })
-  async buyer(
-    @Param('organizationId', ParseUUIDPipe) organizationId: string,
-  ): Promise<BuyerDisputeHistoryDto> {
-    return this.disputes.buyerHistory(organizationId);
+  async buyer(@Param('buyerId', ParseUUIDPipe) buyerId: string): Promise<BuyerDisputeHistoryDto> {
+    return this.disputes.buyerHistory(buyerId);
   }
 
   @Get(':id')
