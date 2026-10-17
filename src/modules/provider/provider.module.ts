@@ -25,6 +25,7 @@ import {
   ConfigProviderStakeSource,
   PROVIDER_STAKE_SNAPSHOT,
 } from './services/config-provider-stake.source';
+import { BINDING_STATS_CONFIG, loadBindingStatsConfig } from './constants/binding-stats.constants';
 import { DbProviderRegistry } from './services/db-provider-registry';
 import { DbChainEnrolmentSource } from './services/db-chain-enrolment.source';
 import { DbStakeGraceSource } from './services/db-stake-grace.source';
@@ -116,6 +117,10 @@ import { loadProviderRegistry, loadProviderStakes } from './services/provider-se
     // decides routability, and publishing into a registry that has never heard
     // of you is publishing into silence.
     { provide: PROVIDER_REGISTRY, useExisting: DbProviderRegistry },
+    // The observed-stats window and minimum sample, validated at boot. Read
+    // by the registry (the minimum sample) and exported for the scheduler's
+    // refresh (the window), so both sides of `binding_stats` agree.
+    { provide: BINDING_STATS_CONFIG, useFactory: loadBindingStatsConfig, inject: [ConfigService] },
 
     // The freshness window and the staleness budget are constants with
     // env overrides rather than literals, because the second one is the bound
@@ -175,7 +180,13 @@ import { loadProviderRegistry, loadProviderStakes } from './services/provider-se
     DbChainEnrolmentSource,
     { provide: CHAIN_ENROLMENT_SOURCE, useExisting: DbChainEnrolmentSource },
   ],
-  exports: [PROVIDER_REGISTRY, PROVIDER_STAKE_SOURCE, STAKE_GRACE_SOURCE, CHAIN_ENROLMENT_SOURCE],
+  exports: [
+    PROVIDER_REGISTRY,
+    PROVIDER_STAKE_SOURCE,
+    STAKE_GRACE_SOURCE,
+    CHAIN_ENROLMENT_SOURCE,
+    BINDING_STATS_CONFIG,
+  ],
 })
 export class ProviderModule {}
 

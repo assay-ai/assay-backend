@@ -20,6 +20,7 @@ import { WebSocketEmitterModule } from '@websocket/websocket-emitter.module';
 // Domain Modules
 import { PaymentSchedulerModule } from '@modules/payment/payment-scheduler.module';
 import {
+  ProviderBindingStatsSchedulerModule,
   ProviderSlaWindowSweepSchedulerModule,
   ProviderStakeMonitorSchedulerModule,
 } from '@modules/provider/provider-scheduler.module';
@@ -71,6 +72,8 @@ import { NetworkModule } from '@shared/network/network.module';
     ProviderStakeMonitorSchedulerModule,
     // Closes SLA windows past their 7-day deadline, every five minutes
     ProviderSlaWindowSweepSchedulerModule,
+    // Rebuilds `binding_stats` (the router's observed stats), every five minutes
+    ProviderBindingStatsSchedulerModule,
 
     // Slash disputes: the two due-process sweepers and the execution pass.
     // In the scheduler only, so no API replica holds a key that can take a

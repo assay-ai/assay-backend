@@ -56,13 +56,17 @@ export class ProviderTrafficBucketDto {
   @ApiPropertyOptional({
     nullable: true,
     description:
-      'No per-day latency source exists: `payment_intents` records no latency column, and ' +
-      '`ProviderStats.p50LatencyMs` is a single rolling snapshot, not bucketed by day. Always `null` ' +
-      'until a latency column lands (left undone — see the provider module memory note).',
+      'Median latency of this provider’s paid attempts that day, from the same ' +
+      '`binding_attempts` the router’s `ProviderStats` latency is computed from (data results and ' +
+      'full-budget timeouts; self-calls and request errors excluded). Not narrowed by `agentId`. ' +
+      '`null` on a day with no such attempt, or older than the 7-day observation window.',
   })
   p50LatencyMs: number | null;
 
-  @ApiPropertyOptional({ nullable: true, description: 'See `p50LatencyMs` — always `null` today.' })
+  @ApiPropertyOptional({
+    nullable: true,
+    description: '95th percentile, same source and same `null` rule as `p50LatencyMs`.',
+  })
   p95LatencyMs: number | null;
 }
 
