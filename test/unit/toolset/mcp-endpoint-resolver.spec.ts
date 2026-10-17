@@ -9,7 +9,14 @@ import { AccessEpochService } from '@modules/toolset/services/access-epoch.servi
 import { McpEndpointResolver } from '@modules/toolset/services/mcp-endpoint.resolver';
 
 const ORG = '8192a3b4-2536-4d78-a9fa-0b1c2d3e4f50';
-const TOOLSET = { id: 'ts-1', slug: 'research', name: 'Research', discovery: 'FULL' };
+const TOOLSET = {
+  id: 'ts-1',
+  slug: 'research',
+  name: 'Research',
+  discovery: 'FULL',
+  searchThreshold: 25,
+  pinnedTools: [],
+};
 
 /** The base view is cached once per path; filters are applied after the lookup. */
 describe('McpEndpointResolver', () => {
@@ -23,8 +30,10 @@ describe('McpEndpointResolver', () => {
         },
       } as never,
       { findByToolsets: async () => [] } as never,
-      { current: async () => '7' } as unknown as AccessEpochService,
+      { current: async () => '7', currentShared: async () => '1' } as unknown as AccessEpochService,
       { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' },
+      { findVersion: async () => null } as never,
+      { resolve: async () => null, handlesOf: async () => new Map() } as never,
     );
     return { resolver, lookups };
   }

@@ -51,6 +51,8 @@ function rootView(query = ''): McpEndpointView {
     handle: null,
     baseToolIds: null,
     entryRules: new Map(),
+    settings: null,
+    notice: null,
   };
 }
 
@@ -61,10 +63,12 @@ function toolsetView(toolIds: string[], entry: RoutingRules['entry'] = null): Mc
     path: { kind: McpPathKind.MY_TOOLSET, slug: 'research', version: null },
     kind: EndpointKind.TOOLSET,
     filter: parsed.filter,
-    toolset: { id: TOOLSET_ID, slug: 'research', name: 'Research', version: null },
+    toolset: { id: TOOLSET_ID, slug: 'research', name: 'Research', version: null, latest: false },
     handle: null,
     baseToolIds: toolIds,
     entryRules: entry ? new Map([[TOOL_ID, entry]]) : new Map(),
+    settings: { discovery: 'AUTO', searchThreshold: 25, pinnedTools: [] },
+    notice: null,
   };
 }
 

@@ -9,6 +9,7 @@ import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
 import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
 
 import { MCP_HOST_CONFIG, McpHostConfig } from '../config/mcp-host.config';
+import { HandlesService } from './handles.service';
 import {
   EndpointKind,
   McpPathKind,
@@ -28,6 +29,8 @@ export interface ServerInUseRow {
   readonly parsed: ParsedMcpUrl;
   readonly endpointKind: EndpointKind;
   readonly toolsetId: string | null;
+  /** The version the URL serves when pinned, or the one its calls were served; `null`: a Draft or latest. */
+  readonly toolsetVersion: number | null;
   readonly serverName: string | null;
   readonly client: string | null;
   /** When the Connect sheet handed it out; `null` when it was only ever called. */
@@ -38,6 +41,7 @@ export interface ServerInUseRow {
 
 interface AttributionGroup {
   endpoint_kind: string;
+  endpoint_handle: string | null;
   toolset_id: string | null;
   toolset_version: number | null;
   view_filter: Record<string, unknown> | null;
@@ -61,6 +65,7 @@ export class ConnectUrlsService {
     private readonly toolsets: ToolsetRepository,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
+    private readonly handles: HandlesService,
   ) {}
 
   /** `url` → its parsed and canonical form, or `URL_NOT_RECOGNISED`. Never fetched. */
@@ -123,9 +128,9 @@ export class ConnectUrlsService {
       ),
     ];
     const slugs = new Map(
-      (await this.toolsets.findOwnedByIds(organizationId, toolsetIds)).map((toolset) => [
+      (await this.toolsets.findAnyByIds(toolsetIds)).map((toolset) => [
         toolset.id,
-        toolset.slug,
+        { slug: toolset.slug, own: toolset.ownerOrgId === organizationId },
       ]),
     );
 
@@ -142,6 +147,7 @@ export class ConnectUrlsService {
           parsed,
           endpointKind: group.endpoint_kind as EndpointKind,
           toolsetId: group.toolset_id,
+          toolsetVersion: group.toolset_version ?? null,
           serverName: null,
           client: null,
           handedOutAt: null,
@@ -171,12 +177,15 @@ export class ConnectUrlsService {
         called?.toolsetId ??
         (parsed.path.kind === McpPathKind.MY_TOOLSET
           ? (idsBySlug.get(parsed.path.slug) ?? null)
-          : null);
+          : await this.sharedToolsetIdOf(parsed));
+      const pathVersion =
+        'version' in parsed.path ? (parsed.path as { version: number | null }).version : null;
       rows.set(row.canonicalUrl, {
         canonicalUrl: row.canonicalUrl,
         parsed,
         endpointKind: called?.endpointKind ?? endpointKindOf(parsed.path),
         toolsetId,
+        toolsetVersion: pathVersion ?? called?.toolsetVersion ?? null,
         serverName: row.serverName,
         client: row.client,
         handedOutAt: row.createdAt,
@@ -190,6 +199,22 @@ export class ConnectUrlsService {
     );
   }
 
+  /** The toolset behind a handed-out `/@…` or `/u/…` URL, or `null`. */
+  private async sharedToolsetIdOf(parsed: ParsedMcpUrl): Promise<string | null> {
+    const { path } = parsed;
+    if (path.kind === McpPathKind.UNLISTED_TOOLSET) {
+      return (await this.toolsets.findByUnlistedToken(path.token))?.id ?? null;
+    }
+    if (path.kind !== McpPathKind.PUBLIC_TOOLSET) return null;
+    const owner = await this.handles.resolve(path.handle);
+    if (!owner) return null;
+    const toolset = await this.toolsets.findHolderOfSlug(
+      owner.kind === 'OFFICIAL' ? null : owner.organizationId,
+      path.slug,
+    );
+    return toolset?.id ?? null;
+  }
+
   private attributionGroups(
     table: 'payment_intents' | 'tool_call_records',
     organizationId: string,
@@ -200,7 +225,7 @@ export class ConnectUrlsService {
     // use must not be able to steer "only what's connected" onto it.
     const servedOnly = table === 'tool_call_records' ? 'AND "refusal_code" IS NULL' : '';
     return this.dataSource.query(
-      `SELECT "endpoint_kind", "toolset_id", "toolset_version", "view_filter",
+      `SELECT "endpoint_kind", "endpoint_handle", "toolset_id", "toolset_version", "view_filter",
               max("created_at") AS "last_call_at"
          FROM "${table}"
         WHERE "organization_id" = $1
@@ -208,31 +233,50 @@ export class ConnectUrlsService {
           AND "created_at" >= $3
           AND "endpoint_kind" IS NOT NULL
           ${servedOnly}
-        GROUP BY "endpoint_kind", "toolset_id", "toolset_version", "view_filter"`,
+        GROUP BY "endpoint_kind", "endpoint_handle", "toolset_id", "toolset_version", "view_filter"`,
       [organizationId, agentId, since],
     );
   }
 }
 
 /**
- * A call's attribution → the URL it came through. Only the forms T1 serves
- * can be rebuilt: `/` and the organization's own `/my/{slug}`.
+ * A call's attribution → the URL it came through: `/`, the organization's own
+ * `/my/{slug}[@n]`, or another organization's `/@{handle}/{slug}@n`. A
+ * link-only call is not rebuilt — its token is not in the attribution, and
+ * the Connect sheet's own row for it names the link.
  */
 function parsedFromAttribution(
   group: AttributionGroup,
-  slugs: ReadonlyMap<string, string>,
+  slugs: ReadonlyMap<string, { slug: string; own: boolean }>,
 ): ParsedMcpUrl | null {
   const filter = viewFilterFromRecord(group.view_filter);
   if (group.endpoint_kind === EndpointKind.ROOT) {
     return { path: { kind: McpPathKind.ROOT }, filter };
   }
   if (group.endpoint_kind === EndpointKind.TOOLSET && group.toolset_id) {
-    const slug = slugs.get(group.toolset_id);
-    if (!slug) return null;
-    return {
-      path: { kind: McpPathKind.MY_TOOLSET, slug, version: group.toolset_version ?? null },
-      filter,
-    };
+    const toolset = slugs.get(group.toolset_id);
+    if (!toolset) return null;
+    if (toolset.own && !group.endpoint_handle) {
+      return {
+        path: {
+          kind: McpPathKind.MY_TOOLSET,
+          slug: toolset.slug,
+          version: group.toolset_version ?? null,
+        },
+        filter,
+      };
+    }
+    if (group.endpoint_handle) {
+      return {
+        path: {
+          kind: McpPathKind.PUBLIC_TOOLSET,
+          handle: group.endpoint_handle,
+          slug: toolset.slug,
+          version: group.toolset_version ?? null,
+        },
+        filter,
+      };
+    }
   }
   return null;
 }

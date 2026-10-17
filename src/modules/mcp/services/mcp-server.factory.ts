@@ -1,3 +1,4 @@
+import { listMetaOf } from '@modules/toolset/domain/view';
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 
@@ -120,7 +121,11 @@ export class McpServerFactory {
       );
       // An unknown name in `?tools=` is ignored, and said so (§7.4).
       const ignored = scope ? await this.catalogue.ignoredTools(scope) : [];
-      return ignored.length > 0 ? { tools, _meta: { [ASSAY_IGNORED_TOOLS]: ignored } } : { tools };
+      const meta = {
+        ...listMetaOf(scope?.view),
+        ...(ignored.length > 0 ? { [ASSAY_IGNORED_TOOLS]: ignored } : {}),
+      };
+      return Object.keys(meta).length > 0 ? { tools, _meta: meta } : { tools };
     });
 
     server.setRequestHandler(CallToolRequestSchema, async (request) => {

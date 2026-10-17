@@ -1,5 +1,8 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 
+import { ToolsetEntity } from '@database/postgres/entities/toolset.entity';
+import { ToolsetVersionEntity } from '@database/postgres/entities/toolset-version.entity';
+import { ToolsetVersionRepository } from '@database/postgres/repositories/toolset-sharing.repository';
 import {
   ToolsetEntryRepository,
   ToolsetRepository,
@@ -21,9 +24,14 @@ import {
   endpointKindOf,
   withoutDefaultDiscovery,
 } from '../domain/mcp-url';
-import { McpEndpointView, entryRulesOf } from '../domain/view';
+import { servesPublicPath, servesUnlistedPath, sharingEndsAt } from '../domain/sharing';
+import { readSnapshotEntries } from '../domain/snapshot';
+import { McpEndpointView, StoredEntryRule, ViewNotice, entryRulesOf } from '../domain/view';
 import { AccessEpochService } from './access-epoch.service';
 import { ACCESS_CACHE_TTL_MS } from './access.resolver';
+import { HandlesService } from './handles.service';
+import { sharingStateOf } from './sharing-row';
+import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
 
 /** What a path serves, before any view filter. */
 type BaseView = Omit<McpEndpointView, 'canonicalUrl' | 'filter'> & {
@@ -34,6 +42,8 @@ type BaseView = Omit<McpEndpointView, 'canonicalUrl' | 'filter'> & {
 interface CachedView {
   readonly epoch: string;
   readonly view: BaseView;
+  /** A grace period or an alias ends: the cached view is stale from then. */
+  readonly validUntil: number | null;
 }
 
 /** Base views kept per process: organizations × the toolsets they serve. */
@@ -43,26 +53,25 @@ export const ENDPOINT_CACHE_MAX_ENTRIES = 10_000;
  * A parsed MCP URL → what it serves, for the organization asking
  * (design spec §7.4, "Resolution rules").
  *
- * T1 serves `/` and `/my/{slug}` (the live Draft). The other forms parse —
- * so their canonical URLs and browser redirects are already final — and
- * answer the same 404 here until the phase that serves them:
- *
  * ```text
- * /my/{slug}@n          T2  published versions
- * /c/{category}         T2
- * /@{handle}/{slug}[@n] T2  PUBLIC toolsets
- * /u/{token}[@n]        T2  UNLISTED toolsets
- * /@{handle}            T4  provider tools
+ * /                       the whole LISTED catalogue
+ * /my/{slug}              the org's own Draft, live
+ * /my/{slug}@n            the org's own published version n
+ * /@{handle}/{slug}[@n]   PUBLIC and LISTED, or in its PUBLIC grace period — else 404
+ * /u/{token}[@n]          the shared toolset holding this token, or one in grace — else 404
+ * /@{handle}              T4 (provider tools): 404
+ * /c/{category}           the discovery half of T2
  * ```
  *
- * Each is one `case` in {@link resolvePath}. A toolset of another
- * organization is the same 404 as a missing one.
+ * Every refusal is the **same** 404 as a missing slug: a PRIVATE or UNLISTED
+ * toolset behind a guessable `/@handle/slug`, another organization's `/my/`,
+ * a removed toolset, a frozen or expired handle, a version that does not
+ * exist. A takedown stops every URL but `/my/` at once.
  *
- * The base view (what the path serves, before any filter) is cached per
- * organization and canonical path, against the organization's access epoch,
- * which a Draft edit bumps, in a bounded LRU. The view filters are applied
- * after the lookup, so `?tools=` variants an agent invents never multiply the
- * entries.
+ * Shared URLs serve published versions only, never the Draft; a URL with no
+ * `@n` serves the latest. The view of a shared URL is the same for every
+ * organization, so it is cached once under the sharing epoch; an own URL is
+ * cached per organization under its access epoch.
  */
 @Injectable()
 export class McpEndpointResolver {
@@ -76,6 +85,9 @@ export class McpEndpointResolver {
     private readonly entries: ToolsetEntryRepository,
     private readonly epochs: AccessEpochService,
     @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
+    private readonly versions: ToolsetVersionRepository,
+    private readonly handles: HandlesService,
+    @Optional() @Inject(TOOLSET_CLOCK) private readonly now: ToolsetClock = systemClock,
   ) {}
 
   /** The view `parsed` serves to `organizationId`, or `MCP_URL_NOT_FOUND`. */
@@ -92,17 +104,37 @@ export class McpEndpointResolver {
         handle: null,
         baseToolIds: null,
         entryRules: new Map(),
+        settings: null,
+        notice: null,
         defaultDiscovery: null,
       };
     }
 
-    const key = `${organizationId}:${canonicalPath(path)}`;
-    const epoch = await this.epochs.current(organizationId);
+    const shared =
+      path.kind === McpPathKind.PUBLIC_TOOLSET || path.kind === McpPathKind.UNLISTED_TOOLSET;
+    const key = shared
+      ? `shared:${canonicalPath(path)}`
+      : `${organizationId}:${canonicalPath(path)}`;
+    const epoch = shared
+      ? await this.epochs.currentShared()
+      : await this.epochs.current(organizationId);
     const cached = this.cache.get(key);
-    if (epoch !== null && cached?.epoch === epoch) return cached.view;
+    const nowMs = this.now().getTime();
+    if (
+      epoch !== null &&
+      cached?.epoch === epoch &&
+      (cached.validUntil === null || cached.validUntil > nowMs)
+    ) {
+      return cached.view;
+    }
 
     const view = await this.resolvePath(organizationId, path);
-    if (epoch !== null) this.cache.set(key, { epoch, view });
+    if (epoch !== null) {
+      const ends = [view.notice?.sharingEndsAt?.getTime()].filter(
+        (value): value is number => typeof value === 'number',
+      );
+      this.cache.set(key, { epoch, view, validUntil: ends.length ? Math.min(...ends) : null });
+    }
     return view;
   }
 
@@ -119,13 +151,13 @@ export class McpEndpointResolver {
   private async resolvePath(organizationId: string, path: McpPath): Promise<BaseView> {
     switch (path.kind) {
       case McpPathKind.MY_TOOLSET:
-        // A published version is T2: no version exists yet, so a pin is a 404.
-        if (path.version !== null) throw McpErrors.urlNotFound();
         return this.myToolsetView(organizationId, path);
+      case McpPathKind.PUBLIC_TOOLSET:
+        return this.publicToolsetView(path);
+      case McpPathKind.UNLISTED_TOOLSET:
+        return this.unlistedToolsetView(path);
       case McpPathKind.CATEGORY:
       case McpPathKind.HANDLE:
-      case McpPathKind.PUBLIC_TOOLSET:
-      case McpPathKind.UNLISTED_TOOLSET:
       default:
         throw McpErrors.urlNotFound();
     }
@@ -137,6 +169,14 @@ export class McpEndpointResolver {
   ): Promise<BaseView> {
     const toolset = await this.toolsets.findOwnedBySlug(organizationId, path.slug);
     if (!toolset) throw McpErrors.urlNotFound();
+    if (path.version !== null) {
+      // `/my/{slug}@n` serves the owner's published version even after a takedown.
+      return this.versionView(path, toolset, await this.requireVersion(toolset, path.version), {
+        handle: null,
+        latest: false,
+        notice: null,
+      });
+    }
 
     const rows = await this.entries.findByToolsets([toolset.id]);
     const entryRules = new Map<string, EntryRoutingRules>();
@@ -148,11 +188,142 @@ export class McpEndpointResolver {
     return {
       path,
       kind: endpointKindOf(path),
-      toolset: { id: toolset.id, slug: toolset.slug, name: toolset.name, version: null },
+      toolset: {
+        id: toolset.id,
+        slug: toolset.slug,
+        name: toolset.name,
+        version: null,
+        latest: false,
+      },
       handle: null,
       baseToolIds: rows.map((row) => row.toolId),
       entryRules,
+      settings: {
+        discovery: toolset.discovery,
+        searchThreshold: toolset.searchThreshold,
+        pinnedTools: toolset.pinnedTools,
+      },
+      notice: null,
       defaultDiscovery: toolset.discovery.toLowerCase() as DiscoveryMode,
     };
   }
+
+  private async publicToolsetView(
+    path: Extract<McpPath, { kind: McpPathKind.PUBLIC_TOOLSET }>,
+  ): Promise<BaseView> {
+    const owner = await this.handles.resolve(path.handle);
+    if (!owner) throw McpErrors.urlNotFound();
+    const toolset = await this.toolsets.findHolderOfSlug(
+      owner.kind === 'OFFICIAL' ? null : owner.organizationId,
+      path.slug,
+    );
+    if (!toolset) throw McpErrors.urlNotFound();
+    const state = sharingStateOf(toolset);
+    if (!servesPublicPath(state, this.now())) throw McpErrors.urlNotFound();
+
+    const version = path.version ?? toolset.lastSharedVersion;
+    if (!version) throw McpErrors.urlNotFound();
+    return this.versionView(path, toolset, await this.requireVersion(toolset, version, true), {
+      handle: path.handle,
+      latest: path.version === null,
+      notice: noticeOf(
+        sharingEndsAt(state, 'PUBLIC'),
+        owner.kind === 'ORG' ? owner.renamedTo : null,
+        owner.kind === 'ORG' ? owner.aliasUntil : null,
+      ),
+    });
+  }
+
+  private async unlistedToolsetView(
+    path: Extract<McpPath, { kind: McpPathKind.UNLISTED_TOOLSET }>,
+  ): Promise<BaseView> {
+    const toolset = await this.toolsets.findByUnlistedToken(path.token);
+    if (!toolset || toolset.unlistedToken !== path.token) throw McpErrors.urlNotFound();
+    const state = sharingStateOf(toolset);
+    if (!servesUnlistedPath(state, this.now())) throw McpErrors.urlNotFound();
+    if (toolset.ownerOrgId !== null) {
+      // A frozen handle stops every URL of its organization, links included.
+      const handle = (await this.handles.handlesOf([toolset.ownerOrgId])).get(toolset.ownerOrgId);
+      if (!handle) throw McpErrors.urlNotFound();
+    }
+
+    const version = path.version ?? toolset.lastSharedVersion;
+    if (!version) throw McpErrors.urlNotFound();
+    return this.versionView(path, toolset, await this.requireVersion(toolset, version, true), {
+      handle: null,
+      latest: path.version === null,
+      notice: noticeOf(sharingEndsAt(state, 'UNLISTED'), null, null),
+    });
+  }
+
+  /** `shared`: a shared URL, which never serves past the last version published while shared. */
+  private async requireVersion(
+    toolset: ToolsetEntity,
+    version: number,
+    shared = false,
+  ): Promise<ToolsetVersionEntity> {
+    const newest = shared ? toolset.lastSharedVersion : toolset.latestVersion;
+    if (newest === null || version > newest) throw McpErrors.urlNotFound();
+    const row = await this.versions.findVersion(toolset.id, version);
+    if (!row) throw McpErrors.urlNotFound();
+    return row;
+  }
+
+  private versionView(
+    path: McpPath,
+    toolset: ToolsetEntity,
+    row: ToolsetVersionEntity,
+    options: { handle: string | null; latest: boolean; notice: ViewNotice | null },
+  ): BaseView {
+    const snapshot = readSnapshotEntries(row.entries);
+    const entryRules = new Map<string, EntryRoutingRules>();
+    for (const entry of snapshot) {
+      const stored: StoredEntryRule = {
+        providerMode: entry.providerMode,
+        providerIds: entry.providerIds,
+        minTier: entry.minTier,
+        maxPriceAmount: entry.maxPrice?.amount ?? null,
+        maxPriceAssetId: entry.maxPrice?.asset ?? null,
+        maxPriceDecimals: entry.maxPrice?.decimals ?? null,
+        minQuality: entry.minQuality === null ? null : String(entry.minQuality),
+        onEmpty: entry.onEmpty,
+      };
+      const rules = entryRulesOf(stored);
+      if (rules) entryRules.set(entry.toolId, rules);
+    }
+    return {
+      path,
+      kind: endpointKindOf(path),
+      toolset: {
+        id: toolset.id,
+        slug: toolset.slug,
+        name: row.name,
+        version: row.version,
+        latest: options.latest,
+      },
+      handle: options.handle,
+      baseToolIds: snapshot.map((entry) => entry.toolId),
+      entryRules,
+      settings: {
+        discovery: row.discovery,
+        searchThreshold: row.searchThreshold,
+        pinnedTools: row.pinnedTools,
+      },
+      notice: options.notice,
+      defaultDiscovery: row.discovery.toLowerCase() as DiscoveryMode,
+    };
+  }
+}
+
+function noticeOf(
+  sharingEnds: Date | null,
+  renamedTo: string | null,
+  aliasUntil: Date | null,
+): ViewNotice | null {
+  const ends = [sharingEnds, aliasUntil].filter((date): date is Date => date !== null);
+  if (ends.length === 0 && renamedTo === null) return null;
+  return {
+    sharingEndsAt: ends.length ? new Date(Math.min(...ends.map((date) => date.getTime()))) : null,
+    renamedTo,
+  };
 }
