@@ -521,6 +521,9 @@ describe('buyer debt migrations, down and up again', () => {
     // The migrations after these sit on top of them and touch none of their
     // objects: undo those first, newest first.
     const later = [
+      'ToolBindingAuthMode1762000000002',
+      'CreateBindingCredentials1762000000001',
+      'DropConnectivityEgressIps1762000000000',
       'ToolDraftIntegrity1761600000000',
       'BindingContractTerms1761500000001',
       'ToolVersions1761500000000',

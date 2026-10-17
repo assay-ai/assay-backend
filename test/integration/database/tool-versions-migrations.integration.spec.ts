@@ -79,7 +79,7 @@ describe('tool version migrations: up, down, up', () => {
     expect(await columns()).toEqual(ALL);
 
     const applied = (await dataSource.query(
-      `SELECT name FROM migrations ORDER BY id DESC LIMIT 3`,
+      `SELECT name FROM migrations WHERE name IN ('BindingContractTerms1761500000001', 'ToolDraftIntegrity1761600000000', 'ToolVersions1761500000000')`,
     )) as { name: string }[];
     expect(applied.map((row) => row.name).sort()).toEqual([
       'BindingContractTerms1761500000001',
@@ -87,9 +87,14 @@ describe('tool version migrations: up, down, up', () => {
       'ToolVersions1761500000000',
     ]);
 
-    await dataSource.undoLastMigration({ transaction: 'each' });
-    await dataSource.undoLastMigration({ transaction: 'each' });
-    await dataSource.undoLastMigration({ transaction: 'each' });
+    // Back to before ToolVersions, however many migrations came after it.
+    for (;;) {
+      const [last] = (await dataSource.query(
+        `SELECT name FROM migrations ORDER BY timestamp DESC, id DESC LIMIT 1`,
+      )) as { name: string }[];
+      await dataSource.undoLastMigration({ transaction: 'each' });
+      if (last?.name === 'ToolVersions1761500000000') break;
+    }
     expect(await columns()).toEqual([]);
 
     await dataSource.runMigrations({ transaction: 'each' });

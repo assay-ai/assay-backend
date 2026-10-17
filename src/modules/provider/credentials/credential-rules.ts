@@ -1,6 +1,7 @@
 import { RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 import { isConstNode } from '@modules/tool/domain/mapping/normalize';
 
+import { ProviderErrors } from '../errors/provider.errors';
 import { CredentialHeader } from './credential-vault.crypto';
 
 /**
@@ -124,4 +125,25 @@ export function secretConstantHeaders(mapping: RequestMappingSpec): string[] {
 /** Scheme + host + port, default port omitted, host lowercased. */
 export function originOf(endpoint: string): string {
   return new URL(endpoint).origin;
+}
+
+/**
+ * Throws unless `origin` is the draft endpoint's or the published revision's,
+ * and the headers pass `credentialHeaderProblems`.
+ */
+export function assertCredentialPut(
+  draftEndpoint: string,
+  publishedEndpoint: string | null,
+  origin: string,
+  headers: readonly CredentialHeader[],
+): void {
+  const allowed = [originOf(draftEndpoint)];
+  if (publishedEndpoint) allowed.push(originOf(publishedEndpoint));
+  if (!allowed.includes(origin)) {
+    throw ProviderErrors.credentialOriginMismatch();
+  }
+  const problems = credentialHeaderProblems(headers);
+  if (problems.length > 0) {
+    throw ProviderErrors.invalidCredentialHeaders({ problems });
+  }
 }

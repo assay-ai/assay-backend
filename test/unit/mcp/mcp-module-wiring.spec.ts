@@ -29,6 +29,7 @@ import { AccountBlockRepository } from '@database/postgres/repositories/account-
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { EvmGasGrantRepository } from '@database/postgres/repositories/evm-gas-grant.repository';
+import { BindingCredentialRepository } from '@database/postgres/repositories/binding-credential.repository';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
@@ -148,6 +149,7 @@ import { ChainId } from '@modules/chains/ports/caip.types';
     // `DatabaseToolContracts` reads the contracts from `tool_versions` (T3).
     { provide: ToolVersionRepository, useValue: { find: async () => [] } },
     // `DatabaseToolCatalogue` reads published revisions from `binding_versions`.
+    { provide: BindingCredentialRepository, useValue: { findForOrigin: async () => null } },
     { provide: BindingVersionRepository, useValue: { find: async () => [] } },
     // `ChainsModule` imports `EvmModule`, whose `EvmGasGrantService`
     // writes the EVM gas-grant ledger. Another `@Global` `PostgresModule` repository,
@@ -215,6 +217,7 @@ import { ChainId } from '@modules/chains/ports/caip.types';
     ToolRepository,
     ToolVersionRepository,
     BindingVersionRepository,
+    BindingCredentialRepository,
     EvmGasGrantRepository,
     EvmChainStateRepository,
     ProviderRepository,
