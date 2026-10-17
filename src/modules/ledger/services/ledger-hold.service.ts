@@ -27,12 +27,9 @@ import { runInLedgerTransaction } from './ledger-transaction.util';
 /**
  * Holds — the mechanism that makes settlement conditional without a refund.
  *
- * Every method here is write-through: a hold is never buffered. The asymmetry
- * is this — a crash losing a
- * buffered `PROVIDER_CREDIT` costs the platform a reconciliation entry, while a
- * crash losing a `HOLD_CREATE` lets an agent spend money it has already
- * committed. One of those is an accounting chore and the other is a hole in the
- * float, so only one of them is allowed to sit in memory.
+ * Every method here is write-through: a hold is durable before the caller is
+ * answered, because a lost `HOLD_CREATE` would let an agent spend money it has
+ * already committed.
  */
 @Injectable()
 export class LedgerHoldService {
