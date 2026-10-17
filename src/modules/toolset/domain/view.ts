@@ -4,7 +4,7 @@ import { EntryRoutingRules, OnEmpty, ProviderMode } from '@modules/tool/domain/r
 import { PricingMode, Tool, categoryOf } from '@modules/tool/ports/tool.types';
 import { MoneyUtil } from '@utils/money.util';
 
-import { EndpointKind, McpPath, ViewFilter } from './mcp-url';
+import { DiscoveryMode, EndpointKind, McpPath, ViewFilter } from './mcp-url';
 
 /**
  * What one MCP URL serves, before access (design spec §7.3):
@@ -30,7 +30,31 @@ export interface McpEndpointView {
   readonly baseToolIds: readonly string[] | null;
   /** The entry rules of the toolset this URL serves, by tool id. */
   readonly entryRules: ReadonlyMap<string, EntryRoutingRules>;
+  /**
+   * `/c/{category}`: the path's own topic, applied like `?category=` (and
+   * intersected with it). Absent or `null` elsewhere.
+   */
+  readonly baseCategory?: string | null;
+  /**
+   * How `tools/list` presents this URL (§7.4, "Discovery modes"), before a
+   * `?discovery=` override. Absent means the path's static default with no
+   * pins — see `discoveryOf` — so a resolver case that predates T2 still
+   * serves a sensible list.
+   */
+  readonly discovery?: ViewDiscovery;
 }
+
+/** A URL's discovery settings: the toolset's, or the path's defaults. */
+export interface ViewDiscovery {
+  readonly mode: DiscoveryMode;
+  /** AUTO turns to SEARCH above this many tools in view ∩ access. */
+  readonly searchThreshold: number;
+  /** The URL's "Always loaded" names (the toolset's, or the root's), at most 5. */
+  readonly pinnedTools: readonly string[];
+}
+
+/** The default `search_threshold` (design spec §13 D2). */
+export const DEFAULT_SEARCH_THRESHOLD = 25;
 
 export interface ViewToolset {
   readonly id: string;
@@ -79,7 +103,7 @@ export function entryRulesOf(entry: StoredEntryRule): EntryRoutingRules | null {
 
 /** The view's tools from `catalogue`, in the URL's order, and the `?tools=` names it ignored. */
 export function selectViewTools(
-  view: Pick<McpEndpointView, 'baseToolIds' | 'filter'>,
+  view: Pick<McpEndpointView, 'baseToolIds' | 'filter' | 'baseCategory'>,
   catalogue: readonly Tool[],
 ): { readonly tools: readonly Tool[]; readonly ignoredTools: readonly string[] } {
   const byId = new Map(catalogue.map((tool) => [tool.id, tool]));
@@ -110,6 +134,10 @@ export function selectViewTools(
   if (view.filter.categories) {
     const categories = new Set(view.filter.categories);
     tools = tools.filter((tool) => categories.has(categoryOf(tool)));
+  }
+
+  if (view.baseCategory) {
+    tools = tools.filter((tool) => categoryOf(tool) === view.baseCategory);
   }
 
   return { tools, ignoredTools: ignored.sort() };
