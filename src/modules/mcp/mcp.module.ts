@@ -170,6 +170,7 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
   ],
   exports: [
     McpCatalogueService,
+    McpDiscoveryService,
     McpToolCallService,
     McpServerFactory,
     MCP_SESSION_SOURCE,
