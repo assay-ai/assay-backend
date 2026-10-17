@@ -130,20 +130,21 @@ export class ContractLifecycleService {
     const recipients = (await this.dataSource.query(
       `SELECT org_id AS "orgId", bool_or(provider) AS "provider" FROM (
          SELECT organization_id AS org_id, true AS provider FROM tool_bindings
-          WHERE tool_id = $1
-            AND $2 = ANY (string_to_array(replace(replace(tool_version_range, '^', ''), ' ', ''), '||')::int[])
+          WHERE tool_id = $1::uuid
+            AND $2::int = ANY (string_to_array(replace(replace(tool_version_range, '^', ''), ' ', ''), '||')::int[])
          UNION ALL
          SELECT organization_id, false FROM payment_intents
-          WHERE tool_id = $1 AND created_at > now() - make_interval(days => $3)
+          WHERE tool_id = $1::uuid AND created_at > now() - make_interval(days => $3)
          UNION ALL
+         -- tool_call_records.tool_id is a varchar column.
          SELECT organization_id, false FROM tool_call_records
-          WHERE tool_id = $1 AND refusal_code IS NULL
+          WHERE tool_id = $1::text AND refusal_code IS NULL
             AND created_at > now() - make_interval(days => $3)
          UNION ALL
          SELECT t.owner_org_id, false FROM toolset_entries e
            JOIN toolsets t ON t.id = e.toolset_id
-          WHERE e.tool_id = $1 AND t.owner_org_id IS NOT NULL AND t.deleted_at IS NULL
-            AND $2 = ANY (string_to_array(replace(replace(coalesce(e.tool_version_range, ''), '^', ''), ' ', ''), '||')::int[])
+          WHERE e.tool_id = $1::uuid AND t.owner_org_id IS NOT NULL AND t.deleted_at IS NULL
+            AND $2::int = ANY (string_to_array(replace(replace(coalesce(e.tool_version_range, ''), '^', ''), ' ', ''), '||')::int[])
        ) affected
        WHERE org_id IS NOT NULL
        GROUP BY org_id

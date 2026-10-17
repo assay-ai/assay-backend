@@ -58,16 +58,17 @@ describe('toolset publishing migrations: up, down, up', () => {
       'toolset_versions',
     ]);
 
-    const applied = (await dataSource.query(
-      `SELECT name FROM migrations ORDER BY id DESC LIMIT 2`,
-    )) as { name: string }[];
-    expect(applied.map((row) => row.name).sort()).toEqual([
-      'OrgHandles1761400000000',
-      'ToolsetPublishing1761400000001',
-    ]);
-
-    await dataSource.undoLastMigration({ transaction: 'each' });
-    await dataSource.undoLastMigration({ transaction: 'each' });
+    // Undo everything newer than the two T2 migrations first (T3 came later),
+    // then the two themselves.
+    const t2 = ['OrgHandles1761400000000', 'ToolsetPublishing1761400000001'];
+    let undone: string[] = [];
+    while (!t2.every((name) => undone.includes(name))) {
+      const [last] = (await dataSource.query(
+        `SELECT name FROM migrations ORDER BY id DESC LIMIT 1`,
+      )) as { name: string }[];
+      await dataSource.undoLastMigration({ transaction: 'each' });
+      undone = [...undone, last.name];
+    }
     expect(await tables()).toEqual([]);
 
     await dataSource.runMigrations({ transaction: 'each' });
