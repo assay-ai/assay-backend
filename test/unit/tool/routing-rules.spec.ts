@@ -384,6 +384,69 @@ describe('routing rules — the router, in both payment phases', () => {
     ).resolves.toMatchObject({ providerId: 'p2' });
   });
 
+  describe('FALLBACK_BEST is decided on the whole pool, then the pin applies', () => {
+    const onlyP1 = {
+      agent: null,
+      entry: ENTRY({
+        mode: ProviderMode.ONLY,
+        providerIds: ['p1'],
+        onEmpty: OnEmpty.FALLBACK_BEST,
+      }),
+    };
+
+    it('offer() never falls back while the entry list has an eligible provider', async () => {
+      const { router: r } = router();
+      const offer = await r.offer(TOOL_ID, { ...ROUTING_CONTEXT, rules: onlyP1 });
+      expect(offer.providerId).toBe('p1');
+      expect(offer.fellBack).toBeUndefined();
+    });
+
+    it('a voucher pinned to a provider outside the list is PAYEE_NO_LONGER_ELIGIBLE, in offer and route', async () => {
+      const { router: r, invoker } = router();
+      const context = { ...ROUTING_CONTEXT, onlyProviderId: 'p2', rules: onlyP1 };
+
+      const refusal = await r.offer(TOOL_ID, context).catch((error: unknown) => error);
+      expect(refusal).toMatchObject({ errorCode: ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES });
+      expect(
+        (refusal as { context: { details: { providers: unknown[] } } }).context.details.providers,
+      ).toEqual([
+        expect.objectContaining({
+          providerId: 'p2',
+          reason: RuleRejectionReason.PAYEE_NO_LONGER_ELIGIBLE,
+          rule: RuleRejectionReason.NOT_IN_ALLOWED_PROVIDERS,
+        }),
+      ]);
+
+      await expect(
+        r.route({ toolId: TOOL_ID, input: { query: 'Paris' }, callId: 'call-2', context }),
+      ).rejects.toMatchObject({ errorCode: ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES });
+      expect(invoker.invocations).toHaveLength(0);
+    });
+
+    it('falls back for the pin only when the list leaves nobody in the whole pool', async () => {
+      const { router: r } = buildRouter({
+        bindings,
+        providers,
+        // p1 is unstaked, so the entry list leaves nobody.
+        stakes: { p2: usdc(1000) },
+        invoker: new ScriptedInvoker({}),
+      });
+      const offer = await r.offer(TOOL_ID, {
+        ...ROUTING_CONTEXT,
+        onlyProviderId: 'p2',
+        rules: onlyP1,
+      });
+      expect(offer).toMatchObject({ providerId: 'p2', fellBack: true });
+    });
+
+    it('a failover exclusion does not trigger the fallback', async () => {
+      const { router: r } = router();
+      await expect(
+        r.offer(TOOL_ID, { ...ROUTING_CONTEXT, excludeProviderIds: ['p1'], rules: onlyP1 }),
+      ).rejects.toBeDefined();
+    });
+  });
+
   it('quoteFromCandidates prices a snapshot without gathering again', async () => {
     const { router: r } = router();
     const snapshot = await r.snapshotCandidates(TOOL_ID);

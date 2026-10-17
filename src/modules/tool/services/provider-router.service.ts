@@ -475,6 +475,26 @@ export class ProviderRouterService {
     return fallback.eligible.length > 0 ? { ...fallback, fellBack: true } : fallback;
   }
 
+  /**
+   * Whether FALLBACK_BEST applies to this call: the entry asks for it, and its
+   * rules leave no eligible provider in `pool` — judged with no pin and no
+   * failover exclusion, so the answer is the same in `offer()`, in the voucher
+   * retry and on every failover attempt.
+   */
+  private fallsBackOn(
+    pool: readonly RoutingCandidate[],
+    context: RoutingContext,
+    now: Date,
+  ): boolean {
+    if (!fallsBack(context.rules)) return false;
+    const unpinned: RoutingContext = {
+      ...context,
+      onlyProviderId: undefined,
+      excludeProviderIds: [],
+    };
+    return this.eligibleUnder(pool, unpinned, context.rules, now).eligible.length === 0;
+  }
+
   private eligibleUnder(
     candidates: readonly RoutingCandidate[],
     context: RoutingContext,
@@ -637,13 +657,31 @@ export class ProviderRouterService {
     // retry's pool is `onlyProviderId ∩ allowProviderIds` minus the rule
     // exclusions. A pinned payee the rules now drop is
     // `PAYEE_NO_LONGER_ELIGIBLE` (see `unroutable`).
-    const pool = candidates.filter(
-      (candidate) =>
-        (!context.onlyProviderId || candidate.binding.providerId === context.onlyProviderId) &&
-        servesCallClass(candidate.binding, context.callClass),
+    //
+    // FALLBACK_BEST is decided on the WHOLE pool of this call class — before
+    // the pin and before the failover exclusions — so the voucher retry makes
+    // the same decision `offer()` made: it falls back only when the entry's
+    // rules leave nobody at all. Deciding it on the pinned pool would let a
+    // voucher naming a provider outside an ONLY list "fall back" onto itself.
+    const classPool = candidates.filter((candidate) =>
+      servesCallClass(candidate.binding, context.callClass),
     );
-    const { eligible, rejected, ruleRejected, fellBack, settlementChainOf } =
-      this.eligibleUnderRules(pool, context, now);
+    const fallingBack = this.fallsBackOn(classPool, context, now);
+    const rules = fallingBack
+      ? withoutEntryPreferences(context.rules as RoutingRules)
+      : context.rules;
+    const pool = classPool.filter(
+      (candidate) =>
+        !context.onlyProviderId || candidate.binding.providerId === context.onlyProviderId,
+    );
+    const { eligible, rejected, ruleRejected, settlementChainOf } = this.eligibleUnder(
+      pool,
+      context,
+      rules,
+      now,
+    );
+    // The receipt says "fell back" only for a call that was actually served so.
+    const fellBack = fallingBack && eligible.length > 0;
 
     if (eligible.length === 0) {
       return { picked: null, rejected, ruleRejected, fellBack, settlementChainOf };
