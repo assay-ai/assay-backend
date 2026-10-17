@@ -19,6 +19,7 @@ import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { AppError } from '@shared/errors/app-errors';
 
 import { McpScope } from '../ports/mcp-scope';
+import { MCP_RATE_LIMITS, McpRateLimiter, refusalKey } from './mcp-rate-limiter.service';
 import { McpSession } from '../ports/mcp-session.port';
 
 /** The refusals a refused-call row is written for, and the layer each belongs to. */
@@ -42,7 +43,8 @@ export const REPEAT_WINDOW_SECONDS = 60 * 60;
 
 /** What the MCP server adds to a refusal's `_meta["x402/error"]`. */
 export interface RefusalNotice {
-  readonly callId: string;
+  /** `null` when the agent is past its per-minute cap: the refusal is counted, not stored. */
+  readonly callId: string | null;
   readonly fixUrl: string | null;
 }
 
@@ -63,6 +65,7 @@ export class McpCallRecorder {
     @Optional() @Inject(MCP_HOST_CONFIG) private readonly host?: McpHostConfig,
     @Optional() private readonly cache?: CacheService,
     @Optional() @Inject(NOTIFICATION_PORT) private readonly notifications?: NotificationPort,
+    @Optional() private readonly limiter?: McpRateLimiter,
   ) {}
 
   /** Records `error` as a refused call when it is one; returns what the agent is told. */
@@ -76,6 +79,15 @@ export class McpCallRecorder {
     if (!(error instanceof AppError)) return null;
     const layer = layerOf(error);
     if (!layer || error.context?.intentId) return null;
+
+    // Every refusal counts towards the agent's limit; only the first few a
+    // minute are stored, so a looping agent cannot grow the table at will.
+    const counted = await this.limiter?.take(
+      refusalKey(session.agentId),
+      MCP_RATE_LIMITS.refusalRowsPerMinute,
+    );
+    await this.alertOnRepeat(session, toolName, error.errorCode);
+    if (counted && !counted.allowed) return { callId: null, fixUrl: null };
 
     const callId = randomUUID();
     const details = (error.context?.details as Record<string, unknown> | undefined) ?? null;
@@ -91,7 +103,6 @@ export class McpCallRecorder {
       latencyMs: Date.now() - startedAt,
       attribution: scope?.attribution ?? null,
     });
-    await this.alertOnRepeat(session, toolName, error.errorCode);
 
     return { callId, fixUrl: this.fixUrlOf(error.errorCode, session, callId) };
   }
@@ -103,8 +114,11 @@ export class McpCallRecorder {
    */
   private async alertOnRepeat(session: McpSession, toolName: string, code: string): Promise<void> {
     if (!this.cache || !this.notifications) return;
+    // The name is the agent's own input: kept to the characters a tool name
+    // can have, and short, before it reaches a key, a title or a body.
+    const name = safeToolName(toolName);
     try {
-      const key = `assay:refusal-repeat:${session.agentId}:${toolName}:${code}`;
+      const key = `assay:refusal-repeat:${session.agentId}:${name}:${code}`;
       const redis = this.cache.getRedisClient();
       const count = await redis.incr(key);
       if (count === 1) await redis.expire(key, REPEAT_WINDOW_SECONDS);
@@ -113,14 +127,14 @@ export class McpCallRecorder {
       await this.notifications.notify({
         organizationId: session.organizationId,
         event: NotificationEvent.CALL_REFUSED_REPEATEDLY,
-        title: `Calls to ${toolName} keep being refused`,
+        title: `Calls to ${name} keep being refused`,
         body:
           `Agent ${session.agentId} was refused ${REPEAT_ALERT_THRESHOLD} times within an hour ` +
-          `calling ${toolName} (${code}). Nothing was charged.`,
+          `calling ${name} (${code}). Nothing was charged.`,
         subjectType: 'agent',
         subjectId: session.agentId,
-        payload: { toolName, code },
-        dedupeKey: `${session.agentId}:${toolName}:${code}`,
+        payload: { toolName: name, code },
+        dedupeKey: `${session.agentId}:${name}:${code}`,
       });
     } catch {
       // Bookkeeping; the refusal itself already reached the agent.
@@ -158,4 +172,10 @@ function layerOf(error: AppError<unknown[]>): RefusalLayer | null {
       : RefusalLayer.TOOLSET_RULES;
   }
   return REFUSAL_LAYER[error.errorCode] ?? null;
+}
+
+/** A tool name an agent sent, reduced to what a tool name may contain, at most 48 characters. */
+export function safeToolName(name: string): string {
+  const cleaned = name.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 48);
+  return cleaned.length > 0 ? cleaned : 'unnamed';
 }

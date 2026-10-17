@@ -164,9 +164,7 @@ export class McpUrlPreviewService {
         };
       })
       // `?free=1` serves only what can be free; a paid tool is not in its view.
-      .filter(
-        (tool) => tool.pricingMode === null || servesPricingMode(view.filter, tool.pricingMode),
-      );
+      .filter((tool) => servesPricingMode(view.filter, tool.pricingMode));
 
     return {
       canonicalUrl: view.canonicalUrl,

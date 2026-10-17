@@ -24,6 +24,8 @@ export enum ToolAccessErrorCode {
   TOOL_REMOVED = 'TOOL_REMOVED',
   /** The agent's and the toolset's provider rules leave no provider. */
   NO_PROVIDER_MATCHES_RULES = 'NO_PROVIDER_MATCHES_RULES',
+  /** Beyond a limit of §7.13; `retryAfterMs` says when to come back. */
+  RATE_LIMITED = 'RATE_LIMITED',
   /** `POST /mcp-urls/preview` was given something that is not an MCP URL of this host. */
   URL_NOT_RECOGNISED = 'URL_NOT_RECOGNISED',
 }
@@ -32,6 +34,7 @@ export const TOOL_NOT_IN_TOOLSET_MESSAGE = 'Not part of this server.';
 export const TOOL_NOT_ALLOWED_MESSAGE = "This agent isn't allowed to use it.";
 export const TOOL_REMOVED_MESSAGE = 'This tool was removed by its maker.';
 export const NO_PROVIDER_MATCHES_RULES_MESSAGE = 'No provider fits your limits.';
+export const RATE_LIMITED_MESSAGE = 'Too many requests. Try again shortly.';
 
 export const ToolAccessErrors = createErrorFactory({
   notInToolset: {
@@ -53,6 +56,11 @@ export const ToolAccessErrors = createErrorFactory({
     code: ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES,
     statusCode: 409,
     message: (_context?: Record<string, any>) => NO_PROVIDER_MATCHES_RULES_MESSAGE,
+  },
+  rateLimited: {
+    code: ToolAccessErrorCode.RATE_LIMITED,
+    statusCode: 429,
+    message: (_context?: Record<string, any>) => RATE_LIMITED_MESSAGE,
   },
   urlNotRecognised: {
     code: ToolAccessErrorCode.URL_NOT_RECOGNISED,

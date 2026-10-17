@@ -174,6 +174,10 @@ export class McpCatalogueService {
     quotes.forEach((quote, index) => {
       if (!quote) return;
 
+      // `?free=1` serves only tools that can be free, and that is decided
+      // first: a tool the rules left unpriced has no free supply to show.
+      if (scope && !servesPricingMode(scope.view.filter, quote.pricingMode)) return;
+
       if (!quote.price) {
         // The agent's or the toolset's rules left no provider: listed, and
         // saying so, because the tool exists and the fix is the agent's.
@@ -186,9 +190,6 @@ export class McpCatalogueService {
         );
         return;
       }
-
-      // `?free=1` serves only tools that can be free.
-      if (scope && !servesPricingMode(scope.view.filter, quote.pricingMode)) return;
 
       listed.push(
         describe(quote, quote.price, freeQuotas[index], freeAllowances[index], paidOnViewerChain),

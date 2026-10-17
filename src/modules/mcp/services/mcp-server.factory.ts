@@ -6,6 +6,7 @@ import {
   CallToolRequestSchema,
   CallToolResult,
   ListToolsRequestSchema,
+  McpError,
 } from '@modelcontextprotocol/sdk/types.js';
 
 import { JsonObject } from '@modules/tool/domain/mapping';
@@ -25,7 +26,11 @@ import {
   X402_REPLAYED,
   X402_VOUCHER,
 } from '../constants/mcp.constants';
-import { ToolAccessErrorCode } from '@modules/tool/errors/tool-access.errors';
+import {
+  RATE_LIMITED_MESSAGE,
+  ToolAccessErrorCode,
+  ToolAccessErrors,
+} from '@modules/tool/errors/tool-access.errors';
 
 import { parseIdempotencyKey } from '../domain/idempotency';
 import { McpErrorCode } from '../errors/mcp.errors';
@@ -33,6 +38,7 @@ import { McpScope } from '../ports/mcp-scope';
 import { McpSession } from '../ports/mcp-session.port';
 import { McpCallRecorder, RefusalNotice } from './mcp-call-recorder.service';
 import { McpCatalogueService, displayPrice } from './mcp-catalogue.service';
+import { MCP_RATE_LIMITS, McpRateLimiter, listKey, refusalKey } from './mcp-rate-limiter.service';
 import {
   McpCallOutcome,
   McpPayment,
@@ -65,6 +71,8 @@ export class McpServerFactory {
     // Refused-call rows and the first-call stamp. Optional so a hand-built
     // harness needs none; it never changes an outcome.
     @Optional() private readonly recorder?: McpCallRecorder,
+    // The §7.13 limits on this host. Optional so a hand-built harness has none.
+    @Optional() private readonly limiter?: McpRateLimiter,
   ) {}
 
   /**
@@ -85,6 +93,21 @@ export class McpServerFactory {
     // quota at all — which reads to an agent as "this tool has no free tier"
     // rather than as "we did not look".
     server.setRequestHandler(ListToolsRequestSchema, async () => {
+      // 60 lists a minute per credential and URL (§7.13). A JSON-RPC error,
+      // since a list has no result to carry `x402/error` in.
+      if (scope && this.limiter) {
+        const rate = await this.limiter.take(
+          listKey(session.credentialId, scope.view.canonicalUrl),
+          MCP_RATE_LIMITS.listsPerMinute,
+        );
+        if (!rate.allowed) {
+          throw new McpError(MCP_RATE_LIMITED_ERROR_CODE, RATE_LIMITED_MESSAGE, {
+            code: ToolAccessErrorCode.RATE_LIMITED,
+            retryAfterMs: rate.retryAfterMs,
+          });
+        }
+      }
+
       const tools = await this.catalogue.listTools(
         {
           organizationId: session.organizationId,
@@ -106,6 +129,18 @@ export class McpServerFactory {
       void this.recorder?.markFirstCall(session, scope).catch(() => undefined);
 
       try {
+        // An agent past its refusal limit gets RATE_LIMITED for the rest of
+        // the minute before anything runs (§7.13): a loop of refused calls is
+        // cheap for it and must not be cheap for the server.
+        if (this.limiter) {
+          const rate = await this.limiter.exceeded(
+            refusalKey(session.agentId),
+            MCP_RATE_LIMITS.refusalsPerMinute,
+          );
+          if (!rate.allowed)
+            throw ToolAccessErrors.rateLimited({ retryAfterMs: rate.retryAfterMs });
+        }
+
         const outcome = await this.calls.call(
           session,
           name,
@@ -161,12 +196,14 @@ export class McpServerFactory {
     // message, the fix page and the structured details, on `x402/error`.
     if (SPEC_REFUSAL_CODES.has(error.errorCode)) {
       const context = error instanceof AppError && error.context ? error.context : {};
+      const rateLimited = error.errorCode === ToolAccessErrorCode.RATE_LIMITED;
       return errorResult(error.message, {
         code: error.errorCode,
         message: error.message,
-        retryable: false,
+        retryable: rateLimited,
+        ...(rateLimited ? { retryAfterMs: context.retryAfterMs } : {}),
         ...(notice?.fixUrl ? { fixUrl: notice.fixUrl } : {}),
-        ...(notice ? { callId: notice.callId } : {}),
+        ...(notice?.callId ? { callId: notice.callId } : {}),
         ...(context.details ? { details: context.details } : {}),
       });
     }
@@ -205,7 +242,11 @@ const SPEC_REFUSAL_CODES: ReadonlySet<string> = new Set<string>([
   ToolAccessErrorCode.TOOL_NOT_ALLOWED,
   ToolAccessErrorCode.TOOL_REMOVED,
   ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES,
+  ToolAccessErrorCode.RATE_LIMITED,
 ]);
+
+/** JSON-RPC's implementation-defined server error range: a rate-limited list. */
+export const MCP_RATE_LIMITED_ERROR_CODE = -32029;
 
 /**
  * The request's `_meta` → what the agent said about paying (rail B).
