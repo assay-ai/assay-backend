@@ -64,6 +64,10 @@ import { ToolBindingRepository } from './repositories/tool-binding.repository';
 import { ToolRepository } from './repositories/tool.repository';
 import { AgentConnectUrlRepository } from './repositories/agent-connect-url.repository';
 import { ToolsetEntryRepository, ToolsetRepository } from './repositories/toolset.repository';
+import {
+  TOOLSET_SHARING_ENTITIES,
+  TOOLSET_SHARING_REPOSITORIES,
+} from './repositories/toolset-sharing.repository';
 import { BindingVersionRepository } from './repositories/binding-version.repository';
 import { BindingTestRunRepository } from './repositories/binding-test-run.repository';
 import { ProviderStakeGraceEntity } from './entities/provider-stake-grace.entity';
@@ -178,6 +182,7 @@ const entities = [
   EvmBlockedAddressEntity,
   BindingAttemptEntity,
   BindingStatsEntity,
+  ...TOOLSET_SHARING_ENTITIES,
 ];
 const repositories = [
   PostRepository,
@@ -238,6 +243,7 @@ const repositories = [
   BindingStatsRepository,
   SlashCaseReadRepository,
   PlatformMetricsRepository,
+  ...TOOLSET_SHARING_REPOSITORIES,
 ];
 
 /**
