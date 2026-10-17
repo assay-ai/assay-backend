@@ -12,6 +12,7 @@ import { attributionOf } from '@modules/toolset/domain/attribution';
 import {
   DiscoveryMode,
   ParsedMcpUrl,
+  defaultDiscoveryFor,
   staticDiscoveryDefault,
   viewFilterRecord,
   withoutDefaultDiscovery,
@@ -204,9 +205,10 @@ export class McpUrlPreviewService {
 
   /** The URL with `discovery=search` (dropped again when search is its default). */
   private async searchUrlOf(organizationId: string, parsed: ParsedMcpUrl): Promise<string> {
+    const searching = { ...parsed.filter, discovery: DiscoveryMode.SEARCH };
     const filter = withoutDefaultDiscovery(
-      { ...parsed.filter, discovery: DiscoveryMode.SEARCH },
-      staticDiscoveryDefault(parsed.path),
+      searching,
+      defaultDiscoveryFor(searching, staticDiscoveryDefault(parsed.path)),
     );
     const view = await this.endpoints.resolve(organizationId, { ...parsed, filter });
     return view.canonicalUrl;

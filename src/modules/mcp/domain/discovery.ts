@@ -1,5 +1,9 @@
 import { JsonSchema } from '@modules/tool/domain/mapping';
-import { DiscoveryMode, staticDiscoveryDefault } from '@modules/toolset/domain/mcp-url';
+import {
+  DiscoveryMode,
+  defaultDiscoveryFor,
+  staticDiscoveryDefault,
+} from '@modules/toolset/domain/mcp-url';
 import {
   DEFAULT_SEARCH_THRESHOLD,
   McpEndpointView,
@@ -65,7 +69,7 @@ export function effectiveMode(
   const settings = discoveryOf(view);
   // A `?tools=` list is an explicit selection (at most 50 names): it is listed
   // like AUTO, so `/?tools=a,b` serves exactly those tools (§8.2 C).
-  const mode = view.filter.discovery ?? (view.filter.tools ? DiscoveryMode.AUTO : settings.mode);
+  const mode = view.filter.discovery ?? defaultDiscoveryFor(view.filter, settings.mode);
   if (mode === DiscoveryMode.FULL || mode === DiscoveryMode.SEARCH) return mode;
   return scopedToolCount <= settings.searchThreshold ? DiscoveryMode.FULL : DiscoveryMode.SEARCH;
 }
