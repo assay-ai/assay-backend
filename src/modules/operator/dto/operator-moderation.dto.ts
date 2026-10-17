@@ -104,7 +104,7 @@ export class ModerationCutoffDto {
   @ApiProperty({ nullable: true })
   revertedAt: string | null;
 
-  @ApiProperty({ nullable: true, enum: ['EXPIRED', 'REJECTED', 'LIFTED'] })
+  @ApiProperty({ nullable: true, enum: ['EXPIRED', 'REJECTED', 'LIFTED', 'REASSIGNED'] })
   revertReason: string | null;
 
   @ApiProperty({ nullable: true })

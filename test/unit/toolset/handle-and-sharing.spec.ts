@@ -1,5 +1,6 @@
 import {
   HANDLE_CLAIM_MAX_ORGS,
+  handleSkeleton,
   claimGateAllows,
   handleRefusal,
   handleSuggestions,
@@ -37,9 +38,38 @@ describe('handles (design spec §7.1)', () => {
     expect(handleRefusal(handle)).toBe(refusal);
   });
 
+  it.each([
+    'assay-ai',
+    'assay0',
+    'official-assay',
+    'my-official-kit',
+    'a55ay',
+    'offlcial',
+    'he1p',
+    'we4ther',
+    'adrnin',
+    'supp0rt-team',
+    'x402-labs',
+    'goassay',
+  ])('refuses %s as a look-alike of a reserved name', (handle) => {
+    expect(handleRefusal(handle)).toBe('RESERVED');
+  });
+
+  it.each(['acme', 'weather-tools', 'my-maps', 'apiary', 'helpful-bot', 'orbit'])(
+    'accepts %s, which only shares letters with a reserved word',
+    (handle) => {
+      expect(handleRefusal(handle)).toBeNull();
+    },
+  );
+
   it('reserves every category the catalogue uses', () => {
     expect(handleRefusal('robotics', ['robotics'])).toBe('RESERVED');
     expect(handleRefusal('robotics', ['maps'])).toBeNull();
+  });
+
+  it('folds look-alikes into one skeleton', () => {
+    expect(handleSkeleton('rn-0-1')).toBe('mol');
+    expect(handleSkeleton('assay')).toBe(handleSkeleton('a55ay'));
   });
 
   it('normalises what a person types', () => {

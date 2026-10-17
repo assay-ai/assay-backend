@@ -96,16 +96,74 @@ export enum HandleHistoryReason {
 export type HandleRefusal = 'FORMAT' | 'RESERVED';
 
 /**
+ * Words a handle may not contain at all, in any spelling that looks like
+ * them: names that claim to speak for the platform (`assay-ai`,
+ * `official-tools`, `supp0rt`). The short reserved words (`u`, `my`, `api`)
+ * are matched whole only — containing them is ordinary.
+ */
+export const IMPERSONATION_WORDS: readonly string[] = [
+  'assay',
+  'goassay',
+  'official',
+  'platform',
+  'system',
+  'admin',
+  'operator',
+  'support',
+  'staff',
+  'moderator',
+  'verified',
+  'security',
+  'x402',
+];
+
+/**
+ * A handle's look-alike skeleton: what it reads as once the separators and
+ * the usual confusables are folded — `rn`→`m`, `vv`→`w`, `cl`→`d`, `0`→`o`,
+ * `1`/`i`→`l`, `3`→`e`, `4`→`a`, `5`→`s`, `7`→`t`, `8`→`b`, `9`→`g`.
+ * Two handles with one skeleton are the same name to a reader.
+ */
+export function handleSkeleton(handle: string): string {
+  const digits: Record<string, string> = {
+    '0': 'o',
+    '1': 'l',
+    '3': 'e',
+    '4': 'a',
+    '5': 's',
+    '7': 't',
+    '8': 'b',
+    '9': 'g',
+  };
+  return handle
+    .toLowerCase()
+    .replace(/-/g, '')
+    .replace(/[0-9]/g, (digit) => digits[digit] ?? digit)
+    .replace(/rn/g, 'm')
+    .replace(/vv/g, 'w')
+    .replace(/cl/g, 'd')
+    .replace(/i/g, 'l');
+}
+
+/**
  * Why `handle` can never be claimed, or `null` when its shape is fine.
  * Availability (taken, held) is the database's question, not this one.
+ *
+ * Reserved: a reserved word or a category, or anything that reads as one
+ * (`he1p`, `we4ther`); or anything containing an impersonation word in any
+ * look-alike spelling (`assay-ai`, `assay0`, `offlcial-tools`).
  */
 export function handleRefusal(
   handle: string,
   categories: Iterable<string> = [],
 ): HandleRefusal | null {
   if (!HANDLE_RE.test(handle)) return 'FORMAT';
-  if (RESERVED_HANDLES.has(handle) || RESERVED_CATEGORY_NAMES.has(handle)) return 'RESERVED';
-  for (const category of categories) if (category === handle) return 'RESERVED';
+  const skeleton = handleSkeleton(handle);
+  for (const word of [...RESERVED_HANDLES, ...RESERVED_CATEGORY_NAMES, ...categories]) {
+    if (word === handle || handleSkeleton(word) === skeleton) return 'RESERVED';
+  }
+  for (const word of IMPERSONATION_WORDS) {
+    if (skeleton.includes(handleSkeleton(word))) return 'RESERVED';
+  }
   return null;
 }
 

@@ -104,15 +104,36 @@ export class HandlesService {
 
     try {
       await this.dataSource.transaction(async (manager) => {
+        // The claimant first, then the handle, always in this order: two
+        // claims by one person serialise on the gate, two claims of one name
+        // on the name, and neither order can deadlock the other.
+        await lockClaimant(manager, user);
         await lockHandle(manager, handle);
+        // The gate again, under the claimant's lock: the read above raced.
+        const recent = (
+          (await manager.query(
+            `SELECT DISTINCT org_id AS "orgId" FROM org_handle_claims
+              WHERE privy_user_id = $1 AND claimed_at >= $2`,
+            [user, since],
+          )) as { orgId: string }[]
+        ).map((row) => row.orgId);
+        if (!claimGateAllows(recent, organizationId)) {
+          throw ToolsetErrors.handleClaimRefused({ reason: 'CLAIM_LIMIT' });
+        }
         if (!(await this.isAvailable(manager, handle, organizationId))) {
           throw ToolsetErrors.handleTaken({ suggestions: await this.freeSuggestions(handle) });
         }
-        await manager.update(
-          OrganizationEntity,
-          { id: organizationId, handleLockedAt: IsNull() },
-          { handle, handleStatus: HandleStatus.ACTIVE },
-        );
+        const changed = await manager
+          .createQueryBuilder()
+          .update(OrganizationEntity)
+          .set({ handle, handleStatus: HandleStatus.ACTIVE })
+          .where('id = :organizationId', { organizationId })
+          .andWhere('handle_locked_at IS NULL')
+          .andWhere(`(handle_status IS NULL OR handle_status <> 'FROZEN')`)
+          .execute();
+        // Locked or frozen since the read above: nothing changed, so nothing
+        // is claimed and nothing is audited.
+        if (!changed.affected) throw ToolsetErrors.handleLocked();
         await manager.insert(OrgHandleClaimEntity, {
           orgId: organizationId,
           privyUserId: user,
@@ -274,6 +295,11 @@ export class HandlesService {
     }
     return out;
   }
+}
+
+/** Serialises the claims of one Privy user, so the 3-in-30-days gate holds under concurrency. */
+export async function lockClaimant(manager: EntityManager, user: string): Promise<void> {
+  await manager.query(`SELECT pg_advisory_xact_lock(hashtext('claimant:' || $1))`, [user]);
 }
 
 /** Serialises every claim, rename and reassignment of one handle. */

@@ -712,7 +712,7 @@ describe('toolset publishing, against a real database and Redis', () => {
       const s = services();
       const orgE = await org('Brand owner');
       await verify(orgE);
-      await dataSource.transaction((manager) =>
+      const { cutoff } = await dataSource.transaction((manager) =>
         s.moderation.cutoffHandle(manager, {
           handle: 'acme',
           operatorId: OPERATOR_1,
@@ -727,14 +727,38 @@ describe('toolset publishing, against a real database and Redis', () => {
         code: ToolsetErrorCode.TOOLSET_HANDLE_NOT_FOUND,
       });
 
+      // Not before a second operator confirmed the takedown.
+      expect(
+        await errorOf(
+          dataSource.transaction((manager) => s.moderation.reassignHandle(manager, 'acme', orgE)),
+        ),
+      ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_HANDLE_REASSIGN_REFUSED });
+      await dataSource.transaction((manager) =>
+        s.moderation.confirm(manager, cutoff.id, OPERATOR_2),
+      );
       await dataSource.transaction((manager) => s.moderation.reassignHandle(manager, 'acme', orgE));
       await s.moderation.afterCommit([orgA, orgE]);
+      const [closed] = await dataSource.query(
+        `SELECT revert_reason FROM moderation_cutoffs WHERE id = $1`,
+        [cutoff.id],
+      );
+      expect(closed.revert_reason).toBe('REASSIGNED');
       expect(await s.handles.get(orgE)).toMatchObject({ handle: 'acme', status: 'ACTIVE' });
       expect(await s.handles.get(orgA)).toMatchObject({ handle: null });
       // The brand's handle names none of the old owner's toolsets.
       expect(
         await errorOf(s.endpoints.resolve(orgB, parseMcpUrl('/@acme/moderated')!)),
       ).toMatchObject({ code: McpErrorCode.MCP_URL_NOT_FOUND });
+      // The new holder can be taken down in turn.
+      await expect(
+        dataSource.transaction((manager) =>
+          s.moderation.cutoffHandle(manager, {
+            handle: 'acme',
+            operatorId: OPERATOR_2,
+            note: 'second takedown of the name',
+          }),
+        ),
+      ).resolves.toHaveProperty('organizationId', orgE);
     });
 
     it('an operator rename keeps the old handle as an alias for 90 days, then holds it', async () => {
@@ -788,13 +812,16 @@ describe('toolset publishing, against a real database and Redis', () => {
       await freeCall(orgP, agentP, popular, 1);
       const linked = await org('Linked');
       await freeCall(linked, await fund(linked, `${CHAIN}:SharedWallet`), popular, 1);
-      // Four independent orgs: below k.
-      const buyers: string[] = [];
-      for (let n = 0; n < 4; n += 1) {
+      // Three independent orgs and two sybils sharing a funding wallet: five
+      // accounts, four parties — below k on the page and on every dashboard cell.
+      for (let n = 0; n < 3; n += 1) {
         const buyer = await org(`Buyer ${n}`);
-        buyers.push(buyer);
         await freeCall(buyer, await agent(buyer, `${CHAIN}:Buyer${n}`), popular, 1);
       }
+      const sybil1 = await org('Sybil 1');
+      const sybil2 = await org('Sybil 2');
+      await freeCall(sybil1, await fund(sybil1, `${CHAIN}:SybilWallet`), popular, 1);
+      await freeCall(sybil2, await fund(sybil2, `${CHAIN}:SybilWallet`), popular, 1);
       const week = mondayOf(new Date(now.getTime() + 7 * 24 * 60 * 60 * 1000));
       const windowEnd = new Date(week.getTime() - 24 * 60 * 60 * 1000);
       const toolset = { id: popular, ownerOrgId: orgP, lastSharedVersion: 1 };
@@ -805,13 +832,21 @@ describe('toolset publishing, against a real database and Redis', () => {
         agents: null,
         calls30d: null,
       });
-      expect((stats.dashboard as { tools: { withheld: boolean }[] }).tools[0].withheld).toBe(true);
+      const dashboard = stats.dashboard as {
+        tools: { withheld: boolean }[];
+        versions: { orgs: { display: string } }[];
+      };
+      expect(dashboard.tools[0].withheld).toBe(true);
+      expect(dashboard.versions[0].orgs.display).toBe('Fewer than 5 orgs');
+      const [score] = await dataSource.query(
+        `SELECT popular_score FROM toolset_stats_published WHERE toolset_id = $1`,
+        [popular],
+      );
+      expect(score.popular_score).toBe(0);
 
-      // Two sybils sharing a funding wallet count once: 4 + 1 = 5.
-      const sybil1 = await org('Sybil 1');
-      const sybil2 = await org('Sybil 2');
-      await freeCall(sybil1, await fund(sybil1, `${CHAIN}:SybilWallet`), popular, 1);
-      await freeCall(sybil2, await fund(sybil2, `${CHAIN}:SybilWallet`), popular, 1);
+      // A fourth independent org: five parties.
+      const fourth = await org('Buyer 3');
+      await freeCall(fourth, await agent(fourth, `${CHAIN}:Buyer3`), popular, 1);
       await s.stats.publishWeek(toolset, week, windowEnd);
       stats = await s.publishing.ownStats(orgP, popular);
       expect(stats.figures).toMatchObject({
@@ -820,6 +855,7 @@ describe('toolset publishing, against a real database and Redis', () => {
         calls30d: { display: '0' },
         onLatestVersionPercent: null,
       });
+      expect((stats.dashboard as { tools: { withheld: boolean }[] }).tools[0].withheld).toBe(false);
       // Another organization never reads a publisher dashboard.
       expect(await errorOf(s.publishing.ownStats(orgB, popular))).toMatchObject({
         code: ToolsetErrorCode.TOOLSET_NOT_FOUND,
@@ -908,6 +944,245 @@ describe('toolset publishing, against a real database and Redis', () => {
       expect(accessAllows(await s.resolver.resolveFor(orgB, agentB, null), GEOCODE.id, null)).toBe(
         true,
       );
+    });
+  });
+
+  describe('versions that were never shared', () => {
+    let owner: string;
+    let ownerAgent: string;
+    let viewer: string;
+    let viewerAgent: string;
+
+    beforeAll(async () => {
+      const s = services();
+      owner = await org('Versions owner');
+      await verify(owner);
+      ownerAgent = await agent(owner);
+      await s.handles.claim(session(owner, ownerAgent), 'versions-co', ACTOR);
+      viewer = await org('Versions viewer');
+      viewerAgent = await agent(viewer);
+    });
+
+    it('serves, lists, pins and copies none of the versions published PRIVATE before v3', async () => {
+      const s = services();
+      const created = await s.toolsets.create(
+        owner,
+        { name: 'Staged', slug: 'staged', entries: [{ toolId: WEATHER.id }] },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.PRIVATE },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.PRIVATE },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.PUBLIC },
+        ACTOR,
+      );
+
+      for (const n of [1, 2]) {
+        expect(
+          await errorOf(s.endpoints.resolve(viewer, parseMcpUrl(`/@versions-co/staged@${n}`)!)),
+        ).toMatchObject({ code: McpErrorCode.MCP_URL_NOT_FOUND });
+        expect(
+          await errorOf(s.publishing.copy(viewer, created.id, { version: n }, ACTOR)),
+        ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_VERSION_NOT_FOUND });
+        expect(
+          await errorOf(
+            s.access.patch(
+              viewer,
+              viewerAgent,
+              { allowedToolsets: [{ toolsetId: created.id, version: n }] },
+              ACTOR,
+            ),
+          ),
+        ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_ACCESS_INVALID });
+      }
+      expect(
+        (await s.endpoints.resolve(viewer, parseMcpUrl('/@versions-co/staged')!)).toolset?.version,
+      ).toBe(3);
+      expect(
+        (await s.publicToolsets.versionsOf('versions-co', 'staged')).versions.map((v) => v.version),
+      ).toEqual([3]);
+      // The owner keeps every version on /my/.
+      expect(
+        (await s.endpoints.resolve(owner, parseMcpUrl('/my/staged@1')!)).toolset?.version,
+      ).toBe(1);
+    });
+
+    it('a PUBLIC grace never serves, pins or copies content published UNLISTED afterwards', async () => {
+      const s = services();
+      const created = await s.toolsets.create(
+        owner,
+        { name: 'Switched', slug: 'switched', entries: [{ toolId: WEATHER.id }] },
+        ACTOR,
+      );
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.PUBLIC },
+        ACTOR,
+      );
+      await dataSource.query(
+        `INSERT INTO toolset_entries (toolset_id, position, tool_id) VALUES ($1, 1, $2)`,
+        [created.id, providerTool],
+      );
+      await dataSource.query(`UPDATE tools SET owner_org_id = $1 WHERE id = $2`, [
+        owner,
+        providerTool,
+      ]);
+      try {
+        const v2 = await s.publishing.publish(
+          owner,
+          created.id,
+          { visibility: ToolsetVisibility.UNLISTED },
+          ACTOR,
+        );
+        const token = v2.toolset.unlistedToken as string;
+        // `/@…` still serves v1 for the grace period, never v2.
+        expect(
+          (await s.endpoints.resolve(viewer, parseMcpUrl('/@versions-co/switched')!)).toolset
+            ?.version,
+        ).toBe(1);
+        expect(
+          await errorOf(s.endpoints.resolve(viewer, parseMcpUrl('/@versions-co/switched@2')!)),
+        ).toMatchObject({ code: McpErrorCode.MCP_URL_NOT_FOUND });
+        expect(
+          await errorOf(s.publishing.copy(viewer, created.id, { version: 2 }, ACTOR)),
+        ).toMatchObject({
+          code: ToolsetErrorCode.TOOLSET_VERSION_NOT_FOUND,
+        });
+        expect((await s.publishing.copy(viewer, created.id, {}, ACTOR)).toolset.forkedFrom).toEqual(
+          {
+            toolsetId: created.id,
+            version: 1,
+          },
+        );
+        // With the link, v2 is there.
+        expect(
+          (await s.endpoints.resolve(viewer, parseMcpUrl(`/u/${token}`)!)).toolset?.version,
+        ).toBe(2);
+      } finally {
+        await dataSource.query(`UPDATE tools SET owner_org_id = $1 WHERE id = $2`, [
+          orgA,
+          providerTool,
+        ]);
+      }
+    });
+
+    it('a handed-out URL never reveals whether a hidden toolset exists', async () => {
+      const s = services();
+      await s.toolsets.create(owner, { name: 'Hidden', slug: 'hidden' }, ACTOR);
+      for (const url of ['/@versions-co/hidden', '/@versions-co/does-not-exist']) {
+        await s.connectUrls.record(viewer, viewerAgent, {
+          url: `https://mcp.example.com${url}`,
+          serverName: null,
+          client: null,
+        });
+      }
+      const rows = await s.connectUrls.serversInUse(viewer, viewerAgent);
+      const ids = rows
+        .filter((row) => row.canonicalUrl.includes('/@versions-co/'))
+        .map((row) => row.toolsetId);
+      expect(ids).toEqual([null, null]);
+    });
+
+    it('a revoked link holder gets no update notice; a pin holder does', async () => {
+      const s = services();
+      const created = await s.toolsets.create(
+        owner,
+        { name: 'Linked', slug: 'linked', entries: [{ toolId: WEATHER.id }] },
+        ACTOR,
+      );
+      const v1 = await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.UNLISTED },
+        ACTOR,
+      );
+      await freeCall(viewer, viewerAgent, created.id, 1);
+      await s.publishing.rotateToken(owner, created.id, ACTOR);
+      await s.toolsets.replaceEntries(owner, created.id, [{ toolId: GEOCODE.id }], ACTOR);
+      await s.publishing.publish(
+        owner,
+        created.id,
+        { visibility: ToolsetVisibility.UNLISTED },
+        ACTOR,
+      );
+      expect(await s.notices.onPublished(created.id, 2)).toBe(0);
+
+      // A pin taken with the link it had: still told.
+      await dataSource.query(`DELETE FROM toolset_notice_log WHERE toolset_id = $1`, [created.id]);
+      await dataSource.query(`UPDATE toolsets SET unlisted_token = $2 WHERE id = $1`, [
+        created.id,
+        v1.toolset.unlistedToken,
+      ]);
+      await s.epochs.bumpShared();
+      await s.access.patch(
+        viewer,
+        viewerAgent,
+        {
+          allowedToolsets: [
+            {
+              toolsetId: created.id,
+              version: 1,
+              unlistedToken: v1.toolset.unlistedToken as string,
+            },
+          ],
+        },
+        ACTOR,
+      );
+      expect(await s.notices.onPublished(created.id, 2)).toBe(1);
+    });
+
+    it('lets concurrent claims take one name once, and keeps the gate under a race', async () => {
+      const s = services();
+      const first = await org('Racer 1');
+      const second = await org('Racer 2');
+      await verify(first);
+      await verify(second);
+      const outcomes = await Promise.allSettled([
+        s.handles.claim(session(first, await agent(first)), 'racer', ACTOR),
+        s.handles.claim(session(second, await agent(second)), 'racer', ACTOR),
+      ]);
+      expect(outcomes.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+      const [{ n }] = await dataSource.query(
+        `SELECT count(*)::int AS n FROM organizations WHERE handle = 'racer'`,
+      );
+      expect(n).toBe(1);
+
+      // One person at two of three organizations, claiming for two more at once.
+      const person = await agent(await org('Gate home'));
+      const [{ privy_user_id: user }] = await dataSource.query(
+        `SELECT privy_user_id FROM agents WHERE id = $1`,
+        [person],
+      );
+      for (const other of [randomUUID(), randomUUID()]) {
+        await dataSource.query(
+          `INSERT INTO org_handle_claims (org_id, privy_user_id, handle) VALUES ($1, $2, 'x')`,
+          [other, user],
+        );
+      }
+      const orgsAtOnce = [await org('Gate 1'), await org('Gate 2')];
+      for (const id of orgsAtOnce) await verify(id);
+      const raced = await Promise.allSettled(
+        orgsAtOnce.map((id, n) => s.handles.claim(session(id, person), `gate-co-${n + 2}`, ACTOR)),
+      );
+      expect(raced.filter((o) => o.status === 'fulfilled')).toHaveLength(1);
+      const [{ claims }] = await dataSource.query(
+        `SELECT count(DISTINCT org_id)::int AS claims FROM org_handle_claims WHERE privy_user_id = $1`,
+        [user],
+      );
+      expect(claims).toBe(3);
     });
   });
 });

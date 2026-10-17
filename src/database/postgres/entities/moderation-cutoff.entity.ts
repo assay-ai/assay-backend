@@ -43,7 +43,7 @@ export class ModerationCutoffEntity {
   @Column({ name: 'reverted_at', type: 'timestamptz', nullable: true })
   revertedAt: Date | null;
 
-  /** `EXPIRED` (nobody confirmed in time) | `REJECTED` (the checker disagreed) | `LIFTED`. */
+  /** `EXPIRED` (nobody confirmed in time), `REJECTED` (the checker disagreed), `LIFTED`, `REASSIGNED`. */
   @Column({ name: 'revert_reason', type: 'varchar', length: 16, nullable: true })
   revertReason: string | null;
 
