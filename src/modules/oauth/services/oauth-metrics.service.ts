@@ -81,6 +81,7 @@ export class OAuthMetrics {
   private readonly refreshReuseTotal: Counter<'kind'>;
   private readonly cimdFetchTotal: Counter<'result'>;
   private readonly dcrTotal: Counter;
+  private readonly dcrClientNameFloodTotal: Counter;
   private readonly mcpUnauthorizedTotal: Counter<'reason'>;
   private readonly liveGrantsPerAgent: Gauge;
 
@@ -127,6 +128,11 @@ export class OAuthMetrics {
       help: 'Dynamic client registrations. Alert above 1000/day, or 100/day for one client_name.',
       registers,
     });
+    this.dcrClientNameFloodTotal = new Counter({
+      name: 'assay_oauth_dcr_client_name_flood_total',
+      help: 'DCR registrations past 100 in one UTC day under one client_name. Alert: > 0.',
+      registers,
+    });
     this.mcpUnauthorizedTotal = new Counter({
       name: 'assay_mcp_unauthorized_total',
       help: '401s from the MCP catch-all, by reason.',
@@ -166,6 +172,11 @@ export class OAuthMetrics {
 
   incDcr(): void {
     this.dcrTotal.inc();
+  }
+
+  /** A registration past the per-`client_name` daily threshold (§6.3.8 alert). */
+  incDcrClientNameFlood(): void {
+    this.dcrClientNameFloodTotal.inc();
   }
 
   incMcpUnauthorized(reason: McpUnauthorizedReason): void {

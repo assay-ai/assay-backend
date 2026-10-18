@@ -1,8 +1,10 @@
 import { SessionSourceMode } from '@modules/auth/domain/session-source-mode';
+import { isLocalDeployment } from '@modules/mcp/config/mcp-discovery.config';
 import { loadMcpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { takeOnceFromEnv } from '@modules/verification/signing/backends/env-key-source';
 
 import { OAUTH_BUILTIN_CLIENT_PATH } from '../constants/oauth.constants';
+import { classify } from '../domain/client-id';
 
 /**
  * OAuth configuration (spec §5.2), read once per process that mounts the OAuth
@@ -40,6 +42,10 @@ export interface OAuthConfig {
   readonly allowHttpCimdLoopback: boolean;
   /** Key for the pending-request browser cookie, at least 32 bytes. */
   readonly requestCookieSecret: Buffer;
+  /** DCR registrations per UTC day, all clients together (§6.3.8). */
+  readonly dcrGlobalPerDay: number;
+  /** DCR registration attempts per hour from one IPv6 /48 (§6.3.8). */
+  readonly dcrPer48PerHour: number;
 }
 
 export const OAUTH_CONFIG = Symbol('OAUTH_CONFIG');
@@ -49,6 +55,12 @@ export const OAUTH_REDIRECT_ALLOWLIST_ENV = 'OAUTH_REDIRECT_ALLOWLIST';
 export const OAUTH_PAYMENT_CLIENTS_ENV = 'OAUTH_PAYMENT_CLIENTS';
 export const OAUTH_ALLOW_HTTP_CIMD_LOOPBACK_ENV = 'OAUTH_ALLOW_HTTP_CIMD_LOOPBACK';
 export const OAUTH_REQUEST_COOKIE_SECRET_ENV = 'OAUTH_REQUEST_COOKIE_SECRET';
+export const OAUTH_DCR_GLOBAL_PER_DAY_ENV = 'OAUTH_DCR_GLOBAL_PER_DAY';
+export const OAUTH_DCR_PER_48_PER_HOUR_ENV = 'OAUTH_DCR_PER_48_PER_HOUR';
+
+/** Defaults pending the owner's numbers (review of Task 1.5, I1). */
+export const DEFAULT_OAUTH_DCR_GLOBAL_PER_DAY = 1000;
+export const DEFAULT_OAUTH_DCR_PER_48_PER_HOUR = 50;
 
 /**
  * §6.3.9 item 2. Only ChatGPT's callback is confirmed; the others stay
@@ -120,9 +132,21 @@ export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConf
       `${OAUTH_ALLOW_HTTP_CIMD_LOOPBACK_ENV} must not be true when NODE_ENV=production`,
     );
   }
+  // Outside a local run the flag would let a stranger make this server GET any
+  // http://localhost port: refuse it on any internet-facing deployment.
+  if (allowHttpCimdLoopback && !isLocalDeployment(env)) {
+    throw new Error(
+      `${OAUTH_ALLOW_HTTP_CIMD_LOOPBACK_ENV} is for a local run only ` +
+        '(NODE_ENV local or test, or a localhost MCP_PUBLIC_URL)',
+    );
+  }
 
   const redirectAllowlist = parseRedirectAllowlist(env[OAUTH_REDIRECT_ALLOWLIST_ENV]);
-  const verifiedClients = parseVerifiedClients(env[OAUTH_VERIFIED_CLIENTS_ENV], redirectAllowlist);
+  const verifiedClients = parseVerifiedClients(
+    env[OAUTH_VERIFIED_CLIENTS_ENV],
+    redirectAllowlist,
+    host.mcpPublicUrl,
+  );
   const paymentClients = parsePaymentClients(
     env[OAUTH_PAYMENT_CLIENTS_ENV],
     `${host.mcpPublicUrl}${OAUTH_BUILTIN_CLIENT_PATH}`,
@@ -136,7 +160,24 @@ export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConf
     paymentClients,
     allowHttpCimdLoopback,
     requestCookieSecret,
+    dcrGlobalPerDay: parsePositiveInt(
+      OAUTH_DCR_GLOBAL_PER_DAY_ENV,
+      env[OAUTH_DCR_GLOBAL_PER_DAY_ENV],
+      DEFAULT_OAUTH_DCR_GLOBAL_PER_DAY,
+    ),
+    dcrPer48PerHour: parsePositiveInt(
+      OAUTH_DCR_PER_48_PER_HOUR_ENV,
+      env[OAUTH_DCR_PER_48_PER_HOUR_ENV],
+      DEFAULT_OAUTH_DCR_PER_48_PER_HOUR,
+    ),
   });
+}
+
+function parsePositiveInt(name: string, raw: string | undefined, fallback: number): number {
+  const value = raw?.trim() ?? '';
+  if (value === '') return fallback;
+  if (!/^[1-9][0-9]{0,8}$/.test(value)) throw new Error(`${name} must be a positive integer`);
+  return Number(value);
 }
 
 function requireHttps(name: string, value: string): void {
@@ -226,6 +267,7 @@ function redirectUriProblem(uri: string): string | null {
 function parseVerifiedClients(
   raw: string | undefined,
   allowlist: readonly OAuthRedirectAllowlistEntry[],
+  mcpPublicUrl: string,
 ): readonly OAuthVerifiedClient[] {
   if (!raw?.trim()) return Object.freeze([]);
   const name = OAUTH_VERIFIED_CLIENTS_ENV;
@@ -247,6 +289,15 @@ function parseVerifiedClients(
       ) {
         throw new Error(
           `${name}[${index}] must be {clientId: string, displayName: string, vendorRedirects: string[]}`,
+        );
+      }
+      // Only a CIMD client proves its domain; a dcr_ id or the built-in client never can.
+      if (
+        classify(clientId, { mcpPublicUrl, allowHttpLoopback: false }).kind !== 'CIMD' ||
+        !clientId.startsWith('https://')
+      ) {
+        throw new Error(
+          `${name}[${index}] clientId "${clientId}" must be an https CIMD client_id URL`,
         );
       }
       for (const uri of vendorRedirects) {
