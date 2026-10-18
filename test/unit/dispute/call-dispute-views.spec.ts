@@ -140,7 +140,7 @@ describe('call dispute: the provider’s notice of a new report', () => {
     expect(notice.title).toBe('A buyer reported a bad result on a call you served');
     expect(notice.body).toBe(
       'The buyer says: "Other". Reply by 2026-10-02 00:00 UTC, or the buyer wins: if you stay ' +
-        'silent, it is upheld automatically at 2026-10-04 00:00 UTC.',
+        'silent, it can be upheld automatically from 2026-10-04 00:00 UTC.',
     );
     expect(notice.body).not.toMatch(/may reply/i);
     expect(notice.payload).toEqual({
