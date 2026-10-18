@@ -2,7 +2,7 @@ import { BindingAuthMode, BindingStatus } from '@modules/tool/ports/tool.types';
 import { RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 import { isConstNode } from '@modules/tool/domain/mapping/normalize';
 
-import { RELAY_ALLOWED_PORTS } from '@shared/network/egress';
+import { RELAY_ALLOWED_PORTS, isIpLiteralHost } from '@shared/network/egress';
 
 import { ProviderErrors } from '../errors/provider.errors';
 import { CredentialHeader } from './credential-vault.crypto';
@@ -263,6 +263,57 @@ export function assertCredentialRemovable(
   if (live && publishedEndpoint && originOf(publishedEndpoint) === origin) {
     throw ProviderErrors.credentialOriginLive();
   }
+}
+
+/**
+ * Throws when the egress relay is configured and could not carry a call to
+ * `endpoint` — the same rules as the relay transport's pre-check
+ * (`egress-relay.transport.ts`), applied at Save so a provider learns now
+ * rather than on every call: `https:` only, a host name rather than an IP
+ * literal, and a port Cloudflare proxies. Unparsable input is left to the
+ * other validators.
+ */
+export function assertRelayableEndpoint(endpoint: string, relayConfigured: boolean): void {
+  if (!relayConfigured) return;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return;
+  }
+  if (url.protocol !== 'https:') {
+    throw ProviderErrors.endpointNotRelayable({ reason: 'use https' });
+  }
+  if (isIpLiteralHost(url.hostname)) {
+    throw ProviderErrors.endpointNotRelayable({ reason: 'use a host name, not an IP address' });
+  }
+  const port = relayUnsupportedPort(endpoint, relayConfigured);
+  if (port !== null) throw ProviderErrors.endpointPortNotRelayable({ port });
+}
+
+/**
+ * The relay refuses a request carrying more headers than this
+ * (`MAX_HEADERS` in `workers/egress-relay/src/relay.ts`; keep the two equal).
+ */
+export const RELAY_MAX_HEADERS = 64;
+
+/**
+ * Headers Assay adds to every call on top of the mapping's: `accept`,
+ * `content-type`, `x-assay-call-id`, `content-digest`, `signature-input`,
+ * `signature`, and up to {@link MAX_HEADERS} credential headers.
+ */
+export const ASSAY_HEADER_COUNT_RESERVE = 6 + MAX_HEADERS;
+
+/**
+ * The most headers a request mapping may declare (constant and input-derived
+ * alike): {@link RELAY_MAX_HEADERS} less {@link ASSAY_HEADER_COUNT_RESERVE} is
+ * 48; 8 more are held back as margin for headers Assay may add later.
+ */
+export const MAX_MAPPING_HEADERS = RELAY_MAX_HEADERS - ASSAY_HEADER_COUNT_RESERVE - 8;
+
+/** The number of headers `mapping` declares. */
+export function mappingHeaderCount(mapping: RequestMappingSpec): number {
+  return Object.keys(mapping.headers ?? {}).length;
 }
 
 /**

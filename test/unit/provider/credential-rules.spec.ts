@@ -7,6 +7,7 @@ import {
   credentialQueryKeys,
   originOf,
   relayUnsupportedPort,
+  assertRelayableEndpoint,
   headerBytes,
   looksLikeSecretName,
   secretConstantHeaders,
@@ -234,5 +235,28 @@ describe('assertCredentialPut — outbound header cap', () => {
 
   it('ignores derived mapping headers, which only the call can size', () => {
     expect(put(m({ headers: { 'X-Derived': { $path: '$.q' } } }), 'a'.repeat(4000))).not.toThrow();
+  });
+});
+
+describe('assertRelayableEndpoint', () => {
+  it('refuses http, IP literals and unreachable ports with the relay on', () => {
+    expect(() => assertRelayableEndpoint('http://p.test/x', true)).toThrow(
+      expect.objectContaining({ errorCode: ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE }),
+    );
+    for (const ip of ['https://10.0.0.1/x', 'https://[::1]/x', 'https://8.8.8.8:443/x']) {
+      expect(() => assertRelayableEndpoint(ip, true)).toThrow(
+        expect.objectContaining({ errorCode: ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE }),
+      );
+    }
+    expect(() => assertRelayableEndpoint('https://p.test:3000/x', true)).toThrow(
+      expect.objectContaining({
+        errorCode: ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
+      }),
+    );
+  });
+  it('accepts an https host name, and anything with the relay off', () => {
+    expect(() => assertRelayableEndpoint('https://p.test:8443/x', true)).not.toThrow();
+    expect(() => assertRelayableEndpoint('http://10.0.0.1:3000/x', false)).not.toThrow();
+    expect(() => assertRelayableEndpoint('not a url', true)).not.toThrow();
   });
 });

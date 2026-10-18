@@ -245,6 +245,10 @@ export enum ProviderErrorCode {
   PROVIDER_CREDENTIAL_ORIGIN_LIVE = 'PROVIDER_CREDENTIAL_ORIGIN_LIVE',
   /** The endpoint names a port the egress relay cannot reach. */
   PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED = 'PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED',
+  /** With the egress relay on, an endpoint that is not https, or names an IP address. 400. */
+  PROVIDER_ENDPOINT_NOT_RELAYABLE = 'PROVIDER_ENDPOINT_NOT_RELAYABLE',
+  /** A request mapping declares more headers than a call can carry. 400. */
+  PROVIDER_TOO_MANY_MAPPING_HEADERS = 'PROVIDER_TOO_MANY_MAPPING_HEADERS',
 }
 
 export type ProviderErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -338,6 +342,19 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `Port ${context?.port} is not supported. Use 443 or one of: ` +
       `${RELAY_ALLOWED_PORTS.filter((port) => port !== 443).join(', ')}.`,
+  },
+  endpointNotRelayable: {
+    code: ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `This endpoint cannot be called: ${context?.reason ?? 'use https and a host name'}.`,
+  },
+  tooManyMappingHeaders: {
+    code: ProviderErrorCode.PROVIDER_TOO_MANY_MAPPING_HEADERS,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `The request mapping declares ${context?.count} headers; at most ${context?.max} are ` +
+      `allowed, so Assay's own and your credential headers still fit.`,
   },
   endpointNotDeclared: {
     code: ProviderErrorCode.PROVIDER_ENDPOINT_NOT_DECLARED,
