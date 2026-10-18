@@ -9,7 +9,6 @@ import {
 } from './helpers/fake-observability-repositories';
 
 import { MetricsCollectorService } from '@modules/observability/services/metrics-collector.service';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { SignalAvailability } from '@modules/observability/domain/signal-catalog';
 import { ReconciliationSeverity } from '@modules/settlement/ports/reconciliation.types';
 import { ReconciliationRunEntity } from '@database/postgres/entities/reconciliation-run.entity';
@@ -24,7 +23,6 @@ function build(
     verificationBacklog?: { count: number; p95AgeSeconds: number | null };
   } = {},
 ) {
-  const registry = new MetricsRegistryService();
   const collector = new MetricsCollectorService(
     fakeReconciliationRunRepository(options.runs ?? []),
     fakeMetricsRepository({
@@ -33,9 +31,8 @@ function build(
     }),
     fakeSlashProposalRepository(options.falsePositive),
     fakeObservabilityMetricsRepository(options.observability),
-    registry,
   );
-  return { collector, registry };
+  return { collector };
 }
 
 function findSignal(snapshotSignals: SignalReadingDto[], signal: string): SignalReadingDto {
@@ -82,17 +79,17 @@ describe('MetricsCollectorService', () => {
     expect(payoutLag.value).toBeNull();
   });
 
-  it('marks the two in-process signals AWAITING_INSTRUMENTATION with a null value', async () => {
+  it('marks the two uninstrumented signals NONE with a null value', async () => {
     const { collector } = build();
 
     const snapshot = await collector.snapshot();
 
     const latency = findSignal(snapshot.signals, 'PLATFORM_LATENCY_P95_BY_BINDING');
-    expect(latency.availability).toBe(SignalAvailability.AWAITING_INSTRUMENTATION);
+    expect(latency.availability).toBe(SignalAvailability.NONE);
     expect(latency.value).toBeNull();
 
     const egress = findSignal(snapshot.signals, 'EGRESS_BLOCKS');
-    expect(egress.availability).toBe(SignalAvailability.AWAITING_INSTRUMENTATION);
+    expect(egress.availability).toBe(SignalAvailability.NONE);
     expect(egress.value).toBeNull();
   });
 
@@ -214,17 +211,5 @@ describe('MetricsCollectorService', () => {
     } finally {
       delete process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS;
     }
-  });
-
-  it('sets the Prometheus gauges the JSON snapshot agrees with', async () => {
-    const { collector, registry } = build({
-      observability: { attestationsSigned: 12, slashesExecuted: 2 },
-    });
-
-    await collector.snapshot();
-    const text = await registry.metricsText();
-
-    expect(text).toContain('assay_attestations_signed{window="24h"} 12');
-    expect(text).toContain('assay_slashes_executed{window="30d"} 2');
   });
 });

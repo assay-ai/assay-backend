@@ -5,11 +5,9 @@ import { OperatorIdentityModule } from '@modules/operator/operator-identity.modu
 import { ObservabilityDashboardController } from './controllers/observability-dashboard.controller';
 import { ObservabilityMetricsRepository } from './repositories/observability-metrics.repository';
 import { MetricsCollectorService } from './services/metrics-collector.service';
-import { MetricsRegistryService } from './services/metrics-registry.service';
 
 /**
- * `GET /operator/dashboard` (+ its JSON twin), and the in-process instruments
- * (`MetricsRegistryService`) other modules record into.
+ * `GET /operator/dashboard` (+ its JSON twin).
  *
  * `ReconciliationRunRepository`, `PlatformMetricsRepository` and
  * `SlashProposalRepository` (all injected by `MetricsCollectorService`) come
@@ -21,8 +19,7 @@ import { MetricsRegistryService } from './services/metrics-registry.service';
  */
 @Module({
   imports: [OperatorIdentityModule],
-  providers: [MetricsRegistryService, MetricsCollectorService, ObservabilityMetricsRepository],
+  providers: [MetricsCollectorService, ObservabilityMetricsRepository],
   controllers: [ObservabilityDashboardController],
-  exports: [MetricsRegistryService],
 })
 export class ObservabilityModule {}

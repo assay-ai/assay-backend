@@ -14,7 +14,7 @@ export interface Response<T> {
 /**
  * Wraps every successful body in the platform's `{ data, statusCode, message }`
  * envelope — except handlers marked `@RawResponse()`, whose body format is
- * specified by somebody else (Prometheus text, an HTML page). See that
+ * specified by somebody else (an HTML page, say). See that
  * decorator for why the exemption is a decorator rather than a `Content-Type`
  * check: a route can set `text/html` and still be handed JSON, and that is
  * exactly the defect this exists to make impossible.
