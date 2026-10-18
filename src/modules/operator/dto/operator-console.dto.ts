@@ -911,6 +911,15 @@ export class AccountBlockDto {
   @ApiProperty({ description: 'What enforcement matches on: the uuid, or `namespace:address`' })
   subjectKey: string;
 
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description:
+      "An organization's public name: the provider's name, else its public handle (@handle). " +
+      'Never the organization name, which can come from an email. Null for a wallet or when there is none',
+  })
+  subjectName: string | null;
+
   @ApiProperty()
   active: boolean;
 
