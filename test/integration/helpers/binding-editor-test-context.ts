@@ -259,9 +259,7 @@ export async function createBindingEditorTestContext(
       CreateLedger1755100000000,
       CreateProviderRegistrationTables1756600000000,
       DropConnectivityEgressIps1762000000000,
-      // `ProviderEntity` gained `payout_threshold_override` here, and TypeORM
-      // inserts every mapped column — so the row this context writes needs the
-      // schema that has it, even though payouts are no part of this suite.
+      // The ledger's credit-type unique index; its payout table is unused here.
       ProviderEarningsAndPayouts1756700000000,
       CreateToolBindingTables1756900000000,
       // The stake-authority migration put `stake_authority`, `stake_proof` and

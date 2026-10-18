@@ -100,7 +100,6 @@ export class MetricsCollectorService {
       attestations,
       slashes,
       queue,
-      payoutQueueDepth,
       intentRates,
       disputeOverturn,
     ] = await Promise.all([
@@ -113,7 +112,6 @@ export class MetricsCollectorService {
       this.observability.attestationsSigned(new Date(now - ATTESTATION_WINDOW_MS)),
       this.observability.slashesExecuted(new Date(now - SLASH_WINDOW_MS)),
       this.platformMetrics.verificationBacklog(nowDate),
-      this.observability.payoutQueueDepth(),
       this.platformMetrics.intentRateCounts(nowDate),
       this.observability.disputeOverturnCounts(new Date(now - OVERTURN_WINDOW_MS)),
     ]).catch((error: unknown) => {
@@ -216,7 +214,7 @@ export class MetricsCollectorService {
     // Bonus readings shown on the dashboards but not part of the
     // named-signals ∪ golden-signals union — see the class comment on
     // `SIGNAL_CATALOG`. Kept out of that enum on purpose: it is the contract
-    // for the union list specifically, and these two are extra.
+    // for the union list specifically, and this one is extra.
     const bonus: SignalReadingDto[] = [
       {
         signal: 'INTENTS_PER_MINUTE',
@@ -225,16 +223,6 @@ export class MetricsCollectorService {
         availability: SignalAvailability.SOURCED,
         value: intentRates.lastMinute,
         unit: 'count / min',
-        gate: null,
-        reason: null,
-      },
-      {
-        signal: 'PAYOUT_QUEUE_DEPTH',
-        label: 'Payout queue (PENDING + SUBMITTED)',
-        section: 'money',
-        availability: SignalAvailability.SOURCED,
-        value: payoutQueueDepth,
-        unit: 'records',
         gate: null,
         reason: null,
       },

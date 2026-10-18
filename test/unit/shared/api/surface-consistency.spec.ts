@@ -536,13 +536,10 @@ describe('REST surface consistency', () => {
         // provider service — `PaymentIntentRepository.exportQueryBuilder` is
         // the sixth cross-tenant read, same justification as the five above.
         'database/postgres/repositories/payment-intent.repository.ts',
-        // The hourly payout batch runs once per deployment, not once per
-        // tenant: `ProviderRepository.findAllProviders` and
-        // `ProviderPayoutRepository.findResumable` both consider every
-        // organization in one pass, the same shape as the five provider
-        // report services above.
+        // The stake monitor runs once per deployment, not once per tenant:
+        // `ProviderRepository.findAllProviders` considers every organization
+        // in one pass, the same shape as the provider report services above.
         'database/postgres/repositories/provider.repository.ts',
-        'database/postgres/repositories/provider-payout.repository.ts',
         // The binding catalogue read. Routing is the one operation in the system
         // that is *about* comparing tenants: an agent asks for `search_web`
         // and the router weighs every provider who implements it, so
