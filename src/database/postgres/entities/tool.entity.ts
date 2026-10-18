@@ -93,7 +93,7 @@ export class ToolEntity {
   @Column({ name: 'removed_at', type: 'timestamptz', nullable: true })
   removedAt: Date | null;
 
-  /** `TAKEDOWN` | `PROVIDER`. */
+  /** `TAKEDOWN` (the tool's own) | `HANDLE` (its handle's takedown) | `PROVIDER`. */
   @Column({ name: 'removal_reason', type: 'varchar', length: 16, nullable: true })
   removalReason: string | null;
 

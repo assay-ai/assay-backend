@@ -10,7 +10,9 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   content hash the submission was for, so an approval can never be for
  *   content that changed after the operator read it. A takedown (FR-18) sets
  *   `removed_at` and keeps the status it replaced, so a reverted cutoff can
- *   restore it. `review_version` has no foreign key on purpose: it may name
+ *   restore it — a tool's own takedown (`TAKEDOWN`) and its handle's
+ *   (`HANDLE`) are told apart, so lifting one never lifts the other.
+ *   `review_version` has no foreign key on purpose: it may name
  *   a draft, and a rejected draft may be discarded.
  * - Name rules, as CHECKs: a PROVIDER name is `{handle}__{tool}` with the
  *   §7.1 caps (`{tool}` at most 40 characters, no `__` inside it, the whole
@@ -57,7 +59,8 @@ export class ProviderTools1761900000000 implements MigrationInterface {
           CHECK ("kind" <> 'PROVIDER' OR "visibility" <> 'LISTED' OR "approved_version" IS NOT NULL),
         ADD CONSTRAINT "chk_tools_removal"
           CHECK (("removed_at" IS NULL) = ("removal_reason" IS NULL)
-                 AND ("removal_reason" IS NULL OR "removal_reason" IN ('TAKEDOWN', 'PROVIDER'))
+                 AND ("removal_reason" IS NULL
+                      OR "removal_reason" IN ('TAKEDOWN', 'HANDLE', 'PROVIDER'))
                  AND ("removed_at" IS NULL OR "status" = 'REMOVED'))
     `);
     await queryRunner.query(`

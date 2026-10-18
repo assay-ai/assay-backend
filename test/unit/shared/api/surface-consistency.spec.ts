@@ -413,6 +413,9 @@ describe('REST surface consistency', () => {
       // `P-10`–`P-12`, the standard contract editor. A STANDARD tool is the
       // platform's: nobody's tenant.
       'modules/operator/controllers/operator-contracts.controller.ts',
+      // `A-24`, the provider tool review queue, and promotion. The subject is a
+      // provider who is never the caller.
+      'modules/operator/controllers/operator-provider-tools.controller.ts',
       // `A-12`–`A-14`, the operator directory. Operators have no tenant.
       'modules/operator/controllers/operator-operators.controller.ts',
       'modules/operator/controllers/operator-override-log.controller.ts',
@@ -787,6 +790,13 @@ describe('REST surface consistency', () => {
       // provider-facing `ToolRequestDto` in the same file does not, because a
       // tenant reading its own ticket learns nothing from being told its own id.
       'modules/tool-request/dto/tool-request.dto.ts',
+      // The provider tool review queue and promotion candidates and invites
+      // (T4): an operator reviews and invites providers who are never the
+      // caller, and a queue row that could not say whose tool it is would be
+      // untriageable. The provider-facing DTOs (`provider-tools.dto.ts`)
+      // carry no organization.
+      'modules/provider-tool/dto/provider-tool-review.dto.ts',
+      'modules/provider-tool/dto/tool-promotion.dto.ts',
     ]);
 
     it('no DTO on the surface declares an organizationId field', () => {

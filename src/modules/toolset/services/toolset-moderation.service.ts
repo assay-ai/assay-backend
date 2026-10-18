@@ -6,6 +6,11 @@ import { ModerationCutoffEntity } from '@database/postgres/entities/moderation-c
 import { OrgHandleHistoryEntity } from '@database/postgres/entities/org-handle-history.entity';
 import { OrganizationEntity } from '@database/postgres/entities/organization.entity';
 import { ToolsetReportEntity } from '@database/postgres/entities/toolset-report.entity';
+import { ToolEntity } from '@database/postgres/entities/tool.entity';
+import {
+  TOOL_CONTRACT_CHANGES,
+  ToolContractChanges,
+} from '@modules/tool/ports/tool-contracts.port';
 import { ToolsetEntity } from '@database/postgres/entities/toolset.entity';
 import { ModerationCutoffRepository } from '@database/postgres/repositories/toolset-sharing.repository';
 
@@ -20,6 +25,7 @@ import {
 import { SharingAction, SharingTransitionError, applySharing } from '../domain/sharing';
 import { ToolsetErrors } from '../errors/toolset.errors';
 import { AccessEpochService } from './access-epoch.service';
+import { removeHandleTools, renameHandleTools, restoreHandleTools } from './handle-tools';
 import { HandlesService, lockHandle } from './handles.service';
 import { sharingPatchOf, sharingStateOf } from './sharing-row';
 import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
@@ -30,6 +36,18 @@ export const CUTOFF_CONFIRM_WINDOW_MS = 72 * 60 * 60 * 1000;
 export enum CutoffTarget {
   TOOLSET = 'TOOLSET',
   HANDLE = 'HANDLE',
+  /** A provider tool (T4, `/operator/tools/:id/takedown`). */
+  TOOL = 'TOOL',
+}
+
+/** Why a tool is REMOVED (`tools.removal_reason`). */
+export enum ToolRemovalReason {
+  /** Its own takedown. */
+  TAKEDOWN = 'TAKEDOWN',
+  /** Its handle's takedown: every URL and tool under the handle stops. */
+  HANDLE = 'HANDLE',
+  /** Its provider withdrew it. */
+  PROVIDER = 'PROVIDER',
 }
 
 export enum CutoffAction {
@@ -73,6 +91,11 @@ export class ToolsetModerationService {
     private readonly epochs: AccessEpochService,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     @Optional() @Inject(TOOLSET_CLOCK) private readonly now: ToolsetClock = systemClock,
+    // A tool's or a handle's takedown changes which tools serve: every
+    // process re-reads its contracts at once. Optional for hand-built harnesses.
+    @Optional()
+    @Inject(TOOL_CONTRACT_CHANGES)
+    private readonly contracts?: ToolContractChanges,
   ) {}
 
   /** Delist or take down a toolset, at once; returns the cutoff to confirm. */
@@ -106,6 +129,48 @@ export class ToolsetModerationService {
     return { cutoff, toolset };
   }
 
+  /**
+   * Take down a provider tool, at once (FR-18): REMOVED everywhere — every
+   * view, pinned toolset versions included — and calls get `TOOL_REMOVED`.
+   * The status it had is kept, so a reverted cutoff restores it.
+   */
+  async cutoffTool(
+    manager: EntityManager,
+    input: { toolId: string; operatorId: string; note: string; reportId?: string | null },
+  ): Promise<{ cutoff: ModerationCutoffEntity; organizationId: string | null }> {
+    const tool = await manager
+      .createQueryBuilder(ToolEntity, 'tool')
+      .setLock('pessimistic_write')
+      .where('tool.id = :id', { id: input.toolId })
+      .getOne();
+    if (!tool || tool.kind !== 'PROVIDER') throw ToolsetErrors.notFound();
+    if (tool.status === 'REMOVED') {
+      throw ToolsetErrors.sharingRefused({ refusal: 'ALREADY_TAKEN_DOWN' });
+    }
+    const now = this.now();
+    await manager.update(
+      ToolEntity,
+      { id: tool.id },
+      {
+        status: 'REMOVED',
+        removedAt: now,
+        removalReason: ToolRemovalReason.TAKEDOWN,
+        statusBeforeRemoval: tool.status,
+        updatedAt: now,
+      },
+    );
+    const cutoff = await this.insertCutoff(manager, {
+      targetType: CutoffTarget.TOOL,
+      targetId: tool.id,
+      action: CutoffAction.TAKEDOWN,
+      operatorId: input.operatorId,
+      note: input.note,
+      reportId: input.reportId ?? null,
+      now,
+    });
+    return { cutoff, organizationId: tool.ownerOrgId };
+  }
+
   /** Take down a handle: every URL under it stops at once, with no alias. */
   async cutoffHandle(
     manager: EntityManager,
@@ -118,6 +183,8 @@ export class ToolsetModerationService {
       throw ToolsetErrors.sharingRefused({ refusal: 'ALREADY_TAKEN_DOWN' });
     }
     await manager.update(OrganizationEntity, { id: org.id }, { handleStatus: HandleStatus.FROZEN });
+    // Its provider tools (`{handle}__…`) stop with it, on every URL.
+    await removeHandleTools(manager, org.id, this.now());
     const cutoff = await this.insertCutoff(manager, {
       targetType: CutoffTarget.HANDLE,
       targetId: handle,
@@ -184,6 +251,17 @@ export class ToolsetModerationService {
           sharingPatchOf(transition(state, action, this.now())),
         );
       }
+    } else if (cutoff.targetType === CutoffTarget.TOOL) {
+      // Restored only from its own takedown: a tool removed since for
+      // another reason (its handle's takedown) stays removed.
+      await manager.query(
+        `UPDATE tools
+            SET status = COALESCE(status_before_removal, 'ACTIVE'),
+                removed_at = NULL, removal_reason = NULL, status_before_removal = NULL,
+                updated_at = now()
+          WHERE id = $1 AND status = 'REMOVED' AND removal_reason = 'TAKEDOWN'`,
+        [cutoff.targetId],
+      );
     } else {
       await lockHandle(manager, cutoff.targetId);
       const org = await manager
@@ -197,6 +275,7 @@ export class ToolsetModerationService {
           { id: org.id },
           { handleStatus: HandleStatus.ACTIVE },
         );
+        await restoreHandleTools(manager, org.id);
       }
     }
 
@@ -253,6 +332,8 @@ export class ToolsetModerationService {
     }
     const now = this.now();
     const aliasUntil = new Date(now.getTime() + HANDLE_ALIAS_MS);
+    // Its provider tools are named under the handle: they move with it.
+    await renameHandleTools(manager, org.id, handle, next);
     await manager.update(
       OrganizationEntity,
       { id: org.id },
@@ -367,6 +448,7 @@ export class ToolsetModerationService {
 
   /** After a moderation write commits: every cached shared view and access re-reads. */
   async afterCommit(organizationIds: readonly (string | null)[] = []): Promise<void> {
+    await this.contracts?.contractsChanged();
     await this.epochs.bumpShared();
     for (const id of new Set(organizationIds)) if (id) await this.epochs.bump(id);
   }

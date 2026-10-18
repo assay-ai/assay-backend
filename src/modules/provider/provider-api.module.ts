@@ -175,6 +175,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     },
     ProviderStakeService,
   ],
-  exports: [ProviderModule],
+  // `BindingPublishService`: a provider tool's publish gate is its binding's (T4).
+  exports: [ProviderModule, BindingPublishService],
 })
 export class ProviderApiModule {}
