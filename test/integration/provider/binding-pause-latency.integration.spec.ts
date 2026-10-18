@@ -211,6 +211,7 @@ beforeAll(async () => {
     new BindingCeilingService(redis),
     config,
     () => 0,
+    noBlocks(),
   );
 });
 

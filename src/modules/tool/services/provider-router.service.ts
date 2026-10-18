@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
+import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { FreeBindingDials } from '@modules/free-tier/domain/free-calls-per-day';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
@@ -56,6 +57,7 @@ import {
   RoutingRules,
   RuleRejection,
   RuleRejectionReason,
+  RuleSource,
   StakeGateVerdict,
   WeightedCandidate,
   applyContractGate,
@@ -176,6 +178,10 @@ export class ProviderRouterService {
     private readonly ceilings: BindingCeilingService,
     @Inject(ROUTER_CONFIG) private readonly config: RouterConfig,
     @Inject(ROUTING_RANDOM) private readonly random: RoutingRandom,
+    // The account blocklist, the in-memory copy payment-intent creation and the
+    // catalogue's market read check. A blocked organization's bindings leave
+    // the pool before anything else looks at it — see {@link unblocked}.
+    private readonly blocklist: AccountBlocklistService,
     // The observed-stats write (`binding_attempts`). Optional: a composition
     // without it routes exactly as before and simply measures nothing.
     @Optional() private readonly observations: BindingAttemptRecorder | null = null,
@@ -205,7 +211,8 @@ export class ProviderRouterService {
       throw ToolErrors.toolNotFound({ toolId: request.toolId });
     }
 
-    const candidates = await this.gatherCandidates(request.toolId);
+    this.assertPayeeNotBlocked(request.toolId, request.context);
+    const candidates = this.unblocked(await this.gatherCandidates(request.toolId));
     if (candidates.length === 0) {
       throw ToolErrors.noEligibleBinding({
         toolId: request.toolId,
@@ -464,6 +471,11 @@ export class ProviderRouterService {
    * Every candidate behind a tool, gathered exactly as a call gathers them —
    * the I/O half of {@link quote}, which the quote index caches so that
    * `tools/list` never reads the registry or the chain per tool.
+   *
+   * Blocked organizations are NOT dropped here: {@link quoteFromCandidates}
+   * drops them when it prices, against the live blocklist, so a block and an
+   * unblock show in a listing at once rather than when the cached snapshot
+   * ages out.
    */
   async snapshotCandidates(toolId: string): Promise<RoutingCandidate[]> {
     return this.gatherCandidates(toolId);
@@ -484,7 +496,7 @@ export class ProviderRouterService {
     context: RoutingContext,
   ): ToolQuote {
     const now = new Date();
-    const pool = classPoolOf(candidates, context);
+    const pool = classPoolOf(this.unblocked(candidates), context);
     const contract = this.resolveContract(tool, pool, context, now);
     if (!contract.version) {
       return {
@@ -721,7 +733,8 @@ export class ProviderRouterService {
   async offer(toolId: string, context: RoutingContext): Promise<RoutingOffer> {
     const tool = await this.catalogue.findTool(toolId);
     if (!tool) throw ToolErrors.toolNotFound({ toolId });
-    const candidates = await this.gatherCandidates(toolId);
+    this.assertPayeeNotBlocked(toolId, context);
+    const candidates = this.unblocked(await this.gatherCandidates(toolId));
     const now = new Date();
     // Decided on the whole class pool, unpinned: the voucher retry makes the
     // same choice the first offer made, and a pinned payee whose binding does
@@ -745,6 +758,58 @@ export class ProviderRouterService {
       contractVersion: contract.version.version,
       ...(fellBack ? { fellBack: true } : {}),
     };
+  }
+
+  // ── The account blocklist ─────────────────────────────────────────────────
+
+  /**
+   * The candidates whose provider organization is not blocked.
+   *
+   * A blocked organization is dropped from the pool, as if it had no bindings,
+   * rather than rejected by a gate. A rejection is reported — in
+   * `unroutableReason`, in a rule refusal's provider list — and the platform
+   * does not confirm that a blocked provider exists (the public catalogue
+   * answers 404 for it). Dropping it also keeps it out of everything priced
+   * off the pool: the quote, `pricedBy`, `listings` and the contract version.
+   *
+   * `DbProviderRegistry` already reads a blocked provider as `SUSPENDED`, so
+   * `filterEligible` refuses it too; that stays as defence in depth, as does
+   * the check in `PaymentIntentService.create`. This one is what holds when
+   * the candidates come from the quote index's cached snapshot, which is up to
+   * a minute old and is not invalidated by a block.
+   *
+   * No I/O: the blocklist is held in memory and answers synchronously, so this
+   * is one map lookup per candidate on every path. Returns the input itself
+   * when nothing is blocked, so an unblocked pool is priced and drawn from the
+   * very same array as before.
+   */
+  private unblocked(candidates: readonly RoutingCandidate[]): readonly RoutingCandidate[] {
+    const kept = candidates.filter(
+      ({ binding }) => !this.blocklist.organizationBlock(binding.providerId),
+    );
+    return kept.length === candidates.length ? candidates : kept;
+  }
+
+  /**
+   * Rail B's pin naming a blocked organization: refused as the payee no longer
+   * eligible, the refusal a voucher retry already gets for a payee the rules
+   * now drop. Not charged, the voucher is not redeemed, and the agent asks for
+   * a new offer, which can no longer name this provider. Checked before the
+   * pool is gathered, so it does not depend on the provider still having a
+   * binding. The detail does not say why: the buyer learns only what it
+   * already knew, that it was offered this provider.
+   */
+  private assertPayeeNotBlocked(toolId: string, context: RoutingContext): void {
+    const payee = context.onlyProviderId;
+    if (!payee || !this.blocklist.organizationBlock(payee)) return;
+    throw ruleRefusal(toolId, [
+      {
+        providerId: payee,
+        reason: RuleRejectionReason.PAYEE_NO_LONGER_ELIGIBLE,
+        source: RuleSource.REQUEST,
+        detail: 'the payee this payment names no longer takes calls',
+      },
+    ]);
   }
 
   // ── Selection ─────────────────────────────────────────────────────────────
@@ -879,7 +944,14 @@ export class ProviderRouterService {
     };
 
     for (let pass = 0; pass <= candidates.length; pass += 1) {
-      const selection = this.select(withShed(candidates, shed), context, now, version);
+      // Re-applied on every pass, not only once per call: a block that lands
+      // between two failover attempts must not be the provider tried next.
+      const selection = this.select(
+        withShed(this.unblocked(candidates), shed),
+        context,
+        now,
+        version,
+      );
       last = selection;
       const { picked } = selection;
       if (!picked) return { ...selection, picked: null };

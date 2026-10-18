@@ -1,6 +1,7 @@
 import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
+import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
@@ -58,6 +59,7 @@ import {
  *   └── BindingCallCounterService  lifetime calls per binding  → the exploration floor
  *   └── BindingCeilingService      declared ceilings           → shed, and spend the token
  *   └── BindingAttemptRecorder     every attempt it is owed    → `binding_attempts` → stats
+ *   └── AccountBlocklistService    blocked organizations       → dropped from the pool
  *   └── BINDING_INVOKER         the actual HTTP call       (`ToolEgressModule`, api + mcp only)
  * ```
  *
@@ -76,8 +78,9 @@ import {
   // `ChainsModule` is imported for `ENABLED_CHAINS` alone: the `ROUTER_CONFIG`
   // factory asserts at boot that every chain this deployment offers has a stake
   // floor. `ProviderModule` already imports it, but does not re-export
-  // it — and a module imports what it uses.
-  imports: [ChainsModule, NetworkModule, ProviderModule],
+  // it — and a module imports what it uses. `BlocklistModule` for the same
+  // reason: the router drops blocked organizations from every pool.
+  imports: [ChainsModule, NetworkModule, ProviderModule, BlocklistModule],
   providers: [
     // The **tool contract** half of the catalogue: empty unless an operator
     // points `TOOL_CATALOGUE_SEED_FILE` at one. Still a seed on purpose — a
