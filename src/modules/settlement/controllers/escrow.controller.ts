@@ -378,7 +378,10 @@ export class EscrowController {
       resourceId: session.agentAccount,
       before: null,
       after: {
-        amount: body.amount,
+        amount: MoneyUtil.format(
+          MoneyUtil.of(body.amount, asset, getAssetMetadata(asset).decimals),
+        ),
+        amountAtomic: body.amount,
         asset,
         withdrawAvailableAt: result.escrow.withdrawAvailableAt,
         transactionHash: result.submission.transactionHash,

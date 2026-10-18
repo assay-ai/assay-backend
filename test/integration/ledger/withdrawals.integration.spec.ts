@@ -147,8 +147,9 @@ describe('Escrow withdrawal history, against a real database', () => {
       actor_type: 'system',
     });
     expect(rows[0].after).toMatchObject({
-      amount: '13000000',
-      requested: '13240000',
+      amount: '13.000000',
+      amountAtomic: '13000000',
+      requested: '13.240000',
       asset: ASSET,
     });
   });
