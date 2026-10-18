@@ -39,6 +39,7 @@ import {
   TEST_POOL_SIZE,
   USDC_ASSET,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
   BuyerEscrowAccountColumnsSlice1759300000000,
 } from './test-database';
@@ -151,6 +152,7 @@ export async function createEscrowSeqTestContext(): Promise<EscrowSeqTestContext
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const redis = new Redis({

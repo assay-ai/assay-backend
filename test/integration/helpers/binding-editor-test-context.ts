@@ -97,6 +97,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
 } from './test-database';
 import { noBlocks } from '../../unit/helpers/blocklist';
@@ -331,6 +332,7 @@ export async function createBindingEditorTestContext(
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
   // The audit table of `1756000000000` without the rest of that migration's
   // tables: the publish service writes prune entries into it.

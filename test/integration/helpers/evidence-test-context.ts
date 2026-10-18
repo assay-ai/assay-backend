@@ -11,7 +11,11 @@ import { CreateVerificationRecords1755800000000 } from '@database/postgres/migra
 import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migrations/1755900000000-timestamptz-timestamps';
 import { CreateEvidencePacks1757400000000 } from '@database/postgres/migrations/1757400000000-create-evidence-packs';
 
-import { ensureTestDatabase, testConnectionOptions } from './test-database';
+import {
+  ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
+  testConnectionOptions,
+} from './test-database';
 
 /**
  * A real Postgres carrying `verification_records` and the two evidence tables
@@ -90,6 +94,7 @@ export async function createEvidenceTestContext(): Promise<EvidenceTestContext> 
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const context: EvidenceTestContext = {

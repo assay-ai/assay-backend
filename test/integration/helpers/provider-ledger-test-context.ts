@@ -39,6 +39,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
 } from './test-database';
 
@@ -173,6 +174,7 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const entryRepository = new LedgerEntryRepository(dataSource);

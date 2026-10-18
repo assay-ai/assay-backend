@@ -75,6 +75,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
 } from './test-database';
 import { noBlocks } from '../../unit/helpers/blocklist';
@@ -211,6 +212,7 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const balanceRepository = new AccountBalanceRepository(dataSource);
