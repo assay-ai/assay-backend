@@ -45,7 +45,9 @@ export type OAuthTokenResult =
   | 'unsupported_grant_type'
   | 'invalid_scope'
   | 'invalid_target'
-  | 'temporarily_unavailable';
+  | 'temporarily_unavailable'
+  /** An unexpected failure: the controller answered 500 `server_error`. */
+  | 'server_error';
 
 /** `oauth_refresh_reuse_total{kind}` (§6.3.11). */
 export type OAuthRefreshReuseKind = 'revoked' | 'stale';

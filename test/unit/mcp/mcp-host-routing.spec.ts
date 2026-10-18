@@ -7,6 +7,7 @@ import { Server } from '@modelcontextprotocol/server';
 import { AppMcpModule } from '@bootstrap/mcp/app.module';
 import { McpController } from '@modules/mcp/controllers/mcp.controller';
 import { McpHttpModule } from '@modules/mcp/mcp-http.module';
+import { OAuthDiscoveryModule } from '@modules/oauth/oauth-discovery.module';
 import { OAuthMcpModule } from '@modules/oauth/oauth-mcp.module';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpScope } from '@modules/mcp/ports/mcp-scope';
@@ -77,7 +78,11 @@ describe('the MCP host — routing', () => {
     class HostModule {}
 
     // The same order as `AppMcpModule`: OAuth and well-known routes first.
-    const moduleRef = await Test.createTestingModule({ imports: [OAuthMcpModule, HostModule] })
+    // `OAuthDiscoveryModule` is the part of `OAuthMcpModule` that needs no
+    // database, Redis or OAuth secret.
+    const moduleRef = await Test.createTestingModule({
+      imports: [OAuthDiscoveryModule, HostModule],
+    })
       .overrideProvider(MCP_HOST_CONFIG)
       .useValue({ mcpPublicUrl: HOST, webAppUrl: WEB })
       .compile();
@@ -138,6 +143,8 @@ describe('the MCP host — routing', () => {
       const oauth = imports.indexOf(OAuthMcpModule);
       expect(oauth).toBeGreaterThanOrEqual(0);
       expect(oauth).toBeLessThan(imports.indexOf(McpHttpModule));
+      const oauthImports: unknown[] = Reflect.getMetadata('imports', OAuthMcpModule);
+      expect(oauthImports).toContain(OAuthDiscoveryModule);
     });
 
     it('/.well-known/oauth-protected-resource/c/weather reaches the metadata controller, not the catch-all', async () => {
