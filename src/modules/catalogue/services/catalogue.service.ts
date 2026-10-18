@@ -425,7 +425,14 @@ export class CatalogueService {
     // One quote per chain a tool settles on (D6): a buyer pays on ONE chain, so
     // the headline is that chain's price, never the dearest across chains.
     const chainPrices = await Promise.all(
-      listed.map((tool: Tool, index) => this.pricesPerChain(tool, quotes[index], quoteContext)),
+      listed.map((tool: Tool, index) =>
+        this.pricesPerChain(
+          tool,
+          quotes[index],
+          quoteContext,
+          new Set((byTool.get(tool.id) ?? []).map((binding) => binding.providerId)),
+        ),
+      ),
     );
 
     const tools = listed.map((tool: Tool, index): CatalogueToolDto => {
@@ -497,15 +504,21 @@ export class CatalogueService {
    * slash hold) never names a price: `providerId` is the one provider at the
    * quoted price, or `null` when several are; `listings` is how many eligible
    * bindings the price was taken over.
+   *
+   * `listed` is the tool's providers in the listed market (ACTIVE, not
+   * blocked). The router does not apply the account blocklist, so a provider
+   * outside it is never named: the public detail route keeps a blocked
+   * provider unconfirmable (wave-1 audit I3).
    */
   private async pricesPerChain(
     tool: Tool,
     quote: ToolQuote,
     context: RoutingContext,
+    listed: ReadonlySet<string>,
   ): Promise<CatalogueChainPriceDto[]> {
     const chains = quote.settlementChains;
     if (quote.price === null || chains.length === 0) return [];
-    if (chains.length === 1) return [chainPrice(chains[0], quote)].filter(isPriced);
+    if (chains.length === 1) return [chainPrice(chains[0], quote, listed)].filter(isPriced);
 
     try {
       const candidates = await this.router.snapshotCandidates(tool.id);
@@ -519,6 +532,7 @@ export class CatalogueService {
                 payerChains: [chainId],
                 defaultChainId: chainId,
               }),
+              listed,
             );
           } catch (error: unknown) {
             this.warnChain(tool, chainId, error);
@@ -729,14 +743,21 @@ function cheapest(bindings: readonly ToolBinding[]): CatalogueMoneyDto | null {
   return best ? money(best) : null;
 }
 
-/** One chain's entry from the router's quote for a payer on that chain; `null` when it has no price. */
-function chainPrice(chainId: ChainId, quote: ToolQuote): CatalogueChainPriceDto | null {
+/**
+ * One chain's entry from the router's quote for a payer on that chain; `null`
+ * when it has no price. The provider is named only when it is in `listed`.
+ */
+function chainPrice(
+  chainId: ChainId,
+  quote: ToolQuote,
+  listed: ReadonlySet<string>,
+): CatalogueChainPriceDto | null {
   if (quote.price === null) return null;
   const pricedBy = quote.pricedBy ?? [];
   return {
     chainId,
     price: toMoneyDto(quote.price),
-    providerId: pricedBy.length === 1 ? pricedBy[0] : null,
+    providerId: pricedBy.length === 1 && listed.has(pricedBy[0]) ? pricedBy[0] : null,
     listings: quote.listings ?? 0,
   };
 }

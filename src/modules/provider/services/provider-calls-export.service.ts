@@ -153,6 +153,20 @@ export interface CallExportResult {
 /** One CSV row, already ordered to match {@link CSV_HEADER}. */
 export type CallExportCsvRow = ReadonlyArray<string | number | null>;
 
+/**
+ * The columns, in order. The money columns per row:
+ *
+ * - `price_amount`: the call's listed price, always.
+ * - `provider_amount`: the provider's share of it. `0` where the call passed
+ *   but nothing was collected (`PROVIDER_FORFEITED`, `PAID_UNCOLLECTED`). On a
+ *   not-credited row (`PAID_UNCREDITED`, including a buyer debt voided by a
+ *   late rejecting verdict, reason `voided:`) it is the share the provider
+ *   forgoes: Σ per class equals the earnings report's `withheldByClass`.
+ * - `platform_fee`: the platform's share. `0` on the passed-but-uncollected
+ *   rows and on a voided debt, since nothing was collected and no fee taken.
+ *   A refunded or voided call (status `REFUNDED` / `VOIDED`) still carries its
+ *   price split here, as it always has: sum fees over credited rows only.
+ */
 export const CSV_HEADER: readonly string[] = Object.freeze([
   'call_id',
   'intent_id',
@@ -228,9 +242,10 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     // Passed-but-unpaid rows carry 0: nothing was collected on them. A voided
     // debt is not credited, like a refund, and carries its share like one, so
     // Σ provider_amount per not-credited class equals the earnings report's
-    // `withheldByClass` (UX review 2026-10-18, B13 I2).
+    // `withheldByClass` (UX review 2026-10-18, B13 I2). Its fee is 0: nothing
+    // was collected, so no fee was taken (wave-1 audit M1). See CSV_HEADER.
     forfeited || uncollected ? '0' : row.providerAmount,
-    forfeited || uncollected ? '0' : row.platformFee,
+    forfeited || uncollected || voided ? '0' : row.platformFee,
     row.priceAmount,
     row.asset,
     row.decimals,

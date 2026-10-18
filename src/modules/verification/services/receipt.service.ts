@@ -1,8 +1,9 @@
 import { disputeWindowEndOf } from '@modules/payment/constants/collection-hold.constants';
-import { Inject, Injectable, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
+import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
 import { VerificationRecordEntity } from '@database/postgres/entities/verification-record.entity';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
@@ -21,6 +22,10 @@ import {
   loadCallDisputeConfig,
 } from '@modules/dispute/constants/call-dispute.config';
 import { disputeFilingClosesAt } from '@modules/dispute/domain/call-dispute';
+import {
+  RefundEligibility,
+  RefundEligibilityService,
+} from '@modules/dispute/services/refund-eligibility.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
@@ -56,9 +61,13 @@ import { VerificationErrors } from '../errors/verification.errors';
  */
 @Injectable()
 export class ReceiptService {
+  private readonly logger = new Logger(ReceiptService.name);
+
   constructor(
     private readonly intents: PaymentIntentRepository,
     private readonly records: VerificationRecordRepository,
+    // Whether a report filed now is refund-guaranteed, read-only.
+    private readonly refunds: RefundEligibilityService,
     // The dispute filing window; read from the environment when no module provides it.
     @Optional()
     @Inject(CALL_DISPUTE_CONFIG)
@@ -114,6 +123,12 @@ export class ReceiptService {
       ? listedPrice
       : MoneyUtil.zero(asset, intent.decimals);
 
+    // Read-only, and what the filing's `refundGuaranteed` would say (wave-1
+    // audit I1): false wherever a report would not be refunded in full, e.g. a
+    // chain without the escrow hold. A failure removes the promise, never the
+    // receipt.
+    const refund = await this.refundEligibility(intent, record?.settledAt ?? null);
+
     return {
       intentId: intent.id,
       toolId: intent.toolId,
@@ -142,9 +157,24 @@ export class ReceiptService {
         record?.settledAt ?? null,
         (this.disputeConfig ?? loadCallDisputeConfig()).filingWindowMs,
       ),
+      refundableIfReportedNow: refund.refundable,
+      refundableIfReportedUntil: refund.until,
       evaluatedAt: record?.evaluatedAt ?? null,
       settledAt: record?.settledAt ?? null,
     };
+  }
+
+  private async refundEligibility(
+    intent: PaymentIntentEntity,
+    settledAt: Date | null,
+  ): Promise<RefundEligibility> {
+    try {
+      return await this.refunds.ofCall(intent, settledAt);
+    } catch (error: unknown) {
+      const reason = error instanceof Error ? error.message : String(error);
+      this.logger.warn(`${intent.id}: refund eligibility failed; no refund promised: ${reason}`);
+      return { refundable: false, until: null };
+    }
   }
 }
 

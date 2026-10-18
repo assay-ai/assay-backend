@@ -238,6 +238,24 @@ export class GetReceiptResponseDto {
   })
   disputeFilingClosesAt: Date | null;
 
+  @ApiProperty({
+    description:
+      'Whether a "Report a bad result" filed now would be refunded in full if upheld: the same ' +
+      "answer as the filed dispute's `refundGuaranteed` would give. False on a chain without the " +
+      'escrow hold, after the dispute window, or when the call cannot be reported. Read-only: ' +
+      'filing decides again under its own locks',
+  })
+  refundableIfReportedNow: boolean;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      "When `refundableIfReportedNow` lapses: the hold's `collectableAt` minus the filing guard " +
+      '(60 s). Null when it is false, or when no end is known yet (a voucher not redeemed into ' +
+      'the hold: its hour starts at redemption). Never show the promise past it',
+  })
+  refundableIfReportedUntil: Date | null;
+
   @ApiPropertyOptional({ nullable: true, description: 'When the verdict was evaluated' })
   evaluatedAt: Date | null;
 

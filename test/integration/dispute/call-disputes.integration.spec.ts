@@ -62,6 +62,8 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import { addBlock, blocklistOf, noBlocks } from '../../unit/helpers/blocklist';
 import { BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
+import { RefundEligibilityService } from '@modules/dispute/services/refund-eligibility.service';
+
 import { FakeHeldPayments } from '../helpers/fake-held-payments';
 import { approvalFor } from '../helpers/operator-approval';
 import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
@@ -104,6 +106,7 @@ describe('call disputes, against a real database', () => {
   let held: FakeHeldPayments;
   let collection: HeldCollectionService;
   let sla: CallDisputeSlaService;
+  let refunds: RefundEligibilityService;
   const alerts: Array<{ name: string; summary: string }> = [];
   let blocklist: ReturnType<typeof blocklistOf>;
 
@@ -190,6 +193,7 @@ describe('call disputes, against a real database', () => {
     operatorDisputes = new OperatorCallDisputeService(disputes, overrides, approvals);
     retention = new CallDisputeRetentionService(dataSource, config);
     sla = new CallDisputeSlaService(dataSource, disputes, overrides, alertSink, config);
+    refunds = new RefundEligibilityService(new DisputeRepository(dataSource), config, held);
 
     adjudicator = await seedOperator('adj-a', [OperatorRole.ADJ]);
     second = await seedOperator('adj-b', [OperatorRole.ADJL]);
@@ -754,6 +758,134 @@ describe('call disputes, against a real database', () => {
         const dispute = await file(call);
         expect({ seconds, guaranteed: dispute.refundGuaranteed }).toEqual({ seconds, guaranteed });
         expect((await intentRow(call.intentId)).dispute_outcome).toBe(guaranteed ? 'OPEN' : null);
+      }
+    });
+
+    /**
+     * Wave-1 audit I1 (review I-1): the receipt's read-only answer
+     * (`RefundEligibilityService`, the pure predicate) against what filing
+     * then grants (the rail-B `holdLive` check and the `holdForDispute` SQL,
+     * untouched). Both directions of drift fail: each state expects one value
+     * and both sides must give it.
+     */
+    it('the receipt’s refundableIfReportedNow says what the filing then grants, in every state', async () => {
+      config.maxPerProviderPerDay = 100;
+      const maxFilings = config.maxFilingsPerDay;
+      config.maxFilingsPerDay = 100;
+      const row = (call: Call, set: string) =>
+        dataSource.query(`UPDATE payment_intents SET ${set} WHERE id = $1`, [call.intentId]);
+      const collectableIn = async (call: Call, seconds: number) => {
+        await row(call, `collectable_at = now() + make_interval(secs => ${seconds})`);
+        return call;
+      };
+      const railA = async () => {
+        const call = await seedSettled({ railA: true });
+        await intents.resolve(
+          buyer,
+          call.intentId,
+          PaymentIntentStatus.VERIFYING,
+          PaymentIntentStatus.SETTLED,
+        );
+        return call;
+      };
+      const cases: Array<[string, () => Promise<Call>, boolean]> = [
+        ['rail B held, 61 s left', () => seedHeld(61_000), true],
+        ['rail B held, 59 s left', () => seedHeld(59_000), false],
+        [
+          'rail B held, exactly at the guard',
+          async () => collectableIn(await seedHeld(), 60),
+          false,
+        ],
+        ['rail B not redeemed yet', () => seedSettled(), true],
+        [
+          'rail B window over',
+          async () => {
+            const call = await seedHeld();
+            await endWindow(call);
+            return call;
+          },
+          false,
+        ],
+        ['rail B buyer debt', () => seedDebt(), false],
+        [
+          'rail B, no escrow hold on the chain',
+          async () => {
+            held.live = false;
+            return seedSettled();
+          },
+          false,
+        ],
+        [
+          'rail B not redeemed, a recorded redemption error',
+          async () => {
+            const call = await seedSettled();
+            await row(call, `redemption_last_error = 'DelegateIsRevoked'`);
+            return call;
+          },
+          false,
+        ],
+        [
+          'hold released',
+          async () => {
+            const call = await seedHeld();
+            await row(call, `hold_released_at = now()`);
+            return call;
+          },
+          false,
+        ],
+        ['held COLLECTED', () => seedCollected(), false],
+        [
+          'held REFUNDED',
+          async () => {
+            const call = await seedHeld();
+            await row(call, `held_status = 'REFUNDED'`);
+            return call;
+          },
+          false,
+        ],
+        [
+          'dispute_outcome already REJECTED on the row',
+          async () => {
+            const call = await seedHeld();
+            await row(call, `dispute_outcome = 'REJECTED'`);
+            return call;
+          },
+          false,
+        ],
+        ['rail A held, 61 s left', async () => collectableIn(await railA(), 61), true],
+        ['rail A held, 59 s left', async () => collectableIn(await railA(), 59), false],
+        ['rail A held, exactly at the guard', async () => collectableIn(await railA(), 60), false],
+        [
+          'rail A, no escrow hold on the chain (not read for rail A)',
+          async () => {
+            held.live = false;
+            return collectableIn(await railA(), 1800);
+          },
+          true,
+        ],
+      ];
+      try {
+        for (const [label, seed, expected] of cases) {
+          held.live = true;
+          const call = await seed();
+          const intent = await payments.findOneBy({ organizationId: buyer, id: call.intentId });
+          const { refundable: flag } = await refunds.ofCall(intent!, null);
+          const dispute = await file(call);
+          expect({ label, flag, filed: dispute.refundGuaranteed }).toEqual({
+            label,
+            flag: expected,
+            filed: expected,
+          });
+          // Once a report holds the call, a second report is not promised a refund.
+          const after = await payments.findOneBy({ organizationId: buyer, id: call.intentId });
+          expect({ label, again: (await refunds.ofCall(after!, null)).refundable }).toEqual({
+            label,
+            again: false,
+          });
+        }
+      } finally {
+        held.live = true;
+        config.maxFilingsPerDay = maxFilings;
       }
     });
 
