@@ -10,7 +10,7 @@ export const RELAY_ALLOWED_PORTS: readonly number[] = [443, 8443, 2053, 2083, 20
 const ALLOWED_METHODS = new Set(['GET', 'HEAD', 'POST', 'PUT', 'PATCH', 'DELETE']);
 const MAX_HEADERS = 64;
 const MAX_TIMEOUT_MS = 120_000;
-const MAX_RESPONSE_BYTES = 50 * 1024 * 1024;
+const MAX_RESPONSE_BYTES = 10 * 1024 * 1024;
 
 const DROP_EXACT = new Set([
   'host',
@@ -80,6 +80,13 @@ function isIpLiteral(hostname: string): boolean {
   return /^(0x[0-9a-f]*|\d+)$/i.test(last);
 }
 
+function isInternalName(hostname: string): boolean {
+  const h = hostname.replace(/\.$/, '').toLowerCase();
+  return (
+    h === 'localhost' || ['.localhost', '.local', '.internal'].some((suffix) => h.endsWith(suffix))
+  );
+}
+
 interface Envelope {
   url: string;
   method: string;
@@ -123,20 +130,32 @@ function buildHeaders(input: Record<string, string>): Headers | null {
   return out;
 }
 
-function limitBody(body: ReadableStream<Uint8Array>, max: number): ReadableStream<Uint8Array> {
+/** Buffers the body while counting bytes; null when it exceeds max. */
+async function readLimited(
+  body: ReadableStream<Uint8Array> | null,
+  max: number,
+): Promise<Uint8Array | null> {
+  if (!body) return new Uint8Array(0);
+  const reader = body.getReader();
+  const chunks: Uint8Array[] = [];
   let seen = 0;
-  return body.pipeThrough(
-    new TransformStream<Uint8Array, Uint8Array>({
-      transform(chunk, controller) {
-        seen += chunk.byteLength;
-        if (seen > max) {
-          controller.error(new Error('TOO_LARGE'));
-          return;
-        }
-        controller.enqueue(chunk);
-      },
-    }),
-  );
+  for (;;) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    seen += value.byteLength;
+    if (seen > max) {
+      void reader.cancel().catch(() => undefined);
+      return null;
+    }
+    chunks.push(value);
+  }
+  const out = new Uint8Array(seen);
+  let off = 0;
+  for (const c of chunks) {
+    out.set(c, off);
+    off += c.byteLength;
+  }
+  return out;
 }
 
 export async function handleRelay(
@@ -165,7 +184,9 @@ export async function handleRelay(
   if (target.protocol !== 'https:' && !httpOk) return relayError('BLOCKED_TARGET');
   if (target.username || target.password) return relayError('BLOCKED_TARGET');
   if (isIpLiteral(target.hostname)) return relayError('BLOCKED_TARGET');
-  if (target.port !== '' && !RELAY_ALLOWED_PORTS.includes(Number(target.port)) && !httpOk) {
+  if (isInternalName(target.hostname)) return relayError('BLOCKED_TARGET');
+  const allowedPorts = httpOk ? [...RELAY_ALLOWED_PORTS, 80] : RELAY_ALLOWED_PORTS;
+  if (target.port !== '' && !allowedPorts.includes(Number(target.port))) {
     return relayError('BLOCKED_TARGET');
   }
 
@@ -198,10 +219,16 @@ export async function handleRelay(
     if (!RESPONSE_DROP.has(name.toLowerCase())) out.append(name, value);
   });
   out.set('x-assay-relay', 'upstream');
-  const body = upstream.body ? limitBody(upstream.body, envelope.maxResponseBytes) : null;
-  return new Response(body, {
-    status: upstream.status,
-    statusText: upstream.statusText,
-    headers: out,
-  });
+  const body = await readLimited(upstream.body, envelope.maxResponseBytes).catch(() => undefined);
+  if (body === undefined) return relayError('CONNECT');
+  if (body === null) return relayError('TOO_LARGE');
+  try {
+    return new Response(upstream.status === 204 || upstream.status === 304 ? null : body, {
+      status: upstream.status,
+      statusText: upstream.statusText,
+      headers: out,
+    });
+  } catch {
+    return relayError('CONNECT');
+  }
 }
