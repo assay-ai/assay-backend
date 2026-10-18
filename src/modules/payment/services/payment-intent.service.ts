@@ -36,7 +36,10 @@ import {
   PAYMENT_INTENT_TTL_MS,
   PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
 } from '../constants/payment-intent.constants';
-import { DEBT_VOIDED_PREFIX } from '../constants/voucher-redemption.constants';
+import {
+  DEBT_VOIDED_PREFIX,
+  PROVIDER_FORFEIT_PREFIX,
+} from '../constants/voucher-redemption.constants';
 import { HoldEffect, requirePaymentIntentTransition } from '../domain/payment-intent-transitions';
 import {
   COLLECTION_HOLD_WINDOW_SECONDS,
@@ -1002,6 +1005,40 @@ export class PaymentIntentService {
       this.intents.markHeldRefunded(runner, target, `${DEBT_VOIDED_PREFIX}${outcome}`, txRef),
     );
     return 'REFUNDED';
+  }
+
+  /**
+   * Books the refund of a BLOCKED provider's held payment, once the chain says
+   * `REFUNDED` (owner decision 2026-10-18; sent by `HeldCollectionService`,
+   * which holds the redeemer key). The provider forfeits the call:
+   * `provider_forfeit:<cause>` closes the row, the buyer's hold is released,
+   * nobody is credited — whatever a dispute on the call says. `false` when the
+   * row is no longer held (already booked, or collected).
+   */
+  async bookBlockedProviderRefund(
+    organizationId: string,
+    intentId: string,
+    cause: string,
+    txRef: string | null,
+  ): Promise<boolean> {
+    const intent = await this.findById(organizationId, intentId);
+    if (!intent.holdId || intent.heldStatus !== HELD) return false;
+    const target: DebtCloseTarget = {
+      organizationId,
+      id: intentId,
+      payer: intent.agentAccount,
+      holdId: intent.holdId,
+    };
+    const released = await this.ledger.releaseHoldIf(organizationId, intent.holdId, (runner) =>
+      this.intents.markHeldRefunded(
+        runner,
+        target,
+        `${PROVIDER_FORFEIT_PREFIX}${cause}`,
+        txRef,
+        false,
+      ),
+    );
+    return released !== null;
   }
 
   /**

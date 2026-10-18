@@ -1169,6 +1169,156 @@ describe('call disputes, against a real database', () => {
       }
     });
 
+    it('a blocked provider: every held payment refunded at once, the dispute too, none collected', async () => {
+      const inWindow = await seedHeld();
+      const pastWindow = await seedHeld();
+      const disputed = await seedHeld();
+      await endWindow(pastWindow);
+      await file(disputed);
+      addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+      try {
+        await collection.run();
+
+        expect(sentFor('collect')).toEqual([]);
+        expect(sentFor('refund')).toHaveLength(1);
+        expect(sentFor('refund')[0].keys).toHaveLength(3);
+        for (const call of [inWindow, pastWindow, disputed]) {
+          expect(await chainStatus(call)).toBe(HeldStatus.REFUNDED);
+          expect(await journalTypes(call.intentId)).toEqual(REFUNDED);
+          expect(await intentRow(call.intentId)).toMatchObject({
+            held_status: 'REFUNDED',
+            redemption_last_error: 'provider_forfeit:ProviderBlocked',
+            held_tx_ref: expect.stringMatching(/^0x/),
+          });
+        }
+        expect(await balance(payer)).toEqual({ available: 3n * FUNDED, held: 0n });
+        expect(await balance(PAYEE, provider)).toEqual({ available: 0n, held: 0n });
+        await assertBooksBalance();
+
+        // Idempotent: nothing is sent or booked again.
+        await collection.run();
+        expect(sentFor('refund')).toHaveLength(1);
+        expect(await journalTypes(inWindow.intentId)).toEqual(REFUNDED);
+      } finally {
+        await blocklist.applied({
+          kind: 'unblocked',
+          subjectKind: BlockSubjectKind.ORGANIZATION,
+          subjectKey: subjectKey(BlockSubjectKind.ORGANIZATION, provider) as string,
+        } as never);
+      }
+    });
+
+    it('a blocked provider: an unrefunded payment near the timeout is paged; past it, never collected', async () => {
+      const call = await seedHeld();
+      await endWindow(call, 7 * 86_400_000 - 3_600_000);
+      held.failRefunds = true;
+      addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+      try {
+        await collection.run();
+        expect(alerts.map((a) => a.name)).toContain('held_payment_blocked_provider_unrefunded');
+        expect(
+          (await payments.findOneBy({ organizationId: buyer, id: call.intentId }))?.heldAttempts,
+        ).toBe(1);
+
+        // Past the timeout: the refund is closed, and the platform never collects it.
+        await endWindow(call, 7 * 86_400_000 + 60_000);
+        await dataSource.query(`UPDATE payment_intents SET held_retry_at = NULL WHERE id = $1`, [
+          call.intentId,
+        ]);
+        alerts.length = 0;
+        await collection.run();
+        expect(sentFor('collect')).toEqual([]);
+        expect(await chainStatus(call)).toBe(HeldStatus.HELD);
+        expect(alerts.map((a) => a.name)).toContain('held_payment_blocked_provider_unrefunded');
+
+        // Anyone collects it for the provider: booked once.
+        held.collectAsAnyone(keyOf(call));
+        await collection.run();
+        await assertCollected(call);
+      } finally {
+        await blocklist.applied({
+          kind: 'unblocked',
+          subjectKind: BlockSubjectKind.ORGANIZATION,
+          subjectKey: subjectKey(BlockSubjectKind.ORGANIZATION, provider) as string,
+        } as never);
+      }
+    });
+
+    it('past the timeout: collected one by one, and a record a stranger collected is booked', async () => {
+      const calls = [await seedHeld(), await seedHeld(), await seedHeld()];
+      for (const call of calls) await endWindow(call, 7 * 86_400_000 + 60_000);
+      held.collectAsAnyone(keyOf(calls[0]));
+      const collect = held.collect.bind(held);
+      const spy = jest.spyOn(held, 'collect').mockImplementation(async (asset, keys) => {
+        // A stranger collects the second one just before our transaction.
+        if (keys.some((key) => key.seq === String(calls[1].seq))) {
+          held.collectAsAnyone(keys[0]);
+        }
+        return collect(asset, keys);
+      });
+      try {
+        await collection.run();
+      } finally {
+        spy.mockRestore();
+      }
+
+      expect(sentFor('collect').map((s) => s.keys.length)).toEqual([1]);
+      for (const call of calls) {
+        expect(await chainStatus(call)).toBe(HeldStatus.COLLECTED);
+        expect(await journalTypes(call.intentId)).toEqual(COLLECTED);
+      }
+      expect(await balance(PAYEE, provider)).toEqual({ available: 3n * PROVIDER_AMOUNT, held: 0n });
+      const failed = await payments.findOneBy({ organizationId: buyer, id: calls[1].intentId });
+      expect(failed?.heldAttempts).toBe(0);
+      await assertBooksBalance();
+    });
+
+    it('finds a blocked provider’s held payments by organization, payout key or on-chain account', async () => {
+      const call = await seedHeld();
+      const none = { organizationIds: [], walletKeys: [], chainAccounts: [] };
+      const ids = async (exclude: typeof none) =>
+        (await payments.findHeldOfBlockedProviders('RAIL_B_VOUCHER', exclude, 7 * 86_400, 500)).map(
+          (row) => row.id,
+        );
+      const near = async (exclude: typeof none) =>
+        (
+          await payments.findBlockedHeldNearTimeout(
+            'RAIL_B_VOUCHER',
+            exclude,
+            7 * 86_400,
+            86_400,
+            500,
+          )
+        ).map((row) => row.id);
+      const byOrg = { ...none, organizationIds: [provider] };
+
+      expect(await ids(none)).toEqual([]);
+      expect(await ids(byOrg)).toContain(call.intentId);
+      expect(
+        await ids({
+          ...none,
+          walletKeys: [subjectKey(BlockSubjectKind.WALLET, PAYEE) as string],
+        }),
+      ).toContain(call.intentId);
+      expect(await ids({ ...none, chainAccounts: [PAYEE] })).toContain(call.intentId);
+      // The payer's side is not the provider's.
+      expect(await ids({ ...none, organizationIds: [buyer] })).not.toContain(call.intentId);
+      expect(await payments.findHeldAssetIds('RAIL_B_VOUCHER')).toContain(ASSET);
+
+      // A day before the timeout: still refundable, not paged yet.
+      await endWindow(call, 7 * 86_400_000 - 25 * 3_600_000);
+      expect(await ids(byOrg)).toContain(call.intentId);
+      expect(await near(byOrg)).not.toContain(call.intentId);
+      // Inside the last 24 h: refundable and paged.
+      await endWindow(call, 7 * 86_400_000 - 23 * 3_600_000);
+      expect(await ids(byOrg)).toContain(call.intentId);
+      expect(await near(byOrg)).toContain(call.intentId);
+      // Past the timeout: refundHeld is closed; still paged.
+      await endWindow(call, 7 * 86_400_000 + 60_000);
+      expect(await ids(byOrg)).not.toContain(call.intentId);
+      expect(await near(byOrg)).toContain(call.intentId);
+    });
+
     it('a held row whose record reads as nothing backs off', async () => {
       const call = await seedHeld();
       await endWindow(call);
