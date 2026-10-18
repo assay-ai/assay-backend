@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { In, IsNull } from 'typeorm';
 
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
@@ -8,6 +8,7 @@ import { ProviderRepository } from '@database/postgres/repositories/provider.rep
 import { ProviderStakeGraceRepository } from '@database/postgres/repositories/provider-stake-grace.repository';
 import { StakeSnapshotRepository } from '@database/postgres/repositories/stake-snapshot.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
+import { ToolRepository } from '@database/postgres/repositories/tool.repository';
 import { AccountId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { MinimumStakeParameters } from '@modules/tool/domain/routing/routing.types';
@@ -20,6 +21,7 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
+import { formatDollars } from '@shared/utils/money-display.util';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
@@ -106,7 +108,38 @@ export class StakeMonitorService {
     // knows both audiences, because `providerId === organizationId` here.
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
     @Inject(STAKE_MONITOR_CONFIG) private readonly config: StakeMonitorConfig,
+    // The tool's name for the provider's notices. Optional: without it a
+    // notice says "one paid tool" rather than naming a binding id.
+    @Optional() private readonly tools: ToolRepository | null = null,
   ) {}
+
+  /** The tool a binding serves, by name; null when unreadable. Never throws. */
+  private async toolNameOf(toolId: string): Promise<string | null> {
+    if (!this.tools || !UUID_RE.test(toolId)) return null;
+    try {
+      const [tool] = await this.tools.findByIds([toolId]);
+      return tool?.name ?? null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** The tool behind a binding id, by name; null when unreadable. Never throws. */
+  private async bindingToolName(organizationId: string, bindingId: string): Promise<string | null> {
+    if (!this.tools) return null;
+    try {
+      const binding = await this.bindings.findOneBy({ organizationId, id: bindingId });
+      return binding ? await this.toolNameOf(binding.toolId) : null;
+    } catch {
+      return null;
+    }
+  }
+
+  /** "7 days": the grace period as the provider reads it. */
+  private graceDays(): string {
+    const days = Math.max(1, Math.round(this.config.gracePeriodMs / 86_400_000));
+    return `${days} day${days === 1 ? '' : 's'}`;
+  }
 
   /** One pass over every provider. Never throws — see the class comment. */
   async sweep(): Promise<void> {
@@ -466,21 +499,27 @@ export class StakeMonitorService {
     // On both ports — see the constructor comment. The operator's alert above
     // is not a substitute for telling the provider their own binding is on the
     // clock.
+    const toolName = await this.toolNameOf(binding.toolId);
+    const subject = toolName ?? 'One paid tool';
+    const toolWord = toolName ?? 'the tool';
     await this.notifications.notify({
       organizationId: provider.organizationId,
       event: NotificationEvent.PROVIDER_STAKE_GRACE_OPENED,
-      title: 'Stake below your minimum — grace period started',
+      title: `${subject}: your stake is below the ${formatDollars(required)} minimum`,
       body:
-        `Your stake for one binding is below your ${MoneyUtil.format(required)} minimum. ` +
-        `A 7-day grace period starts, routing continues, and unpaid earnings are swept to ` +
-        `stake automatically until the floor is met. Grace ends ${expiresAt.toISOString()}.`,
+        `Your stake (${formatDollars(staked)}) is below the ${formatDollars(required)} minimum. ` +
+        `Paid calls continue for ${this.graceDays()}, until ${utcMinute(expiresAt)}; ` +
+        `unpaid earnings go to your stake until it is back above the minimum. If it is still ` +
+        `below then, ${toolWord} stops taking paid calls. Add stake.`,
       subjectType: 'binding',
       subjectId: binding.id,
       payload: {
         bindingId: binding.id,
+        toolName,
         staked: staked.amount,
         required: required.amount,
         asset: required.asset,
+        decimals: required.decimals,
         expiresAt: expiresAt.toISOString(),
       },
       dedupeKey: binding.id,
@@ -524,24 +563,30 @@ export class StakeMonitorService {
 
     // On both ports — see the constructor comment.
     const expired = resolution === StakeGraceResolution.EXPIRED;
+    const toolName = await this.bindingToolName(row.organizationId, row.bindingId);
+    const subject = toolName ?? 'One paid tool';
     await this.notifications.notify({
       organizationId: row.organizationId,
       event: expired
         ? NotificationEvent.PROVIDER_STAKE_GRACE_EXPIRED
         : NotificationEvent.PROVIDER_STAKE_GRACE_CURED,
-      title: expired ? 'Grace period expired — routing paused' : 'Stake restored — routing resumes',
+      title: expired
+        ? `${subject} stopped taking paid calls: stake below the minimum`
+        : `${subject}: your stake is back above the minimum`,
       body: expired
-        ? `Binding ${row.bindingId} ran out of its 7-day grace period still below the ` +
-          `${MoneyUtil.format(required)} minimum and has stopped taking paid traffic.`
-        : `Binding ${row.bindingId} is back above its ${MoneyUtil.format(required)} minimum. ` +
-          `Paid routing continues without interruption.`,
+        ? `Your stake (${formatDollars(staked)}) stayed below the ${formatDollars(required)} ` +
+          `minimum for ${this.graceDays()}, so paid calls stopped. Add stake to start them again.`
+        : `Your stake (${formatDollars(staked)}) covers the ${formatDollars(required)} minimum ` +
+          `again. Paid calls continue without interruption.`,
       subjectType: 'binding',
       subjectId: row.bindingId,
       payload: {
         bindingId: row.bindingId,
+        toolName,
         staked: staked.amount,
         required: required.amount,
         asset: required.asset,
+        decimals: required.decimals,
         startedAt: row.startedAt.toISOString(),
       },
       dedupeKey: row.bindingId,
@@ -595,23 +640,40 @@ export class StakeMonitorService {
     });
 
     // On both ports — see the constructor comment.
+    //
+    // Once per incident, not once a day: the key names the figures, so the
+    // notice is sent again only when the stake or the minimum moves (a
+    // penalty, a top-up that is not enough, a price change), never because a
+    // new UTC day began with nothing changed. The catalogue's `ONCE` rule
+    // holds the key.
+    const toolName = await this.toolNameOf(binding.toolId);
+    const margin = MoneyUtil.of(
+      ((requiredAtomic * threshold) / 10_000n).toString(),
+      required.asset,
+      required.decimals,
+    );
     await this.notifications.notify({
       organizationId: provider.organizationId,
       event: NotificationEvent.PROVIDER_STAKE_HEADROOM_LOW,
-      title: 'Stake headroom is running low',
+      title:
+        `${toolName ? `${toolName}: your` : 'Your'} stake (${formatDollars(staked)}) is within ` +
+        `${formatDollars(margin)} of the ${formatDollars(required)} minimum`,
       body:
-        `Binding ${binding.id} is within ${this.config.headroomWarningRatio * 100}% of its ` +
-        `${MoneyUtil.format(required)} stake floor (staked: ${MoneyUtil.format(staked)}). Top up ` +
-        `now to avoid a grace period.`,
+        `Below the minimum, paid calls continue for ${this.graceDays()}; after that ` +
+        `${toolName ?? 'the tool'} stops taking paid calls until you add stake. A penalty can ` +
+        `take you below it. Add stake to keep a margin.`,
       subjectType: 'binding',
       subjectId: binding.id,
       payload: {
         bindingId: binding.id,
+        toolName,
         staked: staked.amount,
         required: required.amount,
+        margin: margin.amount,
         asset: required.asset,
+        decimals: required.decimals,
       },
-      dedupeKey: binding.id,
+      dedupeKey: `${binding.id}:${staked.amount}:${required.amount}`,
     });
   }
 
@@ -681,6 +743,14 @@ export class StakeMonitorService {
       this.logger.error(`Could not write the fleet stake snapshot: ${describe(error)}`);
     }
   }
+}
+
+/** `tools.id` is a uuid column; anything else is not looked up (Postgres would refuse it). */
+const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
+/** "2026-10-20 17:14 UTC": a time in a provider's notice, without the ISO noise. */
+function utcMinute(at: Date): string {
+  return `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
 
 function groupBy<T>(items: readonly T[], key: (item: T) => string): Map<string, T[]> {

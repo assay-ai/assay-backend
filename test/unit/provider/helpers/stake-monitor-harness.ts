@@ -168,7 +168,7 @@ export function stakeMap(entries: [string, string][]): ReadonlyMap<string, Provi
 export interface Harness {
   readonly service: StakeMonitorService;
   readonly providers: { findAllProviders: jest.Mock };
-  readonly bindings: { findActiveBindings: jest.Mock };
+  readonly bindings: { findActiveBindings: jest.Mock; findOneBy: jest.Mock };
   readonly versions: { find: jest.Mock };
   readonly grace: { find: jest.Mock; insert: jest.Mock; update: jest.Mock };
   readonly stakes: { stakeOn: jest.Mock };
@@ -191,6 +191,8 @@ export function harness(
     onChain?: ReadonlyMap<AccountId, OnChainStake>;
     /** Per provider, `ProviderRoutingState.minimumStakeOverride` — the negotiated floor. */
     overrides?: ReadonlyMap<string, Money>;
+    /** Tool id → name, for the notices; absent = no tool lookup wired. */
+    toolNames?: ReadonlyMap<string, string>;
   } = {},
 ): Harness {
   const providers = { findAllProviders: jest.fn().mockResolvedValue(overrides.providers ?? []) };
@@ -198,7 +200,21 @@ export function harness(
   // after mapping each row to its published revision.
   const bindings = {
     findActiveBindings: jest.fn().mockResolvedValue(overrides.bindings ?? []),
+    findOneBy: jest.fn(({ id }: { id: string }) =>
+      Promise.resolve((overrides.bindings ?? []).find((row) => row.id === id) ?? null),
+    ),
   };
+  const tools = overrides.toolNames
+    ? {
+        findByIds: jest.fn((ids: readonly string[]) =>
+          Promise.resolve(
+            ids
+              .filter((id) => overrides.toolNames!.has(id))
+              .map((id) => ({ id, name: overrides.toolNames!.get(id) })),
+          ),
+        ),
+      }
+    : null;
   // Answers `toServedToolBindings`' batched lookup: one OR'd `where` entry per
   // drifted row, matched field by field.
   const versions = {
@@ -292,6 +308,7 @@ export function harness(
       headroomWarningRatio: STAKE_HEADROOM_WARNING_RATIO,
       now: () => NOW.getTime(),
     },
+    tools as never,
   );
 
   return {

@@ -140,6 +140,57 @@ describe('StakeMonitorService — grace periods', () => {
     );
   });
 
+  it('tells the provider the headroom in dollars, by tool, once per incident', async () => {
+    const TOOL = '06399979-f8b8-4c9e-a9b1-bd2a5924d442';
+    const h = harness({
+      providers: [provider(PROVIDER_A, ACCOUNT_A)],
+      bindings: [Object.assign(binding(BINDING_A, PROVIDER_A, '50000'), { toolId: TOOL })],
+      // $55.955 against a $50 floor.
+      stakes: stakeMap([[PROVIDER_A, '55955000']]),
+      toolNames: new Map([[TOOL, 'get_weather']]),
+    });
+
+    await h.service.sweep();
+
+    const [request] = h.notifications.notify.mock.calls[0] as [Record<string, unknown>];
+    expect(request.event).toBe('provider.stake_headroom_low');
+    expect(request.title).toBe(
+      'get_weather: your stake ($55.95) is within $10.00 of the $50.00 minimum',
+    );
+    expect(request.body).toBe(
+      'Below the minimum, paid calls continue for 7 days; after that get_weather stops taking ' +
+        'paid calls until you add stake. A penalty can take you below it. Add stake to keep a margin.',
+    );
+    for (const text of [request.title, request.body] as string[]) {
+      expect(text).not.toContain(BINDING_A);
+      expect(text).not.toMatch(/\d\.\d{6}/);
+      expect(text).not.toMatch(/binding|floor|grace/i);
+    }
+    // The incident is the figures: the same stake and minimum tomorrow is not a new one.
+    expect(request.dedupeKey).toBe(`${BINDING_A}:55955000:50000000`);
+    expect(request.payload).toMatchObject({
+      toolName: 'get_weather',
+      decimals: 6,
+      margin: '10000000',
+    });
+  });
+
+  it('names no id when the tool cannot be read', async () => {
+    const h = harness({
+      providers: [provider(PROVIDER_A, ACCOUNT_A)],
+      bindings: [binding(BINDING_A, PROVIDER_A, '50000')],
+      stakes: stakeMap([[PROVIDER_A, '40000000']]),
+    });
+
+    await h.service.sweep();
+
+    const [request] = h.notifications.notify.mock.calls[0] as [Record<string, unknown>];
+    expect(request.event).toBe('provider.stake_grace_opened');
+    expect(request.title).toBe('One paid tool: your stake is below the $50.00 minimum');
+    expect(request.body).not.toContain(BINDING_A);
+    expect(request.body).toContain('Your stake ($40.00) is below the $50.00 minimum.');
+  });
+
   it('does not warn while headroom is comfortable', async () => {
     const h = harness({
       providers: [provider(PROVIDER_A, ACCOUNT_A)],
