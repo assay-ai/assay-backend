@@ -137,6 +137,20 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // secret. An OAuth client reads them before it has any token, so a guard
   // would make sign-in impossible.
   ['modules/oauth/controllers/oauth-metadata.controller.ts', 5],
+  // The OAuth protocol endpoints on the MCP host (spec §6.3.4–§6.3.12). A
+  // client calls them before it holds any credential (authorize, token,
+  // register) or to give one up (revoke), so a session guard would make
+  // sign-in impossible. Each one is its own gate instead: authorize and
+  // continue bind the request to the browser (`__Host-assay_oar`) and only
+  // mint a code for a request a person approved through the guarded consent
+  // API; token checks the code's PKCE, client and redirect, or the refresh
+  // token's hash; register is open by design (RFC 7591, public clients only,
+  // rate-limited, fails closed); revoke answers 200 whatever it was sent.
+  // None reads a tenant's rows by a caller-chosen id.
+  ['modules/oauth/controllers/oauth-authorize.controller.ts', 2],
+  ['modules/oauth/controllers/oauth-token.controller.ts', 1],
+  ['modules/oauth/controllers/oauth-register.controller.ts', 1],
+  ['modules/oauth/controllers/oauth-revoke.controller.ts', 1],
   // `GET /chains`. Against the three bars above:
   //
   // 1. The payload is four static strings and a number per chain, computed from

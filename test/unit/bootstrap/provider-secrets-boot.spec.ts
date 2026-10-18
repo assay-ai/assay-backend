@@ -16,6 +16,8 @@ import { OAuthRevokeController } from '@modules/oauth/controllers/oauth-revoke.c
 import { OAuthTokenController } from '@modules/oauth/controllers/oauth-token.controller';
 import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
 import { NOTIFICATION_PORT } from '@modules/notification/ports/notification.port';
+import { McpController } from '@modules/mcp/controllers/mcp.controller';
+import { MCP_UNAUTHORIZED_RECORDER } from '@modules/mcp/ports/mcp-unauthorized.port';
 import { OAuthConsentService } from '@modules/oauth/services/oauth-consent.service';
 import { OAuthRequestStore } from '@modules/oauth/services/oauth-request.store';
 import { BINDING_INVOKER } from '@modules/tool/ports/binding-invoker.port';
@@ -189,6 +191,12 @@ describe('provider-auth secrets per process (NODE_ENV=production)', () => {
         expect(app.get(OAuthRequestStore, { strict: false })).toBeInstanceOf(OAuthRequestStore);
         expect(app.get(OAuthMetrics, { strict: false })).toBeInstanceOf(OAuthMetrics);
         expect(app.get(NOTIFICATION_PORT, { strict: false })).toBeDefined();
+        // The catch-all counts its 401s on this container's OAuth metrics.
+        const mcp = app.get(McpController, { strict: false }) as unknown as {
+          unauthorized?: unknown;
+        };
+        expect(mcp.unauthorized).toBeDefined();
+        expect(app.get(MCP_UNAUTHORIZED_RECORDER, { strict: false })).toBe(mcp.unauthorized);
         // The consent API is the API app's, not this one's.
         expect(() => app.get(OAuthConsentController, { strict: false })).toThrow();
       } finally {
