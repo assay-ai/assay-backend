@@ -90,6 +90,34 @@ describe('LedgerJournalService — balance.low / balance.zero', () => {
     const [request] = notifications.notify.mock.calls[0];
     expect(request.event).toBe(NotificationEvent.BALANCE_LOW);
     expect(request.organizationId).toBe(ORG);
+    // Dollars in the body; the threshold in the payload, so a screen can tell when it has cleared.
+    expect(request.body).toBe(
+      'Your available balance is running low ($4.00). Add funds to avoid interrupted calls.',
+    );
+    expect(request.payload).toEqual(
+      expect.objectContaining({ available: '4000000', threshold: '5000000', asset: ASSET }),
+    );
+  });
+
+  it('writes balance.zero in dollars, with the threshold', async () => {
+    const { journal, notifications } = build('10000000');
+
+    await journal.applyEntries({} as QueryRunner, ORG, [
+      journal.prepare({
+        organizationId: ORG,
+        accountId: ACCOUNT,
+        entryType: LedgerEntryType.WITHDRAWAL,
+        money: usdc('10000000'),
+      }),
+    ]);
+
+    const zero = notifications.notify.mock.calls
+      .map(([request]) => request)
+      .find((request) => request.event === NotificationEvent.BALANCE_ZERO);
+    expect(zero?.body).toBe(
+      'Your available balance has reached zero ($0.00). Paid calls will fail until you add funds.',
+    );
+    expect(zero?.payload).toEqual(expect.objectContaining({ threshold: '5000000' }));
   });
 
   it('does not fire again on a subsequent write that stays below the threshold', async () => {

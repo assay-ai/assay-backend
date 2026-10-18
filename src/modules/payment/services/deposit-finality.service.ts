@@ -19,6 +19,7 @@ import {
 } from '@modules/notification/ports/notification.port';
 import { AuditLogWriter } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { formatDollars } from '@shared/utils/money-display.util';
 
 import { depositResource } from '../constants/deposit-intent.constants';
 
@@ -238,7 +239,7 @@ export class DepositFinalityService {
             organizationId: candidate.organizationId,
             event: NotificationEvent.DEPOSIT_CREDITED,
             title: 'Deposit credited',
-            body: `Your deposit of ${MoneyUtil.format(pending.money)} has been credited and is now spendable.`,
+            body: `Your deposit of ${formatDollars(pending.money)} has been credited and is now spendable.`,
             subjectType: 'deposit_intent',
             subjectId: candidate.id,
             payload: {
@@ -281,7 +282,7 @@ export class DepositFinalityService {
             organizationId: candidate.organizationId,
             event: NotificationEvent.DEPOSIT_FAILED,
             title: 'Deposit failed',
-            body: `Your deposit of ${MoneyUtil.format(pending.money)} could not be finalized on chain. No balance was affected.`,
+            body: `Your deposit of ${formatDollars(pending.money)} could not be finalized on chain. No balance was affected.`,
             subjectType: 'deposit_intent',
             subjectId: candidate.id,
             payload: {

@@ -3,6 +3,7 @@ import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import {
   McpCallRecorder,
   REPEAT_ALERT_THRESHOLD,
+  refusalWords,
   safeToolName,
 } from '@modules/mcp/services/mcp-call-recorder.service';
 import { MCP_RATE_LIMITS, McpRateLimiter } from '@modules/mcp/services/mcp-rate-limiter.service';
@@ -132,6 +133,19 @@ describe('McpCallRecorder', () => {
         dedupeKey: `${SESSION.agentId}:get_weather:TOOL_NOT_ALLOWED`,
       }),
     ]);
+    // Names and plain words; the code stays in the payload.
+    const body = (notified[0] as { body: string }).body;
+    expect(body).toBe(
+      `${SESSION.label ? `"${SESSION.label}"` : 'Your agent'} was refused ${REPEAT_ALERT_THRESHOLD} times within an hour ` +
+        'calling get_weather: the agent may not use this tool. Nothing was charged.',
+    );
+    expect(body).not.toContain(SESSION.agentId);
+    expect(body).not.toContain('TOOL_NOT_ALLOWED');
+  });
+
+  it('words an unlisted refusal code without the code', () => {
+    expect(refusalWords('MCP_SPEND_LIMIT_EXCEEDED')).toBe('a spending limit was reached');
+    expect(refusalWords('SOMETHING_NEW')).toBe('the same reason each time');
   });
 
   it(`stores at most ${MCP_RATE_LIMITS.refusalRowsPerMinute} refused calls a minute per agent, counting the rest`, async () => {
