@@ -21,8 +21,8 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * the repository; the predicates, the advisory lock and the partial index are
  * properties of the database and are only proven here.
  */
-const DATABASE = 'x402_buyer_debt_sql_test';
-const MIGRATION_DATABASE = 'x402_buyer_debt_migrations_test';
+const DATABASE = 'assay_buyer_debt_sql_test';
+const MIGRATION_DATABASE = 'assay_buyer_debt_migrations_test';
 const CHAIN = 'eip155:84532';
 const ASSET = `${CHAIN}/erc20:0x036cbd53842c5426634e7929541ec2318f3dcf7e`;
 const PAYEE = `${CHAIN}:0x5555555555555555555555555555555555555555`;

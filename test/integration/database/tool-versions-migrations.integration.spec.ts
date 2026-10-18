@@ -5,7 +5,7 @@ import { DataSource } from 'typeorm';
 
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 
-const DATABASE = 'x402_tool_versions_migrations_test';
+const DATABASE = 'assay_tool_versions_migrations_test';
 
 /**
  * The T3 contract migrations (`tool_versions`, binding contract terms) apply,

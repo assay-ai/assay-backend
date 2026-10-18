@@ -37,7 +37,7 @@ import { approvalFor } from '../helpers/operator-approval';
  * closed timeline — is the defect these guards exist for, and an in-memory fake
  * cannot show a row that was written before the error was thrown.
  */
-const DATABASE = 'x402_fleet_sweep_test';
+const DATABASE = 'assay_fleet_sweep_test';
 // A Solana case: the in-app objection and the operator's off-chain decision
 // apply only there. An EVM case is disputed and ruled on chain alone (owner
 // decision 2026-10-14, `disputesOnChain`), so these flows refuse it.

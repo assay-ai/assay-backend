@@ -44,7 +44,7 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * wrote the block refuses at once, every other instance within seconds, and the
  * database is the source of truth either way.
  */
-const DATABASE = 'x402_account_blocks_test';
+const DATABASE = 'assay_account_blocks_test';
 const NOTE = 'Agent key leaked in a public repository; reported by the customer.';
 const WALLET = 'eip155:84532:0xA271A3407D3302f4b4Fbe469b9188487cedd7d45';
 

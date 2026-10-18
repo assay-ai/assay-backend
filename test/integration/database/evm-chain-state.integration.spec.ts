@@ -12,7 +12,7 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * blocklist, the reconcile correction, and the in-memory copy every process
  * reads from it.
  */
-const DATABASE = 'x402_evm_chain_state_test';
+const DATABASE = 'assay_evm_chain_state_test';
 const CHAIN = 'eip155:46630';
 const A = '0x1111111111111111111111111111111111111111';
 const B = '0x2222222222222222222222222222222222222222';

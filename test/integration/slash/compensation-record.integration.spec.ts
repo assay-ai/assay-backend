@@ -35,7 +35,7 @@ import { approvalFor } from '../helpers/operator-approval';
  * database can show is asserted here: one deposit cannot compensate two cases,
  * and the status change rolls back with its register entry.
  */
-const DATABASE = 'x402_compensation_record_test';
+const DATABASE = 'assay_compensation_record_test';
 const ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
 const TREASURY = `${CHAIN}:0xd75ba4a2ba90cb110e32ff4d87e1d1352434c687` as AccountId;
 const AGENT = `${CHAIN}:0x976ea74026e726554db657fa54763abd0c3a0aa9`;

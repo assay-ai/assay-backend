@@ -19,7 +19,7 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * `binding_stats` → `DbProviderRegistry`. Pins the SQL the unit tests stub —
  * the per-binding window, the percentiles, the verdict filter and the prune.
  */
-const DATABASE = 'x402_binding_stats_test';
+const DATABASE = 'assay_binding_stats_test';
 const ASSET = 'eip155:46630/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3';
 const PAYEE = 'eip155:46630:0xA271A3407D3302f4b4Fbe469b9188487cedd7d45';
 const NOW = new Date('2026-10-17T12:00:00Z');
