@@ -209,6 +209,10 @@ export interface PaymentIntent {
   readonly holdId: string | null;
   /** When the sweep or the settlement path resolved that hold. */
   readonly holdReleasedAt: Date | null;
+  /** The dispute hold: the voucher is not redeemed before this (rail B, SETTLED). */
+  readonly collectableAt?: Date | null;
+  /** `OPEN` while a guaranteed dispute holds the voucher, then `UPHELD` | `REJECTED`. */
+  readonly disputeOutcome?: string | null;
 
   /** Written by the response classifier; typed as a string until that vocabulary lands. */
   readonly classification: string | null;
@@ -360,4 +364,10 @@ export interface PaymentIntentTransitionContext {
    * `PaymentIntentService.resolve` only.
    */
   readonly lapseCause?: string;
+  /**
+   * Stamps `collectable_at` (the dispute hold, `collection-hold.constants.ts`)
+   * in the same statement as the move to `SETTLED`. Rail B only, set by
+   * `PaymentIntentService.resolve`.
+   */
+  readonly holdForDispute?: boolean;
 }

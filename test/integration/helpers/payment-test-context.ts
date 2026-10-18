@@ -1,3 +1,4 @@
+import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -221,6 +222,8 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // The idempotency index narrowed to live intents (G2.1): a voided,
       // expired or refunded intent releases its key.
       IdempotencyKeyLiveIntents1761000000000,
+      // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
+      PaymentIntentDisputeHold1761800000000,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',

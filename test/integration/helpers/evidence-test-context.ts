@@ -1,3 +1,4 @@
+import { VerificationRecordDisputeOutcome1761800000001 } from '@database/postgres/migrations/1761800000001-verification-record-dispute-outcome';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
@@ -81,6 +82,8 @@ export async function createEvidenceTestContext(): Promise<EvidenceTestContext> 
       CreateVerificationRecords1755800000000,
       TimestamptzTimestamps1755900000000,
       CreateEvidencePacks1757400000000,
+      // `dispute_outcome` (G3.B1), mapped by `VerificationRecordEntity`.
+      VerificationRecordDisputeOutcome1761800000001,
     ],
     synchronize: false,
     logging: false,

@@ -7,7 +7,7 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
 const DATABASE = 'x402_call_disputes_migration_test';
 
 /**
- * `CallDisputes1761800000000` (G3.B1) applies, reverts and applies again on a
+ * The G3.B1 migrations (`1761800000000`–`1761800000002`) applies, reverts and applies again on a
  * database built from every migration, and its constraints hold.
  */
 describe('call disputes migration: up, down, up', () => {
@@ -26,9 +26,11 @@ describe('call disputes migration: up, down, up', () => {
             AND ((table_name = 'disputes' AND column_name IN (
                    'intent_id', 'verdict_id', 'binding_id', 'tool_id', 'respondent_provider_id',
                    'evidence_snapshot', 'provider_response', 'provider_responded_at',
-                   'refund_source', 'refund_state', 'refund_amount'))
+                   'refund_source', 'refund_state', 'refund_amount', 'refund_guaranteed',
+                   'evidence_scrubbed_at'))
               OR (table_name IN ('payment_intents', 'verification_records')
-                  AND column_name = 'dispute_outcome'))
+                  AND column_name = 'dispute_outcome')
+              OR (table_name = 'payment_intents' AND column_name = 'collectable_at'))
           ORDER BY 1`,
       )) as { c: string }[]
     ).map((row) => row.c);
@@ -40,17 +42,26 @@ describe('call disputes migration: up, down, up', () => {
       }[]
     )[0].name;
 
-  it('reverts and reapplies cleanly', async () => {
-    expect(await last()).toBe('CallDisputes1761800000000');
-    expect(await columns()).toHaveLength(13);
+  const OURS = [
+    'CallDisputes1761800000002',
+    'VerificationRecordDisputeOutcome1761800000001',
+    'PaymentIntentDisputeHold1761800000000',
+  ];
 
-    await dataSource.undoLastMigration({ transaction: 'each' });
+  it('reverts and reapplies cleanly', async () => {
+    expect(await last()).toBe(OURS[0]);
+    expect(await columns()).toHaveLength(16);
+
+    for (const name of OURS) {
+      expect(await last()).toBe(name);
+      await dataSource.undoLastMigration({ transaction: 'each' });
+    }
     expect(await last()).toBe('ToolDraftIntegrity1761600000000');
     expect(await columns()).toEqual([]);
 
     await dataSource.runMigrations({ transaction: 'each' });
-    expect(await last()).toBe('CallDisputes1761800000000');
-    expect(await columns()).toHaveLength(13);
+    expect(await last()).toBe(OURS[0]);
+    expect(await columns()).toHaveLength(16);
   });
 
   async function insertDispute(

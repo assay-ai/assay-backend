@@ -75,7 +75,11 @@ describe('tool version migrations: up, down, up', () => {
   ];
 
   /** Migrations after the T3 ones, newest first. */
-  const LATER = ['CallDisputes1761800000000'];
+  const LATER = [
+    'CallDisputes1761800000002',
+    'VerificationRecordDisputeOutcome1761800000001',
+    'PaymentIntentDisputeHold1761800000000',
+  ];
 
   it('applies, reverts the three T3 migrations, and applies them again', async () => {
     await dataSource.runMigrations({ transaction: 'each' });
