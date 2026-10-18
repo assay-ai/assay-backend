@@ -91,6 +91,18 @@ const PROVIDER_TOOL_LIST: ListSpec = {
   },
 };
 
+/**
+ * The failure rate a prefill declares when the source binding's own reads as
+ * nothing usable: 2%, the binding wizard's default. Never `NaN`.
+ */
+export const DEFAULT_DECLARED_FAILURE_RATE = 0.02;
+
+export function declaredFailureRateOf(value: string | number | null | undefined): number {
+  if (value === null || value === undefined || value === '') return DEFAULT_DECLARED_FAILURE_RATE;
+  const rate = Number(value);
+  return Number.isFinite(rate) && rate >= 0 && rate <= 1 ? rate : DEFAULT_DECLARED_FAILURE_RATE;
+}
+
 /** The name preview uses a 4-letter server name, as the Connect sheet suggests (§7.10). */
 const PREVIEW_SERVER = 'acme';
 
@@ -860,7 +872,7 @@ export class ProviderToolsService {
                   settlementChains: [...(own.settlementChains ?? [])],
                   timeoutMs: own.timeoutMs,
                   authMode: own.authMode ?? 'NONE',
-                  slaFailureRate: Number(own.slaFailureRate),
+                  slaFailureRate: declaredFailureRateOf(own.slaFailureRate),
                 }
               : null,
           };

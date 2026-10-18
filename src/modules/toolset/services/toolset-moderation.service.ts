@@ -9,6 +9,8 @@ import { ToolsetReportEntity } from '@database/postgres/entities/toolset-report.
 import { ToolEntity } from '@database/postgres/entities/tool.entity';
 import { NOTIFICATION_PORT, NotificationPort } from '@modules/notification/ports/notification.port';
 import { providerToolNotification } from '@modules/provider-tool/domain/notices';
+
+import { handleNotification } from '../domain/handle-notices';
 import {
   TOOL_CONTRACT_CHANGES,
   ToolContractChanges,
@@ -491,6 +493,7 @@ export class ToolsetModerationService {
     const due = await this.cutoffs.findDue(this.now());
     let reverted = 0;
     const lifted: string[] = [];
+    const liftedHandles: string[] = [];
     for (const cutoff of due) {
       try {
         await this.dataSource.transaction((manager) =>
@@ -498,13 +501,41 @@ export class ToolsetModerationService {
         );
         reverted += 1;
         if (cutoff.targetType === CutoffTarget.TOOL) lifted.push(cutoff.targetId);
+        if (cutoff.targetType === CutoffTarget.HANDLE) liftedHandles.push(cutoff.targetId);
       } catch (error) {
         this.logger.warn(`cutoff ${cutoff.id} not reverted: ${String(error)}`);
       }
     }
     if (reverted > 0) await this.afterCommit();
     for (const toolId of lifted) await this.announceTool(toolId, 'TAKEDOWN_LIFTED');
+    for (const handle of liftedHandles) await this.announceHandle(handle, 'TAKEDOWN_LIFTED');
     return reverted;
+  }
+
+  /**
+   * Tells a handle's owner it was taken down, or that the takedown was
+   * lifted — after the commit, once per handle. A lifted handle is told only
+   * when it serves again under the same name (a reassigned one is somebody
+   * else's). Best-effort, and never throws.
+   */
+  async announceHandle(handle: string, kind: 'TAKEN_DOWN' | 'TAKEDOWN_LIFTED'): Promise<void> {
+    if (!this.notifications) return;
+    try {
+      const name = normalizeHandle(handle);
+      const org = await this.dataSource
+        .getRepository(OrganizationEntity)
+        .createQueryBuilder('org')
+        .where('lower(org.handle) = :handle', { handle: name })
+        .getOne();
+      if (!org) return;
+      const status = kind === 'TAKEN_DOWN' ? HandleStatus.FROZEN : HandleStatus.ACTIVE;
+      if (org.handleStatus !== status) return;
+      await this.notifications.notify(
+        handleNotification({ kind, organizationId: org.id, handle: name }),
+      );
+    } catch (error) {
+      this.logger.error(`Handle ${handle}: could not notify: ${String(error)}`);
+    }
   }
 
   /**

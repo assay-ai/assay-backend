@@ -985,9 +985,19 @@ describe('provider tools, against a real database and Redis', () => {
       await s.moderation.afterCommit([orgA]);
       expect((await detail()).status).toBe('REMOVED');
       expect((await served()).some((tool) => tool.id === toolId)).toBe(false);
+      notified.length = 0;
+      await announcer.announceHandle('acme', 'TAKEN_DOWN');
+      // A lifted notice for a handle still frozen is not sent.
+      await announcer.announceHandle('acme', 'TAKEDOWN_LIFTED');
       await dataSource.transaction((manager) =>
         s.moderation.revert(manager, cutoff.id, OPERATOR_2, CutoffRevertReason.REJECTED),
       );
+      await announcer.announceHandle('acme', 'TAKEDOWN_LIFTED');
+      // One notice per handle, to its owner; none per tool.
+      expect(notified.map((notice) => [notice.organizationId, notice.event])).toEqual([
+        [orgA, 'handle.taken_down'],
+        [orgA, 'handle.takedown_lifted'],
+      ]);
       expect((await detail()).status).toBe('ACTIVE');
     });
 

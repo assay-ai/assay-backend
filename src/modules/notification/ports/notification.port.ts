@@ -230,6 +230,16 @@ export enum NotificationEvent {
    */
   PROVIDER_TOOL_PROMOTION_INVITED = 'provider_tool.promotion_invited',
 
+  // ── Public names (handles) ──────────────────────────────────────────────
+  /**
+   * An operator took down this organization's public name (`A-17`): every URL
+   * under it stops, and its provider tools with it. One notice for the
+   * handle, not one per tool.
+   */
+  HANDLE_TAKEN_DOWN = 'handle.taken_down',
+  /** The handle's takedown was rejected, lifted or lapsed: it and its tools serve again. */
+  HANDLE_TAKEDOWN_LIFTED = 'handle.takedown_lifted',
+
   // ── Digest ──────────────────────────────────────────────────────────────
   /** No producer: the daily digest job is not built. */
   DIGEST_DAILY = 'digest.daily',
