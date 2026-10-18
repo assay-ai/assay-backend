@@ -10,6 +10,10 @@ import { OrganizationScopedRepository } from './organization-scoped.repository';
 const OPEN = 'OPEN';
 const CLOSED = 'CLOSED';
 
+/** How far back the public failure rate looks (owner decision D5). */
+export const PUBLIC_QUALITY_WINDOW_DAYS = 30;
+const DAY_MS = 24 * 60 * 60 * 1000;
+
 /**
  * A window past its `deadlineAt`, from any organization — the age sweep's
  * input.
@@ -26,7 +30,8 @@ export interface DueSlaWindow {
 }
 
 /**
- * One provider's settled quality counters, summed over their closed windows.
+ * One provider's public quality counters, summed over their windows of the
+ * last {@link PUBLIC_QUALITY_WINDOW_DAYS} days, open and closed.
  *
  * `verifiedCalls` is the denominator and `failedCalls` the numerator, exactly
  * as `sla_window_calls.counted_as_quality` / `counted_as_failure` define them —
@@ -216,16 +221,8 @@ export class SlaWindowRepository extends OrganizationScopedRepository<SlaWindowE
   }
 
   /**
-   * Every `OPEN` window past its `deadlineAt`, from any organization.
-   *
-   * **Deliberately cross-organization**, like `PaymentIntentRepository.
-   * findDueForExpiry` and `VerificationRecordRepository.findUnsettled`: the
-   * age sweep is a platform-level job with no calling tenant, run once by the
-   * single-instance scheduler. `idx_sla_windows_deadline` is a partial index
-   * on exactly this predicate, so the query stays the size of the open set.
-   */
-  /**
-   * Settled quality per provider, for the buyer-facing catalogue.
+   * Public quality per provider, for the buyer-facing catalogue: every call
+   * checked in the last {@link PUBLIC_QUALITY_WINDOW_DAYS} days.
    *
    * **Deliberately cross-organization**, and the sharpest instance of the
    * idiom in this file: the tenant on an `sla_windows` row is the **provider**
@@ -235,31 +232,40 @@ export class SlaWindowRepository extends OrganizationScopedRepository<SlaWindowE
    * `ProviderVerificationService.getVerifications` already relies on to answer
    * "is this provider verified?" to a stranger.
    *
-   * **`CLOSED` windows only.** An open window's counters are still moving, and
-   * a quality figure that changes while a buyer compares two providers is not
-   * a measurement. `ProviderSlaWindowsService.peerRowsForTool` draws the same
-   * line for the same reason; this is that decision applied per provider
-   * rather than per binding.
+   * **`OPEN` and `CLOSED` windows alike** (owner decision D5, 2026-10-18). The
+   * public figure used to sum closed windows only, and a provider whose open
+   * windows held almost all of its traffic was shown by a handful of old
+   * closed ones — "100% failed" beside a provider passing ~98% of its calls.
+   * A buyer asks "how often does this fail now", so the figure covers the
+   * windows still collecting: every `OPEN` window, plus every `CLOSED` window
+   * that closed inside the period. Penalties are NOT computed here and do not
+   * change: a strike and a slash still read a single closed window's frozen
+   * counters (`SlaWindowService.closeWindow`), never this sum.
    *
    * The projection carries **no buyer identity and no window identity** — two
    * integers per provider and nothing else. A provider's window ids, deadlines
    * and strike history stay on their own console.
    *
-   * Returns a row only for providers that have at least one closed window, so
+   * Returns a row only for providers with at least one window in the period, so
    * an absent id means "not measured", never "measured at zero". The caller
    * must not fill the gap with a default.
    */
   async qualityByProvider(
     providerIds: readonly string[],
+    now: Date = new Date(),
   ): Promise<ReadonlyMap<string, ProviderQualityCounters>> {
     if (providerIds.length === 0) return new Map();
 
+    const since = new Date(now.getTime() - PUBLIC_QUALITY_WINDOW_DAYS * DAY_MS);
     const rows = await this.createQueryBuilder('window')
       .select('window.provider_id', 'providerId')
       .addSelect('COALESCE(SUM(window.verified_calls), 0)', 'verifiedCalls')
       .addSelect('COALESCE(SUM(window.failed_calls), 0)', 'failedCalls')
       .where('window.organizationId IS NOT NULL')
-      .andWhere('window.status = :status', { status: CLOSED })
+      .andWhere(
+        '(window.status = :open OR (window.status = :closed AND window.closed_at >= :since))',
+        { open: OPEN, closed: CLOSED, since },
+      )
       .andWhere('window.provider_id IN (:...providerIds)', { providerIds })
       .groupBy('window.provider_id')
       .getRawMany<{ providerId: string; verifiedCalls: string; failedCalls: string }>();
@@ -276,6 +282,15 @@ export class SlaWindowRepository extends OrganizationScopedRepository<SlaWindowE
     );
   }
 
+  /**
+   * Every `OPEN` window past its `deadlineAt`, from any organization.
+   *
+   * **Deliberately cross-organization**, like `PaymentIntentRepository.
+   * findDueForExpiry` and `VerificationRecordRepository.findUnsettled`: the
+   * age sweep is a platform-level job with no calling tenant, run once by the
+   * single-instance scheduler. `idx_sla_windows_deadline` is a partial index
+   * on exactly this predicate, so the query stays the size of the open set.
+   */
   async findDueForSweep(now: Date, limit: number): Promise<DueSlaWindow[]> {
     return this.manager
       .createQueryBuilder(SlaWindowEntity, 'window')
