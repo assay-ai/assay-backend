@@ -101,6 +101,14 @@ const PRODUCTION_ENV: Record<string, string> = {
   VERIFIER_SIGNER_BACKEND: 'env',
   VERIFIER_SIGNING_KEYS: JSON.stringify([{ keyId: 'boot-verifier', secretKey: '33'.repeat(32) }]),
   ENABLED_CHAINS: CHAIN_IDS.SOLANA_DEVNET,
+  // The API app mounts the OAuth consent API, whose configuration needs the
+  // Privy source and the request-cookie secret (spec §5.2).
+  AUTH_SESSION_SOURCE: 'both',
+  PRIVY_APP_ID: 'boot-test-app',
+  PRIVY_DEFAULT_CHAIN_ID: CHAIN_IDS.SOLANA_DEVNET,
+  PRIVY_USER_LOOKUP_ENABLED: 'false',
+  MCP_PUBLIC_URL: 'https://mcp.example.test',
+  OAUTH_REQUEST_COOKIE_SECRET: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
 };
 
 async function compile(appModule: Type<unknown>, serviceType: string): Promise<TestingModule> {

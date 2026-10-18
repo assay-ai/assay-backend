@@ -10,6 +10,9 @@
  * render blank. The result must be 1–64 code points, contain at least one
  * letter or digit, and stack at most two combining marks on a base, or `null`.
  * Never truncated: an over-long name is refused, not shortened.
+ *
+ * `max` is 64 for a client name; the consent API also uses it, with its own
+ * limit, for a credential name and a device label.
  */
 export const CLIENT_NAME_MAX = 64;
 
@@ -18,11 +21,11 @@ const MARK_STACK_RE = /\p{M}{3,}/u;
 const LETTER_OR_DIGIT_RE = /[\p{L}\p{N}]/u;
 const SPACE_RUN_RE = /\s+/gu;
 
-export function sanitise(name: unknown): string | null {
+export function sanitise(name: unknown, max: number = CLIENT_NAME_MAX): string | null {
   if (typeof name !== 'string') return null;
   const cleaned = name.replace(STRIP_RE, '').replace(SPACE_RUN_RE, ' ').trim();
   const length = [...cleaned].length;
-  if (length < 1 || length > CLIENT_NAME_MAX) return null;
+  if (length < 1 || length > max) return null;
   if (MARK_STACK_RE.test(cleaned) || !LETTER_OR_DIGIT_RE.test(cleaned)) return null;
   return cleaned;
 }
