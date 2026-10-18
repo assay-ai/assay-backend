@@ -10,12 +10,10 @@ import { OAuthAccessTokenEntity } from '@database/postgres/entities/oauth-access
 import { OAuthAuthorizationCodeEntity } from '@database/postgres/entities/oauth-authorization-code.entity';
 import { OAuthClientEntity } from '@database/postgres/entities/oauth-client.entity';
 import { OAuthRefreshTokenEntity } from '@database/postgres/entities/oauth-refresh-token.entity';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import {
   OAUTH_CLEANUP_LOCK_KEY,
   OAuthCleanupService,
 } from '@modules/oauth/services/oauth-cleanup.service';
-import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
 
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 
@@ -27,13 +25,11 @@ import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-datab
 describe('OAuth cleanup — real database and Redis', () => {
   const DATABASE = 'assay_oauth_cleanup_test';
   const ORGANIZATION = '11111111-1111-4111-8111-111111111111';
-  const OTHER_ORGANIZATION = '22222222-2222-4222-8222-222222222222';
   const VERIFIED_CLIENT_ID = 'https://client.example.com/oauth/client.json';
   const DAY = 24 * 3_600_000;
 
   let dataSource: DataSource;
   let redis: Redis;
-  let registry: MetricsRegistryService;
   let service: OAuthCleanupService;
 
   beforeAll(async () => {
@@ -66,8 +62,7 @@ describe('OAuth cleanup — real database and Redis', () => {
 
   beforeEach(async () => {
     await redis.del(OAUTH_CLEANUP_LOCK_KEY);
-    registry = new MetricsRegistryService();
-    service = new OAuthCleanupService(dataSource, redis, new OAuthMetrics(registry), {
+    service = new OAuthCleanupService(dataSource, redis, {
       now: () => Date.now(),
       verifiedClientIds: [VERIFIED_CLIENT_ID],
     });
@@ -90,16 +85,28 @@ describe('OAuth cleanup — real database and Redis', () => {
   }
 
   async function insertClient(
-    row: { kind?: string; clientId?: string; createdAt?: Date } = {},
+    row: {
+      kind?: string;
+      clientId?: string;
+      createdAt?: Date;
+      lastUsedAt?: Date | null;
+      fetchedAt?: Date | null;
+      cacheUntil?: Date | null;
+    } = {},
   ): Promise<string> {
     const [inserted] = (await dataSource.query(
-      `INSERT INTO "oauth_clients" ("client_id", "kind", "client_name", "redirect_uris", "metadata", "created_at")
-       VALUES ($1, $2, 'Example client', ARRAY['http://127.0.0.1:33418/callback'], '{}', $3)
+      `INSERT INTO "oauth_clients"
+         ("client_id", "kind", "client_name", "redirect_uris", "metadata", "created_at",
+          "last_used_at", "fetched_at", "cache_until")
+       VALUES ($1, $2, 'Example client', ARRAY['http://127.0.0.1:33418/callback'], '{}', $3, $4, $5, $6)
        RETURNING "id"`,
       [
         row.clientId ?? `dcr_${randomUUID().replace(/-/g, '').slice(0, 22)}`,
         row.kind ?? 'DCR',
         row.createdAt ?? new Date(),
+        row.lastUsedAt ?? null,
+        row.fetchedAt ?? null,
+        row.cacheUntil ?? null,
       ],
     )) as { id: string }[];
     return inserted.id;
@@ -190,13 +197,6 @@ describe('OAuth cleanup — real database and Redis', () => {
     return rows.length === 1;
   }
 
-  async function gaugeValue(): Promise<number | undefined> {
-    const metric = await registry.registry
-      .getSingleMetric('assay_oauth_live_grants_per_agent')
-      ?.get();
-    return metric?.values[0]?.value;
-  }
-
   it('the cleanup deletes have expires_at indexes', async () => {
     const rows = (await dataSource.query(
       `SELECT "indexname", "indexdef" FROM "pg_indexes" WHERE "indexname" = ANY($1) ORDER BY 1`,
@@ -204,16 +204,15 @@ describe('OAuth cleanup — real database and Redis', () => {
         [
           'idx_oauth_access_tokens_expires',
           'idx_oauth_authorization_codes_expires',
-          'idx_oauth_refresh_tokens_expires_dead',
+          'idx_oauth_refresh_tokens_expires',
         ],
       ],
     )) as { indexname: string; indexdef: string }[];
     expect(rows.map((row) => row.indexname)).toEqual([
       'idx_oauth_access_tokens_expires',
       'idx_oauth_authorization_codes_expires',
-      'idx_oauth_refresh_tokens_expires_dead',
+      'idx_oauth_refresh_tokens_expires',
     ]);
-    expect(rows[2].indexdef).toContain('used_at IS NOT NULL');
   });
 
   // ── clients ────────────────────────────────────────────────────────────────
@@ -293,12 +292,10 @@ describe('OAuth cleanup — real database and Redis', () => {
 
   it('deletes no client when the verified list could not be read', async () => {
     const client = await insertClient({ createdAt: ago(60 * DAY) });
-    const blind = new OAuthCleanupService(
-      dataSource,
-      redis,
-      new OAuthMetrics(new MetricsRegistryService()),
-      { now: () => Date.now(), verifiedClientIds: null },
-    );
+    const blind = new OAuthCleanupService(dataSource, redis, {
+      now: () => Date.now(),
+      verifiedClientIds: null,
+    });
 
     const summary = await blind.run();
 
@@ -306,13 +303,126 @@ describe('OAuth cleanup — real database and Redis', () => {
     expect(summary).toMatchObject({ skipped: false, clients: 0 });
   });
 
+  it('with an empty verified list (the default), deletes an unreferenced 31-day client', async () => {
+    const client = await insertClient({ createdAt: ago(31 * DAY) });
+    const defaults = new OAuthCleanupService(dataSource, redis, {
+      now: () => Date.now(),
+      verifiedClientIds: [],
+    });
+
+    await defaults.run();
+
+    expect(await exists('oauth_clients', client)).toBe(false);
+  });
+
+  it('keeps an old client used or (CIMD) fetched in the last 30 days', async () => {
+    const used = await insertClient({ createdAt: ago(60 * DAY), lastUsedAt: ago(29 * DAY) });
+    const fetched = await insertClient({
+      kind: 'CIMD',
+      clientId: `https://${randomUUID()}.example.com/client.json`,
+      createdAt: ago(60 * DAY),
+      fetchedAt: ago(DAY),
+    });
+    const stale = await insertClient({
+      kind: 'CIMD',
+      clientId: `https://${randomUUID()}.example.com/client.json`,
+      createdAt: ago(60 * DAY),
+      lastUsedAt: ago(31 * DAY),
+      fetchedAt: ago(31 * DAY),
+    });
+
+    await service.run();
+
+    expect(await exists('oauth_clients', used)).toBe(true);
+    expect(await exists('oauth_clients', fetched)).toBe(true);
+    expect(await exists('oauth_clients', stale)).toBe(false);
+  });
+
+  it('deletes an unreferenced CIMD client once its cache_until has passed, whatever its age', async () => {
+    const cimd = () => `https://${randomUUID()}.example.com/client.json`;
+    const expired = await insertClient({
+      kind: 'CIMD',
+      clientId: cimd(),
+      fetchedAt: ago(2 * 3_600_000),
+      cacheUntil: ago(3_600_000),
+    });
+    const cached = await insertClient({
+      kind: 'CIMD',
+      clientId: cimd(),
+      fetchedAt: ago(60_000),
+      cacheUntil: new Date(Date.now() + 3_600_000),
+    });
+    const referenced = await insertClient({
+      kind: 'CIMD',
+      clientId: cimd(),
+      cacheUntil: ago(3_600_000),
+    });
+    await insertGrant(referenced);
+    const coded = await insertClient({
+      kind: 'CIMD',
+      clientId: cimd(),
+      cacheUntil: ago(3_600_000),
+    });
+    await insertCode(coded, new Date(Date.now() + 60_000));
+    const verified = await insertClient({
+      kind: 'CIMD',
+      clientId: `https://${randomUUID()}.example.com/verified.json`,
+      cacheUntil: ago(3_600_000),
+    });
+    const builtin = await insertClient({
+      kind: 'BUILTIN',
+      clientId: `https://${randomUUID()}.example.com/oauth/clients/assay-mcp`,
+      cacheUntil: ago(3_600_000),
+    });
+    // A DCR row has no cache: cache_until never makes it stale.
+    const dcr = await insertClient({ cacheUntil: ago(3_600_000) });
+    const withVerified = new OAuthCleanupService(dataSource, redis, {
+      now: () => Date.now(),
+      verifiedClientIds: [VERIFIED_CLIENT_ID, (await clientIdOf(verified))!],
+    });
+
+    await withVerified.run();
+
+    expect(await exists('oauth_clients', expired)).toBe(false);
+    expect(await exists('oauth_clients', cached)).toBe(true);
+    expect(await exists('oauth_clients', referenced)).toBe(true);
+    expect(await exists('oauth_clients', coded)).toBe(true);
+    expect(await exists('oauth_clients', verified)).toBe(true);
+    expect(await exists('oauth_clients', builtin)).toBe(true);
+    expect(await exists('oauth_clients', dcr)).toBe(true);
+  });
+
+  async function clientIdOf(id: string): Promise<string | undefined> {
+    const [row] = (await dataSource.query(
+      `SELECT "client_id" FROM "oauth_clients" WHERE "id" = $1`,
+      [id],
+    )) as { client_id: string }[];
+    return row?.client_id;
+  }
+
+  it('without Redis the run is skipped and deletes nothing', async () => {
+    const client = await insertClient({ createdAt: ago(60 * DAY) });
+    const grant = await insertGrant(await insertClient());
+    const dead = await insertAccessToken(grant, ago(100 * DAY));
+    const noRedis = new OAuthCleanupService(dataSource, null, {
+      now: () => Date.now(),
+      verifiedClientIds: [],
+    });
+
+    await expect(noRedis.run()).resolves.toEqual({ skipped: true });
+
+    expect(await exists('oauth_clients', client)).toBe(true);
+    expect(await exists('oauth_access_tokens', dead)).toBe(true);
+  });
+
   // ── tokens and codes ───────────────────────────────────────────────────────
 
-  it('deletes access tokens 7 days past expiry, and only those', async () => {
+  it('deletes access tokens 30 days past expiry, and only those', async () => {
     const client = await insertClient();
     const grant = await insertGrant(client);
-    const dead = await insertAccessToken(grant, ago(7 * DAY + 60_000));
-    const recent = await insertAccessToken(grant, ago(6 * DAY));
+    const dead = await insertAccessToken(grant, ago(30 * DAY + 60_000));
+    // Kept past 7 days, for the stale-reuse check while a refresh token lives.
+    const recent = await insertAccessToken(grant, ago(29 * DAY));
     const live = await insertAccessToken(grant, new Date(Date.now() + 3_600_000));
 
     await service.run();
@@ -322,7 +432,7 @@ describe('OAuth cleanup — real database and Redis', () => {
     expect(await exists('oauth_access_tokens', live)).toBe(true);
   });
 
-  it('deletes used or revoked refresh tokens 30 days past expiry, and only those', async () => {
+  it('deletes refresh tokens 30 days past expiry, in any state, and only those', async () => {
     const client = await insertClient();
     const grant = await insertGrant(client);
     const old = ago(30 * DAY + 60_000);
@@ -336,13 +446,15 @@ describe('OAuth cleanup — real database and Redis', () => {
       expiresAt: ago(29 * DAY),
       usedAt: ago(50 * DAY),
     });
+    const neverUsedRecently = await insertRefreshToken(grant, client, { expiresAt: ago(29 * DAY) });
 
     await service.run();
 
     expect(await exists('oauth_refresh_tokens', used)).toBe(false);
     expect(await exists('oauth_refresh_tokens', revoked)).toBe(false);
-    expect(await exists('oauth_refresh_tokens', neverUsed)).toBe(true);
+    expect(await exists('oauth_refresh_tokens', neverUsed)).toBe(false);
     expect(await exists('oauth_refresh_tokens', usedRecently)).toBe(true);
+    expect(await exists('oauth_refresh_tokens', neverUsedRecently)).toBe(true);
   });
 
   it('deletes codes 1 day past expiry, and only those', async () => {
@@ -392,7 +504,7 @@ describe('OAuth cleanup — real database and Redis', () => {
   it('second concurrent run is a no-op (lock)', async () => {
     const client = await insertClient();
     const grant = await insertGrant(client);
-    const dead = await insertAccessToken(grant, ago(8 * DAY));
+    const dead = await insertAccessToken(grant, ago(31 * DAY));
 
     const [first, second] = await Promise.all([service.run(), service.run()]);
 
@@ -404,32 +516,9 @@ describe('OAuth cleanup — real database and Redis', () => {
     expect(await redis.ttl(OAUTH_CLEANUP_LOCK_KEY)).toBeGreaterThan(0);
 
     // Held for its full hour: a later run in the same window changes nothing.
-    const again = await insertAccessToken(grant, ago(8 * DAY));
+    const again = await insertAccessToken(grant, ago(31 * DAY));
     await expect(service.run()).resolves.toEqual({ skipped: true });
     expect(await exists('oauth_access_tokens', again)).toBe(true);
-  });
-
-  // ── gauge ──────────────────────────────────────────────────────────────────
-
-  it('sets assay_oauth_live_grants_per_agent to the largest live count of one agent', async () => {
-    await dataSource.query(`UPDATE "agent_credentials" SET "revoked_at" = now(), "revoked_by" = 'test'
-                            WHERE "revoked_at" IS NULL`);
-    const client = await insertClient();
-    const busy = randomUUID();
-    for (let index = 0; index < 4; index += 1) await insertGrant(client, { agentId: busy });
-    // Not live: revoked, idle-expired, soft-deleted.
-    await insertGrant(client, { agentId: busy, revokedAt: ago(DAY) });
-    await insertGrant(client, { agentId: busy, expiresAt: ago(60_000) });
-    await insertGrant(client, { agentId: busy, deletedAt: ago(DAY) });
-    // The same agent id under another tenant is another agent.
-    for (let index = 0; index < 3; index += 1) {
-      await insertGrant(client, { agentId: busy, organizationId: OTHER_ORGANIZATION });
-    }
-    await insertGrant(client);
-
-    await service.run();
-
-    expect(await gaugeValue()).toBe(4);
   });
 });
 

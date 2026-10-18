@@ -1,5 +1,5 @@
 import { Injectable } from '@nestjs/common';
-import { Counter, Gauge } from 'prom-client';
+import { Counter } from 'prom-client';
 
 import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 
@@ -69,8 +69,11 @@ export type McpUnauthorizedReason = 'missing' | 'unknown' | 'expired' | 'revoked
  * imported: a second instance on the same registry throws. Alerts (in the spec, not here):
  * `continue_cookie_missing` above 5 % of `approved` over 1 h; any
  * `oauth_refresh_reuse_total{kind="revoked"}`; any
- * `oauth_cimd_fetch_total{result="blocked_address"}`; §6.3.8's DCR thresholds;
- * `oauth_live_grants_per_agent` at 45 or more.
+ * `oauth_cimd_fetch_total{result="blocked_address"}`; §6.3.8's DCR thresholds.
+ *
+ * The §6.7 gauge `assay_oauth_live_grants_per_agent` is not here: it is read
+ * from the database, so it lives with the other DB-backed gauges on
+ * `MetricsRegistryService` and `MetricsCollectorService` sets it.
  */
 @Injectable()
 export class OAuthMetrics {
@@ -82,7 +85,6 @@ export class OAuthMetrics {
   private readonly cimdFetchTotal: Counter<'result'>;
   private readonly dcrTotal: Counter;
   private readonly mcpUnauthorizedTotal: Counter<'reason'>;
-  private readonly liveGrantsPerAgent: Gauge;
 
   constructor(metrics: MetricsRegistryService) {
     const registers = [metrics.registry];
@@ -133,11 +135,6 @@ export class OAuthMetrics {
       labelNames: ['reason'] as const,
       registers,
     });
-    this.liveGrantsPerAgent = new Gauge({
-      name: 'assay_oauth_live_grants_per_agent',
-      help: 'The largest number of live OAuth credentials held by one agent. Alert: >= 45.',
-      registers,
-    });
   }
 
   incAuthorize(outcome: OAuthAuthorizeOutcome): void {
@@ -170,10 +167,5 @@ export class OAuthMetrics {
 
   incMcpUnauthorized(reason: McpUnauthorizedReason): void {
     this.mcpUnauthorizedTotal.labels(reason).inc();
-  }
-
-  /** The gauge is the max over agents; the caller computes it. */
-  setLiveGrantsPerAgentMax(count: number): void {
-    this.liveGrantsPerAgent.set(count);
   }
 }

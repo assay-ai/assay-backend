@@ -1,3 +1,4 @@
+import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { chainStateLagMs } from '@modules/chains/evm/chain-state/evm-chain-state.indexer';
 import { Injectable, Logger, Optional } from '@nestjs/common';
@@ -92,6 +93,9 @@ export class MetricsCollectorService {
     // The EVM chain-state indexer's lag. Optional so a composition without it
     // still scrapes.
     @Optional() private readonly chainStates: EvmChainStateRepository | null = null,
+    // The OAuth live-grants gauge (spec §6.7). Optional like `chainStates`:
+    // a composition without it still scrapes.
+    @Optional() private readonly credentials: AgentCredentialRepository | null = null,
   ) {}
 
   /** The JSON snapshot behind `GET /operator/dashboard` and its data endpoint. */
@@ -221,6 +225,13 @@ export class MetricsCollectorService {
         setGauge(this.registry.evmChainStateLagSeconds.labels(state.chainId), lagMs / 1000);
       }
     }
+
+    // A failed read leaves the last value rather than failing the scrape.
+    const maxLiveOAuth = await this.credentials?.maxLiveOAuthPerAgent().catch((error: unknown) => {
+      this.logger.warn(`OAuth live-grants gauge not refreshed: ${describe(error)}`);
+      return null;
+    });
+    setGauge(this.registry.oauthLiveGrantsPerAgent, maxLiveOAuth);
 
     const signals: SignalReadingDto[] = [
       this.reading(
