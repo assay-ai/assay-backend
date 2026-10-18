@@ -13,6 +13,8 @@ import {
   parseAccountId,
 } from '@modules/chains/ports/caip.types';
 import { ChainProposalStatus } from '@modules/slash/domain/chain-slash-outcome';
+import { alertExecutedWhileCancelWaited } from '@modules/slash/domain/executed-while-cancel-waited';
+import { ALERT_PORT, AlertPort } from '@shared/alerting';
 import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
 import { SlashErrors } from '@modules/slash/errors/slash.errors';
@@ -103,6 +105,7 @@ export class OperatorCaseService {
     private readonly parts: SlashProposalPartRepository,
     private readonly enrolments: ProviderChainEnrolmentRepository,
     @Optional() @Inject(SLASH_EXECUTOR) private readonly executor: SlashExecutorPort | null = null,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {
     // How an approved action is re-run: the same method, as the requester,
     // with the approver attached.
@@ -164,6 +167,15 @@ export class OperatorCaseService {
       this.proposals.findOneScoped(organizationId, proposalId),
     ]);
     const chainRecord = proposal ? await this.chainRecordOf(proposal) : ChainRecordState.GONE;
+    // A withdrawn judgement executed while its cancel waited: the console shows it, so it is paged
+    // too (once per case; the cancel route raises the same alert). Nothing is written.
+    if (
+      proposal &&
+      chainRecord === ChainRecordState.EXECUTED &&
+      proposal.chainStatus === ChainProposalStatus.CANCEL_REQUESTED
+    ) {
+      await alertExecutedWhileCancelWaited(this.alerts, this.logger, proposal, 'record');
+    }
     return {
       ...brief,
       // What stands on chain for this case: STANDING (anyone could execute it
