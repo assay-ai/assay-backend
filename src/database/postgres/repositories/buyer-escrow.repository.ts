@@ -328,6 +328,13 @@ export class BuyerEscrowRepository extends OrganizationScopedRepository<BuyerEsc
    * address. See the regression test in
    * `test/unit/settlement/reconciliation.service.spec.ts`.
    */
+  /** Every escrow this organization has opened, on any chain (B7: its withdrawal history). */
+  async listForOrganization(organizationId: string): Promise<BuyerEscrowEntity[]> {
+    return this.dataSource
+      .getRepository(BuyerEscrowEntity)
+      .find({ where: { organizationId }, order: { createdAt: 'ASC' } });
+  }
+
   async listAll(
     assetId: string,
     limit: number,

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
 
 import { AlertingModule } from '@shared/alerting';
+import { AuditLogModule } from '@shared/audit';
 
 import { ENABLED_CHAINS } from '../enabled-chains';
 import { EnabledChainsModule } from '../enabled-chains.module';
@@ -15,6 +16,7 @@ import {
 } from './evm-relayer-float.constants';
 import { EvmRelayerFloatMonitor } from './evm-relayer-float.monitor';
 import { EvmSlashProposalWatcher } from './evm-slash-proposal.watcher';
+import { EvmEscrowWithdrawalIndexer } from './evm-escrow-withdrawal.indexer';
 import { EvmModule, readPositiveInt } from './evm.module';
 import {
   DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS,
@@ -89,7 +91,8 @@ function readConfirmations(raw: string | undefined): number {
  * three. Unset is a boot failure, not an unwatched faucet.
  */
 @Module({
-  imports: [EvmModule, EnabledChainsModule, AlertingModule],
+  // `AuditLogModule`: the withdrawal index logs each claim it stores.
+  imports: [EvmModule, EnabledChainsModule, AlertingModule, AuditLogModule],
   providers: [
     {
       provide: EVM_RELAYER_FLOAT_MARKS,
@@ -128,6 +131,8 @@ function readConfirmations(raw: string | undefined): number {
     // Read-only: alerts on SlashProposed records this platform did not plan
     // (review H-1). The repositories come from global modules.
     EvmSlashProposalWatcher,
+    // Read-only: the buyer's withdrawal history (B7). Bookkeeping, no ledger entry.
+    EvmEscrowWithdrawalIndexer,
     // Follow-up B5: WARN 45 days before a verifier key with open records expires.
     EvmVerifierExpiryMonitor,
     // The provider slash hold: stop routing paid calls to a provider whose

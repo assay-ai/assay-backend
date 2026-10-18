@@ -6,7 +6,9 @@ import { BalancesController } from './controllers/balances.controller';
 import { DepositsController } from './controllers/deposits.controller';
 import { HoldsController } from './controllers/holds.controller';
 import { WithheldController } from './controllers/withheld.controller';
+import { WithdrawalsController } from './controllers/withdrawals.controller';
 import { LedgerModule } from './ledger.module';
+import { WithdrawalsService } from './services/withdrawals.service';
 
 /**
  * API-side ledger module — imported only by `AppApiModule`.
@@ -18,7 +20,15 @@ import { LedgerModule } from './ledger.module';
  */
 @Module({
   imports: [LedgerModule, McpModule],
-  controllers: [BalancesController, WithheldController, HoldsController, DepositsController],
+  controllers: [
+    BalancesController,
+    WithheldController,
+    HoldsController,
+    DepositsController,
+    WithdrawalsController,
+  ],
+  // Read-only reporting (B7), like `DepositsService`; API-side only.
+  providers: [WithdrawalsService],
   exports: [LedgerModule],
 })
 export class LedgerApiModule {}
