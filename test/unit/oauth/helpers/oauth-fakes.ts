@@ -17,14 +17,17 @@ export class FakeOAuthRedis {
   readonly strings = new Map<string, string>();
   readonly expiries = new Map<string, number>();
   down = false;
+  /** Fail only the commands on keys this matches, to take one counter down at a time. */
+  failWhen: ((key: string) => boolean) | null = null;
 
-  private guard(): void {
+  private guard(key?: string): void {
     if (this.down) throw new Error('redis is unreachable');
+    if (key !== undefined && this.failWhen?.(key)) throw new Error('redis is unreachable');
   }
 
   incr(key: string): Promise<number> {
     try {
-      this.guard();
+      this.guard(key);
     } catch (error) {
       return Promise.reject(error);
     }
