@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -6,6 +6,7 @@ import { ToolEntity } from '@database/postgres/entities/tool.entity';
 import { ToolVersionEntity } from '@database/postgres/entities/tool-version.entity';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
+import { NOTIFICATION_PORT, NotificationPort } from '@modules/notification/ports/notification.port';
 import { ScreenFindingCode } from '@modules/tool/domain/contract/schema-screen';
 import { parseProviderToolName } from '@modules/tool/domain/provider-tool-name';
 import {
@@ -21,7 +22,14 @@ import {
 } from '@modules/tool/ports/tool.types';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 
-import { ReviewKind, ReviewStatus, reviewContentHash, reviewKindOf } from '../domain/review';
+import { providerToolNotification } from '../domain/notices';
+import {
+  ReviewKind,
+  ReviewReasonCode,
+  ReviewStatus,
+  reviewContentHash,
+  reviewKindOf,
+} from '../domain/review';
 import { diffDraft } from '../domain/versioning';
 import {
   ReviewChecklistItemDto,
@@ -66,6 +74,8 @@ export interface DecideInput {
   readonly tier: ToolTier | null;
   /** The content hash the operator read (`GET /operator/reviews/:id`). */
   readonly contentHash: string;
+  /** The register's reason code; told to the provider with a rejection. */
+  readonly reasonCode?: ReviewReasonCode | null;
 }
 
 export interface DecideOutcome {
@@ -76,6 +86,11 @@ export interface DecideOutcome {
   readonly approvedVersion: number | null;
   /** The version a CHANGE approval just published, for its shadow policy. */
   readonly published: ToolVersionEntity | null;
+  /** The semver approved (FIRST: the newest served; CHANGE: the one published). */
+  readonly approvedSemver?: string | null;
+  /** What the provider is told: the note and the reason code of the decision. */
+  readonly note?: string | null;
+  readonly reasonCode?: ReviewReasonCode | null;
 }
 
 /**
@@ -90,6 +105,8 @@ export interface DecideOutcome {
  */
 @Injectable()
 export class ProviderToolReviewService {
+  private readonly logger = new Logger(ProviderToolReviewService.name);
+
   constructor(
     private readonly tools: ToolRepository,
     private readonly providers: ProviderRepository,
@@ -99,6 +116,10 @@ export class ProviderToolReviewService {
     private readonly epochs: AccessEpochService,
     @Inject(TOOL_CONTRACT_CHANGES) private readonly changes: ToolContractChanges,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    // The provider is told the decision. Optional for hand-built harnesses.
+    @Optional()
+    @Inject(NOTIFICATION_PORT)
+    private readonly notifications: NotificationPort | null = null,
   ) {}
 
   /** `GET /operator/reviews`: pending first, oldest submission first; `all` adds decided ones. */
@@ -238,6 +259,9 @@ export class ProviderToolReviewService {
         decision: input.decision,
         approvedVersion: row.approvedVersion,
         published: null,
+        approvedSemver: null,
+        note: input.note,
+        reasonCode: input.reasonCode ?? null,
       };
     }
 
@@ -269,6 +293,9 @@ export class ProviderToolReviewService {
         decision: input.decision,
         approvedVersion,
         published: null,
+        approvedSemver: covered.find((version) => version.version === approvedVersion)?.semver,
+        note: input.note,
+        reasonCode: input.reasonCode ?? null,
       };
     }
 
@@ -302,6 +329,9 @@ export class ProviderToolReviewService {
       decision: input.decision,
       approvedVersion: draft.version,
       published: { ...draft, semver },
+      approvedSemver: semver,
+      note: input.note,
+      reasonCode: input.reasonCode ?? null,
     };
   }
 
@@ -317,6 +347,34 @@ export class ProviderToolReviewService {
         organizationId: outcome.organizationId,
         rules: outcome.published.declaredRules ?? [],
       });
+    }
+    await this.announce(toolId, outcome);
+  }
+
+  /** Tells the tool's provider. Best-effort: the decision stands whether or not this lands. */
+  private async announce(toolId: string, outcome: DecideOutcome): Promise<void> {
+    if (!this.notifications) return;
+    const facts = {
+      organizationId: outcome.organizationId,
+      toolId,
+      toolName: outcome.toolName,
+      reviewKind: outcome.kind,
+    };
+    try {
+      await this.notifications.notify(
+        providerToolNotification(
+          outcome.decision === ReviewDecision.APPROVE
+            ? { ...facts, kind: 'APPROVED', semver: outcome.approvedSemver ?? null }
+            : {
+                ...facts,
+                kind: 'REJECTED',
+                reasonCode: outcome.reasonCode ?? null,
+                note: outcome.note ?? null,
+              },
+        ),
+      );
+    } catch (error) {
+      this.logger.error(`Review of ${toolId}: could not notify: ${(error as Error).message}`);
     }
   }
 

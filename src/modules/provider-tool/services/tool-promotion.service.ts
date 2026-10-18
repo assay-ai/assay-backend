@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In } from 'typeorm';
 
@@ -6,9 +6,11 @@ import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.enti
 import { ToolPromotionInviteEntity } from '@database/postgres/entities/tool-promotion-invite.entity';
 import { ToolEntity } from '@database/postgres/entities/tool.entity';
 import { ToolVersionEntity } from '@database/postgres/entities/tool-version.entity';
+import { NOTIFICATION_PORT, NotificationPort } from '@modules/notification/ports/notification.port';
 import { parseProviderToolName } from '@modules/tool/domain/provider-tool-name';
 import { ToolKind, ToolStatus, ToolVisibility } from '@modules/tool/ports/tool.types';
 
+import { ProviderToolNotice, providerToolNotification } from '../domain/notices';
 import { SimilarityInput, fieldsOf, similarGroups, similarTo } from '../domain/similarity';
 import {
   PromotionCandidateDto,
@@ -37,7 +39,15 @@ interface Candidate extends SimilarityInput {
  */
 @Injectable()
 export class ToolPromotionService {
-  constructor(@InjectDataSource('postgres') private readonly dataSource: DataSource) {}
+  private readonly logger = new Logger(ToolPromotionService.name);
+
+  constructor(
+    @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    // Invited providers are told. Optional for hand-built harnesses.
+    @Optional()
+    @Inject(NOTIFICATION_PORT)
+    private readonly notifications: NotificationPort | null = null,
+  ) {}
 
   /** Groups of similar shared provider tools: same category, similar names and schemas. */
   async groups(): Promise<PromotionGroupDto[]> {
@@ -80,12 +90,18 @@ export class ToolPromotionService {
     return { source: source.row, version: source.version };
   }
 
-  /** One invite per provider tool, to its owner; refused for a tool that is not a candidate. */
+  /**
+   * One invite per provider tool, to its owner; refused for a tool that is not
+   * a candidate. The invites written now (not the ones that already stood)
+   * are pushed onto `invited`, for {@link announce} once the caller's
+   * transaction commits.
+   */
   async invite(
     manager: EntityManager,
     standardToolId: string,
     toolIds: readonly string[],
     operatorId: string,
+    invited: ProviderToolNotice[] = [],
   ): Promise<PromotionInviteDto[]> {
     const standard = await manager.findOne(ToolEntity, { where: { id: standardToolId } });
     if (!standard || standard.kind !== ToolKind.STANDARD) {
@@ -103,7 +119,7 @@ export class ToolPromotionService {
     const now = new Date();
     for (const id of ids) {
       const candidate = candidates.get(id) as Candidate;
-      await manager
+      const inserted = await manager
         .createQueryBuilder()
         .insert()
         .into(ToolPromotionInviteEntity)
@@ -116,9 +132,34 @@ export class ToolPromotionService {
           dismissedAt: null,
         })
         .orIgnore()
+        .returning('source_tool_id')
         .execute();
+      if (rowsOf(inserted.raw).length > 0) {
+        invited.push({
+          kind: 'PROMOTION_INVITED',
+          organizationId: candidate.row.ownerOrgId as string,
+          toolId: candidate.id,
+          toolName: candidate.name,
+          standardToolId: standard.id,
+          standardToolName: standard.name,
+        });
+      }
     }
     return this.invites(standardToolId, manager);
+  }
+
+  /** Tells each invited provider. Best-effort: the invites stand whether or not this lands. */
+  async announce(invited: readonly ProviderToolNotice[]): Promise<void> {
+    if (!this.notifications) return;
+    for (const notice of invited) {
+      try {
+        await this.notifications.notify(providerToolNotification(notice));
+      } catch (error) {
+        this.logger.error(
+          `Promotion invite for ${notice.toolId}: could not notify: ${(error as Error).message}`,
+        );
+      }
+    }
   }
 
   /** The invites of a standard tool, and whether each provider bound to it yet. */
@@ -206,4 +247,10 @@ function candidateDtoOf(candidate: Candidate): PromotionCandidateDto {
     outputFields: [...candidate.outputFields],
     replacementToolId: candidate.row.replacementToolId,
   };
+}
+
+/** Rows of an `INSERT … RETURNING`, whichever shape the driver handed back. */
+function rowsOf(raw: unknown): unknown[] {
+  if (Array.isArray(raw) && raw.length === 2 && Array.isArray(raw[0])) return raw[0];
+  return Array.isArray(raw) ? raw : [];
 }

@@ -37,7 +37,12 @@ import { ToolsetVisibility } from '@modules/toolset/domain/sharing';
 import { selectViewTools } from '@modules/toolset/domain/view';
 import { ToolsetErrorCode } from '@modules/toolset/errors/toolset.errors';
 import { renameHandleTools } from '@modules/toolset/services/handle-tools';
-import { CutoffRevertReason } from '@modules/toolset/services/toolset-moderation.service';
+import {
+  CutoffRevertReason,
+  ToolsetModerationService,
+} from '@modules/toolset/services/toolset-moderation.service';
+import { ModerationCutoffRepository } from '@database/postgres/repositories/toolset-sharing.repository';
+import { NotificationRequest } from '@modules/notification/ports/notification.port';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 import { AuditLogWriter } from '@shared/audit';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
@@ -104,7 +109,16 @@ describe('provider tools, against a real database and Redis', () => {
   let owned: ProviderToolsService;
   let review: ProviderToolReviewService;
   let promotion: ToolPromotionService;
+  let announcer: ToolsetModerationService;
   let s: ReturnType<typeof toolsetTestContext>;
+  const notified: NotificationRequest[] = [];
+  const notifications = {
+    notify: async (request: NotificationRequest) => {
+      notified.push(request);
+      return { deliveredNow: true };
+    },
+  };
+  const noticesFor = (event: string) => notified.filter((notice) => notice.event === event);
 
   const session = (organizationId: string, agentId: string): McpSession => ({
     credentialId: 'login',
@@ -307,8 +321,18 @@ describe('provider tools, against a real database and Redis', () => {
       s.epochs,
       changes,
       dataSource,
+      notifications,
     );
-    promotion = new ToolPromotionService(dataSource);
+    promotion = new ToolPromotionService(dataSource, notifications);
+    announcer = new ToolsetModerationService(
+      new ModerationCutoffRepository(dataSource),
+      s.handles,
+      s.epochs,
+      dataSource,
+      undefined,
+      undefined,
+      notifications,
+    );
 
     orgA = await org('Acme Labs');
     orgB = await org('Beta Labs');
@@ -394,8 +418,12 @@ describe('provider tools, against a real database and Redis', () => {
         status: 'DRAFT',
         notReviewed: true,
         review: { status: ReviewStatus.NONE, state: ReviewDisplayState.NOT_SUBMITTED },
-        draft: { semver: '1.0.0', screen: [], inReview: false },
+        draft: { semver: '1.0.0', screen: [], inReview: false, updatedAt: expect.any(Date) },
       });
+      // The 90-day minimum, stated: a deprecation form never computes it.
+      expect(created.earliestSunsetAt.getTime()).toBeGreaterThanOrEqual(
+        Date.now() + 90 * 86_400_000 - 60_000,
+      );
       expect(
         await errorOf(
           owned.create(
@@ -646,6 +674,22 @@ describe('provider tools, against a real database and Redis', () => {
       expect(
         await errorOf(s.access.patch(orgC, agentC, { allowedToolIds: [toolId] }, ACTOR)),
       ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_ACCESS_INVALID });
+
+      // Stop sharing: UNLISTED → PRIVATE, and the link stops reaching it at once.
+      expect(await errorOf(owned.unshare(orgB, toolId, ACTOR))).toMatchObject({
+        code: ProviderToolErrorCode.TOOL_PROVIDER_TOOL_NOT_FOUND,
+        status: 404,
+      });
+      expect(await owned.unshare(orgA, toolId, ACTOR)).toMatchObject({ visibility: 'PRIVATE' });
+      expect(await view(orgC, `/u/${token}`)).not.toContain('acme__search_posts');
+      expect(await view(orgA, '/my/kit')).toContain('acme__search_posts');
+      expect(await errorOf(owned.unshare(orgA, toolId, ACTOR))).toMatchObject({
+        code: ProviderToolErrorCode.TOOL_PROVIDER_TOOL_STATE,
+        context: { reason: 'the tool is already PRIVATE' },
+      });
+      // Shared again, for what follows.
+      await owned.shareUnlisted(orgA, toolId, ACTOR);
+      expect(await view(orgC, `/u/${token}`)).toEqual(['acme__search_posts']);
     });
   });
 
@@ -725,7 +769,21 @@ describe('provider tools, against a real database and Redis', () => {
     });
 
     it('an approval lists it: /@acme, /, the catalogue, tier VERIFIED and reviewed', async () => {
+      notified.length = 0;
       const outcome = await decide(ReviewDecision.APPROVE);
+      expect(notified).toEqual([
+        expect.objectContaining({
+          organizationId: orgA,
+          event: 'provider_tool.approved',
+          subjectType: 'provider_tool',
+          subjectId: toolId,
+          payload: expect.objectContaining({ toolName: 'acme__search_posts', reviewKind: 'FIRST' }),
+        }),
+      ]);
+      // A LISTED tool is not unshared: it leaves only by takedown or exit.
+      expect(await errorOf(owned.unshare(orgA, toolId, ACTOR))).toMatchObject({
+        code: ProviderToolErrorCode.TOOL_PROVIDER_TOOL_STATE,
+      });
       expect(outcome).toMatchObject({ kind: ReviewKind.FIRST, decision: ReviewDecision.APPROVE });
       const listed = await detail();
       expect(listed).toMatchObject({
@@ -880,10 +938,39 @@ describe('provider tools, against a real database and Redis', () => {
 
   describe('takedown', () => {
     it('removes a provider tool everywhere at once, and a revert restores it', async () => {
+      notified.length = 0;
       const { cutoff } = await dataSource.transaction((manager) =>
-        s.moderation.cutoffTool(manager, { toolId, operatorId: OPERATOR_1, note: 'impersonation' }),
+        s.moderation.cutoffTool(manager, {
+          toolId,
+          operatorId: OPERATOR_1,
+          note: 'impersonation',
+          publicReasonCode: 'IMPERSONATION',
+          publicNote: 'The summary names another company as the maker.',
+        }),
       );
       await s.moderation.afterCommit([orgA]);
+      await announcer.announceTool(toolId, 'TAKEN_DOWN');
+      expect(noticesFor('provider_tool.taken_down')).toEqual([
+        expect.objectContaining({
+          organizationId: orgA,
+          subjectId: toolId,
+          payload: expect.objectContaining({
+            reasonCode: 'IMPERSONATION',
+            publicNote: 'The summary names another company as the maker.',
+          }),
+        }),
+      ]);
+      // The owner reads why, in the words written for them; never the operator's.
+      const down = await detail();
+      expect(down.takedown).toEqual({
+        at: expect.any(Date),
+        reasonCode: 'IMPERSONATION',
+        reasonLabel: 'Impersonation',
+        publicNote: 'The summary names another company as the maker.',
+      });
+      expect(JSON.stringify(down)).not.toContain(OPERATOR_1);
+      // The operator's note is never told: it is not the provider's.
+      expect(JSON.stringify(notified)).not.toContain('impersonation');
       expect((await served()).some((tool) => tool.id === toolId)).toBe(false);
       expect(await catalogue.findRemovedByName('acme__search_posts')).toMatchObject({ id: toolId });
       expect(await errorOf(s.endpoints.resolve(orgC, parseMcpUrl('/@acme')!))).toMatchObject({
@@ -895,10 +982,18 @@ describe('provider tools, against a real database and Redis', () => {
       await dataSource.transaction((manager) =>
         s.moderation.revert(manager, cutoff.id, OPERATOR_2, CutoffRevertReason.REJECTED),
       );
+      await announcer.announceTool(toolId, 'TAKEDOWN_LIFTED');
+      expect(noticesFor('provider_tool.takedown_lifted')).toEqual([
+        expect.objectContaining({
+          organizationId: orgA,
+          payload: expect.objectContaining({ serving: true }),
+        }),
+      ]);
       expect(await detail()).toMatchObject({
         status: 'ACTIVE',
         visibility: 'LISTED',
         removedAt: null,
+        takedown: null,
       });
     });
 
@@ -913,9 +1008,19 @@ describe('provider tools, against a real database and Redis', () => {
       await s.moderation.afterCommit([orgA]);
       expect((await detail()).status).toBe('REMOVED');
       expect((await served()).some((tool) => tool.id === toolId)).toBe(false);
+      notified.length = 0;
+      await announcer.announceHandle('acme', 'TAKEN_DOWN');
+      // A lifted notice for a handle still frozen is not sent.
+      await announcer.announceHandle('acme', 'TAKEDOWN_LIFTED');
       await dataSource.transaction((manager) =>
         s.moderation.revert(manager, cutoff.id, OPERATOR_2, CutoffRevertReason.REJECTED),
       );
+      await announcer.announceHandle('acme', 'TAKEDOWN_LIFTED');
+      // One notice per handle, to its owner; none per tool.
+      expect(notified.map((notice) => [notice.organizationId, notice.event])).toEqual([
+        [orgA, 'handle.taken_down'],
+        [orgA, 'handle.takedown_lifted'],
+      ]);
       expect((await detail()).status).toBe('ACTIVE');
     });
 
@@ -1004,13 +1109,32 @@ describe('provider tools, against a real database and Redis', () => {
           tags: [],
         })
       ).id;
+      notified.length = 0;
+      const invited: Parameters<typeof promotion.announce>[0][number][] = [];
       const invites = await dataSource.transaction((manager) =>
-        promotion.invite(manager, standardId, [toolId, betaTool], OPERATOR_1),
+        promotion.invite(manager, standardId, [toolId, betaTool], OPERATOR_1, invited),
       );
+      await promotion.announce(invited);
       expect(invites.map((invite) => [invite.organizationId, invite.bound])).toEqual([
         [orgA, false],
         [orgB, false],
       ]);
+      // Each provider hears of its own tool only.
+      expect(
+        noticesFor('provider_tool.promotion_invited').map((notice) => [
+          notice.organizationId,
+          notice.subjectId,
+        ]),
+      ).toEqual([
+        [orgA, toolId],
+        [orgB, betaTool],
+      ]);
+      // Inviting again writes nothing new and tells nobody twice.
+      const again: typeof invited = [];
+      await dataSource.transaction((manager) =>
+        promotion.invite(manager, standardId, [toolId], OPERATOR_1, again),
+      );
+      expect(again).toEqual([]);
       const { invitations } = await owned.invitations(orgA);
       expect(invitations).toEqual([
         expect.objectContaining({
@@ -1020,6 +1144,8 @@ describe('provider tools, against a real database and Redis', () => {
           prefill: expect.objectContaining({
             endpoint: 'https://provider.example.com/search',
             responseMapping: { posts: '$.items' },
+            authMode: 'NONE',
+            slaFailureRate: 0.02,
           }),
         }),
       ]);
@@ -1059,6 +1185,113 @@ describe('provider tools, against a real database and Redis', () => {
       expect((await owned.invitations(orgB)).invitations).toHaveLength(1);
       await owned.dismissInvitation(orgB, standardId, betaTool);
       expect((await owned.invitations(orgB)).invitations).toEqual([]);
+    });
+  });
+
+  describe('a deprecation names its replacement', () => {
+    it('accepts a serving tool that reaches the same audience, and names it', async () => {
+      const created = await owned.create(
+        orgA,
+        { name: 'search_posts_v', category: 'social', ...contract() } as never,
+        ACTOR,
+      );
+      await owned.publishVersion(orgA, created.id, 1, ACTOR);
+      const major = await owned.saveDraft(
+        orgA,
+        created.id,
+        contract({
+          inputSchema: {
+            type: 'object',
+            properties: { query: { type: 'string' }, lang: { type: 'string' } },
+            required: ['query', 'lang'],
+          },
+        }) as never,
+        ACTOR,
+      );
+      expect(major.draft).toMatchObject({ semver: '2.0.0' });
+      await owned.publishVersion(orgA, created.id, major.draft!.version, ACTOR);
+      const sunset = new Date(Date.now() + 100 * 86_400_000).toISOString();
+      const deprecate = (replacementToolId: string) =>
+        errorOf(owned.deprecateMajor(orgA, created.id, 1, sunset, ACTOR, replacementToolId));
+
+      expect(await deprecate(created.id)).toMatchObject({
+        code: ProviderToolErrorCode.TOOL_PROVIDER_TOOL_STATE,
+        context: { reason: 'a tool cannot replace itself' },
+      });
+      // Another organization's link-only tool, and one that does not exist,
+      // read the same: no existence leaks.
+      const [beta] = await dataSource.query(
+        `SELECT id FROM tools WHERE name = 'beta__search_post'`,
+      );
+      const unreachable = {
+        reason: 'the replacement must be a published tool your users can reach',
+      };
+      expect(await deprecate(beta.id)).toMatchObject({ context: unreachable });
+      expect(await deprecate(randomUUID())).toMatchObject({ context: unreachable });
+
+      // A deprecated tool is no replacement.
+      await dataSource.query(`UPDATE tools SET status = 'DEPRECATED' WHERE id = $1`, [toolId]);
+      expect(await deprecate(toolId)).toMatchObject({
+        context: { reason: 'the replacement must be serving: not deprecated, retired or removed' },
+      });
+      await dataSource.query(`UPDATE tools SET status = 'ACTIVE' WHERE id = $1`, [toolId]);
+
+      // An own LISTED tool replaces a PRIVATE one.
+      const deprecated = await owned.deprecateMajor(orgA, created.id, 1, sunset, ACTOR, toolId);
+      expect(deprecated).toMatchObject({
+        replacementToolId: toolId,
+        replacementName: 'acme__search_posts',
+      });
+      expect(deprecated.versions.find((v) => v.semver === '1.0.0')).toMatchObject({
+        status: 'DEPRECATED',
+      });
+    });
+
+    it('a replacement reaches at least the audience of the tool it replaces', async () => {
+      const [beta] = await dataSource.query(
+        `SELECT id, visibility FROM tools WHERE name = 'beta__search_post'`,
+      );
+      expect(beta.visibility).toBe('UNLISTED');
+      const make = async (name: string) => {
+        const created = await owned.create(
+          orgB,
+          { name, category: 'social', ...contract() } as never,
+          ACTOR,
+        );
+        await owned.publishVersion(orgB, created.id, 1, ACTOR);
+        return created.id;
+      };
+      const shared = await make('search_post_x');
+      const privateOne = await make('search_post_y');
+      const major = await owned.saveDraft(
+        orgB,
+        shared,
+        contract({
+          inputSchema: {
+            type: 'object',
+            properties: { query: { type: 'string' }, lang: { type: 'string' } },
+            required: ['query', 'lang'],
+          },
+        }) as never,
+        ACTOR,
+      );
+      await owned.publishVersion(orgB, shared, major.draft!.version, ACTOR);
+      await dataSource.query(`UPDATE tools SET visibility = 'UNLISTED' WHERE id = $1`, [shared]);
+      const sunset = new Date(Date.now() + 100 * 86_400_000).toISOString();
+
+      expect(
+        await errorOf(owned.deprecateMajor(orgB, shared, 1, sunset, ACTOR, privateOne)),
+      ).toMatchObject({
+        context: {
+          reason:
+            'the replacement is PRIVATE, so it does not reach everyone this UNLISTED tool does',
+        },
+      });
+      expect(await owned.deprecateMajor(orgB, shared, 1, sunset, ACTOR, beta.id)).toMatchObject({
+        replacementToolId: beta.id,
+        replacementName: 'beta__search_post',
+      });
+      await dataSource.query(`UPDATE tools SET visibility = 'PRIVATE' WHERE id = $1`, [shared]);
     });
   });
 

@@ -197,6 +197,27 @@ describe('call disputes, against a real database', () => {
 
   afterAll(async () => dataSource?.destroy());
 
+  /**
+   * Every test leaves its own rows to itself. The collection job and the SLA
+   * sweep are cross-organization, so a held payment one test leaves behind is
+   * the next test's to collect: the filing-guarantee test seeds a call
+   * collectable one second later, and whichever `collection.run()` came first
+   * after that second counted it — an exact-count assertion two describes
+   * later failed whenever the suite happened to reach it first. Parked rows
+   * are still there to read; no job picks them up again.
+   */
+  afterEach(async () => {
+    await dataSource.query(
+      `UPDATE payment_intents SET held_retry_at = now() + interval '1 day' WHERE held_status = 'HELD'`,
+    );
+    await dataSource.query(`UPDATE disputes SET sla_due_at = NULL WHERE state = 'OPEN'`);
+    await dataSource.query(
+      `UPDATE disputes SET refund_paged_5d_at = coalesce(refund_paged_5d_at, now()),
+                           refund_paged_6d_at = coalesce(refund_paged_6d_at, now())
+        WHERE state = 'UPHELD' AND refund_state = 'PENDING'`,
+    );
+  });
+
   beforeEach(() => {
     buyer = randomUUID();
     provider = randomUUID();
@@ -584,6 +605,60 @@ describe('call disputes, against a real database', () => {
   // ── Disputes and the money ──────────────────────────────────────────────
 
   describe('deciding a held payment', () => {
+    it('states the SLA instants and the hold timeout, and tells each side which side it is', async () => {
+      const call = await seedHeld();
+      const dispute = await file(call);
+      const filed = new Date(dispute.createdAt).getTime();
+      const [{ collectable_at: collectableAt }] = await dataSource.query(
+        `SELECT collectable_at FROM payment_intents WHERE id = $1`,
+        [call.intentId],
+      );
+      const [{ settled_at: settledAt }] = await dataSource.query(
+        `SELECT settled_at FROM verification_records WHERE id = $1`,
+        [call.verdictId],
+      );
+      const expected = {
+        replyDueAt: new Date(filed + 24 * 3_600_000),
+        pageAt: new Date(filed + 48 * 3_600_000),
+        decisionDueAt: new Date(filed + 72 * 3_600_000),
+        autoUpholdAt: new Date(filed + 72 * 3_600_000),
+        holdEndsAt: new Date(new Date(collectableAt).getTime() + 7 * 86_400_000),
+        filingClosesAt: new Date(new Date(settledAt).getTime() + config.filingWindowMs),
+      };
+      expect(dispute).toMatchObject(expected);
+      expect(await disputes.getForBuyer(buyer, dispute.id)).toMatchObject(expected);
+      expect(await disputes.getForProvider(provider, dispute.id)).toMatchObject(expected);
+      expect(await operatorDisputes.detail(dispute.id)).toMatchObject(expected);
+      const [row] = (await disputes.listForBuyer(buyer, { limit: 10 } as never)).items;
+      expect(row).toMatchObject(expected);
+      expect(notified).toEqual([
+        expect.objectContaining({
+          organizationId: provider,
+          event: 'call_dispute.opened',
+          payload: expect.objectContaining({ role: 'provider' }),
+        }),
+      ]);
+
+      // The provider replied: no auto-uphold any more.
+      await disputes.respond(session(provider), dispute.id, 'The city returned no reading.');
+      expect((await disputes.getForBuyer(buyer, dispute.id)).autoUpholdAt).toBeNull();
+      notified.length = 0;
+      await decide(dispute.id, CallDisputeDecision.REJECT);
+      expect(
+        notified
+          .filter((notice) => notice.event === 'call_dispute.decided')
+          .map((notice) => [notice.organizationId, (notice.payload as { role: string }).role]),
+      ).toEqual([
+        [buyer, 'buyer'],
+        [provider, 'provider'],
+      ]);
+      // Decided and collected: no hold left to time out.
+      expect(await disputes.getForBuyer(buyer, dispute.id)).toMatchObject({
+        autoUpholdAt: null,
+        holdEndsAt: null,
+      });
+    });
+
     it('upheld inside the window: refundHeld, a full refund, nothing collected', async () => {
       const call = await seedHeld();
       const dispute = await file(call);
@@ -911,12 +986,19 @@ describe('call disputes, against a real database', () => {
   // ── The decision SLA ────────────────────────────────────────────────────
 
   describe('the decision SLA', () => {
+    /**
+     * Filed `hours` ago and due now, on the test process's clock: the sweep
+     * compares `sla_due_at` with its own `new Date()`, so writing the
+     * database's `now()` here would make the test depend on the two clocks
+     * agreeing to the millisecond.
+     */
     async function age(disputeId: string, hours: number): Promise<void> {
-      await dataSource.query(
-        `UPDATE disputes SET created_at = now() - make_interval(hours => $2), sla_due_at = now()
-          WHERE id = $1`,
-        [disputeId, hours],
-      );
+      const now = Date.now();
+      await dataSource.query(`UPDATE disputes SET created_at = $2, sla_due_at = $3 WHERE id = $1`, [
+        disputeId,
+        new Date(now - hours * 3_600_000),
+        new Date(now - 1_000),
+      ]);
     }
 
     it('a dispute already refunded (blocked provider) is neither paged nor auto-upheld; the buyer is told', async () => {
@@ -931,6 +1013,7 @@ describe('call disputes, against a real database', () => {
           organizationId: buyer,
           event: 'call_dispute.refunded',
           subjectId: dispute.id,
+          payload: expect.objectContaining({ role: 'buyer' }),
         }),
       ]);
       expect((await disputes.requireAny(dispute.id)).slaDueAt).toBeNull();

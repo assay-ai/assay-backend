@@ -76,6 +76,7 @@ describe('tool version migrations: up, down, up', () => {
 
   /** Migrations after the T3 ones, newest first. */
   const LATER = [
+    'ModerationCutoffPublicReason1762200000000',
     'CreateVaultKekChecks1762000000003',
     'ToolBindingAuthMode1762000000002',
     'CreateBindingCredentials1762000000001',

@@ -27,7 +27,16 @@ import { MoneyUtil } from '@shared/utils/money.util';
 
 import { DISPUTE_FILING_GUARD_SECONDS } from '@modules/payment/constants/collection-hold.constants';
 
-import { CALL_DISPUTE_CONFIG, CallDisputeConfig } from '../constants/call-dispute.config';
+import {
+  CALL_DISPUTE_CONFIG,
+  CallDisputeConfig,
+  DEFAULT_CALL_DISPUTE_CONFIG,
+} from '../constants/call-dispute.config';
+import {
+  CALL_DISPUTE_HOLD_TIMEOUT_MS,
+  CALL_DISPUTE_SLA,
+  PROVIDER_REPLY_HOURS,
+} from '../constants/call-dispute-sla.constants';
 import {
   BuyerDisputeHistory,
   CALL_DISPUTE_REASON_LABEL,
@@ -37,6 +46,7 @@ import {
   RefundPlanKind,
   RefundSource,
   RefundState,
+  UNDISPUTABLE_CALL_CLASSES,
   boundedBody,
   filingLimitFor,
   needsSecondOperator,
@@ -74,12 +84,28 @@ const CALL_DISPUTE_LIST: ListSpec = {
 export const CALL_DISPUTE_TARGET = 'call_dispute';
 
 /** Call classes a buyer pays for; the rest are never charged. */
-const UNPAID_CALL_CLASSES: ReadonlySet<string> = new Set(['FREE', 'TEST']);
+const UNPAID_CALL_CLASSES = UNDISPUTABLE_CALL_CLASSES;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
-/** The provider's one reply must come within this many hours of the filing. */
-export const PROVIDER_REPLY_HOURS = 24;
+export { PROVIDER_REPLY_HOURS };
+
+/** Which side of a call dispute a notice is for: an organization may be both. */
+export type CallDisputeRole = 'buyer' | 'provider';
+
+/** What a dispute view needs beyond its row: the dials, and the call's hold. */
+export interface CallDisputeViewContext {
+  readonly filingWindowMs: number;
+  readonly twoPersonThresholdUnits: string;
+  /** The escrow hold's timeout, when the call's payment is held on chain. */
+  readonly holdEndsAt: Date | null;
+}
+
+const DEFAULT_VIEW_CONTEXT: CallDisputeViewContext = Object.freeze({
+  filingWindowMs: DEFAULT_CALL_DISPUTE_CONFIG.filingWindowMs,
+  twoPersonThresholdUnits: DEFAULT_CALL_DISPUTE_CONFIG.twoPersonThresholdUnits,
+  holdEndsAt: null,
+});
 
 /** What a decision needs from its caller — the operator side owns who may decide. */
 export interface CallDisputeDecisionInput {
@@ -177,7 +203,7 @@ export class CallDisputeService {
     });
     if (decided) throw DisputeErrors.alreadyDecided({ id: decided.id });
 
-    const snapshot = await this.snapshot(organizationId, intent, record, now);
+    const snapshot = await this.snapshot(organizationId, intent, record, now, settledAt);
     const actor = auditActorOf(session);
 
     const entity = new DisputeEntity();
@@ -269,14 +295,20 @@ export class CallDisputeService {
       throw error;
     }
 
-    await this.notify(intent.providerId, NotificationEvent.CALL_DISPUTE_OPENED, entity, {
-      title: 'A buyer disputed a call you served',
-      body:
-        `A buyer reported "${CALL_DISPUTE_REASON_LABEL[body.reason]}" on a call you served. ` +
-        'You may reply once before an operator decides.',
-    });
+    await this.notify(
+      intent.providerId,
+      'provider',
+      NotificationEvent.CALL_DISPUTE_OPENED,
+      entity,
+      {
+        title: 'A buyer disputed a call you served',
+        body:
+          `A buyer reported "${CALL_DISPUTE_REASON_LABEL[body.reason]}" on a call you served. ` +
+          'You may reply once before an operator decides.',
+      },
+    );
 
-    return toDetail(entity);
+    return this.detailOf(entity);
   }
 
   async listForBuyer(
@@ -288,11 +320,11 @@ export class CallDisputeService {
       .where('dispute.organizationId = :organizationId', { organizationId })
       .andWhere('dispute.intentId IS NOT NULL');
     this.applyFilters(qb, query);
-    return (await paginate(qb, query, CALL_DISPUTE_LIST)).map(toDto);
+    return this.pageOf(await paginate(qb, query, CALL_DISPUTE_LIST));
   }
 
   async getForBuyer(organizationId: string, id: string): Promise<CallDisputeDetailDto> {
-    return toDetail(await this.requireForBuyer(organizationId, id));
+    return this.detailOf(await this.requireForBuyer(organizationId, id));
   }
 
   async withdraw(session: McpSession, id: string): Promise<CallDisputeDto> {
@@ -326,7 +358,7 @@ export class CallDisputeService {
         after: { state: DisputeState.WITHDRAWN },
       });
     });
-    return toDto(await this.requireForBuyer(organizationId, id));
+    return this.viewOf(await this.requireForBuyer(organizationId, id));
   }
 
   // ── Provider ────────────────────────────────────────────────────────────
@@ -340,11 +372,11 @@ export class CallDisputeService {
       providerId,
     });
     this.applyFilters(qb, query);
-    return (await paginate(qb, query, CALL_DISPUTE_LIST)).map(toDto);
+    return this.pageOf(await paginate(qb, query, CALL_DISPUTE_LIST));
   }
 
   async getForProvider(providerId: string, id: string): Promise<CallDisputeDetailDto> {
-    return toDetail(await this.requireForProvider(providerId, id));
+    return this.detailOf(await this.requireForProvider(providerId, id));
   }
 
   /** The provider's one reply. Refused once it has replied, or once the dispute is closed. */
@@ -372,11 +404,17 @@ export class CallDisputeService {
         resourceId: id,
       });
     });
-    await this.notify(dispute.organizationId, NotificationEvent.CALL_DISPUTE_RESPONDED, dispute, {
-      title: 'The provider replied to your dispute',
-      body: 'The provider of a call you disputed has replied. An operator will decide.',
-    });
-    return toDetail(await this.requireForProvider(providerId, id));
+    await this.notify(
+      dispute.organizationId,
+      'buyer',
+      NotificationEvent.CALL_DISPUTE_RESPONDED,
+      dispute,
+      {
+        title: 'The provider replied to your dispute',
+        body: 'The provider of a call you disputed has replied. An operator will decide.',
+      },
+    );
+    return this.detailOf(await this.requireForProvider(providerId, id));
   }
 
   // ── Operator ────────────────────────────────────────────────────────────
@@ -419,7 +457,10 @@ export class CallDisputeService {
     for (const buyer of buyers) {
       histories.set(buyer, await this.buyerHistory(buyer, now));
     }
-    return page.map((row) => this.toOperatorRow(row, histories.get(row.organizationId)!));
+    const holds = await this.holdEndsOf(page.items);
+    return page.map((row) =>
+      this.toOperatorRow(row, histories.get(row.organizationId)!, holds.get(row.id) ?? null),
+    );
   }
 
   async buyerHistory(
@@ -439,7 +480,12 @@ export class CallDisputeService {
   }
 
   async operatorRow(dispute: DisputeEntity): Promise<OperatorCallDisputeRowDto> {
-    return this.toOperatorRow(dispute, await this.buyerHistory(dispute.organizationId));
+    const holds = await this.holdEndsOf([dispute]);
+    return this.toOperatorRow(
+      dispute,
+      await this.buyerHistory(dispute.organizationId),
+      holds.get(dispute.id) ?? null,
+    );
   }
 
   /** The call as it stands now, and what an upheld decision would do to it. */
@@ -667,18 +713,25 @@ export class CallDisputeService {
   async announceDecision(dispute: DisputeEntity): Promise<void> {
     const upheld = dispute.state === DisputeState.UPHELD;
     const refund = describeRefund(dispute.refundState);
-    await this.notify(dispute.organizationId, NotificationEvent.CALL_DISPUTE_DECIDED, dispute, {
-      title: upheld ? 'Your dispute was upheld' : 'Your dispute was rejected',
-      body: upheld
-        ? `Your dispute over a call was upheld. ${refund}`
-        : `Your dispute over a call was rejected.${
-            dispute.refundState === RefundState.REFUNDED
-              ? ' The call was refunded anyway: its provider was blocked.'
-              : ''
-          }`,
-    });
+    await this.notify(
+      dispute.organizationId,
+      'buyer',
+      NotificationEvent.CALL_DISPUTE_DECIDED,
+      dispute,
+      {
+        title: upheld ? 'Your dispute was upheld' : 'Your dispute was rejected',
+        body: upheld
+          ? `Your dispute over a call was upheld. ${refund}`
+          : `Your dispute over a call was rejected.${
+              dispute.refundState === RefundState.REFUNDED
+                ? ' The call was refunded anyway: its provider was blocked.'
+                : ''
+            }`,
+      },
+    );
     await this.notify(
       dispute.respondentProviderId as string,
+      'provider',
       NotificationEvent.CALL_DISPUTE_DECIDED,
       dispute,
       {
@@ -727,6 +780,7 @@ export class CallDisputeService {
     intent: PaymentIntentEntity,
     record: VerificationRecordEntity | null,
     now: Date,
+    settledAt: Date,
   ): Promise<Record<string, unknown>> {
     const max = this.config.snapshotMaxBytes;
     let request: unknown = record?.request ?? null;
@@ -767,6 +821,9 @@ export class CallDisputeService {
         assetId: intent.assetId,
         decimals: intent.decimals,
         createdAt: intent.createdAt.toISOString(),
+        // The instant the filing window was measured from (`file`), kept so
+        // every view states the same `filingClosesAt` the filing checked.
+        settledAt: settledAt.toISOString(),
       },
       verdict: record
         ? {
@@ -855,9 +912,10 @@ export class CallDisputeService {
   private toOperatorRow(
     dispute: DisputeEntity,
     history: BuyerDisputeHistoryDto,
+    holdEndsAt: Date | null,
   ): OperatorCallDisputeRowDto {
     return {
-      ...toDto(dispute),
+      ...toDto(dispute, this.viewContext(holdEndsAt)),
       buyerOrganizationId: dispute.organizationId,
       buyerHistory: history,
       needsSecondOperator: needsSecondOperator(
@@ -868,8 +926,63 @@ export class CallDisputeService {
     };
   }
 
+  // ── Views ──────────────────────────────────────────────────────────────
+
+  private viewContext(holdEndsAt: Date | null): CallDisputeViewContext {
+    return {
+      filingWindowMs: this.config.filingWindowMs,
+      twoPersonThresholdUnits: this.config.twoPersonThresholdUnits,
+      holdEndsAt,
+    };
+  }
+
+  private async viewOf(row: DisputeEntity): Promise<CallDisputeDto> {
+    const holds = await this.holdEndsOf([row]);
+    return toDto(row, this.viewContext(holds.get(row.id) ?? null));
+  }
+
+  private async detailOf(row: DisputeEntity): Promise<CallDisputeDetailDto> {
+    const holds = await this.holdEndsOf([row]);
+    return toDetail(row, this.viewContext(holds.get(row.id) ?? null));
+  }
+
+  private async pageOf(page: CursorPageDto<DisputeEntity>): Promise<CursorPageDto<CallDisputeDto>> {
+    const holds = await this.holdEndsOf(page.items);
+    return page.map((row) => toDto(row, this.viewContext(holds.get(row.id) ?? null)));
+  }
+
+  /**
+   * Per dispute, when its call's escrow hold times out — only while a rail-B
+   * payment is still HELD on chain (`collectable_at + HELD_TIMEOUT_SECONDS`).
+   * Rail A's withheld credit has no chain timeout. One query per page.
+   */
+  private async holdEndsOf(rows: readonly DisputeEntity[]): Promise<Map<string, Date>> {
+    const out = new Map<string, Date>();
+    const wanted = rows.filter((row) => row.intentId);
+    if (wanted.length === 0) return out;
+    const held = (await this.dataSource.query(
+      `SELECT "id", "organization_id" AS "organizationId", "collectable_at" AS "collectableAt"
+         FROM "payment_intents"
+        WHERE "id" = ANY($1::uuid[]) AND "rail" = 'RAIL_B_VOUCHER'
+          AND "held_status" = 'HELD' AND "collectable_at" IS NOT NULL`,
+      [wanted.map((row) => row.intentId)],
+    )) as { id: string; organizationId: string; collectableAt: Date }[];
+    const byIntent = new Map(held.map((row) => [`${row.organizationId}:${row.id}`, row]));
+    for (const row of wanted) {
+      const intent = byIntent.get(`${row.organizationId}:${row.intentId}`);
+      if (intent) {
+        out.set(
+          row.id,
+          new Date(new Date(intent.collectableAt).getTime() + CALL_DISPUTE_HOLD_TIMEOUT_MS),
+        );
+      }
+    }
+    return out;
+  }
+
   private async notify(
     organizationId: string,
+    role: CallDisputeRole,
     event: NotificationEvent,
     dispute: DisputeEntity,
     message: { title: string; body: string },
@@ -882,12 +995,13 @@ export class CallDisputeService {
         body: message.body,
         subjectType: CALL_DISPUTE_TARGET,
         subjectId: dispute.id,
-        dedupeKey: `${event}:${dispute.id}:${organizationId}`,
+        dedupeKey: `${event}:${dispute.id}:${organizationId}:${role}`,
         payload: {
           disputeId: dispute.id,
           intentId: dispute.intentId,
           state: dispute.state,
           refundState: dispute.refundState,
+          role,
         },
       });
     } catch (error) {
@@ -904,7 +1018,64 @@ export function disputedAmountOf(dispute: DisputeEntity): string {
   return typeof call.amount === 'string' && /^\d+$/.test(call.amount) ? call.amount : '0';
 }
 
-export function toDto(row: DisputeEntity): CallDisputeDto {
+/**
+ * The SLA instants of one dispute, from the constants the SLA sweep acts on
+ * (`CALL_DISPUTE_SLA`) and the configured dials. Pure.
+ */
+export function slaTimesOf(
+  row: DisputeEntity,
+  context: CallDisputeViewContext = DEFAULT_VIEW_CONTEXT,
+): Pick<
+  CallDisputeDto,
+  'replyDueAt' | 'pageAt' | 'decisionDueAt' | 'autoUpholdAt' | 'holdEndsAt' | 'filingClosesAt'
+> {
+  const filed = row.createdAt.getTime();
+  const open = row.state === DisputeState.OPEN;
+  const autoUpholdable =
+    open &&
+    row.providerResponse === null &&
+    (row.refundGuaranteed ?? false) &&
+    row.refundState !== RefundState.REFUNDED &&
+    !needsSecondOperator(disputedAmountOf(row), row.decimals ?? 6, context.twoPersonThresholdUnits);
+  const settledAt = settledAtOf(row);
+  const holdMatters =
+    open || (row.state === DisputeState.UPHELD && row.refundState === RefundState.PENDING);
+  return {
+    replyDueAt: new Date(filed + CALL_DISPUTE_SLA.providerReplyMs),
+    pageAt: new Date(filed + CALL_DISPUTE_SLA.pageMs),
+    decisionDueAt: new Date(filed + CALL_DISPUTE_SLA.decideMs),
+    autoUpholdAt: autoUpholdable ? new Date(filed + CALL_DISPUTE_SLA.decideMs) : null,
+    holdEndsAt: holdMatters ? context.holdEndsAt : null,
+    filingClosesAt: settledAt ? new Date(settledAt.getTime() + context.filingWindowMs) : null,
+  };
+}
+
+/**
+ * When the disputed call settled, as `file` measured it: the snapshot's
+ * `call.settledAt`. Snapshots taken before it was stored fall back to the
+ * verdict's settlement, then the call's creation.
+ */
+function settledAtOf(row: DisputeEntity): Date | null {
+  const snapshot = row.evidenceSnapshot ?? {};
+  const verdict = (snapshot.verdict ?? null) as { settledAt?: unknown } | null;
+  const call = (snapshot.call ?? {}) as { createdAt?: unknown; settledAt?: unknown };
+  const text =
+    typeof call.settledAt === 'string'
+      ? call.settledAt
+      : typeof verdict?.settledAt === 'string'
+        ? verdict.settledAt
+        : typeof call.createdAt === 'string'
+          ? call.createdAt
+          : null;
+  if (!text) return null;
+  const at = new Date(text);
+  return Number.isNaN(at.getTime()) ? null : at;
+}
+
+export function toDto(
+  row: DisputeEntity,
+  context: CallDisputeViewContext = DEFAULT_VIEW_CONTEXT,
+): CallDisputeDto {
   return {
     id: row.id,
     state: row.state as DisputeState,
@@ -928,16 +1099,20 @@ export function toDto(row: DisputeEntity): CallDisputeDto {
     canRespond:
       row.state === DisputeState.OPEN &&
       row.providerResponse === null &&
-      Date.now() - row.createdAt.getTime() < PROVIDER_REPLY_HOURS * 3_600_000,
+      Date.now() - row.createdAt.getTime() < CALL_DISPUTE_SLA.providerReplyMs,
     refundGuaranteed: row.refundGuaranteed ?? false,
     refundNotice: refundNoticeOf(row.refundGuaranteed ?? false),
+    ...slaTimesOf(row, context),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
 }
 
-export function toDetail(row: DisputeEntity): CallDisputeDetailDto {
-  return { ...toDto(row), evidence: row.evidenceSnapshot ?? {} };
+export function toDetail(
+  row: DisputeEntity,
+  context: CallDisputeViewContext = DEFAULT_VIEW_CONTEXT,
+): CallDisputeDetailDto {
+  return { ...toDto(row, context), evidence: row.evidenceSnapshot ?? {} };
 }
 
 function money(
