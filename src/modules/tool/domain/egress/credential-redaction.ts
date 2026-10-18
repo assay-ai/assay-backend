@@ -22,10 +22,17 @@ import { JsonValue } from '../mapping/mapping.types';
  *
  * - **A canonical view of the text**, built in one pass with a map back to the
  *   original offsets: `%xx` (either case) decoded, HTML entities decoded
- *   (`&amp; &lt; &gt; &quot; &apos;`, `&#nn;`, `&#xhh;`), JSON escapes decoded
- *   (`\" \\ \/ \b \f \n \r \t \uXXXX`), ASCII lower-cased and `+` folded to a
- *   space (form encoding). Each needle is searched there both as written and
- *   decoded, folded the same way. Encodings may be mixed per character.
+ *   (`&amp; &lt; &gt; &quot; &apos;`, `&#nn;`, `&#xhh;`, any leading zeros),
+ *   JSON escapes decoded (`\" \\ \/ \b \f \n \r \t \uXXXX`, letters in either
+ *   case), ASCII lower-cased and `+` folded to a space (form encoding).
+ *   Encodings may be mixed per character.
+ * - **Each echo form as its own needle**: the value as sent, upper- and
+ *   lower-cased, JSON-escaped, Go-JSON-escaped (`\u003c`), HTML-escaped,
+ *   percent-encoded (either hex case) and form-encoded, each put through the
+ *   same canonicaliser as the text. A value that itself contains `%41`, `\t`
+ *   or `&amp;` canonicalises differently as sent and as encoded, so one
+ *   decoded form is not enough. Out of scope: two encodings stacked (the HTML
+ *   escape of a JSON escape, …).
  * - **Base64**, standard and url-safe, with or without padding, at all three
  *   byte alignments (a value inside a larger blob such as `Basic
  *   base64(user:value)` encodes differently at each offset), searched
@@ -39,7 +46,8 @@ import { JsonValue } from '../mapping/mapping.types';
  *   `user:pass` and the password. Never the user name alone: it is not a
  *   secret and is usually an ordinary word.
  * - **Values, not keys**: in a JSON body only string values are rewritten.
- *   Rewriting keys could merge two keys into one and change the data.
+ *   Rewriting keys could merge two keys into one and change the data, so a
+ *   key that holds a credential fails the whole response closed instead.
  *
  * **Needles shorter than {@link MIN_REDACTED_LENGTH} characters are not
  * redacted.** A short needle would match ordinary text (a scheme word, a
@@ -54,7 +62,9 @@ import { JsonValue } from '../mapping/mapping.types';
  * linear in the text plus the needles, whatever their content.
  *
  * On top of that there is a hard budget per response: any one string longer
- * than {@link MAX_REDACTABLE_CHARS}, or a scan running past the time budget,
+ * than {@link MAX_REDACTABLE_CHARS}, a scan running past the time budget
+ * ({@link REDACTION_BUDGET_MS} plus {@link REDACTION_BUDGET_MS_PER_MIB} per MiB
+ * scanned), or a JSON key holding a credential
  * **fails closed** — every header value and the body become
  * {@link REDACTED}, the internal note header {@link REDACTION_NOTE_HEADER} is
  * set, and the response carries a `PLATFORM_UNAVAILABLE` transport error with
@@ -69,8 +79,11 @@ export const MIN_REDACTED_LENGTH = 8;
 /** Longest single string scanned; above it the response fails closed. */
 export const MAX_REDACTABLE_CHARS = 5 * 1024 * 1024;
 
-/** Time budget per response, in ms; past it the response fails closed. */
+/** Base time budget per response, in ms; past it the response fails closed. */
 export const REDACTION_BUDGET_MS = 250;
+
+/** Added to the budget per MiB of text scanned (≈550 ms in all at the 5 MiB cap). */
+export const REDACTION_BUDGET_MS_PER_MIB = 60;
 
 /** Internal note on a fail-closed response. Never sent anywhere. */
 export const REDACTION_NOTE_HEADER = 'x-assay-redaction';
@@ -79,19 +92,22 @@ export const REDACTION_NOTE_HEADER = 'x-assay-redaction';
 export const REDACTION_FAILED_DETAIL = 'response redaction exceeded its budget';
 
 export interface RedactorOptions {
-  /** Defaults to {@link REDACTION_BUDGET_MS}. */
+  /** Base budget; defaults to {@link REDACTION_BUDGET_MS}. Scales with the text, see there. */
   readonly budgetMs?: number;
-  /** Clock, for tests. */
+  /** Clock in ms; `performance.now` by default. For tests. */
   readonly now?: () => number;
 }
 
 /** How often (in characters) a scan checks the clock. */
 const CLOCK_STRIDE = 1 << 16;
 
-class BudgetExceeded extends Error {}
+/** Thrown inside a scan to give up on the whole response; see "failing closed". */
+class FailClosed extends Error {}
+
+const MIB = 1024 * 1024;
 
 class Budget {
-  private readonly deadline: number;
+  private deadline: number;
 
   constructor(
     private readonly now: () => number,
@@ -100,8 +116,13 @@ class Budget {
     this.deadline = now() + budgetMs;
   }
 
+  /** Extends the deadline for `chars` more characters of text to scan. */
+  allow(chars: number): void {
+    this.deadline += (chars / MIB) * REDACTION_BUDGET_MS_PER_MIB;
+  }
+
   check(): void {
-    if (this.now() > this.deadline) throw new BudgetExceeded();
+    if (this.now() > this.deadline) throw new FailClosed();
   }
 }
 
@@ -118,14 +139,19 @@ export class CredentialRedactor {
     const canonicalForms = new Set<string>();
     const base64Forms = new Set<string>();
     for (const needle of needles) {
-      canonicalForms.add(fold(needle));
-      canonicalForms.add(codesToString(decode(needle).codes));
+      // Every echo form, put through the same canonicaliser as the text: a
+      // value that itself contains `%41`, `\t` or `&amp;` canonicalises
+      // differently as sent and as encoded, so each encoding is its own needle.
+      for (const encode of ECHO_ENCODERS) {
+        const form = codesToString(decode(encode(needle)).codes);
+        if (form.length >= MIN_REDACTED_LENGTH) canonicalForms.add(form);
+      }
       for (const core of base64Cores(needle)) base64Forms.add(core);
     }
     this.canonical = Automaton.of(canonicalForms);
     this.base64 = Automaton.of(base64Forms);
     this.budgetMs = options.budgetMs ?? REDACTION_BUDGET_MS;
-    this.now = options.now ?? Date.now;
+    this.now = options.now ?? (() => performance.now());
   }
 
   private static none: CredentialRedactor | undefined;
@@ -146,7 +172,7 @@ export class CredentialRedactor {
     try {
       return this.redact(value, this.budget());
     } catch (error) {
-      if (error instanceof BudgetExceeded) return REDACTED;
+      if (error instanceof FailClosed) return REDACTED;
       throw error;
     }
   }
@@ -157,7 +183,7 @@ export class CredentialRedactor {
     try {
       return this.redactJson(value, this.budget());
     } catch (error) {
-      if (error instanceof BudgetExceeded) return REDACTED;
+      if (error instanceof FailClosed) return REDACTED;
       throw error;
     }
   }
@@ -184,7 +210,7 @@ export class CredentialRedactor {
           : {}),
       };
     } catch (error) {
-      if (error instanceof BudgetExceeded) return failClosed(response);
+      if (error instanceof FailClosed) return failClosed(response);
       throw error;
     }
   }
@@ -194,30 +220,42 @@ export class CredentialRedactor {
   }
 
   private redact(text: string, budget: Budget): string {
-    if (text.length > MAX_REDACTABLE_CHARS) throw new BudgetExceeded();
+    if (text.length > MAX_REDACTABLE_CHARS) throw new FailClosed();
+    budget.allow(text.length);
     budget.check();
-    const ranges: Array<[number, number]> = [];
+    // Each pass reports matches in order of their end, so merging as they
+    // arrive keeps only disjoint ranges: memory stays bounded by the text.
+    const canonical = new RangeSet();
     if (this.canonical) {
       const view = decode(text);
       this.canonical.scan(view.codes, view.codes.length, budget, (start, end) => {
-        ranges.push([view.starts[start], view.starts[end]]);
+        canonical.add(view.starts[start], view.starts[end]);
       });
     }
+    const base64 = new RangeSet();
     if (this.base64) {
       this.base64.scanText(text, budget, (start, end) => {
-        ranges.push(widenBase64(text, start, end));
+        const [from, to] = widenBase64(text, start, end);
+        base64.add(from, to);
       });
     }
     budget.check();
-    return replaceRanges(text, ranges);
+    return replaceRanges(text, RangeSet.union(canonical, base64));
   }
 
+  /**
+   * String values rewritten. Keys are never rewritten (that could merge two
+   * keys); a key that holds a credential fails the whole response closed.
+   */
   private redactJson(value: JsonValue, budget: Budget): JsonValue {
     if (typeof value === 'string') return this.redact(value, budget);
     if (Array.isArray(value)) return value.map((item) => this.redactJson(item, budget));
     if (value !== null && typeof value === 'object') {
       return Object.fromEntries(
-        Object.entries(value).map(([key, item]) => [key, this.redactJson(item, budget)]),
+        Object.entries(value).map(([key, item]) => {
+          if (this.redact(key, budget) !== key) throw new FailClosed();
+          return [key, this.redactJson(item, budget)];
+        }),
       );
     }
     return value;
@@ -300,6 +338,7 @@ const NAMED_ENTITIES: ReadonlyArray<readonly [string, number]> = [
   ['apos;', 0x27],
 ];
 
+/** JSON escape letters, matched case-insensitively (an upper-cased echo of `\t` is `\T`). */
 const JSON_ESCAPES: Readonly<Record<string, number>> = {
   '"': 0x22,
   '\\': 0x5c,
@@ -309,19 +348,43 @@ const JSON_ESCAPES: Readonly<Record<string, number>> = {
   n: 0x0a,
   r: 0x0d,
   t: 0x09,
+  B: 0x08,
+  F: 0x0c,
+  N: 0x0a,
+  R: 0x0d,
+  T: 0x09,
 };
+
+/**
+ * How a provider may echo a value back. Each is put through the canonicaliser
+ * to become a needle. Out of scope: two encodings stacked (HTML of JSON, …).
+ */
+const ECHO_ENCODERS: ReadonlyArray<(value: string) => string> = [
+  (value) => value,
+  (value) => value.toUpperCase(),
+  (value) => value.toLowerCase(),
+  (value) => JSON.stringify(value).slice(1, -1),
+  (value) =>
+    JSON.stringify(value)
+      .slice(1, -1)
+      .replace(/[<>&]/g, (c) => `\\u${c.charCodeAt(0).toString(16).padStart(4, '0')}`),
+  (value) =>
+    value
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;')
+      .replace(/"/g, '&quot;')
+      .replace(/'/g, '&#39;'),
+  (value) => encodeURIComponent(value),
+  (value) => encodeURIComponent(value).replace(/%[0-9A-F]{2}/g, (m) => m.toLowerCase()),
+  (value) => new URLSearchParams({ v: value }).toString().slice(2),
+];
 
 /** Lower-case ASCII and `+` → space: the case- and form-insensitivity of the canonical view. */
 function foldCode(code: number): number {
   if (code >= 0x41 && code <= 0x5a) return code + 0x20;
   if (code === 0x2b) return 0x20;
   return code;
-}
-
-function fold(text: string): string {
-  let out = '';
-  for (let i = 0; i < text.length; i += 1) out += String.fromCharCode(foldCode(text.charCodeAt(i)));
-  return out;
 }
 
 function codesToString(codes: Uint16Array): string {
@@ -401,9 +464,12 @@ function decodeAt(text: string, i: number): [number, number] {
 function decodeEntity(text: string, i: number): [number, number] | null {
   if (text.charCodeAt(i + 1) === 0x23 /* # */) {
     const hex = text[i + 2] === 'x' || text[i + 2] === 'X';
-    const from = hex ? i + 3 : i + 2;
+    let from = hex ? i + 3 : i + 2;
+    // Leading zeros are skipped whatever their number (`&#0000000115;`). Still
+    // linear: a run of zeros follows at most one `&`.
+    while (text.charCodeAt(from) === 0x30 && hexValue(text.charCodeAt(from + 1)) >= 0) from += 1;
     let end = from;
-    // Bounded: at most 8 digits (leading zeros included), then `;`.
+    // Then at most 8 significant digits, then `;`.
     while (end < text.length && end - from < 8 && hexValue(text.charCodeAt(end)) >= 0) end += 1;
     if (end === from || text.charCodeAt(end) !== 0x3b /* ; */) return null;
     const value = digits(text, from, end - from, hex ? 16 : 10);
@@ -594,22 +660,45 @@ class Automaton {
   }
 }
 
-/** `text` with the union of `ranges` replaced, one {@link REDACTED} per merged run. */
-function replaceRanges(text: string, ranges: Array<[number, number]>): string {
+/**
+ * Disjoint ranges, sorted. Fed ranges in non-decreasing order of their end
+ * (as a scan finds them), each `add` folds into the ranges it touches.
+ */
+class RangeSet {
+  readonly ranges: Array<[number, number]> = [];
+
+  add(start: number, end: number): void {
+    let from = start;
+    let to = end;
+    while (this.ranges.length > 0 && from <= this.ranges[this.ranges.length - 1][1]) {
+      const [lastFrom, lastTo] = this.ranges.pop() as [number, number];
+      from = Math.min(from, lastFrom);
+      to = Math.max(to, lastTo);
+    }
+    this.ranges.push([from, to]);
+  }
+
+  /** The union of two sets, merged. */
+  static union(a: RangeSet, b: RangeSet): Array<[number, number]> {
+    const all = [...a.ranges, ...b.ranges].sort((x, y) => x[0] - y[0]);
+    const out: Array<[number, number]> = [];
+    for (const [from, to] of all) {
+      const last = out[out.length - 1];
+      if (last && from <= last[1]) last[1] = Math.max(last[1], to);
+      else out.push([from, to]);
+    }
+    return out;
+  }
+}
+
+/** `text` with each of the disjoint, sorted `ranges` replaced by one {@link REDACTED}. */
+function replaceRanges(text: string, ranges: ReadonlyArray<[number, number]>): string {
   if (ranges.length === 0) return text;
-  ranges.sort((a, b) => a[0] - b[0]);
   let out = '';
   let from = 0;
-  let [start, end] = ranges[0];
-  for (let k = 1; k <= ranges.length; k += 1) {
-    const next = ranges[k];
-    if (next && next[0] <= end) {
-      end = Math.max(end, next[1]);
-      continue;
-    }
+  for (const [start, end] of ranges) {
     out += text.slice(from, start) + REDACTED;
     from = end;
-    if (next) [start, end] = next;
   }
   return out + text.slice(from);
 }
