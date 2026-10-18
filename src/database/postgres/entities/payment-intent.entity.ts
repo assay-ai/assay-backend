@@ -323,4 +323,44 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   /** Verification verdict. */
   @Column({ name: 'verification_verdict', type: 'varchar', length: 32, nullable: true })
   verificationVerdict: string | null;
+
+  /**
+   * A buyer's dispute over this call (G3.B1): `OPEN` while a guaranteed
+   * dispute keeps the hold from being collected, then `UPHELD` | `REJECTED`.
+   * The quality stats count an upheld call as a failed one.
+   */
+  @Column({ name: 'dispute_outcome', type: 'varchar', length: 16, nullable: true })
+  disputeOutcome: string | null;
+
+  /**
+   * The dispute hold ("redeem into hold", G3.B1): `HELD` | `COLLECTED` |
+   * `REFUNDED`. Rail B mirrors the escrow's `held[payer][seq]`; rail A is the
+   * provider's ledger credit withheld for the hold window. Null: no hold (a
+   * call not yet redeemed, or collected the old way).
+   */
+  @Column({ name: 'held_status', type: 'varchar', length: 12, nullable: true })
+  heldStatus: string | null;
+
+  /** When the payment went into the hold (the redemption, or rail A's settlement). */
+  @Column({ name: 'held_at', type: 'timestamptz', nullable: true })
+  heldAt: Date | null;
+
+  /** When the hold may be collected (`PaymentHeld.collectableAt`; rail A: + the window). */
+  @Column({ name: 'collectable_at', type: 'timestamptz', nullable: true })
+  collectableAt: Date | null;
+
+  /** The collect or refund transaction (rail B). */
+  @Column({ name: 'held_tx_ref', type: 'text', nullable: true })
+  heldTxRef: string | null;
+
+  /** Failed collect or refund attempts on the held payment (back-off). */
+  @Column({ name: 'held_attempts', type: 'int', default: 0 })
+  heldAttempts: number;
+
+  /** Not retried before this instant. */
+  @Column({ name: 'held_retry_at', type: 'timestamptz', nullable: true })
+  heldRetryAt: Date | null;
+
+  @Column({ name: 'held_last_error', type: 'text', nullable: true })
+  heldLastError: string | null;
 }

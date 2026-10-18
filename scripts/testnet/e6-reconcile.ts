@@ -169,7 +169,6 @@ async function run(phase: string): Promise<E6Result> {
       intent.id,
       hash as TxRef,
     );
-    await ledger.flush();
     if (settled.status !== 'SETTLED') {
       return {
         outcome: 'FAILED',
@@ -194,7 +193,6 @@ async function run(phase: string): Promise<E6Result> {
     const deadline = Date.now() + FINALITY_TIMEOUT_MS;
     for (;;) {
       const summary = await finality.promotePendingDeposits(50);
-      await ledger.flush();
       console.log(`  finality pass: ${json(summary)}`);
       if (summary.rejected > 0) {
         return {

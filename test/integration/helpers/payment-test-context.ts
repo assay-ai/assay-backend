@@ -1,3 +1,4 @@
+import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -28,9 +29,11 @@ import { CreateVerificationRecords1755800000000 } from '@database/postgres/migra
 import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migrations/1755900000000-timestamptz-timestamps';
 import { CreateApiSurfaceTables1756000000000 } from '@database/postgres/migrations/1756000000000-create-api-surface-tables';
 import { CreateProviderRegistrationTables1756600000000 } from '@database/postgres/migrations/1756600000000-create-provider-registration-tables';
+import { DropConnectivityEgressIps1762000000000 } from '@database/postgres/migrations/1762000000000-drop-connectivity-egress-ips';
 import { ProviderEarningsAndPayouts1756700000000 } from '@database/postgres/migrations/1756700000000-provider-earnings-and-payouts';
 import { CallIdAndCallClass1756800000000 } from '@database/postgres/migrations/1756800000000-call-id-and-call-class';
 import { CreateToolBindingTables1756900000000 } from '@database/postgres/migrations/1756900000000-create-tool-binding-tables';
+import { ToolBindingAuthMode1762000000002 } from '@database/postgres/migrations/1762000000002-tool-binding-auth-mode';
 import { BindingTrafficControls1757200000000 } from '@database/postgres/migrations/1757200000000-binding-traffic-controls';
 import { NotificationsLimitsAndFreeTier1757500000000 } from '@database/postgres/migrations/1757500000000-notifications-limits-and-free-tier';
 import { SettledIntentsNamePayee1758100000000 } from '@database/postgres/migrations/1758100000000-settled-intents-name-payee';
@@ -47,7 +50,6 @@ import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service'
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import {
   CreatePaymentIntentInput,
   PaymentIntent,
@@ -63,6 +65,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
   uuidFromLabel,
   BuyerEscrowAccountColumnsSlice1759300000000,
@@ -167,6 +170,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // The earnings-ledger migration adds a column to `providers`, so its own table has to exist.
       CreateApiSurfaceTables1756000000000,
       CreateProviderRegistrationTables1756600000000,
+      DropConnectivityEgressIps1762000000000,
       // The partial unique index behind `commitHoldAndCredit`'s
       // idempotency. `PaymentIntentService.resolve()` now takes that path on
       // the COMMIT edge, so a context that omits this migration would exercise
@@ -221,6 +225,9 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // The idempotency index narrowed to live intents (G2.1): a voided,
       // expired or refunded intent releases its key.
       IdempotencyKeyLiveIntents1761000000000,
+      // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
+      PaymentIntentDisputeHold1761800000000,
+      ToolBindingAuthMode1762000000002,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',
@@ -228,6 +235,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   // Idempotent — the migrations table makes a second run a no-op. Nothing is
   // truncated between tests: `ledger_entries` refuses DELETE and TRUNCATE by
   // design, and a fresh `organizationId` per test isolates better than a
@@ -245,12 +253,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
   );
   const balances = new LedgerBalanceService(balanceRepository, journal);
   const holds = new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource);
-  const ledger = new LedgerService(
-    journal,
-    new LedgerWriterService(journal, dataSource),
-    balances,
-    holds,
-  );
+  const ledger = new LedgerService(journal, balances, holds);
 
   const repository = new PaymentIntentRepository(dataSource);
   const intents = new PaymentIntentService(repository, ledger, DISABLED_ESCROW_GATE, noBlocks());

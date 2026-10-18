@@ -74,9 +74,28 @@ describe('tool version migrations: up, down, up', () => {
     'tools.replacement_tool_id',
   ];
 
+  /** Migrations after the T3 ones, newest first. */
+  const LATER = [
+    'CreateVaultKekChecks1762000000003',
+    'ToolBindingAuthMode1762000000002',
+    'CreateBindingCredentials1762000000001',
+    'DropConnectivityEgressIps1762000000000',
+    'CallDisputes1761800000002',
+    'VerificationRecordDisputeOutcome1761800000001',
+    'PaymentIntentDisputeHold1761800000000',
+  ];
+
   it('applies, reverts the three T3 migrations, and applies them again', async () => {
     await dataSource.runMigrations({ transaction: 'each' });
     expect(await columns()).toEqual(ALL);
+    // Later migrations sit on top of these and touch none of their objects.
+    for (const name of LATER) {
+      const [last] = (await dataSource.query(
+        `SELECT name FROM migrations ORDER BY id DESC LIMIT 1`,
+      )) as { name: string }[];
+      expect(last.name).toBe(name);
+      await dataSource.undoLastMigration({ transaction: 'each' });
+    }
 
     // Migrations newer than T3's come off first, newest first.
     const later = (await dataSource.query(
@@ -87,7 +106,7 @@ describe('tool version migrations: up, down, up', () => {
     }
 
     const applied = (await dataSource.query(
-      `SELECT name FROM migrations ORDER BY id DESC LIMIT 3`,
+      `SELECT name FROM migrations WHERE name IN ('BindingContractTerms1761500000001', 'ToolDraftIntegrity1761600000000', 'ToolVersions1761500000000')`,
     )) as { name: string }[];
     expect(applied.map((row) => row.name).sort()).toEqual([
       'BindingContractTerms1761500000001',
@@ -95,9 +114,14 @@ describe('tool version migrations: up, down, up', () => {
       'ToolVersions1761500000000',
     ]);
 
-    await dataSource.undoLastMigration({ transaction: 'each' });
-    await dataSource.undoLastMigration({ transaction: 'each' });
-    await dataSource.undoLastMigration({ transaction: 'each' });
+    // Back to before ToolVersions, however many migrations came after it.
+    for (;;) {
+      const [last] = (await dataSource.query(
+        `SELECT name FROM migrations ORDER BY timestamp DESC, id DESC LIMIT 1`,
+      )) as { name: string }[];
+      await dataSource.undoLastMigration({ transaction: 'each' });
+      if (last?.name === 'ToolVersions1761500000000') break;
+    }
     expect(await columns()).toEqual([]);
 
     await dataSource.runMigrations({ transaction: 'each' });

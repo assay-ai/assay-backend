@@ -1936,6 +1936,12 @@ function notServedMessage(
       `unchanged: check the arguments.`
     );
   }
+  if (classification.reason === ClassificationReason.PLATFORM_UNAVAILABLE) {
+    return (
+      `${toolName} was not served: Assay could not prepare the call (${evidence}). ` +
+      `This is the platform's fault, not the provider's. Nothing was charged; a retry may succeed.`
+    );
+  }
   return (
     `${toolName} was not served: the provider failed (${evidence}). ` +
     `Nothing was charged; a retry may succeed.`
@@ -1953,6 +1959,7 @@ export function faultOf(classification: { reason: string }): string {
     case ClassificationReason.MAPPING_FAULT_AGENT:
       return 'AGENT';
     case ClassificationReason.MAPPING_FAULT_PLATFORM:
+    case ClassificationReason.PLATFORM_UNAVAILABLE:
       return 'PLATFORM';
     case ClassificationReason.REQUEST_REJECTED:
       return 'UNDETERMINED';

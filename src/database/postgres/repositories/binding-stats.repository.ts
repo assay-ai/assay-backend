@@ -72,6 +72,13 @@ export class BindingStatsRepository extends AbstractRepository<BindingStatsEntit
    * promoted); self-calls, where the buying organization is the provider; and
    * intents that never named a binding or a provider.
    *
+   * A call whose buyer dispute was upheld (`payment_intents.dispute_outcome =
+   * 'UPHELD'`, G3.B1) counts as a quality sample that did not pass, whatever
+   * its verdict said — an unverified call included. It sits inside the same
+   * per-buyer cap as every other verdict, so one buyer's upheld disputes move
+   * a binding by at most `maxPerBuyer` samples. A rejected dispute changes
+   * nothing.
+   *
    * The scan is bounded by `idx_verification_records_judged_created` (the
    * last 7 days of judged records); the ranking bounds each binding to its
    * last `windowSize`.
@@ -81,20 +88,23 @@ export class BindingStatsRepository extends AbstractRepository<BindingStatsEntit
       `SELECT v.binding_id AS "bindingId",
               v.provider_id AS "providerId",
               count(*)::int AS "verdicts",
-              count(*) FILTER (WHERE v.verdict_status = $4)::int AS "passedVerdicts"
+              count(*) FILTER (
+                WHERE v.verdict_status = $4 AND v.dispute_outcome IS DISTINCT FROM 'UPHELD'
+              )::int AS "passedVerdicts"
          FROM (
            SELECT c.*,
                   row_number() OVER (PARTITION BY c.binding_id
                                      ORDER BY c.created_at DESC, c.id DESC) AS rn
              FROM (
                SELECT r.id, r.created_at, i.binding_id, i.provider_id, r.verdict_status,
+                      i.dispute_outcome,
                       row_number() OVER (PARTITION BY i.binding_id, r.organization_id
                                          ORDER BY r.created_at DESC, r.id DESC) AS rb
                  FROM verification_records r
                  JOIN payment_intents i ON i.id = r.intent_id
                 WHERE r.state IN ('JUDGED', 'SETTLED')
                   AND r.created_at >= $1
-                  AND r.verdict_status = ANY($3)
+                  AND (r.verdict_status = ANY($3) OR i.dispute_outcome = 'UPHELD')
                   AND (r.lifecycle IS NULL OR r.lifecycle <> 'SHADOW')
                   AND i.binding_id IS NOT NULL
                   AND i.provider_id IS NOT NULL

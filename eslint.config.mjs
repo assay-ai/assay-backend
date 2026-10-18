@@ -238,6 +238,7 @@ export default tseslint.config(
       '*.js',
       '*.mjs',
       'scripts/**',
+      'workers/**',
       '.yarn/**',
       'build/**',
     ],

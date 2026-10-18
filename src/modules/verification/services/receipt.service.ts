@@ -1,3 +1,4 @@
+import { disputeWindowEndOf } from '@modules/payment/constants/collection-hold.constants';
 import { Injectable } from '@nestjs/common';
 
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
@@ -117,6 +118,8 @@ export class ReceiptService {
       expiresAt: intent.expiresAt,
       updatedAt: intent.updatedAt,
       holdReleasedAt: intent.holdReleasedAt,
+      collectableAt: intent.collectableAt ?? null,
+      disputeWindowEndsAt: disputeWindowEndOf(intent.collectableAt),
       evaluatedAt: record?.evaluatedAt ?? null,
       settledAt: record?.settledAt ?? null,
     };

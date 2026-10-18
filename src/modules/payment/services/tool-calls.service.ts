@@ -1,3 +1,4 @@
+import { disputeWindowEndOf } from '../constants/collection-hold.constants';
 import { Injectable } from '@nestjs/common';
 import { In } from 'typeorm';
 
@@ -186,6 +187,8 @@ export class ToolCallsService {
       charged: toMoneyDto(chargedPrice),
       forfeited: settled && collectionStateOf(intent) === CollectionState.PROVIDER_FORFEITED,
       debt: settled ? debtStateOf(intent) : null,
+      collectableAt: intent.collectableAt ?? null,
+      disputeWindowEndsAt: disputeWindowEndOf(intent.collectableAt),
       verdict,
       createdAt: intent.createdAt,
     };

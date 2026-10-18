@@ -1,6 +1,6 @@
 import { createHash } from 'node:crypto';
 import { Client } from 'pg';
-import { MigrationInterface, QueryRunner } from 'typeorm';
+import { DataSource, MigrationInterface, QueryRunner } from 'typeorm';
 
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AssetId } from '@modules/chains/ports/caip.types';
@@ -106,5 +106,67 @@ export class BuyerEscrowAccountColumnsSlice1759300000000 implements MigrationInt
 
   public async down(): Promise<void> {
     // Test databases are dropped, never rolled back.
+  }
+}
+
+/**
+ * Rebuilds the schema of a test database whose migrations changed after it was
+ * built. The migrations table records a migration by name, so a migration that
+ * is edited in place (or swapped for another branch's version of it) is
+ * skipped as "already applied" and the database keeps the old shape. The
+ * fingerprint of every migration's source is stored beside the schema; a
+ * mismatch drops and recreates the `public` schema. Call it right after
+ * `initialize()` and before `runMigrations()`, only on a database the suite owns.
+ */
+export async function resetSchemaIfMigrationsChanged(dataSource: DataSource): Promise<void> {
+  const [{ name }] = (await dataSource.query('SELECT current_database() AS name')) as {
+    name: string;
+  }[];
+  assertSafeToResetSchema(name, testConnectionOptions().host, process.env);
+
+  const hash = createHash('sha256');
+  for (const migration of dataSource.migrations) {
+    hash.update(migration.name ?? migration.constructor.name);
+    hash.update(migration.up.toString());
+    hash.update(migration.down?.toString() ?? '');
+  }
+  const fingerprint = hash.digest('hex');
+
+  await dataSource.query(
+    'CREATE TABLE IF NOT EXISTS "test_schema_fingerprint" (fingerprint text NOT NULL)',
+  );
+  const rows = (await dataSource.query('SELECT fingerprint FROM "test_schema_fingerprint"')) as {
+    fingerprint: string;
+  }[];
+  if (rows.length === 1 && rows[0].fingerprint === fingerprint) return;
+
+  await dataSource.query('DROP SCHEMA public CASCADE');
+  await dataSource.query('CREATE SCHEMA public');
+  await dataSource.query('CREATE TABLE "test_schema_fingerprint" (fingerprint text NOT NULL)');
+  await dataSource.query('INSERT INTO "test_schema_fingerprint" (fingerprint) VALUES ($1)', [
+    fingerprint,
+  ]);
+}
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+/**
+ * Refuses to let a schema reset near a database that is not clearly a test one:
+ * the name must end in `_test`, and the server must be local unless
+ * `ALLOW_TEST_SCHEMA_RESET=1` says otherwise. Database names come from env vars
+ * (`BINDING_TEST_DATABASE` and friends), so a typo must not reach a real one.
+ */
+export function assertSafeToResetSchema(
+  database: string,
+  host: string,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (!/_test$/.test(database)) {
+    throw new Error(`Refusing to reset schema of "${database}": the name must end in "_test"`);
+  }
+  if (!LOCAL_HOSTS.has(host) && env.ALLOW_TEST_SCHEMA_RESET !== '1') {
+    throw new Error(
+      `Refusing to reset schema on non-local host "${host}" without ALLOW_TEST_SCHEMA_RESET=1`,
+    );
   }
 }

@@ -1785,8 +1785,7 @@ async function runStep2(ctx: SuiteContext): Promise<string> {
 
   return (
     `endpoint=${result.endpoint} outcome=${result.outcome} saved=${result.saved} ` +
-    `status=${result.statusCode ?? 'none'} latencyMs=${result.latencyMs ?? 'none'} ` +
-    `egressIps=[${result.egressIps.join(', ')}]`
+    `status=${result.statusCode ?? 'none'} latencyMs=${result.latencyMs ?? 'none'}`
   );
 }
 
@@ -2635,9 +2634,8 @@ async function awaitDepositCredited(
  * buckets are printed in the detail so a reader of a green report can see the
  * split rather than infer it.
  *
- * Two smaller waits are folded into the same poll and are worth not confusing
- * with the big one: the ledger writer is buffered on a 200 ms timer
- * (`LEDGER_FLUSH_INTERVAL_MS`), so even `pending` is not instantaneous. That
+ * A smaller wait is folded into the same poll and is worth not confusing
+ * with the big one: the pending credit is not instantaneous, but that
  * one is milliseconds. The finality sweep is minutes, and it is the reason the
  * suite needs a scheduler at all — see the file header.
  */
@@ -3282,8 +3280,7 @@ async function awaitChargeVisible(
         `the call was charged ${MoneyUtil.format(charged)} and 'available' never moved: after ` +
           `${attempts} read(s) over ${Date.now() - startedAt}ms it is still ` +
           `${MoneyUtil.format(last.available)}, and ${MoneyUtil.format(expectedAvailable)} was ` +
-          `expected. HOLD_CREATE is { available: -1, held: +1 } and is written THROUGH (it is not ` +
-          `bufferable — see isBufferable), inside the request tools/call already awaited, so this ` +
+          `expected. HOLD_CREATE is { available: -1, held: +1 } and is written THROUGH, inside the request tools/call already awaited, so this ` +
           `is not the ledger being slow. The reads above already outlast the ` +
           `${HTTP_GET_CACHE_TTL_MS / 1000}s default HTTP GET cache, so it is not that either. ` +
           `before: ${formatPosition(before)} | last read: ${formatPosition(last)}`,

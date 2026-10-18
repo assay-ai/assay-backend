@@ -3,6 +3,7 @@ import {
   ArrayMaxSize,
   ArrayNotEmpty,
   IsArray,
+  IsEnum,
   IsIn,
   IsInt,
   IsNotEmpty,
@@ -18,7 +19,7 @@ import {
 } from 'class-validator';
 
 import { CHAIN_ID_RE } from '@modules/chains/ports/caip.types';
-import { PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, PricingMode } from '@modules/tool/ports/tool.types';
 import { bindingEndpointProtocols } from '@shared/network/egress/egress.policy';
 
 import { ToolBindingDetailDto } from './get-tool-bindings.dto';
@@ -76,6 +77,14 @@ export class SaveToolBindingBodyDto {
   @ApiProperty({ enum: PricingMode })
   @IsIn(Object.values(PricingMode))
   pricingMode: PricingMode;
+
+  @ApiPropertyOptional({
+    enum: BindingAuthMode,
+    description: 'How the endpoint authenticates calls. Defaults to NONE.',
+  })
+  @IsOptional()
+  @IsEnum(BindingAuthMode)
+  authMode?: BindingAuthMode;
 
   /**
    * Minor units, as digits.
@@ -295,6 +304,11 @@ export class UpdateToolBindingBodyDto {
   @IsOptional()
   @IsIn(Object.values(PricingMode))
   pricingMode?: PricingMode;
+
+  @ApiPropertyOptional({ enum: BindingAuthMode })
+  @IsOptional()
+  @IsEnum(BindingAuthMode)
+  authMode?: BindingAuthMode;
 
   @ApiPropertyOptional()
   @IsOptional()

@@ -15,6 +15,7 @@ import type { RoutingCallClass } from './routing.types';
  * |   could ever get (`min(binding, request deadline)`) |         |           |         |
  * | `SYSTEM_ERROR`, any other recognised provider cause | yes     | no        | no      |
  * | `SYSTEM_ERROR`, `MAPPING_FAULT_PLATFORM`            | no — our selector, not their server      |
+ * | `SYSTEM_ERROR`, `PLATFORM_UNAVAILABLE`              | no — we could not prepare the call       |
  * | `SYSTEM_ERROR`, `TRANSPORT_UNKNOWN`                 | no — an unrecognised throw is not evidence |
  * | timeout on a budget earlier attempts had spent      | no — the time went elsewhere             |
  * | `REQUEST_ERROR`                                     | no — the agent's arguments               |
@@ -113,7 +114,10 @@ export function attributeAttempt(input: AttemptAttributionInput): AttemptAttribu
       return { counted: false, why: AttemptNotCountedReason.REQUEST_ERROR };
 
     case ResponseClass.SYSTEM_ERROR:
-      if (input.reason === ClassificationReason.MAPPING_FAULT_PLATFORM) {
+      if (
+        input.reason === ClassificationReason.MAPPING_FAULT_PLATFORM ||
+        input.reason === ClassificationReason.PLATFORM_UNAVAILABLE
+      ) {
         return { counted: false, why: AttemptNotCountedReason.PLATFORM_FAULT };
       }
       // `classifyTransportError`'s fallback for a throw it does not

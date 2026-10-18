@@ -81,7 +81,6 @@ describe('Deposit intent lifecycle — real Postgres, real ledger, faked chain',
     expect(settled.status).toBe(DepositIntentStatus.SETTLED);
     expect(settled.chainTxRef).toBe(txSig);
 
-    await ctx.ledger.flush();
     expect(await ctx.pending(agent)).toBe(5_000_000n);
     expect(await ctx.available(agent)).toBe(0n);
 
@@ -147,7 +146,6 @@ describe('Deposit intent lifecycle — real Postgres, real ledger, faked chain',
       network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
       payload: { transaction: 'ZmFrZQ==' },
     });
-    await ctx.ledger.flush();
     expect(await ctx.pending(agent)).toBe(6_000_000n);
 
     // Still there at `finalized` commitment — same mock, simulating no reorg.
@@ -193,7 +191,6 @@ describe('Deposit intent lifecycle — real Postgres, real ledger, faked chain',
       network: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
       payload: { transaction: 'ZmFrZQ==' },
     });
-    await ctx.ledger.flush();
     expect(await ctx.pending(agent)).toBe(7_500_000n);
 
     // A reorg dropped it — the re-check finds nothing at `finalized` commitment, nor at the

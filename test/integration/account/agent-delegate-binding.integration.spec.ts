@@ -14,7 +14,11 @@ import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { deployment } from '../../unit/chains/evm/evm-fixtures';
-import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
+import {
+  ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
+  testConnectionOptions,
+} from '../helpers/test-database';
 
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
 
@@ -52,6 +56,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       migrationsRun: false,
     });
     await dataSource.initialize();
+    await resetSchemaIfMigrationsChanged(dataSource);
     await dataSource.runMigrations({ transaction: 'each' });
 
     redis = new Redis({

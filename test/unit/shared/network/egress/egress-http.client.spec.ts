@@ -21,6 +21,8 @@
 import { AddressInfo } from 'node:net';
 import * as http from 'node:http';
 
+import { Logger } from '@nestjs/common';
+
 import {
   BlockedAddressReason,
   EgressError,
@@ -324,6 +326,46 @@ describe('case 4 — a redirect from a public address to an internal one', () =>
     // Two hops, two resolutions. One resolution reused across hops is how a
     // redirect check gets skipped without anybody noticing.
     expect(lookup).toHaveBeenCalledTimes(2);
+  });
+
+  it('logs a redirect hop without either query string or fragment', async () => {
+    const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+    try {
+      handler = (req, res) => {
+        if (req.url?.startsWith('/start')) {
+          res.writeHead(302, { location: 'http://cdn.provider.test/final?sig=to-secret#frag-b' });
+          res.end();
+          return;
+        }
+        res.end('{}');
+      };
+
+      await clientWithLocalConnect().request({
+        url: 'http://edge.provider.test/start?token=from-secret#frag-a',
+      });
+
+      const lines = debug.mock.calls.map((args) => args.map(String).join(' '));
+      const hop = lines.find((line) => line.includes('/final'));
+      expect(hop).toBe('302 http://edge.provider.test/start → http://cdn.provider.test/final');
+      expect(lines.join('\n')).not.toMatch(/secret|frag-|sig=|token=/);
+    } finally {
+      debug.mockRestore();
+    }
+  });
+
+  it('keeps the query string out of an unparseable-Location error', async () => {
+    handler = (_req, res) => {
+      res.writeHead(302, { location: 'http://[broken/x?key=leaked-secret' });
+      res.end();
+    };
+
+    const error = await expectEgressError(
+      clientWithLocalConnect().request({ url: 'http://edge.provider.test/start?k=also-secret' }),
+    );
+
+    expect(error.kind).toBe(EgressFailureKind.REDIRECT_INVALID);
+    expect(error.message).not.toContain('secret');
+    expect(error.message).toContain('http://[broken/x');
   });
 
   it('drops Authorization when the redirect changes origin', async () => {

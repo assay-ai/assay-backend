@@ -51,9 +51,8 @@ export class DeclareEndpointBodyDto {
 }
 
 /**
- * The connectivity check on the wire. Extends `ConnectivityCheckResultDto` — which already
- * carries `egressIps`, the allowlist published at the moment of this check —
- * with `saved`, present and `true` only on `PUT /providers/me/endpoint`'s
+ * The connectivity check on the wire. Extends `ConnectivityCheckResultDto` with
+ * `saved`, present and `true` only on `PUT /providers/me/endpoint`'s
  * response. Absent on `POST /providers/me/connectivity-check`, which is
  * read-only and never writes the provider row.
  */

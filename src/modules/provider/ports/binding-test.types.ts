@@ -161,6 +161,20 @@ export interface BindingTestReport {
   /** The second panel: the document the response mapping produced. */
   readonly mapped: JsonValue | null;
   readonly verification: BindingTestVerificationView | null;
+  /** Always present; empty when there is nothing to warn about. Never changes `outcome`. */
+  readonly warnings: readonly BindingTestWarning[];
+}
+
+/** A finding that never changes the outcome of a run (spec 7.3). */
+export enum BindingTestWarningCode {
+  ACCEPTS_UNSIGNED = 'ACCEPTS_UNSIGNED',
+  ACCEPTS_WITHOUT_CREDENTIALS = 'ACCEPTS_WITHOUT_CREDENTIALS',
+  NO_AUTHENTICATION = 'NO_AUTHENTICATION',
+}
+
+export interface BindingTestWarning {
+  readonly code: BindingTestWarningCode;
+  readonly message: string;
 }
 
 /** What the console posts to run a test. */

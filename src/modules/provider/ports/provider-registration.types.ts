@@ -176,8 +176,6 @@ export interface ConnectivityCheckResult {
   /** `EGRESS_*` code, when there was one. */
   readonly failureCode: string | null;
   readonly detail: string | null;
-  /** The addresses we told them to allowlist, as of this check. */
-  readonly egressIps: readonly string[];
   /** ISO-8601, UTC. */
   readonly checkedAt: string;
 }

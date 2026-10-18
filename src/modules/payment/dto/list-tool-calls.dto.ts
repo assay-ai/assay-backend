@@ -91,6 +91,22 @@ export class ToolCallDto {
 
   @ApiPropertyOptional({
     nullable: true,
+    description:
+      'When the payment may be collected from the escrow (the dispute hold). Until then the ' +
+      'price stays held and is not the provider’s. Null when the call has no hold',
+  })
+  collectableAt: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Dispute before this and an upheld dispute refunds the call in full; after it a dispute ' +
+      'is a quality signal. Null when the call has no hold',
+  })
+  disputeWindowEndsAt: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
     enum: VerdictStatus,
     description: 'Null until verification has judged this call',
   })

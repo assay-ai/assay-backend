@@ -22,7 +22,12 @@ import {
 } from '@modules/tool/domain/mapping';
 import { BINDING_INVOKER, BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { Tool, ToolBinding, ToolContractVersion } from '@modules/tool/ports/tool.types';
+import {
+  BindingAuthMode,
+  Tool,
+  ToolBinding,
+  ToolContractVersion,
+} from '@modules/tool/ports/tool.types';
 import {
   contractVersionsOf,
   effectiveOutputSchema,
@@ -52,6 +57,8 @@ import {
   BindingTestReport,
   BindingTestUpstreamView,
   BindingTestVerificationView,
+  BindingTestWarning,
+  BindingTestWarningCode,
 } from '../ports/binding-test.types';
 import { ProviderErrors } from '../errors/provider.errors';
 import { BindingEditorService } from './binding-editor.service';
@@ -158,7 +165,11 @@ export class BindingMappingTesterService {
 
     const binding = toToolBinding(row);
     const callId = randomUUID();
-    const report = await this.execute(tool, binding, input, callId);
+    const executed = await this.execute(tool, binding, input, callId);
+    const report: BindingTestReport = {
+      ...executed,
+      warnings: await this.authWarnings(tool, binding, row.authMode, input, executed),
+    };
 
     await this.record(organizationId, subject, row, input, report, version.version);
 
@@ -172,8 +183,81 @@ export class BindingMappingTesterService {
         headerNames: [...report.request.headerNames],
       },
       layers: report.layers.map((layer) => ({ ...layer })),
+      warnings: report.warnings.map((warning) => ({ ...warning })),
       ranAt: new Date(),
     };
+  }
+
+  /**
+   * Unauthenticated probes, and the warnings they earn. Warnings never change
+   * the outcome.
+   *
+   * "The main run succeeded" is read from `report.upstream.status`: the main
+   * upstream answered 2xx (independent of later mapping/verification layers,
+   * which judge the body, not the endpoint's authentication). Each probe is
+   * sent once, inside the caller's {@link ProviderEgressLimiter} slot, with a
+   * fresh call id, omitting what the binding's `auth_mode` says the endpoint
+   * should be demanding.
+   */
+  private async authWarnings(
+    tool: Tool,
+    binding: ToolBinding,
+    authMode: string,
+    input: JsonObject,
+    report: BindingTestReport,
+  ): Promise<BindingTestWarning[]> {
+    const status = report.upstream?.status ?? 0;
+    if (report.upstream?.transportError || status < 200 || status > 299) return [];
+
+    const warnings: BindingTestWarning[] = [];
+    if (authMode === BindingAuthMode.NONE) {
+      warnings.push({
+        code: BindingTestWarningCode.NO_AUTHENTICATION,
+        message: 'Anyone who learns your endpoint URL can call it directly, without paying.',
+      });
+      return warnings;
+    }
+    if (authMode === BindingAuthMode.SIGNATURE || authMode === BindingAuthMode.BOTH) {
+      if (await this.probeAccepted(tool, binding, input, { signature: true })) {
+        warnings.push({
+          code: BindingTestWarningCode.ACCEPTS_UNSIGNED,
+          message: 'Your endpoint accepted a request without an Assay signature.',
+        });
+      }
+    }
+    if (authMode === BindingAuthMode.API_KEY || authMode === BindingAuthMode.BOTH) {
+      if (await this.probeAccepted(tool, binding, input, { credentials: true })) {
+        warnings.push({
+          code: BindingTestWarningCode.ACCEPTS_WITHOUT_CREDENTIALS,
+          message: 'Your endpoint accepted a request without your API key.',
+        });
+      }
+    }
+    return warnings;
+  }
+
+  private async probeAccepted(
+    tool: Tool,
+    binding: ToolBinding,
+    input: JsonObject,
+    omit: { credentials?: boolean; signature?: boolean },
+  ): Promise<boolean> {
+    try {
+      const response = await this.invoker.invoke({
+        tool,
+        binding,
+        input,
+        callId: randomUUID(),
+        timeoutMs: Math.min(binding.timeoutMs, TESTER_MAX_TIMEOUT_MS),
+        omit,
+      });
+      return !response.transportError && response.status >= 200 && response.status <= 299;
+    } catch {
+      // A probe that could not be made proves nothing; never fail the run.
+      // Fixed message only: the error can carry request details.
+      this.logger.debug('Unauthenticated probe could not be made');
+      return false;
+    }
   }
 
   /**
@@ -513,6 +597,7 @@ class LayerLog {
       classification: parts.classification ?? null,
       mapped: parts.mapped ?? null,
       verification: parts.verification ?? null,
+      warnings: [],
     };
   }
 }

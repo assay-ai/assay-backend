@@ -1,3 +1,4 @@
+import { MAX_MAPPING_HEADERS } from '@modules/provider/credentials/credential-rules';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { DataSource } from 'typeorm';
@@ -14,7 +15,7 @@ import {
 import { MappingDirection } from '@modules/tool/domain/mapping/mapping.types';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import {
@@ -139,6 +140,7 @@ function row(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity {
 function build(
   stored: ToolBindingEntity | null = null,
   versions: readonly Partial<BindingVersionEntity>[] = [],
+  options: { relayConfigured?: boolean } = {},
 ) {
   const written: Array<{ entity: string; row: unknown }> = [];
 
@@ -160,6 +162,7 @@ function build(
   };
 
   const dataSource = {
+    manager,
     transaction: jest.fn(async (work: (m: typeof manager) => Promise<unknown>) => work(manager)),
   } as unknown as DataSource;
 
@@ -211,6 +214,10 @@ function build(
       stakes,
       GATE_CHAINS,
       new Map(GATE_CHAINS.map((chainId) => [chainId, MINIMUM_STAKE])),
+      options.relayConfigured
+        ? { url: new URL('https://egress.test'), token: 'a'.repeat(64) }
+        : null,
+      { list: async () => [], pruneExcept: async () => [] } as never,
     ),
     written,
     dataSource,
@@ -355,6 +362,170 @@ describe('BindingEditorService.create — what gets stored', () => {
     // dispute argues over the price that was in force, not today's.
     expect(snapshot.priceAmount).toBe('50000');
     expect(snapshot.publishedAt).toBeNull();
+  });
+
+  it('refuses a credential-like key in the endpoint query, and writes nothing', async () => {
+    const { service, written } = build();
+
+    await expectErrorCodeAsync(
+      () => service.create(PROVIDER, SUBJECT, body({ endpoint: 'https://x.test?apikey=1' })),
+      ProviderErrorCode.PROVIDER_CREDENTIAL_IN_QUERY,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('refuses a port the relay cannot reach, and writes nothing', async () => {
+    const { service, written } = build(null, [], { relayConfigured: true });
+
+    await expectErrorCodeAsync(
+      () => service.create(PROVIDER, SUBJECT, body({ endpoint: 'https://p.test:3000/x' })),
+      ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('refuses a port the relay cannot reach on update, and writes nothing', async () => {
+    const { service, written } = build(row(), [], { relayConfigured: true });
+
+    await expectErrorCodeAsync(
+      () => service.update(PROVIDER, SUBJECT, row().id, { endpoint: 'https://p.test:3000/x' }),
+      ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it.each([
+    ['http', 'http://p.test/x'],
+    ['an IPv4 literal', 'https://203.0.113.7/x'],
+    ['an IPv6 literal', 'https://[2001:db8::1]/x'],
+  ])('refuses %s while the relay is on, and writes nothing', async (_label, endpoint) => {
+    const { service, written } = build(null, [], { relayConfigured: true });
+
+    await expectErrorCodeAsync(
+      () => service.create(PROVIDER, SUBJECT, body({ endpoint })),
+      ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('refuses an IP literal on update while the relay is on', async () => {
+    const { service, written } = build(row(), [], { relayConfigured: true });
+
+    await expectErrorCodeAsync(
+      () => service.update(PROVIDER, SUBJECT, row().id, { endpoint: 'https://198.51.100.4/x' }),
+      ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it(`refuses more than ${MAX_MAPPING_HEADERS} mapping headers, and writes nothing`, async () => {
+    const { service, written } = build();
+    const headers = (n: number) =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`x-h-${i}`, { $const: 'v' }]));
+
+    await expectErrorCodeAsync(
+      () =>
+        service.create(
+          PROVIDER,
+          SUBJECT,
+          body({
+            requestMapping: {
+              method: 'POST',
+              path: '/search',
+              headers: headers(MAX_MAPPING_HEADERS + 1),
+              body: { q: '$.query' },
+            },
+          } as never),
+        ),
+      ProviderErrorCode.PROVIDER_TOO_MANY_MAPPING_HEADERS,
+    );
+    expect(written).toEqual([]);
+    // The reserve leaves room for Assay's six and ten credential headers under the relay's 64.
+    expect(MAX_MAPPING_HEADERS + 6 + 10).toBeLessThanOrEqual(64);
+
+    await service.create(
+      PROVIDER,
+      SUBJECT,
+      body({
+        requestMapping: {
+          method: 'POST',
+          path: '/search',
+          headers: headers(MAX_MAPPING_HEADERS),
+          body: { q: '$.query' },
+        },
+      } as never),
+    );
+    expect(written.length).toBeGreaterThan(0);
+  });
+
+  it('refuses an x-assay- mapping header on create, constant or derived, and writes nothing', async () => {
+    const { service, written } = build();
+
+    for (const node of [{ $const: 'forged' }, { $path: '$.query' }]) {
+      await expectErrorCodeAsync(
+        () =>
+          service.create(
+            PROVIDER,
+            SUBJECT,
+            body({
+              requestMapping: {
+                method: 'POST',
+                path: '/search',
+                headers: { 'X-Assay-Agent': node },
+                body: { q: '$.query' },
+              },
+            } as never),
+          ),
+        ProviderErrorCode.PROVIDER_RESERVED_MAPPING_HEADER,
+      );
+    }
+    expect(written).toEqual([]);
+  });
+
+  it('refuses an x-assay- mapping header on update', async () => {
+    const { service, written } = build(row());
+
+    await expectErrorCodeAsync(
+      () =>
+        service.update(PROVIDER, SUBJECT, row().id, {
+          requestMapping: {
+            method: 'POST',
+            path: '/search',
+            headers: { 'x-assay-call-id': { $const: 'forged' } },
+            body: { q: '$.query' },
+          },
+        }),
+      ProviderErrorCode.PROVIDER_RESERVED_MAPPING_HEADER,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('refuses a secret-looking constant header on update', async () => {
+    const { service, written } = build(row());
+
+    await expectErrorCodeAsync(
+      () =>
+        service.update(PROVIDER, SUBJECT, row().id, {
+          requestMapping: {
+            method: 'POST',
+            path: '/search',
+            headers: { Authorization: { $const: 'Bearer x' } },
+            body: { q: '$.query' },
+          },
+        }),
+      ProviderErrorCode.PROVIDER_SECRET_IN_MAPPING,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('changes authMode without bumping the revision', async () => {
+    const { service } = build(row());
+    const saved = await service.update(PROVIDER, SUBJECT, row().id, {
+      authMode: BindingAuthMode.API_KEY,
+    });
+
+    expect(saved.authMode).toBe('API_KEY');
+    expect(saved.version).toBe(3);
   });
 
   it('prices a FREE binding at zero whatever the caller sent', async () => {

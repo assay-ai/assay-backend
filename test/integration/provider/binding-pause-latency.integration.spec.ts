@@ -17,12 +17,12 @@ import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 import { BindingCallCounterService } from '@modules/tool/services/binding-call-counter.service';
 import { BindingCeilingService } from '@modules/tool/services/binding-ceiling.service';
-import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 import { DEFAULT_ROUTER_TUNING, RouterConfig } from '@modules/tool/services/routing.config';
 import { EgressHttpClient } from '@shared/network/egress';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import { plainInvoker } from '../../unit/tool/helpers/routing-fixtures';
 import {
   BindingEditorTestContext,
   MINIMUM_STAKE,
@@ -161,7 +161,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
 
-  const invoker = new EgressBindingInvoker(
+  const invoker = plainInvoker(
     new EgressHttpClient(lookup, (target) => ({
       address: '127.0.0.1',
       family: 4,

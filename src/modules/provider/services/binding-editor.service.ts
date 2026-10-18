@@ -11,14 +11,21 @@ import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { evaluateStakeGate } from '@modules/tool/domain/routing/stake-gate';
 import { MinimumStakeByChain, RoutingCandidate } from '@modules/tool/domain/routing/routing.types';
-import { MappingDirection } from '@modules/tool/domain/mapping/mapping.types';
+import { MappingDirection, RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 import { checkResponseAgainstSchema } from '@modules/tool/domain/mapping/contract-check';
 import {
   inspectRequestMapping,
   inspectResponseMapping,
 } from '@modules/tool/domain/mapping/mapping-validator';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingStatus, PricingMode, Tool, ToolBinding } from '@modules/tool/ports/tool.types';
+import {
+  BindingAuthMode,
+  BindingStatus,
+  PricingMode,
+  Tool,
+  ToolBinding,
+} from '@modules/tool/ports/tool.types';
+import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from '@shared/network/egress';
 import { canonicalJson } from '@shared/crypto/canonical-json';
 
 import {
@@ -28,7 +35,18 @@ import {
 } from '../dto/save-tool-binding.dto';
 import { ProviderRoutingState } from '../ports/provider.types';
 import { ValidateMappingBodyDto, ValidateMappingResponseDto } from '../dto/validate-mapping.dto';
+import { CredentialVaultService } from '../credentials/credential-vault.service';
 import { ProviderErrors } from '../errors/provider.errors';
+import {
+  assayMappingHeaders,
+  authModeNeedsKey,
+  credentialQueryKeys,
+  MAX_MAPPING_HEADERS,
+  mappingHeaderCount,
+  originOf,
+  assertRelayableEndpoint,
+  secretConstantHeaders,
+} from '../credentials/credential-rules';
 import {
   CHAIN_ENROLMENT_SOURCE,
   ChainEnrolmentPort,
@@ -38,7 +56,7 @@ import {
 import { PROVIDER_STAKE_SOURCE, ProviderStakePort, stakeKey } from '../ports/provider-stake.port';
 import { PROVIDER_MINIMUM_STAKE_BY_CHAIN } from './provider-stake.service';
 
-import { canBind, toDetailDto } from './provider-tool-bindings.service';
+import { canBind, publishedEndpointOf, toDetailDto } from './provider-tool-bindings.service';
 import { assertBindingContract, defaultBindingRange } from '../domain/binding-contract';
 
 /**
@@ -144,6 +162,12 @@ export class BindingEditorService {
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
     @Inject(PROVIDER_MINIMUM_STAKE_BY_CHAIN)
     private readonly minimumStakeByChain: MinimumStakeByChain,
+    @Inject(EGRESS_RELAY_CONFIG)
+    private readonly relayConfig: EgressRelayConfig | null,
+    // Lets a save refuse switching a live binding to an API-key mode without a
+    // key for its live origin. Required: a missing vault module must fail at
+    // boot rather than silently turn the guard off.
+    private readonly vault: CredentialVaultService,
   ) {}
 
   /**
@@ -190,6 +214,7 @@ export class BindingEditorService {
     subject: string,
     body: SaveToolBindingBodyDto,
   ): Promise<SavedToolBindingDto> {
+    this.assertEndpointRelayable(body.endpoint);
     const tool = await this.catalogue.findTool(body.toolId);
     // A provider tool's only implementation is its own provider's binding
     // (§7.6): anyone else's binding for it is refused exactly like a tool
@@ -201,6 +226,7 @@ export class BindingEditorService {
     const context = { toolId: body.toolId, providerId: organizationId };
     const request = inspectRequestMapping(body.requestMapping, context);
     const requestMapping = request.spec;
+    assertNoCredentialsInMapping(body.endpoint, requestMapping);
     const responseMapping = inspectResponseMapping(body.responseMapping, context).spec;
     // The contract half (T3): the majors served — the tool's current major
     // unless named — and the optional fields promised, checked against every
@@ -233,6 +259,7 @@ export class BindingEditorService {
     row.toolVersionRange = toolVersionRange;
     row.providesOutputFields = terms.providesOutputFields;
     row.supportsInputFields = terms.supportsInputFields;
+    row.authMode = body.authMode ?? BindingAuthMode.NONE;
     row.pricingMode = body.pricingMode;
     row.priceAmount = body.pricingMode === PricingMode.FREE ? '0' : body.priceAmount;
     row.assetId = body.assetId;
@@ -278,7 +305,7 @@ export class BindingEditorService {
       return inserted;
     }, body.toolId);
 
-    return toSavedDto(saved);
+    return toSavedDto(saved, null);
   }
 
   async update(
@@ -302,6 +329,10 @@ export class BindingEditorService {
         bindingId: row.id,
         providerId: organizationId,
       }).spec;
+    }
+
+    if (body.requestMapping !== undefined || body.endpoint !== undefined) {
+      assertNoCredentialsInMapping(body.endpoint ?? row.endpoint, row.requestMapping);
     }
 
     if (body.responseMapping !== undefined) {
@@ -349,7 +380,12 @@ export class BindingEditorService {
     // DTO refuses `[]` and the row's CHECK refuses it again, because a binding
     // offered on no chain is unroutable in a way no screen explains.
     if (body.settlementChains !== undefined) row.settlementChains = body.settlementChains;
-    if (body.endpoint !== undefined) row.endpoint = body.endpoint;
+    if (body.endpoint !== undefined) {
+      this.assertEndpointRelayable(body.endpoint);
+      row.endpoint = body.endpoint;
+    }
+    // Outside `VERSIONED_FIELDS`: a descriptive setting, not a term of the revision.
+    if (body.authMode !== undefined) row.authMode = body.authMode;
     if (body.pricingMode !== undefined) row.pricingMode = body.pricingMode;
     if (body.priceAmount !== undefined) row.priceAmount = body.priceAmount;
     if (body.freeQuotaPerAgent !== undefined) row.freeQuotaPerAgent = body.freeQuotaPerAgent;
@@ -386,6 +422,10 @@ export class BindingEditorService {
       );
     }
 
+    if (body.authMode !== undefined) {
+      await this.assertLiveCredentials(organizationId, row, body.authMode);
+    }
+
     const changed = versionedSnapshot(row) !== before;
     const chainsChanged = JSON.stringify(row.settlementChains) !== chainsBefore;
 
@@ -413,10 +453,60 @@ export class BindingEditorService {
       if (revised) {
         await manager.save(BindingVersionEntity, snapshotOf(updated, subject));
       }
-      return updated;
+      return {
+        row: updated,
+        publishedEndpoint: await publishedEndpointOf(
+          { findOne: (options) => manager.findOne(BindingVersionEntity, options) },
+          updated,
+        ),
+      };
     }, row.toolId);
 
-    return toSavedDto(saved);
+    return toSavedDto(saved.row, saved.publishedEndpoint);
+  }
+
+  /**
+   * With the relay configured, an endpoint it cannot carry (not https, an IP
+   * literal, a port it cannot reach) is refused at Save.
+   */
+  private assertEndpointRelayable(endpoint: string): void {
+    assertRelayableEndpoint(endpoint, Boolean(this.relayConfig));
+  }
+
+  /**
+   * Throws `credentialsRequiredForAuthMode` when `authMode` needs a key and the
+   * published (ACTIVE or PAUSED) binding has no credential set for the origin of
+   * its published endpoint. The live address is the published revision's;
+   * without a set for it every live call would be a platform fault. Shared by
+   * the auth-mode switch and the resume, which puts the binding back on that
+   * address.
+   */
+  async assertLiveCredentials(
+    organizationId: string,
+    row: ToolBindingEntity,
+    authMode: string,
+  ): Promise<void> {
+    if (
+      !authModeNeedsKey(authMode) ||
+      row.publishedVersion == null ||
+      (row.status !== BindingStatus.ACTIVE && row.status !== BindingStatus.PAUSED)
+    ) {
+      return;
+    }
+    const published = await this.publishedEndpoint(row);
+    if (!published) return;
+    const sets = await this.vault.list(organizationId, row.id);
+    if (!sets.some((set) => set.origin === originOf(published))) {
+      throw ProviderErrors.credentialsRequiredForAuthMode();
+    }
+  }
+
+  /** The endpoint of the published revision, or null when never published. */
+  async publishedEndpoint(row: ToolBindingEntity): Promise<string | null> {
+    return publishedEndpointOf(
+      { findOne: (options) => this.dataSource.manager.findOne(BindingVersionEntity, options) },
+      row,
+    );
   }
 
   /**
@@ -685,7 +775,29 @@ function snapshotOf(row: ToolBindingEntity, authoredBy: string): BindingVersionE
  * so a save-only field cannot be added and silently left unset; the build stops
  * until someone writes a real body here.
  */
-export const toSavedDto: (row: ToolBindingEntity) => SavedToolBindingDto = toDetailDto;
+export const toSavedDto: (
+  row: ToolBindingEntity,
+  publishedEndpoint: string | null,
+) => SavedToolBindingDto = toDetailDto;
+
+/**
+ * Refuses more than {@link MAX_MAPPING_HEADERS} mapping headers (the relay's
+ * per-request cap, less what Assay adds); credentials in the endpoint query,
+ * constant query entries, and secret-looking constant headers; and any header
+ * in Assay's `x-assay-` namespace, which the invoker also drops on the way out.
+ */
+function assertNoCredentialsInMapping(endpoint: string, mapping: RequestMappingSpec): void {
+  const count = mappingHeaderCount(mapping);
+  if (count > MAX_MAPPING_HEADERS) {
+    throw ProviderErrors.tooManyMappingHeaders({ count, max: MAX_MAPPING_HEADERS });
+  }
+  const reserved = assayMappingHeaders(mapping);
+  if (reserved.length > 0) throw ProviderErrors.reservedMappingHeader({ headers: reserved });
+  const keys = credentialQueryKeys(endpoint, mapping);
+  if (keys.length > 0) throw ProviderErrors.credentialInQuery({ keys });
+  const headers = secretConstantHeaders(mapping);
+  if (headers.length > 0) throw ProviderErrors.secretInMapping({ headers });
+}
 
 function dedupe(values: readonly string[]): string[] {
   return [...new Set(values)].sort();

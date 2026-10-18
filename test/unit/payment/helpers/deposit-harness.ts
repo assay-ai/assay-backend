@@ -235,9 +235,7 @@ export function fakeVaultPort(overrides: Partial<VaultPort> = {}): VaultPort {
 
 export function fakeLedger(overrides: Partial<LedgerService> = {}): LedgerService {
   return {
-    append: jest.fn(),
     appendNow: jest.fn(),
-    flush: jest.fn(),
     readJournal: jest.fn().mockResolvedValue([]),
     getBalance: jest.fn(),
     rebuildBalance: jest.fn(),

@@ -15,6 +15,7 @@ import { ProviderChainEnrolmentRepository } from '@database/postgres/repositorie
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { CreateLedger1755100000000 } from '@database/postgres/migrations/1755100000000-create-ledger';
 import { CreateProviderRegistrationTables1756600000000 } from '@database/postgres/migrations/1756600000000-create-provider-registration-tables';
+import { DropConnectivityEgressIps1762000000000 } from '@database/postgres/migrations/1762000000000-drop-connectivity-egress-ips';
 import { ProviderEarningsAndPayouts1756700000000 } from '@database/postgres/migrations/1756700000000-provider-earnings-and-payouts';
 import { ProviderStakeAuthority1757000000000 } from '@database/postgres/migrations/1757000000000-provider-stake-authority';
 import { ProviderStakeAuthorityFormat1757250000000 } from '@database/postgres/migrations/1757250000000-provider-stake-authority-format';
@@ -31,7 +32,6 @@ import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.se
 import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service';
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
@@ -39,6 +39,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
 } from './test-database';
 
@@ -123,6 +124,7 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
     migrations: [
       CreateLedger1755100000000,
       CreateProviderRegistrationTables1756600000000,
+      DropConnectivityEgressIps1762000000000,
       ProviderEarningsAndPayouts1756700000000,
       // The stake-authority migration put `stake_authority`, `stake_proof` and `stake_proved_at`
       // on `ProviderEntity`, and TypeORM names every mapped column in its
@@ -172,6 +174,7 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const entryRepository = new LedgerEntryRepository(dataSource);
@@ -181,10 +184,9 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
   const chainEnrolmentRepository = new ProviderChainEnrolmentRepository(dataSource);
 
   const journal = new LedgerJournalService(entryRepository, balanceRepository, dataSource);
-  const writer = new LedgerWriterService(journal, dataSource);
   const balances = new LedgerBalanceService(balanceRepository, journal);
   const holds = new LedgerHoldService(holdRepository, journal, dataSource);
-  const ledger = new LedgerService(journal, writer, balances, holds);
+  const ledger = new LedgerService(journal, balances, holds);
 
   const context: ProviderLedgerTestContext = {
     ledger,

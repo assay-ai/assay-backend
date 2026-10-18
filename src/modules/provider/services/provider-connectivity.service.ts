@@ -15,12 +15,14 @@ import {
   isEgressError,
   resolveEgressTarget,
   withLimits,
+  EGRESS_RELAY_CONFIG,
+  EgressRelayConfig,
 } from '@shared/network/egress';
 
+import { assertRelayableEndpoint } from '../credentials/credential-rules';
 import { ConnectivityCheckResultDto, toConnectivityDto } from '../dto/provider-shared.dto';
 import { ProviderErrors } from '../errors/provider.errors';
 import { ConnectivityOutcome } from '../ports/provider-registration.types';
-import { PROVIDER_EGRESS_IPS } from './egress-ips';
 import { ProviderEgressLimiter } from './provider-egress-limiter.service';
 
 /**
@@ -56,6 +58,7 @@ const HTTPS_ONLY_POLICY: EgressPolicy = Object.freeze({
   trust: EgressTrust.PUBLIC_ONLY,
   allowedProtocols: Object.freeze(['https:']),
   limits: UNTRUSTED_EGRESS_POLICY.limits,
+  relay: true,
 });
 
 /** Refusals that mean "the guard would not let a packet leave" — `BLOCKED`, not `UNREACHABLE`. */
@@ -98,13 +101,14 @@ export class ProviderConnectivityService {
     private readonly providers: ProviderRepository,
     private readonly checks: ProviderConnectivityCheckRepository,
     private readonly http: EgressHttpClient,
-    @Inject(PROVIDER_EGRESS_IPS) private readonly egressIpList: string[],
     private readonly limiter: ProviderEgressLimiter,
     // Unbound in production, exactly like `EgressHttpClient`'s own constructor
     // — see `EGRESS_DNS_LOOKUP`'s doc comment. Reused here rather than
     // reinvented so the pre-flight resolve in {@link probe} can be pointed at a
     // test-controlled zone the same way the dial itself already can.
-    @Optional() @Inject(EGRESS_DNS_LOOKUP) private readonly dnsLookup?: EgressDnsLookup,
+    @Optional() @Inject(EGRESS_DNS_LOOKUP) private readonly dnsLookup: EgressDnsLookup | undefined,
+    @Inject(EGRESS_RELAY_CONFIG)
+    private readonly relayConfig: EgressRelayConfig | null,
   ) {}
 
   /**
@@ -117,8 +121,9 @@ export class ProviderConnectivityService {
    * needs a table rather than a return value.
    */
   check(organizationId: string, endpoint?: string): Promise<ConnectivityCheckResultDto> {
+    if (endpoint !== undefined) this.assertRelayable(endpoint);
     // Bounded like the mapping tester: an unthrottled probe of any public URL
-    // from the platform's egress IPs is a scanner anyone can borrow. Its own
+    // from the platform is a scanner anyone can borrow. Its own
     // process-wide pool, so slow tester runs cannot starve it (review N-3).
     return this.limiter.run(
       organizationId,
@@ -132,8 +137,6 @@ export class ProviderConnectivityService {
     endpoint?: string,
   ): Promise<ConnectivityCheckResultDto> {
     const target = endpoint ?? (await this.savedEndpoint(organizationId));
-    const egressIps = this.egressIps();
-
     const probe = await this.probe(target);
 
     const row = await this.checks.save(
@@ -146,7 +149,6 @@ export class ProviderConnectivityService {
         failureKind: probe.failureKind,
         failureCode: probe.failureCode,
         detail: probe.detail,
-        egressIps,
       }),
     );
 
@@ -211,9 +213,8 @@ export class ProviderConnectivityService {
     return result;
   }
 
-  /** The allowlist to publish (the onboarding IP list). See `egress-ips.ts`. */
-  egressIps(): string[] {
-    return this.egressIpList;
+  private assertRelayable(endpoint: string): void {
+    assertRelayableEndpoint(endpoint, Boolean(this.relayConfig));
   }
 
   // ── Internals ───────────────────────────────────────────────────────────
@@ -243,7 +244,7 @@ export class ProviderConnectivityService {
     try {
       const response = await this.http.request({
         url: endpoint,
-        policy: withLimits(UNTRUSTED_EGRESS_POLICY, CONNECTIVITY_PROBE_LIMITS),
+        policy: withLimits({ ...UNTRUSTED_EGRESS_POLICY, relay: true }, CONNECTIVITY_PROBE_LIMITS),
       });
 
       return {

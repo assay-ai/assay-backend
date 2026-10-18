@@ -8,6 +8,7 @@ import { assertTrustProxyHopsConfigured, parseCorsAllowedOrigins } from '@config
 import { applyHttpSecurity } from '@shared/security/security-headers';
 import { buildApiCorsOptionsDelegate } from '@shared/security/cors-policy';
 import { AppApiModule } from './app.module';
+import { buildGlobalPrefixOptions } from './global-prefix';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { HttpCacheInterceptor } from '@shared/interceptors/http-cache.interceptor';
@@ -42,7 +43,7 @@ async function bootstrapApi() {
   applyHttpSecurity(app);
 
   // Global prefix
-  app.setGlobalPrefix('api');
+  app.setGlobalPrefix('api', buildGlobalPrefixOptions());
   app.enableVersioning({
     type: VersioningType.URI, // /api/v1/..., /api/v2/...
     defaultVersion: '1', // Default v1

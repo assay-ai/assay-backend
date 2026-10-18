@@ -1,3 +1,4 @@
+import { VerificationRecordDisputeOutcome1761800000001 } from '@database/postgres/migrations/1761800000001-verification-record-dispute-outcome';
 import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
@@ -10,7 +11,11 @@ import { CreateVerificationRecords1755800000000 } from '@database/postgres/migra
 import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migrations/1755900000000-timestamptz-timestamps';
 import { CreateEvidencePacks1757400000000 } from '@database/postgres/migrations/1757400000000-create-evidence-packs';
 
-import { ensureTestDatabase, testConnectionOptions } from './test-database';
+import {
+  ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
+  testConnectionOptions,
+} from './test-database';
 
 /**
  * A real Postgres carrying `verification_records` and the two evidence tables
@@ -81,12 +86,15 @@ export async function createEvidenceTestContext(): Promise<EvidenceTestContext> 
       CreateVerificationRecords1755800000000,
       TimestamptzTimestamps1755900000000,
       CreateEvidencePacks1757400000000,
+      // `dispute_outcome` (G3.B1), mapped by `VerificationRecordEntity`.
+      VerificationRecordDisputeOutcome1761800000001,
     ],
     synchronize: false,
     logging: false,
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const context: EvidenceTestContext = {

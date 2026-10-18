@@ -25,6 +25,7 @@ import { PaymentApiModule } from '@modules/payment/payment-api.module';
 import { LedgerApiModule } from '@modules/ledger/ledger-api.module';
 import { ToolModule } from '@modules/tool/tool.module';
 import { ToolApiModule } from '@modules/tool/tool-api.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { CatalogueApiModule } from '@modules/catalogue/catalogue-api.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { ProviderApiModule } from '@modules/provider/provider-api.module';
@@ -73,6 +74,7 @@ import { WebSocketBoardModule } from '@websocket/websocket-board.module';
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
 
 import { PublicFeaturesController } from './public-features.controller';
+import { RequestKeysController } from './request-keys.controller';
 
 // Providers
 import { SingleFlightService } from '@shared/services/single-flight.service';
@@ -122,6 +124,10 @@ import { NetworkModule } from '@shared/network/network.module';
     PaymentApiModule,
     LedgerApiModule,
     ToolModule,
+    // The provider call (invoker, request signer, credential vault): the
+    // mapping tester and the public demo dial providers, and the JWKS route
+    // publishes the signer's keys.
+    ToolEgressModule,
     ToolApiModule,
     CatalogueApiModule,
     ProviderModule,
@@ -182,6 +188,6 @@ import { NetworkModule } from '@shared/network/network.module';
     ...(areExamplesEnabled() ? [ExamplesApiModule] : []),
   ],
   providers: [SingleFlightService],
-  controllers: [HealthcheckController, PublicFeaturesController],
+  controllers: [HealthcheckController, PublicFeaturesController, RequestKeysController],
 })
 export class AppApiModule {}

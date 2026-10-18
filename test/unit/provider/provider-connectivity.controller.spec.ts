@@ -51,3 +51,10 @@ describe('ProviderConnectivityController GET :providerId/verification', () => {
     expect(getVerification).toHaveBeenCalledWith(id);
   });
 });
+
+describe('ProviderConnectivityController routes', () => {
+  it('exposes no egress-ips route', () => {
+    const proto = ProviderConnectivityController.prototype as unknown as Record<string, unknown>;
+    expect(proto.getEgressIps).toBeUndefined();
+  });
+});

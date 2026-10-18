@@ -6,6 +6,7 @@ import {
   BindingTestLayerStatus,
   BindingTestOutcome,
   BindingTestPolicySource,
+  BindingTestWarningCode,
 } from '../ports/binding-test.types';
 
 /**
@@ -162,6 +163,19 @@ export class BindingTestReportDto {
 
   @ApiPropertyOptional({ nullable: true, type: BindingTestVerificationDto })
   verification: BindingTestVerificationDto | null;
+
+  @ApiProperty({
+    description:
+      'Findings that never change the outcome, e.g. the endpoint accepted an unauthenticated probe. ' +
+      'Always present; empty when none.',
+    example: [
+      {
+        code: 'ACCEPTS_UNSIGNED',
+        message: 'Your endpoint accepted a request without an Assay signature.',
+      },
+    ],
+  })
+  warnings: { code: BindingTestWarningCode; message: string }[];
 
   @ApiProperty()
   ranAt: Date;
