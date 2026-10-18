@@ -5,7 +5,7 @@ import { SlashProposalPartEntity } from '@database/postgres/entities/slash-propo
 import { SlaWindowCallRepository } from '@database/postgres/repositories/sla-window-call.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { ChainErrors } from '@modules/chains/errors/chains.errors';
-import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
+import { ALERT_PORT, AlertPort } from '@shared/alerting';
 import {
   AssetId,
   ChainId,
@@ -43,6 +43,7 @@ import {
   beneficiaryEvidence,
   FailedCallPayment,
 } from '../domain/slash-beneficiary-evidence';
+import { alertExecutedWhileCancelWaited } from '../domain/executed-while-cancel-waited';
 import { planEvidenceMismatch } from '../domain/slash-plan-evidence';
 import { SlashErrors } from '../errors/slash.errors';
 import { SLASH_CAPS_READER, SlashCapsReaderPort } from '../ports/slash-caps-reader.port';
@@ -63,9 +64,6 @@ import {
  * record can only be expired. Mirrored, as `SlashExecutionService` does.
  */
 const SLASH_EXECUTION_GRACE_MS_FOR_PARTS = 7 * 24 * 60 * 60 * 1000;
-
-/** Alert name: a withdrawn judgement executed on chain while its cancel waited. */
-export const EXECUTED_WHILE_CANCEL_WAITED_ALERT = 'slash_executed_while_cancel_waited';
 
 /** One case handed to {@link SlashPartsService.executeMany}. */
 export interface PartitionedCase {
@@ -965,7 +963,7 @@ export class SlashPartsService {
 
     if (parts.length > 0) {
       if (parts.some((part) => part.chainStatus === 'EXECUTED')) {
-        await this.alertExecutedWhileCancelWaited(proposal, 'part');
+        await alertExecutedWhileCancelWaited(this.alerts, this.logger, proposal, 'part');
         return refuse('EXECUTED');
       }
       return refuse(parts.some((part) => part.chainStatus === 'NONE') ? 'PROPOSING' : 'CANCELLED');
@@ -985,7 +983,7 @@ export class SlashPartsService {
       return this.executor.buildCancel({ chainId, requestId: proposal.chainRequestId, provider });
     }
     if (record?.status === 'EXECUTED') {
-      await this.alertExecutedWhileCancelWaited(proposal, 'record');
+      await alertExecutedWhileCancelWaited(this.alerts, this.logger, proposal, 'record');
       return refuse('EXECUTED');
     }
     if (!record && proposal.chainProposedAt) {
@@ -995,43 +993,6 @@ export class SlashPartsService {
       );
     }
     return refuse(record?.status ?? 'NOT_FOUND');
-  }
-
-  /**
-   * A judgement this platform had withdrawn was executed on chain while its
-   * cancel waited. Money left the provider's stake; it is paged, not hidden.
-   * Recording the execution (and compensating) belongs to the admin-cancel
-   * sweep's `recordAnExecutionNobodyAskedFor`, outside this class.
-   */
-  private async alertExecutedWhileCancelWaited(
-    proposal: SlashProposalEntity,
-    where: 'part' | 'record',
-  ): Promise<void> {
-    this.logger.error(
-      `slash proposal ${proposal.id} (${proposal.status}): its on-chain ${where} was EXECUTED while ` +
-        `the cancel waited; the stake was taken. Not written as cancelled — needs recording and a human`,
-    );
-    try {
-      await this.alerts?.emit({
-        severity: AlertSeverity.CRITICAL,
-        name: EXECUTED_WHILE_CANCEL_WAITED_ALERT,
-        summary: 'A withdrawn slash judgement was executed on chain while its cancel waited',
-        details: {
-          proposalId: proposal.id,
-          requestId: proposal.chainRequestId,
-          caseStatus: proposal.status,
-          penaltyMinor: proposal.penaltyAmount,
-          where,
-        },
-        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
-        dedupeKey: proposal.id,
-      });
-    } catch (error) {
-      this.logger.error(
-        `slash proposal ${proposal.id}: the executed-while-cancel-waited alert failed`,
-        error instanceof Error ? error.stack : String(error),
-      );
-    }
   }
 
   /**

@@ -43,6 +43,17 @@ function build(input: {
     if (input.record instanceof Error) throw input.record;
     return input.record ? ({ status: input.record } as SlashRecordSnapshot) : null;
   });
+  // A sink that pages once per name+dedupeKey for ONCE_PER_INCIDENT, as the suppressing sink does.
+  const pages: string[] = [];
+  const seen = new Set<string>();
+  const alerts = {
+    emit: jest.fn(async (alert: { name: string; dedupeKey?: string; aggregation?: string }) => {
+      const key = `${alert.name}:${alert.dedupeKey ?? ''}`;
+      if (alert.aggregation === 'ONCE_PER_INCIDENT' && seen.has(key)) return;
+      seen.add(key);
+      pages.push(key);
+    }),
+  };
   const service = new OperatorCaseService(
     proposals as never,
     queue as never,
@@ -52,8 +63,9 @@ function build(input: {
     parts as never,
     enrolments as never,
     { readRecord } as never,
+    alerts as never,
   );
-  return { service, readRecord };
+  return { service, readRecord, alerts, pages };
 }
 
 describe('OperatorCaseService.brief chainRecord', () => {
@@ -147,5 +159,38 @@ describe('OperatorCaseService.brief chainRecord', () => {
     });
     await expect(service.brief('case-1')).resolves.toMatchObject({ chainRecord: 'STANDING' });
     expect(readRecord).not.toHaveBeenCalled();
+  });
+});
+
+// Round-2 R1-I1: the page says operations was alerted, so the brief itself pages it.
+describe('OperatorCaseService.brief: an execution while the cancel waited is paged', () => {
+  it('EXECUTED under CANCEL_REQUESTED pages once across repeated views', async () => {
+    const ctx = build({ record: 'EXECUTED' });
+    await ctx.service.brief('case-1');
+    await ctx.service.brief('case-1');
+    expect(ctx.alerts.emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: 'CRITICAL',
+        name: 'slash_executed_while_cancel_waited',
+        aggregation: 'ONCE_PER_INCIDENT',
+        dedupeKey: 'case-1',
+      }),
+    );
+    expect(ctx.pages).toEqual(['slash_executed_while_cancel_waited:case-1']);
+  });
+
+  it('an executed part under CANCEL_REQUESTED pages too', async () => {
+    const ctx = build({ parts: [{ chainStatus: 'EXECUTED' }] });
+    await ctx.service.brief('case-1');
+    expect(ctx.pages).toHaveLength(1);
+  });
+
+  it('an ordinary executed penalty (mirror EXECUTED) or a standing one pages nothing', async () => {
+    const executed = build({ proposal: { chainStatus: 'EXECUTED' } });
+    await executed.service.brief('case-1');
+    const standing = build({ record: 'PENDING' });
+    await standing.service.brief('case-1');
+    expect(executed.alerts.emit).not.toHaveBeenCalled();
+    expect(standing.alerts.emit).not.toHaveBeenCalled();
   });
 });
