@@ -8,6 +8,7 @@ import { AuditLogModule } from '@shared/audit';
 import { CALL_DISPUTE_CONFIG, loadCallDisputeConfig } from './constants/call-dispute.config';
 import { CallDisputeService } from './services/call-dispute.service';
 import { DisputeService } from './services/dispute.service';
+import { RefundEligibilityService } from './services/refund-eligibility.service';
 
 /**
  * Dispute domain — challenges to a verdict, an SLA window, or a payment
@@ -31,8 +32,10 @@ import { DisputeService } from './services/dispute.service';
   providers: [
     DisputeService,
     CallDisputeService,
+    // Read-only: the receipt's refundableIfReportedNow, beside the filing so both see one HELD_PAYMENTS.
+    RefundEligibilityService,
     { provide: CALL_DISPUTE_CONFIG, useFactory: () => loadCallDisputeConfig() },
   ],
-  exports: [DisputeService, CallDisputeService, CALL_DISPUTE_CONFIG],
+  exports: [DisputeService, CallDisputeService, RefundEligibilityService, CALL_DISPUTE_CONFIG],
 })
 export class DisputeModule {}

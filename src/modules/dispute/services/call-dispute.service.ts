@@ -18,9 +18,7 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { collectionStateOf } from '@modules/payment/domain/collection';
-import { refundGuaranteedIfReported } from '@modules/payment/domain/dispute-hold';
 import { HELD_PAYMENTS, HeldPaymentsPort } from '@modules/payment/ports/held-payments.port';
-import { PaymentRail } from '@modules/payment/ports/payment.types';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
 import { EvidencePackService } from '@modules/verification/services/evidence-pack.service';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
@@ -50,7 +48,6 @@ import {
   RefundState,
   UNDISPUTABLE_CALL_CLASSES,
   boundedBody,
-  disputeFilingClosesAt,
   filingLimitFor,
   needsSecondOperator,
   planRefund,
@@ -262,20 +259,15 @@ export class CallDisputeService {
         }
         // Guaranteed only where the hold is real (review P2-1): rail B needs the
         // escrow hold live on the call's chain; rail A's hold is the ledger's.
-        // The receipt's `refundableIfReportedNow` is the same predicate.
-        const holdLive = await this.holdLiveFor(intent);
+        const holdIsLive =
+          intent.rail !== 'RAIL_B_VOUCHER' ||
+          ((await this.held?.holdLive(intent.assetId as AssetId)) ?? false);
         entity.refundGuaranteed =
-          (intent.rail !== PaymentRail.RAIL_B_VOUCHER || holdLive) &&
+          holdIsLive &&
           (await this.paymentIntents.holdForDispute(
             manager,
             { organizationId, id: intent.id, payer: intent.agentAccount },
             DISPUTE_FILING_GUARD_SECONDS,
-            (call, at) =>
-              refundGuaranteedIfReported(call, {
-                holdLive,
-                now: at,
-                guardSeconds: DISPUTE_FILING_GUARD_SECONDS,
-              }),
           ));
         await manager.save(entity);
         await this.audit.record(manager, {
@@ -312,51 +304,6 @@ export class CallDisputeService {
     );
 
     return this.detailOf(entity);
-  }
-
-  /**
-   * Read-only: whether a report filed now would be refund-guaranteed
-   * (`refundGuaranteed`), for the receipt's `refundableIfReportedNow`
-   * (wave-1 audit I1). The filing's own preconditions (settled, paid, another
-   * provider, inside the filing window, never decided) and then
-   * {@link refundGuaranteedIfReported}, with the same hold source as
-   * {@link file}. Writes nothing and takes no lock: the filing decides again
-   * under its lock, and can only withhold what this says.
-   */
-  async refundableIfReportedNow(
-    intent: PaymentIntentEntity,
-    settledAt: Date | null,
-    now: Date = new Date(),
-  ): Promise<boolean> {
-    const closesAt = disputeFilingClosesAt(intent, settledAt, this.config.filingWindowMs);
-    if (closesAt === null || now.getTime() > closesAt.getTime()) return false;
-    const holdLive = await this.holdLiveFor(intent);
-    const facts = {
-      ...intent,
-      heldStatus: intent.heldStatus ?? null,
-      collectableAt: intent.collectableAt ?? null,
-    };
-    if (
-      !refundGuaranteedIfReported(facts, {
-        holdLive,
-        now,
-        guardSeconds: DISPUTE_FILING_GUARD_SECONDS,
-      })
-    ) {
-      return false;
-    }
-    const decided = await this.disputes.findOneBy({
-      organizationId: intent.organizationId,
-      intentId: intent.id,
-      state: In([DisputeState.UPHELD, DisputeState.REJECTED]),
-    });
-    return decided === null;
-  }
-
-  /** Whether the escrow hold is live on a rail-B call's chain; rail A does not read it. */
-  private async holdLiveFor(intent: PaymentIntentEntity): Promise<boolean> {
-    if (intent.rail !== PaymentRail.RAIL_B_VOUCHER) return false;
-    return (await this.held?.holdLive(intent.assetId as AssetId)) ?? false;
   }
 
   async listForBuyer(
