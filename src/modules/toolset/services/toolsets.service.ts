@@ -16,7 +16,7 @@ import {
 import { getAssetMetadata, isRegisteredAsset } from '@modules/chains/ports/asset-registry';
 import { AssetId } from '@modules/chains/ports/caip.types';
 import { OnEmpty, ProviderMode } from '@modules/tool/domain/routing';
-import { ToolStatus, ToolVersionStatus } from '@modules/tool/ports/tool.types';
+import { ToolKind, ToolStatus, ToolVersionStatus } from '@modules/tool/ports/tool.types';
 import { CursorPageDto, ListQueryDto, ListSpec, asInstant, paginate } from '@shared/api';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
@@ -120,7 +120,7 @@ export class ToolsetsService {
       });
     }
 
-    const entries = await this.validateEntries(body.entries ?? []);
+    const entries = await this.validateEntries(organizationId, body.entries ?? []);
     const toolNames = new Map(entries.map((entry) => [entry.toolId, entry.tool.name]));
     const pinnedTools = this.validatePinned(body.pinnedTools ?? [], [...toolNames.values()]);
     const slug = body.slug
@@ -130,7 +130,7 @@ export class ToolsetsService {
     const saved = await this.dataSource.transaction(async (manager) => {
       const toolset = await manager.save(ToolsetEntity, {
         ownerOrgId: organizationId,
-        publisherKind: 'USER',
+        publisherKind: publisherKindOf(organizationId, entries),
         slug,
         name: body.name,
         description: body.description ?? null,
@@ -220,7 +220,7 @@ export class ToolsetsService {
         row.toolVersionRange,
       ]),
     );
-    const entries = await this.validateEntries(input, stored);
+    const entries = await this.validateEntries(organizationId, input, stored);
     const names = new Set(entries.map((entry) => entry.tool.name));
 
     await this.dataSource.transaction(async (manager) => {
@@ -232,6 +232,7 @@ export class ToolsetsService {
         {
           // A pinned tool the new Draft no longer holds stops being pinned.
           pinnedTools: toolset.pinnedTools.filter((name) => names.has(name)),
+          publisherKind: publisherKindOf(organizationId, entries),
           category: toolset.category ?? inferCategory(entries),
           updatedAt: new Date(),
         },
@@ -317,6 +318,7 @@ export class ToolsetsService {
   // ── Validation ────────────────────────────────────────────────────────────
 
   private async validateEntries(
+    organizationId: string,
     input: readonly ToolsetEntryInputDto[],
     storedRanges: ReadonlyMap<string, string | null> = new Map(),
   ): Promise<ValidEntry[]> {
@@ -334,11 +336,21 @@ export class ToolsetsService {
     }
 
     const tools = new Map((await this.tools.findByIds(ids)).map((tool) => [tool.id, tool]));
-    // Only LISTED tools that still serve: a STANDARD tool is always LISTED, and
-    // an UNLISTED provider tool may only sit in its own provider's toolsets (T4).
+    // Only tools that still serve and that this organization may hold: a
+    // LISTED one (every STANDARD tool is), or one of its own PRIVATE or
+    // UNLISTED provider tools — another organization's unlisted provider tool
+    // may only sit in its own provider's toolsets (§7.6), and reads exactly
+    // like a tool that does not exist.
     const unknown = ids.filter((id) => {
       const tool = tools.get(id);
-      return !tool || tool.visibility !== 'LISTED' || tool.status === ToolStatus.REMOVED;
+      return (
+        !tool ||
+        tool.status === ToolStatus.REMOVED ||
+        !(
+          tool.visibility === 'LISTED' ||
+          (tool.kind === ToolKind.PROVIDER && tool.ownerOrgId === organizationId)
+        )
+      );
     });
     if (unknown.length > 0) {
       throw ToolsetErrors.invalid({ reason: 'unknown or unavailable tools', toolIds: unknown });
@@ -361,6 +373,15 @@ export class ToolsetsService {
       );
       const mode = entry.providerMode ?? ProviderMode.BEST;
       const providerIds = dedupe(entry.providerIds ?? []);
+      // A provider tool has exactly one candidate, its own provider (§7.3):
+      // ONLY and EXCLUDE have nothing to choose between. Tier, price and
+      // quality limits still apply.
+      if (tools.get(entry.toolId)?.kind === ToolKind.PROVIDER && mode !== ProviderMode.BEST) {
+        throw ToolsetErrors.invalid({
+          reason: 'a provider tool has one provider, so providerMode must be BEST',
+          toolIds: [entry.toolId],
+        });
+      }
       if (mode === ProviderMode.BEST && providerIds.length > 0) {
         throw ToolsetErrors.invalid({
           reason: 'providerIds must be empty when providerMode is BEST',
@@ -560,6 +581,23 @@ export class ToolsetsService {
         : null,
     };
   }
+}
+
+/**
+ * The badge a toolset carries (§6.1): PROVIDER when every tool in it is the
+ * owner's own provider tool — one maker's set of its own API — else USER
+ * (Community). Recomputed whenever the Draft is written.
+ */
+export function publisherKindOf(
+  organizationId: string,
+  entries: readonly { readonly tool: Pick<ToolEntity, 'kind' | 'ownerOrgId'> }[],
+): 'PROVIDER' | 'USER' {
+  return entries.length > 0 &&
+    entries.every(
+      (entry) => entry.tool.kind === ToolKind.PROVIDER && entry.tool.ownerOrgId === organizationId,
+    )
+    ? 'PROVIDER'
+    : 'USER';
 }
 
 interface ValidEntry {

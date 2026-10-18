@@ -47,9 +47,13 @@ import {
   Tool,
   ToolBinding,
   categoryOf,
+  ToolKind,
   ToolVersionStatus,
   isListedTool,
+  isNotReviewed,
+  isProviderTool,
 } from '@modules/tool/ports/tool.types';
+import { parseProviderToolName } from '@modules/tool/domain/provider-tool-name';
 import { toServedToolBindings } from '@modules/tool/services/database-tool-catalogue';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { MoneyUtil } from '@utils/money.util';
@@ -175,8 +179,14 @@ export class CatalogueService {
    * still answers, with no tools — see {@link getProvider}.
    */
   private async loadMarket(): Promise<ListedMarket> {
+    // Only bindings of LISTED tools: an UNLISTED or PRIVATE provider tool is
+    // reachable only through its provider's own toolsets (§7.6), so neither
+    // its name nor its provider's card may come from here.
+    const listed = new Set(
+      (await this.catalogue.listTools()).filter(isListedTool).map((tool: Tool) => tool.id),
+    );
     const rows = (await this.bindings.findActiveBindings()).filter(
-      (row) => !this.blocklist.organizationBlock(row.organizationId),
+      (row) => listed.has(row.toolId) && !this.blocklist.organizationBlock(row.organizationId),
     );
     // As traffic is served, not as the row reads now: an unpublished draft
     // must not show on a public page. A drifted row with no published snapshot
@@ -417,6 +427,9 @@ export class CatalogueService {
         description: tool.description,
         ...versionFieldsOf(tool, (toolId) => publicTools.has(toolId)),
         tier: tool.tier,
+        kind: isProviderTool(tool) ? ToolKind.PROVIDER : ToolKind.STANDARD,
+        handle: isProviderTool(tool) ? (parseProviderToolName(tool.name)?.handle ?? null) : null,
+        notReviewed: isNotReviewed(tool),
         category: categoryOf(tool),
         tags: [...(tool.tags ?? [])],
         providerCount: new Set(own.map((binding) => binding.providerId)).size,

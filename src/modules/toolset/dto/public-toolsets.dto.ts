@@ -400,6 +400,39 @@ export class PublicToolsetVersionListDto {
   versions: PublicToolsetVersionDto[];
 }
 
+/** One LISTED provider tool on a public name's page (§7.4 `/@{handle}`, §7.10). */
+export class PublicHandleToolDto {
+  @ApiProperty({ format: 'uuid' })
+  id: string;
+
+  @ApiProperty({ example: 'acme__search_posts', description: '`{handle}__{tool}`' })
+  name: string;
+
+  @ApiProperty({ description: 'The 200-character summary an agent reads in tools/list' })
+  summary: string;
+
+  @ApiProperty()
+  category: string;
+
+  @ApiProperty({ type: [String] })
+  tags: string[];
+
+  @ApiProperty({ enum: ['UNVERIFIED', 'VERIFIED'], description: 'Never GUARANTEED (§7.6)' })
+  tier: string;
+
+  @ApiProperty({ example: '1.2.0', nullable: true })
+  version: string | null;
+
+  @ApiProperty({ enum: ['PROVIDER'] })
+  kind: 'PROVIDER';
+
+  @ApiProperty({ description: 'Always true here: only reviewed (LISTED) tools are shown' })
+  reviewed: boolean;
+
+  @ApiProperty({ nullable: true, description: 'The standard tool it points to, when promoted' })
+  replacementName: string | null;
+}
+
 export class PublicHandleProfileDto {
   @ApiProperty()
   handle: string;
@@ -411,10 +444,17 @@ export class PublicHandleProfileDto {
   toolsets: PublicToolsetCardDto[];
 
   @ApiProperty({
-    type: [String],
-    description: 'Provider tools (`{handle}__{tool}`); arrives with provider tools',
+    type: [PublicHandleToolDto],
+    description: 'Every LISTED provider tool (`{handle}__{tool}`) of this public name',
   })
-  tools: string[];
+  tools: PublicHandleToolDto[];
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      '`/@{handle}`: serves every tool above; null when there is none (that URL is a 404)',
+  })
+  mcpUrl: string | null;
 }
 
 export class PublicCategoryDto {

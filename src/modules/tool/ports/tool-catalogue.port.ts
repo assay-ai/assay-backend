@@ -1,3 +1,4 @@
+import { RemovedTool } from './tool-contracts.port';
 import { Tool, ToolBinding } from './tool.types';
 
 /**
@@ -37,6 +38,9 @@ export interface ToolCataloguePort {
    * distinction someone reads at 3am.
    */
   findBindings(toolId: string): Promise<readonly ToolBinding[]>;
+
+  /** A REMOVED tool by name, for `TOOL_REMOVED` (`ToolContractsPort.findRemovedByName`). */
+  findRemovedByName?(name: string): Promise<RemovedTool | null>;
 }
 
 /** DI token for the bound {@link ToolCataloguePort}. */

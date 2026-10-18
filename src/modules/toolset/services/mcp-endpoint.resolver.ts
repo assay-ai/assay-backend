@@ -10,7 +10,7 @@ import {
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { EntryRoutingRules } from '@modules/tool/domain/routing';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { categoryOf, isListedTool } from '@modules/tool/ports/tool.types';
+import { categoryOf, isListedTool, isProviderTool } from '@modules/tool/ports/tool.types';
 
 import { BoundedTtlCache } from '@shared/utils/bounded-ttl-cache';
 
@@ -78,7 +78,7 @@ export const ENDPOINT_CACHE_MAX_ENTRIES = 10_000;
  * /@{handle}/{slug}[@n]   PUBLIC and LISTED, or in its PUBLIC grace period — else 404
  * /u/{token}[@n]          the shared toolset holding this token, or one in grace — else 404
  * /c/{category}           every LISTED tool of one topic; a topic no tool has is a 404
- * /@{handle}              T4 (provider tools): 404
+ * /@{handle}              every LISTED provider tool of one maker; a maker with none is a 404
  * ```
  *
  * Every view carries its discovery settings (`view.discovery`): the root's
@@ -140,7 +140,9 @@ export class McpEndpointResolver {
     }
 
     const shared =
-      path.kind === McpPathKind.PUBLIC_TOOLSET || path.kind === McpPathKind.UNLISTED_TOOLSET;
+      path.kind === McpPathKind.PUBLIC_TOOLSET ||
+      path.kind === McpPathKind.UNLISTED_TOOLSET ||
+      path.kind === McpPathKind.HANDLE;
     const key = shared
       ? `shared:${canonicalPath(path)}`
       : `${organizationId}:${canonicalPath(path)}`;
@@ -191,9 +193,47 @@ export class McpEndpointResolver {
       case McpPathKind.CATEGORY:
         return this.categoryView(path);
       case McpPathKind.HANDLE:
+        return this.handleView(path);
       default:
         throw McpErrors.urlNotFound();
     }
+  }
+
+  /**
+   * `/@{handle}`: every LISTED provider tool of one maker (§7.4). A handle
+   * that names nobody, a frozen one, the Official handle and a maker with no
+   * LISTED provider tool are all the same 404: an UNLISTED or PRIVATE tool
+   * never makes the URL exist.
+   */
+  private async handleView(
+    path: Extract<McpPath, { kind: McpPathKind.HANDLE }>,
+  ): Promise<BaseView> {
+    const owner = await this.handles.resolve(path.handle);
+    if (!owner || owner.kind !== 'ORG') throw McpErrors.urlNotFound();
+    if (this.catalogue) {
+      const tools = await this.catalogue.listTools();
+      const served = tools.some(
+        (tool) =>
+          isListedTool(tool) && isProviderTool(tool) && tool.ownerOrgId === owner.organizationId,
+      );
+      if (!served) throw McpErrors.urlNotFound();
+    }
+    return {
+      path,
+      kind: endpointKindOf(path),
+      toolset: null,
+      handle: path.handle,
+      baseToolIds: null,
+      baseOwnerOrgId: owner.organizationId,
+      entryRules: new Map(),
+      discovery: {
+        mode: DiscoveryMode.AUTO,
+        searchThreshold: DEFAULT_SEARCH_THRESHOLD,
+        pinnedTools: [],
+      },
+      notice: noticeOf(null, owner.renamedTo, owner.aliasUntil),
+      defaultDiscovery: null,
+    };
   }
 
   /** `/c/{category}`: every LISTED tool in one topic; a topic no tool has is a 404. */
@@ -260,6 +300,7 @@ export class McpEndpointResolver {
         name: toolset.name,
         version: null,
         latest: false,
+        ownerOrgId: toolset.ownerOrgId,
       },
       handle: null,
       baseToolIds: rows.map((row) => row.toolId),
@@ -381,6 +422,7 @@ export class McpEndpointResolver {
         name: row.name,
         version: row.version,
         latest: options.latest,
+        ownerOrgId: toolset.ownerOrgId,
       },
       handle: options.handle,
       baseToolIds: snapshot.map((entry) => entry.toolId),

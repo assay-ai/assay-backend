@@ -80,13 +80,14 @@ export class PublicCatalogueController {
     summary: 'Every tool at least one provider serves — no authentication',
     description:
       'Each tool with its category, tags, provider count, the market floor and the routed ' +
-      'price. `?category=` keeps one topic.',
+      'price, its kind (standard, or one maker’s provider tool with its handle), review ' +
+      'badge and tier. `?category=` keeps one topic; `?kind=` keeps standard or provider tools.',
   })
   @ApiResponse({ status: 200, type: PublicToolListDto })
   @ApiResponse({ status: 400, description: 'category is not a category slug.' })
   @ApiResponse({ status: 429, description: 'Too many requests from this address.' })
   async listTools(@Query() query: ListPublicToolsQueryDto): Promise<PublicToolListDto> {
-    return this.catalogue.listTools(query.category);
+    return this.catalogue.listTools(query.category, query.kind);
   }
 
   @Get('tools/:toolId/versions')

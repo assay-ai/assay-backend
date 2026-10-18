@@ -10,7 +10,16 @@ import {
   FreeQuotaService,
 } from '@modules/free-tier/services/free-quota.service';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { PricingMode, Tool, ToolTier } from '@modules/tool/ports/tool.types';
+import {
+  PricingMode,
+  Tool,
+  ToolKind,
+  ToolTier,
+  ToolVisibility,
+  isListedTool,
+  isNotReviewed,
+  isProviderTool,
+} from '@modules/tool/ports/tool.types';
 import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provider-router.service';
 import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
 import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
@@ -111,11 +120,36 @@ export class McpCatalogueService {
   async admit(name: string, scope: McpScope): Promise<Tool> {
     const { tools } = selectViewTools(scope.view, await this.catalogue.listTools());
     const tool = tools.find((candidate) => candidate.name === name);
-    if (!tool) throw ToolAccessErrors.notInToolset({ details: { name } });
+    if (!tool) {
+      await this.refuseIfRemoved(name, scope);
+      throw ToolAccessErrors.notInToolset({ details: { name } });
+    }
     if (!scopeAllows(scope, tool.id)) {
       throw ToolAccessErrors.notAllowed({ details: { name, toolId: tool.id } });
     }
     return tool;
+  }
+
+  /**
+   * `TOOL_REMOVED` for a removed tool this URL served (§7.6 "Removal"): one
+   * its toolset held, or a LISTED one on a catalogue-wide URL. Anything else
+   * stays `TOOL_NOT_IN_TOOLSET`, so a removed PRIVATE or UNLISTED tool's
+   * name is no oracle.
+   */
+  private async refuseIfRemoved(name: string, scope: McpScope): Promise<void> {
+    const removed = await this.catalogue.findRemovedByName?.(name);
+    if (!removed) return;
+    const view = scope.view;
+    const served = view.baseToolIds
+      ? view.baseToolIds.includes(removed.id) &&
+        (removed.visibility === ToolVisibility.LISTED ||
+          (!!view.toolset?.ownerOrgId && view.toolset.ownerOrgId === removed.ownerOrgId))
+      : removed.visibility === ToolVisibility.LISTED &&
+        (!view.baseOwnerOrgId || view.baseOwnerOrgId === removed.ownerOrgId);
+    if (!served) return;
+    throw ToolAccessErrors.removed({
+      details: { name, replacement: removed.replacementToolName },
+    });
   }
 
   /**
@@ -156,7 +190,9 @@ export class McpCatalogueService {
     // access, and prices each tool under the rules a call through this URL
     // would be routed under. Without a scope (the REST surfaces), the whole
     // catalogue with no rules.
-    const all = scope ? await this.scopedTools(scope) : await this.catalogue.listTools();
+    const all = scope
+      ? await this.scopedTools(scope)
+      : (await this.catalogue.listTools()).filter(isListedTool);
     const tools = options.onlyToolIds
       ? all.filter((tool) => options.onlyToolIds.has(tool.id))
       : all;
@@ -279,7 +315,11 @@ export class McpCatalogueService {
    * charge some agents for the wrong one.
    */
   async findByName(name: string): Promise<Tool> {
-    const matches = (await this.catalogue.listTools()).filter((tool) => tool.name === name);
+    // Off the MCP host there is no URL to reach an unlisted tool through, so
+    // only the LISTED catalogue answers (§7.6).
+    const matches = (await this.catalogue.listTools()).filter(
+      (tool) => tool.name === name && isListedTool(tool),
+    );
 
     if (matches.length === 0) {
       throw McpErrors.toolNotFound({ name });
@@ -466,7 +506,28 @@ export const ASSAY_DEPRECATED = 'assay/deprecated';
 export function contractMetaOf(tool: Tool): Record<string, unknown> {
   const version = versionOf(tool);
   const deprecated = deprecationOf(version, replacementOf(tool, version));
-  return deprecated ? { [ASSAY_DEPRECATED]: deprecated } : {};
+  return {
+    ...(deprecated ? { [ASSAY_DEPRECATED]: deprecated } : {}),
+    ...providerMetaOf(tool),
+  };
+}
+
+/** `_meta["assay/kind"]`: `PROVIDER` on one maker's own tool (absent on a standard one). */
+export const ASSAY_KIND = 'assay/kind';
+/** `_meta["assay/notReviewed"]`: a provider tool no operator has reviewed (§7.6). */
+export const ASSAY_NOT_REVIEWED = 'assay/notReviewed';
+
+/**
+ * A provider tool says so beside its price: one maker's API, with no backup
+ * provider, and — until an operator approved it — not reviewed. Calls are
+ * never priced or routed on this; it is what the agent and its owner see.
+ */
+export function providerMetaOf(tool: Tool): Record<string, unknown> {
+  if (!isProviderTool(tool)) return {};
+  return {
+    [ASSAY_KIND]: ToolKind.PROVIDER,
+    ...(isNotReviewed(tool) ? { [ASSAY_NOT_REVIEWED]: true } : {}),
+  };
 }
 
 /**

@@ -80,7 +80,7 @@ describe('public Explorer routes need no authentication', () => {
     catalogue.listTools.mockClear();
     const ok = await request(app.getHttpServer()).get('/public/catalogue/tools?category=weather');
     expect(ok.status).toBe(200);
-    expect(catalogue.listTools).toHaveBeenCalledWith('weather');
+    expect(catalogue.listTools).toHaveBeenCalledWith('weather', undefined);
 
     const bad = await request(app.getHttpServer()).get(
       '/public/catalogue/tools?category=Not%20One',
