@@ -34,7 +34,7 @@
  * any limit lands on `SYSTEM_ERROR`: no charge, no strike, stake untouched.
  */
 
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleDestroy, Optional } from '@nestjs/common';
 import * as http from 'node:http';
 import * as https from 'node:https';
 import { LookupAddress } from 'node:dns';
@@ -43,6 +43,8 @@ import { LookupFunction, isIP } from 'node:net';
 import { EgressError, EgressFailureKind } from './egress.errors';
 import { EgressLimits, EgressPolicy, EgressTrust, UNTRUSTED_EGRESS_POLICY } from './egress.policy';
 import { withSanctionedEgress } from './egress-lockdown';
+import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from './egress-relay.config';
+import { EgressRelayTransport } from './egress-relay.transport';
 import { EgressDnsLookup, EgressTarget, resolveEgressTarget } from './resolve-target';
 
 export interface EgressRequest {
@@ -144,15 +146,28 @@ interface HopRedirect {
 type HopOutcome = HopResponse | HopRedirect;
 
 @Injectable()
-export class EgressHttpClient {
+export class EgressHttpClient implements OnModuleDestroy {
   private readonly logger = new Logger(EgressHttpClient.name);
+
+  /**
+   * Set when `EGRESS_RELAY_URL` is configured. Used only for hops whose policy
+   * says `relay: true`; everything else stays on the direct, unpooled path.
+   */
+  private readonly relay: EgressRelayTransport | null;
 
   constructor(
     @Optional() @Inject(EGRESS_DNS_LOOKUP) private readonly dnsLookup?: EgressDnsLookup,
     @Optional()
     @Inject(EGRESS_CONNECT_OVERRIDE)
     private readonly connectOverride?: EgressConnectOverride,
-  ) {}
+    @Optional() @Inject(EGRESS_RELAY_CONFIG) relayConfig?: EgressRelayConfig | null,
+  ) {
+    this.relay = relayConfig ? new EgressRelayTransport(relayConfig) : null;
+  }
+
+  onModuleDestroy(): void {
+    this.relay?.close();
+  }
 
   /**
    * Perform one outbound call, following redirects under the same checks.
@@ -201,7 +216,12 @@ export class EgressHttpClient {
       }
       origin = target.url.origin;
 
-      const outcome = await this.hop(target, method, headers, body, limits, deadline);
+      // No fallback: with the relay configured and asked for, a relay failure
+      // is the answer, never a cue to dial the provider from here.
+      const outcome =
+        policy.relay && this.relay
+          ? await this.relayHop(this.relay, target, method, headers, body, limits, deadline)
+          : await this.hop(target, method, headers, body, limits, deadline);
 
       if (outcome.kind === 'response') {
         return {
@@ -232,6 +252,55 @@ export class EgressHttpClient {
       `exceeded ${limits.maxRedirects} redirects`,
       { url: currentUrl },
     );
+  }
+
+  // ── One hop, through the relay ─────────────────────────────────────────────
+
+  /**
+   * The target was resolved and checked by the caller exactly as for a direct
+   * hop; only the socket is different. A `3xx` comes back as a redirect so the
+   * loop re-checks the next target here before the relay ever sees it.
+   */
+  private async relayHop(
+    relay: EgressRelayTransport,
+    target: EgressTarget,
+    method: string,
+    headers: Record<string, string>,
+    body: string | Buffer | undefined,
+    limits: EgressLimits,
+    deadline: number,
+  ): Promise<HopOutcome> {
+    const remaining = deadline - Date.now();
+    if (remaining <= 0) {
+      throw new EgressError(EgressFailureKind.TIMEOUT, 'total request budget already spent', {
+        url: target.url.href,
+      });
+    }
+
+    const response = await relay.send(
+      { url: target.url.href, method, headers, body },
+      { ...limits, totalTimeoutMs: remaining },
+    );
+
+    if (REDIRECT_STATUSES.has(response.status)) {
+      const location = response.headers['location'];
+      if (!location) {
+        throw new EgressError(
+          EgressFailureKind.REDIRECT_INVALID,
+          `${response.status} with no Location header`,
+          { url: target.url.href },
+        );
+      }
+      return { kind: 'redirect', status: response.status, location };
+    }
+
+    return {
+      kind: 'response',
+      status: response.status,
+      headers: response.headers,
+      body: response.body.toString('utf8'),
+      bytes: response.body.length,
+    };
   }
 
   // ── One hop ───────────────────────────────────────────────────────────────

@@ -35,6 +35,10 @@ function stringField(value: unknown, field: string): string | undefined {
   return typeof raw === 'string' ? raw : undefined;
 }
 
+/** `EgressFailureKind.RELAY_UNAVAILABLE`'s code; see `egress.errors.ts`. */
+const RELAY_UNAVAILABLE_CODE = 'EGRESS_RELAY_UNAVAILABLE';
+const RELAY_UNAVAILABLE_DETAIL = 'egress relay unavailable';
+
 /**
  * Error codes/names, most specific first.
  *
@@ -147,6 +151,17 @@ export function classifyTransportError(
   partialBody?: string | null,
 ): TransportError {
   const chain = causeChain(error);
+
+  // The egress relay failed, so the provider was never reached through it: a
+  // platform fault, never counted against the provider. Fixed detail, because
+  // `detail` reaches buyers and the raw chain may name relay internals.
+  if (chain.some((link) => stringField(link, 'code') === RELAY_UNAVAILABLE_CODE)) {
+    return {
+      kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+      partialBody: null,
+      detail: RELAY_UNAVAILABLE_DETAIL,
+    };
+  }
 
   for (const link of chain) {
     const code = stringField(link, 'code');
