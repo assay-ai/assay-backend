@@ -11,8 +11,10 @@ import { isSupportedChallengeMethod, isValidChallenge } from '../domain/pkce';
 import { matches } from '../domain/redirect-uri';
 import {
   clearRequestCookie,
-  readRequestCookie,
+  readCookie,
   requestCookieMatches,
+  requestCookieName,
+  requestCookiesToEvict,
   setRequestCookie,
 } from '../domain/request-cookie';
 import { normaliseResource } from '../domain/resource';
@@ -32,7 +34,6 @@ import {
 import { OAuthTokenService } from '../services/oauth-token.service';
 import {
   CONTINUE_EXPIRED_PAGE,
-  CONTINUE_UNDECIDED_PAGE,
   CONTINUE_WRONG_BROWSER_PAGE,
   RATE_LIMITED_PAGE,
   UNAVAILABLE_PAGE,
@@ -73,7 +74,8 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *             response_type, PKCE (S256), state,
  *             scope, resource                        → redirect_uri?error=…&state=…&iss=…
  *             store the request, set the cookie      → {WEB}/connect/authorize#request={rid}
- * continue    cookie = HMAC(secret, rid)?            → else the "finish in that browser" page
+ * continue    this request's cookie?                 → else the "finish in that browser" page,
+ *                                                      and a decided request is discarded
  *             take the request (GETDEL)
  *             approved → mint the code               → redirect_uri?code=…&state=…&iss=…
  *             denied                                 → redirect_uri?error=access_denied&…
@@ -174,8 +176,12 @@ export class OAuthAuthorizeController {
     };
 
     if (!stateUsable) return fail('invalid_request', 'invalid_request');
-    if (single(query, 'response_type') !== 'code')
+    const responseType = single(query, 'response_type');
+    if (typeof responseType !== 'string' || responseType === '') {
       return fail('invalid_request', 'invalid_request');
+    }
+    // RFC 6749 §4.1.2.1; counted with the malformed requests (closed labels).
+    if (responseType !== 'code') return fail('unsupported_response_type', 'invalid_request');
     const codeChallenge = single(query, 'code_challenge');
     if (!isValidChallenge(codeChallenge)) return fail('invalid_request', 'invalid_request');
     if (!isSupportedChallengeMethod(single(query, 'code_challenge_method'))) {
@@ -234,7 +240,11 @@ export class OAuthAuthorizeController {
     await this.stampClient(client);
     this.metrics.incAuthorize('stored');
 
-    res.setHeader('Set-Cookie', setRequestCookie(secret, rid));
+    // One cookie per request; past MAX_REQUEST_COOKIES the oldest are expired.
+    res.setHeader('Set-Cookie', [
+      ...requestCookiesToEvict(req.headers.cookie).map(clearRequestCookie),
+      setRequestCookie(secret, rid),
+    ]);
     // A fragment: the rid never reaches a server log or a Referer.
     redirect(res, `${this.config.webAppUrl}/connect/authorize#request=${rid}`);
   }
@@ -255,15 +265,21 @@ export class OAuthAuthorizeController {
       sendHtml(res, 404, CONTINUE_EXPIRED_PAGE);
       return;
     }
-    // Another browser (or none): refuse, and leave the request for the right one.
-    if (!requestCookieMatches(secret, rid, readRequestCookie(req.headers.cookie))) {
+    const cookieName = requestCookieName(secret, rid);
+    if (!requestCookieMatches(secret, rid, readCookie(req.headers.cookie, cookieName))) {
+      // Another browser (or none). If the request was already approved or
+      // denied, the person who decided it is not in the browser that started
+      // it: discard it, so neither they nor whoever started it can finish it
+      // (T8). An undecided request stays, so a stray tab cannot end a flow
+      // before the person has decided. Both answers are the same page.
       this.metrics.incConsent('continue_cookie_missing');
+      await this.store.discardIfDecided(rid);
       sendHtml(res, 403, CONTINUE_WRONG_BROWSER_PAGE);
       return;
     }
 
     // This browser's request: from here on, the cookie has done its job.
-    res.setHeader('Set-Cookie', clearRequestCookie());
+    res.setHeader('Set-Cookie', clearRequestCookie(cookieName));
     const request = await this.store.take(rid);
     if (!request) {
       this.metrics.incConsent('not_found');
@@ -284,8 +300,20 @@ export class OAuthAuthorizeController {
       return;
     }
     if (!request.approval || !request.boundOrganizationId) {
-      // Taken before anyone decided: the request is gone, and nothing is issued.
-      sendHtml(res, 409, CONTINUE_UNDECIDED_PAGE);
+      // Taken in the browser that started it, before anyone decided: the
+      // request is gone and nothing is issued. The client and its redirect
+      // were validated when the request was stored, so it is told, rather than
+      // left waiting.
+      redirect(
+        res,
+        authorizationErrorLocation(
+          request.redirectUri,
+          'access_denied',
+          request.state,
+          this.config.issuer,
+          'The request was not approved',
+        ),
+      );
       return;
     }
 

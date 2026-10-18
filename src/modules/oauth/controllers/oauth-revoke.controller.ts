@@ -2,8 +2,21 @@ import { Controller, HttpCode, Logger, Post, Req, Res } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 
+import {
+  OAUTH_MINUTE_SECONDS,
+  OAUTH_RATE_LIMITS,
+  OAuthRateLimiter,
+} from '../services/oauth-rate-limiter.service';
 import { OAuthTokenService } from '../services/oauth-token.service';
-import { errorName, isFormEncoded, setNoStore, single } from './oauth-response';
+import {
+  clientAndIpKey,
+  errorName,
+  isFormEncoded,
+  retryAfterSeconds,
+  sendOAuthError,
+  setNoStore,
+  single,
+} from './oauth-response';
 
 /**
  * `POST {MCP}/oauth/revoke` (RFC 7009, spec §6.3.12): `token`, optional
@@ -15,6 +28,12 @@ import { errorName, isFormEncoded, setNoStore, single } from './oauth-response';
  * here. The answer never tells a caller whether a token existed. The hint is
  * not needed: the token's prefix says what it is.
  *
+ * The one exception is the rate limit: the token endpoint's, per `client_id`
+ * and IP key, 60 a minute, on its own counter. Past it the answer is 503 with
+ * `Retry-After`, which RFC 7009 §2.2.1 tells a client to retry. With Redis
+ * unreachable the revocation still runs: refusing a logout would only keep a
+ * token alive.
+ *
  * CORS `*` without credentials (`mcp-cors.ts`). The body is never logged.
  */
 @ApiTags('OAuth')
@@ -22,7 +41,10 @@ import { errorName, isFormEncoded, setNoStore, single } from './oauth-response';
 export class OAuthRevokeController {
   private readonly logger = new Logger(OAuthRevokeController.name);
 
-  constructor(private readonly tokens: OAuthTokenService) {}
+  constructor(
+    private readonly tokens: OAuthTokenService,
+    private readonly limiter: OAuthRateLimiter,
+  ) {}
 
   @Post('revoke')
   @ApiOperation({ summary: 'Revoke a refresh or access token (RFC 7009)' })
@@ -32,6 +54,16 @@ export class OAuthRevokeController {
       const body: unknown = isFormEncoded(req) ? req.body : undefined;
       const token = single(body, 'token');
       const clientId = single(body, 'client_id');
+      const count = await this.limiter.count(
+        'revoke',
+        clientAndIpKey(clientId, req),
+        OAUTH_MINUTE_SECONDS,
+      );
+      if (count !== null && count > OAUTH_RATE_LIMITS.tokenPerClientAndIpPerMinute) {
+        res.setHeader('Retry-After', String(retryAfterSeconds(OAUTH_MINUTE_SECONDS)));
+        sendOAuthError(res, 503, 'temporarily_unavailable', 'Too many revocations; retry later');
+        return;
+      }
       if (typeof token === 'string' && token !== '' && typeof clientId === 'string') {
         await this.tokens.revoke({ token, clientId });
       }

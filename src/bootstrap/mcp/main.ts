@@ -3,7 +3,6 @@ import { NestFactory } from '@nestjs/core';
 import { NestExpressApplication } from '@nestjs/platform-express';
 
 import { applyHttpSecurity } from '@shared/security/security-headers';
-import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { StructuredLogger } from '@shared/observability';
 import { LoggingInterceptor } from '@shared/interceptors/logging.interceptor';
 import { assertTrustProxyHopsConfigured } from '@config/app.config';
@@ -11,6 +10,7 @@ import { loadMcpDiscoveryConfig } from '@modules/mcp/config/mcp-discovery.config
 
 import { AppMcpModule } from './app.module';
 import { mcpCorsOptions } from './mcp-cors';
+import { McpExceptionsFilter } from './mcp-exceptions.filter';
 
 /**
  * The MCP server process — the interface agents actually reach the
@@ -60,7 +60,9 @@ async function bootstrapMcp() {
   applyHttpSecurity(app);
   app.enableCors(mcpCorsOptions);
 
-  app.useGlobalFilters(new AllExceptionsFilter());
+  // `AllExceptionsFilter`, except that a body the parser refuses on the OAuth
+  // token, revoke and register routes answers in RFC 6749 shape.
+  app.useGlobalFilters(new McpExceptionsFilter());
 
   // The ONLY interceptor this process takes. `TransformInterceptor`
   // is deliberately absent (JSON-RPC has its own envelope) and that must not
