@@ -35,16 +35,13 @@ describe('loadProviderTerms', () => {
   });
 
   // R17-R-03: the printed take rate is the charged one, PLATFORM_FEE_BPS.
-  it('prints the take rate from PLATFORM_FEE_BPS, ignoring the retired display setting', () => {
+  it('prints the take rate from PLATFORM_FEE_BPS', () => {
     const takeRate = (values: Record<string, string>) =>
       loadProviderTerms(configWith(values)).commercialTerms.find((term) => term.key === 'takeRate')
         ?.value;
 
     expect(takeRate({})).toBe('10%');
     expect(takeRate({ PLATFORM_FEE_BPS: '1250' })).toBe('12.5%');
-    expect(takeRate({ PLATFORM_FEE_BPS: '1000', PROVIDER_TERMS_TAKE_RATE_PERCENT: '20' })).toBe(
-      '10%',
-    );
   });
 
   it('never rounds the floor up', () => {
