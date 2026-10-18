@@ -1,7 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { Controller, HttpCode, Logger, Post, Req, Res } from '@nestjs/common';
-import { ApiExcludeController } from '@nestjs/swagger';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 
 import { isValidVerifier } from '../domain/pkce';
@@ -63,7 +63,7 @@ const INVALID_REQUEST: OAuthError = { error: 'invalid_request' };
  *
  * CORS `*` without credentials (`mcp-cors.ts`): a browser client may call it.
  */
-@ApiExcludeController()
+@ApiTags('OAuth')
 @Controller('oauth')
 export class OAuthTokenController {
   private readonly logger = new Logger(OAuthTokenController.name);
@@ -75,6 +75,7 @@ export class OAuthTokenController {
   ) {}
 
   @Post('token')
+  @ApiOperation({ summary: 'Exchange a code or rotate a refresh token (RFC 6749 §4.1.3, §6)' })
   @HttpCode(200)
   async token(@Req() req: Request, @Res() res: Response): Promise<void> {
     const body: unknown = isFormEncoded(req) ? req.body : undefined;

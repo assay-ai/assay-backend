@@ -21,8 +21,10 @@ import { CredentialSessionResolver } from '@modules/auth/services/credential-ses
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
 import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { unauthorizedReasonOf } from '@modules/mcp/ports/mcp-unauthorized.port';
 import { OAuthSessionConfig } from '@modules/oauth/config/oauth.config';
 import { AppRole } from '@shared/app-role/app-role';
+import { AppError } from '@shared/errors/app-errors';
 import { digestToken } from '@shared/crypto/token-digest';
 
 import { blocklistOf, SeededBlock } from '../helpers/blocklist';
@@ -258,6 +260,50 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
 
       await expectErrorCodeAsync(() => fx.source.resolve(ACCESS_TOKEN), 'MCP_CREDENTIAL_INVALID');
       expect(fx.credentials.calls).toBe(0);
+    });
+  });
+
+  describe('the private 401 reason (assay_mcp_unauthorized_total)', () => {
+    async function reasonOf(fx: ReturnType<typeof build>): Promise<unknown> {
+      const error = await fx.source.resolve(ACCESS_TOKEN).then(
+        () => null,
+        (caught: unknown) => caught,
+      );
+      expect(error).toMatchObject({ errorCode: 'MCP_CREDENTIAL_INVALID' });
+      return unauthorizedReasonOf(error);
+    }
+
+    it.each([
+      ['an unknown token', {}, false, 'unknown'],
+      ['an expired token', { token: { expiresAt: new Date(Date.now() - 1000) } }, true, 'expired'],
+      ['a revoked token', { token: { revokedAt: new Date() } }, true, 'revoked'],
+      ['another audience', { token: { audience: 'https://mcp.other.example' } }, true, 'audience'],
+      ['a revoked grant', { credential: { revokedAt: new Date() } }, true, 'revoked'],
+      [
+        'an expired grant',
+        { credential: { expiresAt: new Date(Date.now() - 1000) } },
+        true,
+        'expired',
+      ],
+    ] as const)('%s → %s', async (_label, options, seed, reason) => {
+      const fx = build('mcp');
+      if (seed) seedGrant(fx, options as Parameters<typeof seedGrant>[1]);
+      await expect(reasonOf(fx)).resolves.toBe(reason);
+    });
+
+    it('is private: never on the wire, and the message is the same for every reason', async () => {
+      const fx = build('mcp');
+      seedGrant(fx, { token: { revokedAt: new Date() } });
+      const error = (await fx.source.resolve(ACCESS_TOKEN).catch((e: unknown) => e)) as AppError;
+      expect(error.publicContext).toBeUndefined();
+      expect(JSON.stringify(error.toJSON())).not.toContain('revoked');
+      expect(error.message).toBe(McpErrors.credentialInvalid().message);
+    });
+
+    it("a token of another shape carries no reason (not this source's token)", async () => {
+      const fx = build('mcp');
+      const error = await fx.source.resolve('assay_sk_live_x').catch((e: unknown) => e);
+      expect(unauthorizedReasonOf(error)).toBeNull();
     });
   });
 

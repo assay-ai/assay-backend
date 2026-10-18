@@ -1,5 +1,5 @@
 import { Controller, HttpCode, Logger, Post, Req, Res } from '@nestjs/common';
-import { ApiExcludeController } from '@nestjs/swagger';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 
 import { DcrService } from '../services/dcr.service';
@@ -21,7 +21,7 @@ import { errorName, ipKeyOf, retryAfterSeconds, sendJson, sendOAuthError } from 
  * No CORS (L4, `mcp-cors.ts`): a browser page cannot register clients. The
  * body is never logged.
  */
-@ApiExcludeController()
+@ApiTags('OAuth')
 @Controller('oauth')
 export class OAuthRegisterController {
   private readonly logger = new Logger(OAuthRegisterController.name);
@@ -29,6 +29,7 @@ export class OAuthRegisterController {
   constructor(private readonly dcr: DcrService) {}
 
   @Post('register')
+  @ApiOperation({ summary: 'Register a public client (RFC 7591)' })
   @HttpCode(201)
   async register(@Req() req: Request, @Res() res: Response): Promise<void> {
     try {

@@ -1,5 +1,5 @@
 import { Controller, HttpCode, Logger, Post, Req, Res } from '@nestjs/common';
-import { ApiExcludeController } from '@nestjs/swagger';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 
 import { OAuthTokenService } from '../services/oauth-token.service';
@@ -17,7 +17,7 @@ import { errorName, isFormEncoded, setNoStore, single } from './oauth-response';
  *
  * CORS `*` without credentials (`mcp-cors.ts`). The body is never logged.
  */
-@ApiExcludeController()
+@ApiTags('OAuth')
 @Controller('oauth')
 export class OAuthRevokeController {
   private readonly logger = new Logger(OAuthRevokeController.name);
@@ -25,6 +25,7 @@ export class OAuthRevokeController {
   constructor(private readonly tokens: OAuthTokenService) {}
 
   @Post('revoke')
+  @ApiOperation({ summary: 'Revoke a refresh or access token (RFC 7009)' })
   @HttpCode(200)
   async revoke(@Req() req: Request, @Res() res: Response): Promise<void> {
     try {

@@ -1,5 +1,5 @@
 import { Controller, Get, Inject, Logger, Req, Res } from '@nestjs/common';
-import { ApiExcludeController } from '@nestjs/swagger';
+import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
 
 import { OAuthClientKind } from '@database/postgres/entities/oauth-client.entity';
@@ -86,7 +86,7 @@ const UUID_RE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
  *
  * No CORS (`mcp-cors.ts`): these are top-level browser navigations.
  */
-@ApiExcludeController()
+@ApiTags('OAuth')
 @Controller('oauth/authorize')
 export class OAuthAuthorizeController {
   private readonly logger = new Logger(OAuthAuthorizeController.name);
@@ -102,6 +102,7 @@ export class OAuthAuthorizeController {
   ) {}
 
   @Get()
+  @ApiOperation({ summary: 'Start an authorization request (RFC 6749 §4.1.1, PKCE S256)' })
   async authorize(@Req() req: Request, @Res() res: Response): Promise<void> {
     try {
       await this.handleAuthorize(req, res);
@@ -112,6 +113,7 @@ export class OAuthAuthorizeController {
   }
 
   @Get('continue')
+  @ApiOperation({ summary: 'Finish an approved or denied request in the browser that started it' })
   async continue(@Req() req: Request, @Res() res: Response): Promise<void> {
     try {
       await this.handleContinue(req, res);
