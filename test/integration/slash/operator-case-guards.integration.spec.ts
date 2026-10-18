@@ -107,7 +107,15 @@ describe('operator case actions, against a real database', () => {
       new OperatorService(operators, { get: () => undefined } as never),
     );
     // The queue (`AdjudicationQueueService`) is only read by the list routes.
-    cases = new OperatorCaseService(proposals, null as never, arbitration, execution, approvals);
+    cases = new OperatorCaseService(
+      proposals,
+      null as never,
+      arbitration,
+      execution,
+      approvals,
+      null as never,
+      null as never,
+    );
 
     adjudicator = await seedOperator('ops-adj', [OperatorRole.ADJ]);
     lead = await seedOperator('ops-adjl', [OperatorRole.ADJL]);
