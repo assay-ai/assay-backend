@@ -1,3 +1,5 @@
+import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
+import { VerificationRecordDisputeOutcome1761800000001 } from '@database/postgres/migrations/1761800000001-verification-record-dispute-outcome';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -198,6 +200,10 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
       PaymentIntentRedemptionLapsed1760700000000,
       PaymentIntentDebtReplacing1760800000000,
       VoucherSeqDebtReplacement1760900000000,
+      // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
+      PaymentIntentDisputeHold1761800000000,
+      // `dispute_outcome` (G3.B1), mapped by `VerificationRecordEntity`.
+      VerificationRecordDisputeOutcome1761800000001,
     ],
     synchronize: false,
     logging: false,

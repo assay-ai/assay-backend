@@ -1,5 +1,12 @@
 import { Module } from '@nestjs/common';
 
+import { NotificationModule } from '@modules/notification/notification.module';
+import { PaymentModule } from '@modules/payment/payment.module';
+import { VerificationModule } from '@modules/verification/verification.module';
+import { AuditLogModule } from '@shared/audit';
+
+import { CALL_DISPUTE_CONFIG, loadCallDisputeConfig } from './constants/call-dispute.config';
+import { CallDisputeService } from './services/call-dispute.service';
 import { DisputeService } from './services/dispute.service';
 
 /**
@@ -10,15 +17,22 @@ import { DisputeService } from './services/dispute.service';
  *
  * `DisputeService` reads `disputes`, `payment_intents` and
  * `verification_records` directly through the repositories `PostgresModule`
- * provides globally, so this module declares no imports of its own.
+ * provides globally.
  *
- * Scope: opening, acknowledging, withdrawing and reading. Adjudication — who
- * reviews, on what SLA, how a partial overturn restores stake — is not
- * implemented here; `resolvedAt` / `resolvedBy` / `resolutionNote` /
- * `restoredAmount` are columns nothing here writes.
+ * `CallDisputeService` is a buyer's dispute over one paid call (G3.B1), from
+ * filing to the operator's decision and its refund. It needs `PaymentModule`
+ * (`PaymentIntentService.voidDebt`, the refund of an uncollected call),
+ * `VerificationModule` (the evidence pack it snapshots), `NotificationModule`
+ * and `AuditLogModule`. The operator console decides through it
+ * (`OperatorCallDisputeService`).
  */
 @Module({
-  providers: [DisputeService],
-  exports: [DisputeService],
+  imports: [PaymentModule, VerificationModule, NotificationModule, AuditLogModule],
+  providers: [
+    DisputeService,
+    CallDisputeService,
+    { provide: CALL_DISPUTE_CONFIG, useFactory: () => loadCallDisputeConfig() },
+  ],
+  exports: [DisputeService, CallDisputeService, CALL_DISPUTE_CONFIG],
 })
 export class DisputeModule {}

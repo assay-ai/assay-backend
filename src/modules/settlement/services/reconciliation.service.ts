@@ -1,4 +1,6 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
+import { HELD_PAYMENTS, HeldPaymentsPort } from '@modules/payment/ports/held-payments.port';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { BuyerEscrowEntity } from '@database/postgres/entities/buyer-escrow.entity';
 import { ReconciliationRunEntity } from '@database/postgres/entities/reconciliation-run.entity';
@@ -102,6 +104,10 @@ export class ReconciliationService {
     private readonly runs: ReconciliationRunRepository,
     @Inject(ESCROW_BALANCE_READER) private readonly escrowReader: EscrowBalanceReaderPort,
     private readonly escrows: BuyerEscrowRepository,
+    // "Redeem into hold" (G3.B1): held payments are in the escrow contract but
+    // in no buyer's balance. Optional: without them nothing is held.
+    @Optional() private readonly intents: PaymentIntentRepository | null = null,
+    @Optional() @Inject(HELD_PAYMENTS) private readonly held: HeldPaymentsPort | null = null,
   ) {}
 
   /**
@@ -178,9 +184,12 @@ export class ReconciliationService {
     // On eip155 the vault IS the escrow contract, so what it holds beyond the
     // buyer escrows the walk read is value in no `buyer_escrows` row. Only
     // known when every escrow was read; Solana escrows sit outside the vault.
+    // The escrow's held payments (G3.B1): in the contract, in no buyer balance.
+    const totalHeld = await this.readTotalHeld(asset);
+    const mirroredHeld = this.intents ? await this.intents.sumHeldOnChain(asset) : 0n;
     const outsideEscrows =
       namespaceOf(asset) === 'eip155' && escrows.unreadable === 0
-        ? vaultAtomic - escrows.total
+        ? vaultAtomic - escrows.total - (totalHeld ?? 0n)
         : null;
 
     const findings = [
@@ -196,6 +205,7 @@ export class ReconciliationService {
       ...this.checkSnapshot(decimals, asset, books.total, snapshotTotal),
       ...this.checkBooks(decimals, asset, books),
       ...escrows.findings,
+      ...this.checkHeld(asset, decimals, totalHeld, mirroredHeld),
     ];
 
     const finishedAt = new Date();
@@ -223,6 +233,44 @@ export class ReconciliationService {
       finishedAt,
       durationMs: finishedAt.getTime() - startedAt.getTime(),
     });
+  }
+
+  /** `totalHeld()`, or `null` when the escrow has no hold or it could not be read. */
+  private async readTotalHeld(asset: AssetId): Promise<bigint | null> {
+    if (!this.held) return null;
+    try {
+      return await this.held.totalHeld(asset);
+    } catch (error) {
+      this.logger.warn(`totalHeld() on ${asset} could not be read: ${(error as Error).message}`);
+      return null;
+    }
+  }
+
+  /** Check 6 (G3.B1): the escrow's `totalHeld()` against the calls mirrored as held. */
+  private checkHeld(
+    asset: AssetId,
+    decimals: number,
+    totalHeld: bigint | null,
+    mirroredHeld: bigint,
+  ): ReconciliationFinding[] {
+    if (totalHeld === null || totalHeld === mirroredHeld) return [];
+    return [
+      {
+        code: ReconciliationFindingCode.HELD_MIRROR_DRIFT,
+        severity: ReconciliationSeverity.WARN,
+        summary:
+          `Held payments on ${asset}: the escrow holds ${format(totalHeld, decimals)}, the ` +
+          `platform mirrors ${format(mirroredHeld, decimals)} as held — drift ` +
+          `${format(totalHeld - mirroredHeld, decimals)}. Transient while a redemption, collect ` +
+          `or refund is booked; persistent means a missed PaymentHeld, HeldCollected or ` +
+          `HeldRefunded.`,
+        details: {
+          asset,
+          totalHeld: totalHeld.toString(),
+          mirroredHeld: mirroredHeld.toString(),
+        },
+      },
+    ];
   }
 
   // ── Check 4 and 5: every buyer's own escrow ──────────────────────────────
@@ -267,6 +315,11 @@ export class ReconciliationService {
       const accounts = page.map((row) => row.accountId as AccountId);
       const readings = await this.escrowReader.readMany(accounts, asset);
       const mirror = await this.balances.sumByAccounts(asset, accounts);
+      // Held payments (G3.B1) are out of the escrow balance but still in the
+      // buyer's ledger hold: take them off both sides before comparing.
+      const heldOnChain = this.intents
+        ? await this.intents.sumHeldOnChainByAccounts(asset, accounts)
+        : new Map<string, bigint>();
 
       for (const row of page) {
         const account = row.accountId as AccountId;
@@ -280,7 +333,8 @@ export class ReconciliationService {
         const chain = MoneyUtil.toAtomic(reading.balance);
         total += chain;
 
-        const held = mirror.get(account)?.held ?? 0n;
+        const inHold = heldOnChain.get(account) ?? 0n;
+        const held = (mirror.get(account)?.held ?? 0n) - inHold;
         // `pending` too: a deposit settled and awaiting finality is already in
         // the escrow on chain. Leaving it out paged drift for every deposit on
         // a chain whose finality lags (~20 minutes on eip155:46630).
