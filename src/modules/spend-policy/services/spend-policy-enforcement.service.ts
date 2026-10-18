@@ -353,9 +353,10 @@ export class SpendPolicyEnforcementService {
     }
 
     // 6. Alert bands — never blocks. Best-effort: a notification failure must
-    // not turn an otherwise-successful call into an error.
+    // not turn an otherwise-successful call into an error. Not awaited: the
+    // notice (and the label it reads) must not hold the agent's spend lock.
     if (spendToday && spendThisMonth) {
-      await this.emitCrossedBands(
+      void this.emitCrossedBands(
         organizationId,
         agentId,
         price,

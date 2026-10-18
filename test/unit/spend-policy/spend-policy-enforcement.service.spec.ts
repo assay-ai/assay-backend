@@ -59,6 +59,11 @@ function policyRow(overrides: Partial<SpendPolicyEntity> = {}): SpendPolicyEntit
   } as unknown as SpendPolicyEntity;
 }
 
+/** The band notices are fired without awaiting; let them land. */
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+}
+
 function zeroUsage(): AgentSpendUsage {
   return { spendThisHour: money('0'), spendToday: money('0'), spendThisMonth: money('0') };
 }
@@ -406,6 +411,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — alert bands (never
 
     // +50000 crosses 80% (800000) without exceeding the cap.
     const version = await service.assertCallAllowed(input({ price: money('50000') }));
+    await flushMicrotasks();
 
     expect(version).toBe(3);
     expect(notify).toHaveBeenCalledWith(
@@ -427,6 +433,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — alert bands (never
     });
 
     await service.assertCallAllowed(input({ price: money('100000') }));
+    await flushMicrotasks();
 
     const band = notify.mock.calls.find((call) => call[0].dedupeKey === `${AGENT}:daily:100`)?.[0];
     expect(band?.body).toBe('"research-bot" has spent $5.00 of its $5.00 daily limit (100%).');
@@ -448,6 +455,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — alert bands (never
     });
 
     await expect(service.assertCallAllowed(input({ price: money('50000') }))).resolves.toBe(3);
+    await flushMicrotasks();
 
     expect(notify).toHaveBeenCalledWith(
       expect.objectContaining({
@@ -468,6 +476,7 @@ describe('SpendPolicyEnforcementService.assertCallAllowed — alert bands (never
     });
 
     await service.assertCallAllowed(input({ price: money('1000') }));
+    await flushMicrotasks();
 
     expect(notify).not.toHaveBeenCalledWith(
       expect.objectContaining({ dedupeKey: `${AGENT}:daily:80` }),
