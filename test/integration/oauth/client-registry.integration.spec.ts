@@ -160,6 +160,38 @@ describe('OAuth client registry — real Postgres', () => {
     });
   });
 
+  it('an upsert never changes the kind of an existing row', async () => {
+    const dcrId = 'dcr_' + 'k'.repeat(22);
+    const inserted = await clients.insertClient({
+      clientId: dcrId,
+      kind: OAuthClientKind.DCR,
+      clientName: 'Registered',
+      clientUri: null,
+      redirectUris: ['http://127.0.0.1/cb'],
+      metadata: {},
+      fetchedAt: null,
+      cacheUntil: null,
+    });
+    const result = await clients.upsertByClientId({
+      clientId: dcrId,
+      kind: OAuthClientKind.CIMD,
+      clientName: 'Hijack',
+      clientUri: null,
+      redirectUris: ['http://127.0.0.1/evil'],
+      metadata: {},
+      fetchedAt: new Date(),
+      cacheUntil: new Date(),
+    });
+    expect(result).toBeNull();
+    const row = (await clients.findByClientId(dcrId))!;
+    expect(row).toMatchObject({
+      id: inserted.id,
+      kind: OAuthClientKind.DCR,
+      clientName: 'Registered',
+    });
+    expect(row.redirectUris).toEqual(['http://127.0.0.1/cb']);
+  });
+
   async function dropDatabase(database: string): Promise<void> {
     const connection = testConnectionOptions();
     const admin = new Client({

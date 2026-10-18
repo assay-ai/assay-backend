@@ -153,6 +153,8 @@ export class CimdFetcher {
       fetchedAt: new Date(now),
       cacheUntil: new Date(now + outcome.maxAgeSeconds * 1000),
     });
+    // The URL is held by a client of another kind: never turn it into a CIMD client.
+    if (!client) return { ok: false, reason: 'invalid' };
     return { ok: true, client };
   }
 

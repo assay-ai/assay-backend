@@ -44,6 +44,12 @@ const answers: Record<string, Array<{ address: string; family: 4 | 6 }>> = {
   'redirect.example.com': [{ address: PUBLIC_ADDRESS, family: 4 }],
   'big.example.com': [{ address: PUBLIC_ADDRESS, family: 4 }],
   'slow.example.com': [{ address: PUBLIC_ADDRESS, family: 4 }],
+  'chunked.example.com': [{ address: PUBLIC_ADDRESS, family: 4 }],
+  'wrong-name.example.org': [{ address: PUBLIC_ADDRESS, family: 4 }],
+  'untrusted.example.com': [{ address: PUBLIC_ADDRESS, family: 4 }],
+  'nat64.example.com': [{ address: '64:ff9b::a9fe:a9fe', family: 6 }],
+  'zero.example.com': [{ address: '0.0.0.0', family: 4 }],
+  'translated.example.com': [{ address: '::ffff:0:7f00:1', family: 6 }],
   'loopback.example.com': [{ address: '127.0.0.1', family: 4 }],
   '127.0.0.1.nip.io': [{ address: '127.0.0.1', family: 4 }],
   'loopback6.example.com': [{ address: '::1', family: 6 }],
@@ -80,14 +86,18 @@ const lookup = jest.fn(async (hostname: string) => {
 /** Every address a socket was opened for, as the guard approved it. */
 const dialled: string[] = [];
 let serverPort = 0;
+/** Serves a certificate the client does not trust. */
+let untrustedPort = 0;
 const connectOverride: EgressConnectOverride = (target: EgressTarget) => {
   dialled.push(target.address);
-  return { address: '127.0.0.1', family: 4, port: serverPort };
+  const port = target.url.hostname === 'untrusted.example.com' ? untrustedPort : serverPort;
+  return { address: '127.0.0.1', family: 4, port };
 };
 
 const hits: string[] = [];
 const sockets = new Set<Socket>();
 let server: https.Server;
+let untrustedServer: https.Server;
 let certDir: string;
 let defaultCAs: string[];
 
@@ -114,6 +124,13 @@ function handle(req: import('node:http').IncomingMessage, res: import('node:http
       res.end(JSON.stringify({ client_id: url, padding: 'x'.repeat(20_000) }));
       return;
     }
+    case 'chunked.example.com': {
+      // No Content-Length: only the arrival check can stop it.
+      res.writeHead(200, { 'content-type': 'application/json' });
+      for (let i = 0; i < 20; i += 1) res.write('x'.repeat(1024));
+      res.end();
+      return;
+    }
     case 'slow.example.com': {
       res.writeHead(200, { 'content-type': 'application/json' });
       res.write('{');
@@ -131,15 +148,16 @@ function setup() {
   const { metrics, registry } = oauthMetrics();
   const redis = new FakeOAuthRedis();
   const clock = new Clock();
+  const repo = new FakeOAuthClientRepository();
   const fetcher = new CimdFetcher(
     new EgressHttpClient(lookup, connectOverride, null),
-    new FakeOAuthClientRepository() as unknown as OAuthClientRepository,
+    repo as unknown as OAuthClientRepository,
     rateLimiter(redis, clock),
     fakeCache(redis),
     metrics,
     oauthConfig(),
   );
-  return { fetcher, registry };
+  return { fetcher, registry, repo };
 }
 
 const fetched = (registry: MetricsRegistryService, result: string) =>
@@ -148,6 +166,32 @@ const fetched = (registry: MetricsRegistryService, result: string) =>
 beforeAll(async () => {
   // A throwaway key and certificate for this run only; nothing is committed.
   certDir = mkdtempSync(join(tmpdir(), 'cimd-ssrf-'));
+  const trusted = makeCertificate('trusted');
+  const untrusted = makeCertificate('untrusted');
+  const cert = trusted.cert;
+  const key = trusted.key;
+  defaultCAs = tls.getCACertificates('default');
+  tls.setDefaultCACertificates([...defaultCAs, cert]);
+
+  server = https.createServer({ cert, key }, handle);
+  server.on('connection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
+  serverPort = (server.address() as AddressInfo).port;
+
+  untrustedServer = https.createServer(untrusted, handle);
+  untrustedServer.on('connection', (socket: Socket) => {
+    sockets.add(socket);
+    socket.on('close', () => sockets.delete(socket));
+  });
+  await new Promise<void>((resolve) => untrustedServer.listen(0, '127.0.0.1', resolve));
+  untrustedPort = (untrustedServer.address() as AddressInfo).port;
+});
+
+/** A throwaway self-signed CA certificate for `*.example.com`, made with openssl. */
+function makeCertificate(name: string): { cert: string; key: string } {
   execFileSync(
     'openssl',
     [
@@ -159,9 +203,9 @@ beforeAll(async () => {
       'ec_paramgen_curve:prime256v1',
       '-nodes',
       '-keyout',
-      join(certDir, 'key.pem'),
+      join(certDir, `${name}-key.pem`),
       '-out',
-      join(certDir, 'cert.pem'),
+      join(certDir, `${name}-cert.pem`),
       '-days',
       '1',
       '-subj',
@@ -173,24 +217,17 @@ beforeAll(async () => {
     ],
     { stdio: 'ignore' },
   );
-  const cert = readFileSync(join(certDir, 'cert.pem'), 'utf8');
-  const key = readFileSync(join(certDir, 'key.pem'), 'utf8');
-  defaultCAs = tls.getCACertificates('default');
-  tls.setDefaultCACertificates([...defaultCAs, cert]);
-
-  server = https.createServer({ cert, key }, handle);
-  server.on('connection', (socket: Socket) => {
-    sockets.add(socket);
-    socket.on('close', () => sockets.delete(socket));
-  });
-  await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
-  serverPort = (server.address() as AddressInfo).port;
-});
+  return {
+    cert: readFileSync(join(certDir, `${name}-cert.pem`), 'utf8'),
+    key: readFileSync(join(certDir, `${name}-key.pem`), 'utf8'),
+  };
+}
 
 afterAll(async () => {
   tls.setDefaultCACertificates(defaultCAs);
   for (const socket of sockets) socket.destroy();
   await new Promise<void>((resolve) => server.close(() => resolve()));
+  await new Promise<void>((resolve) => untrustedServer.close(() => resolve()));
   rmSync(certDir, { recursive: true, force: true });
 });
 
@@ -220,6 +257,9 @@ describe('CIMD fetch SSRF (T7) — real EgressHttpClient', () => {
     ['100.64.0.1 (CGNAT)', 'cgnat.example.com'],
     ['224.0.0.1 (multicast)', 'multicast.example.com'],
     ['fd00::1 (unique local)', 'ula.example.com'],
+    ['64:ff9b::a9fe:a9fe (NAT64 of the metadata address)', 'nat64.example.com'],
+    ['0.0.0.0', 'zero.example.com'],
+    ['::ffff:0:7f00:1 (IPv4-translated loopback)', 'translated.example.com'],
     ['one public and one private answer', 'mixed.example.com'],
   ])('%s → blocked_address, never dialled', async (_label, host) => {
     const { fetcher, registry } = setup();
@@ -267,6 +307,32 @@ describe('CIMD fetch SSRF (T7) — real EgressHttpClient', () => {
     expect(await fetched(registry, 'too_large')).toBe(1);
   });
 
+  it('a chunked body over 16 KB with no Content-Length → too_large on arrival', async () => {
+    const { fetcher, registry } = setup();
+    const outcome = await fetcher.fetch('https://chunked.example.com/client.json', IP_KEY);
+    expect(outcome).toEqual({ ok: false, reason: 'invalid' });
+    expect(await fetched(registry, 'too_large')).toBe(1);
+  });
+
+  it('a certificate for another name → refused, counted as status, nothing stored', async () => {
+    const { fetcher, registry, repo } = setup();
+    const outcome = await fetcher.fetch('https://wrong-name.example.org/client.json', IP_KEY);
+    expect(outcome).toEqual({ ok: false, reason: 'invalid' });
+    expect(hits).toEqual([]);
+    expect(repo.rows.size).toBe(0);
+    expect(await fetched(registry, 'status')).toBe(1);
+  });
+
+  it('a certificate from an untrusted issuer → refused, counted as status, nothing stored', async () => {
+    const { fetcher, registry, repo } = setup();
+    const outcome = await fetcher.fetch('https://untrusted.example.com/client.json', IP_KEY);
+    expect(outcome).toEqual({ ok: false, reason: 'invalid' });
+    expect(dialled).toEqual([PUBLIC_ADDRESS]);
+    expect(hits).toEqual([]);
+    expect(repo.rows.size).toBe(0);
+    expect(await fetched(registry, 'status')).toBe(1);
+  });
+
   it('a slow drip past 5 s → timeout, within the 5 s budget', async () => {
     const { fetcher, registry } = setup();
     const started = Date.now();
@@ -285,6 +351,9 @@ describe('CIMD fetch SSRF (T7) — real EgressHttpClient', () => {
       'https://[::1]/client.json',
       'https://169.254.169.254/latest/meta-data/',
       'https://0x7f000001/client.json',
+      'https://2130706433/client.json',
+      'https://0177.0.0.1/client.json',
+      'https://0.0.0.0/client.json',
     ]) {
       expect(await fetcher.fetch(url, IP_KEY)).toEqual({ ok: false, reason: 'invalid' });
     }

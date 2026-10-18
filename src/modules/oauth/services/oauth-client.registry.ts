@@ -8,6 +8,7 @@ import { OAuthClientRepository } from '@database/postgres/repositories/oauth-cli
 
 import { OAUTH_CONFIG, OAuthConfig } from '../config/oauth.config';
 import { builtinClientId, classify } from '../domain/client-id';
+import { matches } from '../domain/redirect-uri';
 import { registrableDomain } from '../domain/registrable-domain';
 import { CimdFetcher } from './cimd.fetcher';
 
@@ -100,6 +101,11 @@ export class OAuthClientRegistry implements OnModuleInit {
       fetchedAt: null,
       cacheUntil: null,
     });
+    if (!row) {
+      throw new Error(
+        `oauth_clients already holds ${document.client_id} as a non-BUILTIN client; refusing to boot`,
+      );
+    }
     this.builtin = this.toResolved(row);
     // Not awaited: a slow or failing vendor host must not hold up the boot.
     void this.prewarm();
@@ -160,10 +166,13 @@ export class OAuthClientRegistry implements OnModuleInit {
 
   displayFor(client: ResolvedClient, redirectUri: string): ClientDisplay {
     const builtin = client.kind === OAuthClientKind.BUILTIN;
+    // Self-contained: never verified for a redirect this client did not register.
     const verified =
       !builtin &&
+      client.kind === OAuthClientKind.CIMD &&
       client.verifiedDisplayName !== null &&
-      client.vendorRedirects.includes(redirectUri);
+      client.vendorRedirects.includes(redirectUri) &&
+      matches(client.redirectUris, redirectUri, this.config.redirectAllowlist);
 
     let host: string | null = null;
     let domain: string | null = null;
@@ -190,10 +199,11 @@ export class OAuthClientRegistry implements OnModuleInit {
   }
 
   private toResolved(row: OAuthClientEntity): ResolvedClient {
+    // Only a CIMD client can be listed: its domain is proven by serving the document.
     const listed =
-      row.kind === OAuthClientKind.BUILTIN
-        ? undefined
-        : this.config.verifiedClients.find((entry) => entry.clientId === row.clientId);
+      row.kind === OAuthClientKind.CIMD
+        ? this.config.verifiedClients.find((entry) => entry.clientId === row.clientId)
+        : undefined;
     return Object.freeze({
       id: row.id,
       clientId: row.clientId,
