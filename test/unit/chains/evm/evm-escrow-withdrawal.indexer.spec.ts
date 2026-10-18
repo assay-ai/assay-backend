@@ -17,6 +17,8 @@ function build(
     inserted?: unknown[];
     ownerFails?: boolean;
     blockTime?: bigint;
+    /** A block's timestamp by number; may throw. */
+    timeOf?: (blockNumber: bigint) => bigint;
   } = {},
 ) {
   const logs: EscrowWithdrawalLog[] = [
@@ -35,8 +37,10 @@ function build(
       ? jest.fn(async () => {
           throw new Error('rpc down');
         })
-      : jest.fn(async () => ({
-          timestamp: options.blockTime ?? BigInt(Math.floor(Date.now() / 1000)),
+      : jest.fn(async ({ blockNumber }: { blockNumber: bigint }) => ({
+          timestamp: options.timeOf
+            ? options.timeOf(blockNumber)
+            : (options.blockTime ?? BigInt(Math.floor(Date.now() / 1000))),
         })),
   };
   const events = {
@@ -134,17 +138,43 @@ describe('EvmEscrowWithdrawalIndexer (B7)', () => {
     expect(alerts.emit).not.toHaveBeenCalled();
   });
 
-  it('alerts once per incident when the indexed block is over an hour old', async () => {
-    const { indexer, alerts } = build({ blockTime: BigInt(Math.floor(Date.now() / 1000) - 7_200) });
+  it('alerts once per incident when the index trails the head block by over an hour of chain time', async () => {
+    // One second a block: indexed through 10,099, head at 30,000.
+    const { indexer, alerts, events } = build({ head: 30_000n, timeOf: (n) => n });
 
     await indexer.tick();
 
+    expect(events.applyIndexedRange).toHaveBeenCalledWith(CHAIN, 10_099n, expect.anything());
     expect(alerts.emit).toHaveBeenCalledWith(
       expect.objectContaining({
         name: 'escrow_withdrawal_index_lagging',
         aggregation: 'ONCE_PER_INCIDENT',
       }),
     );
+  });
+
+  it('an idle chain at the safe head is not lagging, however old its last block', async () => {
+    const { indexer, alerts } = build({ blockTime: BigInt(Math.floor(Date.now() / 1000) - 7_200) });
+
+    await indexer.tick();
+
+    expect(alerts.emit).not.toHaveBeenCalled();
+  });
+
+  it('a failed lag read is neither an index failure nor an alert', async () => {
+    const { indexer, alerts, events } = build({
+      head: 30_000n,
+      timeOf: (n) => {
+        if (n === 30_000n) throw new Error('rpc down');
+        return n;
+      },
+    });
+
+    await indexer.tick();
+
+    expect(events.applyIndexedRange).toHaveBeenCalledTimes(1);
+    expect(events.recordError).not.toHaveBeenCalled();
+    expect(alerts.emit).not.toHaveBeenCalled();
   });
 
   it('reads nothing when the cursor is already at the safe head', async () => {
