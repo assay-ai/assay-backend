@@ -15,6 +15,9 @@
  * single-row aggregates (`SUM(...)` over a binding's closed windows) — they
  * return the first (and, in every caller so far, only) row of the fixture.
  *
+ * `having()` was added for `ProviderPayoutsService`'s redemption groups, whose
+ * keyset bound is on the aggregate.
+ *
  * `leftJoin()` was added for `ProviderVerdictService.list`, which registers a
  * join alias for an optional filter (`agentId` → `payment_intents`, `windowId`
  * → `sla_window_calls`) without an `addSelect` — same shape
@@ -27,6 +30,7 @@ export function fakeQueryBuilder<T>(rows: T[]) {
   const selects: Array<{ expr: string; alias?: string }> = [];
   const orders: Array<[string, string]> = [];
   const groups: string[] = [];
+  const havings: Array<{ sql: string; params: Record<string, unknown> }> = [];
   const joins: Array<{ entityOrProperty: unknown; alias: string; condition?: string }> = [];
   const params: Record<string, unknown> = {};
   let taken = 0;
@@ -52,6 +56,11 @@ export function fakeQueryBuilder<T>(rows: T[]) {
     },
     andWhere(sql: string, p: Record<string, unknown> = {}) {
       wheres.push({ sql, params: p });
+      Object.assign(params, p);
+      return qb;
+    },
+    having(sql: string, p: Record<string, unknown> = {}) {
+      havings.push({ sql, params: p });
       Object.assign(params, p);
       return qb;
     },
@@ -112,6 +121,7 @@ export function fakeQueryBuilder<T>(rows: T[]) {
     selects,
     orders,
     groups,
+    havings,
     joins,
     params,
     get taken() {
