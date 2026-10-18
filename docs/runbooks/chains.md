@@ -46,8 +46,8 @@ no-ops when no eip155 chain is enabled:
   defaults; unset is a boot failure**, because an unwatched float is worse than a process that
   refuses to start. `EVM_RELAYER_FLOAT_LOW_WEI` is **one** number read by two things — the grant
   refuses below it (`GasGrantRefusal.RELAYER_FLOAT_LOW`) and `EvmRelayerFloatMonitor` alerts on it
-  — and it was previously called `EVM_RELAYER_FLOAT_LOW_WATER_WEI`. `EVM_RELAYER_FLOAT_CRITICAL_WEI`
-  must be strictly below it. What an operator does when the float runs dry is in the assay-evm repository's deploy runbook.
+  — and `EVM_RELAYER_FLOAT_CRITICAL_WEI` must be strictly below it. What an operator does when the
+  float runs dry is in the assay-evm repository's deploy runbook.
 - `EVM_DEPLOYMENTS` — seven addresses per chain: `config`, `stake`, `escrow`, `asset`,
   `escrowImplementation`, `admin`, `owner`. The last three are what `VaultPort.assertVaultControl`
   compares the live chain against, and they are the ones that **move**: `escrowImplementation` on

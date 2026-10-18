@@ -24,14 +24,6 @@ import { StakeMonitorService } from './services/stake-monitor.service';
 /**
  * Scheduler-only half of the stake lifecycle — the stake monitor.
  *
- * The first of the two scheduler modules this file now holds. It used to be
- * the second: `ProviderPayoutSchedulerModule` ran an hourly job that read every
- * provider's earnings and built one Squads batch, and it has been deleted
- * outright. The simplified contract went further: `redeem_voucher` pays the provider's own
- * wallet in the same instruction, so there is no scheduled job moving anybody
- * else's money at all. `provider_payouts` keeps the rows that job wrote;
- * nothing writes new ones.
- *
  * Registered here and nowhere else, for the reason `docs/architecture.md`
  * §Scaling Design gives: the scheduler is a single instance, so the 5-minute
  * pass happens once per deployment. N API replicas running it would each race

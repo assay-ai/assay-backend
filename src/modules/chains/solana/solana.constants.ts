@@ -16,13 +16,6 @@ export const SOLANA_PAYMENT_SCHEME = 'exact';
 /**
  * Version tag on the canonical payout-proof message.
  *
- * **A withdrawal-authorization message used to lead this file** —
- * `WITHDRAWAL_MESSAGE_VERSION`, `'x402-withdrawal/v1'` — before per-buyer escrows moved
- * the buyer's exit onto a chain transaction the buyer signs directly
- * (`EscrowIntentBuilderPort`; see `ChainAdapter`'s class comment on
- * `buildPayoutProofMessage`). There is no off-chain withdrawal authorization
- * left to distinguish this tag from.
- *
  * Distinct from the voucher's own domain tag, for the confusion that already
  * refuses to allow: "sign this to prove you own this wallet" must never
  * verify as "sign this to pay", in either direction. A payout-proof signature

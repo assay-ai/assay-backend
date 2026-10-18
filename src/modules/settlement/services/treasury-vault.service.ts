@@ -16,12 +16,7 @@ import { ProofOfReserves } from '../ports/treasury-vault.types';
  * Every new deposit now goes onto the buyer's own escrow, so `checkReserves`
  * is now a check over what has not yet been migrated by the cutover runbook
  * rather than over every buyer's balance — it stays exactly as strict
- * until that runbook empties the vault. `proposeWithdrawal` is gone with it:
- * `WithdrawalService` no longer proposes a Squads withdrawal at all, because a
- * buyer's own `withdraw` on their escrow needs no proposal. `proposePayoutBatch`
- * went the same way earlier, and the current program finished the job: `redeem_voucher`
- * pays the provider's own wallet directly, so there is no earnings pool to
- * withdraw from and no fee pool to sweep.
+ * until that runbook empties the vault.
  *
  * This class never *moves* money. It reads chain state through `VaultPort` and reads liabilities
  * through the ledger's own balance table. Both reads are best-effort snapshots
