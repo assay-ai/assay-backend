@@ -27,6 +27,7 @@ function row(overrides: Partial<ReceiptsSummaryRow>): ReceiptsSummaryRow {
     owedCalls: 0,
     inProgressTotal: 0n,
     inProgressCalls: 0,
+    freeCalls: 0,
     ...overrides,
   };
 }
@@ -140,8 +141,28 @@ describe('ReceiptSummaryService — group totals reconcile exactly to the overal
       owedCalls: 0,
       inProgressTotal: { amount: '0', asset: '', decimals: 0 },
       inProgressCalls: 0,
+      freeCalls: 0,
       failRate: null,
     });
+  });
+
+  it('counts free calls per call, so the total is the same whatever the grouping (B1 I2)', async () => {
+    // A tool that served free AND paid calls: its group is not "free only",
+    // yet its free calls still reach the total.
+    const { service } = build({
+      current: [
+        row({ key: 'tool-1', calls: 10, listedTotal: 800n, chargedTotal: 800n, freeCalls: 2 }),
+        row({ key: 'tool-2', calls: 3, freeCalls: 3 }),
+      ],
+    });
+
+    const summary = await service.getSummary(ORG, {
+      ...WINDOW,
+      groupBy: ReceiptsSummaryGroupBy.TOOL,
+    });
+
+    expect(summary.groups.map((group) => group.freeCalls)).toEqual([2, 3]);
+    expect(summary.totals.freeCalls).toBe(5);
   });
 
   it('carries not charged and owed so listed = charged + not charged + owed (R17b-B-01)', async () => {
