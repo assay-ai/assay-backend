@@ -36,6 +36,21 @@ interface ReceiptClient {
   } | null>;
 }
 
+/** The log reads the no-hash fallback needs beyond `EvmReaderClient`. */
+interface LogsClient {
+  getBlockNumber(): Promise<bigint>;
+  getLogs(args: {
+    address: `0x${string}`;
+    fromBlock: bigint;
+    toBlock: bigint;
+  }): Promise<
+    readonly { address: string; data: `0x${string}`; topics: readonly `0x${string}`[] }[]
+  >;
+}
+
+/** How far back the no-hash fallback looks for a redemption's logs. */
+const LOG_LOOKBACK_BLOCKS = 50_000n;
+
 /** The redemption events, to classify a receipt. */
 const REDEMPTION_EVENTS_ABI = [
   ...X402_ESCROW_HOLD_ABI.filter((item) => item.type === 'event'),
@@ -75,8 +90,26 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     private readonly liveChains: ReadonlySet<string> = new Set(),
   ) {}
 
-  holdLive(asset: AssetId): boolean {
-    return this.liveChains.has(chainIdOf(asset));
+  /** Chains whose escrow answered `totalHeld()`: the hold is there, for good. */
+  private readonly supported = new Set<string>();
+  /** When a chain last did NOT answer, so the probe is cheap (once a minute). */
+  private readonly probedAt = new Map<string, number>();
+
+  async holdLive(asset: AssetId): Promise<boolean> {
+    const chainId = chainIdOf(asset);
+    if (this.liveChains.has(chainId) || this.supported.has(chainId)) return true;
+    const last = this.probedAt.get(chainId) ?? 0;
+    if (Date.now() - last < 60_000) return false;
+    this.probedAt.set(chainId, Date.now());
+    try {
+      if ((await this.totalHeld(asset)) !== null) {
+        this.supported.add(chainId);
+        return true;
+      }
+    } catch {
+      // Unknown is not "no hold": the flag still decides, and the next probe asks again.
+    }
+    return false;
   }
 
   async classifyRedemption(
@@ -92,10 +125,54 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       const receipt = await (
         this.client(chainId) as unknown as ReceiptClient
       ).getTransactionReceipt({ hash: txRef as `0x${string}` });
-      if (!receipt) return { kind: 'UNKNOWN' };
-      const escrow = getAddress(this.deployment(chainId).escrow);
+      // A reverted transaction redeemed nothing: never PAID, never HELD.
+      if (!receipt || receipt.status !== 'success') return { kind: 'UNKNOWN' };
+      return this.classifyLogs(chainId, receipt.logs, payer, seq);
+    }
+
+    // No hash (a landing found but not observed): the record at the latest
+    // block, then — bounded, review P2-6 of the second pass — the escrow's own
+    // logs for this payer and seq over the recent blocks.
+    const record = await this.readHeld(asset, key);
+    if (record?.status === HeldStatus.HELD || record?.status === HeldStatus.COLLECTED) {
+      return { kind: 'HELD', collectableAt: record.collectableAt };
+    }
+    const found = await this.findRedemptionLogs(chainId, payer, seq);
+    if (found.kind !== 'UNKNOWN') return found;
+    if (record === null && !(await this.holdLive(asset))) return { kind: 'PAID' };
+    return { kind: 'UNKNOWN' };
+  }
+
+  /** The escrow's `PaymentHeld` / `VoucherRedeemed` for this payer and seq, recent blocks only. */
+  private async findRedemptionLogs(
+    chainId: ChainId,
+    payer: `0x${string}`,
+    seq: bigint,
+  ): Promise<RedemptionClass> {
+    const client = this.client(chainId) as unknown as LogsClient;
+    if (typeof client.getLogs !== 'function' || typeof client.getBlockNumber !== 'function') {
+      return { kind: 'UNKNOWN' };
+    }
+    const latest = await client.getBlockNumber();
+    const logs = await client.getLogs({
+      address: getAddress(this.deployment(chainId).escrow),
+      fromBlock: latest > LOG_LOOKBACK_BLOCKS ? latest - LOG_LOOKBACK_BLOCKS : 0n,
+      toBlock: latest,
+    });
+    return this.classifyLogs(chainId, logs, payer, seq);
+  }
+
+  /** Decides from logs: only those the ESCROW emitted, for this payer and seq. */
+  private classifyLogs(
+    chainId: ChainId,
+    logs: readonly { address: string; data: `0x${string}`; topics: readonly `0x${string}`[] }[],
+    payer: `0x${string}`,
+    seq: bigint,
+  ): RedemptionClass {
+    const escrow = getAddress(this.deployment(chainId).escrow);
+    {
       let redeemed = false;
-      for (const log of receipt.logs) {
+      for (const log of logs) {
         if (getAddress(log.address) !== escrow) continue;
         let decoded: { eventName: string; args: Record<string, unknown> };
         try {
@@ -120,14 +197,6 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       }
       return redeemed ? { kind: 'PAID' } : { kind: 'UNKNOWN' };
     }
-
-    // No hash (a landing found but not observed): the record, at the latest block.
-    const record = await this.readHeld(asset, key);
-    if (record?.status === HeldStatus.HELD || record?.status === HeldStatus.COLLECTED) {
-      return { kind: 'HELD', collectableAt: record.collectableAt };
-    }
-    if (record === null && !this.holdLive(asset)) return { kind: 'PAID' };
-    return { kind: 'UNKNOWN' };
   }
 
   async readHeld(asset: AssetId, key: HeldKey): Promise<HeldRecord | null> {

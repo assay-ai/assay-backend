@@ -214,6 +214,8 @@ export interface PaymentIntent {
   /** `HELD` | `COLLECTED` | `REFUNDED`: the payment's dispute hold. */
   readonly heldStatus?: string | null;
   readonly heldAt?: Date | null;
+  /** Failed collect, refund or classification attempts (back-off). */
+  readonly heldAttempts?: number;
   /** `OPEN` while a guaranteed dispute holds the voucher, then `UPHELD` | `REJECTED`. */
   readonly disputeOutcome?: string | null;
 
