@@ -47,6 +47,13 @@ export interface StuckCaseRead {
    * when it was not checked.
    */
   readonly beneficiaryIsAgent?: boolean;
+  /**
+   * For an `Executed` record: how many distinct harmed agents the window has
+   * (payers of failed calls to this provider). A stuck case's record is ONE
+   * record with ONE beneficiary, so it cannot pay more than one agent its
+   * share: with two or more, someone was underpaid. Absent when not checked.
+   */
+  readonly harmedAgents?: number;
 }
 
 export type StuckCaseAction = 'CLOSE_NOTHING_STANDING' | 'RECORD_EXECUTION' | 'REPROPOSE';
@@ -88,7 +95,13 @@ export type StuckCaseRefusal =
    * of the window (a vault, escrow or treasury, or unknown): recording it
    * would leave that money credited to nobody. Needs a compensation decision.
    */
-  | 'BENEFICIARY_NOT_AN_AGENT';
+  | 'BENEFICIARY_NOT_AN_AGENT'
+  /**
+   * The window has more than one harmed agent, and the single record paid
+   * the whole agent share to one account: it cannot express a per-agent
+   * split, so another agent was underpaid. A human decides the compensation.
+   */
+  | 'SPLIT_NOT_EXPRESSIBLE';
 
 /** Closed in the app with no penalty: the statuses a nothing-standing cancel may be closed under. */
 export const CLOSABLE_STATUSES: readonly string[] = [
@@ -149,6 +162,9 @@ export function stuckCaseRefusal(
       if (proposal.executedAt) return 'ALREADY_RECORDED';
       if (NOT_RECORDABLE.includes(proposal.status)) return 'CASE_STATUS';
       if (read.beneficiaryIsAgent !== true) return 'BENEFICIARY_NOT_AN_AGENT';
+      // One record, one beneficiary: it matches every agent's share only when
+      // the window has exactly one harmed agent (who is owed the whole share).
+      if (read.harmedAgents !== 1) return 'SPLIT_NOT_EXPRESSIBLE';
       {
         const applied = minor(read.record?.appliedMinor);
         const owed = minor(proposal.penaltyAmount);

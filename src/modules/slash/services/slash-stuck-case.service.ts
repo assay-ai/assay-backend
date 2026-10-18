@@ -149,10 +149,9 @@ export async function readStuckCaseRecord(
     const beneficiary = record.beneficiary
       ? normalizeAgentAccount(`${chainId}:${record.beneficiary}`)
       : null;
-    const beneficiaryIsAgent =
-      beneficiary !== null &&
-      payers.some((row) => normalizeAgentAccount(row.agentAccount) === beneficiary);
-    return { state, record, unreadable: false, beneficiaryIsAgent };
+    const agents = new Set(payers.map((row) => normalizeAgentAccount(row.agentAccount)));
+    const beneficiaryIsAgent = beneficiary !== null && agents.has(beneficiary);
+    return { state, record, unreadable: false, beneficiaryIsAgent, harmedAgents: agents.size };
   } catch (error) {
     deps.logger.warn(
       `slash proposal ${proposal.id}: its on-chain record could not be read ` +
