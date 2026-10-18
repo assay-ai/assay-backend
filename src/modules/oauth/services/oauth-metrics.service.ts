@@ -40,7 +40,8 @@ export type OAuthTokenResult =
   | 'unauthorized_client'
   | 'unsupported_grant_type'
   | 'invalid_scope'
-  | 'invalid_target';
+  | 'invalid_target'
+  | 'temporarily_unavailable';
 
 /** `oauth_refresh_reuse_total{kind}` (§6.3.11). */
 export type OAuthRefreshReuseKind = 'revoked' | 'stale';
