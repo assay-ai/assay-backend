@@ -8,7 +8,6 @@ export enum PaymentErrorCode {
   PAYMENT_INVALID_STATE_TRANSITION = 'PAYMENT_INVALID_STATE_TRANSITION',
   PAYMENT_IDEMPOTENCY_KEY_REUSED = 'PAYMENT_IDEMPOTENCY_KEY_REUSED',
   PAYMENT_VOUCHER_SIGNATURE_INVALID = 'PAYMENT_VOUCHER_SIGNATURE_INVALID',
-  PAYMENT_VOUCHER_NONCE_REPLAYED = 'PAYMENT_VOUCHER_NONCE_REPLAYED',
   PAYMENT_VOUCHER_MALFORMED = 'PAYMENT_VOUCHER_MALFORMED',
   PAYMENT_VOUCHER_EXPIRED = 'PAYMENT_VOUCHER_EXPIRED',
   PAYMENT_VOUCHER_BINDING_MISMATCH = 'PAYMENT_VOUCHER_BINDING_MISMATCH',
@@ -279,18 +278,6 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     statusCode: 400,
     message: (context?: Record<string, any>) =>
       `Voucher signature failed verification${context?.payer ? ` for payer: ${context.payer}` : ''}`,
-  },
-  /**
-   * The nonce has been seen before. Raised by both halves of the store — the
-   * Redis reservation that loses a race, and the unique index that refuses the
-   * second insert — because to a caller they are the same event: this voucher
-   * has already been spent.
-   */
-  voucherNonceReplayed: {
-    code: PaymentErrorCode.PAYMENT_VOUCHER_NONCE_REPLAYED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Voucher nonce already spent${context?.nonce ? `: ${context.nonce}` : ''}`,
   },
   /** Structurally invalid — a malformed CAIP id, a nonce that is not 16 hex bytes. */
   voucherMalformed: {
