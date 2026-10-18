@@ -3,6 +3,7 @@ import {
   DEFAULT_OAUTH_REDIRECT_ALLOWLIST,
   OAUTH_REQUEST_COOKIE_SECRET_ENV,
   loadOAuthConfig,
+  loadOAuthSessionConfig,
 } from '@modules/oauth/config/oauth.config';
 
 /** 32 distinct bytes, as a random key would be. */
@@ -341,5 +342,40 @@ describe('loadOAuthConfig', () => {
       const second = loadOAuthConfig(env({ [OAUTH_REQUEST_COOKIE_SECRET_ENV]: undefined }));
       expect(second.requestCookieSecret.equals(first.requestCookieSecret)).toBe(true);
     });
+  });
+});
+
+/**
+ * What the OAuth session source reads, in every process that loads
+ * `AuthModule` (the scheduler included): no secret, no session-source mode.
+ */
+describe('loadOAuthSessionConfig', () => {
+  const bare = (overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv => ({
+    NODE_ENV: 'test',
+    MCP_PUBLIC_URL: 'https://mcp.example.com',
+    ...overrides,
+  });
+
+  it('needs neither the cookie secret nor AUTH_SESSION_SOURCE=both', () => {
+    expect(loadOAuthSessionConfig(bare())).toEqual({
+      audience: 'https://mcp.example.com',
+      paymentClients: ['https://mcp.example.com/oauth/clients/assay-mcp'],
+    });
+  });
+
+  it('agrees with loadOAuthConfig on the audience and the payment clients', () => {
+    resetEnvSigningKeyCacheForTests();
+    const full = loadOAuthConfig(env());
+    const session = loadOAuthSessionConfig(env());
+    expect(session.audience).toBe(full.issuer);
+    expect(session.paymentClients).toEqual(full.paymentClients);
+  });
+
+  it('refuses a payment client other than the built-in one (H2)', () => {
+    expect(() =>
+      loadOAuthSessionConfig(
+        bare({ OAUTH_PAYMENT_CLIENTS: JSON.stringify(['https://app.example.com/client.json']) }),
+      ),
+    ).toThrow(/OAUTH_PAYMENT_CLIENTS/);
   });
 });
