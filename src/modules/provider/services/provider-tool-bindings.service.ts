@@ -3,10 +3,14 @@ import {
   contractVersionsOf,
   currentContractVersion,
 } from '@modules/tool/domain/contract/contract-versions';
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { ConfigService } from '@nestjs/config';
+import { InjectDataSource } from '@nestjs/typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
+import { BindingTestRunEntity } from '@database/postgres/entities/binding-test-run.entity';
+import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
@@ -22,6 +26,9 @@ import {
   isProviderTool,
 } from '@modules/tool/ports/tool.types';
 import { CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
+import { AuditActor, AuditLogWriter } from '@shared/audit';
+
+import { CredentialVaultService } from '../credentials/credential-vault.service';
 
 import {
   ListToolBindingsQueryDto,
@@ -64,12 +71,83 @@ const TOOL_BINDING_LIST: ListSpec = {
  */
 @Injectable()
 export class ProviderToolBindingsService {
+  private readonly logger = new Logger(ProviderToolBindingsService.name);
+
   constructor(
     private readonly bindings: ToolBindingRepository,
     @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort,
     private readonly config: ConfigService,
     private readonly versions: BindingVersionRepository,
+    // `discardDraft` only: one transaction, the vault's own prune, and the
+    // audit entry written inside it (no deletion without its entry).
+    @InjectDataSource('postgres') private readonly dataSource: DataSource,
+    private readonly vault: CredentialVaultService,
+    private readonly audit: AuditLogWriter,
   ) {}
+
+  /**
+   * `DELETE /providers/me/tool-bindings/:id` — discard a draft.
+   *
+   * Only a binding that never left the draft: status `DRAFT`, never published
+   * (`published_version` and `published_at` both null), and named by **no**
+   * row outside the draft — no call, attempt, payment, dispute, check window,
+   * strike, penalty, stake grace or traffic statistic ({@link EVIDENCE}).
+   * Those rows are evidence about traffic, and several of them would cascade
+   * away with the binding. Anything else is `PROVIDER_BINDING_NOT_DISCARDABLE`
+   * (409): pause a published binding instead.
+   *
+   * What it deletes, in one transaction, with the binding row locked first so
+   * a publish cannot race it:
+   *  - the binding's credential sets, through the vault's own `pruneExcept`
+   *    with nothing kept (names are audited, never values);
+   *  - its tester runs and its draft revision snapshots (`binding_test_runs`,
+   *    `binding_versions`): a never-published revision is cited by no verdict;
+   *  - the `tool_bindings` row;
+   *  - and it writes one `tool_binding.discarded` audit entry in the same
+   *    transaction.
+   *
+   * Another organization's id is a 404, never a 409: the refusal must not
+   * confirm that someone else's binding exists.
+   */
+  async discardDraft(organizationId: string, actor: AuditActor, bindingId: string): Promise<void> {
+    await this.dataSource.transaction(async (manager) => {
+      const row = await manager.findOne(ToolBindingEntity, {
+        where: { organizationId, id: bindingId },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!row) throw ProviderErrors.bindingNotFound({ bindingId });
+
+      const reason = await discardRefusal(manager, row);
+      if (reason) throw ProviderErrors.bindingNotDiscardable({ bindingId, reason });
+
+      const pruned = await this.vault.pruneExcept(manager, organizationId, bindingId, []);
+      const runs = await manager.delete(BindingTestRunEntity, { organizationId, bindingId });
+      const revisions = await manager.delete(BindingVersionEntity, { organizationId, bindingId });
+      const removed = await manager.delete(ToolBindingEntity, { organizationId, id: bindingId });
+      if (removed.affected !== 1) throw ProviderErrors.bindingNotFound({ bindingId });
+
+      await this.audit.record(manager, {
+        organizationId,
+        actor,
+        action: 'tool_binding.discarded',
+        resourceType: 'tool_binding',
+        resourceId: bindingId,
+        before: {
+          tool_id: row.toolId,
+          endpoint: row.endpoint,
+          status: row.status,
+          mapping_version: row.mappingVersion,
+          test_runs: runs.affected ?? 0,
+          revisions: revisions.affected ?? 0,
+          credential_sets: pruned.map(({ origin, headerNames }) => ({
+            origin,
+            header_names: headerNames,
+          })),
+        },
+      });
+    });
+    this.logger.log(`Draft binding ${bindingId} discarded`);
+  }
 
   async listBindings(
     providerId: string,
@@ -128,6 +206,43 @@ export class ProviderToolBindingsService {
       },
     };
   }
+}
+
+/**
+ * Tables whose rows are evidence about a binding's traffic. A row in any of
+ * them means the binding is more than a draft, whatever its status says.
+ * `sla_windows`, `sla_strikes` and `provider_stake_grace` would even cascade
+ * away with the binding.
+ */
+export const EVIDENCE: ReadonlyArray<{ table: string; what: string }> = [
+  { table: 'tool_call_records', what: 'has calls' },
+  { table: 'binding_attempts', what: 'has calls' },
+  { table: 'binding_stats', what: 'has calls' },
+  { table: 'payment_intents', what: 'has payments' },
+  { table: 'disputes', what: 'has disputes' },
+  { table: 'sla_windows', what: 'has check windows' },
+  { table: 'sla_strikes', what: 'has check windows' },
+  { table: 'slash_proposals', what: 'has penalties' },
+  { table: 'provider_stake_grace', what: 'has a stake grace period' },
+];
+
+/** Why `row` is not a discardable draft, or null when it is. */
+async function discardRefusal(
+  manager: EntityManager,
+  row: ToolBindingEntity,
+): Promise<string | null> {
+  if (row.status !== BindingStatus.DRAFT) return `is ${row.status}`;
+  if (row.publishedVersion !== null || row.publishedAt !== null) return 'was published';
+  // Table names are the constant list above, never input.
+  const checks = EVIDENCE.map(
+    ({ table }, index) =>
+      `EXISTS (SELECT 1 FROM "${table}" WHERE "binding_id" = $1) AS "e${index}"`,
+  ).join(', ');
+  const [found] = (await manager.query(`SELECT ${checks}`, [row.id])) as Array<
+    Record<string, boolean>
+  >;
+  const hit = EVIDENCE.find((_, index) => found?.[`e${index}`]);
+  return hit ? hit.what : null;
 }
 
 /**

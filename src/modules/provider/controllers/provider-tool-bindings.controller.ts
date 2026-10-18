@@ -1,8 +1,20 @@
-import { Body, Controller, Get, Param, Patch, Post, Query, UseGuards } from '@nestjs/common';
+import {
+  Body,
+  Controller,
+  Delete,
+  Get,
+  HttpCode,
+  Param,
+  Patch,
+  Post,
+  Query,
+  UseGuards,
+} from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
+import { auditActorOf } from '@shared/audit';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { JsonObject } from '@modules/tool/domain/mapping/mapping.types';
 
@@ -126,6 +138,28 @@ export class ProviderToolBindingsController {
     @Body() body: UpdateToolBindingBodyDto,
   ): Promise<SavedToolBindingDto> {
     return this.editor.update(session.organizationId, subjectOf(session), params.id, body);
+  }
+
+  @Delete(':id')
+  @HttpCode(204)
+  @ApiOperation({
+    summary:
+      'Discard a draft that was never published: its credential sets (through the vault), ' +
+      'its tester runs and draft revisions, and the binding itself. Audited.',
+  })
+  @ApiResponse({ status: 204 })
+  @ApiResponse({ status: 404, description: 'No binding of yours with this id' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'PROVIDER_BINDING_NOT_DISCARDABLE — not a draft, published once, or already named by ' +
+      'a call, payment, dispute, check window, penalty or stake grace. Pause it instead.',
+  })
+  async discard(
+    @CurrentSession() session: McpSession,
+    @Param() params: GetToolBindingParamsDto,
+  ): Promise<void> {
+    await this.bindings.discardDraft(session.organizationId, auditActorOf(session), params.id);
   }
 
   @Post(':id/test')
