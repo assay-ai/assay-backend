@@ -2,14 +2,15 @@ import { Module } from '@nestjs/common';
 
 import { OperatorIdentityModule } from '@modules/operator/operator-identity.module';
 
+import { MetricsRegistryModule } from './metrics-registry.module';
 import { ObservabilityDashboardController } from './controllers/observability-dashboard.controller';
 import { ObservabilityMetricsRepository } from './repositories/observability-metrics.repository';
 import { MetricsCollectorService } from './services/metrics-collector.service';
-import { MetricsRegistryService } from './services/metrics-registry.service';
 
 /**
  * `GET /operator/dashboard` (+ its JSON twin), and the in-process instruments
- * (`MetricsRegistryService`) other modules record into.
+ * (`MetricsRegistryService`, from `MetricsRegistryModule`, re-exported) other
+ * modules record into.
  *
  * `ReconciliationRunRepository`, `PlatformMetricsRepository` and
  * `SlashProposalRepository` (all injected by `MetricsCollectorService`) come
@@ -20,9 +21,9 @@ import { MetricsRegistryService } from './services/metrics-registry.service';
  * `OperatorApiModule` in the same process.
  */
 @Module({
-  imports: [OperatorIdentityModule],
-  providers: [MetricsRegistryService, MetricsCollectorService, ObservabilityMetricsRepository],
+  imports: [OperatorIdentityModule, MetricsRegistryModule],
+  providers: [MetricsCollectorService, ObservabilityMetricsRepository],
   controllers: [ObservabilityDashboardController],
-  exports: [MetricsRegistryService],
+  exports: [MetricsRegistryModule],
 })
 export class ObservabilityModule {}

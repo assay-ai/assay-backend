@@ -35,6 +35,7 @@ export enum AuthErrorCode {
   AUTH_PROVISIONING_FAILED = 'AUTH_PROVISIONING_FAILED',
   AUTH_IDENTITY_PROVIDER_UNAVAILABLE = 'AUTH_IDENTITY_PROVIDER_UNAVAILABLE',
   AUTH_HUMAN_SESSION_REQUIRED = 'AUTH_HUMAN_SESSION_REQUIRED',
+  AUTH_CLIENT_NOT_ALLOWED_HERE = 'AUTH_CLIENT_NOT_ALLOWED_HERE',
 }
 
 export type AuthErrorCodesArePrefixed = AssertDomainErrorCodes<'AUTH', `${AuthErrorCode}`>;
@@ -107,6 +108,17 @@ export const AuthErrors = createDomainErrorFactory('AUTH', {
     code: AuthErrorCode.AUTH_HUMAN_SESSION_REQUIRED,
     statusCode: 403,
     message: () => 'This change needs a signed-in user; an agent credential cannot make it',
+  },
+
+  /**
+   * A genuine OAuth access token, presented to the API app by a client outside
+   * `OAUTH_PAYMENT_CLIENTS` (R-OA-21). Such grants serve the MCP host only.
+   * 403, not 401: the token is fine where it belongs.
+   */
+  clientNotAllowedHere: {
+    code: AuthErrorCode.AUTH_CLIENT_NOT_ALLOWED_HERE,
+    statusCode: 403,
+    message: () => 'This app is connected for MCP calls only; it cannot use this API',
   },
 
   identityProviderUnavailable: {
