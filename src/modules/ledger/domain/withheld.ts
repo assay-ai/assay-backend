@@ -16,12 +16,23 @@
  *
  *              bucket 1  REFUNDED           failed verification        ← the guarantee
  *              bucket 2  VOIDED | EXPIRED   provider or platform error ← never your fault
+ *              bucket 3  SETTLED, never     not collected              ← the provider
+ *                        collected and not                               could not be paid
+ *                        owed
  * ```
  *
- * Two buckets, never one. A provider timeout is not the verification engine
+ * Three buckets, never one. A provider timeout is not the verification engine
  * catching bad data — it is a call that never produced data at all. Merging them
  * into a single heroic number is the first thing a sceptical reader takes apart,
  * and they would be right to.
+ *
+ * The third bucket is a served call whose payment was never collected and is
+ * not owed: the provider forfeited the voucher, a buyer debt was voided, or
+ * (legacy) the platform absorbed it. Its hold was released, so it is in
+ * `Σ HOLD_RELEASE`, and `GET /receipts/summary` already counts it as not
+ * charged. Leaving it out made the two buyer figures disagree and the
+ * reconciliation fail by exactly its amount (UX review 2026-10-18, P0-3). It is
+ * not the guarantee and is never presented as one.
  *
  * ## The rule that is in no document: a hold must have existed
  *
@@ -89,19 +100,32 @@ export enum WithheldBucket {
    * not be presented as the guarantee.
    */
   PROVIDER_OR_PLATFORM_ERROR = 'PROVIDER_OR_PLATFORM_ERROR',
+
+  /**
+   * Served, but the payment was never collected and the buyer does not owe it:
+   * the provider forfeited the voucher, a buyer debt was voided by a late
+   * verdict, or a legacy platform-absorbed credit. The hold was released.
+   *
+   * Status `SETTLED` with the repository's `NOT_CHARGED_SETTLED_SQL`. A
+   * WRITTEN-OFF debt is not here: the buyer still owes it.
+   */
+  NOT_COLLECTED = 'NOT_COLLECTED',
 }
 
 /** The label each bucket is rendered under. One wording, every surface. */
 export const WITHHELD_BUCKET_LABEL: Readonly<Record<WithheldBucket, string>> = Object.freeze({
   [WithheldBucket.FAILED_VERIFICATION]: 'failed verification',
   [WithheldBucket.PROVIDER_OR_PLATFORM_ERROR]: 'provider or platform error',
+  [WithheldBucket.NOT_COLLECTED]: 'not collected (the provider could not be paid)',
 });
 
 /**
  * Terminal status → bucket, for the statuses that withhold.
  *
- * A status absent from this map does not withhold. `SETTLED` is absent because
- * the agent was charged; `CREATED`, `FUNDS_SECURED`, `PROVIDER_EXECUTING` and
+ * A status absent from this map does not withhold on its own. `SETTLED` is
+ * absent because the agent was normally charged; a `SETTLED` intent that was
+ * never collected is {@link WithheldBucket.NOT_COLLECTED}, decided by
+ * {@link WithheldCandidate.notCollected} rather than by status. `CREATED`, `FUNDS_SECURED`, `PROVIDER_EXECUTING` and
  * `VERIFYING` are absent because they are not terminal and the call may still
  * end either way.
  *
@@ -116,7 +140,7 @@ export const WITHHELD_STATUS_BUCKET: Readonly<Record<string, WithheldBucket>> = 
   EXPIRED: WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
 });
 
-/** The statuses that put an intent's listed price into `withheld`. */
+/** The statuses that put an intent's listed price into `withheld` on their own. */
 export const WITHHELD_STATUSES: readonly string[] = Object.freeze(
   Object.keys(WITHHELD_STATUS_BUCKET),
 );
@@ -132,11 +156,21 @@ export interface WithheldPeriod {
   readonly to?: Date;
 }
 
+/** The status of a served call: withheld only when it was never collected. */
+export const NOT_COLLECTED_STATUS = 'SETTLED';
+
 /** The minimum an intent must expose for its withholding to be decided. */
 export interface WithheldCandidate {
   readonly status: string;
   /** The hold that reserved the price. `null` means nothing was ever reserved. */
   readonly holdId: string | null;
+  /**
+   * A `SETTLED` intent whose payment was never collected and is not owed
+   * (forfeited, debt voided, legacy absorb). Read only on `SETTLED`; omitted
+   * means collected or owed, so a caller that does not know never counts a
+   * served call as withheld.
+   */
+  readonly notCollected?: boolean;
 }
 
 /**
@@ -148,13 +182,18 @@ export interface WithheldCandidate {
  * not withheld money.
  */
 export function isWithheldIntent(intent: WithheldCandidate): boolean {
-  return intent.holdId !== null && intent.status in WITHHELD_STATUS_BUCKET;
+  return withheldBucketOf(intent) !== null;
 }
 
 /** Which bucket an intent falls in, or `null` if it withheld nothing. */
 export function withheldBucketOf(intent: WithheldCandidate): WithheldBucket | null {
-  if (!isWithheldIntent(intent)) return null;
-  return WITHHELD_STATUS_BUCKET[intent.status];
+  if (intent.holdId === null) return null;
+  if (intent.status === NOT_COLLECTED_STATUS) {
+    return intent.notCollected === true ? WithheldBucket.NOT_COLLECTED : null;
+  }
+  return Object.prototype.hasOwnProperty.call(WITHHELD_STATUS_BUCKET, intent.status)
+    ? WITHHELD_STATUS_BUCKET[intent.status]
+    : null;
 }
 
 /** One bucket's contribution, with the call count the figure is meaningless without. */
@@ -176,21 +215,19 @@ export interface WithheldTotal {
   readonly asset: AssetId;
   readonly calls: number;
   readonly amount: Money;
-  /** Always both buckets, in declaration order, zero-filled. */
+  /** Always every bucket, in declaration order, zero-filled. */
   readonly buckets: readonly WithheldBucketTotal[];
 }
 
 /** One intent's contribution to the total. */
-export interface WithheldEntry {
-  readonly status: string;
-  readonly holdId: string | null;
+export interface WithheldEntry extends WithheldCandidate {
   readonly price: Money;
 }
 
 /**
  * Sums entries into one decomposed total.
  *
- * Both buckets are always present, zero-filled — a bucket that vanishes when it
+ * Every bucket is always present, zero-filled — a bucket that vanishes when it
  * is empty makes two periods incomparable, and an absent "failed verification"
  * row reads as *"we do not report that"* rather than as *"nothing failed"*.
  */
