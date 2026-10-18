@@ -19,8 +19,12 @@ export class AgentCredentialDto {
   @ApiProperty({ description: 'Human label — "CI deploy", "local dev"' })
   name: string;
 
-  @ApiProperty({ description: 'Clear-text leading characters, for disambiguation only' })
-  prefix: string;
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description: 'Clear-text leading characters, for disambiguation only; null for an OAuth grant',
+  })
+  prefix: string | null;
 
   @ApiProperty({ type: [String] })
   scopes: string[];

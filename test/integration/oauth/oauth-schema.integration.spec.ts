@@ -14,6 +14,7 @@ import {
 import { OAuthRefreshTokenEntity } from '@database/postgres/entities/oauth-refresh-token.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
+import { OAuthAuthorizationCodeRepository } from '@database/postgres/repositories/oauth-authorization-code.repository';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { OAuthRefreshTokenRepository } from '@database/postgres/repositories/oauth-refresh-token.repository';
 
@@ -27,6 +28,8 @@ import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-datab
 describe('OAuth schema — real migrations', () => {
   const DATABASE = 'assay_oauth_schema_test';
   const ORGANIZATION = '11111111-1111-4111-8111-111111111111';
+  const OTHER_ORGANIZATION = '22222222-2222-4222-8222-222222222222';
+  const OAUTH_MIGRATION = 'OAuth1762400000000';
   const HOUR = 3_600_000;
 
   let dataSource: DataSource;
@@ -83,6 +86,7 @@ describe('OAuth schema — real migrations', () => {
 
   /** Raw insert, so every column the test names reaches Postgres as written. */
   async function insertCredential(row: {
+    organizationId?: string;
     agentId?: string;
     issuedVia?: string;
     prefix?: string | null;
@@ -93,7 +97,7 @@ describe('OAuth schema — real migrations', () => {
   }): Promise<string> {
     const columns = ['organization_id', 'agent_id', 'name', 'prefix', 'token_hash'];
     const values: unknown[] = [
-      ORGANIZATION,
+      row.organizationId ?? ORGANIZATION,
       row.agentId ?? randomUUID(),
       'test credential',
       row.prefix === undefined ? 'assay_sk_live_ab' : row.prefix,
@@ -126,7 +130,12 @@ describe('OAuth schema — real migrations', () => {
 
   async function insertOAuthCredential(
     clientId: string,
-    row: { agentId?: string; expiresAt?: Date | null; revokedAt?: Date | null } = {},
+    row: {
+      organizationId?: string;
+      agentId?: string;
+      expiresAt?: Date | null;
+      revokedAt?: Date | null;
+    } = {},
   ): Promise<string> {
     return insertCredential({
       ...row,
@@ -163,6 +172,7 @@ describe('OAuth schema — real migrations', () => {
   it('refuses an issued_via outside API_KEY and OAUTH', async () => {
     await expect(insertCredential({ issuedVia: 'PRIVY' })).rejects.toMatchObject({
       code: '23514',
+      constraint: 'chk_agent_credentials_issued_via_kind',
     });
   });
 
@@ -171,7 +181,33 @@ describe('OAuth schema — real migrations', () => {
     await insertOAuthCredential(client.id);
     await expect(
       dataSource.query(`DELETE FROM "oauth_clients" WHERE "id" = $1`, [client.id]),
-    ).rejects.toMatchObject({ code: '23503' });
+    ).rejects.toMatchObject({ code: '23503', constraint: 'fk_agent_credentials_oauth_client' });
+  });
+
+  it('oauth_clients delete is RESTRICTed while an authorization code references it', async () => {
+    const client = await insertClient();
+    const codes = new OAuthAuthorizationCodeRepository(dataSource);
+    await codes.save(
+      codes.create({
+        codeHash: digest(randomUUID()),
+        oauthClientId: client.id,
+        organizationId: ORGANIZATION,
+        agentId: randomUUID(),
+        credentialName: 'Example client',
+        replacesCredentialId: null,
+        approvedBy: 'login-session-1',
+        redirectUri: 'http://127.0.0.1:33418/callback',
+        codeChallenge: 'E9Melhoa2OwvFrEMTJguCHaoeK1t8URWbuGJSstw-cM',
+        scope: 'mcp',
+        resource: 'https://mcp.example.test',
+        expiresAt: new Date(Date.now() + 60_000),
+        usedAt: null,
+        credentialId: null,
+      }),
+    );
+    await expect(
+      dataSource.query(`DELETE FROM "oauth_clients" WHERE "id" = $1`, [client.id]),
+    ).rejects.toMatchObject({ code: '23503', constraint: 'fk_oauth_authorization_codes_client' });
   });
 
   it('an OAuth row maps through the entity with a null prefix and token hash', async () => {
@@ -187,8 +223,17 @@ describe('OAuth schema — real migrations', () => {
   });
 
   it('existing API-key rows default to issued_via API_KEY', async () => {
-    // Step back over the OAuth migration, write a key the old way, and re-apply it.
-    await dataSource.undoLastMigration({ transaction: 'each' });
+    // Step back over the OAuth migration (and any later one), write a key the
+    // old way, and re-apply. Grants block the revert, so the rows earlier
+    // tests made are removed first; later tests make their own.
+    await expect(undoThrough(OAUTH_MIGRATION)).rejects.toThrow(/OAuth credential row/);
+    await dataSource.query(`DELETE FROM "oauth_access_tokens"`);
+    await dataSource.query(`DELETE FROM "oauth_refresh_tokens"`);
+    await dataSource.query(`DELETE FROM "agent_credentials" WHERE "issued_via" = 'OAUTH'`);
+    await undoThrough(OAUTH_MIGRATION);
+    await expect(
+      dataSource.query(`SELECT to_regclass('oauth_clients') AS "table"`),
+    ).resolves.toEqual([{ table: null }]);
     const [{ id }] = (await dataSource.query(
       `INSERT INTO "agent_credentials" ("organization_id", "agent_id", "name", "prefix", "token_hash") ` +
         `VALUES ($1, $2, 'old key', 'assay_sk_live_ab', $3) RETURNING "id"`,
@@ -210,7 +255,7 @@ describe('OAuth schema — real migrations', () => {
     expect(freshRow.issued_via).toBe('API_KEY');
   });
 
-  it('countLiveOAuthForAgent ignores revoked and expired rows', async () => {
+  it('countLiveOAuthForAgent ignores revoked, expired and soft-deleted rows', async () => {
     const client = await insertClient();
     const agentId = randomUUID();
     const later = new Date(Date.now() + HOUR);
@@ -219,22 +264,31 @@ describe('OAuth schema — real migrations', () => {
     await insertOAuthCredential(client.id, { agentId, expiresAt: later });
     await insertOAuthCredential(client.id, { agentId, revokedAt: new Date() });
     await insertOAuthCredential(client.id, { agentId, expiresAt: new Date(Date.now() - HOUR) });
-    // Neither an API key of the same agent nor another agent's grant counts.
+    await insertOAuthCredential(client.id, { agentId, expiresAt: new Date(Date.now() - 50) });
+    const softDeleted = await insertOAuthCredential(client.id, { agentId });
+    await dataSource.query(`UPDATE "agent_credentials" SET "deleted_at" = now() WHERE "id" = $1`, [
+      softDeleted,
+    ]);
+    // Neither an API key of the same agent, another agent's grant, nor a row
+    // of the same agent id under another organization counts.
     await insertCredential({ agentId });
     await insertOAuthCredential(client.id);
+    await insertOAuthCredential(client.id, { agentId, organizationId: OTHER_ORGANIZATION });
 
-    await expect(credentials.countLiveOAuthForAgent(agentId)).resolves.toBe(3);
+    await expect(credentials.countLiveOAuthForAgent(ORGANIZATION, agentId)).resolves.toBe(3);
   });
 
   it('finds access and refresh tokens by hash across tenants', async () => {
     const client = await insertClient();
-    const credentialId = await insertOAuthCredential(client.id);
+    const credentialId = await insertOAuthCredential(client.id, {
+      organizationId: OTHER_ORGANIZATION,
+    });
     const refreshTokens = new OAuthRefreshTokenRepository(dataSource);
     const accessTokens = new OAuthAccessTokenRepository(dataSource);
 
     const refresh = await refreshTokens.save(
       refreshTokens.create({
-        organizationId: ORGANIZATION,
+        organizationId: OTHER_ORGANIZATION,
         credentialId,
         oauthClientId: client.id,
         tokenHash: digest('refresh'),
@@ -247,7 +301,7 @@ describe('OAuth schema — real migrations', () => {
     );
     await accessTokens.save(
       accessTokens.create({
-        organizationId: ORGANIZATION,
+        organizationId: OTHER_ORGANIZATION,
         credentialId,
         refreshTokenId: refresh.id,
         tokenHash: digest('access'),
@@ -259,16 +313,35 @@ describe('OAuth schema — real migrations', () => {
       }),
     );
 
+    // No tenant is supplied: the lookup is what discovers it.
     await expect(refreshTokens.findByTokenHash(digest('refresh'))).resolves.toMatchObject({
       id: refresh.id,
+      organizationId: OTHER_ORGANIZATION,
       credentialId,
     });
     await expect(accessTokens.findByTokenHash(digest('access'))).resolves.toMatchObject({
       refreshTokenId: refresh.id,
+      organizationId: OTHER_ORGANIZATION,
       credentialId,
     });
     await expect(accessTokens.findByTokenHash(digest('nothing'))).resolves.toBeNull();
   });
+
+  /**
+   * Undoes migrations, newest first, until `name` itself has been reverted, and
+   * fails if it never was. Later migrations on this branch therefore cannot
+   * turn the "existing rows" case into a test of some other migration.
+   */
+  async function undoThrough(name: string): Promise<void> {
+    for (;;) {
+      const [last] = (await dataSource.query(
+        `SELECT "name" FROM "migrations" ORDER BY "id" DESC LIMIT 1`,
+      )) as { name: string }[];
+      if (!last) throw new Error(`${name} was never applied`);
+      await dataSource.undoLastMigration({ transaction: 'each' });
+      if (last.name === name) return;
+    }
+  }
 
   async function dropDatabase(database: string): Promise<void> {
     const connection = testConnectionOptions();

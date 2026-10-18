@@ -13,6 +13,7 @@ import { AbstractEntityWithoutSoftDelete } from './abstract.entity';
  */
 @Entity('oauth_authorization_codes')
 @Index('uq_oauth_authorization_codes_code', ['codeHash'], { unique: true })
+@Index('idx_oauth_authorization_codes_client', ['oauthClientId'])
 export class OAuthAuthorizationCodeEntity extends AbstractEntityWithoutSoftDelete {
   @Column({ name: 'code_hash', type: 'varchar', length: 64 })
   codeHash: string;

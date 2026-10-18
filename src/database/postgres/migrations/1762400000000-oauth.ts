@@ -76,6 +76,12 @@ export class OAuth1762400000000 implements MigrationInterface {
       `CREATE INDEX "idx_agent_credentials_oauth_live" ON "agent_credentials" ("agent_id") ` +
         `WHERE "issued_via" = 'OAUTH' AND "revoked_at" IS NULL`,
     );
+    // Postgres does not index FK columns: without this, every client delete's
+    // RESTRICT check (and the cleanup job's "still referenced?") scans the table.
+    await queryRunner.query(
+      `CREATE INDEX "idx_agent_credentials_oauth_client" ON "agent_credentials" ("oauth_client_id") ` +
+        `WHERE "oauth_client_id" IS NOT NULL`,
+    );
 
     // ── oauth_authorization_codes ────────────────────────────────────────────
     await queryRunner.query(`
@@ -106,6 +112,10 @@ export class OAuth1762400000000 implements MigrationInterface {
     await queryRunner.query(
       `CREATE UNIQUE INDEX "uq_oauth_authorization_codes_code" ` +
         `ON "oauth_authorization_codes" ("code_hash")`,
+    );
+    await queryRunner.query(
+      `CREATE INDEX "idx_oauth_authorization_codes_client" ` +
+        `ON "oauth_authorization_codes" ("oauth_client_id")`,
     );
 
     // ── oauth_refresh_tokens ─────────────────────────────────────────────────
@@ -174,12 +184,22 @@ export class OAuth1762400000000 implements MigrationInterface {
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    // Credential rows are never deleted (spec §6.2), and the old schema cannot
+    // hold a grant: refuse rather than drop grants silently.
+    const [{ count }] = (await queryRunner.query(
+      `SELECT count(*)::int AS "count" FROM "agent_credentials" WHERE "issued_via" = 'OAUTH'`,
+    )) as { count: number }[];
+    if (count > 0) {
+      throw new Error(
+        `Cannot revert OAuth1762400000000: ${count} OAuth credential row(s) exist. ` +
+          `Revoke and remove them deliberately first.`,
+      );
+    }
     await queryRunner.query(`DROP TABLE "oauth_access_tokens"`);
     await queryRunner.query(`DROP TABLE "oauth_refresh_tokens"`);
     await queryRunner.query(`DROP TABLE "oauth_authorization_codes"`);
+    await queryRunner.query(`DROP INDEX "idx_agent_credentials_oauth_client"`);
     await queryRunner.query(`DROP INDEX "idx_agent_credentials_oauth_live"`);
-    // A grant cannot exist without the OAuth tables, and has no token to fall back to.
-    await queryRunner.query(`DELETE FROM "agent_credentials" WHERE "issued_via" = 'OAUTH'`);
     await queryRunner.query(`
       ALTER TABLE "agent_credentials"
         DROP CONSTRAINT "ck_agent_credentials_issued_via",

@@ -88,15 +88,17 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
   /**
    * The agent's live OAuth grants, for the per-agent cap (spec §6.3.14).
    * Live = not revoked and not expired; an idle-dead grant (its refresh chain
-   * ran out) does not count. Served by `idx_agent_credentials_oauth_live`.
+   * ran out) and a soft-deleted row do not count. Served by
+   * `idx_agent_credentials_oauth_live`.
    *
-   * By agent alone: an agent id is a platform-wide uuid that belongs to one
-   * tenant, and the caller has already resolved it inside that tenant.
+   * Scoped to `organizationId` as well as the agent: an agent id is already
+   * unique platform-wide, so the tenant predicate is a second safeguard
+   * against a caller that did not resolve the agent inside its tenant.
    */
-  async countLiveOAuthForAgent(agentId: string): Promise<number> {
-    return this.manager
-      .createQueryBuilder(AgentCredentialEntity, 'credential')
-      .where('credential.agent_id = :agentId', { agentId })
+  async countLiveOAuthForAgent(organizationId: string, agentId: string): Promise<number> {
+    return this.createQueryBuilder('credential')
+      .where('credential.organization_id = :organizationId', { organizationId })
+      .andWhere('credential.agent_id = :agentId', { agentId })
       .andWhere('credential.issued_via = :oauth', { oauth: CredentialIssuedVia.OAUTH })
       .andWhere('credential.revoked_at IS NULL')
       .andWhere('(credential.expires_at IS NULL OR credential.expires_at > now())')
