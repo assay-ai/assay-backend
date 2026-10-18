@@ -92,13 +92,13 @@ export class ProviderToolBindingsController {
   @ApiOperation({
     summary:
       'The tools you can bind, with the contract each one has to satisfy, and the asset ' +
-      'a binding is priced in. Platform-wide, identical for every provider.',
+      'a binding is priced in: every listed standard tool, plus your own provider tools.',
   })
   @ApiResponse({ status: 200, type: ToolCatalogueDto })
-  async catalogue(@CurrentSession() _session: McpSession): Promise<ToolCatalogueDto> {
-    // The session is required (the guard is on the controller) but not read:
-    // there is no per-provider catalogue to scope to.
-    return this.bindings.getCatalogue();
+  async catalogue(@CurrentSession() session: McpSession): Promise<ToolCatalogueDto> {
+    // Standard tools are the same for every provider; a provider tool is
+    // bindable by its own provider only (§7.6).
+    return this.bindings.getCatalogue(session.organizationId);
   }
 
   @Get(':id')

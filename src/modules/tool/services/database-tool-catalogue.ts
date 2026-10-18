@@ -6,7 +6,7 @@ import { BindingVersionRepository } from '@database/postgres/repositories/bindin
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 
-import { TOOL_CONTRACTS, ToolContractsPort } from '../ports/tool-contracts.port';
+import { RemovedTool, TOOL_CONTRACTS, ToolContractsPort } from '../ports/tool-contracts.port';
 import { ToolCataloguePort } from '../ports/tool-catalogue.port';
 import {
   BindingAuthMode,
@@ -56,6 +56,10 @@ export class DatabaseToolCatalogue implements ToolCataloguePort {
 
   listTools(): Promise<readonly Tool[]> {
     return this.contracts.listContracts();
+  }
+
+  async findRemovedByName(name: string): Promise<RemovedTool | null> {
+    return (await this.contracts.findRemovedByName?.(name)) ?? null;
   }
 
   /**

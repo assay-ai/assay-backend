@@ -322,6 +322,22 @@ export class ToolsetEntryDto {
 
   @ApiProperty({ type: [String], description: '"Must return": required output fields.' })
   requireOutputFields: string[];
+
+  @ApiProperty({
+    enum: ['STANDARD', 'PROVIDER'],
+    description: 'PROVIDER: one maker’s own API — "No backup provider"',
+  })
+  kind: 'STANDARD' | 'PROVIDER';
+
+  @ApiProperty({ description: 'The "Not reviewed" chip: a provider tool no operator approved' })
+  notReviewed: boolean;
+
+  @ApiProperty({
+    enum: ['PRIVATE', 'UNLISTED', 'LISTED'],
+    description:
+      'A PRIVATE one keeps the set from being shared by link; an unlisted one from the catalogue',
+  })
+  toolVisibility: string;
 }
 
 export class ToolsetUrlsDto {

@@ -22,7 +22,7 @@ import {
   SpendPolicyService,
 } from '@modules/spend-policy/services/spend-policy.service';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { categoryOf } from '@modules/tool/ports/tool.types';
+import { Tool, categoryOf, isListedTool, isVisibleToOrg } from '@modules/tool/ports/tool.types';
 import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
@@ -156,7 +156,8 @@ export class AgentAccessService {
       if (path.kind === McpPathKind.ROOT) {
         const names = new Set(filter.tools?.map((selector) => selector.name) ?? []);
         const categories = new Set(filter.categories ?? []);
-        for (const tool of catalogue) {
+        // `/` serves the LISTED catalogue only.
+        for (const tool of catalogue.filter(isListedTool)) {
           const byName = filter.tools === null || names.has(tool.name);
           const byCategory = filter.categories === null || categories.has(categoryOf(tool));
           if (byName && byCategory) toolIds.add(tool.id);
@@ -280,7 +281,7 @@ export class AgentAccessService {
             allowedToolIds:
               body.allowedToolIds === undefined
                 ? (credential.allowedToolIds ?? [])
-                : await this.validateToolIds(body.allowedToolIds ?? []),
+                : await this.validateToolIds(organizationId, body.allowedToolIds ?? []),
           }
         : { accessMode: null, allowedToolsets: null, allowedToolIds: null };
 
@@ -347,10 +348,10 @@ export class AgentAccessService {
       );
     }
     if (body.allowedToolIds !== undefined) {
-      access.allowedToolIds = await this.validateToolIds(body.allowedToolIds ?? []);
+      access.allowedToolIds = await this.validateToolIds(organizationId, body.allowedToolIds ?? []);
     }
     if (body.pinnedTools !== undefined) {
-      access.pinnedTools = await this.validatePinned(body.pinnedTools ?? []);
+      access.pinnedTools = await this.validatePinned(organizationId, body.pinnedTools ?? []);
     }
     if (body.rules) {
       const { rules } = body;
@@ -475,9 +476,24 @@ export class AgentAccessService {
     return out;
   }
 
-  private async validateToolIds(toolIds: readonly string[]): Promise<string[]> {
+  /**
+   * Tools an access policy may name: LISTED ones and the organization's own
+   * provider tools. Another organization's PRIVATE or UNLISTED provider tool
+   * is reached through its provider's toolset URL only (§7.6), so naming it
+   * here is the same "unknown tools" as a tool that does not exist.
+   */
+  private async validateToolIds(
+    organizationId: string,
+    toolIds: readonly string[],
+  ): Promise<string[]> {
     const ids = [...new Set(toolIds)];
-    const known = new Set((await this.tools.findByIds(ids)).map((tool) => tool.id));
+    const known = new Set(
+      (await this.tools.findByIds(ids))
+        .filter((tool) =>
+          isVisibleToOrg(tool as Pick<Tool, 'visibility' | 'ownerOrgId'>, organizationId),
+        )
+        .map((tool) => tool.id),
+    );
     const unknown = ids.filter((id) => !known.has(id));
     if (unknown.length > 0) {
       throw ToolsetErrors.accessInvalid({ reason: 'unknown tools', toolIds: unknown });
@@ -485,12 +501,19 @@ export class AgentAccessService {
     return ids;
   }
 
-  private async validatePinned(pinned: readonly string[]): Promise<string[]> {
+  private async validatePinned(
+    organizationId: string,
+    pinned: readonly string[],
+  ): Promise<string[]> {
     const names = [...new Set(pinned)];
     if (names.length > TOOLSET_LIMITS.pinnedTools) {
       throw ToolsetErrors.limitExceeded({ limit: 'pinnedTools', max: TOOLSET_LIMITS.pinnedTools });
     }
-    const known = new Set((await this.catalogue.listTools()).map((tool) => tool.name));
+    const known = new Set(
+      (await this.catalogue.listTools())
+        .filter((tool) => isVisibleToOrg(tool, organizationId))
+        .map((tool) => tool.name),
+    );
     const unknown = names.filter((name) => !known.has(name));
     if (unknown.length > 0) {
       throw ToolsetErrors.accessInvalid({ reason: 'unknown pinned tools', tools: unknown });
@@ -532,10 +555,12 @@ export class AgentAccessService {
     agentId: string,
     chainId: ChainId,
   ): Promise<AgentAccessDto['tools']> {
-    const [access, tools] = await Promise.all([
+    const [access, all] = await Promise.all([
       this.resolver.resolveFor(organizationId, agentId, null),
       this.catalogue.listTools(),
     ]);
+    // Per tool this organization can see: LISTED ones and its own.
+    const tools = all.filter((tool) => isVisibleToOrg(tool, organizationId));
     const context = {
       payerChains: this.enabledChains,
       withdrawingChains: [],

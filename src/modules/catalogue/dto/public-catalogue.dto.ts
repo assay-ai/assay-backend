@@ -1,6 +1,6 @@
 import { ToolVersionBriefDto } from '@modules/tool/dto/tool-contract-version.dto';
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsOptional, Matches } from 'class-validator';
+import { IsIn, IsOptional, Matches } from 'class-validator';
 
 import { ToolTier } from '@modules/tool/ports/tool.types';
 
@@ -182,8 +182,29 @@ export class PublicToolDto {
   })
   replacementVersion: string | null;
 
-  @ApiProperty({ enum: ToolTier })
+  @ApiProperty({ enum: ToolTier, description: 'A provider tool is never GUARANTEED (§7.6).' })
   tier: ToolTier;
+
+  @ApiProperty({
+    enum: ['STANDARD', 'PROVIDER'],
+    description: 'STANDARD: backed by several providers. PROVIDER: one maker’s own API.',
+  })
+  kind: 'STANDARD' | 'PROVIDER';
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: 'acme',
+    description: 'The maker’s public name, on a PROVIDER tool (`{handle}__{tool}`).',
+  })
+  handle: string | null;
+
+  @ApiProperty({
+    description:
+      'The "Not reviewed" badge: a provider tool no operator approved. Always false in the ' +
+      'catalogue, which lists reviewed (LISTED) tools only.',
+  })
+  notReviewed: boolean;
 
   @ApiProperty({
     example: 'weather',
@@ -253,4 +274,12 @@ export class ListPublicToolsQueryDto {
   @IsOptional()
   @Matches(/^[a-z][a-z0-9-]{1,63}$/)
   category?: string;
+
+  @ApiPropertyOptional({
+    enum: ['STANDARD', 'PROVIDER'],
+    description: 'Only standard tools ("Backed by several providers") or provider tools.',
+  })
+  @IsOptional()
+  @IsIn(['STANDARD', 'PROVIDER'])
+  kind?: 'STANDARD' | 'PROVIDER';
 }

@@ -274,10 +274,11 @@ describe('no existence oracles', () => {
     });
     const view = rootView();
     expect(selectViewTools(view, [listed, unlisted]).tools.map((t) => t.id)).toEqual(['t1']);
-    // A toolset that holds it by id still serves it.
+    // A toolset that holds it by id serves it only where §7.6 lets it reach:
+    // nowhere for a tool that is not a provider's own (T4).
     expect(
       selectViewTools({ ...view, baseToolIds: ['t2'] }, [listed, unlisted]).tools.map((t) => t.id),
-    ).toEqual(['t2']);
+    ).toEqual([]);
 
     const resolver = new McpEndpointResolver(
       {} as never,

@@ -49,7 +49,12 @@ import { McpErrorCode } from '../errors/mcp.errors';
 import { McpScope } from '../ports/mcp-scope';
 import { McpSession } from '../ports/mcp-session.port';
 import { McpCallRecorder, RefusalNotice } from './mcp-call-recorder.service';
-import { McpCatalogueService, McpCatalogueViewer, displayPrice } from './mcp-catalogue.service';
+import {
+  ASSAY_NOT_REVIEWED,
+  McpCatalogueService,
+  McpCatalogueViewer,
+  displayPrice,
+} from './mcp-catalogue.service';
 import { McpDiscoveryService } from './mcp-discovery.service';
 import { MCP_RATE_LIMITS, McpRateLimiter, listKey, refusalKey } from './mcp-rate-limiter.service';
 import {
@@ -521,8 +526,8 @@ function receiptPayload(receipt: McpReceipt): Record<string, unknown> {
  * that had to know a payment option is sometimes a field of an error object
  * and sometimes a sibling of it would reasonably read neither.
  */
-function errorResult(message: string, meta: Record<string, unknown>): CallToolResult {
-  const { paymentRequired, ...error } = meta;
+export function errorResult(message: string, meta: Record<string, unknown>): CallToolResult {
+  const { paymentRequired, notReviewed, ...error } = meta;
 
   return {
     isError: true,
@@ -530,6 +535,8 @@ function errorResult(message: string, meta: Record<string, unknown>): CallToolRe
     _meta: {
       [X402_ERROR]: error,
       ...(paymentRequired ? { [X402_PAYMENT_REQUIRED]: paymentRequired } : {}),
+      // A provider tool no operator reviewed says so where payment is asked (§7.6).
+      ...(paymentRequired && notReviewed === true ? { [ASSAY_NOT_REVIEWED]: true } : {}),
     },
   };
 }

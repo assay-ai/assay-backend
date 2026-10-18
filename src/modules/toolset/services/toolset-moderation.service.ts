@@ -6,6 +6,11 @@ import { ModerationCutoffEntity } from '@database/postgres/entities/moderation-c
 import { OrgHandleHistoryEntity } from '@database/postgres/entities/org-handle-history.entity';
 import { OrganizationEntity } from '@database/postgres/entities/organization.entity';
 import { ToolsetReportEntity } from '@database/postgres/entities/toolset-report.entity';
+import { ToolEntity } from '@database/postgres/entities/tool.entity';
+import {
+  TOOL_CONTRACT_CHANGES,
+  ToolContractChanges,
+} from '@modules/tool/ports/tool-contracts.port';
 import { ToolsetEntity } from '@database/postgres/entities/toolset.entity';
 import { ModerationCutoffRepository } from '@database/postgres/repositories/toolset-sharing.repository';
 
@@ -20,6 +25,13 @@ import {
 import { SharingAction, SharingTransitionError, applySharing } from '../domain/sharing';
 import { ToolsetErrors } from '../errors/toolset.errors';
 import { AccessEpochService } from './access-epoch.service';
+import {
+  removeHandleTools,
+  renameHandleTools,
+  restoreHandleTools,
+  restoreTakenDownTool,
+  tombstoneHandleTools,
+} from './handle-tools';
 import { HandlesService, lockHandle } from './handles.service';
 import { sharingPatchOf, sharingStateOf } from './sharing-row';
 import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
@@ -30,6 +42,8 @@ export const CUTOFF_CONFIRM_WINDOW_MS = 72 * 60 * 60 * 1000;
 export enum CutoffTarget {
   TOOLSET = 'TOOLSET',
   HANDLE = 'HANDLE',
+  /** A provider tool (T4, `/operator/tools/:id/takedown`). */
+  TOOL = 'TOOL',
 }
 
 export enum CutoffAction {
@@ -73,6 +87,11 @@ export class ToolsetModerationService {
     private readonly epochs: AccessEpochService,
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     @Optional() @Inject(TOOLSET_CLOCK) private readonly now: ToolsetClock = systemClock,
+    // A tool's or a handle's takedown changes which tools serve: every
+    // process re-reads its contracts at once. Optional for hand-built harnesses.
+    @Optional()
+    @Inject(TOOL_CONTRACT_CHANGES)
+    private readonly contracts?: ToolContractChanges,
   ) {}
 
   /** Delist or take down a toolset, at once; returns the cutoff to confirm. */
@@ -106,6 +125,58 @@ export class ToolsetModerationService {
     return { cutoff, toolset };
   }
 
+  /**
+   * Take down a provider tool, at once (FR-18): REMOVED everywhere — every
+   * view, pinned toolset versions included — and calls get `TOOL_REMOVED`.
+   * The status it had is kept, so a reverted cutoff restores it.
+   */
+  async cutoffTool(
+    manager: EntityManager,
+    input: { toolId: string; operatorId: string; note: string; reportId?: string | null },
+  ): Promise<{ cutoff: ModerationCutoffEntity; organizationId: string | null }> {
+    const tool = await manager
+      .createQueryBuilder(ToolEntity, 'tool')
+      .setLock('pessimistic_write')
+      .where('tool.id = :id', { id: input.toolId })
+      .getOne();
+    if (!tool || tool.kind !== 'PROVIDER') throw ToolsetErrors.notFound();
+    // Its own takedown, recorded even when its handle's already removed it:
+    // the two reasons stand apart (lifting one never lifts the other).
+    if (tool.takenDownAt) {
+      throw ToolsetErrors.sharingRefused({ refusal: 'ALREADY_TAKEN_DOWN' });
+    }
+    const now = this.now();
+    const removedNow = tool.status !== 'REMOVED';
+    await manager.update(
+      ToolEntity,
+      { id: tool.id },
+      {
+        status: 'REMOVED',
+        removedAt: tool.removedAt ?? now,
+        takenDownAt: now,
+        statusBeforeRemoval: removedNow ? tool.status : tool.statusBeforeRemoval,
+        // A review in flight is void: nothing taken down can be approved.
+        ...(tool.reviewStatus === 'PENDING'
+          ? {
+              reviewStatus: tool.approvedVersion !== null ? 'APPROVED' : 'NONE',
+              reviewContentHash: null,
+            }
+          : {}),
+        updatedAt: now,
+      },
+    );
+    const cutoff = await this.insertCutoff(manager, {
+      targetType: CutoffTarget.TOOL,
+      targetId: tool.id,
+      action: CutoffAction.TAKEDOWN,
+      operatorId: input.operatorId,
+      note: input.note,
+      reportId: input.reportId ?? null,
+      now,
+    });
+    return { cutoff, organizationId: tool.ownerOrgId };
+  }
+
   /** Take down a handle: every URL under it stops at once, with no alias. */
   async cutoffHandle(
     manager: EntityManager,
@@ -118,6 +189,8 @@ export class ToolsetModerationService {
       throw ToolsetErrors.sharingRefused({ refusal: 'ALREADY_TAKEN_DOWN' });
     }
     await manager.update(OrganizationEntity, { id: org.id }, { handleStatus: HandleStatus.FROZEN });
+    // Its provider tools (`{handle}__…`) stop with it, on every URL.
+    await removeHandleTools(manager, org.id, this.now());
     const cutoff = await this.insertCutoff(manager, {
       targetType: CutoffTarget.HANDLE,
       targetId: handle,
@@ -184,6 +257,11 @@ export class ToolsetModerationService {
           sharingPatchOf(transition(state, action, this.now())),
         );
       }
+    } else if (cutoff.targetType === CutoffTarget.TOOL) {
+      // Its own reason is cleared; it serves again only if its handle's
+      // takedown does not stand and it is still named under its owner's
+      // current, active handle (`restoreTakenDownTool`).
+      await restoreTakenDownTool(manager, cutoff.targetId);
     } else {
       await lockHandle(manager, cutoff.targetId);
       const org = await manager
@@ -197,6 +275,7 @@ export class ToolsetModerationService {
           { id: org.id },
           { handleStatus: HandleStatus.ACTIVE },
         );
+        await restoreHandleTools(manager, org.id);
       }
     }
 
@@ -253,11 +332,15 @@ export class ToolsetModerationService {
     }
     const now = this.now();
     const aliasUntil = new Date(now.getTime() + HANDLE_ALIAS_MS);
+    // Its provider tools are named under the handle: they move with it.
+    await renameHandleTools(manager, org.id, handle, next);
     await manager.update(
       OrganizationEntity,
       { id: org.id },
       { handle: next, handleSkeleton: handleSkeleton(next) },
     );
+    // A tool left removed for want of an active handle serves under this one.
+    await restoreHandleTools(manager, org.id);
     await manager.insert(OrgHandleHistoryEntity, {
       oldHandle: handle,
       oldSkeleton: handleSkeleton(handle),
@@ -289,7 +372,12 @@ export class ToolsetModerationService {
     if (from.id === toOrganizationId) {
       throw ToolsetErrors.handleReassignRefused({ reason: 'it already holds the handle' });
     }
-    const to = await manager.findOne(OrganizationEntity, { where: { id: toOrganizationId } });
+    // Locked: a provider tool created under its current handle meanwhile is
+    // renamed with the rest below, never left behind.
+    const to = await manager.findOne(OrganizationEntity, {
+      where: { id: toOrganizationId },
+      lock: { mode: 'pessimistic_write' },
+    });
     if (!to) throw ToolsetErrors.handleReassignRefused({ reason: 'unknown organization' });
     if (to.handleLockedAt || to.handleStatus === HandleStatus.FROZEN) {
       throw ToolsetErrors.handleReassignRefused({
@@ -316,16 +404,35 @@ export class ToolsetModerationService {
     }
 
     const now = this.now();
+    // The old holder's `{handle}__…` tools are tombstoned: they never come
+    // back under the brand's name, and the names are free for the new holder.
+    await tombstoneHandleTools(manager, from.id, handle);
     await manager.update(
       OrganizationEntity,
       { id: from.id },
       { handle: null, handleSkeleton: null, handleStatus: null, handleLockedAt: null },
     );
+    // The handle it held but had not locked is released: its tools move to
+    // the new name (refused past the 48-character cap), and any left removed
+    // for want of an active handle serve under it.
+    if (to.handle) {
+      try {
+        await renameHandleTools(manager, to.id, to.handle, handle);
+      } catch (error) {
+        if ((error as { context?: { reason?: string } }).context?.reason === 'TOOL_NAME_TOO_LONG') {
+          throw ToolsetErrors.handleReassignRefused({
+            reason: 'a provider tool name of the organization would pass 48 characters under it',
+          });
+        }
+        throw error;
+      }
+    }
     await manager.update(
       OrganizationEntity,
       { id: to.id },
       { handle, handleSkeleton: handleSkeleton(handle), handleStatus: HandleStatus.ACTIVE },
     );
+    await restoreHandleTools(manager, to.id);
     await manager.insert(OrgHandleHistoryEntity, {
       oldHandle: handle,
       oldSkeleton: handleSkeleton(handle),
@@ -367,6 +474,7 @@ export class ToolsetModerationService {
 
   /** After a moderation write commits: every cached shared view and access re-reads. */
   async afterCommit(organizationIds: readonly (string | null)[] = []): Promise<void> {
+    await this.contracts?.contractsChanged();
     await this.epochs.bumpShared();
     for (const id of new Set(organizationIds)) if (id) await this.epochs.bump(id);
   }

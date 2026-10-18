@@ -61,11 +61,12 @@ export class PublicCatalogueService {
   }
 
   /** Every listed tool, or one category's — filtered over the same cached list. */
-  async listTools(category?: string): Promise<PublicToolListDto> {
+  async listTools(category?: string, kind?: 'STANDARD' | 'PROVIDER'): Promise<PublicToolListDto> {
     const { tools } = await this.catalogue.listTools();
     return {
       tools: tools
         .filter((tool) => category === undefined || tool.category === category)
+        .filter((tool) => kind === undefined || tool.kind === kind)
         .map(toPublicTool),
     };
   }
@@ -126,6 +127,9 @@ function toPublicTool(tool: CatalogueToolDto): PublicToolDto {
     replacementMajor: tool.replacementMajor,
     replacementVersion: tool.replacementVersion,
     tier: tool.tier,
+    kind: tool.kind,
+    handle: tool.handle,
+    notReviewed: tool.notReviewed,
     category: tool.category,
     tags: [...tool.tags],
     providerCount: tool.providerCount,

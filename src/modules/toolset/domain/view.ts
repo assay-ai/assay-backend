@@ -10,10 +10,17 @@ import {
   intersectRanges,
   parseVersionRange,
 } from '@modules/tool/domain/contract/version-range';
-import { PricingMode, Tool, categoryOf, isListedTool } from '@modules/tool/ports/tool.types';
+import {
+  PricingMode,
+  Tool,
+  ToolVisibility,
+  categoryOf,
+  isListedTool,
+  isProviderTool,
+} from '@modules/tool/ports/tool.types';
 import { MoneyUtil } from '@utils/money.util';
 
-import { DiscoveryMode, EndpointKind, McpPath, ViewFilter } from './mcp-url';
+import { DiscoveryMode, EndpointKind, McpPath, McpPathKind, ViewFilter } from './mcp-url';
 
 /**
  * What one MCP URL serves, before access (design spec §7.3):
@@ -59,6 +66,11 @@ export interface McpEndpointView {
   readonly discovery?: ViewDiscovery;
   /** Set when a shared URL serves only through a grace period or a rename alias. */
   readonly notice?: ViewNotice | null;
+  /**
+   * `/@{handle}`: the organization whose LISTED provider tools this URL
+   * serves (T4). Absent or `null` elsewhere.
+   */
+  readonly baseOwnerOrgId?: string | null;
 }
 
 export interface ViewNotice {
@@ -88,6 +100,12 @@ export interface ViewToolset {
   readonly version: number | null;
   /** Set on a URL with no `@n`: it follows the latest version (`_meta["assay/toolsetVersion"]`). */
   readonly latest: boolean;
+  /**
+   * The owner: the only organization whose own PRIVATE or UNLISTED provider
+   * tools this toolset may serve (§7.6). `null` for a platform toolset;
+   * absent on a hand-built view, which then serves LISTED tools only.
+   */
+  readonly ownerOrgId?: string | null;
 }
 
 /** A toolset entry's contract constraints (T3): hard, kept by FALLBACK_BEST. */
@@ -171,20 +189,65 @@ export function entryRulesOf(entry: StoredEntryRule): EntryRoutingRules | null {
   return empty ? null : rules;
 }
 
+/**
+ * Whether a URL serving `view` may serve `tool` (design spec §7.6, "Reach of
+ * an UNLISTED provider tool"):
+ *
+ * ```text
+ * LISTED                           every URL whose view holds it
+ * UNLISTED provider tool           /my/{slug}[@n] of its own provider's toolset,
+ *                                  and /u/{token}[@n] of its provider's UNLISTED one
+ * PRIVATE provider tool            /my/{slug}[@n] of its own provider's toolset
+ * anything else                    nowhere — including /@{handle}/{slug}, /, /c/…, /@{handle}
+ * ```
+ *
+ * Checked on every serve, not only when an entry is saved: a snapshot taken
+ * while a tool was reachable never widens what it reaches later.
+ */
+export function reachableThrough(
+  tool: Pick<Tool, 'visibility' | 'kind' | 'ownerOrgId'>,
+  view: Pick<McpEndpointView, 'path' | 'toolset'>,
+): boolean {
+  if (isListedTool(tool)) return true;
+  if (!isProviderTool(tool) || !tool.ownerOrgId) return false;
+  const owner = view.toolset?.ownerOrgId;
+  if (!owner || owner !== tool.ownerOrgId) return false;
+  const kind = view.path?.kind;
+  if (kind === McpPathKind.MY_TOOLSET) {
+    return (
+      tool.visibility === ToolVisibility.PRIVATE || tool.visibility === ToolVisibility.UNLISTED
+    );
+  }
+  if (kind === McpPathKind.UNLISTED_TOOLSET) return tool.visibility === ToolVisibility.UNLISTED;
+  return false;
+}
+
 /** The view's tools from `catalogue`, in the URL's order, and the `?tools=` names it ignored. */
 export function selectViewTools(
-  view: Pick<McpEndpointView, 'baseToolIds' | 'filter' | 'baseCategory' | 'entryContracts'>,
+  view: Pick<
+    McpEndpointView,
+    'baseToolIds' | 'filter' | 'baseCategory' | 'entryContracts' | 'baseOwnerOrgId'
+  > &
+    Partial<Pick<McpEndpointView, 'path' | 'toolset'>>,
   catalogue: readonly Tool[],
 ): { readonly tools: readonly Tool[]; readonly ignoredTools: readonly string[] } {
   const byId = new Map(catalogue.map((tool) => [tool.id, tool]));
   let tools: Tool[] = view.baseToolIds
     ? view.baseToolIds.flatMap((id) => {
         const tool = byId.get(id);
-        return tool ? [tool] : [];
+        // A toolset URL serves an unlisted tool only where §7.6 lets it reach.
+        return tool && reachableThrough(tool, view as Pick<McpEndpointView, 'path' | 'toolset'>)
+          ? [tool]
+          : [];
       })
     : // The catalogue-wide views serve the LISTED catalogue only: an UNLISTED
       // or PRIVATE tool is reachable only through a toolset that holds it.
       catalogue.filter(isListedTool);
+
+  if (view.baseOwnerOrgId) {
+    // `/@{handle}`: one maker's LISTED provider tools.
+    tools = tools.filter((tool) => isProviderTool(tool) && tool.ownerOrgId === view.baseOwnerOrgId);
+  }
 
   const ignored: string[] = [];
   if (view.filter.tools) {
