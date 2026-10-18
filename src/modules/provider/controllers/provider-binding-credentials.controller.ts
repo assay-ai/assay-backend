@@ -59,7 +59,8 @@ export class ProviderBindingCredentialsController {
   @ApiResponse({
     status: 400,
     description:
-      'PROVIDER_CREDENTIAL_ORIGIN_MISMATCH, or PROVIDER_INVALID_CREDENTIAL_HEADERS (names only)',
+      'PROVIDER_CREDENTIAL_ORIGIN_MISMATCH, or PROVIDER_INVALID_CREDENTIAL_HEADERS (names only; ' +
+      'includes the 8 KiB cap on mapping constant headers + credentials + Assay headers)',
   })
   async put(
     @CurrentSession() session: McpSession,
@@ -73,6 +74,7 @@ export class ProviderBindingCredentialsController {
       await this.editor.publishedEndpoint(row),
       body.origin,
       body.headers,
+      row.requestMapping,
     );
 
     return this.vault.put(

@@ -10,6 +10,7 @@ import { VaultKeks } from '@modules/provider/credentials/credential-vault.keys';
 import { SaveToolBindingBodyDto } from '@modules/provider/dto/save-tool-binding.dto';
 import { BindingTestOutcome } from '@modules/provider/ports/binding-test.types';
 import { ProviderResponse } from '@modules/tool/domain/classification';
+import { REDACTED } from '@modules/tool/domain/egress/credential-redaction';
 import { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
 import { signatureBase } from '@modules/tool/request-auth/signature-base';
 import { PricingMode } from '@modules/tool/ports/tool.types';
@@ -50,7 +51,23 @@ const lookup = jest.fn(async (hostname: string) => {
   throw error;
 });
 
-type Mode = 'ok' | 'error' | 'hang' | 'redirect';
+type Mode = 'ok' | 'error' | 'hang' | 'redirect' | 'echo-json' | 'echo-html';
+
+/** A second credential with every character class that encodes differently. */
+const ECHO_SECRET = `ECHO-s3cr3t/v+1&<x> "q" 'z'`;
+
+/** Every form an upstream might echo a value back in. */
+function echoForms(value: string): Record<string, string> {
+  return {
+    raw: value,
+    base64: Buffer.from(value).toString('base64'),
+    base64url: Buffer.from(value).toString('base64url'),
+    percentLower: [...Buffer.from(value)]
+      .map((b) => `%${b.toString(16).padStart(2, '0')}`)
+      .join(''),
+    htmlEntities: [...value].map((c) => `&#x${c.charCodeAt(0).toString(16)};`).join(''),
+  };
+}
 
 let mode: Mode = 'ok';
 const received: Record<'a' | 'b', http.IncomingHttpHeaders[]> = { a: [], b: [] };
@@ -72,6 +89,21 @@ function serverA(req: http.IncomingMessage, res: http.ServerResponse, body: stri
   if (mode === 'redirect') {
     res.writeHead(302, { location: `${ORIGIN_B}/landing` });
     res.end();
+    return;
+  }
+  if (mode === 'echo-json' || mode === 'echo-html') {
+    const echoed = [req.headers['x-vendor-auth'], req.headers['x-vendor-secret']]
+      .filter((v): v is string => typeof v === 'string')
+      .map(echoForms);
+    const headers = { 'x-echo': String(req.headers['x-vendor-auth'] ?? '') };
+    if (mode === 'echo-json') {
+      res.writeHead(200, { 'content-type': 'application/json', ...headers });
+      res.end(JSON.stringify({ data: { answer: 'forty-two', echoed } }));
+    } else {
+      res.writeHead(500, { 'content-type': 'text/html', ...headers });
+      const lines = echoed.flatMap((forms) => Object.values(forms));
+      res.end(`<html><body><pre>${lines.join('\n')}</pre></body></html>`);
+    }
     return;
   }
   res.writeHead(200, { 'content-type': 'application/json' });
@@ -323,6 +355,77 @@ describe('credential egress', () => {
         [`%${CANARY}%`],
       );
       expect({ table: table_name, rows: hit.n }).toEqual({ table: table_name, rows: 0 });
+    }
+  });
+
+  it('redacts a credential the provider echoes back, in every encoding', async () => {
+    await vault.put(
+      context.organizationId,
+      bindingId,
+      ORIGIN_A,
+      [
+        { name: 'X-Vendor-Auth', value: CANARY },
+        { name: 'X-Vendor-Secret', value: ECHO_SECRET },
+      ],
+      SUBJECT,
+    );
+    const forms = [...Object.values(echoForms(CANARY)), ...Object.values(echoForms(ECHO_SECRET))];
+    logged.length = 0;
+
+    const reports: unknown[] = [];
+    for (const next of ['echo-json', 'echo-html'] as const) {
+      mode = next;
+      reports.push(await runTester());
+    }
+    const binding = toToolBinding(
+      await context.editor.loadEditable(context.organizationId, bindingId),
+    );
+    const responses: ProviderResponse[] = [];
+    for (const next of ['echo-json', 'echo-html'] as const) {
+      mode = next;
+      responses.push(
+        await invoker.invoke({
+          tool: TOOL,
+          binding,
+          input: { query: 'anything' },
+          timeoutMs: 400,
+          callId: `it-${next}`,
+        }),
+      );
+    }
+
+    // The provider did receive both values and did echo them.
+    expect(received.a).toHaveLength(4);
+    for (const headers of received.a) {
+      expect(headers['x-vendor-auth']).toBe(CANARY);
+      expect(headers['x-vendor-secret']).toBe(ECHO_SECRET);
+    }
+    expect(JSON.stringify(responses)).toContain(REDACTED);
+    expect(JSON.stringify(reports)).toContain(REDACTED);
+    expect(responses[0].headers?.['x-echo']).toBe(REDACTED);
+
+    const runs: Array<{ report: string }> = await context.dataSource.query(
+      `SELECT report::text AS report FROM binding_test_runs WHERE binding_id = $1`,
+      [bindingId],
+    );
+    expect(runs).toHaveLength(2);
+
+    const surfaces: Record<string, string> = {
+      reports: JSON.stringify(reports),
+      responses: JSON.stringify(responses),
+      runs: runs.map((run) => run.report).join('\n'),
+      logs: logged.join('\n'),
+    };
+    for (const [surface, text] of Object.entries(surfaces)) {
+      for (const form of forms) {
+        // JSON.stringify escapes `"` and `\`, so look for both spellings.
+        const escaped = JSON.stringify(form).slice(1, -1);
+        expect({ surface, form, found: text.includes(form) || text.includes(escaped) }).toEqual({
+          surface,
+          form,
+          found: false,
+        });
+      }
     }
   });
 });

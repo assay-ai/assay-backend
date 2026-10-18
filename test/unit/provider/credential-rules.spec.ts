@@ -1,10 +1,16 @@
 import {
+  ASSAY_HEADER_RESERVE_BYTES,
+  MAX_OUTBOUND_HEADER_BYTES,
+  assayMappingHeaders,
+  assertCredentialPut,
   credentialHeaderProblems,
   credentialQueryKeys,
   originOf,
   relayUnsupportedPort,
+  headerBytes,
   secretConstantHeaders,
 } from '@modules/provider/credentials/credential-rules';
+import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 
 const m = (extra: Partial<RequestMappingSpec> = {}): RequestMappingSpec =>
@@ -57,6 +63,7 @@ describe('credentialHeaderProblems', () => {
     ['bad name', [{ name: 'bad name', value: 'v' }]],
     ['CRLF value', [{ name: 'X-K', value: 'a\r\nb' }]],
     ['oversized value', [{ name: 'X-K', value: 'a'.repeat(4097) }]],
+    ['empty value', [{ name: 'X-K', value: '' }]],
     [
       'duplicate',
       [
@@ -85,6 +92,11 @@ describe('credentialHeaderProblems — messages', () => {
     expect(problems).toEqual(['Header #3: invalid name']);
     expect(JSON.stringify(problems)).not.toContain('sk-live');
   });
+  it('names an empty value by its header', () => {
+    expect(credentialHeaderProblems([{ name: 'X-K', value: '' }])).toEqual([
+      'Header X-K: value is empty',
+    ]);
+  });
   it('does not echo an invalid name in value problems either', () => {
     const problems = credentialHeaderProblems([{ name: 'bad name sk-1', value: 'a\nb' }]);
     expect(JSON.stringify(problems)).not.toContain('sk-1');
@@ -111,5 +123,69 @@ describe('relayUnsupportedPort', () => {
   });
   it('leaves unparsable input to the other validators', () => {
     expect(relayUnsupportedPort('not a url', true)).toBeNull();
+  });
+});
+
+describe('assayMappingHeaders', () => {
+  it('names every mapping header in the x-assay- namespace, constant or derived', () => {
+    expect(
+      assayMappingHeaders(
+        m({
+          headers: {
+            'X-Assay-Agent': { $const: 'a' },
+            'x-assay-call-id': { $path: '$.id' },
+            'X-Assayed': { $const: 'ok' },
+            Accept: { $const: 'x' },
+          },
+        }),
+      ),
+    ).toEqual(['X-Assay-Agent', 'x-assay-call-id']);
+  });
+  it('is empty without headers', () => {
+    expect(assayMappingHeaders(m())).toEqual([]);
+  });
+});
+
+describe('headerBytes', () => {
+  it('counts name, value and the four bytes of ": " and CRLF', () => {
+    expect(headerBytes([['ab', 'cde']])).toBe(9);
+    expect(headerBytes(Object.entries({ a: '1', b: '22' }))).toBe(6 + 7);
+  });
+});
+
+describe('assertCredentialPut — outbound header cap', () => {
+  const ENDPOINT = 'https://p.test/v1';
+  const put = (mapping: RequestMappingSpec, value: string) => () =>
+    assertCredentialPut(ENDPOINT, null, 'https://p.test', [{ name: 'X-K', value }], mapping);
+  // Room left for the credential value once its own name and framing are counted.
+  const room = MAX_OUTBOUND_HEADER_BYTES - ASSAY_HEADER_RESERVE_BYTES - headerBytes([['X-K', '']]);
+
+  it('accepts a set that fits with the reserve for Assay headers', () => {
+    expect(put(m(), 'a'.repeat(Math.min(room, 4096)))).not.toThrow();
+  });
+
+  it("counts the mapping's constant headers, refusing the total past 8 KiB", () => {
+    const big = m({
+      headers: {
+        'X-One': { $const: 'o'.repeat(2000) },
+        'X-Two': { $const: 't'.repeat(2000) },
+        'X-Derived': { $path: '$.q' },
+      },
+    });
+    let thrown: unknown;
+    try {
+      put(big, 'a'.repeat(4000))();
+    } catch (error) {
+      thrown = error;
+    }
+    expect(thrown).toMatchObject({
+      errorCode: ProviderErrorCode.PROVIDER_INVALID_CREDENTIAL_HEADERS,
+    });
+    expect(String((thrown as Error).message)).toContain('Headers too large');
+    expect(String((thrown as Error).message)).not.toContain('aaaa');
+  });
+
+  it('ignores derived mapping headers, which only the call can size', () => {
+    expect(put(m({ headers: { 'X-Derived': { $path: '$.q' } } }), 'a'.repeat(4000))).not.toThrow();
   });
 });

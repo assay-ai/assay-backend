@@ -233,6 +233,8 @@ export enum ProviderErrorCode {
   PROVIDER_CREDENTIAL_IN_QUERY = 'PROVIDER_CREDENTIAL_IN_QUERY',
   /** A secret-looking header is set to a constant in a request mapping. */
   PROVIDER_SECRET_IN_MAPPING = 'PROVIDER_SECRET_IN_MAPPING',
+  /** A request mapping sets a header in the platform's `x-assay-` namespace. */
+  PROVIDER_RESERVED_MAPPING_HEADER = 'PROVIDER_RESERVED_MAPPING_HEADER',
   /** A credential header set breaks the name, value or size rules. */
   PROVIDER_INVALID_CREDENTIAL_HEADERS = 'PROVIDER_INVALID_CREDENTIAL_HEADERS',
   /** A credential set names an origin the binding does not use (draft or published endpoint). */
@@ -731,6 +733,13 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `${context?.headers?.length ? `Header ${context.headers.join(', ')}: ` : ''}` +
       `Move this header to Authentication → API key; mappings are stored in plain text.`,
+  },
+  reservedMappingHeader: {
+    code: ProviderErrorCode.PROVIDER_RESERVED_MAPPING_HEADER,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Header ${(context?.headers ?? []).join(', ')}: names starting with x-assay- are set by ` +
+      `Assay itself. Rename or remove the header.`,
   },
   invalidCredentialHeaders: {
     code: ProviderErrorCode.PROVIDER_INVALID_CREDENTIAL_HEADERS,

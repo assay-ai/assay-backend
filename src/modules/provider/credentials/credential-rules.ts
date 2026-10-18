@@ -61,6 +61,36 @@ const SECRET_HEADER_NAMES: ReadonlySet<string> = new Set([
   'x-access-token',
 ]);
 
+/**
+ * The cap on all outbound request headers together: defaults, mapping,
+ * credentials and Assay's own (call id, digest, signature). 8 KiB is the
+ * smallest default request-header limit among common servers and proxies
+ * (Apache, nginx's default buffer, many CDNs), so a request above it would be
+ * refused by the provider's edge with an error that looks like theirs.
+ */
+export const MAX_OUTBOUND_HEADER_BYTES = 8 * 1024;
+
+/**
+ * What Assay's own headers may take at Save time, when they do not exist yet:
+ * `accept`, `content-type`, `x-assay-call-id`, `content-digest`,
+ * `signature-input` and `signature` come to about 500 bytes on the wire.
+ */
+export const ASSAY_HEADER_RESERVE_BYTES = 1024;
+
+/** Bytes of `headers` as written on the wire: `name: value\r\n` each. */
+export function headerBytes(headers: Iterable<readonly [string, string]>): number {
+  let total = 0;
+  for (const [name, value] of headers) {
+    total += Buffer.byteLength(name, 'utf8') + Buffer.byteLength(value, 'utf8') + 4;
+  }
+  return total;
+}
+
+/** Whether a header name is in the platform's `x-assay-` namespace. */
+export function isAssayHeaderName(name: string): boolean {
+  return name.toLowerCase().startsWith('x-assay-');
+}
+
 /** Human-readable problems with a credential header set; `[]` when valid. */
 export function credentialHeaderProblems(headers: readonly CredentialHeader[]): string[] {
   const problems: string[] = [];
@@ -78,14 +108,16 @@ export function credentialHeaderProblems(headers: readonly CredentialHeader[]): 
     const lower = name.toLowerCase();
     if (name.length === 0 || name.length > MAX_NAME_CHARS || !TOKEN_RE.test(name)) {
       problems.push(`${label}: invalid name`);
-    } else if (RESERVED_NAMES.has(lower) || lower.startsWith('x-assay-')) {
+    } else if (RESERVED_NAMES.has(lower) || isAssayHeaderName(lower)) {
       problems.push(`Reserved header name: ${name}`);
     }
     const valid = !(name.length === 0 || name.length > MAX_NAME_CHARS || !TOKEN_RE.test(name));
     const shown = valid ? `Header ${name}` : label;
     if (seen.has(lower)) problems.push(`Duplicate header name: ${valid ? name : label}`);
     seen.add(lower);
-    if (!VALUE_RE.test(value)) {
+    if (value.length === 0) {
+      problems.push(`${shown}: value is empty`);
+    } else if (!VALUE_RE.test(value)) {
       problems.push(`${shown}: value must be printable ASCII (no CR, LF or NUL)`);
     }
     if (Buffer.byteLength(value, 'utf8') > MAX_VALUE_BYTES) {
@@ -124,6 +156,23 @@ export function secretConstantHeaders(mapping: RequestMappingSpec): string[] {
     .map(([name]) => name);
 }
 
+/** Mapping header names in the platform's `x-assay-` namespace, as written, whatever their node. */
+export function assayMappingHeaders(mapping: RequestMappingSpec): string[] {
+  return Object.keys(mapping.headers ?? {}).filter(isAssayHeaderName);
+}
+
+/**
+ * The mapping's constant headers (the only ones known before a call), as the
+ * invoker would send them: a non-string constant is sent as its JSON text.
+ */
+function constantHeaders(mapping: RequestMappingSpec): Array<[string, string]> {
+  return Object.entries(mapping.headers ?? {}).flatMap(([name, node]) => {
+    if (!isConstNode(node)) return [];
+    const value = node.$const;
+    return [[name, typeof value === 'string' ? value : JSON.stringify(value)] as [string, string]];
+  });
+}
+
 /** Scheme + host + port, default port omitted, host lowercased. */
 export function originOf(endpoint: string): string {
   return new URL(endpoint).origin;
@@ -131,13 +180,17 @@ export function originOf(endpoint: string): string {
 
 /**
  * Throws unless `origin` is the draft endpoint's or the published revision's,
- * and the headers pass `credentialHeaderProblems`.
+ * the headers pass `credentialHeaderProblems`, and together with the draft
+ * mapping's constant headers and {@link ASSAY_HEADER_RESERVE_BYTES} they fit
+ * {@link MAX_OUTBOUND_HEADER_BYTES}. (Mapping headers derived from the input are
+ * only known per call; the invoker enforces the cap again there.)
  */
 export function assertCredentialPut(
   draftEndpoint: string,
   publishedEndpoint: string | null,
   origin: string,
   headers: readonly CredentialHeader[],
+  mapping: RequestMappingSpec,
 ): void {
   const allowed = [originOf(draftEndpoint)];
   if (publishedEndpoint) allowed.push(originOf(publishedEndpoint));
@@ -145,6 +198,16 @@ export function assertCredentialPut(
     throw ProviderErrors.credentialOriginMismatch();
   }
   const problems = credentialHeaderProblems(headers);
+  const total =
+    headerBytes(constantHeaders(mapping)) +
+    headerBytes(headers.map(({ name, value }) => [name, value] as const)) +
+    ASSAY_HEADER_RESERVE_BYTES;
+  if (total > MAX_OUTBOUND_HEADER_BYTES) {
+    problems.push(
+      `Headers too large: the mapping's constant headers and these credentials need ` +
+        `${total} bytes with Assay's own headers; the limit is ${MAX_OUTBOUND_HEADER_BYTES}`,
+    );
+  }
   if (problems.length > 0) {
     throw ProviderErrors.invalidCredentialHeaders({ problems });
   }
