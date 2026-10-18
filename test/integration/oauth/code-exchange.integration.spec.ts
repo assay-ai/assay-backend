@@ -45,7 +45,9 @@ describe('OAuth code exchange — real migrations', () => {
   let clients: OAuthClientRepository;
   let service: OAuthTokenService;
   let bumps: string[];
+  let failBump = false;
   let client: OAuthClientEntity;
+  let builtin: OAuthClientEntity;
 
   beforeAll(async () => {
     await dropDatabase(DATABASE);
@@ -75,6 +77,7 @@ describe('OAuth code exchange — real migrations', () => {
     bumps = [];
     const epoch = {
       bump: async (organizationId: string) => {
+        if (failBump) throw new Error('redis down');
         bumps.push(organizationId);
       },
     } as unknown as AccessEpochService;
@@ -93,6 +96,8 @@ describe('OAuth code exchange — real migrations', () => {
       { issuer: MCP },
     );
     client = await insertClient();
+    builtin = await insertClient(OAuthClientKind.BUILTIN);
+    await insertOrganization(ORGANIZATION);
   });
 
   afterAll(async () => {
@@ -101,15 +106,21 @@ describe('OAuth code exchange — real migrations', () => {
 
   beforeEach(() => {
     bumps.length = 0;
+    failBump = false;
   });
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
-  async function insertClient(): Promise<OAuthClientEntity> {
+  async function insertClient(
+    kind: OAuthClientKind = OAuthClientKind.DCR,
+  ): Promise<OAuthClientEntity> {
     return clients.save(
       clients.create({
-        clientId: `dcr_${randomBytes(16).toString('base64url').slice(0, 22)}`,
-        kind: OAuthClientKind.DCR,
+        clientId:
+          kind === OAuthClientKind.BUILTIN
+            ? `${MCP}/oauth/clients/assay-mcp`
+            : `dcr_${randomBytes(16).toString('base64url').slice(0, 22)}`,
+        kind,
         clientName: 'Example client',
         clientUri: null,
         redirectUris: [REDIRECT],
@@ -118,6 +129,34 @@ describe('OAuth code exchange — real migrations', () => {
         cacheUntil: null,
         lastUsedAt: null,
       }),
+    );
+  }
+
+  async function insertOrganization(id: string, status = 'ACTIVE'): Promise<void> {
+    await dataSource.query(
+      `INSERT INTO "organizations" ("id", "name", "status") VALUES ($1, 'Example org', $2)`,
+      [id, status],
+    );
+  }
+
+  /** An agent of `organizationId`; ACTIVE with a linked wallet unless told otherwise. */
+  async function insertAgent(
+    agentId: string,
+    options: { organizationId?: string; status?: string; wallet?: boolean } = {},
+  ): Promise<void> {
+    const wallet = options.wallet ?? true;
+    await dataSource.query(
+      `INSERT INTO "agents"
+         ("id", "organization_id", "privy_user_id", "status", "primary_account_id", "chain_id")
+       VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING`,
+      [
+        agentId,
+        options.organizationId ?? ORGANIZATION,
+        `did:privy:test-${agentId}`,
+        options.status ?? 'ACTIVE',
+        wallet ? `eip155:1:0x${randomBytes(20).toString('hex')}` : null,
+        wallet ? 'eip155:1' : null,
+      ],
     );
   }
 
@@ -134,16 +173,23 @@ describe('OAuth code exchange — real migrations', () => {
   }
 
   async function mint(
-    overrides: { agentId?: string; replaces?: string | null; oauthClient?: OAuthClientEntity } = {},
+    overrides: {
+      agentId?: string;
+      replaces?: string | null;
+      oauthClient?: OAuthClientEntity;
+      organizationId?: string;
+      skipAgent?: boolean;
+    } = {},
   ): Promise<Minted> {
     const { verifier, challenge } = pkce();
     const agentId = overrides.agentId ?? randomUUID();
+    if (!overrides.skipAgent) await insertAgent(agentId);
     const request: OAuthCodeRequest = {
       oauthClientId: (overrides.oauthClient ?? client).id,
       redirectUri: REDIRECT,
       codeChallenge: challenge,
       scope: 'assay:agent offline_access',
-      boundOrganizationId: ORGANIZATION,
+      boundOrganizationId: overrides.organizationId ?? ORGANIZATION,
     };
     const approval: OAuthCodeApproval = {
       agentId,
@@ -193,13 +239,58 @@ describe('OAuth code exchange — real migrations', () => {
       .find({ where: { organizationId: ORGANIZATION, action }, order: { createdAt: 'ASC' } });
   }
 
-  async function insertLiveGrant(agentId: string): Promise<void> {
-    await dataSource.query(
+  async function insertLiveGrant(
+    agentId: string,
+    oauthClient: OAuthClientEntity = client,
+    expiresIn = '1 day',
+  ): Promise<string> {
+    const [row] = (await dataSource.query(
       `INSERT INTO "agent_credentials"
          ("organization_id", "agent_id", "name", "issued_via", "oauth_client_id", "expires_at")
-       VALUES ($1, $2, 'existing', 'OAUTH', $3, now() + interval '1 day')`,
-      [ORGANIZATION, agentId, client.id],
-    );
+       VALUES ($1, $2, 'existing', 'OAUTH', $3, now() + $4::interval) RETURNING "id"`,
+      [ORGANIZATION, agentId, oauthClient.id, expiresIn],
+    )) as { id: string }[];
+    return row.id;
+  }
+
+  function codeHashOf(code: string): string {
+    return createHash('sha256').update(code).digest('hex');
+  }
+
+  async function liveCredentials(agentId: string): Promise<number> {
+    const [{ live }] = (await dataSource.query(
+      `SELECT count(*)::int AS "live" FROM "agent_credentials"
+        WHERE "agent_id" = $1 AND "revoked_at" IS NULL`,
+      [agentId],
+    )) as { live: number }[];
+    return live;
+  }
+
+  /**
+   * Asserts none of `secrets` appears in any text-like column, and none of
+   * `hashes` appears outside the `code_hash`/`token_hash` columns (R-OA-26).
+   */
+  async function assertNoSecretsStored(secrets: string[], hashes: string[]): Promise<void> {
+    const columns = (await dataSource.query(
+      `SELECT "table_name", "column_name" FROM information_schema.columns
+        WHERE "table_schema" = 'public'
+          AND "data_type" IN ('text', 'character varying', 'jsonb', 'json', 'ARRAY')`,
+    )) as { table_name: string; column_name: string }[];
+    expect(columns.length).toBeGreaterThan(10);
+
+    for (const { table_name: table, column_name: column } of columns) {
+      const needles = [
+        ...secrets,
+        ...(column === 'code_hash' || column === 'token_hash' ? [] : hashes),
+      ];
+      for (const needle of needles) {
+        const [hit] = (await dataSource.query(
+          `SELECT count(*)::int AS "n" FROM "${table}" WHERE "${column}"::text LIKE $1`,
+          [`%${needle}%`],
+        )) as { n: number }[];
+        expect({ table, column, hits: hit.n }).toEqual({ table, column, hits: 0 });
+      }
+    }
   }
 
   // ── tests ──────────────────────────────────────────────────────────────────
@@ -228,6 +319,18 @@ describe('OAuth code exchange — real migrations', () => {
     );
     expect(await exchange(minted)).toEqual(expect.objectContaining({ error: 'invalid_grant' }));
     expect(await credentialsOf(minted.agentId)).toHaveLength(0);
+  });
+
+  it('code valid 60 s: at 59 s → a token pair', async () => {
+    const minted = await mint();
+    await dataSource.query(
+      `UPDATE "oauth_authorization_codes"
+          SET "created_at" = "created_at" - interval '59 seconds',
+              "expires_at" = "expires_at" - interval '59 seconds'
+        WHERE "code_hash" = $1`,
+      [codeHashOf(minted.code)],
+    );
+    expectPair(await exchange(minted));
   });
 
   it('wrong verifier → invalid_grant AND a correct retry also fails (burned)', async () => {
@@ -272,6 +375,78 @@ describe('OAuth code exchange — real migrations', () => {
     expect(reused[0].actorId).toBe('oauth');
     expect(JSON.stringify(reused[0])).not.toContain(pair.access_token);
     expect(bumps).toContain(ORGANIZATION);
+
+    // A third presentation is still a replay: audited, though nothing is left to revoke.
+    expect(await exchange(minted)).toEqual(expect.objectContaining({ error: 'invalid_grant' }));
+    const again = (await auditActions('oauth.code_reused')).filter(
+      (entry) => entry.resourceId === credential.id,
+    );
+    expect(again).toHaveLength(2);
+    expect(again[1].after).toEqual(expect.objectContaining({ alreadyRevoked: true }));
+  });
+
+  it('a replay racing the first exchange: no live grant survives (deterministic)', async () => {
+    const minted = await mint();
+    const holder = new Client({ ...pgOptions(), database: DATABASE });
+    await holder.connect();
+    try {
+      // Park the first exchange inside its grant transaction, after the burn.
+      await holder.query(`SELECT pg_advisory_lock(hashtext($1))`, [
+        `oauth-grants:${minted.agentId}`,
+      ]);
+      const first = exchange(minted);
+      await waitForWaiters(holder, 1);
+      // The replay arrives while the first grant is not yet committed.
+      const replay = exchange(minted);
+      await waitForWaiters(holder, 2);
+      await holder.query(`SELECT pg_advisory_unlock(hashtext($1))`, [
+        `oauth-grants:${minted.agentId}`,
+      ]);
+      const [a, b] = await Promise.all([first, replay]);
+
+      expect(b).toEqual(expect.objectContaining({ error: 'invalid_grant' }));
+      if (!isOAuthError(a)) {
+        const [token] = (await dataSource.query(
+          `SELECT "revoked_at" FROM "oauth_access_tokens" WHERE "token_hash" = $1`,
+          [codeHashOf(a.access_token)],
+        )) as { revoked_at: Date | null }[];
+        expect(token.revoked_at).not.toBeNull();
+      }
+      expect(await liveCredentials(minted.agentId)).toBe(0);
+      const reused = (await auditActions('oauth.code_reused')).filter(
+        (entry) =>
+          entry.resourceId === minted.agentId ||
+          (entry.after as { agentId?: string } | null)?.agentId === minted.agentId,
+      );
+      expect(reused.length).toBeGreaterThanOrEqual(1);
+    } finally {
+      await holder.end();
+    }
+  });
+
+  it('a replay marked before the grant transaction starts: the first exchange creates nothing', async () => {
+    const minted = await mint();
+    // What a replay's compare-and-set leaves behind when it lands first.
+    await dataSource.query(
+      `UPDATE "oauth_authorization_codes" SET "reuse_detected_at" = now() WHERE "code_hash" = $1`,
+      [codeHashOf(minted.code)],
+    );
+    expect(await exchange(minted)).toEqual({ error: 'invalid_grant' });
+    expect(await credentialsOf(minted.agentId)).toHaveLength(0);
+    const reused = (await auditActions('oauth.code_reused')).filter(
+      (entry) => entry.resourceId === minted.agentId,
+    );
+    expect(reused).toHaveLength(1);
+    expect(reused[0].after).toEqual(expect.objectContaining({ grantCreated: false }));
+  });
+
+  it('many parallel exchanges of one code: at most one pair, and no live grant survives', async () => {
+    const minted = await mint();
+    const results = await Promise.all(Array.from({ length: 8 }, () => exchange(minted)));
+    const pairs = results.filter((result) => !isOAuthError(result));
+    expect(pairs.length).toBeLessThanOrEqual(1);
+    expect(results.filter(isOAuthError).length).toBeGreaterThanOrEqual(7);
+    expect(await liveCredentials(minted.agentId)).toBe(0);
   });
 
   it('wrong redirect_uri → invalid_grant, oauth.code_rejected', async () => {
@@ -383,8 +558,8 @@ describe('OAuth code exchange — real migrations', () => {
   });
 
   it('replaces copies narrowing and revokes the old live row', async () => {
-    const first = await mint();
-    expectPair(await exchange(first));
+    const first = await mint({ oauthClient: builtin });
+    expectPair(await exchange(first, {}, builtin));
     const [old] = await credentialsOf(first.agentId);
     const toolId = randomUUID();
     await dataSource.query(
@@ -395,8 +570,8 @@ describe('OAuth code exchange — real migrations', () => {
       [old.id, toolId],
     );
 
-    const second = await mint({ agentId: first.agentId, replaces: old.id });
-    expectPair(await exchange(second));
+    const second = await mint({ agentId: first.agentId, replaces: old.id, oauthClient: builtin });
+    expectPair(await exchange(second, {}, builtin));
 
     const rows = await credentialsOf(first.agentId);
     expect(rows).toHaveLength(2);
@@ -420,16 +595,41 @@ describe('OAuth code exchange — real migrations', () => {
       (entry) => entry.resourceId === fresh.id,
     );
     expect(created[0].after).toEqual(expect.objectContaining({ replaces: old.id }));
+
+    const revoked = (await auditActions('credential.revoked')).filter(
+      (entry) => entry.resourceId === old.id,
+    );
+    expect(revoked).toHaveLength(1);
+    expect(revoked[0].actorType).toBe('user');
+    expect(revoked[0].actorId).toBe(APPROVER);
+    expect(revoked[0].before).toEqual({ revokedAt: null });
+    expect(revoked[0].after).toEqual({
+      revokedAt: replaced.revokedAt!.toISOString(),
+      name: old.name,
+      reason: 'replaced',
+      replacedBy: fresh.id,
+    });
     expect(bumps).toEqual([ORGANIZATION]);
   });
 
+  it('replaces from a client that is not the built-in one is ignored', async () => {
+    const first = await mint();
+    expectPair(await exchange(first));
+    const [old] = await credentialsOf(first.agentId);
+
+    expectPair(await exchange(await mint({ agentId: first.agentId, replaces: old.id })));
+    const rows = await credentialsOf(first.agentId);
+    expect(rows).toHaveLength(2);
+    expect(rows.find((row) => row.id === old.id)!.revokedAt).toBeNull();
+  });
+
   it('replaces naming another agent’s credential is ignored', async () => {
-    const other = await mint();
-    expectPair(await exchange(other));
+    const other = await mint({ oauthClient: builtin });
+    expectPair(await exchange(other, {}, builtin));
     const [foreign] = await credentialsOf(other.agentId);
 
-    const minted = await mint({ replaces: foreign.id });
-    expectPair(await exchange(minted));
+    const minted = await mint({ replaces: foreign.id, oauthClient: builtin });
+    expectPair(await exchange(minted, {}, builtin));
 
     const [still] = await credentialsOf(other.agentId);
     expect(still.revokedAt).toBeNull();
@@ -455,6 +655,70 @@ describe('OAuth code exchange — real migrations', () => {
     expectPair(await exchange(await mint({ agentId })));
   });
 
+  it('replacing a live grant at the cap succeeds and stays at 50 live', async () => {
+    const agentId = randomUUID();
+    for (let i = 0; i < 49; i += 1) await insertLiveGrant(agentId);
+    const old = await insertLiveGrant(agentId, builtin);
+
+    expectPair(
+      await exchange(await mint({ agentId, replaces: old, oauthClient: builtin }), {}, builtin),
+    );
+    expect(await liveCredentials(agentId)).toBe(50);
+  });
+
+  it('replacing a grant that is no longer live does not free a slot at the cap', async () => {
+    const agentId = randomUUID();
+    for (let i = 0; i < 50; i += 1) await insertLiveGrant(agentId);
+    const old = await insertLiveGrant(agentId, builtin, '-1 second');
+
+    expect(
+      await exchange(await mint({ agentId, replaces: old, oauthClient: builtin }), {}, builtin),
+    ).toEqual({ error: 'invalid_grant', error_description: 'grant limit reached' });
+  });
+
+  it('re-checks the agent at exchange: suspended, no wallet, suspended org, missing', async () => {
+    const notActive = { error: 'invalid_grant', error_description: 'agent not active' };
+
+    const suspended = randomUUID();
+    await insertAgent(suspended, { status: 'SUSPENDED' });
+    expect(await exchange(await mint({ agentId: suspended }))).toEqual(notActive);
+
+    const noWallet = randomUUID();
+    await insertAgent(noWallet, { wallet: false });
+    expect(await exchange(await mint({ agentId: noWallet }))).toEqual(notActive);
+
+    const pausedOrg = randomUUID();
+    await insertOrganization(pausedOrg, 'SUSPENDED');
+    const inPausedOrg = randomUUID();
+    await insertAgent(inPausedOrg, { organizationId: pausedOrg });
+    expect(await exchange(await mint({ agentId: inPausedOrg, organizationId: pausedOrg }))).toEqual(
+      notActive,
+    );
+
+    const missing = randomUUID();
+    expect(await exchange(await mint({ agentId: missing, skipAgent: true }))).toEqual(notActive);
+
+    for (const agentId of [suspended, noWallet, inPausedOrg, missing]) {
+      expect(await credentialsOf(agentId)).toHaveLength(0);
+    }
+  });
+
+  it('an access-epoch failure after commit still returns the pair', async () => {
+    const first = await mint({ oauthClient: builtin });
+    expectPair(await exchange(first, {}, builtin));
+    const [old] = await credentialsOf(first.agentId);
+
+    failBump = true;
+    expectPair(
+      await exchange(
+        await mint({ agentId: first.agentId, replaces: old.id, oauthClient: builtin }),
+        {},
+        builtin,
+      ),
+    );
+    expect(await liveCredentials(first.agentId)).toBe(1);
+  });
+
   it('exchanges racing for the last slots: never more than 50 live grants', async () => {
     const agentId = randomUUID();
     for (let i = 0; i < 47; i += 1) await insertLiveGrant(agentId);
@@ -475,34 +739,68 @@ describe('OAuth code exchange — real migrations', () => {
     expect(live).toBe(50);
   });
 
-  it('access token stored only as digest; no raw token in any column (scan all text columns)', async () => {
+  it('no raw secret in any column, and no hash outside the hash columns (happy, rejected and replay paths)', async () => {
+    // Happy path.
     const minted = await mint();
     const pair = expectPair(await exchange(minted));
-    const secrets = [pair.access_token, pair.refresh_token, minted.code, minted.verifier];
-
     const [access] = (await dataSource.query(
       `SELECT count(*)::int AS "n" FROM "oauth_access_tokens" WHERE "token_hash" = $1`,
-      [createHash('sha256').update(pair.access_token).digest('hex')],
+      [codeHashOf(pair.access_token)],
     )) as { n: number }[];
     expect(access.n).toBe(1);
 
-    const columns = (await dataSource.query(
-      `SELECT "table_name", "column_name" FROM information_schema.columns
-        WHERE "table_schema" = 'public'
-          AND "data_type" IN ('text', 'character varying', 'jsonb', 'json', 'ARRAY')`,
-    )) as { table_name: string; column_name: string }[];
-    expect(columns.length).toBeGreaterThan(10);
+    // Replay path: writes oauth.code_reused.
+    expect(await exchange(minted)).toEqual(expect.objectContaining({ error: 'invalid_grant' }));
 
-    for (const { table_name: table, column_name: column } of columns) {
-      for (const secret of secrets) {
-        const [hit] = (await dataSource.query(
-          `SELECT count(*)::int AS "n" FROM "${table}" WHERE "${column}"::text LIKE $1`,
-          [`%${secret}%`],
-        )) as { n: number }[];
-        expect({ table, column, hits: hit.n }).toEqual({ table, column, hits: 0 });
-      }
-    }
+    // Rejected path: writes oauth.code_rejected.
+    const rejected = await mint();
+    const wrongVerifier = pkce().verifier;
+    expect(await exchange(rejected, { codeVerifier: wrongVerifier })).toEqual(
+      expect.objectContaining({ error: 'invalid_grant' }),
+    );
+
+    await assertNoSecretsStored(
+      [
+        pair.access_token,
+        pair.refresh_token,
+        minted.code,
+        minted.verifier,
+        rejected.code,
+        rejected.verifier,
+        wrongVerifier,
+      ],
+      [
+        codeHashOf(pair.access_token),
+        codeHashOf(pair.refresh_token),
+        codeHashOf(minted.code),
+        codeHashOf(rejected.code),
+      ],
+    );
   });
+
+  function pgOptions() {
+    const connection = testConnectionOptions();
+    return {
+      host: connection.host,
+      port: connection.port,
+      user: connection.username,
+      password: connection.password,
+    };
+  }
+
+  /** Polls until at least `count` backends wait on a lock: a condition, not a timer. */
+  async function waitForWaiters(observer: Client, count: number): Promise<void> {
+    for (let attempt = 0; attempt < 500; attempt += 1) {
+      const { rows } = await observer.query<{ n: number }>(
+        `SELECT count(*)::int AS "n" FROM pg_locks l JOIN pg_stat_activity a ON a.pid = l.pid
+          WHERE NOT l.granted AND a.datname = $1`,
+        [DATABASE],
+      );
+      if (rows[0].n >= count) return;
+      await new Promise((resolve) => setTimeout(resolve, 10));
+    }
+    throw new Error(`fewer than ${count} lock waiters after 5 s`);
+  }
 
   async function dropDatabase(database: string): Promise<void> {
     const connection = testConnectionOptions();
