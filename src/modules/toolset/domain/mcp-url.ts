@@ -359,6 +359,22 @@ export function browserRedirectTarget(
 // Internals
 // ---------------------------------------------------------------------------
 
+/**
+ * First path segments that are never an MCP server: the held `t`, the host's
+ * own routes (`/.well-known/*`, `/health`, `/oauth/*`) and the ones kept for
+ * later pages. A URL starting with one of these parses to `null`, whatever
+ * follows, so no toolset slug or route can shadow them (R-OA-28). Lowercase,
+ * compared after the path is lowercased.
+ */
+export const RESERVED_FIRST_SEGMENTS: readonly string[] = Object.freeze([
+  't',
+  '.well-known',
+  'health',
+  'status',
+  'docs',
+  'oauth',
+]);
+
 function parsePath(raw: string): McpPath | null {
   if (!raw.startsWith('/')) return null;
   // `%40` is the one encoding a client may legitimately send (an encoded
@@ -376,6 +392,7 @@ function parsePath(raw: string): McpPath | null {
   }
 
   const [first, ...rest] = segments;
+  if (RESERVED_FIRST_SEGMENTS.includes(first)) return null;
 
   if (first.startsWith('@')) {
     const handle = first.slice(1);
@@ -404,7 +421,7 @@ function parsePath(raw: string): McpPath | null {
       return { kind: McpPathKind.UNLISTED_TOOLSET, token: pinned.name, version: pinned.version };
     }
     default:
-      // `t`, `.well-known`, `health`, `status`, `docs` and everything else.
+      // Every other first segment; the reserved ones never get this far.
       return null;
   }
 }
