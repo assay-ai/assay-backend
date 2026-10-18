@@ -2884,6 +2884,55 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
     return qb;
   }
+
+  /**
+   * What this organization's escrow account paid for calls in `[from, to)`,
+   * by call time: rail-B calls charged as `GET /receipts/summary` counts
+   * them (not owed, not collected-never). Atomic units. A statement line
+   * (B7), read-only.
+   */
+  async sumEscrowPaid(
+    organizationId: string,
+    accountId: string,
+    assetId: string,
+    from: Date | null,
+    to: Date,
+  ): Promise<bigint> {
+    const qb = this.createQueryBuilder('intent')
+      .select(`COALESCE(SUM(intent.priceAmount), 0)`, 'total')
+      .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere('lower(intent.agentAccount) = lower(:accountId)', { accountId })
+      .andWhere('intent.assetId = :assetId', { assetId })
+      .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
+      .andWhere(SUMMARY_CHARGED_SQL)
+      .andWhere('intent.createdAt < :to', { to });
+    if (from) qb.andWhere('intent.createdAt >= :from', { from });
+    const row = await qb.getRawOne<{ total: string }>();
+    return BigInt(row?.total ?? '0');
+  }
+
+  /**
+   * Of {@link sumEscrowPaid}, what the chain has not taken from the escrow yet:
+   * charged rail-B calls neither redeemed nor redeemed into the hold. Atomic
+   * units. Read by the statement's check against the escrow balance (B7).
+   */
+  async sumEscrowChargedNotRedeemed(
+    organizationId: string,
+    accountId: string,
+    assetId: string,
+  ): Promise<bigint> {
+    const row = await this.createQueryBuilder('intent')
+      .select(`COALESCE(SUM(intent.priceAmount), 0)`, 'total')
+      .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere('lower(intent.agentAccount) = lower(:accountId)', { accountId })
+      .andWhere('intent.assetId = :assetId', { assetId })
+      .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
+      .andWhere(SUMMARY_CHARGED_SQL)
+      .andWhere(`cardinality(intent.redemption_tx_refs) = 0`)
+      .andWhere('intent.heldStatus IS NULL')
+      .getRawOne<{ total: string }>();
+    return BigInt(row?.total ?? '0');
+  }
 }
 
 /**

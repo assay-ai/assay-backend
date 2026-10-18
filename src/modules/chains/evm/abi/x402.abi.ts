@@ -246,6 +246,16 @@ export const X402_SLASH_WATCH_EVENTS_ABI = parseAbi([
 ]);
 
 /**
+ * The escrow's two withdrawal events, for `EvmEscrowWithdrawalIndexer` (B7):
+ * the buyer's withdrawal history. `WithdrawRequested` with `amount == 0` is a
+ * cancel. Events only, so the index cannot reach a function.
+ */
+export const X402_ESCROW_WITHDRAWAL_EVENTS_ABI = parseAbi([
+  'event WithdrawRequested(address indexed buyer, uint64 amount, uint64 availableAt)',
+  'event EscrowWithdrawn(address indexed buyer, uint64 requested, uint64 amount)',
+]);
+
+/**
  * `Multicall3.aggregate3` — the one batching door. Each call carries
  * `allowFailure: true`, so one refused judgement does not revert the others;
  * the per-call result is learned by simulating the batch first (`eth_call`

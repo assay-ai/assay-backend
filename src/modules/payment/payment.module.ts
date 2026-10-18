@@ -4,6 +4,7 @@ import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { LedgerModule } from '@modules/ledger/ledger.module';
 import { NotificationModule } from '@modules/notification/notification.module';
+import { AuditLogModule } from '@shared/audit';
 
 import { BuyerDebtSchemaCheck } from './services/buyer-debt-schema-check.service';
 import { DepositFinalityService } from './services/deposit-finality.service';
@@ -49,7 +50,8 @@ import { VoucherService } from './services/voucher.service';
   // `NotificationModule`: `DepositFinalityService` emits
   // `deposit.credited` / `deposit.failed` once finality resolves. Imported,
   // not re-exported — same reasoning as `LedgerModule`.
-  imports: [LedgerModule, ChainsModule, NotificationModule, BlocklistModule],
+  // `AuditLogModule`: `DepositFinalityService` logs each deposit it resolves.
+  imports: [LedgerModule, ChainsModule, NotificationModule, BlocklistModule, AuditLogModule],
   providers: [
     // Boot refuses a schema without the buyer-debt columns (review-buyer-debt H2).
     BuyerDebtSchemaCheck,

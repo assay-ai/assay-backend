@@ -6,6 +6,21 @@ import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
 import { UnsettledVouchers } from '../domain/unsettled-vouchers';
 
+/** `GetEscrowResponseDto.lifetime`. */
+export class EscrowLifetimeDto {
+  @ApiProperty({ type: MoneyDto, description: '`totalFunded`: every deposit, ever.' })
+  deposited: MoneyDto;
+
+  @ApiProperty({
+    type: MoneyDto,
+    description: '`totalRedeemed`: paid out to calls, including payments still held.',
+  })
+  spent: MoneyDto;
+
+  @ApiProperty({ type: MoneyDto, description: '`totalWithdrawn`: every claimed withdrawal.' })
+  withdrawn: MoneyDto;
+}
+
 /**
  * `GET /escrow` — everything a console needs to
  * render the buyer's escrow: balance, both brakes, the window meter and any
@@ -163,6 +178,17 @@ export class GetEscrowResponseDto {
       'to take (`chainReadable: false`).',
   })
   observedAt: string | null;
+
+  @ApiPropertyOptional({
+    type: EscrowLifetimeDto,
+    nullable: true,
+    description:
+      'Lifetime money in and out of this escrow, read from the chain in the same call as ' +
+      '`balance`: `deposited − spent − withdrawn = balance` by the contract invariant. `spent` ' +
+      'includes payments still in their dispute hold. `null` where the chain keeps no money-in ' +
+      'counter (Solana), with no escrow, or when the chain could not be read.',
+  })
+  lifetime: EscrowLifetimeDto | null;
 }
 
 /**

@@ -1,6 +1,7 @@
 import { Controller, Get, Param, Query, UseGuards } from '@nestjs/common';
 import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
+import { RefundEligibilityService } from '@modules/dispute/services/refund-eligibility.service';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 import { ApiCursorPage, CursorPageDto } from '@shared/api';
@@ -22,18 +23,26 @@ import { ToolCallsService } from '../services/tool-calls.service';
 @UseGuards(SessionAuthGuard)
 @Controller('tool-calls')
 export class ToolCallsController {
-  constructor(private readonly toolCalls: ToolCallsService) {}
+  constructor(
+    private readonly toolCalls: ToolCallsService,
+    // `refundable=true` answers with the receipt's own read-only predicate.
+    private readonly refunds: RefundEligibilityService,
+  ) {}
 
   @Get()
   @ApiOperation({
-    summary: 'Tool calls, newest first — filterable by status, tool, provider, verdict',
+    summary:
+      'Tool calls, newest first — filterable by status, tool, provider, verdict, and calls ' +
+      'still refundable if reported now',
   })
   @ApiCursorPage(ToolCallDto)
   async list(
     @CurrentSession() session: McpSession,
     @Query() query: ListToolCallsQueryDto,
   ): Promise<CursorPageDto<ToolCallDto>> {
-    return this.toolCalls.list(session.organizationId, query);
+    return this.toolCalls.list(session.organizationId, query, (calls, now) =>
+      this.refunds.ofCalls(calls, now),
+    );
   }
 
   @Get(':intentId')

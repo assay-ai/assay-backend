@@ -103,6 +103,8 @@ import { EvmBlockedAddressEntity } from './entities/evm-blocked-address.entity';
 import { EvmChainStateEntity } from './entities/evm-chain-state.entity';
 import { ProviderSlashHoldEntity } from './entities/provider-slash-hold.entity';
 import { EvmChainStateRepository } from './repositories/evm-chain-state.repository';
+import { EscrowWithdrawalEventEntity } from './entities/escrow-withdrawal-event.entity';
+import { EscrowWithdrawalEventRepository } from './repositories/escrow-withdrawal-event.repository';
 import { ProviderSlashHoldRepository } from './repositories/provider-slash-hold.repository';
 import { BindingAttemptEntity } from './entities/binding-attempt.entity';
 import { BindingStatsEntity } from './entities/binding-stats.entity';
@@ -192,6 +194,7 @@ export const entities = [
   EvmChainStateEntity,
   ProviderSlashHoldEntity,
   EvmBlockedAddressEntity,
+  EscrowWithdrawalEventEntity,
   BindingAttemptEntity,
   BindingStatsEntity,
   ...TOOLSET_SHARING_ENTITIES,
@@ -253,6 +256,7 @@ export const repositories = [
   AgentRepository,
   AccountBlockRepository,
   EvmChainStateRepository,
+  EscrowWithdrawalEventRepository,
   ProviderSlashHoldRepository,
   BindingAttemptRepository,
   BindingStatsRepository,

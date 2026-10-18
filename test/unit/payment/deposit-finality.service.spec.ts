@@ -25,7 +25,10 @@ const ACCOUNT = `${CHAIN}:0x66d7CA4cD09C65197B2f3239c1fe79631747dd00`;
 const TX = `0x${'ab'.repeat(32)}`;
 const money = MoneyUtil.of('25000000', ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6);
 
-function build(observe: (commitment: string | undefined) => unknown) {
+function build(
+  observe: (commitment: string | undefined) => unknown,
+  options: { appendFails?: boolean } = {},
+) {
   const deposits = {
     findSettledAwaitingFinality: jest
       .fn()
@@ -40,8 +43,11 @@ function build(observe: (commitment: string | undefined) => unknown) {
       .mockResolvedValue([
         { entryType: LedgerEntryType.DEPOSIT_PENDING, accountId: ACCOUNT, money },
       ]),
-    appendNow: jest.fn().mockResolvedValue(undefined),
+    appendNow: options.appendFails
+      ? jest.fn().mockRejectedValue(new Error('Balance folded negative'))
+      : jest.fn().mockResolvedValue(undefined),
   };
+  const audit = { recordAfterCommit: jest.fn().mockResolvedValue(undefined) };
   const adapter = {
     observeTransfer: jest.fn(async (_intent, _tx, options?: { commitment?: string }) =>
       observe(options?.commitment),
@@ -56,8 +62,10 @@ function build(observe: (commitment: string | undefined) => unknown) {
       }),
     } as unknown as EscrowBalanceReaderPort,
     ledger as unknown as LedgerService,
+    undefined,
+    audit as never,
   );
-  return { service, deposits, ledger, adapter };
+  return { service, deposits, ledger, adapter, audit };
 }
 
 const LANDED = { amount: '25000000', asset: ASSET_IDS.USDG_ROBINHOOD_TESTNET, decimals: 6 };
@@ -92,5 +100,63 @@ describe('DepositFinalityService sweep', () => {
     expect(ledger.appendNow).toHaveBeenCalledWith(
       expect.objectContaining({ entryType: LedgerEntryType.DEPOSIT_CONFIRM, chainTxRef: TX }),
     );
+  });
+});
+
+describe('DepositFinalityService audit rows (B7)', () => {
+  it('logs a confirmed deposit once, after the credit, as bookkeeping', async () => {
+    const { service, ledger, audit } = build(() => LANDED);
+
+    await service.promotePendingDeposits(10);
+
+    expect(audit.recordAfterCommit).toHaveBeenCalledTimes(1);
+    expect(audit.recordAfterCommit).toHaveBeenCalledWith({
+      organizationId: 'org-1',
+      actor: { type: 'system', id: 'deposit-finality' },
+      action: 'deposit.credited',
+      resourceType: 'deposit',
+      resourceId: 'dep-1',
+      before: null,
+      after: expect.objectContaining({
+        amount: '25.000000',
+        amountAtomic: '25000000',
+        chainId: CHAIN,
+        transactionHash: TX,
+      }),
+    });
+    expect(ledger.appendNow.mock.invocationCallOrder[0]).toBeLessThan(
+      audit.recordAfterCommit.mock.invocationCallOrder[0],
+    );
+  });
+
+  it('logs a rejected deposit', async () => {
+    const { service, audit } = build(() => null);
+
+    await service.promotePendingDeposits(10);
+
+    expect(audit.recordAfterCommit.mock.calls[0][0]).toMatchObject({ action: 'deposit.rejected' });
+  });
+
+  it('logs nothing while the deposit waits for finality', async () => {
+    const { service, audit } = build((c) => (c === 'finalized' ? null : LANDED));
+
+    await service.promotePendingDeposits(10);
+
+    expect(audit.recordAfterCommit).not.toHaveBeenCalled();
+  });
+
+  it('logs nothing when another trigger resolved the deposit first', async () => {
+    const { service, ledger, audit } = build(() => LANDED, { appendFails: true });
+    ledger.readJournal
+      .mockResolvedValueOnce([
+        { entryType: LedgerEntryType.DEPOSIT_PENDING, accountId: ACCOUNT, money },
+      ])
+      .mockResolvedValueOnce([
+        { entryType: LedgerEntryType.DEPOSIT_PENDING, accountId: ACCOUNT, money },
+        { entryType: LedgerEntryType.DEPOSIT_CONFIRM, accountId: ACCOUNT, money },
+      ]);
+
+    await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ skipped: 1 });
+    expect(audit.recordAfterCommit).not.toHaveBeenCalled();
   });
 });

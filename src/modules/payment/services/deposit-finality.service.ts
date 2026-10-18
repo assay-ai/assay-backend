@@ -3,6 +3,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
+import { Money } from '@modules/chains/ports/money.types';
 import { PaymentIntent as ChainPaymentIntent, TxRef } from '@modules/chains/ports/x402.types';
 import {
   ESCROW_BALANCE_READER,
@@ -16,6 +17,7 @@ import {
   NotificationEvent,
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
+import { AuditLogWriter } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { depositResource } from '../constants/deposit-intent.constants';
@@ -65,6 +67,9 @@ export class DepositFinalityService {
     @Optional()
     @Inject(NOTIFICATION_PORT)
     private readonly notifications?: NotificationPort,
+    // Optional for the same reason. Bookkeeping only: the entry is written
+    // after the resolving ledger entry is durable and never decides anything.
+    @Optional() private readonly audit?: AuditLogWriter,
   ) {}
 
   /**
@@ -222,6 +227,7 @@ export class DepositFinalityService {
           continue;
         }
         confirmed += 1;
+        await this.recordAudit(candidate, 'deposit.credited', pending.money, pending.accountId);
 
         // The notification shows "amount credited (observed), new balance" —
         // the observed amount is what `pending.money`
@@ -268,6 +274,7 @@ export class DepositFinalityService {
           continue;
         }
         rejected += 1;
+        await this.recordAudit(candidate, 'deposit.rejected', pending.money, pending.accountId);
 
         void this.notifications
           ?.notify({
@@ -295,6 +302,38 @@ export class DepositFinalityService {
     }
 
     return { checked: candidates.length, confirmed, rejected, skipped };
+  }
+
+  /**
+   * The audit row for a deposit this pass resolved (B7): the activity log
+   * shows deposits beside the buyer's own changes. Written only by the pass
+   * that won the resolving ledger entry, so a deposit is logged once; after
+   * the fact, because the credit is already durable, and never throwing
+   * (`recordAfterCommit`). It moves no money and nothing reads it to decide.
+   */
+  private async recordAudit(
+    candidate: { organizationId: string; id: string; chainId: string; chainTxRef: string | null },
+    action: 'deposit.credited' | 'deposit.rejected',
+    money: Money,
+    account: string,
+  ): Promise<void> {
+    await this.audit?.recordAfterCommit({
+      organizationId: candidate.organizationId,
+      actor: { type: 'system', id: 'deposit-finality' },
+      action,
+      resourceType: 'deposit',
+      resourceId: candidate.id,
+      before: null,
+      after: {
+        // Decimal for the activity log's sentence; atomic beside it for exactness.
+        amount: MoneyUtil.format(money),
+        amountAtomic: money.amount,
+        asset: money.asset,
+        account,
+        chainId: candidate.chainId,
+        transactionHash: candidate.chainTxRef,
+      },
+    });
   }
 
   /**

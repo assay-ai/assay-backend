@@ -32,6 +32,22 @@ export interface EscrowChainBalance {
   readonly windowStartedAt: number;
   /** The moment THIS reading was taken from the chain — never the moment it was served from cache. */
   readonly observedAt: Date;
+  /**
+   * The escrow's lifetime counters, where the chain keeps all three (eip155:
+   * `totalFunded`, `totalRedeemed`, `totalWithdrawn`). The contract keeps
+   * `totalFunded == balance + totalRedeemed + totalWithdrawn` per escrow, so a
+   * screen can show "deposited − spent − withdrawn = balance" from one read
+   * and no platform arithmetic. Absent or `null` where the chain has no
+   * money-in counter (Solana). Display only: nothing decides on it.
+   */
+  readonly lifetime?: EscrowLifetimeTotals | null;
+}
+
+/** Atomic units, as the chain keeps them. See {@link EscrowChainBalance.lifetime}. */
+export interface EscrowLifetimeTotals {
+  readonly funded: bigint;
+  readonly redeemed: bigint;
+  readonly withdrawn: bigint;
 }
 
 /**

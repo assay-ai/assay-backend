@@ -92,6 +92,7 @@ function unreadableState(): EscrowState {
     nextSeq: '7',
     observedAt: null,
     chainReadable: false,
+    lifetime: null,
   };
 }
 

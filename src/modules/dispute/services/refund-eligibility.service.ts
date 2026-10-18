@@ -60,6 +60,72 @@ export class RefundEligibilityService {
     settledAt: Date | null,
     now: Date = new Date(),
   ): Promise<RefundEligibility> {
+    const answer = await this.beforeDecided(intent, settledAt, now, (call) => this.holdLive(call));
+    if (!answer.refundable) return NOT_REFUNDABLE;
+    const decided = await this.disputes.findOneBy({
+      organizationId: intent.organizationId,
+      intentId: intent.id,
+      state: In([DisputeState.UPHELD, DisputeState.REJECTED]),
+    });
+    return decided ? NOT_REFUNDABLE : answer;
+  }
+
+  /**
+   * {@link ofCall} for a page of one organization's calls, with the decided
+   * reports read in one query and the chain's hold read once per asset (B7
+   * review nit 2). The same answer per call, plus `reported`: a report is
+   * already open on it (it cannot be reported again).
+   */
+  async ofCalls(
+    calls: readonly { intent: PaymentIntentEntity; settledAt: Date | null }[],
+    now: Date = new Date(),
+  ): Promise<Map<string, RefundEligibility & { readonly reported: boolean }>> {
+    const answers = new Map<string, RefundEligibility & { readonly reported: boolean }>();
+    const live = new Map<string, Promise<boolean>>();
+    const holdLive = (intent: PaymentIntentEntity) => {
+      const asset = intent.assetId;
+      if (!live.has(asset)) live.set(asset, this.holdLive(intent));
+      return live.get(asset)!;
+    };
+    const candidates: { intent: PaymentIntentEntity; answer: RefundEligibility }[] = [];
+    for (const { intent, settledAt } of calls) {
+      const answer = await this.beforeDecided(intent, settledAt, now, holdLive);
+      if (answer.refundable) candidates.push({ intent, answer });
+      else answers.set(intent.id, { ...NOT_REFUNDABLE, reported: false });
+    }
+    if (candidates.length === 0) return answers;
+    const reports = await this.disputes.find({
+      where: candidates.map(({ intent }) => ({
+        organizationId: intent.organizationId,
+        intentId: intent.id,
+        state: In([
+          DisputeState.UPHELD,
+          DisputeState.REJECTED,
+          DisputeState.OPEN,
+          DisputeState.UNDER_REVIEW,
+        ]),
+      })),
+    });
+    for (const { intent, answer } of candidates) {
+      const mine = reports.filter((report) => report.intentId === intent.id);
+      const decided = mine.some(
+        (report) => report.state === DisputeState.UPHELD || report.state === DisputeState.REJECTED,
+      );
+      answers.set(
+        intent.id,
+        decided ? { ...NOT_REFUNDABLE, reported: true } : { ...answer, reported: mine.length > 0 },
+      );
+    }
+    return answers;
+  }
+
+  /** Everything {@link ofCall} checks except the decided-report lookup. */
+  private async beforeDecided(
+    intent: PaymentIntentEntity,
+    settledAt: Date | null,
+    now: Date,
+    holdLive: (intent: PaymentIntentEntity) => Promise<boolean>,
+  ): Promise<RefundEligibility> {
     const closesAt = disputeFilingClosesAt(intent, settledAt, this.config.filingWindowMs);
     if (closesAt === null || now.getTime() > closesAt.getTime()) return NOT_REFUNDABLE;
 
@@ -77,17 +143,9 @@ export class RefundEligibilityService {
     const context = { now, guardSeconds: DISPUTE_FILING_GUARD_SECONDS };
     // The cheap check first, as if the hold were live; the chain only when the rest passed.
     if (!refundGuaranteedIfReported(facts, { ...context, holdLive: true })) return NOT_REFUNDABLE;
-    if (intent.rail === PaymentRail.RAIL_B_VOUCHER && !(await this.holdLive(intent))) {
+    if (intent.rail === PaymentRail.RAIL_B_VOUCHER && !(await holdLive(intent))) {
       return NOT_REFUNDABLE;
     }
-
-    const decided = await this.disputes.findOneBy({
-      organizationId: intent.organizationId,
-      intentId: intent.id,
-      state: In([DisputeState.UPHELD, DisputeState.REJECTED]),
-    });
-    if (decided) return NOT_REFUNDABLE;
-
     const until =
       facts.heldStatus === 'HELD' && facts.collectableAt
         ? new Date(facts.collectableAt.getTime() - DISPUTE_FILING_GUARD_SECONDS * 1000)
