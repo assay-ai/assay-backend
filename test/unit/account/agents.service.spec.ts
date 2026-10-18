@@ -222,6 +222,18 @@ describe('AgentsService.rename', () => {
     expect(manager.update).not.toHaveBeenCalled();
   });
 
+  it('refuses with 404 and no audit row when the row went away before the write', async () => {
+    const agent = buildAgent({ id: AGENT_ID, organizationId: ORGANIZATION_ID, label: 'My agent' });
+    const { service, manager, audit } = buildRenameHarness(agent);
+    manager.update.mockResolvedValueOnce({ affected: 0 });
+
+    await expectErrorCodeAsync(
+      () => service.rename(ORGANIZATION_ID, AGENT_ID, 'Too late', ACTOR),
+      AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
+    );
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
   it('is a no-op, with no audit row, when the label does not change', async () => {
     const agent = buildAgent({ id: AGENT_ID, organizationId: ORGANIZATION_ID, label: 'My agent' });
     const { service, dataSource, audit } = buildRenameHarness(agent);

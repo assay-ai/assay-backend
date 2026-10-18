@@ -34,9 +34,14 @@ describe('UpdateAgentBodyDto — PATCH /agents/:agentId', () => {
     ['a NUL', 'a\u0000b'],
     ['DEL', 'a\u007fb'],
     ['a C1 control', 'a\u0085b'],
-    ['a bidi override', 'agent‮txt.exe'],
-    ['a zero-width joiner', 'a‍b'],
-    ['a line separator', 'a b'],
+    ['a bidi override', 'agent\u202Etxt.exe'],
+    ['a zero-width joiner', 'a\u200Db'],
+    ['a line separator', 'a\u2028b'],
+    ['only a Hangul filler', '\u3164'],
+    ['only halfwidth Hangul fillers', '\uFFA0\uFFA0'],
+    ['only a Braille blank', '\u2800\u2800'],
+    ['only a combining grapheme joiner', '\u034F'],
+    ['only combining marks', '\u0301\u0302'],
     ['not a string', 42],
   ])('refuses %s', async (_name, label) => {
     const { errors } = await check({ label });
