@@ -157,6 +157,12 @@ describe('provider-auth secrets per process (NODE_ENV=production)', () => {
       const app = await compile(appModule, serviceType);
       try {
         expect(app.get(BINDING_INVOKER, { strict: false })).toBeInstanceOf(EgressBindingInvoker);
+        // The router must hold that invoker, not just have it available: it is
+        // @Optional(), so a wiring slip would only surface on the first call.
+        const router = app.get(ProviderRouterService, { strict: false }) as unknown as {
+          invoker: unknown;
+        };
+        expect(router.invoker).toBeInstanceOf(EgressBindingInvoker);
       } finally {
         await app.close();
       }

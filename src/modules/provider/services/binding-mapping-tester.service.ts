@@ -254,6 +254,8 @@ export class BindingMappingTesterService {
       return !response.transportError && response.status >= 200 && response.status <= 299;
     } catch {
       // A probe that could not be made proves nothing; never fail the run.
+      // Fixed message only: the error can carry request details.
+      this.logger.debug('Unauthenticated probe could not be made');
       return false;
     }
   }

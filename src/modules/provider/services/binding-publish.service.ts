@@ -93,10 +93,10 @@ export class BindingPublishService {
     // The contract versions a run's `tool_version` names, to group runs by
     // major. Optional only for hand-built harnesses, which then gate on the
     // newest run as before.
-    @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue?: ToolCataloguePort,
+    @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort | undefined,
     // Prunes credential sets whose origin the new revision no longer uses.
-    // Optional only for hand-built harnesses that never reach `publish`.
-    @Optional() private readonly vault?: CredentialVaultService,
+    // Required: a missing vault module must fail at boot.
+    private readonly vault: CredentialVaultService,
     // Records pruned credential sets (names only) in the publish transaction.
     @Optional() private readonly audit?: AuditLogWriter,
   ) {}
@@ -185,10 +185,9 @@ export class BindingPublishService {
 
       // The published endpoint is the draft's at this moment, so any credential
       // set for another origin can never be sent again: drop it with the stamp.
-      const pruned =
-        (await this.vault?.pruneExcept(manager, organizationId, bindingId, [
-          originOf(row.endpoint),
-        ])) ?? [];
+      const pruned = await this.vault.pruneExcept(manager, organizationId, bindingId, [
+        originOf(row.endpoint),
+      ]);
       for (const { origin, headerNames } of pruned) {
         await this.audit?.record(manager, {
           organizationId,
@@ -254,14 +253,13 @@ export class BindingPublishService {
     const required =
       row.authMode === BindingAuthMode.API_KEY || row.authMode === BindingAuthMode.BOTH;
     // The draft endpoint's origin: it is what goes live. Skipped for other modes
-    // (and for hand-built harnesses without a vault) so no read is wasted.
-    const present =
-      required && this.vault
-        ? (await this.vault.list(organizationId, row.id)).some((set) => set.origin === origin)
-        : false;
+    // so no read is wasted.
+    const present = required
+      ? (await this.vault.list(organizationId, row.id)).some((set) => set.origin === origin)
+      : false;
 
     return evaluatePublishGate({
-      credentials: this.vault ? { required, origin, present } : undefined,
+      credentials: { required, origin, present },
       mappingVersion: row.mappingVersion,
       latestRun,
       payoutByChain,
