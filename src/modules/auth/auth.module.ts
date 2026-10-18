@@ -3,6 +3,7 @@ import { ConfigModule, ConfigService } from '@nestjs/config';
 
 import { PRIVY_AUTH_CONFIG, PrivyAuthConfig } from './domain/privy-auth.config';
 import { AgentProvisioningService } from './services/agent-provisioning.service';
+import { CredentialSessionResolver } from './services/credential-session.resolver';
 import { DbCredentialMcpSessionSource } from './services/db-credential-mcp-session.source';
 import { PrivyJwksCache } from './services/privy-jwks.cache';
 import { PrivyMcpSessionSource } from './services/privy-mcp-session.source';
@@ -64,10 +65,14 @@ import { PrivyUserDirectory } from './services/privy-user.directory';
     PrivyUserDirectory,
     AgentProvisioningService,
     PrivyMcpSessionSource,
+    CredentialSessionResolver,
     DbCredentialMcpSessionSource,
   ],
   exports: [
     PrivyMcpSessionSource,
+    // The OAuth access-token source resolves through the same resolver, so an
+    // OAuth grant and an API key for one agent yield the same session.
+    CredentialSessionResolver,
     DbCredentialMcpSessionSource,
     PrivyTokenVerifier,
     // `AuthApiModule`'s `WalletLinkService` re-runs the login path's wallet

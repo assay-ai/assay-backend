@@ -48,6 +48,7 @@ describe('GET /providers/me/calls/export — real HTTP', () => {
       chainId: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' as never,
       label: 'export test',
       callerKind: McpCallerKind.CONFIG,
+      paymentsAllowed: true,
     };
 
     const sessionSource: McpSessionPort = {

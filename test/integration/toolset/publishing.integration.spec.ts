@@ -94,6 +94,7 @@ describe('toolset publishing, against a real database and Redis', () => {
     chainId: CHAIN,
     label: null,
     callerKind: McpCallerKind.HUMAN,
+    paymentsAllowed: true,
   });
 
   const errorOf = (work: Promise<unknown>) =>

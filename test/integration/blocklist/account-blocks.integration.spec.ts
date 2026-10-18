@@ -433,6 +433,7 @@ describe('account blocks, against a real database and Redis', () => {
       chainId: 'eip155:84532' as never,
       label: null,
       callerKind,
+      paymentsAllowed: true,
       delegateAccount: null,
     });
     const tokenKinds: Record<string, McpCallerKind> = {

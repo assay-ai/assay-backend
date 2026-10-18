@@ -9,6 +9,7 @@ import {
   CompositeMcpSessionSource,
   createSessionSource,
 } from '@modules/auth/services/composite-mcp-session.source';
+import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
@@ -148,9 +149,13 @@ describe('createSessionSource — AUTH_SESSION_SOURCE decides, and the default i
  */
 describe('DbCredentialMcpSessionSource ahead of Privy in the chain', () => {
   it('lets a JWT-shaped token fall through the db source and reach Privy', async () => {
+    const credentials = new FakeAgentCredentialRepository() as unknown as AgentCredentialRepository;
     const db = new DbCredentialMcpSessionSource(
-      new FakeAgentCredentialRepository() as unknown as AgentCredentialRepository,
-      new FakeAgentRepository() as unknown as AgentRepository,
+      credentials,
+      new CredentialSessionResolver(
+        credentials,
+        new FakeAgentRepository() as unknown as AgentRepository,
+      ),
     );
     const jwtShaped = 'eyJhbGciOiJFZERTQSJ9.eyJzdWIiOiJkaWQ6cHJpdnk6eCJ9.sig';
     const privy = new StubSource(jwtShaped);

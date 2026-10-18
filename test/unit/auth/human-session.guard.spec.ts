@@ -64,6 +64,7 @@ describe('human-only control writes', () => {
         chainId: CHAIN_IDS.SOLANA_DEVNET,
         label: null,
         callerKind,
+        paymentsAllowed: true,
       };
       return session;
     },

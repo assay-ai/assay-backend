@@ -81,6 +81,8 @@ describe('PrivyMcpSessionSource — the token names an identity, the rows name e
       label: 'dan@example.com',
       // a Privy login is a person
       callerKind: McpCallerKind.HUMAN,
+      // unchanged behaviour: only third-party OAuth grants are refused paid calls
+      paymentsAllowed: true,
     });
   });
 

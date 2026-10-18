@@ -51,6 +51,7 @@ const SESSION: McpSession = {
   chainId: CHAIN,
   label: null,
   callerKind: McpCallerKind.CONFIG,
+  paymentsAllowed: true,
 };
 
 function escrowState(): EscrowState {

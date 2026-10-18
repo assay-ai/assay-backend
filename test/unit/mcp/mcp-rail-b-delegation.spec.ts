@@ -14,6 +14,7 @@ const session = (overrides: Partial<McpSession> = {}): McpSession => ({
   chainId: EVM,
   label: null,
   callerKind: McpCallerKind.AGENT,
+  paymentsAllowed: true,
   ...overrides,
 });
 

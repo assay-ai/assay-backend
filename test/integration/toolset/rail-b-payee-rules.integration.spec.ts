@@ -187,6 +187,7 @@ describe('rail B, a voucher for a payee the rules drop', () => {
     chainId: MAINNET,
     label: null,
     callerKind: McpCallerKind.AGENT,
+    paymentsAllowed: true,
   });
 
   it('offers only p1, the entry’s provider, and never falls back', async () => {
