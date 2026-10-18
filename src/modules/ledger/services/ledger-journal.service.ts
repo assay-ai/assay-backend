@@ -22,6 +22,7 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { formatDollars } from '@shared/utils/money-display.util';
 
 import {
   BALANCE_LOW_THRESHOLD_MAJOR_UNITS,
@@ -263,9 +264,11 @@ export class LedgerJournalService {
         asset,
         crossing.decimals,
       );
-      const formatted = MoneyUtil.format(afterMoney, {
-        symbol: getAssetMetadata(asset).symbol,
-      });
+      // Dollars, the way every screen writes money ("$4.90"), not raw units.
+      const formatted = formatDollars(afterMoney);
+      // The line the balance is judged against: a screen may treat the alert
+      // as cleared only once the balance is back at or above it.
+      const threshold = thresholdAtomic.toString();
 
       if (crossedZero) {
         await this.notifications.notify({
@@ -275,7 +278,12 @@ export class LedgerJournalService {
           body: `Your available balance has reached zero (${formatted}). Paid calls will fail until you add funds.`,
           subjectType: 'account_balance',
           subjectId: crossing.accountId,
-          payload: { accountId: crossing.accountId, asset, available: afterMoney.amount },
+          payload: {
+            accountId: crossing.accountId,
+            asset,
+            available: afterMoney.amount,
+            threshold,
+          },
           dedupeKey: `${crossing.accountId}:${asset}`,
         });
       }
@@ -288,7 +296,12 @@ export class LedgerJournalService {
           body: `Your available balance is running low (${formatted}). Add funds to avoid interrupted calls.`,
           subjectType: 'account_balance',
           subjectId: crossing.accountId,
-          payload: { accountId: crossing.accountId, asset, available: afterMoney.amount },
+          payload: {
+            accountId: crossing.accountId,
+            asset,
+            available: afterMoney.amount,
+            threshold,
+          },
           dedupeKey: `${crossing.accountId}:${asset}`,
         });
       }

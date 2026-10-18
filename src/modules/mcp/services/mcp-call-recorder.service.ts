@@ -18,6 +18,8 @@ import {
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { AppError } from '@shared/errors/app-errors';
 
+import { agentPhrase } from '@modules/notification/domain/notice-text';
+
 import { McpScope } from '../ports/mcp-scope';
 import { MCP_RATE_LIMITS, McpRateLimiter, refusalKey } from './mcp-rate-limiter.service';
 import { McpSession } from '../ports/mcp-session.port';
@@ -130,8 +132,8 @@ export class McpCallRecorder {
         event: NotificationEvent.CALL_REFUSED_REPEATEDLY,
         title: `Calls to ${name} keep being refused`,
         body:
-          `Agent ${session.agentId} was refused ${REPEAT_ALERT_THRESHOLD} times within an hour ` +
-          `calling ${name} (${code}). Nothing was charged.`,
+          `${agentPhrase(session.label)} was refused ${REPEAT_ALERT_THRESHOLD} times within an hour ` +
+          `calling ${name}: ${refusalWords(code)}. Nothing was charged.`,
         subjectType: 'agent',
         subjectId: session.agentId,
         payload: { toolName: name, code },
@@ -191,4 +193,33 @@ function layerOfSource(source: RuleSource): RefusalLayer {
 export function safeToolName(name: string): string {
   const cleaned = name.replace(/[^A-Za-z0-9_-]/g, '_').slice(0, 48);
   return cleaned.length > 0 ? cleaned : 'unnamed';
+}
+
+/**
+ * Why the calls were refused, in the words a notice uses; the code itself
+ * stays in the payload. An unlisted code gets a plain sentence, never the code.
+ */
+const REFUSAL_WORDS: Readonly<Record<string, string>> = {
+  TOOL_NOT_ALLOWED: 'the agent may not use this tool',
+  TOOL_NOT_IN_TOOLSET: 'the tool is not in the tool set it calls through',
+  TOOL_REMOVED: 'the tool was removed',
+  NO_PROVIDER_MATCHES_RULES: "no provider fits the agent's provider limits",
+  CONTRACT_VERSION_RETIRED: 'the tool version it asks for is retired',
+  MCP_SPEND_LIMIT_EXCEEDED: 'a spending limit was reached',
+  MCP_POLICY_AGENT_PAUSED: 'paid calls are paused',
+  MCP_VELOCITY_LIMIT_EXCEEDED: 'it called too fast',
+  MCP_QUOTA_EXCEEDED: 'its free calls are used up',
+  TOOL_ARGUMENTS_INVALID: 'the request did not match the tool',
+  TOOL_NO_ELIGIBLE_BINDING: 'no provider can serve the tool right now',
+  PAYMENT_INSUFFICIENT_FUNDS: 'the balance is too low',
+  PAYMENT_WITHDRAWAL_PENDING: 'a withdrawal is pending',
+  PAYMENT_DEBT_OUTSTANDING: 'an unpaid call must be settled first',
+  PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED: "its payment key's limit was reached",
+  PAYMENT_VOUCHER_ESCROW_LIMIT_EXCEEDED: 'the account ceiling was reached',
+  PAYMENT_VOUCHER_DELEGATE_NOT_BOUND: 'it has no payment key yet',
+  PAYMENT_VOUCHER_DELEGATE_INACTIVE: 'its payment key is not active',
+};
+
+export function refusalWords(code: string): string {
+  return REFUSAL_WORDS[code] ?? 'the same reason each time';
 }
