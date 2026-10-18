@@ -10,8 +10,11 @@
  * dialled — each test says what the "provider" answered.
  */
 import { randomBytes } from 'node:crypto';
+import { readFileSync } from 'node:fs';
 import * as http from 'node:http';
 import { AddressInfo } from 'node:net';
+import { join } from 'node:path';
+import { inspect } from 'node:util';
 import { Logger } from '@nestjs/common';
 
 import {
@@ -21,7 +24,12 @@ import {
   UNTRUSTED_EGRESS_POLICY,
   withLimits,
 } from '@shared/network/egress';
-import { EgressRelayConfig, takeEgressRelayConfig } from '@shared/network/egress';
+import {
+  EgressRelayConfig,
+  RELAY_ALLOWED_PORTS,
+  RELAY_TIMEOUT_MARGIN_MS,
+  takeEgressRelayConfig,
+} from '@shared/network/egress';
 import { resetEnvSigningKeyCacheForTests } from '@modules/verification/signing/backends/env-key-source';
 import {
   ResponseClass,
@@ -64,6 +72,8 @@ interface RelayAnswer {
   status: number;
   headers?: Record<string, string>;
   body?: string | Buffer;
+  /** Write the body in pieces with no Content-Length (chunked framing). */
+  chunked?: boolean;
 }
 
 const TOKEN = randomBytes(32).toString('hex');
@@ -130,6 +140,13 @@ beforeAll(async () => {
       });
       const out = answer(envelope);
       res.writeHead(out.status, out.headers ?? {});
+      if (out.chunked && Buffer.isBuffer(out.body)) {
+        for (let at = 0; at < out.body.length; at += 1024 * 1024) {
+          res.write(out.body.subarray(at, at + 1024 * 1024));
+        }
+        res.end();
+        return;
+      }
       res.end(out.body ?? '');
     });
   });
@@ -192,8 +209,9 @@ describe('relay: true with a relay configured', () => {
       maxResponseBytes: UNTRUSTED_EGRESS_POLICY.limits.maxResponseBytes,
     });
     expect(call.envelope.timeoutMs).toBeGreaterThan(0);
+    // The Worker's deadline sits a margin inside ours, so its TIMEOUT wins.
     expect(call.envelope.timeoutMs).toBeLessThanOrEqual(
-      UNTRUSTED_EGRESS_POLICY.limits.totalTimeoutMs,
+      UNTRUSTED_EGRESS_POLICY.limits.totalTimeoutMs - RELAY_TIMEOUT_MARGIN_MS,
     );
     expect(call.envelope.headers).not.toHaveProperty('host');
   });
@@ -418,7 +436,32 @@ describe('relay failures', () => {
     expect(error.kind).toBe(EgressFailureKind.RESPONSE_TOO_LARGE);
   });
 
-  it('a relay that stalls is cut by the client timers', async () => {
+  it('a chunked oversize relayed body hits the size cap on arrival', async () => {
+    answer = () => ({
+      ...upstream(200, Buffer.alloc(6 * 1024 * 1024, 0x61)),
+      chunked: true,
+    });
+
+    const error = await expectEgressError(
+      relayClient().request({ url: 'https://p.test/', policy: RELAYED }),
+    );
+
+    expect(error.kind).toBe(EgressFailureKind.RESPONSE_TOO_LARGE);
+    expect(error.message).toMatch(/body passed/);
+  });
+
+  it("the Worker's TIMEOUT is the provider being slow: TIMEOUT, not a platform fault", async () => {
+    answer = () => relayError('TIMEOUT');
+
+    const error = await expectEgressError(
+      relayClient().request({ url: 'https://p.test/', policy: RELAYED }),
+    );
+
+    expect(error.kind).toBe(EgressFailureKind.TIMEOUT);
+    expect(classifyTransportError(error).kind).toBe(TransportErrorKind.TIMEOUT);
+  });
+
+  it('a relay that stalls past our deadline is RELAY_UNAVAILABLE (platform fault)', async () => {
     const stalled = http.createServer(() => undefined);
     const stalledSockets: Array<{ destroy: () => void }> = [];
     stalled.on('connection', (s) => stalledSockets.push(s));
@@ -432,15 +475,81 @@ describe('relay failures', () => {
       const error = await expectEgressError(
         client.request({
           url: 'https://p.test/',
-          policy: withLimits(RELAYED, { headersTimeoutMs: 50 }),
+          policy: withLimits(RELAYED, { totalTimeoutMs: 100 }),
         }),
       );
-      expect(error.kind).toBe(EgressFailureKind.TIMEOUT);
+      expect(error.kind).toBe(EgressFailureKind.RELAY_UNAVAILABLE);
+      expect(classifyTransportError(error).kind).toBe(TransportErrorKind.PLATFORM_UNAVAILABLE);
     } finally {
       client.onModuleDestroy();
       for (const s of stalledSockets) s.destroy();
       await new Promise<void>((resolve) => stalled.close(() => resolve()));
     }
+  });
+});
+
+describe('hops the relay cannot carry are refused before sending', () => {
+  it.each([
+    ['plain http', 'http://p.test/'],
+    ['an IP-literal host', 'https://93.184.216.34/'],
+    ['a port outside the relay list', 'https://p.test:8080/'],
+  ])('%s is URL_INVALID and never reaches the relay', async (_what, url) => {
+    const error = await expectEgressError(relayClient().request({ url, policy: RELAYED }));
+
+    expect(error.kind).toBe(EgressFailureKind.URL_INVALID);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('an allowed non-default port is relayed', async () => {
+    await relayClient().request({ url: 'https://p.test:8443/', policy: RELAYED });
+
+    expect(calls[0].envelope.url).toBe('https://p.test:8443/');
+  });
+
+  it('a non-UTF-8 Buffer body is refused rather than corrupted', async () => {
+    const error = await expectEgressError(
+      relayClient().request({
+        url: 'https://p.test/',
+        method: 'POST',
+        body: Buffer.from([0xff, 0xfe, 0x00, 0x80]),
+        policy: RELAYED,
+      }),
+    );
+
+    expect(error.kind).toBe(EgressFailureKind.URL_INVALID);
+    expect(calls).toHaveLength(0);
+  });
+
+  it('a UTF-8 Buffer body is relayed as a string', async () => {
+    await relayClient().request({
+      url: 'https://p.test/',
+      method: 'POST',
+      body: Buffer.from('{"q":"héllo"}', 'utf8'),
+      policy: RELAYED,
+    });
+
+    expect(calls[0].envelope.body).toBe('{"q":"héllo"}');
+  });
+
+  it('keeps the port list in step with the Worker', () => {
+    const worker = readFileSync(
+      join(__dirname, '..', '..', '..', '..', '..', 'workers', 'egress-relay', 'src', 'relay.ts'),
+      'utf8',
+    );
+    const match = /RELAY_ALLOWED_PORTS[^=]*=\s*\[([^\]]*)\]/.exec(worker);
+
+    expect(match).not.toBeNull();
+    expect(match![1].split(',').map((p) => Number(p.trim()))).toEqual([...RELAY_ALLOWED_PORTS]);
+  });
+});
+
+describe('the token stays out of reach', () => {
+  it('util.inspect of the client never prints the bearer', async () => {
+    const client = relayClient();
+    await client.request({ url: 'https://p.test/', policy: RELAYED });
+
+    expect(inspect(client, { depth: 5 })).not.toContain(TOKEN);
+    expect(inspect(client, { depth: 10, showHidden: true })).not.toContain(TOKEN);
   });
 });
 

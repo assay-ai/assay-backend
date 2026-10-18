@@ -16,6 +16,14 @@ export interface EgressRelayConfig {
 /** `EgressRelayConfig | null` — `null` means provider calls go direct. */
 export const EGRESS_RELAY_CONFIG = Symbol('EGRESS_RELAY_CONFIG');
 
+/**
+ * Ports the relay Worker can fetch (Cloudflare's allowed HTTPS ports).
+ * Must match `RELAY_ALLOWED_PORTS` in `workers/egress-relay/src/relay.ts`.
+ */
+export const RELAY_ALLOWED_PORTS: readonly number[] = Object.freeze([
+  443, 8443, 2053, 2083, 2087, 2096,
+]);
+
 export const EGRESS_RELAY_URL_ENV = 'EGRESS_RELAY_URL';
 export const EGRESS_RELAY_TOKEN_ENV = 'EGRESS_RELAY_TOKEN';
 
