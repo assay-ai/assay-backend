@@ -185,6 +185,7 @@ describe('EvmEscrowBalanceReader', () => {
     expect(reading!.windowStartedAt).toBe(107);
     expect(reading!.withdrawRequested).toBe(108n);
     expect(reading!.withdrawAvailableAt).toBe(109);
+    expect(reading!.lifetime).toEqual({ funded: 112n, redeemed: 110n, withdrawn: 111n });
     expect(reading!.observedAt).toBeInstanceOf(Date);
   });
 

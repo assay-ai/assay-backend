@@ -63,6 +63,9 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import { addBlock, blocklistOf, noBlocks } from '../../unit/helpers/blocklist';
 import { BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
 import { RefundEligibilityService } from '@modules/dispute/services/refund-eligibility.service';
+import { ListToolCallsQueryDto } from '@modules/payment/dto/list-tool-calls.dto';
+import { ToolCallsService } from '@modules/payment/services/tool-calls.service';
+import { SortDirection } from '@shared/api';
 
 import { FakeHeldPayments } from '../helpers/fake-held-payments';
 import { approvalFor } from '../helpers/operator-approval';
@@ -769,6 +772,20 @@ describe('call disputes, against a real database', () => {
      * and both sides must give it.
      */
     it('the receipt’s refundableIfReportedNow says what the filing then grants, in every state', async () => {
+      const toolCalls = new ToolCallsService(
+        payments,
+        new VerificationRecordRepository(dataSource),
+      );
+      const refundableCalls = () =>
+        toolCalls.list(
+          buyer,
+          Object.assign(new ListToolCallsQueryDto(), {
+            limit: 100,
+            order: SortDirection.DESC,
+            refundable: true,
+          }),
+          (calls, now) => refunds.ofCalls(calls, now),
+        );
       config.maxPerProviderPerDay = 100;
       const maxFilings = config.maxFilingsPerDay;
       config.maxFilingsPerDay = 100;
@@ -870,6 +887,16 @@ describe('call disputes, against a real database', () => {
           const call = await seed();
           const intent = await payments.findOneBy({ organizationId: buyer, id: call.intentId });
           const { refundable: flag } = await refunds.ofCall(intent!, null);
+          // The batched read the list uses gives the same answer.
+          expect({
+            label,
+            batched: (await refunds.ofCalls([{ intent: intent!, settledAt: null }])).get(intent!.id)
+              ?.refundable,
+          }).toEqual({ label, batched: flag });
+          // B7: the Calls page's "Still refundable" filter gives the same answer.
+          const listed = async () =>
+            (await refundableCalls()).items.some((item) => item.intentId === call.intentId);
+          expect({ label, listed: await listed() }).toEqual({ label, listed: expected });
           const dispute = await file(call);
           expect({ label, flag, filed: dispute.refundGuaranteed }).toEqual({
             label,
@@ -882,6 +909,7 @@ describe('call disputes, against a real database', () => {
             label,
             again: false,
           });
+          expect({ label, listedAgain: await listed() }).toEqual({ label, listedAgain: false });
         }
       } finally {
         held.live = true;

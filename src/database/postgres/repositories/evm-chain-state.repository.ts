@@ -194,18 +194,7 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
   }
 
   private async lockState(manager: EntityManager, chainId: string): Promise<EvmChainStateEntity> {
-    await manager
-      .createQueryBuilder()
-      .insert()
-      .into(EvmChainStateEntity)
-      .values({ chainId })
-      .orIgnore()
-      .execute();
-    return manager
-      .createQueryBuilder(EvmChainStateEntity, 'state')
-      .setLock('pessimistic_write')
-      .where('state.chain_id = :chainId', { chainId })
-      .getOneOrFail();
+    return lockEvmChainState(manager, chainId);
   }
 
   /**
@@ -260,4 +249,26 @@ export class EvmChainStateRepository extends AbstractRepository<EvmChainStateEnt
       },
     );
   }
+}
+
+/**
+ * The chain's `evm_chain_states` row, created if absent, locked for this
+ * transaction. Shared by every writer of a cursor on that row.
+ */
+export async function lockEvmChainState(
+  manager: EntityManager,
+  chainId: string,
+): Promise<EvmChainStateEntity> {
+  await manager
+    .createQueryBuilder()
+    .insert()
+    .into(EvmChainStateEntity)
+    .values({ chainId })
+    .orIgnore()
+    .execute();
+  return manager
+    .createQueryBuilder(EvmChainStateEntity, 'state')
+    .setLock('pessimistic_write')
+    .where('state.chain_id = :chainId', { chainId })
+    .getOneOrFail();
 }

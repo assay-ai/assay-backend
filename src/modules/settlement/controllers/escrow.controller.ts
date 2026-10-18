@@ -366,6 +366,28 @@ export class EscrowController {
       },
     );
 
+    // As for limits: the request has landed, so the entry is written after the
+    // fact and a failure is logged, not thrown. `0` is the contract's cancel.
+    // Bookkeeping only; the claim is logged by the withdrawal index.
+    const cancelled = BigInt(body.amount) === 0n;
+    await this.audit.recordAfterCommit({
+      organizationId: session.organizationId,
+      actor: auditActorOf(session),
+      action: cancelled ? 'withdrawal.cancelled' : 'withdrawal.requested',
+      resourceType: 'escrow',
+      resourceId: session.agentAccount,
+      before: null,
+      after: {
+        amount: MoneyUtil.format(
+          MoneyUtil.of(body.amount, asset, getAssetMetadata(asset).decimals),
+        ),
+        amountAtomic: body.amount,
+        asset,
+        withdrawAvailableAt: result.escrow.withdrawAvailableAt,
+        transactionHash: result.submission.transactionHash,
+      },
+    });
+
     return toRelayedResponseDto(EscrowIntentKind.REQUEST_WITHDRAW, session.agentAccount, result);
   }
 
@@ -466,6 +488,7 @@ function toGetEscrowResponseDto(state: EscrowState): GetEscrowResponseDto {
     seqHigh: state.seqHigh,
     nextSeq: state.nextSeq,
     observedAt: state.observedAt,
+    lifetime: state.lifetime,
   };
 }
 

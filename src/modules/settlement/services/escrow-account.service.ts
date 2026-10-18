@@ -73,6 +73,20 @@ export interface EscrowState {
    * the same reason on every screen.
    */
   readonly chainReadable: boolean;
+  /**
+   * Lifetime money in and out of this escrow, as the chain counts it:
+   * `deposited − spent − withdrawn = balance` holds by the contract's own
+   * invariant. `null` when the chain keeps no such counters (Solana), has no
+   * escrow, or could not be read. Display only.
+   */
+  readonly lifetime: EscrowLifetime | null;
+}
+
+/** See {@link EscrowState.lifetime}. `spent` includes payments still in their dispute hold. */
+export interface EscrowLifetime {
+  readonly deposited: Money;
+  readonly spent: Money;
+  readonly withdrawn: Money;
 }
 
 /**
@@ -251,6 +265,7 @@ export class EscrowAccountService {
         // The chain answered. It said there is no escrow at those seeds, which
         // is a fact about the escrow and not a failure to read one.
         chainReadable: true,
+        lifetime: null,
       };
     }
 
@@ -284,6 +299,13 @@ export class EscrowAccountService {
       nextSeq: nextSeqStr,
       observedAt: reading.observedAt.toISOString(),
       chainReadable: true,
+      lifetime: reading.lifetime
+        ? {
+            deposited: MoneyUtil.of(reading.lifetime.funded, asset, decimals),
+            spent: MoneyUtil.of(reading.lifetime.redeemed, asset, decimals),
+            withdrawn: MoneyUtil.of(reading.lifetime.withdrawn, asset, decimals),
+          }
+        : null,
     };
   }
 
@@ -327,6 +349,7 @@ export class EscrowAccountService {
       nextSeq: nextSeq === null ? '0' : nextSeq.toString(),
       observedAt: null,
       chainReadable: false,
+      lifetime: null,
     };
   }
 
