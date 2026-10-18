@@ -696,7 +696,8 @@ function firstFailingStageDetail(stages: readonly StageResult[]): string | null 
  * The header names of the request as it goes on the wire, lower-cased, in
  * `EgressBindingInvoker`'s order: defaults → mapping → `x-assay-call-id` →
  * signature. Stored credential headers are left out on purpose: the view
- * shows what the mapping and Assay add, never what the vault holds.
+ * shows what the mapping and Assay add, never what the vault holds (a mapping
+ * header that shares a stored header's name is still listed, as the mapping's).
  *
  * Mirrors the invoker's `outboundHeaders` and the signer's output names
  * (`content-digest` only with a body). The tester's own test reads the request
@@ -704,14 +705,18 @@ function firstFailingStageDetail(stages: readonly StageResult[]): string | null 
  */
 function wireHeaderNames(upstream: UpstreamRequest, signed: boolean): string[] {
   const hasBody = upstream.body !== undefined;
+  const signature = signed
+    ? [...(hasBody ? ['content-digest'] : []), 'signature-input', 'signature']
+    : [];
   const names = ['accept', ...(hasBody ? ['content-type'] : [])];
   for (const name of Object.keys(upstream.headers)) {
     const lower = name.toLowerCase();
-    // The invoker drops a mapping header in the platform's namespace.
-    if (!isAssayHeaderName(lower) && !names.includes(lower)) names.push(lower);
+    // The invoker drops a mapping header in the platform's namespace, and the
+    // signer overwrites one of its own names: each is listed once, in its place.
+    if (isAssayHeaderName(lower) || signature.includes(lower) || names.includes(lower)) continue;
+    names.push(lower);
   }
-  names.push('x-assay-call-id');
-  if (signed) names.push(...(hasBody ? ['content-digest'] : []), 'signature-input', 'signature');
+  names.push('x-assay-call-id', ...signature);
   return names;
 }
 

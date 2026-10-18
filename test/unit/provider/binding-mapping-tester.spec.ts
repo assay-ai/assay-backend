@@ -532,6 +532,32 @@ describe('BindingMappingTesterService — the signature headers in the request v
     expect(view).not.toContain(String(received?.headers['x-assay-call-id']));
   });
 
+  it('lists a signature name once, even when the mapping also sets it', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { answer: 'ok' } }));
+    };
+
+    const tester = signedTester(
+      bindingRow({
+        authMode: BindingAuthMode.NONE,
+        requestMapping: {
+          method: 'POST',
+          path: '/search',
+          headers: { Signature: { $const: 'x' } },
+          body: { q: { $path: '$.query' } },
+        },
+      }),
+    );
+    const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
+      query: 'x',
+    });
+
+    const names = report.request?.headerNames ?? [];
+    expect(names.filter((name) => name === 'signature')).toHaveLength(1);
+    expect(names.slice(-3)).toEqual(['content-digest', 'signature-input', 'signature']);
+  });
+
   it('lists no signature header when this deployment does not sign', async () => {
     respond = (_req, res) => {
       res.writeHead(200, { 'content-type': 'application/json' });
