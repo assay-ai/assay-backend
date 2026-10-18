@@ -30,12 +30,31 @@ Provider credentials are stored envelope-encrypted in `binding_credentials`, one
   `publishedEndpoint`.
 - A row that cannot be opened (KEK not loaded, authentication failure) makes the call fail
   closed with `credentialVaultUnavailable`, never an unauthenticated call.
+- Key hygiene at boot: with `NODE_ENV=production` an empty `CREDENTIAL_VAULT_KEKS` fails the
+  boot (like the signer); an all-same-byte key is rejected as a placeholder. A key-check
+  value per key id, `HMAC-SHA256(KEK, "assay/kek-check/v1")` truncated to 16 bytes, is stored
+  in `vault_kek_checks(kek_id, kcv)` on first use and compared at every boot; a mismatch
+  (a key id re-pointed at different bytes) fails the boot with a message naming the key id
+  only.
+- Deleting the set for the origin of the published endpoint of an ACTIVE binding is refused
+  with 409 `PROVIDER_CREDENTIAL_ORIGIN_LIVE`. Put, remove and prune each write an
+  `audit_log_entries` row (`binding_credentials.set|removed|pruned`): actor, binding, origin
+  and header names, never values.
+- An `API_KEY` or `BOTH` binding needs a set for the origin of its endpoint: publish refuses
+  without one (checklist row `API_KEY_CREDENTIALS`), and at call time a missing set for the
+  request origin ends the call as `PLATFORM_UNAVAILABLE` ("credentials missing for this
+  address") without dialling, so the provider's 401 is not blamed on the provider. The
+  tester's credential-less probe is the one deliberate exception.
 
 ### 2. Validation
 
-A mapping is rejected when it contains a credential-like query key (`key`, `api_key`,
-`token`, `secret`, `password`, `signature`, ...; case-insensitive, `-` read as `_`) or a
-constant header that looks like a secret (`authorization`, `cookie`, `x-api-key`, ...).
+A mapping is rejected when a constant header or a constant query entry (and the endpoint's
+own query) has a secret-looking name. The name is lowercased and split into tokens on `-` and
+`_`; it is flagged when a token equals or ends with `key`, `token`, `secret`, `password`,
+`passwd`, `auth`, `authorization`, `credential`, `signature`, `session` or `cookie` (so
+`x-api-key`, `apikey`, `x-goog-api-key` and `ocp-apim-subscription-key` match), or is `sig`.
+An allow-list keeps `idempotency-key`, `x-sort-key`, `sort_key`, `cache-key`, `max_tokens`,
+`keyword` and `keywords`. Body fields are not checked.
 Credential header names must be RFC 9110 tokens and may not be reserved (`host`,
 `content-length`, `signature`, anything `x-assay-*`, ...). `auth_mode`
 (NONE / API_KEY / SIGNATURE / BOTH) states what the endpoint expects and is not versioned.
@@ -83,6 +102,10 @@ proves origin without any network coupling. The in-memory ledger writer is remov
 - Provider endpoints must not redirect. A same-origin redirect re-sends the first-hop
   signature, whose `@path` / `@query` no longer match, and a verifier rejects it.
 
+- Credential headers are not covered by the signature (it covers the method, authority,
+  path, query, body digest and call id). TLS is what protects them in transit; endpoints
+  must be https in production.
+
 ## Operations
 
 - `docs/runbooks/rotate-vault-kek.md` and `docs/runbooks/rotate-request-signing-key.md`.
@@ -93,4 +116,7 @@ proves origin without any network coupling. The in-memory ledger writer is remov
 
 - A leaked database dump without the KEK reveals only header names and hints.
 - Losing every copy of a KEK loses the credentials it wraps; providers must re-enter them.
+- A signing key that is removed from the JWKS may still be cached by providers for up to one
+  hour. Shortening the JWKS cache lifetime in the verifier SDK is out of scope here and
+  belongs to the `assay-provider-verify` repository.
 - Rotation of either key needs an ordered, multi-step deploy (see the runbooks).
