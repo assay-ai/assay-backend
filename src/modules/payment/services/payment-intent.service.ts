@@ -34,7 +34,18 @@ import {
 } from '../constants/payment-intent.constants';
 import { DEBT_VOIDED_PREFIX } from '../constants/voucher-redemption.constants';
 import { HoldEffect, requirePaymentIntentTransition } from '../domain/payment-intent-transitions';
-import { collectableAtSql } from '../constants/collection-hold.constants';
+import {
+  COLLECTION_HOLD_WINDOW_SECONDS,
+  HELD,
+  HELD_COLLECTED,
+  HELD_REFUNDED,
+} from '../constants/collection-hold.constants';
+import {
+  HELD_PAYMENTS,
+  HELD_TIMEOUT_SECONDS,
+  HeldPaymentsPort,
+  HeldStatus,
+} from '../ports/held-payments.port';
 import { PaymentErrors } from '../errors/payment.errors';
 import {
   CreatePaymentIntentInput,
@@ -122,6 +133,11 @@ export class PaymentIntentService {
     private readonly chainState: ChainStateGatePort | null = null,
     // The per-chain slash holds: no new intent names a held provider there.
     @Optional() private readonly slashHolds: ProviderSlashHoldRepository | null = null,
+    // The escrow's hold ("redeem into hold", G3.B1). Absent, or reading `null`
+    // (an escrow before the upgrade): a redemption pays the provider at once.
+    @Optional()
+    @Inject(HELD_PAYMENTS)
+    private readonly held: HeldPaymentsPort | null = null,
   ) {}
 
   /**
@@ -412,7 +428,14 @@ export class PaymentIntentService {
       ...(context.lapseCause !== undefined
         ? { redemptionLapsedAt: new Date(), redemptionLastError: context.lapseCause }
         : {}),
-      ...(context.holdForDispute ? { collectableAt: () => collectableAtSql() } : {}),
+      // Rail A's dispute hold (G3.B1): the provider's credit waits for the window.
+      ...(context.holdForDispute
+        ? {
+            heldStatus: HELD,
+            heldAt: () => 'now()',
+            collectableAt: () => `now() + interval '${COLLECTION_HOLD_WINDOW_SECONDS} seconds'`,
+          }
+        : {}),
     });
 
     if (affected !== 1) {
@@ -560,15 +583,13 @@ export class PaymentIntentService {
     let holdForDispute = false;
     if (rule.holdEffect === HoldEffect.COMMIT && to === PaymentIntentStatus.SETTLED) {
       const current = await this.findById(organizationId, intentId);
-      if (current.rail === PaymentRail.RAIL_B_VOUCHER) {
-        if (this.pastRedemptionLatest(current)) {
-          lapseCause = LATE_VERDICT_LAPSE_CAUSE;
-        } else {
-          // The dispute hold (G3.B1): the voucher waits until `collectable_at`,
-          // capped below its on-chain deadline (`collection-hold.constants.ts`).
-          holdForDispute = true;
-        }
+      if (current.rail === PaymentRail.RAIL_B_VOUCHER && this.pastRedemptionLatest(current)) {
+        lapseCause = LATE_VERDICT_LAPSE_CAUSE;
       }
+      // Rail A settles through the facilitator at call time, so its dispute hold
+      // (G3.B1) is the provider's ledger credit — and so its payout — withheld
+      // for the window. Rail B's hold is on chain, at redemption.
+      if (current.rail === PaymentRail.RAIL_A_PER_CALL) holdForDispute = true;
     }
 
     const intent = await this.transition(organizationId, intentId, from, to, {
@@ -631,6 +652,13 @@ export class PaymentIntentService {
       // unreachable, and if it ever fires again refusing to credit an unnamed
       // payee is right.
       throw PaymentErrors.providerNotAssigned({ intentId });
+    }
+
+    if (intent.heldStatus === HELD) {
+      // Rail A, held for the dispute window (G3.B1): `HeldCollectionService`
+      // credits the provider once it has passed, unless an upheld dispute
+      // refunds the buyer from the uncredited amount.
+      return intent;
     }
 
     await this.ledger.commitHoldAndCredit(organizationId, intent.holdId, {
@@ -706,6 +734,31 @@ export class PaymentIntentService {
 
     if (!intent.holdId || intent.holdReleasedAt !== null) {
       return intent;
+    }
+    if (intent.heldStatus === HELD) return intent;
+
+    // Redeemed INTO THE HOLD (G3.B1): the money left the buyer's escrow for
+    // `held[payer][seq]`, not for the provider. The buyer's ledger hold stays
+    // open; the provider is credited on `HeldCollected`, never here.
+    const record = await this.readHeldRecord(intent);
+    if (record) {
+      if (record.status === HeldStatus.HELD) {
+        await this.intents.markHeld(organizationId, intentId, new Date(), record.collectableAt);
+        return this.findById(organizationId, intentId);
+      }
+      if (record.status === HeldStatus.COLLECTED) {
+        // Collected already (the chain's timeout, or an earlier pass).
+        await this.intents.markHeld(organizationId, intentId, new Date(), record.collectableAt);
+        return this.bookHeldCollected(organizationId, intentId, null);
+      }
+      if (record.status === HeldStatus.NONE) {
+        throw PaymentErrors.invalidStateTransition({
+          intentId,
+          from: intent.status,
+          to: PaymentIntentStatus.SETTLED,
+          actual: 'redeemed, but no held record is visible yet — retried next pass',
+        });
+      }
     }
 
     if (!intent.providerId || !intent.providerAccount) {
@@ -802,36 +855,130 @@ export class PaymentIntentService {
     return true;
   }
 
+  /** `held(payer, seq)` for a rail-B intent, or `null` when there is no chain hold. */
+  async readHeldRecord(intent: PaymentIntent) {
+    if (!this.held || intent.rail !== PaymentRail.RAIL_B_VOUCHER || !intent.voucherSeq) {
+      return null;
+    }
+    return this.held.readHeld(intent.price.asset as AssetId, {
+      payer: intent.agentAccount,
+      seq: intent.voucherSeq,
+    });
+  }
+
   /**
-   * Refunds a call whose voucher an upheld dispute held (G3.B1): the hold is
-   * released and the row closed for good (`voided:<outcome>`) in one ledger
-   * transaction under the payer's lock — the buyer is not charged, nobody is
-   * credited, the voucher is never redeemed. `false` when the row is not such a
-   * held voucher (already released, sent to the chain, or debt).
+   * Books a collected hold (G3.B1): `HOLD_COMMIT + PROVIDER_CREDIT +
+   * PLATFORM_FEE` — the provider is credited now, on `HeldCollected` — then the
+   * row (`held_status = 'COLLECTED'`). Both idempotent: a repeat writes nothing
+   * twice. `txRef` is the collect transaction; rail A has none.
    */
-  async releaseDisputedHold(
+  async bookHeldCollected(
+    organizationId: string,
+    intentId: string,
+    txRef: string | null,
+  ): Promise<PaymentIntent> {
+    const intent = await this.findById(organizationId, intentId);
+    if (!intent.holdId || intent.heldStatus !== HELD) return intent;
+    if (!intent.providerId || !intent.providerAccount) {
+      throw PaymentErrors.providerNotAssigned({ intentId });
+    }
+    await this.ledger.commitHoldAndCredit(organizationId, intent.holdId, {
+      providerOrganizationId: intent.providerId,
+      providerAccountId: intent.providerAccount as LedgerAccountId,
+      providerAmount: intent.providerAmount,
+      platformFee: intent.platformFee,
+      intentId,
+      chainTxRef:
+        intent.rail === PaymentRail.RAIL_A_PER_CALL
+          ? LEGACY_POOLED_VAULT_TX_REF
+          : (txRef ?? `held_collected:seq=${intent.voucherSeq}`),
+    });
+    await this.intents.manager.transaction((manager) =>
+      this.intents.markHeldCollected(
+        manager,
+        { organizationId, id: intentId, payer: intent.agentAccount },
+        txRef,
+      ),
+    );
+    return this.findById(organizationId, intentId);
+  }
+
+  /**
+   * Refunds a call an upheld dispute holds (G3.B1). Rail B: reads the escrow's
+   * record first — the job may have collected it in a race — then
+   * `refundHeld`, and books the release only once the chain says `REFUNDED`.
+   * Rail A: the provider was never credited, so the buyer's hold is released.
+   * One `HOLD_RELEASE`, nobody credited. Returns what the money did.
+   */
+  async refundHeldForDispute(
     organizationId: string,
     intentId: string,
     outcome: string,
-  ): Promise<boolean> {
+  ): Promise<'REFUNDED' | 'COLLECTED' | 'NOT_HELD'> {
     const intent = await this.findById(organizationId, intentId);
-    if (
-      intent.rail !== PaymentRail.RAIL_B_VOUCHER ||
-      intent.status !== PaymentIntentStatus.SETTLED ||
-      !intent.holdId
-    ) {
-      return false;
+    if (!intent.holdId || intent.heldStatus !== HELD) {
+      return intent.heldStatus === HELD_COLLECTED
+        ? 'COLLECTED'
+        : intent.heldStatus === HELD_REFUNDED
+          ? 'REFUNDED'
+          : 'NOT_HELD';
     }
+
+    let txRef: string | null = null;
+    if (intent.rail === PaymentRail.RAIL_B_VOUCHER) {
+      const key = { payer: intent.agentAccount, seq: intent.voucherSeq as string };
+      const asset = intent.price.asset as AssetId;
+      let record = await this.readHeldRecord(intent);
+      if (!record || !this.held) {
+        throw PaymentErrors.invalidStateTransition({
+          intentId,
+          from: intent.status,
+          to: PaymentIntentStatus.SETTLED,
+          actual: 'held, but the escrow has no hold to refund',
+        });
+      }
+      if (record.status === HeldStatus.COLLECTED) {
+        await this.bookHeldCollected(organizationId, intentId, null);
+        return 'COLLECTED';
+      }
+      if (
+        record.status === HeldStatus.HELD &&
+        Date.now() >= record.collectableAt.getTime() + HELD_TIMEOUT_SECONDS * 1000
+      ) {
+        // Past the chain's timeout the payment is the provider's: `refundHeld`
+        // is closed, and anyone may collect. Collect it, and say so.
+        txRef = (await this.held.collect(asset, [key])).txRef;
+        await this.bookHeldCollected(organizationId, intentId, txRef);
+        return 'COLLECTED';
+      }
+      if (record.status === HeldStatus.HELD) {
+        txRef = (await this.held.refund(asset, [key])).txRef;
+        record = await this.held.readHeld(asset, key);
+      }
+      if (record?.status !== HeldStatus.REFUNDED) {
+        if (record?.status === HeldStatus.COLLECTED) {
+          await this.bookHeldCollected(organizationId, intentId, null);
+          return 'COLLECTED';
+        }
+        throw PaymentErrors.invalidStateTransition({
+          intentId,
+          from: intent.status,
+          to: PaymentIntentStatus.SETTLED,
+          actual: `refundHeld did not refund (${record?.status ?? 'unknown'}) — retried`,
+        });
+      }
+    }
+
     const target: DebtCloseTarget = {
       organizationId,
       id: intentId,
       payer: intent.agentAccount,
       holdId: intent.holdId,
     };
-    const resolution = await this.ledger.releaseHoldIf(organizationId, intent.holdId, (runner) =>
-      this.intents.markDisputeReleased(runner, target, `${DEBT_VOIDED_PREFIX}${outcome}`),
+    await this.ledger.releaseHoldIf(organizationId, intent.holdId, (runner) =>
+      this.intents.markHeldRefunded(runner, target, `${DEBT_VOIDED_PREFIX}${outcome}`, txRef),
     );
-    return resolution !== null;
+    return 'REFUNDED';
   }
 
   /**
@@ -924,6 +1071,8 @@ export function toPaymentIntent(row: PaymentIntentEntity): PaymentIntent {
     holdReleasedAt: row.holdReleasedAt,
     collectableAt: row.collectableAt ?? null,
     disputeOutcome: row.disputeOutcome ?? null,
+    heldStatus: row.heldStatus ?? null,
+    heldAt: row.heldAt ?? null,
     classification: row.classification,
     verificationVerdict: row.verificationVerdict,
     createdAt: row.createdAt,

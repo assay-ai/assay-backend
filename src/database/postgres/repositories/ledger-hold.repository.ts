@@ -85,7 +85,14 @@ export class LedgerHoldRepository extends OrganizationScopedRepository<LedgerHol
     const rows: Array<{ sum: string | null }> = await this.dataSource.query(
       `SELECT COALESCE(SUM("amount"), 0)::text AS sum
          FROM "ledger_holds"
-        WHERE "account_id" = $1 AND "asset_id" = $2 AND "status" = $3`,
+        WHERE "account_id" = $1 AND "asset_id" = $2 AND "status" = $3
+          -- Redeemed into the escrow's hold (G3.B1): the chain balance no
+          -- longer contains it, so subtracting the hold again double-counts.
+          AND NOT EXISTS (
+            SELECT 1 FROM "payment_intents" i
+             WHERE i."id" = "ledger_holds"."intent_id" AND i."organization_id" IS NOT NULL
+               AND i."rail" = 'RAIL_B_VOUCHER' AND i."held_status" = 'HELD'
+               AND i."hold_id" = "ledger_holds"."id")`,
       [accountId, assetId, HOLD_STATUS_OPEN],
     );
 

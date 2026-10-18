@@ -24,15 +24,13 @@ import { dayExpr } from './day-bucket.util';
 
 const DAY_EXPR = dayExpr('intent');
 /**
- * Served, its voucher not redeemed yet and not debt: held for the dispute
- * window or an open dispute, or being collected right after (G3.B1). Disjoint
- * from `DEBT_OUTSTANDING_SQL` (lapsed) and from the closed outcomes.
+ * Held for the dispute window, or by an open dispute (G3.B1): rail B in the
+ * escrow's `held[payer][seq]`, rail A as a withheld ledger credit. Not payable
+ * until collected; never if an upheld dispute refunds it. Disjoint from debt
+ * and from every closed outcome, which all have `held_status` unset or not
+ * `HELD`.
  */
-const PENDING_SQL =
-  `(intent.rail = 'RAIL_B_VOUCHER' AND intent.hold_id IS NOT NULL ` +
-  `AND intent.hold_released_at IS NULL AND intent.redemption_lapsed_at IS NULL ` +
-  `AND COALESCE(intent.redemption_last_error, '') NOT LIKE 'provider_forfeit:%' ` +
-  `AND COALESCE(intent.redemption_last_error, '') NOT LIKE 'voided:%')`;
+const PENDING_SQL = `(intent.held_status = 'HELD')`;
 const SETTLED_STATUS = 'SETTLED';
 
 interface EarningsRow {

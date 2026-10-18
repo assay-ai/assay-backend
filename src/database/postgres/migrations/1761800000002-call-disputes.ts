@@ -19,6 +19,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   collected and an upheld decision refunds it in full.
  * - `evidence_scrubbed_at`: when the snapshot's bodies were deleted, a set time
  *   after the decision.
+ * - `provider_silent_at`, `paged_48h_at`, `paged_72h_at`, `paged_6d_at`: the
+ *   decision SLA's marks (`CallDisputeSlaService`).
  *
  * `uq_disputes_open_call` allows one open dispute per call. The marks on the
  * call and its verdict are `1761800000000` and `1761800000001`.
@@ -42,6 +44,10 @@ export class CallDisputes1761800000002 implements MigrationInterface {
         ADD COLUMN "refund_amount" numeric(78,0) NULL,
         ADD COLUMN "refund_guaranteed" boolean NOT NULL DEFAULT false,
         ADD COLUMN "evidence_scrubbed_at" timestamptz NULL,
+        ADD COLUMN "provider_silent_at" timestamptz NULL,
+        ADD COLUMN "paged_48h_at" timestamptz NULL,
+        ADD COLUMN "paged_72h_at" timestamptz NULL,
+        ADD COLUMN "paged_6d_at" timestamptz NULL,
         ADD CONSTRAINT "chk_disputes_call_is_whole" CHECK (
           ("intent_id" IS NULL AND "respondent_provider_id" IS NULL AND "evidence_snapshot" IS NULL)
           OR ("intent_id" IS NOT NULL AND "respondent_provider_id" IS NOT NULL
@@ -94,6 +100,10 @@ export class CallDisputes1761800000002 implements MigrationInterface {
         DROP CONSTRAINT "chk_disputes_refund_source",
         DROP CONSTRAINT "chk_disputes_provider_response_is_whole",
         DROP CONSTRAINT "chk_disputes_call_is_whole",
+        DROP COLUMN "paged_6d_at",
+        DROP COLUMN "paged_72h_at",
+        DROP COLUMN "paged_48h_at",
+        DROP COLUMN "provider_silent_at",
         DROP COLUMN "evidence_scrubbed_at",
         DROP COLUMN "refund_guaranteed",
         DROP COLUMN "refund_amount",

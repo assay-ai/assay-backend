@@ -9,6 +9,7 @@ import { DepositFinalityJob } from './jobs/deposit-finality.job';
 import { DepositFinalityWatcher } from './services/deposit-finality-watcher.service';
 import { DepositIntentExpiryJob } from './jobs/deposit-intent-expiry.job';
 import { PaymentIntentExpiryJob } from './jobs/payment-intent-expiry.job';
+import { HeldCollectionJob } from './jobs/held-collection.job';
 import { VoucherRedemptionJob } from './jobs/voucher-redemption.job';
 import { PaymentModule } from './payment.module';
 import { VoucherRedemptionService } from './services/voucher-redemption.service';
@@ -61,6 +62,8 @@ import { VoucherRedemptionService } from './services/voucher-redemption.service'
     // `ReconciliationJob` has none.
     VoucherRedemptionService,
     VoucherRedemptionJob,
+    // Collects held payments past their dispute window (G3.B1).
+    HeldCollectionJob,
   ],
 })
 export class PaymentSchedulerModule {}
