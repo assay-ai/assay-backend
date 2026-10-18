@@ -3,7 +3,11 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { ListQueryDto } from '@shared/api';
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 
-/** No resource-specific filters — `from`/`to`/`cursor`/`limit`/`sort` from `ListQueryDto` are enough. */
+/**
+ * No resource-specific filters — `from`/`to`/`cursor`/`limit`/`sort` from
+ * `ListQueryDto` are enough. `[from, to)` windows a batch on its entry and a
+ * redemption on its first credit.
+ */
 export class ListProviderPayoutsQueryDto extends ListQueryDto {}
 
 /** How a payment reached the provider's wallet. */
@@ -22,8 +26,10 @@ export enum ProviderPaymentKind {
  * rows sharing one `batchId`: the honest ledger shape, not a synthetic merge.
  *
  * A **REDEMPTION** row is one redemption transaction: the `PROVIDER_CREDIT`
- * entries carrying its `chainTxRef`, summed. A legacy platform absorb is not a
- * payment (nobody paid it) and is never listed.
+ * entries carrying its `chainTxRef`, summed. A credit whose ref is synthetic
+ * (`unobserved:` / `held_collected:`, no signature seen) is a payment of its
+ * own with `chainTxRef: null`. A legacy platform absorb is not a payment
+ * (nobody paid it) and is never listed.
  */
 export class ProviderPayoutDto {
   @ApiProperty({
@@ -44,7 +50,12 @@ export class ProviderPayoutDto {
   @ApiProperty({ type: MoneyDto })
   amount: MoneyDto;
 
-  @ApiPropertyOptional({ nullable: true, description: 'On-chain transaction reference, once sent' })
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'On-chain transaction reference, once sent. `null` for a redemption whose transaction ' +
+      'signature was not observed (its ledger ref is synthetic, not a transaction)',
+  })
   chainTxRef: string | null;
 
   @ApiPropertyOptional({

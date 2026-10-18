@@ -164,4 +164,75 @@ describe('ProviderPayoutsService — batches and redemptions (integration)', () 
       expect(seen).toEqual(order === SortDirection.ASC ? expected : [...expected].reverse());
     }
   });
+
+  it('never merges two payers’ unobserved redemptions, and names no transaction for them (B13 I1)', async () => {
+    // The seq is per payer: two buyers' redemptions can both be `seq=1`.
+    await credit(90_000, '2026-10-12T10:00:00.000Z', 'unobserved:seq=1');
+    await credit(45_000, '2026-10-12T10:05:00.000Z', 'unobserved:seq=1');
+    await credit(18_000, '2026-10-12T10:10:00.000Z', 'held_collected:seq=1');
+    await credit(18_000, '2026-10-12T10:15:00.000Z', 'held_collected:seq=1');
+
+    const page = await service.listPayouts(context.organizationId, {
+      limit: 25,
+      order: SortDirection.ASC,
+    } as any);
+
+    expect(page.items.map((item) => [item.amount.amount, item.calls, item.chainTxRef])).toEqual([
+      ['90000', 1, null],
+      ['45000', 1, null],
+      ['18000', 1, null],
+      ['18000', 1, null],
+    ]);
+  });
+
+  it('pages across a batch and a redemption at the same microsecond, and a transaction straddling the boundary', async () => {
+    const same = '2026-10-12T10:00:00.123456Z';
+    await entry({ type: LedgerEntryType.PAYOUT, amount: 1, at: same, batchId: randomUUID() });
+    await credit(2, same, '0xsame');
+    // One transaction whose two credits land either side of `same`.
+    await credit(3, '2026-10-12T09:59:59.000000Z', '0xstraddle');
+    await credit(3, '2026-10-12T10:00:01.000000Z', '0xstraddle');
+    await credit(4, '2026-10-12T10:00:02.000000Z', '0xlater');
+
+    for (const order of [SortDirection.DESC, SortDirection.ASC]) {
+      for (const limit of [1, 2]) {
+        const seen: Array<[string, number | null]> = [];
+        let cursor: string | undefined;
+        do {
+          const page = await service.listPayouts(context.organizationId, {
+            limit,
+            order,
+            cursor,
+          } as any);
+          seen.push(
+            ...page.items.map((item): [string, number | null] => [item.amount.amount, item.calls]),
+          );
+          cursor = page.pageInfo.nextCursor ?? undefined;
+        } while (cursor);
+
+        // Each payment once, whole: the straddling transaction is one row of
+        // two calls, placed at its first credit.
+        const ascending = seen.map(([amount]) => amount);
+        expect([...ascending].sort()).toEqual(['1', '2', '4', '6']);
+        expect(seen).toContainEqual(['6', 2]);
+        expect(ascending.indexOf('6')).toBe(order === SortDirection.ASC ? 0 : 3);
+      }
+    }
+  });
+
+  it('windows a redemption on its first credit', async () => {
+    await credit(5, '2026-09-30T23:59:59.000Z', '0xedge');
+    await credit(5, '2026-10-01T00:00:01.000Z', '0xedge');
+    await credit(7, '2026-10-02T00:00:00.000Z', '0xinside');
+
+    const page = await service.listPayouts(context.organizationId, {
+      limit: 25,
+      order: SortDirection.DESC,
+      from: new Date('2026-10-01T00:00:00.000Z'),
+      to: new Date('2026-11-01T00:00:00.000Z'),
+    } as any);
+
+    // The September transaction is out whole, never as a partial October row.
+    expect(page.items.map((item) => item.chainTxRef)).toEqual(['0xinside']);
+  });
 });
