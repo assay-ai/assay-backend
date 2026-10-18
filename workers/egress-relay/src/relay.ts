@@ -25,8 +25,14 @@ const DROP_EXACT = new Set([
 ]);
 const DROP_PREFIX = ['cf-', 'x-forwarded-', 'proxy-'];
 
-// Hop-by-hop headers removed from the provider's answer.
+// Hop-by-hop headers removed from the provider's answer, plus the two that
+// describe the wire encoding: fetch() has already decoded the body (gzip, br,
+// deflate), so passing the upstream content-encoding and content-length on
+// would label decoded bytes as compressed, and the backend would blame the
+// provider for a body it cannot read. The Response below sets its own length.
 const RESPONSE_DROP = new Set([
+  'content-encoding',
+  'content-length',
   'connection',
   'keep-alive',
   'te',
@@ -130,6 +136,11 @@ function buildHeaders(input: Record<string, string>): Headers | null {
   return out;
 }
 
+function isTimeout(err: unknown): boolean {
+  const name = (err as { name?: string } | null)?.name;
+  return name === 'TimeoutError' || name === 'AbortError';
+}
+
 /** Buffers the body while counting bytes; null when it exceeds max. */
 async function readLimited(
   body: ReadableStream<Uint8Array> | null,
@@ -204,8 +215,7 @@ export async function handleRelay(
       signal: AbortSignal.timeout(envelope.timeoutMs),
     });
   } catch (err) {
-    const name = (err as { name?: string } | null)?.name;
-    return relayError(name === 'TimeoutError' || name === 'AbortError' ? 'TIMEOUT' : 'CONNECT');
+    return relayError(isTimeout(err) ? 'TIMEOUT' : 'CONNECT');
   }
 
   const declared = Number(upstream.headers.get('content-length'));
@@ -219,8 +229,13 @@ export async function handleRelay(
     if (!RESPONSE_DROP.has(name.toLowerCase())) out.append(name, value);
   });
   out.set('x-assay-relay', 'upstream');
-  const body = await readLimited(upstream.body, envelope.maxResponseBytes).catch(() => undefined);
-  if (body === undefined) return relayError('CONNECT');
+  let body: Uint8Array | null;
+  try {
+    body = await readLimited(upstream.body, envelope.maxResponseBytes);
+  } catch (err) {
+    // The timeout signal covers the body too: a read it aborted is a TIMEOUT.
+    return relayError(isTimeout(err) ? 'TIMEOUT' : 'CONNECT');
+  }
   if (body === null) return relayError('TOO_LARGE');
   try {
     return new Response(upstream.status === 204 || upstream.status === 304 ? null : body, {

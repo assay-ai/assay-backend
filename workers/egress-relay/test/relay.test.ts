@@ -262,4 +262,54 @@ describe('handleRelay', () => {
     }) as unknown as typeof fetch;
     await expectError(await handleRelay(req(envelope()), env, impl), 'CONNECT');
   });
+
+  it('drops content-encoding and content-length from a decoded upstream body', async () => {
+    // fetch() hands back the body already decoded; the headers still say gzip.
+    const decoded = '{"ok":true,"padding":"' + 'x'.repeat(64) + '"}';
+    const f = recorder(
+      () =>
+        new Response(decoded, {
+          status: 200,
+          headers: {
+            'content-type': 'application/json',
+            'content-encoding': 'gzip',
+            'content-length': '37',
+            'x-upstream': 'kept',
+          },
+        }),
+    );
+    const res = await handleRelay(req(envelope()), env, f.impl);
+    expect(res.status).toBe(200);
+    expect(res.headers.get('content-encoding')).toBeNull();
+    expect(res.headers.get('content-length')).not.toBe('37');
+    expect(res.headers.get('x-upstream')).toBe('kept');
+    expect(await res.text()).toBe(decoded);
+  });
+
+  it('returns TIMEOUT when the timeout aborts the body read', async () => {
+    const f = recorder(() => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.enqueue(new TextEncoder().encode('{"partial":'));
+          controller.error(
+            new DOMException('The operation was aborted due to timeout', 'TimeoutError'),
+          );
+        },
+      });
+      return new Response(stream, { status: 200 });
+    });
+    await expectError(await handleRelay(req(envelope()), env, f.impl), 'TIMEOUT');
+  });
+
+  it('returns CONNECT when the body read fails otherwise', async () => {
+    const f = recorder(() => {
+      const stream = new ReadableStream<Uint8Array>({
+        start(controller) {
+          controller.error(new TypeError('terminated'));
+        },
+      });
+      return new Response(stream, { status: 200 });
+    });
+    await expectError(await handleRelay(req(envelope()), env, f.impl), 'CONNECT');
+  });
 });
