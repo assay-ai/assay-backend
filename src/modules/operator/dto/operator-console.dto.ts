@@ -107,14 +107,18 @@ export class PlatformHealthDto {
   @ApiProperty()
   providersWithStake: number;
 
-  @ApiProperty({ description: 'Cases in DISPUTED, UNDER_REVIEW or AWAITING_SECOND' })
-  openDisputes: number;
+  @ApiProperty({
+    description:
+      'Cases still in the retired in-app objection statuses (DISPUTED, UNDER_REVIEW, ' +
+      'AWAITING_SECOND). None of them is on chain or waiting for the arbiter.',
+  })
+  oldProcessCases: number;
 
   @ApiPropertyOptional({
     nullable: true,
-    description: 'Age of the oldest open case, in seconds. Null when there are none.',
+    description: 'Age of the oldest old-process case, in seconds. Null when there are none.',
   })
-  oldestOpenDisputeAgeSeconds: number | null;
+  oldestOldProcessCaseAgeSeconds: number | null;
 
   @ApiPropertyOptional({
     nullable: true,

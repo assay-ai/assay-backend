@@ -30,6 +30,7 @@ function row(overrides: Record<string, unknown> = {}) {
     proposedAt: new Date('2026-09-21T08:09:00Z'),
     disputedAt: new Date('2026-09-23T10:00:00Z'),
     nextDeadline: new Date('2026-10-23T10:00:00Z'),
+    onChain: true,
     k1: '2026-10-23T10:00:00.000000Z',
     k2: '-28470000',
     k3: '-1790237340',
@@ -40,7 +41,12 @@ function row(overrides: Record<string, unknown> = {}) {
 function build(rows: ReturnType<typeof row>[]) {
   const proposals = { findOperatorCasePage: jest.fn().mockResolvedValue(rows) };
   const providers = {
-    find: jest.fn().mockResolvedValue([{ id: PROVIDER, legalName: 'Northwind Geo' }]),
+    // The `providers` row has its own id; the case names the organization.
+    find: jest
+      .fn()
+      .mockResolvedValue([
+        { id: 'a-provider-row-id', organizationId: PROVIDER, legalName: 'Northwind Geo' },
+      ]),
   };
   const catalogue = {
     findTool: jest
@@ -75,6 +81,7 @@ describe('OperatorCaseListService', () => {
         'chainId',
         'disputedAt',
         'nextDeadline',
+        'onChain',
         'proposalId',
         'proposedAt',
         'providerId',
@@ -91,6 +98,7 @@ describe('OperatorCaseListService', () => {
       chainId: 'eip155:84532',
       status: 'CHAIN_DISPUTED',
       amount: { amount: '28470000', asset: ASSET, decimals: 6 },
+      onChain: true,
     });
     expect(JSON.stringify(page)).not.toContain('secret.example');
     expect(JSON.stringify(page)).not.toContain('bindingId');
@@ -168,8 +176,8 @@ describe('OperatorCaseListService', () => {
 
     expect(providers.find).toHaveBeenCalledTimes(1);
     expect(providers.find).toHaveBeenCalledWith({
-      where: [{ organizationId: PROVIDER, id: PROVIDER }],
-      select: { id: true, legalName: true },
+      where: [{ organizationId: PROVIDER }],
+      select: { organizationId: true, legalName: true },
     });
   });
 

@@ -329,21 +329,36 @@ export class OperatorCasesController {
   /**
    * Build the settlement admin's unsigned `cancel_slash`.
    *
-   * Reads and builds; changes nothing, and deliberately is not an override.
+   * Reads and builds; changes no case status, and deliberately is not an
+   * override (reading the chain only brings part mirrors up to date).
    * The on-chain record moved to `CANCEL_REQUESTED` when the case was
    * overturned or suspended; it moves to `CANCELLED` when the lifecycle sweep
    * sees the record leave `Pending`, not because somebody was handed a
-   * transaction.
+   * transaction. When nothing stands on chain, it answers 409 and still
+   * changes no case status.
    */
   @Post('cases/:proposalId/cancel-intent')
   @OverrideExempt(
-    'Builds an unsigned transaction and writes nothing; the decision that requested the cancel ' +
-      'was the override',
+    'Builds an unsigned transaction and changes no case status (the chain read only syncs part ' +
+      'mirrors); the decision that requested the cancel was the override',
   )
   @RequireRoles(OperatorRole.ADJL, OperatorRole.TRE)
   @ApiOperation({ summary: "Build the settlement admin's unsigned cancel_slash" })
   @ApiResponse({ status: 201, type: CancelIntentDto })
-  @ApiResponse({ status: 503, description: 'No settlement program to build against' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'SLASH_NOTHING_STANDING: nothing of the case is Pending or Disputed on chain, so there is ' +
+      'nothing to sign; no case status is changed. `error.context`: `proposalId`; `chainStatus` ' +
+      '(EXECUTED — the stake was taken while the cancel waited; CANCELLED; NOT_FOUND; ' +
+      'PROPOSING — a part may still land)',
+  })
+  @ApiResponse({
+    status: 503,
+    description:
+      'SLASH_CHAIN_UNAVAILABLE: no transaction could be built (no settlement program, or the ' +
+      'record could not be read). `error.context.reason` says why',
+  })
   async cancelIntent(
     @Param('proposalId', ParseUUIDPipe) proposalId: string,
   ): Promise<CancelIntentDto> {

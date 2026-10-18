@@ -89,7 +89,15 @@ describe('recording a compensation, against a real database', () => {
       operators,
       new OperatorService(operators, { get: () => undefined } as never),
     );
-    cases = new OperatorCaseService(proposals, null as never, null as never, execution, approvals);
+    cases = new OperatorCaseService(
+      proposals,
+      null as never,
+      null as never,
+      execution,
+      approvals,
+      null as never,
+      null as never,
+    );
 
     lead = await seedOperator('ops-adjl', [OperatorRole.ADJL]);
     treasurer = await seedOperator('ops-tre', [OperatorRole.TRE]);

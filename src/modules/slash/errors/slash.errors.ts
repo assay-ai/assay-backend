@@ -47,6 +47,8 @@ export enum SlashErrorCode {
   SLASH_ARBITER_RULES_ON_CHAIN = 'SLASH_ARBITER_RULES_ON_CHAIN',
   /** Review R2-6: the superseded-record cancel was asked for a record that is not one. */
   SLASH_RECORD_NOT_SUPERSEDED = 'SLASH_RECORD_NOT_SUPERSEDED',
+  /** A cancel was asked for a case with nothing Pending or Disputed on chain. */
+  SLASH_NOTHING_STANDING = 'SLASH_NOTHING_STANDING',
 }
 
 export type SlashErrorCodesArePrefixed = AssertDomainErrorCodes<'SLASH', `${SlashErrorCode}`>;
@@ -328,6 +330,8 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
   chainUnavailable: {
     code: SlashErrorCode.SLASH_CHAIN_UNAVAILABLE,
     statusCode: 503,
+    // The reason is this platform's own wording (never an RPC payload), so the console can show it.
+    publicContext: ['proposalId', 'reason'],
     message: (context?: Record<string, any>) =>
       `No transaction could be built for this case` +
       `${context?.reason ? `: ${context.reason}` : ''}` +
@@ -517,6 +521,23 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     message: (context?: Record<string, any>) =>
       `Record ${context?.requestId ?? ''} is not a superseded earlier-epoch record standing on ` +
       `${context?.chainId ?? 'this chain'}; nothing was built`,
+  },
+  /**
+   * The cancel has nothing to act on: no record of this case is `Pending` or
+   * `Disputed` on chain, so nothing can be executed against the provider and
+   * nothing needs a signature. Read from the chain, never assumed;
+   * `chainStatus` says what it is (`EXECUTED` — the stake was taken while the
+   * cancel waited; `CANCELLED`; `NOT_FOUND`; `PROPOSING` — a part may still
+   * land). Nothing is written: the case keeps its status.
+   */
+  nothingStanding: {
+    code: SlashErrorCode.SLASH_NOTHING_STANDING,
+    statusCode: 409,
+    publicContext: ['proposalId', 'chainStatus'],
+    message: (context?: Record<string, any>) =>
+      `Nothing of this case stands on chain` +
+      `${context?.chainStatus ? ` (the record reads ${String(context.chainStatus)})` : ''}` +
+      `, so there is nothing to sign. Nothing was changed.`,
   },
   chainBatchRefused: {
     code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,
