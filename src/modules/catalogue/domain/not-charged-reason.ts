@@ -30,11 +30,10 @@ export enum NotChargedReason {
   EXPIRED = 'EXPIRED',
   /**
    * `SETTLED`, but the payment was never collected and the buyer does not owe
-   * it: the provider forfeited the voucher (it caused it to fail), a buyer debt
-   * voided by a late VOID verdict, or a legacy platform-absorbed credit. The
-   * text is neutral on purpose: a legacy absorb was usually a buyer-side
-   * failure, and a VOID can follow a served call, so neither "the provider
-   * could not collect" nor "no usable result" is true of every row. A
+   * it: the provider forfeited the voucher (it caused it to fail), or a buyer
+   * debt voided by a late VOID verdict. The text is neutral on purpose: a VOID
+   * can follow a served call, so neither "the provider could not collect" nor
+   * "no usable result" is true of every row. A
    * written-off buyer debt is NOT this — the buyer still owes it, so it never
    * reaches the feed.
    */
@@ -113,7 +112,6 @@ function settledReason(
       return { reason: NotChargedReason.FAILED_CHECK, bucket: WithheldBucket.FAILED_VERIFICATION };
     case 'VOIDED_VOID':
     case 'FORFEITED':
-    case 'ABSORBED':
       return {
         reason: NotChargedReason.NOT_COLLECTED,
         bucket: WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,

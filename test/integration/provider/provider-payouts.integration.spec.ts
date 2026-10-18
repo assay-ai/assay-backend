@@ -4,14 +4,13 @@
  *
  * The unit spec proves what SQL the service asks for; this one proves the SQL
  * groups, filters and pages the way the list promises — a redemption
- * transaction is one payment, a legacy absorb is no payment, and a cursor
+ * transaction is one payment, a rail-A book credit is no payment, and a cursor
  * walks the list without repeating or skipping a row.
  */
 import { randomUUID } from 'node:crypto';
 
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { LEGACY_POOLED_VAULT_TX_REF, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
-import { PLATFORM_ABSORBED_TX_REF_PREFIX } from '@modules/payment/services/voucher-redemption.service';
 import { ProviderPaymentKind } from '@modules/provider/dto/get-provider-payouts.dto';
 import { ProviderPayoutsService } from '@modules/provider/services/provider-payouts.service';
 import { SortDirection } from '@shared/api';
@@ -72,13 +71,7 @@ describe('ProviderPayoutsService — redemptions (integration)', () => {
     await credit(90_000, '2026-10-12T10:00:00.000Z', '0xaaa');
     await credit(90_000, '2026-10-12T10:00:00.000Z', '0xaaa');
     await credit(18_000, '2026-10-13T10:00:00.000Z', '0xbbb');
-    // Not payments: a legacy platform absorb (nobody paid it) and a rail-A
-    // book credit (no transaction of its own).
-    await credit(
-      90_000,
-      '2026-10-14T10:00:00.000Z',
-      `${PLATFORM_ABSORBED_TX_REF_PREFIX}DelegateIsRevoked`,
-    );
+    // Not a payment: a rail-A book credit (no transaction of its own).
     await credit(90_000, '2026-10-14T11:00:00.000Z', LEGACY_POOLED_VAULT_TX_REF);
     // Another organization's redemption never shows.
     await entry({

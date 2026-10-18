@@ -2,7 +2,6 @@ import {
   CREDITED_SQL,
   DEBT_OUTSTANDING_SQL,
   FORFEITED_SQL,
-  PLATFORM_ABSORBED_SQL,
   VOIDED_SQL,
   WRITTEN_OFF_SQL,
   PaymentIntentRepository,
@@ -20,7 +19,6 @@ import {
 } from '@modules/provider/domain/call-reconciliation';
 import { ProviderEarningsGroupBy } from '@modules/provider/dto/get-provider-earnings.dto';
 import { ProviderEarningsService } from '@modules/provider/services/provider-earnings.service';
-import { PLATFORM_ABSORBED_TX_REF_PREFIX } from '@modules/payment/services/voucher-redemption.service';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { fakeQueryBuilder } from './helpers/fake-query-builder';
@@ -320,15 +318,12 @@ describe('ProviderEarningsService — the platform never pays or owes a provider
 
     const expr = (alias: string) => fake.selects.find((s) => s.alias === alias)?.expr ?? '';
     // Earned and the fee are credited-only, and credited leaves every
-    // non-collected call out — a legacy absorb included.
+    // non-collected call out.
     expect(expr('earned')).toContain(CREDITED_SQL);
     expect(expr('platformFee')).toContain(CREDITED_SQL);
-    expect(CREDITED_SQL).toContain(PLATFORM_ABSORBED_SQL);
     expect(expr('forfeited')).toContain(FORFEITED_SQL);
     expect(expr('debtOutstanding')).toContain(DEBT_OUTSTANDING_SQL);
     expect(expr('uncollected')).toContain(WRITTEN_OFF_SQL);
-    expect(expr('uncollected')).toContain(PLATFORM_ABSORBED_SQL);
-    expect(PLATFORM_ABSORBED_SQL).toContain(`'${PLATFORM_ABSORBED_TX_REF_PREFIX}%'`);
   });
 
   it('is null amounts, and zero counts, for an empty undenominated window', async () => {

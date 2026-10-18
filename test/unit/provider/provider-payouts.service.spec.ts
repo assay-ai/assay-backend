@@ -1,7 +1,6 @@
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
-import { PLATFORM_ABSORBED_TX_REF_PREFIX } from '@modules/payment/services/voucher-redemption.service';
 import { ProviderPaymentKind } from '@modules/provider/dto/get-provider-payouts.dto';
 import { ProviderPayoutsService } from '@modules/provider/services/provider-payouts.service';
 import { ApiErrorCode, SortDirection } from '@shared/api';
@@ -49,7 +48,7 @@ describe('ProviderPayoutsService — an ordinary organization-scoped list', () =
 });
 
 describe('ProviderPayoutsService — rail-B redemptions are payments (D18)', () => {
-  it('groups PROVIDER_CREDIT by transaction, leaving out absorbed and book-only credits', async () => {
+  it('groups PROVIDER_CREDIT by transaction, leaving out book-only credits', async () => {
     const { service, redemptionFake } = build();
 
     await service.listPayouts(ORG, QUERY);
@@ -61,13 +60,9 @@ describe('ProviderPayoutsService — rail-B redemptions are payments (D18)', () 
     expect(redemptionFake.params.unobservedPrefix).toBe('unobserved:');
     expect(redemptionFake.params.heldCollectedPrefix).toBe('held_collected:');
     expect(redemptionFake.params.creditType).toBe('PROVIDER_CREDIT');
-    expect(redemptionFake.params.absorbedPrefix).toBe(PLATFORM_ABSORBED_TX_REF_PREFIX);
     expect(redemptionFake.params.legacyRef).toBe(LEGACY_POOLED_VAULT_TX_REF);
     const sql = redemptionFake.wheres.map((w) => w.sql).join(' | ');
     expect(sql).toContain('entry.chainTxRef IS NOT NULL');
-    // starts_with, not LIKE: the `_` in the prefix is no wildcard.
-    expect(sql).toContain('NOT starts_with(entry.chainTxRef, :absorbedPrefix)');
-    expect(sql).not.toMatch(/LIKE/);
     expect(sql).toContain('<> :legacyRef');
   });
 

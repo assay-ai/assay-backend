@@ -202,9 +202,7 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     classification: row.classification as 'DATA_RESULT' | 'SYSTEM_ERROR' | 'REQUEST_ERROR' | null,
     awaitingRedemption: row.awaitingRedemption,
     debtOutstanding: row.debtOutstanding,
-    uncollected:
-      row.absorbedReason !== null ||
-      (row.redemptionLastError?.startsWith(UNCOLLECTED_PREFIX) ?? false),
+    uncollected: row.redemptionLastError?.startsWith(UNCOLLECTED_PREFIX) ?? false,
     forfeited: row.redemptionLastError?.startsWith(PROVIDER_FORFEIT_PREFIX) ?? false,
     voided: row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false,
     credited: row.credited,
@@ -215,8 +213,8 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     row.status === 'SETTLED' && (row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false);
   // Forfeited by the provider: nothing was collected, credited or taken.
   const forfeited = classification === CallReconciliationClass.PROVIDER_FORFEITED;
-  // Never collected (a written-off debt, or a legacy absorb): nothing was
-  // credited or taken, and nobody owes it — the platform never pays.
+  // Never collected (a written-off debt): nothing was credited or taken, and
+  // the platform never pays.
   const uncollected = classification === CallReconciliationClass.PAID_UNCOLLECTED;
   // SETTLED but classified PENDING: no credit was written for it.
   const uncredited = row.status === 'SETTLED' && classification === CallReconciliationClass.PENDING;
@@ -229,15 +227,13 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     row.toolId,
     row.status,
     classification,
-    forfeited || voided || (uncollected && row.absorbedReason === null)
+    forfeited || voided || uncollected
       ? row.redemptionLastError
-      : uncollected
-        ? `${UNCOLLECTED_PREFIX}legacy_platform_absorbed:${row.absorbedReason}`
-        : debt
-          ? `buyer_debt:${row.redemptionLastError ?? 'unknown'}`
-          : uncredited
-            ? (row.statusReason ?? 'settled, no credit recorded')
-            : row.statusReason,
+      : debt
+        ? `buyer_debt:${row.redemptionLastError ?? 'unknown'}`
+        : uncredited
+          ? (row.statusReason ?? 'settled, no credit recorded')
+          : row.statusReason,
     row.verificationVerdict,
     // Passed-but-unpaid rows carry 0: nothing was collected on them. A voided
     // debt is not credited, like a refund, and carries its share like one, so

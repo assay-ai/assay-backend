@@ -8,7 +8,6 @@ import {
   CREDITED_SQL,
   FORFEITED_SQL,
   DEBT_OUTSTANDING_SQL,
-  PLATFORM_ABSORBED_SQL,
   VOIDED_SQL,
   WRITTEN_OFF_SQL,
   PaymentIntentRepository,
@@ -34,8 +33,8 @@ import { ProviderErrors } from '../errors/provider.errors';
 
 const SETTLED_STATUS = 'SETTLED';
 
-/** Never collected from the buyer: a written-off debt, or a legacy platform absorb. */
-const UNCOLLECTED_GROUP_SQL = `(COALESCE(${WRITTEN_OFF_SQL}, false) OR ${PLATFORM_ABSORBED_SQL})`;
+/** Never collected from the buyer: a written-off debt. */
+const UNCOLLECTED_GROUP_SQL = `COALESCE(${WRITTEN_OFF_SQL}, false)`;
 
 /** One `(call_class, status, classification, asset, decimals)` group, still atomic-unit strings. */
 interface ReconciliationGroupRow {
@@ -46,7 +45,7 @@ interface ReconciliationGroupRow {
   readonly decimals: string;
   /** Rail B, hold still open — Postgres returns a boolean, some drivers a string. */
   readonly awaitingRedemption: boolean | string;
-  /** Never collected: a written-off debt or a legacy absorb — same driver caveat. */
+  /** Never collected: a written-off debt — same driver caveat. */
   readonly uncollected: boolean | string | null;
   /** Open buyer debt — same driver caveat. */
   readonly debtOutstanding: boolean | string | null;
