@@ -107,6 +107,8 @@ function binding(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity 
     priceAmount: '250000',
     assetId: ASSET,
     status: 'ACTIVE',
+    slaFailureRate: '0.05000',
+    settlementChains: [chainIdOf(ASSET as AssetId)],
     // Nullable columns read back as `null`, never `undefined`.
     freeQuotaPerAgent: null,
     freeDailyBudget: null,
@@ -822,6 +824,114 @@ describe('GET /catalogue/tools', () => {
 
     expect(router.quote).toHaveBeenCalledTimes(2);
   });
+
+  /**
+   * D6: a buyer pays on one chain, so the price is per chain, naming the
+   * provider whose listing sets it. A tool on one chain reuses its own quote —
+   * that IS the one chain's price — and asks the router nothing more.
+   */
+  it('prices a single-chain tool once, naming the provider that sets the price', async () => {
+    const { service, router } = build({
+      bindings: [binding({ priceAmount: '100000' })],
+      quotes: { get_weather: quote({ price: MoneyUtil.of('100000', ASSET, 6) }) },
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].prices).toEqual([
+      {
+        chainId: CHAIN,
+        price: { amount: '100000', asset: ASSET, decimals: 6 },
+        providerId: 'provider-a',
+      },
+    ]);
+    expect(router.quote).toHaveBeenCalledTimes(1);
+  });
+
+  /**
+   * The seeded case behind P0-1: $0.10 from one provider on one chain, $0.25
+   * from another on a second chain. Each chain is the router's own quote for
+   * a payer funded only there, never the dearest across both.
+   */
+  it('prices a two-chain tool per chain, each from the router’s quote for that chain', async () => {
+    const { service, router } = build({
+      providers: [
+        provider(),
+        provider({ organizationId: 'provider-b', legalName: 'E2E Weather Ltd' }),
+      ],
+      bindings: [
+        binding({ priceAmount: '250000', assetId: ASSET, settlementChains: [CHAIN] }),
+        binding({
+          organizationId: 'provider-b',
+          priceAmount: '100000',
+          assetId: OTHER_ASSET,
+          settlementChains: [OTHER_CHAIN],
+        }),
+      ],
+    });
+    (router.quote as jest.Mock).mockImplementation(
+      async (_toolId: string, context: { payerChains: readonly ChainId[] }) => {
+        if (context.payerChains.length === 1 && context.payerChains[0] === OTHER_CHAIN) {
+          return quote({
+            price: MoneyUtil.of('100000', OTHER_ASSET, 6),
+            settlementChains: [OTHER_CHAIN],
+          });
+        }
+        if (context.payerChains.length === 1) return quote();
+        return quote({ settlementChains: [CHAIN, OTHER_CHAIN] });
+      },
+    );
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].prices).toEqual([
+      {
+        chainId: CHAIN,
+        price: { amount: '250000', asset: ASSET, decimals: 6 },
+        providerId: 'provider-a',
+      },
+      {
+        chainId: OTHER_CHAIN,
+        price: { amount: '100000', asset: OTHER_ASSET, decimals: 6 },
+        providerId: 'provider-b',
+      },
+    ]);
+    // Once for the tool, once per chain.
+    expect(router.quote).toHaveBeenCalledTimes(3);
+    expect(router.quote).toHaveBeenCalledWith(
+      WEATHER.id,
+      expect.objectContaining({ payerChains: [OTHER_CHAIN], defaultChainId: OTHER_CHAIN }),
+    );
+
+    // The public catalogue copies the same entries.
+    const publicTools = await new PublicCatalogueService(service).listTools();
+    expect(publicTools.tools[0].prices).toEqual(tools[0].prices);
+  });
+
+  it('leaves out a chain whose quote fails, and prices nothing on an unroutable tool', async () => {
+    const { service, router } = build({
+      bindings: [binding(), binding({ toolId: RATE.id })],
+    });
+    (router.quote as jest.Mock).mockImplementation(
+      async (toolId: string, context: { payerChains: readonly ChainId[] }) => {
+        if (toolId === RATE.id) {
+          return quote({ tool: RATE, price: null, settlementChains: [], unroutableReason: 'none' });
+        }
+        if (context.payerChains.length === 1 && context.payerChains[0] === OTHER_CHAIN) {
+          throw new Error('rpc down');
+        }
+        if (context.payerChains.length === 1) return quote();
+        return quote({ settlementChains: [CHAIN, OTHER_CHAIN] });
+      },
+    );
+
+    const { tools } = await service.listTools();
+
+    expect(tools.find((tool) => tool.id === WEATHER.id)?.prices.map((p) => p.chainId)).toEqual([
+      CHAIN,
+    ]);
+    expect(tools.find((tool) => tool.id === RATE.id)?.prices).toEqual([]);
+  });
 });
 
 describe('GET /catalogue/providers/:providerId', () => {
@@ -836,6 +946,7 @@ describe('GET /catalogue/providers/:providerId', () => {
         name: 'get_weather',
         pricingMode: 'PAID',
         price: { amount: '250000', asset: ASSET, decimals: 6 },
+        promisedFailureRate: 0.05,
         freeCallsPerAgentPerDay: null,
       },
     ]);
@@ -1115,6 +1226,7 @@ describe('PublicCatalogueService', () => {
       'name',
       'price',
       'pricingMode',
+      'promisedFailureRate',
       'toolId',
     ]);
     expect(detail.tools[0].freeCallsPerAgentPerDay).toBe(3);
@@ -1137,6 +1249,7 @@ describe('PublicCatalogueService', () => {
         'notReviewed',
         'paidBindings',
         'price',
+        'prices',
         'pricingMode',
         'providerCount',
         'replacementMajor',
@@ -1415,6 +1528,7 @@ describe('the catalogue, with an unpublished draft on a live binding', () => {
         name: WEATHER.name,
         pricingMode: 'FREEMIUM',
         price: published,
+        promisedFailureRate: 0.05,
         freeCallsPerAgentPerDay: 7,
       },
     ]);

@@ -94,6 +94,7 @@ export class PublicCatalogueService {
         name: tool.name,
         pricingMode: tool.pricingMode,
         price: toPublicMoney(tool.price),
+        promisedFailureRate: tool.promisedFailureRate,
         freeCallsPerAgentPerDay: tool.freeCallsPerAgentPerDay,
       })),
     };
@@ -140,6 +141,11 @@ function toPublicTool(tool: CatalogueToolDto): PublicToolDto {
     paidBindings: tool.paidBindings,
     routable: tool.routable,
     settlementChains: tool.settlementChains ? [...tool.settlementChains] : null,
+    prices: tool.prices.map((entry) => ({
+      chainId: entry.chainId,
+      price: toPublicMoney(entry.price),
+      providerId: entry.providerId,
+    })),
   };
 }
 
