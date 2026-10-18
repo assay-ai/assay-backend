@@ -136,18 +136,18 @@ export function openCredentialSet(
  * was sealed with.
  */
 export function rewrapDek(
-  sealed: SealedCredentialSet,
+  sealed: Pick<SealedCredentialSet, 'kekId' | 'wrappedDek' | 'dekIv'>,
   from: Kek,
   to: Kek,
   aad: string,
-): SealedCredentialSet {
+): Pick<SealedCredentialSet, 'kekId' | 'wrappedDek' | 'dekIv'> {
   if (to.key.length !== KEY_BYTES) {
     throw new Error('credential vault: KEK must be 32 bytes');
   }
   const dek = decrypt(from.key, sealed.dekIv, sealed.wrappedDek, aad);
   try {
     const wrapped = encrypt(to.key, dek, aad);
-    return { ...sealed, kekId: to.keyId, wrappedDek: wrapped.output, dekIv: wrapped.iv };
+    return { kekId: to.keyId, wrappedDek: wrapped.output, dekIv: wrapped.iv };
   } finally {
     dek.fill(0);
   }

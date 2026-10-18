@@ -10,9 +10,8 @@ Set the variable on BOTH the `api` and `mcp` processes, always with the same val
 
 ## Steps
 
-1. Generate a keypair with `scripts/verifier-key/generate.ts` style tooling or any Ed25519
-   generator; the entry is `{"keyId":"req-2026-11","secretKey":"<64 hex chars>"}`. Never
-   reuse a `keyId`.
+1. Generate a 32-byte Ed25519 seed: `openssl rand -hex 32`. The entry is
+   `{"keyId":"req-2026-11","secretKey":"<that hex>"}`. Choose a new `keyId`; never reuse one.
 2. Publish first: deploy with the new key SECOND: `[old, new]`. The old key still signs;
    the JWKS now lists both public keys.
 3. Wait at least 1 hour (the JWKS cache lifetime), longer if providers are known to cache
