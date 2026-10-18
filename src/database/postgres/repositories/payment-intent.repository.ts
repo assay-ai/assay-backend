@@ -51,7 +51,7 @@ export interface PaymentIntentPeriod {
 }
 
 /**
- * `Σ` listed price over the withheld statuses that had a hold, grouped by asset
+ * `Σ` held amount over the withheld intents that had a hold, grouped by asset
  * and by status so `LedgerWithheldService` can fold rows into `WithheldBucket`s
  * without loading one row per intent.
  */
@@ -59,6 +59,11 @@ export interface WithheldStatusAssetTotal {
   readonly asset: string;
   readonly decimals: number;
   readonly status: string;
+  /**
+   * The row is `SETTLED` and never collected ({@link NOT_CHARGED_SETTLED_SQL}).
+   * Always true on a `SETTLED` row here, since no other `SETTLED` row is read.
+   */
+  readonly notCollected: boolean;
   readonly calls: number;
   readonly amount: bigint;
 }
@@ -2257,8 +2262,10 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
   /**
    * The intent side of `withheld`: `Σ` held amount over
-   * {@link WITHHELD_STATUSES}, restricted to intents that actually reserved
-   * something (`hold_id IS NOT NULL` — see `domain/withheld.ts` for why an
+   * {@link WITHHELD_STATUSES} plus the `SETTLED` rows never collected and not
+   * owed ({@link NOT_CHARGED_SETTLED_SQL}, the `NOT_COLLECTED` bucket), so the
+   * total is the receipts summary's `notCharged`. Restricted to intents that
+   * actually reserved something (`hold_id IS NOT NULL` — see `domain/withheld.ts` for why an
    * intent that expired in `CREATED` must not appear here), grouped by asset
    * and by status so a caller can fold the rows into `WithheldBucket`s without
    * loading one row per intent.
@@ -2283,7 +2290,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         'hold.id = intent.hold_id AND hold.organization_id = intent.organization_id',
       )
       .where('intent.organizationId = :organizationId', { organizationId })
-      .andWhere('intent.status IN (:...statuses)', { statuses: WITHHELD_STATUSES })
+      .andWhere(`(intent.status IN (:...statuses) OR ${NOT_CHARGED_SETTLED_SQL})`, {
+        statuses: WITHHELD_STATUSES,
+      })
       .andWhere('intent.holdId IS NOT NULL');
 
     this.applyPeriod(qb, period);
@@ -2304,6 +2313,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       asset: row.asset,
       decimals: Number(row.decimals),
       status: row.status,
+      notCollected: row.status === SETTLED_STATUS,
       calls: Number(row.calls),
       amount: BigInt(row.amount),
     }));

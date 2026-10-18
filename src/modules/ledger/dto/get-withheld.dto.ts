@@ -33,7 +33,10 @@ export class GetWithheldQueryDto {
 export class GetWithheldResponseDto {
   @ApiProperty({
     type: [WithheldReconciliationDto],
-    description: 'One entry per asset that has ever had a balance in this organization',
+    description:
+      'One entry per asset that has ever had a balance in this organization. Each total is ' +
+      'the receipts summary’s not-charged figure for the same window: refunded, voided or ' +
+      'expired calls, plus served calls never collected and not owed (bucket NOT_COLLECTED).',
   })
   withheld: WithheldReconciliationDto[];
 }
