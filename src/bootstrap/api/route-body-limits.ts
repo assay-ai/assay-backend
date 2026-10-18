@@ -16,5 +16,10 @@ export const ROUTE_BODY_LIMITS: ReadonlyArray<{ readonly path: string; readonly 
 export function applyRouteBodyLimits(app: {
   use(path: string, handler: RequestHandler): unknown;
 }): void {
-  for (const { path, limit } of ROUTE_BODY_LIMITS) app.use(path, json({ limit }));
+  for (const { path, limit } of ROUTE_BODY_LIMITS) {
+    const parse = json({ limit });
+    app.use(path, function routeScopedJsonParser(req, res, next) {
+      parse(req, res, next);
+    });
+  }
 }
