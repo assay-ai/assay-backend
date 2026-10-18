@@ -24,6 +24,8 @@ import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@
 import { AuditLogWriter, auditActorOf } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import { DISPUTE_FILING_GUARD_SECONDS } from '@modules/payment/constants/collection-hold.constants';
+
 import { CALL_DISPUTE_CONFIG, CallDisputeConfig } from '../constants/call-dispute.config';
 import {
   BuyerDisputeHistory,
@@ -193,6 +195,14 @@ export class CallDisputeService {
         if (history.filedLastDay >= limit.limit) {
           throw DisputeErrors.rateLimited({ limit: limit.limit, flagged: limit.flagged });
         }
+        // Inside the dispute hold, the voucher is set aside before anything can
+        // reach the chain: a refund is then guaranteed. After it, the dispute is
+        // a quality signal (see `../domain/call-dispute.ts`).
+        entity.refundGuaranteed = await this.paymentIntents.holdForDispute(
+          manager,
+          { organizationId, id: intent.id, payer: intent.agentAccount },
+          DISPUTE_FILING_GUARD_SECONDS,
+        );
         await manager.save(entity);
         await this.audit.record(manager, {
           organizationId,
@@ -200,7 +210,11 @@ export class CallDisputeService {
           action: 'call_dispute.filed',
           resourceType: CALL_DISPUTE_TARGET,
           resourceId: entity.id,
-          after: { intentId: intent.id, reason: body.reason },
+          after: {
+            intentId: intent.id,
+            reason: body.reason,
+            refundGuaranteed: entity.refundGuaranteed,
+          },
         });
       });
     } catch (error) {
@@ -254,6 +268,14 @@ export class CallDisputeService {
         ),
       );
       if (rows.length === 0) throw DisputeErrors.notWithdrawable({ state: dispute.state });
+      // A voucher the dispute held goes back to the redemption queue.
+      await this.paymentIntents.setDisputeOutcome(
+        manager,
+        organizationId,
+        dispute.intentId as string,
+        null,
+        true,
+      );
       await this.audit.record(manager, {
         organizationId,
         actor: auditActorOf(session),
@@ -518,7 +540,15 @@ export class CallDisputeService {
     const intentId = dispute.intentId as string;
     let intent = await this.mustFindIntent(dispute.organizationId, intentId);
 
-    if (planRefund(intent) === RefundPlanKind.VOID_DEBT) {
+    const first = planRefund(intent);
+    if (first === RefundPlanKind.RELEASE_HELD) {
+      await this.intents.releaseDisputedHold(
+        dispute.organizationId,
+        intentId,
+        DISPUTE_UPHELD_VOID_OUTCOME,
+      );
+      intent = await this.mustFindIntent(dispute.organizationId, intentId);
+    } else if (first === RefundPlanKind.VOID_DEBT) {
       await this.intents.voidDebt(dispute.organizationId, intentId, DISPUTE_UPHELD_VOID_OUTCOME);
       intent = await this.mustFindIntent(dispute.organizationId, intentId);
     }
@@ -807,6 +837,8 @@ export function toDto(row: DisputeEntity): CallDisputeDto {
     refundAmount: money(row.refundAmount, row.assetId, row.decimals),
     restoredAmount: money(row.restoredAmount, row.assetId, row.decimals),
     canRespond: row.state === DisputeState.OPEN && row.providerResponse === null,
+    refundGuaranteed: row.refundGuaranteed ?? false,
+    refundNotice: refundNoticeOf(row.refundGuaranteed ?? false),
     createdAt: row.createdAt,
     updatedAt: row.updatedAt,
   };
@@ -826,14 +858,26 @@ function money(
   return { amount: value.amount, asset: value.asset, decimals: value.decimals };
 }
 
+/** What the buyer is told at filing about whether an upheld decision refunds. */
+export function refundNoticeOf(guaranteed: boolean): string {
+  return guaranteed
+    ? 'Filed inside the dispute window: the payment is held, and if the dispute is upheld ' +
+        'you are refunded in full.'
+    : 'Filed after the dispute window: the dispute counts toward the provider’s quality; a ' +
+        'refund is made only if the payment has not been collected.';
+}
+
 function describeRefund(state: string | null): string {
   switch (state) {
     case RefundState.REFUNDED:
       return 'The buyer is not charged for the call.';
     case RefundState.NOT_CHARGED:
       return 'The call was not charged, so there is nothing to refund.';
-    case RefundState.STAKE_CLAIM_OPEN:
-      return 'The provider was already paid; the refund is a claim on the provider’s stake.';
+    case RefundState.NOT_REFUNDABLE:
+      return (
+        'It was filed after the dispute window and the provider was already paid, so it ' +
+        'counts against the provider’s quality but is not refunded.'
+      );
     case RefundState.PENDING:
       return 'The refund is being applied.';
     default:

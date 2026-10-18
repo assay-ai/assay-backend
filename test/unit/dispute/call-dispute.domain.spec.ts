@@ -3,6 +3,13 @@ import {
   loadCallDisputeConfig,
 } from '@modules/dispute/constants/call-dispute.config';
 import {
+  COLLECTION_DEADLINE_RESERVE_SECONDS,
+  collectableAtSql,
+  disputeWindowEndOf,
+  loadCollectionHoldWindowSeconds,
+} from '@modules/payment/constants/collection-hold.constants';
+import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
+import {
   RefundPlanInput,
   RefundPlanKind,
   RefundSource,
@@ -32,8 +39,25 @@ function intent(overrides: Partial<RefundPlanInput> = {}): RefundPlanInput {
 }
 
 describe('planRefund — where an upheld refund’s money comes from', () => {
-  it('a redeemed voucher: the provider was paid, so only its stake can refund', () => {
-    expect(planRefund(intent())).toBe(RefundPlanKind.STAKE_CLAIM);
+  it('a redeemed voucher: the provider was paid — not refundable', () => {
+    expect(planRefund(intent())).toBe(RefundPlanKind.COLLECTED);
+  });
+
+  it('a voucher a dispute held inside the window: release it', () => {
+    expect(planRefund(intent({ holdReleasedAt: null, disputeOutcome: 'OPEN' }))).toBe(
+      RefundPlanKind.RELEASE_HELD,
+    );
+    expect(planRefund(intent({ holdReleasedAt: null, disputeOutcome: 'UPHELD' }))).toBe(
+      RefundPlanKind.RELEASE_HELD,
+    );
+  });
+
+  it('a held voucher that somehow reached the chain is not released blind', () => {
+    expect(
+      planRefund(
+        intent({ holdReleasedAt: null, disputeOutcome: 'OPEN', redemptionTxRefs: ['0xabc'] }),
+      ),
+    ).toBe(RefundPlanKind.COLLECTION_IN_PROGRESS);
   });
 
   it('a voucher still awaiting redemption: wait, never release under an in-flight voucher', () => {
@@ -66,7 +90,7 @@ describe('planRefund — where an upheld refund’s money comes from', () => {
 
   it('a debt whose replacement was redeemed: the provider was paid', () => {
     expect(planRefund(intent({ redemptionLapsedAt: AT, redemptionReplacedAt: AT }))).toBe(
-      RefundPlanKind.STAKE_CLAIM,
+      RefundPlanKind.COLLECTED,
     );
   });
 
@@ -91,7 +115,7 @@ describe('planRefund — where an upheld refund’s money comes from', () => {
   });
 
   it('rail A: committed inline at settle, so the provider was credited', () => {
-    expect(planRefund(intent({ rail: 'RAIL_A_PER_CALL' }))).toBe(RefundPlanKind.STAKE_CLAIM);
+    expect(planRefund(intent({ rail: 'RAIL_A_PER_CALL' }))).toBe(RefundPlanKind.COLLECTED);
     expect(planRefund(intent({ rail: 'RAIL_A_PER_CALL', holdReleasedAt: null }))).toBe(
       RefundPlanKind.COLLECTION_IN_PROGRESS,
     );
@@ -104,9 +128,13 @@ describe('refundColumnsFor', () => {
       source: RefundSource.UNCOLLECTED_EARNINGS,
       state: RefundState.PENDING,
     });
-    expect(refundColumnsFor(RefundPlanKind.STAKE_CLAIM)).toEqual({
-      source: RefundSource.PROVIDER_STAKE,
-      state: RefundState.STAKE_CLAIM_OPEN,
+    expect(refundColumnsFor(RefundPlanKind.COLLECTED)).toEqual({
+      source: RefundSource.NONE,
+      state: RefundState.NOT_REFUNDABLE,
+    });
+    expect(refundColumnsFor(RefundPlanKind.RELEASE_HELD)).toEqual({
+      source: RefundSource.UNCOLLECTED_EARNINGS,
+      state: RefundState.PENDING,
     });
     expect(refundColumnsFor(RefundPlanKind.NOT_CHARGED)).toEqual({
       source: RefundSource.NONE,
@@ -167,5 +195,34 @@ describe('loadCallDisputeConfig', () => {
     expect(config.maxFilingsPerDay).toBe(DEFAULT_CALL_DISPUTE_CONFIG.maxFilingsPerDay);
     expect(config.twoPersonThresholdMinor).toBe('100');
     expect(loadCallDisputeConfig({}).twoPersonThresholdMinor).toBe('5000000');
+    expect(loadCallDisputeConfig({}).snapshotRetentionMs).toBe(30 * 24 * 3600 * 1000);
+  });
+});
+
+describe('the dispute hold window', () => {
+  it('defaults to an hour, accepts 0 to 1440 minutes, and refuses anything else', () => {
+    expect(loadCollectionHoldWindowSeconds({})).toBe(3600);
+    expect(loadCollectionHoldWindowSeconds({ CALL_DISPUTE_HOLD_WINDOW_MINUTES: '0' })).toBe(0);
+    expect(loadCollectionHoldWindowSeconds({ CALL_DISPUTE_HOLD_WINDOW_MINUTES: '15' })).toBe(900);
+    expect(() =>
+      loadCollectionHoldWindowSeconds({ CALL_DISPUTE_HOLD_WINDOW_MINUTES: '1441' }),
+    ).toThrow(/0 to 1440/);
+    expect(() =>
+      loadCollectionHoldWindowSeconds({ CALL_DISPUTE_HOLD_WINDOW_MINUTES: 'an hour' }),
+    ).toThrow();
+  });
+
+  it('caps the window below the voucher’s redemption grace', () => {
+    expect(collectableAtSql(3600)).toBe(
+      `LEAST(now() + interval '3600 seconds', "expires_at" + interval '${
+        REDEEM_GRACE_SECONDS - COLLECTION_DEADLINE_RESERVE_SECONDS
+      } seconds')`,
+    );
+  });
+
+  it('ends the guaranteed window a guard before collection', () => {
+    const at = new Date('2026-10-18T12:00:00Z');
+    expect(disputeWindowEndOf(at)?.toISOString()).toBe('2026-10-18T11:59:30.000Z');
+    expect(disputeWindowEndOf(null)).toBeNull();
   });
 });

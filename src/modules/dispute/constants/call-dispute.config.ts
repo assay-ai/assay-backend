@@ -22,6 +22,12 @@ export interface CallDisputeConfig {
   readonly twoPersonThresholdMinor: string;
   /** The largest evidence snapshot kept, in bytes of JSON; larger bodies are cut. */
   readonly snapshotMaxBytes: number;
+  /**
+   * How long after a dispute is decided (or withdrawn) its snapshot keeps the
+   * call's request and response. After it they are deleted; the call's facts
+   * and the verdict stay, so the decision can still be read.
+   */
+  readonly snapshotRetentionMs: number;
 }
 
 export const CALL_DISPUTE_CONFIG = Symbol('CALL_DISPUTE_CONFIG');
@@ -35,6 +41,7 @@ export const DEFAULT_CALL_DISPUTE_CONFIG: CallDisputeConfig = Object.freeze({
   abuseRejectedThreshold: 5,
   twoPersonThresholdMinor: '5000000',
   snapshotMaxBytes: 64 * 1024,
+  snapshotRetentionMs: 30 * DAY_MS,
 });
 
 function readInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number {
@@ -72,5 +79,8 @@ export function loadCallDisputeConfig(env: NodeJS.ProcessEnv = process.env): Cal
       defaults.twoPersonThresholdMinor,
     ),
     snapshotMaxBytes: readInt(env, 'CALL_DISPUTE_SNAPSHOT_MAX_BYTES', defaults.snapshotMaxBytes),
+    snapshotRetentionMs:
+      readInt(env, 'CALL_DISPUTE_SNAPSHOT_RETENTION_DAYS', defaults.snapshotRetentionMs / DAY_MS) *
+      DAY_MS,
   };
 }
