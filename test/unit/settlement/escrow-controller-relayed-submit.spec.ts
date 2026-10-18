@@ -242,9 +242,42 @@ describe('POST /escrow/limits — audit log (BUG-R2-B4-01)', () => {
     expect(recordAfterCommit).not.toHaveBeenCalled();
   });
 
-  it('does not record a withdrawal request — only limit changes are audited here', async () => {
+});
+
+describe('POST /escrow/withdrawals/request — audit log (B7)', () => {
+  it('records withdrawal.requested once the relayed request has landed', async () => {
     const { controller, recordAfterCommit } = build();
+
     await controller.submitRequestWithdraw(SESSION, REQUEST_BODY);
+
+    expect(recordAfterCommit).toHaveBeenCalledTimes(1);
+    expect(recordAfterCommit).toHaveBeenCalledWith({
+      organizationId: SESSION.organizationId,
+      actor: { type: 'user', id: SESSION.credentialId },
+      action: 'withdrawal.requested',
+      resourceType: 'escrow',
+      resourceId: BUYER,
+      before: null,
+      after: expect.objectContaining({ amount: '400000000', asset: ASSET }),
+    });
+    expect(JSON.stringify(recordAfterCommit.mock.calls)).not.toContain(SIGNATURE);
+  });
+
+  it('records a zero request as withdrawal.cancelled', async () => {
+    const { controller, recordAfterCommit } = build();
+
+    await controller.submitRequestWithdraw(SESSION, { ...REQUEST_BODY, amount: '0' });
+
+    expect(recordAfterCommit).toHaveBeenCalledWith(
+      expect.objectContaining({ action: 'withdrawal.cancelled' }),
+    );
+  });
+
+  it('records nothing when the relay refused', async () => {
+    const { controller, submitRelayedIntent, recordAfterCommit } = build();
+    submitRelayedIntent.mockRejectedValueOnce(new Error('refused'));
+
+    await expect(controller.submitRequestWithdraw(SESSION, REQUEST_BODY)).rejects.toThrow('refused');
     expect(recordAfterCommit).not.toHaveBeenCalled();
   });
 });
