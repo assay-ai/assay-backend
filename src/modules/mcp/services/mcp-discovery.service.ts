@@ -9,7 +9,7 @@ import {
 } from '@modules/tool/domain/mapping';
 import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
 import { ToolErrors } from '@modules/tool/errors/tool.errors';
-import { Tool, ToolKind, categoryOf } from '@modules/tool/ports/tool.types';
+import { Tool, ToolKind, categoryOf, isNotReviewed } from '@modules/tool/ports/tool.types';
 import { DiscoveryMode } from '@modules/toolset/domain/mcp-url';
 
 import {
@@ -81,6 +81,8 @@ export interface SearchResult {
   /** `detail: full` only: the schema did not fit the 256 KB cap; `get_tool` has it. */
   readonly inputSchemaOmitted?: boolean;
   readonly note?: string;
+  /** A provider tool no operator has reviewed (§7.6): shown before anyone pays for it. */
+  readonly notReviewed?: boolean;
 }
 
 /** `search_tools`'s output (design spec §7.4). */
@@ -240,6 +242,7 @@ export class McpDiscoveryService {
     return {
       name: tool.name,
       kind: kindOf(tool),
+      ...(isNotReviewed(tool) ? { notReviewed: true } : {}),
       category: categoryOf(tool),
       tags: [...(tool.tags ?? [])],
       summary: version.summary,
@@ -306,8 +309,10 @@ export class McpDiscoveryService {
     detail: SearchDetail,
     viewer: McpCatalogueViewer,
   ): Promise<SearchResult> {
-    if (detail === 'names') return { name: entry.tool.name, score };
+    const reviewFlag = isNotReviewed(entry.tool) ? { notReviewed: true } : {};
+    if (detail === 'names') return { name: entry.tool.name, score, ...reviewFlag };
     const result: SearchResult = {
+      ...reviewFlag,
       name: entry.tool.name,
       summary: versionOf(entry.tool).summary,
       version: versionOf(entry.tool).semver,

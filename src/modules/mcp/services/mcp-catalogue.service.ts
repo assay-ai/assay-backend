@@ -486,7 +486,7 @@ function describe(
     name: tool.name,
     // The version's stored summary (at most 200 characters), never the full
     // description: that is `get_tool`'s (§7.4).
-    description: `${versionOf(tool).summary}\n\n${priceLine(quote, price, freePerDay)}`,
+    description: `${versionOf(tool).summary}\n\n${priceLine(quote, price, freePerDay)}${reviewNote(tool)}`,
     inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
     outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
     annotations,
@@ -510,6 +510,14 @@ export function contractMetaOf(tool: Tool): Record<string, unknown> {
     ...(deprecated ? { [ASSAY_DEPRECATED]: deprecated } : {}),
     ...providerMetaOf(tool),
   };
+}
+
+/**
+ * The stable note a "Not reviewed" provider tool's description line ends
+ * with, so a model reading `tools/list` sees it before it pays (§7.6).
+ */
+export function reviewNote(tool: Tool): string {
+  return isNotReviewed(tool) ? ' · Not reviewed' : '';
 }
 
 /** `_meta["assay/kind"]`: `PROVIDER` on one maker's own tool (absent on a standard one). */
@@ -558,7 +566,7 @@ function describeNoProviderFits(quote: ToolQuote): McpToolDescriptor {
   };
   return {
     name: tool.name,
-    description: `${versionOf(tool).summary}\n\nNo provider fits your limits.`,
+    description: `${versionOf(tool).summary}\n\nNo provider fits your limits.${reviewNote(tool)}`,
     inputSchema: tool.inputSchema as unknown as Record<string, unknown>,
     outputSchema: tool.outputSchema as unknown as Record<string, unknown>,
     annotations,

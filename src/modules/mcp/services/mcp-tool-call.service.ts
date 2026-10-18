@@ -57,7 +57,7 @@ import {
 import { ToolCallRecordWriter } from '@modules/free-tier/services/tool-call-record-writer.service';
 import { SpendPolicyEnforcementService } from '@modules/spend-policy/services/spend-policy-enforcement.service';
 import { ToolErrorCode, ToolErrors } from '@modules/tool/errors/tool.errors';
-import { PricingMode, Tool } from '@modules/tool/ports/tool.types';
+import { PricingMode, Tool, isNotReviewed } from '@modules/tool/ports/tool.types';
 import { BindingCallCounterService } from '@modules/tool/services/binding-call-counter.service';
 import {
   ProviderRouterService,
@@ -896,9 +896,14 @@ export class McpToolCallService {
         message:
           `${tool.name} is paid on rail B: sign the voucher in x402/paymentRequired and ` +
           `call again with it in _meta["x402/voucher"]` +
-          delegationHint(session),
+          delegationHint(session) +
+          (isNotReviewed(tool) ? ' This maker’s tool is not reviewed.' : ''),
         intentId: null,
-        detail: { paymentRequired: requirement },
+        // Beside the voucher, never inside it: the requirement is what is signed.
+        detail: {
+          paymentRequired: requirement,
+          ...(isNotReviewed(tool) ? { notReviewed: true } : {}),
+        },
       };
     }
 
