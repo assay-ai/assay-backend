@@ -24,10 +24,10 @@ describe('OAuthMetrics', () => {
       'assay_oauth_cimd_fetch_total',
       'assay_oauth_dcr_total',
       'assay_mcp_unauthorized_total',
-      'assay_oauth_live_grants_per_agent',
     ]) {
       expect(text).toContain(`# TYPE ${name} `);
     }
+    // The DB-backed gauge is the registry's own, set by MetricsCollectorService.
     expect(text).toContain('# TYPE assay_oauth_live_grants_per_agent gauge');
   });
 
@@ -44,7 +44,6 @@ describe('OAuthMetrics', () => {
     metrics.incCimdFetch('blocked_address');
     metrics.incDcr();
     metrics.incMcpUnauthorized('audience');
-    metrics.setLiveGrantsPerAgentMax(45);
 
     const text = await registry.metricsText();
     expect(text).toContain('assay_oauth_authorize_total{outcome="stored"} 1');
@@ -63,7 +62,6 @@ describe('OAuthMetrics', () => {
     expect(text).toContain('assay_oauth_cimd_fetch_total{result="blocked_address"} 1');
     expect(text).toContain('assay_oauth_dcr_total 1');
     expect(text).toContain('assay_mcp_unauthorized_total{reason="audience"} 1');
-    expect(text).toContain('assay_oauth_live_grants_per_agent 45');
   });
 
   it('two instances on two registries do not collide', () => {

@@ -27,8 +27,7 @@ export class OAuthCleanupJob {
       }
       this.logger.log(
         `OAuth cleanup: accessTokens=${summary.accessTokens} refreshTokens=${summary.refreshTokens} ` +
-          `codes=${summary.codes} clients=${summary.clients} ` +
-          `maxLiveGrantsPerAgent=${summary.maxLiveGrantsPerAgent}`,
+          `codes=${summary.codes} clients=${summary.clients}`,
       );
     } catch (error) {
       this.logger.error(

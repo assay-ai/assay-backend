@@ -16,7 +16,6 @@ import {
   OAUTH_CLEANUP_LOCK_TTL_SECONDS,
   OAUTH_CLEANUP_REFRESH_TOKEN_RETENTION_MS,
 } from '../constants/oauth-cleanup.constants';
-import { OAuthMetrics } from './oauth-metrics.service';
 
 export { OAUTH_CLEANUP_LOCK_KEY };
 
@@ -37,35 +36,72 @@ export type OAuthCleanupSummary =
       refreshTokens: number;
       codes: number;
       clients: number;
-      maxLiveGrantsPerAgent: number;
     };
 
 /** Postgres `foreign_key_violation`. */
 const FOREIGN_KEY_VIOLATION = '23503';
 
+const DELETABLE_CLIENT_KINDS = [OAuthClientKind.DCR, OAuthClientKind.CIMD];
+
+/**
+ * Every condition a client must meet to be deleted. Used by the candidate
+ * query and again by each one-row delete, so a client that changed between
+ * the two is kept. `$1` kinds, `$2` the 30-day cutoff, `$3` verified client
+ * ids, `$4` now.
+ *
+ * A client is stale when it was created over 30 days ago and neither used
+ * nor (CIMD) fetched since the cutoff. A CIMD row is also stale as soon as
+ * its `cache_until` has passed: it is only a cache of a document the
+ * registry fetches again on the next authorize.
+ */
+const DELETABLE_CLIENT_WHERE = `
+      c."kind" = ANY($1)
+  AND (
+        (c."created_at" < $2
+         AND (c."last_used_at" IS NULL OR c."last_used_at" < $2)
+         AND (c."kind" <> '${OAuthClientKind.CIMD}' OR c."fetched_at" IS NULL OR c."fetched_at" < $2))
+     OR (c."kind" = '${OAuthClientKind.CIMD}' AND c."cache_until" < $4)
+      )
+  AND NOT (c."client_id" = ANY($3))
+  AND NOT EXISTS (SELECT 1 FROM "agent_credentials" a WHERE a."oauth_client_id" = c."id")
+  AND NOT EXISTS (SELECT 1 FROM "oauth_authorization_codes" k WHERE k."oauth_client_id" = c."id")`;
+
 /**
  * The OAuth cleanup (spec §6.2, IM-6), run daily by `OAuthCleanupJob` in the
  * scheduler only.
  *
- * - Access tokens 7 days past expiry, used or revoked refresh tokens 30 days
- *   past expiry, and codes 1 day past expiry are deleted.
+ * - Access tokens and refresh tokens 30 days past expiry, and codes 1 day
+ *   past expiry, are deleted. Access tokens are kept as long as refresh
+ *   tokens so the stale-reuse check (§6.3.11, R-OA-15) still finds the
+ *   `first_used_at` of a chain's access tokens while a used refresh token
+ *   can be presented. A refresh token 30 days past expiry is refused
+ *   whatever its state, and its grant cannot be revived, so it goes too.
  * - A DCR or CIMD client is deleted only when no `agent_credentials` row (in
  *   any state, soft-deleted included) and no code row references it, and it
- *   is older than 30 days and unused for 30 days. `BUILTIN` and
- *   `OAUTH_VERIFIED_CLIENTS` rows are never deleted. The FK `RESTRICT` backs
- *   this: a client that gains a reference mid-run refuses the delete and is
- *   kept.
+ *   is stale: created over 30 days ago and neither used nor (CIMD) fetched
+ *   in the last 30 days, or (CIMD) past its `cache_until`. `BUILTIN` and `OAUTH_VERIFIED_CLIENTS` rows are never
+ *   deleted. The FK `RESTRICT` backs this: a client that gains a reference
+ *   mid-run refuses its delete and is kept.
+ * - **Invariant this relies on:** `oauth_refresh_tokens.oauth_client_id` has
+ *   no FK, and it needs none only because every refresh row belongs to a
+ *   credential row on the same client, and credential rows are never
+ *   deleted. A change that allows a refresh row without such a credential
+ *   (or deletes credential rows) must add a reference check here, or tokens
+ *   would be orphaned silently.
  * - Credential rows are never deleted: a grant stays an `agent_credentials`
  *   row for its audit trail, like an API key.
- * - `assay_oauth_live_grants_per_agent` is set to the largest number of live
- *   grants any one agent holds.
  *
  * These are platform-wide deletes by expiry, not reads of one tenant's data,
  * so they run on the data source rather than the tenant-guarded repositories.
+ * Each statement is bounded (`LIMIT` batches); a client backlog larger than
+ * one batch is left for the next day.
  *
  * `SET oauth:cleanup:lock 1 NX EX 3600` makes a second run inside the hour,
  * from this replica or another, a no-op. Without Redis the run is skipped:
  * the next day's run catches up, and every delete is idempotent.
+ *
+ * `assay_oauth_live_grants_per_agent` is not set here: the API app's
+ * `MetricsCollectorService` sets it, where `/metrics` is served.
  */
 @Injectable()
 export class OAuthCleanupService {
@@ -74,7 +110,6 @@ export class OAuthCleanupService {
   constructor(
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     @Optional() @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis | null,
-    private readonly metrics: OAuthMetrics,
     @Inject(OAUTH_CLEANUP_CONFIG) private readonly config: OAuthCleanupConfig,
   ) {}
 
@@ -82,32 +117,25 @@ export class OAuthCleanupService {
     if (!(await this.takeLock())) return { skipped: true };
 
     const now = this.config.now();
-    const codes = await this.deleteInBatches('oauth_authorization_codes', `"expires_at" < $1`, [
+    const codes = await this.deleteInBatches(
+      'oauth_authorization_codes',
       new Date(now - OAUTH_CLEANUP_CODE_RETENTION_MS),
-    ]);
-    const accessTokens = await this.deleteInBatches('oauth_access_tokens', `"expires_at" < $1`, [
+    );
+    const accessTokens = await this.deleteInBatches(
+      'oauth_access_tokens',
       new Date(now - OAUTH_CLEANUP_ACCESS_TOKEN_RETENTION_MS),
-    ]);
+    );
     const refreshTokens = await this.deleteInBatches(
       'oauth_refresh_tokens',
-      `"expires_at" < $1 AND ("used_at" IS NOT NULL OR "revoked_at" IS NOT NULL)`,
-      [new Date(now - OAUTH_CLEANUP_REFRESH_TOKEN_RETENTION_MS)],
+      new Date(now - OAUTH_CLEANUP_REFRESH_TOKEN_RETENTION_MS),
     );
     // After the codes, so a client held only by dead codes goes in this run.
     const clients = await this.deleteUnreferencedClients(
       new Date(now - OAUTH_CLEANUP_CLIENT_MIN_AGE_MS),
+      new Date(now),
     );
-    const maxLiveGrantsPerAgent = await this.maxLiveGrantsPerAgent(new Date(now));
-    this.metrics.setLiveGrantsPerAgentMax(maxLiveGrantsPerAgent);
 
-    return {
-      skipped: false,
-      accessTokens,
-      refreshTokens,
-      codes,
-      clients,
-      maxLiveGrantsPerAgent,
-    };
+    return { skipped: false, accessTokens, refreshTokens, codes, clients };
   }
 
   private async takeLock(): Promise<boolean> {
@@ -133,37 +161,32 @@ export class OAuthCleanupService {
     }
   }
 
-  /** `table` and `where` are constants of this class, never input. */
-  private async deleteInBatches(table: string, where: string, params: unknown[]): Promise<number> {
-    const limit = `$${params.length + 1}`;
+  /** Deletes rows of `table` (a constant of this class) whose `expires_at` is before the cutoff. */
+  private async deleteInBatches(table: string, cutoff: Date): Promise<number> {
     let total = 0;
     for (;;) {
       const [, deleted] = (await this.dataSource.query(
         `DELETE FROM "${table}" WHERE "id" IN ` +
-          `(SELECT "id" FROM "${table}" WHERE ${where} LIMIT ${limit})`,
-        [...params, OAUTH_CLEANUP_BATCH_SIZE],
+          `(SELECT "id" FROM "${table}" WHERE "expires_at" < $1 LIMIT $2)`,
+        [cutoff, OAUTH_CLEANUP_BATCH_SIZE],
       )) as [unknown, number];
       total += deleted;
       if (deleted < OAUTH_CLEANUP_BATCH_SIZE) return total;
     }
   }
 
-  private async deleteUnreferencedClients(cutoff: Date): Promise<number> {
+  private async deleteUnreferencedClients(cutoff: Date, now: Date): Promise<number> {
     const verified = this.config.verifiedClientIds;
     if (verified === null) {
       this.logger.warn('OAuth cleanup deletes no client: OAUTH_VERIFIED_CLIENTS could not be read');
       return 0;
     }
+    const params = [DELETABLE_CLIENT_KINDS, cutoff, [...verified], now];
 
     const candidates = (await this.dataSource.query(
-      `SELECT c."id" FROM "oauth_clients" c
-        WHERE c."kind" = ANY($1)
-          AND c."created_at" < $2
-          AND (c."last_used_at" IS NULL OR c."last_used_at" < $2)
-          AND NOT (c."client_id" = ANY($3))
-          AND NOT EXISTS (SELECT 1 FROM "agent_credentials" a WHERE a."oauth_client_id" = c."id")
-          AND NOT EXISTS (SELECT 1 FROM "oauth_authorization_codes" k WHERE k."oauth_client_id" = c."id")`,
-      [[OAuthClientKind.DCR, OAuthClientKind.CIMD], cutoff, [...verified]],
+      `SELECT c."id" FROM "oauth_clients" c WHERE ${DELETABLE_CLIENT_WHERE}
+        ORDER BY c."created_at" LIMIT $5`,
+      [...params, OAUTH_CLEANUP_BATCH_SIZE],
     )) as { id: string }[];
 
     // One statement per client: a client that gains a reference mid-run
@@ -172,13 +195,8 @@ export class OAuthCleanupService {
     for (const { id } of candidates) {
       try {
         const [, count] = (await this.dataSource.query(
-          `DELETE FROM "oauth_clients" c
-            WHERE c."id" = $1
-              AND c."kind" = ANY($2)
-              AND NOT (c."client_id" = ANY($3))
-              AND NOT EXISTS (SELECT 1 FROM "agent_credentials" a WHERE a."oauth_client_id" = c."id")
-              AND NOT EXISTS (SELECT 1 FROM "oauth_authorization_codes" k WHERE k."oauth_client_id" = c."id")`,
-          [id, [OAuthClientKind.DCR, OAuthClientKind.CIMD], [...verified]],
+          `DELETE FROM "oauth_clients" c WHERE c."id" = $5 AND ${DELETABLE_CLIENT_WHERE}`,
+          [...params, id],
         )) as [unknown, number];
         deleted += count;
       } catch (error) {
@@ -186,25 +204,5 @@ export class OAuthCleanupService {
       }
     }
     return deleted;
-  }
-
-  /**
-   * The same "live" as `AgentCredentialRepository.countLiveOAuthForAgent`
-   * (not revoked, not expired, not soft-deleted), as one aggregate over every
-   * agent. An agent is `(organization_id, agent_id)`.
-   */
-  private async maxLiveGrantsPerAgent(now: Date): Promise<number> {
-    const [row] = (await this.dataSource.query(
-      `SELECT COALESCE(MAX(live."count"), 0)::int AS "max"
-         FROM (SELECT count(*) AS "count"
-                 FROM "agent_credentials"
-                WHERE "issued_via" = 'OAUTH'
-                  AND "revoked_at" IS NULL
-                  AND "deleted_at" IS NULL
-                  AND ("expires_at" IS NULL OR "expires_at" > $1)
-                GROUP BY "organization_id", "agent_id") live`,
-      [now],
-    )) as { max: number }[];
-    return row.max;
   }
 }
