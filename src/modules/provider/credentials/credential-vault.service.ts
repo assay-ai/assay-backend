@@ -105,13 +105,17 @@ export class CredentialVaultService {
     }
   }
 
-  /** Deletes the binding's sets for origins not in `keepOrigins`, inside the caller's transaction. */
-  pruneExcept(
+  /**
+   * Deletes the binding's sets for origins not in `keepOrigins`, inside the
+   * caller's transaction. Returns what was removed (origin and header names,
+   * never values) so the caller can audit it.
+   */
+  async pruneExcept(
     manager: EntityManager,
     organizationId: string,
     bindingId: string,
     keepOrigins: readonly string[],
-  ): Promise<number> {
+  ): Promise<Array<{ origin: string; headerNames: string[] }>> {
     return this.credentials.pruneExcept(manager, organizationId, bindingId, keepOrigins);
   }
 }

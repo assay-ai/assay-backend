@@ -31,6 +31,7 @@ import {
 } from '../domain/classification';
 import { CredentialRedactor } from '../domain/egress/credential-redaction';
 import { UpstreamRequest, mapRequest } from '../domain/mapping';
+import { BindingAuthMode } from '../ports/tool.types';
 import { BindingInvocation, BindingInvokerPort } from '../ports/binding-invoker.port';
 import { RequestSignerService } from '../request-auth/request-signer.service';
 
@@ -120,6 +121,13 @@ export class EgressBindingInvoker implements BindingInvokerPort {
       const credentials = omit?.credentials
         ? []
         : await this.vault.headersFor(binding.providerId, binding.id, originOf(url));
+      if (needsApiKey(binding.authMode) && !omit?.credentials && credentials.length === 0) {
+        return platformFailure({
+          kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+          partialBody: null,
+          detail: CREDENTIALS_MISSING,
+        });
+      }
       redactor = new CredentialRedactor(credentials.map(({ value }) => value));
       headers = outboundHeaders(upstream.headers, credentials, callId, body !== undefined);
       stage = 'request signing failed';
@@ -177,6 +185,16 @@ export class EgressBindingInvoker implements BindingInvokerPort {
       return transportFailure(error);
     }
   }
+}
+
+/**
+ * The fixed detail when an API-key binding has no credentials for the request's
+ * origin. Without this the provider would answer 401 and be blamed for it.
+ */
+export const CREDENTIALS_MISSING = 'credentials missing for this address';
+
+function needsApiKey(authMode: BindingAuthMode | undefined): boolean {
+  return authMode === BindingAuthMode.API_KEY || authMode === BindingAuthMode.BOTH;
 }
 
 /** The fixed detail of the header-size platform fault. */

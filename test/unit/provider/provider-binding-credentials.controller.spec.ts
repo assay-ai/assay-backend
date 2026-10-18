@@ -2,6 +2,7 @@ import { ProviderBindingCredentialsController } from '@modules/provider/controll
 import { ProviderErrorCode, ProviderErrors } from '@modules/provider/errors/provider.errors';
 import { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
 import { BindingEditorService } from '@modules/provider/services/binding-editor.service';
+import { AuditLogWriter } from '@shared/audit';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
@@ -17,11 +18,13 @@ function build(
     endpoint?: string;
     publishedEndpoint?: string | null;
     mappingHeaders?: Record<string, unknown>;
+    status?: string;
   } = {},
 ) {
   const row = {
     id: BINDING,
     organizationId: ORG,
+    status: options.status ?? 'DRAFT',
     endpoint: options.endpoint ?? 'https://api.a.test/v1',
     requestMapping: { method: 'GET', headers: options.mappingHeaders },
   };
@@ -43,11 +46,13 @@ function build(
     put: jest.fn(async () => stored),
     remove: jest.fn(async () => undefined),
   };
+  const audit = { recordAfterCommit: jest.fn(async () => undefined) };
   const controller = new ProviderBindingCredentialsController(
     editor as unknown as BindingEditorService,
     vault as unknown as CredentialVaultService,
+    audit as unknown as AuditLogWriter,
   );
-  return { controller, editor, vault };
+  return { controller, editor, vault, audit };
 }
 
 const body = (origin: string, value = SECRET) => ({
@@ -147,6 +152,56 @@ describe('ProviderBindingCredentialsController', () => {
     const { controller, vault } = build();
     await controller.remove(SESSION, { id: BINDING }, { origin: 'https://api.a.test' });
     expect(vault.remove).toHaveBeenCalledWith(ORG, BINDING, 'https://api.a.test');
+  });
+
+  it('audits put and remove with origin and header names, never values', async () => {
+    const { controller, audit } = build();
+    await controller.put(SESSION, { id: BINDING }, body('https://api.a.test'));
+    await controller.remove(SESSION, { id: BINDING }, { origin: 'https://api.a.test' });
+    expect(audit.recordAfterCommit).toHaveBeenNthCalledWith(
+      1,
+      expect.objectContaining({
+        organizationId: ORG,
+        actor: { type: 'user', id: 'cred-1' },
+        action: 'binding_credentials.set',
+        resourceId: BINDING,
+        after: { origin: 'https://api.a.test', header_names: ['X-Provider-Key'] },
+      }),
+    );
+    expect(audit.recordAfterCommit).toHaveBeenNthCalledWith(
+      2,
+      expect.objectContaining({
+        action: 'binding_credentials.removed',
+        before: { origin: 'https://api.a.test', header_names: ['X-Provider-Key'] },
+      }),
+    );
+    expect(JSON.stringify(audit.recordAfterCommit.mock.calls)).not.toContain(SECRET);
+  });
+
+  describe('DELETE of the live origin', () => {
+    const live = {
+      status: 'ACTIVE',
+      endpoint: 'https://api.a.test/v1',
+      publishedEndpoint: 'https://api.a.test/v1',
+    };
+    it('is a 409 while the binding is ACTIVE and the origin is the published one', async () => {
+      const { controller, vault } = build(live);
+      await expectErrorCodeAsync(
+        () => controller.remove(SESSION, { id: BINDING }, { origin: 'https://api.a.test' }),
+        ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_LIVE,
+      );
+      expect(vault.remove).not.toHaveBeenCalled();
+    });
+    it('is allowed for another origin of an ACTIVE binding', async () => {
+      const { controller, vault } = build({ ...live, endpoint: 'https://api.new.test/v1' });
+      await controller.remove(SESSION, { id: BINDING }, { origin: 'https://api.new.test' });
+      expect(vault.remove).toHaveBeenCalled();
+    });
+    it.each(['DRAFT', 'PAUSED'])('is allowed while the binding is %s', async (status) => {
+      const { controller, vault } = build({ ...live, status });
+      await controller.remove(SESSION, { id: BINDING }, { origin: 'https://api.a.test' });
+      expect(vault.remove).toHaveBeenCalled();
+    });
   });
 
   it("another organization's binding is a 404 on every route, before any vault call", async () => {

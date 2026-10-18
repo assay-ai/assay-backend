@@ -126,7 +126,7 @@ describe('credential vault', () => {
     const pruned = await context.dataSource.transaction((manager) =>
       vault.pruneExcept(manager, organizationId, bindingId, [A]),
     );
-    expect(pruned).toBe(1);
+    expect(pruned).toEqual([{ origin: B, headerNames: headers.map((h) => h.name) }]);
     expect((await vault.list(organizationId, bindingId)).map((s) => s.origin)).toEqual([A]);
     await context.dataSource.transaction((manager) =>
       vault.pruneExcept(manager, organizationId, bindingId, []),

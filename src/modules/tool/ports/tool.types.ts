@@ -268,6 +268,14 @@ export interface ToolBinding {
   readonly status: BindingStatus;
 
   /**
+   * How the endpoint authenticates calls; absent reads as `NONE`. Not a
+   * versioned term, so a served binding carries the row's current value. The
+   * invoker refuses to dial an `API_KEY`/`BOTH` binding that has no credentials
+   * for the request's origin.
+   */
+  readonly authMode?: BindingAuthMode;
+
+  /**
    * The contract majors this binding serves (`^1`, `^1 || ^2`). Absent reads
    * as `^1`, the column default.
    */

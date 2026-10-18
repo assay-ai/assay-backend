@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
+import { AuditLogWriter } from '@shared/audit';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { PayoutGateVerdict, evaluatePayoutGate } from '@modules/tool/domain/routing/payout-gate';
 import {
@@ -12,7 +13,7 @@ import {
   evaluateStakeGateOnChain,
 } from '@modules/tool/domain/routing/stake-gate';
 import { MinimumStakeByChain, RoutingCandidate } from '@modules/tool/domain/routing/routing.types';
-import { BindingStatus } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus } from '@modules/tool/ports/tool.types';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import {
@@ -96,6 +97,8 @@ export class BindingPublishService {
     // Prunes credential sets whose origin the new revision no longer uses.
     // Optional only for hand-built harnesses that never reach `publish`.
     @Optional() private readonly vault?: CredentialVaultService,
+    // Records pruned credential sets (names only) in the publish transaction.
+    @Optional() private readonly audit?: AuditLogWriter,
   ) {}
 
   /** The publish checklist, read before the button is pressed. */
@@ -179,7 +182,20 @@ export class BindingPublishService {
 
       // The published endpoint is the draft's at this moment, so any credential
       // set for another origin can never be sent again: drop it with the stamp.
-      await this.vault?.pruneExcept(manager, organizationId, bindingId, [originOf(row.endpoint)]);
+      const pruned =
+        (await this.vault?.pruneExcept(manager, organizationId, bindingId, [
+          originOf(row.endpoint),
+        ])) ?? [];
+      for (const { origin, headerNames } of pruned) {
+        await this.audit?.record(manager, {
+          organizationId,
+          actor: { type: 'user', id: subject },
+          action: 'binding_credentials.pruned',
+          resourceType: 'tool_binding',
+          resourceId: bindingId,
+          before: { origin, header_names: headerNames },
+        });
+      }
 
       return updated;
     });
@@ -231,7 +247,18 @@ export class BindingPublishService {
       );
     }
 
+    const origin = originOf(row.endpoint);
+    const required =
+      row.authMode === BindingAuthMode.API_KEY || row.authMode === BindingAuthMode.BOTH;
+    // The draft endpoint's origin: it is what goes live. Skipped for other modes
+    // (and for hand-built harnesses without a vault) so no read is wasted.
+    const present =
+      required && this.vault
+        ? (await this.vault.list(organizationId, row.id)).some((set) => set.origin === origin)
+        : false;
+
     return evaluatePublishGate({
+      credentials: this.vault ? { required, origin, present } : undefined,
       mappingVersion: row.mappingVersion,
       latestRun,
       payoutByChain,

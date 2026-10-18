@@ -79,6 +79,12 @@ export enum PublishRequirement {
    * `evaluatePayoutGate`. `FREE` bindings pass.
    */
   PAYOUT_ACCOUNT = 'PAYOUT_ACCOUNT',
+  /**
+   * An API-key binding (`API_KEY` or `BOTH`) has a credential set stored for the
+   * origin of the endpoint about to go live. Asked only when the input carries
+   * {@link PublishGateInput.credentials}.
+   */
+  API_KEY_CREDENTIALS = 'API_KEY_CREDENTIALS',
   /** `stake >= minimumStake` **on every settlement chain**, by `evaluateStakeGate`. */
   STAKE_AT_MINIMUM_ON_EVERY_CHAIN = 'STAKE_AT_MINIMUM_ON_EVERY_CHAIN',
 }
@@ -140,12 +146,23 @@ export interface PublishGateInput {
    * {@link latestRun} is not read.
    */
   readonly runsByMajor?: ReadonlyMap<number, PublishGateTestRun | null>;
+  /**
+   * The credential facts for an API-key binding: whether the auth mode needs a
+   * key, the origin the endpoint will call, and whether a set is stored for it.
+   * Absent, the requirement is not asked.
+   */
+  readonly credentials?: {
+    readonly required: boolean;
+    readonly origin: string;
+    readonly present: boolean;
+  };
 }
 
 export function evaluatePublishGate(input: PublishGateInput): PublishCheck {
   const requirements = [
     ...perMajor(input, testerRunRequirement, PublishRequirement.TESTER_RUN),
     ...perMajor(input, testerPassedRequirement, PublishRequirement.TESTER_PASSED),
+    ...credentialRequirements(input),
     ...payoutRequirements(input),
     ...stakeRequirements(input),
   ];
@@ -241,6 +258,31 @@ function testerPassedRequirement(input: PublishGateInput): PublishRequirementRes
   }
 
   return { requirement: PublishRequirement.TESTER_PASSED, met: true, code: null, detail: null };
+}
+
+/**
+ * An API-key binding cannot go live without its key: every call would reach the
+ * provider unauthenticated, or, with the runtime guard, be refused as a platform
+ * fault. The detail tells the provider what to do.
+ */
+function credentialRequirements(input: PublishGateInput): readonly PublishRequirementResult[] {
+  const { credentials } = input;
+  if (!credentials) return [];
+  if (!credentials.required || credentials.present) {
+    return [
+      { requirement: PublishRequirement.API_KEY_CREDENTIALS, met: true, code: null, detail: null },
+    ];
+  }
+  return [
+    {
+      requirement: PublishRequirement.API_KEY_CREDENTIALS,
+      met: false,
+      code: 'credentials_missing_for_origin',
+      detail:
+        `No API key is stored for ${credentials.origin}. Add it under Authentication → ` +
+        `API key, or set the authentication mode to none or signature only.`,
+    },
+  ];
 }
 
 /**

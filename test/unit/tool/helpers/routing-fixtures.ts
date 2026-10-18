@@ -694,10 +694,18 @@ export const NO_CREDENTIALS = {
   headersFor: async () => [],
 } as unknown as CredentialVaultService;
 
+/** A vault that holds one API key for every binding and origin. */
+export const ONE_CREDENTIAL = {
+  headersFor: async () => [{ name: 'X-Provider-Key', value: 'test-key' }],
+} as unknown as CredentialVaultService;
+
 /** A signer with no keys, as in a non-production deployment that configured none. */
 export const UNSIGNED = { sign: async () => ({}) } as unknown as RequestSignerService;
 
 /** The production invoker with no credentials and no signature. */
-export function plainInvoker(http: EgressHttpClient): EgressBindingInvoker {
-  return new EgressBindingInvoker(http, NO_CREDENTIALS, UNSIGNED);
+export function plainInvoker(
+  http: EgressHttpClient,
+  vault: CredentialVaultService = NO_CREDENTIALS,
+): EgressBindingInvoker {
+  return new EgressBindingInvoker(http, vault, UNSIGNED);
 }

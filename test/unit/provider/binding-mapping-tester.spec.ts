@@ -18,7 +18,7 @@ import { MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
 import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
-import { plainInvoker } from '../tool/helpers/routing-fixtures';
+import { ONE_CREDENTIAL, plainInvoker } from '../tool/helpers/routing-fixtures';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 import { StageStatus, VerificationStage } from '@modules/verification/domain/stage';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
@@ -152,6 +152,9 @@ function buildTester(
         family: 4,
         port: target.port === 80 ? port : target.port,
       })),
+      // The default row is an API-key binding: without a stored key the invoker
+      // refuses to dial (platform fault), which is not what these cases probe.
+      ONE_CREDENTIAL,
     );
 
   return {
