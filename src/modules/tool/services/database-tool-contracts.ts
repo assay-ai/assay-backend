@@ -183,11 +183,24 @@ export function buildTools(
       status: row.status as ToolStatus,
       currentVersion: row.currentVersion,
       versions: served,
+      replacementToolId: row.replacementToolId ?? null,
       replacementToolName: row.replacementToolId
         ? (names.get(row.replacementToolId) ?? null)
         : null,
     };
     tools.set(row.id, toolAtVersion(base, current));
+  }
+  // The replacement's served version, once every tool is built.
+  for (const [id, tool] of tools) {
+    const replacement = tool.replacementToolId ? tools.get(tool.replacementToolId) : undefined;
+    if (!replacement?.version) continue;
+    tools.set(id, {
+      ...tool,
+      replacementToolVersion: {
+        major: replacement.version.major,
+        semver: replacement.version.semver,
+      },
+    });
   }
   return tools;
 }

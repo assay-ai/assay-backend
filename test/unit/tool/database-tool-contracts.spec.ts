@@ -84,6 +84,8 @@ describe('buildTools', () => {
       [versionRow({}), versionRow({ toolId: 'r' })],
     );
     expect(tools.get('t1')?.replacementToolName).toBe('get_replacement');
+    expect(tools.get('t1')?.replacementToolId).toBe('r');
+    expect(tools.get('t1')?.replacementToolVersion).toEqual({ major: 1, semver: '1.0.0' });
     expect(tools.has('d')).toBe(false);
   });
 });

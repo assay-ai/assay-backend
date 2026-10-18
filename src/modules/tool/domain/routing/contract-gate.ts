@@ -4,6 +4,7 @@ import {
   hasOutputField,
   usedOptionalInputs,
 } from '../contract/contract-versions';
+import { bindingRange } from '../contract/version-range';
 import { ToolContractVersion } from '../../ports/tool.types';
 import { RoutingCandidate } from './routing.types';
 import { RuleRejection, RuleRejectionReason, RuleSource } from './rules';
@@ -59,6 +60,9 @@ function evaluateContract(
       detail:
         `binding ${binding.id} serves ${binding.toolVersionRange ?? '^1'}, ` +
         `not contract v${version.semver}`,
+      servedMajors: bindingRange(binding.toolVersionRange),
+      requestedMajor: version.major,
+      requestedRange: request.range ? [...request.range] : null,
     };
   }
 

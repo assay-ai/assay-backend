@@ -207,6 +207,15 @@ describe('binding contract ranges and declared fields (T3)', () => {
       check.requirements.find((r) => r.requirement === PublishRequirement.TESTER_RUN && !r.met)
         ?.detail,
     ).toContain('Contract v1:');
+    // One row per major in the range, each with its own result.
+    expect(
+      check.requirements
+        .filter((r) => r.requirement === PublishRequirement.TESTER_RUN)
+        .map((r) => [r.major, r.met]),
+    ).toEqual([
+      [1, false],
+      [2, true],
+    ]);
 
     await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'x' }, 1);
     check = await context.publisher.check(context.organizationId, binding.id);

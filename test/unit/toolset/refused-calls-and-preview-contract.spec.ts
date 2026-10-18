@@ -47,6 +47,67 @@ describe('refused calls — provider names', () => {
       expect.objectContaining({ providerId: P2, providerName: null }),
     ]);
     expect(lookups).toEqual([[P1, P2]]);
+    expect(dto.details).toEqual({});
+  });
+
+  const serviceFor = (record: Record<string, unknown>) =>
+    new RefusedCallsService(
+      { findOneBy: async () => record } as never,
+      { findDisplayNames: async () => new Map() } as never,
+    );
+
+  it('CONTRACT_VERSION_RETIRED: details.replacement names the tool id, name and version', async () => {
+    const dto = await serviceFor({
+      ...row,
+      refusalCode: 'CONTRACT_VERSION_RETIRED',
+      refusalLayer: 'SERVER',
+      refusalDetail: {
+        toolId: 't1',
+        name: 'get_weather',
+        replacement: 'get_weather@2 (v2.0.0)',
+        replacementTool: { toolId: 't1', name: 'get_weather', major: 2, semver: '2.0.0' },
+      },
+    }).get(ORG, 'c1');
+    expect(dto.details).toEqual({
+      replacement: {
+        toolId: 't1',
+        name: 'get_weather',
+        major: 2,
+        semver: '2.0.0',
+        label: 'get_weather@2 (v2.0.0)',
+      },
+    });
+  });
+
+  it('CONTRACT_VERSION_RETIRED with nothing to replace it: details.replacement is null', async () => {
+    const dto = await serviceFor({
+      ...row,
+      refusalCode: 'CONTRACT_VERSION_RETIRED',
+      refusalDetail: {
+        toolId: 't1',
+        name: 'get_weather',
+        replacement: null,
+        replacementTool: null,
+      },
+    }).get(ORG, 'c1');
+    expect(dto.details).toEqual({ replacement: null });
+  });
+
+  it('CONTRACT_VERSION_MISMATCH: each provider carries servedMajors and requestedRange', async () => {
+    const mismatch = {
+      providerId: P1,
+      reason: 'CONTRACT_VERSION_MISMATCH',
+      source: 'MIGRATION',
+      detail: 'binding b1 serves ^1, not contract v2.0.0',
+      servedMajors: [1],
+      requestedMajor: 2,
+      requestedRange: [2],
+    };
+    const dto = await serviceFor({ ...row, refusalDetail: { providers: [mismatch] } }).get(
+      ORG,
+      'c1',
+    );
+    expect(dto.providers).toEqual([{ ...mismatch, providerName: null }]);
   });
 });
 

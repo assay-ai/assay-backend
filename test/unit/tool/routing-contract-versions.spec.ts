@@ -1,5 +1,6 @@
 import { ProviderTier } from '@modules/provider/ports/provider.types';
 import { ContractRequest } from '@modules/tool/domain/contract/contract-versions';
+import { applyContractGate } from '@modules/tool/domain/routing/contract-gate';
 import {
   OnEmpty,
   ProviderMode,
@@ -201,7 +202,12 @@ describe('contract version selection', () => {
 
     await expect(route(router, { contract: contract({ range: [1] }) })).rejects.toMatchObject({
       errorCode: ToolAccessErrorCode.CONTRACT_VERSION_RETIRED,
-      context: { details: { replacement: 'Search the web@2 (v2.0.0)' } },
+      context: {
+        details: {
+          replacement: 'Search the web@2 (v2.0.0)',
+          replacementTool: { toolId: TOOL_ID, name: 'Search the web', major: 2, semver: '2.0.0' },
+        },
+      },
     });
     const quote = await router.quote(TOOL_ID, {
       ...ROUTING_CONTEXT,
@@ -237,6 +243,29 @@ describe('contract version selection', () => {
 });
 
 describe('the contract hard constraints', () => {
+  it('CONTRACT_VERSION_MISMATCH carries the served majors and the requested range', () => {
+    const candidate = { binding: { id: 'b1', providerId: 'p1', toolVersionRange: '^1' } };
+    const { kept, rejected } = applyContractGate([candidate as never], V2_0, {
+      range: [2, 3],
+      requireOutputFields: [],
+    });
+    expect(kept).toEqual([]);
+    expect(rejected).toEqual([
+      expect.objectContaining({
+        reason: RuleRejectionReason.CONTRACT_VERSION_MISMATCH,
+        source: RuleSource.MIGRATION,
+        servedMajors: [1],
+        requestedMajor: 2,
+        requestedRange: [2, 3],
+      }),
+    ]);
+    const unconstrained = applyContractGate([candidate as never], V2_0, {
+      range: null,
+      requireOutputFields: [],
+    });
+    expect(unconstrained.rejected[0]).toMatchObject({ requestedRange: null });
+  });
+
   it('routes a required optional output only to bindings that declare it (MISSING_OUTPUT_FIELD)', async () => {
     const { router } = harness({});
     const routed = await route(router, {

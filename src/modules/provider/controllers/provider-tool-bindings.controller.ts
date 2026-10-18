@@ -150,7 +150,11 @@ export class ProviderToolBindingsController {
   }
 
   @Get(':id/publish-check')
-  @ApiOperation({ summary: 'Which publish conditions are met, and what is missing' })
+  @ApiOperation({
+    summary:
+      'Which publish conditions are met, and what is missing; the tester conditions one row ' +
+      'per contract major in the range (`major`)',
+  })
   @ApiResponse({ status: 200, type: PublishCheckDto })
   async publishCheck(
     @CurrentSession() session: McpSession,

@@ -16,6 +16,7 @@ import {
   mapServedResponse,
   parseSemver,
   parseVersionRange,
+  contractReplacementOf,
   replacementOf,
   summaryOf,
   usedOptionalInputs,
@@ -401,9 +402,26 @@ describe('candidate versions (§7.3)', () => {
       replacement: 'get_weather@2 (v2.0.0)',
     });
     expect(deprecationOf(v200, null)).toBeNull();
-    expect(replacementOf({ ...t, replacementToolName: 'get_weather_v2' }, deprecated)).toBe(
-      'get_weather_v2',
-    );
+    const named = {
+      ...t,
+      replacementToolId: 't2',
+      replacementToolName: 'get_weather_v2',
+      replacementToolVersion: { major: 1, semver: '1.2.0' },
+    };
+    expect(replacementOf(named, deprecated)).toBe('get_weather_v2');
+    expect(contractReplacementOf(named, deprecated)).toEqual({
+      toolId: 't2',
+      name: 'get_weather_v2',
+      major: 1,
+      semver: '1.2.0',
+    });
+    expect(contractReplacementOf(t, deprecated)).toEqual({
+      toolId: t.id,
+      name: 'get_weather',
+      major: 2,
+      semver: '2.0.0',
+    });
+    expect(contractReplacementOf(t, v200)).toBeNull();
   });
 });
 

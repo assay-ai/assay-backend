@@ -74,7 +74,7 @@ export class CatalogueController {
   @ApiOperation({
     summary:
       'Every tool at least one provider serves, with how many serve it, the market floor and ' +
-      'the price a call would actually be held for.',
+      'the price a call would actually be held for; deprecated majors name their replacement.',
   })
   @ApiResponse({ status: 200, type: CatalogueToolListDto })
   async listTools(): Promise<CatalogueToolListDto> {
@@ -85,7 +85,8 @@ export class CatalogueController {
   @ApiOperation({
     summary:
       'A tool’s published contract versions, newest first: schemas, optional fields, ' +
-      'examples, status, sunset and changelog',
+      'examples, status, sunset and changelog; and per listed provider, the majors and ' +
+      'optional fields it declares',
   })
   @ApiResponse({ status: 200, type: ToolVersionListDto })
   @ApiResponse({ status: 404, description: 'TOOL_NOT_FOUND' })

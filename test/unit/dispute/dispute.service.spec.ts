@@ -192,30 +192,21 @@ describe('DisputeService.getById', () => {
 });
 
 describe('DisputeService.create', () => {
-  it('opens a dispute, OPEN, with no acknowledgedAt/deadlineAt yet', async () => {
+  it("refuses a buyer's dispute over its own verdict: that is POST /call-disputes (G3.B1)", async () => {
     const { service, verificationRecords } = build();
     (verificationRecords.findOneBy as jest.Mock).mockResolvedValue({ id: VERDICT_ID });
 
-    const dispute = await service.create(ORG, SESSION, createBody());
-
-    expect(dispute.state).toBe(DisputeState.OPEN);
-    expect(dispute.acknowledgedAt).toBeNull();
-    expect(dispute.deadlineAt).toBeNull();
-    expect(dispute.openedBy).toBe('agent-1');
-    // The payer path — unchanged by provider-filed disputes — never stamps a provider.
-    expect(dispute.providerId).toBeNull();
-  });
-
-  it("validates a VERDICT subject exists within the caller's organization before opening", async () => {
-    const { service, verificationRecords } = build();
-    (verificationRecords.findOneBy as jest.Mock).mockResolvedValue({ id: VERDICT_ID });
-
-    await service.create(
-      ORG,
-      SESSION,
-      createBody({ subjectType: DisputeSubjectType.VERDICT, subjectId: VERDICT_ID }),
-    );
-
+    await expect(
+      service.create(
+        ORG,
+        SESSION,
+        createBody({ subjectType: DisputeSubjectType.VERDICT, subjectId: VERDICT_ID }),
+      ),
+    ).rejects.toMatchObject({
+      errorCode: DisputeErrorCode.DISPUTE_USE_CALL_DISPUTES,
+      statusCode: 409,
+    });
+    // Still looked up within the caller's own organization first.
     expect(verificationRecords.findOneBy).toHaveBeenCalledWith({
       organizationId: ORG,
       id: VERDICT_ID,
@@ -238,16 +229,17 @@ describe('DisputeService.create', () => {
     });
   });
 
-  it('validates a PAYMENT_INTENT subject the same way', async () => {
+  it("refuses a buyer's dispute over its own payment intent the same way", async () => {
     const { service, paymentIntents } = build();
     (paymentIntents.findOneBy as jest.Mock).mockResolvedValue({ id: INTENT_ID });
 
-    await service.create(
-      ORG,
-      SESSION,
-      createBody({ subjectType: DisputeSubjectType.PAYMENT_INTENT, subjectId: INTENT_ID }),
-    );
-
+    await expect(
+      service.create(
+        ORG,
+        SESSION,
+        createBody({ subjectType: DisputeSubjectType.PAYMENT_INTENT, subjectId: INTENT_ID }),
+      ),
+    ).rejects.toMatchObject({ errorCode: DisputeErrorCode.DISPUTE_USE_CALL_DISPUTES });
     expect(paymentIntents.findOneBy).toHaveBeenCalledWith({ organizationId: ORG, id: INTENT_ID });
   });
 

@@ -188,4 +188,98 @@ export class DisputeEntity extends OrganizationScopedEntityWithoutSoftDelete {
   /** Required when the second objects: an objection must also record a reason. */
   @Column({ name: 'second_note', type: 'varchar', length: 2048, nullable: true })
   secondNote: string | null;
+
+  // ── Buyer call disputes (G3.B1) ───────────────────────────────────────────
+  //
+  // A buyer disputing one paid call. Set together at filing (`chk_disputes_
+  // call_is_whole`); every column below is null on every other kind of row.
+
+  /** The disputed call. Non-null exactly on a buyer call dispute. */
+  @Column({ name: 'intent_id', type: 'uuid', nullable: true })
+  intentId: string | null;
+
+  /** The call's verdict, when it has one. */
+  @Column({ name: 'verdict_id', type: 'uuid', nullable: true })
+  verdictId: string | null;
+
+  @Column({ name: 'binding_id', type: 'uuid', nullable: true })
+  bindingId: string | null;
+
+  @Column({ name: 'tool_id', type: 'varchar', length: 128, nullable: true })
+  toolId: string | null;
+
+  /**
+   * The provider the buyer disputes. Not `providerId`, which names a provider
+   * that FILED a dispute.
+   */
+  @Column({ name: 'respondent_provider_id', type: 'uuid', nullable: true })
+  respondentProviderId: string | null;
+
+  /**
+   * What the decision rests on, copied at filing: the call's input and output
+   * (while retention still kept them), the verdict, and the evidence pack's
+   * digests. The evidence bodies are scrubbed after their retention window, so
+   * a decision must not depend on reading them later.
+   */
+  @Column({ name: 'evidence_snapshot', type: 'jsonb', nullable: true })
+  evidenceSnapshot: Record<string, unknown> | null;
+
+  /** The provider's one reply, written before the decision. */
+  @Column({ name: 'provider_response', type: 'varchar', length: 1000, nullable: true })
+  providerResponse: string | null;
+
+  @Column({ name: 'provider_responded_at', type: 'timestamptz', nullable: true })
+  providerRespondedAt: Date | null;
+
+  /** `UNCOLLECTED_EARNINGS` | `NONE`. Set on an upheld decision. */
+  @Column({ name: 'refund_source', type: 'varchar', length: 24, nullable: true })
+  refundSource: string | null;
+
+  /** `PENDING` | `REFUNDED` | `NOT_CHARGED` | `NOT_REFUNDABLE`. */
+  @Column({ name: 'refund_state', type: 'varchar', length: 24, nullable: true })
+  refundState: string | null;
+
+  /** What the upheld decision owes the buyer, in minor units of `assetId`. */
+  @Column({ name: 'refund_amount', type: 'numeric', precision: 78, scale: 0, nullable: true })
+  refundAmount: string | null;
+
+  /**
+   * Filed inside the dispute hold: the voucher was set aside before it could be
+   * redeemed, so an upheld decision refunds in full. After the hold a dispute is
+   * a quality signal, refunded only if the money is uncollected for another reason.
+   */
+  @Column({ name: 'refund_guaranteed', type: 'boolean', default: false })
+  refundGuaranteed: boolean;
+
+  /** When the snapshot's request and response were deleted (retention). */
+  @Column({ name: 'evidence_scrubbed_at', type: 'timestamptz', nullable: true })
+  evidenceScrubbedAt: Date | null;
+
+  /** The provider did not reply within 24 hours (`CallDisputeSlaService`). */
+  @Column({ name: 'provider_silent_at', type: 'timestamptz', nullable: true })
+  providerSilentAt: Date | null;
+
+  /** An operator was paged: 48 h with no decision. */
+  @Column({ name: 'paged_48h_at', type: 'timestamptz', nullable: true })
+  paged48hAt: Date | null;
+
+  /** 72 h with no decision and a provider reply: still held, paged. */
+  @Column({ name: 'paged_72h_at', type: 'timestamptz', nullable: true })
+  paged72hAt: Date | null;
+
+  /** 6 days with no decision: paged before the chain's 7-day timeout. */
+  @Column({ name: 'paged_6d_at', type: 'timestamptz', nullable: true })
+  paged6dAt: Date | null;
+
+  /** When the SLA's next step is due; null once nothing is left to do. */
+  @Column({ name: 'sla_due_at', type: 'timestamptz', nullable: true })
+  slaDueAt: Date | null;
+
+  /** An upheld refund still pending 5 days after `collectable_at`: paged. */
+  @Column({ name: 'refund_paged_5d_at', type: 'timestamptz', nullable: true })
+  refundPaged5dAt: Date | null;
+
+  /** ...and again at 6 days, a day before `refundHeld` closes. */
+  @Column({ name: 'refund_paged_6d_at', type: 'timestamptz', nullable: true })
+  refundPaged6dAt: Date | null;
 }

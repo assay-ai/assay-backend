@@ -1,4 +1,5 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Transform } from 'class-transformer';
 import {
   IsEnum,
   IsInt,
@@ -209,6 +210,19 @@ export class ListToolRequestQueueQueryDto extends ListQueryDto {
   @IsOptional()
   @IsEnum(SortDirection)
   override order: SortDirection = SortDirection.ASC;
+
+  @ApiPropertyOptional({
+    enum: ToolRequestStatus,
+    isArray: true,
+    description:
+      'Only requests in these states, e.g. `?status=ACKNOWLEDGED` to accept an acknowledged ' +
+      'one later, or `?status=OPEN&status=ACKNOWLEDGED`. Omitted: the unanswered queue ' +
+      '(nobody has responded yet).',
+  })
+  @IsOptional()
+  @Transform(({ value }) => (Array.isArray(value) ? value : String(value).split(',')))
+  @IsEnum(ToolRequestStatus, { each: true })
+  status?: ToolRequestStatus[];
 }
 
 /**
