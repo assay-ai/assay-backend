@@ -81,3 +81,26 @@ local raw = redis.call('GET', KEYS[1])
 if raw then redis.call('DEL', KEYS[1]) end
 return raw
 `;
+
+/**
+ * Delete the request only if it has been decided (approved or denied), in
+ * one step; an undecided request is left as it is. Returns 1 when it was
+ * deleted, 0 otherwise. The tombstone is kept, so the request can never be
+ * decided again either.
+ *
+ * Used by `continue` when the browser's cookie does not match: a decided
+ * request reaching `continue` without its binding means the person who
+ * decided it is not in the browser that started it, so no browser may finish
+ * it (spec §6.3.5, T8).
+ */
+export const DISCARD_IF_DECIDED_SCRIPT = `
+local raw = redis.call('GET', KEYS[1])
+if not raw then return 0 end
+local request = cjson.decode(raw)
+local approval = request['approval']
+if (approval ~= nil and approval ~= cjson.null) or request['denied'] == true then
+  redis.call('DEL', KEYS[1])
+  return 1
+end
+return 0
+`;
