@@ -347,6 +347,27 @@ describe('call disputes, against a real database', () => {
     ]);
   }
 
+  /** Runs `body` with the test's provider blocked on the platform, then lifts the block. */
+  async function withProviderBlocked(body: () => Promise<void>): Promise<void> {
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    try {
+      await body();
+    } finally {
+      await blocklist.applied({
+        kind: 'unblocked',
+        subjectKind: BlockSubjectKind.ORGANIZATION,
+        subjectKey: subjectKey(BlockSubjectKind.ORGANIZATION, provider) as string,
+      } as never);
+    }
+  }
+
+  /** Time passes: the row's held back-off ends. */
+  async function elapseBackOff(call: Call): Promise<void> {
+    await dataSource.query(`UPDATE payment_intents SET held_retry_at = NULL WHERE id = $1`, [
+      call.intentId,
+    ]);
+  }
+
   /** A call whose payment was collected (held, window over, the job ran). */
   async function seedCollected(options = {}): Promise<Call> {
     const call = await seedHeld(3_600_000, options);
@@ -765,8 +786,14 @@ describe('call disputes, against a real database', () => {
       expect(alerts.map((a) => a.name)).toContain('held_payment_past_timeout');
       expect(await chainStatus(call)).toBe(HeldStatus.HELD);
 
-      // Anyone collects it for the provider: booked once, and NOT_REFUNDABLE.
+      // Synced only, so backed off: it does not head the queue every minute.
+      expect(
+        (await payments.findOneBy({ organizationId: buyer, id: call.intentId }))?.heldRetryAt,
+      ).not.toBeNull();
+
+      // Anyone collects it for the provider: booked once (after the back-off), and NOT_REFUNDABLE.
       held.collectAsAnyone(keyOf(call));
+      await elapseBackOff(call);
       await collection.run();
       await sla.sweep();
       await assertCollected(call);
@@ -1060,6 +1087,7 @@ describe('call disputes, against a real database', () => {
       await collection.run();
       expect(await chainStatus(call)).toBe(HeldStatus.HELD);
       held.collectAsAnyone(keyOf(call));
+      await elapseBackOff(call);
 
       await collection.run();
       await sla.sweep();
@@ -1287,6 +1315,7 @@ describe('call disputes, against a real database', () => {
             exclude,
             7 * 86_400,
             86_400,
+            86_400,
             500,
           )
         ).map((row) => row.id);
@@ -1313,10 +1342,125 @@ describe('call disputes, against a real database', () => {
       await endWindow(call, 7 * 86_400_000 - 23 * 3_600_000);
       expect(await ids(byOrg)).toContain(call.intentId);
       expect(await near(byOrg)).toContain(call.intentId);
-      // Past the timeout: refundHeld is closed; still paged.
+      // Past the timeout: refundHeld is closed; still paged, for a day.
       await endWindow(call, 7 * 86_400_000 + 60_000);
       expect(await ids(byOrg)).not.toContain(call.intentId);
       expect(await near(byOrg)).toContain(call.intentId);
+      await endWindow(call, 8 * 86_400_000 + 60_000);
+      expect(await near(byOrg)).not.toContain(call.intentId);
+    });
+
+    it('the open dispute of a blocked provider’s refunded call reads refunded, and stays refunded when decided', async () => {
+      const upheld = await seedHeld();
+      const rejected = await seedHeld();
+      const first = await file(upheld);
+      const second = await file(rejected);
+      await withProviderBlocked(async () => {
+        await collection.run();
+      });
+
+      for (const id of [first.id, second.id]) {
+        expect(await disputes.requireAny(id)).toMatchObject({
+          state: 'OPEN',
+          refundSource: 'UNCOLLECTED_EARNINGS',
+          refundState: 'REFUNDED',
+          refundAmount: PRICE.toString(),
+        });
+      }
+      expect(await upholdAndRefund(first.id)).toMatchObject({
+        state: 'UPHELD',
+        refundState: 'REFUNDED',
+      });
+      await decide(second.id, CallDisputeDecision.REJECT);
+      expect(await disputes.requireAny(second.id)).toMatchObject({
+        state: 'REJECTED',
+        refundState: 'REFUNDED',
+      });
+      // Refunded once each: nothing moved twice.
+      expect(sentFor('refund')).toHaveLength(1);
+      expect(await journalTypes(upheld.intentId)).toEqual(REFUNDED);
+      expect(await journalTypes(rejected.intentId)).toEqual(REFUNDED);
+      await assertBooksBalance();
+    });
+
+    it('a chain refund nothing explains any more (the block was lifted) is still booked', async () => {
+      const call = await seedHeld();
+      await dataSource.query(
+        `UPDATE payment_intents SET redemption_last_error = 'ProviderBlocked' WHERE id = $1`,
+        [call.intentId],
+      );
+      // The refund landed; the block was lifted before the booking.
+      await held.refund(ASSET, [keyOf(call)]);
+      await endWindow(call);
+
+      await collection.run();
+
+      await assertRefunded(call);
+      expect((await intentRow(call.intentId)).redemption_last_error).toBe(
+        'provider_forfeit:ProviderBlocked',
+      );
+    });
+
+    it('past the timeout: rows that are never sent leave the collect queue, and synced ones back off', async () => {
+      const undisputed = await seedHeld();
+      const disputed = await seedHeld();
+      await file(disputed);
+      const blocked = await seedHeld();
+      for (const call of [undisputed, disputed, blocked]) {
+        await endWindow(call, 7 * 86_400_000 + 60_000);
+      }
+      // Another provider's call, and that provider blocked.
+      const other = randomUUID();
+      await dataSource.query(`UPDATE payment_intents SET provider_id = $2 WHERE id = $1`, [
+        blocked.intentId,
+        other,
+      ]);
+      const exclude = { organizationIds: [other], walletKeys: [], chainAccounts: [] };
+      const none = { organizationIds: [], walletKeys: [], chainAccounts: [] };
+      const timedOut = async (e: typeof none) =>
+        (await payments.findTimedOutCollectable('RAIL_B_VOUCHER', e, 7 * 86_400 - 900, 500)).map(
+          (row) => row.id,
+        );
+      const toSync = async (e: typeof none) =>
+        (await payments.findHeldPastTimeout('RAIL_B_VOUCHER', e, 7 * 86_400, 500)).map(
+          (row) => row.id,
+        );
+      const collectable = async () =>
+        (await payments.findCollectable('RAIL_B_VOUCHER', 500, none, 7 * 86_400 - 900)).map(
+          (row) => row.id,
+        );
+
+      // Unblocked: the undisputed one is collected singly, the disputed one synced.
+      expect(await timedOut(none)).toEqual(
+        expect.arrayContaining([undisputed.intentId, blocked.intentId]),
+      );
+      expect(await timedOut(none)).not.toContain(disputed.intentId);
+      expect(await toSync(none)).toContain(disputed.intentId);
+      expect(await toSync(none)).not.toContain(undisputed.intentId);
+      // Never in the batched queue past the timeout.
+      expect(await collectable()).not.toEqual(expect.arrayContaining([undisputed.intentId]));
+      // A blocked provider's: out of the collect queue, into the sync one.
+      expect(await timedOut(exclude)).not.toContain(blocked.intentId);
+      expect(await toSync(exclude)).toEqual(
+        expect.arrayContaining([disputed.intentId, blocked.intentId]),
+      );
+
+      addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: other });
+      try {
+        await collection.run();
+      } finally {
+        await blocklist.applied({
+          kind: 'unblocked',
+          subjectKind: BlockSubjectKind.ORGANIZATION,
+          subjectKey: other,
+        } as never);
+      }
+      // Synced and still held: backed off, so they leave the head of the queue.
+      expect(await toSync(exclude)).not.toEqual(expect.arrayContaining([disputed.intentId]));
+      expect(await toSync(exclude)).not.toEqual(expect.arrayContaining([blocked.intentId]));
+      expect(await chainStatus(blocked)).toBe(HeldStatus.HELD);
+      expect(await chainStatus(disputed)).toBe(HeldStatus.HELD);
+      await assertCollected(undisputed);
     });
 
     it('a held row whose record reads as nothing backs off', async () => {
@@ -1394,6 +1538,22 @@ describe('call disputes, against a real database', () => {
         [call.intentId],
       )) as { chain_tx_ref: string }[];
       expect(credit.chain_tx_ref).toBe('legacy:pooled-vault-no-chain-transfer');
+    });
+
+    it('rail A: a blocked provider’s withheld credit is released to the buyer, never credited', async () => {
+      const call = await seedRailA();
+      await withProviderBlocked(async () => {
+        await collection.run();
+        await endWindow(call);
+        await collection.run();
+      });
+
+      expect(sentFor('refund')).toEqual([]);
+      await assertRefunded(call);
+      expect(await intentRow(call.intentId)).toMatchObject({
+        held_status: 'REFUNDED',
+        redemption_last_error: 'provider_forfeit:ProviderBlocked',
+      });
     });
 
     it('an upheld dispute in the window refunds the buyer from the uncredited amount', async () => {

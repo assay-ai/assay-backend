@@ -40,18 +40,32 @@ const MAX_REFUND_BATCHES_PER_ASSET = 4;
 export const TIMEOUT_RACE_MARGIN_SECONDS = 15 * 60;
 /** A blocked provider's held payment still unrefunded this close to the timeout is paged. */
 export const BLOCKED_REFUND_WARN_SECONDS = 24 * 3600;
+/** …and for this long after it (then the record is only synced), once per window. */
+export const BLOCKED_PAGE_PAST_SECONDS = 24 * 3600;
 
 export const HELD_PAST_TIMEOUT_ALERT = 'held_payment_past_timeout';
 export const BLOCKED_HELD_UNREFUNDED_ALERT = 'held_payment_blocked_provider_unrefunded';
 
+/** The cause booked for a refund nothing else explains: only the redeemer can refund. */
+export const REFUNDED_BY_REDEEMER_CAUSE = 'RefundedByRedeemer';
+const PROVIDER_BLOCK_CAUSES: ReadonlySet<string> = new Set([
+  'ProviderBlocked',
+  'PayeeBlocked',
+  'PayeeBlockedOnChain',
+]);
+
 type HeldMove = 'collect' | 'refund';
 
-/** The provider-side blocks of one pass: the platform blocklist and the chains' own. */
-interface ProviderBlocks {
+/** One pass: the provider-side blocks it read at its start, and what it refunded. */
+interface Pass {
   /** For the queries: organizations, wallet keys and on-chain accounts of every held chain. */
   readonly exclude: RedemptionExclusions;
   /** CAIP-10 accounts the on-chain blocklists refuse, lower-case. */
   readonly chainAccounts: ReadonlySet<string>;
+  /** Intents whose refund landed or was booked this pass: not paged on a lagging read. */
+  readonly refunded: Set<string>;
+  /** The cause recorded on an intent just before its refund was sent. */
+  readonly causes: Map<string, string>;
 }
 
 /**
@@ -77,20 +91,28 @@ interface ProviderBlocks {
  *
  * From `collectableAt + HELD_TIMEOUT_SECONDS` anyone may collect a record, so
  * a stranger can collect one of a batch first and revert the whole atomic
- * batch. Such records (from {@link TIMEOUT_RACE_MARGIN_SECONDS} before) are
- * sent singly, never batched; a single collect that fails is answered by
- * reading `held()` — a record already `COLLECTED` or `REFUNDED` is booked, not
- * retried.
+ * batch. Such records (from {@link TIMEOUT_RACE_MARGIN_SECONDS} before) have
+ * their own queue (`findTimedOutCollectable`) and are sent singly, never
+ * batched; a single collect that fails is answered by reading `held()` — a
+ * record already `COLLECTED` or `REFUNDED` is booked, not retried. Records
+ * past the timeout that are never sent (disputed, or a blocked provider's) are
+ * only synced, and backed off after each read, so they never starve the rest.
  *
  * ## A blocked provider: refunded at once, never collected
  *
  * When the platform blocks a provider — an operator's account block (`A-9`) on
  * its organization or its payout wallet, or the payout address on the chain's
  * own blocklist — every payment of it still held is refunded to the buyer on
- * the next pass (`refundHeldBatch`, chunked; the provider forfeits, as at
- * redemption), and none is ever collected for it. One still unrefunded within
- * {@link BLOCKED_REFUND_WARN_SECONDS} of the timeout is paged: after it the
- * refund is closed for good.
+ * the next pass: rail B with `refundHeldBatch` (chunked), rail A by releasing
+ * the withheld credit; the provider forfeits, as at redemption. None is ever
+ * collected for it: the block is checked again just before every send. One
+ * still unrefunded within {@link BLOCKED_REFUND_WARN_SECONDS} of the timeout is
+ * paged: after it the refund is closed for good.
+ *
+ * Only the redeemer can refund, so a chain `REFUNDED` is always this backend's
+ * doing: unless an upheld dispute explains it, it is booked as the provider's
+ * forfeit — under the cause recorded before the send, or
+ * {@link REFUNDED_BY_REDEEMER_CAUSE} — even if the block was lifted meanwhile.
  */
 @Injectable()
 export class HeldCollectionService {
@@ -111,13 +133,21 @@ export class HeldCollectionService {
   async run(): Promise<number> {
     let booked = 0;
     const exclusions = this.exclusions();
+    const pass = await this.startPass(exclusions);
 
+    // Rail A, a blocked provider's withheld credits first: released to the buyer.
+    try {
+      await this.refundBlockedRailA(pass);
+    } catch (error) {
+      this.logger.error(`Releasing blocked providers' rail-A credits threw: ${describe(error)}`);
+    }
     // Rail A: the ledger only. One bad row must not stop the rest, or rail B.
     for (const row of await this.payments.findCollectable(
       PaymentRail.RAIL_A_PER_CALL,
       RAIL_A_BATCH,
       exclusions,
     )) {
+      if (this.providerBlockCause(row, pass)) continue;
       try {
         await this.intents.bookHeldCollected(row.organizationId, row.id, null);
         booked += 1;
@@ -127,30 +157,28 @@ export class HeldCollectionService {
     }
     if (!this.held) return booked;
 
-    const blocks = await this.providerBlocks(exclusions);
     // Refunds first: a blocked provider's payments leave the hold before
     // anything else is sent on the shared key.
     try {
-      await this.refundBlocked(blocks);
+      await this.refundBlocked(pass);
     } catch (error) {
       this.logger.error(`Refunding blocked providers' held payments threw: ${describe(error)}`);
     }
 
-    // Past (or about to pass) the timeout: `passTimeout`, one by one.
+    // Before the timeout (less the race margin): batched. After it: `passTimeout`.
     booked += await this.collectRailB(
-      (
-        await this.payments.findCollectable(
-          PaymentRail.RAIL_B_VOUCHER,
-          MAX_HELD_BATCH * 4,
-          exclusions,
-        )
-      ).filter((row) => !nearTimeout(row.collectableAt)),
-      blocks,
+      await this.payments.findCollectable(
+        PaymentRail.RAIL_B_VOUCHER,
+        MAX_HELD_BATCH * 4,
+        exclusions,
+        HELD_TIMEOUT_SECONDS - TIMEOUT_RACE_MARGIN_SECONDS,
+      ),
+      pass,
     );
-    booked += await this.passTimeout(blocks);
+    booked += await this.passTimeout(pass);
 
     try {
-      await this.pageBlockedNearTimeout(blocks);
+      await this.pageBlockedNearTimeout(pass);
     } catch (error) {
       this.logger.error(`Paging blocked providers' held payments threw: ${describe(error)}`);
     }
@@ -158,89 +186,79 @@ export class HeldCollectionService {
   }
 
   /**
-   * Past the chain's timeout: an undisputed (or rejected) payment is collected
-   * for the provider, singly; a disputed one, or a blocked provider's, is only
-   * synced — booked if someone collected (or the refund landed) — and paged
-   * while still held.
+   * Past (or about to pass) the chain's timeout: an undisputed (or rejected)
+   * payment is collected for the provider, singly; a disputed one, or a blocked
+   * provider's, is only synced — booked if someone collected it (or the refund
+   * landed) — paged while a dispute still holds it, and backed off.
    */
-  private async passTimeout(blocks: ProviderBlocks): Promise<number> {
-    const rows = (
-      await this.payments.findHeldPastTimeout(
+  private async passTimeout(pass: Pass): Promise<number> {
+    let booked = await this.collectRailB(
+      await this.payments.findTimedOutCollectable(
+        PaymentRail.RAIL_B_VOUCHER,
+        pass.exclude,
         HELD_TIMEOUT_SECONDS - TIMEOUT_RACE_MARGIN_SECONDS,
         MAX_HELD_BATCH,
-      )
-    ).filter((row) => row.rail === PaymentRail.RAIL_B_VOUCHER);
-    const disputed = (row: PaymentIntentEntity) =>
-      row.disputeOutcome === 'OPEN' || row.disputeOutcome === 'UPHELD';
-    let booked = 0;
-    const toCollect: PaymentIntentEntity[] = [];
-    for (const row of rows) {
+      ),
+      pass,
+    );
+    for (const row of await this.payments.findHeldPastTimeout(
+      PaymentRail.RAIL_B_VOUCHER,
+      pass.exclude,
+      HELD_TIMEOUT_SECONDS,
+      MAX_HELD_BATCH,
+    )) {
       try {
-        if (this.providerBlockCause(row, blocks)) {
-          // Never collected for a blocked provider. Before the timeout the
-          // refund pass has it; after it, only what the chain did is booked.
-          if (pastTimeout(row.collectableAt)) booked += await this.syncBlocked(row, blocks);
-        } else if (disputed(row)) {
-          if (pastTimeout(row.collectableAt)) booked += await this.sync(row, blocks);
-        } else {
-          toCollect.push(row);
-        }
+        booked += await this.sync(row, pass);
       } catch (error) {
         await this.backOff(row, error);
       }
     }
-    return booked + (await this.collectRailB(toCollect, blocks));
+    return booked;
   }
 
-  /** Books what the chain did to a disputed held payment; pages while it is still held. */
-  private async sync(row: PaymentIntentEntity, blocks: ProviderBlocks): Promise<number> {
+  /**
+   * Books what the chain did to a held payment past the timeout that is never
+   * sent; while still held it is paged (a dispute's) and backed off, so it
+   * does not sit at the head of the queue.
+   */
+  private async sync(row: PaymentIntentEntity, pass: Pass): Promise<number> {
     const held = this.held as HeldPaymentsPort;
     const record = await held.readHeld(row.assetId as AssetId, this.keyOf(row));
     if (record?.status === HeldStatus.COLLECTED || record?.status === HeldStatus.REFUNDED) {
-      return this.book(row, record.status, null, blocks);
+      return this.book(row, record.status, null, pass);
     }
-    await this.alerts.emit({
-      severity: AlertSeverity.CRITICAL,
-      name: HELD_PAST_TIMEOUT_ALERT,
-      summary:
-        `Intent ${row.id}: a disputed held payment is past the chain's 7-day timeout — ` +
-        `refundHeld is closed and anyone may collect it for the provider`,
-      details: { intentId: row.id, disputeOutcome: row.disputeOutcome ?? 'none' },
-      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
-      dedupeKey: row.id,
-    });
+    if (!this.providerBlockCause(row, pass)) {
+      await this.alerts.emit({
+        severity: AlertSeverity.CRITICAL,
+        name: HELD_PAST_TIMEOUT_ALERT,
+        summary:
+          `Intent ${row.id}: a disputed held payment is past the chain's 7-day timeout — ` +
+          `refundHeld is closed and anyone may collect it for the provider`,
+        details: { intentId: row.id, disputeOutcome: row.disputeOutcome ?? 'none' },
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: row.id,
+      });
+    }
+    await this.backOff(row, new Error('still held past the chain timeout; synced only'));
     return 0;
   }
 
-  /** Books what the chain did to a blocked provider's payment past the timeout (paged elsewhere). */
-  private async syncBlocked(row: PaymentIntentEntity, blocks: ProviderBlocks): Promise<number> {
-    const held = this.held as HeldPaymentsPort;
-    const record = await held.readHeld(row.assetId as AssetId, this.keyOf(row));
-    if (record?.status === HeldStatus.COLLECTED || record?.status === HeldStatus.REFUNDED) {
-      return this.book(row, record.status, null, blocks);
-    }
-    return 0;
-  }
-
-  private async collectRailB(
-    rows: readonly PaymentIntentEntity[],
-    blocks: ProviderBlocks,
-  ): Promise<number> {
+  private async collectRailB(rows: readonly PaymentIntentEntity[], pass: Pass): Promise<number> {
     if (!this.held || rows.length === 0) return 0;
     let booked = 0;
     for (const [asset, group] of byAsset(rows)) {
       const eligible = group.filter(
         (row) =>
-          !blocks.chainAccounts.has(row.agentAccount.toLowerCase()) &&
+          !pass.chainAccounts.has(row.agentAccount.toLowerCase()) &&
           // Never collected for a blocked provider: the refund pass has it.
-          this.providerBlockCause(row, blocks) === null,
+          this.providerBlockCause(row, pass) === null,
       );
       // One batch per asset per pass: the redeemer key is shared.
       booked += await this.moveChunk(
         'collect',
         asset as AssetId,
         eligible.slice(0, MAX_HELD_BATCH),
-        blocks,
+        pass,
       );
     }
     return booked;
@@ -252,10 +270,10 @@ export class HeldCollectionService {
    * of {@link MAX_HELD_BATCH} per asset per pass. Idempotent: only what the
    * chain still holds is sent, and the booking reads the chain back.
    */
-  private async refundBlocked(blocks: ProviderBlocks): Promise<void> {
+  private async refundBlocked(pass: Pass): Promise<void> {
     const rows = await this.payments.findHeldOfBlockedProviders(
       PaymentRail.RAIL_B_VOUCHER,
-      blocks.exclude,
+      pass.exclude,
       HELD_TIMEOUT_SECONDS,
       MAX_HELD_BATCH * MAX_REFUND_BATCHES_PER_ASSET,
     );
@@ -265,8 +283,26 @@ export class HeldCollectionService {
           'refund',
           asset as AssetId,
           group.slice(at, at + MAX_HELD_BATCH),
-          blocks,
+          pass,
         );
+      }
+    }
+  }
+
+  /** Rail A: a blocked provider's withheld credits, released to the buyer (no chain). */
+  private async refundBlockedRailA(pass: Pass): Promise<void> {
+    for (const row of await this.payments.findHeldOfBlockedProviders(
+      PaymentRail.RAIL_A_PER_CALL,
+      pass.exclude,
+      null,
+      RAIL_A_BATCH,
+    )) {
+      const cause = this.providerBlockCause(row, pass);
+      if (!cause) continue;
+      try {
+        await this.intents.bookBlockedProviderRefund(row.organizationId, row.id, cause, null);
+      } catch (error) {
+        await this.backOff(row, error);
       }
     }
   }
@@ -283,7 +319,7 @@ export class HeldCollectionService {
     move: HeldMove,
     asset: AssetId,
     rows: readonly PaymentIntentEntity[],
-    blocks: ProviderBlocks,
+    pass: Pass,
   ): Promise<number> {
     const held = this.held as HeldPaymentsPort;
     let booked = 0;
@@ -302,33 +338,64 @@ export class HeldCollectionService {
           // No record where one must be (a lagging node, a wrong deployment):
           // back off rather than read it again every minute.
           await this.backOff(row, new Error(`held() read ${record?.status ?? 'nothing'}`));
-        } else booked += await this.book(row, record.status, null, blocks);
+        } else booked += await this.book(row, record.status, null, pass);
       } catch (error) {
         await this.backOff(row, error);
       }
     }
 
     let singles = late.slice(0, MAX_TIMEOUT_SINGLES_PER_PASS);
-    if (batchable.length > 0) {
+    const toSend = await this.sendable(move, batchable, pass);
+    if (toSend.length > 0) {
       try {
         const { txRef } = await this.send(
           move,
           asset,
-          batchable.map((row) => this.keyOf(row)),
+          toSend.map((row) => this.keyOf(row)),
         );
-        for (const row of batchable) booked += await this.book(row, done(move), txRef, blocks);
+        for (const row of toSend) {
+          if (move === 'refund') pass.refunded.add(row.id);
+          booked += await this.book(row, done(move), txRef, pass);
+        }
       } catch (error) {
         // Refused in simulation, or failed: singly, a few per pass, each with
         // its own back-off, so one paused or blocked party cannot stop the rest.
         this.logger.warn(
-          `${move}HeldBatch of ${batchable.length} on ${asset} failed (${describe(error)}); ` +
+          `${move}HeldBatch of ${toSend.length} on ${asset} failed (${describe(error)}); ` +
             `sending up to ${MAX_SINGLES_PER_PASS} singly`,
         );
-        singles = [...batchable.slice(0, MAX_SINGLES_PER_PASS), ...singles];
+        singles = [...toSend.slice(0, MAX_SINGLES_PER_PASS), ...singles];
       }
     }
-    for (const row of singles) booked += await this.sendOne(move, asset, row, blocks);
+    for (const row of singles) booked += await this.sendOne(move, asset, row, pass);
     return booked;
+  }
+
+  /**
+   * The rows still to send, the block re-read just before the transaction (a
+   * block added or lifted since the pass started): a collect never goes out
+   * for a provider blocked now, a refund only for one still blocked. A refund's
+   * cause is recorded on the row first, so its booking does not depend on the
+   * block still standing then.
+   */
+  private async sendable(
+    move: HeldMove,
+    rows: readonly PaymentIntentEntity[],
+    pass: Pass,
+  ): Promise<PaymentIntentEntity[]> {
+    const out: PaymentIntentEntity[] = [];
+    for (const row of rows) {
+      const cause = this.providerBlockCause(row, pass);
+      if (move === 'collect') {
+        if (cause === null) out.push(row);
+        continue;
+      }
+      if (cause === null) continue;
+      await this.payments.recordHeldRefundCause(row.organizationId, row.id, cause);
+      pass.causes.set(row.id, cause);
+      out.push(row);
+    }
+    return out;
   }
 
   /**
@@ -340,17 +407,19 @@ export class HeldCollectionService {
     move: HeldMove,
     asset: AssetId,
     row: PaymentIntentEntity,
-    blocks: ProviderBlocks,
+    pass: Pass,
   ): Promise<number> {
     const held = this.held as HeldPaymentsPort;
     try {
+      if ((await this.sendable(move, [row], pass)).length === 0) return 0;
       const { txRef } = await this.send(move, asset, [this.keyOf(row)]);
-      return await this.book(row, done(move), txRef, blocks);
+      if (move === 'refund') pass.refunded.add(row.id);
+      return await this.book(row, done(move), txRef, pass);
     } catch (error) {
       try {
         const record = await held.readHeld(asset, this.keyOf(row));
         if (record?.status === HeldStatus.COLLECTED || record?.status === HeldStatus.REFUNDED) {
-          return await this.book(row, record.status, null, blocks);
+          return await this.book(row, record.status, null, pass);
         }
       } catch {
         // Unreadable: backed off below, read again on the next try.
@@ -368,12 +437,17 @@ export class HeldCollectionService {
   /**
    * Books a chain status for a row; with a transaction, the status is read
    * back first. Returns 1 when it was a collect.
+   *
+   * A `REFUNDED` is always this backend's (only the redeemer can refund): an
+   * upheld dispute's refund, or else the provider's forfeit — under the cause
+   * the block gives now, the one recorded before the send, or
+   * {@link REFUNDED_BY_REDEEMER_CAUSE}.
    */
   private async book(
     row: PaymentIntentEntity,
     status: HeldStatus | null,
     txRef: string | null,
-    blocks: ProviderBlocks,
+    pass: Pass,
   ): Promise<number> {
     const held = this.held as HeldPaymentsPort;
     const confirmed = txRef
@@ -384,30 +458,50 @@ export class HeldCollectionService {
       return 1;
     }
     if (confirmed !== HeldStatus.REFUNDED) return 0;
-    const cause = this.providerBlockCause(row, blocks);
+    pass.refunded.add(row.id);
     if (row.disputeOutcome === 'UPHELD') {
       await this.intents.refundHeldForDispute(row.organizationId, row.id, 'DISPUTE_UPHELD');
-    } else if (cause) {
-      await this.intents.bookBlockedProviderRefund(row.organizationId, row.id, cause, txRef);
-    } else {
-      this.logger.error(
-        `Intent ${row.id}: the escrow refunded its held payment but neither an upheld ` +
-          `dispute nor a blocked provider explains it; not booked — investigate`,
-      );
+      return 0;
     }
+    const recorded =
+      row.redemptionLastError && PROVIDER_BLOCK_CAUSES.has(row.redemptionLastError)
+        ? row.redemptionLastError
+        : null;
+    const cause =
+      this.providerBlockCause(row, pass) ??
+      pass.causes.get(row.id) ??
+      recorded ??
+      REFUNDED_BY_REDEEMER_CAUSE;
+    await this.intents.bookBlockedProviderRefund(row.organizationId, row.id, cause, txRef);
     return 0;
   }
 
-  /** Pages every blocked provider's payment still held within a day of the timeout. */
-  private async pageBlockedNearTimeout(blocks: ProviderBlocks): Promise<void> {
+  /**
+   * Pages every blocked provider's payment still held from a day before the
+   * timeout to a day after it — once per day for each side of the timeout —
+   * unless this pass refunded it, or `held()` says it has moved (booked then).
+   */
+  private async pageBlockedNearTimeout(pass: Pass): Promise<void> {
+    const held = this.held as HeldPaymentsPort;
     const rows = await this.payments.findBlockedHeldNearTimeout(
       PaymentRail.RAIL_B_VOUCHER,
-      blocks.exclude,
+      pass.exclude,
       HELD_TIMEOUT_SECONDS,
       BLOCKED_REFUND_WARN_SECONDS,
+      BLOCKED_PAGE_PAST_SECONDS,
       MAX_HELD_BATCH,
     );
     for (const row of rows) {
+      if (pass.refunded.has(row.id)) continue;
+      try {
+        const record = await held.readHeld(row.assetId as AssetId, this.keyOf(row));
+        if (record?.status === HeldStatus.COLLECTED || record?.status === HeldStatus.REFUNDED) {
+          await this.book(row, record.status, null, pass);
+          continue;
+        }
+      } catch {
+        // Unreadable: paged on the mirror.
+      }
       const timeoutAt = new Date(
         (row.collectableAt as Date).getTime() + HELD_TIMEOUT_SECONDS * 1000,
       );
@@ -423,11 +517,13 @@ export class HeldCollectionService {
         details: {
           intentId: row.id,
           providerId: row.providerId ?? 'none',
-          cause: this.providerBlockCause(row, blocks) ?? 'unknown',
+          cause: this.providerBlockCause(row, pass) ?? 'unknown',
           lastError: row.heldLastError ?? 'none',
         },
         aggregation: AlertAggregation.ONCE_PER_INCIDENT,
-        dedupeKey: row.id,
+        dedupeKey: `${row.id}:${past ? 'past' : 'near'}`,
+        // Each side of the timeout lasts a day: one page each.
+        suppressionWindowSeconds: BLOCKED_REFUND_WARN_SECONDS,
       });
     }
   }
@@ -442,18 +538,18 @@ export class HeldCollectionService {
   }
 
   /**
-   * Why the row's provider is blocked, in the redemption job's names
+   * Why the row's provider is blocked NOW, in the redemption job's names
    * (`VoucherRedemptionService.providerBlockCause`), or `null`: its
-   * organization or payout wallet on the platform blocklist, or the payout
-   * address on its chain's.
+   * organization or payout wallet on the platform blocklist (read live), or
+   * the payout address on its chain's (as the pass read it).
    */
-  private providerBlockCause(row: PaymentIntentEntity, blocks: ProviderBlocks): string | null {
+  private providerBlockCause(row: PaymentIntentEntity, pass: Pass): string | null {
     const blocked = this.blocklist.firstBlocked([
       { role: BlockedRole.PROVIDER, kind: BlockSubjectKind.ORGANIZATION, subject: row.providerId },
       { role: BlockedRole.PAYEE, kind: BlockSubjectKind.WALLET, subject: row.providerAccount },
     ]);
     if (blocked) return blocked.role === BlockedRole.PROVIDER ? 'ProviderBlocked' : 'PayeeBlocked';
-    if (row.providerAccount && blocks.chainAccounts.has(row.providerAccount.toLowerCase())) {
+    if (row.providerAccount && pass.chainAccounts.has(row.providerAccount.toLowerCase())) {
       return 'PayeeBlockedOnChain';
     }
     return null;
@@ -472,9 +568,9 @@ export class HeldCollectionService {
   }
 
   /** The off-chain blocklist plus the on-chain blocklist of every chain something is held on. */
-  private async providerBlocks(exclusions: RedemptionExclusions): Promise<ProviderBlocks> {
+  private async startPass(exclusions: RedemptionExclusions): Promise<Pass> {
     const chainAccounts = new Set<string>();
-    if (this.chainState?.blockedAccounts) {
+    if (this.held && this.chainState?.blockedAccounts) {
       const chains = new Set(
         (await this.payments.findHeldAssetIds(PaymentRail.RAIL_B_VOUCHER)).map((asset) =>
           chainIdOf(asset as AssetId),
@@ -484,7 +580,12 @@ export class HeldCollectionService {
         for (const account of await this.chainBlocked(chain)) chainAccounts.add(account);
       }
     }
-    return { exclude: { ...exclusions, chainAccounts: [...chainAccounts] }, chainAccounts };
+    return {
+      exclude: { ...exclusions, chainAccounts: [...chainAccounts] },
+      chainAccounts,
+      refunded: new Set(),
+      causes: new Map(),
+    };
   }
 
   /** The on-chain blocklist of a chain, lower-case; empty when unknown. */

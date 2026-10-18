@@ -45,30 +45,54 @@ const TIMEOUT_MS = HELD_TIMEOUT_SECONDS * 1000;
 
 interface Repo {
   collectable: PaymentIntentEntity[];
-  pastTimeout: PaymentIntentEntity[];
+  /** `findTimedOutCollectable`: past the timeout, to collect singly. */
+  timedOut: PaymentIntentEntity[];
+  /** `findHeldPastTimeout`: past the timeout, synced only. */
+  toSync: PaymentIntentEntity[];
   blockedHeld: PaymentIntentEntity[];
+  blockedRailA: PaymentIntentEntity[];
   nearTimeout: PaymentIntentEntity[];
   failures: Array<{ id: string; error: string }>;
+  causes: Array<{ id: string; cause: string }>;
   blockedQueries: RedemptionExclusions[];
+  /** Runs when the blocked-provider query is read (a block changing mid-pass). */
+  onBlockedQuery?: () => void;
+  onCollectableQuery?: () => void;
 }
 
 function setup(options: { chainBlocked?: string[] } = {}) {
   const repo: Repo = {
     collectable: [],
-    pastTimeout: [],
+    timedOut: [],
+    toSync: [],
     blockedHeld: [],
+    blockedRailA: [],
     nearTimeout: [],
     failures: [],
+    causes: [],
     blockedQueries: [],
   };
   const payments = {
-    findCollectable: jest.fn(async (rail: string) =>
-      repo.collectable.filter((row) => row.rail === rail),
+    findCollectable: jest.fn(
+      async (rail: string, _limit: number, _exclude: unknown, before: number | null = null) => {
+        repo.onCollectableQuery?.();
+        return repo.collectable.filter(
+          (row) =>
+            row.rail === rail &&
+            (before === null || (row.collectableAt as Date).getTime() + before * 1000 > Date.now()),
+        );
+      },
     ),
-    findHeldPastTimeout: jest.fn(async () => repo.pastTimeout),
-    findHeldOfBlockedProviders: jest.fn(async (_rail: string, exclude: RedemptionExclusions) => {
+    findTimedOutCollectable: jest.fn(async () => repo.timedOut),
+    findHeldPastTimeout: jest.fn(async () => repo.toSync),
+    findHeldOfBlockedProviders: jest.fn(async (rail: string, exclude: RedemptionExclusions) => {
+      if (rail === PaymentRail.RAIL_A_PER_CALL) return repo.blockedRailA;
       repo.blockedQueries.push(exclude);
+      repo.onBlockedQuery?.();
       return repo.blockedHeld;
+    }),
+    recordHeldRefundCause: jest.fn(async (_org: string, id: string, cause: string) => {
+      repo.causes.push({ id, cause });
     }),
     findBlockedHeldNearTimeout: jest.fn(async () => repo.nearTimeout),
     findHeldAssetIds: jest.fn(async () => [ASSET]),
@@ -146,7 +170,6 @@ describe('HeldCollectionService — a blocked provider', () => {
     repo.blockedHeld = rows;
     // Even if a query handed them to the collector, it must not collect them.
     repo.collectable = rows;
-    repo.pastTimeout = [];
 
     expect(await service.run()).toBe(0);
 
@@ -243,10 +266,12 @@ describe('HeldCollectionService — a blocked provider', () => {
     const provider = randomUUID();
     const row = heldRow(held, { providerId: provider, collectableAgoMs: TIMEOUT_MS + HOUR });
     addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
-    repo.pastTimeout = [row];
+    repo.toSync = [row];
 
     await service.run();
     expect(held.sent).toEqual([]);
+    // Still held: backed off, so it does not head the queue every minute.
+    expect(repo.failures.map((f) => f.id)).toEqual([row.id]);
     expect(intents.bookHeldCollected).not.toHaveBeenCalled();
 
     held.collectAsAnyone(keyOf(row));
@@ -268,7 +293,8 @@ describe('HeldCollectionService — a blocked provider', () => {
       expect.objectContaining({
         name: BLOCKED_HELD_UNREFUNDED_ALERT,
         severity: 'CRITICAL',
-        dedupeKey: row.id,
+        dedupeKey: `${row.id}:near`,
+        suppressionWindowSeconds: 86_400,
         details: expect.objectContaining({ intentId: row.id, cause: 'ProviderBlocked' }),
       }),
     ]);
@@ -282,7 +308,7 @@ describe('HeldCollectionService — past the timeout, one by one', () => {
     const rows = [1, 2, 3].map(() => heldRow(held, { collectableAgoMs: TIMEOUT_MS + HOUR }));
     // The collectable queue returns them too: they must not be batched there.
     repo.collectable = rows;
-    repo.pastTimeout = rows;
+    repo.timedOut = rows;
 
     expect(await service.run()).toBe(3);
 
@@ -299,7 +325,7 @@ describe('HeldCollectionService — past the timeout, one by one', () => {
     const fresh = [1, 2].map(() => heldRow(held));
     const late = heldRow(held, { collectableAgoMs: TIMEOUT_MS - 60_000 });
     repo.collectable = [...fresh, late];
-    repo.pastTimeout = [late];
+    repo.timedOut = [late];
 
     expect(await service.run()).toBe(3);
 
@@ -312,7 +338,7 @@ describe('HeldCollectionService — past the timeout, one by one', () => {
   it('a single collect a stranger beat is read back and booked, not retried', async () => {
     const { service, repo, intents, held } = setup();
     const row = heldRow(held, { collectableAgoMs: TIMEOUT_MS + HOUR });
-    repo.pastTimeout = [row];
+    repo.timedOut = [row];
     jest.spyOn(held, 'collect').mockImplementation(async (_asset, keys) => {
       held.collectAsAnyone(keys[0]);
       throw new Error('execution reverted: HeldNotHeld');
@@ -327,7 +353,7 @@ describe('HeldCollectionService — past the timeout, one by one', () => {
   it('a single collect that fails while the record is still held backs off', async () => {
     const { service, repo, intents, held } = setup();
     const row = heldRow(held, { collectableAgoMs: TIMEOUT_MS + HOUR });
-    repo.pastTimeout = [row];
+    repo.timedOut = [row];
     held.stick(keyOf(row));
 
     expect(await service.run()).toBe(0);
@@ -339,11 +365,174 @@ describe('HeldCollectionService — past the timeout, one by one', () => {
   it('a disputed record past the timeout is still only synced and paged', async () => {
     const { service, repo, alerts, held } = setup();
     const row = heldRow(held, { collectableAgoMs: TIMEOUT_MS + HOUR, disputeOutcome: 'OPEN' });
-    repo.pastTimeout = [row];
+    repo.toSync = [row];
 
     await service.run();
 
     expect(held.sent).toEqual([]);
     expect(alerts.map((a) => a.name)).toEqual(['held_payment_past_timeout']);
+    expect(repo.failures.map((f) => f.id)).toEqual([row.id]);
+  });
+});
+
+describe('HeldCollectionService — review fixes', () => {
+  const unblock = (blocklist: AccountBlocklistService, provider: string) =>
+    blocklist.applied({
+      kind: 'unblocked',
+      subjectKind: BlockSubjectKind.ORGANIZATION,
+      subjectKey: provider,
+    });
+
+  it('a block lifted after the refund was sent: still booked, under the recorded cause', async () => {
+    const { service, repo, intents, held, blocklist } = setup();
+    const provider = randomUUID();
+    const row = heldRow(held, { providerId: provider });
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    repo.blockedHeld = [row];
+    const refund = held.refund.bind(held);
+    jest.spyOn(held, 'refund').mockImplementation(async (asset, keys) => {
+      const result = await refund(asset, keys);
+      await unblock(blocklist, provider);
+      return result;
+    });
+
+    await service.run();
+
+    expect(repo.causes).toEqual([{ id: row.id, cause: 'ProviderBlocked' }]);
+    expect(intents.bookBlockedProviderRefund).toHaveBeenCalledWith(
+      row.organizationId,
+      row.id,
+      'ProviderBlocked',
+      expect.stringMatching(/^0x/),
+    );
+  });
+
+  it('a chain REFUNDED nothing explains any more is booked as a forfeit, not left looping', async () => {
+    const { service, repo, intents, held } = setup();
+    const row = heldRow(held);
+    await held.refund(ASSET, [keyOf(row)]);
+    repo.collectable = [row];
+
+    await service.run();
+
+    expect(intents.bookBlockedProviderRefund).toHaveBeenCalledWith(
+      row.organizationId,
+      row.id,
+      'RefundedByRedeemer',
+      null,
+    );
+  });
+
+  it('…and under the cause recorded on the row when there is one', async () => {
+    const { service, repo, intents, held } = setup();
+    const row = heldRow(held);
+    (row as { redemptionLastError: string | null }).redemptionLastError = 'PayeeBlocked';
+    await held.refund(ASSET, [keyOf(row)]);
+    repo.collectable = [row];
+
+    await service.run();
+
+    expect(intents.bookBlockedProviderRefund).toHaveBeenCalledWith(
+      row.organizationId,
+      row.id,
+      'PayeeBlocked',
+      null,
+    );
+  });
+
+  it('a block lifted before the send: no refund goes out', async () => {
+    const { service, repo, held, blocklist } = setup();
+    const provider = randomUUID();
+    const row = heldRow(held, { providerId: provider });
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    repo.blockedHeld = [row];
+    repo.onBlockedQuery = () => void unblock(blocklist, provider);
+
+    await service.run();
+
+    expect(held.sent).toEqual([]);
+    expect(await statusOf(held, row)).toBe(HeldStatus.HELD);
+  });
+
+  it('a block added mid-pass: no collect goes out for it', async () => {
+    const { service, repo, intents, held, blocklist } = setup();
+    const provider = randomUUID();
+    const row = heldRow(held, { providerId: provider });
+    repo.collectable = [row];
+    repo.onCollectableQuery = () =>
+      addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+
+    await service.run();
+
+    expect(held.sent).toEqual([]);
+    expect(intents.bookHeldCollected).not.toHaveBeenCalled();
+  });
+
+  it('rail A: a blocked provider’s withheld credit is released, never credited', async () => {
+    const { service, repo, intents, held, blocklist } = setup();
+    const provider = randomUUID();
+    const row = heldRow(held, { providerId: provider });
+    (row as { rail: string }).rail = PaymentRail.RAIL_A_PER_CALL;
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    repo.blockedRailA = [row];
+    repo.collectable = [row];
+
+    await service.run();
+
+    expect(intents.bookBlockedProviderRefund).toHaveBeenCalledWith(
+      row.organizationId,
+      row.id,
+      'ProviderBlocked',
+      null,
+    );
+    expect(intents.bookHeldCollected).not.toHaveBeenCalled();
+    expect(held.sent).toEqual([]);
+  });
+
+  it('does not page a payment refunded this pass while held() still lags', async () => {
+    const { service, repo, alerts, held, blocklist } = setup();
+    const provider = randomUUID();
+    const row = heldRow(held, { providerId: provider, collectableAgoMs: TIMEOUT_MS - 2 * HOUR });
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    repo.blockedHeld = [row];
+    repo.nearTimeout = [row];
+    const read = held.readHeld.bind(held);
+    jest.spyOn(held, 'readHeld').mockImplementation(async (asset, key) => {
+      const record = await read(asset, key);
+      // A lagging node: the refund landed, the read still says HELD.
+      return record && { ...record, status: HeldStatus.HELD };
+    });
+
+    await service.run();
+
+    expect(held.sent.map((s) => s.op)).toEqual(['refund']);
+    expect(alerts).toEqual([]);
+  });
+
+  it('does not page a payment held() shows as moved: books it instead', async () => {
+    const { service, repo, intents, alerts, held, blocklist } = setup();
+    const provider = randomUUID();
+    const row = heldRow(held, { providerId: provider, collectableAgoMs: TIMEOUT_MS + HOUR });
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    held.collectAsAnyone(keyOf(row));
+    repo.nearTimeout = [row];
+
+    await service.run();
+
+    expect(alerts).toEqual([]);
+    expect(intents.bookHeldCollected).toHaveBeenCalledWith(row.organizationId, row.id, null);
+  });
+
+  it('pages past the timeout under its own key', async () => {
+    const { service, repo, alerts, held, blocklist } = setup();
+    const provider = randomUUID();
+    const row = heldRow(held, { providerId: provider, collectableAgoMs: TIMEOUT_MS + HOUR });
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    repo.nearTimeout = [row];
+
+    await service.run();
+
+    expect(alerts.map((a) => a.dedupeKey)).toEqual([`${row.id}:past`]);
+    expect(alerts[0].summary).toMatch(/has passed/);
   });
 });

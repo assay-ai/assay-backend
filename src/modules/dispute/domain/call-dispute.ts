@@ -19,7 +19,9 @@
  *    the money is uncollected for another reason — buyer debt (outstanding or
  *    written off) is voided through `PaymentIntentService.voidDebt`. A collected
  *    call is `NOT_REFUNDABLE`: nothing is booked.
- * 3. **Nobody was charged** (forfeited, voided): `NOT_CHARGED`.
+ * 3. **Nobody was charged** (forfeited, voided): `NOT_CHARGED`. A held payment
+ *    refunded because its provider was blocked was charged and refunded:
+ *    `REFUNDED`, whatever the decision.
  * 4. **In flight** (a rail-B voucher about to be redeemed into the hold, a held
  *    payment past its window about to be collected, a debt's replacement being
  *    collected): the decision waits a minute.
@@ -107,6 +109,11 @@ export function planRefund(intent: RefundPlanInput): RefundPlanKind {
 
   const mark = intent.redemptionLastError ?? '';
   if (mark === UPHELD_VOID_MARK) return RefundPlanKind.ALREADY_REFUNDED;
+  // A blocked provider's held payment refunded to the buyer (the provider
+  // forfeits): the buyer WAS charged and has been refunded — not "not charged".
+  if (mark.startsWith('provider_forfeit:') && intent.heldStatus === 'REFUNDED') {
+    return RefundPlanKind.ALREADY_REFUNDED;
+  }
   if (mark.startsWith('provider_forfeit:') || mark.startsWith('voided:')) {
     return RefundPlanKind.NOT_CHARGED;
   }
