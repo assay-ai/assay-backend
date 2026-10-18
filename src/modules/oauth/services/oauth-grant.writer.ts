@@ -9,7 +9,10 @@ import {
 } from '@database/postgres/entities/agent-credential.entity';
 import { OAuthAccessTokenEntity } from '@database/postgres/entities/oauth-access-token.entity';
 import { OAuthAuthorizationCodeEntity } from '@database/postgres/entities/oauth-authorization-code.entity';
-import { OAuthClientEntity } from '@database/postgres/entities/oauth-client.entity';
+import {
+  OAuthClientEntity,
+  OAuthClientKind,
+} from '@database/postgres/entities/oauth-client.entity';
 import { OAuthRefreshTokenEntity } from '@database/postgres/entities/oauth-refresh-token.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
@@ -20,6 +23,9 @@ import {
   OAUTH_REFRESH_TOKEN_TTL_SECONDS,
 } from '../constants/oauth.constants';
 import { hashOpaqueToken, mint } from '../domain/opaque-token';
+
+/** The actor of audit entries the authorization server writes on its own. */
+export const OAUTH_SYSTEM_ACTOR: AuditActor = { type: 'system', id: 'oauth' };
 
 /** `revoked_by` of a grant replaced by a newer approval of the same app (§6.3.10 step 3). */
 export const OAUTH_REVOKED_BY_REPLACED = 'system:oauth-replaced';
@@ -41,14 +47,26 @@ export type CreateGrantResult =
        */
       readonly invalidateAccess: boolean;
     }
-  | { readonly ok: false; readonly reason: 'grant_limit_reached' };
+  | {
+      readonly ok: false;
+      /**
+       * `code_reused`: a replay of this code was detected before the grant
+       * existed, so none is created. `agent_not_active`: the agent is missing,
+       * suspended, in a suspended organization, or has no linked wallet.
+       */
+      readonly reason: 'grant_limit_reached' | 'code_reused' | 'agent_not_active';
+    };
 
 export interface RevokeGrantInput {
   readonly organizationId: string;
   readonly credentialId: string;
   /** `agent_credentials.revoked_by`, e.g. `system:oauth-code-reused`. */
   readonly revokedBy: string;
-  /** The audit entry written in the same transaction. */
+  /**
+   * The audit entry written in the same transaction. It is written even when
+   * the credential was already revoked (a replayed code is a signal on its
+   * own); `before`/`after` then record that nothing changed.
+   */
   readonly audit: {
     readonly actor: AuditActor;
     readonly action: string;
@@ -68,6 +86,9 @@ export interface RevokeGrantInput {
  * The 50-live-grants cap (R-OA-31) is a count-then-insert, so it runs under a
  * per-agent transaction-scoped advisory lock: two exchanges for the same agent
  * serialise on it, and the second one counts the first one's row.
+ *
+ * Lock order, always: the code row, then the per-agent advisory lock, then
+ * credential rows. Task 1.8 (refresh) must keep it, or the two can deadlock.
  */
 @Injectable()
 export class OAuthGrantWriter {
@@ -81,6 +102,11 @@ export class OAuthGrantWriter {
    * Creates the grant `code` was approved for, in one transaction. `code` must
    * already be burned (`used_at` set) and checked by the caller; this sets its
    * `credential_id`, so a second exchange can find and revoke the grant.
+   *
+   * The code row is locked first: a replay that marked it
+   * (`reuse_detected_at`) before this transaction got there stops the grant
+   * here; a replay arriving later waits on the row lock until this commits,
+   * then sees `credential_id` and revokes the grant (R-OA-6).
    */
   async createGrant(input: {
     readonly code: OAuthAuthorizationCodeEntity;
@@ -91,9 +117,32 @@ export class OAuthGrantWriter {
     const { organizationId, agentId } = code;
 
     return this.dataSource.transaction(async (manager) => {
+      const [codeRow] = (await manager.query(
+        `SELECT "reuse_detected_at" FROM "oauth_authorization_codes" WHERE "id" = $1 FOR UPDATE`,
+        [code.id],
+      )) as { reuse_detected_at: Date | null }[];
+      if (!codeRow || codeRow.reuse_detected_at !== null) {
+        await this.audit.record(manager, {
+          organizationId,
+          actor: OAUTH_SYSTEM_ACTOR,
+          action: 'oauth.code_reused',
+          resourceType: 'agent',
+          resourceId: agentId,
+          before: null,
+          after: { clientId: client.clientId, grantCreated: false },
+        });
+        return { ok: false, reason: 'code_reused' } as const;
+      }
+
       await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
         `oauth-grants:${agentId}`,
       ]);
+
+      // Approval checked the agent up to ~11 minutes ago; check it again.
+      if (!(await isAgentActive(manager, organizationId, agentId))) {
+        return { ok: false, reason: 'agent_not_active' } as const;
+      }
+
       // The transaction's own clock: every expiry below derives from one instant.
       const [{ now }] = (await manager.query(`SELECT now() AS "now"`)) as { now: Date }[];
       const refreshExpiresAt = new Date(now.getTime() + OAUTH_REFRESH_TOKEN_TTL_SECONDS * 1000);
@@ -101,7 +150,7 @@ export class OAuthGrantWriter {
 
       // A live grant this one replaces is revoked below, so it does not count
       // against the cap: replacing one at the cap succeeds.
-      const replaced = await this.findReplaceable(manager, code);
+      const replaced = await this.findReplaceable(manager, code, client);
       const replacesLive = replaced !== null && isLive(replaced, now);
       const live = await this.credentials.countLiveOAuthForAgent(organizationId, agentId, manager);
       if (live - (replacesLive ? 1 : 0) >= OAUTH_MAX_LIVE_GRANTS_PER_AGENT) {
@@ -160,6 +209,25 @@ export class OAuthGrantWriter {
 
       await manager.update(OAuthAuthorizationCodeEntity, { id: code.id }, { credentialId });
 
+      // The replaced grant's own trail ends in `credential.revoked`, as an API
+      // key's does (R-OA-23).
+      if (replaced && replacesLive) {
+        await this.audit.record(manager, {
+          organizationId,
+          actor: { type: 'user', id: code.approvedBy },
+          action: 'credential.revoked',
+          resourceType: 'agent_credential',
+          resourceId: replaced.id,
+          before: { revokedAt: null },
+          after: {
+            revokedAt: now.toISOString(),
+            name: replaced.name,
+            reason: 'replaced',
+            replacedBy: credentialId,
+          },
+        });
+      }
+
       await this.audit.record(manager, {
         organizationId,
         actor: { type: 'user', id: code.approvedBy },
@@ -199,30 +267,34 @@ export class OAuthGrantWriter {
         input.credentialId,
         { revokedAt: now, revokedBy: input.revokedBy },
       );
-      if (!revoked) return false;
       await this.audit.record(manager, {
         organizationId: input.organizationId,
         actor: input.audit.actor,
         action: input.audit.action,
         resourceType: 'agent_credential',
         resourceId: input.credentialId,
-        before: { revokedAt: null },
-        after: { revokedAt: now.toISOString(), ...(input.audit.after ?? {}) },
+        before: revoked ? { revokedAt: null } : null,
+        after: {
+          ...(revoked ? { revokedAt: now.toISOString() } : { alreadyRevoked: true }),
+          ...(input.audit.after ?? {}),
+        },
       });
-      return true;
+      return revoked;
     });
   }
 
   /**
    * The grant the code replaces, when it is one this approval may replace:
-   * the same organization, agent and client, and an OAuth grant. Anything
-   * else is ignored, as the consent API already drops it (§6.3.5).
+   * the built-in client only, and a grant of the same organization, agent and
+   * client. Anything else is ignored, as the consent API already drops it
+   * (§6.3.5); this is the second check.
    */
   private async findReplaceable(
     manager: EntityManager,
     code: OAuthAuthorizationCodeEntity,
+    client: OAuthClientEntity,
   ): Promise<AgentCredentialEntity | null> {
-    if (!code.replacesCredentialId) return null;
+    if (!code.replacesCredentialId || client.kind !== OAuthClientKind.BUILTIN) return null;
     const row = await manager.findOne(AgentCredentialEntity, {
       where: {
         organizationId: code.organizationId,
@@ -277,6 +349,25 @@ async function insertReturningId<T extends ObjectLiteral>(
     .returning(['id'])
     .execute();
   return (result.raw as { id: string }[])[0].id;
+}
+
+/**
+ * The agent exists in the organization, both are ACTIVE, and it has a linked
+ * wallet: the approval's R-OA-32 check, repeated at exchange.
+ */
+async function isAgentActive(
+  manager: EntityManager,
+  organizationId: string,
+  agentId: string,
+): Promise<boolean> {
+  const rows = (await manager.query(
+    `SELECT 1 FROM "agents" a JOIN "organizations" o ON o."id" = a."organization_id"
+      WHERE a."id" = $1 AND a."organization_id" = $2
+        AND a."status" = 'ACTIVE' AND o."status" = 'ACTIVE'
+        AND a."primary_account_id" IS NOT NULL AND a."chain_id" IS NOT NULL`,
+    [agentId, organizationId],
+  )) as unknown[];
+  return rows.length > 0;
 }
 
 function isLive(credential: AgentCredentialEntity, now: Date): boolean {

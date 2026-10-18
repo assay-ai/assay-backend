@@ -1,4 +1,4 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
@@ -16,7 +16,7 @@ import {
 import { hashOpaqueToken, isWellFormed, mint } from '../domain/opaque-token';
 import { verifyS256 } from '../domain/pkce';
 import { normaliseResource } from '../domain/resource';
-import { OAuthGrantWriter } from './oauth-grant.writer';
+import { OAUTH_SYSTEM_ACTOR, OAuthGrantWriter } from './oauth-grant.writer';
 
 /** The 200 body of `POST {MCP}/oauth/token` (RFC 6749 §5.1). */
 export interface TokenPair {
@@ -85,13 +85,17 @@ export interface ExchangeCodeInput {
 /** `revoked_by` of a grant whose code was presented a second time (R-OA-6). */
 export const OAUTH_REVOKED_BY_CODE_REUSED = 'system:oauth-code-reused';
 
-const SYSTEM_ACTOR = { type: 'system', id: 'oauth' } as const;
+const SYSTEM_ACTOR = OAUTH_SYSTEM_ACTOR;
 
 const INVALID_GRANT: OAuthError = { error: 'invalid_grant' };
 const INVALID_TARGET: OAuthError = { error: 'invalid_target' };
 const GRANT_LIMIT_REACHED: OAuthError = {
   error: 'invalid_grant',
   error_description: 'grant limit reached',
+};
+const AGENT_NOT_ACTIVE: OAuthError = {
+  error: 'invalid_grant',
+  error_description: 'agent not active',
 };
 
 type RejectReason = 'client_id' | 'redirect_uri' | 'resource' | 'pkce';
@@ -112,6 +116,8 @@ type RejectReason = 'client_id' | 'redirect_uri' | 'resource' | 'pkce';
  */
 @Injectable()
 export class OAuthTokenService {
+  private readonly logger = new Logger(OAuthTokenService.name);
+
   constructor(
     @InjectDataSource('postgres') private readonly dataSource: DataSource,
     private readonly codes: OAuthAuthorizationCodeRepository,
@@ -192,10 +198,14 @@ export class OAuthTokenService {
 
     // Step 3: the grant.
     const created = await this.grants.createGrant({ code, client, audience: this.config.issuer });
-    if (!created.ok) return GRANT_LIMIT_REACHED;
+    if ('reason' in created) {
+      if (created.reason === 'grant_limit_reached') return GRANT_LIMIT_REACHED;
+      if (created.reason === 'agent_not_active') return AGENT_NOT_ACTIVE;
+      return INVALID_GRANT;
+    }
 
     // Step 4: after commit.
-    if (created.invalidateAccess) await this.accessEpoch.bump(code.organizationId);
+    if (created.invalidateAccess) await this.bumpAccessEpoch(code.organizationId);
 
     return {
       access_token: created.tokens.accessToken,
@@ -239,25 +249,62 @@ export class OAuthTokenService {
   }
 
   /**
-   * A code that could not be burned. A used code whose exchange created a
-   * grant is being replayed: that grant is revoked (RFC 6749 §4.1.2, R-OA-6).
-   * Unknown, expired, or burned by a failed check: nothing to do.
+   * A code that could not be burned. If it was used, this is a replay: mark
+   * it (compare-and-set on the code row) and revoke the grant its first
+   * exchange created (RFC 6749 §4.1.2, R-OA-6).
+   *
+   * The mark is what closes the race with an exchange still in flight. If the
+   * first exchange's grant transaction already holds the code row, this
+   * update waits for it to commit and then returns its `credential_id`. If it
+   * does not yet, the mark lands first and that transaction creates nothing.
+   * Unknown, unused or expired codes match no row: nothing is written.
    */
   private async handleUnusableCode(codeHash: string): Promise<void> {
-    const code = await this.codes.findByCodeHash(codeHash);
-    if (!code?.usedAt || !code.credentialId) return;
+    const result = await this.codes
+      .createQueryBuilder()
+      .update(OAuthAuthorizationCodeEntity)
+      .set({ reuseDetectedAt: () => 'coalesce(reuse_detected_at, now())' })
+      .where('code_hash = :codeHash', { codeHash })
+      .andWhere('used_at IS NOT NULL')
+      // A string, not an array: TypeORM drops array entries that are not entity properties.
+      .returning('"credential_id", "organization_id", "agent_id", "oauth_client_id"')
+      .execute();
+    const [marked] = (result.raw ?? []) as {
+      credential_id: string | null;
+      organization_id: string;
+      agent_id: string;
+      oauth_client_id: string;
+    }[];
+    // No grant yet: either a failed check burned it, or the exchange in
+    // flight will see the mark and audit the replay itself.
+    if (!marked?.credential_id) return;
 
-    const client = await this.clients.findOne({ where: { id: code.oauthClientId } });
+    const client = await this.clients.findOne({ where: { id: marked.oauth_client_id } });
     const revoked = await this.grants.revokeGrant({
-      organizationId: code.organizationId,
-      credentialId: code.credentialId,
+      organizationId: marked.organization_id,
+      credentialId: marked.credential_id,
       revokedBy: OAUTH_REVOKED_BY_CODE_REUSED,
       audit: {
         actor: SYSTEM_ACTOR,
         action: 'oauth.code_reused',
-        after: { agentId: code.agentId, clientId: client?.clientId ?? null },
+        after: { agentId: marked.agent_id, clientId: client?.clientId ?? null },
       },
     });
-    if (revoked) await this.accessEpoch.bump(code.organizationId);
+    if (revoked) await this.bumpAccessEpoch(marked.organization_id);
+  }
+
+  /**
+   * After commit, so it never fails the exchange: the grant (and its tokens)
+   * already exist, and a lost bump only leaves cached views to their TTL.
+   */
+  private async bumpAccessEpoch(organizationId: string): Promise<void> {
+    try {
+      await this.accessEpoch.bump(organizationId);
+    } catch {
+      this.logger.warn(
+        `org ${organizationId}: access epoch not bumped after an OAuth grant change; ` +
+          'cached access lasts until its TTL',
+      );
+    }
   }
 }
