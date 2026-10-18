@@ -1,4 +1,7 @@
-import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
+import {
+  AgentCredentialEntity,
+  CredentialIssuedVia,
+} from '@database/postgres/entities/agent-credential.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { CredentialExpirySweepConfig } from '@modules/account/constants/credential-expiry.constants';
 import { CredentialExpirySweepService } from '@modules/account/services/credential-expiry-sweep.service';
@@ -23,6 +26,8 @@ function buildCredential(expiresAt: Date): AgentCredentialEntity {
     organizationId: ORG,
     agentId: 'agent-1',
     name: 'CI deploy',
+    issuedVia: CredentialIssuedVia.API_KEY,
+    oauthClientId: null,
     prefix: 'assay_live_ab12',
     tokenHash: 'hash',
     scopes: [],
@@ -50,7 +55,7 @@ function buildHarness(credential: AgentCredentialEntity, now: number) {
     config,
   );
 
-  return { service, notifications, credentials };
+  return { service, notifications, credentials, queryBuilder };
 }
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -146,6 +151,44 @@ describe('CredentialExpirySweepService', () => {
       warnedT7: 0,
       warnedT1: 0,
       expired: 0,
+    });
+  });
+
+  describe('OAuth grants (their expires_at rolls with the refresh chain)', () => {
+    function oauthGrant(expiresAt: Date): AgentCredentialEntity {
+      return {
+        ...buildCredential(expiresAt),
+        issuedVia: CredentialIssuedVia.OAUTH,
+        oauthClientId: 'client-row-1',
+        prefix: null,
+        tokenHash: null,
+      } as unknown as AgentCredentialEntity;
+    }
+
+    it('selects API keys only', async () => {
+      const { service, queryBuilder } = buildHarness(buildCredential(EXPIRES_AT), Date.now());
+
+      await service.sweep();
+
+      expect(queryBuilder.andWhere).toHaveBeenCalledWith('credential.issuedVia = :issuedVia', {
+        issuedVia: CredentialIssuedVia.API_KEY,
+      });
+    });
+
+    it.each([
+      ['T-7', 6 * ONE_DAY_MS],
+      ['T-1', 12 * 60 * 60 * 1000],
+      ['expired', -60 * 60 * 1000],
+    ])('OAuth rows are never warned (%s)', async (_, msBeforeExpiry) => {
+      const { service, notifications } = buildHarness(
+        oauthGrant(EXPIRES_AT),
+        EXPIRES_AT.getTime() - msBeforeExpiry,
+      );
+
+      const summary = await service.sweep();
+
+      expect(notifications.notify).not.toHaveBeenCalled();
+      expect(summary).toEqual({ checked: 0, warnedT7: 0, warnedT1: 0, expired: 0 });
     });
   });
 });

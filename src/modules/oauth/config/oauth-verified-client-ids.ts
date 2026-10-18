@@ -1,3 +1,4 @@
+import { CredentialVerifiedClient } from '../domain/credential-client-view';
 import { OAUTH_VERIFIED_CLIENTS_ENV } from './oauth.config';
 
 /**
@@ -27,4 +28,47 @@ export function readVerifiedClientIds(env: NodeJS.ProcessEnv = process.env): str
     ids.push(clientId);
   }
   return ids;
+}
+
+/**
+ * The entries of `OAUTH_VERIFIED_CLIENTS` with their display names and vendor
+ * redirects, for the credentials list's "Verified" mark (spec §7.10 item 4),
+ * read without loading `OAUTH_CONFIG` for the same reason as above.
+ *
+ * Fails closed: a value that cannot be read, or any malformed entry, returns
+ * `null`, and the caller shows no client as verified. Where the OAuth routes
+ * run, `loadOAuthConfig` validates the same variable fully at boot.
+ */
+export function readVerifiedClients(
+  env: NodeJS.ProcessEnv = process.env,
+): CredentialVerifiedClient[] | null {
+  const raw = env[OAUTH_VERIFIED_CLIENTS_ENV];
+  if (!raw?.trim()) return [];
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    return null;
+  }
+  if (!Array.isArray(parsed)) return null;
+  const clients: CredentialVerifiedClient[] = [];
+  for (const entry of parsed) {
+    const { clientId, displayName, vendorRedirects } = (entry ?? {}) as Record<string, unknown>;
+    if (
+      !isHttpsUrl(clientId) ||
+      typeof displayName !== 'string' ||
+      displayName.trim() === '' ||
+      !Array.isArray(vendorRedirects) ||
+      vendorRedirects.length === 0 ||
+      !vendorRedirects.every(isHttpsUrl)
+    ) {
+      return null;
+    }
+    clients.push({ clientId, displayName, vendorRedirects: [...vendorRedirects] });
+  }
+  return clients;
+}
+
+function isHttpsUrl(value: unknown): value is string {
+  return typeof value === 'string' && value.startsWith('https://');
 }
