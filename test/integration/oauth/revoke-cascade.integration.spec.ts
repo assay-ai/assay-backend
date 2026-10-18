@@ -29,6 +29,7 @@ import { MetricsRegistryService } from '@modules/observability/services/metrics-
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
 import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
+import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
 import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
 import { OAuthGrantWriter } from '@modules/oauth/services/oauth-grant.writer';
 import {
@@ -61,6 +62,7 @@ describe('OAuth grant revocation cascade — real migrations', () => {
   let tokens: OAuthTokenService;
   let credentials: AgentCredentialsService;
   let resolver: CredentialSessionResolver;
+  let sessionSource: OAuthAccessTokenMcpSessionSource;
   let builtin: OAuthClientEntity;
   let redis: Redis;
   let bumps: string[];
@@ -164,6 +166,15 @@ describe('OAuth grant revocation cascade — real migrations', () => {
       { paymentClients: [`${MCP}/oauth/clients/assay-mcp`], verifiedClients: [] },
     );
     resolver = new CredentialSessionResolver(credentialRepository, agents);
+    // The real OAuth session source (§6.4), as the MCP app runs it.
+    sessionSource = new OAuthAccessTokenMcpSessionSource(
+      new OAuthAccessTokenRepository(dataSource),
+      credentialRepository,
+      clients,
+      resolver,
+      { audience: MCP, paymentClients: [`${MCP}/oauth/clients/assay-mcp`] },
+      'mcp',
+    );
 
     builtin = await clients.save(
       clients.create({
@@ -355,17 +366,25 @@ describe('OAuth grant revocation cascade — real migrations', () => {
     expect(bumps).toEqual([]);
   });
 
-  it('next MCP request is refused (MCP_CREDENTIAL_INVALID → 401); refresh → invalid_grant', async () => {
+  it('next MCP request with the access token → 401 MCP_CREDENTIAL_INVALID; refresh → invalid_grant', async () => {
     const g = await grant();
-    // Positive controls: the live grant resolves, and its refresh token rotates.
-    await expect(
-      resolver.sessionFor(await credentialRow(g.credentialId), { paymentsAllowed: true }),
-    ).resolves.toMatchObject({ credentialId: g.credentialId });
+    // Positive controls: the access token opens an MCP session, and the
+    // refresh token rotates.
     const rotated = await refresh(g.pair.refresh_token);
     if (isOAuthError(rotated)) throw new Error(`refresh failed: ${rotated.error}`);
+    await expect(sessionSource.resolve(rotated.access_token)).resolves.toMatchObject({
+      credentialId: g.credentialId,
+    });
 
     await credentials.revoke(ORGANIZATION, g.agentId, g.credentialId, ACTOR);
 
+    // The client's next MCP request, through the real OAuth session source.
+    for (const accessToken of [rotated.access_token, g.pair.access_token]) {
+      await expect(sessionSource.resolve(accessToken)).rejects.toMatchObject({
+        errorCode: McpErrorCode.MCP_CREDENTIAL_INVALID,
+        statusCode: 401,
+      });
+    }
     await expectRefused(g.credentialId);
     // The client's live refresh token, through the real token service.
     expect(await refresh(rotated.refresh_token)).toEqual({ error: 'invalid_grant' });
