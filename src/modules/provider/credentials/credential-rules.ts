@@ -1,4 +1,4 @@
-import { BindingStatus } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus } from '@modules/tool/ports/tool.types';
 import { RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 import { isConstNode } from '@modules/tool/domain/mapping/normalize';
 
@@ -239,22 +239,28 @@ export function assertCredentialPut(
   }
 }
 
+/** Whether calls under `authMode` need a credential set for the endpoint's origin. */
+export function authModeNeedsKey(authMode: string | null | undefined): boolean {
+  return authMode === BindingAuthMode.API_KEY || authMode === BindingAuthMode.BOTH;
+}
+
 /**
  * Throws `credentialOriginLive` when the set to remove is for the origin of the
- * published endpoint of an ACTIVE binding. Deleting it would turn every live
- * call into a platform fault; pause the binding first, or publish an endpoint
- * elsewhere (which prunes it).
+ * published endpoint and the binding can go live on it: it is ACTIVE, or it is
+ * published (ACTIVE or PAUSED) under an auth mode that needs a key. Deleting it
+ * from a paused API-key binding would only defer the fault: the resume would
+ * turn every call into a platform fault. Publish an endpoint elsewhere (which
+ * prunes it), or switch the auth mode, before removing it.
  */
 export function assertCredentialRemovable(
-  status: string,
+  binding: { status: string; publishedVersion: number | null; authMode: string },
   publishedEndpoint: string | null,
   origin: string,
 ): void {
-  if (
-    status === BindingStatus.ACTIVE &&
-    publishedEndpoint &&
-    originOf(publishedEndpoint) === origin
-  ) {
+  const live =
+    binding.status === BindingStatus.ACTIVE ||
+    (binding.publishedVersion != null && authModeNeedsKey(binding.authMode));
+  if (live && publishedEndpoint && originOf(publishedEndpoint) === origin) {
     throw ProviderErrors.credentialOriginLive();
   }
 }

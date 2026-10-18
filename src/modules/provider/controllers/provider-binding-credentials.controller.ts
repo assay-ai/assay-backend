@@ -105,7 +105,8 @@ export class ProviderBindingCredentialsController {
   @ApiResponse({
     status: 409,
     description:
-      'PROVIDER_CREDENTIAL_ORIGIN_LIVE: the origin of the published endpoint of an ACTIVE binding',
+      'PROVIDER_CREDENTIAL_ORIGIN_LIVE: the origin of the published endpoint of an ACTIVE ' +
+      'binding, or of a published (also PAUSED) binding whose auth mode needs a key',
   })
   async remove(
     @CurrentSession() session: McpSession,
@@ -113,7 +114,7 @@ export class ProviderBindingCredentialsController {
     @Query() query: DeleteBindingCredentialsQueryDto,
   ): Promise<void> {
     const row = await this.editor.loadEditable(session.organizationId, params.id);
-    assertCredentialRemovable(row.status, await this.editor.publishedEndpoint(row), query.origin);
+    assertCredentialRemovable(row, await this.editor.publishedEndpoint(row), query.origin);
     const before = (await this.vault.list(session.organizationId, params.id)).find(
       (set) => set.origin === query.origin,
     );
