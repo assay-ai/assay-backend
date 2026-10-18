@@ -200,26 +200,44 @@ export class EvmEscrowWithdrawalIndexer {
     const inserted = await this.events.applyIndexedRange(chainId, end, rows);
     // After the commit and never throwing: an audit failure can never hold the history back.
     await this.auditClaims(chainId, inserted);
-    await this.alertIfLagging(chainId, client, end);
+    await this.alertIfLagging(chainId, client, end, safeHead, head);
   }
 
-  /** One alert per incident while the last indexed block is older than an hour. */
+  /**
+   * One alert per incident while the index trails the chain by over an hour,
+   * measured between the indexed block and the head block (chain time, not
+   * the wall clock: a chain that makes no blocks while idle is not behind).
+   * Nothing to measure at the safe head. Never throws: the range is already
+   * committed, and a failed lag read is not a failed index.
+   */
   private async alertIfLagging(
     chainId: ChainId,
     client: EvmEscrowWithdrawalClient,
     end: bigint,
+    safeHead: bigint,
+    head: bigint,
   ): Promise<void> {
-    const { timestamp } = await client.getBlock({ blockNumber: end });
-    const lagMs = Date.now() - Number(timestamp) * 1000;
-    if (lagMs <= EVM_ESCROW_WITHDRAWAL_MAX_LAG_MS) return;
-    await this.alerts.emit({
-      severity: AlertSeverity.WARN,
-      name: EVM_ESCROW_WITHDRAWAL_ALERTS.LAGGING,
-      summary: `The escrow withdrawal history on ${chainId} is ${Math.round(lagMs / 60_000)} minutes behind the chain`,
-      details: { chainId, indexedThrough: end.toString() },
-      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
-      dedupeKey: chainId,
-    });
+    if (end >= safeHead) return;
+    try {
+      const [indexed, latest] = await Promise.all([
+        client.getBlock({ blockNumber: end }),
+        client.getBlock({ blockNumber: head }),
+      ]);
+      const lagMs = (Number(latest.timestamp) - Number(indexed.timestamp)) * 1000;
+      if (lagMs <= EVM_ESCROW_WITHDRAWAL_MAX_LAG_MS) return;
+      await this.alerts.emit({
+        severity: AlertSeverity.WARN,
+        name: EVM_ESCROW_WITHDRAWAL_ALERTS.LAGGING,
+        summary: `The escrow withdrawal history on ${chainId} is ${Math.round(lagMs / 60_000)} minutes behind the chain`,
+        details: { chainId, indexedThrough: end.toString() },
+        aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+        dedupeKey: chainId,
+      });
+    } catch (error) {
+      this.logger.warn(
+        `escrow withdrawal lag on ${chainId} could not be measured: ${describe(error)}`,
+      );
+    }
   }
 
   private async toRows(
