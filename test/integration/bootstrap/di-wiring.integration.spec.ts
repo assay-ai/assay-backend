@@ -11,6 +11,7 @@ import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { DisputeModule } from '@modules/dispute/dispute.module';
 import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
+import { RefundEligibilityService } from '@modules/dispute/services/refund-eligibility.service';
 import { VAULT_PORT } from '@modules/chains/ports/vault.port';
 import { LedgerModule } from '@modules/ledger/ledger.module';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
@@ -123,7 +124,12 @@ describe('DI wiring — the real domain modules resolve the vault, deposit, reco
       expect(app.get(VoucherRedemptionService)).toBeInstanceOf(VoucherRedemptionService);
       expect(app.get(VoucherRedemptionJob)).toBeInstanceOf(VoucherRedemptionJob);
       // Every consumer of the escrow hold gets the real port, not null.
-      for (const consumer of [CallDisputeService, HeldCollectionService, ReconciliationService]) {
+      for (const consumer of [
+        CallDisputeService,
+        RefundEligibilityService,
+        HeldCollectionService,
+        ReconciliationService,
+      ]) {
         expect(
           (app.get(consumer, { strict: false }) as unknown as { held: unknown }).held,
         ).toBeDefined();
