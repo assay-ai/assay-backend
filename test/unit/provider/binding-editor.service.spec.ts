@@ -162,6 +162,7 @@ function build(
   };
 
   const dataSource = {
+    manager,
     transaction: jest.fn(async (work: (m: typeof manager) => Promise<unknown>) => work(manager)),
   } as unknown as DataSource;
 
