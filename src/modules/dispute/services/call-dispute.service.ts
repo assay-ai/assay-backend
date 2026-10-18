@@ -18,6 +18,7 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { collectionStateOf } from '@modules/payment/domain/collection';
+import { HeldCollectionService } from '@modules/payment/services/held-collection.service';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
 import { EvidencePackService } from '@modules/verification/services/evidence-pack.service';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
@@ -77,6 +78,9 @@ const UNPAID_CALL_CLASSES: ReadonlySet<string> = new Set(['FREE', 'TEST']);
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 
+/** The provider's one reply must come within this many hours of the filing. */
+export const PROVIDER_REPLY_HOURS = 24;
+
 /** What a decision needs from its caller — the operator side owns who may decide. */
 export interface CallDisputeDecisionInput {
   readonly disputeId: string;
@@ -85,6 +89,8 @@ export interface CallDisputeDecisionInput {
   readonly operatorId: string;
   /** The second operator, on a two-person decision. */
   readonly approverOperatorId?: string | null;
+  /** `AUTO_PLATFORM_MISS` for the SLA's auto-uphold; an operator's otherwise. */
+  readonly resolutionKind?: 'ADJUDICATOR' | 'AUTO_PLATFORM_MISS';
 }
 
 /** What the operator side needs to route a decision before taking it. */
@@ -127,6 +133,7 @@ export class CallDisputeService {
     private readonly paymentIntents: PaymentIntentRepository,
     private readonly verificationRecords: VerificationRecordRepository,
     private readonly intents: PaymentIntentService,
+    private readonly collection: HeldCollectionService,
     private readonly evidence: EvidencePackService,
     private readonly audit: AuditLogWriter,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
@@ -318,6 +325,7 @@ export class CallDisputeService {
               SET "provider_response" = $3, "provider_responded_at" = now(), "updated_at" = now()
             WHERE "id" = $1 AND "respondent_provider_id" = $2 AND "state" = 'OPEN'
               AND "provider_response" IS NULL
+              AND "created_at" > now() - interval '${PROVIDER_REPLY_HOURS} hours'
             RETURNING "id"`,
           [id, providerId, response.trim()],
         ),
@@ -485,7 +493,7 @@ export class CallDisputeService {
     await manager.query(
       `UPDATE "disputes"
           SET "state" = $2, "resolved_at" = now(), "resolved_by" = $3, "resolution_note" = $4,
-              "resolution_kind" = 'ADJUDICATOR', "refund_source" = $5, "refund_state" = $6,
+              "resolution_kind" = $10, "refund_source" = $5, "refund_state" = $6,
               "refund_amount" = $7, "restored_amount" = $8,
               "seconded_by_operator_id" = $9::uuid,
               "seconded_at" = CASE WHEN $9::uuid IS NULL THEN NULL ELSE now() END,
@@ -502,6 +510,7 @@ export class CallDisputeService {
         owes ? amount : null,
         restored,
         seconded,
+        input.resolutionKind ?? 'ADJUDICATOR',
       ],
     );
     await manager.query(
@@ -534,6 +543,12 @@ export class CallDisputeService {
    */
   async settleRefund(disputeId: string): Promise<DisputeEntity> {
     const dispute = await this.requireAny(disputeId);
+    if (dispute.state === DisputeState.REJECTED && dispute.intentId) {
+      // Rejected: the held payment is collected at once (once past its window;
+      // inside it, the collection job takes it when the window ends).
+      await this.collection.collectIntent(dispute.organizationId, dispute.intentId);
+      return dispute;
+    }
     if (dispute.state !== DisputeState.UPHELD || dispute.refundState !== RefundState.PENDING) {
       return dispute;
     }
@@ -542,7 +557,10 @@ export class CallDisputeService {
 
     const first = planRefund(intent);
     if (first === RefundPlanKind.RELEASE_HELD) {
-      await this.intents.releaseDisputedHold(
+      // `refundHeld` on chain (rail B) or the withheld credit released (rail A);
+      // a payment the chain collected first (its timeout, a race) is booked as
+      // collected, and the plan below then reads COLLECTED.
+      await this.intents.refundHeldForDispute(
         dispute.organizationId,
         intentId,
         DISPUTE_UPHELD_VOID_OUTCOME,
@@ -577,6 +595,44 @@ export class CallDisputeService {
       ],
     );
     return this.requireAny(disputeId);
+  }
+
+  /**
+   * The SLA's auto-uphold (G3.B1): the provider did not reply within 24 hours
+   * and nobody decided within 72. A system decision, written like an
+   * operator's (`AUTO_PLATFORM_MISS`, audited), then refunded like one. `false`
+   * when it could not be taken this pass (decided meanwhile, or the payment is
+   * still being redeemed into the hold).
+   */
+  async autoUphold(disputeId: string): Promise<boolean> {
+    const dispute = await this.requireAny(disputeId);
+    try {
+      await this.dataSource.transaction(async (manager) => {
+        await this.decideWithin({ manager } as QueryRunner, {
+          disputeId,
+          decision: CallDisputeDecision.UPHOLD,
+          note:
+            'Upheld automatically: the provider did not reply within 24 hours and no ' +
+            'decision was made within 72 hours of the filing.',
+          operatorId: 'system:call-dispute-sla',
+          resolutionKind: 'AUTO_PLATFORM_MISS',
+        });
+        await this.audit.record(manager, {
+          organizationId: dispute.organizationId,
+          actor: { type: 'system', id: 'call-dispute-sla' },
+          action: 'call_dispute.auto_upheld',
+          resourceType: CALL_DISPUTE_TARGET,
+          resourceId: disputeId,
+        });
+      });
+    } catch (error) {
+      this.logger.warn(
+        `Call dispute ${disputeId}: auto-uphold deferred: ${(error as Error).message}`,
+      );
+      return false;
+    }
+    await this.announceDecision(await this.settleRefund(disputeId));
+    return true;
   }
 
   /** Tell both sides. Best-effort: the decision stands whether or not this lands. */
@@ -836,7 +892,10 @@ export function toDto(row: DisputeEntity): CallDisputeDto {
     refundState: row.refundState as RefundState | null,
     refundAmount: money(row.refundAmount, row.assetId, row.decimals),
     restoredAmount: money(row.restoredAmount, row.assetId, row.decimals),
-    canRespond: row.state === DisputeState.OPEN && row.providerResponse === null,
+    canRespond:
+      row.state === DisputeState.OPEN &&
+      row.providerResponse === null &&
+      Date.now() - row.createdAt.getTime() < PROVIDER_REPLY_HOURS * 3_600_000,
     refundGuaranteed: row.refundGuaranteed ?? false,
     refundNotice: refundNoticeOf(row.refundGuaranteed ?? false),
     createdAt: row.createdAt,

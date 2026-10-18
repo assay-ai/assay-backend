@@ -3,12 +3,9 @@ import {
   loadCallDisputeConfig,
 } from '@modules/dispute/constants/call-dispute.config';
 import {
-  COLLECTION_DEADLINE_RESERVE_SECONDS,
-  collectableAtSql,
   disputeWindowEndOf,
   loadCollectionHoldWindowSeconds,
 } from '@modules/payment/constants/collection-hold.constants';
-import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
 import {
   RefundPlanInput,
   RefundPlanKind,
@@ -43,21 +40,29 @@ describe('planRefund — where an upheld refund’s money comes from', () => {
     expect(planRefund(intent())).toBe(RefundPlanKind.COLLECTED);
   });
 
-  it('a voucher a dispute held inside the window: release it', () => {
-    expect(planRefund(intent({ holdReleasedAt: null, disputeOutcome: 'OPEN' }))).toBe(
+  it('a payment held for a dispute filed inside the window: refund it from the hold', () => {
+    const held = { holdReleasedAt: null, heldStatus: 'HELD' };
+    expect(planRefund(intent({ ...held, disputeOutcome: 'OPEN' }))).toBe(
       RefundPlanKind.RELEASE_HELD,
     );
-    expect(planRefund(intent({ holdReleasedAt: null, disputeOutcome: 'UPHELD' }))).toBe(
+    expect(planRefund(intent({ ...held, disputeOutcome: 'UPHELD' }))).toBe(
+      RefundPlanKind.RELEASE_HELD,
+    );
+    expect(planRefund(intent({ ...held, rail: 'RAIL_A_PER_CALL', disputeOutcome: 'OPEN' }))).toBe(
       RefundPlanKind.RELEASE_HELD,
     );
   });
 
-  it('a held voucher that somehow reached the chain is not released blind', () => {
-    expect(
-      planRefund(
-        intent({ holdReleasedAt: null, disputeOutcome: 'OPEN', redemptionTxRefs: ['0xabc'] }),
-      ),
-    ).toBe(RefundPlanKind.COLLECTION_IN_PROGRESS);
+  it('a held payment no dispute holds is about to be collected: wait', () => {
+    expect(planRefund(intent({ holdReleasedAt: null, heldStatus: 'HELD' }))).toBe(
+      RefundPlanKind.COLLECTION_IN_PROGRESS,
+    );
+  });
+
+  it('a held payment the chain collected (its timeout): not refundable', () => {
+    expect(planRefund(intent({ heldStatus: 'COLLECTED', disputeOutcome: 'OPEN' }))).toBe(
+      RefundPlanKind.COLLECTED,
+    );
   });
 
   it('a voucher still awaiting redemption: wait, never release under an in-flight voucher', () => {
@@ -200,29 +205,19 @@ describe('loadCallDisputeConfig', () => {
 });
 
 describe('the dispute hold window', () => {
-  it('defaults to an hour, accepts 0 to 1440 minutes, and refuses anything else', () => {
+  it('defaults to an hour, accepts 1 to 1440 minutes, and refuses anything else', () => {
     expect(loadCollectionHoldWindowSeconds({})).toBe(3600);
-    expect(loadCollectionHoldWindowSeconds({ CALL_DISPUTE_HOLD_WINDOW_MINUTES: '0' })).toBe(0);
     expect(loadCollectionHoldWindowSeconds({ CALL_DISPUTE_HOLD_WINDOW_MINUTES: '15' })).toBe(900);
-    expect(() =>
-      loadCollectionHoldWindowSeconds({ CALL_DISPUTE_HOLD_WINDOW_MINUTES: '1441' }),
-    ).toThrow(/0 to 1440/);
-    expect(() =>
-      loadCollectionHoldWindowSeconds({ CALL_DISPUTE_HOLD_WINDOW_MINUTES: 'an hour' }),
-    ).toThrow();
-  });
-
-  it('caps the window below the voucher’s redemption grace', () => {
-    expect(collectableAtSql(3600)).toBe(
-      `LEAST(now() + interval '3600 seconds', "expires_at" + interval '${
-        REDEEM_GRACE_SECONDS - COLLECTION_DEADLINE_RESERVE_SECONDS
-      } seconds')`,
-    );
+    for (const bad of ['0', '1441', 'an hour']) {
+      expect(() =>
+        loadCollectionHoldWindowSeconds({ CALL_DISPUTE_HOLD_WINDOW_MINUTES: bad }),
+      ).toThrow(/1 to 1440/);
+    }
   });
 
   it('ends the guaranteed window a guard before collection', () => {
     const at = new Date('2026-10-18T12:00:00Z');
-    expect(disputeWindowEndOf(at)?.toISOString()).toBe('2026-10-18T11:59:30.000Z');
+    expect(disputeWindowEndOf(at)?.toISOString()).toBe('2026-10-18T11:59:00.000Z');
     expect(disputeWindowEndOf(null)).toBeNull();
   });
 });

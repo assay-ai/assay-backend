@@ -4,28 +4,28 @@
  * ## Where an upheld refund's money comes from
  *
  * The platform never pays or owes a provider, and never pays a buyer out of its
- * own funds. A paid call's money only ever moves from the buyer's escrow to the
- * provider, by the voucher's redemption — and that redemption waits for the
- * dispute hold (`payment_intents.collectable_at`, see
- * `payment/constants/collection-hold.constants.ts`). So:
+ * own funds. A served call's payment is HELD for the dispute window before it
+ * is the provider's ("redeem into hold", analysis §5): rail B's voucher is
+ * redeemed into the escrow's `held[payer][seq]` (out of the buyer's balance);
+ * rail A's provider credit is withheld in the ledger. So:
  *
- * 1. **Filed inside the hold** (`refund_guaranteed`): the voucher is set aside
- *    (`dispute_outcome = 'OPEN'`) before anything reached the chain, and stays
- *    out of the redemption queue until the decision. Upheld: the hold is
- *    released and the voucher closed for good (`PaymentIntentService.
- *    releaseDisputedHold`) — one `HOLD_RELEASE`, nobody credited, a full
- *    refund. Rejected: it goes back to the queue and is collected normally (or,
- *    if the voucher died during the dispute, becomes buyer debt through the
- *    existing flow).
- * 2. **Filed after the hold**: a quality signal. A refund happens only if the
- *    money is still uncollected for another reason — buyer debt (outstanding or
- *    written off) is voided through `PaymentIntentService.voidDebt`. A
- *    collected call is `NOT_REFUNDABLE`: nothing is booked.
+ * 1. **Filed while the payment is held** (more than 60 s before
+ *    `collectable_at`, or a rail-B call not redeemed yet) — `refund_guaranteed`:
+ *    `dispute_outcome = 'OPEN'` keeps the collection job off it. Upheld:
+ *    `refundHeld` puts it back in the buyer's escrow (rail A: the withheld
+ *    credit is released) — one `HOLD_RELEASE`, nobody credited, a full refund.
+ *    Rejected: collected at once.
+ * 2. **Filed after the window**: a quality signal. A refund happens only if
+ *    the money is uncollected for another reason — buyer debt (outstanding or
+ *    written off) is voided through `PaymentIntentService.voidDebt`. A collected
+ *    call is `NOT_REFUNDABLE`: nothing is booked.
  * 3. **Nobody was charged** (forfeited, voided): `NOT_CHARGED`.
- * 4. **Collection in flight** (a voucher past its hold, not yet redeemed; a
- *    debt's replacement being collected): the decision waits a few minutes —
- *    releasing a hold whose voucher may land would take the buyer's escrow AND
- *    hand it back in the books.
+ * 4. **In flight** (a rail-B voucher about to be redeemed into the hold, a held
+ *    payment past its window about to be collected, a debt's replacement being
+ *    collected): the decision waits a minute.
+ *
+ * A held payment past the chain's 7-day timeout may be collected by anyone, in
+ * the provider's favour; a refund is then impossible (`NOT_REFUNDABLE`).
  */
 
 /** Why a buyer disputes a call — a small closed set, plus a free note. */
@@ -93,7 +93,8 @@ export interface RefundPlanInput {
   readonly redemptionReplacedAt: Date | null;
   /** `OPEN` | `UPHELD` | `REJECTED` | null — see `payment_intents.dispute_outcome`. */
   readonly disputeOutcome?: string | null;
-  readonly redemptionTxRefs?: readonly string[] | null;
+  /** `HELD` | `COLLECTED` | `REFUNDED` | null — see `payment_intents.held_status`. */
+  readonly heldStatus?: string | null;
 }
 
 const RAIL_B = 'RAIL_B_VOUCHER';
@@ -111,7 +112,11 @@ export function planRefund(intent: RefundPlanInput): RefundPlanKind {
   }
 
   if (intent.rail !== RAIL_B) {
-    // Rail A commits inline at settle; an open hold is a repair still owed.
+    // Rail A: held in the ledger for the window, then committed.
+    if (intent.heldStatus === 'HELD') {
+      const disputed = intent.disputeOutcome === 'OPEN' || intent.disputeOutcome === 'UPHELD';
+      return disputed ? RefundPlanKind.RELEASE_HELD : RefundPlanKind.COLLECTION_IN_PROGRESS;
+    }
     return intent.holdReleasedAt ? RefundPlanKind.COLLECTED : RefundPlanKind.COLLECTION_IN_PROGRESS;
   }
 
@@ -126,14 +131,16 @@ export function planRefund(intent: RefundPlanInput): RefundPlanKind {
     if (!intent.holdReleasedAt || mark.startsWith('uncollected:')) return RefundPlanKind.VOID_DEBT;
   }
 
-  // Redeemed: the hold committed with its signature.
-  if (intent.holdReleasedAt) return RefundPlanKind.COLLECTED;
-
-  // Held by a dispute filed inside the hold, and never sent to the chain.
-  const held = intent.disputeOutcome === 'OPEN' || intent.disputeOutcome === 'UPHELD';
-  if (held && (intent.redemptionTxRefs ?? []).length === 0 && mark === '') {
-    return RefundPlanKind.RELEASE_HELD;
+  // The dispute hold (G3.B1): the payment is held, not yet the provider's.
+  const disputed = intent.disputeOutcome === 'OPEN' || intent.disputeOutcome === 'UPHELD';
+  if (intent.heldStatus === 'COLLECTED') return RefundPlanKind.COLLECTED;
+  if (intent.heldStatus === 'HELD') {
+    return disputed ? RefundPlanKind.RELEASE_HELD : RefundPlanKind.COLLECTION_IN_PROGRESS;
   }
+
+  // Collected the old way: the hold committed with its redemption.
+  if (intent.holdReleasedAt) return RefundPlanKind.COLLECTED;
+  // A rail-B voucher about to be redeemed into the hold.
   return RefundPlanKind.COLLECTION_IN_PROGRESS;
 }
 
