@@ -93,9 +93,21 @@ export class ToolEntity {
   @Column({ name: 'removed_at', type: 'timestamptz', nullable: true })
   removedAt: Date | null;
 
-  /** `TAKEDOWN` (the tool's own) | `HANDLE` (its handle's takedown) | `PROVIDER`. */
-  @Column({ name: 'removal_reason', type: 'varchar', length: 16, nullable: true })
-  removalReason: string | null;
+  /** Its own takedown (FR-18), standing. */
+  @Column({ name: 'taken_down_at', type: 'timestamptz', nullable: true })
+  takenDownAt: Date | null;
+
+  /** Its handle's takedown, standing: every tool under the handle stops. */
+  @Column({ name: 'handle_removed_at', type: 'timestamptz', nullable: true })
+  handleRemovedAt: Date | null;
+
+  /** A LISTED tool's category as its draft under review proposes it. */
+  @Column({ name: 'pending_category', type: 'varchar', length: 64, nullable: true })
+  pendingCategory: string | null;
+
+  /** A LISTED tool's tags as its draft under review proposes them. */
+  @Column({ name: 'pending_tags', type: 'text', array: true, nullable: true })
+  pendingTags: string[] | null;
 
   /** The status a takedown replaced, restored when the cutoff is reverted. */
   @Column({ name: 'status_before_removal', type: 'varchar', length: 16, nullable: true })

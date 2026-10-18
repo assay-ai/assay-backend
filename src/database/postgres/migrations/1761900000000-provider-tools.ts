@@ -10,8 +10,11 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   content hash the submission was for, so an approval can never be for
  *   content that changed after the operator read it. A takedown (FR-18) sets
  *   `removed_at` and keeps the status it replaced, so a reverted cutoff can
- *   restore it — a tool's own takedown (`TAKEDOWN`) and its handle's
- *   (`HANDLE`) are told apart, so lifting one never lifts the other.
+ *   restore it. A tool's own takedown (`taken_down_at`) and its handle's
+ *   (`handle_removed_at`) are recorded apart, so lifting one never lifts
+ *   the other: the tool serves again only when neither stands.
+ * - `pending_category` / `pending_tags`: a LISTED tool's category and tags
+ *   change only with a reviewed version, like every other word it shows.
  *   `review_version` has no foreign key on purpose: it may name
  *   a draft, and a rejected draft may be discarded.
  * - Name rules, as CHECKs: a PROVIDER name is `{handle}__{tool}` with the
@@ -40,7 +43,10 @@ export class ProviderTools1761900000000 implements MigrationInterface {
         ADD COLUMN "reviewed_by"           uuid         NULL,
         ADD COLUMN "review_content_hash"   varchar(64)  NULL,
         ADD COLUMN "removed_at"            timestamptz  NULL,
-        ADD COLUMN "removal_reason"        varchar(16)  NULL,
+        ADD COLUMN "taken_down_at"         timestamptz  NULL,
+        ADD COLUMN "handle_removed_at"     timestamptz  NULL,
+        ADD COLUMN "pending_category"      varchar(64)  NULL,
+        ADD COLUMN "pending_tags"          text[]       NULL,
         ADD COLUMN "status_before_removal" varchar(16)  NULL,
         ADD CONSTRAINT "fk_tools_approved_version"
           FOREIGN KEY ("id", "approved_version") REFERENCES "tool_versions" ("tool_id", "version"),
@@ -58,10 +64,10 @@ export class ProviderTools1761900000000 implements MigrationInterface {
         ADD CONSTRAINT "chk_tools_listed_approved"
           CHECK ("kind" <> 'PROVIDER' OR "visibility" <> 'LISTED' OR "approved_version" IS NOT NULL),
         ADD CONSTRAINT "chk_tools_removal"
-          CHECK (("removed_at" IS NULL) = ("removal_reason" IS NULL)
-                 AND ("removal_reason" IS NULL
-                      OR "removal_reason" IN ('TAKEDOWN', 'HANDLE', 'PROVIDER'))
-                 AND ("removed_at" IS NULL OR "status" = 'REMOVED'))
+          CHECK (("removed_at" IS NULL) = ("taken_down_at" IS NULL AND "handle_removed_at" IS NULL)
+                 AND ("removed_at" IS NULL OR "status" = 'REMOVED')),
+        ADD CONSTRAINT "chk_tools_pending_category"
+          CHECK ("pending_category" IS NULL OR "pending_category" ~ '^[a-z][a-z0-9-]{1,63}$')
     `);
     await queryRunner.query(`
       CREATE INDEX "idx_tools_provider_owner"
@@ -137,8 +143,12 @@ export class ProviderTools1761900000000 implements MigrationInterface {
         DROP CONSTRAINT "chk_tools_review_kind",
         DROP CONSTRAINT "chk_tools_provider_name",
         DROP CONSTRAINT "fk_tools_approved_version",
+        DROP CONSTRAINT "chk_tools_pending_category",
         DROP COLUMN "status_before_removal",
-        DROP COLUMN "removal_reason",
+        DROP COLUMN "pending_tags",
+        DROP COLUMN "pending_category",
+        DROP COLUMN "handle_removed_at",
+        DROP COLUMN "taken_down_at",
         DROP COLUMN "removed_at",
         DROP COLUMN "review_content_hash",
         DROP COLUMN "reviewed_by",

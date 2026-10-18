@@ -25,7 +25,13 @@ import {
 import { SharingAction, SharingTransitionError, applySharing } from '../domain/sharing';
 import { ToolsetErrors } from '../errors/toolset.errors';
 import { AccessEpochService } from './access-epoch.service';
-import { removeHandleTools, renameHandleTools, restoreHandleTools } from './handle-tools';
+import {
+  removeHandleTools,
+  renameHandleTools,
+  restoreHandleTools,
+  restoreTakenDownTool,
+  tombstoneHandleTools,
+} from './handle-tools';
 import { HandlesService, lockHandle } from './handles.service';
 import { sharingPatchOf, sharingStateOf } from './sharing-row';
 import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
@@ -38,16 +44,6 @@ export enum CutoffTarget {
   HANDLE = 'HANDLE',
   /** A provider tool (T4, `/operator/tools/:id/takedown`). */
   TOOL = 'TOOL',
-}
-
-/** Why a tool is REMOVED (`tools.removal_reason`). */
-export enum ToolRemovalReason {
-  /** Its own takedown. */
-  TAKEDOWN = 'TAKEDOWN',
-  /** Its handle's takedown: every URL and tool under the handle stops. */
-  HANDLE = 'HANDLE',
-  /** Its provider withdrew it. */
-  PROVIDER = 'PROVIDER',
 }
 
 export enum CutoffAction {
@@ -144,18 +140,28 @@ export class ToolsetModerationService {
       .where('tool.id = :id', { id: input.toolId })
       .getOne();
     if (!tool || tool.kind !== 'PROVIDER') throw ToolsetErrors.notFound();
-    if (tool.status === 'REMOVED') {
+    // Its own takedown, recorded even when its handle's already removed it:
+    // the two reasons stand apart (lifting one never lifts the other).
+    if (tool.takenDownAt) {
       throw ToolsetErrors.sharingRefused({ refusal: 'ALREADY_TAKEN_DOWN' });
     }
     const now = this.now();
+    const removedNow = tool.status !== 'REMOVED';
     await manager.update(
       ToolEntity,
       { id: tool.id },
       {
         status: 'REMOVED',
-        removedAt: now,
-        removalReason: ToolRemovalReason.TAKEDOWN,
-        statusBeforeRemoval: tool.status,
+        removedAt: tool.removedAt ?? now,
+        takenDownAt: now,
+        statusBeforeRemoval: removedNow ? tool.status : tool.statusBeforeRemoval,
+        // A review in flight is void: nothing taken down can be approved.
+        ...(tool.reviewStatus === 'PENDING'
+          ? {
+              reviewStatus: tool.approvedVersion !== null ? 'APPROVED' : 'NONE',
+              reviewContentHash: null,
+            }
+          : {}),
         updatedAt: now,
       },
     );
@@ -252,16 +258,10 @@ export class ToolsetModerationService {
         );
       }
     } else if (cutoff.targetType === CutoffTarget.TOOL) {
-      // Restored only from its own takedown: a tool removed since for
-      // another reason (its handle's takedown) stays removed.
-      await manager.query(
-        `UPDATE tools
-            SET status = COALESCE(status_before_removal, 'ACTIVE'),
-                removed_at = NULL, removal_reason = NULL, status_before_removal = NULL,
-                updated_at = now()
-          WHERE id = $1 AND status = 'REMOVED' AND removal_reason = 'TAKEDOWN'`,
-        [cutoff.targetId],
-      );
+      // Its own reason is cleared; it serves again only if its handle's
+      // takedown does not stand and it is still named under its owner's
+      // current, active handle (`restoreTakenDownTool`).
+      await restoreTakenDownTool(manager, cutoff.targetId);
     } else {
       await lockHandle(manager, cutoff.targetId);
       const org = await manager
@@ -397,6 +397,9 @@ export class ToolsetModerationService {
     }
 
     const now = this.now();
+    // The old holder's `{handle}__…` tools are tombstoned: they never come
+    // back under the brand's name, and the names are free for the new holder.
+    await tombstoneHandleTools(manager, from.id, handle);
     await manager.update(
       OrganizationEntity,
       { id: from.id },
