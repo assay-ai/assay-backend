@@ -27,7 +27,9 @@ import {
 } from '../domain/handle';
 import { ToolsetErrors } from '../errors/toolset.errors';
 import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
-import { renameHandleTools } from './handle-tools';
+import { lockHandle, renameHandleTools } from './handle-tools';
+
+export { lockHandle };
 
 /** What a handle in a URL names right now. */
 export type ResolvedHandle =
@@ -106,11 +108,25 @@ export class HandlesService {
 
     try {
       await this.dataSource.transaction(async (manager) => {
-        // The claimant first, then the handle, always in this order: two
-        // claims by one person serialise on the gate, two claims of one name
-        // on the name, and neither order can deadlock the other.
+        // The claimant first, then the handle, then the organization, always
+        // in this order: two claims by one person serialise on the gate, two
+        // claims of one name on the name, two claims by one organization on
+        // its row, and no order can deadlock another.
         await lockClaimant(manager, user);
         await lockHandle(manager, handle);
+        // The organization again, locked: a claim, a reassignment or a tool
+        // created since the read above changed what it holds.
+        const current = await manager.findOne(OrganizationEntity, {
+          where: { id: organizationId },
+          lock: { mode: 'pessimistic_write' },
+        });
+        if (!current) throw ToolsetErrors.notFound();
+        if (current.handle === handle && current.handleStatus === HandleStatus.ACTIVE) return;
+        // Locked or frozen since the read above: nothing changed, so nothing
+        // is claimed and nothing is audited.
+        if (current.handleLockedAt || current.handleStatus === HandleStatus.FROZEN) {
+          throw ToolsetErrors.handleLocked();
+        }
         // The gate again, under the claimant's lock: the read above raced.
         const recent = (
           (await manager.query(
@@ -126,22 +142,13 @@ export class HandlesService {
           throw ToolsetErrors.handleTaken({ suggestions: await this.freeSuggestions(handle) });
         }
         // Its provider tools (all PRIVATE before the lock) are named under it.
-        if (org.handle) await renameHandleTools(manager, organizationId, org.handle, handle);
-        const changed = await manager
-          .createQueryBuilder()
-          .update(OrganizationEntity)
-          .set({
-            handle,
-            handleSkeleton: handleSkeleton(handle),
-            handleStatus: HandleStatus.ACTIVE,
-          })
-          .where('id = :organizationId', { organizationId })
-          .andWhere('handle_locked_at IS NULL')
-          .andWhere(`(handle_status IS NULL OR handle_status <> 'FROZEN')`)
-          .execute();
-        // Locked or frozen since the read above: nothing changed, so nothing
-        // is claimed and nothing is audited.
-        if (!changed.affected) throw ToolsetErrors.handleLocked();
+        const previous = current.handle;
+        if (previous) await renameHandleTools(manager, organizationId, previous, handle);
+        await manager.update(
+          OrganizationEntity,
+          { id: organizationId },
+          { handle, handleSkeleton: handleSkeleton(handle), handleStatus: HandleStatus.ACTIVE },
+        );
         await manager.insert(OrgHandleClaimEntity, {
           orgId: organizationId,
           privyUserId: user,
@@ -151,10 +158,10 @@ export class HandlesService {
         await this.audit.record(manager, {
           organizationId,
           actor,
-          action: org.handle ? 'org.handle_changed' : 'org.handle_claimed',
+          action: previous ? 'org.handle_changed' : 'org.handle_claimed',
           resourceType: 'organization',
           resourceId: organizationId,
-          before: { handle: org.handle },
+          before: { handle: previous },
           after: { handle },
         });
       });
@@ -322,9 +329,4 @@ export class HandlesService {
 /** Serialises the claims of one Privy user, so the 3-in-30-days gate holds under concurrency. */
 export async function lockClaimant(manager: EntityManager, user: string): Promise<void> {
   await manager.query(`SELECT pg_advisory_xact_lock(hashtext('claimant:' || $1))`, [user]);
-}
-
-/** Serialises every claim, rename and reassignment of one handle. */
-export async function lockHandle(manager: EntityManager, handle: string): Promise<void> {
-  await manager.query(`SELECT pg_advisory_xact_lock(hashtext('handle:' || $1))`, [handle]);
 }
