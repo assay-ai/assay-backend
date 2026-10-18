@@ -158,10 +158,10 @@ export class DbProviderRegistry implements ProviderRegistryPort {
     for (const row of rows) {
       found.set(row.organizationId, {
         providerId: row.organizationId,
-        // A blocked provider reads as `SUSPENDED` to routing, so every path
-        // that routes — `tools/call`, `tools/list` and the catalogue's quotes —
-        // refuses it with the reason it already gives a suspended one, and no
-        // router code has to know the blocklist exists.
+        // A blocked provider reads as `SUSPENDED` to routing. Defence in
+        // depth only: the router drops blocked organizations from the pool
+        // itself (`ProviderRouterService.unblocked`), against the live
+        // blocklist, so they are never rejected, reported or priced.
         status: this.blocklist.organizationBlock(row.organizationId)
           ? ProviderStatus.SUSPENDED
           : (row.status as ProviderStatus),

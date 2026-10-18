@@ -1,5 +1,6 @@
 import type { Redis } from 'ioredis';
 
+import type { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
@@ -55,6 +56,7 @@ import { ProviderRouterService } from '@modules/tool/services/provider-router.se
 import { DEFAULT_ROUTER_TUNING, RouterConfig } from '@modules/tool/services/routing.config';
 import { MoneyUtil } from '@utils/money.util';
 
+import { noBlocks } from '../../helpers/blocklist';
 import { FakeRedis } from './fake-redis';
 
 /**
@@ -569,6 +571,8 @@ export interface RouterHarnessOptions {
   readonly config?: Partial<RouterConfig>;
   /** The observed-stats recorder. Absent: the router records nothing, as before it existed. */
   readonly observations?: BindingAttemptRecorder;
+  /** The account blocklist. Absent: nothing is blocked. */
+  readonly blocklist?: AccountBlocklistService;
 }
 
 export interface RouterHarness {
@@ -660,6 +664,7 @@ export function buildRouter(options: RouterHarnessOptions): RouterHarness {
     // Defaults to "always draw the first entry", which makes selection
     // deterministic for every test that is not about the distribution.
     options.random ?? (() => 0),
+    options.blocklist ?? noBlocks(),
     options.observations ?? null,
   );
 
