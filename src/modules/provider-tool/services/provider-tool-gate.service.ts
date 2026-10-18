@@ -7,15 +7,15 @@ import { ProviderRepository } from '@database/postgres/repositories/provider.rep
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { BindingPublishService } from '@modules/provider/services/binding-publish.service';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
-import { isServable } from '@modules/tool/domain/contract/contract-versions';
 import { ScreenFinding, screenContract } from '@modules/tool/domain/contract/schema-screen';
 import { MappingDirection, MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { JsonSchema, validateAgainstSchema } from '@modules/tool/domain/mapping/schema-validator';
 import { parseProviderToolName } from '@modules/tool/domain/provider-tool-name';
-import { BindingStatus, ToolVersionStatus } from '@modules/tool/ports/tool.types';
+import { BindingStatus } from '@modules/tool/ports/tool.types';
 import { HandlesService } from '@modules/toolset/services/handles.service';
 
 import { declaredRuleProblems } from '../domain/declared-rules';
+import { servedVersionsOf } from '../domain/served-versions';
 import {
   ProviderToolGateDto,
   ProviderToolGateRequirementDto,
@@ -103,9 +103,8 @@ export class ProviderToolGateService {
         : 'Your organization has no active public name.',
     );
 
-    const servable = versions.filter(
-      (version) => version.status !== ToolVersionStatus.DRAFT && isServable(version as never),
-    );
+    // What a call can be served at: the newest version of each major.
+    const servable = servedVersionsOf(versions);
     push(
       GateRequirement.PUBLISHED_VERSION,
       servable.length > 0 || draft !== null,

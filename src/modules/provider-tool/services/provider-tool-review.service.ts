@@ -34,10 +34,10 @@ import { ProviderToolPolicyService } from './provider-tool-policy.service';
 import {
   ProviderToolsService,
   draftShapeOf,
-  isServedRow,
   lockTool,
   publishDraft,
   reviewedVersionOf,
+  servedVersionsOf,
   settledSemver,
   versionDtoOf,
 } from './provider-tools.service';
@@ -315,7 +315,7 @@ export function coveredVersions(
   if (kind === ReviewKind.CHANGE) {
     return versions.filter((version) => version.version === row.reviewVersion);
   }
-  return versions.filter(isServedRow).sort((a, b) => a.version - b.version);
+  return servedVersionsOf(versions);
 }
 
 /** The checklist, machine half filled in; PASS/FAIL are the screen's, CHECK is the operator's. */
