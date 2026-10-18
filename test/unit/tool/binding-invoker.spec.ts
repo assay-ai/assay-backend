@@ -121,6 +121,26 @@ describe('EgressBindingInvoker (router call path)', () => {
   const tool = buildTool();
   const binding = buildBinding(A, { endpoint: 'http://provider-a.example.com/api' });
 
+  it('asks for the egress relay on every provider call', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from('{}'),
+      bytes: 2,
+      url: 'http://provider-a.example.com/api/search',
+      redirects: 0,
+    });
+    await plainInvoker({ request } as unknown as EgressHttpClient).invoke({
+      tool,
+      binding,
+      input: { query: 'x' },
+      timeoutMs: 2_000,
+      callId: 'test-call-id',
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][0].policy.relay).toBe(true);
+  });
+
   it('builds the upstream request from the stored mapping', async () => {
     respondWith(200, JSON.stringify({ answer: 'from upstream' }));
 

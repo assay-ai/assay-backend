@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -25,6 +25,7 @@ import {
   Tool,
   ToolBinding,
 } from '@modules/tool/ports/tool.types';
+import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from '@shared/network/egress/egress-relay.config';
 import { canonicalJson } from '@shared/crypto/canonical-json';
 
 import {
@@ -35,7 +36,11 @@ import {
 import { ProviderRoutingState } from '../ports/provider.types';
 import { ValidateMappingBodyDto, ValidateMappingResponseDto } from '../dto/validate-mapping.dto';
 import { ProviderErrors } from '../errors/provider.errors';
-import { credentialQueryKeys, secretConstantHeaders } from '../credentials/credential-rules';
+import {
+  credentialQueryKeys,
+  relayUnsupportedPort,
+  secretConstantHeaders,
+} from '../credentials/credential-rules';
 import {
   CHAIN_ENROLMENT_SOURCE,
   ChainEnrolmentPort,
@@ -151,6 +156,9 @@ export class BindingEditorService {
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
     @Inject(PROVIDER_MINIMUM_STAKE_BY_CHAIN)
     private readonly minimumStakeByChain: MinimumStakeByChain,
+    @Optional()
+    @Inject(EGRESS_RELAY_CONFIG)
+    private readonly relayConfig?: EgressRelayConfig | null,
   ) {}
 
   /**
@@ -206,6 +214,7 @@ export class BindingEditorService {
     const request = inspectRequestMapping(body.requestMapping, context);
     const requestMapping = request.spec;
     assertNoCredentialsInMapping(body.endpoint, requestMapping);
+    this.assertEndpointRelayable(body.endpoint);
     const responseMapping = inspectResponseMapping(body.responseMapping, context).spec;
     // The contract half (T3): the majors served — the tool's current major
     // unless named — and the optional fields promised, checked against every
@@ -359,7 +368,10 @@ export class BindingEditorService {
     // DTO refuses `[]` and the row's CHECK refuses it again, because a binding
     // offered on no chain is unroutable in a way no screen explains.
     if (body.settlementChains !== undefined) row.settlementChains = body.settlementChains;
-    if (body.endpoint !== undefined) row.endpoint = body.endpoint;
+    if (body.endpoint !== undefined) {
+      this.assertEndpointRelayable(body.endpoint);
+      row.endpoint = body.endpoint;
+    }
     // Outside `VERSIONED_FIELDS`: a descriptive setting, not a term of the revision.
     if (body.authMode !== undefined) row.authMode = body.authMode;
     if (body.pricingMode !== undefined) row.pricingMode = body.pricingMode;
@@ -435,6 +447,12 @@ export class BindingEditorService {
     }, row.toolId);
 
     return toSavedDto(saved.row, saved.publishedEndpoint);
+  }
+
+  /** With the relay configured, an endpoint on a port it cannot reach is refused at Save. */
+  private assertEndpointRelayable(endpoint: string): void {
+    const port = relayUnsupportedPort(endpoint, Boolean(this.relayConfig));
+    if (port !== null) throw ProviderErrors.endpointPortNotRelayable({ port });
   }
 
   /** The endpoint of the published revision, or null when never published. */

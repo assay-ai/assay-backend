@@ -17,6 +17,9 @@ import {
   withLimits,
 } from '@shared/network/egress';
 
+import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from '@shared/network/egress/egress-relay.config';
+
+import { relayUnsupportedPort } from '../credentials/credential-rules';
 import { ConnectivityCheckResultDto, toConnectivityDto } from '../dto/provider-shared.dto';
 import { ProviderErrors } from '../errors/provider.errors';
 import { ConnectivityOutcome } from '../ports/provider-registration.types';
@@ -55,6 +58,7 @@ const HTTPS_ONLY_POLICY: EgressPolicy = Object.freeze({
   trust: EgressTrust.PUBLIC_ONLY,
   allowedProtocols: Object.freeze(['https:']),
   limits: UNTRUSTED_EGRESS_POLICY.limits,
+  relay: true,
 });
 
 /** Refusals that mean "the guard would not let a packet leave" — `BLOCKED`, not `UNREACHABLE`. */
@@ -103,6 +107,9 @@ export class ProviderConnectivityService {
     // reinvented so the pre-flight resolve in {@link probe} can be pointed at a
     // test-controlled zone the same way the dial itself already can.
     @Optional() @Inject(EGRESS_DNS_LOOKUP) private readonly dnsLookup?: EgressDnsLookup,
+    @Optional()
+    @Inject(EGRESS_RELAY_CONFIG)
+    private readonly relayConfig?: EgressRelayConfig | null,
   ) {}
 
   /**
@@ -167,6 +174,9 @@ export class ProviderConnectivityService {
     organizationId: string,
     endpoint: string,
   ): Promise<ConnectivityCheckResultDto> {
+    const port = relayUnsupportedPort(endpoint, Boolean(this.relayConfig));
+    if (port !== null) throw ProviderErrors.endpointPortNotRelayable({ port });
+
     const result = await this.check(organizationId, endpoint);
 
     if (result.outcome !== ConnectivityOutcome.REACHABLE) {
@@ -233,7 +243,7 @@ export class ProviderConnectivityService {
     try {
       const response = await this.http.request({
         url: endpoint,
-        policy: withLimits(UNTRUSTED_EGRESS_POLICY, CONNECTIVITY_PROBE_LIMITS),
+        policy: withLimits({ ...UNTRUSTED_EGRESS_POLICY, relay: true }, CONNECTIVITY_PROBE_LIMITS),
       });
 
       return {
