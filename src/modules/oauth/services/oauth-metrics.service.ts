@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { Counter } from 'prom-client';
 
+import type { McpUnauthorizedReason } from '@modules/mcp/ports/mcp-unauthorized.port';
 import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 
 /** `oauth_authorize_total{outcome}` (spec §6.7). */
@@ -45,7 +46,9 @@ export type OAuthTokenResult =
   | 'unsupported_grant_type'
   | 'invalid_scope'
   | 'invalid_target'
-  | 'temporarily_unavailable';
+  | 'temporarily_unavailable'
+  /** An unexpected failure: the controller answered 500 `server_error`. */
+  | 'server_error';
 
 /** `oauth_refresh_reuse_total{kind}` (§6.3.11). */
 export type OAuthRefreshReuseKind = 'revoked' | 'stale';
@@ -60,8 +63,8 @@ export type OAuthCimdFetchResult =
   | 'blocked_address'
   | 'budget';
 
-/** `mcp_unauthorized_total{reason}`. */
-export type McpUnauthorizedReason = 'missing' | 'unknown' | 'expired' | 'revoked' | 'audience';
+/** `mcp_unauthorized_total{reason}`: the closed set the MCP port defines. */
+export type { McpUnauthorizedReason };
 
 /**
  * The OAuth metrics of spec §6.7, on the registry `MetricsRegistryService`

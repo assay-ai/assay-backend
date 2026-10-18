@@ -1,5 +1,9 @@
 import { McpErrorCode, McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
+import {
+  McpUnauthorizedReason,
+  unauthorizedReasonOf,
+} from '@modules/mcp/ports/mcp-unauthorized.port';
 import { BaseError } from '@shared/errors/base.error';
 
 import { SessionSourceMode } from '../domain/session-source-mode';
@@ -41,6 +45,9 @@ export class CompositeMcpSessionSource implements McpSessionPort {
   constructor(private readonly sources: readonly McpSessionPort[]) {}
 
   async resolve(bearerToken: string | null): Promise<McpSession> {
+    // The private 401 reason a source gave (only the OAuth source gives one),
+    // kept for the metric; the refusal itself is the same either way.
+    let reason: McpUnauthorizedReason | null = null;
     for (const source of this.sources) {
       try {
         return await source.resolve(bearerToken);
@@ -48,10 +55,13 @@ export class CompositeMcpSessionSource implements McpSessionPort {
         if (!isUnrecognisedCredential(error)) {
           throw error;
         }
+        reason = unauthorizedReasonOf(error) ?? reason;
       }
     }
 
-    throw McpErrors.credentialInvalid();
+    throw reason
+      ? McpErrors.credentialInvalid({ unauthorizedReason: reason })
+      : McpErrors.credentialInvalid();
   }
 }
 

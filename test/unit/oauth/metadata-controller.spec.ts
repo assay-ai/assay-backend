@@ -3,7 +3,7 @@ import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
 import { authorizationServerMetadata } from '@modules/oauth/domain/metadata';
-import { OAuthMcpModule } from '@modules/oauth/oauth-mcp.module';
+import { OAuthDiscoveryModule } from '@modules/oauth/oauth-discovery.module';
 import { MCP_HOST_CONFIG } from '@modules/toolset/config/mcp-host.config';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
@@ -18,7 +18,7 @@ describe('OAuth metadata controller', () => {
   let app: INestApplication;
 
   beforeAll(async () => {
-    const moduleRef = await Test.createTestingModule({ imports: [OAuthMcpModule] })
+    const moduleRef = await Test.createTestingModule({ imports: [OAuthDiscoveryModule] })
       .overrideProvider(MCP_HOST_CONFIG)
       .useValue({ mcpPublicUrl: MCP, webAppUrl: WEB })
       .compile();
