@@ -114,7 +114,7 @@ export const DisputeErrors = createDomainErrorFactory('DISPUTE', {
     statusCode: 429,
     message: (context?: Record<string, any>) =>
       (context?.scope === 'provider'
-        ? `Too many open disputes against this provider in the last 24 hours`
+        ? `Too many disputes against this provider in the last 24 hours`
         : `Too many disputes filed in the last 24 hours`) +
       `${context?.limit !== undefined ? ` (limit ${context.limit})` : ''}`,
   },

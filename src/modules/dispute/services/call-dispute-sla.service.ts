@@ -29,6 +29,9 @@ export const CALL_DISPUTE_SLA = Object.freeze({
 
 export const CALL_DISPUTE_SLA_ALERT = 'call_dispute_sla';
 
+/** A deferred auto-uphold is retried this often. */
+const SLA_RETRY_MS = 15 * 60_000;
+
 /**
  * The SLA's actor in the override register: a SUSPENDED operator with no
  * wallet and no console access, seeded by migration `1761800000002`.
@@ -47,6 +50,7 @@ interface DueRow {
   readonly id: string;
   readonly created_at: Date;
   readonly organization_id: string;
+  readonly respondent_provider_id: string;
   readonly provider_response: string | null;
   readonly provider_silent_at: Date | null;
   readonly paged_48h_at: Date | null;
@@ -91,47 +95,70 @@ export class CallDisputeSlaService {
   ) {}
 
   async sweep(now: Date = new Date()): Promise<{ autoUpheld: number; paged: number }> {
-    const at = (ms: number) => new Date(now.getTime() - ms);
+    // The due set (review P2-2 of the second pass): `sla_due_at` is the next
+    // step of every open dispute, rewritten on every pass — a row leaves the
+    // set when nothing is left, and the oldest due goes first.
     const rows = (await this.dataSource.query(
-      `SELECT "id", "created_at", "organization_id", "provider_response", "provider_silent_at",
-              "paged_48h_at", "paged_72h_at", "paged_6d_at", "refund_guaranteed"
+      `SELECT "id", "created_at", "organization_id", "respondent_provider_id",
+              "provider_response", "provider_silent_at", "paged_48h_at", "paged_72h_at",
+              "paged_6d_at", "refund_guaranteed"
          FROM "disputes"
-        WHERE "intent_id" IS NOT NULL AND "state" = 'OPEN'
-          AND (("provider_response" IS NULL AND "provider_silent_at" IS NULL AND "created_at" <= $1)
-               OR ("paged_48h_at" IS NULL AND "created_at" <= $2)
-               OR ("paged_72h_at" IS NULL AND "created_at" <= $3)
-               OR ("paged_6d_at" IS NULL AND "created_at" <= $4))
-        ORDER BY "created_at" ASC
+        WHERE "intent_id" IS NOT NULL AND "state" = 'OPEN' AND "sla_due_at" <= $1
+        ORDER BY "sla_due_at" ASC
         LIMIT 500`,
-      [
-        at(CALL_DISPUTE_SLA.providerReplyMs),
-        at(CALL_DISPUTE_SLA.pageMs),
-        at(CALL_DISPUTE_SLA.decideMs),
-        at(CALL_DISPUTE_SLA.lastPageMs),
-      ],
+      [now],
     )) as DueRow[];
 
     let autoUpheld = 0;
     let paged = 0;
     for (const row of rows) {
-      const age = now.getTime() - new Date(row.created_at).getTime();
+      const created = new Date(row.created_at).getTime();
+      const age = now.getTime() - created;
       const silent = row.provider_response === null;
+      let paged48 = row.paged_48h_at !== null;
+      let paged72 = row.paged_72h_at !== null;
+      let paged6d = row.paged_6d_at !== null;
+      let deferred = false;
 
       if (silent && !row.provider_silent_at && age >= CALL_DISPUTE_SLA.providerReplyMs) {
         await this.mark(row.id, 'provider_silent_at', now);
       }
-      if (age >= CALL_DISPUTE_SLA.decideMs && !row.paged_72h_at) {
-        const why = await this.whyNotAutoUphold(row, silent);
-        if (why === null && (await this.autoUphold(row))) {
-          autoUpheld += 1;
-          continue;
-        }
-        if (why !== null && (await this.mark(row.id, 'paged_72h_at', now))) {
-          await this.page(row.id, AlertSeverity.WARN, `72 hours undecided; held — ${why}`);
+      if (age >= CALL_DISPUTE_SLA.pageMs && !paged48) {
+        if (await this.mark(row.id, 'paged_48h_at', now)) {
+          await this.page(row.id, AlertSeverity.WARN, '48 hours undecided');
           paged += 1;
         }
+        paged48 = true;
       }
-      if (age >= CALL_DISPUTE_SLA.lastPageMs && !row.paged_6d_at) {
+      if (age >= CALL_DISPUTE_SLA.decideMs && !paged72) {
+        const why = await this.whyNotAutoUphold(row, silent, now);
+        if (why === null) {
+          if (await this.autoUphold(row)) {
+            autoUpheld += 1;
+            continue;
+          }
+          deferred = true;
+          if (age >= CALL_DISPUTE_SLA.lastPageMs) {
+            // Deferred for days (never reached the hold): stop retrying, page.
+            await this.mark(row.id, 'paged_72h_at', now);
+            await this.page(
+              row.id,
+              AlertSeverity.CRITICAL,
+              'the auto-uphold kept deferring; ' + 'an operator must decide',
+            );
+            paged72 = true;
+            deferred = false;
+            paged += 1;
+          }
+        } else {
+          if (await this.mark(row.id, 'paged_72h_at', now)) {
+            await this.page(row.id, AlertSeverity.WARN, `72 hours undecided; held — ${why}`);
+            paged += 1;
+          }
+          paged72 = true;
+        }
+      }
+      if (age >= CALL_DISPUTE_SLA.lastPageMs && !paged6d) {
         if (await this.mark(row.id, 'paged_6d_at', now)) {
           await this.page(
             row.id,
@@ -141,14 +168,20 @@ export class CallDisputeSlaService {
           );
           paged += 1;
         }
-        continue;
+        paged6d = true;
       }
-      if (age >= CALL_DISPUTE_SLA.pageMs && !row.paged_48h_at) {
-        if (await this.mark(row.id, 'paged_48h_at', now)) {
-          await this.page(row.id, AlertSeverity.WARN, '48 hours undecided');
-          paged += 1;
-        }
-      }
+
+      // The next step, or none.
+      const next = [
+        !paged48 ? created + CALL_DISPUTE_SLA.pageMs : null,
+        !paged72 && !deferred ? created + CALL_DISPUTE_SLA.decideMs : null,
+        deferred ? now.getTime() + SLA_RETRY_MS : null,
+        !paged6d ? created + CALL_DISPUTE_SLA.lastPageMs : null,
+      ].filter((at): at is number => at !== null);
+      await this.dataSource.query(`UPDATE "disputes" SET "sla_due_at" = $2 WHERE "id" = $1`, [
+        row.id,
+        next.length > 0 ? new Date(Math.min(...next)) : null,
+      ]);
     }
 
     paged += await this.pageStuckRefunds(now);
@@ -189,9 +222,18 @@ export class CallDisputeSlaService {
   }
 
   /** `null` when the SLA may auto-uphold; otherwise why a human must decide. */
-  private async whyNotAutoUphold(row: DueRow, silent: boolean): Promise<string | null> {
+  private async whyNotAutoUphold(row: DueRow, silent: boolean, now: Date): Promise<string | null> {
     if (!silent) return 'the provider replied, so an operator decides';
     if (!row.refund_guaranteed) return 'the refund is not guaranteed, so an operator decides';
+    const [upheld] = (await this.dataSource.query(
+      `SELECT count(*)::int AS "count" FROM "disputes"
+        WHERE "respondent_provider_id" = $1 AND "intent_id" IS NOT NULL
+          AND "resolution_kind" = 'AUTO_PLATFORM_MISS' AND "resolved_at" > $2`,
+      [row.respondent_provider_id, new Date(now.getTime() - 24 * HOUR_MS)],
+    )) as { count: number }[];
+    if (Number(upheld?.count ?? 0) >= this.config.maxAutoUpholdsPerProviderPerDay) {
+      return 'the provider’s daily auto-uphold cap is reached, so an operator decides';
+    }
     const dispute = await this.disputes.requireAny(row.id);
     if (
       needsSecondOperator(
@@ -246,25 +288,38 @@ export class CallDisputeSlaService {
     return true;
   }
 
-  /** Upheld six days ago and the refund still pending: page, once. */
+  /**
+   * An upheld refund still pending as the chain's timeout nears (review P1 of
+   * the second pass): measured from the held payment's `collectable_at` — the
+   * timeout is `collectable_at + 7 d` — and paged at 5 days, then at 6.
+   */
   private async pageStuckRefunds(now: Date): Promise<number> {
-    const rows = (await this.dataSource.query(
-      `UPDATE "disputes" SET "paged_6d_at" = $1
-        WHERE "intent_id" IS NOT NULL AND "state" = 'UPHELD' AND "refund_state" = 'PENDING'
-          AND "paged_6d_at" IS NULL AND "resolved_at" <= $2
-        RETURNING "id"`,
-      [now, new Date(now.getTime() - CALL_DISPUTE_SLA.lastPageMs)],
-    )) as unknown;
-    const ids = returnedIds(rows);
-    for (const id of ids) {
-      await this.page(
-        id,
-        AlertSeverity.CRITICAL,
-        'upheld six days ago and the refund is still ' +
-          'pending; refundHeld closes at the chain’s 7-day timeout',
-      );
+    let paged = 0;
+    for (const [days, column] of [
+      [5, 'refund_paged_5d_at'],
+      [6, 'refund_paged_6d_at'],
+    ] as const) {
+      const rows = (await this.dataSource.query(
+        `UPDATE "disputes" d SET "${column}" = $1
+           FROM "payment_intents" i
+          WHERE d."intent_id" = i."id" AND d."organization_id" = i."organization_id"
+            AND d."state" = 'UPHELD' AND d."refund_state" = 'PENDING' AND d."${column}" IS NULL
+            AND i."held_status" = 'HELD'
+            AND i."collectable_at" + make_interval(days => $2) <= $1
+          RETURNING d."id"`,
+        [now, days],
+      )) as unknown;
+      for (const id of returnedIds(rows)) {
+        await this.page(
+          id,
+          AlertSeverity.CRITICAL,
+          `upheld and the refund still pending ` +
+            `${days} days after the window; refundHeld closes at 7 days`,
+        );
+        paged += 1;
+      }
     }
-    return ids.length;
+    return paged;
   }
 
   /**

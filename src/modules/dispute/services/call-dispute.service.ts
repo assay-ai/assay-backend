@@ -199,6 +199,8 @@ export class CallDisputeService {
       evidenceSnapshot: snapshot,
       assetId: intent.assetId,
       decimals: intent.decimals,
+      // The SLA's first step: the provider's 24 hours to reply.
+      slaDueAt: new Date(now.getTime() + PROVIDER_REPLY_HOURS * 3_600_000),
     });
 
     try {
@@ -215,16 +217,17 @@ export class CallDisputeService {
         // Inside the dispute hold, the voucher is set aside before anything can
         // reach the chain: a refund is then guaranteed. After it, the dispute is
         // a quality signal (see `../domain/call-dispute.ts`).
-        // A wave against one provider cannot ride the auto-uphold (review P2-3).
+        // Per (buyer, provider), under the buyer's lock above (review P2-1 of
+        // the second pass): no buyer can fill another buyer's allowance.
         const [against] = (await manager.query(
-          `SELECT count(*)::int AS "open" FROM "disputes"
-            WHERE "respondent_provider_id" = $1 AND "intent_id" IS NOT NULL
-              AND "state" = 'OPEN' AND "created_at" > $2`,
-          [intent.providerId, new Date(now.getTime() - DAY_MS)],
-        )) as { open: number }[];
-        if (Number(against?.open ?? 0) >= this.config.maxOpenPerProviderPerDay) {
+          `SELECT count(*)::int AS "filed" FROM "disputes"
+            WHERE "organization_id" = $1 AND "respondent_provider_id" = $2
+              AND "intent_id" IS NOT NULL AND "created_at" > $3`,
+          [organizationId, intent.providerId, new Date(now.getTime() - DAY_MS)],
+        )) as { filed: number }[];
+        if (Number(against?.filed ?? 0) >= this.config.maxPerProviderPerDay) {
           throw DisputeErrors.rateLimited({
-            limit: this.config.maxOpenPerProviderPerDay,
+            limit: this.config.maxPerProviderPerDay,
             scope: 'provider',
           });
         }
@@ -232,7 +235,7 @@ export class CallDisputeService {
         // escrow hold live on the call's chain; rail A's hold is the ledger's.
         const holdIsLive =
           intent.rail !== 'RAIL_B_VOUCHER' ||
-          (this.held?.holdLive(intent.assetId as AssetId) ?? false);
+          ((await this.held?.holdLive(intent.assetId as AssetId)) ?? false);
         entity.refundGuaranteed =
           holdIsLive &&
           (await this.paymentIntents.holdForDispute(
@@ -598,11 +601,20 @@ export class CallDisputeService {
       // withheld credit released, in the ledger, anywhere.
       if (intent.rail === 'RAIL_B_VOUCHER' && !options.chain) return dispute;
       try {
-        await this.intents.refundHeldForDispute(
+        const result = await this.intents.refundHeldForDispute(
           dispute.organizationId,
           intentId,
           DISPUTE_UPHELD_VOID_OUTCOME,
         );
+        if (result === 'TIMED_OUT') {
+          // `refundHeld` is closed; nothing to send until someone collects it.
+          await this.paymentIntents.recordHeldFailure(
+            dispute.organizationId,
+            intentId,
+            'refund closed: past the chain timeout',
+          );
+          return dispute;
+        }
       } catch (error) {
         await this.paymentIntents.recordHeldFailure(
           dispute.organizationId,
