@@ -76,7 +76,14 @@ export class AgentsService {
     }
 
     await this.dataSource.transaction(async (manager) => {
-      await manager.update(AgentEntity, { id: agentId, organizationId }, { label });
+      // The row may have gone between the read and the write: then nothing
+      // was renamed, and no audit row may say it was.
+      const { affected } = await manager.update(
+        AgentEntity,
+        { id: agentId, organizationId },
+        { label },
+      );
+      if (affected !== 1) throw AccountErrors.agentNotFound({ agentId });
       await this.audit.record(manager, {
         organizationId,
         actor,

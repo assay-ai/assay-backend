@@ -1,0 +1,159 @@
+import { ValidationPipe, type INestApplication } from '@nestjs/common';
+import { Test } from '@nestjs/testing';
+import request from 'supertest';
+
+import { AgentEntity } from '@database/postgres/entities/agent.entity';
+import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
+import { AgentsController } from '@modules/account/controllers/agents.controller';
+import { AgentsService } from '@modules/account/services/agents.service';
+import { MCP_SESSION_SOURCE, McpCallerKind } from '@modules/mcp/ports/mcp-session.port';
+import { McpErrors } from '@modules/mcp/errors/mcp.errors';
+import { AuditLogWriter } from '@shared/audit';
+import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
+import { ConfigService } from '@nestjs/config';
+import { getDataSourceToken } from '@nestjs/typeorm';
+
+import { buildAgent } from '../auth/helpers/fake-agent-repository';
+
+const ORG_A = '11111111-1111-1111-1111-111111111111';
+const ORG_B = '22222222-2222-2222-2222-222222222222';
+const AGENT_A = '3f2b8c1e-5a4d-4e6f-9b7a-1c2d3e4f5a6b';
+const AGENT_B = '9d4c1f80-6b2e-4a57-8c31-7e05b9a2d146';
+
+/**
+ * `PATCH /agents/:agentId` over HTTP, through the real guards, the app's
+ * global ValidationPipe options and the one exception filter: what a caller
+ * actually meets, not what the decorators say.
+ */
+describe('PATCH /agents/:agentId over HTTP', () => {
+  let app: INestApplication;
+  const update = jest.fn();
+  const record = jest.fn();
+
+  const session = (callerKind: McpCallerKind) => ({
+    credentialId: `cred-${callerKind}`,
+    organizationId: ORG_A,
+    agentId: AGENT_A,
+    agentAccount: 'eip155:46630:0x0000000000000000000000000000000000000001',
+    chainId: 'eip155:46630',
+    label: null,
+    callerKind,
+  });
+  const sessions = {
+    resolve: jest.fn(async (token: string | null) => {
+      if (token === 'person') return session(McpCallerKind.HUMAN);
+      if (token === 'machine') return session(McpCallerKind.AGENT);
+      throw McpErrors.credentialInvalid();
+    }),
+  };
+
+  beforeAll(async () => {
+    const rows: Record<string, AgentEntity> = {
+      [AGENT_A]: buildAgent({ id: AGENT_A, organizationId: ORG_A, label: 'My agent' }),
+      [AGENT_B]: buildAgent({ id: AGENT_B, organizationId: ORG_B, label: 'Theirs' }),
+    };
+    const qb = {
+      select: jest.fn().mockReturnThis(),
+      addSelect: jest.fn().mockReturnThis(),
+      where: jest.fn().mockReturnThis(),
+      andWhere: jest.fn().mockReturnThis(),
+      groupBy: jest.fn().mockReturnThis(),
+      getRawMany: jest.fn().mockResolvedValue([]),
+    };
+    const moduleRef = await Test.createTestingModule({
+      controllers: [AgentsController],
+      providers: [
+        AgentsService,
+        { provide: MCP_SESSION_SOURCE, useValue: sessions },
+        {
+          provide: AgentRepository,
+          useValue: { findById: async (id: string) => rows[id] ?? null },
+        },
+        { provide: AgentCredentialRepository, useValue: { createQueryBuilder: () => qb } },
+        { provide: ConfigService, useValue: { get: (_k: string, fallback: string) => fallback } },
+        {
+          provide: getDataSourceToken('postgres'),
+          useValue: { transaction: async (work: (m: unknown) => unknown) => work({ update }) },
+        },
+        { provide: AuditLogWriter, useValue: { record } },
+      ],
+    }).compile();
+    app = moduleRef.createNestApplication();
+    // The same options as `bootstrap/api/main.ts`.
+    app.useGlobalPipes(
+      new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
+    );
+    app.useGlobalFilters(new AllExceptionsFilter());
+    await app.init();
+  }, 30_000);
+
+  afterAll(async () => {
+    await app.close();
+  });
+
+  beforeEach(() => {
+    update.mockReset().mockResolvedValue({ affected: 1 });
+    record.mockReset().mockResolvedValue(undefined);
+  });
+
+  const patch = (id: string, token: string, body: unknown) =>
+    request(app.getHttpServer())
+      .patch(`/agents/${id}`)
+      .set('Authorization', `Bearer ${token}`)
+      .send(body as object);
+
+  it('renames the caller organization agent for a person, trimmed, with an audit row', async () => {
+    const res = await patch(AGENT_A, 'person', { label: '  Research bot ' });
+    expect(res.status).toBe(200);
+    expect(res.body).toMatchObject({ agentId: AGENT_A, label: 'Research bot' });
+    expect(update).toHaveBeenCalledWith(
+      AgentEntity,
+      { id: AGENT_A, organizationId: ORG_A },
+      { label: 'Research bot' },
+    );
+    expect(record).toHaveBeenCalledWith(
+      expect.anything(),
+      expect.objectContaining({ action: 'agent.renamed' }),
+    );
+  });
+
+  it('refuses an agent machine credential with 403', async () => {
+    const res = await patch(AGENT_A, 'machine', { label: 'Mine now' });
+    expect(res.status).toBe(403);
+    expect(JSON.stringify(res.body)).toContain('AUTH_HUMAN_SESSION_REQUIRED');
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('refuses no credential at all', async () => {
+    const res = await request(app.getHttpServer()).patch(`/agents/${AGENT_A}`).send({ label: 'x' });
+    expect(res.status).toBe(401);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it("answers another organization's agent with 404, writing nothing", async () => {
+    const res = await patch(AGENT_B, 'person', { label: 'Mine now' });
+    expect(res.status).toBe(404);
+    expect(JSON.stringify(res.body)).toContain('ACCOUNT_AGENT_NOT_FOUND');
+    expect(update).not.toHaveBeenCalled();
+    expect(record).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    ['another field', { label: 'ok', status: 'SUSPENDED' }],
+    ['an organization id', { label: 'ok', organizationId: ORG_B }],
+    ['a blank label', { label: '   ' }],
+    ['a control character', { label: 'a\nb' }],
+    ['an invisible label', { label: 'ㅤ' }],
+    ['no label', {}],
+  ])('refuses %s with 400 through the global pipe', async (_name, body) => {
+    const res = await patch(AGENT_A, 'person', body);
+    expect(res.status).toBe(400);
+    expect(update).not.toHaveBeenCalled();
+  });
+
+  it('refuses a non-UUID agent id with 400', async () => {
+    const res = await patch('me', 'person', { label: 'ok' });
+    expect(res.status).toBe(400);
+  });
+});
