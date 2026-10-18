@@ -3,10 +3,15 @@ import {
   TransportErrorKind,
   ProviderResponse,
 } from '@modules/tool/domain/classification';
+import { randomBytes } from 'node:crypto';
+
 import {
   CredentialRedactor,
+  MAX_REDACTABLE_CHARS,
   MIN_REDACTED_LENGTH,
   REDACTED,
+  REDACTION_FAILED_DETAIL,
+  REDACTION_NOTE_HEADER,
 } from '@modules/tool/domain/egress/credential-redaction';
 
 // Contains every character class that encodes differently: space, `/`, `+`,
@@ -125,14 +130,118 @@ describe('CredentialRedactor.string — every form a value can come back in', ()
 });
 
 describe('CredentialRedactor.json', () => {
-  it('walks values and keys, leaving other scalars alone', () => {
+  it('rewrites string values only, never keys or other scalars', () => {
     expect(redactor.json({ echo: [`Bearer ${KEY}`], [KEY]: 1, n: 2, b: true, z: null })).toEqual({
       echo: [`Bearer ${REDACTED}`],
-      [REDACTED]: 1,
+      [KEY]: 1,
       n: 2,
       b: true,
       z: null,
     });
+  });
+
+  it('never merges keys: two keys that would redact alike stay two keys', () => {
+    const value = { [KEY]: 'a', [KEY.toUpperCase()]: 'b' };
+    expect(redactor.json(value)).toEqual(value);
+  });
+
+  it('leaves an ordinary word equal to a Basic user name alone', () => {
+    const basic = new CredentialRedactor([
+      `Basic ${Buffer.from('customer:hunter2hunter2').toString('base64')}`,
+    ]);
+    const value = { type: 'customer', Customer: 'x', note: 'customer customers' };
+    expect(basic.json(value)).toEqual(value);
+    expect(basic.string('{"type":"customer","Customer":"x"}')).toBe(
+      '{"type":"customer","Customer":"x"}',
+    );
+    expect(basic.string('pw hunter2hunter2')).toBe(`pw ${REDACTED}`);
+  });
+});
+
+describe('CredentialRedactor — failing closed', () => {
+  it('fails closed when the time budget runs out: nothing of the answer survives', () => {
+    let clock = 0;
+    const slow = new CredentialRedactor([KEY], { budgetMs: 10, now: () => (clock += 20) });
+    const out = slow.response({
+      status: 200,
+      headers: { 'content-type': 'application/json', 'x-echo': KEY },
+      body: { kind: ResponseBodyKind.JSON, value: { got: KEY, other: 'data' } },
+    });
+    expect(out).toEqual({
+      status: 0,
+      headers: {
+        'content-type': REDACTED,
+        'x-echo': REDACTED,
+        [REDACTION_NOTE_HEADER]: 'truncated',
+      },
+      body: { kind: ResponseBodyKind.NON_JSON, raw: REDACTED, detail: REDACTED },
+      transportError: {
+        kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+        partialBody: null,
+        detail: REDACTION_FAILED_DETAIL,
+      },
+    });
+    expect(slow.string(`x ${KEY}`)).toBe(REDACTED);
+  });
+
+  it(`fails closed on a string longer than ${MAX_REDACTABLE_CHARS} characters`, () => {
+    const out = redactor.response({
+      status: 200,
+      body: {
+        kind: ResponseBodyKind.NON_JSON,
+        raw: 'x'.repeat(MAX_REDACTABLE_CHARS + 1),
+        detail: 'd',
+      },
+    });
+    expect(out.transportError?.kind).toBe(TransportErrorKind.PLATFORM_UNAVAILABLE);
+    expect(out.transportError?.detail).toBe(REDACTION_FAILED_DETAIL);
+    expect(out.body).toEqual({ kind: ResponseBodyKind.NON_JSON, raw: REDACTED, detail: REDACTED });
+  });
+});
+
+/**
+ * Regression benchmarks. The provider controls both the credential and the
+ * body, so the scan must stay linear for any input; ceilings are generous
+ * for CI. A generous budget is passed so the timing measures the scan, not
+ * the fail-closed path.
+ */
+describe('CredentialRedactor — linear time', () => {
+  const FIVE_MIB = 5 * 1024 * 1024;
+  const generous = { budgetMs: 60_000 };
+
+  it.each([
+    ['a…ab', 'a'.repeat(4095) + 'b'],
+    ['b…a', 'b' + 'a'.repeat(4095)],
+    ['a…ba…a', 'a'.repeat(2047) + 'b' + 'a'.repeat(2048)],
+  ])('scans a 5 MiB all-a body against a 4 KiB %s near-match in < 500 ms', (_label, needle) => {
+    const near = new CredentialRedactor([needle], generous);
+    const body = 'a'.repeat(FIVE_MIB);
+    const started = Date.now();
+    const out = near.string(body);
+    const elapsed = Date.now() - started;
+    expect(out).toBe(body);
+    expect(elapsed).toBeLessThan(500);
+  });
+
+  it('scans a 5 MiB random body against 10 random 4 KiB credentials in < 1 s', () => {
+    const values = Array.from({ length: 10 }, () =>
+      randomBytes(3072).toString('base64').slice(0, 4096),
+    );
+    const many = new CredentialRedactor(values, generous);
+    const body = randomBytes((FIVE_MIB * 3) / 4).toString('base64') + values[7];
+    const started = Date.now();
+    const out = many.string(body);
+    const elapsed = Date.now() - started;
+    expect(out.endsWith(REDACTED)).toBe(true);
+    expect(elapsed).toBeLessThan(1000);
+  });
+
+  it('stays within the default budget for a typical 1 MiB JSON body', () => {
+    const typical = new CredentialRedactor(['sk-live-0123456789abcdef', 'Bearer tok_abcdefghijkl']);
+    const value = { items: Array.from({ length: 20_000 }, (_, i) => `item ${i} lorem ipsum`) };
+    const out = typical.response({ status: 200, body: { kind: ResponseBodyKind.JSON, value } });
+    expect(out.transportError).toBeUndefined();
+    expect(out.body).toEqual({ kind: ResponseBodyKind.JSON, value });
   });
 });
 
