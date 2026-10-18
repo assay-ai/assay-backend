@@ -5,12 +5,19 @@
  *     yarn ts-node -T -r tsconfig-paths/register scripts/vault/rewrap-deks.ts
  *
  * The first listed key is active; every key that still wraps a row must be
- * listed. Only `wrapped_dek`, `dek_iv` and `kek_id` change, the `ciphertext` is
+ * listed. Before touching a row, every loaded key is checked against the
+ * key-check value stored for its id (`vault_kek_checks`, the same check the
+ * api and mcp run at boot): a key id that now holds different bytes aborts the
+ * run, so a mistyped key can never re-wrap DEKs under material nobody holds.
+ * Only `wrapped_dek`, `dek_iv` and `kek_id` change, the `ciphertext` is
  * untouched. Batches of 500, one transaction per batch. Re-runnable: rows
  * already under the active key are skipped. Prints counts only, never key
  * material, ids or origins. See docs/runbooks/rotate-vault-kek.md.
  */
 import { DataSource } from 'typeorm';
+
+import { BindingCredentialRepository } from '../../src/database/postgres/repositories/binding-credential.repository';
+import { VaultKekCheckRepository } from '../../src/database/postgres/repositories/vault-kek-check.repository';
 
 import {
   credentialAad,
@@ -20,6 +27,7 @@ import {
   takeVaultKeks,
   VaultKeks,
 } from '../../src/modules/provider/credentials/credential-vault.keys';
+import { CredentialVaultService } from '../../src/modules/provider/credentials/credential-vault.service';
 
 export const REWRAP_BATCH_SIZE = 500;
 
@@ -46,6 +54,14 @@ export async function rewrapAllDeks(
 ): Promise<RewrapResult> {
   const active = keks.active;
   if (!active) throw new Error('CREDENTIAL_VAULT_KEKS is not set: there is no active key');
+
+  // Throws, naming the key id only, when a loaded key does not match its stored
+  // check value. Nothing has been written yet at that point.
+  await new CredentialVaultService(
+    new BindingCredentialRepository(dataSource),
+    keks,
+    new VaultKekCheckRepository(dataSource),
+  ).verifyKeks();
 
   const [{ count }] = await dataSource.query(
     'SELECT count(*)::int AS count FROM binding_credentials WHERE kek_id = $1',
