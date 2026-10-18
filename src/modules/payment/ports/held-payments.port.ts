@@ -39,6 +39,17 @@ export interface HeldRecord {
   readonly collectableAt: Date;
 }
 
+/**
+ * What a landed redemption did, decided from its receipt (review P0-1): a
+ * `PaymentHeld` log means the payment is held; a bare `VoucherRedeemed` means
+ * the escrow paid the provider at once (a redemption before the upgrade).
+ * `UNKNOWN`: no receipt, or neither log — retried, never guessed.
+ */
+export type RedemptionClass =
+  | { readonly kind: 'HELD'; readonly collectableAt: Date }
+  | { readonly kind: 'PAID' }
+  | { readonly kind: 'UNKNOWN' };
+
 export interface HeldTxResult {
   /** The transaction hash. */
   readonly txRef: string;
@@ -46,12 +57,28 @@ export interface HeldTxResult {
 
 export interface HeldPaymentsPort {
   /**
+   * Whether the escrow hold is live on this asset's chain (`EVM_HOLD_LIVE_CHAINS`,
+   * set when the upgrade ships). Once it is, a read that finds no hold is an
+   * error to retry, never a reason to pay the provider at once.
+   */
+  holdLive(asset: AssetId): boolean;
+  /**
+   * Classifies a landed redemption from its receipt (`txRef`, a transaction
+   * hash). Without a hash it falls back to `held(payer, seq)`, which on a live
+   * hold must find the record.
+   */
+  classifyRedemption(asset: AssetId, txRef: string | null, key: HeldKey): Promise<RedemptionClass>;
+  /**
    * `held(payer, seq)`. `null` when the chain has no hold at all — an escrow
    * deployment before the upgrade, or a chain without rail B. A record with
    * status `NONE` on an upgraded escrow is a voucher never redeemed.
    */
   readHeld(asset: AssetId, key: HeldKey): Promise<HeldRecord | null>;
-  /** `collectHeld` (one key) or `collectHeldBatch` (up to {@link MAX_HELD_BATCH}). */
+  /**
+   * `collectHeld` (one key) or `collectHeldBatch` (up to {@link MAX_HELD_BATCH}),
+   * simulated with `eth_call` first: a refusal throws before any gas is spent.
+   * Both sends need the REDEEMER key: only the scheduler holds it.
+   */
   collect(asset: AssetId, keys: readonly HeldKey[]): Promise<HeldTxResult>;
   /** `refundHeld` (one key) or `refundHeldBatch`. Redeemer only, before the timeout. */
   refund(asset: AssetId, keys: readonly HeldKey[]): Promise<HeldTxResult>;

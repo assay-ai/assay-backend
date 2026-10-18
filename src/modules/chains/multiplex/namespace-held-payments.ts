@@ -5,6 +5,7 @@ import {
   HeldPaymentsPort,
   HeldRecord,
   HeldTxResult,
+  RedemptionClass,
 } from '@modules/payment/ports/held-payments.port';
 
 /**
@@ -14,6 +15,16 @@ import {
  */
 export class NamespaceHeldPayments implements HeldPaymentsPort {
   constructor(private readonly evm: HeldPaymentsPort) {}
+
+  holdLive(asset: AssetId): boolean {
+    return this.isEvm(asset) && this.evm.holdLive(asset);
+  }
+
+  classifyRedemption(asset: AssetId, txRef: string | null, key: HeldKey): Promise<RedemptionClass> {
+    return this.isEvm(asset)
+      ? this.evm.classifyRedemption(asset, txRef, key)
+      : Promise.resolve({ kind: 'PAID' });
+  }
 
   readHeld(asset: AssetId, key: HeldKey): Promise<HeldRecord | null> {
     return this.isEvm(asset) ? this.evm.readHeld(asset, key) : Promise.resolve(null);
