@@ -1,4 +1,11 @@
-import { decodeFunctionData, toFunctionSelector } from 'viem';
+import {
+  decodeFunctionData,
+  encodeAbiParameters,
+  encodeEventTopics,
+  toFunctionSelector,
+} from 'viem';
+
+import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
 
 import { X402_ESCROW_HOLD_ABI } from '@modules/chains/evm/abi/x402-hold.abi';
 import { EvmHeldPayments } from '@modules/chains/evm/evm-held-payments.service';
@@ -12,17 +19,30 @@ const ESCROW = '0x1111111111111111111111111111111111111111';
 const CONFIG = '0x2222222222222222222222222222222222222222';
 const PAYER = `${CHAIN}:0x3333333333333333333333333333333333333333` as AccountId;
 
-function build(readResult: unknown | Error) {
-  const reads: Array<{ functionName: string; args: readonly unknown[] }> = [];
-  const sent: Array<{ data: `0x${string}`; to: string }> = [];
+function build(
+  readResult: unknown | Error,
+  options: { receipt?: unknown; live?: boolean; simulateRevert?: boolean } = {},
+) {
+  const reads: Array<{ functionName: string; args: readonly unknown[]; account?: string }> = [];
+  const sent: Array<{ data: `0x${string}`; to: string; boundQueueWait?: boolean }> = [];
+  const revert = Object.assign(new Error('reverted'), { name: 'ContractFunctionRevertedError' });
   const client = {
-    readContract: jest.fn((args: { functionName: string; args: readonly unknown[] }) => {
-      reads.push(args);
-      return readResult instanceof Error ? Promise.reject(readResult) : Promise.resolve(readResult);
-    }),
+    readContract: jest.fn(
+      (args: { functionName: string; args: readonly unknown[]; account?: string }) => {
+        reads.push(args);
+        if (args.account) {
+          return options.simulateRevert ? Promise.reject(revert) : Promise.resolve(undefined);
+        }
+        return readResult instanceof Error
+          ? Promise.reject(readResult)
+          : Promise.resolve(readResult);
+      },
+    ),
     multicall: jest.fn(),
+    getTransactionReceipt: jest.fn(() => Promise.resolve(options.receipt ?? null)),
   };
   const redeemer = {
+    address: jest.fn(() => Promise.resolve(`${CHAIN}:0x5555555555555555555555555555555555555555`)),
     sendCall: jest.fn((call: { data: `0x${string}`; to: string }) => {
       sent.push(call);
       return Promise.resolve({ hash: '0xabc', status: 'SUCCESS', revertReason: null });
@@ -32,8 +52,23 @@ function build(readResult: unknown | Error) {
     new Map([[CHAIN, client as never]]),
     new Map([[CHAIN, { escrow: ESCROW, config: CONFIG } as unknown as EvmDeployment]]),
     redeemer as never,
+    options.live ? new Set([CHAIN]) : new Set(),
   );
   return { service, reads, sent };
+}
+
+function log(eventName: string, args: Record<string, unknown>) {
+  const abi = [...X402_ESCROW_HOLD_ABI, ...X402_ESCROW_ABI];
+  const data = encodeEventTopics({ abi, eventName: eventName as never, args: args as never });
+  const event = abi.find((item) => item.type === 'event' && item.name === eventName)!;
+  const nonIndexed = (
+    event as unknown as { inputs: { indexed?: boolean; name: string; type: string }[] }
+  ).inputs.filter((input) => !input.indexed);
+  return {
+    address: ESCROW,
+    topics: data,
+    data: encodeAbiParameters(nonIndexed, nonIndexed.map((input) => args[input.name]) as never),
+  };
 }
 
 describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
@@ -90,6 +125,7 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
     ]);
     await service.refund(ASSET, [{ payer: PAYER, seq: '4' }]);
 
+    expect(sent.every((call) => call.boundQueueWait === true)).toBe(true);
     const decoded = sent.map((call) =>
       decodeFunctionData({ abi: X402_ESCROW_HOLD_ABI, data: call.data }),
     );
@@ -107,5 +143,89 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
     await expect(service.collect(ASSET, [])).rejects.toBeDefined();
     const many = Array.from({ length: 65 }, (_, i) => ({ payer: PAYER, seq: String(i + 1) }));
     await expect(service.refund(ASSET, many)).rejects.toBeDefined();
+  });
+
+  it('simulates first: a refusal sends nothing', async () => {
+    const { service, sent } = build(null, { simulateRevert: true });
+    await expect(service.collect(ASSET, [{ payer: PAYER, seq: '1' }])).rejects.toMatchObject({
+      name: 'HeldSendRefusedError',
+    });
+    expect(sent).toEqual([]);
+  });
+
+  describe('classifyRedemption — from the receipt (review P0-1)', () => {
+    const PAYER_ADDRESS = '0x3333333333333333333333333333333333333333';
+    const PROVIDER = '0x4444444444444444444444444444444444444444';
+    const HASH = `0x${'ab'.repeat(32)}`;
+
+    it('a PaymentHeld log: held, with its collectableAt', async () => {
+      const { service } = build(null, {
+        receipt: {
+          status: 'success',
+          logs: [
+            log('PaymentHeld', {
+              payer: PAYER_ADDRESS,
+              seq: 7n,
+              provider: PROVIDER,
+              amount: 1_000_000n,
+              collectableAt: 1_800_000_000n,
+            }),
+          ],
+        },
+      });
+      await expect(
+        service.classifyRedemption(ASSET, HASH, { payer: PAYER, seq: '7' }),
+      ).resolves.toEqual({ kind: 'HELD', collectableAt: new Date(1_800_000_000_000) });
+    });
+
+    it('a bare VoucherRedeemed: paid at redemption (before the upgrade)', async () => {
+      const { service } = build(null, {
+        live: true,
+        receipt: {
+          status: 'success',
+          logs: [
+            log('VoucherRedeemed', {
+              payer: PAYER_ADDRESS,
+              provider: PROVIDER,
+              requestHash: `0x${'00'.repeat(32)}`,
+              resourceHash: `0x${'00'.repeat(32)}`,
+              amount: 1_000_000n,
+              fee: 100_000n,
+              seq: 7n,
+              takeRateBps: 1000,
+              spentInWindow: 1_000_000n,
+            }),
+          ],
+        },
+      });
+      await expect(
+        service.classifyRedemption(ASSET, HASH, { payer: PAYER, seq: '7' }),
+      ).resolves.toEqual({ kind: 'PAID' });
+    });
+
+    it('no receipt, or another seq’s logs: unknown', async () => {
+      const { service } = build(null);
+      await expect(
+        service.classifyRedemption(ASSET, HASH, { payer: PAYER, seq: '7' }),
+      ).resolves.toEqual({ kind: 'UNKNOWN' });
+    });
+
+    it('no hash: the record; on a live hold a revert is unknown, never paid', async () => {
+      const revert = Object.assign(new Error('reverted'), {
+        name: 'ContractFunctionRevertedError',
+      });
+      await expect(
+        build(revert, { live: true }).service.classifyRedemption(ASSET, null, {
+          payer: PAYER,
+          seq: '7',
+        }),
+      ).resolves.toEqual({ kind: 'UNKNOWN' });
+      await expect(
+        build(revert, { live: false }).service.classifyRedemption(ASSET, null, {
+          payer: PAYER,
+          seq: '7',
+        }),
+      ).resolves.toEqual({ kind: 'PAID' });
+    });
   });
 });
