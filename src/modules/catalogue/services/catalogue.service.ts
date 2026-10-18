@@ -59,6 +59,7 @@ import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provide
 import { MoneyUtil } from '@utils/money.util';
 
 import {
+  CatalogueChainPriceDto,
   CatalogueChainStakeDto,
   CatalogueMoneyDto,
   CatalogueProviderDetailDto,
@@ -333,6 +334,10 @@ export class CatalogueService {
           name: names.get(binding.toolId) ?? binding.toolId,
           pricingMode: binding.pricingMode,
           price: money(binding),
+          // The failure rate this listing promises (`tool_bindings.sla_failure_rate`),
+          // the line its penalties are measured against — so a buyer can read
+          // the observed rate against it.
+          promisedFailureRate: binding.slaFailureRate,
           // What the free tier would grant one agent here: its per-agent
           // quota, never more than the binding's daily free-call budget (a
           // call COUNT across all agents, BUG-R17g-01), each falling back to
@@ -417,6 +422,14 @@ export class CatalogueService {
       ),
     );
 
+    // One quote per chain a tool settles on (D6): a buyer pays on ONE chain, so
+    // the headline is that chain's price, never the dearest across chains.
+    const chainPrices = await Promise.all(
+      listed.map((tool: Tool, index) =>
+        this.pricesPerChain(tool, quotes[index], byTool.get(tool.id) ?? [], quoteContext),
+      ),
+    );
+
     const tools = listed.map((tool: Tool, index): CatalogueToolDto => {
       const own = byTool.get(tool.id) ?? [];
       const quote = quotes[index];
@@ -462,10 +475,63 @@ export class CatalogueService {
         // should give up on. Keyed off the list itself rather than off `price`
         // so the two can never disagree.
         settlementChains: quote.settlementChains.length > 0 ? [...quote.settlementChains] : null,
+        prices: chainPrices[index],
       };
     });
 
     return { tools: tools.sort((a, b) => a.name.localeCompare(b.name)) };
+  }
+
+  /**
+   * The price a call pays on each chain the tool settles on, with the provider
+   * whose listing sets it.
+   *
+   * Each chain is quoted by the router itself with the payer narrowed to that
+   * one chain, so every figure is `quote()`'s own answer for a buyer funded
+   * there — the dearest eligible binding on that chain — and never a second
+   * derivation. A tool on one chain reuses the tool's own quote, which is that
+   * same question. A chain whose quote fails is left out, as the tool's own
+   * failed quote leaves the tool unroutable.
+   *
+   * `providerId` names the listing that price is: the provider whose ACTIVE
+   * binding offers that chain at exactly the quoted price (the lowest id when
+   * two do, so the answer is stable). `null` when no binding matches, which
+   * the screen reads as "provider not named".
+   */
+  private async pricesPerChain(
+    tool: Tool,
+    quote: ToolQuote,
+    own: readonly ToolBinding[],
+    context: RoutingContext,
+  ): Promise<CatalogueChainPriceDto[]> {
+    const chains = quote.settlementChains;
+    if (quote.price === null || chains.length === 0) return [];
+
+    const quoted =
+      chains.length === 1
+        ? [{ chainId: chains[0], price: quote.price }]
+        : await Promise.all(
+            chains.map((chainId) =>
+              this.router
+                .quote(tool.id, { ...context, payerChains: [chainId], defaultChainId: chainId })
+                .then((perChain) => ({ chainId, price: perChain.price }))
+                .catch((error: unknown) => {
+                  const reason = error instanceof Error ? error.message : String(error);
+                  this.logger.warn(
+                    `${tool.name} (${tool.id}) on ${chainId}: quote failed — ${reason}`,
+                  );
+                  return { chainId, price: null };
+                }),
+            ),
+          );
+
+    return quoted
+      .filter((entry): entry is { chainId: ChainId; price: Money } => entry.price !== null)
+      .map(({ chainId, price }) => ({
+        chainId,
+        price: toMoneyDto(price),
+        providerId: listingAt(own, chainId, price),
+      }));
   }
 
   /**
@@ -658,6 +724,25 @@ function cheapest(bindings: readonly ToolBinding[]): CatalogueMoneyDto | null {
   }
 
   return best ? money(best) : null;
+}
+
+/**
+ * The provider whose binding offers `chainId` at exactly `price` — the listing
+ * a chain's quote was taken from. The lowest provider id among several, so two
+ * loads of one market name the same provider; `null` when none matches.
+ */
+function listingAt(own: readonly ToolBinding[], chainId: ChainId, price: Money): string | null {
+  const atomic = MoneyUtil.toAtomic(price).toString();
+  const matches = own
+    .filter(
+      (binding) =>
+        (binding.settlementChains ?? []).includes(chainId) &&
+        binding.assetId === price.asset &&
+        BigInt(binding.priceAmount).toString() === atomic,
+    )
+    .map((binding) => binding.providerId)
+    .sort();
+  return matches[0] ?? null;
 }
 
 function money(binding: ToolBinding): CatalogueMoneyDto {
