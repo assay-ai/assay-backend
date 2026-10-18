@@ -76,6 +76,16 @@ describe('call dispute views: the SLA instants (G3.B1)', () => {
       ).filingClosesAt,
     ).toEqual(new Date(FILED.getTime() + 7 * 24 * H));
     expect(slaTimesOf(dispute({ evidenceSnapshot: null }), CONTEXT).filingClosesAt).toBeNull();
+    // The instant `file` measured from wins, when the snapshot has it.
+    const measured = '2026-09-30T08:00:00.000Z';
+    expect(
+      slaTimesOf(
+        dispute({
+          evidenceSnapshot: { call: { settledAt: measured }, verdict: { settledAt: SETTLED } },
+        }),
+        CONTEXT,
+      ).filingClosesAt,
+    ).toEqual(new Date(new Date(measured).getTime() + 7 * 24 * H));
   });
 
   it('every view carries them', () => {

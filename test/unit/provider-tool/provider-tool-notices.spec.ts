@@ -6,6 +6,11 @@ import {
 } from '@modules/notification/ports/notification.port';
 import { providerToolNotification } from '@modules/provider-tool/domain/notices';
 import {
+  DEFAULT_DECLARED_FAILURE_RATE,
+  declaredFailureRateOf,
+} from '@modules/provider-tool/services/provider-tools.service';
+import { handleNotification } from '@modules/toolset/domain/handle-notices';
+import {
   REVIEW_REJECT_REASON_CODES,
   ReviewReasonCode,
   reviewReasonCodeFor,
@@ -37,6 +42,8 @@ describe('provider tool notices (T4)', () => {
       'provider_tool.taken_down',
       'provider_tool.takedown_lifted',
       'provider_tool.promotion_invited',
+      'handle.taken_down',
+      'handle.takedown_lifted',
     ]) {
       expect(Object.values(NotificationEvent)).toContain(event);
     }
@@ -136,5 +143,36 @@ describe('ReviewDecisionBodyDto.reasonCode', () => {
     expect(
       await errorsOf({ decision: 'REJECT', contentHash: HASH, reasonCode: 'looks bad', note: 'x' }),
     ).toEqual(['reasonCode']);
+  });
+});
+
+describe('handle notices', () => {
+  it('one per handle, to its owner, without the operator’s note', () => {
+    const down = handleNotification({ kind: 'TAKEN_DOWN', organizationId: ORG, handle: 'acme' });
+    expect(down).toMatchObject({
+      organizationId: ORG,
+      event: 'handle.taken_down',
+      subjectType: 'handle',
+      subjectId: 'acme',
+      payload: { handle: 'acme' },
+    });
+    expect(NOTIFICATION_CATALOGUE[NotificationEvent.HANDLE_TAKEN_DOWN]).toMatchObject({
+      severity: NotificationSeverity.CRITICAL,
+      nonSuppressible: true,
+    });
+    expect(
+      handleNotification({ kind: 'TAKEDOWN_LIFTED', organizationId: ORG, handle: 'acme' }).event,
+    ).toBe('handle.takedown_lifted');
+  });
+});
+
+describe('prefill failure rate', () => {
+  it('the binding’s own rate, or 2% when it reads as nothing; never NaN', () => {
+    expect(declaredFailureRateOf('0.05000')).toBe(0.05);
+    expect(declaredFailureRateOf(0)).toBe(0);
+    for (const value of [null, undefined, '', 'abc', '2', -1]) {
+      expect(declaredFailureRateOf(value as never)).toBe(DEFAULT_DECLARED_FAILURE_RATE);
+    }
+    expect(DEFAULT_DECLARED_FAILURE_RATE).toBe(0.02);
   });
 });

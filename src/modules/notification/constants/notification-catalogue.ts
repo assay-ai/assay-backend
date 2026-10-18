@@ -370,6 +370,23 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       nonSuppressible: false,
     },
 
+    // ── Public names (handles) ────────────────────────────────────────────────
+
+    [NotificationEvent.HANDLE_TAKEN_DOWN]: {
+      severity: NotificationSeverity.CRITICAL,
+      channels: IN_APP_EMAIL_PUSH,
+      aggregation: NotificationAggregation.PER_EVENT,
+      // Every URL and provider tool under the name stopped at once: the same
+      // class as a tool's own takedown.
+      nonSuppressible: true,
+    },
+    [NotificationEvent.HANDLE_TAKEDOWN_LIFTED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+
     // ── Digest ────────────────────────────────────────────────────────────────
 
     [NotificationEvent.DIGEST_DAILY]: {

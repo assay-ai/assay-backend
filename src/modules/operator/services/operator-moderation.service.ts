@@ -257,6 +257,7 @@ export class OperatorModerationService {
       },
     );
     await this.moderation.afterCommit([organizationId]);
+    await this.moderation.announceHandle(handle, 'TAKEN_DOWN');
     return cutoffDtoOf(cutoff);
   }
 
@@ -333,6 +334,9 @@ export class OperatorModerationService {
       await this.moderation.afterCommit(await this.ownersOf(existing));
       if (existing.targetType === 'TOOL') {
         await this.moderation.announceTool(existing.targetId, 'TAKEDOWN_LIFTED');
+      }
+      if (existing.targetType === 'HANDLE') {
+        await this.moderation.announceHandle(existing.targetId, 'TAKEDOWN_LIFTED');
       }
       return cutoffDtoOf(cutoff);
     };

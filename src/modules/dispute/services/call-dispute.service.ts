@@ -203,7 +203,7 @@ export class CallDisputeService {
     });
     if (decided) throw DisputeErrors.alreadyDecided({ id: decided.id });
 
-    const snapshot = await this.snapshot(organizationId, intent, record, now);
+    const snapshot = await this.snapshot(organizationId, intent, record, now, settledAt);
     const actor = auditActorOf(session);
 
     const entity = new DisputeEntity();
@@ -780,6 +780,7 @@ export class CallDisputeService {
     intent: PaymentIntentEntity,
     record: VerificationRecordEntity | null,
     now: Date,
+    settledAt: Date,
   ): Promise<Record<string, unknown>> {
     const max = this.config.snapshotMaxBytes;
     let request: unknown = record?.request ?? null;
@@ -820,6 +821,9 @@ export class CallDisputeService {
         assetId: intent.assetId,
         decimals: intent.decimals,
         createdAt: intent.createdAt.toISOString(),
+        // The instant the filing window was measured from (`file`), kept so
+        // every view states the same `filingClosesAt` the filing checked.
+        settledAt: settledAt.toISOString(),
       },
       verdict: record
         ? {
@@ -1046,17 +1050,23 @@ export function slaTimesOf(
   };
 }
 
-/** When the disputed call settled, from the snapshot taken at filing. */
+/**
+ * When the disputed call settled, as `file` measured it: the snapshot's
+ * `call.settledAt`. Snapshots taken before it was stored fall back to the
+ * verdict's settlement, then the call's creation.
+ */
 function settledAtOf(row: DisputeEntity): Date | null {
   const snapshot = row.evidenceSnapshot ?? {};
   const verdict = (snapshot.verdict ?? null) as { settledAt?: unknown } | null;
-  const call = (snapshot.call ?? {}) as { createdAt?: unknown };
+  const call = (snapshot.call ?? {}) as { createdAt?: unknown; settledAt?: unknown };
   const text =
-    typeof verdict?.settledAt === 'string'
-      ? verdict.settledAt
-      : typeof call.createdAt === 'string'
-        ? call.createdAt
-        : null;
+    typeof call.settledAt === 'string'
+      ? call.settledAt
+      : typeof verdict?.settledAt === 'string'
+        ? verdict.settledAt
+        : typeof call.createdAt === 'string'
+          ? call.createdAt
+          : null;
   if (!text) return null;
   const at = new Date(text);
   return Number.isNaN(at.getTime()) ? null : at;

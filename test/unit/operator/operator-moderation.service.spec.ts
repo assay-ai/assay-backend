@@ -89,6 +89,8 @@ describe('OperatorModerationService', () => {
       resolveReport: jest.fn(),
       relist: jest.fn(),
       afterCommit: jest.fn(async () => undefined),
+      announceTool: jest.fn(async () => undefined),
+      announceHandle: jest.fn(async () => undefined),
     };
     const service = new OperatorModerationService(
       overrides as never,
@@ -237,5 +239,21 @@ describe('OperatorModerationService', () => {
       ['tool-1', 'TAKEN_DOWN'],
       ['tool-1', 'TAKEDOWN_LIFTED'],
     ]);
+  });
+
+  it('tells a handle’s owner once about its takedown and about the takedown lifted', async () => {
+    const { service, moderation } = build({
+      id: 'c1',
+      confirmedAt: null,
+      targetType: 'HANDLE',
+      targetId: 'acme',
+    });
+    await service.takedownHandle(OPERATOR, 'acme', BODY, null);
+    await service.revertCutoff(OPERATOR, 'c1', BODY, null);
+    expect(moderation.announceHandle.mock.calls).toEqual([
+      ['acme', 'TAKEN_DOWN'],
+      ['acme', 'TAKEDOWN_LIFTED'],
+    ]);
+    expect(moderation.announceTool).not.toHaveBeenCalled();
   });
 });
