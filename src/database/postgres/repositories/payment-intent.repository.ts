@@ -2936,7 +2936,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
       .andWhere(SUMMARY_CHARGED_SQL)
-      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(AWAITING_REDEMPTION_SQL)
       .andWhere('intent.heldStatus IS NULL')
       .getRawOne<{ total: string }>();
     return BigInt(row?.total ?? '0');
