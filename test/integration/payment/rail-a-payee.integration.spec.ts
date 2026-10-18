@@ -182,11 +182,21 @@ describe('rail-A payment intents must name a payee', () => {
       { providerId: providerOrg, providerAccount: payee },
     );
 
-    const settled = await context.intents.resolve(
+    const held = await context.intents.resolve(
       context.organizationId,
       intent.id,
       PaymentIntentStatus.VERIFYING,
       PaymentIntentStatus.SETTLED,
+    );
+    // Held for the dispute window (G3.B1): the provider is credited when it is
+    // collected, not at settlement.
+    expect(held.heldStatus).toBe('HELD');
+    expect(held.holdReleasedAt).toBeNull();
+    expect(await context.held(intent.agentAccount)).toBe(1_000_000n);
+    const settled = await context.intents.bookHeldCollected(
+      context.organizationId,
+      intent.id,
+      null,
     );
 
     expect(settled.status).toBe(PaymentIntentStatus.SETTLED);

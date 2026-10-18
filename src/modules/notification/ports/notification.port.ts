@@ -192,6 +192,14 @@ export enum NotificationEvent {
   /** No producer: the payout batch is defaulted off. */
   PROVIDER_PAYOUT_SENT = 'provider.payout_sent',
 
+  // ── Buyer call disputes (G3.B1) ─────────────────────────────────────────
+  /** A buyer disputed a call this provider served. `CallDisputeService.file`. */
+  CALL_DISPUTE_OPENED = 'call_dispute.opened',
+  /** The provider replied to the buyer's dispute. Sent to the buyer. */
+  CALL_DISPUTE_RESPONDED = 'call_dispute.responded',
+  /** An operator upheld or rejected the dispute. Sent to the buyer and the provider. */
+  CALL_DISPUTE_DECIDED = 'call_dispute.decided',
+
   // ── Digest ──────────────────────────────────────────────────────────────
   /** No producer: the daily digest job is not built. */
   DIGEST_DAILY = 'digest.daily',

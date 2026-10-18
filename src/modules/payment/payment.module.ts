@@ -12,6 +12,7 @@ import { DepositIntentExpiryService } from './services/deposit-intent-expiry.ser
 import { DepositIntentService } from './services/deposit-intent.service';
 import { DepositService } from './services/deposit.service';
 import { PaymentIntentExpiryService } from './services/payment-intent-expiry.service';
+import { HeldCollectionService } from './services/held-collection.service';
 import { PaymentIntentService } from './services/payment-intent.service';
 import { ToolCallsService } from './services/tool-calls.service';
 import { VoucherService } from './services/voucher.service';
@@ -53,6 +54,8 @@ import { VoucherService } from './services/voucher.service';
     // Boot refuses a schema without the buyer-debt columns (review-buyer-debt H2).
     BuyerDebtSchemaCheck,
     PaymentIntentService,
+    // Collects held payments past their dispute window (G3.B1).
+    HeldCollectionService,
     PaymentIntentExpiryService,
     VoucherService,
     // The durable `seq` allocator behind `GET /escrow/next-seq`. The
@@ -68,6 +71,7 @@ import { VoucherService } from './services/voucher.service';
   ],
   exports: [
     PaymentIntentService,
+    HeldCollectionService,
     PaymentIntentExpiryService,
     VoucherService,
     EscrowSeqService,

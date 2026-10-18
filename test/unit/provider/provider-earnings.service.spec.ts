@@ -35,6 +35,8 @@ interface Row {
   debtOutstandingCalls: string;
   uncollected: string;
   uncollectedCalls: string;
+  pendingInWindow: string;
+  pendingInWindowCalls: string;
 }
 
 function row(overrides: Partial<Row>): Row {
@@ -53,6 +55,8 @@ function row(overrides: Partial<Row>): Row {
     debtOutstandingCalls: '0',
     uncollected: '0',
     uncollectedCalls: '0',
+    pendingInWindow: '0',
+    pendingInWindowCalls: '0',
     ...overrides,
   };
 }
@@ -252,6 +256,8 @@ describe('ProviderEarningsService — the platform never pays or owes a provider
         debtOutstandingCalls: '2',
         uncollected: '360000',
         uncollectedCalls: '4',
+        pendingInWindow: '270000',
+        pendingInWindowCalls: '3',
       }),
     ]);
 
@@ -267,6 +273,9 @@ describe('ProviderEarningsService — the platform never pays or owes a provider
     expect(earnings.totals.debtOutstandingCalls).toBe(2);
     expect(earnings.totals.uncollected).toEqual({ amount: '360000', asset: USDC, decimals: 6 });
     expect(earnings.groups[0].uncollectedCalls).toBe(4);
+    // Held for the dispute window (G3.B1): pending, not earned, not debt.
+    expect(earnings.totals.pendingInWindow).toEqual({ amount: '270000', asset: USDC, decimals: 6 });
+    expect(earnings.totals.pendingInWindowCalls).toBe(3);
     expect(earnings.totals).not.toHaveProperty('absorbed');
 
     const expr = (alias: string) => fake.selects.find((s) => s.alias === alias)?.expr ?? '';
