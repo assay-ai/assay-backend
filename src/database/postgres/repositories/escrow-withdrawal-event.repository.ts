@@ -1,6 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { Brackets, DataSource, EntityManager } from 'typeorm';
+import { getAddress } from 'viem';
+import { Brackets, DataSource } from 'typeorm';
 
 import {
   EscrowWithdrawalEventEntity,
@@ -8,6 +9,7 @@ import {
 } from '../entities/escrow-withdrawal-event.entity';
 import { EvmChainStateEntity } from '../entities/evm-chain-state.entity';
 import { AbstractRepository } from './abstract.repository';
+import { lockEvmChainState } from './evm-chain-state.repository';
 
 /** One decoded withdrawal log, ready to store. */
 export interface EscrowWithdrawalEventRow {
@@ -52,22 +54,18 @@ export class EscrowWithdrawalEventRepository extends AbstractRepository<EscrowWi
   }
 
   /**
-   * The rows of one indexed range and the cursor past it, in one transaction.
-   * A row already stored (a re-read range) is skipped; `onInserted` sees only
-   * the rows this call stored, inside the same transaction, so whatever it
-   * writes is written once.
+   * The rows of one indexed range and the cursor past it, in one transaction,
+   * and the last error cleared. A row already stored (a re-read range) is
+   * skipped; the rows this call stored are returned, so whatever the caller
+   * does with them afterwards (the claim's audit row) is done once.
    */
   async applyIndexedRange(
     chainId: string,
     cursorBlock: bigint,
     rows: readonly EscrowWithdrawalEventRow[],
-    onInserted?: (
-      manager: EntityManager,
-      inserted: readonly EscrowWithdrawalEventRow[],
-    ) => Promise<void>,
   ): Promise<readonly EscrowWithdrawalEventRow[]> {
     return this.manager.transaction(async (manager) => {
-      const state = await lockState(manager, chainId);
+      const state = await lockEvmChainState(manager, chainId);
       const inserted: EscrowWithdrawalEventRow[] = [];
       for (const row of rows) {
         const result = await manager
@@ -90,30 +88,46 @@ export class EscrowWithdrawalEventRepository extends AbstractRepository<EscrowWi
           .execute();
         if ((result.identifiers ?? []).some((id) => id && id.id)) inserted.push(row);
       }
-      if (onInserted && inserted.length > 0) await onInserted(manager, inserted);
       await manager.update(
         EvmChainStateEntity,
         { id: state.id },
-        { withdrawalCursorBlock: cursorBlock.toString() },
+        { withdrawalCursorBlock: cursorBlock.toString(), withdrawalLastError: null },
       );
       return inserted;
     });
   }
 
+  /** The index's last read failure on `chainId` (no node prose: an RPC URL can carry a key). */
+  async recordError(chainId: string, message: string): Promise<void> {
+    await this.manager.transaction(async (manager) => {
+      const state = await lockEvmChainState(manager, chainId);
+      await manager.update(
+        EvmChainStateEntity,
+        { id: state.id },
+        { withdrawalLastError: message.slice(0, 256) },
+      );
+    });
+  }
+
   /**
    * The organization and asset of the buyer escrow at `chainId:address`, or
-   * `null` when no buyer of this platform has one there.
+   * `null` when no buyer of this platform has one there. An exact match on
+   * `uq_buyer_escrows_account`, in the checksummed form account ids are
+   * written in and the lower-case one.
    */
   async escrowOwner(
-    manager: EntityManager,
     chainId: string,
     buyerAddress: string,
   ): Promise<{ organizationId: string; accountId: string; assetId: string } | null> {
+    const forms = [
+      `${chainId}:${getAddress(buyerAddress)}`,
+      `${chainId}:${buyerAddress.toLowerCase()}`,
+    ];
     const rows: { organization_id: string; account_id: string; asset_id: string }[] =
-      await manager.query(
+      await this.manager.query(
         `SELECT "organization_id", "account_id", "asset_id" FROM "buyer_escrows"
-          WHERE lower("account_id") = lower($1) LIMIT 1`,
-        [`${chainId}:${buyerAddress}`],
+          WHERE "account_id" IN ($1, $2) LIMIT 1`,
+        forms,
       );
     const row = rows[0];
     return row
@@ -170,20 +184,4 @@ export class EscrowWithdrawalEventRepository extends AbstractRepository<EscrowWi
       }),
     );
   }
-}
-
-/** The chain's `evm_chain_states` row, created if absent, locked for this transaction. */
-async function lockState(manager: EntityManager, chainId: string): Promise<EvmChainStateEntity> {
-  await manager
-    .createQueryBuilder()
-    .insert()
-    .into(EvmChainStateEntity)
-    .values({ chainId })
-    .orIgnore()
-    .execute();
-  return manager
-    .createQueryBuilder(EvmChainStateEntity, 'state')
-    .setLock('pessimistic_write')
-    .where('state.chain_id = :chainId', { chainId })
-    .getOneOrFail();
 }

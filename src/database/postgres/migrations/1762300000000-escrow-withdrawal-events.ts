@@ -45,12 +45,16 @@ export class EscrowWithdrawalEvents1762300000000 implements MigrationInterface {
         ON "escrow_withdrawal_events" ("chain_id", "buyer_address", "block_number", "log_index")
     `);
     await queryRunner.query(
-      `ALTER TABLE "evm_chain_states" ADD COLUMN "withdrawal_cursor_block" bigint`,
+      `ALTER TABLE "evm_chain_states" ADD COLUMN "withdrawal_cursor_block" bigint, ` +
+        `ADD COLUMN "withdrawal_last_error" varchar(256)`,
     );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    await queryRunner.query(`ALTER TABLE "evm_chain_states" DROP COLUMN "withdrawal_cursor_block"`);
+    await queryRunner.query(
+      `ALTER TABLE "evm_chain_states" DROP COLUMN "withdrawal_last_error", ` +
+        `DROP COLUMN "withdrawal_cursor_block"`,
+    );
     await queryRunner.query(`DROP TABLE "escrow_withdrawal_events"`);
   }
 }
