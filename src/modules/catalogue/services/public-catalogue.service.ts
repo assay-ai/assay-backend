@@ -145,6 +145,7 @@ function toPublicTool(tool: CatalogueToolDto): PublicToolDto {
       chainId: entry.chainId,
       price: toPublicMoney(entry.price),
       providerId: entry.providerId,
+      listings: entry.listings,
     })),
   };
 }
