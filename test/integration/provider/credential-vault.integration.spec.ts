@@ -125,6 +125,39 @@ describe('credential vault', () => {
     });
   });
 
+  it('concurrent puts for one origin all succeed and leave exactly one set', async () => {
+    const puts = Array.from({ length: 8 }, (_, i) =>
+      vault.put(
+        organizationId,
+        bindingId,
+        A,
+        [{ name: 'Authorization', value: `${SECRET}-${i}` }],
+        `it-${i}`,
+      ),
+    );
+    const results = await Promise.allSettled(puts);
+    expect(results.filter((r) => r.status === 'rejected')).toEqual([]);
+    const listed = await vault.list(organizationId, bindingId);
+    expect(listed).toHaveLength(1);
+    // Last writer wins, and what is stored opens to one of the values written.
+    const [stored] = await vault.headersFor(organizationId, bindingId, A);
+    expect(stored.value).toMatch(new RegExp(`^${SECRET}-[0-7]$`));
+  });
+
+  it("does not overwrite another organization's row at the same key", async () => {
+    await vault.put(organizationId, bindingId, A, headers, 'it');
+    await expect(
+      vault.put(
+        randomUUID(),
+        bindingId,
+        A,
+        [{ name: 'Authorization', value: 'x'.repeat(20) }],
+        'x',
+      ),
+    ).rejects.toThrow('held by another organization');
+    expect(await vault.headersFor(organizationId, bindingId, A)).toEqual(headers);
+  });
+
   it('removes a set', async () => {
     await vault.put(organizationId, bindingId, A, headers, 'it');
     await vault.remove(organizationId, bindingId, A);
