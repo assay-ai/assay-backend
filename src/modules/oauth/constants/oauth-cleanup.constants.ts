@@ -34,9 +34,23 @@ export const OAUTH_CLEANUP_LOCK_TTL_SECONDS = 3600;
 
 /**
  * Rows per token or code delete statement, so no statement holds locks for
- * long; also the most clients one run deletes.
+ * long; also the clients fetched per candidate batch.
  */
 export const OAUTH_CLEANUP_BATCH_SIZE = 5000;
+
+/**
+ * The client pass stops starting new batches this long after the run began,
+ * so the run ends well inside the lock's hour. The rest goes the next day.
+ */
+export const OAUTH_CLEANUP_TIME_BUDGET_MS = 45 * 60 * 1000;
+
+/**
+ * A CIMD row is deleted for an expired cache only once `cache_until` is this
+ * far in the past: longer than a pending authorization request lives
+ * (`OAUTH_PENDING_REQUEST_TTL_SECONDS`), so a request that resolved the client
+ * just before its cache expired can still mint its code.
+ */
+export const OAUTH_CLEANUP_CIMD_CACHE_GRACE_MS = 60 * 60 * 1000;
 
 /** DI token for `OAuthCleanupConfig`. */
 export const OAUTH_CLEANUP_CONFIG = 'OAUTH_CLEANUP_CONFIG';
