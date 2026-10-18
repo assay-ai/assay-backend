@@ -4,6 +4,7 @@ import './load-env';
 
 import { EServiceType } from '@config/app.config';
 import { installEgressLockdown, isEgressLockdownEnabled } from '@shared/network/egress';
+import { unredactedDebugWarning } from '@shared/observability';
 import {
   bootstrapApi,
   bootstrapWebSocket,
@@ -35,6 +36,9 @@ async function bootstrap() {
   }
 
   const serviceType = process.env.SERVICE_TYPE || 'api';
+
+  const debugWarning = unredactedDebugWarning();
+  if (debugWarning) console.warn(`⚠️  ${debugWarning}`);
 
   console.log(`🎯 Starting service type: ${serviceType.toUpperCase()}`);
 

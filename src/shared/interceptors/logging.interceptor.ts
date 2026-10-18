@@ -75,7 +75,9 @@ export class LoggingInterceptor implements NestInterceptor {
     const request = context.switchToHttp().getRequest<Request>();
     const response = context.switchToHttp().getResponse<Response>();
     const { method, ip } = request;
-    const url = redactOAuthUrl(request.url);
+    // The same field `AllExceptionsFilter` reads: `url` is stripped under a
+    // path-mounted router, `originalUrl` never is.
+    const url = redactOAuthUrl(request.originalUrl ?? request.url);
     const userAgent = request.get('user-agent') || '';
     const now = Date.now();
     const store = buildRequestContextStore(request);

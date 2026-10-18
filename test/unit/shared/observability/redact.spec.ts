@@ -52,6 +52,21 @@ describe('isForbiddenKey', () => {
     'rid',
     'requestId',
     'request_id',
+    // M2: hashes and query parameters.
+    'codeHash',
+    'parentHash',
+    'parameters',
+    // M3: OAuth names that are not secret-shaped words on their own.
+    'oauthState',
+    'assayReplaces',
+    'assay_replaces',
+    'authCode',
+    'pkceVerifier',
+    'delegateSignature',
+    'authorizationSignature',
+    // The per-request cookie names (`__Host-assay_oar_{mac16}`), by prefix.
+    '__Host-assay_oar_0123456789abcdef',
+    '__Host-assay_oar',
   ])('forbids the exact field %s', (key) => {
     expect(isForbiddenKey(key)).toBe(true);
   });
@@ -247,5 +262,20 @@ describe('redact', () => {
     expect(redact({ code: '23505' })).toEqual({ code: '23505' });
     expect(redact({ code: AC })).toEqual({ code: REDACTED });
     expect(redact({ code: 'q1W2e3R4t5' })).toEqual({ code: REDACTED });
+  });
+
+  it('keeps an integer code (JSON-RPC, errno) readable (M4)', () => {
+    expect(redact({ code: -32603 })).toEqual({ code: -32603 });
+    expect(redact({ code: 0 })).toEqual({ code: 0 });
+    expect(redact({ code: 1.5 })).toEqual({ code: REDACTED });
+    expect(redact({ code: { nested: 'x' } })).toEqual({ code: REDACTED });
+  });
+
+  it('replaces a 64-byte compact signature and a request cookie pair in text (M3)', () => {
+    const compact = '0x' + 'ef'.repeat(64);
+    expect(redact(`sig ${compact}.`)).toBe(`sig ${REDACTED}.`);
+    expect(redact(`Cookie: __Host-assay_oar_0123456789abcdef=${'a'.repeat(64)}; other=1`)).toBe(
+      `Cookie: ${REDACTED}; other=1`,
+    );
   });
 });

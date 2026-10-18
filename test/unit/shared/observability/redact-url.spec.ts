@@ -1,4 +1,4 @@
-import { redactOAuthUrl, REDACTED } from '@shared/observability';
+import { redactOAuthText, redactOAuthUrl, REDACTED } from '@shared/observability';
 
 /**
  * R-OA-27: a consent request id (`rid`) never reaches a log or an error body.
@@ -69,5 +69,41 @@ describe('redactOAuthUrl', () => {
     ]) {
       expect(redactOAuthUrl(url)).toBe(url);
     }
+  });
+
+  it('is case-insensitive, as routing is (M1)', () => {
+    expect(redactOAuthUrl(`/api/v1/OAuth/Requests/${RID}`)).toBe(
+      `/api/v1/OAuth/Requests/${REDACTED}`,
+    );
+    expect(redactOAuthUrl('/OAUTH/AUTHORIZE?state=s&assay_replaces=x')).toBe('/OAUTH/AUTHORIZE');
+    expect(redactOAuthUrl('/x?Refresh_Token=abc')).toBe(`/x?Refresh_Token=${REDACTED}`);
+  });
+});
+
+describe('redactOAuthText', () => {
+  const RID = 'Q2xp-ZW50X2lk_bGVhay10ZXN0LXJpZC12YWx1ZS0xMjM0NTY';
+  const RT = 'assay_rt_' + 'R'.repeat(43);
+
+  it.each([
+    [
+      `Cannot GET /api/v1/oauth/requests/${RID}/approve`,
+      `Cannot GET /api/v1/oauth/requests/${REDACTED}/approve`,
+    ],
+    [
+      `Cannot PUT /API/V1/OAUTH/REQUESTS/${RID}?x=1 now`,
+      `Cannot PUT /API/V1/OAUTH/REQUESTS/${REDACTED} now`,
+    ],
+    [
+      `Cannot POST /oauth/authorize/continue?request=${RID}`,
+      'Cannot POST /oauth/authorize/continue',
+    ],
+    [
+      `Cannot DELETE /oauth/token?refresh_token=abc&x=1`,
+      `Cannot DELETE /oauth/token?refresh_token=${REDACTED}&x=1`,
+    ],
+    [`Failed to decode param '${RT}'`, `Failed to decode param '${REDACTED}'`],
+    ['Cannot GET /api/v1/payments/abc-123', 'Cannot GET /api/v1/payments/abc-123'],
+  ])('redacts %s', (text, expected) => {
+    expect(redactOAuthText(text)).toBe(expected);
   });
 });

@@ -20,6 +20,8 @@ import {
   McpSession,
   McpSessionPort,
 } from '@modules/mcp/ports/mcp-session.port';
+import { McpExceptionsFilter } from '@bootstrap/mcp/mcp-exceptions.filter';
+import { OAuthConsentService } from '@modules/oauth/services/oauth-consent.service';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { LoggingInterceptor } from '@shared/interceptors/logging.interceptor';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
@@ -43,7 +45,7 @@ jest.mock('../../../src/bull-board/bull-board.module', () => {
  * The log canary (R-OA-26, R-OA-27, anti-goal 3): F1 (authorize, consent,
  * continue, code exchange), F2 (refresh), a few refusals and a revoke, run
  * over real HTTP through both apps wired as their `main.ts` files wire them —
- * the structured logger, `LoggingInterceptor` and `AllExceptionsFilter` — with
+ * the structured logger, `LoggingInterceptor` and the global filters — with
  * everything the process writes captured. Not one secret may appear: no
  * minted token, code, PKCE verifier or challenge, consent request id, request
  * cookie, `Authorization` value, `assay_replaces`, `state`, nor any sha256 of
@@ -144,7 +146,7 @@ describe('OAuth log canary — every secret through every logging call site', ()
     // One proxy hop, so each test can be its own client address.
     mcpApp.set('trust proxy', 1);
     mcpApp.enableCors(mcpCorsOptions);
-    mcpApp.useGlobalFilters(new AllExceptionsFilter());
+    mcpApp.useGlobalFilters(new McpExceptionsFilter());
     mcpApp.useGlobalInterceptors(new LoggingInterceptor());
     await mcpApp.init();
     mcp = mcpApp;
@@ -289,13 +291,15 @@ describe('OAuth log canary — every secret through every logging call site', ()
     const secrets: string[] = [HUMAN];
     const bodies: string[] = [];
     const keep = (response: request.Response) => {
-      bodies.push(response.text ?? '');
-      bodies.push(JSON.stringify(response.headers ?? {}));
+      // Error bodies only: a successful consent read returns its own rid.
+      if (response.status >= 400) bodies.push(response.text ?? '');
       return response;
     };
     const replaces = randomUUID();
     const state = 'canary-state-' + randomBytes(9).toString('base64url');
+    // `__Host-assay_oar_{mac16}={mac}`: both halves are secrets.
     const cookieValue = (cookie: string) => cookie.split('=').slice(1).join('=');
+    const cookieMac = (cookie: string) => cookie.split('=')[0].slice('__Host-assay_oar_'.length);
 
     const { lines, restore } = captureOutput();
     try {
@@ -305,7 +309,7 @@ describe('OAuth log canary — every secret through every logging call site', ()
       // `assay_replaces` and `state` travel only in the authorize query.
       await start(pkce().challenge, { state, assay_replaces: replaces });
       const first = await start(challenge, { scope: 'assay:agent offline_access', state });
-      secrets.push(first.rid, cookieValue(first.cookie));
+      secrets.push(first.rid, cookieValue(first.cookie), cookieMac(first.cookie));
       await approve(first.rid);
       const resumed = await resume(first.rid, first.cookie);
       expect(resumed.status).toBe(302);
@@ -368,7 +372,7 @@ describe('OAuth log canary — every secret through every logging call site', ()
       const other = pkce();
       secrets.push(other.verifier, other.challenge);
       const second = await start(other.challenge);
-      secrets.push(second.rid, cookieValue(second.cookie));
+      secrets.push(second.rid, cookieValue(second.cookie), cookieMac(second.cookie));
       await approve(second.rid);
       const secondCode = new URL(
         (await resume(second.rid, second.cookie)).headers.location,
@@ -376,7 +380,7 @@ describe('OAuth log canary — every secret through every logging call site', ()
       secrets.push(secondCode);
       // A continue before anyone decided.
       const third = await start(pkce().challenge);
-      secrets.push(third.rid, cookieValue(third.cookie));
+      secrets.push(third.rid, cookieValue(third.cookie), cookieMac(third.cookie));
       keep(await resume(third.rid, third.cookie));
 
       const wrongVerifier = randomBytes(32).toString('base64url');
@@ -395,6 +399,72 @@ describe('OAuth log canary — every secret through every logging call site', ()
           .get(`/oauth/token?refresh_token=${refreshed.body.refresh_token}`)
           .set('X-Forwarded-For', newIp()),
       );
+
+      // Review M7. A wrong method on a consent route: Nest's own 404 message
+      // names the URL (I1).
+      const rt = refreshed.body.refresh_token as string;
+      keep(
+        await request(api.getHttpServer())
+          .get(`/api/v1/oauth/requests/${first.rid}/approve?x=${rt}`)
+          .set(auth),
+      );
+      keep(await request(api.getHttpServer()).put(`/api/v1/oauth/requests/${first.rid}`).set(auth));
+      // Malformed JSON on approve (API) and on token and register (MCP).
+      keep(
+        await request(api.getHttpServer())
+          .post(`/api/v1/oauth/requests/${first.rid}/approve`)
+          .set(auth)
+          .set('Content-Type', 'application/json')
+          .send(`{"name":${rt}}`),
+      );
+      for (const path of ['/oauth/token', '/oauth/register']) {
+        keep(
+          await request(mcp.getHttpServer())
+            .post(path)
+            .set('X-Forwarded-For', newIp())
+            .set('Content-Type', 'application/json')
+            .send(`{"refresh_token":${rt}}`),
+        );
+      }
+      // A registration.
+      keep(
+        await request(mcp.getHttpServer())
+          .post('/oauth/register')
+          .set('X-Forwarded-For', newIp())
+          .send({ client_name: 'Canary client', redirect_uris: ['http://127.0.0.1/callback'] }),
+      );
+      // Uppercase paths, which route all the same (M1).
+      const upper = pkce();
+      secrets.push(upper.verifier, upper.challenge);
+      const upperState = 'canary-upper-' + randomBytes(9).toString('base64url');
+      const upperReplaces = randomUUID();
+      secrets.push(upperState, upperReplaces);
+      const upperAuthorize = await request(mcp.getHttpServer())
+        .get(
+          `/OAUTH/AUTHORIZE?${new URLSearchParams(
+            baseParams(upper.challenge, { state: upperState, assay_replaces: upperReplaces }),
+          )}`,
+        )
+        .set('X-Forwarded-For', newIp());
+      expect(upperAuthorize.status).toBe(302);
+      const fourth = await start(pkce().challenge);
+      secrets.push(fourth.rid, cookieValue(fourth.cookie), cookieMac(fourth.cookie));
+      keep(
+        await request(api.getHttpServer()).get(`/api/v1/OAuth/Requests/${fourth.rid}`).set(auth),
+      );
+      // A 5xx: the filter's error line and stack.
+      const consent = api.get(OAuthConsentService, { strict: false });
+      const failing = jest
+        .spyOn(consent, 'read')
+        .mockRejectedValueOnce(new Error(`store failed: ${rt}`));
+      try {
+        const failed = keep(
+          await request(api.getHttpServer()).get(`/api/v1/oauth/requests/${fourth.rid}`).set(auth),
+        );
+        expect(failed.status).toBe(500);
+      } finally {
+        failing.mockRestore();
+      }
 
       // Revoke, then the revoked access token on the MCP endpoint.
       const revoked = await request(mcp.getHttpServer())
@@ -422,8 +492,17 @@ describe('OAuth log canary — every secret through every logging call site', ()
     expect(output).toContain('"url":"/oauth/token"');
     expect(output).toContain('"url":"/oauth/revoke"');
 
+    expect(output).toContain('Cannot GET /api/v1/oauth/requests/[REDACTED]/approve');
+    expect(output).toContain('Cannot PUT /api/v1/oauth/requests/[REDACTED]');
+    expect(output).toContain('"url":"/OAUTH/AUTHORIZE"');
+    expect(output).toContain('/api/v1/OAuth/Requests/[REDACTED]');
+    expect(output).toContain('"url":"/oauth/register"');
+    expect(output).toContain('"level":"error"');
+
     const errorBodies = bodies.join('\n');
     expect(errorBodies).toContain('/api/v1/oauth/requests/[REDACTED]');
+    expect(errorBodies).toContain('Malformed request body');
+    expect(errorBodies).toContain('"error":"invalid_request"');
 
     for (const secret of withHashes(secrets)) {
       expect(secret.length).toBeGreaterThan(8);

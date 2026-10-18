@@ -102,6 +102,20 @@ const FORBIDDEN_KEY_EXACT = new Set([
   'codechallenge',
   'rid',
   'requestid',
+  // Hashes of tokens and codes (R-OA-27 forbids hashes) and a query's bound
+  // parameters, which hold them (`QueryFailedError.parameters`). `tokenHash`
+  // stays in SAFE_KEYS: it is the agent-credential exception (owner call).
+  'codehash',
+  'parenthash',
+  'parameters',
+  // OAuth names that are not secret-shaped words on their own. A bare
+  // `state` or `verifier` would blank job states and the verifier service.
+  'oauthstate',
+  'assayreplaces',
+  'authcode',
+  'pkceverifier',
+  'delegatesignature',
+  'authorizationsignature',
   'body',
   'requestbody',
   'responsebody',
@@ -116,9 +130,12 @@ const FORBIDDEN_KEY_EXACT = new Set([
  * value backstop below catches on its own anyway).
  */
 const CODE_KEY = 'code';
+const REQUEST_COOKIE_KEY_PREFIX = 'hostassayoar';
 const ERROR_CODE_SHAPE = /^(?:[A-Z][A-Z0-9_]*|[a-z][a-z0-9_]*|\d+)$/;
 
 function isLoggableCode(value: unknown): boolean {
+  // A JSON-RPC code or an errno.
+  if (typeof value === 'number') return Number.isInteger(value);
   return (
     typeof value === 'string' &&
     value.length <= 64 &&
@@ -135,7 +152,9 @@ function isLoggableCode(value: unknown): boolean {
  *
  * - `assay_(at|rt|ac|sk_live)_…`: OAuth access/refresh tokens, authorization
  *   codes and API keys.
- * - `0x` + 130 hex: a 65-byte ECDSA signature.
+ * - `0x` + 130 hex: a 65-byte ECDSA signature; `0x` + 128 hex: an EIP-2098
+ *   compact one.
+ * - `__Host-assay_oar_…[=value]`: the consent request cookie, name and value.
  *
  * Deliberately **not** `0x` + 64 hex: on this server that is the shape of
  * every EVM transaction hash, bytes32 id and slash request id the runbooks
@@ -143,8 +162,10 @@ function isLoggableCode(value: unknown): boolean {
  * `signingkey`, `secret`).
  */
 const SECRET_VALUE_PATTERNS: readonly RegExp[] = [
-  /assay_(?:at|rt|ac|sk_live)_[A-Za-z0-9_-]+/g,
+  /assay_(?:at|rt|ac|sk_live)_[A-Za-z0-9_-]+/gi,
   /0x[0-9a-fA-F]{130}(?![0-9a-fA-F])/g,
+  /0x[0-9a-fA-F]{128}(?![0-9a-fA-F])/g,
+  /__Host-assay_oar_[0-9a-fA-F]*(?:=[^;\s,]*)?/gi,
 ];
 
 /** Replaces every secret-shaped substring of `text` with {@link REDACTED}. */
@@ -164,6 +185,8 @@ export function isForbiddenKey(key: string): boolean {
   const normalized = normalizeKey(key);
   if (SAFE_KEYS.has(normalized)) return false;
   if (normalized === CODE_KEY) return true;
+  // The per-request consent cookie, `__Host-assay_oar_{mac16}`.
+  if (normalized.startsWith(REQUEST_COOKIE_KEY_PREFIX)) return true;
   if (FORBIDDEN_KEY_EXACT.has(normalized)) return true;
   return FORBIDDEN_KEY_SUBSTRINGS.some((pattern) => normalized.includes(pattern));
 }

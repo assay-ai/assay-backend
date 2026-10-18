@@ -4,7 +4,7 @@ import { REDACTED, redactSecretsInText } from './redact';
  * The consent request id in a consent API path, under any prefix
  * (`/api/v1/oauth/requests/{rid}`, `…/{rid}/approve`, `…/{rid}/deny`).
  */
-const OAUTH_REQUEST_PATH = /(\/oauth\/requests\/)[^/?#]+/g;
+const OAUTH_REQUEST_PATH = /(\/oauth\/requests\/)[^/?#\s'"]+/gi;
 
 /**
  * Routes whose whole query string is dropped: `/oauth/authorize` carries
@@ -12,7 +12,10 @@ const OAUTH_REQUEST_PATH = /(\/oauth\/requests\/)[^/?#]+/g;
  * (a credential id), `continue` carries the rid; the consent API takes none.
  * Only the path is kept.
  */
-const QUERYLESS_PATH = /\/oauth\/(?:authorize|requests\/)/;
+const QUERYLESS_PATH = /\/oauth\/(?:authorize|requests\/)/i;
+
+/** The same routes inside free text: the path up to its query, then the query. */
+const QUERYLESS_PATH_IN_TEXT = /(\/oauth\/(?:authorize|requests\/)[^\s?#'"]*)\?[^\s#'"]*/gi;
 
 /**
  * Query keys whose value is never logged or echoed. `request` is the rid on
@@ -62,9 +65,32 @@ export function redactOAuthUrl(url: string): string {
             const equals = pair.indexOf('=');
             if (equals === -1) return pair;
             const key = pair.slice(0, equals);
-            return SECRET_QUERY_KEYS.has(decodedKey(key)) ? `${key}=${REDACTED}` : pair;
+            return SECRET_QUERY_KEYS.has(decodedKey(key).toLowerCase())
+              ? `${key}=${REDACTED}`
+              : pair;
           })
           .join('&');
 
   return redactSecretsInText(safePath + safeQuery);
+}
+
+/** `key=value` inside free text, for every key of {@link SECRET_QUERY_KEYS}. */
+const SECRET_QUERY_IN_TEXT = new RegExp(
+  `([?&](?:${[...SECRET_QUERY_KEYS].join('|')})=)[^&\\s#'"]*`,
+  'gi',
+);
+
+/**
+ * {@link redactOAuthUrl} for text that merely *contains* a URL — Nest's
+ * `Cannot GET /api/v1/oauth/requests/{rid}/approve`, Express's
+ * `Failed to decode param '…'`: the rid, the query of the OAuth routes and
+ * every secret query value are replaced, then the value backstop runs.
+ */
+export function redactOAuthText(text: string): string {
+  return redactSecretsInText(
+    text
+      .replace(QUERYLESS_PATH_IN_TEXT, '$1')
+      .replace(OAUTH_REQUEST_PATH, `$1${REDACTED}`)
+      .replace(SECRET_QUERY_IN_TEXT, `$1${REDACTED}`),
+  );
 }
