@@ -113,32 +113,63 @@ describe('CompositeMcpSessionSource — one port, two issuers, one refusal', () 
 describe('createSessionSource — AUTH_SESSION_SOURCE decides, and the default is unchanged behaviour', () => {
   const config = new StubSource('config-token');
   const db = new StubSource('db-token');
+  const oauth = new StubSource('oauth-token');
   const privy = new StubSource('privy-token');
 
   it('binds config only, by default and by name', () => {
-    expect(createSessionSource(SessionSourceMode.CONFIG, { config, db, privy })).toBe(config);
+    expect(createSessionSource(SessionSourceMode.CONFIG, { config, db, oauth, privy })).toBe(
+      config,
+    );
     expect(parseSessionSourceMode(undefined)).toBe(SessionSourceMode.CONFIG);
     expect(parseSessionSourceMode('nonsense')).toBe(SessionSourceMode.CONFIG);
   });
 
   it('binds privy only', () => {
-    expect(createSessionSource(SessionSourceMode.PRIVY, { config, db, privy })).toBe(privy);
+    expect(createSessionSource(SessionSourceMode.PRIVY, { config, db, oauth, privy })).toBe(privy);
     expect(parseSessionSourceMode('privy')).toBe(SessionSourceMode.PRIVY);
   });
 
   it('binds db only', () => {
-    expect(createSessionSource(SessionSourceMode.DB, { config, db, privy })).toBe(db);
+    expect(createSessionSource(SessionSourceMode.DB, { config, db, oauth, privy })).toBe(db);
     expect(parseSessionSourceMode('db')).toBe(SessionSourceMode.DB);
   });
 
   it('binds all three, config first then db then privy', async () => {
-    const source = createSessionSource(SessionSourceMode.BOTH, { config, db, privy });
+    const source = createSessionSource(SessionSourceMode.BOTH, { config, db, oauth, privy });
     expect(source).toBeInstanceOf(CompositeMcpSessionSource);
 
     await expect(source.resolve('config-token')).resolves.toBeDefined();
     await expect(source.resolve('db-token')).resolves.toBeDefined();
+    await expect(source.resolve('oauth-token')).resolves.toBeDefined();
     await expect(source.resolve('privy-token')).resolves.toBeDefined();
     expect(parseSessionSourceMode('both')).toBe(SessionSourceMode.BOTH);
+  });
+
+  it('both order is config, db, oauth, privy', async () => {
+    const order: string[] = [];
+    const recording = (name: string): McpSessionPort => ({
+      resolve: () => {
+        order.push(name);
+        return Promise.reject(McpErrors.credentialInvalid());
+      },
+    });
+
+    const source = createSessionSource(SessionSourceMode.BOTH, {
+      config: recording('config'),
+      db: recording('db'),
+      oauth: recording('oauth'),
+      privy: recording('privy'),
+    });
+
+    await expectErrorCodeAsync(() => source.resolve('unknown'), 'MCP_CREDENTIAL_INVALID');
+    expect(order).toEqual(['config', 'db', 'oauth', 'privy']);
+  });
+
+  it('includes the OAuth source only in both mode (OAuth needs the Privy consent)', async () => {
+    for (const mode of [SessionSourceMode.CONFIG, SessionSourceMode.DB, SessionSourceMode.PRIVY]) {
+      const source = createSessionSource(mode, { config, db, oauth, privy });
+      await expectErrorCodeAsync(() => source.resolve('oauth-token'), 'MCP_CREDENTIAL_INVALID');
+    }
   });
 });
 

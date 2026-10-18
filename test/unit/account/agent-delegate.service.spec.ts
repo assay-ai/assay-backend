@@ -336,6 +336,73 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
     ).rejects.toMatchObject({ errorCode: 'ACCOUNT_DELEGATE_BINDING_AGENT_ONLY' });
   });
 
+  /**
+   * R-OA-22 (defence in depth): only API keys and `assay-mcp` grants may bind a
+   * payment key. Payments need `paymentsAllowed === true`, so a session that
+   * lacks the field is refused like one that says false (fail closed).
+   */
+  describe('a session without paymentsAllowed === true', () => {
+    function spies() {
+      return [
+        jest.spyOn(redis, 'set'),
+        jest.spyOn(redis, 'getdel'),
+        jest.spyOn(credentials, 'findOneBy'),
+        jest.spyOn(credentials, 'update'),
+        jest.spyOn(credentials, 'findOtherDelegateHolders'),
+        jest.spyOn(credentials, 'releaseDelegateFromExpired'),
+      ];
+    }
+
+    const refused: Array<[string, Partial<McpSession>]> = [
+      ['false (a third-party OAuth grant)', { paymentsAllowed: false }],
+      ['missing', { paymentsAllowed: undefined }],
+    ];
+
+    it.each(refused)(
+      'paymentsAllowed %s → challenge, bind and current refused before any Redis or DB access',
+      async (_label, overrides) => {
+        const watched = spies();
+        const s = session(overrides);
+
+        await expect(service.challenge(s, delegateKey.address)).rejects.toMatchObject({
+          errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+          statusCode: 403,
+        });
+        await expect(service.bind(s, 'challenge-1', '0xsig')).rejects.toMatchObject({
+          errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+        });
+        await expect(service.current(s)).rejects.toMatchObject({
+          errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+        });
+
+        for (const spy of watched) expect(spy).not.toHaveBeenCalled();
+        expect(redis.store.size).toBe(0);
+      },
+    );
+
+    it('paymentsAllowed true → challenge and bind proceed', async () => {
+      const { challenge, signature } = await signChallenge(
+        delegateKey,
+        session({ paymentsAllowed: true }),
+      );
+      const bound = await service.bind(
+        session({ paymentsAllowed: true }),
+        challenge.challengeId,
+        signature,
+      );
+      expect(bound.delegate).toBe(`${CHAIN}:${delegateKey.address}`);
+    });
+
+    it('a config-file token is still refused as agent-only first', async () => {
+      await expect(
+        service.challenge(
+          session({ storedCredential: undefined, paymentsAllowed: false }),
+          delegateKey.address,
+        ),
+      ).rejects.toMatchObject({ errorCode: 'ACCOUNT_DELEGATE_BINDING_AGENT_ONLY' });
+    });
+  });
+
   it('refuses a chain without voucher delegation', async () => {
     const solana = { resolve: () => ({ toAccountId: jest.fn() }) };
     const onSolana = new AgentDelegateService(

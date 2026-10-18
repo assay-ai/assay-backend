@@ -6,12 +6,22 @@ import { DataSource } from 'typeorm';
 import { generatePrivateKey, privateKeyToAccount } from 'viem/accounts';
 
 import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
+import { AgentEntity } from '@database/postgres/entities/agent.entity';
+import { OAuthAccessTokenEntity } from '@database/postgres/entities/oauth-access-token.entity';
+import { OAuthClientEntity } from '@database/postgres/entities/oauth-client.entity';
+import { OrganizationEntity } from '@database/postgres/entities/organization.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
+import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
+import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
+import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
+import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
 import { AgentDelegateService } from '@modules/account/services/agent-delegate.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { EvmChainAdapter } from '@modules/chains/evm/evm-chain.adapter';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { hashOpaqueToken, mint } from '@modules/oauth/domain/opaque-token';
 
 import { deployment } from '../../unit/chains/evm/evm-fixtures';
 import {
@@ -50,7 +60,13 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       type: 'postgres',
       ...testConnectionOptions(),
       database: DATABASE,
-      entities: [AgentCredentialEntity],
+      entities: [
+        AgentCredentialEntity,
+        AgentEntity,
+        OrganizationEntity,
+        OAuthClientEntity,
+        OAuthAccessTokenEntity,
+      ],
       migrations: [join(__dirname, '../../../src/database/postgres/migrations/*.ts')],
       synchronize: false,
       migrationsRun: false,
@@ -257,6 +273,90 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     expect(byId[early]).toBeNull();
     expect(byId[late]).toBeNull();
     expect(byId[revoked]).toBe(key);
+  });
+
+  /**
+   * R-OA-22: a grant of a client outside `OAUTH_PAYMENT_CLIENTS`, resolved by
+   * the real OAuth session source on the MCP host, cannot ask for a challenge
+   * or bind a key. Nothing is written to Redis or to the credential row.
+   */
+  it('third-party OAuth session → challenge and bind refused ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED', async () => {
+    const mcp = 'https://mcp.example.com';
+    const orgId = randomUUID();
+    const oauthAgentId = randomUUID();
+    await dataSource.query(
+      `INSERT INTO "organizations" ("id", "name", "status") VALUES ($1, 'Example org', 'ACTIVE')`,
+      [orgId],
+    );
+    await dataSource.query(
+      `INSERT INTO "agents" ("id", "organization_id", "privy_user_id", "status", "primary_account_id", "chain_id")
+       VALUES ($1, $2, $3, 'ACTIVE', $4, $5)`,
+      [
+        oauthAgentId,
+        orgId,
+        `did:privy:test-${oauthAgentId}`,
+        `${CHAIN}:${privateKeyToAccount(generatePrivateKey()).address}`,
+        CHAIN,
+      ],
+    );
+    const [client] = (await dataSource.query(
+      `INSERT INTO "oauth_clients" ("client_id", "kind", "client_name", "redirect_uris", "metadata")
+       VALUES ($1, 'DCR', 'Example app', ARRAY['https://app.example.com/callback'], '{}')
+       RETURNING "id"`,
+      [`dcr_${randomUUID().replace(/-/g, '').slice(0, 22)}`],
+    )) as { id: string }[];
+    const [grant] = (await dataSource.query(
+      `INSERT INTO "agent_credentials"
+         ("organization_id", "agent_id", "name", "issued_via", "oauth_client_id", "scopes", "expires_at")
+       VALUES ($1, $2, 'Example app', 'OAUTH', $3, '{}', now() + interval '30 days')
+       RETURNING "id"`,
+      [orgId, oauthAgentId, client.id],
+    )) as { id: string }[];
+    const accessToken = mint('assay_at_');
+    await dataSource.query(
+      `INSERT INTO "oauth_access_tokens"
+         ("organization_id", "credential_id", "token_hash", "scope", "audience", "expires_at")
+       VALUES ($1, $2, $3, 'assay:agent', $4, now() + interval '1 hour')`,
+      [orgId, grant.id, hashOpaqueToken(accessToken), mcp],
+    );
+
+    const source = new OAuthAccessTokenMcpSessionSource(
+      new OAuthAccessTokenRepository(dataSource),
+      credentials,
+      new OAuthClientRepository(dataSource),
+      new CredentialSessionResolver(credentials, new AgentRepository(dataSource)),
+      { audience: mcp, paymentClients: [`${mcp}/oauth/clients/assay-mcp`] },
+      'mcp',
+    );
+    try {
+      const oauthSession = await source.resolve(accessToken);
+      expect(oauthSession).toMatchObject({ credentialId: grant.id, paymentsAllowed: false });
+
+      await expect(service.challenge(oauthSession, delegateKey.address)).rejects.toMatchObject({
+        errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+      });
+      await expect(service.bind(oauthSession, randomUUID(), '0x00')).rejects.toMatchObject({
+        errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
+      });
+
+      expect(await redis.exists(`agent-delegate-challenge:${grant.id}`)).toBe(0);
+      const [row] = await dataSource.query(
+        `SELECT "delegate_account", "delegate_bound_at" FROM "agent_credentials" WHERE "id" = $1`,
+        [grant.id],
+      );
+      expect(row).toEqual({ delegate_account: null, delegate_bound_at: null });
+    } finally {
+      // The database outlives a run, and the migration-revert test above cannot
+      // undo the OAuth migration while an OAuth credential row exists.
+      await new Promise((resolve) => setTimeout(resolve, 50)); // let the best-effort stamps land
+      await dataSource.query(`DELETE FROM "oauth_access_tokens" WHERE "credential_id" = $1`, [
+        grant.id,
+      ]);
+      await dataSource.query(`DELETE FROM "agent_credentials" WHERE "id" = $1`, [grant.id]);
+      await dataSource.query(`DELETE FROM "oauth_clients" WHERE "id" = $1`, [client.id]);
+      await dataSource.query(`DELETE FROM "agents" WHERE "id" = $1`, [oauthAgentId]);
+      await dataSource.query(`DELETE FROM "organizations" WHERE "id" = $1`, [orgId]);
+    }
   });
 
   it('keeps the account and the instant together, by CHECK', async () => {

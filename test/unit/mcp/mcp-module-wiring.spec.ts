@@ -34,7 +34,15 @@ import { BindingVersionRepository } from '@database/postgres/repositories/bindin
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ToolRepository } from '@database/postgres/repositories/tool.repository';
 import { ToolVersionRepository } from '@database/postgres/repositories/tool-version.repository';
+import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
+import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
+import { CompositeMcpSessionSource } from '@modules/auth/services/composite-mcp-session.source';
+import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
+import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
+import { PrivyMcpSessionSource } from '@modules/auth/services/privy-mcp-session.source';
+import { BlocklistSessionSource } from '@modules/blocklist/services/blocklist-session.source';
 import { McpModule } from '@modules/mcp/mcp.module';
+import { ConfigMcpSessionSource } from '@modules/mcp/services/config-mcp-session.source';
 import { MCP_SESSION_SOURCE } from '@modules/mcp/ports/mcp-session.port';
 import { McpCatalogueService } from '@modules/mcp/services/mcp-catalogue.service';
 import { MCP_PRICING, McpPricingConfig } from '@modules/mcp/services/mcp-pricing.config';
@@ -199,6 +207,9 @@ import { ChainId } from '@modules/chains/ports/caip.types';
     // reads `agent_credentials` directly — same stub-the-boundary reasoning
     // as `AgentRepository` above.
     { provide: AgentCredentialRepository, useValue: {} },
+    // `AuthModule`'s OAuth access-token source reads both.
+    { provide: OAuthAccessTokenRepository, useValue: {} },
+    { provide: OAuthClientRepository, useValue: {} },
     { provide: EgressHttpClient, useValue: {} },
     { provide: SlaWindowCallRepository, useValue: {} },
     { provide: SlaStrikeRepository, useValue: {} },
@@ -235,6 +246,8 @@ import { ChainId } from '@modules/chains/ports/caip.types';
     SlaWindowRepository,
     AgentRepository,
     AgentCredentialRepository,
+    OAuthAccessTokenRepository,
+    OAuthClientRepository,
     EgressHttpClient,
     SlaWindowCallRepository,
     SlaStrikeRepository,
@@ -486,6 +499,84 @@ describe('toolset, Connect preview and MCP host wiring', () => {
       ]) {
         expect(app.get(token, { strict: false })).toBeInstanceOf(token);
       }
+    } finally {
+      for (const token of [KILL_SWITCH_REDIS, KILL_SWITCH_SUBSCRIBER, SIGNING_RATE_REDIS]) {
+        try {
+          app.get<Redis>(token, { strict: false }).disconnect();
+        } catch {
+          // Not part of this graph.
+        }
+      }
+      await app.close().catch(() => undefined);
+    }
+  });
+});
+
+/**
+ * `MCP_SESSION_SOURCE` with `AUTH_SESSION_SOURCE=both`: the blocklist still
+ * wraps the whole chain, and the chain is config, API keys, OAuth access
+ * tokens, then Privy (spec §6.4 item 3). A blocked caller is refused whichever
+ * source recognised it, OAuth included.
+ */
+@Module({
+  imports: [
+    ConfigModule.forRoot({
+      isGlobal: true,
+      ignoreEnvFile: true,
+      load: [() => ({ auth: { sessionSource: 'both' } })],
+    }),
+    StubRepositoriesModule,
+    StubPostgresModule,
+    McpModule,
+  ],
+})
+class SessionSourceWiringHarnessModule {}
+
+describe('MCP_SESSION_SOURCE wiring (AUTH_SESSION_SOURCE=both)', () => {
+  jest.setTimeout(30_000);
+
+  const BOOT_ENV: Readonly<Record<string, string>> = {
+    ENABLED_CHAINS: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+  };
+  const savedEnv: Record<string, string | undefined> = {};
+  beforeAll(() => {
+    for (const [key, value] of Object.entries(BOOT_ENV)) {
+      savedEnv[key] = process.env[key];
+      process.env[key] = value;
+    }
+  });
+  afterAll(() => {
+    for (const [key, value] of Object.entries(savedEnv)) {
+      if (value === undefined) delete process.env[key];
+      else process.env[key] = value;
+    }
+  });
+
+  it('the blocklist still wraps the composite: config, db, oauth, privy', async () => {
+    const app = await Test.createTestingModule({ imports: [SessionSourceWiringHarnessModule] })
+      .overrideModule(PostgresModule)
+      .useModule(StubPostgresModule)
+      // `QuoteIndexInvalidationSubscriber` registers itself on the DataSource.
+      .overrideProvider(getDataSourceToken('postgres'))
+      .useValue({ subscribers: [] })
+      .compile();
+
+    try {
+      const source = app.get(MCP_SESSION_SOURCE);
+      expect(source).toBeInstanceOf(BlocklistSessionSource);
+
+      const inner = (source as unknown as { inner: unknown }).inner;
+      expect(inner).toBeInstanceOf(CompositeMcpSessionSource);
+
+      const sources = (inner as unknown as { sources: readonly unknown[] }).sources;
+      expect(sources.map((each) => (each as object).constructor)).toEqual([
+        ConfigMcpSessionSource,
+        DbCredentialMcpSessionSource,
+        OAuthAccessTokenMcpSessionSource,
+        PrivyMcpSessionSource,
+      ]);
+      // The same instance `AuthModule` exports, not a second one.
+      expect(sources[2]).toBe(app.get(OAuthAccessTokenMcpSessionSource, { strict: false }));
     } finally {
       for (const token of [KILL_SWITCH_REDIS, KILL_SWITCH_SUBSCRIBER, SIGNING_RATE_REDIS]) {
         try {
