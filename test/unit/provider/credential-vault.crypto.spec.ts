@@ -16,7 +16,7 @@ import { resetEnvSigningKeyCacheForTests } from '@modules/verification/signing/b
 const kek: Kek = { keyId: 'k1', key: randomBytes(32) };
 const keks = new Map([[kek.keyId, kek]]);
 const aad = credentialAad('org', 'binding', 'https://x.test');
-const headers = [{ name: 'Authorization', value: 'Bearer sk-live-1234567890abcdef' }];
+const headers = [{ name: 'Authorization', value: 'Bearer sk-example-1234567890abcdef' }];
 
 describe('credential vault crypto', () => {
   it('round-trips a header set', () => {
@@ -57,7 +57,7 @@ describe('credential vault crypto', () => {
   });
 
   it('hints the last 4 characters of long values only', () => {
-    expect(valueHint('sk-live-1234567890abcdef')).toBe('cdef');
+    expect(valueHint('sk-example-1234567890abcdef')).toBe('cdef');
     expect(valueHint('short')).toBeNull();
   });
 

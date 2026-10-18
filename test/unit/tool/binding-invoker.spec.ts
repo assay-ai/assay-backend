@@ -706,7 +706,7 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
   });
 
   describe('echoed credentials', () => {
-    const KEY = 'sk-live-0123456789abcdef';
+    const KEY = 'sk-example-0123456789abcdef';
     const b64 = (text: string) => Buffer.from(text).toString('base64');
 
     it('redacts the values from the JSON body and the headers before returning', async () => {
@@ -733,7 +733,7 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
         reply: { body: `<pre>key=${KEY.toUpperCase()}</pre>`, contentType: 'text/html' },
       });
       const response = await run();
-      expect(JSON.stringify(response)).not.toMatch(/sk-live/i);
+      expect(JSON.stringify(response)).not.toMatch(/sk-example/i);
     });
 
     it('redacts a transport failure: detail and partial body', async () => {
