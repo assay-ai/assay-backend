@@ -745,3 +745,169 @@ describe('review H-2 — the stored plan is checked against the evidence before 
     expect(ctx.executor.batches).toEqual([{ kind: 'propose', size: 2 }]);
   });
 });
+
+/**
+ * B11: a case asked to be cancelled with no part standing (a case opened
+ * before the parts model has no parts at all). The case's own record is read;
+ * what is not Pending or Disputed is closed with a timeline entry and refused
+ * with 409 SLASH_NOTHING_STANDING rather than a 503.
+ */
+describe('SlashPartsService.buildCancel — nothing standing', () => {
+  const record = (status: SlashRecordSnapshot['status']): SlashRecordSnapshot => ({
+    status,
+    penaltyMinor: '300',
+    appliedMinor: '0',
+    agentAmountMinor: '0',
+    platformAmountMinor: '0',
+    reservedMinor: status === 'PENDING' || status === 'DISPUTED' ? '300' : '0',
+    proposedAt: T0,
+    executableAt: X0,
+    executedAt: null,
+    cancelledAt: null,
+  });
+
+  function withCaseStore(weights: [string, string][] = []) {
+    const ctx = build(weights);
+    const updates: { criteria: object; patch: object }[] = [];
+    const events: { kind: string; detail: Record<string, unknown> }[] = [];
+    let chainStatus = 'CANCEL_REQUESTED';
+    const proposals = {
+      update: jest.fn(
+        async (criteria: { chainStatus?: string }, patch: { chainStatus?: string }) => {
+          updates.push({ criteria, patch });
+          if (criteria.chainStatus && criteria.chainStatus !== chainStatus) return { affected: 0 };
+          if (patch.chainStatus) chainStatus = patch.chainStatus;
+          return { affected: 1 };
+        },
+      ),
+    };
+    const lifecycle = {
+      appendEventDirect: jest.fn(
+        async (entry: { kind: string; detail: Record<string, unknown> }) => {
+          events.push(entry);
+        },
+      ),
+    };
+    const service = new SlashPartsService(
+      ctx.parts as never,
+      {} as never,
+      ctx.executor,
+      { dustReportBelowMinor: 0n, stragglerMaxAttempts: 3, stragglerDeadlineMs: 1 },
+      { readCaps: async () => CAPS },
+      proposals as never,
+      lifecycle as never,
+    );
+    const proposal = {
+      ...ctx.proposal,
+      status: 'CANCELLED',
+      chainStatus: 'CANCEL_REQUESTED',
+    } as SlashProposalEntity;
+    let built: string[] = [];
+    ctx.executor.buildCancel = (async (request: { requestId: string }) => {
+      built.push(request.requestId);
+      return { transaction: 'tx' } as never;
+    }) as never;
+    return {
+      ...ctx,
+      planner: ctx.service,
+      service,
+      proposal,
+      updates,
+      events,
+      built: () => built,
+      chainStatus: () => chainStatus,
+      reset: () => (built = []),
+    };
+  }
+
+  it('no parts and the record is no longer pending: 409, closed, with an event', async () => {
+    const ctx = withCaseStore();
+    ctx.executor.records.set(ctx.proposal.chainRequestId, record('CANCELLED'));
+
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
+      statusCode: 409,
+    });
+    expect(ctx.chainStatus()).toBe('CANCELLED');
+    expect(ctx.updates[0].criteria).toMatchObject({
+      organizationId: 'provider-org',
+      id: 'case-1',
+      chainStatus: 'CANCEL_REQUESTED',
+    });
+    expect(ctx.events).toEqual([
+      expect.objectContaining({
+        kind: 'CHAIN_CANCELLED',
+        detail: expect.objectContaining({
+          requestId: ctx.proposal.chainRequestId,
+          chainRecord: 'CANCELLED',
+        }),
+      }),
+    ]);
+    expect(ctx.built()).toEqual([]);
+  });
+
+  it('no parts and no record on chain at all: also closed', async () => {
+    const ctx = withCaseStore();
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
+    });
+    expect(ctx.chainStatus()).toBe('CANCELLED');
+    expect(ctx.events[0].detail.chainRecord).toBe('NOT_FOUND');
+  });
+
+  it.each(['PENDING', 'DISPUTED'] as const)(
+    'no parts but the case record is %s on chain: builds its cancel, writes nothing',
+    async (status) => {
+      const ctx = withCaseStore();
+      ctx.executor.records.set(ctx.proposal.chainRequestId, record(status));
+
+      await ctx.service.buildCancel(ctx.proposal, '0xprovider');
+
+      expect(ctx.built()).toEqual([ctx.proposal.chainRequestId]);
+      expect(ctx.updates).toEqual([]);
+      expect(ctx.events).toEqual([]);
+    },
+  );
+
+  it('an executed record is never written as cancelled', async () => {
+    const ctx = withCaseStore();
+    ctx.executor.records.set(ctx.proposal.chainRequestId, record('EXECUTED'));
+
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
+    });
+    expect(ctx.chainStatus()).toBe('CANCEL_REQUESTED');
+    expect(ctx.events).toEqual([]);
+  });
+
+  it('a part that executed keeps the case out of CANCELLED', async () => {
+    const ctx = withCaseStore([[agent(1), '200']]);
+    await ctx.planner.propose(ctx.proposal, '0xprovider');
+    Object.assign(ctx.parts.rows[0], { chainStatus: 'EXECUTED', executedAt: X0 });
+
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
+    });
+    expect(ctx.chainStatus()).toBe('CANCEL_REQUESTED');
+  });
+
+  it('an unreadable chain is a 503, and nothing is written', async () => {
+    const ctx = withCaseStore();
+    ctx.executor.readRecord = async () => {
+      throw new Error('rpc down');
+    };
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_CHAIN_UNAVAILABLE,
+    });
+    expect(ctx.updates).toEqual([]);
+  });
+
+  it('a recalculated case (still UPHELD) is refused but left for the sweep to re-propose', async () => {
+    const ctx = withCaseStore();
+    const upheld = { ...ctx.proposal, status: 'UPHELD' } as SlashProposalEntity;
+    await expect(ctx.service.buildCancel(upheld, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
+    });
+    expect(ctx.updates).toEqual([]);
+  });
+});
