@@ -40,7 +40,7 @@ import * as https from 'node:https';
 import { LookupAddress } from 'node:dns';
 import { LookupFunction, isIP } from 'node:net';
 
-import { EgressError, EgressFailureKind } from './egress.errors';
+import { EgressError, EgressFailureKind, withoutQuery } from './egress.errors';
 import { EgressLimits, EgressPolicy, EgressTrust, UNTRUSTED_EGRESS_POLICY } from './egress.policy';
 import { withSanctionedEgress } from './egress-lockdown';
 import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from './egress-relay.config';
@@ -235,7 +235,10 @@ export class EgressHttpClient implements OnModuleDestroy {
       }
 
       const next = resolveLocation(outcome.location, target.url);
-      this.logger.debug(`${outcome.status} ${target.url.href} → ${next}`);
+      // Origin and path only: see `withoutQuery`.
+      this.logger.debug(
+        `${outcome.status} ${withoutQuery(target.url.href)} → ${withoutQuery(next)}`,
+      );
       assertRedirectAllowed(target.url, new URL(next), outcome.status, body !== undefined);
 
       if (REWRITE_TO_GET.has(outcome.status) && method !== 'HEAD') {
@@ -669,7 +672,7 @@ function resolveLocation(location: string, base: URL): string {
   } catch (error) {
     throw new EgressError(
       EgressFailureKind.REDIRECT_INVALID,
-      `unparseable Location "${location}"`,
+      `unparseable Location "${withoutQuery(location)}"`,
       {
         url: base.href,
         cause: error,

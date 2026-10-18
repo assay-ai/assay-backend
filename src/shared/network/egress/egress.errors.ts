@@ -114,7 +114,8 @@ export class EgressError extends AppError {
       code,
       statusCode: STATUS_BY_KIND[kind],
       message: () =>
-        `Outbound request refused (${kind})${context.url ? ` for ${context.url}` : ''}: ${detail}`,
+        `Outbound request refused (${kind})` +
+        `${context.url ? ` for ${withoutQuery(context.url)}` : ''}: ${detail}`,
     });
 
     this.kind = kind;
@@ -126,6 +127,21 @@ export class EgressError extends AppError {
     if (context.cause !== undefined) {
       this.cause = context.cause;
     }
+  }
+}
+
+/**
+ * `https://host/path?k=v#f` → `https://host/path`, for messages and log lines.
+ * A query string can carry agent input or a misplaced key, and messages end up
+ * in transport-error details and logs; `EgressError.url` keeps the full URL.
+ * An unparseable URL is cut at the first `?` or `#`.
+ */
+export function withoutQuery(href: string): string {
+  try {
+    const url = new URL(href);
+    return `${url.origin === 'null' ? `${url.protocol}//${url.host}` : url.origin}${url.pathname}`;
+  } catch {
+    return href.split(/[?#]/, 1)[0];
   }
 }
 
