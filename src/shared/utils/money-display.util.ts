@@ -14,8 +14,16 @@ import { Money } from '@modules/chains/ports/money.types';
  * Display only, like `MoneyUtil.format`. The platform settles in dollar
  * stablecoins, so the symbol is `$` for every asset today.
  */
-export function formatDollars(money: Pick<Money, 'amount' | 'decimals'>): string {
+export function formatDollars(
+  money: Pick<Money, 'amount' | 'decimals'> & { readonly asset?: string },
+): string {
   const decimals = money.decimals;
+  // A chain's native coin (CAIP-19 `slip44`) is never a dollar. Every token the
+  // platform settles in is a dollar stablecoin; anything else is written as
+  // plain units rather than with a "$" it has not earned.
+  if (money.asset && /\/slip44:/.test(money.asset)) {
+    return `${plainUnits(BigInt(money.amount || '0'), decimals)} units`;
+  }
   const atomic = BigInt(money.amount || '0');
   const negative = atomic < 0n;
   const value = negative ? -atomic : atomic;
@@ -34,4 +42,13 @@ export function formatDollars(money: Pick<Money, 'amount' | 'decimals'>): string
 
   const grouped = whole.toString().replace(/\B(?=(\d{3})+(?!\d))/g, ',');
   return `${negative ? '-' : ''}$${grouped}${kept ? `.${kept}` : ''}`;
+}
+
+function plainUnits(atomic: bigint, decimals: number): string {
+  const negative = atomic < 0n;
+  const value = negative ? -atomic : atomic;
+  const scale = 10n ** BigInt(decimals);
+  const fraction =
+    decimals === 0 ? '' : (value % scale).toString().padStart(decimals, '0').replace(/0+$/, '');
+  return `${negative ? '-' : ''}${value / scale}${fraction ? `.${fraction}` : ''}`;
 }

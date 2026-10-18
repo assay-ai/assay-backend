@@ -72,7 +72,7 @@ describe('SlashProposalService', () => {
       expect(notifications.sent[0].event).toBe(NotificationEvent.PROVIDER_SLASH_PROPOSED);
       // Dollars, not minor units, and no ISO timestamp in the provider's words.
       expect(notifications.sent[0].title).toBe(
-        'A penalty of $10.27 is proposed against your stake',
+        'A penalty of up to $10.27 is proposed against your stake',
       );
       expect(notifications.sent[0].body).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
     });
