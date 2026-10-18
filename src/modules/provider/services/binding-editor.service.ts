@@ -41,8 +41,10 @@ import {
   assayMappingHeaders,
   authModeNeedsKey,
   credentialQueryKeys,
+  MAX_MAPPING_HEADERS,
+  mappingHeaderCount,
   originOf,
-  relayUnsupportedPort,
+  assertRelayableEndpoint,
   secretConstantHeaders,
 } from '../credentials/credential-rules';
 import {
@@ -459,10 +461,12 @@ export class BindingEditorService {
     return toSavedDto(saved.row, saved.publishedEndpoint);
   }
 
-  /** With the relay configured, an endpoint on a port it cannot reach is refused at Save. */
+  /**
+   * With the relay configured, an endpoint it cannot carry (not https, an IP
+   * literal, a port it cannot reach) is refused at Save.
+   */
   private assertEndpointRelayable(endpoint: string): void {
-    const port = relayUnsupportedPort(endpoint, Boolean(this.relayConfig));
-    if (port !== null) throw ProviderErrors.endpointPortNotRelayable({ port });
+    assertRelayableEndpoint(endpoint, Boolean(this.relayConfig));
   }
 
   /**
@@ -774,11 +778,16 @@ export const toSavedDto: (
 ) => SavedToolBindingDto = toDetailDto;
 
 /**
- * Refuses credentials in the endpoint query, constant query entries, and
- * secret-looking constant headers; and any header in Assay's `x-assay-`
- * namespace, which the invoker also drops on the way out.
+ * Refuses more than {@link MAX_MAPPING_HEADERS} mapping headers (the relay's
+ * per-request cap, less what Assay adds); credentials in the endpoint query,
+ * constant query entries, and secret-looking constant headers; and any header
+ * in Assay's `x-assay-` namespace, which the invoker also drops on the way out.
  */
 function assertNoCredentialsInMapping(endpoint: string, mapping: RequestMappingSpec): void {
+  const count = mappingHeaderCount(mapping);
+  if (count > MAX_MAPPING_HEADERS) {
+    throw ProviderErrors.tooManyMappingHeaders({ count, max: MAX_MAPPING_HEADERS });
+  }
   const reserved = assayMappingHeaders(mapping);
   if (reserved.length > 0) throw ProviderErrors.reservedMappingHeader({ headers: reserved });
   const keys = credentialQueryKeys(endpoint, mapping);

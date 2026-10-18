@@ -197,6 +197,20 @@ describe('a live endpoint that answers', () => {
     expect(providers.rows.get(ORG)?.endpoint).toBeNull();
   });
 
+  it.each(['http://p.test/x', 'https://203.0.113.9/x'])(
+    'refuses %s at declaration when the relay is configured',
+    async (endpoint) => {
+      const { service, providers, http } = buildHarness({ relayConfigured: true });
+      providers.seed(ORG, null);
+      await expectErrorCodeAsync(
+        () => service.declareEndpoint(ORG, endpoint),
+        ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
+      );
+      expect(http.request).not.toHaveBeenCalled();
+      expect(providers.rows.get(ORG)?.endpoint).toBeNull();
+    },
+  );
+
   it('takes its slot from the connectivity pool, not the tester pool (N-3)', async () => {
     const { service, providers, http } = buildHarness();
     providers.seed(ORG, null);

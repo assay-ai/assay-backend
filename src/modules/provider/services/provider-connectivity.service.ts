@@ -19,7 +19,7 @@ import {
   EgressRelayConfig,
 } from '@shared/network/egress';
 
-import { relayUnsupportedPort } from '../credentials/credential-rules';
+import { assertRelayableEndpoint } from '../credentials/credential-rules';
 import { ConnectivityCheckResultDto, toConnectivityDto } from '../dto/provider-shared.dto';
 import { ProviderErrors } from '../errors/provider.errors';
 import { ConnectivityOutcome } from '../ports/provider-registration.types';
@@ -214,8 +214,7 @@ export class ProviderConnectivityService {
   }
 
   private assertRelayable(endpoint: string): void {
-    const port = relayUnsupportedPort(endpoint, Boolean(this.relayConfig));
-    if (port !== null) throw ProviderErrors.endpointPortNotRelayable({ port });
+    assertRelayableEndpoint(endpoint, Boolean(this.relayConfig));
   }
 
   // ── Internals ───────────────────────────────────────────────────────────

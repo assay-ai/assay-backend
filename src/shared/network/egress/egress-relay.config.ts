@@ -1,3 +1,5 @@
+import { isIP } from 'node:net';
+
 import { takeOnceFromEnv } from '@modules/verification/signing/backends/env-key-source';
 
 /**
@@ -63,4 +65,13 @@ export function takeEgressRelayConfig(env: NodeJS.ProcessEnv): EgressRelayConfig
   }
 
   return Object.freeze({ url, token });
+}
+
+/**
+ * Whether `hostname` (as `URL.hostname` gives it, IPv6 in brackets) is an IP
+ * literal. The relay refuses those: it fetches by host name only. Shared by the
+ * transport's pre-check and the save-time checks so the two cannot drift.
+ */
+export function isIpLiteralHost(hostname: string): boolean {
+  return isIP(hostname.replace(/^\[|\]$/g, '')) !== 0;
 }

@@ -81,6 +81,12 @@ Every outbound provider request is signed with Ed25519 in the style of RFC 9421,
 - Outbound header order: defaults, mapping headers, credential headers, `x-assay-call-id`,
   then `Content-Digest` / `Signature-Input` / `Signature`. Credentials are per origin, so a
   binding whose endpoint moves does not leak the old origin's secrets to the new one.
+- A request mapping declares at most 40 headers (`MAX_MAPPING_HEADERS`): the relay carries
+  64, and Assay adds up to 16 (`accept`, `content-type`, the call id, three signature headers
+  and up to 10 credential headers), with 8 held as margin. With the relay configured, Save
+  also refuses an endpoint the relay cannot carry: not https or an IP literal
+  (`PROVIDER_ENDPOINT_NOT_RELAYABLE`), or a port Cloudflare does not proxy
+  (`PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED`).
 
 ### 4. Outcomes and the tester
 

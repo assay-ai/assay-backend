@@ -1,3 +1,4 @@
+import { MAX_MAPPING_HEADERS } from '@modules/provider/credentials/credential-rules';
 import { plainToInstance } from 'class-transformer';
 import { validate } from 'class-validator';
 import { DataSource } from 'typeorm';
@@ -389,6 +390,70 @@ describe('BindingEditorService.create — what gets stored', () => {
       ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
     );
     expect(written).toEqual([]);
+  });
+
+  it.each([
+    ['http', 'http://p.test/x'],
+    ['an IPv4 literal', 'https://203.0.113.7/x'],
+    ['an IPv6 literal', 'https://[2001:db8::1]/x'],
+  ])('refuses %s while the relay is on, and writes nothing', async (_label, endpoint) => {
+    const { service, written } = build(null, [], { relayConfigured: true });
+
+    await expectErrorCodeAsync(
+      () => service.create(PROVIDER, SUBJECT, body({ endpoint })),
+      ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('refuses an IP literal on update while the relay is on', async () => {
+    const { service, written } = build(row(), [], { relayConfigured: true });
+
+    await expectErrorCodeAsync(
+      () => service.update(PROVIDER, SUBJECT, row().id, { endpoint: 'https://198.51.100.4/x' }),
+      ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it(`refuses more than ${MAX_MAPPING_HEADERS} mapping headers, and writes nothing`, async () => {
+    const { service, written } = build();
+    const headers = (n: number) =>
+      Object.fromEntries(Array.from({ length: n }, (_, i) => [`x-h-${i}`, { $const: 'v' }]));
+
+    await expectErrorCodeAsync(
+      () =>
+        service.create(
+          PROVIDER,
+          SUBJECT,
+          body({
+            requestMapping: {
+              method: 'POST',
+              path: '/search',
+              headers: headers(MAX_MAPPING_HEADERS + 1),
+              body: { q: '$.query' },
+            },
+          } as never),
+        ),
+      ProviderErrorCode.PROVIDER_TOO_MANY_MAPPING_HEADERS,
+    );
+    expect(written).toEqual([]);
+    // The reserve leaves room for Assay's six and ten credential headers under the relay's 64.
+    expect(MAX_MAPPING_HEADERS + 6 + 10).toBeLessThanOrEqual(64);
+
+    await service.create(
+      PROVIDER,
+      SUBJECT,
+      body({
+        requestMapping: {
+          method: 'POST',
+          path: '/search',
+          headers: headers(MAX_MAPPING_HEADERS),
+          body: { q: '$.query' },
+        },
+      } as never),
+    );
+    expect(written.length).toBeGreaterThan(0);
   });
 
   it('refuses an x-assay- mapping header on create, constant or derived, and writes nothing', async () => {

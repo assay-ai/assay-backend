@@ -30,11 +30,10 @@
 import { isUtf8 } from 'node:buffer';
 import * as http from 'node:http';
 import * as https from 'node:https';
-import { isIP } from 'node:net';
 
 import { EgressError, EgressFailureKind } from './egress.errors';
 import { EgressLimits } from './egress.policy';
-import { EgressRelayConfig, RELAY_ALLOWED_PORTS } from './egress-relay.config';
+import { EgressRelayConfig, RELAY_ALLOWED_PORTS, isIpLiteralHost } from './egress-relay.config';
 import { withSanctionedEgress } from './egress-lockdown';
 
 export interface RelayHop {
@@ -282,7 +281,7 @@ function assertRelayable(hop: RelayHop): void {
     throw new EgressError(EgressFailureKind.URL_INVALID, detail, { url: hop.url });
   };
   if (url.protocol !== 'https:') refuse('provider calls through the relay must use https');
-  if (isIP(url.hostname.replace(/^\[|\]$/g, '')) !== 0) {
+  if (isIpLiteralHost(url.hostname)) {
     refuse('provider calls through the relay need a hostname, not an IP address');
   }
   if (url.port !== '' && !RELAY_ALLOWED_PORTS.includes(Number(url.port))) {
