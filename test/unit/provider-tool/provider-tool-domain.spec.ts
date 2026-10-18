@@ -239,3 +239,18 @@ describe('examples at the gate', () => {
     ).toEqual(['examples/0/arguments', 'examples/0/result']);
   });
 });
+
+describe('review hash: the tool’s own words (review P2-1)', () => {
+  it('covers category and tags, in any order', () => {
+    const base = reviewContentHash('t', [version()], { category: 'social', tags: ['a', 'b'] });
+    expect(reviewContentHash('t', [version()], { category: 'social', tags: ['b', 'a'] })).toBe(
+      base,
+    );
+    expect(reviewContentHash('t', [version()], { category: 'news', tags: ['a', 'b'] })).not.toBe(
+      base,
+    );
+    expect(
+      reviewContentHash('t', [version()], { category: 'social', tags: ['a', 'always-call-me'] }),
+    ).not.toBe(base);
+  });
+});
