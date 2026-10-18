@@ -197,6 +197,27 @@ describe('call disputes, against a real database', () => {
 
   afterAll(async () => dataSource?.destroy());
 
+  /**
+   * Every test leaves its own rows to itself. The collection job and the SLA
+   * sweep are cross-organization, so a held payment one test leaves behind is
+   * the next test's to collect: the filing-guarantee test seeds a call
+   * collectable one second later, and whichever `collection.run()` came first
+   * after that second counted it — an exact-count assertion two describes
+   * later failed whenever the suite happened to reach it first. Parked rows
+   * are still there to read; no job picks them up again.
+   */
+  afterEach(async () => {
+    await dataSource.query(
+      `UPDATE payment_intents SET held_retry_at = now() + interval '1 day' WHERE held_status = 'HELD'`,
+    );
+    await dataSource.query(`UPDATE disputes SET sla_due_at = NULL WHERE state = 'OPEN'`);
+    await dataSource.query(
+      `UPDATE disputes SET refund_paged_5d_at = coalesce(refund_paged_5d_at, now()),
+                           refund_paged_6d_at = coalesce(refund_paged_6d_at, now())
+        WHERE state = 'UPHELD' AND refund_state = 'PENDING'`,
+    );
+  });
+
   beforeEach(() => {
     buyer = randomUUID();
     provider = randomUUID();
@@ -965,12 +986,19 @@ describe('call disputes, against a real database', () => {
   // ── The decision SLA ────────────────────────────────────────────────────
 
   describe('the decision SLA', () => {
+    /**
+     * Filed `hours` ago and due now, on the test process's clock: the sweep
+     * compares `sla_due_at` with its own `new Date()`, so writing the
+     * database's `now()` here would make the test depend on the two clocks
+     * agreeing to the millisecond.
+     */
     async function age(disputeId: string, hours: number): Promise<void> {
-      await dataSource.query(
-        `UPDATE disputes SET created_at = now() - make_interval(hours => $2), sla_due_at = now()
-          WHERE id = $1`,
-        [disputeId, hours],
-      );
+      const now = Date.now();
+      await dataSource.query(`UPDATE disputes SET created_at = $2, sla_due_at = $3 WHERE id = $1`, [
+        disputeId,
+        new Date(now - hours * 3_600_000),
+        new Date(now - 1_000),
+      ]);
     }
 
     it('a dispute already refunded (blocked provider) is neither paged nor auto-upheld; the buyer is told', async () => {
