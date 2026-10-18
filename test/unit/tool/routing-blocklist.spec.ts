@@ -1,15 +1,11 @@
 import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
-import {
-  OnEmpty,
-  ProviderMode,
-  RuleRejectionReason,
-  RuleSource,
-  RoutingContext,
-} from '@modules/tool/domain/routing';
+import { OnEmpty, ProviderMode, RoutingContext } from '@modules/tool/domain/routing';
 import { ToolAccessErrorCode } from '@modules/tool/errors/tool-access.errors';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { PricingMode } from '@modules/tool/ports/tool.types';
+import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
+import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
 
 import { addBlock, blocklistOf } from '../helpers/blocklist';
 import {
@@ -254,6 +250,31 @@ describe('routing — the account blocklist', () => {
     });
   });
 
+  describe('through the quote index', () => {
+    it('drops a provider blocked after its entry was cached, with no epoch bump', async () => {
+      const { router, blocklist } = harness();
+      const gathers = jest.spyOn(router, 'snapshotCandidates');
+      // No cache and a fixed clock: the entry never ages out and no epoch moves.
+      const index = new QuoteIndexService(
+        router,
+        new InMemoryToolCatalogue({ tools: [(await router.quote(TOOL_ID, PAID))!.tool], bindings }),
+        undefined,
+        () => 0,
+      );
+      const priced = async () => (await index.quoteMany([TOOL_ID], () => PAID)).get(TOOL_ID);
+
+      expect(await priced()).toMatchObject({ pricedBy: [B], listings: 2 });
+      addBlock(blocklist, block(B));
+      const quote = await priced();
+      expect(quote).toMatchObject({ price: usdc('0.05'), pricedBy: [A], listings: 1 });
+      expect(JSON.stringify(quote)).not.toContain(B);
+      await unblock(blocklist, B);
+      expect(await priced()).toMatchObject({ pricedBy: [B], listings: 2 });
+      // All three from the one cached snapshot.
+      expect(gathers).toHaveBeenCalledTimes(1);
+    });
+  });
+
   describe('offer and route', () => {
     it('never offers or routes to a blocked provider', async () => {
       const { router, invoker } = harness({
@@ -360,26 +381,35 @@ describe('routing — the account blocklist', () => {
   });
 
   describe('rail B pin (onlyProviderId)', () => {
-    it('refuses a pin on a blocked provider as PAYEE_NO_LONGER_ELIGIBLE, in offer and route', async () => {
+    it('answers a pin on a blocked organization exactly as a pin on an unknown one', async () => {
+      // The pin is echoed by the agent and proves nothing: no answer may tell
+      // a blocked organization apart, or anyone could probe the blocklist.
+      const unknown = '00000000-0000-4000-8000-0000000000ee';
       const { router, invoker } = harness({ blocklist: blocklistOf(block(B)) });
-      const pinned = { ...PAID, onlyProviderId: B };
+      const refusalOf = (error: unknown) => {
+        const { errorCode, message, context } = error as {
+          errorCode: string;
+          message: string;
+          context: unknown;
+        };
+        return { errorCode, message, context };
+      };
 
-      const refusal = await router.offer(TOOL_ID, pinned).catch((error: unknown) => error);
-      expect(refusal).toMatchObject({ errorCode: ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES });
-      expect((refusal as { context: { details: unknown } }).context.details).toEqual({
-        toolId: TOOL_ID,
-        providers: [
-          expect.objectContaining({
-            providerId: B,
-            reason: RuleRejectionReason.PAYEE_NO_LONGER_ELIGIBLE,
-            source: RuleSource.REQUEST,
-          }),
-        ],
-      });
+      const offered = await Promise.all(
+        [B, unknown].map((payee) =>
+          router.offer(TOOL_ID, { ...PAID, onlyProviderId: payee }).catch(refusalOf),
+        ),
+      );
+      expect(offered[0]).toMatchObject({ errorCode: ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING });
+      expect(offered[0]).toEqual(offered[1]);
 
-      await expect(router.route(call(pinned))).rejects.toMatchObject({
-        errorCode: ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES,
-      });
+      const routed = await Promise.all(
+        [B, unknown].map((payee) =>
+          router.route(call({ ...PAID, onlyProviderId: payee })).catch(refusalOf),
+        ),
+      );
+      expect(routed[0]).toMatchObject({ errorCode: ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING });
+      expect(routed[0]).toEqual(routed[1]);
       expect(invoker.invocations).toHaveLength(0);
     });
 
@@ -387,7 +417,7 @@ describe('routing — the account blocklist', () => {
       const { router, blocklist } = harness({ blocklist: blocklistOf(block(B)) });
       const pinned = { ...PAID, onlyProviderId: B };
       await expect(router.offer(TOOL_ID, pinned)).rejects.toMatchObject({
-        errorCode: ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES,
+        errorCode: ToolErrorCode.TOOL_NO_ELIGIBLE_BINDING,
       });
 
       await unblock(blocklist, B);

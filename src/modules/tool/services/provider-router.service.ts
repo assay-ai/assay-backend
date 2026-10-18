@@ -57,7 +57,6 @@ import {
   RoutingRules,
   RuleRejection,
   RuleRejectionReason,
-  RuleSource,
   StakeGateVerdict,
   WeightedCandidate,
   applyContractGate,
@@ -211,7 +210,6 @@ export class ProviderRouterService {
       throw ToolErrors.toolNotFound({ toolId: request.toolId });
     }
 
-    this.assertPayeeNotBlocked(request.toolId, request.context);
     const candidates = this.unblocked(await this.gatherCandidates(request.toolId));
     if (candidates.length === 0) {
       throw ToolErrors.noEligibleBinding({
@@ -733,7 +731,6 @@ export class ProviderRouterService {
   async offer(toolId: string, context: RoutingContext): Promise<RoutingOffer> {
     const tool = await this.catalogue.findTool(toolId);
     if (!tool) throw ToolErrors.toolNotFound({ toolId });
-    this.assertPayeeNotBlocked(toolId, context);
     const candidates = this.unblocked(await this.gatherCandidates(toolId));
     const now = new Date();
     // Decided on the whole class pool, unpinned: the voucher retry makes the
@@ -772,6 +769,12 @@ export class ProviderRouterService {
    * answers 404 for it). Dropping it also keeps it out of everything priced
    * off the pool: the quote, `pricedBy`, `listings` and the contract version.
    *
+   * Rail B's pin (`onlyProviderId`) gets no check of its own, on purpose: a
+   * pinned blocked organization is simply absent from the pool, so the call is
+   * refused exactly as a pin on an unknown id or on a provider with no binding
+   * here is. The pin is echoed by the agent and proves nothing, so any answer
+   * that told a blocked payee apart would let anyone probe the blocklist.
+   *
    * `DbProviderRegistry` already reads a blocked provider as `SUSPENDED`, so
    * `filterEligible` refuses it too; that stays as defence in depth, as does
    * the check in `PaymentIntentService.create`. This one is what holds when
@@ -788,28 +791,6 @@ export class ProviderRouterService {
       ({ binding }) => !this.blocklist.organizationBlock(binding.providerId),
     );
     return kept.length === candidates.length ? candidates : kept;
-  }
-
-  /**
-   * Rail B's pin naming a blocked organization: refused as the payee no longer
-   * eligible, the refusal a voucher retry already gets for a payee the rules
-   * now drop. Not charged, the voucher is not redeemed, and the agent asks for
-   * a new offer, which can no longer name this provider. Checked before the
-   * pool is gathered, so it does not depend on the provider still having a
-   * binding. The detail does not say why: the buyer learns only what it
-   * already knew, that it was offered this provider.
-   */
-  private assertPayeeNotBlocked(toolId: string, context: RoutingContext): void {
-    const payee = context.onlyProviderId;
-    if (!payee || !this.blocklist.organizationBlock(payee)) return;
-    throw ruleRefusal(toolId, [
-      {
-        providerId: payee,
-        reason: RuleRejectionReason.PAYEE_NO_LONGER_ELIGIBLE,
-        source: RuleSource.REQUEST,
-        detail: 'the payee this payment names no longer takes calls',
-      },
-    ]);
   }
 
   // ── Selection ─────────────────────────────────────────────────────────────
