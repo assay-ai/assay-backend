@@ -118,25 +118,37 @@ function buildHarness(
       return (credentials.update as jest.Mock)(criteria, values);
     }),
     // The refresh-token cascade is raw SQL (`FOR UPDATE SKIP LOCKED`).
+    // The post-commit sweep runs its own short transactions (`SET LOCAL
+    // lock_timeout`, then one UPDATE each); those go to `sweepQuery`.
     query: jest.fn(async (sql: string, params: unknown[]) => {
+      if (sql.startsWith('SET LOCAL') || sql.includes('FROM "agent_credentials" c')) {
+        inSweep = true;
+        return sweepQuery(sql, params);
+      }
       writeOrder.push('oauth_refresh_tokens');
       tokenQueries.push({ sql, params });
       return [];
     }),
   };
   const events: string[] = [];
-  // Outside the transaction, only the post-commit sweep queries the data source.
   const sweeps: Array<{ sql: string; params: unknown[] }> = [];
+  const lockTimeouts: string[] = [];
+  let inSweep = false;
+  const sweepQuery = jest.fn(async (sql: string, params: unknown[]) => {
+    if (sql.startsWith('SET LOCAL')) {
+      lockTimeouts.push(sql);
+      return [];
+    }
+    events.push('sweep');
+    sweeps.push({ sql, params });
+    return [];
+  });
   const dataSource = {
     transaction: jest.fn(async (work: (m: unknown) => unknown) => {
+      inSweep = false;
       const result = await work(manager);
-      events.push('commit');
+      if (!inSweep) events.push('commit');
       return result;
-    }),
-    query: jest.fn(async (sql: string, params: unknown[]) => {
-      events.push('sweep');
-      sweeps.push({ sql, params });
-      return [];
     }),
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
@@ -174,6 +186,8 @@ function buildHarness(
     writeOrder,
     events,
     sweeps,
+    sweepQuery,
+    lockTimeouts,
   };
 }
 
@@ -336,6 +350,14 @@ describe('AgentCredentialsService.list — issuedVia and oauthClient (spec §7.1
       clientRow({ id: CIMD_ROW, clientId: 'https://mcp.other.example/oauth/clients/assay-mcp' }),
     ],
     [
+      'a CIMD row whose clientId is the built-in id',
+      clientRow({ id: CIMD_ROW, clientId: BUILTIN_CLIENT_ID, kind: OAuthClientKind.CIMD }),
+    ],
+    [
+      'a DCR row whose clientId is the built-in id',
+      clientRow({ id: CIMD_ROW, clientId: BUILTIN_CLIENT_ID, kind: OAuthClientKind.DCR }),
+    ],
+    [
       'an unlisted CIMD client',
       clientRow({
         id: CIMD_ROW,
@@ -494,7 +516,8 @@ describe('AgentCredentialsService.revoke', () => {
 
     await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
 
-    expect(dataSource.transaction).toHaveBeenCalledTimes(1);
+    // One transaction for the cascade, then one short one per sweep statement.
+    expect(dataSource.transaction).toHaveBeenCalledTimes(3);
     const revokedAt = (credentials.update.mock.calls[0][1] as { revokedAt: Date }).revokedAt;
     expect(tokenQueries).toHaveLength(1);
     // A refresh token a rotation holds is skipped, never waited for: the
@@ -571,11 +594,16 @@ describe('AgentCredentialsService.revoke', () => {
   });
 
   it('OAuth: sweeps the refresh then the access tokens of the revoked credential after commit', async () => {
-    const { service, credentials, sweeps } = buildHarness();
+    const { service, credentials, sweeps, lockTimeouts } = buildHarness();
     credentials.findOneBy.mockResolvedValue(oauthCredentialRow());
 
     await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
 
+    // Each statement is bounded by its own lock timeout.
+    expect(lockTimeouts).toEqual([
+      "SET LOCAL lock_timeout = '5000ms'",
+      "SET LOCAL lock_timeout = '5000ms'",
+    ]);
     expect(sweeps.map((sweep) => sweep.sql.match(/UPDATE "(\w+)"/)?.[1])).toEqual([
       'oauth_refresh_tokens',
       'oauth_access_tokens',
@@ -587,9 +615,9 @@ describe('AgentCredentialsService.revoke', () => {
   });
 
   it('a failed sweep is logged, not thrown, and does not skip the bump', async () => {
-    const { service, credentials, dataSource, accessEpoch } = buildHarness();
+    const { service, credentials, sweepQuery, accessEpoch } = buildHarness();
     credentials.findOneBy.mockResolvedValue(oauthCredentialRow());
-    dataSource.query.mockRejectedValue(new Error('deadlock detected'));
+    sweepQuery.mockRejectedValue(new Error('canceling statement due to lock timeout'));
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
       await expect(

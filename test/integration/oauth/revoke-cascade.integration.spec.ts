@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
+import { Logger } from '@nestjs/common';
 import Redis from 'ioredis';
 import { Client } from 'pg';
 import { DataSource } from 'typeorm';
@@ -31,7 +32,10 @@ import { AgentCredentialsService } from '@modules/account/services/agent-credent
 import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
 import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
 import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
-import { OAuthGrantWriter } from '@modules/oauth/services/oauth-grant.writer';
+import {
+  OAuthGrantWriter,
+  sweepRevokedCredentialTokens,
+} from '@modules/oauth/services/oauth-grant.writer';
 import {
   OAuthTokenService,
   TokenPair,
@@ -537,6 +541,46 @@ describe('OAuth grant revocation cascade — real migrations', () => {
     }
     expect(await refresh(g.pair.refresh_token)).toEqual({ error: 'invalid_grant' });
     expect(await revokedEntries(g.credentialId)).toHaveLength(1);
+  });
+
+  it('the sweep is bounded: a row held past its lock timeout is left, logged, for the backstop', async () => {
+    const g = await grant();
+    await dataSource.query(
+      `UPDATE "agent_credentials" SET "revoked_at" = now(), "revoked_by" = 'user-elsewhere'
+        WHERE "id" = $1`,
+      [g.credentialId],
+    );
+    const holder = new Client({ ...pgOptions(), database: DATABASE });
+    await holder.connect();
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      // A holder that never lets go of the refresh token row.
+      await holder.query('BEGIN');
+      await holder.query(
+        `SELECT 1 FROM "oauth_refresh_tokens" WHERE "credential_id" = $1 FOR UPDATE`,
+        [g.credentialId],
+      );
+      const started = Date.now();
+      await expect(
+        sweepRevokedCredentialTokens(dataSource, g.credentialId, { lockTimeoutMs: 200 }),
+      ).resolves.toBe(false);
+      expect(Date.now() - started).toBeLessThan(3_000);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('lock timeout'));
+      // Its statement rolled back: the held row is still live.
+      for (const token of await tokenRevocations(g.credentialId)) {
+        if (token.table === 'refresh') expect(token.revoked_at).toBeNull();
+      }
+      await holder.query('ROLLBACK');
+    } finally {
+      warn.mockRestore();
+      await holder.end();
+    }
+
+    // Once nothing holds the rows, a later pass (the backstop) finishes them.
+    await expect(sweepRevokedCredentialTokens(dataSource, g.credentialId)).resolves.toBe(true);
+    for (const token of await tokenRevocations(g.credentialId)) {
+      expect(token.revoked_at).not.toBeNull();
+    }
   });
 
   it('the list shows the revoked grant as an OAuth row of the built-in client', async () => {

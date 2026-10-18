@@ -73,7 +73,7 @@ export function credentialClientView(
     name: verified ? listed.displayName : client.clientName,
     registrableDomain: isCimd ? cimdDomain(client.clientId) : null,
     verified,
-    paymentClient: isPaymentClient(trust.paymentClients, client.clientId),
+    paymentClient: isPaymentClient(trust.paymentClients, client),
   };
 }
 

@@ -473,11 +473,14 @@ export class OAuthTokenService {
 
   /**
    * The pair a racing presentation receives within the grace (§6.3.11 step 4,
-   * "Lost, ≤ 30 s"). Only when its child refresh token is in the database,
-   * a child of this parent, and live: a timed-out `SET` from another process
-   * can land late and leave an entry whose rotation rolled back, and a pair
-   * whose grant was revoked meanwhile is dead. Anything else answers
-   * `invalid_grant`, with no revocation.
+   * "Lost, ≤ 30 s"). Returned only when, read now:
+   * - the child refresh token in the entry is in the database, has this
+   *   parent as `parent_id`, and is neither revoked nor expired (a timed-out
+   *   `SET` from another process can land late and leave an entry whose
+   *   rotation rolled back);
+   * - the credential is neither revoked nor expired (a revocation that
+   *   committed after the rotation, before its sweep reached the child).
+   * Otherwise `invalid_grant`, with no revocation, audit entry or metric.
    */
   private async fromGrace(
     parentToken: string,
@@ -502,6 +505,16 @@ export class OAuthTokenService {
       child.parentId !== token.id ||
       child.revokedAt !== null ||
       child.expiresAt.getTime() <= Date.now()
+    ) {
+      return INVALID_GRANT;
+    }
+    const credential = await this.credentials.findOne({
+      where: { organizationId: token.organizationId, id: token.credentialId },
+    });
+    if (
+      !credential ||
+      credential.revokedAt !== null ||
+      (credential.expiresAt !== null && credential.expiresAt.getTime() <= Date.now())
     ) {
       return INVALID_GRANT;
     }
