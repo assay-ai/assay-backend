@@ -56,11 +56,3 @@ export function parseProviderToolName(
   if (at <= 0) return null;
   return { handle: name.slice(0, at), local: name.slice(at + PROVIDER_TOOL_SEPARATOR.length) };
 }
-
-/** `name` under a new handle, or `null` when it would break the cap. */
-export function renamedProviderToolName(name: string, handle: string): string | null {
-  const parsed = parseProviderToolName(name);
-  if (!parsed) return null;
-  const next = providerToolName(handle, parsed.local);
-  return next.length > TOOL_NAME_MAX ? null : next;
-}

@@ -57,11 +57,6 @@ export class VerificationPolicyRepository extends AbstractRepository<Verificatio
     });
   }
 
-  /** Every version of one policy, newest first. The console's history view. */
-  findHistory(policyId: string): Promise<VerificationPolicyEntity[]> {
-    return this.find({ where: { policyId }, order: { policyVersion: 'DESC' } });
-  }
-
   /** The highest version number registered under this id, or `0` if none. */
   async latestVersion(policyId: string): Promise<number> {
     const latest = await this.findOne({

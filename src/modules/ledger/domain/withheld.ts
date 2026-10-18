@@ -282,10 +282,6 @@ export function sumWithheld(
   };
 }
 
-export function zeroWithheld(asset: AssetId, decimals: number): WithheldTotal {
-  return sumWithheld(asset, decimals, []);
-}
-
 /**
  * The two independent computations of `withheld`, and their difference.
  *

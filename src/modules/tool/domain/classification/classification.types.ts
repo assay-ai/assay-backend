@@ -303,9 +303,6 @@ export interface ClassificationPolicy {
   readonly acceptsEmptyBody?: boolean;
 }
 
-/** The policy for a tool that has declared nothing. All defaults. */
-export const DEFAULT_CLASSIFICATION_POLICY: ClassificationPolicy = { toolId: '*' };
-
 // ---------------------------------------------------------------------------
 // The result
 // ---------------------------------------------------------------------------
