@@ -227,6 +227,8 @@ function build(
     compensation?: { distribute: jest.Mock };
     /** What `confirmedDeposit` answers. `null` = "no such deposit on chain". */
     deposited?: Money | null;
+    /** The tool name the notices read through the binding; absent = no lookup wired. */
+    toolName?: string;
   } = {},
 ) {
   const proposals = new FakeSlashProposals();
@@ -298,6 +300,13 @@ function build(
     (options.beneficiaries ?? null) as never,
     (options.compensation ?? null) as never,
     stakeIntents as never,
+    null,
+    (options.toolName
+      ? { findOneBy: jest.fn().mockResolvedValue({ toolId: '06399979-f8b8-4c9e-a9b1-bd2a5924d442' }) }
+      : null) as never,
+    (options.toolName
+      ? { findByIds: jest.fn().mockResolvedValue([{ name: options.toolName }]) }
+      : null) as never,
   );
 
   return {
@@ -493,6 +502,8 @@ describe('SlashExecutionService', () => {
       // And the status moves inside the override's own transaction.
       expect(ctx.proposals.reversalManagers).toEqual([ctx.overrides.lastManager]);
       expect(ctx.notifications.sent.map((n) => n.event)).toContain('provider.slash_reversed');
+      const reversed = ctx.notifications.sent.find((n) => n.event === 'provider.slash_reversed')!;
+      expect(reversed.title).toBe('$5.00 was returned to your stake');
       expect(ctx.overrides.performed).toEqual(['S-5']);
     });
 
@@ -2094,6 +2105,44 @@ describe('executeDue', () => {
     expect(notifications.sent.map((n) => n.event)).toContain('provider.slash_executed');
   });
 
+  it('tells the provider the penalty in dollars and names the tool, never minor units', async () => {
+    const { service, proposals, notifications, executor } = build({ toolName: 'get_weather' });
+    proposals.seed(executable({ id: 'p1', penaltyAmount: '40000' }));
+    executor.executeImpl = async () => ({
+      signature: null as never,
+      appliedMinor: '40000',
+      agentAmountMinor: '24000',
+      platformAmountMinor: '12000',
+      executedAt: NOW,
+    });
+
+    await service.executeDue(NOW);
+
+    const sent = notifications.sent.find((n) => n.event === 'provider.slash_executed')!;
+    expect(sent.title).toBe('$0.04 penalty on get_weather was executed');
+    expect(sent.title).not.toContain('40000');
+    expect(sent.body).not.toMatch(/timelock|proposal/i);
+    expect(sent.payload).toMatchObject({ applied: '40000', decimals: 6, toolName: 'get_weather' });
+  });
+
+  it('leaves the tool out of the notice rather than naming an id', async () => {
+    const { service, proposals, notifications, executor } = build();
+    proposals.seed(executable({ id: 'p1', penaltyAmount: '1000' }));
+    executor.executeImpl = async () => ({
+      signature: 'sig_1',
+      appliedMinor: '900',
+      agentAmountMinor: '540',
+      platformAmountMinor: '270',
+      executedAt: NOW,
+    });
+
+    await service.executeDue(NOW);
+
+    const sent = notifications.sent.find((n) => n.event === 'provider.slash_executed')!;
+    expect(sent.title).toBe('$0.0009 penalty was executed');
+    expect(sent.body).toContain('Transaction sig_1.');
+  });
+
   it('claims the row before it signs, so a crash is findable', async () => {
     // `chain_claimed_at` is what `findExecutingToReconcile` measures staleness
     // against. Moving a case to `EXECUTING` without stamping it would leave the
@@ -2562,7 +2611,8 @@ describe('what a voided case tells the provider about their stake', () => {
     expect(sent.body).toContain('still holds the stake it reserved');
     // `chain_executable_at + SLASH_EXECUTION_GRACE_SECONDS`, to the hour.
     const releasedAt = new Date(hoursFromNow(-1).getTime() + 7 * 24 * 60 * 60 * 1000);
-    expect(sent.body).toContain(releasedAt.toISOString());
+    // In the provider's words: to the minute, in UTC, without the ISO noise.
+    expect(sent.body).toContain(`${releasedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`);
     expect(sent.payload).toMatchObject({ reservationHeldUntil: releasedAt.toISOString() });
     // And it must NOT claim the release already happened.
     expect(sent.body).not.toContain('Any stake it had reserved is released');
