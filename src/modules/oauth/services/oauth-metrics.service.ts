@@ -13,12 +13,16 @@ export type OAuthAuthorizeOutcome =
   | 'invalid_target'
   | 'rate_limited';
 
-/** `oauth_consent_total{step}`. */
+/**
+ * `oauth_consent_total{step}`. `not_found` counts a read of a request that is
+ * unknown, expired or another organization's: the three are one answer by
+ * design (§6.3.5), so the metric cannot tell expiry apart either.
+ */
 export type OAuthConsentStep =
   | 'shown'
   | 'approved'
   | 'denied'
-  | 'expired'
+  | 'not_found'
   | 'continue_cookie_missing';
 
 /**

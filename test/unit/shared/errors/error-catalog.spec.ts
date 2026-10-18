@@ -55,6 +55,7 @@ describe('domain error catalogs', () => {
     ['OAUTH_REQUEST_ALREADY_DECIDED', () => OAuthErrors.requestAlreadyDecided(), 409],
     ['OAUTH_AGENT_NOT_ACTIVE', () => OAuthErrors.agentNotActive(), 409],
     ['OAUTH_GRANT_LIMIT_REACHED', () => OAuthErrors.grantLimitReached(), 409],
+    ['OAUTH_CREDENTIAL_NAME_INVALID', () => OAuthErrors.credentialNameInvalid(), 400],
     ['AUTH_CLIENT_NOT_ALLOWED_HERE', () => AuthErrors.clientNotAllowedHere(), 403],
     ['ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED', () => AccountErrors.delegateClientNotAllowed(), 403],
   ])('the OAuth code %s exists with its status', (code, make, status) => {
