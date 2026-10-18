@@ -1,13 +1,26 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
+import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
+import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
+import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { CursorPageDto } from '@shared/api';
+import {
+  AssetId,
+  ChainNamespace,
+  chainIdOf,
+  namespaceOf,
+  parseAccountId,
+} from '@modules/chains/ports/caip.types';
+import { ChainProposalStatus } from '@modules/slash/domain/chain-slash-outcome';
 import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
 import { SlashErrors } from '@modules/slash/errors/slash.errors';
 import {
+  SLASH_EXECUTOR,
   SlashCancelIntent,
   SlashCompensationIntent,
+  SlashExecutorPort,
 } from '@modules/slash/ports/slash-executor.port';
 
 import {
@@ -51,14 +64,26 @@ export const CASE_APPROVAL_ACTIONS = {
  * a query scoped to the wrong column, serving an empty list to somebody who
  * should have seen everything.
  */
+/** The mirrors under which a record of the case may still stand on chain. */
+const MAY_STAND: readonly string[] = [
+  ChainProposalStatus.PENDING,
+  ChainProposalStatus.DISPUTED,
+  ChainProposalStatus.CANCEL_REQUESTED,
+];
+
 @Injectable()
 export class OperatorCaseService {
+  private readonly logger = new Logger(OperatorCaseService.name);
+
   constructor(
     private readonly proposals: SlashProposalRepository,
     private readonly queue: AdjudicationQueueService,
     private readonly arbitration: ArbitrationService,
     private readonly execution: SlashExecutionService,
     private readonly approvals: OperatorApprovalService,
+    private readonly parts: SlashProposalPartRepository,
+    private readonly enrolments: ProviderChainEnrolmentRepository,
+    @Optional() @Inject(SLASH_EXECUTOR) private readonly executor: SlashExecutorPort | null = null,
   ) {
     // How an approved action is re-run: the same method, as the requester,
     // with the approver attached.
@@ -115,7 +140,69 @@ export class OperatorCaseService {
    */
   async brief(proposalId: string) {
     const organizationId = await this.tenantOf(proposalId);
-    return this.queue.brief(organizationId, proposalId);
+    const [brief, proposal] = await Promise.all([
+      this.queue.brief(organizationId, proposalId),
+      this.proposals.findOneScoped(organizationId, proposalId),
+    ]);
+    return {
+      ...brief,
+      // Whether anything of this case is Pending or Disputed on chain, i.e.
+      // whether anyone could execute it or a cancel has anything to act on.
+      // `chainExecutableAt` alone cannot say that: a case opened before the
+      // parts model keeps its dates with nothing behind them.
+      chainStanding: proposal ? await this.chainStanding(proposal) : false,
+    };
+  }
+
+  /**
+   * Read, never assumed:
+   *
+   * - a closed or never-proposed mirror: nothing stands;
+   * - a partitioned case (an EVM window) with parts: a part `PENDING` or
+   *   `DISPUTED` in the stored parts, which the sweeps keep in step with the chain;
+   * - a partitioned case with **no** parts (opened before the parts model): its
+   *   judgement, if any, is the one record under the case's own request id, so
+   *   that record is read from the chain. Unreadable: it cannot be ruled out,
+   *   so it counts as standing;
+   * - a single-record case: its mirror, which the sweeps keep in step.
+   */
+  private async chainStanding(proposal: SlashProposalEntity): Promise<boolean> {
+    if (!MAY_STAND.includes(proposal.chainStatus)) return false;
+    const partitioned =
+      proposal.windowId !== null &&
+      namespaceOf(proposal.assetId as AssetId) === ChainNamespace.EIP155;
+    if (!partitioned) return true;
+
+    const parts = await this.parts.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      proposal.chainEpoch,
+    );
+    if (parts.length > 0) {
+      return parts.some((part) => ['PENDING', 'DISPUTED'].includes(part.chainStatus));
+    }
+
+    if (!this.executor) return true;
+    try {
+      const chainId = chainIdOf(proposal.assetId as AssetId);
+      const enrolment = await this.enrolments.findOneBy({
+        organizationId: proposal.providerId,
+        chainId,
+      });
+      if (!enrolment?.stakeAuthorityAccountId) return true;
+      const record = await this.executor.readRecord(
+        proposal.chainRequestId,
+        parseAccountId(enrolment.stakeAuthorityAccountId).address,
+        chainId,
+      );
+      return record?.status === 'PENDING' || record?.status === 'DISPUTED';
+    } catch (error) {
+      this.logger.warn(
+        `slash proposal ${proposal.id}: its on-chain record could not be read for the brief ` +
+          `(${error instanceof Error ? error.message : String(error)}); shown as standing`,
+      );
+      return true;
+    }
   }
 
   async claim(operator: OperatorSession, proposalId: string) {
