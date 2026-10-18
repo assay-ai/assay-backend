@@ -1,5 +1,5 @@
 import { Classification } from '@modules/tool/domain/classification/classification.types';
-import { JsonObject, JsonValue, MappingFault } from '@modules/tool/domain/mapping/mapping.types';
+import { JsonValue, MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { StageResult } from '@modules/verification/domain/stage';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
 
@@ -175,10 +175,4 @@ export enum BindingTestWarningCode {
 export interface BindingTestWarning {
   readonly code: BindingTestWarningCode;
   readonly message: string;
-}
-
-/** What the console posts to run a test. */
-export interface BindingTestRequestInput {
-  /** The tool arguments to call with, validated against the tool's `inputSchema` first. */
-  readonly input: JsonObject;
 }

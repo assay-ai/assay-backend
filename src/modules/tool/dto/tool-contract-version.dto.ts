@@ -107,15 +107,6 @@ export class ToolContractVersionDto {
   }
 }
 
-/** `_meta["assay/deprecated"]`, as the catalogue shows it. */
-export class ToolDeprecationDto {
-  @ApiProperty({ format: 'date-time', example: '2027-02-01T00:00:00.000Z' })
-  sunsetAt: string;
-
-  @ApiProperty({ type: String, nullable: true, example: 'get_weather@2 (v2.0.0)' })
-  replacement: string | null;
-}
-
 /** One published version in a listing: no schemas, just what a card shows. */
 export class ToolVersionBriefDto {
   @ApiProperty({ example: 2 })

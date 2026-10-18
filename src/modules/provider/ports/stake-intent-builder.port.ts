@@ -177,16 +177,9 @@ export interface StakeIntentPreflight {
  * — the same union `EscrowIntentBuilderPort` returns and the same one
  * `POST /deposits` describes its requirements with.
  *
- * `UnsignedStakeTransaction` used to be declared here, field for field
- * identical to `UnsignedEscrowTransaction` two modules away. Both were Solana
- * transactions wearing a domain's name: `transactionBase64`, `feePayer`,
- * `signers`, `blockhash`, `lastValidBlockHeight`. Adding EVM to either copy
- * would have meant adding it to both, and the second copy is the one that gets
- * forgotten.
- *
- * The build-but-never-sign rule is unchanged and is the reason this port still
- * has no `send`, no `submit`, no `signature` and no signer parameter: the union
- * describes what to sign, never a signature.
+ * The build-but-never-sign rule is the reason this port has no `send`, no
+ * `submit`, no `signature` and no signer parameter: the union describes what
+ * to sign, never a signature.
  */
 
 /**

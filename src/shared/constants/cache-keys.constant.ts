@@ -6,11 +6,3 @@ export const CACHE_KEYS = {
       `http-cache:auto:${path}${queryString ? `:${queryString}` : ''}${userId ? `:${userId}` : ''}`,
   },
 };
-
-export const CACHE_TTL = {
-  SHORT: 60,
-  MEDIUM: 300,
-  LONG: 3600,
-  HALF_HOUR: 1800,
-  DAY: 86400,
-};

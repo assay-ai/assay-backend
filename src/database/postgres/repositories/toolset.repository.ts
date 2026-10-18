@@ -25,12 +25,6 @@ export class ToolsetRepository extends AbstractRepository<ToolsetEntity> {
     return this.findOne({ where: { ownerOrgId, slug, deletedAt: IsNull() } });
   }
 
-  /** The owner's toolsets among `ids`, deleted ones included (their access entries still read). */
-  findOwnedByIds(ownerOrgId: string, ids: readonly string[]): Promise<ToolsetEntity[]> {
-    if (ids.length === 0) return Promise.resolve([]);
-    return this.find({ where: { ownerOrgId, id: In([...ids]) } });
-  }
-
   /** The owner's live toolsets with these slugs. */
   findOwnedBySlugs(ownerOrgId: string, slugs: readonly string[]): Promise<ToolsetEntity[]> {
     if (slugs.length === 0) return Promise.resolve([]);

@@ -21,9 +21,6 @@ export const PLATFORM_AGENT_DAILY_QUOTA = 1_000;
 /** Requests per minute on the relay path, per agent. Platform-set. */
 export const PLATFORM_RATE_LIMIT_PER_MINUTE = 60;
 
-/** The sliding window the platform rate limit is measured over. */
-export const PLATFORM_RATE_LIMIT_WINDOW_MS = 60_000;
-
 /**
  * How long a `tool_call_records` row survives before the retention sweep
  * removes it. The rule is *"Retained 30 days, then aggregated."* No

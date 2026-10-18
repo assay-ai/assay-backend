@@ -98,7 +98,7 @@ echo "=== 4. the signing journal in Postgres ==="
 # The journal stores a sha256 of the payload and the (public) signature. If a
 # seed ever reached a column, this is where it would surface.
 DB_DUMP="$(
-  docker exec x402_postgres psql -U "${DATABASE_USER:-postgres}" -d "${DATABASE_NAME:-app}" \
+  docker exec "${POSTGRES_CONTAINER:-app_postgres}" psql -U "${DATABASE_USER:-postgres}" -d "${DATABASE_NAME:-app}" \
     -A -t -c 'SELECT * FROM verifier_signing_log' 2>/dev/null || echo '<database unavailable>'
 )"
 echo "--- grep: verifier_signing_log ---"

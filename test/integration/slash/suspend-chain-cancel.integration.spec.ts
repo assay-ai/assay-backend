@@ -50,7 +50,7 @@ import { seedProRataCase } from '../helpers/slash-prorata-seed';
  * `CANCEL_REQUESTED`, and an execution that beats the cancel has to be
  * recorded as what it was.
  */
-const DATABASE = 'x402_suspend_chain_cancel_test';
+const DATABASE = 'assay_suspend_chain_cancel_test';
 const USDG = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
 const VERIFIER_SECRET = new Uint8Array(32).fill(5);
 const VERIFIER = privateKeyToAccount(toHex(VERIFIER_SECRET)).address;

@@ -74,9 +74,8 @@ export class ProviderRepository extends OrganizationScopedRepository<ProviderEnt
     return (
       this.createQueryBuilder('provider')
         .where('provider.organizationId IS NOT NULL')
-        // `providers.stake_authority` is gone (`1759300000003`); the authority is
-        // a column on the ENROLMENT, one per chain. "Has not proved
-        // one" is therefore "has no enrolment carrying one" — a provider proved
+        // The stake authority is a column on the ENROLMENT, one per chain.
+        // "Has not proved one" is therefore "has no enrolment carrying one" — a provider proved
         // on Solana and not on `eip155:4663` is NOT in this list, and that is
         // correct for what the list is for: the promotion criterion is about a
         // provider the chain source cannot answer for **at all**, and that

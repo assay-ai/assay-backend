@@ -31,7 +31,7 @@ import {
 
 loadEnv();
 
-const DATABASE = 'x402_verification_test';
+const DATABASE = 'assay_verification_test';
 
 /**
  * Two policy-lifecycle mechanisms only exist across a boundary, so they are only

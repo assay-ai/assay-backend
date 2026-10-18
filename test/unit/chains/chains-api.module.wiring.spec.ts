@@ -22,9 +22,7 @@ const DEVNET = CHAIN_IDS.SOLANA_DEVNET;
 /** Set `ENABLED_CHAINS` for one `compile()` and put the environment back. */
 async function compileWith<T>(value: string, use: (moduleRef: TestingModule) => T): Promise<T> {
   const previousEnabled = process.env[ENABLED_CHAINS_ENV];
-  const previousLegacy = process.env.SOLANA_ENABLED_CHAINS;
   process.env[ENABLED_CHAINS_ENV] = value;
-  delete process.env.SOLANA_ENABLED_CHAINS;
 
   let moduleRef: TestingModule | undefined;
   try {
@@ -40,8 +38,6 @@ async function compileWith<T>(value: string, use: (moduleRef: TestingModule) => 
     await moduleRef?.close();
     if (previousEnabled === undefined) delete process.env[ENABLED_CHAINS_ENV];
     else process.env[ENABLED_CHAINS_ENV] = previousEnabled;
-    if (previousLegacy === undefined) delete process.env.SOLANA_ENABLED_CHAINS;
-    else process.env.SOLANA_ENABLED_CHAINS = previousLegacy;
   }
 }
 

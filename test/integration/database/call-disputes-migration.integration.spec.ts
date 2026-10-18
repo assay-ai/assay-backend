@@ -4,7 +4,7 @@ import { DataSource } from 'typeorm';
 
 import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
 
-const DATABASE = 'x402_call_disputes_migration_test';
+const DATABASE = 'assay_call_disputes_migration_test';
 
 /**
  * The G3.B1 migrations (`1761800000000`–`1761800000002`) applies, reverts and applies again on a

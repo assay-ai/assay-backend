@@ -26,8 +26,8 @@ import {
 } from '../dto/metrics-snapshot.dto';
 
 /**
- * How long a computed snapshot is reused before the next `/metrics` or
- * `/operator/dashboard` request triggers a fresh round of queries.
+ * How long a computed snapshot is reused before the next `/operator/dashboard`
+ * request triggers a fresh round of queries.
  *
  * ## Why this exists at all
  *
@@ -39,8 +39,7 @@ import {
  * worse (none of the six have a dedicated time-range index for these
  * queries). A Prometheus scrape is not dashboard cadence — a 15s
  * `scrape_interval`, the Prometheus default, is 4 queries a minute against
- * every one of these tables, indefinitely, from every process that mounts
- * `MetricsController`.
+ * every one of these tables, indefinitely, from every process that serves one.
  *
  * This TTL is the fix: **every** collector in this file is cached behind one
  * shared refresh, so the *scrape* interval and the *query* interval are
@@ -94,16 +93,6 @@ export class MetricsCollectorService {
     // still scrapes.
     @Optional() private readonly chainStates: EvmChainStateRepository | null = null,
   ) {}
-
-  /** Prometheus exposition text for `GET /metrics`. Refreshes the gauges first if the cache is stale. */
-  async metricsText(): Promise<string> {
-    await this.snapshot();
-    return this.registry.metricsText();
-  }
-
-  get contentType(): string {
-    return this.registry.contentType;
-  }
 
   /** The JSON snapshot behind `GET /operator/dashboard` and its data endpoint. */
   async snapshot(): Promise<MetricsSnapshotDto> {

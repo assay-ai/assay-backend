@@ -30,7 +30,7 @@ const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
  * into every MCP session.
  */
 describe('agent_credentials.delegate_account — binding a credential to its delegate key', () => {
-  const DATABASE = 'x402_agent_delegate_test';
+  const DATABASE = 'assay_agent_delegate_test';
   let dataSource: DataSource;
   let redis: Redis;
   let service: AgentDelegateService;

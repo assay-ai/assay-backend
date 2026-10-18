@@ -75,7 +75,7 @@ import { USDC_ASSET } from '../helpers/test-database';
  * provider's reply, the operator's decision and — the part that touches money —
  * each refund path, with the ledger balances asserted after every one.
  */
-const DATABASE = 'x402_call_disputes_test';
+const DATABASE = 'assay_call_disputes_test';
 const CHAIN = CHAIN_IDS.SOLANA_MAINNET;
 const ASSET = USDC_ASSET;
 const PAYEE = toAccountId(CHAIN, 'call-dispute-payee');

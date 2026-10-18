@@ -8,8 +8,3 @@ export const WS_SUBSCRIBE_MESSAGES = {
   PING: 'ping',
   PONG: 'pong',
 };
-
-export const WS_EVENT_NAMES = {
-  POST_CREATED: 'post:created',
-  POST_UPDATED: 'post:updated',
-};

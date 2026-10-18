@@ -65,7 +65,7 @@ const DATABASES: readonly string[] = [
   process.env.SETTLEMENT_TEST_DATABASE || `${base}_settlement_test`,
   process.env.WITHHELD_TEST_DATABASE || `${base}_withheld_test`,
   // `verification-test-context.ts` hardcodes this one and takes no override.
-  'x402_verification_test',
+  'assay_verification_test',
 ];
 
 async function main(): Promise<void> {

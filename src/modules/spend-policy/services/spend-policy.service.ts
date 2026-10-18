@@ -181,7 +181,8 @@ export class SpendPolicyService {
         base?.requireApprovalAbove ?? null,
       ),
       paused: patch.paused ?? base?.paused ?? false,
-      // From the session, never the body: see `UpdateSpendPolicyDto.changedBy`.
+      // From the session, never the body: a caller-chosen value would let
+      // anyone write any name into the policy history.
       changedBy: `agent:${agentId}`,
       changeReason: patch.changeReason ?? null,
       supersededAt: null,

@@ -7,17 +7,11 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
 export enum VerificationErrorCode {
   VERIFICATION_POLICY_NOT_FOUND = 'VERIFICATION_POLICY_NOT_FOUND',
   VERIFICATION_POLICY_VERSION_NOT_FOUND = 'VERIFICATION_POLICY_VERSION_NOT_FOUND',
-  VERIFICATION_POLICY_NOT_ACTIVE = 'VERIFICATION_POLICY_NOT_ACTIVE',
   VERIFICATION_VERDICT_NOT_FOUND = 'VERIFICATION_VERDICT_NOT_FOUND',
-  VERIFICATION_VERDICT_ALREADY_RECORDED = 'VERIFICATION_VERDICT_ALREADY_RECORDED',
-  VERIFICATION_STAGE_FAILED = 'VERIFICATION_STAGE_FAILED',
-  VERIFICATION_SEMANTIC_PROVIDER_UNAVAILABLE = 'VERIFICATION_SEMANTIC_PROVIDER_UNAVAILABLE',
   VERIFICATION_SEMANTIC_CONTEXT_INCOMPLETE = 'VERIFICATION_SEMANTIC_CONTEXT_INCOMPLETE',
   VERIFICATION_SAMPLE_RATE_UNDERIVABLE = 'VERIFICATION_SAMPLE_RATE_UNDERIVABLE',
-  VERIFICATION_KILL_SWITCH_ENGAGED = 'VERIFICATION_KILL_SWITCH_ENGAGED',
   VERIFICATION_DECISION_POLICY_INVALID = 'VERIFICATION_DECISION_POLICY_INVALID',
   VERIFICATION_POLICY_PROMOTION_REFUSED = 'VERIFICATION_POLICY_PROMOTION_REFUSED',
-  VERIFICATION_POLICY_VERSION_EXISTS = 'VERIFICATION_POLICY_VERSION_EXISTS',
   VERIFICATION_POLICY_TRANSITION_LOST = 'VERIFICATION_POLICY_TRANSITION_LOST',
   VERIFICATION_RECEIPT_NOT_FOUND = 'VERIFICATION_RECEIPT_NOT_FOUND',
   VERIFICATION_SUMMARY_INVALID_RANGE = 'VERIFICATION_SUMMARY_INVALID_RANGE',
@@ -53,13 +47,6 @@ export const VerificationErrors = createDomainErrorFactory('VERIFICATION', {
     message: (context?: Record<string, any>) =>
       `Policy version not found${context?.policyId ? ` for policy ${context.policyId}` : ''}` +
       `${context?.version ? ` at version ${context.version}` : ''}`,
-  },
-  policyNotActive: {
-    code: VerificationErrorCode.VERIFICATION_POLICY_NOT_ACTIVE,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Policy is not ACTIVE${context?.mode ? ` (mode: ${context.mode})` : ''}` +
-      `${context?.policyId ? ` — ${context.policyId}` : ''}`,
   },
   /**
    * Covers both lookups the verdict feed does: by `verification_records
@@ -101,27 +88,6 @@ export const VerificationErrors = createDomainErrorFactory('VERIFICATION', {
     message: (context?: Record<string, any>) =>
       `Evidence pack${context?.packId ? ` ${context.packId}` : ''} does not match its content hash`,
   },
-  verdictAlreadyRecorded: {
-    code: VerificationErrorCode.VERIFICATION_VERDICT_ALREADY_RECORDED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `A verdict is already recorded for this intent` +
-      `${context?.intentId ? `: ${context.intentId}` : ''}`,
-  },
-  stageFailed: {
-    code: VerificationErrorCode.VERIFICATION_STAGE_FAILED,
-    statusCode: 422,
-    message: (context?: Record<string, any>) =>
-      `Verification stage failed${context?.stage ? `: ${context.stage}` : ''}` +
-      `${context?.detail ? ` (${context.detail})` : ''}`,
-  },
-  semanticProviderUnavailable: {
-    code: VerificationErrorCode.VERIFICATION_SEMANTIC_PROVIDER_UNAVAILABLE,
-    statusCode: 503,
-    message: (context?: Record<string, any>) =>
-      `Semantic verification provider is unavailable` +
-      `${context?.modelId ? ` (model: ${context.modelId})` : ''}`,
-  },
   /**
    * A semantic judgement arrived without the facts that make it reproducible.
    *
@@ -142,14 +108,6 @@ export const VerificationErrors = createDomainErrorFactory('VERIFICATION', {
     statusCode: 422,
     message: (context?: Record<string, any>) =>
       `Sample rate cannot be derived${context?.reason ? `: ${context.reason}` : ''}`,
-  },
-  killSwitchEngaged: {
-    code: VerificationErrorCode.VERIFICATION_KILL_SWITCH_ENGAGED,
-    statusCode: 503,
-    message: (context?: Record<string, any>) =>
-      `Verification is halted by the kill switch` +
-      `${context?.policyId ? ` for policy: ${context.policyId}` : ''}` +
-      `${context?.reason ? ` (${context.reason})` : ''}`,
   },
   /**
    * A decision policy that could strike somebody for the wrong reason.
@@ -184,14 +142,6 @@ export const VerificationErrors = createDomainErrorFactory('VERIFICATION', {
       `${context?.policyId ? ` for ${context.policyId}` : ''}` +
       `${context?.version ? ` v${context.version}` : ''}` +
       `${context?.reasons ? `: ${context.reasons}` : ''}`,
-  },
-  policyVersionExists: {
-    code: VerificationErrorCode.VERIFICATION_POLICY_VERSION_EXISTS,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Policy version already exists and is immutable` +
-      `${context?.policyId ? `: ${context.policyId}` : ''}` +
-      `${context?.version ? ` v${context.version}` : ''}`,
   },
   /**
    * A lifecycle compare-and-swap that changed no rows.

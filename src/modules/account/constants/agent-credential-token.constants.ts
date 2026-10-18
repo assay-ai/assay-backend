@@ -12,18 +12,9 @@
  */
 export const AGENT_CREDENTIAL_TOKEN_PREFIX = 'assay_sk_live_';
 
-/**
- * The prefix keys were issued with before the rename to `assay_`. Still
- * accepted so existing keys keep working; delete it once they are rotated.
- */
-export const LEGACY_AGENT_CREDENTIAL_TOKEN_PREFIX = 'x402_sk_live_';
-
 /** Whether a bearer token has the shape of one of our agent keys. */
 export function isAgentCredentialToken(token: string): boolean {
-  return (
-    token.startsWith(AGENT_CREDENTIAL_TOKEN_PREFIX) ||
-    token.startsWith(LEGACY_AGENT_CREDENTIAL_TOKEN_PREFIX)
-  );
+  return token.startsWith(AGENT_CREDENTIAL_TOKEN_PREFIX);
 }
 
 /**
