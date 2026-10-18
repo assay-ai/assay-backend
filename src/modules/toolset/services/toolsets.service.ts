@@ -692,6 +692,10 @@ function toEntryDto(row: ToolsetEntryEntity, tool: ToolEntity | undefined): Tool
     onEmpty: row.onEmpty as OnEmpty,
     toolVersionRange: row.toolVersionRange ?? null,
     requireOutputFields: [...(row.requireOutputFields ?? [])],
+    kind: tool?.kind === ToolKind.PROVIDER ? ToolKind.PROVIDER : ToolKind.STANDARD,
+    // From the review state (§7.6): a provider tool with no approved version.
+    notReviewed: tool?.kind === ToolKind.PROVIDER && tool.approvedVersion == null,
+    toolVisibility: tool?.visibility ?? 'LISTED',
   };
 }
 

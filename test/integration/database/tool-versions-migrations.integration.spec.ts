@@ -78,6 +78,14 @@ describe('tool version migrations: up, down, up', () => {
     await dataSource.runMigrations({ transaction: 'each' });
     expect(await columns()).toEqual(ALL);
 
+    // Migrations newer than T3's come off first, newest first.
+    const later = (await dataSource.query(
+      `SELECT name FROM migrations WHERE timestamp > 1761600000000`,
+    )) as { name: string }[];
+    for (let i = 0; i < later.length; i += 1) {
+      await dataSource.undoLastMigration({ transaction: 'each' });
+    }
+
     const applied = (await dataSource.query(
       `SELECT name FROM migrations ORDER BY id DESC LIMIT 3`,
     )) as { name: string }[];
