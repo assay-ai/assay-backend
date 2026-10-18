@@ -454,20 +454,31 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
 
     const result = await exportService.prepare(PROVIDER_ID, { from, to });
     const exported = new Map<string, number>();
+    const exportedAmount = new Map<string, bigint>();
     for await (const row of result.rows) {
       const cls = String(row[5]);
       exported.set(cls, (exported.get(cls) ?? 0) + 1);
+      exportedAmount.set(cls, (exportedAmount.get(cls) ?? 0n) + BigInt(row[8] as string));
+    }
+
+    // Both groupings: the day key (`to_char`) and the tool key join the same way.
+    for (const groupBy of [ProviderEarningsGroupBy.TOOL, ProviderEarningsGroupBy.DAY]) {
+      const earnings = await earningsService.getEarnings(PROVIDER_ID, { from, to, groupBy });
+
+      expect(earnings.totals.withheldCalls).toBe(3);
+      for (const reason of earnings.totals.withheldByClass) {
+        // Calls AND amounts: the CSV's provider_amount per class is the reason's worth.
+        expect(reason.calls).toBe(exported.get(reason.class) ?? 0);
+        expect(reason.amount?.amount).toBe((exportedAmount.get(reason.class) ?? 0n).toString());
+      }
+      const groupCalls = earnings.groups.reduce((sum, group) => sum + group.withheldCalls, 0);
+      expect(groupCalls).toBe(3);
     }
     const earnings = await earningsService.getEarnings(PROVIDER_ID, {
       from,
       to,
       groupBy: ProviderEarningsGroupBy.TOOL,
     });
-
-    expect(earnings.totals.withheldCalls).toBe(3);
-    for (const reason of earnings.totals.withheldByClass) {
-      expect(reason.calls).toBe(exported.get(reason.class) ?? 0);
-    }
     expect(exported.get(CallReconciliationClass.PAID_UNCREDITED)).toBe(2);
     // The summary is its reasons' sum; each call counts at its provider share.
     const share = BigInt(unheld.providerAmount.amount);

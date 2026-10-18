@@ -195,7 +195,8 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
     voided: row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false,
     credited: row.credited,
   });
-  // A debt voided by a late rejecting verdict: nothing collected or credited.
+  // A debt voided by a late rejecting verdict: nothing collected or credited
+  // (its reason is the void cause).
   const voided =
     row.status === 'SETTLED' && (row.redemptionLastError?.startsWith(DEBT_VOIDED_PREFIX) ?? false);
   // Forfeited by the provider: nothing was collected, credited or taken.
@@ -224,8 +225,12 @@ function toCsvRow(row: CallExportRow): CallExportCsvRow {
             ? (row.statusReason ?? 'settled, no credit recorded')
             : row.statusReason,
     row.verificationVerdict,
-    forfeited || uncollected || voided ? '0' : row.providerAmount,
-    forfeited || uncollected || voided ? '0' : row.platformFee,
+    // Passed-but-unpaid rows carry 0: nothing was collected on them. A voided
+    // debt is not credited, like a refund, and carries its share like one, so
+    // Σ provider_amount per not-credited class equals the earnings report's
+    // `withheldByClass` (UX review 2026-10-18, B13 I2).
+    forfeited || uncollected ? '0' : row.providerAmount,
+    forfeited || uncollected ? '0' : row.platformFee,
     row.priceAmount,
     row.asset,
     row.decimals,
