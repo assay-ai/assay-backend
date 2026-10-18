@@ -43,8 +43,13 @@ export interface QueueRequest {
   /**
    * Return a live `PENDING` request of the same action on the same target
    * instead of queueing a second one (a double submit). Off by default.
+   *
+   * `pinnedBy` names the payload key that pins the state the request was
+   * made against (B18: the case's epoch and request id). Only a waiting
+   * request with the same pin is reused; one pinned to another state can
+   * never run, and is superseded (`EXPIRED`) so it no longer blocks.
    */
-  readonly reuseWaiting?: boolean;
+  readonly reuseWaiting?: { readonly pinnedBy: string };
 }
 
 export function isApprovalQueued(value: unknown): value is ApprovalQueuedDto {
@@ -123,7 +128,9 @@ export class OperatorApprovalService {
     }
 
     if (request.reuseWaiting) {
-      const waiting = await this.approvals.findOne({
+      const key = request.reuseWaiting.pinnedBy;
+      const pin = canonicalJson(request.payload[key]);
+      const waiting = await this.approvals.find({
         where: {
           action: request.action,
           target: request.target,
@@ -132,7 +139,12 @@ export class OperatorApprovalService {
         },
         order: { createdAt: 'ASC' },
       });
-      if (waiting) return queuedDto(waiting);
+      const same = waiting.find((row) => canonicalJson(row.payload?.[key]) === pin);
+      for (const stale of waiting.filter((row) => row !== same)) {
+        if (canonicalJson(stale.payload?.[key]) !== pin)
+          await this.approvals.markSuperseded(stale.id);
+      }
+      if (same) return queuedDto(same);
     }
 
     const expiresAt = new Date(Date.now() + APPROVAL_TTL_MS);

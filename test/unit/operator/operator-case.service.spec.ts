@@ -1,5 +1,6 @@
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { OperatorCaseService } from '@modules/operator/services/operator-case.service';
+import { SlashStuckCaseService } from '@modules/slash/services/slash-stuck-case.service';
 import { SlashRecordSnapshot } from '@modules/slash/ports/slash-executor.port';
 
 /**
@@ -14,6 +15,7 @@ function build(input: {
   proposal?: Partial<SlashProposalEntity>;
   parts?: { chainStatus: string }[];
   record?: SlashRecordSnapshot['status'] | null | Error;
+  withStuck?: boolean;
 }) {
   const proposal = {
     id: 'case-1',
@@ -54,6 +56,24 @@ function build(input: {
       pages.push(key);
     }),
   };
+  // B18 m5: the window's harmed agents, for an executed record's beneficiary.
+  const windowCalls = {
+    sumFailedPriceByAgent: jest.fn(async () => [
+      { agentAccount: 'eip155:46630:0x00000000000000000000000000000000000000bb', spend: '1' },
+    ]),
+  };
+  const stuck = input.withStuck
+    ? new SlashStuckCaseService(
+        proposals as never,
+        parts as never,
+        enrolments as never,
+        {} as never,
+        {} as never,
+        {} as never,
+        { readRecord } as never,
+        windowCalls as never,
+      )
+    : null;
   const service = new OperatorCaseService(
     proposals as never,
     queue as never,
@@ -64,6 +84,7 @@ function build(input: {
     enrolments as never,
     { readRecord } as never,
     alerts as never,
+    stuck,
   );
   return { service, readRecord, alerts, pages };
 }
@@ -117,6 +138,7 @@ describe('OperatorCaseService.brief chainRecord', () => {
       'r'.repeat(64),
       '0x00000000000000000000000000000000000000aa',
       'eip155:46630',
+      undefined,
     );
     await expect(brief(build({ record: 'PENDING' }))).resolves.toMatchObject({
       chainRecord: 'STANDING',
@@ -216,10 +238,15 @@ describe('OperatorCaseService.brief manualActions', () => {
   });
 
   it('an executed record: record the execution, with what the chain took', async () => {
-    const ctx = build({ record: 'EXECUTED', proposal: { ...written, status: 'CANCELLED' } });
+    const ctx = build({
+      record: 'EXECUTED',
+      proposal: { ...written, status: 'CANCELLED' },
+      withStuck: true,
+    });
     ctx.readRecord.mockResolvedValue({
       status: 'EXECUTED',
       appliedMinor: '400000',
+      beneficiary: '0x00000000000000000000000000000000000000BB',
     } as SlashRecordSnapshot);
     const brief = await ctx.service.brief('case-1');
     expect(brief.manualActions.recordExecution).toEqual({
@@ -245,5 +272,33 @@ describe('OperatorCaseService.brief manualActions', () => {
       proposal: { ...written, status: 'CANCELLED', ...(input as { proposal?: object }).proposal },
     } as Parameters<typeof build>[0]);
     expect(await offered(ctx)).toEqual([]);
+  });
+});
+
+describe('B18 m5: the brief never offers recording an execution it could not attribute', () => {
+  const written = { chainProposedAt: new Date('2026-10-14T11:17:01Z'), penaltyAmount: '1000000' };
+  it.each([
+    ['without the beneficiary check', false, '0x00000000000000000000000000000000000000bb'],
+    [
+      'paid to an account that is not a harmed agent',
+      true,
+      '0x00000000000000000000000000000000000000f1',
+    ],
+  ])('%s: refused', async (_name, withStuck, beneficiary) => {
+    const ctx = build({
+      record: 'EXECUTED',
+      proposal: { ...written, status: 'CANCELLED' },
+      withStuck,
+    });
+    ctx.readRecord.mockResolvedValue({
+      status: 'EXECUTED',
+      appliedMinor: '400000',
+      beneficiary,
+    } as SlashRecordSnapshot);
+    const brief = await ctx.service.brief('case-1');
+    expect(brief.manualActions.recordExecution).toMatchObject({
+      allowed: false,
+      refusal: 'BENEFICIARY_NOT_AN_AGENT',
+    });
   });
 });

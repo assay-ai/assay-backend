@@ -75,24 +75,42 @@ describe('stuck-case actions (B18), against a real database', () => {
   let treasury: OperatorSession;
   let adjudicator: OperatorSession;
   let lowLimitTreasury: OperatorSession;
+  /** The register repository, to fault-inject its append (review M1). */
+  let entries: OverrideLogEntryRepository;
+  /** Provider notices sent, by case id (review M1: only after commit). */
+  const notices: string[] = [];
+  /** The options of every chain read (review m3: the actions read finalized). */
+  const reads: { requestId: string; options: unknown }[] = [];
 
   beforeAll(async () => {
     dataSource = await freshMigratedDatabase(DATABASE);
     proposals = new SlashProposalRepository(dataSource);
-    const notifications = { notify: async () => ({ deliveredNow: false }) } as never;
+    const notifications = {
+      notify: async (notice: { subjectId?: string }) => {
+        notices.push(notice.subjectId ?? '');
+        return { deliveredNow: false };
+      },
+    } as never;
     const lifecycle = new SlashProposalService(
       proposals,
       new SlashProposalEventRepository(dataSource),
       notifications,
       TEST_SLASH_CONFIG,
     );
+    entries = new OverrideLogEntryRepository(dataSource);
     const overrides = new OverrideLogService(
       dataSource,
-      new OverrideLogEntryRepository(dataSource),
+      entries,
       new OperatorApprovalRepository(dataSource),
     );
     const executor = {
-      readRecord: async (requestId: string) => {
+      readRecord: async (
+        requestId: string,
+        _provider: string,
+        _chain: string,
+        options?: unknown,
+      ) => {
+        reads.push({ requestId, options });
         // A real RPC answers asynchronously; so does this.
         await new Promise((resolve) => setTimeout(resolve, 5));
         const read = chain.get(requestId) ?? null;
@@ -102,9 +120,10 @@ describe('stuck-case actions (B18), against a real database', () => {
     };
     const partsRepository = new SlashProposalPartRepository(dataSource);
     const enrolments = new ProviderChainEnrolmentRepository(dataSource);
+    const windowCalls = new SlaWindowCallRepository(dataSource);
     const parts = new SlashPartsService(
       partsRepository,
-      new SlaWindowCallRepository(dataSource),
+      windowCalls,
       executor as never,
       { dustReportBelowMinor: 0n, stragglerMaxAttempts: 3, stragglerDeadlineMs: 1 },
       null,
@@ -132,6 +151,7 @@ describe('stuck-case actions (B18), against a real database', () => {
       overrides,
       execution,
       executor as never,
+      windowCalls,
     );
     const operators = new OperatorRepository(dataSource);
     approvalRows = new OperatorApprovalRepository(dataSource);
@@ -257,10 +277,20 @@ describe('stuck-case actions (B18), against a real database', () => {
       cancelledAt: status === 'CANCELLED' ? new Date(Date.now() - DAY) : null,
       cancelReason: status === 'CANCELLED' ? 'WITHDRAWN' : null,
       disputedAt: null,
+      // The window's harmed agent: the contract paid the agent share to it.
+      beneficiary: AGENT.split(':')[2],
       ...extra,
     });
   }
 
+  const orgOf = async (id: string) =>
+    (
+      (await dataSource.query(`SELECT organization_id FROM slash_proposals WHERE id = $1`, [
+        id,
+      ])) as {
+        organization_id: string;
+      }[]
+    )[0].organization_id;
   const row = async (id: string) =>
     (
       (await dataSource.query(
@@ -387,22 +417,34 @@ describe('stuck-case actions (B18), against a real database', () => {
       expect(await register(id)).toEqual([]);
     });
 
-    it('double submit: two at once close it once, with one event and one override row', async () => {
+    it('double submit: two at once close it once; both answer closed, one event and one override row', async () => {
       const id = await stuckCase('CANCELLED');
       onChain(id, 'CANCELLED');
-      const results = await Promise.allSettled([
+      const results = await Promise.all([
         cases.closeNothingStanding(lead, id, BODY, null),
         cases.closeNothingStanding(treasury, id, BODY, null),
       ]);
-      expect(results.filter((r) => r.status === 'fulfilled')).toHaveLength(1);
-      const failure = results.find((r) => r.status === 'rejected') as PromiseRejectedResult;
-      expect(failure.reason).toMatchObject(refused('CHANGED'));
+      expect(results.map((r) => r.chainStatus)).toEqual(['CANCELLED', 'CANCELLED']);
+      expect(results.filter((r) => r.alreadyDone)).toHaveLength(1);
       expect(await events(id)).toHaveLength(1);
       expect(await register(id)).toHaveLength(1);
-      // A third, later, is refused on the mirror it now reads.
-      await expect(cases.closeNothingStanding(lead, id, BODY, null)).rejects.toMatchObject(
-        refused('NOT_CANCEL_REQUESTED'),
-      );
+      // A third, later, gets the same answer and writes nothing.
+      await expect(cases.closeNothingStanding(lead, id, BODY, null)).resolves.toMatchObject({
+        chainStatus: 'CANCELLED',
+        alreadyDone: true,
+      });
+      expect(await register(id)).toHaveLength(1);
+    });
+
+    it('m3: the action reads the record as of the finalized block', async () => {
+      const id = await stuckCase('CANCELLED');
+      onChain(id, 'CANCELLED');
+      reads.length = 0;
+      await cases.closeNothingStanding(lead, id, BODY, null);
+      expect(reads).toContainEqual({
+        requestId: deriveChainRequestId({ id, chainEpoch: 0 }),
+        options: { finalized: true },
+      });
     });
 
     it('with the admin-cancel sweep running at the same time, the close wins cleanly', async () => {
@@ -482,6 +524,108 @@ describe('stuck-case actions (B18), against a real database', () => {
       await expect(cases.recordExecution(lead, id, BODY, null)).rejects.toMatchObject(
         refused('NOT_CANCEL_REQUESTED'),
       );
+    });
+
+    it('m1: approved on an UPHELD case, the penalty closes as executed through the existing completion', async () => {
+      const id = await stuckCase('UPHELD');
+      onChain(id, 'EXECUTED');
+      const queued = (await cases.recordExecution(lead, id, BODY, null)) as ApprovalQueuedDto;
+      notices.length = 0;
+      await approvals.approve(queued.approvalId, treasury, null);
+      expect(await row(id)).toMatchObject({
+        status: 'EXECUTED',
+        chain_status: 'EXECUTED',
+        applied_amount: '400000',
+      });
+      const kinds = (await events(id)).map((e) => e.kind);
+      expect(kinds.filter((k) => k === 'EXECUTED')).toHaveLength(1);
+      expect(kinds.filter((k) => k === 'EXECUTION_RECORDED_BY_OPERATOR')).toHaveLength(1);
+      expect(await register(id)).toEqual([
+        expect.objectContaining({ code: 'S-16', approver_operator_id: treasury.operatorId }),
+      ]);
+      expect((await proposals.findAwaitingAdminCancel(1000)).map((r) => r.id)).not.toContain(id);
+      // The provider is told once, after the commit.
+      expect(notices.filter((n) => n === id)).toHaveLength(1);
+    });
+
+    it('M1: a register failure rolls the recorded execution back with it; nothing is half-written', async () => {
+      const id = await stuckCase('UPHELD');
+      onChain(id, 'EXECUTED');
+      const queued = (await cases.recordExecution(lead, id, BODY, null)) as ApprovalQueuedDto;
+      notices.length = 0;
+      const append = jest
+        .spyOn(entries, 'append')
+        .mockRejectedValueOnce(new Error('register down'));
+      try {
+        await expect(approvals.approve(queued.approvalId, treasury, null)).rejects.toThrow(
+          'register down',
+        );
+      } finally {
+        append.mockRestore();
+      }
+      // Neither the execution nor its audit exists.
+      expect(await row(id)).toMatchObject({
+        status: 'UPHELD',
+        chain_status: 'CANCEL_REQUESTED',
+        executed_at: null,
+        applied_amount: null,
+      });
+      expect(await events(id)).toEqual([]);
+      expect(await register(id)).toEqual([]);
+      expect((await approvalsFor(id))[0].status).toBe('PENDING');
+      expect(notices).not.toContain(id);
+
+      // Retried, both exist.
+      await approvals.approve(queued.approvalId, treasury, null);
+      expect(await row(id)).toMatchObject({ status: 'EXECUTED', chain_status: 'EXECUTED' });
+      expect(await register(id)).toHaveLength(1);
+      expect((await approvalsFor(id))[0].status).toBe('APPROVED');
+      expect(notices.filter((n) => n === id)).toHaveLength(1);
+    });
+
+    it('m5: an execution whose agent share went to anyone but a harmed agent is refused', async () => {
+      const id = await stuckCase('OVERTURNED');
+      onChain(id, 'EXECUTED', { beneficiary: '0x00000000000000000000000000000000000000f1' });
+      await expect(cases.recordExecution(lead, id, BODY, null)).rejects.toMatchObject(
+        refused('BENEFICIARY_NOT_AN_AGENT'),
+      );
+      expect(await approvalsFor(id)).toEqual([]);
+    });
+
+    it('m6: the indexer mirroring the same execution at the same time writes nothing; one record', async () => {
+      const id = await stuckCase('OVERTURNED');
+      onChain(id, 'EXECUTED');
+      const queued = (await cases.recordExecution(lead, id, BODY, null)) as ApprovalQueuedDto;
+      const entity = (await proposals.findOneScoped(await orgOf(id), id))!;
+      await Promise.all([
+        execution.mirrorChainExecution(entity, '0xfeed'),
+        approvals.approve(queued.approvalId, treasury, null),
+        execution.mirrorChainExecution(entity, '0xfeed'),
+      ]);
+      expect(await row(id)).toMatchObject({ chain_status: 'EXECUTED', applied_amount: '400000' });
+      expect((await events(id)).filter((e) => e.kind === 'EXECUTED_AFTER_CLOSURE')).toHaveLength(1);
+      expect(await register(id)).toHaveLength(1);
+    });
+
+    it('m2: a request pinned to an older epoch is superseded, and a fresh one is queued', async () => {
+      const id = await stuckCase('OVERTURNED');
+      onChain(id, 'EXECUTED');
+      const first = (await cases.recordExecution(lead, id, BODY, null)) as ApprovalQueuedDto;
+      // The case moved on to epoch 1 (its record there also reads executed).
+      const nextId = deriveChainRequestId({ id, chainEpoch: 1 });
+      await dataSource.query(
+        `UPDATE slash_proposals SET chain_epoch = 1, chain_request_id = $2 WHERE id = $1`,
+        [id, nextId],
+      );
+      chain.set(nextId, chain.get(deriveChainRequestId({ id, chainEpoch: 0 })) ?? null);
+      const second = (await cases.recordExecution(lead, id, BODY, null)) as ApprovalQueuedDto;
+      expect(second.approvalId).not.toBe(first.approvalId);
+      const rows = await approvalsFor(id);
+      expect(rows.find((r) => r.id === first.approvalId)?.status).toBe('EXPIRED');
+      expect(rows.find((r) => r.id === second.approvalId)).toMatchObject({
+        status: 'PENDING',
+        payload: expect.objectContaining({ expected: { chainEpoch: 1, chainRequestId: nextId } }),
+      });
     });
 
     it('two approvals of the same case at once: one records it, the other is refused', async () => {
@@ -637,6 +781,26 @@ describe('stuck-case actions (B18), against a real database', () => {
       );
       expect((await approvalsFor(id))[0].status).toBe('PENDING');
       expect(await register(id)).toEqual([]);
+    });
+
+    it('m6: a close and a re-propose racing after a status change: the compare-and-set lets one through', async () => {
+      const id = await stuckCase('UPHELD');
+      onChain(id, 'CANCELLED');
+      const queued = (await cases.repropose(lead, id, BODY, null)) as ApprovalQueuedDto;
+      // An adjudicator overturned it meanwhile.
+      await dataSource.query(
+        `UPDATE slash_proposals SET status = 'OVERTURNED', outcome = 'OVERTURNED_PLATFORM_DEFECT'
+          WHERE id = $1`,
+        [id],
+      );
+      const [closed, reproposed] = await Promise.allSettled([
+        cases.closeNothingStanding(treasury, id, BODY, null),
+        approvals.approve(queued.approvalId, adjudicator, null),
+      ]);
+      expect(closed.status).toBe('fulfilled');
+      expect(reproposed.status).toBe('rejected');
+      expect(await row(id)).toMatchObject({ chain_status: 'CANCELLED', chain_epoch: 0 });
+      expect((await register(id)).map((r) => r.code)).toEqual(['S-15']);
     });
 
     it('with the admin-cancel sweep running at the same time, one clean fresh epoch', async () => {

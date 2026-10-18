@@ -39,7 +39,12 @@ const READS: Record<string, StuckCaseRead | null> = {
     record: record('DISPUTED'),
     unreadable: false,
   },
-  EXECUTED: { state: ChainRecordState.EXECUTED, record: record('EXECUTED'), unreadable: false },
+  EXECUTED: {
+    state: ChainRecordState.EXECUTED,
+    record: record('EXECUTED'),
+    unreadable: false,
+    beneficiaryIsAgent: true,
+  },
   GONE: { state: ChainRecordState.GONE, record: record('CANCELLED'), unreadable: false },
   // Not found though a record was written: an anomaly, never "gone".
   'UNKNOWN (missing)': { state: ChainRecordState.UNKNOWN, record: null, unreadable: false },
@@ -152,10 +157,20 @@ describe('stuckCaseRefusal: the guard matrix', () => {
       state: ChainRecordState.EXECUTED,
       record: record('EXECUTED', { appliedMinor: '1000001' }),
       unreadable: false,
+      beneficiaryIsAgent: true,
     };
     expect(stuckCaseRefusal('RECORD_EXECUTION', facts('UPHELD'), beyond)).toBe(
       'EXECUTED_BEYOND_DECISION',
     );
+  });
+
+  it('m5: never records an execution whose agent share went to anyone but a harmed agent', () => {
+    for (const beneficiaryIsAgent of [false, undefined]) {
+      const read: StuckCaseRead = { ...(READS.EXECUTED as StuckCaseRead), beneficiaryIsAgent };
+      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('OVERTURNED'), read)).toBe(
+        'BENEFICIARY_NOT_AN_AGENT',
+      );
+    }
   });
 
   it('B7: never re-proposes a record the provider disputed or a case they won', () => {
