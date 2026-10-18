@@ -1,7 +1,11 @@
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
 import {
   DiscoveryMode,
   EndpointKind,
   McpPathKind,
+  RESERVED_FIRST_SEGMENTS,
   browserRedirectTarget,
   canonicalUrl,
   endpointKindOf,
@@ -88,6 +92,71 @@ describe('MCP URLs — paths', () => {
     ['no leading slash', 'my/research'],
   ])('refuses %s (404)', (_name, path) => {
     expect(parseMcpUrl(path)).toBeNull();
+  });
+
+  describe('reserved first segments (R-OA-28)', () => {
+    it('RESERVED_FIRST_SEGMENTS contains oauth and the other held segments', () => {
+      expect([...RESERVED_FIRST_SEGMENTS]).toEqual([
+        't',
+        '.well-known',
+        'health',
+        'status',
+        'docs',
+        'oauth',
+      ]);
+    });
+
+    /**
+     * Every reserved segment already falls through the switch to `null`, so
+     * the behavioural tests below would pass without the check. These pin the
+     * check itself: `parsePath` consults the list before any form is matched,
+     * and no form the switch serves is reserved.
+     */
+    const parsePathSource = (() => {
+      const source = readFileSync(
+        join(__dirname, '../../../src/modules/toolset/domain/mcp-url.ts'),
+        'utf8',
+      );
+      const start = source.indexOf('function parsePath(');
+      const end = source.indexOf('\nfunction ', start + 1);
+      expect(start).toBeGreaterThan(-1);
+      return source.slice(start, end);
+    })();
+
+    it('parsePath checks RESERVED_FIRST_SEGMENTS before the @ branch and the switch', () => {
+      const check = parsePathSource.indexOf('RESERVED_FIRST_SEGMENTS.includes(first)');
+      expect(check).toBeGreaterThan(-1);
+      expect(check).toBeLessThan(parsePathSource.indexOf("first.startsWith('@')"));
+      expect(check).toBeLessThan(parsePathSource.indexOf('switch (first)'));
+    });
+
+    it('no first segment the switch serves is reserved', () => {
+      const served = [...parsePathSource.matchAll(/case '([^']+)':/g)].map(
+        ([, segment]) => segment,
+      );
+      expect(served.length).toBeGreaterThan(0);
+      expect(served.filter((segment) => RESERVED_FIRST_SEGMENTS.includes(segment))).toEqual([]);
+    });
+
+    it('/oauth/x parses to null, in any case and any depth', () => {
+      for (const path of [
+        '/oauth/x',
+        '/oauth',
+        '/OAuth/token',
+        '/oauth/clients/assay-mcp',
+        '/oauth/x?free=1',
+      ]) {
+        expect({ path, parsed: parseMcpUrl(path) }).toEqual({ path, parsed: null });
+      }
+    });
+
+    it.each(['t', '.well-known', 'health', 'status', 'docs', 'oauth'])(
+      'refuses /%s/{x} even when {x} would be a valid second segment',
+      (segment) => {
+        expect(parseMcpUrl(`/${segment}/research`)).toBeNull();
+        expect(parseMcpAbsoluteUrl(`${BASE}/${segment}/research`, BASE)).toBeNull();
+      },
+    );
   });
 
   it('refuses a URL longer than 2,048 characters', () => {

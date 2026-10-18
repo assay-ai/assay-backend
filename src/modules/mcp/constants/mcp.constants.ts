@@ -276,5 +276,9 @@ export const MCP_ALL_PROVIDERS_FAILED_REASON =
 export const MCP_UNPAYABLE_PROVIDER_REASON =
   'mcp: voided — the serving provider has no proved payout account';
 
-/** `Authorization: Bearer <token>` — the only credential the server accepts. */
-export const MCP_BEARER_PREFIX = 'Bearer ';
+/**
+ * `Authorization: Bearer <token>` — the only credential the server accepts.
+ * The scheme name is case-insensitive (RFC 7235 §2.1), so `bearer` and
+ * `BEARER` are the same scheme; the token itself is verified in full.
+ */
+export const MCP_BEARER_SCHEME_RE = /^bearer\s+/i;

@@ -3,7 +3,7 @@ import { isLocalDeployment } from '@modules/mcp/config/mcp-discovery.config';
 import { loadMcpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { takeOnceFromEnv } from '@modules/verification/signing/backends/env-key-source';
 
-import { OAUTH_BUILTIN_CLIENT_PATH } from '../constants/oauth.constants';
+import { builtinClientId } from '../domain/client-id';
 import { classify } from '../domain/client-id';
 
 /**
@@ -149,7 +149,7 @@ export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConf
   );
   const paymentClients = parsePaymentClients(
     env[OAUTH_PAYMENT_CLIENTS_ENV],
-    `${host.mcpPublicUrl}${OAUTH_BUILTIN_CLIENT_PATH}`,
+    builtinClientId(host.mcpPublicUrl),
   );
 
   return Object.freeze({
