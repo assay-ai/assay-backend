@@ -23,6 +23,7 @@ import {
 import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
 import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
+import { McpExceptionsFilter } from '@bootstrap/mcp/mcp-exceptions.filter';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 
 import { freshMigratedDatabase, runDatabaseName } from '../helpers/slash-prorata-context';
@@ -140,7 +141,7 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     // One proxy hop, so each test can be its own client address.
     mcpApp.set('trust proxy', 1);
     mcpApp.enableCors(mcpCorsOptions);
-    mcpApp.useGlobalFilters(new AllExceptionsFilter());
+    mcpApp.useGlobalFilters(new McpExceptionsFilter());
     await mcpApp.init();
     mcp = mcpApp;
     mcpMetrics = mcp.get(MetricsRegistryService, { strict: false });
@@ -300,7 +301,7 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     expect(location).toBe(`${WEB}/connect/authorize#request=${rid}`);
     expect(new URL(location).search).toBe('');
     const setCookie = (response.headers['set-cookie'] as unknown as string[])[0];
-    expect(setCookie).toMatch(/^__Host-assay_oar=[0-9a-f]{64}; /);
+    expect(setCookie).toMatch(/^__Host-assay_oar_[0-9a-f]{16}=[0-9a-z]+\.[0-9a-f]{64}; /);
     for (const attribute of ['Path=/', 'HttpOnly', 'Secure', 'SameSite=Lax', 'Max-Age=600']) {
       expect(setCookie.split('; ')).toContain(attribute);
     }
@@ -328,21 +329,65 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
   it("continue without cookie → error page; with another browser's cookie → error page (R-OA-8)", async () => {
     const first = await start(pkce().challenge);
     const second = await start(pkce().challenge);
+
+    // Before any decision, a stray continue takes nothing.
+    const early = await resume(first.rid);
+    expect(early.status).toBe(403);
+    expect(early.text).toContain('Finish this in the browser window where you started it');
+    expect(early.headers.location).toBeUndefined();
+
     await approve(first.rid);
-
-    const none = await resume(first.rid);
-    expect(none.status).toBe(403);
-    expect(none.text).toContain('Finish this in the browser window where you started it');
-    expect(none.headers.location).toBeUndefined();
-
     const other = await resume(first.rid, second.cookie);
     expect(other.status).toBe(403);
     expect(other.text).toContain('Finish this in the browser window where you started it');
 
-    // The right browser still gets its code: the refusals took nothing.
+    // After a decision, the wrong browser's continue discarded the request:
+    // not even the browser that started it can finish it now.
     const right = await resume(first.rid, first.cookie);
-    expect(right.status).toBe(302);
-    expect(new URL(right.headers.location).searchParams.get('code')).toMatch(/^assay_ac_/);
+    expect(right.status).toBe(404);
+    expect(right.headers.location).toBeUndefined();
+  });
+
+  it('T8: a request an attacker started and a victim approved yields no code to anyone', async () => {
+    // The attacker starts a sign-in in their own browser and keeps its cookie.
+    const { verifier, challenge } = pkce();
+    const attacker = await start(challenge);
+    // The victim opens the consent link and approves it with their agent.
+    await approve(attacker.rid);
+    // The victim's browser goes on to continue, without the attacker's cookie.
+    const victim = await resume(attacker.rid);
+    expect(victim.status).toBe(403);
+    expect(victim.headers.location).toBeUndefined();
+    // The attacker then continues with their own cookie: no code.
+    const stolen = await resume(attacker.rid, attacker.cookie);
+    expect(stolen.status).toBe(404);
+    expect(stolen.headers.location).toBeUndefined();
+    const [{ count }] = (await dataSource.query(
+      `SELECT count(*)::int AS "count" FROM "oauth_authorization_codes" WHERE "code_challenge" = $1`,
+      [challenge],
+    )) as { count: number }[];
+    expect(count).toBe(0);
+    expect(verifier).toBeTruthy();
+  });
+
+  it('two sign-ins started together in one browser both complete', async () => {
+    const first = await start(pkce().challenge, { state: 'one' });
+    const second = await start(pkce().challenge, { state: 'two' });
+    expect(first.cookie.split('=')[0]).not.toBe(second.cookie.split('=')[0]);
+    const jar = `${first.cookie}; ${second.cookie}`;
+    await approve(first.rid);
+    await approve(second.rid);
+
+    for (const [rid, state] of [
+      [second.rid, 'two'],
+      [first.rid, 'one'],
+    ]) {
+      const response = await resume(rid, jar);
+      expect(response.status).toBe(302);
+      const location = new URL(response.headers.location);
+      expect(location.searchParams.get('code')).toMatch(/^assay_ac_/);
+      expect(location.searchParams.get('state')).toBe(state);
+    }
   });
 
   it('approve then continue → 302 with code, state, iss={MCP}; the code exchanges once (R-OA-6)', async () => {
@@ -358,8 +403,8 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     expect(code).toMatch(/^assay_ac_/);
     expect(location.searchParams.get('state')).toBe('client-state');
     expect(location.searchParams.get('iss')).toBe(MCP);
-    expect((response.headers['set-cookie'] as unknown as string[])[0]).toMatch(
-      /^__Host-assay_oar=; .*Max-Age=0/,
+    expect((response.headers['set-cookie'] as unknown as string[])[0]).toBe(
+      `${cookie.split('=')[0]}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
     );
 
     const form = {
@@ -400,11 +445,23 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     expect(location.searchParams.has('code')).toBe(false);
   });
 
-  it('continue before anyone decided → an error, and no code', async () => {
+  it('continue before anyone decided, in the browser that started it → access_denied, no code', async () => {
     const { rid, cookie } = await start(pkce().challenge);
     const response = await resume(rid, cookie);
-    expect(response.status).toBe(409);
-    expect(response.headers.location).toBeUndefined();
+    expect(response.status).toBe(302);
+    const location = new URL(response.headers.location);
+    expect(`${location.origin}${location.pathname}`).toBe('http://127.0.0.1:61234/callback');
+    expect(location.searchParams.get('error')).toBe('access_denied');
+    expect(location.searchParams.get('state')).toBe('client-state');
+    expect(location.searchParams.get('iss')).toBe(MCP);
+    expect(location.searchParams.has('code')).toBe(false);
+  });
+
+  it('response_type other than code → unsupported_response_type', async () => {
+    const response = await authorize(baseParams(pkce().challenge, { response_type: 'token' }));
+    const location = new URL(response.headers.location);
+    expect(location.searchParams.get('error')).toBe('unsupported_response_type');
+    expect(location.searchParams.get('iss')).toBe(MCP);
   });
 
   // ── token, refresh, revoke, and the 401 reason ───────────────────────────────
@@ -456,6 +513,33 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     expect(
       await counter('assay_oauth_token_total', { grant_type: 'refresh_token', result: 'ok' }),
     ).toBeGreaterThanOrEqual(1);
+  });
+
+  it('a body the parser refuses on token, revoke and register → 400 invalid_request', async () => {
+    for (const path of ['/oauth/token', '/oauth/revoke', '/oauth/register']) {
+      const response = await request(mcp.getHttpServer())
+        .post(path)
+        .set('X-Forwarded-For', newIp())
+        .set('Content-Type', 'application/json')
+        .send('{not json');
+      expect({ path, status: response.status, body: response.body }).toEqual({
+        path,
+        status: 400,
+        body: { error: 'invalid_request' },
+      });
+      expect(response.headers['cache-control']).toBe('no-store');
+    }
+  });
+
+  it('a client name that claims trust is refused at registration', async () => {
+    for (const name of ['Claude \u2713 Verified', 'Assay app', 'V\u0435rified Tools']) {
+      const response = await request(mcp.getHttpServer())
+        .post('/oauth/register')
+        .set('X-Forwarded-For', newIp())
+        .send({ client_name: name, redirect_uris: [LOOPBACK] });
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'invalid_client_metadata' });
+    }
   });
 
   it('a malformed request is invalid_request before anything else', async () => {

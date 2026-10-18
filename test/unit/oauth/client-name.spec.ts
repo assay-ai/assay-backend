@@ -1,4 +1,5 @@
-import { CLIENT_NAME_MAX, sanitise } from '@modules/oauth/domain/client-name';
+import { CLIENT_NAME_MAX, claimsTrust, sanitise } from '@modules/oauth/domain/client-name';
+import { validateClientMetadata } from '@modules/oauth/domain/client-metadata';
 
 describe('client name sanitising', () => {
   it('keeps an ordinary name', () => {
@@ -90,5 +91,73 @@ describe('client name sanitising', () => {
     for (const value of [undefined, null, 1, {}, ['Claude']]) {
       expect(sanitise(value)).toBeNull();
     }
+  });
+});
+
+describe('a client name that claims trust (§6.3.6, R-OA-25)', () => {
+  it.each([
+    'Verified',
+    'Claude Code Verified',
+    'Claude Code (verified)',
+    'VERIFIED app',
+    'ClaudeVerified',
+    'V e r i f i e d',
+    'Ver-i_fied',
+    'Veri.fied',
+    'Veri\u200Bfied',
+    'V\u0435r\u0456f\u0456\u0435d',
+    '\uFF36\uFF45\uFF52\uFF49\uFF46\uFF49\uFF45\uFF44',
+    'V3r1f13d',
+    'Verifled',
+    've\u0301rified',
+    'Claude \u2713',
+    'Claude \u2714 Code',
+    'Claude \u2705',
+    '\u2611 Claude',
+    'Assay app',
+    'Assay App',
+    'assay-app',
+    '\u0410ssay app',
+    '4ssay 4pp',
+    'Claude (says it is)',
+    'X \u00b7 an app on this computer',
+    'An App On This Computer',
+  ])('%j is refused', (name) => {
+    expect(claimsTrust(name)).toBe(true);
+  });
+
+  it.each([
+    'Claude Code',
+    'Verifone',
+    'Verifier Tools',
+    'Unverifiedness Labs',
+    'Assayer Labs',
+    'Assay Application',
+    'Assay',
+    'My App',
+    'Says Hello',
+    'Visual Studio Code',
+    'Cursor',
+    'An app',
+  ])('%j passes', (name) => {
+    expect(claimsTrust(name)).toBe(false);
+  });
+
+  it('refuses such a name at registration and in a CIMD document, as invalid_client_metadata', () => {
+    const allowlist: never[] = [];
+    for (const name of ['Claude \u2713 Verified', 'Assay app', 'V\u0435rified']) {
+      expect(
+        validateClientMetadata(
+          { client_name: name, redirect_uris: ['http://127.0.0.1/callback'] },
+          allowlist,
+        ),
+      ).toEqual({ ok: false, error: 'invalid_client_metadata' });
+    }
+    expect(
+      validateClientMetadata(
+        { client_name: 'Visual Studio Code', redirect_uris: ['http://127.0.0.1/callback'] },
+        allowlist,
+      ).ok,
+    ).toBe(true);
   });
 });

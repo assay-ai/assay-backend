@@ -53,14 +53,6 @@ export const CONTINUE_EXPIRED_PAGE = page(
 <p>Start again from the app.</p>`,
 );
 
-/** `continue` for a request nobody approved or denied. */
-export const CONTINUE_UNDECIDED_PAGE = page(
-  'Sign-in not finished - Assay',
-  'This sign-in was not approved',
-  `<p>The request was closed before anyone approved or declined it.</p>
-<p>Start again from the app.</p>`,
-);
-
 /** The 429 page of `/oauth/authorize`. */
 export const RATE_LIMITED_PAGE = page(
   'Too many requests - Assay',

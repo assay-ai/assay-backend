@@ -12,10 +12,13 @@ import { OAuthRegisterController } from '@modules/oauth/controllers/oauth-regist
 import { OAuthRevokeController } from '@modules/oauth/controllers/oauth-revoke.controller';
 import { OAuthTokenController } from '@modules/oauth/controllers/oauth-token.controller';
 import {
-  REQUEST_COOKIE_NAME,
-  readRequestCookie,
+  MAX_REQUEST_COOKIES,
+  REQUEST_COOKIE_PREFIX,
+  readCookie,
   requestCookieMatches,
+  requestCookieName,
   requestCookieValue,
+  requestCookiesToEvict,
 } from '@modules/oauth/domain/request-cookie';
 import { DcrService } from '@modules/oauth/services/dcr.service';
 import { OAuthClientRegistry, ResolvedClient } from '@modules/oauth/services/oauth-client.registry';
@@ -76,6 +79,16 @@ class FakeStore {
       denied: false,
     });
     return Promise.resolve(rid);
+  }
+
+  discards = 0;
+
+  discardIfDecided(rid: string): Promise<boolean> {
+    this.discards += 1;
+    const found = this.requests.get(rid);
+    if (!found || (!found.approval && !found.denied)) return Promise.resolve(false);
+    this.requests.delete(rid);
+    return Promise.resolve(true);
   }
 
   take(rid: string): Promise<OAuthPendingRequest | null> {
@@ -235,12 +248,16 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
         replaces: null,
       });
 
-      const cookie = (response.headers['set-cookie'] as unknown as string[])[0];
-      expect(cookie).toBe(
-        `${REQUEST_COOKIE_NAME}=${requestCookieValue(config.requestCookieSecret!, rid)}; ` +
-          'Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=600',
-      );
-      expect(cookie).not.toContain(rid);
+      const cookies = response.headers['set-cookie'] as unknown as string[];
+      expect(cookies).toHaveLength(1);
+      const secret = config.requestCookieSecret!;
+      const name = requestCookieName(secret, rid);
+      expect(name).toMatch(new RegExp(`^${REQUEST_COOKIE_PREFIX}[0-9a-f]{16}$`));
+      const [pair, ...attributes] = cookies[0].split('; ');
+      expect(attributes).toEqual(['Path=/', 'HttpOnly', 'Secure', 'SameSite=Lax', 'Max-Age=600']);
+      expect(pair.startsWith(`${name}=`)).toBe(true);
+      expect(requestCookieMatches(secret, rid, pair.slice(name.length + 1))).toBe(true);
+      expect(cookies[0]).not.toContain(rid);
       expect(
         await counterValue(registry, 'assay_oauth_authorize_total', { outcome: 'stored' }),
       ).toBe(1);
@@ -319,7 +336,8 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       ['a short code_challenge', { code_challenge: 'abc' }, 'invalid_request'],
       ['code_challenge_method=plain', { code_challenge_method: 'plain' }, 'invalid_request'],
       ['no code_challenge_method', { code_challenge_method: undefined }, 'invalid_request'],
-      ['response_type=token', { response_type: 'token' }, 'invalid_request'],
+      ['response_type=token', { response_type: 'token' }, 'unsupported_response_type'],
+      ['no response_type', { response_type: undefined }, 'invalid_request'],
       ['a resource on another origin', { resource: 'https://evil.example' }, 'invalid_target'],
     ])('%s → redirect with error, description, state and iss', async (_n, over, error) => {
       const response = await authorize(over);
@@ -393,8 +411,9 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       expect(params.get('iss')).toBe(MCP);
       expect(tokens.mintCode).toHaveBeenCalledTimes(1);
       // The cookie is cleared.
-      expect((response.headers['set-cookie'] as unknown as string[])[0]).toMatch(
-        new RegExp(`^${REQUEST_COOKIE_NAME}=; .*Max-Age=0`),
+      expect((response.headers['set-cookie'] as unknown as string[])[0]).toBe(
+        `${requestCookieName(config.requestCookieSecret!, rid)}=; ` +
+          'Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0',
       );
       expect(response.headers['cache-control']).toBe('no-store');
     });
@@ -411,14 +430,16 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       expect(tokens.mintCode).not.toHaveBeenCalled();
     });
 
-    it('without the cookie: the error page, the request left in place, counted', async () => {
-      const { rid } = await started();
+    it('without the cookie, after a decision: the error page, and the request is discarded (T8)', async () => {
+      const { rid, cookie } = await started();
       store.approve(rid);
       const response = await resume(rid);
       expect(response.status).toBe(403);
       expect(response.text).toContain('Finish this in the browser window where you started it');
-      expect(store.requests.has(rid)).toBe(true);
+      expect(store.requests.has(rid)).toBe(false);
       expect(store.takes).toBe(0);
+      // Not even the browser that started it can finish it now.
+      expect((await resume(rid, cookie)).status).toBe(404);
       expect(tokens.mintCode).not.toHaveBeenCalled();
       expect(
         await counterValue(registry, 'assay_oauth_consent_total', {
@@ -427,14 +448,59 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       ).toBe(1);
     });
 
-    it("with another browser's cookie: the error page, no code", async () => {
+    it('without the cookie, before any decision: the error page, and the request stays', async () => {
+      const { rid, cookie } = await started();
+      const response = await resume(rid);
+      expect(response.status).toBe(403);
+      expect(store.requests.has(rid)).toBe(true);
+      store.approve(rid);
+      const finished = await resume(rid, cookie);
+      expect(query(finished.headers.location).get('code')).toBe('assay_ac_code');
+    });
+
+    it("with another request's cookie value under this request's name: the error page, no code", async () => {
       const first = await started();
       const second = await started();
       store.approve(first.rid);
-      const response = await resume(first.rid, second.cookie);
+      const secret = config.requestCookieSecret!;
+      const forged = `${requestCookieName(secret, first.rid)}=${second.cookie.split('=')[1]}`;
+      const response = await resume(first.rid, forged);
       expect(response.status).toBe(403);
       expect(response.text).toContain('Finish this in the browser window where you started it');
       expect(tokens.mintCode).not.toHaveBeenCalled();
+      expect(store.requests.has(first.rid)).toBe(false);
+    });
+
+    it('two sign-ins started together in one browser both complete', async () => {
+      const first = await started();
+      const second = await started();
+      const jar = `${first.cookie}; ${second.cookie}`;
+      store.approve(first.rid);
+      store.approve(second.rid);
+      const one = await resume(second.rid, jar);
+      const two = await resume(first.rid, jar);
+      expect(query(one.headers.location).get('code')).toBe('assay_ac_code');
+      expect(query(two.headers.location).get('code')).toBe('assay_ac_code');
+      expect(tokens.mintCode).toHaveBeenCalledTimes(2);
+    });
+
+    it(`a browser keeps at most ${MAX_REQUEST_COOKIES} pending sign-ins: the oldest is expired`, async () => {
+      const held: string[] = [];
+      for (let i = 0; i < MAX_REQUEST_COOKIES; i += 1) {
+        const response = await authorize().set('Cookie', held.join('; '));
+        const cookies = response.headers['set-cookie'] as unknown as string[];
+        expect(cookies).toHaveLength(1);
+        // Issue times one second apart (the controller reads the wall clock).
+        const [name, value] = cookies[0].split(';')[0].split('=');
+        held.push(`${name}=${(1_000_000 + i).toString(36)}.${value.split('.')[1]}`);
+      }
+      const sixth = await authorize().set('Cookie', held.join('; '));
+      const cookies = sixth.headers['set-cookie'] as unknown as string[];
+      expect(cookies).toHaveLength(2);
+      expect(cookies[0]).toBe(
+        `${held[0].split('=')[0]}=; Path=/; HttpOnly; Secure; SameSite=Lax; Max-Age=0`,
+      );
+      expect(cookies[1]).toMatch(/Max-Age=600$/);
     });
 
     it('a cookie sent twice is refused', async () => {
@@ -463,7 +529,8 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       });
       store.approve(rid);
       // A cookie a browser could hold from an app that did have a secret.
-      const cookie = `${REQUEST_COOKIE_NAME}=${requestCookieValue(Buffer.alloc(32, 7), rid)}`;
+      const other = Buffer.alloc(32, 7);
+      const cookie = `${requestCookieName(other, rid)}=${requestCookieValue(other, rid)}`;
 
       const response = await resume(rid, cookie);
       expect(response.status).toBe(503);
@@ -482,11 +549,16 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       expect(response.headers['set-cookie']).toBeUndefined();
     });
 
-    it('a taken request neither approved nor denied is an error: no redirect, no code', async () => {
+    it('undecided, in the browser that started it: access_denied to the client, no code', async () => {
       const { rid, cookie } = await started();
       const response = await resume(rid, cookie);
-      expect(response.status).toBe(409);
-      expect(response.headers.location).toBeUndefined();
+      expect(response.status).toBe(302);
+      const params = query(response.headers.location);
+      expect(response.headers.location.startsWith('http://127.0.0.1:53111/callback?')).toBe(true);
+      expect(params.get('error')).toBe('access_denied');
+      expect(params.get('state')).toBe('st-1');
+      expect(params.get('iss')).toBe(MCP);
+      expect(params.has('code')).toBe(false);
       expect(tokens.mintCode).not.toHaveBeenCalled();
       expect(store.requests.has(rid)).toBe(false);
     });
@@ -747,6 +819,26 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       expect(malformed.text).toBe('');
       expect(tokens.revoke).toHaveBeenCalledTimes(2);
     });
+
+    it("has the token endpoint's limit: the 61st in a minute is 503 with Retry-After", async () => {
+      for (let i = 0; i < 60; i += 1) {
+        expect((await revoke({ token: 'assay_rt_x', client_id: BUILTIN_ID })).status).toBe(200);
+      }
+      const limited = await revoke({ token: 'assay_rt_x', client_id: BUILTIN_ID });
+      expect(limited.status).toBe(503);
+      expect(limited.headers['retry-after']).toMatch(/^\d+$/);
+      expect(limited.body).toMatchObject({ error: 'temporarily_unavailable' });
+      expect(tokens.revoke).toHaveBeenCalledTimes(60);
+      // Another client from the same address has its own budget.
+      expect((await revoke({ token: 'assay_rt_x', client_id: CIMD_ID })).status).toBe(200);
+    });
+
+    it('still revokes with Redis unreachable: refusing would keep a token alive', async () => {
+      redis.down = true;
+      const response = await revoke({ token: 'assay_rt_x', client_id: BUILTIN_ID });
+      expect(response.status).toBe(200);
+      expect(tokens.revoke).toHaveBeenCalledTimes(1);
+    });
   });
 });
 
@@ -754,11 +846,14 @@ describe('the request cookie', () => {
   const secret = Buffer.alloc(32, 9);
   const rid = randomBytes(32).toString('base64url');
 
-  it('is an HMAC of the rid, never the rid', () => {
+  it('is named and valued by an HMAC of the rid, never the rid', () => {
+    const name = requestCookieName(secret, rid);
     const value = requestCookieValue(secret, rid);
-    expect(value).toMatch(/^[0-9a-f]{64}$/);
-    expect(value).not.toContain(rid);
-    expect(requestCookieValue(Buffer.alloc(32, 8), rid)).not.toBe(value);
+    expect(name).toMatch(/^__Host-assay_oar_[0-9a-f]{16}$/);
+    expect(value).toMatch(/^[0-9a-z]+\.[0-9a-f]{64}$/);
+    expect(`${name}${value}`).not.toContain(rid);
+    expect(requestCookieName(Buffer.alloc(32, 8), rid)).not.toBe(name);
+    expect(requestCookieName(secret, randomBytes(32).toString('base64url'))).not.toBe(name);
   });
 
   it('matches only the value for this rid', () => {
@@ -767,13 +862,27 @@ describe('the request cookie', () => {
     expect(requestCookieMatches(secret, randomBytes(32).toString('base64url'), value)).toBe(false);
     expect(requestCookieMatches(secret, rid, null)).toBe(false);
     expect(requestCookieMatches(secret, rid, value.toUpperCase())).toBe(false);
-    expect(requestCookieMatches(secret, rid, value.slice(1))).toBe(false);
+    expect(requestCookieMatches(secret, rid, value.slice(0, -1))).toBe(false);
+    expect(requestCookieMatches(secret, rid, value.split('.')[1])).toBe(false);
   });
 
   it('is read by its exact name only, and refused when sent twice', () => {
-    expect(readRequestCookie(`a=1; ${REQUEST_COOKIE_NAME}=abc; b=2`)).toBe('abc');
-    expect(readRequestCookie('assay_oar=abc')).toBeNull();
-    expect(readRequestCookie(undefined)).toBeNull();
-    expect(readRequestCookie(`${REQUEST_COOKIE_NAME}=a; ${REQUEST_COOKIE_NAME}=b`)).toBeNull();
+    const name = requestCookieName(secret, rid);
+    expect(readCookie(`a=1; ${name}=abc; b=2`, name)).toBe('abc');
+    expect(readCookie(`${REQUEST_COOKIE_PREFIX}0000000000000000=abc`, name)).toBeNull();
+    expect(readCookie(undefined, name)).toBeNull();
+    expect(readCookie(`${name}=a; ${name}=b`, name)).toBeNull();
+  });
+
+  it('evicts the oldest past the cap, unreadable issue times first', () => {
+    const at = (n: number) => `${REQUEST_COOKIE_PREFIX}${String(n).padStart(16, '0')}`;
+    const v = (seconds: number) => `${seconds.toString(36)}.${'a'.repeat(64)}`;
+    const four = [1, 2, 3, 4].map((n) => `${at(n)}=${v(100 + n)}`).join('; ');
+    expect(requestCookiesToEvict(four)).toEqual([]);
+    const five = `${four}; ${at(5)}=${v(50)}`;
+    expect(requestCookiesToEvict(five)).toEqual([at(5)]);
+    const garbled = `${four}; ${at(6)}=garbage`;
+    expect(requestCookiesToEvict(garbled)).toEqual([at(6)]);
+    expect(requestCookiesToEvict('other=1')).toEqual([]);
   });
 });
