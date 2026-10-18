@@ -15,9 +15,9 @@ import {
   isEgressError,
   resolveEgressTarget,
   withLimits,
+  EGRESS_RELAY_CONFIG,
+  EgressRelayConfig,
 } from '@shared/network/egress';
-
-import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from '@shared/network/egress/egress-relay.config';
 
 import { relayUnsupportedPort } from '../credentials/credential-rules';
 import { ConnectivityCheckResultDto, toConnectivityDto } from '../dto/provider-shared.dto';
@@ -106,10 +106,9 @@ export class ProviderConnectivityService {
     // — see `EGRESS_DNS_LOOKUP`'s doc comment. Reused here rather than
     // reinvented so the pre-flight resolve in {@link probe} can be pointed at a
     // test-controlled zone the same way the dial itself already can.
-    @Optional() @Inject(EGRESS_DNS_LOOKUP) private readonly dnsLookup?: EgressDnsLookup,
-    @Optional()
+    @Optional() @Inject(EGRESS_DNS_LOOKUP) private readonly dnsLookup: EgressDnsLookup | undefined,
     @Inject(EGRESS_RELAY_CONFIG)
-    private readonly relayConfig?: EgressRelayConfig | null,
+    private readonly relayConfig: EgressRelayConfig | null,
   ) {}
 
   /**
@@ -122,6 +121,7 @@ export class ProviderConnectivityService {
    * needs a table rather than a return value.
    */
   check(organizationId: string, endpoint?: string): Promise<ConnectivityCheckResultDto> {
+    if (endpoint !== undefined) this.assertRelayable(endpoint);
     // Bounded like the mapping tester: an unthrottled probe of any public URL
     // from the platform is a scanner anyone can borrow. Its own
     // process-wide pool, so slow tester runs cannot starve it (review N-3).
@@ -174,9 +174,6 @@ export class ProviderConnectivityService {
     organizationId: string,
     endpoint: string,
   ): Promise<ConnectivityCheckResultDto> {
-    const port = relayUnsupportedPort(endpoint, Boolean(this.relayConfig));
-    if (port !== null) throw ProviderErrors.endpointPortNotRelayable({ port });
-
     const result = await this.check(organizationId, endpoint);
 
     if (result.outcome !== ConnectivityOutcome.REACHABLE) {
@@ -214,6 +211,11 @@ export class ProviderConnectivityService {
     }
 
     return result;
+  }
+
+  private assertRelayable(endpoint: string): void {
+    const port = relayUnsupportedPort(endpoint, Boolean(this.relayConfig));
+    if (port !== null) throw ProviderErrors.endpointPortNotRelayable({ port });
   }
 
   // ── Internals ───────────────────────────────────────────────────────────

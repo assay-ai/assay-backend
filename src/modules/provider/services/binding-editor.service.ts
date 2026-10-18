@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -25,7 +25,7 @@ import {
   Tool,
   ToolBinding,
 } from '@modules/tool/ports/tool.types';
-import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from '@shared/network/egress/egress-relay.config';
+import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from '@shared/network/egress';
 import { canonicalJson } from '@shared/crypto/canonical-json';
 
 import {
@@ -156,9 +156,8 @@ export class BindingEditorService {
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
     @Inject(PROVIDER_MINIMUM_STAKE_BY_CHAIN)
     private readonly minimumStakeByChain: MinimumStakeByChain,
-    @Optional()
     @Inject(EGRESS_RELAY_CONFIG)
-    private readonly relayConfig?: EgressRelayConfig | null,
+    private readonly relayConfig: EgressRelayConfig | null,
   ) {}
 
   /**
@@ -205,6 +204,7 @@ export class BindingEditorService {
     subject: string,
     body: SaveToolBindingBodyDto,
   ): Promise<SavedToolBindingDto> {
+    this.assertEndpointRelayable(body.endpoint);
     const tool = await this.catalogue.findTool(body.toolId);
     if (!tool) {
       throw ProviderErrors.bindingToolUnknown({ toolId: body.toolId });
@@ -214,7 +214,6 @@ export class BindingEditorService {
     const request = inspectRequestMapping(body.requestMapping, context);
     const requestMapping = request.spec;
     assertNoCredentialsInMapping(body.endpoint, requestMapping);
-    this.assertEndpointRelayable(body.endpoint);
     const responseMapping = inspectResponseMapping(body.responseMapping, context).spec;
     // The contract half (T3): the majors served — the tool's current major
     // unless named — and the optional fields promised, checked against every

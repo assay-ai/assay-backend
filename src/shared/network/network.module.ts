@@ -37,6 +37,6 @@ function egressRelayConfigFactory(): EgressRelayConfig | null {
     { provide: EGRESS_RELAY_CONFIG, useFactory: egressRelayConfigFactory },
     EgressHttpClient,
   ],
-  exports: [EgressHttpClient],
+  exports: [EgressHttpClient, EGRESS_RELAY_CONFIG],
 })
 export class NetworkModule {}

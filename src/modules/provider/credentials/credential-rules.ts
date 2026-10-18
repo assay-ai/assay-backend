@@ -1,7 +1,7 @@
 import { RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 import { isConstNode } from '@modules/tool/domain/mapping/normalize';
 
-import { RELAY_ALLOWED_PORTS } from '@shared/network/egress/egress-relay.config';
+import { RELAY_ALLOWED_PORTS } from '@shared/network/egress';
 
 import { ProviderErrors } from '../errors/provider.errors';
 import { CredentialHeader } from './credential-vault.crypto';

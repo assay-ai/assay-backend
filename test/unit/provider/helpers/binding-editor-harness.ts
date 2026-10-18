@@ -185,6 +185,7 @@ export function buildBindingEditorHarness(
     new ConfigProviderStakeSource(snapshot),
     options.enabledChains,
     minimumStakeByChain(options.enabledChains),
+    null,
   );
 
   const validBody = {
