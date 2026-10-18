@@ -1,7 +1,11 @@
 import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { CALL_DISPUTE_SLA } from '@modules/dispute/constants/call-dispute-sla.constants';
 import { disputeFilingClosesAt } from '@modules/dispute/domain/call-dispute';
-import { slaTimesOf, toDto } from '@modules/dispute/services/call-dispute.service';
+import {
+  providerOpenedNotice,
+  slaTimesOf,
+  toDto,
+} from '@modules/dispute/services/call-dispute.service';
 import { CALL_DISPUTE_SLA as SWEEP_SLA } from '@modules/dispute/services/call-dispute-sla.service';
 
 const FILED = new Date('2026-10-01T00:00:00Z');
@@ -127,5 +131,35 @@ describe('the receipt’s disputeFilingClosesAt', () => {
     ]) {
       expect(disputeFilingClosesAt({ ...call, ...overrides }, null, H)).toBeNull();
     }
+  });
+});
+
+describe('call dispute: the provider’s notice of a new report', () => {
+  it('names the deadline and what silence costs', () => {
+    const notice = providerOpenedNotice(dispute(), 'Other', CONTEXT);
+    expect(notice.title).toBe('A buyer reported a bad result on a call you served');
+    expect(notice.body).toBe(
+      'The buyer says: "Other". Reply by 2026-10-02 00:00 UTC, or the buyer wins: if you stay ' +
+        'silent, it is upheld automatically at 2026-10-04 00:00 UTC.',
+    );
+    expect(notice.body).not.toMatch(/may reply/i);
+    expect(notice.payload).toEqual({
+      reasonLabel: 'Other',
+      replyDueAt: '2026-10-02T00:00:00.000Z',
+      autoUpholdAt: '2026-10-04T00:00:00.000Z',
+    });
+  });
+
+  it('does not promise an automatic result where the SLA cannot give one', () => {
+    const notice = providerOpenedNotice(
+      dispute({ refundGuaranteed: false }),
+      'Wrong data',
+      CONTEXT,
+    );
+    expect(notice.body).toBe(
+      'The buyer says: "Wrong data". Reply by 2026-10-02 00:00 UTC, or an operator decides it ' +
+        'without your side.',
+    );
+    expect(notice.payload.autoUpholdAt).toBeNull();
   });
 });

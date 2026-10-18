@@ -300,12 +300,7 @@ export class CallDisputeService {
       'provider',
       NotificationEvent.CALL_DISPUTE_OPENED,
       entity,
-      {
-        title: 'A buyer disputed a call you served',
-        body:
-          `A buyer reported "${CALL_DISPUTE_REASON_LABEL[body.reason]}" on a call you served. ` +
-          'You may reply once before an operator decides.',
-      },
+      providerOpenedNotice(entity, CALL_DISPUTE_REASON_LABEL[body.reason], this.viewContext(null)),
     );
 
     return this.detailOf(entity);
@@ -740,7 +735,7 @@ export class CallDisputeService {
           : 'A dispute over your call was rejected',
         body: upheld
           ? 'A buyer’s dispute over a call you served was upheld; it counts against the ' +
-            `binding’s quality. ${refund}`
+            `tool’s quality. ${refund}`
           : 'A buyer’s dispute over a call you served was rejected.',
       },
     );
@@ -985,7 +980,7 @@ export class CallDisputeService {
     role: CallDisputeRole,
     event: NotificationEvent,
     dispute: DisputeEntity,
-    message: { title: string; body: string },
+    message: { title: string; body: string; payload?: Record<string, unknown> },
   ): Promise<void> {
     try {
       await this.notifications.notify({
@@ -1002,6 +997,7 @@ export class CallDisputeService {
           state: dispute.state,
           refundState: dispute.refundState,
           role,
+          ...message.payload,
         },
       });
     } catch (error) {
@@ -1010,6 +1006,36 @@ export class CallDisputeService {
       );
     }
   }
+}
+
+/**
+ * The provider's notice for a new report. The reply has a deadline, and
+ * silence has a consequence, so both are in the sentence: "You may reply once"
+ * read as optional while a silent provider loses the report.
+ */
+export function providerOpenedNotice(
+  dispute: DisputeEntity,
+  reasonLabel: string,
+  context: CallDisputeViewContext = DEFAULT_VIEW_CONTEXT,
+): { title: string; body: string; payload: Record<string, unknown> } {
+  const { replyDueAt, autoUpholdAt } = slaTimesOf(dispute, context);
+  const consequence = autoUpholdAt
+    ? `or the buyer wins: if you stay silent, it is upheld automatically at ${utcMinute(autoUpholdAt)}.`
+    : 'or an operator decides it without your side.';
+  return {
+    title: `A buyer reported a bad result on a call you served`,
+    body: `The buyer says: "${reasonLabel}". Reply by ${utcMinute(replyDueAt)}, ${consequence}`,
+    payload: {
+      reasonLabel,
+      replyDueAt: replyDueAt.toISOString(),
+      autoUpholdAt: autoUpholdAt?.toISOString() ?? null,
+    },
+  };
+}
+
+/** "2026-10-20 17:14 UTC": a time in a notice, without the ISO noise. */
+function utcMinute(at: Date): string {
+  return `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
 
 /** The disputed amount, from the snapshot taken at filing. */
