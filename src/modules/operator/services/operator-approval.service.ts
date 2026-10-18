@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
+import { MoreThan } from 'typeorm';
 
 import { OperatorApprovalEntity } from '@database/postgres/entities/operator-approval.entity';
 import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
@@ -39,6 +40,11 @@ export interface QueueRequest {
   readonly target: string;
   readonly payload: Record<string, unknown>;
   readonly requester: OperatorSession;
+  /**
+   * Return a live `PENDING` request of the same action on the same target
+   * instead of queueing a second one (a double submit). Off by default.
+   */
+  readonly reuseWaiting?: boolean;
 }
 
 export function isApprovalQueued(value: unknown): value is ApprovalQueuedDto {
@@ -116,6 +122,19 @@ export class OperatorApprovalService {
       }
     }
 
+    if (request.reuseWaiting) {
+      const waiting = await this.approvals.findOne({
+        where: {
+          action: request.action,
+          target: request.target,
+          status: 'PENDING',
+          expiresAt: MoreThan(new Date()),
+        },
+        order: { createdAt: 'ASC' },
+      });
+      if (waiting) return queuedDto(waiting);
+    }
+
     const expiresAt = new Date(Date.now() + APPROVAL_TTL_MS);
     const row = await this.approvals.save(
       this.approvals.create({
@@ -128,12 +147,7 @@ export class OperatorApprovalService {
         expiresAt,
       }),
     );
-    return Object.assign(new ApprovalQueuedDto(), {
-      approvalId: row.id,
-      status: 'PENDING' as const,
-      action: row.action,
-      expiresAt: row.expiresAt,
-    });
+    return queuedDto(row);
   }
 
   async list(query: ListOperatorApprovalsQueryDto): Promise<CursorPageDto<OperatorApprovalDto>> {
@@ -277,6 +291,15 @@ export class OperatorApprovalService {
     }
     return out;
   }
+}
+
+function queuedDto(row: OperatorApprovalEntity): ApprovalQueuedDto {
+  return Object.assign(new ApprovalQueuedDto(), {
+    approvalId: row.id,
+    status: 'PENDING' as const,
+    action: row.action,
+    expiresAt: row.expiresAt,
+  });
 }
 
 /** Newest first. */

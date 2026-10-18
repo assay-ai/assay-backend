@@ -634,6 +634,31 @@ export class SuspendProposalBodyDto {
 }
 
 /**
+ * B18 (`S-15`, `S-16`, `S-17`): the operator's reason for a manual action on a
+ * case stuck behind a requested cancel. The same fields as a suspension; what
+ * the action does is fixed by its route, and the case's state is read, never
+ * taken from the body.
+ */
+export class ManualCaseActionBodyDto {
+  @ApiProperty({ minLength: 20 })
+  @Trimmed()
+  @IsString()
+  @Length(20, 2048)
+  note: string;
+
+  @ApiProperty()
+  @ReasonCode()
+  reasonCode: string;
+
+  @ApiPropertyOptional()
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(128)
+  ticketRef?: string;
+}
+
+/**
  * `S-5`, step two: the signature of a compensation the treasury has already
  * paid.
  *
