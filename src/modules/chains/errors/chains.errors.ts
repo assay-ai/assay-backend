@@ -28,7 +28,6 @@ export enum ChainErrorCode {
   CHAIN_VAULT_CONTROL_UNVERIFIED = 'CHAIN_VAULT_CONTROL_UNVERIFIED',
   CHAIN_DEVNET_OVERRIDE_FORBIDDEN = 'CHAIN_DEVNET_OVERRIDE_FORBIDDEN',
   CHAIN_ENABLED_CHAINS_INVALID = 'CHAIN_ENABLED_CHAINS_INVALID',
-  CHAIN_ENABLED_CHAINS_LEGACY_VARIABLE_SET = 'CHAIN_ENABLED_CHAINS_LEGACY_VARIABLE_SET',
   CHAIN_PROGRAM_NOT_CONFIGURED = 'CHAIN_PROGRAM_NOT_CONFIGURED',
   CHAIN_ACCOUNT_LAYOUT_UNEXPECTED = 'CHAIN_ACCOUNT_LAYOUT_UNEXPECTED',
   CHAIN_RPC_REPLY_MALFORMED = 'CHAIN_RPC_REPLY_MALFORMED',
@@ -198,23 +197,6 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
       `${context?.variable ?? 'Enabled chains'} names an unknown network` +
       `${context?.value !== undefined ? `: "${context.value}"` : ''}` +
       `${context?.accepted ? `. Accepted: ${context.accepted}` : ''}`,
-  },
-  /**
-   * `SOLANA_ENABLED_CHAINS` is still set.
-   *
-   * A renamed variable that is silently ignored is how a deployment serves a
-   * network the operator believes is off: they edited the old name, the process
-   * read the new one, and nothing said so. Boot fails instead, naming the new
-   * variable and printing the CAIP-2 translation of what the old one held so the
-   * fix is a copy rather than a lookup.
-   */
-  enabledChainsLegacyVariableSet: {
-    code: ChainErrorCode.CHAIN_ENABLED_CHAINS_LEGACY_VARIABLE_SET,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `${context?.legacy ?? 'SOLANA_ENABLED_CHAINS'} is set and is no longer read. ` +
-      `Move it to ${context?.variable ?? 'ENABLED_CHAINS'} as CAIP-2 ids` +
-      `${context?.translation ? `, e.g. ${context.translation}` : ''}, then unset it.`,
   },
   devnetOverrideForbidden: {
     code: ChainErrorCode.CHAIN_DEVNET_OVERRIDE_FORBIDDEN,

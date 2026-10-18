@@ -31,23 +31,9 @@ past it; the measurement is recorded in `docs/chain-facts.md` in the assay-evm r
 
 ## Unset is a boot failure. There is no default
 
-The old `DEFAULT_SOLANA_ENABLED_CHAINS` ("mainnet and devnet") is gone. A default here is a default
-that silently enables a *mainnet* nobody asked for. The house rule this follows: operational dials
-fall back so a typo does not stop the process, but a value that silently changes what is live fails
-loudly at boot, where somebody is looking.
-
-## `SOLANA_ENABLED_CHAINS` present at all is also a boot failure
-
-Boot fails if the old variable is set — **even beside a valid `ENABLED_CHAINS`**, and even when it is
-set to the empty string. Blanking a value is how an operator neutralises a configuration key without
-deleting it, so it is the shape most likely to be left behind by a half-finished migration; reading
-it as "not set" would be this guard failing open on the one input it exists to catch.
-
-The error message contains the translated replacement line, ready to paste.
-
-**Consequence for a deploy:** the code change and the configuration change must land in the same window.
-A deployment still carrying `SOLANA_ENABLED_CHAINS` will refuse to start the moment the new image rolls
-out.
+A default here is a default that silently enables a *mainnet* nobody asked for. The house rule this
+follows: operational dials fall back so a typo does not stop the process, but a value that silently
+changes what is live fails loudly at boot, where somebody is looking.
 
 ## What else must cover every enabled `eip155` chain
 
