@@ -34,6 +34,20 @@
  * reconciliation fail by exactly its amount (UX review 2026-10-18, P0-3). It is
  * not the guarantee and is never presented as one.
  *
+ * `withheld` equals the summary's `notChargedTotal` for the same window, with
+ * two known residuals, neither reachable on current data:
+ *
+ * - **Hold vs price.** This side sums the hold, the summary sums
+ *   `price_amount`. A rail-A call re-priced below its quote and then not
+ *   charged differs by the remainder. True of the first two buckets before
+ *   `NOT_COLLECTED` existed.
+ * - **Absorbed and written off.** A legacy absorb that was also written off is
+ *   in no summary bucket but "not charged" (the summary derives that by
+ *   subtraction), while `NOT_CHARGED_SETTLED_SQL` excludes every write-off.
+ *
+ * A terminal call that never reserved anything is in neither: the summary
+ * leaves it out of every bucket for the reason below.
+ *
  * ## The rule that is in no document: a hold must have existed
  *
  * The definition above says *"charging the agent nothing"*, which on its face

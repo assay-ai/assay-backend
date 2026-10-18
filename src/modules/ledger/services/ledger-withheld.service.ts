@@ -154,6 +154,9 @@ export class LedgerWithheldService {
   }
 }
 
+/** Stands in for the hold id the query already required (`hold_id IS NOT NULL`). */
+const HELD = 'held';
+
 /**
  * Folds pre-aggregated `(asset, status)` rows into a `WithheldTotal`.
  *
@@ -162,9 +165,6 @@ export class LedgerWithheldService {
  * both land in `PROVIDER_OR_PLATFORM_ERROR`), so this is a many-to-one fold,
  * not a relabelling. Every row had a hold (the query requires one).
  */
-/** Stands in for the hold id the query already required (`hold_id IS NOT NULL`). */
-const HELD = 'held';
-
 function toWithheldTotal(
   asset: AssetId,
   fallbackDecimals: number,
