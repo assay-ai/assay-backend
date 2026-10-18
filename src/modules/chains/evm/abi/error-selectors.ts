@@ -3,7 +3,7 @@ import { toFunctionSelector } from 'viem';
 /**
  * Every `error X();` in assay-evm's `src/Errors.sol`, by name.
  *
- * All 91 are **zero-argument** custom errors, so a revert arrives as a bare
+ * All 95 are **zero-argument** custom errors, so a revert arrives as a bare
  * 4-byte selector with nothing else in it — the only way to say what happened
  * is this table. `check-errors.sh` in `evm/` keeps the Solidity honest;
  * `abi-selectors.spec.ts` keeps this list in step by pinning every name to the
@@ -26,7 +26,9 @@ import { toFunctionSelector } from 'viem';
  * simplify round (9f036a3) removed `ArbiterIsVerifier`,
  * `VerifierIsAdminOrArbiter`, `RedeemerIsArbiter` (now `InvalidAdmin` /
  * `InvalidArbiter`) and `VerifierDailyCapExceeded` (now
- * `SlashWindowNotDrained`: execution is all or wait).
+ * `SlashWindowNotDrained`: execution is all or wait). Redeem into hold
+ * (3d8fc8e) appended `HeldPaymentNotHeld`, `HeldNotYetCollectable`,
+ * `HeldRefundWindowClosed` and `InvalidCollectHold`.
  */
 const NAMES: readonly string[] = [
   'ZeroAmount',
@@ -122,6 +124,11 @@ const NAMES: readonly string[] = [
   'SlashWindowNotDrained',
   'ArbiterCannotUnblock',
   'InvalidArbiter',
+  // Redeem into hold (EVM only), in Errors.sol's order.
+  'HeldPaymentNotHeld',
+  'HeldNotYetCollectable',
+  'HeldRefundWindowClosed',
+  'InvalidCollectHold',
 ];
 
 /**
