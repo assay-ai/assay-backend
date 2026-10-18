@@ -188,17 +188,19 @@ export class CatalogueProviderDto {
 
   /**
    * The chains a call to this provider can settle on right now: the union of
-   * {@link CatalogueProviderToolDto.chains} over its tools. Empty when the
-   * router would take no call to it on any chain (paused at the circuit, at its
-   * ceiling, short of stake, on a slash hold) or when that could not be read.
+   * the known {@link CatalogueProviderToolDto.chains} over its tools. Empty
+   * when the router would take no call to it on any chain (paused at the
+   * circuit, at its ceiling, short of stake, on a slash hold); `null` when no
+   * tool's chains could be read — unknown, never "takes no call".
    */
   @ApiProperty({
     type: [String],
+    nullable: true,
     description:
       'CAIP-2 chains a call to this provider can settle on now, by the router’s own gates. ' +
-      'Empty when it takes no call on any chain right now.',
+      'Empty when it takes no call on any chain right now; null when that could not be read.',
   })
-  chains: string[];
+  chains: string[] | null;
 
   /**
    * Whether this provider takes a call from the **caller's** agents now: one of
@@ -211,7 +213,7 @@ export class CatalogueProviderDto {
     nullable: true,
     description:
       'Per caller: a call from one of your agents can settle with this provider now (on your ' +
-      'agents’ chains). null when unknown.',
+      'agents’ chains, less a chain with a standing withdrawal). null when unknown.',
   })
   servesYou: boolean | null;
 }
