@@ -1138,7 +1138,10 @@ export class SlashExecutionService {
         // theirs. See `reservationReleasedBy`.
         const heldUntil = this.reservationHeldUntil(proposal, chain.status);
         const toolName = await this.toolNameOf(proposal);
-        const penalty = formatDollars({ amount: proposal.penaltyAmount, decimals: proposal.decimals });
+        const penalty = formatDollars({
+          amount: proposal.penaltyAmount,
+          decimals: proposal.decimals,
+        });
 
         await this.notifications.notify({
           organizationId: proposal.organizationId,

@@ -302,7 +302,11 @@ function build(
     stakeIntents as never,
     null,
     (options.toolName
-      ? { findOneBy: jest.fn().mockResolvedValue({ toolId: '06399979-f8b8-4c9e-a9b1-bd2a5924d442' }) }
+      ? {
+          findOneBy: jest
+            .fn()
+            .mockResolvedValue({ toolId: '06399979-f8b8-4c9e-a9b1-bd2a5924d442' }),
+        }
       : null) as never,
     (options.toolName
       ? { findByIds: jest.fn().mockResolvedValue([{ name: options.toolName }]) }
