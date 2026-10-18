@@ -20,6 +20,7 @@ import { HealthcheckController } from '@shared/controllers/healthcheck.controlle
 import { NetworkModule } from '@shared/network/network.module';
 
 import { McpHttpModule } from '@modules/mcp/mcp-http.module';
+import { OAuthMcpModule } from '@modules/oauth/oauth-mcp.module';
 import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 
 /**
@@ -68,6 +69,9 @@ import { ToolEgressModule } from '@modules/tool/tool-egress.module';
     // credential vault. The scheduler does not import this, so it needs neither
     // `PROVIDER_REQUEST_SIGNING_KEYS` nor `CREDENTIAL_VAULT_KEKS`.
     ToolEgressModule,
+    // Before `McpHttpModule`: the OAuth and well-known routes must be matched
+    // before the MCP catch-all (R-OA-29), the same way as `/health`.
+    OAuthMcpModule,
     McpHttpModule,
   ],
   controllers: [HealthcheckController],

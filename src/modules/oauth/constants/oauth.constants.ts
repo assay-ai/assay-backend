@@ -34,6 +34,3 @@ export const OAUTH_CIMD_FAILURE_CACHE_SECONDS = 60;
 export const OAUTH_MAX_LIVE_GRANTS_PER_AGENT = 50;
 /** The consent page warns from this many live grants on (R-OA-31). */
 export const OAUTH_LIVE_GRANTS_WARN_AT = 45;
-
-/** The built-in `assay-mcp` client's path under `{MCP}` (§6.3.6 item 3). */
-export const OAUTH_BUILTIN_CLIENT_PATH = '/oauth/clients/assay-mcp';

@@ -2,12 +2,8 @@ import { OAuthClientKind } from '@database/postgres/entities/oauth-client.entity
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { OAuthConfig } from '@modules/oauth/config/oauth.config';
 import { CimdFetcher } from '@modules/oauth/services/cimd.fetcher';
-import {
-  BUILTIN_CLIENT_DOCUMENT_NAME,
-  OAuthClientRegistry,
-  ResolvedClient,
-  builtinClientDocument,
-} from '@modules/oauth/services/oauth-client.registry';
+import { BUILTIN_CLIENT_NAME, builtinClientDocument } from '@modules/oauth/domain/builtin-client';
+import { OAuthClientRegistry, ResolvedClient } from '@modules/oauth/services/oauth-client.registry';
 import { EgressHttpClient } from '@shared/network/egress';
 
 import { FakeEgressHttpClient } from '../auth/helpers/fake-egress';
@@ -120,7 +116,7 @@ describe('OAuthClientRegistry (§6.3.6)', () => {
     it('serves the §6.3.6 document for the built-in client', () => {
       expect(builtinClientDocument(MCP)).toEqual({
         client_id: BUILTIN,
-        client_name: BUILTIN_CLIENT_DOCUMENT_NAME,
+        client_name: BUILTIN_CLIENT_NAME,
         redirect_uris: ['http://127.0.0.1/callback'],
         token_endpoint_auth_method: 'none',
         grant_types: ['authorization_code', 'refresh_token'],

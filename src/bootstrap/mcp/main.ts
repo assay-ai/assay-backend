@@ -10,6 +10,7 @@ import { assertTrustProxyHopsConfigured } from '@config/app.config';
 import { loadMcpDiscoveryConfig } from '@modules/mcp/config/mcp-discovery.config';
 
 import { AppMcpModule } from './app.module';
+import { mcpCorsOptions } from './mcp-cors';
 
 /**
  * The MCP server process — the interface agents actually reach the
@@ -51,26 +52,13 @@ async function bootstrapMcp() {
   assertTrustProxyHopsConfigured();
   app.set('trust proxy', configService.get<number>('app.api.trustProxyHops') ?? 0);
 
-  // An MCP client may be a browser-hosted agent. `Authorization` has to be
-  // allowed explicitly — it is not a CORS-safelisted request header — and
-  // `mcp-session-id` / `mcp-protocol-version` are the Streamable HTTP headers a
-  // client must be able to send and read back, and `mcp-method` / `mcp-name`
-  // the ones protocol 2026-07-28 adds to every request. Any origin, but without
-  // credentials: the bearer token is a header, not a cookie, so nothing is
-  // lost, and `*` with credentials is the pairing R17-R-02 removed.
+  // An MCP client may be a browser-hosted agent, and an OAuth client may run
+  // in a browser too. CORS is per route family (`mcp-cors.ts`, spec §6.3):
+  // the catch-all allows the MCP headers and exposes the 401 challenge;
+  // discovery, token and revocation get a narrow public policy; register and
+  // authorize get none. Never with credentials.
   applyHttpSecurity(app);
-  app.enableCors({
-    origin: '*',
-    allowedHeaders: [
-      'content-type',
-      'authorization',
-      'mcp-session-id',
-      'mcp-protocol-version',
-      'mcp-method',
-      'mcp-name',
-    ],
-    exposedHeaders: ['mcp-session-id', 'mcp-protocol-version'],
-  });
+  app.enableCors(mcpCorsOptions);
 
   app.useGlobalFilters(new AllExceptionsFilter());
 

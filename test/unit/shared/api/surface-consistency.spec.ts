@@ -130,6 +130,13 @@ const PUBLIC_SURFACE = new Map<string, number>([
   // It is also the only public route that SPENDS MONEY, which a per-IP window
   // and the demo agent's spend policy pay for.
   ['modules/mcp/controllers/public-demo.controller.ts', 3],
+  // OAuth discovery on the MCP host (spec §6.3.1, §6.3.2, §6.3.6): the two
+  // protected resource metadata forms, the authorization server metadata, the
+  // `openid-configuration` 404 and the built-in client document. Every payload
+  // is built from the public origins and constants; no tenant, no row, no
+  // secret. An OAuth client reads them before it has any token, so a guard
+  // would make sign-in impossible.
+  ['modules/oauth/controllers/oauth-metadata.controller.ts', 5],
   // `GET /chains`. Against the three bars above:
   //
   // 1. The payload is four static strings and a number per chain, computed from

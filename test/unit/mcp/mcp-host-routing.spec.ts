@@ -4,7 +4,10 @@ import request from 'supertest';
 
 import { Server } from '@modelcontextprotocol/server';
 
+import { AppMcpModule } from '@bootstrap/mcp/app.module';
 import { McpController } from '@modules/mcp/controllers/mcp.controller';
+import { McpHttpModule } from '@modules/mcp/mcp-http.module';
+import { OAuthMcpModule } from '@modules/oauth/oauth-mcp.module';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpScope } from '@modules/mcp/ports/mcp-scope';
 import { MCP_SESSION_SOURCE, McpSession } from '@modules/mcp/ports/mcp-session.port';
@@ -73,7 +76,11 @@ describe('the MCP host — routing', () => {
     })
     class HostModule {}
 
-    const moduleRef = await Test.createTestingModule({ imports: [HostModule] }).compile();
+    // The same order as `AppMcpModule`: OAuth and well-known routes first.
+    const moduleRef = await Test.createTestingModule({ imports: [OAuthMcpModule, HostModule] })
+      .overrideProvider(MCP_HOST_CONFIG)
+      .useValue({ mcpPublicUrl: HOST, webAppUrl: WEB })
+      .compile();
     app = moduleRef.createNestApplication();
     app.useGlobalFilters(new AllExceptionsFilter());
     await app.init();
@@ -123,6 +130,85 @@ describe('the MCP host — routing', () => {
     const response = await request(app.getHttpServer()).get('/health');
     expect(response.status).toBe(200);
     expect(response.body).toMatchObject({ success: true });
+  });
+
+  describe('OAuth and well-known routes come before the catch-all (R-OA-29)', () => {
+    it('AppMcpModule imports OAuthMcpModule before McpHttpModule', () => {
+      const imports: unknown[] = Reflect.getMetadata('imports', AppMcpModule);
+      const oauth = imports.indexOf(OAuthMcpModule);
+      expect(oauth).toBeGreaterThanOrEqual(0);
+      expect(oauth).toBeLessThan(imports.indexOf(McpHttpModule));
+    });
+
+    it('/.well-known/oauth-protected-resource/c/weather reaches the metadata controller, not the catch-all', async () => {
+      const response = await request(app.getHttpServer())
+        .get('/.well-known/oauth-protected-resource/c/weather')
+        // Even a browser's Accept: the catch-all would redirect it.
+        .set('Accept', 'text/html,application/xhtml+xml');
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({
+        resource: `${HOST}/c/weather`,
+        authorization_servers: [HOST],
+      });
+      expect(resolve).not.toHaveBeenCalled();
+      expect(created).toHaveLength(0);
+    });
+
+    /**
+     * The RFC 9728 §3.3 invariant end to end (builder review IM-1): follow the
+     * 401's `resource_metadata`, and the PRM it names has `resource` equal to
+     * the URL the client asked for (without its query) — byte for byte, so a
+     * strict client accepts it, mixed case included.
+     */
+    it.each([
+      ['/c/weather', `${HOST}/c/weather`],
+      ['/C/Weather', `${HOST}/C/Weather`],
+      ['/%40acme/kit', `${HOST}/%40acme/kit`],
+      ['/c/weather/', `${HOST}/c/weather/`],
+      ['/my/Research?free=1', `${HOST}/my/Research`],
+      ['/?free=1', HOST],
+      ['/', HOST],
+    ])('following the 401 challenge for %s leads to resource = %s', async (path, want) => {
+      const challenged = await request(app.getHttpServer()).post(path).send({});
+      expect(challenged.status).toBe(401);
+      const header = challenged.headers['www-authenticate'];
+      const metadataUrl = /resource_metadata="([^"]+)"/.exec(header)?.[1];
+      expect(metadataUrl).toBeDefined();
+      expect(metadataUrl?.startsWith(`${HOST}/.well-known/oauth-protected-resource`)).toBe(true);
+
+      const metadata = await request(app.getHttpServer()).get(
+        (metadataUrl as string).slice(HOST.length),
+      );
+      expect(metadata.status).toBe(200);
+      expect(metadata.body.resource).toBe(want);
+    });
+
+    it('/.well-known/oauth-authorization-server reaches the metadata controller', async () => {
+      const response = await request(app.getHttpServer()).get(
+        '/.well-known/oauth-authorization-server',
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.issuer).toBe(HOST);
+    });
+
+    it('/oauth/token is not an MCP URL', async () => {
+      // No token route is mounted here (Task 1.11), so this is the catch-all:
+      // a 404 before any token is read, never a 401 challenge.
+      const response = await request(app.getHttpServer())
+        .post('/oauth/token')
+        .type('form')
+        .send({ grant_type: 'authorization_code' });
+      expect(response.status).toBe(404);
+      expect(response.body).toMatchObject({ error: { code: 'MCP_URL_NOT_FOUND' } });
+      expect(response.headers['www-authenticate']).toBeUndefined();
+      expect(resolve).not.toHaveBeenCalled();
+    });
+
+    it('/health still answers', async () => {
+      const response = await request(app.getHttpServer()).get('/health');
+      expect(response.status).toBe(200);
+      expect(response.body).toMatchObject({ success: true });
+    });
   });
 
   it('redirects a browser to the web page, before authentication', async () => {
