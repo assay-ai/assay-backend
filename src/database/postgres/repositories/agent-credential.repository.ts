@@ -116,6 +116,24 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
   }
 
   /**
+   * {@link countLiveOAuthForAgent} for every agent of an organization at once,
+   * as the consent page lists them: agent id → live OAuth grants. An agent
+   * with none is absent.
+   */
+  async countLiveOAuthByAgent(organizationId: string): Promise<Map<string, number>> {
+    const rows = await this.createQueryBuilder('credential')
+      .select('credential.agent_id', 'agentId')
+      .addSelect('count(*)::int', 'live')
+      .where('credential.organization_id = :organizationId', { organizationId })
+      .andWhere('credential.issued_via = :oauth', { oauth: CredentialIssuedVia.OAUTH })
+      .andWhere('credential.revoked_at IS NULL')
+      .andWhere('(credential.expires_at IS NULL OR credential.expires_at > now())')
+      .groupBy('credential.agent_id')
+      .getRawMany<{ agentId: string; live: number }>();
+    return new Map(rows.map((row) => [row.agentId, Number(row.live)]));
+  }
+
+  /**
    * The largest number of live OAuth grants any one agent holds, for the
    * `assay_oauth_live_grants_per_agent` gauge (spec §6.7). Live means the same
    * as in {@link countLiveOAuthForAgent}: not revoked, not expired, not

@@ -1,10 +1,11 @@
-import { Inject, Injectable, Logger, OnModuleInit } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 
 import {
   OAuthClientEntity,
   OAuthClientKind,
 } from '@database/postgres/entities/oauth-client.entity';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
+import { APP_ROLE, AppRole, resolveAppRole } from '@shared/app-role/app-role';
 
 import { OAUTH_CONFIG, OAuthConfig } from '../config/oauth.config';
 import { builtinClientDocument } from '../domain/builtin-client';
@@ -71,6 +72,7 @@ export class OAuthClientRegistry implements OnModuleInit {
     private readonly clients: OAuthClientRepository,
     private readonly cimd: CimdFetcher,
     @Inject(OAUTH_CONFIG) private readonly config: OAuthConfig,
+    @Optional() @Inject(APP_ROLE) private readonly role?: AppRole,
   ) {}
 
   async onModuleInit(): Promise<void> {
@@ -91,6 +93,9 @@ export class OAuthClientRegistry implements OnModuleInit {
       );
     }
     this.builtin = this.toResolved(row);
+    // Only the MCP app resolves client ids (`/oauth/authorize`), so only it
+    // fetches. The API app reads stored rows and makes no outbound call.
+    if (resolveAppRole(this.role) !== 'mcp') return;
     // Not awaited: a slow or failing vendor host must not hold up the boot.
     void this.prewarm();
   }
@@ -141,6 +146,15 @@ export class OAuthClientRegistry implements OnModuleInit {
       default:
         return { error: 'client_unknown' };
     }
+  }
+
+  /**
+   * The client a pending request or a grant names by its row id
+   * (`oauth_clients.id`), as stored: no fetch. `null` if the row is gone.
+   */
+  async findById(id: string): Promise<ResolvedClient | null> {
+    const row = await this.clients.findOne({ where: { id } });
+    return row ? this.toResolved(row) : null;
   }
 
   /** Whether grants of `clientId` may bind a payment key and use the API host (§6.3.13). */

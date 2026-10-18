@@ -1,4 +1,5 @@
 import { SessionSourceMode } from '@modules/auth/domain/session-source-mode';
+import { AppRole } from '@shared/app-role/app-role';
 import { isLocalDeployment } from '@modules/mcp/config/mcp-discovery.config';
 import { loadMcpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { takeOnceFromEnv } from '@modules/verification/signing/backends/env-key-source';
@@ -40,8 +41,11 @@ export interface OAuthConfig {
   readonly paymentClients: readonly string[];
   /** e2e only: accept `http://localhost` CIMD client ids. Never in production. */
   readonly allowHttpCimdLoopback: boolean;
-  /** Key for the pending-request browser cookie, at least 32 bytes. */
-  readonly requestCookieSecret: Buffer;
+  /**
+   * Key for the pending-request browser cookie, at least 32 bytes. `null` on
+   * the API app, which never uses it; whatever uses it must refuse a `null`.
+   */
+  readonly requestCookieSecret: Buffer | null;
   /** DCR registrations per UTC day, all clients together (§6.3.8). */
   readonly dcrGlobalPerDay: number;
   /** DCR registration attempts per hour from one IPv6 /48 (§6.3.8). */
@@ -87,23 +91,21 @@ const REVERSE_DOMAIN_SCHEME = /^[a-z][a-z0-9+-]*(?:\.[a-z0-9+-]+)+:$/;
 /** Vendor schemes without a dot, admitted by name (the §6.3.9 Cursor default). */
 const NAMED_PRIVATE_SCHEMES: ReadonlySet<string> = new Set(['cursor:', 'vscode:']);
 
-export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConfig {
+/**
+ * `role` is the container's `APP_ROLE`. Only the MCP app serves
+ * `/oauth/authorize` and `continue`, the two places that use the request
+ * cookie, so only it reads and requires `OAUTH_REQUEST_COOKIE_SECRET`. The
+ * API app (the consent API) never reads it, so it boots without it and holds
+ * no copy; there `requestCookieSecret` is `null`. Under `SERVICE_TYPE=all` the
+ * MCP container still takes it out of the shared environment.
+ */
+export function loadOAuthConfig(
+  env: NodeJS.ProcessEnv = process.env,
+  role: AppRole = 'mcp',
+): OAuthConfig {
+  const servesAuthorize = role === 'mcp';
   // First, so the secret leaves the environment even when a check below throws.
-  const [requestCookieSecret] = takeOnceFromEnv(env, OAUTH_REQUEST_COOKIE_SECRET_ENV, (raw) => {
-    const value = raw.trim();
-    if (!SECRET_SHAPE.test(value)) {
-      throw new Error(
-        `${OAUTH_REQUEST_COOKIE_SECRET_ENV} must be at least 32 random bytes, hex-encoded`,
-      );
-    }
-    const secret = Buffer.from(value, 'hex');
-    if (new Set(secret).size < MIN_DISTINCT_SECRET_BYTES) {
-      throw new Error(
-        `${OAUTH_REQUEST_COOKIE_SECRET_ENV} is not random; generate one with openssl rand -hex 32`,
-      );
-    }
-    return [secret];
-  });
+  const [requestCookieSecret] = servesAuthorize ? readRequestCookieSecret(env) : [];
 
   if (env.AUTH_SESSION_SOURCE !== SessionSourceMode.BOTH) {
     throw new Error(
@@ -119,7 +121,7 @@ export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConf
     requireHttps('WEB_APP_URL', host.webAppUrl);
   }
 
-  if (!requestCookieSecret) {
+  if (servesAuthorize && !requestCookieSecret) {
     throw new Error(`${OAUTH_REQUEST_COOKIE_SECRET_ENV} is required where the OAuth routes run`);
   }
 
@@ -159,7 +161,7 @@ export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConf
     redirectAllowlist,
     paymentClients,
     allowHttpCimdLoopback,
-    requestCookieSecret,
+    requestCookieSecret: requestCookieSecret ?? null,
     dcrGlobalPerDay: parsePositiveInt(
       OAUTH_DCR_GLOBAL_PER_DAY_ENV,
       env[OAUTH_DCR_GLOBAL_PER_DAY_ENV],
@@ -170,6 +172,24 @@ export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConf
       env[OAUTH_DCR_PER_48_PER_HOUR_ENV],
       DEFAULT_OAUTH_DCR_PER_48_PER_HOUR,
     ),
+  });
+}
+
+function readRequestCookieSecret(env: NodeJS.ProcessEnv): readonly Buffer[] {
+  return takeOnceFromEnv(env, OAUTH_REQUEST_COOKIE_SECRET_ENV, (raw) => {
+    const value = raw.trim();
+    if (!SECRET_SHAPE.test(value)) {
+      throw new Error(
+        `${OAUTH_REQUEST_COOKIE_SECRET_ENV} must be at least 32 random bytes, hex-encoded`,
+      );
+    }
+    const secret = Buffer.from(value, 'hex');
+    if (new Set(secret).size < MIN_DISTINCT_SECRET_BYTES) {
+      throw new Error(
+        `${OAUTH_REQUEST_COOKIE_SECRET_ENV} is not random; generate one with openssl rand -hex 32`,
+      );
+    }
+    return [secret];
   });
 }
 
