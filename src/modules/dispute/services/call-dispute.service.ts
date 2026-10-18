@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, In, QueryRunner, SelectQueryBuilder } from 'typeorm';
 
@@ -164,7 +164,8 @@ export class CallDisputeService {
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
     @Inject(CALL_DISPUTE_CONFIG) private readonly config: CallDisputeConfig,
     // Whether the escrow hold is live on the call's chain (review P2-1).
-    @Optional() @Inject(HELD_PAYMENTS) private readonly held: HeldPaymentsPort | null = null,
+    // Required: an absent port would quietly file every rail-B report unheld.
+    @Inject(HELD_PAYMENTS) private readonly held: HeldPaymentsPort,
   ) {}
 
   // ── Buyer ───────────────────────────────────────────────────────────────
@@ -261,7 +262,7 @@ export class CallDisputeService {
         // escrow hold live on the call's chain; rail A's hold is the ledger's.
         const holdIsLive =
           intent.rail !== 'RAIL_B_VOUCHER' ||
-          ((await this.held?.holdLive(intent.assetId as AssetId)) ?? false);
+          (await this.held.holdLive(intent.assetId as AssetId));
         entity.refundGuaranteed =
           holdIsLive &&
           (await this.paymentIntents.holdForDispute(

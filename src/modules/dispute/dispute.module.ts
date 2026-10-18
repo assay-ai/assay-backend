@@ -1,5 +1,6 @@
 import { Module } from '@nestjs/common';
 
+import { ChainsModule } from '@modules/chains/chains.module';
 import { NotificationModule } from '@modules/notification/notification.module';
 import { PaymentModule } from '@modules/payment/payment.module';
 import { VerificationModule } from '@modules/verification/verification.module';
@@ -24,10 +25,12 @@ import { DisputeService } from './services/dispute.service';
  * (`PaymentIntentService.voidDebt`, the refund of an uncollected call),
  * `VerificationModule` (the evidence pack it snapshots), `NotificationModule`
  * and `AuditLogModule`. The operator console decides through it
- * (`OperatorCallDisputeService`).
+ * (`OperatorCallDisputeService`). It imports `ChainsModule` for
+ * `HELD_PAYMENTS`: `PaymentModule` imports it without re-exporting the token,
+ * and without the hold a rail-B report is never held or guaranteed.
  */
 @Module({
-  imports: [PaymentModule, VerificationModule, NotificationModule, AuditLogModule],
+  imports: [ChainsModule, PaymentModule, VerificationModule, NotificationModule, AuditLogModule],
   providers: [
     DisputeService,
     CallDisputeService,
