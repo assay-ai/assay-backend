@@ -1,6 +1,5 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { getAddress } from 'viem';
 import { Brackets, DataSource } from 'typeorm';
 
 import {
@@ -112,17 +111,13 @@ export class EscrowWithdrawalEventRepository extends AbstractRepository<EscrowWi
   /**
    * The organization and asset of the buyer escrow at `chainId:address`, or
    * `null` when no buyer of this platform has one there. An exact match on
-   * `uq_buyer_escrows_account`, in the checksummed form account ids are
-   * written in and the lower-case one.
+   * `uq_buyer_escrows_account`, for each spelling of the account id the
+   * caller passes (the checksummed form ids are written in, and lower case).
    */
   async escrowOwner(
-    chainId: string,
-    buyerAddress: string,
+    accountForms: readonly [string, string],
   ): Promise<{ organizationId: string; accountId: string; assetId: string } | null> {
-    const forms = [
-      `${chainId}:${getAddress(buyerAddress)}`,
-      `${chainId}:${buyerAddress.toLowerCase()}`,
-    ];
+    const forms = [...accountForms];
     const rows: { organization_id: string; account_id: string; asset_id: string }[] =
       await this.manager.query(
         `SELECT "organization_id", "account_id", "asset_id" FROM "buyer_escrows"

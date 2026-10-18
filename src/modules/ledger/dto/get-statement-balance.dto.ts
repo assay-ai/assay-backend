@@ -33,7 +33,9 @@ export class GetStatementBalanceQueryDto {
   @IsISO8601()
   from: string;
 
-  @ApiProperty({ description: 'ISO-8601, exclusive (the next month start); after from, at most 366 days later' })
+  @ApiProperty({
+    description: 'ISO-8601, exclusive (the next month start); after from, at most 366 days later',
+  })
   @IsISO8601()
   @Validate(StatementPeriodConstraint)
   to: string;

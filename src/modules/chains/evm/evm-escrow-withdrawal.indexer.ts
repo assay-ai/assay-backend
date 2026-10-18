@@ -1,5 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
+import { getAddress } from 'viem';
 
 import { EscrowWithdrawalEventKind } from '@database/postgres/entities/escrow-withdrawal-event.entity';
 import {
@@ -296,7 +297,11 @@ export class EvmEscrowWithdrawalIndexer {
     if (!this.audit) return;
     for (const row of inserted) {
       if (row.kind !== EscrowWithdrawalEventKind.WITHDRAWN) continue;
-      const owner = await this.events.escrowOwner(chainId, row.buyerAddress).catch((error) => {
+      const forms: [string, string] = [
+        `${chainId}:${getAddress(row.buyerAddress)}`,
+        `${chainId}:${row.buyerAddress.toLowerCase()}`,
+      ];
+      const owner = await this.events.escrowOwner(forms).catch((error) => {
         this.logger.error(
           `claim ${row.transactionHash}: its owner could not be read: ${describe(error)}`,
         );
