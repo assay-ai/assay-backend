@@ -1566,11 +1566,17 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
   /**
    * Held payments the collection job may collect now (G3.B1): past
-   * `collectable_at`, not held by an open or upheld dispute, hold still open —
-   * in seq order per payer. Deliberately cross-organization: a platform job.
+   * `collectable_at`, not held by an open or upheld dispute, hold still open,
+   * not backing off after a failure, no blocked party (review P1-3 — the
+   * contract refuses them, and they would block the pass every minute) — in
+   * seq order per payer. Deliberately cross-organization: a platform job.
    */
-  async findCollectable(rail: string, limit: number): Promise<PaymentIntentEntity[]> {
-    return this.createQueryBuilder('intent')
+  async findCollectable(
+    rail: string,
+    limit: number,
+    exclude: RedemptionExclusions = NO_REDEMPTION_EXCLUSIONS,
+  ): Promise<PaymentIntentEntity[]> {
+    const query = this.createQueryBuilder('intent')
       .where('intent.organizationId IS NOT NULL')
       .andWhere('intent.rail = :rail', { rail })
       .andWhere(`intent.heldStatus = 'HELD'`)
@@ -1578,6 +1584,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere(`(intent.disputeOutcome IS NULL OR intent.disputeOutcome = 'REJECTED')`)
       .andWhere('intent.holdId IS NOT NULL')
       .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())');
+    if (hasExclusions(exclude)) {
+      query.andWhere(`NOT (${blockedCollectSql('intent')})`, blockedPartyParams(exclude));
+    }
+    return query
       .orderBy('intent.agentAccount', 'ASC')
       .addOrderBy('intent.voucherSeq', 'ASC', 'NULLS LAST')
       .addOrderBy('intent.collectableAt', 'ASC')
@@ -1586,9 +1597,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * Held payments a guaranteed dispute still holds past the chain's timeout
-   * (`collectable_at + timeoutSeconds`), when anyone may collect them for the
-   * provider and a refund is no longer possible. Cross-organization: a job.
+   * Held payments past the chain's timeout (`collectable_at + timeoutSeconds`),
+   * when anyone may collect them for the provider and `refundHeld` is closed.
+   * Cross-organization: a job.
    */
   async findHeldPastTimeout(timeoutSeconds: number, limit: number): Promise<PaymentIntentEntity[]> {
     return this.createQueryBuilder('intent')
@@ -1598,9 +1609,44 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         timeout: timeoutSeconds,
       })
       .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())')
       .orderBy('intent.collectableAt', 'ASC')
       .limit(limit)
       .getMany();
+  }
+
+  /**
+   * Upheld disputes' held payments still to refund (review P1-2): retried by
+   * the scheduler, which holds the redeemer key. Cross-organization: a job.
+   */
+  async findRefundable(rail: string, limit: number): Promise<PaymentIntentEntity[]> {
+    return this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere(`intent.disputeOutcome = 'UPHELD'`)
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())')
+      .orderBy('intent.collectableAt', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * A collect or refund of this held payment failed: back off — 1, 2, 4 …
+   * minutes, at most an hour — so a stuck row neither blocks the pass nor
+   * burns gas every minute (review P1-3).
+   */
+  async recordHeldFailure(organizationId: string, id: string, error: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents"
+          SET "held_attempts" = "held_attempts" + 1,
+              "held_retry_at" = now() + LEAST(interval '60 minutes',
+                                              interval '1 minute' * power(2, LEAST("held_attempts", 6))),
+              "held_last_error" = $3
+        WHERE "organization_id" = $1 AND "id" = $2`,
+      [organizationId, id, error.slice(0, 500)],
+    );
   }
 
   /**
@@ -2788,6 +2834,23 @@ function blockedPartySql(alias: string): string {
       `${key(column)} = ANY(:blockedWalletKeys)`,
       `lower(${alias}.${column}) = ANY(:blockedChainAccounts)`,
     ]),
+  ].join(' OR ');
+}
+
+/**
+ * {@link blockedPartySql} for a COLLECT: the contract's `assertActive(payer,
+ * provider)` refuses the provider side too, so the provider's organization and
+ * payout account count as well.
+ */
+function blockedCollectSql(alias: string): string {
+  const key = (column: string) =>
+    `(split_part(${alias}.${column}, ':', 1) || ':' || CASE WHEN split_part(${alias}.${column}, ':', 1) = 'eip155' ` +
+    `THEN lower(split_part(${alias}.${column}, ':', 3)) ELSE split_part(${alias}.${column}, ':', 3) END)`;
+  return [
+    blockedPartySql(alias),
+    `${alias}.provider_id::text = ANY(:blockedOrgs)`,
+    `${key('provider_account')} = ANY(:blockedWalletKeys)`,
+    `lower(${alias}.provider_account) = ANY(:blockedChainAccounts)`,
   ].join(' OR ');
 }
 

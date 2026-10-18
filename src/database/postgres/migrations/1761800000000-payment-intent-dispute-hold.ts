@@ -11,6 +11,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * - `collectable_at`: from the record (`PaymentHeld.collectableAt`); rail A:
  *   settlement + `CALL_DISPUTE_HOLD_WINDOW_MINUTES`.
  * - `held_tx_ref`: the collect or refund transaction.
+ * - `held_attempts`, `held_retry_at`, `held_last_error`: a collect or refund
+ *   that failed backs off rather than retrying every minute.
  * - `dispute_outcome`: `OPEN` while a guaranteed dispute keeps the hold from
  *   being collected, then `UPHELD` | `REJECTED`. The quality stats count an
  *   upheld call as a failed one.
@@ -25,6 +27,9 @@ export class PaymentIntentDisputeHold1761800000000 implements MigrationInterface
         ADD COLUMN "held_at" timestamptz NULL,
         ADD COLUMN "collectable_at" timestamptz NULL,
         ADD COLUMN "held_tx_ref" text NULL,
+        ADD COLUMN "held_attempts" integer NOT NULL DEFAULT 0,
+        ADD COLUMN "held_retry_at" timestamptz NULL,
+        ADD COLUMN "held_last_error" text NULL,
         ADD COLUMN "dispute_outcome" character varying(16) NULL,
         ADD CONSTRAINT "chk_payment_intents_held_status" CHECK (
           "held_status" IS NULL OR "held_status" IN ('HELD', 'COLLECTED', 'REFUNDED')
@@ -51,6 +56,9 @@ export class PaymentIntentDisputeHold1761800000000 implements MigrationInterface
         DROP CONSTRAINT "chk_payment_intents_held_is_whole",
         DROP CONSTRAINT "chk_payment_intents_held_status",
         DROP COLUMN "dispute_outcome",
+        DROP COLUMN "held_last_error",
+        DROP COLUMN "held_retry_at",
+        DROP COLUMN "held_attempts",
         DROP COLUMN "held_tx_ref",
         DROP COLUMN "collectable_at",
         DROP COLUMN "held_at",

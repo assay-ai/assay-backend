@@ -1,16 +1,19 @@
 import { Injectable, Logger } from '@nestjs/common';
-import { Cron, CronExpression } from '@nestjs/schedule';
+import { Cron } from '@nestjs/schedule';
 
 import { HeldCollectionService } from '../services/held-collection.service';
 
-/** Every minute: collect held payments past their dispute window (G3.B1). */
+/**
+ * Every minute, at second 30 — the redemption job runs at second 0 on the same
+ * redeemer key — collect held payments past their dispute window (G3.B1).
+ */
 @Injectable()
 export class HeldCollectionJob {
   private readonly logger = new Logger(HeldCollectionJob.name);
 
   constructor(private readonly collection: HeldCollectionService) {}
 
-  @Cron(CronExpression.EVERY_MINUTE, { waitForCompletion: true })
+  @Cron('30 * * * * *', { waitForCompletion: true })
   async handleHeldCollection(): Promise<void> {
     try {
       await this.collection.run();
