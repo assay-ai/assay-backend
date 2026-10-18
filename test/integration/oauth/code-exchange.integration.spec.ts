@@ -405,13 +405,14 @@ describe('OAuth code exchange — real migrations', () => {
       const [a, b] = await Promise.all([first, replay]);
 
       expect(b).toEqual(expect.objectContaining({ error: 'invalid_grant' }));
-      if (!isOAuthError(a)) {
-        const [token] = (await dataSource.query(
-          `SELECT "revoked_at" FROM "oauth_access_tokens" WHERE "token_hash" = $1`,
-          [codeHashOf(a.access_token)],
-        )) as { revoked_at: Date | null }[];
-        expect(token.revoked_at).not.toBeNull();
-      }
+      // A held the code row when B arrived, so A's grant was created and then
+      // revoked by B: A gets a pair whose tokens are already dead.
+      const pair = expectPair(a);
+      const [token] = (await dataSource.query(
+        `SELECT "revoked_at" FROM "oauth_access_tokens" WHERE "token_hash" = $1`,
+        [codeHashOf(pair.access_token)],
+      )) as { revoked_at: Date | null }[];
+      expect(token.revoked_at).not.toBeNull();
       expect(await liveCredentials(minted.agentId)).toBe(0);
       const reused = (await auditActions('oauth.code_reused')).filter(
         (entry) =>
