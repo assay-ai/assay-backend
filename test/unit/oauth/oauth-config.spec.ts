@@ -336,6 +336,25 @@ describe('loadOAuthConfig', () => {
       expect(() => loadOAuthConfig(bad)).toThrow(/is required/);
     });
 
+    it('is not read or required on the API app (APP_ROLE=api)', () => {
+      const withoutSecret = env({ [OAUTH_REQUEST_COOKIE_SECRET_ENV]: undefined });
+      expect(loadOAuthConfig(withoutSecret, 'api').requestCookieSecret).toBeNull();
+
+      // Set or not, the API app leaves it for the MCP container (SERVICE_TYPE=all) and keeps no copy.
+      const withSecret = env();
+      const config = loadOAuthConfig(withSecret, 'api');
+      expect(config.requestCookieSecret).toBeNull();
+      expect(withSecret[OAUTH_REQUEST_COOKIE_SECRET_ENV]).toBe(SECRET);
+      expect(loadOAuthConfig(withSecret, 'mcp').requestCookieSecret?.toString('hex')).toBe(SECRET);
+      expect(withSecret[OAUTH_REQUEST_COOKIE_SECRET_ENV]).toBeUndefined();
+    });
+
+    it('is required on the MCP app (APP_ROLE=mcp)', () => {
+      expect(() =>
+        loadOAuthConfig(env({ [OAUTH_REQUEST_COOKIE_SECRET_ENV]: undefined }), 'mcp'),
+      ).toThrow(/is required/);
+    });
+
     it('is read once per process, so a second loader (SERVICE_TYPE=all) gets the same key', () => {
       const first = loadOAuthConfig(env());
       const second = loadOAuthConfig(env({ [OAUTH_REQUEST_COOKIE_SECRET_ENV]: undefined }));
