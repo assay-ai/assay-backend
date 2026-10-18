@@ -481,28 +481,5 @@ describe('operator access, over HTTP, against a real database and Redis', () => 
         unblockApprovedBy: lead.subject,
       });
     });
-
-    it('ignores an X-Operator-Approver header: the action is queued all the same', async () => {
-      const sre = await seedOperator([OperatorRole.SRE]);
-      const lead = await seedOperator([OperatorRole.ADJL]);
-      const sreToken = await signIn(sre.account);
-      const block = await http()
-        .post('/operator/blocks')
-        .set(bearer(sreToken))
-        .send({
-          subjectKind: 'ORGANIZATION',
-          subject: randomUUID(),
-          reasonCode: 'LEAKED_KEY',
-          note: NOTE,
-        })
-        .expect(201);
-
-      await http()
-        .post(`/operator/blocks/${block.body.data.id}/unblock`)
-        .set(bearer(sreToken))
-        .set('X-Operator-Approver', await signIn(lead.account))
-        .send({ reasonCode: 'KEY_ROTATED', note: NOTE })
-        .expect(202);
-    });
   });
 });

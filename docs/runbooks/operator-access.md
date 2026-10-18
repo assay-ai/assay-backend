@@ -136,5 +136,3 @@ expire. Two approvers at the same moment produce one execution.
 | `409 OPERATOR_APPROVAL_NOT_PENDING` | already approved, rejected or expired |
 | `404 OPERATOR_APPROVAL_NOT_FOUND` | no such approval |
 | `403 OPERATOR_NOT_AUTHORIZED` | the requester is no longer an active operator |
-
-The `X-Operator-Approver` header is gone: nothing reads it.
