@@ -18,6 +18,10 @@ export const OAUTH_RATE_LIMITS = Object.freeze({
   dcrPerIpPerHour: 20,
   /** Registrations per UTC day under one `client_name`; past this an alert counter rises. */
   dcrPerClientNamePerDay: 100,
+  /** `GET /oauth/authorize` per minute from one client IP key (§6.3.4). */
+  authorizePerIpPerMinute: 30,
+  /** `POST /oauth/token` per minute per `client_id` and client IP key (§6.3.10). */
+  tokenPerClientAndIpPerMinute: 60,
 });
 
 export const OAUTH_MINUTE_SECONDS = 60;

@@ -17,7 +17,7 @@ import { McpController } from '@modules/mcp/controllers/mcp.controller';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { MCP_SESSION_SOURCE } from '@modules/mcp/ports/mcp-session.port';
 import { McpServerFactory } from '@modules/mcp/services/mcp-server.factory';
-import { OAuthMcpModule } from '@modules/oauth/oauth-mcp.module';
+import { OAuthDiscoveryModule } from '@modules/oauth/oauth-discovery.module';
 import { MCP_HOST_CONFIG } from '@modules/toolset/config/mcp-host.config';
 import { ALLOW_ALL } from '@modules/toolset/domain/access';
 import { EndpointKind, ParsedMcpUrl } from '@modules/toolset/domain/mcp-url';
@@ -118,10 +118,10 @@ describe('discovery end to end over HTTP', () => {
     })
     class EndToEndModule {}
 
-    // `OAuthMcpModule` first, as in `AppMcpModule`, so the discovery routes
+    // `OAuthDiscoveryModule` first, as in `AppMcpModule`, so the discovery routes
     // answer for real in the CORS tests below.
     const moduleRef = await Test.createTestingModule({
-      imports: [OAuthMcpModule, EndToEndModule],
+      imports: [OAuthDiscoveryModule, EndToEndModule],
     })
       .overrideProvider(MCP_HOST_CONFIG)
       .useValue({ mcpPublicUrl: MCP, webAppUrl: 'https://app.example.com' })
