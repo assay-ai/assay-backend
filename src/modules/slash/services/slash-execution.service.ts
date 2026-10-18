@@ -185,6 +185,41 @@ const EXECUTE_MUST_READ_THE_RECORD: ReadonlySet<string> = new Set(['SlashNotPend
  */
 const EXECUTED_BEYOND_DECISION = 'ExecutedBeyondDecision';
 
+/**
+ * The patch that moves a case to a fresh epoch whose record is not yet
+ * proposed: the second half of a downward recalculation, once the old record
+ * is off the chain. Shared by {@link SlashExecutionService} and the B18
+ * operator re-proposal, so both write exactly the same row.
+ *
+ * One statement. `chk_slash_proposals_chain_pending_is_whole` refuses a
+ * `PENDING`/`EXECUTED` mirror without both chain clocks, so nulling the clocks
+ * and returning the status to `NONE` separately would be rejected by the
+ * database rather than merely be untidy. `NONE` with both clocks nulled is
+ * exactly what `findAwaitingChainProposal` selects, so the propose sweep picks
+ * it up under the fresh id.
+ */
+export function reproposalEpochPatch(
+  proposal: Pick<SlashProposalEntity, 'id' | 'chainEpoch'>,
+): Partial<SlashProposalEntity> & { chainEpoch: number; chainRequestId: string } {
+  const chainEpoch = proposal.chainEpoch + 1;
+  return {
+    chainEpoch,
+    // Derived from the BUMPED epoch. Deriving from the row as it stands would
+    // reproduce the id that was just cancelled, and `propose_slash`'s `init`
+    // would refuse it forever.
+    chainRequestId: deriveChainRequestId({ id: proposal.id, chainEpoch }),
+    chainStatus: ChainProposalStatus.NONE,
+    chainProposedAt: null,
+    chainExecutableAt: null,
+    chainReserved: null,
+    chainProposalSignature: null,
+    // The previous epoch's claim. Left standing it would misdate work that
+    // belongs to a request id that no longer exists.
+    chainClaimedAt: null,
+    chainLastError: null,
+  };
+}
+
 /** "2026-10-20 17:14 UTC": a time in a provider's notice, without the ISO noise. */
 function utcMinute(at: Date): string {
   return `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
@@ -2255,7 +2290,14 @@ export class SlashExecutionService {
         // Unreachable: neither `cancel_slash` nor `expire_slash` closes the
         // account, so a record that refused the cancel is still readable. An
         // anomaly, and not one to write a status from.
-        await this.proposals.update(scope, { chainLastError: 'SlashNotPending' });
+        //
+        // B18: only onto the mirror this pass read. An operator may have
+        // closed (or re-proposed) the case since, and the note would then sit
+        // on a row it no longer describes.
+        await this.proposals.update(
+          { ...scope, chainStatus: proposal.chainStatus, chainEpoch: proposal.chainEpoch },
+          { chainLastError: 'SlashNotPending' },
+        );
         return false;
       }
 
@@ -2325,6 +2367,25 @@ export class SlashExecutionService {
    * on-chain record rather than being recomputed, and `distribute` is idempotent
    * on the ledger's unique index, so a repeat is safe where a miss is not.
    */
+  /**
+   * B18 (`S-16`): an operator records an execution the chain made while the
+   * case's cancel waited — the case shape the admin-cancel sweep cannot read
+   * (a window case with no parts; `slash/domain/stuck-case.ts`). Nothing new:
+   * the same {@link recordAnExecutionNobodyAskedFor} the sweep runs, with the
+   * record the operator's fresh read returned. The caller has checked the
+   * guard on that read and holds the case's manual-action lock.
+   */
+  async recordExecutionWhileCancelWaited(
+    proposal: SlashProposalEntity,
+    record: SlashRecordSnapshot,
+  ): Promise<void> {
+    await this.recordAnExecutionNobodyAskedFor(
+      proposal,
+      record,
+      'recorded by an operator: executed on chain while the cancel waited',
+    );
+  }
+
   private async recordAnExecutionNobodyAskedFor(
     proposal: SlashProposalEntity,
     record: SlashRecordSnapshot,
@@ -2585,17 +2646,9 @@ export class SlashExecutionService {
           .catch(() => undefined);
         return;
       }
-      const chainEpoch = proposal.chainEpoch + 1;
-      // Derived from the BUMPED epoch. Deriving from the row as it stands would
-      // reproduce the id that was just cancelled, and `propose_slash`'s `init`
-      // would refuse it forever.
-      const chainRequestId = deriveChainRequestId({ id: proposal.id, chainEpoch });
+      const patch = reproposalEpochPatch(proposal);
+      const chainEpoch = patch.chainEpoch;
 
-      // One statement. `chk_slash_proposals_chain_pending_is_whole` refuses a
-      // `PENDING`/`EXECUTED` mirror without both chain clocks, so nulling the
-      // clocks and returning the status to `NONE` separately would be rejected
-      // by the database rather than merely be untidy.
-      //
       // `NONE` is also the recovery: if the propose below throws, the row is
       // exactly what `findAwaitingChainProposal` selects, and the next sweep
       // re-proposes it under this same fresh id.
@@ -2604,19 +2657,7 @@ export class SlashExecutionService {
       // scheduler holding the same row loses here instead of bumping again.
       const bumped = await this.proposals.update(
         { organizationId, id: proposalId, chainEpoch: proposal.chainEpoch },
-        {
-          chainEpoch,
-          chainRequestId,
-          chainStatus: ChainProposalStatus.NONE,
-          chainProposedAt: null,
-          chainExecutableAt: null,
-          chainReserved: null,
-          chainProposalSignature: null,
-          // The previous epoch's claim. Left standing it would misdate work
-          // that belongs to a request id that no longer exists.
-          chainClaimedAt: null,
-          chainLastError: null,
-        },
+        patch,
       );
       if (!bumped.affected) {
         // Review R2-9: the other side of the compare-and-set bumped first and
