@@ -1,4 +1,7 @@
-import { readVerifiedClientIds } from '@modules/oauth/config/oauth-verified-client-ids';
+import {
+  readVerifiedClientIds,
+  readVerifiedClients,
+} from '@modules/oauth/config/oauth-verified-client-ids';
 
 describe('readVerifiedClientIds', () => {
   it('is empty when OAUTH_VERIFIED_CLIENTS is unset or blank', () => {
@@ -37,5 +40,39 @@ describe('readVerifiedClientIds', () => {
     const env = { OAUTH_REQUEST_COOKIE_SECRET: 'present', OAUTH_VERIFIED_CLIENTS: '[]' };
     readVerifiedClientIds(env);
     expect(env.OAUTH_REQUEST_COOKIE_SECRET).toBe('present');
+  });
+});
+
+describe('readVerifiedClients', () => {
+  const entry = {
+    clientId: 'https://client.example.com/oauth/client.json',
+    displayName: 'Example',
+    vendorRedirects: ['https://client.example.com/callback'],
+  };
+
+  it('is empty when OAUTH_VERIFIED_CLIENTS is unset or blank', () => {
+    expect(readVerifiedClients({})).toEqual([]);
+    expect(readVerifiedClients({ OAUTH_VERIFIED_CLIENTS: ' ' })).toEqual([]);
+  });
+
+  it('returns each entry with its display name and vendor redirects', () => {
+    expect(readVerifiedClients({ OAUTH_VERIFIED_CLIENTS: JSON.stringify([entry]) })).toEqual([
+      entry,
+    ]);
+  });
+
+  it.each([
+    ['not JSON', '{'],
+    ['not an array', JSON.stringify(entry)],
+    ['a null entry', '[null]'],
+    ['no displayName', JSON.stringify([{ ...entry, displayName: '' }])],
+    ['no vendorRedirects', JSON.stringify([{ ...entry, vendorRedirects: [] }])],
+    ['a non-string redirect', JSON.stringify([{ ...entry, vendorRedirects: [1] }])],
+    [
+      'a non-https clientId',
+      JSON.stringify([{ ...entry, clientId: 'dcr_abcdefghijklmnopqrstuv' }]),
+    ],
+  ])('returns null for %s, so no client is shown as verified', (_, raw) => {
+    expect(readVerifiedClients({ OAUTH_VERIFIED_CLIENTS: raw })).toBeNull();
   });
 });

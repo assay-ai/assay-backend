@@ -1,6 +1,9 @@
 import { Inject, Injectable, Logger } from '@nestjs/common';
 
-import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
+import {
+  AgentCredentialEntity,
+  CredentialIssuedVia,
+} from '@database/postgres/entities/agent-credential.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import {
   NOTIFICATION_PORT,
@@ -50,6 +53,14 @@ export interface CredentialExpirySweepSummary {
  * window and calls `notify()` again. `NotificationAggregation.ONCE`, keyed by
  * `` `${credentialId}:T-7` ``, is what turns "found repeatedly" into
  * "delivered exactly once" — see `NOTIFICATION_CATALOGUE[SESSION_EXPIRING]`.
+ *
+ * ## API keys only
+ *
+ * An OAuth grant (`issued_via = 'OAUTH'`) has an `expires_at` that rolls
+ * forward with its refresh chain and no `prefix` to quote, so warning on it
+ * would notify every idle grant and print "null…". Its app signs in again on
+ * its own; nothing here is for it. The query excludes it, and `sweep` drops
+ * any such row that reaches it anyway.
  */
 @Injectable()
 export class CredentialExpirySweepService {
@@ -68,7 +79,7 @@ export class CredentialExpirySweepService {
 
     let candidates: AgentCredentialEntity[];
     try {
-      candidates = await this.credentials
+      const rows = await this.credentials
         .createQueryBuilder('credential')
         // Cross-organization, deliberately: this is the platform's own promise
         // to warn before every credential lapses, not a query scoped to one
@@ -77,10 +88,12 @@ export class CredentialExpirySweepService {
         // sweeps use, and it is on `surface-consistency.spec.ts`'s allowlist
         // under this file's own path.
         .where('credential.organizationId IS NOT NULL')
+        .andWhere('credential.issuedVia = :issuedVia', { issuedVia: CredentialIssuedVia.API_KEY })
         .andWhere('credential.revokedAt IS NULL')
         .andWhere('credential.expiresAt IS NOT NULL')
         .andWhere('credential.expiresAt <= :horizon', { horizon })
         .getMany();
+      candidates = rows.filter((row) => row.issuedVia === CredentialIssuedVia.API_KEY);
     } catch (error) {
       this.logger.error(`Could not read credentials due for expiry: ${describe(error)}`);
       return { checked: 0, warnedT7: 0, warnedT1: 0, expired: 0 };
