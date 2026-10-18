@@ -82,8 +82,6 @@ export async function rewrapAllDeks(
               kekId: row.kek_id,
               wrappedDek: row.wrapped_dek,
               dekIv: row.dek_iv,
-              ciphertext: Buffer.alloc(0),
-              iv: Buffer.alloc(0),
             },
             from,
             active,
@@ -93,13 +91,14 @@ export async function rewrapAllDeks(
           result.failed += 1;
           continue;
         }
-        await manager.query(
+        const [, affected] = await manager.query(
           `UPDATE binding_credentials
               SET kek_id = $1, wrapped_dek = $2, dek_iv = $3
             WHERE binding_id = $4 AND origin = $5 AND kek_id = $6`,
           [next.kekId, next.wrappedDek, next.dekIv, row.binding_id, row.origin, row.kek_id],
         );
-        result.rewrapped += 1;
+        if (affected === 1) result.rewrapped += 1;
+        else result.failed += 1;
       }
     });
     const last = rows[rows.length - 1];
