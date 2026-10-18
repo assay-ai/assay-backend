@@ -13,7 +13,9 @@ import {
   CALL_RECONCILIATION_CLASSES,
   CallReconciliationCandidate,
   CallReconciliationClass,
+  NOT_CREDITED_CLASSES,
   classifyForReconciliation,
+  isNotCredited,
 } from '@modules/provider/domain/call-reconciliation';
 
 function candidate(overrides: Partial<CallReconciliationCandidate>): CallReconciliationCandidate {
@@ -207,5 +209,26 @@ describe('classifyForReconciliation — reconciliation vocabulary', () => {
     // `ResponseClassValue` against `ResponseClass`.
     expect(Object.values(ResponseClass)).toContain('SYSTEM_ERROR');
     expect(Object.values(ResponseClass)).toContain('REQUEST_ERROR');
+  });
+
+  it('isNotCredited is exactly a failed check, an endpoint error or a refused request (D17)', () => {
+    const notCredited = Object.values(CallReconciliationClass).filter(isNotCredited).sort();
+    expect(notCredited).toEqual(
+      [
+        CallReconciliationClass.PAID_UNCREDITED,
+        CallReconciliationClass.REQUEST_ERROR,
+        CallReconciliationClass.SYSTEM_ERROR,
+      ].sort(),
+    );
+    expect([...NOT_CREDITED_CLASSES].sort()).toEqual(notCredited);
+    // Held or not: the classifier never looks at the hold for these.
+    expect(isNotCredited(classifyForReconciliation(candidate({ status: 'REFUNDED' })))).toBe(true);
+    expect(
+      isNotCredited(classifyForReconciliation(candidate({ status: 'SETTLED', voided: true }))),
+    ).toBe(true);
+    // Passed but not paid is reported apart.
+    expect(
+      isNotCredited(classifyForReconciliation(candidate({ status: 'SETTLED', uncollected: true }))),
+    ).toBe(false);
   });
 });
