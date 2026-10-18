@@ -83,3 +83,7 @@ lerna-debug.log*
 # git worktrees
 .worktrees/
 .local/
+
+# Python bytecode (it embeds absolute local paths)
+__pycache__/
+*.pyc
