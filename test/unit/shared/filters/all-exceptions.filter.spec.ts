@@ -214,6 +214,45 @@ describe('AllExceptionsFilter', () => {
       }
     });
 
+    it('redacts the rid and query in a Nest route-not-found message (wrong method), body and log', () => {
+      const url = `/api/v1/oauth/requests/${RID}/approve?x=${SECRET}`;
+      const { body, logged } = captureWithLog(new NotFoundException(`Cannot GET ${url}`), url);
+      expect(body.error.message).toBe('Cannot GET /api/v1/oauth/requests/[REDACTED]/approve');
+      expect(body.error.path).toBe('/api/v1/oauth/requests/[REDACTED]/approve');
+      for (const text of [JSON.stringify(body), logged]) {
+        expect(text).not.toContain(RID);
+        expect(text).not.toContain(SECRET);
+      }
+    });
+
+    it('replaces a body-parser JSON message with a fixed string', () => {
+      let parseError: Error;
+      try {
+        JSON.parse(`{"refresh_token":${SECRET}}`);
+        throw new Error('unreachable');
+      } catch (error) {
+        parseError = error as Error;
+      }
+      // What Nest's `mapExternalException` makes of a body-parser SyntaxError.
+      const mapped = new BadRequestException(parseError.message);
+      const { body, logged } = captureWithLog(mapped, `/api/v1/oauth/requests/${RID}/approve`);
+      expectTheOneShape(body);
+      expect(body.error.statusCode).toBe(400);
+      expect(body.error.message).toBe('Malformed request body');
+      for (const text of [JSON.stringify(body), logged]) {
+        expect(text).not.toContain(SECRET.slice(0, 12));
+        expect(text).not.toContain('assay_rt');
+      }
+    });
+
+    it('redacts a URIError param-decode message', () => {
+      const { body } = captureWithLog(
+        new BadRequestException(`Failed to decode param '${SECRET}%FF'`),
+        '/x',
+      );
+      expect(body.error.message).not.toContain(SECRET);
+    });
+
     it('redacts a token in a query string of error.path', () => {
       const { body } = captureWithLog(
         new NotFoundException(),

@@ -59,6 +59,31 @@ describe('LoggingInterceptor redaction', () => {
     }
   });
 
+  it('logs originalUrl, the same field the filter reads (M6)', async () => {
+    const context = {
+      switchToHttp: () => ({
+        getRequest: () => ({
+          method: 'GET',
+          url: '/stripped',
+          originalUrl: `/api/v1/oauth/requests/${RID}`,
+          ip: '127.0.0.1',
+          headers: {},
+          get: () => '',
+        }),
+        getResponse: () => ({ statusCode: 200 }),
+      }),
+    } as never;
+    const log = jest.spyOn(Logger.prototype, 'log').mockImplementation(() => undefined);
+    try {
+      await lastValueFrom(new LoggingInterceptor().intercept(context, { handle: () => of('ok') }));
+      expect((log.mock.calls[0][0] as { url: string }).url).toBe(
+        '/api/v1/oauth/requests/[REDACTED]',
+      );
+    } finally {
+      log.mockRestore();
+    }
+  });
+
   it('never logs the Authorization header, the cookie or the token form body', async () => {
     for (const url of ['/oauth/token', '/oauth/revoke', `/oauth/token?refresh_token=${REFRESH}`]) {
       const text = JSON.stringify(await logged(url));
