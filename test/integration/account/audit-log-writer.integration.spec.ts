@@ -93,7 +93,7 @@ describe('audit_log_entries — the writer and its call sites', () => {
       writer,
       { bump: async () => undefined } as unknown as AccessEpochService,
       new OAuthClientRepository(dataSource),
-      { builtinClientId: 'https://mcp.example.test/oauth/clients/assay-mcp', verifiedClients: [] },
+      { paymentClients: ['https://mcp.example.test/oauth/clients/assay-mcp'], verifiedClients: [] },
     );
     settings = new NotificationSettingsService(
       new NotificationChannelRepository(dataSource),
