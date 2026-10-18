@@ -24,7 +24,9 @@ import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.
 import { ProviderChainEnrolmentEntity } from '@database/postgres/entities/provider-chain-enrolment.entity';
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
 import { BindingCredentialEntity } from '@database/postgres/entities/binding-credential.entity';
+import { VaultKekCheckEntity } from '@database/postgres/entities/vault-kek-check.entity';
 import { CreateBindingCredentials1762000000001 } from '@database/postgres/migrations/1762000000001-create-binding-credentials';
+import { CreateVaultKekChecks1762000000003 } from '@database/postgres/migrations/1762000000003-create-vault-kek-checks';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
@@ -235,6 +237,7 @@ export async function createBindingEditorTestContext(
       ProviderEntity,
       ToolBindingEntity,
       BindingCredentialEntity,
+      VaultKekCheckEntity,
       BindingVersionEntity,
       BindingTestRunEntity,
       // The payout address the publish gate reads is on the
@@ -314,6 +317,7 @@ export async function createBindingEditorTestContext(
       BindingContractTerms1761500000001,
       CreateBindingCredentials1762000000001,
       ToolBindingAuthMode1762000000002,
+      CreateVaultKekChecks1762000000003,
     ],
     synchronize: false,
     logging: process.env.BINDING_TEST_LOGGING === 'true',

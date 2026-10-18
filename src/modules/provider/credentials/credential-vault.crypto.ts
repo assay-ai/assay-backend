@@ -1,4 +1,4 @@
-import { createCipheriv, createDecipheriv, randomBytes } from 'node:crypto';
+import { createCipheriv, createDecipheriv, createHmac, randomBytes } from 'node:crypto';
 
 /**
  * Envelope encryption for a provider's credential header set.
@@ -38,6 +38,18 @@ export interface SealedCredentialSet {
   /** Header JSON encrypted under the DEK, auth tag appended. */
   ciphertext: Buffer;
   iv: Buffer;
+}
+
+const KCV_LABEL = 'assay/kek-check/v1';
+const KCV_BYTES = 16;
+
+/**
+ * The key-check value of a KEK: HMAC-SHA256 of a fixed label, truncated to 16
+ * bytes. Stored per key id so a boot can tell that an id now holds different
+ * bytes, without the value helping anyone recover the key.
+ */
+export function kekCheckValue(kek: Kek): Buffer {
+  return createHmac('sha256', kek.key).update(KCV_LABEL).digest().subarray(0, KCV_BYTES);
 }
 
 export function credentialAad(organizationId: string, bindingId: string, origin: string): string {

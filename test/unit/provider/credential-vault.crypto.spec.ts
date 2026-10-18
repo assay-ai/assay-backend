@@ -107,6 +107,33 @@ describe('takeVaultKeks', () => {
     expect(env[CREDENTIAL_VAULT_KEKS_ENV]).toBeUndefined();
   });
 
+  it.each(['00', 'ff', '7a'])('rejects a key whose every byte is %s', (byte) => {
+    const env: NodeJS.ProcessEnv = {
+      [CREDENTIAL_VAULT_KEKS_ENV]: JSON.stringify([{ keyId: 'k1', key: byte.repeat(32) }]),
+    };
+    expect(() => takeVaultKeks(env)).toThrow(/placeholder/);
+  });
+
+  it('fails the boot in production when no key is configured', () => {
+    expect(() => takeVaultKeks({ NODE_ENV: 'production' })).toThrow(
+      /CREDENTIAL_VAULT_KEKS must be set in production/,
+    );
+  });
+
+  it('boots without a key outside production', () => {
+    expect(takeVaultKeks({ NODE_ENV: 'development' }).active).toBeNull();
+  });
+
+  it('boots in production with a key', () => {
+    const env: NodeJS.ProcessEnv = {
+      NODE_ENV: 'production',
+      [CREDENTIAL_VAULT_KEKS_ENV]: JSON.stringify([
+        { keyId: 'k1', key: randomBytes(32).toString('hex') },
+      ]),
+    };
+    expect(takeVaultKeks(env).active?.keyId).toBe('k1');
+  });
+
   it('rejects malformed JSON without echoing it', () => {
     expect(() => takeVaultKeks({ [CREDENTIAL_VAULT_KEKS_ENV]: '[{"keyId":"secret-ish' })).toThrow(
       /not valid JSON/,
