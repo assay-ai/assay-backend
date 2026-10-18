@@ -521,6 +521,11 @@ export class CallDisputeService {
       if (!refund) throw DisputeErrors.collectionInProgress({});
     } else {
       state = DisputeState.REJECTED;
+      // Refunded already (a blocked provider's held payment): rejecting the
+      // dispute does not un-refund it, and the dispute keeps saying so.
+      if (planRefund(intent) === RefundPlanKind.ALREADY_REFUNDED) {
+        refund = refundColumnsFor(RefundPlanKind.ALREADY_REFUNDED);
+      }
     }
     const owes = refund !== null && refund.source !== RefundSource.NONE;
     const restored = refund?.state === RefundState.REFUNDED ? amount : null;
@@ -666,7 +671,11 @@ export class CallDisputeService {
       title: upheld ? 'Your dispute was upheld' : 'Your dispute was rejected',
       body: upheld
         ? `Your dispute over a call was upheld. ${refund}`
-        : 'Your dispute over a call was rejected.',
+        : `Your dispute over a call was rejected.${
+            dispute.refundState === RefundState.REFUNDED
+              ? ' The call was refunded anyway: its provider was blocked.'
+              : ''
+          }`,
     });
     await this.notify(
       dispute.respondentProviderId as string,

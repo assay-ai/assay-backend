@@ -109,6 +109,21 @@ describe('planRefund — where an upheld refund’s money comes from', () => {
     );
   });
 
+  it('a held payment refunded because its provider was blocked: charged, then refunded', () => {
+    for (const rail of ['RAIL_B_VOUCHER', 'RAIL_A_PER_CALL']) {
+      expect(
+        planRefund(
+          intent({
+            rail,
+            redemptionLastError: 'provider_forfeit:ProviderBlocked',
+            heldStatus: 'REFUNDED',
+            disputeOutcome: 'OPEN',
+          }),
+        ),
+      ).toBe(RefundPlanKind.ALREADY_REFUNDED);
+    }
+  });
+
   it('a void written by an upheld dispute is recognised on a retry', () => {
     expect(planRefund(intent({ redemptionLastError: 'voided:DISPUTE_UPHELD' }))).toBe(
       RefundPlanKind.ALREADY_REFUNDED,

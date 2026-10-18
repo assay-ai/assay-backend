@@ -1008,12 +1008,15 @@ export class PaymentIntentService {
   }
 
   /**
-   * Books the refund of a BLOCKED provider's held payment, once the chain says
-   * `REFUNDED` (owner decision 2026-10-18; sent by `HeldCollectionService`,
-   * which holds the redeemer key). The provider forfeits the call:
-   * `provider_forfeit:<cause>` closes the row, the buyer's hold is released,
-   * nobody is credited — whatever a dispute on the call says. `false` when the
-   * row is no longer held (already booked, or collected).
+   * Books the refund of a held payment the platform made for its provider
+   * (owner decision 2026-10-18): rail B once the chain says `REFUNDED` (sent by
+   * `HeldCollectionService`, which holds the redeemer key — the only sender
+   * `refundHeld` accepts), rail A by releasing the withheld credit. The
+   * provider forfeits the call: `provider_forfeit:<cause>` closes the row, the
+   * buyer's hold is released, nobody is credited, and a dispute still open on
+   * the call is written as refunded. A call an upheld dispute holds is booked
+   * as that dispute's refund instead. `false` when the row is no longer held
+   * (already booked, or collected).
    */
   async bookBlockedProviderRefund(
     organizationId: string,
@@ -1023,20 +1026,31 @@ export class PaymentIntentService {
   ): Promise<boolean> {
     const intent = await this.findById(organizationId, intentId);
     if (!intent.holdId || intent.heldStatus !== HELD) return false;
+    if (intent.disputeOutcome === 'UPHELD') {
+      return (
+        (await this.refundHeldForDispute(organizationId, intentId, 'DISPUTE_UPHELD')) === 'REFUNDED'
+      );
+    }
     const target: DebtCloseTarget = {
       organizationId,
       id: intentId,
       payer: intent.agentAccount,
       holdId: intent.holdId,
     };
-    const released = await this.ledger.releaseHoldIf(organizationId, intent.holdId, (runner) =>
-      this.intents.markHeldRefunded(
-        runner,
-        target,
-        `${PROVIDER_FORFEIT_PREFIX}${cause}`,
-        txRef,
-        false,
-      ),
+    const released = await this.ledger.releaseHoldIf(
+      organizationId,
+      intent.holdId,
+      async (runner) => {
+        const marked = await this.intents.markHeldRefunded(
+          runner,
+          target,
+          `${PROVIDER_FORFEIT_PREFIX}${cause}`,
+          txRef,
+          false,
+        );
+        if (marked) await this.intents.markDisputeRefunded(runner, organizationId, intentId);
+        return marked;
+      },
     );
     return released !== null;
   }
