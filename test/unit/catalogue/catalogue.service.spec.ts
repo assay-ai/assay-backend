@@ -28,6 +28,7 @@ import { Money } from '@modules/chains/ports/money.types';
 import {
   CATALOGUE_CACHE_MS,
   CatalogueService,
+  WITHDRAWAL_FLAG_CACHE_MS,
 } from '@modules/catalogue/services/catalogue.service';
 import { PublicCatalogueService } from '@modules/catalogue/services/public-catalogue.service';
 import { X402_SETTLEMENT_CHAINS } from '@modules/mcp/constants/mcp.constants';
@@ -1060,6 +1061,7 @@ describe('GET /catalogue/providers/:providerId', () => {
         freeCallsPerAgentPerDay: null,
         chains: [CHAIN, OTHER_CHAIN],
         servesYou: null,
+        notServedReason: null,
       },
     ]);
   });
@@ -1674,6 +1676,7 @@ describe('the catalogue, with an unpublished draft on a live binding', () => {
         freeCallsPerAgentPerDay: 7,
         chains: [CHAIN, OTHER_CHAIN],
         servesYou: null,
+        notServedReason: null,
       },
     ]);
     expect(detail.fromPrice).toEqual(published);
@@ -2056,5 +2059,55 @@ describe('the catalogue, servesYou fix round 1', () => {
     const unreadable = market({ escrowThrows: true });
     routedOn(unreadable, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
     expect(await servesYouById(unreadable)).toEqual({ [P1]: true, [P2]: false });
+  });
+
+  it('every agent withdrawing: the reason is the withdrawal, not the chain', async () => {
+    const wired = market({ withdrawing: ['wallet-1'] });
+    routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+
+    const { providers } = await wired.service.listProvidersFor(BUYER);
+    expect(providers.map((row) => [row.servesYou, row.notServedReason])).toEqual([
+      [false, 'WITHDRAWING'],
+      [false, 'WITHDRAWING'],
+    ]);
+    const detail = await wired.service.getProviderFor(P1, BUYER);
+    expect(detail.notServedReason).toBe('WITHDRAWING');
+    expect(detail.tools[0].notServedReason).toBe('WITHDRAWING');
+
+    // A plain chain mismatch carries no reason of the caller's own.
+    const plain = market();
+    routedOn(plain, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+    const rows = (await plain.service.listProvidersFor(BUYER)).providers;
+    expect(rows.map((row) => row.notServedReason)).toEqual([null, null]);
+  });
+
+  describe('the withdrawal reading is reused briefly (m7)', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    it('reads each escrow at most once per window, then again after it', async () => {
+      let now = 1_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const wired = market();
+      routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+
+      await wired.service.listProvidersFor(BUYER);
+      await wired.service.getProviderFor(P1, BUYER);
+      now += WITHDRAWAL_FLAG_CACHE_MS - 1;
+      await wired.service.listProvidersFor(BUYER);
+      expect(wired.escrow.readMany).toHaveBeenCalledTimes(1);
+
+      now += 2;
+      await wired.service.listProvidersFor(BUYER);
+      expect(wired.escrow.readMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('a failed read is not cached, and the chain still counts (fail-open for display)', async () => {
+      const wired = market({ escrowThrows: true });
+      routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+
+      expect(await servesYouById(wired)).toEqual({ [P1]: true, [P2]: false });
+      await wired.service.listProvidersFor(BUYER);
+      expect(wired.escrow.readMany).toHaveBeenCalledTimes(2);
+    });
   });
 });
