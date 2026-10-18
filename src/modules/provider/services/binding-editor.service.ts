@@ -425,6 +425,14 @@ export class BindingEditorService {
     const chainsChanged = JSON.stringify(row.settlementChains) !== chainsBefore;
 
     const saved = await this.inTransaction(async (manager) => {
+      // Locked and re-read before the write: a draft discarded since the
+      // read above (`DELETE …/tool-bindings/:id`) is a 404, not re-created
+      // by `save` inserting a row it no longer finds.
+      const current = await manager.findOne(ToolBindingEntity, {
+        where: { organizationId, id: row.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      if (!current) throw ProviderErrors.bindingNotFound({ bindingId: row.id });
       let revised = false;
       if (changed) {
         // An edit that lands back on the published terms is not a draft. It
