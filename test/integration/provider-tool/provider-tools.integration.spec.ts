@@ -31,10 +31,12 @@ import {
   DatabaseToolContracts,
   ToolContractChangesService,
 } from '@modules/tool/services/database-tool-contracts';
+import { handleSkeleton } from '@modules/toolset/domain/handle';
 import { parseMcpUrl } from '@modules/toolset/domain/mcp-url';
 import { ToolsetVisibility } from '@modules/toolset/domain/sharing';
 import { selectViewTools } from '@modules/toolset/domain/view';
 import { ToolsetErrorCode } from '@modules/toolset/errors/toolset.errors';
+import { renameHandleTools } from '@modules/toolset/services/handle-tools';
 import { CutoffRevertReason } from '@modules/toolset/services/toolset-moderation.service';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
 import { AuditLogWriter } from '@shared/audit';
@@ -1255,6 +1257,105 @@ describe('provider tools, against a real database and Redis', () => {
       ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_HANDLE_REASSIGN_REFUSED });
       // Nothing moved.
       expect(await owned.get(target, long.id)).toMatchObject({ handle: 'abq-co' });
+    });
+  });
+
+  describe('concurrent handle changes (final review)', () => {
+    /** Until another session of this database waits on a lock. */
+    async function untilBlocked(): Promise<void> {
+      for (let attempt = 0; attempt < 200; attempt += 1) {
+        const [row] = await dataSource.query(
+          `SELECT count(*)::int AS waiting FROM pg_stat_activity
+            WHERE datname = current_database() AND wait_event_type = 'Lock'`,
+        );
+        if (row.waiting > 0) return;
+        await new Promise((resolve) => setTimeout(resolve, 25));
+      }
+      throw new Error('nothing waited on a lock');
+    }
+
+    it('a claim renames the tools under the handle the organization holds when it commits', async () => {
+      const orgG = await org('Golf');
+      const agentG = await agent(orgG);
+      await verify(orgG);
+      await registerProvider(orgG);
+      await s.handles.claim(session(orgG, agentG), 'golf-one', ACTOR);
+      const created = await owned.create(
+        orgG,
+        { name: 'get_quote', category: 'weather', ...contract() } as never,
+        ACTOR,
+      );
+
+      // Another change of the handle holds the organization while the claim starts.
+      const other = dataSource.createQueryRunner();
+      await other.connect();
+      await other.startTransaction();
+      try {
+        await other.query(`SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`, [orgG]);
+        const claim = s.handles.claim(session(orgG, agentG), 'golf-three', ACTOR);
+        await untilBlocked();
+        await renameHandleTools(other.manager, orgG, 'golf-one', 'golf-two');
+        await other.query(
+          `UPDATE organizations SET handle = 'golf-two', handle_skeleton = $2 WHERE id = $1`,
+          [orgG, handleSkeleton('golf-two')],
+        );
+        await other.commitTransaction();
+        await claim;
+      } finally {
+        await other.release();
+      }
+
+      expect(await owned.get(orgG, created.id)).toMatchObject({
+        name: 'golf-three__get_quote',
+        handle: 'golf-three',
+      });
+    });
+
+    it('a lifted tool takedown waits for a handle takedown and stays removed under it', async () => {
+      const orgH = await org('Hotel');
+      const agentH = await agent(orgH);
+      await verify(orgH);
+      await registerProvider(orgH);
+      await s.handles.claim(session(orgH, agentH), 'hotel', ACTOR);
+      const created = await owned.create(
+        orgH,
+        { name: 'get_quote', category: 'weather', ...contract() } as never,
+        ACTOR,
+      );
+      const own = await dataSource.transaction((manager) =>
+        s.moderation.cutoffTool(manager, {
+          toolId: created.id,
+          operatorId: OPERATOR_1,
+          note: 'abuse',
+        }),
+      );
+
+      const other = dataSource.createQueryRunner();
+      await other.connect();
+      await other.startTransaction();
+      try {
+        await s.moderation.cutoffHandle(other.manager, {
+          handle: 'hotel',
+          operatorId: OPERATOR_1,
+          note: 'brand',
+        });
+        const lift = dataSource.transaction((manager) =>
+          s.moderation.revert(manager, own.cutoff.id, OPERATOR_2, CutoffRevertReason.REJECTED),
+        );
+        await untilBlocked();
+        await other.commitTransaction();
+        await lift;
+      } finally {
+        await other.release();
+      }
+
+      const [row] = await dataSource.query(
+        `SELECT status, taken_down_at, handle_removed_at FROM tools WHERE id = $1`,
+        [created.id],
+      );
+      expect(row.status).toBe('REMOVED');
+      expect(row.taken_down_at).toBeNull();
+      expect(row.handle_removed_at).not.toBeNull();
     });
   });
 });
