@@ -13,6 +13,7 @@ import { BlocklistSessionSource } from '@modules/blocklist/services/blocklist-se
 import { parseSessionSourceMode } from '@modules/auth/domain/session-source-mode';
 import { createSessionSource } from '@modules/auth/services/composite-mcp-session.source';
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
+import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
 import { PrivyMcpSessionSource } from '@modules/auth/services/privy-mcp-session.source';
 import { ToolModule } from '@modules/tool/tool.module';
 import { ToolsetModule } from '@modules/toolset/toolset.module';
@@ -115,6 +116,7 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
         config: ConfigService,
         configSource: ConfigMcpSessionSource,
         dbSource: DbCredentialMcpSessionSource,
+        oauthSource: OAuthAccessTokenMcpSessionSource,
         privySource: PrivyMcpSessionSource,
         blocklist: AccountBlocklistService,
       ) =>
@@ -124,6 +126,7 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
           createSessionSource(parseSessionSourceMode(config.get<string>('auth.sessionSource')), {
             config: configSource,
             db: dbSource,
+            oauth: oauthSource,
             privy: privySource,
           }),
           blocklist,
@@ -132,6 +135,7 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
         ConfigService,
         ConfigMcpSessionSource,
         DbCredentialMcpSessionSource,
+        OAuthAccessTokenMcpSessionSource,
         PrivyMcpSessionSource,
         AccountBlocklistService,
       ],
