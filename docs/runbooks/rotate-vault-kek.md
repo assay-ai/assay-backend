@@ -22,7 +22,8 @@ key id, never the key.
    production `DATABASE_*` settings):
    `yarn ts-node -T -r tsconfig-paths/register scripts/vault/rewrap-deks.ts`
    It prints `rewrap: rewrapped=N already_active=M failed=F` and never any key material.
-   It is safe to re-run.
+   It is safe to re-run. It first checks every listed key against `vault_kek_checks`, like
+   the boot does, and aborts before any write if a key id now holds different bytes.
 4. `failed` must be 0 (a non-zero count exits 1: those rows name a KEK that is not loaded
    or failed authentication). Verify: `SELECT kek_id, count(*) FROM binding_credentials GROUP BY 1`
    shows only `k2`.

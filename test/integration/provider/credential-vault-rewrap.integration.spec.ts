@@ -49,6 +49,7 @@ function body(): SaveToolBindingBodyDto {
 async function sealedBinding(name: string): Promise<{ organizationId: string; bindingId: string }> {
   await context.reset();
   await context.dataSource.query('DELETE FROM binding_credentials');
+  await context.dataSource.query('DELETE FROM vault_kek_checks');
   await context.registerProvider();
   const organizationId = context.organizationId;
   context.stakes.set(organizationId, MoneyUtil.of('100000000', USDC_ASSET, USDC_DECIMALS));
@@ -111,6 +112,22 @@ describe('credential vault KEK rewrap', () => {
       alreadyActive: 0,
       failed: 1,
     });
+    const [row] = await context.dataSource.query(
+      `SELECT kek_id FROM binding_credentials WHERE binding_id = $1`,
+      [bindingId],
+    );
+    expect(row.kek_id).toBe('k1');
+  });
+
+  it('aborts before any write when a loaded key does not match its stored check value', async () => {
+    const { bindingId } = await sealedBinding('rewrap-it-kcv');
+    // Record the real k1 and k2, as a boot would.
+    await rewrapAllDeks(context.dataSource, only(k1));
+    const wrongK1 = { keyId: 'k1', key: randomBytes(32) };
+
+    await expect(rewrapAllDeks(context.dataSource, only(k2, wrongK1))).rejects.toThrow(
+      'Vault key "k1" does not match the key-check value stored for it',
+    );
     const [row] = await context.dataSource.query(
       `SELECT kek_id FROM binding_credentials WHERE binding_id = $1`,
       [bindingId],
