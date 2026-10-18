@@ -45,6 +45,13 @@ export class EvmChainStateEntity extends AbstractEntityWithoutSoftDelete {
   @Column({ name: 'slash_watch_cursor_block', type: 'bigint', nullable: true })
   slashWatchCursorBlock: string | null;
 
+  /**
+   * The last block `EvmEscrowWithdrawalIndexer` has read (B7), apart from the
+   * other two cursors for the same reason they are apart from each other.
+   */
+  @Column({ name: 'withdrawal_cursor_block', type: 'bigint', nullable: true })
+  withdrawalCursorBlock: string | null;
+
   @Column({ name: 'head_block', type: 'bigint', nullable: true })
   headBlock: string | null;
 
