@@ -662,6 +662,18 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
         expect(http.request).toHaveBeenCalled();
       },
     );
+    it.each([BindingAuthMode.NONE, BindingAuthMode.SIGNATURE])(
+      'still reads the vault and attaches a stored set when the mode is %s',
+      async (authMode) => {
+        const { run, sent, vault } = setup({
+          authMode,
+          credentials: [{ name: 'X-Key', value: 'stored-under-any-mode' }],
+        });
+        await run();
+        expect(vault.headersFor).toHaveBeenCalledTimes(1);
+        expect(lower(sent[0])['x-key']).toBe('stored-under-any-mode');
+      },
+    );
     it('still lets the tester omit credentials on purpose', async () => {
       const { run, http } = setup({
         authMode: BindingAuthMode.API_KEY,
