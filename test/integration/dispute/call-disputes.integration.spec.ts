@@ -784,7 +784,7 @@ describe('call disputes, against a real database', () => {
             order: SortDirection.DESC,
             refundable: true,
           }),
-          (intent, settledAt, now) => refunds.ofCall(intent, settledAt, now),
+          (calls, now) => refunds.ofCalls(calls, now),
         );
       config.maxPerProviderPerDay = 100;
       const maxFilings = config.maxFilingsPerDay;
@@ -887,6 +887,12 @@ describe('call disputes, against a real database', () => {
           const call = await seed();
           const intent = await payments.findOneBy({ organizationId: buyer, id: call.intentId });
           const { refundable: flag } = await refunds.ofCall(intent!, null);
+          // The batched read the list uses gives the same answer.
+          expect({
+            label,
+            batched: (await refunds.ofCalls([{ intent: intent!, settledAt: null }])).get(intent!.id)
+              ?.refundable,
+          }).toEqual({ label, batched: flag });
           // B7: the Calls page's "Still refundable" filter gives the same answer.
           const listed = async () =>
             (await refundableCalls()).items.some((item) => item.intentId === call.intentId);

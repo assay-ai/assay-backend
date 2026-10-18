@@ -270,31 +270,52 @@ describe('ToolCallsService.list — refundable=true (B7)', () => {
     verificationRecords.find.mockResolvedValue([
       { intentId: INTENT_ID, verdictStatus: VerdictStatus.PASS, settledAt },
     ]);
-    const check = jest.fn(async (intent: { id: string }) =>
-      intent.id === INTENT_ID
-        ? { refundable: true, until }
-        : intent.id === 'row-3'
-          ? { refundable: true, until: null }
-          : { refundable: false, until: null },
+    const check = jest.fn(
+      async (calls: readonly { intent: { id: string }; settledAt: Date | null }[]) =>
+        new Map(
+          calls.map(({ intent }) => [
+            intent.id,
+            intent.id === INTENT_ID
+              ? { refundable: true, until, reported: false }
+              : intent.id === 'row-3'
+                ? { refundable: true, until: null, reported: false }
+                : { refundable: false, until: null, reported: false },
+          ]),
+        ),
     );
 
-    const page = await service.list(ORGANIZATION_ID, baseQuery({ refundable: true }), check);
+    const page = await service.list(
+      ORGANIZATION_ID,
+      baseQuery({ refundable: true }),
+      check as never,
+    );
 
     expect(page.items.map((item) => [item.intentId, item.refundableIfReportedUntil])).toEqual([
       [INTENT_ID, until],
       ['row-3', null],
     ]);
-    // The receipt's own inputs: the record's settledAt.
-    expect(check).toHaveBeenCalledWith(
-      expect.objectContaining({ id: INTENT_ID }),
-      settledAt,
-      expect.any(Date),
+    // One batched call, with the receipt's own inputs: the record's settledAt.
+    expect(check).toHaveBeenCalledTimes(1);
+    expect(check.mock.calls[0][0]).toEqual([
+      { intent: expect.objectContaining({ id: INTENT_ID }), settledAt },
+      { intent: expect.objectContaining({ id: 'row-2' }), settledAt: null },
+      { intent: expect.objectContaining({ id: 'row-3' }), settledAt: null },
+    ]);
+  });
+
+  it('drops a call that already carries an open report: it cannot be reported again', async () => {
+    const { service } = buildHarness([intentRow()]);
+    const check = jest.fn(
+      async () => new Map([[INTENT_ID, { refundable: true, until, reported: true }]]),
     );
-    expect(check).toHaveBeenCalledWith(
-      expect.objectContaining({ id: 'row-2' }),
-      null,
-      expect.any(Date),
+
+    const page = await service.list(
+      ORGANIZATION_ID,
+      baseQuery({ refundable: true }),
+      check as never,
     );
+
+    expect(page.items).toEqual([]);
   });
 
   it('refuses rather than answer an empty list without the check', async () => {

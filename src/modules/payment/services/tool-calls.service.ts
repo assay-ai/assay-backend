@@ -34,16 +34,21 @@ import { PaymentErrors } from '../errors/payment.errors';
 import { PaymentIntentStatus, PaymentRail } from '../ports/payment.types';
 
 /**
- * Whether a report filed now on this call would be refunded in full, and
- * until when: `RefundEligibilityService.ofCall` (dispute module), passed in by
- * the controller so this module does not import the dispute module that
- * imports it.
+ * For a page of calls: whether a report filed now on each would be refunded
+ * in full, until when, and whether one is already open on it.
+ * `RefundEligibilityService.ofCalls` (dispute module), passed in by the
+ * controller so this module does not import the dispute module that imports
+ * it.
  */
 export type RefundableCheck = (
-  intent: PaymentIntentEntity,
-  settledAt: Date | null,
+  calls: readonly { intent: PaymentIntentEntity; settledAt: Date | null }[],
   now: Date,
-) => Promise<{ readonly refundable: boolean; readonly until: Date | null }>;
+) => Promise<
+  ReadonlyMap<
+    string,
+    { readonly refundable: boolean; readonly until: Date | null; readonly reported: boolean }
+  >
+>;
 
 /**
  * Declared next to the query this drives, per `backend/docs/api-list-contract.md`.
@@ -178,12 +183,20 @@ export class ToolCallsService {
       return page.map((intent) => this.toDto(intent, verdictOf(intent.id)));
     }
 
-    // The same answer the receipt gives, row by row. A row that no longer
-    // qualifies is dropped from the page; the cursor is unaffected.
+    // The same answer the receipt gives, for the page at once. A row that no
+    // longer qualifies, or already carries an open report (it cannot be
+    // reported again), is dropped from the page; the cursor is unaffected.
+    const checked = await refundableCheck(
+      page.items.map((intent) => ({
+        intent,
+        settledAt: records.get(intent.id)?.settledAt ?? null,
+      })),
+      now,
+    );
     const answers = new Map<string, Date | null>();
     for (const intent of page.items) {
-      const answer = await refundableCheck(intent, records.get(intent.id)?.settledAt ?? null, now);
-      if (answer.refundable) answers.set(intent.id, answer.until);
+      const answer = checked.get(intent.id);
+      if (answer?.refundable && !answer.reported) answers.set(intent.id, answer.until);
     }
     return new CursorPageDto(
       page.items
