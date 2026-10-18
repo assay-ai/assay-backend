@@ -361,6 +361,7 @@ export async function createBindingEditorTestContext(
     stakes,
     [STAKE_CHAIN],
     new Map([[STAKE_CHAIN, MINIMUM_STAKE]]),
+    null,
   );
   const tester = new BindingMappingTesterService(
     editor,

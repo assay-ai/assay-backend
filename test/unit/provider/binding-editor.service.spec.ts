@@ -381,6 +381,16 @@ describe('BindingEditorService.create — what gets stored', () => {
     expect(written).toEqual([]);
   });
 
+  it('refuses a port the relay cannot reach on update, and writes nothing', async () => {
+    const { service, written } = build(row(), [], { relayConfigured: true });
+
+    await expectErrorCodeAsync(
+      () => service.update(PROVIDER, SUBJECT, row().id, { endpoint: 'https://p.test:3000/x' }),
+      ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
+    );
+    expect(written).toEqual([]);
+  });
+
   it('refuses a secret-looking constant header on update', async () => {
     const { service, written } = build(row());
 

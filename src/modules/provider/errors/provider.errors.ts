@@ -1,4 +1,4 @@
-import { RELAY_ALLOWED_PORTS } from '@shared/network/egress/egress-relay.config';
+import { RELAY_ALLOWED_PORTS } from '@shared/network/egress';
 import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors/error-catalog';
 
 /**
