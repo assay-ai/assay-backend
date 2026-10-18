@@ -209,7 +209,10 @@ describe('stuck-case actions (B18), against a real database', () => {
    * written on chain, now waiting on a requested cancel: the shape the
    * admin-cancel sweep cannot settle.
    */
-  async function stuckCase(status: 'CANCELLED' | 'OVERTURNED' | 'UPHELD'): Promise<string> {
+  async function stuckCase(
+    status: 'CANCELLED' | 'OVERTURNED' | 'UPHELD',
+    agents: readonly string[] = [AGENT],
+  ): Promise<string> {
     const proposedAt = new Date(Date.now() - 6 * DAY);
     const seeded = await seedProRataCase(dataSource, {
       providerOrg: randomUUID(),
@@ -217,7 +220,7 @@ describe('stuck-case actions (B18), against a real database', () => {
       stakeAuthority: `${CHAIN}:0x${randomUUID().replace(/-/g, '')}${'0'.repeat(8)}`,
       assetId: EVM_ASSET,
       penalty: PENALTY,
-      agents: [{ account: AGENT, failed: [100_000n] }],
+      agents: agents.map((account) => ({ account, failed: [100_000n] })),
       proposedAt,
     });
     const decided =
@@ -588,6 +591,16 @@ describe('stuck-case actions (B18), against a real database', () => {
       onChain(id, 'EXECUTED', { beneficiary: '0x00000000000000000000000000000000000000f1' });
       await expect(cases.recordExecution(lead, id, BODY, null)).rejects.toMatchObject(
         refused('BENEFICIARY_NOT_AN_AGENT'),
+      );
+      expect(await approvalsFor(id)).toEqual([]);
+    });
+
+    it('round 2: two harmed agents, the record paid one: refused, nothing queued', async () => {
+      const other = `${CHAIN}:0x1111111111111111111111111111111111111111`;
+      const id = await stuckCase('OVERTURNED', [AGENT, other]);
+      onChain(id, 'EXECUTED');
+      await expect(cases.recordExecution(lead, id, BODY, null)).rejects.toMatchObject(
+        refused('SPLIT_NOT_EXPRESSIBLE'),
       );
       expect(await approvalsFor(id)).toEqual([]);
     });

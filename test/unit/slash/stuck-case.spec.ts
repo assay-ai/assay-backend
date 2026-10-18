@@ -44,6 +44,7 @@ const READS: Record<string, StuckCaseRead | null> = {
     record: record('EXECUTED'),
     unreadable: false,
     beneficiaryIsAgent: true,
+    harmedAgents: 1,
   },
   GONE: { state: ChainRecordState.GONE, record: record('CANCELLED'), unreadable: false },
   // Not found though a record was written: an anomaly, never "gone".
@@ -158,6 +159,7 @@ describe('stuckCaseRefusal: the guard matrix', () => {
       record: record('EXECUTED', { appliedMinor: '1000001' }),
       unreadable: false,
       beneficiaryIsAgent: true,
+      harmedAgents: 1,
     };
     expect(stuckCaseRefusal('RECORD_EXECUTION', facts('UPHELD'), beyond)).toBe(
       'EXECUTED_BEYOND_DECISION',
@@ -171,6 +173,36 @@ describe('stuckCaseRefusal: the guard matrix', () => {
         'BENEFICIARY_NOT_AN_AGENT',
       );
     }
+  });
+
+  describe("round 2: the payout must match every harmed agent's share", () => {
+    const executed = (beneficiaryIsAgent: boolean, harmedAgents: number): StuckCaseRead => ({
+      ...(READS.EXECUTED as StuckCaseRead),
+      beneficiaryIsAgent,
+      harmedAgents,
+    });
+    it('one harmed agent, paid: passes', () => {
+      expect(
+        stuckCaseRefusal('RECORD_EXECUTION', facts('OVERTURNED'), executed(true, 1)),
+      ).toBeNull();
+    });
+    it('two harmed agents, one paid: refused', () => {
+      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('OVERTURNED'), executed(true, 2))).toBe(
+        'SPLIT_NOT_EXPRESSIBLE',
+      );
+    });
+    it('two harmed agents "both paid": a single record cannot express it, so refused', () => {
+      // One record has one beneficiary; a correct two-way split cannot exist on it.
+      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('UPHELD'), executed(true, 2))).toBe(
+        'SPLIT_NOT_EXPRESSIBLE',
+      );
+    });
+    it('unchecked agent count: refused', () => {
+      const read = { ...(READS.EXECUTED as StuckCaseRead), harmedAgents: undefined };
+      expect(stuckCaseRefusal('RECORD_EXECUTION', facts('OVERTURNED'), read)).toBe(
+        'SPLIT_NOT_EXPRESSIBLE',
+      );
+    });
   });
 
   it('B7: never re-proposes a record the provider disputed or a case they won', () => {
