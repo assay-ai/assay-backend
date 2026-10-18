@@ -114,4 +114,29 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
       .andWhere('(credential.expires_at IS NULL OR credential.expires_at > now())')
       .getCount();
   }
+
+  /**
+   * The largest number of live OAuth grants any one agent holds, for the
+   * `assay_oauth_live_grants_per_agent` gauge (spec §6.7). Live means the same
+   * as in {@link countLiveOAuthForAgent}: not revoked, not expired, not
+   * soft-deleted. An agent is `(organization_id, agent_id)`.
+   *
+   * A **deliberate** cross-tenant aggregate: `this.manager` bypasses the
+   * tenant guard, because a platform metric has no tenant. It returns one
+   * number, never a row of any tenant. `0` when there is no live grant.
+   */
+  async maxLiveOAuthPerAgent(): Promise<number> {
+    const [row] = (await this.manager.query(
+      `SELECT COALESCE(MAX(live."count"), 0)::int AS "max"
+         FROM (SELECT count(*) AS "count"
+                 FROM "agent_credentials"
+                WHERE "issued_via" = $1
+                  AND "revoked_at" IS NULL
+                  AND "deleted_at" IS NULL
+                  AND ("expires_at" IS NULL OR "expires_at" > now())
+                GROUP BY "organization_id", "agent_id") live`,
+      [CredentialIssuedVia.OAUTH],
+    )) as { max: number }[];
+    return row.max;
+  }
 }

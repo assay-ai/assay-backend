@@ -184,6 +184,16 @@ export class MetricsRegistryService {
     registers: [this.registry],
   });
 
+  /**
+   * Spec §6.7: the largest number of live OAuth grants held by one agent,
+   * against the cap of 50 (`OAUTH_MAX_LIVE_GRANTS_PER_AGENT`).
+   */
+  readonly oauthLiveGrantsPerAgent = new Gauge({
+    name: 'assay_oauth_live_grants_per_agent',
+    help: 'The largest number of live OAuth credentials held by one agent. Alert: >= 45.',
+    registers: [this.registry],
+  });
+
   readonly intentsPerMinute = new Gauge({
     name: 'assay_intents_per_minute',
     help: 'payment_intents created in the last minute.',
