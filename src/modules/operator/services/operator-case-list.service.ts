@@ -109,6 +109,7 @@ function toDto(
     proposedAt: row.proposedAt,
     disputedAt: row.disputedAt,
     nextDeadline: row.nextDeadline,
+    onChain: Boolean(row.onChain),
   };
 }
 

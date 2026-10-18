@@ -116,4 +116,11 @@ export class OperatorCaseListRowDto {
       'signed by, or it becomes executable. Null once closed.',
   })
   nextDeadline: Date | null;
+
+  @ApiProperty({
+    description:
+      'Whether a record of the penalty was ever written on chain. False for one still ' +
+      'waiting to go there, whose dates are computed, not the chain’s.',
+  })
+  onChain: boolean;
 }

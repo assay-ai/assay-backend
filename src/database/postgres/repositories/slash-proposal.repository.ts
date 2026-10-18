@@ -86,6 +86,8 @@ export interface OperatorCaseListRow extends OperatorCaseKey {
   readonly proposedAt: Date;
   readonly disputedAt: Date | null;
   readonly nextDeadline: Date | null;
+  /** A record of it was written on chain (`chain_proposed_at` is set). */
+  readonly onChain: boolean;
 }
 
 /**
@@ -588,6 +590,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         SELECT p.id, p.provider_id, p.binding_id, p.penalty_amount, p.asset_id, p.decimals,
                p.proposed_at, p.chain_disputed_at, p.chain_disputed_parts,
                p.chain_executable_at, p.earliest_execution_at, p.platform_decision_due_at,
+               p.chain_proposed_at IS NOT NULL AS on_chain,
                ${OPERATOR_CASE_STATUS_SQL} AS status
           FROM slash_proposals p
          ${inner.length > 0 ? `WHERE ${inner.join(' AND ')}` : ''}
@@ -604,7 +607,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
              b.tool_id AS "toolId", d.penalty_amount::text AS "penaltyAmount",
              d.asset_id AS "assetId", d.decimals AS "decimals", d.status AS "status",
              d.proposed_at AS "proposedAt", d.chain_disputed_at AS "disputedAt",
-             d.next_deadline AS "nextDeadline",
+             d.next_deadline AS "nextDeadline", d.on_chain AS "onChain",
              CASE WHEN d.k1 = 'infinity'::timestamptz THEN 'infinity'
                   ELSE to_char(d.k1 AT TIME ZONE 'UTC', 'YYYY-MM-DD"T"HH24:MI:SS.US"Z"') END AS "k1",
              d.k2::text AS "k2", d.k3::text AS "k3"

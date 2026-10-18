@@ -30,6 +30,7 @@ function row(overrides: Record<string, unknown> = {}) {
     proposedAt: new Date('2026-09-21T08:09:00Z'),
     disputedAt: new Date('2026-09-23T10:00:00Z'),
     nextDeadline: new Date('2026-10-23T10:00:00Z'),
+    onChain: true,
     k1: '2026-10-23T10:00:00.000000Z',
     k2: '-28470000',
     k3: '-1790237340',
@@ -80,6 +81,7 @@ describe('OperatorCaseListService', () => {
         'chainId',
         'disputedAt',
         'nextDeadline',
+        'onChain',
         'proposalId',
         'proposedAt',
         'providerId',
@@ -96,6 +98,7 @@ describe('OperatorCaseListService', () => {
       chainId: 'eip155:84532',
       status: 'CHAIN_DISPUTED',
       amount: { amount: '28470000', asset: ASSET, decimals: 6 },
+      onChain: true,
     });
     expect(JSON.stringify(page)).not.toContain('secret.example');
     expect(JSON.stringify(page)).not.toContain('bindingId');
