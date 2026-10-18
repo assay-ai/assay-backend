@@ -8,6 +8,7 @@ import {
   SlashExecutorPort,
   SlashProposalRequest,
   SlashProposalResult,
+  SlashRecordReadOptions,
   SlashRecordSnapshot,
 } from '@modules/slash/ports/slash-executor.port';
 import { SlashCaps, SlashCapsReaderPort } from '@modules/slash/ports/slash-caps-reader.port';
@@ -59,8 +60,14 @@ export class NamespaceSlashExecutor implements SlashExecutorPort {
     requestId: string,
     provider: string,
     chainId: ChainId,
+    options?: SlashRecordReadOptions,
   ): Promise<SlashRecordSnapshot | null> {
-    return implementationFor(this.byNamespace, chainId).readRecord(requestId, provider, chainId);
+    return implementationFor(this.byNamespace, chainId).readRecord(
+      requestId,
+      provider,
+      chainId,
+      options,
+    );
   }
 
   settlementTreasury(asset: AssetId): Promise<AccountId> {

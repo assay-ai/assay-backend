@@ -39,6 +39,14 @@ export interface StuckCaseRead {
   readonly record: SlashRecordSnapshot | null;
   /** True when the chain could not be read at all (error, timeout, no executor or enrolment). */
   readonly unreadable: boolean;
+  /**
+   * For an `Executed` record: whether its `beneficiary` (who the contract paid
+   * the agent share to) is an agent that paid for a failed call in the
+   * case's window. Only then did the money reach a harmed agent directly, as
+   * the pro-rata model (and the skipped ledger compensation) assumes. Absent
+   * when it was not checked.
+   */
+  readonly beneficiaryIsAgent?: boolean;
 }
 
 export type StuckCaseAction = 'CLOSE_NOTHING_STANDING' | 'RECORD_EXECUTION' | 'REPROPOSE';
@@ -74,7 +82,13 @@ export type StuckCaseRefusal =
   /** The chain took more than the case says is owed: the row cannot record it (S-5 and a human). */
   | 'EXECUTED_BEYOND_DECISION'
   /** The provider disputed the record on chain, or won a dispute of the case (B7). */
-  | 'DISPUTED_ON_CHAIN';
+  | 'DISPUTED_ON_CHAIN'
+  /**
+   * The record paid its agent share to an account that is not a harmed agent
+   * of the window (a vault, escrow or treasury, or unknown): recording it
+   * would leave that money credited to nobody. Needs a compensation decision.
+   */
+  | 'BENEFICIARY_NOT_AN_AGENT';
 
 /** Closed in the app with no penalty: the statuses a nothing-standing cancel may be closed under. */
 export const CLOSABLE_STATUSES: readonly string[] = [
@@ -134,6 +148,7 @@ export function stuckCaseRefusal(
       if (read.state !== ChainRecordState.EXECUTED || status !== 'EXECUTED') return 'NOT_EXECUTED';
       if (proposal.executedAt) return 'ALREADY_RECORDED';
       if (NOT_RECORDABLE.includes(proposal.status)) return 'CASE_STATUS';
+      if (read.beneficiaryIsAgent !== true) return 'BENEFICIARY_NOT_AN_AGENT';
       {
         const applied = minor(read.record?.appliedMinor);
         const owed = minor(proposal.penaltyAmount);

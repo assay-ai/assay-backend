@@ -279,16 +279,21 @@ export class OperatorCaseService {
 
     // No parts: the one record under the case's own request id, read live
     // with a short timeout (the same read the B18 actions take).
-    const read = await readStuckCaseRecord(
-      {
-        parts: { findForEpoch: async () => parts },
-        enrolments: this.enrolments,
-        executor: this.executor,
-        logger: this.logger,
-      },
-      proposal,
-      BRIEF_CHAIN_READ_TIMEOUT_MS,
-    );
+    // The B18 service when present (it also checks an executed record's
+    // beneficiary); otherwise the same read, with that check left undone, so
+    // recording is never offered.
+    const read = this.stuck
+      ? await this.stuck.readLive(proposal, BRIEF_CHAIN_READ_TIMEOUT_MS)
+      : await readStuckCaseRecord(
+          {
+            parts: { findForEpoch: async () => parts },
+            enrolments: this.enrolments,
+            executor: this.executor,
+            logger: this.logger,
+          },
+          proposal,
+          BRIEF_CHAIN_READ_TIMEOUT_MS,
+        );
     return { state: read?.state ?? ChainRecordState.UNKNOWN, read };
   }
 
@@ -604,7 +609,9 @@ export class OperatorCaseService {
         target: `slash_proposal:${proposalId}`,
         payload: { proposalId, body: { ...body }, expected: { ...expectation } },
         requester: operator,
-        reuseWaiting: true,
+        // A second request on the same case at the same epoch returns the
+        // waiting one; one pinned to an older epoch is superseded (review m2).
+        reuseWaiting: { pinnedBy: 'expected' },
       },
       () => attempt(expectation),
     );

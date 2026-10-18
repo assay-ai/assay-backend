@@ -3,6 +3,7 @@ import { In, IsNull, QueryRunner } from 'typeorm';
 
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
+import { SlaWindowCallRepository } from '@database/postgres/repositories/sla-window-call.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import {
@@ -16,6 +17,7 @@ import { OperatorApprover, OperatorSession } from '@modules/operator/ports/opera
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
 
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
+import { normalizeAgentAccount } from '../domain/prorata-slash';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import {
   ChainRecordState,
@@ -25,7 +27,7 @@ import {
   StuckCaseRead,
   stuckCaseRefusal,
 } from '../domain/stuck-case';
-import { SlashErrors } from '../errors/slash.errors';
+import { SlashErrorCode, SlashErrors } from '../errors/slash.errors';
 import { SLASH_EXECUTOR, SlashExecutorPort } from '../ports/slash-executor.port';
 import { reproposalEpochPatch, SlashExecutionService } from './slash-execution.service';
 import { SlashProposalService } from './slash-proposal.service';
@@ -63,6 +65,8 @@ export interface ManualActionResult {
   readonly status: string;
   readonly chainStatus: string;
   readonly chainEpoch: number;
+  /** A repeat of an action that already ran (a double submit): nothing more was written. */
+  readonly alreadyDone?: boolean;
 }
 
 function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
@@ -88,9 +92,13 @@ export async function readStuckCaseRecord(
     readonly enrolments: Pick<ProviderChainEnrolmentRepository, 'findOneBy'>;
     readonly executor: Pick<SlashExecutorPort, 'readRecord'> | null;
     readonly logger: Logger;
+    /** The window's payers, to check an executed record's beneficiary (m5). Absent: unchecked. */
+    readonly windowCalls?: Pick<SlaWindowCallRepository, 'sumFailedPriceByAgent'> | null;
   },
   proposal: SlashProposalEntity,
   timeoutMs: number,
+  // The actions read as of the finalized block (review m3); the brief only shows.
+  options: { readonly finalized?: boolean } = {},
 ): Promise<StuckCaseRead | null> {
   const partitioned =
     proposal.windowId !== null &&
@@ -121,10 +129,30 @@ export async function readStuckCaseRecord(
         proposal.chainRequestId,
         parseAccountId(enrolment.stakeAuthorityAccountId).address,
         chainId,
+        options.finalized ? { finalized: true } : undefined,
       ),
       timeoutMs,
     );
-    return { state: classifyRecord(record, proposal.chainProposedAt), record, unreadable: false };
+    const state = classifyRecord(record, proposal.chainProposedAt);
+    if (record?.status !== 'EXECUTED' || !deps.windowCalls) {
+      return { state, record, unreadable: false };
+    }
+    // Who the contract paid the agent share to. A legacy single record may
+    // name a vault, escrow or treasury: then no agent was paid, and recording
+    // it (whose compensation books nothing for this shape) would leave that
+    // money credited to nobody.
+    const payers = await deps.windowCalls.sumFailedPriceByAgent(
+      proposal.windowId as string,
+      proposal.assetId,
+      proposal.providerId,
+    );
+    const beneficiary = record.beneficiary
+      ? normalizeAgentAccount(`${chainId}:${record.beneficiary}`)
+      : null;
+    const beneficiaryIsAgent =
+      beneficiary !== null &&
+      payers.some((row) => normalizeAgentAccount(row.agentAccount) === beneficiary);
+    return { state, record, unreadable: false, beneficiaryIsAgent };
   } catch (error) {
     deps.logger.warn(
       `slash proposal ${proposal.id}: its on-chain record could not be read ` +
@@ -177,19 +205,30 @@ export class SlashStuckCaseService {
     private readonly overrides: OverrideLogService,
     private readonly execution: SlashExecutionService,
     @Optional() @Inject(SLASH_EXECUTOR) private readonly executor: SlashExecutorPort | null = null,
+    @Optional() private readonly windowCalls: SlaWindowCallRepository | null = null,
   ) {}
 
-  /** The live read, for the brief and the actions. */
-  readLive(proposal: SlashProposalEntity, timeoutMs: number): Promise<StuckCaseRead | null> {
+  /**
+   * The live read, for the brief (`latest`, a short timeout: it only shows)
+   * and the actions (`finalized`: what they act on must not be undone by a
+   * reorg).
+   */
+  readLive(
+    proposal: SlashProposalEntity,
+    timeoutMs: number,
+    options: { readonly finalized?: boolean } = {},
+  ): Promise<StuckCaseRead | null> {
     return readStuckCaseRecord(
       {
         parts: this.parts,
         enrolments: this.enrolments,
         executor: this.executor,
         logger: this.logger,
+        windowCalls: this.windowCalls,
       },
       proposal,
       timeoutMs,
+      options,
     );
   }
 
@@ -217,8 +256,73 @@ export class SlashStuckCaseService {
   ): Promise<ManualActionResult> {
     const action: StuckCaseAction = 'CLOSE_NOTHING_STANDING';
     const proposal = await this.require(organizationId, proposalId);
+    // A repeat of a close that already ran (another tab, another operator):
+    // the same answer, and nothing written twice (review m7).
+    const done = await this.alreadyClosed(proposal, proposal);
+    if (done) return done;
     const read = await this.freshRead(action, proposal);
 
+    try {
+      return await this.closeOnce(
+        operator,
+        organizationId,
+        proposalId,
+        input,
+        requestId,
+        proposal,
+        read,
+      );
+    } catch (error) {
+      // Lost the compare-and-set to a sibling close of the same epoch: that one closed it.
+      if (isRefusal(error, 'CHANGED')) {
+        const now = await this.proposals.findOneScoped(organizationId, proposalId);
+        const sibling = now ? await this.alreadyClosed(proposal, now) : null;
+        if (sibling) return sibling;
+      }
+      throw error;
+    }
+  }
+
+  /**
+   * The case as closed by an earlier `S-15` of the same epoch and request id,
+   * or `null`. Read from the row and the timeline entry that close wrote.
+   */
+  private async alreadyClosed(
+    asked: SlashProposalEntity,
+    now: SlashProposalEntity,
+  ): Promise<ManualActionResult | null> {
+    if (
+      now.chainStatus !== ChainProposalStatus.CANCELLED ||
+      now.chainEpoch !== asked.chainEpoch ||
+      now.chainRequestId !== asked.chainRequestId ||
+      !(await this.lifecycle.hasTimelineEntry(
+        now.organizationId,
+        now.id,
+        'CHAIN_CANCELLED',
+        now.chainRequestId,
+      ))
+    ) {
+      return null;
+    }
+    return {
+      proposalId: now.id,
+      status: now.status,
+      chainStatus: now.chainStatus,
+      chainEpoch: now.chainEpoch,
+      alreadyDone: true,
+    };
+  }
+
+  private closeOnce(
+    operator: OperatorSession,
+    organizationId: string,
+    proposalId: string,
+    input: ManualActionInput,
+    requestId: string | null,
+    proposal: SlashProposalEntity,
+    read: StuckCaseRead,
+  ): Promise<ManualActionResult> {
+    const action: StuckCaseAction = 'CLOSE_NOTHING_STANDING';
     return this.overrides.perform<ManualActionResult>(
       {
         code: 'S-15',
@@ -295,8 +399,10 @@ export class SlashStuckCaseService {
     this.assertExpected(action, proposal, expected);
     const read = await this.freshRead(action, proposal);
     const record = read.record!;
+    // The provider's notice, sent only once everything below has committed.
+    let afterCommit: (() => Promise<void>) | null = null;
 
-    return this.overrides.perform<ManualActionResult>(
+    const result = await this.overrides.perform<ManualActionResult>(
       {
         code: 'S-16',
         actor: operator,
@@ -338,15 +444,25 @@ export class SlashStuckCaseService {
           summary:
             'Its on-chain record reads executed: the penalty was taken while the cancel waited. ' +
             'The execution is recorded on the case.',
-          detail: { ...this.readDetail(fresh, read, 'S-16'), applied: record.appliedMinor },
+          detail: {
+            ...this.readDetail(fresh, read, 'S-16'),
+            applied: record.appliedMinor,
+            beneficiary: record.beneficiary ?? null,
+          },
         });
 
-        // The existing path, on its own connections. It writes no lock this
-        // transaction holds (the case row is read here, never locked), so it
-        // cannot wait on us.
-        await this.execution.recordExecutionWhileCancelWaited(fresh, record);
+        // The existing path, written in THIS transaction (review M1): the
+        // recorded execution, the approval and the register row commit
+        // together or not at all.
+        ({ afterCommit } = await this.execution.recordExecutionWhileCancelWaited(
+          fresh,
+          record,
+          queryRunner,
+        ));
 
-        const after = await this.proposals.findOneScoped(organizationId, proposalId);
+        const after = await queryRunner.manager.findOne(SlashProposalEntity, {
+          where: { organizationId, id: proposalId },
+        });
         if (!after?.executedAt) {
           // The path refused to write it (it logged why): nothing to record.
           throw this.refused(action, proposalId, 'CASE_STATUS', read);
@@ -368,6 +484,8 @@ export class SlashStuckCaseService {
         };
       },
     );
+    await (afterCommit as (() => Promise<void>) | null)?.();
+    return result;
   }
 
   /**
@@ -494,7 +612,7 @@ export class SlashStuckCaseService {
     if (proposal.chainStatus !== ChainProposalStatus.CANCEL_REQUESTED) {
       throw this.refused(action, proposal.id, 'NOT_CANCEL_REQUESTED', null);
     }
-    const read = await this.readLive(proposal, ACTION_CHAIN_READ_TIMEOUT_MS);
+    const read = await this.readLive(proposal, ACTION_CHAIN_READ_TIMEOUT_MS, { finalized: true });
     if (read?.unreadable) {
       throw SlashErrors.chainUnavailable({
         proposalId: proposal.id,
@@ -568,4 +686,12 @@ export class SlashStuckCaseService {
   private changed(action: StuckCaseAction, proposalId: string, read: StuckCaseRead | null) {
     return this.refused(action, proposalId, 'CHANGED', read);
   }
+}
+
+function isRefusal(error: unknown, reason: string): boolean {
+  const context = (error as { publicContext?: Record<string, unknown> } | null)?.publicContext;
+  return (
+    (error as { errorCode?: string } | null)?.errorCode ===
+      SlashErrorCode.SLASH_MANUAL_ACTION_REFUSED && context?.reason === reason
+  );
 }
