@@ -266,8 +266,9 @@ describe('ReceiptService — listed and charged, always both, even when equal', 
 
     expect(receipt.listedPrice.amount).toBe('1000');
     expect(receipt.chargedPrice.amount).toBe('0');
-    // Not withheld: the frontend's "listed − charged = withheld" does not hold (M4).
-    expect(receipt.withheld.amount).toBe('0');
+    // Withheld (NOT_COLLECTED): the hold was released, and the aggregate
+    // `GET /withheld` counts it, so the row must too (UX review B1 I3).
+    expect(receipt.withheld.amount).toBe('1000');
     expect(receipt.forfeited).toBe(true);
     expect(receipt.debt).toBeNull();
     expect(receipt.chargeNote).toBe('provider_forfeit:ProviderBelowMinimumStake');
@@ -310,7 +311,34 @@ describe('ReceiptService — listed and charged, always both, even when equal', 
     expect(receipt.chargedPrice.amount).toBe('0');
     expect(receipt.forfeited).toBe(false);
     expect(receipt.debt).toBe('WRITTEN_OFF');
+    // Still owed, so not withheld.
+    expect(receipt.withheld.amount).toBe('0');
   });
+
+  it.each([
+    ['a late verdict', 'voided:REFUND'],
+    ['an upheld report', 'voided:DISPUTE_UPHELD'],
+  ])(
+    'a debt voided by %s is not charged and withholds the listed price (B1 I3)',
+    async (_, mark) => {
+      const { service } = build(
+        buildIntent({
+          status: PaymentIntentStatus.SETTLED,
+          priceAmount: '1000',
+          holdReleasedAt: new Date('2026-10-16T01:00:00Z'),
+          redemptionLapsedAt: new Date('2026-10-16T00:00:00Z'),
+          redemptionLastError: mark,
+        }),
+        buildRecord({ verdictStatus: 'PASS', stages: passingStages() }),
+      );
+
+      const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+      expect(receipt.chargedPrice.amount).toBe('0');
+      expect(receipt.withheld.amount).toBe('1000');
+      expect(receipt.debt).toBe('VOIDED');
+    },
+  );
 
   it('a plain SETTLED call carries no flag', async () => {
     const { service } = build(

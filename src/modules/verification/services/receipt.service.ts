@@ -12,6 +12,7 @@ import {
   collectionStateOf,
   debtStateOf,
   isChargedWhenSettled,
+  isNotCollected,
 } from '@modules/payment/domain/collection';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import {
@@ -103,7 +104,13 @@ export class ReceiptService {
     // figure computed any other way would not sum to the total shown beside
     // it — the exact "three surfaces, three definitions" failure this
     // exists to prevent. One predicate, `isWithheldIntent`, used by both.
-    const withheld = isWithheldIntent({ status: intent.status, holdId: intent.holdId })
+    // A forfeited or voided-debt call is withheld too (`NOT_COLLECTED`): its
+    // hold was released and the aggregate counts it (UX review 2026-10-18, B1 I3).
+    const withheld = isWithheldIntent({
+      status: intent.status,
+      holdId: intent.holdId,
+      notCollected: isNotCollected(intent),
+    })
       ? listedPrice
       : MoneyUtil.zero(asset, intent.decimals);
 
