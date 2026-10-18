@@ -67,13 +67,16 @@ export class OperatorCaseListService {
     const unique = [...new Set(ids)];
     const map = new Map<string, string>();
     if (unique.length === 0) return map;
-    // `providerId == organizationId` (see `SlashProposalEntity.providerId`), so
-    // each key names its own tenant and the scoped repository's guard holds.
+    // A case's `providerId` is the provider's ORGANIZATION id (see
+    // `SlashProposalEntity.providerId`), not the `providers` row id, so the
+    // name is looked up by tenant; each key still names its own tenant, so the
+    // scoped repository's guard holds. Matching on `id` too found nothing and
+    // the list showed the organization id as the name.
     const providers = await this.providers.find({
-      where: unique.map((id) => ({ organizationId: id, id })),
-      select: { id: true, legalName: true },
+      where: unique.map((id) => ({ organizationId: id })),
+      select: { organizationId: true, legalName: true },
     });
-    for (const provider of providers) map.set(provider.id, provider.legalName);
+    for (const provider of providers) map.set(provider.organizationId, provider.legalName);
     return map;
   }
 
