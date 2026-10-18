@@ -419,7 +419,8 @@ describe('the vendored ABI matches the compiled contracts', () => {
  * 2026-10-13, after D-17/D-18, and again at assay-evm 99f98ed (88 hits: the
  * dispute upgrade's seven appended), and at 6865b24 (95 hits: a4f97ab's and
  * the audit fix round's seven appended), and at 9f036a3 (91: the simplify
- * round removed four). Each selector is `cast sig '<Name>()'`
+ * round removed four), and at 3d8fc8e (95: redeem into hold appended four).
+ * Each selector is `cast sig '<Name>()'`
  * on the pinned Foundry build (1.2.1-nightly), the last seven viem's keccak
  * cross-checked against the compiled ABIs. `target-branch-pin.spec.ts` checks
  * the list against the branch the backend targets (audit T-3).
@@ -525,6 +526,11 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
   ['0x6a3f467f', 'SlashWindowNotDrained'],
   ['0x64ce2c77', 'ArbiterCannotUnblock'],
   ['0xf0318500', 'InvalidArbiter'],
+  // Redeem into hold (3d8fc8e): `cast sig '<Name>()'`.
+  ['0x581fe0ab', 'HeldPaymentNotHeld'],
+  ['0x3e5b55ad', 'HeldNotYetCollectable'],
+  ['0xe8824463', 'HeldRefundWindowClosed'],
+  ['0xb2db24e8', 'InvalidCollectHold'],
   // OpenZeppelin `Ownable2StepUpgradeable`, raised by X402Config's owner doors
   // (D-17). Parameterised: `cast sig 'OwnableUnauthorizedAccount(address)'`
   // and `cast sig 'OwnableInvalidOwner(address)'`.
@@ -534,9 +540,9 @@ const ERROR_PINS: ReadonlyArray<readonly [`0x${string}`, string]> = [
 
 describe('the Errors.sol selector table', () => {
   it('has one entry per declared error and no collisions', () => {
-    // 91 from Errors.sol plus OpenZeppelin's two Ownable errors.
-    expect(EVM_ERROR_BY_SELECTOR.size).toBe(93);
-    expect(ERROR_PINS).toHaveLength(93);
+    // 95 from Errors.sol plus OpenZeppelin's two Ownable errors.
+    expect(EVM_ERROR_BY_SELECTOR.size).toBe(97);
+    expect(ERROR_PINS).toHaveLength(97);
   });
 
   it.each(ERROR_PINS)('%s decodes to %s', (selector, name) => {

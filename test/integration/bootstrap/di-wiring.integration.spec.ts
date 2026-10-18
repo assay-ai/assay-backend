@@ -9,12 +9,15 @@ import { redisConfig } from '@config/redis.config';
 import { DatabaseModule } from '@database/database.module';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ChainsModule } from '@modules/chains/chains.module';
+import { DisputeModule } from '@modules/dispute/dispute.module';
+import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
 import { VAULT_PORT } from '@modules/chains/ports/vault.port';
 import { LedgerModule } from '@modules/ledger/ledger.module';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { PaymentModule } from '@modules/payment/payment.module';
 import { PaymentSchedulerModule } from '@modules/payment/payment-scheduler.module';
 import { VoucherRedemptionJob } from '@modules/payment/jobs/voucher-redemption.job';
+import { HeldCollectionService } from '@modules/payment/services/held-collection.service';
 import { DepositFinalityWatcher } from '@modules/payment/services/deposit-finality-watcher.service';
 import { VoucherRedemptionService } from '@modules/payment/services/voucher-redemption.service';
 import { DepositFinalityService } from '@modules/payment/services/deposit-finality.service';
@@ -79,6 +82,10 @@ import type { Redis } from 'ioredis';
     // `ChainsModule` without re-exporting them, so nothing short of composing
     // this module could have caught it.
     PaymentSchedulerModule,
+    // A buyer's report reaches the escrow hold through `HELD_PAYMENTS`, which
+    // `PaymentModule` does not re-export. The injection used to be optional,
+    // so a missing import filed every rail-B report unheld with nothing failing.
+    DisputeModule,
   ],
 })
 class DiWiringHarnessModule {}
@@ -115,6 +122,15 @@ describe('DI wiring — the real domain modules resolve the vault, deposit, reco
       // exactly the shape of gap that took the deposit scheduler down at boot.
       expect(app.get(VoucherRedemptionService)).toBeInstanceOf(VoucherRedemptionService);
       expect(app.get(VoucherRedemptionJob)).toBeInstanceOf(VoucherRedemptionJob);
+      // Every consumer of the escrow hold gets the real port, not null.
+      for (const consumer of [CallDisputeService, HeldCollectionService, ReconciliationService]) {
+        expect(
+          (app.get(consumer, { strict: false }) as unknown as { held: unknown }).held,
+        ).toBeDefined();
+        expect(
+          (app.get(consumer, { strict: false }) as unknown as { held: unknown }).held,
+        ).not.toBeNull();
+      }
     } finally {
       // `app.close()` alone is not enough: a pre-existing, unrelated Nest
       // quirk — `TypeOrmCoreModule`'s
