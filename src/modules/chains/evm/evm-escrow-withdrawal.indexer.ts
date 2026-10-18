@@ -1,12 +1,12 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { Cron } from '@nestjs/schedule';
-import { EntityManager } from 'typeorm';
 
 import { EscrowWithdrawalEventKind } from '@database/postgres/entities/escrow-withdrawal-event.entity';
 import {
   EscrowWithdrawalEventRepository,
   EscrowWithdrawalEventRow,
 } from '@database/postgres/repositories/escrow-withdrawal-event.repository';
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { AuditLogWriter } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -32,6 +32,13 @@ export const EVM_ESCROW_WITHDRAWAL_CHUNK = 2_000n;
  * `disputeUpgradeBlock` starts: this many blocks behind the safe head.
  */
 export const EVM_ESCROW_WITHDRAWAL_INITIAL_LOOKBACK = 10_000n;
+/** Behind by more than this (the indexed block's age), and the index alerts once per incident. */
+export const EVM_ESCROW_WITHDRAWAL_MAX_LAG_MS = 3_600_000;
+
+export const EVM_ESCROW_WITHDRAWAL_ALERTS = {
+  FAILING: 'escrow_withdrawal_index_failing',
+  LAGGING: 'escrow_withdrawal_index_lagging',
+} as const;
 
 /** One decoded log of {@link X402_ESCROW_WITHDRAWAL_EVENTS_ABI}. */
 export interface EscrowWithdrawalLog {
@@ -79,7 +86,14 @@ export interface EvmEscrowWithdrawalClient {
  * `evm_chain_states.withdrawal_cursor_block`, written with the rows. A chain
  * with no cursor starts at `EVM_CHAIN_STATE_FROM_BLOCK`, else the deployment's
  * `disputeUpgradeBlock`, else {@link EVM_ESCROW_WITHDRAWAL_INITIAL_LOOKBACK}
- * blocks back: withdrawals before that are not in the history.
+ * blocks back: withdrawals before that are not in the history. A reorg deeper
+ * than the confirmation depth could leave a row for a log that no longer
+ * exists; accepted, since the table is read-side history only and the escrow
+ * read stays the authority on the balance and on a pending request.
+ *
+ * A failed tick records `withdrawal_last_error` and alerts once per incident;
+ * an indexed block older than an hour alerts as lag. Claim audit rows are
+ * written after the range commits, so they can never hold the history back.
  */
 @Injectable()
 export class EvmEscrowWithdrawalIndexer {
@@ -91,6 +105,7 @@ export class EvmEscrowWithdrawalIndexer {
     @Inject(EVM_DEPLOYMENTS) private readonly deployments: ReadonlyMap<ChainId, EvmDeployment>,
     @Inject(ENABLED_CHAINS) private readonly enabled: readonly ChainId[],
     private readonly events: EscrowWithdrawalEventRepository,
+    @Inject(ALERT_PORT) private readonly alerts: AlertPort,
     @Optional() private readonly audit: AuditLogWriter | null = null,
     @Optional()
     @Inject(EVM_CHAIN_STATE_INDEXER_CONFIG)
@@ -121,6 +136,19 @@ export class EvmEscrowWithdrawalIndexer {
       } catch (error) {
         // The node's message stays in this log line: an RPC URL can carry a key.
         this.logger.error(`escrow withdrawal index on ${chainId} failed: ${describe(error)}`);
+        await this.events
+          .recordError(chainId, 'the chain or the database could not be read')
+          .catch(() => undefined);
+        await this.alerts
+          .emit({
+            severity: AlertSeverity.WARN,
+            name: EVM_ESCROW_WITHDRAWAL_ALERTS.FAILING,
+            summary: `The escrow withdrawal history on ${chainId} could not be indexed; Funding and Statements stop showing new withdrawals`,
+            details: { chainId },
+            aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+            dedupeKey: chainId,
+          })
+          .catch(() => undefined);
       }
     }
   }
@@ -168,9 +196,29 @@ export class EvmEscrowWithdrawalIndexer {
 
     const rows = await this.toRows(chainId, client, logs);
     // A failure throws before the cursor moves, so the range is read again.
-    await this.events.applyIndexedRange(chainId, end, rows, (manager, inserted) =>
-      this.auditClaims(manager, chainId, inserted),
-    );
+    const inserted = await this.events.applyIndexedRange(chainId, end, rows);
+    // After the commit and never throwing: an audit failure can never hold the history back.
+    await this.auditClaims(chainId, inserted);
+    await this.alertIfLagging(chainId, client, end);
+  }
+
+  /** One alert per incident while the last indexed block is older than an hour. */
+  private async alertIfLagging(
+    chainId: ChainId,
+    client: EvmEscrowWithdrawalClient,
+    end: bigint,
+  ): Promise<void> {
+    const { timestamp } = await client.getBlock({ blockNumber: end });
+    const lagMs = Date.now() - Number(timestamp) * 1000;
+    if (lagMs <= EVM_ESCROW_WITHDRAWAL_MAX_LAG_MS) return;
+    await this.alerts.emit({
+      severity: AlertSeverity.WARN,
+      name: EVM_ESCROW_WITHDRAWAL_ALERTS.LAGGING,
+      summary: `The escrow withdrawal history on ${chainId} is ${Math.round(lagMs / 60_000)} minutes behind the chain`,
+      details: { chainId, indexedThrough: end.toString() },
+      aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+      dedupeKey: chainId,
+    });
   }
 
   private async toRows(
@@ -236,18 +284,26 @@ export class EvmEscrowWithdrawalIndexer {
     return rows;
   }
 
-  /** `withdrawal.claimed` for each newly stored claim of a buyer this platform knows. */
+  /**
+   * `withdrawal.claimed` for each claim this tick stored, of a buyer this
+   * platform knows. After the range is committed, through `recordAfterCommit`
+   * (logs, never throws), so a failing audit row loses only itself.
+   */
   private async auditClaims(
-    manager: EntityManager,
     chainId: ChainId,
     inserted: readonly EscrowWithdrawalEventRow[],
   ): Promise<void> {
     if (!this.audit) return;
     for (const row of inserted) {
       if (row.kind !== EscrowWithdrawalEventKind.WITHDRAWN) continue;
-      const owner = await this.events.escrowOwner(manager, chainId, row.buyerAddress);
+      const owner = await this.events.escrowOwner(chainId, row.buyerAddress).catch((error) => {
+        this.logger.error(
+          `claim ${row.transactionHash}: its owner could not be read: ${describe(error)}`,
+        );
+        return null;
+      });
       if (!owner) continue;
-      await this.audit.record(manager, {
+      await this.audit.recordAfterCommit({
         organizationId: owner.organizationId,
         actor: { type: 'system', id: 'escrow-withdrawal-index' },
         action: 'withdrawal.claimed',

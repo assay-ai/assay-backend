@@ -93,6 +93,7 @@ describe('Escrow withdrawal history, against a real database', () => {
       new Map([[CHAIN, { escrow: ESCROW, disputeUpgradeBlock: 100n } as unknown as EvmDeployment]]),
       [CHAIN],
       events,
+      { emit: async () => undefined } as never,
       new AuditLogWriter(dataSource),
       { fromBlock: new Map(), confirmations: 2 },
     );
