@@ -2,6 +2,8 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
+import { ON_CHAIN_DISPUTE_ASSET_PREFIX } from '@modules/slash/domain/on-chain-dispute';
+
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
 import { SlashProposalEntity } from '../entities/slash-proposal.entity';
 import { VerificationPolicyEntity } from '../entities/verification-policy.entity';
@@ -113,7 +115,11 @@ export class PlatformMetricsRepository {
   }
 
   /**
-   * `openDisputes` / `oldestOpenDisputeAgeSeconds`.
+   * `oldProcessCases` / `oldestOldProcessCaseAgeSeconds` (formerly
+   * `openDisputes`): non-EVM cases still in the in-app objection statuses
+   * DISPUTED, UNDER_REVIEW or AWAITING_SECOND. None of them is on chain or
+   * waiting for the arbiter: an on-chain dispute is mirrored as
+   * `chain_status = 'DISPUTED'` and listed by the arbiter, not here.
    *
    * Age is measured from `disputed_at` — when the case *became* one of these
    * three statuses — not `proposed_at`, which can predate the dispute by
@@ -122,7 +128,7 @@ export class PlatformMetricsRepository {
    * state diagram), so `disputed_at` is expected to be set on every row this
    * matches; `MIN` simply ignores any row where it is not.
    */
-  async openSlashProposalCounts(
+  async oldProcessCaseCounts(
     now: Date,
   ): Promise<{ count: number; oldestAgeSeconds: number | null }> {
     const row = await this.dataSource
@@ -132,9 +138,20 @@ export class PlatformMetricsRepository {
         'EXTRACT(EPOCH FROM (:now::timestamptz - MIN(proposal.disputed_at)))::float8',
         'oldestAgeSeconds',
       )
+      // Exactly the rows the Penalties list reads as `DISPUTED` (its "Old
+      // process" tab, `OPERATOR_CASE_STATUS_SQL`): non-EVM (an EVM case
+      // disputes on chain), and not overtaken by its on-chain record.
       .where('proposal.status IN (:...open)', {
         open: ['DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND'],
       })
+      .andWhere('proposal.asset_id NOT LIKE :onChain', {
+        onChain: `${ON_CHAIN_DISPUTE_ASSET_PREFIX}%`,
+      })
+      .andWhere(
+        "COALESCE(proposal.chain_status, 'NONE') NOT IN " +
+          "('EXECUTED', 'CANCEL_REQUESTED', 'CANCELLED', 'DISPUTED')",
+      )
+      .andWhere("NOT (proposal.chain_status = 'PENDING' AND proposal.chain_disputed_parts > 0)")
       .setParameter('now', now)
       .getRawOne<{ count: number; oldestAgeSeconds: number | string | null }>();
 
