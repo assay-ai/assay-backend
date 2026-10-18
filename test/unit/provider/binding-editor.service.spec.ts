@@ -391,6 +391,48 @@ describe('BindingEditorService.create — what gets stored', () => {
     expect(written).toEqual([]);
   });
 
+  it('refuses an x-assay- mapping header on create, constant or derived, and writes nothing', async () => {
+    const { service, written } = build();
+
+    for (const node of [{ $const: 'forged' }, { $path: '$.query' }]) {
+      await expectErrorCodeAsync(
+        () =>
+          service.create(
+            PROVIDER,
+            SUBJECT,
+            body({
+              requestMapping: {
+                method: 'POST',
+                path: '/search',
+                headers: { 'X-Assay-Agent': node },
+                body: { q: '$.query' },
+              },
+            } as never),
+          ),
+        ProviderErrorCode.PROVIDER_RESERVED_MAPPING_HEADER,
+      );
+    }
+    expect(written).toEqual([]);
+  });
+
+  it('refuses an x-assay- mapping header on update', async () => {
+    const { service, written } = build(row());
+
+    await expectErrorCodeAsync(
+      () =>
+        service.update(PROVIDER, SUBJECT, row().id, {
+          requestMapping: {
+            method: 'POST',
+            path: '/search',
+            headers: { 'x-assay-call-id': { $const: 'forged' } },
+            body: { q: '$.query' },
+          },
+        }),
+      ProviderErrorCode.PROVIDER_RESERVED_MAPPING_HEADER,
+    );
+    expect(written).toEqual([]);
+  });
+
   it('refuses a secret-looking constant header on update', async () => {
     const { service, written } = build(row());
 

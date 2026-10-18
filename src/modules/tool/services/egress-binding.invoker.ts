@@ -1,7 +1,12 @@
 import { Injectable } from '@nestjs/common';
 
 import { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
-import { originOf } from '@modules/provider/credentials/credential-rules';
+import {
+  MAX_OUTBOUND_HEADER_BYTES,
+  headerBytes,
+  isAssayHeaderName,
+  originOf,
+} from '@modules/provider/credentials/credential-rules';
 import { EgressHttpClient } from '@shared/network/egress/egress-http.client';
 import {
   EgressError,
@@ -18,10 +23,13 @@ import {
 import {
   ProviderResponse,
   ResponseBodyKind,
+  TransportError,
+  TransportErrorKind,
   classifyTransportError,
   platformUnavailable,
   readResponseBody,
 } from '../domain/classification';
+import { CredentialRedactor } from '../domain/egress/credential-redaction';
 import { UpstreamRequest, mapRequest } from '../domain/mapping';
 import { BindingInvocation, BindingInvokerPort } from '../ports/binding-invoker.port';
 import { RequestSignerService } from '../request-auth/request-signer.service';
@@ -62,6 +70,12 @@ import { RequestSignerService } from '../request-auth/request-signer.service';
  *
  * A vault failure is a platform fault: the call is not sent and the outcome is
  * a `PLATFORM_UNAVAILABLE` transport error, never counted against the provider.
+ * So is a request whose headers, all layers together, exceed
+ * `MAX_OUTBOUND_HEADER_BYTES` (fixed detail {@link HEADERS_TOO_LARGE}).
+ *
+ * Every response it returns has first been through a {@link CredentialRedactor}
+ * built from the credential values of this call, so an upstream that echoes
+ * its key reaches no report, stored run, response mapping, evidence or log.
  */
 @Injectable()
 export class EgressBindingInvoker implements BindingInvokerPort {
@@ -100,11 +114,13 @@ export class EgressBindingInvoker implements BindingInvokerPort {
     // provider's, and nothing is sent.
     const method = upstream.method.toUpperCase();
     let headers: Record<string, string>;
+    let redactor = CredentialRedactor.NONE;
     let stage = 'credential lookup failed';
     try {
       const credentials = omit?.credentials
         ? []
         : await this.vault.headersFor(binding.providerId, binding.id, originOf(url));
+      redactor = new CredentialRedactor(credentials.map(({ value }) => value));
       headers = outboundHeaders(upstream.headers, credentials, callId, body !== undefined);
       stage = 'request signing failed';
       if (!omit?.signature) {
@@ -112,13 +128,29 @@ export class EgressBindingInvoker implements BindingInvokerPort {
         for (const [name, value] of Object.entries(signature)) setHeader(headers, name, value);
       }
     } catch (error) {
-      return {
-        status: 0,
-        body: { kind: ResponseBodyKind.EMPTY },
-        transportError: platformUnavailable(error, stage),
-      };
+      return platformFailure(platformUnavailable(error, stage));
     }
 
+    // After signing, so the signature headers count. Our fault, not the
+    // provider's: their edge would refuse the request with an error of theirs.
+    if (headerBytes(Object.entries(headers)) > MAX_OUTBOUND_HEADER_BYTES) {
+      return platformFailure({
+        kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+        partialBody: null,
+        detail: HEADERS_TOO_LARGE,
+      });
+    }
+
+    return redactor.response(await this.send(url, method, headers, body, timeoutMs));
+  }
+
+  private async send(
+    url: string,
+    method: string,
+    headers: Record<string, string>,
+    body: string | undefined,
+    timeoutMs: number,
+  ): Promise<ProviderResponse> {
     try {
       const response = await this.http.request({
         url,
@@ -147,6 +179,13 @@ export class EgressBindingInvoker implements BindingInvokerPort {
   }
 }
 
+/** The fixed detail of the header-size platform fault. */
+export const HEADERS_TOO_LARGE = 'outbound request headers exceed 8 KiB';
+
+function platformFailure(transportError: TransportError): ProviderResponse {
+  return { status: 0, body: { kind: ResponseBodyKind.EMPTY }, transportError };
+}
+
 /**
  * Resolve, do not reject — see `BindingInvokerPort.invoke`. The bytes that
  * arrived before the failure are carried for diagnostics and are never parsed:
@@ -166,6 +205,10 @@ function transportFailure(error: unknown): ProviderResponse {
  * The request headers, lower-cased, in wire order: defaults → mapping →
  * credentials → `x-assay-call-id`. The signature headers are appended after.
  *
+ * Mapping headers in the `x-assay-` namespace are dropped: the namespace is
+ * the platform's, a provider's middleware may trust it, and the editor refuses
+ * such names at Save. This is the backstop for rows saved before that rule.
+ *
  * Every write removes the name first, so a later layer wins against an
  * earlier one whatever its case, and lands in its own layer's position.
  * `x-assay-call-id` is written last: a binding is a provider-authored mapping
@@ -181,7 +224,9 @@ function outboundHeaders(
 ): Record<string, string> {
   const headers: Record<string, string> = { accept: 'application/json' };
   if (hasBody) headers['content-type'] = 'application/json';
-  for (const [name, value] of Object.entries(mapped)) setHeader(headers, name, value);
+  for (const [name, value] of Object.entries(mapped)) {
+    if (!isAssayHeaderName(name)) setHeader(headers, name, value);
+  }
   for (const { name, value } of credentials) setHeader(headers, name, value);
   setHeader(headers, 'x-assay-call-id', callId);
   return headers;

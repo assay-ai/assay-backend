@@ -12,11 +12,18 @@ const BINDING = '3f2b8c1e-5a4d-4e6f-9b7a-1c2d3e4f5a6b';
 const SESSION = { organizationId: ORG, credentialId: 'cred-1' } as McpSession;
 const SECRET = 'sk_live_super_secret_value_1234';
 
-function build(options: { endpoint?: string; publishedEndpoint?: string | null } = {}) {
+function build(
+  options: {
+    endpoint?: string;
+    publishedEndpoint?: string | null;
+    mappingHeaders?: Record<string, unknown>;
+  } = {},
+) {
   const row = {
     id: BINDING,
     organizationId: ORG,
     endpoint: options.endpoint ?? 'https://api.a.test/v1',
+    requestMapping: { method: 'GET', headers: options.mappingHeaders },
   };
   const editor = {
     loadEditable: jest.fn(async (organizationId: string, id: string) => {
@@ -100,6 +107,33 @@ describe('ProviderBindingCredentialsController', () => {
     );
     expect(JSON.stringify(thrown)).not.toContain(SECRET);
     expect(String((thrown as Error).message)).not.toContain(SECRET);
+    expect(vault.put).not.toHaveBeenCalled();
+  });
+
+  it("PUT counts the draft mapping's constant headers against the 8 KiB cap", async () => {
+    const { controller, vault } = build({
+      mappingHeaders: { 'X-Big': { $const: 'b'.repeat(4000) } },
+    });
+    let thrown: unknown;
+    try {
+      await controller.put(SESSION, { id: BINDING }, body('https://api.a.test', 'k'.repeat(4000)));
+    } catch (error) {
+      thrown = error;
+    }
+    expect((thrown as { errorCode?: string }).errorCode).toBe(
+      ProviderErrorCode.PROVIDER_INVALID_CREDENTIAL_HEADERS,
+    );
+    expect(String((thrown as Error).message)).toContain('Headers too large');
+    expect(String((thrown as Error).message)).not.toContain('kkkk');
+    expect(vault.put).not.toHaveBeenCalled();
+  });
+
+  it('PUT with an empty value is a 400', async () => {
+    const { controller, vault } = build();
+    await expectErrorCodeAsync(
+      () => controller.put(SESSION, { id: BINDING }, body('https://api.a.test', '')),
+      ProviderErrorCode.PROVIDER_INVALID_CREDENTIAL_HEADERS,
+    );
     expect(vault.put).not.toHaveBeenCalled();
   });
 

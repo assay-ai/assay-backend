@@ -37,6 +37,7 @@ import { ProviderRoutingState } from '../ports/provider.types';
 import { ValidateMappingBodyDto, ValidateMappingResponseDto } from '../dto/validate-mapping.dto';
 import { ProviderErrors } from '../errors/provider.errors';
 import {
+  assayMappingHeaders,
   credentialQueryKeys,
   relayUnsupportedPort,
   secretConstantHeaders,
@@ -733,8 +734,14 @@ export const toSavedDto: (
   publishedEndpoint: string | null,
 ) => SavedToolBindingDto = toDetailDto;
 
-/** Refuses credentials in the endpoint query, constant query entries, and secret-looking constant headers. */
+/**
+ * Refuses credentials in the endpoint query, constant query entries, and
+ * secret-looking constant headers; and any header in Assay's `x-assay-`
+ * namespace, which the invoker also drops on the way out.
+ */
 function assertNoCredentialsInMapping(endpoint: string, mapping: RequestMappingSpec): void {
+  const reserved = assayMappingHeaders(mapping);
+  if (reserved.length > 0) throw ProviderErrors.reservedMappingHeader({ headers: reserved });
   const keys = credentialQueryKeys(endpoint, mapping);
   if (keys.length > 0) throw ProviderErrors.credentialInQuery({ keys });
   const headers = secretConstantHeaders(mapping);
