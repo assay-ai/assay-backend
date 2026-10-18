@@ -32,6 +32,7 @@ interface Figures {
   readonly owedCalls: number;
   readonly inProgressTotal: bigint;
   readonly inProgressCalls: number;
+  readonly freeCalls: number;
 }
 
 const ZERO_FIGURES: Figures = {
@@ -46,6 +47,7 @@ const ZERO_FIGURES: Figures = {
   owedCalls: 0,
   inProgressTotal: 0n,
   inProgressCalls: 0,
+  freeCalls: 0,
 };
 
 /**
@@ -178,6 +180,7 @@ function toFigures(row: ReceiptsSummaryRow): Figures {
     owedCalls: row.owedCalls,
     inProgressTotal: row.inProgressTotal,
     inProgressCalls: row.inProgressCalls,
+    freeCalls: row.freeCalls,
   };
 }
 
@@ -194,6 +197,7 @@ function addFigures(a: Figures, b: Figures): Figures {
     owedCalls: a.owedCalls + b.owedCalls,
     inProgressTotal: a.inProgressTotal + b.inProgressTotal,
     inProgressCalls: a.inProgressCalls + b.inProgressCalls,
+    freeCalls: a.freeCalls + b.freeCalls,
   };
 }
 
@@ -218,6 +222,7 @@ function toFiguresDto(
     owedCalls: figures.owedCalls,
     inProgressTotal: money(figures.inProgressTotal),
     inProgressCalls: figures.inProgressCalls,
+    freeCalls: figures.freeCalls,
     failRate: figures.calls === 0 ? null : figures.refundedCalls / figures.calls,
   };
 }

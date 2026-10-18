@@ -115,6 +115,8 @@ export interface ReceiptsSummaryRow {
   /** Not finished yet (`CREATED`, `FUNDS_SECURED`, `PROVIDER_EXECUTING`, `VERIFYING`). */
   readonly inProgressTotal: bigint;
   readonly inProgressCalls: number;
+  /** Calls listed at zero (free tier). Counted in `calls`, adding nothing to any amount. */
+  readonly freeCalls: number;
 }
 
 /**
@@ -424,6 +426,16 @@ const SUMMARY_OWED_SQL =
   `AND NOT ${PLATFORM_ABSORBED_SQL})`;
 const SUMMARY_CHARGED_SQL = `(intent.status = '${SETTLED_STATUS}' AND NOT ${DEBT_OUTSTANDING_SQL} AND NOT ${NOT_COLLECTED_SQL})`;
 const SUMMARY_IN_PROGRESS_SQL = `(intent.status IN ('CREATED', 'FUNDS_SECURED', 'PROVIDER_EXECUTING', 'VERIFYING'))`;
+
+/**
+ * A terminal call that withheld nothing because nothing was ever reserved
+ * (`domain/withheld.ts`: "a hold must have existed"): an unfunded keyed call
+ * moved `CREATED → EXPIRED`, for one. It never ran, so the summary leaves it
+ * out of every bucket, listed included — otherwise it is "not charged" here
+ * and absent from `GET /withheld` (UX review 2026-10-18, B1 I1).
+ * Bound parameter: `:...withheldStatuses`.
+ */
+const SUMMARY_NEVER_RESERVED_SQL = `(intent.status IN (:...withheldStatuses) AND intent.hold_id IS NULL)`;
 
 /**
  * Read on a `SETTLED` intent: the provider has been credited OUT OF THE
@@ -2434,7 +2446,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         'withheldTotal',
       )
       .addSelect('COUNT(*) FILTER (WHERE intent.status = :refundedStatus)', 'refundedCalls')
+      .addSelect('COUNT(*) FILTER (WHERE intent.price_amount = 0)', 'freeCalls')
       .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere(`NOT ${SUMMARY_NEVER_RESERVED_SQL}`)
       .andWhere(`${CREATED_AT} >= :from`, { from: window.from })
       .andWhere(`${CREATED_AT} < :to`, { to: window.to })
       .setParameters({
@@ -2469,6 +2483,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         owedCalls: string;
         inProgressTotal: string;
         inProgressCalls: string;
+        freeCalls: string;
       }>();
 
     return rows.map((row) => {
@@ -2494,6 +2509,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         owedCalls,
         inProgressTotal,
         inProgressCalls,
+        freeCalls: Number(row.freeCalls ?? 0),
       };
     });
   }

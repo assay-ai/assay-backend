@@ -109,6 +109,38 @@ describe('PaymentIntentRepository.summarizeReceipts SQL', () => {
     );
   });
 
+  it('leaves a terminal call that never reserved money out of every bucket (B1 I1)', async () => {
+    const sql = await renderedSql(ReceiptsSummaryGroupBy.TOOL);
+    const where = sql.slice(sql.indexOf('WHERE'));
+    expect(where).toContain(
+      'NOT ("intent"."status" IN (:...withheldStatuses) AND "intent"."hold_id" IS NULL)',
+    );
+  });
+
+  it('counts free calls by price, not by group', async () => {
+    const sql = await renderedSql(ReceiptsSummaryGroupBy.TOOL);
+    expect(sql).toContain('COUNT(*) FILTER (WHERE "intent"."price_amount" = 0) AS "freeCalls"');
+    const { rows } = await run(ReceiptsSummaryGroupBy.TOOL, [
+      {
+        key: 't',
+        asset: 'a',
+        decimals: '6',
+        calls: '4',
+        listedTotal: '0',
+        chargedTotal: '0',
+        chargedCalls: '4',
+        owedTotal: '0',
+        owedCalls: '0',
+        inProgressTotal: '0',
+        inProgressCalls: '0',
+        withheldTotal: '0',
+        refundedCalls: '0',
+        freeCalls: '4',
+      },
+    ]);
+    expect(rows[0].freeCalls).toBe(4);
+  });
+
   it('derives not charged as listed minus charged, owed and in progress', async () => {
     const { rows } = await run(ReceiptsSummaryGroupBy.TOOL, [
       {
