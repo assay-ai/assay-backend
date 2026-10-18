@@ -30,6 +30,7 @@ import {
   ReassignHandleBodyDto,
   RenameHandleBodyDto,
   ResolveReportBodyDto,
+  TakedownToolBodyDto,
 } from '../dto/operator-moderation.dto';
 import { OperatorOverrideGuard } from '../guards/operator-override.guard';
 import { OperatorSession } from '../ports/operator-session.port';
@@ -93,7 +94,7 @@ export class OperatorModerationController {
   async takedownTool(
     @CurrentOperator() operator: OperatorSession,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: ModerationBodyDto,
+    @Body() body: TakedownToolBodyDto,
   ): Promise<ModerationCutoffDto> {
     return this.moderation.takedownTool(operator, id, body, requestIdOf());
   }

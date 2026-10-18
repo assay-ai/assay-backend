@@ -141,7 +141,15 @@ export class ToolsetModerationService {
    */
   async cutoffTool(
     manager: EntityManager,
-    input: { toolId: string; operatorId: string; note: string; reportId?: string | null },
+    input: {
+      toolId: string;
+      operatorId: string;
+      note: string;
+      reportId?: string | null;
+      /** What the provider is told (`TakedownReasonCode`), and a note for them. */
+      publicReasonCode?: string | null;
+      publicNote?: string | null;
+    },
   ): Promise<{ cutoff: ModerationCutoffEntity; organizationId: string | null }> {
     const tool = await manager
       .createQueryBuilder(ToolEntity, 'tool')
@@ -182,6 +190,8 @@ export class ToolsetModerationService {
       note: input.note,
       reportId: input.reportId ?? null,
       now,
+      publicReasonCode: input.publicReasonCode ?? null,
+      publicNote: input.publicNote ?? null,
     });
     return { cutoff, organizationId: tool.ownerOrgId };
   }
@@ -512,6 +522,22 @@ export class ToolsetModerationService {
     return reverted;
   }
 
+  /** A provider tool's own takedown still in force, newest first; `null` if none. */
+  async standingToolTakedown(
+    manager: EntityManager,
+    toolId: string,
+  ): Promise<ModerationCutoffEntity | null> {
+    return manager.findOne(ModerationCutoffEntity, {
+      where: {
+        targetType: CutoffTarget.TOOL,
+        targetId: toolId,
+        action: CutoffAction.TAKEDOWN,
+        revertedAt: IsNull(),
+      },
+      order: { actedAt: 'DESC' },
+    });
+  }
+
   /**
    * Tells a handle's owner it was taken down, or that the takedown was
    * lifted — after the commit, once per handle. A lifted handle is told only
@@ -552,10 +578,19 @@ export class ToolsetModerationService {
       });
       if (!tool || tool.kind !== 'PROVIDER' || !tool.ownerOrgId) return;
       const facts = { organizationId: tool.ownerOrgId, toolId: tool.id, toolName: tool.name };
+      const standing =
+        kind === 'TAKEN_DOWN'
+          ? await this.standingToolTakedown(this.dataSource.manager, toolId)
+          : null;
       await this.notifications.notify(
         providerToolNotification(
           kind === 'TAKEN_DOWN'
-            ? { ...facts, kind }
+            ? {
+                ...facts,
+                kind,
+                reasonCode: standing?.publicReasonCode ?? null,
+                publicNote: standing?.publicNote ?? null,
+              }
             : { ...facts, kind, serving: tool.status !== 'REMOVED' },
         ),
       );
@@ -615,6 +650,8 @@ export class ToolsetModerationService {
       note: string;
       reportId: string | null;
       now: Date;
+      publicReasonCode?: string | null;
+      publicNote?: string | null;
     },
   ): Promise<ModerationCutoffEntity> {
     const row = manager.create(ModerationCutoffEntity, {
@@ -626,6 +663,8 @@ export class ToolsetModerationService {
       confirmBy: new Date(input.now.getTime() + CUTOFF_CONFIRM_WINDOW_MS),
       note: input.note,
       reportId: input.reportId,
+      publicReasonCode: input.publicReasonCode ?? null,
+      publicNote: input.publicNote ?? null,
     });
     return manager.save(ModerationCutoffEntity, row);
   }

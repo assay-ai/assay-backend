@@ -7,6 +7,7 @@ import {
   OperatorModerationService,
   RENAME_HANDLE_APPROVAL_ACTION,
 } from '@modules/operator/services/operator-moderation.service';
+import { TakedownReasonCode } from '@modules/toolset/domain/takedown-reason';
 import { CutoffAction } from '@modules/toolset/services/toolset-moderation.service';
 
 const OPERATOR: OperatorSession = {
@@ -233,7 +234,12 @@ describe('OperatorModerationService', () => {
     (service as unknown as { cutoffs: { query: unknown } }).cutoffs.query = async () => [
       { ownerOrgId: 'org-1' },
     ];
-    await service.takedownTool(OPERATOR, 'tool-1', BODY, null);
+    await service.takedownTool(
+      OPERATOR,
+      'tool-1',
+      { ...BODY, publicReasonCode: TakedownReasonCode.IMPERSONATION },
+      null,
+    );
     await service.revertCutoff(OPERATOR, 'c1', BODY, null);
     expect(announced).toEqual([
       ['tool-1', 'TAKEN_DOWN'],

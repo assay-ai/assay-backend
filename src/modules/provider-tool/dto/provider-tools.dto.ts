@@ -175,6 +175,19 @@ export class DeprecateProviderToolMajorBodyDto {
   @ApiProperty({ format: 'date-time', description: 'At least 90 days from now (UTC)' })
   @IsISO8601({ strict: true })
   sunsetAt: string;
+
+  @ApiPropertyOptional({
+    format: 'uuid',
+    description:
+      'The tool that replaces this one, named in notices and shown as `replacementName`. It ' +
+      'must serve now (ACTIVE, its current version not deprecated, not removed or taken ' +
+      'down), not be this tool, and reach at least the same audience: a LISTED tool, or one ' +
+      'of your own shared at least as widely as this one. A newer major of this same tool ' +
+      'needs no replacement: it is already the current version',
+  })
+  @IsOptional()
+  @IsUUID()
+  replacementToolId?: string;
 }
 
 export class SetReplacementBodyDto {
@@ -494,6 +507,31 @@ export class ProviderToolQualityDto {
   maxTier: string;
 }
 
+export class ProviderToolTakedownDto {
+  @ApiProperty({ format: 'date-time', description: 'When it was taken down' })
+  at: Date;
+
+  @ApiProperty({
+    enum: [
+      'IMPERSONATION',
+      'MODEL_INSTRUCTIONS',
+      'SECRET_COLLECTION',
+      'HARMFUL_OUTPUT',
+      'LEGAL_REQUEST',
+      'POLICY_VIOLATION',
+    ],
+    nullable: true,
+    description: 'Why, from a closed list. Null on a takedown recorded before reasons were kept',
+  })
+  reasonCode: string | null;
+
+  @ApiProperty({ nullable: true, example: 'Impersonation' })
+  reasonLabel: string | null;
+
+  @ApiProperty({ nullable: true, description: 'A note the operator wrote for you' })
+  publicNote: string | null;
+}
+
 export class ProviderToolDto extends ProviderToolSummaryDto {
   @ApiProperty({ type: [ProviderToolVersionDto], description: 'Published versions, newest first' })
   versions: ProviderToolVersionDto[];
@@ -521,6 +559,15 @@ export class ProviderToolDto extends ProviderToolSummaryDto {
       'The earliest `sunsetAt` a deprecation accepts if sent now: now + the 90-day minimum (UTC)',
   })
   earliestSunsetAt: Date;
+
+  @ApiProperty({
+    type: ProviderToolTakedownDto,
+    nullable: true,
+    description:
+      'The tool’s own takedown while it stands: when and why, as told to you. Never the ' +
+      'operator’s note or identity. Null when it is not taken down',
+  })
+  takedown: ProviderToolTakedownDto | null;
 }
 
 export class ProviderToolGateRequirementDto {

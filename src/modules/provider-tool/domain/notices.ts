@@ -40,6 +40,9 @@ export type ProviderToolNotice =
       readonly organizationId: string;
       readonly toolId: string;
       readonly toolName: string;
+      /** The provider-facing reason (`TakedownReasonCode`) and note, never the operator's. */
+      readonly reasonCode?: string | null;
+      readonly publicNote?: string | null;
     }
   | {
       readonly kind: 'TAKEDOWN_LIFTED';
@@ -114,8 +117,15 @@ export function providerToolNotification(notice: ProviderToolNotice): Notificati
         title: `${notice.toolName} was taken down`,
         body:
           `An operator took ${notice.toolName} down. It is removed from every view and its ` +
-          'calls are refused. Contact support if you think this is a mistake.',
-        payload: { toolId: notice.toolId, toolName: notice.toolName },
+          'calls are refused.' +
+          (notice.publicNote ? ` ${notice.publicNote}` : '') +
+          ' Contact support if you think this is a mistake.',
+        payload: {
+          toolId: notice.toolId,
+          toolName: notice.toolName,
+          reasonCode: notice.reasonCode ?? null,
+          publicNote: notice.publicNote ?? null,
+        },
       };
     case 'TAKEDOWN_LIFTED':
       return {

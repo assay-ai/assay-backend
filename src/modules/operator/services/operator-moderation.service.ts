@@ -27,6 +27,7 @@ import {
   ReassignHandleBodyDto,
   RenameHandleBodyDto,
   ResolveReportBodyDto,
+  TakedownToolBodyDto,
 } from '../dto/operator-moderation.dto';
 import { OperatorApprover, OperatorSession } from '../ports/operator-session.port';
 import { OperatorApprovalService } from './operator-approval.service';
@@ -183,7 +184,7 @@ export class OperatorModerationService {
   async takedownTool(
     operator: OperatorSession,
     toolId: string,
-    body: ModerationBodyDto,
+    body: TakedownToolBodyDto,
     requestId: string | null,
   ): Promise<ModerationCutoffDto> {
     let organizationId: string | null = null;
@@ -205,6 +206,8 @@ export class OperatorModerationService {
           operatorId: operator.operatorId,
           note: body.note,
           reportId: body.reportId ?? null,
+          publicReasonCode: body.publicReasonCode,
+          publicNote: body.publicNote?.trim() || null,
         });
         organizationId = result.organizationId;
         await this.closeReport(queryRunner.manager, body.reportId, 'TAKEN_DOWN', operator);

@@ -241,6 +241,7 @@ export class ProviderToolsController {
       Number(params.version),
       body.sunsetAt,
       auditActorOf(session),
+      body.replacementToolId ?? null,
     );
   }
 
