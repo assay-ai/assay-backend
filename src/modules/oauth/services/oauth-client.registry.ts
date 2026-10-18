@@ -7,29 +7,13 @@ import {
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 
 import { OAUTH_CONFIG, OAuthConfig } from '../config/oauth.config';
-import { builtinClientId, classify } from '../domain/client-id';
+import { builtinClientDocument } from '../domain/builtin-client';
+import { classify } from '../domain/client-id';
 import { matches } from '../domain/redirect-uri';
 import { registrableDomain } from '../domain/registrable-domain';
 import { CimdFetcher } from './cimd.fetcher';
 
-export const BUILTIN_CLIENT_DOCUMENT_NAME = 'Assay app (assay-mcp)';
-const BUILTIN_REDIRECT_URIS = Object.freeze(['http://127.0.0.1/callback']);
 const LOCAL_APP_DISPLAY = 'an app on this computer';
-
-/**
- * The built-in `assay-mcp` client's metadata (§6.3.6 item 3): what its row
- * stores, and what `{MCP}/oauth/clients/assay-mcp` serves.
- */
-export function builtinClientDocument(mcpPublicUrl: string) {
-  return {
-    client_id: builtinClientId(mcpPublicUrl),
-    client_name: BUILTIN_CLIENT_DOCUMENT_NAME,
-    redirect_uris: [...BUILTIN_REDIRECT_URIS],
-    token_endpoint_auth_method: 'none',
-    grant_types: ['authorization_code', 'refresh_token'],
-    response_types: ['code'],
-  };
-}
 
 /** A client the authorization server knows, as `/oauth/authorize` and consent use it. */
 export interface ResolvedClient {
