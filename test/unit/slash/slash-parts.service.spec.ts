@@ -781,6 +781,7 @@ describe('SlashPartsService.buildCancel — nothing standing', () => {
         },
       ),
     };
+    const alerts = { emit: jest.fn(async () => undefined) };
     const lifecycle = {
       appendEventDirect: jest.fn(
         async (entry: { kind: string; detail: Record<string, unknown> }) => {
@@ -796,11 +797,13 @@ describe('SlashPartsService.buildCancel — nothing standing', () => {
       { readCaps: async () => CAPS },
       proposals as never,
       lifecycle as never,
+      alerts as never,
     );
     const proposal = {
       ...ctx.proposal,
       status: 'CANCELLED',
       chainStatus: 'CANCEL_REQUESTED',
+      chainProposedAt: null,
     } as SlashProposalEntity;
     let built: string[] = [];
     ctx.executor.buildCancel = (async (request: { requestId: string }) => {
@@ -814,6 +817,7 @@ describe('SlashPartsService.buildCancel — nothing standing', () => {
       proposal,
       updates,
       events,
+      alerts,
       built: () => built,
       chainStatus: () => chainStatus,
       reset: () => (built = []),
@@ -833,6 +837,7 @@ describe('SlashPartsService.buildCancel — nothing standing', () => {
       organizationId: 'provider-org',
       id: 'case-1',
       chainStatus: 'CANCEL_REQUESTED',
+      chainEpoch: 0,
     });
     expect(ctx.events).toEqual([
       expect.objectContaining({
@@ -846,13 +851,51 @@ describe('SlashPartsService.buildCancel — nothing standing', () => {
     expect(ctx.built()).toEqual([]);
   });
 
-  it('no parts and no record on chain at all: also closed', async () => {
+  it('no parts and no record ever written: closed, and the 409 says so', async () => {
     const ctx = withCaseStore();
     await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
       errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
     });
     expect(ctx.chainStatus()).toBe('CANCELLED');
     expect(ctx.events[0].detail.chainRecord).toBe('NOT_FOUND');
+  });
+
+  // I2: our own mirror says a record landed; a missing slot is an anomaly, not "nothing stands".
+  it('no record, but chain_proposed_at set: refused, not closed, RecordMissing noted', async () => {
+    const ctx = withCaseStore();
+    const landed = { ...ctx.proposal, chainProposedAt: T0 } as SlashProposalEntity;
+    await expect(ctx.service.buildCancel(landed, '0xprovider')).rejects.toMatchObject({
+      errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
+      publicContext: { chainStatus: 'NOT_FOUND', closed: false },
+    });
+    expect(ctx.chainStatus()).toBe('CANCEL_REQUESTED');
+    expect(ctx.events).toEqual([]);
+    expect(ctx.updates).toEqual([
+      {
+        criteria: { organizationId: 'provider-org', id: 'case-1' },
+        patch: { chainLastError: 'RecordMissing' },
+      },
+    ]);
+  });
+
+  it('only a case closed as a decision is closed (OVERTURNED yes, PROPOSED no)', async () => {
+    const overturned = withCaseStore();
+    await expect(
+      overturned.service.buildCancel(
+        { ...overturned.proposal, status: 'OVERTURNED' } as SlashProposalEntity,
+        '0xprovider',
+      ),
+    ).rejects.toMatchObject({ publicContext: { closed: true } });
+    expect(overturned.chainStatus()).toBe('CANCELLED');
+
+    const open = withCaseStore();
+    await expect(
+      open.service.buildCancel(
+        { ...open.proposal, status: 'PROPOSED' } as SlashProposalEntity,
+        '0xprovider',
+      ),
+    ).rejects.toMatchObject({ publicContext: { closed: false } });
+    expect(open.chainStatus()).toBe('CANCEL_REQUESTED');
   });
 
   it.each(['PENDING', 'DISPUTED'] as const)(
@@ -880,13 +923,70 @@ describe('SlashPartsService.buildCancel — nothing standing', () => {
     expect(ctx.events).toEqual([]);
   });
 
-  it('a part that executed keeps the case out of CANCELLED', async () => {
+  // C1: a withdrawn judgement executed while the cancel waited is paged, and said as EXECUTED.
+  it('C1: an executed record is alerted and refused as EXECUTED, never closed', async () => {
+    const ctx = withCaseStore();
+    ctx.executor.records.set(ctx.proposal.chainRequestId, record('EXECUTED'));
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      publicContext: { chainStatus: 'EXECUTED', closed: false },
+    });
+    expect(ctx.alerts.emit).toHaveBeenCalledWith(
+      expect.objectContaining({
+        severity: 'CRITICAL',
+        name: 'slash_executed_while_cancel_waited',
+        details: expect.objectContaining({ proposalId: 'case-1', where: 'record' }),
+      }),
+    );
+    expect(ctx.updates).toEqual([]);
+  });
+
+  it('a part that executed keeps the case out of CANCELLED, and is alerted', async () => {
     const ctx = withCaseStore([[agent(1), '200']]);
     await ctx.planner.propose(ctx.proposal, '0xprovider');
     Object.assign(ctx.parts.rows[0], { chainStatus: 'EXECUTED', executedAt: X0 });
 
     await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
       errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
+      publicContext: { chainStatus: 'EXECUTED', closed: false },
+    });
+    expect(ctx.chainStatus()).toBe('CANCEL_REQUESTED');
+    expect(ctx.alerts.emit).toHaveBeenCalledWith(
+      expect.objectContaining({ details: expect.objectContaining({ where: 'part' }) }),
+    );
+  });
+
+  // I3: a case with parts is judged by its parts, never by a read of the case id.
+  it('a case with parts, all cancelled: closed from the parts, without reading the case id', async () => {
+    const ctx = withCaseStore([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    await ctx.planner.propose(ctx.proposal, '0xprovider');
+    ctx.parts.rows.forEach((row) => Object.assign(row, { chainStatus: 'CANCELLED' }));
+    const reads = jest.spyOn(ctx.executor, 'readRecord');
+
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      publicContext: { chainStatus: 'CANCELLED', closed: true },
+    });
+    expect(reads.mock.calls.map(([id]) => id)).not.toContain(ctx.proposal.chainRequestId);
+    expect(ctx.chainStatus()).toBe('CANCELLED');
+    expect(ctx.events[0]).toMatchObject({
+      summary: expect.stringContaining('Every on-chain record of this penalty is cancelled'),
+      detail: expect.objectContaining({ parts: 2 }),
+    });
+  });
+
+  it('a case with a part still NONE (it may land) is refused, not closed', async () => {
+    const ctx = withCaseStore([
+      [agent(1), '200'],
+      [agent(2), '100'],
+    ]);
+    await ctx.planner.propose(ctx.proposal, '0xprovider');
+    Object.assign(ctx.parts.rows[0], { chainStatus: 'CANCELLED' });
+    Object.assign(ctx.parts.rows[1], { chainStatus: 'NONE' });
+
+    await expect(ctx.service.buildCancel(ctx.proposal, '0xprovider')).rejects.toMatchObject({
+      publicContext: { closed: false },
     });
     expect(ctx.chainStatus()).toBe('CANCEL_REQUESTED');
   });
