@@ -139,10 +139,12 @@ describe('call dispute: the provider’s notice of a new report', () => {
     const notice = providerOpenedNotice(dispute(), 'Other', CONTEXT);
     expect(notice.title).toBe('A buyer reported a bad result on a call you served');
     expect(notice.body).toBe(
-      'The buyer says: "Other". Reply by 2026-10-02 00:00 UTC, or the buyer wins: if you stay ' +
-        'silent, it can be upheld automatically from 2026-10-04 00:00 UTC.',
+      'The buyer says: "Other". Reply by 2026-10-02 00:00 UTC. If you stay silent, it can be ' +
+        'upheld automatically from 2026-10-04 00:00 UTC.',
     );
     expect(notice.body).not.toMatch(/may reply/i);
+    // Owner rule: no outcome is promised.
+    expect(notice.body).not.toMatch(/buyer wins|is upheld automatically at/i);
     expect(notice.payload).toEqual({
       reasonLabel: 'Other',
       replyDueAt: '2026-10-02T00:00:00.000Z',
@@ -157,8 +159,8 @@ describe('call dispute: the provider’s notice of a new report', () => {
       CONTEXT,
     );
     expect(notice.body).toBe(
-      'The buyer says: "Wrong data". Reply by 2026-10-02 00:00 UTC, or an operator decides it ' +
-        'without your side.',
+      'The buyer says: "Wrong data". Reply by 2026-10-02 00:00 UTC. If you stay silent, an ' +
+        'operator decides it without your side.',
     );
     expect(notice.payload.autoUpholdAt).toBeNull();
   });

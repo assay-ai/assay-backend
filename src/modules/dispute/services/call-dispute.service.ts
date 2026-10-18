@@ -1019,12 +1019,14 @@ export function providerOpenedNotice(
   context: CallDisputeViewContext = DEFAULT_VIEW_CONTEXT,
 ): { title: string; body: string; payload: Record<string, unknown> } {
   const { replyDueAt, autoUpholdAt } = slaTimesOf(dispute, context);
+  // Never a promised outcome: the daily auto-uphold cap can hand the report
+  // to an operator, who may reject it.
   const consequence = autoUpholdAt
-    ? `or the buyer wins: if you stay silent, it can be upheld automatically from ${utcMinute(autoUpholdAt)}.`
-    : 'or an operator decides it without your side.';
+    ? `If you stay silent, it can be upheld automatically from ${utcMinute(autoUpholdAt)}.`
+    : 'If you stay silent, an operator decides it without your side.';
   return {
     title: `A buyer reported a bad result on a call you served`,
-    body: `The buyer says: "${reasonLabel}". Reply by ${utcMinute(replyDueAt)}, ${consequence}`,
+    body: `The buyer says: "${reasonLabel}". Reply by ${utcMinute(replyDueAt)}. ${consequence}`,
     payload: {
       reasonLabel,
       replyDueAt: replyDueAt.toISOString(),
