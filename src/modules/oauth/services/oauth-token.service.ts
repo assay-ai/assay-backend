@@ -51,7 +51,12 @@ export type OAuthErrorType =
   | 'unauthorized_client'
   | 'unsupported_grant_type'
   | 'invalid_scope'
-  | 'invalid_target';
+  | 'invalid_target'
+  /**
+   * Not a §5.2 token error: the controller answers it with 503. Used when the
+   * refresh grace entry cannot be stored, so nothing was issued.
+   */
+  | 'temporarily_unavailable';
 
 /** An RFC 6749 §5.2 error body. The description is fixed text: never a token, code or id. */
 export interface OAuthError {
@@ -129,6 +134,13 @@ const SYSTEM_ACTOR = OAUTH_SYSTEM_ACTOR;
 const INVALID_GRANT: OAuthError = { error: 'invalid_grant' };
 const INVALID_TARGET: OAuthError = { error: 'invalid_target' };
 const INVALID_SCOPE: OAuthError = { error: 'invalid_scope' };
+const TEMPORARILY_UNAVAILABLE: OAuthError = { error: 'temporarily_unavailable' };
+
+/** How long a rotation waits for Redis to store its grace entry. */
+export const OAUTH_REFRESH_GRACE_WRITE_TIMEOUT_MS = 500;
+
+/** Thrown inside the rotation transaction to roll it back. */
+class GraceStoreFailed extends Error {}
 const GRANT_LIMIT_REACHED: OAuthError = {
   error: 'invalid_grant',
   error_description: 'grant limit reached',
@@ -305,19 +317,27 @@ export class OAuthTokenService {
     const scope = narrowScope(token.scope, input.scope);
     if (scope === null) return INVALID_SCOPE;
 
-    const rotated = await this.grants.rotateRefresh({
-      parent: token,
-      agentId: credential.agentId,
-      scope,
-      audience: this.config.issuer,
-      beforeCommit: (tokens) =>
-        this.storeGrace(input.refreshToken, tokenHash, {
-          access_token: tokens.accessToken,
-          refresh_token: tokens.refreshToken,
-          expires_in: OAUTH_ACCESS_TOKEN_TTL_SECONDS,
-          scope,
-        }),
-    });
+    let rotated: Awaited<ReturnType<OAuthGrantWriter['rotateRefresh']>>;
+    try {
+      rotated = await this.grants.rotateRefresh({
+        parent: token,
+        agentId: credential.agentId,
+        scope,
+        audience: this.config.issuer,
+        beforeCommit: (tokens) =>
+          this.storeGrace(input.refreshToken, tokenHash, {
+            access_token: tokens.accessToken,
+            refresh_token: tokens.refreshToken,
+            expires_in: OAUTH_ACCESS_TOKEN_TTL_SECONDS,
+            scope,
+          }),
+      });
+    } catch (error) {
+      // Fail closed: no pair is issued without its grace entry. The rotation
+      // rolled back, so the token is unused and the client can retry.
+      if (error instanceof GraceStoreFailed) return TEMPORARILY_UNAVAILABLE;
+      throw error;
+    }
     if (!('reason' in rotated)) {
       return {
         access_token: rotated.tokens.accessToken,
@@ -369,7 +389,12 @@ export class OAuthTokenService {
       const credential = await this.credentials.findOne({
         where: { organizationId: token.organizationId, id: token.credentialId },
       });
-      if (!credential || credential.revokedAt !== null) return;
+      if (!credential) return;
+      if (credential.revokedAt !== null) {
+        // Already revoked: nothing to audit, but finish any token it left.
+        await this.grants.sweepRevokedTokens(credential.id);
+        return;
+      }
       const revoked = await this.grants.revokeGrant({
         organizationId: token.organizationId,
         credentialId: credential.id,
@@ -409,17 +434,21 @@ export class OAuthTokenService {
   }
 
   /**
-   * Stores the sealed pair under the parent's hash for the grace window.
-   * Best effort: without it, a racing presentation gets `invalid_grant` and
-   * nothing is revoked, so a Redis failure must not fail the rotation.
+   * Stores the sealed pair under the parent's hash for the grace window, from
+   * inside the rotation transaction (which holds the parent row, the agent
+   * lock and the credential row). Bounded: an error, or no answer within
+   * {@link OAUTH_REFRESH_GRACE_WRITE_TIMEOUT_MS}, throws `GraceStoreFailed`,
+   * which rolls the rotation back. A pair is never issued without its grace
+   * entry, and a stalled Redis never holds those locks for long.
    */
   private async storeGrace(
     parentToken: string,
     parentHash: string,
     payload: GracePayload,
   ): Promise<void> {
+    let timer: NodeJS.Timeout | undefined;
     try {
-      await this.cache
+      const write = this.cache
         .getRedisClient()
         .set(
           refreshGraceKey(parentHash),
@@ -427,8 +456,18 @@ export class OAuthTokenService {
           'EX',
           OAUTH_REFRESH_GRACE_SECONDS,
         );
+      const timeout = new Promise<never>((_, reject) => {
+        timer = setTimeout(
+          () => reject(new Error('timeout')),
+          OAUTH_REFRESH_GRACE_WRITE_TIMEOUT_MS,
+        );
+      });
+      await Promise.race([write, timeout]);
     } catch {
-      this.logger.warn('refresh grace entry not stored; a racing refresh will be refused');
+      this.logger.warn('refresh grace entry not stored; the rotation is rolled back');
+      throw new GraceStoreFailed();
+    } finally {
+      if (timer) clearTimeout(timer);
     }
   }
 

@@ -56,10 +56,12 @@ describe('OAuth refresh rotation — real database and Redis', () => {
   let credentials: AgentCredentialRepository;
   let service: OAuthTokenService;
   let registry: MetricsRegistryService;
+  let metrics: OAuthMetrics;
   let notifications: NotificationRequest[];
   let bumps: string[];
   let client: OAuthClientEntity;
   let otherClient: OAuthClientEntity;
+  let builtin: OAuthClientEntity;
 
   beforeAll(async () => {
     await dropDatabase(DATABASE);
@@ -95,6 +97,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     credentials = new AgentCredentialRepository(dataSource);
     client = await insertClient();
     otherClient = await insertClient();
+    builtin = await insertClient(OAuthClientKind.BUILTIN);
     await dataSource.query(
       `INSERT INTO "organizations" ("id", "name", "status") VALUES ($1, 'Example org', 'ACTIVE')`,
       [ORGANIZATION],
@@ -105,6 +108,12 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     notifications = [];
     bumps = [];
     registry = new MetricsRegistryService();
+    metrics = new OAuthMetrics(registry);
+    service = makeService(new CacheService(redis));
+  });
+
+  /** The service under test, on `cache` (a real Redis unless a test fakes one). */
+  function makeService(cache: CacheService): OAuthTokenService {
     const audit = new AuditLogWriter(dataSource);
     const notifier: NotificationPort = {
       notify: async (request) => {
@@ -117,7 +126,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
         bumps.push(organizationId);
       },
     } as unknown as AccessEpochService;
-    service = new OAuthTokenService(
+    return new OAuthTokenService(
       dataSource,
       new OAuthAuthorizationCodeRepository(dataSource),
       clients,
@@ -128,11 +137,11 @@ describe('OAuth refresh rotation — real database and Redis', () => {
       new OAuthRefreshTokenRepository(dataSource),
       new OAuthAccessTokenRepository(dataSource),
       credentials,
-      new CacheService(redis),
-      new OAuthMetrics(registry),
+      cache,
+      metrics,
       notifier,
     );
-  });
+  }
 
   afterAll(async () => {
     redis?.disconnect();
@@ -141,11 +150,16 @@ describe('OAuth refresh rotation — real database and Redis', () => {
 
   // ── helpers ────────────────────────────────────────────────────────────────
 
-  async function insertClient(): Promise<OAuthClientEntity> {
+  async function insertClient(
+    kind: OAuthClientKind = OAuthClientKind.DCR,
+  ): Promise<OAuthClientEntity> {
     return clients.save(
       clients.create({
-        clientId: `dcr_${randomBytes(16).toString('base64url').slice(0, 22)}`,
-        kind: OAuthClientKind.DCR,
+        clientId:
+          kind === OAuthClientKind.BUILTIN
+            ? `${MCP}/oauth/clients/assay-mcp`
+            : `dcr_${randomBytes(16).toString('base64url').slice(0, 22)}`,
+        kind,
         clientName: 'Example client',
         clientUri: null,
         redirectUris: [REDIRECT],
@@ -164,7 +178,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
   }
 
   /** A real grant: an approved code, exchanged. */
-  async function grant(): Promise<Grant> {
+  async function grant(oauthClient: OAuthClientEntity = client): Promise<Grant> {
     const agentId = randomUUID();
     await dataSource.query(
       `INSERT INTO "agents"
@@ -177,22 +191,12 @@ describe('OAuth refresh rotation — real database and Redis', () => {
         `eip155:1:0x${randomBytes(20).toString('hex')}`,
       ],
     );
-    const verifier = randomBytes(32).toString('base64url');
-    const code = await service.mintCode(
-      {
-        oauthClientId: client.id,
-        redirectUri: REDIRECT,
-        codeChallenge: createHash('sha256').update(verifier, 'ascii').digest('base64url'),
-        scope: 'assay:agent offline_access',
-        boundOrganizationId: ORGANIZATION,
-      },
-      { agentId, name: 'Example app', approvedBy: APPROVER, replaces: null },
-    );
+    const { code, verifier } = await mintFor(agentId, oauthClient, null);
     const pair = expectPair(
       await service.exchangeCode({
         code,
         redirectUri: REDIRECT,
-        clientId: client.clientId,
+        clientId: oauthClient.clientId,
         codeVerifier: verifier,
       }),
     );
@@ -200,6 +204,25 @@ describe('OAuth refresh rotation — real database and Redis', () => {
       where: { organizationId: ORGANIZATION, agentId },
     });
     return { agentId, credentialId: credential.id, pair };
+  }
+
+  async function mintFor(
+    agentId: string,
+    oauthClient: OAuthClientEntity,
+    replaces: string | null,
+  ): Promise<{ code: string; verifier: string }> {
+    const verifier = randomBytes(32).toString('base64url');
+    const code = await service.mintCode(
+      {
+        oauthClientId: oauthClient.id,
+        redirectUri: REDIRECT,
+        codeChallenge: createHash('sha256').update(verifier, 'ascii').digest('base64url'),
+        scope: 'assay:agent offline_access',
+        boundOrganizationId: ORGANIZATION,
+      },
+      { agentId, name: 'Example app', approvedBy: APPROVER, replaces },
+    );
+    return { code, verifier };
   }
 
   function refresh(refreshToken: string, clientId = client.clientId, scope?: string) {
@@ -328,15 +351,20 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expectPair(await refresh(next.refresh_token));
   });
 
-  it('a narrower scope is honoured; a wider one is invalid_scope', async () => {
+  it('a narrower scope narrows the access token only; a wider one is invalid_scope', async () => {
     const { pair } = await grant();
     const narrowed = expectPair(await refresh(pair.refresh_token, client.clientId, 'assay:agent'));
     expect(narrowed.scope).toBe('assay:agent');
-    expect(
-      await refresh(narrowed.refresh_token, client.clientId, 'assay:agent offline_access'),
-    ).toEqual(expect.objectContaining({ error: 'invalid_scope' }));
-    // The refused request did not burn the token.
-    expectPair(await refresh(narrowed.refresh_token));
+    expect((await accessRow(narrowed.access_token)).scope).toBe('assay:agent');
+    // RFC 6749 §6: the new refresh token keeps the grant's scope.
+    expect((await refreshRow(narrowed.refresh_token)).scope).toBe('assay:agent offline_access');
+
+    expect(await refresh(narrowed.refresh_token, client.clientId, 'assay:agent admin')).toEqual(
+      expect.objectContaining({ error: 'invalid_scope' }),
+    );
+    // The refused request did not burn the token; with no scope, the full one comes back.
+    const full = expectPair(await refresh(narrowed.refresh_token));
+    expect(full.scope).toBe('assay:agent offline_access');
   });
 
   // ── grace ──────────────────────────────────────────────────────────────────
@@ -344,7 +372,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
   it('two refreshes within 30 s → identical pair, one oauth.refresh_grace_used', async () => {
     const { credentialId, pair } = await grant();
     const first = expectPair(await refresh(pair.refresh_token));
-    await ageUse(pair.refresh_token, 29);
+    await ageUse(pair.refresh_token, 20);
     const second = expectPair(await refresh(pair.refresh_token));
     expect(second).toEqual(first);
 
@@ -355,12 +383,12 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expect(JSON.stringify(used[0])).not.toContain(hashOf(pair.refresh_token));
     expect(await counter('assay_oauth_refresh_grace_total')).toBe(1);
 
-    // Still exactly one child.
-    const [{ children }] = (await dataSource.query(
-      `SELECT count(*)::int AS "children" FROM "oauth_refresh_tokens" WHERE "credential_id" = $1`,
+    // Still exactly one child: the parent and its child.
+    const [{ rows }] = (await dataSource.query(
+      `SELECT count(*)::int AS "rows" FROM "oauth_refresh_tokens" WHERE "credential_id" = $1`,
       [credentialId],
-    )) as { children: number }[];
-    expect(children).toBe(2);
+    )) as { rows: number }[];
+    expect(rows).toBe(2);
     expect((await credential(credentialId)).revokedAt).toBeNull();
   });
 
@@ -562,9 +590,13 @@ describe('OAuth refresh rotation — real database and Redis', () => {
       // The rotation holds the refresh row and waits for the agent lock.
       const rotation = refresh(pair.refresh_token);
       await waitForWaiters(holder, 1);
-      // The person revokes the grant meanwhile (client logout here).
-      await service.revoke({ token: pair.refresh_token, clientId: client.clientId });
+      // The person revokes the grant meanwhile (client logout here). Its
+      // transaction skips the held row and commits; its sweep then waits on it.
+      const revocation = service.revoke({ token: pair.refresh_token, clientId: client.clientId });
+      await waitForWaiters(holder, 2);
+      expect((await credential(credentialId)).revokedAt).not.toBeNull();
       await holder.query(`SELECT pg_advisory_unlock(hashtext($1))`, [`oauth-grants:${agentId}`]);
+      await revocation;
 
       expect(await rotation).toEqual({ error: 'invalid_grant' });
       expect((await credential(credentialId)).revokedAt).not.toBeNull();
@@ -578,6 +610,175 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     } finally {
       await holder.end();
     }
+  });
+
+  it('a revocation while the holder of a skipped token rolls back: the sweep revokes it', async () => {
+    const { credentialId, pair } = await grant();
+    const holder = new Client({ ...pgOptions(), database: DATABASE });
+    await holder.connect();
+    try {
+      // A rotation that locked the parent and then dies before reaching the credential.
+      await holder.query('BEGIN');
+      await holder.query(
+        `SELECT 1 FROM "oauth_refresh_tokens" WHERE "token_hash" = $1 FOR UPDATE`,
+        [hashOf(pair.refresh_token)],
+      );
+      const revocation = service.revoke({ token: pair.refresh_token, clientId: client.clientId });
+      // The revoking transaction skipped the row and committed; its sweep now waits on it.
+      await waitForWaiters(holder, 1);
+      expect((await credential(credentialId)).revokedAt).not.toBeNull();
+      await holder.query('ROLLBACK');
+      await revocation;
+
+      expect(await liveTokens(credentialId)).toEqual({ access: 0, refresh: 0 });
+      const revokedAt = (await credential(credentialId)).revokedAt;
+      expect((await refreshRow(pair.refresh_token)).revokedAt).toEqual(revokedAt);
+    } finally {
+      await holder.end();
+    }
+  });
+
+  it('reuse detection against an in-flight child rotation: one detection, no grandchild, nothing live', async () => {
+    const { agentId, credentialId, pair } = await grant();
+    const child = expectPair(await refresh(pair.refresh_token));
+    await dataSource.query(
+      `UPDATE "oauth_access_tokens" SET "first_used_at" = now() WHERE "token_hash" = $1`,
+      [hashOf(child.access_token)],
+    );
+    await ageUse(pair.refresh_token, 31);
+
+    const holder = new Client({ ...pgOptions(), database: DATABASE });
+    await holder.connect();
+    try {
+      await holder.query(`SELECT pg_advisory_lock(hashtext($1))`, [`oauth-grants:${agentId}`]);
+      // The replay holds the parent and queues first on the agent lock …
+      const replay = refresh(pair.refresh_token);
+      await waitForWaiters(holder, 1);
+      // … then the child's rotation holds the child and queues behind it.
+      const rotation = refresh(child.refresh_token);
+      await waitForWaiters(holder, 2);
+      await holder.query(`SELECT pg_advisory_unlock(hashtext($1))`, [`oauth-grants:${agentId}`]);
+
+      expect(await replay).toEqual({ error: 'invalid_grant' });
+      expect(await rotation).toEqual({ error: 'invalid_grant' });
+      expect(await auditOf('oauth.refresh_reuse_detected', credentialId)).toHaveLength(1);
+      expect(notifications).toHaveLength(1);
+      expect(await liveTokens(credentialId)).toEqual({ access: 0, refresh: 0 });
+      const childRow = await refreshRow(child.refresh_token);
+      const [{ grandchildren }] = (await dataSource.query(
+        `SELECT count(*)::int AS "grandchildren" FROM "oauth_refresh_tokens" WHERE "parent_id" = $1`,
+        [childRow.id],
+      )) as { grandchildren: number }[];
+      expect(grandchildren).toBe(0);
+    } finally {
+      await holder.end();
+    }
+  });
+
+  it('two concurrent reuse presentations: the grant is stopped once', async () => {
+    const { credentialId, pair } = await grant();
+    const child = expectPair(await refresh(pair.refresh_token));
+    await dataSource.query(
+      `UPDATE "oauth_access_tokens" SET "first_used_at" = now() WHERE "token_hash" = $1`,
+      [hashOf(child.access_token)],
+    );
+    await ageUse(pair.refresh_token, 31);
+
+    const results = await Promise.all([refresh(pair.refresh_token), refresh(pair.refresh_token)]);
+    expect(results).toEqual([{ error: 'invalid_grant' }, { error: 'invalid_grant' }]);
+    expect(await auditOf('oauth.refresh_reuse_detected', credentialId)).toHaveLength(1);
+    expect(notifications).toHaveLength(1);
+    expect(await counter('assay_oauth_refresh_reuse_total', { kind: 'revoked' })).toBe(1);
+    expect(await counter('assay_oauth_refresh_reuse_total', { kind: 'stale' })).toBe(0);
+    expect(await liveTokens(credentialId)).toEqual({ access: 0, refresh: 0 });
+  });
+
+  it('a code exchange replacing a grant while that grant rotates: no deadlock, nothing of the old grant live', async () => {
+    const old = await grant(builtin);
+    const { code, verifier } = await mintFor(old.agentId, builtin, old.credentialId);
+    const holder = new Client({ ...pgOptions(), database: DATABASE });
+    await holder.connect();
+    try {
+      await holder.query(`SELECT pg_advisory_lock(hashtext($1))`, [`oauth-grants:${old.agentId}`]);
+      // The exchange holds its code row and queues first on the agent lock …
+      const exchange = service.exchangeCode({
+        code,
+        redirectUri: REDIRECT,
+        clientId: builtin.clientId,
+        codeVerifier: verifier,
+      });
+      await waitForWaiters(holder, 1);
+      // … then the old grant's rotation holds its refresh token and queues behind it.
+      const rotation = refresh(old.pair.refresh_token, builtin.clientId);
+      await waitForWaiters(holder, 2);
+      await holder.query(`SELECT pg_advisory_unlock(hashtext($1))`, [
+        `oauth-grants:${old.agentId}`,
+      ]);
+
+      expectPair(await exchange);
+      expect(await rotation).toEqual({ error: 'invalid_grant' });
+      expect((await credential(old.credentialId)).revokedBy).toBe('system:oauth-replaced');
+      expect(await liveTokens(old.credentialId)).toEqual({ access: 0, refresh: 0 });
+      const [{ children }] = (await dataSource.query(
+        `SELECT count(*)::int AS "children" FROM "oauth_refresh_tokens"
+          WHERE "credential_id" = $1 AND "parent_id" IS NOT NULL`,
+        [old.credentialId],
+      )) as { children: number }[];
+      expect(children).toBe(0);
+    } finally {
+      await holder.end();
+    }
+  });
+
+  // ── grace store failures (fail closed) ─────────────────────────────────────
+
+  function failingCache(set: () => Promise<unknown>): CacheService {
+    return {
+      getRedisClient: () => ({ set, get: async () => null }),
+    } as unknown as CacheService;
+  }
+
+  async function expectRolledBack(credentialId: string, token: string, expiresAt: Date | null) {
+    expect((await refreshRow(token)).usedAt).toBeNull();
+    expect((await credential(credentialId)).expiresAt).toEqual(expiresAt);
+    const [{ children }] = (await dataSource.query(
+      `SELECT count(*)::int AS "children" FROM "oauth_refresh_tokens"
+        WHERE "credential_id" = $1 AND "parent_id" IS NOT NULL`,
+      [credentialId],
+    )) as { children: number }[];
+    expect(children).toBe(0);
+  }
+
+  it('a hung Redis: the rotation times out, rolls back and answers temporarily_unavailable', async () => {
+    const { credentialId, pair } = await grant();
+    const expiresAt = (await credential(credentialId)).expiresAt;
+    const hung = makeService(failingCache(() => new Promise(() => undefined)));
+
+    const started = Date.now();
+    expect(
+      await hung.refresh({ refreshToken: pair.refresh_token, clientId: client.clientId }),
+    ).toEqual({
+      error: 'temporarily_unavailable',
+    });
+    const elapsed = Date.now() - started;
+    expect(elapsed).toBeGreaterThanOrEqual(450);
+    expect(elapsed).toBeLessThan(5000);
+    await expectRolledBack(credentialId, pair.refresh_token, expiresAt);
+
+    // Redis back: the same token rotates.
+    expectPair(await refresh(pair.refresh_token));
+  });
+
+  it('a Redis error: the rotation rolls back and answers temporarily_unavailable', async () => {
+    const { credentialId, pair } = await grant();
+    const expiresAt = (await credential(credentialId)).expiresAt;
+    const broken = makeService(failingCache(() => Promise.reject(new Error('redis is down'))));
+
+    expect(
+      await broken.refresh({ refreshToken: pair.refresh_token, clientId: client.clientId }),
+    ).toEqual({ error: 'temporarily_unavailable' });
+    await expectRolledBack(credentialId, pair.refresh_token, expiresAt);
+    expectPair(await refresh(pair.refresh_token));
   });
 
   // ── revocation (RFC 7009) ──────────────────────────────────────────────────
@@ -633,9 +834,9 @@ describe('OAuth refresh rotation — real database and Redis', () => {
   it('no raw token in any column, and no hash outside the hash columns', async () => {
     const { pair } = await grant();
     const next = expectPair(await refresh(pair.refresh_token));
-    await ageUse(pair.refresh_token, 29);
+    await ageUse(pair.refresh_token, 20);
     expectPair(await refresh(pair.refresh_token));
-    await ageUse(pair.refresh_token, 2);
+    await ageUse(pair.refresh_token, 11);
     expect(await refresh(pair.refresh_token)).toEqual({ error: 'invalid_grant' });
     await service.revoke({ token: next.refresh_token, clientId: client.clientId });
 
