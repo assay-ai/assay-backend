@@ -1020,7 +1020,7 @@ export function providerOpenedNotice(
 ): { title: string; body: string; payload: Record<string, unknown> } {
   const { replyDueAt, autoUpholdAt } = slaTimesOf(dispute, context);
   const consequence = autoUpholdAt
-    ? `or the buyer wins: if you stay silent, it is upheld automatically at ${utcMinute(autoUpholdAt)}.`
+    ? `or the buyer wins: if you stay silent, it can be upheld automatically from ${utcMinute(autoUpholdAt)}.`
     : 'or an operator decides it without your side.';
   return {
     title: `A buyer reported a bad result on a call you served`,
