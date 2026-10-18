@@ -267,7 +267,6 @@ export class FakeIntents {
       chainId: input.chainId,
       expiresAt: new Date(Date.now() + 300_000),
       idempotencyKey: input.idempotencyKey ?? null,
-      voucherNonce: input.voucherNonce ?? null,
       voucherSeq: input.voucherSeq ?? null,
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,

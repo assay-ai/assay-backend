@@ -1,4 +1,5 @@
 import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
+import { DropLegacyPaymentSchema1762300000000 } from '@database/postgres/migrations/1762300000000-drop-legacy-payment-schema';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -10,7 +11,7 @@ import { PaymentIntentRedemptionLapsed1760700000000 } from '@database/postgres/m
 import { PaymentIntentDebtReplacing1760800000000 } from '@database/postgres/migrations/1760800000000-payment-intent-debt-replacing';
 import { VoucherSeqDebtReplacement1760900000000 } from '@database/postgres/migrations/1760900000000-voucher-seq-debt-replacement';
 import { IdempotencyKeyLiveIntents1761000000000 } from '@database/postgres/migrations/1761000000000-idempotency-key-live-intents';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomInt, randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
 
@@ -228,6 +229,9 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
       PaymentIntentDisputeHold1761800000000,
       ToolBindingAuthMode1762000000002,
+      // Drops `voucher_nonce` and narrows the rail-B insert rule to the seq,
+      // so this harness refuses what production refuses.
+      DropLegacyPaymentSchema1762300000000,
     ],
     synchronize: false,
     logging: process.env.PAYMENT_TEST_LOGGING === 'true',
@@ -310,7 +314,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
         providerAccount: context.account(`${label}-provider`),
         toolId: context.id(`${label}:tool`),
         rail: PaymentRail.RAIL_B_VOUCHER,
-        // Random, not derived from `label` — like `voucherNonce` below,
+        // Random, not derived from `label` — like `voucherSeq` below,
         // `call_id` carries a real `UNIQUE` index, and `label` is reused
         // across tests (each gets its own `organizationId` from `reset()`,
         // but `call_id` is deliberately *not* scoped to it — see the
@@ -321,11 +325,11 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
         platformFee,
         requestHash: `sha256:${label}`,
         chainId: SOLANA_MAINNET,
-        // `chk_payment_intents_voucher_nonce_rail` refuses a rail-B intent with
-        // no nonce, so one is minted per call. Random rather than derived from
-        // `label`: two intents in one test share a label on purpose, and the
-        // nonce is the one thing about them that must never be shared.
-        voucherNonce: randomBytes(16).toString('hex'),
+        // The rail-B insert trigger refuses an intent with no voucher seq, so
+        // one is minted per call. Random rather than derived from `label`: two
+        // intents in one test share a label on purpose, and the seq is the one
+        // thing about them that must never be shared.
+        voucherSeq: String(randomInt(1, 2 ** 47)),
         ...overrides,
       });
     },

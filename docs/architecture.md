@@ -282,7 +282,7 @@ the first request that raises the code.
 Always throw from **services**, never from controllers:
 ```typescript
 throw PaymentErrors.paymentIntentNotFound({ id });       // 404
-throw PaymentErrors.voucherNonceReplayed({ nonce });     // 409
+throw PaymentErrors.voucherSeqAlreadyUsed({ account });  // 409
 ```
 
 The factory returns a typed function — calling it creates an `AppError` that

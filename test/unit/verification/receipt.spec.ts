@@ -42,7 +42,6 @@ function buildIntent(overrides: Partial<PaymentIntentEntity> = {}): PaymentInten
     chainId: 'solana:mainnet',
     expiresAt: new Date('2026-08-10T10:05:00.000Z'),
     idempotencyKey: null,
-    voucherNonce: null,
     holdId: 'hold-1',
     holdReleasedAt: null,
     classification: null,

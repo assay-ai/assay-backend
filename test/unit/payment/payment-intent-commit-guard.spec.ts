@@ -195,7 +195,6 @@ function harness() {
       chainId: CHAIN_IDS.SOLANA_DEVNET,
       expiresAt: new Date(Date.now() + 300_000),
       idempotencyKey: null,
-      voucherNonce: null,
       holdId: randomUUID(),
       holdReleasedAt: null,
       classification: null,

@@ -282,7 +282,6 @@ export class InMemoryIntentWriter {
       chainId: input.chainId,
       expiresAt: input.expiresAt ?? new Date(),
       idempotencyKey: input.idempotencyKey ?? null,
-      voucherNonce: input.voucherNonce ?? null,
       voucherSeq: input.voucherSeq ?? null,
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,

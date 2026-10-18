@@ -21,9 +21,8 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
  *
  * ## Why the allocator is a Postgres column and not a Redis counter
  *
- * Redis would be the obvious home. `voucher-nonce.store.ts` already gives the
- * argument against that about its own fast layer — *"flushing Redis must never
- * enable a double spend"* — and it applies harder here: an `INCR` counter that
+ * Redis would be the obvious home, and the argument against it is that
+ * flushing Redis must never enable a double spend: an `INCR` counter that
  * a flush resets to 1 re-issues numbers the chain has already redeemed. The
  * buyer signs them, the platform serves the call, and the redemption dies with
  * `VoucherSeqNotIncreasing` — money held, call served, nothing collected.
