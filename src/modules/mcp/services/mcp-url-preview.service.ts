@@ -6,7 +6,8 @@ import { AccountErrors } from '@modules/account/errors/account.errors';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { categoryOf } from '@modules/tool/ports/tool.types';
+import { PricingMode, categoryOf } from '@modules/tool/ports/tool.types';
+import { ToolQuote } from '@modules/tool/services/provider-router.service';
 import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
 import { McpPathKind } from '@modules/toolset/domain/mcp-url';
 import { attributionOf } from '@modules/toolset/domain/attribution';
@@ -26,6 +27,7 @@ import { BaseError } from '@shared/errors/base.error';
 
 import {
   McpUrlPreviewDto,
+  NoFitReason,
   PreviewToolDto,
   PreviewWarningDto,
   ServerInUseDto,
@@ -190,6 +192,7 @@ export class McpUrlPreviewService {
           price: displayOf(listed.find((descriptor) => descriptor.name === tool.name)?._meta),
           providerCount: quote?.routableBindings ?? 0,
           noProviderFits: Boolean(quote && !quote.price && quote.ruleRejections?.length),
+          noFitReason: noFitReasonOf(quote, chainId),
         };
       })
       // `?free=1` serves only what can be free; a paid tool is not in its view.
@@ -238,6 +241,25 @@ export class McpUrlPreviewService {
       this.config.get<string>('auth.privy.defaultChainId') ||
       this.enabledChains[0]) as ChainId;
   }
+}
+
+/**
+ * Why this agent cannot run a tool here, or null when it can (display only:
+ * counts and routing are unchanged).
+ *
+ * - `RULES`: the rules (the agent's, or the tool set's entry) removed every
+ *   provider.
+ * - `OTHER_CHAIN`: the tool has a paid price, but none of its providers settles
+ *   on the agent's own chain, so a paid call from this agent is refused (a
+ *   call pays on `[session.chainId]`). The quote itself counts every enabled
+ *   chain, so this is read from `settlementChains` (review 2026-10-18 F-P1:
+ *   a Solana-only provider and an EVM buyer, both chains enabled).
+ */
+export function noFitReasonOf(quote: ToolQuote | null, agentChain: ChainId): NoFitReason | null {
+  if (!quote) return null;
+  if (!quote.price) return quote.ruleRejections?.length ? 'RULES' : null;
+  if (quote.pricingMode === PricingMode.FREE) return null;
+  return quote.settlementChains.includes(agentChain) ? null : 'OTHER_CHAIN';
 }
 
 function displayOf(meta: Record<string, unknown> | undefined): string | null {

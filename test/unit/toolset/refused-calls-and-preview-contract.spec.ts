@@ -1,4 +1,6 @@
-import { warningsOf } from '@modules/mcp/services/mcp-url-preview.service';
+import { noFitReasonOf, warningsOf } from '@modules/mcp/services/mcp-url-preview.service';
+import { ChainId } from '@modules/chains/ports/caip.types';
+import { ToolQuote } from '@modules/tool/services/provider-router.service';
 import { PricingMode } from '@modules/tool/ports/tool.types';
 import { RefusedCallsService } from '@modules/toolset/services/refused-calls.service';
 
@@ -122,6 +124,7 @@ describe('Connect preview — warnings carry tool ids and names', () => {
     price: '$0.01',
     providerCount: 2,
     noProviderFits: false,
+    noFitReason: null,
     ...over,
   });
 
@@ -138,5 +141,43 @@ describe('Connect preview — warnings carry tool ids and names', () => {
       { code: 'BLOCKED_BY_ACCESS', tools: [{ toolId: 'id-2', name: 'geocode_place' }] },
       { code: 'IGNORED_TOOLS', tools: [{ toolId: null, name: 'nope_tool' }] },
     ]);
+  });
+});
+
+describe('preview noFitReason: why this agent cannot run a tool, display only', () => {
+  const AGENT_CHAIN = 'eip155:46630' as ChainId;
+  const quote = (over: Partial<ToolQuote> = {}) =>
+    ({
+      price: { amount: '100000' },
+      pricingMode: PricingMode.PAID,
+      settlementChains: [AGENT_CHAIN],
+      ...over,
+    }) as unknown as ToolQuote;
+
+  it('is null for a tool that runs, and for no quote at all', () => {
+    expect(noFitReasonOf(null, AGENT_CHAIN)).toBeNull();
+    expect(noFitReasonOf(quote(), AGENT_CHAIN)).toBeNull();
+  });
+
+  it('says RULES when the rules emptied the tool', () => {
+    const emptied = quote({
+      price: null,
+      ruleRejections: [
+        { providerId: 'p1', reason: 'EXCLUDED_BY_AGENT', source: 'AGENT', detail: '' },
+      ] as never,
+    });
+    expect(noFitReasonOf(emptied, AGENT_CHAIN)).toBe('RULES');
+    expect(noFitReasonOf(quote({ price: null }), AGENT_CHAIN)).toBeNull();
+  });
+
+  it('says OTHER_CHAIN for a paid or freemium tool not settled on the agent chain', () => {
+    const elsewhere = { settlementChains: ['solana:devnet' as ChainId] };
+    expect(noFitReasonOf(quote(elsewhere), AGENT_CHAIN)).toBe('OTHER_CHAIN');
+    expect(
+      noFitReasonOf(quote({ ...elsewhere, pricingMode: PricingMode.FREEMIUM }), AGENT_CHAIN),
+    ).toBe('OTHER_CHAIN');
+    expect(
+      noFitReasonOf(quote({ ...elsewhere, pricingMode: PricingMode.FREE }), AGENT_CHAIN),
+    ).toBeNull();
   });
 });
