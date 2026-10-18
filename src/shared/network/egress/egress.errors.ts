@@ -31,6 +31,12 @@ export enum EgressFailureKind {
   TIMEOUT = 'TIMEOUT',
   /** The socket failed: refused, reset, TLS rejected. */
   CONNECTION_FAILED = 'CONNECTION_FAILED',
+  /**
+   * The egress relay could not carry the call: unreachable, refused our token
+   * or envelope, or answered without the protocol's `x-assay-relay` header.
+   * Assay's fault, never the provider's — classified `PLATFORM_UNAVAILABLE`.
+   */
+  RELAY_UNAVAILABLE = 'RELAY_UNAVAILABLE',
 }
 
 export type EgressErrorCode = `EGRESS_${EgressFailureKind}`;
@@ -53,6 +59,7 @@ const STATUS_BY_KIND: Readonly<Record<EgressFailureKind, number>> = Object.freez
   [EgressFailureKind.RESPONSE_TOO_LARGE]: 502,
   [EgressFailureKind.TIMEOUT]: 504,
   [EgressFailureKind.CONNECTION_FAILED]: 502,
+  [EgressFailureKind.RELAY_UNAVAILABLE]: 503,
 });
 
 export interface EgressErrorContext {

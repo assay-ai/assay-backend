@@ -12,6 +12,15 @@ export {
   isEgressLockdownInstalled,
   withSanctionedEgress,
 } from './egress-lockdown';
+export {
+  EGRESS_RELAY_CONFIG,
+  EGRESS_RELAY_TOKEN_ENV,
+  EGRESS_RELAY_URL_ENV,
+  takeEgressRelayConfig,
+} from './egress-relay.config';
+export type { EgressRelayConfig } from './egress-relay.config';
+export { EgressRelayTransport } from './egress-relay.transport';
+export type { RelayHop, RelayedResponse } from './egress-relay.transport';
 export { EgressError, EgressFailureKind, isEgressError } from './egress.errors';
 export type { EgressErrorCode, EgressErrorContext } from './egress.errors';
 export {

@@ -77,6 +77,15 @@ export interface EgressPolicy {
   /** URL schemes permitted. `file:`, `gopher:`, `ftp:`, `data:` are absent on purpose. */
   readonly allowedProtocols: readonly string[];
   readonly limits: EgressLimits;
+  /**
+   * Send each hop through the egress relay (`EGRESS_RELAY_URL`) instead of
+   * dialling the target from this server, so the provider never sees this
+   * server's IP. Set only for provider-typed URLs. Every hop is still resolved,
+   * address-checked and redirect-checked here first; with no relay configured
+   * the call goes direct, and with one configured a relay failure never falls
+   * back to a direct call.
+   */
+  readonly relay?: boolean;
 }
 
 export const DEFAULT_EGRESS_LIMITS: EgressLimits = Object.freeze({
