@@ -32,6 +32,7 @@ import { SlashBeneficiaryService } from './services/slash-beneficiary.service';
 import { SlashCompensationService } from './services/slash-compensation.service';
 import { SlashExecutionService } from './services/slash-execution.service';
 import { SlashPartsService } from './services/slash-parts.service';
+import { SlashStuckCaseService } from './services/slash-stuck-case.service';
 import { SlashProposalService } from './services/slash-proposal.service';
 
 /**
@@ -116,6 +117,8 @@ import { SlashProposalService } from './services/slash-proposal.service';
     SlashCompensationService,
     SlashPartsService,
     SlashExecutionService,
+    // B18: the operator's manual actions on a case stuck behind a cancel.
+    SlashStuckCaseService,
     // The dispute upgrade's unsigned provider and arbiter intents (D-19).
     SlashDisputeIntentService,
   ],
@@ -124,6 +127,7 @@ import { SlashProposalService } from './services/slash-proposal.service';
     SlashCaseService,
     ArbitrationService,
     SlashExecutionService,
+    SlashStuckCaseService,
     SlashDisputeIntentService,
   ],
 })
