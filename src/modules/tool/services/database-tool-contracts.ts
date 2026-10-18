@@ -11,12 +11,14 @@ import { readEpoch } from '@shared/cache/redis-cache/epoch-counter';
 import { toolAtVersion } from '../domain/contract/contract-versions';
 import { compareSemverText } from '../domain/contract/semver';
 import { JsonSchema } from '../domain/mapping/schema-validator';
-import { ToolContractChanges, ToolContractsPort } from '../ports/tool-contracts.port';
+import { RemovedTool, ToolContractChanges, ToolContractsPort } from '../ports/tool-contracts.port';
 import {
   Tool,
   ToolContractVersion,
   ToolExample,
+  ToolKind,
   ToolStatus,
+  cappedProviderTier,
   ToolTier,
   ToolVersionStatus,
   ToolVisibility,
@@ -34,6 +36,8 @@ export const DEFAULT_VERIFICATION_POLICY_ID = 'policy-default';
 
 interface Snapshot {
   readonly tools: ReadonlyMap<string, Tool>;
+  /** REMOVED tools by name, for `TOOL_REMOVED`. */
+  readonly removed: ReadonlyMap<string, RemovedTool>;
   readonly loadedAt: number;
   readonly epoch: string | null;
 }
@@ -69,6 +73,10 @@ export class DatabaseToolContracts implements ToolContractsPort {
     return (await this.current()).tools.get(toolId) ?? null;
   }
 
+  async findRemovedByName(name: string): Promise<RemovedTool | null> {
+    return (await this.current()).removed.get(name) ?? null;
+  }
+
   /** Drop the in-memory copy; the next read reloads. */
   invalidate(): void {
     this.snapshot = null;
@@ -99,9 +107,10 @@ export class DatabaseToolContracts implements ToolContractsPort {
   }
 
   private async load(epoch: string | null): Promise<Snapshot> {
-    const rows = await this.toolRows.find({
-      where: { status: Not(In([ToolStatus.DRAFT, ToolStatus.REMOVED])) },
-    });
+    // One read: the served tools, and the REMOVED ones `TOOL_REMOVED` names.
+    const all = await this.toolRows.find({ where: { status: Not(ToolStatus.DRAFT) } });
+    const rows = all.filter((row) => row.status !== ToolStatus.REMOVED);
+    const removedRows = all.filter((row) => row.status === ToolStatus.REMOVED);
     const versions =
       rows.length === 0
         ? []
@@ -111,8 +120,23 @@ export class DatabaseToolContracts implements ToolContractsPort {
               status: Not(ToolVersionStatus.DRAFT),
             },
           });
+    const tools = buildTools(rows, versions);
     const snapshot: Snapshot = {
-      tools: buildTools(rows, versions),
+      tools,
+      removed: new Map(
+        removedRows.map((row) => [
+          row.name,
+          {
+            id: row.id,
+            name: row.name,
+            visibility: row.visibility,
+            ownerOrgId: row.ownerOrgId ?? null,
+            replacementToolName: row.replacementToolId
+              ? (tools.get(row.replacementToolId)?.name ?? null)
+              : null,
+          },
+        ]),
+      ),
       loadedAt: Date.now(),
       epoch,
     };
@@ -163,7 +187,21 @@ export function buildTools(
 
   const tools = new Map<string, Tool>();
   for (const row of rows) {
-    const served = (byTool.get(row.id) ?? []).sort((a, b) => compareSemverText(b.semver, a.semver));
+    const provider = row.kind === ToolKind.PROVIDER;
+    const served = (byTool.get(row.id) ?? [])
+      // A LISTED provider tool serves approved versions only (§7.6): a
+      // version newer than the approved one is waiting for its review.
+      .filter(
+        (version) =>
+          !provider ||
+          row.visibility !== ToolVisibility.LISTED ||
+          (row.approvedVersion != null && version.version <= row.approvedVersion),
+      )
+      // A provider tool is never GUARANTEED (§7.6), whatever a row says.
+      .map((version) =>
+        provider ? { ...version, tier: cappedProviderTier(version.tier) } : version,
+      )
+      .sort((a, b) => compareSemverText(b.semver, a.semver));
     if (served.length === 0) continue;
     const current =
       served.find((version) => version.version === row.currentVersion) ??
@@ -187,6 +225,9 @@ export function buildTools(
       replacementToolName: row.replacementToolId
         ? (names.get(row.replacementToolId) ?? null)
         : null,
+      kind: provider ? ToolKind.PROVIDER : ToolKind.STANDARD,
+      ownerOrgId: row.ownerOrgId ?? null,
+      ...(provider ? { reviewed: row.approvedVersion != null } : {}),
     };
     tools.set(row.id, toolAtVersion(base, current));
   }

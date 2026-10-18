@@ -118,6 +118,16 @@ export interface Tool {
   readonly replacementToolName?: string | null;
   /** The replacement tool's current version, when it has a served one. */
   readonly replacementToolVersion?: { readonly major: number; readonly semver: string } | null;
+  /** `tools.kind`. Absent reads as STANDARD. */
+  readonly kind?: ToolKind;
+  /** The provider organization behind a PROVIDER tool (`tools.owner_org_id`). */
+  readonly ownerOrgId?: string | null;
+  /**
+   * PROVIDER only: an operator approved a version of it (`approved_version`
+   * set) — the "Not reviewed" badge is its absence (§7.6). Absent on a
+   * STANDARD tool, which needs no review.
+   */
+  readonly reviewed?: boolean;
 }
 
 /** `tool_versions.status`. */
@@ -176,6 +186,37 @@ export function isListedTool(tool: Pick<Tool, 'visibility'>): boolean {
   return (tool.visibility ?? ToolVisibility.LISTED) === ToolVisibility.LISTED;
 }
 
+/** A provider's own tool (`{handle}__{tool}`), rather than a platform contract. */
+export function isProviderTool(tool: Pick<Tool, 'kind'>): boolean {
+  return tool.kind === ToolKind.PROVIDER;
+}
+
+/** A provider tool no operator has approved yet: the "Not reviewed" badge (§7.6). */
+export function isNotReviewed(tool: Pick<Tool, 'kind' | 'reviewed'>): boolean {
+  return isProviderTool(tool) && tool.reviewed !== true;
+}
+
+/**
+ * Whether `organizationId` may see that `tool` exists outside a URL that
+ * serves it: every LISTED tool, and its own provider tools. Everything else
+ * reads exactly like a tool that does not exist.
+ */
+export function isVisibleToOrg(
+  tool: Pick<Tool, 'visibility' | 'ownerOrgId'>,
+  organizationId: string | null | undefined,
+): boolean {
+  if (isListedTool(tool)) return true;
+  return !!organizationId && !!tool.ownerOrgId && tool.ownerOrgId === organizationId;
+}
+
+/** The highest `ToolTier` a provider tool may carry (§7.6): never GUARANTEED. */
+export const PROVIDER_TOOL_MAX_TIER = ToolTier.VERIFIED;
+
+/** `tier` as a provider tool may carry it: GUARANTEED reads as VERIFIED. */
+export function cappedProviderTier(tier: ToolTier): ToolTier {
+  return tier === ToolTier.GUARANTEED ? PROVIDER_TOOL_MAX_TIER : tier;
+}
+
 /** The category of a tool that declares none. */
 export const UNCATEGORISED = 'uncategorised';
 
@@ -184,7 +225,7 @@ export function categoryOf(tool: Pick<Tool, 'category'>): string {
   return tool.category ?? UNCATEGORISED;
 }
 
-/** `tools.kind`. Only STANDARD exists until provider tools (T4). */
+/** `tools.kind`: a platform contract, or one provider's own tool (T4). */
 export enum ToolKind {
   STANDARD = 'STANDARD',
   PROVIDER = 'PROVIDER',

@@ -1,7 +1,7 @@
 import { Inject, Injectable } from '@nestjs/common';
 
 import { TOOL_CATALOGUE, ToolCataloguePort } from '../ports/tool-catalogue.port';
-import { Tool } from '../ports/tool.types';
+import { Tool, isListedTool } from '../ports/tool.types';
 import { ToolListDto, ToolSummaryDto } from '../dto/get-tools.dto';
 
 /**
@@ -23,7 +23,9 @@ export class PublicToolCatalogueService {
   constructor(@Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort) {}
 
   async listTools(): Promise<ToolListDto> {
-    const tools = await this.catalogue.listTools();
+    // The LISTED catalogue: an UNLISTED or PRIVATE provider tool is its
+    // provider's link to share, never a name this list hands out (§7.6).
+    const tools = (await this.catalogue.listTools()).filter(isListedTool);
 
     return { tools: tools.map(toToolSummaryDto) };
   }

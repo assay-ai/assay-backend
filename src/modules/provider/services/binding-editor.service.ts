@@ -38,7 +38,7 @@ import {
 import { PROVIDER_STAKE_SOURCE, ProviderStakePort, stakeKey } from '../ports/provider-stake.port';
 import { PROVIDER_MINIMUM_STAKE_BY_CHAIN } from './provider-stake.service';
 
-import { toDetailDto } from './provider-tool-bindings.service';
+import { canBind, toDetailDto } from './provider-tool-bindings.service';
 import { assertBindingContract, defaultBindingRange } from '../domain/binding-contract';
 
 /**
@@ -191,7 +191,10 @@ export class BindingEditorService {
     body: SaveToolBindingBodyDto,
   ): Promise<SavedToolBindingDto> {
     const tool = await this.catalogue.findTool(body.toolId);
-    if (!tool) {
+    // A provider tool's only implementation is its own provider's binding
+    // (§7.6): anyone else's binding for it is refused exactly like a tool
+    // that does not exist, so the id is no oracle either.
+    if (!tool || !canBind(tool, organizationId)) {
       throw ProviderErrors.bindingToolUnknown({ toolId: body.toolId });
     }
 
