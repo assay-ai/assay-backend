@@ -1,4 +1,4 @@
-import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger, OnModuleInit, Optional } from '@nestjs/common';
 import { timingSafeEqual } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
@@ -48,7 +48,13 @@ export class CredentialVaultService implements OnModuleInit {
    * naming the id and never the key.
    */
   async verifyKeks(): Promise<void> {
-    if (!this.kekChecks) return;
+    if (!this.kekChecks) {
+      Logger.warn(
+        'Vault key check skipped: no key-check repository is available',
+        CredentialVaultService.name,
+      );
+      return;
+    }
     for (const kek of this.keks.byId.values()) {
       const actual = kekCheckValue(kek);
       let stored = await this.kekChecks.findKcv(kek.keyId);

@@ -178,6 +178,12 @@ describe('ProviderBindingCredentialsController', () => {
     expect(JSON.stringify(audit.recordAfterCommit.mock.calls)).not.toContain(SECRET);
   });
 
+  it('DELETE of an origin with no set removes nothing and audits nothing', async () => {
+    const { controller, audit } = build();
+    await controller.remove(SESSION, { id: BINDING }, { origin: 'https://nothing.test' });
+    expect(audit.recordAfterCommit).not.toHaveBeenCalled();
+  });
+
   describe('DELETE of the live origin', () => {
     const live = {
       status: 'ACTIVE',

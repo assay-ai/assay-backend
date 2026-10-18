@@ -1,3 +1,4 @@
+import { Logger } from '@nestjs/common';
 import { randomBytes } from 'node:crypto';
 
 import { kekCheckValue, Kek } from '@modules/provider/credentials/credential-vault.crypto';
@@ -60,5 +61,16 @@ describe('CredentialVaultService.verifyKeks', () => {
     await expect(build([]).vault.verifyKeks()).resolves.toBeUndefined();
     const bare = new CredentialVaultService({} as never, { active: null, byId: new Map() });
     await expect(bare.onModuleInit()).resolves.toBeUndefined();
+  });
+});
+
+describe('CredentialVaultService without a check repository', () => {
+  it('warns once at boot that the key check was skipped', async () => {
+    const warn = jest.spyOn(Logger, 'warn').mockImplementation(() => undefined);
+    const bare = new CredentialVaultService({} as never, { active: null, byId: new Map() });
+    await bare.onModuleInit();
+    expect(warn).toHaveBeenCalledTimes(1);
+    expect(String(warn.mock.calls[0][0])).toContain('key check skipped');
+    warn.mockRestore();
   });
 });

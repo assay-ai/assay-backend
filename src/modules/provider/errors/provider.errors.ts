@@ -239,6 +239,8 @@ export enum ProviderErrorCode {
   PROVIDER_INVALID_CREDENTIAL_HEADERS = 'PROVIDER_INVALID_CREDENTIAL_HEADERS',
   /** A credential set names an origin the binding does not use (draft or published endpoint). */
   PROVIDER_CREDENTIAL_ORIGIN_MISMATCH = 'PROVIDER_CREDENTIAL_ORIGIN_MISMATCH',
+  /** Switching a published binding to API_KEY/BOTH while no credential set exists for its live origin. 400. */
+  PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE = 'PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE',
   /** The credential set for the live (published, ACTIVE) origin cannot be deleted. 409. */
   PROVIDER_CREDENTIAL_ORIGIN_LIVE = 'PROVIDER_CREDENTIAL_ORIGIN_LIVE',
   /** The endpoint names a port the egress relay cannot reach. */
@@ -748,6 +750,11 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     statusCode: 400,
     message: (context?: Record<string, any>) =>
       `Invalid credential headers: ${(context?.problems ?? []).join('; ')}`,
+  },
+  credentialsRequiredForAuthMode: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE,
+    statusCode: 400,
+    message: () => `Add your API key headers for the live address first, then switch to API key.`,
   },
   credentialOriginLive: {
     code: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_LIVE,

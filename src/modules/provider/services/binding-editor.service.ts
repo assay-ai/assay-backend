@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
 
@@ -35,10 +35,12 @@ import {
 } from '../dto/save-tool-binding.dto';
 import { ProviderRoutingState } from '../ports/provider.types';
 import { ValidateMappingBodyDto, ValidateMappingResponseDto } from '../dto/validate-mapping.dto';
+import { CredentialVaultService } from '../credentials/credential-vault.service';
 import { ProviderErrors } from '../errors/provider.errors';
 import {
   assayMappingHeaders,
   credentialQueryKeys,
+  originOf,
   relayUnsupportedPort,
   secretConstantHeaders,
 } from '../credentials/credential-rules';
@@ -159,6 +161,9 @@ export class BindingEditorService {
     private readonly minimumStakeByChain: MinimumStakeByChain,
     @Inject(EGRESS_RELAY_CONFIG)
     private readonly relayConfig: EgressRelayConfig | null,
+    // Lets a save refuse switching a live binding to an API-key mode without a
+    // key for its live origin. Optional only for hand-built harnesses.
+    @Optional() private readonly vault?: CredentialVaultService,
   ) {}
 
   /**
@@ -408,6 +413,23 @@ export class BindingEditorService {
         row.assetId as AssetId,
         row.id,
       );
+    }
+
+    if (
+      (body.authMode === BindingAuthMode.API_KEY || body.authMode === BindingAuthMode.BOTH) &&
+      this.vault &&
+      row.publishedVersion != null &&
+      (row.status === BindingStatus.ACTIVE || row.status === BindingStatus.PAUSED)
+    ) {
+      // The live address is the published revision's. Without a set for it every
+      // live call would turn into a platform fault the moment this saves.
+      const published = await this.publishedEndpoint(row);
+      if (published) {
+        const sets = await this.vault.list(organizationId, row.id);
+        if (!sets.some((set) => set.origin === originOf(published))) {
+          throw ProviderErrors.credentialsRequiredForAuthMode();
+        }
+      }
     }
 
     const changed = versionedSnapshot(row) !== before;

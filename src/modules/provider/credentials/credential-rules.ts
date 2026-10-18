@@ -59,16 +59,21 @@ const SECRET_WORDS: readonly string[] = [
 /** Short words that count only as a whole token (`sig`, not `config`). */
 const SECRET_WHOLE_TOKENS: ReadonlySet<string> = new Set(['sig']);
 
-/** Names that contain a secret word and are not secrets. Compared with `_` as `-`. */
-const SECRET_NAME_ALLOW_LIST: ReadonlySet<string> = new Set([
+/**
+ * Names that contain a secret word and are not secrets. Compared lowercased with
+ * `_` read as `-`. Exported so the frontend rule can mirror it.
+ */
+export const SECRET_NAME_ALLOW_LIST: readonly string[] = [
   'idempotency-key',
-  'x-sort-key',
+  'x-idempotency-key',
   'sort-key',
+  'x-sort-key',
   'cache-key',
+  'x-cache-key',
   'max-tokens',
   'keyword',
   'keywords',
-]);
+];
 
 /**
  * Whether a constant header name or query key looks like it carries a secret.
@@ -76,7 +81,7 @@ const SECRET_NAME_ALLOW_LIST: ReadonlySet<string> = new Set([
  */
 export function looksLikeSecretName(name: string): boolean {
   const normalised = name.toLowerCase().replace(/_/g, '-');
-  if (SECRET_NAME_ALLOW_LIST.has(normalised)) return false;
+  if (SECRET_NAME_ALLOW_LIST.includes(normalised)) return false;
   return normalised
     .split('-')
     .filter((token) => token.length > 0)
