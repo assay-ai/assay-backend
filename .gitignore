@@ -83,3 +83,6 @@ lerna-debug.log*
 # git worktrees
 .worktrees/
 .local/
+
+workers/*/node_modules
+workers/*/.wrangler
