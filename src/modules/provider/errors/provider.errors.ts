@@ -208,6 +208,13 @@ export enum ProviderErrorCode {
    */
   PROVIDER_BINDING_NEVER_PUBLISHED = 'PROVIDER_BINDING_NEVER_PUBLISHED',
   /**
+   * `DELETE …/tool-bindings/:id` on a binding that is more than a draft: it was
+   * published once, or something outside the draft (a call, a check window, a
+   * penalty, a dispute, a stake grace) already names it. Those rows are
+   * evidence, and deleting the binding would orphan or cascade them. 409.
+   */
+  PROVIDER_BINDING_NOT_DISCARDABLE = 'PROVIDER_BINDING_NOT_DISCARDABLE',
+  /**
    * `POST`/`PATCH …/tool-bindings` named a chain the provider has no enrolment
    * on. 409 — see the factory entry.
    */
@@ -630,6 +637,13 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     statusCode: 409,
     message: (context?: Record<string, any>) =>
       `This binding is ${context?.status ?? 'not paused'}, so there is nothing to resume`,
+  },
+  bindingNotDiscardable: {
+    code: ProviderErrorCode.PROVIDER_BINDING_NOT_DISCARDABLE,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `Only a draft that was never published can be discarded; this one ` +
+      `${context?.reason ?? 'is not a draft'}. Pause it instead.`,
   },
   bindingNeverPublished: {
     code: ProviderErrorCode.PROVIDER_BINDING_NEVER_PUBLISHED,

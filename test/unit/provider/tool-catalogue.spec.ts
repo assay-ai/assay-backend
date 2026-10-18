@@ -80,6 +80,10 @@ function build(tools: readonly Tool[], values: Record<string, string> = {}) {
       catalogue,
       configOf(values),
       {} as unknown as BindingVersionRepository,
+      // `discardDraft`'s transaction, vault and audit: not reached by the catalogue.
+      {} as never,
+      {} as never,
+      {} as never,
     ),
     catalogue,
   };

@@ -112,14 +112,23 @@ export function buildBindingEditorHarness(
     }),
     findOne: jest.fn(
       async (
-        _entity: unknown,
-        { where }: { where: { bindingId: string; mappingVersion: number } },
+        entity: unknown,
+        {
+          where,
+        }: {
+          where: { bindingId: string; mappingVersion: number; organizationId: string; id: string };
+        },
       ) =>
-        versions.find(
-          (version) =>
-            version.bindingId === where.bindingId &&
-            version.mappingVersion === where.mappingVersion,
-        ) ?? null,
+        // The save's locked re-read of the binding row, else a stored revision.
+        (entity as { name?: string })?.name === ToolBindingEntity.name
+          ? (rows.find(
+              (row) => row.organizationId === where.organizationId && row.id === where.id,
+            ) ?? null)
+          : (versions.find(
+              (version) =>
+                version.bindingId === where.bindingId &&
+                version.mappingVersion === where.mappingVersion,
+            ) ?? null),
     ),
     maximum: jest.fn(async (_entity: unknown, _column: string, where: { bindingId: string }) => {
       const stored = versions.filter((version) => version.bindingId === where.bindingId);
