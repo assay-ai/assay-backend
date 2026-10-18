@@ -68,7 +68,7 @@ interface ForbiddenShape {
  * `negative` on every rule is what holds that claim to account.
  */
 describe('no cross-chain invariant', () => {
-  const sources = walk(SRC).filter((f) => f.endsWith('.ts') && !f.includes('/_examples/'));
+  const sources = walk(SRC).filter((f) => f.endsWith('.ts'));
 
   const forbidden: readonly ForbiddenShape[] = [
     {

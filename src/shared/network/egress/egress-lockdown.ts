@@ -120,7 +120,7 @@ export class EgressLockdownError extends Error {
  * reaching for the library they know, on the first test run, instead of six
  * months later in production.
  *
- * Same call-it-inline rule as `areExamplesEnabled()`: read at boot, after
+ * Same call-it-inline rule as `areDiagnosticsEnabled()`: read at boot, after
  * `.env` is loaded, never into a top-of-file constant.
  */
 export function isEgressLockdownEnabled(): boolean {

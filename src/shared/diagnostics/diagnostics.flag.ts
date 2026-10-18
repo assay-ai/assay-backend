@@ -1,7 +1,7 @@
 /**
- * Whether the diagnostics probe routes are mounted. Same fail-closed rule as
- * `areExamplesEnabled()`: unset means on outside production and off in it, an
- * explicit `DIAGNOSTICS_ENABLED` wins everywhere.
+ * Whether the diagnostics probe routes are mounted. Fails closed: unset means
+ * on outside production and off in it, an explicit `DIAGNOSTICS_ENABLED` wins
+ * everywhere.
  *
  * Call INLINE in the bootstrap `imports` array, after `ConfigModule.forRoot`.
  */

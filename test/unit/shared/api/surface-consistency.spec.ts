@@ -20,17 +20,8 @@ import { join, relative } from 'path';
 
 const SRC = join(__dirname, '../../../../src');
 
-/**
- * Reference material behind `EXAMPLES_ENABLED`, plus the surfaces that are not
- * this REST API.
- *
- * `_examples/` keeps the starter's offset `PaginationDto` deliberately: it is
- * the worked example of the *framework's* patterns, it is off in production,
- * and rewriting it would misrepresent what the starter ships. It is excluded
- * here rather than exempted silently — see the assertion at the bottom, which
- * pins that `PaginationDto` has no other callers.
- */
-const EXCLUDED_DIRS = ['_examples', 'chains/facilitator', 'mcp'];
+/** The surfaces that are not this REST API. */
+const EXCLUDED_DIRS = ['chains/facilitator', 'mcp'];
 
 function walk(dir: string, out: string[] = []): string[] {
   for (const entry of readdirSync(dir)) {
@@ -942,9 +933,8 @@ describe('REST surface consistency', () => {
     const mentions = (source: string, cls: string) => new RegExp(`\\b${cls}\\b`).test(source);
 
     it('is imported by the API bootstrap, or it is a 404 nobody notices', () => {
-      // Reachability is one hop, not zero. `_examples/` nests `DemoApiModule`
-      // and `PostsApiModule` inside `ExamplesApiModule`, which the bootstrap
-      // imports — they are reachable, and a rule that only reads
+      // Reachability is one hop, not zero: an api module nested inside another
+      // that the bootstrap imports is reachable, and a rule that only reads
       // `app.module.ts` would report a working composition as broken. One hop
       // covers that and still fails the case that actually happens: a module
       // written and imported by nothing at all.
@@ -964,23 +954,6 @@ describe('REST surface consistency', () => {
       });
 
       expect(offenders).toEqual([]);
-    });
-  });
-
-  describe('the excluded reference module stays excluded', () => {
-    // If `_examples` ever stops being the only user of the offset DTO, the
-    // exclusion above is hiding a real divergence rather than describing one.
-    it('the offset PaginationDto has no callers outside _examples', () => {
-      const callers = ALL_TS.filter((file) => /\bPaginationDto\b/.test(read(file)))
-        .map(name)
-        // The reference module, which keeps it deliberately.
-        .filter((file) => !file.includes('_examples'))
-        // Where it is defined, and where the replacement documents why.
-        .filter((file) => !file.startsWith('shared/dtos/'))
-        .filter((file) => !file.startsWith('shared/utils/pagination.util'))
-        .filter((file) => !file.startsWith('shared/api/'));
-
-      expect(callers).toEqual([]);
     });
   });
 });
