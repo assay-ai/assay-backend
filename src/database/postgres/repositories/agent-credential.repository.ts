@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AgentCredentialEntity, CredentialIssuedVia } from '../entities/agent-credential.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -94,14 +94,49 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
    * Scoped to `organizationId` as well as the agent: an agent id is already
    * unique platform-wide, so the tenant predicate is a second safeguard
    * against a caller that did not resolve the agent inside its tenant.
+   *
+   * Pass `manager` to count inside a transaction: the grant writer counts and
+   * inserts under one per-agent lock, so the count must see that transaction.
    */
-  async countLiveOAuthForAgent(organizationId: string, agentId: string): Promise<number> {
-    return this.createQueryBuilder('credential')
+  async countLiveOAuthForAgent(
+    organizationId: string,
+    agentId: string,
+    manager?: EntityManager,
+  ): Promise<number> {
+    const qb = manager
+      ? manager.createQueryBuilder(AgentCredentialEntity, 'credential')
+      : this.createQueryBuilder('credential');
+    return qb
       .where('credential.organization_id = :organizationId', { organizationId })
       .andWhere('credential.agent_id = :agentId', { agentId })
       .andWhere('credential.issued_via = :oauth', { oauth: CredentialIssuedVia.OAUTH })
       .andWhere('credential.revoked_at IS NULL')
       .andWhere('(credential.expires_at IS NULL OR credential.expires_at > now())')
       .getCount();
+  }
+
+  /**
+   * The largest number of live OAuth grants any one agent holds, for the
+   * `assay_oauth_live_grants_per_agent` gauge (spec §6.7). Live means the same
+   * as in {@link countLiveOAuthForAgent}: not revoked, not expired, not
+   * soft-deleted. An agent is `(organization_id, agent_id)`.
+   *
+   * A **deliberate** cross-tenant aggregate: `this.manager` bypasses the
+   * tenant guard, because a platform metric has no tenant. It returns one
+   * number, never a row of any tenant. `0` when there is no live grant.
+   */
+  async maxLiveOAuthPerAgent(): Promise<number> {
+    const [row] = (await this.manager.query(
+      `SELECT COALESCE(MAX(live."count"), 0)::int AS "max"
+         FROM (SELECT count(*) AS "count"
+                 FROM "agent_credentials"
+                WHERE "issued_via" = $1
+                  AND "revoked_at" IS NULL
+                  AND "deleted_at" IS NULL
+                  AND ("expires_at" IS NULL OR "expires_at" > now())
+                GROUP BY "organization_id", "agent_id") live`,
+      [CredentialIssuedVia.OAUTH],
+    )) as { max: number }[];
+    return row.max;
   }
 }
