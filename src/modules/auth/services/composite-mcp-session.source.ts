@@ -77,6 +77,8 @@ export function createSessionSource(
   sources: {
     readonly config: McpSessionPort;
     readonly db: McpSessionPort;
+    /** OAuth access tokens: `both` only, because consent needs the Privy source. */
+    readonly oauth: McpSessionPort;
     readonly privy: McpSessionPort;
   },
 ): McpSessionPort {
@@ -86,7 +88,14 @@ export function createSessionSource(
     case SessionSourceMode.DB:
       return sources.db;
     case SessionSourceMode.BOTH:
-      return new CompositeMcpSessionSource([sources.config, sources.db, sources.privy]);
+      // The API-key and OAuth sources refuse a token of another shape before
+      // any read, so each token reaches its own source and a Privy JWT the last.
+      return new CompositeMcpSessionSource([
+        sources.config,
+        sources.db,
+        sources.oauth,
+        sources.privy,
+      ]);
     case SessionSourceMode.CONFIG:
     default:
       return sources.config;

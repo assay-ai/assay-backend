@@ -189,5 +189,11 @@ export class AgentDelegateService {
     if (session.callerKind !== McpCallerKind.AGENT || !storedCredentialIdOf(session)) {
       throw AccountErrors.delegateBindingAgentOnly();
     }
+    // Only API keys and `assay-mcp` grants may bind a payment key (spec
+    // §6.3.13, H2, R-OA-22). `=== true`, so a session that lacks the field is
+    // refused too. Defence in depth: the API app already refuses other grants.
+    if (session.paymentsAllowed !== true) {
+      throw AccountErrors.delegateClientNotAllowed();
+    }
   }
 }

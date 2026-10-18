@@ -4,9 +4,10 @@
  * `OAUTH_PAYMENT_CLIENTS` (`parsePaymentClientsEnv`), which today admits only
  * the built-in `assay-mcp` client.
  *
- * The one predicate for every place that answers this: delegate binding and
- * the consent page (`OAuthClientRegistry.isPaymentClient`) and the
- * credentials list (`credentialClientView`), so they cannot disagree.
+ * The one predicate for every place that answers this: the OAuth session
+ * source (`paymentsAllowed`, which delegate binding checks), the consent page
+ * (`OAuthClientRegistry.isPaymentClient`) and the credentials list
+ * (`credentialClientView`), so they cannot disagree.
  */
 export function isPaymentClient(paymentClients: readonly string[], clientId: string): boolean {
   return paymentClients.includes(clientId);
