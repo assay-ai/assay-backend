@@ -9,3 +9,4 @@ export * from './contract-versions';
 export * from './contract-diff';
 export * from './contract-shape';
 export * from './served-response';
+export * from './schema-screen';
