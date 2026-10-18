@@ -3084,10 +3084,12 @@ describe('sweepAdminCancels', () => {
     log.mockRestore();
   });
 
-  it('closes a recalculation whose cancel has nothing on chain to cancel, and re-proposes it', async () => {
-    // B11: an UPHELD case behind CANCEL_REQUESTED with no record standing was
-    // refused by the cancel route and never closed by this sweep.
-    const { service, proposals, executor, events } = build();
+  it('never re-proposes a recalculation whose cancelled record cannot be found: left for an operator', async () => {
+    // Review R-C1: a null read here is an anomaly (the record was seen when it
+    // was proposed, and neither cancel nor expire closes the account), not a
+    // confirmed cancel. Treating it as one would put a second record on chain
+    // beside one that may still stand and execute.
+    const { service, proposals, executor } = build();
     proposals.seed(
       standing({
         id: 'p1',
@@ -3097,36 +3099,17 @@ describe('sweepAdminCancels', () => {
       }),
     );
     executor.readRecordImpl = async () => null;
-    executor.appliedMinor = '400000';
 
     await expect(service.sweepAdminCancels(NOW)).resolves.toMatchObject({
-      mirrored: 1,
-      waiting: 0,
+      mirrored: 0,
+      expired: 0,
     });
 
-    expect(events.kinds()).toContain('CHAIN_CANCELLED');
     const saved = proposals.rows.get('p1')!;
-    expect(saved.chainEpoch).toBe(1);
-    expect(executor.proposed).toEqual([expect.objectContaining({ penaltyMinor: '400000' })]);
-  });
-
-  it('does not close a recalculation on an unreadable chain, nor an overturned case with no record', async () => {
-    const unreadable = build();
-    unreadable.proposals.seed(
-      standing({ id: 'p1', status: 'UPHELD', chainStatus: 'CANCEL_REQUESTED' }),
-    );
-    unreadable.executor.readRecordImpl = async () => {
-      throw new Error('rpc down');
-    };
-    await unreadable.service.sweepAdminCancels(NOW);
-    expect(unreadable.proposals.rows.get('p1')!.chainStatus).toBe('CANCEL_REQUESTED');
-    expect(unreadable.executor.proposed).toHaveLength(0);
-
-    const overturned = build();
-    overturned.proposals.seed(standing({ id: 'p1', chainStatus: 'CANCEL_REQUESTED' }));
-    overturned.executor.readRecordImpl = async () => null;
-    await overturned.service.sweepAdminCancels(NOW);
-    expect(overturned.proposals.rows.get('p1')!.chainStatus).toBe('CANCEL_REQUESTED');
+    expect(saved.chainStatus).toBe('CANCEL_REQUESTED');
+    expect(saved.status).toBe('UPHELD');
+    expect(saved.chainEpoch).toBe(0);
+    expect(executor.proposed).toHaveLength(0);
   });
 
   it('S-2: does not re-propose an overturned case whose cancel landed', async () => {

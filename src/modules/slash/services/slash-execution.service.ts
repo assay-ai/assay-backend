@@ -2006,16 +2006,6 @@ export class SlashExecutionService {
         const proposal = await this.proposals.findOneScoped(row.organizationId, row.id);
         if (!proposal || proposal.chainStatus !== ChainProposalStatus.CANCEL_REQUESTED) continue;
 
-        // A recalculation asked for a cancel, and the chain holds nothing for
-        // it (no record, or a partitioned case with no parts): nobody can sign
-        // a cancel of nothing, and nothing will ever expire. Close the mirror
-        // so the decided figure can be proposed again.
-        if (await this.closeRecalculationWithNothingStanding(proposal)) {
-          mirrored += 1;
-          await this.reproposeIfRecalculated(proposal, now);
-          continue;
-        }
-
         if (await this.mirrorRecordThatLeftPending(proposal, 'ADMIN_CANCEL')) {
           mirrored += 1;
           await this.reproposeIfRecalculated(proposal, now);
@@ -2045,77 +2035,6 @@ export class SlashExecutionService {
     }
 
     return { mirrored, expired, waiting };
-  }
-
-  /**
-   * An `UPHELD` case (a downward recalculation) behind a `CANCEL_REQUESTED`
-   * mirror whose record a live chain read finds absent: there is nothing to
-   * cancel and nothing to expire, so without this the case waits forever.
-   *
-   * Only on a successful read that returns no record — an unreadable chain is
-   * not "nothing standing" — and only through a compare-and-set on both the
-   * case status and the mirror, so a cancel mirrored or a status moved in the
-   * meantime is left alone. Writes a `CHAIN_CANCELLED` timeline entry. Never
-   * throws.
-   */
-  private async closeRecalculationWithNothingStanding(
-    proposal: SlashProposalEntity,
-  ): Promise<boolean> {
-    if (proposal.status !== SlashProposalStatus.UPHELD) return false;
-    let record: SlashRecordSnapshot | null;
-    try {
-      record = await this.readCaseRecord(proposal);
-    } catch {
-      return false;
-    }
-    if (record !== null) return false;
-
-    try {
-      const result = await this.proposals.update(
-        {
-          organizationId: proposal.organizationId,
-          id: proposal.id,
-          status: SlashProposalStatus.UPHELD,
-          chainStatus: ChainProposalStatus.CANCEL_REQUESTED,
-        },
-        { chainStatus: ChainProposalStatus.CANCELLED, chainLastError: null },
-      );
-      if (!result.affected) return false;
-    } catch (error) {
-      this.logger.error(
-        `slash proposal ${proposal.id}: nothing stands on chain but its cancel could not be closed`,
-        error instanceof Error ? error.stack : String(error),
-      );
-      return false;
-    }
-
-    // Past the compare-and-set the mirror is closed; a lost timeline entry
-    // must not undo the re-proposal that follows.
-    try {
-      await this.lifecycle.appendEventDirect({
-        organizationId: proposal.organizationId,
-        proposalId: proposal.id,
-        occurredAt: new Date(),
-        kind: 'CHAIN_CANCELLED',
-        actorType: 'system',
-        actorId: null,
-        summary:
-          'Nothing stands on chain for this case, so the requested cancel is closed and the ' +
-          'recalculated penalty can be proposed again',
-        detail: {
-          requestId: proposal.chainRequestId,
-          chainRecord: null,
-          reason: 'NOTHING_STANDING',
-        },
-      });
-    } catch (error) {
-      this.logger.error(
-        `slash proposal ${proposal.id}: its cancel was closed (nothing standing) but the ` +
-          `timeline entry was not written`,
-        error instanceof Error ? error.stack : String(error),
-      );
-    }
-    return true;
   }
 
   /**

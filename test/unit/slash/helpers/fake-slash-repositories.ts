@@ -489,16 +489,13 @@ export class FakeSlashProposals {
       readonly id: string;
       /** A compare-and-set on the epoch, as the real `WHERE` would apply it. */
       readonly chainEpoch?: number;
-      /** Any other column in the criteria is a compare-and-set too, as in the real `WHERE`. */
-      readonly [column: string]: unknown;
     },
     patch: Partial<SlashProposalEntity>,
   ): Promise<{ affected: number }> {
     const row = this.rows.get(criteria.id);
     if (!row || row.organizationId !== criteria.organizationId) return { affected: 0 };
-    for (const [column, value] of Object.entries(criteria)) {
-      if (value === undefined) continue;
-      if ((row as unknown as Record<string, unknown>)[column] !== value) return { affected: 0 };
+    if (criteria.chainEpoch !== undefined && row.chainEpoch !== criteria.chainEpoch) {
+      return { affected: 0 };
     }
     Object.assign(row, patch);
     return { affected: 1 };
