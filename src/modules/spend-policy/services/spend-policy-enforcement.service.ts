@@ -7,13 +7,16 @@ import { AssetId } from '@modules/chains/ports/caip.types';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { SpendPolicyEntity } from '@database/postgres/entities/spend-policy.entity';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { formatDollars } from '@shared/utils/money-display.util';
 import {
   NotificationEvent,
   NotificationPort,
   NOTIFICATION_PORT,
 } from '@modules/notification/ports/notification.port';
+import { agentLabelOf, agentPhrase } from '@modules/notification/domain/notice-text';
 
 import {
   centsToAtomicUnits,
@@ -173,6 +176,8 @@ export class SpendPolicyEnforcementService {
     private readonly usage: SpendUsageService,
     private readonly velocity: SpendPolicyVelocityService,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
+    // Read only to name the agent in a notice body; never part of a decision.
+    private readonly agents: AgentRepository,
   ) {}
 
   /**
@@ -571,19 +576,22 @@ export class SpendPolicyEnforcementService {
     const capAtomic = MoneyUtil.toAtomic(cap);
     if (capAtomic === 0n) return;
 
+    // Looked up once, and only when a band is actually crossed.
+    let agent: string | null = null;
     for (const band of SPEND_ALERT_BANDS) {
       const threshold = (capAtomic * BigInt(band)) / 100n;
       const crossedNow =
         MoneyUtil.toAtomic(spendBefore) < threshold && MoneyUtil.toAtomic(spendAfter) >= threshold;
       if (!crossedNow) continue;
 
+      agent ??= agentPhrase(await agentLabelOf(this.agents, organizationId, agentId));
       await this.notifications.notify({
         organizationId,
         event: NotificationEvent.SPEND_THRESHOLD_CROSSED,
         title: `${scope === 'daily' ? 'Daily' : 'Monthly'} spend at ${band}%`,
         body:
-          `Agent ${agentId} has spent ${MoneyUtil.format(spendAfter)} of its ` +
-          `${MoneyUtil.format(cap)} ${scope} limit (${band}%).`,
+          `${agent} has spent ${formatDollars(spendAfter)} of its ` +
+          `${formatDollars(cap)} ${scope} limit (${band}%).`,
         subjectType: 'agent',
         subjectId: agentId,
         payload: { scope, band, spendAfter: spendAfter.amount, cap: cap.amount, asset: cap.asset },
@@ -598,11 +606,12 @@ export class SpendPolicyEnforcementService {
     requestHash: string,
   ): Promise<void> {
     try {
+      const agent = agentPhrase(await agentLabelOf(this.agents, organizationId, agentId));
       await this.notifications.notify({
         organizationId,
         event: NotificationEvent.VELOCITY_ANOMALY,
         title: 'Unusual call pattern detected',
-        body: `Agent ${agentId} sent the same request repeatedly in a short window and has been throttled.`,
+        body: `${agent} sent the same request repeatedly in a short window and has been throttled.`,
         subjectType: 'agent',
         subjectId: agentId,
         payload: { requestHash },

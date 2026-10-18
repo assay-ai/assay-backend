@@ -6,7 +6,10 @@
  */
 process.env.TZ = 'Pacific/Kiritimati';
 
-import { FreeQuotaLimitKind } from '@modules/free-tier/services/free-quota.service';
+import {
+  FreeQuotaLimitKind,
+  freeQuotaNoticeBody,
+} from '@modules/free-tier/services/free-quota.service';
 import { PricingMode } from '@modules/tool/ports/tool.types';
 import { NotificationEvent } from '@modules/notification/ports/notification.port';
 
@@ -20,6 +23,10 @@ import {
 
 /** Deep inside a UTC day, and deliberately not inside the same local one. */
 const T0 = new Date('2026-08-20T10:00:00.000Z').getTime();
+
+async function flushMicrotasks(): Promise<void> {
+  for (let i = 0; i < 10; i += 1) await Promise.resolve();
+}
 
 beforeEach(() => {
   jest.useFakeTimers();
@@ -240,12 +247,61 @@ describe('FreeQuotaService — check()', () => {
       pricingMode: PricingMode.FREE,
     });
     // `notify` is fired-and-forgotten inside `refuse()`; flush microtasks.
-    await Promise.resolve();
-    await Promise.resolve();
+    await flushMicrotasks();
 
     expect(notifications.notified).toHaveLength(1);
     expect(notifications.notified[0].event).toBe(NotificationEvent.FREE_QUOTA_EXHAUSTED);
     expect(notifications.notified[0].organizationId).toBe(ORGANIZATION_ID);
+  });
+
+  it('writes the free_quota.exhausted body with names and a readable reset time', async () => {
+    const { service, notifications, agents, tools } = buildFreeQuotaHarness({
+      platformAgentDailyLimit: 0,
+    });
+
+    await service.check({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      toolId: TOOL_ID,
+      pricingMode: PricingMode.FREEMIUM,
+    });
+    await flushMicrotasks();
+
+    expect(agents.findOne).toHaveBeenCalledWith({
+      where: { id: AGENT_ID, organizationId: ORGANIZATION_ID },
+    });
+    expect(tools.findOne).toHaveBeenCalledWith({ where: { id: TOOL_ID } });
+    const body = notifications.notified[0].body;
+    expect(body).toBe(
+      '"research-bot" reached today\'s free-call limit for all tools while calling get_weather. ' +
+        'Resets Aug 21, 00:00 UTC. Until then, calls to it are paid calls.',
+    );
+    expect(body).not.toContain(AGENT_ID);
+    expect(body).not.toContain(TOOL_ID);
+    expect(body).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
+    expect(body).not.toContain('PLATFORM_AGENT_DAILY');
+  });
+
+  it('still notifies, with generic words, when the names cannot be read', async () => {
+    const { service, notifications, agents, tools } = buildFreeQuotaHarness({
+      platformAgentDailyLimit: 0,
+    });
+    agents.findOne.mockRejectedValue(new Error('db down'));
+    tools.findOne.mockResolvedValue(null);
+
+    await service.check({
+      organizationId: ORGANIZATION_ID,
+      agentId: AGENT_ID,
+      toolId: TOOL_ID,
+      pricingMode: PricingMode.FREE,
+    });
+    await flushMicrotasks();
+
+    expect(notifications.notified).toHaveLength(1);
+    expect(notifications.notified[0].body).toBe(
+      "Your agent reached today's free-call limit for all tools while calling a tool. " +
+        'Resets Aug 21, 00:00 UTC. Until then, it cannot be called.',
+    );
   });
 
   // ── Redis-miss rebuild from Postgres ────────────────────────────────────
@@ -550,5 +606,30 @@ describe('FreeQuotaService — reserve: parallel calls cannot overspend (review 
     );
 
     expect(places.filter((p) => p !== null)).toHaveLength(2);
+  });
+});
+
+describe('freeQuotaNoticeBody', () => {
+  const resetsAt = new Date('2026-10-14T00:00:00.000Z');
+  it.each([
+    [
+      FreeQuotaLimitKind.PLATFORM_RATE_LIMIT,
+      '"bot" reached the per-minute free-call limit while calling get_weather.',
+    ],
+    [
+      FreeQuotaLimitKind.PROVIDER_PER_AGENT_DAILY,
+      '"bot" used all of today\'s free calls the provider gives each agent for get_weather.',
+    ],
+    [
+      FreeQuotaLimitKind.PROVIDER_DAILY_BUDGET,
+      "The provider's free calls for get_weather are used up for today.",
+    ],
+  ])('names the %s limit in words', (limit, sentence) => {
+    const body = freeQuotaNoticeBody('"bot"', 'get_weather', {
+      limit,
+      resetsAt,
+      fallThroughToPaid: false,
+    });
+    expect(body).toBe(`${sentence} Resets Oct 14, 00:00 UTC. Until then, it cannot be called.`);
   });
 });

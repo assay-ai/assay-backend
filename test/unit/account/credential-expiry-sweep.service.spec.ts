@@ -1,5 +1,6 @@
 import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { CredentialExpirySweepConfig } from '@modules/account/constants/credential-expiry.constants';
 import { CredentialExpirySweepService } from '@modules/account/services/credential-expiry-sweep.service';
 import { NotificationEvent, NotificationPort } from '@modules/notification/ports/notification.port';
@@ -43,14 +44,16 @@ function buildHarness(credential: AgentCredentialEntity, now: number) {
   const credentials = { createQueryBuilder: jest.fn().mockReturnValue(queryBuilder) };
   const notifications = { notify: jest.fn().mockResolvedValue(undefined) };
   const config: CredentialExpirySweepConfig = { now: () => now };
+  const agents = { findOne: jest.fn().mockResolvedValue({ label: 'research-bot' }) };
 
   const service = new CredentialExpirySweepService(
     credentials as unknown as AgentCredentialRepository,
     notifications as unknown as NotificationPort,
     config,
+    agents as unknown as AgentRepository,
   );
 
-  return { service, notifications, credentials };
+  return { service, notifications, credentials, agents };
 }
 
 const ONE_DAY_MS = 24 * 60 * 60 * 1000;
@@ -99,6 +102,45 @@ describe('CredentialExpirySweepService', () => {
     expect(request.dedupeKey).toBe(CREDENTIAL_ID);
   });
 
+  it.each([
+    [
+      -6 * ONE_DAY_MS,
+      'Key "CI deploy" (assay_live_ab12…) of "research-bot" expires Sep 1, 00:00 UTC. Renew it before then.',
+    ],
+    [
+      -12 * 60 * 60 * 1000,
+      'Key "CI deploy" (assay_live_ab12…) of "research-bot" expires Sep 1, 00:00 UTC. Renew it now or this agent stops working.',
+    ],
+    [
+      60 * 60 * 1000,
+      'Key "CI deploy" (assay_live_ab12…) of "research-bot" expired and can no longer authenticate. Make a new key to keep this agent running.',
+    ],
+  ])('writes the body with names and a readable time (offset %d ms)', async (offset, body) => {
+    const { service, notifications, agents } = buildHarness(
+      buildCredential(EXPIRES_AT),
+      EXPIRES_AT.getTime() + offset,
+    );
+
+    await service.sweep();
+
+    expect(agents.findOne).toHaveBeenCalledWith({ where: { id: 'agent-1', organizationId: ORG } });
+    const [request] = notifications.notify.mock.calls[0];
+    expect(request.body).toBe(body);
+    expect(request.body).not.toMatch(/\d{4}-\d{2}-\d{2}T/);
+  });
+
+  it('says "your agent" when the agent label cannot be read, and still notifies', async () => {
+    const { service, notifications, agents } = buildHarness(
+      buildCredential(EXPIRES_AT),
+      EXPIRES_AT.getTime() + 1,
+    );
+    agents.findOne.mockRejectedValue(new Error('db down'));
+
+    await service.sweep();
+
+    expect(notifications.notify.mock.calls[0][0].body).toContain('of your agent expired');
+  });
+
   it('does not fire outside either warning window', async () => {
     const credential = buildCredential(EXPIRES_AT);
     const now = EXPIRES_AT.getTime() - 8 * ONE_DAY_MS; // 8 days out — before T-7
@@ -125,6 +167,7 @@ describe('CredentialExpirySweepService', () => {
       credentials as unknown as AgentCredentialRepository,
       notifications as unknown as NotificationPort,
       { now: () => Date.now() },
+      { findOne: jest.fn() } as unknown as AgentRepository,
     );
 
     await expect(service.sweep()).resolves.toEqual({
