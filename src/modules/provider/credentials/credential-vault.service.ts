@@ -30,6 +30,8 @@ export interface CredentialSetSummary {
  */
 @Injectable()
 export class CredentialVaultService implements OnModuleInit {
+  private readonly logger = new Logger(CredentialVaultService.name);
+
   constructor(
     private readonly credentials: BindingCredentialRepository,
     @Inject(CREDENTIAL_VAULT_KEKS) private readonly keks: VaultKeks,
@@ -49,10 +51,7 @@ export class CredentialVaultService implements OnModuleInit {
    */
   async verifyKeks(): Promise<void> {
     if (!this.kekChecks) {
-      Logger.warn(
-        'Vault key check skipped: no key-check repository is available',
-        CredentialVaultService.name,
-      );
+      this.logger.warn('Vault key check skipped: no key-check repository is available');
       return;
     }
     for (const kek of this.keks.byId.values()) {
@@ -142,9 +141,8 @@ export class CredentialVaultService implements OnModuleInit {
       );
     } catch (error) {
       // Only the error class: the message and stack can carry key material.
-      Logger.warn(
+      this.logger.warn(
         `Credential set could not be opened (${error instanceof Error ? error.constructor.name : 'non-error'})`,
-        CredentialVaultService.name,
       );
       throw ProviderErrors.credentialVaultUnavailable({ reason: 'decryption failed' });
     }
