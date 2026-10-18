@@ -4,6 +4,7 @@ import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.
 import { SlashProposalPartEntity } from '@database/postgres/entities/slash-proposal-part.entity';
 import { SlaWindowCallRepository } from '@database/postgres/repositories/sla-window-call.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
+import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { ChainErrors } from '@modules/chains/errors/chains.errors';
 import {
   AssetId,
@@ -21,6 +22,7 @@ import {
 } from '../constants/slash.constants';
 import {
   ChainFailureKind,
+  ChainProposalStatus,
   chainErrorName,
   classifyChainFailure,
 } from '../domain/chain-slash-outcome';
@@ -43,6 +45,7 @@ import {
   FailedCallPayment,
 } from '../domain/slash-beneficiary-evidence';
 import { planEvidenceMismatch } from '../domain/slash-plan-evidence';
+import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import { SlashErrors } from '../errors/slash.errors';
 import { SLASH_CAPS_READER, SlashCapsReaderPort } from '../ports/slash-caps-reader.port';
 import {
@@ -56,6 +59,7 @@ import {
   SlashRecordSnapshot,
   SlashRecordStatus,
 } from '../ports/slash-executor.port';
+import { SlashProposalService } from './slash-proposal.service';
 
 /**
  * `SLASH_EXECUTION_GRACE_SECONDS` (7 days) — after `executableAt + grace` a
@@ -114,6 +118,11 @@ export class SlashPartsService {
     @Inject(SLASH_EXECUTOR) private readonly executor: SlashExecutorPort,
     @Inject(SLASH_PRORATA_CONFIG) private readonly config: ProRataSlashConfig,
     @Optional() @Inject(SLASH_CAPS_READER) private readonly caps: SlashCapsReaderPort | null = null,
+    // Only {@link buildCancel} writes the case row, to close the chain side of a
+    // case with nothing standing; optional so the parts-only callers stay as
+    // they were.
+    @Optional() private readonly proposals: SlashProposalRepository | null = null,
+    @Optional() private readonly lifecycle: SlashProposalService | null = null,
   ) {}
 
   /**
@@ -924,13 +933,107 @@ export class SlashPartsService {
     );
     // `cancelSlash` takes a `Pending` or (D-19) a `Disputed` record.
     const next = parts.find((part) => ['PENDING', 'DISPUTED'].includes(part.chainStatus));
-    if (!next) {
-      throw SlashErrors.chainUnavailable({
+    if (!next) return this.cancelWithNoPartStanding(proposal, parts, chainId, provider);
+    return this.executor.buildCancel({ chainId, requestId: next.chainRequestId, provider });
+  }
+
+  /**
+   * No part of the case stands. A case opened before the parts model has no
+   * parts at all, and its judgement (if any) is the single record under the
+   * case's own `chainRequestId`, so that record is read — never assumed:
+   *
+   * - `Pending` / `Disputed`: it stands; its cancel is built as before.
+   * - `Executed` (that record, or any part): money moved. Nothing is written
+   *   here; the execution is the sweeps' to record. Refused with 409.
+   * - `Cancelled`, or no record at all: nothing can be executed against the
+   *   provider. The chain side is closed (`CANCEL_REQUESTED` → `CANCELLED`, by
+   *   compare-and-swap, with a timeline entry) and the request is refused with
+   *   409 `SLASH_NOTHING_STANDING` — there is nothing to sign.
+   *
+   * A case still `UPHELD` behind the request is a downward recalculation
+   * waiting to be proposed again; it is refused but not closed here, so the
+   * re-proposal stays with the admin-cancel sweep.
+   *
+   * An unreadable chain stays a 503: nothing can be said about the record.
+   */
+  private async cancelWithNoPartStanding(
+    proposal: SlashProposalEntity,
+    parts: readonly SlashProposalPartEntity[],
+    chainId: ChainId,
+    provider: string,
+  ): Promise<SlashCancelIntent> {
+    if (parts.some((part) => part.chainStatus === 'EXECUTED')) {
+      throw SlashErrors.nothingStanding({
         proposalId: proposal.id,
-        reason: 'no part of this case is pending on chain',
+        chainStatus: 'EXECUTED',
+        closed: false,
       });
     }
-    return this.executor.buildCancel({ chainId, requestId: next.chainRequestId, provider });
+
+    let record: SlashRecordSnapshot | null;
+    try {
+      record = await this.executor.readRecord(proposal.chainRequestId, provider, chainId);
+    } catch (error) {
+      throw SlashErrors.chainUnavailable({
+        proposalId: proposal.id,
+        reason: `its on-chain record could not be read (${chainErrorName(error) ?? 'transport'})`,
+      });
+    }
+
+    if (record?.status === 'PENDING' || record?.status === 'DISPUTED') {
+      return this.executor.buildCancel({ chainId, requestId: proposal.chainRequestId, provider });
+    }
+
+    const chainRecord = record?.status ?? 'NOT_FOUND';
+    const closed =
+      chainRecord !== 'EXECUTED' && proposal.status !== SlashProposalStatus.UPHELD
+        ? await this.closeChainSide(proposal, chainRecord)
+        : false;
+    throw SlashErrors.nothingStanding({
+      proposalId: proposal.id,
+      chainStatus: chainRecord,
+      closed,
+    });
+  }
+
+  /** `CANCEL_REQUESTED` → `CANCELLED`, only from that status, with its timeline entry. */
+  private async closeChainSide(
+    proposal: SlashProposalEntity,
+    chainRecord: string,
+  ): Promise<boolean> {
+    if (!this.proposals) return false;
+    const result = await this.proposals.update(
+      {
+        organizationId: proposal.organizationId,
+        id: proposal.id,
+        chainStatus: ChainProposalStatus.CANCEL_REQUESTED,
+      },
+      { chainStatus: ChainProposalStatus.CANCELLED, chainLastError: null },
+    );
+    if (!result.affected) return false;
+    try {
+      await this.lifecycle?.appendEventDirect({
+        organizationId: proposal.organizationId,
+        proposalId: proposal.id,
+        occurredAt: new Date(),
+        kind: 'CHAIN_CANCELLED',
+        actorType: 'system',
+        actorId: null,
+        summary:
+          chainRecord === 'NOT_FOUND'
+            ? 'Nothing of this penalty was ever recorded on chain, so there is nothing to cancel ' +
+              'there; the on-chain side is closed'
+            : 'The on-chain record had already left Pending (it reads ' +
+              `${chainRecord}); nothing stands against the provider, so the on-chain side is closed`,
+        detail: { requestId: proposal.chainRequestId, chainRecord, parts: 0 },
+      });
+    } catch (error) {
+      this.logger.error(
+        `slash proposal ${proposal.id}: the chain side was closed but its timeline entry failed`,
+        error instanceof Error ? error.stack : String(error),
+      );
+    }
+    return true;
   }
 
   /**
