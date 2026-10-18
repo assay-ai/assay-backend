@@ -10,22 +10,12 @@ import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/
 
 import { CallDisputeDecision, needsSecondOperator } from '../domain/call-dispute';
 import { CALL_DISPUTE_CONFIG, CallDisputeConfig } from '../constants/call-dispute.config';
-import {
-  CALL_DISPUTE_TARGET,
-  CallDisputeService,
-  PROVIDER_REPLY_HOURS,
-  disputedAmountOf,
-} from './call-dispute.service';
+import { CALL_DISPUTE_SLA } from '../constants/call-dispute-sla.constants';
+import { CALL_DISPUTE_TARGET, CallDisputeService, disputedAmountOf } from './call-dispute.service';
 
 const HOUR_MS = 3_600_000;
 
-/** The decision SLA, from the filing (analysis §5). */
-export const CALL_DISPUTE_SLA = Object.freeze({
-  providerReplyMs: PROVIDER_REPLY_HOURS * HOUR_MS,
-  pageMs: 48 * HOUR_MS,
-  decideMs: 72 * HOUR_MS,
-  lastPageMs: 6 * 24 * HOUR_MS,
-});
+export { CALL_DISPUTE_SLA };
 
 export const CALL_DISPUTE_SLA_ALERT = 'call_dispute_sla';
 

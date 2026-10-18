@@ -584,6 +584,60 @@ describe('call disputes, against a real database', () => {
   // ── Disputes and the money ──────────────────────────────────────────────
 
   describe('deciding a held payment', () => {
+    it('states the SLA instants and the hold timeout, and tells each side which side it is', async () => {
+      const call = await seedHeld();
+      const dispute = await file(call);
+      const filed = new Date(dispute.createdAt).getTime();
+      const [{ collectable_at: collectableAt }] = await dataSource.query(
+        `SELECT collectable_at FROM payment_intents WHERE id = $1`,
+        [call.intentId],
+      );
+      const [{ settled_at: settledAt }] = await dataSource.query(
+        `SELECT settled_at FROM verification_records WHERE id = $1`,
+        [call.verdictId],
+      );
+      const expected = {
+        replyDueAt: new Date(filed + 24 * 3_600_000),
+        pageAt: new Date(filed + 48 * 3_600_000),
+        decisionDueAt: new Date(filed + 72 * 3_600_000),
+        autoUpholdAt: new Date(filed + 72 * 3_600_000),
+        holdEndsAt: new Date(new Date(collectableAt).getTime() + 7 * 86_400_000),
+        filingClosesAt: new Date(new Date(settledAt).getTime() + config.filingWindowMs),
+      };
+      expect(dispute).toMatchObject(expected);
+      expect(await disputes.getForBuyer(buyer, dispute.id)).toMatchObject(expected);
+      expect(await disputes.getForProvider(provider, dispute.id)).toMatchObject(expected);
+      expect(await operatorDisputes.detail(dispute.id)).toMatchObject(expected);
+      const [row] = (await disputes.listForBuyer(buyer, { limit: 10 } as never)).items;
+      expect(row).toMatchObject(expected);
+      expect(notified).toEqual([
+        expect.objectContaining({
+          organizationId: provider,
+          event: 'call_dispute.opened',
+          payload: expect.objectContaining({ role: 'provider' }),
+        }),
+      ]);
+
+      // The provider replied: no auto-uphold any more.
+      await disputes.respond(session(provider), dispute.id, 'The city returned no reading.');
+      expect((await disputes.getForBuyer(buyer, dispute.id)).autoUpholdAt).toBeNull();
+      notified.length = 0;
+      await decide(dispute.id, CallDisputeDecision.REJECT);
+      expect(
+        notified
+          .filter((notice) => notice.event === 'call_dispute.decided')
+          .map((notice) => [notice.organizationId, (notice.payload as { role: string }).role]),
+      ).toEqual([
+        [buyer, 'buyer'],
+        [provider, 'provider'],
+      ]);
+      // Decided and collected: no hold left to time out.
+      expect(await disputes.getForBuyer(buyer, dispute.id)).toMatchObject({
+        autoUpholdAt: null,
+        holdEndsAt: null,
+      });
+    });
+
     it('upheld inside the window: refundHeld, a full refund, nothing collected', async () => {
       const call = await seedHeld();
       const dispute = await file(call);
@@ -931,6 +985,7 @@ describe('call disputes, against a real database', () => {
           organizationId: buyer,
           event: 'call_dispute.refunded',
           subjectId: dispute.id,
+          payload: expect.objectContaining({ role: 'buyer' }),
         }),
       ]);
       expect((await disputes.requireAny(dispute.id)).slaDueAt).toBeNull();

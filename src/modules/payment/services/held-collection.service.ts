@@ -514,7 +514,8 @@ export class HeldCollectionService {
           subjectType: 'call_dispute',
           subjectId: disputeId,
           dedupeKey: `${NotificationEvent.CALL_DISPUTE_REFUNDED}:${disputeId}`,
-          payload: { disputeId, intentId: row.id, refundState: 'REFUNDED' },
+          // Sent to the buyer only; `role` as on every call_dispute.* payload.
+          payload: { disputeId, intentId: row.id, refundState: 'REFUNDED', role: 'buyer' },
         });
       } catch (error) {
         this.logger.error(`Call dispute ${disputeId}: could not notify: ${describe(error)}`);

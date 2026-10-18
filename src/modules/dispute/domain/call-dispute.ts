@@ -170,6 +170,35 @@ export function refundColumnsFor(
   }
 }
 
+/** Call classes a buyer pays for; the rest are never charged and cannot be disputed. */
+export const UNDISPUTABLE_CALL_CLASSES: ReadonlySet<string> = new Set(['FREE', 'TEST']);
+
+/**
+ * When the buyer's filing window for a call closes — the instant
+ * `CallDisputeService.file` refuses after — or `null` when the call can never
+ * be disputed (not settled, free, or served by the buyer itself). Pure; the
+ * receipt shows it so a screen never re-derives the window.
+ */
+export function disputeFilingClosesAt(
+  call: {
+    readonly organizationId: string;
+    readonly status: string;
+    readonly callClass: string;
+    readonly priceAmount: string;
+    readonly providerId: string | null;
+    readonly updatedAt: Date;
+  },
+  settledAt: Date | null,
+  windowMs: number,
+): Date | null {
+  if (call.status !== 'SETTLED') return null;
+  if (UNDISPUTABLE_CALL_CLASSES.has(call.callClass) || BigInt(call.priceAmount) === 0n) {
+    return null;
+  }
+  if (!call.providerId || call.providerId === call.organizationId) return null;
+  return new Date((settledAt ?? call.updatedAt).getTime() + windowMs);
+}
+
 /** Whether a call settled at `settledAt` may still be disputed at `now`. */
 export function withinFilingWindow(settledAt: Date, now: Date, windowMs: number): boolean {
   return now.getTime() - settledAt.getTime() <= windowMs;
