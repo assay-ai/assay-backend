@@ -215,8 +215,11 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       severity: NotificationSeverity.WARNING,
       channels: IN_APP_EMAIL,
       // The monitor sweeps every five minutes and the condition persists until
-      // the provider tops up — per-event would be 288 identical messages a day.
-      aggregation: NotificationAggregation.ONCE_PER_UTC_DAY,
+      // the provider tops up — per-event would be 288 identical messages a day,
+      // and once a day repeated the same unchanged warning for weeks. Once per
+      // incident: the producer's key names the stake and the minimum, so only
+      // a change to either is a new incident.
+      aggregation: NotificationAggregation.ONCE,
       nonSuppressible: false,
     },
     [NotificationEvent.PROVIDER_STAKE_GRACE_OPENED]: {
