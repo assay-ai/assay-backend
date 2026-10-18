@@ -1,3 +1,4 @@
+import { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
 import { Test } from '@nestjs/testing';
 import { getDataSourceToken } from '@nestjs/typeorm';
 
@@ -35,6 +36,7 @@ describe('BindingEditorService — relay config wiring', () => {
         { provide: PROVIDER_STAKE_SOURCE, useValue: {} },
         { provide: ENABLED_CHAINS, useValue: [] },
         { provide: PROVIDER_MINIMUM_STAKE_BY_CHAIN, useValue: new Map() },
+        { provide: CredentialVaultService, useValue: {} },
       ],
     }).compile();
     return module.get(BindingEditorService);
