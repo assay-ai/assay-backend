@@ -401,6 +401,10 @@ export class StakeMonitorService {
         continue;
       }
 
+      // Below the minimum is not a headroom incident: end the band stay, so a
+      // cure back into the band at the same figures is a new notice.
+      await this.leaveHeadroomBand(provider.organizationId, binding.id);
+
       if (!open) {
         await this.openGrace(provider, binding, staked, required, now);
         continue;
