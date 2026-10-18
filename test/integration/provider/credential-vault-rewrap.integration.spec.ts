@@ -26,7 +26,7 @@ const only = (...ks: (typeof k1)[]): VaultKeks => ({
 });
 
 const ORIGIN = 'https://a.test';
-const headers = [{ name: 'Authorization', value: 'Bearer sk-live-1234567890abcdef' }];
+const headers = [{ name: 'Authorization', value: 'Bearer sk-example-1234567890abcdef' }];
 
 let context: BindingEditorTestContext;
 let repository: BindingCredentialRepository;

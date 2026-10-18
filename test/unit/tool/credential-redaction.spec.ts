@@ -398,7 +398,10 @@ describe('CredentialRedactor — linear time', () => {
   });
 
   it('stays within the default budget for a typical 1 MiB JSON body', () => {
-    const typical = new CredentialRedactor(['sk-live-0123456789abcdef', 'Bearer tok_abcdefghijkl']);
+    const typical = new CredentialRedactor([
+      'sk-example-0123456789abcdef',
+      'Bearer tok_abcdefghijkl',
+    ]);
     const value = { items: Array.from({ length: 20_000 }, (_, i) => `item ${i} lorem ipsum`) };
     const out = typical.response({ status: 200, body: { kind: ResponseBodyKind.JSON, value } });
     expect(out.transportError).toBeUndefined();

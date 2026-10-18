@@ -131,14 +131,14 @@ describe('credentialHeaderProblems — messages', () => {
     ]);
   });
   it('identifies an invalid name by position and never echoes it', () => {
-    const secret = 'Authorization: Bearer sk-live-123';
+    const secret = 'Authorization: Bearer sk-example-123';
     const problems = credentialHeaderProblems([
       { name: 'X-Ok', value: 'v' },
       { name: 'X-Ok2', value: 'v' },
       { name: secret, value: 'v' },
     ]);
     expect(problems).toEqual(['Header #3: invalid name']);
-    expect(JSON.stringify(problems)).not.toContain('sk-live');
+    expect(JSON.stringify(problems)).not.toContain('sk-example');
   });
   it('names an empty value by its header', () => {
     expect(credentialHeaderProblems([{ name: 'X-K', value: '' }])).toEqual([

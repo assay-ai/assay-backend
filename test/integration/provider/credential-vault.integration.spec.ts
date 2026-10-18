@@ -22,7 +22,7 @@ import {
 
 const kek = { keyId: 'k1', key: randomBytes(32) };
 const keks: VaultKeks = { active: kek, byId: new Map([[kek.keyId, kek]]) };
-const SECRET = 'Bearer sk-live-1234567890abcdef';
+const SECRET = 'Bearer sk-example-1234567890abcdef';
 const A = 'https://a.test';
 const B = 'https://b.test';
 
@@ -74,7 +74,7 @@ describe('credential vault', () => {
     expect(listed).toHaveLength(1);
     expect(listed[0].headers).toEqual([{ name: 'Authorization', hint: 'cdef' }]);
     expect(JSON.stringify(listed)).not.toContain(SECRET);
-    expect(JSON.stringify(listed)).not.toContain('sk-live');
+    expect(JSON.stringify(listed)).not.toContain('sk-example');
   });
 
   it('serves values for exactly the stored origin', async () => {
@@ -95,7 +95,7 @@ describe('credential vault', () => {
       `SELECT ciphertext, wrapped_dek FROM binding_credentials WHERE binding_id = $1`,
       [bindingId],
     );
-    expect(row.ciphertext.includes(Buffer.from('sk-live'))).toBe(false);
+    expect(row.ciphertext.includes(Buffer.from('sk-example'))).toBe(false);
     expect(row.ciphertext.length).toBeGreaterThan(16);
   });
 
