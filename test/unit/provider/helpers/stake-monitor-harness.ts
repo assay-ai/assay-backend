@@ -193,6 +193,10 @@ export function harness(
     overrides?: ReadonlyMap<string, Money>;
     /** Tool id → name, for the notices; absent = no tool lookup wired. */
     toolNames?: ReadonlyMap<string, string>;
+    /** The headroom band store; share one between harnesses to model later sweeps. */
+    redis?: FakeBandStore;
+    /** The sweep's clock; defaults to `NOW`. */
+    now?: Date;
   } = {},
 ): Harness {
   const providers = { findAllProviders: jest.fn().mockResolvedValue(overrides.providers ?? []) };
@@ -306,9 +310,10 @@ export function harness(
     {
       gracePeriodMs: STAKE_GRACE_PERIOD_MS,
       headroomWarningRatio: STAKE_HEADROOM_WARNING_RATIO,
-      now: () => NOW.getTime(),
+      now: () => (overrides.now ?? NOW).getTime(),
     },
     tools as never,
+    (overrides.redis ?? null) as never,
   );
 
   return {
@@ -325,4 +330,20 @@ export function harness(
     alerts,
     notifications,
   };
+}
+
+/** The few Redis calls the headroom band uses: `SET … NX`, `GET`, `DEL`. */
+export class FakeBandStore {
+  readonly values = new Map<string, string>();
+  async set(key: string, value: string, ..._options: unknown[]): Promise<'OK' | null> {
+    if (this.values.has(key)) return null;
+    this.values.set(key, value);
+    return 'OK';
+  }
+  async get(key: string): Promise<string | null> {
+    return this.values.get(key) ?? null;
+  }
+  async del(key: string): Promise<number> {
+    return this.values.delete(key) ? 1 : 0;
+  }
 }

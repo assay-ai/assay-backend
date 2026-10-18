@@ -24,6 +24,7 @@ import {
   provider,
   stakeMap,
   usdc,
+  FakeBandStore,
 } from './helpers/stake-monitor-harness';
 
 /**
@@ -167,7 +168,10 @@ describe('StakeMonitorService — grace periods', () => {
       expect(text).not.toMatch(/binding|floor|grace/i);
     }
     // The incident is the figures: the same stake and minimum tomorrow is not a new one.
-    expect(request.dedupeKey).toBe(`${BINDING_A}:55955000:50000000`);
+    // No band store wired here: the UTC day stands in for the incident.
+    expect(request.dedupeKey).toBe(
+      `${BINDING_A}:${NOW.toISOString().slice(0, 10)}:55955000:50000000`,
+    );
     expect(request.payload).toMatchObject({
       toolName: 'get_weather',
       decimals: 6,
@@ -175,11 +179,60 @@ describe('StakeMonitorService — grace periods', () => {
     });
   });
 
-  it('names no id when the tool cannot be read', async () => {
+  it('re-notifies headroom per incident: same figures once, changed figures or a new stay again', async () => {
+    const store = new FakeBandStore();
+    const sweep = async (stake: string, now: Date) => {
+      const h = harness({
+        providers: [provider(PROVIDER_A, ACCOUNT_A)],
+        bindings: [binding(BINDING_A, PROVIDER_A, '50000')],
+        stakes: stakeMap([[PROVIDER_A, stake]]),
+        redis: store,
+        now,
+      });
+      await h.service.sweep();
+      const call = h.notifications.notify.mock.calls.find(
+        ([request]) => (request as { event: string }).event === 'provider.stake_headroom_low',
+      );
+      return call ? (call[0] as { dedupeKey: string }).dedupeKey : null;
+    };
+    const later = (hours: number) => new Date(NOW.getTime() + hours * 3_600_000);
+
+    const first = await sweep('55000000', NOW);
+    // The same figures on the next day: the same key, so the catalogue's ONCE holds it.
+    expect(await sweep('55000000', later(24))).toBe(first);
+    // Different figures inside the same stay: a new notice.
+    expect(await sweep('54000000', later(25))).not.toBe(first);
+    // Leaves the band, then comes back to the very same figures: a new incident.
+    expect(await sweep('100000000', later(26))).toBeNull();
+    const again = await sweep('55000000', later(48));
+    expect(again).not.toBe(first);
+    expect(again).toBe(`${BINDING_A}:${later(48).toISOString()}:55000000:50000000`);
+  });
+
+  it('names a catalogue string id as the tool, as the case page does', async () => {
     const h = harness({
       providers: [provider(PROVIDER_A, ACCOUNT_A)],
       bindings: [binding(BINDING_A, PROVIDER_A, '50000')],
       stakes: stakeMap([[PROVIDER_A, '40000000']]),
+    });
+
+    await h.service.sweep();
+
+    const [request] = h.notifications.notify.mock.calls[0] as [Record<string, unknown>];
+    expect(request.title).toBe('search_web: your stake is below the $50.00 minimum');
+    expect(request.payload).toMatchObject({ graceDays: 7 });
+  });
+
+  it('names no id when the tool cannot be read', async () => {
+    const h = harness({
+      providers: [provider(PROVIDER_A, ACCOUNT_A)],
+      bindings: [
+        Object.assign(binding(BINDING_A, PROVIDER_A, '50000'), {
+          toolId: '0caf90d0-5710-412b-8e88-afc0f661004e',
+        }),
+      ],
+      stakes: stakeMap([[PROVIDER_A, '40000000']]),
+      toolNames: new Map(),
     });
 
     await h.service.sweep();

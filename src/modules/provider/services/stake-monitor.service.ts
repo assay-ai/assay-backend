@@ -1,4 +1,5 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import type { Redis } from 'ioredis';
 import { In, IsNull } from 'typeorm';
 
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
@@ -23,6 +24,7 @@ import {
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { formatDollars } from '@shared/utils/money-display.util';
 import { MoneyUtil } from '@shared/utils/money.util';
+import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import {
   STAKE_MONITOR_CONFIG,
@@ -111,11 +113,20 @@ export class StakeMonitorService {
     // The tool's name for the provider's notices. Optional: without it a
     // notice says "one paid tool" rather than naming a binding id.
     @Optional() private readonly tools: ToolRepository | null = null,
+    // Where a binding's stay in the low-headroom band is remembered, so the
+    // headroom notice is once per incident (see `warnIfHeadroomLow`).
+    @Optional() @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis | null = null,
   ) {}
 
-  /** The tool a binding serves, by name; null when unreadable. Never throws. */
+  /**
+   * The tool a binding serves, by name; null when unreadable. Never throws.
+   * A catalogue id that is not a uuid ("search_web") is already the tool's
+   * name, as `SlashCaseService` reads it; only a uuid is looked up.
+   */
   private async toolNameOf(toolId: string): Promise<string | null> {
-    if (!this.tools || !UUID_RE.test(toolId)) return null;
+    if (!toolId) return null;
+    if (!UUID_RE.test(toolId)) return toolId;
+    if (!this.tools) return null;
     try {
       const [tool] = await this.tools.findByIds([toolId]);
       return tool?.name ?? null;
@@ -135,10 +146,45 @@ export class StakeMonitorService {
     }
   }
 
+  /** The grace period in whole days, as the notices state it and their payloads carry it. */
+  private graceDayCount(): number {
+    return Math.max(1, Math.round(this.config.gracePeriodMs / 86_400_000));
+  }
+
   /** "7 days": the grace period as the provider reads it. */
   private graceDays(): string {
-    const days = Math.max(1, Math.round(this.config.gracePeriodMs / 86_400_000));
+    const days = this.graceDayCount();
     return `${days} day${days === 1 ? '' : 's'}`;
+  }
+
+  /**
+   * When this binding entered the low-headroom band, set on first sight and
+   * kept until it leaves (`leaveHeadroomBand`). That instant names the
+   * incident, so the same figures in a later incident are a new notice.
+   * Null when the store cannot answer.
+   */
+  private async headroomBandSince(
+    organizationId: string,
+    bindingId: string,
+    now: Date,
+  ): Promise<string | null> {
+    if (!this.redis) return null;
+    try {
+      const key = headroomBandKey(organizationId, bindingId);
+      await this.redis.set(key, now.toISOString(), 'EX', HEADROOM_BAND_TTL_SECONDS, 'NX');
+      return await this.redis.get(key);
+    } catch {
+      return null;
+    }
+  }
+
+  private async leaveHeadroomBand(organizationId: string, bindingId: string): Promise<void> {
+    if (!this.redis) return;
+    try {
+      await this.redis.del(headroomBandKey(organizationId, bindingId));
+    } catch {
+      // Left behind, the marker is deleted again on the next healthy sweep.
+    }
   }
 
   /** One pass over every provider. Never throws — see the class comment. */
@@ -520,6 +566,7 @@ export class StakeMonitorService {
         required: required.amount,
         asset: required.asset,
         decimals: required.decimals,
+        graceDays: this.graceDayCount(),
         expiresAt: expiresAt.toISOString(),
       },
       dedupeKey: binding.id,
@@ -587,6 +634,7 @@ export class StakeMonitorService {
         required: required.amount,
         asset: required.asset,
         decimals: required.decimals,
+        graceDays: this.graceDayCount(),
         startedAt: row.startedAt.toISOString(),
       },
       dedupeKey: row.bindingId,
@@ -620,6 +668,7 @@ export class StakeMonitorService {
     // fractional threshold survives without a float.
     const threshold = BigInt(Math.round(this.config.headroomWarningRatio * 10_000));
     if (headroom * 10_000n >= requiredAtomic * threshold) {
+      await this.leaveHeadroomBand(provider.organizationId, binding.id);
       return;
     }
 
@@ -641,11 +690,19 @@ export class StakeMonitorService {
 
     // On both ports — see the constructor comment.
     //
-    // Once per incident, not once a day: the key names the figures, so the
-    // notice is sent again only when the stake or the minimum moves (a
-    // penalty, a top-up that is not enough, a price change), never because a
-    // new UTC day began with nothing changed. The catalogue's `ONCE` rule
-    // holds the key.
+    // Once per incident, not once a day. The key names the incident (when the
+    // binding entered the band) and the figures, so the notice is sent again
+    // when the stake or the minimum moves inside the band, or when the binding
+    // leaves the band and comes back — even to the very same figures — and
+    // never because a new UTC day began with nothing changed. The catalogue's
+    // `ONCE` rule holds the key. Without the band store the UTC day stands in
+    // for the incident, so a failure costs a daily repeat, never silence.
+    const bandSince =
+      (await this.headroomBandSince(
+        provider.organizationId,
+        binding.id,
+        new Date(this.config.now()),
+      )) ?? new Date(this.config.now()).toISOString().slice(0, 10);
     const toolName = await this.toolNameOf(binding.toolId);
     const margin = MoneyUtil.of(
       ((requiredAtomic * threshold) / 10_000n).toString(),
@@ -672,8 +729,9 @@ export class StakeMonitorService {
         margin: margin.amount,
         asset: required.asset,
         decimals: required.decimals,
+        graceDays: this.graceDayCount(),
       },
-      dedupeKey: `${binding.id}:${staked.amount}:${required.amount}`,
+      dedupeKey: `${binding.id}:${bandSince}:${staked.amount}:${required.amount}`,
     });
   }
 
@@ -743,6 +801,13 @@ export class StakeMonitorService {
       this.logger.error(`Could not write the fleet stake snapshot: ${describe(error)}`);
     }
   }
+}
+
+/** The band marker outlives any real incident; it is deleted when the binding leaves the band. */
+const HEADROOM_BAND_TTL_SECONDS = 180 * 24 * 60 * 60;
+
+function headroomBandKey(organizationId: string, bindingId: string): string {
+  return `stake-headroom-band:${organizationId}:${bindingId}`;
 }
 
 /** `tools.id` is a uuid column; anything else is not looked up (Postgres would refuse it). */
