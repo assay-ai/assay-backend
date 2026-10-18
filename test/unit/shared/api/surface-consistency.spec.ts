@@ -436,11 +436,9 @@ describe('REST surface consistency', () => {
       // behind `SessionAuthGuard` and is not here, so filing and triaging are
       // two surfaces rather than one route with a role flag.
       'modules/tool-request/controllers/operator-tool-requests.controller.ts',
-      // The Prometheus scrape endpoint and the operator dashboard
-      // that renders the same numbers. Neither has a tenant — every series is
-      // a platform-wide aggregate, the same shape `operator-reference.controller.ts`
+      // The operator dashboard. It has no tenant — every series is a
+      // platform-wide aggregate, the same shape `operator-reference.controller.ts`
       // already serves at `GET /operator/health`.
-      'modules/observability/controllers/metrics.controller.ts',
       'modules/observability/controllers/observability-dashboard.controller.ts',
     ]);
 
