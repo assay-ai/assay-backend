@@ -65,15 +65,18 @@ describe('GET /statements/balance, against a real database', () => {
     );
 
     // September: deposit 20, paid 1. October: deposit 5 then a reorg drops it,
-    // deposit 10, withdraw 3 (of 4 asked), paid 2 + 0.5 (not redeemed yet);
-    // an owed call and a forfeited one are not paid.
+    // deposit 10, withdraw 3 (of 4 asked), paid 2 + 0.5 (not redeemed yet) +
+    // 0.25 (redeemed before tx refs were recorded) + 0.25 (redeemed into the
+    // dispute hold); an owed call and a forfeited one are not paid.
     await deposit('DEPOSIT_PENDING', 20_000_000n, '2026-09-02T00:00:00Z');
     await deposit('DEPOSIT_PENDING', 5_000_000n, '2026-10-02T00:00:00Z');
     await deposit('DEPOSIT_REJECT', 5_000_000n, '2026-10-02T00:20:00Z');
     await deposit('DEPOSIT_PENDING', 10_000_000n, '2026-10-03T00:00:00Z');
     await call(1_000_000n, '2026-09-10T00:00:00Z', { redeemed: true });
     await call(2_000_000n, '2026-10-05T00:00:00Z', { redeemed: true });
-    await call(500_000n, '2026-10-18T00:00:00Z', { redeemed: false });
+    await call(500_000n, '2026-10-18T00:00:00Z', { redeemed: false, txRef: true });
+    await call(250_000n, '2026-10-18T00:10:00Z', { redeemed: true, txRef: false });
+    await call(250_000n, '2026-10-18T00:20:00Z', { held: true });
     await call(700_000n, '2026-10-18T01:00:00Z', { owed: true });
     await call(300_000n, '2026-10-18T02:00:00Z', { forfeited: true });
     await call(400_000n, '2026-10-18T03:00:00Z', { railA: true });
@@ -106,7 +109,17 @@ describe('GET /statements/balance, against a real database', () => {
   async function call(
     price: bigint,
     at: string,
-    options: { redeemed?: boolean; owed?: boolean; forfeited?: boolean; railA?: boolean },
+    options: {
+      /** The redemption landed: the hold was released. */
+      redeemed?: boolean;
+      /** A redemption tx was recorded (sent); defaults to `redeemed`. */
+      txRef?: boolean;
+      /** Redeemed into the dispute hold, not collected yet. */
+      held?: boolean;
+      owed?: boolean;
+      forfeited?: boolean;
+      railA?: boolean;
+    },
   ): Promise<void> {
     await dataSource.query(
       `INSERT INTO payment_intents (
@@ -114,9 +127,10 @@ describe('GET /statements/balance, against a real database', () => {
          tool_id, rail, call_id, call_class, asset_id, decimals, price_amount, provider_amount,
          platform_fee, request_hash, chain_id, expires_at, voucher_seq, voucher_signature,
          voucher_resource_hash, voucher_issued_at, hold_id, redemption_tx_refs,
-         redemption_lapsed_at, redemption_last_error, created_at)
+         redemption_lapsed_at, redemption_last_error, created_at, hold_released_at,
+         held_status, held_at, collectable_at)
        VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, 'PAID', $11, 6, $12, $12, 0,
-               $13, $14, now(), $15, $16, $17, $18, $19, $20, $21, $22, $23)`,
+               $13, $14, now(), $15, $16, $17, $18, $19, $20, $21, $22, $23, $24, $25, $26, $26)`,
       [
         randomUUID(),
         org,
@@ -137,10 +151,13 @@ describe('GET /statements/balance, against a real database', () => {
         options.railA ? null : `sha256:${'cd'.repeat(32)}`,
         options.railA ? null : String(Math.floor(Date.now() / 1000)),
         randomUUID(),
-        options.redeemed ? [`0x${'ef'.repeat(32)}`] : [],
+        (options.txRef ?? options.redeemed ?? options.held) ? [`0x${'ef'.repeat(32)}`] : [],
         options.owed ? at : null,
         options.forfeited ? 'provider_forfeit:DelegateIsRevoked' : null,
         at,
+        options.redeemed || options.forfeited || options.railA ? at : null,
+        options.held ? 'HELD' : null,
+        options.held ? at : null,
       ],
     );
   }
@@ -162,8 +179,8 @@ describe('GET /statements/balance, against a real database', () => {
       opening: '19000000',
       deposits: '10000000',
       withdrawals: '3000000',
-      paid: '2500000',
-      closing: '23500000',
+      paid: '3000000',
+      closing: '23000000',
     });
   });
 
@@ -181,17 +198,18 @@ describe('GET /statements/balance, against a real database', () => {
   });
 
   it('checks the current month against the escrow, allowing for payments still being settled', async () => {
-    // The chain still holds the 0.50 not redeemed yet.
-    chainBalance = 24_000_000n;
+    // The chain still holds the 0.50 not redeemed yet (its tx was only sent);
+    // the call redeemed with no tx ref and the one in the dispute hold are gone from it.
+    chainBalance = 23_500_000n;
     const matched = (await statements.balance(org, OCT, NOV, NOW)).items[0].check!;
     expect(matched).toMatchObject({
-      escrowBalance: { amount: '24000000' },
+      escrowBalance: { amount: '23500000' },
       stillSettling: { amount: '500000' },
       difference: { amount: '0' },
       matches: true,
     });
 
-    chainBalance = 23_000_000n;
+    chainBalance = 22_500_000n;
     const off = (await statements.balance(org, OCT, NOV, NOW)).items[0].check!;
     expect(off).toMatchObject({ difference: { amount: '-1000000' }, matches: false });
   });
