@@ -2,15 +2,18 @@ import { AddressInfo } from 'node:net';
 import * as http from 'node:http';
 
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
+import { ProviderBindingCredentialsController } from '@modules/provider/controllers/provider-binding-credentials.controller';
+import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { AuditLogWriter } from '@shared/audit';
 import { PublishRequirement } from '@modules/provider/domain/publish-gate';
 import { BindingTestLayer, BindingTestOutcome } from '@modules/provider/ports/binding-test.types';
 import { SaveToolBindingBodyDto } from '@modules/provider/dto/save-tool-binding.dto';
 import { IneligibilityReason } from '@modules/tool/domain/routing/routing.types';
-import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
-import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
+import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 import { EgressHttpClient } from '@shared/network/egress';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import { ONE_CREDENTIAL, plainInvoker } from '../../unit/tool/helpers/routing-fixtures';
 import {
   BindingEditorTestContext,
   STAKE_CHAIN,
@@ -103,12 +106,15 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
 
-  const invoker = new EgressBindingInvoker(
+  const invoker = plainInvoker(
     new EgressHttpClient(lookup, (target) => ({
       address: '127.0.0.1',
       family: 4,
       port: target.port === 80 ? port : target.port,
     })),
+    // API-key bindings need a key for the tester's own run; whether a set is
+    // STORED is what the publish gate asks, and is set per test below.
+    ONE_CREDENTIAL,
   );
 
   context = await createBindingEditorTestContext(invoker);
@@ -300,6 +306,50 @@ describe('binding editor → mapping tester → publish gate', () => {
     expect(mine?.version).toBe(1);
   });
 
+  it('publish deletes the credential sets of origins the binding no longer uses, and reports publishedEndpoint', async () => {
+    const OLD = 'http://provider.example.com';
+    const NEW = 'http://other.example.com';
+    const binding = await context.editor.create(context.organizationId, SUBJECT, body());
+    expect(
+      (await context.bindingsList.getBinding(context.organizationId, binding.id)).publishedEndpoint,
+    ).toBeNull();
+    await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'q' });
+    await context.publisher.publish(context.organizationId, SUBJECT, binding.id);
+    await context.vault.put(
+      context.organizationId,
+      binding.id,
+      OLD,
+      [{ name: 'X-K', value: 'a' }],
+      SUBJECT,
+    );
+
+    // Move the draft to another origin; the old set stays until the next publish.
+    const moved = await context.editor.update(context.organizationId, SUBJECT, binding.id, {
+      endpoint: `${NEW}/api`,
+    });
+    expect(moved.publishedEndpoint).toBe(`${OLD}/api`);
+    const detail = await context.bindingsList.getBinding(context.organizationId, binding.id);
+    expect(detail.endpoint).toBe(`${NEW}/api`);
+    expect(detail.publishedEndpoint).toBe(`${OLD}/api`);
+    await context.vault.put(
+      context.organizationId,
+      binding.id,
+      NEW,
+      [{ name: 'X-K', value: 'b' }],
+      SUBJECT,
+    );
+    expect(
+      (await context.vault.list(context.organizationId, binding.id)).map((s) => s.origin).sort(),
+    ).toEqual([NEW, OLD].sort());
+
+    await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'q' });
+    const published = await context.publisher.publish(context.organizationId, SUBJECT, binding.id);
+    expect(published.publishedEndpoint).toBe(`${NEW}/api`);
+
+    const left = await context.vault.list(context.organizationId, binding.id);
+    expect(left.map((s) => s.origin)).toEqual([NEW]);
+  });
+
   it('refuses a second publish of a revision already live', async () => {
     const binding = await context.editor.create(context.organizationId, SUBJECT, body());
     await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'x' });
@@ -470,5 +520,152 @@ describe('the mapping tester charges nobody', () => {
     });
     expect(runs).toHaveLength(2);
     expect(new Set(runs.map((run) => run.callId)).size).toBe(2);
+  });
+});
+
+describe('API-key credentials at publish', () => {
+  const ORIGIN = 'http://provider.example.com';
+
+  async function testedApiKeyBinding(): Promise<string> {
+    const binding = await context.editor.create(
+      context.organizationId,
+      SUBJECT,
+      body({ authMode: BindingAuthMode.API_KEY }),
+    );
+    const report = await context.tester.run(context.organizationId, SUBJECT, binding.id, {
+      query: 'anything',
+    });
+    expect(report.outcome).toBe(BindingTestOutcome.PASSED);
+    return binding.id;
+  }
+
+  const row = (check: {
+    requirements: Array<{ requirement: string; met: boolean; code: string | null }>;
+  }) => check.requirements.find((r) => r.requirement === PublishRequirement.API_KEY_CREDENTIALS);
+
+  it('refuses until a set exists for the draft origin, then publishes', async () => {
+    const id = await testedApiKeyBinding();
+
+    const before = await context.publisher.check(context.organizationId, id);
+    expect(row(before)).toMatchObject({ met: false, code: 'credentials_missing_for_origin' });
+    await expect(
+      context.publisher.publish(context.organizationId, SUBJECT, id),
+    ).rejects.toMatchObject({ errorCode: ProviderErrorCode.PROVIDER_PUBLISH_CHECKS_FAILED });
+
+    await context.vault.put(
+      context.organizationId,
+      id,
+      ORIGIN,
+      [{ name: 'X-Vendor-Auth', value: 'k' }],
+      SUBJECT,
+    );
+    const after = await context.publisher.check(context.organizationId, id);
+    expect(row(after)?.met).toBe(true);
+    const published = await context.publisher.publish(context.organizationId, SUBJECT, id);
+    expect(published.publishedAt).toBeDefined();
+  });
+
+  it('audits a pruned old-origin set with names only', async () => {
+    const id = await testedApiKeyBinding();
+    const SECRET = 'sk_live_audit_canary_1234567890';
+    await context.vault.put(
+      context.organizationId,
+      id,
+      ORIGIN,
+      [{ name: 'X-Vendor-Auth', value: 'k' }],
+      SUBJECT,
+    );
+    await context.vault.put(
+      context.organizationId,
+      id,
+      'https://old.example.com',
+      [{ name: 'X-Old-Auth', value: SECRET }],
+      SUBJECT,
+    );
+
+    await context.publisher.publish(context.organizationId, SUBJECT, id);
+
+    const entries = (await context.dataSource.query(
+      `SELECT actor_type, actor_id, action, resource_id, "before", "after"
+         FROM audit_log_entries WHERE organization_id = $1 AND action = 'binding_credentials.pruned'`,
+      [context.organizationId],
+    )) as Array<Record<string, unknown>>;
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({
+      actor_type: 'user',
+      actor_id: SUBJECT,
+      resource_id: id,
+      before: { origin: 'https://old.example.com', header_names: ['X-Old-Auth'] },
+    });
+    expect(JSON.stringify(entries)).not.toContain(SECRET);
+    expect(await context.vault.list(context.organizationId, id)).toHaveLength(1);
+  });
+
+  it('a paused API-key binding keeps its live set, and cannot resume without one', async () => {
+    const id = await testedApiKeyBinding();
+    await context.vault.put(
+      context.organizationId,
+      id,
+      ORIGIN,
+      [{ name: 'X-Vendor-Auth', value: 'k' }],
+      SUBJECT,
+    );
+    await context.publisher.publish(context.organizationId, SUBJECT, id);
+    await context.pauser.pause(context.organizationId, id);
+
+    const controller = new ProviderBindingCredentialsController(context.editor, context.vault, {
+      recordAfterCommit: async () => undefined,
+    } as unknown as AuditLogWriter);
+    const session = { organizationId: context.organizationId, credentialId: SUBJECT } as McpSession;
+    await expect(controller.remove(session, { id }, { origin: ORIGIN })).rejects.toMatchObject({
+      errorCode: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_LIVE,
+    });
+    expect(await context.vault.list(context.organizationId, id)).toHaveLength(1);
+
+    // However the set went (an older build, an operator), the resume is the gate.
+    await context.vault.remove(context.organizationId, id, ORIGIN);
+    await expect(context.pauser.resume(context.organizationId, id)).rejects.toMatchObject({
+      errorCode: ProviderErrorCode.PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE,
+    });
+    const still = await context.bindings.findOne({
+      where: { id, organizationId: context.organizationId },
+    });
+    expect(still?.status).toBe(BindingStatus.PAUSED);
+
+    await context.vault.put(
+      context.organizationId,
+      id,
+      ORIGIN,
+      [{ name: 'X-Vendor-Auth', value: 'k' }],
+      SUBJECT,
+    );
+    const resumed = await context.pauser.resume(context.organizationId, id);
+    expect(resumed.status).toBe(BindingStatus.ACTIVE);
+  });
+
+  it('refuses switching a published binding to API key without a set for the live origin', async () => {
+    const binding = await context.editor.create(context.organizationId, SUBJECT, body());
+    await context.tester.run(context.organizationId, SUBJECT, binding.id, { query: 'anything' });
+    await context.publisher.publish(context.organizationId, SUBJECT, binding.id);
+
+    await expect(
+      context.editor.update(context.organizationId, SUBJECT, binding.id, {
+        authMode: BindingAuthMode.API_KEY,
+      }),
+    ).rejects.toMatchObject({
+      errorCode: ProviderErrorCode.PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE,
+    });
+
+    await context.vault.put(
+      context.organizationId,
+      binding.id,
+      ORIGIN,
+      [{ name: 'X-Vendor-Auth', value: 'k' }],
+      SUBJECT,
+    );
+    const saved = await context.editor.update(context.organizationId, SUBJECT, binding.id, {
+      authMode: BindingAuthMode.BOTH,
+    });
+    expect(saved.authMode).toBe(BindingAuthMode.BOTH);
   });
 });

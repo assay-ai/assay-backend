@@ -7,9 +7,12 @@ import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { McpModule } from '@modules/mcp/mcp.module';
 import { ToolModule } from '@modules/tool/tool.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { VerificationModule } from '@modules/verification/verification.module';
 import { AuditLogModule } from '@shared/audit';
 
+import { CredentialVaultModule } from './credentials/credential-vault.module';
+import { ProviderBindingCredentialsController } from './controllers/provider-binding-credentials.controller';
 import { ProviderConnectivityController } from './controllers/provider-connectivity.controller';
 import { ProviderPayoutAddressController } from './controllers/provider-payout-address.controller';
 import { ProviderPayoutsController } from './controllers/provider-payouts.controller';
@@ -27,7 +30,6 @@ import { ProviderVerdictsController } from './controllers/provider-verdicts.cont
 import { ProviderController } from './controllers/provider.controller';
 import { ProviderModule } from './provider.module';
 import { SlaWindowModule } from './sla-window.module';
-import { PROVIDER_EGRESS_IPS, loadEgressIps } from './services/egress-ips';
 import { ProviderCallsExportService } from './services/provider-calls-export.service';
 import { ProviderConnectivityService } from './services/provider-connectivity.service';
 import { ProviderEarningsService } from './services/provider-earnings.service';
@@ -113,6 +115,10 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderModule,
     BlocklistModule,
     ToolModule,
+    // `BINDING_INVOKER` for the mapping tester, which dials through the same
+    // invoker production uses rather than a sandbox copy of it.
+    ToolEgressModule,
+    CredentialVaultModule,
     McpModule,
     ChainsModule,
     VerificationModule,
@@ -125,6 +131,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderController,
     ProviderPayoutsController,
     ProviderToolBindingsController,
+    ProviderBindingCredentialsController,
     ProviderVerdictsController,
     ProviderReconciliationController,
     ProviderPolicyChangesController,
@@ -135,7 +142,6 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
   ],
   providers: [
     { provide: PROVIDER_TERMS, useFactory: loadProviderTerms, inject: [ConfigService] },
-    { provide: PROVIDER_EGRESS_IPS, useFactory: loadEgressIps, inject: [ConfigService] },
     ProviderRegistrationService,
     ProviderPayoutAddressService,
     ProviderStakeAuthorityService,

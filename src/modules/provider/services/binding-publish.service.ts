@@ -5,6 +5,7 @@ import { DataSource } from 'typeorm';
 import { BindingVersionEntity } from '@database/postgres/entities/binding-version.entity';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { BindingTestRunRepository } from '@database/postgres/repositories/binding-test-run.repository';
+import { AuditLogWriter } from '@shared/audit';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { PayoutGateVerdict, evaluatePayoutGate } from '@modules/tool/domain/routing/payout-gate';
 import {
@@ -12,7 +13,7 @@ import {
   evaluateStakeGateOnChain,
 } from '@modules/tool/domain/routing/stake-gate';
 import { MinimumStakeByChain, RoutingCandidate } from '@modules/tool/domain/routing/routing.types';
-import { BindingStatus } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus } from '@modules/tool/ports/tool.types';
 import { toToolBinding } from '@modules/tool/services/database-tool-catalogue';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import {
@@ -28,6 +29,8 @@ import {
   evaluatePublishGate,
   unmetRequirements,
 } from '../domain/publish-gate';
+import { CredentialVaultService } from '../credentials/credential-vault.service';
+import { originOf } from '../credentials/credential-rules';
 import { PublishCheckDto, PublishedToolBindingDto } from '../dto/publish-tool-binding.dto';
 import { ProviderErrors } from '../errors/provider.errors';
 import { BindingTestLayer, BindingTestOutcome } from '../ports/binding-test.types';
@@ -90,7 +93,12 @@ export class BindingPublishService {
     // The contract versions a run's `tool_version` names, to group runs by
     // major. Optional only for hand-built harnesses, which then gate on the
     // newest run as before.
-    @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue?: ToolCataloguePort,
+    @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort | undefined,
+    // Prunes credential sets whose origin the new revision no longer uses.
+    // Required: a missing vault module must fail at boot.
+    private readonly vault: CredentialVaultService,
+    // Records pruned credential sets (names only) in the publish transaction.
+    @Optional() private readonly audit?: AuditLogWriter,
   ) {}
 
   /** The publish checklist, read before the button is pressed. */
@@ -175,12 +183,28 @@ export class BindingPublishService {
         });
       }
 
+      // The published endpoint is the draft's at this moment, so any credential
+      // set for another origin can never be sent again: drop it with the stamp.
+      const pruned = await this.vault.pruneExcept(manager, organizationId, bindingId, [
+        originOf(row.endpoint),
+      ]);
+      for (const { origin, headerNames } of pruned) {
+        await this.audit?.record(manager, {
+          organizationId,
+          actor: { type: 'user', id: subject },
+          action: 'binding_credentials.pruned',
+          resourceType: 'tool_binding',
+          resourceId: bindingId,
+          before: { origin, header_names: headerNames },
+        });
+      }
+
       return updated;
     });
 
     this.logger.log(`Binding ${bindingId} published at revision ${row.mappingVersion}`);
 
-    return { ...toSavedDto(saved), publishedAt };
+    return { ...toSavedDto(saved, saved.endpoint), publishedAt };
   }
 
   private async evaluate(organizationId: string, row: ToolBindingEntity): Promise<PublishCheck> {
@@ -225,7 +249,17 @@ export class BindingPublishService {
       );
     }
 
+    const origin = originOf(row.endpoint);
+    const required =
+      row.authMode === BindingAuthMode.API_KEY || row.authMode === BindingAuthMode.BOTH;
+    // The draft endpoint's origin: it is what goes live. Skipped for other modes
+    // so no read is wasted.
+    const present = required
+      ? (await this.vault.list(organizationId, row.id)).some((set) => set.origin === origin)
+      : false;
+
     return evaluatePublishGate({
+      credentials: { required, origin, present },
       mappingVersion: row.mappingVersion,
       latestRun,
       payoutByChain,

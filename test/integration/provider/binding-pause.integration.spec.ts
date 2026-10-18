@@ -5,10 +5,10 @@ import * as http from 'node:http';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { SaveToolBindingBodyDto } from '@modules/provider/dto/save-tool-binding.dto';
 import { BindingPauseReason, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
-import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { EgressHttpClient } from '@shared/network/egress';
 import { MoneyUtil } from '@shared/utils/money.util';
 
+import { plainInvoker } from '../../unit/tool/helpers/routing-fixtures';
 import {
   BindingEditorTestContext,
   STAKE_CHAIN,
@@ -97,7 +97,7 @@ beforeAll(async () => {
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve));
   port = (server.address() as AddressInfo).port;
 
-  const invoker = new EgressBindingInvoker(
+  const invoker = plainInvoker(
     new EgressHttpClient(lookup, (target) => ({
       address: '127.0.0.1',
       family: 4,

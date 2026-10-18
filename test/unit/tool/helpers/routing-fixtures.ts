@@ -47,6 +47,9 @@ import { BindingAttemptRecorder } from '@modules/tool/services/binding-attempt-r
 import { BindingCallCounterService } from '@modules/tool/services/binding-call-counter.service';
 import { BindingCeilingService } from '@modules/tool/services/binding-ceiling.service';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
+import type { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
+import type { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
+import type { EgressHttpClient } from '@shared/network/egress/egress-http.client';
 import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 import { DEFAULT_ROUTER_TUNING, RouterConfig } from '@modules/tool/services/routing.config';
@@ -685,3 +688,24 @@ export function seededRandom(seed: number): () => number {
 
 /** Re-exported so specs can build the production invoker without a second import path. */
 export { EgressBindingInvoker };
+
+/** A vault with no stored credentials for any binding. */
+export const NO_CREDENTIALS = {
+  headersFor: async () => [],
+} as unknown as CredentialVaultService;
+
+/** A vault that holds one API key for every binding and origin. */
+export const ONE_CREDENTIAL = {
+  headersFor: async () => [{ name: 'X-Provider-Key', value: 'test-key' }],
+} as unknown as CredentialVaultService;
+
+/** A signer with no keys, as in a non-production deployment that configured none. */
+export const UNSIGNED = { sign: async () => ({}) } as unknown as RequestSignerService;
+
+/** The production invoker with no credentials and no signature. */
+export function plainInvoker(
+  http: EgressHttpClient,
+  vault: CredentialVaultService = NO_CREDENTIALS,
+): EgressBindingInvoker {
+  return new EgressBindingInvoker(http, vault, UNSIGNED);
+}

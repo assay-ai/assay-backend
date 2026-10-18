@@ -122,9 +122,9 @@ export class DepositFinalityService {
       );
 
       // Nothing to resolve yet. Deliberately NOT marked resolved: this is a
-      // transient state, not a terminal one — `DepositService.settleDeposit`
-      // buffers its `DEPOSIT_PENDING` through the ledger writer, so a row can
-      // read `SETTLED` for the moment before that entry flushes. Stamping here
+      // transient state, not a terminal one — a row can read `SETTLED` for the
+      // moment before `DepositService.settleDeposit` writes its
+      // `DEPOSIT_PENDING`. Stamping here
       // would drop the deposit out of the queue forever, which is the very
       // failure this column exists to fix.
       if (!pending) {

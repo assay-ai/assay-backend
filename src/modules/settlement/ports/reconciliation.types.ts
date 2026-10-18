@@ -37,6 +37,13 @@ export enum ReconciliationFindingCode {
    * long as that gap lasts. The chain is the tiebreak.
    */
   ESCROW_MIRROR_DRIFT = 'ESCROW_MIRROR_DRIFT',
+  /**
+   * The escrow's `totalHeld()` (G3.B1, "redeem into hold") and the calls the
+   * platform mirrors as held disagree. WARN and transient for a pass while a
+   * redemption, collect or refund is being booked; persistent is a missed
+   * `PaymentHeld` / `HeldCollected` / `HeldRefunded`.
+   */
+  HELD_MIRROR_DRIFT = 'HELD_MIRROR_DRIFT',
   /** The pass could not complete; the figures are unknown, not healthy. */
   RECONCILIATION_FAILED = 'RECONCILIATION_FAILED',
   /** Enough consecutive failures that nobody has checked the money in a while. */

@@ -8,7 +8,6 @@ import { ProviderModule } from '@modules/provider/provider.module';
 import { loadMinimumStakeByChain } from '@modules/provider/services/provider-stake.service';
 import { NetworkModule } from '@shared/network/network.module';
 
-import { BINDING_INVOKER } from './ports/binding-invoker.port';
 import { BindingAttemptRecorder } from './services/binding-attempt-recorder.service';
 import { BindingCallCounterService } from './services/binding-call-counter.service';
 import { BindingCeilingService } from './services/binding-ceiling.service';
@@ -20,7 +19,6 @@ import {
   ToolContractChangesService,
 } from './services/database-tool-contracts';
 import { TOOL_CONTRACT_CHANGES, TOOL_CONTRACTS } from './ports/tool-contracts.port';
-import { EgressBindingInvoker } from './services/egress-binding.invoker';
 import {
   InMemoryToolCatalogue,
   TOOL_CATALOGUE_SNAPSHOT,
@@ -60,7 +58,7 @@ import {
  *   └── BindingCallCounterService  lifetime calls per binding  → the exploration floor
  *   └── BindingCeilingService      declared ceilings           → shed, and spend the token
  *   └── BindingAttemptRecorder     every attempt it is owed    → `binding_attempts` → stats
- *   └── BINDING_INVOKER         the actual HTTP call
+ *   └── BINDING_INVOKER         the actual HTTP call       (`ToolEgressModule`, api + mcp only)
  * ```
  *
  * The router is what the MCP server calls, so it could not wait for the
@@ -73,9 +71,8 @@ import {
  * `errors/tool.errors.ts` for the catalog.
  */
 @Module({
-  // `EgressBindingInvoker` dials provider endpoints — URLs typed by strangers,
-  // since provider registration is open, with no approval. `NetworkModule` is
-  // `@Global`, but it is imported here so this module's graph stands on its own.
+  // `NetworkModule` is `@Global`, but it is imported here so this module's
+  // graph stands on its own.
   // `ChainsModule` is imported for `ENABLED_CHAINS` alone: the `ROUTER_CONFIG`
   // factory asserts at boot that every chain this deployment offers has a stake
   // floor. `ProviderModule` already imports it, but does not re-export
@@ -107,8 +104,9 @@ import {
     DatabaseToolCatalogue,
     { provide: TOOL_CATALOGUE, useExisting: DatabaseToolCatalogue },
 
-    EgressBindingInvoker,
-    { provide: BINDING_INVOKER, useExisting: EgressBindingInvoker },
+    // The invoker (`BINDING_INVOKER`), the request signer and the credential
+    // vault live in `ToolEgressModule`, imported only by the processes that
+    // dial providers. See that module for why.
 
     {
       provide: ROUTER_CONFIG,
@@ -166,10 +164,6 @@ import {
     QuoteIndexService,
     QuoteIndexInvalidationSubscriber,
   ],
-  // `BINDING_INVOKER` is exported for the mapping tester, which dials a
-  // provider's endpoint through the *same* invoker production uses, rather
-  // than a sandbox copy of it. A copy is how a tester goes green on a call
-  // production would have made differently.
   // `BindingCallCounterService` is exported for the MCP server: the increment belongs
   // at the point that writes `payment_intents.binding_id`, which is the MCP
   // loop's own transition, not anywhere inside routing. Counting where the
@@ -180,7 +174,6 @@ import {
     TOOL_CATALOGUE,
     TOOL_CONTRACTS,
     TOOL_CONTRACT_CHANGES,
-    BINDING_INVOKER,
     BindingCallCounterService,
   ],
 })

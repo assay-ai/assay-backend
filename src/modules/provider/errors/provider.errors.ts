@@ -1,3 +1,4 @@
+import { RELAY_ALLOWED_PORTS } from '@shared/network/egress';
 import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors/error-catalog';
 
 /**
@@ -224,6 +225,30 @@ export enum ProviderErrorCode {
   PROVIDER_INVALID_TIME_RANGE = 'PROVIDER_INVALID_TIME_RANGE',
   /** A report window spans more than one asset with no `?asset=` filter to disambiguate. */
   PROVIDER_MULTIPLE_ASSETS = 'PROVIDER_MULTIPLE_ASSETS',
+  /** Stored credentials cannot be decrypted right now (key missing or ciphertext failed authentication). */
+  PROVIDER_CREDENTIAL_VAULT_UNAVAILABLE = 'PROVIDER_CREDENTIAL_VAULT_UNAVAILABLE',
+  /** No active vault key is configured, so credentials cannot be stored. */
+  PROVIDER_CREDENTIAL_VAULT_NOT_CONFIGURED = 'PROVIDER_CREDENTIAL_VAULT_NOT_CONFIGURED',
+  /** A credential-like key sits in the endpoint query or a constant mapping query entry. */
+  PROVIDER_CREDENTIAL_IN_QUERY = 'PROVIDER_CREDENTIAL_IN_QUERY',
+  /** A secret-looking header is set to a constant in a request mapping. */
+  PROVIDER_SECRET_IN_MAPPING = 'PROVIDER_SECRET_IN_MAPPING',
+  /** A request mapping sets a header in the platform's `x-assay-` namespace. */
+  PROVIDER_RESERVED_MAPPING_HEADER = 'PROVIDER_RESERVED_MAPPING_HEADER',
+  /** A credential header set breaks the name, value or size rules. */
+  PROVIDER_INVALID_CREDENTIAL_HEADERS = 'PROVIDER_INVALID_CREDENTIAL_HEADERS',
+  /** A credential set names an origin the binding does not use (draft or published endpoint). */
+  PROVIDER_CREDENTIAL_ORIGIN_MISMATCH = 'PROVIDER_CREDENTIAL_ORIGIN_MISMATCH',
+  /** Switching a published binding to API_KEY/BOTH while no credential set exists for its live origin. 400. */
+  PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE = 'PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE',
+  /** The credential set for the live (published, ACTIVE) origin cannot be deleted. 409. */
+  PROVIDER_CREDENTIAL_ORIGIN_LIVE = 'PROVIDER_CREDENTIAL_ORIGIN_LIVE',
+  /** The endpoint names a port the egress relay cannot reach. */
+  PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED = 'PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED',
+  /** With the egress relay on, an endpoint that is not https, or names an IP address. 400. */
+  PROVIDER_ENDPOINT_NOT_RELAYABLE = 'PROVIDER_ENDPOINT_NOT_RELAYABLE',
+  /** A request mapping declares more headers than a call can carry. 400. */
+  PROVIDER_TOO_MANY_MAPPING_HEADERS = 'PROVIDER_TOO_MANY_MAPPING_HEADERS',
 }
 
 export type ProviderErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -310,6 +335,26 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `Signature does not verify against the challenged address` +
       `${context?.accountId ? `: ${context.accountId}` : ''}`,
+  },
+  endpointPortNotRelayable: {
+    code: ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Port ${context?.port} is not supported. Use 443 or one of: ` +
+      `${RELAY_ALLOWED_PORTS.filter((port) => port !== 443).join(', ')}.`,
+  },
+  endpointNotRelayable: {
+    code: ProviderErrorCode.PROVIDER_ENDPOINT_NOT_RELAYABLE,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `This endpoint cannot be called: ${context?.reason ?? 'use https and a host name'}.`,
+  },
+  tooManyMappingHeaders: {
+    code: ProviderErrorCode.PROVIDER_TOO_MANY_MAPPING_HEADERS,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `The request mapping declares ${context?.count} headers; at most ${context?.max} are ` +
+      `allowed, so Assay's own and your credential headers still fit.`,
   },
   endpointNotDeclared: {
     code: ProviderErrorCode.PROVIDER_ENDPOINT_NOT_DECLARED,
@@ -680,5 +725,66 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `The requested window spans more than one asset (${context?.assets ?? '?'})` +
       ` — pass ?asset= to pick one`,
+  },
+  credentialVaultUnavailable: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_VAULT_UNAVAILABLE,
+    statusCode: 503,
+    message: (context?: Record<string, any>) =>
+      `Stored provider credentials could not be decrypted` +
+      `${context?.reason ? ` (${context.reason})` : ''}` +
+      `. The call was not sent.`,
+  },
+  credentialVaultNotConfigured: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_VAULT_NOT_CONFIGURED,
+    statusCode: 503,
+    message: () => `Credential storage is not configured on this deployment (no active vault key)`,
+  },
+  credentialInQuery: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_IN_QUERY,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Credential-like query parameter${(context?.keys?.length ?? 0) === 1 ? '' : 's'}: ` +
+      `${(context?.keys ?? []).join(', ')}. ` +
+      `URLs are logged by proxies, CDNs and servers and leak through browser history and ` +
+      `Referer headers. Send the key as a header: Authentication → API key.`,
+  },
+  secretInMapping: {
+    code: ProviderErrorCode.PROVIDER_SECRET_IN_MAPPING,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `${context?.headers?.length ? `Header ${context.headers.join(', ')}: ` : ''}` +
+      `Move this header to Authentication → API key; mappings are stored in plain text.`,
+  },
+  reservedMappingHeader: {
+    code: ProviderErrorCode.PROVIDER_RESERVED_MAPPING_HEADER,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Header ${(context?.headers ?? []).join(', ')}: names starting with x-assay- are set by ` +
+      `Assay itself. Rename or remove the header.`,
+  },
+  invalidCredentialHeaders: {
+    code: ProviderErrorCode.PROVIDER_INVALID_CREDENTIAL_HEADERS,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Invalid credential headers: ${(context?.problems ?? []).join('; ')}`,
+  },
+  credentialsRequiredForAuthMode: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE,
+    statusCode: 400,
+    message: () => `Add your API key headers for the live address first, then switch to API key.`,
+  },
+  credentialOriginLive: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_LIVE,
+    statusCode: 409,
+    message: () =>
+      `These credentials belong to the live endpoint of this binding. Publish a revision with ` +
+      `a different endpoint, or (once paused) switch off API key auth, before removing them; ` +
+      `replace them instead to rotate the key.`,
+  },
+  credentialOriginMismatch: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_MISMATCH,
+    statusCode: 400,
+    message: () =>
+      `Credentials can only be stored for the origin of this binding's endpoint (draft or published).`,
   },
 });

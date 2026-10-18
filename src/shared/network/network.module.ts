@@ -1,7 +1,26 @@
-import { Global, Module } from '@nestjs/common';
+import { Global, Logger, Module } from '@nestjs/common';
 import { ConfigModule } from '@nestjs/config';
 
-import { EgressHttpClient } from './egress';
+import {
+  EGRESS_RELAY_CONFIG,
+  EgressHttpClient,
+  EgressRelayConfig,
+  takeEgressRelayConfig,
+} from './egress';
+
+/**
+ * Read once at boot: the token is taken out of `process.env` here. Unset means
+ * provider calls go direct, which in production reveals this server's IP.
+ */
+function egressRelayConfigFactory(): EgressRelayConfig | null {
+  const config = takeEgressRelayConfig(process.env);
+  if (!config && process.env.NODE_ENV === 'production') {
+    new Logger('NetworkModule').warn(
+      "EGRESS_RELAY_URL is not set: provider calls reveal this server's IP",
+    );
+  }
+  return config;
+}
 
 /**
  * Outbound HTTP, for every service type.
@@ -14,7 +33,10 @@ import { EgressHttpClient } from './egress';
 @Global()
 @Module({
   imports: [ConfigModule],
-  providers: [EgressHttpClient],
-  exports: [EgressHttpClient],
+  providers: [
+    { provide: EGRESS_RELAY_CONFIG, useFactory: egressRelayConfigFactory },
+    EgressHttpClient,
+  ],
+  exports: [EgressHttpClient, EGRESS_RELAY_CONFIG],
 })
 export class NetworkModule {}

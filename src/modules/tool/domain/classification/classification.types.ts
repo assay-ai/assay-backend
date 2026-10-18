@@ -89,6 +89,12 @@ export enum ClassificationReason {
    */
   TRANSPORT_HTTPS_REQUIRED = 'TRANSPORT_HTTPS_REQUIRED',
   TRANSPORT_UNKNOWN = 'TRANSPORT_UNKNOWN',
+  /**
+   * Assay could not prepare the call (the credential vault could not open the
+   * binding's stored headers). Never dialled, and the platform's fault: it is
+   * not counted against the provider anywhere (see `attributeAttempt`).
+   */
+  PLATFORM_UNAVAILABLE = 'PLATFORM_UNAVAILABLE',
 
   // --- per-tool policy overrode the default for this status
   POLICY_SYSTEM_ERROR_STATUS = 'POLICY_SYSTEM_ERROR_STATUS',
@@ -156,6 +162,22 @@ export enum TransportErrorKind {
    * with `http:` before that rule lands here on every call.
    */
   SCHEME_NOT_ALLOWED = 'SCHEME_NOT_ALLOWED',
+  /**
+   * Assay could not prepare the call, so nothing was sent: today the credential
+   * vault being unable to open the binding's stored headers. The platform's
+   * fault, never the provider's — classified `PLATFORM_UNAVAILABLE` and left
+   * out of the provider's stats.
+   */
+  PLATFORM_UNAVAILABLE = 'PLATFORM_UNAVAILABLE',
+  /**
+   * The provider's answer arrived but its content made it unusable, so it was
+   * replaced before anything could read it: today a response that echoes a
+   * credential as a JSON key, or holds a single string too long to redact
+   * (`credential-redaction.ts`). The provider produced it, so it is classified
+   * like any other malformed body — `BODY_NOT_JSON`, a `SYSTEM_ERROR` counted
+   * against the binding's availability.
+   */
+  UNUSABLE_RESPONSE = 'UNUSABLE_RESPONSE',
   /** Recognised as a transport failure, but not as one of the above. */
   UNKNOWN = 'UNKNOWN',
 }

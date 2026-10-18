@@ -131,6 +131,8 @@ describe('BindingPublishService — publishing a paused binding', () => {
       } as unknown as ProviderRegistryPort,
       new Map([[CHAIN, { floor: MoneyUtil.of('50000000', ASSET, 6), priceMultiple: 1000 }]]),
       dataSource,
+      undefined,
+      { list: async () => [], pruneExcept: async () => [] } as never,
     );
 
     return { service, saved };

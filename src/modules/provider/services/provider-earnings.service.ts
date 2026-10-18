@@ -23,6 +23,14 @@ import { ProviderErrors } from '../errors/provider.errors';
 import { dayExpr } from './day-bucket.util';
 
 const DAY_EXPR = dayExpr('intent');
+/**
+ * Held for the dispute window, or by an open dispute (G3.B1): rail B in the
+ * escrow's `held[payer][seq]`, rail A as a withheld ledger credit. Not payable
+ * until collected; never if an upheld dispute refunds it. Disjoint from debt
+ * and from every closed outcome, which all have `held_status` unset or not
+ * `HELD`.
+ */
+const PENDING_SQL = `(intent.held_status = 'HELD')`;
 const SETTLED_STATUS = 'SETTLED';
 
 interface EarningsRow {
@@ -40,6 +48,8 @@ interface EarningsRow {
   readonly debtOutstandingCalls: string;
   readonly uncollected: string;
   readonly uncollectedCalls: string;
+  readonly pendingInWindow: string;
+  readonly pendingInWindowCalls: string;
 }
 
 interface Figures {
@@ -54,6 +64,8 @@ interface Figures {
   readonly debtOutstandingCalls: number;
   readonly uncollected: bigint;
   readonly uncollectedCalls: number;
+  readonly pendingInWindow: bigint;
+  readonly pendingInWindowCalls: number;
 }
 
 const ZERO_FIGURES: Figures = {
@@ -68,6 +80,8 @@ const ZERO_FIGURES: Figures = {
   debtOutstandingCalls: 0,
   uncollected: 0n,
   uncollectedCalls: 0,
+  pendingInWindow: 0n,
+  pendingInWindowCalls: 0,
 };
 
 /**
@@ -155,6 +169,16 @@ export class ProviderEarningsService {
           `AND (COALESCE(${WRITTEN_OFF_SQL}, false) OR ${PLATFORM_ABSORBED_SQL}))`,
         'uncollectedCalls',
       )
+      // Held for the dispute window or an open dispute, or being collected:
+      // still in the buyer's escrow, not yet payable (`PENDING_SQL`).
+      .addSelect(
+        `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND ${PENDING_SQL} THEN intent.providerAmount ELSE 0 END), 0)`,
+        'pendingInWindow',
+      )
+      .addSelect(
+        `COUNT(*) FILTER (WHERE intent.status = :settledStatus AND ${PENDING_SQL})`,
+        'pendingInWindowCalls',
+      )
       .addSelect(
         `COALESCE(SUM(CASE WHEN intent.status IN (:...withheldStatuses) AND intent.holdId IS NOT NULL ` +
           `THEN intent.providerAmount ELSE 0 END), 0)`,
@@ -234,6 +258,8 @@ function toFigures(row: EarningsRow): Figures {
     debtOutstandingCalls: Number(row.debtOutstandingCalls),
     uncollected: BigInt(row.uncollected),
     uncollectedCalls: Number(row.uncollectedCalls),
+    pendingInWindow: BigInt(row.pendingInWindow),
+    pendingInWindowCalls: Number(row.pendingInWindowCalls),
   };
 }
 
@@ -250,6 +276,8 @@ function addFigures(a: Figures, b: Figures): Figures {
     debtOutstandingCalls: a.debtOutstandingCalls + b.debtOutstandingCalls,
     uncollected: a.uncollected + b.uncollected,
     uncollectedCalls: a.uncollectedCalls + b.uncollectedCalls,
+    pendingInWindow: a.pendingInWindow + b.pendingInWindow,
+    pendingInWindowCalls: a.pendingInWindowCalls + b.pendingInWindowCalls,
   };
 }
 
@@ -282,5 +310,7 @@ function toFiguresDto(
     debtOutstandingCalls: figures.debtOutstandingCalls,
     uncollected: money(figures.uncollected),
     uncollectedCalls: figures.uncollectedCalls,
+    pendingInWindow: money(figures.pendingInWindow),
+    pendingInWindowCalls: figures.pendingInWindowCalls,
   };
 }

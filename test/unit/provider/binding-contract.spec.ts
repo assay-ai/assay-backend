@@ -286,6 +286,7 @@ describe('the publish gate wants each major tested at its newest version (P2-2)'
       new Map(),
       {} as never,
       { findTool: async () => tool } as never,
+      { list: async () => [], pruneExcept: async () => [] } as never,
     );
     const at = (runs: unknown[]) =>
       (

@@ -42,9 +42,16 @@ verifies the result (the verification pipeline) and settles to the provider's
 payout account on chain (the settlement program). If a design ever requires the provider to change
 their endpoint, the design is wrong.
 
-Credentials the endpoint needs are the provider's own and are injected into
-`headers` by the caller. **A secret never belongs in a mapping** — a mapping
-lives in a `jsonb` column and is rendered in a console.
+Credentials the endpoint needs are the provider's own. **A secret never belongs
+in a mapping** — a mapping lives in a `jsonb` column and is rendered in a
+console. The provider stores them in the credential vault
+(`PUT providers/me/tool-bindings/:id/credentials`, write-only, one set per
+origin) and the caller attaches them to the outgoing request after the
+mapping's own headers. A mapping that carries a credential-like query key
+(`api_key`, `token`, `secret`, ...) or a secret-looking constant header
+(`authorization`, `x-api-key`, `cookie`, ...) is rejected at save time. The
+binding's `auth_mode` (NONE, API_KEY, SIGNATURE, BOTH) says what the endpoint
+expects; it is not versioned. See `docs/adr/0002-provider-request-auth.md`.
 
 ## Selectors
 

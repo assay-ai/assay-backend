@@ -106,7 +106,10 @@ import { EvmStakeReader } from './evm/evm-stake-reader.service';
 import { EvmStakeIntentBuilder } from './evm/evm-stake-intent-builder.service';
 import { EvmVaultService } from './evm/evm-vault.service';
 import { EvmVerifierRegistryService } from './evm/evm-verifier-registry.service';
+import { EvmHeldPayments } from './evm/evm-held-payments.service';
 import { EvmVoucherRedeemer } from './evm/evm-voucher-redeemer.service';
+import { NamespaceHeldPayments } from './multiplex/namespace-held-payments';
+import { HELD_PAYMENTS } from '@modules/payment/ports/held-payments.port';
 import { SolanaChainAdapter } from './solana/solana-chain.adapter';
 import { SOLANA_CHAIN_ID, SOLANA_RPC, SOLANA_RPC_SUBSCRIPTIONS } from './solana/solana.constants';
 import { ACCOUNT_WATCH_PORT } from './ports/account-watch.port';
@@ -585,6 +588,13 @@ import {
       inject: [SolanaVoucherRedeemer, EvmVoucherRedeemer],
     },
 
+    {
+      // "Redeem into hold" (G3.B1): the escrow's held payments, eip155 only.
+      provide: HELD_PAYMENTS,
+      useFactory: (evm: EvmHeldPayments) => new NamespaceHeldPayments(evm),
+      inject: [EvmHeldPayments],
+    },
+
     // `open_escrow`. Unlike the redeemer above, the account this
     // instruction moves rent for (`escrow`) is `init`, never signed by a
     // buyer — see `SolanaEscrowOpener`'s class comment. Same `ModuleRef`
@@ -628,6 +638,7 @@ import {
     CHAIN_STATE_GATE,
     SLASH_DISPUTE_INTENTS,
     VOUCHER_REDEEMER,
+    HELD_PAYMENTS,
     ESCROW_OPENER,
     ESCROW_INTENT_BUILDER,
     ESCROW_DELEGATION,

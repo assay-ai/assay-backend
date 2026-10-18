@@ -126,6 +126,17 @@ describe('attributeAttempt', () => {
     ).toEqual({ counted: false, why: AttemptNotCountedReason.UNRECOGNISED_FAILURE });
   });
 
+  it('does not count a call Assay could not prepare (vault unavailable)', () => {
+    expect(
+      attributeAttempt(
+        attempt({
+          responseClass: ResponseClass.SYSTEM_ERROR,
+          reason: ClassificationReason.PLATFORM_UNAVAILABLE,
+        }),
+      ),
+    ).toEqual({ counted: false, why: AttemptNotCountedReason.PLATFORM_FAULT });
+  });
+
   it('excludes a self-call, whatever its outcome', () => {
     for (const responseClass of [ResponseClass.DATA_RESULT, ResponseClass.SYSTEM_ERROR]) {
       expect(

@@ -53,6 +53,8 @@ import { ProviderRepository } from './repositories/provider.repository';
 import { ProviderPayoutChallengeRepository } from './repositories/provider-payout-challenge.repository';
 import { ProviderConnectivityCheckRepository } from './repositories/provider-connectivity-check.repository';
 import { ProviderPayoutRepository } from './repositories/provider-payout.repository';
+import { BindingCredentialEntity } from './entities/binding-credential.entity';
+import { VaultKekCheckEntity } from './entities/vault-kek-check.entity';
 import { ToolBindingEntity } from './entities/tool-binding.entity';
 import { ToolEntity } from './entities/tool.entity';
 import { ToolVersionEntity } from './entities/tool-version.entity';
@@ -62,6 +64,8 @@ import { ToolPromotionInviteEntity } from './entities/tool-promotion-invite.enti
 import { ToolsetEntryEntity } from './entities/toolset-entry.entity';
 import { BindingVersionEntity } from './entities/binding-version.entity';
 import { BindingTestRunEntity } from './entities/binding-test-run.entity';
+import { BindingCredentialRepository } from './repositories/binding-credential.repository';
+import { VaultKekCheckRepository } from './repositories/vault-kek-check.repository';
 import { ToolBindingRepository } from './repositories/tool-binding.repository';
 import { ToolRepository } from './repositories/tool.repository';
 import { ToolVersionRepository } from './repositories/tool-version.repository';
@@ -127,7 +131,8 @@ import { FleetSweepRepository } from './repositories/fleet-sweep.repository';
 import { SlashCaseReadRepository } from './repositories/slash-case-read.repository';
 import { PlatformMetricsRepository } from './repositories/platform-metrics.repository';
 
-const entities = [
+/** Exported for the per-process boot tests, which stub every repository. */
+export const entities = [
   PostEntity,
   LedgerEntryEntity,
   LedgerHoldEntity,
@@ -160,6 +165,8 @@ const entities = [
   ToolsetEntryEntity,
   AgentConnectUrlEntity,
   ToolBindingEntity,
+  BindingCredentialEntity,
+  VaultKekCheckEntity,
   BindingVersionEntity,
   BindingTestRunEntity,
   ProviderStakeGraceEntity,
@@ -189,7 +196,7 @@ const entities = [
   BindingStatsEntity,
   ...TOOLSET_SHARING_ENTITIES,
 ];
-const repositories = [
+export const repositories = [
   PostRepository,
   LedgerEntryRepository,
   LedgerHoldRepository,
@@ -221,6 +228,8 @@ const repositories = [
   ToolsetEntryRepository,
   AgentConnectUrlRepository,
   ToolBindingRepository,
+  BindingCredentialRepository,
+  VaultKekCheckRepository,
   BindingVersionRepository,
   BindingTestRunRepository,
   ProviderStakeGraceRepository,

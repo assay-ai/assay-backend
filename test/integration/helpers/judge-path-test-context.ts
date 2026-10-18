@@ -1,3 +1,5 @@
+import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
+import { VerificationRecordDisputeOutcome1761800000001 } from '@database/postgres/migrations/1761800000001-verification-record-dispute-outcome';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -29,6 +31,7 @@ import { CreateVerificationRecords1755800000000 } from '@database/postgres/migra
 import { TimestamptzTimestamps1755900000000 } from '@database/postgres/migrations/1755900000000-timestamptz-timestamps';
 import { CallIdAndCallClass1756800000000 } from '@database/postgres/migrations/1756800000000-call-id-and-call-class';
 import { CreateToolBindingTables1756900000000 } from '@database/postgres/migrations/1756900000000-create-tool-binding-tables';
+import { ToolBindingAuthMode1762000000002 } from '@database/postgres/migrations/1762000000002-tool-binding-auth-mode';
 import { BindingTrafficControls1757200000000 } from '@database/postgres/migrations/1757200000000-binding-traffic-controls';
 import { CreateEvidencePacks1757400000000 } from '@database/postgres/migrations/1757400000000-create-evidence-packs';
 import { CreateApiSurfaceTables1756000000000 } from '@database/postgres/migrations/1756000000000-create-api-surface-tables';
@@ -50,7 +53,6 @@ import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service'
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
 import {
@@ -73,6 +75,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
 } from './test-database';
 import { noBlocks } from '../../unit/helpers/blocklist';
@@ -198,12 +201,18 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
       PaymentIntentRedemptionLapsed1760700000000,
       PaymentIntentDebtReplacing1760800000000,
       VoucherSeqDebtReplacement1760900000000,
+      // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
+      PaymentIntentDisputeHold1761800000000,
+      // `dispute_outcome` (G3.B1), mapped by `VerificationRecordEntity`.
+      VerificationRecordDisputeOutcome1761800000001,
+      ToolBindingAuthMode1762000000002,
     ],
     synchronize: false,
     logging: false,
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const balanceRepository = new AccountBalanceRepository(dataSource);
@@ -211,12 +220,7 @@ export async function createJudgePathTestContext(): Promise<JudgePathTestContext
   const journal = new LedgerJournalService(entries, balanceRepository, dataSource);
   const balances = new LedgerBalanceService(balanceRepository, journal);
   const holds = new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource);
-  const ledger = new LedgerService(
-    journal,
-    new LedgerWriterService(journal, dataSource),
-    balances,
-    holds,
-  );
+  const ledger = new LedgerService(journal, balances, holds);
 
   const paymentIntents = new PaymentIntentRepository(dataSource);
   const intents = new PaymentIntentService(

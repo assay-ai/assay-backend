@@ -68,7 +68,7 @@ describe('Deposit finality sweep — the candidate window past its batch size', 
       expiresAt: new Date(Date.now() + 90_000),
     });
 
-    ctx.ledger.append({
+    await ctx.ledger.appendNow({
       organizationId: ctx.organizationId,
       accountId: account,
       entryType: LedgerEntryType.DEPOSIT_PENDING,
@@ -108,7 +108,6 @@ describe('Deposit finality sweep — the candidate window past its batch size', 
       older.push(id);
     }
     const newest = await seedSettledDeposit('agent-window-newest');
-    await ctx.ledger.flush();
 
     // `updated_at` decides the window, and 201 inserts can land inside one
     // clock tick. Back-date the batch explicitly so the ordering under test is
@@ -158,7 +157,6 @@ describe('Deposit finality sweep — the candidate window past its batch size', 
     });
 
     const deposit = await seedSettledDeposit('agent-idempotent');
-    await ctx.ledger.flush();
 
     expect((await ctx.finality.promotePendingDeposits(50)).confirmed).toBe(1);
 
@@ -191,15 +189,15 @@ describe('Deposit finality sweep — the candidate window past its batch size', 
     expect(await resolvedAt(deposit.id)).not.toBeNull();
   });
 
-  it('leaves a settled deposit whose DEPOSIT_PENDING has not flushed yet in the queue', async () => {
+  it('leaves a settled deposit whose DEPOSIT_PENDING has not landed yet in the queue', async () => {
     (ctx.adapter.observeTransfer as jest.Mock).mockResolvedValue({
       amount: AMOUNT.toString(),
       asset: USDC_ASSET,
       decimals: USDC_DECIMALS,
     });
 
-    // The row is SETTLED but the buffered pending entry has not landed — the
-    // window between `ledger.append` and the writer's flush in
+    // The row is SETTLED but its pending entry has not landed — the window
+    // between the status update and the ledger write in
     // `DepositService.settleDeposit`. Stamping here would be the original bug
     // with a new cause.
     const id = randomUUID();
@@ -232,7 +230,6 @@ describe('Deposit finality sweep — the candidate window past its batch size', 
     });
 
     const deposit = await seedSettledDeposit('agent-backfill');
-    await ctx.ledger.flush();
     expect((await ctx.finality.promotePendingDeposits(50)).confirmed).toBe(1);
 
     // Rewind to the pre-migration shape: dropping the column takes its partial

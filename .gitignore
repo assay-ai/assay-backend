@@ -84,6 +84,8 @@ lerna-debug.log*
 .worktrees/
 .local/
 
+workers/*/node_modules
+workers/*/.wrangler
 # Python bytecode (it embeds absolute local paths)
 __pycache__/
 *.pyc

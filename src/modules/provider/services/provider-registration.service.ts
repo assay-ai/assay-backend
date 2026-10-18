@@ -36,7 +36,6 @@ import {
 } from '../ports/provider-registration.types';
 import { ChainEnrolmentStatus } from '../ports/chain-enrolment.port';
 import { ProviderStatus, ProviderTier } from '../ports/provider.types';
-import { PROVIDER_EGRESS_IPS } from './egress-ips';
 import { PROVIDER_TERMS, ProviderTerms } from './provider-terms';
 
 /**
@@ -78,7 +77,6 @@ export class ProviderRegistrationService {
     private readonly chainEnrolments: ProviderChainEnrolmentRepository,
     private readonly connectivityChecks: ProviderConnectivityCheckRepository,
     @Inject(PROVIDER_TERMS) private readonly terms: ProviderTerms,
-    @Inject(PROVIDER_EGRESS_IPS) private readonly egressIps: string[],
   ) {}
 
   async register(
@@ -213,7 +211,6 @@ export class ProviderRegistrationService {
       currentStep: deriveCurrentStep(steps),
       totalSteps: steps.length,
       terms: this.toTermsSummaryDto(),
-      egressIps: this.egressIps,
       lastConnectivityCheck: lastCheck ? toConnectivityDto(lastCheck) : null,
     };
   }

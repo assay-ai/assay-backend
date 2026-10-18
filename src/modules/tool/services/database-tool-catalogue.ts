@@ -8,7 +8,13 @@ import { AssetId, ChainId } from '@modules/chains/ports/caip.types';
 
 import { RemovedTool, TOOL_CONTRACTS, ToolContractsPort } from '../ports/tool-contracts.port';
 import { ToolCataloguePort } from '../ports/tool-catalogue.port';
-import { BindingStatus, PricingMode, Tool, ToolBinding } from '../ports/tool.types';
+import {
+  BindingAuthMode,
+  BindingStatus,
+  PricingMode,
+  Tool,
+  ToolBinding,
+} from '../ports/tool.types';
 
 /**
  * The catalogue, from the database.
@@ -114,6 +120,7 @@ export function toToolBinding(row: ToolBindingEntity): ToolBinding {
     slaFailureRate: Number(row.slaFailureRate),
     timeoutMs: row.timeoutMs,
     status: row.status as BindingStatus,
+    authMode: row.authMode as BindingAuthMode,
     toolVersionRange: row.toolVersionRange ?? '^1',
     providesOutputFields: [...(row.providesOutputFields ?? [])],
     supportsInputFields: [...(row.supportsInputFields ?? [])],

@@ -1,10 +1,12 @@
 import { ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
+import { NestExpressApplication } from '@nestjs/platform-express';
 
 import { applyHttpSecurity } from '@shared/security/security-headers';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { StructuredLogger } from '@shared/observability';
 import { LoggingInterceptor } from '@shared/interceptors/logging.interceptor';
+import { assertTrustProxyHopsConfigured } from '@config/app.config';
 import { loadMcpDiscoveryConfig } from '@modules/mcp/config/mcp-discovery.config';
 
 import { AppMcpModule } from './app.module';
@@ -35,11 +37,19 @@ async function bootstrapMcp() {
   // missing in production.
   loadMcpDiscoveryConfig();
 
-  const app = await NestFactory.create(AppMcpModule, {
+  const app = await NestFactory.create<NestExpressApplication>(AppMcpModule, {
     logger: new StructuredLogger(),
   });
 
-  const port = app.get(ConfigService).get<number>('app.mcp.port');
+  const configService = app.get(ConfigService);
+  const port = configService.get<number>('app.mcp.port');
+
+  // Client address, as in `api/main.ts`. Both processes sit behind the same
+  // balancer, so they share `API_TRUST_PROXY_HOPS`: without it `request.ip`
+  // here is the balancer's address and every IP-keyed limit (the public demo)
+  // counts all callers as one. Production refuses to start with it unset.
+  assertTrustProxyHopsConfigured();
+  app.set('trust proxy', configService.get<number>('app.api.trustProxyHops') ?? 0);
 
   // An MCP client may be a browser-hosted agent. `Authorization` has to be
   // allowed explicitly — it is not a CORS-safelisted request header — and

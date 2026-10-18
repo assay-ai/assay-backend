@@ -23,10 +23,18 @@ import {
   classifyResponse,
 } from '@modules/tool/domain/classification';
 import { MappingFault, mappingFaultOf } from '@modules/tool/domain/mapping';
+import { BindingAuthMode } from '@modules/tool/ports/tool.types';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { EgressHttpClient } from '@shared/network/egress';
+import type { EgressRequest } from '@shared/network/egress/egress-http.client';
+import type { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
+import { ProviderErrors } from '@modules/provider/errors/provider.errors';
+import type { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
+import type { SignableRequest } from '@modules/tool/request-auth/signature-base';
 import { bindingEndpointProtocols } from '@shared/network/egress/egress.policy';
+import { EgressError, EgressFailureKind } from '@shared/network/egress/egress.errors';
+import { REDACTED } from '@modules/tool/domain/egress/credential-redaction';
 import { AppError } from '@shared/errors/app-errors';
 
 import {
@@ -37,6 +45,7 @@ import {
   buildProvider,
   buildRouter,
   buildTool,
+  plainInvoker,
   usdc,
 } from './helpers/routing-fixtures';
 
@@ -56,7 +65,7 @@ let handler: http.RequestListener;
 const openSockets: Array<{ destroy: () => void }> = [];
 
 function invoker(): EgressBindingInvoker {
-  return new EgressBindingInvoker(
+  return plainInvoker(
     new EgressHttpClient(lookup, (target) => ({
       address: '127.0.0.1',
       family: 4,
@@ -114,6 +123,26 @@ describe('EgressBindingInvoker (router call path)', () => {
   const A = 'provider-a';
   const tool = buildTool();
   const binding = buildBinding(A, { endpoint: 'http://provider-a.example.com/api' });
+
+  it('asks for the egress relay on every provider call', async () => {
+    const request = jest.fn().mockResolvedValue({
+      status: 200,
+      headers: { 'content-type': 'application/json' },
+      body: Buffer.from('{}'),
+      bytes: 2,
+      url: 'http://provider-a.example.com/api/search',
+      redirects: 0,
+    });
+    await plainInvoker({ request } as unknown as EgressHttpClient).invoke({
+      tool,
+      binding,
+      input: { query: 'x' },
+      timeoutMs: 2_000,
+      callId: 'test-call-id',
+    });
+    expect(request).toHaveBeenCalledTimes(1);
+    expect(request.mock.calls[0][0].policy.relay).toBe(true);
+  });
 
   it('builds the upstream request from the stored mapping', async () => {
     respondWith(200, JSON.stringify({ answer: 'from upstream' }));
@@ -396,5 +425,383 @@ describe('EgressBindingInvoker (router call path)', () => {
     });
 
     expect(response.transportError?.kind).toBe(TransportErrorKind.DNS_FAILURE);
+  });
+});
+
+/**
+ * Credentials and the Assay signature, against a fake client: what matters
+ * here is the exact header set and order handed to `EgressHttpClient`, and what
+ * the vault and the signer were asked.
+ */
+describe('EgressBindingInvoker (credentials and signature)', () => {
+  const tool = buildTool();
+  const ENDPOINT = 'https://p.test/v1';
+
+  function setup(options: {
+    credentials?: Array<{ name: string; value: string }>;
+    vaultError?: unknown;
+    signerError?: unknown;
+    mappingHeaders?: Record<string, { $const: string }>;
+    method?: 'GET' | 'POST';
+    reply?: { headers?: Record<string, string>; body?: string; contentType?: string };
+    transportError?: unknown;
+    authMode?: BindingAuthMode;
+    omit?: { credentials?: boolean; signature?: boolean };
+  }) {
+    const sent: EgressRequest[] = [];
+    const http = {
+      request: jest.fn(async (req: EgressRequest) => {
+        sent.push(req);
+        if (options.transportError) throw options.transportError;
+        const body = options.reply?.body ?? '{"answer":"ok"}';
+        return {
+          status: 200,
+          headers: {
+            'content-type': options.reply?.contentType ?? 'application/json',
+            ...options.reply?.headers,
+          },
+          body,
+          bytes: body.length,
+          url: req.url,
+          redirects: 0,
+        };
+      }),
+    } as unknown as EgressHttpClient;
+
+    const vault = {
+      headersFor: jest.fn(async () => {
+        if (options.vaultError) throw options.vaultError;
+        return options.credentials ?? [];
+      }),
+    };
+
+    const signed: SignableRequest[] = [];
+    const signer = {
+      sign: jest.fn(async (req: SignableRequest) => {
+        if (options.signerError) throw options.signerError;
+        signed.push(req);
+        return {
+          ...(req.body === undefined ? {} : { 'Content-Digest': 'sha-256=:digest:' }),
+          'Signature-Input': 'assay=("@method");keyid="k"',
+          Signature: 'assay=:sig:',
+        };
+      }),
+    };
+
+    const binding = buildBinding('provider-p', {
+      endpoint: ENDPOINT,
+      authMode: options.authMode,
+      requestMapping:
+        options.method === 'GET'
+          ? {
+              method: 'GET',
+              path: '/search',
+              query: { q: { $path: '$.query' } },
+              headers: options.mappingHeaders,
+            }
+          : {
+              method: 'POST',
+              path: '/search',
+              body: { q: { $path: '$.query' } },
+              headers: options.mappingHeaders,
+            },
+    });
+
+    const subject = new EgressBindingInvoker(
+      http,
+      vault as unknown as CredentialVaultService,
+      signer as unknown as RequestSignerService,
+    );
+    const run = () =>
+      subject.invoke({
+        tool,
+        binding,
+        input: { query: 'q' },
+        timeoutMs: 2_000,
+        callId: 'call-1',
+        omit: options.omit,
+      });
+    return { run, sent, signed, vault, signer, http, binding };
+  }
+
+  /** Lower-cased header names, in the order the invoker built them. */
+  const names = (req: EgressRequest) => Object.keys(req.headers ?? {});
+  const lower = (req: EgressRequest) =>
+    Object.fromEntries(Object.entries(req.headers ?? {}).map(([k, v]) => [k.toLowerCase(), v]));
+
+  it('sends the vault credential headers', async () => {
+    const { run, sent } = setup({ credentials: [{ name: 'Authorization', value: 'Bearer k' }] });
+    await run();
+    expect(lower(sent[0]).authorization).toBe('Bearer k');
+  });
+
+  it('asks the vault for exactly the endpoint origin, as the binding provider', async () => {
+    const { run, vault, binding } = setup({});
+    await run();
+    expect(vault.headersFor).toHaveBeenCalledWith(binding.providerId, binding.id, 'https://p.test');
+  });
+
+  it('lets a vault header override a mapping header case-insensitively', async () => {
+    const { run, sent } = setup({
+      credentials: [{ name: 'x-key', value: 'v' }],
+      mappingHeaders: { 'X-Key': { $const: 'm' } },
+    });
+    await run();
+    const headers = sent[0].headers ?? {};
+    const keys = Object.keys(headers).filter((k) => k.toLowerCase() === 'x-key');
+    expect(keys).toHaveLength(1);
+    expect(headers[keys[0]]).toBe('v');
+  });
+
+  it('keeps x-assay-call-id un-overridable by the vault', async () => {
+    const { run, sent } = setup({
+      credentials: [{ name: 'X-Assay-Call-Id', value: 'forged' }],
+    });
+    await run();
+    const headers = sent[0].headers ?? {};
+    const keys = Object.keys(headers).filter((k) => k.toLowerCase() === 'x-assay-call-id');
+    expect(keys).toEqual(['x-assay-call-id']);
+    expect(headers['x-assay-call-id']).toBe('call-1');
+  });
+
+  it('adds signature, signature-input and content-digest to a POST', async () => {
+    const { run, sent } = setup({});
+    await run();
+    const headers = lower(sent[0]);
+    expect(headers.signature).toBe('assay=:sig:');
+    expect(headers['signature-input']).toBe('assay=("@method");keyid="k"');
+    expect(headers['content-digest']).toBe('sha-256=:digest:');
+  });
+
+  it('adds no content-digest to a GET', async () => {
+    const { run, sent, signed } = setup({ method: 'GET' });
+    await run();
+    expect(signed[0].body).toBeUndefined();
+    expect(lower(sent[0])['content-digest']).toBeUndefined();
+    expect(lower(sent[0]).signature).toBe('assay=:sig:');
+  });
+
+  it('orders headers: defaults, mapping, credentials, call id, signature', async () => {
+    const { run, sent } = setup({
+      credentials: [{ name: 'Authorization', value: 'Bearer k' }],
+      mappingHeaders: { 'X-Mapped': { $const: 'm' } },
+    });
+    await run();
+    expect(names(sent[0])).toEqual([
+      'accept',
+      'content-type',
+      'x-mapped',
+      'authorization',
+      'x-assay-call-id',
+      'content-digest',
+      'signature-input',
+      'signature',
+    ]);
+  });
+
+  it('signs the final URL, method, headers and body that are sent', async () => {
+    const { run, sent, signed } = setup({
+      credentials: [{ name: 'Authorization', value: 'Bearer k' }],
+    });
+    await run();
+    expect(signed).toHaveLength(1);
+    expect(signed[0].url).toBe(sent[0].url);
+    expect(signed[0].method).toBe(sent[0].method);
+    expect(signed[0].body).toBe(sent[0].body);
+    expect(signed[0].headers).toMatchObject({
+      authorization: 'Bearer k',
+      'x-assay-call-id': 'call-1',
+    });
+    expect(sent[0].url).toBe('https://p.test/v1/search');
+  });
+
+  it('turns a vault failure into a platform-fault transport error and never dials', async () => {
+    const { run, http, signer } = setup({
+      vaultError: ProviderErrors.credentialVaultUnavailable({ reason: 'key not loaded' }),
+    });
+    const response = await run();
+    expect(http.request).not.toHaveBeenCalled();
+    expect(signer.sign).not.toHaveBeenCalled();
+    expect(response.status).toBe(0);
+    expect(response.transportError?.kind).toBe(TransportErrorKind.PLATFORM_UNAVAILABLE);
+    expect(classifyResponse(response, { toolId: TOOL_ID })).toMatchObject({
+      responseClass: ResponseClass.SYSTEM_ERROR,
+      reason: ClassificationReason.PLATFORM_UNAVAILABLE,
+    });
+  });
+
+  describe('API-key bindings without credentials for the origin', () => {
+    it.each([BindingAuthMode.API_KEY, BindingAuthMode.BOTH])(
+      '%s: platform fault with the fixed detail, nothing dialled',
+      async (authMode) => {
+        const { run, http, signer } = setup({ authMode });
+        const response = await run();
+        expect(http.request).not.toHaveBeenCalled();
+        expect(signer.sign).not.toHaveBeenCalled();
+        expect(response.transportError?.kind).toBe(TransportErrorKind.PLATFORM_UNAVAILABLE);
+        expect(response.transportError?.detail).toBe('credentials missing for this address');
+        expect(classifyResponse(response, { toolId: TOOL_ID })).toMatchObject({
+          responseClass: ResponseClass.SYSTEM_ERROR,
+          reason: ClassificationReason.PLATFORM_UNAVAILABLE,
+        });
+      },
+    );
+    it('dials when the set exists', async () => {
+      const { run, http } = setup({
+        authMode: BindingAuthMode.API_KEY,
+        credentials: [{ name: 'X-Key', value: 'k' }],
+      });
+      await run();
+      expect(http.request).toHaveBeenCalled();
+    });
+    it.each([BindingAuthMode.NONE, BindingAuthMode.SIGNATURE, undefined])(
+      'dials without credentials when the mode is %s',
+      async (authMode) => {
+        const { run, http } = setup({ authMode });
+        await run();
+        expect(http.request).toHaveBeenCalled();
+      },
+    );
+    it.each([BindingAuthMode.NONE, BindingAuthMode.SIGNATURE])(
+      'still reads the vault and attaches a stored set when the mode is %s',
+      async (authMode) => {
+        const { run, sent, vault } = setup({
+          authMode,
+          credentials: [{ name: 'X-Key', value: 'stored-under-any-mode' }],
+        });
+        await run();
+        expect(vault.headersFor).toHaveBeenCalledTimes(1);
+        expect(lower(sent[0])['x-key']).toBe('stored-under-any-mode');
+      },
+    );
+    it('still lets the tester omit credentials on purpose', async () => {
+      const { run, http } = setup({
+        authMode: BindingAuthMode.API_KEY,
+        omit: { credentials: true },
+      });
+      await run();
+      expect(http.request).toHaveBeenCalled();
+    });
+  });
+
+  it('keeps raw error text out of the detail when the vault throws a non-AppError', async () => {
+    const { run } = setup({ vaultError: new Error('connection to 10.0.0.5 refused') });
+    const response = await run();
+    expect(response.transportError?.kind).toBe(TransportErrorKind.PLATFORM_UNAVAILABLE);
+    expect(response.transportError?.detail).toBe('credential lookup failed');
+    expect(response.transportError?.detail).not.toContain('10.0.0.5');
+  });
+
+  it('keeps raw error text out of the detail when the signer throws a non-AppError', async () => {
+    const { run } = setup({ signerError: new Error('key file /secrets/ed25519 unreadable') });
+    const response = await run();
+    expect(response.transportError?.detail).toBe('request signing failed');
+  });
+
+  it('keeps the fixed message of an AppError', async () => {
+    const error = ProviderErrors.credentialVaultUnavailable({ reason: 'key not loaded' });
+    const { run } = setup({ vaultError: error });
+    const response = await run();
+    expect(response.transportError?.detail).toBe(error.message);
+  });
+
+  describe('echoed credentials', () => {
+    const KEY = 'sk-example-0123456789abcdef';
+    const b64 = (text: string) => Buffer.from(text).toString('base64');
+
+    it('redacts the values from the JSON body and the headers before returning', async () => {
+      const { run } = setup({
+        credentials: [{ name: 'X-Api-Key', value: KEY }],
+        reply: {
+          headers: { 'x-echo': KEY },
+          body: JSON.stringify({ got: KEY, b64: b64(KEY), pct: encodeURIComponent(KEY) }),
+        },
+      });
+      const response = await run();
+      expect(JSON.stringify(response)).not.toContain(KEY);
+      expect(JSON.stringify(response)).not.toContain(b64(KEY).slice(0, 12));
+      expect(response.headers?.['x-echo']).toBe(REDACTED);
+      expect(response.body).toEqual({
+        kind: ResponseBodyKind.JSON,
+        value: { got: REDACTED, b64: REDACTED, pct: REDACTED },
+      });
+    });
+
+    it('redacts a non-JSON body', async () => {
+      const { run } = setup({
+        credentials: [{ name: 'X-Api-Key', value: KEY }],
+        reply: { body: `<pre>key=${KEY.toUpperCase()}</pre>`, contentType: 'text/html' },
+      });
+      const response = await run();
+      expect(JSON.stringify(response)).not.toMatch(/sk-example/i);
+    });
+
+    it('redacts a transport failure: detail and partial body', async () => {
+      const { run } = setup({
+        credentials: [{ name: 'X-Api-Key', value: KEY }],
+        transportError: new EgressError(EgressFailureKind.TIMEOUT, `stalled after ${KEY}`, {
+          partialBody: `{"echo":"${KEY}`,
+        }),
+      });
+      const response = await run();
+      expect(response.transportError?.kind).toBe(TransportErrorKind.TIMEOUT);
+      expect(JSON.stringify(response)).not.toContain(KEY);
+    });
+
+    it('leaves the response untouched when there are no credentials', async () => {
+      const { run } = setup({ reply: { body: JSON.stringify({ got: KEY }) } });
+      const response = await run();
+      expect(response.body).toEqual({ kind: ResponseBodyKind.JSON, value: { got: KEY } });
+    });
+  });
+
+  describe('x-assay-* mapping headers', () => {
+    it('drops every mapping header in the x-assay- namespace and keeps the call id', async () => {
+      const { run, sent, signed } = setup({
+        mappingHeaders: {
+          'X-Assay-Agent': { $const: 'forged' },
+          'x-assay-timestamp': { $const: '1' },
+          'X-Assay-Call-Id': { $const: 'forged' },
+          'X-Kept': { $const: 'k' },
+        },
+      });
+      await run();
+      const headers = lower(sent[0]);
+      expect(Object.keys(headers).filter((k) => k.startsWith('x-assay-'))).toEqual([
+        'x-assay-call-id',
+      ]);
+      expect(headers['x-assay-call-id']).toBe('call-1');
+      expect(headers['x-kept']).toBe('k');
+      expect(signed[0].headers['x-assay-agent']).toBeUndefined();
+    });
+  });
+
+  describe('outbound header size cap', () => {
+    it('refuses to dial when mapping + credentials + Assay headers exceed 8 KiB', async () => {
+      const { run, http } = setup({
+        credentials: [
+          { name: 'X-A', value: 'a'.repeat(4000) },
+          { name: 'X-B', value: 'b'.repeat(4000) },
+        ],
+        mappingHeaders: { 'X-Mapped': { $const: 'm'.repeat(200) } },
+      });
+      const response = await run();
+      expect(http.request).not.toHaveBeenCalled();
+      expect(response.status).toBe(0);
+      expect(response.transportError).toEqual({
+        kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+        partialBody: null,
+        detail: 'outbound request headers exceed 8 KiB',
+      });
+    });
+
+    it('dials when the total is within the cap', async () => {
+      const { run, http } = setup({
+        credentials: [{ name: 'X-A', value: 'a'.repeat(4000) }],
+        mappingHeaders: { 'X-Mapped': { $const: 'm'.repeat(2000) } },
+      });
+      await run();
+      expect(http.request).toHaveBeenCalledTimes(1);
+    });
   });
 });
