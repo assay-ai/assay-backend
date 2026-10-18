@@ -2,7 +2,6 @@ import { Injectable } from '@nestjs/common';
 
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { LEGACY_POOLED_VAULT_TX_REF, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
-import { PLATFORM_ABSORBED_TX_REF_PREFIX } from '@modules/payment/services/voucher-redemption.service';
 import {
   ApiErrors,
   CursorPageDto,
@@ -43,13 +42,12 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * A `PROVIDER_CREDIT` that a redemption transaction paid: it carries the
- * transaction's ref. Not one of the book-only refs — a legacy platform absorb
- * (nobody paid it) or a rail-A credit (no transaction of its own).
- * `starts_with`, not `LIKE`: the `_` in the prefix is not a wildcard.
+ * transaction's ref. Not a rail-A credit, whose book-only ref names no
+ * transaction of its own.
  */
 const REDEMPTION_CREDIT_SQL =
   `entry.entryType = :creditType AND entry.chainTxRef IS NOT NULL ` +
-  `AND NOT starts_with(entry.chainTxRef, :absorbedPrefix) AND entry.chainTxRef <> :legacyRef`;
+  `AND entry.chainTxRef <> :legacyRef`;
 
 /**
  * Refs the redemption paths write when no transaction signature was observed:
@@ -149,7 +147,6 @@ export class ProviderPayoutsService {
       .where('entry.organizationId = :organizationId', { organizationId })
       .andWhere(REDEMPTION_CREDIT_SQL, {
         creditType: LedgerEntryType.PROVIDER_CREDIT,
-        absorbedPrefix: PLATFORM_ABSORBED_TX_REF_PREFIX,
         legacyRef: LEGACY_POOLED_VAULT_TX_REF,
       })
       .setParameters(SYNTHETIC_REF_PARAMS)

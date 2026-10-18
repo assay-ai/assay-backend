@@ -5,7 +5,6 @@ import {
   CREDITED_SQL,
   DEBT_OUTSTANDING_SQL,
   FORFEITED_SQL,
-  PLATFORM_ABSORBED_SQL,
   PaymentIntentRepository,
   VOIDED_SQL,
   WRITTEN_OFF_SQL,
@@ -42,8 +41,8 @@ const DAY_EXPR = dayExpr('intent');
  */
 const PENDING_SQL = `(intent.held_status = 'HELD')`;
 const SETTLED_STATUS = 'SETTLED';
-/** Never collected from the buyer: a written-off debt, or a legacy platform absorb. */
-const UNCOLLECTED_SQL = `(COALESCE(${WRITTEN_OFF_SQL}, false) OR ${PLATFORM_ABSORBED_SQL})`;
+/** Never collected from the buyer: a written-off debt. */
+const UNCOLLECTED_SQL = `COALESCE(${WRITTEN_OFF_SQL}, false)`;
 
 interface EarningsRow {
   readonly key: string;
@@ -198,16 +197,16 @@ export class ProviderEarningsService {
         `COUNT(*) FILTER (WHERE intent.status = :settledStatus AND ${DEBT_OUTSTANDING_SQL})`,
         'debtOutstandingCalls',
       )
-      // Never collected: a written-off debt, or a legacy absorb (nobody owes it).
+      // Never collected: a written-off debt.
       .addSelect(
         `COALESCE(SUM(CASE WHEN intent.status = :settledStatus AND NOT COALESCE(${FORFEITED_SQL}, false) ` +
-          `AND (COALESCE(${WRITTEN_OFF_SQL}, false) OR ${PLATFORM_ABSORBED_SQL}) ` +
+          `AND COALESCE(${WRITTEN_OFF_SQL}, false) ` +
           `THEN intent.providerAmount ELSE 0 END), 0)`,
         'uncollected',
       )
       .addSelect(
         `COUNT(*) FILTER (WHERE intent.status = :settledStatus AND NOT COALESCE(${FORFEITED_SQL}, false) ` +
-          `AND (COALESCE(${WRITTEN_OFF_SQL}, false) OR ${PLATFORM_ABSORBED_SQL}))`,
+          `AND COALESCE(${WRITTEN_OFF_SQL}, false))`,
         'uncollectedCalls',
       )
       // Held for the dispute window or an open dispute, or being collected:

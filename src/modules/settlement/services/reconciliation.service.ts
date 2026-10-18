@@ -78,9 +78,8 @@ import {
  * An unredeemable rail-B voucher no longer credits anybody: the provider
  * forfeits it, or it becomes buyer debt (the buyer's hold stays open) and is
  * paid from the buyer's escrow once re-signed, or written off. So no ledger
- * entry is ever written that the vault must fund for a provider, and the
- * legacy `platform_absorbed:` credits written before that are not counted as a
- * liability (`LedgerEntryRepository.sumPaidAtRedemption`). A breach here is a
+ * entry is ever written that the vault must fund for a provider. A breach here
+ * is a
  * real discrepancy to investigate.
  *
  * ## Why it does not throw on a breach
