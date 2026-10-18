@@ -172,6 +172,7 @@ function build(parts: Record<string, unknown>[] | null = null) {
     bindings,
     caseRead,
     stakeService,
+    catalogue,
   };
 }
 
@@ -273,6 +274,30 @@ describe('SlashCaseService.buildCase — arithmetic', () => {
 
     const result = await service.buildCase(ORG, 'p1');
     expect(result.arithmetic).toEqual([]);
+  });
+});
+
+describe('SlashCaseService.buildCase — toolName', () => {
+  it('names the tool from the catalogue', async () => {
+    const { service, proposals, bindings, catalogue } = build();
+    proposals.seed(buildProposal({ id: 'p1', organizationId: ORG }));
+    bindings.seed(buildBinding({ id: TEST_BINDING_ID, organizationId: ORG }));
+    catalogue.findTool.mockResolvedValue(buildTool({ id: 'search_web', name: 'search_web' }));
+
+    const result = await service.buildCase(ORG, 'p1');
+
+    expect(result.proposal.toolName).toBe('search_web');
+  });
+
+  it('is null, never an id, when the catalogue cannot name the tool', async () => {
+    const { service, proposals, bindings, catalogue } = build();
+    proposals.seed(buildProposal({ id: 'p1', organizationId: ORG }));
+    bindings.seed(buildBinding({ id: TEST_BINDING_ID, organizationId: ORG }));
+    catalogue.findTool.mockResolvedValue(null);
+
+    const result = await service.buildCase(ORG, 'p1');
+
+    expect(result.proposal.toolName).toBeNull();
   });
 });
 

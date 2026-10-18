@@ -15,6 +15,8 @@ import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.
 import { FleetSweepEntity } from '@database/postgres/entities/fleet-sweep.entity';
 import { FleetSweepRepository } from '@database/postgres/repositories/fleet-sweep.repository';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
+import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
+import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import {
   CHAIN_PROPOSABLE_STATUSES,
   CLOSED_WITHOUT_PENALTY_STATUSES,
@@ -34,6 +36,7 @@ import {
   StakeIntentBuilderPort,
   StakeIntentKind,
 } from '@modules/provider/ports/stake-intent-builder.port';
+import { formatDollars } from '@shared/utils/money-display.util';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { SlashBeneficiaryService } from './slash-beneficiary.service';
@@ -182,6 +185,11 @@ const EXECUTE_MUST_READ_THE_RECORD: ReadonlySet<string> = new Set(['SlashNotPend
  */
 const EXECUTED_BEYOND_DECISION = 'ExecutedBeyondDecision';
 
+/** "2026-10-20 17:14 UTC": a time in a provider's notice, without the ISO noise. */
+function utcMinute(at: Date): string {
+  return `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
+}
+
 /**
  * Everything that touches the chain, and the fleet sweep that follows an
  * overturn.
@@ -245,7 +253,38 @@ export class SlashExecutionService {
     // for the same structural reason as the executor; absent, every case takes
     // the single-judgement path it always has.
     @Optional() private readonly parts: SlashPartsService | null = null,
+    // The tool's name for the provider's notices ("$0.04 penalty on
+    // get_weather"). Optional: a composition without them writes the notice
+    // without a name rather than with an id.
+    @Optional() private readonly bindings: ToolBindingRepository | null = null,
+    // The same catalogue read `SlashCaseService` names a case's tool with, so
+    // a notice and the penalty page never name it differently.
+    @Optional() @Inject(TOOL_CATALOGUE) private readonly catalogue: ToolCataloguePort | null = null,
   ) {}
+
+  /**
+   * The name of the tool a case is about, for the provider's notices; null
+   * when it cannot be read. Never an id: a notice that names a UUID is worse
+   * than one that names nothing. Never throws, because it runs on paths
+   * where nothing may (see `recordExecution`).
+   */
+  private async toolNameOf(proposal: SlashProposalEntity): Promise<string | null> {
+    if (!this.bindings || !this.catalogue) return null;
+    try {
+      const binding = await this.bindings.findOneBy({
+        organizationId: proposal.organizationId,
+        id: proposal.bindingId,
+      });
+      if (!binding) return null;
+      return (await this.catalogue.findTool(binding.toolId))?.name ?? null;
+    } catch (error) {
+      this.logger.warn(
+        `slash proposal ${proposal.id}: tool name unreadable for its notice: ` +
+          (error instanceof Error ? error.message : String(error)),
+      );
+      return null;
+    }
+  }
 
   /**
    * Put every live judgement on chain, so the 72-hour on-chain delay runs
@@ -1096,11 +1135,17 @@ export class SlashExecutionService {
         // mirror says, because the two cases are opposites and the money is
         // theirs. See `reservationReleasedBy`.
         const heldUntil = this.reservationHeldUntil(proposal, chain.status);
+        const toolName = await this.toolNameOf(proposal);
+        const penalty = formatDollars({
+          amount: proposal.penaltyAmount,
+          decimals: proposal.decimals,
+          asset: proposal.assetId,
+        });
 
         await this.notifications.notify({
           organizationId: proposal.organizationId,
           event: NotificationEvent.PROVIDER_SLASH_DECIDED,
-          title: 'A proposed penalty against your stake was cancelled',
+          title: `${penalty} penalty${toolName ? ` on ${toolName}` : ''} was cancelled: nothing was taken`,
           // No program error name on the provider's screen. `VerifierRevoked`
           // is our incident, not their vocabulary; the name is in the timeline
           // entry and the log, which is where an operator reads.
@@ -1113,13 +1158,19 @@ export class SlashExecutionService {
             (heldUntil
               ? `The on-chain record still holds the stake it reserved. Nothing can be taken ` +
                 `from that reservation now, and it is released when the record expires after ` +
-                `${heldUntil.toISOString()}.`
+                `${utcMinute(heldUntil)}.`
               : 'Any stake it had reserved is released.'),
           subjectType: SLASH_PROPOSAL_SUBJECT_TYPE,
           subjectId: proposal.id,
           dedupeKey: `${proposal.id}:decided`,
           payload: {
             proposalId: proposal.id,
+            penaltyAmount: proposal.penaltyAmount,
+            decimals: proposal.decimals,
+            toolName,
+            // The arbiter's win and a chain refusal are opposite stories; the
+            // inbox renders from the payload, so the kind travels with it.
+            resolutionKind,
             chainError: chain.lastError,
             // Null when the reservation is already released, so the case page
             // can render the same distinction without re-deriving it.
@@ -2978,15 +3029,27 @@ export class SlashExecutionService {
         },
       });
 
+      // Dollars and the tool's name, never minor units: "40000 was taken"
+      // reads as forty thousand. The figure is the penalty as the chain applied
+      // it, the same one the penalty page leads with; how much of it actually
+      // left the stake is the program's split, which the penalty page shows.
+      const toolName = await this.toolNameOf(proposal);
+      const penalty = formatDollars({
+        amount: result.appliedMinor,
+        decimals: proposal.decimals,
+        asset: proposal.assetId,
+      });
       await this.notifications.notify({
         organizationId: proposal.organizationId,
         event: NotificationEvent.PROVIDER_SLASH_EXECUTED,
-        title: `${result.appliedMinor} was taken from your stake`,
+        title: `${penalty} penalty${toolName ? ` on ${toolName}` : ''} was executed`,
         body:
-          `The proposal was upheld and the timelock has elapsed. ` +
+          `It was upheld or not disputed, and its waiting time is over, so it was taken from ` +
+          `your stake. Part of every penalty is never taken; the penalty page shows what left ` +
+          `your stake and where it went.` +
           // No signature on the recovery path, and no sentence pretending
           // otherwise: a transaction id nobody can look up is worse than none.
-          (result.signature ? `Transaction ${result.signature}.` : `The case page has the detail.`),
+          (result.signature ? ` Transaction ${result.signature}.` : ''),
         subjectType: SLASH_PROPOSAL_SUBJECT_TYPE,
         subjectId: proposal.id,
         dedupeKey: `${proposal.id}:executed`,
@@ -2994,6 +3057,8 @@ export class SlashExecutionService {
           proposalId: proposal.id,
           applied: result.appliedMinor,
           requested: proposal.penaltyAmount,
+          decimals: proposal.decimals,
+          toolName,
           signature: result.signature,
         },
       });
@@ -3293,10 +3358,13 @@ export class SlashExecutionService {
         },
       )
       .then(async (saved) => {
+        const toolName = await this.toolNameOf(proposal);
         await this.notifications.notify({
           organizationId,
           event: NotificationEvent.PROVIDER_SLASH_REVERSED,
-          title: `${restoredMinor} was returned to your stake`,
+          title:
+            `${formatDollars(deposited)} was returned to your stake` +
+            (toolName ? ` (penalty on ${toolName})` : ''),
           // Two different things happened, and one sentence cannot describe
           // both honestly. A case compensated out of `EXECUTED` was reviewed
           // and the review changed the answer. One compensated out of
@@ -3314,7 +3382,13 @@ export class SlashExecutionService {
           subjectType: 'slash_proposal',
           subjectId: proposalId,
           dedupeKey: `${proposalId}:reversed`,
-          payload: { proposalId, restored: restoredMinor, signature },
+          payload: {
+            proposalId,
+            restored: restoredMinor,
+            decimals: deposited.decimals,
+            toolName,
+            signature,
+          },
         });
         return saved;
       });
