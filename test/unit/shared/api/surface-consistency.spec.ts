@@ -618,9 +618,9 @@ describe('REST surface consistency', () => {
         // `qualityByProvider` scoped to the caller's own organization would not
         // narrow the answer, it would return nothing — a buyer has no windows.
         // The projection is two integers per provider: no window id, no
-        // deadline, no strike, and no buyer identity. Closed windows only, so
-        // what crosses the boundary is a settled figure rather than one still
-        // moving. `CatalogueService` composes this and writes no SQL of its
+        // deadline, no strike, and no buyer identity. Open and closed windows
+        // of the last 30 days (D5), so the figure covers current traffic;
+        // penalties never read it. `CatalogueService` composes this and writes no SQL of its
         // own, deliberately, so that this list stays the whole conversation.
         'database/postgres/repositories/sla-window.repository.ts',
         // The public proof-of-reserves page. The `Accounts` tile sits
