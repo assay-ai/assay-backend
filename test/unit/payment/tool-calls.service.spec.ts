@@ -247,3 +247,70 @@ describe('ToolCallsService.getOne', () => {
     expect(dto.verdict).toBeNull();
   });
 });
+
+describe('ToolCallsService.list — refundable=true (B7)', () => {
+  const until = new Date('2026-08-10T10:59:00.000Z');
+  const settledAt = new Date('2026-08-10T10:00:01.000Z');
+
+  it('narrows the scan to rows the refund predicate could accept', async () => {
+    const { service, fake } = buildHarness([]);
+    await service.list(ORGANIZATION_ID, baseQuery({ refundable: true }), jest.fn());
+
+    const sql = fake.wheres.map((where) => where.sql);
+    expect(sql).toContain('intent.status = :settled');
+    expect(sql).toContain('intent.holdId IS NOT NULL');
+    expect(sql).toContain('intent.holdReleasedAt IS NULL');
+    expect(sql).toContain('intent.disputeOutcome IS NULL');
+    expect(sql.some((s) => s.includes('intent.collectableAt > :guardedNow'))).toBe(true);
+  });
+
+  it('keeps only the rows the shared check calls refundable, with their end', async () => {
+    const rows = [intentRow(), intentRow({ id: 'row-2' }), intentRow({ id: 'row-3' })];
+    const { service, verificationRecords } = buildHarness(rows);
+    verificationRecords.find.mockResolvedValue([
+      { intentId: INTENT_ID, verdictStatus: VerdictStatus.PASS, settledAt },
+    ]);
+    const check = jest.fn(async (intent: { id: string }) =>
+      intent.id === INTENT_ID
+        ? { refundable: true, until }
+        : intent.id === 'row-3'
+          ? { refundable: true, until: null }
+          : { refundable: false, until: null },
+    );
+
+    const page = await service.list(ORGANIZATION_ID, baseQuery({ refundable: true }), check);
+
+    expect(page.items.map((item) => [item.intentId, item.refundableIfReportedUntil])).toEqual([
+      [INTENT_ID, until],
+      ['row-3', null],
+    ]);
+    // The receipt's own inputs: the record's settledAt.
+    expect(check).toHaveBeenCalledWith(
+      expect.objectContaining({ id: INTENT_ID }),
+      settledAt,
+      expect.any(Date),
+    );
+    expect(check).toHaveBeenCalledWith(
+      expect.objectContaining({ id: 'row-2' }),
+      null,
+      expect.any(Date),
+    );
+  });
+
+  it('refuses rather than answer an empty list without the check', async () => {
+    const { service } = buildHarness([intentRow()]);
+    await expect(service.list(ORGANIZATION_ID, baseQuery({ refundable: true }))).rejects.toThrow(
+      'refundable=true needs the refund eligibility check',
+    );
+  });
+
+  it('never calls the check, and adds no field, on an ordinary list', async () => {
+    const { service } = buildHarness([intentRow()]);
+    const check = jest.fn();
+
+    const page = await service.list(ORGANIZATION_ID, baseQuery(), check);
+
+    expect(check).not.toHaveBeenCalled();
+    expect(page.items[0]).not.toHaveProperty('refundableIfReportedUntil');
+  });
+});
