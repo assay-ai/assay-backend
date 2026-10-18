@@ -42,6 +42,7 @@ import { CursorPageDto, ListQueryDto, ListSpec, asInstant, paginate } from '@sha
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
 import { declaredRuleProblems } from '../domain/declared-rules';
+import { isServedRow, servedVersionsOf } from '../domain/served-versions';
 import {
   ReviewKind,
   ReviewStatus,
@@ -640,7 +641,7 @@ export class ProviderToolsService {
       const now = await manager.find(ToolVersionEntity, { where: { toolId: row.id } });
       assertSameServedVersions(versions, now);
       await this.handles.lockForSharing(manager, organizationId);
-      const served = now.filter((version) => isServedRow(version));
+      const served = servedVersionsOf(now);
       await submitForReview(manager, row, served, row.currentVersion as number);
       await this.audit.record(manager, {
         organizationId,
@@ -870,18 +871,13 @@ function assertSameServedVersions(
   now: readonly ToolVersionEntity[],
 ): void {
   const key = (rows: readonly ToolVersionEntity[]) =>
-    rows
-      .filter(isServedRow)
+    servedVersionsOf(rows)
       .map((row) => `${row.version}:${row.updatedAt?.getTime?.() ?? 0}`)
       .sort()
       .join(',');
   if (key(before) !== key(now)) {
     throw ProviderToolErrors.state({ reason: 'the tool changed while it was checked; try again' });
   }
-}
-
-export function isServedRow(row: Pick<ToolVersionEntity, 'status'>): boolean {
-  return row.status === ToolVersionStatus.ACTIVE || row.status === ToolVersionStatus.DEPRECATED;
 }
 
 function majorOf(semver: string): number {
@@ -1159,3 +1155,5 @@ export function draftDtoOf(
 function dedupe<T>(items: readonly T[]): T[] {
   return [...new Set(items)];
 }
+
+export { isServedRow, servedVersionsOf };
