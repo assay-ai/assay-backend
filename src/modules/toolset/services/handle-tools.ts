@@ -2,6 +2,11 @@ import { EntityManager } from 'typeorm';
 
 import { ToolsetErrors } from '../errors/toolset.errors';
 
+/** Serialises every claim, rename and reassignment of one handle. */
+export async function lockHandle(manager: EntityManager, handle: string): Promise<void> {
+  await manager.query(`SELECT pg_advisory_xact_lock(hashtext('handle:' || $1))`, [handle]);
+}
+
 /**
  * A handle's provider tools (design spec §7.1): named `{handle}__{tool}`, so
  * they move with a rename, and they stop with a takedown.
@@ -79,6 +84,13 @@ export async function restoreHandleTools(
  * becomes a handle reason, which a later handle lift clears.
  */
 export async function restoreTakenDownTool(manager: EntityManager, toolId: string): Promise<void> {
+  // The owner's handle, then its row, then the tool — a handle takedown's
+  // order — so one landing meanwhile is seen, and neither deadlocks.
+  const [tool] = (await manager.query(
+    `SELECT owner_org_id AS "ownerOrgId" FROM tools WHERE id = $1`,
+    [toolId],
+  )) as { ownerOrgId: string | null }[];
+  if (tool?.ownerOrgId) await lockOwner(manager, tool.ownerOrgId);
   await manager.query(
     `UPDATE tools t
         SET taken_down_at = NULL,
@@ -93,6 +105,18 @@ export async function restoreTakenDownTool(manager: EntityManager, toolId: strin
       WHERE t.id = $1 AND t.kind = 'PROVIDER' AND t.taken_down_at IS NOT NULL`,
     [toolId],
   );
+}
+
+/**
+ * Locks an organization's current handle and then its row, so a takedown,
+ * rename or reassignment of the handle is either done or waits.
+ */
+async function lockOwner(manager: EntityManager, organizationId: string): Promise<void> {
+  const [org] = (await manager.query(`SELECT handle FROM organizations WHERE id = $1`, [
+    organizationId,
+  ])) as { handle: string | null }[];
+  if (org?.handle) await lockHandle(manager, org.handle);
+  await manager.query(`SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`, [organizationId]);
 }
 
 /** The handle prefix a reassigned handle's old tools are renamed to: never claimable. */
