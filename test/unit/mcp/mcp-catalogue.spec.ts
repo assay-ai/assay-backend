@@ -13,6 +13,7 @@ import {
 } from '@modules/mcp/constants/mcp.constants';
 import {
   McpCatalogueService,
+  displayPrice,
   McpPriceAnnotation,
 } from '@modules/mcp/services/mcp-catalogue.service';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
@@ -602,6 +603,11 @@ describe('McpCatalogueService — a tool sold on two chains', () => {
     expect([...(descriptor.annotations[X402_SETTLEMENT_CHAINS] as string[])].sort()).toEqual(
       [SOLANA, EVM].sort(),
     );
+  });
+
+  it('shows the USDG price in dollars, like every other dollar stablecoin', () => {
+    expect(displayPrice(usdg('100000'))).toBe('$0.1');
+    expect(displayPrice(usdg('100000'))).not.toContain('USDG');
   });
 
   it('shows a Solana buyer the USDC price', async () => {
