@@ -65,6 +65,9 @@ class FakeBlocks {
   }
 }
 
+const PROVIDER_NAMES = new Map([[ORG.toLowerCase(), 'Open-Meteo Demo BV']]);
+const OTHER_ORG = '7e3a94c1-0000-4000-8000-000000000001';
+
 function build() {
   const runner = {
     connect: async () => undefined,
@@ -100,12 +103,25 @@ function build() {
     operators as never,
     {} as never,
   );
+  const providers = {
+    findDisplayNames: async (ids: readonly string[]) =>
+      new Map(
+        ids
+          .filter((id) => PROVIDER_NAMES.has(id))
+          .map((id) => [id, PROVIDER_NAMES.get(id) as string]),
+      ),
+  };
+  const organizations = {
+    findById: async (id: string) => (id === OTHER_ORG ? { id, name: 'acme-buyers' } : null),
+  };
   const service = new OperatorAccountBlockService(
     overrides,
     blocks as never,
     operators as never,
     blocklist,
     approvals,
+    providers as never,
+    organizations as never,
   );
   return { service, blocks, entries, blocklist, applied, runner, queued };
 }
@@ -194,6 +210,35 @@ describe('OperatorAccountBlockService.block', () => {
 
     expect(entries[0]).toMatchObject({ organizationId: ORG.toLowerCase() });
     expect(blocklist.organizationBlock(ORG)).not.toBeNull();
+  });
+
+  it("names every organization: the provider's public name, else the organization's own; never a wallet", async () => {
+    const { service } = build();
+    const provider = await service.block(
+      SRE,
+      { subjectKind: BlockSubjectKind.ORGANIZATION, subject: ORG, reasonCode: 'X', note: NOTE },
+      null,
+    );
+    expect(provider.subjectName).toBe('Open-Meteo Demo BV');
+
+    const buyer = await service.block(
+      SRE,
+      {
+        subjectKind: BlockSubjectKind.ORGANIZATION,
+        subject: OTHER_ORG,
+        reasonCode: 'X',
+        note: NOTE,
+      },
+      null,
+    );
+    expect(buyer.subjectName).toBe('acme-buyers');
+
+    const wallet = await service.block(
+      SRE,
+      { subjectKind: BlockSubjectKind.WALLET, subject: WALLET, reasonCode: 'X', note: NOTE },
+      null,
+    );
+    expect(wallet.subjectName).toBeNull();
   });
 
   it('refuses a subject that is not one, and writes nothing', async () => {

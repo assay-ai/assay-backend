@@ -13,7 +13,9 @@ import { generatePrivateKey, privateKeyToAccount, PrivateKeyAccount } from 'viem
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
+import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
+import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { OperatorSessionStore } from '@modules/operator/auth/operator-session.store';
 import { OPERATOR_SIGN_IN_CONFIG } from '@modules/operator/auth/operator-sign-in.config';
@@ -91,6 +93,8 @@ describe('operator access, over HTTP, against a real database and Redis', () => 
         OperatorApprovalRepository,
         OverrideLogEntryRepository,
         AccountBlockRepository,
+        ProviderRepository,
+        OrganizationRepository,
         OperatorService,
         OperatorSessionStore,
         OperatorAuthThrottle,

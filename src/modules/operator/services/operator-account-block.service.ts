@@ -7,6 +7,8 @@ import { AccountBlockEntity } from '@database/postgres/entities/account-block.en
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
+import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
+import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { asInstant, CursorPageDto, ListSpec, paginate } from '@shared/api';
 import {
   BlockSubjectKind,
@@ -56,6 +58,8 @@ export class OperatorAccountBlockService {
     private readonly operators: OperatorRepository,
     private readonly blocklist: AccountBlocklistService,
     private readonly approvals: OperatorApprovalService,
+    private readonly providers: ProviderRepository,
+    private readonly organizations: OrganizationRepository,
   ) {
     approvals.register(UNBLOCK_APPROVAL_ACTION, {
       code: 'A-10',
@@ -278,12 +282,17 @@ export class OperatorAccountBlockService {
       if (found) subjects.set(id, found.subject);
     }
     const named = (id: string | null) => (id === null ? null : (subjects.get(id) ?? id));
+    const orgNames = await this.organizationNames(rows);
 
     return rows.map((row) => ({
       id: row.id,
       subjectKind: row.subjectKind as BlockSubjectKind,
       subject: row.subject,
       subjectKey: row.subjectKey,
+      subjectName:
+        row.subjectKind === BlockSubjectKind.ORGANIZATION
+          ? (orgNames.get(row.subject) ?? null)
+          : null,
       active: row.unblockedAt === null,
       reasonCode: row.reasonCode,
       note: row.note,
@@ -295,6 +304,32 @@ export class OperatorAccountBlockService {
       unblockedAt: row.unblockedAt,
       unblockNote: row.unblockNote,
     }));
+  }
+
+  /**
+   * A name for every blocked organization, so no row reads as a bare uuid:
+   * the provider's public name when it is a provider (listed or not, as the
+   * case view names it), else the organization's own name. Operators read
+   * across tenants by construction, so neither is a disclosure.
+   */
+  private async organizationNames(
+    rows: readonly AccountBlockEntity[],
+  ): Promise<Map<string, string>> {
+    const ids = [
+      ...new Set(
+        rows
+          .filter((row) => row.subjectKind === BlockSubjectKind.ORGANIZATION)
+          .map((row) => row.subject),
+      ),
+    ];
+    if (ids.length === 0) return new Map();
+    const names = new Map(await this.providers.findDisplayNames(ids));
+    for (const id of ids) {
+      if (names.has(id)) continue;
+      const organization = await this.organizations.findById(id);
+      if (organization?.name) names.set(id, organization.name);
+    }
+    return names;
   }
 }
 
