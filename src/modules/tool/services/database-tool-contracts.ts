@@ -120,7 +120,7 @@ export class DatabaseToolContracts implements ToolContractsPort {
               status: Not(ToolVersionStatus.DRAFT),
             },
           });
-    const tools = buildTools(rows, versions);
+    const tools = buildTools(rows, versions, await this.activeHandles(rows));
     const snapshot: Snapshot = {
       tools,
       removed: new Map(
@@ -142,6 +142,27 @@ export class DatabaseToolContracts implements ToolContractsPort {
     };
     this.snapshot = snapshot;
     return snapshot;
+  }
+
+  /**
+   * The active handle of every organization owning a served provider tool:
+   * a provider tool serves only under its owner's current, active handle.
+   */
+  private async activeHandles(rows: readonly ToolEntity[]): Promise<ReadonlyMap<string, string>> {
+    const owners = [
+      ...new Set(
+        rows
+          .filter((row) => row.kind === ToolKind.PROVIDER && row.ownerOrgId)
+          .map((row) => row.ownerOrgId as string),
+      ),
+    ];
+    if (owners.length === 0) return new Map();
+    const found = (await this.toolRows.query(
+      `SELECT id, handle FROM organizations
+        WHERE id = ANY($1::uuid[]) AND handle IS NOT NULL AND handle_status = 'ACTIVE'`,
+      [owners],
+    )) as { id: string; handle: string }[];
+    return new Map(found.map((row) => [row.id, row.handle]));
   }
 
   private async readEpoch(): Promise<string | null> {
@@ -175,6 +196,13 @@ export class ToolContractChangesService implements ToolContractChanges {
 export function buildTools(
   rows: readonly ToolEntity[],
   versions: readonly ToolVersionEntity[],
+  /**
+   * Active handles by organization. Given, a provider tool is served only
+   * when it is named `{handle}__…` under its owner's active handle: a frozen,
+   * renamed-away or reassigned handle serves none of its old tools, whatever
+   * their own status says.
+   */
+  activeHandles?: ReadonlyMap<string, string>,
 ): ReadonlyMap<string, Tool> {
   const byTool = new Map<string, ToolContractVersion[]>();
   for (const row of versions) {
@@ -188,6 +216,11 @@ export function buildTools(
   const tools = new Map<string, Tool>();
   for (const row of rows) {
     const provider = row.kind === ToolKind.PROVIDER;
+    if (provider && activeHandles) {
+      const handle = row.ownerOrgId ? activeHandles.get(row.ownerOrgId) : undefined;
+      if (!handle || !row.name.startsWith(`${handle}__`)) continue;
+    }
+    if (provider && (row.takenDownAt || row.handleRemovedAt)) continue;
     const served = (byTool.get(row.id) ?? [])
       // A LISTED provider tool serves approved versions only (§7.6): a
       // version newer than the approved one is waiting for its review.

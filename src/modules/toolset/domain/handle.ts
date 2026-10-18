@@ -166,6 +166,8 @@ export function handleRefusal(
   categories: Iterable<string> = [],
 ): HandleRefusal | null {
   if (!HANDLE_RE.test(handle)) return 'FORMAT';
+  // The prefix a reassigned handle's old provider tools are renamed under.
+  if (/^removed-/.test(handle)) return 'RESERVED';
   const skeleton = handleSkeleton(handle);
   for (const word of [...RESERVED_HANDLES, ...RESERVED_CATEGORY_NAMES, ...categories]) {
     if (word === handle || handleSkeleton(word) === skeleton) return 'RESERVED';

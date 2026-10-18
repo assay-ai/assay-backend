@@ -315,6 +315,8 @@ export class PublicToolsetsService {
          FROM tools t
          JOIN tool_versions v ON v.tool_id = t.id AND v.version = t.current_version
          LEFT JOIN tools r ON r.id = t.replacement_tool_id AND r.visibility = 'LISTED'
+         JOIN organizations o ON o.id = t.owner_org_id AND o.handle_status = 'ACTIVE'
+                             AND left(t.name, length(o.handle) + 2) = o.handle || '__'
         WHERE t.kind = 'PROVIDER' AND t.owner_org_id = $1 AND t.visibility = 'LISTED'
           AND t.approved_version IS NOT NULL
           AND t.status IN ('ACTIVE', 'DEPRECATED')

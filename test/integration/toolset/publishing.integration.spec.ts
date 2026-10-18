@@ -1059,7 +1059,8 @@ describe('toolset publishing, against a real database and Redis', () => {
       // removed its provider tools (T4); it serves again under this owner.
       await dataSource.query(
         `UPDATE tools SET owner_org_id = $1, status = 'ACTIVE', removed_at = NULL,
-                          removal_reason = NULL, status_before_removal = NULL
+                          taken_down_at = NULL, handle_removed_at = NULL,
+                          status_before_removal = NULL
           WHERE id = $2`,
         [owner, providerTool],
       );

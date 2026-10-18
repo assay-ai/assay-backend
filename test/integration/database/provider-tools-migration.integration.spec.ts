@@ -53,7 +53,8 @@ describe('provider tools migration: up, down, up', () => {
           WHERE table_schema = 'public'
             AND ((table_name = 'tools' AND column_name IN
                    ('review_version', 'approved_version', 'review_content_hash', 'removed_at',
-                    'removal_reason', 'status_before_removal'))
+                    'taken_down_at', 'handle_removed_at', 'pending_category',
+                    'status_before_removal'))
               OR (table_name = 'tool_versions' AND column_name = 'declared_rules')
               OR (table_name = 'tool_promotion_invites' AND column_name = 'source_tool_id'))
           ORDER BY 1`,
@@ -64,11 +65,13 @@ describe('provider tools migration: up, down, up', () => {
     'tool_promotion_invites.source_tool_id',
     'tool_versions.declared_rules',
     'tools.approved_version',
-    'tools.removal_reason',
+    'tools.handle_removed_at',
+    'tools.pending_category',
     'tools.removed_at',
     'tools.review_content_hash',
     'tools.review_version',
     'tools.status_before_removal',
+    'tools.taken_down_at',
   ];
 
   async function undoThrough(name: string): Promise<void> {
@@ -172,12 +175,12 @@ describe('provider tools migration: up, down, up', () => {
       const [{ id }] = await insertTool('acme__removable', { status: 'ACTIVE' });
       await expect(
         dataSource.query(
-          `UPDATE tools SET removed_at = now(), removal_reason = 'TAKEDOWN' WHERE id = $1`,
+          `UPDATE tools SET removed_at = now(), taken_down_at = now() WHERE id = $1`,
           [id],
         ),
       ).rejects.toThrow(/chk_tools_removal/);
       await dataSource.query(
-        `UPDATE tools SET status = 'REMOVED', removed_at = now(), removal_reason = 'HANDLE',
+        `UPDATE tools SET status = 'REMOVED', removed_at = now(), handle_removed_at = now(),
                           status_before_removal = 'ACTIVE' WHERE id = $1`,
         [id],
       );
