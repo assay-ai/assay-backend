@@ -42,13 +42,26 @@ function parseKeks(raw: string): readonly Kek[] {
         `${CREDENTIAL_VAULT_KEKS_ENV} entry ${index} key must be 64 hex characters (32 bytes)`,
       );
     }
-    return { keyId, key: Buffer.from(key, 'hex') };
+    const bytes = Buffer.from(key, 'hex');
+    // An all-same-byte key (all zeros is the usual unset-template default) is a
+    // placeholder, not a key.
+    if (bytes.every((byte) => byte === bytes[0])) {
+      throw new Error(
+        `${CREDENTIAL_VAULT_KEKS_ENV} entry ${index} key is a placeholder (every byte is the same)`,
+      );
+    }
+    return { keyId, key: bytes };
   });
 }
 
 /** Reads the KEKs once and removes the variable from `env`. The first entry is active. */
 export function takeVaultKeks(env: NodeJS.ProcessEnv): VaultKeks {
   const keks = takeOnceFromEnv<Kek>(env, CREDENTIAL_VAULT_KEKS_ENV, parseKeks);
+  // Stored credentials would otherwise be unwritable and unreadable in a
+  // deployment nobody noticed was missing its key. The signer does the same.
+  if (keks.length === 0 && env.NODE_ENV === 'production') {
+    throw new Error(`${CREDENTIAL_VAULT_KEKS_ENV} must be set in production`);
+  }
   return {
     active: keks[0] ?? null,
     byId: new Map(keks.map((k) => [k.keyId, k])),

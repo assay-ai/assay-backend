@@ -1,13 +1,16 @@
-import { Inject, Injectable } from '@nestjs/common';
+import { Inject, Injectable, OnModuleInit, Optional } from '@nestjs/common';
+import { timingSafeEqual } from 'node:crypto';
 import { EntityManager } from 'typeorm';
 
 import { BindingCredentialEntity } from '@database/postgres/entities/binding-credential.entity';
+import { VaultKekCheckRepository } from '@database/postgres/repositories/vault-kek-check.repository';
 import { BindingCredentialRepository } from '@database/postgres/repositories/binding-credential.repository';
 
 import { ProviderErrors } from '../errors/provider.errors';
 import {
   CredentialHeader,
   credentialAad,
+  kekCheckValue,
   openCredentialSet,
   sealCredentialSet,
   valueHint,
@@ -26,11 +29,42 @@ export interface CredentialSetSummary {
  * method returns names and hints.
  */
 @Injectable()
-export class CredentialVaultService {
+export class CredentialVaultService implements OnModuleInit {
   constructor(
     private readonly credentials: BindingCredentialRepository,
     @Inject(CREDENTIAL_VAULT_KEKS) private readonly keks: VaultKeks,
+    // Optional only for hand-built harnesses; without it no key-check runs.
+    @Optional() private readonly kekChecks?: VaultKekCheckRepository,
   ) {}
+
+  async onModuleInit(): Promise<void> {
+    await this.verifyKeks();
+  }
+
+  /**
+   * Compares every loaded KEK with the key-check value stored for its id,
+   * writing the value on first sight. A mismatch means the id now holds
+   * different bytes than the ones that sealed existing sets: the boot fails,
+   * naming the id and never the key.
+   */
+  async verifyKeks(): Promise<void> {
+    if (!this.kekChecks) return;
+    for (const kek of this.keks.byId.values()) {
+      const actual = kekCheckValue(kek);
+      let stored = await this.kekChecks.findKcv(kek.keyId);
+      if (!stored) {
+        await this.kekChecks.insertIfAbsent(kek.keyId, actual);
+        // A concurrent first boot (api and mcp together) may have won the insert.
+        stored = await this.kekChecks.findKcv(kek.keyId);
+      }
+      if (!stored || stored.length !== actual.length || !timingSafeEqual(stored, actual)) {
+        throw new Error(
+          `Vault key "${kek.keyId}" does not match the key-check value stored for it; ` +
+            `the key id was reused with different key material`,
+        );
+      }
+    }
+  }
 
   async put(
     organizationId: string,

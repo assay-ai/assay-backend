@@ -5,6 +5,7 @@ import { SaveToolBindingBodyDto } from '@modules/provider/dto/save-tool-binding.
 import { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
 import { VaultKeks } from '@modules/provider/credentials/credential-vault.keys';
 import { PricingMode } from '@modules/tool/ports/tool.types';
+import { VaultKekCheckRepository } from '@database/postgres/repositories/vault-kek-check.repository';
 import { BindingCredentialRepository } from '@database/postgres/repositories/binding-credential.repository';
 import { BindingCredentialEntity } from '@database/postgres/entities/binding-credential.entity';
 import { MoneyUtil } from '@shared/utils/money.util';
@@ -104,6 +105,24 @@ describe('credential vault', () => {
     await vault.put(organizationId, bindingId, A, next, 'it');
     expect(await vault.headersFor(organizationId, bindingId, A)).toEqual(next);
     expect(await vault.list(organizationId, bindingId)).toHaveLength(1);
+  });
+
+  describe('boot key check', () => {
+    it('writes the value on first use, accepts it again and rejects reused ids', async () => {
+      const checks = new VaultKekCheckRepository(context.dataSource);
+      const id = `it-${randomUUID().slice(0, 8)}`;
+      const first = { keyId: id, key: randomBytes(32) };
+      const boot = (k: typeof first) =>
+        new CredentialVaultService(
+          repository,
+          { active: k, byId: new Map([[k.keyId, k]]) },
+          checks,
+        ).onModuleInit();
+      await boot(first);
+      expect(await checks.findKcv(id)).toHaveLength(16);
+      await expect(boot(first)).resolves.toBeUndefined();
+      await expect(boot({ keyId: id, key: randomBytes(32) })).rejects.toThrow(`"${id}"`);
+    });
   });
 
   it('removes a set', async () => {
