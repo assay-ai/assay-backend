@@ -1,7 +1,6 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { ModuleRef } from '@nestjs/core';
 import { Cron } from '@nestjs/schedule';
-import type { Redis } from 'ioredis';
 
 import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
@@ -10,7 +9,6 @@ import {
   SlashChainRulingsPort,
 } from '@modules/slash/ports/slash-chain-rulings.port';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
-import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import { ENABLED_CHAINS } from '../enabled-chains';
 import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
@@ -49,9 +47,6 @@ export const EVM_SLASH_WATCH_ALERTS = {
   UNREADABLE: 'slash_watch_unreadable',
   UNKNOWN_RULING: 'slash_ruling_unknown',
 } as const;
-
-/** The cursor's former home in the cache Redis: read once, when Postgres has none yet. */
-const LEGACY_CURSOR_PREFIX = 'evm:slash-watch:cursor:';
 
 /** The two reads this class needs from a viem public client. */
 export interface EvmSlashWatchClient {
@@ -151,7 +146,6 @@ export class EvmSlashProposalWatcher {
     @Inject(ENABLED_CHAINS) private readonly enabled: readonly ChainId[],
     private readonly parts: SlashProposalPartRepository,
     @Inject(ALERT_PORT) private readonly alerts: AlertPort,
-    @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis,
     private readonly cursors: EvmChainStateRepository,
     // Resolved at call time: the slash domain is composed beside this module
     // in the scheduler, and a composition without it still alerts.
@@ -457,20 +451,9 @@ export class EvmSlashProposalWatcher {
     }
   }
 
-  /**
-   * Postgres first; the old Redis cursor only while Postgres has none, so the
-   * move does not re-read from the start block. A failed Postgres read throws:
-   * guessing a start could skip blocks.
-   */
+  /** The durable cursor in Postgres. A failed read throws: guessing a start could skip blocks. */
   private async readCursor(chainId: ChainId): Promise<bigint | null> {
-    const stored = await this.cursors.findSlashWatchCursor(chainId);
-    if (stored !== null) return stored;
-    try {
-      const value = await this.redis.get(LEGACY_CURSOR_PREFIX + chainId);
-      return value === null ? null : BigInt(value);
-    } catch {
-      return null;
-    }
+    return this.cursors.findSlashWatchCursor(chainId);
   }
 
   private async writeCursor(chainId: ChainId, block: bigint): Promise<void> {

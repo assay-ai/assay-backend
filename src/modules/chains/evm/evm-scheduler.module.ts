@@ -126,7 +126,7 @@ function readConfirmations(raw: string | undefined): number {
     },
     EvmChainStateIndexer,
     // Read-only: alerts on SlashProposed records this platform did not plan
-    // (review H-1). The repository and Redis come from global modules.
+    // (review H-1). The repositories come from global modules.
     EvmSlashProposalWatcher,
     // Follow-up B5: WARN 45 days before a verifier key with open records expires.
     EvmVerifierExpiryMonitor,
