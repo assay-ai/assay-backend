@@ -130,19 +130,18 @@ describe('CredentialRedactor.string — every form a value can come back in', ()
 });
 
 describe('CredentialRedactor.json', () => {
-  it('rewrites string values only, never keys or other scalars', () => {
-    expect(redactor.json({ echo: [`Bearer ${KEY}`], [KEY]: 1, n: 2, b: true, z: null })).toEqual({
+  it('rewrites string values only, leaving keys and other scalars alone', () => {
+    expect(redactor.json({ echo: [`Bearer ${KEY}`], k: 1, n: 2, b: true, z: null })).toEqual({
       echo: [`Bearer ${REDACTED}`],
-      [KEY]: 1,
+      k: 1,
       n: 2,
       b: true,
       z: null,
     });
   });
 
-  it('never merges keys: two keys that would redact alike stay two keys', () => {
-    const value = { [KEY]: 'a', [KEY.toUpperCase()]: 'b' };
-    expect(redactor.json(value)).toEqual(value);
+  it('never rewrites (or merges) keys: a key holding a credential fails closed', () => {
+    expect(redactor.json({ [KEY]: 'a', [KEY.toUpperCase()]: 'b' })).toBe(REDACTED);
   });
 
   it('leaves an ordinary word equal to a Basic user name alone', () => {
@@ -155,6 +154,81 @@ describe('CredentialRedactor.json', () => {
       '{"type":"customer","Customer":"x"}',
     );
     expect(basic.string('pw hunter2hunter2')).toBe(`pw ${REDACTED}`);
+  });
+});
+
+/** Deterministic PRNG (mulberry32), so a failure reproduces. */
+function seeded(seed: number): () => number {
+  let state = seed >>> 0;
+  return () => {
+    state = (state + 0x6d2b79f5) >>> 0;
+    let t = state;
+    t = Math.imul(t ^ (t >>> 15), t | 1);
+    t ^= t + Math.imul(t ^ (t >>> 7), t | 61);
+    return ((t ^ (t >>> 14)) >>> 0) / 4294967296;
+  };
+}
+
+/**
+ * Differential probe from review: keys that themselves contain escape-like
+ * text (`%41`, `\t`, `&amp;`) once leaked in some echo forms. Every form here
+ * was caught by the earlier regex redactor; none may leak now. Out of scope:
+ * two encodings stacked (HTML of JSON).
+ */
+describe('CredentialRedactor — keys with escape-like content, every echo form', () => {
+  const ECHOES: Record<string, (s: string) => string> = {
+    raw: (s) => s,
+    upper: (s) => s.toUpperCase(),
+    lower: (s) => s.toLowerCase(),
+    percent: (s) => encodeURIComponent(s),
+    percentLower: (s) => lowerPercent(s),
+    form: (s) => new URLSearchParams({ a: s }).toString().slice(2),
+    json: (s) => JSON.stringify(s).slice(1, -1),
+    jsonUpper: (s) => JSON.stringify(s).slice(1, -1).toUpperCase(),
+    goJson: (s) =>
+      JSON.stringify(s)
+        .slice(1, -1)
+        .replace(/</g, '\\u003c')
+        .replace(/>/g, '\\u003e')
+        .replace(/&/g, '\\u0026'),
+    htmlNamed,
+  };
+  const printable = Array.from({ length: 95 }, (_, i) => String.fromCharCode(32 + i)).join('');
+
+  it.each([
+    ['escape-heavy', 'abcdefABCDEF0123456789%\\&#;xu', 1],
+    ['printable', printable, 2],
+  ])('leaks no form of 500 seeded %s keys', (_label, alphabet, seed) => {
+    const random = seeded(seed);
+    const leaks: string[] = [];
+    for (let n = 0; n < 500; n += 1) {
+      const key = Array.from({ length: 24 }, () => alphabet[Math.floor(random() * alphabet.length)])
+        .join('')
+        .trim();
+      if (key.length < MIN_REDACTED_LENGTH) continue;
+      const subject = new CredentialRedactor([key]);
+      for (const [name, encode] of Object.entries(ECHOES)) {
+        const echoed = encode(key);
+        if (subject.string(`<${echoed}>`).includes(echoed)) leaks.push(`${name}: ${key}`);
+      }
+    }
+    expect(leaks).toEqual([]);
+  });
+
+  it.each([['abc%41def\\tghijk'], ['Xy7%2fQ\\"k9Lm']])(
+    'catches the review examples for %s',
+    (key) => {
+      const subject = new CredentialRedactor([key]);
+      for (const encode of Object.values(ECHOES)) {
+        expect(subject.string(encode(key))).toBe(REDACTED);
+      }
+    },
+  );
+
+  it('decodes numeric HTML entities with any number of leading zeros', () => {
+    const key = 'secret-value-123';
+    const padded = [...key].map((c) => `&#0000000${c.charCodeAt(0)};`).join('');
+    expect(new CredentialRedactor([key]).string(`x ${padded} y`)).toBe(`x ${REDACTED} y`);
   });
 });
 
@@ -182,6 +256,30 @@ describe('CredentialRedactor — failing closed', () => {
       },
     });
     expect(slow.string(`x ${KEY}`)).toBe(REDACTED);
+  });
+
+  it('fails closed when a JSON object key holds a credential (keys are never rewritten)', () => {
+    const out = redactor.response({
+      status: 200,
+      body: { kind: ResponseBodyKind.JSON, value: { data: { [`echo ${KEY}`]: 1 } } },
+    });
+    expect(out.transportError).toEqual({
+      kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+      partialBody: null,
+      detail: REDACTION_FAILED_DETAIL,
+    });
+    expect(JSON.stringify(out)).not.toContain('sk-Live');
+  });
+
+  it('scales the budget with the text scanned: 60 ms per MiB on top of the base', () => {
+    // The clock reads 0 when a budget starts and 200 ms on every check after.
+    let started = false;
+    const now = () => (started ? 200 : ((started = true), 0));
+    const scaled = new CredentialRedactor([KEY], { budgetMs: 10, now });
+    expect(scaled.string('short')).toBe(REDACTED); // 10 ms: past
+    started = false;
+    const big = 'y'.repeat(4 * 1024 * 1024); // 10 + 4 × 60 = 250 ms: within
+    expect(scaled.string(big)).toBe(big);
   });
 
   it(`fails closed on a string longer than ${MAX_REDACTABLE_CHARS} characters`, () => {
