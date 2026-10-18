@@ -2,7 +2,7 @@ import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
-import { AgentCredentialEntity } from '../entities/agent-credential.entity';
+import { AgentCredentialEntity, CredentialIssuedVia } from '../entities/agent-credential.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
 
 /** Machine tokens, by prefix and by agent. */
@@ -83,5 +83,23 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
       .andWhere('deleted_at IS NULL')
       .andWhere('expires_at IS NOT NULL AND expires_at <= now()')
       .execute();
+  }
+
+  /**
+   * The agent's live OAuth grants, for the per-agent cap (spec §6.3.14).
+   * Live = not revoked and not expired; an idle-dead grant (its refresh chain
+   * ran out) does not count. Served by `idx_agent_credentials_oauth_live`.
+   *
+   * By agent alone: an agent id is a platform-wide uuid that belongs to one
+   * tenant, and the caller has already resolved it inside that tenant.
+   */
+  async countLiveOAuthForAgent(agentId: string): Promise<number> {
+    return this.manager
+      .createQueryBuilder(AgentCredentialEntity, 'credential')
+      .where('credential.agent_id = :agentId', { agentId })
+      .andWhere('credential.issued_via = :oauth', { oauth: CredentialIssuedVia.OAUTH })
+      .andWhere('credential.revoked_at IS NULL')
+      .andWhere('(credential.expires_at IS NULL OR credential.expires_at > now())')
+      .getCount();
   }
 }
