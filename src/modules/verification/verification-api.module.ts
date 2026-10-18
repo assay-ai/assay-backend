@@ -26,9 +26,9 @@ import { VerificationModule } from './verification.module';
  * token `SessionAuthGuard` resolves bearer tokens through
  * (`shared/auth/session-auth.guard.ts`).
  *
- * Imports `DisputeModule` for `CallDisputeService.refundableIfReportedNow`: the
- * receipt asks the filing's own predicate whether a report now is refunded in
- * full, so the two cannot disagree.
+ * Imports `DisputeModule` for `RefundEligibilityService`: the receipt asks the
+ * dispute module, which sees the same chain hold as the filing, whether a
+ * report now is refunded in full.
  */
 @Module({
   imports: [McpModule, VerificationModule, DisputeModule],

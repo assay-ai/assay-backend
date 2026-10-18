@@ -3,7 +3,7 @@ import { VerificationRecordEntity } from '@database/postgres/entities/verificati
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
-import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
+import { RefundEligibilityService } from '@modules/dispute/services/refund-eligibility.service';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import {
   STAGE_STATUS_LABEL,
@@ -104,7 +104,8 @@ function stageResult(
 function build(
   intent: PaymentIntentEntity | null,
   record: VerificationRecordEntity | null,
-  refundable = false,
+  refundable: boolean | Error = false,
+  until: Date | null = null,
 ) {
   const intents = {
     findOneBy: jest.fn().mockResolvedValue(intent),
@@ -112,15 +113,18 @@ function build(
   const records = {
     findByIntentId: jest.fn().mockResolvedValue(record),
   } as unknown as VerificationRecordRepository;
-  const callDisputes = {
-    refundableIfReportedNow: jest.fn().mockResolvedValue(refundable),
+  const refunds = {
+    ofCall:
+      refundable instanceof Error
+        ? jest.fn().mockRejectedValue(refundable)
+        : jest.fn().mockResolvedValue({ refundable, until }),
   };
 
   return {
-    service: new ReceiptService(intents, records, callDisputes as unknown as CallDisputeService),
+    service: new ReceiptService(intents, records, refunds as unknown as RefundEligibilityService),
     intents,
     records,
-    callDisputes,
+    refunds,
   };
 }
 
@@ -535,27 +539,42 @@ function passingStages(): StageResult[] {
   ];
 }
 
-describe("ReceiptService — refundableIfReportedNow is the filing's own predicate (wave-1 audit I1)", () => {
-  it.each([true, false])(
-    "relays the dispute service's answer (%s) for this call",
-    async (answer) => {
-      const intent = buildIntent({ status: PaymentIntentStatus.SETTLED });
-      const settledAt = new Date('2026-08-10T10:00:02.000Z');
-      const { service, callDisputes } = build(intent, buildRecord({ settledAt }), answer);
+describe('ReceiptService — refundableIfReportedNow, read-only (wave-1 audit I1)', () => {
+  it.each([true, false])('relays the answer (%s) and its end for this call', async (answer) => {
+    const intent = buildIntent({ status: PaymentIntentStatus.SETTLED });
+    const settledAt = new Date('2026-08-10T10:00:02.000Z');
+    const until = answer ? new Date('2026-08-10T10:59:02.000Z') : null;
+    const { service, refunds } = build(intent, buildRecord({ settledAt }), answer, until);
 
-      const receipt = await service.getReceipt(ORG, INTENT_ID);
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
 
-      expect(receipt.refundableIfReportedNow).toBe(answer);
-      expect(callDisputes.refundableIfReportedNow).toHaveBeenCalledWith(intent, settledAt);
-    },
-  );
+    expect(receipt.refundableIfReportedNow).toBe(answer);
+    expect(receipt.refundableIfReportedUntil).toEqual(until);
+    expect(refunds.ofCall).toHaveBeenCalledWith(intent, settledAt);
+  });
 
   it('asks with no settlement time when no verification record exists', async () => {
     const intent = buildIntent();
-    const { service, callDisputes } = build(intent, null);
+    const { service, refunds } = build(intent, null);
 
     await service.getReceipt(ORG, INTENT_ID);
 
-    expect(callDisputes.refundableIfReportedNow).toHaveBeenCalledWith(intent, null);
+    expect(refunds.ofCall).toHaveBeenCalledWith(intent, null);
+  });
+
+  // Review m1: a dispute-side failure removes the promise, never the receipt.
+  it('still answers, promising nothing, when the eligibility check throws', async () => {
+    const { service } = build(
+      buildIntent({ status: PaymentIntentStatus.SETTLED }),
+      null,
+      new Error('db down'),
+    );
+
+    const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+    expect(receipt).toMatchObject({
+      refundableIfReportedNow: false,
+      refundableIfReportedUntil: null,
+    });
   });
 });

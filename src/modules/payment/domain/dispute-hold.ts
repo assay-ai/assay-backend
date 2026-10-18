@@ -14,11 +14,13 @@ export interface DisputeHoldFacts {
 }
 
 /**
- * Whether a buyer report filed at `now` is guaranteed a full refund if upheld
- * (G3.B1). The one predicate behind both the filing's `refundGuaranteed`
- * (`CallDisputeService.file`, through `PaymentIntentRepository.holdForDispute`)
- * and the receipt's read-only `refundableIfReportedNow`, so the promise shown
- * before filing cannot drift from what filing grants (wave-1 audit I1).
+ * Whether a buyer report filed at `now` would be guaranteed a full refund if
+ * upheld (G3.B1), for the receipt's read-only `refundableIfReportedNow`
+ * (wave-1 audit I1). It mirrors, and does not gate, the filing:
+ * `CallDisputeService.file` decides with its rail-B `holdLive` check and the
+ * `UPDATE` in `PaymentIntentRepository.holdForDispute`. An integration test
+ * (`call-disputes.integration.spec.ts`) files in every state and checks the
+ * two answers agree, so a drift either way fails it.
  *
  * - Rail B needs the escrow hold live on the call's chain (`holdLive`); rail
  *   A's hold is the ledger's, so `holdLive` is not read for it.
@@ -26,9 +28,6 @@ export interface DisputeHoldFacts {
  * - Either the payment is held and more than `guardSeconds` before
  *   `collectableAt`, or (rail B) served and not redeemed yet: it is redeemed
  *   into the hold as usual, and a full window starts then.
- *
- * `holdForDispute` keeps the same conditions in its `UPDATE` as well, so a
- * disagreement can only withhold a guarantee, never grant one.
  */
 export function refundGuaranteedIfReported(
   call: DisputeHoldFacts,
