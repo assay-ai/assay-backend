@@ -9,6 +9,7 @@ import { BindingVersionRepository } from '@database/postgres/repositories/bindin
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { ConfigService } from '@nestjs/config';
+import { EscrowBalanceReaderPort } from '@modules/ledger/ports/escrow-balance-reader.port';
 import {
   ProviderQualityCounters,
   SlaWindowRepository,
@@ -184,7 +185,17 @@ interface Wiring {
   readonly versions?: BindingVersionEntity[];
   readonly freeQuota?: FreeQuotaConfig;
   /** Agents per organization, as `agents` rows; read only for `servesYou`. */
-  readonly agents?: readonly { organizationId: string; chainId: string | null; status?: string }[];
+  readonly agents?: readonly {
+    id?: string;
+    organizationId: string;
+    chainId: string | null;
+    status?: string;
+    primaryAccountId?: string | null;
+  }[];
+  /** Wallet accounts whose escrow has a standing withdrawal. */
+  readonly withdrawing?: readonly string[];
+  /** The escrow read fails. */
+  readonly escrowThrows?: boolean;
   /** `auth.privy.defaultChainId`. */
   readonly defaultChainId?: string;
 }
@@ -283,13 +294,26 @@ function build(wiring: Wiring = {}) {
   const agents = {
     find: jest.fn(async ({ where }: { where: { organizationId?: string; status?: string } }) => {
       if (!where?.organizationId) throw new Error('unscoped agents read');
-      return (wiring.agents ?? []).filter(
-        (agent) =>
-          agent.organizationId === where.organizationId &&
-          (where.status === undefined || (agent.status ?? 'ACTIVE') === where.status),
-      );
+      return (wiring.agents ?? [])
+        .map((agent, index) => ({ id: `agent-${index}`, primaryAccountId: null, ...agent }))
+        .filter(
+          (agent) =>
+            agent.organizationId === where.organizationId &&
+            (where.status === undefined || (agent.status ?? 'ACTIVE') === where.status),
+        );
     }),
   } as unknown as AgentRepository;
+  const escrow = {
+    readMany: jest.fn(async (accounts: readonly string[]) => {
+      if (wiring.escrowThrows) throw new Error('rpc down');
+      return new Map(
+        accounts.map((account) => [
+          account,
+          { withdrawRequested: (wiring.withdrawing ?? []).includes(account) ? 1n : 0n },
+        ]),
+      );
+    }),
+  } as unknown as EscrowBalanceReaderPort;
   const config = {
     get: jest.fn((key: string) =>
       key === 'auth.privy.defaultChainId' ? wiring.defaultChainId : undefined,
@@ -311,6 +335,7 @@ function build(wiring: Wiring = {}) {
     providers,
     windows,
     agents,
+    escrow,
     service: new CatalogueService(
       bindings,
       versions,
@@ -328,6 +353,7 @@ function build(wiring: Wiring = {}) {
       wiring.freeQuota ?? DEFAULT_FREE_QUOTA_CONFIG,
       agents,
       config,
+      escrow,
     ),
   };
 }
@@ -1848,7 +1874,7 @@ describe('the catalogue, chains and servesYou per caller', () => {
     const detail = await wired.service.getProviderFor(OPEN, EVM_BUYER);
 
     expect(detail.tools[0]).toMatchObject({ chains: null, servesYou: null });
-    expect(detail).toMatchObject({ chains: [], servesYou: null });
+    expect(detail).toMatchObject({ chains: null, servesYou: null });
   });
 
   it('reads only the caller’s own ACTIVE agents, and their chains', async () => {
@@ -1922,5 +1948,113 @@ describe('the catalogue, chains and servesYou per caller', () => {
       expect(Object.keys(row)).not.toContain('servesYou');
       expect(Object.keys(row)).not.toContain('chains');
     }
+  });
+});
+
+/** B16 fix round 1: unknown stays unknown; one snapshot per window; withdrawals. */
+describe('the catalogue, servesYou fix round 1', () => {
+  const BUYER = 'buyer-1';
+  const P1 = '0a6f3c1e-7d8b-4e2a-9c5f-1b3d5e7f9a11';
+  const P2 = '1b7a4d2f-8e9c-4f3b-a0d6-2c4e6a8b0c22';
+
+  function routedOn(wired: ReturnType<typeof build>, servesOn: Record<string, readonly ChainId[]>) {
+    (wired.router.snapshotCandidates as jest.Mock).mockImplementation(async () =>
+      Object.keys(servesOn).map((providerId) => ({ binding: { providerId } })),
+    );
+    (wired.router.quoteFromCandidates as jest.Mock).mockImplementation(
+      (
+        tool: Tool,
+        candidates: readonly { binding: { providerId: string } }[],
+        context: { payerChains: readonly ChainId[] },
+      ) =>
+        quote({
+          tool,
+          routableBindings: candidates.filter((candidate) =>
+            (servesOn[candidate.binding.providerId] ?? []).includes(context.payerChains[0]),
+          ).length,
+        }),
+    );
+  }
+
+  const market = (overrides: Wiring = {}) =>
+    build({
+      bindings: [binding({ organizationId: P1 }), binding({ organizationId: P2 })],
+      providers: [
+        provider({ organizationId: P1, legalName: 'One BV' }),
+        provider({ organizationId: P2, legalName: 'Two BV' }),
+      ],
+      agents: [{ organizationId: BUYER, chainId: CHAIN, primaryAccountId: 'wallet-1' }],
+      ...overrides,
+    });
+
+  const servesYouById = async (wired: ReturnType<typeof build>) =>
+    Object.fromEntries(
+      (await wired.service.listProvidersFor(BUYER)).providers.map((row) => [
+        row.providerId,
+        row.servesYou,
+      ]),
+    );
+
+  it('a failed snapshot leaves the CARD unknown too: chains null, servesYou null', async () => {
+    const wired = market();
+    (wired.router.snapshotCandidates as jest.Mock).mockRejectedValue(new Error('rpc down'));
+
+    const { providers } = await wired.service.listProvidersFor(BUYER);
+
+    expect(providers).toHaveLength(2);
+    for (const row of providers) expect(row).toMatchObject({ chains: null, servesYou: null });
+  });
+
+  it('a tool catalogue read that fails for the served chains degrades to unknown, never fails the list', async () => {
+    const wired = market();
+    routedOn(wired, { [P1]: [CHAIN] });
+    // The market read succeeds; the served-chains read of the same catalogue fails.
+    (wired.catalogue.listTools as jest.Mock)
+      .mockImplementationOnce(async () => [WEATHER, RATE])
+      .mockImplementation(async () => {
+        throw new Error('catalogue down');
+      });
+
+    const { providers } = await wired.service.listProvidersFor(BUYER);
+
+    expect(providers).toHaveLength(2);
+    for (const row of providers) expect(row).toMatchObject({ chains: null, servesYou: null });
+  });
+
+  it('gathers each tool once per window, shared by the per-chain prices and the served chains', async () => {
+    const wired = market();
+    routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+    (wired.router.quote as jest.Mock).mockImplementation(async () =>
+      quote({ settlementChains: [CHAIN, OTHER_CHAIN] }),
+    );
+
+    await Promise.all([wired.service.listTools(), wired.service.listProvidersFor(BUYER)]);
+    await wired.service.getProviderFor(P1, BUYER);
+
+    expect(wired.router.snapshotCandidates).toHaveBeenCalledTimes(1);
+  });
+
+  it('a chain the buyer is withdrawing on does not count as serving them', async () => {
+    const wired = market({ withdrawing: ['wallet-1'] });
+    routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+
+    expect(await servesYouById(wired)).toEqual({ [P1]: false, [P2]: false });
+    expect(wired.escrow.readMany).toHaveBeenCalledWith(['wallet-1'], expect.any(String));
+  });
+
+  it('only the withdrawing agent’s chain drops out; an unreadable escrow keeps the chain', async () => {
+    const two = market({
+      agents: [
+        { organizationId: BUYER, chainId: CHAIN, primaryAccountId: 'wallet-1' },
+        { organizationId: BUYER, chainId: OTHER_CHAIN, primaryAccountId: 'wallet-2' },
+      ],
+      withdrawing: ['wallet-1'],
+    });
+    routedOn(two, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+    expect(await servesYouById(two)).toEqual({ [P1]: false, [P2]: true });
+
+    const unreadable = market({ escrowThrows: true });
+    routedOn(unreadable, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+    expect(await servesYouById(unreadable)).toEqual({ [P1]: true, [P2]: false });
   });
 });
