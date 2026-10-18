@@ -33,7 +33,7 @@ const TOOLS: Tool[] = ['get_weather', 'geocode_place', 'get_token_market'].map((
   tier: ToolTier.VERIFIED,
 }));
 
-function preview(): McpUrlPreviewService {
+function preview(overrides: Record<string, Record<string, unknown>> = {}): McpUrlPreviewService {
   const quotes = {
     quoteMany: async (ids: readonly string[]) =>
       new Map(
@@ -50,6 +50,7 @@ function preview(): McpUrlPreviewService {
             p95LatencyMs: null,
             qualityRate: null,
             unroutableReason: null,
+            ...overrides[id],
           },
         ]),
       ),
@@ -168,5 +169,46 @@ describe('the Connect preview and Servers in use — discovery', () => {
       [true, 4, `${HOST}/my/kit@4`],
       [false, null, null],
     ]);
+  });
+});
+
+describe('the Connect preview — why a tool cannot run for this agent (review 2026-10-18 F-P1)', () => {
+  offerSolanaRailsInThisSuite('A', 'B');
+  // The agent pays on CHAIN_ID (Solana devnet here); this provider settles only on EVM.
+  const OTHER_CHAIN = 'eip155:46630';
+
+  it('names the rules, and a paid tool none of whose providers settles on the agent chain', async () => {
+    const result = await preview({
+      // Rule-emptied: no price, and the rules' rejections.
+      'tool-geocode_place': {
+        price: null,
+        cheapestPrice: null,
+        pricingMode: null,
+        routableBindings: 0,
+        settlementChains: [],
+        unroutableReason: '1 EXCLUDED_BY_AGENT',
+        ruleRejections: [
+          { providerId: 'p1', reason: 'EXCLUDED_BY_AGENT', source: 'AGENT', detail: '' },
+        ],
+      },
+      // Priced (every enabled chain counts), but only on a chain this agent does not pay on.
+      'tool-get_token_market': { settlementChains: [OTHER_CHAIN] },
+    }).preview(ORG, `${HOST}/?discovery=full`, AGENT);
+    const reasons = Object.fromEntries(result.tools.map((tool) => [tool.name, tool.noFitReason]));
+    expect(reasons).toEqual({
+      get_weather: null,
+      geocode_place: 'RULES',
+      get_token_market: 'OTHER_CHAIN',
+    });
+    // Display only: the chain-gated tool keeps its price and provider count.
+    const market = result.tools.find((tool) => tool.name === 'get_token_market')!;
+    expect(market).toMatchObject({ providerCount: 1, noProviderFits: false });
+  });
+
+  it('never flags a FREE tool for the chain: free calls do not pay on any chain', async () => {
+    const result = await preview({
+      'tool-get_token_market': { pricingMode: PricingMode.FREE, settlementChains: [OTHER_CHAIN] },
+    }).preview(ORG, `${HOST}/?discovery=full`, AGENT);
+    expect(result.tools.find((tool) => tool.name === 'get_token_market')!.noFitReason).toBeNull();
   });
 });
