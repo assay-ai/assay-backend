@@ -105,6 +105,14 @@ import { ProviderSlashHoldEntity } from './entities/provider-slash-hold.entity';
 import { EvmChainStateRepository } from './repositories/evm-chain-state.repository';
 import { EscrowWithdrawalEventEntity } from './entities/escrow-withdrawal-event.entity';
 import { EscrowWithdrawalEventRepository } from './repositories/escrow-withdrawal-event.repository';
+import { OAuthClientEntity } from './entities/oauth-client.entity';
+import { OAuthAuthorizationCodeEntity } from './entities/oauth-authorization-code.entity';
+import { OAuthRefreshTokenEntity } from './entities/oauth-refresh-token.entity';
+import { OAuthAccessTokenEntity } from './entities/oauth-access-token.entity';
+import { OAuthClientRepository } from './repositories/oauth-client.repository';
+import { OAuthAuthorizationCodeRepository } from './repositories/oauth-authorization-code.repository';
+import { OAuthRefreshTokenRepository } from './repositories/oauth-refresh-token.repository';
+import { OAuthAccessTokenRepository } from './repositories/oauth-access-token.repository';
 import { ProviderSlashHoldRepository } from './repositories/provider-slash-hold.repository';
 import { BindingAttemptEntity } from './entities/binding-attempt.entity';
 import { BindingStatsEntity } from './entities/binding-stats.entity';
@@ -195,6 +203,10 @@ export const entities = [
   ProviderSlashHoldEntity,
   EvmBlockedAddressEntity,
   EscrowWithdrawalEventEntity,
+  OAuthClientEntity,
+  OAuthAuthorizationCodeEntity,
+  OAuthRefreshTokenEntity,
+  OAuthAccessTokenEntity,
   BindingAttemptEntity,
   BindingStatsEntity,
   ...TOOLSET_SHARING_ENTITIES,
@@ -257,6 +269,10 @@ export const repositories = [
   AccountBlockRepository,
   EvmChainStateRepository,
   EscrowWithdrawalEventRepository,
+  OAuthClientRepository,
+  OAuthAuthorizationCodeRepository,
+  OAuthRefreshTokenRepository,
+  OAuthAccessTokenRepository,
   ProviderSlashHoldRepository,
   BindingAttemptRepository,
   BindingStatsRepository,
