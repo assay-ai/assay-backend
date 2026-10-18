@@ -1,4 +1,5 @@
 import { Inject, Injectable } from '@nestjs/common';
+import { IsNull } from 'typeorm';
 import {
   AgentCredentialEntity,
   CredentialIssuedVia,
@@ -40,8 +41,6 @@ import { DecideResult, OAuthRequestStore } from './oauth-request.store';
 /** `assay_device` is display-only and at most 32 characters (§6.3.4). */
 const DEVICE_LABEL_MAX = 32;
 const DEFAULT_DEVICE = 'this computer';
-/** The consent page lists the organization's agents; an organization has a handful. */
-const MAX_AGENTS_LISTED = 100;
 
 /**
  * The consent API (spec §6.3.5): what the consent page shows about a pending
@@ -84,7 +83,7 @@ export class OAuthConsentService {
     const bound = await this.requests.bind(rid, organizationId);
     if (bound.status === 'already_decided') throw OAuthErrors.requestAlreadyDecided();
     if (bound.status !== 'ok') {
-      this.metrics.incConsent('expired');
+      this.metrics.incConsent('not_found');
       throw OAuthErrors.requestNotFound();
     }
     const request = bound.request;
@@ -119,7 +118,8 @@ export class OAuthConsentService {
       returnTo: { kind: display.returnTo.kind, display: display.returnTo.display },
       scope: request.scope.split(' ').filter((scope) => scope !== ''),
       agents,
-      ...(replaced ? { replaces: replacesDto(replaced) } : {}),
+      // Only a live grant is shown as replaced: a dead one has nothing left to stop.
+      ...(replaced && isLive(replaced) ? { replaces: replacesDto(replaced) } : {}),
       suggestedName: builtin
         ? `Assay app on ${sanitise(request.device, DEVICE_LABEL_MAX) ?? DEFAULT_DEVICE}`
         : `${display.name} · ${createdAt.toISOString().slice(0, 10)}`,
@@ -192,37 +192,38 @@ export class OAuthConsentService {
     return `${this.config.issuer}/oauth/authorize/continue?request=${encodeURIComponent(rid)}`;
   }
 
-  /** The organization's agents, as the picker shows them. */
+  /**
+   * The organization's agents, as the picker shows them: every one of them,
+   * in four queries whatever their number.
+   */
   private async agentsOf(organizationId: string): Promise<OAuthConsentAgentDto[]> {
-    const [agents, organization] = await Promise.all([
-      this.agents.find({
-        where: { organizationId },
-        order: { createdAt: 'ASC', id: 'ASC' },
-        take: MAX_AGENTS_LISTED,
-      }),
+    const [agents, organization, policies, live] = await Promise.all([
+      this.agents.find({ where: { organizationId }, order: { createdAt: 'ASC', id: 'ASC' } }),
       this.organizations.findById(organizationId),
+      // Every live version in the organization: the default and each agent's override.
+      this.policies.find({ where: { organizationId, supersededAt: IsNull() } }),
+      this.credentials.countLiveOAuthByAgent(organizationId),
     ]);
-    return Promise.all(
-      agents.map(async (agent): Promise<OAuthConsentAgentDto> => {
-        // The agent's own policy, else the organization default: the limits a call meets.
-        const [policy, live] = await Promise.all([
-          this.policies.findLive(organizationId, agent.id),
-          this.credentials.countLiveOAuthForAgent(organizationId, agent.id),
-        ]);
-        return {
-          id: agent.id,
-          label: agent.label,
-          active: isActive(agent, organization?.status),
-          limits: {
-            perCall: moneyOrNull(policy?.perCallMax, policy),
-            perDay: moneyOrNull(policy?.dailyCap, policy),
-            freeCallsPerDay: this.freeQuota.platformAgentDailyLimit,
-          },
-          access: accessOf(policy),
-          liveOAuthCredentials: live,
-        };
-      }),
+    const orgDefault = policies.find((policy) => policy.agentId === null) ?? null;
+    const overrides = new Map(
+      policies.flatMap((policy) => (policy.agentId ? [[policy.agentId, policy] as const] : [])),
     );
+    return agents.map((agent): OAuthConsentAgentDto => {
+      // The agent's own policy, else the organization default: the limits a call meets.
+      const policy = overrides.get(agent.id) ?? orgDefault;
+      return {
+        id: agent.id,
+        label: agent.label,
+        active: isActive(agent, organization?.status),
+        limits: {
+          perCall: moneyOrNull(policy?.perCallMax, policy),
+          perDay: moneyOrNull(policy?.dailyCap, policy),
+          freeCallsPerDay: this.freeQuota.platformAgentDailyLimit,
+        },
+        access: accessOf(policy),
+        liveOAuthCredentials: live.get(agent.id) ?? 0,
+      };
+    });
   }
 
   /**
@@ -272,6 +273,7 @@ function replacesDto(credential: AgentCredentialEntity): OAuthConsentReplacesDto
   return {
     id: credential.id,
     name: credential.name,
+    agentId: credential.agentId,
     narrowed:
       credential.accessMode !== null ||
       credential.allowedToolsets !== null ||

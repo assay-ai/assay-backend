@@ -1,3 +1,4 @@
+import { AppRole } from '@shared/app-role/app-role';
 import { OAuthClientKind } from '@database/postgres/entities/oauth-client.entity';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { OAuthConfig } from '@modules/oauth/config/oauth.config';
@@ -39,7 +40,7 @@ function cimdDocument(url: string, name: string, redirects: string[]) {
   };
 }
 
-function setup(overrides: Partial<OAuthConfig> = {}) {
+function setup(overrides: Partial<OAuthConfig> = {}, role?: AppRole) {
   const config = oauthConfig({
     verifiedClients: [
       {
@@ -92,6 +93,7 @@ function setup(overrides: Partial<OAuthConfig> = {}) {
     repo as unknown as OAuthClientRepository,
     fetcher,
     config,
+    role,
   );
   return { registry, repo, egress, redis };
 }
@@ -134,6 +136,20 @@ describe('OAuthClientRegistry (§6.3.6)', () => {
       await registry.prewarm();
       expect(repo.rows.get(VERIFIED_URL)?.kind).toBe(OAuthClientKind.CIMD);
       expect(egress.requests.map((r) => r.url)).toContain(VERIFIED_URL);
+    });
+
+    it('pre-warms only on the MCP app: the API app makes no outbound call at boot', async () => {
+      const api = setup({}, 'api');
+      await api.registry.onModuleInit();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(api.egress.requests).toEqual([]);
+      // The built-in row is still upserted: the consent API reads it.
+      expect(api.repo.rows.get(BUILTIN)?.kind).toBe(OAuthClientKind.BUILTIN);
+
+      const mcp = setup({}, 'mcp');
+      await mcp.registry.onModuleInit();
+      await new Promise((resolve) => setImmediate(resolve));
+      expect(mcp.egress.requests.map((r) => r.url)).toContain(VERIFIED_URL);
     });
 
     it('a failed pre-warm does not fail the boot', async () => {

@@ -15,6 +15,7 @@ import { AgentRepository } from '@database/postgres/repositories/agent.repositor
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
+import { BlockSubjectKind, BlockedRole } from '@modules/blocklist/domain/account-block';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
 import {
   DEFAULT_FREE_QUOTA_CONFIG,
@@ -689,7 +690,12 @@ describe('OAuth consent API — real database and Redis', () => {
     });
     const rid = await newRequest({ oauthClientId: builtin.id, replaces: old });
     const body = (await read(rid)).body.data;
-    expect(body.replaces).toEqual({ id: old, name: 'Assay app on this Mac', narrowed: true });
+    expect(body.replaces).toEqual({
+      id: old,
+      name: 'Assay app on this Mac',
+      agentId: PERSON_A,
+      narrowed: true,
+    });
 
     await approve(rid, { agentId: PERSON_A, name: 'Assay app on this Mac' });
     expect((await store.take(rid))?.approval?.replaces).toBe(old);
@@ -716,11 +722,57 @@ describe('OAuth consent API — real database and Redis', () => {
       expect((await store.take(rid))?.approval?.replaces).toBeNull();
     }
 
-    // Another agent's grant: shown for that agent, dropped when approving as a different one.
+    // Another agent's grant: shown with that agent (the page preselects it),
+    // dropped when approving as a different one.
     const rid = await newRequest({ oauthClientId: builtin.id, replaces: ofOtherAgent });
-    await read(rid);
+    expect((await read(rid)).body.data.replaces).toEqual(
+      expect.objectContaining({ id: ofOtherAgent, agentId: otherAgent }),
+    );
     await approve(rid, { agentId: PERSON_A, name: 'New' });
     expect((await store.take(rid))?.approval?.replaces).toBeNull();
+  });
+
+  it('replaces naming a dead grant is not shown, though approve still carries it', async () => {
+    const revoked = await insertGrant(PERSON_A, { client: builtin, revoked: true });
+    const expired = await insertGrant(PERSON_A, { client: builtin, expiresIn: '-1 minute' });
+    for (const old of [revoked, expired]) {
+      const rid = await newRequest({ oauthClientId: builtin.id, replaces: old });
+      expect((await read(rid)).body.data).not.toHaveProperty('replaces');
+      // The exchange still copies its narrowing; it has nothing left to revoke.
+      await approve(rid, { agentId: PERSON_A, name: 'Assay app' });
+      expect((await store.take(rid))?.approval?.replaces).toBe(old);
+    }
+  });
+
+  it('at 50, replaces naming a dead grant does not lift the cap → 409', async () => {
+    const agent = await insertAgent(randomUUID());
+    for (let i = 0; i < 50; i += 1) await insertGrant(agent);
+    const dead = await insertGrant(agent, { client: builtin, revoked: true });
+    const rid = await newRequest({ oauthClientId: builtin.id, replaces: dead });
+    await read(rid);
+    const response = await approve(rid, { agentId: agent, name: 'Assay app' });
+    expect(response.status).toBe(409);
+    expect(response.body.error.code).toBe('OAUTH_GRANT_LIMIT_REACHED');
+  });
+
+  // ── a blocked person ─────────────────────────────────────────────────────
+
+  it('a blocked person can read a request but not approve or deny it', async () => {
+    const token = 'test-human-blocked';
+    sessions.set(token, {
+      ...session('user-blocked', ORG_A, PERSON_A, McpCallerKind.HUMAN),
+      blocked: { role: BlockedRole.ORGANIZATION, subjectKind: BlockSubjectKind.ORGANIZATION },
+    } as McpSession);
+    const rid = await newRequest();
+    expect((await read(rid, token)).status).toBe(200);
+    for (const response of [
+      await approve(rid, { agentId: PERSON_A, name: 'Blocked' }, token),
+      await deny(rid, token),
+    ]) {
+      expect(response.status).toBe(403);
+      expect(response.body.error.code).toBe('AUTH_ORGANIZATION_SUSPENDED');
+    }
+    expect((await store.take(rid))?.approval).toBeNull();
   });
 
   // ── suggestedName ────────────────────────────────────────────────────────

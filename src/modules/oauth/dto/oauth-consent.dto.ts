@@ -119,6 +119,13 @@ export class OAuthConsentReplacesDto {
   @ApiProperty()
   name: string;
 
+  @ApiProperty({
+    description:
+      'The agent the replaced connection belongs to. The page preselects it: approving as ' +
+      'another agent leaves the old connection in place',
+  })
+  agentId: string;
+
   @ApiProperty({ description: 'It has its own tool narrowing, which the new connection keeps' })
   narrowed: boolean;
 }

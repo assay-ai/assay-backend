@@ -8,6 +8,10 @@ import { AppSchedulerModule } from '@bootstrap/scheduler/app.module';
 import { DatabaseModule } from '@database/database.module';
 import { PostgresModule, entities, repositories } from '@database/postgres/postgres.module';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
+import { OAUTH_CONFIG, OAuthConfig } from '@modules/oauth/config/oauth.config';
+import { OAuthConsentController } from '@modules/oauth/controllers/oauth-consent.controller';
+import { OAuthConsentService } from '@modules/oauth/services/oauth-consent.service';
+import { OAuthRequestStore } from '@modules/oauth/services/oauth-request.store';
 import { BINDING_INVOKER } from '@modules/tool/ports/binding-invoker.port';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
@@ -102,13 +106,13 @@ const PRODUCTION_ENV: Record<string, string> = {
   VERIFIER_SIGNING_KEYS: JSON.stringify([{ keyId: 'boot-verifier', secretKey: '33'.repeat(32) }]),
   ENABLED_CHAINS: CHAIN_IDS.SOLANA_DEVNET,
   // The API app mounts the OAuth consent API, whose configuration needs the
-  // Privy source and the request-cookie secret (spec §5.2).
+  // Privy source (spec §5.2) but not the request-cookie secret, which only the
+  // MCP app (`/oauth/authorize`, `continue`) holds.
   AUTH_SESSION_SOURCE: 'both',
   PRIVY_APP_ID: 'boot-test-app',
   PRIVY_DEFAULT_CHAIN_ID: CHAIN_IDS.SOLANA_DEVNET,
   PRIVY_USER_LOOKUP_ENABLED: 'false',
   MCP_PUBLIC_URL: 'https://mcp.example.test',
-  OAUTH_REQUEST_COOKIE_SECRET: '000102030405060708090a0b0c0d0e0f101112131415161718191a1b1c1d1e1f',
 };
 
 async function compile(appModule: Type<unknown>, serviceType: string): Promise<TestingModule> {
@@ -143,6 +147,25 @@ describe('provider-auth secrets per process (NODE_ENV=production)', () => {
     if (vault) process.env.CREDENTIAL_VAULT_KEKS = VAULT_KEKS;
     else delete process.env.CREDENTIAL_VAULT_KEKS;
   }
+
+  it('api boots without OAUTH_REQUEST_COOKIE_SECRET and holds no copy of it', async () => {
+    withSecrets(true, true);
+    delete process.env.OAUTH_REQUEST_COOKIE_SECRET;
+    const app = await compile(AppApiModule, 'api');
+    try {
+      const config = app.get<OAuthConfig>(OAUTH_CONFIG, { strict: false });
+      expect(config.issuer).toBe('https://mcp.example.test');
+      expect(config.requestCookieSecret).toBeNull();
+      // OAuthApiModule's own wiring: the consent controller and its services resolve.
+      expect(app.get(OAuthConsentController, { strict: false })).toBeInstanceOf(
+        OAuthConsentController,
+      );
+      expect(app.get(OAuthConsentService, { strict: false })).toBeInstanceOf(OAuthConsentService);
+      expect(app.get(OAuthRequestStore, { strict: false })).toBeInstanceOf(OAuthRequestStore);
+    } finally {
+      await app.close();
+    }
+  });
 
   it('scheduler boots with neither secret', async () => {
     withSecrets(false, false);
