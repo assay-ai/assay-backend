@@ -3,6 +3,7 @@ import { VerificationRecordEntity } from '@database/postgres/entities/verificati
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
+import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 import {
   STAGE_STATUS_LABEL,
@@ -100,15 +101,27 @@ function stageResult(
   return { stage, status, code: null, detail: null, score: null, ...patch };
 }
 
-function build(intent: PaymentIntentEntity | null, record: VerificationRecordEntity | null) {
+function build(
+  intent: PaymentIntentEntity | null,
+  record: VerificationRecordEntity | null,
+  refundable = false,
+) {
   const intents = {
     findOneBy: jest.fn().mockResolvedValue(intent),
   } as unknown as PaymentIntentRepository;
   const records = {
     findByIntentId: jest.fn().mockResolvedValue(record),
   } as unknown as VerificationRecordRepository;
+  const callDisputes = {
+    refundableIfReportedNow: jest.fn().mockResolvedValue(refundable),
+  };
 
-  return { service: new ReceiptService(intents, records), intents, records };
+  return {
+    service: new ReceiptService(intents, records, callDisputes as unknown as CallDisputeService),
+    intents,
+    records,
+    callDisputes,
+  };
 }
 
 describe('ReceiptService — the four stage rows are always present, in pipeline order', () => {
@@ -521,3 +534,28 @@ function passingStages(): StageResult[] {
     stageResult(VerificationStage.SEMANTIC, StageStatus.SKIPPED),
   ];
 }
+
+describe("ReceiptService — refundableIfReportedNow is the filing's own predicate (wave-1 audit I1)", () => {
+  it.each([true, false])(
+    "relays the dispute service's answer (%s) for this call",
+    async (answer) => {
+      const intent = buildIntent({ status: PaymentIntentStatus.SETTLED });
+      const settledAt = new Date('2026-08-10T10:00:02.000Z');
+      const { service, callDisputes } = build(intent, buildRecord({ settledAt }), answer);
+
+      const receipt = await service.getReceipt(ORG, INTENT_ID);
+
+      expect(receipt.refundableIfReportedNow).toBe(answer);
+      expect(callDisputes.refundableIfReportedNow).toHaveBeenCalledWith(intent, settledAt);
+    },
+  );
+
+  it('asks with no settlement time when no verification record exists', async () => {
+    const intent = buildIntent();
+    const { service, callDisputes } = build(intent, null);
+
+    await service.getReceipt(ORG, INTENT_ID);
+
+    expect(callDisputes.refundableIfReportedNow).toHaveBeenCalledWith(intent, null);
+  });
+});

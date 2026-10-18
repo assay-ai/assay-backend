@@ -4,6 +4,7 @@ import { DataSource, EntityManager, IsNull, QueryRunner, SelectQueryBuilder } fr
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
 import { WITHHELD_STATUSES } from '@modules/ledger/domain/withheld';
 import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
+import { DisputeHoldFacts } from '@modules/payment/domain/dispute-hold';
 import { exactInstantSql } from '@shared/api';
 import { PaymentIntentEntity } from '../entities/payment-intent.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -1511,15 +1512,32 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * not redeemed yet (it is redeemed into the hold as usual; a full window
    * starts then). `false` when the window has passed: the dispute is then not
    * guaranteed.
+   *
+   * `guaranteed` is {@link refundGuaranteedIfReported} (the receipt's
+   * `refundableIfReportedNow` reads the same function), applied to the row as
+   * locked here at the transaction's `now()`. The `UPDATE` keeps the same
+   * conditions, so a disagreement can only withhold the guarantee.
    */
   async holdForDispute(
     runner: Pick<QueryRunner, 'query'>,
     target: { organizationId: string; id: string; payer: string },
     guardSeconds: number,
+    guaranteed: (call: DisputeHoldFacts, now: Date) => boolean,
   ): Promise<boolean> {
     await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
       `voucher-admission:${target.payer}`,
     ]);
+    const [row] = (await runner.query(
+      `SELECT "status", "rail", "hold_id" AS "holdId", "hold_released_at" AS "holdReleasedAt",
+              "dispute_outcome" AS "disputeOutcome", "held_status" AS "heldStatus",
+              "collectable_at" AS "collectableAt", "redemption_lapsed_at" AS "redemptionLapsedAt",
+              "redemption_last_error" AS "redemptionLastError", now() AS "now"
+         FROM "payment_intents"
+        WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3
+        FOR UPDATE`,
+      [target.organizationId, target.id, target.payer],
+    )) as Array<DisputeHoldFacts & { now: Date }>;
+    if (!row || !guaranteed(row, row.now)) return false;
     const result = (await runner.query(
       `UPDATE "payment_intents" SET "dispute_outcome" = 'OPEN'
         WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3

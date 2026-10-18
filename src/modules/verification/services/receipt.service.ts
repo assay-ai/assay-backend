@@ -21,6 +21,7 @@ import {
   loadCallDisputeConfig,
 } from '@modules/dispute/constants/call-dispute.config';
 import { disputeFilingClosesAt } from '@modules/dispute/domain/call-dispute';
+import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
@@ -59,6 +60,8 @@ export class ReceiptService {
   constructor(
     private readonly intents: PaymentIntentRepository,
     private readonly records: VerificationRecordRepository,
+    // Whether a report filed now is refund-guaranteed: the filing's own predicate.
+    private readonly callDisputes: CallDisputeService,
     // The dispute filing window; read from the environment when no module provides it.
     @Optional()
     @Inject(CALL_DISPUTE_CONFIG)
@@ -114,6 +117,14 @@ export class ReceiptService {
       ? listedPrice
       : MoneyUtil.zero(asset, intent.decimals);
 
+    // Read-only, and the same predicate as the filing's `refundGuaranteed`
+    // (wave-1 audit I1): false wherever a report would not be refunded in full,
+    // e.g. a chain without the escrow hold.
+    const refundableIfReportedNow = await this.callDisputes.refundableIfReportedNow(
+      intent,
+      record?.settledAt ?? null,
+    );
+
     return {
       intentId: intent.id,
       toolId: intent.toolId,
@@ -142,6 +153,7 @@ export class ReceiptService {
         record?.settledAt ?? null,
         (this.disputeConfig ?? loadCallDisputeConfig()).filingWindowMs,
       ),
+      refundableIfReportedNow,
       evaluatedAt: record?.evaluatedAt ?? null,
       settledAt: record?.settledAt ?? null,
     };

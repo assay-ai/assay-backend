@@ -757,6 +757,51 @@ describe('call disputes, against a real database', () => {
       }
     });
 
+    it('the receipt’s refundableIfReportedNow says what the filing then grants (wave-1 audit I1)', async () => {
+      const cases: Array<[string, () => Promise<Call>, boolean]> = [
+        ['held, 61 s left', () => seedHeld(61_000), true],
+        ['held, 59 s left', () => seedHeld(59_000), false],
+        ['not redeemed yet', () => seedSettled(), true],
+        [
+          'window over',
+          async () => {
+            const call = await seedHeld();
+            await endWindow(call);
+            return call;
+          },
+          false,
+        ],
+        ['buyer debt', () => seedDebt(), false],
+        [
+          'no escrow hold on the chain',
+          async () => {
+            held.live = false;
+            return seedSettled();
+          },
+          false,
+        ],
+      ];
+      for (const [label, seed, expected] of cases) {
+        held.live = true;
+        const call = await seed();
+        const intent = await payments.findOneBy({ organizationId: buyer, id: call.intentId });
+        const flag = await disputes.refundableIfReportedNow(intent!, null);
+        const dispute = await file(call);
+        expect({ label, flag, filed: dispute.refundGuaranteed }).toEqual({
+          label,
+          flag: expected,
+          filed: expected,
+        });
+        // Once a report holds the call, a second report is not promised a refund.
+        const after = await payments.findOneBy({ organizationId: buyer, id: call.intentId });
+        expect({ label, again: await disputes.refundableIfReportedNow(after!, null) }).toEqual({
+          label,
+          again: false,
+        });
+      }
+      held.live = true;
+    });
+
     it('a filing before the redemption is held the same way, and refunded when upheld', async () => {
       const call = await seedSettled();
       const dispute = await file(call);

@@ -238,6 +238,15 @@ export class GetReceiptResponseDto {
   })
   disputeFilingClosesAt: Date | null;
 
+  @ApiProperty({
+    description:
+      'Whether a "Report a bad result" filed now would be refunded in full if upheld: the same ' +
+      "predicate as the filed dispute's `refundGuaranteed`. False on a chain without the " +
+      'escrow hold, after the dispute window, or when the call cannot be reported. Read-only: ' +
+      'filing decides again, and can only withhold what this says',
+  })
+  refundableIfReportedNow: boolean;
+
   @ApiPropertyOptional({ nullable: true, description: 'When the verdict was evaluated' })
   evaluatedAt: Date | null;
 
