@@ -1,5 +1,5 @@
 import { disputeWindowEndOf } from '@modules/payment/constants/collection-hold.constants';
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Optional } from '@nestjs/common';
 
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
@@ -14,6 +14,12 @@ import {
   isChargedWhenSettled,
 } from '@modules/payment/domain/collection';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
+import {
+  CALL_DISPUTE_CONFIG,
+  CallDisputeConfig,
+  loadCallDisputeConfig,
+} from '@modules/dispute/constants/call-dispute.config';
+import { disputeFilingClosesAt } from '@modules/dispute/domain/call-dispute';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import {
@@ -52,6 +58,10 @@ export class ReceiptService {
   constructor(
     private readonly intents: PaymentIntentRepository,
     private readonly records: VerificationRecordRepository,
+    // The dispute filing window; read from the environment when no module provides it.
+    @Optional()
+    @Inject(CALL_DISPUTE_CONFIG)
+    private readonly disputeConfig: CallDisputeConfig = loadCallDisputeConfig(),
   ) {}
 
   async getReceipt(organizationId: string, intentId: string): Promise<GetReceiptResponseDto> {
@@ -120,6 +130,11 @@ export class ReceiptService {
       holdReleasedAt: intent.holdReleasedAt,
       collectableAt: intent.collectableAt ?? null,
       disputeWindowEndsAt: disputeWindowEndOf(intent.collectableAt),
+      disputeFilingClosesAt: disputeFilingClosesAt(
+        intent,
+        record?.settledAt ?? null,
+        (this.disputeConfig ?? loadCallDisputeConfig()).filingWindowMs,
+      ),
       evaluatedAt: record?.evaluatedAt ?? null,
       settledAt: record?.settledAt ?? null,
     };
