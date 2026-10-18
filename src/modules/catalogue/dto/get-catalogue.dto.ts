@@ -247,8 +247,29 @@ export class CatalogueToolDto {
   })
   replacementVersion: string | null;
 
-  @ApiProperty({ enum: ToolTier })
+  @ApiProperty({ enum: ToolTier, description: 'A provider tool is never GUARANTEED (§7.6).' })
   tier: ToolTier;
+
+  @ApiProperty({
+    enum: ['STANDARD', 'PROVIDER'],
+    description: 'STANDARD: backed by several providers. PROVIDER: one maker’s own API.',
+  })
+  kind: 'STANDARD' | 'PROVIDER';
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    example: 'acme',
+    description: 'The maker’s public name, on a PROVIDER tool (`{handle}__{tool}`).',
+  })
+  handle: string | null;
+
+  @ApiProperty({
+    description:
+      'The "Not reviewed" badge: a provider tool no operator approved. Always false in the ' +
+      'catalogue, which lists reviewed (LISTED) tools only.',
+  })
+  notReviewed: boolean;
 
   @ApiProperty({
     example: 'weather',

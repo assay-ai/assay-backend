@@ -448,16 +448,20 @@ export class ToolsetPublishingService {
         const tool = tools.get(entry.toolId);
         if (!tool || tool.status === ToolStatus.REMOVED || tool.status === 'RETIRED') return true;
         if (tool.visibility === 'LISTED') return false;
-        // An UNLISTED tool may sit only in its own provider's non-public toolsets (§7.6).
-        return visibility === ToolsetVisibility.PUBLIC || tool.ownerOrgId !== organizationId;
+        return !holdsUnlisted(tool, organizationId, visibility);
       })
       .map((entry) => entry.toolId);
     if (refused.length > 0) {
+      const gone = refused.some((id) => {
+        const tool = tools.get(id);
+        return !tool || tool.status === ToolStatus.REMOVED || tool.status === 'RETIRED';
+      });
       throw ToolsetErrors.notPublishable({
-        reason:
-          visibility === ToolsetVisibility.PUBLIC
+        reason: gone
+          ? 'some tools are no longer available'
+          : visibility === ToolsetVisibility.PUBLIC
             ? 'a listed tool set may hold only listed tools'
-            : 'some tools are no longer available',
+            : 'a link-only tool set may hold listed tools and your own link-only provider tools; share private provider tools as link-only first',
         toolIds: refused,
       });
     }
@@ -547,6 +551,25 @@ export function visibleToOthers(
   now: Date,
 ): boolean {
   return sharedPathFor(state, token, now) !== null;
+}
+
+/**
+ * Whether a version shared as `visibility` may hold this non-LISTED tool
+ * (§7.6, §7.7): only the owner's own provider tool, and then a PRIVATE
+ * version may hold a PRIVATE or UNLISTED one, an UNLISTED (link-only)
+ * version an UNLISTED one only, and a PUBLIC version none.
+ */
+export function holdsUnlisted(
+  tool: Pick<ToolEntity, 'visibility' | 'ownerOrgId' | 'kind'>,
+  organizationId: string,
+  visibility: ToolsetVisibility,
+): boolean {
+  if (tool.kind !== 'PROVIDER' || tool.ownerOrgId !== organizationId) return false;
+  if (visibility === ToolsetVisibility.PRIVATE) {
+    return tool.visibility === 'PRIVATE' || tool.visibility === 'UNLISTED';
+  }
+  if (visibility === ToolsetVisibility.UNLISTED) return tool.visibility === 'UNLISTED';
+  return false;
 }
 
 /** Why a copy leaves this tool out, or `null` to keep it. */

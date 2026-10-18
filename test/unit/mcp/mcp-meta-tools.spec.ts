@@ -6,13 +6,19 @@ import { FreeQuotaService } from '@modules/free-tier/services/free-quota.service
 import { X402_ERROR, X402_PRICE } from '@modules/mcp/constants/mcp.constants';
 import { SEARCH_RESPONSE_MAX_BYTES } from '@modules/mcp/domain/discovery';
 import { McpScope } from '@modules/mcp/ports/mcp-scope';
-import { McpCatalogueService } from '@modules/mcp/services/mcp-catalogue.service';
+import { McpCatalogueService, reviewNote } from '@modules/mcp/services/mcp-catalogue.service';
 import { McpDiscoveryService } from '@modules/mcp/services/mcp-discovery.service';
 import { MCP_RATE_LIMITS, McpRateLimiter } from '@modules/mcp/services/mcp-rate-limiter.service';
-import { McpServerFactory } from '@modules/mcp/services/mcp-server.factory';
+import { McpServerFactory, errorResult } from '@modules/mcp/services/mcp-server.factory';
 import { McpToolCallService } from '@modules/mcp/services/mcp-tool-call.service';
 import { ToolAccessErrorCode } from '@modules/tool/errors/tool-access.errors';
-import { PricingMode, Tool, ToolTier } from '@modules/tool/ports/tool.types';
+import {
+  PricingMode,
+  Tool,
+  ToolKind,
+  ToolTier,
+  ToolVisibility,
+} from '@modules/tool/ports/tool.types';
 import { InMemoryToolCatalogue } from '@modules/tool/services/in-memory-tool-catalogue';
 import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
 import { ToolQuote } from '@modules/tool/services/provider-router.service';
@@ -729,5 +735,81 @@ describe('contract versions in discovery (T3)', () => {
       summary: 'Temperature now (stored summary).',
       version: '1.0.0',
     });
+  });
+});
+
+/**
+ * A buyer never pays for an unreviewed provider tool without being told
+ * (§7.6, review P2-3): tools/list, search_tools, get_tool and the payment
+ * request all say "Not reviewed".
+ */
+describe('"Not reviewed" wherever a provider tool is offered', () => {
+  offerSolanaRailsInThisSuite('A', 'B');
+
+  const unreviewed: Tool = {
+    ...tool('acme__search_posts', 'social', ['posts'], 'Search public posts by keyword.'),
+    kind: ToolKind.PROVIDER,
+    ownerOrgId: 'org-acme',
+    visibility: ToolVisibility.UNLISTED,
+    reviewed: false,
+  };
+  const ownView = () =>
+    view('/my/kit', {
+      path: { kind: McpPathKind.MY_TOOLSET, slug: 'kit', version: null },
+      kind: EndpointKind.TOOLSET,
+      toolset: {
+        id: TOOLSET_ID,
+        slug: 'kit',
+        name: 'Kit',
+        version: null,
+        latest: false,
+        ownerOrgId: 'org-acme',
+      },
+      baseToolIds: [unreviewed.id],
+      discovery: { mode: DiscoveryMode.FULL, searchThreshold: 25, pinnedTools: [] },
+    });
+
+  it('tools/list ends the description with it and marks _meta', async () => {
+    const { client } = await connect(scopeOf(ownView()), { tools: [...CATALOGUE, unreviewed] });
+    const { tools } = await client.listTools();
+    const listed = tools.find((t) => t.name === 'acme__search_posts')!;
+    expect(listed.description).toMatch(/· Not reviewed$/);
+    expect(listed._meta).toMatchObject({ 'assay/kind': 'PROVIDER', 'assay/notReviewed': true });
+  });
+
+  it('search_tools and get_tool carry notReviewed, at every detail level', async () => {
+    const { client } = await connect(scopeOf(ownView()), { tools: [...CATALOGUE, unreviewed] });
+    for (const detail of ['names', 'summary', 'full']) {
+      const found = output(await call(client, 'search_tools', { query: 'posts', detail }));
+      expect(found.results[0]).toMatchObject({ name: 'acme__search_posts', notReviewed: true });
+    }
+    expect(output(await call(client, 'get_tool', { name: 'acme__search_posts' }))).toMatchObject({
+      notReviewed: true,
+    });
+  });
+
+  it('a payment request says so beside the voucher, never inside it', () => {
+    const result = errorResult('pay', {
+      code: 'PAYMENT_REQUIRED',
+      paymentRequired: { rail: 'B', seq: 1 },
+      notReviewed: true,
+    });
+    expect(result._meta).toEqual({
+      [X402_ERROR]: { code: 'PAYMENT_REQUIRED' },
+      'x402/paymentRequired': { rail: 'B', seq: 1 },
+      'assay/notReviewed': true,
+    });
+    // A reviewed tool's request carries no flag.
+    expect(
+      errorResult('pay', { code: 'PAYMENT_REQUIRED', paymentRequired: { rail: 'B' } })._meta,
+    ).not.toHaveProperty('assay/notReviewed');
+  });
+
+  it('a standard tool carries none of it', async () => {
+    const { client } = await connect(scopeOf(view('/?discovery=full')));
+    const { tools } = await client.listTools();
+    expect(tools.every((t) => !String(t.description).includes('Not reviewed'))).toBe(true);
+    expect(reviewNote(CATALOGUE[0])).toBe('');
+    expect(reviewNote(unreviewed)).toBe(' · Not reviewed');
   });
 });

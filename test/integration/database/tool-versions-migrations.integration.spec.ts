@@ -80,6 +80,7 @@ describe('tool version migrations: up, down, up', () => {
     'ToolBindingAuthMode1762000000002',
     'CreateBindingCredentials1762000000001',
     'DropConnectivityEgressIps1762000000000',
+    'ProviderTools1761900000000',
     'CallDisputes1761800000002',
     'VerificationRecordDisputeOutcome1761800000001',
     'PaymentIntentDisputeHold1761800000000',
@@ -94,6 +95,14 @@ describe('tool version migrations: up, down, up', () => {
         `SELECT name FROM migrations ORDER BY id DESC LIMIT 1`,
       )) as { name: string }[];
       expect(last.name).toBe(name);
+      await dataSource.undoLastMigration({ transaction: 'each' });
+    }
+
+    // Migrations newer than T3's come off first, newest first.
+    const later = (await dataSource.query(
+      `SELECT name FROM migrations WHERE timestamp > 1761600000000`,
+    )) as { name: string }[];
+    for (let i = 0; i < later.length; i += 1) {
       await dataSource.undoLastMigration({ transaction: 'each' });
     }
 

@@ -60,6 +60,7 @@ import { ToolEntity } from './entities/tool.entity';
 import { ToolVersionEntity } from './entities/tool-version.entity';
 import { AgentConnectUrlEntity } from './entities/agent-connect-url.entity';
 import { ToolsetEntity } from './entities/toolset.entity';
+import { ToolPromotionInviteEntity } from './entities/tool-promotion-invite.entity';
 import { ToolsetEntryEntity } from './entities/toolset-entry.entity';
 import { BindingVersionEntity } from './entities/binding-version.entity';
 import { BindingTestRunEntity } from './entities/binding-test-run.entity';
@@ -159,6 +160,7 @@ export const entities = [
   ProviderPayoutEntity,
   ToolEntity,
   ToolVersionEntity,
+  ToolPromotionInviteEntity,
   ToolsetEntity,
   ToolsetEntryEntity,
   AgentConnectUrlEntity,

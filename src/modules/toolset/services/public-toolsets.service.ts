@@ -25,6 +25,7 @@ import {
   PublicCategoryListDto,
   PublicFigureDto,
   PublicHandleProfileDto,
+  PublicHandleToolDto,
   PublicToolsetCardDto,
   PublicToolsetDiffDto,
   PublicToolsetEntryDto,
@@ -292,12 +293,58 @@ export class PublicToolsetsService {
     if (!owner) throw ToolsetErrors.handleNotFound();
     const current = owner.kind === 'OFFICIAL' ? OFFICIAL_HANDLE : (owner.renamedTo ?? handle);
     const rows = (await this.listedRows()).filter((row) => row.handle === current);
+    const tools = owner.kind === 'ORG' ? await this.listedProviderTools(owner.organizationId) : [];
     return {
       handle: current,
       renamedTo: owner.kind === 'ORG' ? owner.renamedTo : null,
       toolsets: rows.map((row) => this.card(row)),
-      tools: [],
+      tools,
+      mcpUrl: tools.length > 0 ? `${this.host.mcpPublicUrl}/@${current}` : null,
     };
+  }
+
+  /**
+   * One maker's LISTED provider tools, at the version an unpinned call is
+   * served (§7.4 `/@{handle}`). UNLISTED and PRIVATE ones never appear: a
+   * public page is no way to learn that a link-only tool exists.
+   */
+  private async listedProviderTools(organizationId: string): Promise<PublicHandleToolDto[]> {
+    const rows = (await this.dataSource.query(
+      `SELECT t.id, t.name, t.category, t.tags, v.summary, v.semver, v.tier,
+              r.name AS "replacementName"
+         FROM tools t
+         JOIN tool_versions v ON v.tool_id = t.id AND v.version = t.current_version
+         LEFT JOIN tools r ON r.id = t.replacement_tool_id AND r.visibility = 'LISTED'
+         JOIN organizations o ON o.id = t.owner_org_id AND o.handle_status = 'ACTIVE'
+                             AND left(t.name, length(o.handle) + 2) = o.handle || '__'
+        WHERE t.kind = 'PROVIDER' AND t.owner_org_id = $1 AND t.visibility = 'LISTED'
+          AND t.approved_version IS NOT NULL
+          AND t.status IN ('ACTIVE', 'DEPRECATED')
+        ORDER BY t.name`,
+      [organizationId],
+    )) as {
+      id: string;
+      name: string;
+      category: string;
+      tags: string[];
+      summary: string;
+      semver: string | null;
+      tier: string | null;
+      replacementName: string | null;
+    }[];
+    return rows.map((row) => ({
+      id: row.id,
+      name: row.name,
+      summary: row.summary,
+      category: row.category,
+      tags: [...(row.tags ?? [])],
+      // Never GUARANTEED, whatever a row says (§7.6).
+      tier: row.tier === 'GUARANTEED' ? 'VERIFIED' : (row.tier ?? 'UNVERIFIED'),
+      version: row.semver,
+      kind: 'PROVIDER' as const,
+      reviewed: true,
+      replacementName: row.replacementName,
+    }));
   }
 
   async categories(): Promise<PublicCategoryListDto> {
@@ -449,24 +496,26 @@ export class PublicToolsetsService {
 
   /**
    * Removed (or gone) and not-reviewed tools of a snapshot. "Not reviewed" is
-   * a tool outside the LISTED catalogue — an UNLISTED provider tool (§7.6),
-   * which only a link-only set may hold. Every tool a listed set holds is
-   * LISTED, so it is `false` there until provider tools arrive (T4).
+   * a provider tool with no approved version (§7.6) — read from its review
+   * state, so a LISTED tool is reviewed and an UNLISTED one is not.
    */
   private async toolFlags(entries: readonly SnapshotEntry[]): Promise<ToolFlags> {
     const toolIds = [...new Set(entries.map((entry) => entry.toolId))];
     if (toolIds.length === 0) return { removed: new Set(), notReviewed: new Set() };
     const rows = (await this.dataSource.query(
-      `SELECT id, status, visibility FROM tools WHERE id = ANY($1::uuid[])`,
+      `SELECT id, status, kind, approved_version AS "approvedVersion"
+         FROM tools WHERE id = ANY($1::uuid[])`,
       [toolIds],
-    )) as { id: string; status: string; visibility: string }[];
+    )) as { id: string; status: string; kind: string; approvedVersion: number | null }[];
     const found = new Map(rows.map((row) => [row.id, row]));
     const removed = new Set<string>();
     const notReviewed = new Set<string>();
     for (const id of toolIds) {
       const tool = found.get(id);
       if (!tool || tool.status === 'REMOVED' || tool.status === 'RETIRED') removed.add(id);
-      else if (tool.visibility !== 'LISTED') notReviewed.add(id);
+      // From the review state, not the visibility (§7.6): a provider tool
+      // nobody approved yet.
+      else if (tool.kind === 'PROVIDER' && tool.approvedVersion === null) notReviewed.add(id);
     }
     return { removed, notReviewed };
   }

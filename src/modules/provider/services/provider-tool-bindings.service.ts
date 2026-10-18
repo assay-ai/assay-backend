@@ -13,7 +13,14 @@ import { AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
 import { getAssetMetadata } from '@modules/chains/ports/asset-registry';
 import { platformAssetFrom } from '@modules/chains/platform-asset';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import { BindingAuthMode, BindingStatus, PricingMode, Tool } from '@modules/tool/ports/tool.types';
+import {
+  BindingAuthMode,
+  BindingStatus,
+  PricingMode,
+  Tool,
+  isListedTool,
+  isProviderTool,
+} from '@modules/tool/ports/tool.types';
 import { CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
 
 import {
@@ -101,8 +108,13 @@ export class ProviderToolBindingsService {
    * API that changes twice), and this endpoint inherits that decision rather
    * than inventing a second answer to it.
    */
-  async getCatalogue(): Promise<ToolCatalogueDto> {
-    const tools = await this.catalogue.listTools();
+  async getCatalogue(organizationId?: string): Promise<ToolCatalogueDto> {
+    // Every LISTED standard tool, and the caller's own provider tools: a
+    // provider tool's own binding is its only implementation (§7.6), so
+    // nobody else's provider tool is bindable — or named here.
+    const tools = (await this.catalogue.listTools()).filter((tool) =>
+      canBind(tool, organizationId),
+    );
 
     const metadata = getAssetMetadata(settlementAsset(this.config));
 
@@ -222,6 +234,16 @@ export function toDetailDto(
     // never been published is wholly unpublished.
     hasUnpublishedChanges: row.publishedVersion !== row.mappingVersion,
   };
+}
+
+/**
+ * Whether `organizationId` may bind `tool`: a LISTED standard tool, or one of
+ * its own provider tools (§7.6: "the provider's own binding is the only
+ * implementation").
+ */
+export function canBind(tool: Tool, organizationId: string | null | undefined): boolean {
+  if (isProviderTool(tool)) return !!organizationId && tool.ownerOrgId === organizationId;
+  return isListedTool(tool);
 }
 
 /** The endpoint stored in the revision currently published, or null when never published. */

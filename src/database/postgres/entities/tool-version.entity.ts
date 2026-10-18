@@ -64,6 +64,14 @@ export class ToolVersionEntity {
   @Column({ name: 'verification_policy_id', type: 'varchar', length: 64, nullable: true })
   verificationPolicyId: string | null;
 
+  /**
+   * Provider tools (T4): the verification rules the provider declares for its
+   * own contract, in the deterministic rule dialect (`VerificationRule`).
+   * Always empty for a STANDARD tool, whose rules live in its policy.
+   */
+  @Column({ name: 'declared_rules', type: 'jsonb', default: () => `'[]'::jsonb` })
+  declaredRules: unknown[];
+
   /** `ToolTier`. */
   @Column({ name: 'tier', type: 'varchar', length: 16, nullable: true })
   tier: string | null;

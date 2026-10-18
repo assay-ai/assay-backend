@@ -525,6 +525,7 @@ describe('buyer debt migrations, down and up again', () => {
       'ToolBindingAuthMode1762000000002',
       'CreateBindingCredentials1762000000001',
       'DropConnectivityEgressIps1762000000000',
+      'ProviderTools1761900000000',
       'CallDisputes1761800000002',
       'VerificationRecordDisputeOutcome1761800000001',
       'PaymentIntentDisputeHold1761800000000',

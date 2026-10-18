@@ -74,7 +74,9 @@ export const ToolsetErrors = createDomainErrorFactory('TOOLSET', {
     message: (context?: Record<string, any>) =>
       context?.reason === 'RESERVED'
         ? 'This public name is reserved'
-        : 'A public name is 3–24 characters: lowercase letters, digits and "-", starting with a letter',
+        : context?.reason === 'TOOL_NAME_TOO_LONG'
+          ? 'A provider tool name would pass 48 characters under this public name'
+          : 'A public name is 3–24 characters: lowercase letters, digits and "-", starting with a letter',
     publicContext: ['reason'],
   },
   /** Taken by another organization, or held after a rename or a takedown. */

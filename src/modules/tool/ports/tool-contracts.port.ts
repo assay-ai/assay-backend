@@ -13,6 +13,23 @@ import { Tool } from './tool.types';
 export interface ToolContractsPort {
   listContracts(): Promise<readonly Tool[]>;
   findContract(toolId: string): Promise<Tool | null>;
+  /**
+   * A REMOVED tool by name (taken down, or withdrawn by its provider), so a
+   * call through a URL that served it gets `TOOL_REMOVED` rather than reading
+   * like a name that never existed (§7.6 "Removal"). Optional: harnesses
+   * that remove nothing need none.
+   */
+  findRemovedByName?(name: string): Promise<RemovedTool | null>;
+}
+
+/** What `TOOL_REMOVED` says about a removed tool. */
+export interface RemovedTool {
+  readonly id: string;
+  readonly name: string;
+  /** The visibility it had: a catalogue-wide URL only ever served a LISTED one. */
+  readonly visibility: string;
+  readonly ownerOrgId: string | null;
+  readonly replacementToolName: string | null;
 }
 
 /** DI token for the bound {@link ToolContractsPort}. */

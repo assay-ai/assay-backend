@@ -7,6 +7,7 @@ import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
 import { ToolModule } from '@modules/tool/tool.module';
 import { ToolsetModule } from '@modules/toolset/toolset.module';
+import { ProviderToolModule } from '@modules/provider-tool/provider-tool.module';
 
 import { OperatorApprovalsController } from './controllers/operator-approvals.controller';
 import { OperatorArbiterController } from './controllers/operator-arbiter.controller';
@@ -14,6 +15,7 @@ import { OperatorBlocksController } from './controllers/operator-blocks.controll
 import { OperatorModerationController } from './controllers/operator-moderation.controller';
 import { OperatorContractsController } from './controllers/operator-contracts.controller';
 import { OperatorCallDisputesController } from './controllers/operator-call-disputes.controller';
+import { OperatorProviderToolsController } from './controllers/operator-provider-tools.controller';
 import { OperatorCasesController } from './controllers/operator-cases.controller';
 import { OperatorReferenceController } from './controllers/operator-reference.controller';
 import { OperatorOperatorsController } from './controllers/operator-operators.controller';
@@ -31,6 +33,7 @@ import { OperatorCaseService } from './services/operator-case.service';
 import { OperatorDirectoryService } from './services/operator-directory.service';
 import { OperatorModerationService } from './services/operator-moderation.service';
 import { OperatorContractsService } from './services/operator-contracts.service';
+import { OperatorProviderToolsService } from './services/operator-provider-tools.service';
 import { OperatorProviderVerificationService } from './services/operator-provider-verification.service';
 import { PlatformHealthService } from './services/platform-health.service';
 import { OperatorReferenceService } from './services/operator-reference.service';
@@ -75,6 +78,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     BlocklistModule,
     ToolModule,
     ToolsetModule,
+    ProviderToolModule,
     // `CallDisputeService`, which `OperatorCallDisputeService` decides through (G3.B1).
     DisputeModule,
   ],
@@ -84,6 +88,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     OperatorBlocksController,
     OperatorModerationController,
     OperatorContractsController,
+    OperatorProviderToolsController,
     OperatorCasesController,
     OperatorCallDisputesController,
     OperatorOperatorsController,
@@ -103,6 +108,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     OperatorDirectoryService,
     OperatorModerationService,
     OperatorContractsService,
+    OperatorProviderToolsService,
     // `V-7`. `ProviderRepository` needs no import here — `PostgresModule` is
     // `@Global()`, and `OverrideLogService` already comes in with
     // `OperatorModule`.

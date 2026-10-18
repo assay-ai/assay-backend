@@ -79,6 +79,24 @@ export class OperatorModerationController {
     return this.moderation.cutoffToolset(operator, id, CutoffAction.TAKEDOWN, body, requestIdOf());
   }
 
+  @Post('tools/:id/takedown')
+  @HttpCode(200)
+  @Override('A-25')
+  @RequireRoles(OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE)
+  @ApiOperation({
+    summary:
+      'Take a provider tool down at once: removed from every view, calls get TOOL_REMOVED; ' +
+      'a second operator confirms within 72 h',
+  })
+  @ApiResponse({ status: 200, type: ModerationCutoffDto })
+  async takedownTool(
+    @CurrentOperator() operator: OperatorSession,
+    @Param('id', ParseUUIDPipe) id: string,
+    @Body() body: ModerationBodyDto,
+  ): Promise<ModerationCutoffDto> {
+    return this.moderation.takedownTool(operator, id, body, requestIdOf());
+  }
+
   @Post('toolsets/:id/relist')
   @HttpCode(204)
   @Override('A-20')

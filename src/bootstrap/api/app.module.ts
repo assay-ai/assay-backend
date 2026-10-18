@@ -29,6 +29,7 @@ import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { CatalogueApiModule } from '@modules/catalogue/catalogue-api.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { ProviderApiModule } from '@modules/provider/provider-api.module';
+import { ProviderToolModule } from '@modules/provider-tool/provider-tool.module';
 import { VerificationModule } from '@modules/verification/verification.module';
 import { VerificationApiModule } from '@modules/verification/verification-api.module';
 import { SettlementModule } from '@modules/settlement/settlement.module';
@@ -131,6 +132,7 @@ import { NetworkModule } from '@shared/network/network.module';
     CatalogueApiModule,
     ProviderModule,
     ProviderApiModule,
+    ProviderToolModule,
     VerificationModule,
     VerificationApiModule,
     SettlementModule,

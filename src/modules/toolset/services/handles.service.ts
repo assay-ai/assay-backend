@@ -27,6 +27,7 @@ import {
 } from '../domain/handle';
 import { ToolsetErrors } from '../errors/toolset.errors';
 import { TOOLSET_CLOCK, ToolsetClock, systemClock } from './toolset-clock';
+import { renameHandleTools } from './handle-tools';
 
 /** What a handle in a URL names right now. */
 export type ResolvedHandle =
@@ -124,6 +125,8 @@ export class HandlesService {
         if (!(await this.isAvailable(manager, handle, organizationId))) {
           throw ToolsetErrors.handleTaken({ suggestions: await this.freeSuggestions(handle) });
         }
+        // Its provider tools (all PRIVATE before the lock) are named under it.
+        if (org.handle) await renameHandleTools(manager, organizationId, org.handle, handle);
         const changed = await manager
           .createQueryBuilder()
           .update(OrganizationEntity)
