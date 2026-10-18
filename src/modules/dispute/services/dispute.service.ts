@@ -161,6 +161,9 @@ export class DisputeService {
     if (dispute.subjectType === SLASH_PROPOSAL_SUBJECT) {
       throw DisputeErrors.notAcknowledgeable({ state: slashObjectionState(dispute) });
     }
+    if (dispute.intentId) {
+      throw DisputeErrors.notAcknowledgeable({ state: `${dispute.state} (a call dispute)` });
+    }
     if (TERMINAL_DISPUTE_STATES.includes(dispute.state as DisputeState)) {
       throw DisputeErrors.notAcknowledgeable({ state: dispute.state });
     }
@@ -190,6 +193,10 @@ export class DisputeService {
     }
     if (dispute.subjectType === SLASH_PROPOSAL_SUBJECT) {
       throw DisputeErrors.notWithdrawable({ state: slashObjectionState(dispute) });
+    }
+    if (dispute.intentId) {
+      // A call dispute may hold its voucher: only `POST /call-disputes/:id/withdraw` releases it.
+      throw DisputeErrors.notWithdrawable({ state: `${dispute.state} (a call dispute)` });
     }
     if (TERMINAL_DISPUTE_STATES.includes(dispute.state as DisputeState)) {
       throw DisputeErrors.notWithdrawable({ state: dispute.state });

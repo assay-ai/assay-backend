@@ -18,6 +18,7 @@ import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
 import { WebSocketEmitterModule } from '@websocket/websocket-emitter.module';
 
 // Domain Modules
+import { DisputeSchedulerModule } from '@modules/dispute/dispute-scheduler.module';
 import { PaymentSchedulerModule } from '@modules/payment/payment-scheduler.module';
 import {
   ProviderBindingStatsSchedulerModule,
@@ -65,6 +66,8 @@ import { NetworkModule } from '@shared/network/network.module';
     WebSocketEmitterModule,
     // Domain Modules — payment intent expiry sweep
     PaymentSchedulerModule,
+    // Call dispute snapshot retention (G3.B1).
+    DisputeSchedulerModule,
     // Reconciliation / proof of reserves every five minutes
     SettlementSchedulerModule,
     // The evidence retention sweep, hourly, once per deployment.

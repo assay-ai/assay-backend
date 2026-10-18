@@ -196,9 +196,9 @@ export class CallDisputeDto {
     enum: RefundState,
     nullable: true,
     description:
-      'REFUNDED: the buyer is not charged. NOT_CHARGED: it never was. STAKE_CLAIM_OPEN: the ' +
-      'provider was already paid; the refund is a claim on its stake. PENDING: decided, the ' +
-      'ledger step still landing.',
+      'REFUNDED: the buyer is not charged. NOT_CHARGED: it never was. NOT_REFUNDABLE: filed ' +
+      'after the dispute window and the provider was paid — a quality signal only. PENDING: ' +
+      'decided, the ledger step still landing.',
   })
   refundState: RefundState | null;
 
@@ -210,6 +210,16 @@ export class CallDisputeDto {
 
   @ApiProperty({ description: 'The provider may still reply once' })
   canRespond: boolean;
+
+  @ApiProperty({
+    description:
+      'Filed inside the dispute window: the payment is held, and an upheld decision refunds ' +
+      'it in full. False: a quality signal, refunded only if the payment was not collected',
+  })
+  refundGuaranteed: boolean;
+
+  @ApiProperty({ description: 'The sentence to show the buyer about refundGuaranteed' })
+  refundNotice: string;
 
   @ApiProperty()
   createdAt: Date;

@@ -108,6 +108,20 @@ export class ProviderEarningsFiguresDto {
     type: MoneyDto,
     nullable: true,
     description:
+      'Σ provider_amount over SETTLED calls whose payment is still held in the buyer’s escrow ' +
+      'and not yet payable: inside the dispute window, held by an open dispute, or being ' +
+      'collected right after it. Paid once collected; never if an upheld dispute refunds it. ' +
+      'Not in `earned`. `null` — see `earned`.',
+  })
+  pendingInWindow: MoneyDto | null;
+
+  @ApiProperty({ description: 'Calls counted in `pendingInWindow`' })
+  pendingInWindowCalls: number;
+
+  @ApiProperty({
+    type: MoneyDto,
+    nullable: true,
+    description:
       'Σ provider_amount over SETTLED calls never collected: a buyer debt written off after 30 ' +
       'days (and historical calls absorbed before buyer debt existed). Nobody owes it. Not in ' +
       '`earned`. `null` — see `earned`.',
