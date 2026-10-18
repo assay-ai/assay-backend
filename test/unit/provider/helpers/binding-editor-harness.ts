@@ -186,6 +186,7 @@ export function buildBindingEditorHarness(
     options.enabledChains,
     minimumStakeByChain(options.enabledChains),
     null,
+    { list: async () => [], pruneExcept: async () => [] } as never,
   );
 
   const validBody = {

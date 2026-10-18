@@ -140,8 +140,13 @@ export class CredentialVaultService implements OnModuleInit {
         this.keks.byId,
         credentialAad(organizationId, bindingId, origin),
       );
-    } catch {
-      throw ProviderErrors.credentialVaultUnavailable({ reason: 'authentication failed' });
+    } catch (error) {
+      // Only the error class: the message and stack can carry key material.
+      Logger.warn(
+        `Credential set could not be opened (${error instanceof Error ? error.constructor.name : 'non-error'})`,
+        CredentialVaultService.name,
+      );
+      throw ProviderErrors.credentialVaultUnavailable({ reason: 'decryption failed' });
     }
   }
 

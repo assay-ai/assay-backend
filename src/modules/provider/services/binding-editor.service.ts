@@ -165,8 +165,9 @@ export class BindingEditorService {
     @Inject(EGRESS_RELAY_CONFIG)
     private readonly relayConfig: EgressRelayConfig | null,
     // Lets a save refuse switching a live binding to an API-key mode without a
-    // key for its live origin. Optional only for hand-built harnesses.
-    @Optional() private readonly vault?: CredentialVaultService,
+    // key for its live origin. Required: a missing vault module must fail at
+    // boot rather than silently turn the guard off.
+    private readonly vault: CredentialVaultService,
   ) {}
 
   /**
@@ -484,7 +485,6 @@ export class BindingEditorService {
   ): Promise<void> {
     if (
       !authModeNeedsKey(authMode) ||
-      !this.vault ||
       row.publishedVersion == null ||
       (row.status !== BindingStatus.ACTIVE && row.status !== BindingStatus.PAUSED)
     ) {

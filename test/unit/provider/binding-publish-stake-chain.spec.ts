@@ -138,6 +138,8 @@ describe('BindingPublishService — the stake floor is the binding’s own chain
       // The real wiring: the same derivation `ROUTER_CONFIG` uses.
       loadMinimumStakeByChain(config, input.enabled),
       {} as unknown as DataSource,
+      undefined,
+      { list: async () => [], pruneExcept: async () => [] } as never,
     );
   }
 

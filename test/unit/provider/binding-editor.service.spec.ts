@@ -216,6 +216,7 @@ function build(
       options.relayConfigured
         ? { url: new URL('https://egress.test'), token: 'a'.repeat(64) }
         : null,
+      { list: async () => [], pruneExcept: async () => [] } as never,
     ),
     written,
     dataSource,

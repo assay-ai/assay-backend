@@ -185,6 +185,8 @@ describe('BindingPublishService — the chain the payout gate is asked about', (
       registry,
       new Map([[chainIdOf(input.assetId), stakeParameters(input.assetId)]]),
       {} as unknown as DataSource,
+      undefined,
+      { list: async () => [], pruneExcept: async () => [] } as never,
     );
 
     return { service };
@@ -304,6 +306,8 @@ describe('BindingPublishService — the chain the payout gate is asked about', (
       registry,
       new Map([[MAINNET, stakeParameters(MAINNET_ASSET)]]),
       {} as unknown as DataSource,
+      undefined,
+      { list: async () => [], pruneExcept: async () => [] } as never,
     );
 
     const check = await service.check(ORG, BINDING);
@@ -352,6 +356,8 @@ describe('BindingPublishService — the chain the payout gate is asked about', (
       } as unknown as ProviderRegistryPort,
       new Map([[MAINNET, stakeParameters(MAINNET_ASSET)]]),
       {} as unknown as DataSource,
+      undefined,
+      { list: async () => [], pruneExcept: async () => [] } as never,
     );
 
     const check = await service.check(ORG, BINDING);
