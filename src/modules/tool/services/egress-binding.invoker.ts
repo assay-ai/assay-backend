@@ -118,6 +118,14 @@ export class EgressBindingInvoker implements BindingInvokerPort {
     let redactor = CredentialRedactor.NONE;
     let stage = 'credential lookup failed';
     try {
+      // Read under every auth mode, NONE and SIGNATURE included: a stored set is
+      // attached whatever the mode says (the mode only decides whether its
+      // absence is a fault), so skipping the read by mode would silently drop
+      // headers a provider configured. For a binding with no set the read is
+      // already the cheap existence check: one primary-key lookup on
+      // (binding_id, origin) that finds nothing, with no key unwrap or
+      // decryption. A separate EXISTS first would add a round trip to every
+      // call of a binding that does have a set, so there is none.
       const credentials = omit?.credentials
         ? []
         : await this.vault.headersFor(binding.providerId, binding.id, originOf(url));
