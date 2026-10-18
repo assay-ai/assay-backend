@@ -1015,21 +1015,21 @@ export class PaymentIntentService {
    * provider forfeits the call: `provider_forfeit:<cause>` closes the row, the
    * buyer's hold is released, nobody is credited, and a dispute still open on
    * the call is written as refunded. A call an upheld dispute holds is booked
-   * as that dispute's refund instead. `false` when the row is no longer held
-   * (already booked, or collected).
+   * as that dispute's refund instead. `booked: false` when the row is no
+   * longer held (already booked, or collected); `disputeIds`: the open
+   * disputes written as refunded, for the caller to tell the buyer.
    */
   async bookBlockedProviderRefund(
     organizationId: string,
     intentId: string,
     cause: string,
     txRef: string | null,
-  ): Promise<boolean> {
+  ): Promise<{ readonly booked: boolean; readonly disputeIds: readonly string[] }> {
     const intent = await this.findById(organizationId, intentId);
-    if (!intent.holdId || intent.heldStatus !== HELD) return false;
+    if (!intent.holdId || intent.heldStatus !== HELD) return { booked: false, disputeIds: [] };
     if (intent.disputeOutcome === 'UPHELD') {
-      return (
-        (await this.refundHeldForDispute(organizationId, intentId, 'DISPUTE_UPHELD')) === 'REFUNDED'
-      );
+      const result = await this.refundHeldForDispute(organizationId, intentId, 'DISPUTE_UPHELD');
+      return { booked: result === 'REFUNDED', disputeIds: [] };
     }
     const target: DebtCloseTarget = {
       organizationId,
@@ -1037,6 +1037,7 @@ export class PaymentIntentService {
       payer: intent.agentAccount,
       holdId: intent.holdId,
     };
+    let disputeIds: readonly string[] = [];
     const released = await this.ledger.releaseHoldIf(
       organizationId,
       intent.holdId,
@@ -1048,11 +1049,13 @@ export class PaymentIntentService {
           txRef,
           false,
         );
-        if (marked) await this.intents.markDisputeRefunded(runner, organizationId, intentId);
+        if (marked) {
+          disputeIds = await this.intents.markDisputeRefunded(runner, organizationId, intentId);
+        }
         return marked;
       },
     );
-    return released !== null;
+    return { booked: released !== null, disputeIds };
   }
 
   /**

@@ -199,6 +199,12 @@ export enum NotificationEvent {
   CALL_DISPUTE_RESPONDED = 'call_dispute.responded',
   /** An operator upheld or rejected the dispute. Sent to the buyer and the provider. */
   CALL_DISPUTE_DECIDED = 'call_dispute.decided',
+  /**
+   * The disputed call was refunded before any decision: its provider was
+   * blocked and its held payment went back to the buyer. Sent to the buyer.
+   * `HeldCollectionService`.
+   */
+  CALL_DISPUTE_REFUNDED = 'call_dispute.refunded',
 
   // ── Digest ──────────────────────────────────────────────────────────────
   /** No producer: the daily digest job is not built. */

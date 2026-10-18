@@ -22,6 +22,10 @@ import {
   HeldCollectionService,
 } from '@modules/payment/services/held-collection.service';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
+import {
+  NotificationEvent,
+  NotificationRequest,
+} from '@modules/notification/ports/notification.port';
 import { Alert } from '@shared/alerting';
 
 import { FakeHeldPayments } from '../../integration/helpers/fake-held-payments';
@@ -54,6 +58,7 @@ interface Repo {
   nearTimeout: PaymentIntentEntity[];
   failures: Array<{ id: string; error: string }>;
   causes: Array<{ id: string; cause: string }>;
+  cleared: string[];
   blockedQueries: RedemptionExclusions[];
   /** Runs when the blocked-provider query is read (a block changing mid-pass). */
   onBlockedQuery?: () => void;
@@ -70,6 +75,7 @@ function setup(options: { chainBlocked?: string[] } = {}) {
     nearTimeout: [],
     failures: [],
     causes: [],
+    cleared: [],
     blockedQueries: [],
   };
   const payments = {
@@ -94,6 +100,9 @@ function setup(options: { chainBlocked?: string[] } = {}) {
     recordHeldRefundCause: jest.fn(async (_org: string, id: string, cause: string) => {
       repo.causes.push({ id, cause });
     }),
+    clearHeldRefundCause: jest.fn(async (_org: string, id: string) => {
+      repo.cleared.push(id);
+    }),
     findBlockedHeldNearTimeout: jest.fn(async () => repo.nearTimeout),
     findHeldAssetIds: jest.fn(async () => [ASSET]),
     recordHeldFailure: jest.fn(async (_org: string, id: string, error: string) => {
@@ -103,9 +112,13 @@ function setup(options: { chainBlocked?: string[] } = {}) {
   const intents = {
     bookHeldCollected: jest.fn(async () => undefined),
     refundHeldForDispute: jest.fn(async () => 'REFUNDED'),
-    bookBlockedProviderRefund: jest.fn(async () => true),
+    bookBlockedProviderRefund: jest.fn(async () => ({
+      booked: true,
+      disputeIds: [] as string[],
+    })),
   };
   const alerts: Alert[] = [];
+  const notified: NotificationRequest[] = [];
   const held = new FakeHeldPayments();
   const blocklist: AccountBlocklistService = blocklistOf();
   const chainState = {
@@ -118,8 +131,9 @@ function setup(options: { chainBlocked?: string[] } = {}) {
     { emit: async (alert: Alert) => void alerts.push(alert) },
     held,
     chainState,
+    { notify: async (request: NotificationRequest) => void notified.push(request) } as never,
   );
-  return { service, repo, payments, intents, alerts, held, blocklist };
+  return { service, repo, payments, intents, alerts, held, blocklist, notified };
 }
 
 let seq = 0;
@@ -148,6 +162,8 @@ function heldRow(
     disputeOutcome: options.disputeOutcome ?? null,
     heldStatus: 'HELD',
     heldLastError: null,
+    heldRetryAt: null,
+    redemptionLastError: null,
   } as unknown as PaymentIntentEntity;
   held.redeemInto(ASSET, keyOf(row), 1_000_000n, collectableAt);
   return row;
@@ -534,5 +550,74 @@ describe('HeldCollectionService — review fixes', () => {
 
     expect(alerts.map((a) => a.dedupeKey)).toEqual([`${row.id}:past`]);
     expect(alerts[0].summary).toMatch(/has passed/);
+  });
+});
+
+describe('HeldCollectionService — verification fixes', () => {
+  it('tells the buyer when the refund settled an open dispute', async () => {
+    const { service, repo, intents, notified, held, blocklist } = setup();
+    const provider = randomUUID();
+    const row = heldRow(held, { providerId: provider });
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    repo.blockedHeld = [row];
+    intents.bookBlockedProviderRefund.mockResolvedValueOnce({
+      booked: true,
+      disputeIds: ['dispute-1'],
+    });
+
+    await service.run();
+
+    expect(notified).toEqual([
+      expect.objectContaining({
+        organizationId: row.organizationId,
+        event: NotificationEvent.CALL_DISPUTE_REFUNDED,
+        subjectId: 'dispute-1',
+      }),
+    ]);
+  });
+
+  it('a recorded cause with a suffix keeps its label', async () => {
+    const { service, repo, intents, held } = setup();
+    const row = heldRow(held);
+    (row as { redemptionLastError: string | null }).redemptionLastError =
+      'PayeeBlockedOnChain:retry';
+    await held.refund(ASSET, [keyOf(row)]);
+    repo.collectable = [row];
+
+    await service.run();
+
+    expect(intents.bookBlockedProviderRefund).toHaveBeenCalledWith(
+      row.organizationId,
+      row.id,
+      'PayeeBlockedOnChain',
+      null,
+    );
+  });
+
+  it('a recorded cause whose block was lifted, still held: cleared, not refunded', async () => {
+    const { service, repo, held } = setup();
+    const row = heldRow(held);
+    (row as { redemptionLastError: string | null }).redemptionLastError = 'ProviderBlocked';
+    repo.blockedHeld = [row];
+
+    await service.run();
+
+    expect(held.sent).toEqual([]);
+    expect(repo.cleared).toEqual([row.id]);
+  });
+
+  it('pages a backed-off row without reading the chain', async () => {
+    const { service, repo, alerts, held, blocklist } = setup();
+    const provider = randomUUID();
+    const row = heldRow(held, { providerId: provider, collectableAgoMs: TIMEOUT_MS - 2 * HOUR });
+    (row as { heldRetryAt: Date | null }).heldRetryAt = new Date(Date.now() + HOUR);
+    addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: provider });
+    repo.nearTimeout = [row];
+    const read = jest.spyOn(held, 'readHeld');
+
+    await service.run();
+
+    expect(read).not.toHaveBeenCalled();
+    expect(alerts.map((a) => a.dedupeKey)).toEqual([`${row.id}:near`]);
   });
 });

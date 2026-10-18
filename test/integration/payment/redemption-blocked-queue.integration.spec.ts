@@ -163,4 +163,21 @@ describe('redemption queue with blocked parties, against a real database', () =>
     // RETRY on seq 1 holds this payer's later seqs for the pass, as ever.
     expect(calls.map((call) => [call.payer, call.seq])).toEqual([[HONEST, '1']]);
   });
+
+  it('the write-off sweep keeps a debt without a delegate once some wallet is blocked', async () => {
+    // NULL poisoning: `NULL = ANY(non-empty)` is NULL, and `NOT (… OR NULL)` dropped the row.
+    const debtor = `${CHAIN}:0x7777777777777777777777777777777777777777`;
+    await seed(debtor, 1);
+    await dataSource.query(
+      `UPDATE payment_intents SET redemption_lapsed_at = now() - interval '40 days'
+        WHERE agent_account = $1`,
+      [debtor],
+    );
+    const due = await payments.findDueForWriteOff(new Date(), 500, {
+      organizationIds: [],
+      walletKeys: ['eip155:0x0000000000000000000000000000000000000abc'],
+      chainAccounts: [BLOCKED.toLowerCase()],
+    });
+    expect(due.map((row) => (row as { agentAccount?: string }).agentAccount)).toContain(debtor);
+  });
 });

@@ -9,6 +9,11 @@ import { BlockedRole, BlockSubjectKind, subjectKey } from '@modules/blocklist/do
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { CHAIN_STATE_GATE, ChainStateGatePort } from '@modules/chains/ports/chain-state-gate.port';
 import { AccountId, AssetId, ChainId, chainIdOf } from '@modules/chains/ports/caip.types';
+import {
+  NOTIFICATION_PORT,
+  NotificationEvent,
+  NotificationPort,
+} from '@modules/notification/ports/notification.port';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 
 import {
@@ -48,11 +53,12 @@ export const BLOCKED_HELD_UNREFUNDED_ALERT = 'held_payment_blocked_provider_unre
 
 /** The cause booked for a refund nothing else explains: only the redeemer can refund. */
 export const REFUNDED_BY_REDEEMER_CAUSE = 'RefundedByRedeemer';
-const PROVIDER_BLOCK_CAUSES: ReadonlySet<string> = new Set([
+/** Longest first: a recorded cause is matched by prefix (it may carry a suffix). */
+const PROVIDER_BLOCK_CAUSES: readonly string[] = [
+  'PayeeBlockedOnChain',
   'ProviderBlocked',
   'PayeeBlocked',
-  'PayeeBlockedOnChain',
-]);
+];
 
 type HeldMove = 'collect' | 'refund';
 
@@ -127,6 +133,9 @@ export class HeldCollectionService {
     @Optional()
     @Inject(CHAIN_STATE_GATE)
     private readonly chainState: ChainStateGatePort | null = null,
+    @Optional()
+    @Inject(NOTIFICATION_PORT)
+    private readonly notifications: NotificationPort | null = null,
   ) {}
 
   /** One pass. Returns how many payments were booked as collected. */
@@ -297,10 +306,14 @@ export class HeldCollectionService {
       null,
       RAIL_A_BATCH,
     )) {
+      // A chain-blocked payee counts too: a payout to it could not land anyway.
       const cause = this.providerBlockCause(row, pass);
-      if (!cause) continue;
+      if (!cause) {
+        await this.payments.clearHeldRefundCause(row.organizationId, row.id);
+        continue;
+      }
       try {
-        await this.intents.bookBlockedProviderRefund(row.organizationId, row.id, cause, null);
+        await this.bookRefund(row, cause, null);
       } catch (error) {
         await this.backOff(row, error);
       }
@@ -390,7 +403,12 @@ export class HeldCollectionService {
         if (cause === null) out.push(row);
         continue;
       }
-      if (cause === null) continue;
+      if (cause === null) {
+        // Unblocked, and the chain still holds it: back to plain collection.
+        if (recordedCause(row))
+          await this.payments.clearHeldRefundCause(row.organizationId, row.id);
+        continue;
+      }
       await this.payments.recordHeldRefundCause(row.organizationId, row.id, cause);
       pass.causes.set(row.id, cause);
       out.push(row);
@@ -463,17 +481,45 @@ export class HeldCollectionService {
       await this.intents.refundHeldForDispute(row.organizationId, row.id, 'DISPUTE_UPHELD');
       return 0;
     }
-    const recorded =
-      row.redemptionLastError && PROVIDER_BLOCK_CAUSES.has(row.redemptionLastError)
-        ? row.redemptionLastError
-        : null;
     const cause =
       this.providerBlockCause(row, pass) ??
       pass.causes.get(row.id) ??
-      recorded ??
+      recordedCause(row) ??
       REFUNDED_BY_REDEEMER_CAUSE;
-    await this.intents.bookBlockedProviderRefund(row.organizationId, row.id, cause, txRef);
+    await this.bookRefund(row, cause, txRef);
     return 0;
+  }
+
+  /** Books a forfeit refund, and tells the buyer of each open dispute it settled. */
+  private async bookRefund(
+    row: PaymentIntentEntity,
+    cause: string,
+    txRef: string | null,
+  ): Promise<void> {
+    const { disputeIds } = await this.intents.bookBlockedProviderRefund(
+      row.organizationId,
+      row.id,
+      cause,
+      txRef,
+    );
+    for (const disputeId of disputeIds) {
+      try {
+        await this.notifications?.notify({
+          organizationId: row.organizationId,
+          event: NotificationEvent.CALL_DISPUTE_REFUNDED,
+          title: 'Your disputed call was refunded',
+          body:
+            'The provider of a call you disputed was blocked, and its payment went back to ' +
+            'your balance. Your dispute stays open for a decision.',
+          subjectType: 'call_dispute',
+          subjectId: disputeId,
+          dedupeKey: `${NotificationEvent.CALL_DISPUTE_REFUNDED}:${disputeId}`,
+          payload: { disputeId, intentId: row.id, refundState: 'REFUNDED' },
+        });
+      } catch (error) {
+        this.logger.error(`Call dispute ${disputeId}: could not notify: ${describe(error)}`);
+      }
+    }
   }
 
   /**
@@ -493,8 +539,12 @@ export class HeldCollectionService {
     );
     for (const row of rows) {
       if (pass.refunded.has(row.id)) continue;
+      // Backing off (its refund keeps failing): paged on the mirror, no read.
+      const backingOff = row.heldRetryAt !== null && row.heldRetryAt.getTime() > Date.now();
       try {
-        const record = await held.readHeld(row.assetId as AssetId, this.keyOf(row));
+        const record = backingOff
+          ? null
+          : await held.readHeld(row.assetId as AssetId, this.keyOf(row));
         if (record?.status === HeldStatus.COLLECTED || record?.status === HeldStatus.REFUNDED) {
           await this.book(row, record.status, null, pass);
           continue;
@@ -598,6 +648,13 @@ export class HeldCollectionService {
       return [];
     }
   }
+}
+
+/** The provider-block cause recorded on the row, matched by prefix, or `null`. */
+function recordedCause(row: PaymentIntentEntity): string | null {
+  const stored = row.redemptionLastError;
+  if (!stored) return null;
+  return PROVIDER_BLOCK_CAUSES.find((cause) => stored.startsWith(cause)) ?? null;
 }
 
 /** The chain status a landed move leaves. */

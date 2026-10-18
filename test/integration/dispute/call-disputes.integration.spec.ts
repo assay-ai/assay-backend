@@ -147,7 +147,12 @@ describe('call disputes, against a real database', () => {
       alertSink,
     );
     blocklist = blocklistOf();
-    collection = new HeldCollectionService(payments, intents, blocklist, alertSink, held, null);
+    collection = new HeldCollectionService(payments, intents, blocklist, alertSink, held, null, {
+      notify: async (request: NotificationRequest) => {
+        notified.push(request);
+        return { deliveredNow: true };
+      },
+    } as NotificationPort);
 
     notified = [];
     const notifications: NotificationPort = {
@@ -914,6 +919,32 @@ describe('call disputes, against a real database', () => {
       );
     }
 
+    it('a dispute already refunded (blocked provider) is neither paged nor auto-upheld; the buyer is told', async () => {
+      const call = await seedHeld();
+      const dispute = await file(call);
+      notified.length = 0;
+      await withProviderBlocked(async () => {
+        await collection.run();
+      });
+      expect(notified).toEqual([
+        expect.objectContaining({
+          organizationId: buyer,
+          event: 'call_dispute.refunded',
+          subjectId: dispute.id,
+        }),
+      ]);
+      expect((await disputes.requireAny(dispute.id)).slaDueAt).toBeNull();
+
+      await age(dispute.id, 6 * 24 + 1);
+      expect(await sla.sweep()).toMatchObject({ autoUpheld: 0, paged: 0 });
+
+      expect(await disputes.requireAny(dispute.id)).toMatchObject({
+        state: 'OPEN',
+        refundState: 'REFUNDED',
+      });
+      expect(alerts).toEqual([]);
+    });
+
     it('auto-upholds at 72 h when the provider stayed silent, and refunds', async () => {
       const call = await seedHeld();
       const dispute = await file(call);
@@ -1259,8 +1290,9 @@ describe('call disputes, against a real database', () => {
         expect(await chainStatus(call)).toBe(HeldStatus.HELD);
         expect(alerts.map((a) => a.name)).toContain('held_payment_blocked_provider_unrefunded');
 
-        // Anyone collects it for the provider: booked once.
+        // Anyone collects it for the provider: booked once its back-off ends.
         held.collectAsAnyone(keyOf(call));
+        await elapseBackOff(call);
         await collection.run();
         await assertCollected(call);
       } finally {
@@ -1461,6 +1493,71 @@ describe('call disputes, against a real database', () => {
       expect(await chainStatus(blocked)).toBe(HeldStatus.HELD);
       expect(await chainStatus(disputed)).toBe(HeldStatus.HELD);
       await assertCollected(undisputed);
+    });
+
+    it('a row without a delegate is not dropped once some wallet or chain account is blocked', async () => {
+      // NULL poisoning: `NULL = ANY(non-empty)` is NULL, and `NOT (… OR NULL)` drops the row.
+      const fresh = await seedHeld();
+      await endWindow(fresh);
+      const late = await seedHeld();
+      await endWindow(late, 7 * 86_400_000 + 60_000);
+      const unrelated = {
+        organizationIds: [randomUUID()],
+        walletKeys: ['eip155:0x000000000000000000000000000000000000dead'],
+        chainAccounts: ['eip155:1:0x000000000000000000000000000000000000dead'],
+      };
+      expect(
+        (await payments.findOneBy({ organizationId: buyer, id: fresh.intentId }))?.voucherDelegate,
+      ).toBeNull();
+
+      const collectable = await payments.findCollectable(
+        'RAIL_B_VOUCHER',
+        500,
+        unrelated,
+        7 * 86_400 - 900,
+      );
+      expect(collectable.map((row) => row.id)).toContain(fresh.intentId);
+      const timedOut = await payments.findTimedOutCollectable(
+        'RAIL_B_VOUCHER',
+        unrelated,
+        7 * 86_400 - 900,
+        500,
+      );
+      expect(timedOut.map((row) => row.id)).toContain(late.intentId);
+    });
+
+    it('a refund that landed unbooked before the block was lifted is found by its recorded cause', async () => {
+      const call = await seedHeld();
+      const dispute = await file(call);
+      await dataSource.query(
+        `UPDATE payment_intents SET redemption_last_error = 'ProviderBlocked' WHERE id = $1`,
+        [call.intentId],
+      );
+      // The refund landed; the booking crashed; the block was lifted. The dispute
+      // holds the row, so no collect queue reads it.
+      await held.refund(ASSET, [keyOf(call)]);
+
+      await collection.run();
+
+      await assertRefunded(call);
+      expect(await disputes.requireAny(dispute.id)).toMatchObject({
+        state: 'OPEN',
+        refundState: 'REFUNDED',
+      });
+    });
+
+    it('a recorded cause on a still-held row whose provider is no longer blocked is cleared', async () => {
+      const call = await seedHeld();
+      await dataSource.query(
+        `UPDATE payment_intents SET redemption_last_error = 'ProviderBlocked' WHERE id = $1`,
+        [call.intentId],
+      );
+      await collection.run();
+      expect(sentFor('refund')).toEqual([]);
+      expect((await intentRow(call.intentId)).redemption_last_error).toBeNull();
+      await endWindow(call);
+      await collection.run();
+      await assertCollected(call);
     });
 
     it('a held row whose record reads as nothing backs off', async () => {
