@@ -339,6 +339,8 @@ export class ToolsetModerationService {
       { id: org.id },
       { handle: next, handleSkeleton: handleSkeleton(next) },
     );
+    // A tool left removed for want of an active handle serves under this one.
+    await restoreHandleTools(manager, org.id);
     await manager.insert(OrgHandleHistoryEntity, {
       oldHandle: handle,
       oldSkeleton: handleSkeleton(handle),
@@ -370,7 +372,12 @@ export class ToolsetModerationService {
     if (from.id === toOrganizationId) {
       throw ToolsetErrors.handleReassignRefused({ reason: 'it already holds the handle' });
     }
-    const to = await manager.findOne(OrganizationEntity, { where: { id: toOrganizationId } });
+    // Locked: a provider tool created under its current handle meanwhile is
+    // renamed with the rest below, never left behind.
+    const to = await manager.findOne(OrganizationEntity, {
+      where: { id: toOrganizationId },
+      lock: { mode: 'pessimistic_write' },
+    });
     if (!to) throw ToolsetErrors.handleReassignRefused({ reason: 'unknown organization' });
     if (to.handleLockedAt || to.handleStatus === HandleStatus.FROZEN) {
       throw ToolsetErrors.handleReassignRefused({
@@ -405,11 +412,27 @@ export class ToolsetModerationService {
       { id: from.id },
       { handle: null, handleSkeleton: null, handleStatus: null, handleLockedAt: null },
     );
+    // The handle it held but had not locked is released: its tools move to
+    // the new name (refused past the 48-character cap), and any left removed
+    // for want of an active handle serve under it.
+    if (to.handle) {
+      try {
+        await renameHandleTools(manager, to.id, to.handle, handle);
+      } catch (error) {
+        if ((error as { context?: { reason?: string } }).context?.reason === 'TOOL_NAME_TOO_LONG') {
+          throw ToolsetErrors.handleReassignRefused({
+            reason: 'a provider tool name of the organization would pass 48 characters under it',
+          });
+        }
+        throw error;
+      }
+    }
     await manager.update(
       OrganizationEntity,
       { id: to.id },
       { handle, handleSkeleton: handleSkeleton(handle), handleStatus: HandleStatus.ACTIVE },
     );
+    await restoreHandleTools(manager, to.id);
     await manager.insert(OrgHandleHistoryEntity, {
       oldHandle: handle,
       oldSkeleton: handleSkeleton(handle),

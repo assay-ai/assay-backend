@@ -36,52 +36,62 @@ export async function removeHandleTools(
 }
 
 /**
- * A lifted handle takedown: its reason is cleared, and a tool serves again
- * only when no takedown of its own stands and it is still named under the
- * organization's current, active handle.
+ * The tool may serve under its owner: the organization's current handle is
+ * ACTIVE and the tool is still named `{handle}__…` under it. A tool whose
+ * handle was frozen, renamed away from it or reassigned may not.
+ */
+const SERVES_UNDER_OWNER = `EXISTS (
+  SELECT 1 FROM organizations o
+   WHERE o.id = t.owner_org_id AND o.handle IS NOT NULL AND o.handle_status = 'ACTIVE'
+     AND left(t.name, length(o.handle) + 2) = o.handle || '__')`;
+
+/**
+ * A lifted handle takedown, or a handle that became ACTIVE: the reason is
+ * cleared on every tool that may serve under its owner's handle again, and
+ * such a tool comes back unless its own takedown stands. A tool that may not
+ * serve keeps the reason, so the check holds (a REMOVED tool always has one)
+ * and a later lift picks it up. One statement per row, so the check never
+ * sees a removal without a reason.
  */
 export async function restoreHandleTools(
   manager: EntityManager,
   organizationId: string,
 ): Promise<void> {
   await manager.query(
-    `UPDATE tools SET handle_removed_at = NULL, updated_at = now()
-      WHERE owner_org_id = $1 AND kind = 'PROVIDER' AND handle_removed_at IS NOT NULL`,
+    `UPDATE tools t
+        SET handle_removed_at = NULL,
+            status = CASE WHEN t.taken_down_at IS NULL
+                          THEN COALESCE(t.status_before_removal, 'ACTIVE') ELSE t.status END,
+            removed_at = CASE WHEN t.taken_down_at IS NULL THEN NULL ELSE t.removed_at END,
+            status_before_removal = CASE WHEN t.taken_down_at IS NULL THEN NULL
+                                         ELSE t.status_before_removal END,
+            updated_at = now()
+      WHERE t.owner_org_id = $1 AND t.kind = 'PROVIDER' AND t.handle_removed_at IS NOT NULL
+        AND ${SERVES_UNDER_OWNER}`,
     [organizationId],
   );
-  await restoreWhereClear(manager, `t.owner_org_id = $1`, [organizationId]);
-}
-
-/** A lifted takedown of one tool: restored only under the same conditions. */
-export async function restoreTakenDownTool(manager: EntityManager, toolId: string): Promise<void> {
-  await manager.query(
-    `UPDATE tools SET taken_down_at = NULL, updated_at = now()
-      WHERE id = $1 AND kind = 'PROVIDER' AND taken_down_at IS NOT NULL`,
-    [toolId],
-  );
-  await restoreWhereClear(manager, `t.id = $1`, [toolId]);
 }
 
 /**
- * REMOVED provider tools with no standing reason come back — but only those
- * named `{handle}__…` under their owner's current ACTIVE handle. A tool
- * whose handle was frozen, renamed away from it or reassigned stays removed.
+ * A lifted takedown of one tool: it comes back when it may serve under its
+ * owner's handle — an ACTIVE handle has no takedown standing, so a handle
+ * reason left on it is cleared too. When it may not, the lifted reason
+ * becomes a handle reason, which a later handle lift clears.
  */
-async function restoreWhereClear(
-  manager: EntityManager,
-  where: string,
-  params: unknown[],
-): Promise<void> {
+export async function restoreTakenDownTool(manager: EntityManager, toolId: string): Promise<void> {
   await manager.query(
     `UPDATE tools t
-        SET status = COALESCE(t.status_before_removal, 'ACTIVE'),
-            removed_at = NULL, status_before_removal = NULL, updated_at = now()
-       FROM organizations o
-      WHERE ${where} AND t.kind = 'PROVIDER' AND t.status = 'REMOVED'
-        AND t.taken_down_at IS NULL AND t.handle_removed_at IS NULL
-        AND o.id = t.owner_org_id AND o.handle IS NOT NULL AND o.handle_status = 'ACTIVE'
-        AND left(t.name, length(o.handle) + 2) = o.handle || '__'`,
-    params,
+        SET taken_down_at = NULL,
+            handle_removed_at = CASE WHEN ${SERVES_UNDER_OWNER} THEN NULL
+                                     ELSE COALESCE(t.handle_removed_at, now()) END,
+            status = CASE WHEN ${SERVES_UNDER_OWNER}
+                          THEN COALESCE(t.status_before_removal, 'ACTIVE') ELSE t.status END,
+            removed_at = CASE WHEN ${SERVES_UNDER_OWNER} THEN NULL ELSE t.removed_at END,
+            status_before_removal = CASE WHEN ${SERVES_UNDER_OWNER} THEN NULL
+                                         ELSE t.status_before_removal END,
+            updated_at = now()
+      WHERE t.id = $1 AND t.kind = 'PROVIDER' AND t.taken_down_at IS NOT NULL`,
+    [toolId],
   );
 }
 
@@ -128,7 +138,9 @@ export async function tombstoneHandleTools(
 
 /**
  * Provider tools are named `{handle}__{tool}` (§7.1): a renamed handle
- * renames them. Refused when a name would pass the 48-character cap.
+ * renames them. Refused when a name would pass the 48-character cap. A
+ * review in flight is void, as on a takedown: its content hash covers the
+ * name, so it could never be decided.
  */
 export async function renameHandleTools(
   manager: EntityManager,
@@ -149,9 +161,16 @@ export async function renameHandleTools(
     throw ToolsetErrors.handleInvalid({ reason: 'TOOL_NAME_TOO_LONG' });
   }
   for (const row of rows) {
-    await manager.query(`UPDATE tools SET name = $2, updated_at = now() WHERE id = $1`, [
-      row.id,
-      `${to}__${row.name.slice(prefix.length)}`,
-    ]);
+    await manager.query(
+      `UPDATE tools
+          SET name = $2,
+              review_status = CASE WHEN review_status = 'PENDING'
+                                   THEN CASE WHEN approved_version IS NULL THEN 'NONE' ELSE 'APPROVED' END
+                                   ELSE review_status END,
+              review_content_hash = NULL,
+              updated_at = now()
+        WHERE id = $1`,
+      [row.id, `${to}__${row.name.slice(prefix.length)}`],
+    );
   }
 }

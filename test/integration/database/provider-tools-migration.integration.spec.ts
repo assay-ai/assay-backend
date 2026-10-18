@@ -188,6 +188,10 @@ describe('provider tools migration: up, down, up', () => {
                           status_before_removal = 'ACTIVE' WHERE id = $1`,
         [id],
       );
+      // And a removal always has a standing reason.
+      await expect(
+        dataSource.query(`UPDATE tools SET handle_removed_at = NULL WHERE id = $1`, [id]),
+      ).rejects.toThrow(/chk_tools_removal/);
       await expect(
         dataSource.query(
           `INSERT INTO moderation_cutoffs (target_type, target_id, action, acted_by, confirm_by, note)
