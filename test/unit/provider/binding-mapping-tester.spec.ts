@@ -17,6 +17,8 @@ import { ResponseClass } from '@modules/tool/domain/classification';
 import { MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
+import { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
+import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 import { ONE_CREDENTIAL, plainInvoker } from '../tool/helpers/routing-fixtures';
 import { DecisionPolicyService } from '@modules/verification/services/decision-policy.service';
@@ -60,6 +62,9 @@ const lookup = jest.fn(async (hostname: string) => {
   error.code = 'ENOTFOUND';
   throw error;
 });
+
+/** No keys: what a deployment without `PROVIDER_REQUEST_SIGNING_KEYS` runs (never production). */
+const UNSIGNED_SIGNER = new RequestSignerService([]);
 
 let server: http.Server;
 let port: number;
@@ -120,6 +125,7 @@ function buildTester(
   row: ToolBindingEntity,
   tool = buildTool(),
   invokerOverride?: BindingInvokerPort,
+  signer: RequestSignerService = UNSIGNED_SIGNER,
 ) {
   const saved: unknown[] = [];
 
@@ -165,6 +171,7 @@ function buildTester(
       invoker,
       policies,
       new ProviderEgressLimiter(),
+      signer,
     ),
     saved,
   };
@@ -481,5 +488,83 @@ describe('BindingMappingTesterService — unauthenticated probes', () => {
     expect(report.outcome).toBe(BindingTestOutcome.FAILED);
     expect(report.warnings).toEqual([]);
     expect(invoke).toHaveBeenCalledTimes(1);
+  });
+});
+
+describe('BindingMappingTesterService — the signature headers in the request view', () => {
+  const signer = new RequestSignerService([
+    { keyId: 'tester-1', seed: Buffer.alloc(32, 7), claimedPublicKey: null },
+  ]);
+
+  function signedTester(row: ToolBindingEntity) {
+    const invoker = new EgressBindingInvoker(
+      new EgressHttpClient(lookup, (target) => ({
+        address: '127.0.0.1',
+        family: 4,
+        port: target.port === 80 ? port : target.port,
+      })),
+      ONE_CREDENTIAL,
+      signer,
+    );
+    return buildTester(row, buildTool(), invoker, signer).tester;
+  }
+
+  it('names the headers Assay adds, signature included, so a provider can code against them', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { answer: 'ok' } }));
+    };
+
+    const tester = signedTester(bindingRow({ authMode: BindingAuthMode.NONE }));
+    const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
+      query: 'x',
+    });
+
+    const names = report.request?.headerNames ?? [];
+    expect(names).toEqual(
+      expect.arrayContaining(['x-assay-call-id', 'content-digest', 'signature-input', 'signature']),
+    );
+    // The view says what went on the wire: every name it lists was received.
+    for (const name of names) expect(received?.headers[name]).toBeDefined();
+    // Names only: no signature, digest or call id value is in the report.
+    const view = JSON.stringify(report.request);
+    expect(view).not.toContain(String(received?.headers['signature']));
+    expect(view).not.toContain(String(received?.headers['x-assay-call-id']));
+  });
+
+  it('lists no signature header when this deployment does not sign', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { answer: 'ok' } }));
+    };
+
+    const { tester } = buildTester(bindingRow({ authMode: BindingAuthMode.NONE }));
+    const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
+      query: 'x',
+    });
+
+    const names = report.request?.headerNames ?? [];
+    expect(names).toContain('x-assay-call-id');
+    expect(names).not.toContain('signature');
+    expect(names).not.toContain('signature-input');
+    expect(received?.headers['signature']).toBeUndefined();
+  });
+
+  it('never lists a stored credential header, by name or value', async () => {
+    respond = (_req, res) => {
+      res.writeHead(200, { 'content-type': 'application/json' });
+      res.end(JSON.stringify({ data: { answer: 'ok' } }));
+    };
+
+    const tester = signedTester(bindingRow({ authMode: BindingAuthMode.NONE }));
+    const report = await tester.run(PROVIDER, SUBJECT, 'a3f1c2d4-0000-4000-8000-000000000001', {
+      query: 'x',
+    });
+
+    // A stored set is attached under every mode (NONE: no probe, so `received`
+    // is the main request). The stored key went out, but neither its name nor its value is in the view.
+    expect(received?.headers['x-provider-key']).toBe('test-key');
+    expect(report.request?.headerNames).not.toContain('x-provider-key');
+    expect(JSON.stringify(report.request)).not.toContain('test-key');
   });
 });
