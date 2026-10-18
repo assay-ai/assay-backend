@@ -308,3 +308,67 @@ describe('TOOL_REMOVED', () => {
     });
   });
 });
+
+/** Review P1-1: a provider tool serves only under its owner's current, active handle. */
+describe('serving follows the owner’s handle', () => {
+  const row = (overrides: Partial<ToolEntity>) =>
+    ({
+      id: 't1',
+      name: 'acme__search',
+      kind: 'PROVIDER',
+      ownerOrgId: OWNER,
+      category: 'social',
+      tags: [],
+      visibility: 'LISTED',
+      reviewStatus: 'APPROVED',
+      status: 'ACTIVE',
+      currentVersion: 1,
+      approvedVersion: 1,
+      replacementToolId: null,
+      takenDownAt: null,
+      handleRemovedAt: null,
+      ...overrides,
+    }) as ToolEntity;
+  const versions = [
+    {
+      toolId: 't1',
+      version: 1,
+      semver: '1.0.0',
+      major: 1,
+      summary: 's',
+      description: 'd',
+      inputSchema: { type: 'object' },
+      outputSchema: { type: 'object' },
+      optionalInputFields: [],
+      optionalOutputFields: [],
+      examples: [],
+      tier: 'VERIFIED',
+      status: 'ACTIVE',
+      publishedAt: new Date(0),
+    } as unknown as ToolVersionEntity,
+  ];
+
+  it('serves under the active handle the name carries', () => {
+    expect(buildTools([row({})], versions, new Map([[OWNER, 'acme']])).has('t1')).toBe(true);
+  });
+
+  it('serves nothing under a frozen or reassigned handle, or a name that is not its owner’s', () => {
+    expect(buildTools([row({})], versions, new Map()).has('t1')).toBe(false);
+    expect(buildTools([row({})], versions, new Map([[OWNER, 'acme-two']])).has('t1')).toBe(false);
+    expect(
+      buildTools(
+        [row({ name: 'removed-1a2b3c4d__search' })],
+        versions,
+        new Map([[OWNER, 'acme']]),
+      ).has('t1'),
+    ).toBe(false);
+  });
+
+  it('serves nothing while either takedown stands, whatever the status says', () => {
+    const handles = new Map([[OWNER, 'acme']]);
+    expect(buildTools([row({ takenDownAt: new Date() })], versions, handles).has('t1')).toBe(false);
+    expect(buildTools([row({ handleRemovedAt: new Date() })], versions, handles).has('t1')).toBe(
+      false,
+    );
+  });
+});

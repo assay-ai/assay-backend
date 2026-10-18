@@ -526,7 +526,7 @@ function receiptPayload(receipt: McpReceipt): Record<string, unknown> {
  * that had to know a payment option is sometimes a field of an error object
  * and sometimes a sibling of it would reasonably read neither.
  */
-function errorResult(message: string, meta: Record<string, unknown>): CallToolResult {
+export function errorResult(message: string, meta: Record<string, unknown>): CallToolResult {
   const { paymentRequired, notReviewed, ...error } = meta;
 
   return {
