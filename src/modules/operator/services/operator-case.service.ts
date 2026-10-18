@@ -5,15 +5,21 @@ import { ProviderChainEnrolmentRepository } from '@database/postgres/repositorie
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { CursorPageDto } from '@shared/api';
-import {
-  AssetId,
-  ChainNamespace,
-  chainIdOf,
-  namespaceOf,
-  parseAccountId,
-} from '@modules/chains/ports/caip.types';
+import { AssetId, ChainNamespace, namespaceOf } from '@modules/chains/ports/caip.types';
 import { ChainProposalStatus } from '@modules/slash/domain/chain-slash-outcome';
 import { alertExecutedWhileCancelWaited } from '@modules/slash/domain/executed-while-cancel-waited';
+import {
+  ChainRecordState,
+  StuckCaseRead,
+  StuckCaseRefusal,
+  stuckCaseOptions,
+} from '@modules/slash/domain/stuck-case';
+import {
+  ManualActionExpectation,
+  ManualActionResult,
+  readStuckCaseRecord,
+  SlashStuckCaseService,
+} from '@modules/slash/services/slash-stuck-case.service';
 import { ALERT_PORT, AlertPort } from '@shared/alerting';
 import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
@@ -32,6 +38,7 @@ import {
   ExtendDeadlineBodyDto,
   FleetSweepDto,
   ListQueueQueryDto,
+  ManualCaseActionBodyDto,
   OpenFleetSweepBodyDto,
   SecondSignatureBodyDto,
   SuspendProposalBodyDto,
@@ -46,7 +53,28 @@ export const CASE_APPROVAL_ACTIONS = {
   suspend: 'slash.suspend',
   sweep: 'slash.sweep',
   compensated: 'slash.compensated',
+  recordExecution: 'slash.record_execution',
+  repropose: 'slash.repropose',
 } as const;
+
+/** One B18 action as the brief offers it: `refusal` null means the guard holds now. */
+export interface ManualActionOption {
+  readonly allowed: boolean;
+  readonly refusal: StuckCaseRefusal | null;
+}
+
+/**
+ * B18: the brief's word on the three manual actions for a stuck case, from
+ * the same live read and the same guard the action re-checks before acting.
+ */
+export interface ManualActionsDto {
+  readonly closeNothingStanding: ManualActionOption;
+  readonly recordExecution: ManualActionOption & {
+    /** What the chain took, minor units of the penalty's asset; set when the record reads Executed. */
+    readonly appliedMinor: string | null;
+  };
+  readonly repropose: ManualActionOption;
+}
 
 /**
  * The operator's side of a case, and the one place a tenant is resolved from a
@@ -66,24 +94,10 @@ export const CASE_APPROVAL_ACTIONS = {
  * a query scoped to the wrong column, serving an empty list to somebody who
  * should have seen everything.
  */
-/** What stands on chain for a case, as the brief says it (`chainRecord`). */
-export enum ChainRecordState {
-  STANDING = 'STANDING',
-  EXECUTED = 'EXECUTED',
-  GONE = 'GONE',
-  UNKNOWN = 'UNKNOWN',
-}
+export { ChainRecordState };
 
 /** The case page waits no longer than this for a live chain read. */
 const BRIEF_CHAIN_READ_TIMEOUT_MS = 2_500;
-
-function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
-  let timer: NodeJS.Timeout | undefined;
-  const timeout = new Promise<never>((_, reject) => {
-    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
-  });
-  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
-}
 
 /** The mirrors under which a record of the case may still stand on chain. */
 const MAY_STAND: readonly string[] = [
@@ -106,6 +120,7 @@ export class OperatorCaseService {
     private readonly enrolments: ProviderChainEnrolmentRepository,
     @Optional() @Inject(SLASH_EXECUTOR) private readonly executor: SlashExecutorPort | null = null,
     @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
+    @Optional() private readonly stuck: SlashStuckCaseService | null = null,
   ) {
     // How an approved action is re-run: the same method, as the requester,
     // with the approver attached.
@@ -129,6 +144,30 @@ export class OperatorCaseService {
           payload.body as OpenFleetSweepBodyDto,
           requestId,
           approver,
+        ),
+    });
+    approvals.register(CASE_APPROVAL_ACTIONS.recordExecution, {
+      code: 'S-16',
+      run: (requester, approver, payload, requestId) =>
+        this.recordExecution(
+          requester,
+          payload.proposalId as string,
+          payload.body as ManualCaseActionBodyDto,
+          requestId,
+          approver,
+          payload.expected as ManualActionExpectation,
+        ),
+    });
+    approvals.register(CASE_APPROVAL_ACTIONS.repropose, {
+      code: 'S-17',
+      run: (requester, approver, payload, requestId) =>
+        this.repropose(
+          requester,
+          payload.proposalId as string,
+          payload.body as ManualCaseActionBodyDto,
+          requestId,
+          approver,
+          payload.expected as ManualActionExpectation,
         ),
     });
     approvals.register(CASE_APPROVAL_ACTIONS.compensated, {
@@ -166,7 +205,9 @@ export class OperatorCaseService {
       this.queue.brief(organizationId, proposalId),
       this.proposals.findOneScoped(organizationId, proposalId),
     ]);
-    const chainRecord = proposal ? await this.chainRecordOf(proposal) : ChainRecordState.GONE;
+    const { state: chainRecord, read } = proposal
+      ? await this.chainRecordOf(proposal)
+      : { state: ChainRecordState.GONE, read: null };
     // A withdrawn judgement executed while its cancel waited: the console shows it, so it is paged
     // too (once per case; the cancel route raises the same alert). Nothing is written.
     if (
@@ -188,6 +229,9 @@ export class OperatorCaseService {
       // STANDING or UNKNOWN. Kept beside `chainRecord` for the console's simple reads.
       chainStanding:
         chainRecord === ChainRecordState.STANDING || chainRecord === ChainRecordState.UNKNOWN,
+      // B18: which manual action the console may offer, on this same read. The
+      // action reads the chain again before it acts.
+      manualActions: manualActionsOf(proposal, read),
     };
   }
 
@@ -207,13 +251,18 @@ export class OperatorCaseService {
    *   UNKNOWN;
    * - a single-record case: STANDING (its mirror, kept in step by the sweeps).
    */
-  private async chainRecordOf(proposal: SlashProposalEntity): Promise<ChainRecordState> {
-    if (proposal.chainStatus === ChainProposalStatus.EXECUTED) return ChainRecordState.EXECUTED;
-    if (!MAY_STAND.includes(proposal.chainStatus)) return ChainRecordState.GONE;
+  private async chainRecordOf(
+    proposal: SlashProposalEntity,
+  ): Promise<{ state: ChainRecordState; read: StuckCaseRead | null }> {
+    const only = (state: ChainRecordState) => ({ state, read: null });
+    if (proposal.chainStatus === ChainProposalStatus.EXECUTED) {
+      return only(ChainRecordState.EXECUTED);
+    }
+    if (!MAY_STAND.includes(proposal.chainStatus)) return only(ChainRecordState.GONE);
     const partitioned =
       proposal.windowId !== null &&
       namespaceOf(proposal.assetId as AssetId) === ChainNamespace.EIP155;
-    if (!partitioned) return ChainRecordState.STANDING;
+    if (!partitioned) return only(ChainRecordState.STANDING);
 
     const parts = await this.parts.findForEpoch(
       proposal.organizationId,
@@ -222,41 +271,25 @@ export class OperatorCaseService {
     );
     if (parts.length > 0) {
       const has = (status: string) => parts.some((part) => part.chainStatus === status);
-      if (has('PENDING') || has('DISPUTED')) return ChainRecordState.STANDING;
-      if (has('EXECUTED')) return ChainRecordState.EXECUTED;
-      if (has('NONE') || has('REFUSED')) return ChainRecordState.UNKNOWN;
-      return ChainRecordState.GONE;
+      if (has('PENDING') || has('DISPUTED')) return only(ChainRecordState.STANDING);
+      if (has('EXECUTED')) return only(ChainRecordState.EXECUTED);
+      if (has('NONE') || has('REFUSED')) return only(ChainRecordState.UNKNOWN);
+      return only(ChainRecordState.GONE);
     }
 
-    if (!this.executor) return ChainRecordState.UNKNOWN;
-    try {
-      const chainId = chainIdOf(proposal.assetId as AssetId);
-      const enrolment = await this.enrolments.findOneBy({
-        organizationId: proposal.providerId,
-        chainId,
-      });
-      if (!enrolment?.stakeAuthorityAccountId) return ChainRecordState.UNKNOWN;
-      const record = await withTimeout(
-        this.executor.readRecord(
-          proposal.chainRequestId,
-          parseAccountId(enrolment.stakeAuthorityAccountId).address,
-          chainId,
-        ),
-        BRIEF_CHAIN_READ_TIMEOUT_MS,
-      );
-      if (record?.status === 'PENDING' || record?.status === 'DISPUTED') {
-        return ChainRecordState.STANDING;
-      }
-      if (record?.status === 'EXECUTED') return ChainRecordState.EXECUTED;
-      if (record?.status === 'CANCELLED') return ChainRecordState.GONE;
-      return proposal.chainProposedAt ? ChainRecordState.UNKNOWN : ChainRecordState.GONE;
-    } catch (error) {
-      this.logger.warn(
-        `slash proposal ${proposal.id}: its on-chain record could not be read for the brief ` +
-          `(${error instanceof Error ? error.message : String(error)}); shown as unknown`,
-      );
-      return ChainRecordState.UNKNOWN;
-    }
+    // No parts: the one record under the case's own request id, read live
+    // with a short timeout (the same read the B18 actions take).
+    const read = await readStuckCaseRecord(
+      {
+        parts: { findForEpoch: async () => parts },
+        enrolments: this.enrolments,
+        executor: this.executor,
+        logger: this.logger,
+      },
+      proposal,
+      BRIEF_CHAIN_READ_TIMEOUT_MS,
+    );
+    return { state: read?.state ?? ChainRecordState.UNKNOWN, read };
   }
 
   async claim(operator: OperatorSession, proposalId: string) {
@@ -455,6 +488,136 @@ export class OperatorCaseService {
   }
 
   /**
+   * B18 `S-15`: close a requested cancel that nothing on chain is left to act
+   * on. One person's act (it moves no money and sends nothing); the service
+   * reads the chain again and refuses unless the record reads cancelled.
+   */
+  async closeNothingStanding(
+    operator: OperatorSession,
+    proposalId: string,
+    body: ManualCaseActionBodyDto,
+    requestId: string | null,
+  ): Promise<ManualActionResult> {
+    const organizationId = await this.tenantOf(proposalId);
+    return this.requireStuck().closeNothingStanding(
+      operator,
+      organizationId,
+      proposalId,
+      body,
+      requestId,
+    );
+  }
+
+  /**
+   * B18 `S-16`: record an execution that happened while the cancel waited.
+   * Two-person: called without an approver it is checked (fresh chain read
+   * included) and queued; the approval runs it, reading the chain again.
+   */
+  async recordExecution(
+    operator: OperatorSession,
+    proposalId: string,
+    body: ManualCaseActionBodyDto,
+    requestId: string | null,
+    approver: OperatorApprover | null = null,
+    expected: ManualActionExpectation | null = null,
+  ): Promise<ManualActionResult | ApprovalQueuedDto> {
+    const organizationId = await this.tenantOf(proposalId);
+    const stuck = this.requireStuck();
+    return this.twoPersonManual(
+      CASE_APPROVAL_ACTIONS.recordExecution,
+      operator,
+      organizationId,
+      proposalId,
+      body,
+      approver,
+      expected,
+      (expectation) =>
+        stuck.recordExecution(
+          operator,
+          approver,
+          organizationId,
+          proposalId,
+          body,
+          expectation,
+          requestId,
+        ),
+    );
+  }
+
+  /**
+   * B18 `S-17`: propose an upheld penalty again once its cancelled record is
+   * gone. Two-person, like {@link recordExecution}; the proposal itself is the
+   * scheduler's existing propose path.
+   */
+  async repropose(
+    operator: OperatorSession,
+    proposalId: string,
+    body: ManualCaseActionBodyDto,
+    requestId: string | null,
+    approver: OperatorApprover | null = null,
+    expected: ManualActionExpectation | null = null,
+  ): Promise<ManualActionResult | ApprovalQueuedDto> {
+    const organizationId = await this.tenantOf(proposalId);
+    const stuck = this.requireStuck();
+    return this.twoPersonManual(
+      CASE_APPROVAL_ACTIONS.repropose,
+      operator,
+      organizationId,
+      proposalId,
+      body,
+      approver,
+      expected,
+      (expectation) =>
+        stuck.repropose(
+          operator,
+          approver,
+          organizationId,
+          proposalId,
+          body,
+          expectation,
+          requestId,
+        ),
+    );
+  }
+
+  /**
+   * Run a two-person B18 action, or queue it. The payload pins the case's
+   * epoch and request id as the requester saw them, so an approval of a case
+   * that has moved since is refused rather than run on a different question.
+   * A second request while one waits returns the waiting one (double submit).
+   */
+  private async twoPersonManual(
+    action: string,
+    operator: OperatorSession,
+    organizationId: string,
+    proposalId: string,
+    body: ManualCaseActionBodyDto,
+    approver: OperatorApprover | null,
+    expected: ManualActionExpectation | null,
+    attempt: (expected: ManualActionExpectation | null) => Promise<ManualActionResult>,
+  ): Promise<ManualActionResult | ApprovalQueuedDto> {
+    if (approver) return attempt(expected);
+    const expectation = await this.requireStuck().expectationOf(organizationId, proposalId);
+    return this.approvals.orQueue(
+      {
+        action,
+        target: `slash_proposal:${proposalId}`,
+        payload: { proposalId, body: { ...body }, expected: { ...expectation } },
+        requester: operator,
+        reuseWaiting: true,
+      },
+      () => attempt(expectation),
+    );
+  }
+
+  private requireStuck(): SlashStuckCaseService {
+    if (!this.stuck) {
+      throw SlashErrors.chainUnavailable({ reason: 'no settlement executor is configured' });
+    }
+    return this.stuck;
+  }
+
+  /**
    * The proposal's tenant, looked up across tenants.
    *
    * A 404 here is indistinguishable from "no such proposal", which is correct:
@@ -468,4 +631,30 @@ export class OperatorCaseService {
     }
     return organizationId;
   }
+}
+
+/** B18: the brief's manual actions, from the brief's own live read. */
+function manualActionsOf(
+  proposal: SlashProposalEntity | null,
+  read: StuckCaseRead | null,
+): ManualActionsDto {
+  const refusals = proposal
+    ? stuckCaseOptions(proposal, read)
+    : {
+        CLOSE_NOTHING_STANDING: 'NOT_CANCEL_REQUESTED' as const,
+        RECORD_EXECUTION: 'NOT_CANCEL_REQUESTED' as const,
+        REPROPOSE: 'NOT_CANCEL_REQUESTED' as const,
+      };
+  const option = (refusal: StuckCaseRefusal | null): ManualActionOption => ({
+    allowed: refusal === null,
+    refusal,
+  });
+  return {
+    closeNothingStanding: option(refusals.CLOSE_NOTHING_STANDING),
+    recordExecution: {
+      ...option(refusals.RECORD_EXECUTION),
+      appliedMinor: read?.record?.status === 'EXECUTED' ? read.record.appliedMinor : null,
+    },
+    repropose: option(refusals.REPROPOSE),
+  };
 }

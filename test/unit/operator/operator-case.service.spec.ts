@@ -194,3 +194,56 @@ describe('OperatorCaseService.brief: an execution while the cancel waited is pag
     expect(standing.alerts.emit).not.toHaveBeenCalled();
   });
 });
+
+// B18: the brief offers a manual action only when its guard holds on the brief's own read.
+describe('OperatorCaseService.brief manualActions', () => {
+  const offered = async (ctx: ReturnType<typeof build>) => {
+    const brief = await ctx.service.brief('case-1');
+    return Object.entries(brief.manualActions)
+      .filter(([, option]) => option.allowed)
+      .map(([name]) => name);
+  };
+  const written = { chainProposedAt: new Date('2026-10-14T11:17:01Z'), penaltyAmount: '1000000' };
+
+  it('a closed case whose record reads cancelled: close, and nothing else', async () => {
+    const ctx = build({ record: 'CANCELLED', proposal: { ...written, status: 'OVERTURNED' } });
+    expect(await offered(ctx)).toEqual(['closeNothingStanding']);
+  });
+
+  it('an upheld case whose record reads cancelled: re-propose, and nothing else', async () => {
+    const ctx = build({ record: 'CANCELLED', proposal: { ...written, status: 'UPHELD' } });
+    expect(await offered(ctx)).toEqual(['repropose']);
+  });
+
+  it('an executed record: record the execution, with what the chain took', async () => {
+    const ctx = build({ record: 'EXECUTED', proposal: { ...written, status: 'CANCELLED' } });
+    ctx.readRecord.mockResolvedValue({
+      status: 'EXECUTED',
+      appliedMinor: '400000',
+    } as SlashRecordSnapshot);
+    const brief = await ctx.service.brief('case-1');
+    expect(brief.manualActions.recordExecution).toEqual({
+      allowed: true,
+      refusal: null,
+      appliedMinor: '400000',
+    });
+  });
+
+  it.each([
+    ['standing', { record: 'PENDING' as const }],
+    ['unreadable', { record: new Error('rpc down') }],
+    ['written but not found', { record: null }],
+    ['a case with parts', { parts: [{ chainStatus: 'CANCELLED' }] }],
+    ['a single-record case', { record: 'CANCELLED' as const, proposal: { assetId: SOLANA_ASSET } }],
+    [
+      'a mirror that is not CANCEL_REQUESTED',
+      { record: 'CANCELLED' as const, proposal: { chainStatus: 'PENDING' } },
+    ],
+  ])('%s: nothing is offered', async (_name, input) => {
+    const ctx = build({
+      ...input,
+      proposal: { ...written, status: 'CANCELLED', ...(input as { proposal?: object }).proposal },
+    } as Parameters<typeof build>[0]);
+    expect(await offered(ctx)).toEqual([]);
+  });
+});
