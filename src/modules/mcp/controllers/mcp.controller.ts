@@ -15,7 +15,7 @@ import { AccessResolver } from '@modules/toolset/services/access.resolver';
 import { McpEndpointResolver } from '@modules/toolset/services/mcp-endpoint.resolver';
 import { BaseError } from '@shared/errors/base.error';
 
-import { MCP_BEARER_PREFIX } from '../constants/mcp.constants';
+import { MCP_BEARER_SCHEME_RE } from '../constants/mcp.constants';
 import { McpErrorCode, McpErrors } from '../errors/mcp.errors';
 import { McpScope } from '../ports/mcp-scope';
 import { MCP_SESSION_SOURCE, McpSession, McpSessionPort } from '../ports/mcp-session.port';
@@ -141,8 +141,10 @@ export class McpController {
  */
 function bearerToken(request: Request): string | null {
   const header = request.headers.authorization;
-  if (typeof header !== 'string' || !header.startsWith(MCP_BEARER_PREFIX)) return null;
+  if (typeof header !== 'string') return null;
+  const scheme = MCP_BEARER_SCHEME_RE.exec(header);
+  if (!scheme) return null;
 
-  const token = header.slice(MCP_BEARER_PREFIX.length).trim();
+  const token = header.slice(scheme[0].length).trim();
   return token.length > 0 ? token : null;
 }

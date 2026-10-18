@@ -365,6 +365,10 @@ export function browserRedirectTarget(
  * later pages. A URL starting with one of these parses to `null`, whatever
  * follows, so no toolset slug or route can shadow them (R-OA-28). Lowercase,
  * compared after the path is lowercased.
+ *
+ * This list is the single source: the frontend parser
+ * (`assay-frontend/src/features/connect/mcp-url.ts`) must refuse exactly
+ * these first segments too.
  */
 export const RESERVED_FIRST_SEGMENTS: readonly string[] = Object.freeze([
   't',
