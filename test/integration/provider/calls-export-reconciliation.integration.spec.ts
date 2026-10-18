@@ -456,6 +456,13 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
     const exported = new Map<string, number>();
     const exportedAmount = new Map<string, bigint>();
     for await (const row of result.rows) {
+      if (row[1] === voided.id) {
+        // Wave-1 audit M1: the forgone share, but no fee was taken on it.
+        expect({ providerAmount: row[8], platformFee: row[9] }).toEqual({
+          providerAmount: voided.providerAmount.amount,
+          platformFee: '0',
+        });
+      }
       const cls = String(row[5]);
       exported.set(cls, (exported.get(cls) ?? 0) + 1);
       exportedAmount.set(cls, (exportedAmount.get(cls) ?? 0n) + BigInt(row[8] as string));
