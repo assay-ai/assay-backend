@@ -3,12 +3,21 @@ import {
   DEBT_OUTSTANDING_SQL,
   FORFEITED_SQL,
   PLATFORM_ABSORBED_SQL,
+  VOIDED_SQL,
   WRITTEN_OFF_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { ApiErrorCode } from '@shared/api';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
+import {
+  CallClassValue,
+  CallReconciliationClass,
+  IntentStatusValue,
+  ResponseClassValue,
+  classifyForReconciliation,
+  isNotCredited,
+} from '@modules/provider/domain/call-reconciliation';
 import { ProviderEarningsGroupBy } from '@modules/provider/dto/get-provider-earnings.dto';
 import { ProviderEarningsService } from '@modules/provider/services/provider-earnings.service';
 import { PLATFORM_ABSORBED_TX_REF_PREFIX } from '@modules/payment/services/voucher-redemption.service';
@@ -27,8 +36,6 @@ interface Row {
   calls: string;
   earned: string;
   platformFee: string;
-  withheld: string;
-  withheldCalls: string;
   forfeited: string;
   forfeitedCalls: string;
   debtOutstanding: string;
@@ -47,8 +54,6 @@ function row(overrides: Partial<Row>): Row {
     calls: '0',
     earned: '0',
     platformFee: '0',
-    withheld: '0',
-    withheldCalls: '0',
     forfeited: '0',
     forfeitedCalls: '0',
     debtOutstanding: '0',
@@ -61,12 +66,49 @@ function row(overrides: Partial<Row>): Row {
   };
 }
 
-function build(rows: Row[]) {
+/** One group of calls sharing every input the classifier reads (the second query). */
+interface ClassRow {
+  key: string;
+  asset: string;
+  decimals: string;
+  callClass: string;
+  status: string;
+  classification: string | null;
+  awaitingRedemption: boolean | string | null;
+  uncollected: boolean | string | null;
+  debtOutstanding: boolean | string | null;
+  forfeited: boolean | string | null;
+  voided: boolean | string | null;
+  calls: string;
+  providerAmount: string;
+}
+
+function classRow(overrides: Partial<ClassRow>): ClassRow {
+  return {
+    key: 'tool-1',
+    asset: USDC,
+    decimals: '6',
+    callClass: 'PAID',
+    status: 'SETTLED',
+    classification: 'DATA_RESULT',
+    awaitingRedemption: false,
+    uncollected: false,
+    debtOutstanding: false,
+    forfeited: false,
+    voided: false,
+    calls: '1',
+    providerAmount: '0',
+    ...overrides,
+  };
+}
+
+function build(rows: Row[], classRows: ClassRow[] = []) {
   const fake = fakeQueryBuilder(rows);
+  const classFake = fakeQueryBuilder(classRows);
   const intents = {
-    createQueryBuilder: jest.fn().mockReturnValue(fake.qb),
+    createQueryBuilder: jest.fn().mockReturnValueOnce(fake.qb).mockReturnValueOnce(classFake.qb),
   } as unknown as PaymentIntentRepository;
-  return { service: new ProviderEarningsService(intents), fake };
+  return { service: new ProviderEarningsService(intents), fake, classFake };
 }
 
 describe('ProviderEarningsService — cross-organization, scoped by provider_id', () => {
@@ -89,19 +131,17 @@ describe('ProviderEarningsService — group totals reconcile exactly to the over
         calls: '100',
         earned: '9000',
         platformFee: '1000',
-        withheld: '500',
-        withheldCalls: '2',
       }),
       row({
         key: 'tool-2',
         calls: '37',
         earned: '3701',
         platformFee: '400',
-        withheld: '0',
-        withheldCalls: '0',
       }),
     ];
-    const { service } = build(rows);
+    const { service } = build(rows, [
+      classRow({ key: 'tool-1', status: 'REFUNDED', calls: '2', providerAmount: '500' }),
+    ]);
 
     const earnings = await service.getEarnings(PROVIDER, {
       ...WINDOW,
@@ -303,5 +343,121 @@ describe('ProviderEarningsService — the platform never pays or owes a provider
     expect(earnings.totals.uncollected).toBeNull();
     expect(earnings.totals.debtOutstanding).toBeNull();
     expect(earnings.totals.forfeitedCalls).toBe(0);
+  });
+});
+
+describe('ProviderEarningsService — not credited is the export classifier, held or not (D17)', () => {
+  // UX review 2026-10-18, D-P0-1: the summary required a hold and read
+  // "14 calls · $0.54" while its own reasons (the export) read 22 · $0.74.
+  const classes = [
+    // Not credited: a failed check, held and unheld, and a voided buyer debt.
+    classRow({ status: 'REFUNDED', calls: '4', providerAmount: '153000' }),
+    classRow({ status: 'REFUNDED', classification: null, calls: '8', providerAmount: '200000' }),
+    classRow({ status: 'SETTLED', voided: true, calls: '1', providerAmount: '45000' }),
+    // Not credited: endpoint errors and refused requests.
+    classRow({
+      status: 'VOIDED',
+      classification: 'SYSTEM_ERROR',
+      calls: '8',
+      providerAmount: '297000',
+    }),
+    classRow({ status: 'EXPIRED', classification: null, calls: '1', providerAmount: '9000' }),
+    classRow({
+      status: 'VOIDED',
+      classification: 'REQUEST_ERROR',
+      calls: '2',
+      providerAmount: '90000',
+    }),
+    // Credited, pending, or passed-but-unpaid: reported elsewhere.
+    classRow({ status: 'SETTLED', calls: '81', providerAmount: '6084000' }),
+    classRow({ status: 'SETTLED', uncollected: true, calls: '5', providerAmount: '450000' }),
+    classRow({ status: 'SETTLED', forfeited: 'true', calls: '1', providerAmount: '90000' }),
+    classRow({ status: 'SETTLED', debtOutstanding: true, calls: '2', providerAmount: '180000' }),
+    classRow({ status: 'SETTLED', awaitingRedemption: true, calls: '3', providerAmount: '270000' }),
+    classRow({ status: 'VERIFYING', classification: null, calls: '1', providerAmount: '90000' }),
+    // Free calls are never "not credited", whatever their outcome.
+    classRow({ callClass: 'FREE', status: 'REFUNDED', calls: '6', providerAmount: '0' }),
+  ];
+
+  it('counts unheld REFUNDED and SETTLED+voided calls, and the summary is the sum of its reasons', async () => {
+    const { service } = build([row({ key: 'tool-1', calls: '123' })], classes);
+
+    const earnings = await service.getEarnings(PROVIDER, {
+      ...WINDOW,
+      groupBy: ProviderEarningsGroupBy.TOOL,
+    });
+
+    const money = (amount: string) => ({ amount, asset: USDC, decimals: 6 });
+    expect(earnings.totals.withheldByClass).toEqual([
+      { class: CallReconciliationClass.PAID_UNCREDITED, calls: 13, amount: money('398000') },
+      { class: CallReconciliationClass.SYSTEM_ERROR, calls: 9, amount: money('306000') },
+      { class: CallReconciliationClass.REQUEST_ERROR, calls: 2, amount: money('90000') },
+    ]);
+    expect(earnings.totals.withheldCalls).toBe(24);
+    expect(earnings.totals.withheld).toEqual(money('794000'));
+    expect(earnings.groups[0].withheldCalls).toBe(24);
+  });
+
+  it('agrees with classifyForReconciliation call for call over the fixture set', async () => {
+    const { service } = build([row({ key: 'tool-1', calls: '123' })], classes);
+    const earnings = await service.getEarnings(PROVIDER, {
+      ...WINDOW,
+      groupBy: ProviderEarningsGroupBy.TOOL,
+    });
+
+    const expected = new Map<string, number>();
+    for (const c of classes) {
+      const cls = classifyForReconciliation({
+        callClass: c.callClass as CallClassValue,
+        status: c.status as IntentStatusValue,
+        classification: c.classification as ResponseClassValue,
+        awaitingRedemption: c.awaitingRedemption === true || c.awaitingRedemption === 'true',
+        uncollected: c.uncollected === true || c.uncollected === 'true',
+        debtOutstanding: c.debtOutstanding === true || c.debtOutstanding === 'true',
+        forfeited: c.forfeited === true || c.forfeited === 'true',
+        voided: c.voided === true || c.voided === 'true',
+      });
+      if (isNotCredited(cls)) expected.set(cls, (expected.get(cls) ?? 0) + Number(c.calls));
+    }
+    for (const reason of earnings.totals.withheldByClass) {
+      expect(reason.calls).toBe(expected.get(reason.class) ?? 0);
+    }
+  });
+
+  it('groups the classifier inputs per report group, and keeps groups apart', async () => {
+    const { service, classFake } = build(
+      [row({ key: 'tool-1', calls: '3' }), row({ key: 'tool-2', calls: '1' })],
+      [
+        classRow({ key: 'tool-1', status: 'REFUNDED', calls: '3', providerAmount: '300' }),
+        classRow({
+          key: 'tool-2',
+          status: 'VOIDED',
+          classification: 'SYSTEM_ERROR',
+          providerAmount: '7',
+        }),
+      ],
+    );
+
+    const earnings = await service.getEarnings(PROVIDER, {
+      ...WINDOW,
+      groupBy: ProviderEarningsGroupBy.TOOL,
+    });
+
+    expect(earnings.groups.map((g) => [g.key, g.withheldCalls, g.withheld?.amount])).toEqual([
+      ['tool-1', 3, '300'],
+      ['tool-2', 1, '7'],
+    ]);
+    // The second query is scoped like the first and groups by every classifier input.
+    expect(classFake.wheres.some((w) => w.params.providerId === PROVIDER)).toBe(true);
+    for (const column of [
+      'intent.callClass',
+      'intent.status',
+      'intent.classification',
+      VOIDED_SQL,
+    ]) {
+      expect(classFake.groups).toContain(column);
+    }
+    // No hold condition anywhere in it.
+    expect(classFake.selects.map((s) => s.expr).join(' ')).not.toMatch(/holdId IS NOT NULL/);
   });
 });
