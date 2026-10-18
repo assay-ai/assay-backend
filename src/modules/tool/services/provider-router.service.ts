@@ -1510,6 +1510,7 @@ const TRANSPORT_REASON: Readonly<Record<TransportErrorKind, ClassificationReason
   [TransportErrorKind.BODY_TRUNCATED]: ClassificationReason.TRANSPORT_BODY_TRUNCATED,
   [TransportErrorKind.SCHEME_NOT_ALLOWED]: ClassificationReason.TRANSPORT_HTTPS_REQUIRED,
   [TransportErrorKind.PLATFORM_UNAVAILABLE]: ClassificationReason.PLATFORM_UNAVAILABLE,
+  [TransportErrorKind.UNUSABLE_RESPONSE]: ClassificationReason.BODY_NOT_JSON,
   [TransportErrorKind.UNKNOWN]: ClassificationReason.TRANSPORT_UNKNOWN,
 });
 
