@@ -104,6 +104,9 @@ export class CallDisputeSlaService {
               "paged_6d_at", "refund_guaranteed"
          FROM "disputes"
         WHERE "intent_id" IS NOT NULL AND "state" = 'OPEN' AND "sla_due_at" <= $1
+          -- Refunded already (a blocked provider's held payment): nothing to
+          -- page about or auto-uphold; the operator still decides it.
+          AND "refund_state" IS DISTINCT FROM 'REFUNDED'
         ORDER BY "sla_due_at" ASC
         LIMIT 500`,
       [now],

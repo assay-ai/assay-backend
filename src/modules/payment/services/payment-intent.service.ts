@@ -36,7 +36,10 @@ import {
   PAYMENT_INTENT_TTL_MS,
   PAYMENT_INTENT_VERDICT_DEADLINE_LATEST_SECONDS,
 } from '../constants/payment-intent.constants';
-import { DEBT_VOIDED_PREFIX } from '../constants/voucher-redemption.constants';
+import {
+  DEBT_VOIDED_PREFIX,
+  PROVIDER_FORFEIT_PREFIX,
+} from '../constants/voucher-redemption.constants';
 import { HoldEffect, requirePaymentIntentTransition } from '../domain/payment-intent-transitions';
 import {
   COLLECTION_HOLD_WINDOW_SECONDS,
@@ -1002,6 +1005,57 @@ export class PaymentIntentService {
       this.intents.markHeldRefunded(runner, target, `${DEBT_VOIDED_PREFIX}${outcome}`, txRef),
     );
     return 'REFUNDED';
+  }
+
+  /**
+   * Books the refund of a held payment the platform made for its provider
+   * (owner decision 2026-10-18): rail B once the chain says `REFUNDED` (sent by
+   * `HeldCollectionService`, which holds the redeemer key — the only sender
+   * `refundHeld` accepts), rail A by releasing the withheld credit. The
+   * provider forfeits the call: `provider_forfeit:<cause>` closes the row, the
+   * buyer's hold is released, nobody is credited, and a dispute still open on
+   * the call is written as refunded. A call an upheld dispute holds is booked
+   * as that dispute's refund instead. `booked: false` when the row is no
+   * longer held (already booked, or collected); `disputeIds`: the open
+   * disputes written as refunded, for the caller to tell the buyer.
+   */
+  async bookBlockedProviderRefund(
+    organizationId: string,
+    intentId: string,
+    cause: string,
+    txRef: string | null,
+  ): Promise<{ readonly booked: boolean; readonly disputeIds: readonly string[] }> {
+    const intent = await this.findById(organizationId, intentId);
+    if (!intent.holdId || intent.heldStatus !== HELD) return { booked: false, disputeIds: [] };
+    if (intent.disputeOutcome === 'UPHELD') {
+      const result = await this.refundHeldForDispute(organizationId, intentId, 'DISPUTE_UPHELD');
+      return { booked: result === 'REFUNDED', disputeIds: [] };
+    }
+    const target: DebtCloseTarget = {
+      organizationId,
+      id: intentId,
+      payer: intent.agentAccount,
+      holdId: intent.holdId,
+    };
+    let disputeIds: readonly string[] = [];
+    const released = await this.ledger.releaseHoldIf(
+      organizationId,
+      intent.holdId,
+      async (runner) => {
+        const marked = await this.intents.markHeldRefunded(
+          runner,
+          target,
+          `${PROVIDER_FORFEIT_PREFIX}${cause}`,
+          txRef,
+          false,
+        );
+        if (marked) {
+          disputeIds = await this.intents.markDisputeRefunded(runner, organizationId, intentId);
+        }
+        return marked;
+      },
+    );
+    return { booked: released !== null, disputeIds };
   }
 
   /**

@@ -273,6 +273,12 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       aggregation: NotificationAggregation.PER_EVENT,
       nonSuppressible: false,
     },
+    [NotificationEvent.CALL_DISPUTE_REFUNDED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
     [NotificationEvent.PROVIDER_SLASH_EXECUTED]: {
       severity: NotificationSeverity.CRITICAL,
       channels: EVERYTHING,

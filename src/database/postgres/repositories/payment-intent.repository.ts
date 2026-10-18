@@ -307,6 +307,15 @@ export const DEBT_REFUSING_SQL =
 /** The mark an upheld call dispute's refund writes (`voided:DISPUTE_UPHELD`). */
 export const DISPUTE_REFUND_MARK = 'voided:DISPUTE_UPHELD';
 
+/**
+ * A provider-block cause recorded on the row (`ProviderBlocked`,
+ * `PayeeBlocked`, `PayeeBlockedOnChain`, with any suffix): written by the
+ * redemption pass and just before a blocked provider's refund is sent.
+ */
+const RECORDED_BLOCK_CAUSE_SQL = (alias: string): string =>
+  `(${alias}.redemption_last_error LIKE 'ProviderBlocked%' ` +
+  `OR ${alias}.redemption_last_error LIKE 'PayeeBlocked%')`;
+
 const CLOSED_OUTCOME_SQL = (alias: string): string =>
   `(${alias}.redemption_last_error LIKE 'provider_forfeit:%' ` +
   `OR ${alias}.redemption_last_error LIKE 'uncollected:%' ` +
@@ -1570,11 +1579,16 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * not backing off after a failure, no blocked party (review P1-3 — the
    * contract refuses them, and they would block the pass every minute) — in
    * seq order per payer. Deliberately cross-organization: a platform job.
+   *
+   * `beforeSeconds` (rail B): only rows whose `collectable_at + beforeSeconds`
+   * is still in the future — the rest are past (or about to pass) the chain's
+   * timeout and are {@link findTimedOutCollectable}'s, collected singly.
    */
   async findCollectable(
     rail: string,
     limit: number,
     exclude: RedemptionExclusions = NO_REDEMPTION_EXCLUSIONS,
+    beforeSeconds: number | null = null,
   ): Promise<PaymentIntentEntity[]> {
     const query = this.createQueryBuilder('intent')
       .where('intent.organizationId IS NOT NULL')
@@ -1585,6 +1599,11 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.holdId IS NOT NULL')
       .andWhere('intent.holdReleasedAt IS NULL')
       .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())');
+    if (beforeSeconds !== null) {
+      query.andWhere(`intent.collectableAt > now() - make_interval(secs => :before)`, {
+        before: beforeSeconds,
+      });
+    }
     if (hasExclusions(exclude)) {
       query.andWhere(`NOT (${blockedCollectSql('intent')})`, blockedPartyParams(exclude));
     }
@@ -1597,22 +1616,228 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * Held payments past the chain's timeout (`collectable_at + timeoutSeconds`),
-   * when anyone may collect them for the provider and `refundHeld` is closed.
+   * Held payments the collection job collects SINGLY (G3.B1): past, or about
+   * to pass, the chain's timeout (`collect_at + timeoutSeconds <= now()`, the
+   * caller's margin already taken off), when anyone may collect them and one
+   * collected by a stranger would revert a whole batch. Otherwise exactly
+   * {@link findCollectable}'s filters: undisputed (or rejected), hold open, not
+   * backing off, no blocked party — so a row that will never be sent cannot sit
+   * at the head of the queue. Cross-organization: a job.
+   */
+  async findTimedOutCollectable(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    const query = this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere(`(intent.disputeOutcome IS NULL OR intent.disputeOutcome = 'REJECTED')`)
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(`intent.collectableAt <= now() - make_interval(secs => :timeout)`, {
+        timeout: timeoutSeconds,
+      })
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())');
+    if (hasExclusions(exclude)) {
+      query.andWhere(`NOT (${blockedCollectSql('intent')})`, blockedPartyParams(exclude));
+    }
+    return query
+      .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Held payments past the chain's timeout (`collectable_at + timeoutSeconds`)
+   * that the platform never collects and only SYNCS — an open or upheld
+   * dispute's, or a blocked provider's ({@link blockedProviderSql}): booked once
+   * someone collects them. Not backing off: the caller backs a row off after
+   * each read that finds it still held, so these never crowd out newer ones.
    * Cross-organization: a job.
    */
-  async findHeldPastTimeout(timeoutSeconds: number, limit: number): Promise<PaymentIntentEntity[]> {
+  async findHeldPastTimeout(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    const blockedProvider = hasExclusions(exclude) ? ` OR (${blockedProviderSql('intent')})` : '';
     return this.createQueryBuilder('intent')
       .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
       .andWhere(`intent.heldStatus = 'HELD'`)
-      .andWhere(`intent.collectableAt + make_interval(secs => :timeout) <= now()`, {
+      .andWhere(`intent.collectableAt <= now() - make_interval(secs => :timeout)`, {
         timeout: timeoutSeconds,
       })
       .andWhere('intent.holdReleasedAt IS NULL')
       .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())')
+      .andWhere(
+        `(intent.disputeOutcome IN ('OPEN', 'UPHELD')${blockedProvider})`,
+        blockedPartyParams(exclude),
+      )
       .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
       .limit(limit)
       .getMany();
+  }
+
+  /**
+   * Held payments of a BLOCKED provider the escrow can still refund (owner
+   * decision 2026-10-18): held, hold open, not backing off, the provider's
+   * organization or payout account blocked ({@link blockedProviderSql} — only
+   * the provider side of `exclude` is read), and `refundHeld` still open
+   * (`collectable_at + timeoutSeconds` in the future; `null` for rail A,
+   * whose hold is the ledger's and has no timeout). Any dispute state: the
+   * buyer is refunded whatever a dispute would have decided. Closest to the
+   * timeout first. Cross-organization: a job.
+   *
+   * Also a held row whose provider-block cause is RECORDED
+   * ({@link RECORDED_BLOCK_CAUSE_SQL}), blocked or not now: its refund may have
+   * landed without being booked before the block was lifted, and no other
+   * queue would pick it up while a dispute holds it. The caller books it, or
+   * clears the cause when the chain still holds it.
+   */
+  async findHeldOfBlockedProviders(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number | null,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    const blocked = hasExclusions(exclude) ? ` OR (${blockedProviderSql('intent')})` : '';
+    const query = this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL');
+    if (timeoutSeconds !== null) {
+      query.andWhere(`intent.collectableAt > now() - make_interval(secs => :timeout)`, {
+        timeout: timeoutSeconds,
+      });
+    }
+    return query
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())')
+      .andWhere(`(${RECORDED_BLOCK_CAUSE_SQL('intent')}${blocked})`, blockedPartyParams(exclude))
+      .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Clears a provider-block cause recorded on a held row whose provider is no
+   * longer blocked and whose payment the chain still holds: the row goes back
+   * to plain collection.
+   */
+  async clearHeldRefundCause(organizationId: string, id: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents" SET "redemption_last_error" = NULL
+        WHERE "organization_id" = $1 AND "id" = $2 AND "held_status" = 'HELD'
+          AND ${RECORDED_BLOCK_CAUSE_SQL('payment_intents')}`,
+      [organizationId, id],
+    );
+  }
+
+  /**
+   * Held payments of a BLOCKED provider from `warnSeconds` before the chain's
+   * timeout (`collectable_at + timeoutSeconds`) to `pastSeconds` after it: a
+   * refund that has not landed by then is lost to the provider, so these are
+   * paged. Bounded on both sides, so rows long past the timeout that nobody
+   * collects cannot crowd out the ones still inside the window. Backing off or
+   * not. Cross-organization: a job.
+   */
+  async findBlockedHeldNearTimeout(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number,
+    warnSeconds: number,
+    pastSeconds: number,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    if (!hasExclusions(exclude)) return [];
+    return this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(`intent.collectableAt <= now() - make_interval(secs => :lead)`, {
+        lead: timeoutSeconds - warnSeconds,
+      })
+      .andWhere(`intent.collectableAt > now() - make_interval(secs => :lag)`, {
+        lag: timeoutSeconds + pastSeconds,
+      })
+      .andWhere(`(${blockedProviderSql('intent')})`, blockedPartyParams(exclude))
+      .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Records why a held payment is about to be refunded for its provider
+   * (`ProviderBlocked` | `PayeeBlocked` | `PayeeBlockedOnChain`), BEFORE the
+   * refund is sent: if the block is lifted before the refund is booked, the
+   * booking still knows its cause. Never over a closed outcome.
+   */
+  async recordHeldRefundCause(organizationId: string, id: string, cause: string): Promise<void> {
+    await this.manager.query(
+      `UPDATE "payment_intents" SET "redemption_last_error" = $3
+        WHERE "organization_id" = $1 AND "id" = $2 AND "held_status" = 'HELD'
+          AND ("redemption_last_error" IS NULL OR NOT ${CLOSED_OUTCOME_SQL('payment_intents')})`,
+      [organizationId, id, cause],
+    );
+  }
+
+  /**
+   * A blocked provider's refund landed while a buyer's dispute on the call is
+   * still undecided (or decided, its refund pending): the dispute's money side
+   * is written as refunded — the full amount restored, as an upheld refund
+   * would — inside the caller's transaction. The decision itself stays the
+   * operator's (the dispute stays `OPEN` in the queue); deciding later keeps
+   * `REFUNDED` (`planRefund`). `sla_due_at` is cleared: the SLA neither pages
+   * about nor auto-upholds a call already refunded. Returns the disputes
+   * written.
+   */
+  async markDisputeRefunded(
+    runner: Pick<QueryRunner, 'query'>,
+    organizationId: string,
+    intentId: string,
+  ): Promise<string[]> {
+    const result = (await runner.query(
+      `UPDATE "disputes" d
+          SET "refund_source" = 'UNCOLLECTED_EARNINGS', "refund_state" = 'REFUNDED',
+              "refund_amount" = CASE WHEN d."asset_id" IS NULL THEN NULL
+                                     ELSE COALESCE(i."settled_amount", i."price_amount") END,
+              "restored_amount" = CASE WHEN d."asset_id" IS NULL THEN NULL
+                                       ELSE COALESCE(i."settled_amount", i."price_amount") END,
+              "sla_due_at" = NULL, "updated_at" = now()
+         FROM "payment_intents" i
+        WHERE i."organization_id" = $1 AND i."id" = $2
+          AND d."organization_id" = $1 AND d."intent_id" = $2
+          AND (d."state" IN ('OPEN', 'UNDER_REVIEW')
+               OR (d."state" = 'UPHELD' AND d."refund_state" = 'PENDING'))
+        RETURNING d."id"`,
+      [organizationId, intentId],
+    )) as unknown;
+    const rows =
+      Array.isArray(result) && result.length === 2 && Array.isArray(result[0])
+        ? (result[0] as { id: string }[])
+        : (result as { id: string }[]);
+    return rows.map((row) => row.id);
+  }
+
+  /** The assets with a payment still held on chain: whose chains' blocklists matter. */
+  async findHeldAssetIds(rail: string): Promise<string[]> {
+    const rows = (await this.manager.query(
+      `SELECT DISTINCT "asset_id" AS "assetId" FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL AND "rail" = $1 AND "held_status" = 'HELD'`,
+      [rail],
+    )) as { assetId: string }[];
+    return rows.map((row) => row.assetId);
   }
 
   /**
@@ -1697,14 +1922,16 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * Books a refunded hold (G3.B1), INSIDE the ledger transaction that releases
    * the buyer's hold, under the payer's admission lock: `<reason>` closes the
    * row for good, `held_status = 'REFUNDED'`, `hold_released_at` stamped with
-   * the release. Only a row an upheld dispute holds. `false` when nothing
-   * matched — already booked, or collected.
+   * the release. Only a row an upheld dispute holds — unless `requireUpheld`
+   * is `false` (a blocked provider's refund, whatever the dispute state).
+   * `false` when nothing matched — already booked, or collected.
    */
   async markHeldRefunded(
     runner: QueryRunner,
     target: DebtCloseTarget,
     reason: string,
     txRef: string | null,
+    requireUpheld = true,
   ): Promise<boolean> {
     await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
       `voucher-admission:${target.payer}`,
@@ -1715,9 +1942,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
               "held_status" = 'REFUNDED', "held_tx_ref" = COALESCE($6, "held_tx_ref")
         WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3 AND "hold_id" = $4
           AND "status" = 'SETTLED' AND "held_status" = 'HELD'
-          AND "dispute_outcome" = 'UPHELD' AND "hold_released_at" IS NULL
+          AND ("dispute_outcome" = 'UPHELD' OR NOT $7) AND "hold_released_at" IS NULL
         RETURNING "id"`,
-      [target.organizationId, target.id, target.payer, target.holdId, reason, txRef],
+      [target.organizationId, target.id, target.payer, target.holdId, reason, txRef, requireUpheld],
     )) as [unknown[], number] | unknown[];
     return affected(result) > 0;
   }
@@ -2823,6 +3050,11 @@ async function readUnsettledVouchers(
  * Whether a payer-side party of the row aliased `alias` is blocked: the
  * payer's organization, the payer or the delegate (by blocklist key or by
  * on-chain account). Named parameters: {@link blockedPartyParams}.
+ *
+ * Never NULL: each term is `COALESCE(…, false)`. A NULL column (no delegate,
+ * no provider) compared with a non-empty array is NULL, and `NOT (… OR NULL)`
+ * is NULL too — which would drop every honest row without a delegate from
+ * every `NOT (blocked)` query the moment one wallet is blocked.
  */
 function blockedPartySql(alias: string): string {
   const key = (column: string) =>
@@ -2834,7 +3066,9 @@ function blockedPartySql(alias: string): string {
       `${key(column)} = ANY(:blockedWalletKeys)`,
       `lower(${alias}.${column}) = ANY(:blockedChainAccounts)`,
     ]),
-  ].join(' OR ');
+  ]
+    .map(notNull)
+    .join(' OR ');
 }
 
 /**
@@ -2843,15 +3077,30 @@ function blockedPartySql(alias: string): string {
  * payout account count as well.
  */
 function blockedCollectSql(alias: string): string {
+  return [blockedPartySql(alias), blockedProviderSql(alias)].join(' OR ');
+}
+
+/**
+ * Whether the PROVIDER side of the row aliased `alias` is blocked: the
+ * provider's organization, or its payout account by blocklist key or by
+ * on-chain account. Named parameters: {@link blockedPartyParams}.
+ */
+function blockedProviderSql(alias: string): string {
   const key = (column: string) =>
     `(split_part(${alias}.${column}, ':', 1) || ':' || CASE WHEN split_part(${alias}.${column}, ':', 1) = 'eip155' ` +
     `THEN lower(split_part(${alias}.${column}, ':', 3)) ELSE split_part(${alias}.${column}, ':', 3) END)`;
   return [
-    blockedPartySql(alias),
     `${alias}.provider_id::text = ANY(:blockedOrgs)`,
     `${key('provider_account')} = ANY(:blockedWalletKeys)`,
     `lower(${alias}.provider_account) = ANY(:blockedChainAccounts)`,
-  ].join(' OR ');
+  ]
+    .map(notNull)
+    .join(' OR ');
+}
+
+/** A boolean SQL term that is `false`, never NULL, when its column is NULL. */
+function notNull(term: string): string {
+  return `COALESCE(${term}, false)`;
 }
 
 function blockedPartyParams(exclude: RedemptionExclusions): Record<string, string[]> {
