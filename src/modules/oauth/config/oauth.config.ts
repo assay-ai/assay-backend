@@ -147,17 +147,16 @@ export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConf
     redirectAllowlist,
     host.mcpPublicUrl,
   );
-  const paymentClients = parsePaymentClients(
-    env[OAUTH_PAYMENT_CLIENTS_ENV],
-    `${host.mcpPublicUrl}${OAUTH_BUILTIN_CLIENT_PATH}`,
-  );
+  // One derivation of the audience and the payment clients, shared with the
+  // session source: a drift would refuse every token or change who may pay.
+  const session = loadOAuthSessionConfig(env);
 
   return Object.freeze({
-    issuer: host.mcpPublicUrl,
+    issuer: session.audience,
     webAppUrl: host.webAppUrl,
     verifiedClients,
     redirectAllowlist,
-    paymentClients,
+    paymentClients: session.paymentClients,
     allowHttpCimdLoopback,
     requestCookieSecret,
     dcrGlobalPerDay: parsePositiveInt(

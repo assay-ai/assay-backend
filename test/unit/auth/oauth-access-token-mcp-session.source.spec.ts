@@ -12,6 +12,11 @@ import { AgentRepository } from '@database/postgres/repositories/agent.repositor
 import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
+import { BlockSubjectKind } from '@modules/blocklist/domain/account-block';
+import { BlocklistSessionSource } from '@modules/blocklist/services/blocklist-session.source';
+import { SessionSourceMode } from '@modules/auth/domain/session-source-mode';
+import { createSessionSource } from '@modules/auth/services/composite-mcp-session.source';
+import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
 import { OAuthAccessTokenMcpSessionSource } from '@modules/auth/services/oauth-access-token-mcp-session.source';
@@ -20,11 +25,13 @@ import { OAuthSessionConfig } from '@modules/oauth/config/oauth.config';
 import { AppRole } from '@shared/app-role/app-role';
 import { digestToken } from '@shared/crypto/token-digest';
 
+import { blocklistOf, SeededBlock } from '../helpers/blocklist';
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { FakeAgentRepository, buildAgent } from './helpers/fake-agent-repository';
 import { buildCredential } from './helpers/fake-agent-credential-repository';
 
 const MCP = 'https://mcp.example.com';
+const ORG = '0b5c1e9a-4f1d-4c62-9a57-3d2f6c1e8b04';
 const BUILTIN_CLIENT_ID = `${MCP}/oauth/clients/assay-mcp`;
 const THIRD_PARTY_CLIENT_ID = 'dcr_AAAAAAAAAAAAAAAAAAAAAA';
 const ACCESS_TOKEN = `assay_at_${'a'.repeat(43)}`;
@@ -133,7 +140,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
     agents.seed(
       buildAgent({
         id: 'agent-1',
-        organizationId: 'org-1',
+        organizationId: ORG,
         primaryAccountId: ACCOUNT,
         chainId: CHAIN,
         label: 'research-bot',
@@ -156,6 +163,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
     } = {},
   ) {
     const credential = buildCredential({
+      organizationId: ORG,
       id: 'grant-1',
       issuedVia: CredentialIssuedVia.OAUTH,
       oauthClientId: options.clientRowId ?? 'client-builtin',
@@ -169,7 +177,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
     fx.credentials.rows.push(credential);
     const token = {
       id: 'token-1',
-      organizationId: 'org-1',
+      organizationId: ORG,
       credentialId: credential.id,
       refreshTokenId: 'refresh-1',
       tokenHash: digestToken(ACCESS_TOKEN),
@@ -279,7 +287,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
 
       await expectErrorCodeAsync(() => fx.source.resolve(ACCESS_TOKEN), 'MCP_CREDENTIAL_INVALID');
       expect(spy).toHaveBeenCalledWith({
-        organizationId: 'org-1',
+        organizationId: ORG,
         id: 'grant-1',
         issuedVia: CredentialIssuedVia.OAUTH,
       });
@@ -366,7 +374,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
       expect(token.firstUsedAt).toBe(stamped);
       expect(fx.tokens.updateCalls).toHaveLength(1);
       const [{ criteria, patch }] = fx.tokens.updateCalls;
-      expect(criteria).toMatchObject({ organizationId: 'org-1', id: 'token-1' });
+      expect(criteria).toMatchObject({ organizationId: ORG, id: 'token-1' });
       // `IsNull()`: the write itself only lands on an unstamped row.
       expect(criteria.firstUsedAt).toMatchObject({ _type: 'isNull' });
       expect(patch).toEqual({ firstUsedAt: stamped });
@@ -389,6 +397,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
       seedGrant(fx);
       fx.credentials.rows.push(
         buildCredential({
+          organizationId: ORG,
           id: 'key-1',
           tokenHash: digestToken(API_KEY),
           delegateAccount: DELEGATE,
@@ -398,11 +407,11 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
       const viaGrant = await fx.source.resolve(ACCESS_TOKEN);
       const viaKey = await fx.apiKeySource.resolve(API_KEY);
 
-      expect(viaGrant).toEqual({ ...viaKey, credentialId: 'grant-1' });
-      expect(viaGrant).toEqual({
+      expect(viaGrant).toStrictEqual({ ...viaKey, credentialId: 'grant-1' });
+      expect(viaGrant).toStrictEqual({
         credentialId: 'grant-1',
         storedCredential: true,
-        organizationId: 'org-1',
+        organizationId: ORG,
         agentId: 'agent-1',
         agentAccount: ACCOUNT,
         chainId: CHAIN,
@@ -418,6 +427,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
       seedGrant(fx, { clientRowId: 'client-third' });
       fx.credentials.rows.push(
         buildCredential({
+          organizationId: ORG,
           id: 'key-1',
           tokenHash: digestToken(API_KEY),
           delegateAccount: DELEGATE,
@@ -427,7 +437,74 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
       const viaGrant = await fx.source.resolve(ACCESS_TOKEN);
       const viaKey = await fx.apiKeySource.resolve(API_KEY);
 
-      expect(viaGrant).toEqual({ ...viaKey, credentialId: 'grant-1', paymentsAllowed: false });
+      expect(viaGrant).toStrictEqual({
+        ...viaKey,
+        credentialId: 'grant-1',
+        paymentsAllowed: false,
+      });
+    });
+  });
+
+  /**
+   * `BlocklistSessionSource` wraps the composite (§6.4 item 3), so a blocked
+   * organization, payer wallet or delegate is refused through the OAuth source
+   * exactly as through an API key of the same agent.
+   */
+  describe('behind the blocklist, as McpModule wires it', () => {
+    const declines = { resolve: () => Promise.reject(McpErrors.credentialInvalid()) };
+
+    function wired(fx: ReturnType<typeof build>, ...blocks: SeededBlock[]) {
+      return new BlocklistSessionSource(
+        createSessionSource(SessionSourceMode.BOTH, {
+          config: declines,
+          db: fx.apiKeySource,
+          oauth: fx.source,
+          privy: declines,
+        }),
+        blocklistOf(...blocks),
+      );
+    }
+
+    it.each([
+      [
+        'organization',
+        { kind: BlockSubjectKind.ORGANIZATION, subject: ORG },
+        'AUTH_ORGANIZATION_SUSPENDED',
+      ],
+      ['payer wallet', { kind: BlockSubjectKind.WALLET, subject: ACCOUNT }, 'ACCOUNT_BLOCKED'],
+      ['delegate wallet', { kind: BlockSubjectKind.WALLET, subject: DELEGATE }, 'ACCOUNT_BLOCKED'],
+    ])(
+      'a blocked %s refuses the assay-mcp grant with the code an API key gets',
+      async (_label, blocked: SeededBlock, code) => {
+        const fx = build('mcp');
+        seedGrant(fx);
+        fx.credentials.rows.push(
+          buildCredential({
+            organizationId: ORG,
+            id: 'key-1',
+            tokenHash: digestToken(API_KEY),
+            delegateAccount: DELEGATE,
+          }),
+        );
+        const source = wired(fx, blocked);
+
+        await expectErrorCodeAsync(() => source.resolve(API_KEY), code);
+        await expectErrorCodeAsync(() => source.resolve(ACCESS_TOKEN), code);
+      },
+    );
+
+    it('an unblocked grant passes through untouched', async () => {
+      const fx = build('mcp');
+      seedGrant(fx);
+      const source = wired(fx, {
+        kind: BlockSubjectKind.ORGANIZATION,
+        subject: '7f3e2d1c-0b9a-4876-9543-210fedcba987',
+      });
+
+      await expect(source.resolve(ACCESS_TOKEN)).resolves.toMatchObject({
+        credentialId: 'grant-1',
+        paymentsAllowed: true,
+      });
     });
   });
 });

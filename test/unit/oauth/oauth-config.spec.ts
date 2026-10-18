@@ -363,13 +363,27 @@ describe('loadOAuthSessionConfig', () => {
     });
   });
 
-  it('agrees with loadOAuthConfig on the audience and the payment clients', () => {
-    resetEnvSigningKeyCacheForTests();
-    const full = loadOAuthConfig(env());
-    const session = loadOAuthSessionConfig(env());
-    expect(session.audience).toBe(full.issuer);
-    expect(session.paymentClients).toEqual(full.paymentClients);
-  });
+  it.each([
+    ['the defaults', {}],
+    [
+      'an explicit OAUTH_PAYMENT_CLIENTS',
+      {
+        OAUTH_PAYMENT_CLIENTS: JSON.stringify(['https://mcp.example.com/oauth/clients/assay-mcp']),
+      },
+    ],
+    ['an MCP_PUBLIC_URL with a trailing slash', { MCP_PUBLIC_URL: 'https://mcp.example.com/' }],
+  ])(
+    'agrees with loadOAuthConfig on the audience and the payment clients (%s)',
+    (_label, overrides: Record<string, string>) => {
+      resetEnvSigningKeyCacheForTests();
+      const full = loadOAuthConfig(env(overrides));
+      const session = loadOAuthSessionConfig(env(overrides));
+      expect(session.audience).toBe(full.issuer);
+      expect(session.paymentClients).toEqual(full.paymentClients);
+      expect(full.issuer).toBe('https://mcp.example.com');
+      expect(full.paymentClients).toEqual(['https://mcp.example.com/oauth/clients/assay-mcp']);
+    },
+  );
 
   it('refuses a payment client other than the built-in one (H2)', () => {
     expect(() =>
