@@ -452,13 +452,16 @@ export class ToolsetPublishingService {
       })
       .map((entry) => entry.toolId);
     if (refused.length > 0) {
+      const gone = refused.some((id) => {
+        const tool = tools.get(id);
+        return !tool || tool.status === ToolStatus.REMOVED || tool.status === 'RETIRED';
+      });
       throw ToolsetErrors.notPublishable({
-        reason:
-          visibility === ToolsetVisibility.PUBLIC
+        reason: gone
+          ? 'some tools are no longer available'
+          : visibility === ToolsetVisibility.PUBLIC
             ? 'a listed tool set may hold only listed tools'
-            : visibility === ToolsetVisibility.UNLISTED
-              ? 'a link-only tool set may hold listed tools and your own link-only provider tools; publish private provider tools as link-only first'
-              : 'some tools are no longer available',
+            : 'a link-only tool set may hold listed tools and your own link-only provider tools; share private provider tools as link-only first',
         toolIds: refused,
       });
     }

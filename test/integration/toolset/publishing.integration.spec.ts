@@ -218,8 +218,8 @@ describe('toolset publishing, against a real database and Redis', () => {
 
     providerTool = randomUUID();
     await dataSource.query(
-      `INSERT INTO tools (id, name, kind, owner_org_id, category, visibility, status)
-       VALUES ($1, 'acme__search_posts', 'PROVIDER', $2, 'social', 'UNLISTED', 'ACTIVE')`,
+      `INSERT INTO tools (id, name, kind, owner_org_id, category, visibility, status, review_status)
+       VALUES ($1, 'acme__search_posts', 'PROVIDER', $2, 'social', 'UNLISTED', 'ACTIVE', 'NONE')`,
       [providerTool, orgA],
     );
   }, 300_000);
@@ -1055,10 +1055,14 @@ describe('toolset publishing, against a real database and Redis', () => {
         `INSERT INTO toolset_entries (toolset_id, position, tool_id) VALUES ($1, 1, $2)`,
         [created.id, providerTool],
       );
-      await dataSource.query(`UPDATE tools SET owner_org_id = $1 WHERE id = $2`, [
-        owner,
-        providerTool,
-      ]);
+      // The tool's first owner lost its handle to a takedown above, which
+      // removed its provider tools (T4); it serves again under this owner.
+      await dataSource.query(
+        `UPDATE tools SET owner_org_id = $1, status = 'ACTIVE', removed_at = NULL,
+                          removal_reason = NULL, status_before_removal = NULL
+          WHERE id = $2`,
+        [owner, providerTool],
+      );
       try {
         const v2 = await s.publishing.publish(
           owner,
@@ -1394,8 +1398,9 @@ describe('toolset publishing, against a real database and Redis', () => {
       );
       ownTool = randomUUID();
       await dataSource.query(
-        `INSERT INTO tools (id, name, kind, owner_org_id, category, visibility, status)
-         VALUES ($1, 'gaps__own_api', 'PROVIDER', $2, 'testing', 'UNLISTED', 'ACTIVE')`,
+        `INSERT INTO tools (id, name, kind, owner_org_id, category, visibility, status,
+                            review_status)
+         VALUES ($1, 'gaps__own_api', 'PROVIDER', $2, 'testing', 'UNLISTED', 'ACTIVE', 'NONE')`,
         [ownTool, owner],
       );
       await bind(owner, gapTool);
