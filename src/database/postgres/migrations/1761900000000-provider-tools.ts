@@ -64,8 +64,7 @@ export class ProviderTools1761900000000 implements MigrationInterface {
         ADD CONSTRAINT "chk_tools_listed_approved"
           CHECK ("kind" <> 'PROVIDER' OR "visibility" <> 'LISTED' OR "approved_version" IS NOT NULL),
         ADD CONSTRAINT "chk_tools_removal"
-          CHECK (("removed_at" IS NOT NULL
-                  OR ("taken_down_at" IS NULL AND "handle_removed_at" IS NULL))
+          CHECK (("removed_at" IS NULL) = ("taken_down_at" IS NULL AND "handle_removed_at" IS NULL)
                  AND ("removed_at" IS NULL OR "status" = 'REMOVED')),
         ADD CONSTRAINT "chk_tools_pending_category"
           CHECK ("pending_category" IS NULL OR "pending_category" ~ '^[a-z][a-z0-9-]{1,63}$')

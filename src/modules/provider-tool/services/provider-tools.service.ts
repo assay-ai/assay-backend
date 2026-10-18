@@ -38,8 +38,9 @@ import {
   ToolVisibility,
 } from '@modules/tool/ports/tool.types';
 import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
+import { HandleStatus } from '@modules/toolset/domain/handle';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
-import { HandlesService } from '@modules/toolset/services/handles.service';
+import { HandlesService, lockHandle } from '@modules/toolset/services/handles.service';
 import { CursorPageDto, ListQueryDto, ListSpec, asInstant, paginate } from '@shared/api';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
@@ -222,6 +223,17 @@ export class ProviderToolsService {
     let toolId: string;
     try {
       toolId = await this.dataSource.transaction(async (manager) => {
+        // The handle again, locked: a takedown, rename or reassignment that
+        // landed since the read above would leave the new tool outside it.
+        await lockHandle(manager, handle);
+        const [owner] = (await manager.query(
+          `SELECT handle, handle_status AS "handleStatus" FROM organizations
+            WHERE id = $1 FOR UPDATE`,
+          [organizationId],
+        )) as { handle: string | null; handleStatus: string | null }[];
+        if (owner?.handle !== handle || owner.handleStatus !== HandleStatus.ACTIVE) {
+          throw ProviderToolErrors.notAllowed({ reason: 'NO_HANDLE' });
+        }
         const [inserted] = (await manager.query(
           `INSERT INTO tools (id, name, kind, owner_org_id, category, tags, visibility,
                               review_status, status, last_version_number)

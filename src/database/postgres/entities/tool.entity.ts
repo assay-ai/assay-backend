@@ -89,10 +89,7 @@ export class ToolEntity {
   @Column({ name: 'review_content_hash', type: 'varchar', length: 64, nullable: true })
   reviewContentHash: string | null;
 
-  /**
-   * Set with `status = REMOVED` by a takedown (FR-18). It outlives the
-   * reasons below when a lifted tool has no active handle to serve under.
-   */
+  /** Set with `status = REMOVED` by a takedown (FR-18). */
   @Column({ name: 'removed_at', type: 'timestamptz', nullable: true })
   removedAt: Date | null;
 
@@ -100,7 +97,10 @@ export class ToolEntity {
   @Column({ name: 'taken_down_at', type: 'timestamptz', nullable: true })
   takenDownAt: Date | null;
 
-  /** Its handle's takedown, standing: every tool under the handle stops. */
+  /**
+   * Its handle's takedown, standing: every tool under the handle stops. Also
+   * left by a lifted takedown when the tool has no active handle to serve under.
+   */
   @Column({ name: 'handle_removed_at', type: 'timestamptz', nullable: true })
   handleRemovedAt: Date | null;
 

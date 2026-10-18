@@ -1084,6 +1084,37 @@ describe('provider tools, against a real database and Redis', () => {
       });
       expect(ToolVisibility.LISTED).toBe('LISTED');
     });
+
+    it('an operator rename voids a pending review: its hash covers the old name', async () => {
+      const orgE = await org('Echo');
+      const agentE = await agent(orgE);
+      await verify(orgE);
+      await registerProvider(orgE);
+      await s.handles.claim(session(orgE, agentE), 'echo', ACTOR);
+      const created = await owned.create(
+        orgE,
+        { name: 'get_quote', category: 'weather', ...contract() } as never,
+        ACTOR,
+      );
+      await dataSource.query(
+        `UPDATE tools SET review_status = 'PENDING', review_version = 1,
+                          review_submitted_at = now(), review_content_hash = $2
+          WHERE id = $1`,
+        [created.id, 'a'.repeat(64)],
+      );
+      await dataSource.transaction((manager) =>
+        s.moderation.renameHandle(manager, 'echo', 'echo-two'),
+      );
+      const [row] = await dataSource.query(
+        `SELECT name, review_status, review_content_hash FROM tools WHERE id = $1`,
+        [created.id],
+      );
+      expect(row).toEqual({
+        name: 'echo-two__get_quote',
+        review_status: ReviewStatus.NONE,
+        review_content_hash: null,
+      });
+    });
   });
 
   describe('overlapping takedowns and a reassignment (review P1-1)', () => {
@@ -1140,13 +1171,25 @@ describe('provider tools, against a real database and Redis', () => {
       await dataSource.transaction((manager) =>
         s.moderation.confirm(manager, handle.cutoff.id, OPERATOR_2),
       );
+      // The brand held a handle it had not locked: its tools move to the new name.
       const brand = await org('The Acme brand');
       const brandAgent = await agent(brand);
       await verify(brand);
       await registerProvider(brand);
+      await s.handles.claim(session(brand, brandAgent), 'acme-brand', ACTOR);
+      const quote = await owned.create(
+        brand,
+        { name: 'get_quote', category: 'weather', ...contract() } as never,
+        ACTOR,
+      );
       await dataSource.transaction((manager) =>
         s.moderation.reassignHandle(manager, 'acme', brand),
       );
+      expect(await owned.get(brand, quote.id)).toMatchObject({
+        name: 'acme__get_quote',
+        handle: 'acme',
+        status: 'DRAFT',
+      });
 
       const [old] = await dataSource.query(`SELECT name, status FROM tools WHERE id = $1`, [
         toolId,
@@ -1176,6 +1219,42 @@ describe('provider tools, against a real database and Redis', () => {
         ),
       ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_HANDLE_INVALID });
       expect(brandAgent).toBeDefined();
+    });
+
+    it('refuses a reassignment that would push a tool of the new holder past 48 characters', async () => {
+      const squatter = await org('Squatter');
+      const squatterAgent = await agent(squatter);
+      await verify(squatter);
+      await s.handles.claim(session(squatter, squatterAgent), 'a-very-long-brand-name', ACTOR);
+      const taken = await dataSource.transaction((manager) =>
+        s.moderation.cutoffHandle(manager, {
+          handle: 'a-very-long-brand-name',
+          operatorId: OPERATOR_1,
+          note: 'brand',
+        }),
+      );
+      await dataSource.transaction((manager) =>
+        s.moderation.confirm(manager, taken.cutoff.id, OPERATOR_2),
+      );
+      const target = await org('Short name');
+      const targetAgent = await agent(target);
+      await verify(target);
+      await registerProvider(target);
+      await s.handles.claim(session(target, targetAgent), 'abq-co', ACTOR);
+      const long = await owned.create(
+        target,
+        { name: `a${'b'.repeat(39)}`, category: 'weather', ...contract() } as never,
+        ACTOR,
+      );
+      expect(
+        await errorOf(
+          dataSource.transaction((manager) =>
+            s.moderation.reassignHandle(manager, 'a-very-long-brand-name', target),
+          ),
+        ),
+      ).toMatchObject({ code: ToolsetErrorCode.TOOLSET_HANDLE_REASSIGN_REFUSED });
+      // Nothing moved.
+      expect(await owned.get(target, long.id)).toMatchObject({ handle: 'abq-co' });
     });
   });
 });
