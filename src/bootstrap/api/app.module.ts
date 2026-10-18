@@ -13,6 +13,7 @@ import { bullboardConfig } from '@config/bullboard.config';
 // Infrastructure
 import { DatabaseModule } from '@database/database.module';
 import { AlertingModule } from '@shared/alerting';
+import { AppRoleModule } from '@shared/app-role/app-role.module';
 import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
 import { RedisAdapterModule } from '@shared/cache/redis-adapter/redis-adapter.module';
 import { HttpCacheModule } from '@shared/cache/http-cache/http-cache.module';
@@ -104,6 +105,8 @@ import { NetworkModule } from '@shared/network/network.module';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => configService.get('bullmq'),
     }),
+    // `APP_ROLE = 'api'`: OAuth grants of payment clients only (spec §6.3.13).
+    AppRoleModule.forRoot('api'),
     // Infrastructure
     NetworkModule,
     DatabaseModule,
