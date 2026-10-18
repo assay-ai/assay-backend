@@ -53,6 +53,9 @@ export enum CredentialIssuedVia {
 @Index('idx_agent_credentials_oauth_live', ['agentId'], {
   where: `"issued_via" = 'OAUTH' AND "revoked_at" IS NULL`,
 })
+@Index('idx_agent_credentials_oauth_client', ['oauthClientId'], {
+  where: `"oauth_client_id" IS NOT NULL`,
+})
 export class AgentCredentialEntity extends OrganizationScopedEntity {
   @Column({ name: 'agent_id', type: 'uuid' })
   agentId: string;
