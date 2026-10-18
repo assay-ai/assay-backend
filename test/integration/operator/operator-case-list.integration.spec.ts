@@ -245,6 +245,17 @@ describe('the operator case list SQL, against a real database', () => {
     }
   });
 
+  it('says whether a record was ever written on chain', async () => {
+    const rows = await repository.findOperatorCasePage({ limit: 100 });
+    for (const row of rows) {
+      const scenario = ids.get(row.id)!;
+      expect({ name: scenario.name, onChain: row.onChain }).toEqual({
+        name: scenario.name,
+        onChain: 'chain_status' in scenario.patch,
+      });
+    }
+  });
+
   it('D1: the EVM case left DISPUTED sorts with the open cases, at its door', async () => {
     const rows = await repository.findOperatorCasePage({
       statuses: [OperatorCaseStatus.DISPUTED],

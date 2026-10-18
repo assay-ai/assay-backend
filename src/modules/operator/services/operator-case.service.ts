@@ -1,13 +1,28 @@
-import { Injectable } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
+import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
+import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
+import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { CursorPageDto } from '@shared/api';
+import {
+  AssetId,
+  ChainNamespace,
+  chainIdOf,
+  namespaceOf,
+  parseAccountId,
+} from '@modules/chains/ports/caip.types';
+import { ChainProposalStatus } from '@modules/slash/domain/chain-slash-outcome';
+import { alertExecutedWhileCancelWaited } from '@modules/slash/domain/executed-while-cancel-waited';
+import { ALERT_PORT, AlertPort } from '@shared/alerting';
 import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
 import { SlashErrors } from '@modules/slash/errors/slash.errors';
 import {
+  SLASH_EXECUTOR,
   SlashCancelIntent,
   SlashCompensationIntent,
+  SlashExecutorPort,
 } from '@modules/slash/ports/slash-executor.port';
 
 import {
@@ -51,14 +66,46 @@ export const CASE_APPROVAL_ACTIONS = {
  * a query scoped to the wrong column, serving an empty list to somebody who
  * should have seen everything.
  */
+/** What stands on chain for a case, as the brief says it (`chainRecord`). */
+export enum ChainRecordState {
+  STANDING = 'STANDING',
+  EXECUTED = 'EXECUTED',
+  GONE = 'GONE',
+  UNKNOWN = 'UNKNOWN',
+}
+
+/** The case page waits no longer than this for a live chain read. */
+const BRIEF_CHAIN_READ_TIMEOUT_MS = 2_500;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
+/** The mirrors under which a record of the case may still stand on chain. */
+const MAY_STAND: readonly string[] = [
+  ChainProposalStatus.PENDING,
+  ChainProposalStatus.DISPUTED,
+  ChainProposalStatus.CANCEL_REQUESTED,
+];
+
 @Injectable()
 export class OperatorCaseService {
+  private readonly logger = new Logger(OperatorCaseService.name);
+
   constructor(
     private readonly proposals: SlashProposalRepository,
     private readonly queue: AdjudicationQueueService,
     private readonly arbitration: ArbitrationService,
     private readonly execution: SlashExecutionService,
     private readonly approvals: OperatorApprovalService,
+    private readonly parts: SlashProposalPartRepository,
+    private readonly enrolments: ProviderChainEnrolmentRepository,
+    @Optional() @Inject(SLASH_EXECUTOR) private readonly executor: SlashExecutorPort | null = null,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {
     // How an approved action is re-run: the same method, as the requester,
     // with the approver attached.
@@ -115,7 +162,101 @@ export class OperatorCaseService {
    */
   async brief(proposalId: string) {
     const organizationId = await this.tenantOf(proposalId);
-    return this.queue.brief(organizationId, proposalId);
+    const [brief, proposal] = await Promise.all([
+      this.queue.brief(organizationId, proposalId),
+      this.proposals.findOneScoped(organizationId, proposalId),
+    ]);
+    const chainRecord = proposal ? await this.chainRecordOf(proposal) : ChainRecordState.GONE;
+    // A withdrawn judgement executed while its cancel waited: the console shows it, so it is paged
+    // too (once per case; the cancel route raises the same alert). Nothing is written.
+    if (
+      proposal &&
+      chainRecord === ChainRecordState.EXECUTED &&
+      proposal.chainStatus === ChainProposalStatus.CANCEL_REQUESTED
+    ) {
+      await alertExecutedWhileCancelWaited(this.alerts, this.logger, proposal, 'record');
+    }
+    return {
+      ...brief,
+      // What stands on chain for this case: STANDING (anyone could execute it
+      // once due; a cancel has something to act on), EXECUTED (the stake was
+      // taken, even under a requested cancel), GONE (nothing stands and nothing
+      // was taken), UNKNOWN (could not be told; read as standing).
+      // `chainExecutableAt` alone cannot say any of this: a case opened before
+      // the parts model keeps its dates with nothing behind them.
+      chainRecord,
+      // STANDING or UNKNOWN. Kept beside `chainRecord` for the console's simple reads.
+      chainStanding:
+        chainRecord === ChainRecordState.STANDING || chainRecord === ChainRecordState.UNKNOWN,
+    };
+  }
+
+  /**
+   * Read, never assumed; anything that cannot be told is UNKNOWN:
+   *
+   * - mirror `EXECUTED`: EXECUTED; any other mirror that cannot carry a record
+   *   (`NONE`, `PROPOSING`, `REFUSED`, `CANCELLED`): GONE;
+   * - a partitioned case (an EVM window) with parts, from the stored parts the
+   *   sweeps keep in step: a part PENDING or DISPUTED is STANDING, else one
+   *   EXECUTED is EXECUTED, else a part NONE or REFUSED is UNKNOWN (it may
+   *   still land; the sweep re-reads it), else GONE;
+   * - a partitioned case with **no** parts (opened before the parts model):
+   *   its judgement is the one record under the case's own request id, read
+   *   from the chain with a short timeout. No record is GONE only when none
+   *   was ever written; one that was written and is not found is an anomaly,
+   *   UNKNOWN;
+   * - a single-record case: STANDING (its mirror, kept in step by the sweeps).
+   */
+  private async chainRecordOf(proposal: SlashProposalEntity): Promise<ChainRecordState> {
+    if (proposal.chainStatus === ChainProposalStatus.EXECUTED) return ChainRecordState.EXECUTED;
+    if (!MAY_STAND.includes(proposal.chainStatus)) return ChainRecordState.GONE;
+    const partitioned =
+      proposal.windowId !== null &&
+      namespaceOf(proposal.assetId as AssetId) === ChainNamespace.EIP155;
+    if (!partitioned) return ChainRecordState.STANDING;
+
+    const parts = await this.parts.findForEpoch(
+      proposal.organizationId,
+      proposal.id,
+      proposal.chainEpoch,
+    );
+    if (parts.length > 0) {
+      const has = (status: string) => parts.some((part) => part.chainStatus === status);
+      if (has('PENDING') || has('DISPUTED')) return ChainRecordState.STANDING;
+      if (has('EXECUTED')) return ChainRecordState.EXECUTED;
+      if (has('NONE') || has('REFUSED')) return ChainRecordState.UNKNOWN;
+      return ChainRecordState.GONE;
+    }
+
+    if (!this.executor) return ChainRecordState.UNKNOWN;
+    try {
+      const chainId = chainIdOf(proposal.assetId as AssetId);
+      const enrolment = await this.enrolments.findOneBy({
+        organizationId: proposal.providerId,
+        chainId,
+      });
+      if (!enrolment?.stakeAuthorityAccountId) return ChainRecordState.UNKNOWN;
+      const record = await withTimeout(
+        this.executor.readRecord(
+          proposal.chainRequestId,
+          parseAccountId(enrolment.stakeAuthorityAccountId).address,
+          chainId,
+        ),
+        BRIEF_CHAIN_READ_TIMEOUT_MS,
+      );
+      if (record?.status === 'PENDING' || record?.status === 'DISPUTED') {
+        return ChainRecordState.STANDING;
+      }
+      if (record?.status === 'EXECUTED') return ChainRecordState.EXECUTED;
+      if (record?.status === 'CANCELLED') return ChainRecordState.GONE;
+      return proposal.chainProposedAt ? ChainRecordState.UNKNOWN : ChainRecordState.GONE;
+    } catch (error) {
+      this.logger.warn(
+        `slash proposal ${proposal.id}: its on-chain record could not be read for the brief ` +
+          `(${error instanceof Error ? error.message : String(error)}); shown as unknown`,
+      );
+      return ChainRecordState.UNKNOWN;
+    }
   }
 
   async claim(operator: OperatorSession, proposalId: string) {

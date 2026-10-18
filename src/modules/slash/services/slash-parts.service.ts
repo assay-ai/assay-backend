@@ -5,6 +5,7 @@ import { SlashProposalPartEntity } from '@database/postgres/entities/slash-propo
 import { SlaWindowCallRepository } from '@database/postgres/repositories/sla-window-call.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { ChainErrors } from '@modules/chains/errors/chains.errors';
+import { ALERT_PORT, AlertPort } from '@shared/alerting';
 import {
   AssetId,
   ChainId,
@@ -42,6 +43,7 @@ import {
   beneficiaryEvidence,
   FailedCallPayment,
 } from '../domain/slash-beneficiary-evidence';
+import { alertExecutedWhileCancelWaited } from '../domain/executed-while-cancel-waited';
 import { planEvidenceMismatch } from '../domain/slash-plan-evidence';
 import { SlashErrors } from '../errors/slash.errors';
 import { SLASH_CAPS_READER, SlashCapsReaderPort } from '../ports/slash-caps-reader.port';
@@ -114,6 +116,7 @@ export class SlashPartsService {
     @Inject(SLASH_EXECUTOR) private readonly executor: SlashExecutorPort,
     @Inject(SLASH_PRORATA_CONFIG) private readonly config: ProRataSlashConfig,
     @Optional() @Inject(SLASH_CAPS_READER) private readonly caps: SlashCapsReaderPort | null = null,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
 
   /**
@@ -924,13 +927,72 @@ export class SlashPartsService {
     );
     // `cancelSlash` takes a `Pending` or (D-19) a `Disputed` record.
     const next = parts.find((part) => ['PENDING', 'DISPUTED'].includes(part.chainStatus));
-    if (!next) {
+    if (!next) return this.cancelWithNoPartStanding(proposal, parts, chainId, provider);
+    return this.executor.buildCancel({ chainId, requestId: next.chainRequestId, provider });
+  }
+
+  /**
+   * No part of the case stands, so there is nothing to sign. What is on chain
+   * is read (or, for a case with parts, taken from the parts the sweeps keep
+   * in step) — never assumed — and said in a 409 `SLASH_NOTHING_STANDING`
+   * whose context names it (`chainStatus`). Nothing is written: the case keeps
+   * its status for an operator (or the sweeps) to settle.
+   *
+   * - **A case with parts** never reads the case's own request id (parts live
+   *   at their own ids): `EXECUTED` if any part executed (money moved:
+   *   alerted), `PROPOSING` while a part is still `NONE` (it may land), else
+   *   `CANCELLED`.
+   * - **A case with no parts** (opened before the parts model) is the single
+   *   record under its own `chainRequestId`, read live: `Pending`/`Disputed`
+   *   stands and its cancel is built; `Executed` is a withdrawn judgement
+   *   executed while the cancel waited (alerted; recording it is the
+   *   admin-cancel sweep's `recordAnExecutionNobodyAskedFor`); `Cancelled`;
+   *   or `NOT_FOUND` (logged as an anomaly when a record was written).
+   *
+   * An unreadable chain stays a 503.
+   */
+  private async cancelWithNoPartStanding(
+    proposal: SlashProposalEntity,
+    parts: readonly SlashProposalPartEntity[],
+    chainId: ChainId,
+    provider: string,
+  ): Promise<SlashCancelIntent> {
+    const refuse = (chainStatus: string): never => {
+      throw SlashErrors.nothingStanding({ proposalId: proposal.id, chainStatus });
+    };
+
+    if (parts.length > 0) {
+      if (parts.some((part) => part.chainStatus === 'EXECUTED')) {
+        await alertExecutedWhileCancelWaited(this.alerts, this.logger, proposal, 'part');
+        return refuse('EXECUTED');
+      }
+      return refuse(parts.some((part) => part.chainStatus === 'NONE') ? 'PROPOSING' : 'CANCELLED');
+    }
+
+    let record: SlashRecordSnapshot | null;
+    try {
+      record = await this.executor.readRecord(proposal.chainRequestId, provider, chainId);
+    } catch (error) {
       throw SlashErrors.chainUnavailable({
         proposalId: proposal.id,
-        reason: 'no part of this case is pending on chain',
+        reason: `its on-chain record could not be read (${chainErrorName(error) ?? 'transport'})`,
       });
     }
-    return this.executor.buildCancel({ chainId, requestId: next.chainRequestId, provider });
+
+    if (record?.status === 'PENDING' || record?.status === 'DISPUTED') {
+      return this.executor.buildCancel({ chainId, requestId: proposal.chainRequestId, provider });
+    }
+    if (record?.status === 'EXECUTED') {
+      await alertExecutedWhileCancelWaited(this.alerts, this.logger, proposal, 'record');
+      return refuse('EXECUTED');
+    }
+    if (!record && proposal.chainProposedAt) {
+      this.logger.error(
+        `slash proposal ${proposal.id}: a record was written on chain (${proposal.chainProposedAt.toISOString()}) ` +
+          `but none is found at ${proposal.chainRequestId}; left for a human`,
+      );
+    }
+    return refuse(record?.status ?? 'NOT_FOUND');
   }
 
   /**

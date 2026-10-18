@@ -2,7 +2,7 @@ import { ApiPropertyOptional } from '@nestjs/swagger';
 import { Transform, Type } from 'class-transformer';
 import { IsDate, IsIn, IsInt, IsOptional, IsString, Max, MaxLength, Min } from 'class-validator';
 
-/** `asc` / `desc`, lowercase on the wire because every other query value is. */
+/** `asc` / `desc`, lowercase on the wire because every other query value is (upper case is accepted and lowered). */
 export enum SortDirection {
   ASC = 'asc',
   DESC = 'desc',
@@ -108,6 +108,9 @@ export class ListQueryDto {
   })
   @IsOptional()
   @IsIn(Object.values(SortDirection))
+  // Case-insensitive on input: `DESC` is as clear as `desc`, and refusing it
+  // with a 400 broke a whole list for a client that sent upper case.
+  @Transform(({ value }) => (typeof value === 'string' ? value.toLowerCase() : value))
   order: SortDirection = SortDirection.DESC;
 
   @ApiPropertyOptional({
