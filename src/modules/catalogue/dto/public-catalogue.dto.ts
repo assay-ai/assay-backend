@@ -73,9 +73,13 @@ export class PublicChainPriceDto {
   @ApiProperty({
     type: String,
     nullable: true,
-    description: 'The provider whose listing sets this price; null when none can be named.',
+    description:
+      'The provider whose listing sets this price; null when several eligible listings share it.',
   })
   providerId: string | null;
+
+  @ApiProperty({ description: 'Eligible listings on this chain. Name the provider only when 1.' })
+  listings: number;
 }
 
 export class PublicProviderDto {

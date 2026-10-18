@@ -425,9 +425,7 @@ export class CatalogueService {
     // One quote per chain a tool settles on (D6): a buyer pays on ONE chain, so
     // the headline is that chain's price, never the dearest across chains.
     const chainPrices = await Promise.all(
-      listed.map((tool: Tool, index) =>
-        this.pricesPerChain(tool, quotes[index], byTool.get(tool.id) ?? [], quoteContext),
-      ),
+      listed.map((tool: Tool, index) => this.pricesPerChain(tool, quotes[index], quoteContext)),
     );
 
     const tools = listed.map((tool: Tool, index): CatalogueToolDto => {
@@ -486,52 +484,57 @@ export class CatalogueService {
    * The price a call pays on each chain the tool settles on, with the provider
    * whose listing sets it.
    *
-   * Each chain is quoted by the router itself with the payer narrowed to that
+   * Each chain is priced by the router itself with the payer narrowed to that
    * one chain, so every figure is `quote()`'s own answer for a buyer funded
-   * there — the dearest eligible binding on that chain — and never a second
-   * derivation. A tool on one chain reuses the tool's own quote, which is that
-   * same question. A chain whose quote fails is left out, as the tool's own
-   * failed quote leaves the tool unroutable.
+   * there — the dearest eligible binding on that chain. The candidates are
+   * read once ({@link ProviderRouterService.snapshotCandidates}) and every
+   * chain is priced from that one snapshot, so the chain lines agree with
+   * each other. A tool on one chain reuses the tool's own quote, which is
+   * that same question. A chain that cannot be priced right now is left out.
    *
-   * `providerId` names the listing that price is: the provider whose ACTIVE
-   * binding offers that chain at exactly the quoted price (the lowest id when
-   * two do, so the answer is stable). `null` when no binding matches, which
-   * the screen reads as "provider not named".
+   * `providerId` and `listings` come from the router's own priced set, so a
+   * binding the router would not route to (understaked, at its ceiling, in a
+   * slash hold) never names a price: `providerId` is the one provider at the
+   * quoted price, or `null` when several are; `listings` is how many eligible
+   * bindings the price was taken over.
    */
   private async pricesPerChain(
     tool: Tool,
     quote: ToolQuote,
-    own: readonly ToolBinding[],
     context: RoutingContext,
   ): Promise<CatalogueChainPriceDto[]> {
     const chains = quote.settlementChains;
     if (quote.price === null || chains.length === 0) return [];
+    if (chains.length === 1) return [chainPrice(chains[0], quote)].filter(isPriced);
 
-    const quoted =
-      chains.length === 1
-        ? [{ chainId: chains[0], price: quote.price }]
-        : await Promise.all(
-            chains.map((chainId) =>
-              this.router
-                .quote(tool.id, { ...context, payerChains: [chainId], defaultChainId: chainId })
-                .then((perChain) => ({ chainId, price: perChain.price }))
-                .catch((error: unknown) => {
-                  const reason = error instanceof Error ? error.message : String(error);
-                  this.logger.warn(
-                    `${tool.name} (${tool.id}) on ${chainId}: quote failed — ${reason}`,
-                  );
-                  return { chainId, price: null };
-                }),
-            ),
-          );
+    try {
+      const candidates = await this.router.snapshotCandidates(tool.id);
+      return chains
+        .map((chainId) => {
+          try {
+            return chainPrice(
+              chainId,
+              this.router.quoteFromCandidates(tool, candidates, {
+                ...context,
+                payerChains: [chainId],
+                defaultChainId: chainId,
+              }),
+            );
+          } catch (error: unknown) {
+            this.warnChain(tool, chainId, error);
+            return null;
+          }
+        })
+        .filter(isPriced);
+    } catch (error: unknown) {
+      this.warnChain(tool, 'every chain', error);
+      return [];
+    }
+  }
 
-    return quoted
-      .filter((entry): entry is { chainId: ChainId; price: Money } => entry.price !== null)
-      .map(({ chainId, price }) => ({
-        chainId,
-        price: toMoneyDto(price),
-        providerId: listingAt(own, chainId, price),
-      }));
+  private warnChain(tool: Tool, chain: string, error: unknown): void {
+    const reason = error instanceof Error ? error.message : String(error);
+    this.logger.warn(`${tool.name} (${tool.id}) on ${chain}: quote failed — ${reason}`);
   }
 
   /**
@@ -726,23 +729,20 @@ function cheapest(bindings: readonly ToolBinding[]): CatalogueMoneyDto | null {
   return best ? money(best) : null;
 }
 
-/**
- * The provider whose binding offers `chainId` at exactly `price` — the listing
- * a chain's quote was taken from. The lowest provider id among several, so two
- * loads of one market name the same provider; `null` when none matches.
- */
-function listingAt(own: readonly ToolBinding[], chainId: ChainId, price: Money): string | null {
-  const atomic = MoneyUtil.toAtomic(price).toString();
-  const matches = own
-    .filter(
-      (binding) =>
-        (binding.settlementChains ?? []).includes(chainId) &&
-        binding.assetId === price.asset &&
-        BigInt(binding.priceAmount).toString() === atomic,
-    )
-    .map((binding) => binding.providerId)
-    .sort();
-  return matches[0] ?? null;
+/** One chain's entry from the router's quote for a payer on that chain; `null` when it has no price. */
+function chainPrice(chainId: ChainId, quote: ToolQuote): CatalogueChainPriceDto | null {
+  if (quote.price === null) return null;
+  const pricedBy = quote.pricedBy ?? [];
+  return {
+    chainId,
+    price: toMoneyDto(quote.price),
+    providerId: pricedBy.length === 1 ? pricedBy[0] : null,
+    listings: quote.listings ?? 0,
+  };
+}
+
+function isPriced(entry: CatalogueChainPriceDto | null): entry is CatalogueChainPriceDto {
+  return entry !== null;
 }
 
 function money(binding: ToolBinding): CatalogueMoneyDto {

@@ -210,12 +210,20 @@ export class CatalogueChainPriceDto {
   })
   price: CatalogueMoneyDto;
 
-  @ApiPropertyOptional({
+  @ApiProperty({
     type: String,
     nullable: true,
-    description: 'The provider whose listing sets this price; null when none can be named.',
+    description:
+      'The provider whose listing sets this price; null when several eligible listings share it.',
   })
   providerId: string | null;
+
+  @ApiProperty({
+    description:
+      'Eligible listings on this chain the price was taken over. Name the provider only when 1.',
+    example: 1,
+  })
+  listings: number;
 }
 
 export class CatalogueToolDto {
@@ -454,8 +462,9 @@ export class CatalogueToolDto {
   @ApiProperty({
     type: [CatalogueChainPriceDto],
     description:
-      'The price per chain a call can settle on, with the provider setting it — one entry per ' +
-      '`settlementChains` entry. Empty when nothing is routable.',
+      'The price per chain a call can settle on, with the provider setting it — at most one entry ' +
+      'per `settlementChains` entry; a chain that cannot be quoted right now is left out. Empty ' +
+      'when nothing is routable.',
   })
   prices: CatalogueChainPriceDto[];
 }

@@ -668,14 +668,14 @@ export class ProviderRouterService {
     const priced = pricedOnQuotedChain(eligible, settlementChains, context);
     const pricingMode = quotedPricingMode(priced);
     const chargeable = priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE);
+    const priceSet = pricingMode === PricingMode.FREE ? priced : chargeable;
+    const price = dearestPrice(priceSet);
 
     return {
       tool,
-      price: dearestPrice(
-        pricingMode === PricingMode.FREE
-          ? priced
-          : priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE),
-      ),
+      price,
+      pricedBy: pricedByOf(priceSet, price),
+      listings: priceSet.length,
       pricingMode,
       routableBindings: eligible.length,
       paidBindings: priced.filter(({ binding }) => binding.pricingMode !== PricingMode.FREE).length,
@@ -1291,6 +1291,18 @@ export interface ToolQuote {
    * platform look like it lacks the tool."*
    */
   readonly settlementChains: readonly ChainId[];
+  /**
+   * The providers whose eligible bindings on the quoted chain are at exactly
+   * {@link price} — whose listing sets the quote. Sorted, de-duplicated.
+   * Absent on a quote with no routable supply.
+   */
+  readonly pricedBy?: readonly string[];
+  /**
+   * How many eligible bindings on the quoted chain the price was taken over
+   * (the chargeable ones; every one for a FREE quote). Absent on a quote with
+   * no routable supply.
+   */
+  readonly listings?: number;
   /** Traffic-weighted across eligible bindings. `null` when nothing is measured. */
   readonly p95LatencyMs: number | null;
   readonly qualityRate: number | null;
@@ -1609,6 +1621,18 @@ function pricedOnQuotedChain(
     context.enabledChains,
   );
   return eligible.filter((candidate) => settleableChains(candidate, context).includes(chain));
+}
+
+/** The providers whose binding in `set` is priced at exactly `price`, sorted and de-duplicated. */
+function pricedByOf(set: readonly RoutingCandidate[], price: Money): string[] {
+  const atomic = MoneyUtil.toAtomic(price);
+  return [
+    ...new Set(
+      set
+        .filter(({ binding }) => BigInt(binding.priceAmount) === atomic)
+        .map(({ binding }) => binding.providerId),
+    ),
+  ].sort();
 }
 
 /**

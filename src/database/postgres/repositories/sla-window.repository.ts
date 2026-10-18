@@ -238,7 +238,10 @@ export class SlaWindowRepository extends OrganizationScopedRepository<SlaWindowE
    * closed ones — "100% failed" beside a provider passing ~98% of its calls.
    * A buyer asks "how often does this fail now", so the figure covers the
    * windows still collecting: every `OPEN` window, plus every `CLOSED` window
-   * that closed inside the period. Penalties are NOT computed here and do not
+   * that closed inside the period. The period is therefore approximate by up
+   * to one window: a window counts whole, so a closed one can hold calls from
+   * up to its `max_age_ms` (7 days) before the period, and an open one counts
+   * from when it opened. Penalties are NOT computed here and do not
    * change: a strike and a slash still read a single closed window's frozen
    * counters (`SlaWindowService.closeWindow`), never this sum.
    *
