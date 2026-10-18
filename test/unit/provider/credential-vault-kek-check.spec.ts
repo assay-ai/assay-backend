@@ -59,7 +59,7 @@ describe('CredentialVaultService.verifyKeks', () => {
 
   it('does nothing without keys or without a check repository', async () => {
     await expect(build([]).vault.verifyKeks()).resolves.toBeUndefined();
-    const warn = jest.spyOn(Logger, 'warn').mockImplementation(() => undefined);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const bare = new CredentialVaultService({} as never, { active: null, byId: new Map() });
     await expect(bare.onModuleInit()).resolves.toBeUndefined();
     warn.mockRestore();
@@ -68,7 +68,7 @@ describe('CredentialVaultService.verifyKeks', () => {
 
 describe('CredentialVaultService without a check repository', () => {
   it('warns once at boot that the key check was skipped', async () => {
-    const warn = jest.spyOn(Logger, 'warn').mockImplementation(() => undefined);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     const bare = new CredentialVaultService({} as never, { active: null, byId: new Map() });
     await bare.onModuleInit();
     expect(warn).toHaveBeenCalledTimes(1);
