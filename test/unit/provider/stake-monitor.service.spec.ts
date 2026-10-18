@@ -207,6 +207,11 @@ describe('StakeMonitorService — grace periods', () => {
     const again = await sweep('55000000', later(48));
     expect(again).not.toBe(first);
     expect(again).toBe(`${BINDING_A}:${later(48).toISOString()}:55000000:50000000`);
+
+    // Below the minimum, then cured back into the band at the same figures: a new incident too.
+    expect(await sweep('40000000', later(50))).toBeNull();
+    const cured = await sweep('55000000', later(52));
+    expect(cured).toBe(`${BINDING_A}:${later(52).toISOString()}:55000000:50000000`);
   });
 
   it('names a catalogue string id as the tool, as the case page does', async () => {
