@@ -18,18 +18,23 @@
  * no header       → not the relay talking (a Cloudflare error page): unavailable
  * ```
  *
+ * The Worker's own `{ kind: "TIMEOUT" }` is the authoritative "provider was
+ * slow"; a deadline expiring on this side means the relay stalled.
+ *
  * Every failure of the relay itself is `RELAY_UNAVAILABLE` — Assay's fault,
  * never counted against the provider — and there is no fallback to a direct
  * call. The token is only ever written into the request header: no error, log
  * line or error context built here contains it.
  */
 
+import { isUtf8 } from 'node:buffer';
 import * as http from 'node:http';
 import * as https from 'node:https';
+import { isIP } from 'node:net';
 
 import { EgressError, EgressFailureKind } from './egress.errors';
 import { EgressLimits } from './egress.policy';
-import { EgressRelayConfig } from './egress-relay.config';
+import { EgressRelayConfig, RELAY_ALLOWED_PORTS } from './egress-relay.config';
 import { withSanctionedEgress } from './egress-lockdown';
 
 export interface RelayHop {
@@ -66,23 +71,48 @@ const ENVELOPE_DROP = new Set(['host', 'content-length', 'connection', 'transfer
 /** Enough to read `{"kind":"..."}`; an error body larger than this is not the relay's. */
 const MAX_ERROR_BODY_BYTES = 4096;
 
+/**
+ * The relay leg's own deadline sits this far past the envelope's `timeoutMs`,
+ * so a slow provider is reported by the Worker as `{ kind: "TIMEOUT" }` — the
+ * authoritative "provider was slow" — before any timer here fires. A timer
+ * here firing therefore means the relay itself stalled.
+ */
+export const RELAY_TIMEOUT_MARGIN_MS = 1_500;
+/** The Worker is never given less than this to reach the provider. */
+export const RELAY_MIN_TIMEOUT_MS = 1_000;
+
+/**
+ * Idle pooled sockets are dropped after this, well below typical edge
+ * keep-alive, so a socket the far end already closed is rarely reused.
+ */
+const RELAY_IDLE_SOCKET_MS = 30_000;
+
+export interface EgressRelayTransportOptions {
+  /** Tests only; production uses the default. */
+  readonly maxSockets?: number;
+}
+
 export class EgressRelayTransport {
   private readonly agent: http.Agent;
   private readonly module: typeof http | typeof https;
   private readonly endpoint: URL;
-  private readonly authorization: string;
+  /** ES-private, so `util.inspect` and JSON serialisation never see it. */
+  readonly #authorization: string;
 
-  constructor(config: EgressRelayConfig) {
+  constructor(config: EgressRelayConfig, options: EgressRelayTransportOptions = {}) {
     this.endpoint = new URL(RELAY_PATH, config.url);
     const secure = this.endpoint.protocol === 'https:';
     this.module = secure ? https : http;
     // One pool, bound to the fixed relay host. Pooling is safe here and only
     // here: the relay is operator config, and the provider's address was
     // already checked before the hop was handed over.
-    this.agent = secure
-      ? new https.Agent({ keepAlive: true, maxSockets: 256 })
-      : new http.Agent({ keepAlive: true, maxSockets: 256 });
-    this.authorization = `Bearer ${config.token}`;
+    const agentOptions = {
+      keepAlive: true,
+      maxSockets: options.maxSockets ?? 256,
+      timeout: RELAY_IDLE_SOCKET_MS,
+    };
+    this.agent = secure ? new https.Agent(agentOptions) : new http.Agent(agentOptions);
+    this.#authorization = `Bearer ${config.token}`;
   }
 
   /** Close pooled sockets. Called on module shutdown. */
@@ -93,15 +123,21 @@ export class EgressRelayTransport {
   /**
    * Relay one hop. `limits.totalTimeoutMs` is the budget left for this hop.
    *
-   * The client's limits apply to the relay leg as they would to a direct one:
-   * a headers deadline, a body deadline, and the byte cap on declared and on
-   * arrived length.
+   * The Worker gets `timeoutMs` = that budget minus {@link RELAY_TIMEOUT_MARGIN_MS}
+   * (bounded by the per-hop headers + body limits, floor
+   * {@link RELAY_MIN_TIMEOUT_MS}); the relay leg here runs on one deadline that
+   * margin later. Expiry of that deadline — connect, headers or body — is
+   * `RELAY_UNAVAILABLE`. The byte cap applies on declared and on arrived length.
    */
   send(hop: RelayHop, limits: EgressLimits): Promise<RelayedResponse> {
+    assertRelayable(hop);
+
     const budget = Math.max(1, Math.floor(limits.totalTimeoutMs));
-    const startedAt = Date.now();
-    const remaining = (want: number): number =>
-      Math.max(1, Math.min(want, budget - (Date.now() - startedAt)));
+    const workerTimeoutMs = Math.max(
+      RELAY_MIN_TIMEOUT_MS,
+      Math.min(limits.headersTimeoutMs + limits.bodyTimeoutMs, budget - RELAY_TIMEOUT_MARGIN_MS),
+    );
+    const legTimeoutMs = Math.min(budget, workerTimeoutMs + RELAY_TIMEOUT_MARGIN_MS);
 
     const envelope = Buffer.from(
       JSON.stringify({
@@ -109,7 +145,7 @@ export class EgressRelayTransport {
         method: hop.method,
         headers: envelopeHeaders(hop.headers),
         body: hop.body === undefined ? null : hop.body.toString('utf8'),
-        timeoutMs: budget,
+        timeoutMs: workerTimeoutMs,
         maxResponseBytes: limits.maxResponseBytes,
       }),
       'utf8',
@@ -117,22 +153,13 @@ export class EgressRelayTransport {
 
     return new Promise<RelayedResponse>((resolve, reject) => {
       let settled = false;
-      let headersTimer: NodeJS.Timeout | undefined;
-      let bodyTimer: NodeJS.Timeout | undefined;
-
-      const clearTimers = (): void => {
-        if (headersTimer) clearTimeout(headersTimer);
-        if (bodyTimer) clearTimeout(bodyTimer);
-        headersTimer = undefined;
-        bodyTimer = undefined;
-      };
 
       // A failure destroys the socket (it may be mid-body); a success leaves
       // it in the pool, which is the point of the keep-alive agent.
       const fail = (error: EgressError): void => {
         if (settled) return;
         settled = true;
-        clearTimers();
+        clearTimeout(legTimer);
         req.destroy();
         reject(error);
       };
@@ -140,14 +167,14 @@ export class EgressRelayTransport {
       const succeed = (response: RelayedResponse): void => {
         if (settled) return;
         settled = true;
-        clearTimers();
+        clearTimeout(legTimer);
         resolve(response);
       };
 
       const unavailable = (detail: string, cause?: unknown): EgressError =>
         new EgressError(EgressFailureKind.RELAY_UNAVAILABLE, detail, {
           url: hop.url,
-          ...(cause === undefined ? {} : { cause: redact(cause, this.authorization) }),
+          ...(cause === undefined ? {} : { cause: redact(cause, this.#authorization) }),
         });
 
       const req = withSanctionedEgress(() =>
@@ -155,17 +182,19 @@ export class EgressRelayTransport {
           method: 'POST',
           agent: this.agent,
           headers: {
-            authorization: this.authorization,
+            authorization: this.#authorization,
             'content-type': 'application/json',
             'content-length': String(envelope.length),
           },
         }),
       );
 
-      req.on('response', (res: http.IncomingMessage) => {
-        if (headersTimer) clearTimeout(headersTimer);
-        headersTimer = undefined;
+      // One deadline for the whole leg: connect, headers and body.
+      const legTimer = setTimeout(() => {
+        fail(unavailable(`relay did not answer within ${legTimeoutMs}ms`));
+      }, legTimeoutMs);
 
+      req.on('response', (res: http.IncomingMessage) => {
         const status = res.statusCode ?? 0;
         const headers = flatten(res.headers);
         const marker = headers[RELAY_HEADER];
@@ -193,16 +222,6 @@ export class EgressRelayTransport {
 
         const chunks: Buffer[] = [];
         let received = 0;
-
-        bodyTimer = setTimeout(() => {
-          fail(
-            new EgressError(
-              EgressFailureKind.TIMEOUT,
-              `body did not complete within ${limits.bodyTimeoutMs}ms`,
-              { url: hop.url, partialBody: partial(chunks) },
-            ),
-          );
-        }, remaining(limits.bodyTimeoutMs));
 
         res.on('data', (chunk: Buffer) => {
           received += chunk.length;
@@ -245,18 +264,32 @@ export class EgressRelayTransport {
         fail(unavailable('relay connection failed', error));
       });
 
-      headersTimer = setTimeout(() => {
-        fail(
-          new EgressError(
-            EgressFailureKind.TIMEOUT,
-            `no response headers within ${limits.headersTimeoutMs}ms`,
-            { url: hop.url },
-          ),
-        );
-      }, remaining(limits.headersTimeoutMs));
-
       req.end(envelope);
     });
+  }
+}
+
+/**
+ * Refuse, before anything is sent, a hop the Worker cannot carry: it fetches
+ * `https:` only, never an IP-literal host, and only on Cloudflare's allowed
+ * ports. That is the provider's URL being unusable, not the relay failing.
+ * Protocol v1 carries the body as a UTF-8 string, so a binary body is refused
+ * rather than silently corrupted.
+ */
+function assertRelayable(hop: RelayHop): void {
+  const url = new URL(hop.url);
+  const refuse = (detail: string): never => {
+    throw new EgressError(EgressFailureKind.URL_INVALID, detail, { url: hop.url });
+  };
+  if (url.protocol !== 'https:') refuse('provider calls through the relay must use https');
+  if (isIP(url.hostname.replace(/^\[|\]$/g, '')) !== 0) {
+    refuse('provider calls through the relay need a hostname, not an IP address');
+  }
+  if (url.port !== '' && !RELAY_ALLOWED_PORTS.includes(Number(url.port))) {
+    refuse(`port ${url.port} is not one the relay can reach (${RELAY_ALLOWED_PORTS.join(', ')})`);
+  }
+  if (Buffer.isBuffer(hop.body) && !isUtf8(hop.body)) {
+    refuse('request body is not UTF-8; the relay carries UTF-8 bodies only');
   }
 }
 
