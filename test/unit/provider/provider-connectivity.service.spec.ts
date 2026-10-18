@@ -123,7 +123,7 @@ interface FakeHttpClient {
   request: jest.Mock;
 }
 
-function buildHarness() {
+function buildHarness(options: { relayConfigured?: boolean } = {}) {
   const providers = new FakeProviderRepository();
   const checks = new FakeConnectivityCheckRepository();
   const http: FakeHttpClient = { request: jest.fn() };
@@ -134,6 +134,7 @@ function buildHarness() {
     http as unknown as EgressHttpClient,
     new ProviderEgressLimiter(),
     fakeLookup,
+    options.relayConfigured ? { url: new URL('https://egress.test'), token: 'a'.repeat(64) } : null,
   );
 
   return { providers, checks, http, service };
@@ -168,6 +169,32 @@ describe('a live endpoint that answers', () => {
     expect(providers.rows.get(ORG)?.endpoint).toBe(PUBLIC_ENDPOINT);
     expect(checks.rows).toHaveLength(1);
     expect(checks.rows[0].outcome).toBe(ConnectivityOutcome.REACHABLE);
+  });
+
+  it('asks for the egress relay', async () => {
+    const { service, providers, http } = buildHarness();
+    providers.seed(ORG, null);
+    http.request.mockResolvedValue({
+      status: 200,
+      headers: {},
+      body: '{}',
+      bytes: 2,
+      url: PUBLIC_ENDPOINT,
+      redirects: 0,
+    });
+    await service.declareEndpoint(ORG, PUBLIC_ENDPOINT);
+    expect(http.request.mock.calls[0][0].policy.relay).toBe(true);
+  });
+
+  it('refuses a port the relay cannot reach when the relay is configured', async () => {
+    const { service, providers, http } = buildHarness({ relayConfigured: true });
+    providers.seed(ORG, null);
+    await expectErrorCodeAsync(
+      () => service.declareEndpoint(ORG, 'https://p.test:3000/x'),
+      ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
+    );
+    expect(http.request).not.toHaveBeenCalled();
+    expect(providers.rows.get(ORG)?.endpoint).toBeNull();
   });
 
   it('takes its slot from the connectivity pool, not the tester pool (N-3)', async () => {

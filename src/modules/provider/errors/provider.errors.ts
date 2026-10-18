@@ -1,3 +1,4 @@
+import { RELAY_ALLOWED_PORTS } from '@shared/network/egress/egress-relay.config';
 import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors/error-catalog';
 
 /**
@@ -236,6 +237,8 @@ export enum ProviderErrorCode {
   PROVIDER_INVALID_CREDENTIAL_HEADERS = 'PROVIDER_INVALID_CREDENTIAL_HEADERS',
   /** A credential set names an origin the binding does not use (draft or published endpoint). */
   PROVIDER_CREDENTIAL_ORIGIN_MISMATCH = 'PROVIDER_CREDENTIAL_ORIGIN_MISMATCH',
+  /** The endpoint names a port the egress relay cannot reach. */
+  PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED = 'PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED',
 }
 
 export type ProviderErrorCodesArePrefixed = AssertDomainErrorCodes<
@@ -322,6 +325,13 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `Signature does not verify against the challenged address` +
       `${context?.accountId ? `: ${context.accountId}` : ''}`,
+  },
+  endpointPortNotRelayable: {
+    code: ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
+    statusCode: 400,
+    message: (context?: Record<string, any>) =>
+      `Port ${context?.port} is not supported. Use 443 or one of: ` +
+      `${RELAY_ALLOWED_PORTS.filter((port) => port !== 443).join(', ')}.`,
   },
   endpointNotDeclared: {
     code: ProviderErrorCode.PROVIDER_ENDPOINT_NOT_DECLARED,

@@ -204,6 +204,7 @@ function bindingPolicy(): EgressPolicy {
   return Object.freeze({
     ...UNTRUSTED_EGRESS_POLICY,
     allowedProtocols: Object.freeze([...bindingEndpointProtocols()]),
+    relay: true,
   });
 }
 

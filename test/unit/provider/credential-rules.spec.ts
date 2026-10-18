@@ -2,6 +2,7 @@ import {
   credentialHeaderProblems,
   credentialQueryKeys,
   originOf,
+  relayUnsupportedPort,
   secretConstantHeaders,
 } from '@modules/provider/credentials/credential-rules';
 import { RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
@@ -93,5 +94,22 @@ describe('credentialHeaderProblems — messages', () => {
 describe('originOf', () => {
   it('lowercases and drops default ports and paths', () => {
     expect(originOf('https://API.x.test:443/a?b')).toBe('https://api.x.test');
+  });
+});
+
+describe('relayUnsupportedPort', () => {
+  it('names a port the relay cannot reach', () => {
+    expect(relayUnsupportedPort('https://p.test:3000/x', true)).toBe(3000);
+  });
+  it('allows anything when the relay is not configured', () => {
+    expect(relayUnsupportedPort('https://p.test:3000/x', false)).toBeNull();
+  });
+  it('allows the default and the listed ports', () => {
+    expect(relayUnsupportedPort('https://p.test/x', true)).toBeNull();
+    expect(relayUnsupportedPort('https://p.test:8443/x', true)).toBeNull();
+    expect(relayUnsupportedPort('https://p.test:443/x', true)).toBeNull();
+  });
+  it('leaves unparsable input to the other validators', () => {
+    expect(relayUnsupportedPort('not a url', true)).toBeNull();
   });
 });

@@ -1,6 +1,8 @@
 import { RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 import { isConstNode } from '@modules/tool/domain/mapping/normalize';
 
+import { RELAY_ALLOWED_PORTS } from '@shared/network/egress/egress-relay.config';
+
 import { ProviderErrors } from '../errors/provider.errors';
 import { CredentialHeader } from './credential-vault.crypto';
 
@@ -146,4 +148,23 @@ export function assertCredentialPut(
   if (problems.length > 0) {
     throw ProviderErrors.invalidCredentialHeaders({ problems });
   }
+}
+
+/**
+ * The explicit port of `endpoint` when the egress relay cannot reach it, else
+ * null. Only meaningful when the relay is configured: with provider calls
+ * going direct, every port is fine. Unparsable input is left to the other
+ * validators.
+ */
+export function relayUnsupportedPort(endpoint: string, relayConfigured: boolean): number | null {
+  if (!relayConfigured) return null;
+  let url: URL;
+  try {
+    url = new URL(endpoint);
+  } catch {
+    return null;
+  }
+  if (!url.port) return null;
+  const port = Number(url.port);
+  return RELAY_ALLOWED_PORTS.includes(port) ? null : port;
 }

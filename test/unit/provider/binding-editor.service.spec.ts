@@ -139,6 +139,7 @@ function row(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity {
 function build(
   stored: ToolBindingEntity | null = null,
   versions: readonly Partial<BindingVersionEntity>[] = [],
+  options: { relayConfigured?: boolean } = {},
 ) {
   const written: Array<{ entity: string; row: unknown }> = [];
 
@@ -211,6 +212,9 @@ function build(
       stakes,
       GATE_CHAINS,
       new Map(GATE_CHAINS.map((chainId) => [chainId, MINIMUM_STAKE])),
+      options.relayConfigured
+        ? { url: new URL('https://egress.test'), token: 'a'.repeat(64) }
+        : null,
     ),
     written,
     dataSource,
@@ -363,6 +367,16 @@ describe('BindingEditorService.create — what gets stored', () => {
     await expectErrorCodeAsync(
       () => service.create(PROVIDER, SUBJECT, body({ endpoint: 'https://x.test?apikey=1' })),
       ProviderErrorCode.PROVIDER_CREDENTIAL_IN_QUERY,
+    );
+    expect(written).toEqual([]);
+  });
+
+  it('refuses a port the relay cannot reach, and writes nothing', async () => {
+    const { service, written } = build(null, [], { relayConfigured: true });
+
+    await expectErrorCodeAsync(
+      () => service.create(PROVIDER, SUBJECT, body({ endpoint: 'https://p.test:3000/x' })),
+      ProviderErrorCode.PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED,
     );
     expect(written).toEqual([]);
   });
