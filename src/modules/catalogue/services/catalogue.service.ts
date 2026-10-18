@@ -79,6 +79,13 @@ import {
 } from '../dto/get-catalogue.dto';
 import { TtlCache } from '../domain/ttl-cache';
 
+/**
+ * How long one agent's escrow "withdrawal pending" reading is reused for
+ * `servesYou`: an advisory field, so a short-lived reading spares the RPC on
+ * every signed-in provider read. The call path always reads live.
+ */
+export const WITHDRAWAL_FLAG_CACHE_MS = 15_000;
+
 /** How long one market read is reused, signed-in and public alike. */
 export const CATALOGUE_CACHE_MS = 30_000;
 
@@ -183,6 +190,8 @@ interface CatalogueWindow {
 export class CatalogueService {
   private readonly logger = new Logger(CatalogueService.name);
   private readonly windows = new TtlCache<CatalogueWindow>(CATALOGUE_CACHE_MS);
+  /** `chainId|account` → whether a withdrawal stands, read at most once per {@link WITHDRAWAL_FLAG_CACHE_MS}. */
+  private readonly withdrawalFlags = new Map<string, { expiresAt: number; withdrawing: boolean }>();
 
   constructor(
     private readonly bindings: ToolBindingRepository,
@@ -385,10 +394,13 @@ export class CatalogueService {
       this.yourChains(organizationId),
     ]);
     return {
-      providers: providers.map((provider) => ({
-        ...provider,
-        servesYou: servesYouOf([...(served.get(provider.providerId)?.values() ?? [])], yours),
-      })),
+      providers: providers.map((provider) => {
+        const servesYou = servesYouOf(
+          [...(served.get(provider.providerId)?.values() ?? [])],
+          yours.chains,
+        );
+        return { ...provider, servesYou, notServedReason: reasonOf(servesYou, yours) };
+      }),
     };
   }
 
@@ -401,18 +413,15 @@ export class CatalogueService {
       this.getProvider(providerId),
       this.yourChains(organizationId),
     ]);
-    const tools = detail.tools.map((tool) => ({
-      ...tool,
-      servesYou: servesYouOf([tool.chains], yours),
-    }));
-    return {
-      ...detail,
-      servesYou: servesYouOf(
-        tools.map((tool) => tool.chains),
-        yours,
-      ),
-      tools,
-    };
+    const tools = detail.tools.map((tool) => {
+      const servesYou = servesYouOf([tool.chains], yours.chains);
+      return { ...tool, servesYou, notServedReason: reasonOf(servesYou, yours) };
+    });
+    const servesYou = servesYouOf(
+      tools.map((tool) => tool.chains),
+      yours.chains,
+    );
+    return { ...detail, servesYou, notServedReason: reasonOf(servesYou, yours), tools };
   }
 
   /**
@@ -428,13 +437,13 @@ export class CatalogueService {
    * When the escrow cannot be read, the chain still counts and the reason is
    * logged: this is advisory, and the call path keeps its own fail-closed read.
    */
-  private async yourChains(organizationId: string): Promise<ReadonlySet<string>> {
+  private async yourChains(organizationId: string): Promise<YourChains> {
     const fallback = this.config.get<string>('auth.privy.defaultChainId') || this.enabledChains[0];
     const agents = await this.agents.find({
       where: { organizationId, status: 'ACTIVE' },
       select: { id: true, chainId: true, primaryAccountId: true },
     });
-    if (agents.length === 0) return new Set([fallback]);
+    if (agents.length === 0) return { chains: new Set([fallback]), allWithdrawing: false };
 
     const withdrawing = new Set<string>();
     const wallets = groupBy(
@@ -444,14 +453,12 @@ export class CatalogueService {
     await Promise.all(
       [...wallets].map(async ([chainId, own]) => {
         try {
-          const asset = chainMetadata(chainId as ChainId).settlementAsset as AssetId;
-          const readings = await this.escrow.readMany(
+          const flags = await this.withdrawalFlagsOn(
+            chainId,
             own.map((agent) => agent.primaryAccountId as AccountId),
-            asset,
           );
           for (const agent of own) {
-            const reading = readings.get(agent.primaryAccountId as AccountId);
-            if (reading && reading.withdrawRequested > 0n) withdrawing.add(agent.id);
+            if (flags.get(agent.primaryAccountId as AccountId)) withdrawing.add(agent.id);
           }
         } catch (error: unknown) {
           this.logger.warn(`servesYou: escrow unreadable on ${chainId} — ${String(error)}`);
@@ -459,11 +466,47 @@ export class CatalogueService {
       }),
     );
 
-    return new Set(
+    const chains = new Set(
       agents
         .filter((agent) => !withdrawing.has(agent.id))
         .map((agent) => agent.chainId ?? fallback),
     );
+    return { chains, allWithdrawing: chains.size === 0 };
+  }
+
+  /**
+   * Whether each account's escrow on `chainId` has a standing withdrawal,
+   * reusing a reading for {@link WITHDRAWAL_FLAG_CACHE_MS}; only the accounts
+   * with no fresh reading go to the chain, in one batched read. A failed read
+   * is never cached (the caller keeps the chain: fail-open for display).
+   */
+  private async withdrawalFlagsOn(
+    chainId: string,
+    accounts: readonly AccountId[],
+  ): Promise<ReadonlyMap<AccountId, boolean>> {
+    const now = Date.now();
+    const key = (account: AccountId) => `${chainId}|${account}`;
+    const flags = new Map<AccountId, boolean>();
+    const stale: AccountId[] = [];
+    for (const account of accounts) {
+      const hit = this.withdrawalFlags.get(key(account));
+      if (hit && hit.expiresAt > now) flags.set(account, hit.withdrawing);
+      else stale.push(account);
+    }
+    if (stale.length === 0) return flags;
+
+    const asset = chainMetadata(chainId as ChainId).settlementAsset as AssetId;
+    const readings = await this.escrow.readMany(stale, asset);
+    for (const account of stale) {
+      const reading = readings.get(account);
+      const withdrawing = Boolean(reading && reading.withdrawRequested > 0n);
+      flags.set(account, withdrawing);
+      this.withdrawalFlags.set(key(account), {
+        expiresAt: now + WITHDRAWAL_FLAG_CACHE_MS,
+        withdrawing,
+      });
+    }
+    return flags;
   }
 
   private async loadProviders(window: CatalogueWindow): Promise<CatalogueProviderListDto> {
@@ -593,6 +636,7 @@ export class CatalogueService {
           // listing of the tool as a whole.
           chains: chainsOf(served?.get(binding.toolId)),
           servesYou: null,
+          notServedReason: null,
         }),
       )
       .sort((a, b) => a.name.localeCompare(b.name));
@@ -945,6 +989,7 @@ export class CatalogueService {
       quality: toQualityDto(counters),
       chains: chains ? [...chains] : null,
       servesYou: null,
+      notServedReason: null,
     };
   }
 }
@@ -963,6 +1008,21 @@ function knownUnionOf(lists: readonly (readonly ChainId[] | null)[]): string[] |
   const known = lists.filter((chains): chains is readonly ChainId[] => chains !== null);
   if (known.length === 0 && lists.length > 0) return null;
   return [...new Set(known.flat())];
+}
+
+/** The caller's paying chains, and whether every agent is withdrawing (so none is left). */
+interface YourChains {
+  readonly chains: ReadonlySet<string>;
+  readonly allWithdrawing: boolean;
+}
+
+/**
+ * Why a provider does not serve the caller, when the reason is the caller's
+ * own: every agent has a standing withdrawal, so no chain is left to pay on.
+ * Otherwise `null` (the chain mismatch or "takes no calls" reads from `chains`).
+ */
+function reasonOf(servesYou: boolean | null, yours: YourChains): 'WITHDRAWING' | null {
+  return servesYou === false && yours.allWithdrawing ? 'WITHDRAWING' : null;
 }
 
 /**

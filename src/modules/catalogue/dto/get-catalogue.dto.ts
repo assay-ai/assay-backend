@@ -216,6 +216,16 @@ export class CatalogueProviderDto {
       'agents’ chains, less a chain with a standing withdrawal). null when unknown.',
   })
   servesYou: boolean | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['WITHDRAWING'],
+    description:
+      'Per caller, when servesYou is false for a reason of your own: WITHDRAWING (every agent ' +
+      'has a standing withdrawal, so no chain is left to pay on). null otherwise.',
+  })
+  notServedReason: 'WITHDRAWING' | null;
 }
 
 export class CatalogueProviderListDto {
@@ -560,6 +570,16 @@ export class CatalogueProviderToolDto {
       'Per caller: one of your agents’ chains is in `chains`. null when unknown or unasked.',
   })
   servesYou: boolean | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['WITHDRAWING'],
+    description:
+      'Per caller, when servesYou is false for a reason of your own: WITHDRAWING (every agent ' +
+      'has a standing withdrawal, so no chain is left to pay on). null otherwise.',
+  })
+  notServedReason: 'WITHDRAWING' | null;
 }
 
 export class CatalogueProviderDetailDto extends CatalogueProviderDto {
