@@ -18,7 +18,17 @@ import { registrableDomain } from './registrable-domain';
  * the same `client_id` byte for byte, so a spelling the fetch would rewrite is
  * refused rather than normalised.
  *
- * No other URL on the MCP origin is a CIMD document: we never fetch ourselves.
+ * Nothing under Assay's own registrable domain (the MCP origin's eTLD+1, so
+ * also the API and web hosts) is a CIMD document: we never fetch ourselves.
+ * Percent-escapes must be well formed, and `%00` is refused.
+ *
+ * `classify` checks text only. `CIMD` means "lexically acceptable", not
+ * "safe to fetch": a DNS name that resolves to a private or loopback address
+ * (`127.0.0.1.nip.io`) is still `CIMD` here. The CIMD fetch must enforce the
+ * network checks in `EgressHttpClient` (resolved-IP checks including
+ * IPv4-mapped IPv6, connecting to the checked address, no redirects).
+ *
+ * A missing or malformed `options` gives `UNKNOWN`; it never throws.
  */
 export type ClientKind = 'BUILTIN' | 'CIMD' | 'DCR' | 'UNKNOWN';
 
@@ -37,7 +47,9 @@ export function builtinClientId(mcpPublicUrl: string): string {
 }
 
 export function classify(clientId: string, options: ClassifyOptions): { kind: ClientKind } {
-  if (typeof clientId !== 'string') return { kind: 'UNKNOWN' };
+  if (typeof clientId !== 'string' || typeof options?.mcpPublicUrl !== 'string') {
+    return { kind: 'UNKNOWN' };
+  }
   if (clientId === builtinClientId(options.mcpPublicUrl)) return { kind: 'BUILTIN' };
   if (DCR_RE.test(clientId)) return { kind: 'DCR' };
   if (isCimdUrl(clientId, options)) return { kind: 'CIMD' };
@@ -48,6 +60,8 @@ function isCimdUrl(raw: string, options: ClassifyOptions): boolean {
   if (raw.length > CIMD_MAX_LENGTH) return false;
   // Raw checks before parsing: WHATWG drops an empty fragment and rewrites `\`.
   if (raw.includes('#') || raw.includes('\\') || /[\s\p{Cc}]/u.test(raw)) return false;
+  // Every `%` starts a two-hex-digit escape, and none of them is NUL.
+  if (/%(?![0-9A-Fa-f]{2})|%00/.test(raw)) return false;
   let url: URL;
   try {
     url = new URL(raw);
@@ -58,7 +72,7 @@ function isCimdUrl(raw: string, options: ClassifyOptions): boolean {
   if (url.username !== '' || url.password !== '') return false;
   if (url.pathname === '/' || url.hash !== '') return false;
   if (!isCanonical(raw, url)) return false;
-  if (sameOrigin(url, options.mcpPublicUrl)) return false;
+  if (sameOrigin(url, options.mcpPublicUrl) || ownSite(url, options.mcpPublicUrl)) return false;
 
   if (url.protocol === 'https:') {
     // WHATWG serialises :443 as no port; any other port survives.
@@ -76,6 +90,18 @@ function isCanonical(raw: string, url: URL): boolean {
   if (raw === url.href) return true;
   if (url.protocol !== 'https:') return false;
   return raw === `https://${url.hostname}:443${url.pathname}${url.search}`;
+}
+
+/** Same registrable domain as the MCP origin (`api.assay.ai`, `assay.ai`, …). */
+function ownSite(url: URL, mcpPublicUrl: string): boolean {
+  let mcpHost: string;
+  try {
+    mcpHost = new URL(mcpPublicUrl).hostname;
+  } catch {
+    return false;
+  }
+  const own = registrableDomain(mcpHost);
+  return own !== null && registrableDomain(url.hostname)?.registrable === own.registrable;
 }
 
 function sameOrigin(url: URL, mcpPublicUrl: string): boolean {

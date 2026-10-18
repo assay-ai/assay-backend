@@ -8,8 +8,12 @@
  * ```
  *
  * The audience is always `{MCP}`: one grant serves every MCP URL kind, so a
- * path never narrows it. A fragment or userinfo is refused (RFC 8707 §2), as
- * is any raw string a URL parser would have to repair (whitespace, `\`).
+ * path never narrows it. A fragment or userinfo is refused (RFC 8707 §2).
+ *
+ * The origin must be spelled exactly as `MCP_PUBLIC_URL` (same case, no
+ * explicit default port), followed by nothing, `/` or `?`, in printable ASCII
+ * only: nothing a URL parser would have to repair (`https:mcp…`, `HTTPS://`,
+ * fullwidth letters, soft hyphens, whitespace, `\`) is accepted.
  */
 export type ResourceResult =
   | { readonly ok: true; readonly resource: string }
@@ -23,7 +27,10 @@ export function normaliseResource(
 ): ResourceResult {
   if (raw === undefined || raw === null) return { ok: true, resource: mcpPublicUrl };
   if (typeof raw !== 'string') return INVALID;
-  if (raw.includes('#') || raw.includes('\\') || /[\s\p{Cc}]/u.test(raw)) {
+  if (typeof mcpPublicUrl !== 'string') return INVALID;
+  if (raw.includes('#') || raw.includes('\\') || !/^[\x21-\x7e]+$/.test(raw)) return INVALID;
+  const rest = raw.startsWith(mcpPublicUrl) ? raw.slice(mcpPublicUrl.length) : null;
+  if (rest === null || !(rest === '' || rest.startsWith('/') || rest.startsWith('?'))) {
     return INVALID;
   }
   let url: URL;

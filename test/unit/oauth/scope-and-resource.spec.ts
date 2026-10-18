@@ -53,7 +53,7 @@ describe('normaliseResource', () => {
       `${MCP}/c/weather`,
       `${MCP}/@acme/tools`,
       `${MCP}/?tools=a,b`,
-      'https://mcp.assay.ai:443/c/weather',
+      `${MCP}?tools=a`,
     ]) {
       expect(normaliseResource(raw, MCP)).toEqual(ok);
     }
@@ -92,6 +92,29 @@ describe('normaliseResource', () => {
     ]) {
       expect(normaliseResource(raw, MCP)).toEqual(bad);
     }
+  });
+
+  it('requires the exact canonical spelling of the MCP origin', () => {
+    for (const raw of [
+      'https:mcp.assay.ai',
+      'https:/mcp.assay.ai',
+      'https:///mcp.assay.ai',
+      'HTTPS://mcp.assay.ai',
+      'https://MCP.assay.ai/c',
+      'https://mcp.assay.ai:443/c/weather',
+      'https://mcp.assay.ai./c',
+      'https://mcp.ass\u00aday.ai/c',
+      'https://mcp.\uff41ssay.ai/c',
+      'https://mcp.assay.ai/c\u00e9',
+      'https://mcp.assay.aix',
+      'https://mcp.assay.ai:',
+    ]) {
+      expect(normaliseResource(raw, MCP)).toEqual(bad);
+    }
+  });
+
+  it('refuses rather than throws without an MCP origin', () => {
+    expect(normaliseResource(MCP, undefined as unknown as string)).toEqual(bad);
   });
 
   it('refuses a non-string (e.g. a repeated form parameter)', () => {
