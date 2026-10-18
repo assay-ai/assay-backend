@@ -181,6 +181,14 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       aggregation: NotificationAggregation.ONCE,
       nonSuppressible: true,
     },
+    [NotificationEvent.OAUTH_GRANT_STOPPED_REUSE]: {
+      severity: NotificationSeverity.CRITICAL,
+      channels: EVERYTHING,
+      // A grant is revoked for reuse at most once: it is dead afterwards.
+      aggregation: NotificationAggregation.PER_EVENT,
+      // A copied sign-in is an account-takeover signal, like a withdrawal.
+      nonSuppressible: true,
+    },
 
     // ── Free tier ─────────────────────────────────────────────────────────────
 

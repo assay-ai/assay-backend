@@ -2,21 +2,37 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
+import { OAuthAccessTokenEntity } from '@database/postgres/entities/oauth-access-token.entity';
 import { OAuthAuthorizationCodeEntity } from '@database/postgres/entities/oauth-authorization-code.entity';
+import { OAuthClientEntity } from '@database/postgres/entities/oauth-client.entity';
+import { OAuthRefreshTokenEntity } from '@database/postgres/entities/oauth-refresh-token.entity';
+import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
 import { OAuthAuthorizationCodeRepository } from '@database/postgres/repositories/oauth-authorization-code.repository';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
+import { OAuthRefreshTokenRepository } from '@database/postgres/repositories/oauth-refresh-token.repository';
+import {
+  NOTIFICATION_PORT,
+  NotificationEvent,
+  NotificationPort,
+} from '@modules/notification/ports/notification.port';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { AuditLogWriter } from '@shared/audit';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
 
 import { OAUTH_CONFIG, OAuthConfig } from '../config/oauth.config';
 import {
   OAUTH_ACCESS_TOKEN_TTL_SECONDS,
   OAUTH_AUTHORIZATION_CODE_TTL_SECONDS,
+  OAUTH_REFRESH_GRACE_SECONDS,
 } from '../constants/oauth.constants';
+import { GracePayload, open as openGrace, seal as sealGrace } from '../domain/grace-box';
 import { hashOpaqueToken, isWellFormed, mint } from '../domain/opaque-token';
 import { verifyS256 } from '../domain/pkce';
 import { normaliseResource } from '../domain/resource';
+import { normaliseScope } from '../domain/scope';
 import { OAUTH_SYSTEM_ACTOR, OAuthGrantWriter } from './oauth-grant.writer';
+import { OAuthMetrics } from './oauth-metrics.service';
 
 /** The 200 body of `POST {MCP}/oauth/token` (RFC 6749 §5.1). */
 export interface TokenPair {
@@ -82,6 +98,29 @@ export interface ExchangeCodeInput {
   readonly resource?: string | null;
 }
 
+export interface RefreshInput {
+  readonly refreshToken: string;
+  /** The public `client_id` the request names. */
+  readonly clientId: string;
+  /** RFC 6749 §6: the original scope or a narrower one; omitted, the original. */
+  readonly scope?: string | null;
+}
+
+export interface RevokeInput {
+  readonly token: string;
+  readonly clientId: string;
+}
+
+/** The Redis key of a rotated refresh token's grace entry (spec §6.2). */
+export function refreshGraceKey(parentHash: string): string {
+  return `oauth:rt-grace:${parentHash}`;
+}
+
+/** The notice sent when a grant is stopped for refresh-token reuse (§6.3.11). */
+export function grantStoppedReuseBody(name: string): string {
+  return `We stopped ${name} because its sign-in was used twice. Sign in again on that device.`;
+}
+
 /** `revoked_by` of a grant whose code was presented a second time (R-OA-6). */
 export const OAUTH_REVOKED_BY_CODE_REUSED = 'system:oauth-code-reused';
 
@@ -89,6 +128,7 @@ const SYSTEM_ACTOR = OAUTH_SYSTEM_ACTOR;
 
 const INVALID_GRANT: OAuthError = { error: 'invalid_grant' };
 const INVALID_TARGET: OAuthError = { error: 'invalid_target' };
+const INVALID_SCOPE: OAuthError = { error: 'invalid_scope' };
 const GRANT_LIMIT_REACHED: OAuthError = {
   error: 'invalid_grant',
   error_description: 'grant limit reached',
@@ -101,8 +141,10 @@ const AGENT_NOT_ACTIVE: OAuthError = {
 type RejectReason = 'client_id' | 'redirect_uri' | 'resource' | 'pkce';
 
 /**
- * Token service A: authorization codes and the grant an exchange creates
- * (spec §6.3.10, R-OA-5, R-OA-6, R-OA-11, R-OA-12, R-OA-17).
+ * The token service: authorization codes and the grant an exchange creates
+ * (A: spec §6.3.10, R-OA-5, R-OA-6, R-OA-11, R-OA-12, R-OA-17), and refresh
+ * rotation, its grace, reuse detection and client revocation (B: §6.3.11,
+ * §6.3.12, R-OA-12 to R-OA-15).
  *
  * A code is `assay_ac_` + 32 random bytes, stored only as its digest, valid
  * 60 s and for one exchange, and bound to its client, redirect URI, PKCE
@@ -126,6 +168,12 @@ export class OAuthTokenService {
     private readonly audit: AuditLogWriter,
     private readonly accessEpoch: AccessEpochService,
     @Inject(OAUTH_CONFIG) private readonly config: Pick<OAuthConfig, 'issuer'>,
+    private readonly refreshTokens: OAuthRefreshTokenRepository,
+    private readonly accessTokens: OAuthAccessTokenRepository,
+    private readonly credentials: AgentCredentialRepository,
+    private readonly cache: CacheService,
+    private readonly metrics: OAuthMetrics,
+    @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
   ) {}
 
   /**
@@ -214,6 +262,229 @@ export class OAuthTokenService {
       refresh_token: created.tokens.refreshToken,
       scope: code.scope,
     };
+  }
+
+  /**
+   * `grant_type=refresh_token` (§6.3.11).
+   *
+   * 1. Unknown, expired or revoked token, another client's token, or a grant
+   *    that is revoked or expired → `invalid_grant`. Agent or organization
+   *    suspension does not block rotation: the session source refuses the
+   *    calls instead, as it does for an API key.
+   * 2. Won the compare-and-set → the new pair, and its grace entry.
+   * 3. Lost, within 30 s of the first use → the same pair from the grace
+   *    entry, or `invalid_grant` (no revocation) when it is gone.
+   * 4. Lost, later → reuse: the grant is revoked if a descendant was used,
+   *    else this is a stale retry. `invalid_grant` either way.
+   *
+   * A refused scope (wider than the grant's) answers `invalid_scope` before
+   * anything is written, so it does not burn the token.
+   */
+  async refresh(input: RefreshInput): Promise<TokenPair | OAuthError> {
+    if (!isWellFormed(input.refreshToken, 'assay_rt_')) return INVALID_GRANT;
+    const tokenHash = hashOpaqueToken(input.refreshToken);
+
+    const token = await this.refreshTokens.findByTokenHash(tokenHash);
+    if (!token || token.revokedAt !== null || token.expiresAt.getTime() <= Date.now()) {
+      return INVALID_GRANT;
+    }
+    const client = await this.clients.findOne({ where: { id: token.oauthClientId } });
+    if (!client || client.clientId !== input.clientId) return INVALID_GRANT;
+
+    const credential = await this.credentials.findOne({
+      where: { organizationId: token.organizationId, id: token.credentialId },
+    });
+    if (
+      !credential ||
+      credential.revokedAt !== null ||
+      (credential.expiresAt !== null && credential.expiresAt.getTime() <= Date.now())
+    ) {
+      return INVALID_GRANT;
+    }
+
+    const scope = narrowScope(token.scope, input.scope);
+    if (scope === null) return INVALID_SCOPE;
+
+    const rotated = await this.grants.rotateRefresh({
+      parent: token,
+      agentId: credential.agentId,
+      scope,
+      audience: this.config.issuer,
+      beforeCommit: (tokens) =>
+        this.storeGrace(input.refreshToken, tokenHash, {
+          access_token: tokens.accessToken,
+          refresh_token: tokens.refreshToken,
+          expires_in: OAUTH_ACCESS_TOKEN_TTL_SECONDS,
+          scope,
+        }),
+    });
+    if (!('reason' in rotated)) {
+      return {
+        access_token: rotated.tokens.accessToken,
+        token_type: 'Bearer',
+        expires_in: OAUTH_ACCESS_TOKEN_TTL_SECONDS,
+        refresh_token: rotated.tokens.refreshToken,
+        scope,
+      };
+    }
+    if (rotated.reason !== 'lost') return INVALID_GRANT;
+
+    // Lost: read the parent again, with the database's clock for the grace.
+    const [state] = (await this.dataSource.query(
+      `SELECT "used_at" IS NOT NULL AS "used", "revoked_at" IS NOT NULL AS "revoked",
+              "expires_at" <= now() AS "expired",
+              "used_at" >= now() - make_interval(secs => $2) AS "in_grace"
+         FROM "oauth_refresh_tokens" WHERE "id" = $1`,
+      [token.id, OAUTH_REFRESH_GRACE_SECONDS],
+    )) as { used: boolean; revoked: boolean; expired: boolean; in_grace: boolean | null }[];
+    if (!state || !state.used || state.revoked || state.expired) return INVALID_GRANT;
+
+    if (state.in_grace) return this.fromGrace(input.refreshToken, tokenHash, token, client);
+
+    const reuse = await this.grants.detectRefreshReuse({
+      parent: token,
+      agentId: credential.agentId,
+      clientId: client.clientId,
+    });
+    if (reuse.outcome === 'stale') this.metrics.incRefreshReuse('stale');
+    if (reuse.outcome === 'revoked') {
+      this.metrics.incRefreshReuse('revoked');
+      await this.bumpAccessEpoch(token.organizationId);
+      await this.notifyStoppedForReuse(token, credential.agentId, client, reuse.credentialName);
+    }
+    return INVALID_GRANT;
+  }
+
+  /**
+   * `POST /oauth/revoke` (RFC 7009, §6.3.12). A refresh token revokes its
+   * grant, credential and tokens, audited `credential.revoked` by the agent
+   * with `reason: 'client_logout'`; an access token revokes itself. A token
+   * that is unknown, malformed, already revoked or another client's is a
+   * no-op: the endpoint answers 200 whatever happens here.
+   */
+  async revoke(input: RevokeInput): Promise<void> {
+    if (isWellFormed(input.token, 'assay_rt_')) {
+      const token = await this.refreshTokens.findByTokenHash(hashOpaqueToken(input.token));
+      if (!token || !(await this.isClientOf(token.oauthClientId, input.clientId))) return;
+      const credential = await this.credentials.findOne({
+        where: { organizationId: token.organizationId, id: token.credentialId },
+      });
+      if (!credential || credential.revokedAt !== null) return;
+      const revoked = await this.grants.revokeGrant({
+        organizationId: token.organizationId,
+        credentialId: credential.id,
+        // As an API key's revocation: `revoked_by` is the actor's id.
+        revokedBy: credential.agentId,
+        audit: {
+          actor: { type: 'agent', id: credential.agentId },
+          action: 'credential.revoked',
+          after: { name: credential.name, reason: 'client_logout', clientId: input.clientId },
+        },
+      });
+      if (revoked) await this.bumpAccessEpoch(token.organizationId);
+      return;
+    }
+
+    if (isWellFormed(input.token, 'assay_at_')) {
+      const token = await this.accessTokens.findByTokenHash(hashOpaqueToken(input.token));
+      if (!token || token.revokedAt !== null) return;
+      const credential = await this.credentials.findOne({
+        where: { organizationId: token.organizationId, id: token.credentialId },
+      });
+      if (!credential?.oauthClientId) return;
+      if (!(await this.isClientOf(credential.oauthClientId, input.clientId))) return;
+      await this.accessTokens
+        .createQueryBuilder()
+        .update(OAuthAccessTokenEntity)
+        .set({ revokedAt: () => 'now()' })
+        .where('id = :id', { id: token.id })
+        .andWhere('revoked_at IS NULL')
+        .execute();
+    }
+  }
+
+  private async isClientOf(oauthClientId: string, clientId: string): Promise<boolean> {
+    const client = await this.clients.findOne({ where: { id: oauthClientId } });
+    return client !== null && client.clientId === clientId;
+  }
+
+  /**
+   * Stores the sealed pair under the parent's hash for the grace window.
+   * Best effort: without it, a racing presentation gets `invalid_grant` and
+   * nothing is revoked, so a Redis failure must not fail the rotation.
+   */
+  private async storeGrace(
+    parentToken: string,
+    parentHash: string,
+    payload: GracePayload,
+  ): Promise<void> {
+    try {
+      await this.cache
+        .getRedisClient()
+        .set(
+          refreshGraceKey(parentHash),
+          sealGrace(parentToken, parentHash, payload),
+          'EX',
+          OAUTH_REFRESH_GRACE_SECONDS,
+        );
+    } catch {
+      this.logger.warn('refresh grace entry not stored; a racing refresh will be refused');
+    }
+  }
+
+  private async fromGrace(
+    parentToken: string,
+    parentHash: string,
+    token: OAuthRefreshTokenEntity,
+    client: OAuthClientEntity,
+  ): Promise<TokenPair | OAuthError> {
+    let sealed: string | null = null;
+    try {
+      sealed = await this.cache.getRedisClient().get(refreshGraceKey(parentHash));
+    } catch {
+      sealed = null;
+    }
+    const payload = sealed === null ? null : openGrace(parentToken, parentHash, sealed);
+    if (!payload) return INVALID_GRANT;
+
+    this.metrics.incRefreshGrace();
+    await this.audit.recordAfterCommit({
+      organizationId: token.organizationId,
+      actor: SYSTEM_ACTOR,
+      action: 'oauth.refresh_grace_used',
+      resourceType: 'agent_credential',
+      resourceId: token.credentialId,
+      before: null,
+      after: { clientId: client.clientId },
+    });
+    return {
+      access_token: payload.access_token,
+      token_type: 'Bearer',
+      expires_in: payload.expires_in,
+      refresh_token: payload.refresh_token,
+      scope: payload.scope,
+    };
+  }
+
+  private async notifyStoppedForReuse(
+    token: OAuthRefreshTokenEntity,
+    agentId: string,
+    client: OAuthClientEntity,
+    name: string,
+  ): Promise<void> {
+    try {
+      await this.notifications.notify({
+        organizationId: token.organizationId,
+        event: NotificationEvent.OAUTH_GRANT_STOPPED_REUSE,
+        title: `${name} was stopped`,
+        body: grantStoppedReuseBody(name),
+        subjectType: 'credential',
+        subjectId: token.credentialId,
+        payload: { credentialId: token.credentialId, agentId, clientId: client.clientId },
+      });
+    } catch {
+      this.logger.warn(`org ${token.organizationId}: grant-stopped notice not sent`);
+    }
   }
 
   /** `UPDATE … SET used_at = now() … RETURNING *`: the unused, unexpired code, now used. */
@@ -307,4 +578,17 @@ export class OAuthTokenService {
       );
     }
   }
+}
+
+/**
+ * The scope of a refreshed pair (RFC 6749 §6): the grant's when none is asked
+ * for; otherwise the normalised request, which must not add to the grant's.
+ * `null` when it would.
+ */
+function narrowScope(granted: string, requested: string | null | undefined): string | null {
+  if (requested === undefined || requested === null || requested === '') return granted;
+  const allowed = new Set(granted.split(' '));
+  const asked = requested.split(' ').filter((scope) => scope !== '');
+  if (asked.some((scope) => !allowed.has(scope))) return null;
+  return normaliseScope(requested);
 }
