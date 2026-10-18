@@ -89,7 +89,10 @@ export class ToolEntity {
   @Column({ name: 'review_content_hash', type: 'varchar', length: 64, nullable: true })
   reviewContentHash: string | null;
 
-  /** Set with `status = REMOVED` by a takedown (FR-18). */
+  /**
+   * Set with `status = REMOVED` by a takedown (FR-18). It outlives the
+   * reasons below when a lifted tool has no active handle to serve under.
+   */
   @Column({ name: 'removed_at', type: 'timestamptz', nullable: true })
   removedAt: Date | null;
 

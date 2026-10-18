@@ -179,6 +179,10 @@ describe('provider tools migration: up, down, up', () => {
           [id],
         ),
       ).rejects.toThrow(/chk_tools_removal/);
+      // A standing takedown always keeps the tool removed.
+      await expect(
+        dataSource.query(`UPDATE tools SET taken_down_at = now() WHERE id = $1`, [id]),
+      ).rejects.toThrow(/chk_tools_removal/);
       await dataSource.query(
         `UPDATE tools SET status = 'REMOVED', removed_at = now(), handle_removed_at = now(),
                           status_before_removal = 'ACTIVE' WHERE id = $1`,
