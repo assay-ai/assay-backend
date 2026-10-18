@@ -27,10 +27,12 @@ describe('call disputes migration: up, down, up', () => {
                    'intent_id', 'verdict_id', 'binding_id', 'tool_id', 'respondent_provider_id',
                    'evidence_snapshot', 'provider_response', 'provider_responded_at',
                    'refund_source', 'refund_state', 'refund_amount', 'refund_guaranteed',
-                   'evidence_scrubbed_at'))
+                   'evidence_scrubbed_at', 'provider_silent_at', 'paged_48h_at', 'paged_72h_at',
+                   'paged_6d_at'))
               OR (table_name IN ('payment_intents', 'verification_records')
                   AND column_name = 'dispute_outcome')
-              OR (table_name = 'payment_intents' AND column_name = 'collectable_at'))
+              OR (table_name = 'payment_intents'
+                  AND column_name IN ('collectable_at', 'held_status', 'held_at', 'held_tx_ref')))
           ORDER BY 1`,
       )) as { c: string }[]
     ).map((row) => row.c);
@@ -50,7 +52,7 @@ describe('call disputes migration: up, down, up', () => {
 
   it('reverts and reapplies cleanly', async () => {
     expect(await last()).toBe(OURS[0]);
-    expect(await columns()).toHaveLength(16);
+    expect(await columns()).toHaveLength(23);
 
     for (const name of OURS) {
       expect(await last()).toBe(name);
@@ -61,7 +63,7 @@ describe('call disputes migration: up, down, up', () => {
 
     await dataSource.runMigrations({ transaction: 'each' });
     expect(await last()).toBe(OURS[0]);
-    expect(await columns()).toHaveLength(16);
+    expect(await columns()).toHaveLength(23);
   });
 
   async function insertDispute(

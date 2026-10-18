@@ -1,19 +1,23 @@
 import { Module } from '@nestjs/common';
 
-import { CALL_DISPUTE_CONFIG, loadCallDisputeConfig } from './constants/call-dispute.config';
+import { DisputeModule } from './dispute.module';
 import { CallDisputeRetentionJob } from './jobs/call-dispute-retention.job';
+import { CallDisputeSlaJob } from './jobs/call-dispute-sla.job';
 import { CallDisputeRetentionService } from './services/call-dispute-retention.service';
+import { CallDisputeSlaService } from './services/call-dispute-sla.service';
 
 /**
- * The scheduler's half of the dispute domain: the call-dispute snapshot
- * retention sweep. Needs only the global `DataSource`, so it does not pull in
- * `DisputeModule`'s payment and verification graph.
+ * The scheduler's half of the dispute domain (G3.B1): the decision SLA
+ * (provider silence, pages, auto-uphold, the chain timeout) and the snapshot
+ * retention sweep. `DisputeModule` brings `CallDisputeService` and its config.
  */
 @Module({
+  imports: [DisputeModule],
   providers: [
     CallDisputeRetentionService,
     CallDisputeRetentionJob,
-    { provide: CALL_DISPUTE_CONFIG, useFactory: () => loadCallDisputeConfig() },
+    CallDisputeSlaService,
+    CallDisputeSlaJob,
   ],
 })
 export class DisputeSchedulerModule {}
