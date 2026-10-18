@@ -14,7 +14,11 @@ import {
   MAX_LISTED_ORPHANED_HOLD_IDS,
   WITHHELD_STATUSES,
   WithheldBucket,
+  isWithheldIntent,
+  sumWithheld,
+  withheldBucketOf,
 } from '@modules/ledger/domain/withheld';
+import { MoneyUtil } from '@shared/utils/money.util';
 import { LedgerWithheldService } from '@modules/ledger/services/ledger-withheld.service';
 
 const ORG = 'org-11111111-1111-4111-8111-111111111111';
@@ -72,6 +76,11 @@ function fakeIntents(overrides: Partial<PaymentIntentRepository> = {}): PaymentI
   } as unknown as PaymentIntentRepository;
 }
 
+/** One pre-aggregated `(asset, status)` row, as `sumWithheldByAssetAndStatus` returns it. */
+function row(status: string, calls: number, amount: bigint, notCollected = false) {
+  return { asset: USDC, decimals: USDC_DECIMALS, status, notCollected, calls, amount };
+}
+
 function build(options: {
   entries?: Partial<LedgerEntryRepository>;
   intents?: Partial<PaymentIntentRepository>;
@@ -82,14 +91,18 @@ function build(options: {
 }
 
 describe('LedgerWithheldService — withheldFromIntents', () => {
-  it('always returns both buckets, zero-filled, when nothing withheld', async () => {
+  it('always returns all three buckets, zero-filled, when nothing withheld', async () => {
     const { service } = build({});
 
     const total = await service.withheldFromIntents(ORG, USDC, USDC_DECIMALS);
 
     expect(total.calls).toBe(0);
     expect(total.amount.amount).toBe('0');
-    expect(total.buckets).toHaveLength(2);
+    expect(total.buckets.map((bucket) => bucket.bucket)).toEqual([
+      WithheldBucket.FAILED_VERIFICATION,
+      WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
+      WithheldBucket.NOT_COLLECTED,
+    ]);
 
     const byBucket = new Map(total.buckets.map((bucket) => [bucket.bucket, bucket]));
     expect(byBucket.get(WithheldBucket.FAILED_VERIFICATION)).toMatchObject({
@@ -100,6 +113,36 @@ describe('LedgerWithheldService — withheldFromIntents', () => {
       calls: 0,
       amount: { amount: '0' },
     });
+    expect(byBucket.get(WithheldBucket.NOT_COLLECTED)).toMatchObject({
+      calls: 0,
+      amount: { amount: '0' },
+      label: 'not collected (the provider could not be paid)',
+    });
+  });
+
+  it('folds a never-collected SETTLED row into not-collected', async () => {
+    const { service } = build({
+      intents: {
+        sumWithheldByAssetAndStatus: jest.fn().mockResolvedValue([
+          row('REFUNDED', 4, 170_000n),
+          row('VOIDED', 10, 430_000n),
+          // Forfeited, voided-debt and absorbed calls arrive as one SETTLED row.
+          row('SETTLED', 5, 500_000n, true),
+        ]),
+      },
+    });
+
+    const total = await service.withheldFromIntents(ORG, USDC, USDC_DECIMALS);
+
+    expect(total.calls).toBe(19);
+    expect(total.amount.amount).toBe('1100000');
+    expect(
+      total.buckets.map((bucket) => [bucket.bucket, bucket.calls, bucket.amount.amount]),
+    ).toEqual([
+      [WithheldBucket.FAILED_VERIFICATION, 4, '170000'],
+      [WithheldBucket.PROVIDER_OR_PLATFORM_ERROR, 10, '430000'],
+      [WithheldBucket.NOT_COLLECTED, 5, '500000'],
+    ]);
   });
 
   it('folds REFUNDED into failed-verification and VOIDED/EXPIRED into provider-or-platform-error', async () => {
@@ -201,6 +244,41 @@ describe('LedgerWithheldService — reconcile', () => {
     expect(reconciliation.withheld.amount.amount).toBe('10000');
     expect(reconciliation.holdReleaseTotal.amount).toBe('12500');
     expect(reconciliation.orphanedReleases.amount).toBe('2500');
+  });
+
+  /**
+   * UX review 2026-10-18 P0-3: a forfeited voucher, a voided debt and a legacy
+   * absorb each release the buyer's hold. Left out of `withheld`, they made
+   * `ok` false by exactly their amount, and the screens said "$0.60 not
+   * charged" beside a summary of $1.10.
+   */
+  it('balances once forfeited, voided-debt and absorbed releases are counted', async () => {
+    const { service } = build({
+      intents: {
+        sumWithheldByAssetAndStatus: jest
+          .fn()
+          .mockResolvedValue([
+            row('REFUNDED', 4, 170_000n),
+            row('VOIDED', 10, 430_000n),
+            row('SETTLED', 5, 500_000n, true),
+          ]),
+      },
+      entries: {
+        sumEntryTypeByAsset: jest
+          .fn()
+          .mockResolvedValue([
+            { asset: USDC, decimals: USDC_DECIMALS, amount: 1_100_000n, entries: 19 },
+          ]),
+        summarizeOrphanedHoldReleases: jest.fn().mockResolvedValue([]),
+      },
+    });
+
+    const reconciliation = await service.reconcile(ORG, USDC, USDC_DECIMALS);
+
+    expect(reconciliation.withheld.calls).toBe(19);
+    expect(reconciliation.withheld.amount.amount).toBe('1100000');
+    expect(reconciliation.ok).toBe(true);
+    expect(reconciliation.difference).toBe('0');
   });
 
   it('reports a named orphan rather than silently dropping the delta', async () => {
@@ -347,7 +425,8 @@ describe('PaymentIntentRepository.sumWithheldByAssetAndStatus — the query itse
     ]) {
       builder[method] = chain(method);
     }
-    builder.getRawMany = jest.fn().mockResolvedValue([]);
+    const getRawMany = jest.fn().mockResolvedValue([]);
+    builder.getRawMany = getRawMany;
     // The organization-scope guard reads this on every terminal call.
     builder.getQuery = () => 'SELECT * FROM payment_intents WHERE organization_id = $1';
 
@@ -365,7 +444,7 @@ describe('PaymentIntentRepository.sumWithheldByAssetAndStatus — the query itse
       }
     }
 
-    return { repository: new TestRepository(), calls };
+    return { repository: new TestRepository(), calls, getRawMany };
   }
 
   it('requires hold_id IS NOT NULL — CREATED → EXPIRED with no hold never contributes', async () => {
@@ -389,16 +468,42 @@ describe('PaymentIntentRepository.sumWithheldByAssetAndStatus — the query itse
     expect(amount?.args[0]).toContain('hold.amount');
   });
 
-  it('restricts status to WITHHELD_STATUSES, never retyping the list', async () => {
+  it('reads WITHHELD_STATUSES plus never-collected SETTLED rows, never retyping the list', async () => {
     const { repository, calls } = buildRepository();
 
     await repository.sumWithheldByAssetAndStatus(ORG);
 
     const statusPredicate = calls.find(
-      (call) => call.method === 'andWhere' && call.args[0] === 'intent.status IN (:...statuses)',
+      (call) =>
+        call.method === 'andWhere' &&
+        String(call.args[0]).startsWith('(intent.status IN (:...statuses) OR '),
     );
     expect(statusPredicate).toBeDefined();
     expect(statusPredicate?.args[1]).toEqual({ statuses: WITHHELD_STATUSES });
+    const sql = String(statusPredicate?.args[0]);
+    // NOT_CHARGED_SETTLED_SQL: forfeited, voided debt, legacy absorb; never written off.
+    expect(sql).toContain("intent.status = 'SETTLED'");
+    expect(sql).toContain('provider_forfeit:%');
+    expect(sql).toContain('voided:%');
+    expect(sql).toContain('platform_absorbed:%');
+    expect(sql).toContain(
+      "NOT COALESCE((intent.redemption_last_error LIKE 'uncollected:%'), false)",
+    );
+  });
+
+  it('marks a SETTLED row as not collected, and no other', async () => {
+    const { repository, getRawMany } = buildRepository();
+    getRawMany.mockResolvedValue([
+      { asset: USDC, decimals: '6', status: 'SETTLED', calls: '5', amount: '500000' },
+      { asset: USDC, decimals: '6', status: 'REFUNDED', calls: '4', amount: '170000' },
+    ]);
+
+    const rows = await repository.sumWithheldByAssetAndStatus(ORG);
+
+    expect(rows.map((r) => [r.status, r.notCollected, r.calls, r.amount])).toEqual([
+      ['SETTLED', true, 5, 500_000n],
+      ['REFUNDED', false, 4, 170_000n],
+    ]);
   });
 
   it('scopes to the caller organization', async () => {
@@ -508,5 +613,48 @@ describe('LedgerEntryRepository.summarizeOrphanedHoldReleases — the query itse
         orphanedHoldIds: [],
       },
     ]);
+  });
+});
+
+/**
+ * `domain/withheld.ts` — which intent lands in which bucket. A served call is
+ * withheld only when the caller says it was never collected; one that does not
+ * know (the receipt) never counts it.
+ */
+describe('withheld domain — buckets', () => {
+  const price = (amount: bigint) => MoneyUtil.of(amount, USDC, USDC_DECIMALS);
+
+  it.each([
+    ['REFUNDED', 'h', undefined, WithheldBucket.FAILED_VERIFICATION],
+    ['VOIDED', 'h', undefined, WithheldBucket.PROVIDER_OR_PLATFORM_ERROR],
+    ['EXPIRED', 'h', undefined, WithheldBucket.PROVIDER_OR_PLATFORM_ERROR],
+    ['SETTLED', 'h', true, WithheldBucket.NOT_COLLECTED],
+    ['SETTLED', 'h', false, null],
+    ['SETTLED', 'h', undefined, null],
+    ['SETTLED', null, true, null],
+    ['EXPIRED', null, undefined, null],
+    ['VERIFYING', 'h', undefined, null],
+    ['constructor', 'h', undefined, null],
+  ] as const)('%s, hold %s, notCollected %s -> %s', (status, holdId, notCollected, bucket) => {
+    expect(withheldBucketOf({ status, holdId, notCollected })).toBe(bucket);
+    expect(isWithheldIntent({ status, holdId, notCollected })).toBe(bucket !== null);
+  });
+
+  it('sums into three buckets, zero-filled, in declaration order', () => {
+    const total = sumWithheld(USDC, USDC_DECIMALS, [
+      { status: 'REFUNDED', holdId: 'a', price: price(10n) },
+      { status: 'SETTLED', holdId: 'b', notCollected: true, price: price(7n) },
+      { status: 'SETTLED', holdId: 'c', price: price(100n) },
+    ]);
+
+    expect(
+      total.buckets.map((bucket) => [bucket.bucket, bucket.calls, bucket.amount.amount]),
+    ).toEqual([
+      [WithheldBucket.FAILED_VERIFICATION, 1, '10'],
+      [WithheldBucket.PROVIDER_OR_PLATFORM_ERROR, 0, '0'],
+      [WithheldBucket.NOT_COLLECTED, 1, '7'],
+    ]);
+    expect(total.calls).toBe(2);
+    expect(total.amount.amount).toBe('17');
   });
 });
