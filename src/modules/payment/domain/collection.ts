@@ -71,6 +71,31 @@ export function isChargedWhenSettled(intent: CollectionInput): boolean {
   );
 }
 
+/**
+ * The mark an upheld buyer report writes when it refunds a served call
+ * (`voided:DISPUTE_UPHELD`, `call-dispute.ts`'s `DISPUTE_UPHELD_VOID_OUTCOME`).
+ * The row is `VOIDED` like a late-verdict debt, so the money reads the same;
+ * only the reason a buyer is told differs.
+ */
+const REFUNDED_BY_REPORT_MARK = `${DEBT_VOIDED_PREFIX}DISPUTE_UPHELD`;
+
+/** A served call refunded because the buyer's report was upheld. */
+export function isRefundedByReport(intent: CollectionInput): boolean {
+  return intent.redemptionLastError === REFUNDED_BY_REPORT_MARK;
+}
+
+/**
+ * A `SETTLED` call that was never collected and is not owed: the provider
+ * forfeited it, or its debt was voided (a late verdict or an upheld report).
+ * The per-row twin of the repository's `NOT_CHARGED_SETTLED_SQL` (a legacy
+ * absorb is not visible on the row), and the `notCollected` the withheld
+ * definition reads.
+ */
+export function isNotCollected(intent: CollectionInput): boolean {
+  const state = collectionStateOf(intent);
+  return state === CollectionState.PROVIDER_FORFEITED || state === CollectionState.VOIDED;
+}
+
 export function debtStateOf(intent: CollectionInput): DebtState {
   switch (collectionStateOf(intent)) {
     case CollectionState.DEBT_OUTSTANDING:
