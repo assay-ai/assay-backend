@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
+import { Logger } from '@nestjs/common';
 import Redis from 'ioredis';
 import { Client } from 'pg';
 import { DataSource } from 'typeorm';
@@ -24,6 +25,8 @@ import {
   NotificationPort,
   NotificationRequest,
 } from '@modules/notification/ports/notification.port';
+import { seal as sealGrace } from '@modules/oauth/domain/grace-box';
+import { mint } from '@modules/oauth/domain/opaque-token';
 import { OAuthGrantWriter } from '@modules/oauth/services/oauth-grant.writer';
 import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
 import {
@@ -432,6 +435,46 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expectPair(await refresh(next.refresh_token));
   });
 
+  it('a grace entry whose child never committed → invalid_grant, no revoke', async () => {
+    const { credentialId, pair } = await grant();
+    const next = expectPair(await refresh(pair.refresh_token));
+    // A timed-out SET from another process landing late: a sealed pair whose
+    // rotation rolled back, so its tokens are in no table.
+    const parentHash = hashOf(pair.refresh_token);
+    await redis.set(
+      `oauth:rt-grace:${parentHash}`,
+      sealGrace(pair.refresh_token, parentHash, {
+        access_token: mint('assay_at_'),
+        refresh_token: mint('assay_rt_'),
+        expires_in: 3600,
+        scope: 'assay:agent offline_access',
+      }),
+      'EX',
+      30,
+    );
+
+    expect(await refresh(pair.refresh_token)).toEqual({ error: 'invalid_grant' });
+    expect((await credential(credentialId)).revokedAt).toBeNull();
+    expect(await auditOf('oauth.refresh_grace_used', credentialId)).toHaveLength(0);
+    expect(await counter('assay_oauth_refresh_grace_total')).toBe(0);
+    expect(notifications).toHaveLength(0);
+    // The committed child still works.
+    expectPair(await refresh(next.refresh_token));
+  });
+
+  it('a grace entry whose child was revoked → invalid_grant, no revoke', async () => {
+    const { credentialId, pair } = await grant();
+    const next = expectPair(await refresh(pair.refresh_token));
+    await dataSource.query(
+      `UPDATE "oauth_refresh_tokens" SET "revoked_at" = now() WHERE "token_hash" = $1`,
+      [hashOf(next.refresh_token)],
+    );
+
+    expect(await refresh(pair.refresh_token)).toEqual({ error: 'invalid_grant' });
+    expect((await credential(credentialId)).revokedAt).toBeNull();
+    expect(await auditOf('oauth.refresh_grace_used', credentialId)).toHaveLength(0);
+  });
+
   // ── reuse after the grace ──────────────────────────────────────────────────
 
   it('reuse at 31 s after a child access token was used → grant revoked + notification + oauth_refresh_reuse_total{kind="revoked"}', async () => {
@@ -676,7 +719,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
   });
 
   it('two concurrent reuse presentations: the grant is stopped once', async () => {
-    const { credentialId, pair } = await grant();
+    const { agentId, credentialId, pair } = await grant();
     const child = expectPair(await refresh(pair.refresh_token));
     await dataSource.query(
       `UPDATE "oauth_access_tokens" SET "first_used_at" = now() WHERE "token_hash" = $1`,
@@ -684,13 +727,69 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     );
     await ageUse(pair.refresh_token, 31);
 
-    const results = await Promise.all([refresh(pair.refresh_token), refresh(pair.refresh_token)]);
+    // Force the race: both presentations pass the pre-checks against a live
+    // grant. The first holds the parent row and queues on the agent lock; the
+    // second queues on the parent row behind it. Released, the first revokes;
+    // the second then holds the parent, finds the credential revoked under its
+    // lock, and stops (`not_live`): no second revocation, notice or metric.
+    const holder = new Client({ ...pgOptions(), database: DATABASE });
+    await holder.connect();
+    let results: unknown[];
+    try {
+      await holder.query(`SELECT pg_advisory_lock(hashtext($1))`, [`oauth-grants:${agentId}`]);
+      const presentations = [refresh(pair.refresh_token), refresh(pair.refresh_token)];
+      await waitForWaiters(holder, 2);
+      expect((await credential(credentialId)).revokedAt).toBeNull();
+      await holder.query(`SELECT pg_advisory_unlock(hashtext($1))`, [`oauth-grants:${agentId}`]);
+      results = await Promise.all(presentations);
+    } finally {
+      await holder.end();
+    }
     expect(results).toEqual([{ error: 'invalid_grant' }, { error: 'invalid_grant' }]);
     expect(await auditOf('oauth.refresh_reuse_detected', credentialId)).toHaveLength(1);
+    expect(await auditOf('oauth.refresh_stale_reuse', credentialId)).toHaveLength(0);
     expect(notifications).toHaveLength(1);
     expect(await counter('assay_oauth_refresh_reuse_total', { kind: 'revoked' })).toBe(1);
     expect(await counter('assay_oauth_refresh_reuse_total', { kind: 'stale' })).toBe(0);
     expect(await liveTokens(credentialId)).toEqual({ access: 0, refresh: 0 });
+  });
+
+  it('a failed post-commit sweep is logged: reuse still answers, bumps and notifies; logout still returns', async () => {
+    const reused = await grant();
+    const child = expectPair(await refresh(reused.pair.refresh_token));
+    await dataSource.query(
+      `UPDATE "oauth_access_tokens" SET "first_used_at" = now() WHERE "token_hash" = $1`,
+      [hashOf(child.access_token)],
+    );
+    await ageUse(reused.pair.refresh_token, 31);
+    const loggedOut = await grant();
+
+    // Only the sweep's statements read "agent_credentials" c through the data source.
+    const query = dataSource.query.bind(dataSource);
+    const spy = jest
+      .spyOn(dataSource, 'query')
+      .mockImplementation(async (sql: string, ...rest: unknown[]) => {
+        if (sql.includes('FROM "agent_credentials" c')) throw new Error('deadlock detected');
+        return query(sql, ...(rest as [unknown[]]));
+      });
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      expect(await refresh(reused.pair.refresh_token)).toEqual({ error: 'invalid_grant' });
+      expect((await credential(reused.credentialId)).revokedAt).not.toBeNull();
+      expect(bumps).toEqual([ORGANIZATION]);
+      expect(notifications).toHaveLength(1);
+
+      await expect(
+        service.revoke({ token: loggedOut.pair.refresh_token, clientId: client.clientId }),
+      ).resolves.toBeUndefined();
+      expect((await credential(loggedOut.credentialId)).revokedAt).not.toBeNull();
+      expect(bumps).toEqual([ORGANIZATION, ORGANIZATION]);
+
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('post-commit token sweep failed'));
+    } finally {
+      spy.mockRestore();
+      warn.mockRestore();
+    }
   });
 
   it('a code exchange replacing a grant while that grant rotates: no deadlock, nothing of the old grant live', async () => {

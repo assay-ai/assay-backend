@@ -3,6 +3,7 @@ import {
   OAuthClientKind,
 } from '@database/postgres/entities/oauth-client.entity';
 
+import { isPaymentClient } from './payment-client';
 import { registrableDomain } from './registrable-domain';
 
 /** A client listed in `OAUTH_VERIFIED_CLIENTS`, as far as the credentials list needs it. */
@@ -14,8 +15,11 @@ export interface CredentialVerifiedClient {
 
 /** What the credentials list needs to know to describe a grant's client. */
 export interface OAuthClientTrust {
-  /** `{MCP}/oauth/clients/assay-mcp`: the only client whose grants may bind a payment key. */
-  readonly builtinClientId: string;
+  /**
+   * The parsed `OAUTH_PAYMENT_CLIENTS` (`parsePaymentClientsEnv`), the same
+   * list delegate binding reads: only the built-in `assay-mcp` client today.
+   */
+  readonly paymentClients: readonly string[];
   readonly verifiedClients: readonly CredentialVerifiedClient[];
 }
 
@@ -43,9 +47,13 @@ export interface CredentialOAuthClientView {
  * verified, because its grant may have gone there. The built-in client always
  * returns to loopback, so it is never verified.
  *
- * `paymentClient`: `OAUTH_PAYMENT_CLIENTS` may contain only the built-in
- * client (the config refuses any other id at boot, H2), so it is exactly the
- * built-in client of this deployment.
+ * `paymentClient`: {@link isPaymentClient} on the parsed
+ * `OAUTH_PAYMENT_CLIENTS`, the predicate and list delegate binding uses, so
+ * the two cannot disagree.
+ *
+ * Drift, accepted: "verified" reads the client's current redirects, not the
+ * ones it had when the grant was approved. A CIMD document that later drops
+ * a non-vendor redirect makes an older grant show as verified. Display only.
  */
 export function credentialClientView(
   client: Pick<OAuthClientEntity, 'clientId' | 'kind' | 'clientName' | 'redirectUris'>,
@@ -65,8 +73,7 @@ export function credentialClientView(
     name: verified ? listed.displayName : client.clientName,
     registrableDomain: isCimd ? cimdDomain(client.clientId) : null,
     verified,
-    paymentClient:
-      client.kind === OAuthClientKind.BUILTIN && client.clientId === trust.builtinClientId,
+    paymentClient: isPaymentClient(trust.paymentClients, client.clientId),
   };
 }
 

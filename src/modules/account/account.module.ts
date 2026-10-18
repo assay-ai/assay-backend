@@ -1,8 +1,7 @@
 import { Module } from '@nestjs/common';
 
 import { ChainsModule } from '@modules/chains/chains.module';
-import { readVerifiedClients } from '@modules/oauth/config/oauth-verified-client-ids';
-import { builtinClientId } from '@modules/oauth/domain/client-id';
+import { readOAuthClientTrust } from '@modules/oauth/config/oauth-verified-client-ids';
 import { OAUTH_CLIENT_TRUST, OAuthClientTrust } from '@modules/oauth/domain/credential-client-view';
 import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { ToolsetModule } from '@modules/toolset/toolset.module';
@@ -29,7 +28,8 @@ import { NotificationsService } from './services/notifications.service';
  * `ToolsetModule` for `AccessEpochService` (a revoke invalidates cached
  * access) and `MCP_HOST_CONFIG`. `OAUTH_CLIENT_TRUST` is what the credentials
  * list needs to describe a grant's client; it reads `OAUTH_VERIFIED_CLIENTS`
- * on its own rather than `OAUTH_CONFIG`, which demands the OAuth secrets.
+ * and `OAUTH_PAYMENT_CLIENTS` through `OAUTH_CONFIG`'s own parsers, without
+ * loading `OAUTH_CONFIG`, which demands the OAuth secrets.
  */
 @Module({
   imports: [ChainsModule, AuditLogModule, ToolsetModule],
@@ -37,11 +37,9 @@ import { NotificationsService } from './services/notifications.service';
     {
       provide: OAUTH_CLIENT_TRUST,
       inject: [MCP_HOST_CONFIG],
-      useFactory: (host: McpHostConfig): OAuthClientTrust => ({
-        builtinClientId: builtinClientId(host.mcpPublicUrl),
-        // Unreadable → no client is shown as verified.
-        verifiedClients: readVerifiedClients() ?? [],
-      }),
+      // Invalid values are logged and read as "nothing verified, no payment client".
+      useFactory: (host: McpHostConfig): OAuthClientTrust =>
+        readOAuthClientTrust(process.env, host.mcpPublicUrl),
     },
     NotificationsService,
     AuditLogService,

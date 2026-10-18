@@ -1,4 +1,4 @@
-import { Injectable } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager, EntityTarget, IsNull, ObjectLiteral } from 'typeorm';
 import { QueryDeepPartialEntity } from 'typeorm/query-builder/QueryPartialEntity';
@@ -338,7 +338,7 @@ export class OAuthGrantWriter {
     return revoked;
   }
 
-  /** {@link sweepRevokedCredentialTokens} on this writer's data source. */
+  /** {@link sweepRevokedCredentialTokens} on this writer's data source; never throws. */
   async sweepRevokedTokens(credentialId: string): Promise<void> {
     await sweepRevokedCredentialTokens(this.dataSource, credentialId);
   }
@@ -596,6 +596,9 @@ export class OAuthGrantWriter {
                           FOR UPDATE SKIP LOCKED)`,
       [organizationId, credentialId, revocation.revokedAt],
     );
+    // Access tokens: a blocking update, safe because no path locks an
+    // access-token row before the credential row (the same rule as
+    // `AgentCredentialsService.revoke`).
     await manager.update(
       OAuthAccessTokenEntity,
       { organizationId, credentialId, revokedAt: IsNull() },
@@ -621,6 +624,8 @@ async function insertReturningId<T extends ObjectLiteral>(
   return (result.raw as { id: string }[])[0].id;
 }
 
+const sweepLogger = new Logger('OAuthTokenSweep');
+
 /**
  * The post-commit sweep of a revoked credential (R-OA-23): every token of it
  * still live gets the credential's `revoked_at`.
@@ -631,19 +636,35 @@ async function insertReturningId<T extends ObjectLiteral>(
  * that rolled back instead of revoking its own token is caught here. It does
  * nothing unless the credential is revoked, and is idempotent. Every path
  * that revokes an OAuth credential calls it, the admin revoke included.
+ *
+ * Best effort: it never throws. The revocation it follows has committed, and
+ * every authentication path already refuses a token of a revoked credential,
+ * so a failed sweep (a deadlock victim, a dropped connection) must not fail
+ * that operation or skip what follows it (the access-epoch bump, the
+ * notification). The failure is logged, and the cleanup job's backstop pass
+ * revokes the stray tokens. Returns whether both statements ran.
  */
 export async function sweepRevokedCredentialTokens(
   executor: Pick<DataSource, 'query'>,
   credentialId: string,
-): Promise<void> {
-  for (const table of ['oauth_refresh_tokens', 'oauth_access_tokens']) {
-    await executor.query(
-      `UPDATE "${table}" t SET "revoked_at" = c."revoked_at"
-         FROM "agent_credentials" c
-        WHERE t."credential_id" = $1 AND c."id" = t."credential_id"
-          AND c."revoked_at" IS NOT NULL AND t."revoked_at" IS NULL`,
-      [credentialId],
+): Promise<boolean> {
+  try {
+    for (const table of ['oauth_refresh_tokens', 'oauth_access_tokens']) {
+      await executor.query(
+        `UPDATE "${table}" t SET "revoked_at" = c."revoked_at"
+           FROM "agent_credentials" c
+          WHERE t."credential_id" = $1 AND c."id" = t."credential_id"
+            AND c."revoked_at" IS NOT NULL AND t."revoked_at" IS NULL`,
+        [credentialId],
+      );
+    }
+    return true;
+  } catch (error) {
+    sweepLogger.warn(
+      `credential ${credentialId}: post-commit token sweep failed; the cleanup job revokes ` +
+        `the remaining tokens. ${error instanceof Error ? error.message : String(error)}`,
     );
+    return false;
   }
 }
 
