@@ -37,6 +37,30 @@ describe('client name sanitising', () => {
     expect(sanitise('\u{e0041}Claude')).toBe('Claude');
   });
 
+  it('strips Hangul fillers, private-use and unassigned code points', () => {
+    expect(sanitise('Claude\u3164Code')).toBe('ClaudeCode');
+    expect(sanitise('\u115f\u1160Claude\uffa0')).toBe('Claude');
+    expect(sanitise('Claude\ue000\u{f0000}')).toBe('Claude');
+    expect(sanitise('Claude\u0378')).toBe('Claude');
+    for (const blank of ['\u3164', '\u115f', '\u1160', '\uffa0', '\ue000', '\u3164 \u3164']) {
+      expect(sanitise(blank)).toBeNull();
+    }
+  });
+
+  it('requires at least one letter or digit', () => {
+    for (const name of ['---', '...', '\u2800', '🤖', '\u0301\u0301', '_ _']) {
+      expect(sanitise(name)).toBeNull();
+    }
+    expect(sanitise('7')).toBe('7');
+    expect(sanitise('Bot 🤖')).toBe('Bot 🤖');
+  });
+
+  it('allows at most two combining marks on a base', () => {
+    expect(sanitise('e\u0323\u0302')).toBe('e\u0323\u0302');
+    expect(sanitise('a\u0301\u0301\u0301')).toBeNull();
+    expect(sanitise('Claude' + '\u0301'.repeat(40))).toBeNull();
+  });
+
   it('keeps non-Latin letters and emoji', () => {
     expect(sanitise('Ассистент')).toBe('Ассистент');
     expect(sanitise('助手')).toBe('助手');
@@ -53,8 +77,8 @@ describe('client name sanitising', () => {
     expect(CLIENT_NAME_MAX).toBe(64);
     expect(sanitise('a'.repeat(64))).toBe('a'.repeat(64));
     expect(sanitise('a'.repeat(65))).toBeNull();
-    expect(sanitise('🤖'.repeat(64))).toBe('🤖'.repeat(64));
-    expect(sanitise('🤖'.repeat(65))).toBeNull();
+    expect(sanitise('a' + '🤖'.repeat(63))).toBe('a' + '🤖'.repeat(63));
+    expect(sanitise('a' + '🤖'.repeat(64))).toBeNull();
   });
 
   it('counts the length after stripping', () => {

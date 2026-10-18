@@ -83,6 +83,8 @@ describe('client identification (§6.3.6, §6.3.7)', () => {
         'https://1.2.3.4/c',
         'https://[::1]/c',
         'https://[2001:db8::1]/c',
+        'https://[::ffff:7f00:1]/c',
+        'https://[::ffff:127.0.0.1]/c',
         'https://0x7f.0.0.1/c',
         'https://2130706433/c',
         'https://127.1/c',
@@ -176,6 +178,38 @@ describe('client identification (§6.3.6, §6.3.7)', () => {
       }
     });
 
+    it("refuses Assay's own registrable domain (we never fetch ourselves)", () => {
+      for (const id of [
+        'https://api.assay.ai/c',
+        'https://assay.ai/c',
+        'https://app.assay.ai/client.json',
+        'https://x.mcp.assay.ai/c',
+      ]) {
+        expect(kind(id)).toBe('UNKNOWN');
+      }
+      expect(kind('https://assay.example.com/c')).toBe('CIMD');
+      expect(kind('https://notassay.ai/c')).toBe('CIMD');
+    });
+
+    it('refuses invalid percent-escapes and %00', () => {
+      for (const id of [
+        'https://x.com/c%00',
+        'https://x.com/c%00x',
+        'https://x.com/c%zz',
+        'https://x.com/c%',
+        'https://x.com/c%4',
+        'https://x.com/c?q=%G1',
+      ]) {
+        expect(kind(id)).toBe('UNKNOWN');
+      }
+      expect(kind('https://x.com/c%20d')).toBe('CIMD');
+      expect(kind('https://x.com/c%2Fd')).toBe('CIMD');
+    });
+
+    it('checks text only: a DNS name resolving to loopback is still CIMD (the fetch must refuse it)', () => {
+      expect(kind('https://127.0.0.1.nip.io/c')).toBe('CIMD');
+    });
+
     it('accepts a punycode host', () => {
       expect(kind('https://xn--bcher-kva.de/c')).toBe('CIMD');
     });
@@ -196,6 +230,13 @@ describe('client identification (§6.3.6, §6.3.7)', () => {
     it('refuses non-strings without throwing', () => {
       for (const value of [undefined, null, 1, {}, ['https://x.com/c']]) {
         expect(kind(value)).toBe('UNKNOWN');
+      }
+    });
+
+    it('gives UNKNOWN instead of throwing when options are missing or malformed', () => {
+      for (const options of [undefined, null, {}, { mcpPublicUrl: 42 }]) {
+        expect(classify('https://x.com/c', options as never).kind).toBe('UNKNOWN');
+        expect(classify('dcr_' + 'A'.repeat(22), options as never).kind).toBe('UNKNOWN');
       }
     });
   });

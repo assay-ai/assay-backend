@@ -299,6 +299,16 @@ describe('redirect URIs (§6.3.9)', () => {
       }
     });
 
+    it('fails closed instead of throwing when the allowlist is missing or malformed', () => {
+      for (const allowlist of [undefined, null, {}, 'x', [null, 1, { uri: CHATGPT }]]) {
+        const list = allowlist as unknown as RedirectAllowlistEntry[];
+        expect(registrable(CHATGPT, list)).toBe(false);
+        expect(matches([CHATGPT], CHATGPT, list)).toBe(false);
+      }
+      // Loopback does not depend on the allowlist.
+      expect(registrable(LOOPBACK, undefined as unknown as RedirectAllowlistEntry[])).toBe(true);
+    });
+
     it('refuses non-string input without throwing', () => {
       for (const value of [undefined, null, 1, {}, [CHATGPT]]) {
         expect(registrable(value as unknown as string, ALLOWLIST)).toBe(false);

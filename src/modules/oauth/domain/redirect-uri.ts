@@ -109,7 +109,8 @@ function isCanonicalHttpsUrl(uri: string): boolean {
 
 function allowlisted(uri: string, allowlist: readonly RedirectAllowlistEntry[]): boolean {
   if (!isValidAllowlistUri(uri)) return false;
-  return allowlist.some((entry) => entry.review === false && entry.uri === uri);
+  if (!Array.isArray(allowlist)) return false;
+  return allowlist.some((entry) => entry?.review === false && entry.uri === uri);
 }
 
 /**
