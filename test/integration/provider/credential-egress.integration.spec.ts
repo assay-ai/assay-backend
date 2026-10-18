@@ -180,7 +180,7 @@ beforeAll(async () => {
     signer,
   );
 
-  context = await createBindingEditorTestContext(invoker);
+  context = await createBindingEditorTestContext(invoker, undefined, signer);
   vault = new CredentialVaultService(new BindingCredentialRepository(context.dataSource), keks);
 
   for (const level of ['log', 'warn', 'error', 'debug', 'verbose', 'fatal'] as const) {

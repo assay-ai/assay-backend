@@ -323,7 +323,7 @@ import { SlashExecutionService } from '@modules/slash/services/slash-execution.s
 import { ResponseClass } from '@modules/tool/domain/classification';
 import type { MinimumStakeParameters } from '@modules/tool/domain/routing/routing.types';
 import { minimumStakeFor } from '@modules/tool/domain/routing/stake-gate';
-import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 import {
   StageStatus,
   UNSAMPLED_STAGES,
@@ -1990,6 +1990,7 @@ async function runStep3(ctx: SuiteContext): Promise<string> {
     settlementChains: [SOLANA_DEVNET],
     slaFailureRate: 0.02,
     timeoutMs: 10_000,
+    authMode: BindingAuthMode.NONE,
   } satisfies SaveToolBindingBodyDto);
 
   // The price is read back rather than trusted: `create` writes `'0'` for a
@@ -4018,6 +4019,7 @@ async function runStep8Seed(ctx: SuiteContext): Promise<string> {
     settlementChains: [SOLANA_DEVNET],
     slaFailureRate: SLA_SEED_DECLARED_FAILURE_RATE,
     timeoutMs: 10_000,
+    authMode: BindingAuthMode.NONE,
   } satisfies SaveToolBindingBodyDto);
 
   if (binding.id === ctx.binding.id) {

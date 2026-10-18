@@ -4,7 +4,12 @@ import * as http from 'node:http';
 
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { SaveToolBindingBodyDto } from '@modules/provider/dto/save-tool-binding.dto';
-import { BindingPauseReason, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
+import {
+  BindingAuthMode,
+  BindingPauseReason,
+  BindingStatus,
+  PricingMode,
+} from '@modules/tool/ports/tool.types';
 import { EgressHttpClient } from '@shared/network/egress';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -76,6 +81,7 @@ function body(): SaveToolBindingBodyDto {
     settlementChains: [STAKE_CHAIN],
     slaFailureRate: 0.02,
     timeoutMs: 30_000,
+    authMode: BindingAuthMode.NONE,
   } as SaveToolBindingBodyDto;
 }
 

@@ -14,7 +14,7 @@ import { DbChainEnrolmentSource } from '@modules/provider/services/db-chain-enro
 import { DbProviderRegistry } from '@modules/provider/services/db-provider-registry';
 import { ResponseClass } from '@modules/tool/domain/classification';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
-import { BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, BindingStatus, PricingMode } from '@modules/tool/ports/tool.types';
 import { BindingCallCounterService } from '@modules/tool/services/binding-call-counter.service';
 import { BindingCeilingService } from '@modules/tool/services/binding-ceiling.service';
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
@@ -126,6 +126,7 @@ function body(): SaveToolBindingBodyDto {
     settlementChains: [STAKE_CHAIN],
     slaFailureRate: 0.02,
     timeoutMs: 5_000,
+    authMode: BindingAuthMode.NONE,
   } as SaveToolBindingBodyDto;
 }
 
