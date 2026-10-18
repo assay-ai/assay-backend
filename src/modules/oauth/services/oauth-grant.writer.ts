@@ -57,6 +57,54 @@ export type CreateGrantResult =
       readonly reason: 'grant_limit_reached' | 'code_reused' | 'agent_not_active';
     };
 
+/** `revoked_by` of a grant whose rotated refresh token came back after a descendant was used. */
+export const OAUTH_REVOKED_BY_REFRESH_REUSE = 'system:oauth-refresh-reuse';
+
+export interface RotateRefreshInput {
+  /** The presented refresh token's row, as read before the rotation. */
+  readonly parent: OAuthRefreshTokenEntity;
+  /** The credential's agent: the key of the per-agent advisory lock. */
+  readonly agentId: string;
+  /**
+   * The scope of the new access token: the parent's, or narrower. The child
+   * refresh token always keeps the parent's scope (RFC 6749 §6).
+   */
+  readonly scope: string;
+  readonly audience: string;
+  /**
+   * Runs inside the transaction once the new tokens exist, before commit:
+   * the grace entry is stored here, so a racing presentation of the parent,
+   * which waits on the parent row until this commits, always finds it.
+   */
+  readonly beforeCommit: (tokens: IssuedGrantTokens) => Promise<void>;
+}
+
+export type RotateRefreshResult =
+  | { readonly ok: true; readonly tokens: IssuedGrantTokens }
+  | {
+      readonly ok: false;
+      /**
+       * `lost`: the parent was already used, revoked or expired when the
+       * compare-and-set ran. `credential_not_live`: the credential was revoked
+       * or expired under its row lock; nothing was issued.
+       */
+      readonly reason: 'lost' | 'credential_not_live';
+    };
+
+export interface RefreshReuseInput {
+  /** The rotated refresh token presented again, more than 30 s after its use. */
+  readonly parent: OAuthRefreshTokenEntity;
+  readonly agentId: string;
+  /** The public `client_id`, for the audit entry. */
+  readonly clientId: string;
+}
+
+export type RefreshReuseResult =
+  | { readonly outcome: 'revoked'; readonly credentialName: string }
+  | { readonly outcome: 'stale' }
+  /** The credential was already revoked or expired: nothing to decide. */
+  | { readonly outcome: 'not_live' };
+
 export interface RevokeGrantInput {
   readonly organizationId: string;
   readonly credentialId: string;
@@ -116,7 +164,8 @@ export class OAuthGrantWriter {
     const { code, client, audience } = input;
     const { organizationId, agentId } = code;
 
-    return this.dataSource.transaction(async (manager) => {
+    let sweep: string | null = null;
+    const result = await this.dataSource.transaction(async (manager) => {
       const [codeRow] = (await manager.query(
         `SELECT "reuse_detected_at" FROM "oauth_authorization_codes" WHERE "id" = $1 FOR UPDATE`,
         [code.id],
@@ -134,9 +183,7 @@ export class OAuthGrantWriter {
         return { ok: false, reason: 'code_reused' } as const;
       }
 
-      await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
-        `oauth-grants:${agentId}`,
-      ]);
+      await this.lockAgent(manager, agentId);
 
       // Approval checked the agent up to ~11 minutes ago; check it again.
       if (!(await isAgentActive(manager, organizationId, agentId))) {
@@ -161,6 +208,7 @@ export class OAuthGrantWriter {
           revokedAt: now,
           revokedBy: OAUTH_REVOKED_BY_REPLACED,
         });
+        sweep = replaced.id;
       }
 
       const credentialId = await insertReturningId(manager, AgentCredentialEntity, {
@@ -251,15 +299,18 @@ export class OAuthGrantWriter {
         invalidateAccess: replaced !== null && (hasNarrowing(replaced) || replacesLive),
       } as const;
     });
+    if (sweep) await this.sweepRevokedTokens(sweep);
+    return result;
   }
 
   /**
    * Revokes a grant: the credential and every one of its tokens, with its
-   * audit entry, in one transaction (R-OA-23). A credential already revoked is
-   * left as it is (its first revocation stands) and `false` is returned.
+   * audit entry, in one transaction, then the post-commit sweep (R-OA-23). A
+   * credential already revoked is left as it is (its first revocation
+   * stands) and `false` is returned; the sweep still runs.
    */
   async revokeGrant(input: RevokeGrantInput): Promise<boolean> {
-    return this.dataSource.transaction(async (manager) => {
+    const revoked = await this.dataSource.transaction(async (manager) => {
       const [{ now }] = (await manager.query(`SELECT now() AS "now"`)) as { now: Date }[];
       const revoked = await this.revokeInTransaction(
         manager,
@@ -281,6 +332,216 @@ export class OAuthGrantWriter {
       });
       return revoked;
     });
+    // Also when it was already revoked: a token an earlier revocation skipped
+    // is caught here.
+    await this.sweepRevokedTokens(input.credentialId);
+    return revoked;
+  }
+
+  /** {@link sweepRevokedCredentialTokens} on this writer's data source. */
+  async sweepRevokedTokens(credentialId: string): Promise<void> {
+    await sweepRevokedCredentialTokens(this.dataSource, credentialId);
+  }
+
+  /**
+   * Rotates a refresh token (spec §6.3.11 step 4), in one transaction:
+   * compare-and-set `used_at` on the parent, then insert the child refresh
+   * token (30 days) and an access token (1 h), and move the credential's
+   * `expires_at` to the child's (R-OA-13).
+   *
+   * Lock order, as everywhere: the refresh token row (the compare-and-set),
+   * then the per-agent advisory lock, then the credential row. A presentation
+   * racing this one blocks on the parent row until this commits, then loses
+   * the compare-and-set and reads the grace entry `beforeCommit` stored.
+   *
+   * The credential is checked again under its row lock. A revocation that
+   * committed first skipped the parent (it was locked here), so the parent is
+   * revoked here, with the credential's own `revoked_at`.
+   */
+  async rotateRefresh(input: RotateRefreshInput): Promise<RotateRefreshResult> {
+    const { parent, agentId, scope, audience } = input;
+    const { organizationId, credentialId } = parent;
+
+    return this.dataSource.transaction(async (manager) => {
+      const won = (await manager.query(
+        `UPDATE "oauth_refresh_tokens" SET "used_at" = now()
+          WHERE "id" = $1 AND "used_at" IS NULL AND "revoked_at" IS NULL
+            AND "expires_at" > now()
+          RETURNING "id"`,
+        [parent.id],
+      )) as [unknown[], number];
+      if (won[1] === 0) return { ok: false, reason: 'lost' } as const;
+
+      await this.lockAgent(manager, agentId);
+      const [now, credential] = await Promise.all([
+        transactionNow(manager),
+        lockCredential(manager, organizationId, credentialId),
+      ]);
+      if (!credential || credential.revoked_at !== null) {
+        await manager.query(
+          `UPDATE "oauth_refresh_tokens" SET "revoked_at" = $2
+            WHERE "id" = $1 AND "revoked_at" IS NULL`,
+          [parent.id, credential?.revoked_at ?? now],
+        );
+        return { ok: false, reason: 'credential_not_live' } as const;
+      }
+      if (credential.expires_at !== null && credential.expires_at.getTime() <= now.getTime()) {
+        // Undo the compare-and-set: nothing is issued from an expired grant.
+        await manager.query(`UPDATE "oauth_refresh_tokens" SET "used_at" = NULL WHERE "id" = $1`, [
+          parent.id,
+        ]);
+        return { ok: false, reason: 'credential_not_live' } as const;
+      }
+
+      // Times are written by the database, at its microsecond precision, from
+      // the transaction's `now()`: the child's `created_at` is exactly the
+      // parent's `used_at`, which reuse detection compares against.
+      const refreshExpiresAt = () =>
+        `now() + interval '${OAUTH_REFRESH_TOKEN_TTL_SECONDS} seconds'`;
+      const accessExpiresAt = () => `now() + interval '${OAUTH_ACCESS_TOKEN_TTL_SECONDS} seconds'`;
+      const issuedAt = () => 'now()';
+
+      const refreshToken = mint('assay_rt_');
+      const refreshTokenId = await insertReturningId(manager, OAuthRefreshTokenEntity, {
+        organizationId,
+        credentialId,
+        oauthClientId: parent.oauthClientId,
+        tokenHash: hashOpaqueToken(refreshToken),
+        parentId: parent.id,
+        scope: parent.scope,
+        expiresAt: refreshExpiresAt,
+        usedAt: null,
+        revokedAt: null,
+        createdAt: issuedAt,
+      });
+
+      const accessToken = mint('assay_at_');
+      await insertReturningId(manager, OAuthAccessTokenEntity, {
+        organizationId,
+        credentialId,
+        refreshTokenId,
+        tokenHash: hashOpaqueToken(accessToken),
+        scope,
+        audience,
+        expiresAt: accessExpiresAt,
+        firstUsedAt: null,
+        revokedAt: null,
+        createdAt: issuedAt,
+      });
+
+      await manager.update(
+        AgentCredentialEntity,
+        { organizationId, id: credentialId },
+        { expiresAt: refreshExpiresAt },
+      );
+
+      const tokens = { accessToken, refreshToken };
+      await input.beforeCommit(tokens);
+      return { ok: true, tokens } as const;
+    });
+  }
+
+  /**
+   * A rotated refresh token presented again after the grace (spec §6.3.11,
+   * R-OA-15). If a descendant was used, the grant is revoked with all its
+   * tokens and `oauth.refresh_reuse_detected` is audited; otherwise
+   * `oauth.refresh_stale_reuse` is audited and the grant stays.
+   *
+   * "A descendant was used": a refresh token of the same credential issued at
+   * or after the parent's use (its child is issued in the very transaction
+   * that set `used_at`, so at the same instant) that was itself used, or an
+   * access token issued at or after it, other than the parent's own, that was
+   * presented.
+   *
+   * Same lock order as a rotation, so the decision sees every rotation of the
+   * chain that committed before it, and a rotation still in flight sees the
+   * revocation when it reaches the credential row.
+   *
+   * A descendant use that has not committed yet (a child rotation past its
+   * compare-and-set, or a `first_used_at` stamp still in flight) reads as
+   * unused, so that replay is classed stale; the next replay detects it.
+   * Locking the descendants to see it would invert the lock order. The stale
+   * replay gains nothing (T14).
+   */
+  async detectRefreshReuse(input: RefreshReuseInput): Promise<RefreshReuseResult> {
+    const { parent, agentId, clientId } = input;
+    const { organizationId, credentialId } = parent;
+
+    const result = await this.dataSource.transaction(
+      async (manager): Promise<RefreshReuseResult> => {
+        const [locked] = (await manager.query(
+          `SELECT "used_at" FROM "oauth_refresh_tokens" WHERE "id" = $1 FOR UPDATE`,
+          [parent.id],
+        )) as { used_at: Date | null }[];
+        await this.lockAgent(manager, agentId);
+        const [now, credential] = await Promise.all([
+          transactionNow(manager),
+          lockCredential(manager, organizationId, credentialId),
+        ]);
+        if (!credential || credential.revoked_at !== null) {
+          // A revocation that committed while this held the row skipped it.
+          await manager.query(
+            `UPDATE "oauth_refresh_tokens" SET "revoked_at" = $2
+            WHERE "id" = $1 AND "revoked_at" IS NULL`,
+            [parent.id, credential?.revoked_at ?? now],
+          );
+          return { outcome: 'not_live' } as const;
+        }
+        if (!locked?.used_at) return { outcome: 'not_live' } as const;
+        if (credential.expires_at !== null && credential.expires_at.getTime() <= now.getTime()) {
+          return { outcome: 'not_live' } as const;
+        }
+
+        const [{ used }] = (await manager.query(
+          `SELECT (EXISTS (SELECT 1 FROM "oauth_refresh_tokens"
+                          WHERE "organization_id" = $1 AND "credential_id" = $2
+                            AND "id" <> $3 AND "created_at" >= p."used_at"
+                            AND "used_at" IS NOT NULL)
+              OR EXISTS (SELECT 1 FROM "oauth_access_tokens"
+                          WHERE "organization_id" = $1 AND "credential_id" = $2
+                            AND "refresh_token_id" IS DISTINCT FROM $3
+                            AND "created_at" >= p."used_at" AND "first_used_at" IS NOT NULL))
+                AS "used"
+           FROM "oauth_refresh_tokens" p WHERE p."id" = $3`,
+          // `used_at` is compared in SQL, at the database's microsecond precision.
+          [organizationId, credentialId, parent.id],
+        )) as { used: boolean }[];
+
+        if (!used) {
+          await this.audit.record(manager, {
+            organizationId,
+            actor: OAUTH_SYSTEM_ACTOR,
+            action: 'oauth.refresh_stale_reuse',
+            resourceType: 'agent_credential',
+            resourceId: credentialId,
+            before: null,
+            after: { agentId, clientId },
+          });
+          return { outcome: 'stale' } as const;
+        }
+
+        await this.revokeInTransaction(manager, organizationId, credentialId, {
+          revokedAt: now,
+          revokedBy: OAUTH_REVOKED_BY_REFRESH_REUSE,
+        });
+        await this.audit.record(manager, {
+          organizationId,
+          actor: OAUTH_SYSTEM_ACTOR,
+          action: 'oauth.refresh_reuse_detected',
+          resourceType: 'agent_credential',
+          resourceId: credentialId,
+          before: { revokedAt: null },
+          after: { revokedAt: now.toISOString(), agentId, clientId },
+        });
+        return { outcome: 'revoked', credentialName: credential.name } as const;
+      },
+    );
+    if (result.outcome !== 'stale') await this.sweepRevokedTokens(credentialId);
+    return result;
+  }
+
+  private async lockAgent(manager: EntityManager, agentId: string): Promise<void> {
+    await manager.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [`oauth-grants:${agentId}`]);
   }
 
   /**
@@ -321,10 +582,19 @@ export class OAuthGrantWriter {
       { revokedAt: revocation.revokedAt, revokedBy: revocation.revokedBy },
     );
     if (!result.affected) return false;
-    await manager.update(
-      OAuthRefreshTokenEntity,
-      { organizationId, credentialId, revokedAt: IsNull() },
-      { revokedAt: revocation.revokedAt },
+    // `SKIP LOCKED`: a refresh token locked by another transaction is one a
+    // rotation holds (§6.3.11). That rotation then waits for this credential
+    // row, finds it revoked, and revokes its own token; if it rolls back
+    // instead, the post-commit sweep (`sweepRevokedCredentialTokens`) catches
+    // the row. Waiting for it here would deadlock: it holds the token and
+    // waits for the credential.
+    await manager.query(
+      `UPDATE "oauth_refresh_tokens" SET "revoked_at" = $3
+        WHERE "id" IN (SELECT "id" FROM "oauth_refresh_tokens"
+                        WHERE "organization_id" = $1 AND "credential_id" = $2
+                          AND "revoked_at" IS NULL
+                          FOR UPDATE SKIP LOCKED)`,
+      [organizationId, credentialId, revocation.revokedAt],
     );
     await manager.update(
       OAuthAccessTokenEntity,
@@ -349,6 +619,53 @@ async function insertReturningId<T extends ObjectLiteral>(
     .returning(['id'])
     .execute();
   return (result.raw as { id: string }[])[0].id;
+}
+
+/**
+ * The post-commit sweep of a revoked credential (R-OA-23): every token of it
+ * still live gets the credential's `revoked_at`.
+ *
+ * Runs after the revoking transaction has committed, outside any
+ * transaction and holding no other lock. Each statement waits for a token row
+ * an in-flight rotation holds (the row `SKIP LOCKED` left), so a rotation
+ * that rolled back instead of revoking its own token is caught here. It does
+ * nothing unless the credential is revoked, and is idempotent. Every path
+ * that revokes an OAuth credential calls it, the admin revoke included.
+ */
+export async function sweepRevokedCredentialTokens(
+  executor: Pick<DataSource, 'query'>,
+  credentialId: string,
+): Promise<void> {
+  for (const table of ['oauth_refresh_tokens', 'oauth_access_tokens']) {
+    await executor.query(
+      `UPDATE "${table}" t SET "revoked_at" = c."revoked_at"
+         FROM "agent_credentials" c
+        WHERE t."credential_id" = $1 AND c."id" = t."credential_id"
+          AND c."revoked_at" IS NOT NULL AND t."revoked_at" IS NULL`,
+      [credentialId],
+    );
+  }
+}
+
+/** The transaction's own clock: every time written in one transaction derives from it. */
+async function transactionNow(manager: EntityManager): Promise<Date> {
+  const [{ now }] = (await manager.query(`SELECT now() AS "now"`)) as { now: Date }[];
+  return now;
+}
+
+/** The credential row, locked `FOR UPDATE`; soft-deleted rows read as missing. */
+async function lockCredential(
+  manager: EntityManager,
+  organizationId: string,
+  credentialId: string,
+): Promise<{ revoked_at: Date | null; expires_at: Date | null; name: string } | null> {
+  const [row] = (await manager.query(
+    `SELECT "revoked_at", "expires_at", "name" FROM "agent_credentials"
+      WHERE "id" = $1 AND "organization_id" = $2 AND "deleted_at" IS NULL
+      FOR UPDATE`,
+    [credentialId, organizationId],
+  )) as { revoked_at: Date | null; expires_at: Date | null; name: string }[];
+  return row ?? null;
 }
 
 /**

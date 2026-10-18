@@ -476,6 +476,33 @@ describe('OAuth cleanup — real database and Redis', () => {
     expect(await exists('oauth_authorization_codes', recent)).toBe(true);
   });
 
+  it('revokes live tokens of a revoked credential (sweep backstop), and only those', async () => {
+    const client = await insertClient();
+    const revokedAt = ago(DAY);
+    const dead = await insertGrant(client, { revokedAt });
+    const live = await insertGrant(client);
+    const future = new Date(Date.now() + DAY);
+    const strayRefresh = await insertRefreshToken(dead, client, { expiresAt: future });
+    const strayAccess = await insertAccessToken(dead, future);
+    const liveRefresh = await insertRefreshToken(live, client, { expiresAt: future });
+    const liveAccess = await insertAccessToken(live, future);
+
+    const summary = await service.run();
+
+    expect(summary).toMatchObject({ skipped: false });
+    expect((summary as { tokensRevoked: number }).tokensRevoked).toBeGreaterThanOrEqual(2);
+    const revokedAtOf = async (table: string, id: string): Promise<Date | null> =>
+      (
+        (await dataSource.query(`SELECT "revoked_at" FROM "${table}" WHERE "id" = $1`, [id])) as {
+          revoked_at: Date | null;
+        }[]
+      )[0].revoked_at;
+    expect(await revokedAtOf('oauth_refresh_tokens', strayRefresh)).toEqual(revokedAt);
+    expect(await revokedAtOf('oauth_access_tokens', strayAccess)).toEqual(revokedAt);
+    expect(await revokedAtOf('oauth_refresh_tokens', liveRefresh)).toBeNull();
+    expect(await revokedAtOf('oauth_access_tokens', liveAccess)).toBeNull();
+  });
+
   it('credential rows untouched', async () => {
     const client = await insertClient({ createdAt: ago(400 * DAY) });
     const ids = [

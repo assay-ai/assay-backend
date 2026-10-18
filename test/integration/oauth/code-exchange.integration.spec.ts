@@ -15,8 +15,11 @@ import {
 import { OAuthRefreshTokenEntity } from '@database/postgres/entities/oauth-refresh-token.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { OAuthAuthorizationCodeRepository } from '@database/postgres/repositories/oauth-authorization-code.repository';
+import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
+import { OAuthRefreshTokenRepository } from '@database/postgres/repositories/oauth-refresh-token.repository';
 import { OAuthGrantWriter } from '@modules/oauth/services/oauth-grant.writer';
+import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
 import {
   OAuthCodeApproval,
   OAuthCodeRequest,
@@ -24,8 +27,10 @@ import {
   TokenPair,
   isOAuthError,
 } from '@modules/oauth/services/oauth-token.service';
+import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { AuditLogWriter } from '@shared/audit';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
 
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 
@@ -94,6 +99,12 @@ describe('OAuth code exchange — real migrations', () => {
       audit,
       epoch,
       { issuer: MCP },
+      new OAuthRefreshTokenRepository(dataSource),
+      new OAuthAccessTokenRepository(dataSource),
+      new AgentCredentialRepository(dataSource),
+      {} as CacheService,
+      new OAuthMetrics(new MetricsRegistryService()),
+      { notify: async () => ({ deliveredNow: true }) },
     );
     client = await insertClient();
     builtin = await insertClient(OAuthClientKind.BUILTIN);

@@ -17,6 +17,11 @@ import { AgentCredentialRepository } from '@database/postgres/repositories/agent
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { OAuthAuthorizationCodeRepository } from '@database/postgres/repositories/oauth-authorization-code.repository';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
+import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
+import { OAuthRefreshTokenRepository } from '@database/postgres/repositories/oauth-refresh-token.repository';
+import { NotificationPort } from '@modules/notification/ports/notification.port';
+import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
 import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
 import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
@@ -102,6 +107,13 @@ describe('OAuth grant revocation cascade — real migrations', () => {
       realAudit,
       epoch,
       { issuer: MCP },
+      new OAuthRefreshTokenRepository(dataSource),
+      new OAuthAccessTokenRepository(dataSource),
+      credentialRepository,
+      // Refresh is not exercised here: these collaborators are never called.
+      {} as unknown as CacheService,
+      {} as unknown as OAuthMetrics,
+      {} as unknown as NotificationPort,
     );
     // The agent lookup is not under test: every agent id belongs to the organization.
     const agents = {

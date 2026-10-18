@@ -141,6 +141,12 @@ export enum NotificationEvent {
   // ── Credentials and signing ─────────────────────────────────────────────
   SESSION_EXPIRING = 'session.expiring',
   SESSION_EXPIRED = 'session.expired',
+  /**
+   * An app's OAuth grant was revoked because a rotated refresh token came back
+   * after one of its descendants was used: the sign-in was copied (spec
+   * §6.3.11). `OAuthTokenService.refresh` is the producer.
+   */
+  OAUTH_GRANT_STOPPED_REUSE = 'oauth.grant_stopped_reuse',
 
   // ── Free tier ───────────────────────────────────────────────────────────
   FREE_QUOTA_EXHAUSTED = 'free_quota.exhausted',

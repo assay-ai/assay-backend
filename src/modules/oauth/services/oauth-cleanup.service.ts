@@ -34,6 +34,8 @@ export type OAuthCleanupSummary =
   | { skipped: true }
   | {
       skipped: false;
+      /** Live tokens of a revoked credential, revoked by the backstop pass. */
+      tokensRevoked: number;
       accessTokens: number;
       refreshTokens: number;
       codes: number;
@@ -91,6 +93,8 @@ const DELETABLE_CLIENT_WHERE = `
  *   deleted. A change that allows a refresh row without such a credential
  *   (or deletes credential rows) must add a reference check here, or tokens
  *   would be orphaned silently.
+ * - Live tokens of a revoked credential are revoked first: a backstop of the
+ *   post-commit sweep every revocation runs (R-OA-23).
  * - Credential rows are never deleted: a grant stays an `agent_credentials`
  *   row for its audit trail, like an API key.
  *
@@ -121,6 +125,9 @@ export class OAuthCleanupService {
     if (!(await this.takeLock())) return { skipped: true };
 
     const now = this.config.now();
+    const tokensRevoked =
+      (await this.revokeTokensOfRevokedCredentials('oauth_refresh_tokens')) +
+      (await this.revokeTokensOfRevokedCredentials('oauth_access_tokens'));
     const codes = await this.deleteInBatches(
       'oauth_authorization_codes',
       new Date(now - OAUTH_CLEANUP_CODE_RETENTION_MS),
@@ -140,7 +147,31 @@ export class OAuthCleanupService {
       now + OAUTH_CLEANUP_TIME_BUDGET_MS,
     );
 
-    return { skipped: false, accessTokens, refreshTokens, codes, clients };
+    return { skipped: false, tokensRevoked, accessTokens, refreshTokens, codes, clients };
+  }
+
+  /**
+   * The backstop of the post-commit sweep (R-OA-23): a token still live under
+   * a revoked credential gets the credential's `revoked_at`. Such a row is
+   * already refused (every reader checks the credential); this keeps the row
+   * state complete if a sweep was lost to a crash. Batched, idempotent.
+   */
+  private async revokeTokensOfRevokedCredentials(table: string): Promise<number> {
+    let total = 0;
+    for (;;) {
+      const [, revoked] = (await this.dataSource.query(
+        `UPDATE "${table}" t SET "revoked_at" = c."revoked_at"
+           FROM "agent_credentials" c
+          WHERE c."id" = t."credential_id" AND t."id" IN (
+                SELECT t2."id" FROM "${table}" t2
+                  JOIN "agent_credentials" c2 ON c2."id" = t2."credential_id"
+                 WHERE t2."revoked_at" IS NULL AND c2."revoked_at" IS NOT NULL
+                 LIMIT $1)`,
+        [OAUTH_CLEANUP_BATCH_SIZE],
+      )) as [unknown, number];
+      total += revoked;
+      if (revoked < OAUTH_CLEANUP_BATCH_SIZE) return total;
+    }
   }
 
   private async takeLock(): Promise<boolean> {
