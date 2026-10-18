@@ -1858,23 +1858,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
-   * Upheld disputes' held payments still to refund (review P1-2): retried by
-   * the scheduler, which holds the redeemer key. Cross-organization: a job.
-   */
-  async findRefundable(rail: string, limit: number): Promise<PaymentIntentEntity[]> {
-    return this.createQueryBuilder('intent')
-      .where('intent.organizationId IS NOT NULL')
-      .andWhere('intent.rail = :rail', { rail })
-      .andWhere(`intent.heldStatus = 'HELD'`)
-      .andWhere(`intent.disputeOutcome = 'UPHELD'`)
-      .andWhere('intent.holdReleasedAt IS NULL')
-      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())')
-      .orderBy('intent.collectableAt', 'ASC')
-      .limit(limit)
-      .getMany();
-  }
-
-  /**
    * A collect or refund of this held payment failed: back off — 1, 2, 4 …
    * minutes, at most an hour — so a stuck row neither blocks the pass nor
    * burns gas every minute (review P1-3).

@@ -34,11 +34,6 @@ export function formatVersionRange(range: VersionRange): string {
     .join(' || ');
 }
 
-/** The range of one major, `^N`. */
-export function majorRange(major: number): VersionRange {
-  return [major];
-}
-
 export function rangeCovers(range: VersionRange, major: number): boolean {
   return range.includes(major);
 }

@@ -119,9 +119,6 @@ async function lockOwner(manager: EntityManager, organizationId: string): Promis
   await manager.query(`SELECT 1 FROM organizations WHERE id = $1 FOR UPDATE`, [organizationId]);
 }
 
-/** The handle prefix a reassigned handle's old tools are renamed to: never claimable. */
-export const TOMBSTONE_HANDLE_RE = /^removed-[0-9a-f]{8}$/;
-
 /**
  * A reassigned handle moves to another organization; the old holder's
  * `{handle}__…` tools stay removed and are renamed `removed-{id}__…`, so the

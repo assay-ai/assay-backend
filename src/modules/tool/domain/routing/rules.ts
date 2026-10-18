@@ -142,8 +142,6 @@ export interface RuleRejection {
   readonly requestedRange?: readonly number[] | null;
 }
 
-export const NO_RULES: RoutingRules = Object.freeze({ agent: null, entry: null });
-
 const TIER_RANK: Readonly<Record<ProviderTier, number>> = Object.freeze({
   [ProviderTier.NEW]: 0,
   [ProviderTier.ESTABLISHED]: 1,

@@ -9,8 +9,6 @@ import {
   MaxLength,
 } from 'class-validator';
 
-import { SpendPolicyDto } from './get-spend-policy.dto';
-
 /** Atomic units as a non-negative decimal integer string — same grammar as `MoneyDto.amount`. */
 const ATOMIC_AMOUNT_RE = /^\d+$/;
 
@@ -109,5 +107,3 @@ export class UpdateSpendPolicyDto {
   @MaxLength(512)
   changeReason?: string;
 }
-
-export class UpdateSpendPolicyResponseDto extends SpendPolicyDto {}

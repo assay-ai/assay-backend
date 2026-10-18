@@ -69,16 +69,4 @@ export class VerifierSigningLogEntryRepository extends AbstractRepository<Verifi
       order: { createdAt: 'ASC' },
     });
   }
-
-  /**
-   * The row a given signed payload came from, if any.
-   *
-   * This is the query that turns the journal into evidence: given an
-   * attestation the chain accepted, a hash with no row here means the signature
-   * was produced outside this platform. Indexed on `payload_sha256` for exactly
-   * that lookup.
-   */
-  findByPayloadHash(payloadSha256: string): Promise<VerifierSigningLogEntryEntity[]> {
-    return this.find({ where: { payloadSha256 }, order: { createdAt: 'ASC' } });
-  }
 }

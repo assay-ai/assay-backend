@@ -135,16 +135,4 @@ export class OperatorService {
     }
     return operator;
   }
-
-  /**
-   * "No self-approval, enforced in code" — the code half of the pair
-   * `chk_override_log_entries_no_self_approval` also enforces at the row.
-   * Refuses even before either operator is looked up: two identical ids can
-   * never be two people, regardless of what either one's row says.
-   */
-  assertDifferentPerson(actorOperatorId: string, approverOperatorId: string): void {
-    if (actorOperatorId === approverOperatorId) {
-      throw OperatorErrors.selfApprovalRefused();
-    }
-  }
 }
