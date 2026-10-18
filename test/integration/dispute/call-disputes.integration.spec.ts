@@ -23,7 +23,9 @@ import {
   OperatorCallDisputeDetailDto,
 } from '@modules/dispute/dto/call-dispute.dto';
 import { DisputeErrorCode } from '@modules/dispute/errors/dispute.errors';
+import { CallDisputeRetentionService } from '@modules/dispute/services/call-dispute-retention.service';
 import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
+import { REDEEM_GRACE_SECONDS } from '@modules/payment/constants/voucher-redemption.constants';
 import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.service';
@@ -46,6 +48,9 @@ import {
 } from '@modules/operator/services/operator-call-dispute.service';
 import { OperatorService } from '@modules/operator/services/operator.service';
 import { OverrideLogService } from '@modules/operator/services/override-log.service';
+import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
+import { ProviderEarningsGroupBy } from '@modules/provider/dto/get-provider-earnings.dto';
+import { ProviderEarningsService } from '@modules/provider/services/provider-earnings.service';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
 import { EvidencePackService } from '@modules/verification/services/evidence-pack.service';
 import { AuditLogWriter } from '@shared/audit';
@@ -88,6 +93,8 @@ describe('call disputes, against a real database', () => {
   let config: { -readonly [K in keyof CallDisputeConfig]: CallDisputeConfig[K] };
   let adjudicator: OperatorSession;
   let second: OperatorSession;
+  let payments: PaymentIntentRepository;
+  let retention: CallDisputeRetentionService;
 
   let buyer: string;
   let provider: string;
@@ -116,7 +123,7 @@ describe('call disputes, against a real database', () => {
       balances,
       holds,
     );
-    const payments = new PaymentIntentRepository(dataSource);
+    payments = new PaymentIntentRepository(dataSource);
     intents = new PaymentIntentService(payments, ledger, DISABLED_ESCROW_GATE, noBlocks());
 
     notified = [];
@@ -152,6 +159,7 @@ describe('call disputes, against a real database', () => {
       {} as OperatorService,
     );
     operatorDisputes = new OperatorCallDisputeService(disputes, overrides, approvals);
+    retention = new CallDisputeRetentionService(dataSource, config);
 
     adjudicator = await seedOperator('adj-a', [OperatorRole.ADJ]);
     second = await seedOperator('adj-b', [OperatorRole.ADJL]);
@@ -197,7 +205,12 @@ describe('call disputes, against a real database', () => {
     } as unknown as McpSession;
   }
 
-  type Collection = 'AWAITING' | 'REDEEMED' | 'DEBT' | 'WRITTEN_OFF';
+  /**
+   * `HELD`: inside the dispute hold (`collectable_at` an hour away).
+   * `PAST_WINDOW`: past it and not redeemed yet. `REDEEMED`: collected.
+   * `DEBT` / `WRITTEN_OFF`: the voucher lapsed (buyer debt).
+   */
+  type Collection = 'HELD' | 'PAST_WINDOW' | 'REDEEMED' | 'DEBT' | 'WRITTEN_OFF';
 
   /**
    * A served, paid rail-B call settled a minute ago: the buyer funded, its
@@ -207,9 +220,10 @@ describe('call disputes, against a real database', () => {
   async function seedCall(
     collection: Collection,
     options: { settledAgoMs?: number; callClass?: string } = {},
-  ): Promise<{ intentId: string; verdictId: string; holdId: string }> {
+  ): Promise<{ intentId: string; verdictId: string; holdId: string; seq: number }> {
     const intentId = randomUUID();
     const verdictId = randomUUID();
+    const seq = (voucherSeq += 1);
     await ledger.appendNow({
       organizationId: buyer,
       accountId: payer,
@@ -221,9 +235,9 @@ describe('call disputes, against a real database', () => {
          id, organization_id, status, agent_id, agent_account, provider_id, provider_account,
          tool_id, binding_id, rail, call_id, call_class, asset_id, decimals, price_amount,
          provider_amount, platform_fee, request_hash, chain_id, expires_at, voucher_seq,
-         voucher_signature, voucher_resource_hash, voucher_issued_at)
+         voucher_signature, voucher_resource_hash, voucher_issued_at, collectable_at)
        VALUES ($1, $2, 'SETTLED', $3, $4, $5, $6, $7, $8, 'RAIL_B_VOUCHER', $9, $10, $11, 6,
-               $12, $13, $14, $15, $16, now() - interval '1 hour', $20, $17, $18, $19)`,
+               $12, $13, $14, $15, $16, now() + interval '4 minutes', $20, $17, $18, $19, $21)`,
       [
         intentId,
         buyer,
@@ -244,7 +258,8 @@ describe('call disputes, against a real database', () => {
         `0x${'12'.repeat(65)}`,
         `sha256:${'cd'.repeat(32)}`,
         String(Math.floor(Date.now() / 1000)),
-        String((voucherSeq += 1)),
+        String(seq),
+        collection === 'HELD' ? new Date(Date.now() + 3_600_000) : new Date(Date.now() - 60_000),
       ],
     );
     const hold = await ledger.createHold({
@@ -270,10 +285,11 @@ describe('call disputes, against a real database', () => {
     );
 
     switch (collection) {
-      case 'AWAITING':
+      case 'HELD':
+      case 'PAST_WINDOW':
         break;
       case 'REDEEMED':
-        await intents.commitRedeemedHold(buyer, intentId, `0x${'77'.repeat(32)}`);
+        await redeem(intentId);
         break;
       case 'DEBT':
         await dataSource.query(
@@ -301,7 +317,26 @@ describe('call disputes, against a real database', () => {
         ).resolves.toBe(true);
         break;
     }
-    return { intentId, verdictId, holdId: hold.id };
+    return { intentId, verdictId, holdId: hold.id, seq };
+  }
+
+  /** The intent ids the redemption job would take now, for this buyer. */
+  async function queued(): Promise<string[]> {
+    const rows = await payments.findAwaitingRedemption(ASSET, 'SETTLED', 'RAIL_B_VOUCHER', 500);
+    return rows.filter((row) => row.agentAccount === payer).map((row) => row.id);
+  }
+
+  /** What the redemption job does once `redeem_voucher` lands. */
+  async function redeem(intentId: string): Promise<void> {
+    await intents.commitRedeemedHold(buyer, intentId, `0x${randomUUID().replace(/-/g, '')}`);
+  }
+
+  /** Moves a held call's window into the past, as time would. */
+  async function endWindow(intentId: string): Promise<void> {
+    await dataSource.query(
+      `UPDATE payment_intents SET collectable_at = now() - interval '1 second' WHERE id = $1`,
+      [intentId],
+    );
   }
 
   async function file(
@@ -339,21 +374,26 @@ describe('call disputes, against a real database', () => {
 
   async function journalTypes(intentId: string): Promise<string[]> {
     const rows = (await dataSource.query(
-      `SELECT entry_type FROM ledger_entries WHERE intent_id = $1 ORDER BY seq`,
+      `SELECT entry_type FROM ledger_entries WHERE intent_id = $1 ORDER BY entry_type`,
       [intentId],
     )) as { entry_type: string }[];
     return rows.map((row) => row.entry_type);
   }
 
+  const COLLECTED = ['HOLD_COMMIT', 'HOLD_CREATE', 'PLATFORM_FEE', 'PROVIDER_CREDIT'];
+  const REFUNDED = ['HOLD_CREATE', 'HOLD_RELEASE'];
+
   async function intentRow(intentId: string) {
     const [row] = (await dataSource.query(
-      `SELECT redemption_last_error, hold_released_at, dispute_outcome
+      `SELECT redemption_last_error, hold_released_at, dispute_outcome, collectable_at, expires_at
          FROM payment_intents WHERE id = $1`,
       [intentId],
     )) as {
       redemption_last_error: string | null;
       hold_released_at: Date | null;
       dispute_outcome: string | null;
+      collectable_at: Date | null;
+      expires_at: Date;
     }[];
     return row;
   }
@@ -363,11 +403,264 @@ describe('call disputes, against a real database', () => {
     expect((await ledger.verifySnapshots(provider)).ok).toBe(true);
   }
 
+  /** The buyer charged and the provider credited for one call. */
+  async function assertCollected(intentId: string): Promise<void> {
+    expect(await journalTypes(intentId)).toEqual(COLLECTED);
+    expect(await balance(payer)).toEqual({ available: FUNDED - PRICE, held: 0n });
+    expect(await balance(PAYEE, provider)).toEqual({ available: PROVIDER_AMOUNT, held: 0n });
+    await assertBooksBalance();
+  }
+
+  /** The buyer whole, nobody credited, the voucher never redeemed. */
+  async function assertRefunded(intentId: string): Promise<void> {
+    expect(await journalTypes(intentId)).toEqual(REFUNDED);
+    expect(await balance(payer)).toEqual({ available: FUNDED, held: 0n });
+    expect(await balance(PAYEE, provider)).toEqual({ available: 0n, held: 0n });
+    expect(await queued()).not.toContain(intentId);
+    await assertBooksBalance();
+  }
+
+  // ── The dispute hold ────────────────────────────────────────────────────
+
+  describe('the dispute hold', () => {
+    it('no dispute: the voucher waits out the window, then is redeemed', async () => {
+      const { intentId } = await seedCall('HELD');
+      expect(await queued()).not.toContain(intentId);
+      // Held, not payable: still in the buyer's held bucket, nothing credited.
+      expect(await balance(payer)).toEqual({ available: FUNDED - PRICE, held: PRICE });
+      expect(await balance(PAYEE, provider)).toEqual({ available: 0n, held: 0n });
+
+      const earnings = () =>
+        new ProviderEarningsService(payments).getEarnings(provider, {
+          from: new Date(Date.now() - 3_600_000).toISOString(),
+          to: new Date(Date.now() + 3_600_000).toISOString(),
+          groupBy: ProviderEarningsGroupBy.TOOL,
+        } as never);
+      expect((await earnings()).totals).toMatchObject({
+        pendingInWindow: { amount: PROVIDER_AMOUNT.toString() },
+        pendingInWindowCalls: 1,
+        earned: { amount: '0' },
+        debtOutstandingCalls: 0,
+      });
+
+      await endWindow(intentId);
+      expect(await queued()).toContain(intentId);
+      await redeem(intentId);
+      await assertCollected(intentId);
+      expect((await earnings()).totals).toMatchObject({
+        pendingInWindowCalls: 0,
+        earned: { amount: PROVIDER_AMOUNT.toString() },
+      });
+    });
+
+    it('upheld inside the window: a full refund, and nothing is ever redeemed', async () => {
+      const { intentId } = await seedCall('HELD');
+      const dispute = await file(intentId);
+      expect(dispute).toMatchObject({ refundGuaranteed: true });
+      expect(dispute.refundNotice).toMatch(/refunded in full/);
+      expect((await intentRow(intentId)).dispute_outcome).toBe('OPEN');
+
+      // The window ends while the dispute is open: still not collected.
+      await endWindow(intentId);
+      expect(await queued()).not.toContain(intentId);
+
+      const decided = (await decide(
+        dispute.id,
+        CallDisputeDecision.UPHOLD,
+      )) as OperatorCallDisputeDetailDto;
+      expect(decided).toMatchObject({
+        state: 'UPHELD',
+        refundGuaranteed: true,
+        refundSource: 'UNCOLLECTED_EARNINGS',
+        refundState: 'REFUNDED',
+        restoredAmount: { amount: PRICE.toString() },
+      });
+      expect(await intentRow(intentId)).toMatchObject({
+        redemption_last_error: 'voided:DISPUTE_UPHELD',
+        dispute_outcome: 'UPHELD',
+      });
+      await assertRefunded(intentId);
+    });
+
+    it('rejected: the held voucher goes back to the queue and is redeemed after the decision', async () => {
+      const { intentId } = await seedCall('HELD');
+      const dispute = await file(intentId);
+      await endWindow(intentId);
+      expect(await queued()).not.toContain(intentId);
+
+      await decide(dispute.id, CallDisputeDecision.REJECT);
+
+      expect((await intentRow(intentId)).dispute_outcome).toBe('REJECTED');
+      expect(await queued()).toContain(intentId);
+      await redeem(intentId);
+      await assertCollected(intentId);
+    });
+
+    it('withdrawn: the hold is lifted and collection proceeds', async () => {
+      const { intentId } = await seedCall('HELD');
+      const dispute = await file(intentId);
+      await endWindow(intentId);
+
+      await disputes.withdraw(session(), dispute.id);
+
+      expect((await intentRow(intentId)).dispute_outcome).toBeNull();
+      expect(await queued()).toContain(intentId);
+    });
+
+    it('filed after the window: a quality signal; a collected call is not refunded', async () => {
+      const { intentId } = await seedCall('PAST_WINDOW');
+      const dispute = await file(intentId);
+      expect(dispute.refundGuaranteed).toBe(false);
+      expect(dispute.refundNotice).toMatch(/after the dispute window/);
+      // Nothing holds it: collection goes on during the dispute.
+      expect((await intentRow(intentId)).dispute_outcome).toBeNull();
+      expect(await queued()).toContain(intentId);
+      // Upholding while the redemption is in flight waits.
+      await expect(decide(dispute.id, CallDisputeDecision.UPHOLD)).rejects.toMatchObject({
+        errorCode: DisputeErrorCode.DISPUTE_COLLECTION_IN_PROGRESS,
+      });
+
+      await redeem(intentId);
+      const decided = (await decide(
+        dispute.id,
+        CallDisputeDecision.UPHOLD,
+      )) as OperatorCallDisputeDetailDto;
+
+      expect(decided).toMatchObject({
+        state: 'UPHELD',
+        refundSource: 'NONE',
+        refundState: 'NOT_REFUNDABLE',
+        refundAmount: null,
+        restoredAmount: null,
+      });
+      expect((await intentRow(intentId)).dispute_outcome).toBe('UPHELD');
+      await assertCollected(intentId);
+    });
+
+    it('filed after the window on uncollected money (buyer debt): still refunded', async () => {
+      const { intentId } = await seedCall('DEBT');
+      expect(await balance(payer)).toEqual({ available: FUNDED - PRICE, held: PRICE });
+      const dispute = await file(intentId);
+      expect(dispute.refundGuaranteed).toBe(false);
+
+      const decided = (await decide(
+        dispute.id,
+        CallDisputeDecision.UPHOLD,
+      )) as OperatorCallDisputeDetailDto;
+
+      expect(decided).toMatchObject({ refundState: 'REFUNDED', secondedBy: null });
+      expect(decided.history).toEqual([
+        expect.objectContaining({ code: 'S-14', action: 'call_dispute.decided' }),
+      ]);
+      expect((await intentRow(intentId)).redemption_last_error).toBe('voided:DISPUTE_UPHELD');
+      await assertRefunded(intentId);
+      expect(notified.filter((n) => n.event === 'call_dispute.decided')).toHaveLength(2);
+    });
+
+    it('voids a written-off debt: the buyer no longer owes it, and no money moves again', async () => {
+      const { intentId } = await seedCall('WRITTEN_OFF');
+      const dispute = await file(intentId);
+
+      const decided = (await decide(
+        dispute.id,
+        CallDisputeDecision.UPHOLD,
+      )) as OperatorCallDisputeDetailDto;
+
+      expect(decided.refundState).toBe('REFUNDED');
+      expect((await intentRow(intentId)).redemption_last_error).toBe('voided:DISPUTE_UPHELD');
+      await assertRefunded(intentId);
+    });
+  });
+
+  describe('voucher expiry safety', () => {
+    it('stamps a window capped below the voucher’s on-chain deadline on the move to SETTLED', async () => {
+      const intentId = randomUUID();
+      await dataSource.query(
+        `INSERT INTO payment_intents (
+           id, organization_id, status, agent_id, agent_account, provider_id, provider_account,
+           tool_id, rail, call_id, call_class, asset_id, decimals, price_amount,
+           provider_amount, platform_fee, request_hash, chain_id, expires_at, voucher_seq,
+           voucher_signature, voucher_resource_hash, voucher_issued_at)
+         VALUES ($1, $2, 'VERIFYING', $3, $4, $5, $6, $7, 'RAIL_B_VOUCHER', $8, 'PAID', $9, 6,
+                 $10, $11, $12, $13, $14, now() + interval '5 minutes', $15, $16, $17, $18)`,
+        [
+          intentId,
+          buyer,
+          randomUUID(),
+          payer,
+          provider,
+          PAYEE,
+          TOOL,
+          randomUUID(),
+          ASSET,
+          PRICE.toString(),
+          PROVIDER_AMOUNT.toString(),
+          FEE.toString(),
+          `sha256:${'ab'.repeat(32)}`,
+          CHAIN,
+          String((voucherSeq += 1)),
+          `0x${'12'.repeat(65)}`,
+          `sha256:${'cd'.repeat(32)}`,
+          String(Math.floor(Date.now() / 1000)),
+        ],
+      );
+
+      // The default window is an hour; the voucher dies 35 minutes from now.
+      await intents.resolve(
+        buyer,
+        intentId,
+        PaymentIntentStatus.VERIFYING,
+        PaymentIntentStatus.SETTLED,
+      );
+
+      const row = await intentRow(intentId);
+      const deadline = row.expires_at.getTime() + REDEEM_GRACE_SECONDS * 1000;
+      expect(row.collectable_at).not.toBeNull();
+      const collectable = (row.collectable_at as Date).getTime();
+      expect(collectable).toBeLessThan(Date.now() + 3_600_000 - 60_000);
+      // At least ten minutes left between the window's end and the chain's deadline.
+      expect(deadline - collectable).toBeGreaterThanOrEqual(600_000);
+    });
+
+    it('keeps seq order across the window: a later voucher waits for an earlier held one', async () => {
+      const earlier = await seedCall('HELD');
+      const later = await seedCall('PAST_WINDOW');
+      expect(await queued()).not.toContain(later.intentId);
+
+      await endWindow(earlier.intentId);
+      expect(await queued()).toEqual([earlier.intentId, later.intentId]);
+    });
+
+    it('a disputed voucher does not hold the buyer’s later vouchers past their deadline', async () => {
+      const disputed = await seedCall('HELD');
+      const later = await seedCall('PAST_WINDOW');
+      await file(disputed.intentId);
+
+      expect(await queued()).toEqual([later.intentId]);
+      await redeem(later.intentId);
+
+      // The disputed voucher is now unredeemable on chain (a higher seq landed):
+      // rejected, it is queued, the chain refuses it and it becomes buyer debt
+      // through the existing flow — the provider is never paid by the platform.
+      await endWindow(disputed.intentId);
+      const [dispute] = (await disputes.listForBuyer(buyer, { limit: 5 } as never)).items;
+      await decide(dispute.id, CallDisputeDecision.REJECT);
+      expect(await queued()).toContain(disputed.intentId);
+      await payments.lapseRedemption(buyer, disputed.intentId, 'VoucherSeqNotIncreasing');
+      expect(await queued()).not.toContain(disputed.intentId);
+      expect(await balance(payer)).toEqual({
+        available: 2n * FUNDED - 2n * PRICE,
+        held: PRICE,
+      });
+      await assertBooksBalance();
+    });
+  });
+
   // ── Filing ──────────────────────────────────────────────────────────────
 
   describe('filing', () => {
-    it('files a dispute over a paid call, snapshots its evidence and tells the provider', async () => {
-      const { intentId, verdictId } = await seedCall('REDEEMED');
+    it('snapshots the evidence, tells the provider, and scrubs the bodies after retention', async () => {
+      const { intentId, verdictId } = await seedCall('HELD');
 
       const dispute = await disputes.file(session(), {
         subjectType: CallDisputeSubjectType.VERDICT,
@@ -399,6 +692,15 @@ describe('call disputes, against a real database', () => {
         [dispute.id],
       )) as { action: string }[];
       expect(audit.action).toBe('call_dispute.filed');
+
+      await decide(dispute.id, CallDisputeDecision.REJECT);
+      expect(await retention.sweep()).toBe(0);
+      const later = new Date(Date.now() + config.snapshotRetentionMs + 60_000);
+      expect(await retention.sweep(later)).toBeGreaterThanOrEqual(1);
+      const scrubbed = await disputes.getForBuyer(buyer, dispute.id);
+      expect(scrubbed.evidence).not.toHaveProperty('request');
+      expect(scrubbed.evidence).not.toHaveProperty('response');
+      expect(scrubbed.evidence).toMatchObject({ call: { intentId }, verdict: { id: verdictId } });
     });
 
     it('allows one open dispute per call, and a new one once it is withdrawn', async () => {
@@ -462,50 +764,11 @@ describe('call disputes, against a real database', () => {
     });
   });
 
-  // ── Decisions and money ────────────────────────────────────────────────
+  // ── Decisions ───────────────────────────────────────────────────────────
 
-  describe('upholding', () => {
-    it('voids an outstanding debt: the buyer is made whole, the provider is not paid', async () => {
-      const { intentId } = await seedCall('DEBT');
-      expect(await balance(payer)).toEqual({ available: FUNDED - PRICE, held: PRICE });
-      const dispute = await file(intentId);
-
-      const decided = (await decide(
-        dispute.id,
-        CallDisputeDecision.UPHOLD,
-      )) as OperatorCallDisputeDetailDto;
-
-      expect(decided).toMatchObject({
-        state: 'UPHELD',
-        refundSource: 'UNCOLLECTED_EARNINGS',
-        refundState: 'REFUNDED',
-        refundAmount: { amount: PRICE.toString() },
-        restoredAmount: { amount: PRICE.toString() },
-        resolvedBy: adjudicator.operatorId,
-        secondedBy: null,
-      });
-      expect(decided.history).toEqual([
-        expect.objectContaining({ code: 'S-14', action: 'call_dispute.decided' }),
-      ]);
-      // Double entry: the hold opened and was released — nothing else moved.
-      expect(await balance(payer)).toEqual({ available: FUNDED, held: 0n });
-      expect(await journalTypes(intentId)).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
-      expect(await balance(PAYEE, provider)).toEqual({ available: 0n, held: 0n });
-      expect(await intentRow(intentId)).toMatchObject({
-        redemption_last_error: 'voided:DISPUTE_UPHELD',
-        dispute_outcome: 'UPHELD',
-      });
-      const [verdict] = (await dataSource.query(
-        `SELECT dispute_outcome FROM verification_records WHERE intent_id = $1`,
-        [intentId],
-      )) as { dispute_outcome: string }[];
-      expect(verdict.dispute_outcome).toBe('UPHELD');
-      expect(notified.filter((n) => n.event === 'call_dispute.decided')).toHaveLength(2);
-      await assertBooksBalance();
-    });
-
+  describe('deciding', () => {
     it('is idempotent: deciding again or re-running the refund moves nothing twice', async () => {
-      const { intentId } = await seedCall('DEBT');
+      const { intentId } = await seedCall('HELD');
       const dispute = await file(intentId);
       await decide(dispute.id, CallDisputeDecision.UPHOLD);
 
@@ -516,15 +779,14 @@ describe('call disputes, against a real database', () => {
         errorCode: DisputeErrorCode.DISPUTE_NOT_DECIDABLE,
       });
       await disputes.settleRefund(dispute.id);
-      await expect(intents.voidDebt(buyer, intentId, 'DISPUTE_UPHELD')).resolves.toBe(false);
-
-      expect(await journalTypes(intentId)).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
-      expect(await balance(payer)).toEqual({ available: FUNDED, held: 0n });
-      await assertBooksBalance();
+      await expect(intents.releaseDisputedHold(buyer, intentId, 'DISPUTE_UPHELD')).resolves.toBe(
+        false,
+      );
+      await assertRefunded(intentId);
     });
 
     it('finishes a refund whose money step never ran (a crash after the decision committed)', async () => {
-      const { intentId } = await seedCall('DEBT');
+      const { intentId } = await seedCall('HELD');
       const dispute = await file(intentId);
       // The decision commits, the process dies before `settleRefund`.
       const runner = dataSource.createQueryRunner();
@@ -540,6 +802,9 @@ describe('call disputes, against a real database', () => {
       await runner.release();
       expect((await disputes.requireAny(dispute.id)).refundState).toBe('PENDING');
       expect(await balance(payer)).toEqual({ available: FUNDED - PRICE, held: PRICE });
+      // Upheld but not yet released: still out of the redemption queue.
+      await endWindow(intentId);
+      expect(await queued()).not.toContain(intentId);
 
       const finished = (await decide(
         dispute.id,
@@ -547,81 +812,19 @@ describe('call disputes, against a real database', () => {
       )) as OperatorCallDisputeDetailDto;
 
       expect(finished.refundState).toBe('REFUNDED');
-      expect(await balance(payer)).toEqual({ available: FUNDED, held: 0n });
-      expect(await journalTypes(intentId)).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
-      await assertBooksBalance();
-    });
-
-    it('voids a written-off debt: the buyer no longer owes it, and no money moves again', async () => {
-      const { intentId } = await seedCall('WRITTEN_OFF');
-      expect(await balance(payer)).toEqual({ available: FUNDED, held: 0n });
-      const dispute = await file(intentId);
-
-      const decided = (await decide(
-        dispute.id,
-        CallDisputeDecision.UPHOLD,
-      )) as OperatorCallDisputeDetailDto;
-
-      expect(decided.refundState).toBe('REFUNDED');
-      expect(await intentRow(intentId)).toMatchObject({
-        redemption_last_error: 'voided:DISPUTE_UPHELD',
-      });
-      expect(await journalTypes(intentId)).toEqual(['HOLD_CREATE', 'HOLD_RELEASE']);
-      expect(await balance(payer)).toEqual({ available: FUNDED, held: 0n });
-      await assertBooksBalance();
-    });
-
-    it('opens a claim on the provider’s stake when the provider was already paid — the platform books nothing', async () => {
-      const { intentId } = await seedCall('REDEEMED');
-      const before = await journalTypes(intentId);
-      expect([...before].sort()).toEqual([
-        'HOLD_COMMIT',
-        'HOLD_CREATE',
-        'PLATFORM_FEE',
-        'PROVIDER_CREDIT',
-      ]);
-      const providerBefore = await balance(PAYEE, provider);
-      const dispute = await file(intentId);
-
-      const decided = (await decide(
-        dispute.id,
-        CallDisputeDecision.UPHOLD,
-      )) as OperatorCallDisputeDetailDto;
-
-      expect(decided).toMatchObject({
-        state: 'UPHELD',
-        refundSource: 'PROVIDER_STAKE',
-        refundState: 'STAKE_CLAIM_OPEN',
-        refundAmount: { amount: PRICE.toString() },
-        restoredAmount: null,
-      });
-      expect(await journalTypes(intentId)).toEqual(before);
-      expect(await balance(payer)).toEqual({ available: FUNDED - PRICE, held: 0n });
-      expect(await balance(PAYEE, provider)).toEqual(providerBefore);
-      expect((await intentRow(intentId)).dispute_outcome).toBe('UPHELD');
-      await assertBooksBalance();
-    });
-
-    it('waits while the voucher is still being collected, and leaves the dispute open', async () => {
-      const { intentId } = await seedCall('AWAITING');
-      const dispute = await file(intentId);
-
-      await expect(decide(dispute.id, CallDisputeDecision.UPHOLD)).rejects.toMatchObject({
-        errorCode: DisputeErrorCode.DISPUTE_COLLECTION_IN_PROGRESS,
-      });
-
-      expect((await disputes.requireAny(dispute.id)).state).toBe('OPEN');
-      expect(await journalTypes(intentId)).toEqual(['HOLD_CREATE']);
-      expect((await intentRow(intentId)).dispute_outcome).toBeNull();
+      await assertRefunded(intentId);
     });
 
     it('needs a second operator at or above the threshold, and refuses self-approval', async () => {
       config.twoPersonThresholdMinor = PRICE.toString();
-      const { intentId } = await seedCall('DEBT');
+      const { intentId } = await seedCall('HELD');
       const dispute = await file(intentId);
 
-      const queued = (await decide(dispute.id, CallDisputeDecision.UPHOLD)) as ApprovalQueuedDto;
-      expect(queued).toMatchObject({ status: 'PENDING' });
+      const queuedApproval = (await decide(
+        dispute.id,
+        CallDisputeDecision.UPHOLD,
+      )) as ApprovalQueuedDto;
+      expect(queuedApproval).toMatchObject({ status: 'PENDING' });
       expect((await disputes.requireAny(dispute.id)).state).toBe('OPEN');
       expect(await journalTypes(intentId)).toEqual(['HOLD_CREATE']);
 
@@ -666,14 +869,11 @@ describe('call disputes, against a real database', () => {
         resolvedBy: adjudicator.operatorId,
         secondedBy: second.operatorId,
       });
-      expect(await balance(payer)).toEqual({ available: FUNDED, held: 0n });
-      await assertBooksBalance();
+      await assertRefunded(intentId);
     });
-  });
 
-  describe('rejecting, and abuse', () => {
-    it('rejects with a reason, moves no money and marks the call', async () => {
-      const { intentId } = await seedCall('DEBT');
+    it('rejects with a reason and marks the call; a held voucher is then collected', async () => {
+      const { intentId } = await seedCall('HELD');
       const dispute = await file(intentId);
 
       const decided = (await decide(
@@ -691,7 +891,9 @@ describe('call disputes, against a real database', () => {
       expect(await journalTypes(intentId)).toEqual(['HOLD_CREATE']);
       expect(await balance(payer)).toEqual({ available: FUNDED - PRICE, held: PRICE });
     });
+  });
 
+  describe('abuse', () => {
     it('flags a buyer whose disputes are mostly rejected, and tightens its daily limit', async () => {
       for (let i = 0; i < config.abuseRejectedThreshold; i += 1) {
         const { intentId } = await seedCall('REDEEMED');
