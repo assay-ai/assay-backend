@@ -4,7 +4,6 @@ import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.
 import { SlashProposalPartEntity } from '@database/postgres/entities/slash-proposal-part.entity';
 import { SlaWindowCallRepository } from '@database/postgres/repositories/sla-window-call.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
-import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { ChainErrors } from '@modules/chains/errors/chains.errors';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import {
@@ -23,7 +22,6 @@ import {
 } from '../constants/slash.constants';
 import {
   ChainFailureKind,
-  ChainProposalStatus,
   chainErrorName,
   classifyChainFailure,
 } from '../domain/chain-slash-outcome';
@@ -46,7 +44,6 @@ import {
   FailedCallPayment,
 } from '../domain/slash-beneficiary-evidence';
 import { planEvidenceMismatch } from '../domain/slash-plan-evidence';
-import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import { SlashErrors } from '../errors/slash.errors';
 import { SLASH_CAPS_READER, SlashCapsReaderPort } from '../ports/slash-caps-reader.port';
 import {
@@ -60,7 +57,6 @@ import {
   SlashRecordSnapshot,
   SlashRecordStatus,
 } from '../ports/slash-executor.port';
-import { SlashProposalService } from './slash-proposal.service';
 
 /**
  * `SLASH_EXECUTION_GRACE_SECONDS` (7 days) — after `executableAt + grace` a
@@ -70,13 +66,6 @@ const SLASH_EXECUTION_GRACE_MS_FOR_PARTS = 7 * 24 * 60 * 60 * 1000;
 
 /** Alert name: a withdrawn judgement executed on chain while its cancel waited. */
 export const EXECUTED_WHILE_CANCEL_WAITED_ALERT = 'slash_executed_while_cancel_waited';
-
-/** Case statuses closed as a decision: the only ones whose chain side a cancel may close. */
-const CLOSED_DECISIONS: readonly string[] = [
-  SlashProposalStatus.CANCELLED,
-  SlashProposalStatus.OVERTURNED,
-  SlashProposalStatus.WAIVED,
-];
 
 /** One case handed to {@link SlashPartsService.executeMany}. */
 export interface PartitionedCase {
@@ -129,11 +118,6 @@ export class SlashPartsService {
     @Inject(SLASH_EXECUTOR) private readonly executor: SlashExecutorPort,
     @Inject(SLASH_PRORATA_CONFIG) private readonly config: ProRataSlashConfig,
     @Optional() @Inject(SLASH_CAPS_READER) private readonly caps: SlashCapsReaderPort | null = null,
-    // Only {@link buildCancel} writes the case row, to close the chain side of a
-    // case with nothing standing; optional so the parts-only callers stay as
-    // they were.
-    @Optional() private readonly proposals: SlashProposalRepository | null = null,
-    @Optional() private readonly lifecycle: SlashProposalService | null = null,
     @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
 
@@ -950,31 +934,23 @@ export class SlashPartsService {
   }
 
   /**
-   * No part of the case stands. What is on chain is read (or, for a case with
-   * parts, taken from the parts the sweeps keep in step) — never assumed:
+   * No part of the case stands, so there is nothing to sign. What is on chain
+   * is read (or, for a case with parts, taken from the parts the sweeps keep
+   * in step) — never assumed — and said in a 409 `SLASH_NOTHING_STANDING`
+   * whose context names it (`chainStatus`). Nothing is written: the case keeps
+   * its status for an operator (or the sweeps) to settle.
    *
    * - **A case with parts** never reads the case's own request id (parts live
-   *   at their own ids). Any part `EXECUTED`: money moved (alert, 409, nothing
-   *   written). Every part `CANCELLED` or `REFUSED`, none `NONE`: nothing
-   *   stands, so the chain side is closed. A `NONE` part may still land, so
-   *   it is refused without closing (as `followRecords` does).
+   *   at their own ids): `EXECUTED` if any part executed (money moved:
+   *   alerted), `PROPOSING` while a part is still `NONE` (it may land), else
+   *   `CANCELLED`.
    * - **A case with no parts** (opened before the parts model) is the single
-   *   record under its own `chainRequestId`, read live:
-   *   - `Pending` / `Disputed`: it stands; its cancel is built;
-   *   - `Executed`: a stranger executed a withdrawn judgement. Alerted and
-   *     refused; recording the execution is the admin-cancel sweep's
-   *     (`recordAnExecutionNobodyAskedFor`), never written as cancelled here;
-   *   - `Cancelled`: closed;
-   *   - no record: closed only if no record was ever written
-   *     (`chainProposedAt` null). If one was, a missing slot is an anomaly (a
-   *     different deployment or RPC), not proof that nothing stands:
-   *     `chainLastError = 'RecordMissing'`, logged, refused.
+   *   record under its own `chainRequestId`, read live: `Pending`/`Disputed`
+   *   stands and its cancel is built; `Executed` is a withdrawn judgement
+   *   executed while the cancel waited (alerted; recording it is the
+   *   admin-cancel sweep's `recordAnExecutionNobodyAskedFor`); `Cancelled`;
+   *   or `NOT_FOUND` (logged as an anomaly when a record was written).
    *
-   * Closing is `CANCEL_REQUESTED` → `CANCELLED` by compare-and-swap (same
-   * epoch), only for a case closed as a decision (`CANCELLED`, `OVERTURNED`,
-   * `WAIVED`), with a timeline entry. A case still `UPHELD` (a downward
-   * recalculation) is refused but left for the sweep's re-proposal. Every
-   * refusal is 409 `SLASH_NOTHING_STANDING` with `chainStatus` and `closed`.
    * An unreadable chain stays a 503.
    */
   private async cancelWithNoPartStanding(
@@ -983,24 +959,16 @@ export class SlashPartsService {
     chainId: ChainId,
     provider: string,
   ): Promise<SlashCancelIntent> {
-    const refuse = (chainStatus: string, closed: boolean): never => {
-      throw SlashErrors.nothingStanding({ proposalId: proposal.id, chainStatus, closed });
+    const refuse = (chainStatus: string): never => {
+      throw SlashErrors.nothingStanding({ proposalId: proposal.id, chainStatus });
     };
 
     if (parts.length > 0) {
       if (parts.some((part) => part.chainStatus === 'EXECUTED')) {
         await this.alertExecutedWhileCancelWaited(proposal, 'part');
-        return refuse('EXECUTED', false);
+        return refuse('EXECUTED');
       }
-      if (parts.some((part) => part.chainStatus === 'NONE')) return refuse('PROPOSING', false);
-      const closed = await this.closeChainSide(proposal, {
-        chainRecord: 'CANCELLED',
-        summary:
-          'Every on-chain record of this penalty is cancelled or was refused; nothing stands ' +
-          'against the provider, so the on-chain side is closed',
-        parts: parts.length,
-      });
-      return refuse('CANCELLED', closed);
+      return refuse(parts.some((part) => part.chainStatus === 'NONE') ? 'PROPOSING' : 'CANCELLED');
     }
 
     let record: SlashRecordSnapshot | null;
@@ -1018,34 +986,15 @@ export class SlashPartsService {
     }
     if (record?.status === 'EXECUTED') {
       await this.alertExecutedWhileCancelWaited(proposal, 'record');
-      return refuse('EXECUTED', false);
+      return refuse('EXECUTED');
     }
     if (!record && proposal.chainProposedAt) {
       this.logger.error(
         `slash proposal ${proposal.id}: a record was written on chain (${proposal.chainProposedAt.toISOString()}) ` +
-          `but none is found at ${proposal.chainRequestId}; not closed — left for a human`,
+          `but none is found at ${proposal.chainRequestId}; left for a human`,
       );
-      await this.proposals
-        ?.update(
-          { organizationId: proposal.organizationId, id: proposal.id },
-          { chainLastError: 'RecordMissing' },
-        )
-        .catch(() => undefined);
-      return refuse('NOT_FOUND', false);
     }
-
-    const chainRecord = record?.status ?? 'NOT_FOUND';
-    const closed = await this.closeChainSide(proposal, {
-      chainRecord,
-      summary:
-        chainRecord === 'NOT_FOUND'
-          ? 'Nothing of this penalty was ever recorded on chain, so there is nothing to cancel ' +
-            'there; the on-chain side is closed'
-          : 'The on-chain record had already left Pending (it reads ' +
-            `${chainRecord}); nothing stands against the provider, so the on-chain side is closed`,
-      parts: 0,
-    });
-    return refuse(chainRecord, closed);
+    return refuse(record?.status ?? 'NOT_FOUND');
   }
 
   /**
@@ -1083,49 +1032,6 @@ export class SlashPartsService {
         error instanceof Error ? error.stack : String(error),
       );
     }
-  }
-
-  /**
-   * `CANCEL_REQUESTED` → `CANCELLED`, by compare-and-swap on the status and the
-   * epoch, only for a case closed as a decision, with its timeline entry.
-   */
-  private async closeChainSide(
-    proposal: SlashProposalEntity,
-    entry: { chainRecord: string; summary: string; parts: number },
-  ): Promise<boolean> {
-    if (!this.proposals || !CLOSED_DECISIONS.includes(proposal.status)) return false;
-    const result = await this.proposals.update(
-      {
-        organizationId: proposal.organizationId,
-        id: proposal.id,
-        chainStatus: ChainProposalStatus.CANCEL_REQUESTED,
-        chainEpoch: proposal.chainEpoch,
-      },
-      { chainStatus: ChainProposalStatus.CANCELLED, chainLastError: null },
-    );
-    if (!result.affected) return false;
-    try {
-      await this.lifecycle?.appendEventDirect({
-        organizationId: proposal.organizationId,
-        proposalId: proposal.id,
-        occurredAt: new Date(),
-        kind: 'CHAIN_CANCELLED',
-        actorType: 'system',
-        actorId: null,
-        summary: entry.summary,
-        detail: {
-          requestId: proposal.chainRequestId,
-          chainRecord: entry.chainRecord,
-          parts: entry.parts,
-        },
-      });
-    } catch (error) {
-      this.logger.error(
-        `slash proposal ${proposal.id}: the chain side was closed but its timeline entry failed`,
-        error instanceof Error ? error.stack : String(error),
-      );
-    }
-    return true;
   }
 
   /**
