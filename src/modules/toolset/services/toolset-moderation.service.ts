@@ -7,6 +7,8 @@ import { OrgHandleHistoryEntity } from '@database/postgres/entities/org-handle-h
 import { OrganizationEntity } from '@database/postgres/entities/organization.entity';
 import { ToolsetReportEntity } from '@database/postgres/entities/toolset-report.entity';
 import { ToolEntity } from '@database/postgres/entities/tool.entity';
+import { NOTIFICATION_PORT, NotificationPort } from '@modules/notification/ports/notification.port';
+import { providerToolNotification } from '@modules/provider-tool/domain/notices';
 import {
   TOOL_CONTRACT_CHANGES,
   ToolContractChanges,
@@ -92,6 +94,11 @@ export class ToolsetModerationService {
     @Optional()
     @Inject(TOOL_CONTRACT_CHANGES)
     private readonly contracts?: ToolContractChanges,
+    // A provider tool's own takedown and its lifting are told to its
+    // provider. Optional for hand-built harnesses.
+    @Optional()
+    @Inject(NOTIFICATION_PORT)
+    private readonly notifications?: NotificationPort | null,
   ) {}
 
   /** Delist or take down a toolset, at once; returns the cutoff to confirm. */
@@ -483,18 +490,47 @@ export class ToolsetModerationService {
   async revertExpired(): Promise<number> {
     const due = await this.cutoffs.findDue(this.now());
     let reverted = 0;
+    const lifted: string[] = [];
     for (const cutoff of due) {
       try {
         await this.dataSource.transaction((manager) =>
           this.revert(manager, cutoff.id, null, CutoffRevertReason.EXPIRED),
         );
         reverted += 1;
+        if (cutoff.targetType === CutoffTarget.TOOL) lifted.push(cutoff.targetId);
       } catch (error) {
         this.logger.warn(`cutoff ${cutoff.id} not reverted: ${String(error)}`);
       }
     }
     if (reverted > 0) await this.afterCommit();
+    for (const toolId of lifted) await this.announceTool(toolId, 'TAKEDOWN_LIFTED');
     return reverted;
+  }
+
+  /**
+   * Tells a provider tool's owner it was taken down, or that its takedown
+   * was lifted (rejected, lifted or lapsed) — after the commit. Best-effort,
+   * and never throws: the cutoff stands whether or not this lands.
+   */
+  async announceTool(toolId: string, kind: 'TAKEN_DOWN' | 'TAKEDOWN_LIFTED'): Promise<void> {
+    if (!this.notifications) return;
+    try {
+      const tool = await this.dataSource.getRepository(ToolEntity).findOne({
+        where: { id: toolId },
+        select: { id: true, name: true, ownerOrgId: true, kind: true, status: true },
+      });
+      if (!tool || tool.kind !== 'PROVIDER' || !tool.ownerOrgId) return;
+      const facts = { organizationId: tool.ownerOrgId, toolId: tool.id, toolName: tool.name };
+      await this.notifications.notify(
+        providerToolNotification(
+          kind === 'TAKEN_DOWN'
+            ? { ...facts, kind }
+            : { ...facts, kind, serving: tool.status !== 'REMOVED' },
+        ),
+      );
+    } catch (error) {
+      this.logger.error(`Provider tool ${toolId}: could not notify: ${String(error)}`);
+    }
   }
 
   /**

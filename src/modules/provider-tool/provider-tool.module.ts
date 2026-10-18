@@ -1,7 +1,9 @@
 import { Module } from '@nestjs/common';
 
 import { McpModule } from '@modules/mcp/mcp.module';
+import { NotificationModule } from '@modules/notification/notification.module';
 import { ProviderApiModule } from '@modules/provider/provider-api.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { ToolModule } from '@modules/tool/tool.module';
 import { ToolsetModule } from '@modules/toolset/toolset.module';
 import { VerificationModule } from '@modules/verification/verification.module';
@@ -13,6 +15,7 @@ import { ProviderToolGateService } from './services/provider-tool-gate.service';
 import { ProviderToolPolicyService } from './services/provider-tool-policy.service';
 import { ProviderToolQualityService } from './services/provider-tool-quality.service';
 import { ProviderToolReviewService } from './services/provider-tool-review.service';
+import { ProviderToolTryService } from './services/provider-tool-try.service';
 import { ProviderToolsService } from './services/provider-tools.service';
 import { ToolPromotionService } from './services/tool-promotion.service';
 
@@ -30,7 +33,10 @@ import { ToolPromotionService } from './services/tool-promotion.service';
   imports: [
     AuditLogModule,
     McpModule,
+    NotificationModule,
     ToolModule,
+    // `BINDING_INVOKER` for "Try your endpoint": the production call path.
+    ToolEgressModule,
     ToolsetModule,
     VerificationModule,
     ProviderApiModule,
@@ -43,6 +49,7 @@ import { ToolPromotionService } from './services/tool-promotion.service';
     ProviderToolPolicyService,
     ProviderToolQualityService,
     ProviderToolReviewService,
+    ProviderToolTryService,
     ToolPromotionService,
   ],
   exports: [ProviderToolsService, ProviderToolReviewService, ToolPromotionService],

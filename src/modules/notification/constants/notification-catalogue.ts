@@ -331,6 +331,45 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       nonSuppressible: false,
     },
 
+    // ── Provider tools (T4) ───────────────────────────────────────────────────
+
+    [NotificationEvent.PROVIDER_TOOL_APPROVED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.PROVIDER_TOOL_REJECTED]: {
+      // The provider has something to fix before the tool (or its change)
+      // reaches the catalogue; nothing already serving stops.
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.PROVIDER_TOOL_TAKEN_DOWN]: {
+      severity: NotificationSeverity.CRITICAL,
+      channels: IN_APP_EMAIL_PUSH,
+      aggregation: NotificationAggregation.PER_EVENT,
+      // The tool stopped serving everywhere at once. A provider who muted
+      // this would learn it from their traffic graph, days later.
+      nonSuppressible: true,
+    },
+    [NotificationEvent.PROVIDER_TOOL_TAKEDOWN_LIFTED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      aggregation: NotificationAggregation.PER_EVENT,
+      nonSuppressible: false,
+    },
+    [NotificationEvent.PROVIDER_TOOL_PROMOTION_INVITED]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      // One per (standard tool, provider tool): the producer's dedupe key. An
+      // invite re-sent for the same pair is the same invitation.
+      aggregation: NotificationAggregation.ONCE,
+      nonSuppressible: false,
+    },
+
     // ── Digest ────────────────────────────────────────────────────────────────
 
     [NotificationEvent.DIGEST_DAILY]: {

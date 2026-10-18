@@ -73,15 +73,38 @@ export class ListModerationQueryDto {
   pending?: boolean;
 }
 
+export const CUTOFF_TARGET_TYPES = ['TOOLSET', 'HANDLE', 'TOOL'] as const;
+
+export class ListCutoffsQueryDto {
+  @ApiPropertyOptional({ description: 'Only the ones still waiting for a second operator' })
+  @IsOptional()
+  @QueryBoolean()
+  @IsBoolean()
+  pending?: boolean;
+
+  @ApiPropertyOptional({ enum: CUTOFF_TARGET_TYPES, description: 'Only cutoffs of this kind' })
+  @IsOptional()
+  @IsIn(CUTOFF_TARGET_TYPES)
+  targetType?: (typeof CUTOFF_TARGET_TYPES)[number];
+}
+
 export class ModerationCutoffDto {
   @ApiProperty()
   id: string;
 
-  @ApiProperty({ enum: ['TOOLSET', 'HANDLE', 'TOOL'] })
+  @ApiProperty({ enum: CUTOFF_TARGET_TYPES })
   targetType: string;
 
   @ApiProperty()
   targetId: string;
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      'What the target is called: a tool’s name (`acme__search_posts`), a toolset’s name, or ' +
+      'the handle. Null when the target no longer exists',
+  })
+  targetName: string | null;
 
   @ApiProperty({ enum: ['DELIST', 'TAKEDOWN'] })
   action: string;

@@ -182,6 +182,7 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderStakeService,
   ],
   // `BindingPublishService`: a provider tool's publish gate is its binding's (T4).
-  exports: [ProviderModule, BindingPublishService],
+  // `ProviderEgressLimiter`: "Try your endpoint" shares the tester's budget.
+  exports: [ProviderModule, BindingPublishService, ProviderEgressLimiter],
 })
 export class ProviderApiModule {}

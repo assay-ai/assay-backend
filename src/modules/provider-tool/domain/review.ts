@@ -35,6 +35,57 @@ export enum ReviewKind {
   CHANGE = 'CHANGE',
 }
 
+/**
+ * Why a review was decided: the register's `reasonCode` for `A-24`.
+ *
+ * An approval has one code. A rejection names the item of the §7.6 review
+ * checklist the tool failed, so a provider (and a later audit) reads the
+ * reason as one of five, not as free text; the note says what to fix.
+ */
+export enum ReviewReasonCode {
+  APPROVED = 'APPROVED',
+  /** "No impersonation." */
+  IMPERSONATION = 'IMPERSONATION',
+  /** "No instructions to models in the summary or in any schema text." */
+  MODEL_INSTRUCTIONS = 'MODEL_INSTRUCTIONS',
+  /** "No secret inputs." */
+  SECRET_INPUTS = 'SECRET_INPUTS',
+  /** "Examples run and match the schema." */
+  EXAMPLES_MISMATCH = 'EXAMPLES_MISMATCH',
+  /** "Pricing is clear." */
+  PRICING_UNCLEAR = 'PRICING_UNCLEAR',
+}
+
+/** The codes a rejection may give: one per checklist item. */
+export const REVIEW_REJECT_REASON_CODES: readonly ReviewReasonCode[] = Object.freeze([
+  ReviewReasonCode.IMPERSONATION,
+  ReviewReasonCode.MODEL_INSTRUCTIONS,
+  ReviewReasonCode.SECRET_INPUTS,
+  ReviewReasonCode.EXAMPLES_MISMATCH,
+  ReviewReasonCode.PRICING_UNCLEAR,
+]);
+
+/**
+ * The reason code a decision is logged under, or why it is refused: an
+ * approval is `APPROVED` (the default), a rejection one of
+ * {@link REVIEW_REJECT_REASON_CODES}.
+ */
+export function reviewReasonCodeFor(
+  decision: 'APPROVE' | 'REJECT',
+  given: ReviewReasonCode | undefined,
+): { readonly code: ReviewReasonCode } | { readonly problem: string } {
+  if (decision === 'APPROVE') {
+    if (given === undefined || given === ReviewReasonCode.APPROVED) {
+      return { code: ReviewReasonCode.APPROVED };
+    }
+    return { problem: `an approval's reasonCode is ${ReviewReasonCode.APPROVED}` };
+  }
+  if (given !== undefined && REVIEW_REJECT_REASON_CODES.includes(given)) return { code: given };
+  return {
+    problem: `a rejection's reasonCode is one of ${REVIEW_REJECT_REASON_CODES.join(', ')}`,
+  };
+}
+
 /** The provider console's review state (§7.6 "Review states"). */
 export enum ReviewDisplayState {
   NOT_SUBMITTED = 'NOT_SUBMITTED',

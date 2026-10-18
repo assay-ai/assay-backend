@@ -162,4 +162,80 @@ describe('OperatorModerationService', () => {
     expect(confirmed.queued).toEqual([LIFT_CUTOFF_APPROVAL_ACTION]);
     expect(confirmed.moderation.revert).not.toHaveBeenCalled();
   });
+
+  it('lists cutoffs with each target’s name, filtered by targetType', async () => {
+    const at = new Date('2026-10-01T00:00:00Z');
+    const rows = [
+      { id: 'c1', targetType: 'TOOL', targetId: 'tool-1' },
+      { id: 'c2', targetType: 'TOOLSET', targetId: 'set-1' },
+      { id: 'c3', targetType: 'HANDLE', targetId: 'acme' },
+      { id: 'c4', targetType: 'TOOL', targetId: 'tool-gone' },
+    ].map((row) => ({
+      ...row,
+      action: 'TAKEDOWN',
+      actedBy: 'op-1',
+      actedAt: at,
+      confirmBy: at,
+      confirmedBy: null,
+      confirmedAt: null,
+      revertedAt: null,
+      revertReason: null,
+      reportId: null,
+      note: 'n',
+    }));
+    const find = jest.fn(async () => rows);
+    const managerFind = jest.fn(async (entity: { name: string }) =>
+      entity.name === 'ToolEntity'
+        ? [{ id: 'tool-1', name: 'acme__search_posts' }]
+        : [{ id: 'set-1', name: 'Acme kit' }],
+    );
+    const service = new OperatorModerationService(
+      { perform: jest.fn() } as never,
+      { register: jest.fn() } as never,
+      {} as never,
+      {} as never,
+      { find, manager: { find: managerFind } } as never,
+      {} as never,
+    );
+    const listed = await service.listCutoffs({ pending: true, targetType: 'TOOL' });
+    expect(find).toHaveBeenCalledWith(
+      expect.objectContaining({
+        where: expect.objectContaining({ targetType: 'TOOL' }),
+      }),
+    );
+    expect(listed.map((row) => [row.id, row.targetName])).toEqual([
+      ['c1', 'acme__search_posts'],
+      ['c2', 'Acme kit'],
+      ['c3', 'acme'],
+      ['c4', null],
+    ]);
+  });
+
+  it('tells the provider about its tool’s takedown, and about the takedown lifted', async () => {
+    const { service, moderation } = build({
+      id: 'c1',
+      confirmedAt: null,
+      targetType: 'TOOL',
+      targetId: 'tool-1',
+    });
+    const announced: unknown[] = [];
+    Object.assign(moderation, {
+      cutoffTool: jest.fn(async () => ({
+        cutoff: { id: 'c1', actedAt: new Date(), confirmBy: new Date() },
+        organizationId: 'org-1',
+      })),
+      announceTool: jest.fn(async (...args: unknown[]) => {
+        announced.push(args);
+      }),
+    });
+    (service as unknown as { cutoffs: { query: unknown } }).cutoffs.query = async () => [
+      { ownerOrgId: 'org-1' },
+    ];
+    await service.takedownTool(OPERATOR, 'tool-1', BODY, null);
+    await service.revertCutoff(OPERATOR, 'c1', BODY, null);
+    expect(announced).toEqual([
+      ['tool-1', 'TAKEN_DOWN'],
+      ['tool-1', 'TAKEDOWN_LIFTED'],
+    ]);
+  });
 });
