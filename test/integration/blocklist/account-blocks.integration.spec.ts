@@ -9,7 +9,9 @@ import { DataSource } from 'typeorm';
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
+import { OrganizationRepository } from '@database/postgres/repositories/organization.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
+import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { AccountErrorCode } from '@modules/account/errors/account.errors';
@@ -120,6 +122,8 @@ describe('account blocks, against a real database and Redis', () => {
       operators,
       blocklist,
       approvals,
+      new ProviderRepository(dataSource),
+      new OrganizationRepository(dataSource),
     );
     return {
       block: service.block.bind(service),

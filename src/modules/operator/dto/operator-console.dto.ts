@@ -911,6 +911,15 @@ export class AccountBlockDto {
   @ApiProperty({ description: 'What enforcement matches on: the uuid, or `namespace:address`' })
   subjectKey: string;
 
+  @ApiProperty({
+    nullable: true,
+    type: String,
+    description:
+      "An organization's name: the provider's public name, else the organization's own. " +
+      'Null for a wallet, or an organization with no row',
+  })
+  subjectName: string | null;
+
   @ApiProperty()
   active: boolean;
 
