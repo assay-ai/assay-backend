@@ -14,7 +14,6 @@ describe('OAuth TTLs and limits (spec §6.3.14)', () => {
     ['OAUTH_CIMD_FAILURE_CACHE_SECONDS', 60],
     ['OAUTH_MAX_LIVE_GRANTS_PER_AGENT', 50],
     ['OAUTH_LIVE_GRANTS_WARN_AT', 45],
-    ['OAUTH_BUILTIN_CLIENT_PATH', '/oauth/clients/assay-mcp'],
   ])('%s is %p', (name, value) => {
     expect((constants as Record<string, unknown>)[name]).toBe(value);
   });

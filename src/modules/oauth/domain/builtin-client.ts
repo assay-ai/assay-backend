@@ -10,14 +10,15 @@ export const BUILTIN_CLIENT_REDIRECT_URIS: readonly string[] = Object.freeze([
   'http://127.0.0.1/callback',
 ]);
 
-export interface BuiltinClientDocument {
+/** A type alias, not an interface, so it is assignable to the row's JSON `metadata`. */
+export type BuiltinClientDocument = {
   client_id: string;
   client_name: string;
   redirect_uris: string[];
   token_endpoint_auth_method: 'none';
   grant_types: string[];
   response_types: string[];
-}
+};
 
 export function builtinClientDocument(mcpPublicUrl: string): BuiltinClientDocument {
   return {
