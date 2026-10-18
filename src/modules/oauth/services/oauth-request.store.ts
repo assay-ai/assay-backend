@@ -6,7 +6,12 @@ import type { Redis } from 'ioredis';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
 import { OAUTH_PENDING_REQUEST_TTL_SECONDS } from '../constants/oauth.constants';
-import { BIND_SCRIPT, DECIDE_SCRIPT, TAKE_SCRIPT } from './oauth-request.lua';
+import {
+  BIND_SCRIPT,
+  DECIDE_SCRIPT,
+  DISCARD_IF_DECIDED_SCRIPT,
+  TAKE_SCRIPT,
+} from './oauth-request.lua';
 import { OAuthCodeApproval, OAuthCodeRequest } from './oauth-token.service';
 
 /**
@@ -69,6 +74,8 @@ export function isWellFormedRid(rid: unknown): rid is string {
  *   other organization gets `not_found` from then on.
  * - {@link decide}: approve or deny, once, atomically; writes the tombstone.
  * - {@link take}: `GETDEL`, for `continue` in the browser that started it.
+ * - {@link discardIfDecided}: for `continue` in any other browser, so a
+ *   decided request can be finished by no one.
  *
  * `rid` is a bearer secret until the request is taken: whoever holds it (and
  * a human session) can bind the request. It is never logged, never put in an
@@ -150,6 +157,21 @@ export class OAuthRequestStore {
       String(OAUTH_PENDING_REQUEST_TTL_SECONDS),
     )) as string;
     return result === 'ok' || result === 'already_decided' ? result : 'not_found';
+  }
+
+  /**
+   * Deletes the request if, and only if, it has been approved or denied, in
+   * one step; `true` when it was deleted. An undecided request stays. For a
+   * `continue` from a browser that did not start the request.
+   */
+  async discardIfDecided(rid: string): Promise<boolean> {
+    if (!isWellFormedRid(rid)) return false;
+    const deleted = (await this.redis.eval(
+      DISCARD_IF_DECIDED_SCRIPT,
+      1,
+      requestKey(rid),
+    )) as number;
+    return deleted === 1;
   }
 
   /** Reads and deletes the request in one step. `null` if it is gone or was never there. */

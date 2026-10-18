@@ -1,3 +1,5 @@
+import { createHash } from 'node:crypto';
+
 import type { Request, Response } from 'express';
 
 import { oauthIpKey } from '../services/oauth-rate-limiter.service';
@@ -68,6 +70,7 @@ export function withQuery(uri: string, params: Record<string, string | null>): s
 /** The fixed `error_description` of each authorization error the server sends. */
 export const AUTHORIZATION_ERROR_DESCRIPTIONS = Object.freeze({
   invalid_request: 'The authorization request is missing a parameter or has an invalid one',
+  unsupported_response_type: 'Only response_type=code is supported',
   invalid_scope: 'The requested scope is not supported',
   invalid_target: 'The resource must be this MCP server',
   access_denied: 'The person declined the request',
@@ -85,10 +88,12 @@ export function authorizationErrorLocation(
   error: AuthorizationErrorCode,
   state: string | null,
   issuer: string,
+  /** Fixed text replacing the error's usual description. */
+  description: string = AUTHORIZATION_ERROR_DESCRIPTIONS[error],
 ): string {
   return withQuery(redirectUri, {
     error,
-    error_description: AUTHORIZATION_ERROR_DESCRIPTIONS[error],
+    error_description: description,
     state,
     iss: issuer,
   });
@@ -109,6 +114,18 @@ export function single(source: unknown, name: string): string | undefined | null
 /** The rate-limit key of the caller: IPv4 as is, IPv6 by its /64. */
 export function ipKeyOf(req: Request): string {
   return oauthIpKey(req.ip);
+}
+
+/**
+ * The rate-limit key of `/oauth/token` and `/oauth/revoke` (§6.3.10): the
+ * `client_id` (hashed, so its length is bounded) and the caller's IP key.
+ */
+export function clientAndIpKey(clientId: string | undefined | null, req: Request): string {
+  const client =
+    typeof clientId === 'string' && clientId !== ''
+      ? createHash('sha256').update(clientId).digest('base64url').slice(0, 22)
+      : '-';
+  return `${client}:${ipKeyOf(req)}`;
 }
 
 /** Whether the request body is form-encoded (RFC 6749 §4.1.3, RFC 7009 §2.1). */

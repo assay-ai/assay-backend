@@ -1,5 +1,3 @@
-import { createHash } from 'node:crypto';
-
 import { Controller, HttpCode, Logger, Post, Req, Res } from '@nestjs/common';
 import { ApiOperation, ApiTags } from '@nestjs/swagger';
 import type { Request, Response } from 'express';
@@ -19,8 +17,8 @@ import {
   isOAuthError,
 } from '../services/oauth-token.service';
 import {
+  clientAndIpKey,
   errorName,
-  ipKeyOf,
   isFormEncoded,
   retryAfterSeconds,
   sendJson,
@@ -113,7 +111,7 @@ export class OAuthTokenController {
     const clientId = single(body, 'client_id');
     if (grantType === null || clientId === null) return INVALID_REQUEST;
 
-    const key = `${clientKeyPart(clientId)}:${ipKeyOf(req)}`;
+    const key = clientAndIpKey(clientId, req);
     const count = await this.limiter.count('token', key, OAUTH_MINUTE_SECONDS);
     if (count === null) return { error: 'temporarily_unavailable' };
     if (count > OAUTH_RATE_LIMITS.tokenPerClientAndIpPerMinute) return 'rate_limited';
@@ -157,10 +155,4 @@ export class OAuthTokenController {
 /** A closed label: a client cannot mint label values. */
 function grantTypeLabel(raw: string | undefined | null): OAuthTokenGrantType {
   return raw === 'authorization_code' || raw === 'refresh_token' ? raw : 'other';
-}
-
-/** The `client_id` part of the rate-limit key: hashed, so its length is bounded. */
-function clientKeyPart(clientId: string | undefined): string {
-  if (typeof clientId !== 'string' || clientId === '') return '-';
-  return createHash('sha256').update(clientId).digest('base64url').slice(0, 22);
 }
