@@ -881,7 +881,10 @@ describe('GET /catalogue/tools', () => {
    * a payer funded only there, never the dearest across both.
    */
   it('prices a two-chain tool per chain from one candidate snapshot', async () => {
-    const { service, router } = build({ bindings: [binding()] });
+    const { service, router } = build({
+      bindings: [binding(), binding({ organizationId: 'provider-b' })],
+      providers: [provider(), provider({ organizationId: 'provider-b', legalName: 'B' })],
+    });
     perChain(router, {
       [CHAIN]: quote({ pricedBy: ['provider-a'], listings: 1 }),
       [OTHER_CHAIN]: quote({
@@ -1134,6 +1137,36 @@ describe('the catalogue, with a provider blocked', () => {
     const { tools } = await service.listTools();
 
     expect(tools[0].providerCount).toBe(1);
+  });
+
+  /**
+   * Wave-1 audit I3: the router does not apply the account blocklist, so it
+   * can price a tool by a blocked provider. The catalogue never names it: the
+   * public detail route keeps a blocked provider unconfirmable.
+   */
+  it('never names a blocked provider as the one setting a price, on one chain or several', async () => {
+    const single = build({
+      ...wiring(),
+      quotes: { get_weather: quote({ pricedBy: [BLOCKED], listings: 2 }) },
+    });
+    const [one] = (await single.service.listTools()).tools[0].prices;
+    expect(one).toMatchObject({ providerId: null });
+
+    const multi = build(wiring());
+    (multi.router.quote as jest.Mock).mockImplementation(async () =>
+      quote({ settlementChains: [CHAIN, OTHER_CHAIN] }),
+    );
+    (multi.router.quoteFromCandidates as jest.Mock).mockImplementation(
+      (_tool: Tool, _candidates: unknown, context: { payerChains: readonly ChainId[] }) =>
+        context.payerChains[0] === CHAIN
+          ? quote({ pricedBy: [BLOCKED], listings: 2 })
+          : quote({ pricedBy: [OPEN], listings: 1 }),
+    );
+    const { tools } = await multi.service.listTools();
+    expect(tools[0].prices.map((entry) => entry.providerId)).toEqual([null, OPEN]);
+
+    const publicTools = await new PublicCatalogueService(multi.service).listTools();
+    expect(JSON.stringify(publicTools)).not.toContain(BLOCKED);
   });
 
   it('still answers for the blocked provider, with no tools', async () => {
