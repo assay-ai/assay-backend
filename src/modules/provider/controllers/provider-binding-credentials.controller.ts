@@ -13,17 +13,15 @@ import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagg
 
 import { CurrentSession, HumanSessionGuard, SessionAuthGuard } from '@shared/auth';
 import { AuditLogWriter, auditActorOf } from '@shared/audit';
-import { BindingStatus } from '@modules/tool/ports/tool.types';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
-import { assertCredentialPut, originOf } from '../credentials/credential-rules';
+import { assertCredentialPut, assertCredentialRemovable } from '../credentials/credential-rules';
 import { CredentialVaultService } from '../credentials/credential-vault.service';
 import {
   CredentialSetSummaryDto,
   DeleteBindingCredentialsQueryDto,
   PutBindingCredentialsBodyDto,
 } from '../dto/binding-credentials.dto';
-import { ProviderErrors } from '../errors/provider.errors';
 import { GetToolBindingParamsDto } from '../dto/get-tool-bindings.dto';
 import { BindingEditorService } from '../services/binding-editor.service';
 
@@ -115,15 +113,7 @@ export class ProviderBindingCredentialsController {
     @Query() query: DeleteBindingCredentialsQueryDto,
   ): Promise<void> {
     const row = await this.editor.loadEditable(session.organizationId, params.id);
-    // The published revision's origin is the one live calls use. Deleting its
-    // set while the binding is ACTIVE would turn every call into a platform
-    // fault; pause first, or publish an endpoint elsewhere (which prunes it).
-    if (row.status === BindingStatus.ACTIVE) {
-      const published = await this.editor.publishedEndpoint(row);
-      if (published && originOf(published) === query.origin) {
-        throw ProviderErrors.credentialOriginLive();
-      }
-    }
+    assertCredentialRemovable(row.status, await this.editor.publishedEndpoint(row), query.origin);
     const before = (await this.vault.list(session.organizationId, params.id)).find(
       (set) => set.origin === query.origin,
     );

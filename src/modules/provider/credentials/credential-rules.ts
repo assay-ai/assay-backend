@@ -1,3 +1,4 @@
+import { BindingStatus } from '@modules/tool/ports/tool.types';
 import { RequestMappingSpec } from '@modules/tool/domain/mapping/mapping.types';
 import { isConstNode } from '@modules/tool/domain/mapping/normalize';
 
@@ -230,6 +231,26 @@ export function assertCredentialPut(
   }
   if (problems.length > 0) {
     throw ProviderErrors.invalidCredentialHeaders({ problems });
+  }
+}
+
+/**
+ * Throws `credentialOriginLive` when the set to remove is for the origin of the
+ * published endpoint of an ACTIVE binding. Deleting it would turn every live
+ * call into a platform fault; pause the binding first, or publish an endpoint
+ * elsewhere (which prunes it).
+ */
+export function assertCredentialRemovable(
+  status: string,
+  publishedEndpoint: string | null,
+  origin: string,
+): void {
+  if (
+    status === BindingStatus.ACTIVE &&
+    publishedEndpoint &&
+    originOf(publishedEndpoint) === origin
+  ) {
+    throw ProviderErrors.credentialOriginLive();
   }
 }
 
