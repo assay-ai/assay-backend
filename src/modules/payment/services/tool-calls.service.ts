@@ -24,6 +24,7 @@ import {
   collectionStateOf,
   debtStateOf,
   isChargedWhenSettled,
+  isRefundedByReport,
 } from '../domain/collection';
 import { ListToolCallsQueryDto, ToolCallDto } from '../dto/list-tool-calls.dto';
 import { PaymentErrors } from '../errors/payment.errors';
@@ -187,6 +188,7 @@ export class ToolCallsService {
       charged: toMoneyDto(chargedPrice),
       forfeited: settled && collectionStateOf(intent) === CollectionState.PROVIDER_FORFEITED,
       debt: settled ? debtStateOf(intent) : null,
+      refundedByReport: settled && isRefundedByReport(intent),
       collectableAt: intent.collectableAt ?? null,
       disputeWindowEndsAt: disputeWindowEndOf(intent.collectableAt),
       verdict,

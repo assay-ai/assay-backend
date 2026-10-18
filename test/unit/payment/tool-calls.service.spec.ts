@@ -185,8 +185,30 @@ describe('ToolCallsService.list', () => {
     expect(page.items[1]).toMatchObject({
       debt: 'WRITTEN_OFF',
       forfeited: false,
+      refundedByReport: false,
       charged: { amount: '0' },
     });
+  });
+
+  it('flags a call refunded by an upheld report apart from a late-verdict void (B1 I4)', async () => {
+    const { service } = buildHarness([
+      intentRow({
+        id: 'report',
+        holdReleasedAt: new Date(),
+        redemptionLastError: 'voided:DISPUTE_UPHELD',
+      }),
+      intentRow({ id: 'late', holdReleasedAt: new Date(), redemptionLastError: 'voided:REFUND' }),
+      intentRow({ id: 'plain' }),
+    ]);
+    const page = await service.list(ORGANIZATION_ID, baseQuery());
+
+    expect(
+      page.items.map((item) => [item.debt, item.refundedByReport, item.charged.amount]),
+    ).toEqual([
+      ['VOIDED', true, '0'],
+      ['VOIDED', false, '0'],
+      [null, false, '1000000'],
+    ]);
   });
 });
 

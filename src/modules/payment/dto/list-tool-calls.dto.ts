@@ -89,6 +89,13 @@ export class ToolCallDto {
   })
   debt: 'OUTSTANDING' | 'WRITTEN_OFF' | 'VOIDED' | null;
 
+  @ApiProperty({
+    description:
+      'SETTLED, and refunded because the buyer reported a bad result and the report was ' +
+      'upheld: not charged (`charged` is zero, `debt` is `VOIDED`)',
+  })
+  refundedByReport: boolean;
+
   @ApiPropertyOptional({
     nullable: true,
     description:

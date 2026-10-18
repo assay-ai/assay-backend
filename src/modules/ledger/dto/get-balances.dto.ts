@@ -146,13 +146,17 @@ export class WithheldTotalDto {
   @ApiProperty({ description: 'CAIP-19 asset id' })
   asset: string;
 
-  @ApiProperty({ description: 'Calls across both buckets' })
+  @ApiProperty({ description: 'Calls across every bucket' })
   calls: number;
 
   @ApiProperty({ type: MoneyDto })
   amount: MoneyDto;
 
-  @ApiProperty({ type: [WithheldBucketDto], description: 'Always both buckets, zero-filled' })
+  @ApiProperty({
+    type: [WithheldBucketDto],
+    description:
+      'Always every bucket, zero-filled: failed verification, provider or platform error, not collected',
+  })
   buckets: WithheldBucketDto[];
 }
 
