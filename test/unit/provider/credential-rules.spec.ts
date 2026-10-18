@@ -8,6 +8,7 @@ import {
   originOf,
   relayUnsupportedPort,
   headerBytes,
+  looksLikeSecretName,
   secretConstantHeaders,
 } from '@modules/provider/credentials/credential-rules';
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
@@ -34,7 +35,51 @@ describe('credentialQueryKeys', () => {
   });
 });
 
+describe('looksLikeSecretName', () => {
+  it.each([
+    'x-api-key',
+    'apikey',
+    'apiKey',
+    'Subscription-Key',
+    'x-goog-api-key',
+    'Ocp-Apim-Subscription-Key',
+    'X-RapidAPI-Key',
+    'access_token',
+    'x-auth-token',
+    'client_secret',
+    'Authorization',
+    'Proxy-Authorization',
+    'password',
+    'passwd',
+    'oauth',
+    'x-credential',
+    'x-signature',
+    'session_id',
+    'Cookie',
+    'sig',
+  ])('flags %s', (name) => expect(looksLikeSecretName(name)).toBe(true));
+  it.each([
+    'idempotency-key',
+    'Idempotency-Key',
+    'x-sort-key',
+    'sort_key',
+    'cache-key',
+    'max_tokens',
+    'keyword',
+    'keywords',
+    'accept',
+    'x-api-version',
+    'author',
+    'config',
+  ])('allows %s', (name) => expect(looksLikeSecretName(name)).toBe(false));
+});
+
 describe('secretConstantHeaders', () => {
+  it('flags names the exact list missed', () => {
+    expect(secretConstantHeaders(m({ headers: { 'x-goog-api-key': { $const: 'a' } } }))).toEqual([
+      'x-goog-api-key',
+    ]);
+  });
   it('flags secret-looking constant headers', () => {
     expect(
       secretConstantHeaders(m({ headers: { Authorization: { $const: 'Bearer x' } } })),
