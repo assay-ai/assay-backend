@@ -57,11 +57,13 @@ export interface HeldTxResult {
 
 export interface HeldPaymentsPort {
   /**
-   * Whether the escrow hold is live on this asset's chain (`EVM_HOLD_LIVE_CHAINS`,
-   * set when the upgrade ships). Once it is, a read that finds no hold is an
-   * error to retry, never a reason to pay the provider at once.
+   * Whether the escrow hold is live on this asset's chain: listed in
+   * `EVM_HOLD_LIVE_CHAINS`, OR the escrow's implementation answers the hold's
+   * own view (`totalHeld()`), probed once and cached per chain — so the hold is
+   * recognised the moment the upgrade lands, before the flag flips. Once it is
+   * live, a redemption with no decisive receipt is retried, never paid at once.
    */
-  holdLive(asset: AssetId): boolean;
+  holdLive(asset: AssetId): Promise<boolean>;
   /**
    * Classifies a landed redemption from its receipt (`txRef`, a transaction
    * hash). Without a hash it falls back to `held(payer, seq)`, which on a live

@@ -50,8 +50,8 @@ export class FakeHeldPayments implements HeldPaymentsPort {
     if (record) this.records.set(this.keyOf(key), { ...record, collectableAt: at });
   }
 
-  holdLive(): boolean {
-    return this.live;
+  holdLive(): Promise<boolean> {
+    return Promise.resolve(this.live);
   }
 
   classifyRedemption(

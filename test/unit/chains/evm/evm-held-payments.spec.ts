@@ -21,7 +21,12 @@ const PAYER = `${CHAIN}:0x3333333333333333333333333333333333333333` as AccountId
 
 function build(
   readResult: unknown | Error,
-  options: { receipt?: unknown; live?: boolean; simulateRevert?: boolean } = {},
+  options: {
+    receipt?: unknown;
+    live?: boolean;
+    simulateRevert?: boolean;
+    logs?: readonly unknown[];
+  } = {},
 ) {
   const reads: Array<{ functionName: string; args: readonly unknown[]; account?: string }> = [];
   const sent: Array<{ data: `0x${string}`; to: string; boundQueueWait?: boolean }> = [];
@@ -40,6 +45,8 @@ function build(
     ),
     multicall: jest.fn(),
     getTransactionReceipt: jest.fn(() => Promise.resolve(options.receipt ?? null)),
+    getBlockNumber: jest.fn(() => Promise.resolve(100_000n)),
+    getLogs: jest.fn(() => Promise.resolve(options.logs ?? [])),
   };
   const redeemer = {
     address: jest.fn(() => Promise.resolve(`${CHAIN}:0x5555555555555555555555555555555555555555`)),
@@ -57,7 +64,7 @@ function build(
   return { service, reads, sent };
 }
 
-function log(eventName: string, args: Record<string, unknown>) {
+function log(eventName: string, args: Record<string, unknown>, address: string = ESCROW) {
   const abi = [...X402_ESCROW_HOLD_ABI, ...X402_ESCROW_ABI];
   const data = encodeEventTopics({ abi, eventName: eventName as never, args: args as never });
   const event = abi.find((item) => item.type === 'event' && item.name === eventName)!;
@@ -65,7 +72,7 @@ function log(eventName: string, args: Record<string, unknown>) {
     event as unknown as { inputs: { indexed?: boolean; name: string; type: string }[] }
   ).inputs.filter((input) => !input.indexed);
   return {
-    address: ESCROW,
+    address,
     topics: data,
     data: encodeAbiParameters(nonIndexed, nonIndexed.map((input) => args[input.name]) as never),
   };
@@ -226,6 +233,56 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
           seq: '7',
         }),
       ).resolves.toEqual({ kind: 'PAID' });
+    });
+
+    const held = (address: string = ESCROW) =>
+      log(
+        'PaymentHeld',
+        {
+          payer: PAYER_ADDRESS,
+          seq: 7n,
+          provider: PROVIDER,
+          amount: 1_000_000n,
+          collectableAt: 1_800_000_000n,
+        },
+        address,
+      );
+
+    it('a reverted receipt is never held or paid', async () => {
+      const { service } = build(null, { receipt: { status: 'reverted', logs: [held()] } });
+      await expect(
+        service.classifyRedemption(ASSET, HASH, { payer: PAYER, seq: '7' }),
+      ).resolves.toEqual({ kind: 'UNKNOWN' });
+    });
+
+    it('a PaymentHeld emitted by another contract is ignored', async () => {
+      const { service } = build(null, {
+        receipt: { status: 'success', logs: [held('0x9999999999999999999999999999999999999999')] },
+      });
+      await expect(
+        service.classifyRedemption(ASSET, HASH, { payer: PAYER, seq: '7' }),
+      ).resolves.toEqual({ kind: 'UNKNOWN' });
+    });
+
+    it('no hash and no record: placed from the escrow’s recent logs', async () => {
+      const revert = Object.assign(new Error('reverted'), {
+        name: 'ContractFunctionRevertedError',
+      });
+      const { service } = build(revert, { live: true, logs: [held()] });
+      await expect(
+        service.classifyRedemption(ASSET, null, { payer: PAYER, seq: '7' }),
+      ).resolves.toEqual({ kind: 'HELD', collectableAt: new Date(1_800_000_000_000) });
+    });
+  });
+
+  describe('holdLive', () => {
+    it('is the flag, or the escrow answering totalHeld() — before the flag flips', async () => {
+      await expect(build(0n, { live: true }).service.holdLive(ASSET)).resolves.toBe(true);
+      await expect(build(5n).service.holdLive(ASSET)).resolves.toBe(true);
+      const revert = Object.assign(new Error('reverted'), {
+        name: 'ContractFunctionRevertedError',
+      });
+      await expect(build(revert).service.holdLive(ASSET)).resolves.toBe(false);
     });
   });
 });

@@ -175,7 +175,11 @@ export class HeldCollectionService {
       try {
         const record = await held.readHeld(asset, this.keyOf(row));
         if (record?.status === HeldStatus.HELD) toSend.push(row);
-        else booked += await this.book(row, record?.status ?? null, null);
+        else if (record === null || record.status === HeldStatus.NONE) {
+          // No record where one must be (a lagging node, a wrong deployment):
+          // back off rather than read it again every minute.
+          await this.backOff(row, new Error(`held() read ${record?.status ?? 'nothing'}`));
+        } else booked += await this.book(row, record.status, null);
       } catch (error) {
         await this.backOff(row, error);
       }

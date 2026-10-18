@@ -16,8 +16,8 @@ import {
 export class NamespaceHeldPayments implements HeldPaymentsPort {
   constructor(private readonly evm: HeldPaymentsPort) {}
 
-  holdLive(asset: AssetId): boolean {
-    return this.isEvm(asset) && this.evm.holdLive(asset);
+  holdLive(asset: AssetId): Promise<boolean> {
+    return this.isEvm(asset) ? this.evm.holdLive(asset) : Promise.resolve(false);
   }
 
   classifyRedemption(asset: AssetId, txRef: string | null, key: HeldKey): Promise<RedemptionClass> {

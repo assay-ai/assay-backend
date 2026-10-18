@@ -23,7 +23,11 @@ import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { LedgerAccountId, LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
+import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { MoneyUtil } from '@shared/utils/money.util';
+
+/** A redemption its receipt and the logs cannot classify is paged after this many tries. */
+const UNCLASSIFIED_PAGE_AFTER = 5;
 
 import {
   LATE_VERDICT_LAPSE_CAUSE,
@@ -138,6 +142,7 @@ export class PaymentIntentService {
     @Optional()
     @Inject(HELD_PAYMENTS)
     private readonly held: HeldPaymentsPort | null = null,
+    @Optional() @Inject(ALERT_PORT) private readonly alerts: AlertPort | null = null,
   ) {}
 
   /**
@@ -755,7 +760,22 @@ export class PaymentIntentService {
         await this.intents.markHeld(organizationId, intentId, new Date(), decided.collectableAt);
         return this.findById(organizationId, intentId);
       }
-      if (decided.kind === 'UNKNOWN' && this.held.holdLive(asset)) {
+      if (decided.kind === 'UNKNOWN' && (await this.held.holdLive(asset))) {
+        // Counted, and paged after a few passes (review P2-6 of the second pass):
+        // a no-hash landing the logs cannot place needs a human.
+        await this.intents.recordHeldFailure(organizationId, intentId, 'redemption unclassified');
+        if ((intent.heldAttempts ?? 0) + 1 >= UNCLASSIFIED_PAGE_AFTER) {
+          await this.alerts?.emit({
+            severity: AlertSeverity.CRITICAL,
+            name: 'redemption_unclassified',
+            summary:
+              `Intent ${intentId}: redeemed, but neither its receipt nor the escrow's logs say ` +
+              `whether it was held — not credited; look it up on chain`,
+            details: { intentId, seq: intent.voucherSeq ?? 'none' },
+            aggregation: AlertAggregation.ONCE_PER_INCIDENT,
+            dedupeKey: intentId,
+          });
+        }
         throw PaymentErrors.invalidStateTransition({
           intentId,
           from: intent.status,
@@ -1076,6 +1096,7 @@ export function toPaymentIntent(row: PaymentIntentEntity): PaymentIntent {
     disputeOutcome: row.disputeOutcome ?? null,
     heldStatus: row.heldStatus ?? null,
     heldAt: row.heldAt ?? null,
+    heldAttempts: row.heldAttempts ?? 0,
     classification: row.classification,
     verificationVerdict: row.verificationVerdict,
     createdAt: row.createdAt,
