@@ -77,9 +77,7 @@ LIMIT 1;
 If `severity` is not `CRITICAL` here but you believe there is a breach, the freeze has not engaged —
 escalate as a reconciler bug, do not wait for the next tick.
 
-`TreasuryVaultService.checkReserves` (`src/modules/settlement/services/treasury-vault.service.ts`)
-can re-derive the same inequality live. `proposeWithdrawal` and `proposePayoutBatch` no longer
-exist, so the reconciliation freeze above is the one that gates withdrawals.
+The reconciliation freeze above is the one that gates withdrawals.
 
 ## 2. Page on-call
 

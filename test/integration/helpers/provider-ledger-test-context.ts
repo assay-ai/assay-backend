@@ -24,7 +24,7 @@ import { Money } from '@modules/chains/ports/money.types';
 import {
   LedgerAccountId,
   LedgerEntryType,
-  LEGACY_POOLED_VAULT_TX_REF,
+  RAIL_A_BOOK_CREDIT_TX_REF,
   SettlementCredit,
 } from '@modules/ledger/ports/ledger.types';
 import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.service';
@@ -237,7 +237,7 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
         intentId,
         // This helper settles the legacy pooled-vault rail, which
         // moves nothing on chain.
-        chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
+        chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF,
       };
 
       await ledger.commitHoldAndCredit(input.agentOrganizationId, hold.id, credit);

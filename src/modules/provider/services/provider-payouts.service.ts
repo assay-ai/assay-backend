@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
-import { LEGACY_POOLED_VAULT_TX_REF, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
+import { RAIL_A_BOOK_CREDIT_TX_REF, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import {
   ApiErrors,
   CursorPageDto,
@@ -47,7 +47,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  */
 const REDEMPTION_CREDIT_SQL =
   `entry.entryType = :creditType AND entry.chainTxRef IS NOT NULL ` +
-  `AND entry.chainTxRef <> :legacyRef`;
+  `AND entry.chainTxRef <> :railARef`;
 
 /**
  * Refs the redemption paths write when no transaction signature was observed:
@@ -147,7 +147,7 @@ export class ProviderPayoutsService {
       .where('entry.organizationId = :organizationId', { organizationId })
       .andWhere(REDEMPTION_CREDIT_SQL, {
         creditType: LedgerEntryType.PROVIDER_CREDIT,
-        legacyRef: LEGACY_POOLED_VAULT_TX_REF,
+        railARef: RAIL_A_BOOK_CREDIT_TX_REF,
       })
       .setParameters(SYNTHETIC_REF_PARAMS)
       .groupBy(PAYMENT_KEY_SQL)

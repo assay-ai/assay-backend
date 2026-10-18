@@ -1,7 +1,7 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, QueryRunner } from 'typeorm';
-import { LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
+import { RAIL_A_BOOK_CREDIT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { LedgerEntryEntity } from '../entities/ledger-entry.entity';
 import { assertOrganizationScopedValues } from '../organization-scope';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -212,13 +212,13 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
       .where('entry.assetId = :assetId', { assetId })
       .andWhere('entry.entryType IN (:...types)', { types: ['PROVIDER_CREDIT', 'PLATFORM_FEE'] })
       // Identified by the ref, which is required on every credit: a rail-A
-      // commit names `LEGACY_POOLED_VAULT_TX_REF` (its money stays in the
-      // pooled vault until a `PAYOUT`), and every other ref is a redemption —
+      // commit names `RAIL_A_BOOK_CREDIT_TX_REF` (its money stays in the
+      // vault the reconciler reads), and every other ref is a redemption —
       // its signature, or `unobserved:seq=…` for one that landed unobserved. A
       // NULL ref predates the rule and stays counted, which can only
       // over-state what is owed.
       .andWhere('entry.chainTxRef IS NOT NULL')
-      .andWhere('entry.chainTxRef <> :legacy', { legacy: LEGACY_POOLED_VAULT_TX_REF })
+      .andWhere('entry.chainTxRef <> :railARef', { railARef: RAIL_A_BOOK_CREDIT_TX_REF })
       .groupBy('entry.entryType')
       .getRawMany<{ entryType: string; total: string; organizations: string }>();
 

@@ -75,7 +75,7 @@ import {
   PaymentRail,
 } from '@modules/payment/ports/payment.types';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
-import { LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
+import { RAIL_A_BOOK_CREDIT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { JsonValue } from '@modules/tool/domain/mapping/mapping.types';
 import { JsonSchema } from '@modules/tool/domain/mapping/schema-validator';
@@ -590,7 +590,7 @@ export class VerificationSettlementService {
         // Rail A only — the branch above returns before this for a SETTLED
         // rail-B intent, the only COMMIT edge — so there is no chain
         // transaction to name.
-        chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
+        chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF,
       });
     } else if (rule.holdEffect === HoldEffect.RELEASE) {
       await this.ledger.releaseHold(organizationId, intent.holdId);

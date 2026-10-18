@@ -4,7 +4,7 @@ import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
-import { LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
+import { RAIL_A_BOOK_CREDIT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
@@ -326,7 +326,7 @@ describe('PaymentIntentService.resolve() — the COMMIT branch needs a payee', (
     expect(ledger.credited).toEqual([]);
     await service.bookHeldCollected(organizationId, intent.id, null);
 
-    expect(ledger.credited[0]).toMatchObject({ chainTxRef: LEGACY_POOLED_VAULT_TX_REF });
+    expect(ledger.credited[0]).toMatchObject({ chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF });
   });
 
   it('releases without a payee on the REFUND edge, because a release pays nobody', async () => {

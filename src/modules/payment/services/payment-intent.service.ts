@@ -20,7 +20,7 @@ import {
 import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
-import { LedgerAccountId, LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
+import { LedgerAccountId, RAIL_A_BOOK_CREDIT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
@@ -661,7 +661,7 @@ export class PaymentIntentService {
       providerAmount: intent.providerAmount,
       platformFee: intent.platformFee,
       intentId,
-      chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
+      chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF,
     });
     await this.intents.update({ organizationId, id: intentId }, { holdReleasedAt: new Date() });
 
@@ -903,7 +903,7 @@ export class PaymentIntentService {
       intentId,
       chainTxRef:
         intent.rail === PaymentRail.RAIL_A_PER_CALL
-          ? LEGACY_POOLED_VAULT_TX_REF
+          ? RAIL_A_BOOK_CREDIT_TX_REF
           : (txRef ?? `held_collected:seq=${intent.voucherSeq}`),
     });
     await this.intents.manager.transaction((manager) =>
