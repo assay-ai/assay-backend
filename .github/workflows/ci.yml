@@ -35,3 +35,28 @@ jobs:
       - name: Unit tests
         # The unit suite needs no database, Redis or network.
         run: yarn test
+
+  egress-relay:
+    # The Cloudflare Worker in `workers/egress-relay` has its own package and
+    # lockfile; the backend's `yarn test` does not reach it.
+    runs-on: ubuntu-latest
+    defaults:
+      run:
+        working-directory: workers/egress-relay
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: 24
+          cache: npm
+          cache-dependency-path: workers/egress-relay/package-lock.json
+
+      - name: Install
+        run: npm ci
+
+      - name: Type-check
+        run: npm run typecheck
+
+      - name: Tests
+        run: npm test
