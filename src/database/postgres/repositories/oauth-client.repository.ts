@@ -17,6 +17,21 @@ export class OAuthClientRepository extends AbstractRepository<OAuthClientEntity>
     return this.findOne({ where: { clientId } });
   }
 
+  /**
+   * Stamp `last_used_at` (a `/oauth/authorize` naming the client), so the
+   * cleanup keeps a client in use. At most once an hour per client: the
+   * cleanup counts idleness in days, and a hot client must not write its row
+   * on every sign-in.
+   */
+  async touchLastUsed(id: string): Promise<void> {
+    await this.query(
+      `UPDATE "oauth_clients" SET "last_used_at" = now()
+        WHERE "id" = $1
+          AND ("last_used_at" IS NULL OR "last_used_at" < now() - interval '1 hour')`,
+      [id],
+    );
+  }
+
   /** Insert a new client; a `client_id` already present fails on the unique index. */
   async insertClient(values: OAuthClientUpsert): Promise<OAuthClientEntity> {
     return this.save(this.create(values));

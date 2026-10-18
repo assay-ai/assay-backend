@@ -13,6 +13,7 @@ import { CredentialSessionResolver } from '@modules/auth/services/credential-ses
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
+import { unauthorizedReasonOf } from '@modules/mcp/ports/mcp-unauthorized.port';
 
 import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 import { FakeAgentCredentialRepository } from './helpers/fake-agent-credential-repository';
@@ -81,6 +82,27 @@ describe('CompositeMcpSessionSource — one port, two issuers, one refusal', () 
     ]);
 
     await expectErrorCodeAsync(() => composite.resolve('neither'), 'MCP_CREDENTIAL_INVALID');
+  });
+
+  it("carries a source's private 401 reason out, still moving on to the next source", async () => {
+    const oauth = new StubSource(
+      'oauth-token',
+      SESSION,
+      McpErrors.credentialInvalid({ unauthorizedReason: 'revoked' }),
+    );
+    const privy = new StubSource('privy-token');
+    const composite = new CompositeMcpSessionSource([new StubSource('config-token'), oauth, privy]);
+
+    const error = await composite.resolve('assay_at_x').catch((e: unknown) => e);
+    expect(error).toMatchObject({ errorCode: 'MCP_CREDENTIAL_INVALID' });
+    expect(unauthorizedReasonOf(error)).toBe('revoked');
+    expect(privy.seen).toEqual(['assay_at_x']);
+  });
+
+  it('gives no reason when no source gave one', async () => {
+    const composite = new CompositeMcpSessionSource([new StubSource('a'), new StubSource('b')]);
+    const error = await composite.resolve('neither').catch((e: unknown) => e);
+    expect(unauthorizedReasonOf(error)).toBeNull();
   });
 
   it('stops at a wallet-not-linked refusal instead of degrading it into a 401', async () => {

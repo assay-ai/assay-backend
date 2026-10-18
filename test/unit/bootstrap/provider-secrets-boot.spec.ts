@@ -9,7 +9,15 @@ import { DatabaseModule } from '@database/database.module';
 import { PostgresModule, entities, repositories } from '@database/postgres/postgres.module';
 import { CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { OAUTH_CONFIG, OAuthConfig } from '@modules/oauth/config/oauth.config';
+import { OAuthAuthorizeController } from '@modules/oauth/controllers/oauth-authorize.controller';
 import { OAuthConsentController } from '@modules/oauth/controllers/oauth-consent.controller';
+import { OAuthRegisterController } from '@modules/oauth/controllers/oauth-register.controller';
+import { OAuthRevokeController } from '@modules/oauth/controllers/oauth-revoke.controller';
+import { OAuthTokenController } from '@modules/oauth/controllers/oauth-token.controller';
+import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
+import { NOTIFICATION_PORT } from '@modules/notification/ports/notification.port';
+import { McpController } from '@modules/mcp/controllers/mcp.controller';
+import { MCP_UNAUTHORIZED_RECORDER } from '@modules/mcp/ports/mcp-unauthorized.port';
 import { OAuthConsentService } from '@modules/oauth/services/oauth-consent.service';
 import { OAuthRequestStore } from '@modules/oauth/services/oauth-request.store';
 import { BINDING_INVOKER } from '@modules/tool/ports/binding-invoker.port';
@@ -85,6 +93,10 @@ const SIGNING_KEYS = JSON.stringify([
   { keyId: 'boot-test', secretKey: '11'.repeat(16) + '22'.repeat(16) },
 ]);
 const VAULT_KEKS = JSON.stringify([{ keyId: 'boot-test', key: '0123456789abcdef'.repeat(4) }]);
+/** 32 random-looking bytes, hex: the MCP app's `/oauth/authorize` browser-binding key. */
+const REQUEST_COOKIE_SECRET = Array.from({ length: 32 }, (_, i) =>
+  ((i * 37 + 11) % 256).toString(16).padStart(2, '0'),
+).join('');
 
 const PRODUCTION_ENV: Record<string, string> = {
   NODE_ENV: 'production',
@@ -146,7 +158,52 @@ describe('provider-auth secrets per process (NODE_ENV=production)', () => {
     else delete process.env.PROVIDER_REQUEST_SIGNING_KEYS;
     if (vault) process.env.CREDENTIAL_VAULT_KEKS = VAULT_KEKS;
     else delete process.env.CREDENTIAL_VAULT_KEKS;
+    // Only the MCP app reads it; it is taken out of the environment once read.
+    process.env.OAUTH_REQUEST_COOKIE_SECRET = REQUEST_COOKIE_SECRET;
   }
+
+  describe('mcp: the OAuth endpoints', () => {
+    it('refuses to boot without OAUTH_REQUEST_COOKIE_SECRET', async () => {
+      withSecrets(true, true);
+      delete process.env.OAUTH_REQUEST_COOKIE_SECRET;
+      await expect(compile(AppMcpModule, 'mcp')).rejects.toThrow(
+        'OAUTH_REQUEST_COOKIE_SECRET is required where the OAuth routes run',
+      );
+    });
+
+    it('boots with it: OAuthCoreModule (and NotificationModule on the BullMQ root) and every endpoint resolve', async () => {
+      withSecrets(true, true);
+      const app = await compile(AppMcpModule, 'mcp');
+      try {
+        const config = app.get<OAuthConfig>(OAUTH_CONFIG, { strict: false });
+        expect(Buffer.isBuffer(config.requestCookieSecret)).toBe(true);
+        expect(config.requestCookieSecret!.toString('hex')).toBe(REQUEST_COOKIE_SECRET);
+        // Taken out of the environment once read.
+        expect(process.env.OAUTH_REQUEST_COOKIE_SECRET).toBeUndefined();
+        for (const controller of [
+          OAuthAuthorizeController,
+          OAuthTokenController,
+          OAuthRegisterController,
+          OAuthRevokeController,
+        ]) {
+          expect(app.get(controller, { strict: false })).toBeInstanceOf(controller);
+        }
+        expect(app.get(OAuthRequestStore, { strict: false })).toBeInstanceOf(OAuthRequestStore);
+        expect(app.get(OAuthMetrics, { strict: false })).toBeInstanceOf(OAuthMetrics);
+        expect(app.get(NOTIFICATION_PORT, { strict: false })).toBeDefined();
+        // The catch-all counts its 401s on this container's OAuth metrics.
+        const mcp = app.get(McpController, { strict: false }) as unknown as {
+          unauthorized?: unknown;
+        };
+        expect(mcp.unauthorized).toBeDefined();
+        expect(app.get(MCP_UNAUTHORIZED_RECORDER, { strict: false })).toBe(mcp.unauthorized);
+        // The consent API is the API app's, not this one's.
+        expect(() => app.get(OAuthConsentController, { strict: false })).toThrow();
+      } finally {
+        await app.close();
+      }
+    });
+  });
 
   it('api boots without OAUTH_REQUEST_COOKIE_SECRET and holds no copy of it', async () => {
     withSecrets(true, true);

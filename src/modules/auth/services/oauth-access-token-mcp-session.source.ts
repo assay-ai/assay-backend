@@ -7,6 +7,7 @@ import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oaut
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
+import { McpUnauthorizedReason } from '@modules/mcp/ports/mcp-unauthorized.port';
 import { OAUTH_SESSION_CONFIG, OAuthSessionConfig } from '@modules/oauth/config/oauth.config';
 import { hashOpaqueToken, isWellFormed } from '@modules/oauth/domain/opaque-token';
 import { isPaymentClient } from '@modules/oauth/domain/payment-client';
@@ -46,6 +47,11 @@ import { CredentialSessionResolver } from './credential-session.resolver';
  *    which re-checks the credential and checks the agent and organization on
  *    every request (T16).
  *
+ * Each refusal of a token of this source's shape carries a private reason
+ * (`unknown`, `expired`, `revoked`, `audience`) on the error's context, for
+ * `assay_mcp_unauthorized_total` (§6.7). The error is still the plain
+ * `MCP_CREDENTIAL_INVALID` (the composite moves on; the body is unchanged).
+ *
  * The lookup is by digest only; the token itself is never passed to the
  * database, logged, or kept. See `DbCredentialMcpSessionSource` for why an
  * indexed digest lookup needs no constant-time comparison.
@@ -74,33 +80,24 @@ export class OAuthAccessTokenMcpSessionSource implements McpSessionPort {
     }
 
     const token = await this.tokens.findByTokenHash(hashOpaqueToken(bearerToken));
-    if (
-      !token ||
-      token.revokedAt ||
-      token.expiresAt.getTime() <= Date.now() ||
-      token.audience !== this.config.audience
-    ) {
-      throw McpErrors.credentialInvalid();
-    }
+    if (!token) throw refused('unknown');
+    if (token.revokedAt) throw refused('revoked');
+    if (token.expiresAt.getTime() <= Date.now()) throw refused('expired');
+    if (token.audience !== this.config.audience) throw refused('audience');
 
     const credential = await this.credentials.findOneBy({
       organizationId: token.organizationId,
       id: token.credentialId,
       issuedVia: CredentialIssuedVia.OAUTH,
     });
-    if (
-      !credential ||
-      !credential.oauthClientId ||
-      credential.revokedAt ||
-      (credential.expiresAt && credential.expiresAt.getTime() <= Date.now())
-    ) {
-      throw McpErrors.credentialInvalid();
+    if (!credential || !credential.oauthClientId) throw refused('unknown');
+    if (credential.revokedAt) throw refused('revoked');
+    if (credential.expiresAt && credential.expiresAt.getTime() <= Date.now()) {
+      throw refused('expired');
     }
 
     const client = await this.clients.findOneBy({ id: credential.oauthClientId });
-    if (!client) {
-      throw McpErrors.credentialInvalid();
-    }
+    if (!client) throw refused('unknown');
 
     const paymentsAllowed = isPaymentClient(this.config.paymentClients, client);
     if (this.role === 'api' && !paymentsAllowed) {
@@ -125,4 +122,9 @@ export class OAuthAccessTokenMcpSessionSource implements McpSessionPort {
 
     return this.resolver.sessionFor(credential, { paymentsAllowed });
   }
+}
+
+/** `MCP_CREDENTIAL_INVALID`, with the reason in its private context only. */
+function refused(unauthorizedReason: McpUnauthorizedReason) {
+  return McpErrors.credentialInvalid({ unauthorizedReason });
 }

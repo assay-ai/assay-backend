@@ -1,4 +1,4 @@
-import { All, Controller, Inject, Req, Res } from '@nestjs/common';
+import { All, Controller, Inject, Optional, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 
 import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
@@ -19,6 +19,11 @@ import { MCP_BEARER_SCHEME_RE } from '../constants/mcp.constants';
 import { McpErrorCode, McpErrors } from '../errors/mcp.errors';
 import { McpScope } from '../ports/mcp-scope';
 import { MCP_SESSION_SOURCE, McpSession, McpSessionPort } from '../ports/mcp-session.port';
+import {
+  MCP_UNAUTHORIZED_RECORDER,
+  McpUnauthorizedRecorder,
+  unauthorizedReasonOf,
+} from '../ports/mcp-unauthorized.port';
 import { McpHttpBridge } from '../services/mcp-http-bridge';
 import { McpServerFactory } from '../services/mcp-server.factory';
 
@@ -72,6 +77,10 @@ export class McpController {
     private readonly endpoints: McpEndpointResolver,
     private readonly access: AccessResolver,
     @Inject(MCP_HOST_CONFIG) private readonly host: McpHostConfig,
+    // The MCP app's 401 counter (`OAuthMcpModule`); absent elsewhere.
+    @Optional()
+    @Inject(MCP_UNAUTHORIZED_RECORDER)
+    private readonly unauthorized?: McpUnauthorizedRecorder,
   ) {
     this.bridge = new McpHttpBridge((session, scope) => this.servers.create(session, scope));
   }
@@ -125,6 +134,9 @@ export class McpController {
       return await this.sessions.resolve(token);
     } catch (error) {
       if (error instanceof BaseError && error.errorCode === McpErrorCode.MCP_CREDENTIAL_INVALID) {
+        this.unauthorized?.record(
+          token === null ? 'missing' : (unauthorizedReasonOf(error) ?? 'unknown'),
+        );
         response.setHeader(
           'WWW-Authenticate',
           challengeHeader(this.host.mcpPublicUrl, request.originalUrl, token !== null),

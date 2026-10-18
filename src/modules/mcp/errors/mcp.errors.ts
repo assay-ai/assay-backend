@@ -1,4 +1,5 @@
 import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors/error-catalog';
+import type { McpUnauthorizedReason } from '../ports/mcp-unauthorized.port';
 
 /**
  * `MCP_*` — the MCP server surface: `tools/list` with prices and `tools/call`.
@@ -84,7 +85,11 @@ export const McpErrors = createDomainErrorFactory('MCP', {
   credentialInvalid: {
     code: McpErrorCode.MCP_CREDENTIAL_INVALID,
     statusCode: 401,
-    message: () => `MCP credential is missing or invalid`,
+    // The optional context carries only the private `unauthorizedReason`
+    // (`mcp-unauthorized.port.ts`): no `publicContext`, so it never reaches
+    // the wire, and the message is the same for every reason.
+    message: (_context?: { unauthorizedReason?: McpUnauthorizedReason }) =>
+      `MCP credential is missing or invalid`,
   },
   urlNotFound: {
     code: McpErrorCode.MCP_URL_NOT_FOUND,
