@@ -35,31 +35,55 @@ const RESERVED_NAMES: ReadonlySet<string> = new Set([
   'content-digest',
 ]);
 
-/** Compared after lowercasing and `-` to `_`. */
-const CREDENTIAL_QUERY_KEYS: ReadonlySet<string> = new Set([
+/**
+ * Words that make a constant header name or query key look like a secret. A
+ * name is flagged when one of its tokens (split on `-` and `_`) equals or ends
+ * with a word, so `x-api-key`, `apikey`, `subscription-key` and
+ * `ocp-apim-subscription-key` all match `key`.
+ */
+const SECRET_WORDS: readonly string[] = [
   'key',
-  'api_key',
-  'apikey',
   'token',
-  'access_token',
-  'auth_token',
   'secret',
-  'client_secret',
   'password',
+  'passwd',
   'auth',
+  'authorization',
+  'credential',
   'signature',
-  'sig',
+  'session',
+  'cookie',
+];
+
+/** Short words that count only as a whole token (`sig`, not `config`). */
+const SECRET_WHOLE_TOKENS: ReadonlySet<string> = new Set(['sig']);
+
+/** Names that contain a secret word and are not secrets. Compared with `_` as `-`. */
+const SECRET_NAME_ALLOW_LIST: ReadonlySet<string> = new Set([
+  'idempotency-key',
+  'x-sort-key',
+  'sort-key',
+  'cache-key',
+  'max-tokens',
+  'keyword',
+  'keywords',
 ]);
 
-const SECRET_HEADER_NAMES: ReadonlySet<string> = new Set([
-  'authorization',
-  'proxy-authorization',
-  'cookie',
-  'x-api-key',
-  'api-key',
-  'x-auth-token',
-  'x-access-token',
-]);
+/**
+ * Whether a constant header name or query key looks like it carries a secret.
+ * Applied to constants only: body fields are not checked.
+ */
+export function looksLikeSecretName(name: string): boolean {
+  const normalised = name.toLowerCase().replace(/_/g, '-');
+  if (SECRET_NAME_ALLOW_LIST.has(normalised)) return false;
+  return normalised
+    .split('-')
+    .filter((token) => token.length > 0)
+    .some(
+      (token) =>
+        SECRET_WHOLE_TOKENS.has(token) || SECRET_WORDS.some((word) => token.endsWith(word)),
+    );
+}
 
 /**
  * The cap on all outbound request headers together: defaults, mapping,
@@ -127,10 +151,6 @@ export function credentialHeaderProblems(headers: readonly CredentialHeader[]): 
   return problems;
 }
 
-function isCredentialQueryKey(key: string): boolean {
-  return CREDENTIAL_QUERY_KEYS.has(key.toLowerCase().replace(/-/g, '_'));
-}
-
 /** Credential-like query keys in the endpoint URL or constant mapping query entries, as written. */
 export function credentialQueryKeys(endpoint: string, mapping: RequestMappingSpec): string[] {
   const found: string[] = [];
@@ -141,10 +161,10 @@ export function credentialQueryKeys(endpoint: string, mapping: RequestMappingSpe
     params = null;
   }
   if (params) {
-    for (const key of params.keys()) if (isCredentialQueryKey(key)) found.push(key);
+    for (const key of params.keys()) if (looksLikeSecretName(key)) found.push(key);
   }
   for (const [key, node] of Object.entries(mapping.query ?? {})) {
-    if (isConstNode(node) && isCredentialQueryKey(key)) found.push(key);
+    if (isConstNode(node) && looksLikeSecretName(key)) found.push(key);
   }
   return [...new Set(found)];
 }
@@ -152,7 +172,7 @@ export function credentialQueryKeys(endpoint: string, mapping: RequestMappingSpe
 /** Secret-looking header names set to a constant in the mapping, as written. */
 export function secretConstantHeaders(mapping: RequestMappingSpec): string[] {
   return Object.entries(mapping.headers ?? {})
-    .filter(([name, node]) => isConstNode(node) && SECRET_HEADER_NAMES.has(name.toLowerCase()))
+    .filter(([name, node]) => isConstNode(node) && looksLikeSecretName(name))
     .map(([name]) => name);
 }
 
