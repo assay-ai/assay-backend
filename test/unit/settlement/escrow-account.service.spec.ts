@@ -496,8 +496,12 @@ describe('EscrowAccountService lifetime totals (B7)', () => {
       (await buildService({ reading: null }).service.getForConsole(ORG, ACCOUNT)).lifetime,
     ).toBeNull();
     expect(
-      (await buildService({ readerThrows: new Error('rpc down') }).service.getForConsole(ORG, ACCOUNT))
-        .lifetime,
+      (
+        await buildService({ readerThrows: new Error('rpc down') }).service.getForConsole(
+          ORG,
+          ACCOUNT,
+        )
+      ).lifetime,
     ).toBeNull();
   });
 });
