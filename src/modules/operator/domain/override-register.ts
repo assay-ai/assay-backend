@@ -237,6 +237,64 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     reversible: false,
     implemented: true,
   }),
+  /**
+   * B18, owner-approved 2026-10-18: three operator actions for a case stuck
+   * behind a requested cancel the admin-cancel sweep cannot settle (a window
+   * case opened before the parts model; `slash/domain/stuck-case.ts`). Each
+   * runs only on a fresh chain read taken immediately before it, and each is
+   * a compare-and-set on the case.
+   *
+   * `S-15` closes the cancel when the record reads `Cancelled` on chain. It
+   * moves no money and writes nothing on chain (only the mirror the sweep
+   * would have written), so it is one person's act, like the cancel intent it
+   * stands in for, by the same pair (`ADJL`/`TRE`).
+   */
+  'S-15': define({
+    code: 'S-15',
+    family: OverrideFamily.SLASHING,
+    action: 'slash.chain_cancel_closed',
+    label: 'Close a requested cancel when nothing stands on chain',
+    roles: [OperatorRole.ADJL, OperatorRole.TRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+  /**
+   * `S-16` records an execution the chain made while the cancel waited,
+   * through the existing `recordAnExecutionNobodyAskedFor` path. It records
+   * money that moved, so it is two-person with the roles and the limit of
+   * `S-5` (the compensation that usually follows it); the limit is checked
+   * against what the chain took.
+   */
+  'S-16': define({
+    code: 'S-16',
+    family: OverrideFamily.SLASHING,
+    action: 'slash.execution_recorded',
+    label: 'Record an on-chain execution that happened while the cancel waited',
+    roles: [OperatorRole.ADJL, OperatorRole.TRE],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJL, OperatorRole.TRE],
+    reversible: false,
+    implemented: true,
+  }),
+  /**
+   * `S-17` puts an upheld penalty back on chain under a fresh epoch once its
+   * old record reads `Cancelled`. It reserves the provider's stake, so it is
+   * two-person, and the checker must be able to read a case (`ADJ`/`ADJL`, as
+   * for suspending an upheld case). The proposal itself is the scheduler's
+   * existing path, with its stake, cap, idempotency and promise guards.
+   */
+  'S-17': define({
+    code: 'S-17',
+    family: OverrideFamily.SLASHING,
+    action: 'slash.reproposed',
+    label: 'Propose again an upheld penalty whose cancelled record is gone',
+    roles: [OperatorRole.ADJL, OperatorRole.TRE],
+    approval: ApprovalMode.TWO_PERSON,
+    approverRoles: [OperatorRole.ADJ, OperatorRole.ADJL],
+    reversible: false,
+    implemented: true,
+  }),
   // Enumerated, not built. Each needs a resource the arbitration flow does not create.
   'S-4': define({
     code: 'S-4',

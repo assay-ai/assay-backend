@@ -26,6 +26,7 @@ import {
   ExtendDeadlineBodyDto,
   FleetSweepDto,
   ListQueueQueryDto,
+  ManualCaseActionBodyDto,
   OpenFleetSweepBodyDto,
   OperatorDto,
   SecondSignatureBodyDto,
@@ -363,6 +364,90 @@ export class OperatorCasesController {
     @Param('proposalId', ParseUUIDPipe) proposalId: string,
   ): Promise<CancelIntentDto> {
     return this.cases.cancelIntent(proposalId);
+  }
+
+  /**
+   * B18 `S-15` — close a requested cancel that nothing on chain is left to act
+   * on: a case closed with no penalty whose own record reads `Cancelled` on a
+   * fresh chain read. One person's act: it moves no money and sends nothing.
+   * Only for the case shape the admin-cancel sweep cannot settle.
+   */
+  @Post('cases/:proposalId/close-nothing-standing')
+  @Override('S-15')
+  @RequireRoles(OperatorRole.ADJL, OperatorRole.TRE)
+  @ApiOperation({ summary: 'Close a requested cancel when nothing stands on chain' })
+  @ApiResponse({
+    status: 409,
+    description:
+      'SLASH_MANUAL_ACTION_REFUSED: the guard does not hold on the fresh read, or the case ' +
+      'changed. `error.context`: `proposalId`, `action`, `reason`, `chainRecord`',
+  })
+  @ApiResponse({
+    status: 503,
+    description: 'SLASH_CHAIN_UNAVAILABLE: the record could not be read',
+  })
+  async closeNothingStanding(
+    @CurrentOperator() operator: OperatorSession,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
+    @Body() body: ManualCaseActionBodyDto,
+  ) {
+    return this.cases.closeNothingStanding(operator, proposalId, body, requestIdOf());
+  }
+
+  /**
+   * B18 `S-16` — record an execution the chain made while the cancel waited,
+   * through the existing recording path. Two-person: queued with 202
+   * `{approvalId}`; the approval reads the chain again and runs it.
+   */
+  @Post('cases/:proposalId/record-execution')
+  @Override('S-16')
+  @RequireRoles(OperatorRole.ADJL, OperatorRole.TRE)
+  @ApiOperation({ summary: 'Record an on-chain execution that happened while the cancel waited' })
+  @ApiResponse({
+    status: 202,
+    type: ApprovalQueuedDto,
+    description: 'Queued for a second operator',
+  })
+  @ApiResponse({ status: 409, description: 'SLASH_MANUAL_ACTION_REFUSED' })
+  @ApiResponse({ status: 503, description: 'SLASH_CHAIN_UNAVAILABLE' })
+  async recordExecution(
+    @CurrentOperator() operator: OperatorSession,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
+    @Body() body: ManualCaseActionBodyDto,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    return answerOrQueued(
+      response,
+      await this.cases.recordExecution(operator, proposalId, body, requestIdOf()),
+    );
+  }
+
+  /**
+   * B18 `S-17` — propose an upheld penalty again once its cancelled record is
+   * gone. Two-person: queued with 202 `{approvalId}`. Approved, the case moves
+   * to a fresh epoch and the scheduler's propose pass puts it on chain.
+   */
+  @Post('cases/:proposalId/repropose')
+  @Override('S-17')
+  @RequireRoles(OperatorRole.ADJL, OperatorRole.TRE)
+  @ApiOperation({ summary: 'Propose an upheld penalty again after its record was cancelled' })
+  @ApiResponse({
+    status: 202,
+    type: ApprovalQueuedDto,
+    description: 'Queued for a second operator',
+  })
+  @ApiResponse({ status: 409, description: 'SLASH_MANUAL_ACTION_REFUSED' })
+  @ApiResponse({ status: 503, description: 'SLASH_CHAIN_UNAVAILABLE' })
+  async repropose(
+    @CurrentOperator() operator: OperatorSession,
+    @Param('proposalId', ParseUUIDPipe) proposalId: string,
+    @Body() body: ManualCaseActionBodyDto,
+    @Res({ passthrough: true }) response: Response,
+  ) {
+    return answerOrQueued(
+      response,
+      await this.cases.repropose(operator, proposalId, body, requestIdOf()),
+    );
   }
 }
 
