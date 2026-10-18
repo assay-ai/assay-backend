@@ -648,7 +648,8 @@ export function displayPrice(price: Money): string {
   return USD_PEGGED_SYMBOLS.has(symbol) ? `$${rendered}` : `${rendered} ${symbol}`;
 }
 
-const USD_PEGGED_SYMBOLS: ReadonlySet<string> = new Set(['USDC', 'USDT', 'PYUSD']);
+/** Dollar stablecoins: shown as `$`. USDG is the Robinhood Chain one (review 2026-10-18: "0.1 USDG"). */
+const USD_PEGGED_SYMBOLS: ReadonlySet<string> = new Set(['USDC', 'USDG', 'USDT', 'PYUSD']);
 
 function trimTrailingZeros(decimal: string): string {
   if (!decimal.includes('.')) return decimal;

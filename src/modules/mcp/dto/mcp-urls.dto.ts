@@ -70,7 +70,20 @@ export class PreviewToolDto {
 
   @ApiProperty({ description: 'The rules leave no provider: "No provider fits your limits"' })
   noProviderFits: boolean;
+
+  @ApiProperty({
+    enum: ['RULES', 'OTHER_CHAIN'],
+    nullable: true,
+    description:
+      'Why this agent cannot run it here: the rules removed every provider (`RULES`), or it has a ' +
+      'paid price but no provider settles on the agent’s own chain (`OTHER_CHAIN`; a FREEMIUM tool ' +
+      'still serves its free calls). Display only. `null` when it can run.',
+  })
+  noFitReason: NoFitReason | null;
 }
+
+/** Why a tool has no provider for this agent here; see `PreviewToolDto.noFitReason`. */
+export type NoFitReason = 'RULES' | 'OTHER_CHAIN';
 
 /** A tool a warning is about: its id and the name an agent sees. */
 export class PreviewWarningToolDto {
