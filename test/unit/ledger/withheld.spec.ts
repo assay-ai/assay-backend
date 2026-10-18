@@ -116,7 +116,7 @@ describe('LedgerWithheldService — withheldFromIntents', () => {
     expect(byBucket.get(WithheldBucket.NOT_COLLECTED)).toMatchObject({
       calls: 0,
       amount: { amount: '0' },
-      label: 'not collected (the provider could not be paid)',
+      label: 'not collected (the charge was cancelled or never taken)',
     });
   });
 

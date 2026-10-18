@@ -16,9 +16,9 @@
  *
  *              bucket 1  REFUNDED           failed verification        ← the guarantee
  *              bucket 2  VOIDED | EXPIRED   provider or platform error ← never your fault
- *              bucket 3  SETTLED, never     not collected              ← the provider
- *                        collected and not                               could not be paid
- *                        owed
+ *              bucket 3  SETTLED, never     not collected              ← the charge was
+ *                        collected and not                               cancelled or never
+ *                        owed                                            taken
  * ```
  *
  * Three buckets, never one. A provider timeout is not the verification engine
@@ -130,7 +130,9 @@ export enum WithheldBucket {
 export const WITHHELD_BUCKET_LABEL: Readonly<Record<WithheldBucket, string>> = Object.freeze({
   [WithheldBucket.FAILED_VERIFICATION]: 'failed verification',
   [WithheldBucket.PROVIDER_OR_PLATFORM_ERROR]: 'provider or platform error',
-  [WithheldBucket.NOT_COLLECTED]: 'not collected (the provider could not be paid)',
+  // Not "the provider could not be paid": a debt voided by a late verdict or an
+  // upheld report is the buyer-side outcome, not the provider (wave-1 audit M7).
+  [WithheldBucket.NOT_COLLECTED]: 'not collected (the charge was cancelled or never taken)',
 });
 
 /**
