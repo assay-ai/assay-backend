@@ -326,8 +326,11 @@ export class SlashProposalDto {
   @ApiProperty()
   toolId: string;
 
-  @ApiProperty({ description: 'The tool’s name, e.g. `search_web`' })
-  toolName: string;
+  @ApiPropertyOptional({
+    nullable: true,
+    description: 'The tool’s name, e.g. `search_web`; null when the catalogue cannot name it',
+  })
+  toolName: string | null;
 
   @ApiPropertyOptional({ nullable: true })
   windowId: string | null;

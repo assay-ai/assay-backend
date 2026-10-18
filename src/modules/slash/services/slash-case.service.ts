@@ -589,7 +589,9 @@ function buildProposalDto(
     // the column on this row. The column type mismatch is a known schema
     // limitation that this rendering works around.
     toolId: binding?.toolId ?? proposal.toolId,
-    toolName: tool?.name ?? binding?.toolId ?? proposal.toolId,
+    // Null rather than an id when the catalogue cannot name the tool: a
+    // penalty titled with a UUID tells the provider nothing.
+    toolName: tool?.name ?? null,
     windowId: proposal.windowId,
     windowLabel: window ? renderWindowLabel(window.sequence) : null,
     penaltyAmount: toMoneyDto(MoneyUtil.of(proposal.penaltyAmount, asset, proposal.decimals)),
