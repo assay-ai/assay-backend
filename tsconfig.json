@@ -34,5 +34,6 @@
       "@schedule/*": ["src/modules/_examples/schedule/*"],
       "@websocket/*": ["src/websocket/*"]
     }
-  }
+  },
+  "exclude": ["node_modules", "dist", "workers"]
 }
