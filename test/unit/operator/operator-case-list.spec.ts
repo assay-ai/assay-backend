@@ -40,7 +40,12 @@ function row(overrides: Record<string, unknown> = {}) {
 function build(rows: ReturnType<typeof row>[]) {
   const proposals = { findOperatorCasePage: jest.fn().mockResolvedValue(rows) };
   const providers = {
-    find: jest.fn().mockResolvedValue([{ id: PROVIDER, legalName: 'Northwind Geo' }]),
+    // The `providers` row has its own id; the case names the organization.
+    find: jest
+      .fn()
+      .mockResolvedValue([
+        { id: 'a-provider-row-id', organizationId: PROVIDER, legalName: 'Northwind Geo' },
+      ]),
   };
   const catalogue = {
     findTool: jest
@@ -168,8 +173,8 @@ describe('OperatorCaseListService', () => {
 
     expect(providers.find).toHaveBeenCalledTimes(1);
     expect(providers.find).toHaveBeenCalledWith({
-      where: [{ organizationId: PROVIDER, id: PROVIDER }],
-      select: { id: true, legalName: true },
+      where: [{ organizationId: PROVIDER }],
+      select: { organizationId: true, legalName: true },
     });
   });
 
