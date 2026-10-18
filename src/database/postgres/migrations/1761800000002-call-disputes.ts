@@ -25,6 +25,9 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `uq_disputes_open_call` allows one open dispute per call. The marks on the
  * call and its verdict are `1761800000000` and `1761800000001`.
  */
+/** The SLA's system actor in the override register (`CallDisputeSlaService`). */
+export const SYSTEM_SLA_OPERATOR_ID = '00000000-0000-4000-8000-0000000005a1';
+
 export class CallDisputes1761800000002 implements MigrationInterface {
   name = 'CallDisputes1761800000002';
 
@@ -85,9 +88,26 @@ export class CallDisputes1761800000002 implements MigrationInterface {
       `CREATE INDEX "idx_disputes_call_buyer" ON "disputes" ` +
         `("organization_id", "created_at") WHERE "intent_id" IS NOT NULL`,
     );
+    // The actor the SLA's auto-uphold is logged under in the override register
+    // (S-14): a SUSPENDED operator with no wallet and no roles, so it can never
+    // sign in or act through the console.
+    await queryRunner.query(
+      `INSERT INTO "operators" ("id", "subject", "display_name", "email", "roles", "status",
+                                "suspended_at")
+       VALUES ($1, 'system:call-dispute-sla', 'Call dispute SLA (system)',
+               'call-dispute-sla@system.invalid', '[]'::jsonb, 'SUSPENDED', now())
+       ON CONFLICT ("id") DO NOTHING`,
+      [SYSTEM_SLA_OPERATOR_ID],
+    );
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
+    // Kept once the append-only override log names it.
+    await queryRunner.query(
+      `DELETE FROM "operators" WHERE "id" = $1
+         AND NOT EXISTS (SELECT 1 FROM "override_log_entries" WHERE "actor_operator_id" = $1)`,
+      [SYSTEM_SLA_OPERATOR_ID],
+    );
     await queryRunner.query(`DROP INDEX "idx_disputes_call_buyer"`);
     await queryRunner.query(`DROP INDEX "idx_disputes_call_respondent"`);
     await queryRunner.query(`DROP INDEX "idx_disputes_call_queue"`);

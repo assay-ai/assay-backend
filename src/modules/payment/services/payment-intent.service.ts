@@ -737,26 +737,30 @@ export class PaymentIntentService {
     }
     if (intent.heldStatus === HELD) return intent;
 
-    // Redeemed INTO THE HOLD (G3.B1): the money left the buyer's escrow for
-    // `held[payer][seq]`, not for the provider. The buyer's ledger hold stays
-    // open; the provider is credited on `HeldCollected`, never here.
-    const record = await this.readHeldRecord(intent);
-    if (record) {
-      if (record.status === HeldStatus.HELD) {
-        await this.intents.markHeld(organizationId, intentId, new Date(), record.collectableAt);
+    // Redeemed INTO THE HOLD (G3.B1)? Decided from the redemption's RECEIPT
+    // (review P0-1): a `PaymentHeld` log — the money is in `held[payer][seq]`,
+    // the buyer's ledger hold stays open and the provider is credited on
+    // `HeldCollected`, never here; a bare `VoucherRedeemed` — the escrow paid
+    // the provider at once (a redemption before the upgrade). Anything else is
+    // retried: on a chain whose hold is live, a missing answer is never a
+    // reason to credit the provider while the chain may still hold the money.
+    if (this.held && intent.rail === PaymentRail.RAIL_B_VOUCHER && intent.voucherSeq) {
+      const asset = intent.price.asset as AssetId;
+      const decided = await this.held.classifyRedemption(
+        asset,
+        /^0x[0-9a-fA-F]{64}$/.test(chainTxRef) ? chainTxRef : null,
+        { payer: intent.agentAccount, seq: intent.voucherSeq },
+      );
+      if (decided.kind === 'HELD') {
+        await this.intents.markHeld(organizationId, intentId, new Date(), decided.collectableAt);
         return this.findById(organizationId, intentId);
       }
-      if (record.status === HeldStatus.COLLECTED) {
-        // Collected already (the chain's timeout, or an earlier pass).
-        await this.intents.markHeld(organizationId, intentId, new Date(), record.collectableAt);
-        return this.bookHeldCollected(organizationId, intentId, null);
-      }
-      if (record.status === HeldStatus.NONE) {
+      if (decided.kind === 'UNKNOWN' && this.held.holdLive(asset)) {
         throw PaymentErrors.invalidStateTransition({
           intentId,
           from: intent.status,
           to: PaymentIntentStatus.SETTLED,
-          actual: 'redeemed, but no held record is visible yet — retried next pass',
+          actual: 'redeemed, but the receipt does not say yet whether it was held — retried',
         });
       }
     }
@@ -914,7 +918,7 @@ export class PaymentIntentService {
     organizationId: string,
     intentId: string,
     outcome: string,
-  ): Promise<'REFUNDED' | 'COLLECTED' | 'NOT_HELD'> {
+  ): Promise<'REFUNDED' | 'COLLECTED' | 'NOT_HELD' | 'TIMED_OUT'> {
     const intent = await this.findById(organizationId, intentId);
     if (!intent.holdId || intent.heldStatus !== HELD) {
       return intent.heldStatus === HELD_COLLECTED
@@ -945,11 +949,10 @@ export class PaymentIntentService {
         record.status === HeldStatus.HELD &&
         Date.now() >= record.collectableAt.getTime() + HELD_TIMEOUT_SECONDS * 1000
       ) {
-        // Past the chain's timeout the payment is the provider's: `refundHeld`
-        // is closed, and anyone may collect. Collect it, and say so.
-        txRef = (await this.held.collect(asset, [key])).txRef;
-        await this.bookHeldCollected(organizationId, intentId, txRef);
-        return 'COLLECTED';
+        // Past the chain's timeout `refundHeld` is closed and anyone may
+        // collect, in the provider's favour. Nothing to send: the collection
+        // job books the collect once it lands, and the SLA job pages.
+        return 'TIMED_OUT';
       }
       if (record.status === HeldStatus.HELD) {
         txRef = (await this.held.refund(asset, [key])).txRef;

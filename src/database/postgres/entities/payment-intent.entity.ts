@@ -352,4 +352,15 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   /** The collect or refund transaction (rail B). */
   @Column({ name: 'held_tx_ref', type: 'text', nullable: true })
   heldTxRef: string | null;
+
+  /** Failed collect or refund attempts on the held payment (back-off). */
+  @Column({ name: 'held_attempts', type: 'int', default: 0 })
+  heldAttempts: number;
+
+  /** Not retried before this instant. */
+  @Column({ name: 'held_retry_at', type: 'timestamptz', nullable: true })
+  heldRetryAt: Date | null;
+
+  @Column({ name: 'held_last_error', type: 'text', nullable: true })
+  heldLastError: string | null;
 }
