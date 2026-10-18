@@ -15,7 +15,7 @@ import { SeededCase, seedProRataCase } from '../helpers/slash-prorata-seed';
  * Postgres built from every migration: the two tables it reads, the tenant
  * predicate on both, and the `char(64)` column it matches against.
  */
-const DATABASE = 'x402_slash_request_lookup_test';
+const DATABASE = 'assay_slash_request_lookup_test';
 const ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
 const STAKE_AUTHORITY = `${CHAIN}:0xA271A3407D3302f4b4Fbe469b9188487cedd7d45`;
 const AGENT = `${CHAIN}:0x976ea74026e726554db657fa54763abd0c3a0aa9`;

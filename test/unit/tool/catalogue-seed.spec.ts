@@ -77,9 +77,9 @@ describe('loadToolCatalogue', () => {
   });
 
   it('treats a blank environment variable as unset, not as a broken document', () => {
-    // A deployment config key with no value arrives as '', and `x402-mcp` ships exactly
-    // such a placeholder key today. Empty must mean "no catalogue configured",
-    // never "parse this".
+    // A deployment config key with no value arrives as '', and a deployment
+    // can ship exactly such a placeholder key. Empty must mean "no catalogue
+    // configured", never "parse this".
     expect(loadToolCatalogue(undefined, '   ').tools).toHaveLength(0);
   });
 
@@ -194,7 +194,7 @@ describe('loadToolCatalogue — settlementChains', () => {
   let dir: string;
 
   beforeAll(() => {
-    dir = mkdtempSync(join(tmpdir(), 'x402-catalogue-seed-'));
+    dir = mkdtempSync(join(tmpdir(), 'assay-catalogue-seed-'));
   });
 
   afterAll(() => {

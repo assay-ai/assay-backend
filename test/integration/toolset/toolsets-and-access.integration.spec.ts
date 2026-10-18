@@ -24,7 +24,7 @@ import { RefusedCallsService } from '@modules/toolset/services/refused-calls.ser
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 import { toolsetTestContext } from '../helpers/toolset-test-context';
 
-const DATABASE = 'x402_toolsets_access_test';
+const DATABASE = 'assay_toolsets_access_test';
 const HOST = { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' };
 const CHAIN = CHAIN_IDS.SOLANA_DEVNET;
 const ACTOR = { type: 'user' as const, id: 'login-integration' };

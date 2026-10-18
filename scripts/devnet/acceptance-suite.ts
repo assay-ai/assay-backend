@@ -690,7 +690,7 @@ const ACCEPTANCE_RESPONSE_MAPPING = {
  */
 const SLA_SEED_TOOL_ID = '06399979-f8b8-4c9e-a9b1-bd2a5924d442';
 const SLA_SEED_ENDPOINT = 'https://api.met.no';
-const SLA_SEED_USER_AGENT = 'x402-devnet-acceptance-suite/0.1.0';
+const SLA_SEED_USER_AGENT = 'assay-devnet-acceptance-suite/0.1.0';
 const SLA_SEED_REQUEST_MAPPING = {
   method: 'GET',
   path: '/weatherapi/locationforecast/2.0/compact',

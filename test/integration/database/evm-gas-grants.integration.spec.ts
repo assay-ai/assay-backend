@@ -59,7 +59,7 @@ const EXPECTED_WEI = (ESTIMATED_GAS * FEE_PER_GAS * 12n) / 10n;
  * standing between them is the index.
  */
 describe('the gas grant is once per address, against a real unique index', () => {
-  const DATABASE = 'x402_gas_grant_test';
+  const DATABASE = 'assay_gas_grant_test';
 
   let dataSource: DataSource;
   let grants: EvmGasGrantRepository;

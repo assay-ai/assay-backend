@@ -6,7 +6,7 @@ import { DataSource } from 'typeorm';
 
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 
-const DATABASE = 'x402_provider_tools_migration_test';
+const DATABASE = 'assay_provider_tools_migration_test';
 
 /**
  * The T4 migration (`1761900000000-provider-tools`) applies, reverts and

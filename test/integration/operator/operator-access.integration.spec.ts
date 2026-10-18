@@ -43,7 +43,7 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * the approvals queue — with the real guards, the real register and the real
  * session store. Only the blocklist's broadcast is stubbed.
  */
-const DATABASE = 'x402_operator_access_test';
+const DATABASE = 'assay_operator_access_test';
 const DOMAIN = 'console.goassay.test';
 const NOTE = 'Provisioned for the on-call rotation this quarter.';
 

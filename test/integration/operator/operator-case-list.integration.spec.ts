@@ -24,7 +24,7 @@ import { USDC_ASSET } from '../helpers/test-database';
  * audit named (D1–D4) or a neighbour of one, and the list must name it, and
  * date it, exactly as the definition does.
  */
-const DATABASE = 'x402_operator_case_list_test';
+const DATABASE = 'assay_operator_case_list_test';
 const EVM_ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
 const STAKE_AUTHORITY = `${CHAIN}:0xA271A3407D3302f4b4Fbe469b9188487cedd7d45`;
 const AGENT = `${CHAIN}:0x976ea74026e726554db657fa54763abd0c3a0aa9`;

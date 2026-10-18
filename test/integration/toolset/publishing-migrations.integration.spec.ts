@@ -5,7 +5,7 @@ import { DataSource } from 'typeorm';
 
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 
-const DATABASE = 'x402_toolset_publishing_migrations_test';
+const DATABASE = 'assay_toolset_publishing_migrations_test';
 
 /** The T2 publishing migrations apply, revert and apply again on a fresh database. */
 describe('toolset publishing migrations: up, down, up', () => {

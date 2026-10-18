@@ -1,6 +1,6 @@
 import { SetMetadata } from '@nestjs/common';
 
-export const RAW_RESPONSE_KEY = 'x402:raw-response';
+export const RAW_RESPONSE_KEY = 'assay:raw-response';
 
 /**
  * Exempt a handler from `TransformInterceptor`'s `{ data, statusCode, message }`

@@ -41,7 +41,7 @@ import {
  * secret, and one organization never reads another's entries.
  */
 describe('audit_log_entries — the writer and its call sites', () => {
-  const DATABASE = 'x402_audit_log_writer_test';
+  const DATABASE = 'assay_audit_log_writer_test';
   let dataSource: DataSource;
   let writer: AuditLogWriter;
   let reader: AuditLogService;
