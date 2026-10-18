@@ -1,5 +1,6 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsEnum, IsOptional, IsUUID } from 'class-validator';
+import { Transform } from 'class-transformer';
+import { IsBoolean, IsEnum, IsOptional, IsUUID } from 'class-validator';
 
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
 import { VerdictStatus } from '@modules/verification/domain/verdict';
@@ -42,6 +43,22 @@ export class ListToolCallsQueryDto extends ListQueryDto {
   @IsEnum(VerdictStatus, { each: true })
   @TransformToArray()
   verdict?: VerdictStatus[];
+
+  @ApiPropertyOptional({
+    description:
+      'Only calls a report filed now would refund in full if upheld: the same read-only ' +
+      'predicate as the receipt’s `refundableIfReportedNow` (and the filing’s ' +
+      '`refundGuaranteed`), never the clock alone. Each row then carries ' +
+      '`refundableIfReportedUntil`',
+  })
+  @IsOptional()
+  @IsBoolean()
+  @Transform(({ value }) => {
+    if (value === 'true') return true;
+    if (value === 'false') return false;
+    return value;
+  })
+  refundable?: boolean;
 }
 
 /** One row of the call list, and the shape `GET /tool-calls/:intentId` returns for one. */
@@ -121,4 +138,13 @@ export class ToolCallDto {
 
   @ApiProperty()
   createdAt: Date;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Only with `refundable=true`: the instant the full-refund answer lapses (the ' +
+      'receipt’s `refundableIfReportedUntil`). Null when no end is known yet: a voucher not ' +
+      'redeemed, whose hour starts at redemption',
+  })
+  refundableIfReportedUntil?: Date | null;
 }
