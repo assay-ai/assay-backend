@@ -118,13 +118,15 @@ export class ProviderBindingCredentialsController {
       (set) => set.origin === query.origin,
     );
     await this.vault.remove(session.organizationId, params.id, query.origin);
+    // Nothing existed, nothing was removed: no entry.
+    if (!before) return;
     await this.audit.recordAfterCommit({
       organizationId: session.organizationId,
       actor: auditActorOf(session),
       action: 'binding_credentials.removed',
       resourceType: 'tool_binding',
       resourceId: params.id,
-      before: { origin: query.origin, header_names: before?.headers.map((h) => h.name) ?? [] },
+      before: { origin: query.origin, header_names: before.headers.map((h) => h.name) },
     });
   }
 }

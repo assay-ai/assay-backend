@@ -24,6 +24,8 @@ import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.
 import { ProviderChainEnrolmentEntity } from '@database/postgres/entities/provider-chain-enrolment.entity';
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
 import { BindingCredentialEntity } from '@database/postgres/entities/binding-credential.entity';
+import { AuditLogEntryEntity } from '@database/postgres/entities/audit-log-entry.entity';
+import { AuditLogWriter } from '@shared/audit';
 import { VaultKekCheckEntity } from '@database/postgres/entities/vault-kek-check.entity';
 import { CreateBindingCredentials1762000000001 } from '@database/postgres/migrations/1762000000001-create-binding-credentials';
 import { CreateVaultKekChecks1762000000003 } from '@database/postgres/migrations/1762000000003-create-vault-kek-checks';
@@ -238,6 +240,7 @@ export async function createBindingEditorTestContext(
       ToolBindingEntity,
       BindingCredentialEntity,
       VaultKekCheckEntity,
+      AuditLogEntryEntity,
       BindingVersionEntity,
       BindingTestRunEntity,
       // The payout address the publish gate reads is on the
@@ -326,6 +329,28 @@ export async function createBindingEditorTestContext(
 
   await dataSource.initialize();
   await dataSource.runMigrations();
+  // The audit table of `1756000000000` without the rest of that migration's
+  // tables: the publish service writes prune entries into it.
+  await dataSource.query(`
+    CREATE TABLE IF NOT EXISTS "audit_log_entries" (
+      "id" uuid NOT NULL DEFAULT gen_random_uuid(),
+      "created_at" timestamptz NOT NULL DEFAULT now(),
+      "updated_at" timestamptz NOT NULL DEFAULT now(),
+      "version" integer NOT NULL DEFAULT 1,
+      "organization_id" uuid NOT NULL,
+      "actor_type" varchar(16) NOT NULL,
+      "actor_id" varchar(128) NOT NULL,
+      "action" varchar(64) NOT NULL,
+      "resource_type" varchar(32) NOT NULL,
+      "resource_id" varchar(128) NULL,
+      "before" jsonb NULL,
+      "after" jsonb NULL,
+      "ip_address" varchar(64) NULL,
+      "user_agent" varchar(512) NULL,
+      "request_id" varchar(128) NULL,
+      CONSTRAINT "pk_audit_log_entries" PRIMARY KEY ("id")
+    )
+  `);
 
   const bindings = new ToolBindingRepository(dataSource);
   const versions = new BindingVersionRepository(dataSource);
@@ -357,6 +382,11 @@ export async function createBindingEditorTestContext(
   // this context already writes, and the same mutable stake source the publish
   // gate is given — so a binding saved here is refused for exactly the reasons
   // production would refuse it, rather than passing a stubbed gate.
+  const vaultKek = { keyId: 'ctx-kek', key: randomBytes(32) };
+  const vault = new CredentialVaultService(new BindingCredentialRepository(dataSource), {
+    active: vaultKek,
+    byId: new Map([[vaultKek.keyId, vaultKek]]),
+  });
   const editor = new BindingEditorService(
     bindings,
     catalogue,
@@ -366,6 +396,7 @@ export async function createBindingEditorTestContext(
     [STAKE_CHAIN],
     new Map([[STAKE_CHAIN, MINIMUM_STAKE]]),
     null,
+    vault,
   );
   const tester = new BindingMappingTesterService(
     editor,
@@ -375,11 +406,6 @@ export async function createBindingEditorTestContext(
     policies,
     new ProviderEgressLimiter(),
   );
-  const vaultKek = { keyId: 'ctx-kek', key: randomBytes(32) };
-  const vault = new CredentialVaultService(new BindingCredentialRepository(dataSource), {
-    active: vaultKek,
-    byId: new Map([[vaultKek.keyId, vaultKek]]),
-  });
   const publisher = new BindingPublishService(
     editor,
     runs,
@@ -393,6 +419,7 @@ export async function createBindingEditorTestContext(
     dataSource,
     catalogue,
     vault,
+    new AuditLogWriter(dataSource),
   );
 
   const context: BindingEditorTestContext = {

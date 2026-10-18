@@ -64,6 +64,8 @@ describe('looksLikeSecretName', () => {
     'x-sort-key',
     'sort_key',
     'cache-key',
+    'x-idempotency-key',
+    'X-Cache-Key',
     'max_tokens',
     'keyword',
     'keywords',
