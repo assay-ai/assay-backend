@@ -95,6 +95,25 @@ export class ProviderToolContractBodyDto {
   changelog?: string;
 
   @ApiPropertyOptional({
+    example: 'social',
+    description:
+      'A new category with this draft. On a listed tool it waits for the draft’s review (PATCH is refused).',
+  })
+  @IsOptional()
+  @Matches(CATEGORY_RE)
+  category?: string;
+
+  @ApiPropertyOptional({
+    type: [String],
+    description: 'New tags with this draft; on a listed tool they wait for its review',
+  })
+  @IsOptional()
+  @IsArray()
+  @ArrayMaxSize(10)
+  @Matches(TAG_RE, { each: true })
+  tags?: string[];
+
+  @ApiPropertyOptional({
     description:
       'Draft a change to an older major: the newest version of that major. Default: the newest version.',
   })

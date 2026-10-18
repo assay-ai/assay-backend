@@ -7,7 +7,11 @@ import { ProviderRepository } from '@database/postgres/repositories/provider.rep
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { BindingPublishService } from '@modules/provider/services/binding-publish.service';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
-import { ScreenFinding, screenContract } from '@modules/tool/domain/contract/schema-screen';
+import {
+  ScreenFinding,
+  screenContract,
+  screenLabel,
+} from '@modules/tool/domain/contract/schema-screen';
 import { MappingDirection, MappingFault } from '@modules/tool/domain/mapping/mapping.types';
 import { JsonSchema, validateAgainstSchema } from '@modules/tool/domain/mapping/schema-validator';
 import { parseProviderToolName } from '@modules/tool/domain/provider-tool-name';
@@ -153,6 +157,17 @@ export class ProviderToolGateService {
       semver: version.semver,
       findings: screenVersion(version),
     }));
+    // The tool's own words beside its versions: its tags (search and
+    // `get_tool` show them) and category, as they would stand.
+    const metaFindings = [
+      ...(tool.pendingTags ?? tool.tags ?? []).flatMap((tag, index) =>
+        screenLabel(`tags/${index}`, tag),
+      ),
+      ...screenLabel('category', tool.pendingCategory ?? tool.category ?? ''),
+    ];
+    if (metaFindings.length > 0) {
+      screen.push({ version: 0, semver: 'tags', findings: metaFindings });
+    }
     const screenFindings = screen.flatMap((entry) =>
       entry.findings.filter((finding) => finding.code !== 'EXAMPLE_MISMATCH'),
     );

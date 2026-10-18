@@ -106,7 +106,17 @@ export interface ReviewedVersion {
 }
 
 /** SHA-256 over the versions a review covers, in version order: what an approval is for. */
-export function reviewContentHash(name: string, versions: readonly ReviewedVersion[]): string {
+/** The tool's own words beside its versions: its category and tags (search and `get_tool` show them). */
+export interface ReviewedMeta {
+  readonly category: string;
+  readonly tags: readonly string[];
+}
+
+export function reviewContentHash(
+  name: string,
+  versions: readonly ReviewedVersion[],
+  meta: ReviewedMeta = { category: '', tags: [] },
+): string {
   const ordered = [...versions]
     .sort((a, b) => a.version - b.version)
     .map((version) => ({
@@ -122,6 +132,14 @@ export function reviewContentHash(name: string, versions: readonly ReviewedVersi
       declaredRules: [...(version.declaredRules ?? [])],
     }));
   return createHash('sha256')
-    .update(canonicalJson({ name, versions: ordered }), 'utf8')
+    .update(
+      canonicalJson({
+        name,
+        versions: ordered,
+        category: meta.category,
+        tags: [...new Set(meta.tags)].sort(),
+      }),
+      'utf8',
+    )
     .digest('hex');
 }
