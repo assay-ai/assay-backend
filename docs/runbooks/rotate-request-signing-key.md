@@ -5,7 +5,8 @@
 at `/.well-known/assay-request-keys.json` with `Cache-Control: max-age=3600`, and
 providers' verifiers cache it. Design: `docs/adr/0002-provider-request-auth.md`.
 
-Set the variable on BOTH the `api` and `mcp` processes, always with the same value. The
+Set the variable on BOTH the `api` and `mcp` processes, always with the same value: a
+process with a different list signs with another key or publishes the wrong JWKS. The
 `api` process serves the JWKS; the `mcp` process signs.
 
 ## Steps
@@ -31,4 +32,11 @@ provider's fault to the provider.
 - Providers report `unknown keyid`: put the previous key first again (it is still in the
   list or in the secret store) and wait for the cache to expire.
 - A key is compromised: skip the waiting, put a new key first and remove the compromised
-  one in the same deploy, then tell providers to refresh the JWKS.
+  one from the list (and so from the JWKS) in the same deploy, immediately. Providers can
+  keep the old JWKS cached for up to 1 hour, so signatures from the compromised key are
+  still accepted by them until their cache expires; tell providers to refresh the JWKS.
+  A shorter cache lifetime is a verifier SDK option and is tracked in the
+  `assay-provider-verify` repository, not here.
+
+Credential headers are not covered by the signature and rely on TLS; a signing-key
+compromise does not expose them.
