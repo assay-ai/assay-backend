@@ -44,13 +44,6 @@ export class ToolsetVersionRepository extends AbstractRepository<ToolsetVersionE
     const wanted = new Set(pairs.map((pair) => `${pair.toolsetId}@${pair.version}`));
     return rows.filter((row) => wanted.has(`${row.toolsetId}@${row.version}`));
   }
-
-  async countPublishedSince(toolsetId: string, since: Date): Promise<number> {
-    return this.createQueryBuilder('v')
-      .where('v.toolset_id = :toolsetId', { toolsetId })
-      .andWhere('v.published_at >= :since', { since })
-      .getCount();
-  }
 }
 
 @Injectable()

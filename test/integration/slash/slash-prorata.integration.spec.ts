@@ -48,7 +48,7 @@ import { seedProRataCase } from '../helpers/slash-prorata-seed';
  * executor depends on (signature recovery, replay lock, caps, 72h door,
  * 60/30 split). Everything else is production code.
  */
-const DATABASE = 'x402_slash_prorata_test';
+const DATABASE = 'assay_slash_prorata_test';
 const USDG = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
 const VERIFIER_SECRET = new Uint8Array(32).fill(5);
 const VERIFIER = privateKeyToAccount(toHex(VERIFIER_SECRET)).address;

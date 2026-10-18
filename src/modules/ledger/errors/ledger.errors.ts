@@ -4,14 +4,10 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  * `LEDGER_*` — the append-only journal, balances, holds and `withheld`.
  */
 export enum LedgerErrorCode {
-  LEDGER_ACCOUNT_NOT_FOUND = 'LEDGER_ACCOUNT_NOT_FOUND',
-  LEDGER_ENTRY_NOT_FOUND = 'LEDGER_ENTRY_NOT_FOUND',
-  LEDGER_ENTRY_IMMUTABLE = 'LEDGER_ENTRY_IMMUTABLE',
   LEDGER_INSUFFICIENT_AVAILABLE_BALANCE = 'LEDGER_INSUFFICIENT_AVAILABLE_BALANCE',
   LEDGER_HOLD_NOT_FOUND = 'LEDGER_HOLD_NOT_FOUND',
   LEDGER_HOLD_ALREADY_RESOLVED = 'LEDGER_HOLD_ALREADY_RESOLVED',
   LEDGER_ASSET_MISMATCH = 'LEDGER_ASSET_MISMATCH',
-  LEDGER_RECONCILIATION_MISMATCH = 'LEDGER_RECONCILIATION_MISMATCH',
   LEDGER_NEGATIVE_BALANCE = 'LEDGER_NEGATIVE_BALANCE',
   LEDGER_INVALID_ACCOUNT_ID = 'LEDGER_INVALID_ACCOUNT_ID',
   LEDGER_HOLD_ALREADY_OPEN = 'LEDGER_HOLD_ALREADY_OPEN',
@@ -24,25 +20,6 @@ export enum LedgerErrorCode {
 export type LedgerErrorCodesArePrefixed = AssertDomainErrorCodes<'LEDGER', `${LedgerErrorCode}`>;
 
 export const LedgerErrors = createDomainErrorFactory('LEDGER', {
-  accountNotFound: {
-    code: LedgerErrorCode.LEDGER_ACCOUNT_NOT_FOUND,
-    statusCode: 404,
-    message: (context?: Record<string, any>) =>
-      `Ledger account not found${context?.accountId ? `: ${context.accountId}` : ''}`,
-  },
-  entryNotFound: {
-    code: LedgerErrorCode.LEDGER_ENTRY_NOT_FOUND,
-    statusCode: 404,
-    message: (context?: Record<string, any>) =>
-      `Ledger entry not found${context?.id ? ` with id: ${context.id}` : ''}`,
-  },
-  entryImmutable: {
-    code: LedgerErrorCode.LEDGER_ENTRY_IMMUTABLE,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Ledger entries are append-only and cannot be modified` +
-      `${context?.id ? ` (attempted on ${context.id})` : ''}`,
-  },
   insufficientAvailableBalance: {
     code: LedgerErrorCode.LEDGER_INSUFFICIENT_AVAILABLE_BALANCE,
     statusCode: 409,
@@ -78,13 +55,6 @@ export const LedgerErrors = createDomainErrorFactory('LEDGER', {
     statusCode: 400,
     message: (context?: Record<string, any>) =>
       `Asset mismatch${context?.expected ? `: expected ${context.expected}, got ${context.actual}` : ''}`,
-  },
-  reconciliationMismatch: {
-    code: LedgerErrorCode.LEDGER_RECONCILIATION_MISMATCH,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `Ledger does not reconcile with on-chain state` +
-      `${context?.delta ? `: delta ${context.delta}` : ''}`,
   },
   /**
    * The journal folds to an impossible state. Raised instead of clamping to

@@ -372,45 +372,6 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
       orphanedHoldIds: row.orphanedHoldIds ?? [],
     }));
   }
-
-  /**
-   * `COUNT`, `SUM(amount)` and `MAX(seq)` of one entry type for one
-   * organization+asset, above a seq watermark.
-   *
-   * The read the deleted payout batch used to decompose a payout into the exact
-   * `PROVIDER_CREDIT` rows it swept — see `ProviderPayoutEntity`'s class
-   * comment for why the window, not a stamped column, is what makes that
-   * recoverable on an append-only table. The caller is expected to run this
-   * under the same lock it took on the account's balance row, so the result is
-   * a consistent snapshot rather than a number a concurrent settlement could
-   * move between this read and the balance read it is meant to agree with.
-   */
-  async summarizeCreditWindow(
-    organizationId: string,
-    assetId: string,
-    entryType: string,
-    fromSeqExclusive: bigint,
-    queryRunner?: QueryRunner,
-  ): Promise<CreditWindowSummary> {
-    const row = await this.createQueryBuilder('entry', queryRunner)
-      .select('COALESCE(SUM(entry.amount), 0)', 'amount')
-      .addSelect('COUNT(*)', 'count')
-      .addSelect('COALESCE(MAX(entry.seq), 0)', 'maxSeq')
-      .where('entry.organizationId = :organizationId', { organizationId })
-      .andWhere('entry.assetId = :assetId', { assetId })
-      .andWhere('entry.entryType = :entryType', { entryType })
-      .andWhere('entry.seq > :fromSeq', { fromSeq: fromSeqExclusive.toString() })
-      .getRawOne<{ amount: string; count: string; maxSeq: string }>();
-
-    const count = Number(row?.count ?? '0');
-    const maxSeq = BigInt(row?.maxSeq ?? '0');
-
-    return {
-      amount: BigInt(row?.amount ?? '0'),
-      count,
-      toSeq: count === 0 ? fromSeqExclusive : maxSeq,
-    };
-  }
 }
 
 /** See {@link LedgerEntryRepository.sumPaidAtRedemption}. Unsigned, atomic units. */
@@ -462,12 +423,4 @@ export interface OrphanedHoldReleaseSummary {
   readonly orphanedHoldCount: number;
   /** The holds of the first of them, oldest first, at most the caller's cap. */
   readonly orphanedHoldIds: readonly string[];
-}
-
-/** The `(from, to]` window a payout run swept — see `ProviderPayoutEntity`. */
-export interface CreditWindowSummary {
-  /** `MAX(seq)` of the matching rows, or `fromSeqExclusive` when there are none. */
-  readonly toSeq: bigint;
-  readonly count: number;
-  readonly amount: bigint;
 }

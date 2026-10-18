@@ -210,11 +210,6 @@ export class EscrowSeqService {
 
     return computed;
   }
-
-  /** Drops the cached minimum, so the next read recomputes it. */
-  async invalidateGap(account: AccountId): Promise<void> {
-    await this.cache.del(ESCROW_SEQ_GAP_CACHE_KEY(account)).catch(() => undefined);
-  }
 }
 
 /**

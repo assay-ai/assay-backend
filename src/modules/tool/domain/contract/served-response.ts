@@ -80,16 +80,6 @@ function declaredFieldOf(error: unknown, declared: readonly string[]): string | 
   );
 }
 
-/** The optional outputs of `version` that `binding` declares it returns. */
-export function declaredOutputs(
-  version: Pick<ToolContractVersion, 'optionalOutputFields'>,
-  binding: Pick<ToolBinding, 'providesOutputFields'>,
-): readonly string[] {
-  return (binding.providesOutputFields ?? []).filter((field) =>
-    version.optionalOutputFields.includes(field),
-  );
-}
-
 /** The mapping with each declared field's top-level selector read as `$optional`. */
 function optionalised(spec: ResponseMappingSpec, declared: readonly string[]): ResponseMappingSpec {
   if (!isObjectNode(spec as MappingNode)) return spec;

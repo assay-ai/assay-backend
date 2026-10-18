@@ -36,7 +36,7 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * move, deprecation with its 90-day floor, retirement at the sunset, the
  * notices, and the DRAFT tool an accepted request creates.
  */
-const DATABASE = 'x402_contract_editor_test';
+const DATABASE = 'assay_contract_editor_test';
 const NOTE = 'A contract change reviewed by the policy team.';
 const ACTION = { reasonCode: 'CONTRACT_CHANGE', note: NOTE };
 const DAY = 24 * 60 * 60 * 1000;

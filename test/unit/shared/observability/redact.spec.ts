@@ -25,8 +25,6 @@ describe('isForbiddenKey', () => {
     'databasePassword',
     'authorization',
     'Authorization',
-    'x-operator-approver',
-    'X-Operator-Approver',
     'apiKey',
     'cookie',
   ])('forbids %s', (key) => {

@@ -22,7 +22,7 @@ import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
  * the head of the `(agent_account, voucher_seq)` order cannot starve the
  * honest buyer behind them, for the platform blocklist and the on-chain one.
  */
-const DATABASE = 'x402_redemption_blocked_queue_test';
+const DATABASE = 'assay_redemption_blocked_queue_test';
 const CHAIN = 'eip155:84532';
 const ASSET = `${CHAIN}/erc20:0x036cbd53842c5426634e7929541ec2318f3dcf7e`;
 // Sorts before HONEST so its rows fill the head of the queue.

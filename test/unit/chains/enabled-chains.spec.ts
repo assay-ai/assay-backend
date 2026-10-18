@@ -130,41 +130,4 @@ describe('parseEnabledChains', () => {
       expect(thrown?.errorCode).toBe(ChainErrorCode.CHAIN_UNSUPPORTED);
     });
   });
-
-  describe('the renamed variable is enforced, not ignored', () => {
-    const previous = process.env.SOLANA_ENABLED_CHAINS;
-    afterEach(() => {
-      if (previous === undefined) delete process.env.SOLANA_ENABLED_CHAINS;
-      else process.env.SOLANA_ENABLED_CHAINS = previous;
-    });
-
-    it('throws when SOLANA_ENABLED_CHAINS is set at all, even alongside a valid list', () => {
-      process.env.SOLANA_ENABLED_CHAINS = 'devnet';
-      const error = call(DEVNET);
-      expect(error.errorCode).toBe(ChainErrorCode.CHAIN_ENABLED_CHAINS_LEGACY_VARIABLE_SET);
-      // It prints the CAIP-2 translation of what it found, so the operator is
-      // not left to look it up.
-      expect(error.message).toContain('ENABLED_CHAINS');
-      expect(error.message).toContain(DEVNET);
-    });
-
-    it('throws even when SOLANA_ENABLED_CHAINS is set to something unparseable', () => {
-      process.env.SOLANA_ENABLED_CHAINS = 'nonsense';
-      expect(call(DEVNET).errorCode).toBe(ChainErrorCode.CHAIN_ENABLED_CHAINS_LEGACY_VARIABLE_SET);
-    });
-
-    it.each(['', '   '])(
-      'throws on the key present with a blank value (%p) — "set" is presence, not content',
-      (blank) => {
-        // Blanking a value is how an operator neutralises a deployment config key
-        // without deleting it, so it is the shape a half-finished migration
-        // leaves behind. Reading it as "not set" would be this guard failing
-        // open on the one input it exists to catch.
-        process.env.SOLANA_ENABLED_CHAINS = blank;
-        expect(call(DEVNET).errorCode).toBe(
-          ChainErrorCode.CHAIN_ENABLED_CHAINS_LEGACY_VARIABLE_SET,
-        );
-      },
-    );
-  });
 });

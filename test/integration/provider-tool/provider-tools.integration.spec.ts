@@ -50,7 +50,7 @@ import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 import { toolsetTestContext } from '../helpers/toolset-test-context';
 
-const DATABASE = 'x402_provider_tools_test';
+const DATABASE = 'assay_provider_tools_test';
 const HOST = { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' };
 const CHAIN = CHAIN_IDS.SOLANA_DEVNET;
 const ACTOR = { type: 'user' as const, id: 'login-integration' };

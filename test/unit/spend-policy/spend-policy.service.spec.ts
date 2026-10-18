@@ -312,23 +312,6 @@ describe('SpendPolicyService.patch', () => {
     expect(tx.insertValues?.changedBy).toBe(`agent:${AGENT}`);
   });
 
-  it('ignores a changedBy the caller supplies — the actor comes from the session', async () => {
-    const { service, tx } = build({ findOneResults: [null, null] });
-
-    await service.patch(
-      ORG,
-      AGENT,
-      {
-        assetId: USDC,
-        decimals: DECIMALS,
-        changedBy: 'operator@example.com',
-      },
-      ACTOR,
-    );
-
-    expect(tx.insertValues?.changedBy).toBe(`agent:${AGENT}`);
-  });
-
   it('raises SPEND_POLICY_CONCURRENT_MODIFICATION when the supersede loses the race', async () => {
     const current = policyRow();
     const { service } = build({
@@ -441,7 +424,6 @@ describe('SpendPolicyService.patch — a request that changes nothing (BUG-R8-A-
     ['every field restated', { perCallMax: '500000', dailyCap: '10000000', paused: false }],
     ['null for a limit that is already unset', { maxSpendPerHour: null }],
     ['the same asset', { assetId: USDC, decimals: DECIMALS }],
-    ['only a changedBy, which is ignored', { changedBy: 'someone@example.com' }],
   ])('writes no version and no audit entry for %s', async (_name, patch) => {
     const row = current();
     const { service, dataSource, tx, audit } = build({ findOneResults: [row] });

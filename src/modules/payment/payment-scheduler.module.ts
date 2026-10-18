@@ -32,10 +32,7 @@ import { VoucherRedemptionService } from './services/voucher-redemption.service'
   // injects `VOUCHER_REDEEMER` directly. `PaymentModule` imports `ChainsModule`
   // but does not re-export its tokens, and a Nest provider resolves only
   // against its own module's context — so without this the scheduler dies at
-  // boot on `VOUCHER_REDEEMER`. (`DepositFinalityWatcher` used to be the
-  // reason this import existed — it injected `VAULT_PORT` and
-  // `ACCOUNT_WATCH_PORT` to watch the pooled vault — but per-buyer escrows
-  // disabled it unconditionally; see its own class comment.)
+  // boot on `VOUCHER_REDEEMER`.
   // `FeePayerSignerModule` is what puts a fee-payer key in this
   // process, and it is imported here, in the facilitator's bootstrap, and in
   // `PaymentApiModule` (for opening a buyer's escrow at deposit time) — and in

@@ -4,7 +4,6 @@ import {
   parseProviderToolName,
   providerToolName,
   providerToolNameProblems,
-  renamedProviderToolName,
 } from '@modules/tool/domain/provider-tool-name';
 
 /** §7.1: `{handle}__{tool}`, `{tool}` ≤ 40, the whole name ≤ 48, hard caps. */
@@ -39,15 +38,11 @@ describe('provider tool names', () => {
     }
   });
 
-  it('parses and renames, refusing a rename past the cap', () => {
+  it('parses a provider tool name', () => {
     expect(parseProviderToolName('acme__search_posts')).toEqual({
       handle: 'acme',
       local: 'search_posts',
     });
     expect(parseProviderToolName('get_weather')).toBeNull();
-    expect(renamedProviderToolName('acme__search_posts', 'acme-labs')).toBe(
-      'acme-labs__search_posts',
-    );
-    expect(renamedProviderToolName(`acme__${'a'.repeat(40)}`, 'acme-labs')).toBeNull();
   });
 });

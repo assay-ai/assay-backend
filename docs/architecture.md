@@ -98,10 +98,7 @@ build on `@solana/*`, `@solana-program/*`, `viem`, `ethers` and friends anywhere
 A comma-separated list of CAIP-2 ids, read once at boot by `chains.module.ts`.
 Absent, empty, malformed, or naming a chain with no adapter, the process
 **exits** — `CHAIN_ENABLED_CHAINS_INVALID` naming the offending value and
-listing what is actually served. The predecessor `SOLANA_ENABLED_CHAINS` is
-refused outright (`CHAIN_ENABLED_CHAINS_LEGACY_VARIABLE_SET`), even alongside a
-valid `ENABLED_CHAINS`, because a deployment that reads one and ignores the
-other is worse than one that will not start. It narrows the adapter registry,
+listing what is actually served. It narrows the adapter registry,
 the reconciler's asset list and the router's eligibility filter from one place,
 so there is no second list to forget. Operating it — adding a chain, removing
 one, and what removing one does to balances already held on it — is

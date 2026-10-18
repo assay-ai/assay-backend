@@ -208,7 +208,7 @@ function assertKeyPairAgrees(keyId: string, scalar: Uint8Array, publicKey: Uint8
   // attestation, because no typed-data encoding produces a preimage of this
   // shape.
   const probe = Uint8Array.from(
-    Buffer.from(`x402-secp256k1-selftest:${keyId}`.padEnd(32, '.').slice(0, 32)),
+    Buffer.from(`assay-secp256k1-selftest:${keyId}`.padEnd(32, '.').slice(0, 32)),
   );
   let raw: Uint8Array;
   try {

@@ -47,7 +47,7 @@ describe('domain error catalogs', () => {
   it('rejects a mis-prefixed code at import time rather than at request time', () => {
     expect(() =>
       createDomainErrorFactory('PAYMENT', {
-        wrong: { code: 'LEDGER_ENTRY_NOT_FOUND', statusCode: 404, message: () => 'x' },
+        wrong: { code: 'LEDGER_HOLD_NOT_FOUND', statusCode: 404, message: () => 'x' },
       }),
     ).toThrow(/Error catalog violation/);
   });

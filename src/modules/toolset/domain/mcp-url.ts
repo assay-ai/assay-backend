@@ -97,19 +97,6 @@ const TOKEN_RE = /^[a-z0-9_-]{22,64}$/;
 const TOOL_NAME_RE = /^[a-z][a-z0-9_-]{1,47}$/;
 const VERSION_RE = /^[1-9][0-9]{0,5}$/;
 
-/**
- * First segments that are not handles and not served as MCP endpoints here:
- * held for future paths (`t`), for OAuth metadata (`.well-known`) or for the
- * host's own pages. Each answers 404.
- */
-export const RESERVED_FIRST_SEGMENTS: ReadonlySet<string> = new Set([
-  't',
-  '.well-known',
-  'health',
-  'status',
-  'docs',
-]);
-
 const QUERY_ORDER = ['tools', 'category', 'free', 'discovery'] as const;
 
 /**

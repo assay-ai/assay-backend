@@ -10,8 +10,6 @@ import { ChainErrors } from '../errors/chains.errors';
  * those were two config keys they WOULD drift, and the failure is silent in the
  * worst direction: the grant keeps paying out below a mark nobody is watching,
  * or the monitor pages about a level the grant is happily spending through.
- *
- * Formerly named `EVM_RELAYER_FLOAT_LOW_WATER_WEI`.
  */
 export const EVM_RELAYER_FLOAT_LOW_WEI = 'EVM_RELAYER_FLOAT_LOW_WEI';
 export const EVM_RELAYER_FLOAT_CRITICAL_WEI = 'EVM_RELAYER_FLOAT_CRITICAL_WEI';

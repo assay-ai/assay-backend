@@ -9,7 +9,6 @@ export enum ProviderErrorCode {
   PROVIDER_NOT_FOUND = 'PROVIDER_NOT_FOUND',
   PROVIDER_ALREADY_REGISTERED = 'PROVIDER_ALREADY_REGISTERED',
   PROVIDER_SUSPENDED = 'PROVIDER_SUSPENDED',
-  PROVIDER_PAYOUT_ADDRESS_UNPROVEN = 'PROVIDER_PAYOUT_ADDRESS_UNPROVEN',
   /** `POST /providers/me/payout-address` — no challenge by that id belongs to the caller. */
   PROVIDER_PAYOUT_CHALLENGE_NOT_FOUND = 'PROVIDER_PAYOUT_CHALLENGE_NOT_FOUND',
   /** The nonce timed out. Issue another; never extend one. */
@@ -287,13 +286,6 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     message: (context?: Record<string, any>) =>
       `Provider is suspended${context?.providerId ? `: ${context.providerId}` : ''}` +
       `${context?.reason ? ` (${context.reason})` : ''}`,
-  },
-  payoutAddressUnproven: {
-    code: ProviderErrorCode.PROVIDER_PAYOUT_ADDRESS_UNPROVEN,
-    statusCode: 400,
-    message: (context?: Record<string, any>) =>
-      `Payout address has not been proven by wallet signature` +
-      `${context?.accountId ? `: ${context.accountId}` : ''}`,
   },
   connectivityCheckFailed: {
     code: ProviderErrorCode.PROVIDER_CONNECTIVITY_CHECK_FAILED,

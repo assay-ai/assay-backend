@@ -269,10 +269,8 @@ export class ProviderStakeService {
       this.enrolments.enrolmentsOf([providerId]),
     ]);
 
-    // The stake authority is a column on the ENROLMENT since `1759300000003`,
-    // one per chain — `providers.stake_authority` is gone, and with it the
-    // possibility of reading one chain's account while reporting another's
-    // floor. So the authority is resolved per chain, into the entry that names
+    // The stake authority is a column on the ENROLMENT, one per chain, so one
+    // chain's account can never be read while reporting another's floor. So the authority is resolved per chain, into the entry that names
     // that chain, and never lifted to the response.
     const authorities = chainsToReport(providerId, enrolments, floorChain);
 

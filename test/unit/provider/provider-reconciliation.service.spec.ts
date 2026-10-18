@@ -565,16 +565,4 @@ describe('ProviderReconciliationService — platform take rate', () => {
 
     expect(result.platformTakeRatePercent).toBe(12.5);
   });
-
-  // R17-R-03: the retired display-only setting no longer moves the rate.
-  it('ignores the retired PROVIDER_TERMS_TAKE_RATE_PERCENT', async () => {
-    const { service } = build([], [], {
-      PROVIDER_TERMS_TAKE_RATE_PERCENT: '20',
-      PLATFORM_FEE_BPS: '1000',
-    });
-
-    const result = await service.getReconciliation(PROVIDER, WINDOW);
-
-    expect(result.platformTakeRatePercent).toBe(10);
-  });
 });

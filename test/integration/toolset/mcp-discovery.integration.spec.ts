@@ -30,7 +30,7 @@ import { MoneyUtil } from '@utils/money.util';
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 import { toolsetTestContext } from '../helpers/toolset-test-context';
 
-const DATABASE = 'x402_mcp_discovery_test';
+const DATABASE = 'assay_mcp_discovery_test';
 const HOST = {
   mcpPublicUrl: 'https://mcp.example.com',
   webAppUrl: 'https://app.example.com',

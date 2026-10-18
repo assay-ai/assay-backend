@@ -20,7 +20,7 @@ import { seedProRataCase } from '../helpers/slash-prorata-seed';
  * `provider_slash_holds`, and the payment path refuses a held provider. One
  * case per condition, and the release after two clear checks.
  */
-const DATABASE = 'x402_provider_slash_hold_test';
+const DATABASE = 'assay_provider_slash_hold_test';
 const CHAIN = 'eip155:46630';
 const ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
 const AUTHORITY = '0xA271A3407D3302f4b4Fbe469b9188487cedd7d45';

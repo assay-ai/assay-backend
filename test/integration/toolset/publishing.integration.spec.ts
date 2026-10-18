@@ -27,7 +27,7 @@ import { seedOfficialToolsets } from '../../../scripts/demo/lib/official-toolset
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 import { toolsetTestContext } from '../helpers/toolset-test-context';
 
-const DATABASE = 'x402_toolset_publishing_test';
+const DATABASE = 'assay_toolset_publishing_test';
 const HOST = { mcpPublicUrl: 'https://mcp.example.com', webAppUrl: 'https://app.example.com' };
 const CHAIN = CHAIN_IDS.SOLANA_DEVNET;
 const ACTOR = { type: 'user' as const, id: 'login-integration' };

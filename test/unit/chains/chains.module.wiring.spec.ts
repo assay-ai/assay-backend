@@ -82,7 +82,6 @@ describe('ChainsModule wiring — ENABLED_CHAINS is provided, exported and injec
 
   const DEVNET = CHAIN_IDS.SOLANA_DEVNET;
   const previousEnabled = process.env[ENABLED_CHAINS_ENV];
-  const previousLegacy = process.env.SOLANA_ENABLED_CHAINS;
 
   let moduleRef: TestingModule;
 
@@ -91,7 +90,6 @@ describe('ChainsModule wiring — ENABLED_CHAINS is provided, exported and injec
     // `ConfigService.get` reads `process.env` first — and because the variable
     // an operator sets is the thing under test.
     process.env[ENABLED_CHAINS_ENV] = DEVNET;
-    delete process.env.SOLANA_ENABLED_CHAINS;
 
     moduleRef = await Test.createTestingModule({
       imports: [
@@ -106,8 +104,6 @@ describe('ChainsModule wiring — ENABLED_CHAINS is provided, exported and injec
     await moduleRef?.close();
     if (previousEnabled === undefined) delete process.env[ENABLED_CHAINS_ENV];
     else process.env[ENABLED_CHAINS_ENV] = previousEnabled;
-    if (previousLegacy === undefined) delete process.env.SOLANA_ENABLED_CHAINS;
-    else process.env.SOLANA_ENABLED_CHAINS = previousLegacy;
   });
 
   it('resolves the token to the parsed list', () => {

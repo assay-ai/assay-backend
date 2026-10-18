@@ -12,14 +12,9 @@ import { BLOCKHASH_READER, BlockhashReaderPort } from './blockhash.port';
 /**
  * Solana's `POST /deposits` requirements.
  *
- * ## What moved, and why it moved here
- *
- * `DepositsController` used to inject `BLOCKHASH_READER` directly, call it, and
- * flatten the result onto the response by hand. That put an RPC read in an HTTP
- * handler and made an SVM primitive a field of a chain-neutral controller. So
- * `BLOCKHASH_READER` was removed from `payment/controllers/deposits.controller.ts`
- * and injected into the Solana adapter's builder, where it belongs. This is
- * that builder.
+ * The blockhash read lives here, in the Solana adapter's builder, rather than
+ * in `DepositsController`: an RPC read does not belong in an HTTP handler, and
+ * an SVM primitive is not a field of a chain-neutral controller.
  *
  * ## The blockhash is read exactly once
  *
