@@ -1146,6 +1146,38 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       // must never be redeemed, or the buyer pays for a call reported as not
       // charged (review-buyer-debt L2). The expiry sweep finishes the release.
       .andWhere(`(intent.redemption_last_error IS NULL OR NOT ${CLOSED_OUTCOME_SQL('intent')})`)
+      // The dispute hold (G3.B1): not before `collectable_at`, and never while a
+      // dispute filed inside the hold is open or upheld (an upheld one is
+      // released, never redeemed). NULL is collectable: settled before the
+      // hold existed, or a debt's replacement.
+      .andWhere('(intent.collectable_at IS NULL OR intent.collectable_at <= now())')
+      .andWhere(
+        `(intent.dispute_outcome IS NULL OR intent.dispute_outcome NOT IN ('OPEN', 'UPHELD'))`,
+      )
+      // Seq order across the hold: wait while an EARLIER voucher of this payer
+      // is still held and redeemable. Redeeming past it would kill it. A held
+      // voucher becomes collectable before its own deadline, and this one's
+      // deadline is later (`COLLECTION_DEADLINE_RESERVE_SECONDS`). A voucher a
+      // dispute holds does NOT block: it is redeemed after its decision or not
+      // at all, and the buyer's later calls must not lapse waiting for it.
+      .andWhere(
+        `NOT EXISTS (
+           SELECT 1 FROM payment_intents held
+            WHERE held.organization_id IS NOT NULL
+              AND held.agent_account = intent.agent_account
+              AND held.rail = :rail
+              AND held.status = :settledStatus
+              AND held.voucher_seq IS NOT NULL
+              AND held.voucher_seq < intent.voucher_seq
+              AND held.hold_id IS NOT NULL
+              AND held.hold_released_at IS NULL
+              AND held.redemption_lapsed_at IS NULL
+              AND held.redemption_last_error IS NULL
+              AND held.dispute_outcome IS NULL
+              AND held.collectable_at > now()
+              AND held.expires_at > now() - interval '${REDEEM_GRACE_SECONDS} seconds'
+         )`,
+      )
       // A row waits while a LOWER seq of its payer is still in flight or open
       // (review 2026-10-15 P-4). Redeeming it first advances `seq_high` past
       // the lower one, which then dies on `VoucherSeqNotIncreasing` and is paid
@@ -1460,6 +1492,87 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
           AND "redemption_lapsed_at" IS NOT NULL
           AND "redemption_replaced_at" IS NULL
           AND ("hold_released_at" IS NULL OR "redemption_last_error" LIKE 'uncollected:%')
+        RETURNING "id"`,
+      [target.organizationId, target.id, target.payer, target.holdId, reason],
+    )) as [unknown[], number] | unknown[];
+    return affected(result) > 0;
+  }
+
+  /**
+   * Sets a voucher aside for a buyer's dispute filed inside the dispute hold
+   * (G3.B1), under the payer's admission lock: `dispute_outcome = 'OPEN'` keeps
+   * it out of the redemption queue until the decision. Only while nothing can
+   * have reached the chain — before `collectable_at` (less a guard), no
+   * redemption transaction recorded, hold open, not debt. `false` when the
+   * window has passed or collection began: the dispute is then not guaranteed.
+   */
+  async holdForDispute(
+    runner: Pick<QueryRunner, 'query'>,
+    target: { organizationId: string; id: string; payer: string },
+    guardSeconds: number,
+  ): Promise<boolean> {
+    await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `voucher-admission:${target.payer}`,
+    ]);
+    const result = (await runner.query(
+      `UPDATE "payment_intents" SET "dispute_outcome" = 'OPEN'
+        WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3
+          AND "status" = 'SETTLED' AND "rail" = 'RAIL_B_VOUCHER'
+          AND "hold_id" IS NOT NULL AND "hold_released_at" IS NULL
+          AND "redemption_lapsed_at" IS NULL AND "redemption_last_error" IS NULL
+          AND "redemption_tx_refs" = '{}'
+          AND "dispute_outcome" IS NULL
+          AND "collectable_at" > now() + make_interval(secs => $4)
+        RETURNING "id"`,
+      [target.organizationId, target.id, target.payer, guardSeconds],
+    )) as [unknown[], number] | unknown[];
+    return affected(result) > 0;
+  }
+
+  /**
+   * Sets the call's dispute mark, inside the caller's transaction: the decision
+   * (`UPHELD` | `REJECTED`), or `null` when a held dispute is withdrawn. A
+   * `REJECTED` or cleared row is back in the redemption queue.
+   */
+  async setDisputeOutcome(
+    runner: Pick<QueryRunner, 'query'>,
+    organizationId: string,
+    id: string,
+    outcome: 'UPHELD' | 'REJECTED' | null,
+    onlyIfOpen = false,
+  ): Promise<void> {
+    await runner.query(
+      `UPDATE "payment_intents" SET "dispute_outcome" = $3
+        WHERE "organization_id" = $1 AND "id" = $2
+          ${onlyIfOpen ? `AND "dispute_outcome" = 'OPEN'` : ''}`,
+      [organizationId, id, outcome],
+    );
+  }
+
+  /**
+   * Refunds a voucher an upheld dispute held (G3.B1), INSIDE the ledger
+   * transaction that releases its hold, under the payer's admission lock:
+   * `voided:<reason>` closes it for good (never redeemed — `CLOSED_OUTCOME_SQL`)
+   * and `hold_released_at` is stamped with the release. Only a row the dispute
+   * held: SETTLED rail B, `dispute_outcome = 'UPHELD'`, hold open, never sent
+   * to the chain, not debt. `false` when nothing matched.
+   */
+  async markDisputeReleased(
+    runner: QueryRunner,
+    target: DebtCloseTarget,
+    reason: string,
+  ): Promise<boolean> {
+    await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
+      `voucher-admission:${target.payer}`,
+    ]);
+    const result = (await runner.query(
+      `UPDATE "payment_intents"
+          SET "redemption_last_error" = $5, "hold_released_at" = now()
+        WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3 AND "hold_id" = $4
+          AND "status" = 'SETTLED' AND "rail" = 'RAIL_B_VOUCHER'
+          AND "dispute_outcome" = 'UPHELD'
+          AND "hold_released_at" IS NULL AND "redemption_lapsed_at" IS NULL
+          AND "redemption_tx_refs" = '{}'
         RETURNING "id"`,
       [target.organizationId, target.id, target.payer, target.holdId, reason],
     )) as [unknown[], number] | unknown[];

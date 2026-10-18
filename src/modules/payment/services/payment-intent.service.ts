@@ -34,6 +34,7 @@ import {
 } from '../constants/payment-intent.constants';
 import { DEBT_VOIDED_PREFIX } from '../constants/voucher-redemption.constants';
 import { HoldEffect, requirePaymentIntentTransition } from '../domain/payment-intent-transitions';
+import { collectableAtSql } from '../constants/collection-hold.constants';
 import { PaymentErrors } from '../errors/payment.errors';
 import {
   CreatePaymentIntentInput,
@@ -411,6 +412,7 @@ export class PaymentIntentService {
       ...(context.lapseCause !== undefined
         ? { redemptionLapsedAt: new Date(), redemptionLastError: context.lapseCause }
         : {}),
+      ...(context.holdForDispute ? { collectableAt: () => collectableAtSql() } : {}),
     });
 
     if (affected !== 1) {
@@ -555,16 +557,24 @@ export class PaymentIntentService {
     // then lapsed with a transaction in flight. Read first — the decision
     // needs the voucher's `expiresAt` — which costs one read per settle.
     let lapseCause: string | undefined;
+    let holdForDispute = false;
     if (rule.holdEffect === HoldEffect.COMMIT && to === PaymentIntentStatus.SETTLED) {
       const current = await this.findById(organizationId, intentId);
-      if (current.rail === PaymentRail.RAIL_B_VOUCHER && this.pastRedemptionLatest(current)) {
-        lapseCause = LATE_VERDICT_LAPSE_CAUSE;
+      if (current.rail === PaymentRail.RAIL_B_VOUCHER) {
+        if (this.pastRedemptionLatest(current)) {
+          lapseCause = LATE_VERDICT_LAPSE_CAUSE;
+        } else {
+          // The dispute hold (G3.B1): the voucher waits until `collectable_at`,
+          // capped below its on-chain deadline (`collection-hold.constants.ts`).
+          holdForDispute = true;
+        }
       }
     }
 
     const intent = await this.transition(organizationId, intentId, from, to, {
       ...context,
       ...(lapseCause ? { lapseCause } : {}),
+      ...(holdForDispute ? { holdForDispute } : {}),
     });
 
     if (rule.holdEffect === HoldEffect.NONE || !intent.holdId) {
@@ -793,6 +803,38 @@ export class PaymentIntentService {
   }
 
   /**
+   * Refunds a call whose voucher an upheld dispute held (G3.B1): the hold is
+   * released and the row closed for good (`voided:<outcome>`) in one ledger
+   * transaction under the payer's lock — the buyer is not charged, nobody is
+   * credited, the voucher is never redeemed. `false` when the row is not such a
+   * held voucher (already released, sent to the chain, or debt).
+   */
+  async releaseDisputedHold(
+    organizationId: string,
+    intentId: string,
+    outcome: string,
+  ): Promise<boolean> {
+    const intent = await this.findById(organizationId, intentId);
+    if (
+      intent.rail !== PaymentRail.RAIL_B_VOUCHER ||
+      intent.status !== PaymentIntentStatus.SETTLED ||
+      !intent.holdId
+    ) {
+      return false;
+    }
+    const target: DebtCloseTarget = {
+      organizationId,
+      id: intentId,
+      payer: intent.agentAccount,
+      holdId: intent.holdId,
+    };
+    const resolution = await this.ledger.releaseHoldIf(organizationId, intent.holdId, (runner) =>
+      this.intents.markDisputeReleased(runner, target, `${DEBT_VOIDED_PREFIX}${outcome}`),
+    );
+    return resolution !== null;
+  }
+
+  /**
    * Opens a NEW hold for a written-off debt the buyer is re-signing (H1
    * interim): the write-off released the old one, and the redemption commits a
    * hold. Priced against the chain like any rail-B hold (`secureFunds`).
@@ -880,6 +922,8 @@ export function toPaymentIntent(row: PaymentIntentEntity): PaymentIntent {
     credentialId: row.credentialId ?? null,
     holdId: row.holdId,
     holdReleasedAt: row.holdReleasedAt,
+    collectableAt: row.collectableAt ?? null,
+    disputeOutcome: row.disputeOutcome ?? null,
     classification: row.classification,
     verificationVerdict: row.verificationVerdict,
     createdAt: row.createdAt,

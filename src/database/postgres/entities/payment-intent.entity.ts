@@ -325,10 +325,18 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   verificationVerdict: string | null;
 
   /**
-   * The decision on a buyer's dispute over this call (G3.B1): `UPHELD` |
-   * `REJECTED`, or null when none was decided. The quality stats count an
-   * upheld call as a failed one.
+   * A buyer's dispute over this call (G3.B1): `OPEN` while a dispute filed
+   * inside the hold keeps the voucher out of the redemption queue, then
+   * `UPHELD` | `REJECTED`. The quality stats count an upheld call as a failed one.
    */
   @Column({ name: 'dispute_outcome', type: 'varchar', length: 16, nullable: true })
   disputeOutcome: string | null;
+
+  /**
+   * The dispute hold: a SETTLED rail-B voucher is not redeemed before this
+   * (`collection-hold.constants.ts`). Null — settled before the hold existed,
+   * or rail A — is collectable.
+   */
+  @Column({ name: 'collectable_at', type: 'timestamptz', nullable: true })
+  collectableAt: Date | null;
 }

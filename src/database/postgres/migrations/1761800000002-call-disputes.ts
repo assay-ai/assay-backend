@@ -15,12 +15,16 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * - `refund_source` / `refund_state` / `refund_amount`: the money side of an
  *   upheld decision (see `CallDisputeService`).
  *
- * `uq_disputes_open_call` allows one open dispute per call. `payment_intents.
- * dispute_outcome` and `verification_records.dispute_outcome` mark the call and
- * its verdict with the decision; the quality stats read the intent's.
+ * - `refund_guaranteed`: filed inside the dispute hold, so the money was never
+ *   collected and an upheld decision refunds it in full.
+ * - `evidence_scrubbed_at`: when the snapshot's bodies were deleted, a set time
+ *   after the decision.
+ *
+ * `uq_disputes_open_call` allows one open dispute per call. The marks on the
+ * call and its verdict are `1761800000000` and `1761800000001`.
  */
-export class CallDisputes1761800000000 implements MigrationInterface {
-  name = 'CallDisputes1761800000000';
+export class CallDisputes1761800000002 implements MigrationInterface {
+  name = 'CallDisputes1761800000002';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`
@@ -36,6 +40,8 @@ export class CallDisputes1761800000000 implements MigrationInterface {
         ADD COLUMN "refund_source" character varying(24) NULL,
         ADD COLUMN "refund_state" character varying(24) NULL,
         ADD COLUMN "refund_amount" numeric(78,0) NULL,
+        ADD COLUMN "refund_guaranteed" boolean NOT NULL DEFAULT false,
+        ADD COLUMN "evidence_scrubbed_at" timestamptz NULL,
         ADD CONSTRAINT "chk_disputes_call_is_whole" CHECK (
           ("intent_id" IS NULL AND "respondent_provider_id" IS NULL AND "evidence_snapshot" IS NULL)
           OR ("intent_id" IS NOT NULL AND "respondent_provider_id" IS NOT NULL
@@ -45,10 +51,10 @@ export class CallDisputes1761800000000 implements MigrationInterface {
           ("provider_response" IS NULL) = ("provider_responded_at" IS NULL)
         ),
         ADD CONSTRAINT "chk_disputes_refund_source" CHECK (
-          "refund_source" IS NULL OR "refund_source" IN ('UNCOLLECTED_EARNINGS', 'PROVIDER_STAKE', 'NONE')
+          "refund_source" IS NULL OR "refund_source" IN ('UNCOLLECTED_EARNINGS', 'NONE')
         ),
         ADD CONSTRAINT "chk_disputes_refund_state" CHECK (
-          "refund_state" IS NULL OR "refund_state" IN ('PENDING', 'REFUNDED', 'NOT_CHARGED', 'STAKE_CLAIM_OPEN')
+          "refund_state" IS NULL OR "refund_state" IN ('PENDING', 'REFUNDED', 'NOT_CHARGED', 'NOT_REFUNDABLE')
         ),
         ADD CONSTRAINT "chk_disputes_refund_is_whole" CHECK (
           ("refund_source" IS NULL) = ("refund_state" IS NULL)
@@ -73,26 +79,9 @@ export class CallDisputes1761800000000 implements MigrationInterface {
       `CREATE INDEX "idx_disputes_call_buyer" ON "disputes" ` +
         `("organization_id", "created_at") WHERE "intent_id" IS NOT NULL`,
     );
-
-    for (const table of ['payment_intents', 'verification_records']) {
-      await queryRunner.query(`
-        ALTER TABLE "${table}"
-          ADD COLUMN "dispute_outcome" character varying(16) NULL,
-          ADD CONSTRAINT "chk_${table}_dispute_outcome" CHECK (
-            "dispute_outcome" IS NULL OR "dispute_outcome" IN ('UPHELD', 'REJECTED')
-          )
-      `);
-    }
   }
 
   public async down(queryRunner: QueryRunner): Promise<void> {
-    for (const table of ['verification_records', 'payment_intents']) {
-      await queryRunner.query(`
-        ALTER TABLE "${table}"
-          DROP CONSTRAINT "chk_${table}_dispute_outcome",
-          DROP COLUMN "dispute_outcome"
-      `);
-    }
     await queryRunner.query(`DROP INDEX "idx_disputes_call_buyer"`);
     await queryRunner.query(`DROP INDEX "idx_disputes_call_respondent"`);
     await queryRunner.query(`DROP INDEX "idx_disputes_call_queue"`);
@@ -105,6 +94,8 @@ export class CallDisputes1761800000000 implements MigrationInterface {
         DROP CONSTRAINT "chk_disputes_refund_source",
         DROP CONSTRAINT "chk_disputes_provider_response_is_whole",
         DROP CONSTRAINT "chk_disputes_call_is_whole",
+        DROP COLUMN "evidence_scrubbed_at",
+        DROP COLUMN "refund_guaranteed",
         DROP COLUMN "refund_amount",
         DROP COLUMN "refund_state",
         DROP COLUMN "refund_source",

@@ -231,15 +231,27 @@ export class DisputeEntity extends OrganizationScopedEntityWithoutSoftDelete {
   @Column({ name: 'provider_responded_at', type: 'timestamptz', nullable: true })
   providerRespondedAt: Date | null;
 
-  /** `UNCOLLECTED_EARNINGS` | `PROVIDER_STAKE` | `NONE`. Set on an upheld decision. */
+  /** `UNCOLLECTED_EARNINGS` | `NONE`. Set on an upheld decision. */
   @Column({ name: 'refund_source', type: 'varchar', length: 24, nullable: true })
   refundSource: string | null;
 
-  /** `PENDING` | `REFUNDED` | `NOT_CHARGED` | `STAKE_CLAIM_OPEN`. */
+  /** `PENDING` | `REFUNDED` | `NOT_CHARGED` | `NOT_REFUNDABLE`. */
   @Column({ name: 'refund_state', type: 'varchar', length: 24, nullable: true })
   refundState: string | null;
 
   /** What the upheld decision owes the buyer, in minor units of `assetId`. */
   @Column({ name: 'refund_amount', type: 'numeric', precision: 78, scale: 0, nullable: true })
   refundAmount: string | null;
+
+  /**
+   * Filed inside the dispute hold: the voucher was set aside before it could be
+   * redeemed, so an upheld decision refunds in full. After the hold a dispute is
+   * a quality signal, refunded only if the money is uncollected for another reason.
+   */
+  @Column({ name: 'refund_guaranteed', type: 'boolean', default: false })
+  refundGuaranteed: boolean;
+
+  /** When the snapshot's request and response were deleted (retention). */
+  @Column({ name: 'evidence_scrubbed_at', type: 'timestamptz', nullable: true })
+  evidenceScrubbedAt: Date | null;
 }
