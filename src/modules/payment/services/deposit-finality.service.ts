@@ -16,6 +16,7 @@ import {
   NotificationEvent,
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
+import { AuditLogWriter } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
 
 import { depositResource } from '../constants/deposit-intent.constants';
@@ -65,6 +66,9 @@ export class DepositFinalityService {
     @Optional()
     @Inject(NOTIFICATION_PORT)
     private readonly notifications?: NotificationPort,
+    // Optional for the same reason. Bookkeeping only: the entry is written
+    // after the resolving ledger entry is durable and never decides anything.
+    @Optional() private readonly audit?: AuditLogWriter,
   ) {}
 
   /**
@@ -222,6 +226,7 @@ export class DepositFinalityService {
           continue;
         }
         confirmed += 1;
+        await this.recordAudit(candidate, 'deposit.confirmed', pending.money, pending.accountId);
 
         // The notification shows "amount credited (observed), new balance" —
         // the observed amount is what `pending.money`
@@ -268,6 +273,7 @@ export class DepositFinalityService {
           continue;
         }
         rejected += 1;
+        await this.recordAudit(candidate, 'deposit.rejected', pending.money, pending.accountId);
 
         void this.notifications
           ?.notify({
@@ -295,6 +301,37 @@ export class DepositFinalityService {
     }
 
     return { checked: candidates.length, confirmed, rejected, skipped };
+  }
+
+  /**
+   * The audit row for a deposit this pass resolved (B7): the activity log
+   * shows deposits beside the buyer's own changes. Written only by the pass
+   * that won the resolving ledger entry, so a deposit is logged once; after
+   * the fact, because the credit is already durable, and never throwing
+   * (`recordAfterCommit`). It moves no money and nothing reads it to decide.
+   */
+  private async recordAudit(
+    candidate: { organizationId: string; id: string; chainId: string; chainTxRef: string | null },
+    action: 'deposit.confirmed' | 'deposit.rejected',
+    money: { amount: string; asset: string; decimals: number },
+    account: string,
+  ): Promise<void> {
+    await this.audit?.recordAfterCommit({
+      organizationId: candidate.organizationId,
+      actor: { type: 'system', id: 'deposit-finality' },
+      action,
+      resourceType: 'deposit',
+      resourceId: candidate.id,
+      before: null,
+      after: {
+        amount: money.amount,
+        asset: money.asset,
+        decimals: money.decimals,
+        account,
+        chainId: candidate.chainId,
+        transactionHash: candidate.chainTxRef,
+      },
+    });
   }
 
   /**
