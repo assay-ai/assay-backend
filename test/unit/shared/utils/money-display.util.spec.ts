@@ -16,6 +16,19 @@ describe('formatDollars', () => {
     expect(formatDollars(usd('100000'))).toBe('$0.10');
   });
 
+  it('writes a native coin as units, never with a dollar sign', () => {
+    expect(
+      formatDollars({
+        amount: '1500000000',
+        decimals: 9,
+        asset: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/slip44:501',
+      }),
+    ).toBe('1.5 units');
+    expect(
+      formatDollars({ amount: '40000', decimals: 6, asset: 'eip155:46630/erc20:0xDbbC' }),
+    ).toBe('$0.04');
+  });
+
   it('never writes a non-zero amount as zero', () => {
     expect(formatDollars(usd('1'))).toBe('$0.000001');
     expect(formatDollars(usd('0'))).toBe('$0.00');

@@ -289,8 +289,10 @@ export class SlashProposalService {
       organizationId: proposal.organizationId,
       event: NotificationEvent.PROVIDER_SLASH_PROPOSED,
       // Dollars, never minor units: "A penalty of 28470000" reads as millions.
+      // "Up to": this is the uncapped figure; the chain may reserve less, and
+      // the penalty page leads with what it reserved.
       title:
-        `A penalty of ${formatDollars({ amount: proposal.penaltyAmount, decimals: proposal.decimals })} ` +
+        `A penalty of up to ${formatDollars({ amount: proposal.penaltyAmount, decimals: proposal.decimals, asset: proposal.assetId })} ` +
         `is proposed against your stake`,
       body: disputesOnChain(proposal.assetId)
         ? `Nothing is taken before ${utcMinute(proposal.earliestExecutionAt)}. Disputing ` +

@@ -309,7 +309,7 @@ function build(
         }
       : null) as never,
     (options.toolName
-      ? { findByIds: jest.fn().mockResolvedValue([{ name: options.toolName }]) }
+      ? { findTool: jest.fn().mockResolvedValue({ name: options.toolName }) }
       : null) as never,
   );
 
@@ -2615,6 +2615,9 @@ describe('what a voided case tells the provider about their stake', () => {
     expect(sent.body).toContain('still holds the stake it reserved');
     // `chain_executable_at + SLASH_EXECUTION_GRACE_SECONDS`, to the hour.
     const releasedAt = new Date(hoursFromNow(-1).getTime() + 7 * 24 * 60 * 60 * 1000);
+    // Dollars, no tool lookup wired here, and the kind the inbox renders from.
+    expect(sent.title).toMatch(/^\$\d+\.\d{2,3} penalty was cancelled: nothing was taken$/);
+    expect(sent.payload).toMatchObject({ resolutionKind: 'AUTO_CHAIN_VOIDED', decimals: 6 });
     // In the provider's words: to the minute, in UTC, without the ISO noise.
     expect(sent.body).toContain(`${releasedAt.toISOString().slice(0, 16).replace('T', ' ')} UTC`);
     expect(sent.payload).toMatchObject({ reservationHeldUntil: releasedAt.toISOString() });
@@ -3079,6 +3082,51 @@ describe('sweepAdminCancels', () => {
     // R2-9: the loser says so.
     expect(log).toHaveBeenCalledWith(expect.stringContaining('lost the epoch compare-and-set'));
     log.mockRestore();
+  });
+
+  it('closes a recalculation whose cancel has nothing on chain to cancel, and re-proposes it', async () => {
+    // B11: an UPHELD case behind CANCEL_REQUESTED with no record standing was
+    // refused by the cancel route and never closed by this sweep.
+    const { service, proposals, executor, events } = build();
+    proposals.seed(
+      standing({
+        id: 'p1',
+        status: 'UPHELD',
+        chainStatus: 'CANCEL_REQUESTED',
+        penaltyAmount: '400000',
+      }),
+    );
+    executor.readRecordImpl = async () => null;
+    executor.appliedMinor = '400000';
+
+    await expect(service.sweepAdminCancels(NOW)).resolves.toMatchObject({
+      mirrored: 1,
+      waiting: 0,
+    });
+
+    expect(events.kinds()).toContain('CHAIN_CANCELLED');
+    const saved = proposals.rows.get('p1')!;
+    expect(saved.chainEpoch).toBe(1);
+    expect(executor.proposed).toEqual([expect.objectContaining({ penaltyMinor: '400000' })]);
+  });
+
+  it('does not close a recalculation on an unreadable chain, nor an overturned case with no record', async () => {
+    const unreadable = build();
+    unreadable.proposals.seed(
+      standing({ id: 'p1', status: 'UPHELD', chainStatus: 'CANCEL_REQUESTED' }),
+    );
+    unreadable.executor.readRecordImpl = async () => {
+      throw new Error('rpc down');
+    };
+    await unreadable.service.sweepAdminCancels(NOW);
+    expect(unreadable.proposals.rows.get('p1')!.chainStatus).toBe('CANCEL_REQUESTED');
+    expect(unreadable.executor.proposed).toHaveLength(0);
+
+    const overturned = build();
+    overturned.proposals.seed(standing({ id: 'p1', chainStatus: 'CANCEL_REQUESTED' }));
+    overturned.executor.readRecordImpl = async () => null;
+    await overturned.service.sweepAdminCancels(NOW);
+    expect(overturned.proposals.rows.get('p1')!.chainStatus).toBe('CANCEL_REQUESTED');
   });
 
   it('S-2: does not re-propose an overturned case whose cancel landed', async () => {
