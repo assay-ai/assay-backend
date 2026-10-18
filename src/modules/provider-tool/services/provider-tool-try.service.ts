@@ -3,6 +3,8 @@ import { randomUUID } from 'node:crypto';
 import { Inject, Injectable } from '@nestjs/common';
 
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
+import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
 import { ProviderEgressLimiter } from '@modules/provider/services/provider-egress-limiter.service';
 import { ProviderResponse, ResponseBodyKind } from '@modules/tool/domain/classification';
@@ -10,6 +12,7 @@ import { CredentialRedactor } from '@modules/tool/domain/egress/credential-redac
 import { JsonValue } from '@modules/tool/domain/mapping/mapping.types';
 import { BINDING_INVOKER, BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
 import { BindingAuthMode, Tool, ToolBinding, ToolTier } from '@modules/tool/ports/tool.types';
+import { AuditLogWriter, auditActorOf } from '@shared/audit';
 import { isBlockedAddress, isIpLiteralHost } from '@shared/network/egress';
 
 import {
@@ -60,44 +63,101 @@ const TEXT_ECHO_LIMIT = 4 * 1024;
 export class ProviderToolTryService {
   constructor(
     private readonly providers: ProviderRepository,
+    private readonly bindings: ToolBindingRepository,
     private readonly limiter: ProviderEgressLimiter,
+    private readonly audit: AuditLogWriter,
     @Inject(BINDING_INVOKER) private readonly invoker: BindingInvokerPort,
   ) {}
 
-  async try(
-    organizationId: string,
-    body: TryProviderToolBodyDto,
-  ): Promise<ProviderToolTryResultDto> {
+  async try(session: McpSession, body: TryProviderToolBodyDto): Promise<ProviderToolTryResultDto> {
+    const organizationId = session.organizationId;
     const provider = await this.providers.findOne({ where: { organizationId } });
     if (!provider || provider.status !== ProviderStatus.ACTIVE) {
       throw ProviderToolErrors.notAllowed({ reason: 'NOT_PROVIDER' });
     }
-    const plan = planOf(body);
-    assertDialable(plan.url);
-    if (!plan.runnable) return resultOf(plan, null, 0);
-
-    const timeoutMs = body.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+    assertOneSource(body);
+    // Parsing runs inside the limiter's slot: a document is bounded
+    // (`TRY_LIMITS`), and how often one organization may send one is too.
     return this.limiter.run(organizationId, async () => {
+      const plan = planOf(body);
+      assertDialable(plan.url);
+      if (!plan.runnable) return resultOf(plan, null, 0, []);
+
+      // Signed only towards the organization's own binding origins: the
+      // signature tells an endpoint "this is Assay calling for a binding of
+      // yours", and a provider must not obtain that for another's endpoint.
+      const origin = new URL(plan.url).origin;
+      const signed = (await this.ownOrigins(organizationId)).has(origin);
+      const warnings: TryWarning[] = signed
+        ? []
+        : [
+            {
+              code: TryWarningCode.UNSIGNED_FOREIGN_ORIGIN,
+              detail:
+                `${origin} is not the origin of one of your bindings, so the test was sent ` +
+                'without the Assay request signature: an endpoint that checks it will refuse ' +
+                'this test. Save a binding with this endpoint to test it signed.',
+            },
+          ];
+      const callId = randomUUID();
+      const timeoutMs = body.timeoutMs ?? DEFAULT_TIMEOUT_MS;
+      // The one record of a try run: who, where, which call id, signed or
+      // not. Never a header, a query value or a body.
+      await this.audit.recordAfterCommit({
+        organizationId,
+        actor: auditActorOf(session),
+        action: 'provider_tool.try_run',
+        resourceType: 'endpoint_origin',
+        resourceId: origin,
+        after: { origin, method: plan.method, callId, signed, source: plan.source },
+      });
       const started = Date.now();
       const response = await this.invoker.invoke({
         tool: throwawayTool(),
         binding: throwawayBinding(organizationId, plan, timeoutMs),
         input: {},
-        callId: randomUUID(),
+        callId,
         timeoutMs,
         // No vault: the throwaway binding has no credentials of its own.
-        omit: { credentials: true },
+        omit: { credentials: true, signature: !signed },
       });
       const redacted = new CredentialRedactor(plan.secrets).response(response);
-      return resultOf(plan, redacted, Date.now() - started);
+      return resultOf(plan, redacted, Date.now() - started, warnings);
+    });
+  }
+
+  /** The origins of every binding this organization holds, whatever its status. */
+  private async ownOrigins(organizationId: string): Promise<Set<string>> {
+    const rows = await this.bindings.find({
+      where: { organizationId },
+      select: { id: true, endpoint: true },
+    });
+    const origins = new Set<string>();
+    for (const row of rows) {
+      try {
+        origins.add(new URL(row.endpoint).origin);
+      } catch {
+        // A stored endpoint that does not parse names no origin.
+      }
+    }
+    return origins;
+  }
+}
+
+function assertOneSource(body: TryProviderToolBodyDto): void {
+  if ((body.curl === undefined) === (body.openapi === undefined)) {
+    throw ProviderToolErrors.invalid({ problems: ['send exactly one of curl and openapi'] });
+  }
+  if (body.curl !== undefined && (body.headers || body.input || body.operationId)) {
+    // A curl command carries its own headers; two sources of one header
+    // would need a merge rule nobody can see on the screen.
+    throw ProviderToolErrors.invalid({
+      problems: ['headers, input and operationId go with openapi; put them in the curl command'],
     });
   }
 }
 
 function planOf(body: TryProviderToolBodyDto): TryPlan {
-  if ((body.curl === undefined) === (body.openapi === undefined)) {
-    throw ProviderToolErrors.invalid({ problems: ['send exactly one of curl and openapi'] });
-  }
   const headers = body.headers ?? {};
   if (Object.values(headers).some((value) => typeof value !== 'string')) {
     throw ProviderToolErrors.invalid({ problems: ['every header value is a string'] });
@@ -180,8 +240,9 @@ function resultOf(
   plan: TryPlan,
   response: ProviderResponse | null,
   latencyMs: number,
+  extra: readonly TryWarning[],
 ): ProviderToolTryResultDto {
-  const warnings: TryWarning[] = [...plan.warnings];
+  const warnings: TryWarning[] = [...plan.warnings, ...extra];
   const answer =
     response && response.status >= 200 && response.status < 300 && !response.transportError
       ? response.body.kind === ResponseBodyKind.JSON

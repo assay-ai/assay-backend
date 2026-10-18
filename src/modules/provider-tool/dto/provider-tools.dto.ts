@@ -679,7 +679,8 @@ export class TryProviderToolBodyDto {
   openapi?: string;
 
   @ApiPropertyOptional({
-    description: 'OpenAPI: the operation to try, when there is more than one',
+    description:
+      'OpenAPI only (refused with curl): the operation to try, when there is more than one',
   })
   @IsOptional()
   @IsString()
@@ -688,7 +689,9 @@ export class TryProviderToolBodyDto {
 
   @ApiPropertyOptional({
     type: Object,
-    description: 'OpenAPI: values for the operation’s inputs; examples and defaults fill the rest',
+    description:
+      'OpenAPI only (refused with curl): values for the operation’s inputs; examples and ' +
+      'defaults fill the rest',
   })
   @IsOptional()
   @IsObject()
@@ -697,7 +700,8 @@ export class TryProviderToolBodyDto {
   @ApiPropertyOptional({
     type: Object,
     description:
-      'OpenAPI: headers sent with the test only (a credential, typically). Never stored or echoed',
+      'OpenAPI only (refused with curl): headers sent with the test only. Every one is treated ' +
+      'as a credential: never stored, echoed or suggested as a mapping constant',
   })
   @IsOptional()
   @IsObject()
@@ -721,6 +725,7 @@ export class TryWarningDto {
       'NOT_SUPPORTED',
       'NO_JSON_RESPONSE',
       'EXAMPLE_TOO_LARGE',
+      'UNSIGNED_FOREIGN_ORIGIN',
     ],
   })
   code: string;

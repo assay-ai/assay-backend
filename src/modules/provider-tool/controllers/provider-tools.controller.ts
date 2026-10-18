@@ -109,7 +109,7 @@ export class ProviderToolsController {
     @CurrentSession() session: McpSession,
     @Body() body: TryProviderToolBodyDto,
   ): Promise<ProviderToolTryResultDto> {
-    return this.trial.try(session.organizationId, body);
+    return this.trial.try(session, body);
   }
 
   @Get('invitations')
