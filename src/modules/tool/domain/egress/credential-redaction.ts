@@ -67,9 +67,16 @@ import { JsonValue } from '../mapping/mapping.types';
  * scanned), or a JSON key holding a credential
  * **fails closed** — every header value and the body become
  * {@link REDACTED}, the internal note header {@link REDACTION_NOTE_HEADER} is
- * set, and the response carries a `PLATFORM_UNAVAILABLE` transport error with
- * the fixed detail {@link REDACTION_FAILED_DETAIL}: Assay's fault, never the
- * provider's, and no secret is exposed.
+ * set, and no secret is exposed. Who is blamed depends on the cause:
+ *
+ * - **The content** (a credential as a JSON key, a string over the cap): the
+ *   provider produced it, so the response carries an `UNUSABLE_RESPONSE`
+ *   transport error with the fixed detail {@link REDACTION_UNUSABLE_DETAIL},
+ *   classified like any malformed body and counted against the binding.
+ * - **The time budget**: the scan is linear, so running out of time says more
+ *   about this process than about the response. `PLATFORM_UNAVAILABLE` with
+ *   the fixed detail {@link REDACTION_FAILED_DETAIL}: Assay's fault, never the
+ *   provider's.
  */
 export const REDACTED = '[REDACTED]';
 
@@ -88,8 +95,12 @@ export const REDACTION_BUDGET_MS_PER_MIB = 60;
 /** Internal note on a fail-closed response. Never sent anywhere. */
 export const REDACTION_NOTE_HEADER = 'x-assay-redaction';
 
-/** The fixed transport-error detail of a fail-closed response. */
+/** The fixed transport-error detail of a response that ran out of redaction time. */
 export const REDACTION_FAILED_DETAIL = 'response redaction exceeded its budget';
+
+/** The fixed transport-error detail of a response whose content cannot be redacted. */
+export const REDACTION_UNUSABLE_DETAIL =
+  'response cannot be redacted: a credential in a JSON key, or a string over the size cap';
 
 export interface RedactorOptions {
   /** Base budget; defaults to {@link REDACTION_BUDGET_MS}. Scales with the text, see there. */
@@ -102,7 +113,12 @@ export interface RedactorOptions {
 const CLOCK_STRIDE = 1 << 16;
 
 /** Thrown inside a scan to give up on the whole response; see "failing closed". */
-class FailClosed extends Error {}
+class FailClosed extends Error {
+  /** `content`: the provider's response itself; `budget`: the time ran out. */
+  constructor(readonly why: 'content' | 'budget') {
+    super(why);
+  }
+}
 
 const MIB = 1024 * 1024;
 
@@ -122,7 +138,7 @@ class Budget {
   }
 
   check(): void {
-    if (this.now() > this.deadline) throw new FailClosed();
+    if (this.now() > this.deadline) throw new FailClosed('budget');
   }
 }
 
@@ -210,7 +226,7 @@ export class CredentialRedactor {
           : {}),
       };
     } catch (error) {
-      if (error instanceof FailClosed) return failClosed(response);
+      if (error instanceof FailClosed) return failClosed(response, error.why);
       throw error;
     }
   }
@@ -220,7 +236,7 @@ export class CredentialRedactor {
   }
 
   private redact(text: string, budget: Budget): string {
-    if (text.length > MAX_REDACTABLE_CHARS) throw new FailClosed();
+    if (text.length > MAX_REDACTABLE_CHARS) throw new FailClosed('content');
     budget.allow(text.length);
     budget.check();
     // Each pass reports matches in order of their end, so merging as they
@@ -253,7 +269,7 @@ export class CredentialRedactor {
     if (value !== null && typeof value === 'object') {
       return Object.fromEntries(
         Object.entries(value).map(([key, item]) => {
-          if (this.redact(key, budget) !== key) throw new FailClosed();
+          if (this.redact(key, budget) !== key) throw new FailClosed('content');
           return [key, this.redactJson(item, budget)];
         }),
       );
@@ -288,7 +304,7 @@ export class CredentialRedactor {
 }
 
 /** Nothing of the provider's answer survives; see "failing closed" above. */
-function failClosed(response: ProviderResponse): ProviderResponse {
+function failClosed(response: ProviderResponse, why: FailClosed['why']): ProviderResponse {
   return {
     status: 0,
     headers: {
@@ -296,11 +312,18 @@ function failClosed(response: ProviderResponse): ProviderResponse {
       [REDACTION_NOTE_HEADER]: 'truncated',
     },
     body: { kind: ResponseBodyKind.NON_JSON, raw: REDACTED, detail: REDACTED },
-    transportError: {
-      kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
-      partialBody: null,
-      detail: REDACTION_FAILED_DETAIL,
-    },
+    transportError:
+      why === 'content'
+        ? {
+            kind: TransportErrorKind.UNUSABLE_RESPONSE,
+            partialBody: null,
+            detail: REDACTION_UNUSABLE_DETAIL,
+          }
+        : {
+            kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+            partialBody: null,
+            detail: REDACTION_FAILED_DETAIL,
+          },
   };
 }
 

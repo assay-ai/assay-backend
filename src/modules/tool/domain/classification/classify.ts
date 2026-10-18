@@ -25,6 +25,7 @@ import {
   ResponseBody,
   ResponseBodyKind,
   ResponseClass,
+  TransportErrorKind,
 } from './classification.types';
 import { MappingFault } from '../mapping/mapping.types';
 import { parseRetryAfter } from './response-body';
@@ -48,8 +49,9 @@ const TRANSPORT_REASON = {
   BODY_TRUNCATED: ClassificationReason.TRANSPORT_BODY_TRUNCATED,
   SCHEME_NOT_ALLOWED: ClassificationReason.TRANSPORT_HTTPS_REQUIRED,
   PLATFORM_UNAVAILABLE: ClassificationReason.PLATFORM_UNAVAILABLE,
+  UNUSABLE_RESPONSE: ClassificationReason.BODY_NOT_JSON,
   UNKNOWN: ClassificationReason.TRANSPORT_UNKNOWN,
-} as const;
+} as const satisfies Record<TransportErrorKind, ClassificationReason>;
 
 export function classifyResponse(
   response: ProviderResponse,

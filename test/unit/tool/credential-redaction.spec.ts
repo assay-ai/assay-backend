@@ -12,7 +12,14 @@ import {
   REDACTED,
   REDACTION_FAILED_DETAIL,
   REDACTION_NOTE_HEADER,
+  REDACTION_UNUSABLE_DETAIL,
 } from '@modules/tool/domain/egress/credential-redaction';
+import {
+  ClassificationReason,
+  ResponseClass,
+  classifyResponse,
+} from '@modules/tool/domain/classification';
+import { attributeAttempt } from '@modules/tool/domain/routing/attempt-attribution';
 
 // Contains every character class that encodes differently: space, `/`, `+`,
 // `&`, `<`, `"`, `'` and `\`.
@@ -263,10 +270,11 @@ describe('CredentialRedactor — failing closed', () => {
       status: 200,
       body: { kind: ResponseBodyKind.JSON, value: { data: { [`echo ${KEY}`]: 1 } } },
     });
+    // The provider's content caused it: an unusable response, not a platform fault.
     expect(out.transportError).toEqual({
-      kind: TransportErrorKind.PLATFORM_UNAVAILABLE,
+      kind: TransportErrorKind.UNUSABLE_RESPONSE,
       partialBody: null,
-      detail: REDACTION_FAILED_DETAIL,
+      detail: REDACTION_UNUSABLE_DETAIL,
     });
     expect(JSON.stringify(out)).not.toContain('sk-Live');
   });
@@ -291,9 +299,64 @@ describe('CredentialRedactor — failing closed', () => {
         detail: 'd',
       },
     });
-    expect(out.transportError?.kind).toBe(TransportErrorKind.PLATFORM_UNAVAILABLE);
-    expect(out.transportError?.detail).toBe(REDACTION_FAILED_DETAIL);
+    expect(out.transportError?.kind).toBe(TransportErrorKind.UNUSABLE_RESPONSE);
+    expect(out.transportError?.detail).toBe(REDACTION_UNUSABLE_DETAIL);
     expect(out.body).toEqual({ kind: ResponseBodyKind.NON_JSON, raw: REDACTED, detail: REDACTED });
+  });
+
+  /**
+   * Who is blamed, end to end: content the provider sent is classified like a
+   * malformed body and counted against the binding; only a scan that ran out
+   * of time stays a platform fault the stats leave out.
+   */
+  describe('attribution', () => {
+    const paid = {
+      providerId: 'provider-1',
+      buyerOrganizationId: 'buyer-1',
+      callClass: 'PAID' as const,
+      elapsedMs: 40,
+      timeoutMs: 1000,
+      maxBudgetMs: 1000,
+    };
+    const attribute = (out: ProviderResponse) => {
+      const c = classifyResponse(out, { toolId: '*', acceptsNonJsonBody: true });
+      return {
+        c,
+        a: attributeAttempt({ ...paid, responseClass: c.responseClass, reason: c.reason }),
+      };
+    };
+
+    it.each([
+      [
+        'a credential echoed as a JSON key',
+        { kind: ResponseBodyKind.JSON, value: { [KEY]: 1 } } as const,
+      ],
+      [
+        'a string over the size cap',
+        {
+          kind: ResponseBodyKind.NON_JSON,
+          raw: 'x'.repeat(MAX_REDACTABLE_CHARS + 1),
+          detail: 'd',
+        } as const,
+      ],
+    ])('%s: BODY_NOT_JSON, counted as unavailable', (_label, body) => {
+      const { c, a } = attribute(redactor.response({ status: 200, body }));
+      expect(c.responseClass).toBe(ResponseClass.SYSTEM_ERROR);
+      expect(c.reason).toBe(ClassificationReason.BODY_NOT_JSON);
+      expect(a).toEqual({ counted: true, available: false, latencyMs: null });
+    });
+
+    it('the time budget running out: PLATFORM_UNAVAILABLE, not counted', () => {
+      let clock = 0;
+      const slow = new CredentialRedactor([KEY], { budgetMs: 10, now: () => (clock += 20) });
+      const out = slow.response({
+        status: 200,
+        body: { kind: ResponseBodyKind.JSON, value: { got: KEY } },
+      });
+      const { c, a } = attribute(out);
+      expect(c.reason).toBe(ClassificationReason.PLATFORM_UNAVAILABLE);
+      expect(a).toEqual({ counted: false, why: 'PLATFORM_FAULT' });
+    });
   });
 });
 
