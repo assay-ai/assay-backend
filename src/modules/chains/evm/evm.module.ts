@@ -41,6 +41,7 @@ import { DEFAULT_EVM_PARAMS_TTL_MS, EvmStakeReader } from './evm-stake-reader.se
 import { EvmStakeIntentBuilder } from './evm-stake-intent-builder.service';
 import { EvmVerifierRegistryService } from './evm-verifier-registry.service';
 import { EvmVaultService } from './evm-vault.service';
+import { EvmHeldPayments } from './evm-held-payments.service';
 import { EvmVoucherRedeemer } from './evm-voucher-redeemer.service';
 import { EvmTightenDelayProbe } from './evm-tighten-delay.probe';
 import { DEFAULT_EVM_SLASH_BATCH_SIZE, EvmSlashExecutor } from './evm-slash-executor.service';
@@ -334,6 +335,14 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
       inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS],
     },
     {
+      // "Redeem into hold" (G3.B1): collect and refund the escrow's held
+      // payments with the REDEEMER key.
+      provide: EvmHeldPayments,
+      useFactory: (clients: never, deployments: never, redeemer: never) =>
+        new EvmHeldPayments(clients, deployments, redeemer),
+      inject: [EVM_RPC_CLIENTS, EVM_DEPLOYMENTS, EVM_REDEEMER],
+    },
+    {
       provide: EvmVoucherRedeemer,
       useFactory: (
         clients: never,
@@ -503,6 +512,7 @@ export const EVM_DEPLOYMENTS_ENV = 'EVM_DEPLOYMENTS';
     EvmEscrowIntentBuilder,
     EvmRelayedEscrowIntentSubmitter,
     EvmVoucherRedeemer,
+    EvmHeldPayments,
     EvmTightenDelayProbe,
     EvmSlashExecutor,
     EvmVerifierRegistryService,
