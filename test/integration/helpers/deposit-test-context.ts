@@ -43,6 +43,7 @@ import {
   TEST_POOL_SIZE,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
   uuidFromLabel,
 } from './test-database';
@@ -171,6 +172,7 @@ export async function createDepositTestContext(): Promise<DepositTestContext> {
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   await dataSource.runMigrations();
 
   const balanceRepository = new AccountBalanceRepository(dataSource);

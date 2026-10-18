@@ -28,7 +28,12 @@ import { AuditActor, AuditLogWriter } from '@shared/audit';
 import { digestToken } from '@shared/crypto/token-digest';
 import { RequestContext } from '@shared/observability';
 
-import { USDC_ASSET, ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
+import {
+  USDC_ASSET,
+  ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
+  testConnectionOptions,
+} from '../helpers/test-database';
 
 /**
  * BUG-R2-B4-01, against the real migrations: every audited write appends its
@@ -69,6 +74,7 @@ describe('audit_log_entries — the writer and its call sites', () => {
       migrationsRun: false,
     });
     await dataSource.initialize();
+    await resetSchemaIfMigrationsChanged(dataSource);
     await dataSource.runMigrations({ transaction: 'each' });
 
     writer = new AuditLogWriter(dataSource);

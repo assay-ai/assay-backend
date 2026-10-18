@@ -23,6 +23,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
   uuidFromLabel,
 } from './test-database';
@@ -70,6 +71,7 @@ export async function createLedgerTestContext(): Promise<LedgerTestContext> {
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   // Idempotent — the migrations table makes a second run a no-op. Nothing is
   // ever truncated between tests: `ledger_entries` refuses DELETE and TRUNCATE
   // by design, and a fresh `organizationId` per test isolates far better than
