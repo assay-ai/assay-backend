@@ -14,6 +14,7 @@ import { redisConfig } from '@config/redis.config';
 // and the cache service are `@Global` dependencies of the payment domain.
 import { DatabaseModule } from '@database/database.module';
 import { AlertingModule } from '@shared/alerting';
+import { AppRoleModule } from '@shared/app-role/app-role.module';
 import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
 import { NetworkModule } from '@shared/network/network.module';
@@ -57,6 +58,8 @@ import { ToolEgressModule } from '@modules/tool/tool-egress.module';
       inject: [ConfigService],
       useFactory: (configService: ConfigService) => configService.get('bullmq'),
     }),
+    // `APP_ROLE = 'mcp'`: this container accepts every OAuth grant.
+    AppRoleModule.forRoot('mcp'),
     NetworkModule,
     DatabaseModule,
     RedisCacheModule,
