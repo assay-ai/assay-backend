@@ -12,6 +12,7 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
 @Entity('oauth_access_tokens')
 @Index('uq_oauth_access_tokens_token', ['tokenHash'], { unique: true })
 @Index('idx_oauth_access_tokens_credential', ['credentialId', 'createdAt'])
+@Index('idx_oauth_access_tokens_expires', ['expiresAt'])
 export class OAuthAccessTokenEntity extends OrganizationScopedEntityWithoutSoftDelete {
   @Column({ name: 'credential_id', type: 'uuid' })
   credentialId: string;

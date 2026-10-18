@@ -17,6 +17,9 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
 @Index('uq_oauth_refresh_tokens_token', ['tokenHash'], { unique: true })
 @Index('idx_oauth_refresh_tokens_credential', ['credentialId'])
 @Index('idx_oauth_refresh_tokens_parent', ['parentId'])
+@Index('idx_oauth_refresh_tokens_expires_dead', ['expiresAt'], {
+  where: '"used_at" IS NOT NULL OR "revoked_at" IS NOT NULL',
+})
 export class OAuthRefreshTokenEntity extends OrganizationScopedEntityWithoutSoftDelete {
   @Column({ name: 'credential_id', type: 'uuid' })
   credentialId: string;
