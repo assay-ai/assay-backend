@@ -5,7 +5,6 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  */
 export enum PaymentErrorCode {
   PAYMENT_INTENT_NOT_FOUND = 'PAYMENT_INTENT_NOT_FOUND',
-  PAYMENT_INTENT_EXPIRED = 'PAYMENT_INTENT_EXPIRED',
   PAYMENT_INVALID_STATE_TRANSITION = 'PAYMENT_INVALID_STATE_TRANSITION',
   PAYMENT_IDEMPOTENCY_KEY_REUSED = 'PAYMENT_IDEMPOTENCY_KEY_REUSED',
   PAYMENT_VOUCHER_SIGNATURE_INVALID = 'PAYMENT_VOUCHER_SIGNATURE_INVALID',
@@ -15,7 +14,6 @@ export enum PaymentErrorCode {
   PAYMENT_VOUCHER_BINDING_MISMATCH = 'PAYMENT_VOUCHER_BINDING_MISMATCH',
   PAYMENT_REQUEST_HASH_MISMATCH = 'PAYMENT_REQUEST_HASH_MISMATCH',
   PAYMENT_REQUEST_NOT_CANONICALISABLE = 'PAYMENT_REQUEST_NOT_CANONICALISABLE',
-  PAYMENT_RAIL_UNSUPPORTED = 'PAYMENT_RAIL_UNSUPPORTED',
 
   // ── Deposits — `deposit_intents`, a sibling of `payment_intents`,
   //    not a member of it. See `src/modules/payment/ports/deposit.types.ts`.
@@ -110,13 +108,6 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     statusCode: 404,
     message: (context?: Record<string, any>) =>
       `Payment intent not found${context?.id ? ` with id: ${context.id}` : ''}`,
-  },
-  paymentIntentExpired: {
-    code: PaymentErrorCode.PAYMENT_INTENT_EXPIRED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Payment intent expired${context?.id ? `: ${context.id}` : ''}` +
-      `${context?.expiresAt ? ` at ${context.expiresAt}` : ''}`,
   },
   /**
    * The one code every edge outside `PAYMENT_INTENT_TRANSITIONS` raises —
@@ -358,12 +349,6 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `Request cannot be canonicalised${context?.path ? ` at ${context.path}` : ''}` +
       `${context?.reason ? `: ${context.reason}` : ''}`,
   },
-  railUnsupported: {
-    code: PaymentErrorCode.PAYMENT_RAIL_UNSUPPORTED,
-    statusCode: 400,
-    message: (context?: Record<string, any>) =>
-      `Payment rail not supported${context?.rail ? `: ${context.rail}` : ''}`,
-  },
 
   // ── Deposits ───────────────────────────────────────────────────────────
   depositIntentNotFound: {
@@ -381,9 +366,9 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
       `${context?.intentId ? ` [intent ${context.intentId}]` : ''}`,
   },
   /**
-   * `402`, matching `paymentIntentExpired`'s reasoning: the agent did nothing
-   * wrong, the SVM blockhash the client already signed over is simply dead,
-   * and the fix is a new `402` round trip, not a retry of the same payload.
+   * `402`: the agent did nothing wrong, the SVM blockhash the client already
+   * signed over is simply dead, and the fix is a new `402` round trip, not a
+   * retry of the same payload.
    */
   depositIntentExpired: {
     code: PaymentErrorCode.PAYMENT_DEPOSIT_EXPIRED,

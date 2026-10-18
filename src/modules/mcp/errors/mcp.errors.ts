@@ -6,12 +6,9 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  * errors are the ones an agent sees most often.
  */
 export enum McpErrorCode {
-  MCP_REQUEST_MALFORMED = 'MCP_REQUEST_MALFORMED',
   MCP_METHOD_NOT_SUPPORTED = 'MCP_METHOD_NOT_SUPPORTED',
   MCP_TOOL_NOT_FOUND = 'MCP_TOOL_NOT_FOUND',
   MCP_CREDENTIAL_INVALID = 'MCP_CREDENTIAL_INVALID',
-  MCP_CREDENTIAL_REVOKED = 'MCP_CREDENTIAL_REVOKED',
-  MCP_SESSION_NOT_FOUND = 'MCP_SESSION_NOT_FOUND',
   MCP_QUOTA_EXCEEDED = 'MCP_QUOTA_EXCEEDED',
   /**
    * The path of an MCP URL is not one the host serves, or names something
@@ -72,12 +69,6 @@ const VELOCITY_REASON_TEXT: Record<string, string> = {
 };
 
 export const McpErrors = createDomainErrorFactory('MCP', {
-  requestMalformed: {
-    code: McpErrorCode.MCP_REQUEST_MALFORMED,
-    statusCode: 400,
-    message: (context?: Record<string, any>) =>
-      `Malformed MCP request${context?.detail ? `: ${context.detail}` : ''}`,
-  },
   methodNotSupported: {
     code: McpErrorCode.MCP_METHOD_NOT_SUPPORTED,
     statusCode: 400,
@@ -94,18 +85,6 @@ export const McpErrors = createDomainErrorFactory('MCP', {
     code: McpErrorCode.MCP_CREDENTIAL_INVALID,
     statusCode: 401,
     message: () => `MCP credential is missing or invalid`,
-  },
-  credentialRevoked: {
-    code: McpErrorCode.MCP_CREDENTIAL_REVOKED,
-    statusCode: 401,
-    message: (context?: Record<string, any>) =>
-      `MCP credential has been revoked` + `${context?.revokedAt ? ` at ${context.revokedAt}` : ''}`,
-  },
-  sessionNotFound: {
-    code: McpErrorCode.MCP_SESSION_NOT_FOUND,
-    statusCode: 404,
-    message: (context?: Record<string, any>) =>
-      `MCP session not found${context?.sessionId ? `: ${context.sessionId}` : ''}`,
   },
   urlNotFound: {
     code: McpErrorCode.MCP_URL_NOT_FOUND,
