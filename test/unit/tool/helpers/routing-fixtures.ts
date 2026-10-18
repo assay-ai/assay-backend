@@ -22,9 +22,9 @@ import {
 } from '@modules/provider/ports/chain-enrolment.port';
 import { ProviderStake, stakeKey } from '@modules/provider/ports/provider-stake.port';
 import {
-  ConfigProviderStakeSource,
+  InMemoryProviderStakeSource,
   ProviderStakeSnapshot,
-} from '@modules/provider/services/config-provider-stake.source';
+} from '../../helpers/in-memory-provider-stake.source';
 import { StakeGraceLookup, StakeGracePort } from '@modules/provider/ports/stake-grace.port';
 import {
   ProviderResponse,
@@ -596,9 +596,7 @@ export function buildRouter(options: RouterHarnessOptions): RouterHarness {
     options.providers.map((provider) => [provider.providerId, provider]),
   );
   // The shorthand is expanded into real `stakeKey`s here, and never inside the
-  // source: `ConfigProviderStakeSource` must be the production class, keyed the
-  // production way, or the fixtures would be testing a different lookup from
-  // the one that runs.
+  // source, so the fixtures key stake the way the real source does.
   const stakeSnapshot: ProviderStakeSnapshot = {
     ...Object.fromEntries(
       Object.entries(options.stakes).map(([providerId, money]) => [
@@ -654,7 +652,7 @@ export function buildRouter(options: RouterHarnessOptions): RouterHarness {
   const router = new ProviderRouterService(
     catalogue,
     new ConfigProviderRegistry(registrySnapshot),
-    new ConfigProviderStakeSource(stakeSnapshot),
+    new InMemoryProviderStakeSource(stakeSnapshot),
     enrolments,
     graceSource,
     options.invoker,
