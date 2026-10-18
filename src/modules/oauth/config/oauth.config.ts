@@ -149,17 +149,16 @@ export function loadOAuthConfig(
     redirectAllowlist,
     host.mcpPublicUrl,
   );
-  const paymentClients = parsePaymentClients(
-    env[OAUTH_PAYMENT_CLIENTS_ENV],
-    builtinClientId(host.mcpPublicUrl),
-  );
+  // One derivation of the audience and the payment clients, shared with the
+  // session source: a drift would refuse every token or change who may pay.
+  const session = loadOAuthSessionConfig(env);
 
   return Object.freeze({
-    issuer: host.mcpPublicUrl,
+    issuer: session.audience,
     webAppUrl: host.webAppUrl,
     verifiedClients,
     redirectAllowlist,
-    paymentClients,
+    paymentClients: session.paymentClients,
     allowHttpCimdLoopback,
     requestCookieSecret: requestCookieSecret ?? null,
     dcrGlobalPerDay: parsePositiveInt(
@@ -190,6 +189,36 @@ function readRequestCookieSecret(env: NodeJS.ProcessEnv): readonly Buffer[] {
       );
     }
     return [secret];
+  });
+}
+
+/**
+ * The two values the OAuth session source needs (spec §6.4), and nothing else:
+ * the audience every access token must carry, and the payment clients.
+ *
+ * Separate from {@link OAuthConfig} because the session source lives in
+ * `AuthModule`, which every process with `McpModule` loads, the scheduler
+ * included. `OAUTH_CONFIG` must not exist there: it demands the request cookie
+ * secret and `AUTH_SESSION_SOURCE=both`. This reads the same variables through
+ * the same parsers, so where both exist they hold the same values.
+ */
+export interface OAuthSessionConfig {
+  /** `MCP_PUBLIC_URL`: the only audience an access token may carry (§6.3.13). */
+  readonly audience: string;
+  /** Client ids whose grants may bind a payment key and use the API host (§6.3.13). */
+  readonly paymentClients: readonly string[];
+}
+
+export const OAUTH_SESSION_CONFIG = Symbol('OAUTH_SESSION_CONFIG');
+
+export function loadOAuthSessionConfig(env: NodeJS.ProcessEnv = process.env): OAuthSessionConfig {
+  const { mcpPublicUrl } = loadMcpHostConfig(env);
+  return Object.freeze({
+    audience: mcpPublicUrl,
+    paymentClients: parsePaymentClients(
+      env[OAUTH_PAYMENT_CLIENTS_ENV],
+      builtinClientId(mcpPublicUrl),
+    ),
   });
 }
 
