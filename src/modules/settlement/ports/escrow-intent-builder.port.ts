@@ -32,15 +32,8 @@ export interface EscrowIntentRequest {
  * {@link import('@modules/chains/ports/unsigned-chain-transaction').UnsignedChainTransaction}
  * — the same union `StakeIntentBuilderPort` returns.
  *
- * `UnsignedEscrowTransaction` used to be declared here and its own doc comment
- * admitted what it was: *"field-for-field `UnsignedStakeTransaction`'s shape."*
- * Two identical declarations of one wire contract in two modules is one
- * contract that can drift, and the copy that drifts is the one nobody is
- * looking at.
- *
- * The rule this port exists to make structural is unchanged, and is why it
- * still has no `send`, no `submit`, no `signature` and no signer parameter:
- * two of these four doors are the buyer's defence against **this platform**.
+ * The rule this port exists to make structural is why it has no `send`, no
+ * `submit`, no `signature` and no signer parameter: two of these four doors are the buyer's defence against **this platform**.
  * `withdraw` takes their money out of reach and `set_escrow_limits` is the
  * ceiling that exists because the platform writes the 402. A backend
  * that could sign either could raise the ceiling and then spend to it.

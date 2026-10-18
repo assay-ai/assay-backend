@@ -63,9 +63,8 @@ import {
  *
  * ## The account is never taken from the request
  *
- * It comes off `provider_chain_enrolments.stake_authority_account_id`
- * (formerly `providers.stake_authority`), which only the challenge/prove flow
- * writes. A request body that could name the account would undo that proof
+ * It comes off `provider_chain_enrolments.stake_authority_account_id`, which
+ * only the challenge/prove flow writes. A request body that could name the account would undo that proof
  * entirely: provider A could build a withdrawal against
  * provider B's PDA — which B's wallet would refuse to sign, so no money moves —
  * but more usefully could probe B's balances through the preflight. Neither is

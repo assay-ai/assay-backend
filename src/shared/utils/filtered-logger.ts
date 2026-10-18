@@ -3,9 +3,8 @@ import { ConsoleLogger } from '@nestjs/common';
 /**
  * ConsoleLogger with a hook for suppressing known-noisy third-party warnings.
  *
- * Used by the api and websocket bootstraps. The list is currently empty — the
- * only entry used to be an `AmqpConnection` warning, which went away with
- * RabbitMQ. Add patterns here rather than lowering the global log level.
+ * Used by the api and websocket bootstraps. The list is currently empty. Add
+ * patterns here rather than lowering the global log level.
  *
  * `StructuredLogger` (`src/shared/observability/structured-logger.ts`)
  * preserves this hook rather than duplicating it: it calls

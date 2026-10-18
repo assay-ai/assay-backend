@@ -11,10 +11,8 @@ import { AgentDto, ListAgentsQueryDto } from '../dto/list-agents.dto';
 /**
  * `GET /api/v1/agents` — the agents in this organization.
  *
- * Reads the `agents` table (`AgentEntity`) — the real
- * table Privy login provisions into. Earlier this read a config-file snapshot
- * of demo MCP credentials, because the table did not exist yet; that snapshot
- * is gone, along with `ACCOUNT_AGENT_SNAPSHOT`.
+ * Reads the `agents` table (`AgentEntity`) — the table Privy login provisions
+ * into.
  */
 @Injectable()
 export class AgentsService {
