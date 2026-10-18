@@ -34,7 +34,11 @@ import { AppRole } from '@shared/app-role/app-role';
 import { AuditLogWriter } from '@shared/audit';
 import { digestToken } from '@shared/crypto/token-digest';
 
-import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
+import {
+  ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
+  testConnectionOptions,
+} from '../helpers/test-database';
 
 /**
  * The OAuth session source (spec §6.4) against real migrations, on grants the
@@ -78,6 +82,7 @@ describe('OAuthAccessTokenMcpSessionSource — real migrations', () => {
       migrationsRun: false,
     });
     await dataSource.initialize();
+    await resetSchemaIfMigrationsChanged(dataSource);
     await dataSource.runMigrations({ transaction: 'each' });
 
     clients = new OAuthClientRepository(dataSource);
@@ -222,7 +227,7 @@ describe('OAuthAccessTokenMcpSessionSource — real migrations', () => {
     for (const role of ['mcp', 'api'] as const) {
       const viaGrant = await source(role).resolve(pair.access_token);
       const viaKey = await apiKeys().resolve(key.token);
-      expect(viaGrant).toEqual({ ...viaKey, credentialId });
+      expect(viaGrant).toStrictEqual({ ...viaKey, credentialId });
       expect(viaGrant.paymentsAllowed).toBe(true);
     }
 
@@ -234,7 +239,7 @@ describe('OAuthAccessTokenMcpSessionSource — real migrations', () => {
     await setDelegate(key.id, delegate);
     const viaKey = await apiKeys().resolve(key.token);
     expect(viaGrant.delegateAccount).toBe(delegate);
-    expect(viaGrant).toEqual({ ...viaKey, credentialId });
+    expect(viaGrant).toStrictEqual({ ...viaKey, credentialId });
   });
 
   it('third-party grant: the MCP host gets paymentsAllowed false, the API host 403', async () => {
@@ -244,7 +249,7 @@ describe('OAuthAccessTokenMcpSessionSource — real migrations', () => {
 
     const viaGrant = await source('mcp').resolve(pair.access_token);
     const viaKey = await apiKeys().resolve(key.token);
-    expect(viaGrant).toEqual({ ...viaKey, credentialId, paymentsAllowed: false });
+    expect(viaGrant).toStrictEqual({ ...viaKey, credentialId, paymentsAllowed: false });
 
     await expect(source('api').resolve(pair.access_token)).rejects.toMatchObject({
       errorCode: 'AUTH_CLIENT_NOT_ALLOWED_HERE',

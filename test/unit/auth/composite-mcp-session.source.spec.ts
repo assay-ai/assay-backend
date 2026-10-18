@@ -134,7 +134,7 @@ describe('createSessionSource — AUTH_SESSION_SOURCE decides, and the default i
     expect(parseSessionSourceMode('db')).toBe(SessionSourceMode.DB);
   });
 
-  it('binds all three, config first then db then privy', async () => {
+  it('binds all four in both mode: config, db, oauth, privy', async () => {
     const source = createSessionSource(SessionSourceMode.BOTH, { config, db, oauth, privy });
     expect(source).toBeInstanceOf(CompositeMcpSessionSource);
 

@@ -394,22 +394,15 @@ describe('McpApiModule wiring', () => {
     // registry down — `TypeError: pgPass is not a function`, reported against
     // whichever suite happened to be running. Swapped for stubs of every
     // repository it exports: the claim is that the tokens resolve.
+    // Strict: any compile error fails the test, DI or not. A tolerant branch
+    // here once let this test pass without resolving anything.
     const app = await Test.createTestingModule({ imports: [McpApiWiringHarnessModule] })
       .overrideModule(PostgresModule)
       .useModule(StubPostgresModule)
-      .compile()
-      .catch((error: unknown) => error as Error);
-
-    if (app instanceof Error) {
-      // Infrastructure being unreachable is not this test's business; a DI
-      // failure is. Assert on what a DI failure IS rather than on an allowlist
-      // of infrastructure messages: an allowlist has to be extended every time
-      // a machine fails a new way, and until someone extends it the test bails
-      // out early and proves nothing. `database "x" does not exist` is exactly
-      // such a message, and it is what this machine produces.
-      expect(app.message).not.toMatch(/can't resolve dependencies|Nest can not resolve/i);
-      return;
-    }
+      // `QuoteIndexInvalidationSubscriber` registers itself on the DataSource.
+      .overrideProvider(getDataSourceToken('postgres'))
+      .useValue({ subscribers: [] })
+      .compile();
 
     const killSwitchRedis = app.get<Redis>(KILL_SWITCH_REDIS);
     const killSwitchSubscriber = app.get<Redis>(KILL_SWITCH_SUBSCRIBER);
@@ -478,13 +471,9 @@ describe('toolset, Connect preview and MCP host wiring', () => {
     const app = await Test.createTestingModule({ imports: [ToolsetWiringHarnessModule] })
       .overrideModule(PostgresModule)
       .useModule(StubPostgresModule)
-      .compile()
-      .catch((error: unknown) => error as Error);
-
-    if (app instanceof Error) {
-      expect(app.message).not.toMatch(/can't resolve dependencies|Nest can not resolve/i);
-      return;
-    }
+      .overrideProvider(getDataSourceToken('postgres'))
+      .useValue({ subscribers: [] })
+      .compile();
 
     try {
       for (const token of [

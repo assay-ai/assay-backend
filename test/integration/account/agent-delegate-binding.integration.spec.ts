@@ -93,6 +93,15 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     if (dataSource?.isInitialized) await dataSource.destroy();
   });
 
+  /** Polls `condition` until it holds; fails after about two seconds. */
+  async function waitFor(condition: () => Promise<boolean>): Promise<void> {
+    for (let attempt = 0; attempt < 100; attempt += 1) {
+      if (await condition()) return;
+      await new Promise((resolve) => setTimeout(resolve, 20));
+    }
+    throw new Error('condition never held');
+  }
+
   async function credential(): Promise<string> {
     const id = randomUUID();
     await dataSource.query(
@@ -348,7 +357,16 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     } finally {
       // The database outlives a run, and the migration-revert test above cannot
       // undo the OAuth migration while an OAuth credential row exists.
-      await new Promise((resolve) => setTimeout(resolve, 50)); // let the best-effort stamps land
+      // Let the source's fire-and-forget stamps land first, so none races the DELETEs.
+      await waitFor(async () => {
+        const [stamps] = (await dataSource.query(
+          `SELECT
+             (SELECT "first_used_at" FROM "oauth_access_tokens" WHERE "credential_id" = $1) AS "first_used_at",
+             (SELECT "last_used_at" FROM "agent_credentials" WHERE "id" = $1) AS "last_used_at"`,
+          [grant.id],
+        )) as { first_used_at: Date | null; last_used_at: Date | null }[];
+        return stamps.first_used_at !== null && stamps.last_used_at !== null;
+      }).catch(() => undefined); // never resolved: no stamp is coming, clean up anyway
       await dataSource.query(`DELETE FROM "oauth_access_tokens" WHERE "credential_id" = $1`, [
         grant.id,
       ]);
