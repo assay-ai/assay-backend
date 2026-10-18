@@ -26,7 +26,6 @@ import { VerifierSigningLogEntryEntity } from './entities/verifier-signing-log-e
 import { ProviderEntity } from './entities/provider.entity';
 import { ProviderPayoutChallengeEntity } from './entities/provider-payout-challenge.entity';
 import { ProviderConnectivityCheckEntity } from './entities/provider-connectivity-check.entity';
-import { ProviderPayoutEntity } from './entities/provider-payout.entity';
 import { AccountBalanceRepository } from './repositories/account-balance.repository';
 import { BuyerEscrowRepository } from './repositories/buyer-escrow.repository';
 import { DepositIntentRepository } from './repositories/deposit-intent.repository';
@@ -50,7 +49,6 @@ import { VerifierSigningLogEntryRepository } from './repositories/verifier-signi
 import { ProviderRepository } from './repositories/provider.repository';
 import { ProviderPayoutChallengeRepository } from './repositories/provider-payout-challenge.repository';
 import { ProviderConnectivityCheckRepository } from './repositories/provider-connectivity-check.repository';
-import { ProviderPayoutRepository } from './repositories/provider-payout.repository';
 import { BindingCredentialEntity } from './entities/binding-credential.entity';
 import { VaultKekCheckEntity } from './entities/vault-kek-check.entity';
 import { ToolBindingEntity } from './entities/tool-binding.entity';
@@ -156,7 +154,6 @@ export const entities = [
   ProviderEntity,
   ProviderPayoutChallengeEntity,
   ProviderConnectivityCheckEntity,
-  ProviderPayoutEntity,
   ToolEntity,
   ToolVersionEntity,
   ToolPromotionInviteEntity,
@@ -220,7 +217,6 @@ export const repositories = [
   ProviderRepository,
   ProviderPayoutChallengeRepository,
   ProviderConnectivityCheckRepository,
-  ProviderPayoutRepository,
   ToolRepository,
   ToolVersionRepository,
   ToolsetRepository,

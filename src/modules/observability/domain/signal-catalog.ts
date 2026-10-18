@@ -122,9 +122,8 @@ export const SIGNAL_CATALOG: Readonly<Record<ObservabilitySignal, SignalDescript
     label: 'Payout lag p95 (credit → on-chain confirmation)',
     availability: SignalAvailability.NONE,
     reason:
-      'provider_payouts has no confirmed-on-chain timestamp — "SUBMITTED" means a Squads ' +
-      'instruction was built, not confirmed. The batch is also OFF by ' +
-      'default (PROVIDER_PAYOUT_EXECUTION_ENABLED), so there would be little real data regardless.',
+      'Providers are paid in the same transaction that redeems a voucher, so there is no ' +
+      'separate payout to time.',
   },
   [ObservabilitySignal.OPEN_HOLD_AGE]: {
     signal: ObservabilitySignal.OPEN_HOLD_AGE,

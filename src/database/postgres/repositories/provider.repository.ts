@@ -17,8 +17,8 @@ export class ProviderRepository extends OrganizationScopedRepository<ProviderEnt
    *
    * Deliberately cross-organization, the same `organizationId IS NOT NULL`
    * idiom `ProviderTrafficService` and its siblings use for their own
-   * reports: the hourly payout batch has to consider every registered
-   * provider once per run, not one organization's providers at a time —
+   * reports: the stake monitor has to consider every registered provider
+   * once per run, not one organization's providers at a time —
    * there is no caller with a single tenant in mind here, unlike every other
    * method on this class.
    */

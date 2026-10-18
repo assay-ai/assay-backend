@@ -30,19 +30,18 @@
  *   cannot be produced in one process any other way. `ledger_entries` is never
  *   touched by it — that table refuses `UPDATE` by design (append-only) and this
  *   script does not go near the trigger.
- * - **`tool_bindings`, `binding_versions`, `binding_test_runs`,
- *   `provider_payouts` and the `providers` row are written through their
- *   repositories**, not through `BindingEditorService` / `ProviderPayoutBatchService`.
- *   Those services live in `ProviderApiModule`, which this context does not
- *   load, and the payout batch additionally needs a Squads vault. The rows
- *   written match what those services write, constraint for constraint.
+ * - **`tool_bindings`, `binding_versions`, `binding_test_runs` and the
+ *   `providers` row are written through their repositories**, not through
+ *   `BindingEditorService`. That service lives in `ProviderApiModule`, which
+ *   this context does not load. The rows written match what it writes,
+ *   constraint for constraint.
  *
  * ## Idempotent
  *
  * Safe to re-run. Every unit of work is keyed on something the schema already
  * makes unique — `payment_intents.call_id`, `tool_bindings (organization_id,
- * tool_id)`, `binding_test_runs.call_id`, `provider_payouts (organization_id,
- * asset_id, period_start)` — and is skipped when it is already there. A partial
+ * tool_id)`, `binding_test_runs.call_id` — and is skipped when it is already
+ * there. A partial
  * run can be resumed by running it again.
  *
  * ## What it deliberately does NOT seed
@@ -77,8 +76,6 @@ import {
   BindingVersionEntity,
   BindingVersionRepository,
   ProviderEntity,
-  ProviderPayoutEntity,
-  ProviderPayoutRepository,
   ProviderRepository,
   ToolBindingEntity,
   ToolBindingRepository,
@@ -87,8 +84,6 @@ import {
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId, CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 import { LedgerAccountId, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
-import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
-import { runInLedgerTransaction } from '@modules/ledger/services/ledger-transaction.util';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import {
   PaymentIntentCallClass,
@@ -297,8 +292,6 @@ async function main(): Promise<void> {
   const bindings = app.get(ToolBindingRepository);
   const versions = app.get(BindingVersionRepository);
   const testRuns = app.get(BindingTestRunRepository);
-  const payouts = app.get(ProviderPayoutRepository);
-  const journal = app.get(LedgerJournalService);
 
   const tools = readCatalogueTools();
 
@@ -343,11 +336,7 @@ async function main(): Promise<void> {
   });
   log(`calls     ${written} written, ${plans.length - written} already present`);
 
-  // 6. Earnings out. Needs the credits from step 5 to already be in the ledger.
-  const paid = await seedPayouts(payouts, journal, dataSource);
-  log(`payouts   ${paid} provider_payouts rows`);
-
-  // 7. Official tool sets, so the catalogue's "Tool sets" tab is not empty.
+  // 6. Official tool sets, so the catalogue's "Tool sets" tab is not empty.
   const officialSets = await seedOfficialToolsets(dataSource);
   log(`toolsets  ${officialSets} official tool sets created`);
 
@@ -966,118 +955,6 @@ async function backdate(dataSource: DataSource, intentId: string, at: Date): Pro
       WHERE intent_id = $1`,
     [intentId, at],
   );
-}
-
-// ── Payouts ────────────────────────────────────────────────────────────────
-
-interface PayoutPlan {
-  readonly weeksAgo: number;
-  readonly amount: bigint;
-  readonly callCount: number;
-  readonly status: 'PENDING' | 'SUBMITTED' | 'RECORDED';
-}
-
-/**
- * Four payout runs across three states — the three `chk_provider_payouts_status`
- * allows.
- *
- * A `RECORDED` row is the only one that has actually moved money, so it is the
- * only one that gets a `PAYOUT` ledger entry.
- *
- * ## That entry is written the long way round, and the reason is a real defect
- *
- * `GET /providers/me/payouts` lists `PAYOUT` ledger entries **with a
- * `batch_id`** (`ProviderPayoutsService`). Nothing in `src/` can write one:
- *
- * - `LedgerService.appendNow` — what `ProviderPayoutBatchService.record()`
- *   actually calls — has no `batchId` on its input at all;
- * - `ledger_entries` refuses `UPDATE`, so it cannot be stamped afterwards.
- *
- * So the payout writer and the reader disagree, and the payouts screen is empty for
- * every payout the platform will ever make. Seeding around that with a raw
- * `INSERT` would leave `account_balances` unfolded and make the reconciler
- * disagree with the journal, so this takes the two public journal calls
- * `prepare(input, batchId)` then `applyEntries` inside
- * `runInLedgerTransaction`, with the batch id chosen up front. The balance moves,
- * the snapshot folds, and the row is exactly what a working batch would have written.
- */
-const PAYOUTS: readonly PayoutPlan[] = [
-  { weeksAgo: 3, amount: 3_000_000n, callCount: 41, status: 'RECORDED' },
-  { weeksAgo: 2, amount: 2_500_000n, callCount: 33, status: 'RECORDED' },
-  { weeksAgo: 1, amount: 1_500_000n, callCount: 19, status: 'SUBMITTED' },
-  { weeksAgo: 0, amount: 750_000n, callCount: 11, status: 'PENDING' },
-];
-
-async function seedPayouts(
-  payouts: ProviderPayoutRepository,
-  journal: LedgerJournalService,
-  dataSource: DataSource,
-): Promise<number> {
-  let seq = 0n;
-
-  for (const plan of PAYOUTS) {
-    const periodStart = daysAgo(7 * (plan.weeksAgo + 1));
-    const periodEnd = daysAgo(7 * plan.weeksAgo);
-
-    // `uq_provider_payouts_org_asset_period` is the idempotency key.
-    const existing = await payouts.findOneBy({
-      organizationId: PROVIDER_ORG,
-      assetId: ASSET,
-      periodStart,
-    });
-    if (existing) {
-      seq += BigInt(plan.callCount) * 2n;
-      continue;
-    }
-
-    const chainTxRef = plan.status === 'PENDING' ? null : `demo_squads_proposal_${plan.weeksAgo}`;
-
-    const batchId = uuidFromLabel(`demo:payout-batch:${plan.weeksAgo}`);
-
-    let ledgerEntryId: string | null = null;
-    if (plan.status === 'RECORDED') {
-      const prepared = journal.prepare(
-        {
-          organizationId: PROVIDER_ORG,
-          accountId: PROVIDER_ACCOUNT as LedgerAccountId,
-          entryType: LedgerEntryType.PAYOUT,
-          money: MoneyUtil.of(plan.amount, ASSET, DECIMALS),
-          chainTxRef,
-        },
-        batchId,
-      );
-      const [entry] = await runInLedgerTransaction(dataSource, (queryRunner) =>
-        journal.applyEntries(queryRunner, PROVIDER_ORG, [prepared]),
-      );
-      ledgerEntryId = entry.id;
-    }
-
-    const row = new ProviderPayoutEntity();
-    row.organizationId = PROVIDER_ORG;
-    row.assetId = ASSET;
-    row.decimals = DECIMALS;
-    row.periodStart = periodStart;
-    row.periodEnd = periodEnd;
-    row.amount = plan.amount.toString();
-    row.fromSeq = seq.toString();
-    row.toSeq = (seq + BigInt(plan.callCount) * 2n).toString();
-    row.callCount = plan.callCount;
-    row.status = plan.status;
-    row.batchId = batchId;
-    row.sourceAccountId = PROVIDER_ACCOUNT;
-    row.payoutAccountId = PROVIDER_PAYOUT_ACCOUNT;
-    row.chainTxRef = chainTxRef;
-    row.ledgerEntryId = ledgerEntryId;
-    await payouts.save(row);
-
-    seq += BigInt(plan.callCount) * 2n;
-  }
-
-  const [{ count }] = (await dataSource.query(
-    'SELECT count(*)::int AS count FROM provider_payouts WHERE organization_id = $1',
-    [PROVIDER_ORG],
-  )) as [{ count: number }];
-  return count;
 }
 
 // ── Reporting ──────────────────────────────────────────────────────────────
