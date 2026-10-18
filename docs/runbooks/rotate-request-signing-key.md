@@ -7,7 +7,8 @@ providers' verifiers cache it. Design: `docs/adr/0002-provider-request-auth.md`.
 
 Set the variable on BOTH the `api` and `mcp` processes, always with the same value: a
 process with a different list signs with another key or publishes the wrong JWKS. The
-`api` process serves the JWKS; the `mcp` process signs.
+`api` process serves the JWKS; the `mcp` process signs. No other process (`scheduler`,
+`worker`, `websocket`, `facilitator`) reads it; do not set it there.
 
 ## Steps
 

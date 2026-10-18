@@ -162,7 +162,10 @@ export class ProviderRouterService {
     // enrolment can be closed afterwards without anybody touching it.
     @Inject(CHAIN_ENROLMENT_SOURCE) private readonly enrolments: ChainEnrolmentPort,
     @Inject(STAKE_GRACE_SOURCE) private readonly grace: StakeGracePort,
-    @Inject(BINDING_INVOKER) private readonly invoker: BindingInvokerPort,
+    // Provided by `ToolEgressModule`, which only the processes that dial
+    // providers (api, mcp) import. Absent elsewhere — the scheduler reaches this
+    // class for quotes — and then `route` refuses.
+    @Optional() @Inject(BINDING_INVOKER) private readonly invoker: BindingInvokerPort | null,
     // The two traffic counters. Concrete classes rather than ports because they
     // live in this module: `PROVIDER_REGISTRY` and friends are tokens because
     // they cross a module boundary the router must not look past, and inventing
@@ -191,6 +194,11 @@ export class ProviderRouterService {
    * neither is reachable by any provider's stake.
    */
   async route(request: ToolCallRequest): Promise<RoutedCall> {
+    if (!this.invoker) {
+      throw new Error(
+        'ProviderRouterService.route: no BINDING_INVOKER in this process (import ToolEgressModule)',
+      );
+    }
     const tool = await this.catalogue.findTool(request.toolId);
     if (!tool) {
       throw ToolErrors.toolNotFound({ toolId: request.toolId });
@@ -1043,7 +1051,7 @@ export class ProviderRouterService {
 
     try {
       response = await this.withDeadline(
-        this.invoker.invoke({ tool, binding, input, timeoutMs, callId }),
+        this.invoker!.invoke({ tool, binding, input, timeoutMs, callId }),
         timeoutMs,
       );
     } catch (error) {

@@ -7,6 +7,7 @@ import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
 import { McpModule } from '@modules/mcp/mcp.module';
 import { ToolModule } from '@modules/tool/tool.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { VerificationModule } from '@modules/verification/verification.module';
 import { AuditLogModule } from '@shared/audit';
 
@@ -114,6 +115,9 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderModule,
     BlocklistModule,
     ToolModule,
+    // `BINDING_INVOKER` for the mapping tester, which dials through the same
+    // invoker production uses rather than a sandbox copy of it.
+    ToolEgressModule,
     CredentialVaultModule,
     McpModule,
     ChainsModule,

@@ -20,6 +20,7 @@ import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invo
 import { ProviderRouterService } from '@modules/tool/services/provider-router.service';
 import { ROUTER_CONFIG, ROUTING_RANDOM, RouterConfig } from '@modules/tool/services/routing.config';
 import { ToolModule } from '@modules/tool/tool.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { BindingAttemptRepository } from '@database/postgres/repositories/binding-attempt.repository';
@@ -173,9 +174,21 @@ class StubRepositoriesModule {}
     ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env.local', '.env'] }),
     StubRepositoriesModule,
     ToolModule,
+    // The invoker lives in its own module, imported by the processes that dial
+    // providers (api, mcp); see `provider-secrets-boot.spec.ts`.
+    ToolEgressModule,
   ],
 })
 class ToolWiringHarnessModule {}
+
+@Module({
+  imports: [
+    ConfigModule.forRoot({ isGlobal: true, envFilePath: ['.env.local', '.env'] }),
+    StubRepositoriesModule,
+    ToolModule,
+  ],
+})
+class ToolWithoutEgressHarnessModule {}
 
 describe('ToolModule wiring', () => {
   jest.setTimeout(30_000);
@@ -219,7 +232,7 @@ describe('ToolModule wiring', () => {
       expect(app.get(CHAIN_ENROLMENT_SOURCE, { strict: false })).toBeInstanceOf(
         DbChainEnrolmentSource,
       );
-      expect(app.get(BINDING_INVOKER)).toBeInstanceOf(EgressBindingInvoker);
+      expect(app.get(BINDING_INVOKER, { strict: false })).toBeInstanceOf(EgressBindingInvoker);
       expect(typeof app.get(ROUTING_RANDOM)).toBe('function');
       // Exported, because the increment belongs to whoever writes
       // `payment_intents.binding_id` — the MCP loop — and not to the router.
@@ -334,6 +347,27 @@ describe('ToolModule wiring', () => {
       await app.close();
       if (previous === undefined) delete process.env.ENABLED_CHAINS;
       else process.env.ENABLED_CHAINS = previous;
+    }
+  });
+
+  it('without ToolEgressModule: boots for quotes, and route() refuses', async () => {
+    const app = await NestFactory.createApplicationContext(ToolWithoutEgressHarnessModule, {
+      logger: false,
+      abortOnError: false,
+    });
+
+    try {
+      expect(() => app.get(BINDING_INVOKER, { strict: false })).toThrow();
+      await expect(
+        app.get(ProviderRouterService).route({
+          toolId: 'search_web',
+          callId: 'test-call-id',
+          input: {},
+          context: ROUTING_CONTEXT,
+        }),
+      ).rejects.toThrow('no BINDING_INVOKER in this process');
+    } finally {
+      await app.close();
     }
   });
 
