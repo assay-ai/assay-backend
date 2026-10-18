@@ -30,8 +30,11 @@ import { ToolTier } from '@modules/tool/ports/tool.types';
  *   every write is scoped to the caller's own session.
  * - `stake` — the bonded amount per chain, the same figure that is readable on
  *   chain. Amounts only: no account or authority address.
- * - `quality` — the measured pass rate over closed SLA windows, aggregated
- *   across all buyers; it names no buyer.
+ * - `quality` — the measured pass rate over the last 30 days of SLA windows,
+ *   open and closed, aggregated across all buyers; it names no buyer.
+ * - `prices` — the quote per chain with the `providerId` setting it, the same
+ *   public id the provider list already carries.
+ * - `promisedFailureRate` — the rate a listing promises; the provider published it.
  */
 export class PublicMoneyDto {
   @ApiProperty({ description: 'Atomic units as a decimal integer string', example: '250000' })
@@ -58,6 +61,25 @@ export class PublicQualityDto {
 
   @ApiProperty()
   failedCalls: number;
+}
+
+export class PublicChainPriceDto {
+  @ApiProperty({ description: 'CAIP-2 chain a call settles on at this price' })
+  chainId: string;
+
+  @ApiProperty({ type: PublicMoneyDto, description: 'The most a call on this chain is charged.' })
+  price: PublicMoneyDto;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    description:
+      'The provider whose listing sets this price; null when several eligible listings share it.',
+  })
+  providerId: string | null;
+
+  @ApiProperty({ description: 'Eligible listings on this chain. Name the provider only when 1.' })
+  listings: number;
 }
 
 export class PublicProviderDto {
@@ -110,6 +132,9 @@ export class PublicProviderToolDto {
 
   @ApiProperty({ type: PublicMoneyDto })
   price: PublicMoneyDto;
+
+  @ApiProperty({ description: 'The failure rate this listing promises, 0..1.', example: 0.05 })
+  promisedFailureRate: number;
 
   @ApiProperty({
     type: Number,
@@ -258,6 +283,13 @@ export class PublicToolDto {
     description: 'CAIP-2 chains a call would settle on; null when nothing is routable.',
   })
   settlementChains: string[] | null;
+
+  @ApiProperty({
+    type: [PublicChainPriceDto],
+    description:
+      'The price per chain, with the provider setting it. Empty when nothing is routable.',
+  })
+  prices: PublicChainPriceDto[];
 }
 
 export class PublicToolListDto {
