@@ -1,7 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
-import { IsNull } from 'typeorm';
+import { In, IsNull } from 'typeorm';
 
 import { AccountBlockEntity } from '@database/postgres/entities/account-block.entity';
 import { AccountBlockRepository } from '@database/postgres/repositories/account-block.repository';
@@ -307,10 +307,12 @@ export class OperatorAccountBlockService {
   }
 
   /**
-   * A name for every blocked organization, so no row reads as a bare uuid:
-   * the provider's public name when it is a provider (listed or not, as the
-   * case view names it), else the organization's own name. Operators read
-   * across tenants by construction, so neither is a disclosure.
+   * A name for every blocked organization that has a public one: the
+   * provider's public name (listed or not, as the case view names it), else
+   * the organization's public handle (`@handle`). Never `organizations.name`:
+   * for a login-created tenant that is the signup email's local part, personal
+   * data no operator screen shows. Without either, null, and the console shows
+   * a short id.
    */
   private async organizationNames(
     rows: readonly AccountBlockEntity[],
@@ -324,10 +326,11 @@ export class OperatorAccountBlockService {
     ];
     if (ids.length === 0) return new Map();
     const names = new Map(await this.providers.findDisplayNames(ids));
-    for (const id of ids) {
-      if (names.has(id)) continue;
-      const organization = await this.organizations.findById(id);
-      if (organization?.name) names.set(id, organization.name);
+    const rest = ids.filter((id) => !names.has(id));
+    if (rest.length > 0) {
+      for (const organization of await this.organizations.findBy({ id: In(rest) })) {
+        if (organization.handle) names.set(organization.id, `@${organization.handle}`);
+      }
     }
     return names;
   }

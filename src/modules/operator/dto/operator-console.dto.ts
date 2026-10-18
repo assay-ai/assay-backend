@@ -915,8 +915,8 @@ export class AccountBlockDto {
     nullable: true,
     type: String,
     description:
-      "An organization's name: the provider's public name, else the organization's own. " +
-      'Null for a wallet, or an organization with no row',
+      "An organization's public name: the provider's name, else its public handle (@handle). " +
+      'Never the organization name, which can come from an email. Null for a wallet or when there is none',
   })
   subjectName: string | null;
 
