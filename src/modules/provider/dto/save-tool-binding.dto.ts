@@ -78,13 +78,16 @@ export class SaveToolBindingBodyDto {
   @IsIn(Object.values(PricingMode))
   pricingMode: PricingMode;
 
-  @ApiPropertyOptional({
+  /**
+   * Required, with no default (D10): the provider says how their endpoint
+   * authenticates calls. A silent `NONE` made the least safe choice for them.
+   */
+  @ApiProperty({
     enum: BindingAuthMode,
-    description: 'How the endpoint authenticates calls. Defaults to NONE.',
+    description: 'How the endpoint authenticates calls. Required: there is no default.',
   })
-  @IsOptional()
   @IsEnum(BindingAuthMode)
-  authMode?: BindingAuthMode;
+  authMode: BindingAuthMode;
 
   /**
    * Minor units, as digits.

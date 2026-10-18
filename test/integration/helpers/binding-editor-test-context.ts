@@ -85,6 +85,7 @@ import { CredentialVaultService } from '@modules/provider/credentials/credential
 import { ProviderToolBindingsService } from '@modules/provider/services/provider-tool-bindings.service';
 import { MinimumStakeParameters } from '@modules/tool/domain/routing/routing.types';
 import { BindingInvokerPort } from '@modules/tool/ports/binding-invoker.port';
+import { RequestSignerService } from '@modules/tool/request-auth/request-signer.service';
 import { ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
 import { staticToolContracts } from '@modules/tool/ports/tool-contracts.port';
 import { Tool, ToolTier } from '@modules/tool/ports/tool.types';
@@ -225,6 +226,8 @@ export async function createBindingEditorTestContext(
   invoker: BindingInvokerPort,
   /** The contract the bindings implement; {@link TOOL} (one implicit version) by default. */
   tool: Tool = TOOL,
+  /** The signer the invoker uses, so the tester names the headers it adds. Keyless by default. */
+  signer: RequestSignerService = new RequestSignerService([]),
 ): Promise<BindingEditorTestContext> {
   const database = await ensureTestDatabase(
     process.env.BINDING_TEST_DATABASE || `${process.env.DATABASE_NAME || 'app'}_binding_test`,
@@ -410,6 +413,7 @@ export async function createBindingEditorTestContext(
     invoker,
     policies,
     new ProviderEgressLimiter(),
+    signer,
   );
   const publisher = new BindingPublishService(
     editor,
