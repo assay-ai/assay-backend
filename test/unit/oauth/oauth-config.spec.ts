@@ -94,6 +94,9 @@ describe('loadOAuthConfig', () => {
     ['a query', 'https://example.com/callback?x=1'],
     ['a fragment', 'https://example.com/callback#x'],
     ['non-loopback http', 'http://example.com/callback'],
+    ['loopback http on 127.0.0.1 (its own rule, port ignored)', 'http://127.0.0.1/callback'],
+    ['loopback http on localhost', 'http://localhost:8080/callback'],
+    ['loopback http on [::1]', 'http://[::1]:3000/callback'],
     ['userinfo', 'https://user@example.com/callback'],
     ['javascript:', 'javascript:alert(1)'],
     ['an obfuscated javascript:', 'java\tscript:alert(1)'],
@@ -137,14 +140,12 @@ describe('loadOAuthConfig', () => {
     );
   });
 
-  it('accepts exact https, loopback http and private-use scheme redirects', () => {
+  it('accepts exact https and private-use scheme redirects', () => {
     const entries = [
       { uri: 'https://example.com/callback', review: false },
       { uri: 'com.example.app:/oauth/callback', review: false },
       { uri: 'cursor://anysphere.cursor-mcp/oauth/callback', review: true },
       { uri: 'vscode://example.ext/callback', review: true },
-      { uri: 'http://127.0.0.1/callback', review: false },
-      { uri: 'http://localhost:8080/callback', review: false },
     ];
     const config = loadOAuthConfig(env({ OAUTH_REDIRECT_ALLOWLIST: JSON.stringify(entries) }));
     expect(config.redirectAllowlist).toEqual(entries);

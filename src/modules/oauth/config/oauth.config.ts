@@ -75,9 +75,6 @@ const REVERSE_DOMAIN_SCHEME = /^[a-z][a-z0-9+-]*(?:\.[a-z0-9+-]+)+:$/;
 /** Vendor schemes without a dot, admitted by name (the §6.3.9 Cursor default). */
 const NAMED_PRIVATE_SCHEMES: ReadonlySet<string> = new Set(['cursor:', 'vscode:']);
 
-/** RFC 8252 §7.3 loopback hosts, as `URL.hostname` gives them. */
-const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['127.0.0.1', '[::1]', 'localhost']);
-
 export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConfig {
   // First, so the secret leaves the environment even when a check below throws.
   const [requestCookieSecret] = takeOnceFromEnv(env, OAUTH_REQUEST_COOKIE_SECRET_ENV, (raw) => {
@@ -192,8 +189,7 @@ function parseRedirectAllowlist(raw: string | undefined): readonly OAuthRedirect
 
 /**
  * Why `uri` cannot be an allowlist entry, or `null` (§6.3.9). A positive rule:
- * an exact, canonical `https:` URI; a loopback `http:` URI (RFC 8252 §7.3); or
- * a private-use scheme (RFC 8252 §7.1: reverse-domain, or one of
+ * an exact, canonical `https:` URI, or a private-use scheme (RFC 8252 §7.1: reverse-domain, or one of
  * {@link NAMED_PRIVATE_SCHEMES}) with a path. Everything else is refused. No
  * wildcard, query, fragment or userinfo in any of them.
  */
@@ -210,16 +206,18 @@ function redirectUriProblem(uri: string): string | null {
   if (parsed.username || parsed.password) return 'no userinfo is allowed';
 
   const { protocol } = parsed;
-  if (protocol === 'https:' || protocol === 'http:') {
-    if (protocol === 'http:' && !LOOPBACK_HOSTS.has(parsed.hostname)) {
-      return 'http is allowed for a loopback host only';
-    }
+  if (protocol === 'http:') {
+    // Loopback is §6.3.9 rule 1, matched with the port ignored; an exact
+    // allowlist entry would pin a port and duplicate that rule.
+    return 'http is never an allowlist entry; loopback redirects are allowed by their own rule';
+  }
+  if (protocol === 'https:') {
     // The match is exact on the string, so it must be the form a browser sends.
     if (parsed.href !== uri) return `not canonical; write it as "${parsed.href}"`;
     return null;
   }
   if (!REVERSE_DOMAIN_SCHEME.test(protocol) && !NAMED_PRIVATE_SCHEMES.has(protocol)) {
-    return 'only an exact https URI, a loopback http URI or a private-use (reverse-domain) scheme is allowed';
+    return 'only an exact https URI or a private-use (reverse-domain) scheme is allowed';
   }
   if (!parsed.pathname || parsed.pathname === '/') return 'a private-use redirect needs a path';
   return null;
