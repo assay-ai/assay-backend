@@ -4,7 +4,7 @@ import { join } from 'node:path';
 import { Logger } from '@nestjs/common';
 import Redis from 'ioredis';
 import { Client } from 'pg';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
 import { AuditLogEntryEntity } from '@database/postgres/entities/audit-log-entry.entity';
@@ -475,6 +475,40 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expect(await auditOf('oauth.refresh_grace_used', credentialId)).toHaveLength(0);
   });
 
+  it.each([
+    ['revoked', `"revoked_at" = now(), "revoked_by" = 'user-elsewhere'`],
+    ['expired', `"expires_at" = now() - interval '1 second'`],
+  ])(
+    'a grace pair whose credential was %s after the pre-checks → invalid_grant, no revoke',
+    async (_label, change) => {
+      const { credentialId, pair } = await grant();
+      expectPair(await refresh(pair.refresh_token));
+      const before = await credential(credentialId);
+      // The window: after refresh's credential check, before the grace read.
+      // A revocation here has committed but its sweep has not reached the child.
+      const grants = (service as unknown as { grants: OAuthGrantWriter }).grants;
+      const rotate = grants.rotateRefresh.bind(grants);
+      const spy = jest.spyOn(grants, 'rotateRefresh').mockImplementation(async (input) => {
+        const result = await rotate(input);
+        await dataSource.query(`UPDATE "agent_credentials" SET ${change} WHERE "id" = $1`, [
+          credentialId,
+        ]);
+        return result;
+      });
+      try {
+        expect(await refresh(pair.refresh_token)).toEqual({ error: 'invalid_grant' });
+      } finally {
+        spy.mockRestore();
+      }
+      const after = await credential(credentialId);
+      // Nothing revoked by the grace path itself.
+      expect(after.revokedBy).toBe(_label === 'revoked' ? 'user-elsewhere' : before.revokedBy);
+      expect(await auditOf('oauth.refresh_grace_used', credentialId)).toHaveLength(0);
+      expect(await counter('assay_oauth_refresh_grace_total')).toBe(0);
+      expect(notifications).toHaveLength(0);
+    },
+  );
+
   // ── reuse after the grace ──────────────────────────────────────────────────
 
   it('reuse at 31 s after a child access token was used → grant revoked + notification + oauth_refresh_reuse_total{kind="revoked"}', async () => {
@@ -764,14 +798,16 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     await ageUse(reused.pair.refresh_token, 31);
     const loggedOut = await grant();
 
-    // Only the sweep's statements read "agent_credentials" c through the data source.
-    const query = dataSource.query.bind(dataSource);
-    const spy = jest
-      .spyOn(dataSource, 'query')
-      .mockImplementation(async (sql: string, ...rest: unknown[]) => {
-        if (sql.includes('FROM "agent_credentials" c')) throw new Error('deadlock detected');
-        return query(sql, ...(rest as [unknown[]]));
-      });
+    // Only the sweep's statements read "agent_credentials" c.
+    const query = EntityManager.prototype.query;
+    const spy = jest.spyOn(EntityManager.prototype, 'query').mockImplementation(async function (
+      this: EntityManager,
+      sql: string,
+      ...rest: unknown[]
+    ) {
+      if (sql.includes('FROM "agent_credentials" c')) throw new Error('deadlock detected');
+      return query.call(this, sql, ...(rest as [unknown[]]));
+    });
     const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
     try {
       expect(await refresh(reused.pair.refresh_token)).toEqual({ error: 'invalid_grant' });

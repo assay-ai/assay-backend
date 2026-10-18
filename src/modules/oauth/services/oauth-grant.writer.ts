@@ -627,36 +627,52 @@ async function insertReturningId<T extends ObjectLiteral>(
 const sweepLogger = new Logger('OAuthTokenSweep');
 
 /**
+ * How long one sweep statement waits for a token row another transaction
+ * holds. A rotation holds its row for at most its grace write (500 ms), so
+ * this is generous; anything held longer is left to the cleanup backstop.
+ */
+export const OAUTH_TOKEN_SWEEP_LOCK_TIMEOUT_MS = 5_000;
+
+/**
  * The post-commit sweep of a revoked credential (R-OA-23): every token of it
  * still live gets the credential's `revoked_at`.
  *
- * Runs after the revoking transaction has committed, outside any
- * transaction and holding no other lock. Each statement waits for a token row
- * an in-flight rotation holds (the row `SKIP LOCKED` left), so a rotation
- * that rolled back instead of revoking its own token is caught here. It does
- * nothing unless the credential is revoked, and is idempotent. Every path
- * that revokes an OAuth credential calls it, the admin revoke included.
+ * Runs after the revoking transaction has committed, holding no other lock.
+ * Each of its two statements (refresh tokens, then access tokens) runs in its
+ * own short transaction with `SET LOCAL lock_timeout`, so it waits for a token
+ * row an in-flight rotation holds (the row `SKIP LOCKED` left), but never
+ * longer than {@link OAUTH_TOKEN_SWEEP_LOCK_TIMEOUT_MS}. A rotation that rolled
+ * back instead of revoking its own token is caught here. It does nothing
+ * unless the credential is revoked, and is idempotent. Every path that
+ * revokes an OAuth credential calls it, the admin revoke included.
  *
  * Best effort: it never throws. The revocation it follows has committed, and
  * every authentication path already refuses a token of a revoked credential,
- * so a failed sweep (a deadlock victim, a dropped connection) must not fail
- * that operation or skip what follows it (the access-epoch bump, the
- * notification). The failure is logged, and the cleanup job's backstop pass
- * revokes the stray tokens. Returns whether both statements ran.
+ * so a failed or timed-out sweep (a lock timeout, a deadlock victim, a
+ * dropped connection) must not fail that operation or skip what follows it
+ * (the access-epoch bump, the notification). The failure is logged, and the
+ * cleanup job's backstop pass revokes the stray tokens. Returns whether both
+ * statements ran.
  */
 export async function sweepRevokedCredentialTokens(
-  executor: Pick<DataSource, 'query'>,
+  executor: Pick<DataSource, 'transaction'>,
   credentialId: string,
+  options: { readonly lockTimeoutMs?: number } = {},
 ): Promise<boolean> {
+  const lockTimeoutMs = Math.trunc(options.lockTimeoutMs ?? OAUTH_TOKEN_SWEEP_LOCK_TIMEOUT_MS);
   try {
     for (const table of ['oauth_refresh_tokens', 'oauth_access_tokens']) {
-      await executor.query(
-        `UPDATE "${table}" t SET "revoked_at" = c."revoked_at"
-           FROM "agent_credentials" c
-          WHERE t."credential_id" = $1 AND c."id" = t."credential_id"
-            AND c."revoked_at" IS NOT NULL AND t."revoked_at" IS NULL`,
-        [credentialId],
-      );
+      await executor.transaction(async (manager) => {
+        // `SET LOCAL` takes no bind parameter; the value is an integer.
+        await manager.query(`SET LOCAL lock_timeout = '${lockTimeoutMs}ms'`);
+        await manager.query(
+          `UPDATE "${table}" t SET "revoked_at" = c."revoked_at"
+             FROM "agent_credentials" c
+            WHERE t."credential_id" = $1 AND c."id" = t."credential_id"
+              AND c."revoked_at" IS NOT NULL AND t."revoked_at" IS NULL`,
+          [credentialId],
+        );
+      });
     }
     return true;
   } catch (error) {

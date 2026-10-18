@@ -102,7 +102,7 @@ export class OAuthAccessTokenMcpSessionSource implements McpSessionPort {
       throw McpErrors.credentialInvalid();
     }
 
-    const paymentsAllowed = isPaymentClient(this.config.paymentClients, client.clientId);
+    const paymentsAllowed = isPaymentClient(this.config.paymentClients, client);
     if (this.role === 'api' && !paymentsAllowed) {
       throw AuthErrors.clientNotAllowedHere();
     }
