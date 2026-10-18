@@ -21,6 +21,7 @@ const ROGUE = 'f'.repeat(64);
 
 function event(requestId: string, beneficiary: `0x${string}`, penalty: bigint): SlashProposedLog {
   return {
+    eventName: 'SlashProposed',
     args: {
       requestId: `0x${requestId}`,
       provider: '0x00000000000000000000000000000000000000c1',

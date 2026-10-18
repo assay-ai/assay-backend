@@ -59,13 +59,9 @@ export interface EvmSlashWatchClient {
   }): Promise<readonly SlashProposedLog[]>;
 }
 
-/**
- * One decoded log of {@link X402_SLASH_WATCH_EVENTS_ABI}. `eventName` absent is
- * read as `SlashProposed`, the only event an earlier version of this watcher
- * asked for.
- */
+/** One decoded log of {@link X402_SLASH_WATCH_EVENTS_ABI}. */
 export interface SlashProposedLog {
-  readonly eventName?:
+  readonly eventName:
     | 'SlashProposed'
     | 'SlashDisputed'
     | 'SlashUpheld'
@@ -236,7 +232,7 @@ export class EvmSlashProposalWatcher {
       );
     }
 
-    const proposed = logs.filter((log) => (log.eventName ?? 'SlashProposed') === 'SlashProposed');
+    const proposed = logs.filter((log) => log.eventName === 'SlashProposed');
     const { findings, late } = await this.compare(chainId, proposed);
     await this.readoptLate(chainId, late);
     // A failure here throws before the cursor moves, so the range is re-read
