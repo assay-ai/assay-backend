@@ -75,6 +75,7 @@ function escrowState(): EscrowState {
   return {
     exists: true,
     chainReadable: true,
+    lifetime: null,
     account: ALICE.account,
     escrowPda: null,
     escrowTokenAccount: null,

@@ -58,6 +58,7 @@ function escrowState(): EscrowState {
   return {
     exists: true,
     chainReadable: true,
+    lifetime: null,
     account: BUYER,
     escrowPda: null,
     escrowTokenAccount: null,

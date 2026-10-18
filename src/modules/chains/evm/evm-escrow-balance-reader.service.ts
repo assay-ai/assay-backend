@@ -206,6 +206,11 @@ export class EvmEscrowBalanceReader implements EscrowBalanceReaderPort {
       spentInWindow: escrow.spentInWindow,
       windowStartedAt: Number(escrow.windowStartedAt),
       observedAt: new Date(),
+      lifetime: {
+        funded: escrow.totalFunded,
+        redeemed: escrow.totalRedeemed,
+        withdrawn: escrow.totalWithdrawn,
+      },
     };
   }
 
