@@ -193,15 +193,57 @@ describe('handleRelay', () => {
     await expectError(await handleRelay(req(envelope({ timeoutMs: 30 })), env, impl), 'TIMEOUT');
   });
 
-  it('returns TOO_LARGE when the body exceeds maxResponseBytes', async () => {
-    const f = recorder(() => new Response('x'.repeat(100)));
-    const res = await handleRelay(req(envelope({ maxResponseBytes: 10 })), env, f.impl);
-    // Either rejected up front, or the stream errors while counting.
-    if (res.headers.get('x-assay-relay') === 'error') {
-      await expectError(res, 'TOO_LARGE');
-    } else {
-      await expect(res.text()).rejects.toBeDefined();
+  it('returns TOO_LARGE when a stream without content-length exceeds the cap', async () => {
+    const f = recorder(
+      () =>
+        new Response(
+          new ReadableStream({
+            start(c) {
+              c.enqueue(new Uint8Array(8));
+              c.enqueue(new Uint8Array(8));
+              c.close();
+            },
+          }),
+        ),
+    );
+    await expectError(
+      await handleRelay(req(envelope({ maxResponseBytes: 10 })), env, f.impl),
+      'TOO_LARGE',
+    );
+  });
+
+  it('blocks internal host names', async () => {
+    for (const url of [
+      'https://localhost/',
+      'https://a.localhost/',
+      'https://x.local/',
+      'https://db.internal/',
+    ]) {
+      await expectError(
+        await handleRelay(req(envelope({ url })), env, recorder().impl),
+        'BLOCKED_TARGET',
+      );
     }
+  });
+
+  it('ALLOW_HTTP relaxes only the scheme; port check stays', async () => {
+    const e = { ...env, ALLOW_HTTP: '1' };
+    await expectError(
+      await handleRelay(req(envelope({ url: 'http://p.test:6379' })), e, recorder().impl),
+      'BLOCKED_TARGET',
+    );
+    const res = await handleRelay(req(envelope({ url: 'http://p.test:80/' })), e, recorder().impl);
+    expect(res.headers.get('x-assay-relay')).toBe('upstream');
+  });
+
+  it('returns CONNECT for an upstream status outside 200-599', async () => {
+    const impl = (async () => ({
+      status: 101,
+      statusText: '',
+      headers: new Headers(),
+      body: null,
+    })) as unknown as typeof fetch;
+    await expectError(await handleRelay(req(envelope()), env, impl), 'CONNECT');
   });
 
   it('returns TOO_LARGE up front when content-length exceeds the cap', async () => {
