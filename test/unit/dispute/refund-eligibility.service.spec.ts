@@ -33,14 +33,14 @@ function call(overrides: Partial<PaymentIntentEntity> = {}): PaymentIntentEntity
 }
 
 function build(
-  held: Partial<HeldPaymentsPort> | null = { holdLive: async () => true },
+  held: Partial<HeldPaymentsPort> = { holdLive: async () => true },
   decided = null,
 ) {
   const disputes = { findOneBy: jest.fn().mockResolvedValue(decided) };
   const service = new RefundEligibilityService(
     disputes as unknown as DisputeRepository,
     DEFAULT_CALL_DISPUTE_CONFIG,
-    held as HeldPaymentsPort | null,
+    held as HeldPaymentsPort,
   );
   return { service, disputes };
 }

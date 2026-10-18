@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
+import { Inject, Injectable, Logger } from '@nestjs/common';
 import { In } from 'typeorm';
 
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
@@ -52,7 +52,7 @@ export class RefundEligibilityService {
   constructor(
     private readonly disputes: DisputeRepository,
     @Inject(CALL_DISPUTE_CONFIG) private readonly config: CallDisputeConfig,
-    @Optional() @Inject(HELD_PAYMENTS) private readonly held: HeldPaymentsPort | null = null,
+    @Inject(HELD_PAYMENTS) private readonly held: HeldPaymentsPort,
   ) {}
 
   async ofCall(
@@ -97,7 +97,6 @@ export class RefundEligibilityService {
 
   /** The chain's answer, or `false` on no port, an error or no answer within the timeout. */
   private async holdLive(intent: PaymentIntentEntity): Promise<boolean> {
-    if (!this.held) return false;
     let timer: NodeJS.Timeout | undefined;
     try {
       return await Promise.race([
