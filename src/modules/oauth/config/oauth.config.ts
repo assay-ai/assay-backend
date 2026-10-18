@@ -66,24 +66,17 @@ export const DEFAULT_OAUTH_REDIRECT_ALLOWLIST: readonly OAuthRedirectAllowlistEn
 
 /** At least 32 random bytes, hex. */
 const SECRET_SHAPE = /^(?:[0-9a-f]{2}){32,}$/i;
+/** A random 32-byte key has ~25 distinct bytes; fewer than this is not random. */
+const MIN_DISTINCT_SECRET_BYTES = 16;
 
-/**
- * Schemes that are never a private-use redirect: the web, scripts, local
- * content. Loopback `http:` is rule 1 of §6.3.9 and never an allowlist entry.
- */
-const NON_PRIVATE_SCHEMES = new Set([
-  'http:',
-  'javascript:',
-  'data:',
-  'file:',
-  'blob:',
-  'about:',
-  'vbscript:',
-  'ws:',
-  'wss:',
-  'ftp:',
-  'mailto:',
-]);
+/** RFC 8252 §7.1: a private-use scheme is a reverse domain name, so it has a dot. */
+const REVERSE_DOMAIN_SCHEME = /^[a-z][a-z0-9+-]*(?:\.[a-z0-9+-]+)+:$/;
+
+/** Vendor schemes without a dot, admitted by name (the §6.3.9 Cursor default). */
+const NAMED_PRIVATE_SCHEMES: ReadonlySet<string> = new Set(['cursor:', 'vscode:']);
+
+/** RFC 8252 §7.3 loopback hosts, as `URL.hostname` gives them. */
+const LOOPBACK_HOSTS: ReadonlySet<string> = new Set(['127.0.0.1', '[::1]', 'localhost']);
 
 export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConfig {
   // First, so the secret leaves the environment even when a check below throws.
@@ -94,7 +87,13 @@ export function loadOAuthConfig(env: NodeJS.ProcessEnv = process.env): OAuthConf
         `${OAUTH_REQUEST_COOKIE_SECRET_ENV} must be at least 32 random bytes, hex-encoded`,
       );
     }
-    return [Buffer.from(value, 'hex')];
+    const secret = Buffer.from(value, 'hex');
+    if (new Set(secret).size < MIN_DISTINCT_SECRET_BYTES) {
+      throw new Error(
+        `${OAUTH_REQUEST_COOKIE_SECRET_ENV} is not random; generate one with openssl rand -hex 32`,
+      );
+    }
+    return [secret];
   });
 
   if (env.AUTH_SESSION_SOURCE !== SessionSourceMode.BOTH) {
@@ -174,6 +173,7 @@ function parseRedirectAllowlist(raw: string | undefined): readonly OAuthRedirect
   const parsed = parseJson(name, raw);
   if (!Array.isArray(parsed)) throw new Error(`${name} must be a JSON array of {uri, review}`);
 
+  const seen = new Set<string>();
   return Object.freeze(
     parsed.map((entry: unknown, index) => {
       const { uri, review } = (entry ?? {}) as { uri?: unknown; review?: unknown };
@@ -182,14 +182,20 @@ function parseRedirectAllowlist(raw: string | undefined): readonly OAuthRedirect
       }
       const problem = redirectUriProblem(uri);
       if (problem) throw new Error(`${name}[${index}] "${uri}": ${problem}`);
+      // A duplicate could list one URI as both under review and cleared.
+      if (seen.has(uri)) throw new Error(`${name}[${index}] "${uri}" is listed twice`);
+      seen.add(uri);
       return Object.freeze({ uri, review });
     }),
   );
 }
 
 /**
- * Why `uri` cannot be an allowlist entry, or `null`. Exact `https:` URIs and
- * private-use schemes only (§6.3.9): no wildcard, query or fragment.
+ * Why `uri` cannot be an allowlist entry, or `null` (§6.3.9). A positive rule:
+ * an exact, canonical `https:` URI; a loopback `http:` URI (RFC 8252 §7.3); or
+ * a private-use scheme (RFC 8252 §7.1: reverse-domain, or one of
+ * {@link NAMED_PRIVATE_SCHEMES}) with a path. Everything else is refused. No
+ * wildcard, query, fragment or userinfo in any of them.
  */
 function redirectUriProblem(uri: string): string | null {
   if (uri.includes('*')) return 'no wildcard is allowed';
@@ -202,10 +208,20 @@ function redirectUriProblem(uri: string): string | null {
   if (parsed.search || uri.includes('?')) return 'no query is allowed';
   if (parsed.hash || uri.includes('#')) return 'no fragment is allowed';
   if (parsed.username || parsed.password) return 'no userinfo is allowed';
-  if (parsed.protocol === 'https:') return parsed.hostname ? null : 'an https URI needs a host';
-  if (NON_PRIVATE_SCHEMES.has(parsed.protocol)) {
-    return 'only an exact https URI or a private-use scheme is allowed';
+
+  const { protocol } = parsed;
+  if (protocol === 'https:' || protocol === 'http:') {
+    if (protocol === 'http:' && !LOOPBACK_HOSTS.has(parsed.hostname)) {
+      return 'http is allowed for a loopback host only';
+    }
+    // The match is exact on the string, so it must be the form a browser sends.
+    if (parsed.href !== uri) return `not canonical; write it as "${parsed.href}"`;
+    return null;
   }
+  if (!REVERSE_DOMAIN_SCHEME.test(protocol) && !NAMED_PRIVATE_SCHEMES.has(protocol)) {
+    return 'only an exact https URI, a loopback http URI or a private-use (reverse-domain) scheme is allowed';
+  }
+  if (!parsed.pathname || parsed.pathname === '/') return 'a private-use redirect needs a path';
   return null;
 }
 
@@ -254,12 +270,25 @@ function parseVerifiedClients(
   );
 }
 
+/**
+ * Owner decision H2 (§6.3.13): only the built-in `assay-mcp` client's grants
+ * may bind a payment key. The variable exists so the list is explicit in a
+ * deployment, but it cannot widen that rule: any other id fails the boot.
+ */
 function parsePaymentClients(raw: string | undefined, builtin: string): readonly string[] {
   if (!raw?.trim()) return Object.freeze([builtin]);
   const name = OAUTH_PAYMENT_CLIENTS_ENV;
   const parsed = parseJson(name, raw);
-  if (!Array.isArray(parsed) || !parsed.every(isNonEmptyString)) {
-    throw new Error(`${name} must be a JSON array of client id strings`);
+  if (!Array.isArray(parsed) || parsed.length === 0 || !parsed.every(isNonEmptyString)) {
+    throw new Error(`${name} must be a non-empty JSON array of client id strings`);
   }
-  return Object.freeze([...parsed]);
+  for (const clientId of parsed) {
+    if (clientId !== builtin) {
+      throw new Error(
+        `${name}: "${clientId}" is not the built-in client "${builtin}"; ` +
+          'only assay-mcp grants may bind a payment key',
+      );
+    }
+  }
+  return Object.freeze([...new Set(parsed)]);
 }

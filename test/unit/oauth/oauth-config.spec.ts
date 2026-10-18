@@ -5,7 +5,8 @@ import {
   loadOAuthConfig,
 } from '@modules/oauth/config/oauth.config';
 
-const SECRET = 'ab'.repeat(32);
+/** 32 distinct bytes, as a random key would be. */
+const SECRET = Buffer.from(Array.from({ length: 32 }, (_, i) => i * 7 + 3)).toString('hex');
 
 function env(overrides: Record<string, string | undefined> = {}): NodeJS.ProcessEnv {
   return {
@@ -39,15 +40,34 @@ describe('loadOAuthConfig', () => {
     ]);
   });
 
-  it('reads OAUTH_PAYMENT_CLIENTS as a JSON string array', () => {
-    const config = loadOAuthConfig(
-      env({ OAUTH_PAYMENT_CLIENTS: JSON.stringify(['https://a.example.com/client']) }),
-    );
-    expect(config.paymentClients).toEqual(['https://a.example.com/client']);
-    expect(() => loadOAuthConfig(env({ OAUTH_PAYMENT_CLIENTS: '{"a":1}' }))).toThrow(
+  it('accepts OAUTH_PAYMENT_CLIENTS naming the built-in client', () => {
+    const builtin = 'https://mcp.example.com/oauth/clients/assay-mcp';
+    const config = loadOAuthConfig(env({ OAUTH_PAYMENT_CLIENTS: JSON.stringify([builtin]) }));
+    expect(config.paymentClients).toEqual([builtin]);
+  });
+
+  it.each([
+    ['a hosted connector', ['https://claude.ai/oauth/client.json']],
+    ['a DCR client', ['dcr_abcdefghijklmnopqrstuv']],
+    ['the built-in path on another origin', ['https://evil.example.com/oauth/clients/assay-mcp']],
+    [
+      'the built-in client plus another',
+      ['https://mcp.example.com/oauth/clients/assay-mcp', 'https://a.example.com/client'],
+    ],
+  ])('refuses OAUTH_PAYMENT_CLIENTS naming %s (owner decision H2)', (_label, clients) => {
+    expect(() => loadOAuthConfig(env({ OAUTH_PAYMENT_CLIENTS: JSON.stringify(clients) }))).toThrow(
       /OAUTH_PAYMENT_CLIENTS/,
     );
   });
+
+  it.each(['{"a":1}', '[]', '[1]', 'not json'])(
+    'refuses a malformed OAUTH_PAYMENT_CLIENTS (%s)',
+    (raw) => {
+      expect(() => loadOAuthConfig(env({ OAUTH_PAYMENT_CLIENTS: raw }))).toThrow(
+        /OAUTH_PAYMENT_CLIENTS/,
+      );
+    },
+  );
 
   it('keeps the unconfirmed default redirects under review', () => {
     const review = (uri: string) =>
@@ -73,14 +93,40 @@ describe('loadOAuthConfig', () => {
   it.each([
     ['a query', 'https://example.com/callback?x=1'],
     ['a fragment', 'https://example.com/callback#x'],
-    ['plain http', 'http://example.com/callback'],
+    ['non-loopback http', 'http://example.com/callback'],
     ['userinfo', 'https://user@example.com/callback'],
-    ['a dangerous scheme', 'javascript:alert(1)'],
+    ['javascript:', 'javascript:alert(1)'],
+    ['an obfuscated javascript:', 'java\tscript:alert(1)'],
+    ['data:', 'data:text/html,x'],
+    ['file:', 'file:///etc/passwd'],
+    ['filesystem:', 'filesystem:https://example.com/temporary/x'],
+    ['view-source:', 'view-source:https://example.com/'],
+    ['jar:', 'jar:https://example.com/a.jar!/x'],
+    ['intent:', 'intent://x'],
+    ['content:', 'content://com.example.provider/x'],
+    ['chrome-extension:', 'chrome-extension://abcdefghijklmnop/cb'],
+    ['tel:', 'tel:+15550100'],
+    ['a bare x:', 'x:'],
+    ['a private-use scheme without a path', 'com.example.app:'],
+    ['an upper-case https URI', 'HTTPS://EXAMPLE.COM/cb'],
+    ['an explicit default port', 'https://example.com:443/cb'],
+    ['a backslash in the authority', 'https://example.com\\@evil.example.com/'],
     ['no URI at all', 'not a uri'],
   ])('rejects a redirect with %s', (_label, uri) => {
     const allowlist = JSON.stringify([{ uri, review: false }]);
     expect(() => loadOAuthConfig(env({ OAUTH_REDIRECT_ALLOWLIST: allowlist }))).toThrow(
       /OAUTH_REDIRECT_ALLOWLIST/,
+    );
+  });
+
+  it('rejects a URI listed twice', () => {
+    const uri = 'https://example.com/callback';
+    const allowlist = JSON.stringify([
+      { uri, review: true },
+      { uri, review: false },
+    ]);
+    expect(() => loadOAuthConfig(env({ OAUTH_REDIRECT_ALLOWLIST: allowlist }))).toThrow(
+      /listed twice/,
     );
   });
 
@@ -91,10 +137,14 @@ describe('loadOAuthConfig', () => {
     );
   });
 
-  it('accepts an exact https and a private-use scheme redirect', () => {
+  it('accepts exact https, loopback http and private-use scheme redirects', () => {
     const entries = [
       { uri: 'https://example.com/callback', review: false },
       { uri: 'com.example.app:/oauth/callback', review: false },
+      { uri: 'cursor://anysphere.cursor-mcp/oauth/callback', review: true },
+      { uri: 'vscode://example.ext/callback', review: true },
+      { uri: 'http://127.0.0.1/callback', review: false },
+      { uri: 'http://localhost:8080/callback', review: false },
     ];
     const config = loadOAuthConfig(env({ OAUTH_REDIRECT_ALLOWLIST: JSON.stringify(entries) }));
     expect(config.redirectAllowlist).toEqual(entries);
@@ -194,6 +244,16 @@ describe('loadOAuthConfig', () => {
       );
     });
 
+    it.each([
+      ['all bytes equal', '00'.repeat(32)],
+      ['two distinct bytes', 'ab'.repeat(32)],
+      ['fewer than 16 distinct bytes', '000102030405060708090a0b0c0d0e'.repeat(2) + '0001'],
+    ])('rejects a low-entropy value (%s)', (_label, value) => {
+      expect(() => loadOAuthConfig(env({ [OAUTH_REQUEST_COOKIE_SECRET_ENV]: value }))).toThrow(
+        /not random/,
+      );
+    });
+
     it('needs at least 32 bytes of hex, and never quotes the value', () => {
       const short = 'cd'.repeat(31);
       let message = '';
@@ -215,6 +275,13 @@ describe('loadOAuthConfig', () => {
       const bad = env({ AUTH_SESSION_SOURCE: 'config' });
       expect(() => loadOAuthConfig(bad)).toThrow();
       expect(bad[OAUTH_REQUEST_COOKIE_SECRET_ENV]).toBeUndefined();
+    });
+
+    it('is deleted when the value itself is malformed, and a second load says required', () => {
+      const bad = env({ [OAUTH_REQUEST_COOKIE_SECRET_ENV]: 'zz'.repeat(32) });
+      expect(() => loadOAuthConfig(bad)).toThrow(/hex-encoded/);
+      expect(bad[OAUTH_REQUEST_COOKIE_SECRET_ENV]).toBeUndefined();
+      expect(() => loadOAuthConfig(bad)).toThrow(/is required/);
     });
 
     it('is read once per process, so a second loader (SERVICE_TYPE=all) gets the same key', () => {

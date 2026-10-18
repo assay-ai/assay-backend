@@ -27,9 +27,13 @@ export type OAuthConsentStep =
  */
 export type OAuthTokenGrantType = 'authorization_code' | 'refresh_token' | 'other';
 
-/** `oauth_token_total{result}`: `ok`, or the RFC 6749 §5.2 / RFC 8707 error code. */
+/**
+ * `oauth_token_total{result}`: `ok`, the RFC 6749 §5.2 / RFC 8707 error code,
+ * or `rate_limited` for the 429 of §6.3.10.
+ */
 export type OAuthTokenResult =
   | 'ok'
+  | 'rate_limited'
   | 'invalid_request'
   | 'invalid_client'
   | 'invalid_grant'
@@ -59,7 +63,10 @@ export type McpUnauthorizedReason = 'missing' | 'unknown' | 'expired' | 'revoked
  * owns. Call sites only use the `inc*` / `set*` methods below; the label
  * values are closed unions, so no request value ever becomes a label.
  *
- * Names are the spec's, verbatim. Alerts (in the spec, not here):
+ * Names are the spec's with the house `assay_` prefix (`oauth_token_total` is
+ * `assay_oauth_token_total`); alerts written from §6.7 must add it. Provided
+ * once per container (by `OAuthCoreModule`), with `MetricsRegistryModule`
+ * imported: a second instance on the same registry throws. Alerts (in the spec, not here):
  * `continue_cookie_missing` above 5 % of `approved` over 1 h; any
  * `oauth_refresh_reuse_total{kind="revoked"}`; any
  * `oauth_cimd_fetch_total{result="blocked_address"}`; §6.3.8's DCR thresholds;
@@ -81,53 +88,53 @@ export class OAuthMetrics {
     const registers = [metrics.registry];
 
     this.authorizeTotal = new Counter({
-      name: 'oauth_authorize_total',
+      name: 'assay_oauth_authorize_total',
       help: 'GET /oauth/authorize outcomes.',
       labelNames: ['outcome'] as const,
       registers,
     });
     this.consentTotal = new Counter({
-      name: 'oauth_consent_total',
+      name: 'assay_oauth_consent_total',
       help: 'Consent steps. Alert: continue_cookie_missing > 5% of approved over 1h.',
       labelNames: ['step'] as const,
       registers,
     });
     this.tokenTotal = new Counter({
-      name: 'oauth_token_total',
+      name: 'assay_oauth_token_total',
       help: 'POST /oauth/token results, by grant type.',
       labelNames: ['grant_type', 'result'] as const,
       registers,
     });
     this.refreshGraceTotal = new Counter({
-      name: 'oauth_refresh_grace_total',
+      name: 'assay_oauth_refresh_grace_total',
       help: 'Rotated refresh tokens answered from the 30s grace entry.',
       registers,
     });
     this.refreshReuseTotal = new Counter({
-      name: 'oauth_refresh_reuse_total',
+      name: 'assay_oauth_refresh_reuse_total',
       help: 'Rotated refresh tokens presented after the grace. Alert: kind="revoked" > 0.',
       labelNames: ['kind'] as const,
       registers,
     });
     this.cimdFetchTotal = new Counter({
-      name: 'oauth_cimd_fetch_total',
+      name: 'assay_oauth_cimd_fetch_total',
       help: 'Client ID metadata document fetches. Alert: result="blocked_address" > 0.',
       labelNames: ['result'] as const,
       registers,
     });
     this.dcrTotal = new Counter({
-      name: 'oauth_dcr_total',
+      name: 'assay_oauth_dcr_total',
       help: 'Dynamic client registrations. Alert above 1000/day, or 100/day for one client_name.',
       registers,
     });
     this.mcpUnauthorizedTotal = new Counter({
-      name: 'mcp_unauthorized_total',
+      name: 'assay_mcp_unauthorized_total',
       help: '401s from the MCP catch-all, by reason.',
       labelNames: ['reason'] as const,
       registers,
     });
     this.liveGrantsPerAgent = new Gauge({
-      name: 'oauth_live_grants_per_agent',
+      name: 'assay_oauth_live_grants_per_agent',
       help: 'The largest number of live OAuth credentials held by one agent. Alert: >= 45.',
       registers,
     });
