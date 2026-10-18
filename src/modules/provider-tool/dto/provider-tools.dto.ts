@@ -10,6 +10,7 @@ import {
   IsString,
   IsUUID,
   Matches,
+  Max,
   MaxLength,
   Min,
   ValidateIf,
@@ -416,6 +417,9 @@ export class ProviderToolDraftDto extends ProviderToolVersionDto {
 
   @ApiProperty({ description: 'Frozen: a review of this draft is pending' })
   inReview: boolean;
+
+  @ApiProperty({ format: 'date-time', description: 'When the draft was last saved' })
+  updatedAt: Date;
 }
 
 export class ProviderToolBindingRefDto {
@@ -510,6 +514,13 @@ export class ProviderToolDto extends ProviderToolSummaryDto {
 
   @ApiProperty({ type: ProviderToolQualityDto })
   quality: ProviderToolQualityDto;
+
+  @ApiProperty({
+    format: 'date-time',
+    description:
+      'The earliest `sunsetAt` a deprecation accepts if sent now: now + the 90-day minimum (UTC)',
+  })
+  earliestSunsetAt: Date;
 }
 
 export class ProviderToolGateRequirementDto {
@@ -585,6 +596,24 @@ export class BindingPrefillDto {
 
   @ApiProperty()
   timeoutMs: number;
+
+  @ApiProperty({
+    enum: ['NONE', 'API_KEY', 'SIGNATURE', 'BOTH'],
+    description:
+      'How your endpoint authenticates calls, as on your provider tool’s binding. API_KEY and ' +
+      'BOTH: add the credential to the new binding before its test run (credentials are never ' +
+      'copied)',
+  })
+  authMode: string;
+
+  @ApiProperty({
+    description:
+      'The failure rate to declare, 0..1. Standard tools carry no failure-rate setting of their ' +
+      'own, so this is the rate your provider tool’s binding already declares for the same ' +
+      'endpoint',
+    example: 0.02,
+  })
+  slaFailureRate: number;
 }
 
 export class PromotionInvitationDto {
@@ -622,4 +651,175 @@ export class PromotionInvitationDto {
 export class PromotionInvitationListDto {
   @ApiProperty({ type: [PromotionInvitationDto] })
   invitations: PromotionInvitationDto[];
+}
+
+// ── Try your endpoint (§7.10) ─────────────────────────────────────────────
+
+/** `POST /provider/tools/try`: exactly one of `curl` and `openapi`. */
+export class TryProviderToolBodyDto {
+  @ApiPropertyOptional({
+    maxLength: 16384,
+    description:
+      'A curl command: GET or POST, a JSON body (-d/--json), headers (-H). Credentials in ' +
+      'it are sent with the test only and never stored or echoed',
+    example: "curl -H 'Authorization: Bearer …' 'https://api.example.com/v1/search?q=solana'",
+  })
+  @ValidateIf((body: TryProviderToolBodyDto) => body.openapi === undefined)
+  @IsString()
+  @MaxLength(16384)
+  curl?: string;
+
+  @ApiPropertyOptional({
+    maxLength: 524288,
+    description: 'An OpenAPI 3 document, JSON or YAML text; one GET or POST operation is tried',
+  })
+  @ValidateIf((body: TryProviderToolBodyDto) => body.curl === undefined)
+  @IsString()
+  @MaxLength(524288)
+  openapi?: string;
+
+  @ApiPropertyOptional({
+    description: 'OpenAPI: the operation to try, when there is more than one',
+  })
+  @IsOptional()
+  @IsString()
+  @MaxLength(256)
+  operationId?: string;
+
+  @ApiPropertyOptional({
+    type: Object,
+    description: 'OpenAPI: values for the operation’s inputs; examples and defaults fill the rest',
+  })
+  @IsOptional()
+  @IsObject()
+  input?: Record<string, unknown>;
+
+  @ApiPropertyOptional({
+    type: Object,
+    description:
+      'OpenAPI: headers sent with the test only (a credential, typically). Never stored or echoed',
+  })
+  @IsOptional()
+  @IsObject()
+  headers?: Record<string, string>;
+
+  @ApiPropertyOptional({ minimum: 1000, maximum: 30000, description: 'Default 10000' })
+  @IsOptional()
+  @IsInt()
+  @Min(1000)
+  @Max(30000)
+  timeoutMs?: number;
+}
+
+export class TryWarningDto {
+  @ApiProperty({
+    enum: [
+      'CREDENTIAL_DETECTED',
+      'OPTION_IGNORED',
+      'MISSING_TEST_VALUES',
+      'AUTH_REQUIRED',
+      'NOT_SUPPORTED',
+      'NO_JSON_RESPONSE',
+      'EXAMPLE_TOO_LARGE',
+    ],
+  })
+  code: string;
+
+  @ApiProperty()
+  detail: string;
+}
+
+export class TryRequestDto {
+  @ApiProperty({ enum: ['GET', 'POST'] })
+  method: string;
+
+  @ApiProperty({ description: 'The URL sent; credential query values shown as ***' })
+  url: string;
+
+  @ApiProperty({ type: [String], description: 'Header names sent; values are never echoed' })
+  headerNames: string[];
+}
+
+export class TryUpstreamDto {
+  @ApiProperty({ description: 'The HTTP status; 0 when no answer arrived' })
+  status: number;
+
+  @ApiProperty()
+  latencyMs: number;
+
+  @ApiProperty({ nullable: true })
+  contentType: string | null;
+
+  @ApiProperty({ enum: ['JSON', 'NON_JSON', 'EMPTY'] })
+  bodyKind: string;
+
+  @ApiProperty({
+    nullable: true,
+    description:
+      'JSON: the parsed answer (at most 32 KB, else `{ truncated, bytes, head }`). NON_JSON: ' +
+      'the first 4 KB of text. Credentials sent with the test are redacted',
+  })
+  body: unknown;
+
+  @ApiProperty({
+    nullable: true,
+    description: 'No answer: why (`kind`, e.g. TIMEOUT, CONNECTION_REFUSED, BLOCKED_ADDRESS)',
+  })
+  transportError: { kind: string; detail: string | null } | null;
+}
+
+export class TryInferredDto {
+  @ApiProperty({ description: 'The binding endpoint: origin and base path, no query' })
+  endpoint: string;
+
+  @ApiProperty({ type: Object, description: 'The draft’s inputSchema; credentials are not inputs' })
+  inputSchema: Record<string, unknown>;
+
+  @ApiProperty({
+    type: Object,
+    nullable: true,
+    description: 'The draft’s outputSchema: the document’s, or inferred from the answer',
+  })
+  outputSchema: Record<string, unknown> | null;
+
+  @ApiProperty({ type: [Object], description: '`[{ arguments, result? }]`, within the 2 KB cap' })
+  examples: Record<string, unknown>[];
+
+  @ApiProperty({
+    type: Object,
+    description: 'The binding’s requestMapping (editor shorthand); credentials go to the vault',
+  })
+  requestMapping: Record<string, unknown>;
+
+  @ApiProperty({ type: Object, nullable: true, description: 'The binding’s responseMapping' })
+  responseMapping: Record<string, unknown> | null;
+
+  @ApiProperty({ nullable: true })
+  operationId: string | null;
+}
+
+export class ProviderToolTryResultDto {
+  @ApiProperty({ enum: ['CURL', 'OPENAPI'] })
+  source: string;
+
+  @ApiProperty({ description: 'A request was sent (false: required test values were missing)' })
+  ran: boolean;
+
+  @ApiProperty({ description: 'The endpoint answered 2xx with a JSON body' })
+  passed: boolean;
+
+  @ApiProperty({ type: TryRequestDto })
+  request: TryRequestDto;
+
+  @ApiProperty({ type: TryUpstreamDto, nullable: true })
+  upstream: TryUpstreamDto | null;
+
+  @ApiProperty({ type: TryInferredDto })
+  inferred: TryInferredDto;
+
+  @ApiProperty({ type: [TryWarningDto] })
+  warnings: TryWarningDto[];
+
+  @ApiProperty({ format: 'date-time' })
+  ranAt: Date;
 }

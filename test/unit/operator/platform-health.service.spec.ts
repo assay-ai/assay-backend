@@ -143,6 +143,16 @@ describe('PlatformHealthService', () => {
     expect(health.intentsPerMinuteDeltaVsHour).toBeCloseTo(0.5);
   });
 
+  it('carries the "Needs you" counts: pending tool reviews and open call disputes', async () => {
+    const service = build({
+      metrics: { operatorWorkCounts: { pendingToolReviews: 3, openCallDisputes: 7 } },
+    });
+
+    const health = await service.getHealth();
+
+    expect(health).toMatchObject({ pendingToolReviews: 3, openCallDisputes: 7 });
+  });
+
   it('reports the delta as null on a cold start — an hour-ago figure of zero', async () => {
     const service = build({ metrics: { intentRateCounts: { lastMinute: 3, hourAgoMinute: 0 } } });
 

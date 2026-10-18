@@ -76,17 +76,30 @@ export class PlatformHealthService {
   async getHealth(): Promise<PlatformHealthDto> {
     const now = new Date();
 
-    const [intentRates, backlog, falsePositiveRate, policies, stake, disputes, chainState, holds] =
-      await Promise.all([
-        this.metrics.intentRateCounts(now),
-        this.metrics.verificationBacklog(now),
-        this.falsePositiveRate(now),
-        this.metrics.policyLifecycleCounts(),
-        this.stakeLocked(),
-        this.metrics.openSlashProposalCounts(now),
-        this.chainState(now),
-        (this.slashHolds?.findAllHeld() ?? Promise.resolve([])).catch(() => []),
-      ]);
+    const [
+      intentRates,
+      backlog,
+      falsePositiveRate,
+      policies,
+      stake,
+      disputes,
+      chainState,
+      holds,
+      work,
+    ] = await Promise.all([
+      this.metrics.intentRateCounts(now),
+      this.metrics.verificationBacklog(now),
+      this.falsePositiveRate(now),
+      this.metrics.policyLifecycleCounts(),
+      this.stakeLocked(),
+      this.metrics.openSlashProposalCounts(now),
+      this.chainState(now),
+      (this.slashHolds?.findAllHeld() ?? Promise.resolve([])).catch(() => []),
+      // The "Needs you" counts never fail the tiles: unreadable reads as unknown.
+      this.metrics
+        .operatorWorkCounts()
+        .catch(() => ({ pendingToolReviews: null, openCallDisputes: null })),
+    ]);
 
     return {
       intentsPerMinute: intentRates.lastMinute,
@@ -102,6 +115,8 @@ export class PlatformHealthService {
       openDisputes: disputes.count,
       oldestOpenDisputeAgeSeconds: disputes.oldestAgeSeconds,
       chainState,
+      pendingToolReviews: work.pendingToolReviews,
+      openCallDisputes: work.openCallDisputes,
       slashHolds: holds.map((hold) => ({
         providerId: hold.providerId,
         chainId: hold.chainId,

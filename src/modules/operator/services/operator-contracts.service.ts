@@ -157,6 +157,7 @@ export class OperatorContractsService {
       draft: draftRow ? draftOf(draftRow, published) : null,
       majors,
       suggestedCurrentVersion: suggestedCurrent(row, published, majors),
+      earliestSunsetAt: new Date(Date.now() + MIN_SUNSET_MS),
     };
   }
 

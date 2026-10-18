@@ -206,6 +206,30 @@ export enum NotificationEvent {
    */
   CALL_DISPUTE_REFUNDED = 'call_dispute.refunded',
 
+  // ── Provider tools (T4) ─────────────────────────────────────────────────
+  /**
+   * An operator approved a provider tool's review: a first review lists it,
+   * a change is published. `ProviderToolReviewService.afterDecision`.
+   */
+  PROVIDER_TOOL_APPROVED = 'provider_tool.approved',
+  /**
+   * An operator rejected a review, with a note saying what to fix ("Fix and
+   * resubmit", design spec §7.6). An approved version keeps serving.
+   */
+  PROVIDER_TOOL_REJECTED = 'provider_tool.rejected',
+  /** An operator took the tool down: REMOVED from every view, calls refused. `A-25`. */
+  PROVIDER_TOOL_TAKEN_DOWN = 'provider_tool.taken_down',
+  /**
+   * The tool's takedown was rejected, lifted, or lapsed unconfirmed. It serves
+   * again unless its handle's takedown still stands.
+   */
+  PROVIDER_TOOL_TAKEDOWN_LIFTED = 'provider_tool.takedown_lifted',
+  /**
+   * An operator drafted a standard contract from (or matched it to) one of
+   * this provider's tools, and invites the provider to bind to it (§7.5).
+   */
+  PROVIDER_TOOL_PROMOTION_INVITED = 'provider_tool.promotion_invited',
+
   // ── Digest ──────────────────────────────────────────────────────────────
   /** No producer: the daily digest job is not built. */
   DIGEST_DAILY = 'digest.daily',

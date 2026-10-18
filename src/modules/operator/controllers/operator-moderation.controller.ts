@@ -22,6 +22,7 @@ import { OperatorRole } from '../domain/override-register';
 import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
 import {
   HandleParamDto,
+  ListCutoffsQueryDto,
   ListModerationQueryDto,
   ModerationBodyDto,
   ModerationCutoffDto,
@@ -175,9 +176,13 @@ export class OperatorModerationController {
   }
 
   @Get('cutoffs')
-  @ApiOperation({ summary: 'Delists and takedowns, newest first; `pending` = still to confirm' })
+  @ApiOperation({
+    summary:
+      'Delists and takedowns, newest first, with each target’s name; `pending` = still to ' +
+      'confirm, `targetType` = TOOLSET, HANDLE or TOOL only',
+  })
   @ApiResponse({ status: 200, type: [ModerationCutoffDto] })
-  async cutoffs(@Query() query: ListModerationQueryDto): Promise<ModerationCutoffDto[]> {
+  async cutoffs(@Query() query: ListCutoffsQueryDto): Promise<ModerationCutoffDto[]> {
     return this.moderation.listCutoffs(query);
   }
 

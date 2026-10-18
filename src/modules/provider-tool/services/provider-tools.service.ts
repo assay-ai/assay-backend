@@ -182,6 +182,7 @@ export class ProviderToolsService {
             : null,
       },
       quality,
+      earliestSunsetAt: new Date(Date.now() + MIN_SUNSET_MS),
     };
   }
 
@@ -640,6 +641,53 @@ export class ProviderToolsService {
   }
 
   /**
+   * `POST …/unpublish`: UNLISTED → PRIVATE ("Stop sharing"). The tool then
+   * serves only on its own organization's `/my/` URLs: every link-only
+   * toolset that reached it stops listing it at once, because the contract
+   * epoch and every shared view move with the write. Refused for a LISTED
+   * tool (reviewed: it leaves the catalogue only by takedown or exit), and
+   * while a review is pending (that review is for sharing it wider).
+   */
+  async unshare(
+    organizationId: string,
+    toolId: string,
+    actor: AuditActor,
+  ): Promise<ProviderToolDto> {
+    const owned = await this.requireOwned(organizationId, toolId);
+    await this.dataSource.transaction(async (manager) => {
+      const row = await lockTool(manager, owned.id);
+      assertNotRemoved(row);
+      if (row.reviewStatus === ReviewStatus.PENDING) {
+        throw ProviderToolErrors.inReview({ reviewVersion: row.reviewVersion });
+      }
+      if (row.visibility !== ToolVisibility.UNLISTED) {
+        throw ProviderToolErrors.state({
+          reason:
+            row.visibility === ToolVisibility.PRIVATE
+              ? 'the tool is already PRIVATE'
+              : 'a listed tool is not unshared; it stays listed until it is taken down',
+        });
+      }
+      await manager.update(
+        ToolEntity,
+        { id: row.id },
+        { visibility: ToolVisibility.PRIVATE, updatedAt: new Date() },
+      );
+      await this.audit.record(manager, {
+        organizationId,
+        actor,
+        action: 'provider_tool.unshared',
+        resourceType: 'tool',
+        resourceId: row.id,
+        before: { visibility: ToolVisibility.UNLISTED },
+        after: { visibility: ToolVisibility.PRIVATE },
+      });
+    });
+    await this.contractsChanged(organizationId);
+    return this.get(organizationId, owned.id);
+  }
+
+  /**
    * `POST …/review`: submit for LISTED. A tool never approved submits every
    * version it serves; a LISTED one submits its draft (the same as
    * publishing that draft).
@@ -811,6 +859,8 @@ export class ProviderToolsService {
                   assetId: own.assetId,
                   settlementChains: [...(own.settlementChains ?? [])],
                   timeoutMs: own.timeoutMs,
+                  authMode: own.authMode ?? 'NONE',
+                  slaFailureRate: Number(own.slaFailureRate),
                 }
               : null,
           };
@@ -1244,6 +1294,7 @@ export function draftDtoOf(
     ],
     screen: screenVersion(draft),
     inReview: row.reviewStatus === ReviewStatus.PENDING && row.reviewVersion === draft.version,
+    updatedAt: draft.updatedAt,
   };
 }
 

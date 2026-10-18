@@ -340,4 +340,11 @@ export class OperatorToolDto extends OperatorToolSummaryDto {
       "least 2 eligible bindings, or half of the current major's (§7.3)",
   })
   suggestedCurrentVersion: number | null;
+
+  @ApiProperty({
+    format: 'date-time',
+    description:
+      'The earliest `sunsetAt` a deprecation accepts if sent now: now + the 90-day minimum (UTC)',
+  })
+  earliestSunsetAt: Date;
 }
