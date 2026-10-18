@@ -113,6 +113,7 @@ describe('PlatformHealthService', () => {
     expect(health.policiesTotal).toBe(0);
     expect(health.stakeLocked.amount).toBe('0');
     expect(health.providersWithStake).toBe(0);
+    expect(health.oldProcessCases).toBe(0);
     expect(health.openDisputes).toBe(0);
     expect(health.oldestOpenDisputeAgeSeconds).toBeNull();
   });
@@ -207,7 +208,7 @@ describe('PlatformHealthService', () => {
     const service = build({
       metrics: {
         verificationBacklog: { count: 4, p95AgeSeconds: 12.5 },
-        openSlashProposalCounts: { count: 2, oldestAgeSeconds: 3600 },
+        oldProcessCaseCounts: { count: 2, oldestAgeSeconds: 3600 },
       },
     });
 
@@ -215,6 +216,9 @@ describe('PlatformHealthService', () => {
 
     expect(health.verificationBacklog).toBe(4);
     expect(health.verificationBacklogP95AgeSeconds).toBe(12.5);
+    expect(health.oldProcessCases).toBe(2);
+    expect(health.oldestOldProcessCaseAgeSeconds).toBe(3600);
+    // D15: the old names carry the same figures for one release.
     expect(health.openDisputes).toBe(2);
     expect(health.oldestOpenDisputeAgeSeconds).toBe(3600);
   });
