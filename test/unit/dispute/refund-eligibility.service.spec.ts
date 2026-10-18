@@ -32,11 +32,11 @@ function call(overrides: Partial<PaymentIntentEntity> = {}): PaymentIntentEntity
   } as PaymentIntentEntity;
 }
 
-function build(
-  held: Partial<HeldPaymentsPort> = { holdLive: async () => true },
-  decided = null,
-) {
-  const disputes = { findOneBy: jest.fn().mockResolvedValue(decided) };
+function build(held: Partial<HeldPaymentsPort> = { holdLive: async () => true }, decided = null) {
+  const disputes = {
+    findOneBy: jest.fn().mockResolvedValue(decided),
+    find: jest.fn().mockResolvedValue([]),
+  };
   const service = new RefundEligibilityService(
     disputes as unknown as DisputeRepository,
     DEFAULT_CALL_DISPUTE_CONFIG,
@@ -122,5 +122,41 @@ describe('RefundEligibilityService (wave-1 audit I1, review m1)', () => {
     expect((await service.ofCall(call({ providerId: 'buyer' }), at(-600), NOW)).refundable).toBe(
       false,
     );
+  });
+});
+
+describe('RefundEligibilityService.ofCalls (B7 review m2, nit 2)', () => {
+  it('answers a page with one dispute query and one chain read per asset, as ofCall would', async () => {
+    const holdLive = jest.fn(async () => true);
+    const { service, disputes } = build({ holdLive });
+    disputes.find.mockResolvedValue([
+      { intentId: 'decided', state: 'REJECTED' },
+      { intentId: 'open', state: 'OPEN' },
+    ]);
+    const calls = ['plain', 'decided', 'open'].map((id) => ({
+      intent: call({ id }),
+      settledAt: at(-600),
+    }));
+    calls.push({ intent: call({ id: 'released', holdReleasedAt: at(-1) }), settledAt: at(-600) });
+
+    const answers = await service.ofCalls(calls, NOW);
+
+    expect(disputes.find).toHaveBeenCalledTimes(1);
+    expect(disputes.findOneBy).not.toHaveBeenCalled();
+    expect(holdLive).toHaveBeenCalledTimes(1);
+    expect(answers.get('plain')).toEqual({
+      refundable: true,
+      until: at(1800 - 60),
+      reported: false,
+    });
+    expect(answers.get('decided')).toEqual({ refundable: false, until: null, reported: true });
+    expect(answers.get('open')).toEqual({ refundable: true, until: at(1800 - 60), reported: true });
+    expect(answers.get('released')).toEqual({ refundable: false, until: null, reported: false });
+  });
+
+  it('reads no dispute when nothing on the page passes', async () => {
+    const { service, disputes } = build();
+    await service.ofCalls([{ intent: call({ holdReleasedAt: at(-1) }), settledAt: at(-600) }], NOW);
+    expect(disputes.find).not.toHaveBeenCalled();
   });
 });

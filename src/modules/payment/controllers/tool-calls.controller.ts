@@ -40,8 +40,8 @@ export class ToolCallsController {
     @CurrentSession() session: McpSession,
     @Query() query: ListToolCallsQueryDto,
   ): Promise<CursorPageDto<ToolCallDto>> {
-    return this.toolCalls.list(session.organizationId, query, (intent, settledAt, now) =>
-      this.refunds.ofCall(intent, settledAt, now),
+    return this.toolCalls.list(session.organizationId, query, (calls, now) =>
+      this.refunds.ofCalls(calls, now),
     );
   }
 
