@@ -46,10 +46,29 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
  * A `PROVIDER_CREDIT` that a redemption transaction paid: it carries the
  * transaction's ref. Not one of the book-only refs — a legacy platform absorb
  * (nobody paid it) or a rail-A credit (paid later, in a `PAYOUT` batch).
+ * `starts_with`, not `LIKE`: the `_` in the prefix is not a wildcard.
  */
 const REDEMPTION_CREDIT_SQL =
   `entry.entryType = :creditType AND entry.chainTxRef IS NOT NULL ` +
-  `AND entry.chainTxRef NOT LIKE :absorbedPrefix AND entry.chainTxRef <> :legacyRef`;
+  `AND NOT starts_with(entry.chainTxRef, :absorbedPrefix) AND entry.chainTxRef <> :legacyRef`;
+
+/**
+ * Refs the redemption paths write when no transaction signature was observed:
+ * `unobserved:seq=…` (`VoucherRedemptionService`) and `held_collected:seq=…`
+ * (a held collect with no tx ref). The seq is per PAYER, so two buyers'
+ * redemptions can share one — such a credit is never grouped with another and
+ * never named as a transaction.
+ */
+const SYNTHETIC_REF_SQL =
+  `(starts_with(entry.chainTxRef, :unobservedPrefix) ` +
+  `OR starts_with(entry.chainTxRef, :heldCollectedPrefix))`;
+const SYNTHETIC_REF_PARAMS = {
+  unobservedPrefix: 'unobserved:',
+  heldCollectedPrefix: 'held_collected:',
+};
+
+/** One payment: a real transaction's credits, or one credit with a synthetic ref. */
+const PAYMENT_KEY_SQL = `CASE WHEN ${SYNTHETIC_REF_SQL} THEN entry.id::text ELSE entry.chainTxRef END`;
 
 interface PaymentRow {
   readonly id: string;
@@ -82,7 +101,19 @@ interface PaymentRow {
  *
  * Paged by keyset over `(createdAt, id)`: each kind is read from its own
  * position with `limit + 1` rows, and the two are merged here, so a page never
- * reads more than twice its size.
+ * returns more than twice its size.
+ *
+ * A redemption is positioned (and windowed by `from`/`to`) at its FIRST
+ * credit, `(MIN(created_at), MIN(id))`. A transaction that redeemed several
+ * calls writes its credits one per intent, so a page read mid-way sees part of
+ * it; its first credit never moves, so its position stays put and the rest of
+ * the calls simply join the row on the next read.
+ *
+ * Cost: the redemption query groups the provider's whole credit history in
+ * the window on every page (filters on the group run in `HAVING`). A per-entry
+ * pre-filter on the cursor instant would cut a transaction that straddles it
+ * into a partial row, so there is none; `from` narrows the scan correctly only
+ * in `HAVING` too. Linear in paid calls, fine at current volume.
  */
 @Injectable()
 export class ProviderPayoutsService {
@@ -98,6 +129,12 @@ export class ProviderPayoutsService {
     const comparator = descending ? '<' : '>';
     const order = descending ? 'DESC' : 'ASC';
     const take = query.limit + 1;
+    if (query.from && query.to && query.from >= query.to) {
+      throw ApiErrors.invalidTimeRange({
+        from: query.from.toISOString(),
+        to: query.to.toISOString(),
+      });
+    }
 
     const batches = this.ledgerEntries
       .createQueryBuilder('entry')
@@ -119,6 +156,8 @@ export class ProviderPayoutsService {
       .where('entry.organizationId = :organizationId', { organizationId })
       .andWhere('entry.entryType = :entryType', { entryType: LedgerEntryType.PAYOUT })
       .andWhere('entry.batchId IS NOT NULL');
+    if (query.from) batches.andWhere('entry.createdAt >= :from', { from: query.from });
+    if (query.to) batches.andWhere('entry.createdAt < :to', { to: query.to });
     if (after) {
       batches.andWhere(
         `(entry.createdAt, entry.id::text) ${comparator} (:afterAt::timestamptz, :afterId)`,
@@ -129,7 +168,7 @@ export class ProviderPayoutsService {
 
     // One row per transaction. Its id is the lowest entry id in it: stable,
     // and a uuid like a batch's, so the two kinds share one cursor.
-    const groupAt = 'MAX(entry.createdAt)';
+    const groupAt = 'MIN(entry.createdAt)';
     const groupId = 'MIN(entry.id::text)';
     const redemptions = this.ledgerEntries
       .createQueryBuilder('entry')
@@ -139,29 +178,39 @@ export class ProviderPayoutsService {
       .addSelect('SUM(entry.amount)', 'amount')
       .addSelect('entry.assetId', 'asset')
       .addSelect('entry.decimals', 'decimals')
-      .addSelect('entry.chainTxRef', 'chainTxRef')
+      // A synthetic ref names no transaction: it is not shown as one.
+      .addSelect(
+        `CASE WHEN bool_or(${SYNTHETIC_REF_SQL}) THEN NULL ELSE MIN(entry.chainTxRef) END`,
+        'chainTxRef',
+      )
       .addSelect('COUNT(*)', 'calls')
       .addSelect(groupAt, 'createdAt')
-      .addSelect(exactInstantSql('MAX(entry.created_at)'), 'at')
+      .addSelect(exactInstantSql('MIN(entry.created_at)'), 'at')
       .where('entry.organizationId = :organizationId', { organizationId })
       .andWhere(REDEMPTION_CREDIT_SQL, {
         creditType: LedgerEntryType.PROVIDER_CREDIT,
-        // A LIKE pattern matching the legacy rows; nothing here writes one.
-        absorbedPrefix: PLATFORM_ABSORBED_TX_REF_PREFIX + '%',
+        absorbedPrefix: PLATFORM_ABSORBED_TX_REF_PREFIX,
         legacyRef: LEGACY_POOLED_VAULT_TX_REF,
       })
-      .groupBy('entry.chainTxRef')
+      .setParameters(SYNTHETIC_REF_PARAMS)
+      .groupBy(PAYMENT_KEY_SQL)
       .addGroupBy('entry.assetId')
       .addGroupBy('entry.decimals');
-    if (after) {
-      redemptions.having(
-        `(${groupAt}, ${groupId}) ${comparator} (:afterAt::timestamptz, :afterId)`,
-        {
-          afterAt: after.at,
-          afterId: after.id,
-        },
-      );
+    const having: string[] = [];
+    const havingParams: Record<string, unknown> = {};
+    if (query.from) {
+      having.push(`${groupAt} >= :from`);
+      havingParams.from = query.from;
     }
+    if (query.to) {
+      having.push(`${groupAt} < :to`);
+      havingParams.to = query.to;
+    }
+    if (after) {
+      having.push(`(${groupAt}, ${groupId}) ${comparator} (:afterAt::timestamptz, :afterId)`);
+      Object.assign(havingParams, { afterAt: after.at, afterId: after.id });
+    }
+    if (having.length > 0) redemptions.having(having.join(' AND '), havingParams);
     redemptions.orderBy(groupAt, order).addOrderBy(groupId, order).limit(take);
 
     const [batchRows, redemptionRows] = await Promise.all([
