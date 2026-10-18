@@ -1,6 +1,6 @@
 import { Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource } from 'typeorm';
+import { DataSource, EntityManager } from 'typeorm';
 
 import { AgentCredentialEntity, CredentialIssuedVia } from '../entities/agent-credential.entity';
 import { OrganizationScopedRepository } from './organization-scoped.repository';
@@ -94,9 +94,19 @@ export class AgentCredentialRepository extends OrganizationScopedRepository<Agen
    * Scoped to `organizationId` as well as the agent: an agent id is already
    * unique platform-wide, so the tenant predicate is a second safeguard
    * against a caller that did not resolve the agent inside its tenant.
+   *
+   * Pass `manager` to count inside a transaction: the grant writer counts and
+   * inserts under one per-agent lock, so the count must see that transaction.
    */
-  async countLiveOAuthForAgent(organizationId: string, agentId: string): Promise<number> {
-    return this.createQueryBuilder('credential')
+  async countLiveOAuthForAgent(
+    organizationId: string,
+    agentId: string,
+    manager?: EntityManager,
+  ): Promise<number> {
+    const qb = manager
+      ? manager.createQueryBuilder(AgentCredentialEntity, 'credential')
+      : this.createQueryBuilder('credential');
+    return qb
       .where('credential.organization_id = :organizationId', { organizationId })
       .andWhere('credential.agent_id = :agentId', { agentId })
       .andWhere('credential.issued_via = :oauth', { oauth: CredentialIssuedVia.OAUTH })
