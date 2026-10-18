@@ -14,6 +14,7 @@ import { AbstractEntityWithoutSoftDelete } from './abstract.entity';
 @Entity('oauth_authorization_codes')
 @Index('uq_oauth_authorization_codes_code', ['codeHash'], { unique: true })
 @Index('idx_oauth_authorization_codes_client', ['oauthClientId'])
+@Index('idx_oauth_authorization_codes_expires', ['expiresAt'])
 export class OAuthAuthorizationCodeEntity extends AbstractEntityWithoutSoftDelete {
   @Column({ name: 'code_hash', type: 'varchar', length: 64 })
   codeHash: string;
@@ -58,6 +59,13 @@ export class OAuthAuthorizationCodeEntity extends AbstractEntityWithoutSoftDelet
 
   @Column({ name: 'used_at', type: 'timestamptz', nullable: true })
   usedAt: Date | null;
+
+  /**
+   * Set when a used code is presented again. The exchange that burned it
+   * creates no grant once this is set; see migration 1762400000003.
+   */
+  @Column({ name: 'reuse_detected_at', type: 'timestamptz', nullable: true })
+  reuseDetectedAt: Date | null;
 
   /** The credential the exchange created. */
   @Column({ name: 'credential_id', type: 'uuid', nullable: true })

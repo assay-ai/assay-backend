@@ -8,6 +8,7 @@ import {
   FakeObservabilityOverrides,
 } from './helpers/fake-observability-repositories';
 
+import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { MetricsCollectorService } from '@modules/observability/services/metrics-collector.service';
 import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { SignalAvailability } from '@modules/observability/domain/signal-catalog';
@@ -226,5 +227,49 @@ describe('MetricsCollectorService', () => {
 
     expect(text).toContain('assay_attestations_signed{window="24h"} 12');
     expect(text).toContain('assay_slashes_executed{window="30d"} 2');
+  });
+
+  describe('assay_oauth_live_grants_per_agent', () => {
+    function buildWithCredentials(maxLiveOAuthPerAgent: jest.Mock) {
+      const registry = new MetricsRegistryService();
+      const collector = new MetricsCollectorService(
+        fakeReconciliationRunRepository([]),
+        fakeMetricsRepository({}),
+        fakeSlashProposalRepository(),
+        fakeObservabilityMetricsRepository(),
+        registry,
+        null,
+        { maxLiveOAuthPerAgent } as unknown as AgentCredentialRepository,
+      );
+      return { collector, registry };
+    }
+
+    it('is set from the repository on each refresh', async () => {
+      const max = jest.fn().mockResolvedValue(47);
+      const { collector, registry } = buildWithCredentials(max);
+
+      await collector.snapshot();
+
+      expect(max).toHaveBeenCalledTimes(1);
+      expect(await registry.metricsText()).toContain('assay_oauth_live_grants_per_agent 47');
+    });
+
+    it('a failed read keeps the scrape and the previous value', async () => {
+      const max = jest.fn().mockResolvedValueOnce(12).mockRejectedValueOnce(new Error('db down'));
+      const { collector, registry } = buildWithCredentials(max);
+      const ttl = process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS;
+      process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS = '1';
+      try {
+        await collector.snapshot();
+        await new Promise((resolve) => setTimeout(resolve, 5));
+        await expect(collector.snapshot()).resolves.toBeDefined();
+      } finally {
+        if (ttl === undefined) delete process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS;
+        else process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS = ttl;
+      }
+
+      expect(max).toHaveBeenCalledTimes(2);
+      expect(await registry.metricsText()).toContain('assay_oauth_live_grants_per_agent 12');
+    });
   });
 });
