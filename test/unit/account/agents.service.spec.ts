@@ -1,9 +1,11 @@
 import { AgentEntity } from '@database/postgres/entities/agent.entity';
+import { AccountErrorCode } from '@modules/account/errors/account.errors';
 import { AgentsService } from '@modules/account/services/agents.service';
 import { toAccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { CursorPageDto, SortDirection } from '@shared/api';
 
 import { buildAgent } from '../auth/helpers/fake-agent-repository';
+import { expectErrorCodeAsync } from '../helpers/expect-error-code';
 
 const ORGANIZATION_ID = '11111111-1111-1111-1111-111111111111';
 const AGENT_ID = '22222222-2222-2222-2222-222222222222';
@@ -42,7 +44,13 @@ function buildHarness(
 
   const config = { get: jest.fn().mockReturnValue(defaultChainId) };
 
-  const service = new AgentsService(agents as any, credentials as any, config as any);
+  const service = new AgentsService(
+    agents as any,
+    credentials as any,
+    config as any,
+    {} as any,
+    {} as any,
+  );
   return { service, agents, credentials, config };
 }
 
@@ -129,5 +137,99 @@ describe('AgentsService.list', () => {
     const page = await service.list(ORGANIZATION_ID, baseQuery());
 
     expect(page).toEqual({ items: [], pageInfo: { nextCursor: null, hasMore: false } });
+  });
+});
+
+describe('AgentsService.rename', () => {
+  const ACTOR = { type: 'user' as const, id: 'login-session-1' };
+
+  function buildRenameHarness(row: AgentEntity | null) {
+    const base = buildHarness([], { [AGENT_ID]: 2 });
+    const agents = { findById: jest.fn().mockResolvedValue(row) };
+    const manager = { update: jest.fn().mockResolvedValue({ affected: 1 }) };
+    const dataSource = {
+      transaction: jest.fn(async (work: (m: unknown) => unknown) => work(manager)),
+    };
+    const audit = { record: jest.fn().mockResolvedValue(undefined) };
+    const service = new AgentsService(
+      agents as any,
+      base.credentials as any,
+      base.config as any,
+      dataSource as any,
+      audit as any,
+    );
+    return { service, agents, manager, dataSource, audit };
+  }
+
+  it('writes only the label, scoped to the caller organization, and returns the renamed agent', async () => {
+    const agent = buildAgent({
+      id: AGENT_ID,
+      organizationId: ORGANIZATION_ID,
+      label: 'dan@example.com',
+    });
+    const { service, manager } = buildRenameHarness(agent);
+
+    const renamed = await service.rename(ORGANIZATION_ID, AGENT_ID, 'Research bot', ACTOR);
+
+    expect(manager.update).toHaveBeenCalledTimes(1);
+    expect(manager.update).toHaveBeenCalledWith(
+      AgentEntity,
+      { id: AGENT_ID, organizationId: ORGANIZATION_ID },
+      { label: 'Research bot' },
+    );
+    expect(renamed).toMatchObject({ agentId: AGENT_ID, label: 'Research bot', credentialCount: 2 });
+  });
+
+  it('records agent.renamed with the old and new label in the same transaction', async () => {
+    const agent = buildAgent({ id: AGENT_ID, organizationId: ORGANIZATION_ID, label: 'My agent' });
+    const { service, manager, audit } = buildRenameHarness(agent);
+
+    await service.rename(ORGANIZATION_ID, AGENT_ID, 'Laptop agent', ACTOR);
+
+    expect(audit.record).toHaveBeenCalledWith(manager, {
+      organizationId: ORGANIZATION_ID,
+      actor: ACTOR,
+      action: 'agent.renamed',
+      resourceType: 'agent',
+      resourceId: AGENT_ID,
+      before: { label: 'My agent' },
+      after: { label: 'Laptop agent' },
+    });
+  });
+
+  it('refuses an agent in another organization with the same 404 as a missing one, and writes nothing', async () => {
+    const foreign = buildAgent({
+      id: AGENT_ID,
+      organizationId: 'aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa',
+    });
+    const { service, manager, audit } = buildRenameHarness(foreign);
+
+    await expectErrorCodeAsync(
+      () => service.rename(ORGANIZATION_ID, AGENT_ID, 'Mine now', ACTOR),
+      AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
+    );
+    expect(manager.update).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+  });
+
+  it('refuses an unknown agent', async () => {
+    const { service, manager } = buildRenameHarness(null);
+
+    await expectErrorCodeAsync(
+      () => service.rename(ORGANIZATION_ID, AGENT_ID, 'Ghost', ACTOR),
+      AccountErrorCode.ACCOUNT_AGENT_NOT_FOUND,
+    );
+    expect(manager.update).not.toHaveBeenCalled();
+  });
+
+  it('is a no-op, with no audit row, when the label does not change', async () => {
+    const agent = buildAgent({ id: AGENT_ID, organizationId: ORGANIZATION_ID, label: 'My agent' });
+    const { service, dataSource, audit } = buildRenameHarness(agent);
+
+    const same = await service.rename(ORGANIZATION_ID, AGENT_ID, 'My agent', ACTOR);
+
+    expect(same.label).toBe('My agent');
+    expect(dataSource.transaction).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
   });
 });

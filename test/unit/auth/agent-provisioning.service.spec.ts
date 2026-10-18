@@ -98,6 +98,19 @@ describe('AgentProvisioningService — the organization is created, never chosen
     await expectErrorCodeAsync(() => service.resolve(CLAIMS), 'AUTH_PROVISIONING_FAILED');
   });
 
+  it('labels a new agent "My agent", never the email, and leaves existing labels alone', async () => {
+    const { service, agents, directory } = build();
+    directory.facts = { solanaAddress: null, evmAddress: null, email: 'dan@example.com' } as any;
+
+    await service.resolve(CLAIMS);
+    expect(agents.rows.get(CLAIMS.subject)?.label).toBe('My agent');
+    expect(agents.rows.get(CLAIMS.subject)?.email).toBe('dan@example.com');
+
+    agents.rows.get(CLAIMS.subject)!.label = 'Renamed';
+    await service.resolve(CLAIMS);
+    expect(agents.rows.get(CLAIMS.subject)?.label).toBe('Renamed');
+  });
+
   it('names the new organization from the email, and falls back to the DID', () => {
     expect(organizationNameFor('dan@example.com', 'did:privy:cabc123')).toBe('dan');
     expect(organizationNameFor(null, 'did:privy:cabc123')).toBe('agent-cabc123');
