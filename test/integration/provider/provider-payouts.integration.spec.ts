@@ -10,7 +10,7 @@
 import { randomUUID } from 'node:crypto';
 
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
-import { LEGACY_POOLED_VAULT_TX_REF, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
+import { RAIL_A_BOOK_CREDIT_TX_REF, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { ProviderPaymentKind } from '@modules/provider/dto/get-provider-payouts.dto';
 import { ProviderPayoutsService } from '@modules/provider/services/provider-payouts.service';
 import { SortDirection } from '@shared/api';
@@ -72,7 +72,7 @@ describe('ProviderPayoutsService — redemptions (integration)', () => {
     await credit(90_000, '2026-10-12T10:00:00.000Z', '0xaaa');
     await credit(18_000, '2026-10-13T10:00:00.000Z', '0xbbb');
     // Not a payment: a rail-A book credit (no transaction of its own).
-    await credit(90_000, '2026-10-14T11:00:00.000Z', LEGACY_POOLED_VAULT_TX_REF);
+    await credit(90_000, '2026-10-14T11:00:00.000Z', RAIL_A_BOOK_CREDIT_TX_REF);
     // Another organization's redemption never shows.
     await entry({
       type: LedgerEntryType.PROVIDER_CREDIT,

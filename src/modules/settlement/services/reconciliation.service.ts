@@ -84,8 +84,7 @@ import {
  *
  * ## Why it does not throw on a breach
  *
- * `TreasuryVaultService.checkReserves` throws, and should: its callers are
- * about to move money. This one records and alerts, because a throw would
+ * It records and alerts, because a throw would
  * abort the pass *before* the `reconciliation_runs` row is written, and that
  * row is the artefact an incident is reconstructed from. A breach here is a
  * `CRITICAL` finding, a persisted row, an alert, and a frozen withdrawal path
@@ -156,7 +155,7 @@ export class ReconciliationService {
     decimals: number,
     startedAt: Date,
   ): Promise<ReconciliationReport> {
-    // Control first, exactly as `checkReserves` does. A vault balance read
+    // Control first. A vault balance read
     // from an address whose control has not been proven is not evidence of
     // anything, and it would look authoritative in the stored row forever.
     await this.vault.assertVaultControl(asset);

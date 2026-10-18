@@ -1,6 +1,6 @@
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
-import { LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
+import { RAIL_A_BOOK_CREDIT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { ProviderPaymentKind } from '@modules/provider/dto/get-provider-payouts.dto';
 import { ProviderPayoutsService } from '@modules/provider/services/provider-payouts.service';
 import { ApiErrorCode, SortDirection } from '@shared/api';
@@ -60,10 +60,10 @@ describe('ProviderPayoutsService — rail-B redemptions are payments (D18)', () 
     expect(redemptionFake.params.unobservedPrefix).toBe('unobserved:');
     expect(redemptionFake.params.heldCollectedPrefix).toBe('held_collected:');
     expect(redemptionFake.params.creditType).toBe('PROVIDER_CREDIT');
-    expect(redemptionFake.params.legacyRef).toBe(LEGACY_POOLED_VAULT_TX_REF);
+    expect(redemptionFake.params.railARef).toBe(RAIL_A_BOOK_CREDIT_TX_REF);
     const sql = redemptionFake.wheres.map((w) => w.sql).join(' | ');
     expect(sql).toContain('entry.chainTxRef IS NOT NULL');
-    expect(sql).toContain('<> :legacyRef');
+    expect(sql).toContain('<> :railARef');
   });
 
   it('windows redemptions on their first credit', async () => {
