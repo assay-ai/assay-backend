@@ -61,14 +61,18 @@ afterAll(async () => {
   await dataSource?.destroy();
 });
 
-async function draft(organizationId: string, toolId = TOOL_ID): Promise<string> {
+async function draft(
+  organizationId: string,
+  toolId = TOOL_ID,
+  endpoint = 'https://api.example.com/v1',
+): Promise<string> {
   const [row] = (await dataSource.query(
     `INSERT INTO tool_bindings
        (organization_id, tool_id, endpoint, request_mapping, response_mapping, pricing_mode,
         price_amount, asset_id, sla_failure_rate, timeout_ms, settlement_chains)
-     VALUES ($1, $2, 'https://api.example.com/v1', '{}', '{}', 'PAID', 10000, $3, 0.02, 8000, $4)
+     VALUES ($1, $2, $5, '{}', '{}', 'PAID', 10000, $3, 0.02, 8000, $4)
      RETURNING id`,
-    [organizationId, toolId, USDC_ASSET, [CHAIN]],
+    [organizationId, toolId, USDC_ASSET, [CHAIN], endpoint],
   )) as Array<{ id: string }>;
   return row.id;
 }
@@ -168,6 +172,56 @@ describe('discarding a draft', () => {
     )) as Array<{ table_name: string }>;
     expect(rows.map((row) => row.table_name).sort()).toEqual(
       [...new Set(EVIDENCE.map((entry) => entry.table))].sort(),
+    );
+  });
+
+  it('audits the origin only: userinfo, path and query never reach the audit log', async () => {
+    const organizationId = randomUUID();
+    const bindingId = await draft(
+      organizationId,
+      TOOL_ID,
+      'https://alice:hunter2@api.example.com/v1/quote?token=abc123',
+    );
+
+    await service.discardDraft(organizationId, ACTOR, bindingId);
+
+    const [audit] = (await dataSource.query(
+      `SELECT before FROM audit_log_entries WHERE organization_id = $1 AND resource_id = $2`,
+      [organizationId, bindingId],
+    )) as Array<{ before: Record<string, unknown> }>;
+    expect(audit.before.endpoint_origin).toBe('https://api.example.com');
+    expect(audit.before).not.toHaveProperty('endpoint');
+    const text = JSON.stringify(audit.before);
+    for (const secret of ['alice', 'hunter2', 'token', 'abc123', '/v1/quote']) {
+      expect(text).not.toContain(secret);
+    }
+  });
+
+  it('refuses a draft that a notice already names', async () => {
+    const organizationId = randomUUID();
+    const bindingId = await draft(organizationId);
+    await dataSource.query(
+      `INSERT INTO notifications (organization_id, event, severity, title, body, subject_type, subject_id)
+       VALUES ($1, 'stake.headroom_low', 'WARNING', 't', 'b', 'binding', $2)`,
+      [organizationId, bindingId],
+    );
+
+    await expect(service.discardDraft(organizationId, ACTOR, bindingId)).rejects.toMatchObject({
+      errorCode: ProviderErrorCode.PROVIDER_BINDING_NOT_DISCARDABLE,
+    });
+    expect(await exists(bindingId)).toBe(true);
+  });
+
+  it('accounts for every table with a binding column: refused on, or deleted with the draft', async () => {
+    // A new table naming a binding must be added to EVIDENCE or deleted by the
+    // discard; otherwise a discard would orphan it or cascade it away.
+    const rows = (await dataSource.query(
+      `SELECT DISTINCT table_name FROM information_schema.columns
+        WHERE table_schema = 'public' AND column_name IN ('binding_id', 'tool_binding_id')`,
+    )) as Array<{ table_name: string }>;
+    const deletedWithDraft = ['binding_versions', 'binding_test_runs', 'binding_credentials'];
+    expect(rows.map((row) => row.table_name).sort()).toEqual(
+      [...new Set([...EVIDENCE.map((entry) => entry.table), ...deletedWithDraft])].sort(),
     );
   });
 });

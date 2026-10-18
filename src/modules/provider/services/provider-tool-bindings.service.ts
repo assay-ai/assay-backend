@@ -28,6 +28,7 @@ import {
 import { CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
+import { originOf } from '../credentials/credential-rules';
 import { CredentialVaultService } from '../credentials/credential-vault.service';
 
 import {
@@ -134,7 +135,9 @@ export class ProviderToolBindingsService {
         resourceId: bindingId,
         before: {
           tool_id: row.toolId,
-          endpoint: row.endpoint,
+          // The origin only, as every binding audit records it: a stored URL
+          // may carry userinfo, a path or a query nobody should keep forever.
+          endpoint_origin: safeOrigin(row.endpoint),
           status: row.status,
           mapping_version: row.mappingVersion,
           test_runs: runs.affected ?? 0,
@@ -226,6 +229,18 @@ export const EVIDENCE: ReadonlyArray<{ table: string; what: string }> = [
   { table: 'provider_stake_grace', what: 'has a stake grace period' },
 ];
 
+/** Notices about a binding (stake headroom, check windows): no FK, so checked by subject. */
+const NOTICE_EVIDENCE = { what: 'has notices about it' };
+
+/** `originOf`, or null for an address that does not parse (never the raw string). */
+function safeOrigin(endpoint: string): string | null {
+  try {
+    return originOf(endpoint);
+  } catch {
+    return null;
+  }
+}
+
 /** Why `row` is not a discardable draft, or null when it is. */
 async function discardRefusal(
   manager: EntityManager,
@@ -242,7 +257,13 @@ async function discardRefusal(
     Record<string, boolean>
   >;
   const hit = EVIDENCE.find((_, index) => found?.[`e${index}`]);
-  return hit ? hit.what : null;
+  if (hit) return hit.what;
+  const [notice] = (await manager.query(
+    `SELECT EXISTS (SELECT 1 FROM "notifications"
+       WHERE "subject_type" = 'binding' AND "subject_id" = $1::text) AS "e"`,
+    [row.id],
+  )) as Array<{ e: boolean }>;
+  return notice?.e ? NOTICE_EVIDENCE.what : null;
 }
 
 /**
