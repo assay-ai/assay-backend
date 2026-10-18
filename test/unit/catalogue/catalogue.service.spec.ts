@@ -107,6 +107,8 @@ function binding(overrides: Partial<ToolBindingEntity> = {}): ToolBindingEntity 
     priceAmount: '250000',
     assetId: ASSET,
     status: 'ACTIVE',
+    slaFailureRate: '0.05000',
+    settlementChains: [chainIdOf(ASSET as AssetId)],
     // Nullable columns read back as `null`, never `undefined`.
     freeQuotaPerAgent: null,
     freeDailyBudget: null,
@@ -219,6 +221,8 @@ function build(wiring: Wiring = {}) {
 
   const router = {
     quote: jest.fn(async (toolId: string) => wiring.quotes?.[toolId] ?? quote()),
+    snapshotCandidates: jest.fn(async () => []),
+    quoteFromCandidates: jest.fn((tool: Tool) => wiring.quotes?.[tool.id] ?? quote()),
   } as unknown as ProviderRouterService;
 
   // Answers only the pairs it was asked for, from a table keyed the way the
@@ -822,6 +826,166 @@ describe('GET /catalogue/tools', () => {
 
     expect(router.quote).toHaveBeenCalledTimes(2);
   });
+
+  /**
+   * D6: a buyer pays on one chain, so the price is per chain, naming the
+   * provider whose listing sets it. A tool on one chain reuses its own quote —
+   * that IS the one chain's price — and asks the router nothing more.
+   */
+  it('prices a single-chain tool once, naming the provider the router priced it by', async () => {
+    const { service, router } = build({
+      bindings: [binding({ priceAmount: '100000' })],
+      quotes: {
+        get_weather: quote({
+          price: MoneyUtil.of('100000', ASSET, 6),
+          pricedBy: ['provider-a'],
+          listings: 1,
+        }),
+      },
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].prices).toEqual([
+      {
+        chainId: CHAIN,
+        price: { amount: '100000', asset: ASSET, decimals: 6 },
+        providerId: 'provider-a',
+        listings: 1,
+      },
+    ]);
+    expect(router.quote).toHaveBeenCalledTimes(1);
+    expect(router.snapshotCandidates).not.toHaveBeenCalled();
+  });
+
+  /** Several chains: one candidate snapshot, one pure quote per chain from it. */
+  function perChain(
+    router: ProviderRouterService,
+    byChain: Record<string, ToolQuote | Error>,
+  ): void {
+    (router.quote as jest.Mock).mockImplementation(async () =>
+      quote({ settlementChains: Object.keys(byChain) as ChainId[] }),
+    );
+    (router.quoteFromCandidates as jest.Mock).mockImplementation(
+      (_tool: Tool, _candidates: unknown, context: { payerChains: readonly ChainId[] }) => {
+        const answer = byChain[context.payerChains[0]];
+        if (answer instanceof Error) throw answer;
+        return answer;
+      },
+    );
+  }
+
+  /**
+   * The seeded case behind P0-1: $0.10 from one provider on one chain, $0.25
+   * from another on a second chain. Each chain is the router's own quote for
+   * a payer funded only there, never the dearest across both.
+   */
+  it('prices a two-chain tool per chain from one candidate snapshot', async () => {
+    const { service, router } = build({ bindings: [binding()] });
+    perChain(router, {
+      [CHAIN]: quote({ pricedBy: ['provider-a'], listings: 1 }),
+      [OTHER_CHAIN]: quote({
+        price: MoneyUtil.of('100000', OTHER_ASSET, 6),
+        settlementChains: [OTHER_CHAIN],
+        pricedBy: ['provider-b'],
+        listings: 1,
+      }),
+    });
+
+    const { tools } = await service.listTools();
+
+    expect(tools[0].prices).toEqual([
+      {
+        chainId: CHAIN,
+        price: { amount: '250000', asset: ASSET, decimals: 6 },
+        providerId: 'provider-a',
+        listings: 1,
+      },
+      {
+        chainId: OTHER_CHAIN,
+        price: { amount: '100000', asset: OTHER_ASSET, decimals: 6 },
+        providerId: 'provider-b',
+        listings: 1,
+      },
+    ]);
+    expect(router.snapshotCandidates).toHaveBeenCalledTimes(1);
+    expect(router.quoteFromCandidates).toHaveBeenCalledWith(
+      WEATHER,
+      expect.anything(),
+      expect.objectContaining({ payerChains: [OTHER_CHAIN], defaultChainId: OTHER_CHAIN }),
+    );
+
+    // The public catalogue copies the same entries.
+    const publicTools = await new PublicCatalogueService(service).listTools();
+    expect(publicTools.tools[0].prices).toEqual(tools[0].prices);
+  });
+
+  it('names the dearest provider when two on one chain charge different prices', async () => {
+    const { service, router } = build({ bindings: [binding()] });
+    perChain(router, {
+      [CHAIN]: quote({ pricedBy: ['provider-a'], listings: 2 }),
+      [OTHER_CHAIN]: quote({ price: null }),
+    });
+
+    const [entry] = (await service.listTools()).tools[0].prices;
+
+    expect(entry).toMatchObject({ providerId: 'provider-a', listings: 2 });
+  });
+
+  it('names nobody when two providers on one chain charge the same price', async () => {
+    const { service, router } = build({ bindings: [binding()] });
+    perChain(router, {
+      [CHAIN]: quote({ pricedBy: ['provider-a', 'provider-b'], listings: 2 }),
+      [OTHER_CHAIN]: quote({ price: null }),
+    });
+
+    const [entry] = (await service.listTools()).tools[0].prices;
+
+    expect(entry).toMatchObject({ providerId: null, listings: 2 });
+  });
+
+  /**
+   * An ACTIVE binding at the same price that the router finds ineligible
+   * (understaked, at its ceiling) is not in `pricedBy`, so it is never named:
+   * the name is the router's, not a re-match against the listed bindings.
+   */
+  it('names only the provider the router priced, not an ineligible binding at the same price', async () => {
+    const { service, router } = build({
+      bindings: [binding(), binding({ organizationId: 'provider-b' })],
+      providers: [provider(), provider({ organizationId: 'provider-b', legalName: 'B' })],
+    });
+    perChain(router, {
+      [CHAIN]: quote({ pricedBy: ['provider-b'], listings: 1 }),
+      [OTHER_CHAIN]: quote({ price: null }),
+    });
+
+    const [entry] = (await service.listTools()).tools[0].prices;
+
+    expect(entry).toMatchObject({ providerId: 'provider-b', listings: 1 });
+  });
+
+  it('leaves out a chain whose quote fails or has no price, and prices nothing on an unroutable tool', async () => {
+    const { service, router } = build({
+      bindings: [binding(), binding({ toolId: RATE.id })],
+    });
+    perChain(router, {
+      [CHAIN]: quote({ pricedBy: ['provider-a'], listings: 1 }),
+      [OTHER_CHAIN]: new Error('rpc down'),
+    });
+    const base = (router.quote as jest.Mock).getMockImplementation()!;
+    (router.quote as jest.Mock).mockImplementation(async (toolId: string, context: unknown) =>
+      toolId === RATE.id
+        ? quote({ tool: RATE, price: null, settlementChains: [], unroutableReason: 'none' })
+        : base(toolId, context),
+    );
+
+    const { tools } = await service.listTools();
+
+    expect(tools.find((tool) => tool.id === WEATHER.id)?.prices.map((p) => p.chainId)).toEqual([
+      CHAIN,
+    ]);
+    expect(tools.find((tool) => tool.id === RATE.id)?.prices).toEqual([]);
+  });
 });
 
 describe('GET /catalogue/providers/:providerId', () => {
@@ -836,6 +1000,7 @@ describe('GET /catalogue/providers/:providerId', () => {
         name: 'get_weather',
         pricingMode: 'PAID',
         price: { amount: '250000', asset: ASSET, decimals: 6 },
+        promisedFailureRate: 0.05,
         freeCallsPerAgentPerDay: null,
       },
     ]);
@@ -1115,6 +1280,7 @@ describe('PublicCatalogueService', () => {
       'name',
       'price',
       'pricingMode',
+      'promisedFailureRate',
       'toolId',
     ]);
     expect(detail.tools[0].freeCallsPerAgentPerDay).toBe(3);
@@ -1137,6 +1303,7 @@ describe('PublicCatalogueService', () => {
         'notReviewed',
         'paidBindings',
         'price',
+        'prices',
         'pricingMode',
         'providerCount',
         'replacementMajor',
@@ -1415,6 +1582,7 @@ describe('the catalogue, with an unpublished draft on a live binding', () => {
         name: WEATHER.name,
         pricingMode: 'FREEMIUM',
         price: published,
+        promisedFailureRate: 0.05,
         freeCallsPerAgentPerDay: 7,
       },
     ]);

@@ -59,6 +59,7 @@ import { ProviderRouterService, ToolQuote } from '@modules/tool/services/provide
 import { MoneyUtil } from '@utils/money.util';
 
 import {
+  CatalogueChainPriceDto,
   CatalogueChainStakeDto,
   CatalogueMoneyDto,
   CatalogueProviderDetailDto,
@@ -333,6 +334,10 @@ export class CatalogueService {
           name: names.get(binding.toolId) ?? binding.toolId,
           pricingMode: binding.pricingMode,
           price: money(binding),
+          // The failure rate this listing promises (`tool_bindings.sla_failure_rate`),
+          // the line its penalties are measured against — so a buyer can read
+          // the observed rate against it.
+          promisedFailureRate: binding.slaFailureRate,
           // What the free tier would grant one agent here: its per-agent
           // quota, never more than the binding's daily free-call budget (a
           // call COUNT across all agents, BUG-R17g-01), each falling back to
@@ -417,6 +422,12 @@ export class CatalogueService {
       ),
     );
 
+    // One quote per chain a tool settles on (D6): a buyer pays on ONE chain, so
+    // the headline is that chain's price, never the dearest across chains.
+    const chainPrices = await Promise.all(
+      listed.map((tool: Tool, index) => this.pricesPerChain(tool, quotes[index], quoteContext)),
+    );
+
     const tools = listed.map((tool: Tool, index): CatalogueToolDto => {
       const own = byTool.get(tool.id) ?? [];
       const quote = quotes[index];
@@ -462,10 +473,68 @@ export class CatalogueService {
         // should give up on. Keyed off the list itself rather than off `price`
         // so the two can never disagree.
         settlementChains: quote.settlementChains.length > 0 ? [...quote.settlementChains] : null,
+        prices: chainPrices[index],
       };
     });
 
     return { tools: tools.sort((a, b) => a.name.localeCompare(b.name)) };
+  }
+
+  /**
+   * The price a call pays on each chain the tool settles on, with the provider
+   * whose listing sets it.
+   *
+   * Each chain is priced by the router itself with the payer narrowed to that
+   * one chain, so every figure is `quote()`'s own answer for a buyer funded
+   * there — the dearest eligible binding on that chain. The candidates are
+   * read once ({@link ProviderRouterService.snapshotCandidates}) and every
+   * chain is priced from that one snapshot, so the chain lines agree with
+   * each other. A tool on one chain reuses the tool's own quote, which is
+   * that same question. A chain that cannot be priced right now is left out.
+   *
+   * `providerId` and `listings` come from the router's own priced set, so a
+   * binding the router would not route to (understaked, at its ceiling, in a
+   * slash hold) never names a price: `providerId` is the one provider at the
+   * quoted price, or `null` when several are; `listings` is how many eligible
+   * bindings the price was taken over.
+   */
+  private async pricesPerChain(
+    tool: Tool,
+    quote: ToolQuote,
+    context: RoutingContext,
+  ): Promise<CatalogueChainPriceDto[]> {
+    const chains = quote.settlementChains;
+    if (quote.price === null || chains.length === 0) return [];
+    if (chains.length === 1) return [chainPrice(chains[0], quote)].filter(isPriced);
+
+    try {
+      const candidates = await this.router.snapshotCandidates(tool.id);
+      return chains
+        .map((chainId) => {
+          try {
+            return chainPrice(
+              chainId,
+              this.router.quoteFromCandidates(tool, candidates, {
+                ...context,
+                payerChains: [chainId],
+                defaultChainId: chainId,
+              }),
+            );
+          } catch (error: unknown) {
+            this.warnChain(tool, chainId, error);
+            return null;
+          }
+        })
+        .filter(isPriced);
+    } catch (error: unknown) {
+      this.warnChain(tool, 'every chain', error);
+      return [];
+    }
+  }
+
+  private warnChain(tool: Tool, chain: string, error: unknown): void {
+    const reason = error instanceof Error ? error.message : String(error);
+    this.logger.warn(`${tool.name} (${tool.id}) on ${chain}: quote failed — ${reason}`);
   }
 
   /**
@@ -658,6 +727,22 @@ function cheapest(bindings: readonly ToolBinding[]): CatalogueMoneyDto | null {
   }
 
   return best ? money(best) : null;
+}
+
+/** One chain's entry from the router's quote for a payer on that chain; `null` when it has no price. */
+function chainPrice(chainId: ChainId, quote: ToolQuote): CatalogueChainPriceDto | null {
+  if (quote.price === null) return null;
+  const pricedBy = quote.pricedBy ?? [];
+  return {
+    chainId,
+    price: toMoneyDto(quote.price),
+    providerId: pricedBy.length === 1 ? pricedBy[0] : null,
+    listings: quote.listings ?? 0,
+  };
+}
+
+function isPriced(entry: CatalogueChainPriceDto | null): entry is CatalogueChainPriceDto {
+  return entry !== null;
 }
 
 function money(binding: ToolBinding): CatalogueMoneyDto {
