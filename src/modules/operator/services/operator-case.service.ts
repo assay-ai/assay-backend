@@ -64,6 +64,25 @@ export const CASE_APPROVAL_ACTIONS = {
  * a query scoped to the wrong column, serving an empty list to somebody who
  * should have seen everything.
  */
+/** What stands on chain for a case, as the brief says it (`chainRecord`). */
+export enum ChainRecordState {
+  STANDING = 'STANDING',
+  EXECUTED = 'EXECUTED',
+  GONE = 'GONE',
+  UNKNOWN = 'UNKNOWN',
+}
+
+/** The case page waits no longer than this for a live chain read. */
+const BRIEF_CHAIN_READ_TIMEOUT_MS = 2_500;
+
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  let timer: NodeJS.Timeout | undefined;
+  const timeout = new Promise<never>((_, reject) => {
+    timer = setTimeout(() => reject(new Error(`timed out after ${ms} ms`)), ms);
+  });
+  return Promise.race([promise, timeout]).finally(() => clearTimeout(timer));
+}
+
 /** The mirrors under which a record of the case may still stand on chain. */
 const MAY_STAND: readonly string[] = [
   ChainProposalStatus.PENDING,
@@ -144,34 +163,45 @@ export class OperatorCaseService {
       this.queue.brief(organizationId, proposalId),
       this.proposals.findOneScoped(organizationId, proposalId),
     ]);
+    const chainRecord = proposal ? await this.chainRecordOf(proposal) : ChainRecordState.GONE;
     return {
       ...brief,
-      // Whether anything of this case is Pending or Disputed on chain, i.e.
-      // whether anyone could execute it or a cancel has anything to act on.
-      // `chainExecutableAt` alone cannot say that: a case opened before the
-      // parts model keeps its dates with nothing behind them.
-      chainStanding: proposal ? await this.chainStanding(proposal) : false,
+      // What stands on chain for this case: STANDING (anyone could execute it
+      // once due; a cancel has something to act on), EXECUTED (the stake was
+      // taken, even under a requested cancel), GONE (nothing stands and nothing
+      // was taken), UNKNOWN (could not be told; read as standing).
+      // `chainExecutableAt` alone cannot say any of this: a case opened before
+      // the parts model keeps its dates with nothing behind them.
+      chainRecord,
+      // STANDING or UNKNOWN. Kept beside `chainRecord` for the console's simple reads.
+      chainStanding:
+        chainRecord === ChainRecordState.STANDING || chainRecord === ChainRecordState.UNKNOWN,
     };
   }
 
   /**
-   * Read, never assumed:
+   * Read, never assumed; anything that cannot be told is UNKNOWN:
    *
-   * - a closed or never-proposed mirror: nothing stands;
-   * - a partitioned case (an EVM window) with parts: a part `PENDING` or
-   *   `DISPUTED` in the stored parts, which the sweeps keep in step with the chain;
-   * - a partitioned case with **no** parts (opened before the parts model): its
-   *   judgement, if any, is the one record under the case's own request id, so
-   *   that record is read from the chain. Unreadable: it cannot be ruled out,
-   *   so it counts as standing;
-   * - a single-record case: its mirror, which the sweeps keep in step.
+   * - mirror `EXECUTED`: EXECUTED; any other mirror that cannot carry a record
+   *   (`NONE`, `PROPOSING`, `REFUSED`, `CANCELLED`): GONE;
+   * - a partitioned case (an EVM window) with parts, from the stored parts the
+   *   sweeps keep in step: a part PENDING or DISPUTED is STANDING, else one
+   *   EXECUTED is EXECUTED, else a part NONE or REFUSED is UNKNOWN (it may
+   *   still land; the sweep re-reads it), else GONE;
+   * - a partitioned case with **no** parts (opened before the parts model):
+   *   its judgement is the one record under the case's own request id, read
+   *   from the chain with a short timeout. No record is GONE only when none
+   *   was ever written; one that was written and is not found is an anomaly,
+   *   UNKNOWN;
+   * - a single-record case: STANDING (its mirror, kept in step by the sweeps).
    */
-  private async chainStanding(proposal: SlashProposalEntity): Promise<boolean> {
-    if (!MAY_STAND.includes(proposal.chainStatus)) return false;
+  private async chainRecordOf(proposal: SlashProposalEntity): Promise<ChainRecordState> {
+    if (proposal.chainStatus === ChainProposalStatus.EXECUTED) return ChainRecordState.EXECUTED;
+    if (!MAY_STAND.includes(proposal.chainStatus)) return ChainRecordState.GONE;
     const partitioned =
       proposal.windowId !== null &&
       namespaceOf(proposal.assetId as AssetId) === ChainNamespace.EIP155;
-    if (!partitioned) return true;
+    if (!partitioned) return ChainRecordState.STANDING;
 
     const parts = await this.parts.findForEpoch(
       proposal.organizationId,
@@ -179,29 +209,41 @@ export class OperatorCaseService {
       proposal.chainEpoch,
     );
     if (parts.length > 0) {
-      return parts.some((part) => ['PENDING', 'DISPUTED'].includes(part.chainStatus));
+      const has = (status: string) => parts.some((part) => part.chainStatus === status);
+      if (has('PENDING') || has('DISPUTED')) return ChainRecordState.STANDING;
+      if (has('EXECUTED')) return ChainRecordState.EXECUTED;
+      if (has('NONE') || has('REFUSED')) return ChainRecordState.UNKNOWN;
+      return ChainRecordState.GONE;
     }
 
-    if (!this.executor) return true;
+    if (!this.executor) return ChainRecordState.UNKNOWN;
     try {
       const chainId = chainIdOf(proposal.assetId as AssetId);
       const enrolment = await this.enrolments.findOneBy({
         organizationId: proposal.providerId,
         chainId,
       });
-      if (!enrolment?.stakeAuthorityAccountId) return true;
-      const record = await this.executor.readRecord(
-        proposal.chainRequestId,
-        parseAccountId(enrolment.stakeAuthorityAccountId).address,
-        chainId,
+      if (!enrolment?.stakeAuthorityAccountId) return ChainRecordState.UNKNOWN;
+      const record = await withTimeout(
+        this.executor.readRecord(
+          proposal.chainRequestId,
+          parseAccountId(enrolment.stakeAuthorityAccountId).address,
+          chainId,
+        ),
+        BRIEF_CHAIN_READ_TIMEOUT_MS,
       );
-      return record?.status === 'PENDING' || record?.status === 'DISPUTED';
+      if (record?.status === 'PENDING' || record?.status === 'DISPUTED') {
+        return ChainRecordState.STANDING;
+      }
+      if (record?.status === 'EXECUTED') return ChainRecordState.EXECUTED;
+      if (record?.status === 'CANCELLED') return ChainRecordState.GONE;
+      return proposal.chainProposedAt ? ChainRecordState.UNKNOWN : ChainRecordState.GONE;
     } catch (error) {
       this.logger.warn(
         `slash proposal ${proposal.id}: its on-chain record could not be read for the brief ` +
-          `(${error instanceof Error ? error.message : String(error)}); shown as standing`,
+          `(${error instanceof Error ? error.message : String(error)}); shown as unknown`,
       );
-      return true;
+      return ChainRecordState.UNKNOWN;
     }
   }
 

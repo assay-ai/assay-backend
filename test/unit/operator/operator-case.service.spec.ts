@@ -24,6 +24,7 @@ function build(input: {
     assetId: EVM_ASSET,
     windowId: 'window-1',
     chainStatus: 'CANCEL_REQUESTED',
+    chainProposedAt: null,
     ...input.proposal,
   } as SlashProposalEntity;
   const proposals = {
@@ -38,7 +39,7 @@ function build(input: {
       stakeAuthorityAccountId: 'eip155:46630:0x00000000000000000000000000000000000000aa',
     })),
   };
-  const readRecord = jest.fn(async () => {
+  const readRecord = jest.fn(async (): Promise<SlashRecordSnapshot | null> => {
     if (input.record instanceof Error) throw input.record;
     return input.record ? ({ status: input.record } as SlashRecordSnapshot) : null;
   });
@@ -55,55 +56,96 @@ function build(input: {
   return { service, readRecord };
 }
 
-describe('OperatorCaseService.brief chainStanding', () => {
-  it('false once the chain side is closed', async () => {
-    const { service, readRecord } = build({ proposal: { chainStatus: 'CANCELLED' } });
-    await expect(service.brief('case-1')).resolves.toMatchObject({ chainStanding: false });
-    expect(readRecord).not.toHaveBeenCalled();
-  });
+describe('OperatorCaseService.brief chainRecord', () => {
+  const brief = (ctx: ReturnType<typeof build>) => ctx.service.brief('case-1');
 
-  it('a partitioned case stands while a part is Pending or Disputed', async () => {
-    const standing = build({
-      proposal: { chainStatus: 'PENDING' },
-      parts: [{ chainStatus: 'CANCELLED' }, { chainStatus: 'DISPUTED' }],
-    });
-    await expect(standing.service.brief('case-1')).resolves.toMatchObject({ chainStanding: true });
-
-    const gone = build({
-      parts: [{ chainStatus: 'CANCELLED' }, { chainStatus: 'EXECUTED' }],
-    });
-    await expect(gone.service.brief('case-1')).resolves.toMatchObject({ chainStanding: false });
-    expect(gone.readRecord).not.toHaveBeenCalled();
-  });
-
-  it('a window case with no parts (opened before parts) reads its own record', async () => {
-    const cancelled = build({ record: 'CANCELLED' });
-    await expect(cancelled.service.brief('case-1')).resolves.toMatchObject({
+  it('GONE once the chain side is closed; EXECUTED once the mirror says so', async () => {
+    const closed = build({ proposal: { chainStatus: 'CANCELLED' } });
+    await expect(brief(closed)).resolves.toMatchObject({
+      chainRecord: 'GONE',
       chainStanding: false,
     });
+    expect(closed.readRecord).not.toHaveBeenCalled();
+    await expect(brief(build({ proposal: { chainStatus: 'EXECUTED' } }))).resolves.toMatchObject({
+      chainRecord: 'EXECUTED',
+      chainStanding: false,
+    });
+  });
+
+  it('a partitioned case reads its parts', async () => {
+    const cases: [string[], string][] = [
+      [['CANCELLED', 'DISPUTED'], 'STANDING'],
+      [['CANCELLED', 'EXECUTED'], 'EXECUTED'],
+      [['CANCELLED', 'CANCELLED'], 'GONE'],
+      [['CANCELLED', 'NONE'], 'UNKNOWN'],
+      [['CANCELLED', 'REFUSED'], 'UNKNOWN'],
+    ];
+    for (const [statuses, expected] of cases) {
+      const ctx = build({ parts: statuses.map((chainStatus) => ({ chainStatus })) });
+      await expect(brief(ctx)).resolves.toMatchObject({ chainRecord: expected });
+      expect(ctx.readRecord).not.toHaveBeenCalled();
+    }
+  });
+
+  // C1: an executed part is money taken, never "nothing stands".
+  it('C1: an executed part or record is EXECUTED, never GONE', async () => {
+    await expect(brief(build({ parts: [{ chainStatus: 'EXECUTED' }] }))).resolves.toMatchObject({
+      chainRecord: 'EXECUTED',
+    });
+    await expect(brief(build({ record: 'EXECUTED' }))).resolves.toMatchObject({
+      chainRecord: 'EXECUTED',
+      chainStanding: false,
+    });
+  });
+
+  it('a window case with no parts reads its own record', async () => {
+    const cancelled = build({ record: 'CANCELLED' });
+    await expect(brief(cancelled)).resolves.toMatchObject({ chainRecord: 'GONE' });
     expect(cancelled.readRecord).toHaveBeenCalledWith(
       'r'.repeat(64),
       '0x00000000000000000000000000000000000000aa',
       'eip155:46630',
     );
-
-    const missing = build({ record: null });
-    await expect(missing.service.brief('case-1')).resolves.toMatchObject({ chainStanding: false });
-
-    const pending = build({ record: 'PENDING' });
-    await expect(pending.service.brief('case-1')).resolves.toMatchObject({ chainStanding: true });
+    await expect(brief(build({ record: 'PENDING' }))).resolves.toMatchObject({
+      chainRecord: 'STANDING',
+      chainStanding: true,
+    });
   });
 
-  it('cannot rule a record out when the chain is unreadable: standing', async () => {
-    const { service } = build({ record: new Error('rpc down') });
-    await expect(service.brief('case-1')).resolves.toMatchObject({ chainStanding: true });
+  it('no record: GONE only when none was ever written, else UNKNOWN (standing)', async () => {
+    await expect(brief(build({ record: null }))).resolves.toMatchObject({ chainRecord: 'GONE' });
+    await expect(
+      brief(
+        build({ record: null, proposal: { chainProposedAt: new Date('2026-10-14T11:17:01Z') } }),
+      ),
+    ).resolves.toMatchObject({ chainRecord: 'UNKNOWN', chainStanding: true });
+  });
+
+  it('an unreadable chain is UNKNOWN, read as standing', async () => {
+    await expect(brief(build({ record: new Error('rpc down') }))).resolves.toMatchObject({
+      chainRecord: 'UNKNOWN',
+      chainStanding: true,
+    });
+  });
+
+  it('a slow chain read gives up after a short timeout: UNKNOWN', async () => {
+    jest.useFakeTimers();
+    try {
+      const ctx = build({});
+      ctx.readRecord.mockImplementation(() => new Promise(() => undefined));
+      const pending = brief(ctx);
+      await jest.advanceTimersByTimeAsync(3_000);
+      await expect(pending).resolves.toMatchObject({ chainRecord: 'UNKNOWN' });
+    } finally {
+      jest.useRealTimers();
+    }
   });
 
   it('a single-record case trusts its mirror', async () => {
     const { service, readRecord } = build({
       proposal: { assetId: SOLANA_ASSET, chainStatus: 'PENDING' },
     });
-    await expect(service.brief('case-1')).resolves.toMatchObject({ chainStanding: true });
+    await expect(service.brief('case-1')).resolves.toMatchObject({ chainRecord: 'STANDING' });
     expect(readRecord).not.toHaveBeenCalled();
   });
 });

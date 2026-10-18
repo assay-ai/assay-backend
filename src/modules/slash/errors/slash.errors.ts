@@ -330,6 +330,8 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
   chainUnavailable: {
     code: SlashErrorCode.SLASH_CHAIN_UNAVAILABLE,
     statusCode: 503,
+    // The reason is this platform's own wording (never an RPC payload), so the console can show it.
+    publicContext: ['proposalId', 'reason'],
     message: (context?: Record<string, any>) =>
       `No transaction could be built for this case` +
       `${context?.reason ? `: ${context.reason}` : ''}` +
