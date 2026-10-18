@@ -36,7 +36,6 @@ import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-ga
 import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.service';
 import { LedgerHoldService } from '@modules/ledger/services/ledger-hold.service';
 import { LedgerJournalService } from '@modules/ledger/services/ledger-journal.service';
-import { LedgerWriterService } from '@modules/ledger/services/ledger-writer.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
 import {
@@ -129,12 +128,7 @@ describe('call disputes, against a real database', () => {
     );
     const balances = new LedgerBalanceService(balanceRepository, journal);
     const holds = new LedgerHoldService(new LedgerHoldRepository(dataSource), journal, dataSource);
-    ledger = new LedgerService(
-      journal,
-      new LedgerWriterService(journal, dataSource),
-      balances,
-      holds,
-    );
+    ledger = new LedgerService(journal, balances, holds);
     payments = new PaymentIntentRepository(dataSource);
     held = new FakeHeldPayments();
     const alertSink = {
