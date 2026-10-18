@@ -270,4 +270,16 @@ export class DisputeEntity extends OrganizationScopedEntityWithoutSoftDelete {
   /** 6 days with no decision: paged before the chain's 7-day timeout. */
   @Column({ name: 'paged_6d_at', type: 'timestamptz', nullable: true })
   paged6dAt: Date | null;
+
+  /** When the SLA's next step is due; null once nothing is left to do. */
+  @Column({ name: 'sla_due_at', type: 'timestamptz', nullable: true })
+  slaDueAt: Date | null;
+
+  /** An upheld refund still pending 5 days after `collectable_at`: paged. */
+  @Column({ name: 'refund_paged_5d_at', type: 'timestamptz', nullable: true })
+  refundPaged5dAt: Date | null;
+
+  /** ...and again at 6 days, a day before `refundHeld` closes. */
+  @Column({ name: 'refund_paged_6d_at', type: 'timestamptz', nullable: true })
+  refundPaged6dAt: Date | null;
 }

@@ -23,11 +23,17 @@ export interface CallDisputeConfig {
    */
   readonly twoPersonThresholdUnits: string;
   /**
-   * Open disputes against one provider filed in a rolling 24 hours, over every
-   * buyer: past it a filing is refused, so a coordinated wave cannot ride the
-   * auto-uphold.
+   * Disputes one buyer organization may file against ONE provider in a rolling
+   * 24 hours (beside the per-buyer daily limit). Counted per (buyer, provider),
+   * so no buyer can use it to block another buyer's filings.
    */
-  readonly maxOpenPerProviderPerDay: number;
+  readonly maxPerProviderPerDay: number;
+  /**
+   * Auto-upholds against one provider in a rolling 24 hours. Past it the SLA
+   * pages instead, so a coordinated wave of silent-provider disputes cannot
+   * drain a provider without a human looking.
+   */
+  readonly maxAutoUpholdsPerProviderPerDay: number;
   /** The largest evidence snapshot kept, in bytes of JSON; larger bodies are cut. */
   readonly snapshotMaxBytes: number;
   /**
@@ -48,7 +54,8 @@ export const DEFAULT_CALL_DISPUTE_CONFIG: CallDisputeConfig = Object.freeze({
   abuseMaxFilingsPerDay: 2,
   abuseRejectedThreshold: 5,
   twoPersonThresholdUnits: '5',
-  maxOpenPerProviderPerDay: 100,
+  maxPerProviderPerDay: 10,
+  maxAutoUpholdsPerProviderPerDay: 20,
   snapshotMaxBytes: 64 * 1024,
   snapshotRetentionMs: 30 * DAY_MS,
 });
@@ -87,10 +94,15 @@ export function loadCallDisputeConfig(env: NodeJS.ProcessEnv = process.env): Cal
       'CALL_DISPUTE_TWO_PERSON_THRESHOLD',
       defaults.twoPersonThresholdUnits,
     ),
-    maxOpenPerProviderPerDay: readInt(
+    maxPerProviderPerDay: readInt(
       env,
-      'CALL_DISPUTE_MAX_OPEN_PER_PROVIDER_PER_DAY',
-      defaults.maxOpenPerProviderPerDay,
+      'CALL_DISPUTE_MAX_PER_PROVIDER_PER_DAY',
+      defaults.maxPerProviderPerDay,
+    ),
+    maxAutoUpholdsPerProviderPerDay: readInt(
+      env,
+      'CALL_DISPUTE_MAX_AUTO_UPHOLDS_PER_PROVIDER_PER_DAY',
+      defaults.maxAutoUpholdsPerProviderPerDay,
     ),
     snapshotMaxBytes: readInt(env, 'CALL_DISPUTE_SNAPSHOT_MAX_BYTES', defaults.snapshotMaxBytes),
     snapshotRetentionMs:

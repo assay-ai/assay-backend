@@ -137,6 +137,11 @@ describe('call disputes, against a real database', () => {
     );
     payments = new PaymentIntentRepository(dataSource);
     held = new FakeHeldPayments();
+    const alertSink = {
+      emit: async (alert: { name: string; summary: string }) => {
+        alerts.push(alert);
+      },
+    } as never;
     intents = new PaymentIntentService(
       payments,
       ledger,
@@ -145,12 +150,8 @@ describe('call disputes, against a real database', () => {
       null,
       null,
       held,
+      alertSink,
     );
-    const alertSink = {
-      emit: async (alert: { name: string; summary: string }) => {
-        alerts.push(alert);
-      },
-    } as never;
     blocklist = blocklistOf();
     collection = new HeldCollectionService(payments, intents, blocklist, alertSink, held, null);
 
@@ -204,7 +205,9 @@ describe('call disputes, against a real database', () => {
     notified = [];
     alerts.length = 0;
     config.twoPersonThresholdUnits = '5';
-    config.maxOpenPerProviderPerDay = DEFAULT_CALL_DISPUTE_CONFIG.maxOpenPerProviderPerDay;
+    config.maxPerProviderPerDay = DEFAULT_CALL_DISPUTE_CONFIG.maxPerProviderPerDay;
+    config.maxAutoUpholdsPerProviderPerDay =
+      DEFAULT_CALL_DISPUTE_CONFIG.maxAutoUpholdsPerProviderPerDay;
     held.live = true;
     held.readMode = 'normal';
     held.failRefunds = false;
@@ -884,7 +887,8 @@ describe('call disputes, against a real database', () => {
   describe('the decision SLA', () => {
     async function age(disputeId: string, hours: number): Promise<void> {
       await dataSource.query(
-        `UPDATE disputes SET created_at = now() - make_interval(hours => $2) WHERE id = $1`,
+        `UPDATE disputes SET created_at = now() - make_interval(hours => $2), sla_due_at = now()
+          WHERE id = $1`,
         [disputeId, hours],
       );
     }
@@ -971,6 +975,68 @@ describe('call disputes, against a real database', () => {
       );
     });
 
+    it('caps auto-upholds per provider per day, and pages past the cap', async () => {
+      config.maxAutoUpholdsPerProviderPerDay = 1;
+      const first = await file(await seedHeld());
+      const secondCall = await seedHeld();
+      const second = await file(secondCall);
+      await age(first.id, 73);
+      await age(second.id, 73);
+
+      expect(await sla.sweep()).toMatchObject({ autoUpheld: 1 });
+
+      expect((await disputes.requireAny(second.id)).state).toBe('OPEN');
+      expect(alerts.map((a) => a.summary)).toEqual(
+        expect.arrayContaining([expect.stringMatching(/daily auto-uphold cap/)]),
+      );
+      expect(await chainStatus(secondCall)).toBe(HeldStatus.HELD);
+    });
+
+    it('every row leaves the due set: a deferring auto-uphold is retried later, then paged', async () => {
+      const call = await seedSettled(); // filed before redemption: the uphold defers
+      const dispute = await file(call);
+      await age(dispute.id, 73);
+
+      await sla.sweep();
+      const deferred = await disputes.requireAny(dispute.id);
+      expect(deferred.state).toBe('OPEN');
+      // Retried in about 15 minutes, not on every pass; the 48 h page was not skipped.
+      expect(deferred.slaDueAt!.getTime()).toBeGreaterThan(Date.now() + 10 * 60_000);
+      expect(deferred.paged48hAt).not.toBeNull();
+
+      await age(dispute.id, 6 * 24 + 1);
+      await sla.sweep();
+      const stopped = await disputes.requireAny(dispute.id);
+      expect(stopped.paged72hAt).not.toBeNull();
+      expect(stopped.paged6dAt).not.toBeNull();
+      expect(stopped.slaDueAt).toBeNull();
+      expect(alerts.map((a) => a.summary)).toEqual(
+        expect.arrayContaining([expect.stringMatching(/kept deferring/)]),
+      );
+    });
+
+    it('pages an upheld refund still pending at collectable_at + 5 d and + 6 d', async () => {
+      const call = await seedHeld();
+      const dispute = await file(call);
+      await decide(dispute.id, CallDisputeDecision.UPHOLD);
+      held.failRefunds = true;
+      await sla.refundPending();
+
+      await endWindow(call, 5 * 86_400_000 + 60_000);
+      await sla.sweep();
+      expect(alerts.map((a) => a.summary)).toEqual([
+        expect.stringMatching(/refund still pending 5 days after the window/),
+      ]);
+
+      await endWindow(call, 6 * 86_400_000 + 60_000);
+      await sla.sweep();
+      await sla.sweep();
+      expect(alerts.map((a) => a.summary)).toEqual([
+        expect.stringMatching(/5 days after the window/),
+        expect.stringMatching(/6 days after the window/),
+      ]);
+    });
+
     it('keeps holding when the provider replied, and pages at 72 h and 6 d', async () => {
       const call = await seedHeld();
       const dispute = await file(call);
@@ -1034,6 +1100,20 @@ describe('call disputes, against a real database', () => {
       }
     });
 
+    it('a redemption nothing can classify is counted and paged, never credited', async () => {
+      const call = await seedSettled();
+      held.receiptSays(keyOf(call), { kind: 'UNKNOWN' });
+      for (let i = 0; i < 5; i += 1) {
+        await expect(
+          intents.commitRedeemedHold(buyer, call.intentId, `unobserved:seq=${call.seq}`),
+        ).rejects.toBeDefined();
+      }
+      expect(
+        (await payments.findOneBy({ organizationId: buyer, id: call.intentId }))?.heldAttempts,
+      ).toBe(5);
+      expect(await journalTypes(call.intentId)).toEqual(['HOLD_CREATE']);
+    });
+
     it('a receipt that cannot be read is retried, never guessed', async () => {
       const call = await seedSettled();
       held.receiptSays(keyOf(call), 'THROW');
@@ -1095,6 +1175,18 @@ describe('call disputes, against a real database', () => {
       }
     });
 
+    it('a held row whose record reads as nothing backs off', async () => {
+      const call = await seedHeld();
+      await endWindow(call);
+      held.readMode = 'null';
+      await collection.run();
+      held.readMode = 'normal';
+      const row = await payments.findOneBy({ organizationId: buyer, id: call.intentId });
+      expect(row?.heldAttempts).toBe(1);
+      expect(row?.heldRetryAt?.getTime()).toBeGreaterThan(Date.now());
+      expect(await chainStatus(call)).toBe(HeldStatus.HELD);
+    });
+
     it('guarantees a refund only where the hold is live', async () => {
       held.live = false;
       const call = await seedSettled();
@@ -1115,11 +1207,17 @@ describe('call disputes, against a real database', () => {
     });
 
     it('caps the open disputes against one provider in a day', async () => {
-      config.maxOpenPerProviderPerDay = 1;
+      config.maxPerProviderPerDay = 1;
       await file(await seedHeld());
       await expect(file(await seedHeld())).rejects.toMatchObject({
         errorCode: DisputeErrorCode.DISPUTE_RATE_LIMITED,
       });
+      // Per (buyer, provider): another buyer is not blocked by this one.
+      const otherBuyer = buyer;
+      buyer = randomUUID();
+      payer = toAccountId(CHAIN, `buyer-${randomUUID()}`) as AccountId;
+      await expect(file(await seedHeld())).resolves.toMatchObject({ state: 'OPEN' });
+      expect(otherBuyer).not.toBe(buyer);
     });
   });
 

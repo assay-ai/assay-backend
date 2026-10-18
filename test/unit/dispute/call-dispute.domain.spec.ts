@@ -202,12 +202,14 @@ describe('loadCallDisputeConfig', () => {
       CALL_DISPUTE_FILING_WINDOW_DAYS: '3',
       CALL_DISPUTE_MAX_PER_DAY: 'lots',
       CALL_DISPUTE_TWO_PERSON_THRESHOLD: '2.5',
-      CALL_DISPUTE_MAX_OPEN_PER_PROVIDER_PER_DAY: '7',
+      CALL_DISPUTE_MAX_PER_PROVIDER_PER_DAY: '7',
+      CALL_DISPUTE_MAX_AUTO_UPHOLDS_PER_PROVIDER_PER_DAY: '3',
     });
     expect(config.filingWindowMs).toBe(3 * 24 * 3600 * 1000);
     expect(config.maxFilingsPerDay).toBe(DEFAULT_CALL_DISPUTE_CONFIG.maxFilingsPerDay);
     expect(config.twoPersonThresholdUnits).toBe('2.5');
-    expect(config.maxOpenPerProviderPerDay).toBe(7);
+    expect(config.maxPerProviderPerDay).toBe(7);
+    expect(config.maxAutoUpholdsPerProviderPerDay).toBe(3);
     expect(loadCallDisputeConfig({}).twoPersonThresholdUnits).toBe('5');
     expect(
       loadCallDisputeConfig({ CALL_DISPUTE_TWO_PERSON_THRESHOLD: 'five' }).twoPersonThresholdUnits,
