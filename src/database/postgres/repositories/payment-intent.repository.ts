@@ -1616,6 +1616,78 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
   }
 
   /**
+   * Held payments of a BLOCKED provider the escrow can still refund (owner
+   * decision 2026-10-18): held, hold open, not backing off, the provider's
+   * organization or payout account blocked ({@link blockedProviderSql} — only
+   * the provider side of `exclude` is read), and `refundHeld` still open
+   * (`collectable_at + timeoutSeconds` in the future). Any dispute state: the
+   * buyer is refunded whatever a dispute would have decided. Closest to the
+   * timeout first. Cross-organization: a job.
+   */
+  async findHeldOfBlockedProviders(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    if (!hasExclusions(exclude)) return [];
+    return this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(`intent.collectableAt + make_interval(secs => :timeout) > now()`, {
+        timeout: timeoutSeconds,
+      })
+      .andWhere('(intent.heldRetryAt IS NULL OR intent.heldRetryAt <= now())')
+      .andWhere(`(${blockedProviderSql('intent')})`, blockedPartyParams(exclude))
+      .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /**
+   * Held payments of a BLOCKED provider within `warnSeconds` of the chain's
+   * timeout (`collectable_at + timeoutSeconds`), or past it: a refund that has
+   * not landed by then is lost to the provider, so these are paged. Backing
+   * off or not. Cross-organization: a job.
+   */
+  async findBlockedHeldNearTimeout(
+    rail: string,
+    exclude: RedemptionExclusions,
+    timeoutSeconds: number,
+    warnSeconds: number,
+    limit: number,
+  ): Promise<PaymentIntentEntity[]> {
+    if (!hasExclusions(exclude)) return [];
+    return this.createQueryBuilder('intent')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail })
+      .andWhere(`intent.heldStatus = 'HELD'`)
+      .andWhere('intent.holdReleasedAt IS NULL')
+      .andWhere(`intent.collectableAt + make_interval(secs => :lead) <= now()`, {
+        lead: timeoutSeconds - warnSeconds,
+      })
+      .andWhere(`(${blockedProviderSql('intent')})`, blockedPartyParams(exclude))
+      .orderBy('intent.collectableAt', 'ASC')
+      .addOrderBy('intent.id', 'ASC')
+      .limit(limit)
+      .getMany();
+  }
+
+  /** The assets with a payment still held on chain: whose chains' blocklists matter. */
+  async findHeldAssetIds(rail: string): Promise<string[]> {
+    const rows = (await this.manager.query(
+      `SELECT DISTINCT "asset_id" AS "assetId" FROM "payment_intents"
+        WHERE "organization_id" IS NOT NULL AND "rail" = $1 AND "held_status" = 'HELD'`,
+      [rail],
+    )) as { assetId: string }[];
+    return rows.map((row) => row.assetId);
+  }
+
+  /**
    * Upheld disputes' held payments still to refund (review P1-2): retried by
    * the scheduler, which holds the redeemer key. Cross-organization: a job.
    */
@@ -1697,14 +1769,16 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
    * Books a refunded hold (G3.B1), INSIDE the ledger transaction that releases
    * the buyer's hold, under the payer's admission lock: `<reason>` closes the
    * row for good, `held_status = 'REFUNDED'`, `hold_released_at` stamped with
-   * the release. Only a row an upheld dispute holds. `false` when nothing
-   * matched — already booked, or collected.
+   * the release. Only a row an upheld dispute holds — unless `requireUpheld`
+   * is `false` (a blocked provider's refund, whatever the dispute state).
+   * `false` when nothing matched — already booked, or collected.
    */
   async markHeldRefunded(
     runner: QueryRunner,
     target: DebtCloseTarget,
     reason: string,
     txRef: string | null,
+    requireUpheld = true,
   ): Promise<boolean> {
     await runner.query(`SELECT pg_advisory_xact_lock(hashtext($1))`, [
       `voucher-admission:${target.payer}`,
@@ -1715,9 +1789,9 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
               "held_status" = 'REFUNDED', "held_tx_ref" = COALESCE($6, "held_tx_ref")
         WHERE "organization_id" = $1 AND "id" = $2 AND "agent_account" = $3 AND "hold_id" = $4
           AND "status" = 'SETTLED' AND "held_status" = 'HELD'
-          AND "dispute_outcome" = 'UPHELD' AND "hold_released_at" IS NULL
+          AND ("dispute_outcome" = 'UPHELD' OR NOT $7) AND "hold_released_at" IS NULL
         RETURNING "id"`,
-      [target.organizationId, target.id, target.payer, target.holdId, reason, txRef],
+      [target.organizationId, target.id, target.payer, target.holdId, reason, txRef, requireUpheld],
     )) as [unknown[], number] | unknown[];
     return affected(result) > 0;
   }
@@ -2843,11 +2917,19 @@ function blockedPartySql(alias: string): string {
  * payout account count as well.
  */
 function blockedCollectSql(alias: string): string {
+  return [blockedPartySql(alias), blockedProviderSql(alias)].join(' OR ');
+}
+
+/**
+ * Whether the PROVIDER side of the row aliased `alias` is blocked: the
+ * provider's organization, or its payout account by blocklist key or by
+ * on-chain account. Named parameters: {@link blockedPartyParams}.
+ */
+function blockedProviderSql(alias: string): string {
   const key = (column: string) =>
     `(split_part(${alias}.${column}, ':', 1) || ':' || CASE WHEN split_part(${alias}.${column}, ':', 1) = 'eip155' ` +
     `THEN lower(split_part(${alias}.${column}, ':', 3)) ELSE split_part(${alias}.${column}, ':', 3) END)`;
   return [
-    blockedPartySql(alias),
     `${alias}.provider_id::text = ANY(:blockedOrgs)`,
     `${key('provider_account')} = ANY(:blockedWalletKeys)`,
     `lower(${alias}.provider_account) = ANY(:blockedChainAccounts)`,
