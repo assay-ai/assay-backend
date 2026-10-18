@@ -372,6 +372,37 @@ export class LedgerEntryRepository extends OrganizationScopedRepository<LedgerEn
       orphanedHoldIds: row.orphanedHoldIds ?? [],
     }));
   }
+
+  /**
+   * What was deposited into this account's escrow in `[from, to)`, by entry
+   * time: credited deposits (`DEPOSIT_PENDING`, legacy `DEPOSIT`) less those a
+   * reorg dropped (`DEPOSIT_REJECT`). Atomic units. A statement line (B7),
+   * read-only.
+   */
+  async sumDeposits(
+    organizationId: string,
+    accountId: string,
+    assetId: string,
+    from: Date | null,
+    to: Date,
+  ): Promise<bigint> {
+    const qb = this.createQueryBuilder('entry')
+      .select(
+        `COALESCE(SUM(CASE WHEN entry.entryType = 'DEPOSIT_REJECT' ` +
+          `THEN -entry.amount ELSE entry.amount END), 0)`,
+        'total',
+      )
+      .where('entry.organizationId = :organizationId', { organizationId })
+      .andWhere('lower(entry.accountId) = lower(:accountId)', { accountId })
+      .andWhere('entry.assetId = :assetId', { assetId })
+      .andWhere('entry.entryType IN (:...types)', {
+        types: ['DEPOSIT_PENDING', 'DEPOSIT', 'DEPOSIT_REJECT'],
+      })
+      .andWhere('entry.createdAt < :to', { to });
+    if (from) qb.andWhere('entry.createdAt >= :from', { from });
+    const row = await qb.getRawOne<{ total: string }>();
+    return BigInt(row?.total ?? '0');
+  }
 }
 
 /** See {@link LedgerEntryRepository.sumPaidAtRedemption}. Unsigned, atomic units. */
