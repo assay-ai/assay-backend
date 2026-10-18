@@ -5,7 +5,8 @@ import { HeldCollectionService } from '../services/held-collection.service';
 
 /**
  * Every minute, at second 30 — the redemption job runs at second 0 on the same
- * redeemer key — collect held payments past their dispute window (G3.B1).
+ * redeemer key — collect held payments past their dispute window (G3.B1), and
+ * refund those of a blocked provider.
  */
 @Injectable()
 export class HeldCollectionJob {
