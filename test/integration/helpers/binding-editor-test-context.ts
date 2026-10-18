@@ -121,10 +121,8 @@ export const STAKE_CHAIN: ChainId = chainIdOf(USDC_ASSET as AssetId);
  * account. A test that compared two empty tables would pass against a tester
  * that charged every call.
  *
- * `PROVIDER_STAKE_SOURCE` is a fake, deliberately: `ConfigProviderStakeSource`
- * reads a seed file and the on-chain source replaces it, so what the gate
- * needs from this context is a number it can move — not a fixture of whichever
- * implementation happens to be bound this month. `PROVIDER_REGISTRY` is the
+ * `PROVIDER_STAKE_SOURCE` is a fake, deliberately: what the gate needs from
+ * this context is a number it can move, not a chain. `PROVIDER_REGISTRY` is the
  * **real** `DbProviderRegistry`, because the publish check is what bound it
  * and "a registered provider is now visible to routing" is a claim worth
  * testing rather than stubbing.

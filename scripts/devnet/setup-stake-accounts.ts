@@ -8,8 +8,7 @@
  * ## Why this script exists
  *
  * The check is *"a provider below the stake minimum is dropped from routing,
- * using real on-chain state on devnet"*. At `PROVIDER_STAKE_SOURCE_MODE=chain`
- * that check is **vacuous unless real stake accounts exist**: a provider with no
+ * using real on-chain state on devnet"*. That check is **vacuous unless real stake accounts exist**: a provider with no
  * `ProviderStake` PDA is absent from `OnChainProviderStakeSource`, absent becomes
  * `STAKE_UNKNOWN`, and `evaluateStakeGate` fails closed. With zero stake accounts
  * in existence the check "passes" by excluding everybody, and proves nothing
@@ -613,8 +612,7 @@ async function main(): Promise<void> {
   // two provider rows the chain source cannot answer for either of them and both
   // are excluded — which is the vacuous pass this script exists to prevent.
   console.log("  Apply these for the stake-gate check — set each provider's enrolment");
-  console.log('  (POST /providers/me/stake-authority, or the column directly) and run at');
-  console.log('  PROVIDER_STAKE_SOURCE_MODE=chain:');
+  console.log('  (POST /providers/me/stake-authority, or the column directly):');
   console.log('');
   for (const state of resolved) {
     console.log(

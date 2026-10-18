@@ -286,15 +286,6 @@ import {
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
 import { ProviderStatus } from '@modules/provider/ports/provider.types';
 import { StakeIntentKind } from '@modules/provider/ports/stake-intent-builder.port';
-// Imported for the mode's own vocabulary — the env var name and the three
-// values — so a rename in `composite-provider-stake.source.ts` breaks this
-// script at compile time rather than leaving step 0b advising an operator to
-// set a variable that no longer exists.
-import {
-  PROVIDER_STAKE_SOURCE_MODE_ENV,
-  ProviderStakeSourceMode,
-} from '@modules/provider/services/composite-provider-stake.source';
-import { loadProviderStakes } from '@modules/provider/services/provider-seed';
 import { SlaWindowService } from '@modules/provider/services/sla-window.service';
 import type { FileSlashDisputeBodyDto } from '@modules/slash/controllers/provider-slash-proposals.controller';
 // Step 8a's whole vocabulary — the claim, the outcome, the closed reason-code
@@ -428,27 +419,20 @@ const MCP_CLIENT_NAME = 'devnet-acceptance-suite';
 const MCP_CLIENT_VERSION = '0.1.0';
 
 /**
- * An organization whose provider is staked **on the chain** and is named in no
- * stake seed file — the witness {@link assertStakeSourceIsChain} questions.
+ * An organization whose provider is staked **on the chain** — the witness
+ * {@link assertStakeSourceIsChain} questions.
  *
- * It has to be all three things at once, and each one is doing work:
+ * It has to be both things at once, and each one is doing work:
  *
  * - **Staked on chain**, so that a chain-backed source has something to
  *   report: the organization's `ProviderStake` PDA must already hold a
  *   non-zero `bonded` balance, put there by a provider-stake run beforehand.
- * - **Has a proved `stake_authority`**, or `chain_with_config_fallback` would
- *   serve it off configuration and the witness would answer for the wrong
- *   mode.
- * - **Absent from `PROVIDER_STAKE_SEED_FILE`**, which is what makes a reading
- *   evidence at all — see {@link assertStakeSourceIsChain}. Checked at run
- *   time rather than assumed, because it is the one of the three that somebody
- *   could quietly undo by editing a JSON file.
+ * - **Has a proved `stake_authority`**, or the chain source has no account to
+ *   read for it.
  *
  * `a965eec3` looks like an alternative. It does not work and cannot be
  * made to: it has a `providers` row and an on-chain stake, but **no
- * `organizations` row and no agent**, so no session can ever be minted for it
- * — and it is one of the two ids in `scripts/mcp/seed/stakes.json`, so even
- * with a session its reading would prove nothing about which source answered.
+ * `organizations` row and no agent**, so no session can ever be minted for it.
  *
  * Override with `ACCEPTANCE_STAKED_PROVIDER_ORG_ID` on a deployment where this
  * id does not exist. Read inside the function, not here: see the header's
@@ -1357,9 +1341,8 @@ function stakeOnChain(
  *
  * The deadline is what keeps this an assertion rather than a hope: past
  * {@link STAKE_VISIBILITY_TIMEOUT_MS} it throws with the last unmet requirement
- * verbatim, which is the same message a genuinely wrong
- * `PROVIDER_STAKE_SOURCE_MODE` would produce — and step 0b has already ruled
- * that out, so a timeout here means the chain read, not the configuration.
+ * verbatim — and step 0b has already shown the source reads the chain, so a
+ * timeout here means the chain read lagged, not the configuration.
  *
  * Everything that cannot be explained by lag is still fatal on the **first**
  * read: a reading belonging to another authority, a balance in a different
@@ -1499,8 +1482,7 @@ async function awaitStakeVisibleToGate(
           `${Date.now() - startedAt}ms: ${lastReason}. ` +
           // The two things an operator would otherwise go and check first, and
           // both are already excluded.
-          `This is NOT ${PROVIDER_STAKE_SOURCE_MODE_ENV}: step 0b proved this deployment reads ` +
-          `the chain for a provider named in no seed file, before this run spent anything. ` +
+          `Step 0b proved this deployment reads the chain before this run spent anything. ` +
           // The contradiction this failure is most likely to print, named so
           // nobody spends an afternoon on it. `chainReadable` comes from
           // ONCHAIN_STAKE_READER, which `getStake` calls directly;
@@ -2077,7 +2059,7 @@ async function runStep3(ctx: SuiteContext): Promise<string> {
     throw new Error(
       `${PublishRequirement.STAKE_AT_MINIMUM_ON_EVERY_CHAIN} is already met for binding ${binding.id} at price ` +
         `${binding.price.amount} ${binding.price.asset}, before anything has been staked. The ` +
-        `stake step would then prove nothing — check PROVIDER_STAKE_SOURCE_MODE and whether this ` +
+        `stake step would then prove nothing — check whether this ` +
         `provider carries a minimumStakeOverride`,
     );
   }
@@ -6402,79 +6384,24 @@ async function runPreflight(): Promise<string> {
 }
 
 /**
- * Step 0b: refuse to run at all unless this deployment's stake source is the
- * **chain**, before a lamport has been spent.
+ * Step 0b: refuse to run at all unless this deployment can read a provider's
+ * stake off the chain, before a lamport has been spent.
  *
- * ## What goes wrong without it
+ * Step 4 puts real money into a `ProviderStake` PDA and then asserts that
+ * `STAKE_AT_MINIMUM` flipped. If the stake source cannot see the chain, the run
+ * fails *after* opening an account and moving `$60`–`$90` into a vault with a
+ * twelve-day unbonding period. This is the cheap version of that discovery:
+ * one HTTP call, no chain writes.
  *
- * `PROVIDER_STAKE_SOURCE_MODE` decides which of two things answers "how much
- * has this provider staked": the chain, or a JSON file an operator typed
- * (`config` — and it is the **default**, so an unset variable means it). Step 4
- * puts real money into a `ProviderStake` PDA and then asserts that
- * `STAKE_AT_MINIMUM` flipped. Under `config` that stake is invisible: the
- * source never looks at the chain, this run's brand-new organization is in no
- * seed file, and the gate goes on answering `STAKE_UNKNOWN` — so the run fails
- * *after* opening an account, paying its rent, moving `$60`–`$90` into a vault
- * with a twelve-day unbonding period, and it fails with a message about a
- * publish gate rather than about the variable that caused it.
- *
- * This is the cheap version of that discovery: one HTTP call, no chain writes,
- * before `generateFundedSigner` has moved anything.
- *
- * ## Why it takes an existing organization rather than this run's
- *
- * It has to run before step 1, and before step 1 there is no provider to ask
- * about. So it asks about a **witness**: an organization that is already staked
- * on the chain, already has a proved `stake_authority`, and appears in no stake
- * seed file. `/providers/me/stake` is session-scoped and there is no
- * `/providers/:id/stake`, so speaking as that organization means holding a
- * credential for it — {@link borrowOrganizationCredential} mints one for the
- * length of this call and deletes it in the `finally`.
- *
- * ## Why the three assertions are the ones that discriminate
- *
- * `chainReadable` alone would not do it, and this is the trap worth naming:
- * that flag comes from `ONCHAIN_STAKE_READER`, which
- * `ProviderStakeService.getStake` calls **directly**, bypassing
- * `PROVIDER_STAKE_SOURCE` entirely. It reports that the RPC answered, not that
- * the gate reads it. Under `config` it is `true` and the gate is still deaf to
- * the chain.
- *
- * What discriminates is `hasKnownStake` **for a provider no seed file names**:
- * `ConfigProviderStakeSource` leaves an unlisted provider absent from its
- * result map, so a reading for such a provider can only have come from the
- * chain. Hence the third check, which is on the seed file itself — read through
- * `loadProviderStakes()`, the deployment's own loader, so the witness cannot
- * silently stop being a witness by someone adding a line to
- * `PROVIDER_STAKE_SEED_FILE`.
- *
- * `chainReadable` is still asserted, for its own question: an RPC that cannot
- * be read now is an RPC that cannot confirm step 4's two transactions later.
- *
- * The one thing this cannot see is a *server* configured differently from the
- * environment this script loaded — same machine, same `.env` in every intended
- * use, but the seed-file check reads this process's `PROVIDER_STAKE_SEED_FILE`
- * and the mode check reads the server's behaviour through its own API. Only the
- * second is authoritative; the first is a guard on the witness, not on the mode.
+ * It asks about a **witness** — an organization already staked on the chain
+ * with a proved `stake_authority` — because before step 1 there is no provider
+ * of this run's own to ask about. `/providers/me/stake` is session-scoped, so
+ * {@link borrowOrganizationCredential} mints a credential for the length of
+ * this call and deletes it in the `finally`.
  */
 async function assertStakeSourceIsChain(app: INestApplicationContext): Promise<string> {
   const organizationId =
     process.env.ACCEPTANCE_STAKED_PROVIDER_ORG_ID ?? CHAIN_STAKED_WITNESS_ORG_ID;
-
-  const seeded = loadProviderStakes();
-  // The snapshot is keyed `${providerId}|${chainId}` (`stakeKey`),
-  // so "is this provider seeded" is "is it seeded on ANY chain" — a provider
-  // seeded on one chain is served off configuration there and proves nothing
-  // about the mode. `|` cannot appear in a UUID, so the prefix test is exact.
-  if (Object.keys(seeded).some((key) => key.startsWith(`${organizationId}|`))) {
-    throw new Error(
-      `witness organization ${organizationId} is named in PROVIDER_STAKE_SEED_FILE ` +
-        `(${process.env.PROVIDER_STAKE_SEED_FILE}), so a stake reading for it proves nothing ` +
-        `about ${PROVIDER_STAKE_SOURCE_MODE_ENV}: config would answer for it too. Point ` +
-        `ACCEPTANCE_STAKED_PROVIDER_ORG_ID at a provider that is staked on chain, has proved a ` +
-        `stake authority, and is in no seed file.`,
-    );
-  }
 
   const credential = await borrowOrganizationCredential(
     app,
@@ -6490,9 +6417,9 @@ async function assertStakeSourceIsChain(app: INestApplicationContext): Promise<s
 
     if (!stake.stakeAuthority) {
       throw new Error(
-        `witness organization ${organizationId} has no proved stake authority, so even ` +
-          `${ProviderStakeSourceMode.CHAIN_WITH_CONFIG_FALLBACK} would serve it off ` +
-          `configuration — it cannot answer for ${PROVIDER_STAKE_SOURCE_MODE_ENV}`,
+        `witness organization ${organizationId} has no proved stake authority, so the chain ` +
+          `source has no account to read for it. Point ACCEPTANCE_STAKED_PROVIDER_ORG_ID at a ` +
+          `provider that is staked on chain and has proved a stake authority.`,
       );
     }
     if (!stake.chainReadable) {
@@ -6504,21 +6431,16 @@ async function assertStakeSourceIsChain(app: INestApplicationContext): Promise<s
     }
     if (!stake.hasKnownStake || !stake.staked || stake.staked.amount === '0') {
       throw new Error(
-        `${PROVIDER_STAKE_SOURCE_MODE_ENV} is not reading the chain on this deployment. ` +
-          `Witness ${organizationId} (${stake.stakeAuthority}) is staked on chain and is named ` +
-          `in no stake seed file, yet the source reports ` +
+        `the stake source is not reading the chain on this deployment. Witness ` +
+          `${organizationId} (${stake.stakeAuthority}) is staked on chain, yet the source reports ` +
           `${stake.hasKnownStake ? `staked=${stake.staked?.amount ?? 'null'}` : 'no reading at all'}` +
-          ` — which is what ${ProviderStakeSourceMode.CONFIG} (the DEFAULT, so an unset variable ` +
-          `means it) answers for a provider it has never heard of. Step 4 would stake real ` +
-          `devnet USDC into a vault the publish gate cannot see. Set ` +
-          `${PROVIDER_STAKE_SOURCE_MODE_ENV}=${ProviderStakeSourceMode.CHAIN_WITH_CONFIG_FALLBACK} ` +
-          `or =${ProviderStakeSourceMode.CHAIN} and restart the API server.`,
+          `. Step 4 would stake real devnet USDC into a vault the publish gate cannot see.`,
       );
     }
 
     return (
-      `stake source reads the chain: witness ${organizationId} (${stake.stakeAuthority}) is in ` +
-      `no seed file and reports staked=${stake.staked.amount} ${stake.staked.asset} ` +
+      `stake source reads the chain: witness ${organizationId} (${stake.stakeAuthority}) ` +
+      `reports staked=${stake.staked.amount} ${stake.staked.asset} ` +
       `chainReadable=${stake.chainReadable}`
     );
   } finally {
@@ -6548,8 +6470,7 @@ async function main(): Promise<void> {
     // Before anything is minted and — the part that matters — before
     // `generateFundedSigner` moves a lamport or a token. Step 0b is the only
     // check in the run that can fail *after* a boot and *before* a spend, which
-    // is exactly the window a wrong PROVIDER_STAKE_SOURCE_MODE has to be caught
-    // in. It needs the Nest context (to mint a witness credential) and cannot
+    // is exactly the window an unreadable stake source has to be caught in. It needs the Nest context (to mint a witness credential) and cannot
     // take `SuiteContext`, which does not exist until the funded signer does.
     await step(report, STEP_0B, () => assertStakeSourceIsChain(identityApp));
 

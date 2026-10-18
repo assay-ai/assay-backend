@@ -25,7 +25,7 @@ import {
   enrolmentKey,
 } from '@modules/provider/ports/chain-enrolment.port';
 import { stakeKey } from '@modules/provider/ports/provider-stake.port';
-import { ConfigProviderStakeSource } from '@modules/provider/services/config-provider-stake.source';
+import { InMemoryProviderStakeSource } from '../helpers/in-memory-provider-stake.source';
 
 import {
   MINIMUM_STAKE,
@@ -198,7 +198,7 @@ function build(
       ),
   };
 
-  const stakes = new ConfigProviderStakeSource(
+  const stakes = new InMemoryProviderStakeSource(
     Object.fromEntries(GATE_CHAINS.map((chainId) => [stakeKey(PROVIDER, chainId), usdc('1000')])),
   );
 

@@ -13,9 +13,7 @@
  * is unset and no mint has been persisted yet (`lib/mint-setup.ts`). That is
  * fine for a from-scratch `devnet:deposit` run bootstrapping its own state,
  * but the faucet's whole purpose is to top up *the* mint the rest of the
- * stack already points at — `scripts/mcp/seed/stakes.json` bakes in a mint
- * address, and its validation checks shape, not which asset it names. A
- * faucet run that silently created a second mint would produce tokens the
+ * stack already points at. A faucet run that silently created a second mint would produce tokens the
  * router does not recognise, with no error anywhere near the mistake.
  */
 import { readFileSync } from 'node:fs';
@@ -55,8 +53,7 @@ async function main(): Promise<void> {
     throw new Error(
       'REFUSING: SOLANA_DEVNET_USDC_MINT is not set.\n\n' +
         'Without it, setupDevnetMint would create a BRAND NEW mint and persist it — ' +
-        'and the mint address is baked into scripts/mcp/seed/stakes.json, which validates ' +
-        'shape but not asset, so a new mint would break routing silently. ' +
+        'and a new mint would break routing silently. ' +
         'Set SOLANA_DEVNET_USDC_MINT in backend/.env to the mint this deployment already uses, then re-run.',
     );
   }

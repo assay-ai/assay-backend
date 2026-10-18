@@ -301,7 +301,6 @@ async function main(): Promise<void> {
   const journal = app.get(LedgerJournalService);
 
   const tools = readCatalogueTools();
-  assertAssetIsCurrent();
 
   log(`asset ${ASSET}`);
 
@@ -362,49 +361,6 @@ async function main(): Promise<void> {
 }
 
 // ── Guards ─────────────────────────────────────────────────────────────────
-
-/**
- * Refuse to seed against an asset the running process cannot resolve.
- *
- * This is the exact failure this seeder was written after: 285 rows carrying a
- * mint that `SOLANA_DEVNET_USDC_MINT` no longer names, and every endpoint that
- * serialises money answering `400 CHAIN_ASSET_UNKNOWN`. The registry resolves
- * its devnet slot **once, at module load**, so the only safe moment to check is
- * before the first row is written.
- */
-function assertAssetIsCurrent(): void {
-  // An ARRAY of `{ providerId, chainId, amount, asset, decimals }` since
-  // multichain support — the stake seed is keyed on the (provider, chain) pair, which a JSON
-  // object key cannot hold. Every entry for this provider is checked, not the
-  // first: an entry on a second chain in a stale asset would fail exactly the
-  // same way and is exactly as invisible.
-  const stakes = JSON.parse(
-    readFileSync(process.env.PROVIDER_STAKE_SEED_FILE ?? join(SEED_DIR, 'stakes.json'), 'utf8'),
-  ) as readonly {
-    providerId: string;
-    chainId: string;
-    asset: string;
-  }[];
-  const own = stakes.filter((entry) => entry.providerId === PROVIDER_ORG);
-
-  if (own.length === 0) {
-    throw new Error(
-      `PROVIDER_STAKE_SEED_FILE names no stake for ${PROVIDER_ORG}, so the Capital screen ` +
-        `would report hasKnownStake: false against its own seed. Add an entry before seeding.`,
-    );
-  }
-
-  for (const entry of own) {
-    if (entry.asset !== ASSET) {
-      throw new Error(
-        `PROVIDER_STAKE_SEED_FILE stakes ${PROVIDER_ORG} on ${entry.chainId} in ${entry.asset}, ` +
-          `but this process resolves ${ASSET}. The Capital screen would report ` +
-          `STAKE_ASSET_MISMATCH against its own seed. Point SOLANA_DEVNET_USDC_MINT and ` +
-          `stakes.json at the same mint before seeding.`,
-      );
-    }
-  }
-}
 
 function readCatalogueTools(): ReadonlyMap<string, CataloguedTool> {
   const path = process.env.TOOL_CATALOGUE_SEED_FILE ?? join(SEED_DIR, 'catalogue.json');
