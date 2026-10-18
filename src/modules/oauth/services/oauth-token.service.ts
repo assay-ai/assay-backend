@@ -471,6 +471,14 @@ export class OAuthTokenService {
     }
   }
 
+  /**
+   * The pair a racing presentation receives within the grace (§6.3.11 step 4,
+   * "Lost, ≤ 30 s"). Only when its child refresh token is in the database,
+   * a child of this parent, and live: a timed-out `SET` from another process
+   * can land late and leave an entry whose rotation rolled back, and a pair
+   * whose grant was revoked meanwhile is dead. Anything else answers
+   * `invalid_grant`, with no revocation.
+   */
   private async fromGrace(
     parentToken: string,
     parentHash: string,
@@ -485,6 +493,18 @@ export class OAuthTokenService {
     }
     const payload = sealed === null ? null : openGrace(parentToken, parentHash, sealed);
     if (!payload) return INVALID_GRANT;
+
+    const child = isWellFormed(payload.refresh_token, 'assay_rt_')
+      ? await this.refreshTokens.findByTokenHash(hashOpaqueToken(payload.refresh_token))
+      : null;
+    if (
+      !child ||
+      child.parentId !== token.id ||
+      child.revokedAt !== null ||
+      child.expiresAt.getTime() <= Date.now()
+    ) {
+      return INVALID_GRANT;
+    }
 
     this.metrics.incRefreshGrace();
     await this.audit.recordAfterCommit({

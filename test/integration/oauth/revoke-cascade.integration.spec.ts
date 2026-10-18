@@ -1,6 +1,7 @@
 import { createHash, randomBytes, randomUUID } from 'node:crypto';
 import { join } from 'node:path';
 
+import Redis from 'ioredis';
 import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
@@ -19,8 +20,12 @@ import { OAuthAuthorizationCodeRepository } from '@database/postgres/repositorie
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { OAuthAccessTokenRepository } from '@database/postgres/repositories/oauth-access-token.repository';
 import { OAuthRefreshTokenRepository } from '@database/postgres/repositories/oauth-refresh-token.repository';
-import { NotificationPort } from '@modules/notification/ports/notification.port';
+import {
+  NotificationPort,
+  NotificationRequest,
+} from '@modules/notification/ports/notification.port';
 import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
+import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
 import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
@@ -31,7 +36,7 @@ import {
   TokenPair,
   isOAuthError,
 } from '@modules/oauth/services/oauth-token.service';
-import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
+import { AccessEpochService, epochKey } from '@modules/toolset/services/access-epoch.service';
 import { SortDirection } from '@shared/api';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 
@@ -41,7 +46,9 @@ import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-datab
  * R-OA-23, F3 steps 1–3: revoking an OAuth grant from Agents & keys
  * (`DELETE /agents/:agentId/credentials/:id`, `AgentCredentialsService.revoke`)
  * revokes the credential row and every one of its tokens in one transaction,
- * audits `credential.revoked`, and invalidates cached access after commit.
+ * audits `credential.revoked`, and invalidates cached access after commit;
+ * then the post-commit sweep revokes any token a rotation held. The token
+ * service, its cache (Redis), metrics and the access epoch are the real ones.
  */
 describe('OAuth grant revocation cascade — real migrations', () => {
   const DATABASE = 'assay_oauth_revoke_cascade_test';
@@ -55,7 +62,9 @@ describe('OAuth grant revocation cascade — real migrations', () => {
   let credentials: AgentCredentialsService;
   let resolver: CredentialSessionResolver;
   let builtin: OAuthClientEntity;
+  let redis: Redis;
   let bumps: string[];
+  let notifications: NotificationRequest[];
   let failAudit = false;
 
   beforeAll(async () => {
@@ -90,12 +99,28 @@ describe('OAuth grant revocation cascade — real migrations', () => {
       },
       recordAfterCommit: realAudit.recordAfterCommit.bind(realAudit),
     } as unknown as AuditLogWriter;
+    redis = new Redis({
+      host: process.env.REDIS_HOST || 'localhost',
+      port: parseInt(process.env.REDIS_PORT || '6379', 10),
+      password: process.env.REDIS_PASSWORD || undefined,
+      maxRetriesPerRequest: 1,
+    });
+    const cache = new CacheService(redis);
     bumps = [];
-    const epoch = {
-      bump: async (organizationId: string) => {
-        bumps.push(organizationId);
+    notifications = [];
+    // The real epoch (a Redis INCR), with its calls recorded.
+    const epoch = new AccessEpochService(cache);
+    const bump = epoch.bump.bind(epoch);
+    epoch.bump = async (organizationId: string) => {
+      bumps.push(organizationId);
+      await bump(organizationId);
+    };
+    const notifier: NotificationPort = {
+      notify: async (request) => {
+        notifications.push(request);
+        return { deliveredNow: true };
       },
-    } as unknown as AccessEpochService;
+    };
     const clients = new OAuthClientRepository(dataSource);
     const credentialRepository = new AgentCredentialRepository(dataSource);
 
@@ -110,10 +135,9 @@ describe('OAuth grant revocation cascade — real migrations', () => {
       new OAuthRefreshTokenRepository(dataSource),
       new OAuthAccessTokenRepository(dataSource),
       credentialRepository,
-      // Refresh is not exercised here: these collaborators are never called.
-      {} as unknown as CacheService,
-      {} as unknown as OAuthMetrics,
-      {} as unknown as NotificationPort,
+      cache,
+      new OAuthMetrics(new MetricsRegistryService()),
+      notifier,
     );
     // The agent lookup is not under test: every agent id belongs to the organization.
     const agents = {
@@ -137,7 +161,7 @@ describe('OAuth grant revocation cascade — real migrations', () => {
       audit,
       epoch,
       clients,
-      { builtinClientId: `${MCP}/oauth/clients/assay-mcp`, verifiedClients: [] },
+      { paymentClients: [`${MCP}/oauth/clients/assay-mcp`], verifiedClients: [] },
     );
     resolver = new CredentialSessionResolver(credentialRepository, agents);
 
@@ -161,11 +185,13 @@ describe('OAuth grant revocation cascade — real migrations', () => {
   });
 
   afterAll(async () => {
+    redis?.disconnect();
     await dataSource?.destroy();
   });
 
   beforeEach(() => {
     bumps.length = 0;
+    notifications.length = 0;
     failAudit = false;
   });
 
@@ -273,6 +299,15 @@ describe('OAuth grant revocation cascade — real migrations', () => {
     });
   }
 
+  /** A real `grant_type=refresh_token` (§6.3.11) with `token`. */
+  function refresh(token: string) {
+    return tokens.refresh({ refreshToken: token, clientId: builtin.clientId });
+  }
+
+  async function epochOf(organizationId: string): Promise<number> {
+    return Number((await redis.get(epochKey(organizationId))) ?? 0);
+  }
+
   async function expectRefused(credentialId: string): Promise<void> {
     await expect(
       resolver.sessionFor(await credentialRow(credentialId), { paymentsAllowed: true }),
@@ -320,29 +355,24 @@ describe('OAuth grant revocation cascade — real migrations', () => {
     expect(bumps).toEqual([]);
   });
 
-  it('next MCP request is refused (MCP_CREDENTIAL_INVALID → 401); refresh token rows are dead', async () => {
+  it('next MCP request is refused (MCP_CREDENTIAL_INVALID → 401); refresh → invalid_grant', async () => {
     const g = await grant();
-    // Positive control: the live grant resolves.
+    // Positive controls: the live grant resolves, and its refresh token rotates.
     await expect(
       resolver.sessionFor(await credentialRow(g.credentialId), { paymentsAllowed: true }),
     ).resolves.toMatchObject({ credentialId: g.credentialId });
+    const rotated = await refresh(g.pair.refresh_token);
+    if (isOAuthError(rotated)) throw new Error(`refresh failed: ${rotated.error}`);
 
     await credentials.revoke(ORGANIZATION, g.agentId, g.credentialId, ACTOR);
 
     await expectRefused(g.credentialId);
-    // The access token the client holds is itself revoked (the OAuth source's
-    // own check), and so is its refresh token (refresh step 1: invalid_grant).
-    const hash = (token: string) => createHash('sha256').update(token).digest('hex');
-    const [access] = (await dataSource.query(
-      `SELECT "revoked_at" FROM "oauth_access_tokens" WHERE "token_hash" = $1`,
-      [hash(g.pair.access_token)],
-    )) as { revoked_at: Date | null }[];
-    const [refresh] = (await dataSource.query(
-      `SELECT "revoked_at" FROM "oauth_refresh_tokens" WHERE "token_hash" = $1`,
-      [hash(g.pair.refresh_token)],
-    )) as { revoked_at: Date | null }[];
-    expect(access.revoked_at).not.toBeNull();
-    expect(refresh.revoked_at).not.toBeNull();
+    // The client's live refresh token, through the real token service.
+    expect(await refresh(rotated.refresh_token)).toEqual({ error: 'invalid_grant' });
+    // And the rotated parent.
+    expect(await refresh(g.pair.refresh_token)).toEqual({ error: 'invalid_grant' });
+    // An admin revoke is not a reuse: no notice is sent.
+    expect(notifications).toEqual([]);
   });
 
   it('audits credential.revoked naming the credential and client, never a token or hash', async () => {
@@ -375,8 +405,10 @@ describe('OAuth grant revocation cascade — real migrations', () => {
   it('invalidates cached access after commit, once; a second revoke changes nothing', async () => {
     const g = await grant();
     bumps.length = 0;
+    const epoch = await epochOf(ORGANIZATION);
 
     await credentials.revoke(ORGANIZATION, g.agentId, g.credentialId, ACTOR);
+    expect(await epochOf(ORGANIZATION)).toBe(epoch + 1);
     const first = await credentialRow(g.credentialId);
     await credentials.revoke(ORGANIZATION, g.agentId, g.credentialId, {
       type: 'user',
@@ -423,9 +455,9 @@ describe('OAuth grant revocation cascade — real migrations', () => {
       );
       await waitForWaiters(observer, 2);
       await parker.query('COMMIT');
-      await revoke;
 
-      // Under the credential lock the rotation finds it revoked and revokes its own token.
+      // Under the credential lock the rotation finds it revoked and revokes its
+      // own token. The revoke's sweep waits on that row meanwhile.
       const [credential] = (await rotationCredential).rows;
       expect(credential.revoked_at).not.toBeNull();
       await rotation.query(`UPDATE "oauth_refresh_tokens" SET "revoked_at" = $2 WHERE "id" = $1`, [
@@ -433,6 +465,7 @@ describe('OAuth grant revocation cascade — real migrations', () => {
         credential.revoked_at,
       ]);
       await rotation.query('COMMIT');
+      await revoke;
     } finally {
       await Promise.all([rotation.end(), parker.end(), observer.end()]);
     }
@@ -441,6 +474,49 @@ describe('OAuth grant revocation cascade — real migrations', () => {
     for (const token of await tokenRevocations(g.credentialId)) {
       expect(token.revoked_at).not.toBeNull();
     }
+    expect(await revokedEntries(g.credentialId)).toHaveLength(1);
+  });
+
+  it('a rotation holding its refresh token rolls back: the post-commit sweep revokes every token', async () => {
+    const g = await grant();
+    await addRotatedTokens(g);
+    const rotation = new Client({ ...pgOptions(), database: DATABASE });
+    const observer = new Client({ ...pgOptions(), database: DATABASE });
+    await Promise.all([rotation.connect(), observer.connect()]);
+    try {
+      // A rotation in flight holds the live refresh token, then dies before it
+      // reaches the credential row.
+      await rotation.query('BEGIN');
+      await rotation.query(
+        `SELECT "id" FROM "oauth_refresh_tokens"
+          WHERE "credential_id" = $1 AND "used_at" IS NULL FOR UPDATE`,
+        [g.credentialId],
+      );
+      const revoke = credentials.revoke(ORGANIZATION, g.agentId, g.credentialId, ACTOR);
+      // The revoke's transaction skipped the held row and committed; its sweep waits on it.
+      await waitForWaiters(observer, 1);
+      expect((await credentialRow(g.credentialId)).revokedAt).not.toBeNull();
+      const [{ live }] = (await dataSource.query(
+        `SELECT count(*)::int AS "live" FROM "oauth_refresh_tokens"
+          WHERE "credential_id" = $1 AND "revoked_at" IS NULL`,
+        [g.credentialId],
+      )) as { live: number }[];
+      expect(live).toBe(1);
+      expect(bumps).toEqual([ORGANIZATION]);
+
+      await rotation.query('ROLLBACK');
+      await revoke;
+    } finally {
+      await Promise.all([rotation.end(), observer.end()]);
+    }
+
+    const row = await credentialRow(g.credentialId);
+    const revoked = await tokenRevocations(g.credentialId);
+    expect(revoked).toHaveLength(4);
+    for (const token of revoked) {
+      expect(token.revoked_at?.getTime()).toBe(row.revokedAt?.getTime());
+    }
+    expect(await refresh(g.pair.refresh_token)).toEqual({ error: 'invalid_grant' });
     expect(await revokedEntries(g.credentialId)).toHaveLength(1);
   });
 

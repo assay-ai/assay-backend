@@ -149,10 +149,7 @@ export function loadOAuthConfig(
     redirectAllowlist,
     host.mcpPublicUrl,
   );
-  const paymentClients = parsePaymentClients(
-    env[OAUTH_PAYMENT_CLIENTS_ENV],
-    builtinClientId(host.mcpPublicUrl),
-  );
+  const paymentClients = parsePaymentClientsEnv(env, host.mcpPublicUrl);
 
   return Object.freeze({
     issuer: host.mcpPublicUrl,
@@ -173,6 +170,36 @@ export function loadOAuthConfig(
       DEFAULT_OAUTH_DCR_PER_48_PER_HOUR,
     ),
   });
+}
+
+/**
+ * `OAUTH_VERIFIED_CLIENTS`, validated exactly as {@link loadOAuthConfig} does
+ * (with `OAUTH_REDIRECT_ALLOWLIST`, which its vendor redirects must be in).
+ * Throws on any problem. For a process that needs the list without the rest
+ * of `OAUTH_CONFIG` (the credentials list, through `readOAuthClientTrust`).
+ */
+export function parseVerifiedClientsEnv(
+  env: NodeJS.ProcessEnv,
+  mcpPublicUrl: string,
+): readonly OAuthVerifiedClient[] {
+  return parseVerifiedClients(
+    env[OAUTH_VERIFIED_CLIENTS_ENV],
+    parseRedirectAllowlist(env[OAUTH_REDIRECT_ALLOWLIST_ENV]),
+    mcpPublicUrl,
+  );
+}
+
+/**
+ * `OAUTH_PAYMENT_CLIENTS`, validated as {@link loadOAuthConfig} does: the one
+ * source of the payment-client list, for `OAuthClientRegistry.isPaymentClient`
+ * (through `OAUTH_CONFIG`) and the credentials list's `paymentClient` (through
+ * `readOAuthClientTrust`). Throws on any problem.
+ */
+export function parsePaymentClientsEnv(
+  env: NodeJS.ProcessEnv,
+  mcpPublicUrl: string,
+): readonly string[] {
+  return parsePaymentClients(env[OAUTH_PAYMENT_CLIENTS_ENV], builtinClientId(mcpPublicUrl));
 }
 
 function readRequestCookieSecret(env: NodeJS.ProcessEnv): readonly Buffer[] {

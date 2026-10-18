@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+
 import { CredentialIssuedVia } from '@database/postgres/entities/agent-credential.entity';
 import { OAuthAccessTokenEntity } from '@database/postgres/entities/oauth-access-token.entity';
 import { OAuthClientKind } from '@database/postgres/entities/oauth-client.entity';
@@ -23,7 +25,7 @@ const CIMD_CLIENT_ID = 'https://app.client.example.com/oauth/client.json';
 const VENDOR_REDIRECT = 'https://app.client.example.com/callback';
 
 const TRUST: OAuthClientTrust = {
-  builtinClientId: BUILTIN_CLIENT_ID,
+  paymentClients: [BUILTIN_CLIENT_ID],
   verifiedClients: [
     { clientId: CIMD_CLIENT_ID, displayName: 'Example Vendor', vendorRedirects: [VENDOR_REDIRECT] },
   ],
@@ -123,11 +125,18 @@ function buildHarness(
     }),
   };
   const events: string[] = [];
+  // Outside the transaction, only the post-commit sweep queries the data source.
+  const sweeps: Array<{ sql: string; params: unknown[] }> = [];
   const dataSource = {
     transaction: jest.fn(async (work: (m: unknown) => unknown) => {
       const result = await work(manager);
       events.push('commit');
       return result;
+    }),
+    query: jest.fn(async (sql: string, params: unknown[]) => {
+      events.push('sweep');
+      sweeps.push({ sql, params });
+      return [];
     }),
   };
   const audit = { record: jest.fn().mockResolvedValue(undefined) };
@@ -164,6 +173,7 @@ function buildHarness(
     tokenQueries,
     writeOrder,
     events,
+    sweeps,
   };
 }
 
@@ -291,6 +301,58 @@ describe('AgentCredentialsService.list — issuedVia and oauthClient (spec §7.1
       verified: false,
       paymentClient: false,
     });
+  });
+
+  it.each([
+    [
+      'a DCR client',
+      clientRow({
+        id: CIMD_ROW,
+        clientId: 'dcr_abcdefghijklmnopqrstuv',
+        kind: OAuthClientKind.DCR,
+        redirectUris: [VENDOR_REDIRECT],
+      }),
+    ],
+    [
+      'a listed CIMD client with a non-vendor https redirect',
+      clientRow({
+        id: CIMD_ROW,
+        clientId: CIMD_CLIENT_ID,
+        kind: OAuthClientKind.CIMD,
+        redirectUris: ['https://app.client.example.com/other-callback'],
+      }),
+    ],
+    [
+      'a listed CIMD client with no redirect',
+      clientRow({ id: CIMD_ROW, clientId: CIMD_CLIENT_ID, kind: OAuthClientKind.CIMD, redirectUris: [] }),
+    ],
+    [
+      "another deployment's built-in client",
+      clientRow({ id: CIMD_ROW, clientId: 'https://mcp.other.example/oauth/clients/assay-mcp' }),
+    ],
+    [
+      'an unlisted CIMD client',
+      clientRow({
+        id: CIMD_ROW,
+        clientId: 'https://other.example.org/oauth/client.json',
+        kind: OAuthClientKind.CIMD,
+        redirectUris: [VENDOR_REDIRECT],
+      }),
+    ],
+    [
+      'a DCR row that carries a listed id',
+      clientRow({
+        id: CIMD_ROW,
+        clientId: CIMD_CLIENT_ID,
+        kind: OAuthClientKind.DCR,
+        redirectUris: [VENDOR_REDIRECT],
+      }),
+    ],
+  ])('%s: neither verified nor a payment client', async (_label, row) => {
+    const { service } = buildHarness([oauthCredentialRow({ oauthClientId: CIMD_ROW })], [row]);
+    const page = await service.list(ORGANIZATION_ID, AGENT_ID, baseQuery());
+
+    expect(page.items[0].oauthClient).toMatchObject({ verified: false, paymentClient: false });
   });
 
   it('looks up the clients of a page in one query', async () => {
@@ -452,7 +514,8 @@ describe('AgentCredentialsService.revoke', () => {
       'oauth_refresh_tokens',
       'OAuthAccessTokenEntity',
     ]);
-    expect(events).toEqual(['commit', `bump:${ORGANIZATION_ID}`]);
+    // After commit: the bump, then the sweep of any token a rotation held.
+    expect(events).toEqual(['commit', `bump:${ORGANIZATION_ID}`, 'sweep', 'sweep']);
   });
 
   it('OAuth: audits credential.revoked naming the credential and the client, never a token', async () => {
@@ -502,14 +565,58 @@ describe('AgentCredentialsService.revoke', () => {
     expect(accessEpoch.bump).not.toHaveBeenCalled();
   });
 
-  it('a failed bump does not fail the revoke (it is already committed)', async () => {
-    const { service, credentials, accessEpoch } = buildHarness();
+  it('OAuth: sweeps the refresh then the access tokens of the revoked credential after commit', async () => {
+    const { service, credentials, sweeps } = buildHarness();
     credentials.findOneBy.mockResolvedValue(oauthCredentialRow());
-    accessEpoch.bump.mockRejectedValue(new Error('redis down'));
 
-    await expect(
-      service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR),
-    ).resolves.toBeUndefined();
+    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
+
+    expect(sweeps.map((sweep) => sweep.sql.match(/UPDATE "(\w+)"/)?.[1])).toEqual([
+      'oauth_refresh_tokens',
+      'oauth_access_tokens',
+    ]);
+    for (const sweep of sweeps) {
+      expect(sweep.sql).toMatch(/c\."revoked_at" IS NOT NULL AND t\."revoked_at" IS NULL/);
+      expect(sweep.params).toEqual([CREDENTIAL_ID]);
+    }
+  });
+
+  it('a failed sweep is logged, not thrown, and does not skip the bump', async () => {
+    const { service, credentials, dataSource, accessEpoch } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(oauthCredentialRow());
+    dataSource.query.mockRejectedValue(new Error('deadlock detected'));
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    try {
+      await expect(
+        service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR),
+      ).resolves.toBeUndefined();
+
+      expect(accessEpoch.bump).toHaveBeenCalledWith(ORGANIZATION_ID);
+      expect(warn).toHaveBeenCalledWith(expect.stringContaining('post-commit token sweep failed'));
+    } finally {
+      warn.mockRestore();
+    }
+  });
+
+  it('an already-revoked grant: nothing written, but the sweep still finishes skipped tokens', async () => {
+    const { service, credentials, audit, accessEpoch, sweeps } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(oauthCredentialRow({ revokedAt: new Date() }));
+
+    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
+
+    expect(credentials.update).not.toHaveBeenCalled();
+    expect(audit.record).not.toHaveBeenCalled();
+    expect(accessEpoch.bump).not.toHaveBeenCalled();
+    expect(sweeps).toHaveLength(2);
+  });
+
+  it('an API key is never swept: it has no OAuth tokens', async () => {
+    const { service, credentials, sweeps } = buildHarness();
+    credentials.findOneBy.mockResolvedValue(credentialRow());
+
+    await service.revoke(ORGANIZATION_ID, AGENT_ID, CREDENTIAL_ID, ACTOR);
+
+    expect(sweeps).toEqual([]);
   });
 
   it('is idempotent — revoking an already-revoked credential does not overwrite the original time', async () => {
