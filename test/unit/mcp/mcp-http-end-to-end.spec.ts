@@ -1,3 +1,5 @@
+import http from 'node:http';
+
 import { INestApplication, Module } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 
@@ -15,6 +17,7 @@ import { McpController } from '@modules/mcp/controllers/mcp.controller';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { MCP_SESSION_SOURCE } from '@modules/mcp/ports/mcp-session.port';
 import { McpServerFactory } from '@modules/mcp/services/mcp-server.factory';
+import { OAuthMcpModule } from '@modules/oauth/oauth-mcp.module';
 import { MCP_HOST_CONFIG } from '@modules/toolset/config/mcp-host.config';
 import { ALLOW_ALL } from '@modules/toolset/domain/access';
 import { EndpointKind, ParsedMcpUrl } from '@modules/toolset/domain/mcp-url';
@@ -115,7 +118,14 @@ describe('discovery end to end over HTTP', () => {
     })
     class EndToEndModule {}
 
-    const moduleRef = await Test.createTestingModule({ imports: [EndToEndModule] }).compile();
+    // `OAuthMcpModule` first, as in `AppMcpModule`, so the discovery routes
+    // answer for real in the CORS tests below.
+    const moduleRef = await Test.createTestingModule({
+      imports: [OAuthMcpModule, EndToEndModule],
+    })
+      .overrideProvider(MCP_HOST_CONFIG)
+      .useValue({ mcpPublicUrl: MCP, webAppUrl: 'https://app.example.com' })
+      .compile();
     app = moduleRef.createNestApplication();
     app.useGlobalFilters(new AllExceptionsFilter());
     // The MCP bootstrap's CORS (`bootstrap/mcp/main.ts`), so the exposed
@@ -266,6 +276,30 @@ describe('discovery end to end over HTTP', () => {
       );
     });
 
+    it.each(['bearer', 'BEARER', 'BeArEr'])(
+      'the scheme is case-insensitive: "%s <valid token>" is served (RFC 7235 §2.1)',
+      async (scheme) => {
+        const response = await post('/', { Authorization: `${scheme} ${TOKEN}` });
+        expect(response.status).toBe(200);
+        expect(response.headers.get('www-authenticate')).toBeNull();
+      },
+    );
+
+    it.each(['bearer', 'BEARER'])(
+      '"%s <bad token>" counts as a presented token: error="invalid_token"',
+      async (scheme) => {
+        const response = await post('/c/weather', { Authorization: `${scheme} not-a-real-token` });
+        expect(response.status).toBe(401);
+        expect(response.headers.get('www-authenticate')).toContain('error="invalid_token"');
+      },
+    );
+
+    it('"Bearer" with no token counts as no token', async () => {
+      const response = await post('/c/weather', { Authorization: 'Bearer    ' });
+      expect(response.status).toBe(401);
+      expect(response.headers.get('www-authenticate')).not.toContain('error=');
+    });
+
     it('a valid token gets no challenge', async () => {
       const response = await post('/', { Authorization: `Bearer ${TOKEN}` });
       expect(response.status).toBe(200);
@@ -312,17 +346,96 @@ describe('discovery end to end over HTTP', () => {
       '/.well-known/oauth-protected-resource',
       '/.well-known/oauth-protected-resource/c/weather',
       '/.well-known/oauth-authorization-server',
-      '/oauth/token',
-      '/oauth/revoke',
-      '/OAuth/Token/',
-    ])('%s: any origin, GET/POST/OPTIONS, Content-Type only, no credentials', async (path) => {
-      const response = await preflight(path);
-      expect(response.status).toBe(204);
+      '/.WELL-KNOWN/oauth-authorization-server/',
+    ])(
+      '%s: any origin, GET/POST/OPTIONS, Content-Type and MCP-Protocol-Version, no credentials',
+      async (path) => {
+        const response = await preflight(path, 'content-type,mcp-protocol-version');
+        expect(response.status).toBe(204);
+        expect(response.headers.get('access-control-allow-origin')).toBe('*');
+        expect(response.headers.get('access-control-allow-methods')).toBe('GET,POST,OPTIONS');
+        expect(response.headers.get('access-control-allow-headers')).toBe(
+          'Content-Type,MCP-Protocol-Version',
+        );
+        expect(response.headers.get('access-control-allow-credentials')).toBeNull();
+        expect(response.headers.get('access-control-expose-headers')).toBeNull();
+      },
+    );
+
+    it.each(['/oauth/token', '/oauth/revoke', '/OAuth/Token/'])(
+      '%s: any origin, GET/POST/OPTIONS, Content-Type only, no credentials',
+      async (path) => {
+        const response = await preflight(path);
+        expect(response.status).toBe(204);
+        expect(response.headers.get('access-control-allow-origin')).toBe('*');
+        expect(response.headers.get('access-control-allow-methods')).toBe('GET,POST,OPTIONS');
+        expect(response.headers.get('access-control-allow-headers')).toBe('Content-Type');
+        expect(response.headers.get('access-control-allow-credentials')).toBeNull();
+        expect(response.headers.get('access-control-expose-headers')).toBeNull();
+      },
+    );
+
+    it('a plain cross-origin GET of the AS metadata carries the CORS headers on the 200', async () => {
+      // A simple request: no preflight, so the 200 itself must allow the origin.
+      const response = await fetch(new URL('/.well-known/oauth-authorization-server', url), {
+        headers: { Origin: ORIGIN, Accept: 'application/json' },
+      });
+      expect(response.status).toBe(200);
+      expect((await response.json()).issuer).toBe(MCP);
       expect(response.headers.get('access-control-allow-origin')).toBe('*');
-      expect(response.headers.get('access-control-allow-methods')).toBe('GET,POST,OPTIONS');
-      expect(response.headers.get('access-control-allow-headers')).toBe('Content-Type');
       expect(response.headers.get('access-control-allow-credentials')).toBeNull();
-      expect(response.headers.get('access-control-expose-headers')).toBeNull();
+    });
+
+    it('a plain cross-origin GET of a path PRM carries the CORS headers on the 200', async () => {
+      const response = await fetch(
+        new URL('/.well-known/oauth-protected-resource/c/weather', url),
+        { headers: { Origin: ORIGIN } },
+      );
+      expect(response.status).toBe(200);
+      expect(response.headers.get('access-control-allow-origin')).toBe('*');
+      expect(response.headers.get('access-control-allow-credentials')).toBeNull();
+    });
+
+    it('a plain cross-origin POST to /oauth/register carries no CORS header', async () => {
+      const response = await fetch(new URL('/oauth/register', url), {
+        method: 'POST',
+        headers: { Origin: ORIGIN, 'Content-Type': 'text/plain' },
+        body: '{}',
+      });
+      expect(response.headers.get('access-control-allow-origin')).toBeNull();
+      expect(response.headers.get('access-control-allow-credentials')).toBeNull();
+    });
+
+    it.each([
+      `http://mcp.example.com/oauth/register`,
+      `HTTP://MCP.EXAMPLE.COM/OAuth/Register/`,
+      `http://mcp.example.com/oauth/authorize?client_id=x`,
+    ])('an absolute-form target %s is matched on its pathname: no CORS', async (target) => {
+      const response = await rawRequest(
+        'OPTIONS',
+        target,
+        {
+          Origin: ORIGIN,
+          'Access-Control-Request-Method': 'POST',
+        },
+        url,
+      );
+      expect(response.headers['access-control-allow-origin']).toBeUndefined();
+      expect(response.headers['access-control-allow-methods']).toBeUndefined();
+    });
+
+    it('an absolute-form target for /oauth/token gets the token policy', async () => {
+      const response = await rawRequest(
+        'OPTIONS',
+        'http://mcp.example.com/oauth/token',
+        {
+          Origin: ORIGIN,
+          'Access-Control-Request-Method': 'POST',
+        },
+        url,
+      );
+      expect(response.status).toBe(204);
+      expect(response.headers['access-control-allow-headers']).toBe('Content-Type');
     });
 
     it.each([
@@ -339,3 +452,25 @@ describe('discovery end to end over HTTP', () => {
     });
   });
 });
+
+/** A request with a raw target (`http.request` passes `path` verbatim), e.g. absolute-form. */
+function rawRequest(
+  method: string,
+  target: string,
+  headers: Record<string, string>,
+  base: URL,
+): Promise<{ status: number; headers: http.IncomingHttpHeaders }> {
+  return new Promise((resolve, reject) => {
+    const call = http.request(
+      { host: base.hostname, port: base.port, method, path: target, headers },
+      (response) => {
+        response.resume();
+        response.on('end', () =>
+          resolve({ status: response.statusCode ?? 0, headers: response.headers }),
+        );
+      },
+    );
+    call.on('error', reject);
+    call.end();
+  });
+}
