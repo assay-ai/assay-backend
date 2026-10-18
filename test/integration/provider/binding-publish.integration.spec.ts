@@ -2,6 +2,9 @@ import { AddressInfo } from 'node:net';
 import * as http from 'node:http';
 
 import { ProviderErrorCode } from '@modules/provider/errors/provider.errors';
+import { ProviderBindingCredentialsController } from '@modules/provider/controllers/provider-binding-credentials.controller';
+import { McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { AuditLogWriter } from '@shared/audit';
 import { PublishRequirement } from '@modules/provider/domain/publish-gate';
 import { BindingTestLayer, BindingTestOutcome } from '@modules/provider/ports/binding-test.types';
 import { SaveToolBindingBodyDto } from '@modules/provider/dto/save-tool-binding.dto';
@@ -596,6 +599,48 @@ describe('API-key credentials at publish', () => {
     });
     expect(JSON.stringify(entries)).not.toContain(SECRET);
     expect(await context.vault.list(context.organizationId, id)).toHaveLength(1);
+  });
+
+  it('a paused API-key binding keeps its live set, and cannot resume without one', async () => {
+    const id = await testedApiKeyBinding();
+    await context.vault.put(
+      context.organizationId,
+      id,
+      ORIGIN,
+      [{ name: 'X-Vendor-Auth', value: 'k' }],
+      SUBJECT,
+    );
+    await context.publisher.publish(context.organizationId, SUBJECT, id);
+    await context.pauser.pause(context.organizationId, id);
+
+    const controller = new ProviderBindingCredentialsController(context.editor, context.vault, {
+      recordAfterCommit: async () => undefined,
+    } as unknown as AuditLogWriter);
+    const session = { organizationId: context.organizationId, credentialId: SUBJECT } as McpSession;
+    await expect(controller.remove(session, { id }, { origin: ORIGIN })).rejects.toMatchObject({
+      errorCode: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_LIVE,
+    });
+    expect(await context.vault.list(context.organizationId, id)).toHaveLength(1);
+
+    // However the set went (an older build, an operator), the resume is the gate.
+    await context.vault.remove(context.organizationId, id, ORIGIN);
+    await expect(context.pauser.resume(context.organizationId, id)).rejects.toMatchObject({
+      errorCode: ProviderErrorCode.PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE,
+    });
+    const still = await context.bindings.findOne({
+      where: { id, organizationId: context.organizationId },
+    });
+    expect(still?.status).toBe(BindingStatus.PAUSED);
+
+    await context.vault.put(
+      context.organizationId,
+      id,
+      ORIGIN,
+      [{ name: 'X-Vendor-Auth', value: 'k' }],
+      SUBJECT,
+    );
+    const resumed = await context.pauser.resume(context.organizationId, id);
+    expect(resumed.status).toBe(BindingStatus.ACTIVE);
   });
 
   it('refuses switching a published binding to API key without a set for the live origin', async () => {

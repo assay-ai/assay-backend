@@ -19,12 +19,16 @@ function build(
     publishedEndpoint?: string | null;
     mappingHeaders?: Record<string, unknown>;
     status?: string;
+    publishedVersion?: number | null;
+    authMode?: string;
   } = {},
 ) {
   const row = {
     id: BINDING,
     organizationId: ORG,
     status: options.status ?? 'DRAFT',
+    publishedVersion: options.publishedVersion ?? null,
+    authMode: options.authMode ?? 'NONE',
     endpoint: options.endpoint ?? 'https://api.a.test/v1',
     requestMapping: { method: 'GET', headers: options.mappingHeaders },
   };
@@ -187,6 +191,7 @@ describe('ProviderBindingCredentialsController', () => {
   describe('DELETE of the live origin', () => {
     const live = {
       status: 'ACTIVE',
+      publishedVersion: 1,
       endpoint: 'https://api.a.test/v1',
       publishedEndpoint: 'https://api.a.test/v1',
     };
@@ -203,8 +208,30 @@ describe('ProviderBindingCredentialsController', () => {
       await controller.remove(SESSION, { id: BINDING }, { origin: 'https://api.new.test' });
       expect(vault.remove).toHaveBeenCalled();
     });
-    it.each(['DRAFT', 'PAUSED'])('is allowed while the binding is %s', async (status) => {
-      const { controller, vault } = build({ ...live, status });
+    it('is allowed while the binding is PAUSED under an auth mode with no key', async () => {
+      const { controller, vault } = build({ ...live, status: 'PAUSED' });
+      await controller.remove(SESSION, { id: BINDING }, { origin: 'https://api.a.test' });
+      expect(vault.remove).toHaveBeenCalled();
+    });
+    it.each(['API_KEY', 'BOTH'])(
+      'is a 409 while a published binding is PAUSED under %s',
+      async (authMode) => {
+        const { controller, vault } = build({ ...live, status: 'PAUSED', authMode });
+        await expectErrorCodeAsync(
+          () => controller.remove(SESSION, { id: BINDING }, { origin: 'https://api.a.test' }),
+          ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_LIVE,
+        );
+        expect(vault.remove).not.toHaveBeenCalled();
+      },
+    );
+    it('is allowed for a never-published API-key draft', async () => {
+      const { controller, vault } = build({
+        ...live,
+        status: 'DRAFT',
+        publishedVersion: null,
+        publishedEndpoint: null,
+        authMode: 'API_KEY',
+      });
       await controller.remove(SESSION, { id: BINDING }, { origin: 'https://api.a.test' });
       expect(vault.remove).toHaveBeenCalled();
     });

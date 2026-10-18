@@ -760,9 +760,9 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     code: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_LIVE,
     statusCode: 409,
     message: () =>
-      `These credentials belong to the live endpoint of an active binding. Pause the binding ` +
-      `or publish a revision with a different endpoint before removing them; replace them ` +
-      `instead to rotate the key.`,
+      `These credentials belong to the live endpoint of this binding. Publish a revision with ` +
+      `a different endpoint, or (once paused) switch off API key auth, before removing them; ` +
+      `replace them instead to rotate the key.`,
   },
   credentialOriginMismatch: {
     code: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_MISMATCH,

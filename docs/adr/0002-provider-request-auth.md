@@ -36,8 +36,11 @@ Provider credentials are stored envelope-encrypted in `binding_credentials`, one
   in `vault_kek_checks(kek_id, kcv)` on first use and compared at every boot; a mismatch
   (a key id re-pointed at different bytes) fails the boot with a message naming the key id
   only.
-- Deleting the set for the origin of the published endpoint of an ACTIVE binding is refused
-  with 409 `PROVIDER_CREDENTIAL_ORIGIN_LIVE`. Put, remove and prune each write an
+- Deleting the set for the origin of the published endpoint is refused with 409
+  `PROVIDER_CREDENTIAL_ORIGIN_LIVE` while the binding is ACTIVE, or published (also PAUSED)
+  under an auth mode that needs a key. Resuming such a binding without a set for that origin
+  is refused with `PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE`, the same check as switching
+  the auth mode. Put, remove and prune each write an
   `audit_log_entries` row (`binding_credentials.set|removed|pruned`): actor, binding, origin
   and header names, never values.
 - An `API_KEY` or `BOTH` binding needs a set for the origin of its endpoint: publish refuses

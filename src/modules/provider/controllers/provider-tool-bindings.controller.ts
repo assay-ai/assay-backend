@@ -186,6 +186,12 @@ export class ProviderToolBindingsController {
       'PROVIDER_BINDING_NOT_PAUSED — nothing to resume; or ' +
       'PROVIDER_BINDING_NEVER_PUBLISHED — publish it instead',
   })
+  @ApiResponse({
+    status: 400,
+    description:
+      'PROVIDER_CREDENTIALS_REQUIRED_FOR_AUTH_MODE — an API-key binding with no credential ' +
+      'set for its published address',
+  })
   async resume(
     @CurrentSession() session: McpSession,
     @Param() params: GetToolBindingParamsDto,

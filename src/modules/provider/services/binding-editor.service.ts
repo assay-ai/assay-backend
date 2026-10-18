@@ -39,6 +39,7 @@ import { CredentialVaultService } from '../credentials/credential-vault.service'
 import { ProviderErrors } from '../errors/provider.errors';
 import {
   assayMappingHeaders,
+  authModeNeedsKey,
   credentialQueryKeys,
   originOf,
   relayUnsupportedPort,
@@ -415,21 +416,8 @@ export class BindingEditorService {
       );
     }
 
-    if (
-      (body.authMode === BindingAuthMode.API_KEY || body.authMode === BindingAuthMode.BOTH) &&
-      this.vault &&
-      row.publishedVersion != null &&
-      (row.status === BindingStatus.ACTIVE || row.status === BindingStatus.PAUSED)
-    ) {
-      // The live address is the published revision's. Without a set for it every
-      // live call would turn into a platform fault the moment this saves.
-      const published = await this.publishedEndpoint(row);
-      if (published) {
-        const sets = await this.vault.list(organizationId, row.id);
-        if (!sets.some((set) => set.origin === originOf(published))) {
-          throw ProviderErrors.credentialsRequiredForAuthMode();
-        }
-      }
+    if (body.authMode !== undefined) {
+      await this.assertLiveCredentials(organizationId, row, body.authMode);
     }
 
     const changed = versionedSnapshot(row) !== before;
@@ -475,6 +463,35 @@ export class BindingEditorService {
   private assertEndpointRelayable(endpoint: string): void {
     const port = relayUnsupportedPort(endpoint, Boolean(this.relayConfig));
     if (port !== null) throw ProviderErrors.endpointPortNotRelayable({ port });
+  }
+
+  /**
+   * Throws `credentialsRequiredForAuthMode` when `authMode` needs a key and the
+   * published (ACTIVE or PAUSED) binding has no credential set for the origin of
+   * its published endpoint. The live address is the published revision's;
+   * without a set for it every live call would be a platform fault. Shared by
+   * the auth-mode switch and the resume, which puts the binding back on that
+   * address.
+   */
+  async assertLiveCredentials(
+    organizationId: string,
+    row: ToolBindingEntity,
+    authMode: string,
+  ): Promise<void> {
+    if (
+      !authModeNeedsKey(authMode) ||
+      !this.vault ||
+      row.publishedVersion == null ||
+      (row.status !== BindingStatus.ACTIVE && row.status !== BindingStatus.PAUSED)
+    ) {
+      return;
+    }
+    const published = await this.publishedEndpoint(row);
+    if (!published) return;
+    const sets = await this.vault.list(organizationId, row.id);
+    if (!sets.some((set) => set.origin === originOf(published))) {
+      throw ProviderErrors.credentialsRequiredForAuthMode();
+    }
   }
 
   /** The endpoint of the published revision, or null when never published. */
