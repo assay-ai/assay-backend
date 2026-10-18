@@ -204,6 +204,57 @@ describe('loadOAuthConfig', () => {
     ).toThrow(/OAUTH_ALLOW_HTTP_CIMD_LOOPBACK/);
   });
 
+  it('refuses HTTP CIMD loopback on a deployment that is not local', () => {
+    expect(() =>
+      loadOAuthConfig(env({ NODE_ENV: 'development', OAUTH_ALLOW_HTTP_CIMD_LOOPBACK: 'true' })),
+    ).toThrow(/local run only/);
+    expect(
+      loadOAuthConfig(
+        env({
+          NODE_ENV: 'development',
+          MCP_PUBLIC_URL: 'http://localhost:3200',
+          WEB_APP_URL: 'http://localhost:4000',
+          OAUTH_ALLOW_HTTP_CIMD_LOOPBACK: 'true',
+        }),
+      ).allowHttpCimdLoopback,
+    ).toBe(true);
+  });
+
+  it('refuses a verified client that is not a CIMD URL', () => {
+    for (const clientId of [
+      'dcr_' + 'A'.repeat(22),
+      'https://mcp.example.com/oauth/clients/assay-mcp',
+      'http://localhost:4100/client.json',
+      'https://203.0.113.9/client.json',
+    ]) {
+      const clients = [
+        {
+          clientId,
+          displayName: 'X',
+          vendorRedirects: ['https://chatgpt.com/connector_platform_oauth_redirect'],
+        },
+      ];
+      expect(() =>
+        loadOAuthConfig(env({ OAUTH_VERIFIED_CLIENTS: JSON.stringify(clients) })),
+      ).toThrow(/must be an https CIMD client_id URL/);
+    }
+  });
+
+  it('reads the DCR caps, with defaults', () => {
+    expect(loadOAuthConfig(env())).toMatchObject({ dcrGlobalPerDay: 1000, dcrPer48PerHour: 50 });
+    expect(
+      loadOAuthConfig(env({ OAUTH_DCR_GLOBAL_PER_DAY: '200', OAUTH_DCR_PER_48_PER_HOUR: '60' })),
+    ).toMatchObject({ dcrGlobalPerDay: 200, dcrPer48PerHour: 60 });
+    for (const bad of ['0', '-1', '1.5', 'many']) {
+      expect(() => loadOAuthConfig(env({ OAUTH_DCR_GLOBAL_PER_DAY: bad }))).toThrow(
+        /OAUTH_DCR_GLOBAL_PER_DAY/,
+      );
+      expect(() => loadOAuthConfig(env({ OAUTH_DCR_PER_48_PER_HOUR: bad }))).toThrow(
+        /OAUTH_DCR_PER_48_PER_HOUR/,
+      );
+    }
+  });
+
   it('allows HTTP CIMD loopback outside production', () => {
     expect(
       loadOAuthConfig(env({ OAUTH_ALLOW_HTTP_CIMD_LOOPBACK: 'true' })).allowHttpCimdLoopback,

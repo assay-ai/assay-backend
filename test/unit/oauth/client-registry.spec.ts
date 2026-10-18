@@ -27,6 +27,8 @@ const BUILTIN = `${MCP}/oauth/clients/assay-mcp`;
 const VERIFIED_URL = 'https://chatgpt.com/oauth/client.json';
 const OTHER_URL = 'https://tools.example.com/client.json';
 const IP = '203.0.113.7';
+/** Cleared in the allowlist and listed as a vendor redirect, but not in the client's document. */
+const OTHER_VENDOR_REDIRECT = 'https://chatgpt.com/other_redirect';
 
 function cimdDocument(url: string, name: string, redirects: string[]) {
   return {
@@ -40,7 +42,15 @@ function cimdDocument(url: string, name: string, redirects: string[]) {
 function setup(overrides: Partial<OAuthConfig> = {}) {
   const config = oauthConfig({
     verifiedClients: [
-      { clientId: VERIFIED_URL, displayName: 'ChatGPT', vendorRedirects: [CHATGPT_REDIRECT] },
+      {
+        clientId: VERIFIED_URL,
+        displayName: 'ChatGPT',
+        vendorRedirects: [CHATGPT_REDIRECT, OTHER_VENDOR_REDIRECT],
+      },
+    ],
+    redirectAllowlist: [
+      { uri: CHATGPT_REDIRECT, review: false },
+      { uri: OTHER_VENDOR_REDIRECT, review: false },
     ],
     ...overrides,
   });
@@ -231,7 +241,7 @@ describe('OAuthClientRegistry (§6.3.6)', () => {
       expect(await resolved(registry, VERIFIED_URL)).toMatchObject({
         name: 'ChatGPT (self-declared)',
         verifiedDisplayName: 'ChatGPT',
-        vendorRedirects: [CHATGPT_REDIRECT],
+        vendorRedirects: [CHATGPT_REDIRECT, OTHER_VENDOR_REDIRECT],
       });
     });
   });
@@ -317,6 +327,55 @@ describe('OAuthClientRegistry (§6.3.6)', () => {
       expect(
         registry.displayFor(client, 'cursor://anysphere.cursor-mcp/oauth/callback').returnTo,
       ).toEqual({ kind: 'LOCAL_APP', display: 'an app on this computer' });
+    });
+  });
+
+  describe('review fixes', () => {
+    it('not verified for a vendor redirect the client did not register (M3)', async () => {
+      const { registry } = setup();
+      const client = await resolved(registry, VERIFIED_URL);
+      expect(client.redirectUris).not.toContain(OTHER_VENDOR_REDIRECT);
+      const display = registry.displayFor(client, OTHER_VENDOR_REDIRECT);
+      expect(display.verified).toBe(false);
+      expect(display.name).toBe('ChatGPT (self-declared)');
+    });
+
+    it('a DCR client listed as verified by mistake is never verified (M2)', async () => {
+      const dcrId = 'dcr_' + 'e'.repeat(22);
+      const { registry, repo } = setup({
+        verifiedClients: [
+          { clientId: dcrId, displayName: 'Trusted', vendorRedirects: [CHATGPT_REDIRECT] },
+        ],
+      });
+      await repo.insertClient({
+        clientId: dcrId,
+        kind: OAuthClientKind.DCR,
+        clientName: 'Trusted',
+        clientUri: null,
+        redirectUris: [CHATGPT_REDIRECT],
+        metadata: {},
+        fetchedAt: null,
+        cacheUntil: null,
+      });
+      const client = await resolved(registry, dcrId);
+      expect(client.verifiedDisplayName).toBeNull();
+      expect(registry.displayFor(client, CHATGPT_REDIRECT).verified).toBe(false);
+    });
+
+    it('the boot refuses when the built-in URL is held by a client of another kind (M4)', async () => {
+      const { registry, repo } = setup();
+      await repo.insertClient({
+        clientId: BUILTIN,
+        kind: OAuthClientKind.CIMD,
+        clientName: 'Squatter',
+        clientUri: null,
+        redirectUris: ['http://127.0.0.1/cb'],
+        metadata: {},
+        fetchedAt: null,
+        cacheUntil: null,
+      });
+      await expect(registry.onModuleInit()).rejects.toThrow(/non-BUILTIN/);
+      expect(repo.rows.get(BUILTIN)!.kind).toBe(OAuthClientKind.CIMD);
     });
   });
 

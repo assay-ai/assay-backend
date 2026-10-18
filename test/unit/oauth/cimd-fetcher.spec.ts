@@ -403,6 +403,23 @@ describe('CimdFetcher (§6.3.7)', () => {
     });
   });
 
+  it('never turns a row of another kind into a CIMD client (review M4)', async () => {
+    const { fetcher, serve, repo } = setup();
+    await repo.insertClient({
+      clientId: URL_A,
+      kind: OAuthClientKind.BUILTIN,
+      clientName: 'Assay app (assay-mcp)',
+      clientUri: null,
+      redirectUris: ['http://127.0.0.1/callback'],
+      metadata: {},
+      fetchedAt: null,
+      cacheUntil: null,
+    });
+    serve(document());
+    expect(await fetcher.fetch(URL_A, IP)).toEqual({ ok: false, reason: 'invalid' });
+    expect(repo.rows.get(URL_A)!.kind).toBe(OAuthClientKind.BUILTIN);
+  });
+
   it('two concurrent resolves of one URL make one fetch', async () => {
     const { egress, fetcher, serve } = setup();
     serve(document());

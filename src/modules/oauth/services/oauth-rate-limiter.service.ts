@@ -16,10 +16,13 @@ export const OAUTH_RATE_LIMITS = Object.freeze({
   cimdGlobalPerMinute: 600,
   /** `POST /oauth/register` per hour from one client IP key. */
   dcrPerIpPerHour: 20,
+  /** Registrations per UTC day under one `client_name`; past this an alert counter rises. */
+  dcrPerClientNamePerDay: 100,
 });
 
 export const OAUTH_MINUTE_SECONDS = 60;
 export const OAUTH_HOUR_SECONDS = 3600;
+export const OAUTH_DAY_SECONDS = 86_400;
 
 /** Injected by tests; production reads the wall clock. */
 export const OAUTH_CLOCK = 'OAUTH_CLOCK';
@@ -30,6 +33,16 @@ export const OAUTH_CLOCK = 'OAUTH_CLOCK';
  */
 export function oauthIpKey(ip: string | undefined): string {
   return clientKey(ip);
+}
+
+/**
+ * The /48 an IPv6 rate-limit key (`a:b:c:d::/64`) belongs to, as `a:b:c::/48`;
+ * `null` for an IPv4 key. One site is commonly given a whole /48, so a
+ * per-/64 limit alone multiplies by up to 65 536 for one attacker.
+ */
+export function oauthIpv6Prefix48(ipKey: string): string | null {
+  const match = /^([0-9a-f]{1,4}):([0-9a-f]{1,4}):([0-9a-f]{1,4}):[0-9a-f]{1,4}::\/64$/.exec(ipKey);
+  return match ? `${match[1]}:${match[2]}:${match[3]}::/48` : null;
 }
 
 /**
@@ -54,7 +67,16 @@ export class OAuthRateLimiter {
    * `windowSeconds`; `true` while the count is within `limit`.
    */
   async take(name: string, key: string, limit: number, windowSeconds: number): Promise<boolean> {
-    if (!this.cache) return false;
+    const count = await this.count(name, key, windowSeconds);
+    return count !== null && count <= limit;
+  }
+
+  /**
+   * Count one more under `name`/`key` and return the window's count, this one
+   * included; `null` when Redis cannot be reached (the caller decides).
+   */
+  async count(name: string, key: string, windowSeconds: number): Promise<number | null> {
+    if (!this.cache) return null;
     const windowMs = windowSeconds * 1000;
     const bucket = Math.floor(this.now() / windowMs);
     const bucketKey = `oauth:rl:${name}:${key}:${bucket}`;
@@ -62,12 +84,12 @@ export class OAuthRateLimiter {
       const redis = this.cache.getRedisClient();
       const count = await redis.incr(bucketKey);
       if (count === 1) await redis.pexpire(bucketKey, windowMs * 2);
-      return count <= limit;
+      return count;
     } catch (error) {
       this.logger.warn(
-        `OAuth rate counter ${name} unavailable; refusing. ${error instanceof Error ? error.message : String(error)}`,
+        `OAuth rate counter ${name} unavailable. ${error instanceof Error ? error.message : String(error)}`,
       );
-      return false;
+      return null;
     }
   }
 }

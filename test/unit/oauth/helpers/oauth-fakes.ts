@@ -90,12 +90,13 @@ export class FakeOAuthClientRepository {
 
   insertClient(values: OAuthClientUpsert): Promise<OAuthClientEntity> {
     if (this.rows.has(values.clientId)) return Promise.reject(new Error('duplicate client_id'));
-    return this.upsertByClientId(values);
+    return this.upsertByClientId(values) as Promise<OAuthClientEntity>;
   }
 
-  upsertByClientId(values: OAuthClientUpsert): Promise<OAuthClientEntity> {
+  upsertByClientId(values: OAuthClientUpsert): Promise<OAuthClientEntity | null> {
     this.upserts += 1;
     const existing = this.rows.get(values.clientId);
+    if (existing && existing.kind !== values.kind) return Promise.resolve(null);
     const now = new Date();
     const row = Object.assign(new OAuthClientEntity(), {
       id: existing?.id ?? randomUUID(),
@@ -125,6 +126,8 @@ export function oauthConfig(overrides: Partial<OAuthConfig> = {}): OAuthConfig {
     paymentClients: [`${MCP}/oauth/clients/assay-mcp`],
     allowHttpCimdLoopback: false,
     requestCookieSecret: Buffer.alloc(32, 7),
+    dcrGlobalPerDay: 1000,
+    dcrPer48PerHour: 50,
     ...overrides,
   };
 }
