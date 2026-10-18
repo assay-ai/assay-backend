@@ -130,7 +130,8 @@ import { FleetSweepRepository } from './repositories/fleet-sweep.repository';
 import { SlashCaseReadRepository } from './repositories/slash-case-read.repository';
 import { PlatformMetricsRepository } from './repositories/platform-metrics.repository';
 
-const entities = [
+/** Exported for the per-process boot tests, which stub every repository. */
+export const entities = [
   PostEntity,
   LedgerEntryEntity,
   LedgerHoldEntity,
@@ -193,7 +194,7 @@ const entities = [
   BindingStatsEntity,
   ...TOOLSET_SHARING_ENTITIES,
 ];
-const repositories = [
+export const repositories = [
   PostRepository,
   LedgerEntryRepository,
   LedgerHoldRepository,

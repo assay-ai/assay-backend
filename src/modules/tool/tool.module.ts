@@ -4,19 +4,10 @@ import { ConfigService } from '@nestjs/config';
 import { ChainsModule } from '@modules/chains/chains.module';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { ChainId } from '@modules/chains/ports/caip.types';
-import { CredentialVaultModule } from '@modules/provider/credentials/credential-vault.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { loadMinimumStakeByChain } from '@modules/provider/services/provider-stake.service';
 import { NetworkModule } from '@shared/network/network.module';
-import { takeEnvSigningKeys } from '@modules/verification/signing/backends/env-key-source';
 
-import { RequestSignerService } from './request-auth/request-signer.service';
-import {
-  PROVIDER_REQUEST_SIGNING_KEYS_ENV,
-  REQUEST_SIGNING_KEYS,
-} from './request-auth/request-signing.keys';
-
-import { BINDING_INVOKER } from './ports/binding-invoker.port';
 import { BindingAttemptRecorder } from './services/binding-attempt-recorder.service';
 import { BindingCallCounterService } from './services/binding-call-counter.service';
 import { BindingCeilingService } from './services/binding-ceiling.service';
@@ -28,7 +19,6 @@ import {
   ToolContractChangesService,
 } from './services/database-tool-contracts';
 import { TOOL_CONTRACT_CHANGES, TOOL_CONTRACTS } from './ports/tool-contracts.port';
-import { EgressBindingInvoker } from './services/egress-binding.invoker';
 import {
   InMemoryToolCatalogue,
   TOOL_CATALOGUE_SNAPSHOT,
@@ -68,7 +58,7 @@ import {
  *   └── BindingCallCounterService  lifetime calls per binding  → the exploration floor
  *   └── BindingCeilingService      declared ceilings           → shed, and spend the token
  *   └── BindingAttemptRecorder     every attempt it is owed    → `binding_attempts` → stats
- *   └── BINDING_INVOKER         the actual HTTP call
+ *   └── BINDING_INVOKER         the actual HTTP call       (`ToolEgressModule`, api + mcp only)
  * ```
  *
  * The router is what the MCP server calls, so it could not wait for the
@@ -81,14 +71,13 @@ import {
  * `errors/tool.errors.ts` for the catalog.
  */
 @Module({
-  // `EgressBindingInvoker` dials provider endpoints — URLs typed by strangers,
-  // since provider registration is open, with no approval. `NetworkModule` is
-  // `@Global`, but it is imported here so this module's graph stands on its own.
+  // `NetworkModule` is `@Global`, but it is imported here so this module's
+  // graph stands on its own.
   // `ChainsModule` is imported for `ENABLED_CHAINS` alone: the `ROUTER_CONFIG`
   // factory asserts at boot that every chain this deployment offers has a stake
   // floor. `ProviderModule` already imports it, but does not re-export
   // it — and a module imports what it uses.
-  imports: [ChainsModule, NetworkModule, ProviderModule, CredentialVaultModule],
+  imports: [ChainsModule, NetworkModule, ProviderModule],
   providers: [
     // The **tool contract** half of the catalogue: empty unless an operator
     // points `TOOL_CATALOGUE_SEED_FILE` at one. Still a seed on purpose — a
@@ -115,15 +104,9 @@ import {
     DatabaseToolCatalogue,
     { provide: TOOL_CATALOGUE, useExisting: DatabaseToolCatalogue },
 
-    // Ed25519 request signing: keys read once from the environment and deleted from it.
-    {
-      provide: REQUEST_SIGNING_KEYS,
-      useFactory: () => takeEnvSigningKeys(process.env, PROVIDER_REQUEST_SIGNING_KEYS_ENV),
-    },
-    RequestSignerService,
-
-    EgressBindingInvoker,
-    { provide: BINDING_INVOKER, useExisting: EgressBindingInvoker },
+    // The invoker (`BINDING_INVOKER`), the request signer and the credential
+    // vault live in `ToolEgressModule`, imported only by the processes that
+    // dial providers. See that module for why.
 
     {
       provide: ROUTER_CONFIG,
@@ -181,10 +164,6 @@ import {
     QuoteIndexService,
     QuoteIndexInvalidationSubscriber,
   ],
-  // `BINDING_INVOKER` is exported for the mapping tester, which dials a
-  // provider's endpoint through the *same* invoker production uses, rather
-  // than a sandbox copy of it. A copy is how a tester goes green on a call
-  // production would have made differently.
   // `BindingCallCounterService` is exported for the MCP server: the increment belongs
   // at the point that writes `payment_intents.binding_id`, which is the MCP
   // loop's own transition, not anywhere inside routing. Counting where the
@@ -195,10 +174,7 @@ import {
     TOOL_CATALOGUE,
     TOOL_CONTRACTS,
     TOOL_CONTRACT_CHANGES,
-    BINDING_INVOKER,
     BindingCallCounterService,
-    REQUEST_SIGNING_KEYS,
-    RequestSignerService,
   ],
 })
 export class ToolModule {}

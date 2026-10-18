@@ -94,8 +94,11 @@ proves origin without any network coupling. The in-memory ledger writer is remov
 ## Deployment
 
 - BOTH the `api` and `mcp` processes need `PROVIDER_REQUEST_SIGNING_KEYS` and
-  `CREDENTIAL_VAULT_KEKS`: the MCP process imports `ToolModule` and is the one that
-  actually dials providers.
+  `CREDENTIAL_VAULT_KEKS`, and only they: the invoker, the signer and the vault live in
+  `ToolEgressModule`, which only `AppApiModule` (mapping tester, public demo, JWKS) and
+  `AppMcpModule` (`tools/call`) import. The `scheduler`, `worker`, `websocket` and
+  `facilitator` processes need neither; the scheduler reaches `ToolModule` for quotes but
+  never dials a provider. `test/unit/bootstrap/provider-secrets-boot.spec.ts` pins this.
 - The MCP process now also sets Express `trust proxy`, from the same
   `API_TRUST_PROXY_HOPS` as the API (both sit behind the same balancer); production
   refuses to start without it.

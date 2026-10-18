@@ -19,6 +19,7 @@ import { HealthcheckController } from '@shared/controllers/healthcheck.controlle
 import { NetworkModule } from '@shared/network/network.module';
 
 import { McpHttpModule } from '@modules/mcp/mcp-http.module';
+import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 
 /**
  * The MCP service.
@@ -60,6 +61,10 @@ import { McpHttpModule } from '@modules/mcp/mcp-http.module';
     DatabaseModule,
     RedisCacheModule,
     AlertingModule,
+    // `tools/call` dials providers: the invoker, the request signer and the
+    // credential vault. The scheduler does not import this, so it needs neither
+    // `PROVIDER_REQUEST_SIGNING_KEYS` nor `CREDENTIAL_VAULT_KEKS`.
+    ToolEgressModule,
     McpHttpModule,
   ],
   controllers: [HealthcheckController],

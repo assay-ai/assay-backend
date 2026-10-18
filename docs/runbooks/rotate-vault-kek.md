@@ -5,6 +5,8 @@
 
 Set the variable on BOTH the `api` and `mcp` processes, always with the same value: the
 `mcp` process opens the credentials to dial providers and the `api` process writes them.
+No other process (`scheduler`, `worker`, `websocket`, `facilitator`) reads it; do not set it
+there.
 In production an empty variable fails the boot, and so does a key id that now holds
 different bytes than the ones first seen for it (`vault_kek_checks`); the message names the
 key id, never the key.
