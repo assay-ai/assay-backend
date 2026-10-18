@@ -113,11 +113,16 @@ describe('DepositFinalityService audit rows (B7)', () => {
     expect(audit.recordAfterCommit).toHaveBeenCalledWith({
       organizationId: 'org-1',
       actor: { type: 'system', id: 'deposit-finality' },
-      action: 'deposit.confirmed',
+      action: 'deposit.credited',
       resourceType: 'deposit',
       resourceId: 'dep-1',
       before: null,
-      after: expect.objectContaining({ amount: '25000000', chainId: CHAIN, transactionHash: TX }),
+      after: expect.objectContaining({
+        amount: '25.000000',
+        amountAtomic: '25000000',
+        chainId: CHAIN,
+        transactionHash: TX,
+      }),
     });
     expect(ledger.appendNow.mock.invocationCallOrder[0]).toBeLessThan(
       audit.recordAfterCommit.mock.invocationCallOrder[0],
@@ -143,7 +148,9 @@ describe('DepositFinalityService audit rows (B7)', () => {
   it('logs nothing when another trigger resolved the deposit first', async () => {
     const { service, ledger, audit } = build(() => LANDED, { appendFails: true });
     ledger.readJournal
-      .mockResolvedValueOnce([{ entryType: LedgerEntryType.DEPOSIT_PENDING, accountId: ACCOUNT, money }])
+      .mockResolvedValueOnce([
+        { entryType: LedgerEntryType.DEPOSIT_PENDING, accountId: ACCOUNT, money },
+      ])
       .mockResolvedValueOnce([
         { entryType: LedgerEntryType.DEPOSIT_PENDING, accountId: ACCOUNT, money },
         { entryType: LedgerEntryType.DEPOSIT_CONFIRM, accountId: ACCOUNT, money },

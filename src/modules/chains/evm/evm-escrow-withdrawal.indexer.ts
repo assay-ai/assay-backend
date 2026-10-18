@@ -8,9 +8,11 @@ import {
   EscrowWithdrawalEventRow,
 } from '@database/postgres/repositories/escrow-withdrawal-event.repository';
 import { AuditLogWriter } from '@shared/audit';
+import { MoneyUtil } from '@shared/utils/money.util';
 
 import { ENABLED_CHAINS } from '../enabled-chains';
-import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
+import { getAssetMetadata } from '../ports/asset-registry';
+import { AssetId, ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
 import { X402_ESCROW_WITHDRAWAL_EVENTS_ABI } from './abi/x402.abi';
 import {
   DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS,
@@ -253,13 +255,24 @@ export class EvmEscrowWithdrawalIndexer {
         resourceId: owner.accountId,
         before: null,
         after: {
-          amount: row.amount.toString(),
-          requested: row.requested === null ? null : row.requested.toString(),
+          amount: decimal(row.amount, owner.assetId),
+          amountAtomic: row.amount.toString(),
+          requested: row.requested === null ? null : decimal(row.requested, owner.assetId),
           asset: owner.assetId,
           transactionHash: row.transactionHash,
         },
       });
     }
+  }
+}
+
+/** A decimal amount for the activity log's sentence, or the atomic one for an unknown asset. */
+function decimal(atomic: bigint, assetId: string): string {
+  try {
+    const { decimals } = getAssetMetadata(assetId as AssetId);
+    return MoneyUtil.format(MoneyUtil.of(atomic, assetId as AssetId, decimals));
+  } catch {
+    return atomic.toString();
   }
 }
 

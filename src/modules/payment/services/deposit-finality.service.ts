@@ -3,6 +3,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { DepositIntentRepository } from '@database/postgres/repositories/deposit-intent.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { AccountId, ChainId } from '@modules/chains/ports/caip.types';
+import { Money } from '@modules/chains/ports/money.types';
 import { PaymentIntent as ChainPaymentIntent, TxRef } from '@modules/chains/ports/x402.types';
 import {
   ESCROW_BALANCE_READER,
@@ -226,7 +227,7 @@ export class DepositFinalityService {
           continue;
         }
         confirmed += 1;
-        await this.recordAudit(candidate, 'deposit.confirmed', pending.money, pending.accountId);
+        await this.recordAudit(candidate, 'deposit.credited', pending.money, pending.accountId);
 
         // The notification shows "amount credited (observed), new balance" —
         // the observed amount is what `pending.money`
@@ -312,8 +313,8 @@ export class DepositFinalityService {
    */
   private async recordAudit(
     candidate: { organizationId: string; id: string; chainId: string; chainTxRef: string | null },
-    action: 'deposit.confirmed' | 'deposit.rejected',
-    money: { amount: string; asset: string; decimals: number },
+    action: 'deposit.credited' | 'deposit.rejected',
+    money: Money,
     account: string,
   ): Promise<void> {
     await this.audit?.recordAfterCommit({
@@ -324,9 +325,10 @@ export class DepositFinalityService {
       resourceId: candidate.id,
       before: null,
       after: {
-        amount: money.amount,
+        // Decimal for the activity log's sentence; atomic beside it for exactness.
+        amount: MoneyUtil.format(money),
+        amountAtomic: money.amount,
         asset: money.asset,
-        decimals: money.decimals,
         account,
         chainId: candidate.chainId,
         transactionHash: candidate.chainTxRef,

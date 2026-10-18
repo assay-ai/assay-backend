@@ -241,7 +241,6 @@ describe('POST /escrow/limits — audit log (BUG-R2-B4-01)', () => {
     await expect(controller.submitLimits(SESSION, LIMITS_BODY)).rejects.toThrow('refused');
     expect(recordAfterCommit).not.toHaveBeenCalled();
   });
-
 });
 
 describe('POST /escrow/withdrawals/request — audit log (B7)', () => {
@@ -258,7 +257,11 @@ describe('POST /escrow/withdrawals/request — audit log (B7)', () => {
       resourceType: 'escrow',
       resourceId: BUYER,
       before: null,
-      after: expect.objectContaining({ amount: '400000000', asset: ASSET }),
+      after: expect.objectContaining({
+        amount: '400.000000',
+        amountAtomic: '400000000',
+        asset: ASSET,
+      }),
     });
     expect(JSON.stringify(recordAfterCommit.mock.calls)).not.toContain(SIGNATURE);
   });
@@ -277,7 +280,9 @@ describe('POST /escrow/withdrawals/request — audit log (B7)', () => {
     const { controller, submitRelayedIntent, recordAfterCommit } = build();
     submitRelayedIntent.mockRejectedValueOnce(new Error('refused'));
 
-    await expect(controller.submitRequestWithdraw(SESSION, REQUEST_BODY)).rejects.toThrow('refused');
+    await expect(controller.submitRequestWithdraw(SESSION, REQUEST_BODY)).rejects.toThrow(
+      'refused',
+    );
     expect(recordAfterCommit).not.toHaveBeenCalled();
   });
 });
