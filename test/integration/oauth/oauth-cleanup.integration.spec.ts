@@ -338,13 +338,20 @@ describe('OAuth cleanup — real database and Redis', () => {
     expect(await exists('oauth_clients', stale)).toBe(false);
   });
 
-  it('deletes an unreferenced CIMD client once its cache_until has passed, whatever its age', async () => {
+  it('deletes an unreferenced CIMD client once its cache_until is over an hour past, whatever its age', async () => {
     const cimd = () => `https://${randomUUID()}.example.com/client.json`;
     const expired = await insertClient({
       kind: 'CIMD',
       clientId: cimd(),
-      fetchedAt: ago(2 * 3_600_000),
-      cacheUntil: ago(3_600_000),
+      fetchedAt: ago(3 * 3_600_000),
+      cacheUntil: ago(2 * 3_600_000),
+    });
+    // Just expired: a pending request (600 s) may still hold it.
+    const justExpired = await insertClient({
+      kind: 'CIMD',
+      clientId: cimd(),
+      fetchedAt: ago(10 * 60_000),
+      cacheUntil: ago(5 * 60_000),
     });
     const cached = await insertClient({
       kind: 'CIMD',
@@ -355,27 +362,27 @@ describe('OAuth cleanup — real database and Redis', () => {
     const referenced = await insertClient({
       kind: 'CIMD',
       clientId: cimd(),
-      cacheUntil: ago(3_600_000),
+      cacheUntil: ago(2 * 3_600_000),
     });
     await insertGrant(referenced);
     const coded = await insertClient({
       kind: 'CIMD',
       clientId: cimd(),
-      cacheUntil: ago(3_600_000),
+      cacheUntil: ago(2 * 3_600_000),
     });
     await insertCode(coded, new Date(Date.now() + 60_000));
     const verified = await insertClient({
       kind: 'CIMD',
       clientId: `https://${randomUUID()}.example.com/verified.json`,
-      cacheUntil: ago(3_600_000),
+      cacheUntil: ago(2 * 3_600_000),
     });
     const builtin = await insertClient({
       kind: 'BUILTIN',
       clientId: `https://${randomUUID()}.example.com/oauth/clients/assay-mcp`,
-      cacheUntil: ago(3_600_000),
+      cacheUntil: ago(2 * 3_600_000),
     });
     // A DCR row has no cache: cache_until never makes it stale.
-    const dcr = await insertClient({ cacheUntil: ago(3_600_000) });
+    const dcr = await insertClient({ cacheUntil: ago(2 * 3_600_000) });
     const withVerified = new OAuthCleanupService(dataSource, redis, {
       now: () => Date.now(),
       verifiedClientIds: [VERIFIED_CLIENT_ID, (await clientIdOf(verified))!],
@@ -384,6 +391,7 @@ describe('OAuth cleanup — real database and Redis', () => {
     await withVerified.run();
 
     expect(await exists('oauth_clients', expired)).toBe(false);
+    expect(await exists('oauth_clients', justExpired)).toBe(true);
     expect(await exists('oauth_clients', cached)).toBe(true);
     expect(await exists('oauth_clients', referenced)).toBe(true);
     expect(await exists('oauth_clients', coded)).toBe(true);

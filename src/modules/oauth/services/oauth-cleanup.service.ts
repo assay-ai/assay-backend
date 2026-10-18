@@ -9,12 +9,14 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 import {
   OAUTH_CLEANUP_ACCESS_TOKEN_RETENTION_MS,
   OAUTH_CLEANUP_BATCH_SIZE,
+  OAUTH_CLEANUP_CIMD_CACHE_GRACE_MS,
   OAUTH_CLEANUP_CLIENT_MIN_AGE_MS,
   OAUTH_CLEANUP_CODE_RETENTION_MS,
   OAUTH_CLEANUP_CONFIG,
   OAUTH_CLEANUP_LOCK_KEY,
   OAUTH_CLEANUP_LOCK_TTL_SECONDS,
   OAUTH_CLEANUP_REFRESH_TOKEN_RETENTION_MS,
+  OAUTH_CLEANUP_TIME_BUDGET_MS,
 } from '../constants/oauth-cleanup.constants';
 
 export { OAUTH_CLEANUP_LOCK_KEY };
@@ -47,12 +49,13 @@ const DELETABLE_CLIENT_KINDS = [OAuthClientKind.DCR, OAuthClientKind.CIMD];
  * Every condition a client must meet to be deleted. Used by the candidate
  * query and again by each one-row delete, so a client that changed between
  * the two is kept. `$1` kinds, `$2` the 30-day cutoff, `$3` verified client
- * ids, `$4` now.
+ * ids, `$4` the CIMD cache cutoff (now − 1 h).
  *
  * A client is stale when it was created over 30 days ago and neither used
- * nor (CIMD) fetched since the cutoff. A CIMD row is also stale as soon as
- * its `cache_until` has passed: it is only a cache of a document the
- * registry fetches again on the next authorize.
+ * nor (CIMD) fetched since the cutoff. A CIMD row is also stale once its
+ * `cache_until` is over an hour past: it is only a cache of a document the
+ * registry fetches again on the next authorize, and the hour outlives any
+ * pending request that resolved it.
  */
 const DELETABLE_CLIENT_WHERE = `
       c."kind" = ANY($1)
@@ -79,8 +82,8 @@ const DELETABLE_CLIENT_WHERE = `
  * - A DCR or CIMD client is deleted only when no `agent_credentials` row (in
  *   any state, soft-deleted included) and no code row references it, and it
  *   is stale: created over 30 days ago and neither used nor (CIMD) fetched
- *   in the last 30 days, or (CIMD) past its `cache_until`. `BUILTIN` and `OAUTH_VERIFIED_CLIENTS` rows are never
- *   deleted. The FK `RESTRICT` backs this: a client that gains a reference
+ *   in the last 30 days, or (CIMD) over an hour past its `cache_until`.
+ *   `BUILTIN` and `OAUTH_VERIFIED_CLIENTS` rows are never deleted. The FK `RESTRICT` backs this: a client that gains a reference
  *   mid-run refuses its delete and is kept.
  * - **Invariant this relies on:** `oauth_refresh_tokens.oauth_client_id` has
  *   no FK, and it needs none only because every refresh row belongs to a
@@ -93,8 +96,9 @@ const DELETABLE_CLIENT_WHERE = `
  *
  * These are platform-wide deletes by expiry, not reads of one tenant's data,
  * so they run on the data source rather than the tenant-guarded repositories.
- * Each statement is bounded (`LIMIT` batches); a client backlog larger than
- * one batch is left for the next day.
+ * Each statement is bounded (`LIMIT` batches). The client pass loops over
+ * batches for up to 45 minutes from the start of the run, inside the lock's
+ * hour; a backlog beyond that is left for the next day.
  *
  * `SET oauth:cleanup:lock 1 NX EX 3600` makes a second run inside the hour,
  * from this replica or another, a no-op. Without Redis the run is skipped:
@@ -132,7 +136,8 @@ export class OAuthCleanupService {
     // After the codes, so a client held only by dead codes goes in this run.
     const clients = await this.deleteUnreferencedClients(
       new Date(now - OAUTH_CLEANUP_CLIENT_MIN_AGE_MS),
-      new Date(now),
+      new Date(now - OAUTH_CLEANUP_CIMD_CACHE_GRACE_MS),
+      now + OAUTH_CLEANUP_TIME_BUDGET_MS,
     );
 
     return { skipped: false, accessTokens, refreshTokens, codes, clients };
@@ -175,34 +180,55 @@ export class OAuthCleanupService {
     }
   }
 
-  private async deleteUnreferencedClients(cutoff: Date, now: Date): Promise<number> {
+  /**
+   * Batches of candidates, oldest first, until a batch comes back short or
+   * the time budget (`deadline`, on the config clock) is spent; what is left
+   * goes the next day. Each client is deleted in its own statement: one that
+   * gains a reference mid-run fails only its own delete (FK RESTRICT).
+   */
+  private async deleteUnreferencedClients(
+    cutoff: Date,
+    cacheCutoff: Date,
+    deadline: number,
+  ): Promise<number> {
     const verified = this.config.verifiedClientIds;
     if (verified === null) {
       this.logger.warn('OAuth cleanup deletes no client: OAUTH_VERIFIED_CLIENTS could not be read');
       return 0;
     }
-    const params = [DELETABLE_CLIENT_KINDS, cutoff, [...verified], now];
+    const params = [DELETABLE_CLIENT_KINDS, cutoff, [...verified], cacheCutoff];
 
-    const candidates = (await this.dataSource.query(
-      `SELECT c."id" FROM "oauth_clients" c WHERE ${DELETABLE_CLIENT_WHERE}
-        ORDER BY c."created_at" LIMIT $5`,
-      [...params, OAUTH_CLEANUP_BATCH_SIZE],
-    )) as { id: string }[];
-
-    // One statement per client: a client that gains a reference mid-run
-    // fails only its own delete (FK RESTRICT), not the whole sweep.
     let deleted = 0;
-    for (const { id } of candidates) {
-      try {
-        const [, count] = (await this.dataSource.query(
-          `DELETE FROM "oauth_clients" c WHERE c."id" = $5 AND ${DELETABLE_CLIENT_WHERE}`,
-          [...params, id],
-        )) as [unknown, number];
-        deleted += count;
-      } catch (error) {
-        if ((error as { code?: string }).code !== FOREIGN_KEY_VIOLATION) throw error;
+    for (;;) {
+      if (this.config.now() >= deadline) {
+        this.logger.warn(
+          `OAuth cleanup stopped the client pass at its time budget after ${deleted} ` +
+            'deletes; the rest goes on the next run',
+        );
+        return deleted;
       }
+      const candidates = (await this.dataSource.query(
+        `SELECT c."id" FROM "oauth_clients" c WHERE ${DELETABLE_CLIENT_WHERE}
+          ORDER BY c."created_at" LIMIT $5`,
+        [...params, OAUTH_CLEANUP_BATCH_SIZE],
+      )) as { id: string }[];
+
+      let deletedInBatch = 0;
+      for (const { id } of candidates) {
+        try {
+          const [, count] = (await this.dataSource.query(
+            `DELETE FROM "oauth_clients" c WHERE c."id" = $5 AND ${DELETABLE_CLIENT_WHERE}`,
+            [...params, id],
+          )) as [unknown, number];
+          deletedInBatch += count;
+        } catch (error) {
+          if ((error as { code?: string }).code !== FOREIGN_KEY_VIOLATION) throw error;
+        }
+      }
+      deleted += deletedInBatch;
+      // A short batch is the last one. A full batch that deleted nothing
+      // would be fetched again unchanged, so it ends the pass too.
+      if (candidates.length < OAUTH_CLEANUP_BATCH_SIZE || deletedInBatch === 0) return deleted;
     }
-    return deleted;
   }
 }
