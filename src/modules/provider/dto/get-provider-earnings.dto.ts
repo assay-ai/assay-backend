@@ -2,6 +2,10 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import { IsEnum, IsISO8601, IsOptional, IsString } from 'class-validator';
 
 import { MoneyDto } from '@modules/ledger/dto/get-balances.dto';
+import {
+  NOT_CREDITED_CLASSES,
+  NotCreditedClass,
+} from '@modules/provider/domain/call-reconciliation';
 
 export enum ProviderEarningsGroupBy {
   DAY = 'day',
@@ -29,6 +33,22 @@ export class GetProviderEarningsQueryDto {
   asset?: string;
 }
 
+/** One not-credited reason: a per-call export class, its calls and their worth. */
+export class NotCreditedClassFigureDto {
+  @ApiProperty({ enum: NOT_CREDITED_CLASSES, description: 'The per-call export class' })
+  class: NotCreditedClass;
+
+  @ApiProperty({ description: 'Calls of this class' })
+  calls: number;
+
+  @ApiProperty({
+    type: MoneyDto,
+    nullable: true,
+    description: 'Σ provider_amount over those calls. `null` — see `earned`.',
+  })
+  amount: MoneyDto | null;
+}
+
 /**
  * One group's earnings figures, in atomic units of one asset.
  *
@@ -39,12 +59,11 @@ export class GetProviderEarningsQueryDto {
  * owes a provider, so a call that was not collected (`forfeited`,
  * `uncollected`) is in neither, and an open buyer debt (`debtOutstanding`) is
  * not earned until the buyer settles it.
- * `withheld` is the earnings screen's "withheld itemised with reasons": `Σ
- * provider_amount` over intents that reached a terminal state paying the
- * provider nothing (`REFUNDED`, `VOIDED`, `EXPIRED`, restricted to intents that
- * actually held funds) — the provider's side of the same `WITHHELD_STATUSES`
- * set `ledger/domain/withheld.ts` defines for the agent's side, applied to
- * `provider_amount` instead of `price_amount`.
+ * `withheld` is the provider's "Not credited": `Σ provider_amount` over the
+ * calls the per-call export classifies as not credited (`NOT_CREDITED_CLASSES`
+ * in `provider/domain/call-reconciliation.ts`: a failed check, an endpoint
+ * error, a refused request), held or not. `withheldByClass` itemises it, and
+ * `withheld` / `withheldCalls` are exactly the sum of its rows.
  */
 export class ProviderEarningsFiguresDto {
   @ApiProperty({ description: 'Calls in this group, any terminal or in-flight status' })
@@ -69,13 +88,23 @@ export class ProviderEarningsFiguresDto {
 
   @ApiProperty({
     type: MoneyDto,
+    nullable: true,
     description:
-      'Σ provider_amount the provider would have earned had verification not withheld it',
+      'Not credited: Σ provider_amount over the calls that earned nothing because of their ' +
+      'answer or request (a failed check, an endpoint error, a refused request), held or not. ' +
+      'Exactly the sum of `withheldByClass`. `null` — see `earned`.',
   })
   withheld: MoneyDto | null;
 
-  @ApiProperty({ description: 'Calls counted in `withheld`' })
+  @ApiProperty({ description: 'Calls counted in `withheld`; the sum of `withheldByClass` calls' })
   withheldCalls: number;
+
+  @ApiProperty({
+    type: [NotCreditedClassFigureDto],
+    description:
+      '`withheld` by reason: one row per not-credited class, always all three, in a fixed order',
+  })
+  withheldByClass: NotCreditedClassFigureDto[];
 
   @ApiProperty({
     type: MoneyDto,
