@@ -14,6 +14,9 @@ import { PrivyIdentityFacts, PrivyUserDirectory } from './privy-user.directory';
 /** How this organization came to exist, recorded on the row. */
 export const CREATED_VIA_PRIVY_SIGNUP = 'PRIVY_SIGNUP';
 
+/** The label of a newly provisioned agent, until the person renames it. */
+export const DEFAULT_AGENT_LABEL = 'My agent';
+
 /**
  * At most one wallet lookup per identity per minute.
  *
@@ -131,7 +134,9 @@ export class AgentProvisioningService {
         email,
         organizationName: organizationNameFor(email, claims.subject),
         createdVia: CREATED_VIA_PRIVY_SIGNUP,
-        label: email,
+        // The person renames it in the dashboard. Not the email: an agent is
+        // a program, and the label is shown wherever the agent is named.
+        label: DEFAULT_AGENT_LABEL,
       });
 
       this.logger.log(`Provisioned organization ${agent.organizationId} on first login`);
