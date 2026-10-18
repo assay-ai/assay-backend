@@ -21,6 +21,7 @@ import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import { SlashProposalStatus } from '../domain/slash-proposal-state';
 import { SlashErrors } from '../errors/slash.errors';
 import { SlashProposalSource } from '../dto/slash-proposal.dto';
+import { formatDollars } from '@shared/utils/money-display.util';
 
 /**
  * The proposal's lifecycle up to the point a human touches it.
@@ -287,15 +288,18 @@ export class SlashProposalService {
     const outcome = await this.notifications.notify({
       organizationId: proposal.organizationId,
       event: NotificationEvent.PROVIDER_SLASH_PROPOSED,
-      title: `A penalty of ${proposal.penaltyAmount} is proposed against your stake`,
+      // Dollars, never minor units: "A penalty of 28470000" reads as millions.
+      title:
+        `A penalty of ${formatDollars({ amount: proposal.penaltyAmount, decimals: proposal.decimals })} ` +
+        `is proposed against your stake`,
       body: disputesOnChain(proposal.assetId)
-        ? `Nothing executes before ${proposal.earliestExecutionAt.toISOString()}. Disputing ` +
-          `freezes the penalty on chain until the arbiter decides; you must dispute before the ` +
-          `record's executableAt, which the case page shows. Your routing continues and ` +
-          `nothing is taken from earnings already paid.`
-        : `Nothing executes before ${proposal.earliestExecutionAt.toISOString()}, even if you ` +
-          `do nothing. Your routing continues and nothing is taken from earnings already paid. ` +
-          `Open the case to see the measurement and to object.`,
+        ? `Nothing is taken before ${utcMinute(proposal.earliestExecutionAt)}. Disputing ` +
+          `freezes the penalty on chain until the arbiter decides; the penalty page shows the ` +
+          `deadline to dispute. Your tools keep taking calls, and nothing is taken from ` +
+          `earnings already paid.`
+        : `Nothing is taken before ${utcMinute(proposal.earliestExecutionAt)}, even if you ` +
+          `do nothing. Your tools keep taking calls, and nothing is taken from earnings already ` +
+          `paid. Open the penalty to see the measurement and to object.`,
       subjectType: SLASH_PROPOSAL_SUBJECT_TYPE,
       subjectId: proposal.id,
       dedupeKey: `${proposal.id}:proposed`,
@@ -305,6 +309,7 @@ export class SlashProposalService {
         windowId: proposal.windowId,
         penaltyAmount: proposal.penaltyAmount,
         assetId: proposal.assetId,
+        decimals: proposal.decimals,
         earliestExecutionAt: proposal.earliestExecutionAt.toISOString(),
         source: proposal.source,
       },
@@ -630,4 +635,9 @@ export function deriveChainRequestId(
     digest.update(`:${proposal.chainEpoch}`);
   }
   return digest.digest('hex');
+}
+
+/** "2026-10-20 17:14 UTC": a time in a provider's notice, without the ISO noise. */
+function utcMinute(at: Date): string {
+  return `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
 }
