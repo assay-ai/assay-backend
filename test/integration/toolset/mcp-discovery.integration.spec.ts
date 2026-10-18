@@ -134,6 +134,7 @@ describe('MCP discovery, against a real database and Redis', () => {
     chainId: CHAIN,
     label: null,
     callerKind: credentialId ? McpCallerKind.AGENT : McpCallerKind.HUMAN,
+    paymentsAllowed: true,
   });
 
   beforeAll(async () => {

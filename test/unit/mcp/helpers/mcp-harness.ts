@@ -94,6 +94,7 @@ export const SESSION: McpSession = Object.freeze({
   chainId: CHAIN_ID,
   label: 'test agent',
   callerKind: McpCallerKind.CONFIG,
+  paymentsAllowed: true,
 });
 
 // ---------------------------------------------------------------------------

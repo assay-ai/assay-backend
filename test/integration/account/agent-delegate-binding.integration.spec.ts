@@ -95,6 +95,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
     chainId: CHAIN,
     label: null,
     callerKind: McpCallerKind.AGENT,
+    paymentsAllowed: true,
     storedCredential: true,
   });
 

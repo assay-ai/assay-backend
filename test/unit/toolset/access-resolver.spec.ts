@@ -17,6 +17,7 @@ const session: McpSession = {
   chainId: 'solana:x' as never,
   label: null,
   callerKind: McpCallerKind.AGENT,
+  paymentsAllowed: true,
 };
 
 function build(

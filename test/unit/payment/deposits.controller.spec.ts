@@ -52,6 +52,7 @@ function session(overrides?: Partial<McpSession>): McpSession {
     chainId: SOLANA_DEVNET,
     label: 'buyer',
     callerKind: McpCallerKind.CONFIG,
+    paymentsAllowed: true,
     ...overrides,
   };
 }

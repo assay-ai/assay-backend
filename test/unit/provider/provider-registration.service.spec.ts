@@ -39,6 +39,7 @@ const SESSION: McpSession = {
   chainId: 'solana:5eykt4UsFv8P8NJdTREpY1vzqKqZKvdp' as any,
   label: null,
   callerKind: McpCallerKind.CONFIG,
+  paymentsAllowed: true,
 };
 
 function acceptedTermsInput(overrides: Partial<Record<string, unknown>> = {}) {

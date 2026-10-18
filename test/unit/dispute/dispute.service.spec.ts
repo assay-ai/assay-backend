@@ -27,6 +27,7 @@ const SESSION: McpSession = {
   chainId: 'solana:mainnet' as any,
   label: null,
   callerKind: McpCallerKind.CONFIG,
+  paymentsAllowed: true,
 };
 
 function buildDispute(overrides: Partial<DisputeEntity> = {}): DisputeEntity {

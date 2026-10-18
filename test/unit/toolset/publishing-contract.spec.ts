@@ -39,6 +39,7 @@ const session = (callerKind: McpCallerKind): McpSession => ({
   chainId: 'solana:x' as never,
   label: null,
   callerKind,
+  paymentsAllowed: true,
 });
 
 /** The T2 publishing REST contract: bodies are validated before a service runs; writes are a person's. */

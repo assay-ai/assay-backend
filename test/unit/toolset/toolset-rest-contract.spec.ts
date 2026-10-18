@@ -29,6 +29,7 @@ const session = (callerKind: McpCallerKind): McpSession => ({
   chainId: 'solana:x' as never,
   label: null,
   callerKind,
+  paymentsAllowed: true,
 });
 
 /**

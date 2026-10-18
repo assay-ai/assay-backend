@@ -90,6 +90,7 @@ describe('toolsets and access, against a real database and Redis', () => {
     chainId: CHAIN,
     label: null,
     callerKind: credentialId ? McpCallerKind.AGENT : McpCallerKind.HUMAN,
+    paymentsAllowed: true,
   });
 
   const errorOf = (work: Promise<unknown>) =>

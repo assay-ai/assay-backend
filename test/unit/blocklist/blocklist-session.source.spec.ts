@@ -36,6 +36,7 @@ function session(callerKind: McpCallerKind, overrides: Partial<McpSession> = {})
     chainId: CHAIN,
     label: null,
     callerKind,
+    paymentsAllowed: true,
     delegateAccount: null,
     ...overrides,
   };

@@ -203,6 +203,7 @@ describe('AccountBlockStatusService', () => {
     chainId: CHAIN,
     label: null,
     callerKind: McpCallerKind.HUMAN,
+    paymentsAllowed: true,
     delegateAccount: DELEGATE,
     ...overrides,
   });
