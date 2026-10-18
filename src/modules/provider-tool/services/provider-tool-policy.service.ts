@@ -11,9 +11,13 @@ import {
 
 import { asDeclaredRules } from '../domain/declared-rules';
 
-/** The policy id a provider tool is judged by: one per tool, versioned by the policy service. */
-export function providerPolicyId(toolName: string): string {
-  return `${toolName}.provider`;
+/**
+ * The policy id a provider tool is judged by: one per tool, versioned by the
+ * policy service. Keyed on the tool's id, never its name, which follows a
+ * handle rename.
+ */
+export function providerPolicyId(toolId: string): string {
+  return `provider-tool:${toolId}`;
 }
 
 /** A rule set scores its passed weight over the weight that applied; below this it fails. */
@@ -45,7 +49,7 @@ export class ProviderToolPolicyService {
     readonly organizationId: string;
     readonly rules: unknown;
   }): Promise<void> {
-    const id = providerPolicyId(input.toolName);
+    const id = providerPolicyId(input.toolId);
     const rules = asDeclaredRules(input.rules);
     const verificationPolicy: VerificationPolicy = {
       id,

@@ -1,3 +1,5 @@
+import { randomUUID } from 'node:crypto';
+
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource, EntityManager } from 'typeorm';
@@ -46,6 +48,7 @@ import { isServedRow, servedVersionsOf } from '../domain/served-versions';
 import {
   ReviewKind,
   ReviewStatus,
+  ReviewedMeta,
   ReviewedVersion,
   reviewContentHash,
   reviewDisplayOf,
@@ -211,7 +214,8 @@ export class ProviderToolsService {
     if (nameProblems.length > 0) throw ProviderToolErrors.invalid({ problems: nameProblems });
     await this.assertCategory(body.category);
 
-    const shape = shapeOfBody(body, null, name);
+    const newId = randomUUID();
+    const shape = shapeOfBody(body, null, newId);
     const problems = [...contractProblems(shape), ...declaredRuleProblems(body.rules ?? [])];
     if (problems.length > 0) throw ProviderToolErrors.invalid({ problems });
 
@@ -221,10 +225,10 @@ export class ProviderToolsService {
         const [inserted] = (await manager.query(
           `INSERT INTO tools (id, name, kind, owner_org_id, category, tags, visibility,
                               review_status, status, last_version_number)
-           VALUES (gen_random_uuid(), $1, 'PROVIDER', $2, $3, $4::text[], 'PRIVATE',
+           VALUES ($5, $1, 'PROVIDER', $2, $3, $4::text[], 'PRIVATE',
                    'NONE', 'DRAFT', 1)
            RETURNING id`,
-          [name, organizationId, body.category, dedupe(body.tags ?? [])],
+          [name, organizationId, body.category, dedupe(body.tags ?? []), newId],
         )) as { id: string }[];
         await manager.insert(ToolVersionEntity, {
           ...versionFieldsOf(shape),
@@ -263,12 +267,14 @@ export class ProviderToolsService {
     actor: AuditActor,
   ): Promise<ProviderToolDto> {
     const owned = await this.requireOwned(organizationId, toolId);
+    if (body.category !== undefined) await this.assertCategory(body.category);
     await this.dataSource.transaction(async (manager) => {
       const row = await lockTool(manager, owned.id);
       assertNotRemoved(row);
       const versions = await manager.find(ToolVersionEntity, { where: { toolId: row.id } });
       const existing = versions.find((version) => version.status === ToolVersionStatus.DRAFT);
       if (existing) assertDraftNotInReview(row, existing);
+      await applyDraftMeta(manager, row, body);
       const published = versions.filter((version) => version.status !== ToolVersionStatus.DRAFT);
 
       let base: ToolVersionEntity | null = newestOf(published);
@@ -286,7 +292,7 @@ export class ProviderToolsService {
         }
         base = named;
       }
-      const shape = shapeOfBody(body, base, row.name);
+      const shape = shapeOfBody(body, base, row.id);
       const problems = [...contractProblems(shape), ...declaredRuleProblems(body.rules ?? [])];
       if (problems.length > 0) throw ProviderToolErrors.invalid({ problems });
 
@@ -357,9 +363,15 @@ export class ProviderToolsService {
           reason: 'the first version can be edited, not discarded',
         });
       }
-      if (row.reviewVersion === draft.version) {
-        await manager.update(ToolEntity, { id: row.id }, { reviewVersion: null });
-      }
+      await manager.update(
+        ToolEntity,
+        { id: row.id },
+        {
+          pendingCategory: null,
+          pendingTags: null,
+          ...(row.reviewVersion === draft.version ? { reviewVersion: null } : {}),
+        },
+      );
       await manager.delete(ToolVersionEntity, { toolId: row.id, version: draft.version });
       await this.audit.record(manager, {
         organizationId,
@@ -382,6 +394,16 @@ export class ProviderToolsService {
   ): Promise<ProviderToolDto> {
     const row = await this.requireOwned(organizationId, toolId);
     assertNotRemoved(row);
+    // A reviewed tool's category and tags are part of what was reviewed
+    // (§7.6): they change with a draft, through review, never here.
+    if (row.approvedVersion !== null) {
+      throw ProviderToolErrors.state({
+        reason: 'a reviewed tool’s category and tags change with its next draft, through review',
+      });
+    }
+    if (row.reviewStatus === ReviewStatus.PENDING) {
+      throw ProviderToolErrors.inReview({ reviewVersion: row.reviewVersion });
+    }
     const patch: Partial<ToolEntity> = {};
     if (body.category !== undefined && body.category !== row.category) {
       await this.assertCategory(body.category);
@@ -464,6 +486,7 @@ export class ProviderToolsService {
           row,
           [{ ...draft, semver } as ToolVersionEntity],
           draft.version,
+          reviewMetaOf(row, ReviewKind.CHANGE),
         );
         await manager.update(
           ToolVersionEntity,
@@ -642,7 +665,13 @@ export class ProviderToolsService {
       assertSameServedVersions(versions, now);
       await this.handles.lockForSharing(manager, organizationId);
       const served = servedVersionsOf(now);
-      await submitForReview(manager, row, served, row.currentVersion as number);
+      await submitForReview(
+        manager,
+        row,
+        served,
+        row.currentVersion as number,
+        reviewMetaOf(row, ReviewKind.FIRST),
+      );
       await this.audit.record(manager, {
         organizationId,
         actor,
@@ -949,6 +978,7 @@ export async function submitForReview(
   row: ToolEntity,
   versions: readonly ToolVersionEntity[],
   reviewVersion: number,
+  meta: ReviewedMeta,
 ): Promise<void> {
   await manager.update(
     ToolEntity,
@@ -957,9 +987,62 @@ export async function submitForReview(
       reviewStatus: ReviewStatus.PENDING,
       reviewVersion,
       reviewSubmittedAt: new Date(),
-      reviewContentHash: reviewContentHash(row.name, versions.map(reviewedVersionOf)),
+      reviewContentHash: reviewContentHash(row.name, versions.map(reviewedVersionOf), meta),
       reviewNote: null,
       updatedAt: new Date(),
+    },
+  );
+}
+
+/**
+ * The category and tags a review covers: the tool's own for a first review;
+ * for a change, the ones its draft proposes (or the current ones, unchanged).
+ */
+export function reviewMetaOf(
+  row: Pick<ToolEntity, 'category' | 'tags' | 'pendingCategory' | 'pendingTags'>,
+  kind: ReviewKind,
+): ReviewedMeta {
+  if (kind === ReviewKind.CHANGE) {
+    return {
+      category: row.pendingCategory ?? row.category,
+      tags: row.pendingTags ?? row.tags ?? [],
+    };
+  }
+  return { category: row.category, tags: row.tags ?? [] };
+}
+
+/**
+ * A draft's category and tags. On a reviewed tool they wait beside the draft
+ * (`pending_*`) and change only with its approval; on any other tool they
+ * apply at once — the publish gate screens them before anyone else sees them.
+ */
+async function applyDraftMeta(
+  manager: EntityManager,
+  row: ToolEntity,
+  body: Pick<ProviderToolContractBodyDto, 'category' | 'tags'>,
+): Promise<void> {
+  if (body.category === undefined && body.tags === undefined) return;
+  if (row.reviewStatus === ReviewStatus.PENDING) {
+    throw ProviderToolErrors.inReview({ reviewVersion: row.reviewVersion });
+  }
+  const tags = body.tags === undefined ? undefined : dedupe(body.tags);
+  if (row.approvedVersion !== null) {
+    await manager.update(
+      ToolEntity,
+      { id: row.id },
+      {
+        ...(body.category !== undefined ? { pendingCategory: body.category } : {}),
+        ...(tags !== undefined ? { pendingTags: tags } : {}),
+      },
+    );
+    return;
+  }
+  await manager.update(
+    ToolEntity,
+    { id: row.id },
+    {
+      ...(body.category !== undefined ? { category: body.category } : {}),
+      ...(tags !== undefined ? { tags } : {}),
     },
   );
 }
@@ -982,7 +1065,7 @@ export function reviewedVersionOf(row: ToolVersionEntity): ReviewedVersion {
 function shapeOfBody(
   body: ProviderToolContractBodyDto,
   base: ToolVersionEntity | null,
-  name: string,
+  toolId: string,
 ): ProviderDraftShape {
   return {
     summary: body.summary,
@@ -994,7 +1077,7 @@ function shapeOfBody(
     examples: body.examples ?? [],
     // The provider sets neither: the policy is the tool's own, and the tier
     // is the reviewer's (never GUARANTEED, §7.6).
-    verificationPolicyId: base?.verificationPolicyId ?? providerPolicyId(name),
+    verificationPolicyId: base?.verificationPolicyId ?? providerPolicyId(toolId),
     tier: base?.tier ?? ToolTier.UNVERIFIED,
     declaredRules: body.rules ?? [],
   };

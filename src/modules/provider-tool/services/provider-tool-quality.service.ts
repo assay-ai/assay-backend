@@ -58,7 +58,7 @@ export class ProviderToolQualityService {
          FROM verification_records
         WHERE tool_id = $1 AND provider_id = $2 AND decision_policy_id = $3
           AND created_at >= $4`,
-      [tool.id, providerId, providerPolicyId(tool.name), since],
+      [tool.id, providerId, providerPolicyId(tool.id), since],
     )) as { judged: number; failed: number }[];
     const [sla] = (await this.dataSource.query(
       `SELECT COALESCE(sum(verified_calls), 0)::int AS verified,

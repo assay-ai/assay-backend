@@ -14,6 +14,7 @@ import {
 } from '@modules/tool/ports/tool-contracts.port';
 import {
   ToolKind,
+  ToolStatus,
   ToolTier,
   ToolVersionStatus,
   ToolVisibility,
@@ -36,6 +37,7 @@ import {
   draftShapeOf,
   lockTool,
   publishDraft,
+  reviewMetaOf,
   reviewedVersionOf,
   servedVersionsOf,
   settledSemver,
@@ -157,7 +159,11 @@ export class ProviderToolReviewService {
       tool,
       kind,
       pending: row.reviewStatus === ReviewStatus.PENDING,
-      contentHash: reviewContentHash(row.name, covered.map(reviewedVersionOf)),
+      contentHash: reviewContentHash(
+        row.name,
+        covered.map(reviewedVersionOf),
+        reviewMetaOf(row, kind),
+      ),
       covered: covered.map((version) => versionDtoOf(row, version)),
       changes:
         draft && approved
@@ -191,10 +197,20 @@ export class ProviderToolReviewService {
   async decide(manager: EntityManager, input: DecideInput): Promise<DecideOutcome> {
     const row = await lockTool(manager, input.toolId);
     if (row.reviewStatus !== ReviewStatus.PENDING) throw ProviderToolErrors.reviewNotPending();
+    // Nothing taken down is decided: its own takedown, or its handle's.
+    if (
+      row.status === ToolStatus.REMOVED ||
+      row.removedAt ||
+      row.takenDownAt ||
+      row.handleRemovedAt
+    ) {
+      throw ProviderToolErrors.state({ reason: 'the tool is taken down' });
+    }
     const versions = await manager.find(ToolVersionEntity, { where: { toolId: row.id } });
     const kind = reviewKindOf(row);
     const covered = coveredVersions(row, versions, kind);
-    const hash = reviewContentHash(row.name, covered.map(reviewedVersionOf));
+    const meta = reviewMetaOf(row, kind);
+    const hash = reviewContentHash(row.name, covered.map(reviewedVersionOf), meta);
     if (covered.length === 0 || hash !== row.reviewContentHash || hash !== input.contentHash) {
       throw ProviderToolErrors.reviewStale({ contentHash: hash });
     }
@@ -271,6 +287,11 @@ export class ProviderToolReviewService {
         reviewStatus: ReviewStatus.APPROVED,
         reviewNote: input.note,
         approvedVersion: draft.version,
+        // The category and tags the review covered take effect with it.
+        category: meta.category,
+        tags: [...meta.tags],
+        pendingCategory: null,
+        pendingTags: null,
       },
       tier,
     );
