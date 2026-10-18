@@ -394,10 +394,16 @@ describe('OAuthClientRegistry (§6.3.6)', () => {
   describe('isPaymentClient', () => {
     it('only the built-in client', () => {
       const { registry } = setup();
-      expect(registry.isPaymentClient(BUILTIN)).toBe(true);
-      expect(registry.isPaymentClient(VERIFIED_URL)).toBe(false);
-      expect(registry.isPaymentClient('dcr_' + 'a'.repeat(22))).toBe(false);
-      expect(registry.isPaymentClient(`${BUILTIN}/`)).toBe(false);
+      const { BUILTIN: builtin, CIMD: cimd, DCR: dcr } = OAuthClientKind;
+      expect(registry.isPaymentClient({ kind: builtin, clientId: BUILTIN })).toBe(true);
+      expect(registry.isPaymentClient({ kind: cimd, clientId: VERIFIED_URL })).toBe(false);
+      expect(registry.isPaymentClient({ kind: dcr, clientId: 'dcr_' + 'a'.repeat(22) })).toBe(
+        false,
+      );
+      expect(registry.isPaymentClient({ kind: builtin, clientId: `${BUILTIN}/` })).toBe(false);
+      // The kind is a belt: the built-in id on any other kind is not a payment client.
+      expect(registry.isPaymentClient({ kind: cimd, clientId: BUILTIN })).toBe(false);
+      expect(registry.isPaymentClient({ kind: dcr, clientId: BUILTIN })).toBe(false);
     });
   });
 });

@@ -113,7 +113,7 @@ export class OAuthConsentService {
         verified: display.verified === true,
         builtin,
         // Fail closed: only an explicit `true` makes a payment client (§6.3.13).
-        paymentClient: this.registry.isPaymentClient(client.clientId) === true,
+        paymentClient: this.registry.isPaymentClient(client) === true,
       },
       returnTo: { kind: display.returnTo.kind, display: display.returnTo.display },
       scope: request.scope.split(' ').filter((scope) => scope !== ''),

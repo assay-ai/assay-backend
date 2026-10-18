@@ -1,4 +1,4 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { randomBytes } from 'node:crypto';
 import { DataSource, In, IsNull } from 'typeorm';
@@ -17,6 +17,7 @@ import {
   OAuthClientTrust,
   credentialClientView,
 } from '@modules/oauth/domain/credential-client-view';
+import { sweepRevokedCredentialTokens } from '@modules/oauth/services/oauth-grant.writer';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
@@ -78,8 +79,6 @@ const CREDENTIALS_LIST: ListSpec = {
  */
 @Injectable()
 export class AgentCredentialsService {
-  private readonly logger = new Logger(AgentCredentialsService.name);
-
   constructor(
     private readonly credentials: AgentCredentialRepository,
     private readonly agents: AgentRepository,
@@ -181,9 +180,11 @@ export class AgentCredentialsService {
    * `FOR UPDATE SKIP LOCKED`: a row locked elsewhere is one a rotation holds
    * (§6.3.11), and that rotation then waits for this credential row, finds it
    * revoked, and revokes its own token. Waiting for it here instead would
-   * deadlock: it holds the token and waits for the credential. After commit
-   * the organization's access epoch is bumped, so no cached access of the
-   * credential outlives it (R-OA-23).
+   * deadlock: it holds the token and waits for the credential. If that
+   * rotation rolls back instead, the post-commit sweep
+   * (`sweepRevokedCredentialTokens`) catches the row; it never throws, and the
+   * cleanup job is its backstop. After commit the organization's access epoch
+   * is bumped, so no cached access of the credential outlives it (R-OA-23).
    */
   async revoke(
     organizationId: string,
@@ -196,11 +197,16 @@ export class AgentCredentialsService {
       throw AccountErrors.credentialNotFound({ id });
     }
 
-    // Idempotent: revoking an already-revoked credential must not overwrite
-    // the original revocation time.
-    if (credential.revokedAt) return;
-
     const isGrant = credential.issuedVia === CredentialIssuedVia.OAUTH;
+
+    // Idempotent: revoking an already-revoked credential must not overwrite
+    // the original revocation time. A grant's sweep still runs, to finish any
+    // token an earlier revocation skipped (as `OAuthTokenService.revoke`).
+    if (credential.revokedAt) {
+      if (isGrant) await sweepRevokedCredentialTokens(this.dataSource, id);
+      return;
+    }
+
     const client =
       isGrant && credential.oauthClientId
         ? await this.oauthClients.findOneBy({ id: credential.oauthClientId })
@@ -224,6 +230,12 @@ export class AgentCredentialsService {
                               FOR UPDATE SKIP LOCKED)`,
           [organizationId, id, revokedAt],
         );
+        // Access tokens: a blocking update, not `SKIP LOCKED`. Lock rule: no
+        // path may lock an access-token row before the credential row (1.8
+        // inserts them under the credential lock; the `first_used_at` stamp and
+        // the RFC 7009 revoke are autocommit statements that lock nothing else).
+        // A path that broke it, e.g. a stamp followed by a `FOR SHARE` read of
+        // the credential in one transaction, would deadlock with this update.
         await manager.update(
           OAuthAccessTokenEntity,
           { organizationId, credentialId: id, revokedAt: IsNull() },
@@ -247,23 +259,10 @@ export class AgentCredentialsService {
       return true;
     });
 
-    if (revoked) await this.bumpAccessEpoch(organizationId);
-  }
-
-  /**
-   * After commit, so it never fails the revoke: the row is already revoked,
-   * and every session source re-reads it on each request; a lost bump only
-   * leaves cached access views to their TTL.
-   */
-  private async bumpAccessEpoch(organizationId: string): Promise<void> {
-    try {
-      await this.accessEpoch.bump(organizationId);
-    } catch {
-      this.logger.warn(
-        `org ${organizationId}: access epoch not bumped after a credential revoke; ` +
-          'cached access lasts until its TTL',
-      );
-    }
+    // After commit. `bump` never throws (it logs); the sweep never throws
+    // either, so neither can skip the other or fail a committed revoke.
+    if (revoked) await this.accessEpoch.bump(organizationId);
+    if (isGrant) await sweepRevokedCredentialTokens(this.dataSource, id);
   }
 
   /** The OAuth clients of a page's grants, by row id, in one query. */

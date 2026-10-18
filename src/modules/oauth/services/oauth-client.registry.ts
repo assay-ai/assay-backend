@@ -10,6 +10,7 @@ import { APP_ROLE, AppRole, resolveAppRole } from '@shared/app-role/app-role';
 import { OAUTH_CONFIG, OAuthConfig } from '../config/oauth.config';
 import { builtinClientDocument } from '../domain/builtin-client';
 import { classify } from '../domain/client-id';
+import { isPaymentClient } from '../domain/payment-client';
 import { matches } from '../domain/redirect-uri';
 import { registrableDomain } from '../domain/registrable-domain';
 import { CimdFetcher } from './cimd.fetcher';
@@ -158,8 +159,8 @@ export class OAuthClientRegistry implements OnModuleInit {
   }
 
   /** Whether grants of `clientId` may bind a payment key and use the API host (§6.3.13). */
-  isPaymentClient(clientId: string): boolean {
-    return this.config.paymentClients.includes(clientId);
+  isPaymentClient(client: Pick<ResolvedClient, 'kind' | 'clientId'>): boolean {
+    return isPaymentClient(this.config.paymentClients, client);
   }
 
   displayFor(client: ResolvedClient, redirectUri: string): ClientDisplay {

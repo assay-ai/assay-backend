@@ -348,6 +348,16 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
       expect(session.agentId).toBe('agent-1');
     });
 
+    it('a non-BUILTIN row carrying the built-in id is not a payment client (kind belt)', async () => {
+      const fx = build('mcp');
+      fx.clients.rows.push(client('client-odd', BUILTIN_CLIENT_ID, OAuthClientKind.CIMD));
+      seedGrant(fx, { clientRowId: 'client-odd' });
+
+      const session = await fx.source.resolve(ACCESS_TOKEN);
+
+      expect(session.paymentsAllowed).toBe(false);
+    });
+
     it.each(['mcp', 'api'] as const)(
       '%s role + assay-mcp → session with paymentsAllowed true',
       async (role) => {

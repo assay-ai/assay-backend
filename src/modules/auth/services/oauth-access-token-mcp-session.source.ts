@@ -9,6 +9,7 @@ import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { McpSession, McpSessionPort } from '@modules/mcp/ports/mcp-session.port';
 import { OAUTH_SESSION_CONFIG, OAuthSessionConfig } from '@modules/oauth/config/oauth.config';
 import { hashOpaqueToken, isWellFormed } from '@modules/oauth/domain/opaque-token';
+import { isPaymentClient } from '@modules/oauth/domain/payment-client';
 import { APP_ROLE, AppRole, resolveAppRole } from '@shared/app-role/app-role';
 
 import { AuthErrors } from '../errors/auth.errors';
@@ -101,7 +102,7 @@ export class OAuthAccessTokenMcpSessionSource implements McpSessionPort {
       throw McpErrors.credentialInvalid();
     }
 
-    const paymentsAllowed = this.config.paymentClients.includes(client.clientId);
+    const paymentsAllowed = isPaymentClient(this.config.paymentClients, client);
     if (this.role === 'api' && !paymentsAllowed) {
       throw AuthErrors.clientNotAllowedHere();
     }
