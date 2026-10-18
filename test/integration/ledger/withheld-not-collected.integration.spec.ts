@@ -201,6 +201,54 @@ describe('PaymentIntentRepository — withheld equals the summary’s not charge
   });
 
   /**
+   * Wave-1 audit M4: the summary drops every hold-less REFUNDED / VOIDED /
+   * EXPIRED intent. No call that ran is among them: a hold must reserve a
+   * non-zero amount, so a zero-price intent never secures funds and never runs
+   * (it can only go CREATED → EXPIRED), and every edge into REFUNDED or VOIDED
+   * starts after FUNDS_SECURED, which writes the hold. Free-tier calls are
+   * `tool_call_records`, not intents. A zero-price row that did settle still
+   * counts in `calls` and `freeCalls`.
+   */
+  it('drops no zero-price call that ran: a zero-price intent cannot secure funds', async () => {
+    await context.reset();
+    const TOOL = randomUUID();
+    const account = context.account(`buyer-${randomUUID()}`);
+    await context.fund(account, 10_000_000n);
+
+    const free = await context.createIntent({
+      agentAccount: account,
+      toolId: TOOL,
+      priceAtomic: 0n,
+    });
+    await expect(context.intents.secureFunds(context.organizationId, free.id)).rejects.toThrow();
+    const [row] = (await context.dataSource.query(
+      `SELECT status, hold_id FROM payment_intents WHERE id = $1`,
+      [free.id],
+    )) as { status: string; hold_id: string | null }[];
+    expect(row).toEqual({ status: 'CREATED', hold_id: null });
+
+    // A zero-price row settled without a hold (as a free intent is recorded).
+    const settled = await context.createIntent({
+      agentAccount: account,
+      toolId: TOOL,
+      priceAtomic: 0n,
+    });
+    await context.dataSource.query(
+      `UPDATE payment_intents SET status = 'SETTLED', provider_id = $2, provider_account = $3
+        WHERE id = $1`,
+      [settled.id, PROVIDER, context.account(`provider-${PROVIDER}`)],
+    );
+
+    const [totals] = await context.repository.summarizeReceipts(
+      context.organizationId,
+      ReceiptsSummaryGroupBy.TOOL,
+      { from: new Date(Date.now() - DAY_MS), to: new Date(Date.now() + DAY_MS) },
+    );
+    // The CREATED one is in progress, the settled one free: both counted.
+    expect(totals).toMatchObject({ calls: 2, freeCalls: 2, inProgressCalls: 1 });
+  });
+
+  /**
    * The same calls with their holds really released, the way the services do
    * it, so `ok` is proven against the journal rather than a mock: a forfeit and
    * a voided debt release the buyer's hold, and the release must be explained.
