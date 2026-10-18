@@ -240,3 +240,38 @@ function classifyTerminalError(classification: ResponseClassValue): CallReconcil
 export const CALL_RECONCILIATION_CLASSES: readonly CallReconciliationClass[] = Object.freeze(
   Object.values(CallReconciliationClass),
 );
+
+/** The not-credited classes, one of {@link NOT_CREDITED_CLASSES}. */
+export type NotCreditedClass =
+  | CallReconciliationClass.PAID_UNCREDITED
+  | CallReconciliationClass.SYSTEM_ERROR
+  | CallReconciliationClass.REQUEST_ERROR;
+
+/**
+ * The classes a provider reads as "not credited": the call earned nothing
+ * because of its answer or its request — a failed check (`REFUNDED`, or a
+ * buyer debt voided by a late rejecting verdict), an endpoint error, or a
+ * refused request. Held or not: a call is not credited whatever reserved its
+ * price (D17).
+ *
+ * The ONE definition. `ProviderEarningsService` folds its `withheld` /
+ * `withheldCalls` through {@link isNotCredited} over the same candidates this
+ * file classifies, so the earnings summary, its reasons and the per-call
+ * export can never count a different set of calls.
+ *
+ * Not here, on purpose: calls that passed the check but were not paid
+ * (`PAID_BUYER_DEBT`, `PAID_UNCOLLECTED`, `PROVIDER_FORFEITED` — reported
+ * apart), `EXCLUDED` (still credited), and the intrinsic free / test /
+ * exploration classes. Nor the buyer's `WITHHELD_STATUSES`, which is a
+ * different question (what the buyer was not charged) and changes on its own.
+ */
+export const NOT_CREDITED_CLASSES: readonly NotCreditedClass[] = Object.freeze([
+  CallReconciliationClass.PAID_UNCREDITED,
+  CallReconciliationClass.SYSTEM_ERROR,
+  CallReconciliationClass.REQUEST_ERROR,
+] as const);
+
+/** Whether a classified call counts as "not credited". See {@link NOT_CREDITED_CLASSES}. */
+export function isNotCredited(cls: CallReconciliationClass): cls is NotCreditedClass {
+  return (NOT_CREDITED_CLASSES as readonly CallReconciliationClass[]).includes(cls);
+}

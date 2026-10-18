@@ -409,4 +409,79 @@ describe('per-call export ↔ ProviderEarningsService reconciliation', () => {
     });
     expect(earnings.totals.earned?.amount ?? '0').toBe('0');
   });
+
+  it('not credited counts the same calls as the export, held or not (D17)', async () => {
+    const PROVIDER_ID = context.id('not-credited:provider');
+    const parties = {
+      agentAccount: context.account('not-credited-agent'),
+      providerId: PROVIDER_ID,
+      providerAccount: context.account('not-credited-provider'),
+    };
+    await context.fund(parties.agentAccount, 100_000_000n);
+
+    // A failed check whose hold was never recorded (a test-injected row).
+    const unheld = await context.createIntent('not-credited-unheld', parties);
+    await context.dataSource.query(
+      `UPDATE payment_intents SET status = 'REFUNDED', hold_id = NULL WHERE id = $1`,
+      [unheld.id],
+    );
+    // A buyer debt voided by a late rejecting verdict.
+    const voided = await context.createIntent('not-credited-voided', parties);
+    await context.dataSource.query(
+      `UPDATE payment_intents SET status = 'SETTLED', redemption_last_error = 'voided:FAIL' WHERE id = $1`,
+      [voided.id],
+    );
+    // A held endpoint error.
+    const errored = await context.createIntent('not-credited-error', parties);
+    await context.intents.secureFunds(context.organizationId, errored.id);
+    await context.intents.transition(
+      context.organizationId,
+      errored.id,
+      PaymentIntentStatus.FUNDS_SECURED,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+    );
+    await context.intents.resolve(
+      context.organizationId,
+      errored.id,
+      PaymentIntentStatus.PROVIDER_EXECUTING,
+      PaymentIntentStatus.VOIDED,
+      { reason: 'upstream 503', classification: 'SYSTEM_ERROR' },
+    );
+
+    const times = [unheld, voided, errored].map((intent) => intent.createdAt.getTime());
+    const from = new Date(Math.min(...times) - 1_000).toISOString();
+    const to = new Date(Math.max(...times) + 1_000).toISOString();
+
+    const result = await exportService.prepare(PROVIDER_ID, { from, to });
+    const exported = new Map<string, number>();
+    const exportedAmount = new Map<string, bigint>();
+    for await (const row of result.rows) {
+      const cls = String(row[5]);
+      exported.set(cls, (exported.get(cls) ?? 0) + 1);
+      exportedAmount.set(cls, (exportedAmount.get(cls) ?? 0n) + BigInt(row[8] as string));
+    }
+
+    // Both groupings: the day key (`to_char`) and the tool key join the same way.
+    for (const groupBy of [ProviderEarningsGroupBy.TOOL, ProviderEarningsGroupBy.DAY]) {
+      const earnings = await earningsService.getEarnings(PROVIDER_ID, { from, to, groupBy });
+
+      expect(earnings.totals.withheldCalls).toBe(3);
+      for (const reason of earnings.totals.withheldByClass) {
+        // Calls AND amounts: the CSV's provider_amount per class is the reason's worth.
+        expect(reason.calls).toBe(exported.get(reason.class) ?? 0);
+        expect(reason.amount?.amount).toBe((exportedAmount.get(reason.class) ?? 0n).toString());
+      }
+      const groupCalls = earnings.groups.reduce((sum, group) => sum + group.withheldCalls, 0);
+      expect(groupCalls).toBe(3);
+    }
+    const earnings = await earningsService.getEarnings(PROVIDER_ID, {
+      from,
+      to,
+      groupBy: ProviderEarningsGroupBy.TOOL,
+    });
+    expect(exported.get(CallReconciliationClass.PAID_UNCREDITED)).toBe(2);
+    // The summary is its reasons' sum; each call counts at its provider share.
+    const share = BigInt(unheld.providerAmount.amount);
+    expect(earnings.totals.withheld?.amount).toBe((share * 3n).toString());
+  });
 });
