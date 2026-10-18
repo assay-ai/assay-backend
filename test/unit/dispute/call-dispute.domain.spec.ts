@@ -15,6 +15,7 @@ import {
   filingLimitFor,
   isFlaggedBuyer,
   needsSecondOperator,
+  unitsToMinor,
   planRefund,
   refundColumnsFor,
   withinFilingWindow,
@@ -174,8 +175,14 @@ describe('filing rules', () => {
   });
 
   it('needs a second operator at or above the threshold', () => {
-    expect(needsSecondOperator('4999999', '5000000')).toBe(false);
-    expect(needsSecondOperator('5000000', '5000000')).toBe(true);
+    // Whole units, normalised by the asset's decimals (review P2-5).
+    expect(needsSecondOperator('4999999', 6, '5')).toBe(false);
+    expect(needsSecondOperator('5000000', 6, '5')).toBe(true);
+    expect(needsSecondOperator('5000000000000000000', 18, '5')).toBe(true);
+    expect(needsSecondOperator('4999999999999999999', 18, '5')).toBe(false);
+    expect(needsSecondOperator('2500000', 6, '2.5')).toBe(true);
+    expect(unitsToMinor('2.5', 6)).toBe(2_500_000n);
+    expect(unitsToMinor('1', 0)).toBe(1n);
   });
 });
 
@@ -194,12 +201,17 @@ describe('loadCallDisputeConfig', () => {
     const config = loadCallDisputeConfig({
       CALL_DISPUTE_FILING_WINDOW_DAYS: '3',
       CALL_DISPUTE_MAX_PER_DAY: 'lots',
-      CALL_DISPUTE_TWO_PERSON_THRESHOLD_MINOR: '100',
+      CALL_DISPUTE_TWO_PERSON_THRESHOLD: '2.5',
+      CALL_DISPUTE_MAX_OPEN_PER_PROVIDER_PER_DAY: '7',
     });
     expect(config.filingWindowMs).toBe(3 * 24 * 3600 * 1000);
     expect(config.maxFilingsPerDay).toBe(DEFAULT_CALL_DISPUTE_CONFIG.maxFilingsPerDay);
-    expect(config.twoPersonThresholdMinor).toBe('100');
-    expect(loadCallDisputeConfig({}).twoPersonThresholdMinor).toBe('5000000');
+    expect(config.twoPersonThresholdUnits).toBe('2.5');
+    expect(config.maxOpenPerProviderPerDay).toBe(7);
+    expect(loadCallDisputeConfig({}).twoPersonThresholdUnits).toBe('5');
+    expect(
+      loadCallDisputeConfig({ CALL_DISPUTE_TWO_PERSON_THRESHOLD: 'five' }).twoPersonThresholdUnits,
+    ).toBe('5');
     expect(loadCallDisputeConfig({}).snapshotRetentionMs).toBe(30 * 24 * 3600 * 1000);
   });
 });

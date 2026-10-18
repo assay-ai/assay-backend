@@ -1,6 +1,6 @@
-import { Inject, Injectable, Logger } from '@nestjs/common';
+import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager, QueryRunner, SelectQueryBuilder } from 'typeorm';
+import { DataSource, EntityManager, In, QueryRunner, SelectQueryBuilder } from 'typeorm';
 
 import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
@@ -18,7 +18,7 @@ import {
   NotificationPort,
 } from '@modules/notification/ports/notification.port';
 import { collectionStateOf } from '@modules/payment/domain/collection';
-import { HeldCollectionService } from '@modules/payment/services/held-collection.service';
+import { HELD_PAYMENTS, HeldPaymentsPort } from '@modules/payment/ports/held-payments.port';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
 import { EvidencePackService } from '@modules/verification/services/evidence-pack.service';
 import { CursorPageDto, ListSpec, applyTimeWindow, asInstant, paginate } from '@shared/api';
@@ -133,11 +133,12 @@ export class CallDisputeService {
     private readonly paymentIntents: PaymentIntentRepository,
     private readonly verificationRecords: VerificationRecordRepository,
     private readonly intents: PaymentIntentService,
-    private readonly collection: HeldCollectionService,
     private readonly evidence: EvidencePackService,
     private readonly audit: AuditLogWriter,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
     @Inject(CALL_DISPUTE_CONFIG) private readonly config: CallDisputeConfig,
+    // Whether the escrow hold is live on the call's chain (review P2-1).
+    @Optional() @Inject(HELD_PAYMENTS) private readonly held: HeldPaymentsPort | null = null,
   ) {}
 
   // ── Buyer ───────────────────────────────────────────────────────────────
@@ -166,6 +167,15 @@ export class CallDisputeService {
         closedAt: new Date(settledAt.getTime() + this.config.filingWindowMs).toISOString(),
       });
     }
+
+    // One dispute per call, ever decided (review P2-2): a second could flip a
+    // decided outcome or restore its amount twice.
+    const decided = await this.disputes.findOneBy({
+      organizationId,
+      intentId: intent.id,
+      state: In([DisputeState.UPHELD, DisputeState.REJECTED]),
+    });
+    if (decided) throw DisputeErrors.alreadyDecided({ id: decided.id });
 
     const snapshot = await this.snapshot(organizationId, intent, record, now);
     const actor = auditActorOf(session);
@@ -205,11 +215,31 @@ export class CallDisputeService {
         // Inside the dispute hold, the voucher is set aside before anything can
         // reach the chain: a refund is then guaranteed. After it, the dispute is
         // a quality signal (see `../domain/call-dispute.ts`).
-        entity.refundGuaranteed = await this.paymentIntents.holdForDispute(
-          manager,
-          { organizationId, id: intent.id, payer: intent.agentAccount },
-          DISPUTE_FILING_GUARD_SECONDS,
-        );
+        // A wave against one provider cannot ride the auto-uphold (review P2-3).
+        const [against] = (await manager.query(
+          `SELECT count(*)::int AS "open" FROM "disputes"
+            WHERE "respondent_provider_id" = $1 AND "intent_id" IS NOT NULL
+              AND "state" = 'OPEN' AND "created_at" > $2`,
+          [intent.providerId, new Date(now.getTime() - DAY_MS)],
+        )) as { open: number }[];
+        if (Number(against?.open ?? 0) >= this.config.maxOpenPerProviderPerDay) {
+          throw DisputeErrors.rateLimited({
+            limit: this.config.maxOpenPerProviderPerDay,
+            scope: 'provider',
+          });
+        }
+        // Guaranteed only where the hold is real (review P2-1): rail B needs the
+        // escrow hold live on the call's chain; rail A's hold is the ledger's.
+        const holdIsLive =
+          intent.rail !== 'RAIL_B_VOUCHER' ||
+          (this.held?.holdLive(intent.assetId as AssetId) ?? false);
+        entity.refundGuaranteed =
+          holdIsLive &&
+          (await this.paymentIntents.holdForDispute(
+            manager,
+            { organizationId, id: intent.id, payer: intent.agentAccount },
+            DISPUTE_FILING_GUARD_SECONDS,
+          ));
         await manager.save(entity);
         await this.audit.record(manager, {
           organizationId,
@@ -438,7 +468,11 @@ export class CallDisputeService {
       amountMinor,
       needsSecondOperator:
         decision === CallDisputeDecision.UPHOLD &&
-        needsSecondOperator(amountMinor, this.config.twoPersonThresholdMinor),
+        needsSecondOperator(
+          amountMinor,
+          dispute.decimals ?? 6,
+          this.config.twoPersonThresholdUnits,
+        ),
     };
   }
 
@@ -515,13 +549,15 @@ export class CallDisputeService {
     );
     await manager.query(
       `UPDATE "payment_intents" SET "dispute_outcome" = $3
-        WHERE "organization_id" = $1 AND "id" = $2`,
+        WHERE "organization_id" = $1 AND "id" = $2
+          AND ("dispute_outcome" IS NULL OR "dispute_outcome" = 'OPEN')`,
       [locked.organization_id, locked.intent_id, outcome],
     );
     if (locked.verdict_id) {
       await manager.query(
         `UPDATE "verification_records" SET "dispute_outcome" = $3
-          WHERE "organization_id" = $1 AND "id" = $2`,
+          WHERE "organization_id" = $1 AND "id" = $2
+            AND ("dispute_outcome" IS NULL OR "dispute_outcome" = 'OPEN')`,
         [locked.organization_id, locked.verdict_id, outcome],
       );
     }
@@ -541,14 +577,13 @@ export class CallDisputeService {
    * The money step of an upheld decision, after its transaction committed.
    * Idempotent: see the class comment. Returns the dispute as it now stands.
    */
-  async settleRefund(disputeId: string): Promise<DisputeEntity> {
+  async settleRefund(
+    disputeId: string,
+    options: { readonly chain?: boolean } = {},
+  ): Promise<DisputeEntity> {
     const dispute = await this.requireAny(disputeId);
-    if (dispute.state === DisputeState.REJECTED && dispute.intentId) {
-      // Rejected: the held payment is collected at once (once past its window;
-      // inside it, the collection job takes it when the window ends).
-      await this.collection.collectIntent(dispute.organizationId, dispute.intentId);
-      return dispute;
-    }
+    // Rejected: `dispute_outcome = 'REJECTED'` puts the held payment back in
+    // the collection job's queue; it is collected on its next pass.
     if (dispute.state !== DisputeState.UPHELD || dispute.refundState !== RefundState.PENDING) {
       return dispute;
     }
@@ -557,14 +592,28 @@ export class CallDisputeService {
 
     const first = planRefund(intent);
     if (first === RefundPlanKind.RELEASE_HELD) {
-      // `refundHeld` on chain (rail B) or the withheld credit released (rail A);
-      // a payment the chain collected first (its timeout, a race) is booked as
-      // collected, and the plan below then reads COLLECTED.
-      await this.intents.refundHeldForDispute(
-        dispute.organizationId,
-        intentId,
-        DISPUTE_UPHELD_VOID_OUTCOME,
-      );
+      // Rail B is `refundHeld` on chain, which only the REDEEMER may send — the
+      // scheduler's key (review P1-2). The API leaves it PENDING and the
+      // scheduler's refund job sends it, retried with back-off. Rail A is the
+      // withheld credit released, in the ledger, anywhere.
+      if (intent.rail === 'RAIL_B_VOUCHER' && !options.chain) return dispute;
+      try {
+        await this.intents.refundHeldForDispute(
+          dispute.organizationId,
+          intentId,
+          DISPUTE_UPHELD_VOID_OUTCOME,
+        );
+      } catch (error) {
+        await this.paymentIntents.recordHeldFailure(
+          dispute.organizationId,
+          intentId,
+          (error as Error).message,
+        );
+        this.logger.warn(
+          `Call dispute ${disputeId}: refund failed, retried: ${(error as Error).message}`,
+        );
+        return dispute;
+      }
       intent = await this.mustFindIntent(dispute.organizationId, intentId);
     } else if (first === RefundPlanKind.VOID_DEBT) {
       await this.intents.voidDebt(dispute.organizationId, intentId, DISPUTE_UPHELD_VOID_OUTCOME);
@@ -595,44 +644,6 @@ export class CallDisputeService {
       ],
     );
     return this.requireAny(disputeId);
-  }
-
-  /**
-   * The SLA's auto-uphold (G3.B1): the provider did not reply within 24 hours
-   * and nobody decided within 72. A system decision, written like an
-   * operator's (`AUTO_PLATFORM_MISS`, audited), then refunded like one. `false`
-   * when it could not be taken this pass (decided meanwhile, or the payment is
-   * still being redeemed into the hold).
-   */
-  async autoUphold(disputeId: string): Promise<boolean> {
-    const dispute = await this.requireAny(disputeId);
-    try {
-      await this.dataSource.transaction(async (manager) => {
-        await this.decideWithin({ manager } as QueryRunner, {
-          disputeId,
-          decision: CallDisputeDecision.UPHOLD,
-          note:
-            'Upheld automatically: the provider did not reply within 24 hours and no ' +
-            'decision was made within 72 hours of the filing.',
-          operatorId: 'system:call-dispute-sla',
-          resolutionKind: 'AUTO_PLATFORM_MISS',
-        });
-        await this.audit.record(manager, {
-          organizationId: dispute.organizationId,
-          actor: { type: 'system', id: 'call-dispute-sla' },
-          action: 'call_dispute.auto_upheld',
-          resourceType: CALL_DISPUTE_TARGET,
-          resourceId: disputeId,
-        });
-      });
-    } catch (error) {
-      this.logger.warn(
-        `Call dispute ${disputeId}: auto-uphold deferred: ${(error as Error).message}`,
-      );
-      return false;
-    }
-    await this.announceDecision(await this.settleRefund(disputeId));
-    return true;
   }
 
   /** Tell both sides. Best-effort: the decision stands whether or not this lands. */
@@ -830,7 +841,8 @@ export class CallDisputeService {
       buyerHistory: history,
       needsSecondOperator: needsSecondOperator(
         disputedAmountOf(dispute),
-        this.config.twoPersonThresholdMinor,
+        dispute.decimals ?? 6,
+        this.config.twoPersonThresholdUnits,
       ),
     };
   }

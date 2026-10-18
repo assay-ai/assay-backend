@@ -25,7 +25,10 @@ import {
 import { DisputeErrorCode } from '@modules/dispute/errors/dispute.errors';
 import { CallDisputeRetentionService } from '@modules/dispute/services/call-dispute-retention.service';
 import { CallDisputeService } from '@modules/dispute/services/call-dispute.service';
-import { CallDisputeSlaService } from '@modules/dispute/services/call-dispute-sla.service';
+import {
+  CallDisputeSlaService,
+  SYSTEM_SLA_OPERATOR_ID,
+} from '@modules/dispute/services/call-dispute-sla.service';
 import { HeldStatus } from '@modules/payment/ports/held-payments.port';
 import { HeldCollectionService } from '@modules/payment/services/held-collection.service';
 import { LedgerEntryType } from '@modules/ledger/ports/ledger.types';
@@ -58,7 +61,8 @@ import { EvidencePackService } from '@modules/verification/services/evidence-pac
 import { AuditLogWriter } from '@shared/audit';
 import { MoneyUtil } from '@shared/utils/money.util';
 
-import { noBlocks } from '../../unit/helpers/blocklist';
+import { addBlock, blocklistOf, noBlocks } from '../../unit/helpers/blocklist';
+import { BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
 import { FakeHeldPayments } from '../helpers/fake-held-payments';
 import { approvalFor } from '../helpers/operator-approval';
 import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
@@ -101,7 +105,8 @@ describe('call disputes, against a real database', () => {
   let held: FakeHeldPayments;
   let collection: HeldCollectionService;
   let sla: CallDisputeSlaService;
-  let alerts: Array<{ name: string; summary: string }>;
+  const alerts: Array<{ name: string; summary: string }> = [];
+  let blocklist: ReturnType<typeof blocklistOf>;
 
   let buyer: string;
   let provider: string;
@@ -141,7 +146,13 @@ describe('call disputes, against a real database', () => {
       null,
       held,
     );
-    collection = new HeldCollectionService(payments, intents, held);
+    const alertSink = {
+      emit: async (alert: { name: string; summary: string }) => {
+        alerts.push(alert);
+      },
+    } as never;
+    blocklist = blocklistOf();
+    collection = new HeldCollectionService(payments, intents, blocklist, alertSink, held, null);
 
     notified = [];
     const notifications: NotificationPort = {
@@ -151,7 +162,7 @@ describe('call disputes, against a real database', () => {
       },
     } as NotificationPort;
     const evidence = { forBuyer: async () => null } as unknown as EvidencePackService;
-    config = { ...DEFAULT_CALL_DISPUTE_CONFIG, twoPersonThresholdMinor: '5000000' };
+    config = { ...DEFAULT_CALL_DISPUTE_CONFIG, twoPersonThresholdUnits: '5' };
 
     disputes = new CallDisputeService(
       dataSource,
@@ -159,11 +170,11 @@ describe('call disputes, against a real database', () => {
       payments,
       new VerificationRecordRepository(dataSource),
       intents,
-      collection,
       evidence,
       new AuditLogWriter(dataSource),
       notifications,
       config,
+      held,
     );
     const approvalRepository = new OperatorApprovalRepository(dataSource);
     const overrides = new OverrideLogService(
@@ -178,12 +189,7 @@ describe('call disputes, against a real database', () => {
     );
     operatorDisputes = new OperatorCallDisputeService(disputes, overrides, approvals);
     retention = new CallDisputeRetentionService(dataSource, config);
-    alerts = [];
-    sla = new CallDisputeSlaService(dataSource, disputes, {
-      emit: async (alert: { name: string; summary: string }) => {
-        alerts.push(alert);
-      },
-    } as never);
+    sla = new CallDisputeSlaService(dataSource, disputes, overrides, alertSink, config);
 
     adjudicator = await seedOperator('adj-a', [OperatorRole.ADJ]);
     second = await seedOperator('adj-b', [OperatorRole.ADJL]);
@@ -196,8 +202,12 @@ describe('call disputes, against a real database', () => {
     provider = randomUUID();
     payer = toAccountId(CHAIN, `buyer-${randomUUID()}`) as AccountId;
     notified = [];
-    alerts = [];
-    config.twoPersonThresholdMinor = '5000000';
+    alerts.length = 0;
+    config.twoPersonThresholdUnits = '5';
+    config.maxOpenPerProviderPerDay = DEFAULT_CALL_DISPUTE_CONFIG.maxOpenPerProviderPerDay;
+    held.live = true;
+    held.readMode = 'normal';
+    held.failRefunds = false;
   });
 
   // ── Seeding ─────────────────────────────────────────────────────────────
@@ -393,6 +403,19 @@ describe('call disputes, against a real database', () => {
     });
   }
 
+  /** The scheduler's refund job runs; the dispute as it then stands. */
+  async function upholdAndRefundDone(id: string): Promise<OperatorCallDisputeDetailDto> {
+    await sla.refundPending();
+    return operatorDisputes.detail(id);
+  }
+
+  /** Upheld by an operator (API: refund PENDING), then the scheduler's refund job runs. */
+  async function upholdAndRefund(id: string): Promise<OperatorCallDisputeDetailDto> {
+    await decide(id, CallDisputeDecision.UPHOLD);
+    await sla.refundPending();
+    return operatorDisputes.detail(id);
+  }
+
   async function balance(account: string, organizationId = buyer) {
     const value = await ledger.getBalance(organizationId, account as AccountId, ASSET);
     return {
@@ -547,11 +570,17 @@ describe('call disputes, against a real database', () => {
       await endWindow(call);
       expect(await collection.run()).toBe(0);
 
-      const decided = (await decide(
+      // The API decides; it holds no redeemer key, so the refund is PENDING
+      // until the scheduler's refund job sends `refundHeld` (review P1-2).
+      const pending = (await decide(
         dispute.id,
         CallDisputeDecision.UPHOLD,
       )) as OperatorCallDisputeDetailDto;
+      expect(pending.refundState).toBe('PENDING');
+      expect(sentFor('refund')).toEqual([]);
+      expect(await collection.run()).toBe(0);
 
+      const decided = await upholdAndRefundDone(dispute.id);
       expect(decided).toMatchObject({
         state: 'UPHELD',
         refundSource: 'UNCOLLECTED_EARNINGS',
@@ -587,6 +616,8 @@ describe('call disputes, against a real database', () => {
       await decide(dispute.id, CallDisputeDecision.REJECT);
 
       expect((await intentRow(call.intentId)).dispute_outcome).toBe('REJECTED');
+      // Back in the collection queue: collected on the job's next pass.
+      expect(await collection.run()).toBe(1);
       await assertCollected(call);
     });
 
@@ -595,6 +626,7 @@ describe('call disputes, against a real database', () => {
       const dispute = await file(call);
 
       await decide(dispute.id, CallDisputeDecision.REJECT);
+      expect(await collection.run()).toBe(0);
       expect(await chainStatus(call)).toBe(HeldStatus.HELD);
 
       await endWindow(call);
@@ -638,7 +670,7 @@ describe('call disputes, against a real database', () => {
 
       await redeem(call);
       expect((await intentRow(call.intentId)).dispute_outcome).toBe('OPEN');
-      await decide(dispute.id, CallDisputeDecision.UPHOLD);
+      await upholdAndRefund(dispute.id);
       await assertRefunded(call);
     });
 
@@ -706,31 +738,54 @@ describe('call disputes, against a real database', () => {
       // Someone collects it on chain first (the timeout, or a racing pass).
       held.collectAsAnyone(keyOf(call));
 
-      const decided = (await decide(
-        dispute.id,
-        CallDisputeDecision.UPHOLD,
-      )) as OperatorCallDisputeDetailDto;
+      const decided = await upholdAndRefund(dispute.id);
 
       expect(decided).toMatchObject({ state: 'UPHELD', refundState: 'NOT_REFUNDABLE' });
       await assertCollected(call);
       expect(await balance(payer)).toEqual({ available: FUNDED - PRICE, held: 0n });
     });
 
-    it('collect/refund race past the timeout: the job and an uphold converge on one collect', async () => {
+    it('a refund that keeps failing until the timeout: never collected by the platform, paged, booked once someone collects', async () => {
       const call = await seedHeld();
       const dispute = await file(call);
+      await decide(dispute.id, CallDisputeDecision.UPHOLD);
+      held.failRefunds = true;
+
+      expect(await sla.refundPending()).toBe(0);
+      const backedOff = await payments.findOneBy({ organizationId: buyer, id: call.intentId });
+      expect(backedOff?.heldAttempts).toBe(1);
+      expect(backedOff?.heldRetryAt?.getTime()).toBeGreaterThan(Date.now());
+      expect((await disputes.requireAny(dispute.id)).refundState).toBe('PENDING');
+
+      // Past the chain's timeout: refundHeld is closed; the platform does not
+      // collect a payment an upheld dispute still claims — it pages.
       await endWindow(call, 8 * 86_400_000);
-
-      const [, decided] = await Promise.allSettled([
-        collection.run(),
-        decide(dispute.id, CallDisputeDecision.UPHOLD),
+      await dataSource.query(`UPDATE payment_intents SET held_retry_at = NULL WHERE id = $1`, [
+        call.intentId,
       ]);
+      await collection.run();
+      expect(sentFor('collect')).toEqual([]);
+      expect(alerts.map((a) => a.name)).toContain('held_payment_past_timeout');
+      expect(await chainStatus(call)).toBe(HeldStatus.HELD);
 
-      expect(decided.status).toBe('fulfilled');
-      expect(sentFor('refund')).toEqual([]);
-      expect(await chainStatus(call)).toBe(HeldStatus.COLLECTED);
+      // Anyone collects it for the provider: booked once, and NOT_REFUNDABLE.
+      held.collectAsAnyone(keyOf(call));
+      await collection.run();
+      await sla.sweep();
       await assertCollected(call);
       expect((await disputes.requireAny(dispute.id)).refundState).toBe('NOT_REFUNDABLE');
+    });
+
+    it('the API process sends no refund: it holds no redeemer key', async () => {
+      const call = await seedHeld();
+      const dispute = await file(call);
+
+      await decide(dispute.id, CallDisputeDecision.UPHOLD);
+      await disputes.settleRefund(dispute.id);
+
+      expect(sentFor('refund')).toEqual([]);
+      expect((await disputes.requireAny(dispute.id)).refundState).toBe('PENDING');
+      expect(await chainStatus(call)).toBe(HeldStatus.HELD);
     });
 
     it('finishes a refund whose money step never ran (a crash after the decision)', async () => {
@@ -752,15 +807,13 @@ describe('call disputes, against a real database', () => {
       await endWindow(call);
       expect(await collection.run()).toBe(0);
 
-      const finished = (await decide(
-        dispute.id,
-        CallDisputeDecision.UPHOLD,
-      )) as OperatorCallDisputeDetailDto;
+      const finished = await upholdAndRefund(dispute.id);
 
       expect(finished.refundState).toBe('REFUNDED');
       await assertRefunded(call);
       // And again: nothing moves twice.
-      await disputes.settleRefund(dispute.id);
+      await disputes.settleRefund(dispute.id, { chain: true });
+      await sla.refundPending();
       await expect(
         intents.refundHeldForDispute(buyer, call.intentId, 'DISPUTE_UPHELD'),
       ).resolves.toBe('REFUNDED');
@@ -769,7 +822,7 @@ describe('call disputes, against a real database', () => {
     });
 
     it('needs a second operator at or above the threshold, and refuses self-approval', async () => {
-      config.twoPersonThresholdMinor = PRICE.toString();
+      config.twoPersonThresholdUnits = '1';
       const call = await seedHeld();
       const dispute = await file(call);
 
@@ -813,8 +866,10 @@ describe('call disputes, against a real database', () => {
         },
         approver,
       )) as OperatorCallDisputeDetailDto;
+      expect(decided.refundState).toBe('PENDING');
+      await sla.refundPending();
 
-      expect(decided).toMatchObject({
+      expect(await operatorDisputes.detail(dispute.id)).toMatchObject({
         state: 'UPHELD',
         refundState: 'REFUNDED',
         resolvedBy: adjudicator.operatorId,
@@ -859,6 +914,61 @@ describe('call disputes, against a real database', () => {
         refundState: 'REFUNDED',
       });
       await assertRefunded(call);
+      // Logged in the override register as S-14, under the system actor.
+      expect((await operatorDisputes.detail(dispute.id)).history).toEqual([
+        expect.objectContaining({
+          code: 'S-14',
+          actorOperatorId: SYSTEM_SLA_OPERATOR_ID,
+        }),
+      ]);
+    });
+
+    it('pages instead of auto-upholding above the two-person threshold or without a guaranteed refund', async () => {
+      config.twoPersonThresholdUnits = '1';
+      const big = await seedHeld();
+      const bigDispute = await file(big);
+      const late = await seedHeld();
+      await endWindow(late);
+      const lateDispute = await file(late);
+      expect(lateDispute.refundGuaranteed).toBe(false);
+      await age(bigDispute.id, 73);
+      await age(lateDispute.id, 73);
+
+      expect(await sla.sweep()).toMatchObject({ autoUpheld: 0 });
+
+      expect((await disputes.requireAny(bigDispute.id)).state).toBe('OPEN');
+      expect((await disputes.requireAny(lateDispute.id)).state).toBe('OPEN');
+      expect(alerts.map((a) => a.summary)).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/two-person threshold/),
+          expect.stringMatching(/not guaranteed/),
+        ]),
+      );
+    });
+
+    it('does not starve: 500 disputes with nothing due do not hide one that is', async () => {
+      await dataSource.query(
+        `INSERT INTO disputes (organization_id, subject_type, subject_id, state, claim_type, reason,
+                               opened_by, intent_id, respondent_provider_id, evidence_snapshot,
+                               provider_response, provider_responded_at, provider_silent_at,
+                               paged_48h_at, paged_72h_at, paged_6d_at, created_at)
+         SELECT gen_random_uuid(), 'PAYMENT_INTENT', gen_random_uuid()::text, 'OPEN', 'OTHER', '',
+                'agent', gen_random_uuid(), gen_random_uuid(), '{}'::jsonb, 'replied', now(),
+                now(), now(), now(), now(), now() - interval '30 days' - n * interval '1 second'
+           FROM generate_series(1, 500) AS n`,
+      );
+      const call = await seedHeld();
+      const dispute = await file(call);
+      await age(dispute.id, 49);
+
+      await sla.sweep();
+
+      expect(alerts.map((a) => a.summary)).toContain(
+        `Call dispute ${dispute.id}: 48 hours undecided`,
+      );
+      await dataSource.query(
+        `UPDATE disputes SET state = 'WITHDRAWN' WHERE provider_response = 'replied'`,
+      );
     });
 
     it('keeps holding when the provider replied, and pages at 72 h and 6 d', async () => {
@@ -872,10 +982,12 @@ describe('call disputes, against a real database', () => {
       await sla.sweep();
 
       expect((await disputes.requireAny(dispute.id)).state).toBe('OPEN');
-      expect(alerts.map((a) => a.summary)).toEqual([
-        expect.stringMatching(/72 hours/),
-        expect.stringMatching(/six days/),
-      ]);
+      expect(alerts.map((a) => a.summary)).toEqual(
+        expect.arrayContaining([
+          expect.stringMatching(/72 hours undecided; held — the provider replied/),
+          expect.stringMatching(/six days/),
+        ]),
+      );
       expect(await chainStatus(call)).toBe(HeldStatus.HELD);
     });
 
@@ -884,6 +996,10 @@ describe('call disputes, against a real database', () => {
       const dispute = await file(call);
       await disputes.respond(session(provider), dispute.id, 'Upstream had no data.');
       await endWindow(call, 7 * 86_400_000 + 60_000);
+      // The platform never collects a disputed payment; anyone may, after the timeout.
+      await collection.run();
+      expect(await chainStatus(call)).toBe(HeldStatus.HELD);
+      held.collectAsAnyone(keyOf(call));
 
       await collection.run();
       await sla.sweep();
@@ -893,6 +1009,116 @@ describe('call disputes, against a real database', () => {
         state: 'OPEN',
         refundSource: 'NONE',
         refundState: 'NOT_REFUNDABLE',
+      });
+    });
+  });
+
+  // ── Review fixes: deciding from the receipt, liveness, stuck rows ──────
+
+  describe('deciding a redemption from its receipt (P0-1, P1-1)', () => {
+    it('a lagging node (held() reads null or throws) never credits the provider on a live hold', async () => {
+      for (const mode of ['null', 'throw'] as const) {
+        const call = await seedSettled();
+        held.redeemInto(ASSET, keyOf(call), PRICE, new Date(Date.now() + 3_600_000));
+        held.receiptSays(keyOf(call), { kind: 'UNKNOWN' });
+        held.readMode = mode;
+
+        await expect(
+          intents.commitRedeemedHold(buyer, call.intentId, `0x${'77'.repeat(32)}`),
+        ).rejects.toBeDefined();
+        held.readMode = 'normal';
+
+        expect(await journalTypes(call.intentId)).toEqual(['HOLD_CREATE']);
+        expect((await intentRow(call.intentId)).held_status).toBeNull();
+        expect(await balance(PAYEE, provider)).toEqual({ available: 0n, held: 0n });
+      }
+    });
+
+    it('a receipt that cannot be read is retried, never guessed', async () => {
+      const call = await seedSettled();
+      held.receiptSays(keyOf(call), 'THROW');
+      await expect(
+        intents.commitRedeemedHold(buyer, call.intentId, `0x${'77'.repeat(32)}`),
+      ).rejects.toBeDefined();
+      expect(await journalTypes(call.intentId)).toEqual(['HOLD_CREATE']);
+    });
+
+    it('a voucher redeemed just before the upgrade (bare VoucherRedeemed) is credited, and does not block the next', async () => {
+      const before = await seedSettled();
+      held.receiptSays(keyOf(before), { kind: 'PAID' });
+      const next = await seedSettled();
+
+      await intents.commitRedeemedHold(buyer, before.intentId, `0x${'77'.repeat(32)}`);
+
+      // Paid at redemption, the old way: committed and credited, no hold.
+      expect(await journalTypes(before.intentId)).toEqual(COLLECTED);
+      expect((await intentRow(before.intentId)).held_status).toBeNull();
+      expect(await balance(PAYEE, provider)).toEqual({ available: PROVIDER_AMOUNT, held: 0n });
+      await assertBooksBalance();
+      const queue = await payments.findAwaitingRedemption(ASSET, 'SETTLED', 'RAIL_B_VOUCHER', 500);
+      expect(queue.map((row) => row.id)).toContain(next.intentId);
+      expect(queue.map((row) => row.id)).not.toContain(before.intentId);
+    });
+  });
+
+  describe('stuck rows, blocked parties and liveness (P1-3, P2-1, P2-2, P2-3)', () => {
+    it('a stuck row backs off and does not stop the rest; a blocked party is never sent', async () => {
+      const stuck = await seedHeld();
+      const fine = await seedHeld();
+      await endWindow(stuck);
+      await endWindow(fine);
+      held.stick(keyOf(stuck));
+      held.failNextCollect = true;
+
+      expect(await collection.run()).toBe(1);
+      await assertCollected(fine);
+      const row = await payments.findOneBy({ organizationId: buyer, id: stuck.intentId });
+      expect(row?.heldAttempts).toBe(1);
+      expect(row?.heldLastError).toMatch(/refused/);
+      // Backing off: not retried on the next pass.
+      const sent = held.sent.length;
+      await collection.run();
+      expect(held.sent.length).toBe(sent);
+
+      const blockedBuyer = await seedHeld();
+      await endWindow(blockedBuyer);
+      addBlock(blocklist, { kind: BlockSubjectKind.ORGANIZATION, subject: buyer });
+      try {
+        await collection.run();
+        expect(await chainStatus(blockedBuyer)).toBe(HeldStatus.HELD);
+      } finally {
+        await blocklist.applied({
+          kind: 'unblocked',
+          subjectKind: BlockSubjectKind.ORGANIZATION,
+          subjectKey: subjectKey(BlockSubjectKind.ORGANIZATION, buyer) as string,
+        } as never);
+      }
+    });
+
+    it('guarantees a refund only where the hold is live', async () => {
+      held.live = false;
+      const call = await seedSettled();
+      const dispute = await file(call);
+      expect(dispute.refundGuaranteed).toBe(false);
+      expect((await intentRow(call.intentId)).dispute_outcome).toBeNull();
+    });
+
+    it('refuses a new filing on a call whose dispute was decided, and never flips its outcome', async () => {
+      const call = await seedCollected();
+      const first = await file(call);
+      await decide(first.id, CallDisputeDecision.REJECT);
+
+      await expect(file(call)).rejects.toMatchObject({
+        errorCode: DisputeErrorCode.DISPUTE_ALREADY_DECIDED,
+      });
+      expect((await intentRow(call.intentId)).dispute_outcome).toBe('REJECTED');
+    });
+
+    it('caps the open disputes against one provider in a day', async () => {
+      config.maxOpenPerProviderPerDay = 1;
+      await file(await seedHeld());
+      await expect(file(await seedHeld())).rejects.toMatchObject({
+        errorCode: DisputeErrorCode.DISPUTE_RATE_LIMITED,
       });
     });
   });

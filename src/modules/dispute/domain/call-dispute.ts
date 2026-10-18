@@ -205,9 +205,23 @@ export function filingLimitFor(
   return { limit: flagged ? config.abuseMaxFilingsPerDay : config.maxFilingsPerDay, flagged };
 }
 
-/** Whether an upheld decision owing `amountMinor` needs a second operator. */
-export function needsSecondOperator(amountMinor: string, thresholdMinor: string): boolean {
-  return BigInt(amountMinor) >= BigInt(thresholdMinor);
+/** Whole units (decimal string) to minor units of an asset with `decimals`. */
+export function unitsToMinor(units: string, decimals: number): bigint {
+  const [whole, fraction = ''] = units.split('.');
+  const padded = (fraction + '0'.repeat(decimals)).slice(0, decimals);
+  return BigInt(whole || '0') * 10n ** BigInt(decimals) + BigInt(padded || '0');
+}
+
+/**
+ * Whether an upheld decision owing `amountMinor` (of an asset with `decimals`)
+ * needs a second operator: at or above `thresholdUnits` whole units.
+ */
+export function needsSecondOperator(
+  amountMinor: string,
+  decimals: number,
+  thresholdUnits: string,
+): boolean {
+  return BigInt(amountMinor) >= unitsToMinor(thresholdUnits, decimals);
 }
 
 /**

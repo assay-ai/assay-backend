@@ -16,10 +16,18 @@ export interface CallDisputeConfig {
   readonly abuseMaxFilingsPerDay: number;
   readonly abuseRejectedThreshold: number;
   /**
-   * An upheld decision owing at least this much (minor units of the call's
-   * asset) needs a second operator. Below it one operator decides.
+   * An upheld decision owing at least this much, in WHOLE units of the call's
+   * asset (decimal, e.g. `"5"` or `"2.5"`; normalised by the asset's decimals),
+   * needs a second operator. Below it one operator decides; the SLA's
+   * auto-uphold pages instead.
    */
-  readonly twoPersonThresholdMinor: string;
+  readonly twoPersonThresholdUnits: string;
+  /**
+   * Open disputes against one provider filed in a rolling 24 hours, over every
+   * buyer: past it a filing is refused, so a coordinated wave cannot ride the
+   * auto-uphold.
+   */
+  readonly maxOpenPerProviderPerDay: number;
   /** The largest evidence snapshot kept, in bytes of JSON; larger bodies are cut. */
   readonly snapshotMaxBytes: number;
   /**
@@ -39,7 +47,8 @@ export const DEFAULT_CALL_DISPUTE_CONFIG: CallDisputeConfig = Object.freeze({
   maxFilingsPerDay: 20,
   abuseMaxFilingsPerDay: 2,
   abuseRejectedThreshold: 5,
-  twoPersonThresholdMinor: '5000000',
+  twoPersonThresholdUnits: '5',
+  maxOpenPerProviderPerDay: 100,
   snapshotMaxBytes: 64 * 1024,
   snapshotRetentionMs: 30 * DAY_MS,
 });
@@ -51,10 +60,10 @@ function readInt(env: NodeJS.ProcessEnv, name: string, fallback: number): number
   return Number.isFinite(parsed) && parsed > 0 ? parsed : fallback;
 }
 
-function readMinor(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
+function readUnits(env: NodeJS.ProcessEnv, name: string, fallback: string): string {
   const raw = env[name];
   if (raw === undefined || raw === '') return fallback;
-  return /^\d+$/.test(raw) ? raw : fallback;
+  return /^\d+(\.\d+)?$/.test(raw) ? raw : fallback;
 }
 
 export function loadCallDisputeConfig(env: NodeJS.ProcessEnv = process.env): CallDisputeConfig {
@@ -73,10 +82,15 @@ export function loadCallDisputeConfig(env: NodeJS.ProcessEnv = process.env): Cal
       'CALL_DISPUTE_ABUSE_REJECTED_THRESHOLD',
       defaults.abuseRejectedThreshold,
     ),
-    twoPersonThresholdMinor: readMinor(
+    twoPersonThresholdUnits: readUnits(
       env,
-      'CALL_DISPUTE_TWO_PERSON_THRESHOLD_MINOR',
-      defaults.twoPersonThresholdMinor,
+      'CALL_DISPUTE_TWO_PERSON_THRESHOLD',
+      defaults.twoPersonThresholdUnits,
+    ),
+    maxOpenPerProviderPerDay: readInt(
+      env,
+      'CALL_DISPUTE_MAX_OPEN_PER_PROVIDER_PER_DAY',
+      defaults.maxOpenPerProviderPerDay,
     ),
     snapshotMaxBytes: readInt(env, 'CALL_DISPUTE_SNAPSHOT_MAX_BYTES', defaults.snapshotMaxBytes),
     snapshotRetentionMs:
