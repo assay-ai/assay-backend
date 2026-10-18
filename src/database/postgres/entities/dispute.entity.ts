@@ -254,4 +254,20 @@ export class DisputeEntity extends OrganizationScopedEntityWithoutSoftDelete {
   /** When the snapshot's request and response were deleted (retention). */
   @Column({ name: 'evidence_scrubbed_at', type: 'timestamptz', nullable: true })
   evidenceScrubbedAt: Date | null;
+
+  /** The provider did not reply within 24 hours (`CallDisputeSlaService`). */
+  @Column({ name: 'provider_silent_at', type: 'timestamptz', nullable: true })
+  providerSilentAt: Date | null;
+
+  /** An operator was paged: 48 h with no decision. */
+  @Column({ name: 'paged_48h_at', type: 'timestamptz', nullable: true })
+  paged48hAt: Date | null;
+
+  /** 72 h with no decision and a provider reply: still held, paged. */
+  @Column({ name: 'paged_72h_at', type: 'timestamptz', nullable: true })
+  paged72hAt: Date | null;
+
+  /** 6 days with no decision: paged before the chain's 7-day timeout. */
+  @Column({ name: 'paged_6d_at', type: 'timestamptz', nullable: true })
+  paged6dAt: Date | null;
 }
