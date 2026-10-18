@@ -77,7 +77,7 @@ export class ModerationCutoffDto {
   @ApiProperty()
   id: string;
 
-  @ApiProperty({ enum: ['TOOLSET', 'HANDLE'] })
+  @ApiProperty({ enum: ['TOOLSET', 'HANDLE', 'TOOL'] })
   targetType: string;
 
   @ApiProperty()

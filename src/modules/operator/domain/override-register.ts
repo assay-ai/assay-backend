@@ -658,6 +658,33 @@ export const OVERRIDE_REGISTER: Readonly<Record<string, OverrideDefinition>> = O
     reversible: false,
     implemented: true,
   }),
+  /**
+   * Provider tools (design spec §7.6, FR-15, FR-18). A review decision moves
+   * a provider tool into the LISTED catalogue (or a new version of a LISTED
+   * one onto the wire), for the content hash the operator read; one
+   * operator decides, as any review. A takedown is FR-18's cutoff: at once,
+   * confirmed by a second operator within 72 hours (`A-18`) or reverted.
+   */
+  'A-24': define({
+    code: 'A-24',
+    family: OverrideFamily.ACCESS,
+    action: 'provider_tool.review_decided',
+    label: 'Approve or reject a provider tool for the catalogue',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.POL],
+    approval: ApprovalMode.SINGLE,
+    reversible: false,
+    implemented: true,
+  }),
+  'A-25': define({
+    code: 'A-25',
+    family: OverrideFamily.ACCESS,
+    action: 'provider_tool.taken_down',
+    label: 'Take down a provider tool for abuse (confirmed by a second operator within 72 h)',
+    roles: [OperatorRole.ADJ, OperatorRole.ADJL, OperatorRole.SRE],
+    approval: ApprovalMode.SINGLE,
+    reversible: true,
+    implemented: true,
+  }),
 });
 
 /** Every code, ordered by family then numerically — the console's own order. */

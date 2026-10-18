@@ -193,7 +193,7 @@ export class OperatorContractsService {
     toolId: string,
     body: SaveContractDraftBodyDto,
   ): Promise<OperatorToolDto> {
-    const row = await this.requireTool(toolId);
+    const row = await this.requireStandardTool(toolId);
     const shape = shapeOf(body);
     const problems = contractProblems(shape);
     if (problems.length > 0) throw ToolErrors.contractInvalid({ problems });
@@ -257,7 +257,7 @@ export class OperatorContractsService {
   }
 
   async discardDraft(operator: OperatorSession, toolId: string): Promise<OperatorToolDto> {
-    const row = await this.requireTool(toolId);
+    const row = await this.requireStandardTool(toolId);
     await this.assertNoPendingPublish(row.id);
     await this.versions.delete({ toolId: row.id, status: ToolVersionStatus.DRAFT });
     this.logger.log(`${row.name}: draft discarded by operator ${operator.operatorId}`);
@@ -298,7 +298,7 @@ export class OperatorContractsService {
     /** The draft content the queued request was for; re-checked under the lock. */
     contentHash?: string,
   ): Promise<OperatorToolDto | ApprovalQueuedDto> {
-    const row = await this.requireTool(toolId);
+    const row = await this.requireStandardTool(toolId);
     // Checked before queueing, so a request no one could approve is refused at once.
     const draft = await this.versions.findVersion(row.id, version);
     if (!draft) throw ToolErrors.versionNotFound({ version });
@@ -426,7 +426,7 @@ export class OperatorContractsService {
     requestId: string | null,
     approver: OperatorApprover | null = null,
   ): Promise<OperatorToolDto | ApprovalQueuedDto> {
-    const row = await this.requireTool(toolId);
+    const row = await this.requireStandardTool(toolId);
     const target = await this.versions.findVersion(row.id, body.version);
     if (!target) throw ToolErrors.versionNotFound({ version: body.version });
     if (target.status !== ToolVersionStatus.ACTIVE) {
@@ -498,7 +498,7 @@ export class OperatorContractsService {
     body: DeprecateVersionBodyDto,
     requestId: string | null,
   ): Promise<OperatorToolDto> {
-    const row = await this.requireTool(toolId);
+    const row = await this.requireStandardTool(toolId);
     const target = await this.versions.findVersion(row.id, version);
     if (!target || target.status === ToolVersionStatus.DRAFT) {
       throw ToolErrors.versionNotFound({ version });
@@ -603,6 +603,21 @@ export class OperatorContractsService {
       }
       throw error;
     }
+  }
+
+  /**
+   * The editor writes standard contracts only: a provider tool's contract is
+   * its provider's, reviewed through `/operator/reviews` (§7.6), never
+   * rewritten here.
+   */
+  private async requireStandardTool(toolId: string): Promise<ToolEntity> {
+    const row = await this.requireTool(toolId);
+    if (row.kind !== 'STANDARD') {
+      throw ToolErrors.contractState({
+        reason: 'a provider tool’s contract is its provider’s; review it in /operator/reviews',
+      });
+    }
+    return row;
   }
 
   private async requireTool(toolId: string): Promise<ToolEntity> {

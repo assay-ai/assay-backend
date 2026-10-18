@@ -172,6 +172,50 @@ export class OperatorModerationService {
     await this.moderation.afterCommit([toolset.ownerOrgId]);
   }
 
+  /**
+   * `A-25`: a provider tool stops at once — REMOVED from every view, pinned
+   * toolset versions included, and calls get `TOOL_REMOVED`; a second
+   * operator confirms within 72 hours (`A-18`) or it is restored.
+   */
+  async takedownTool(
+    operator: OperatorSession,
+    toolId: string,
+    body: ModerationBodyDto,
+    requestId: string | null,
+  ): Promise<ModerationCutoffDto> {
+    let organizationId: string | null = null;
+    const cutoff = await this.overrides.perform<ModerationCutoffEntity>(
+      {
+        code: 'A-25',
+        actor: operator,
+        targetType: 'tool',
+        targetId: toolId,
+        organizationId: null,
+        reasonCode: body.reasonCode,
+        reason: body.note,
+        ticketRef: body.ticketRef ?? null,
+        requestId,
+      },
+      async (queryRunner) => {
+        const result = await this.moderation.cutoffTool(queryRunner.manager, {
+          toolId,
+          operatorId: operator.operatorId,
+          note: body.note,
+          reportId: body.reportId ?? null,
+        });
+        organizationId = result.organizationId;
+        await this.closeReport(queryRunner.manager, body.reportId, 'TAKEN_DOWN', operator);
+        return {
+          value: result.cutoff,
+          before: { status: 'SERVING' },
+          after: { status: 'REMOVED', cutoffId: result.cutoff.id },
+        };
+      },
+    );
+    await this.moderation.afterCommit([organizationId]);
+    return cutoffDtoOf(cutoff);
+  }
+
   /** `A-17`: every URL under the handle stops at once, with no alias. */
   async takedownHandle(
     operator: OperatorSession,
@@ -476,6 +520,13 @@ export class OperatorModerationService {
   }
 
   private async ownersOf(cutoff: ModerationCutoffEntity): Promise<(string | null)[]> {
+    if (cutoff.targetType === 'TOOL') {
+      const [row] = (await this.cutoffs.query(
+        `SELECT owner_org_id AS "ownerOrgId" FROM tools WHERE id = $1`,
+        [cutoff.targetId],
+      )) as { ownerOrgId: string | null }[];
+      return [row?.ownerOrgId ?? null];
+    }
     if (cutoff.targetType !== 'TOOLSET') return [];
     return [(await this.toolsets.findAnyById(cutoff.targetId))?.ownerOrgId ?? null];
   }
