@@ -1,8 +1,10 @@
 import { Injectable } from '@nestjs/common';
-import { EntityManager, IsNull } from 'typeorm';
+import { EntityManager, FindOptionsWhere, In, IsNull } from 'typeorm';
 
 import { ModerationCutoffEntity } from '@database/postgres/entities/moderation-cutoff.entity';
 import { ToolsetReportEntity } from '@database/postgres/entities/toolset-report.entity';
+import { ToolEntity } from '@database/postgres/entities/tool.entity';
+import { ToolsetEntity } from '@database/postgres/entities/toolset.entity';
 import {
   ModerationCutoffRepository,
   ToolsetReportRepository,
@@ -17,6 +19,7 @@ import {
 
 import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
 import {
+  ListCutoffsQueryDto,
   ListModerationQueryDto,
   ModerationBodyDto,
   ModerationCutoffDto,
@@ -24,6 +27,7 @@ import {
   ReassignHandleBodyDto,
   RenameHandleBodyDto,
   ResolveReportBodyDto,
+  TakedownToolBodyDto,
 } from '../dto/operator-moderation.dto';
 import { OperatorApprover, OperatorSession } from '../ports/operator-session.port';
 import { OperatorApprovalService } from './operator-approval.service';
@@ -180,7 +184,7 @@ export class OperatorModerationService {
   async takedownTool(
     operator: OperatorSession,
     toolId: string,
-    body: ModerationBodyDto,
+    body: TakedownToolBodyDto,
     requestId: string | null,
   ): Promise<ModerationCutoffDto> {
     let organizationId: string | null = null;
@@ -202,6 +206,8 @@ export class OperatorModerationService {
           operatorId: operator.operatorId,
           note: body.note,
           reportId: body.reportId ?? null,
+          publicReasonCode: body.publicReasonCode,
+          publicNote: body.publicNote?.trim() || null,
         });
         organizationId = result.organizationId;
         await this.closeReport(queryRunner.manager, body.reportId, 'TAKEN_DOWN', operator);
@@ -213,6 +219,7 @@ export class OperatorModerationService {
       },
     );
     await this.moderation.afterCommit([organizationId]);
+    await this.moderation.announceTool(toolId, 'TAKEN_DOWN');
     return cutoffDtoOf(cutoff);
   }
 
@@ -253,6 +260,7 @@ export class OperatorModerationService {
       },
     );
     await this.moderation.afterCommit([organizationId]);
+    await this.moderation.announceHandle(handle, 'TAKEN_DOWN');
     return cutoffDtoOf(cutoff);
   }
 
@@ -327,6 +335,12 @@ export class OperatorModerationService {
         },
       );
       await this.moderation.afterCommit(await this.ownersOf(existing));
+      if (existing.targetType === 'TOOL') {
+        await this.moderation.announceTool(existing.targetId, 'TAKEDOWN_LIFTED');
+      }
+      if (existing.targetType === 'HANDLE') {
+        await this.moderation.announceHandle(existing.targetId, 'TAKEDOWN_LIFTED');
+      }
       return cutoffDtoOf(cutoff);
     };
     if (approver || !confirmed) return attempt();
@@ -483,13 +497,49 @@ export class OperatorModerationService {
     return reportDtoOf(row);
   }
 
-  async listCutoffs(query: ListModerationQueryDto): Promise<ModerationCutoffDto[]> {
-    const rows = await this.cutoffs.find({
-      where: query.pending ? { confirmedAt: IsNull(), revertedAt: IsNull() } : {},
-      order: { actedAt: 'DESC' },
-      take: 200,
-    });
-    return rows.map(cutoffDtoOf);
+  async listCutoffs(query: ListCutoffsQueryDto): Promise<ModerationCutoffDto[]> {
+    const where: FindOptionsWhere<ModerationCutoffEntity> = {
+      ...(query.pending ? { confirmedAt: IsNull(), revertedAt: IsNull() } : {}),
+      ...(query.targetType ? { targetType: query.targetType } : {}),
+    };
+    const rows = await this.cutoffs.find({ where, order: { actedAt: 'DESC' }, take: 200 });
+    const names = await this.targetNames(rows);
+    return rows.map((row) => cutoffDtoOf(row, names));
+  }
+
+  /**
+   * The display name of every target: a tool's name, a toolset's name, a
+   * handle as itself. Two batched reads, any owner — this is the operator's
+   * console, and the list is operator-only.
+   */
+  private async targetNames(
+    rows: readonly ModerationCutoffEntity[],
+  ): Promise<ReadonlyMap<string, string>> {
+    const ids = (type: string) => [
+      ...new Set(rows.filter((row) => row.targetType === type).map((row) => row.targetId)),
+    ];
+    const toolIds = ids('TOOL');
+    const toolsetIds = ids('TOOLSET');
+    const manager = this.cutoffs.manager;
+    const [tools, toolsets] = await Promise.all([
+      toolIds.length > 0
+        ? manager.find(ToolEntity, {
+            where: { id: In(toolIds) },
+            select: { id: true, name: true },
+          })
+        : [],
+      toolsetIds.length > 0
+        ? manager.find(ToolsetEntity, {
+            where: { id: In(toolsetIds) },
+            select: { id: true, name: true },
+          })
+        : [],
+    ]);
+    const names = new Map<string, string>();
+    for (const tool of tools) names.set(`TOOL:${tool.id}`, tool.name);
+    for (const toolset of toolsets) names.set(`TOOLSET:${toolset.id}`, toolset.name);
+    for (const handle of ids('HANDLE')) names.set(`HANDLE:${handle}`, handle);
+    return names;
   }
 
   async listReports(query: ListModerationQueryDto): Promise<OperatorReportDto[]> {
@@ -536,11 +586,19 @@ function iso(date: Date | null): string | null {
   return date ? new Date(date).toISOString() : null;
 }
 
-function cutoffDtoOf(row: ModerationCutoffEntity): ModerationCutoffDto {
+function cutoffDtoOf(
+  row: ModerationCutoffEntity,
+  names?: ReadonlyMap<string, string>,
+): ModerationCutoffDto {
   return {
     id: row.id,
     targetType: row.targetType,
     targetId: row.targetId,
+    targetName: names
+      ? (names.get(`${row.targetType}:${row.targetId}`) ?? null)
+      : row.targetType === 'HANDLE'
+        ? row.targetId
+        : null,
     action: row.action,
     actedBy: row.actedBy,
     actedAt: new Date(row.actedAt).toISOString(),

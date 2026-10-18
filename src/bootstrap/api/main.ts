@@ -9,6 +9,7 @@ import { applyHttpSecurity } from '@shared/security/security-headers';
 import { buildApiCorsOptionsDelegate } from '@shared/security/cors-policy';
 import { AppApiModule } from './app.module';
 import { buildGlobalPrefixOptions } from './global-prefix';
+import { applyRouteBodyLimits } from './route-body-limits';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { HttpCacheInterceptor } from '@shared/interceptors/http-cache.interceptor';
@@ -41,6 +42,10 @@ async function bootstrapApi() {
 
   // Security headers, and no `X-Powered-By` (R17-R-02).
   applyHttpSecurity(app);
+
+  // A larger JSON body for the few routes that need one, before Nest's
+  // default 100 KB parser (`route-body-limits.ts`).
+  applyRouteBodyLimits(app);
 
   // Global prefix
   app.setGlobalPrefix('api', buildGlobalPrefixOptions());

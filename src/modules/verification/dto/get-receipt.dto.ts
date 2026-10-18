@@ -228,6 +228,16 @@ export class GetReceiptResponseDto {
   })
   disputeWindowEndsAt: Date | null;
 
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      '"Report a bad result" is accepted until then: settlement + the filing window (7 days by ' +
+      'default). Before `disputeWindowEndsAt` an upheld report refunds in full; between the two ' +
+      'it is a quality signal. Null when the call cannot be disputed (not settled, free, or ' +
+      'your own)',
+  })
+  disputeFilingClosesAt: Date | null;
+
   @ApiPropertyOptional({ nullable: true, description: 'When the verdict was evaluated' })
   evaluatedAt: Date | null;
 

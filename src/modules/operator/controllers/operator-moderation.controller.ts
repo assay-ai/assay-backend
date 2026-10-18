@@ -22,6 +22,7 @@ import { OperatorRole } from '../domain/override-register';
 import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
 import {
   HandleParamDto,
+  ListCutoffsQueryDto,
   ListModerationQueryDto,
   ModerationBodyDto,
   ModerationCutoffDto,
@@ -29,6 +30,7 @@ import {
   ReassignHandleBodyDto,
   RenameHandleBodyDto,
   ResolveReportBodyDto,
+  TakedownToolBodyDto,
 } from '../dto/operator-moderation.dto';
 import { OperatorOverrideGuard } from '../guards/operator-override.guard';
 import { OperatorSession } from '../ports/operator-session.port';
@@ -92,7 +94,7 @@ export class OperatorModerationController {
   async takedownTool(
     @CurrentOperator() operator: OperatorSession,
     @Param('id', ParseUUIDPipe) id: string,
-    @Body() body: ModerationBodyDto,
+    @Body() body: TakedownToolBodyDto,
   ): Promise<ModerationCutoffDto> {
     return this.moderation.takedownTool(operator, id, body, requestIdOf());
   }
@@ -175,9 +177,13 @@ export class OperatorModerationController {
   }
 
   @Get('cutoffs')
-  @ApiOperation({ summary: 'Delists and takedowns, newest first; `pending` = still to confirm' })
+  @ApiOperation({
+    summary:
+      'Delists and takedowns, newest first, with each target’s name; `pending` = still to ' +
+      'confirm, `targetType` = TOOLSET, HANDLE or TOOL only',
+  })
   @ApiResponse({ status: 200, type: [ModerationCutoffDto] })
-  async cutoffs(@Query() query: ListModerationQueryDto): Promise<ModerationCutoffDto[]> {
+  async cutoffs(@Query() query: ListCutoffsQueryDto): Promise<ModerationCutoffDto[]> {
     return this.moderation.listCutoffs(query);
   }
 

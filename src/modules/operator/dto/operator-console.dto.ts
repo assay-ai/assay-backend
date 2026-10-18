@@ -116,6 +116,22 @@ export class PlatformHealthDto {
   })
   oldestOpenDisputeAgeSeconds: number | null;
 
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Provider tools waiting for review (PENDING, first reviews and changes): the "Needs you" ' +
+      'count for GET /operator/reviews. Null when it could not be read',
+  })
+  pendingToolReviews: number | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    description:
+      'Buyer call disputes still OPEN: the "Needs you" count for GET /operator/call-disputes. ' +
+      'Null when it could not be read',
+  })
+  openCallDisputes: number | null;
+
   @ApiProperty({
     type: () => [ChainStateHealthDto],
     description:

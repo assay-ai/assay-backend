@@ -2,6 +2,7 @@ import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   ArrayMaxSize,
   IsArray,
+  IsEnum,
   IsOptional,
   IsString,
   IsUUID,
@@ -9,6 +10,8 @@ import {
   Matches,
   MaxLength,
 } from 'class-validator';
+
+import { ReviewReasonCode } from '../domain/review';
 
 export class PromotionCandidateDto {
   @ApiProperty({ format: 'uuid' })
@@ -175,10 +178,16 @@ export class ReviewDecisionBodyDto {
   @Matches(/^(UNVERIFIED|VERIFIED)$/)
   tier?: 'UNVERIFIED' | 'VERIFIED';
 
-  @ApiProperty({ example: 'PROVIDER_TOOL_REVIEW' })
-  @IsString()
-  @Length(1, 64)
-  reasonCode: string;
+  @ApiPropertyOptional({
+    enum: ReviewReasonCode,
+    description:
+      'APPROVE: APPROVED (the default). REJECT: required, the §7.6 checklist item the tool ' +
+      'fails: IMPERSONATION, MODEL_INSTRUCTIONS, SECRET_INPUTS, EXAMPLES_MISMATCH, ' +
+      'PRICING_UNCLEAR',
+  })
+  @IsOptional()
+  @IsEnum(ReviewReasonCode)
+  reasonCode?: ReviewReasonCode;
 
   @ApiPropertyOptional()
   @IsOptional()

@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto';
 
 import { Inject, Injectable } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
-import { DataSource, EntityManager } from 'typeorm';
+import { DataSource, EntityManager, IsNull } from 'typeorm';
 
+import { ModerationCutoffEntity } from '@database/postgres/entities/moderation-cutoff.entity';
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { ToolPromotionInviteEntity } from '@database/postgres/entities/tool-promotion-invite.entity';
 import { ToolEntity } from '@database/postgres/entities/tool.entity';
@@ -39,6 +40,7 @@ import {
 } from '@modules/tool/ports/tool.types';
 import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { HandleStatus } from '@modules/toolset/domain/handle';
+import { TAKEDOWN_REASON_LABEL, TakedownReasonCode } from '@modules/toolset/domain/takedown-reason';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { HandlesService, lockHandle } from '@modules/toolset/services/handles.service';
 import { CursorPageDto, ListQueryDto, ListSpec, asInstant, paginate } from '@shared/api';
@@ -71,6 +73,7 @@ import {
   ProviderToolGateDto,
   ProviderToolReviewDto,
   ProviderToolSummaryDto,
+  ProviderToolTakedownDto,
   ProviderToolVersionDto,
   UpdateProviderToolBodyDto,
 } from '../dto/provider-tools.dto';
@@ -90,6 +93,18 @@ const PROVIDER_TOOL_LIST: ListSpec = {
     },
   },
 };
+
+/**
+ * The failure rate a prefill declares when the source binding's own reads as
+ * nothing usable: 2%, the binding wizard's default. Never `NaN`.
+ */
+export const DEFAULT_DECLARED_FAILURE_RATE = 0.02;
+
+export function declaredFailureRateOf(value: string | number | null | undefined): number {
+  if (value === null || value === undefined || value === '') return DEFAULT_DECLARED_FAILURE_RATE;
+  const rate = Number(value);
+  return Number.isFinite(rate) && rate >= 0 && rate <= 1 ? rate : DEFAULT_DECLARED_FAILURE_RATE;
+}
 
 /** The name preview uses a 4-letter server name, as the Connect sheet suggests (§7.10). */
 const PREVIEW_SERVER = 'acme';
@@ -155,10 +170,11 @@ export class ProviderToolsService {
     const versions = (await this.versionsOf([row.id])).get(row.id) ?? [];
     const published = versions.filter((version) => version.status !== ToolVersionStatus.DRAFT);
     const draftRow = versions.find((version) => version.status === ToolVersionStatus.DRAFT) ?? null;
-    const [binding, quality, names] = await Promise.all([
+    const [binding, quality, names, takedown] = await Promise.all([
       this.gate.bindingOf(row),
       this.quality.of(row),
       this.replacementNames([row]),
+      this.takedownOf(row),
     ]);
     const handle = parseProviderToolName(row.name)?.handle ?? null;
     return {
@@ -182,6 +198,29 @@ export class ProviderToolsService {
             : null,
       },
       quality,
+      earliestSunsetAt: new Date(Date.now() + MIN_SUNSET_MS),
+      takedown,
+    };
+  }
+
+  /**
+   * The tool's own takedown while it stands, as its provider is told it: the
+   * time, the provider-facing reason code and note. The cutoff's `note`,
+   * `acted_by` and confirmations are the operators' and are never read here.
+   */
+  private async takedownOf(row: ToolEntity): Promise<ProviderToolTakedownDto | null> {
+    if (!row.takenDownAt) return null;
+    const cutoff = await this.dataSource.getRepository(ModerationCutoffEntity).findOne({
+      where: { targetType: 'TOOL', targetId: row.id, action: 'TAKEDOWN', revertedAt: IsNull() },
+      select: { id: true, actedAt: true, publicReasonCode: true, publicNote: true },
+      order: { actedAt: 'DESC' },
+    });
+    const code = (cutoff?.publicReasonCode ?? null) as TakedownReasonCode | null;
+    return {
+      at: cutoff?.actedAt ?? row.takenDownAt,
+      reasonCode: code,
+      reasonLabel: code ? (TAKEDOWN_REASON_LABEL[code] ?? null) : null,
+      publicNote: cutoff?.publicNote ?? null,
     };
   }
 
@@ -547,8 +586,12 @@ export class ProviderToolsService {
     version: number,
     sunsetAtText: string,
     actor: AuditActor,
+    replacementToolId: string | null = null,
   ): Promise<ProviderToolDto> {
     const owned = await this.requireOwned(organizationId, toolId);
+    if (replacementToolId !== null) {
+      await this.assertReplacement(organizationId, owned, replacementToolId);
+    }
     const sunsetAt = new Date(sunsetAtText);
     if (Number.isNaN(sunsetAt.getTime()) || sunsetAt.getTime() < Date.now() + MIN_SUNSET_MS) {
       throw ProviderToolErrors.state({
@@ -579,14 +622,24 @@ export class ProviderToolsService {
         { toolId: row.id, major: target.major, status: ToolVersionStatus.ACTIVE },
         { status: ToolVersionStatus.DEPRECATED, sunsetAt, updatedAt: new Date() },
       );
+      if (replacementToolId !== null) {
+        await manager.update(
+          ToolEntity,
+          { id: row.id },
+          { replacementToolId, updatedAt: new Date() },
+        );
+      }
       await this.audit.record(manager, {
         organizationId,
         actor,
         action: 'provider_tool.major_deprecated',
         resourceType: 'tool',
         resourceId: row.id,
-        before: { major: target.major },
-        after: { sunsetAt: sunsetAt.toISOString() },
+        before: { major: target.major, replacementToolId: row.replacementToolId },
+        after: {
+          sunsetAt: sunsetAt.toISOString(),
+          replacementToolId: replacementToolId ?? row.replacementToolId,
+        },
       });
     });
     await this.contractsChanged(organizationId);
@@ -633,6 +686,53 @@ export class ProviderToolsService {
         resourceId: row.id,
         before: { visibility: ToolVisibility.PRIVATE },
         after: { visibility: ToolVisibility.UNLISTED },
+      });
+    });
+    await this.contractsChanged(organizationId);
+    return this.get(organizationId, owned.id);
+  }
+
+  /**
+   * `POST …/unpublish`: UNLISTED → PRIVATE ("Stop sharing"). The tool then
+   * serves only on its own organization's `/my/` URLs: every link-only
+   * toolset that reached it stops listing it at once, because the contract
+   * epoch and every shared view move with the write. Refused for a LISTED
+   * tool (reviewed: it leaves the catalogue only by takedown or exit), and
+   * while a review is pending (that review is for sharing it wider).
+   */
+  async unshare(
+    organizationId: string,
+    toolId: string,
+    actor: AuditActor,
+  ): Promise<ProviderToolDto> {
+    const owned = await this.requireOwned(organizationId, toolId);
+    await this.dataSource.transaction(async (manager) => {
+      const row = await lockTool(manager, owned.id);
+      assertNotRemoved(row);
+      if (row.reviewStatus === ReviewStatus.PENDING) {
+        throw ProviderToolErrors.inReview({ reviewVersion: row.reviewVersion });
+      }
+      if (row.visibility !== ToolVisibility.UNLISTED) {
+        throw ProviderToolErrors.state({
+          reason:
+            row.visibility === ToolVisibility.PRIVATE
+              ? 'the tool is already PRIVATE'
+              : 'a listed tool is not unshared; it stays listed until it is taken down',
+        });
+      }
+      await manager.update(
+        ToolEntity,
+        { id: row.id },
+        { visibility: ToolVisibility.PRIVATE, updatedAt: new Date() },
+      );
+      await this.audit.record(manager, {
+        organizationId,
+        actor,
+        action: 'provider_tool.unshared',
+        resourceType: 'tool',
+        resourceId: row.id,
+        before: { visibility: ToolVisibility.UNLISTED },
+        after: { visibility: ToolVisibility.PRIVATE },
       });
     });
     await this.contractsChanged(organizationId);
@@ -811,6 +911,8 @@ export class ProviderToolsService {
                   assetId: own.assetId,
                   settlementChains: [...(own.settlementChains ?? [])],
                   timeoutMs: own.timeoutMs,
+                  authMode: own.authMode ?? 'NONE',
+                  slaFailureRate: declaredFailureRateOf(own.slaFailureRate),
                 }
               : null,
           };
@@ -849,6 +951,55 @@ export class ProviderToolsService {
       .getMany();
     for (const row of rows) out.set(row.toolId, [...(out.get(row.toolId) ?? []), row]);
     return out;
+  }
+
+  /**
+   * A deprecation's replacement: it serves now — ACTIVE, its current version
+   * not deprecated, not removed or taken down — it is not the tool itself,
+   * and everyone who can reach the deprecated tool can reach it: a LISTED
+   * tool, or one of the caller's own at least as widely shared. Anything
+   * else, including another organization's unlisted or private tool, is the
+   * same refusal, so the check never tells whether such a tool exists.
+   */
+  private async assertReplacement(
+    organizationId: string,
+    tool: ToolEntity,
+    replacementToolId: string,
+  ): Promise<void> {
+    const refuse = (reason: string) => ProviderToolErrors.state({ reason });
+    if (replacementToolId === tool.id) throw refuse('a tool cannot replace itself');
+    const candidate = await this.tools.findOne({ where: { id: replacementToolId } });
+    const own = candidate?.ownerOrgId === organizationId;
+    const reach = (visibility: string | null | undefined) =>
+      visibility === ToolVisibility.LISTED ? 2 : visibility === ToolVisibility.UNLISTED ? 1 : 0;
+    if (
+      !candidate ||
+      !(own || candidate.visibility === ToolVisibility.LISTED) ||
+      candidate.status === ToolStatus.DRAFT
+    ) {
+      throw refuse('the replacement must be a published tool your users can reach');
+    }
+    if (
+      candidate.status !== ToolStatus.ACTIVE ||
+      candidate.removedAt ||
+      candidate.takenDownAt ||
+      candidate.handleRemovedAt ||
+      candidate.currentVersion === null
+    ) {
+      throw refuse('the replacement must be serving: not deprecated, retired or removed');
+    }
+    const current = await this.dataSource.getRepository(ToolVersionEntity).findOne({
+      where: { toolId: candidate.id, version: candidate.currentVersion },
+    });
+    if (!current || current.status !== ToolVersionStatus.ACTIVE) {
+      throw refuse('the replacement’s current version is deprecated or retired');
+    }
+    if (reach(candidate.visibility) < reach(tool.visibility)) {
+      throw refuse(
+        `the replacement is ${candidate.visibility}, so it does not reach everyone this ` +
+          `${tool.visibility} tool does`,
+      );
+    }
   }
 
   /** A provider tool's category is the platform's: one a standard tool already uses. */
@@ -1244,6 +1395,7 @@ export function draftDtoOf(
     ],
     screen: screenVersion(draft),
     inReview: row.reviewStatus === ReviewStatus.PENDING && row.reviewVersion === draft.version,
+    updatedAt: draft.updatedAt,
   };
 }
 

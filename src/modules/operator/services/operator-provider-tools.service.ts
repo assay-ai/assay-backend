@@ -15,7 +15,8 @@ import {
   ReviewDecisionBodyDto,
   SimilarToolListDto,
 } from '@modules/provider-tool/dto/tool-promotion.dto';
-import { ReviewKind } from '@modules/provider-tool/domain/review';
+import { ProviderToolNotice } from '@modules/provider-tool/domain/notices';
+import { ReviewKind, reviewReasonCodeFor } from '@modules/provider-tool/domain/review';
 import {
   DecideOutcome,
   ProviderToolReviewService,
@@ -76,6 +77,8 @@ export class OperatorProviderToolsService {
         reason: 'a rejection needs a note the provider can act on',
       });
     }
+    const reason = reviewReasonCodeFor(body.decision, body.reasonCode);
+    if ('problem' in reason) throw ProviderToolErrors.invalid({ problems: [reason.problem] });
     const tool = await this.review.requireProviderTool(toolId);
     const outcome = await this.overrides.perform<DecideOutcome>(
       {
@@ -84,7 +87,7 @@ export class OperatorProviderToolsService {
         targetType: 'tool',
         targetId: tool.id,
         organizationId: tool.ownerOrgId,
-        reasonCode: body.reasonCode,
+        reasonCode: reason.code,
         reason: body.note?.trim() || `${decision} ${tool.name}`,
         ticketRef: body.ticketRef ?? null,
         requestId,
@@ -97,6 +100,7 @@ export class OperatorProviderToolsService {
           note: body.note?.trim() || null,
           tier: (body.tier as ToolTier | undefined) ?? null,
           contentHash: body.contentHash,
+          reasonCode: reason.code,
         });
         return {
           value,
@@ -107,6 +111,7 @@ export class OperatorProviderToolsService {
             approvedVersion: value.approvedVersion,
             contentHash: body.contentHash,
             tier: body.tier ?? null,
+            reasonCode: reason.code,
           },
         };
       },
@@ -159,9 +164,17 @@ export class OperatorProviderToolsService {
       changelog: `Drafted from ${source.name} v${version.semver}`,
     };
     const tool = await this.contracts.saveDraft(operator, created.id, draft);
+    const invited: ProviderToolNotice[] = [];
     const invites = await this.dataSource.transaction((manager) =>
-      this.promotion.invite(manager, created.id, [source.id, ...others], operator.operatorId),
+      this.promotion.invite(
+        manager,
+        created.id,
+        [source.id, ...others],
+        operator.operatorId,
+        invited,
+      ),
     );
+    await this.promotion.announce(invited);
     return { tool, invites: { invites } };
   }
 
@@ -170,9 +183,11 @@ export class OperatorProviderToolsService {
     standardToolId: string,
     body: InvitePromotionBodyDto,
   ): Promise<PromotionInviteListDto> {
+    const invited: ProviderToolNotice[] = [];
     const invites = await this.dataSource.transaction((manager) =>
-      this.promotion.invite(manager, standardToolId, body.toolIds, operator.operatorId),
+      this.promotion.invite(manager, standardToolId, body.toolIds, operator.operatorId, invited),
     );
+    await this.promotion.announce(invited);
     return { invites };
   }
 

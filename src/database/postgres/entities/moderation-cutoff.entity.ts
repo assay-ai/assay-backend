@@ -50,6 +50,15 @@ export class ModerationCutoffEntity {
   @Column({ name: 'report_id', type: 'uuid', nullable: true })
   reportId: string | null;
 
+  /** The operator's note. Never shown to the provider. */
   @Column({ name: 'note', type: 'varchar', length: 1000 })
   note: string;
+
+  /** A tool takedown's reason, for its provider (`TakedownReasonCode`). */
+  @Column({ name: 'public_reason_code', type: 'varchar', length: 32, nullable: true })
+  publicReasonCode: string | null;
+
+  /** A tool takedown's note written for its provider. */
+  @Column({ name: 'public_note', type: 'varchar', length: 500, nullable: true })
+  publicNote: string | null;
 }

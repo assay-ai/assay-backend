@@ -30,10 +30,13 @@ import {
   ProviderToolIdParamDto,
   ProviderToolSummaryDto,
   ProviderToolVersionParamDto,
+  ProviderToolTryResultDto,
   SetReplacementBodyDto,
   ShareProviderToolBodyDto,
+  TryProviderToolBodyDto,
   UpdateProviderToolBodyDto,
 } from '../dto/provider-tools.dto';
+import { ProviderToolTryService } from '../services/provider-tool-try.service';
 import { ProviderToolsService } from '../services/provider-tools.service';
 
 /**
@@ -42,7 +45,7 @@ import { ProviderToolsService } from '../services/provider-tools.service';
  *
  * Person-only, reads included, like the binding editor: a provider tool's
  * text reaches every model that lists it, and its review is a promise made
- * by a person. Literal segments (`invitations`) are declared before `:id`.
+ * by a person. Literal segments (`try`, `invitations`) are declared before `:id`.
  * Another organization's tool is the same 404 as one that does not exist.
  */
 @ApiTags('Provider')
@@ -50,7 +53,10 @@ import { ProviderToolsService } from '../services/provider-tools.service';
 @UseGuards(SessionAuthGuard, HumanSessionGuard)
 @Controller('provider/tools')
 export class ProviderToolsController {
-  constructor(private readonly tools: ProviderToolsService) {}
+  constructor(
+    private readonly tools: ProviderToolsService,
+    private readonly trial: ProviderToolTryService,
+  ) {}
 
   @Get()
   @ApiOperation({ summary: 'Your provider tools, newest first, with their review state' })
@@ -82,6 +88,28 @@ export class ProviderToolsController {
     @Body() body: CreateProviderToolBodyDto,
   ): Promise<ProviderToolDto> {
     return this.tools.create(session.organizationId, body, auditActorOf(session));
+  }
+
+  @Post('try')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Try your endpoint: one real call from a curl command or an OpenAPI operation, through ' +
+      'the egress relay and request signing, and the inferred schemas, example and mapping. ' +
+      'Stores nothing',
+  })
+  @ApiResponse({ status: 200, type: ProviderToolTryResultDto })
+  @ApiResponse({
+    status: 400,
+    description: 'TOOL_PROVIDER_TOOL_INVALID: unparseable, unsupported, or a private address',
+  })
+  @ApiResponse({ status: 403, description: 'TOOL_PROVIDER_TOOL_NOT_ALLOWED: no provider account' })
+  @ApiResponse({ status: 429, description: 'PROVIDER_EGRESS_RATE_LIMITED' })
+  async tryEndpoint(
+    @CurrentSession() session: McpSession,
+    @Body() body: TryProviderToolBodyDto,
+  ): Promise<ProviderToolTryResultDto> {
+    return this.trial.try(session, body);
   }
 
   @Get('invitations')
@@ -213,6 +241,7 @@ export class ProviderToolsController {
       Number(params.version),
       body.sunsetAt,
       auditActorOf(session),
+      body.replacementToolId ?? null,
     );
   }
 
@@ -231,6 +260,25 @@ export class ProviderToolsController {
     @Body() _body: ShareProviderToolBodyDto,
   ): Promise<ProviderToolDto> {
     return this.tools.shareUnlisted(session.organizationId, params.id, auditActorOf(session));
+  }
+
+  @Post(':id/unpublish')
+  @HttpCode(200)
+  @ApiOperation({
+    summary:
+      'Stop sharing: UNLISTED back to PRIVATE ("Only my team"). Link-only tool sets stop ' +
+      'reaching it at once; your own /my/ URLs keep serving it',
+  })
+  @ApiResponse({ status: 200, type: ProviderToolDto })
+  @ApiResponse({
+    status: 409,
+    description: 'TOOL_PROVIDER_TOOL_STATE (not UNLISTED), TOOL_PROVIDER_TOOL_IN_REVIEW',
+  })
+  async unshare(
+    @CurrentSession() session: McpSession,
+    @Param() params: ProviderToolIdParamDto,
+  ): Promise<ProviderToolDto> {
+    return this.tools.unshare(session.organizationId, params.id, auditActorOf(session));
   }
 
   @Post(':id/review')

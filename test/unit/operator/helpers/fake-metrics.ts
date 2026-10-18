@@ -21,6 +21,7 @@ export interface FakeMetricsOverrides {
   verificationBacklog?: { count: number; p95AgeSeconds: number | null };
   policyLifecycleCounts?: { shadow: number; total: number };
   openSlashProposalCounts?: { count: number; oldestAgeSeconds: number | null };
+  operatorWorkCounts?: { pendingToolReviews: number; openCallDisputes: number };
 }
 
 /** Every method defaults to the "empty database" answer. */
@@ -40,6 +41,11 @@ export function fakeMetricsRepository(
     openSlashProposalCounts: jest
       .fn()
       .mockResolvedValue(overrides.openSlashProposalCounts ?? { count: 0, oldestAgeSeconds: null }),
+    operatorWorkCounts: jest
+      .fn()
+      .mockResolvedValue(
+        overrides.operatorWorkCounts ?? { pendingToolReviews: 0, openCallDisputes: 0 },
+      ),
   } as unknown as PlatformMetricsRepository;
 }
 

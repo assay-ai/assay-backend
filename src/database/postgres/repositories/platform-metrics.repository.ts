@@ -143,6 +143,25 @@ export class PlatformMetricsRepository {
       oldestAgeSeconds: toFiniteNumberOrNull(row?.oldestAgeSeconds),
     };
   }
+
+  /**
+   * The operator's two T4 queues: provider tools whose review is PENDING, and
+   * buyer call disputes still OPEN. Counts only — the queues themselves are
+   * `GET /operator/reviews` and `GET /operator/call-disputes`.
+   */
+  async operatorWorkCounts(): Promise<{ pendingToolReviews: number; openCallDisputes: number }> {
+    const [row] = (await this.dataSource.query(
+      `SELECT
+         (SELECT count(*)::int FROM tools
+           WHERE kind = 'PROVIDER' AND review_status = 'PENDING') AS "pendingToolReviews",
+         (SELECT count(*)::int FROM disputes
+           WHERE intent_id IS NOT NULL AND state = 'OPEN') AS "openCallDisputes"`,
+    )) as { pendingToolReviews: number; openCallDisputes: number }[];
+    return {
+      pendingToolReviews: Number(row?.pendingToolReviews ?? 0),
+      openCallDisputes: Number(row?.openCallDisputes ?? 0),
+    };
+  }
 }
 
 /**

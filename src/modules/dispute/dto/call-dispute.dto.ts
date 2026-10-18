@@ -221,6 +221,53 @@ export class CallDisputeDto {
   @ApiProperty({ description: 'The sentence to show the buyer about refundGuaranteed' })
   refundNotice: string;
 
+  @ApiProperty({
+    format: 'date-time',
+    description: 'The provider’s one reply is accepted until then: filing + 24 h',
+  })
+  replyDueAt: Date;
+
+  @ApiProperty({
+    format: 'date-time',
+    description: 'An operator is paged if it is still undecided then: filing + 48 h',
+  })
+  pageAt: Date;
+
+  @ApiProperty({
+    format: 'date-time',
+    description: 'The decision SLA: filing + 72 h, when it is auto-upheld or paged again',
+  })
+  decisionDueAt: Date;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    format: 'date-time',
+    description:
+      'When the SLA auto-upholds it (filing + 72 h) if the provider stays silent. Null when it ' +
+      'cannot be: decided or withdrawn, the provider replied, the refund is not guaranteed, or ' +
+      'the amount needs two operators. The provider’s daily auto-uphold cap may still defer it',
+  })
+  autoUpholdAt: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    format: 'date-time',
+    description:
+      'While the payment is held in escrow: when the hold times out (collectableAt + 7 d) and ' +
+      'anyone may collect it to the provider, so a refund must land before it. Null when ' +
+      'nothing is held on chain',
+  })
+  holdEndsAt: Date | null;
+
+  @ApiPropertyOptional({
+    nullable: true,
+    format: 'date-time',
+    description:
+      'When the call’s filing window closed or closes (settlement + the configured window, ' +
+      '7 days by default). Null when the call’s settlement time is unknown',
+  })
+  filingClosesAt: Date | null;
+
   @ApiProperty()
   createdAt: Date;
 
