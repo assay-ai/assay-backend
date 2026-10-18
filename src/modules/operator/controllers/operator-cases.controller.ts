@@ -329,23 +329,17 @@ export class OperatorCasesController {
   /**
    * Build the settlement admin's unsigned `cancel_slash`.
    *
-   * Builds; it is not an override. The record moved to `CANCEL_REQUESTED` when
-   * the case was overturned or suspended, and moves to `CANCELLED` when the
-   * lifecycle sweep sees it leave `Pending`, not because somebody was handed a
-   * transaction.
-   *
-   * One write, a system reconcile of a chain fact rather than an operator
-   * decision: when the chain shows nothing of a case closed as a decision
-   * standing (every part cancelled, or a pre-parts record cancelled or never
-   * written), the chain side is closed (`CANCELLED`, by compare-and-swap, with
-   * a `CHAIN_CANCELLED` timeline entry) and the call answers 409
-   * `SLASH_NOTHING_STANDING`.
+   * Reads and builds; changes nothing, and deliberately is not an override.
+   * The on-chain record moved to `CANCEL_REQUESTED` when the case was
+   * overturned or suspended; it moves to `CANCELLED` when the lifecycle sweep
+   * sees the record leave `Pending`, not because somebody was handed a
+   * transaction. When nothing stands on chain, it answers 409 and still
+   * changes nothing.
    */
   @Post('cases/:proposalId/cancel-intent')
   @OverrideExempt(
-    'Builds an unsigned transaction. The only write is a system reconcile of a chain fact ' +
-      '(nothing stands, so the chain side is closed, with a timeline entry), not an operator ' +
-      'decision; the decision that requested the cancel was the override',
+    'Builds an unsigned transaction and writes nothing; the decision that requested the cancel ' +
+      'was the override',
   )
   @RequireRoles(OperatorRole.ADJL, OperatorRole.TRE)
   @ApiOperation({ summary: "Build the settlement admin's unsigned cancel_slash" })
@@ -354,9 +348,9 @@ export class OperatorCasesController {
     status: 409,
     description:
       'SLASH_NOTHING_STANDING: nothing of the case is Pending or Disputed on chain, so there is ' +
-      'nothing to sign. `error.context`: `proposalId`; `chainStatus` (EXECUTED — the stake was ' +
-      'taken while the cancel waited; CANCELLED; NOT_FOUND; PROPOSING — a part may still land); ' +
-      '`closed` (true when this call closed the chain side)',
+      'nothing to sign; nothing is changed. `error.context`: `proposalId`; `chainStatus` ' +
+      '(EXECUTED — the stake was taken while the cancel waited; CANCELLED; NOT_FOUND; ' +
+      'PROPOSING — a part may still land)',
   })
   @ApiResponse({
     status: 503,

@@ -115,8 +115,7 @@ export class PlatformMetricsRepository {
   }
 
   /**
-   * `oldProcessCases` / `oldestOldProcessCaseAgeSeconds` (formerly
-   * `openDisputes`): non-EVM cases still in the in-app objection statuses
+   * `oldProcessCases` / `oldestOldProcessCaseAgeSeconds`: non-EVM cases still in the in-app objection statuses
    * DISPUTED, UNDER_REVIEW or AWAITING_SECOND. None of them is on chain or
    * waiting for the arbiter: an on-chain dispute is mirrored as
    * `chain_status = 'DISPUTED'` and listed by the arbiter, not here.

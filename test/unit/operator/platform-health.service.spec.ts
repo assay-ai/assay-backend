@@ -114,8 +114,6 @@ describe('PlatformHealthService', () => {
     expect(health.stakeLocked.amount).toBe('0');
     expect(health.providersWithStake).toBe(0);
     expect(health.oldProcessCases).toBe(0);
-    expect(health.openDisputes).toBe(0);
-    expect(health.oldestOpenDisputeAgeSeconds).toBeNull();
   });
 
   it('reports a false-positive rate of 0, not NaN, when nothing has resolved yet', async () => {
@@ -218,9 +216,7 @@ describe('PlatformHealthService', () => {
     expect(health.verificationBacklogP95AgeSeconds).toBe(12.5);
     expect(health.oldProcessCases).toBe(2);
     expect(health.oldestOldProcessCaseAgeSeconds).toBe(3600);
-    // D15: the old names carry the same figures for one release.
-    expect(health.openDisputes).toBe(2);
-    expect(health.oldestOpenDisputeAgeSeconds).toBe(3600);
+    expect(health).not.toHaveProperty('openDisputes');
   });
 });
 

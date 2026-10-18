@@ -114,9 +114,6 @@ export class PlatformHealthService {
       providersWithStake: stake.providersWithStake,
       oldProcessCases: oldProcess.count,
       oldestOldProcessCaseAgeSeconds: oldProcess.oldestAgeSeconds,
-      // Deprecated names for one release (D15): same figures.
-      openDisputes: oldProcess.count,
-      oldestOpenDisputeAgeSeconds: oldProcess.oldestAgeSeconds,
       chainState,
       pendingToolReviews: work.pendingToolReviews,
       openCallDisputes: work.openCallDisputes,

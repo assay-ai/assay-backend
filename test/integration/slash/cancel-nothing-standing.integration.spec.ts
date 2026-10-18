@@ -3,22 +3,20 @@ import { randomUUID } from 'node:crypto';
 import { DataSource } from 'typeorm';
 
 import { SlaWindowCallRepository } from '@database/postgres/repositories/sla-window-call.repository';
-import { SlashProposalEventRepository } from '@database/postgres/repositories/slash-proposal-event.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { SlashErrorCode } from '@modules/slash/errors/slash.errors';
 import { SlashRecordSnapshot } from '@modules/slash/ports/slash-executor.port';
 import { SlashPartsService } from '@modules/slash/services/slash-parts.service';
-import { SlashProposalService } from '@modules/slash/services/slash-proposal.service';
 
 import { CHAIN } from '../../unit/chains/evm/helpers/fake-stake-chain';
-import { freshMigratedDatabase, TEST_SLASH_CONFIG } from '../helpers/slash-prorata-context';
+import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
 
 /**
- * B11: the cancel of a pre-parts case with nothing standing closes the chain
- * side through the real repository's compare-and-swap, with exactly one
- * `CHAIN_CANCELLED` timeline row, and a second attempt changes nothing.
+ * B11 (owner rule): the cancel of a pre-parts case with nothing standing
+ * answers 409 SLASH_NOTHING_STANDING with what the chain shows, and writes
+ * nothing: the row keeps its status and no timeline row is added.
  */
 const DATABASE = 'x402_cancel_nothing_standing_test';
 const EVM_ASSET = `${CHAIN}/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3`;
@@ -35,13 +33,6 @@ describe('cancel with nothing standing, against a real database', () => {
   beforeAll(async () => {
     dataSource = await freshMigratedDatabase(DATABASE);
     proposals = new SlashProposalRepository(dataSource);
-    const events = new SlashProposalEventRepository(dataSource);
-    const lifecycle = new SlashProposalService(
-      proposals,
-      events,
-      { notify: async () => undefined } as never,
-      TEST_SLASH_CONFIG,
-    );
     const executor = {
       readRecord: async () => (record ? ({ status: record } as SlashRecordSnapshot) : null),
       buildCancel: async () => {
@@ -54,8 +45,6 @@ describe('cancel with nothing standing, against a real database', () => {
       executor as never,
       { dustReportBelowMinor: 0n, stragglerMaxAttempts: 3, stragglerDeadlineMs: 1 },
       null,
-      proposals,
-      lifecycle,
       { emit: async () => undefined } as never,
     );
   }, 240_000);
@@ -97,52 +86,21 @@ describe('cancel with nothing standing, against a real database', () => {
       )
     )[0];
 
-  it('a cancelled record closes the chain side once, with one timeline row', async () => {
+  it.each([
+    ['CANCELLED', 'CANCELLED'],
+    [null, 'NOT_FOUND'],
+    ['EXECUTED', 'EXECUTED'],
+  ] as const)('record %s: 409 naming %s, and nothing is written', async (status, named) => {
     const id = await legacyCase();
     const proposal = (await proposals.findOneScoped(await load(id), id))!;
-    record = 'CANCELLED';
-
+    record = status;
     await expect(service.buildCancel(proposal, '0xprovider')).rejects.toMatchObject({
       errorCode: SlashErrorCode.SLASH_NOTHING_STANDING,
-      publicContext: { chainStatus: 'CANCELLED', closed: true },
-    });
-    expect((await chainStatus(id)).chain_status).toBe('CANCELLED');
-    expect(await events(id)).toEqual([
-      expect.objectContaining({
-        detail: expect.objectContaining({ chainRecord: 'CANCELLED', parts: 0 }),
-      }),
-    ]);
-
-    // The compare-and-swap lost: nothing more is written.
-    await expect(service.buildCancel(proposal, '0xprovider')).rejects.toMatchObject({
-      publicContext: { closed: false },
-    });
-    expect(await events(id)).toHaveLength(1);
-  });
-
-  it('another epoch is never closed', async () => {
-    const id = await legacyCase();
-    const proposal = (await proposals.findOneScoped(await load(id), id))!;
-    record = 'CANCELLED';
-    await expect(
-      service.buildCancel(
-        { ...proposal, chainEpoch: proposal.chainEpoch + 1 } as never,
-        '0xprovider',
-      ),
-    ).rejects.toMatchObject({ publicContext: { closed: false } });
-    expect((await chainStatus(id)).chain_status).toBe('CANCEL_REQUESTED');
-  });
-
-  it('a written record that is not found is noted, not closed', async () => {
-    const id = await legacyCase();
-    const proposal = (await proposals.findOneScoped(await load(id), id))!;
-    record = null;
-    await expect(service.buildCancel(proposal, '0xprovider')).rejects.toMatchObject({
-      publicContext: { chainStatus: 'NOT_FOUND', closed: false },
+      publicContext: { chainStatus: named },
     });
     expect(await chainStatus(id)).toEqual({
       chain_status: 'CANCEL_REQUESTED',
-      chain_last_error: 'RecordMissing',
+      chain_last_error: null,
     });
     expect(await events(id)).toEqual([]);
   });

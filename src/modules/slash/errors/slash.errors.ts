@@ -525,18 +525,19 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
   /**
    * The cancel has nothing to act on: no record of this case is `Pending` or
    * `Disputed` on chain, so nothing can be executed against the provider and
-   * nothing needs a signature. Read from the chain, never assumed; `chainStatus`
-   * says what the record is (or `NOT_FOUND` when it never landed).
+   * nothing needs a signature. Read from the chain, never assumed;
+   * `chainStatus` says what it is (`EXECUTED` — the stake was taken while the
+   * cancel waited; `CANCELLED`; `NOT_FOUND`; `PROPOSING` — a part may still
+   * land). Nothing is written: the case keeps its status.
    */
   nothingStanding: {
     code: SlashErrorCode.SLASH_NOTHING_STANDING,
     statusCode: 409,
-    publicContext: ['proposalId', 'chainStatus', 'closed'],
+    publicContext: ['proposalId', 'chainStatus'],
     message: (context?: Record<string, any>) =>
       `Nothing of this case stands on chain` +
       `${context?.chainStatus ? ` (the record reads ${String(context.chainStatus)})` : ''}` +
-      `, so nothing can be executed and there is nothing to sign` +
-      `${context?.closed ? '; the case is now marked cancelled on chain' : ''}.`,
+      `, so there is nothing to sign. Nothing was changed.`,
   },
   chainBatchRefused: {
     code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,

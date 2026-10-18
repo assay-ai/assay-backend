@@ -120,19 +120,6 @@ export class PlatformHealthDto {
   })
   oldestOldProcessCaseAgeSeconds: number | null;
 
-  @ApiProperty({
-    deprecated: true,
-    description: 'Deprecated: the same figure as `oldProcessCases`. Removed next release.',
-  })
-  openDisputes: number;
-
-  @ApiPropertyOptional({
-    nullable: true,
-    deprecated: true,
-    description: 'Deprecated: the same figure as `oldestOldProcessCaseAgeSeconds`.',
-  })
-  oldestOpenDisputeAgeSeconds: number | null;
-
   @ApiPropertyOptional({
     nullable: true,
     description:
