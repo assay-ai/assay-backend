@@ -277,6 +277,58 @@ describe('DcrService (§6.3.8)', () => {
     });
   });
 
+  describe('each cap fails closed on its own (review R1-M1)', () => {
+    const IP48 = oauthIpKey('2001:db8:1:2::1');
+
+    it('the /48 cap: Redis down for its counter alone → refused, nothing stored', async () => {
+      const { service, redis, repo } = setup();
+      redis.failWhen = (key) => key.startsWith('oauth:rl:dcr-48:');
+      expect(await service.register(body(), IP48)).toEqual({ ok: false, error: 'rate_limited' });
+      expect(repo.rows.size).toBe(0);
+      // The /64 counter was reachable and counted; only the /48 one refused.
+      expect(redis.keys('oauth:rl:dcr-ip:')).toHaveLength(1);
+      // IPv4 has no /48 counter, so it is unaffected.
+      expect((await service.register(body(), '198.51.100.1')).ok).toBe(true);
+    });
+
+    it('the /48 cap: refuses once exceeded', async () => {
+      const { service } = setup({ dcrPer48PerHour: 1 });
+      expect((await service.register(body(), oauthIpKey('2001:db8:1:1::1'))).ok).toBe(true);
+      expect(await service.register(body(), oauthIpKey('2001:db8:1:2::1'))).toEqual({
+        ok: false,
+        error: 'rate_limited',
+      });
+    });
+
+    it('the global cap: Redis down for its counter alone → refused, nothing stored', async () => {
+      const { service, redis, repo } = setup();
+      redis.failWhen = (key) => key.startsWith('oauth:rl:dcr-all:');
+      expect(await service.register(body(), IP48)).toEqual({ ok: false, error: 'rate_limited' });
+      expect(await service.register(body(), '198.51.100.1')).toEqual({
+        ok: false,
+        error: 'rate_limited',
+      });
+      expect(repo.rows.size).toBe(0);
+      expect(redis.keys('oauth:rl:dcr-48:')).toHaveLength(1);
+    });
+
+    it('the global cap: refuses once exceeded, for IPv4 and IPv6 alike', async () => {
+      const { service } = setup({ dcrGlobalPerDay: 1 });
+      expect((await service.register(body(), '198.51.100.1')).ok).toBe(true);
+      expect(await service.register(body(), IP48)).toEqual({ ok: false, error: 'rate_limited' });
+      expect(await service.register(body(), '198.51.100.2')).toEqual({
+        ok: false,
+        error: 'rate_limited',
+      });
+    });
+
+    it('the per-name count never blocks a registration when its counter is down', async () => {
+      const { service, redis } = setup();
+      redis.failWhen = (key) => key.startsWith('oauth:rl:dcr-name:');
+      expect((await service.register(body(), IP48)).ok).toBe(true);
+    });
+  });
+
   describe('per-client_name daily count (§6.3.8 alert, review M5)', () => {
     it('counts past 100 registrations of one name in a UTC day, by hash only', async () => {
       const { service, registry, redis } = setup({ dcrGlobalPerDay: 1000, dcrPer48PerHour: 1000 });
