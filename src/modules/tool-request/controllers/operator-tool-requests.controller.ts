@@ -39,7 +39,11 @@ export class OperatorToolRequestsController {
   constructor(private readonly queueService: ToolRequestQueueService) {}
 
   @Get()
-  @ApiOperation({ summary: 'The queue: everything unanswered, oldest due date first' })
+  @ApiOperation({
+    summary:
+      'The queue: everything unanswered, oldest due date first; `?status=` lists requests in ' +
+      'those states instead (e.g. ACKNOWLEDGED, to accept them later)',
+  })
   @ApiCursorPage(OperatorToolRequestQueueRowDto)
   async queue(
     @Query() query: ListToolRequestQueueQueryDto,

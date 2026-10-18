@@ -120,8 +120,12 @@ export interface Tool {
   readonly currentVersion?: number | null;
   /** `tools.status`. Absent reads as ACTIVE. */
   readonly status?: ToolStatus;
+  /** The tool deprecation and retirement notices point to (`tools.replacement_tool_id`). */
+  readonly replacementToolId?: string | null;
   /** The tool deprecation and retirement notices point to, by name. */
   readonly replacementToolName?: string | null;
+  /** The replacement tool's current version, when it has a served one. */
+  readonly replacementToolVersion?: { readonly major: number; readonly semver: string } | null;
 }
 
 /** `tool_versions.status`. */

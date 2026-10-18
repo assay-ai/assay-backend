@@ -58,7 +58,7 @@ export class ToolRequestQueueService {
   async listQueue(
     query: ListToolRequestQueueQueryDto,
   ): Promise<CursorPageDto<OperatorToolRequestQueueRowDto>> {
-    const page = await paginate(this.requests.queueQueryBuilder(), query, QUEUE_LIST);
+    const page = await paginate(this.requests.queueQueryBuilder(query.status), query, QUEUE_LIST);
     return page.map((row) => OperatorToolRequestQueueRowDto.fromEntity(row));
   }
 

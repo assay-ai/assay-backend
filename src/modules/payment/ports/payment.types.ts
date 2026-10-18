@@ -209,6 +209,15 @@ export interface PaymentIntent {
   readonly holdId: string | null;
   /** When the sweep or the settlement path resolved that hold. */
   readonly holdReleasedAt: Date | null;
+  /** The dispute hold (G3.B1): the held payment may be collected from this instant. */
+  readonly collectableAt?: Date | null;
+  /** `HELD` | `COLLECTED` | `REFUNDED`: the payment's dispute hold. */
+  readonly heldStatus?: string | null;
+  readonly heldAt?: Date | null;
+  /** Failed collect, refund or classification attempts (back-off). */
+  readonly heldAttempts?: number;
+  /** `OPEN` while a guaranteed dispute holds the voucher, then `UPHELD` | `REJECTED`. */
+  readonly disputeOutcome?: string | null;
 
   /** Written by the response classifier; typed as a string until that vocabulary lands. */
   readonly classification: string | null;
@@ -360,4 +369,11 @@ export interface PaymentIntentTransitionContext {
    * `PaymentIntentService.resolve` only.
    */
   readonly lapseCause?: string;
+  /**
+   * Rail A's dispute hold (G3.B1): marks the settled call held for
+   * `CALL_DISPUTE_HOLD_WINDOW_MINUTES` in the same statement as the move to
+   * `SETTLED`, so the provider is not credited until it passes. Set by
+   * `PaymentIntentService.resolve` only.
+   */
+  readonly holdForDispute?: boolean;
 }

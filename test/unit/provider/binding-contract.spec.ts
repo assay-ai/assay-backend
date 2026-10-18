@@ -209,6 +209,20 @@ describe('the publish gate, per contract major', () => {
       ]),
     });
     expect(check.publishable).toBe(true);
+    // One row per major, each with its own result.
+    expect(
+      check.requirements
+        .filter((r) => r.requirement === PublishRequirement.TESTER_RUN)
+        .map((r) => [r.major, r.met]),
+    ).toEqual([
+      [1, true],
+      [2, true],
+    ]);
+    expect(
+      check.requirements
+        .filter((r) => r.requirement === PublishRequirement.STAKE_AT_MINIMUM_ON_EVERY_CHAIN)
+        .map((r) => r.major),
+    ).toEqual([null]);
   });
 
   it('names each major with no run, or a failed one', () => {
@@ -238,6 +252,16 @@ describe('the publish gate, per contract major', () => {
         }),
       ]),
     );
+    // Every major has its own row, met or not.
+    expect(
+      check.requirements
+        .filter((r) => r.requirement === PublishRequirement.TESTER_PASSED)
+        .map((r) => [r.major, r.met, r.code]),
+    ).toEqual([
+      [1, true, null],
+      [2, false, 'tester_never_run'],
+      [3, false, 'tester_failed'],
+    ]);
   });
 });
 

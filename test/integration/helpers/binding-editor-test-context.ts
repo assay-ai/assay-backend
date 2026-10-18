@@ -1,4 +1,5 @@
 import { randomBytes } from 'node:crypto';
+import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { BindingContractTerms1761500000001 } from '@database/postgres/migrations/1761500000001-binding-contract-terms';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
@@ -318,6 +319,8 @@ export async function createBindingEditorTestContext(
       // T3: the binding's contract range and declared fields, on the binding,
       // its snapshots and its tester runs.
       BindingContractTerms1761500000001,
+      // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
+      PaymentIntentDisputeHold1761800000000,
       CreateBindingCredentials1762000000001,
       ToolBindingAuthMode1762000000002,
       CreateVaultKekChecks1762000000003,

@@ -3,12 +3,14 @@ import { Injectable } from '@nestjs/common';
 import { ToolCallRecordEntity } from '@database/postgres/entities/tool-call-record.entity';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
 import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
+import { ToolAccessErrorCode } from '@modules/tool/errors/tool-access.errors';
 import { CursorPageDto, ListSpec, asInstant, paginate } from '@shared/api';
 
 import { RefusalLayer } from '../domain/attribution';
 import { EndpointKind } from '../domain/mcp-url';
 import {
   ListRefusedCallsQueryDto,
+  RefusedCallDetailsDto,
   RefusedCallDto,
   RefusedProviderDto,
 } from '../dto/refused-call.dto';
@@ -68,6 +70,25 @@ function providersOf(row: ToolCallRecordEntity): Omit<RefusedProviderDto, 'provi
   return Array.isArray(providers) ? (providers as Omit<RefusedProviderDto, 'providerName'>[]) : [];
 }
 
+/** The structured details a refusal code carries (only CONTRACT_VERSION_RETIRED so far). */
+function detailsOf(row: ToolCallRecordEntity): RefusedCallDetailsDto {
+  if (row.refusalCode !== ToolAccessErrorCode.CONTRACT_VERSION_RETIRED) return {};
+  const tool = row.refusalDetail?.replacementTool as Record<string, unknown> | null | undefined;
+  const label = row.refusalDetail?.replacement;
+  if (!tool || typeof tool.toolId !== 'string' || typeof tool.name !== 'string') {
+    return { replacement: null };
+  }
+  return {
+    replacement: {
+      toolId: tool.toolId,
+      name: tool.name,
+      major: typeof tool.major === 'number' ? tool.major : null,
+      semver: typeof tool.semver === 'string' ? tool.semver : null,
+      label: typeof label === 'string' ? label : tool.name,
+    },
+  };
+}
+
 function toDto(row: ToolCallRecordEntity, names: ReadonlyMap<string, string>): RefusedCallDto {
   const providers = providersOf(row).map((provider) => ({
     ...provider,
@@ -82,6 +103,7 @@ function toDto(row: ToolCallRecordEntity, names: ReadonlyMap<string, string>): R
     refusalLayer: row.refusalLayer as RefusalLayer,
     charged: false,
     providers,
+    details: detailsOf(row),
     endpointKind: (row.endpointKind as EndpointKind | null) ?? null,
     toolsetId: row.toolsetId,
     toolsetVersion: row.toolsetVersion,

@@ -409,6 +409,9 @@ describe('REST surface consistency', () => {
       'modules/operator/controllers/operator-arbiter.controller.ts',
       'modules/operator/controllers/operator-blocks.controller.ts',
       'modules/operator/controllers/operator-cases.controller.ts',
+      // The buyer call-dispute queue (G3.B1): disputes filed by tenants, decided
+      // by an operator who has none.
+      'modules/operator/controllers/operator-call-disputes.controller.ts',
       // `A-15`–`A-23`: delisting and taking down tool sets and public names,
       // renames and reassignments, and the reports queue. The subject is a
       // publisher who is never the caller.
@@ -652,6 +655,12 @@ describe('REST surface consistency', () => {
         //
         // Neither read projects a row: one returns a boolean, the other a sum.
         'database/postgres/repositories/evm-gas-grant.repository.ts',
+        // Buyer call disputes (G3.B1). A dispute row's tenant is the BUYER that
+        // filed it; the provider that served the call reads its disputes by
+        // `respondent_provider_id` (as `ProviderTrafficService` reads intents by
+        // `provider_id`), and the operator queue reads every buyer's. The
+        // provider projection names no buyer organization.
+        'modules/dispute/services/call-dispute.service.ts',
       ]);
 
       const found = SURFACE_FILES.filter(

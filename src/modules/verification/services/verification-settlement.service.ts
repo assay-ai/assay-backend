@@ -518,6 +518,9 @@ export class VerificationSettlementService {
    */
   private async repairHoldEffect(organizationId: string, intent: PaymentIntent): Promise<void> {
     if (intent.holdReleasedAt !== null || !intent.holdId) return;
+    // Held for the dispute window (G3.B1): `HeldCollectionService` commits it,
+    // or an upheld dispute releases it. Not a lost commit.
+    if (intent.heldStatus === 'HELD') return;
 
     if (
       intent.rail === PaymentRail.RAIL_B_VOUCHER &&

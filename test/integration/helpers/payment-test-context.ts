@@ -1,3 +1,4 @@
+import { PaymentIntentDisputeHold1761800000000 } from '@database/postgres/migrations/1761800000000-payment-intent-dispute-hold';
 import { VoucherDelegate1759600000000 } from '@database/postgres/migrations/1759600000000-voucher-delegate';
 import { VoucherAdmissionIndex1759600000003 } from '@database/postgres/migrations/1759600000003-voucher-admission-index';
 import { PaymentIntentCredential1759600000004 } from '@database/postgres/migrations/1759600000004-payment-intent-credential';
@@ -64,6 +65,7 @@ import {
   USDC_ASSET,
   USDC_DECIMALS,
   ensureTestDatabase,
+  resetSchemaIfMigrationsChanged,
   testConnectionOptions,
   uuidFromLabel,
   BuyerEscrowAccountColumnsSlice1759300000000,
@@ -223,6 +225,8 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
       // The idempotency index narrowed to live intents (G2.1): a voided,
       // expired or refunded intent releases its key.
       IdempotencyKeyLiveIntents1761000000000,
+      // `collectable_at` and `dispute_outcome` (G3.B1), mapped by `PaymentIntentEntity`.
+      PaymentIntentDisputeHold1761800000000,
       ToolBindingAuthMode1762000000002,
     ],
     synchronize: false,
@@ -231,6 +235,7 @@ export async function createPaymentTestContext(): Promise<PaymentTestContext> {
   });
 
   await dataSource.initialize();
+  await resetSchemaIfMigrationsChanged(dataSource);
   // Idempotent — the migrations table makes a second run a no-op. Nothing is
   // truncated between tests: `ledger_entries` refuses DELETE and TRUNCATE by
   // design, and a fresh `organizationId` per test isolates better than a

@@ -2,6 +2,7 @@ import { Module } from '@nestjs/common';
 
 import { BlocklistModule } from '@modules/blocklist/blocklist.module';
 import { ChainsModule } from '@modules/chains/chains.module';
+import { DisputeModule } from '@modules/dispute/dispute.module';
 import { ProviderModule } from '@modules/provider/provider.module';
 import { SlashModule } from '@modules/slash/slash.module';
 import { ToolModule } from '@modules/tool/tool.module';
@@ -12,6 +13,7 @@ import { OperatorArbiterController } from './controllers/operator-arbiter.contro
 import { OperatorBlocksController } from './controllers/operator-blocks.controller';
 import { OperatorModerationController } from './controllers/operator-moderation.controller';
 import { OperatorContractsController } from './controllers/operator-contracts.controller';
+import { OperatorCallDisputesController } from './controllers/operator-call-disputes.controller';
 import { OperatorCasesController } from './controllers/operator-cases.controller';
 import { OperatorReferenceController } from './controllers/operator-reference.controller';
 import { OperatorOperatorsController } from './controllers/operator-operators.controller';
@@ -23,6 +25,7 @@ import { AdjudicationQueueService } from './services/adjudication-queue.service'
 import { OperatorAccountBlockService } from './services/operator-account-block.service';
 import { OperatorApprovalService } from './services/operator-approval.service';
 import { OperatorArbiterService } from './services/operator-arbiter.service';
+import { OperatorCallDisputeService } from './services/operator-call-dispute.service';
 import { OperatorCaseListService } from './services/operator-case-list.service';
 import { OperatorCaseService } from './services/operator-case.service';
 import { OperatorDirectoryService } from './services/operator-directory.service';
@@ -72,6 +75,8 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     BlocklistModule,
     ToolModule,
     ToolsetModule,
+    // `CallDisputeService`, which `OperatorCallDisputeService` decides through (G3.B1).
+    DisputeModule,
   ],
   controllers: [
     OperatorApprovalsController,
@@ -80,6 +85,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     OperatorModerationController,
     OperatorContractsController,
     OperatorCasesController,
+    OperatorCallDisputesController,
     OperatorOperatorsController,
     OperatorOverrideLogController,
     OperatorProvidersController,
@@ -91,6 +97,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     OperatorAccountBlockService,
     OperatorApprovalService,
     OperatorArbiterService,
+    OperatorCallDisputeService,
     OperatorCaseListService,
     OperatorCaseService,
     OperatorDirectoryService,

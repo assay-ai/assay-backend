@@ -109,7 +109,10 @@ export class BindingPublishService {
     return {
       publishable: check.publishable,
       mappingVersion: row.mappingVersion,
-      requirements: check.requirements.map((requirement) => ({ ...requirement })),
+      requirements: check.requirements.map((requirement) => ({
+        ...requirement,
+        major: requirement.major ?? null,
+      })),
     };
   }
 
