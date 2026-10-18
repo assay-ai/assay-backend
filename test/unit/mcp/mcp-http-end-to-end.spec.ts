@@ -8,6 +8,9 @@ import {
 import { Client as LegacyClient } from '@modelcontextprotocol/sdk/client/index.js';
 import { StreamableHTTPClientTransport as LegacyTransport } from '@modelcontextprotocol/sdk/client/streamableHttp.js';
 
+import { mcpCorsOptions } from '@bootstrap/mcp/mcp-cors';
+import { AuthErrors } from '@modules/auth/errors/auth.errors';
+import { BlockSubjectKind, BlockedRole } from '@modules/blocklist/domain/account-block';
 import { McpController } from '@modules/mcp/controllers/mcp.controller';
 import { McpErrors } from '@modules/mcp/errors/mcp.errors';
 import { MCP_SESSION_SOURCE } from '@modules/mcp/ports/mcp-session.port';
@@ -24,6 +27,9 @@ import { ScriptedInvoker, buildBinding, buildProvider, ok } from '../tool/helper
 import { SESSION, buildMcpHarness } from './helpers/mcp-harness';
 
 const TOKEN = 'end-to-end-agent-token';
+const SUSPENDED_TOKEN = 'suspended-agent-token';
+const BLOCKED_TOKEN = 'blocked-agent-token';
+const MCP = 'https://mcp.example.com';
 const TOOL_NAME = 'Search the web';
 
 /**
@@ -54,6 +60,13 @@ describe('discovery end to end over HTTP', () => {
           provide: MCP_SESSION_SOURCE,
           useValue: {
             resolve: async (token: string | null) => {
+              if (token === SUSPENDED_TOKEN) throw AuthErrors.agentSuspended();
+              if (token === BLOCKED_TOKEN) {
+                return {
+                  ...SESSION,
+                  blocked: { role: BlockedRole.PAYER, subjectKind: BlockSubjectKind.WALLET },
+                };
+              }
               if (token !== TOKEN) throw McpErrors.credentialInvalid();
               return SESSION;
             },
@@ -94,7 +107,7 @@ describe('discovery end to end over HTTP', () => {
         {
           provide: MCP_HOST_CONFIG,
           useValue: {
-            mcpPublicUrl: 'https://mcp.example.com',
+            mcpPublicUrl: MCP,
             webAppUrl: 'https://app.example.com',
           },
         },
@@ -105,6 +118,9 @@ describe('discovery end to end over HTTP', () => {
     const moduleRef = await Test.createTestingModule({ imports: [EndToEndModule] }).compile();
     app = moduleRef.createNestApplication();
     app.useGlobalFilters(new AllExceptionsFilter());
+    // The MCP bootstrap's CORS (`bootstrap/mcp/main.ts`), so the exposed
+    // headers below are the ones production sends.
+    app.enableCors(mcpCorsOptions);
     await app.listen(0, '127.0.0.1');
     url = new URL(`${await app.getUrl()}/`);
   });
@@ -170,5 +186,156 @@ describe('discovery end to end over HTTP', () => {
     });
     expect(called.structuredContent).toEqual({ answer: 'forty-two' });
     await client.close();
+  });
+
+  /**
+   * The 401 challenge (spec §6.3.3, R-OA-3): every `MCP_CREDENTIAL_INVALID`
+   * from the catch-all names the path's protected resource metadata, so an
+   * OAuth client can start the flow from the URL alone.
+   */
+  describe('the 401 challenge', () => {
+    const post = (path: string, extra: Record<string, string> = {}) =>
+      fetch(new URL(path, url), {
+        method: 'POST',
+        headers: {
+          Accept: 'application/json, text/event-stream',
+          'Content-Type': 'application/json',
+          ...extra,
+        },
+        body: JSON.stringify({ jsonrpc: '2.0', id: 1, method: 'tools/list', params: {} }),
+      });
+
+    it('no token on /c/weather → 401 with WWW-Authenticate naming the path PRM', async () => {
+      const response = await post('/c/weather');
+      expect(response.status).toBe(401);
+      expect(response.headers.get('www-authenticate')).toBe(
+        `Bearer resource_metadata="${MCP}/.well-known/oauth-protected-resource/c/weather", scope="assay:agent"`,
+      );
+      // Body unchanged: the platform's ordinary error response.
+      expect(await response.json()).toMatchObject({
+        success: false,
+        error: { code: 'MCP_CREDENTIAL_INVALID', statusCode: 401 },
+      });
+    });
+
+    it('bad token → the same challenge plus error="invalid_token"', async () => {
+      const response = await post('/c/weather', { Authorization: 'Bearer not-a-real-token' });
+      expect(response.status).toBe(401);
+      expect(response.headers.get('www-authenticate')).toBe(
+        `Bearer resource_metadata="${MCP}/.well-known/oauth-protected-resource/c/weather", scope="assay:agent", error="invalid_token"`,
+      );
+    });
+
+    it('an Authorization header that is not a bearer token counts as no token', async () => {
+      const response = await post('/c/weather', { Authorization: 'Basic dXNlcjpwYXNz' });
+      expect(response.status).toBe(401);
+      expect(response.headers.get('www-authenticate')).not.toContain('error=');
+    });
+
+    it('suspended agent → AUTH_AGENT_SUSPENDED and no header', async () => {
+      const response = await post('/c/weather', { Authorization: `Bearer ${SUSPENDED_TOKEN}` });
+      expect(response.status).toBe(403);
+      expect(response.headers.get('www-authenticate')).toBeNull();
+      expect(await response.json()).toMatchObject({ error: { code: 'AUTH_AGENT_SUSPENDED' } });
+    });
+
+    it('a blocked session keeps its refusal and gets no header', async () => {
+      const response = await post('/c/weather', { Authorization: `Bearer ${BLOCKED_TOKEN}` });
+      expect(response.status).toBe(403);
+      expect(response.headers.get('www-authenticate')).toBeNull();
+    });
+
+    it('an unknown path stays a 404 with no header', async () => {
+      const response = await post('/no/such/thing');
+      expect(response.status).toBe(404);
+      expect(response.headers.get('www-authenticate')).toBeNull();
+    });
+
+    it('/?tools=… → resource_metadata for / (the path PRM, no query)', async () => {
+      const response = await post('/?tools=get_weather&free=1');
+      expect(response.status).toBe(401);
+      expect(response.headers.get('www-authenticate')).toBe(
+        `Bearer resource_metadata="${MCP}/.well-known/oauth-protected-resource", scope="assay:agent"`,
+      );
+    });
+
+    it('keeps the path as the client sent it, so a strict client finds its own resource', async () => {
+      const response = await post('/%40acme/kit?free=1');
+      expect(response.headers.get('www-authenticate')).toContain(
+        `resource_metadata="${MCP}/.well-known/oauth-protected-resource/%40acme/kit"`,
+      );
+    });
+
+    it('a valid token gets no challenge', async () => {
+      const response = await post('/', { Authorization: `Bearer ${TOKEN}` });
+      expect(response.status).toBe(200);
+      expect(response.headers.get('www-authenticate')).toBeNull();
+    });
+  });
+
+  /** CORS (spec §6.3): the catch-all exposes the challenge; OAuth routes get their own policy. */
+  describe('CORS', () => {
+    const ORIGIN = 'https://agent.example.org';
+
+    const preflight = (path: string, requestHeaders = 'content-type') =>
+      fetch(new URL(path, url), {
+        method: 'OPTIONS',
+        headers: {
+          Origin: ORIGIN,
+          'Access-Control-Request-Method': 'POST',
+          'Access-Control-Request-Headers': requestHeaders,
+        },
+      });
+
+    it('CORS preflight exposes www-authenticate', async () => {
+      const response = await preflight('/c/weather', 'authorization,content-type');
+      expect(response.status).toBe(204);
+      expect(response.headers.get('access-control-allow-origin')).toBe('*');
+      expect(response.headers.get('access-control-allow-headers')).toContain('authorization');
+      expect(response.headers.get('access-control-expose-headers')).toContain('www-authenticate');
+      expect(response.headers.get('access-control-allow-credentials')).toBeNull();
+    });
+
+    it('the 401 itself exposes www-authenticate to a browser client', async () => {
+      const response = await fetch(new URL('/c/weather', url), {
+        method: 'POST',
+        headers: { Origin: ORIGIN, 'Content-Type': 'application/json' },
+        body: '{}',
+      });
+      expect(response.status).toBe(401);
+      expect(response.headers.get('access-control-expose-headers')?.split(',')).toEqual(
+        expect.arrayContaining(['mcp-session-id', 'mcp-protocol-version', 'www-authenticate']),
+      );
+    });
+
+    it.each([
+      '/.well-known/oauth-protected-resource',
+      '/.well-known/oauth-protected-resource/c/weather',
+      '/.well-known/oauth-authorization-server',
+      '/oauth/token',
+      '/oauth/revoke',
+      '/OAuth/Token/',
+    ])('%s: any origin, GET/POST/OPTIONS, Content-Type only, no credentials', async (path) => {
+      const response = await preflight(path);
+      expect(response.status).toBe(204);
+      expect(response.headers.get('access-control-allow-origin')).toBe('*');
+      expect(response.headers.get('access-control-allow-methods')).toBe('GET,POST,OPTIONS');
+      expect(response.headers.get('access-control-allow-headers')).toBe('Content-Type');
+      expect(response.headers.get('access-control-allow-credentials')).toBeNull();
+      expect(response.headers.get('access-control-expose-headers')).toBeNull();
+    });
+
+    it.each([
+      '/oauth/register',
+      '/OAuth/Register/',
+      '/oauth/authorize',
+      '/oauth/authorize/continue',
+      '/oauth/clients/assay-mcp',
+      '/oauth',
+    ])('%s: no CORS at all', async (path) => {
+      const response = await preflight(path);
+      expect(response.headers.get('access-control-allow-origin')).toBeNull();
+      expect(response.headers.get('access-control-allow-methods')).toBeNull();
+    });
   });
 });

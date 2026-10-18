@@ -2,6 +2,7 @@ import { All, Controller, Inject, Req, Res } from '@nestjs/common';
 import type { Request, Response } from 'express';
 
 import { sessionBlockedError } from '@modules/blocklist/services/blocklist-session.source';
+import { challengeHeader } from '@modules/oauth/domain/www-authenticate';
 import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { attributionOf } from '@modules/toolset/domain/attribution';
 import {
@@ -12,11 +13,12 @@ import {
 } from '@modules/toolset/domain/mcp-url';
 import { AccessResolver } from '@modules/toolset/services/access.resolver';
 import { McpEndpointResolver } from '@modules/toolset/services/mcp-endpoint.resolver';
+import { BaseError } from '@shared/errors/base.error';
 
 import { MCP_BEARER_PREFIX } from '../constants/mcp.constants';
-import { McpErrors } from '../errors/mcp.errors';
+import { McpErrorCode, McpErrors } from '../errors/mcp.errors';
 import { McpScope } from '../ports/mcp-scope';
-import { MCP_SESSION_SOURCE, McpSessionPort } from '../ports/mcp-session.port';
+import { MCP_SESSION_SOURCE, McpSession, McpSessionPort } from '../ports/mcp-session.port';
 import { McpHttpBridge } from '../services/mcp-http-bridge';
 import { McpServerFactory } from '../services/mcp-server.factory';
 
@@ -32,6 +34,7 @@ import { McpServerFactory } from '../services/mcp-server.factory';
  * request ─▶ parse the URL (canonical form)        unknown form        → 404
  *         ─▶ a browser? (before auth)              302 to the web app
  *         ─▶ authenticate                           no or bad token     → 401
+ *                                                   + WWW-Authenticate
  *         ─▶ resolve the URL for this org           not here / not his  → 404
  *         ─▶ resolve the caller's access (cached, invalidated on write)
  *         ─▶ one MCP server bound to session + scope, for this request only
@@ -92,7 +95,7 @@ export class McpController {
 
     if (!parsed) throw McpErrors.urlNotFound();
 
-    const session = await this.sessions.resolve(bearerToken(request));
+    const session = await this.authenticate(request, response);
     // A blocked person's session exists so the dashboard can read; nothing on
     // this endpoint is a read of the account's own data — `tools/list` is the
     // shop and `tools/call` spends — so it is refused whole.
@@ -106,6 +109,29 @@ export class McpController {
     };
 
     await this.bridge.serve(request, response, { session, scope });
+  }
+
+  /**
+   * The session, or the refusal. A missing or invalid credential
+   * (`MCP_CREDENTIAL_INVALID`) also gets the OAuth challenge (spec §6.3.3,
+   * R-OA-3), naming the protected resource metadata of the path the client
+   * asked for, so it can sign in from the URL alone. Identified refusals
+   * (suspended agent or organization, no wallet) keep their status and get no
+   * header: the credential is fine, and signing in again would not help.
+   */
+  private async authenticate(request: Request, response: Response): Promise<McpSession> {
+    const token = bearerToken(request);
+    try {
+      return await this.sessions.resolve(token);
+    } catch (error) {
+      if (error instanceof BaseError && error.errorCode === McpErrorCode.MCP_CREDENTIAL_INVALID) {
+        response.setHeader(
+          'WWW-Authenticate',
+          challengeHeader(this.host.mcpPublicUrl, request.originalUrl, token !== null),
+        );
+      }
+      throw error;
+    }
   }
 }
 

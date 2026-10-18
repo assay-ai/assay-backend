@@ -2,6 +2,7 @@ import {
   DiscoveryMode,
   EndpointKind,
   McpPathKind,
+  RESERVED_FIRST_SEGMENTS,
   browserRedirectTarget,
   canonicalUrl,
   endpointKindOf,
@@ -88,6 +89,39 @@ describe('MCP URLs — paths', () => {
     ['no leading slash', 'my/research'],
   ])('refuses %s (404)', (_name, path) => {
     expect(parseMcpUrl(path)).toBeNull();
+  });
+
+  describe('reserved first segments (R-OA-28)', () => {
+    it('RESERVED_FIRST_SEGMENTS contains oauth and the other held segments', () => {
+      expect([...RESERVED_FIRST_SEGMENTS]).toEqual([
+        't',
+        '.well-known',
+        'health',
+        'status',
+        'docs',
+        'oauth',
+      ]);
+    });
+
+    it('/oauth/x parses to null, in any case and any depth', () => {
+      for (const path of [
+        '/oauth/x',
+        '/oauth',
+        '/OAuth/token',
+        '/oauth/clients/assay-mcp',
+        '/oauth/x?free=1',
+      ]) {
+        expect({ path, parsed: parseMcpUrl(path) }).toEqual({ path, parsed: null });
+      }
+    });
+
+    it.each(['t', '.well-known', 'health', 'status', 'docs', 'oauth'])(
+      'refuses /%s/{x} even when {x} would be a valid second segment',
+      (segment) => {
+        expect(parseMcpUrl(`/${segment}/research`)).toBeNull();
+        expect(parseMcpAbsoluteUrl(`${BASE}/${segment}/research`, BASE)).toBeNull();
+      },
+    );
   });
 
   it('refuses a URL longer than 2,048 characters', () => {
