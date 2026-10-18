@@ -239,6 +239,8 @@ export enum ProviderErrorCode {
   PROVIDER_INVALID_CREDENTIAL_HEADERS = 'PROVIDER_INVALID_CREDENTIAL_HEADERS',
   /** A credential set names an origin the binding does not use (draft or published endpoint). */
   PROVIDER_CREDENTIAL_ORIGIN_MISMATCH = 'PROVIDER_CREDENTIAL_ORIGIN_MISMATCH',
+  /** The credential set for the live (published, ACTIVE) origin cannot be deleted. 409. */
+  PROVIDER_CREDENTIAL_ORIGIN_LIVE = 'PROVIDER_CREDENTIAL_ORIGIN_LIVE',
   /** The endpoint names a port the egress relay cannot reach. */
   PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED = 'PROVIDER_ENDPOINT_PORT_NOT_SUPPORTED',
 }
@@ -746,6 +748,14 @@ export const ProviderErrors = createDomainErrorFactory('PROVIDER', {
     statusCode: 400,
     message: (context?: Record<string, any>) =>
       `Invalid credential headers: ${(context?.problems ?? []).join('; ')}`,
+  },
+  credentialOriginLive: {
+    code: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_LIVE,
+    statusCode: 409,
+    message: () =>
+      `These credentials belong to the live endpoint of an active binding. Pause the binding ` +
+      `or publish a revision with a different endpoint before removing them; replace them ` +
+      `instead to rotate the key.`,
   },
   credentialOriginMismatch: {
     code: ProviderErrorCode.PROVIDER_CREDENTIAL_ORIGIN_MISMATCH,

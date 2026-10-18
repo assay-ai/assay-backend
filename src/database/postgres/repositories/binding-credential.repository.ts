@@ -51,19 +51,24 @@ export class BindingCredentialRepository extends OrganizationScopedRepository<Bi
     await this.delete({ organizationId, bindingId, origin });
   }
 
-  /** Deletes every origin of the binding not in `keepOrigins`; returns the count. */
+  /** Deletes every origin of the binding not in `keepOrigins`; returns what was removed. */
   async pruneExcept(
     manager: EntityManager,
     organizationId: string,
     bindingId: string,
     keepOrigins: readonly string[],
-  ): Promise<number> {
-    const result = await manager.delete(BindingCredentialEntity, {
+  ): Promise<Array<{ origin: string; headerNames: string[] }>> {
+    const where = {
       organizationId,
       bindingId,
       ...(keepOrigins.length > 0 ? { origin: Not(In([...keepOrigins])) } : {}),
+    };
+    const doomed = await manager.find(BindingCredentialEntity, {
+      select: { origin: true, headerNames: true },
+      where,
     });
-    return result.affected ?? 0;
+    if (doomed.length > 0) await manager.delete(BindingCredentialEntity, where);
+    return doomed.map(({ origin, headerNames }) => ({ origin, headerNames }));
   }
 }
 

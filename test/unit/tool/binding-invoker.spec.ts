@@ -23,6 +23,7 @@ import {
   classifyResponse,
 } from '@modules/tool/domain/classification';
 import { MappingFault, mappingFaultOf } from '@modules/tool/domain/mapping';
+import { BindingAuthMode } from '@modules/tool/ports/tool.types';
 import { ToolErrorCode } from '@modules/tool/errors/tool.errors';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
 import { EgressHttpClient } from '@shared/network/egress';
@@ -444,6 +445,8 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
     method?: 'GET' | 'POST';
     reply?: { headers?: Record<string, string>; body?: string; contentType?: string };
     transportError?: unknown;
+    authMode?: BindingAuthMode;
+    omit?: { credentials?: boolean; signature?: boolean };
   }) {
     const sent: EgressRequest[] = [];
     const http = {
@@ -487,6 +490,7 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
 
     const binding = buildBinding('provider-p', {
       endpoint: ENDPOINT,
+      authMode: options.authMode,
       requestMapping:
         options.method === 'GET'
           ? {
@@ -509,7 +513,14 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
       signer as unknown as RequestSignerService,
     );
     const run = () =>
-      subject.invoke({ tool, binding, input: { query: 'q' }, timeoutMs: 2_000, callId: 'call-1' });
+      subject.invoke({
+        tool,
+        binding,
+        input: { query: 'q' },
+        timeoutMs: 2_000,
+        callId: 'call-1',
+        omit: options.omit,
+      });
     return { run, sent, signed, vault, signer, http, binding };
   }
 
@@ -616,6 +627,48 @@ describe('EgressBindingInvoker (credentials and signature)', () => {
     expect(classifyResponse(response, { toolId: TOOL_ID })).toMatchObject({
       responseClass: ResponseClass.SYSTEM_ERROR,
       reason: ClassificationReason.PLATFORM_UNAVAILABLE,
+    });
+  });
+
+  describe('API-key bindings without credentials for the origin', () => {
+    it.each([BindingAuthMode.API_KEY, BindingAuthMode.BOTH])(
+      '%s: platform fault with the fixed detail, nothing dialled',
+      async (authMode) => {
+        const { run, http, signer } = setup({ authMode });
+        const response = await run();
+        expect(http.request).not.toHaveBeenCalled();
+        expect(signer.sign).not.toHaveBeenCalled();
+        expect(response.transportError?.kind).toBe(TransportErrorKind.PLATFORM_UNAVAILABLE);
+        expect(response.transportError?.detail).toBe('credentials missing for this address');
+        expect(classifyResponse(response, { toolId: TOOL_ID })).toMatchObject({
+          responseClass: ResponseClass.SYSTEM_ERROR,
+          reason: ClassificationReason.PLATFORM_UNAVAILABLE,
+        });
+      },
+    );
+    it('dials when the set exists', async () => {
+      const { run, http } = setup({
+        authMode: BindingAuthMode.API_KEY,
+        credentials: [{ name: 'X-Key', value: 'k' }],
+      });
+      await run();
+      expect(http.request).toHaveBeenCalled();
+    });
+    it.each([BindingAuthMode.NONE, BindingAuthMode.SIGNATURE, undefined])(
+      'dials without credentials when the mode is %s',
+      async (authMode) => {
+        const { run, http } = setup({ authMode });
+        await run();
+        expect(http.request).toHaveBeenCalled();
+      },
+    );
+    it('still lets the tester omit credentials on purpose', async () => {
+      const { run, http } = setup({
+        authMode: BindingAuthMode.API_KEY,
+        omit: { credentials: true },
+      });
+      await run();
+      expect(http.request).toHaveBeenCalled();
     });
   });
 
