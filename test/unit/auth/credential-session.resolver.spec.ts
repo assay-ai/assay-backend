@@ -69,7 +69,7 @@ describe('CredentialSessionResolver — one credential row, one session shape', 
     );
   });
 
-  it('refuses an expired credential as MCP_CREDENTIAL_INVALID', async () => {
+  it('refuses an expired credential as MCP_CREDENTIAL_INVALID, before any agent read', async () => {
     const { resolver, agents } = build();
     seedLinkedAgent(agents);
 
@@ -80,9 +80,11 @@ describe('CredentialSessionResolver — one credential row, one session shape', 
         }),
       'MCP_CREDENTIAL_INVALID',
     );
+    // An inactive row costs no second query, so it times like an unknown token.
+    expect(agents.findByIdWithOrganizationCalls).toBe(0);
   });
 
-  it('refuses a revoked credential as MCP_CREDENTIAL_INVALID', async () => {
+  it('refuses a revoked credential as MCP_CREDENTIAL_INVALID, before any agent read', async () => {
     const { resolver, agents } = build();
     seedLinkedAgent(agents);
 
@@ -93,6 +95,7 @@ describe('CredentialSessionResolver — one credential row, one session shape', 
         }),
       'MCP_CREDENTIAL_INVALID',
     );
+    expect(agents.findByIdWithOrganizationCalls).toBe(0);
   });
 
   it.each([true, false])('copies paymentsAllowed=%s from opts', async (paymentsAllowed) => {
@@ -133,5 +136,31 @@ describe('CredentialSessionResolver — one credential row, one session shape', 
     expect((credentials.updateCalls[0]!.patch as { lastUsedAt: Date }).lastUsedAt).toBeInstanceOf(
       Date,
     );
+  });
+
+  it('does not let a failed last_used_at stamp reject sessionFor', async () => {
+    const { resolver, credentials, agents } = build();
+    seedLinkedAgent(agents);
+    credentials.failNextUpdate = true;
+
+    const session = await resolver.sessionFor(buildCredential({ id: 'cred-42' }), {
+      paymentsAllowed: true,
+    });
+    // Let the rejected, un-awaited stamp settle.
+    await Promise.resolve();
+
+    expect(credentials.updateCalls).toHaveLength(1);
+    expect(session).toEqual({
+      credentialId: 'cred-42',
+      storedCredential: true,
+      organizationId: 'org-1',
+      agentId: 'agent-1',
+      agentAccount: ACCOUNT,
+      chainId: CHAIN,
+      label: 'ci-deploy',
+      callerKind: McpCallerKind.AGENT,
+      delegateAccount: null,
+      paymentsAllowed: true,
+    });
   });
 });

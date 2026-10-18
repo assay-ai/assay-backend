@@ -20,6 +20,11 @@ const ACTIVE = 'ACTIVE';
  * the same checks. The only input a source chooses is `paymentsAllowed`
  * (spec §6.3.13). Nothing here reads how the row was issued.
  *
+ * Callers must pass only a row they found by authenticating a presented
+ * secret (an API key's hash, an OAuth access token), never one looked up by
+ * an id from the request: this mints a full session from whatever row it is
+ * given.
+ *
  * ## `agentAccount` and `chainId` come from `agents`, not from the credential
  *
  * `agent_credentials` has neither column — same reason `PrivyMcpSessionSource`
