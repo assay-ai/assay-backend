@@ -150,10 +150,12 @@ function build(
       written.push({ entity: (entity as { name: string }).name, row: value });
       return value;
     }),
-    // The stored `binding_versions` rows: `findOne` by revision, `maximum` over them.
-    findOne: jest.fn(
-      async (_entity: unknown, { where }: { where: { mappingVersion: number } }) =>
-        versions.find((version) => version.mappingVersion === where.mappingVersion) ?? null,
+    // The binding row (the save's locked re-read), else the stored
+    // `binding_versions` rows: `findOne` by revision, `maximum` over them.
+    findOne: jest.fn(async (entity: unknown, { where }: { where: { mappingVersion: number } }) =>
+      entity === ToolBindingEntity
+        ? stored
+        : (versions.find((version) => version.mappingVersion === where.mappingVersion) ?? null),
     ),
     maximum: jest.fn(async () =>
       versions.length === 0
