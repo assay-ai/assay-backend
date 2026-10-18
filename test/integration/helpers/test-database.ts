@@ -119,6 +119,11 @@ export class BuyerEscrowAccountColumnsSlice1759300000000 implements MigrationInt
  * `initialize()` and before `runMigrations()`, only on a database the suite owns.
  */
 export async function resetSchemaIfMigrationsChanged(dataSource: DataSource): Promise<void> {
+  const [{ name }] = (await dataSource.query('SELECT current_database() AS name')) as {
+    name: string;
+  }[];
+  assertSafeToResetSchema(name, testConnectionOptions().host, process.env);
+
   const hash = createHash('sha256');
   for (const migration of dataSource.migrations) {
     hash.update(migration.name ?? migration.constructor.name);
@@ -141,4 +146,27 @@ export async function resetSchemaIfMigrationsChanged(dataSource: DataSource): Pr
   await dataSource.query('INSERT INTO "test_schema_fingerprint" (fingerprint) VALUES ($1)', [
     fingerprint,
   ]);
+}
+
+const LOCAL_HOSTS = new Set(['localhost', '127.0.0.1', '::1']);
+
+/**
+ * Refuses to let a schema reset near a database that is not clearly a test one:
+ * the name must end in `_test`, and the server must be local unless
+ * `ALLOW_TEST_SCHEMA_RESET=1` says otherwise. Database names come from env vars
+ * (`BINDING_TEST_DATABASE` and friends), so a typo must not reach a real one.
+ */
+export function assertSafeToResetSchema(
+  database: string,
+  host: string,
+  env: NodeJS.ProcessEnv,
+): void {
+  if (!/_test$/.test(database)) {
+    throw new Error(`Refusing to reset schema of "${database}": the name must end in "_test"`);
+  }
+  if (!LOCAL_HOSTS.has(host) && env.ALLOW_TEST_SCHEMA_RESET !== '1') {
+    throw new Error(
+      `Refusing to reset schema on non-local host "${host}" without ALLOW_TEST_SCHEMA_RESET=1`,
+    );
+  }
 }
