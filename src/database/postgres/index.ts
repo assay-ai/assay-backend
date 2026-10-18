@@ -11,7 +11,6 @@ export * from './entities/abstract.entity';
 export * from './entities/organization-scoped.entity';
 export * from './entities/organization.entity';
 export * from './entities/agent.entity';
-export * from './entities/post.entity';
 export * from './entities/ledger-entry.entity';
 export * from './entities/ledger-hold.entity';
 export * from './entities/account-balance.entity';
@@ -51,7 +50,6 @@ export * from './entities/sla-strike.entity';
 // Repositories
 export * from './repositories/abstract.repository';
 export * from './repositories/organization-scoped.repository';
-export * from './repositories/post.repository';
 export * from './repositories/ledger-entry.repository';
 export * from './repositories/ledger-hold.repository';
 export * from './repositories/account-balance.repository';

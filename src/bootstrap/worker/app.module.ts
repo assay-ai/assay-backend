@@ -16,10 +16,6 @@ import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
 // WebSocket Emitter (for publishing events from background jobs)
 import { WebSocketEmitterModule } from '@websocket/websocket-emitter.module';
 
-// Starter reference modules — see src/modules/_examples/README.md
-import { ExamplesWorkerModule } from '@modules/_examples/examples-worker.module';
-import { areExamplesEnabled } from '@modules/_examples/examples.flag';
-
 // Verification worker — judges a `DATA_RESULT` off the request path
 // and settles the intent the MCP process left in `VERIFYING`.
 import { VerificationWorkerModule } from '@modules/verification/verification-worker.module';
@@ -75,7 +71,6 @@ import { NetworkModule } from '@shared/network/network.module';
     NotificationWorkerModule,
     VerifierSigningModule,
     // Starter reference modules — off by default in production
-    ...(areExamplesEnabled() ? [ExamplesWorkerModule] : []),
   ],
   controllers: [HealthcheckController],
 })

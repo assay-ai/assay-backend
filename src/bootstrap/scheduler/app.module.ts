@@ -34,10 +34,6 @@ import { FreeTierSchedulerModule } from '@modules/free-tier/free-tier-scheduler.
 import { EvmSchedulerModule } from '@modules/chains/evm/evm-scheduler.module';
 import { ToolsetSchedulerModule } from '@modules/toolset/toolset-scheduler.module';
 
-// Starter reference modules — see src/modules/_examples/README.md
-import { ExamplesSchedulerModule } from '@modules/_examples/examples-scheduler.module';
-import { areExamplesEnabled } from '@modules/_examples/examples.flag';
-
 // Controllers
 import { HealthcheckController } from '@shared/controllers/healthcheck.controller';
 import { NetworkModule } from '@shared/network/network.module';
@@ -101,7 +97,6 @@ import { NetworkModule } from '@shared/network/network.module';
     // Toolsets: grace and moderation-cutoff sweeps, daily and weekly usage stats.
     ToolsetSchedulerModule,
     // Starter reference modules — off by default in production
-    ...(areExamplesEnabled() ? [ExamplesSchedulerModule] : []),
   ],
   controllers: [HealthcheckController],
 })

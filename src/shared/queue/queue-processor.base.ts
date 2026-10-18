@@ -90,7 +90,7 @@ export abstract class QueueProcessorBase<TData = unknown, TResult = void> extend
  *
  * Deliberately structural rather than a shared `CorrelatedJobData` interface
  * every payload must extend: the base class must work for a payload it has
- * never heard of, including `_examples`' and any queue added later. A payload
+ * never heard of, including any queue added later. A payload
  * that carries no id is not an error here — it is the legacy case, and
  * the constructor above supplies a fresh one.
  */

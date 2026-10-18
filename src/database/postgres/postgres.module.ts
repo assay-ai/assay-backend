@@ -10,7 +10,6 @@ import { EvmGasGrantEntity } from './entities/evm-gas-grant.entity';
 import { LedgerEntryEntity } from './entities/ledger-entry.entity';
 import { LedgerHoldEntity } from './entities/ledger-hold.entity';
 import { PaymentIntentEntity } from './entities/payment-intent.entity';
-import { PostEntity } from './entities/post.entity';
 import { ReconciliationRunEntity } from './entities/reconciliation-run.entity';
 import { StakeSnapshotEntity } from './entities/stake-snapshot.entity';
 import { VerificationPolicyEntity } from './entities/verification-policy.entity';
@@ -35,7 +34,6 @@ import { EvmGasGrantRepository } from './repositories/evm-gas-grant.repository';
 import { LedgerEntryRepository } from './repositories/ledger-entry.repository';
 import { LedgerHoldRepository } from './repositories/ledger-hold.repository';
 import { PaymentIntentRepository } from './repositories/payment-intent.repository';
-import { PostRepository } from './repositories/post.repository';
 import { ReconciliationRunRepository } from './repositories/reconciliation-run.repository';
 import { StakeSnapshotRepository } from './repositories/stake-snapshot.repository';
 import { VerificationPolicyRepository } from './repositories/verification-policy.repository';
@@ -135,7 +133,6 @@ import { PlatformMetricsRepository } from './repositories/platform-metrics.repos
 
 /** Exported for the per-process boot tests, which stub every repository. */
 export const entities = [
-  PostEntity,
   LedgerEntryEntity,
   LedgerHoldEntity,
   AccountBalanceEntity,
@@ -200,7 +197,6 @@ export const entities = [
   ...TOOLSET_SHARING_ENTITIES,
 ];
 export const repositories = [
-  PostRepository,
   LedgerEntryRepository,
   LedgerHoldRepository,
   AccountBalanceRepository,
