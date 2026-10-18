@@ -18,13 +18,7 @@ import {
   inspectResponseMapping,
 } from '@modules/tool/domain/mapping/mapping-validator';
 import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-catalogue.port';
-import {
-  BindingAuthMode,
-  BindingStatus,
-  PricingMode,
-  Tool,
-  ToolBinding,
-} from '@modules/tool/ports/tool.types';
+import { BindingStatus, PricingMode, Tool, ToolBinding } from '@modules/tool/ports/tool.types';
 import { EGRESS_RELAY_CONFIG, EgressRelayConfig } from '@shared/network/egress';
 import { canonicalJson } from '@shared/crypto/canonical-json';
 
@@ -259,7 +253,8 @@ export class BindingEditorService {
     row.toolVersionRange = toolVersionRange;
     row.providesOutputFields = terms.providesOutputFields;
     row.supportsInputFields = terms.supportsInputFields;
-    row.authMode = body.authMode ?? BindingAuthMode.NONE;
+    // No default (D10): the DTO requires an explicit choice.
+    row.authMode = body.authMode;
     row.pricingMode = body.pricingMode;
     row.priceAmount = body.pricingMode === PricingMode.FREE ? '0' : body.priceAmount;
     row.assetId = body.assetId;
