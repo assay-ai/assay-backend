@@ -35,6 +35,11 @@ export enum TryWarningCode {
   NO_JSON_RESPONSE = 'NO_JSON_RESPONSE',
   /** The example would exceed the 2 KB cap; it is returned without its result. */
   EXAMPLE_TOO_LARGE = 'EXAMPLE_TOO_LARGE',
+  /**
+   * The target is not the origin of one of the caller's bindings, so the test
+   * went without the Assay request signature: an endpoint checking it refuses.
+   */
+  UNSIGNED_FOREIGN_ORIGIN = 'UNSIGNED_FOREIGN_ORIGIN',
 }
 
 export interface TryWarning {
@@ -76,6 +81,10 @@ export const TRY_LIMITS = Object.freeze({
   openapiChars: 512 * 1024,
   schemaDepth: 8,
   schemaProperties: 100,
+  /** Schema nodes one OpenAPI operation may expand to, `$ref`s inlined. */
+  schemaNodes: 5_000,
+  /** Entries kept of an `allOf` / `anyOf` / `oneOf`. */
+  schemaAlternatives: 20,
   exampleBytes: 2 * 1024,
 });
 
@@ -83,8 +92,16 @@ export const TRY_LIMITS = Object.freeze({
 const SECRET_NAME =
   /(^|[-_])(auth|authorization|api[-_]?key|apikey|key|token|secret|password|passwd|session|cookie|signature|credential|bearer)s?($|[-_])/i;
 
+/**
+ * Whether a header, query or body name reads as a credential. camelCase is
+ * split first (`accessToken` → `access_Token`), so `apiKey`, `authToken` and
+ * `clientSecret` read as what they are. Conservative on purpose: a false
+ * positive costs an input the provider re-adds by hand; a false negative
+ * suggests a secret as a mapping constant.
+ */
 export function isCredentialName(name: string): boolean {
-  return SECRET_NAME.test(name) || /^authorization$|^cookie$|^x-api-key$/i.test(name);
+  const split = name.replace(/([a-z0-9])([A-Z])/g, '$1_$2');
+  return SECRET_NAME.test(split) || /^authorization$|^cookie$|^x-api-key$/i.test(name);
 }
 
 /** Headers a test never forwards: the transport's, or the platform's own namespace. */
@@ -420,6 +437,7 @@ export function planFromOpenApi(text: string, options: OpenApiTryOptions = {}): 
   }
   const root = doc;
   const deref = (value: unknown): unknown => resolveRef(root, value, 0);
+  const walk = schemaWalk(root);
 
   // The operation.
   const operations: Array<{ path: string; method: TryMethod; op: Doc; item: Doc }> = [];
@@ -502,7 +520,7 @@ export function planFromOpenApi(text: string, options: OpenApiTryOptions = {}): 
       continue;
     }
     if (where !== 'query' && where !== 'path') continue;
-    const schema = sanitizeSchema(deref(param.schema), deref, 0);
+    const schema = sanitizeSchema(param.schema, walk, 0);
     const isRequired = where === 'path' || param.required === true;
     const value = firstDefined(
       input[name],
@@ -532,15 +550,29 @@ export function planFromOpenApi(text: string, options: OpenApiTryOptions = {}): 
 
   // The JSON body: its top-level properties are inputs beside the parameters.
   let body: JsonObject | undefined;
+  const bodySecrets: string[] = [];
   const requestBody = deref(op.requestBody);
   if (method === 'POST' && isObject(requestBody) && isObject(requestBody.content)) {
     const media = deref(requestBody.content['application/json']);
-    const schema = isObject(media) ? sanitizeSchema(deref(media.schema), deref, 0) : null;
+    const schema = isObject(media) ? sanitizeSchema(media.schema, walk, 0) : null;
     if (isObject(schema) && isObject(schema.properties)) {
       const example = isObject(media) && isObject(media.example) ? media.example : {};
       const bodyRequired = Array.isArray(schema.required) ? (schema.required as string[]) : [];
       body = {};
       for (const [name, propSchema] of Object.entries(schema.properties)) {
+        if (isCredentialName(name)) {
+          // Sent when given (as a secret), never an input.
+          const given = input[name];
+          warnings.push({
+            code: TryWarningCode.CREDENTIAL_DETECTED,
+            detail: `the body field "${name}" reads as a credential: it is not an input`,
+          });
+          if (given !== undefined && given !== null) {
+            body[name] = given as JsonValue;
+            bodySecrets.push(...stringsOf(given));
+          }
+          continue;
+        }
         if (name in properties) {
           warnings.push({
             code: TryWarningCode.NOT_SUPPORTED,
@@ -593,10 +625,14 @@ export function planFromOpenApi(text: string, options: OpenApiTryOptions = {}): 
 
   const headers: Record<string, string> = { accept: 'application/json' };
   if (body !== undefined) headers['content-type'] = 'application/json';
+  // Headers given for the test are the caller's credentials, whatever their
+  // names: sent once, redacted from every echo, never a mapping constant.
+  const secretHeaders = new Set<string>();
   for (const [name, value] of Object.entries(options.headers ?? {})) {
     const key = name.toLowerCase();
     if (DROPPED_HEADERS.has(key) || key.startsWith('x-assay-')) continue;
     headers[key] = value;
+    secretHeaders.add(key);
   }
 
   return assemble({
@@ -607,9 +643,11 @@ export function planFromOpenApi(text: string, options: OpenApiTryOptions = {}): 
     body,
     pathTemplate: path,
     operationId: typeof op.operationId === 'string' ? op.operationId : null,
-    outputSchema: outputSchemaOf(op, deref),
+    outputSchema: outputSchemaOf(op, deref, walk),
     runnable: missing.length === 0,
     warnings,
+    secretHeaders,
+    extraSecrets: bodySecrets,
     declaredInputs: {
       schema: { type: 'object', properties, required } as JsonObject,
       values,
@@ -632,6 +670,10 @@ interface AssembleInput {
   readonly outputSchema: JsonObject | null;
   readonly runnable: boolean;
   readonly warnings: TryWarning[];
+  /** Header names that are secret whatever they are called (OpenAPI `headers`). */
+  readonly secretHeaders?: ReadonlySet<string>;
+  /** Values to redact found elsewhere (credential-named body fields). */
+  readonly extraSecrets?: readonly string[];
   /** OpenAPI: the inputs the document declares; curl infers them from the request. */
   readonly declaredInputs: {
     readonly schema: JsonObject;
@@ -642,12 +684,12 @@ interface AssembleInput {
 
 function assemble(input: AssembleInput): TryPlan {
   const { target, headers, body, warnings } = input;
-  const secrets: string[] = [];
+  const secrets: string[] = [...(input.extraSecrets ?? [])];
   const secretQueryNames: string[] = [];
   const mappingHeaders: Record<string, JsonValue> = {};
 
   for (const [name, value] of Object.entries(headers)) {
-    if (isCredentialName(name)) {
+    if (isCredentialName(name) || input.secretHeaders?.has(name)) {
       secrets.push(value, ...credentialParts(value));
       warnings.push({
         code: TryWarningCode.CREDENTIAL_DETECTED,
@@ -682,11 +724,23 @@ function assemble(input: AssembleInput): TryPlan {
   const bodyMapping: Record<string, JsonValue> = {};
   if (body !== undefined) {
     for (const [name, value] of Object.entries(body)) {
+      if (input.source === 'CURL' && isCredentialName(name)) {
+        // A credential in the body: sent with the test, never an input,
+        // an example or a mapping.
+        secrets.push(...stringsOf(value));
+        warnings.push({
+          code: TryWarningCode.CREDENTIAL_DETECTED,
+          detail: `the body field "${name}" reads as a credential: it is sent with the test only; it is not an input`,
+        });
+        continue;
+      }
+      if (input.source === 'OPENAPI' && isCredentialName(name)) continue;
       bodyMapping[name] = `$.${name}`;
       if (input.source === 'CURL') {
         if (name in properties) continue;
-        argumentsOf[name] = value;
-        properties[name] = inferSchema(value);
+        const clean = withoutCredentials(value, name, secrets, warnings);
+        argumentsOf[name] = clean;
+        properties[name] = inferSchema(clean);
       }
     }
   }
@@ -848,7 +902,11 @@ export function exampleOf(
 
 // ── OpenAPI helpers ────────────────────────────────────────────────────────
 
-function outputSchemaOf(op: Doc, deref: (value: unknown) => unknown): JsonObject | null {
+function outputSchemaOf(
+  op: Doc,
+  deref: (value: unknown) => unknown,
+  walk: SchemaWalk,
+): JsonObject | null {
   const responses = deref(op.responses);
   if (!isObject(responses)) return null;
   for (const code of ['200', '201', '2XX', '2xx', 'default']) {
@@ -856,7 +914,7 @@ function outputSchemaOf(op: Doc, deref: (value: unknown) => unknown): JsonObject
     if (!isObject(response) || !isObject(response.content)) continue;
     const media = deref(response.content['application/json']);
     if (!isObject(media)) continue;
-    const schema = sanitizeSchema(deref(media.schema), deref, 0);
+    const schema = sanitizeSchema(media.schema, walk, 0);
     if (isObject(schema)) return schema as JsonObject;
   }
   return null;
@@ -866,50 +924,106 @@ function outputSchemaOf(op: Doc, deref: (value: unknown) => unknown): JsonObject
 function resolveRef(root: Doc, value: unknown, depth: number): unknown {
   if (!isObject(value) || typeof value.$ref !== 'string') return value;
   if (depth > 16 || !value.$ref.startsWith('#/')) return {};
+  return resolveRef(root, lookupRef(root, value.$ref), depth + 1);
+}
+
+function lookupRef(root: Doc, ref: string): unknown {
   let node: unknown = root;
-  for (const part of value.$ref.slice(2).split('/')) {
+  for (const part of ref.slice(2).split('/')) {
     const key = part.replace(/~1/g, '/').replace(/~0/g, '~');
     node = isObject(node) ? node[key] : undefined;
   }
-  return resolveRef(root, node, depth + 1);
+  return node;
 }
 
-/** A schema with its `$ref`s inlined, depth-capped, without OpenAPI-only keywords. */
-function sanitizeSchema(
-  schema: unknown,
-  deref: (value: unknown) => unknown,
-  depth: number,
-): Doc | null {
-  const node = deref(schema);
+/**
+ * One walk over a document's schemas: a node budget shared by every schema
+ * of the operation, and the `$ref`s on the current path. A `$ref` is
+ * expanded in place, so without the budget a few kilobytes of mutually
+ * referring schemas (`A.properties.p0..p99 → A`) expand to 100^depth nodes,
+ * synchronously, on the API's event loop.
+ */
+interface SchemaWalk {
+  readonly root: Doc;
+  budget: number;
+  readonly onPath: Set<string>;
+}
+
+function schemaWalk(root: Doc): SchemaWalk {
+  return { root, budget: TRY_LIMITS.schemaNodes, onPath: new Set() };
+}
+
+/**
+ * A schema with its `$ref`s inlined, depth-capped, without OpenAPI-only
+ * keywords. A `$ref` already on the current path (a cycle) becomes `{}`;
+ * past {@link TRY_LIMITS.schemaNodes} nodes the document is refused.
+ */
+function sanitizeSchema(schema: unknown, walk: SchemaWalk, depth: number): Doc | null {
+  walk.budget -= 1;
+  if (walk.budget < 0) {
+    throw new TryParseError([
+      `the OpenAPI schemas expand past ${TRY_LIMITS.schemaNodes} nodes; simplify them or their $refs`,
+    ]);
+  }
+  const refs: string[] = [];
+  let node = schema;
+  while (isObject(node) && typeof node.$ref === 'string') {
+    const ref = node.$ref;
+    if (!ref.startsWith('#/') || walk.onPath.has(ref) || refs.includes(ref) || refs.length >= 16) {
+      return {};
+    }
+    refs.push(ref);
+    node = lookupRef(walk.root, ref);
+  }
   if (!isObject(node)) return null;
   if (depth >= TRY_LIMITS.schemaDepth) return { type: node.type ?? 'object' };
-  const out: Doc = {};
-  for (const [key, value] of Object.entries(node)) {
-    if (
-      ['xml', 'externalDocs', 'discriminator', 'readOnly', 'writeOnly', 'deprecated'].includes(key)
-    ) {
-      continue;
-    }
-    if (key === 'nullable') continue;
-    if (key === 'properties' && isObject(value)) {
-      const properties: Doc = {};
-      for (const [name, child] of Object.entries(value).slice(0, TRY_LIMITS.schemaProperties)) {
-        properties[name] = sanitizeSchema(child, deref, depth + 1) ?? {};
+  for (const ref of refs) walk.onPath.add(ref);
+  try {
+    const out: Doc = {};
+    for (const [key, value] of Object.entries(node)) {
+      if (
+        ['xml', 'externalDocs', 'discriminator', 'readOnly', 'writeOnly', 'deprecated'].includes(
+          key,
+        )
+      ) {
+        continue;
       }
-      out.properties = properties;
-      continue;
+      if (key === 'nullable') continue;
+      if (key === 'properties' && isObject(value)) {
+        const properties: Doc = {};
+        for (const [name, child] of Object.entries(value).slice(0, TRY_LIMITS.schemaProperties)) {
+          properties[name] = sanitizeSchema(child, walk, depth + 1) ?? {};
+        }
+        out.properties = properties;
+        continue;
+      }
+      if ((key === 'items' || key === 'additionalProperties') && isObject(value)) {
+        out[key] = sanitizeSchema(value, walk, depth + 1) ?? {};
+        continue;
+      }
+      if (['allOf', 'anyOf', 'oneOf'].includes(key) && Array.isArray(value)) {
+        out[key] = value
+          .slice(0, TRY_LIMITS.schemaAlternatives)
+          .map((child) => sanitizeSchema(child, walk, depth + 1) ?? {});
+        continue;
+      }
+      // Any other keyword is copied only when it holds no `$ref`: a reference
+      // left in place would point into a document nobody keeps.
+      if (!containsRef(value)) out[key] = value;
     }
-    if ((key === 'items' || key === 'additionalProperties') && isObject(value)) {
-      out[key] = sanitizeSchema(value, deref, depth + 1) ?? {};
-      continue;
-    }
-    if (['allOf', 'anyOf', 'oneOf'].includes(key) && Array.isArray(value)) {
-      out[key] = value.map((child) => sanitizeSchema(child, deref, depth + 1) ?? {});
-      continue;
-    }
-    out[key] = value;
+    return out;
+  } finally {
+    for (const ref of refs) walk.onPath.delete(ref);
   }
-  return out;
+}
+
+/** Whether a JSON value holds a `$ref` anywhere, looked at no more than 500 nodes deep. */
+function containsRef(value: unknown, seen = { left: 500 }): boolean {
+  if (seen.left-- <= 0) return true;
+  if (Array.isArray(value)) return value.some((child) => containsRef(child, seen));
+  if (!isObject(value)) return false;
+  if ('$ref' in value) return true;
+  return Object.values(value).some((child) => containsRef(child, seen));
 }
 
 function firstExample(examples: unknown, deref: (value: unknown) => unknown): unknown {
@@ -945,6 +1059,55 @@ function credentialParts(value: string): string[] {
     if (colon >= 0) parts.push(decoded.slice(colon + 1));
   }
   return parts;
+}
+
+/** Every string inside a JSON value (a credential field's value, for redaction). */
+function stringsOf(value: unknown, depth = 0): string[] {
+  if (depth > 16) return [];
+  if (typeof value === 'string') return [value];
+  if (typeof value === 'number' || typeof value === 'boolean') return [String(value)];
+  if (Array.isArray(value)) return value.flatMap((child) => stringsOf(child, depth + 1));
+  if (isObject(value)) return Object.values(value).flatMap((child) => stringsOf(child, depth + 1));
+  return [];
+}
+
+/**
+ * A body value with every credential-named field below it taken out; their
+ * values join `secrets` and each earns a warning.
+ */
+function withoutCredentials(
+  value: JsonValue,
+  path: string,
+  secrets: string[],
+  warnings: TryWarning[],
+  depth = 0,
+): JsonValue {
+  if (depth > TRY_LIMITS.schemaDepth) return value;
+  if (Array.isArray(value)) {
+    return value.map((child) =>
+      withoutCredentials(child, `${path}[]`, secrets, warnings, depth + 1),
+    );
+  }
+  if (!isObject(value)) return value;
+  const out: JsonObject = {};
+  for (const [name, child] of Object.entries(value)) {
+    if (isCredentialName(name)) {
+      secrets.push(...stringsOf(child));
+      warnings.push({
+        code: TryWarningCode.CREDENTIAL_DETECTED,
+        detail: `the body field "${path}.${name}" reads as a credential: it is sent with the test only; it is not an input`,
+      });
+      continue;
+    }
+    out[name] = withoutCredentials(
+      child as JsonValue,
+      `${path}.${name}`,
+      secrets,
+      warnings,
+      depth + 1,
+    );
+  }
+  return out;
 }
 
 function decodeForm(text: string): string {
