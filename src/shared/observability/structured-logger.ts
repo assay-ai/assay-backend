@@ -84,18 +84,22 @@ export class StructuredLogger extends ConsoleLogger {
     const base = super.getJsonLogObject(message, options);
     const store = RequestContext.get();
 
+    // `redact` is generic over `unknown`; the cast back to `typeof base`
+    // is safe because redaction only ever replaces individual values with
+    // `REDACTED`/`[CIRCULAR]`/`[TRUNCATED]` strings — it never removes or
+    // renames a key — so the shape here is unchanged.
+    //
+    // The caller's part is redacted *before* the correlation fields are
+    // added: `requestId` is a forbidden key when a caller logs it (that name
+    // is the OAuth consent request id, R-OA-27), while the one added here is
+    // the trace id this logger exists to carry.
     const enriched = {
-      ...base,
+      ...(redact(base) as typeof base),
       requestId: store?.requestId ?? null,
       organizationId: store?.organizationId ?? null,
       // Present on HTTP requests only; joins a log line to an override entry.
       ...(store?.serverRequestId ? { serverRequestId: store.serverRequestId } : {}),
     };
-
-    // `redact` is generic over `unknown`; the cast back to `typeof enriched`
-    // is safe because redaction only ever replaces individual values with
-    // `REDACTED`/`[CIRCULAR]`/`[TRUNCATED]` strings — it never removes or
-    // renames a key — so the shape here is unchanged.
-    return redact(enriched) as typeof enriched;
+    return enriched;
   }
 }

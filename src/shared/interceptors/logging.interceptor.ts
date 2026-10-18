@@ -13,13 +13,21 @@ import { tap, catchError } from 'rxjs/operators';
 import { Request, Response } from 'express';
 import { BaseError } from '@shared/errors/base.error';
 import { SESSION_REQUEST_KEY } from '@shared/auth/session-request.key';
-import { RequestContext, RequestContextStore, requestIdFromHeader } from '@shared/observability';
+import {
+  RequestContext,
+  RequestContextStore,
+  redactOAuthUrl,
+  requestIdFromHeader,
+} from '@shared/observability';
 
 /**
  * One request, one `RequestContext`, plus the same information this
  * interceptor logged before (`method`, `url`, `statusCode`, response time,
  * `ip`, `userAgent`), now as structured fields rather than one formatted
- * string.
+ * string. The `url` is logged through `redactOAuthUrl`: a consent request id
+ * (`/oauth/requests/{rid}`, `continue?request={rid}`) and any OAuth secret in
+ * the query never reach a log line (R-OA-27). Headers and bodies are never
+ * logged here at all.
  *
  * ## Where `requestId` and `organizationId` come from
  *
@@ -66,7 +74,8 @@ export class LoggingInterceptor implements NestInterceptor {
   intercept(context: ExecutionContext, next: CallHandler): Observable<any> {
     const request = context.switchToHttp().getRequest<Request>();
     const response = context.switchToHttp().getResponse<Response>();
-    const { method, url, ip } = request;
+    const { method, ip } = request;
+    const url = redactOAuthUrl(request.url);
     const userAgent = request.get('user-agent') || '';
     const now = Date.now();
     const store = buildRequestContextStore(request);
