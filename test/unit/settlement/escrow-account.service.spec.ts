@@ -467,3 +467,37 @@ describe('EscrowAccountService.getForConsole degrades instead of 500ing', () => 
     await expect(service.getForConsole(ORG, ACCOUNT)).rejects.toBe(failure);
   });
 });
+
+describe('EscrowAccountService lifetime totals (B7)', () => {
+  it('publishes the chain lifetime counters, which add up to the balance', async () => {
+    const { service } = buildService({
+      reading: chainBalance({
+        balance: MoneyUtil.of(13_240_000n, USDC, 6),
+        lifetime: { funded: 20_000_000n, redeemed: 6_760_000n, withdrawn: 0n },
+      }),
+    });
+
+    const state = await service.getForConsole(ORG, ACCOUNT);
+
+    expect(state.lifetime).toEqual({
+      deposited: MoneyUtil.of(20_000_000n, USDC, 6),
+      spent: MoneyUtil.of(6_760_000n, USDC, 6),
+      withdrawn: MoneyUtil.of(0n, USDC, 6),
+    });
+    const { deposited, spent, withdrawn } = state.lifetime!;
+    expect(BigInt(deposited.amount) - BigInt(spent.amount) - BigInt(withdrawn.amount)).toBe(
+      BigInt(state.balance!.amount),
+    );
+  });
+
+  it('is null where the chain keeps no counters, with no escrow, and when unreadable', async () => {
+    expect((await buildService().service.getForConsole(ORG, ACCOUNT)).lifetime).toBeNull();
+    expect(
+      (await buildService({ reading: null }).service.getForConsole(ORG, ACCOUNT)).lifetime,
+    ).toBeNull();
+    expect(
+      (await buildService({ readerThrows: new Error('rpc down') }).service.getForConsole(ORG, ACCOUNT))
+        .lifetime,
+    ).toBeNull();
+  });
+});
