@@ -324,7 +324,12 @@ describe('AgentCredentialsService.list — issuedVia and oauthClient (spec §7.1
     ],
     [
       'a listed CIMD client with no redirect',
-      clientRow({ id: CIMD_ROW, clientId: CIMD_CLIENT_ID, kind: OAuthClientKind.CIMD, redirectUris: [] }),
+      clientRow({
+        id: CIMD_ROW,
+        clientId: CIMD_CLIENT_ID,
+        kind: OAuthClientKind.CIMD,
+        redirectUris: [],
+      }),
     ],
     [
       "another deployment's built-in client",
