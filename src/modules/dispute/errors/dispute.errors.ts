@@ -14,6 +14,7 @@ export enum DisputeErrorCode {
   DISPUTE_CALL_NOT_DISPUTABLE = 'DISPUTE_CALL_NOT_DISPUTABLE',
   DISPUTE_FILING_WINDOW_CLOSED = 'DISPUTE_FILING_WINDOW_CLOSED',
   DISPUTE_ALREADY_OPEN = 'DISPUTE_ALREADY_OPEN',
+  DISPUTE_ALREADY_DECIDED = 'DISPUTE_ALREADY_DECIDED',
   DISPUTE_RATE_LIMITED = 'DISPUTE_RATE_LIMITED',
   DISPUTE_ALREADY_RESPONDED = 'DISPUTE_ALREADY_RESPONDED',
   DISPUTE_NOT_DECIDABLE = 'DISPUTE_NOT_DECIDABLE',
@@ -101,11 +102,20 @@ export const DisputeErrors = createDomainErrorFactory('DISPUTE', {
     message: (context?: Record<string, any>) =>
       `This call already has an open dispute${context?.id ? `: ${context.id}` : ''}`,
   },
+  /** The call already has a decided dispute: one decision per call. */
+  alreadyDecided: {
+    code: DisputeErrorCode.DISPUTE_ALREADY_DECIDED,
+    statusCode: 409,
+    message: (context?: Record<string, any>) =>
+      `This call's dispute was already decided${context?.id ? `: ${context.id}` : ''}`,
+  },
   rateLimited: {
     code: DisputeErrorCode.DISPUTE_RATE_LIMITED,
     statusCode: 429,
     message: (context?: Record<string, any>) =>
-      `Too many disputes filed in the last 24 hours` +
+      (context?.scope === 'provider'
+        ? `Too many open disputes against this provider in the last 24 hours`
+        : `Too many disputes filed in the last 24 hours`) +
       `${context?.limit !== undefined ? ` (limit ${context.limit})` : ''}`,
   },
   alreadyResponded: {
