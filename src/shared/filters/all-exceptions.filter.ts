@@ -8,6 +8,7 @@ import {
 } from '@nestjs/common';
 import { Request, Response } from 'express';
 import { AppError } from '@shared/errors/app-errors';
+import { redactOAuthUrl } from '@shared/observability';
 import {
   ErrorResponse,
   HttpErrorCode,
@@ -54,7 +55,9 @@ export class AllExceptionsFilter implements ExceptionFilter {
     const response = ctx.getResponse<Response>();
 
     const { code, message, statusCode, context } = this.describe(exception);
-    const path = request.originalUrl ?? request.url;
+    // The path is logged and echoed with any consent request id and OAuth
+    // secret replaced (R-OA-27). The request body is never read here.
+    const path = redactOAuthUrl(request.originalUrl ?? request.url);
     const line = `[${statusCode}] ${code} - ${message} | ${request.method} ${path}`;
 
     // 5xx is our bug and must reach whoever is on call; 4xx is the caller's

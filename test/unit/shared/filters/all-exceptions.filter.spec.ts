@@ -4,6 +4,7 @@ import {
   HttpException,
   NotFoundException,
 } from '@nestjs/common';
+import { Logger } from '@nestjs/common';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { ErrorResponse } from '@shared/errors/error-response';
 import { PaymentErrors } from '@modules/payment/errors/payment.errors';
@@ -150,6 +151,75 @@ describe('AllExceptionsFilter', () => {
 
       const notFound = capture(PaymentErrors.paymentIntentNotFound({ id: 'abc-123' }));
       expectTheOneShape(notFound);
+    });
+  });
+
+  describe('R-OA-27: no consent request id, token or request body', () => {
+    const RID = 'cmlkLXZhbHVlLXRoYXQtbXVzdC1uZXZlci1sZWFrLTEyMzQ';
+    const SECRET = 'assay_rt_' + 'R'.repeat(43);
+
+    function captureWithLog(exception: unknown, url: string, body?: unknown) {
+      const json = jest.fn();
+      const response = { status: jest.fn(() => ({ json })), json, headersSent: false };
+      const request = { url, originalUrl: url, method: 'POST', body };
+      const host = {
+        getType: () => 'http',
+        switchToHttp: () => ({ getRequest: () => request, getResponse: () => response }),
+      } as unknown as ArgumentsHost;
+      const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+      const error = jest.spyOn(Logger.prototype, 'error').mockImplementation(() => undefined);
+      let logged: string;
+      try {
+        new AllExceptionsFilter().catch(exception, host);
+        logged = JSON.stringify([...debug.mock.calls, ...error.mock.calls]);
+      } finally {
+        debug.mockRestore();
+        error.mockRestore();
+      }
+      return { body: json.mock.calls[0][0] as ErrorResponse, logged };
+    }
+
+    it.each([
+      [`/api/v1/oauth/requests/${RID}`, '/api/v1/oauth/requests/[REDACTED]'],
+      [`/api/v1/oauth/requests/${RID}/approve`, '/api/v1/oauth/requests/[REDACTED]/approve'],
+      [`/oauth/authorize/continue?request=${RID}`, '/oauth/authorize/continue'],
+    ])('redacts the rid in error.path and the 4xx debug line: %s', (url, expected) => {
+      const { body, logged } = captureWithLog(new NotFoundException(), url);
+      expectTheOneShape(body);
+      expect(body.error.path).toBe(expected);
+      expect(JSON.stringify(body)).not.toContain(RID);
+      expect(logged).toContain(expected);
+      expect(logged).not.toContain(RID);
+    });
+
+    it('redacts the rid in the 5xx error line too', () => {
+      const { body, logged } = captureWithLog(new Error('boom'), `/api/v1/oauth/requests/${RID}`);
+      expect(body.error.statusCode).toBe(500);
+      expect(logged).not.toContain(RID);
+      expect(JSON.stringify(body)).not.toContain(RID);
+    });
+
+    it('never echoes the request body (token and revoke forms), in the body or the log', () => {
+      for (const path of ['/oauth/token', '/oauth/revoke', '/oauth/register']) {
+        const form = { grant_type: 'refresh_token', refresh_token: SECRET, token: SECRET };
+        for (const exception of [
+          new BadRequestException(),
+          new HttpException('teapot', 418),
+          new Error('boom'),
+        ]) {
+          const { body, logged } = captureWithLog(exception, path, form);
+          expect(JSON.stringify(body)).not.toContain(SECRET);
+          expect(logged).not.toContain(SECRET);
+        }
+      }
+    });
+
+    it('redacts a token in a query string of error.path', () => {
+      const { body } = captureWithLog(
+        new NotFoundException(),
+        `/oauth/token?refresh_token=${SECRET}`,
+      );
+      expect(body.error.path).toBe('/oauth/token?refresh_token=[REDACTED]');
     });
   });
 });
