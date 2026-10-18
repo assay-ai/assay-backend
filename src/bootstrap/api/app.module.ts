@@ -58,6 +58,7 @@ import { OperatorApiModule } from '@modules/operator/operator-api.module';
 import { SlashModule } from '@modules/slash/slash.module';
 import { ToolRequestModule } from '@modules/tool-request/tool-request.module';
 import { ObservabilityModule } from '@modules/observability/observability.module';
+import { OAuthApiModule } from '@modules/oauth/oauth-api.module';
 
 // Diagnostics (error-contract probe)
 import { DiagnosticsModule } from '@shared/diagnostics/diagnostics.module';
@@ -173,6 +174,10 @@ import { NetworkModule } from '@shared/network/network.module';
     NotificationApiModule,
     FreeTierApiModule,
     DisputeApiModule,
+    // The consent API of the OAuth authorization server (`/oauth/requests/:rid`):
+    // a person approves an app here; the MCP app mints the code. Needs the
+    // OAuth configuration (`OAUTH_*`, `AUTH_SESSION_SOURCE=both`).
+    OAuthApiModule,
 
     // Slash proposals, disputes and the operator console. Two surfaces, deliberately separate: the
     // provider reads their own case through `SessionAuthGuard`, and the

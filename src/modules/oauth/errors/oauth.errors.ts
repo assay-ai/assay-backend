@@ -14,6 +14,7 @@ export enum OAuthErrorCode {
   OAUTH_REQUEST_ALREADY_DECIDED = 'OAUTH_REQUEST_ALREADY_DECIDED',
   OAUTH_AGENT_NOT_ACTIVE = 'OAUTH_AGENT_NOT_ACTIVE',
   OAUTH_GRANT_LIMIT_REACHED = 'OAUTH_GRANT_LIMIT_REACHED',
+  OAUTH_CREDENTIAL_NAME_INVALID = 'OAUTH_CREDENTIAL_NAME_INVALID',
 }
 
 export type OAuthErrorCodesArePrefixed = AssertDomainErrorCodes<'OAUTH', `${OAuthErrorCode}`>;
@@ -47,5 +48,14 @@ export const OAuthErrors = createDomainErrorFactory('OAUTH', {
     message: (context?: Record<string, any>) =>
       `This agent already has ${context?.limit ?? 'the maximum number of'} connected apps; ` +
       'disconnect one before adding another',
+  },
+  /**
+   * The connection's name is empty, or nothing but control, format or
+   * invisible characters, once those are stripped.
+   */
+  credentialNameInvalid: {
+    code: OAuthErrorCode.OAUTH_CREDENTIAL_NAME_INVALID,
+    statusCode: 400,
+    message: () => 'Give this connection a name with at least one letter or digit',
   },
 });

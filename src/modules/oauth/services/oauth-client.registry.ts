@@ -159,6 +159,15 @@ export class OAuthClientRegistry implements OnModuleInit {
     }
   }
 
+  /**
+   * The client a pending request or a grant names by its row id
+   * (`oauth_clients.id`), as stored: no fetch. `null` if the row is gone.
+   */
+  async findById(id: string): Promise<ResolvedClient | null> {
+    const row = await this.clients.findOne({ where: { id } });
+    return row ? this.toResolved(row) : null;
+  }
+
   /** Whether grants of `clientId` may bind a payment key and use the API host (§6.3.13). */
   isPaymentClient(clientId: string): boolean {
     return this.config.paymentClients.includes(clientId);
