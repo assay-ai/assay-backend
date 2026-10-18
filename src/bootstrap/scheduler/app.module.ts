@@ -33,6 +33,7 @@ import { AccountSchedulerModule } from '@modules/account/account-scheduler.modul
 import { FreeTierSchedulerModule } from '@modules/free-tier/free-tier-scheduler.module';
 import { EvmSchedulerModule } from '@modules/chains/evm/evm-scheduler.module';
 import { ToolsetSchedulerModule } from '@modules/toolset/toolset-scheduler.module';
+import { OAuthSchedulerModule } from '@modules/oauth/oauth-scheduler.module';
 
 // Starter reference modules — see src/modules/_examples/README.md
 import { ExamplesSchedulerModule } from '@modules/_examples/examples-scheduler.module';
@@ -100,6 +101,8 @@ import { NetworkModule } from '@shared/network/network.module';
     EvmSchedulerModule,
     // Toolsets: grace and moderation-cutoff sweeps, daily and weekly usage stats.
     ToolsetSchedulerModule,
+    // OAuth: dead tokens, codes and unreferenced clients, daily. Never credentials.
+    OAuthSchedulerModule,
     // Starter reference modules — off by default in production
     ...(areExamplesEnabled() ? [ExamplesSchedulerModule] : []),
   ],
