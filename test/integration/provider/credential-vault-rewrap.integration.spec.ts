@@ -3,7 +3,7 @@ import { randomBytes } from 'node:crypto';
 import { CredentialVaultService } from '@modules/provider/credentials/credential-vault.service';
 import { VaultKeks } from '@modules/provider/credentials/credential-vault.keys';
 import { SaveToolBindingBodyDto } from '@modules/provider/dto/save-tool-binding.dto';
-import { PricingMode } from '@modules/tool/ports/tool.types';
+import { BindingAuthMode, PricingMode } from '@modules/tool/ports/tool.types';
 import { BindingCredentialRepository } from '@database/postgres/repositories/binding-credential.repository';
 import { MoneyUtil } from '@shared/utils/money.util';
 import { EgressBindingInvoker } from '@modules/tool/services/egress-binding.invoker';
@@ -43,6 +43,7 @@ function body(): SaveToolBindingBodyDto {
     settlementChains: [STAKE_CHAIN],
     slaFailureRate: 0.02,
     timeoutMs: 30_000,
+    authMode: BindingAuthMode.NONE,
   } as SaveToolBindingBodyDto;
 }
 

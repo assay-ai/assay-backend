@@ -84,6 +84,7 @@ function body(overrides: Partial<SaveToolBindingBodyDto> = {}): SaveToolBindingB
     settlementChains: [PAYOUT_CHAIN],
     slaFailureRate: 0.02,
     timeoutMs: 8000,
+    authMode: BindingAuthMode.NONE,
     ...overrides,
   } as SaveToolBindingBodyDto;
 }
@@ -1089,6 +1090,31 @@ describe('BindingEditorService — the chains a binding is offered on', () => {
     expect(await invalidProperties(UpdateToolBindingBodyDto, { settlementChains: [] })).toContain(
       'settlementChains',
     );
+  });
+
+  it('refuses a create with no authMode: the provider must choose one (D10)', async () => {
+    // No default. A listing that silently started as NONE took the least safe
+    // choice on the provider's behalf; the choice is now explicit.
+    const withoutAuth = saveBody();
+    delete withoutAuth.authMode;
+    expect(await invalidProperties(SaveToolBindingBodyDto, withoutAuth)).toContain('authMode');
+    expect(
+      await invalidProperties(SaveToolBindingBodyDto, saveBody({ authMode: 'BASIC' })),
+    ).toContain('authMode');
+    expect(await invalidProperties(SaveToolBindingBodyDto, saveBody())).toEqual([]);
+
+    // A PATCH that leaves it out leaves it alone.
+    expect(await invalidProperties(UpdateToolBindingBodyDto, {})).toEqual([]);
+  });
+
+  it('stores the chosen authMode on create', async () => {
+    const { service } = build();
+    const saved = await service.create(
+      PROVIDER,
+      SUBJECT,
+      body({ authMode: BindingAuthMode.SIGNATURE }),
+    );
+    expect(saved.authMode).toBe('SIGNATURE');
   });
 
   it('refuses a missing list on create, and accepts its absence on update', async () => {
