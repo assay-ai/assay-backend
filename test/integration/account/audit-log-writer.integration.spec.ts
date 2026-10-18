@@ -13,6 +13,7 @@ import { AgentRepository } from '@database/postgres/repositories/agent.repositor
 import { AuditLogEntryRepository } from '@database/postgres/repositories/audit-log-entry.repository';
 import { NotificationChannelRepository } from '@database/postgres/repositories/notification-channel.repository';
 import { NotificationPreferenceRepository } from '@database/postgres/repositories/notification-preference.repository';
+import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { SpendPolicyRepository } from '@database/postgres/repositories/spend-policy.repository';
 import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
 import { AuditLogService } from '@modules/account/services/audit-log.service';
@@ -23,6 +24,7 @@ import {
 } from '@modules/notification/ports/notification.port';
 import { NotificationSettingsService } from '@modules/notification/services/notification-settings.service';
 import { SpendPolicyService } from '@modules/spend-policy/services/spend-policy.service';
+import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { SortDirection } from '@shared/api';
 import { AuditActor, AuditLogWriter } from '@shared/audit';
 import { digestToken } from '@shared/crypto/token-digest';
@@ -89,6 +91,9 @@ describe('audit_log_entries — the writer and its call sites', () => {
       agents,
       dataSource,
       writer,
+      { bump: async () => undefined } as unknown as AccessEpochService,
+      new OAuthClientRepository(dataSource),
+      { builtinClientId: 'https://mcp.example.test/oauth/clients/assay-mcp', verifiedClients: [] },
     );
     settings = new NotificationSettingsService(
       new NotificationChannelRepository(dataSource),
