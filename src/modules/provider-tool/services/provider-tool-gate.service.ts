@@ -139,7 +139,15 @@ export class ProviderToolGateService {
       }
     }
 
-    const screened = [...servable, ...(draft ? [draft] : [])];
+    // With a draft, what the tool would serve once it is published: the
+    // draft replaces the newest version of its major, so a version it
+    // supersedes never blocks the fix that supersedes it.
+    const screened = draft
+      ? servedVersionsOf([
+          ...versions.filter((version) => version.version !== draft.version),
+          { ...draft, status: 'ACTIVE' } as ToolVersionEntity,
+        ]).map((version) => (version.version === draft.version ? draft : version))
+      : servable;
     const screen: ProviderToolScreenDto[] = screened.map((version) => ({
       version: version.version,
       semver: version.semver,
