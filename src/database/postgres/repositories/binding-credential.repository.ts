@@ -13,22 +13,57 @@ export class BindingCredentialRepository extends OrganizationScopedRepository<Bi
   }
 
   /**
-   * Replaces the set for `(bindingId, origin)`. Delete-then-insert in one
-   * transaction, both scoped to the organization: a row another organization
-   * somehow holds at the same key makes the insert fail on the primary key
-   * instead of being overwritten.
+   * Replaces the set for `(bindingId, origin)` in one statement:
+   * `INSERT … ON CONFLICT (binding_id, origin) DO UPDATE`, so two concurrent
+   * PUTs both succeed and the last one wins, instead of one of them hitting the
+   * primary key. The update only applies to a row of the same organization: a
+   * row another organization somehow holds at the same key is left alone and
+   * the call throws.
    */
   async replace(
     organizationId: string,
     row: BindingCredentialRow,
   ): Promise<BindingCredentialEntity> {
     return this.manager.transaction(async (manager) => {
-      await manager.delete(BindingCredentialEntity, {
+      const written: unknown[] = await manager.query(
+        `INSERT INTO binding_credentials
+           (binding_id, origin, organization_id, kek_id, wrapped_dek, dek_iv, ciphertext, iv,
+            header_names, value_hints, updated_by)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+         ON CONFLICT (binding_id, origin) DO UPDATE
+            SET kek_id = EXCLUDED.kek_id,
+                wrapped_dek = EXCLUDED.wrapped_dek,
+                dek_iv = EXCLUDED.dek_iv,
+                ciphertext = EXCLUDED.ciphertext,
+                iv = EXCLUDED.iv,
+                header_names = EXCLUDED.header_names,
+                value_hints = EXCLUDED.value_hints,
+                updated_by = EXCLUDED.updated_by,
+                updated_at = now()
+          WHERE binding_credentials.organization_id = EXCLUDED.organization_id
+         RETURNING binding_id`,
+        [
+          row.bindingId,
+          row.origin,
+          organizationId,
+          row.kekId,
+          row.wrappedDek,
+          row.dekIv,
+          row.ciphertext,
+          row.iv,
+          row.headerNames,
+          row.valueHints,
+          row.updatedBy,
+        ],
+      );
+      if (written.length !== 1) {
+        throw new Error('binding_credentials row is held by another organization');
+      }
+      return manager.findOneByOrFail(BindingCredentialEntity, {
         organizationId,
         bindingId: row.bindingId,
         origin: row.origin,
       });
-      return manager.save(manager.create(BindingCredentialEntity, { ...row, organizationId }));
     });
   }
 
