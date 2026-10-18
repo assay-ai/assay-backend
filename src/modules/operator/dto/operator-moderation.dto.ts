@@ -1,6 +1,7 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
 import {
   IsBoolean,
+  IsEnum,
   IsIn,
   IsOptional,
   IsString,
@@ -9,6 +10,11 @@ import {
   Matches,
   MaxLength,
 } from 'class-validator';
+
+import {
+  TAKEDOWN_PUBLIC_NOTE_MAX,
+  TakedownReasonCode,
+} from '@modules/toolset/domain/takedown-reason';
 
 import { QueryBoolean, ReasonCode, Trimmed, TrimmedOrAbsent } from './operator-console.dto';
 
@@ -35,6 +41,26 @@ export class ModerationBodyDto {
   @IsOptional()
   @IsUUID()
   reportId?: string;
+}
+
+/** `POST /operator/tools/:id/takedown`: the register body, and what the provider is told. */
+export class TakedownToolBodyDto extends ModerationBodyDto {
+  @ApiProperty({
+    enum: TakedownReasonCode,
+    description: 'The reason the provider sees. `note` stays the operator’s and is never shown',
+  })
+  @IsEnum(TakedownReasonCode)
+  publicReasonCode: TakedownReasonCode;
+
+  @ApiPropertyOptional({
+    maxLength: TAKEDOWN_PUBLIC_NOTE_MAX,
+    description: 'A note written for the provider: what to fix, or whom to contact',
+  })
+  @TrimmedOrAbsent()
+  @IsOptional()
+  @IsString()
+  @MaxLength(TAKEDOWN_PUBLIC_NOTE_MAX)
+  publicNote?: string;
 }
 
 export class RenameHandleBodyDto extends ModerationBodyDto {

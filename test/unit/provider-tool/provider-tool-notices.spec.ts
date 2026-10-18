@@ -176,3 +176,27 @@ describe('prefill failure rate', () => {
     expect(DEFAULT_DECLARED_FAILURE_RATE).toBe(0.02);
   });
 });
+
+describe('TakedownToolBodyDto', () => {
+  const errorsOf = async (body: Record<string, unknown>) => {
+    const { plainToInstance } = await import('class-transformer');
+    const { validate } = await import('class-validator');
+    const { TakedownToolBodyDto } = await import('@modules/operator/dto/operator-moderation.dto');
+    return (await validate(plainToInstance(TakedownToolBodyDto, body))).map((e) => e.property);
+  };
+  const base = { reasonCode: 'ABUSE', note: 'impersonates another organization' };
+
+  it('needs a provider-facing reason from the closed list; the public note is optional', async () => {
+    expect(await errorsOf({ ...base, publicReasonCode: 'IMPERSONATION' })).toEqual([]);
+    expect(
+      await errorsOf({ ...base, publicReasonCode: 'LEGAL_REQUEST', publicNote: 'See the email.' }),
+    ).toEqual([]);
+    expect(await errorsOf(base)).toEqual(['publicReasonCode']);
+    expect(await errorsOf({ ...base, publicReasonCode: 'they were rude' })).toEqual([
+      'publicReasonCode',
+    ]);
+    expect(
+      await errorsOf({ ...base, publicReasonCode: 'IMPERSONATION', publicNote: 'x'.repeat(501) }),
+    ).toEqual(['publicNote']);
+  });
+});
