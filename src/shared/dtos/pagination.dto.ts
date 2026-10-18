@@ -10,12 +10,6 @@ export interface IPaginationResult<T> {
   previous: number;
 }
 
-export interface IPaginationInfo {
-  page: number;
-  skip: number;
-  limit: number;
-}
-
 export class PaginationDto {
   @ApiProperty({
     description: 'Page number',
