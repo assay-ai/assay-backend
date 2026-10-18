@@ -1,7 +1,31 @@
 import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
-import { IsISO8601 } from 'class-validator';
+import {
+  IsISO8601,
+  Validate,
+  ValidationArguments,
+  ValidatorConstraint,
+  ValidatorConstraintInterface,
+} from 'class-validator';
 
 import { MoneyDto } from './get-balances.dto';
+
+/** The longest statement period: a year, with a leap day to spare. */
+export const STATEMENT_MAX_SPAN_MS = 366 * 86_400_000;
+
+/** `to` after `from`, and at most {@link STATEMENT_MAX_SPAN_MS} later: a bounded scan and chain read. */
+@ValidatorConstraint({ name: 'statementPeriod', async: false })
+export class StatementPeriodConstraint implements ValidatorConstraintInterface {
+  validate(to: unknown, args: ValidationArguments): boolean {
+    const from = Date.parse(String((args.object as { from?: unknown }).from));
+    const end = Date.parse(String(to));
+    if (Number.isNaN(from) || Number.isNaN(end)) return true; // IsISO8601 reports it
+    return end > from && end - from <= STATEMENT_MAX_SPAN_MS;
+  }
+
+  defaultMessage(): string {
+    return 'to must be after from, and at most 366 days later';
+  }
+}
 
 /** `GET /statements/balance` — one statement period, `[from, to)`. */
 export class GetStatementBalanceQueryDto {
@@ -9,8 +33,9 @@ export class GetStatementBalanceQueryDto {
   @IsISO8601()
   from: string;
 
-  @ApiProperty({ description: 'ISO-8601, exclusive (the next month start)' })
+  @ApiProperty({ description: 'ISO-8601, exclusive (the next month start); after from, at most 366 days later' })
   @IsISO8601()
+  @Validate(StatementPeriodConstraint)
   to: string;
 }
 
