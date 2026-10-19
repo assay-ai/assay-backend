@@ -13,7 +13,6 @@ import { Alert, AlertSeverity } from './alert.port';
 export enum GoldenSignal {
   FALSE_POSITIVE_RATE = 'FALSE_POSITIVE_RATE',
   FALSE_NEGATIVE_RATE = 'FALSE_NEGATIVE_RATE',
-  DISPUTE_OVERTURN_RATE = 'DISPUTE_OVERTURN_RATE',
   GAS_RUNWAY_DAYS = 'GAS_RUNWAY_DAYS',
   TOOL_CALL_SUCCESS_RATE = 'TOOL_CALL_SUCCESS_RATE',
   PLATFORM_LATENCY_P95_MS = 'PLATFORM_LATENCY_P95_MS',
@@ -73,14 +72,6 @@ const RULES: Readonly<Record<GoldenSignal, ThresholdRule>> = {
     label: 'Verification false-negative rate',
     worseWhen: 'above',
     warn: 0.05,
-    formatValue: percent,
-  },
-  /** Warn > 20%, no page tier. Tracked separately from the false-positive rate. */
-  [GoldenSignal.DISPUTE_OVERTURN_RATE]: {
-    alertName: 'dispute_overturn_rate_high',
-    label: 'Dispute overturn rate',
-    worseWhen: 'above',
-    warn: 0.2,
     formatValue: percent,
   },
   /** Warn < 7 days, page < 2 days. Auto-refill (14d) is a separate, non-alerting action. */

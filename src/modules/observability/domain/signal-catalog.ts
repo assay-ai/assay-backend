@@ -1,6 +1,6 @@
 /**
- * The union of the seven named observability signals and the ten golden-signal
- * rows — fifteen distinct signals once the two lists' overlaps are folded together
+ * The union of the seven named observability signals and the nine golden-signal
+ * rows — fourteen distinct signals once the two lists' overlaps are folded together
  * (reconciler drift *is* reserve health; "p95 latency by binding" *is*
  * platform latency, labelled).
  *
@@ -20,7 +20,6 @@ export enum ObservabilitySignal {
   RESERVE_HEALTH = 'RESERVE_HEALTH',
   FALSE_POSITIVE_RATE = 'FALSE_POSITIVE_RATE',
   FALSE_NEGATIVE_RATE = 'FALSE_NEGATIVE_RATE',
-  DISPUTE_OVERTURN_RATE = 'DISPUTE_OVERTURN_RATE',
   GAS_RUNWAY_DAYS = 'GAS_RUNWAY_DAYS',
   TOOL_CALL_SUCCESS_RATE = 'TOOL_CALL_SUCCESS_RATE',
   PLATFORM_LATENCY_P95_BY_BINDING = 'PLATFORM_LATENCY_P95_BY_BINDING',
@@ -81,11 +80,6 @@ export const SIGNAL_CATALOG: Readonly<Record<ObservabilitySignal, SignalDescript
       'explicit that this must never be derived from disputes. No labelling pipeline exists in ' +
       'this codebase (the false-positive rate at least has SlashProposalRepository.falsePositiveCounts ' +
       'as a proxy against overturned slashes; the false-negative side has no equivalent producer at all).',
-  },
-  [ObservabilitySignal.DISPUTE_OVERTURN_RATE]: {
-    signal: ObservabilitySignal.DISPUTE_OVERTURN_RATE,
-    label: 'Dispute overturn rate',
-    availability: SignalAvailability.SOURCED,
   },
   [ObservabilitySignal.GAS_RUNWAY_DAYS]: {
     signal: ObservabilitySignal.GAS_RUNWAY_DAYS,

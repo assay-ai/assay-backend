@@ -158,13 +158,13 @@ describe('a closed case with a record standing on chain, against a real database
 
   /**
    * A case closed in the app while its record stood on chain (`CANCELLED`, no
-   * outcome, no resolution), with no cancel request — the request that was
+   * resolution), with no cancel request — the request that was
    * lost. The repair tick is what asks for its on-chain cancel.
    */
   const closeInApp = (seeded: { proposalId: string }) =>
     dataSource.query(
       `UPDATE slash_proposals
-          SET status = 'CANCELLED', resolution_kind = NULL, resolved_at = NULL, outcome = NULL
+          SET status = 'CANCELLED', resolution_kind = NULL, resolved_at = NULL
         WHERE id = $1`,
       [seeded.proposalId],
     );
