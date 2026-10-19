@@ -21,6 +21,11 @@ export function formatNoticeTime(at: Date): string {
   return `${MONTHS[at.getUTCMonth()]} ${at.getUTCDate()}, ${hh}:${mm} UTC`;
 }
 
+/** `Oct 14`: a UTC calendar day. */
+export function formatNoticeDay(at: Date): string {
+  return `${MONTHS[at.getUTCMonth()]} ${at.getUTCDate()}`;
+}
+
 /** How a body opens when it names an agent: `"My first agent"`, or `Your agent` when it has no label. */
 export function agentPhrase(label: string | null | undefined): string {
   const name = label?.trim();

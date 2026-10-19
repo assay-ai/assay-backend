@@ -2897,6 +2897,119 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .getRawOne<{ total: string }>();
     return BigInt(row?.total ?? '0');
   }
+
+  /**
+   * Whether this payment key (`voucher_delegate`) signed a voucher that held
+   * money before `intent` did: an earlier row, by `(created_at, id)`, with a
+   * hold. `PaymentKeyFirstSpendService` asks it so that "first" is a fact of
+   * the table and not only of the notification suppression cache, which fails
+   * open. A row that never held money (refused for funds) is not a spend.
+   *
+   * Two concurrent first vouchers may both answer `false`; the notification's
+   * own `ONCE` suppression then keeps it to one. Served by
+   * `idx_payment_intents_delegate_created`.
+   */
+  async hasEarlierDelegateSpend(
+    organizationId: string,
+    delegate: string,
+    intent: { readonly id: string; readonly createdAt: Date },
+  ): Promise<boolean> {
+    const row = await this.createQueryBuilder('intent')
+      .select('1', 'one')
+      .where('intent.organizationId = :organizationId', { organizationId })
+      .andWhere('intent.voucherDelegate = :delegate', { delegate })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.id <> :id', { id: intent.id })
+      .andWhere(
+        `(${CREATED_AT} < :createdAt OR (${CREATED_AT} = :createdAt AND intent.id < :id))`,
+        { createdAt: intent.createdAt },
+      )
+      .limit(1)
+      .getRawOne<{ one: number }>();
+    return row !== undefined && row !== null;
+  }
+
+  /**
+   * What each payment key spent in `[from, to)`, across every organization,
+   * for `PaymentKeyDailySummaryService`: rail-B vouchers signed by a delegate
+   * whose funds were secured and that are not refunded, voided or expired,
+   * grouped by organization, credential, key and asset. A key that spent
+   * nothing has no row.
+   *
+   * Deliberately cross-organization: the summary is the platform's own daily
+   * pass over every tenant, like the redemption queue above; each row is then
+   * sent to its own organization only. Amounts are sums of `numeric(78,0)`
+   * returned as decimal strings and read as `bigint`. Served by
+   * `idx_payment_intents_delegate_recent`.
+   */
+  async sumDelegateSpendByKey(from: Date, to: Date): Promise<DelegateSpendRow[]> {
+    const rows = await this.createQueryBuilder('intent')
+      .select('intent.organizationId', 'organizationId')
+      .addSelect('intent.credentialId', 'credentialId')
+      .addSelect('MIN(intent.agent_id::text)', 'agentId')
+      .addSelect('intent.voucherDelegate', 'delegate')
+      .addSelect('intent.chainId', 'chainId')
+      .addSelect('intent.assetId', 'assetId')
+      .addSelect('intent.decimals', 'decimals')
+      .addSelect('COUNT(*)', 'calls')
+      .addSelect('COALESCE(SUM(intent.priceAmount), 0)', 'amount')
+      .where('intent.organizationId IS NOT NULL')
+      .andWhere('intent.voucherDelegate IS NOT NULL')
+      .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
+      .andWhere('intent.holdId IS NOT NULL')
+      .andWhere('intent.status IN (:...spent)', {
+        spent: ['FUNDS_SECURED', 'PROVIDER_EXECUTING', 'VERIFYING', SETTLED_STATUS],
+      })
+      .andWhere(`${CREATED_AT} >= :from`, { from })
+      .andWhere(`${CREATED_AT} < :to`, { to })
+      .groupBy('intent.organizationId')
+      .addGroupBy('intent.credentialId')
+      .addGroupBy('intent.voucherDelegate')
+      .addGroupBy('intent.chainId')
+      .addGroupBy('intent.assetId')
+      .addGroupBy('intent.decimals')
+      .orderBy('intent.organizationId', 'ASC')
+      .addOrderBy('intent.voucherDelegate', 'ASC')
+      .addOrderBy('intent.assetId', 'ASC')
+      .getRawMany<{
+        organizationId: string;
+        credentialId: string | null;
+        agentId: string;
+        delegate: string;
+        chainId: string;
+        assetId: string;
+        decimals: number | string;
+        calls: number | string;
+        amount: string;
+      }>();
+    return rows.map((row) => ({
+      organizationId: row.organizationId,
+      credentialId: row.credentialId ?? null,
+      agentId: row.agentId,
+      delegate: row.delegate,
+      chainId: row.chainId,
+      assetId: row.assetId,
+      decimals: Number(row.decimals),
+      calls: Number(row.calls),
+      amount: BigInt(row.amount),
+    }));
+  }
+}
+
+/** One payment key's spend in one asset over a window (`sumDelegateSpendByKey`). */
+export interface DelegateSpendRow {
+  readonly organizationId: string;
+  /** The credential that made the calls; null on a row written without one. */
+  readonly credentialId: string | null;
+  readonly agentId: string;
+  /** The payment key (CAIP-10). */
+  readonly delegate: string;
+  readonly chainId: string;
+  readonly assetId: string;
+  readonly decimals: number;
+  readonly calls: number;
+  /** Atomic units, exact. */
+  readonly amount: bigint;
 }
 
 /**

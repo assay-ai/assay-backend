@@ -120,11 +120,16 @@ export function normaliser(
   const sibling: Via = via === 'key' ? 'grant' : 'key';
   const exact = new Map<string, string>();
   const addresses = new Map<string, string>();
+  // A payment key's notices name it by its last eight hex characters,
+  // upper-cased (`paymentKeyEnding`): the same key in a different form.
+  const endings = new Map<string, string>();
   for (const [placeholder, value] of Object.entries(extra)) {
     if (!value) continue;
     const address = /0x[0-9a-fA-F]{40}$/.exec(value)?.[0];
-    if (address) addresses.set(address.toLowerCase(), placeholder);
-    else exact.set(value, placeholder);
+    if (address) {
+      addresses.set(address.toLowerCase(), placeholder);
+      endings.set(address.slice(-8).toUpperCase(), placeholder.replace(/>$/, ':ending>'));
+    } else exact.set(value, placeholder);
   }
   const base: [string, string][] = [
     [credentialOf(world, via).id, '<credential>'],
@@ -156,6 +161,8 @@ export function normaliser(
       if (!uuids.has(lower)) uuids.set(lower, numbered ? `<uuid:${uuids.size + 1}>` : '<uuid>');
       return uuids.get(lower)!;
     });
+    // After the addresses and ids, so an ending never clips a full address.
+    for (const [ending, placeholder] of endings) out = out.split(ending).join(placeholder);
     return out.replace(ISO_RE, '<time>');
   };
 

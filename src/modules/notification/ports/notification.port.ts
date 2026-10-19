@@ -147,6 +147,19 @@ export enum NotificationEvent {
    * §6.3.11). `OAuthTokenService.refresh` is the producer.
    */
   OAUTH_GRANT_STOPPED_REUSE = 'oauth.grant_stopped_reuse',
+  /**
+   * A payment key (an agent credential's bound delegate) signed its first
+   * voucher that held money: the earliest sign that a key on someone's
+   * computer is spending (spec §7.9, threats T2/T12). Once per key;
+   * `PaymentKeyFirstSpendService`, from `VoucherService.redeem`, is the producer.
+   */
+  PAYMENT_KEY_FIRST_SPEND = 'payment_key.first_spend',
+  /**
+   * Yesterday's (UTC) paid calls and amount per payment key, for an
+   * organization whose keys spent anything. Once per organization per UTC day;
+   * `PaymentKeyDailySummaryService`, in the scheduler, is the producer.
+   */
+  PAYMENT_KEY_DAILY_SUMMARY = 'payment_key.daily_summary',
 
   // ── Free tier ───────────────────────────────────────────────────────────
   FREE_QUOTA_EXHAUSTED = 'free_quota.exhausted',
