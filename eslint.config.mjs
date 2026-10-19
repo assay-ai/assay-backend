@@ -241,6 +241,8 @@ export default tseslint.config(
       'workers/**',
       '.yarn/**',
       'build/**',
+      // Rendered from the IDL and CI-gated by `client:check`; never hand-edited.
+      'packages/settlement-client/src/generated/**',
     ],
   },
   eslint.configs.recommended,
