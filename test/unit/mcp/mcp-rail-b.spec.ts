@@ -488,18 +488,33 @@ describe('rail B over MCP', () => {
 
   describe('chooseRail — which rail a call takes', () => {
     it('takes rail B on a chain that offers nothing else', () => {
-      expect(chooseRail(CHAIN_IDS.ROBINHOOD_TESTNET, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
+      expect(chooseRail(CHAIN_IDS.ROBINHOOD_TESTNET, null, false, true)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
     });
 
     it('takes rail A as the default only where it is offered', () => {
       // This suite re-opens rail B on Solana, not rail A, so with nothing asked
       // for the call goes to rail B.
-      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false, true)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
+    });
+
+    it('never takes rail A for a session that may not pay (free-only rule)', () => {
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, PaymentRail.RAIL_A_PER_CALL, false, false)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, false, false)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
     });
 
     it('takes rail B whenever a voucher is presented, or the agent asks for it', () => {
-      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, true)).toBe(PaymentRail.RAIL_B_VOUCHER);
-      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, PaymentRail.RAIL_B_VOUCHER, false)).toBe(
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, null, true, true)).toBe(
+        PaymentRail.RAIL_B_VOUCHER,
+      );
+      expect(chooseRail(CHAIN_IDS.SOLANA_DEVNET, PaymentRail.RAIL_B_VOUCHER, false, true)).toBe(
         PaymentRail.RAIL_B_VOUCHER,
       );
     });
@@ -689,6 +704,6 @@ describe('rail B over MCP on Solana, with the real rail table', () => {
   });
 
   it('takes no paid rail on Solana by default: chooseRail falls to B, which is refused', () => {
-    expect(chooseRail(CHAIN_ID, null, false)).toBe(PaymentRail.RAIL_B_VOUCHER);
+    expect(chooseRail(CHAIN_ID, null, false, true)).toBe(PaymentRail.RAIL_B_VOUCHER);
   });
 });
