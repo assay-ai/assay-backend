@@ -31,7 +31,7 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
  *   CANCELLED — voided by the chain, or closed with nothing standing (terminal)
  * ```
  *
- * `outcome` carries which of the six outcomes the adjudicator chose. It is NULL
+ * `outcome` carries the outcome an adjudicator chose (`ArbitrationOutcome`). It is NULL
  * for every automatic resolution, and the CHECK
  * `chk_slash_proposals_outcome_needs_adjudicator` makes that exact: an outcome
  * is a judgement, and there are three ways a case ends without one.
@@ -324,7 +324,7 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   resolutionKind: string | null;
 
   /**
-   * One of the six outcomes. NOT NULL exactly when `resolutionKind` is
+   * An `ArbitrationOutcome`. NOT NULL exactly when `resolutionKind` is
    * `'ADJUDICATOR'`, with one exception: `AUTO_CHAIN_VOIDED` may land on a case
    * an adjudicator already upheld, and the human's judgement is left standing
    * on the row while the *closure* is recorded as automatic. See

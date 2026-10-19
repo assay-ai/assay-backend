@@ -24,7 +24,7 @@ import { CHAIN_DISPUTE_SETTLE_MS, SlashConfig } from '@modules/slash/constants/s
 const CHAIN_PROPOSABLE_STATUSES = ['PROPOSED', 'DISPUTED', 'UPHELD'] as const;
 
 /** Mirrors `REVERSIBLE_STATUSES` in `slash-proposal.repository.ts`. */
-const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
+const REVERSIBLE_STATUSES = ['EXECUTED'] as const;
 
 export class FakeSlashProposals {
   /** The entity manager each `markReversedIfExecuted` ran on (undefined = default connection). */
@@ -197,10 +197,9 @@ export class FakeSlashProposals {
 
   /**
    * Mirrors `SlashProposalRepository.markReversedIfExecuted`, predicate for
-   * predicate. The money columns are what decide it — a case the chain executed
-   * after an adjudicator overturned it carries them in `OVERTURNED` — and the
-   * status list is the state-machine half beside them, matching the `→
-   * REVERSED` column of `SLASH_PROPOSAL_TRANSITIONS`.
+   * predicate. The money columns are what decide it, and the status list is
+   * the state-machine half beside them, matching the `→ REVERSED` column of
+   * `SLASH_PROPOSAL_TRANSITIONS`.
    */
   async markReversedIfExecuted(
     organizationId: string,
@@ -338,7 +337,7 @@ export class FakeSlashProposals {
       .filter(
         (row) =>
           ['PENDING', 'DISPUTED'].includes(row.chainStatus) &&
-          ['CANCELLED', 'OVERTURNED'].includes(row.status) &&
+          row.status === 'CANCELLED' &&
           row.resolutionKind !== 'AUTO_CHAIN_VOIDED',
       )
       .sort((a, b) => (a.chainExecutableAt?.getTime() ?? 0) - (b.chainExecutableAt?.getTime() ?? 0))

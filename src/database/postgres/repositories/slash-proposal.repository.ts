@@ -33,7 +33,7 @@ const OPERATOR_CASE_STATUS_SQL = `CASE
   WHEN p.status = 'CANCELLED' AND p.resolution_kind = 'AUTO_CHAIN_VOIDED'
        AND p.chain_status = 'CANCELLED' AND p.chain_disputed_at IS NOT NULL THEN 'EXPIRED'
   WHEN p.chain_status = 'CANCELLED'
-       OR p.status IN ('OVERTURNED', 'WAIVED', 'CANCELLED') THEN 'CANCELLED'
+       OR p.status IN ('WAIVED', 'CANCELLED') THEN 'CANCELLED'
   WHEN p.chain_status = 'DISPUTED'
        OR (p.chain_status = 'PENDING' AND p.chain_disputed_parts > 0) THEN 'CHAIN_DISPUTED'
   ELSE 'PROPOSED'
@@ -137,21 +137,20 @@ export interface ChainClaimGuards {
 export const CHAIN_PROPOSABLE_STATUSES = ['PROPOSED', 'DISPUTED', 'UPHELD'] as const;
 
 /**
- * The two statuses a case can carry an `executed_at` in, and so the two
- * `markReversedIfExecuted` may move to `REVERSED`.
+ * The status `markReversedIfExecuted` may move to `REVERSED`.
  *
  * Mirrors the `→ REVERSED` column of `SLASH_PROPOSAL_TRANSITIONS`. It is the
  * *state-machine* half of that method's guard and never the whole of it — what
  * decides a reversal is the money columns. See the method.
  */
-const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
+const REVERSIBLE_STATUSES = ['EXECUTED'] as const;
 
 /**
- * The statuses that close a case with no penalty owed: an operator suspended
- * it, or it was overturned. A record still standing on chain for one of these
- * has to be cancelled — see {@link SlashProposalRepository.findClosedStillPending}.
+ * The statuses that close a case with no penalty owed. A record still
+ * standing on chain for one of these has to be cancelled — see
+ * {@link SlashProposalRepository.findClosedStillPending}.
  */
-export const CLOSED_WITHOUT_PENALTY_STATUSES = ['CANCELLED', 'OVERTURNED'] as const;
+export const CLOSED_WITHOUT_PENALTY_STATUSES = ['CANCELLED'] as const;
 
 /**
  * `slash_proposals`.
@@ -286,25 +285,17 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * redundant: this one gives a usable error, the constraint survives a second
    * write path, and only the chain's is authoritative about money.
    *
-   * ## Why this is not `status = 'EXECUTED'`
+   * ## Why the money columns, and not only `status = 'EXECUTED'`
    *
    * **The question a reversal asks is "did money leave the provider", and the
-   * status is not the column that answers it.** `execute_slash` is
-   * permissionless once `executable_at` passes, so a stranger may spend a
-   * standing record after an adjudicator has overturned the case;
-   * `SlashExecutionService.recordAnExecutionNobodyAskedFor` writes the money
-   * columns and leaves `status = 'OVERTURNED'`, because a chain event must not
-   * overwrite a human. That row — the only overturned case where the provider
-   * is out of pocket — is exactly the one a reversal exists for, and a
-   * status-name predicate refuses it.
-   *
-   * So the predicate is `executed_at IS NOT NULL AND applied_amount IS NOT
-   * NULL`, which is the pair `chk_slash_proposals_executed_is_whole` keeps
-   * whole and which `reverse_slash.rs` mirrors with
-   * `record.status == SlashStatus::Executed`. `status IN (…)` stays beside it
-   * as the state-machine half — `SLASH_PROPOSAL_TRANSITIONS` admits `REVERSED`
-   * from these two and nothing else — so a row that somehow carries an
-   * `executed_at` in a status the table does not admit is still refused here.
+   * status alone is not the column that answers it.** So the predicate is
+   * `executed_at IS NOT NULL AND applied_amount IS NOT NULL`, which is the
+   * pair `chk_slash_proposals_executed_is_whole` keeps whole and which
+   * `reverse_slash.rs` mirrors with `record.status == SlashStatus::Executed`.
+   * `status IN (…)` stays beside it as the state-machine half —
+   * `SLASH_PROPOSAL_TRANSITIONS` admits `REVERSED` from `EXECUTED` and nothing
+   * else — so a row that somehow carries an `executed_at` in another status
+   * is still refused here.
    */
   async markReversedIfExecuted(
     organizationId: string,
@@ -602,9 +593,9 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    *
    * `chain_status = 'CANCEL_REQUESTED'` and nothing else: the case's own
    * `status` is deliberately not in the predicate, because every route into
-   * this state leaves a different one behind — `OVERTURNED` after an
-   * adjudication, still `UPHELD` after a downward recalculation — and what the
-   * sweep does is identical in both. Ordered by `chain_executable_at` so the
+   * this state may leave a different one behind — `CANCELLED` after a
+   * closure, still `UPHELD` while a record of it stands — and what the sweep
+   * does is identical in both. Ordered by `chain_executable_at` so the
    * records closest to their seven-day expiry grace are looked at first, which
    * is the half of the sweep that has a deadline.
    *
@@ -705,8 +696,8 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    *   upheld. A case the platform only labelled upheld (`AUTO_UNDISPUTED`)
    *   counts once a record of it executes, not before.
    *
-   * Never counted: a case closed in the provider's favour (`OVERTURNED`,
-   * `WAIVED`, `REVERSED`), and no cancelled record at all — neither a
+   * Never counted: a case closed in the provider's favour (`WAIVED`,
+   * `REVERSED`), and no cancelled record at all — neither a
    * verifier-key lapse (`VERIFIER_UNAVAILABLE`, which voids a case for reasons
    * that say nothing about the provider) nor a record that expired because
    * the platform did not execute it in time (`EXPIRED`, which the contract
@@ -731,7 +722,7 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
         providerIds: [...new Set(providerIds)],
       })
       .andWhere('proposal.status NOT IN (:...providerWon)', {
-        providerWon: ['OVERTURNED', 'WAIVED', 'REVERSED'],
+        providerWon: ['WAIVED', 'REVERSED'],
       })
       .andWhere(
         `((${executed}) OR (proposal.status IN (:...upheld) AND ` +
@@ -814,8 +805,8 @@ export class SlashProposalRepository extends OrganizationScopedRepository<SlashP
    * Cases closed off chain whose record still mirrors `PENDING`: the repair
    * behind every best-effort cancel request.
    *
-   * A suspension (`CANCELLED`) or an overturn (`OVERTURNED`) asks for the
-   * on-chain cancel after its own transaction commits, and that request can be
+   * A case closed in the app (`CANCELLED`) asks for the on-chain cancel
+   * after its own transaction commits, and that request can be
    * lost — the write fails, or the record lands after the case was closed. The
    * row is then selected by nothing: the execute sweep wants `UPHELD` and the
    * admin-cancel sweep wants `CANCEL_REQUESTED`.

@@ -341,8 +341,8 @@ export class SlashProposalDto {
     enum: ArbitrationOutcome,
     nullable: true,
     description:
-      'One of six. Null for every automatic resolution — an outcome is a judgement, and there ' +
-      'are three ways a case ends without one.',
+      'Null for every automatic resolution — an outcome is a judgement, and there are ' +
+      'several ways a case ends without one.',
   })
   outcome: ArbitrationOutcome | null;
 
@@ -447,7 +447,7 @@ export class RestorationRowDto {
     enum: ['ON_DECISION', 'RESTORED', 'NOT_APPLICABLE'],
     description:
       '`ON_DECISION` while the case is open, `RESTORED` once done, `NOT_APPLICABLE` where the ' +
-      'outcome does not restore this — an insufficient-evidence overturn leaves strikes standing.',
+      'outcome does not restore this.',
   })
   status: 'ON_DECISION' | 'RESTORED' | 'NOT_APPLICABLE';
 }
