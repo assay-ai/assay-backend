@@ -181,7 +181,7 @@ async function main(): Promise<void> {
     section('Result');
     console.log('rotation drill PASSED');
   } finally {
-    // Same teardown as `scripts/devnet/deposit.ts`: `app.close()` alone leaves
+    // Same teardown as `scripts/devnet/acceptance-suite.ts`: `app.close()` alone leaves
     // the Postgres and Redis handles open, and the datasource is named
     // `postgres` rather than default, so the shutdown hook cannot find it. The
     // rate limiter's own connection closes itself — see its `onModuleDestroy`.

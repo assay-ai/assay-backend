@@ -134,9 +134,9 @@
  *   after `main()` starts still leaves evidence on disk.
  */
 // `.env` is loaded by `-r dotenv/config` in the `devnet:acceptance` script
-// entry (package.json) — **before** this file or any of its imports run. See
-// `deposit.ts` for why loading it here instead would be too late for any
-// module-load-time `process.env` read elsewhere in the graph.
+// entry (package.json) — **before** this file or any of its imports run.
+// Loading it here instead would be too late for any module-load-time
+// `process.env` read elsewhere in the graph.
 
 import { randomBytes, randomInt } from 'node:crypto';
 
@@ -2296,16 +2296,13 @@ async function awaitDepositCredited(
  *   POST /deposits/:id/settle -> facilitator co-signs, pays gas, submits, observes
  * ```
  *
- * ## Over HTTP, deliberately, unlike `scripts/devnet/deposit.ts`
+ * ## Over HTTP, deliberately
  *
- * That script proves the same path but calls `DepositService` **in process**,
- * against its own locally generated org and agent ids. It was written before
- * the routes existed and it is not what this suite is for: every other step
- * here goes through the live server, so the controllers, the guards, the DTO
- * validation and the session scoping are all under test. Only its
- * transaction-building half is shared, and it already lived in its own module
- * (`lib/build-deposit-payload.ts`) — the one thing that had to change is that
- * the blockhash is now *given* rather than fetched. See `DepositLifetime`.
+ * Every other step here goes through the live server, so the controllers, the
+ * guards, the DTO validation and the session scoping are all under test. The
+ * transaction-building half lives in its own module
+ * (`lib/build-deposit-payload.ts`), and the blockhash is *given* by the server
+ * rather than fetched. See `DepositLifetime`.
  *
  * ## The order is the point: create → build → sign → settle, with nothing slow between
  *
@@ -3556,8 +3553,7 @@ const PASSING_VERDICTS: ReadonlySet<VerdictStatus> = new Set([
  * Unauthenticated on purpose — `/health` needs no token, and this runs before
  * any identity exists. Without it the first real call throws
  * `TypeError: fetch failed` with the cause buried, which is the single most
- * likely failure of the whole suite. `deposit.ts` names its equivalent
- * condition (an unreachable facilitator) the same way.
+ * likely failure of the whole suite.
  *
  * "Not reachable" and "answered badly" are kept apart deliberately: telling
  * someone to start a server that is already running, because it returned a
@@ -3767,8 +3763,7 @@ async function main(): Promise<void> {
     // did so above this it would both replace the original error and skip the
     // teardown — hanging the process on exactly the handle this exists to
     // release. `app.close()` alone does not release the Postgres pool: see
-    // `test/integration/bootstrap/di-wiring.integration.spec.ts` and
-    // `deposit.ts`'s identical cleanup.
+    // `test/integration/bootstrap/di-wiring.integration.spec.ts`.
     // The whole block is best-effort, not just the two awaits inside it:
     // `get()` THROWS `UnknownElementException` for a missing token rather than
     // returning undefined, and an unguarded throw here would skip

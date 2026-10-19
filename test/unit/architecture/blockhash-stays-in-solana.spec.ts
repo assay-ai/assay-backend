@@ -64,9 +64,9 @@ function walk(dir: string): string[] {
  * ## Why it scans three trees
  *
  * `yarn lint` globs `{src,test}` and `eslint.config.mjs` ignores `scripts/**`;
- * `nest build` compiles `src/` only. `scripts/devnet/deposit.ts` reads the
- * deposit response and is exactly the kind of file that would reach for this
- * port. Three times during multichain work a rename left `scripts/` unbuildable with no gate
+ * `nest build` compiles `src/` only. `scripts/devnet/acceptance-suite.ts` reads
+ * the deposit response and is exactly the kind of file that would reach for
+ * this port. Three times during multichain work a rename left `scripts/` unbuildable with no gate
  * noticing. This one notices.
  */
 describe('the blockhash port stays inside chains/solana', () => {
@@ -79,7 +79,7 @@ describe('the blockhash port stays inside chains/solana', () => {
     // every rule below trivially satisfied and silent about it.
     expect(files.length).toBeGreaterThan(400);
     expect(files).toContain(join(ROOT, 'src/modules/payment/controllers/deposits.controller.ts'));
-    expect(files).toContain(join(ROOT, 'scripts/devnet/deposit.ts'));
+    expect(files).toContain(join(ROOT, 'scripts/devnet/acceptance-suite.ts'));
   });
 
   it.each(NAMES)('no file outside chains/solana names %s', (name) => {

@@ -123,19 +123,6 @@ const FORBIDDEN: readonly ForbiddenPattern[] = [
 ];
 
 /**
- * The one file allowed to build a `TransactionInstruction`, and why.
- *
- * `@sqds/multisig` is built on `@solana/web3.js` v1 and takes no other shape, so
- * the Squads path needs a converter from the kit instructions the generated
- * client emits. It converts; it does not encode — the `data` it copies was
- * produced by the client. Keeping it on this list rather than deleting the rule
- * is the difference between one reviewed exception and none at all.
- */
-const CONVERTER_EXEMPTIONS: readonly string[] = [
-  join('scripts', 'devnet', 'lib', 'kit-to-web3.ts'),
-];
-
-/**
  * The generated tree, exempt wholesale — and guarded by something stronger.
  *
  * It is full of 8-byte discriminator literals, because that is what a generated
@@ -242,9 +229,6 @@ describe('the settlement program is only ever spoken to through the generated cl
     for (const file of settlementFiles) {
       const lines = sources.get(file)!.split('\n');
       for (const { pattern, what, unless } of FORBIDDEN) {
-        if (what.includes('TransactionInstruction') && CONVERTER_EXEMPTIONS.includes(file)) {
-          continue;
-        }
         if (SIGNED_MESSAGE_ENCODERS.includes(file) && BORSH_PRIMITIVE_RULES.includes(what)) {
           continue;
         }

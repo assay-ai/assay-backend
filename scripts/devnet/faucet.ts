@@ -7,11 +7,11 @@
  * (refuse before minting with the wrong key), and `setupDevnetMint` (the
  * idempotent mint + top-up itself). This file is only the sequencing.
  *
- * ## Why `SOLANA_DEVNET_USDC_MINT` is required here, unlike `deposit.ts`
+ * ## Why `SOLANA_DEVNET_USDC_MINT` is required here
  *
  * `setupDevnetMint` creates a brand new mint when `SOLANA_DEVNET_USDC_MINT`
  * is unset and no mint has been persisted yet (`lib/mint-setup.ts`). That is
- * fine for a from-scratch `devnet:deposit` run bootstrapping its own state,
+ * fine for a from-scratch run bootstrapping its own state,
  * but the faucet's whole purpose is to top up *the* mint the rest of the
  * stack already points at. A faucet run that silently created a second mint would produce tokens the
  * router does not recognise, with no error anywhere near the mistake.
