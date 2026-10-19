@@ -647,8 +647,12 @@ export class McpToolCallService {
     // the session's chain offers nothing else (`eip155:46630`). Everything
     // below this branch is rail A and is byte-for-byte what it always was.
     if (
-      chooseRail(session.chainId, payment.rail, payment.voucher !== null) ===
-      PaymentRail.RAIL_B_VOUCHER
+      chooseRail(
+        session.chainId,
+        payment.rail,
+        payment.voucher !== null,
+        session.paymentsAllowed === true,
+      ) === PaymentRail.RAIL_B_VOUCHER
     ) {
       return this.callOnRailB(session, tool, args, callId, payment.voucher, idempotencyKey, plan);
     }
@@ -2159,13 +2163,19 @@ export type VoucherSigner = 'payer' | 'delegate';
  * the chain offers it, and rail B otherwise — which on a chain with no paid
  * rail (Solana today) is refused with `CHAIN_RAIL_NOT_OFFERED` (4xx) before
  * anything is created.
+ *
+ * A session that may not pay (`paymentsAllowed !== true`: a hosted connector,
+ * a third-party grant) never takes rail A, which needs no buyer signature: it
+ * goes to rail B, where only the bound payment key's voucher is accepted. So
+ * the free-only rule holds whatever rails a chain offers.
  */
 export function chooseRail(
   chainId: ChainId,
   requested: PaymentRail | null,
   hasVoucher: boolean,
+  paymentsAllowed: boolean,
 ): PaymentRail {
-  if (hasVoucher) return PaymentRail.RAIL_B_VOUCHER;
+  if (hasVoucher || !paymentsAllowed) return PaymentRail.RAIL_B_VOUCHER;
   if (requested) return requested;
   return offersRail(chainId, railName(PaymentRail.RAIL_A_PER_CALL))
     ? PaymentRail.RAIL_A_PER_CALL
