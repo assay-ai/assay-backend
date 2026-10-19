@@ -12,7 +12,6 @@ import {
   ChainId,
   chainIdOf,
   isAccountId,
-  parseAccountId,
 } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { EscrowChainBalance } from '@modules/ledger/ports/escrow-balance-reader.port';
@@ -651,7 +650,7 @@ export class VoucherService {
     terms: VoucherDelegationTerms,
   ): void {
     const bound = input.boundDelegate ?? null;
-    if (bound === null || !sameAccount(bound, delegate)) {
+    if (bound === null || !sameAccountSpelling(bound, delegate)) {
       throw PaymentErrors.voucherDelegateNotBound({ delegate, bound });
     }
 
@@ -1082,13 +1081,4 @@ function inServerSpelling(
     provider: parties.provider,
     amount: { ...voucher.amount, asset: parties.asset },
   };
-}
-
-/** One account, compared on its chain and its address case-insensitively. */
-function sameAccount(a: AccountId, b: AccountId): boolean {
-  const left = parseAccountId(a);
-  const right = parseAccountId(b);
-  return (
-    left.chainId === right.chainId && left.address.toLowerCase() === right.address.toLowerCase()
-  );
 }
