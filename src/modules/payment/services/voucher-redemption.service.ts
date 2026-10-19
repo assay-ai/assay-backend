@@ -37,16 +37,6 @@ import {
 } from '../ports/voucher-redeemer.port';
 import { PaymentIntentService } from './payment-intent.service';
 
-/**
- * The `chainTxRef` a LEGACY platform-absorbed `PROVIDER_CREDIT` carries.
- *
- * Nothing writes one any more — the platform never pays or owes a provider; a
- * voucher that cannot be redeemed is forfeited by the provider or becomes
- * buyer debt (see the class comment). The literal stays so the historical rows
- * can still be labelled (`PLATFORM_ABSORBED_SQL`, reported as uncollected).
- */
-export const PLATFORM_ABSORBED_TX_REF_PREFIX = 'platform_absorbed:';
-
 // Re-exported: callers and specs have always imported it from here.
 export { PROVIDER_FORFEIT_PREFIX };
 

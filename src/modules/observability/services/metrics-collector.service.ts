@@ -1,6 +1,4 @@
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
-import { EvmChainStateRepository } from '@database/postgres/repositories/evm-chain-state.repository';
-import { chainStateLagMs } from '@modules/chains/evm/chain-state/evm-chain-state.indexer';
 import { Injectable, Logger, Optional } from '@nestjs/common';
 
 import { ReconciliationRunRepository } from '@database/postgres/repositories/reconciliation-run.repository';
@@ -14,7 +12,6 @@ import {
 } from '@shared/alerting';
 
 import { atomicToDisplayNumber } from '../domain/money-scale';
-import { reconciliationSeverityToNumber } from '../domain/severity-scale';
 import { ObservabilitySignal, SIGNAL_CATALOG, SignalAvailability } from '../domain/signal-catalog';
 import { ObservabilityMetricsRepository } from '../repositories/observability-metrics.repository';
 import { MetricsRegistryService } from './metrics-registry.service';
@@ -38,18 +35,9 @@ import {
  * (`ObservabilityMetricsRepository`) reads a `created_at`/`disputed_at`/
  * `updated_at` window the same way, on tables carrying the same caveat or
  * worse (none of the six have a dedicated time-range index for these
- * queries). A Prometheus scrape is not dashboard cadence — a 15s
- * `scrape_interval`, the Prometheus default, is 4 queries a minute against
- * every one of these tables, indefinitely, from every process that serves one.
- *
- * This TTL is the fix: **every** collector in this file is cached behind one
- * shared refresh, so the *scrape* interval and the *query* interval are
- * decoupled entirely. A scrape at any cadence — 1s or 60s — costs at most one
- * round of these queries per {@link CACHE_TTL_MS}. The alternative the task
- * offered ("make the scrape interval explicit") was not enough on its own:
- * it only constrains a cooperating Prometheus config, and does nothing for a
- * curious operator hitting `/operator/dashboard` in a loop, or a second
- * scrape target added later without reading this comment.
+ * queries). Every collector in this file is cached behind one shared refresh,
+ * so an operator hitting `/operator/dashboard` in a loop costs at most one
+ * round of these queries per TTL.
  *
  * Default **30 seconds** — half the reconciler's own 5-minute cadence's
  * order of magnitude tighter bound, and in line with `PlatformHealthService`'s
@@ -59,11 +47,6 @@ import {
  * rather than through `ConfigModule`, matching `isEgressLockdownEnabled()`'s
  * own reasoning: this file must not gain a dependency on module wiring it
  * does not own.
- *
- * **Operational implication**: configure Prometheus's `scrape_interval` for
- * this target to **30s or looser**. A tighter scrape interval is harmless —
- * the cache absorbs it — but will not produce fresher numbers than this TTL
- * allows, and it wastes the scrape.
  */
 function cacheTtlMs(): number {
   const configured = Number(process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS);
@@ -90,11 +73,8 @@ export class MetricsCollectorService {
     private readonly slashProposals: SlashProposalRepository,
     private readonly observability: ObservabilityMetricsRepository,
     private readonly registry: MetricsRegistryService,
-    // The EVM chain-state indexer's lag. Optional so a composition without it
-    // still scrapes.
-    @Optional() private readonly chainStates: EvmChainStateRepository | null = null,
-    // The OAuth live-grants gauge (spec §6.7). Optional like `chainStates`:
-    // a composition without it still scrapes.
+    // The OAuth live-grants gauge (spec §6.7). Optional so a composition
+    // without it still refreshes.
     @Optional() private readonly credentials: AgentCredentialRepository | null = null,
   ) {}
 
@@ -126,7 +106,6 @@ export class MetricsCollectorService {
       attestations,
       slashes,
       queue,
-      payoutQueueDepth,
       intentRates,
       disputeOverturn,
     ] = await Promise.all([
@@ -139,13 +118,11 @@ export class MetricsCollectorService {
       this.observability.attestationsSigned(new Date(now - ATTESTATION_WINDOW_MS)),
       this.observability.slashesExecuted(new Date(now - SLASH_WINDOW_MS)),
       this.platformMetrics.verificationBacklog(nowDate),
-      this.observability.payoutQueueDepth(),
       this.platformMetrics.intentRateCounts(nowDate),
       this.observability.disputeOverturnCounts(new Date(now - OVERTURN_WINDOW_MS)),
     ]).catch((error: unknown) => {
-      // The collector must not 500 `/metrics` — a scrape failing to parse an
-      // empty body is worse than a stale-but-valid one. Log and fall back to
-      // the last good snapshot (or an all-absent one on a cold start).
+      // Log and rethrow: the caller falls back to the last good snapshot (or
+      // an all-absent one on a cold start).
       this.logger.error(`Metrics refresh failed: ${describe(error)}`);
       throw error;
     });
@@ -160,78 +137,14 @@ export class MetricsCollectorService {
     const disputeOverturnRate =
       disputeOverturn.raised > 0 ? disputeOverturn.overturned / disputeOverturn.raised : null;
 
-    // ── Set the gauges/counters registry consumers (Prometheus) read ───────
-    for (const run of reconciliation) {
-      setGauge(this.registry.reconciliationDifference.labels(run.asset), run.differenceDisplay);
-      setGauge(
-        this.registry.reconciliationSeverity.labels(run.asset),
-        reconciliationSeverityToNumber(run.severity),
-      );
-      setGauge(this.registry.reconciliationAgeSeconds.labels(run.asset), run.ageSeconds);
-      if (run.gate) {
-        setGauge(
-          this.registry.signalStatus.labels(`reserve_health:${run.asset}`),
-          gateToNumber(run.gate.status),
-        );
-      }
-    }
-    if (falsePositiveRate !== null) {
-      this.registry.falsePositiveRate.set(falsePositiveRate);
-      // Deliberately NOT set on `signalStatus` — see SIGNAL_CATALOG's
-      // FALSE_POSITIVE_RATE reason: this is the dispute-derived proxy, and
-      // golden-signals.ts forbids grading it against the labelled-sample gate.
-    }
-    if (disputeOverturnRate !== null) {
-      this.registry.disputeOverturnRate.set(disputeOverturnRate);
-    }
-    if (toolCallSuccessRate !== null) {
-      this.registry.toolCallSuccessRate.set(toolCallSuccessRate);
-    }
-    if (settlementLagP95 !== null) {
-      this.registry.settlementLagP95Seconds.set(settlementLagP95);
-    }
-    // `openHold.oldestAgeSeconds` is `null` when nothing is open — see
-    // `ObservabilityMetricsRepository.openHoldAge`'s own docstring on why
-    // that must never become a fabricated `0` ("0" reads as "one just
-    // opened," not "the queue is empty"). The JSON snapshot (below) carries
-    // that `null` faithfully. `GET /metrics` cannot make the same promise for
-    // this one series: `assay_open_hold_count` is labelled `[]`, and
-    // prom-client initialises every unlabelled Gauge to `0` at construction
-    // (`Metric.reset()`), so the series exists from process start regardless
-    // of whether `.set()` is ever called. Read it beside
-    // `assay_open_hold_count == 0` — that pairing is the honest "empty queue"
-    // signal at the Prometheus layer.
-    if (openHold.oldestAgeSeconds !== null) {
-      this.registry.openHoldOldestAgeSeconds.set(openHold.oldestAgeSeconds);
-    }
-    setGauge(this.registry.openHoldCount, openHold.count);
-    for (const row of failRateByPolicy) {
-      setGauge(
-        this.registry.failRateByPolicy.labels(row.policyId, String(row.policyVersion)),
-        row.failRate,
-      );
-    }
-    setGauge(this.registry.attestationsSigned.labels('24h'), attestations);
-    setGauge(this.registry.slashesExecuted.labels('30d'), slashes);
-    setGauge(this.registry.verificationQueueDepth, queue.count);
-    if (queue.p95AgeSeconds !== null) {
-      this.registry.verificationQueueP95AgeSeconds.set(queue.p95AgeSeconds);
-    }
-    setGauge(this.registry.payoutQueueDepth, payoutQueueDepth);
-    setGauge(this.registry.intentsPerMinute, intentRates.lastMinute);
-    for (const state of (await this.chainStates?.findAllStates().catch(() => [])) ?? []) {
-      const lagMs = chainStateLagMs(state.caughtUpAt, now);
-      if (lagMs !== null) {
-        setGauge(this.registry.evmChainStateLagSeconds.labels(state.chainId), lagMs / 1000);
-      }
-    }
-
-    // A failed read leaves the last value rather than failing the scrape.
+    // A failed read leaves the last value rather than failing the refresh.
     const maxLiveOAuth = await this.credentials?.maxLiveOAuthPerAgent().catch((error: unknown) => {
       this.logger.warn(`OAuth live-grants gauge not refreshed: ${describe(error)}`);
       return null;
     });
-    setGauge(this.registry.oauthLiveGrantsPerAgent, maxLiveOAuth);
+    if (maxLiveOAuth !== null && maxLiveOAuth !== undefined) {
+      this.registry.oauthLiveGrantsPerAgent.set(maxLiveOAuth);
+    }
 
     const signals: SignalReadingDto[] = [
       this.reading(
@@ -310,34 +223,13 @@ export class MetricsCollectorService {
           p95AgeSeconds: queue.p95AgeSeconds ?? undefined,
         },
       ),
-      this.reading(
-        ObservabilitySignal.EGRESS_BLOCKS,
-        'traffic',
-        currentEgressBlockedTotal(this.registry),
-        'count',
-        null,
-      ),
+      this.reading(ObservabilitySignal.EGRESS_BLOCKS, 'traffic', null, 'count', null),
     ];
-
-    // Every graded reading's gate also lands on the `assay_signal_status`
-    // gauge — not just reserve health's (set above, per-asset). Without this
-    // loop the Prometheus surface would silently carry a gate for exactly one
-    // signal while the JSON snapshot carried five; a scrape-only consumer
-    // (no dashboard, alerting straight off `/metrics`) would never see
-    // `tool_call_success_rate`, `dispute_overturn_rate`, `settlement_lag_p95`
-    // or `open_hold_age` cross their threshold.
-    for (const reading of signals) {
-      if (reading.gate) {
-        this.registry.signalStatus
-          .labels(reading.signal.toLowerCase())
-          .set(gateToNumber(reading.gate.status));
-      }
-    }
 
     // Bonus readings shown on the dashboards but not part of the
     // named-signals ∪ golden-signals union — see the class comment on
     // `SIGNAL_CATALOG`. Kept out of that enum on purpose: it is the contract
-    // for the union list specifically, and these two are extra.
+    // for the union list specifically, and this one is extra.
     const bonus: SignalReadingDto[] = [
       {
         signal: 'INTENTS_PER_MINUTE',
@@ -346,16 +238,6 @@ export class MetricsCollectorService {
         availability: SignalAvailability.SOURCED,
         value: intentRates.lastMinute,
         unit: 'count / min',
-        gate: null,
-        reason: null,
-      },
-      {
-        signal: 'PAYOUT_QUEUE_DEPTH',
-        label: 'Payout queue (PENDING + SUBMITTED)',
-        section: 'money',
-        availability: SignalAvailability.SOURCED,
-        value: payoutQueueDepth,
-        unit: 'records',
         gate: null,
         reason: null,
       },
@@ -441,51 +323,6 @@ function toGate(alert: { severity: AlertSeverity; summary: string } | null): Sig
   };
 }
 
-function gateToNumber(status: 'OK' | 'WARN' | 'CRITICAL'): number {
-  return status === 'CRITICAL' ? 2 : status === 'WARN' ? 1 : 0;
-}
-
-/**
- * The in-process egress-block counter's JSON reading.
- *
- * `recordEgressBlock` has no caller anywhere in this codebase yet — the counter exists and is correctly wired into the
- * Prometheus registry, but nothing has ever incremented it, so no labelled
- * series exists for it at all. That is the accurate "absent" state
- * `SIGNAL_CATALOG` asks for, and `null` here (never a fabricated `0`) is
- * what carries it into the JSON snapshot. `GET /metrics` needs no equivalent
- * special-casing: a `Counter` with an unused label never emits a series in
- * Prometheus exposition text in the first place.
- */
-function currentEgressBlockedTotal(_registry: MetricsRegistryService): number | null {
-  return null;
-}
-
 function describe(error: unknown): string {
   return error instanceof Error ? error.message : String(error);
-}
-
-/**
- * The only way this file writes a gauge.
- *
- * `prom-client`'s `Gauge.set` throws `TypeError: Value is not a valid number`
- * on `null`, and a surprising number of the values here are legitimately
- * null: `reconciliation_runs.difference` is nullable and IS null on every row
- * while the reconciler cannot reach the vault, `PERCENTILE_CONT` over an empty
- * set returns null rather than zero, and a rate over a zero denominator has no
- * value. Passing any of those through took down `GET /operator/dashboard` with
- * a 500 — found by opening the page, not by a test, because the fakes in
- * `test/unit/observability` return numbers.
- *
- * Skipping the write is also the semantically right answer, not just the safe
- * one: an unset series is **absent**, and absent is what "we do not know this"
- * looks like in Prometheus. Writing `0` would claim the reconciler agrees with
- * the ledger exactly, at the moment it cannot read the vault at all — the one
- * reading that must never be inferred from silence.
- *
- * Guarding here rather than at each call site is deliberate: there are a dozen
- * writes and the next one added will not remember.
- */
-function setGauge(gauge: { set(value: number): void }, value: number | null | undefined): void {
-  if (value === null || value === undefined || Number.isNaN(value)) return;
-  gauge.set(value);
 }

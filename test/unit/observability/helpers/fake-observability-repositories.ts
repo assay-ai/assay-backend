@@ -37,7 +37,6 @@ export interface FakeObservabilityOverrides {
   openHoldAge?: { count: number; oldestAgeSeconds: number | null };
   attestationsSigned?: number;
   slashesExecuted?: number;
-  payoutQueueDepth?: number;
   disputeOverturnCounts?: { raised: number; overturned: number };
 }
 
@@ -56,7 +55,6 @@ export function fakeObservabilityMetricsRepository(
       .mockResolvedValue(overrides.openHoldAge ?? { count: 0, oldestAgeSeconds: null }),
     attestationsSigned: jest.fn().mockResolvedValue(overrides.attestationsSigned ?? 0),
     slashesExecuted: jest.fn().mockResolvedValue(overrides.slashesExecuted ?? 0),
-    payoutQueueDepth: jest.fn().mockResolvedValue(overrides.payoutQueueDepth ?? 0),
     disputeOverturnCounts: jest
       .fn()
       .mockResolvedValue(overrides.disputeOverturnCounts ?? { raised: 0, overturned: 0 }),

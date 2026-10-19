@@ -126,7 +126,7 @@ describe('LedgerWithheldService — withheldFromIntents', () => {
         sumWithheldByAssetAndStatus: jest.fn().mockResolvedValue([
           row('REFUNDED', 4, 170_000n),
           row('VOIDED', 10, 430_000n),
-          // Forfeited, voided-debt and absorbed calls arrive as one SETTLED row.
+          // Forfeited and voided-debt calls arrive as one SETTLED row.
           row('SETTLED', 5, 500_000n, true),
         ]),
       },
@@ -247,12 +247,12 @@ describe('LedgerWithheldService — reconcile', () => {
   });
 
   /**
-   * UX review 2026-10-18 P0-3: a forfeited voucher, a voided debt and a legacy
-   * absorb each release the buyer's hold. Left out of `withheld`, they made
+   * UX review 2026-10-18 P0-3: a forfeited voucher and a voided debt each
+   * release the buyer's hold. Left out of `withheld`, they made
    * `ok` false by exactly their amount, and the screens said "$0.60 not
    * charged" beside a summary of $1.10.
    */
-  it('balances once forfeited, voided-debt and absorbed releases are counted', async () => {
+  it('balances once forfeited and voided-debt releases are counted', async () => {
     const { service } = build({
       intents: {
         sumWithheldByAssetAndStatus: jest
@@ -481,11 +481,10 @@ describe('PaymentIntentRepository.sumWithheldByAssetAndStatus — the query itse
     expect(statusPredicate).toBeDefined();
     expect(statusPredicate?.args[1]).toEqual({ statuses: WITHHELD_STATUSES });
     const sql = String(statusPredicate?.args[0]);
-    // NOT_CHARGED_SETTLED_SQL: forfeited, voided debt, legacy absorb; never written off.
+    // NOT_CHARGED_SETTLED_SQL: forfeited or voided debt; never written off.
     expect(sql).toContain("intent.status = 'SETTLED'");
     expect(sql).toContain('provider_forfeit:%');
     expect(sql).toContain('voided:%');
-    expect(sql).toContain('platform_absorbed:%');
     expect(sql).toContain(
       "NOT COALESCE((intent.redemption_last_error LIKE 'uncollected:%'), false)",
     );

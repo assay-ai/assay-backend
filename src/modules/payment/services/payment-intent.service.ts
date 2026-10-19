@@ -20,7 +20,7 @@ import {
 import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
-import { LedgerAccountId, LEGACY_POOLED_VAULT_TX_REF } from '@modules/ledger/ports/ledger.types';
+import { LedgerAccountId, RAIL_A_BOOK_CREDIT_TX_REF } from '@modules/ledger/ports/ledger.types';
 import { EscrowSpendGateService } from '@modules/ledger/services/escrow-spend-gate.service';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
 import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
@@ -64,19 +64,8 @@ import {
 } from '../ports/payment.types';
 
 /**
- * The unique index on `payment_intents.voucher_nonce` (voucher v1).
- *
- * Matched by name because Postgres reports which constraint refused an insert,
- * and this table has three unique indexes whose violations mean different
- * things. No caller writes `voucherNonce` any more — `VoucherService` writes
- * {@link VOUCHER_SEQ_CONSTRAINT} instead — but the index and this branch stay
- * for rows written before the v2 cutover.
- */
-const VOUCHER_NONCE_CONSTRAINT = 'idx_payment_intents_voucher_nonce';
-
-/**
- * Voucher v2's replacement: unique on `(agent_account, voucher_seq)`, not global —
- * voucher v2's `seq` is per-buyer, so buyer A's seq 5 and buyer B's seq 5 are
+ * The voucher replay guard: unique on `(agent_account, voucher_seq)`, not
+ * global — a `seq` is per-buyer, so buyer A's seq 5 and buyer B's seq 5 are
  * different vouchers and must not collide.
  */
 const VOUCHER_SEQ_CONSTRAINT = 'uq_payment_intents_account_voucher_seq';
@@ -249,7 +238,6 @@ export class PaymentIntentService {
       chainId: input.chainId,
       expiresAt: input.expiresAt ?? new Date(Date.now() + PAYMENT_INTENT_TTL_MS),
       idempotencyKey: input.idempotencyKey ?? null,
-      voucherNonce: input.voucherNonce ?? null,
       voucherSeq: input.voucherSeq ?? null,
       voucherSignature: input.voucherSignature ?? null,
       voucherResourceHash: input.voucherResourceHash ?? null,
@@ -276,15 +264,13 @@ export class PaymentIntentService {
 
         // Two unique indexes can refuse this insert and they mean opposite
         // things, so the constraint name decides rather than the presence of a
-        // key. A voucher nonce collision is a **replay** — the authorization has
+        // key. A voucher seq collision is a **replay** — the authorization has
         // already been spent and there is nothing to return — while an
         // idempotency collision is a **retry**, and the caller wants the intent
         // the first copy created. Inferring one from the other would answer a
         // replayed voucher with someone's earlier intent.
-        if (violation.constraint === VOUCHER_NONCE_CONSTRAINT) {
-          throw PaymentErrors.voucherNonceReplayed({ nonce: row.voucherNonce });
-        }
-        // Voucher v2's replay guard: `VoucherService.assertIssuedSeq` already
+        //
+        // The voucher replay guard: `VoucherService.assertIssuedSeq` already
         // confirmed the seq was issued to this account and not yet used before
         // this insert ran, so a collision here means a second call reached the
         // insert for the same `(account, seq)` first — a genuine concurrent
@@ -675,7 +661,7 @@ export class PaymentIntentService {
       providerAmount: intent.providerAmount,
       platformFee: intent.platformFee,
       intentId,
-      chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
+      chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF,
     });
     await this.intents.update({ organizationId, id: intentId }, { holdReleasedAt: new Date() });
 
@@ -917,7 +903,7 @@ export class PaymentIntentService {
       intentId,
       chainTxRef:
         intent.rail === PaymentRail.RAIL_A_PER_CALL
-          ? LEGACY_POOLED_VAULT_TX_REF
+          ? RAIL_A_BOOK_CREDIT_TX_REF
           : (txRef ?? `held_collected:seq=${intent.voucherSeq}`),
     });
     await this.intents.manager.transaction((manager) =>
@@ -1137,7 +1123,6 @@ export function toPaymentIntent(row: PaymentIntentEntity): PaymentIntent {
     chainId: row.chainId as ChainId,
     expiresAt: row.expiresAt,
     idempotencyKey: row.idempotencyKey,
-    voucherNonce: row.voucherNonce,
     voucherSeq: row.voucherSeq,
     voucherSignature: row.voucherSignature ?? null,
     voucherResourceHash: row.voucherResourceHash ?? null,

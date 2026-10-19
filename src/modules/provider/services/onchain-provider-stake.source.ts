@@ -93,10 +93,8 @@ interface CachedReading {
  * read is added — the freshness window is still 30s and the fail-closed ceiling
  * still 15 minutes, for the reasons `onchain-stake.constants.ts` gives.
  *
- * This is the class `ProviderStakePort` was written to make possible: the
- * router does not import it, cannot tell it apart from `ConfigProviderStakeSource`,
- * and has no branch that behaves differently under one. Swapping them is a
- * `useClass` in `ProviderModule` — not this file's job.
+ * The router does not import it: it reads `PROVIDER_STAKE_SOURCE`, which
+ * `ProviderModule` binds to this class.
  *
  * ## Why the cache is not an optimisation
  *

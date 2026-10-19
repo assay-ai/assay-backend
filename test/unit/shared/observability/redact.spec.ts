@@ -42,6 +42,31 @@ describe('isForbiddenKey', () => {
     'requestBody',
     'responseBody',
     'rawBody',
+    // OAuth (R-OA-27): tokens, the code, the PKCE verifier and the consent request id.
+    'access_token',
+    'refresh_token',
+    'code_verifier',
+    'codeVerifier',
+    'code_challenge',
+    'client_secret',
+    'rid',
+    'requestId',
+    'request_id',
+    // M2: hashes and query parameters.
+    'codeHash',
+    'parentHash',
+    'parameters',
+    // M3: OAuth names that are not secret-shaped words on their own.
+    'oauthState',
+    'assayReplaces',
+    'assay_replaces',
+    'authCode',
+    'pkceVerifier',
+    'delegateSignature',
+    'authorizationSignature',
+    // The per-request cookie names (`__Host-assay_oar_{mac16}`), by prefix.
+    '__Host-assay_oar_0123456789abcdef',
+    '__Host-assay_oar',
   ])('forbids the exact field %s', (key) => {
     expect(isForbiddenKey(key)).toBe(true);
   });
@@ -61,7 +86,7 @@ describe('isForbiddenKey', () => {
     'producedSignature',
     'nextPageToken',
     'tokenId',
-    'requestId',
+    'serverRequestId',
     'organizationId',
     'intentId',
     'amount',
@@ -193,5 +218,64 @@ describe('redact', () => {
     redact(input);
 
     expect(input).toEqual(clone);
+  });
+
+  // ── the value backstop (R-OA-27) ───────────────────────────────────────────
+
+  const AT = 'assay_at_' + 'A'.repeat(20) + 'b-c_d' + 'E'.repeat(18);
+  const RT = 'assay_rt_' + 'Zz09_-'.repeat(7) + 'q';
+  const AC = 'assay_ac_' + 'x'.repeat(43);
+  const SK = 'assay_sk_live_' + 'k'.repeat(40);
+  const SIG = '0x' + 'ab'.repeat(65);
+
+  it('replaces assay_rt_… in a free-text message', () => {
+    const result = redact({ message: `refresh with ${RT} failed` }) as Record<string, unknown>;
+    expect(result.message).toBe(`refresh with ${REDACTED} failed`);
+  });
+
+  it.each([
+    ['an access token', AT],
+    ['an authorization code', AC],
+    ['an API key', SK],
+    ['a 65-byte signature', SIG],
+  ])('replaces %s wherever it appears in a string', (_label, secret) => {
+    expect(redact(`a ${secret} b`)).toBe(`a ${REDACTED} b`);
+    expect(redact({ nested: [{ note: `x=${secret}` }] })).toEqual({
+      nested: [{ note: `x=${REDACTED}` }],
+    });
+  });
+
+  it('replaces a secret in an Error message and stack', () => {
+    const result = redact(new Error(`bad token ${AT}`)) as Record<string, unknown>;
+    expect(result.message).toBe(`bad token ${REDACTED}`);
+    expect(String(result.stack)).not.toContain(AT);
+  });
+
+  it('keeps a 32-byte hex value (a transaction hash) and an API-key prefix readable', () => {
+    const txHash = '0x' + 'cd'.repeat(32);
+    expect(redact(`tx ${txHash}`)).toBe(`tx ${txHash}`);
+    expect(redact({ prefix: 'assay_sk_live_ab12cd' })).toEqual({ prefix: 'assay_sk_live_ab12cd' });
+  });
+
+  it('keeps an error-code shaped code (ECONNREFUSED, a Postgres code) and blanks any other', () => {
+    expect(redact({ code: 'ECONNREFUSED' })).toEqual({ code: 'ECONNREFUSED' });
+    expect(redact({ code: '23505' })).toEqual({ code: '23505' });
+    expect(redact({ code: AC })).toEqual({ code: REDACTED });
+    expect(redact({ code: 'q1W2e3R4t5' })).toEqual({ code: REDACTED });
+  });
+
+  it('keeps an integer code (JSON-RPC, errno) readable (M4)', () => {
+    expect(redact({ code: -32603 })).toEqual({ code: -32603 });
+    expect(redact({ code: 0 })).toEqual({ code: 0 });
+    expect(redact({ code: 1.5 })).toEqual({ code: REDACTED });
+    expect(redact({ code: { nested: 'x' } })).toEqual({ code: REDACTED });
+  });
+
+  it('replaces a 64-byte compact signature and a request cookie pair in text (M3)', () => {
+    const compact = '0x' + 'ef'.repeat(64);
+    expect(redact(`sig ${compact}.`)).toBe(`sig ${REDACTED}.`);
+    expect(redact(`Cookie: __Host-assay_oar_0123456789abcdef=${'a'.repeat(64)}; other=1`)).toBe(
+      `Cookie: ${REDACTED}; other=1`,
+    );
   });
 });

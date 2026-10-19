@@ -268,6 +268,16 @@ export interface SlashCancelIntent {
  * record is the authority in both directions, so the recovery paths read it
  * rather than reasoning from local state.
  */
+/** How {@link SlashExecutorPort.readRecord} reads. */
+export interface SlashRecordReadOptions {
+  /**
+   * Read the record as of the chain's finalized block, not `latest` (B18's
+   * operator actions on a stuck case: a reorg must not undo the state they
+   * act on). EVM only; an adapter whose reads are already final ignores it.
+   */
+  readonly finalized?: boolean;
+}
+
 export interface SlashRecordSnapshot {
   readonly status: SlashRecordStatus;
   readonly penaltyMinor: string;
@@ -469,6 +479,7 @@ export interface SlashExecutorPort {
     requestId: string,
     provider: string,
     chainId: ChainId,
+    options?: SlashRecordReadOptions,
   ): Promise<SlashRecordSnapshot | null>;
 
   /**

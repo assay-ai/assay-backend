@@ -69,7 +69,7 @@ export class SignalReadingDto {
 
   @ApiPropertyOptional({
     nullable: true,
-    description: 'Null when NONE/AWAITING_INSTRUMENTATION, or when the window has no data.',
+    description: 'Null when NONE, or when the window has no data.',
   })
   value: number | null;
 
@@ -92,7 +92,7 @@ export class SignalReadingDto {
   extra?: Record<string, number | undefined>;
 }
 
-/** `GET /operator/dashboard/data.json` and the object `GET /metrics` is rendered from. */
+/** `GET /operator/dashboard/data.json`, and the object the HTML dashboard is rendered from. */
 export class MetricsSnapshotDto {
   @ApiProperty()
   generatedAt: string;

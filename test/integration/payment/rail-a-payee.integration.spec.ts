@@ -52,9 +52,9 @@ describe('rail-A payment intents must name a payee', () => {
   async function unroutedIntent(label: string): Promise<PaymentIntent> {
     return context.createIntent(label, {
       rail: PaymentRail.RAIL_A_PER_CALL,
-      // Rail A's replay guard is on-chain; a nonce here would be refused by
-      // `chk_payment_intents_voucher_nonce_rail`.
-      voucherNonce: null,
+      // Rail A's replay guard is on-chain; a seq here would be refused by
+      // `chk_payment_intents_rail_a_has_no_seq`.
+      voucherSeq: null,
       providerId: null,
       providerAccount: null,
       callId: randomUUID(),

@@ -11,7 +11,7 @@ import { PaymentIntentRedemptionLastError1760600000000 } from '@database/postgre
 import { PaymentIntentRedemptionLapsed1760700000000 } from '@database/postgres/migrations/1760700000000-payment-intent-redemption-lapsed';
 import { PaymentIntentDebtReplacing1760800000000 } from '@database/postgres/migrations/1760800000000-payment-intent-debt-replacing';
 import { VoucherSeqDebtReplacement1760900000000 } from '@database/postgres/migrations/1760900000000-voucher-seq-debt-replacement';
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomBytes, randomInt, randomUUID } from 'node:crypto';
 import { config as loadEnv } from 'dotenv';
 import { DataSource } from 'typeorm';
 
@@ -274,7 +274,7 @@ export async function createWithheldTestContext(): Promise<WithheldTestContext> 
         platformFee,
         requestHash: `sha256:${randomBytes(16).toString('hex')}`,
         chainId: CHAIN_IDS.SOLANA_MAINNET,
-        voucherNonce: randomBytes(16).toString('hex'),
+        voucherSeq: String(randomInt(1, 2 ** 47)),
       });
     },
 

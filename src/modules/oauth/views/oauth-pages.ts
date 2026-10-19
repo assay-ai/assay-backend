@@ -36,7 +36,8 @@ ${body}
 
 /**
  * `continue` without the `__Host-assay_oar` cookie of this request: another
- * browser, a cleared cookie, or a second sign-in started in this browser.
+ * browser, a cleared cookie, or a cookie this browser evicted because more
+ * sign-ins were started in it than it keeps at once.
  */
 export const CONTINUE_WRONG_BROWSER_PAGE = page(
   'Finish signing in - Assay',

@@ -29,7 +29,7 @@ describe('OAuth schema — real migrations', () => {
   const DATABASE = 'assay_oauth_schema_test';
   const ORGANIZATION = '11111111-1111-4111-8111-111111111111';
   const OTHER_ORGANIZATION = '22222222-2222-4222-8222-222222222222';
-  const OAUTH_MIGRATION = 'OAuth1762400000000';
+  const OAUTH_MIGRATION = 'OAuth1762400000010';
   const HOUR = 3_600_000;
 
   let dataSource: DataSource;
