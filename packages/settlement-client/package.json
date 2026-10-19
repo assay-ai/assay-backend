@@ -1,5 +1,5 @@
 {
-  "name": "@x402/settlement-client",
+  "name": "@assay/settlement-client",
   "version": "1.0.0",
   "description": "Generated @solana/kit client for the x402 settlement program. Do not hand-edit src/generated.",
   "private": true,

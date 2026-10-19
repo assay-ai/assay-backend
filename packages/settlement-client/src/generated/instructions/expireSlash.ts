@@ -33,7 +33,7 @@ import {
   getAccountMetaFactory,
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const EXPIRE_SLASH_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   114, 239, 117, 220, 151, 115, 241, 214,
@@ -44,7 +44,7 @@ export function getExpireSlashDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type ExpireSlashInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountSlashRecord extends string | AccountMeta<string> = string,
   TAccountStake extends string | AccountMeta<string> = string,
   TAccountVerifierKey extends string | AccountMeta<string> = string,
@@ -121,7 +121,7 @@ export function getExpireSlashInstruction<
   TAccountSlashRecord extends string,
   TAccountStake extends string,
   TAccountVerifierKey extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: ExpireSlashInput<TAccountSlashRecord, TAccountStake, TAccountVerifierKey>,
   config?: { programAddress?: TProgramAddress },
@@ -132,7 +132,7 @@ export function getExpireSlashInstruction<
   TAccountVerifierKey
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -163,7 +163,7 @@ export function getExpireSlashInstruction<
 }
 
 export type ParsedExpireSlashInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

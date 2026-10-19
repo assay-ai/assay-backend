@@ -40,7 +40,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findConfigPda, findStakePda, findStakeVaultPda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const WITHDRAW_STAKE_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   153, 8, 22, 138, 105, 176, 87, 66,
@@ -51,7 +51,7 @@ export function getWithdrawStakeDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type WithdrawStakeInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountProvider extends string | AccountMeta<string> = string,
   TAccountConfig extends string | AccountMeta<string> = string,
   TAccountStake extends string | AccountMeta<string> = string,
@@ -144,7 +144,7 @@ export async function getWithdrawStakeInstructionAsync<
   TAccountDestination extends string,
   TAccountStakeMint extends string,
   TAccountTokenProgram extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: WithdrawStakeAsyncInput<
     TAccountProvider,
@@ -169,7 +169,7 @@ export async function getWithdrawStakeInstructionAsync<
   >
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -262,7 +262,7 @@ export function getWithdrawStakeInstruction<
   TAccountDestination extends string,
   TAccountStakeMint extends string,
   TAccountTokenProgram extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: WithdrawStakeInput<
     TAccountProvider,
@@ -285,7 +285,7 @@ export function getWithdrawStakeInstruction<
   TAccountTokenProgram
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -337,7 +337,7 @@ export function getWithdrawStakeInstruction<
 }
 
 export type ParsedWithdrawStakeInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

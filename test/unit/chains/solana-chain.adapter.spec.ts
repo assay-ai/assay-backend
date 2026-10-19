@@ -13,7 +13,7 @@ import {
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
 } from '@solana/kit';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '@x402/settlement-client';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '@assay/settlement-client';
 
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
 import { computeResourceHash, hashHexToBytes } from '@modules/payment/domain/resource-hash';
@@ -49,7 +49,7 @@ const PROVIDER = `${SOLANA_MAINNET}:${PROVIDER_ADDRESS}` as AccountId;
  * The address the settlement program is **deployed** to, which is not the
  * address it was **built** for.
  *
- * Deliberately different from `X402_PAYMENT_PROGRAM_ADDRESS` — the client's
+ * Deliberately different from `ASSAY_PAYMENT_PROGRAM_ADDRESS` — the client's
  * compiled-in `declare_id!()` — because the voucher signs the program id at
  * offset 16 and a redeploy can move it to a new one. A default to the compiled-in
  * constant would have every buyer sign bytes naming a program that is not the
@@ -440,7 +440,7 @@ describe('SolanaChainAdapter — voucher v2', () => {
     const message = adapter.buildVoucherMessage(voucher);
 
     expect(Array.from(message.subarray(16, 48))).toEqual(addressBytes(DEPLOYED_PROGRAM_ID));
-    expect(DEPLOYED_PROGRAM_ID).not.toBe(X402_PAYMENT_PROGRAM_ADDRESS);
+    expect(DEPLOYED_PROGRAM_ID).not.toBe(ASSAY_PAYMENT_PROGRAM_ADDRESS);
   });
 
   it('refuses to build a voucher message when the program id is unconfigured', () => {
@@ -521,7 +521,7 @@ describe('SolanaChainAdapter — voucher v2', () => {
     const redeployed = new SolanaChainAdapter(
       stubRpc('10000', 6),
       [CHAIN_IDS.SOLANA_MAINNET, CHAIN_IDS.SOLANA_DEVNET],
-      X402_PAYMENT_PROGRAM_ADDRESS,
+      ASSAY_PAYMENT_PROGRAM_ADDRESS,
     );
 
     expect(redeployed.verifyVoucherSignature(voucher, signVoucher(voucher), signer)).toBe(false);

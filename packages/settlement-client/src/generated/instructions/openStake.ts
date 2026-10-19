@@ -38,7 +38,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findStakePda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const OPEN_STAKE_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   136, 215, 163, 130, 234, 194, 229, 229,
@@ -49,7 +49,7 @@ export function getOpenStakeDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type OpenStakeInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountPayer extends string | AccountMeta<string> = string,
   TAccountProvider extends string | AccountMeta<string> = string,
   TAccountStake extends string | AccountMeta<string> = string,
@@ -111,7 +111,7 @@ export async function getOpenStakeInstructionAsync<
   TAccountProvider extends string,
   TAccountStake extends string,
   TAccountSystemProgram extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: OpenStakeAsyncInput<TAccountPayer, TAccountProvider, TAccountStake, TAccountSystemProgram>,
   config?: { programAddress?: TProgramAddress },
@@ -125,7 +125,7 @@ export async function getOpenStakeInstructionAsync<
   >
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -187,7 +187,7 @@ export function getOpenStakeInstruction<
   TAccountProvider extends string,
   TAccountStake extends string,
   TAccountSystemProgram extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: OpenStakeInput<TAccountPayer, TAccountProvider, TAccountStake, TAccountSystemProgram>,
   config?: { programAddress?: TProgramAddress },
@@ -199,7 +199,7 @@ export function getOpenStakeInstruction<
   TAccountSystemProgram
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -239,7 +239,7 @@ export function getOpenStakeInstruction<
 }
 
 export type ParsedOpenStakeInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

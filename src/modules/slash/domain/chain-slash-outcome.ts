@@ -6,7 +6,7 @@ import { AppError } from '@shared/errors/app-errors';
  *
  * Pure — no NestJS, no TypeORM, no chain SDK. The two imports are a string enum
  * of error codes and the error class itself; both are plain TypeScript, and
- * `@x402/settlement-client` is banned outside `src/modules/chains/` by ESLint
+ * `@assay/settlement-client` is banned outside `src/modules/chains/` by ESLint
  * anyway.
  *
  * ## Why this keys on names and not on numbers
@@ -23,7 +23,7 @@ import { AppError } from '@shared/errors/app-errors';
  * {@link settlementErrorName}, and every decision is made on the name.
  * {@link SETTLEMENT_ERROR_NAMES} is the only copy of the program's error enum
  * outside the IDL, and `test/unit/slash/chain-slash-outcome.spec.ts` compares
- * it against `packages/settlement-client/idl/x402_payment.json` entry by entry
+ * it against `packages/settlement-client/idl/assay_payment.json` entry by entry
  * — so the next shift fails a test rather than re-pointing a verdict.
  *
  * Neither the table nor its spec states how many variants there are. One
@@ -37,7 +37,7 @@ import { AppError } from '@shared/errors/app-errors';
  * The obvious shortcut — read the name out of the string the chain layer
  * produced — does not work and fails in the dangerous direction. That string
  * comes from `explainStatusError`, which renders
- * `getX402PaymentErrorMessage(code)`: the human *sentence*, not the variant
+ * `getAssayPaymentErrorMessage(code)`: the human *sentence*, not the variant
  * name (6011 is "This verifier key has been revoked and can never be
  * reinstated"), and a fixed placeholder for every code when
  * `NODE_ENV === 'production'`. A parser would extract "reinstated", or nothing,
@@ -104,7 +104,7 @@ export const SETTLEMENT_ERROR_CODE_BASE = 6000;
 
 /**
  * The settlement program's error enum, in declaration order, from
- * `packages/settlement-client/idl/x402_payment.json`.
+ * `packages/settlement-client/idl/assay_payment.json`.
  *
  * Index `i` is code `SETTLEMENT_ERROR_CODE_BASE + i`. Hand-written on purpose —
  * the generated client is a chain SDK and cannot be imported here — and checked

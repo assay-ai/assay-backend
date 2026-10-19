@@ -38,7 +38,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findConfigPda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const SET_PAUSED_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   91, 60, 125, 192, 176, 225, 166, 218,
@@ -49,7 +49,7 @@ export function getSetPausedDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type SetPausedInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountAdmin extends string | AccountMeta<string> = string,
   TAccountConfig extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
@@ -105,13 +105,13 @@ export type SetPausedAsyncInput<
 export async function getSetPausedInstructionAsync<
   TAccountAdmin extends string,
   TAccountConfig extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: SetPausedAsyncInput<TAccountAdmin, TAccountConfig>,
   config?: { programAddress?: TProgramAddress },
 ): Promise<SetPausedInstruction<TProgramAddress, TAccountAdmin, TAccountConfig>> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -151,13 +151,13 @@ export type SetPausedInput<
 export function getSetPausedInstruction<
   TAccountAdmin extends string,
   TAccountConfig extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: SetPausedInput<TAccountAdmin, TAccountConfig>,
   config?: { programAddress?: TProgramAddress },
 ): SetPausedInstruction<TProgramAddress, TAccountAdmin, TAccountConfig> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -181,7 +181,7 @@ export function getSetPausedInstruction<
 }
 
 export type ParsedSetPausedInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

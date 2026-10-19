@@ -133,10 +133,10 @@ import {
   findVerifierKeyPda,
 } from '../pdas';
 
-export const X402_PAYMENT_PROGRAM_ADDRESS =
+export const ASSAY_PAYMENT_PROGRAM_ADDRESS =
   'DbHEzzA6CwKRY9xLGSzDgqei7VmnHpF6YociozaN8qFR' as Address<'DbHEzzA6CwKRY9xLGSzDgqei7VmnHpF6YociozaN8qFR'>;
 
-export enum X402PaymentAccount {
+export enum AssayPaymentAccount {
   BuyerEscrow,
   Config,
   ProviderStake,
@@ -144,9 +144,9 @@ export enum X402PaymentAccount {
   VerifierKey,
 }
 
-export function identifyX402PaymentAccount(
+export function identifyAssayPaymentAccount(
   account: { data: ReadonlyUint8Array } | ReadonlyUint8Array,
-): X402PaymentAccount {
+): AssayPaymentAccount {
   const data = 'data' in account ? account.data : account;
   if (
     containsBytes(
@@ -157,7 +157,7 @@ export function identifyX402PaymentAccount(
       0,
     )
   ) {
-    return X402PaymentAccount.BuyerEscrow;
+    return AssayPaymentAccount.BuyerEscrow;
   }
   if (
     containsBytes(
@@ -168,7 +168,7 @@ export function identifyX402PaymentAccount(
       0,
     )
   ) {
-    return X402PaymentAccount.Config;
+    return AssayPaymentAccount.Config;
   }
   if (
     containsBytes(
@@ -179,7 +179,7 @@ export function identifyX402PaymentAccount(
       0,
     )
   ) {
-    return X402PaymentAccount.ProviderStake;
+    return AssayPaymentAccount.ProviderStake;
   }
   if (
     containsBytes(
@@ -190,7 +190,7 @@ export function identifyX402PaymentAccount(
       0,
     )
   ) {
-    return X402PaymentAccount.SlashRecord;
+    return AssayPaymentAccount.SlashRecord;
   }
   if (
     containsBytes(
@@ -201,15 +201,15 @@ export function identifyX402PaymentAccount(
       0,
     )
   ) {
-    return X402PaymentAccount.VerifierKey;
+    return AssayPaymentAccount.VerifierKey;
   }
   throw new SolanaError(SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_ACCOUNT, {
     accountData: data,
-    programName: 'x402Payment',
+    programName: 'assayPayment',
   });
 }
 
-export enum X402PaymentInstruction {
+export enum AssayPaymentInstruction {
   CancelSlash,
   DepositStake,
   ExecuteSlash,
@@ -230,9 +230,9 @@ export enum X402PaymentInstruction {
   WithdrawStake,
 }
 
-export function identifyX402PaymentInstruction(
+export function identifyAssayPaymentInstruction(
   instruction: { data: ReadonlyUint8Array } | ReadonlyUint8Array,
-): X402PaymentInstruction {
+): AssayPaymentInstruction {
   const data = 'data' in instruction ? instruction.data : instruction;
   if (
     containsBytes(
@@ -243,7 +243,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.CancelSlash;
+    return AssayPaymentInstruction.CancelSlash;
   }
   if (
     containsBytes(
@@ -254,7 +254,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.DepositStake;
+    return AssayPaymentInstruction.DepositStake;
   }
   if (
     containsBytes(
@@ -265,7 +265,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.ExecuteSlash;
+    return AssayPaymentInstruction.ExecuteSlash;
   }
   if (
     containsBytes(
@@ -276,7 +276,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.ExpireSlash;
+    return AssayPaymentInstruction.ExpireSlash;
   }
   if (
     containsBytes(
@@ -287,7 +287,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.InitializeConfig;
+    return AssayPaymentInstruction.InitializeConfig;
   }
   if (
     containsBytes(
@@ -298,7 +298,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.OpenEscrow;
+    return AssayPaymentInstruction.OpenEscrow;
   }
   if (
     containsBytes(
@@ -309,7 +309,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.OpenStake;
+    return AssayPaymentInstruction.OpenStake;
   }
   if (
     containsBytes(
@@ -320,7 +320,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.ProposeSlash;
+    return AssayPaymentInstruction.ProposeSlash;
   }
   if (
     containsBytes(
@@ -331,7 +331,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.RedeemVoucher;
+    return AssayPaymentInstruction.RedeemVoucher;
   }
   if (
     containsBytes(
@@ -342,7 +342,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.RegisterVerifier;
+    return AssayPaymentInstruction.RegisterVerifier;
   }
   if (
     containsBytes(
@@ -353,7 +353,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.RequestUnstake;
+    return AssayPaymentInstruction.RequestUnstake;
   }
   if (
     containsBytes(
@@ -364,7 +364,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.RequestWithdraw;
+    return AssayPaymentInstruction.RequestWithdraw;
   }
   if (
     containsBytes(
@@ -375,7 +375,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.RevokeVerifier;
+    return AssayPaymentInstruction.RevokeVerifier;
   }
   if (
     containsBytes(
@@ -386,7 +386,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.SetEscrowLimits;
+    return AssayPaymentInstruction.SetEscrowLimits;
   }
   if (
     containsBytes(
@@ -397,7 +397,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.SetPaused;
+    return AssayPaymentInstruction.SetPaused;
   }
   if (
     containsBytes(
@@ -408,7 +408,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.UpdateConfig;
+    return AssayPaymentInstruction.UpdateConfig;
   }
   if (
     containsBytes(
@@ -419,7 +419,7 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.Withdraw;
+    return AssayPaymentInstruction.Withdraw;
   }
   if (
     containsBytes(
@@ -430,213 +430,215 @@ export function identifyX402PaymentInstruction(
       0,
     )
   ) {
-    return X402PaymentInstruction.WithdrawStake;
+    return AssayPaymentInstruction.WithdrawStake;
   }
   throw new SolanaError(SOLANA_ERROR__PROGRAM_CLIENTS__FAILED_TO_IDENTIFY_INSTRUCTION, {
     instructionData: data,
-    programName: 'x402Payment',
+    programName: 'assayPayment',
   });
 }
 
-export type ParsedX402PaymentInstruction<
+export type ParsedAssayPaymentInstruction<
   TProgram extends string = 'DbHEzzA6CwKRY9xLGSzDgqei7VmnHpF6YociozaN8qFR',
 > =
   | ({
-      instructionType: X402PaymentInstruction.CancelSlash;
+      instructionType: AssayPaymentInstruction.CancelSlash;
     } & ParsedCancelSlashInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.DepositStake;
+      instructionType: AssayPaymentInstruction.DepositStake;
     } & ParsedDepositStakeInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.ExecuteSlash;
+      instructionType: AssayPaymentInstruction.ExecuteSlash;
     } & ParsedExecuteSlashInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.ExpireSlash;
+      instructionType: AssayPaymentInstruction.ExpireSlash;
     } & ParsedExpireSlashInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.InitializeConfig;
+      instructionType: AssayPaymentInstruction.InitializeConfig;
     } & ParsedInitializeConfigInstruction<TProgram>)
-  | ({ instructionType: X402PaymentInstruction.OpenEscrow } & ParsedOpenEscrowInstruction<TProgram>)
-  | ({ instructionType: X402PaymentInstruction.OpenStake } & ParsedOpenStakeInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.ProposeSlash;
+      instructionType: AssayPaymentInstruction.OpenEscrow;
+    } & ParsedOpenEscrowInstruction<TProgram>)
+  | ({ instructionType: AssayPaymentInstruction.OpenStake } & ParsedOpenStakeInstruction<TProgram>)
+  | ({
+      instructionType: AssayPaymentInstruction.ProposeSlash;
     } & ParsedProposeSlashInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.RedeemVoucher;
+      instructionType: AssayPaymentInstruction.RedeemVoucher;
     } & ParsedRedeemVoucherInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.RegisterVerifier;
+      instructionType: AssayPaymentInstruction.RegisterVerifier;
     } & ParsedRegisterVerifierInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.RequestUnstake;
+      instructionType: AssayPaymentInstruction.RequestUnstake;
     } & ParsedRequestUnstakeInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.RequestWithdraw;
+      instructionType: AssayPaymentInstruction.RequestWithdraw;
     } & ParsedRequestWithdrawInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.RevokeVerifier;
+      instructionType: AssayPaymentInstruction.RevokeVerifier;
     } & ParsedRevokeVerifierInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.SetEscrowLimits;
+      instructionType: AssayPaymentInstruction.SetEscrowLimits;
     } & ParsedSetEscrowLimitsInstruction<TProgram>)
-  | ({ instructionType: X402PaymentInstruction.SetPaused } & ParsedSetPausedInstruction<TProgram>)
+  | ({ instructionType: AssayPaymentInstruction.SetPaused } & ParsedSetPausedInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.UpdateConfig;
+      instructionType: AssayPaymentInstruction.UpdateConfig;
     } & ParsedUpdateConfigInstruction<TProgram>)
-  | ({ instructionType: X402PaymentInstruction.Withdraw } & ParsedWithdrawInstruction<TProgram>)
+  | ({ instructionType: AssayPaymentInstruction.Withdraw } & ParsedWithdrawInstruction<TProgram>)
   | ({
-      instructionType: X402PaymentInstruction.WithdrawStake;
+      instructionType: AssayPaymentInstruction.WithdrawStake;
     } & ParsedWithdrawStakeInstruction<TProgram>);
 
-export function parseX402PaymentInstruction<TProgram extends string>(
+export function parseAssayPaymentInstruction<TProgram extends string>(
   instruction: Instruction<TProgram> & InstructionWithData<ReadonlyUint8Array>,
-): ParsedX402PaymentInstruction<TProgram> {
-  const instructionType = identifyX402PaymentInstruction(instruction);
+): ParsedAssayPaymentInstruction<TProgram> {
+  const instructionType = identifyAssayPaymentInstruction(instruction);
   switch (instructionType) {
-    case X402PaymentInstruction.CancelSlash: {
+    case AssayPaymentInstruction.CancelSlash: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.CancelSlash,
+        instructionType: AssayPaymentInstruction.CancelSlash,
         ...parseCancelSlashInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.DepositStake: {
+    case AssayPaymentInstruction.DepositStake: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.DepositStake,
+        instructionType: AssayPaymentInstruction.DepositStake,
         ...parseDepositStakeInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.ExecuteSlash: {
+    case AssayPaymentInstruction.ExecuteSlash: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.ExecuteSlash,
+        instructionType: AssayPaymentInstruction.ExecuteSlash,
         ...parseExecuteSlashInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.ExpireSlash: {
+    case AssayPaymentInstruction.ExpireSlash: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.ExpireSlash,
+        instructionType: AssayPaymentInstruction.ExpireSlash,
         ...parseExpireSlashInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.InitializeConfig: {
+    case AssayPaymentInstruction.InitializeConfig: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.InitializeConfig,
+        instructionType: AssayPaymentInstruction.InitializeConfig,
         ...parseInitializeConfigInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.OpenEscrow: {
+    case AssayPaymentInstruction.OpenEscrow: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.OpenEscrow,
+        instructionType: AssayPaymentInstruction.OpenEscrow,
         ...parseOpenEscrowInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.OpenStake: {
+    case AssayPaymentInstruction.OpenStake: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.OpenStake,
+        instructionType: AssayPaymentInstruction.OpenStake,
         ...parseOpenStakeInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.ProposeSlash: {
+    case AssayPaymentInstruction.ProposeSlash: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.ProposeSlash,
+        instructionType: AssayPaymentInstruction.ProposeSlash,
         ...parseProposeSlashInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.RedeemVoucher: {
+    case AssayPaymentInstruction.RedeemVoucher: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.RedeemVoucher,
+        instructionType: AssayPaymentInstruction.RedeemVoucher,
         ...parseRedeemVoucherInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.RegisterVerifier: {
+    case AssayPaymentInstruction.RegisterVerifier: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.RegisterVerifier,
+        instructionType: AssayPaymentInstruction.RegisterVerifier,
         ...parseRegisterVerifierInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.RequestUnstake: {
+    case AssayPaymentInstruction.RequestUnstake: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.RequestUnstake,
+        instructionType: AssayPaymentInstruction.RequestUnstake,
         ...parseRequestUnstakeInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.RequestWithdraw: {
+    case AssayPaymentInstruction.RequestWithdraw: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.RequestWithdraw,
+        instructionType: AssayPaymentInstruction.RequestWithdraw,
         ...parseRequestWithdrawInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.RevokeVerifier: {
+    case AssayPaymentInstruction.RevokeVerifier: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.RevokeVerifier,
+        instructionType: AssayPaymentInstruction.RevokeVerifier,
         ...parseRevokeVerifierInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.SetEscrowLimits: {
+    case AssayPaymentInstruction.SetEscrowLimits: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.SetEscrowLimits,
+        instructionType: AssayPaymentInstruction.SetEscrowLimits,
         ...parseSetEscrowLimitsInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.SetPaused: {
+    case AssayPaymentInstruction.SetPaused: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.SetPaused,
+        instructionType: AssayPaymentInstruction.SetPaused,
         ...parseSetPausedInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.UpdateConfig: {
+    case AssayPaymentInstruction.UpdateConfig: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.UpdateConfig,
+        instructionType: AssayPaymentInstruction.UpdateConfig,
         ...parseUpdateConfigInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.Withdraw: {
+    case AssayPaymentInstruction.Withdraw: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.Withdraw,
+        instructionType: AssayPaymentInstruction.Withdraw,
         ...parseWithdrawInstruction(instruction),
       };
     }
-    case X402PaymentInstruction.WithdrawStake: {
+    case AssayPaymentInstruction.WithdrawStake: {
       assertIsInstructionWithAccounts(instruction);
       return {
-        instructionType: X402PaymentInstruction.WithdrawStake,
+        instructionType: AssayPaymentInstruction.WithdrawStake,
         ...parseWithdrawStakeInstruction(instruction),
       };
     }
     default:
       throw new SolanaError(SOLANA_ERROR__PROGRAM_CLIENTS__UNRECOGNIZED_INSTRUCTION_TYPE, {
         instructionType: instructionType as string,
-        programName: 'x402Payment',
+        programName: 'assayPayment',
       });
   }
 }
 
-export type X402PaymentPlugin = {
-  accounts: X402PaymentPluginAccounts;
-  instructions: X402PaymentPluginInstructions;
-  pdas: X402PaymentPluginPdas;
-  identifyAccount: typeof identifyX402PaymentAccount;
-  identifyInstruction: typeof identifyX402PaymentInstruction;
-  parseInstruction: typeof parseX402PaymentInstruction;
+export type AssayPaymentPlugin = {
+  accounts: AssayPaymentPluginAccounts;
+  instructions: AssayPaymentPluginInstructions;
+  pdas: AssayPaymentPluginPdas;
+  identifyAccount: typeof identifyAssayPaymentAccount;
+  identifyInstruction: typeof identifyAssayPaymentInstruction;
+  parseInstruction: typeof parseAssayPaymentInstruction;
 };
 
-export type X402PaymentPluginAccounts = {
+export type AssayPaymentPluginAccounts = {
   buyerEscrow: ReturnType<typeof getBuyerEscrowCodec> &
     SelfFetchFunctions<BuyerEscrowArgs, BuyerEscrow>;
   config: ReturnType<typeof getConfigCodec> & SelfFetchFunctions<ConfigArgs, Config>;
@@ -648,7 +650,7 @@ export type X402PaymentPluginAccounts = {
     SelfFetchFunctions<VerifierKeyArgs, VerifierKey>;
 };
 
-export type X402PaymentPluginInstructions = {
+export type AssayPaymentPluginInstructions = {
   cancelSlash: (
     input: CancelSlashAsyncInput,
   ) => ReturnType<typeof getCancelSlashInstructionAsync> & SelfPlanAndSendFunctions;
@@ -705,7 +707,7 @@ export type X402PaymentPluginInstructions = {
   ) => ReturnType<typeof getWithdrawStakeInstructionAsync> & SelfPlanAndSendFunctions;
 };
 
-export type X402PaymentPluginPdas = {
+export type AssayPaymentPluginPdas = {
   config: typeof findConfigPda;
   stakeVault: typeof findStakeVaultPda;
   escrow: typeof findEscrowPda;
@@ -713,19 +715,19 @@ export type X402PaymentPluginPdas = {
   verifierKey: typeof findVerifierKeyPda;
 };
 
-export type X402PaymentPluginRequirements = ClientWithRpc<
+export type AssayPaymentPluginRequirements = ClientWithRpc<
   GetAccountInfoApi & GetMultipleAccountsApi
 > &
   ClientWithPayer &
   ClientWithTransactionPlanning &
   ClientWithTransactionSending;
 
-export function x402PaymentProgram() {
-  return <T extends X402PaymentPluginRequirements>(
+export function assayPaymentProgram() {
+  return <T extends AssayPaymentPluginRequirements>(
     client: T,
-  ): ExtendedClient<T, { x402Payment: X402PaymentPlugin }> => {
+  ): ExtendedClient<T, { assayPayment: AssayPaymentPlugin }> => {
     return extendClient(client, {
-      x402Payment: <X402PaymentPlugin>{
+      assayPayment: <AssayPaymentPlugin>{
         accounts: {
           buyerEscrow: addSelfFetchFunctions(client, getBuyerEscrowCodec()),
           config: addSelfFetchFunctions(client, getConfigCodec()),
@@ -787,9 +789,9 @@ export function x402PaymentProgram() {
           stake: findStakePda,
           verifierKey: findVerifierKeyPda,
         },
-        identifyAccount: identifyX402PaymentAccount,
-        identifyInstruction: identifyX402PaymentInstruction,
-        parseInstruction: parseX402PaymentInstruction,
+        identifyAccount: identifyAssayPaymentAccount,
+        identifyInstruction: identifyAssayPaymentInstruction,
+        parseInstruction: parseAssayPaymentInstruction,
       },
     });
   };

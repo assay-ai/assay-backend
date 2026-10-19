@@ -306,7 +306,7 @@ import { SolanaVerifierRegistryService } from './solana/verifier-registry.servic
     // `ProviderStake.bonded`, read off the same settlement program.
     // The port is declared by `provider/`, because that is the module that
     // needs the fact; the implementation is here, because it is the only place
-    // allowed to import `@x402/settlement-client`. Exactly the arrangement
+    // allowed to import `@assay/settlement-client`. Exactly the arrangement
     // `VERIFIER_REGISTRY` above already has, and for the same ESLint rule.
     SolanaSettlementStakeReader,
     {

@@ -21,7 +21,7 @@
  * encodes decides who may take a provider's stake.
  *
  * It now calls `getRegisterVerifierInstructionAsync` from
- * `@x402/settlement-client`, which is Codama output rendered from the program's
+ * `@assay/settlement-client`, which is Codama output rendered from the program's
  * IDL. Discriminator, argument encoding, account order, signer and writable
  * flags, and the PDA seeds are all the program's own, and `yarn client:check`
  * fails the build if they stop being.
@@ -41,7 +41,7 @@ import {
   getRegisterVerifierInstructionAsync,
   getRevokeVerifierInstructionAsync,
   VerifierStatus,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { createSender, loadKeypairSigner, Sender } from '../settlement/lib/sender';
 import { solanaConfig } from '../devnet/lib/solana-cli';

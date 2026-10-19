@@ -40,7 +40,7 @@ import type { Address, ReadonlyUint8Array } from '@solana/kit';
  * ## Why `programAddress` is required here and optional in `attestation-message.ts`
  *
  * The program id sits at offset 16..48, inside the signed bytes. Its sibling
- * defaults to `X402_PAYMENT_PROGRAM_ADDRESS`, which is `declare_id!()` — the
+ * defaults to `ASSAY_PAYMENT_PROGRAM_ADDRESS`, which is `declare_id!()` — the
  * address the program was *built* for. A redeploy under a **new** id makes the
  * built id and the deployed id differ, and a default here would have every
  * buyer sign bytes naming a program that is not the one about to check them.

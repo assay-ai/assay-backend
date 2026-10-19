@@ -39,7 +39,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findConfigPda, findStakeVaultPda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const DEPOSIT_STAKE_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   160, 167, 9, 220, 74, 243, 228, 43,
@@ -50,7 +50,7 @@ export function getDepositStakeDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type DepositStakeInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountFunder extends string | AccountMeta<string> = string,
   TAccountFunderTokenAccount extends string | AccountMeta<string> = string,
   TAccountConfig extends string | AccountMeta<string> = string,
@@ -144,7 +144,7 @@ export async function getDepositStakeInstructionAsync<
   TAccountStakeVault extends string,
   TAccountStakeMint extends string,
   TAccountTokenProgram extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: DepositStakeAsyncInput<
     TAccountFunder,
@@ -169,7 +169,7 @@ export async function getDepositStakeInstructionAsync<
   >
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -258,7 +258,7 @@ export function getDepositStakeInstruction<
   TAccountStakeVault extends string,
   TAccountStakeMint extends string,
   TAccountTokenProgram extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: DepositStakeInput<
     TAccountFunder,
@@ -281,7 +281,7 @@ export function getDepositStakeInstruction<
   TAccountTokenProgram
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -333,7 +333,7 @@ export function getDepositStakeInstruction<
 }
 
 export type ParsedDepositStakeInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

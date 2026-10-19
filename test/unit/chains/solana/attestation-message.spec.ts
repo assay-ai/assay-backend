@@ -33,7 +33,7 @@ import {
   SLASH_MESSAGE_LENGTH,
   slashAttestationMessage,
   VOUCHER_MESSAGE_LENGTH,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 const PROVIDER = address('74GakfrcEvE7qh9LzB7hf4JZgE9eu1yDEZTYqSWWbB1a');
 const BENEFICIARY = address('BPFLoaderUpgradeab1e11111111111111111111111');

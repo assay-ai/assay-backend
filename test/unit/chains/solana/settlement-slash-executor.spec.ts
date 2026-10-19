@@ -21,7 +21,7 @@ import {
   SLASH_MESSAGE_LENGTH,
   slashAttestationMessage,
   SlashStatus,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 import { ChainErrorCode } from '@modules/chains/errors/chains.errors';
@@ -965,7 +965,7 @@ describe('SolanaSlashExecutor', () => {
     it('carries the numeric custom-program-error code in a field, not only in the message', async () => {
       // The classifier that decides whether a judgement is void, retryable or
       // still waiting keys on the error's NAME, resolved from this number. A
-      // message alone is not parseable: `getX402PaymentErrorMessage` renders
+      // message alone is not parseable: `getAssayPaymentErrorMessage` renders
       // the human sentence, and returns a fixed placeholder in production.
       const rpc = new FakeRpc();
       // No record on chain: a confirmation failure with one present is an

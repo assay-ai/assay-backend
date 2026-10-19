@@ -27,7 +27,7 @@ import {
   getConfigEncoder,
   getRedeemVoucherInstructionAsync,
   voucherMessage,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { FeePayerSignResult } from '@modules/chains/facilitator/signing/fee-payer-signer.port';
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';

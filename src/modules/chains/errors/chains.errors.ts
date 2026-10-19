@@ -288,7 +288,7 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
    * the refusal against the vendored IDL and decide what it means: a revoked
    * verifier key voids a judgement outright, an unelapsed timelock means wait,
    * an expired blockhash means retry. The rendered message cannot carry that —
-   * `getX402PaymentErrorMessage` returns the human sentence, and a fixed
+   * `getAssayPaymentErrorMessage` returns the human sentence, and a fixed
    * placeholder in production — so a caller that parsed the string would
    * collapse every one of those outcomes into "try again".
    *

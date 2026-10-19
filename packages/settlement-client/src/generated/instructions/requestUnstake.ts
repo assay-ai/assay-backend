@@ -40,7 +40,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findConfigPda, findStakePda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const REQUEST_UNSTAKE_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   44, 154, 110, 253, 160, 202, 54, 34,
@@ -51,7 +51,7 @@ export function getRequestUnstakeDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type RequestUnstakeInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountProvider extends string | AccountMeta<string> = string,
   TAccountConfig extends string | AccountMeta<string> = string,
   TAccountStake extends string | AccountMeta<string> = string,
@@ -115,7 +115,7 @@ export async function getRequestUnstakeInstructionAsync<
   TAccountProvider extends string,
   TAccountConfig extends string,
   TAccountStake extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: RequestUnstakeAsyncInput<TAccountProvider, TAccountConfig, TAccountStake>,
   config?: { programAddress?: TProgramAddress },
@@ -123,7 +123,7 @@ export async function getRequestUnstakeInstructionAsync<
   RequestUnstakeInstruction<TProgramAddress, TAccountProvider, TAccountConfig, TAccountStake>
 > {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -178,13 +178,13 @@ export function getRequestUnstakeInstruction<
   TAccountProvider extends string,
   TAccountConfig extends string,
   TAccountStake extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: RequestUnstakeInput<TAccountProvider, TAccountConfig, TAccountStake>,
   config?: { programAddress?: TProgramAddress },
 ): RequestUnstakeInstruction<TProgramAddress, TAccountProvider, TAccountConfig, TAccountStake> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -215,7 +215,7 @@ export function getRequestUnstakeInstruction<
 }
 
 export type ParsedRequestUnstakeInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

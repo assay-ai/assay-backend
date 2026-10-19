@@ -74,7 +74,7 @@ import {
   findStakeVaultPda,
   getDepositStakeInstructionAsync,
   getOpenStakeInstructionAsync,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { loadMinimumStakeParameters } from '@modules/provider/services/provider-stake.service';
