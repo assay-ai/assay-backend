@@ -85,7 +85,7 @@ import { Module } from '@nestjs/common';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { NestFactory } from '@nestjs/core';
 import { getDataSourceToken } from '@nestjs/typeorm';
-import { DataSource, IsNull } from 'typeorm';
+import { DataSource, IsNull, Like } from 'typeorm';
 
 import { appConfig } from '@config/app.config';
 import { authConfig } from '@config/auth.config';
@@ -184,10 +184,10 @@ const FAILURE_REASON_CODES = [
 const REASON_WEIGHTS = [0.5, 0.2, 0.13, 0.1, 0.07] as const;
 
 /** Agents that made failing calls. Deterministic, so a re-run addresses the
- * same rows. Two of them are the agents the console seed already uses. */
+ * same rows. Two of them are EVM buyer agents the console seed already uses. */
 const FAILING_AGENTS = [
-  'dcff5fef-5f11-4bc6-8d85-d64e38da6e39',
-  '9f1d3c72-6b48-4e90-a253-7c0b8d5e2a14',
+  'b1c07f4a-3e59-4d2b-8a16-90f4c7d5e2a1',
+  'c2d18a5b-4f6a-4e3c-9b27-a1e5d8f6b3c2',
   uuidFromLabel('slash-case:agent:3'),
   uuidFromLabel('slash-case:agent:4'),
   uuidFromLabel('slash-case:agent:5'),
@@ -200,7 +200,7 @@ const AGENT_WEIGHTS = [0.45, 0.24, 0.13, 0.08, 0.06, 0.04] as const;
 /** The single agent behind every excluded call. */
 const EXCLUDED_AGENT = uuidFromLabel('slash-case:agent:excluded');
 
-const PASSING_AGENT = 'dcff5fef-5f11-4bc6-8d85-d64e38da6e39';
+const PASSING_AGENT = 'b1c07f4a-3e59-4d2b-8a16-90f4c7d5e2a1';
 
 /**
  * A per-run salt for every synthetic `intentId` this script mints.
@@ -258,16 +258,20 @@ async function main(): Promise<void> {
   // a second copy of a tenant id is a second thing to keep in step.
   const demoOrganizationId = readDemoProviderOrganizationId();
 
-  // The subject is whichever binding that org left ACTIVE. Resolved rather than
-  // hard-coded, so this script does not carry a copy of an id that lives in the
-  // database either.
+  // The subject is whichever binding that org left ACTIVE on an EVM chain.
+  // Resolved rather than hard-coded, so this script does not carry a copy of an
+  // id that lives in the database either. EVM only: a slash case opens only on
+  // an `eip155` chain, so a Solana binding would fill six windows and then
+  // fail with a strike and no proposal.
   const binding = await bindings.findOne({
-    where: { organizationId: demoOrganizationId, status: 'ACTIVE' },
+    where: { organizationId: demoOrganizationId, status: 'ACTIVE', assetId: Like('eip155:%') },
+    order: { createdAt: 'ASC' },
   });
   if (!binding) {
     throw new Error(
-      `No ACTIVE tool_bindings row for ${demoOrganizationId}. Run \`yarn demo:seed\` first — ` +
-        'this script needs a binding with a declared SLA to open a window against.',
+      `No ACTIVE tool_bindings row on an EVM (eip155) chain for ${demoOrganizationId}. ` +
+        'Run `yarn demo:seed` first — this script needs an ACTIVE EVM binding with a declared ' +
+        'SLA to open a window against; slash cases open only on EVM chains.',
     );
   }
 
@@ -435,15 +439,13 @@ async function main(): Promise<void> {
   if (!proposal) {
     throw new Error(
       `A strike was written (${strike.id}) but no proposal opened. ` +
-        'SLASH_PROPOSAL_OPENER is not bound in this context, or the binding is not on an EVM ' +
-        'chain (Solana opens no slash case).',
+        'SLASH_PROPOSAL_OPENER is not bound in this context.',
     );
   }
 
   // Delivery is recorded by `SlashDeliveryObserver`, reached from the
   // notification deliver processor when a channel confirms, so `notifiedAt`
-  // may be null for a moment after this script finishes. A case opens only on
-  // an EVM binding: Solana has no slash path.
+  // may be null for a moment after this script finishes.
 
   const final = await proposals.findOne({ where: { organizationId, id: proposal.id } });
 
