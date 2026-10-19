@@ -2404,11 +2404,13 @@ export function delegationTerms(
 
 export function delegationHint(session: McpSession): string {
   if (namespaceOf(session.chainId) !== 'eip155') return '';
+  // EIP-55, like the requirement beside it: an agent may copy an address from here.
+  const payer = checksummedAccount(session.agentAccount);
   return session.delegateAccount
-    ? `. The payer (${session.agentAccount}) or the delegate key bound to this credential ` +
-        `(${session.delegateAccount}) may sign; a delegate signs within the caps the payer ` +
-        `authorised on chain.`
-    : `. The payer (${session.agentAccount}) may sign, or a delegate key the payer authorised ` +
+    ? `. The payer (${payer}) or the delegate key bound to this credential ` +
+        `(${checksummedAccount(session.delegateAccount)}) may sign; a delegate signs within ` +
+        `the caps the payer authorised on chain.`
+    : `. The payer (${payer}) may sign, or a delegate key the payer authorised ` +
         `on chain once it is bound to this credential (POST /agents/me/delegate).`;
 }
 
