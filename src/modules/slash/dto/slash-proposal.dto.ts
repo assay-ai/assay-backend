@@ -12,8 +12,6 @@ import { SlashProposalStatus } from '../domain/slash-proposal-state';
 export enum SlashProposalSource {
   /** A window closed `BREACH_PROPOSED` and wrote an `sla_strikes` row. */
   SLA_STRIKE = 'SLA_STRIKE',
-  /** A single call was judged `FAIL` — the only slashable verdict. */
-  DATA_FAIL = 'DATA_FAIL',
 }
 
 export { ArbitrationOutcome, DisputeClaimType, ResolutionKind, SlashProposalStatus };
@@ -360,12 +358,6 @@ export class SlashProposalDto {
 
   @ApiPropertyOptional({ nullable: true })
   reversalSignature: string | null;
-
-  @ApiPropertyOptional({
-    nullable: true,
-    description: 'The fleet sweep that reached this case, if any — including uncomplained ones.',
-  })
-  sweepId: string | null;
 
   @ApiProperty()
   createdAt: Date;
