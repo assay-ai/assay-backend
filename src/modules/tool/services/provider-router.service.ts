@@ -536,7 +536,47 @@ export class ProviderRouterService {
       };
     }
 
-    return this.priceEligible(versionTool, ruled.eligible, context, ruled.fellBack);
+    const quote = this.priceEligible(versionTool, ruled.eligible, context, ruled.fellBack);
+    return { ...quote, maxPrice: this.chargeableBound(tool, pool, context, now, quote.price) };
+  }
+
+  /**
+   * {@link ToolQuote.maxPrice}: the dearest chargeable binding priced in
+   * `price`'s asset over everything a live call could choose, with the rate and
+   * daily ceilings relaxed. A superset of the quote's own eligible set, so it
+   * is never below the chargeable `price`, by construction.
+   */
+  private chargeableBound(
+    tool: Tool,
+    pool: readonly RoutingCandidate[],
+    context: RoutingContext,
+    now: Date,
+    price: Money | null,
+  ): Money | null {
+    if (!price) return null;
+    const relaxed = pool.map((candidate) =>
+      candidate.ceilingHit ? { ...candidate, ceilingHit: null } : candidate,
+    );
+    const request = context.contract ?? NO_CONTRACT_REQUEST;
+    const { versions } = candidateVersions(tool, request);
+    const passes: (RoutingRules | undefined)[] = [context.rules];
+    if (fallsBack(context.rules))
+      passes.push(withoutEntryPreferences(context.rules as RoutingRules));
+
+    let dearest: ToolBinding | null = null;
+    for (const version of versions) {
+      const { kept } = applyContractGate(relaxed, version, request);
+      if (kept.length === 0) continue;
+      for (const rules of passes) {
+        for (const { binding } of this.eligibleUnder(kept, context, rules, now).eligible) {
+          if (binding.pricingMode === PricingMode.FREE) continue;
+          if (binding.assetId !== price.asset) continue;
+          if (!dearest || BigInt(binding.priceAmount) > BigInt(dearest.priceAmount))
+            dearest = binding;
+        }
+      }
+    }
+    return dearest ? bindingPrice(dearest) : null;
   }
 
   /**
@@ -1367,6 +1407,23 @@ export interface ToolQuote {
    * quote with no routable supply.
    */
   readonly cheapestPrice?: Money | null;
+  /**
+   * The most a paid call under this quote's context can be charged, in
+   * `price`'s asset: the dearest chargeable binding, priced in that asset,
+   * that a live call could choose. That means every contract version the
+   * call may use, the rules and (when the entry asks for it) FALLBACK_BEST,
+   * and every gate except the provider's declared rate and daily ceilings,
+   * which are relaxed.
+   *
+   * A ceiling is transient capacity, not price eligibility: `price` leaves a
+   * binding at its ceiling out (it cannot serve right now), but the quote
+   * index holds that state for up to a minute while a live call reads it
+   * fresh, so a dearer binding can be chosen the moment its ceiling clears.
+   * This is never below `price` when `price` is chargeable, and can be above
+   * it. `null` when no chargeable binding qualifies. Absent on a quote with no
+   * routable supply. What `assay/price.maxAmount` publishes (spec §7.8 G3).
+   */
+  readonly maxPrice?: Money | null;
   /**
    * What the buyer's rules dropped, on a quote they emptied: the price is then
    * `null` and the listing says "No provider fits your limits".
