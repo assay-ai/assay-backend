@@ -833,6 +833,22 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       expect((await revoke({ token: 'assay_rt_x', client_id: CIMD_ID })).status).toBe(200);
     });
 
+    it('bounds one address to 120 a minute whatever client_id it sends (R1-m2)', async () => {
+      // A new client_id each time never reaches the per-client limit.
+      for (let i = 0; i < 120; i += 1) {
+        expect((await revoke({ token: 'assay_rt_x', client_id: `client-${i}` })).status).toBe(200);
+      }
+      const limited = await revoke({ token: 'assay_rt_x', client_id: 'client-120' });
+      expect(limited.status).toBe(503);
+      expect(limited.headers['retry-after']).toMatch(/^\d+$/);
+      expect(limited.body).toMatchObject({ error: 'temporarily_unavailable' });
+      expect(tokens.revoke).toHaveBeenCalledTimes(120);
+      // The next window starts afresh.
+      clock.advance(60);
+      expect((await revoke({ token: 'assay_rt_x', client_id: 'client-121' })).status).toBe(200);
+      expect(tokens.revoke).toHaveBeenCalledTimes(121);
+    });
+
     it('still revokes with Redis unreachable: refusing would keep a token alive', async () => {
       redis.down = true;
       const response = await revoke({ token: 'assay_rt_x', client_id: BUILTIN_ID });
@@ -884,5 +900,26 @@ describe('the request cookie', () => {
     const garbled = `${four}; ${at(6)}=garbage`;
     expect(requestCookiesToEvict(garbled)).toEqual([at(6)]);
     expect(requestCookiesToEvict('other=1')).toEqual([]);
+  });
+
+  it('evicts only names of the exact binding format, never echoing another (R1-m3)', () => {
+    const at = (n: number) => `${REQUEST_COOKIE_PREFIX}${String(n).padStart(16, '0')}`;
+    const v = (seconds: number) => `${seconds.toString(36)}.${'a'.repeat(64)}`;
+    const four = [1, 2, 3, 4].map((n) => `${at(n)}=${v(100 + n)}`).join('; ');
+    for (const odd of [
+      `${REQUEST_COOKIE_PREFIX}`,
+      `${REQUEST_COOKIE_PREFIX}0000`,
+      `${REQUEST_COOKIE_PREFIX}${'0'.repeat(17)}`,
+      `${REQUEST_COOKIE_PREFIX}${'A'.repeat(16)}`,
+      `${REQUEST_COOKIE_PREFIX}${'g'.repeat(16)}`,
+      `${REQUEST_COOKIE_PREFIX}${'0'.repeat(16)}; Domain=evil.example`,
+      `${REQUEST_COOKIE_PREFIX}${'0'.repeat(15)}\r\nX`,
+      `x${REQUEST_COOKIE_PREFIX}${'0'.repeat(16)}`,
+    ]) {
+      // An odd name with the oldest issue time is not counted, and not named.
+      expect(requestCookiesToEvict(`${four}; ${odd}=${v(1)}`)).toEqual([]);
+      const five = `${four}; ${odd}=${v(1)}; ${at(5)}=${v(50)}`;
+      expect(requestCookiesToEvict(five)).toEqual([at(5)]);
+    }
   });
 });

@@ -1,4 +1,4 @@
-import { claimsTrust, sanitise } from './client-name';
+import { claimsTrust, mixesScripts, sanitise } from './client-name';
 import { RedirectAllowlistEntry, registrable } from './redirect-uri';
 
 /**
@@ -109,8 +109,9 @@ export function validateClientMetadata(
 
   const clientName = sanitise(document.client_name);
   // A name that claims trust ("Verified", the built-in app's header words, a
-  // check mark) is refused, not shown (§6.3.6, R-OA-25).
-  if (clientName === null || claimsTrust(clientName)) return invalid;
+  // check mark) is refused, not shown (§6.3.6, R-OA-25); so is a word that
+  // mixes Latin with another script, the shape of a lookalike spelling.
+  if (clientName === null || claimsTrust(clientName) || mixesScripts(clientName)) return invalid;
 
   const { grant_types: grantTypes, response_types: responseTypes } = document;
   if (grantTypes !== undefined) {

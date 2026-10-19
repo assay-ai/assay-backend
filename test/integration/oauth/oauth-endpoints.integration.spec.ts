@@ -349,8 +349,12 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
   });
 
   it('T8: a request an attacker started and a victim approved yields no code to anyone', async () => {
+    // Remaining window: a code is minted only if the attacker's own continue
+    // lands between the victim's approve and the victim's continue (about one
+    // round trip, blind); the consent page's Cross-Origin-Opener-Policy keeps
+    // an opener from stretching it by holding the window open or closing it.
     // The attacker starts a sign-in in their own browser and keeps its cookie.
-    const { verifier, challenge } = pkce();
+    const { challenge } = pkce();
     const attacker = await start(challenge);
     // The victim opens the consent link and approves it with their agent.
     await approve(attacker.rid);
@@ -367,7 +371,18 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
       [challenge],
     )) as { count: number }[];
     expect(count).toBe(0);
-    expect(verifier).toBeTruthy();
+    // Nor later: the discarded request stays decided, so it cannot be
+    // approved again, and a second continue with the attacker's cookie still
+    // finds nothing.
+    const reapprove = await request(api.getHttpServer())
+      .post(`/api/v1/oauth/requests/${attacker.rid}/approve`)
+      .set(auth)
+      .send({ agentId: AGENT, name: 'Endpoints test' });
+    expect(reapprove.status).toBe(409);
+    expect(JSON.stringify(reapprove.body)).toContain('OAUTH_REQUEST_ALREADY_DECIDED');
+    const again = await resume(attacker.rid, attacker.cookie);
+    expect(again.status).toBe(404);
+    expect(again.headers.location).toBeUndefined();
   });
 
   it('two sign-ins started together in one browser both complete', async () => {
