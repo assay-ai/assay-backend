@@ -79,7 +79,7 @@ export interface RedeemVoucherRequest {
   /**
    * The DELEGATE key that signed (CAIP-10), when it was not the payer — agent
    * payment delegation. The redeemer pre-validates the delegate's on-chain grant
-   * (revoked, lapsed, caps, window) exactly as `X402Escrow._redeem` will, so a
+   * (revoked, lapsed, caps, window) exactly as `AssayEscrow._redeem` will, so a
    * voucher the chain will refuse is never broadcast.
    */
   readonly delegate?: AccountId | null;

@@ -554,7 +554,7 @@ export class SlashExecutionService {
 
   /**
    * How long after a proposal made now its record becomes executable, read
-   * from the chain: on EVM `X402Config.slashDelaySeconds()` (settable, 10
+   * from the chain: on EVM `AssayConfig.slashDelaySeconds()` (settable, 10
    * minutes at the least), never assumed. A namespace whose executor cannot
    * say (Solana) uses its program's floor.
    *

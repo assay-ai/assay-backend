@@ -1,7 +1,7 @@
 /**
  * Agent payment delegation, end to end against a REAL EVM — an anvil fork of
- * Robinhood Chain testnet (eip155:46630) whose X402Escrow proxy has been
- * upgraded with `assay-evm/script/UpgradeEscrow.s.sol`.
+ * Robinhood Chain testnet (eip155:46630) that carries the Assay* deployment
+ * (`AssayConfig`, `AssayStake`, `AssayEscrow`) named in `EVM_DEPLOYMENTS`.
  *
  * It drives the backend's own production classes against that chain, with no
  * Nest and no database, so what it proves is the chain/backend contract:
@@ -24,8 +24,6 @@
  * payer. Nothing here sends a transaction to a real network.
  *
  *   anvil --fork-url https://rpc.testnet.chain.robinhood.com --port 8547
- *   (assay-evm) forge script script/UpgradeEscrow.s.sol --rpc-url http://127.0.0.1:8547 \
- *       --sender <admin> --unlocked --broadcast
  *   (assay-backend) E2_RPC_URL=http://127.0.0.1:8547 \
  *       npx ts-node -r tsconfig-paths/register scripts/testnet/e2-delegation-anvil.ts
  */
@@ -108,7 +106,7 @@ const chain = defineChain({
 const CONFIG_ABI = parseAbi([
   'struct ParamSet { address treasury; address redeemer; uint64 unbondingPeriodSeconds; uint64 minimumStake; uint64 penaltyAmount; uint64 verifierDailyCap; uint16 takeRateBps; uint16 slashAgentBps; uint16 slashPlatformBps; uint16 slashCapBps; }',
   'function params() view returns (ParamSet)',
-  'function updateConfig(ParamSet p, address newAdmin)',
+  'function updateConfig(ParamSet p)',
 ]);
 const ERC20_ABI = parseAbi([
   'function mint(address to, uint256 amount)',
@@ -188,7 +186,7 @@ async function main(): Promise<void> {
       address: DEPLOYMENT.config as `0x${string}`,
       abi: CONFIG_ABI,
       functionName: 'updateConfig',
-      args: [{ ...params, redeemer: relayer.address }, DEPLOYMENT.admin as `0x${string}`],
+      args: [{ ...params, redeemer: relayer.address }],
       chain,
     } as never),
   });

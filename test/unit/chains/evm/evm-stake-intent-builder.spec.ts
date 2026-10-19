@@ -23,7 +23,7 @@ import { deployment } from './evm-fixtures';
  * `EvmStakeIntentBuilder` — a provider's stake doors on eip155.
  *
  * The ABI the calldata is decoded against is written out here from
- * `assay-evm/src/X402Stake.sol`, not imported from the builder, so a builder that
+ * `assay-evm/src/AssayStake.sol`, not imported from the builder, so a builder that
  * encoded the wrong function or the wrong argument order fails here rather than
  * agreeing with itself.
  */

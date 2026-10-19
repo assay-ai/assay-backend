@@ -240,11 +240,11 @@ export interface SlashCancelIntent {
    * calldata, `0x`-hex, for the admin's wallet to send to {@link to}.
    */
   readonly transaction: string;
-  /** EVM only: the contract the calldata is addressed to (the `X402Stake` proxy). */
+  /** EVM only: the contract the calldata is addressed to (the `AssayStake` proxy). */
   readonly to?: string;
   /**
    * The only account that may sign it, and its fee payer: `Config.admin`, or
-   * — on EVM once the dispute upgrade has appointed one — `X402Config.arbiter()`.
+   * — on EVM once the dispute upgrade has appointed one — `AssayConfig.arbiter()`.
    * The field keeps its name for the clients that read it; {@link signerRole}
    * says which of the two it is.
    */
@@ -501,7 +501,7 @@ export interface SlashExecutorPort {
 
   /**
    * The delay a record proposed NOW would freeze into its `executableAt`, in
-   * seconds, read from the chain (EVM: `X402Config.slashDelaySeconds()` since
+   * seconds, read from the chain (EVM: `AssayConfig.slashDelaySeconds()` since
    * the dispute upgrade, the old contract's constant before it). Optional, and
    * `null` when the namespace cannot say: the caller then falls back to the
    * Solana program's floor, `MIN_SLASH_DELAY_SECONDS` (72 h).

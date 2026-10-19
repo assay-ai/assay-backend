@@ -100,7 +100,7 @@ class FakeEvmChain {
  * embedded wallet whose key never leaves Privy; its agent holds a DELEGATE key
  * the payer authorised on chain; the voucher is signed by the delegate.
  *
- * The rule under test is the contract's (`X402Escrow._voucherAuthority`):
+ * The rule under test is the contract's (`AssayEscrow._voucherAuthority`):
  * payer key → active delegate within its own caps (and nothing else: no
  * EIP-1271, assay-evm D-18), read from chain state, failing closed — plus the platform's one addition, that the delegate
  * must be the one bound to the calling credential.
@@ -595,7 +595,7 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
     });
   });
 
-  describe('the chain’s seq jump cap (X402Escrow.MAX_SEQ_GAP) at admission', () => {
+  describe('the chain’s seq jump cap (AssayEscrow.MAX_SEQ_GAP) at admission', () => {
     const GAP = BigInt(VOUCHER_MAX_SEQ_GAP);
 
     it('admits a seq exactly MAX_SEQ_GAP above the escrow’s seqHigh', async () => {

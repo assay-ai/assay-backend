@@ -7,7 +7,7 @@ import { AlertAggregation, AlertPort, AlertSeverity } from '@shared/alerting';
 import { ChainErrors } from '../../errors/chains.errors';
 import { ChainDoor, ChainParty, ChainStateGatePort } from '../../ports/chain-state-gate.port';
 import { ChainId, ChainNamespace, namespaceOf, parseAccountId } from '../../ports/caip.types';
-import { X402_CONFIG_ABI } from '../abi/x402.abi';
+import { ASSAY_CONFIG_ABI } from '../abi/assay.abi';
 import { readDomainMismatches } from '../eip712/domain-guard';
 import { checkConfigUpgraded } from '../evm-config-terms';
 import { EvmDeployment } from '../evm.constants';
@@ -219,7 +219,7 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
       return Boolean(
         await client.readContract({
           address: deployment.config,
-          abi: X402_CONFIG_ABI,
+          abi: ASSAY_CONFIG_ABI,
           functionName: 'blocked',
           args: [parsed.address],
         }),
@@ -312,7 +312,7 @@ export class EvmChainStateService implements ChainStateGatePort, OnModuleInit, O
       return Boolean(
         await client.readContract({
           address: deployment.config,
-          abi: X402_CONFIG_ABI,
+          abi: ASSAY_CONFIG_ABI,
           functionName,
           args,
         }),

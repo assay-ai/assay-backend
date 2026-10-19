@@ -7,7 +7,7 @@ import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/
 
 import { ENABLED_CHAINS } from '../enabled-chains';
 import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
-import { X402_CONFIG_ABI } from './abi/x402.abi';
+import { ASSAY_CONFIG_ABI } from './abi/assay.abi';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
 import { EvmSlashRecordClient, readSlashRecord } from './evm-slash-record';
 
@@ -96,7 +96,7 @@ export class EvmVerifierExpiryMonitor {
         try {
           const key = (await client.readContract({
             address: deployment.config,
-            abi: X402_CONFIG_ABI,
+            abi: ASSAY_CONFIG_ABI,
             functionName: 'verifierKey',
             args: [verifier],
           })) as { expiresAt: bigint; revoked: boolean };

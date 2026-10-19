@@ -6,7 +6,7 @@ import {
   toFunctionSelector,
 } from 'viem';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EvmReaderClient } from '@modules/chains/evm/evm-escrow-balance-reader.service';
 import {
   EVM_REDEEM_BATCH_BASE_GAS,
@@ -252,11 +252,11 @@ function harness(overrides: Partial<ChainState> = {}) {
 }
 
 function calledFunction(call: EvmRelayedCall): string {
-  return decodeFunctionData({ abi: X402_ESCROW_ABI, data: call.data }).functionName;
+  return decodeFunctionData({ abi: ASSAY_ESCROW_ABI, data: call.data }).functionName;
 }
 
 function batchedPayers(call: EvmRelayedCall): string[] {
-  const decoded = decodeFunctionData({ abi: X402_ESCROW_ABI, data: call.data });
+  const decoded = decodeFunctionData({ abi: ASSAY_ESCROW_ABI, data: call.data });
   const vouchers = decoded.args?.[0] as readonly { payer: string }[];
   return vouchers.map((v) => v.payer.toLowerCase());
 }
@@ -570,7 +570,7 @@ describe('EvmVoucherRedeemer', () => {
     await redeemer.redeem(request(0, { seq: '10', amount: MoneyUtil.of('1000000', USDG, 6) }));
 
     const decoded = decodeFunctionData({
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       data: sendCall.mock.calls[0][0].data,
     });
     const voucher = decoded.args?.[0] as Record<string, unknown>;
@@ -600,7 +600,7 @@ describe('EvmVoucherRedeemer', () => {
     await redeemer.redeem(request(0, { requestHash: `sha256:${'cd'.repeat(32)}` }));
 
     const decoded = decodeFunctionData({
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       data: sendCall.mock.calls[0][0].data,
     });
     expect((decoded.args?.[0] as Record<string, unknown>).requestHash).toBe(`0x${'cd'.repeat(32)}`);
@@ -708,7 +708,7 @@ describe('EvmVoucherRedeemer', () => {
       ]);
       expect(sendCall).toHaveBeenCalledTimes(1);
       const call = sendCall.mock.calls[0][0];
-      const decoded = decodeFunctionData({ abi: X402_ESCROW_ABI, data: call.data });
+      const decoded = decodeFunctionData({ abi: ASSAY_ESCROW_ABI, data: call.data });
       expect((decoded.args as unknown as unknown[][])[0]).toHaveLength(2);
       expect(outcomes.map((o) => o.kind)).toEqual([
         RedeemOutcomeKind.REDEEMED,
@@ -834,7 +834,7 @@ describe('EvmVoucherRedeemer', () => {
       return {
         address: DEPLOYMENT.escrow,
         topics: encodeEventTopics({
-          abi: X402_ESCROW_ABI,
+          abi: ASSAY_ESCROW_ABI,
           eventName: 'VoucherRedeemed',
           args: { payer, provider: getAddress(PROVIDER) },
         }) as [`0x${string}`, ...`0x${string}`[]],

@@ -1,6 +1,6 @@
 import { encodeAbiParameters, encodeEventTopics, encodeFunctionData } from 'viem';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import {
   decodeEscrowView,
   EvmChainAdapter,
@@ -73,7 +73,7 @@ function depositedLog(args: {
   return {
     address: args.address ?? DEPLOYMENT.escrow,
     topics: encodeEventTopics({
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       eventName: 'Deposited',
       args: { buyer: args.buyer as `0x${string}`, funder: args.funder as `0x${string}` },
     }) as `0x${string}`[],
@@ -377,7 +377,7 @@ describe('EvmChainAdapter payload binding', () => {
     // `withdraw()` is on the same contract and is signed by the same buyer, so
     // "calls our escrow" is not the binding — which function it calls is.
     const { adapter } = buildAdapter();
-    const data = encodeFunctionData({ abi: X402_ESCROW_ABI, functionName: 'withdraw' });
+    const data = encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'withdraw' });
     expect(
       codeOf(() =>
         adapter.assertPayloadBoundToIntent(payloadOf(depositTransaction({ data })), intent),

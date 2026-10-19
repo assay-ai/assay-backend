@@ -45,7 +45,7 @@ import {
   TxRef,
   Voucher,
 } from '../ports/x402.types';
-import { X402_ESCROW_ABI } from './abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { evmDomain } from './eip712/domain';
 import { EvmVoucher, hashVoucher, voucherTypedData } from './eip712/voucher';
 import { EVM_DEPOSIT_METHOD, EvmDeployment } from './evm.constants';
@@ -144,7 +144,7 @@ export interface EvmTransactionReceipt {
  * ## What is deliberately NOT here
  *
  * There is no per-buyer escrow account to derive and no associated token
- * account: one `X402Escrow` contract holds every buyer's USDG and splits it in
+ * account: one `AssayEscrow` contract holds every buyer's USDG and splits it in
  * an `escrows[buyer]` mapping. Two consequences run through this whole file:
  *
  *  - `getVaultAccount` is the identity function. That is the *correct*
@@ -606,7 +606,7 @@ export class EvmChainAdapter implements ChainAdapter {
   }
 
   /**
-   * `X402Escrow._voucherAuthority`, off chain — see `EvmVoucherAuthority`.
+   * `AssayEscrow._voucherAuthority`, off chain — see `EvmVoucherAuthority`.
    *
    * The digest is the same one {@link verifyVoucherSignature} checks, built by
    * the same conversion, and the same `payTo` rule applies: a voucher aimed at
@@ -866,7 +866,7 @@ export class EvmChainAdapter implements ChainAdapter {
    * the correct answer, which is what makes it unrefusable in the general case.
    * ATAs vanish on EVM: there is one token contract and one balance mapping.
    *
-   * The alternative — returning the pooled `X402Escrow` address — looks like
+   * The alternative — returning the pooled `AssayEscrow` address — looks like
    * the careful answer and is the dangerous one. It would make every owner
    * share one vault account (so `getVaultBalance` could not be keyed on the
    * owner at all), and it would put the contract address in
@@ -899,7 +899,7 @@ export class EvmChainAdapter implements ChainAdapter {
     const escrow = decodeEscrowView(
       await this.clientFor(chainId).readContract({
         address: getAddress(deployment.escrow),
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         functionName: 'escrowOf',
         args: [getAddress(address)],
       }),
@@ -948,7 +948,7 @@ export class EvmChainAdapter implements ChainAdapter {
     const deployment = this.deployments.get(chainId);
     if (!deployment) {
       throw ChainErrors.programNotConfigured({
-        what: `the X402Escrow deployment on ${chainId}`,
+        what: `the AssayEscrow deployment on ${chainId}`,
         variable: 'EVM_DEPLOYMENTS',
       });
     }
@@ -992,7 +992,7 @@ export class EvmChainAdapter implements ChainAdapter {
       throw ChainErrors.payloadMalformed({ reason: 'transaction carries no calldata' });
     }
     try {
-      const decoded = decodeFunctionData({ abi: X402_ESCROW_ABI, data });
+      const decoded = decodeFunctionData({ abi: ASSAY_ESCROW_ABI, data });
       return {
         functionName: decoded.functionName,
         args: (decoded.args ?? []) as readonly unknown[],
@@ -1005,7 +1005,7 @@ export class EvmChainAdapter implements ChainAdapter {
   private decodeEscrowEvent(log: EvmLog): { eventName: string; args: unknown } | null {
     try {
       return decodeEventLog({
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         data: log.data,
         topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
       }) as unknown as { eventName: string; args: unknown };
@@ -1028,7 +1028,7 @@ export class EvmChainAdapter implements ChainAdapter {
 export function decodeEscrowView(value: unknown): EvmEscrowView {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     throw ChainErrors.accountLayoutUnexpected({
-      account: 'X402Escrow.escrowOf',
+      account: 'AssayEscrow.escrowOf',
       expected: 'a named struct',
       actual: Array.isArray(value) ? 'a positional tuple' : typeof value,
     });
@@ -1037,7 +1037,7 @@ export function decodeEscrowView(value: unknown): EvmEscrowView {
   const expected = [...ESCROW_FIELDS].sort();
   if (keys.length !== expected.length || keys.some((key, index) => key !== expected[index])) {
     throw ChainErrors.accountLayoutUnexpected({
-      account: 'X402Escrow.escrowOf',
+      account: 'AssayEscrow.escrowOf',
       expected: expected.join(','),
       actual: keys.join(','),
     });
@@ -1046,7 +1046,7 @@ export function decodeEscrowView(value: unknown): EvmEscrowView {
   for (const field of ESCROW_FIELDS) {
     if (typeof record[field] !== 'bigint') {
       throw ChainErrors.accountLayoutUnexpected({
-        account: 'X402Escrow.escrowOf',
+        account: 'AssayEscrow.escrowOf',
         expected: `${field} as a bigint`,
         actual: typeof record[field],
       });

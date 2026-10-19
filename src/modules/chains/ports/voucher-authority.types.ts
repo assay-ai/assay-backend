@@ -2,7 +2,7 @@ import { AccountId } from './caip.types';
 
 /**
  * Who authorised a rail-B voucher, as the CHAIN's own rule decides it — the
- * off-chain mirror of `X402Escrow._voucherAuthority` (assay-evm), which x402
+ * off-chain mirror of `AssayEscrow._voucherAuthority` (assay-evm), which x402
  * facilitators apply the same way: verify off chain exactly what the contract
  * will verify on chain.
  *

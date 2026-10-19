@@ -3,7 +3,7 @@ import { toFunctionSelector } from 'viem';
 /**
  * Every `error X();` in assay-evm's `src/Errors.sol`, by name.
  *
- * All 95 are **zero-argument** custom errors, so a revert arrives as a bare
+ * All 94 are **zero-argument** custom errors, so a revert arrives as a bare
  * 4-byte selector with nothing else in it — the only way to say what happened
  * is this table. `check-errors.sh` in `evm/` keeps the Solidity honest;
  * `abi-selectors.spec.ts` keeps this list in step by pinning every name to the
@@ -15,12 +15,11 @@ import { toFunctionSelector } from 'viem';
  * left (`AmountExceedsUint64`, `NotBuyer`, `SignerIsNotVerifier`,
  * `EscrowLimitsRequireBuyer`, `DestinationIsVault`, `WalletCheckUnderfunded`,
  * `Permit2NotConfigured`); D-17/D-18 added `NotOwner`,
- * `OwnershipCannotBeRenounced`, `AdminChangeRequiresOwner`,
- * `VoucherSeqGapTooLarge` and `SignatureDeadlineTooFar`. The dispute upgrade
- * (D-19) appended seven: `NotSlashedProvider`, `DisputeWindowClosed`,
- * `SlashNotDisputed`, `NotArbiter`, `ArbiterIsVerifier`, `AddressBlocked` and
- * `InvalidSlashDelay`. The uphold-timeout fix (a4f97ab) and the audit fix
- * round added `DisputeTimedOut`, `SlashAlreadyDisputed` (first named
+ * `OwnershipCannotBeRenounced`, `VoucherSeqGapTooLarge` and
+ * `SignatureDeadlineTooFar`. The dispute upgrade (D-19) appended seven:
+ * `NotSlashedProvider`, `DisputeWindowClosed`, `SlashNotDisputed`,
+ * `NotArbiter`, `ArbiterIsVerifier`, `AddressBlocked` and `InvalidSlashDelay`.
+ * The uphold-timeout fix (a4f97ab) and the audit fix round added `DisputeTimedOut`, `SlashAlreadyDisputed` (first named
  * `AlreadyDisputed`), `SlashWindowNotDrained`, `ArbiterCannotUnblock`,
  * `VerifierIsAdminOrArbiter`, `RedeemerIsArbiter` and `InvalidArbiter`. The
  * simplify round (9f036a3) removed `ArbiterIsVerifier`,
@@ -28,7 +27,9 @@ import { toFunctionSelector } from 'viem';
  * `InvalidArbiter`) and `VerifierDailyCapExceeded` (now
  * `SlashWindowNotDrained`: execution is all or wait). Redeem into hold
  * (3d8fc8e) appended `HeldPaymentNotHeld`, `HeldNotYetCollectable`,
- * `HeldRefundWindowClosed` and `InvalidCollectHold`.
+ * `HeldRefundWindowClosed` and `InvalidCollectHold`. The clean-up before the
+ * fresh deploy (D-22) removed `AdminChangeRequiresOwner` with
+ * `updateConfig`'s `newAdmin` argument.
  */
 const NAMES: readonly string[] = [
   'ZeroAmount',
@@ -40,7 +41,6 @@ const NAMES: readonly string[] = [
   'NotRedeemer',
   'NotOwner',
   'OwnershipCannotBeRenounced',
-  'AdminChangeRequiresOwner',
   'InvalidTakeRateBps',
   'InvalidSplitBps',
   'InvalidSlashCapBps',
@@ -132,7 +132,7 @@ const NAMES: readonly string[] = [
 ];
 
 /**
- * OpenZeppelin's own errors that `X402Config`'s owner doors raise
+ * OpenZeppelin's own errors that `AssayConfig`'s owner doors raise
  * (`Ownable2StepUpgradeable`, D-17). Unlike `Errors.sol` these carry an
  * argument, so the selector is over the full signature; the decoded name drops
  * the argument, which a revert reason does not need. The backend calls none of

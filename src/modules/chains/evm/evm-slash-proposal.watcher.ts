@@ -12,7 +12,7 @@ import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/
 
 import { ENABLED_CHAINS } from '../enabled-chains';
 import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
-import { X402_SLASH_WATCH_EVENTS_ABI } from './abi/x402.abi';
+import { ASSAY_SLASH_WATCH_EVENTS_ABI } from './abi/assay.abi';
 import {
   DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS,
   EVM_CHAIN_STATE_INDEXER_CONFIG,
@@ -53,13 +53,13 @@ export interface EvmSlashWatchClient {
   getBlockNumber(args?: { cacheTime?: number }): Promise<bigint>;
   getContractEvents(args: {
     address: `0x${string}`;
-    abi: typeof X402_SLASH_WATCH_EVENTS_ABI;
+    abi: typeof ASSAY_SLASH_WATCH_EVENTS_ABI;
     fromBlock: bigint;
     toBlock: bigint;
   }): Promise<readonly SlashProposedLog[]>;
 }
 
-/** One decoded log of {@link X402_SLASH_WATCH_EVENTS_ABI}. */
+/** One decoded log of {@link ASSAY_SLASH_WATCH_EVENTS_ABI}. */
 export interface SlashProposedLog {
   readonly eventName:
     | 'SlashProposed'
@@ -225,7 +225,7 @@ export class EvmSlashProposalWatcher {
       logs.push(
         ...(await client.getContractEvents({
           address: deployment.stake,
-          abi: X402_SLASH_WATCH_EVENTS_ABI,
+          abi: ASSAY_SLASH_WATCH_EVENTS_ABI,
           fromBlock: from,
           toBlock: to,
         })),

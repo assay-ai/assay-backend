@@ -80,7 +80,7 @@ export class EscrowSeqService {
    * monotonic (`bumpNextSeqTo`), so a stale read can never rewind the counter.
    *
    * With `chainSeqHigh` known, a seq more than {@link VOUCHER_MAX_SEQ_GAP} above
-   * it is one `X402Escrow` would refuse at redemption. When the counter is
+   * it is one `AssayEscrow` would refuse at redemption. When the counter is
    * already past that gap — unpaid allocations alone can push it there, and
    * then nothing can be redeemed to move `seqHigh` — it is REWOUND first to
    * `max(seqHigh, highest recorded seq) + 1` (`BuyerEscrowRepository.rewindNextSeq`,

@@ -10,7 +10,11 @@ import { ALERT_PORT, AlertAggregation, AlertPort, AlertSeverity } from '@shared/
 
 import { ENABLED_CHAINS } from '../../enabled-chains';
 import { ChainId, ChainNamespace, namespaceOf } from '../../ports/caip.types';
-import { X402_CONFIG_ABI, X402_CONFIG_EVENTS_ABI, X402_PROXY_EVENTS_ABI } from '../abi/x402.abi';
+import {
+  ASSAY_CONFIG_ABI,
+  ASSAY_CONFIG_EVENTS_ABI,
+  ASSAY_PROXY_EVENTS_ABI,
+} from '../abi/assay.abi';
 import { readConfigTerms } from '../evm-config-terms';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from '../evm.constants';
 import { EvmChainStateService } from './evm-chain-state.service';
@@ -73,7 +77,7 @@ export interface EvmChainStateIndexerClient {
   getBlockNumber(args?: { cacheTime?: number }): Promise<bigint>;
   getContractEvents(args: {
     address: `0x${string}` | readonly `0x${string}`[];
-    abi: typeof X402_CONFIG_EVENTS_ABI | typeof X402_PROXY_EVENTS_ABI;
+    abi: typeof ASSAY_CONFIG_EVENTS_ABI | typeof ASSAY_PROXY_EVENTS_ABI;
     fromBlock: bigint;
     toBlock: bigint;
   }): Promise<readonly EvmConfigEventLog[]>;
@@ -86,7 +90,7 @@ export interface EvmChainStateIndexerClient {
 }
 
 /**
- * Indexes `X402Config`'s pause and blocklist into Postgres, with a cursor per
+ * Indexes `AssayConfig`'s pause and blocklist into Postgres, with a cursor per
  * chain kept in the same transaction as the events it covers (the H-1
  * watcher's shape, with the cursor durable rather than in Redis — a lost
  * blocklist event is not recoverable by re-reading a recent window).
@@ -200,14 +204,14 @@ export class EvmChainStateIndexer {
       logs.push(
         ...(await client.getContractEvents({
           address: deployment.config,
-          abi: X402_CONFIG_EVENTS_ABI,
+          abi: ASSAY_CONFIG_EVENTS_ABI,
           fromBlock: from,
           toBlock: to,
         })),
       );
       for (const log of await client.getContractEvents({
         address: [deployment.config, deployment.stake, deployment.escrow],
-        abi: X402_PROXY_EVENTS_ABI,
+        abi: ASSAY_PROXY_EVENTS_ABI,
         fromBlock: from,
         toBlock: to,
       })) {
@@ -229,7 +233,7 @@ export class EvmChainStateIndexer {
       knownArbiter = await (
         client.readContract({
           address: deployment.config,
-          abi: X402_CONFIG_ABI,
+          abi: ASSAY_CONFIG_ABI,
           functionName: 'arbiter',
           args: [],
         }) as Promise<string>
@@ -246,7 +250,7 @@ export class EvmChainStateIndexer {
             chainId,
             log,
             EVM_CHAIN_STATE_ALERTS.PAUSE_TOGGLED,
-            `X402Config on ${chainId} was ${paused ? 'PAUSED' : 'unpaused'} by ` +
+            `AssayConfig on ${chainId} was ${paused ? 'PAUSED' : 'unpaused'} by ` +
               `${String(log.args.admin)}: confirm it was intended`,
           );
           break;
@@ -324,7 +328,7 @@ export class EvmChainStateIndexer {
       const live = Boolean(
         await client.readContract({
           address: deployment.config,
-          abi: X402_CONFIG_ABI,
+          abi: ASSAY_CONFIG_ABI,
           functionName: 'blocked',
           args: [getAddress(address)],
         }),
@@ -377,7 +381,7 @@ export class EvmChainStateIndexer {
       const live = Boolean(
         await client.readContract({
           address: deployment.config,
-          abi: X402_CONFIG_ABI,
+          abi: ASSAY_CONFIG_ABI,
           functionName: 'blocked',
           args: [getAddress(row.address)],
         }),
@@ -444,7 +448,7 @@ export class EvmChainStateIndexer {
       severity: AlertSeverity.CRITICAL,
       name: EVM_CHAIN_STATE_ALERTS.CONFIG_LEVER,
       summary:
-        `X402Config on ${chainId} emitted ${log.eventName}. This is a lever a stolen admin key ` +
+        `AssayConfig on ${chainId} emitted ${log.eventName}. This is a lever a stolen admin key ` +
         `pulls (admin, treasury, bps, caps, arbiter, slash delay, verifier registry): confirm ` +
         `it was intended`,
       details: { chainId, event: log.eventName, ...stringArgs(log) },

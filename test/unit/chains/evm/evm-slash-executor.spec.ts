@@ -2,7 +2,7 @@ import { Logger } from '@nestjs/common';
 import { decodeFunctionData, getAddress, sha256, toBytes, toHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-import { MULTICALL3_ABI, X402_STAKE_SLASH_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { MULTICALL3_ABI, ASSAY_STAKE_SLASH_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EvmSlashExecutor } from '@modules/chains/evm/evm-slash-executor.service';
 import { ChainErrorCode, ChainErrors } from '@modules/chains/errors/chains.errors';
 import { chainErrorName } from '@modules/slash/domain/chain-slash-outcome';
@@ -144,7 +144,7 @@ describe('EvmSlashExecutor — propose', () => {
   });
 
   it('signs nothing while the Stake proxy signs under another EIP-712 domain', async () => {
-    const refusal = ChainErrors.domainMismatch({ chainId: CHAIN, contracts: 'X402Stake' });
+    const refusal = ChainErrors.domainMismatch({ chainId: CHAIN, contracts: 'AssayStake' });
     const { chain, signatures, executor } = build({ domainRefusal: refusal });
 
     await expect(executor.propose(proposal(1))).rejects.toMatchObject({
@@ -194,7 +194,7 @@ describe('EvmSlashExecutor — proposeBatch through Multicall3', () => {
     expect(
       calls.map(
         (call) =>
-          decodeFunctionData({ abi: X402_STAKE_SLASH_ABI, data: call.callData }).functionName,
+          decodeFunctionData({ abi: ASSAY_STAKE_SLASH_ABI, data: call.callData }).functionName,
       ),
     ).toEqual(['proposeSlash', 'proposeSlash', 'proposeSlash']);
 
@@ -437,7 +437,7 @@ describe('EvmSlashExecutor — reads, cancel, expire, caps', () => {
     });
 
     expect(
-      decodeFunctionData({ abi: X402_STAKE_SLASH_ABI, data: intent.transaction as `0x${string}` }),
+      decodeFunctionData({ abi: ASSAY_STAKE_SLASH_ABI, data: intent.transaction as `0x${string}` }),
     ).toMatchObject({
       functionName: 'cancelSlash',
       args: [`0x${requestId(1)}`],

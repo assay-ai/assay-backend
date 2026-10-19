@@ -2,7 +2,7 @@ import { hashTypedData, TypedDataDomain } from 'viem';
 
 /**
  * `SlashAttestation` — the verifier's judgement, in assay-evm's `src/Types.sol`
- * field order. Signed under the **X402Stake** domain (`evmDomain(chainId,
+ * field order. Signed under the **AssayStake** domain (`evmDomain(chainId,
  * stakeProxy)`), never the escrow's: two verifying contracts is what keeps a
  * captured attestation from being replayed at the other door.
  */

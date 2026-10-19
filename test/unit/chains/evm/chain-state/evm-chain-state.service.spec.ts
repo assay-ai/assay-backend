@@ -218,7 +218,7 @@ describe('EvmChainStateService — the EIP-712 domain guard (reviews R1, R-3)', 
 });
 
 describe('readDomainMismatches', () => {
-  it('flags the live testnet proxies, which still sign under "x402 Settlement"', async () => {
+  it('flags the abandoned testnet proxies, which sign under "x402 Settlement"', async () => {
     // `DOMAIN_SEPARATOR()` as read from eip155:46630 on 2026-10-15.
     const live: Record<string, `0x${string}`> = {
       '0x1D2625efD87c2fc10b8563f3F0890072845Fcf41':
@@ -231,7 +231,7 @@ describe('readDomainMismatches', () => {
       escrow: '0x1D2625efD87c2fc10b8563f3F0890072845Fcf41',
       stake: '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c',
     });
-    expect(mismatches.map((row) => row.contract)).toEqual(['X402Escrow', 'X402Stake']);
+    expect(mismatches.map((row) => row.contract)).toEqual(['AssayEscrow', 'AssayStake']);
   });
 });
 

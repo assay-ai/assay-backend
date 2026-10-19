@@ -13,7 +13,7 @@ import {
 import { ChainErrors } from '../errors/chains.errors';
 import { AccountId, ChainId, parseAccountId, toAccountId } from '../ports/caip.types';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
-import { X402_ESCROW_ABI } from './abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
 import { EVM_RELAYER, EvmRelayerPort } from './ports/evm-relayer.port';
 
@@ -36,7 +36,7 @@ export interface EvmRelayedIntentClient {
   }): Promise<bigint>;
 }
 
-/** Every amount argument on `X402Escrow` is a `uint64`. */
+/** Every amount argument on `AssayEscrow` is a `uint64`. */
 const MAX_UINT64 = 2n ** 64n - 1n;
 
 /** `r || s || v`, 65 bytes. The same shape `EvmVoucherRedeemer` demands. */
@@ -172,7 +172,7 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
    * The `switch` is exhaustive over a kind that cannot be `WITHDRAW` — the
    * union excludes it at the type level, because `withdraw()` is
    * `msg.sender`-only and there is no `withdrawBySig` in the contract, in
-   * `X402_ESCROW_ABI` or in the deployed bytecode (checked against a live
+   * `ASSAY_ESCROW_ABI` or in the deployed bytecode (checked against a live
    * deployment). A `default:` branch here would be a place for one to appear.
    */
   private encode(intent: RelayedEscrowIntent, buyer: `0x${string}`): `0x${string}` {
@@ -183,7 +183,7 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
     switch (intent.kind) {
       case EscrowIntentKind.SET_LIMITS:
         return encodeFunctionData({
-          abi: X402_ESCROW_ABI,
+          abi: ASSAY_ESCROW_ABI,
           functionName: 'setLimitsBySig',
           args: [
             buyer,
@@ -197,7 +197,7 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
 
       case EscrowIntentKind.REQUEST_WITHDRAW:
         return encodeFunctionData({
-          abi: X402_ESCROW_ABI,
+          abi: ASSAY_ESCROW_ABI,
           functionName: 'requestWithdrawBySig',
           args: [buyer, this.uint64(intent.amount, 'amount'), nonce, deadline, signature],
         });
@@ -206,7 +206,7 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
       // the relayer cannot point the payer's consent at a key of its own.
       case EscrowDelegationKind.AUTHORIZE_DELEGATE:
         return encodeFunctionData({
-          abi: X402_ESCROW_ABI,
+          abi: ASSAY_ESCROW_ABI,
           functionName: 'authorizeDelegateBySig',
           args: [
             buyer,
@@ -222,7 +222,7 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
 
       case EscrowDelegationKind.REVOKE_DELEGATE:
         return encodeFunctionData({
-          abi: X402_ESCROW_ABI,
+          abi: ASSAY_ESCROW_ABI,
           functionName: 'revokeDelegateBySig',
           args: [buyer, this.address(intent.delegate, 'delegate'), nonce, deadline, signature],
         });
@@ -313,7 +313,7 @@ export class EvmRelayedEscrowIntentSubmitter implements RelayedEscrowIntentPort 
   }
 
   /**
-   * Every amount argument on `X402Escrow` is a `uint64`, and these arrive from
+   * Every amount argument on `AssayEscrow` is a `uint64`, and these arrive from
    * an HTTP body rather than from `Money`.
    *
    * Out of range would otherwise throw inside viem's encoder with a message

@@ -10,9 +10,9 @@ import {
 
 import {
   MULTICALL3_ABI,
-  X402_STAKE_ABI,
-  X402_STAKE_SLASH_ABI,
-} from '@modules/chains/evm/abi/x402.abi';
+  ASSAY_STAKE_ABI,
+  ASSAY_STAKE_SLASH_ABI,
+} from '@modules/chains/evm/abi/assay.abi';
 import { evmDomain } from '@modules/chains/evm/eip712/domain';
 import { hashSlashAttestation } from '@modules/chains/evm/eip712/slash-attestation';
 import { EvmDeployment } from '@modules/chains/evm/evm.constants';
@@ -25,8 +25,8 @@ import {
 import { AccountId, ChainId, parseAccountId, toAccountId } from '@modules/chains/ports/caip.types';
 
 /**
- * An in-memory `X402Stake` + `Multicall3`, faithful to the parts of
- * `X402Stake.sol` the slash executor relies on:
+ * An in-memory `AssayStake` + `Multicall3`, faithful to the parts of
+ * `AssayStake.sol` the slash executor relies on:
  *
  * - `proposeSlash` recovers the attestation signer from the EIP-712 digest
  *   and refuses any key that is not the registered verifier; the replay lock
@@ -350,14 +350,14 @@ export class FakeStakeChain {
       try {
         if (call.callData.startsWith(SLASH_RECORD_OF)) {
           const { args: readArgs } = decodeFunctionData({
-            abi: X402_STAKE_ABI,
+            abi: ASSAY_STAKE_ABI,
             data: call.callData,
           });
           const view = this.recordView(state, readArgs[0] as string);
           return {
             success: true,
             returnData: encodeFunctionResult({
-              abi: X402_STAKE_ABI,
+              abi: ASSAY_STAKE_ABI,
               functionName: 'slashRecordOf',
               result: view as never,
             }),
@@ -375,7 +375,7 @@ export class FakeStakeChain {
   }
 
   private apply(state: State, data: `0x${string}`, logs: Log[]): void {
-    const decoded = decodeFunctionData({ abi: X402_STAKE_SLASH_ABI, data });
+    const decoded = decodeFunctionData({ abi: ASSAY_STAKE_SLASH_ABI, data });
     switch (decoded.functionName) {
       case 'proposeSlash':
         return this.propose(
@@ -616,11 +616,11 @@ function event(
   eventName: 'SlashProposed' | 'SlashExecuted' | 'SlashCancelled',
   args: Record<string, unknown>,
 ): Log {
-  const definition = X402_STAKE_SLASH_ABI.find(
+  const definition = ASSAY_STAKE_SLASH_ABI.find(
     (entry) => entry.type === 'event' && entry.name === eventName,
   ) as { inputs: readonly { name: string; type: string; indexed?: boolean }[] };
   const topics = encodeEventTopics({
-    abi: X402_STAKE_SLASH_ABI,
+    abi: ASSAY_STAKE_SLASH_ABI,
     eventName,
     args: Object.fromEntries(
       definition.inputs

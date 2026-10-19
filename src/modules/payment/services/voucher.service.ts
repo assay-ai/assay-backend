@@ -543,7 +543,7 @@ export class VoucherService {
    * The voucher must be authorised by `voucher.payer` — the account inside the
    * signed message, by then already checked to be the authenticated caller —
    * under the CHAIN's rule, which this mirrors exactly
-   * (`X402Escrow._voucherAuthority`):
+   * (`AssayEscrow._voucherAuthority`):
    *
    *   (a) the payer's own key signed it — checked first, synchronously, with no
    *       I/O, exactly as before delegation existed;
@@ -710,7 +710,7 @@ export class VoucherService {
       });
     }
 
-    // The chain's seq jump cap (`X402Escrow.MAX_SEQ_GAP`), when this call read
+    // The chain's seq jump cap (`AssayEscrow.MAX_SEQ_GAP`), when this call read
     // the escrow: a voucher the chain would refuse with `VoucherSeqGapTooLarge`
     // is not served on, even though this backend issued its seq.
     if (input.escrow) {

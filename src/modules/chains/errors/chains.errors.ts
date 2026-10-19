@@ -452,7 +452,7 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
       `request was not sent; nothing changed on chain — try again shortly`,
   },
   /**
-   * The settlement contracts are paused (`X402Config.paused`), and this door is
+   * The settlement contracts are paused (`AssayConfig.paused`), and this door is
    * one the pause closes — the contract would revert `ProgramPaused`.
    *
    * Since the dispute upgrade (D-19) the pause also closes the exits, the
@@ -488,7 +488,7 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
       'it resumes once the domains match',
   },
   /**
-   * A party to this action is on the ON-CHAIN blocklist (`X402Config.blocked`,
+   * A party to this action is on the ON-CHAIN blocklist (`AssayConfig.blocked`,
    * D-19) — the contract would revert `AddressBlocked`. Distinct from the
    * platform's own `ACCOUNT_BLOCKED`: this one is the chain's, set by the
    * admin or the arbiter, and lifted only by the admin.
@@ -502,7 +502,7 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
       `${context?.chainId ? ` (${context.chainId})` : ''}; the contract refuses it here. ` +
       'A blocked address can still revoke a delegate and dispute a slash; nothing moves its funds',
   },
-  /** `X402Config.arbiter()` is `address(0)`: nobody can uphold a dispute or block. */
+  /** `AssayConfig.arbiter()` is `address(0)`: nobody can uphold a dispute or block. */
   arbiterNotSet: {
     code: ChainErrorCode.CHAIN_ARBITER_NOT_SET,
     statusCode: 409,
