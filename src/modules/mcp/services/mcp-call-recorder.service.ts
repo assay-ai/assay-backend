@@ -161,7 +161,7 @@ export class McpCallRecorder {
       return `${web}/agents?agent=${encodeURIComponent(session.agentId)}#access`;
     }
     if (code === ToolAccessErrorCode.NO_PROVIDER_MATCHES_RULES) {
-      return `${web}/calls?call=${encodeURIComponent(callId)}`;
+      return `${web}/spend/calls?call=${encodeURIComponent(callId)}`;
     }
     return null;
   }
