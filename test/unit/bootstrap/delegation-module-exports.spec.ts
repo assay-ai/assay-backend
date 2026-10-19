@@ -16,7 +16,7 @@ import { SettlementModule } from '@modules/settlement/settlement.module';
  * (an unexported `AgentDelegateService`) with every unit test green, because a
  * unit harness provides the service itself. Composing the full API graph in the
  * integration suite pulls in `McpModule`'s connections, so the wiring is pinned
- * here instead; the real boot (`e2e/apps/agent-cli/anvil-api.sh`) proved it.
+ * here instead; the real boot of the API against an anvil fork proved it.
  */
 describe('agent-delegation module wiring', () => {
   const meta = (module: object, key: string): unknown[] =>
