@@ -56,12 +56,9 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
  * for the same reason.
  *
  * The stake source is asserted **through `PROVIDER_STAKE_SOURCE`, never as a
- * class**, and that is deliberate rather than incidental. The class behind that
- * token was replaced once — `ConfigProviderStakeSource` became
- * `CompositeProviderStakeSource` — and this file did not have to say so,
- * because the router does not know either name. A test that named the class
- * would have failed on a change the router could not see, which is the opposite
- * of what it is for.
+ * class**, and that is deliberate rather than incidental: the router does not
+ * know the class name, so a test that named it would fail on a change the router
+ * could not see, which is the opposite of what it is for.
  */
 /**
  * The repositories and the cache that `ProviderModule` and `ToolModule` now

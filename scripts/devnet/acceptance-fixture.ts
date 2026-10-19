@@ -15,10 +15,9 @@
  * ## Why this is needed
  *
  * Step `0b` (`assertStakeSourceIsChain`) refuses to let the suite spend real
- * devnet USDC until it has proved that `PROVIDER_STAKE_SOURCE_MODE` is actually
- * reading the chain. It proves that with a **witness**: an organization that is
- * staked on chain, has a proved `stake_authority`, and is named in no stake
- * seed file — so a reading for it can only have come from the chain.
+ * devnet USDC until it has proved that the stake source is actually reading the
+ * chain. It proves that with a **witness**: an organization that is staked on
+ * chain and has a proved `stake_authority`.
  *
  * The witness id baked into the suite (`677e6a64…`) came from an earlier manual
  * provider-stake run and lives in the database that run used. On any other database — a fresh local
@@ -153,9 +152,6 @@ async function main(): Promise<void> {
           '  - the ProviderStake PDA does not exist or is empty — run\n' +
           '      yarn devnet:escrow-rail-b --execute\n' +
           '    which opens and bonds it for this same keypair;\n' +
-          '  - PROVIDER_STAKE_SOURCE_MODE is `config` on the API SERVER (not in this\n' +
-          '    process) — it must be `chain` or `chain_with_config_fallback`, and the\n' +
-          '    server must have been restarted since;\n' +
           '  - SOLANA_RPC_URL on the API server cannot reach devnet.\n',
       );
       return;

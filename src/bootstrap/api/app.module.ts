@@ -64,10 +64,6 @@ import { OAuthApiModule } from '@modules/oauth/oauth-api.module';
 import { DiagnosticsModule } from '@shared/diagnostics/diagnostics.module';
 import { areDiagnosticsEnabled } from '@shared/diagnostics/diagnostics.flag';
 
-// Starter reference modules — see src/modules/_examples/README.md
-import { ExamplesApiModule } from '@modules/_examples/examples-api.module';
-import { areExamplesEnabled } from '@modules/_examples/examples.flag';
-
 // WebSocket
 import { WebSocketEmitterModule } from '@websocket/websocket-emitter.module';
 import { WebSocketBoardModule } from '@websocket/websocket-board.module';
@@ -193,7 +189,6 @@ import { NetworkModule } from '@shared/network/network.module';
     // Diagnostics — off by default in production
     ...(areDiagnosticsEnabled() ? [DiagnosticsModule] : []),
     // Starter reference modules — off by default in production
-    ...(areExamplesEnabled() ? [ExamplesApiModule] : []),
   ],
   providers: [SingleFlightService],
   controllers: [HealthcheckController, PublicFeaturesController, RequestKeysController],

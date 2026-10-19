@@ -8,12 +8,10 @@ import {
   CREDITED_SQL,
   FORFEITED_SQL,
   DEBT_OUTSTANDING_SQL,
-  PLATFORM_ABSORBED_SQL,
   VOIDED_SQL,
   WRITTEN_OFF_SQL,
   PaymentIntentRepository,
 } from '@database/postgres/repositories/payment-intent.repository';
-import { ProviderPayoutRepository } from '@database/postgres/repositories/provider-payout.repository';
 import { platformTakeRatePercent } from '@modules/mcp/services/mcp-pricing.config';
 import { AssetId, isAssetId } from '@modules/chains/ports/caip.types';
 import {
@@ -35,9 +33,8 @@ import { ProviderErrors } from '../errors/provider.errors';
 
 const SETTLED_STATUS = 'SETTLED';
 
-/** Never collected from the buyer: a written-off debt, or a legacy platform absorb. */
-const UNCOLLECTED_GROUP_SQL = `(COALESCE(${WRITTEN_OFF_SQL}, false) OR ${PLATFORM_ABSORBED_SQL})`;
-const RECORDED_PAYOUT_STATUS = 'RECORDED';
+/** Never collected from the buyer: a written-off debt. */
+const UNCOLLECTED_GROUP_SQL = `COALESCE(${WRITTEN_OFF_SQL}, false)`;
 
 /** One `(call_class, status, classification, asset, decimals)` group, still atomic-unit strings. */
 interface ReconciliationGroupRow {
@@ -48,7 +45,7 @@ interface ReconciliationGroupRow {
   readonly decimals: string;
   /** Rail B, hold still open — Postgres returns a boolean, some drivers a string. */
   readonly awaitingRedemption: boolean | string;
-  /** Never collected: a written-off debt or a legacy absorb — same driver caveat. */
+  /** Never collected: a written-off debt — same driver caveat. */
   readonly uncollected: boolean | string | null;
   /** Open buyer debt — same driver caveat. */
   readonly debtOutstanding: boolean | string | null;
@@ -65,13 +62,6 @@ interface ReconciliationGroupRow {
   readonly providerAmount: string;
   /** `Σ platform_fee` over this group's `SETTLED` rows. */
   readonly platformFee: string;
-}
-
-interface BatchTotalsRow {
-  readonly asset: string;
-  readonly decimals: string;
-  readonly count: string;
-  readonly paid: string;
 }
 
 /** Accumulator for one {@link CallReconciliationClass}. */
@@ -166,17 +156,11 @@ const CLASS_NOTES: Record<CallReconciliationClass, string> = {
  * satisfies `OrganizationScopedRepository`'s guard while `provider_id =
  * :providerId` does the real scoping — see that class's doc comment for the
  * full justification, not repeated here.
- *
- * `provider_payouts`, by contrast, **is** the provider's own table — it is
- * written under the provider's own `organization_id` (`providerId ==
- * organizationId` for a provider session; see `provider-verdicts.controller.ts`
- * L60-61) — so the batches query is a normal organization-scoped read.
  */
 @Injectable()
 export class ProviderReconciliationService {
   constructor(
     private readonly intents: PaymentIntentRepository,
-    private readonly payouts: ProviderPayoutRepository,
     private readonly config: ConfigService,
   ) {}
 
@@ -195,10 +179,9 @@ export class ProviderReconciliationService {
     }
 
     const groupRows = await this.queryGroups(providerId, from, to, query.asset);
-    const batchRows = await this.queryBatches(providerId, from, to, query.asset);
 
-    const asset = resolveAsset([...groupRows, ...batchRows], query.asset);
-    const decimals = asset ? decimalsFor(asset, groupRows, batchRows) : 0;
+    const asset = resolveAsset(groupRows, query.asset);
+    const decimals = asset ? decimalsFor(asset, groupRows) : 0;
     const money = (amount: bigint) =>
       asset === null ? null : { amount: amount.toString(), asset, decimals };
 
@@ -286,9 +269,6 @@ export class ProviderReconciliationService {
       };
     });
 
-    const batchCount = batchRows.reduce((total, row) => total + Number(row.count), 0);
-    const batchPaid = batchRows.reduce((total, row) => total + BigInt(row.paid), 0n);
-
     // The rate a call is charged at today (`PLATFORM_FEE_BPS`, the value
     // `MCP_PRICING` splits every live call with): this number sits next to the
     // real Σ platform_fee, and only the charged rate is one that sum can be
@@ -306,11 +286,6 @@ export class ProviderReconciliationService {
       platformTakeRatePercent: takeRatePercent,
       platformTake: money(platformTakeAmount),
       net: money(netAmount),
-      batches: {
-        count: batchCount,
-        paid: money(batchPaid),
-        reconciles: netAmount === batchPaid,
-      },
       // No producer exists anywhere in this codebase for a canary flag — see
       // the DTO's own doc comment. A real, honest `[]`, not an omitted field.
       monthlyCanaryAggregate: [],
@@ -378,37 +353,12 @@ export class ProviderReconciliationService {
       .addGroupBy(VOIDED_SQL)
       .getRawMany<ReconciliationGroupRow>();
   }
-
-  private async queryBatches(
-    providerId: string,
-    from: Date,
-    to: Date,
-    asset: string | undefined,
-  ): Promise<BatchTotalsRow[]> {
-    const qb = this.payouts
-      .createQueryBuilder('payout')
-      .select('payout.assetId', 'asset')
-      .addSelect('payout.decimals', 'decimals')
-      .addSelect('COUNT(*)', 'count')
-      .addSelect('COALESCE(SUM(payout.amount), 0)', 'paid')
-      .where('payout.organizationId = :providerId', { providerId })
-      .andWhere('payout.status = :recorded', { recorded: RECORDED_PAYOUT_STATUS })
-      .andWhere('payout.periodStart >= :from', { from })
-      .andWhere('payout.periodStart < :to', { to });
-
-    if (asset) {
-      qb.andWhere('payout.assetId = :assetId', { assetId: asset });
-    }
-
-    return qb.groupBy('payout.assetId').addGroupBy('payout.decimals').getRawMany<BatchTotalsRow>();
-  }
 }
 
 /**
  * Same rule as `ProviderEarningsService.resolveAsset`: an explicit `?asset=`
- * wins outright; otherwise the window must name at most one asset across
- * *both* sources (calls and payouts) or there is nothing honest to
- * denominate a total in.
+ * wins outright; otherwise the window must name at most one asset or there is
+ * nothing honest to denominate a total in.
  */
 function resolveAsset(rows: readonly { asset: string }[], requested?: string): AssetId | null {
   if (requested) return requested as AssetId;
@@ -423,10 +373,8 @@ function resolveAsset(rows: readonly { asset: string }[], requested?: string): A
 function decimalsFor(
   asset: AssetId,
   groupRows: readonly { asset: string; decimals: string }[],
-  batchRows: readonly { asset: string; decimals: string }[],
 ): number {
-  const match =
-    groupRows.find((row) => row.asset === asset) ?? batchRows.find((row) => row.asset === asset);
+  const match = groupRows.find((row) => row.asset === asset);
   return match ? Number(match.decimals) : 0;
 }
 

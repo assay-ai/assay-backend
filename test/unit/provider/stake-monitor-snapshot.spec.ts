@@ -36,11 +36,8 @@ describe('StakeMonitorService — the fleet stake snapshot', () => {
   const PROVIDER_C = '33333333-3333-4333-8333-333333333333';
 
   it('snapshots the fleet total off a pure chain reading', async () => {
-    // The total is summed from `bondedStakeOf` and nothing else.
-    // `PROVIDER_STAKE_SOURCE` runs in `chain_with_config_fallback` and mixes
-    // chain reads with a JSON file, and publishing that under "stake locked in
-    // the settlement program" would put an unverifiable number on the one page
-    // whose entire purpose is verifiability.
+    // The total is summed from `bondedStakeOf` and nothing else — the chain
+    // itself, not the router's cached stake source.
     const h = harness({
       providers: [provider(PROVIDER_A, ACCOUNT_A), provider(PROVIDER_B, ACCOUNT_B)],
       bindings: [binding(BINDING_A, PROVIDER_A, '50000')],

@@ -15,7 +15,7 @@ const PRICE = 100_000n;
  * UX review 2026-10-18 P0-3: `GET /withheld` and `GET /receipts/summary` are
  * two routes to one buyer figure, "not charged", and they disagreed. The
  * summary counted a served call that was never collected and is not owed
- * (forfeited, debt voided, legacy absorb) as not charged; `withheld` did not,
+ * (forfeited, or debt voided) as not charged; `withheld` did not,
  * so the seeded buyer saw $0.60 / 14 calls on one screen and $1.10 / 19 on the
  * next. Both are computed in SQL, so the agreement is checked against Postgres.
  */
@@ -119,18 +119,6 @@ describe('PaymentIntentRepository — withheld equals the summary’s not charge
     );
   }
 
-  /** A legacy absorb: collected columns, plus a `platform_absorbed:` provider credit. */
-  async function absorbed(intentId: string): Promise<void> {
-    await settledAs(intentId, 'COLLECTED');
-    await context.dataSource.query(
-      `INSERT INTO ledger_entries
-         (organization_id, account_id, entry_type, amount, asset_id, decimals, intent_id, chain_tx_ref)
-       SELECT provider_id, $2, 'PROVIDER_CREDIT', price_amount, asset_id, decimals, id, $3
-         FROM payment_intents WHERE id = $1`,
-      [intentId, context.account(`provider-${PROVIDER}`), 'platform_absorbed:DelegateIsRevoked'],
-    );
-  }
-
   /**
    * A terminal call that never reserved money: an unfunded keyed call is moved
    * `CREATED → EXPIRED` with no hold (`mcp-tool-call.service.ts`). Written with
@@ -148,7 +136,7 @@ describe('PaymentIntentRepository — withheld equals the summary’s not charge
     );
   }
 
-  it('counts forfeited, voided-debt and absorbed calls in both, and owed calls in neither', async () => {
+  it('counts forfeited and voided-debt calls in both, and owed calls in neither', async () => {
     await context.reset();
     const TOOL = randomUUID();
 
@@ -159,7 +147,6 @@ describe('PaymentIntentRepository — withheld equals the summary’s not charge
     await settledAs(await call(TOOL, 'SETTLED'), 'FORFEITED');
     await settledAs(await call(TOOL, 'SETTLED'), 'VOIDED_REFUND');
     await settledAs(await call(TOOL, 'SETTLED'), 'VOIDED_VOID');
-    await absorbed(await call(TOOL, 'SETTLED'));
     await settledAs(await call(TOOL, 'SETTLED'), 'OPEN_DEBT'); // owed
     await settledAs(await call(TOOL, 'SETTLED'), 'WRITTEN_OFF'); // still owed
     await settledAs(await call(TOOL, 'SETTLED'), 'DISPUTE_UPHELD'); // refunded by a report
@@ -183,10 +170,10 @@ describe('PaymentIntentRepository — withheld equals the summary’s not charge
 
     expect(summary).toHaveLength(1);
     const totals = summary[0];
-    expect(totals.calls).toBe(11);
-    expect(totals.listedTotal).toBe(11n * PRICE);
-    expect(totals.notChargedCalls).toBe(8);
-    expect(totals.notChargedTotal).toBe(8n * PRICE);
+    expect(totals.calls).toBe(10);
+    expect(totals.listedTotal).toBe(10n * PRICE);
+    expect(totals.notChargedCalls).toBe(7);
+    expect(totals.notChargedTotal).toBe(7n * PRICE);
     expect(totals.owedCalls).toBe(2);
 
     const withheldCalls = withheld.reduce((total, row) => total + row.calls, 0);
@@ -197,7 +184,7 @@ describe('PaymentIntentRepository — withheld equals the summary’s not charge
     const byStatus = new Map(withheld.map((row) => [row.status, row]));
     expect(byStatus.get('REFUNDED')).toMatchObject({ calls: 1, notCollected: false });
     expect(byStatus.get('VOIDED')).toMatchObject({ calls: 2, notCollected: false });
-    expect(byStatus.get('SETTLED')).toMatchObject({ calls: 5, notCollected: true });
+    expect(byStatus.get('SETTLED')).toMatchObject({ calls: 4, notCollected: true });
   });
 
   /**

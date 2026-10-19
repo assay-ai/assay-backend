@@ -203,17 +203,16 @@ export interface SettlementCredit {
  * The `chainTxRef` a **rail-A** commit carries.
  *
  * The ref is required so that no code path can retire a hold without
- * naming the transaction that moved the money. Rail A has no such transaction:
- * its money sits in the pooled Squads treasury vault and a settlement moves it
- * only in the books. A NULL there would be indistinguishable from a rail-B
- * commit whose signature somebody forgot to record, so the absence is written
- * down explicitly instead — greppable, and impossible to mistake for a
- * signature.
+ * naming the transaction that moved the money. A rail-A commit moves money
+ * only in the books, so it has no transaction of its own to name. A NULL there
+ * would be indistinguishable from a rail-B commit whose signature somebody
+ * forgot to record, so the absence is written down explicitly instead —
+ * greppable, and impossible to mistake for a signature.
  *
- * The escrow cutover retires the pooled vault, and with it every writer of this
- * constant.
+ * The value keeps its original spelling: `ledger_entries` is append-only, and
+ * the rows already written carry it.
  */
-export const LEGACY_POOLED_VAULT_TX_REF = 'legacy:pooled-vault-no-chain-transfer';
+export const RAIL_A_BOOK_CREDIT_TX_REF = 'legacy:pooled-vault-no-chain-transfer';
 
 /**
  * The outcome of resolving a hold.

@@ -31,6 +31,8 @@ export const MAX_REQUEST_COOKIES = 5;
 const COOKIE_ATTRIBUTES = `Path=/; HttpOnly; Secure; SameSite=Lax`;
 const NAME_HEX_LENGTH = 16;
 const VALUE_RE = /^([0-9a-z]{1,11})\.([0-9a-f]{64})$/;
+/** The exact name of a binding cookie; nothing else is ever evicted. */
+const NAME_RE = new RegExp(`^${REQUEST_COOKIE_PREFIX}[0-9a-f]{${NAME_HEX_LENGTH}}$`);
 
 function mac(secret: Buffer, rid: string): string {
   return createHmac('sha256', secret).update(rid, 'utf8').digest('hex');
@@ -106,12 +108,15 @@ export function requestCookieMatches(
 /**
  * The binding cookies to expire so that, with one more set, the browser holds
  * at most {@link MAX_REQUEST_COOKIES}: the oldest by issue time. A cookie
- * whose issue time cannot be read counts as the oldest.
+ * whose issue time cannot be read counts as the oldest. Only a name of the
+ * exact binding format (`__Host-assay_oar_` and 16 lower-case hex digits)
+ * counts, so a name sent in the `Cookie` header is never echoed into a
+ * `Set-Cookie` unless it is one this server could have set.
  */
 export function requestCookiesToEvict(header: string | string[] | undefined): string[] {
   const held = new Map<string, number>();
   for (const [name, value] of pairs(header)) {
-    if (!name.startsWith(REQUEST_COOKIE_PREFIX)) continue;
+    if (!NAME_RE.test(name)) continue;
     const parsed = VALUE_RE.exec(value);
     const issued = parsed ? parseInt(parsed[1], 36) : -1;
     held.set(name, Math.min(held.get(name) ?? Infinity, issued));

@@ -84,8 +84,8 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
    * know about payments — sending `id` upstream would wire that dependency back
    * in.
    *
-   * `UNIQUE`, unscoped to `organization_id` — same reasoning as
-   * `voucher_nonce` below: the platform mints this value itself, so a
+   * `UNIQUE`, unscoped to `organization_id`: the platform mints this value
+   * itself, so a
    * collision is a bug in the minting path, not a legitimate cross-tenant
    * event, and a per-tenant index would hide exactly that.
    */
@@ -167,19 +167,6 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   idempotencyKey: string | null;
 
   /**
-   * The rail-B voucher nonce — the durable half of replay protection.
-   *
-   * The unique index on this column is the replay guarantee, with Redis as a
-   * fast path in front of it. The index is deliberately **not** scoped to
-   * `organization_id`, which is the only index on this table that is not: a
-   * nonce is a one-time token, and an index per tenant would let one signed
-   * voucher be redeemed once in every organization. It also has no TTL and
-   * never will — the record that an authorization was spent does not expire.
-   */
-  @Column({ name: 'voucher_nonce', type: 'varchar', length: 64, nullable: true })
-  voucherNonce: string | null;
-
-  /**
    * The rail-B voucher **sequence number** (voucher v2) — a decimal `u64`.
    *
    * `numeric`/`bigint` over the wire is a string, and it stays one all the way
@@ -187,11 +174,9 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
    * rounded at 2^53 is a voucher aimed at the wrong bit of the chain's replay
    * bitmap.
    *
-   * Its uniqueness index is `(agent_account, voucher_seq)` and NOT global — the
-   * opposite of `voucher_nonce` above, and for the same reason stated the other
-   * way round. A nonce is a one-time token in one global space; a seq counts
-   * from 1 per escrow, so buyer A's seq 5 and buyer B's seq 5 are two different
-   * vouchers and a global index would refuse the second.
+   * Its uniqueness index is `(agent_account, voucher_seq)` and NOT global: a
+   * seq counts from 1 per escrow, so buyer A's seq 5 and buyer B's seq 5 are two
+   * different vouchers and a global index would refuse the second.
    */
   @Column({ name: 'voucher_seq', type: 'bigint', nullable: true })
   voucherSeq: string | null;

@@ -220,10 +220,9 @@ describe('ReconciliationService on eip155:46630', () => {
   });
 
   it('does not count what a redemption already paid out of the escrow as owed by it', async () => {
-    // A buyer deposits 20 USDG. Two 0.10 calls are served on rail B: one
-    // voucher is redeemed (the escrow pays 0.09 to the provider and 0.01 to the
-    // treasury, so it holds 19.90); the other can never be redeemed and carries
-    // a legacy `platform_absorbed:` credit, which nobody owes.
+    // A buyer deposits 20 USDG. A 0.10 call is served on rail B and its
+    // voucher redeemed: the escrow pays 0.09 to the provider and 0.01 to the
+    // treasury, so it holds 19.90.
     const PROVIDER = toAccountId(EVM_CHAIN, '0xfB18f483E985F21c58fD97F69DE225aECA5Fc1c4');
     const providerOrg = randomUUID();
     const usdg = (atomic: bigint) => MoneyUtil.of(atomic, USDG, USDG_DECIMALS);
@@ -250,26 +249,12 @@ describe('ReconciliationService on eip155:46630', () => {
       chainTxRef: `0x${'ab'.repeat(32)}`,
     });
 
-    const absorbed = await intent();
-    const absorbedHold = await hold(absorbed);
-    await context.ledger.appendNow({
-      organizationId: providerOrg,
-      accountId: PROVIDER as unknown as LedgerAccountId,
-      entryType: LedgerEntryType.PROVIDER_CREDIT,
-      money: usdg(90_000n),
-      intentId: absorbed,
-      chainTxRef: 'platform_absorbed:DelegateIsRevoked',
-    });
-    await context.ledger.releaseHold(context.organizationId, absorbedHold.id);
-
     evmRpc.escrowBalance = 19_900_000n;
     const report = await context.reconciliation.reconcile(USDG);
 
     expect(report.agentLiabilitiesAtomic).toBe(19_900_000n);
-    // Neither credit is owed by the vault: the redeemed one is in the
-    // provider's wallet, and the platform never pays or owes a provider, so a
-    // legacy `platform_absorbed:` credit is not a liability either
-    // (`LedgerEntryRepository.sumPaidAtRedemption`, review-buyer-debt L4).
+    // The credit is not owed by the vault: it is in the provider's wallet
+    // (`LedgerEntryRepository.sumPaidAtRedemption`).
     expect(report.providerPayableAtomic).toBe(0n);
     expect(report.platformFeesAtomic).toBe(0n);
     expect(report.differenceAtomic).toBe(0n);

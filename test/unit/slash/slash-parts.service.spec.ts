@@ -197,6 +197,24 @@ describe('SlashPartsService.appliesTo', () => {
   });
 });
 
+/**
+ * Load-bearing for B18 (review m6): a case with no parts in its epoch reads
+ * as `null` — never the case's own request id, even when a record stands
+ * there. That is why the sweeps and the watcher can never settle (or race)
+ * such a case, and why only the operator's stuck-case actions act on it. A
+ * fallback here to the case's own record would make the watcher and `S-16`
+ * write the same execution concurrently.
+ */
+describe('SlashPartsService.readRecord with no parts (B18)', () => {
+  it('is null and reads nothing on chain, whatever stands at the case id', async () => {
+    const { service, proposal, executor } = build([]);
+    executor.records.set(proposal.chainRequestId, { status: 'EXECUTED' } as never);
+    const read = jest.spyOn(executor, 'readRecord');
+    await expect(service.readRecord(proposal, '0xprovider')).resolves.toBeNull();
+    expect(read).not.toHaveBeenCalled();
+  });
+});
+
 describe('SlashPartsService.propose', () => {
   it('plans once, proposes every part in one batch, and folds the parts into one record', async () => {
     const { service, proposal, executor, parts } = build([

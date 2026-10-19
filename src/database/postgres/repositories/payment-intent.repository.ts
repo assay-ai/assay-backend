@@ -156,11 +156,10 @@ export interface NotChargedCallRow {
  * - `FORFEITED`: the provider caused the voucher to fail ({@link FORFEITED_SQL}).
  * - `VOIDED_REFUND` / `VOIDED_VOID`: a buyer debt voided by a late REFUND or
  *   VOID verdict ({@link VOIDED_SQL}).
- * - `ABSORBED`: a legacy platform-absorbed credit ({@link PLATFORM_ABSORBED_SQL}).
  *
  * A WRITTEN-OFF debt is not here: the buyer still owes it (receipts `owed`).
  */
-export type NotChargedSettledCause = 'FORFEITED' | 'VOIDED_REFUND' | 'VOIDED_VOID' | 'ABSORBED';
+export type NotChargedSettledCause = 'FORFEITED' | 'VOIDED_REFUND' | 'VOIDED_VOID';
 
 /** The Explorer's query window, and who counts as a buyer within it. */
 export interface NotChargedWindow {
@@ -353,53 +352,17 @@ const ELIGIBLE_BUYER_SQL =
   `AND s.call_class = :paid AND s.status = :settledStatus ` +
   `AND s.hold_id IS NOT NULL AND s.hold_released_at IS NOT NULL ` +
   `AND s.hold_released_at < :buyerCollectedBefore ` +
-  `AND NOT COALESCE(${CLOSED_OUTCOME_SQL('s')}, false) ` +
-  `AND NOT EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
-  `WHERE absorbed.organization_id = s.provider_id AND absorbed.intent_id = s.id ` +
-  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
-  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')))`;
-
-/**
- * Read on a credited intent: a LEGACY credit out of platform funds
- * (`platform_absorbed:<error>`), written before buyer debt replaced it. Nothing
- * writes one any more: the platform never pays or owes a provider. Kept only to
- * label the historical rows, which are reported as uncollected (the buyer's
- * hold was released and no buyer money backs the credit). The credit's
- * `organization_id` is the provider's, which puts the probe on
- * `idx_ledger_entries_intent_id`.
- *
- * RECONCILIATION FLAG (review-buyer-debt L4): these credits are labelled, not
- * reversed — no money moves — so they still sit in the provider's ledger
- * balance. Any payout writer must leave them out; see
- * `docs/runbooks/buyer-debt-deploy.md` §4 for the query that lists them.
- */
-export const PLATFORM_ABSORBED_SQL =
-  `EXISTS (SELECT 1 FROM ledger_entries absorbed ` +
-  `WHERE absorbed.organization_id = intent.provider_id AND absorbed.intent_id = intent.id ` +
-  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
-  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%')`;
-
-/**
- * The same legacy credit as {@link PLATFORM_ABSORBED_SQL}, read for its reason
- * (the program error after the prefix, e.g. `DelegateIsRevoked`); `NULL` when
- * the call was not absorbed. One credit per intent (partial unique index).
- */
-export const PLATFORM_ABSORBED_REASON_SQL =
-  `(SELECT substring(absorbed.chain_tx_ref FROM 19) ` + // after the 18-char prefix
-  `FROM ledger_entries absorbed ` +
-  `WHERE absorbed.organization_id = intent.provider_id AND absorbed.intent_id = intent.id ` +
-  `AND absorbed.entry_type = 'PROVIDER_CREDIT' ` +
-  `AND absorbed.chain_tx_ref LIKE 'platform_absorbed:%' LIMIT 1)`;
+  `AND NOT COALESCE(${CLOSED_OUTCOME_SQL('s')}, false)))`;
 
 /**
  * Read on a `SETTLED` intent: the buyer was NOT charged although the verdict
- * passed — the provider forfeited, the debt was written off, or (legacy) the
- * platform absorbed it. The one predicate every buyer-facing "charged" figure
+ * passed — the provider forfeited, or the debt was written off or voided. The
+ * one predicate every buyer-facing "charged" figure
  * and the spend caps leave out (review 2026-10-15 #2, M4).
  */
 export const NOT_COLLECTED_SQL =
   `(COALESCE(${FORFEITED_SQL}, false) OR COALESCE(${WRITTEN_OFF_SQL}, false) ` +
-  `OR COALESCE(${VOIDED_SQL}, false) OR ${PLATFORM_ABSORBED_SQL})`;
+  `OR COALESCE(${VOIDED_SQL}, false))`;
 
 /**
  * `GET /receipts/summary`'s buckets. Every call is in exactly one, so
@@ -416,14 +379,13 @@ export const NOT_COLLECTED_SQL =
  *   (final review M2).
  * - in progress: not finished yet.
  * - not charged: the rest — `REFUNDED`, `VOIDED`, `EXPIRED`, and a served call
- *   that was never collected and is not owed (forfeited, voided debt, legacy
- *   absorb). Derived by subtraction so it cannot drift from the other three.
+ *   that was never collected and is not owed (forfeited, voided debt).
+ *   Derived by subtraction so it cannot drift from the other three.
  */
 const SUMMARY_OWED_SQL =
   `(intent.status = '${SETTLED_STATUS}' ` +
   `AND (${DEBT_OUTSTANDING_SQL} OR COALESCE(${WRITTEN_OFF_SQL}, false)) ` +
-  `AND NOT COALESCE(${FORFEITED_SQL}, false) AND NOT COALESCE(${VOIDED_SQL}, false) ` +
-  `AND NOT ${PLATFORM_ABSORBED_SQL})`;
+  `AND NOT COALESCE(${FORFEITED_SQL}, false) AND NOT COALESCE(${VOIDED_SQL}, false))`;
 const SUMMARY_CHARGED_SQL = `(intent.status = '${SETTLED_STATUS}' AND NOT ${DEBT_OUTSTANDING_SQL} AND NOT ${NOT_COLLECTED_SQL})`;
 const SUMMARY_IN_PROGRESS_SQL = `(intent.status IN ('CREATED', 'FUNDS_SECURED', 'PROVIDER_EXECUTING', 'VERIFYING'))`;
 
@@ -444,8 +406,8 @@ const SUMMARY_NEVER_RESERVED_SQL = `(intent.status IN (:...withheldStatuses) AND
  * rail B in `commitRedeemedHold` once `redeem_voucher` lands). Every "earned"
  * figure filters on this, so it matches the earnings ledger by construction.
  *
- * A released hold is not a committed one: a forfeit, a write-off and a legacy
- * absorb all released the buyer's hold and are left out (review 2026-10-15, M2;
+ * A released hold is not a committed one: a forfeit and a write-off both
+ * released the buyer's hold and are left out (review 2026-10-15, M2;
  * review #2, M4).
  */
 export const CREDITED_SQL =
@@ -454,7 +416,7 @@ export const CREDITED_SQL =
 
 /**
  * The public Explorer's "not charged" share of `SETTLED` rows: served, never
- * collected, and NOT owed — forfeited, voided debt, legacy absorb. Exactly
+ * collected, and NOT owed — forfeited, or voided debt. Exactly
  * {@link NOT_COLLECTED_SQL} without {@link WRITTEN_OFF_SQL}: a written-off debt
  * is still owed by the buyer (receipts `owed`), so the feed never calls it
  * "not charged". With the withheld statuses this is the receipts summary's
@@ -462,16 +424,14 @@ export const CREDITED_SQL =
  */
 const NOT_CHARGED_SETTLED_SQL =
   `(intent.status = '${SETTLED_STATUS}' AND NOT COALESCE(${WRITTEN_OFF_SQL}, false) ` +
-  `AND (COALESCE(${FORFEITED_SQL}, false) OR COALESCE(${VOIDED_SQL}, false) ` +
-  `OR ${PLATFORM_ABSORBED_SQL}))`;
+  `AND (COALESCE(${FORFEITED_SQL}, false) OR COALESCE(${VOIDED_SQL}, false)))`;
 
 /** {@link NotChargedSettledCause} for a row, `NULL` when it is not {@link NOT_CHARGED_SETTLED_SQL}. */
 const NOT_CHARGED_SETTLED_CAUSE_SQL =
   `CASE WHEN NOT ${NOT_CHARGED_SETTLED_SQL} THEN NULL ` +
   `WHEN COALESCE(${FORFEITED_SQL}, false) THEN 'FORFEITED' ` +
   `WHEN intent.redemption_last_error = 'voided:REFUND' THEN 'VOIDED_REFUND' ` +
-  `WHEN COALESCE(${VOIDED_SQL}, false) THEN 'VOIDED_VOID' ` +
-  `ELSE 'ABSORBED' END`;
+  `WHEN COALESCE(${VOIDED_SQL}, false) THEN 'VOIDED_VOID' END`;
 
 /** Every paid call the Explorer reports as not charged: withheld statuses, or {@link NOT_CHARGED_SETTLED_SQL}. */
 const NOT_CHARGED_SQL = `(intent.status IN (:...withheldStatuses) OR ${NOT_CHARGED_SETTLED_SQL})`;
@@ -535,8 +495,6 @@ export interface CallExportRow {
   readonly awaitingRedemption: boolean;
   /** {@link CREDITED_SQL}: the hold was committed. Only meaningful on a `SETTLED` row. */
   readonly credited: boolean;
-  /** A LEGACY platform-absorbed credit's reason, or `null` — see {@link PLATFORM_ABSORBED_REASON_SQL}. */
-  readonly absorbedReason: string | null;
   /**
    * `provider_forfeit:<cause>` when the provider forfeited ({@link FORFEITED_SQL}),
    * `uncollected:<cause>` once a debt was written off ({@link WRITTEN_OFF_SQL}),
@@ -2596,7 +2554,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .addSelect('intent.platformFee', 'platformFee')
       .addSelect(AWAITING_REDEMPTION_SQL, 'awaitingRedemption')
       .addSelect(CREDITED_SQL, 'credited')
-      .addSelect(PLATFORM_ABSORBED_REASON_SQL, 'absorbedReason')
       .addSelect('intent.redemptionLastError', 'redemptionLastError')
       .addSelect(DEBT_OUTSTANDING_SQL, 'debtOutstanding')
       .addSelect('intent.createdAt', 'createdAt')
@@ -2634,7 +2591,6 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
         platformFee: string;
         awaitingRedemption: boolean | string;
         credited: boolean | string;
-        absorbedReason: string | null;
         redemptionLastError: string | null;
         debtOutstanding: boolean | string;
         createdAt: Date;
@@ -2913,8 +2869,16 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
   /**
    * Of {@link sumEscrowPaid}, what the chain has not taken from the escrow yet:
-   * charged rail-B calls neither redeemed nor redeemed into the hold. Atomic
-   * units. Read by the statement's check against the escrow balance (B7).
+   * charged rail-B calls whose hold is still open ({@link AWAITING_REDEMPTION_SQL}:
+   * the redemption has not landed) and that were not redeemed into the dispute
+   * hold either. Atomic units. Read by the statement's check against the escrow
+   * balance (B7).
+   *
+   * Not `redemption_tx_refs`: a ref is written before its broadcast (so it does
+   * not prove the chain took anything), and calls redeemed before refs were
+   * recorded have none. Counting those as unsettled made the statement say
+   * money was "still being collected" that Funding's chain counters showed
+   * collected (V1-5).
    */
   async sumEscrowChargedNotRedeemed(
     organizationId: string,
@@ -2928,7 +2892,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
       .andWhere(SUMMARY_CHARGED_SQL)
-      .andWhere(`cardinality(intent.redemption_tx_refs) = 0`)
+      .andWhere(AWAITING_REDEMPTION_SQL)
       .andWhere('intent.heldStatus IS NULL')
       .getRawOne<{ total: string }>();
     return BigInt(row?.total ?? '0');

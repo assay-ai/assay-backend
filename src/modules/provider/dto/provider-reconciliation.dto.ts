@@ -105,21 +105,6 @@ export class ReconciliationUnexplainedDto {
   reference: string | null;
 }
 
-export class ReconciliationBatchesDto {
-  @ApiProperty({ description: 'Number of `RECORDED` payout rows whose period falls in the window' })
-  count: number;
-
-  @ApiProperty({
-    type: MoneyDto,
-    nullable: true,
-    description: 'Σ amount of those payout rows — what was actually paid out for this window',
-  })
-  paid: MoneyDto | null;
-
-  @ApiProperty({ description: 'Whether `paid` equals `net` exactly' })
-  reconciles: boolean;
-}
-
 /**
  * The one canary number that ever crosses to a provider: a monthly count per
  * binding, never a per-call flag. **No producer exists yet** — nothing in
@@ -202,9 +187,6 @@ export class GetProviderReconciliationResponseDto {
       '`classBreakdown[].credited`.',
   })
   net: MoneyDto | null;
-
-  @ApiProperty({ type: ReconciliationBatchesDto })
-  batches: ReconciliationBatchesDto;
 
   @ApiProperty({ type: [ReconciliationCanaryAggregateRowDto] })
   monthlyCanaryAggregate: ReconciliationCanaryAggregateRowDto[];

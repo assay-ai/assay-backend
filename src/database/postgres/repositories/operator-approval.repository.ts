@@ -48,6 +48,21 @@ export class OperatorApprovalRepository extends AbstractRepository<OperatorAppro
     return (result.affected ?? 0) === 1;
   }
 
+  /**
+   * `PENDING` → `EXPIRED`, now: a request pinned to a state that has moved on
+   * can never run, and a newer one replaces it. Returns whether this call
+   * moved it.
+   */
+  async markSuperseded(id: string, now: Date = new Date()): Promise<boolean> {
+    const result = await this.createQueryBuilder()
+      .update(OperatorApprovalEntity)
+      .set({ status: 'EXPIRED', decidedAt: now })
+      .where('id = :id', { id })
+      .andWhere('status = :pending', { pending: 'PENDING' })
+      .execute();
+    return (result.affected ?? 0) === 1;
+  }
+
   /** `PENDING` → `REJECTED`. Returns whether this call moved it. */
   async markRejected(id: string, rejectedBy: string, now: Date = new Date()): Promise<boolean> {
     const result = await this.createQueryBuilder()

@@ -1,4 +1,4 @@
-import { randomBytes, randomUUID } from 'node:crypto';
+import { randomUUID } from 'node:crypto';
 
 import { PaymentErrorCode } from '@modules/payment/errors/payment.errors';
 import {
@@ -194,11 +194,10 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
   });
 
   describe('the schema refuses what the service would never write', () => {
-    it('rejects a rail-B intent with neither a voucher nonce nor a voucher seq', async () => {
-      // `trg_payment_intents_rail_b_has_nonce`, widened with sequenced vouchers to accept
-      // either field. A rail-B intent with neither is a charge with no replay
-      // protection at all, and the trigger makes that unrepresentable rather
-      // than merely unwritten.
+    it('rejects a rail-B intent with no voucher seq', async () => {
+      // `trg_payment_intents_rail_b_has_seq`. A rail-B intent with no seq is a
+      // charge with no replay protection at all, and the trigger makes that
+      // unrepresentable rather than merely unwritten.
       await expect(
         context.intents.create({
           organizationId: context.organizationId,
@@ -287,7 +286,7 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
       // The reason the rail-B rule is a BEFORE INSERT trigger and not a CHECK.
       //
       // A CHECK is re-evaluated on every UPDATE, so a rail-B row written before
-      // this migration — no nonce and no seq, because there was no voucher path
+      // the rule — no seq, because there was no voucher path
       // yet — would become unmodifiable, and the expiry sweep could never move
       // it to EXPIRED. Its ledger hold would then sit open until the 24-hour
       // backstop. A guard that strands an agent's money is not a guard.
@@ -296,7 +295,7 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
       // which is itself the proof that no new one can appear.
       const legacyId = randomUUID();
       await context.dataSource.query(
-        `ALTER TABLE payment_intents DISABLE TRIGGER trg_payment_intents_rail_b_has_nonce`,
+        `ALTER TABLE payment_intents DISABLE TRIGGER trg_payment_intents_rail_b_has_seq`,
       );
       try {
         await context.dataSource.query(
@@ -319,7 +318,7 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
         );
       } finally {
         await context.dataSource.query(
-          `ALTER TABLE payment_intents ENABLE TRIGGER trg_payment_intents_rail_b_has_nonce`,
+          `ALTER TABLE payment_intents ENABLE TRIGGER trg_payment_intents_rail_b_has_seq`,
         );
       }
 
@@ -332,38 +331,7 @@ describe('Voucher redemption — real Postgres, real Redis', () => {
       );
 
       expect(expired.status).toBe(PaymentIntentStatus.EXPIRED);
-      expect(expired.voucherNonce).toBeNull();
       expect(expired.voucherSeq).toBeNull();
-    });
-
-    it('refuses two intents sharing a nonce, whatever else differs (v1 rows, kept for history)', async () => {
-      const nonce = randomBytes(16).toString('hex');
-      const create = (label: string, organizationId: string) =>
-        context.intents.create({
-          organizationId,
-          agentId: context.id(`${label}:agent`),
-          agentAccount: context.account(`${label}-agent`),
-          providerId: context.id(`${label}:provider`),
-          providerAccount: context.account(`${label}-provider`),
-          toolId: context.id(`${label}:tool`),
-          rail: PaymentRail.RAIL_B_VOUCHER,
-          callId: randomUUID(),
-          callClass: PaymentIntentCallClass.PAID,
-          price: context.usdc(7n),
-          platformFee: context.usdc(0n),
-          requestHash: `sha256:${'1'.repeat(64)}`,
-          chainId: context.voucherFor().chainId,
-          voucherNonce: nonce,
-        });
-
-      await create('shared-nonce-a', context.organizationId);
-
-      // Different tenant, different agent, different tool, different request —
-      // and still refused, because the nonce is the same.
-      await expectErrorCodeAsync(
-        () => create('shared-nonce-b', randomUUID()),
-        PaymentErrorCode.PAYMENT_VOUCHER_NONCE_REPLAYED,
-      );
     });
 
     it('refuses two intents sharing an account and seq, whatever else differs', async () => {

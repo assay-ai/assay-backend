@@ -87,8 +87,8 @@ export function isRefundedByReport(intent: CollectionInput): boolean {
 /**
  * A `SETTLED` call that was never collected and is not owed: the provider
  * forfeited it, or its debt was voided (a late verdict or an upheld report).
- * The per-row twin of the repository's `NOT_CHARGED_SETTLED_SQL` (a legacy
- * absorb is not visible on the row), and the `notCollected` the withheld
+ * The per-row twin of the repository's `NOT_CHARGED_SETTLED_SQL`, and the
+ * `notCollected` the withheld
  * definition reads.
  */
 export function isNotCollected(intent: CollectionInput): boolean {

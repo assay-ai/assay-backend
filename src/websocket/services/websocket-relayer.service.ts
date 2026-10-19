@@ -1,13 +1,8 @@
 import { Injectable, Logger } from '@nestjs/common';
 import { WebSocketEventMessage } from '../types/event-data.interface';
 import type { Server, Socket } from 'socket.io';
-import {
-  ConnectedSocket,
-  MessageBody,
-  SubscribeMessage,
-  WebSocketGateway,
-} from '@nestjs/websockets';
-import { WS_ROOMS_PREFIXES, WS_SUBSCRIBE_MESSAGES } from '../constants/ws-namespaces.constant';
+import { SubscribeMessage, WebSocketGateway } from '@nestjs/websockets';
+import { WS_SUBSCRIBE_MESSAGES } from '../constants/ws-namespaces.constant';
 import { BaseGateway } from '../gateways/base.gateway';
 import { MAX_MESSAGE_AGE } from '../constants';
 
@@ -70,31 +65,5 @@ export class WebSocketRelayerService extends BaseGateway {
     } catch (error) {
       this.logger.error(`Failed to handle WebSocket event: ${error.message}`, error.stack);
     }
-  }
-
-  // Posts
-
-  @SubscribeMessage(WS_SUBSCRIBE_MESSAGES.SUBSCRIBE_POSTS)
-  async subscribeToPosts(
-    @MessageBody() data: { postId: string },
-    @ConnectedSocket() client: Socket,
-  ): Promise<void> {
-    const { postId } = data;
-    const room = `${WS_ROOMS_PREFIXES.POST}${postId}`;
-
-    await this.joinRoom(client, room);
-    this.logger.log(`Client ${client.id} subscribed to post: ${postId}`);
-  }
-
-  @SubscribeMessage(WS_SUBSCRIBE_MESSAGES.UNSUBSCRIBE_POSTS)
-  async unsubscribeFromPosts(
-    @MessageBody() data: { postId: string },
-    @ConnectedSocket() client: Socket,
-  ): Promise<void> {
-    const { postId } = data;
-    const room = `${WS_ROOMS_PREFIXES.POST}${postId}`;
-
-    await this.leaveRoom(client, room);
-    this.logger.log(`Client ${client.id} unsubscribed from post: ${postId}`);
   }
 }

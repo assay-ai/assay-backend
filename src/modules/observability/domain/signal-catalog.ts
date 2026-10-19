@@ -6,10 +6,9 @@
  *
  * This file is the single place that says, for each one, whether this
  * codebase currently has a data source for it. `MetricsCollectorService`
- * reads {@link SIGNAL_SOURCE} before computing a gauge; a `NONE` entry means
- * the collector must not register or set that series at all — Prometheus's
- * own `absent()` then reports it accurately as missing, rather than the
- * collector fabricating a `0` that reads as "healthy: nothing found."
+ * reads {@link SIGNAL_SOURCE} before computing a reading; a `NONE` entry means
+ * the reading is reported as absent, rather than the collector fabricating a
+ * `0` that reads as "healthy: nothing found."
  *
  * The golden-signal thresholds gate the number, not the metric — see
  * `SIGNAL_GATE`. Everything with a `GoldenSignal` entry is graded through
@@ -38,14 +37,6 @@ export enum ObservabilitySignal {
 export enum SignalAvailability {
   /** Backed by a real query against a table already written elsewhere. */
   SOURCED = 'SOURCED',
-  /**
-   * Backed by an in-process instrument (a prom-client `Counter`/`Histogram`)
-   * that this change registers, but that nothing in the codebase calls yet —
-   * see `MetricsRegistryService`'s recording methods. Distinct from `NONE`: the seam exists and is
-   * named; it is one call-site addition away from reporting real numbers,
-   * not a redesign away.
-   */
-  AWAITING_INSTRUMENTATION = 'AWAITING_INSTRUMENTATION',
   /** No table, column or in-process counter anywhere in this codebase computes this today. */
   NONE = 'NONE',
 }
@@ -115,11 +106,8 @@ export const SIGNAL_CATALOG: Readonly<Record<ObservabilitySignal, SignalDescript
   [ObservabilitySignal.PLATFORM_LATENCY_P95_BY_BINDING]: {
     signal: ObservabilitySignal.PLATFORM_LATENCY_P95_BY_BINDING,
     label: 'Platform-added latency p95, by binding',
-    availability: SignalAvailability.AWAITING_INSTRUMENTATION,
-    reason:
-      'No column or span anywhere separates platform-added time from provider time. A Histogram ' +
-      'is registered and MetricsRegistryService.observePlatformLatency(bindingId, ms) is ready to ' +
-      'receive it; nothing calls it yet.',
+    availability: SignalAvailability.NONE,
+    reason: 'No column or span anywhere separates platform-added time from provider time.',
   },
   [ObservabilitySignal.SETTLEMENT_LAG_P95]: {
     signal: ObservabilitySignal.SETTLEMENT_LAG_P95,
@@ -134,9 +122,8 @@ export const SIGNAL_CATALOG: Readonly<Record<ObservabilitySignal, SignalDescript
     label: 'Payout lag p95 (credit → on-chain confirmation)',
     availability: SignalAvailability.NONE,
     reason:
-      'provider_payouts has no confirmed-on-chain timestamp — "SUBMITTED" means a Squads ' +
-      'instruction was built, not confirmed. The batch is also OFF by ' +
-      'default (PROVIDER_PAYOUT_EXECUTION_ENABLED), so there would be little real data regardless.',
+      'Providers are paid in the same transaction that redeems a voucher, so there is no ' +
+      'separate payout to time.',
   },
   [ObservabilitySignal.OPEN_HOLD_AGE]: {
     signal: ObservabilitySignal.OPEN_HOLD_AGE,
@@ -169,10 +156,9 @@ export const SIGNAL_CATALOG: Readonly<Record<ObservabilitySignal, SignalDescript
   [ObservabilitySignal.EGRESS_BLOCKS]: {
     signal: ObservabilitySignal.EGRESS_BLOCKS,
     label: 'Egress calls blocked',
-    availability: SignalAvailability.AWAITING_INSTRUMENTATION,
+    availability: SignalAvailability.NONE,
     reason:
-      'EgressError(BLOCKED_ADDRESS) is thrown and returned to the caller; nothing persists it. ' +
-      'A Counter is registered and MetricsRegistryService.recordEgressBlock(reason) is ready to ' +
-      'receive it; nothing calls it yet.',
+      'EgressError(BLOCKED_ADDRESS) is thrown and returned to the caller; nothing persists or ' +
+      'counts it.',
   },
 };

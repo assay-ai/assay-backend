@@ -23,7 +23,6 @@
     "^@filters/(.*)$": "<rootDir>/../src/shared/filters/$1",
     "^@utils/(.*)$": "<rootDir>/../src/shared/utils/$1",
     "^@bootstrap/(.*)$": "<rootDir>/../src/bootstrap/$1",
-    "^@schedule/(.*)$": "<rootDir>/../src/modules/_examples/schedule/$1",
     "^@websocket/(.*)$": "<rootDir>/../src/websocket/$1"
   },
   "collectCoverageFrom": [

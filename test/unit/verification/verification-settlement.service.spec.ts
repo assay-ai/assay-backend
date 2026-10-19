@@ -350,7 +350,6 @@ function baseIntent(overrides: Partial<PaymentIntent> = {}): PaymentIntent {
     chainId: 'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1' as never,
     expiresAt: new Date(Date.now() + 300_000),
     idempotencyKey: null,
-    voucherNonce: null,
     voucherSeq: null,
     voucherSignature: null,
     voucherResourceHash: null,
