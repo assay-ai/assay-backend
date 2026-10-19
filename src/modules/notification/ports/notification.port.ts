@@ -189,8 +189,6 @@ export enum NotificationEvent {
    * override that gives money back.
    */
   PROVIDER_SLASH_REVERSED = 'provider.slash_reversed',
-  /** No producer: the payout batch is defaulted off. */
-  PROVIDER_PAYOUT_SENT = 'provider.payout_sent',
 
   // ── Buyer call disputes (G3.B1) ─────────────────────────────────────────
   /** A buyer disputed a call this provider served. `CallDisputeService.file`. */
