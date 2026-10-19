@@ -51,7 +51,7 @@ const PROVIDER = `${SOLANA_MAINNET}:${PROVIDER_ADDRESS}` as AccountId;
  *
  * Deliberately different from `X402_PAYMENT_PROGRAM_ADDRESS` — the client's
  * compiled-in `declare_id!()` — because the voucher signs the program id at
- * offset 15 and a redeploy can move it to a new one. A default to the compiled-in
+ * offset 16 and a redeploy can move it to a new one. A default to the compiled-in
  * constant would have every buyer sign bytes naming a program that is not the
  * one about to check them: the call is served, the money is held, and every
  * redemption dies with `MissingBuyerSignature`.
@@ -426,20 +426,20 @@ describe('SolanaChainAdapter — voucher v2', () => {
 
   const addressBytes = (value: string) => Array.from(getAddressEncoder().encode(address(value)));
 
-  it('builds the 239 bytes the settlement program recomputes', () => {
+  it('builds the 240 bytes the settlement program recomputes', () => {
     const message = adapter.buildVoucherMessage(voucher);
 
-    expect(message).toHaveLength(239);
-    expect(new TextDecoder().decode(message.subarray(0, 15))).toBe('x402:voucher:v2');
+    expect(message).toHaveLength(240);
+    expect(new TextDecoder().decode(message.subarray(0, 16))).toBe('assay:voucher:v2');
   });
 
   it('signs over the DEPLOYED program id, not the one compiled into the client', () => {
-    // The program id is at offset 15..47 of the signed bytes. A redeploy can
+    // The program id is at offset 16..48 of the signed bytes. A redeploy can
     // land under a new id, so a default would have every buyer sign for a program
     // that is not the one about to check the signature.
     const message = adapter.buildVoucherMessage(voucher);
 
-    expect(Array.from(message.subarray(15, 47))).toEqual(addressBytes(DEPLOYED_PROGRAM_ID));
+    expect(Array.from(message.subarray(16, 48))).toEqual(addressBytes(DEPLOYED_PROGRAM_ID));
     expect(DEPLOYED_PROGRAM_ID).not.toBe(X402_PAYMENT_PROGRAM_ADDRESS);
   });
 
@@ -574,7 +574,7 @@ describe('SolanaChainAdapter — payout proof', () => {
   it('leads with its own version tag, distinct from the voucher', () => {
     const message = new TextDecoder().decode(adapter.buildPayoutProofMessage(challenge));
     expect(message.startsWith(PAYOUT_PROOF_MESSAGE_VERSION)).toBe(true);
-    expect(message).not.toContain('x402:voucher:v2');
+    expect(message).not.toContain('assay:voucher:v2');
   });
 
   it('puts the account being claimed inside the signed bytes', () => {

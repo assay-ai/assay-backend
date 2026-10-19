@@ -196,7 +196,7 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
   voucherSignature: string | null;
 
   /**
-   * `'sha256:' + 64 hex` — offset 151 of the signed bytes.
+   * `'sha256:' + 64 hex` — offset 152 of the signed bytes.
    *
    * The one voucher field that is derivable from nothing else on this row: it
    * hashes the tool's `resource` string, and a binding's resource can change

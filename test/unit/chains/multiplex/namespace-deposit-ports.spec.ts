@@ -144,7 +144,7 @@ const IRRELEVANT_402: PaymentRequirements = {
   amount: '5000000',
   asset: 'irrelevant',
   payTo: 'irrelevant',
-  resource: 'x402:deposit:11111111-1111-1111-1111-111111111111',
+  resource: 'assay:deposit:11111111-1111-1111-1111-111111111111',
   maxTimeoutSeconds: 60,
 };
 

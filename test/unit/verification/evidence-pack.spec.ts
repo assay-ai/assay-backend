@@ -57,7 +57,7 @@ describe('the evidence core', () => {
   it('carries every field the evidence pack names, as pure JSON', () => {
     const core = buildEvidenceCore(judged);
 
-    expect(core.schema).toBe('x402/evidence-pack/v1');
+    expect(core.schema).toBe('assay/evidence-pack/v1');
     expect(core.verdict).toEqual({
       status: 'FAIL',
       reasonCode: 'SCHEMA_MISMATCH',

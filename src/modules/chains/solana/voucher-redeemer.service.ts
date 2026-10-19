@@ -376,7 +376,7 @@ export class SolanaVoucherRedeemer implements VoucherRedeemerPort {
       { programAddress },
     );
 
-    // The exact 239 bytes the buyer signed, rebuilt from the same nine fields
+    // The exact 240 bytes the buyer signed, rebuilt from the same nine fields
     // the instruction carries. If these two ever disagree the program refuses
     // with `MissingBuyerSignature` after the call has been served, which is why
     // both are built from one set of locals here rather than from two reads.
