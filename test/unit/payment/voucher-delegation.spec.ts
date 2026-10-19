@@ -418,6 +418,187 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
     });
   });
 
+  /**
+   * Task 2.13 (carry from 2.3-M5): PAYMENT_REQUIRED hands the agent EIP-55
+   * spellings, the only ones `assay-mcp` signs, while a stored account may be
+   * spelled in lower case. The voucher still binds the same 20-byte parties,
+   * and everything after the match is keyed by the server's own spelling.
+   */
+  describe('the EIP-55 spellings the server asks an agent to sign', () => {
+    const lowerAccount = (account: AccountId) => account.toLowerCase() as AccountId;
+    const lowerAsset = (asset: string) =>
+      asset.replace(/0x[0-9a-fA-F]{40}$/, (address) => address.toLowerCase()) as typeof USDG;
+
+    /** The server's values in lower case; the voucher in EIP-55, as the requirement named them. */
+    function spelled(signer: EvmSigner, amount = 100_000n): RedeemVoucherInput {
+      const server = input(signer, { amount, escrow: escrow() });
+      const price = { ...server.price, asset: lowerAsset(USDG) };
+      const call = server.call;
+      const voucher: Voucher = {
+        ...server.signed.voucher,
+        payer: payer.account,
+        payTo: ESCROW,
+        provider: PROVIDER,
+        amount: usdg(amount),
+        requestHash: computeRequestHash({
+          ...call,
+          toolId: server.toolId,
+          providerId: server.providerId,
+          amount: amount.toString(),
+          asset: price.asset,
+        }),
+      };
+      expect(voucher.payer).not.toBe(lowerAccount(payer.account));
+      return {
+        ...server,
+        signed: { voucher, signature: signer.sign(adapter.buildVoucherMessage(voucher)) },
+        agentAccount: lowerAccount(payer.account),
+        escrowPda: lowerAccount(ESCROW),
+        providerAccount: lowerAccount(PROVIDER),
+        price,
+        platformFee: { ...server.platformFee, asset: price.asset },
+        boundDelegate: delegate.account,
+      };
+    }
+
+    it('redeems a checksummed voucher against lower-case stored parties, keyed by the stored spelling', async () => {
+      chain.grant(payer.address, delegate.address);
+      const create = jest.spyOn(intents, 'create');
+      afterThisTest(() => create.mockRestore());
+
+      const call = spelled(delegate);
+      const intent = await service.redeem(call);
+
+      expect(intent.status).toBe(PaymentIntentStatus.FUNDS_SECURED);
+      expect(intents.created[0].agentAccount).toBe(call.agentAccount);
+      const admission = create.mock.calls[0][1];
+      expect(admission?.scope).toMatchObject({
+        payer: call.agentAccount,
+        assetId: call.price.asset,
+      });
+    });
+
+    it("counts the checksummed vouchers already admitted in the delegate's window", async () => {
+      chain.grant(payer.address, delegate.address, { maxPerWindow: 150_000n });
+      await service.redeem(spelled(delegate));
+      await rejects(
+        service.redeem(spelled(delegate)),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+      );
+    });
+
+    it('still refuses a different address, in any spelling', async () => {
+      const call = spelled(payer);
+      const other = generateSigner(CHAIN);
+      await rejects(
+        service.redeem({ ...call, providerAccount: lowerAccount(other.account) }),
+        PaymentErrorCode.PAYMENT_VOUCHER_BINDING_MISMATCH,
+      );
+    });
+
+    /**
+     * Review I1: every party binding compares the parsed 20 bytes, so a value
+     * that is not `0x` and 40 hex digits never matches by case, and one nibble
+     * apart is another account. Presented under the original signature: the
+     * binding is checked before it.
+     */
+    const PARTIES = ['payer', 'payTo', 'provider'] as const;
+    const address = (account: string) => account.split(':')[2];
+    const malformed: [string, (account: string) => string][] = [
+      ['a 0X prefix', (a) => `${CHAIN}:0X${address(a).slice(2)}`],
+      ['a short address', (a) => `${CHAIN}:${address(a).slice(0, -2)}`],
+      ['a long address', (a) => `${CHAIN}:${address(a)}00`],
+      ['non-hex digits', () => `${CHAIN}:0x${'g'.repeat(40)}`],
+      [
+        'an address one nibble apart',
+        (a) => {
+          const hex = address(a);
+          const last = hex.at(-1)!.toLowerCase();
+          return `${CHAIN}:${hex.slice(0, -1)}${last === '0' ? '1' : '0'}`;
+        },
+      ],
+    ];
+    for (const field of PARTIES) {
+      it.each(malformed)(`refuses a ${field} with %s, by name`, async (_label, mutate) => {
+        const call = spelled(payer);
+        const voucher = { ...call.signed.voucher, [field]: mutate(call.signed.voucher[field]) };
+        await expect(
+          service.redeem({ ...call, signed: { voucher, signature: call.signed.signature } }),
+        ).rejects.toMatchObject({
+          errorCode: PaymentErrorCode.PAYMENT_VOUCHER_BINDING_MISMATCH,
+          context: { field },
+        });
+        expect(intents.created).toHaveLength(0);
+      });
+    }
+
+    it('refuses an asset with a 0X prefix or an upper-case namespace', async () => {
+      for (const asset of [
+        USDG.replace('/erc20:0x', '/erc20:0X'),
+        USDG.replace('/erc20:', '/ERC20:'),
+      ]) {
+        const call = spelled(payer);
+        const voucher = {
+          ...call.signed.voucher,
+          amount: { ...call.signed.voucher.amount, asset: asset as typeof USDG },
+        };
+        await expect(
+          service.redeem({ ...call, signed: { voucher, signature: call.signed.signature } }),
+        ).rejects.toMatchObject({
+          // The money constructor refuses the shape first; either way, by name.
+          errorCode: expect.stringMatching(/^PAYMENT_VOUCHER_(MALFORMED|BINDING_MISMATCH)$/),
+        });
+      }
+      expect(intents.created).toHaveLength(0);
+    });
+
+    it('one seq in two spellings is one payment: the second is already used', async () => {
+      const checksummed = spelled(payer);
+      await service.redeem(checksummed);
+
+      // The same seq, signed again over the lower-case spelling of every party.
+      const lower: Voucher = {
+        ...checksummed.signed.voucher,
+        payer: lowerAccount(payer.account),
+        payTo: lowerAccount(ESCROW),
+        provider: lowerAccount(PROVIDER),
+        amount: { ...checksummed.signed.voucher.amount, asset: lowerAsset(USDG) },
+      };
+      await rejects(
+        service.redeem({
+          ...checksummed,
+          signed: { voucher: lower, signature: payer.sign(adapter.buildVoucherMessage(lower)) },
+        }),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
+      );
+      expect(intents.created).toHaveLength(1);
+      expect(intents.created[0].agentAccount).toBe(checksummed.agentAccount);
+    });
+
+    it('the window counts both spellings as one payer: no split totals', async () => {
+      chain.grant(payer.address, delegate.address, { maxPerWindow: 150_000n });
+      await service.redeem(spelled(delegate));
+
+      // The next call signed over the lower-case spelling, against the same stored payer.
+      const next = spelled(delegate);
+      const lower: Voucher = {
+        ...next.signed.voucher,
+        payer: lowerAccount(payer.account),
+        payTo: lowerAccount(ESCROW),
+        provider: lowerAccount(PROVIDER),
+        amount: { ...next.signed.voucher.amount, asset: lowerAsset(USDG) },
+      };
+      await rejects(
+        service.redeem({
+          ...next,
+          signed: { voucher: lower, signature: delegate.sign(adapter.buildVoucherMessage(lower)) },
+        }),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+      );
+      expect(intents.created).toHaveLength(1);
+    });
+  });
+
   describe('(b) an authorised delegate', () => {
     it('redeems a delegate-signed voucher within its caps and records the delegate', async () => {
       chain.grant(payer.address, delegate.address);

@@ -4,7 +4,23 @@ import { IsIn, IsOptional, IsString, IsUUID, Matches, MaxLength } from 'class-va
 import { PricingMode } from '@modules/tool/ports/tool.types';
 import { EndpointKind } from '@modules/toolset/domain/mcp-url';
 
-export const CONNECT_CLIENTS = ['claude-code', 'claude-desktop', 'cursor', 'other'] as const;
+/**
+ * The Connect sheet's client tabs, and the client ids `assay-mcp add --client`
+ * takes (spec §7.10 item 5, §8.4). `agent_connect_urls.client` is
+ * `varchar(24)`: every id fits.
+ */
+export const CONNECT_CLIENTS = [
+  'claude-code',
+  'codex',
+  'cursor',
+  'vscode',
+  'windsurf',
+  'gemini',
+  'claude-desktop',
+  'claude-ai',
+  'chatgpt',
+  'other',
+] as const;
 
 export class PreviewMcpUrlBodyDto {
   @ApiProperty({

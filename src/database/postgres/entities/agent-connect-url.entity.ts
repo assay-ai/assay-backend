@@ -23,7 +23,7 @@ export class AgentConnectUrlEntity {
   @Column({ name: 'server_name', type: 'varchar', length: 9, nullable: true })
   serverName: string | null;
 
-  /** The client tab: `claude-code`, `claude-desktop`, `cursor`, `other`. */
+  /** The client tab: one of `CONNECT_CLIENTS` (`mcp-urls.dto.ts`). */
   @Column({ name: 'client', type: 'varchar', length: 24, nullable: true })
   client: string | null;
 
