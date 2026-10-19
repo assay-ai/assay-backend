@@ -147,15 +147,27 @@ const JSON_PARSE_MESSAGE = /is not valid JSON|JSON at position \d+|end of JSON i
 export const MALFORMED_BODY_MESSAGE = 'Malformed request body';
 
 /**
+ * Express's `URIError` for a path param it cannot decode, which Nest turns
+ * into `BadRequestException(err.message)`. It quotes the raw param — a rid on
+ * the consent routes — so its text is replaced outright.
+ */
+const PARAM_DECODE_MESSAGE = /^Failed to decode param /;
+
+/** The fixed text for a path param that could not be decoded. */
+export const MALFORMED_PATH_MESSAGE = 'Malformed request path';
+
+/**
  * The message as it may be logged and echoed (R-OA-27):
  * - a JSON parse failure is replaced outright, since it quotes the body;
+ * - so is a param-decode failure, since it quotes the param;
  * - Nest's route-not-found `Cannot {METHOD} {originalUrl}` is rebuilt from
  *   the already-redacted path;
- * - anything else (an Express `Failed to decode param '…'` among them) goes
- *   through the same rid, query and token redaction as the path.
+ * - anything else goes through the same rid, query and token redaction as
+ *   the path.
  */
 function safeMessage(message: string, method: string, path: string): string {
   if (JSON_PARSE_MESSAGE.test(message)) return MALFORMED_BODY_MESSAGE;
+  if (PARAM_DECODE_MESSAGE.test(message)) return MALFORMED_PATH_MESSAGE;
   if (message.startsWith(`Cannot ${method} `)) return `Cannot ${method} ${path}`;
   return redactOAuthText(message);
 }

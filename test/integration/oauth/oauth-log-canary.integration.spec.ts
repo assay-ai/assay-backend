@@ -452,6 +452,27 @@ describe('OAuth log canary — every secret through every logging call site', ()
       keep(
         await request(api.getHttpServer()).get(`/api/v1/OAuth/Requests/${fourth.rid}`).set(auth),
       );
+      // A param Express cannot decode (`%E0`): the message would quote it.
+      // A rid-shaped 64-hex value and a real rid, so only the fixed text can hide them.
+      const hexRid = randomBytes(32).toString('hex');
+      secrets.push(hexRid);
+      for (const value of [hexRid, fourth.rid]) {
+        const undecodable = keep(
+          await request(api.getHttpServer()).get(`/api/v1/oauth/requests/${value}%E0`).set(auth),
+        );
+        expect(undecodable.status).toBe(400);
+      }
+      // A client falling back to a root `/authorize` on MCP: a 404, logged.
+      const rootState = 'canary-root-' + randomBytes(9).toString('base64url');
+      const rootReplaces = randomUUID();
+      secrets.push(rootState, rootReplaces);
+      const rootAuthorize = keep(
+        await request(mcp.getHttpServer())
+          .get(`/authorize?state=${rootState}&assay_replaces=${rootReplaces}`)
+          .set('X-Forwarded-For', newIp()),
+      );
+      expect(rootAuthorize.status).toBe(404);
+
       // A 5xx: the filter's error line and stack.
       const consent = api.get(OAuthConsentService, { strict: false });
       const failing = jest
@@ -502,6 +523,8 @@ describe('OAuth log canary — every secret through every logging call site', ()
     const errorBodies = bodies.join('\n');
     expect(errorBodies).toContain('/api/v1/oauth/requests/[REDACTED]');
     expect(errorBodies).toContain('Malformed request body');
+    expect(errorBodies).toContain('Malformed request path');
+    expect(output).toContain('/authorize?state=[REDACTED]&assay_replaces=[REDACTED]');
     expect(errorBodies).toContain('"error":"invalid_request"');
 
     for (const secret of withHashes(secrets)) {
