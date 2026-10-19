@@ -10,7 +10,6 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  */
 export enum SettlementErrorCode {
   SETTLEMENT_SLASH_NOT_PERMITTED = 'SETTLEMENT_SLASH_NOT_PERMITTED',
-  SETTLEMENT_RESERVES_BREACH = 'SETTLEMENT_RESERVES_BREACH',
 
   // ── The buyer's escrow exit, now a chain transaction ─────────────────────
   SETTLEMENT_WITHDRAWALS_FROZEN = 'SETTLEMENT_WITHDRAWALS_FROZEN',
@@ -56,20 +55,6 @@ export const SettlementErrors = createDomainErrorFactory('SETTLEMENT', {
     message: (context?: Record<string, any>) =>
       `Slash requires a signed verifier attestation — the platform cannot slash on its own authority` +
       `${context?.classification ? ` (classification: ${context.classification})` : ''}`,
-  },
-  /**
-   * `vault_balance < Σ liabilities` — any breach pages immediately and halts
-   * payouts.
-   * 500, not 409: this is never a caller's mistake to retry around, it means
-   * either an accounting bug or funds leaving the vault without a matching
-   * ledger entry, and both are stop-everything conditions.
-   */
-  reservesBreach: {
-    code: SettlementErrorCode.SETTLEMENT_RESERVES_BREACH,
-    statusCode: 500,
-    message: (context?: Record<string, any>) =>
-      `PROOF OF RESERVES BREACH on ${context?.asset ?? 'vault asset'}: vault holds ${context?.vaultBalance ?? '?'}` +
-      ` but liabilities total ${context?.liabilities ?? '?'} — halt payouts and freeze withdrawals immediately`,
   },
 
   // ── Escrow exit ──────────────────────────────────────────────────────────

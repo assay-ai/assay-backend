@@ -4,7 +4,6 @@ import { DataSource } from 'typeorm';
 
 import { LedgerHoldEntity } from '@database/postgres/entities/ledger-hold.entity';
 import { PaymentIntentEntity } from '@database/postgres/entities/payment-intent.entity';
-import { ProviderPayoutEntity } from '@database/postgres/entities/provider-payout.entity';
 import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.entity';
 import { VerificationRecordEntity } from '@database/postgres/entities/verification-record.entity';
 import { VerifierSigningLogEntryEntity } from '@database/postgres/entities/verifier-signing-log-entry.entity';
@@ -215,23 +214,6 @@ export class ObservabilityMetricsRepository {
       .getRawOne<{ raised: number; overturned: number }>();
 
     return { raised: row?.raised ?? 0, overturned: row?.overturned ?? 0 };
-  }
-
-  /**
-   * How many provider payouts are still short of a confirmed ledger entry —
-   * `PENDING` (reserved, nothing sent) or `SUBMITTED` (built, not yet
-   * confirmed — see `ProviderPayoutEntity`'s own docstring on why
-   * `SUBMITTED` is not `CONFIRMED`). The Money dashboard's "payout queue"
-   * content, distinct from `PAYOUT_LAG_P95` (absent — see the catalog).
-   */
-  async payoutQueueDepth(): Promise<number> {
-    const row = await this.dataSource
-      .createQueryBuilder(ProviderPayoutEntity, 'payout')
-      .select('COUNT(*)::int', 'count')
-      .where("payout.status IN ('PENDING', 'SUBMITTED')")
-      .getRawOne<{ count: number }>();
-
-    return row?.count ?? 0;
   }
 }
 

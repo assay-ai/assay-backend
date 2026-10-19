@@ -27,8 +27,8 @@
  * and they would be right to.
  *
  * The third bucket is a served call whose payment was never collected and is
- * not owed: the provider forfeited the voucher, a buyer debt was voided, or
- * (legacy) the platform absorbed it. Its hold was released, so it is in
+ * not owed: the provider forfeited the voucher, or a buyer debt was voided.
+ * Its hold was released, so it is in
  * `Σ HOLD_RELEASE`, and `GET /receipts/summary` already counts it as not
  * charged. Leaving it out made the two buyer figures disagree and the
  * reconciliation fail by exactly its amount (UX review 2026-10-18, P0-3). It is
@@ -41,9 +41,6 @@
  *   `price_amount`. A rail-A call re-priced below its quote and then not
  *   charged differs by the remainder. True of the first two buckets before
  *   `NOT_COLLECTED` existed.
- * - **Absorbed and written off.** A legacy absorb that was also written off is
- *   in no summary bucket but "not charged" (the summary derives that by
- *   subtraction), while `NOT_CHARGED_SETTLED_SQL` excludes every write-off.
  *
  * A terminal call that never reserved anything is in neither: the summary
  * leaves it out of every bucket for the reason below.
@@ -117,8 +114,8 @@ export enum WithheldBucket {
 
   /**
    * Served, but the payment was never collected and the buyer does not owe it:
-   * the provider forfeited the voucher, a buyer debt was voided by a late
-   * verdict, or a legacy platform-absorbed credit. The hold was released.
+   * the provider forfeited the voucher, or a buyer debt was voided by a late
+   * verdict. The hold was released.
    *
    * Status `SETTLED` with the repository's `NOT_CHARGED_SETTLED_SQL`. A
    * WRITTEN-OFF debt is not here: the buyer still owes it.
@@ -182,7 +179,7 @@ export interface WithheldCandidate {
   readonly holdId: string | null;
   /**
    * A `SETTLED` intent whose payment was never collected and is not owed
-   * (forfeited, debt voided, legacy absorb). Read only on `SETTLED`; omitted
+   * (forfeited, or debt voided). Read only on `SETTLED`; omitted
    * means collected or owed, so a caller that does not know never counts a
    * served call as withheld.
    */

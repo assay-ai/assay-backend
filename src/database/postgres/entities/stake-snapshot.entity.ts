@@ -68,12 +68,8 @@ export class StakeSnapshotEntity extends AbstractEntityWithoutSoftDelete {
   /**
    * `Σ bonded` in minor units, over every provider that has a stake account.
    *
-   * Read through `OnChainStakeReaderPort.bondedStakeOf` — **the chain**, never
-   * `PROVIDER_STAKE_SOURCE`. The composite source runs in
-   * `chain_with_config_fallback` mode and mixes chain readings with values
-   * from a JSON file; publishing that under the label "locked in the
-   * settlement program" would be an unverifiable claim on the one page whose
-   * entire purpose is verifiability.
+   * Read through `OnChainStakeReaderPort.bondedStakeOf` — the chain itself,
+   * not the router's cached `PROVIDER_STAKE_SOURCE`.
    */
   @Column({ name: 'bonded_total', type: 'numeric', precision: 78, scale: 0 })
   bondedTotal: string;

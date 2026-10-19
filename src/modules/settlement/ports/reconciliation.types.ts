@@ -62,11 +62,9 @@ export interface ReconciliationFinding {
 /**
  * The result of one pass.
  *
- * Unlike `ProofOfReserves`, a breach is a **field** here, not a throw. The two
- * are used differently on purpose: `checkReserves` answers "may I move money
- * right now" and must be impossible to ignore, while the reconciler's job is
- * to observe, record and alert — throwing would abort the run before the row
- * that records the breach is written, which is the one artefact an incident
+ * A breach is a **field** here, not a throw: the reconciler's job is to
+ * observe, record and alert — throwing would abort the run before the row that
+ * records the breach is written, which is the one artefact an incident
  * actually needs.
  */
 export interface ReconciliationReport {

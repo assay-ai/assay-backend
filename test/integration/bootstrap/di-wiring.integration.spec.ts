@@ -30,7 +30,6 @@ import { SettlementModule } from '@modules/settlement/settlement.module';
 import { SettlementSchedulerModule } from '@modules/settlement/settlement-scheduler.module';
 import { ReconciliationJob } from '@modules/settlement/jobs/reconciliation.job';
 import { ReconciliationService } from '@modules/settlement/services/reconciliation.service';
-import { TreasuryVaultService } from '@modules/settlement/services/treasury-vault.service';
 import { WithdrawalService } from '@modules/settlement/services/withdrawal.service';
 import { ALERT_PORT, AlertingModule } from '@shared/alerting';
 import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
@@ -110,7 +109,6 @@ describe('DI wiring — the real domain modules resolve the vault, deposit, reco
       expect(app.get(DepositService)).toBeInstanceOf(DepositService);
       expect(app.get(DepositFinalityService)).toBeInstanceOf(DepositFinalityService);
       expect(app.get(DepositIntentExpiryService)).toBeInstanceOf(DepositIntentExpiryService);
-      expect(app.get(TreasuryVaultService)).toBeInstanceOf(TreasuryVaultService);
       expect(app.get(ReconciliationService)).toBeInstanceOf(ReconciliationService);
       expect(app.get(WithdrawalService)).toBeInstanceOf(WithdrawalService);
       expect(app.get(ReconciliationJob)).toBeInstanceOf(ReconciliationJob);

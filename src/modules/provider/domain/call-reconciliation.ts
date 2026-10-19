@@ -128,8 +128,8 @@ export interface CallReconciliationCandidate {
    */
   readonly awaitingRedemption?: boolean;
   /**
-   * Never collected from the buyer: a written-off debt (`uncollected:` cause)
-   * or a legacy `platform_absorbed:` credit. Optional; absent means not.
+   * Never collected from the buyer: a written-off debt (`uncollected:` cause).
+   * Optional; absent means not.
    */
   readonly uncollected?: boolean;
   /** Open buyer debt (`redemption_lapsed_at`, hold open). Optional; absent means not. */

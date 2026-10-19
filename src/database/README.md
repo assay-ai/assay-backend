@@ -17,12 +17,10 @@ src/database/
 │
 ├── postgres/                    # PostgreSQL Module (OLTP)
 │   ├── entities/                # Entity definitions
-│   │   ├── abstract.entity.ts
-│   │   └── post.entity.ts
+│   │   └── abstract.entity.ts
 │   │
 │   ├── repositories/            # Repository implementations
-│   │   ├── abstract.repository.ts
-│   │   └── post.repository.ts
+│   │   └── abstract.repository.ts
 │   │
 │   ├── migrations/              # PostgreSQL migrations
 │   │
@@ -58,12 +56,12 @@ All repositories inject DataSource with connection name `'postgres'`:
 
 ```typescript
 @Injectable()
-export class PostRepository extends AbstractRepository<PostEntity> {
+export class ToolRequestRepository extends AbstractRepository<ToolRequestEntity> {
   constructor(
     @InjectDataSource('postgres')
     protected readonly dataSource: DataSource,
   ) {
-    super(PostEntity, dataSource);
+    super(ToolRequestEntity, dataSource);
   }
 }
 ```

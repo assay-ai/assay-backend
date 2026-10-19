@@ -11,24 +11,21 @@ import {
   RelayedIntentRateLimiter,
 } from './services/relayed-intent-rate-limiter.service';
 import { ReconciliationService } from './services/reconciliation.service';
-import { TreasuryVaultService } from './services/treasury-vault.service';
 import { UnsettledVoucherGuard } from './services/unsettled-voucher-guard.service';
 import { WithdrawalService } from './services/withdrawal.service';
 
 /**
  * Settlement domain — the economic consequence, on chain.
  *
- * Scope: the treasury vault and proof of reserves; the 5-minute reconciler; the
+ * Scope: proof of reserves and the 5-minute reconciler; the
  * buyer's escrow — its state, its own brake, and the two-step exit — replacing
  * the earlier off-chain withdrawal authorization entirely; the Anchor program
  * surface (stake, settle, slash) and its parameters; verifier attestations;
  * slash execution and penalty split; shadow mode. Verifier decides, settlement
  * executes — there is no path here that slashes without an attestation.
  *
- * `TreasuryVaultService` knows where the legacy pooled vault is (until the
- * cutover empties it) and sweeps accrued fees; `ReconciliationService` proves
- * every five minutes that both the vault and every buyer's escrow are still
- * what the books say; `EscrowAccountService` reads one buyer's escrow whole;
+ * `ReconciliationService` proves every five minutes that both the vault and
+ * every buyer's escrow are still what the books say; `EscrowAccountService` reads one buyer's escrow whole;
  * `WithdrawalService` is now the domain service behind every buyer-signed
  * escrow intent — `set_escrow_limits`, `request_withdraw`, `withdraw`,
  * `close_escrow` — none of which this backend can sign, and the first of
@@ -50,7 +47,6 @@ import { WithdrawalService } from './services/withdrawal.service';
 @Module({
   imports: [ChainsModule, LedgerModule],
   providers: [
-    TreasuryVaultService,
     ReconciliationService,
     EscrowAccountService,
     WithdrawalService,
@@ -69,7 +65,6 @@ import { WithdrawalService } from './services/withdrawal.service';
     RelayedIntentRateLimiter,
   ],
   exports: [
-    TreasuryVaultService,
     ReconciliationService,
     EscrowAccountService,
     WithdrawalService,

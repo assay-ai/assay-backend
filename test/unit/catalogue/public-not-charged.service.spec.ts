@@ -806,13 +806,6 @@ describe('notChargedReason', () => {
       NotChargedReason.NOT_COLLECTED,
       WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
     ],
-    [
-      'ABSORBED',
-      'DATA_RESULT',
-      'PASS',
-      NotChargedReason.NOT_COLLECTED,
-      WithheldBucket.PROVIDER_OR_PLATFORM_ERROR,
-    ],
   ] as const)(
     'SETTLED with cause %s / %s / %s → %s',
     (settledCause, classification, verificationVerdict, reason, bucket) => {

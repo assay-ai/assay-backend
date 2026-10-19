@@ -121,10 +121,8 @@ export const STAKE_CHAIN: ChainId = chainIdOf(USDC_ASSET as AssetId);
  * account. A test that compared two empty tables would pass against a tester
  * that charged every call.
  *
- * `PROVIDER_STAKE_SOURCE` is a fake, deliberately: `ConfigProviderStakeSource`
- * reads a seed file and the on-chain source replaces it, so what the gate
- * needs from this context is a number it can move — not a fixture of whichever
- * implementation happens to be bound this month. `PROVIDER_REGISTRY` is the
+ * `PROVIDER_STAKE_SOURCE` is a fake, deliberately: what the gate needs from
+ * this context is a number it can move, not a chain. `PROVIDER_REGISTRY` is the
  * **real** `DbProviderRegistry`, because the publish check is what bound it
  * and "a registered provider is now visible to routing" is a claim worth
  * testing rather than stubbing.
@@ -261,9 +259,7 @@ export async function createBindingEditorTestContext(
       CreateLedger1755100000000,
       CreateProviderRegistrationTables1756600000000,
       DropConnectivityEgressIps1762000000000,
-      // `ProviderEntity` gained `payout_threshold_override` here, and TypeORM
-      // inserts every mapped column — so the row this context writes needs the
-      // schema that has it, even though payouts are no part of this suite.
+      // The ledger's credit-type unique index; its payout table is unused here.
       ProviderEarningsAndPayouts1756700000000,
       CreateToolBindingTables1756900000000,
       // The stake-authority migration put `stake_authority`, `stake_proof` and

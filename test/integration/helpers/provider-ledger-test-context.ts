@@ -7,7 +7,6 @@ import { LedgerEntryEntity } from '@database/postgres/entities/ledger-entry.enti
 import { LedgerHoldEntity } from '@database/postgres/entities/ledger-hold.entity';
 import { ProviderEntity } from '@database/postgres/entities/provider.entity';
 import { ProviderChainEnrolmentEntity } from '@database/postgres/entities/provider-chain-enrolment.entity';
-import { ProviderPayoutEntity } from '@database/postgres/entities/provider-payout.entity';
 import { AccountBalanceRepository } from '@database/postgres/repositories/account-balance.repository';
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
 import { LedgerHoldRepository } from '@database/postgres/repositories/ledger-hold.repository';
@@ -25,7 +24,7 @@ import { Money } from '@modules/chains/ports/money.types';
 import {
   LedgerAccountId,
   LedgerEntryType,
-  LEGACY_POOLED_VAULT_TX_REF,
+  RAIL_A_BOOK_CREDIT_TX_REF,
   SettlementCredit,
 } from '@modules/ledger/ports/ledger.types';
 import { LedgerBalanceService } from '@modules/ledger/services/ledger-balance.service';
@@ -65,10 +64,6 @@ export { USDC_ASSET, USDC_DECIMALS };
  * What is left is what the two surviving suites actually use: the ledger's
  * settlement-credit write path (`commitHoldAndCredit`) and the `providers`
  * table with the three stake-authority constraints on it.
- *
- * `provider_payouts` is still in the schema. Nothing writes to it any more —
- * the batch was removed — but `GET /providers/me/payouts` still reads
- * it, so the table and its migration stay.
  */
 export interface ProviderLedgerTestContext {
   readonly ledger: LedgerService;
@@ -99,7 +94,6 @@ export interface ProviderLedgerTestContext {
   registerProvider(input: {
     organizationId: string;
     payoutAccountId?: string | null;
-    payoutThresholdOverride?: bigint | null;
   }): Promise<void>;
 }
 
@@ -118,7 +112,6 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
       LedgerHoldEntity,
       AccountBalanceEntity,
       ProviderEntity,
-      ProviderPayoutEntity,
       ProviderChainEnrolmentEntity,
     ],
     migrations: [
@@ -196,7 +189,6 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
 
     async reset(): Promise<void> {
       await dataSource.query('DELETE FROM provider_chain_enrolments');
-      await dataSource.query('DELETE FROM provider_payouts');
       await dataSource.query('DELETE FROM providers');
       await dataSource.query('ALTER TABLE ledger_entries DISABLE TRIGGER USER');
       await dataSource.query('DELETE FROM ledger_entries');
@@ -245,7 +237,7 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
         intentId,
         // This helper settles the legacy pooled-vault rail, which
         // moves nothing on chain.
-        chainTxRef: LEGACY_POOLED_VAULT_TX_REF,
+        chainTxRef: RAIL_A_BOOK_CREDIT_TX_REF,
       };
 
       await ledger.commitHoldAndCredit(input.agentOrganizationId, hold.id, credit);
@@ -270,8 +262,6 @@ export async function createProviderLedgerTestContext(): Promise<ProviderLedgerT
           acceptedAt: new Date().toISOString(),
           acceptedBy: 'test-credential',
         },
-        payoutThresholdOverride:
-          input.payoutThresholdOverride != null ? input.payoutThresholdOverride.toString() : null,
       });
 
       // The three payout columns are NOT on `ProviderEntity` any more — the

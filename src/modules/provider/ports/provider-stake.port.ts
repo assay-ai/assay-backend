@@ -4,22 +4,11 @@ import { Money } from '@modules/chains/ports/money.types';
 /**
  * Where the router learns how much a provider has at stake, **on one chain**.
  *
- * This port exists for one reason, and it is a scheduling reason rather than an
- * architectural one. The stake **gate** — `stake >= minimumStake` or the binding
- * is not routable — shipped before the on-chain **read** that the gate is
- * supposed to consult. The gate is the part with the
- * behaviour; the read is the part with the RPC.
- *
- * ```text
- * first           ConfigProviderStakeSource   ← config
- * then            OnChainProviderStakeSource  ← settlement program account state
- * ```
- *
- * Swapping those two is a change of one `useClass` in `ProviderModule`. The
- * router does not import either implementation, does not know which one it has,
- * and has no branch that could behave differently under one. That is the whole
- * design requirement: when the chain read lands, **only the data source
- * changes.**
+ * The stake **gate** — `stake >= minimumStake` or the binding is not routable —
+ * is the part with the behaviour; the read behind this port
+ * (`OnChainProviderStakeSource`, settlement program account state) is the part
+ * with the RPC. The router does not import the implementation and has no
+ * branch that depends on it.
  *
  * The chain is authoritative and the cached value is a read optimisation. That
  * statement is about which source wins during reconciliation, not about who calls
