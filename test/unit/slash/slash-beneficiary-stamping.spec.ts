@@ -75,7 +75,6 @@ function build() {
     reverse: jest.fn(),
     settlementTreasury: jest.fn().mockResolvedValue('solana:dev:Treasury3333' as AccountId),
   };
-  const beneficiaries = { resolve: jest.fn().mockResolvedValue(VAULT) };
   const lifecycle = { appendEventDirect: jest.fn().mockResolvedValue(undefined) };
   const notifications = { notify: jest.fn().mockResolvedValue(undefined) };
   const overrides = { record: jest.fn().mockResolvedValue(undefined) };
@@ -110,10 +109,9 @@ function build() {
     notifications as never,
     { sweepBatchSize: 10 } as never,
     executor as never,
-    beneficiaries as never,
   );
 
-  return { service, proposals, executor, beneficiaries, enrolments };
+  return { service, proposals, executor, enrolments };
 }
 
 describe('SlashExecutionService — the beneficiary on the execute path', () => {
@@ -146,11 +144,10 @@ describe('SlashExecutionService — the beneficiary on the execute path', () => 
     // The on-chain record already names an account, chosen and signed for at
     // proposal time. A beneficiary resolved now is a different question's
     // answer, and the program would either refuse it or pay it.
-    const { service, beneficiaries, executor } = build();
+    const { service, executor } = build();
 
     await service.executeDue();
 
-    expect(beneficiaries.resolve).not.toHaveBeenCalled();
     expect(executor.executeProposal).toHaveBeenCalledWith(
       expect.objectContaining({ beneficiary: 'VaultPDA1111' }),
     );
@@ -160,14 +157,13 @@ describe('SlashExecutionService — the beneficiary on the execute path', () => 
     // Reaching here without one means the row was written by a path that
     // skipped `proposeOne` — so there is no on-chain record to execute either,
     // and the honest answer is a refusal the next tick can retry.
-    const { service, proposals, beneficiaries, executor } = build();
+    const { service, proposals, executor } = build();
     proposals.findOneScoped.mockResolvedValue(proposal({ beneficiaryAccount: null }));
 
     const result = await service.executeDue();
 
     expect(result).toEqual({ executed: 0, voided: 0, failed: 1 });
     expect(executor.executeProposal).not.toHaveBeenCalled();
-    expect(beneficiaries.resolve).not.toHaveBeenCalled();
     // Nothing was claimed: the refusal happens before `UPHELD → EXECUTING`, so
     // the case is not left in flight for a reconciler that has nothing to read.
     expect(proposals.transitionIfIn).not.toHaveBeenCalled();

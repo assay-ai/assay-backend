@@ -65,10 +65,7 @@ export interface EvmVaultClient {
  *
  * ## The vault IS the escrow contract, and there is no second account
  *
- * On Solana the treasury is a Squads multisig PDA that *owns* an ATA, and
- * `assertVaultControl` proves the ATA's authority is the derived PDA and that
- * the PDA is owned by the Squads program. On EVM `X402Escrow` holds the USDG
- * itself and is authorised by its own code. So `getVaultOwner` and
+ * `X402Escrow` holds the USDG itself and is authorised by its own code. So `getVaultOwner` and
  * `getVaultAccount` return the same address, which is not a shortcut — it is
  * the shape of the thing. Neither costs a round trip: the answer is the
  * deployment record, and the record is what `assertVaultControl` checks.

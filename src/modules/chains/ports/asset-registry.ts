@@ -1,5 +1,5 @@
 import { ChainErrors } from '../errors/chains.errors';
-import { AssetId, CHAIN_IDS, ChainId } from './caip.types';
+import { AssetId, CHAIN_IDS, ChainId, ChainNamespace, namespaceOf } from './caip.types';
 import { AssetMetadata } from './money.types';
 
 /**
@@ -126,7 +126,9 @@ export function isRegisteredAsset(asset: AssetId): boolean {
 }
 
 /**
- * The settlement assets this platform custodies on one chain.
+ * The settlement assets this platform holds in a vault on one chain: the EVM
+ * escrow contract's asset on an `eip155` chain, and nothing on Solana, whose
+ * pooled Squads treasury is gone.
  *
  * **One derivation, two callers.** `ReconciliationJob` decides which assets to
  * reconcile and `PublicReservesApiModule` decides which chains to publish, and
@@ -135,11 +137,12 @@ export function isRegisteredAsset(asset: AssetId): boolean {
  * forgotten edit away from. A separate env var for either would be a second
  * place to forget to add a chain.
  *
- * Exactly one asset per chain today, and `reconciliation-job.spec.ts` asserts
- * that rather than assuming it: the withdrawal freeze is keyed on the ASSET, so
- * a chain with two settlement assets would be a chain that can be half frozen.
+ * At most one asset per chain, and `reconciliation-job.spec.ts` asserts that
+ * rather than assuming it: the withdrawal freeze is keyed on the ASSET, so a
+ * chain with two settlement assets would be a chain that can be half frozen.
  */
 export function settlementAssetsOn(chainId: ChainId): AssetId[] {
+  if (namespaceOf(chainId) !== ChainNamespace.EIP155) return [];
   return Object.values(ASSET_IDS).filter(
     (asset): asset is AssetId => asset !== null && REGISTRY[asset]?.chainId === chainId,
   );

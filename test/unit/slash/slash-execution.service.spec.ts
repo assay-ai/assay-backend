@@ -214,14 +214,8 @@ const OPERATOR = {
 };
 const APPROVER = { ...OPERATOR, operatorId: 'op_2', subject: 'sam@' };
 
-/**
- * `beneficiaries` defaults to **absent**, not to a stub: `SlashBeneficiaryService`
- * reads the chain, and the composition without it is the one the "no
- * beneficiary" refusals are about. A case that wants a resolver passes one.
- */
 function build(
   options: {
-    beneficiaries?: { resolve: jest.Mock };
     compensation?: { distribute: jest.Mock };
     /** What `confirmedDeposit` answers. `null` = "no such deposit on chain". */
     deposited?: Money | null;
@@ -293,7 +287,6 @@ function build(
     notifications as never,
     TEST_SLASH_CONFIG,
     executor,
-    (options.beneficiaries ?? null) as never,
     (options.compensation ?? null) as never,
     stakeIntents as never,
     null,
@@ -318,7 +311,6 @@ function build(
     overrides,
     service,
     stakeIntents,
-    beneficiaries: options.beneficiaries ?? null,
     compensation: options.compensation ?? null,
   };
 }
@@ -1114,13 +1106,6 @@ describe('update()', () => {
 
 // ── `proposeDue()` — put the judgement on chain and start the clock ──
 
-/**
- * The vault owner, in both spellings. The column is CAIP-10 and the port takes
- * the bare base58 address, and this boundary is the only place the two meet.
- */
-const BENEFICIARY = 'Vau1t1111111111111111111111111111111111111';
-const BENEFICIARY_CAIP = `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:${BENEFICIARY}`;
-
 /** The chain's replay lock for a row, derived the way the row's column was. */
 function requestIdOf(id: string): string {
   return deriveChainRequestId({ id, chainEpoch: 0 });
@@ -1222,23 +1207,9 @@ describe('proposeDue', () => {
     ]);
   });
 
-  it('stamps the beneficiary before it signs, so the row records what was signed', async () => {
-    // `beneficiary` is a field of the signed attestation. Resolving it after
-    // the signature would leave the row unable to say who the judgement named.
-    const beneficiaries = { resolve: jest.fn().mockResolvedValue(BENEFICIARY_CAIP) };
-    const { service, proposals, executor } = build({ beneficiaries });
-    proposals.seed(proposable({ id: 'p1', beneficiaryAccount: null }));
-
-    await service.proposeDue(NOW);
-
-    expect(proposals.rows.get('p1')!.beneficiaryAccount).toBe(BENEFICIARY_CAIP);
-    expect(executor.proposed[0].beneficiary).toBe(BENEFICIARY);
-  });
-
   it('refuses to sign for a case with no beneficiary, and does not close it', async () => {
-    // No resolver wired, so nothing can name who the 60% is owed to. That is a
-    // transient composition problem, not a dead judgement: leaving the case
-    // alone is what lets a scheduler with the resolver pick it up.
+    // Nothing resolves a beneficiary any more (the single-record rule named
+    // the retired pooled vault), so a row without one cannot be signed for.
     const { service, proposals, executor } = build();
     proposals.seed(proposable({ id: 'p1', beneficiaryAccount: null }));
 
@@ -3827,7 +3798,6 @@ describe('SlashExecutionService.refoldLatePart (review R2-4)', () => {
       ctx.notifications as never,
       TEST_SLASH_CONFIG,
       ctx.executor,
-      null,
       compensation as never,
       null,
       parts as never,

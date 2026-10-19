@@ -136,7 +136,6 @@ describe('stuck-case actions (B18), against a real database', () => {
       notifications,
       TEST_SLASH_CONFIG,
       executor as never,
-      null,
       { distribute: async () => 0 } as never,
       null,
       parts,

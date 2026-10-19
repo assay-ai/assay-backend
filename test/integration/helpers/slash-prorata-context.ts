@@ -158,7 +158,6 @@ export function buildProRataSlashServices(
     notifications,
     TEST_SLASH_CONFIG,
     executor,
-    null,
     compensation,
     null,
     parts,
