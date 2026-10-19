@@ -5,6 +5,7 @@ import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { assertRailOffered } from '@modules/chains/chain-metadata';
+import { sameAccountSpelling, sameAssetSpelling } from '@modules/chains/evm/eip55';
 import {
   AccountId,
   AssetId,
@@ -139,12 +140,19 @@ export class VoucherService {
    * with another `voucherSeq`, and this voucher reserves nothing.
    */
   async redeem(input: RedeemVoucherInput): Promise<PaymentIntent> {
-    const { voucher, signature } = input.signed;
+    const { voucher: signed, signature } = input.signed;
     const now = Math.floor(Date.now() / 1000);
 
-    this.assertWellFormed(voucher);
-    this.assertUnexpired(voucher, now);
-    this.assertAuthorisesCall(voucher, input);
+    this.assertWellFormed(signed);
+    this.assertUnexpired(signed, now);
+    this.assertAuthorisesCall(signed, input);
+    // From here on, the server's own spellings of the parties it just matched.
+    const voucher = inServerSpelling(signed, {
+      payer: input.agentAccount,
+      payTo: input.escrowPda,
+      provider: input.providerAccount,
+      asset: input.price.asset,
+    });
     const delegation = await this.assertAuthorisedByPayer(voucher, signature, input, now);
     // AFTER the session binding and the signature (audit E-10): checked first,
     // any agent could send an unsigned voucher naming any wallet and read from
@@ -238,8 +246,9 @@ export class VoucherService {
    * live seq of the payer.
    */
   async verifyReplacement(input: ReplacementVoucherInput): Promise<VerifiedReplacement> {
-    const { voucher, signature } = input.signed;
+    const { voucher: signed, signature } = input.signed;
     const now = Math.floor(Date.now() / 1000);
+    let voucher = signed;
 
     this.assertWellFormed(voucher);
     this.assertUnexpired(voucher, now);
@@ -258,17 +267,17 @@ export class VoucherService {
         });
       }
     }
-    this.assertEquals('payer', voucher.payer, input.payer);
-    this.assertEquals('payTo', voucher.payTo, input.escrowPda);
-    this.assertEquals('provider', voucher.provider, input.providerAccount);
+    this.assertSameAccount('payer', voucher.payer, input.payer);
+    this.assertSameAccount('payTo', voucher.payTo, input.escrowPda);
+    this.assertSameAccount('provider', voucher.provider, input.providerAccount);
     this.assertEquals('resource', voucher.resource, input.resource);
-    this.assertEquals('amount.asset', voucher.amount.asset, input.price.asset);
+    this.assertSameAsset(voucher.amount.asset, input.price.asset);
     this.assertEquals(
       'amount.decimals',
       String(voucher.amount.decimals),
       String(input.price.decimals),
     );
-    if (MoneyUtil.compare(voucher.amount, input.price) !== 0) {
+    if (MoneyUtil.compare(this.inPriceAsset(voucher.amount, input.price), input.price) !== 0) {
       throw PaymentErrors.voucherBindingMismatch({
         field: 'amount',
         expected: input.price.amount,
@@ -281,6 +290,13 @@ export class VoucherService {
         actual: voucher.requestHash,
       });
     }
+    // From here on, the server's own spellings of the parties it just matched.
+    voucher = inServerSpelling(voucher, {
+      payer: input.payer,
+      payTo: input.escrowPda,
+      provider: input.providerAccount,
+      asset: input.price.asset,
+    });
 
     // The admission checks, read off a call-shaped input: only the fields
     // they consult are meaningful here.
@@ -480,15 +496,15 @@ export class VoucherService {
       }
     }
 
-    this.assertEquals('payer', voucher.payer, input.agentAccount);
+    this.assertSameAccount('payer', voucher.payer, input.agentAccount);
     // This session's escrow PDA. v1 compared against the pooled platform
     // vault; there is no pooled vault on the paying path any more, and the
     // program checks the same field against the escrow it derives from
     // `voucher.payer` — so a wrong comparison here can refuse a good voucher
     // but can never redirect a buyer's payment to anyone else's escrow.
-    this.assertEquals('payTo', voucher.payTo, input.escrowPda);
+    this.assertSameAccount('payTo', voucher.payTo, input.escrowPda);
     // New in v2: the payee is inside the signed bytes.
-    this.assertEquals('provider', voucher.provider, input.providerAccount);
+    this.assertSameAccount('provider', voucher.provider, input.providerAccount);
     this.assertEquals('resource', voucher.resource, input.resource);
 
     // Asset and scale first. `MoneyUtil.compare` refuses operands that disagree
@@ -496,7 +512,7 @@ export class VoucherService {
     // authorise this call should say so as a binding failure rather than as
     // arithmetic that could not be performed. Checking here also means the
     // agent-supplied `decimals` never reaches the arithmetic at all.
-    this.assertEquals('amount.asset', voucher.amount.asset, input.price.asset);
+    this.assertSameAsset(voucher.amount.asset, input.price.asset);
     this.assertEquals(
       'amount.decimals',
       String(voucher.amount.decimals),
@@ -510,7 +526,7 @@ export class VoucherService {
     // existed for the `upto` scheme, where usage is metered after the fact;
     // that scheme is not available on this rail, and its absence is a known
     // limitation rather than something to paper over with a tolerance.
-    if (MoneyUtil.compare(voucher.amount, input.price) !== 0) {
+    if (MoneyUtil.compare(this.inPriceAsset(voucher.amount, input.price), input.price) !== 0) {
       throw PaymentErrors.voucherBindingMismatch({
         field: 'amount',
         expected: input.price.amount,
@@ -986,6 +1002,34 @@ export class VoucherService {
       throw PaymentErrors.voucherBindingMismatch({ field, expected, actual });
     }
   }
+
+  /**
+   * One account, exactly — but on eip155 in any spelling of the same address.
+   * The server hands agents EIP-55 spellings to sign (`assay-mcp` signs no
+   * other), while a stored account may be spelled in lower case; the 20 bytes
+   * are what is signed and what the chain pays, so both name one account.
+   * Solana addresses are case-sensitive and still compared exactly.
+   */
+  private assertSameAccount(field: string, actual: string, expected: string): void {
+    if (!sameAccountSpelling(actual, expected)) {
+      throw PaymentErrors.voucherBindingMismatch({ field, expected, actual });
+    }
+  }
+
+  /** {@link assertSameAccount} for the asset: an erc20 address in any spelling. */
+  private assertSameAsset(actual: string, expected: string): void {
+    if (!sameAssetSpelling(actual, expected)) {
+      throw PaymentErrors.voucherBindingMismatch({ field: 'amount.asset', expected, actual });
+    }
+  }
+
+  /**
+   * The voucher's amount in the price's own spelling of the asset, once
+   * {@link assertSameAsset} has passed: `MoneyUtil` compares assets exactly.
+   */
+  private inPriceAsset(amount: Money, price: Money): Money {
+    return { ...amount, asset: price.asset };
+  }
 }
 
 function describe(error: unknown): string {
@@ -1018,6 +1062,26 @@ export interface ReplacementVoucherInput {
   readonly requestHash: string;
   readonly boundDelegate?: AccountId | null;
   readonly escrow?: EscrowChainBalance | null;
+}
+
+/**
+ * The voucher with its parties in the server's own spelling, once they matched
+ * (`assertSameAccount`/`assertSameAsset`). On eip155 the signed bytes hold the
+ * 20-byte addresses, so the signature is the same; what changes is that every
+ * later key — the blocklist, the admission scope's asset, the intent — is
+ * spelled as the server stores it, whichever spelling the agent signed.
+ */
+function inServerSpelling(
+  voucher: Voucher,
+  parties: { payer: AccountId; payTo: AccountId; provider: AccountId; asset: AssetId },
+): Voucher {
+  return {
+    ...voucher,
+    payer: parties.payer,
+    payTo: parties.payTo,
+    provider: parties.provider,
+    amount: { ...voucher.amount, asset: parties.asset },
+  };
 }
 
 /** One account, compared on its chain and its address case-insensitively. */
