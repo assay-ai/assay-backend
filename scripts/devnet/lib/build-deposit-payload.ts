@@ -33,7 +33,10 @@ import {
   setTransactionMessageFeePayer,
   setTransactionMessageLifetimeUsingBlockhash,
 } from '@solana/kit';
-import { getSetComputeUnitLimitInstruction, getSetComputeUnitPriceInstruction } from '@solana-program/compute-budget';
+import {
+  getSetComputeUnitLimitInstruction,
+  getSetComputeUnitPriceInstruction,
+} from '@solana-program/compute-budget';
 import { getAddMemoInstruction } from '@solana-program/memo';
 import { getTransferCheckedInstruction } from '@solana-program/token';
 
@@ -41,8 +44,8 @@ import { getTransferCheckedInstruction } from '@solana-program/token';
  * Where the transaction's blockhash lifetime comes from — and the two callers
  * genuinely need different answers.
  *
- * `deposit.ts` drives `DepositService` **in process**: nothing hands it a
- * blockhash, so it fetches one (`{ rpcUrl }`).
+ * A caller driving `DepositService` **in process** is handed no blockhash,
+ * so it fetches one (`{ rpcUrl }`).
  *
  * Anything driving `POST /api/v1/deposits` over HTTP is **given** one on the
  * response (`SolanaDepositRequirementsDto.blockhash` + `lastValidBlockHeight`) and
@@ -135,7 +138,8 @@ export async function buildDepositPayload(
     createTransactionMessage({ version: 'legacy' }),
     (m) => setTransactionMessageFeePayer(input.feePayer, m),
     (m) => setTransactionMessageLifetimeUsingBlockhash(latestBlockhash, m),
-    (m) => appendTransactionMessageInstructions([computeLimitIx, computePriceIx, transferIx, memoIx], m),
+    (m) =>
+      appendTransactionMessageInstructions([computeLimitIx, computePriceIx, transferIx, memoIx], m),
   );
 
   const compiled = compileTransaction(message);

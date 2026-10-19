@@ -10,9 +10,7 @@
  * ## Why not @solana/web3.js
  *
  * The generated client emits `@solana/kit` instructions, and `sendAndConfirm`
- * from web3.js v1 wants `TransactionInstruction`. `scripts/devnet/lib/kit-to-web3.ts`
- * exists to bridge those two for `@sqds/multisig`, which is built on web3.js and
- * gives no choice. Nothing here is in that position, so this stays on one SDK.
+ * from web3.js v1 wants `TransactionInstruction`, so this stays on one SDK.
  *
  * ## Why confirmation is polled rather than subscribed
  *

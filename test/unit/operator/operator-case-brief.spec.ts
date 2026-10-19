@@ -5,7 +5,7 @@ import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state'
 /**
  * The console offers "cancel the judgement on chain" from the brief alone, and
  * `cancel-intent` is guarded on `chain_status`, which is not the case status:
- * an overturned case waiting for the settlement admin reads `OVERTURNED`.
+ * a closed case waiting for the settlement admin reads `CANCELLED`.
  */
 describe('OperatorCaseBriefService.brief', () => {
   function build(chainStatus: ChainProposalStatus | null, chainExecutableAt: Date | null = null) {
@@ -21,7 +21,7 @@ describe('OperatorCaseBriefService.brief', () => {
     };
     const cases = {
       buildCase: jest.fn().mockResolvedValue({
-        proposal: { id: 'p1', status: SlashProposalStatus.OVERTURNED, disputeId: null },
+        proposal: { id: 'p1', status: SlashProposalStatus.CANCELLED, disputeId: null },
       }),
       timeline: jest.fn().mockResolvedValue([]),
       restoration: jest.fn().mockResolvedValue(null),
@@ -36,7 +36,7 @@ describe('OperatorCaseBriefService.brief', () => {
     const brief = await service.brief('org_1', 'p1');
 
     expect(brief.chainStatus).toBe('CANCEL_REQUESTED');
-    expect(brief.case.proposal.status).toBe('OVERTURNED');
+    expect(brief.case.proposal.status).toBe('CANCELLED');
     expect(proposals.findOneScoped).toHaveBeenCalledWith('org_1', 'p1');
   });
 

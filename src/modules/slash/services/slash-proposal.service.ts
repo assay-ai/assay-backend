@@ -90,7 +90,6 @@ export class SlashProposalService {
     proposal.toolId = strike.toolId;
     proposal.source = SlashProposalSource.SLA_STRIKE;
     proposal.strikeId = strike.id;
-    proposal.verdictId = null;
     proposal.windowId = strike.windowId;
     proposal.penaltyAmount = strike.penaltyAmount;
     proposal.assetId = strike.assetId;
@@ -152,15 +151,11 @@ export class SlashProposalService {
     proposal.beneficiaryAccount = proposal.beneficiaryAccount ?? null;
     proposal.outcome = null;
     proposal.decidedByOperatorId = null;
-    proposal.secondedByOperatorId = null;
-    proposal.secondedAt = null;
-    proposal.secondKind = null;
     proposal.executedAt = null;
     proposal.executionSignature = null;
     proposal.reversedAt = null;
     proposal.reversalSignature = null;
     proposal.rootCauseKey = null;
-    proposal.sweepId = null;
     proposal.countsAsFalsePositive = false;
     proposal.resolutionKind = proposal.resolutionKind ?? null;
     proposal.resolvedAt = proposal.resolvedAt ?? null;

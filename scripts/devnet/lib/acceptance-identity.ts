@@ -5,7 +5,7 @@
  * `bootIdentityContext()` boots against **this deployment's actual Postgres
  * database** — `DATABASE_*` from `.env.local` / `.env`, not a `*_test`
  * database — and `mintScriptIdentity()` writes real rows into it as normal
- * operation, exactly like `scripts/devnet/deposit.ts` and friends. There is
+ * operation, exactly like the other `scripts/devnet/` scripts. There is
  * no separate database for this suite; running it means adding rows to the
  * same Postgres the live devnet API server reads.
  *

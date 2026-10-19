@@ -13,16 +13,6 @@ export enum SlashProposalStatus {
   DISPUTED = 'DISPUTED',
   /** The penalty stands. Not yet on chain. */
   UPHELD = 'UPHELD',
-  /**
-   * The penalty is cancelled.
-   *
-   * Terminal **as a decision** — nothing an adjudicator or this platform does
-   * moves a case out of here. The one edge out is `REVERSED`, and it is not a
-   * second decision: `execute_slash` is permissionless, so a stranger can spend
-   * the standing record after the overturn, and the reversal is how that money
-   * goes back. See `SLASH_PROPOSAL_TRANSITIONS`.
-   */
-  OVERTURNED = 'OVERTURNED',
   /** An attestation is signed and a transaction is in flight. */
   EXECUTING = 'EXECUTING',
   /** The slash landed. Money moved. */
@@ -54,22 +44,11 @@ export enum SlashProposalStatus {
  * Legal transitions. Anything not listed is refused by
  * `SlashProposalService.transition`, which is the only writer of this column.
  *
- * Three edges are worth reading twice:
+ * Two edges are worth reading twice:
  *
  * - **`EXECUTED → REVERSED`, and nothing else out of `EXECUTED`.** Once money
  *   has moved, the only correction is the on-chain reversal. There is no path
  *   back to `UPHELD`, no re-execution, and no second reversal.
- * - **`OVERTURNED → REVERSED`.** The same edge, from the other status that can
- *   carry an `executed_at`. `execute_slash` is permissionless once
- *   `executable_at` passes, so between an adjudicator overturning a case and
- *   `cancel_slash` confirming, any stranger may spend the standing record;
- *   `SlashExecutionService.recordAnExecutionNobodyAskedFor` writes the money
- *   columns and deliberately leaves `status = 'OVERTURNED'`, because a chain
- *   event must not overwrite a human. That row is the *only* overturned case a
- *   reversal exists for — the provider is out of pocket for a judgement that
- *   was overturned — and this edge is what lets `reverse()` reach it. It is not
- *   a licence to reverse an overturn: `reverse()` gates on the money columns,
- *   not on the status, so an overturn that took nothing is still refused.
  * - **`EXECUTING → CANCELLED`.** `execute_slash` re-checks the
  *   verifier key, so a key revoked during the 72-hour wait voids every
  *   judgement it signed that is still in flight. That is the program working as
@@ -106,8 +85,6 @@ export const SLASH_PROPOSAL_TRANSITIONS: Readonly<
     SlashProposalStatus.CANCELLED,
   ],
   [SlashProposalStatus.EXECUTED]: [SlashProposalStatus.REVERSED],
-  // Only where the chain took the penalty anyway — see the header.
-  [SlashProposalStatus.OVERTURNED]: [SlashProposalStatus.REVERSED],
   [SlashProposalStatus.REVERSED]: [],
   [SlashProposalStatus.WAIVED]: [],
   [SlashProposalStatus.CANCELLED]: [],

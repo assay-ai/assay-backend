@@ -5,35 +5,17 @@
  * statement about what a word means, so that the services below it cannot mean
  * something slightly different in two places.
  *
- * ## Six outcomes, not two
- *
- * *"'Uphold or overturn' is an underspecified outcome space."* By the time a
- * case arrives, thousands of calls have been judged by an automated pipeline
- * and a window has been aggregated. The human is deciding **causal attribution
- * over an aggregate**, and there are six distinguishable answers, each with a
- * different downstream automation. Collapsing them to a binary throws away
- * exactly the information that makes the system self-correcting.
- *
- * The table below is that argument as data. Every consequence in it is read off
- * `OUTCOME_CONSEQUENCE` rather than restated at a call site, for the same
- * reason `VERDICT_CONSEQUENCE` exists one domain over: a seventh outcome should
- * be classified by adding a row, not by finding every `switch`.
+ * The case is disputed on chain and ruled by the arbiter on chain, so the only
+ * outcomes left are the two a dispute row closes with when the penalty stands:
+ * in full, or in part (`recordPartialChainWin`).
  */
 
-/** What an adjudicator concluded. Six outcomes, and only these six. */
+/** What a closed dispute says about the proposal. */
 export enum ArbitrationOutcome {
-  /** The provider genuinely served below its published rate. */
+  /** The penalty stands. */
   UPHELD = 'UPHELD',
-  /** Genuine, but the penalty arithmetic was wrong. */
+  /** The penalty stands at a lower figure: some records were won on chain. */
   UPHELD_RECALCULATED = 'UPHELD_RECALCULATED',
-  /** Our mapping, classifier or routing changed and caused it. */
-  OVERTURNED_PLATFORM_DEFECT = 'OVERTURNED_PLATFORM_DEFECT',
-  /** The verification policy is wrong for this class of input. */
-  OVERTURNED_POLICY_DEFECT = 'OVERTURNED_POLICY_DEFECT',
-  /** One or a few agents manufactured the failures. */
-  OVERTURNED_GRIEFING = 'OVERTURNED_GRIEFING',
-  /** The sample was too small and this is noise. */
-  OVERTURNED_INSUFFICIENT_EVIDENCE = 'OVERTURNED_INSUFFICIENT_EVIDENCE',
 }
 
 /**
@@ -97,36 +79,10 @@ export interface OutcomeConsequence {
   /** Does the binding's routing weight survive? */
   readonly routingWeightStands: boolean;
   /**
-   * Does this open a fleet sweep — the same conclusion applied to every binding
-   * the defect touched, complained or not?
-   *
-   * True for exactly the two outcomes that are findings about **us**. The other
-   * four are findings about one provider, one agent or one window, and do not
-   * generalise; `chk_fleet_sweeps_outcome` refuses them at the database too.
-   */
-  readonly opensFleetSweep: boolean;
-  /**
    * Does this count against **our** false-positive rate, rather than
    * against the provider?
-   *
-   * `OVERTURNED_INSUFFICIENT_EVIDENCE` counts, and this is the non-obvious one:
-   * The rule is that it is *"counted against our process-error metric, not
-   * against the provider"*. We proposed a penalty on evidence that could not
-   * support it, and the provider was not shown to have done anything. That is
-   * our error even though nobody's code was wrong.
-   *
-   * `OVERTURNED_GRIEFING` does **not** count. The measurement was correct, the
-   * calls really did fail, and the cause was a third party — counting it as a
-   * false positive would make our own metric move whenever someone attacked a
-   * provider, which is the one thing it must not do.
    */
   readonly countsAsFalsePositive: boolean;
-  /**
-   * The binding's sampling is raised to 100% and the window is merged forward
-   * rather than judged. Only `OVERTURNED_INSUFFICIENT_EVIDENCE`: the answer to
-   * "we could not tell" is to look harder, not to look away.
-   */
-  readonly raisesSamplingToFull: boolean;
 }
 
 export const OUTCOME_CONSEQUENCE: Readonly<Record<ArbitrationOutcome, OutcomeConsequence>> =
@@ -136,58 +92,15 @@ export const OUTCOME_CONSEQUENCE: Readonly<Record<ArbitrationOutcome, OutcomeCon
       recalculated: false,
       strikesStand: true,
       routingWeightStands: true,
-      opensFleetSweep: false,
       countsAsFalsePositive: false,
-      raisesSamplingToFull: false,
     },
     [ArbitrationOutcome.UPHELD_RECALCULATED]: {
       penaltyStands: true,
       recalculated: true,
       strikesStand: true,
       routingWeightStands: true,
-      opensFleetSweep: false,
-      // The finding held; only our arithmetic was wrong. That is a defect
-      // against the window builder, logged as one — not a wrongful penalty.
+      // The finding held; only the figure changed — not a wrongful penalty.
       countsAsFalsePositive: false,
-      raisesSamplingToFull: false,
-    },
-    [ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT]: {
-      penaltyStands: false,
-      recalculated: false,
-      strikesStand: false,
-      routingWeightStands: false,
-      opensFleetSweep: true,
-      countsAsFalsePositive: true,
-      raisesSamplingToFull: false,
-    },
-    [ArbitrationOutcome.OVERTURNED_POLICY_DEFECT]: {
-      penaltyStands: false,
-      recalculated: false,
-      strikesStand: false,
-      routingWeightStands: false,
-      opensFleetSweep: true,
-      countsAsFalsePositive: true,
-      raisesSamplingToFull: false,
-    },
-    [ArbitrationOutcome.OVERTURNED_GRIEFING]: {
-      penaltyStands: false,
-      recalculated: false,
-      strikesStand: false,
-      routingWeightStands: false,
-      opensFleetSweep: false,
-      countsAsFalsePositive: false,
-      raisesSamplingToFull: false,
-    },
-    [ArbitrationOutcome.OVERTURNED_INSUFFICIENT_EVIDENCE]: {
-      penaltyStands: false,
-      recalculated: false,
-      // The strikes stand: the calls really did fail, we simply could not say
-      // at what rate. Removing them would erase an observation, not a verdict.
-      strikesStand: true,
-      routingWeightStands: true,
-      opensFleetSweep: false,
-      countsAsFalsePositive: true,
-      raisesSamplingToFull: true,
     },
   });
 
@@ -219,17 +132,12 @@ export enum DisputeResolutionState {
  * ```text
  *   proposal upheld                  → objection REJECTED
  *   proposal upheld, recalculated    → objection PARTIALLY_UPHELD
- *   proposal overturned (any of 4)   → objection UPHELD
  * ```
  */
 export const ARBITRATION_STATE_MAP: Readonly<Record<ArbitrationOutcome, DisputeResolutionState>> =
   Object.freeze({
     [ArbitrationOutcome.UPHELD]: DisputeResolutionState.REJECTED,
     [ArbitrationOutcome.UPHELD_RECALCULATED]: DisputeResolutionState.PARTIALLY_UPHELD,
-    [ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT]: DisputeResolutionState.UPHELD,
-    [ArbitrationOutcome.OVERTURNED_POLICY_DEFECT]: DisputeResolutionState.UPHELD,
-    [ArbitrationOutcome.OVERTURNED_GRIEFING]: DisputeResolutionState.UPHELD,
-    [ArbitrationOutcome.OVERTURNED_INSUFFICIENT_EVIDENCE]: DisputeResolutionState.UPHELD,
   });
 
 /**

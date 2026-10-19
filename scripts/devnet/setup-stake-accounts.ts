@@ -49,8 +49,8 @@
  * and the second run says what it skipped.
  */
 // `.env` is loaded by `-r dotenv/config` in the package.json script entry, before
-// this file or any of its imports run — the same ordering note `deposit.ts`
-// carries, and for the same reason: `@modules/chains` reads env at import time.
+// this file or any of its imports run, because `@modules/chains` reads env at
+// import time.
 import { execFileSync } from 'node:child_process';
 import { existsSync, mkdirSync } from 'node:fs';
 import { homedir } from 'node:os';

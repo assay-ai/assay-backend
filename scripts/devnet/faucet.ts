@@ -7,11 +7,11 @@
  * (refuse before minting with the wrong key), and `setupDevnetMint` (the
  * idempotent mint + top-up itself). This file is only the sequencing.
  *
- * ## Why `SOLANA_DEVNET_USDC_MINT` is required here, unlike `deposit.ts`
+ * ## Why `SOLANA_DEVNET_USDC_MINT` is required here
  *
  * `setupDevnetMint` creates a brand new mint when `SOLANA_DEVNET_USDC_MINT`
  * is unset and no mint has been persisted yet (`lib/mint-setup.ts`). That is
- * fine for a from-scratch `devnet:deposit` run bootstrapping its own state,
+ * fine for a from-scratch run bootstrapping its own state,
  * but the faucet's whole purpose is to top up *the* mint the rest of the
  * stack already points at. A faucet run that silently created a second mint would produce tokens the
  * router does not recognise, with no error anywhere near the mistake.
@@ -59,7 +59,9 @@ async function main(): Promise<void> {
   }
 
   const { keypairPath, rpcUrl } = solanaConfig();
-  const signer = Keypair.fromSecretKey(Uint8Array.from(JSON.parse(readFileSync(keypairPath, 'utf8'))));
+  const signer = Keypair.fromSecretKey(
+    Uint8Array.from(JSON.parse(readFileSync(keypairPath, 'utf8'))),
+  );
   const signerPubkey = signer.publicKey.toBase58();
 
   const connection = new Connection(rpcUrl, 'confirmed');
@@ -70,9 +72,13 @@ async function main(): Promise<void> {
   const balanceBefore = result.userBalanceAtomic - result.mintedThisRun;
 
   console.log(`cluster:          ${rpcHost(rpcUrl)}`);
-  console.log(`mint:             ${result.mint} ${result.created ? '(created this run)' : '(reused)'}`);
+  console.log(
+    `mint:             ${result.mint} ${result.created ? '(created this run)' : '(reused)'}`,
+  );
   console.log(`recipient:        ${recipient}`);
-  console.log(`recipient ATA:    ${result.userAta} ${result.userAtaCreated ? '(created this run)' : '(reused)'}`);
+  console.log(
+    `recipient ATA:    ${result.userAta} ${result.userAtaCreated ? '(created this run)' : '(reused)'}`,
+  );
   console.log(`balance before:   ${formatTokenAmount(balanceBefore)} tokens`);
   console.log(`minted this run:  ${formatTokenAmount(result.mintedThisRun)} tokens`);
   console.log(`balance after:    ${formatTokenAmount(result.userBalanceAtomic)} tokens`);

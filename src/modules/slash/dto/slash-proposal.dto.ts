@@ -12,8 +12,6 @@ import { SlashProposalStatus } from '../domain/slash-proposal-state';
 export enum SlashProposalSource {
   /** A window closed `BREACH_PROPOSED` and wrote an `sla_strikes` row. */
   SLA_STRIKE = 'SLA_STRIKE',
-  /** A single call was judged `FAIL` — the only slashable verdict. */
-  DATA_FAIL = 'DATA_FAIL',
 }
 
 export { ArbitrationOutcome, DisputeClaimType, ResolutionKind, SlashProposalStatus };
@@ -341,8 +339,8 @@ export class SlashProposalDto {
     enum: ArbitrationOutcome,
     nullable: true,
     description:
-      'One of six. Null for every automatic resolution — an outcome is a judgement, and there ' +
-      'are three ways a case ends without one.',
+      'Null for every automatic resolution — an outcome is a judgement, and there are ' +
+      'several ways a case ends without one.',
   })
   outcome: ArbitrationOutcome | null;
 
@@ -360,12 +358,6 @@ export class SlashProposalDto {
 
   @ApiPropertyOptional({ nullable: true })
   reversalSignature: string | null;
-
-  @ApiPropertyOptional({
-    nullable: true,
-    description: 'The fleet sweep that reached this case, if any — including uncomplained ones.',
-  })
-  sweepId: string | null;
 
   @ApiProperty()
   createdAt: Date;
@@ -447,7 +439,7 @@ export class RestorationRowDto {
     enum: ['ON_DECISION', 'RESTORED', 'NOT_APPLICABLE'],
     description:
       '`ON_DECISION` while the case is open, `RESTORED` once done, `NOT_APPLICABLE` where the ' +
-      'outcome does not restore this — an insufficient-evidence overturn leaves strikes standing.',
+      'outcome does not restore this.',
   })
   status: 'ON_DECISION' | 'RESTORED' | 'NOT_APPLICABLE';
 }
