@@ -415,7 +415,7 @@ import { SolanaVerifierRegistryService } from './solana/verifier-registry.servic
     SolanaSlashExecutor,
     // Chain-dispatched, not a global override: each request carries its
     // `chainId` and reaches the executor of that namespace. eip155 is
-    // `EvmSlashExecutor` (X402Stake, batched through Multicall3 where
+    // `EvmSlashExecutor` (AssayStake, batched through Multicall3 where
     // configured); solana is unchanged.
     {
       provide: SLASH_EXECUTOR,

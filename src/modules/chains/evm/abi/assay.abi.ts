@@ -1,9 +1,9 @@
 import { parseAbi } from 'viem';
 
 /**
- * The parts of `X402Escrow` this backend calls or decodes.
+ * The parts of `AssayEscrow` this backend calls or decodes.
  *
- * Hand-written from assay-evm's `src/X402Escrow.sol` rather than generated, and
+ * Hand-written from assay-evm's `src/AssayEscrow.sol` rather than generated, and
  * deliberately partial: a vendored 200 kB artifact is surface nobody reviews,
  * and every entry below is one somebody had to justify.
  * `abi-selectors.spec.ts` pins each signature to the selector the compiler
@@ -22,7 +22,7 @@ import { parseAbi } from 'viem';
  * The deposit path built here is `approve` + `depositFor`; the contract has no
  * other deposit door (D-18 removed the Permit2 one).
  */
-export const X402_ESCROW_ABI = parseAbi([
+export const ASSAY_ESCROW_ABI = parseAbi([
   'struct Voucher { address payer; address provider; uint64 amount; bytes32 resourceHash; bytes32 requestHash; uint64 seq; uint64 issuedAt; uint64 expiresAt; }',
   'struct Delegation { uint64 maxVoucherAmount; uint64 maxPerWindow; uint64 spentInWindow; uint64 windowStartedAt; uint64 validUntil; uint32 listPosition; bool revoked; }',
   'struct Escrow { uint128 balance; uint64 seqHigh; uint64 authNonce; uint64 maxVoucherAmount; uint64 maxPerWindow; uint64 spentInWindow; uint64 windowStartedAt; uint64 withdrawRequested; uint64 withdrawAvailableAt; uint128 totalRedeemed; uint128 totalWithdrawn; uint128 totalFunded; }',
@@ -75,14 +75,13 @@ export const X402_ESCROW_ABI = parseAbi([
 ]);
 
 /**
- * `X402Config`, read-only.
+ * `AssayConfig`, read-only.
  *
  * **Nothing in this backend writes to it.** `updateConfig`, `setPaused`,
  * `registerVerifier` and `revokeVerifier` are the ADMIN's; `setAdmin`,
- * `transferOwnership`, `acceptOwnership`, `renounceOwnership` and
- * `initializeV2` are the OWNER's (D-17). Both keys are held by humans, and
- * every one of those writes is deliberately absent so that no call site can
- * reach for one — an ABI entry is a call site waiting to exist, and
+ * `transferOwnership`, `acceptOwnership` and `renounceOwnership` are the
+ * OWNER's (D-17). Both keys are held by humans, and every one of those
+ * writes is deliberately absent so that no call site can reach for one — an ABI entry is a call site waiting to exist, and
  * `abi-selectors.spec.ts` fails if any of them appears.
  *
  * `owner()` is the UUPS upgrade authority of all three contracts and
@@ -94,7 +93,7 @@ export const X402_ESCROW_ABI = parseAbi([
  * admin is one key, and *"read `params()` in the same block you sign from"* is
  * **not** a defence: it appears nowhere here and must not.
  */
-export const X402_CONFIG_ABI = parseAbi([
+export const ASSAY_CONFIG_ABI = parseAbi([
   'struct ParamSet { address treasury; address redeemer; uint64 unbondingPeriodSeconds; uint64 minimumStake; uint64 penaltyAmount; uint64 verifierDailyCap; uint16 takeRateBps; uint16 slashAgentBps; uint16 slashPlatformBps; uint16 slashCapBps; }',
   'struct VerifierKey { uint64 registeredAt; uint64 expiresAt; uint64 revokedAt; bool registered; bool revoked; }',
   'function params() view returns (ParamSet)',
@@ -116,7 +115,7 @@ export const X402_CONFIG_ABI = parseAbi([
 ]);
 
 /**
- * `X402Config`'s events the chain-state indexer reads (`EvmChainStateIndexer`):
+ * `AssayConfig`'s events the chain-state indexer reads (`EvmChainStateIndexer`):
  * `PauseToggled` and `BlockedSet` into Postgres; `AdminSet`, `ConfigUpdated`
  * (treasury, bps, caps), `VerifierRevokedEvent`, `ArbiterSet`,
  * `SlashDelaySet` and `VerifierRegistered` as CRITICAL alerts (the levers a
@@ -124,7 +123,7 @@ export const X402_CONFIG_ABI = parseAbi([
  * which only the admin can send) and a block by the arbiter as a WARN. Events
  * only, no function: nothing here may write the Config.
  */
-export const X402_CONFIG_EVENTS_ABI = parseAbi([
+export const ASSAY_CONFIG_EVENTS_ABI = parseAbi([
   'struct ParamSet { address treasury; address redeemer; uint64 unbondingPeriodSeconds; uint64 minimumStake; uint64 penaltyAmount; uint64 verifierDailyCap; uint16 takeRateBps; uint16 slashAgentBps; uint16 slashPlatformBps; uint16 slashCapBps; }',
   'event PauseToggled(address indexed admin, bool paused, uint64 at)',
   'event AdminSet(address indexed previousAdmin, address indexed newAdmin)',
@@ -141,27 +140,27 @@ export const X402_CONFIG_EVENTS_ABI = parseAbi([
  * an implementation swap is the biggest lever a stolen owner key pulls, so it
  * is a CRITICAL alert (audit E-6). Events only.
  */
-export const X402_PROXY_EVENTS_ABI = parseAbi(['event Upgraded(address indexed implementation)']);
+export const ASSAY_PROXY_EVENTS_ABI = parseAbi(['event Upgraded(address indexed implementation)']);
 
 /**
  * `setBlocked(account, true)` — ENCODED, never sent, for the ARBITER's wallet
- * (`X402Config.setBlocked` lets the arbiter block and only the admin unblock).
+ * (`AssayConfig.setBlocked` lets the arbiter block and only the admin unblock).
  *
- * Kept apart from {@link X402_CONFIG_ABI} so the Config's read surface stays
+ * Kept apart from {@link ASSAY_CONFIG_ABI} so the Config's read surface stays
  * read-only, and imported by `EvmSlashExecutor` alone (`abi-selectors.spec.ts`
  * enforces it): the backend holds no arbiter key, so this calldata is handed
  * to an operator and signed by a person.
  */
-export const X402_CONFIG_ARBITER_ABI = parseAbi([
+export const ASSAY_CONFIG_ARBITER_ABI = parseAbi([
   'function setBlocked(address account, bool value)',
 ]);
 
 /**
- * `X402Stake`, read-only here.
+ * `AssayStake`, read-only here.
  *
  * The four slash-lifecycle writes (`proposeSlash`, `executeSlash`,
  * `cancelSlash`, `expireSlash`) are NOT in this constant. They live in
- * {@link X402_STAKE_SLASH_ABI}, which only `EvmSlashExecutor` imports
+ * {@link ASSAY_STAKE_SLASH_ABI}, which only `EvmSlashExecutor` imports
  * (`abi-selectors.spec.ts` enforces both halves), so a stake reader or an
  * intent builder cannot reach for one.
  *
@@ -174,7 +173,7 @@ export const X402_CONFIG_ARBITER_ABI = parseAbi([
  * Read a record through `readSlashRecord` / `decodeSlashRecord`
  * (`evm-slash-record.ts`).
  */
-export const X402_STAKE_ABI = parseAbi([
+export const ASSAY_STAKE_ABI = parseAbi([
   'struct ProviderStake { uint128 bonded; uint64 unbonding; uint64 unbondingStartedAt; uint64 slashedInWindow; uint64 slashWindowStartedAt; uint64 pendingSlash; uint64 __gap; uint128 totalDeposited; uint128 totalWithdrawn; uint128 totalSlashed; }',
   'struct SlashRecord { address provider; uint8 status; uint64 penalty; address beneficiary; uint64 proposedAt; uint32 __gap; address verifier; uint64 executableAt; uint32 __gap2; uint64 reserved; uint64 capAllowance; uint64 applied; uint64 executedAt; bytes32 policy; uint64 disputedAt; }',
   'function stakeOf(address provider) view returns (ProviderStake)',
@@ -192,7 +191,7 @@ export const X402_STAKE_ABI = parseAbi([
 ]);
 
 /**
- * The slash lifecycle on `X402Stake`, for `EvmSlashExecutor` and nothing else.
+ * The slash lifecycle on `AssayStake`, for `EvmSlashExecutor` and nothing else.
  *
  * - `proposeSlash` is authorised by the **verifier's signature** over the
  *   `SlashAttestation`, never by `msg.sender`: the platform cannot slash
@@ -212,7 +211,7 @@ export const X402_STAKE_ABI = parseAbi([
  * The events are decoded off receipts to learn what a batched call did — a
  * `Multicall3` receipt carries no per-call return data.
  */
-export const X402_STAKE_SLASH_ABI = parseAbi([
+export const ASSAY_STAKE_SLASH_ABI = parseAbi([
   'struct SlashAttestation { bytes32 requestId; address provider; address beneficiary; uint8 status; uint64 penalty; bytes32 policy; uint64 issuedAt; uint64 expiresAt; }',
   'function proposeSlash(SlashAttestation a, bytes sig)',
   'function executeSlash(bytes32 requestId)',
@@ -234,10 +233,10 @@ export const X402_STAKE_SLASH_ABI = parseAbi([
  * `SlashDisputed`, `SlashUpheld` and `SlashCancelled` to mirror a provider's
  * on-chain dispute and the arbiter's ruling onto the case, and `SlashExecuted`
  * to mirror an execution whoever sent it (BUG-R13-D-03). Kept apart from
- * {@link X402_STAKE_SLASH_ABI} so the slash WRITES stay reachable from the
+ * {@link ASSAY_STAKE_SLASH_ABI} so the slash WRITES stay reachable from the
  * slash executor only: this constant holds events and no function.
  */
-export const X402_SLASH_WATCH_EVENTS_ABI = parseAbi([
+export const ASSAY_SLASH_WATCH_EVENTS_ABI = parseAbi([
   'event SlashProposed(bytes32 indexed requestId, address indexed provider, address indexed verifier, address beneficiary, bytes32 policy, uint64 penalty, uint64 reserved, uint64 capAllowance, uint64 pendingSlash, uint64 proposedAt, uint64 executableAt)',
   'event SlashDisputed(bytes32 indexed requestId, address indexed provider, uint64 disputedAt, uint64 executableAt)',
   'event SlashUpheld(bytes32 indexed requestId, address indexed provider, address indexed arbiter, uint64 executableAt)',
@@ -250,7 +249,7 @@ export const X402_SLASH_WATCH_EVENTS_ABI = parseAbi([
  * the buyer's withdrawal history. `WithdrawRequested` with `amount == 0` is a
  * cancel. Events only, so the index cannot reach a function.
  */
-export const X402_ESCROW_WITHDRAWAL_EVENTS_ABI = parseAbi([
+export const ASSAY_ESCROW_WITHDRAWAL_EVENTS_ABI = parseAbi([
   'event WithdrawRequested(address indexed buyer, uint64 amount, uint64 availableAt)',
   'event EscrowWithdrawn(address indexed buyer, uint64 requested, uint64 amount)',
 ]);

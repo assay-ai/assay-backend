@@ -106,7 +106,7 @@ describe('EscrowSeqService.allocate', () => {
     });
   });
 
-  describe('the chain’s seq jump cap (X402Escrow.MAX_SEQ_GAP)', () => {
+  describe('the chain’s seq jump cap (AssayEscrow.MAX_SEQ_GAP)', () => {
     const GAP = BigInt(VOUCHER_MAX_SEQ_GAP);
     const SEQ_HIGH = 7n;
     const at = (seq: bigint) => ({

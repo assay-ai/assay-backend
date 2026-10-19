@@ -1,6 +1,10 @@
 import { decodeFunctionResult, pad, toHex } from 'viem';
 
-import { X402_CONFIG_ABI, X402_ESCROW_ABI, X402_STAKE_ABI } from '@modules/chains/evm/abi/x402.abi';
+import {
+  ASSAY_CONFIG_ABI,
+  ASSAY_ESCROW_ABI,
+  ASSAY_STAKE_ABI,
+} from '@modules/chains/evm/abi/assay.abi';
 import {
   EvmEscrowBalanceReader,
   EvmReaderClient,
@@ -52,7 +56,7 @@ function returnData(words: readonly (bigint | string)[]): `0x${string}` {
 }
 
 /**
- * `Escrow`, positionally, in `assay-evm/src/X402Escrow.sol:83`'s declared order.
+ * `Escrow`, positionally, in `assay-evm/src/AssayEscrow.sol:83`'s declared order.
  *
  * The names are here as a comment on each line rather than as object keys — the
  * point of the fixture is that the ORDER is the only thing it asserts.
@@ -75,7 +79,7 @@ function escrowWords(overrides: Partial<Record<string, bigint>> = {}): readonly 
   return fields.map(([name, value]) => overrides[name] ?? value);
 }
 
-/** `ProviderStake`, positionally, in `assay-evm/src/X402Stake.sol:46`'s declared order. */
+/** `ProviderStake`, positionally, in `assay-evm/src/AssayStake.sol:46`'s declared order. */
 function stakeWords(overrides: Partial<Record<string, bigint>> = {}): readonly bigint[] {
   const fields: readonly [string, bigint][] = [
     ['bonded', 201n],
@@ -92,7 +96,7 @@ function stakeWords(overrides: Partial<Record<string, bigint>> = {}): readonly b
   return fields.map(([name, value]) => overrides[name] ?? value);
 }
 
-/** `ParamSet`, positionally, in `assay-evm/src/X402Config.sol`'s declared order. */
+/** `ParamSet`, positionally, in `assay-evm/src/AssayConfig.sol`'s declared order. */
 const PARAMS_WORDS: readonly (bigint | string)[] = [
   '0x000000000000000000000000000000000000dEaD', // treasury
   '0x00000000000000000000000000000000000000Ee', // redeemer
@@ -118,21 +122,21 @@ function client(
   const one = (address: string, functionName: string, args: readonly unknown[]): unknown => {
     if (functionName === 'escrowOf') {
       return decodeFunctionResult({
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         functionName: 'escrowOf',
         data: returnData(escrowWords(reads.escrow ?? {})),
       });
     }
     if (functionName === 'stakeOf') {
       return decodeFunctionResult({
-        abi: X402_STAKE_ABI,
+        abi: ASSAY_STAKE_ABI,
         functionName: 'stakeOf',
         data: returnData(stakeWords(reads.stake ?? {})),
       });
     }
     if (functionName === 'params') {
       return decodeFunctionResult({
-        abi: X402_CONFIG_ABI,
+        abi: ASSAY_CONFIG_ABI,
         functionName: 'params',
         data: returnData(PARAMS_WORDS),
       });
@@ -416,7 +420,7 @@ describe('EvmStakeReader', () => {
     const short: EvmReaderClient = {
       readContract: async () =>
         decodeFunctionResult({
-          abi: X402_CONFIG_ABI,
+          abi: ASSAY_CONFIG_ABI,
           functionName: 'params',
           data: returnData(PARAMS_WORDS),
         }),
@@ -435,7 +439,7 @@ describe('EvmStakeReader', () => {
 /** The `Escrow` field names, read back off a real decode rather than retyped. */
 async function escrowFields(): Promise<Record<string, bigint>> {
   return decodeFunctionResult({
-    abi: X402_ESCROW_ABI,
+    abi: ASSAY_ESCROW_ABI,
     functionName: 'escrowOf',
     data: returnData(escrowWords()),
   }) as unknown as Record<string, bigint>;

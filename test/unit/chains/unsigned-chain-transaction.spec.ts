@@ -39,7 +39,7 @@ const TYPED_DATA: Eip155TypedDataRequest = {
   chainId: EIP155,
   kind: 'typed-data',
   domain: {
-    name: 'X402Escrow',
+    name: 'AssayEscrow',
     version: '1',
     chainId: '46630',
     verifyingContract: '0x3333333333333333333333333333333333333333',

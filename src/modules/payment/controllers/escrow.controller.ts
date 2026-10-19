@@ -158,7 +158,7 @@ export class EscrowController {
    *
    * **Throttled, and given the chain's `seqHigh` (review S2-2).** Unbounded
    * calls could push the counter more than `MAX_SEQ_GAP` past the chain, where
-   * `X402Escrow` refuses every voucher. So each credential gets
+   * `AssayEscrow` refuses every voucher. So each credential gets
    * `NEXT_SEQ_RATE_LIMITS` (a sliding window in Redis that fails closed;
    * see `NextSeqService`), and the allocation reads the escrow like the MCP path does, which
    * applies the gap cap and rewinds a counter that is already past it.

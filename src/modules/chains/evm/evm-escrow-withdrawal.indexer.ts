@@ -14,7 +14,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import { ENABLED_CHAINS } from '../enabled-chains';
 import { getAssetMetadata } from '../ports/asset-registry';
 import { AssetId, ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
-import { X402_ESCROW_WITHDRAWAL_EVENTS_ABI } from './abi/x402.abi';
+import { ASSAY_ESCROW_WITHDRAWAL_EVENTS_ABI } from './abi/assay.abi';
 import {
   DEFAULT_EVM_CHAIN_STATE_CONFIRMATIONS,
   EVM_CHAIN_STATE_INDEXER_CONFIG,
@@ -41,7 +41,7 @@ export const EVM_ESCROW_WITHDRAWAL_ALERTS = {
   LAGGING: 'escrow_withdrawal_index_lagging',
 } as const;
 
-/** One decoded log of {@link X402_ESCROW_WITHDRAWAL_EVENTS_ABI}. */
+/** One decoded log of {@link ASSAY_ESCROW_WITHDRAWAL_EVENTS_ABI}. */
 export interface EscrowWithdrawalLog {
   readonly eventName: 'WithdrawRequested' | 'EscrowWithdrawn';
   readonly args: {
@@ -60,7 +60,7 @@ export interface EvmEscrowWithdrawalClient {
   getBlockNumber(args?: { cacheTime?: number }): Promise<bigint>;
   getContractEvents(args: {
     address: `0x${string}`;
-    abi: typeof X402_ESCROW_WITHDRAWAL_EVENTS_ABI;
+    abi: typeof ASSAY_ESCROW_WITHDRAWAL_EVENTS_ABI;
     fromBlock: bigint;
     toBlock: bigint;
   }): Promise<readonly EscrowWithdrawalLog[]>;
@@ -188,7 +188,7 @@ export class EvmEscrowWithdrawalIndexer {
       logs.push(
         ...(await client.getContractEvents({
           address: deployment.escrow,
-          abi: X402_ESCROW_WITHDRAWAL_EVENTS_ABI,
+          abi: ASSAY_ESCROW_WITHDRAWAL_EVENTS_ABI,
           fromBlock: from,
           toBlock: to,
         })),

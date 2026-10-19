@@ -1,6 +1,6 @@
 /**
  * Refuse early what the chain would refuse anyway: a paused program, or a
- * party on the ON-CHAIN blocklist (assay-evm D-19, `X402Config.assertActive`).
+ * party on the ON-CHAIN blocklist (assay-evm D-19, `AssayConfig.assertActive`).
  *
  * ## A stale cache must never lose money
  *

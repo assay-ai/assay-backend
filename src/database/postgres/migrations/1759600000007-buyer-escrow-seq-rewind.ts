@@ -4,7 +4,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Lets `next_seq` be rewound, under two conditions, so a payer whose counter
  * ran more than `MAX_SEQ_GAP` ahead of the chain can recover (review S2-2).
  *
- * `X402Escrow` refuses a voucher more than 1,000,000 above `seqHigh`, and
+ * `AssayEscrow` refuses a voucher more than 1,000,000 above `seqHigh`, and
  * `seqHigh` only moves when a voucher is redeemed. A counter pushed past that
  * gap by unpaid allocations could therefore never issue a usable seq again:
  * nothing could be redeemed, so nothing could move `seqHigh`.

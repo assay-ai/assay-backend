@@ -18,7 +18,7 @@ import { EscrowSeqService, NextSeq } from './escrow-seq.service';
  * S2-2).
  *
  * Each call advances the payer's counter, and unbounded calls could push it
- * more than `MAX_SEQ_GAP` past the chain, where `X402Escrow` refuses every
+ * more than `MAX_SEQ_GAP` past the chain, where `AssayEscrow` refuses every
  * voucher. So each agent credential gets {@link NEXT_SEQ_RATE_LIMITS} (the
  * public demo's sliding window, which fails closed), and the allocation reads
  * the escrow like the MCP path does: that applies the gap cap and rewinds a

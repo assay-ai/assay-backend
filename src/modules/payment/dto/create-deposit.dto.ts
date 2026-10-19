@@ -179,7 +179,7 @@ export class SolanaDepositRequirementsDto {
  * There is no `payTo`, no `feePayer`, no `memo` and no `blockhash`, and each
  * absence is a fact about the chain rather than a field nobody got round to:
  *
- * - **No `payTo`.** A plain ERC-20 `transfer` into `X402Escrow` moves
+ * - **No `payTo`.** A plain ERC-20 `transfer` into `AssayEscrow` moves
  *   the tokens and credits **nobody**, with no contract-level remedy. The
  *   Solana member's `payTo` *is* a send-to address, so a field of that name
  *   here carrying the escrow contract would be the single most expensive thing
@@ -332,7 +332,7 @@ export class CreateDepositResponseDto {
    * `oneOf`, and the client MUST narrow on `namespace` before reading anything
    * else. The two members are not variations of one shape: `payTo` on the
    * Solana member is an address to send tokens to, and the EVM member has no
-   * such field **on purpose** (a plain transfer into `X402Escrow`
+   * such field **on purpose** (a plain transfer into `AssayEscrow`
    * credits nobody). A fat class with both halves optional would emit a schema
    * in which a client could construct a deposit that is neither, and would put
    * a send-to field and a call-this-contract field side by side.

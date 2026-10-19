@@ -24,7 +24,7 @@ const CHAIN = 'eip155:46630';
 const ACCOUNT = '0xA271A3407D3302f4b4Fbe469b9188487cedd7d45';
 const CALL = {
   chainId: CHAIN,
-  to: '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c',
+  to: '0x7242F853db478A28Ae76Ace808212d4B68aa73e7',
   data: '0x',
   value: '0' as const,
   signer: '0x1111111111111111111111111111111111111111',
