@@ -46,7 +46,13 @@ interface IndexEntry {
  *
  * A call never reads this. `tools/call` gathers its own candidates, so a stale
  * listing can show an old price but can never route, charge or admit
- * anything.
+ * anything on the server. It can make the buyer's local proxy REFUSE one:
+ * the proxy signs nothing above the listed `assay/price.maxAmount` (spec §7.8
+ * G3). That bound relaxes the providers' rate and daily ceilings, the one
+ * state no write bumps the epoch for (`ToolQuote.maxPrice`); any other change
+ * a listing has not seen yet (at most {@link QUOTE_INDEX_MAX_AGE_MS}) can
+ * still put a live offer above it, and the proxy then refuses until it
+ * re-reads the quote.
  */
 @Injectable()
 export class QuoteIndexService {

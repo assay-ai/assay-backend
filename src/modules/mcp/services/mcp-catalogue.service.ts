@@ -25,6 +25,7 @@ import { QuoteIndexService } from '@modules/tool/services/quote-index.service';
 import { ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
 import { RoutingContext } from '@modules/tool/domain/routing';
 import {
+  NO_CONTRACT_REQUEST,
   deprecationOf,
   replacementOf,
   versionOf,
@@ -46,7 +47,7 @@ import {
   ASSAY_TOOL_ID,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
-import { McpScope, contractFor, rulesFor, scopeAllows } from '../ports/mcp-scope';
+import { McpScope, contractFor, forcesFree, rulesFor, scopeAllows } from '../ports/mcp-scope';
 
 /**
  * `tools/list` — the catalogue an agent decides from.
@@ -232,7 +233,13 @@ export class McpCatalogueService {
     // Each tool is priced under the rules and at the contract version a call
     // through this URL would use, so the listed schema and price are the
     // ones the call gets (§7.3, "Contract version").
+    //
+    // The version is chosen for the viewer's own chain, as `requireQuote` and
+    // `offer()` choose it (review P2-1): priced over every chain, but at a
+    // version this buyer's chain can be served at, so the listed price and
+    // `maxAmount` are the ones a call from this buyer is offered.
     const byId = new Map(tools.map((tool) => [tool.id, tool]));
+    const versionChains = viewer?.chainId ? { versionChains: [viewer.chainId] } : {};
     const quoted = await this.quotes.quoteMany(
       tools.map((tool) => tool.id),
       (toolId) =>
@@ -240,9 +247,12 @@ export class McpCatalogueService {
           ? {
               ...context,
               rules: rulesFor(scope, toolId),
-              contract: contractFor(scope, byId.get(toolId) as Tool),
+              contract: {
+                ...(contractFor(scope, byId.get(toolId) as Tool) ?? NO_CONTRACT_REQUEST),
+                ...versionChains,
+              },
             }
-          : context,
+          : { ...context, contract: { ...NO_CONTRACT_REQUEST, ...versionChains } },
     );
     const quotes = tools.map((tool) => quoted.get(tool.id) ?? null);
 
@@ -265,6 +275,8 @@ export class McpCatalogueService {
     // A chain with no paid rail (Solana: `rails: []`) cannot buy a priced
     // tool. Still listed — see above — but not priced as buyable (L6).
     const paidOnViewerChain = viewer?.chainId ? paidRailOffered(viewer.chainId) : true;
+    // `?free=1` never takes a paid path, so nothing listed there can be charged.
+    const freeOnly = forcesFree(scope);
 
     const listed: McpQuotedTool[] = [];
     quotes.forEach((quote, index) => {
@@ -295,6 +307,7 @@ export class McpCatalogueService {
           freeQuotas[index],
           freeAllowances[index],
           paidOnViewerChain,
+          freeOnly,
         ),
       });
     });
@@ -396,13 +409,27 @@ export interface McpToolDescriptor {
 export interface McpPriceAnnotation {
   readonly amount: string;
   /**
-   * The most a call of this tool through this URL can be charged, in the same
-   * atomic units of `asset` as `amount` — an integer string, never a decimal
-   * or a float. The highest price among the providers the merged rules
-   * (the URL's entry ∧ the agent's) leave, from the same quote `amount` is.
-   * No rail B offer, rail A hold or charge for the call exceeds it, so the
-   * local proxy can refuse anything above it (spec §7.8 G3, §7.10 item 3).
-   * `"0"` on a `FREE` tool, which has no paid path.
+   * The most a paid call of this tool through this URL can be charged, in the
+   * same atomic units of `asset` as `amount`: an integer string, never a
+   * decimal or a float. It is the highest price among the bindings a live call
+   * from this buyer could choose on this chain and asset: the providers the
+   * merged rules (the URL's entry ∧ the agent's) leave, every contract version
+   * the call may use, FALLBACK_BEST when the entry asks for it, with the
+   * providers' rate and daily ceilings relaxed (`ToolQuote.maxPrice`).
+   *
+   * `amount` is the listed price: the dearest binding that can serve right
+   * now. `maxAmount` is never below it and can be above it, when a dearer
+   * binding was at its ceiling when the listing was priced. The local proxy
+   * refuses to sign above `maxAmount` (spec §7.8 G3, §7.10 item 3); the
+   * buyer's own per-call cap (G7) still bounds what it signs.
+   *
+   * No rail B offer exceeds it while the listing is fresh (the quote index is
+   * at most a minute old, `QUOTE_INDEX_MAX_AGE_MS`, and every binding,
+   * provider and stake write bumps its epoch). Rail A is held at the live
+   * quote, not at this figure.
+   *
+   * `"0"` on a `FREE` tool with no chargeable binding, and on a `?free=1`
+   * URL, which never takes a paid path.
    */
   readonly maxAmount: string;
   readonly asset: string;
@@ -426,6 +453,7 @@ function describe(
   freeQuota: FreeQuotaRemaining | null,
   freePerDay: number | null,
   paidOnThisChain = true,
+  freeOnly = false,
 ): McpToolDescriptor {
   const { tool } = quote;
 
@@ -436,6 +464,7 @@ function describe(
       quote.paidBindings ?? quote.routableBindings,
       freePerDay,
       paidOnThisChain,
+      maxAmountOf(quote, price, freeOnly),
     ),
     [ASSAY_TIER]: tierLabel(tool.tier),
     // Every response class other than `DATA_RESULT` releases the hold rather
@@ -607,15 +636,11 @@ function priceAnnotation(
   paidBindings: number,
   freePerDay: number | null,
   paidOnThisChain = true,
+  maxAmount: string = price.amount,
 ): McpPriceAnnotation {
   if (mode === PricingMode.FREE) {
-    return { amount: price.amount, maxAmount: '0', asset: price.asset, display: 'free' };
+    return { amount: price.amount, maxAmount, asset: price.asset, display: 'free' };
   }
-  // The quote is already taken under the call's rules and is already the
-  // dearest binding they leave (`ToolQuote.price`), so the bound IS the quote:
-  // recomputing it over the bindings here could only drift from what a call
-  // is held for.
-  const maxAmount = price.amount;
 
   const shown = displayPrice(price);
   const paid = paidBindings > 1 ? `up to ${shown}` : shown;
@@ -639,6 +664,21 @@ function priceAnnotation(
     asset: price.asset,
     display: mode === PricingMode.FREEMIUM ? `${free}, then ${paid}` : paid,
   };
+}
+
+/**
+ * `assay/price.maxAmount`, in atomic units of `price.asset`: the quote's
+ * ceiling-relaxed bound ({@link ToolQuote.maxPrice}), never below a chargeable
+ * `price`. `"0"` when nothing can be charged: a `?free=1` URL, or a `FREE`
+ * quote with no chargeable binding even with the ceilings relaxed.
+ */
+function maxAmountOf(quote: ToolQuote, price: Money, freeOnly: boolean): string {
+  if (freeOnly) return '0';
+  const chargeable = quote.pricingMode !== PricingMode.FREE;
+  const bound = quote.maxPrice ?? null;
+  if (!bound || bound.asset !== price.asset) return chargeable ? price.amount : '0';
+  if (!chargeable) return bound.amount;
+  return BigInt(bound.amount) > BigInt(price.amount) ? bound.amount : price.amount;
 }
 
 /** Whether `chainId` offers any paid rail (`chain-metadata.ts`'s `rails`). */

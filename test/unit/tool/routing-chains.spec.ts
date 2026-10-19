@@ -878,12 +878,14 @@ describe('the providers a quote was priced by', () => {
       invoker: new ScriptedInvoker({}),
     }).router;
 
-  it('leaves every existing field of the quote unchanged and only adds pricedBy and listings', async () => {
+  it('leaves every existing field of the quote unchanged and only adds pricedBy, listings and maxPrice', async () => {
     const quote = await router([buildBinding('a', { priceAmount: '250000' })], {
       a: usdc(1000),
     }).quote(TOOL_ID, ctx);
 
-    const { pricedBy, listings, ...rest } = quote!;
+    const { pricedBy, listings, maxPrice, ...rest } = quote!;
+    // `maxPrice` (assay/price.maxAmount): one binding, no ceiling, so the price.
+    expect(maxPrice).toEqual(MoneyUtil.of('250000', ASSET_IDS.USDC_SOLANA_DEVNET, 6));
     expect(rest).toEqual({
       tool: rest.tool,
       price: MoneyUtil.of('250000', ASSET_IDS.USDC_SOLANA_DEVNET, 6),
