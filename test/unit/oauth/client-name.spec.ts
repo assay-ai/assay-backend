@@ -1,5 +1,31 @@
-import { CLIENT_NAME_MAX, claimsTrust, sanitise } from '@modules/oauth/domain/client-name';
+import { readFileSync } from 'node:fs';
+import { join } from 'node:path';
+
+import {
+  CLIENT_NAME_MAX,
+  claimsTrust,
+  foldForMatch,
+  mixesScripts,
+  sanitise,
+} from '@modules/oauth/domain/client-name';
 import { validateClientMetadata } from '@modules/oauth/domain/client-metadata';
+
+/**
+ * The fold vectors shared with assay-frontend (`src/features/oauth/`, same
+ * file name, identical content): both fold an app's name the same way.
+ */
+const VECTORS = JSON.parse(
+  readFileSync(join(__dirname, 'client-name-fold.vectors.json'), 'utf8'),
+) as {
+  fold: { input: string; folded: string; group: string }[];
+  mixesScripts: { name: string; mixed: boolean }[];
+  caught: string[];
+  legitimate: string[];
+};
+
+const registers = (name: string): boolean =>
+  validateClientMetadata({ client_name: name, redirect_uris: ['http://127.0.0.1/callback'] }, [])
+    .ok;
 
 describe('client name sanitising', () => {
   it('keeps an ordinary name', () => {
@@ -159,5 +185,93 @@ describe('a client name that claims trust (§6.3.6, R-OA-25)', () => {
         allowlist,
       ).ok,
     ).toBe(true);
+  });
+});
+
+describe('fold and script checks shared with the consent page (R1-m1)', () => {
+  it.each(VECTORS.fold.map((v) => [v.group, v.input, v.folded]))(
+    '%s: %j folds to %j',
+    (_group, input, folded) => {
+      expect(foldForMatch(input)).toBe(folded);
+    },
+  );
+
+  it.each(VECTORS.mixesScripts.map((v) => [v.name, v.mixed]))(
+    '%j mixes Latin with another script: %s',
+    (name, mixed) => {
+      expect(mixesScripts(name)).toBe(mixed);
+    },
+  );
+
+  it.each(VECTORS.caught)('%j is refused at registration', (name) => {
+    expect(claimsTrust(name) || mixesScripts(name)).toBe(true);
+    expect(registers(name)).toBe(false);
+  });
+
+  it.each(VECTORS.legitimate)('%j registers unchanged', (name) => {
+    expect(sanitise(name)).toBe(name);
+    expect(claimsTrust(name)).toBe(false);
+    expect(mixesScripts(name)).toBe(false);
+    expect(registers(name)).toBe(true);
+  });
+});
+
+describe('separator letters and the "verified" prefix (R1-m1)', () => {
+  it.each([
+    ['Claude Verified\u24e1', 'circled r after the word'],
+    ['Claude Verified\u02bc', 'modifier apostrophe after the word'],
+    ['Claude \u02bcVerified', 'modifier apostrophe before the word'],
+    ['Claude Verified\u0640', 'tatweel after the word'],
+    ['Claude Veri\u0640fied', 'tatweel inside the word'],
+    ['Claude Ver\u24d8fied', 'circled i inside the word'],
+    ['Claude Verifieds', 'a longer word'],
+    ['Claude Verified2026', 'digits after the word'],
+    ['\u24cberified', 'circled V'],
+    ['Claude \u1d5berified', 'modifier small v'],
+  ])('%j is refused (%s)', (name) => {
+    expect(claimsTrust(name)).toBe(true);
+  });
+
+  it('the other phrases still need whole words', () => {
+    expect(claimsTrust('Assay Application')).toBe(false);
+    expect(claimsTrust('Assay app\u24e1')).toBe(true);
+    expect(claimsTrust('Says itisfine')).toBe(false);
+  });
+
+  it('"verified" inside a word is not a claim', () => {
+    for (const name of ['Unverified', 'Unverifiedness Labs', 'Geverifieerd', 'Preverified']) {
+      expect(claimsTrust(name)).toBe(false);
+    }
+  });
+});
+
+describe('a name that mixes Latin with another script in one word (R1-m1)', () => {
+  it.each([
+    ['\u13d9erified', 'Cherokee V'],
+    ['\ua4e6erified', 'Lisu V'],
+    ['\u142ferified', 'Canadian syllabics V'],
+    ['Claude C\u043ede', 'Cyrillic o'],
+    ['\u039dode helper', 'Greek capital nu'],
+    ['App \u{1d400}\u03b2', 'mathematical bold a with Greek beta'],
+  ])('%j is refused (%s)', (name) => {
+    expect(mixesScripts(name)).toBe(true);
+    expect(registers(name)).toBe(false);
+  });
+
+  it.each([
+    'Verifone',
+    'Assayer Labs',
+    'Cursor',
+    'Claude Code',
+    'Zed',
+    'VS Code',
+    'l33t tools',
+    '\u65e5\u672c\u8a9e\u30c4\u30fc\u30eb',
+    '\u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043d\u0442',
+    'Claude \u0410\u0441\u0441\u0438\u0441\u0442\u0435\u043d\u0442',
+    'Git\u30af\u30e9\u30a4\u30a2\u30f3\u30c8',
+  ])('%j passes', (name) => {
+    expect(mixesScripts(name)).toBe(false);
+    expect(registers(name)).toBe(true);
   });
 });
