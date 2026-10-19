@@ -211,8 +211,6 @@ describe('SlashProposalService', () => {
       expect(proposals.rows.get('p1')!).toMatchObject({
         status: SlashProposalStatus.UPHELD,
         resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
-        // Nobody adjudicated it, so it carries no adjudicator's outcome.
-        outcome: null,
         countsAsFalsePositive: false,
       });
       expect(events.kinds()).toContain('AUTO_CLOSED');

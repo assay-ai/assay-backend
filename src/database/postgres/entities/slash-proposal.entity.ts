@@ -10,10 +10,7 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
  * `status = 'RECORDED'` and nothing ever moved them, because the lifecycle
  * lives here.
  *
- * ## `status` is the case; `outcome` is the judgement
- *
- * Two columns, because they answer different questions and a single one would
- * lose an answer.
+ * ## `status` is the case
  *
  * ```text
  *   PROPOSED ──── disputeSlash on chain ────► DISPUTED
@@ -31,10 +28,8 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
  *   CANCELLED — voided by the chain, or closed with nothing standing (terminal)
  * ```
  *
- * `outcome` carries the outcome an adjudicator chose (`ArbitrationOutcome`). It is NULL
- * for every automatic resolution, and the CHECK
- * `chk_slash_proposals_outcome_needs_adjudicator` makes that exact: an outcome
- * is a judgement, and there are three ways a case ends without one.
+ * Every resolution is the chain's or automatic, so the case carries no
+ * judgement of its own: `resolution_kind` says how it closed.
  *
  * ## The word UPHELD means the opposite here and on `disputes`
  *
@@ -311,28 +306,15 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   disputeId: string | null;
 
   /**
-   * `ADJUDICATOR` | `AUTO_UNDISPUTED` | `AUTO_PLATFORM_MISS` | `AUTO_DE_MINIMIS`
-   * | `AUTO_CHAIN_VOIDED` | `CHAIN_ARBITER` (the arbiter's on-chain uphold, or
-   * on a `CANCELLED` case its `cancelSlash`).
+   * `AUTO_UNDISPUTED` | `AUTO_DE_MINIMIS` | `AUTO_CHAIN_VOIDED` |
+   * `CHAIN_ARBITER` (the arbiter's on-chain uphold, or on a `CANCELLED` case
+   * its `cancelSlash`).
    */
   @Column({ name: 'resolution_kind', type: 'varchar', length: 24, nullable: true })
   resolutionKind: string | null;
 
-  /**
-   * An `ArbitrationOutcome`. NOT NULL exactly when `resolutionKind` is
-   * `'ADJUDICATOR'`, with one exception: `AUTO_CHAIN_VOIDED` may land on a case
-   * an adjudicator already upheld, and the human's judgement is left standing
-   * on the row while the *closure* is recorded as automatic. See
-   * `chk_slash_proposals_outcome_needs_adjudicator`.
-   */
-  @Column({ name: 'outcome', type: 'varchar', length: 40, nullable: true })
-  outcome: string | null;
-
   @Column({ name: 'resolved_at', type: 'timestamptz', nullable: true })
   resolvedAt: Date | null;
-
-  @Column({ name: 'decided_by_operator_id', type: 'uuid', nullable: true })
-  decidedByOperatorId: string | null;
 
   @Column({ name: 'executed_at', type: 'timestamptz', nullable: true })
   executedAt: Date | null;
@@ -347,18 +329,9 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   reversalSignature: string | null;
 
   /**
-   * Cases sharing a suspected root cause are grouped and decided once.
-   * Free-form on purpose: the key is whatever the operator judged the cases to
-   * have in common, and a closed vocabulary would need to be complete before
-   * the first incident.
-   */
-  @Column({ name: 'root_cause_key', type: 'varchar', length: 128, nullable: true })
-  rootCauseKey: string | null;
-
-  /**
    * Read by the false-positive metric. Stored rather than derived, because the
-   * outcome taxonomy may grow and a historical false-positive rate must not
-   * move when it does.
+   * resolution vocabulary may grow and a historical false-positive rate must
+   * not move when it does.
    */
   @Column({ name: 'counts_as_false_positive', type: 'boolean', default: false })
   countsAsFalsePositive: boolean;

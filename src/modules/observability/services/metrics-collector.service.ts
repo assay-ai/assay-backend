@@ -101,7 +101,6 @@ export class MetricsCollectorService {
       slashes,
       queue,
       intentRates,
-      disputeOverturn,
     ] = await Promise.all([
       this.reconciliationRuns.findLatestPerAsset(),
       this.slashProposals.falsePositiveCounts(new Date(now - OVERTURN_WINDOW_MS)),
@@ -113,7 +112,6 @@ export class MetricsCollectorService {
       this.observability.slashesExecuted(new Date(now - SLASH_WINDOW_MS)),
       this.platformMetrics.verificationBacklog(nowDate),
       this.platformMetrics.intentRateCounts(nowDate),
-      this.observability.disputeOverturnCounts(new Date(now - OVERTURN_WINDOW_MS)),
     ]).catch((error: unknown) => {
       // Log and rethrow: the caller falls back to the last good snapshot (or
       // an all-absent one on a cold start).
@@ -128,8 +126,6 @@ export class MetricsCollectorService {
       toolCalls.total > 0 ? toolCalls.nonSystemError / toolCalls.total : null;
     const falsePositiveRate =
       falsePositive.resolved > 0 ? falsePositive.falsePositives / falsePositive.resolved : null;
-    const disputeOverturnRate =
-      disputeOverturn.raised > 0 ? disputeOverturn.overturned / disputeOverturn.raised : null;
 
     const signals: SignalReadingDto[] = [
       this.reading(
@@ -140,15 +136,6 @@ export class MetricsCollectorService {
         null,
       ),
       this.reading(ObservabilitySignal.FALSE_NEGATIVE_RATE, 'other', null, 'ratio', null),
-      this.reading(
-        ObservabilitySignal.DISPUTE_OVERTURN_RATE,
-        'money',
-        disputeOverturnRate,
-        'ratio',
-        disputeOverturnRate === null
-          ? null
-          : toGate(evaluateGoldenSignal(GoldenSignal.DISPUTE_OVERTURN_RATE, disputeOverturnRate)),
-      ),
       this.reading(ObservabilitySignal.GAS_RUNWAY_DAYS, 'money', null, 'days', null),
       this.reading(
         ObservabilitySignal.TOOL_CALL_SUCCESS_RATE,

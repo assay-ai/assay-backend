@@ -149,13 +149,10 @@ export class SlashProposalService {
     proposal.disputeId = null;
     proposal.appliedAmount = null;
     proposal.beneficiaryAccount = proposal.beneficiaryAccount ?? null;
-    proposal.outcome = null;
-    proposal.decidedByOperatorId = null;
     proposal.executedAt = null;
     proposal.executionSignature = null;
     proposal.reversedAt = null;
     proposal.reversalSignature = null;
-    proposal.rootCauseKey = null;
     proposal.countsAsFalsePositive = false;
     proposal.resolutionKind = proposal.resolutionKind ?? null;
     proposal.resolvedAt = proposal.resolvedAt ?? null;

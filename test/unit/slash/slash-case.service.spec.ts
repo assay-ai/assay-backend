@@ -32,8 +32,7 @@ const ORG = 'org_1';
 
 /**
  * `SlaWindowRepository`, faked: `findOneBy` for the point reads
- * (`buildCase`, `restoration`'s window-label
- * lookup) and `createQueryBuilder` for `loadPriorWindows`, which this suite
+ * (`buildCase`) and `createQueryBuilder` for `loadPriorWindows`, which this suite
  * does not exercise beyond returning an empty list — none of the five
  * required cases touch `priorWindows`.
  */
@@ -438,29 +437,31 @@ describe('SlashCaseService.buildCase — clocks', () => {
 });
 
 describe('SlashCaseService.restoration', () => {
-  it('marks strikes and the penalty NOT_APPLICABLE for an upheld outcome — they stand', async () => {
-    const { service, proposals, windows } = build();
+  it('marks the penalty NOT_APPLICABLE once the case is upheld — it stands', async () => {
+    const { service, proposals } = build();
 
-    windows.seed(buildWindow({ id: 'window_1', organizationId: ORG }));
     proposals.seed(
       buildProposal({
         id: 'p1',
         organizationId: ORG,
         status: 'UPHELD',
-        resolutionKind: 'ADJUDICATOR',
-        outcome: 'UPHELD',
+        resolutionKind: 'CHAIN_ARBITER',
         resolvedAt: new Date('2026-08-11T00:00:00Z'),
       }),
     );
 
     const rows = await service.restoration(ORG, 'p1');
-    const strikesRow = rows.find((row) => row.label.startsWith('Strikes removed'))!;
-    expect(strikesRow.status).toBe('NOT_APPLICABLE');
+    expect(rows.map((row) => row.label)).toEqual([
+      'Tier progress restored',
+      'Penalty cancelled',
+      'Counted against our false-positive metric',
+      'Policy recalibration ticket',
+    ]);
     const penaltyRow = rows.find((row) => row.label === 'Penalty cancelled')!;
     expect(penaltyRow.status).toBe('NOT_APPLICABLE');
   });
 
-  it('reads ON_DECISION for every row while the case is still open', async () => {
+  it('reads ON_DECISION for the penalty and the metric while the case is still open', async () => {
     const { service, proposals } = build();
 
     proposals.seed(
@@ -471,17 +472,17 @@ describe('SlashCaseService.restoration', () => {
         windowId: null,
         status: 'PROPOSED',
         resolvedAt: null,
-        outcome: null,
       }),
     );
 
     const rows = await service.restoration(ORG, 'p1');
-    const strikesRow = rows.find((row) => row.label.startsWith('Strikes removed'))!;
-    const routingRow = rows.find((row) => row.label === 'Routing weight restored')!;
+    const penaltyRow = rows.find((row) => row.label === 'Penalty cancelled')!;
+    const metricRow = rows.find(
+      (row) => row.label === 'Counted against our false-positive metric',
+    )!;
 
-    // No strike on this proposal — NOT_APPLICABLE regardless of pendency.
-    expect(strikesRow.status).toBe('NOT_APPLICABLE');
-    expect(routingRow.status).toBe('ON_DECISION');
+    expect(penaltyRow.status).toBe('ON_DECISION');
+    expect(metricRow.status).toBe('ON_DECISION');
   });
 
   it('is honest that tier progress and the policy ticket are not tracked', async () => {
