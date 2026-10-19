@@ -1,6 +1,7 @@
 import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 import { clientKey } from '@shared/interceptors/public-read-rate-limit.interceptor';
 
 /**
@@ -87,15 +88,19 @@ export class OAuthRateLimiter {
    * included; `null` when Redis cannot be reached (the caller decides).
    */
   async count(name: string, key: string, windowSeconds: number): Promise<number | null> {
-    if (!this.cache) return null;
+    const cache = this.cache;
+    if (!cache) return null;
     const windowMs = windowSeconds * 1000;
     const bucket = Math.floor(this.now() / windowMs);
     const bucketKey = `oauth:rl:${name}:${key}:${bucket}`;
     try {
-      const redis = this.cache.getRedisClient();
-      const count = await redis.incr(bucketKey);
-      if (count === 1) await redis.pexpire(bucketKey, windowMs * 2);
-      return count;
+      // Bounded: a Redis that stops answering reads as unreachable (`null`).
+      return await withRedisTimeout(async () => {
+        const redis = cache.getRedisClient();
+        const count = await redis.incr(bucketKey);
+        if (count === 1) await redis.pexpire(bucketKey, windowMs * 2);
+        return count;
+      });
     } catch (error) {
       this.logger.warn(
         `OAuth rate counter ${name} unavailable. ${error instanceof Error ? error.message : String(error)}`,

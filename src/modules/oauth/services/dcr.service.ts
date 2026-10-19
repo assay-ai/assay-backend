@@ -7,7 +7,6 @@ import { OAuthClientRepository } from '@database/postgres/repositories/oauth-cli
 
 import { OAUTH_CONFIG, OAuthConfig } from '../config/oauth.config';
 import { ClientMetadataError, validateClientMetadata } from '../domain/client-metadata';
-import { OAuthMetrics } from './oauth-metrics.service';
 import {
   OAUTH_CLOCK,
   OAUTH_DAY_SECONDS,
@@ -46,9 +45,10 @@ export type DcrResult =
  * all clients                   OAUTH_DCR_GLOBAL_PER_DAY       (default 1000) valid registrations / UTC day
  * ```
  *
- * Over 100 registrations in a UTC day under one `client_name` raise
- * `assay_oauth_dcr_client_name_flood_total` (the §6.3.8 alert); the name is
- * counted by its hash, never as a label.
+ * Over 100 registrations in a UTC day under one `client_name` log
+ * `dcr.client_name_flood`; the name is counted by its hash. The operator
+ * dashboard's `OAUTH_DCR_REGISTRATIONS` signal raises the §6.3.8 alert from
+ * the `oauth_clients` rows themselves.
  */
 @Injectable()
 export class DcrService {
@@ -57,7 +57,6 @@ export class DcrService {
   constructor(
     private readonly clients: OAuthClientRepository,
     private readonly limiter: OAuthRateLimiter,
-    private readonly metrics: OAuthMetrics,
     @Inject(OAUTH_CONFIG) private readonly config: OAuthConfig,
     @Optional() @Inject(OAUTH_CLOCK) private readonly now: () => number = Date.now,
   ) {}
@@ -108,7 +107,6 @@ export class DcrService {
       fetchedAt: null,
       cacheUntil: null,
     });
-    this.metrics.incDcr();
     await this.countClientName(value.clientName);
 
     return {
@@ -129,7 +127,6 @@ export class DcrService {
     const nameHash = createHash('sha256').update(clientName).digest('hex').slice(0, 32);
     const count = await this.limiter.count('dcr-name', nameHash, OAUTH_DAY_SECONDS);
     if (count !== null && count > OAUTH_RATE_LIMITS.dcrPerClientNamePerDay) {
-      this.metrics.incDcrClientNameFlood();
       this.logger.warn(`dcr.client_name_flood nameHash=${nameHash} count=${count}`);
     }
   }

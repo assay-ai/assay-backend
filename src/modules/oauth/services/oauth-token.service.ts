@@ -20,12 +20,14 @@ import {
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { AuditLogWriter } from '@shared/audit';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 
 import { OAUTH_CONFIG, OAuthConfig } from '../config/oauth.config';
 import {
   OAUTH_ACCESS_TOKEN_TTL_SECONDS,
   OAUTH_AUTHORIZATION_CODE_TTL_SECONDS,
   OAUTH_REFRESH_GRACE_SECONDS,
+  OAUTH_REVOKED_BY_CODE_REUSED,
 } from '../constants/oauth.constants';
 import { GracePayload, open as openGrace, seal as sealGrace } from '../domain/grace-box';
 import { hashOpaqueToken, isWellFormed, mint } from '../domain/opaque-token';
@@ -33,7 +35,6 @@ import { verifyS256 } from '../domain/pkce';
 import { normaliseResource } from '../domain/resource';
 import { normaliseScope } from '../domain/scope';
 import { OAUTH_SYSTEM_ACTOR, OAuthGrantWriter } from './oauth-grant.writer';
-import { OAuthMetrics } from './oauth-metrics.service';
 
 /** The 200 body of `POST {MCP}/oauth/token` (RFC 6749 §5.1). */
 export interface TokenPair {
@@ -127,9 +128,6 @@ export function grantStoppedReuseBody(name: string): string {
   return `We stopped ${name} because its sign-in was used twice. Sign in again on that device.`;
 }
 
-/** `revoked_by` of a grant whose code was presented a second time (R-OA-6). */
-export const OAUTH_REVOKED_BY_CODE_REUSED = 'system:oauth-code-reused';
-
 const SYSTEM_ACTOR = OAUTH_SYSTEM_ACTOR;
 
 const INVALID_GRANT: OAuthError = { error: 'invalid_grant' };
@@ -185,7 +183,6 @@ export class OAuthTokenService {
     private readonly accessTokens: OAuthAccessTokenRepository,
     private readonly credentials: AgentCredentialRepository,
     private readonly cache: CacheService,
-    private readonly metrics: OAuthMetrics,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
   ) {}
 
@@ -367,9 +364,7 @@ export class OAuthTokenService {
       agentId: credential.agentId,
       clientId: client.clientId,
     });
-    if (reuse.outcome === 'stale') this.metrics.incRefreshReuse('stale');
     if (reuse.outcome === 'revoked') {
-      this.metrics.incRefreshReuse('revoked');
       await this.bumpAccessEpoch(token.organizationId);
       await this.notifyStoppedForReuse(token, credential.agentId, client, reuse.credentialName);
     }
@@ -452,28 +447,22 @@ export class OAuthTokenService {
     parentHash: string,
     payload: GracePayload,
   ): Promise<void> {
-    let timer: NodeJS.Timeout | undefined;
     try {
-      const write = this.cache
-        .getRedisClient()
-        .set(
-          refreshGraceKey(parentHash),
-          sealGrace(parentToken, parentHash, payload),
-          'EX',
-          OAUTH_REFRESH_GRACE_SECONDS,
-        );
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error('timeout')),
-          OAUTH_REFRESH_GRACE_WRITE_TIMEOUT_MS,
-        );
-      });
-      await Promise.race([write, timeout]);
+      await withRedisTimeout(
+        () =>
+          this.cache
+            .getRedisClient()
+            .set(
+              refreshGraceKey(parentHash),
+              sealGrace(parentToken, parentHash, payload),
+              'EX',
+              OAUTH_REFRESH_GRACE_SECONDS,
+            ),
+        OAUTH_REFRESH_GRACE_WRITE_TIMEOUT_MS,
+      );
     } catch {
       this.logger.warn('refresh grace entry not stored; the rotation is rolled back');
       throw new GraceStoreFailed();
-    } finally {
-      if (timer) clearTimeout(timer);
     }
   }
 
@@ -496,8 +485,11 @@ export class OAuthTokenService {
   ): Promise<TokenPair | OAuthError> {
     let sealed: string | null = null;
     try {
-      sealed = await this.cache.getRedisClient().get(refreshGraceKey(parentHash));
+      sealed = await withRedisTimeout(() =>
+        this.cache.getRedisClient().get(refreshGraceKey(parentHash)),
+      );
     } catch {
+      // Failed or timed out: no entry can be read, so `invalid_grant`, no revoke.
       sealed = null;
     }
     const payload = sealed === null ? null : openGrace(parentToken, parentHash, sealed);
@@ -525,7 +517,6 @@ export class OAuthTokenService {
       return INVALID_GRANT;
     }
 
-    this.metrics.incRefreshGrace();
     await this.audit.recordAfterCommit({
       organizationId: token.organizationId,
       actor: SYSTEM_ACTOR,
@@ -648,7 +639,10 @@ export class OAuthTokenService {
    */
   private async bumpAccessEpoch(organizationId: string): Promise<void> {
     try {
-      await this.accessEpoch.bump(organizationId);
+      // Bounded: a stalled Redis must not hold the answer of a committed
+      // exchange (the client would retry the code, which is a replay). The
+      // post-commit sweep and the cleanup are the backstop.
+      await withRedisTimeout(() => this.accessEpoch.bump(organizationId));
     } catch {
       this.logger.warn(
         `org ${organizationId}: access epoch not bumped after an OAuth grant change; ` +

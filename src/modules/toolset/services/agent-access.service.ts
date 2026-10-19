@@ -254,38 +254,61 @@ export class AgentAccessService {
     return this.toCredentialDto(organizationId, credential);
   }
 
-  /** A key can only narrow: its grant is intersected with its agent's (`accessAllows`). */
+  /**
+   * A key can only narrow: its grant is intersected with its agent's
+   * (`accessAllows`).
+   *
+   * The credential row is locked (`FOR UPDATE`) and must still be live: not
+   * revoked, not expired. A dead credential is `ACCOUNT_CREDENTIAL_NOT_FOUND`,
+   * so the page reloads. This matters for an OAuth grant being replaced: the
+   * replacement exchange locks the old row, copies its narrowing and revokes
+   * it. A PATCH that waited on that lock must fail visibly, not land on the
+   * dead row while the live replacement keeps the wider access.
+   */
   async patchCredential(
     organizationId: string,
     credentialId: string,
     body: UpdateCredentialAccessBodyDto,
     actor: AuditActor,
   ): Promise<CredentialAccessDto> {
-    const credential = await this.requireCredential(organizationId, credentialId);
-
-    // An omitted field keeps its value; `accessMode: null` (or ALL) removes
-    // the narrowing whole.
-    const mode = body.accessMode === undefined ? credential.accessMode : body.accessMode;
-    const values =
-      mode === AccessMode.RESTRICTED
-        ? {
-            accessMode: AccessMode.RESTRICTED,
-            allowedToolsets:
-              body.allowedToolsets === undefined
-                ? readAllowedToolsets(credential.allowedToolsets)
-                : await this.validateToolsets(
-                    organizationId,
-                    body.allowedToolsets ?? [],
-                    readAllowedToolsets(credential.allowedToolsets),
-                  ),
-            allowedToolIds:
-              body.allowedToolIds === undefined
-                ? (credential.allowedToolIds ?? [])
-                : await this.validateToolIds(organizationId, body.allowedToolIds ?? []),
-          }
-        : { accessMode: null, allowedToolsets: null, allowedToolIds: null };
+    const read = await this.requireCredential(organizationId, credentialId);
 
     await this.dataSource.transaction(async (manager) => {
+      const credential = await manager.findOne(AgentCredentialEntity, {
+        where: { organizationId, id: read.id },
+        lock: { mode: 'pessimistic_write' },
+      });
+      const [{ now }] = (await manager.query(`SELECT now() AS "now"`)) as { now: Date }[];
+      if (
+        !credential ||
+        credential.revokedAt !== null ||
+        (credential.expiresAt !== null && credential.expiresAt.getTime() <= now.getTime())
+      ) {
+        throw AccountErrors.credentialNotFound({ id: credentialId });
+      }
+
+      // An omitted field keeps its value (read under the lock); `accessMode:
+      // null` (or ALL) removes the narrowing whole.
+      const mode = body.accessMode === undefined ? credential.accessMode : body.accessMode;
+      const values =
+        mode === AccessMode.RESTRICTED
+          ? {
+              accessMode: AccessMode.RESTRICTED,
+              allowedToolsets:
+                body.allowedToolsets === undefined
+                  ? readAllowedToolsets(credential.allowedToolsets)
+                  : await this.validateToolsets(
+                      organizationId,
+                      body.allowedToolsets ?? [],
+                      readAllowedToolsets(credential.allowedToolsets),
+                    ),
+              allowedToolIds:
+                body.allowedToolIds === undefined
+                  ? (credential.allowedToolIds ?? [])
+                  : await this.validateToolIds(organizationId, body.allowedToolIds ?? []),
+            }
+          : { accessMode: null, allowedToolsets: null, allowedToolIds: null };
+
       await manager.update(AgentCredentialEntity, { organizationId, id: credential.id }, values);
       await this.audit.record(manager, {
         organizationId,
@@ -303,7 +326,7 @@ export class AgentAccessService {
     });
     await this.epochs.bump(organizationId);
 
-    return this.getCredential(organizationId, credential.id);
+    return this.getCredential(organizationId, read.id);
   }
 
   // ── Writing ──────────────────────────────────────────────────────────────

@@ -13,7 +13,7 @@ import { OAuthCleanupService, OAuthCleanupConfig } from './services/oauth-cleanu
  * scheduler demand the request cookie secret and `AUTH_SESSION_SOURCE=both`
  * (and, under `SERVICE_TYPE=all`, take the secret out of the environment
  * first). The job needs only the verified client ids, read on their own.
- * No metric is set here: the scheduler serves no `/metrics`. Postgres and
+ * No metric is counted here: the scheduler has no OAuth request path. Postgres and
  * Redis come from the global modules.
  */
 @Module({

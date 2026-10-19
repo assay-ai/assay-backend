@@ -8,7 +8,7 @@ import {
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
 /**
- * `assay_mcp_unauthorized_total{reason}` (spec §6.7): the MCP catch-all
+ * The `mcp_unauthorized{reason}` counter (spec §6.7): the MCP catch-all
  * counts each 401 by the reason the session source carried out privately,
  * and the 401 the client sees is the same whatever the reason.
  */

@@ -83,7 +83,7 @@ export class OAuthConsentService {
     const bound = await this.requests.bind(rid, organizationId);
     if (bound.status === 'already_decided') throw OAuthErrors.requestAlreadyDecided();
     if (bound.status !== 'ok') {
-      this.metrics.incConsent('not_found');
+      await this.metrics.incConsent('not_found');
       throw OAuthErrors.requestNotFound();
     }
     const request = bound.request;
@@ -124,7 +124,7 @@ export class OAuthConsentService {
         ? `Assay app on ${sanitise(request.device, DEVICE_LABEL_MAX) ?? DEFAULT_DEVICE}`
         : `${display.name} · ${createdAt.toISOString().slice(0, 10)}`,
     };
-    this.metrics.incConsent('shown');
+    await this.metrics.incConsent('shown');
     return dto;
   }
 
@@ -172,14 +172,14 @@ export class OAuthConsentService {
       replaces: replaces?.id ?? null,
     });
     this.raiseUnlessDecided(decided);
-    this.metrics.incConsent('approved');
+    await this.metrics.incConsent('approved');
     return { redirectTo: this.continueUrl(rid) };
   }
 
   /** `POST {API}/oauth/requests/{rid}/deny`. */
   async deny(session: McpSession, rid: string): Promise<OAuthRedirectDto> {
     this.raiseUnlessDecided(await this.requests.decide(rid, session.organizationId, 'deny'));
-    this.metrics.incConsent('denied');
+    await this.metrics.incConsent('denied');
     return { redirectTo: this.continueUrl(rid) };
   }
 

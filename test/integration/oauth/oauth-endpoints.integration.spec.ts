@@ -21,7 +21,9 @@ import {
   McpSessionPort,
 } from '@modules/mcp/ports/mcp-session.port';
 import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
+import { OAuthCounterName, oauthCounterKey } from '@modules/oauth/domain/oauth-counters';
+import { MetricsCollectorService } from '@modules/observability/services/metrics-collector.service';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { McpExceptionsFilter } from '@bootstrap/mcp/mcp-exceptions.filter';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
@@ -87,7 +89,6 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
   let dataSource: DataSource;
   let mcp: INestApplication;
   let api: INestApplication;
-  let mcpMetrics: MetricsRegistryService;
 
   const humanSession = {
     credentialId: 'user-endpoints',
@@ -144,7 +145,6 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     mcpApp.useGlobalFilters(new McpExceptionsFilter());
     await mcpApp.init();
     mcp = mcpApp;
-    mcpMetrics = mcp.get(MetricsRegistryService, { strict: false });
 
     const apiRef = await Test.createTestingModule({ imports: [AppApiModule] })
       .overrideProvider(MCP_SESSION_SOURCE)
@@ -252,12 +252,32 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
       .type('form')
       .send(form);
 
-  async function counter(name: string, labels: Record<string, string>): Promise<number> {
-    const metric = await mcpMetrics.registry.getSingleMetric(name)?.get();
-    const found = metric?.values.find((entry) =>
-      Object.entries(labels).every(([key, want]) => entry.labels[key] === want),
-    );
-    return found?.value ?? 0;
+  /**
+   * A request-path counter (spec §6.7) over the current and the previous
+   * hourly bucket, read through the MCP container's own Redis client, so it
+   * sees every count that container sent before.
+   */
+  async function counter(name: OAuthCounterName, label: string): Promise<number> {
+    const now = Date.now();
+    const keys = [now, now - 3_600_000].map((at) => oauthCounterKey(name, label, at));
+    const values = await mcp.get(CacheService, { strict: false }).getRedisClient().mget(keys);
+    return values.reduce((total, value) => total + Number(value ?? 0), 0);
+  }
+
+  /** Approve a fresh request and return the exchange form for its code. */
+  async function codeForm(): Promise<Record<string, string>> {
+    const { verifier, challenge } = pkce();
+    const { rid, cookie } = await start(challenge);
+    await approve(rid);
+    const resumed = await resume(rid, cookie);
+    expect(resumed.status).toBe(302);
+    return {
+      grant_type: 'authorization_code',
+      code: new URL(resumed.headers.location).searchParams.get('code')!,
+      redirect_uri: 'http://127.0.0.1:61234/callback',
+      client_id: BUILTIN,
+      code_verifier: verifier,
+    };
   }
 
   // ── authorize ──────────────────────────────────────────────────────────────
@@ -508,7 +528,7 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     expect(refreshed.headers['cache-control']).toBe('no-store');
     expect(refreshed.body.refresh_token).not.toBe(exchanged.body.refresh_token);
 
-    const before = await counter('assay_mcp_unauthorized_total', { reason: 'revoked' });
+    const before = await counter('mcp_unauthorized', 'revoked');
     const revoked = await request(mcp.getHttpServer())
       .post('/oauth/revoke')
       .type('form')
@@ -524,11 +544,9 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
     expect(call.status).toBe(401);
     expect(call.headers['www-authenticate']).toContain('error="invalid_token"');
     expect(JSON.stringify(call.body)).not.toContain('revoked');
-    expect(await counter('assay_mcp_unauthorized_total', { reason: 'revoked' })).toBe(before + 1);
+    expect(await counter('mcp_unauthorized', 'revoked')).toBeGreaterThanOrEqual(before + 1);
 
-    expect(
-      await counter('assay_oauth_token_total', { grant_type: 'refresh_token', result: 'ok' }),
-    ).toBeGreaterThanOrEqual(1);
+    expect(await counter('token', 'refresh_token.ok')).toBeGreaterThanOrEqual(1);
   });
 
   it('a body the parser refuses on token, revoke and register → 400 invalid_request', async () => {
@@ -641,5 +659,78 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
 
   it('the MCP container counts on its own OAuthMetrics', () => {
     expect(mcp.get(OAuthMetrics, { strict: false })).toBeInstanceOf(OAuthMetrics);
+  });
+
+  // ── dashboard signals (§6.7) ───────────────────────────────────────────────
+
+  it('a token exchange and consent steps count in Redis, and the operator snapshot reports them', async () => {
+    const before = {
+      ok: await counter('token', 'authorization_code.ok'),
+      shown: await counter('consent', 'shown'),
+      approved: await counter('consent', 'approved'),
+      stored: await counter('authorize', 'stored'),
+    };
+
+    const exchanged = await token(await codeForm());
+    expect(exchanged.status).toBe(200);
+
+    // The Redis server is shared with other runs, so the counts only grow by at least one.
+    const after = {
+      ok: await counter('token', 'authorization_code.ok'),
+      shown: await counter('consent', 'shown'),
+      approved: await counter('consent', 'approved'),
+      stored: await counter('authorize', 'stored'),
+    };
+    expect(after.ok).toBeGreaterThanOrEqual(before.ok + 1);
+    expect(after.shown).toBeGreaterThanOrEqual(before.shown + 1);
+    expect(after.approved).toBeGreaterThanOrEqual(before.approved + 1);
+    expect(after.stored).toBeGreaterThanOrEqual(before.stored + 1);
+
+    // The API container's dashboard reads the counters the MCP container wrote.
+    process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS = '1';
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const snapshot = await api.get(MetricsCollectorService, { strict: false }).snapshot();
+    const signal = (name: string) => {
+      const row = snapshot.signals.find((reading) => reading.signal === name);
+      if (!row) throw new Error(`no ${name} reading`);
+      return row;
+    };
+
+    const tokens = signal('OAUTH_TOKEN_RESULTS');
+    expect(tokens.section).toBe('oauth');
+    expect(tokens.extra?.['authorization_code.ok']).toBeGreaterThanOrEqual(after.ok);
+    expect(tokens.value).toBeGreaterThanOrEqual(after.ok);
+    const consent = signal('OAUTH_CONSENT_STEPS');
+    expect(consent.value).toBeGreaterThanOrEqual(after.approved);
+    expect(consent.extra?.shown).toBeGreaterThanOrEqual(after.shown);
+    expect(signal('OAUTH_AUTHORIZE_OUTCOMES').value).toBeGreaterThanOrEqual(after.stored);
+    // Database-backed: this run's own database holds the grant just issued.
+    expect(signal('OAUTH_LIVE_GRANTS').value).toBeGreaterThanOrEqual(1);
+    expect(signal('OAUTH_LIVE_GRANTS_PER_AGENT_MAX').gate).toEqual({
+      status: 'OK',
+      summary: expect.any(String),
+    });
+    expect(signal('OAUTH_CONTINUE_COOKIE_MISSING').value).not.toBeNull();
+  });
+
+  it('a counter that cannot reach Redis never fails /oauth/token', async () => {
+    const form = await codeForm();
+    const original = Redis.prototype.incr;
+    const incr = jest.spyOn(Redis.prototype, 'incr').mockImplementation(function (
+      this: Redis,
+      key: unknown,
+      ...rest: unknown[]
+    ) {
+      if (String(key).startsWith('oauth:m:')) return Promise.reject(new Error('redis is down'));
+      return (original as (...args: unknown[]) => Promise<number>).call(this, key, ...rest);
+    } as never);
+    try {
+      const exchanged = await token(form);
+      expect(exchanged.status).toBe(200);
+      expect(exchanged.body.access_token).toMatch(/^assay_at_/);
+      expect(incr.mock.calls.some(([key]) => String(key).startsWith('oauth:m:token:'))).toBe(true);
+    } finally {
+      incr.mockRestore();
+    }
   });
 });

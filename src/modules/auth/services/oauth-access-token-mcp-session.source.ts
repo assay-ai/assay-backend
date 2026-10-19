@@ -49,7 +49,7 @@ import { CredentialSessionResolver } from './credential-session.resolver';
  *
  * Each refusal of a token of this source's shape carries a private reason
  * (`unknown`, `expired`, `revoked`, `audience`) on the error's context, for
- * `assay_mcp_unauthorized_total` (§6.7). The error is still the plain
+ * the `mcp_unauthorized` counter (§6.7). The error is still the plain
  * `MCP_CREDENTIAL_INVALID` (the composite moves on; the body is unchanged).
  *
  * The lookup is by digest only; the token itself is never passed to the

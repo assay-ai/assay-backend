@@ -59,7 +59,7 @@ function setup(config: OAuthConfig = oauthConfig()) {
   const redis = new FakeOAuthRedis();
   const repo = new FakeOAuthClientRepository();
   const clock = new Clock();
-  const { metrics, registry } = oauthMetrics();
+  const { metrics, counters } = oauthMetrics();
   const fetcher = new CimdFetcher(
     egress as unknown as EgressHttpClient,
     repo as unknown as OAuthClientRepository,
@@ -74,8 +74,7 @@ function setup(config: OAuthConfig = oauthConfig()) {
       ...response(typeof body === 'string' ? body : JSON.stringify(body), headers, status),
       url: request.url,
     }));
-  const fetched = (result: string) =>
-    counterValue(registry, 'assay_oauth_cimd_fetch_total', { result });
+  const fetched = (result: string) => counterValue(counters, 'cimd_fetch', result);
   return { egress, redis, repo, clock, fetcher, serve, fetched };
 }
 
