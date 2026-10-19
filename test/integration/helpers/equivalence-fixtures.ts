@@ -45,7 +45,6 @@ import {
   ProviderTier,
 } from '@modules/provider/ports/provider.types';
 import { ConfigProviderRegistry } from '@modules/provider/services/config-provider-registry';
-import { ConfigProviderStakeSource } from '@modules/provider/services/config-provider-stake.source';
 import {
   ProviderResponse,
   ResponseBodyKind,
@@ -70,6 +69,7 @@ import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 
 import { EvmSigner, generateSigner } from '../../unit/chains/evm/evm-fixtures';
+import { InMemoryProviderStakeSource } from '../../unit/helpers/in-memory-provider-stake.source';
 import { freshMigratedDatabase, runDatabaseName } from './slash-prorata-context';
 import { testConnectionOptions } from './test-database';
 
@@ -177,17 +177,19 @@ export const bindingIdOf = (toolId: string): string => `${toolId.slice(0, -2)}b$
  * Ids that are the SAME in every world, by placeholder. The normaliser keeps
  * them distinct (`<tool:paid>`, not a bare `<uuid>`), so a row or a call that
  * names the wrong tool, binding, provider or shared toolset on one side fails.
- * `publishMarket` adds the shared toolsets.
+ * Each boot starts from these (`EquivalenceApps.knownIds`); `publishMarket`
+ * adds the shared toolsets.
  */
-export const KNOWN_IDS = new Map<string, string>([
-  ...Object.entries(TOOLS).flatMap(([kind, tool]): [string, string][] => [
-    [tool.id, `<tool:${kind}>`],
-    [bindingIdOf(tool.id), `<binding:${kind}>`],
-  ]),
-  [MAKER_TOOL.id, '<tool:maker>'],
-  [bindingIdOf(MAKER_TOOL.id), '<binding:maker>'],
-  [PROVIDER_ID, '<provider>'],
-]);
+const seededKnownIds = (): Map<string, string> =>
+  new Map<string, string>([
+    ...Object.entries(TOOLS).flatMap(([kind, tool]): [string, string][] => [
+      [tool.id, `<tool:${kind}>`],
+      [bindingIdOf(tool.id), `<binding:${kind}>`],
+    ]),
+    [MAKER_TOOL.id, '<tool:maker>'],
+    [bindingIdOf(MAKER_TOOL.id), '<binding:maker>'],
+    [PROVIDER_ID, '<provider>'],
+  ]);
 
 const catalogueSeed = () => ({
   tools: SEEDED.map((tool) => ({
@@ -398,7 +400,7 @@ function marketOverrides(market: Market, builder: TestingModuleBuilder): Testing
     .useValue(new ConfigProviderRegistry({ [PROVIDER_ID]: provider }))
     .overrideProvider(PROVIDER_STAKE_SOURCE)
     .useValue(
-      new ConfigProviderStakeSource({
+      new InMemoryProviderStakeSource({
         [stakeKey(PROVIDER_ID, CHAIN)]: MoneyUtil.of('1000000000', USDG, 6),
       }),
     )
@@ -531,6 +533,8 @@ export interface EquivalenceApps {
   readonly dataSource: DataSource;
   readonly redis: Redis;
   readonly market: Market;
+  /** Ids shared by every world, by placeholder (see `seededKnownIds`). */
+  readonly knownIds: ReadonlyMap<string, string>;
   /** A new organization, its agent, an API key and an OAuth grant for that agent. */
   world(options?: WorldOptions): Promise<World>;
   /** Two worlds built alike: the key runs in the first, the grant in the second. */
@@ -625,6 +629,7 @@ export async function bootEquivalenceApps(options: BootOptions): Promise<Equival
     TOOL_CATALOGUE_SEED_JSON: JSON.stringify(catalogueSeed()),
     ...options.env,
   });
+  const knownIds = seededKnownIds();
   const market: Market = {
     provider: new ProviderStub(),
     chain: new FakeEvmChain(),
@@ -908,8 +913,8 @@ export async function bootEquivalenceApps(options: BootOptions): Promise<Equival
     }
     const kit = await toolsetFor(maker, 'kit', 'PUBLIC', 2);
     const link = await toolsetFor(maker, 'link-kit', 'UNLISTED');
-    KNOWN_IDS.set(kit.id, '<toolset:kit>');
-    KNOWN_IDS.set(link.id, '<toolset:link-kit>');
+    knownIds.set(kit.id, '<toolset:kit>');
+    knownIds.set(link.id, '<toolset:link-kit>');
     return { maker, handle: MAKER_HANDLE, unlistedToken: link.unlistedToken! };
   }
 
@@ -946,6 +951,7 @@ export async function bootEquivalenceApps(options: BootOptions): Promise<Equival
     dataSource,
     redis,
     market,
+    knownIds,
     world,
     pair,
     grantFor,

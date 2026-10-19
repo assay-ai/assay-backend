@@ -1,7 +1,7 @@
 import { Response } from 'supertest';
 import { DataSource } from 'typeorm';
 
-import { BOTH, KNOWN_IDS, ProviderStub, Via, World, credentialOf } from './equivalence-fixtures';
+import { BOTH, ProviderStub, Via, World, credentialOf } from './equivalence-fixtures';
 
 /**
  * Runs one equivalence case on both credentials and compares everything.
@@ -19,11 +19,13 @@ import { BOTH, KNOWN_IDS, ProviderStub, Via, World, credentialOf } from './equiv
  *   `<sibling-credential>` (the other one), `<organization>`, `<agent>`,
  *   `<person>`, `<wallet>`, plus what a case passes (`<delegate>`, ...);
  * - ids that are the same in every world keep their identity
- *   ({@link KNOWN_IDS}: `<tool:paid>`, `<binding:paid>`, `<provider>`,
+ *   (`EquivalenceApps.knownIds`: `<tool:paid>`, `<binding:paid>`, `<provider>`,
  *   `<toolset:kit>`, ...), so a wrong reference on one side fails;
  * - what is fresh per call (other uuids, other addresses) keeps its identity
- *   within a response (`<uuid:1>`, ...); in the footprint, where row order is
- *   arbitrary, it becomes `<uuid>` / `<address>`.
+ *   (`<uuid:1>`, ...): within a response, and across the whole footprint once
+ *   its rows are put in a content order (see `renumbered`);
+ * - a row the run created compares its timestamps as offsets from its own
+ *   `created_at`, to the minute (see `withTimeOffsets`).
  *
  * ## Allowed differences (spec §12.1, amended for D1)
  *
@@ -39,7 +41,8 @@ import { BOTH, KNOWN_IDS, ProviderStub, Via, World, credentialOf } from './equiv
  * - the `credential.created` entries of the world's two fixture credentials,
  *   written before the run (the audit case compares those on their own);
  * - facts about the moment rather than the call: {@link VOLATILE_COLUMNS},
- *   {@link VOLATILE_KEYS}, ISO timestamps, Unix-second expiries
+ *   {@link VOLATILE_KEYS}, ISO timestamps in responses and in rows made before
+ *   the run, Unix-second expiries
  *   ({@link UNIX_TIME_KEYS}), signatures by each world's own key.
  *
  * Anything else that differs fails the case.
@@ -109,7 +112,10 @@ export function normaliser(
   world: World,
   via: Via,
   extra: Placeholders = {},
-  { numbered = true }: { readonly numbered?: boolean } = {},
+  {
+    numbered = true,
+    known = new Map(),
+  }: { readonly numbered?: boolean; readonly known?: ReadonlyMap<string, string> } = {},
 ) {
   const sibling: Via = via === 'key' ? 'grant' : 'key';
   const exact = new Map<string, string>();
@@ -126,7 +132,7 @@ export function normaliser(
     [world.organizationId, '<organization>'],
     [world.agentId, '<agent>'],
     [world.person.agentId, '<person>'],
-    ...KNOWN_IDS,
+    ...known,
   ];
   for (const [value, placeholder] of base) if (!exact.has(value)) exact.set(value, placeholder);
   const wallet = world.wallet.split(':')[2].toLowerCase();
@@ -219,6 +225,8 @@ export interface TwinOptions<T> {
   readonly dataSource?: DataSource;
   /** Adds the requests the run sent to the provider. */
   readonly provider?: ProviderStub;
+  /** Ids shared by every world (`EquivalenceApps.knownIds`). */
+  readonly knownIds?: ReadonlyMap<string, string>;
   readonly placeholders?: (context: RunContext, result: T) => Placeholders;
 }
 
@@ -249,19 +257,22 @@ export async function runTwins<T>(
       credentialId: credential.id,
     };
     const sent = options.provider?.calls.length ?? 0;
+    const runStart = options.dataSource ? await databaseNow(options.dataSource) : null;
     const result = await run(context);
     const placeholders = options.placeholders?.(context, result);
     const outcome: Record<string, unknown> = { result };
     if (options.provider) outcome.providerCalls = options.provider.calls.slice(sent);
-    const normalised = normaliser(world, via, placeholders)(outcome) as Record<string, unknown>;
+    const known = options.knownIds;
+    const normalised = normaliser(world, via, placeholders, { known })(outcome) as Record<
+      string,
+      unknown
+    >;
     if (options.dataSource) {
-      // Row order and fresh ids are not comparable across worlds: unnumbered
-      // placeholders, then rows sorted by content.
-      const footprint = normaliser(world, via, placeholders, { numbered: false })(
-        await settledFootprint(options.dataSource, world),
-      ) as Record<string, unknown[]>;
-      for (const table of Object.keys(footprint)) footprint[table] = sortedRows(footprint[table]);
-      normalised.footprint = footprint;
+      normalised.footprint = renumbered(
+        await settledFootprint(options.dataSource, world, runStart!),
+        normaliser(world, via, placeholders, { numbered: false, known }),
+        normaliser(world, via, placeholders, { known }),
+      );
     }
     results[via] = normalised;
   }
@@ -279,6 +290,38 @@ export async function expectEquivalent<T>(
   return twins;
 }
 
+async function databaseNow(dataSource: DataSource): Promise<Date> {
+  const [{ now }] = (await dataSource.query(`SELECT now() AS "now"`)) as { now: Date }[];
+  return now;
+}
+
+/**
+ * Rows sorted by their content with fresh ids masked (row order is
+ * arbitrary), then normalised again with ONE numbering for the whole
+ * footprint, so ids made in this world keep their identity across rows and
+ * tables (`<uuid:3>` in a hold names the `<uuid:3>` intent): a row pointing
+ * at the wrong row of the same world fails (review M10). Rows equal but for
+ * their own ids are ordered by creation time.
+ */
+function renumbered(
+  raw: Record<string, Record<string, unknown>[]>,
+  sortKey: (value: unknown) => unknown,
+  numbered: (value: unknown) => unknown,
+): Record<string, unknown[]> {
+  const footprint: Record<string, unknown[]> = {};
+  for (const table of Object.keys(raw).sort()) {
+    footprint[table] = raw[table]
+      .map((row) => ({
+        row,
+        key: JSON.stringify(sortKey(row)),
+        at: row.created_at instanceof Date ? row.created_at.getTime() : 0,
+      }))
+      .sort((a, b) => a.key.localeCompare(b.key) || a.at - b.at)
+      .map(({ row }) => numbered(row));
+  }
+  return footprint;
+}
+
 /**
  * The footprint once writes made after the response (last-use stamps,
  * attribution, attempt records) have landed: two equal snapshots in a row,
@@ -287,11 +330,12 @@ export async function expectEquivalent<T>(
 async function settledFootprint(
   dataSource: DataSource,
   world: World,
-): Promise<Record<string, unknown[]>> {
-  let last = JSON.stringify(await footprintOf(dataSource, world));
+  runStart: Date,
+): Promise<Record<string, Record<string, unknown>[]>> {
+  let last = JSON.stringify(await footprintOf(dataSource, world, runStart));
   for (let attempt = 0; attempt < 20; attempt += 1) {
     await new Promise((resolve) => setTimeout(resolve, 100));
-    const next = await footprintOf(dataSource, world);
+    const next = await footprintOf(dataSource, world, runStart);
     const text = JSON.stringify(next);
     if (text === last) return next;
     last = text;
@@ -307,7 +351,8 @@ async function settledFootprint(
 export async function footprintOf(
   dataSource: DataSource,
   world: World,
-): Promise<Record<string, unknown[]>> {
+  runStart: Date,
+): Promise<Record<string, Record<string, unknown>[]>> {
   const fixtures = new Set([world.key.id, world.grant.id]);
   const tables = (await dataSource.query(
     `SELECT "table_name" FROM "information_schema"."columns"
@@ -315,7 +360,7 @@ export async function footprintOf(
       ORDER BY "table_name"`,
   )) as { table_name: string }[];
 
-  const footprint: Record<string, unknown[]> = {};
+  const footprint: Record<string, Record<string, unknown>[]> = {};
   for (const { table_name: table } of tables) {
     if ((ISSUANCE_TABLES as readonly string[]).includes(table)) continue;
     const rows = (await dataSource.query(`SELECT * FROM "${table}" WHERE "organization_id" = $1`, [
@@ -323,7 +368,7 @@ export async function footprintOf(
     ])) as Record<string, unknown>[];
     const kept = rows
       .filter((row) => !isFixtureCreation(row, fixtures))
-      .map((row) => withoutVolatile(table, withoutIssuance(table, row)));
+      .map((row) => withTimeOffsets(withoutVolatile(table, withoutIssuance(table, row)), runStart));
     if (kept.length > 0) footprint[table] = kept;
   }
   return footprint;
@@ -336,6 +381,24 @@ export async function footprintOf(
  */
 function isFixtureCreation(row: Record<string, unknown>, fixtures: Set<string>): boolean {
   return row.action === 'credential.created' && fixtures.has(row.resource_id as string);
+}
+
+/**
+ * A row this run created compares each timestamp column as its offset from
+ * the row's own `created_at`, to the minute (`<+43200m>`: a 30-day expiry),
+ * so a hold or expiry of the wrong length fails (review M1). A row made
+ * before the run (the world's fixtures) keeps `<time>` only: when a case
+ * touches it depends on how long the case before it took.
+ */
+function withTimeOffsets(row: Record<string, unknown>, runStart: Date): Record<string, unknown> {
+  const created = row.created_at;
+  if (!(created instanceof Date) || created.getTime() < runStart.getTime()) return row;
+  const copy = { ...row };
+  for (const [column, value] of Object.entries(row)) {
+    if (column === 'created_at' || !(value instanceof Date)) continue;
+    copy[column] = `<+${Math.round((value.getTime() - created.getTime()) / 60_000)}m>`;
+  }
+  return copy;
 }
 
 function withoutVolatile(table: string, row: Record<string, unknown>): Record<string, unknown> {
@@ -359,9 +422,4 @@ function withoutIssuance(table: string, row: Record<string, unknown>): Record<st
     return { ...row, after };
   }
   return row;
-}
-
-/** Sorted by content, so row order (insertion races) never decides equality. */
-export function sortedRows(rows: unknown[]): unknown[] {
-  return [...rows].sort((a, b) => JSON.stringify(a).localeCompare(JSON.stringify(b)));
 }
