@@ -19,7 +19,7 @@ export class AgentConnectUrlEntity {
   @Column({ name: ORGANIZATION_SCOPE_COLUMN, type: 'uuid' })
   organizationId: string;
 
-  /** The server name the sheet suggested, at most 9 characters. */
+  /** The server name the sheet suggested, at most 56 characters, lowercase letters, digits and dashes. */
   @Column({ name: 'server_name', type: 'varchar', length: 56, nullable: true })
   serverName: string | null;
 
