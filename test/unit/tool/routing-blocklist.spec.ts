@@ -107,6 +107,11 @@ describe('routing — the account blocklist', () => {
               },
             ],
             "listings": 2,
+            "maxPrice": {
+              "amount": "80000",
+              "asset": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/token:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+              "decimals": 6,
+            },
             "p95LatencyMs": 800.0000000000001,
             "paidBindings": 2,
             "price": {
@@ -134,6 +139,11 @@ describe('routing — the account blocklist', () => {
             },
             "freeBindings": [],
             "listings": 2,
+            "maxPrice": {
+              "amount": "80000",
+              "asset": "solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/token:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU",
+              "decimals": 6,
+            },
             "p95LatencyMs": 800,
             "paidBindings": 2,
             "price": {
@@ -162,6 +172,7 @@ describe('routing — the account blocklist', () => {
               },
             ],
             "listings": 1,
+            "maxPrice": null,
             "p95LatencyMs": 800,
             "paidBindings": 0,
             "price": {
