@@ -49,7 +49,7 @@ const PRETTIER_OPTIONS = {
  */
 export async function render() {
   const idl = JSON.parse(readFileSync(IDL_PATH, 'utf8'));
-  const scratch = mkdtempSync(join(tmpdir(), 'x402-client-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'assay-client-'));
 
   const codama = createFromRoot(rootNodeFromAnchor(idl));
   await codama.accept(
