@@ -19,7 +19,7 @@ import { getAssetMetadata } from '../ports/asset-registry';
 import { AccountId, AssetId, ChainId, parseAccountId, toAssetId } from '../ports/caip.types';
 import { Money } from '../ports/money.types';
 import { UnsignedChainTransaction } from '../ports/unsigned-chain-transaction';
-import { ERC20_ABI, X402_STAKE_ABI } from './abi/x402.abi';
+import { ERC20_ABI, ASSAY_STAKE_ABI } from './abi/assay.abi';
 import { EvmDeployment } from './evm.constants';
 
 /**
@@ -85,7 +85,7 @@ function nativeAssetIdOf(chain: ChainId): AssetId {
  *
  * ## There is nothing to open
  *
- * `X402Stake` keys `mapping(address => ProviderStake)` on the provider, and the
+ * `AssayStake` keys `mapping(address => ProviderStake)` on the provider, and the
  * first `depositStakeFor` writes the row. So {@link needsOpenStake} is `false`
  * and an `OPEN_STAKE` request is refused by name — the same fact
  * `EvmEscrowOpener` states for a buyer's escrow, answered in the port's type
@@ -197,7 +197,7 @@ export class EvmStakeIntentBuilder implements StakeIntentBuilderPort {
 
     const stake = getAddress(deployment.stake);
     const events = parseEventLogs({
-      abi: X402_STAKE_ABI,
+      abi: ASSAY_STAKE_ABI,
       eventName: 'StakeDeposited',
       logs: receipt.logs.filter((log) => getAddress(log.address) === stake) as never,
     });
@@ -232,7 +232,7 @@ export class EvmStakeIntentBuilder implements StakeIntentBuilderPort {
     if (request.kind === StakeIntentKind.OPEN_STAKE) {
       throw ChainErrors.payloadMalformed({
         reason:
-          'there is no stake account to open on eip155: X402Stake keys a mapping on the ' +
+          'there is no stake account to open on eip155: AssayStake keys a mapping on the ' +
           'provider, and the first depositStake writes it',
       });
     }
@@ -303,24 +303,24 @@ export class EvmStakeIntentBuilder implements StakeIntentBuilderPort {
       case StakeIntentKind.DEPOSIT:
         return request.funder
           ? encodeFunctionData({
-              abi: X402_STAKE_ABI,
+              abi: ASSAY_STAKE_ABI,
               functionName: 'depositStakeFor',
               args: [context.provider, amount],
             })
           : encodeFunctionData({
-              abi: X402_STAKE_ABI,
+              abi: ASSAY_STAKE_ABI,
               functionName: 'depositStake',
               args: [amount],
             });
       case StakeIntentKind.UNSTAKE:
         return encodeFunctionData({
-          abi: X402_STAKE_ABI,
+          abi: ASSAY_STAKE_ABI,
           functionName: 'requestUnstake',
           args: [amount],
         });
       case StakeIntentKind.WITHDRAW:
         return encodeFunctionData({
-          abi: X402_STAKE_ABI,
+          abi: ASSAY_STAKE_ABI,
           functionName: 'withdrawStake',
           args: [amount],
         });

@@ -34,7 +34,7 @@ queue long behind the others.
 ## Turning the hold on for a chain
 
 1. Add the chain's CAIP-2 id to `EVM_HOLD_LIVE_CHAINS` on the API and the
-   scheduler IN THE SAME DEPLOY as the X402Escrow / X402Config upgrade (contract
+   scheduler IN THE SAME DEPLOY as the AssayEscrow / AssayConfig upgrade (contract
    work) — not after it.
 2. The backend does not depend on the flag being in time: a redemption's
    receipt is classified from the logs the ESCROW emitted (`PaymentHeld` means

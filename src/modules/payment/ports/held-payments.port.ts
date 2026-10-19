@@ -86,7 +86,7 @@ export interface HeldPaymentsPort {
   refund(asset: AssetId, keys: readonly HeldKey[]): Promise<HeldTxResult>;
   /** `totalHeld()`, or `null` when the escrow has no hold. */
   totalHeld(asset: AssetId): Promise<bigint | null>;
-  /** `X402Config.collectHoldSeconds()`, or `null` when the config has no hold. */
+  /** `AssayConfig.collectHoldSeconds()`, or `null` when the config has no hold. */
   collectHoldSeconds(asset: AssetId): Promise<number | null>;
 }
 

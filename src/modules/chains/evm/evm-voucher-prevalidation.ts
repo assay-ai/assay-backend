@@ -5,7 +5,7 @@ import { EVM_CONSTANTS } from './evm.constants';
  * Everything `_redeem` reads that is not in the voucher itself.
  *
  * All of it comes off the chain in one `multicall` — the escrow struct, the
- * provider's bonded stake, and the two `X402Config` reads — so nothing here is
+ * provider's bonded stake, and the two `AssayConfig` reads — so nothing here is
  * derived from anything else and nothing is a local copy of a program constant.
  */
 export interface PrevalidationState {
@@ -101,7 +101,7 @@ export function decayWindow(state: {
  * the cost of that decision lands here, and assay-evm's `docs/gas.md` states
  * it in the imperative.
  *
- * The order is copied from assay-evm's `src/X402Escrow.sol::_redeem` rather than
+ * The order is copied from assay-evm's `src/AssayEscrow.sol::_redeem` rather than
  * invented, and two entries are **not** where the Anchor program puts them:
  *
  *  - **`seq` is checked BEFORE the signature** (divergence 3). Cheaper on chain

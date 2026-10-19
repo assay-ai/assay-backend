@@ -1,7 +1,7 @@
 import { encodeFunctionResult } from 'viem';
 import { baseSepolia } from 'viem/chains';
 
-import { X402_STAKE_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_STAKE_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { checkConfigUpgraded, readConfigTerms } from '@modules/chains/evm/evm-config-terms';
 import { decodeSlashRecord, readSlashRecord } from '@modules/chains/evm/evm-slash-record';
 import { cancelReasonFromEvm, slashStatusFromEvm } from '@modules/chains/evm/evm-slash-status';
@@ -31,7 +31,7 @@ const RECORD = {
 
 const recordBytes = () =>
   encodeFunctionResult({
-    abi: X402_STAKE_ABI,
+    abi: ASSAY_STAKE_ABI,
     functionName: 'slashRecordOf',
     result: RECORD as never,
   });

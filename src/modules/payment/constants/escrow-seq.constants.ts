@@ -26,7 +26,7 @@
 
 /**
  * The widest jump a voucher's seq may take past the escrow's on-chain
- * `seqHigh`: mirrors `X402Escrow`'s `MAX_SEQ_GAP` (assay-evm
+ * `seqHigh`: mirrors `AssayEscrow`'s `MAX_SEQ_GAP` (assay-evm
  * `Constants.sol`, D-17), which refuses `seq > seqHigh + MAX_SEQ_GAP` with
  * `VoucherSeqGapTooLarge`. So on eip155 gaps are free but **bounded**.
  *

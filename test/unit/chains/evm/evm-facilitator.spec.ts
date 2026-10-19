@@ -1,7 +1,7 @@
 import { encodeFunctionData, keccak256 } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EvmFacilitator, EvmFacilitatorClient } from '@modules/chains/evm/evm-facilitator.service';
 import { X402_INVALID_REASON } from '@modules/chains/facilitator/facilitator.wire';
 import { CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
@@ -41,9 +41,9 @@ async function signedDeposit(
   const account = privateKeyToAccount((overrides.signer ?? buyer).privateKey);
   const data =
     overrides.functionName === 'requestWithdraw'
-      ? encodeFunctionData({ abi: X402_ESCROW_ABI, functionName: 'requestWithdraw', args: [1n] })
+      ? encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'requestWithdraw', args: [1n] })
       : encodeFunctionData({
-          abi: X402_ESCROW_ABI,
+          abi: ASSAY_ESCROW_ABI,
           functionName: 'depositFor',
           args: [overrides.credit ?? buyer.address, overrides.amount ?? PRICE],
         });

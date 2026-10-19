@@ -359,7 +359,7 @@ const runE2: K3Step = async (c) => {
   if (deploymentStatus(46630) === 'no record file') {
     return notRunWithoutDeployment(
       c.id,
-      "the platform's half has never run against a deployed X402Escrow.",
+      "the platform's half has never run against a deployed AssayEscrow.",
     );
   }
   if (!process.env.TESTNET_E2_BUYER_KEY) {
@@ -507,7 +507,7 @@ const runE5: K3Step = async (c) => {
   if (deploymentStatus(46630) !== 'deployed') {
     return notRunWithoutDeployment(
       c.id,
-      'no zero-ETH buyer has withdrawn on a deployed X402Escrow through the gas grant.',
+      'no zero-ETH buyer has withdrawn on a deployed AssayEscrow through the gas grant.',
     );
   }
   if (!process.env.TESTNET_E5_BUYER_KEY || !process.env.TESTNET_E5_FUNDER_KEY) {

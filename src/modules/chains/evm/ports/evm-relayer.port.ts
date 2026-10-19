@@ -14,7 +14,7 @@ import { AccountId, ChainId } from '../../ports/caip.types';
  *
  * ## Why the relayer key satisfies "a leaked env key must not cost users money"
  *
- * **It can never move USDG.** Every money-moving path in `X402Escrow` is
+ * **It can never move USDG.** Every money-moving path in `AssayEscrow` is
  * authorised by `msg.sender == buyer`, by a buyer's EIP-712 signature, or by a
  * registered verifier's attestation plus a 72-hour timelock. The relayer
  * appears in none of them — only as the *sender* of a call whose authority

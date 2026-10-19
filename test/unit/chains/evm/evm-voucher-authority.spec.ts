@@ -106,7 +106,7 @@ class FakeChain implements EvmVoucherAuthorityClient {
   }
 }
 
-describe('EvmVoucherAuthority — X402Escrow._voucherAuthority, off chain', () => {
+describe('EvmVoucherAuthority — AssayEscrow._voucherAuthority, off chain', () => {
   let chain: FakeChain;
   let authority: EvmVoucherAuthority;
 

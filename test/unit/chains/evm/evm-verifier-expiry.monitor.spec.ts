@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { encodeFunctionResult } from 'viem';
 
-import { X402_STAKE_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_STAKE_ABI } from '@modules/chains/evm/abi/assay.abi';
 import {
   EVM_VERIFIER_EXPIRY_ALERTS,
   EvmVerifierExpiryMonitor,
@@ -48,10 +48,10 @@ function build(records: { requestId: string; verifier: string }[]) {
       if (functionName === 'slashRecordOf') {
         const found = records.find((row) => `0x${row.requestId}` === args[0]);
         return (await import('viem')).decodeFunctionResult({
-          abi: X402_STAKE_ABI,
+          abi: ASSAY_STAKE_ABI,
           functionName: 'slashRecordOf',
           data: encodeFunctionResult({
-            abi: X402_STAKE_ABI,
+            abi: ASSAY_STAKE_ABI,
             functionName: 'slashRecordOf',
             result: record(found!.verifier) as never,
           }),

@@ -685,7 +685,7 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
 
   /**
    * The seq is more than `MAX_SEQ_GAP` above the escrow's on-chain `seqHigh`.
-   * `X402Escrow` refuses such a voucher at redemption (`VoucherSeqGapTooLarge`),
+   * `AssayEscrow` refuses such a voucher at redemption (`VoucherSeqGapTooLarge`),
    * so it is neither issued nor admitted: a call served on it could never be
    * collected. Only reachable when the backend's seq bookkeeping has run far
    * ahead of the chain; the buyer's next voucher after redemptions catch up is

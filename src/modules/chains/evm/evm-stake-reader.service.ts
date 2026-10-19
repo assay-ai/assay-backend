@@ -10,7 +10,7 @@ import { MoneyUtil } from '@shared/utils/money.util';
 import { ChainErrors } from '../errors/chains.errors';
 import { getAssetMetadata } from '../ports/asset-registry';
 import { AccountId, ChainId, parseAccountId, toAssetId } from '../ports/caip.types';
-import { X402_CONFIG_ABI, X402_STAKE_ABI } from './abi/x402.abi';
+import { ASSAY_CONFIG_ABI, ASSAY_STAKE_ABI } from './abi/assay.abi';
 import { EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 
@@ -44,11 +44,11 @@ export interface EvmStakeReaderConfig {
 export const DEFAULT_EVM_PARAMS_TTL_MS = 60_000;
 
 /**
- * `OnChainStakeReaderPort` over `X402Stake.stakeOf`.
+ * `OnChainStakeReaderPort` over `AssayStake.stakeOf`.
  *
  * ## `bonded` alone is the routable figure
  *
- * `_redeem` reads `bondedOf(provider) < p.minimumStake`, and `X402Stake`'s own
+ * `_redeem` reads `bondedOf(provider) < p.minimumStake`, and `AssayStake`'s own
  * note says why: stake the provider has already asked to take out is not
  * backing anybody's traffic, even though it stays slashable for the whole
  * unbonding period. Folding `unbonding` into `bonded` here would let a provider
@@ -105,7 +105,7 @@ export class EvmStakeReader implements OnChainStakeReaderPort {
       const results = await this.client(chainId).multicall({
         contracts: group.map(({ address }) => ({
           address: getAddress(deployment.stake),
-          abi: X402_STAKE_ABI,
+          abi: ASSAY_STAKE_ABI,
           functionName: 'stakeOf',
           args: [address],
         })),
@@ -179,7 +179,7 @@ export class EvmStakeReader implements OnChainStakeReaderPort {
     const deployment = this.deployment(chainId);
     const params = (await this.client(chainId).readContract({
       address: getAddress(deployment.config),
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'params',
       args: [],
     })) as EvmParamSet;
