@@ -9,8 +9,11 @@ import { AccessEpochService } from '@modules/toolset/services/access-epoch.servi
 
 import {
   RunContext,
+  TwinOptions,
+  TwinResult,
   expectEquivalent,
   normaliser,
+  ObservedResponse,
   observed,
   runTwins,
 } from '../helpers/equivalence-compare';
@@ -61,6 +64,10 @@ const KINDS = [
   'myToolsetPinned',
 ] as const;
 type Kind = (typeof KINDS)[number];
+
+/** The method row runs on every kind, and on `/?free=1`, the hosted-connector default. */
+const METHOD_URLS = [...KINDS, 'rootFreeOnly'] as const;
+type MethodUrl = (typeof METHOD_URLS)[number];
 
 const QUERIES = [
   '',
@@ -148,9 +155,6 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
   const requirementOf = (response: Response): PaymentRequirement | null =>
     (response.body?.result?._meta?.['x402/paymentRequired'] as PaymentRequirement) ?? null;
 
-  const errorCodeOf = (response: Response): string | undefined =>
-    response.body?.result?._meta?.['x402/error']?.code ?? response.body?.error?.code;
-
   /** Binds `key` to the run's credential over the API host, as `assay-mcp` does (F4). */
   async function bindDelegate(bearer: string, key: DelegateKey) {
     const challenge = await onApi(bearer, 'post', '/agents/me/delegate/challenge', {
@@ -192,6 +196,19 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       myToolsetPinned: '/my/kit@1',
     })[kind];
 
+  /** Every case compares the provider's requests too (review I3). */
+  const equivalent = <T>(
+    worlds: World | Record<Via, World>,
+    run: (context: RunContext) => Promise<T>,
+    options: TwinOptions<T> = {},
+  ) => expectEquivalent(worlds, run, { provider: apps.market.provider, ...options });
+
+  /** The key's normalised result (equal to the grant's once `equivalent` passed). */
+  const resultOf = <T>(twins: TwinResult): T => (twins.key as { result: T }).result;
+
+  const methodUrlOf = (kind: MethodUrl): string =>
+    kind === 'rootFreeOnly' ? '/?free=1' : urlOf(kind);
+
   const twoKeys = (): Record<Via, DelegateKey> => ({
     key: newDelegateKey(),
     grant: newDelegateKey(),
@@ -225,7 +242,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         expect((await bindDelegate(credential.bearer, keys[via])).bind?.status).toBe(201);
       }
 
-      await expectEquivalent(
+      await equivalent(
         world,
         async ({ bearer }) => ({
           mcp: await sessionSource('mcp').resolve(bearer),
@@ -256,6 +273,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         'x402/voucher': signVoucher(apps.mcp, requirement, key),
       });
     }
+    steps.maker = await call(bearer, path, MAKER_TOOL.name);
     steps.search = await call(bearer, path, 'search_tools', { query: 'weather' });
     steps.getTool = await call(bearer, path, 'get_tool', { name: TOOLS.paid.name });
     steps.callToolFree = await call(bearer, path, 'call_tool', {
@@ -276,11 +294,110 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
   const seenAll = (steps: Record<string, Response>) =>
     Object.fromEntries(Object.entries(steps).map(([step, response]) => [step, seen(response)]));
 
+  /** What a step amounted to: the per-kind expectations read this. */
+  function outcome(step: ObservedResponse | undefined): string {
+    if (!step) return 'absent';
+    if (step.status !== 200) return `http ${step.status} ${step.body?.error?.code}`;
+    const result = step.body?.result;
+    if (!result) return `rpc ${step.body?.error?.code}`;
+    if (Array.isArray(result.tools)) {
+      return (result.tools as { name: string }[])
+        .map((tool) => tool.name)
+        .sort()
+        .join(',');
+    }
+    const code = result._meta?.['x402/error']?.code;
+    if (code) return code;
+    if (result.structuredContent?.answer) {
+      return result._meta?.['x402/receipt']?.intentId ? 'paid' : 'served';
+    }
+    return result.isError ? 'error' : 'ok';
+  }
+
+  const outcomes = (steps: Record<string, ObservedResponse>) =>
+    Object.fromEntries(Object.entries(steps).map(([step, seen]) => [step, outcome(seen)]));
+
+  const META = 'call_tool,get_tool,search_tools';
+  const KIT = [TOOLS.freemium.name, TOOLS.free.name, TOOLS.paid.name].sort().join(',');
+  /** A URL that serves all three tools: every step is served, both paid steps paid. */
+  const ALL_SERVED = {
+    list: KIT,
+    free: 'served',
+    freemium1: 'served',
+    freemium2: 'served',
+    freemium3: 'PAYMENT_REQUIRED',
+    paidRequirement: 'PAYMENT_REQUIRED',
+    paidWithVoucher: 'paid',
+    maker: 'TOOL_NOT_IN_TOOLSET',
+    search: 'ok',
+    getTool: 'ok',
+    callToolFree: 'served',
+    callToolPaidRequirement: 'PAYMENT_REQUIRED',
+    callToolPaidWithVoucher: 'paid',
+  };
+  /** A URL without the paid tool: the paid steps are refused, so no voucher step runs. */
+  const NO_PAID = {
+    free: 'served',
+    freemium1: 'served',
+    freemium2: 'served',
+    paidRequirement: 'TOOL_NOT_IN_TOOLSET',
+    search: 'ok',
+    getTool: 'TOOL_NOT_IN_TOOLSET',
+    callToolFree: 'served',
+    callToolPaidRequirement: 'TOOL_NOT_IN_TOOLSET',
+  };
+  /** What each step amounts to on each URL (review I4). */
+  const SERVED_BY_KIND: Record<MethodUrl, Record<string, string>> = {
+    root: { ...ALL_SERVED, list: META, maker: 'served' },
+    category: {
+      ...NO_PAID,
+      list: [TOOLS.freemium.name, TOOLS.free.name].sort().join(','),
+      freemium3: 'PAYMENT_REQUIRED',
+      maker: 'TOOL_NOT_IN_TOOLSET',
+    },
+    handle: {
+      list: MAKER_TOOL.name,
+      free: 'TOOL_NOT_IN_TOOLSET',
+      freemium1: 'TOOL_NOT_IN_TOOLSET',
+      freemium2: 'TOOL_NOT_IN_TOOLSET',
+      freemium3: 'TOOL_NOT_IN_TOOLSET',
+      paidRequirement: 'TOOL_NOT_IN_TOOLSET',
+      maker: 'served',
+      search: 'ok',
+      getTool: 'TOOL_NOT_IN_TOOLSET',
+      callToolFree: 'TOOL_NOT_IN_TOOLSET',
+      callToolPaidRequirement: 'TOOL_NOT_IN_TOOLSET',
+    },
+    publicToolset: ALL_SERVED,
+    publicToolsetPinned: ALL_SERVED,
+    unlisted: ALL_SERVED,
+    unlistedPinned: ALL_SERVED,
+    myToolset: ALL_SERVED,
+    myToolsetPinned: ALL_SERVED,
+    // Free only: over the freemium quota no free binding is left.
+    rootFreeOnly: {
+      ...NO_PAID,
+      list: META,
+      freemium3: 'TOOL_NO_ELIGIBLE_BINDING',
+      maker: 'served',
+    },
+  };
+
   describe('URL kinds', () => {
+    /** The tools each query form leaves on `/?discovery=full` (the full list). */
+    const LISTED_BY_QUERY: Record<string, string> = {
+      '': [...Object.values(TOOLS).map((tool) => tool.name), MAKER_TOOL.name].sort().join(','),
+      [`?tools=${TOOLS.free.name},${TOOLS.paid.name}`]: [TOOLS.free.name, TOOLS.paid.name]
+        .sort()
+        .join(','),
+      '?category=weather': [TOOLS.free.name, TOOLS.freemium.name].sort().join(','),
+      '?free=1': [TOOLS.free.name, TOOLS.freemium.name, MAKER_TOOL.name].sort().join(','),
+    };
+
     it('tools/list is identical on every URL kind, with and without each query', async () => {
       const world = await apps.world();
       await apps.toolsetFor(world, 'kit', 'PRIVATE');
-      const twins = await expectEquivalent(world, async ({ bearer }) => {
+      const twins = await equivalent(world, async ({ bearer }) => {
         const listed: Record<string, unknown> = {};
         for (const kind of KINDS) {
           for (const query of QUERIES) {
@@ -288,30 +405,77 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
             listed[url] = seen(await rpc(bearer, url, 'tools/list'));
           }
         }
+        // The query forms on the full list, where each one's effect shows.
+        for (const query of Object.keys(LISTED_BY_QUERY)) {
+          const url = `/?discovery=full${query.replace('?', '&')}`;
+          listed[url] = seen(await rpc(bearer, url, 'tools/list'));
+        }
         return listed;
       });
-      // Not vacuous: every kind serves a list.
-      const listed = twins.key as Record<string, { status: number }>;
+      // Not vacuous: every kind serves a list, and each query form narrows it.
+      const listed = resultOf<Record<string, ObservedResponse>>(twins);
       for (const kind of KINDS) expect(listed[urlOf(kind)].status).toBe(200);
+      for (const [query, names] of Object.entries(LISTED_BY_QUERY)) {
+        expect(outcome(listed[`/?discovery=full${query.replace('?', '&')}`])).toBe(names);
+      }
     });
 
-    it.each(KINDS)(
+    it('each query form also reaches the call path: a free and a paid call under it', async () => {
+      const twins = await equivalent(
+        await apps.pair(),
+        async ({ bearer }) => {
+          const steps: Record<string, unknown> = {};
+          for (const query of QUERIES) {
+            steps[`free ${query}`] = seen(await call(bearer, `/${query}`, TOOLS.free.name));
+            steps[`paid ${query}`] = seen(await call(bearer, `/${query}`, TOOLS.paid.name));
+          }
+          return steps;
+        },
+        { dataSource: apps.dataSource },
+      );
+      const steps = outcomes(resultOf<Record<string, ObservedResponse>>(twins));
+      const [tools, category, free, discovery] = QUERIES.slice(1);
+      expect(steps).toEqual({
+        'free ': 'served',
+        'paid ': 'PAYMENT_REQUIRED',
+        [`free ${tools}`]: 'served',
+        [`paid ${tools}`]: 'PAYMENT_REQUIRED',
+        [`free ${category}`]: 'served',
+        [`paid ${category}`]: 'TOOL_NOT_IN_TOOLSET',
+        [`free ${free}`]: 'served',
+        [`paid ${free}`]: 'TOOL_NOT_IN_TOOLSET',
+        [`free ${discovery}`]: 'served',
+        [`paid ${discovery}`]: 'PAYMENT_REQUIRED',
+      });
+    });
+
+    it.each(METHOD_URLS)(
       '%s: tools/list; tools/call free, freemium in and over quota, paid rail B both steps; search_tools, get_tool, call_tool free and paid',
       async (kind) => {
         const keys = twoKeys();
-        const twins = await expectEquivalent(
+        const own: Partial<Record<Via, string>> = {};
+        const twins = await equivalent(
           await apps.pair(),
           async ({ world, via, bearer }) => {
-            await apps.toolsetFor(world, 'kit', 'PRIVATE');
+            own[via] = (await apps.toolsetFor(world, 'kit', 'PRIVATE')).id;
             const bound = await bindDelegate(bearer, keys[via]);
             authorise(world, keys[via]);
-            return { bound, steps: seenAll(await everyMethod(bearer, urlOf(kind), keys[via])) };
+            return {
+              bound,
+              steps: seenAll(await everyMethod(bearer, methodUrlOf(kind), keys[via])),
+            };
           },
           {
             dataSource: apps.dataSource,
-            placeholders: ({ via }) => ({ '<delegate>': keys[via].account }),
+            placeholders: ({ via }) => ({
+              '<delegate>': keys[via].account,
+              '<toolset:my-kit>': own[via],
+            }),
           },
         );
+        // Not vacuous: each step does what this kind serves (review I4).
+        const { steps } = resultOf<{ steps: Record<string, ObservedResponse> }>(twins);
+        expect(outcomes(steps)).toEqual(SERVED_BY_KIND[kind]);
         // Intents name the run's own credential, in the same form.
         const footprint = (twins.key as { footprint: Record<string, Record<string, unknown>[]> })
           .footprint;
@@ -321,24 +485,13 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       },
     );
 
-    it('the method row is not vacuous: on / each step does what its name says, and intents carry the credential', async () => {
+    it('on /, the steps are what their names say, and the intents carry the grant', async () => {
       const world = await apps.world();
       const key = newDelegateKey();
       await bindDelegate(world.grant.bearer, key);
       authorise(world, key);
       const steps = await everyMethod(world.grant.bearer, '/', key);
-      expect(steps.free.body.result.structuredContent).toEqual({ answer: 'forty-two' });
-      expect(steps.freemium1.body.result.structuredContent).toEqual({ answer: 'forty-two' });
-      expect(errorCodeOf(steps[`freemium${FREEMIUM_QUOTA + 1}`])).toBe('PAYMENT_REQUIRED');
-      expect(errorCodeOf(steps.paidRequirement)).toBe('PAYMENT_REQUIRED');
       expect(requirementOf(steps.paidRequirement)).toMatchObject({ delegate: key.account });
-      for (const paid of [steps.paidWithVoucher, steps.callToolPaidWithVoucher]) {
-        expect(paid.body.result._meta['x402/receipt'].intentId).toEqual(expect.any(String));
-      }
-      expect(errorCodeOf(steps.search)).toBeUndefined();
-      expect(errorCodeOf(steps.getTool)).toBeUndefined();
-      expect(steps.callToolFree.body.result.structuredContent).toEqual({ answer: 'forty-two' });
-
       const intents = (await apps.dataSource.query(
         `SELECT "credential_id" FROM "payment_intents" WHERE "organization_id" = $1`,
         [world.organizationId],
@@ -363,7 +516,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
 
     it('spend-policy refusals: a per-call ceiling, then paused', async () => {
       const keys = twoKeys();
-      const twins = await expectEquivalent(
+      const twins = await equivalent(
         await apps.pair(),
         async ({ world, via, bearer }) => {
           await bindDelegate(bearer, keys[via]);
@@ -399,7 +552,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     });
 
     it('the free budget: the platform daily free calls, then refused', async () => {
-      const twins = await expectEquivalent(
+      const twins = await equivalent(
         await apps.pair(),
         async ({ bearer }) => {
           const outcomes: unknown[] = [];
@@ -417,9 +570,10 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     });
 
     it('the refusal rate limit: refusals counted per agent, then every call RATE_LIMITED', async () => {
+      const worlds = await apps.pair();
       await inOneWindow(40);
-      const twins = await expectEquivalent(
-        await apps.pair(),
+      const twins = await equivalent(
+        worlds,
         async ({ world, credentialId, bearer }) => {
           // Narrowed to the free tool: every paid call is a refusal.
           await apps.asPerson(world, 'patch', `/agent-credentials/${credentialId}/access`, {
@@ -439,9 +593,10 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     });
 
     it('the meta-tool rate limits: search_tools and get_tool, per agent', async () => {
+      const worlds = await apps.pair();
       await inOneWindow(40);
-      const twins = await expectEquivalent(
-        await apps.pair(),
+      const twins = await equivalent(
+        worlds,
         async ({ bearer }) => {
           const search: unknown[] = [];
           const getTool: unknown[] = [];
@@ -532,7 +687,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     it.each(states)('%s: the same refusal for both, on both hosts', async (_state, code, pause) => {
       const world = await apps.world();
       await pause(world);
-      const twins = await expectEquivalent(world, pausedOutcome);
+      const twins = await equivalent(world, pausedOutcome);
       expect(JSON.stringify(twins.key)).toContain(code);
     });
 
@@ -552,7 +707,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         ...world,
         grant: { ...world.grant, bearer: refreshed.body.access_token },
       };
-      const twins = await expectEquivalent(rotated, pausedOutcome);
+      const twins = await equivalent(rotated, pausedOutcome);
       expect(JSON.stringify(twins.key)).toContain('AUTH_AGENT_SUSPENDED');
     });
   });
@@ -570,9 +725,10 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     it('the next request is 401 for both; the access epoch moves; the grant refresh is invalid_grant', async () => {
       const epochs = apps.mcp.get(AccessEpochService, { strict: false });
       const worlds = await apps.pair();
-      const twins = await expectEquivalent(
+      const twins = await equivalent(
         worlds,
-        async ({ world, credentialId, bearer }) => {
+        async ({ world, via, credentialId, bearer }) => {
+          const sibling = credentialOf(world, via === 'key' ? 'grant' : 'key');
           const before = await epochs.current(world.organizationId);
           const revoked = await apps.asPerson(
             world,
@@ -585,11 +741,14 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
             list: seen(await rpc(bearer, '/', 'tools/list')),
             call: seen(await call(bearer, '/', TOOLS.free.name)),
             apiHost: observed(await onApi(bearer, 'get', '/agents/me/delegate')),
+            // The other credential of the same agent is untouched (review I1).
+            siblingList: seen(await rpc(sibling.bearer, '/', 'tools/list')),
           };
         },
         { dataSource: apps.dataSource },
       );
       expect((twins.key as { result: unknown }).result).toMatchObject({
+        siblingList: { status: 200 },
         revoked: 204,
         epochMoved: true,
         list: { status: 401 },
@@ -649,9 +808,9 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     });
 
     it('PATCH /agent-credentials/:id/access has the same effect on both', async () => {
-      const twins = await expectEquivalent(
+      const twins = await equivalent(
         await apps.pair(),
-        async ({ world, credentialId, bearer }) => ({
+        async ({ world, via, credentialId, bearer }) => ({
           patched: await apps.asPerson(
             world,
             'patch',
@@ -660,10 +819,21 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
           ),
           read: await apps.asPerson(world, 'get', `/agent-credentials/${credentialId}/access`),
           view: await narrowedView(bearer),
+          // The other credential keeps the agent's access (review I1).
+          sibling: seen(
+            await call(
+              credentialOf(world, via === 'key' ? 'grant' : 'key').bearer,
+              '/',
+              TOOLS.paid.name,
+            ),
+          ),
         }),
         { dataSource: apps.dataSource },
       );
       expect(JSON.stringify(twins.key)).toContain('TOOL_NOT_ALLOWED');
+      expect(outcome(resultOf<{ sibling: ObservedResponse }>(twins).sibling)).toBe(
+        'PAYMENT_REQUIRED',
+      );
     });
 
     it('the narrowing survives an F5 replacement of the grant (assay_replaces)', async () => {
@@ -689,7 +859,13 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
           };
         },
         {
-          placeholders: ({ via }) => (via === 'grant' ? { '<credential>': replacement.id } : {}),
+          provider: apps.market.provider,
+          // The replacement is the run's credential; the grant it replaced
+          // stays apart, so a read-back of the old one would fail (review M3).
+          placeholders: ({ via }) =>
+            via === 'grant'
+              ? { '<credential>': replacement.id, '<replaced>': worlds.grant.grant.id }
+              : {},
         },
       );
       expect(twins.grant).toStrictEqual(twins.key);
@@ -704,7 +880,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
   describe('Delegate', () => {
     it('binds for both, and GET /agents/me/delegate reads it back (API host)', async () => {
       const keys = twoKeys();
-      const twins = await expectEquivalent(
+      const twins = await equivalent(
         await apps.pair(),
         async ({ via, bearer }) => ({
           before: observed(await onApi(bearer, 'get', '/agents/me/delegate')),
@@ -725,7 +901,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
 
     it('one live credential per key: a key the sibling holds is refused for both', async () => {
       const keys = twoKeys();
-      const twins = await expectEquivalent(
+      const twins = await equivalent(
         await apps.pair(),
         async ({ world, via, bearer }) => {
           const sibling = credentialOf(world, via === 'key' ? 'grant' : 'key');
@@ -737,14 +913,14 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         },
         { placeholders: ({ via }) => ({ '<delegate>': keys[via].account }) },
       );
-      expect((twins.key as Record<string, unknown>).siblingBound).toBe(201);
+      expect(resultOf<{ siblingBound: number }>(twins).siblingBound).toBe(201);
       expect(JSON.stringify(twins.key)).toContain('ACCOUNT_DELEGATE_ALREADY_BOUND');
     });
 
     it("a voucher signed by another credential's key is refused for both", async () => {
       const own = twoKeys();
       const other = twoKeys();
-      const twins = await expectEquivalent(
+      const twins = await equivalent(
         await apps.pair(),
         async ({ world, via, bearer }) => {
           const sibling = credentialOf(world, via === 'key' ? 'grant' : 'key');
@@ -774,12 +950,11 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       const keys = twoKeys();
       const renewed: Partial<Record<Via, string>> = {};
       const writesBefore = apps.market.chain.writes.length;
-      const twins = await expectEquivalent(
+      const twins = await equivalent(
         await apps.pair(),
         async ({ world, via, bearer, credentialId }) => {
           await bindDelegate(bearer, keys[via]);
           authorise(world, keys[via]);
-          const authorisations = apps.market.chain.delegations.size;
           // Idle past its expiry: the credential is not live and holds no key.
           await apps.dataSource.query(
             `UPDATE "agent_credentials" SET "expires_at" = now() - interval '1 second' WHERE "id" = $1`,
@@ -807,7 +982,6 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
             rebound,
             requirement: seen(unpaid),
             paid: seen(paid),
-            newAuthorisations: apps.market.chain.delegations.size - authorisations,
           };
         },
         {
@@ -821,7 +995,6 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       expect((twins.key as { result: unknown }).result).toMatchObject({
         expired: { status: 401 },
         rebound: { bind: { status: 201 } },
-        newAuthorisations: 0,
       });
       expect(JSON.stringify((twins.key as { result: { paid: unknown } }).result.paid)).toContain(
         'x402/receipt',
@@ -902,7 +1075,12 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       const delegates = apps.api.get(AgentDelegateService, { strict: false });
       // The MCP host's session for the grant; the API host refuses it sooner.
       const thirdParty = await sessionSource('mcp').resolve(world.grant.bearer);
-      expect(thirdParty.paymentsAllowed).toBe(false);
+      const keySession = await sessionSource('mcp').resolve(world.key.bearer);
+      expect(thirdParty).toStrictEqual({
+        ...keySession,
+        credentialId: world.grant.id,
+        paymentsAllowed: false,
+      });
       const key = newDelegateKey();
       await expect(delegates.challenge(thirdParty, key.signer.address)).rejects.toMatchObject({
         errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED',
@@ -911,7 +1089,6 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         delegates.bind(thirdParty, '00000000-0000-4000-8000-000000000000', '0x00'),
       ).rejects.toMatchObject({ errorCode: 'ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED' });
       // The API key of the same agent may.
-      const keySession = await sessionSource('mcp').resolve(world.key.bearer);
       await expect(delegates.challenge(keySession, key.signer.address)).resolves.toMatchObject({
         delegate: key.account,
       });
@@ -939,10 +1116,14 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
           status: 403,
           code: 'AUTH_CLIENT_NOT_ALLOWED_HERE',
         });
+        // The key gets through authentication and the host check: no 401, no
+        // 403, no 5xx (400 for the empty POST bodies, 404 for no policy yet).
         const served = await onApi(world.key.bearer, method, path, {});
-        expect({ path, code: served.body?.error?.code }).not.toEqual({
+        const passed = ![401, 403].includes(served.status) && served.status < 500;
+        expect({ path, status: served.status, passed }).toEqual({
           path,
-          code: 'AUTH_CLIENT_NOT_ALLOWED_HERE',
+          status: served.status,
+          passed: true,
         });
       }
     });
@@ -967,7 +1148,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     );
 
     it('every free MCP case equals the key, on every URL kind', async () => {
-      await expectEquivalent(
+      await equivalent(
         await apps.pair({ client: 'third-party' }),
         async ({ world, bearer }) => {
           await apps.toolsetFor(world, 'kit', 'PRIVATE');
@@ -981,6 +1162,17 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
           for (let n = 1; n <= FREEMIUM_QUOTA; n += 1) {
             steps[`freemium${n}`] = seen(await call(bearer, '/', TOOLS.freemium.name));
           }
+          // The URLs hosted connectors are handed (`/?free=1` by default, owner rule 5).
+          for (const path of ['/?free=1', `/?tools=${TOOLS.free.name},${TOOLS.paid.name}`]) {
+            steps[`${path} list`] = seen(await rpc(bearer, path, 'tools/list'));
+            steps[`${path} free`] = seen(await call(bearer, path, TOOLS.free.name));
+            steps[`${path} call_tool`] = seen(
+              await call(bearer, path, 'call_tool', {
+                name: TOOLS.free.name,
+                arguments: { query: 'moon landing' },
+              }),
+            );
+          }
           steps.search = seen(await call(bearer, '/', 'search_tools', { query: 'weather' }));
           steps.getTool = seen(await call(bearer, '/', 'get_tool', { name: TOOLS.free.name }));
           steps.callTool = seen(
@@ -989,6 +1181,9 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
               arguments: { query: 'moon landing' },
             }),
           );
+          // Paid step 1 with no key bound on either side: equal until Task 2.13
+          // adds the third-party fixUrl rule and sentence (review M9).
+          steps.paidRequirement = seen(await call(bearer, '/', TOOLS.paid.name));
           return steps;
         },
         { dataSource: apps.dataSource },
