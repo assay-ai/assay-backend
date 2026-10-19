@@ -3,14 +3,14 @@ import { randomUUID } from 'node:crypto';
 import { OAuthClientEntity } from '@database/postgres/entities/oauth-client.entity';
 import { OAuthClientUpsert } from '@database/postgres/repositories/oauth-client.repository';
 import { OAuthConfig } from '@modules/oauth/config/oauth.config';
+import { OAuthCounterName } from '@modules/oauth/domain/oauth-counters';
 import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
 import { OAuthRateLimiter } from '@modules/oauth/services/oauth-rate-limiter.service';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 
 /**
  * The Redis commands the OAuth services use: `INCR`, `PEXPIRE`, `GET`,
- * `SET … EX`, `DEL`. Expiries are recorded, not enforced; a test moves the
+ * `MGET`, `SET … EX`, `DEL`. Expiries are recorded, not enforced; a test moves the
  * clock or calls `expire(key)` itself.
  */
 export class FakeOAuthRedis {
@@ -48,6 +48,15 @@ export class FakeOAuthRedis {
       return Promise.reject(error);
     }
     return Promise.resolve(this.strings.get(key) ?? null);
+  }
+
+  mget(keys: string[]): Promise<(string | null)[]> {
+    try {
+      this.guard();
+    } catch (error) {
+      return Promise.reject(error);
+    }
+    return Promise.resolve(keys.map((key) => this.strings.get(key) ?? null));
   }
 
   set(key: string, value: string, _ex: 'EX', seconds: number): Promise<'OK'> {
@@ -135,22 +144,26 @@ export function oauthConfig(overrides: Partial<OAuthConfig> = {}): OAuthConfig {
   };
 }
 
-/** Real metrics on a fresh registry, so a test can read a counter back. */
-export function oauthMetrics(): { metrics: OAuthMetrics; registry: MetricsRegistryService } {
-  const registry = new MetricsRegistryService();
-  return { metrics: new OAuthMetrics(registry), registry };
+/** Real metrics over a fake Redis, so a test can read a counter back. */
+export function oauthMetrics(counters: FakeOAuthRedis = new FakeOAuthRedis()): {
+  metrics: OAuthMetrics;
+  counters: FakeOAuthRedis;
+} {
+  return { metrics: new OAuthMetrics(fakeCache(counters)), counters };
 }
 
+/**
+ * A request-path counter, summed over every hourly bucket. The token
+ * counter's label is `{grant_type}.{result}`.
+ */
 export async function counterValue(
-  registry: MetricsRegistryService,
-  name: string,
-  labels: Record<string, string> = {},
+  counters: FakeOAuthRedis,
+  name: OAuthCounterName,
+  label: string,
 ): Promise<number> {
-  const metric = await registry.registry.getSingleMetric(name)?.get();
-  const value = metric?.values.find((entry) =>
-    Object.entries(labels).every(([key, want]) => entry.labels[key] === want),
-  );
-  return value?.value ?? 0;
+  const keys = counters.keys(`oauth:m:${name}:${label}:`);
+  const values = await Promise.all(keys.map((key) => counters.get(key)));
+  return values.reduce((total, value) => total + Number(value ?? 0), 0);
 }
 
 export class Clock {

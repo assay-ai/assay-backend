@@ -263,7 +263,7 @@ describe('OAuthAccessTokenMcpSessionSource', () => {
     });
   });
 
-  describe('the private 401 reason (assay_mcp_unauthorized_total)', () => {
+  describe('the private 401 reason (the mcp_unauthorized counter)', () => {
     async function reasonOf(fx: ReturnType<typeof build>): Promise<unknown> {
       const error = await fx.source.resolve(ACCESS_TOKEN).then(
         () => null,

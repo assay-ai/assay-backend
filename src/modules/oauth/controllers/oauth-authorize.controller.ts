@@ -134,7 +134,7 @@ export class OAuthAuthorizeController {
       return;
     }
     if (count > OAUTH_RATE_LIMITS.authorizePerIpPerMinute) {
-      this.metrics.incAuthorize('rate_limited');
+      await this.metrics.incAuthorize('rate_limited');
       res.setHeader('Retry-After', String(retryAfterSeconds(OAUTH_MINUTE_SECONDS)));
       sendHtml(res, 429, RATE_LIMITED_PAGE);
       return;
@@ -171,7 +171,7 @@ export class OAuthAuthorizeController {
       (typeof rawState === 'string' && rawState.length <= OAUTH_STATE_MAX_LENGTH);
     const state = typeof rawState === 'string' && stateUsable ? rawState : null;
     const fail = (error: AuthorizationErrorCode, outcome: 'invalid_request' | 'invalid_target') => {
-      this.metrics.incAuthorize(outcome);
+      void this.metrics.incAuthorize(outcome);
       redirect(res, authorizationErrorLocation(redirectUri, error, state, this.config.issuer));
     };
 
@@ -238,7 +238,7 @@ export class OAuthAuthorizeController {
       return;
     }
     await this.stampClient(client);
-    this.metrics.incAuthorize('stored');
+    await this.metrics.incAuthorize('stored');
 
     // One cookie per request; past MAX_REQUEST_COOKIES the oldest are expired.
     res.setHeader('Set-Cookie', [
@@ -261,7 +261,7 @@ export class OAuthAuthorizeController {
 
     const rid = single(req.query, 'request');
     if (!isWellFormedRid(rid)) {
-      this.metrics.incConsent('not_found');
+      await this.metrics.incConsent('not_found');
       sendHtml(res, 404, CONTINUE_EXPIRED_PAGE);
       return;
     }
@@ -272,7 +272,7 @@ export class OAuthAuthorizeController {
       // it: discard it, so neither they nor whoever started it can finish it
       // (T8). An undecided request stays, so a stray tab cannot end a flow
       // before the person has decided. Both answers are the same page.
-      this.metrics.incConsent('continue_cookie_missing');
+      await this.metrics.incConsent('continue_cookie_missing');
       await this.store.discardIfDecided(rid);
       sendHtml(res, 403, CONTINUE_WRONG_BROWSER_PAGE);
       return;
@@ -282,7 +282,7 @@ export class OAuthAuthorizeController {
     res.setHeader('Set-Cookie', clearRequestCookie(cookieName));
     const request = await this.store.take(rid);
     if (!request) {
-      this.metrics.incConsent('not_found');
+      await this.metrics.incConsent('not_found');
       sendHtml(res, 404, CONTINUE_EXPIRED_PAGE);
       return;
     }
@@ -341,7 +341,7 @@ export class OAuthAuthorizeController {
   }
 
   private preRedirectFailure(res: Response, reason: PreRedirectReason): void {
-    this.metrics.incAuthorize(reason);
+    void this.metrics.incAuthorize(reason);
     redirect(res, withQuery(`${this.config.webAppUrl}/connect/authorize-error`, { reason }));
   }
 

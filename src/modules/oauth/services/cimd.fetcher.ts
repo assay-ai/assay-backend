@@ -131,12 +131,12 @@ export class CimdFetcher {
     if (await this.failedRecently(url)) return { ok: false, reason: 'invalid' };
 
     if (!this.isVerified(url) && !(await this.withinBudgets(url, ipKey))) {
-      this.metrics.incCimdFetch('budget');
+      await this.metrics.incCimdFetch('budget');
       return { ok: false, reason: 'budget' };
     }
 
     const outcome = await this.fetchDocument(url);
-    this.metrics.incCimdFetch(outcome.result);
+    await this.metrics.incCimdFetch(outcome.result);
     if (outcome.result !== 'ok') {
       await this.rememberFailure(url);
       return { ok: false, reason: 'invalid' };

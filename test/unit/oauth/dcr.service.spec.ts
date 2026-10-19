@@ -1,3 +1,5 @@
+import { Logger } from '@nestjs/common';
+
 import { OAuthClientKind } from '@database/postgres/entities/oauth-client.entity';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { DcrService } from '@modules/oauth/services/dcr.service';
@@ -8,9 +10,7 @@ import {
   Clock,
   FakeOAuthClientRepository,
   FakeOAuthRedis,
-  counterValue,
   oauthConfig,
-  oauthMetrics,
   rateLimiter,
 } from './helpers/oauth-fakes';
 
@@ -31,20 +31,18 @@ function setup(caps: { dcrGlobalPerDay?: number; dcrPer48PerHour?: number } = {}
   const redis = new FakeOAuthRedis();
   const repo = new FakeOAuthClientRepository();
   const clock = new Clock();
-  const { metrics, registry } = oauthMetrics();
   const service = new DcrService(
     repo as unknown as OAuthClientRepository,
     rateLimiter(redis, clock),
-    metrics,
     oauthConfig(caps),
     clock.now,
   );
-  return { service, repo, redis, clock, registry };
+  return { service, repo, redis, clock };
 }
 
 describe('DcrService (§6.3.8)', () => {
   it('registers a public client and returns the 201 body', async () => {
-    const { service, repo, clock, registry } = setup();
+    const { service, repo, clock } = setup();
 
     const result = await service.register(body({ client_uri: 'https://code.example.com' }), IP);
 
@@ -65,7 +63,6 @@ describe('DcrService (§6.3.8)', () => {
     expect(row.clientUri).toBe('https://code.example.com');
     expect(row.fetchedAt).toBeNull();
     expect(row.cacheUntil).toBeNull();
-    expect(await counterValue(registry, 'assay_oauth_dcr_total')).toBe(1);
   });
 
   it('returns no secret and no registration_access_token', async () => {
@@ -330,9 +327,12 @@ describe('DcrService (§6.3.8)', () => {
   });
 
   describe('per-client_name daily count (§6.3.8 alert, review M5)', () => {
-    it('counts past 100 registrations of one name in a UTC day, by hash only', async () => {
-      const { service, registry, redis } = setup({ dcrGlobalPerDay: 1000, dcrPer48PerHour: 1000 });
-      const flood = () => counterValue(registry, 'assay_oauth_dcr_client_name_flood_total');
+    it('logs past 100 registrations of one name in a UTC day, by hash only', async () => {
+      const { service, redis } = setup({ dcrGlobalPerDay: 1000, dcrPer48PerHour: 1000 });
+      const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+      const flood = () =>
+        warn.mock.calls.filter(([message]) => String(message).startsWith('dcr.client_name_flood'))
+          .length;
       for (let i = 0; i < 100; i += 1) {
         await service.register(body(), `10.0.${i >> 4}.${i}`);
       }
@@ -341,6 +341,10 @@ describe('DcrService (§6.3.8)', () => {
       await service.register(body({ client_name: 'Other' }), '10.1.0.2');
       expect(await flood()).toBe(1);
       expect([...redis.strings.keys()].some((key) => key.includes('Visual Studio'))).toBe(false);
+      expect(warn.mock.calls.some(([message]) => String(message).includes('Visual Studio'))).toBe(
+        false,
+      );
+      warn.mockRestore();
     });
   });
 });

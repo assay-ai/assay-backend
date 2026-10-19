@@ -25,6 +25,7 @@ import {
   OAUTH_ACCESS_TOKEN_TTL_SECONDS,
   OAUTH_AUTHORIZATION_CODE_TTL_SECONDS,
   OAUTH_REFRESH_GRACE_SECONDS,
+  OAUTH_REVOKED_BY_CODE_REUSED,
 } from '../constants/oauth.constants';
 import { GracePayload, open as openGrace, seal as sealGrace } from '../domain/grace-box';
 import { hashOpaqueToken, isWellFormed, mint } from '../domain/opaque-token';
@@ -32,7 +33,6 @@ import { verifyS256 } from '../domain/pkce';
 import { normaliseResource } from '../domain/resource';
 import { normaliseScope } from '../domain/scope';
 import { OAUTH_SYSTEM_ACTOR, OAuthGrantWriter } from './oauth-grant.writer';
-import { OAuthMetrics } from './oauth-metrics.service';
 
 /** The 200 body of `POST {MCP}/oauth/token` (RFC 6749 §5.1). */
 export interface TokenPair {
@@ -126,9 +126,6 @@ export function grantStoppedReuseBody(name: string): string {
   return `We stopped ${name} because its sign-in was used twice. Sign in again on that device.`;
 }
 
-/** `revoked_by` of a grant whose code was presented a second time (R-OA-6). */
-export const OAUTH_REVOKED_BY_CODE_REUSED = 'system:oauth-code-reused';
-
 const SYSTEM_ACTOR = OAUTH_SYSTEM_ACTOR;
 
 const INVALID_GRANT: OAuthError = { error: 'invalid_grant' };
@@ -184,7 +181,6 @@ export class OAuthTokenService {
     private readonly accessTokens: OAuthAccessTokenRepository,
     private readonly credentials: AgentCredentialRepository,
     private readonly cache: CacheService,
-    private readonly metrics: OAuthMetrics,
     @Inject(NOTIFICATION_PORT) private readonly notifications: NotificationPort,
   ) {}
 
@@ -366,9 +362,7 @@ export class OAuthTokenService {
       agentId: credential.agentId,
       clientId: client.clientId,
     });
-    if (reuse.outcome === 'stale') this.metrics.incRefreshReuse('stale');
     if (reuse.outcome === 'revoked') {
-      this.metrics.incRefreshReuse('revoked');
       await this.bumpAccessEpoch(token.organizationId);
       await this.notifyStoppedForReuse(token, credential.agentId, client, reuse.credentialName);
     }
@@ -519,7 +513,6 @@ export class OAuthTokenService {
       return INVALID_GRANT;
     }
 
-    this.metrics.incRefreshGrace();
     await this.audit.recordAfterCommit({
       organizationId: token.organizationId,
       actor: SYSTEM_ACTOR,

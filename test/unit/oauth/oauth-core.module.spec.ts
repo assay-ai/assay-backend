@@ -99,4 +99,30 @@ describe('OAuthCoreModule', () => {
     };
     expect(walk(AppSchedulerModule)).toBe(false);
   });
+
+  it('no module the scheduler imports provides OAUTH_CONFIG or OAuthMetrics', () => {
+    const seen = new Set<unknown>();
+    const provided: unknown[] = [];
+    const walk = (module: unknown): void => {
+      if (!module || seen.has(module)) return;
+      seen.add(module);
+      const target = (module as { module?: unknown }).module ?? module;
+      for (const source of [target, module]) {
+        const providers = [
+          ...((Reflect.getMetadata('providers', source as object) ?? []) as unknown[]),
+          ...(((source as { providers?: unknown[] }).providers ?? []) as unknown[]),
+        ];
+        for (const provider of providers) {
+          provided.push((provider as { provide?: unknown }).provide ?? provider);
+        }
+      }
+      const imports = (Reflect.getMetadata('imports', target as object) ?? []) as unknown[];
+      const dynamic = ((module as { imports?: unknown[] }).imports ?? []) as unknown[];
+      [...imports, ...dynamic].forEach(walk);
+    };
+    walk(AppSchedulerModule);
+    expect(provided.length).toBeGreaterThan(0);
+    expect(provided).not.toContain(OAUTH_CONFIG);
+    expect(provided).not.toContain(OAuthMetrics);
+  });
 });

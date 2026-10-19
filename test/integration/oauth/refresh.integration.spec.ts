@@ -28,13 +28,15 @@ import {
 import { seal as sealGrace } from '@modules/oauth/domain/grace-box';
 import { mint } from '@modules/oauth/domain/opaque-token';
 import { OAuthGrantWriter } from '@modules/oauth/services/oauth-grant.writer';
-import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
 import {
   OAuthTokenService,
   TokenPair,
   isOAuthError,
 } from '@modules/oauth/services/oauth-token.service';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
+import {
+  OAuthDatabaseFacts,
+  OAuthSignalsReader,
+} from '@modules/observability/services/oauth-signals.reader';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { AuditLogWriter } from '@shared/audit';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
@@ -58,8 +60,8 @@ describe('OAuth refresh rotation — real database and Redis', () => {
   let clients: OAuthClientRepository;
   let credentials: AgentCredentialRepository;
   let service: OAuthTokenService;
-  let registry: MetricsRegistryService;
-  let metrics: OAuthMetrics;
+  let signals: OAuthSignalsReader;
+  let baseline: OAuthDatabaseFacts;
   let notifications: NotificationRequest[];
   let bumps: string[];
   let client: OAuthClientEntity;
@@ -107,11 +109,11 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     );
   });
 
-  beforeEach(() => {
+  beforeEach(async () => {
     notifications = [];
     bumps = [];
-    registry = new MetricsRegistryService();
-    metrics = new OAuthMetrics(registry);
+    signals = new OAuthSignalsReader(dataSource, new CacheService(redis));
+    baseline = await signals.databaseFacts(new Date(0));
     service = makeService(new CacheService(redis));
   });
 
@@ -141,7 +143,6 @@ describe('OAuth refresh rotation — real database and Redis', () => {
       new OAuthAccessTokenRepository(dataSource),
       credentials,
       cache,
-      metrics,
       notifier,
     );
   }
@@ -300,12 +301,9 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     return row;
   }
 
-  async function counter(name: string, labels: Record<string, string> = {}): Promise<number> {
-    const metric = await registry.registry.getSingleMetric(name)?.get();
-    const value = metric?.values.find((entry) =>
-      Object.entries(labels).every(([key, want]) => entry.labels[key] === want),
-    );
-    return value?.value ?? 0;
+  /** How far a dashboard fact (spec §6.7, read from the database) moved in this test. */
+  async function fact(name: keyof OAuthDatabaseFacts): Promise<number> {
+    return (await signals.databaseFacts(new Date(0)))[name] - baseline[name];
   }
 
   // ── rotation ───────────────────────────────────────────────────────────────
@@ -384,7 +382,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expect(used[0].actorType).toBe('system');
     expect(used[0].after).toEqual(expect.objectContaining({ clientId: client.clientId }));
     expect(JSON.stringify(used[0])).not.toContain(hashOf(pair.refresh_token));
-    expect(await counter('assay_oauth_refresh_grace_total')).toBe(1);
+    expect(await fact('refreshGraceUses')).toBe(1);
 
     // Still exactly one child: the parent and its child.
     const [{ rows }] = (await dataSource.query(
@@ -456,7 +454,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expect(await refresh(pair.refresh_token)).toEqual({ error: 'invalid_grant' });
     expect((await credential(credentialId)).revokedAt).toBeNull();
     expect(await auditOf('oauth.refresh_grace_used', credentialId)).toHaveLength(0);
-    expect(await counter('assay_oauth_refresh_grace_total')).toBe(0);
+    expect(await fact('refreshGraceUses')).toBe(0);
     expect(notifications).toHaveLength(0);
     // The committed child still works.
     expectPair(await refresh(next.refresh_token));
@@ -504,7 +502,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
       // Nothing revoked by the grace path itself.
       expect(after.revokedBy).toBe(_label === 'revoked' ? 'user-elsewhere' : before.revokedBy);
       expect(await auditOf('oauth.refresh_grace_used', credentialId)).toHaveLength(0);
-      expect(await counter('assay_oauth_refresh_grace_total')).toBe(0);
+      expect(await fact('refreshGraceUses')).toBe(0);
       expect(notifications).toHaveLength(0);
     },
   );
@@ -546,7 +544,7 @@ describe('OAuth refresh rotation — real database and Redis', () => {
       }),
     );
     expect(JSON.stringify(notifications[0])).not.toContain(next.access_token);
-    expect(await counter('assay_oauth_refresh_reuse_total', { kind: 'revoked' })).toBe(1);
+    expect(await fact('stoppedForRefreshReuse')).toBe(1);
     expect(bumps).toEqual([ORGANIZATION]);
 
     // The child is dead with the grant.
@@ -581,8 +579,8 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expect(stale[0].after).toEqual(expect.objectContaining({ clientId: client.clientId }));
     expect(await auditOf('oauth.refresh_reuse_detected', credentialId)).toHaveLength(0);
     expect(notifications).toHaveLength(0);
-    expect(await counter('assay_oauth_refresh_reuse_total', { kind: 'stale' })).toBe(1);
-    expect(await counter('assay_oauth_refresh_reuse_total', { kind: 'revoked' })).toBe(0);
+    expect(await fact('refreshStaleReuse')).toBe(1);
+    expect(await fact('stoppedForRefreshReuse')).toBe(0);
     expectPair(await refresh(next.refresh_token));
   });
 
@@ -783,8 +781,8 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expect(await auditOf('oauth.refresh_reuse_detected', credentialId)).toHaveLength(1);
     expect(await auditOf('oauth.refresh_stale_reuse', credentialId)).toHaveLength(0);
     expect(notifications).toHaveLength(1);
-    expect(await counter('assay_oauth_refresh_reuse_total', { kind: 'revoked' })).toBe(1);
-    expect(await counter('assay_oauth_refresh_reuse_total', { kind: 'stale' })).toBe(0);
+    expect(await fact('stoppedForRefreshReuse')).toBe(1);
+    expect(await fact('refreshStaleReuse')).toBe(0);
     expect(await liveTokens(credentialId)).toEqual({ access: 0, refresh: 0 });
   });
 

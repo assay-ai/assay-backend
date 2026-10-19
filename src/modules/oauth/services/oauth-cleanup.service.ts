@@ -107,9 +107,6 @@ const DELETABLE_CLIENT_WHERE = `
  * `SET oauth:cleanup:lock 1 NX EX 3600` makes a second run inside the hour,
  * from this replica or another, a no-op. Without Redis the run is skipped:
  * the next day's run catches up, and every delete is idempotent.
- *
- * `assay_oauth_live_grants_per_agent` is not set here: the API app's
- * `MetricsCollectorService` sets it, where `/metrics` is served.
  */
 @Injectable()
 export class OAuthCleanupService {

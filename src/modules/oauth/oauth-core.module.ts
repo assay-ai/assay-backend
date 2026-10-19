@@ -1,7 +1,6 @@
 import { Module } from '@nestjs/common';
 
 import { NotificationModule } from '@modules/notification/notification.module';
-import { MetricsRegistryModule } from '@modules/observability/metrics-registry.module';
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { AuditLogModule } from '@shared/audit/audit-log.module';
 import { APP_ROLE, AppRole, resolveAppRole } from '@shared/app-role/app-role';
@@ -25,7 +24,7 @@ import { OAuthTokenService } from './services/oauth-token.service';
  * `continue`) requires `OAUTH_REQUEST_COOKIE_SECRET` and pre-warms the
  * verified clients' metadata; the API app does neither. Never by the
  * scheduler: it provides `OAUTH_CONFIG`, which fails the boot without the
- * OAuth secrets, and `OAuthMetrics`, which may exist once per container.
+ * OAuth secrets, and `OAuthMetrics`, the request-path counters.
  *
  * Relies on the global `PostgresModule` (the OAuth and credential
  * repositories), `RedisCacheModule` (`CacheService`) and `NetworkModule`
@@ -35,7 +34,7 @@ import { OAuthTokenService } from './services/oauth-token.service';
  * stateless over the shared Redis counter, so a second instance is the same.
  */
 @Module({
-  imports: [MetricsRegistryModule, AuditLogModule, NotificationModule],
+  imports: [AuditLogModule, NotificationModule],
   providers: [
     {
       provide: OAUTH_CONFIG,
