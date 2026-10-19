@@ -1,10 +1,10 @@
 /**
- * The 239 bytes a buyer signs, pinned offset by offset.
+ * The 240 bytes a buyer signs, pinned offset by offset.
  *
  * ## Where these offsets come from
  *
  * The program's `Voucher` struct is `seq, issued_at, expires_at`, which puts
- * `issued_at` at **223** and `expires_at` at **231**. An earlier layout table had
+ * `issued_at` at **224** and `expires_at` at **232**. An earlier layout table had
  * the two **swapped**. Copying it would mean every buyer signed a message the
  * program never recomputes: `redeem_voucher` would refuse with
  * `MissingBuyerSignature` after the call had been served and the money held.
@@ -16,7 +16,7 @@ import {
   VOUCHER_DOMAIN,
   VOUCHER_MESSAGE_LENGTH,
   voucherMessage,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 const PROGRAM = address('DbHEzzA6CwKRY9xLGSzDgqei7VmnHpF6YociozaN8qFR');
 const PAYER = address('9xGuGHFYb4KysmNbZpvHEUJYwxC8zwFhP1GT2apAyCjj');
@@ -41,31 +41,31 @@ function fields(overrides: Partial<Parameters<typeof voucherMessage>[0]> = {}) {
 
 const bytes = (value: string) => Uint8Array.from(getAddressEncoder().encode(address(value)));
 
-describe('voucherMessage — the 239 bytes a buyer signs', () => {
-  it('is exactly 239 bytes and starts with the v2 domain tag', () => {
+describe('voucherMessage — the 240 bytes a buyer signs', () => {
+  it('is exactly 240 bytes and starts with the v2 domain tag', () => {
     const message = voucherMessage(fields());
 
     expect(message).toHaveLength(VOUCHER_MESSAGE_LENGTH);
-    expect(VOUCHER_MESSAGE_LENGTH).toBe(239);
-    expect(Array.from(message.subarray(0, 15))).toEqual(Array.from(VOUCHER_DOMAIN));
-    expect(new TextDecoder().decode(message.subarray(0, 15))).toBe('x402:voucher:v2');
+    expect(VOUCHER_MESSAGE_LENGTH).toBe(240);
+    expect(Array.from(message.subarray(0, 16))).toEqual(Array.from(VOUCHER_DOMAIN));
+    expect(new TextDecoder().decode(message.subarray(0, 16))).toBe('assay:voucher:v2');
   });
 
   it('puts every field at the offset the program reads it from', () => {
     const message = voucherMessage(fields());
 
-    expect(Array.from(message.subarray(15, 47))).toEqual(Array.from(bytes(PROGRAM)));
-    expect(Array.from(message.subarray(47, 79))).toEqual(Array.from(bytes(PAYER)));
-    expect(Array.from(message.subarray(79, 111))).toEqual(Array.from(bytes(PAY_TO)));
-    expect(Array.from(message.subarray(111, 143))).toEqual(Array.from(bytes(PROVIDER)));
-    expect(new DataView(message.buffer).getBigUint64(143, true)).toBe(1_000_000n);
-    expect(Array.from(message.subarray(151, 183))).toEqual(Array(32).fill(0xa1));
-    expect(Array.from(message.subarray(183, 215))).toEqual(Array(32).fill(0xb2));
-    expect(new DataView(message.buffer).getBigUint64(215, true)).toBe(42n);
-    // 223 is `issued_at` and 231 is `expires_at`, matching the program's
+    expect(Array.from(message.subarray(16, 48))).toEqual(Array.from(bytes(PROGRAM)));
+    expect(Array.from(message.subarray(48, 80))).toEqual(Array.from(bytes(PAYER)));
+    expect(Array.from(message.subarray(80, 112))).toEqual(Array.from(bytes(PAY_TO)));
+    expect(Array.from(message.subarray(112, 144))).toEqual(Array.from(bytes(PROVIDER)));
+    expect(new DataView(message.buffer).getBigUint64(144, true)).toBe(1_000_000n);
+    expect(Array.from(message.subarray(152, 184))).toEqual(Array(32).fill(0xa1));
+    expect(Array.from(message.subarray(184, 216))).toEqual(Array(32).fill(0xb2));
+    expect(new DataView(message.buffer).getBigUint64(216, true)).toBe(42n);
+    // 224 is `issued_at` and 232 is `expires_at`, matching the program's
     // `Voucher` struct; see the file header.
-    expect(new DataView(message.buffer).getBigInt64(223, true)).toBe(1_700_000_000n);
-    expect(new DataView(message.buffer).getBigInt64(231, true)).toBe(1_700_000_300n);
+    expect(new DataView(message.buffer).getBigInt64(224, true)).toBe(1_700_000_000n);
+    expect(new DataView(message.buffer).getBigInt64(232, true)).toBe(1_700_000_300n);
   });
 
   it('changes when any one field changes — a signature covers all nine', () => {
@@ -89,15 +89,15 @@ describe('voucherMessage — the 239 bytes a buyer signs', () => {
   });
 
   it('does not confuse issued_at with expires_at', () => {
-    // Swapping the two produces different bytes, so a program that reads 223 as
+    // Swapping the two produces different bytes, so a program that reads 224 as
     // `issued_at` and a client that writes `expires_at` there cannot both be
     // right. This is the assertion the swapped layout would have failed.
     const straight = voucherMessage(fields());
     const swapped = voucherMessage(fields({ issuedAt: 1_700_000_300n, expiresAt: 1_700_000_000n }));
 
     expect(Array.from(swapped)).not.toEqual(Array.from(straight));
-    expect(new DataView(swapped.buffer).getBigInt64(223, true)).toBe(1_700_000_300n);
-    expect(new DataView(swapped.buffer).getBigInt64(231, true)).toBe(1_700_000_000n);
+    expect(new DataView(swapped.buffer).getBigInt64(224, true)).toBe(1_700_000_300n);
+    expect(new DataView(swapped.buffer).getBigInt64(232, true)).toBe(1_700_000_000n);
   });
 
   it('refuses a hash that is not exactly 32 bytes', () => {
@@ -117,6 +117,6 @@ describe('voucherMessage — the 239 bytes a buyer signs', () => {
     // voucher and the verifier's slash attestation.
     const lengths = [VOUCHER_MESSAGE_LENGTH, SLASH_MESSAGE_LENGTH];
     expect(new Set(lengths).size).toBe(lengths.length);
-    expect(lengths).toEqual([239, 210]);
+    expect(lengths).toEqual([240, 211]);
   });
 });

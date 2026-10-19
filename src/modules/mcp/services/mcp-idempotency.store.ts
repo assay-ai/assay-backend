@@ -7,7 +7,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 import { idempotencyKeyDigest } from '../domain/idempotency';
 
 /**
- * The numbers behind `_meta["x402/idempotency-key"]`, injected like
+ * The numbers behind `_meta["assay/idempotency-key"]`, injected like
  * `MCP_PRICING` so the retention window is not a deploy.
  */
 export interface McpIdempotencyConfig {

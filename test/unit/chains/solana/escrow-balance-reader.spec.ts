@@ -4,7 +4,7 @@ import {
   TOKEN_PROGRAM_ADDRESS,
 } from '@solana-program/token';
 import { Address, address, getAddressDecoder } from '@solana/kit';
-import { findEscrowPda, getBuyerEscrowEncoder } from '@x402/settlement-client';
+import { findEscrowPda, getBuyerEscrowEncoder } from '@assay/settlement-client';
 
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS, parseAssetId } from '@modules/chains/ports/caip.types';

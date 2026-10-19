@@ -32,7 +32,7 @@ const ORG = 'org_1';
 
 /**
  * `SlaWindowRepository`, faked: `findOneBy` for the point reads
- * (`buildCase`, `caseLabel`, `coFailureCount`, `restoration`'s window-label
+ * (`buildCase`, `restoration`'s window-label
  * lookup) and `createQueryBuilder` for `loadPriorWindows`, which this suite
  * does not exercise beyond returning an empty list — none of the five
  * required cases touch `priorWindows`.
@@ -113,13 +113,9 @@ class FakeBindingVersions {
 
 class FakeCaseRead {
   evidenceCount = 0;
-  coFailure = 0;
 
   async countEvidencePacksForWindow() {
     return this.evidenceCount;
-  }
-  async countPeerBindingsWithMaterialDeviation() {
-    return this.coFailure;
   }
 }
 
@@ -372,30 +368,7 @@ describe('SlashCaseService.buildCase — changeOverlay', () => {
 });
 
 describe('SlashCaseService.buildCase — clocks', () => {
-  it('clamps `secondsRemaining` at zero rather than going negative', async () => {
-    const { service, proposals } = build();
-
-    proposals.seed(
-      buildProposal({
-        id: 'p1',
-        organizationId: ORG,
-        strikeId: null,
-        windowId: null,
-        status: 'DISPUTED',
-        disputedAt: new Date(Date.now() - 2 * 60 * 60 * 1000),
-        // Already elapsed — the platform missed its own window, but the sweep
-        // has not run yet, so the case is still `DISPUTED` in this row.
-        platformDecisionDueAt: new Date(Date.now() - 60 * 60 * 1000),
-      }),
-    );
-
-    const result = await service.buildCase(ORG, 'p1');
-
-    expect(result.proposal.clocks.runningClock).toBe('PLATFORM');
-    expect(result.proposal.clocks.secondsRemaining).toBe(0);
-  });
-
-  it('runs the provider’s clock only while `respondByAt` is still in the future', async () => {
+  it('runs the provider’s clock only while the record’s door is still in the future', async () => {
     const { service, proposals } = build();
 
     proposals.seed(
@@ -405,7 +378,8 @@ describe('SlashCaseService.buildCase — clocks', () => {
         strikeId: null,
         windowId: null,
         status: 'PROPOSED',
-        respondByAt: new Date(Date.now() + 60 * 60 * 1000),
+        chainStatus: 'PENDING',
+        chainExecutableAt: new Date(Date.now() + 60 * 60 * 1000),
       }),
     );
 
@@ -534,66 +508,6 @@ describe('SlashCaseService.restoration', () => {
   });
 });
 
-describe('SlashCaseService.caseLabel', () => {
-  it('renders `w_<sequence> · bnd_<label>` when the proposal has a window', async () => {
-    const { service, proposals, windows } = build();
-
-    proposals.seed(buildProposal({ id: 'p1', organizationId: ORG, windowId: 'window_1' }));
-    windows.seed(buildWindow({ id: 'window_1', organizationId: ORG, sequence: 4471 }));
-
-    const label = await service.caseLabel(ORG, 'p1');
-    expect(label).toMatch(/^w_4471 · bnd_[0-9A-F]{3}$/);
-  });
-
-  it('falls back to the binding label alone for a windowless `DATA_FAIL` proposal', async () => {
-    const { service, proposals } = build();
-
-    proposals.seed(
-      buildProposal({
-        id: 'p1',
-        organizationId: ORG,
-        source: 'DATA_FAIL',
-        strikeId: null,
-        windowId: null,
-      }),
-    );
-
-    const label = await service.caseLabel(ORG, 'p1');
-    expect(label).toMatch(/^bnd_[0-9A-F]{3}$/);
-  });
-});
-
-describe('SlashCaseService.coFailureCount', () => {
-  it('returns 0, honestly, when the proposal has no window to align peers against', async () => {
-    const { service, proposals, caseRead } = build();
-
-    proposals.seed(
-      buildProposal({
-        id: 'p1',
-        organizationId: ORG,
-        source: 'DATA_FAIL',
-        strikeId: null,
-        windowId: null,
-      }),
-    );
-    caseRead.coFailure = 7; // proves the service does NOT reach the repository at all
-
-    const count = await service.coFailureCount(ORG, 'p1');
-    expect(count).toBe(0);
-  });
-
-  it('otherwise defers to the peer-deviation query', async () => {
-    const { service, proposals, windows, caseRead } = build();
-
-    proposals.seed(buildProposal({ id: 'p1', organizationId: ORG, windowId: 'window_1' }));
-    windows.seed(buildWindow({ id: 'window_1', organizationId: ORG }));
-    caseRead.coFailure = 3;
-
-    const count = await service.coFailureCount(ORG, 'p1');
-    expect(count).toBe(3);
-  });
-});
-
 /**
  * The slash case's "what happens if you do nothing" panel, against a
  * **per-chain** stake.
@@ -666,7 +580,7 @@ describe('SlashCaseService.buildCase — the clocks of an EVM case', () => {
   const EVM_ASSET = 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3';
   const DOOR = new Date('2099-01-01T00:00:00Z');
 
-  it('has one deadline, the record’s executableAt, and no in-app or platform clock', async () => {
+  it('has one deadline, the record’s executableAt', async () => {
     const { service, proposals, strikes, windows, bindings } = build();
     proposals.seed(
       buildProposal({
@@ -675,7 +589,6 @@ describe('SlashCaseService.buildCase — the clocks of an EVM case', () => {
         assetId: EVM_ASSET,
         chainStatus: 'PENDING',
         chainExecutableAt: DOOR,
-        platformDecisionDueAt: new Date('2098-01-01T00:00:00Z'),
       }),
     );
     strikes.seed(buildStrike({ id: 'strike_1', organizationId: ORG }));
@@ -685,11 +598,8 @@ describe('SlashCaseService.buildCase — the clocks of an EVM case', () => {
     const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
 
     expect(clocks).toMatchObject({
-      disputeOnChain: true,
       chainState: 'PENDING',
       disputeBy: DOOR,
-      respondByAt: null,
-      platformDecisionDueAt: null,
       runningClock: 'PROVIDER',
     });
   });
@@ -793,23 +703,6 @@ describe('SlashCaseService.buildCase — the clocks of an EVM case', () => {
       chainState: 'PARTIALLY_EXECUTED',
       chainRecords: 2,
       cancelledRecords: 1,
-    });
-  });
-
-  it('keeps the in-app clocks on Solana', async () => {
-    const { service, proposals, strikes, windows, bindings } = build();
-    proposals.seed(buildProposal({ id: 'p1', organizationId: ORG }));
-    strikes.seed(buildStrike({ id: 'strike_1', organizationId: ORG }));
-    windows.seed(buildWindow({ id: 'window_1', organizationId: ORG }));
-    bindings.seed(buildBinding({ id: TEST_BINDING_ID, organizationId: ORG }));
-
-    const { clocks } = (await service.buildCase(ORG, 'p1')).proposal;
-
-    expect(clocks).toMatchObject({
-      disputeOnChain: false,
-      chainState: null,
-      disputeBy: null,
-      respondByAt: new Date('2026-08-12T09:14:00Z'),
     });
   });
 });

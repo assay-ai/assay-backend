@@ -11,7 +11,7 @@ import { RegisteredVerifierStatus } from '@modules/verification/signing/ports/ve
 /**
  * The `VerifierKey` reader.
  *
- * The decoding itself is `@x402/settlement-client`, generated from the
+ * The decoding itself is `@assay/settlement-client`, generated from the
  * program's IDL, so the offsets are no longer this repo's to get wrong. What
  * these tests pin is everything the generated decoder does *not* decide: that a
  * never-registered key is `null` rather than an error, that the discriminator is

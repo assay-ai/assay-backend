@@ -526,7 +526,7 @@ describe('ProviderPayoutAddressService.prove', () => {
       nonce: 'f'.repeat(64),
       expiresAt: Math.floor((Date.now() + 60_000) / 1000),
     };
-    // Voucher v2 signs the DEPLOYED program id at offset 15, so the adapter
+    // Voucher v2 signs the DEPLOYED program id at offset 16, so the adapter
     // needs one to build a message at all.
     const solana = new SolanaChainAdapter(
       stubRpc(),

@@ -4,9 +4,9 @@ import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { ListToolsRequestSchema, ListToolsResult } from '@modelcontextprotocol/sdk/types.js';
 
 import {
-  X402_FREE_QUOTA,
-  X402_PAID_ALTERNATIVE,
-  X402_PRICING_MODE,
+  ASSAY_FREE_QUOTA,
+  ASSAY_PAID_ALTERNATIVE,
+  ASSAY_PRICING_MODE,
 } from '@modules/mcp/constants/mcp.constants';
 import { PricingMode } from '@modules/tool/ports/tool.types';
 
@@ -18,7 +18,7 @@ import { buildMcpHarness } from './helpers/mcp-harness';
  * extending `mcp-protocol.spec.ts`'s own approach: the SDK
  * validates and **strips** any `annotations` key it does not recognise
  * (`ToolSchema.annotations` is `$strip`), so only a client-side read proves
- * `x402/pricingMode`, `x402/freeQuota` and `x402/paidAlternative` actually
+ * `assay/pricingMode`, `assay/freeQuota` and `assay/paidAlternative` actually
  * reach an agent rather than merely existing in the server's own object.
  *
  * This wires `ListToolsRequestSchema` straight to
@@ -62,39 +62,39 @@ describe('free-tier annotations, through the reference MCP client', () => {
     return client;
   }
 
-  it('carries x402/pricingMode and x402/paidAlternative in _meta after SDK validation', async () => {
+  it('carries assay/pricingMode and assay/paidAlternative in _meta after SDK validation', async () => {
     const client = await connectWithViewer();
 
     const result: ListToolsResult = await client.listTools();
     const [tool] = result.tools;
 
-    expect(tool._meta?.[X402_PRICING_MODE]).toBe(PricingMode.FREEMIUM);
-    expect(tool._meta?.[X402_PAID_ALTERNATIVE]).toBe('search_web');
+    expect(tool._meta?.[ASSAY_PRICING_MODE]).toBe(PricingMode.FREEMIUM);
+    expect(tool._meta?.[ASSAY_PAID_ALTERNATIVE]).toBe('search_web');
     // Not a behavioural hint the MCP spec recognises, so `annotations` itself is
     // stripped clean of it — proving the duplication is what saves it, not a
     // coincidence of this particular SDK version.
-    expect(tool.annotations).not.toHaveProperty(X402_PRICING_MODE);
+    expect(tool.annotations).not.toHaveProperty(ASSAY_PRICING_MODE);
   });
 
-  it('carries this agent’s own x402/freeQuota in _meta when a viewer connects', async () => {
+  it('carries this agent’s own assay/freeQuota in _meta when a viewer connects', async () => {
     const client = await connectWithViewer({ organizationId: 'org-1', agentId: 'agent-1' });
 
     const result: ListToolsResult = await client.listTools();
     const [tool] = result.tools;
 
-    expect(tool._meta?.[X402_FREE_QUOTA]).toEqual({
+    expect(tool._meta?.[ASSAY_FREE_QUOTA]).toEqual({
       remaining: 42,
       limit: 100,
       resetsAt: '2026-08-11T00:00:00.000Z',
     });
   });
 
-  it('omits x402/freeQuota when nobody is asking on an agent’s behalf', async () => {
+  it('omits assay/freeQuota when nobody is asking on an agent’s behalf', async () => {
     const client = await connectWithViewer(undefined);
 
     const result: ListToolsResult = await client.listTools();
     const [tool] = result.tools;
 
-    expect(tool._meta).not.toHaveProperty(X402_FREE_QUOTA);
+    expect(tool._meta).not.toHaveProperty(ASSAY_FREE_QUOTA);
   });
 });

@@ -48,7 +48,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findConfigPda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const UPDATE_CONFIG_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   29, 158, 252, 191, 10, 83, 219, 99,
@@ -59,7 +59,7 @@ export function getUpdateConfigDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type UpdateConfigInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountAdmin extends string | AccountMeta<string> = string,
   TAccountConfig extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
@@ -173,13 +173,13 @@ export type UpdateConfigAsyncInput<
 export async function getUpdateConfigInstructionAsync<
   TAccountAdmin extends string,
   TAccountConfig extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: UpdateConfigAsyncInput<TAccountAdmin, TAccountConfig>,
   config?: { programAddress?: TProgramAddress },
 ): Promise<UpdateConfigInstruction<TProgramAddress, TAccountAdmin, TAccountConfig>> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -229,13 +229,13 @@ export type UpdateConfigInput<
 export function getUpdateConfigInstruction<
   TAccountAdmin extends string,
   TAccountConfig extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: UpdateConfigInput<TAccountAdmin, TAccountConfig>,
   config?: { programAddress?: TProgramAddress },
 ): UpdateConfigInstruction<TProgramAddress, TAccountAdmin, TAccountConfig> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -259,7 +259,7 @@ export function getUpdateConfigInstruction<
 }
 
 export type ParsedUpdateConfigInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

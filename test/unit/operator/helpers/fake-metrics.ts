@@ -20,7 +20,6 @@ export interface FakeMetricsOverrides {
   intentRateCounts?: { lastMinute: number; hourAgoMinute: number };
   verificationBacklog?: { count: number; p95AgeSeconds: number | null };
   policyLifecycleCounts?: { shadow: number; total: number };
-  oldProcessCaseCounts?: { count: number; oldestAgeSeconds: number | null };
   operatorWorkCounts?: { pendingToolReviews: number; openCallDisputes: number };
 }
 
@@ -38,9 +37,6 @@ export function fakeMetricsRepository(
     policyLifecycleCounts: jest
       .fn()
       .mockResolvedValue(overrides.policyLifecycleCounts ?? { shadow: 0, total: 0 }),
-    oldProcessCaseCounts: jest
-      .fn()
-      .mockResolvedValue(overrides.oldProcessCaseCounts ?? { count: 0, oldestAgeSeconds: null }),
     operatorWorkCounts: jest
       .fn()
       .mockResolvedValue(

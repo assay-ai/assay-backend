@@ -152,7 +152,7 @@ import { McpRateLimiter } from './services/mcp-rate-limiter.service';
     },
 
     {
-      // `_meta["x402/idempotency-key"]`: how long a keyed call's result stays
+      // `_meta["assay/idempotency-key"]`: how long a keyed call's result stays
       // replayable — the retry window, default 900 s, at most 3600 s — and the
       // largest output kept, default 256 KB. A bad value fails the boot.
       provide: MCP_IDEMPOTENCY_CONFIG,

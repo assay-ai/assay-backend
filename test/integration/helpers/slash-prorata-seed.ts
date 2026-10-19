@@ -35,8 +35,6 @@ export interface SeedProRataCase {
   readonly penalty: bigint;
   readonly agents: readonly SeedAgent[];
   readonly proposedAt: Date;
-  /** Defaults to `proposedAt + 48h`. */
-  readonly respondByAt?: Date;
   /** Defaults to `proposedAt + 72h`. */
   readonly earliestExecutionAt?: Date;
   readonly label?: string;
@@ -145,9 +143,8 @@ export async function seedProRataCase(
     `INSERT INTO slash_proposals
        (id, organization_id, provider_id, binding_id, tool_id, source, strike_id, window_id,
         status, chain_request_id, penalty_amount, asset_id, decimals, proposed_at, notified_at,
-        respond_by_at, platform_decision_due_at, earliest_execution_at)
-     VALUES ($1, $2, $2, $3, $4, 'SLA_STRIKE', $5, $6, 'PROPOSED', $7, $8, $9, 6, $10, $10,
-             $11, $12, $13)`,
+        earliest_execution_at)
+     VALUES ($1, $2, $2, $3, $4, 'SLA_STRIKE', $5, $6, 'PROPOSED', $7, $8, $9, 6, $10, $10, $11)`,
     [
       proposalId,
       org,
@@ -159,8 +156,6 @@ export async function seedProRataCase(
       input.penalty.toString(),
       input.assetId,
       proposedAt,
-      input.respondByAt ?? new Date(proposedAt.getTime() + 48 * HOUR),
-      new Date(proposedAt.getTime() + 71 * HOUR),
       input.earliestExecutionAt ?? new Date(proposedAt.getTime() + 72 * HOUR),
     ],
   );

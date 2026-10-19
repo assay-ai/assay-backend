@@ -2,11 +2,7 @@ import { Type, ValidationPipe } from '@nestjs/common';
 
 import {
   CompensatedBodyDto,
-  DecideCaseBodyDto,
-  ExtendDeadlineBodyDto,
-  OpenFleetSweepBodyDto,
-  SecondSignatureBodyDto,
-  SuspendProposalBodyDto,
+  ManualCaseActionBodyDto,
   VerifyProviderBodyDto,
 } from '@modules/operator/dto/operator-console.dto';
 
@@ -33,115 +29,10 @@ describe('operator action bodies', () => {
   };
 
   const NOTE_20 = 'held for the incident';
-  const NOTE_120 = 'n'.repeat(120);
 
-  describe('decide', () => {
-    const recalculated = (extra: Record<string, unknown>) => ({
-      outcome: 'UPHELD_RECALCULATED',
-      reasonCodes: ['PRICE_BASIS_WRONG'],
-      note: NOTE_120,
-      ...extra,
-    });
-
-    it.each(['284.7', 'abc', '', '0', '-5', '028470000', ' 100', '1e3', '0x10', '१२'])(
-      'refuses recalculatedAmount %p',
-      async (recalculatedAmount) => {
-        const message = await messageOf(
-          parse(DecideCaseBodyDto, recalculated({ recalculatedAmount })),
-        );
-        expect(message).toContain('recalculatedAmount');
-        expect(message).toContain('minor units');
-      },
-    );
-
-    it.each([28470000, null, ['1']])(
-      'refuses a recalculatedAmount that is not a string: %p',
-      async (recalculatedAmount) => {
-        await expect(
-          parse(DecideCaseBodyDto, recalculated({ recalculatedAmount })),
-        ).rejects.toBeDefined();
-      },
-    );
-
-    it('requires recalculatedAmount when the outcome is UPHELD_RECALCULATED', async () => {
-      const message = await messageOf(parse(DecideCaseBodyDto, recalculated({})));
-      expect(message).toContain('recalculatedAmount');
-    });
-
-    it('accepts a positive whole number of minor units', async () => {
-      await expect(
-        parse(DecideCaseBodyDto, recalculated({ recalculatedAmount: '28470000' })),
-      ).resolves.toMatchObject({ recalculatedAmount: '28470000' });
-    });
-
-    it('does not ask for an amount on the other outcomes', async () => {
-      await expect(
-        parse(DecideCaseBodyDto, {
-          outcome: 'UPHELD',
-          reasonCodes: ['RATE_GENUINELY_EXCEEDED'],
-          note: NOTE_120,
-        }),
-      ).resolves.toMatchObject({ outcome: 'UPHELD' });
-    });
-
-    it('still validates an amount sent with another outcome', async () => {
-      await expect(
-        parse(DecideCaseBodyDto, {
-          outcome: 'UPHELD',
-          reasonCodes: ['RATE_GENUINELY_EXCEEDED'],
-          note: NOTE_120,
-          recalculatedAmount: 'abc',
-        }),
-      ).rejects.toBeDefined();
-    });
-
-    it.each([[['']], [['   ']], [['PRICE_BASIS_WRONG', ' ']]])(
-      'refuses blank reason codes %p',
-      async (reasonCodes) => {
-        await expect(
-          parse(DecideCaseBodyDto, recalculated({ reasonCodes, recalculatedAmount: '1' })),
-        ).rejects.toBeDefined();
-      },
-    );
-
-    it('counts the note after trimming', async () => {
-      await expect(
-        parse(DecideCaseBodyDto, recalculated({ note: ' '.repeat(120), recalculatedAmount: '1' })),
-      ).rejects.toBeDefined();
-      await expect(
-        parse(
-          DecideCaseBodyDto,
-          recalculated({ note: `${'n'.repeat(119)}   `, recalculatedAmount: '1' }),
-        ),
-      ).rejects.toBeDefined();
-    });
-
-    it('trims what it stores and drops blank optional references', async () => {
-      await expect(
-        parse(
-          DecideCaseBodyDto,
-          recalculated({
-            reasonCodes: [' PRICE_BASIS_WRONG '],
-            note: `  ${NOTE_120}  `,
-            ticketRef: '   ',
-            rootCauseKey: ' mapping/v3 ',
-            recalculatedAmount: '1',
-          }),
-        ),
-      ).resolves.toMatchObject({
-        reasonCodes: ['PRICE_BASIS_WRONG'],
-        note: NOTE_120,
-        ticketRef: undefined,
-        rootCauseKey: 'mapping/v3',
-      });
-    });
-  });
-
-  describe('reason code and note on every other action', () => {
+  describe('reason code and note on every action', () => {
     const bodies: [string, Type<object>, Record<string, unknown>, number][] = [
-      ['suspend', SuspendProposalBodyDto, {}, 20],
-      ['extend-deadline', ExtendDeadlineBodyDto, { additionalHours: 2 }, 20],
-      ['sweep', OpenFleetSweepBodyDto, { defectKey: 'mapping/v3', lookbackHours: 24 }, 120],
+      ['manual case action', ManualCaseActionBodyDto, {}, 20],
       ['compensated', CompensatedBodyDto, { signature: 's'.repeat(88) }, 20],
       [
         'verify-provider',
@@ -179,39 +70,14 @@ describe('operator action bodies', () => {
       });
     });
 
-    it('refuses a blank sweep defect key', async () => {
-      await expect(
-        parse(OpenFleetSweepBodyDto, {
-          defectKey: '   ',
-          lookbackHours: 24,
-          reasonCode: 'MAPPING_REGRESSION',
-          note: NOTE_120,
-        }),
-      ).rejects.toBeDefined();
-    });
-
     it('drops a blank ticket reference instead of recording an empty one', async () => {
       await expect(
-        parse(SuspendProposalBodyDto, {
+        parse(ManualCaseActionBodyDto, {
           reasonCode: 'OPERATOR_HOLD',
           note: NOTE_20,
           ticketRef: ' ',
         }),
       ).resolves.toMatchObject({ ticketRef: undefined });
-    });
-  });
-
-  describe('second signature', () => {
-    it('refuses a note made of spaces', async () => {
-      await expect(
-        parse(SecondSignatureBodyDto, { kind: 'SIGNED', note: ' '.repeat(20) }),
-      ).rejects.toBeDefined();
-    });
-
-    it('accepts a real note', async () => {
-      await expect(
-        parse(SecondSignatureBodyDto, { kind: 'OBJECTED', note: ` ${NOTE_20} ` }),
-      ).resolves.toMatchObject({ note: NOTE_20 });
     });
   });
 });

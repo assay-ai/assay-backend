@@ -14,7 +14,7 @@ import { RefusedCallsService } from '../services/refused-calls.service';
 
 /**
  * Calls refused before anything was charged: the Calls page's "Refused"
- * filter, and the page an agent's `fixUrl` (`/calls?call={id}`) opens.
+ * filter, and the page an agent's `fixUrl` (`/spend/calls?call={id}`) opens.
  */
 @ApiTags('RefusedCalls')
 @ApiBearerAuth()

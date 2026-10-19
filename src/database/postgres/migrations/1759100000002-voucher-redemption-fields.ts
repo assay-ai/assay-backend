@@ -39,7 +39,7 @@ export class VoucherRedemptionFields1759100000002 implements MigrationInterface 
     );
     await queryRunner.query(
       `COMMENT ON COLUMN "payment_intents"."voucher_resource_hash" IS ` +
-        `'sha256: plus 64 hex — offset 151 of the signed bytes, and not derivable from any other column.'`,
+        `'sha256: plus 64 hex — offset 152 of the signed bytes, and not derivable from any other column.'`,
     );
     await queryRunner.query(
       `COMMENT ON COLUMN "payment_intents"."voucher_issued_at" IS ` +

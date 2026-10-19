@@ -75,7 +75,7 @@ export class OverrideLogEntryEntity extends AbstractEntityWithoutSoftDelete {
   family: string;
 
   /**
-   * The register row, e.g. `S-3`, `V-6`, `M-2`. Constrained to begin with
+   * The register row, e.g. `S-5`, `V-6`, `M-2`. Constrained to begin with
    * `family`, so a mis-filed row cannot hide from the console's family filter.
    */
   @Column({ name: 'code', type: 'varchar', length: 8 })

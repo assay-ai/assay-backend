@@ -42,8 +42,8 @@ console.log('tools:', listed.tools.map((entry) => entry.name).join(', '));
 
 if (tool !== '--list') {
   const result = await client.callTool({ name: tool, arguments: args });
-  const receipt = result._meta?.['x402/receipt'];
-  const failure = result._meta?.['x402/error'];
+  const receipt = result._meta?.['assay/receipt'];
+  const failure = result._meta?.['assay/error'];
 
   if (receipt) {
     console.log(

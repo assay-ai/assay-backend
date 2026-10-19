@@ -63,7 +63,7 @@ const API_BASE_URL = process.env.ACCEPTANCE_API_BASE_URL ?? 'http://127.0.0.1:30
 
 /**
  * The keypair `devnet:escrow-rail-b` staked. `lib/keystore.ts` persists under
- * `scripts/devnet/.keys/` — **not** `~/.x402-keys`, which holds only the
+ * `scripts/devnet/.keys/` — **not** `~/.assay-keys`, which holds only the
  * operator's own key and its credentials file. The directory is gitignored.
  */
 const PROVIDER_KEYPAIR =

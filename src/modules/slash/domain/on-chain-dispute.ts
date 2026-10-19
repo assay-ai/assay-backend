@@ -7,19 +7,12 @@ import { ChainProposalStatus } from './chain-slash-outcome';
  * its own stake wallet, the person-held arbiter rules on chain (`upholdSlash`
  * / `cancelSlash`), an unruled dispute expires after 30 days, and the record's
  * `executableAt` is the only deadline. No in-app objection, platform deadline,
- * extension or off-chain decision applies to such a case. Solana cases keep
- * the in-app objection: that program has no dispute.
+ * extension or off-chain decision applies. Solana has no dispute path at
+ * all: it opens no slash case (`SlashProposalService.openFromStrike`).
  *
  * Pure: the watcher mirrors the chain's events onto the case, and this reads
  * the mirror.
  */
-
-/** The CAIP-2 namespace of {@link disputesOnChain}, for SQL `LIKE` (`eip155:%`). */
-export const ON_CHAIN_DISPUTE_ASSET_PREFIX = 'eip155:';
-
-export function disputesOnChain(assetId: string): boolean {
-  return assetId.startsWith(ON_CHAIN_DISPUTE_ASSET_PREFIX);
-}
 
 /** Where the case's on-chain record stands, in the provider's words. */
 export enum OnChainDisputeState {
@@ -68,7 +61,6 @@ export interface OnChainRecordMirror {
 }
 
 export interface OnChainDisputeMirror {
-  readonly assetId: string;
   readonly chainStatus: string;
   readonly chainDisputedAt: Date | null;
   readonly chainDisputeWonAt: Date | null;
@@ -140,8 +132,8 @@ export function disputeByOf(records: readonly OnChainRecordMirror[]): Date | nul
 }
 
 /**
- * The record's state from the watcher-mirrored columns, or `null` when the
- * case is not an EVM case or no record stands on chain yet.
+ * The record's state from the watcher-mirrored columns, or `null` when no
+ * record stands on chain yet.
  *
  * - With the case's records ({@link OnChainDisputeMirror.records}) the state
  *   is derived per record (review N-4); the rules below are the fallback for
@@ -156,7 +148,6 @@ export function onChainDisputeState(
   mirror: OnChainDisputeMirror,
   disputeTimeoutMs: number,
 ): OnChainDisputeState | null {
-  if (!disputesOnChain(mirror.assetId)) return null;
   if (mirror.records && mirror.records.length > 0) {
     const derived = stateOfRecords(mirror.records);
     if (derived) return derived;

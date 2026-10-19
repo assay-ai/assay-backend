@@ -29,7 +29,7 @@ export function renderDashboardHtml(
 <html lang="en">
 <head>
 <meta charset="utf-8" />
-<title>x402 — Operator Dashboard</title>
+<title>Assay — Operator Dashboard</title>
 <style>
   :root { color-scheme: light dark; }
   body {
@@ -55,7 +55,7 @@ export function renderDashboardHtml(
 </style>
 </head>
 <body>
-  <h1>x402 — Operator Dashboard</h1>
+  <h1>Assay — Operator Dashboard</h1>
   <div class="meta">
     Generated ${escapeHtml(snapshot.generatedAt)} · cached ${snapshot.cacheTtlMs / 1000}s ·
     viewing as ${escapeHtml(operatorDisplayName)}

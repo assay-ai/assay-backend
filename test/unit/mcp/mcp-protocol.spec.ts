@@ -3,7 +3,7 @@ import { Client } from '@modelcontextprotocol/sdk/client/index.js';
 import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
 import { CallToolResult, ListToolsResult } from '@modelcontextprotocol/sdk/types.js';
 
-import { X402_ERROR, X402_PRICE, X402_RECEIPT } from '@modules/mcp/constants/mcp.constants';
+import { ASSAY_ERROR, ASSAY_PRICE, ASSAY_RECEIPT } from '@modules/mcp/constants/mcp.constants';
 import { PaymentIntentStatus } from '@modules/payment/ports/payment.types';
 
 import {
@@ -64,7 +64,7 @@ describe('MCP protocol surface, through the reference client', () => {
     // The point of the whole exercise: after the SDK has parsed the response,
     // the price is still there. It is read from `_meta` because `annotations`
     // is a closed schema and the SDK strips unknown keys out of it.
-    expect(tool._meta?.[X402_PRICE]).toEqual({
+    expect(tool._meta?.[ASSAY_PRICE]).toEqual({
       amount: usdc('0.05').amount,
       asset: usdc('0.05').asset,
       display: '$0.05',
@@ -85,7 +85,7 @@ describe('MCP protocol surface, through the reference client', () => {
     expect(result.structuredContent).toEqual({ answer: 'forty-two' });
     expect(result.content).toEqual([{ type: 'text', text: '{"answer":"forty-two"}' }]);
 
-    const receipt = result._meta?.[X402_RECEIPT] as Record<string, unknown>;
+    const receipt = result._meta?.[ASSAY_RECEIPT] as Record<string, unknown>;
     // Durably handed to the verification worker, not judged yet — the
     // receipt says `VERIFYING`, which is the truth.
     expect(receipt.status).toBe(PaymentIntentStatus.VERIFYING);
@@ -118,7 +118,7 @@ describe('MCP protocol surface, through the reference client', () => {
     const result = (await client.callTool({ name: 'no_such_tool' })) as CallToolResult;
 
     expect(result.isError).toBe(true);
-    expect(result._meta?.[X402_ERROR]).toMatchObject({
+    expect(result._meta?.[ASSAY_ERROR]).toMatchObject({
       code: 'MCP_TOOL_NOT_FOUND',
       retryable: false,
     });
@@ -133,7 +133,7 @@ describe('MCP protocol surface, through the reference client', () => {
     })) as CallToolResult;
 
     expect(result.isError).toBe(true);
-    expect(result._meta?.[X402_ERROR]).toMatchObject({
+    expect(result._meta?.[ASSAY_ERROR]).toMatchObject({
       code: 'TOOL_MAPPING_REQUIRED_FIELD_MISSING',
       retryable: false,
     });
@@ -155,7 +155,7 @@ describe('MCP protocol surface, through the reference client', () => {
     })) as CallToolResult;
 
     expect(result.isError).toBe(true);
-    expect(result._meta?.[X402_ERROR]).toMatchObject({
+    expect(result._meta?.[ASSAY_ERROR]).toMatchObject({
       code: 'PAYMENT_INSUFFICIENT_FUNDS',
       retryable: false,
       price: usdc('0.05').amount,
@@ -180,13 +180,13 @@ describe('MCP protocol surface, through the reference client', () => {
       arguments: ARGS,
     })) as CallToolResult;
 
-    expect(outageResult._meta?.[X402_ERROR]).toMatchObject({
+    expect(outageResult._meta?.[ASSAY_ERROR]).toMatchObject({
       code: 'TOOL_ALL_BINDINGS_FAILED',
       retryable: true,
       // So the agent can open the receipt of the voided call.
       intentId: expect.any(String),
     });
-    expect(rejectedResult._meta?.[X402_ERROR]).toMatchObject({
+    expect(rejectedResult._meta?.[ASSAY_ERROR]).toMatchObject({
       code: 'PROVIDER_REQUEST_ERROR',
       retryable: false,
     });

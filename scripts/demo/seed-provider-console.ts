@@ -412,7 +412,7 @@ async function seedProvider(providers: ProviderRepository, dataSource: DataSourc
       JSON.stringify({
         challengeId: uuidFromLabel('demo:payout-challenge'),
         signature: 'demo-seed-signature-not-a-real-ed25519-signature',
-        messageVersion: 'x402-payout-proof/v1',
+        messageVersion: 'assay-payout-proof/v1',
         provedAt: provedAt.toISOString(),
       }),
       provedAt,

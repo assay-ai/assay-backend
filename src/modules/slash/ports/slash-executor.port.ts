@@ -486,11 +486,8 @@ export interface SlashExecutorPort {
    * `Config.treasury`, as CAIP-10 — the address the program pays the
    * platform's share of every penalty into.
    *
-   * Exposed because one caller must know it in order to **refuse**: a judgement
-   * whose `beneficiary` equals the treasury cannot execute, and it fails
-   * without a named error because Anchor rejects the duplicate mutable account
-   * before the handler runs. `SlashBeneficiaryService` compares against this
-   * so the refusal happens off-chain, where it can say why.
+   * Read by the compensation path, which builds the treasury's deposit back
+   * into a provider's stake.
    *
    * A read, not a second copy: the implementation returns the same value it
    * already caches for building the instruction, so the check and the

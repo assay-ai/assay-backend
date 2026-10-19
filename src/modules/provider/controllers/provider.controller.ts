@@ -13,24 +13,14 @@ import {
   GetProviderEarningsResponseDto,
 } from '../dto/get-provider-earnings.dto';
 import { GetProviderMeResponseDto } from '../dto/get-provider-me.dto';
-import {
-  GetProviderQualityQueryDto,
-  GetProviderQualityResponseDto,
-} from '../dto/get-provider-quality.dto';
 import { GetProviderStakeResponseDto } from '../dto/get-provider-stake.dto';
-import {
-  GetProviderTrafficQueryDto,
-  GetProviderTrafficResponseDto,
-} from '../dto/get-provider-traffic.dto';
 import {
   ProviderCallsExportService,
   writeExportCsv,
 } from '../services/provider-calls-export.service';
 import { ProviderEarningsService } from '../services/provider-earnings.service';
 import { ProviderProfileService } from '../services/provider-profile.service';
-import { ProviderQualityService } from '../services/provider-quality.service';
 import { ProviderStakeService } from '../services/provider-stake.service';
-import { ProviderTrafficService } from '../services/provider-traffic.service';
 
 /**
  * `GET /api/v1/providers/me` and its report sub-resources.
@@ -47,8 +37,6 @@ import { ProviderTrafficService } from '../services/provider-traffic.service';
 export class ProviderController {
   constructor(
     private readonly profile: ProviderProfileService,
-    private readonly traffic: ProviderTrafficService,
-    private readonly quality: ProviderQualityService,
     private readonly earnings: ProviderEarningsService,
     private readonly stake: ProviderStakeService,
     private readonly callsExport: ProviderCallsExportService,
@@ -60,30 +48,6 @@ export class ProviderController {
   @ApiResponse({ status: 404, description: 'This organization has no provider record' })
   async getMe(@CurrentSession() session: McpSession): Promise<GetProviderMeResponseDto> {
     return this.profile.getMe(session.organizationId);
-  }
-
-  @Get('traffic')
-  @ApiOperation({
-    summary:
-      'Call volume over a window, bucketed by UTC calendar day, plus a per-agent breakdown ' +
-      'and an optional `agentId` filter',
-  })
-  @ApiResponse({ status: 200, type: GetProviderTrafficResponseDto })
-  async getTraffic(
-    @CurrentSession() session: McpSession,
-    @Query() query: GetProviderTrafficQueryDto,
-  ): Promise<GetProviderTrafficResponseDto> {
-    return this.traffic.getTraffic(session.organizationId, query);
-  }
-
-  @Get('quality')
-  @ApiOperation({ summary: 'Quality position: paid vs free pass rate, availability, verdict mix' })
-  @ApiResponse({ status: 200, type: GetProviderQualityResponseDto })
-  async getQuality(
-    @CurrentSession() session: McpSession,
-    @Query() query: GetProviderQualityQueryDto,
-  ): Promise<GetProviderQualityResponseDto> {
-    return this.quality.getQuality(session.organizationId, query);
   }
 
   @Get('earnings')

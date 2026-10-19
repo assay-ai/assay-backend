@@ -39,30 +39,13 @@ export class SlashProposalClocksDto {
   @ApiPropertyOptional({
     nullable: true,
     description:
-      'When the notification was DELIVERED. The provider’s clock starts here, not at issuance — ' +
-      'a webhook to a dead endpoint must not consume their appeal window.',
+      'When the notification was DELIVERED. The case is proposed on chain only after delivery, ' +
+      'so the provider has heard of it before any stake is reserved.',
   })
   notifiedAt: Date | null;
 
   @ApiPropertyOptional({ nullable: true })
   acknowledgedAt: Date | null;
-
-  @ApiPropertyOptional({
-    nullable: true,
-    description:
-      'The provider’s deadline to object in the app. Null until delivery is confirmed, and ' +
-      'always null on EVM, where the only deadline is `disputeBy`.',
-  })
-  respondByAt: Date | null;
-
-  @ApiPropertyOptional({
-    nullable: true,
-    description:
-      'OUR deadline to decide, set when an in-app objection is filed. Missing it overturns the ' +
-      'case automatically and records it as our failure, not the provider’s. Always null on ' +
-      'EVM: the arbiter rules on chain, and an unruled dispute expires there after 30 days.',
-  })
-  platformDecisionDueAt: Date | null;
 
   @ApiProperty({
     description: 'Nothing executes before this, even if the provider does nothing at all.',
@@ -76,10 +59,10 @@ export class SlashProposalClocksDto {
   secondsRemaining: number | null;
 
   @ApiProperty({
-    description: 'Which clock `secondsRemaining` refers to: PROVIDER, PLATFORM or NONE.',
-    enum: ['PROVIDER', 'PLATFORM', 'NONE'],
+    description: 'Which clock `secondsRemaining` refers to: PROVIDER (the dispute window) or NONE.',
+    enum: ['PROVIDER', 'NONE'],
   })
-  runningClock: 'PROVIDER' | 'PLATFORM' | 'NONE';
+  runningClock: 'PROVIDER' | 'NONE';
 
   @ApiPropertyOptional({
     description:
@@ -109,14 +92,6 @@ export class SlashProposalClocksDto {
     description: 'How many of the current parts are `Disputed` on chain, awaiting the arbiter.',
   })
   chainDisputedParts: number;
-
-  @ApiProperty({
-    description:
-      'True on EVM: the provider disputes with `disputeSlash` from its own stake wallet ' +
-      '(`POST /providers/me/slash-requests/dispute-intent`), the arbiter rules on chain, and ' +
-      '`POST …/dispute` is refused. False on Solana, which keeps the in-app objection.',
-  })
-  disputeOnChain: boolean;
 
   @ApiPropertyOptional({
     nullable: true,
@@ -427,15 +402,6 @@ export class SlashProposalCaseDto {
 
   @ApiProperty({ description: 'Verdicts in the evidence pack for this window' })
   evidenceVerdictCount: number;
-
-  @ApiPropertyOptional({
-    enum: DisputeClaimType,
-    nullable: true,
-    description:
-      'The claim the dispute form should pre-select, derived from the evidence rather than ' +
-      'from the provider — "we would rather find our own defect than win a dispute about it".',
-  })
-  suggestedClaim: DisputeClaimType | null;
 }
 
 /** One row of the dispute case timeline. */

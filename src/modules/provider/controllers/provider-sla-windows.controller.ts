@@ -6,8 +6,6 @@ import { CurrentSession, SessionAuthGuard } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
 import {
-  GetBindingSlaParamsDto,
-  GetBindingSlaResponseDto,
   GetSlaWindowEvidenceParamsDto,
   GetSlaWindowEvidenceResponseDto,
   GetSlaWindowParamsDto,
@@ -62,36 +60,5 @@ export class ProviderSlaWindowsController {
     @Param() params: GetSlaWindowEvidenceParamsDto,
   ): Promise<GetSlaWindowEvidenceResponseDto> {
     return this.slaWindows.getEvidence(session.organizationId, params.windowId);
-  }
-}
-
-/**
- * `GET /providers/me/bindings/:bindingId/sla` — the SLA workbench.
- *
- * A separate controller (rather than a fourth route on
- * `ProviderSlaWindowsController`) because its base path is `providers/me/
- * bindings`, not `providers/me/sla-windows` — the resource this endpoint
- * describes is the binding, with its SLA workbench as one facet of it, on the
- * same footing as `providers/me/tool-bindings/:id`.
- */
-@ApiTags('Provider')
-@ApiBearerAuth()
-@UseGuards(SessionAuthGuard)
-@Controller('providers/me/bindings')
-export class ProviderBindingSlaController {
-  constructor(private readonly slaWindows: ProviderSlaWindowsService) {}
-
-  @Get(':bindingId/sla')
-  @ApiOperation({
-    summary:
-      'The SLA workbench for one binding: measured rate, effective threshold, peer distribution',
-  })
-  @ApiResponse({ status: 200, type: GetBindingSlaResponseDto })
-  @ApiResponse({ status: 404, description: 'No binding of yours with this id' })
-  async getBindingSla(
-    @CurrentSession() session: McpSession,
-    @Param() params: GetBindingSlaParamsDto,
-  ): Promise<GetBindingSlaResponseDto> {
-    return this.slaWindows.getBindingSla(session.organizationId, params.bindingId);
   }
 }

@@ -3,7 +3,7 @@
  * accounts that the routing stake-gate check needs in order to mean anything.
  *
  *     yarn devnet:stake-accounts                        # dry run, sends nothing
- *     yarn devnet:stake-accounts --execute --operator ~/keys/x402-admin.json
+ *     yarn devnet:stake-accounts --execute --operator ~/keys/assay-admin.json
  *
  * ## Why this script exists
  *
@@ -74,7 +74,7 @@ import {
   findStakeVaultPda,
   getDepositStakeInstructionAsync,
   getOpenStakeInstructionAsync,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { CHAIN_IDS, toAccountId } from '@modules/chains/ports/caip.types';
 import { loadMinimumStakeParameters } from '@modules/provider/services/provider-stake.service';

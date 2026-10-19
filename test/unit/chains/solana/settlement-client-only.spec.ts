@@ -2,7 +2,7 @@
  * The settlement program's wire format is produced in exactly one place, and
  * that place is generated.
  *
- * `@x402/settlement-client` is Codama output rendered from the program's IDL,
+ * `@assay/settlement-client` is Codama output rendered from the program's IDL,
  * which is itself rendered from the program source, and two CI gates keep the
  * chain honest end to end (`scripts/check-idl-sync.sh` in assay-solana, and
  * `yarn client:check`). None of that is worth anything if a second encoder can
@@ -31,7 +31,7 @@
  *   - encoding an instruction     `get<Name>Instruction[Async](…)`
  *   - decoding an account         `fetch<Name>` / `get<Name>Decoder()`
  *   - deriving a PDA              `find<Name>Pda(…)`
- *   - naming a custom error       `getX402PaymentErrorMessage(code)`
+ *   - naming a custom error       `getAssayPaymentErrorMessage(code)`
  *
  * If the program genuinely has no such function, the program's IDL is the thing
  * to change — not this scan.
@@ -51,7 +51,7 @@ const BACKEND = join(__dirname, '..', '..', '..', '..');
 const ROOTS = ['src', 'scripts', join('packages', 'settlement-client', 'src')] as const;
 
 /** The generated client, by the specifier every consumer imports it under. */
-const CLIENT_PACKAGE = '@x402/settlement-client';
+const CLIENT_PACKAGE = '@assay/settlement-client';
 
 /**
  * How a file is recognised as touching the settlement program.
@@ -294,7 +294,7 @@ describe('the settlement program is only ever spoken to through the generated cl
 
   it('does not fire on ordinary code that has nothing to do with encoding', () => {
     const innocent = [
-      "import { findVerifierKeyPda } from '@x402/settlement-client';",
+      "import { findVerifierKeyPda } from '@assay/settlement-client';",
       'const [pda] = await findVerifierKeyPda({ verifier }, { programAddress });',
       'const account = await fetchMaybeVerifierKey(rpc, pda);',
       'const bytes = new Uint8Array(getBase64Encoder().encode(account.value.data[0]));',

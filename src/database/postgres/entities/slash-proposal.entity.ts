@@ -5,8 +5,7 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
 /**
  * A proposal to take a provider's capital, with a clock on it.
  *
- * This is the object the slash-proposal case screen renders and the row the
- * adjudication queue orders. It is the first thing in the system that reads
+ * This is the object the slash-proposal case screen renders. It is the first thing in the system that reads
  * `sla_strikes`: the SLA window service wrote strikes with
  * `status = 'RECORDED'` and nothing ever moved them, because the lifecycle
  * lives here.
@@ -17,27 +16,19 @@ import { OrganizationScopedEntityWithoutSoftDelete } from './organization-scoped
  * lose an answer.
  *
  * ```text
- *   PROPOSED ──── provider objects, in window ────► DISPUTED
- *      │                                              │
- *      │ nobody objects, respond_by_at passes         │ operator claims it
- *      │ (AUTO_UNDISPUTED)                            ▼
- *      │                                        UNDER_REVIEW
- *      │                                              │
- *      │                                     adjudicator decides
- *      │                                              ▼
- *      │                                       AWAITING_SECOND
- *      │                                              │
- *      │                              second signs ───┤─── second objects
- *      │                                              │      (back to
- *      ▼                                              ▼    UNDER_REVIEW)
- *   UPHELD ◄─────────────────────────────────► OVERTURNED (terminal)
+ *   PROPOSED ──── disputeSlash on chain ────► DISPUTED
+ *      │                                        │
+ *      │ the record's door passes undisputed    │ the arbiter: upholdSlash
+ *      │ (AUTO_UNDISPUTED)                      │ (CHAIN_ARBITER), or
+ *      ▼                                        │ cancelSlash / expiry
+ *   UPHELD ◄────────────────────────────────────┘ ──► CANCELLED
  *      │
- *      │ earliest_execution_at has passed
+ *      │ the record's executableAt has passed
  *      ▼
- *   EXECUTING ──► EXECUTED ──── later overturn ──► REVERSED (terminal)
+ *   EXECUTING ──► EXECUTED ──── compensated ──► REVERSED (terminal)
  *
- *   WAIVED    — below the de-minimis floor, never adjudicated (terminal)
- *   CANCELLED — S-1, suspended by an operator pre-attestation (terminal)
+ *   WAIVED    — below the de-minimis floor, never levied (terminal)
+ *   CANCELLED — voided by the chain, or closed with nothing standing (terminal)
  * ```
  *
  * `outcome` carries which of the six outcomes the adjudicator chose. It is NULL
@@ -190,29 +181,15 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   proposedAt: Date;
 
   /**
-   * When the notification was **delivered**, which is when the provider's clock
-   * starts. A webhook to a dead endpoint must not consume their appeal window,
-   * so `respond_by_at` stays NULL until this is set.
+   * When the notification was **delivered**. The case is proposed on chain
+   * only after this is set, so no stake is reserved for a case the provider
+   * was never told about.
    */
   @Column({ name: 'notified_at', type: 'timestamptz', nullable: true })
   notifiedAt: Date | null;
 
   @Column({ name: 'acknowledged_at', type: 'timestamptz', nullable: true })
   acknowledgedAt: Date | null;
-
-  /** Derived from `notified_at`, never from `proposed_at`. */
-  @Column({ name: 'respond_by_at', type: 'timestamptz', nullable: true })
-  respondByAt: Date | null;
-
-  /**
-   * Our own deadline, set when a dispute is filed.
-   *
-   * The one rule that makes understaffing our cost instead of the provider's:
-   * miss it and the case is automatically overturned. Nothing else puts a clock
-   * on us.
-   */
-  @Column({ name: 'platform_decision_due_at', type: 'timestamptz', nullable: true })
-  platformDecisionDueAt: Date | null;
 
   /**
    * The timelock. The case screen states it as a promise — "never before that
@@ -252,20 +229,13 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
    * `SlashRecord.executable_at` — `proposed_at + Config.slash_delay_seconds`.
    *
    * Not the same thing as `earliest_execution_at`, which is this platform's
-   * promise to the provider. Two things an earlier version of this comment got
-   * wrong, both of which cost a guard:
+   * promise to the provider, and **not "always at or after the promise"**: it
+   * is frozen when the record is written, so a record adopted at an older
+   * `proposed_at` puts it BEFORE the promise. `execute_slash` is
+   * permissionless, so that gap is a window in which any stranger may take
+   * the penalty while the provider is still inside the time they were given.
    *
-   * - **`earliest_execution_at` moves.** `ArbitrationService.extendDeadline`
-   *   (`S-8`) pushes it forward, by up to 14 days.
-   * - **This is not "always at or after the promise".** It is frozen when the
-   *   record is written and nothing off-chain can move it, so an extension made
-   *   after the propose, or a record adopted at an older `proposed_at`, puts it
-   *   BEFORE the promise. `execute_slash` is permissionless, so that gap is a
-   *   window in which any stranger may take the penalty while the provider is
-   *   still inside the time they were given.
-   *
-   * Three things keep the two in the right order, and none of them is this
-   * column: `extendDeadline` refuses an extension past a standing door,
+   * Two things keep the two in the right order, and neither is this column:
    * `proposeDue` defers a propose that would open one early, and the executor
    * waits on `max(both clocks)` so at least this process never goes first.
    */

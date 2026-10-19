@@ -27,7 +27,7 @@ import {
   getConfigEncoder,
   getRedeemVoucherInstructionAsync,
   voucherMessage,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { FeePayerSignResult } from '@modules/chains/facilitator/signing/fee-payer-signer.port';
 import { ASSET_IDS, getAssetMetadata } from '@modules/chains/ports/asset-registry';
@@ -125,7 +125,7 @@ function requestFor(
   return { ...base, signature: base.signature || signVoucher(buyer, base) };
 }
 
-/** A real ed25519 signature over the real 239 bytes. */
+/** A real ed25519 signature over the real 240 bytes. */
 function signVoucher(
   buyer: ReturnType<typeof keypairFromSeed>,
   request: Omit<RedeemVoucherRequest, 'signature'>,

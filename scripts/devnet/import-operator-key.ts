@@ -45,7 +45,7 @@ function usage(): void {
   console.log(`
 Import an operator keypair into a file, from whatever form you have it in.
 
-  yarn devnet:import-key --out ~/.x402-keys/devnet-operator.json [--expect <pubkey>]
+  yarn devnet:import-key --out ~/.assay-keys/devnet-operator.json [--expect <pubkey>]
 
 You are prompted for the key. Nothing is echoed, nothing is stored in shell
 history, and the key is never passed as an argument.

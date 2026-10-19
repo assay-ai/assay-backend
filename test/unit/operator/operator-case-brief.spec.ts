@@ -1,4 +1,4 @@
-import { AdjudicationQueueService } from '@modules/operator/services/adjudication-queue.service';
+import { OperatorCaseBriefService } from '@modules/operator/services/operator-case-brief.service';
 import { ChainProposalStatus } from '@modules/slash/domain/chain-slash-outcome';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
 
@@ -7,7 +7,7 @@ import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state'
  * `cancel-intent` is guarded on `chain_status`, which is not the case status:
  * an overturned case waiting for the settlement admin reads `OVERTURNED`.
  */
-describe('AdjudicationQueueService.brief', () => {
+describe('OperatorCaseBriefService.brief', () => {
   function build(chainStatus: ChainProposalStatus | null, chainExecutableAt: Date | null = null) {
     const proposals = {
       findOneScoped: jest
@@ -26,13 +26,7 @@ describe('AdjudicationQueueService.brief', () => {
       timeline: jest.fn().mockResolvedValue([]),
       restoration: jest.fn().mockResolvedValue(null),
     };
-    const service = new AdjudicationQueueService(
-      proposals as never,
-      { findOneBy: jest.fn() } as never,
-      {} as never,
-      {} as never,
-      cases as never,
-    );
+    const service = new OperatorCaseBriefService(proposals as never, cases as never);
     return { service, proposals };
   }
 

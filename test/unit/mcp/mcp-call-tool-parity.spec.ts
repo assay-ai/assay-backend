@@ -4,13 +4,13 @@ import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 
 import { AccountId } from '@modules/chains/ports/caip.types';
 import {
-  X402_ERROR,
-  X402_IDEMPOTENCY_KEY,
+  ASSAY_ERROR,
+  ASSAY_IDEMPOTENCY_KEY,
   X402_PAYMENT_REQUIRED,
-  X402_RAIL,
-  X402_RECEIPT,
-  X402_REPLAYED,
-  X402_VOUCHER,
+  ASSAY_RAIL,
+  ASSAY_RECEIPT,
+  ASSAY_REPLAYED,
+  ASSAY_VOUCHER,
 } from '@modules/mcp/constants/mcp.constants';
 import { McpScope } from '@modules/mcp/ports/mcp-scope';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
@@ -130,7 +130,7 @@ describe('call_tool runs exactly the tools/call pipeline', () => {
       const result = await callVia(h.client, via, TOOL_NAME, ARGS);
       expect(result.isError).toBeFalsy();
       expect(result.structuredContent).toEqual({ answer: 'forty-two' });
-      expect(result._meta?.[X402_RECEIPT]).toMatchObject({ held: { display: '$0.05' } });
+      expect(result._meta?.[ASSAY_RECEIPT]).toMatchObject({ held: { display: '$0.05' } });
       expect(h.invoker.invocations).toHaveLength(1);
       results[via] = normalised(result);
       ledgers[via] = JSON.parse(
@@ -168,7 +168,7 @@ describe('call_tool runs exactly the tools/call pipeline', () => {
     for (const via of ['tools/call', 'call_tool'] as const) {
       const h = await connect(scope);
       const result = await callVia(h.client, via, name, ARGS);
-      expect((result._meta?.[X402_ERROR] as { code: string }).code).toBe(code);
+      expect((result._meta?.[ASSAY_ERROR] as { code: string }).code).toBe(code);
       expect(h.intents.rows.size).toBe(0);
       expect(h.ledger.events).toHaveLength(0);
       expect(h.invoker.invocations).toHaveLength(0);
@@ -192,18 +192,18 @@ describe('call_tool runs exactly the tools/call pipeline', () => {
 
   it('honours the idempotency key in its _meta: one charge, the retry replayed', async () => {
     const h = await connect();
-    const meta = { [X402_IDEMPOTENCY_KEY]: 'retry-key-0001' };
+    const meta = { [ASSAY_IDEMPOTENCY_KEY]: 'retry-key-0001' };
     const first = await callVia(h.client, 'call_tool', TOOL_NAME, ARGS, meta);
     const again = await callVia(h.client, 'call_tool', TOOL_NAME, ARGS, meta);
-    expect(first._meta?.[X402_REPLAYED]).toBeUndefined();
-    expect(again._meta?.[X402_REPLAYED]).toBe(true);
+    expect(first._meta?.[ASSAY_REPLAYED]).toBeUndefined();
+    expect(again._meta?.[ASSAY_REPLAYED]).toBe(true);
     expect(again.structuredContent).toEqual(first.structuredContent);
     expect(h.invoker.invocations).toHaveLength(1);
     expect(h.ledger.events.filter((event) => event.kind === 'HOLD_CREATE')).toHaveLength(1);
 
     // The key space is the pipeline's: the same key through tools/call replays too.
     const direct = await callVia(h.client, 'tools/call', TOOL_NAME, ARGS, meta);
-    expect(direct._meta?.[X402_REPLAYED]).toBe(true);
+    expect(direct._meta?.[ASSAY_REPLAYED]).toBe(true);
     expect(h.invoker.invocations).toHaveLength(1);
   });
 
@@ -211,7 +211,7 @@ describe('call_tool runs exactly the tools/call pipeline', () => {
     const h = await connect();
     for (const inner of ['call_tool', 'search_tools', 'get_tool']) {
       const result = await callVia(h.client, 'call_tool', inner, {});
-      expect((result._meta?.[X402_ERROR] as { code: string }).code).toBe(
+      expect((result._meta?.[ASSAY_ERROR] as { code: string }).code).toBe(
         ToolAccessErrorCode.TOOL_NOT_IN_TOOLSET,
       );
     }
@@ -249,7 +249,7 @@ describe('call_tool on rail B: the voucher handshake in _meta (§8.2 H)', () => 
       expiresAt: now + 120,
     };
     return {
-      [X402_VOUCHER]: {
+      [ASSAY_VOUCHER]: {
         voucher,
         signature: fakeVoucherSignature(voucher.payer),
         providerId: requirement.providerId,
@@ -259,7 +259,7 @@ describe('call_tool on rail B: the voucher handshake in _meta (§8.2 H)', () => 
 
   it('returns x402/paymentRequired at the top level, then serves on the voucher', async () => {
     const h = await connect(scopeOf(), RAIL_B_SESSION);
-    const asked = await callVia(h.client, 'call_tool', TOOL_NAME, ARGS, { [X402_RAIL]: 'B' });
+    const asked = await callVia(h.client, 'call_tool', TOOL_NAME, ARGS, { [ASSAY_RAIL]: 'B' });
     expect(asked.isError).toBe(true);
     const requirement = asked._meta?.[X402_PAYMENT_REQUIRED] as VoucherRequirement;
     expect(requirement).toMatchObject({ providerId: 'p1' });
@@ -267,7 +267,7 @@ describe('call_tool on rail B: the voucher handshake in _meta (§8.2 H)', () => 
     const paid = await callVia(h.client, 'call_tool', TOOL_NAME, ARGS, voucherMeta(requirement));
     expect(paid.isError).toBeFalsy();
     expect(paid.structuredContent).toEqual({ answer: 'forty-two' });
-    expect(paid._meta?.[X402_RECEIPT]).toMatchObject({ providerId: 'p1' });
+    expect(paid._meta?.[ASSAY_RECEIPT]).toMatchObject({ providerId: 'p1' });
     expect(h.invoker.invocations).toHaveLength(1);
   });
 
@@ -275,7 +275,7 @@ describe('call_tool on rail B: the voucher handshake in _meta (§8.2 H)', () => 
     const asks: unknown[] = [];
     for (const via of ['tools/call', 'call_tool'] as const) {
       const h = await connect(scopeOf(), RAIL_B_SESSION);
-      const asked = await callVia(h.client, via, TOOL_NAME, ARGS, { [X402_RAIL]: 'B' });
+      const asked = await callVia(h.client, via, TOOL_NAME, ARGS, { [ASSAY_RAIL]: 'B' });
       const requirement = { ...(asked._meta?.[X402_PAYMENT_REQUIRED] as object) };
       delete (requirement as Record<string, unknown>).intentId;
       asks.push(requirement);

@@ -17,7 +17,7 @@ import { renderVisitor } from '@codama/renderers-js';
 import { createFromRoot } from 'codama';
 
 export const PACKAGE_ROOT = join(dirname(fileURLToPath(import.meta.url)), '..');
-export const IDL_PATH = join(PACKAGE_ROOT, 'idl', 'x402_payment.json');
+export const IDL_PATH = join(PACKAGE_ROOT, 'idl', 'assay_payment.json');
 export const GENERATED_DIR = join(PACKAGE_ROOT, 'src', 'generated');
 
 /**
@@ -49,7 +49,7 @@ const PRETTIER_OPTIONS = {
  */
 export async function render() {
   const idl = JSON.parse(readFileSync(IDL_PATH, 'utf8'));
-  const scratch = mkdtempSync(join(tmpdir(), 'x402-client-'));
+  const scratch = mkdtempSync(join(tmpdir(), 'assay-client-'));
 
   const codama = createFromRoot(rootNodeFromAnchor(idl));
   await codama.accept(

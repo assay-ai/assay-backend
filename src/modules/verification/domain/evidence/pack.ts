@@ -15,7 +15,7 @@ import {
 export const BODY_DIGEST_PREFIX = 'sha256:';
 
 /** The version of the document shape, carried inside the document. */
-export const EVIDENCE_PACK_SCHEMA = 'x402/evidence-pack/v1' as const;
+export const EVIDENCE_PACK_SCHEMA = 'assay/evidence-pack/v1' as const;
 
 /**
  * The digest of one body, or `null` when the call had none.

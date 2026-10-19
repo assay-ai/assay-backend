@@ -88,7 +88,7 @@ import {
   findStakeVaultPda,
   getDepositStakeInstructionAsync,
   getOpenStakeInstructionAsync,
-} from '@x402/settlement-client';
+} from '@assay/settlement-client';
 
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
@@ -200,7 +200,7 @@ async function main(): Promise<void> {
     // the buyer and provider are this harness's own, persisted so a re-run is
     // idempotent rather than a fresh escrow every time.
     const operator = await loadKeypairSigner(
-      process.env.SOLANA_ADMIN_KEYPAIR ?? join(homedir(), '.x402-keys', 'devnet-operator.json'),
+      process.env.SOLANA_ADMIN_KEYPAIR ?? join(homedir(), '.assay-keys', 'devnet-operator.json'),
     );
     const buyer = await loadOrCreateSigner('rail-b-buyer');
     const provider = await loadOrCreateSigner('rail-b-provider');
@@ -422,7 +422,7 @@ async function main(): Promise<void> {
       payTo: toAccountId(chainId, escrowPda) as AccountId,
       provider: toAccountId(chainId, provider.address) as AccountId,
       amount: MoneyUtil.of(VOUCHER_AMOUNT, asset, DECIMALS),
-      resource: `https://x402.test/rail-b/${now}`,
+      resource: `https://assay.test/rail-b/${now}`,
       requestHash: `sha256:${'0'.repeat(64)}`,
       seq: seq.toString(),
       issuedAt: now,
@@ -625,7 +625,7 @@ async function fetchProviderEarnings(
   provider: Address,
   programAddress: Address,
 ): Promise<bigint> {
-  const { findEarningsPda } = await import('@x402/settlement-client');
+  const { findEarningsPda } = await import('@assay/settlement-client');
   const [pda] = await findEarningsPda({ provider }, { programAddress });
   const acc = await fetchMaybeProviderEarnings(rpc, pda);
   return acc.exists ? acc.data.balance : 0n;

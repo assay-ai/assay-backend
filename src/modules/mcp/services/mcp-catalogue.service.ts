@@ -33,17 +33,17 @@ import { selectViewTools, servesPricingMode } from '@modules/toolset/domain/view
 import { MoneyUtil } from '@utils/money.util';
 
 import {
-  X402_FREE_QUOTA,
-  X402_P95_LATENCY_MS,
-  X402_PAID_ALTERNATIVE,
-  X402_PAID_ON_THIS_CHAIN,
-  X402_PRICE,
-  X402_PRICING_MODE,
-  X402_QUALITY_RATE,
-  X402_REFUND_ON_FAILURE,
-  X402_SETTLEMENT_CHAINS,
-  X402_TIER,
-  X402_TOOL_ID,
+  ASSAY_FREE_QUOTA,
+  ASSAY_P95_LATENCY_MS,
+  ASSAY_PAID_ALTERNATIVE,
+  ASSAY_PAID_ON_THIS_CHAIN,
+  ASSAY_PRICE,
+  ASSAY_PRICING_MODE,
+  ASSAY_QUALITY_RATE,
+  ASSAY_REFUND_ON_FAILURE,
+  ASSAY_SETTLEMENT_CHAINS,
+  ASSAY_TIER,
+  ASSAY_TOOL_ID,
 } from '../constants/mcp.constants';
 import { McpErrors } from '../errors/mcp.errors';
 import { McpScope, contractFor, rulesFor, scopeAllows } from '../ports/mcp-scope';
@@ -160,11 +160,11 @@ export class McpCatalogueService {
    * chain state. Sequentially that would make `tools/list` —
    * the first thing every agent does — take one round-trip per tool.
    *
-   * `viewer` is who is asking, so `x402/freeQuota` can be
+   * `viewer` is who is asking, so `assay/freeQuota` can be
    * this **agent's own** remaining count rather than nobody's. It is optional
    * because `tools/list`, unlike `tools/call`, has no session threaded to it
    * on every path. Without a `viewer`, every `FREE`/`FREEMIUM` tool is still listed and still
-   * carries `x402/pricingMode`; it simply omits `x402/freeQuota` rather than
+   * carries `assay/pricingMode`; it simply omits `assay/freeQuota` rather than
    * publish a number that is nobody's.
    */
   async listTools(
@@ -345,7 +345,7 @@ export class McpCatalogueService {
 /** How {@link McpCatalogueService.listTools} prices. */
 export interface McpListOptions {
   /**
-   * `false` skips the per-agent `x402/freeQuota` read: `search_tools` ranks the
+   * `false` skips the per-agent `assay/freeQuota` read: `search_tools` ranks the
    * whole view and reads the quota only for the page it returns.
    */
   readonly freeQuota?: boolean;
@@ -392,7 +392,7 @@ export interface McpToolDescriptor {
   readonly _meta: Record<string, unknown>;
 }
 
-/** The `x402/price` value: atomic units, the asset that scales them, and a display form. */
+/** The `assay/price` value: atomic units, the asset that scales them, and a display form. */
 export interface McpPriceAnnotation {
   readonly amount: string;
   readonly asset: string;
@@ -420,50 +420,50 @@ function describe(
   const { tool } = quote;
 
   const annotations: Record<string, unknown> = {
-    [X402_PRICE]: priceAnnotation(
+    [ASSAY_PRICE]: priceAnnotation(
       price,
       quote.pricingMode,
       quote.paidBindings ?? quote.routableBindings,
       freePerDay,
       paidOnThisChain,
     ),
-    [X402_TIER]: tierLabel(tool.tier),
+    [ASSAY_TIER]: tierLabel(tool.tier),
     // Every response class other than `DATA_RESULT` releases the hold rather
     // than committing it (`RESPONSE_CLASS_CONSEQUENCE`), so this is a property
     // of the platform today rather than of the tool. It is published per tool
     // anyway because the free-tier and relay work will make it one.
-    [X402_REFUND_ON_FAILURE]: true,
-    [X402_TOOL_ID]: tool.id,
+    [ASSAY_REFUND_ON_FAILURE]: true,
+    [ASSAY_TOOL_ID]: tool.id,
     // Where this tool settles, so a buyer holding funds on another chain
     // can be told rather than discovering it at PAYMENT_NO_SETTLEABLE_CHAIN.
     // Unconditional, including when empty: a missing LIST reads as
     // "unconstrained", which is the one reading that is never true here — see
-    // `X402_SETTLEMENT_CHAINS`. That is why it sits in the base object beside
-    // the price rather than behind a guard, unlike `x402/p95LatencyMs`.
+    // `ASSAY_SETTLEMENT_CHAINS`. That is why it sits in the base object beside
+    // the price rather than behind a guard, unlike `assay/p95LatencyMs`.
     //
     // Copied, not passed through: `annotations` is handed to an SDK that owns
     // it afterwards, and the quote's array is the router's.
-    [X402_SETTLEMENT_CHAINS]: [...quote.settlementChains],
+    [ASSAY_SETTLEMENT_CHAINS]: [...quote.settlementChains],
   };
 
   // Omitted rather than sent as null. An agent scoring endpoints has to be able
   // to tell "measured, and this is the figure" from "never measured", and a
   // null in a numeric field is read as zero by more clients than not.
   if (quote.p95LatencyMs !== null)
-    annotations[X402_P95_LATENCY_MS] = Math.round(quote.p95LatencyMs);
-  if (quote.qualityRate !== null) annotations[X402_QUALITY_RATE] = quote.qualityRate;
+    annotations[ASSAY_P95_LATENCY_MS] = Math.round(quote.p95LatencyMs);
+  if (quote.qualityRate !== null) annotations[ASSAY_QUALITY_RATE] = quote.qualityRate;
 
   // Free-tier annotations. Every listed tool has a
   // non-null `pricingMode` by the time `describe` runs (see `quotedPricingMode`
   // on `ProviderRouterService.quote`: it is set whenever `eligible.length > 0`,
   // which is the same condition that produced a non-null `price`).
   if (isFreeOrFreemium(quote.pricingMode)) {
-    annotations[X402_PRICING_MODE] = quote.pricingMode;
+    annotations[ASSAY_PRICING_MODE] = quote.pricingMode;
 
     // Present only when the caller supplied a viewer AND the quota is known —
     // never a zeroed placeholder. See `McpCatalogueService.listTools`.
     if (freeQuota) {
-      annotations[X402_FREE_QUOTA] = {
+      annotations[ASSAY_FREE_QUOTA] = {
         remaining: freeQuota.remaining,
         limit: freeQuota.limit,
         resetsAt: freeQuota.resetsAt.toISOString(),
@@ -472,14 +472,14 @@ function describe(
 
     // FREEMIUM's paid path is provably honest: the same tool, at the price
     // already quoted above. FREE has no paid path through this catalogue at
-    // all — see `X402_PAID_ALTERNATIVE`'s own doc comment — so it publishes
+    // all — see `ASSAY_PAID_ALTERNATIVE`'s own doc comment — so it publishes
     // no key rather than a fabricated one.
     if (quote.pricingMode === PricingMode.FREEMIUM && paidOnThisChain) {
-      annotations[X402_PAID_ALTERNATIVE] = tool.name;
+      annotations[ASSAY_PAID_ALTERNATIVE] = tool.name;
     }
   }
   if (!paidOnThisChain && quote.pricingMode !== PricingMode.FREE) {
-    annotations[X402_PAID_ON_THIS_CHAIN] = false;
+    annotations[ASSAY_PAID_ON_THIS_CHAIN] = false;
   }
 
   return {
@@ -559,9 +559,9 @@ export const ASSAY_NO_PROVIDER_FITS = 'assay/noProviderFits';
 function describeNoProviderFits(quote: ToolQuote): McpToolDescriptor {
   const { tool } = quote;
   const annotations: Record<string, unknown> = {
-    [X402_TIER]: tierLabel(tool.tier),
-    [X402_TOOL_ID]: tool.id,
-    [X402_SETTLEMENT_CHAINS]: [],
+    [ASSAY_TIER]: tierLabel(tool.tier),
+    [ASSAY_TOOL_ID]: tool.id,
+    [ASSAY_SETTLEMENT_CHAINS]: [],
     [ASSAY_NO_PROVIDER_FITS]: true,
   };
   return {

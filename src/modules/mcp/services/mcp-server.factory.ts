@@ -23,13 +23,13 @@ import { PaymentErrorCode, PaymentErrors } from '@modules/payment/errors/payment
 import { PaymentRail } from '@modules/payment/ports/payment.types';
 
 import {
-  X402_ERROR,
-  X402_IDEMPOTENCY_KEY,
+  ASSAY_ERROR,
+  ASSAY_IDEMPOTENCY_KEY,
   X402_PAYMENT_REQUIRED,
-  X402_RAIL,
-  X402_RECEIPT,
-  X402_REPLAYED,
-  X402_VOUCHER,
+  ASSAY_RAIL,
+  ASSAY_RECEIPT,
+  ASSAY_REPLAYED,
+  ASSAY_VOUCHER,
 } from '../constants/mcp.constants';
 import {
   RATE_LIMITED_MESSAGE,
@@ -119,13 +119,13 @@ export class McpServerFactory {
       },
     );
 
-    // The viewer is passed, not omitted: `x402/freeQuota` is *this agent's*
+    // The viewer is passed, not omitted: `assay/freeQuota` is *this agent's*
     // remaining allowance, and a catalogue listed without a viewer publishes no
     // quota at all — which reads to an agent as "this tool has no free tier"
     // rather than as "we did not look".
     server.setRequestHandler('tools/list', async () => {
       // 60 lists a minute per credential and URL (§7.13). A JSON-RPC error,
-      // since a list has no result to carry `x402/error` in.
+      // since a list has no result to carry `assay/error` in.
       if (scope && this.limiter) {
         const rate = await this.limiter.take(
           listKey(session.credentialId, scope.view.canonicalUrl),
@@ -151,7 +151,7 @@ export class McpServerFactory {
         ...listMetaOf(scope?.view),
         ...(ignored.length > 0 ? { [ASSAY_IGNORED_TOOLS]: ignored } : {}),
       };
-      // The descriptors carry `x402/*` annotations outside the SDK's closed
+      // The descriptors carry `assay/*` annotations outside the SDK's closed
       // `ToolAnnotations` set; see `McpToolDescriptor`.
       const result = Object.keys(meta).length > 0 ? { tools, _meta: meta } : { tools };
       return result as unknown as ListToolsResult;
@@ -220,7 +220,7 @@ export class McpServerFactory {
         scope,
         // Validated here, before anything runs: a malformed key is refused
         // with `MCP_IDEMPOTENCY_KEY_INVALID` and nothing is charged.
-        parseIdempotencyKey(meta?.[X402_IDEMPOTENCY_KEY]),
+        parseIdempotencyKey(meta?.[ASSAY_IDEMPOTENCY_KEY]),
       );
       return toCallToolResult(outcome);
     } catch (error) {
@@ -242,8 +242,8 @@ export class McpServerFactory {
    * `search_tools`, `get_tool` and `call_tool` (§7.4). The first two are free
    * reads of view ∩ access and are not recorded as calls. `call_tool` is a
    * door, not a tool: its inner call goes through {@link callTool} with the
-   * same scope and the request's own `_meta` (`x402/rail`, `x402/voucher`,
-   * `x402/idempotency-key`), and its result — `_meta` included — comes back
+   * same scope and the request's own `_meta` (`assay/rail`, `assay/voucher`,
+   * `assay/idempotency-key`), and its result — `_meta` included — comes back
    * unchanged. A meta tool is never an inner call.
    */
   private async callMetaTool(
@@ -306,7 +306,7 @@ export class McpServerFactory {
     this.logger.warn(`${session.credentialId}: ${name} → ${error.errorCode}: ${error.message}`);
 
     // The spec's agent-facing refusals (design spec §7.4, "Errors"): the plain
-    // message, the fix page and the structured details, on `x402/error`.
+    // message, the fix page and the structured details, on `assay/error`.
     if (SPEC_REFUSAL_CODES.has(error.errorCode)) {
       const context = error instanceof AppError && error.context ? error.context : {};
       const rateLimited = error.errorCode === ToolAccessErrorCode.RATE_LIMITED;
@@ -376,13 +376,13 @@ export const MCP_RATE_LIMITED_ERROR_CODE = -32029;
 /**
  * The request's `_meta` → what the agent said about paying (rail B).
  *
- * Only the envelope is checked here — that `x402/voucher` is an object with a
+ * Only the envelope is checked here — that `assay/voucher` is an object with a
  * voucher object, a signature string and a provider id. Every field INSIDE the
  * voucher is `VoucherService`'s to judge, against values this server computes
  * itself; checking them twice would mean two definitions of a valid voucher.
  */
 function paymentOf(meta: Record<string, unknown> | undefined): McpPayment {
-  const railValue = meta?.[X402_RAIL];
+  const railValue = meta?.[ASSAY_RAIL];
   const rail =
     railValue === 'A'
       ? PaymentRail.RAIL_A_PER_CALL
@@ -390,7 +390,7 @@ function paymentOf(meta: Record<string, unknown> | undefined): McpPayment {
         ? PaymentRail.RAIL_B_VOUCHER
         : null;
 
-  const raw = meta?.[X402_VOUCHER];
+  const raw = meta?.[ASSAY_VOUCHER];
   if (raw === undefined || raw === null) return { rail, voucher: null };
 
   const envelope = raw as Record<string, unknown>;
@@ -402,7 +402,7 @@ function paymentOf(meta: Record<string, unknown> | undefined): McpPayment {
     typeof envelope.providerId !== 'string'
   ) {
     throw PaymentErrors.voucherMalformed({
-      field: X402_VOUCHER,
+      field: ASSAY_VOUCHER,
       reason: 'expected { voucher: object, signature: string, providerId: string }',
     });
   }
@@ -418,7 +418,7 @@ function paymentOf(meta: Record<string, unknown> | undefined): McpPayment {
     )
   ) {
     throw PaymentErrors.voucherMalformed({
-      field: X402_VOUCHER,
+      field: ASSAY_VOUCHER,
       reason: 'contractVersion, when present, is a positive integer',
     });
   }
@@ -470,9 +470,9 @@ function toCallToolResult(outcome: McpCallOutcome): CallToolResult {
     // it makes the SDK reject an otherwise perfectly good result.
     structuredContent: outcome.output as Record<string, unknown>,
     _meta: {
-      [X402_RECEIPT]: receiptPayload(outcome.receipt),
-      // Only on a replay: a first answer carries no `x402/replayed` at all.
-      ...(outcome.replayed ? { [X402_REPLAYED]: true } : {}),
+      [ASSAY_RECEIPT]: receiptPayload(outcome.receipt),
+      // Only on a replay: a first answer carries no `assay/replayed` at all.
+      ...(outcome.replayed ? { [ASSAY_REPLAYED]: true } : {}),
     },
   };
 }
@@ -515,7 +515,7 @@ function receiptPayload(receipt: McpReceipt): Record<string, unknown> {
 }
 
 /**
- * `_meta[x402/error]`, plus `_meta[x402/paymentRequired]` when the refusal
+ * `_meta[assay/error]`, plus `_meta[x402/paymentRequired]` when the refusal
  * carries a paid way forward.
  *
  * The paid option is promoted to its **own** `_meta` key rather than left
@@ -533,7 +533,7 @@ export function errorResult(message: string, meta: Record<string, unknown>): Cal
     isError: true,
     content: [{ type: 'text', text: message }],
     _meta: {
-      [X402_ERROR]: error,
+      [ASSAY_ERROR]: error,
       ...(paymentRequired ? { [X402_PAYMENT_REQUIRED]: paymentRequired } : {}),
       // A provider tool no operator reviewed says so where payment is asked (§7.6).
       ...(paymentRequired && notReviewed === true ? { [ASSAY_NOT_REVIEWED]: true } : {}),

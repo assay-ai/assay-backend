@@ -103,8 +103,6 @@ expiresAt }`** and does nothing else. The routes:
 
 | Route | Register | Second person must hold |
 |---|---|---|
-| `POST /operator/cases/:id/suspend` from `AWAITING_SECOND` / `UPHELD` | `S-1` | `ADJ` or `ADJL`, limit ≥ penalty |
-| `POST /operator/cases/:id/sweep` | `S-11` | `ADJ` or `ADJL`, limit ≥ swept penalties |
 | `POST /operator/cases/:id/compensated` | `S-5` | `ADJL` or `TRE`, limit ≥ deposit |
 | `POST /operator/blocks/:id/unblock` | `A-10` | `ADJL` |
 | `POST /operator/operators` | `A-12` | `OPS_ADMIN`, limit ≥ the limit granted |

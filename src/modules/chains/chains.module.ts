@@ -133,12 +133,6 @@ import { SolanaSlashExecutor } from './solana/settlement-slash-executor.service'
 import { SolanaStakeIntentBuilder } from './solana/stake-intent-builder.service';
 import { SolanaVoucherRedeemer } from './solana/voucher-redeemer.service';
 import { SolanaVerifierRegistryService } from './solana/verifier-registry.service';
-import { SquadsVaultService } from './solana/squads-vault.service';
-import {
-  DEFAULT_VAULT_INDEX,
-  SOLANA_VAULT_INDEX,
-  SOLANA_VAULT_MULTISIG_CREATE_KEY,
-} from './solana/squads-vault.constants';
 
 /**
  * The chain boundary.
@@ -260,44 +254,16 @@ import {
       inject: [HttpFacilitatorAdapter, EvmFacilitator],
     },
 
-    // The treasury vault. Unset in an environment with no vault
-    // provisioned yet: `SquadsVaultService` fails loudly the first time
-    // anything actually tries to derive a PDA from it, not at boot, so a
-    // deployment that never touches the vault (most integration tests) is
-    // unaffected by it being unconfigured.
-    {
-      provide: SOLANA_VAULT_MULTISIG_CREATE_KEY,
-      useFactory: (config: ConfigService) =>
-        config.get<string>('SOLANA_VAULT_MULTISIG_CREATE_KEY') ?? null,
-      inject: [ConfigService],
-    },
-    {
-      provide: SOLANA_VAULT_INDEX,
-      useFactory: (config: ConfigService) =>
-        Number(config.get<string>('SOLANA_VAULT_INDEX') ?? DEFAULT_VAULT_INDEX),
-      inject: [ConfigService],
-    },
-    SquadsVaultService,
     {
       /**
-       * A namespace multiplexer rather than one implementation, and the whole
-       * of "the per-chain reconciler".
-       *
-       * `ReconciliationJob` has visited one asset at a time over
-       * `enabledChains()` since multichain support, and one asset belongs to exactly one
-       * chain — so the job was already a per-chain loop. The one line that
-       * stopped `reconcile(USDG_ROBINHOOD_TESTNET)` running was this token
-       * resolving to `SquadsVaultService`: `ReconciliationService.run` opens
-       * with `assertVaultControl(asset)`, and handing a Squads reader an
-       * `eip155` asset does not fail cleanly — it base58-decodes the reference,
-       * derives a PDA and reads a real account belonging to somebody else.
-       *
-       * `SquadsVaultService` keeps its own provider token and is unchanged.
+       * The escrow contract's balance, on each enabled eip155 chain — the
+       * left side of proof of reserves. Solana has no vault: the pooled
+       * Squads treasury is gone, so a Solana asset is `CHAIN_UNSUPPORTED`.
        */
       provide: VAULT_PORT,
-      useFactory: (solana: SquadsVaultService, evm: EvmVaultService, enabled: readonly ChainId[]) =>
-        buildNamespaceVaultPort({ enabled, solana, evm }),
-      inject: [SquadsVaultService, EvmVaultService, ENABLED_CHAINS],
+      useFactory: (evm: EvmVaultService, enabled: readonly ChainId[]) =>
+        buildNamespaceVaultPort({ enabled, evm }),
+      inject: [EvmVaultService, ENABLED_CHAINS],
     },
 
     // The on-chain verifier allowlist, read-only. `null` when the
@@ -340,7 +306,7 @@ import {
     // `ProviderStake.bonded`, read off the same settlement program.
     // The port is declared by `provider/`, because that is the module that
     // needs the fact; the implementation is here, because it is the only place
-    // allowed to import `@x402/settlement-client`. Exactly the arrangement
+    // allowed to import `@assay/settlement-client`. Exactly the arrangement
     // `VERIFIER_REGISTRY` above already has, and for the same ESLint rule.
     SolanaSettlementStakeReader,
     {

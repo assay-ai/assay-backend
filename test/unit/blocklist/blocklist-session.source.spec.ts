@@ -263,8 +263,6 @@ describe('the revoke routes a blocked person still needs (audit E-5)', () => {
     [EscrowDelegatesController, 'revokeIntent', 'POST'],
     [EscrowDelegatesController, 'revoke', 'POST'],
     [AgentCredentialsController, 'revoke', 'DELETE'],
-    // Review S-8: an objection only takes authority away from the platform.
-    [ProviderSlashProposalsController, 'dispute', 'POST'],
     [ProviderSlashProposalsController, 'acknowledge', 'POST'],
   ] as const)('lets a blocked person through %p.%s', async (controller, handler, method) => {
     for (const [role, kind] of [

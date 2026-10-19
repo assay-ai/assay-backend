@@ -39,7 +39,7 @@ import {
   type ResolvedInstructionAccount,
 } from '@solana/program-client-core';
 import { findEscrowPda } from '../pdas';
-import { X402_PAYMENT_PROGRAM_ADDRESS } from '../programs';
+import { ASSAY_PAYMENT_PROGRAM_ADDRESS } from '../programs';
 
 export const REQUEST_WITHDRAW_DISCRIMINATOR: ReadonlyUint8Array = new Uint8Array([
   137, 95, 187, 96, 250, 138, 31, 182,
@@ -50,7 +50,7 @@ export function getRequestWithdrawDiscriminatorBytes(): ReadonlyUint8Array {
 }
 
 export type RequestWithdrawInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountBuyer extends string | AccountMeta<string> = string,
   TAccountEscrow extends string | AccountMeta<string> = string,
   TRemainingAccounts extends readonly AccountMeta<string>[] = [],
@@ -109,13 +109,13 @@ export type RequestWithdrawAsyncInput<
 export async function getRequestWithdrawInstructionAsync<
   TAccountBuyer extends string,
   TAccountEscrow extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: RequestWithdrawAsyncInput<TAccountBuyer, TAccountEscrow>,
   config?: { programAddress?: TProgramAddress },
 ): Promise<RequestWithdrawInstruction<TProgramAddress, TAccountBuyer, TAccountEscrow>> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -159,13 +159,13 @@ export type RequestWithdrawInput<
 export function getRequestWithdrawInstruction<
   TAccountBuyer extends string,
   TAccountEscrow extends string,
-  TProgramAddress extends Address = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgramAddress extends Address = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
 >(
   input: RequestWithdrawInput<TAccountBuyer, TAccountEscrow>,
   config?: { programAddress?: TProgramAddress },
 ): RequestWithdrawInstruction<TProgramAddress, TAccountBuyer, TAccountEscrow> {
   // Program address.
-  const programAddress = config?.programAddress ?? X402_PAYMENT_PROGRAM_ADDRESS;
+  const programAddress = config?.programAddress ?? ASSAY_PAYMENT_PROGRAM_ADDRESS;
 
   // Original accounts.
   const originalAccounts = {
@@ -191,7 +191,7 @@ export function getRequestWithdrawInstruction<
 }
 
 export type ParsedRequestWithdrawInstruction<
-  TProgram extends string = typeof X402_PAYMENT_PROGRAM_ADDRESS,
+  TProgram extends string = typeof ASSAY_PAYMENT_PROGRAM_ADDRESS,
   TAccountMetas extends readonly AccountMeta[] = readonly AccountMeta[],
 > = {
   programAddress: Address<TProgram>;

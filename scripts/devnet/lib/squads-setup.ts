@@ -87,7 +87,7 @@ export async function setupSquadsVault(
       timeLock: 0,
       rentCollector: null,
       treasury: programConfig.treasury,
-      memo: 'x402 platform devnet treasury vault',
+      memo: 'assay platform devnet treasury vault',
       sendOptions: { skipPreflight: false },
     });
     multisigCreated = true;
@@ -146,4 +146,3 @@ export function loadSquadsVaultState(): {
 } | null {
   return loadState('squads-vault');
 }
-

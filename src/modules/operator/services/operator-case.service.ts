@@ -4,7 +4,6 @@ import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { SlashProposalPartRepository } from '@database/postgres/repositories/slash-proposal-part.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
-import { CursorPageDto } from '@shared/api';
 import { AssetId, ChainNamespace, namespaceOf } from '@modules/chains/ports/caip.types';
 import { ChainProposalStatus } from '@modules/slash/domain/chain-slash-outcome';
 import { alertExecutedWhileCancelWaited } from '@modules/slash/domain/executed-while-cancel-waited';
@@ -21,7 +20,6 @@ import {
   SlashStuckCaseService,
 } from '@modules/slash/services/slash-stuck-case.service';
 import { ALERT_PORT, AlertPort } from '@shared/alerting';
-import { ArbitrationService } from '@modules/slash/services/arbitration.service';
 import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
 import { SlashErrors } from '@modules/slash/errors/slash.errors';
 import {
@@ -31,27 +29,14 @@ import {
   SlashExecutorPort,
 } from '@modules/slash/ports/slash-executor.port';
 
-import {
-  AdjudicationQueueRowDto,
-  CompensatedBodyDto,
-  DecideCaseBodyDto,
-  ExtendDeadlineBodyDto,
-  FleetSweepDto,
-  ListQueueQueryDto,
-  ManualCaseActionBodyDto,
-  OpenFleetSweepBodyDto,
-  SecondSignatureBodyDto,
-  SuspendProposalBodyDto,
-} from '../dto/operator-console.dto';
+import { CompensatedBodyDto, ManualCaseActionBodyDto } from '../dto/operator-console.dto';
 import { ApprovalQueuedDto } from '../dto/operator-approval.dto';
 import { OperatorApprover, OperatorSession } from '../ports/operator-session.port';
-import { AdjudicationQueueService } from './adjudication-queue.service';
+import { OperatorCaseBriefService } from './operator-case-brief.service';
 import { OperatorApprovalService } from './operator-approval.service';
 
 /** The queued-action names this service owns. */
 export const CASE_APPROVAL_ACTIONS = {
-  suspend: 'slash.suspend',
-  sweep: 'slash.sweep',
   compensated: 'slash.compensated',
   recordExecution: 'slash.record_execution',
   repropose: 'slash.repropose',
@@ -112,8 +97,7 @@ export class OperatorCaseService {
 
   constructor(
     private readonly proposals: SlashProposalRepository,
-    private readonly queue: AdjudicationQueueService,
-    private readonly arbitration: ArbitrationService,
+    private readonly briefs: OperatorCaseBriefService,
     private readonly execution: SlashExecutionService,
     private readonly approvals: OperatorApprovalService,
     private readonly parts: SlashProposalPartRepository,
@@ -124,28 +108,6 @@ export class OperatorCaseService {
   ) {
     // How an approved action is re-run: the same method, as the requester,
     // with the approver attached.
-    approvals.register(CASE_APPROVAL_ACTIONS.suspend, {
-      code: 'S-1',
-      run: (requester, approver, payload, requestId) =>
-        this.suspend(
-          requester,
-          payload.proposalId as string,
-          payload.body as SuspendProposalBodyDto,
-          requestId,
-          approver,
-        ),
-    });
-    approvals.register(CASE_APPROVAL_ACTIONS.sweep, {
-      code: 'S-11',
-      run: (requester, approver, payload, requestId) =>
-        this.openSweep(
-          requester,
-          payload.proposalId as string,
-          payload.body as OpenFleetSweepBodyDto,
-          requestId,
-          approver,
-        ),
-    });
     approvals.register(CASE_APPROVAL_ACTIONS.recordExecution, {
       code: 'S-16',
       run: (requester, approver, payload, requestId) =>
@@ -183,16 +145,9 @@ export class OperatorCaseService {
     });
   }
 
-  async listQueue(
-    operator: OperatorSession,
-    query: ListQueueQueryDto,
-  ): Promise<CursorPageDto<AdjudicationQueueRowDto>> {
-    return this.queue.list(operator, query);
-  }
-
   /**
-   * The brief is the provider's own case object, plus the timeline, the
-   * restoration record and whether a second signature is outstanding.
+   * The brief is the provider's own case object, plus the timeline and the
+   * restoration record.
    *
    * The same object, deliberately. Every item an adjudicator needs is something
    * the provider is entitled to see too; building a second, richer
@@ -202,7 +157,7 @@ export class OperatorCaseService {
   async brief(proposalId: string) {
     const organizationId = await this.tenantOf(proposalId);
     const [brief, proposal] = await Promise.all([
-      this.queue.brief(organizationId, proposalId),
+      this.briefs.brief(organizationId, proposalId),
       this.proposals.findOneScoped(organizationId, proposalId),
     ]);
     const { state: chainRecord, read } = proposal
@@ -295,148 +250,6 @@ export class OperatorCaseService {
           BRIEF_CHAIN_READ_TIMEOUT_MS,
         );
     return { state: read?.state ?? ChainRecordState.UNKNOWN, read };
-  }
-
-  async claim(operator: OperatorSession, proposalId: string) {
-    const organizationId = await this.tenantOf(proposalId);
-    return this.arbitration.claim(operator, organizationId, proposalId);
-  }
-
-  async decide(
-    operator: OperatorSession,
-    proposalId: string,
-    body: DecideCaseBodyDto,
-    requestId: string | null,
-  ) {
-    const organizationId = await this.tenantOf(proposalId);
-    return this.arbitration.decide(
-      operator,
-      organizationId,
-      proposalId,
-      {
-        outcome: body.outcome,
-        reasonCodes: body.reasonCodes,
-        note: body.note,
-        rootCauseKey: body.rootCauseKey ?? null,
-        ticketRef: body.ticketRef ?? null,
-        recalculatedAmount: body.recalculatedAmount ?? null,
-      },
-      requestId,
-    );
-  }
-
-  async second(
-    operator: OperatorSession,
-    proposalId: string,
-    body: SecondSignatureBodyDto,
-    requestId: string | null,
-  ) {
-    const organizationId = await this.tenantOf(proposalId);
-    return this.arbitration.second(
-      operator,
-      organizationId,
-      proposalId,
-      body.kind,
-      body.note,
-      requestId,
-    );
-  }
-
-  /**
-   * `S-1`. One person from `PROPOSED`, `DISPUTED` and `UNDER_REVIEW`; from
-   * `AWAITING_SECOND` and `UPHELD` the register raises it to two-person, and a
-   * call without an approver is queued (`ApprovalQueuedDto`, HTTP 202).
-   */
-  async suspend(
-    operator: OperatorSession,
-    proposalId: string,
-    body: SuspendProposalBodyDto,
-    requestId: string | null,
-    approver: OperatorApprover | null = null,
-  ) {
-    const organizationId = await this.tenantOf(proposalId);
-    const attempt = () =>
-      this.arbitration.suspend(
-        operator,
-        organizationId,
-        proposalId,
-        body.reasonCode,
-        body.note,
-        body.ticketRef ?? null,
-        requestId,
-        approver,
-      );
-    if (approver) return attempt();
-    return this.approvals.orQueue(
-      {
-        action: CASE_APPROVAL_ACTIONS.suspend,
-        target: `slash_proposal:${proposalId}`,
-        payload: { proposalId, body: { ...body } },
-        requester: operator,
-      },
-      attempt,
-    );
-  }
-
-  async extendDeadline(
-    operator: OperatorSession,
-    proposalId: string,
-    body: ExtendDeadlineBodyDto,
-    requestId: string | null,
-  ) {
-    const organizationId = await this.tenantOf(proposalId);
-    return this.arbitration.extendDeadline(
-      operator,
-      organizationId,
-      proposalId,
-      body.additionalHours,
-      body.reasonCode,
-      body.note,
-      requestId,
-    );
-  }
-
-  /** `S-11`. Always two-person: called without an approver, it is queued. */
-  async openSweep(
-    operator: OperatorSession,
-    proposalId: string,
-    body: OpenFleetSweepBodyDto,
-    requestId: string | null,
-    approver: OperatorApprover | null = null,
-  ): Promise<FleetSweepDto | ApprovalQueuedDto> {
-    const organizationId = await this.tenantOf(proposalId);
-    const attempt = async (): Promise<FleetSweepDto> => {
-      const sweep = await this.execution.openSweep(
-        operator,
-        approver,
-        organizationId,
-        proposalId,
-        body,
-        requestId,
-      );
-      return {
-        id: sweep.id,
-        outcome: sweep.outcome as FleetSweepDto['outcome'],
-        defectKey: sweep.defectKey,
-        windowFrom: sweep.windowFrom,
-        windowTo: sweep.windowTo,
-        status: sweep.status as FleetSweepDto['status'],
-        matchedCount: sweep.matchedCount,
-        appliedCount: sweep.appliedCount,
-        openedBySubject: operator.subject,
-        completedAt: sweep.completedAt,
-      };
-    };
-    if (approver) return attempt();
-    return this.approvals.orQueue(
-      {
-        action: CASE_APPROVAL_ACTIONS.sweep,
-        target: `slash_proposal:${proposalId}`,
-        payload: { proposalId, body: { ...body } },
-        requester: operator,
-      },
-      attempt,
-    );
   }
 
   /** `S-5`, step one. Builds only — see `SlashExecutionService.compensationIntent`. */

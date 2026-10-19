@@ -37,14 +37,14 @@ import {
   getExpireSlashInstruction,
   getProposeSlashInstructionAsync,
   getSlashRecordDecoder,
-  getX402PaymentErrorMessage,
+  getAssayPaymentErrorMessage,
   ResponseClass,
   SIGNED_RESPONSE_CLASS,
   SLASH_RECORD_DISCRIMINATOR,
   slashAttestationMessage,
   SlashStatus,
-  X402PaymentError,
-} from '@x402/settlement-client';
+  AssayPaymentError,
+} from '@assay/settlement-client';
 
 import {
   AccountId,
@@ -1040,7 +1040,7 @@ function parseMinorUnits(value: string, field: string): bigint {
  * bytes to have been stored on-chain to begin with.
  *
  * `webcrypto.subtle.digest`, not `node:crypto`'s `createHash` — this file
- * imports `@x402/settlement-client`, so `test/unit/chains/solana/settlement-client-only.spec.ts`
+ * imports `@assay/settlement-client`, so `test/unit/chains/solana/settlement-client-only.spec.ts`
  * treats it as a file that touches the settlement program and bans
  * `createHash(` outright, on the (correct, for every other case) assumption
  * that the only reason to hash something here is a hand-recomputed Anchor
@@ -1060,7 +1060,7 @@ async function hashPolicy(policy: string): Promise<Uint8Array> {
  * classifier that decides whether a judgement is void, still waiting, or worth
  * retrying keys on the error's *name*, resolved from this number against the
  * vendored IDL — and it cannot key on the message, for two reasons.
- * `getX402PaymentErrorMessage` renders the human sentence rather than the
+ * `getAssayPaymentErrorMessage` renders the human sentence rather than the
  * variant name (`6011` is "This verifier key has been revoked and can never be
  * reinstated"), and in production it returns a fixed placeholder for every code.
  * A classifier reading the string would therefore see nothing to classify, and
@@ -1105,7 +1105,7 @@ function explainStatusError(err: unknown): string {
   if (custom === null) {
     return describeError(err);
   }
-  const explanation = getX402PaymentErrorMessage(custom as X402PaymentError);
+  const explanation = getAssayPaymentErrorMessage(custom as AssayPaymentError);
   return explanation
     ? `${explanation} (custom program error ${custom})`
     : `custom program error ${custom}`;

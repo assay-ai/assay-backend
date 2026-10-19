@@ -14,12 +14,12 @@ export const BACKEND_DIR = resolve(__dirname, '../../..');
  * A checkout of the `assay-evm` repository (the Foundry project), which the testnet
  * acceptance suite runs `forge` in and reads `deployments/<chainId>.json` from.
  *
- * Set `X402_EVM_DIR` to it. Without it this tries `../assay-evm` and `../evm` next to the
+ * Set `ASSAY_EVM_DIR` to it. Without it this tries `../assay-evm` and `../evm` next to the
  * backend, and **throws naming every candidate** rather than returning a guess: a check that
  * passes when it cannot find its input is the failure this harness exists to refuse.
  */
 export function evmDir(): string {
-  const override = process.env.X402_EVM_DIR;
+  const override = process.env.ASSAY_EVM_DIR;
   const candidates = [
     ...(override ? [resolve(override)] : []),
     resolve(BACKEND_DIR, '../assay-evm'),
@@ -31,7 +31,7 @@ export function evmDir(): string {
   throw new Error(
     'could not locate the assay-evm checkout. Tried:\n  ' +
       candidates.join('\n  ') +
-      '\nSet X402_EVM_DIR to it. This is thrown rather than skipped on purpose: a check ' +
+      '\nSet ASSAY_EVM_DIR to it. This is thrown rather than skipped on purpose: a check ' +
       'that passes when it cannot find its input is the failure this harness exists to ' +
       'refuse.',
   );
