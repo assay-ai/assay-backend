@@ -144,12 +144,12 @@ export class DisputeEntity extends OrganizationScopedEntityWithoutSoftDelete {
   platformDueAt: Date | null;
 
   /**
-   * One of the six outcomes, stated from the **proposal's** point of view.
+   * An `ArbitrationOutcome`, stated from the **proposal's** point of view.
    *
    * Note the polarity: this column and `state` describe the same decision in
-   * opposite directions. `state = 'UPHELD'` means the provider's objection was
-   * upheld, and the matching `outcome` is one of the four `OVERTURNED_*`
-   * values. `ARBITRATION_STATE_MAP` is the one place the translation lives.
+   * opposite directions. `outcome = 'UPHELD'` means the penalty stood, and the
+   * matching `state` is `REJECTED`. `ARBITRATION_STATE_MAP` is the one place
+   * the translation lives.
    */
   @Column({ name: 'outcome', type: 'varchar', length: 40, nullable: true })
   outcome: string | null;

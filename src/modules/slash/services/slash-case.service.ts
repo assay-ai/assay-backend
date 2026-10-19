@@ -483,7 +483,6 @@ function buildProposalDto(
     executionSignature: proposal.executionSignature,
     reversedAt: proposal.reversedAt,
     reversalSignature: proposal.reversalSignature,
-    sweepId: proposal.sweepId,
     createdAt: proposal.createdAt,
     updatedAt: proposal.updatedAt,
   };
@@ -656,9 +655,8 @@ function restorationBasisFor(proposal: SlashProposalEntity): RestorationBasis | 
   // Automatic resolutions carry no `ArbitrationOutcome` —
   // `chk_slash_proposals_outcome_needs_adjudicator` refuses one. Only
   // `AUTO_PLATFORM_MISS` is a genuine overturn among the three: it is our own
-  // control failing, not a judgement about the provider, and unlike
-  // `OVERTURNED_INSUFFICIENT_EVIDENCE` there is no "we could not tell"
-  // carve-out, so it is read here as a full reversal. This mapping names no
+  // control failing, not a judgement about the provider, so it is read here
+  // as a full reversal. This mapping names no
   // `ArbitrationOutcome` and is therefore not in `OUTCOME_CONSEQUENCE` — it is
   // a judgement of this service, not a documented rule.
   if (proposal.resolutionKind === ResolutionKind.AUTO_PLATFORM_MISS) {

@@ -24,7 +24,7 @@ import { CHAIN_DISPUTE_SETTLE_MS, SlashConfig } from '@modules/slash/constants/s
 const CHAIN_PROPOSABLE_STATUSES = ['PROPOSED', 'DISPUTED', 'UPHELD'] as const;
 
 /** Mirrors `REVERSIBLE_STATUSES` in `slash-proposal.repository.ts`. */
-const REVERSIBLE_STATUSES = ['EXECUTED', 'OVERTURNED'] as const;
+const REVERSIBLE_STATUSES = ['EXECUTED'] as const;
 
 export class FakeSlashProposals {
   /** The entity manager each `markReversedIfExecuted` ran on (undefined = default connection). */
@@ -50,7 +50,6 @@ export class FakeSlashProposals {
         toolId: 'tool_1',
         source: 'SLA_STRIKE',
         strikeId: 'strike_1',
-        verdictId: null,
         windowId: 'win_1',
         status: 'PROPOSED',
         chainRequestId: 'a'.repeat(64),
@@ -90,15 +89,11 @@ export class FakeSlashProposals {
         outcome: null,
         resolvedAt: null,
         decidedByOperatorId: null,
-        secondedByOperatorId: null,
-        secondedAt: null,
-        secondKind: null,
         executedAt: null,
         executionSignature: null,
         reversedAt: null,
         reversalSignature: null,
         rootCauseKey: null,
-        sweepId: null,
         countsAsFalsePositive: false,
         createdAt: new Date('2026-08-10T09:14:00Z'),
         updatedAt: new Date('2026-08-10T09:14:00Z'),
@@ -114,7 +109,6 @@ export class FakeSlashProposals {
     organizationId: string;
     id?: string;
     strikeId?: string;
-    verdictId?: string;
     windowId?: string;
     /** Any value here stands for TypeORM's `Not(IsNull())`, the only use. */
     chainDisputeWonAt?: unknown;
@@ -123,7 +117,6 @@ export class FakeSlashProposals {
       if (row.organizationId !== where.organizationId) continue;
       if (where.id !== undefined && row.id !== where.id) continue;
       if (where.strikeId !== undefined && row.strikeId !== where.strikeId) continue;
-      if (where.verdictId !== undefined && row.verdictId !== where.verdictId) continue;
       if (where.windowId !== undefined && row.windowId !== where.windowId) continue;
       if (where.chainDisputeWonAt !== undefined && !row.chainDisputeWonAt) continue;
       return row;
@@ -197,10 +190,9 @@ export class FakeSlashProposals {
 
   /**
    * Mirrors `SlashProposalRepository.markReversedIfExecuted`, predicate for
-   * predicate. The money columns are what decide it — a case the chain executed
-   * after an adjudicator overturned it carries them in `OVERTURNED` — and the
-   * status list is the state-machine half beside them, matching the `→
-   * REVERSED` column of `SLASH_PROPOSAL_TRANSITIONS`.
+   * predicate. The money columns are what decide it, and the status list is
+   * the state-machine half beside them, matching the `→ REVERSED` column of
+   * `SLASH_PROPOSAL_TRANSITIONS`.
    */
   async markReversedIfExecuted(
     organizationId: string,
@@ -338,7 +330,7 @@ export class FakeSlashProposals {
       .filter(
         (row) =>
           ['PENDING', 'DISPUTED'].includes(row.chainStatus) &&
-          ['CANCELLED', 'OVERTURNED'].includes(row.status) &&
+          row.status === 'CANCELLED' &&
           row.resolutionKind !== 'AUTO_CHAIN_VOIDED',
       )
       .sort((a, b) => (a.chainExecutableAt?.getTime() ?? 0) - (b.chainExecutableAt?.getTime() ?? 0))

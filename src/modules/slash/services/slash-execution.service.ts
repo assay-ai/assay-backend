@@ -93,11 +93,10 @@ const CHAIN_STATUS_FOR_RECORD: Readonly<Record<SlashRecordStatus, ChainProposalS
  * The statuses a case may be closed from when the chain voids its judgement.
  *
  * Every one of them carries `outcome IS NULL`, `'UPHELD'` or
- * `'UPHELD_RECALCULATED'` and nothing else: an overturned case is
- * `OVERTURNED`, which is not on the list. That is the precondition `chk_slash_proposals_outcome_needs_adjudicator` was relaxed
- * against: it admits `AUTO_CHAIN_VOIDED` beside those two outcomes and refuses
- * it beside an `OVERTURNED_*`. **Adding a status to this list without checking
- * that property writes rows Postgres rejects.**
+ * `'UPHELD_RECALCULATED'` and nothing else. That is the precondition
+ * `chk_slash_proposals_outcome_needs_adjudicator` was relaxed against: it
+ * admits `AUTO_CHAIN_VOIDED` beside those two outcomes only. **Adding a status
+ * to this list without checking that property writes rows Postgres rejects.**
  */
 const CHAIN_VOIDABLE_STATUSES: readonly SlashProposalStatus[] = [
   SlashProposalStatus.PROPOSED,
@@ -222,8 +221,7 @@ function utcMinute(at: Date): string {
 }
 
 /**
- * Everything that touches the chain, and the fleet sweep that follows an
- * overturn.
+ * Everything that touches the chain.
  *
  * ## Why execution is a scheduled step and not the end of `decide`
  *
@@ -414,12 +412,10 @@ export class SlashExecutionService {
       //
       // `caseStatusIn` closes the gap between the sweep's SELECT and this
       // UPDATE. A batch is 100 rows and each one costs a confirmation, so the
-      // last row can be reached minutes after it was chosen; an overturn or a
-      // suspension landing in that window would otherwise reserve a terminal
-      // case's stake. That is not untidy — `execute_slash` is permissionless,
-      // so the stranded record is a stranger's to execute 72 hours later, and
-      // `voidCase` could not clean it up because `OVERTURNED` is deliberately
-      // outside `CHAIN_VOIDABLE_STATUSES`.
+      // last row can be reached minutes after it was chosen; a closure
+      // landing in that window would otherwise reserve a terminal case's
+      // stake. That is not untidy — `execute_slash` is permissionless, so the
+      // stranded record is a stranger's to execute 72 hours later.
       const claimed = await this.proposals.claimChainStatus(
         proposal.organizationId,
         proposal.id,
@@ -896,7 +892,7 @@ export class SlashExecutionService {
    *   → `EXECUTED`, with applied and executed_at, the `EXECUTED` timeline
    *   entry, the notification and the compensation (`completeExecution` +
    *   `compensate`);
-   * - closed in the app (`CANCELLED`, `OVERTURNED`) → the existing
+   * - closed in the app (`CANCELLED`) → the existing
    *   `EXECUTED_AFTER_CLOSURE` handling (`recordAnExecutionNobodyAskedFor`).
    *
    * Idempotent: a case already `EXECUTED`, already carrying the execution
@@ -2212,8 +2208,7 @@ export class SlashExecutionService {
    * There are **three** ways out of `Pending` and only two of them are the
    * outcome this method's caller wanted. The third is `Executed`, and
    * `execute_slash` is permissionless once `executable_at` passes — so on a
-   * case the fleet sweep overturned days late, or one whose cancel is retried
-   * after a stranger executed it, "not pending" can mean the money already
+   * case whose cancel is retried after a stranger executed it, "not pending" can mean the money already
    * moved. Writing `CANCELLED` on the strength of the error name would tell the
    * provider a penalty was dropped that was in fact taken.
    *
@@ -2228,8 +2223,7 @@ export class SlashExecutionService {
    * that pair — finish the job. It cannot, and the reason is worth writing
    * down because it looks like it works: `reconcileExecuting` completes a park
    * with `completeExecution(…, CHAIN_PROPOSABLE_STATUSES)`, and the cases that
-   * reach *this* method through an overturn are `OVERTURNED`, which is not in
-   * that list. The compare-and-swap would affect zero rows, `executed_at` would
+   * reach *this* method closed are `CANCELLED`, which is not in that list. The compare-and-swap would affect zero rows, `executed_at` would
    * stay null, and the row would re-match the predicate on every tick for ever:
    * one `readRecord` RPC and one `compensate` per minute, and a permanent slot
    * in every capped batch.
@@ -2451,9 +2445,7 @@ export class SlashExecutionService {
     // is the transition that was going to happen anyway, not a chain event
     // overwriting a human. It also leaves the case reversible — `reverse()`
     // gates on the money columns this writes, and a reversal is exactly what a
-    // penalty taken out from under a recalculation needs. (The closed branch
-    // below writes the same columns, which is what made the overturned case
-    // reversible too.)
+    // penalty taken out from under a recalculation needs.
     if ((CHAIN_PROPOSABLE_STATUSES as readonly string[]).includes(proposal.status)) {
       await this.completeExecution(proposal, asExecuted, CHAIN_PROPOSABLE_STATUSES, undefined, tx);
       this.logger.error(
@@ -2467,13 +2459,9 @@ export class SlashExecutionService {
 
     // Everything below is for a case whose `status` this method must not move.
     //
-    // Mostly that means CLOSED — an overturn, a platform miss, a fleet sweep —
-    // and for those the row is terminal the moment this statement commits.
-    //
-    // Those closed rows ARE reachable by `reverse()`: it gates on `executed_at`
-    // and `applied_amount`, which this statement writes, rather than on the
-    // status. That is the whole point of writing them here — an overturned case
-    // whose penalty a stranger took is the one case a reversal exists for.
+    // Mostly that means CLOSED (`CANCELLED`), and for those the row is
+    // terminal the moment this statement commits: the money columns record
+    // what the chain took, beside the closure.
     //
     // `EXECUTING` reaches here as well, and it is worth naming rather than
     // implying it cannot: a decide-time re-propose can race a claim
@@ -3396,9 +3384,7 @@ export class SlashExecutionService {
             actorId: operator.subject,
             summary: `${restoredMinor} deposited back into stake by the treasury`,
             // `from` is on the timeline for the same reason it is on the
-            // override register: `OVERTURNED` here means the chain took the
-            // penalty after the case was closed, which is a different story
-            // from a review that changed its mind.
+            // override register.
             detail: { signature, restored: restoredMinor, from },
           });
 
@@ -3407,11 +3393,7 @@ export class SlashExecutionService {
           });
           return {
             value,
-            // The status the row was really in, not a constant. A case the
-            // chain executed after an overturn is compensated from
-            // `OVERTURNED`, and a register that recorded `EXECUTED` for it
-            // would say this platform had executed a judgement its own
-            // adjudicator dropped.
+            // The status the row was really in, not a constant.
             before: { status: from, reversedAt: null },
             after: {
               status: SlashProposalStatus.REVERSED,
@@ -3429,18 +3411,8 @@ export class SlashExecutionService {
           title:
             `${formatDollars(deposited)} was returned to your stake` +
             (toolName ? ` (penalty on ${toolName})` : ''),
-          // Two different things happened, and one sentence cannot describe
-          // both honestly. A case compensated out of `EXECUTED` was reviewed
-          // and the review changed the answer. One compensated out of
-          // `OVERTURNED` was already decided in the provider's favour and the
-          // penalty was taken anyway — telling them it "was reversed on review"
-          // would describe a review that had already happened and hide the fact
-          // that we took their money after it.
           body:
-            (from === SlashProposalStatus.OVERTURNED
-              ? `This case had already been overturned and the penalty was taken on chain ` +
-                `anyway. It has been returned. `
-              : `The penalty was reversed on review. `) +
+            `The penalty was reversed on review. ` +
             `Transaction ${signature}. ` +
             `The case page lists everything that was restored.`,
           subjectType: 'slash_proposal',
@@ -3462,12 +3434,8 @@ export class SlashExecutionService {
    * The one predicate both compensation routes share.
    *
    * **"Money left the provider", not "the case ended a particular way".**
-   * `execute_slash` is permissionless once `executable_at` passes, so a stranger
-   * may spend a standing record after an adjudicator has overturned the case;
-   * {@link recordAnExecutionNobodyAskedFor} records that honestly — the money
-   * columns land and `status` stays `OVERTURNED`, because a chain event must
-   * not overwrite a human. Every *other* overturn needs no compensation,
-   * because nothing was taken.
+   * A case is compensable only once its money columns record an execution;
+   * a case closed with nothing taken needs no compensation.
    */
   private assertCompensable(proposal: SlashProposalEntity): void {
     if (proposal.reversedAt) {

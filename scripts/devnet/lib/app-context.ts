@@ -36,7 +36,7 @@ import { RedisCacheModule } from '@shared/cache/redis-cache/redis-cache.module';
     // six bootstrap modules each do; this one did not, so `SettlementModule`
     // stopped resolving the moment observability gave it an alert sink. The symptom
     // is a DI error naming `ALERT_PORT`, and it takes down every script that
-    // boots this context, `yarn devnet:deposit` included.
+    // boots this context.
     AlertingModule,
     ChainsModule,
     // `SolanaEscrowOpener` resolves `FEE_PAYER_SIGNER` lazily, so a context

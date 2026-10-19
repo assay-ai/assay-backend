@@ -206,7 +206,7 @@ describe('stuck-case actions (B18), against a real database', () => {
    * admin-cancel sweep cannot settle.
    */
   async function stuckCase(
-    status: 'CANCELLED' | 'OVERTURNED' | 'UPHELD',
+    status: 'CANCELLED' | 'UPHELD',
     agents: readonly string[] = [AGENT],
   ): Promise<string> {
     const proposedAt = new Date(Date.now() - 6 * DAY);
@@ -222,9 +222,7 @@ describe('stuck-case actions (B18), against a real database', () => {
     const decided =
       status === 'CANCELLED'
         ? { outcome: null, kind: null }
-        : status === 'OVERTURNED'
-          ? { outcome: 'OVERTURNED_PLATFORM_DEFECT', kind: 'ADJUDICATOR' }
-          : { outcome: 'UPHELD_RECALCULATED', kind: 'ADJUDICATOR' };
+        : { outcome: 'UPHELD_RECALCULATED', kind: 'ADJUDICATOR' };
     await dataSource.query(
       `UPDATE slash_proposals
           SET status = $2, outcome = $3::text, resolution_kind = $4::text,
@@ -340,7 +338,7 @@ describe('stuck-case actions (B18), against a real database', () => {
   // ── 1. close a cancel with nothing standing ─────────────────────────────
 
   describe('S-15 close a requested cancel with nothing standing', () => {
-    it.each(['CANCELLED', 'OVERTURNED'] as const)(
+    it.each(['CANCELLED'] as const)(
       'a %s case whose record reads cancelled is closed, with an event and an override row',
       async (status) => {
         const id = await stuckCase(status);
@@ -465,7 +463,7 @@ describe('stuck-case actions (B18), against a real database', () => {
 
   describe('S-16 record an execution', () => {
     it('is queued for a second person; a double submit returns the same request', async () => {
-      const id = await stuckCase('OVERTURNED');
+      const id = await stuckCase('CANCELLED');
       onChain(id, 'EXECUTED');
       const first = await cases.recordExecution(lead, id, BODY, null);
       const second = await cases.recordExecution(lead, id, BODY, null);
@@ -489,7 +487,7 @@ describe('stuck-case actions (B18), against a real database', () => {
     });
 
     it('approved by a second operator: recorded once through the existing path, audited', async () => {
-      const id = await stuckCase('OVERTURNED');
+      const id = await stuckCase('CANCELLED');
       onChain(id, 'EXECUTED');
       const queued = (await cases.recordExecution(lead, id, BODY, null)) as ApprovalQueuedDto;
 
@@ -499,7 +497,7 @@ describe('stuck-case actions (B18), against a real database', () => {
       await approvals.approve(queued.approvalId, treasury, null);
 
       expect(await row(id)).toMatchObject({
-        status: 'OVERTURNED',
+        status: 'CANCELLED',
         chain_status: 'EXECUTED',
         applied_amount: '400000',
       });
@@ -583,7 +581,7 @@ describe('stuck-case actions (B18), against a real database', () => {
     });
 
     it('m5: an execution whose agent share went to anyone but a harmed agent is refused', async () => {
-      const id = await stuckCase('OVERTURNED');
+      const id = await stuckCase('CANCELLED');
       onChain(id, 'EXECUTED', { beneficiary: '0x00000000000000000000000000000000000000f1' });
       await expect(cases.recordExecution(lead, id, BODY, null)).rejects.toMatchObject(
         refused('BENEFICIARY_NOT_AN_AGENT'),
@@ -593,7 +591,7 @@ describe('stuck-case actions (B18), against a real database', () => {
 
     it('round 2: two harmed agents, the record paid one: refused, nothing queued', async () => {
       const other = `${CHAIN}:0x1111111111111111111111111111111111111111`;
-      const id = await stuckCase('OVERTURNED', [AGENT, other]);
+      const id = await stuckCase('CANCELLED', [AGENT, other]);
       onChain(id, 'EXECUTED');
       await expect(cases.recordExecution(lead, id, BODY, null)).rejects.toMatchObject(
         refused('SPLIT_NOT_EXPRESSIBLE'),
@@ -602,7 +600,7 @@ describe('stuck-case actions (B18), against a real database', () => {
     });
 
     it('m6: the indexer mirroring the same execution at the same time writes nothing; one record', async () => {
-      const id = await stuckCase('OVERTURNED');
+      const id = await stuckCase('CANCELLED');
       onChain(id, 'EXECUTED');
       const queued = (await cases.recordExecution(lead, id, BODY, null)) as ApprovalQueuedDto;
       const entity = (await proposals.findOneScoped(await orgOf(id), id))!;
@@ -617,7 +615,7 @@ describe('stuck-case actions (B18), against a real database', () => {
     });
 
     it('m2: a request pinned to an older epoch is superseded, and a fresh one is queued', async () => {
-      const id = await stuckCase('OVERTURNED');
+      const id = await stuckCase('CANCELLED');
       onChain(id, 'EXECUTED');
       const first = (await cases.recordExecution(lead, id, BODY, null)) as ApprovalQueuedDto;
       // The case moved on to epoch 1 (its record there also reads executed).
@@ -684,7 +682,7 @@ describe('stuck-case actions (B18), against a real database', () => {
       ['GONE', 'CANCELLED' as const, 'NOT_EXECUTED'],
       ['UNKNOWN', null, 'CHAIN_UNKNOWN'],
     ])('read %s: refused at request time, nothing queued', async (_name, status, reason) => {
-      const id = await stuckCase('OVERTURNED');
+      const id = await stuckCase('CANCELLED');
       onChain(id, status);
       await expect(cases.recordExecution(lead, id, BODY, null)).rejects.toMatchObject(
         refused(reason),
@@ -693,7 +691,7 @@ describe('stuck-case actions (B18), against a real database', () => {
     });
 
     it('a record that stopped reading executed by approval time is refused there', async () => {
-      const id = await stuckCase('OVERTURNED');
+      const id = await stuckCase('CANCELLED');
       onChain(id, 'EXECUTED');
       const queued = (await cases.recordExecution(lead, id, BODY, null)) as ApprovalQueuedDto;
       onChain(id, new Error('rpc down'));
@@ -769,7 +767,7 @@ describe('stuck-case actions (B18), against a real database', () => {
     });
 
     it('a closed case is not re-proposed', async () => {
-      const id = await stuckCase('OVERTURNED');
+      const id = await stuckCase('CANCELLED');
       onChain(id, 'CANCELLED');
       await expect(cases.repropose(lead, id, BODY, null)).rejects.toMatchObject(
         refused('CASE_STATUS'),
@@ -796,12 +794,8 @@ describe('stuck-case actions (B18), against a real database', () => {
       const id = await stuckCase('UPHELD');
       onChain(id, 'CANCELLED');
       const queued = (await cases.repropose(lead, id, BODY, null)) as ApprovalQueuedDto;
-      // An adjudicator overturned it meanwhile.
-      await dataSource.query(
-        `UPDATE slash_proposals SET status = 'OVERTURNED', outcome = 'OVERTURNED_PLATFORM_DEFECT'
-          WHERE id = $1`,
-        [id],
-      );
+      // It was closed meanwhile.
+      await dataSource.query(`UPDATE slash_proposals SET status = 'CANCELLED' WHERE id = $1`, [id]);
       const [closed, reproposed] = await Promise.allSettled([
         cases.closeNothingStanding(treasury, id, BODY, null),
         approvals.approve(queued.approvalId, adjudicator, null),

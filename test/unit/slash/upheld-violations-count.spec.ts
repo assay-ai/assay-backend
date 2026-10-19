@@ -41,7 +41,7 @@ describe('SlashProposalRepository.countUpheldViolationsByProvider', () => {
   it('R2-1: excludes cases won by the provider and records that lapsed or expired', async () => {
     const { sql, params } = await sqlOf();
     expect(sql).toContain('proposal.status NOT IN (:...providerWon)');
-    expect(params.providerWon).toEqual(['OVERTURNED', 'WAIVED', 'REVERSED']);
+    expect(params.providerWon).toEqual(['WAIVED', 'REVERSED']);
     // No branch counts a cancelled record: a verifier-key lapse voids the case
     // for reasons that say nothing about the provider, and a record the
     // platform failed to execute in time expires in the provider's favour.

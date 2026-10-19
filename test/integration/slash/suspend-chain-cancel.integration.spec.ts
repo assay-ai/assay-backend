@@ -234,24 +234,6 @@ describe('a closed case with a record standing on chain, against a real database
       });
     });
 
-    it('does the same for an overturned case', async () => {
-      const seeded = await standing();
-      // The in-app era's platform-miss overturn: closed in the provider's favour.
-      await dataSource.query(
-        `UPDATE slash_proposals SET status = 'OVERTURNED', resolution_kind = 'AUTO_PLATFORM_MISS',
-           resolved_at = now() WHERE id = $1`,
-        [seeded.proposalId],
-      );
-      expect(await row(seeded.proposalId)).toMatchObject({
-        status: 'OVERTURNED',
-        chain_status: 'PENDING',
-      });
-
-      expect(await services.execution.requestCancelsForClosedCases()).toBe(1);
-
-      expect((await row(seeded.proposalId)).chain_status).toBe('CANCEL_REQUESTED');
-    });
-
     it('leaves a live case and a case the chain itself voided alone', async () => {
       const live = await standing();
       const voided = await standing({ provider: PROVIDER_2 });
