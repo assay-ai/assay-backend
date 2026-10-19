@@ -1,5 +1,5 @@
 /**
- * `@assay/settlement-client` — the typed client for the x402 settlement program.
+ * `@assay/settlement-client` — the typed client for the assay settlement program.
  *
  * Everything under `./generated` is Codama output rendered from
  * `idl/assay_payment.json`, which is itself rendered from the program source. Do
