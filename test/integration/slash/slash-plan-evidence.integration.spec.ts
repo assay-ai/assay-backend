@@ -35,7 +35,7 @@ import { seedProRataCase } from '../helpers/slash-prorata-seed';
  * parts in one batch — paying each agent 60% of its part and the treasury
  * 30%, with nothing booked to the ledger.
  *
- * The chain is `FakeStakeChain`, an emulator of the `X402Stake` rules the
+ * The chain is `FakeStakeChain`, an emulator of the `AssayStake` rules the
  * executor depends on (signature recovery, replay lock, caps, 72h door,
  * 60/30 split). Everything else is production code.
  */

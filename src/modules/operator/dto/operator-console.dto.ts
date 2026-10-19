@@ -160,10 +160,10 @@ export class ChainStateHealthDto {
   @ApiProperty({ example: 'eip155:46630' })
   chainId: string;
 
-  @ApiProperty({ description: 'X402Config.paused, as last indexed' })
+  @ApiProperty({ description: 'AssayConfig.paused, as last indexed' })
   paused: boolean;
 
-  @ApiPropertyOptional({ nullable: true, description: 'X402Config.arbiter(), lower-case' })
+  @ApiPropertyOptional({ nullable: true, description: 'AssayConfig.arbiter(), lower-case' })
   arbiter: string | null;
 
   @ApiPropertyOptional({ nullable: true, description: 'The live slash delay — the dispute window' })
@@ -422,7 +422,7 @@ export class CancelIntentDto {
   @ApiPropertyOptional({ enum: ['ADMIN', 'ARBITER'], description: 'Who `admin` is' })
   signerRole?: 'ADMIN' | 'ARBITER';
 
-  @ApiPropertyOptional({ description: 'EVM only: the X402Stake proxy the calldata is sent to' })
+  @ApiPropertyOptional({ description: 'EVM only: the AssayStake proxy the calldata is sent to' })
   to?: string;
 
   @ApiProperty({ description: "The record's 32-byte request id, lower-case hex" })

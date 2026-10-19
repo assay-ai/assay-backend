@@ -15,10 +15,10 @@ import { ChainErrors } from '../errors/chains.errors';
 import { AssetId, ChainId, chainIdOf, parseAccountId, toAccountId } from '../ports/caip.types';
 import {
   HELD_STATUS_BY_INDEX,
-  X402_CONFIG_HOLD_ABI,
-  X402_ESCROW_HOLD_ABI,
-} from './abi/x402-hold.abi';
-import { X402_ESCROW_ABI } from './abi/x402.abi';
+  ASSAY_CONFIG_HOLD_ABI,
+  ASSAY_ESCROW_HOLD_ABI,
+} from './abi/assay-hold.abi';
+import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EvmDeployment } from './evm.constants';
 import { EvmReaderClient } from './evm-escrow-balance-reader.service';
 import { isRevert } from './evm-voucher-authority';
@@ -53,8 +53,8 @@ const LOG_LOOKBACK_BLOCKS = 50_000n;
 
 /** The redemption events, to classify a receipt. */
 const REDEMPTION_EVENTS_ABI = [
-  ...X402_ESCROW_HOLD_ABI.filter((item) => item.type === 'event'),
-  ...X402_ESCROW_ABI.filter((item) => item.type === 'event' && item.name === 'VoucherRedeemed'),
+  ...ASSAY_ESCROW_HOLD_ABI.filter((item) => item.type === 'event'),
+  ...ASSAY_ESCROW_ABI.filter((item) => item.type === 'event' && item.name === 'VoucherRedeemed'),
 ];
 
 /** `EVM_HOLD_LIVE_CHAINS`: the CAIP-2 chains whose escrow has the hold (comma-separated). */
@@ -76,7 +76,7 @@ export class HeldSendRefusedError extends Error {
 }
 
 /**
- * The escrow's held payments on eip155 (G3.B1, `x402-hold.abi.ts`). Sends with
+ * The escrow's held payments on eip155 (G3.B1, `assay-hold.abi.ts`). Sends with
  * the REDEEMER key — the only sender `collectHeld` (before the timeout) and
  * `refundHeld` accept. A read that reverts means the escrow has no hold (not
  * yet upgraded): `null`, and the caller keeps the old pay-at-redemption path.
@@ -204,7 +204,7 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     try {
       const raw = (await this.client(chainId).readContract({
         address: this.deployment(chainId).escrow,
-        abi: X402_ESCROW_HOLD_ABI,
+        abi: ASSAY_ESCROW_HOLD_ABI,
         functionName: 'held',
         args: [getAddress(parseAccountId(key.payer).address), BigInt(key.seq)],
       })) as {
@@ -241,7 +241,7 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       return BigInt(
         (await this.client(chainId).readContract({
           address: this.deployment(chainId).escrow,
-          abi: X402_ESCROW_HOLD_ABI,
+          abi: ASSAY_ESCROW_HOLD_ABI,
           functionName: 'totalHeld',
           args: [],
         })) as bigint,
@@ -258,7 +258,7 @@ export class EvmHeldPayments implements HeldPaymentsPort {
       return Number(
         (await this.client(chainId).readContract({
           address: this.deployment(chainId).config,
-          abi: X402_CONFIG_HOLD_ABI,
+          abi: ASSAY_CONFIG_HOLD_ABI,
           functionName: 'collectHoldSeconds',
           args: [],
         })) as bigint,
@@ -286,12 +286,12 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     const data =
       keys.length === 1
         ? encodeFunctionData({
-            abi: X402_ESCROW_HOLD_ABI,
+            abi: ASSAY_ESCROW_HOLD_ABI,
             functionName: single,
             args: [payers[0], seqs[0]],
           })
         : encodeFunctionData({
-            abi: X402_ESCROW_HOLD_ABI,
+            abi: ASSAY_ESCROW_HOLD_ABI,
             functionName: batch,
             args: [payers, seqs],
           });
@@ -302,7 +302,7 @@ export class EvmHeldPayments implements HeldPaymentsPort {
     try {
       await this.client(chainId).readContract({
         address: getAddress(this.deployment(chainId).escrow),
-        abi: X402_ESCROW_HOLD_ABI,
+        abi: ASSAY_ESCROW_HOLD_ABI,
         functionName: keys.length === 1 ? single : batch,
         args: keys.length === 1 ? [payers[0], seqs[0]] : [payers, seqs],
         account: sender,

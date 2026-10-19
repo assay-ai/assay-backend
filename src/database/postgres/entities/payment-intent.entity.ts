@@ -219,7 +219,7 @@ export class PaymentIntentEntity extends OrganizationScopedEntityWithoutSoftDele
 
   /**
    * The DELEGATE key that signed this rail-B voucher (CAIP-10), when it was not
-   * the payer: agent payment delegation, `X402Escrow.authorizeDelegate`. NULL
+   * the payer: agent payment delegation, `AssayEscrow.authorizeDelegate`. NULL
    * when the payer's own key authorised it. Read to add a delegate's in-flight
    * vouchers to its on-chain window before a call is served.
    */

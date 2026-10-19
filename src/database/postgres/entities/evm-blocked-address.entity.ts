@@ -3,7 +3,7 @@ import { Column, Entity, Index } from 'typeorm';
 import { AbstractEntityWithoutSoftDelete } from './abstract.entity';
 
 /**
- * One address `X402Config.setBlocked` has named on one chain (assay-evm D-19),
+ * One address `AssayConfig.setBlocked` has named on one chain (assay-evm D-19),
  * from its latest `BlockedSet` event and corrected by the periodic
  * `blocked(address)` read. `blocked = false` rows are kept: the address was
  * unblocked, and the row is what the reconcile re-checks.

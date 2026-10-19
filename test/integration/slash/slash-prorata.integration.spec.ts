@@ -42,7 +42,7 @@ import { seedProRataCase } from '../helpers/slash-prorata-seed';
  * parts in one batch — paying each agent 60% of its part and the treasury
  * 30%, with nothing booked to the ledger.
  *
- * The chain is `FakeStakeChain`, an emulator of the `X402Stake` rules the
+ * The chain is `FakeStakeChain`, an emulator of the `AssayStake` rules the
  * executor depends on (signature recovery, replay lock, caps, 72h door,
  * 60/30 split). Everything else is production code.
  */
@@ -318,7 +318,7 @@ describe('pro-rata EVM slash, against a real database', () => {
         chainId: CHAIN,
         to: `${CHAIN}:${DEPLOYMENT.stake}` as never,
         data: (await import('viem')).encodeFunctionData({
-          abi: (await import('@modules/chains/evm/abi/x402.abi')).X402_STAKE_SLASH_ABI,
+          abi: (await import('@modules/chains/evm/abi/assay.abi')).ASSAY_STAKE_SLASH_ABI,
           functionName: 'executeSlash',
           args: [`0x${part.chainRequestId}`],
         }),

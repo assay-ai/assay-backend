@@ -29,7 +29,7 @@ import { seedProRataCase } from '../helpers/slash-prorata-seed';
 
 /**
  * A case closed in the app while its record stands on chain — over a real
- * Postgres built from every migration and the `X402Stake` emulator.
+ * Postgres built from every migration and the `AssayStake` emulator.
  *
  * An EVM case is no longer suspended off chain (review N-2: the arbiter's
  * `cancelSlash` is the way to stop it), and that refusal must write nothing.

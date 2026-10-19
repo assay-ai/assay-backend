@@ -655,8 +655,8 @@ function readDeployment(value: unknown, chainId: ChainId): EvmDeployment {
           'admin and owner. config/stake/escrow are the PROXY addresses, which are what an ' +
           'EIP-712 verifyingContract names and what does not move across an upgrade; ' +
           'escrowImplementation is the address behind the escrow proxy and DOES move on every ' +
-          'upgrade; admin is X402Config.admin, the operational key; owner is ' +
-          'X402Config.owner(), the upgrade authority of all three contracts',
+          'upgrade; admin is AssayConfig.admin, the operational key; owner is ' +
+          'AssayConfig.owner(), the upgrade authority of all three contracts',
       });
     }
   }

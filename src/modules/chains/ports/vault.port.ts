@@ -3,7 +3,7 @@ import { Money } from './money.types';
 
 /**
  * The account that holds buyers' money on a chain, for proof of reserves: on
- * EVM the `X402Escrow` contract, whose token balance must cover every buyer
+ * EVM the `AssayEscrow` contract, whose token balance must cover every buyer
  * escrow and held payment the ledger records. Solana has none (its pooled
  * Squads treasury is gone); `NamespaceVaultPort` answers a Solana asset with
  * `CHAIN_UNSUPPORTED`.
