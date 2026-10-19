@@ -459,7 +459,7 @@ export interface PaymentRequirement {
   readonly seq: string;
 }
 
-/** The `_meta["x402/voucher"]` envelope for a requirement, signed by `key`. */
+/** The `_meta["assay/voucher"]` envelope for a requirement, signed by `key`. */
 export function signVoucher(
   mcp: INestApplication,
   requirement: PaymentRequirement,

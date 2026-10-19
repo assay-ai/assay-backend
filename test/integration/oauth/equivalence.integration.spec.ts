@@ -86,7 +86,7 @@ const QUERIES = [
  * key of the same agent: the same session, limits, toolset access, blocklist,
  * revocation and audit. Every case below runs once with each, on the real
  * `AppMcpModule` and `AppApiModule` over HTTP, and compares the status, the
- * JSON-RPC result (`x402/error.code` and every `_meta` key with it) and every
+ * JSON-RPC result (`assay/error.code` and every `_meta` key with it) and every
  * row the run left in the database; `equivalence-compare.ts` names the only
  * differences allowed.
  *
@@ -275,7 +275,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     const requirement = requirementOf(steps.paidRequirement);
     if (requirement) {
       steps.paidWithVoucher = await call(bearer, path, TOOLS.paid.name, undefined, {
-        'x402/voucher': signVoucher(apps.mcp, requirement, key),
+        'assay/voucher': signVoucher(apps.mcp, requirement, key),
       });
     }
     steps.maker = await call(bearer, path, MAKER_TOOL.name);
@@ -290,7 +290,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     const metaRequirement = requirementOf(steps.callToolPaidRequirement);
     if (metaRequirement) {
       steps.callToolPaidWithVoucher = await call(bearer, path, 'call_tool', paidArgs, {
-        'x402/voucher': signVoucher(apps.mcp, metaRequirement, key),
+        'assay/voucher': signVoucher(apps.mcp, metaRequirement, key),
       });
     }
     return steps;
@@ -311,10 +311,10 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         .sort()
         .join(',');
     }
-    const code = result._meta?.['x402/error']?.code;
+    const code = result._meta?.['assay/error']?.code;
     if (code) return code;
     if (result.structuredContent?.answer) {
-      return result._meta?.['x402/receipt']?.intentId ? 'paid' : 'served';
+      return result._meta?.['assay/receipt']?.intentId ? 'paid' : 'served';
     }
     return result.isError ? 'error' : 'ok';
   }
@@ -538,7 +538,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
             if (requirement) {
               outcomes[`${label}Voucher`] = seen(
                 await call(bearer, '/', TOOLS.paid.name, undefined, {
-                  'x402/voucher': signVoucher(apps.mcp, requirement, keys[via]),
+                  'assay/voucher': signVoucher(apps.mcp, requirement, keys[via]),
                 }),
               );
             }
@@ -939,7 +939,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
           const unpaid = await call(bearer, '/', TOOLS.paid.name);
           return seen(
             await call(bearer, '/', TOOLS.paid.name, undefined, {
-              'x402/voucher': signVoucher(apps.mcp, requirementOf(unpaid)!, other[via]),
+              'assay/voucher': signVoucher(apps.mcp, requirementOf(unpaid)!, other[via]),
             }),
           );
         },
@@ -983,7 +983,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
           const rebound = await bindDelegate(fresh.bearer, keys[via]);
           const unpaid = await call(fresh.bearer, '/', TOOLS.paid.name);
           const paid = await call(fresh.bearer, '/', TOOLS.paid.name, undefined, {
-            'x402/voucher': signVoucher(apps.mcp, requirementOf(unpaid)!, keys[via]),
+            'assay/voucher': signVoucher(apps.mcp, requirementOf(unpaid)!, keys[via]),
           });
           return {
             expired,
@@ -1005,7 +1005,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         rebound: { bind: { status: 201 } },
       });
       expect(JSON.stringify((twins.key as { result: { paid: unknown } }).result.paid)).toContain(
-        'x402/receipt',
+        'assay/receipt',
       );
       // No chain write: the on-chain authorisation is per key, not per credential.
       expect(apps.market.chain.writes.length).toBe(writesBefore);

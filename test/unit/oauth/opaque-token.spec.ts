@@ -24,7 +24,7 @@ describe('opaque tokens (R-OA-11, R-OA-12)', () => {
   });
 
   it('refuses an unknown prefix at run time', () => {
-    for (const prefix of ['assay_sk_live_', 'x402_sk_live_', '', 'assay_at']) {
+    for (const prefix of ['assay_sk_live_', 'other_sk_live_', '', 'assay_at']) {
       expect(() => mint(prefix as OpaqueTokenPrefix)).toThrow();
     }
   });
