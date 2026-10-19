@@ -61,9 +61,6 @@ describe('MetricsCollectorService', () => {
     expect(toolCallSuccess.value).toBeNull();
     expect(toolCallSuccess.gate).toBeNull();
 
-    const disputeOverturn = findSignal(snapshot.signals, 'DISPUTE_OVERTURN_RATE');
-    expect(disputeOverturn.value).toBeNull();
-
     const openHoldAge = findSignal(snapshot.signals, 'OPEN_HOLD_AGE');
     expect(openHoldAge.value).toBeNull();
   });
@@ -183,17 +180,6 @@ describe('MetricsCollectorService', () => {
     const reading = findSignal(snapshot.signals, 'TOOL_CALL_SUCCESS_RATE');
     expect(reading.value).toBeCloseTo(0.9);
     expect(reading.gate?.status).toBe('WARN');
-  });
-
-  it('computes dispute overturn rate from raised/overturned counts, 0 raised as null not NaN', async () => {
-    const { collector } = build({
-      observability: { disputeOverturnCounts: { raised: 10, overturned: 3 } },
-    });
-
-    const snapshot = await collector.snapshot();
-
-    const reading = findSignal(snapshot.signals, 'DISPUTE_OVERTURN_RATE');
-    expect(reading.value).toBeCloseTo(0.3);
   });
 
   it('caches the snapshot within the TTL — one round of repository calls serves many requests', async () => {

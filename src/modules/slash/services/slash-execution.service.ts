@@ -1051,17 +1051,14 @@ export class SlashExecutionService {
    *
    * `byArbiter` (the records' state is `CANCELLED`, `cancelledByArbiter`): the
    * arbiter ruled for the provider, recorded as `CHAIN_ARBITER` so the case
-   * is not read as expired (`AUTO_CHAIN_VOIDED` after a dispute). A case that
-   * already carries an adjudicator's outcome keeps `AUTO_CHAIN_VOIDED`, the
-   * only automatic kind `chk_slash_proposals_outcome_needs_adjudicator`
-   * admits beside an outcome.
+   * is not read as expired (`AUTO_CHAIN_VOIDED` after a dispute).
    */
   async closeCancelledOnChain(
     proposal: SlashProposalEntity,
     because: string,
     options: { readonly byArbiter?: boolean } = {},
   ): Promise<void> {
-    const byArbiter = options.byArbiter === true && !proposal.outcome;
+    const byArbiter = options.byArbiter === true;
     await this.voidCase(
       proposal,
       { status: ChainProposalStatus.CANCELLED, lastError: null },

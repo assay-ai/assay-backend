@@ -219,24 +219,18 @@ describe('stuck-case actions (B18), against a real database', () => {
       agents: agents.map((account) => ({ account, failed: [100_000n] })),
       proposedAt,
     });
-    const decided =
-      status === 'CANCELLED'
-        ? { outcome: null, kind: null }
-        : { outcome: 'UPHELD_RECALCULATED', kind: 'ADJUDICATOR' };
+    const kind = status === 'CANCELLED' ? null : 'CHAIN_ARBITER';
     await dataSource.query(
       `UPDATE slash_proposals
-          SET status = $2, outcome = $3::text, resolution_kind = $4::text,
-              resolved_at = CASE WHEN $4::text IS NULL THEN NULL ELSE now() END,
-              decided_by_operator_id = CASE WHEN $4::text IS NULL THEN NULL ELSE $5::uuid END,
-              chain_status = 'CANCEL_REQUESTED', chain_proposed_at = $6, chain_executable_at = $7,
-              chain_reserved = $8
+          SET status = $2, resolution_kind = $3::text,
+              resolved_at = CASE WHEN $3::text IS NULL THEN NULL ELSE now() END,
+              chain_status = 'CANCEL_REQUESTED', chain_proposed_at = $4, chain_executable_at = $5,
+              chain_reserved = $6
         WHERE id = $1`,
       [
         seeded.proposalId,
         status,
-        decided.outcome,
-        decided.kind,
-        lead.operatorId,
+        kind,
         new Date(proposedAt.getTime() + 60_000),
         new Date(proposedAt.getTime() + 3 * DAY),
         PENALTY.toString(),

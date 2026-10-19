@@ -123,7 +123,6 @@ describe('ArbitrationService', () => {
       expect(row).toMatchObject({
         status: SlashProposalStatus.UPHELD,
         resolutionKind: ResolutionKind.CHAIN_ARBITER,
-        outcome: null,
       });
       expect(dispute).toMatchObject({
         state: 'REJECTED',
@@ -147,7 +146,6 @@ describe('ArbitrationService', () => {
       expect(ctx.proposals.rows.get('p1')!).toMatchObject({
         status: SlashProposalStatus.UPHELD,
         resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
-        outcome: null,
       });
       expect(dispute).toMatchObject({ state: 'REJECTED', resolvedBy: 'chain:undisputed' });
       expect(await ctx.service.recordChainStanding('org_1', 'p1')).toBe(false);

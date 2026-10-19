@@ -335,15 +335,6 @@ export class SlashProposalDto {
   @ApiPropertyOptional({ enum: ResolutionKind, nullable: true })
   resolutionKind: ResolutionKind | null;
 
-  @ApiPropertyOptional({
-    enum: ArbitrationOutcome,
-    nullable: true,
-    description:
-      'Null for every automatic resolution — an outcome is a judgement, and there are ' +
-      'several ways a case ends without one.',
-  })
-  outcome: ArbitrationOutcome | null;
-
   @ApiPropertyOptional({ nullable: true })
   resolvedAt: Date | null;
 
@@ -429,7 +420,7 @@ export class SlashProposalEventDto {
  * are the same list.
  */
 export class RestorationRowDto {
-  @ApiProperty({ description: 'e.g. `Strikes removed from w_4471`' })
+  @ApiProperty({ description: 'e.g. `Penalty cancelled`' })
   label: string;
 
   @ApiProperty({ description: 'Already formatted; may be a count, a share or an amount' })

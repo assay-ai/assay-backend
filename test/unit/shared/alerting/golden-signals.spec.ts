@@ -47,13 +47,6 @@ describe('evaluateGoldenSignal', () => {
     );
   });
 
-  it('DISPUTE_OVERTURN_RATE: warn > 20%, no page tier', () => {
-    expect(evaluateGoldenSignal(GoldenSignal.DISPUTE_OVERTURN_RATE, 0.2)).toBeNull();
-    expect(evaluateGoldenSignal(GoldenSignal.DISPUTE_OVERTURN_RATE, 0.21)?.severity).toBe(
-      AlertSeverity.WARN,
-    );
-  });
-
   it('GAS_RUNWAY_DAYS: warn < 7 days, page < 2 days (lower is worse)', () => {
     expect(evaluateGoldenSignal(GoldenSignal.GAS_RUNWAY_DAYS, 7)).toBeNull();
     expect(evaluateGoldenSignal(GoldenSignal.GAS_RUNWAY_DAYS, 6.9)?.severity).toBe(

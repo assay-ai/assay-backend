@@ -1,5 +1,5 @@
 /**
- * The adjudication vocabulary, and the consequences each member carries.
+ * The adjudication vocabulary.
  *
  * Pure: no imports, no I/O, no dates read from the clock. Everything here is a
  * statement about what a word means, so that the services below it cannot mean
@@ -21,23 +21,12 @@ export enum ArbitrationOutcome {
 /**
  * How a case ended.
  *
- * Four of the five are automatic, and none of those four *writes* an
- * `ArbitrationOutcome` — see `chk_slash_proposals_outcome_needs_adjudicator`
- * and the migration header. A decision nobody made must not appear in the
- * taxonomy the false-positive metric reads.
- *
- * `AUTO_CHAIN_VOIDED` is the one that can *land on* a row that already carries
- * an outcome, because it closes a case at any point in its life — including one
- * an adjudicator had already upheld. It never writes an outcome of its own, and
- * the constraint admits exactly the two upholding outcomes beside it.
+ * Every member is the chain's or automatic: none writes an
+ * `ArbitrationOutcome` on the case, and none names an operator.
  */
 export enum ResolutionKind {
-  /** A human decided, under a rubric, with a reason. */
-  ADJUDICATOR = 'ADJUDICATOR',
   /** The provider's window elapsed without an objection. */
   AUTO_UNDISPUTED = 'AUTO_UNDISPUTED',
-  /** **Our** window elapsed without a decision. The one symmetric rule (platform miss). */
-  AUTO_PLATFORM_MISS = 'AUTO_PLATFORM_MISS',
   /** Below the de-minimis floor; recorded for routing, never levied. */
   AUTO_DE_MINIMIS = 'AUTO_DE_MINIMIS',
   /**
@@ -67,42 +56,6 @@ export enum ResolutionKind {
    */
   CHAIN_ARBITER = 'CHAIN_ARBITER',
 }
-
-/** What follows from an outcome, automatically and without a second decision. */
-export interface OutcomeConsequence {
-  /** Does the penalty stand? */
-  readonly penaltyStands: boolean;
-  /** Is the amount recomputed before it executes? */
-  readonly recalculated: boolean;
-  /** Do the window's strikes survive? */
-  readonly strikesStand: boolean;
-  /** Does the binding's routing weight survive? */
-  readonly routingWeightStands: boolean;
-  /**
-   * Does this count against **our** false-positive rate, rather than
-   * against the provider?
-   */
-  readonly countsAsFalsePositive: boolean;
-}
-
-export const OUTCOME_CONSEQUENCE: Readonly<Record<ArbitrationOutcome, OutcomeConsequence>> =
-  Object.freeze({
-    [ArbitrationOutcome.UPHELD]: {
-      penaltyStands: true,
-      recalculated: false,
-      strikesStand: true,
-      routingWeightStands: true,
-      countsAsFalsePositive: false,
-    },
-    [ArbitrationOutcome.UPHELD_RECALCULATED]: {
-      penaltyStands: true,
-      recalculated: true,
-      strikesStand: true,
-      routingWeightStands: true,
-      // The finding held; only the figure changed — not a wrongful penalty.
-      countsAsFalsePositive: false,
-    },
-  });
 
 /**
  * The states `disputes.state` may hold, unchanged from the dispute module.

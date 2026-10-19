@@ -4,7 +4,7 @@ import { ChainErrors } from '@modules/chains/errors/chains.errors';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
-import { ArbitrationOutcome, ResolutionKind } from '@modules/slash/domain/arbitration';
+import { ResolutionKind } from '@modules/slash/domain/arbitration';
 import {
   SETTLEMENT_ERROR_CODE_BASE,
   SETTLEMENT_ERROR_NAMES,
@@ -1216,40 +1216,7 @@ describe('proposeDue', () => {
     // A revoked key or a contract ceiling says nothing about whether the
     // provider failed, so it is not our error rate that moves.
     expect(saved.countsAsFalsePositive).toBe(false);
-    // And no adjudicated outcome is invented for a case no human read.
-    expect(saved.outcome).toBeNull();
     expect(notifications.sent.map((n) => n.event)).toContain('provider.slash_decided');
-  });
-
-  it("leaves an adjudicator's outcome standing when the chain voids the case", async () => {
-    // `chk_slash_proposals_outcome_needs_adjudicator` admits `AUTO_CHAIN_VOIDED`
-    // beside `UPHELD` and `UPHELD_RECALCULATED` and beside nothing else. The
-    // human's judgement stands; only the *closure* was automatic. Overwriting
-    // the outcome would erase a decision somebody made and signed.
-    const { service, proposals, executor } = build();
-    proposals.seed(
-      proposable({
-        id: 'p1',
-        status: 'UPHELD',
-        outcome: ArbitrationOutcome.UPHELD,
-        resolutionKind: ResolutionKind.ADJUDICATOR,
-        resolvedAt: new Date('2026-08-19T00:00:00Z'),
-        decidedByOperatorId: 'op_1',
-      }),
-    );
-    executor.proposeImpl = async () => {
-      throw refusal(codeOf('VerifierRevoked'), 'this verifier key has been revoked');
-    };
-
-    const result = await service.proposeDue(NOW);
-
-    expect(result).toEqual({ proposed: 0, refused: 1, failed: 0 });
-    const saved = proposals.rows.get('p1')!;
-    expect(saved.status).toBe(SlashProposalStatus.CANCELLED);
-    expect(saved.outcome).toBe(ArbitrationOutcome.UPHELD);
-    expect(saved.resolutionKind).toBe(ResolutionKind.AUTO_CHAIN_VOIDED);
-    expect(saved.resolvedAt).not.toBeNull();
-    expect(saved.chainLastError).toBe('VerifierRevoked');
   });
 
   describe('closeCancelledOnChain (audit D3)', () => {
@@ -1271,7 +1238,6 @@ describe('proposeDue', () => {
       expect(saved.status).toBe(SlashProposalStatus.CANCELLED);
       expect(saved.resolutionKind).toBe(ResolutionKind.CHAIN_ARBITER);
       expect(saved.chainStatus).toBe('CANCELLED');
-      expect(saved.outcome).toBeNull();
       expect(saved.resolvedAt).not.toBeNull();
     });
 
@@ -1280,27 +1246,6 @@ describe('proposeDue', () => {
       proposals.seed(disputedCase());
       await service.closeCancelledOnChain(proposals.rows.get('p1')!, 'expired');
       expect(proposals.rows.get('p1')!.resolutionKind).toBe(ResolutionKind.AUTO_CHAIN_VOIDED);
-    });
-
-    it("keeps AUTO_CHAIN_VOIDED beside an adjudicator's outcome (the DB constraint)", async () => {
-      const { service, proposals } = build();
-      proposals.seed(
-        disputedCase({
-          status: 'UPHELD',
-          chainStatus: 'PENDING',
-          outcome: ArbitrationOutcome.UPHELD,
-          resolutionKind: ResolutionKind.ADJUDICATOR,
-          resolvedAt: new Date('2026-08-19T00:00:00Z'),
-          decidedByOperatorId: 'op_1',
-        }),
-      );
-      await service.closeCancelledOnChain(proposals.rows.get('p1')!, 'arbiter', {
-        byArbiter: true,
-      });
-      const saved = proposals.rows.get('p1')!;
-      expect(saved.status).toBe(SlashProposalStatus.CANCELLED);
-      expect(saved.outcome).toBe(ArbitrationOutcome.UPHELD);
-      expect(saved.resolutionKind).toBe(ResolutionKind.AUTO_CHAIN_VOIDED);
     });
   });
 
