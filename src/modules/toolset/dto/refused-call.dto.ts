@@ -14,7 +14,7 @@ export class ListRefusedCallsQueryDto extends ListQueryDto {
 }
 
 export class RefusedCallParamsDto {
-  @ApiProperty({ description: 'The refused call’s id, as in `fixUrl` (`/calls?call={id}`)' })
+  @ApiProperty({ description: 'The refused call’s id, as in `fixUrl` (`/spend/calls?call={id}`)' })
   @IsUUID()
   callId: string;
 }

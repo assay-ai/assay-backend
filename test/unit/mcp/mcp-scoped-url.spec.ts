@@ -457,7 +457,9 @@ describe('a scoped MCP URL — tools/list and the error shape', () => {
     const error = result._meta?.[X402_ERROR] as Record<string, unknown>;
 
     expect(error.code).toBe('NO_PROVIDER_MATCHES_RULES');
-    expect(error.fixUrl).toBe(`https://app.example.com/calls?call=${String(writes[0].callId)}`);
+    expect(error.fixUrl).toBe(
+      `https://app.example.com/spend/calls?call=${String(writes[0].callId)}`,
+    );
     expect(writes[0]).toMatchObject({
       refusalLayer: RefusalLayer.TOOLSET_RULES,
       attribution: { endpointKind: 'TOOLSET', toolsetId: TOOLSET_ID, toolsetVersion: null },
