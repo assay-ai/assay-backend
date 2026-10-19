@@ -189,6 +189,23 @@ export const NOTIFICATION_CATALOGUE: Readonly<Record<NotificationEvent, Notifica
       // A copied sign-in is an account-takeover signal, like a withdrawal.
       nonSuppressible: true,
     },
+    [NotificationEvent.PAYMENT_KEY_FIRST_SPEND]: {
+      severity: NotificationSeverity.WARNING,
+      channels: IN_APP_EMAIL,
+      // Once per key: the producer's dedupe key names the chain and the key, and
+      // it only calls when no earlier voucher of that key held money.
+      aggregation: NotificationAggregation.ONCE,
+      // The detection signal for a stolen or misused key (T2, T12). It fires
+      // once per key, so it never becomes noise worth muting.
+      nonSuppressible: true,
+    },
+    [NotificationEvent.PAYMENT_KEY_DAILY_SUMMARY]: {
+      severity: NotificationSeverity.INFO,
+      channels: IN_APP_EMAIL,
+      // One per organization per UTC day, whichever scheduler run sends it.
+      aggregation: NotificationAggregation.ONCE_PER_UTC_DAY,
+      nonSuppressible: false,
+    },
 
     // ── Free tier ─────────────────────────────────────────────────────────────
 

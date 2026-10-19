@@ -76,6 +76,7 @@ describe('tool version migrations: up, down, up', () => {
 
   /** Migrations after the T3 ones, newest first. */
   const LATER = [
+    'PaymentKeySpendIndexes1762400000020',
     'OAuthAuditSignalIndex1762400000014',
     'OAuthCodeReuseDetected1762400000013',
     'OAuthExpiryIndexes1762400000012',
@@ -103,7 +104,10 @@ describe('tool version migrations: up, down, up', () => {
         `SELECT name FROM migrations ORDER BY id DESC LIMIT 1`,
       )) as { name: string }[];
       expect(last.name).toBe(name);
-      await dataSource.undoLastMigration({ transaction: 'each' });
+      // No wrapping transaction where a down() drops an index CONCURRENTLY.
+      await dataSource.undoLastMigration({
+        transaction: name === 'PaymentKeySpendIndexes1762400000020' ? 'none' : 'each',
+      });
     }
 
     // Migrations newer than T3's come off first, newest first.

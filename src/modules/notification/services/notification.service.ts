@@ -95,9 +95,9 @@ export class NotificationService implements NotificationPort {
     // Step 2 — the aggregation rule, as a suppression check.
     const suppressed = await this.isSuppressed(request, definition);
     if (suppressed) {
-      this.logger.debug(
-        `${request.event} suppressed for org ${request.organizationId} (dedupeKey=${request.dedupeKey ?? '(none)'})`,
-      );
+      // The dedupe key is not logged: a producer's grain may name an account
+      // (a payment key's address), and the event and organization say enough.
+      this.logger.debug(`${request.event} suppressed for org ${request.organizationId}`);
       // An outcome, never `undefined`: callers read `deliveredNow` off it, and
       // `SlashProposalService` does so on the path that starts the response clock.
       return { deliveredNow: false };

@@ -521,6 +521,7 @@ describe('buyer debt migrations, down and up again', () => {
     // The migrations after these sit on top of them and touch none of their
     // objects: undo those first, newest first.
     const later = [
+      'PaymentKeySpendIndexes1762400000020',
       'OAuthAuditSignalIndex1762400000014',
       'OAuthCodeReuseDetected1762400000013',
       'OAuthExpiryIndexes1762400000012',
@@ -550,11 +551,15 @@ describe('buyer debt migrations, down and up again', () => {
       'BindingObservations1761100000000',
       'IdempotencyKeyLiveIntents1761000000000',
     ];
+    const CONCURRENT_INDEX_MIGRATIONS = new Set([
+      'PaymentKeySpendIndexes1762400000020',
+      'IdempotencyKeyLiveIntents1761000000000',
+    ]);
     for (const name of later) {
       expect(await last()).toBe(name);
       // No wrapping transaction where a down() rebuilds an index CONCURRENTLY.
       await dataSource.undoLastMigration({
-        transaction: name === 'IdempotencyKeyLiveIntents1761000000000' ? 'none' : 'each',
+        transaction: CONCURRENT_INDEX_MIGRATIONS.has(name) ? 'none' : 'each',
       });
     }
 

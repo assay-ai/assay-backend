@@ -15,6 +15,7 @@ import { DepositService } from './services/deposit.service';
 import { PaymentIntentExpiryService } from './services/payment-intent-expiry.service';
 import { HeldCollectionService } from './services/held-collection.service';
 import { PaymentIntentService } from './services/payment-intent.service';
+import { PaymentKeyFirstSpendService } from './services/payment-key-first-spend.service';
 import { ToolCallsService } from './services/tool-calls.service';
 import { VoucherService } from './services/voucher.service';
 
@@ -59,6 +60,8 @@ import { VoucherService } from './services/voucher.service';
     // Collects held payments past their dispute window (G3.B1).
     HeldCollectionService,
     PaymentIntentExpiryService,
+    // `payment_key.first_spend`, raised by `VoucherService.redeem`.
+    PaymentKeyFirstSpendService,
     VoucherService,
     // The durable `seq` allocator behind `GET /escrow/next-seq`. The
     // repository is global (`PostgresModule`); `ALERT_PORT` comes from the
