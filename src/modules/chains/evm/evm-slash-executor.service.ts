@@ -32,6 +32,7 @@ import {
   SlashExecutorPort,
   SlashProposalRequest,
   SlashProposalResult,
+  SlashRecordReadOptions,
   SlashRecordSnapshot,
 } from '@modules/slash/ports/slash-executor.port';
 import { SlashCaps, SlashCapsReaderPort } from '@modules/slash/ports/slash-caps-reader.port';
@@ -285,8 +286,13 @@ export class EvmSlashExecutor
     requestId: string,
     provider: string,
     chainId: ChainId,
+    options?: SlashRecordReadOptions,
   ): Promise<SlashRecordSnapshot | null> {
-    const record = await this.fetchRecord(chainId, requestId);
+    const record = await this.fetchRecord(
+      chainId,
+      requestId,
+      options?.finalized ? 'finalized' : undefined,
+    );
     if (!record) return null;
     this.assertRecordProvider(record, provider, requestId);
 
@@ -1412,11 +1418,16 @@ export class EvmSlashExecutor
     };
   }
 
-  private async fetchRecord(chainId: ChainId, requestId: string): Promise<EvmSlashRecord | null> {
+  private async fetchRecord(
+    chainId: ChainId,
+    requestId: string,
+    blockTag?: 'finalized',
+  ): Promise<EvmSlashRecord | null> {
     const record = await readSlashRecord(
       this.client(chainId),
       this.deployment(chainId).stake,
       bytes32(requestId),
+      blockTag,
     );
     // `None` (0) is the untouched mapping slot: no record.
     return record.status === 0 ? null : record;

@@ -1,6 +1,7 @@
 import { createHash } from 'node:crypto';
 
 import { Injectable } from '@nestjs/common';
+import { MoreThan } from 'typeorm';
 
 import { OperatorApprovalEntity } from '@database/postgres/entities/operator-approval.entity';
 import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
@@ -39,6 +40,16 @@ export interface QueueRequest {
   readonly target: string;
   readonly payload: Record<string, unknown>;
   readonly requester: OperatorSession;
+  /**
+   * Return a live `PENDING` request of the same action on the same target
+   * instead of queueing a second one (a double submit). Off by default.
+   *
+   * `pinnedBy` names the payload key that pins the state the request was
+   * made against (B18: the case's epoch and request id). Only a waiting
+   * request with the same pin is reused; one pinned to another state can
+   * never run, and is superseded (`EXPIRED`) so it no longer blocks.
+   */
+  readonly reuseWaiting?: { readonly pinnedBy: string };
 }
 
 export function isApprovalQueued(value: unknown): value is ApprovalQueuedDto {
@@ -116,6 +127,26 @@ export class OperatorApprovalService {
       }
     }
 
+    if (request.reuseWaiting) {
+      const key = request.reuseWaiting.pinnedBy;
+      const pin = canonicalJson(request.payload[key]);
+      const waiting = await this.approvals.find({
+        where: {
+          action: request.action,
+          target: request.target,
+          status: 'PENDING',
+          expiresAt: MoreThan(new Date()),
+        },
+        order: { createdAt: 'ASC' },
+      });
+      const same = waiting.find((row) => canonicalJson(row.payload?.[key]) === pin);
+      for (const stale of waiting.filter((row) => row !== same)) {
+        if (canonicalJson(stale.payload?.[key]) !== pin)
+          await this.approvals.markSuperseded(stale.id);
+      }
+      if (same) return queuedDto(same);
+    }
+
     const expiresAt = new Date(Date.now() + APPROVAL_TTL_MS);
     const row = await this.approvals.save(
       this.approvals.create({
@@ -128,12 +159,7 @@ export class OperatorApprovalService {
         expiresAt,
       }),
     );
-    return Object.assign(new ApprovalQueuedDto(), {
-      approvalId: row.id,
-      status: 'PENDING' as const,
-      action: row.action,
-      expiresAt: row.expiresAt,
-    });
+    return queuedDto(row);
   }
 
   async list(query: ListOperatorApprovalsQueryDto): Promise<CursorPageDto<OperatorApprovalDto>> {
@@ -277,6 +303,15 @@ export class OperatorApprovalService {
     }
     return out;
   }
+}
+
+function queuedDto(row: OperatorApprovalEntity): ApprovalQueuedDto {
+  return Object.assign(new ApprovalQueuedDto(), {
+    approvalId: row.id,
+    status: 'PENDING' as const,
+    action: row.action,
+    expiresAt: row.expiresAt,
+  });
 }
 
 /** Newest first. */

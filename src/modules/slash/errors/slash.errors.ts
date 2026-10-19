@@ -49,6 +49,8 @@ export enum SlashErrorCode {
   SLASH_RECORD_NOT_SUPERSEDED = 'SLASH_RECORD_NOT_SUPERSEDED',
   /** A cancel was asked for a case with nothing Pending or Disputed on chain. */
   SLASH_NOTHING_STANDING = 'SLASH_NOTHING_STANDING',
+  /** B18: an operator action on a stuck case whose guard does not hold (or no longer holds). */
+  SLASH_MANUAL_ACTION_REFUSED = 'SLASH_MANUAL_ACTION_REFUSED',
 }
 
 export type SlashErrorCodesArePrefixed = AssertDomainErrorCodes<'SLASH', `${SlashErrorCode}`>;
@@ -538,6 +540,22 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
       `Nothing of this case stands on chain` +
       `${context?.chainStatus ? ` (the record reads ${String(context.chainStatus)})` : ''}` +
       `, so there is nothing to sign. Nothing was changed.`,
+  },
+  /**
+   * B18: a manual action on a case stuck behind a requested cancel was
+   * refused. `reason` is the guard's code (`StuckCaseRefusal`, or `CHANGED`
+   * when the case moved since it was read); `chainRecord` what the live read
+   * said. Nothing was written.
+   */
+  manualActionRefused: {
+    code: SlashErrorCode.SLASH_MANUAL_ACTION_REFUSED,
+    statusCode: 409,
+    publicContext: ['proposalId', 'action', 'reason', 'chainRecord'],
+    message: (context?: Record<string, any>) =>
+      `This action cannot run on this case now` +
+      `${context?.reason ? ` (${String(context.reason)})` : ''}` +
+      `${context?.chainRecord ? `; the chain reads ${String(context.chainRecord)}` : ''}` +
+      `. Nothing was changed.`,
   },
   chainBatchRefused: {
     code: SlashErrorCode.SLASH_CHAIN_BATCH_REFUSED,

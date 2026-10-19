@@ -1,8 +1,10 @@
 import type { Redis } from 'ioredis';
 
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ToolBindingRepository } from '@database/postgres/repositories/tool-binding.repository';
 import { ToolCallRecordRepository } from '@database/postgres/repositories/tool-call-record.repository';
+import { ToolRepository } from '@database/postgres/repositories/tool.repository';
 import { FreeQuotaConfig } from '@modules/free-tier/config/free-quota.config';
 import { FreeQuotaService } from '@modules/free-tier/services/free-quota.service';
 import {
@@ -197,6 +199,9 @@ export interface FreeQuotaHarness {
   readonly bindings: FakeToolBindingRepository;
   readonly notifications: FakeNotificationPort;
   readonly versions: FakeBindingVersionRepository;
+  /** `findOne` for the agent label and the tool name a notice body uses. */
+  readonly agents: { findOne: jest.Mock };
+  readonly tools: { findOne: jest.Mock };
   readonly service: FreeQuotaService;
 }
 
@@ -210,6 +215,8 @@ export function buildFreeQuotaHarness(
   const notifications = new FakeNotificationPort();
   const versions = new FakeBindingVersionRepository();
   const config: FreeQuotaConfig = { ...DEFAULT_TEST_CONFIG, ...overrides };
+  const agents = { findOne: jest.fn().mockResolvedValue({ label: 'research-bot' }) };
+  const tools = { findOne: jest.fn().mockResolvedValue({ name: 'get_weather' }) };
 
   const service = new FreeQuotaService(
     redis as unknown as Redis,
@@ -218,7 +225,9 @@ export function buildFreeQuotaHarness(
     config,
     notifications,
     versions as unknown as BindingVersionRepository,
+    agents as unknown as AgentRepository,
+    tools as unknown as ToolRepository,
   );
 
-  return { redis, records, bindings, notifications, versions, service };
+  return { redis, records, bindings, notifications, versions, agents, tools, service };
 }

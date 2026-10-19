@@ -7,6 +7,9 @@ import {
 import { ToolBindingEntity } from '@database/postgres/entities/tool-binding.entity';
 import { BindingVersionRepository } from '@database/postgres/repositories/binding-version.repository';
 import { ProviderRepository } from '@database/postgres/repositories/provider.repository';
+import { AgentRepository } from '@database/postgres/repositories/agent.repository';
+import { ConfigService } from '@nestjs/config';
+import { EscrowBalanceReaderPort } from '@modules/ledger/ports/escrow-balance-reader.port';
 import {
   ProviderQualityCounters,
   SlaWindowRepository,
@@ -25,6 +28,7 @@ import { Money } from '@modules/chains/ports/money.types';
 import {
   CATALOGUE_CACHE_MS,
   CatalogueService,
+  WITHDRAWAL_FLAG_CACHE_MS,
 } from '@modules/catalogue/services/catalogue.service';
 import { PublicCatalogueService } from '@modules/catalogue/services/public-catalogue.service';
 import { X402_SETTLEMENT_CHAINS } from '@modules/mcp/constants/mcp.constants';
@@ -181,6 +185,20 @@ interface Wiring {
    */
   readonly versions?: BindingVersionEntity[];
   readonly freeQuota?: FreeQuotaConfig;
+  /** Agents per organization, as `agents` rows; read only for `servesYou`. */
+  readonly agents?: readonly {
+    id?: string;
+    organizationId: string;
+    chainId: string | null;
+    status?: string;
+    primaryAccountId?: string | null;
+  }[];
+  /** Wallet accounts whose escrow has a standing withdrawal. */
+  readonly withdrawing?: readonly string[];
+  /** The escrow read fails. */
+  readonly escrowThrows?: boolean;
+  /** `auth.privy.defaultChainId`. */
+  readonly defaultChainId?: string;
 }
 
 function build(wiring: Wiring = {}) {
@@ -272,6 +290,37 @@ function build(wiring: Wiring = {}) {
     }),
   };
 
+  // Answers `find({ where: { organizationId, status } })` and nothing wider:
+  // a read that forgot the organization would get every agent and fail.
+  const agents = {
+    find: jest.fn(async ({ where }: { where: { organizationId?: string; status?: string } }) => {
+      if (!where?.organizationId) throw new Error('unscoped agents read');
+      return (wiring.agents ?? [])
+        .map((agent, index) => ({ id: `agent-${index}`, primaryAccountId: null, ...agent }))
+        .filter(
+          (agent) =>
+            agent.organizationId === where.organizationId &&
+            (where.status === undefined || (agent.status ?? 'ACTIVE') === where.status),
+        );
+    }),
+  } as unknown as AgentRepository;
+  const escrow = {
+    readMany: jest.fn(async (accounts: readonly string[]) => {
+      if (wiring.escrowThrows) throw new Error('rpc down');
+      return new Map(
+        accounts.map((account) => [
+          account,
+          { withdrawRequested: (wiring.withdrawing ?? []).includes(account) ? 1n : 0n },
+        ]),
+      );
+    }),
+  } as unknown as EscrowBalanceReaderPort;
+  const config = {
+    get: jest.fn((key: string) =>
+      key === 'auth.privy.defaultChainId' ? wiring.defaultChainId : undefined,
+    ),
+  } as unknown as ConfigService;
+
   const catalogue: ToolCataloguePort = {
     findTool: jest.fn(),
     listTools: jest.fn(async () => wiring.tools ?? [WEATHER, RATE]),
@@ -286,6 +335,8 @@ function build(wiring: Wiring = {}) {
     bindings,
     providers,
     windows,
+    agents,
+    escrow,
     service: new CatalogueService(
       bindings,
       versions,
@@ -301,6 +352,9 @@ function build(wiring: Wiring = {}) {
       [CHAIN, OTHER_CHAIN],
       wiring.blocklist ?? noBlocks(),
       wiring.freeQuota ?? DEFAULT_FREE_QUOTA_CONFIG,
+      agents,
+      config,
+      escrow,
     ),
   };
 }
@@ -1005,6 +1059,9 @@ describe('GET /catalogue/providers/:providerId', () => {
         price: { amount: '250000', asset: ASSET, decimals: 6 },
         promisedFailureRate: 0.05,
         freeCallsPerAgentPerDay: null,
+        chains: [CHAIN, OTHER_CHAIN],
+        servesYou: null,
+        notServedReason: null,
       },
     ]);
   });
@@ -1617,6 +1674,9 @@ describe('the catalogue, with an unpublished draft on a live binding', () => {
         price: published,
         promisedFailureRate: 0.05,
         freeCallsPerAgentPerDay: 7,
+        chains: [CHAIN, OTHER_CHAIN],
+        servesYou: null,
+        notServedReason: null,
       },
     ]);
     expect(detail.fromPrice).toEqual(published);
@@ -1695,5 +1755,359 @@ describe('the catalogue, with an unpublished draft on a live binding', () => {
     expect(detail.tools[0].price).toEqual(published);
     expect(detail.fromPrice).toEqual(published);
     expect(tools.find((tool) => tool.id === WEATHER.id)?.fromPrice).toEqual(published);
+  });
+});
+
+/**
+ * B16: the provider picker and the providers list say which provider serves
+ * THIS buyer. `chains` is the router's own answer per chain; `servesYou`
+ * compares it with the caller's own agents' chains and nothing else.
+ */
+describe('the catalogue, chains and servesYou per caller', () => {
+  const EVM_BUYER = 'buyer-evm';
+  const OPEN = '0a6f3c1e-7d8b-4e2a-9c5f-1b3d5e7f9a11';
+  const ELSEWHERE = '1b7a4d2f-8e9c-4f3b-a0d6-2c4e6a8b0c22';
+  const BLOCKED = '5c0b3b4e-0d8a-4f6e-9a51-6f1d2b7c9e10';
+
+  /** `providerId` → the chains the stubbed router routes its candidates on. */
+  function routed(wired: ReturnType<typeof build>, servesOn: Record<string, readonly ChainId[]>) {
+    (wired.router.snapshotCandidates as jest.Mock).mockImplementation(async () =>
+      Object.keys(servesOn).map((providerId) => ({ binding: { providerId } })),
+    );
+    (wired.router.quoteFromCandidates as jest.Mock).mockImplementation(
+      (
+        tool: Tool,
+        candidates: readonly { binding: { providerId: string } }[],
+        context: { payerChains: readonly ChainId[] },
+      ) =>
+        quote({
+          tool,
+          routableBindings: candidates.filter((candidate) =>
+            (servesOn[candidate.binding.providerId] ?? []).includes(context.payerChains[0]),
+          ).length,
+        }),
+    );
+  }
+
+  function wiredMarket(overrides: Wiring = {}) {
+    return build({
+      bindings: [
+        binding({ organizationId: OPEN }),
+        binding({ organizationId: ELSEWHERE }),
+        binding({ organizationId: BLOCKED }),
+      ],
+      providers: [
+        provider({ organizationId: OPEN, legalName: 'E2E Weather Ltd' }),
+        provider({ organizationId: ELSEWHERE, legalName: 'Open-Meteo Demo BV' }),
+        provider({ organizationId: BLOCKED, legalName: 'Blocked BV' }),
+      ],
+      blocklist: blocklistOf({ kind: BlockSubjectKind.ORGANIZATION, subject: BLOCKED }),
+      agents: [{ organizationId: EVM_BUYER, chainId: CHAIN }],
+      ...overrides,
+    });
+  }
+
+  it('flags a provider that settles only on another chain, on the card and the tool', async () => {
+    const wired = wiredMarket();
+    routed(wired, { [OPEN]: [CHAIN], [ELSEWHERE]: [OTHER_CHAIN], [BLOCKED]: [CHAIN] });
+
+    const { providers } = await wired.service.listProvidersFor(EVM_BUYER);
+    const byId = Object.fromEntries(providers.map((row) => [row.providerId, row]));
+    expect(byId[OPEN]).toMatchObject({ chains: [CHAIN], servesYou: true });
+    expect(byId[ELSEWHERE]).toMatchObject({ chains: [OTHER_CHAIN], servesYou: false });
+
+    const detail = await wired.service.getProviderFor(ELSEWHERE, EVM_BUYER);
+    expect(detail).toMatchObject({ chains: [OTHER_CHAIN], servesYou: false });
+    expect(detail.tools).toEqual([
+      expect.objectContaining({ toolId: WEATHER.id, chains: [OTHER_CHAIN], servesYou: false }),
+    ]);
+  });
+
+  it('asks the router one chain at a time, over that provider’s candidates only', async () => {
+    const wired = wiredMarket();
+    routed(wired, { [OPEN]: [CHAIN], [ELSEWHERE]: [OTHER_CHAIN] });
+
+    await wired.service.listProvidersFor(EVM_BUYER);
+
+    const calls = (wired.router.quoteFromCandidates as jest.Mock).mock.calls as [
+      Tool,
+      { binding: { providerId: string } }[],
+      { payerChains: ChainId[]; defaultChainId: ChainId; withdrawingChains: ChainId[] },
+    ][];
+    expect(calls.length).toBeGreaterThan(0);
+    for (const [, candidates, context] of calls) {
+      expect(new Set(candidates.map((candidate) => candidate.binding.providerId)).size).toBe(1);
+      expect(context.payerChains).toHaveLength(1);
+      expect(context.defaultChainId).toBe(context.payerChains[0]);
+    }
+    expect(wired.router.snapshotCandidates).toHaveBeenCalledTimes(1);
+  });
+
+  it('never asks about, lists or names a blocked provider', async () => {
+    const wired = wiredMarket();
+    routed(wired, { [OPEN]: [CHAIN], [ELSEWHERE]: [OTHER_CHAIN], [BLOCKED]: [CHAIN] });
+
+    const list = await wired.service.listProvidersFor(EVM_BUYER);
+    expect(JSON.stringify(list)).not.toContain(BLOCKED);
+    const asked = (wired.router.quoteFromCandidates as jest.Mock).mock.calls.flatMap(
+      ([, candidates]: [Tool, { binding: { providerId: string } }[]]) =>
+        candidates.map((candidate) => candidate.binding.providerId),
+    );
+    expect(asked).not.toContain(BLOCKED);
+
+    // Its own page still answers, as before, and says it takes no call.
+    const detail = await wired.service.getProviderFor(BLOCKED, EVM_BUYER);
+    expect(detail).toMatchObject({ tools: [], chains: [], servesYou: false });
+  });
+
+  it('a provider the router takes no call to on any chain has no chains, and does not serve you', async () => {
+    const wired = wiredMarket();
+    routed(wired, { [OPEN]: [], [ELSEWHERE]: [OTHER_CHAIN] });
+
+    const detail = await wired.service.getProviderFor(OPEN, EVM_BUYER);
+
+    expect(detail).toMatchObject({ chains: [], servesYou: false });
+    expect(detail.tools[0]).toMatchObject({ chains: [], servesYou: false });
+  });
+
+  it('a snapshot the router could not read is unknown (null), never "does not serve"', async () => {
+    const wired = wiredMarket();
+    (wired.router.snapshotCandidates as jest.Mock).mockRejectedValue(new Error('rpc down'));
+
+    const detail = await wired.service.getProviderFor(OPEN, EVM_BUYER);
+
+    expect(detail.tools[0]).toMatchObject({ chains: null, servesYou: null });
+    expect(detail).toMatchObject({ chains: null, servesYou: null });
+  });
+
+  it('reads only the caller’s own ACTIVE agents, and their chains', async () => {
+    const wired = wiredMarket({
+      agents: [
+        { organizationId: EVM_BUYER, chainId: CHAIN, status: 'SUSPENDED' },
+        { organizationId: EVM_BUYER, chainId: OTHER_CHAIN },
+        { organizationId: 'someone-else', chainId: CHAIN },
+      ],
+    });
+    routed(wired, { [OPEN]: [CHAIN], [ELSEWHERE]: [OTHER_CHAIN] });
+
+    const { providers } = await wired.service.listProvidersFor(EVM_BUYER);
+    const byId = Object.fromEntries(providers.map((row) => [row.providerId, row.servesYou]));
+
+    // The suspended agent on CHAIN and the other organization's agent count for nothing.
+    expect(byId).toEqual({ [OPEN]: false, [ELSEWHERE]: true });
+    expect(wired.agents.find).toHaveBeenCalledWith(
+      expect.objectContaining({ where: { organizationId: EVM_BUYER, status: 'ACTIVE' } }),
+    );
+  });
+
+  it('an agent with no wallet yet, or no agent at all, pays on the deployment default', async () => {
+    const wired = wiredMarket({
+      agents: [{ organizationId: 'new-buyer', chainId: null }],
+      defaultChainId: OTHER_CHAIN,
+    });
+    routed(wired, { [OPEN]: [CHAIN], [ELSEWHERE]: [OTHER_CHAIN] });
+
+    for (const buyer of ['new-buyer', 'no-agents-yet']) {
+      const { providers } = await wired.service.listProvidersFor(buyer);
+      expect(Object.fromEntries(providers.map((row) => [row.providerId, row.servesYou]))).toEqual({
+        [OPEN]: false,
+        [ELSEWHERE]: true,
+      });
+    }
+  });
+
+  it('the shared answer stays the same for everyone; only servesYou differs, and it is not cached', async () => {
+    const agents = [{ organizationId: EVM_BUYER, chainId: CHAIN as string | null }];
+    const wired = wiredMarket({
+      agents: [...agents, { organizationId: 'solana-buyer', chainId: OTHER_CHAIN }],
+    });
+    routed(wired, { [OPEN]: [CHAIN], [ELSEWHERE]: [OTHER_CHAIN] });
+
+    const shared = await wired.service.listProviders();
+    expect(shared.providers.every((row) => row.servesYou === null)).toBe(true);
+
+    const evm = await wired.service.listProvidersFor(EVM_BUYER);
+    const solana = await wired.service.listProvidersFor('solana-buyer');
+    const strip = (rows: readonly { servesYou: boolean | null }[]) =>
+      rows.map((row) => ({ ...row, servesYou: null }));
+    expect(strip(evm.providers)).toEqual(shared.providers);
+    expect(strip(solana.providers)).toEqual(shared.providers);
+    expect(evm.providers.map((row) => row.servesYou)).not.toEqual(
+      solana.providers.map((row) => row.servesYou),
+    );
+    // One market read, one served-chains read, for all three answers.
+    expect(wired.router.snapshotCandidates).toHaveBeenCalledTimes(1);
+  });
+
+  it('the public catalogue carries neither chains nor servesYou', async () => {
+    const wired = wiredMarket();
+    routed(wired, { [OPEN]: [CHAIN], [ELSEWHERE]: [OTHER_CHAIN] });
+    const publicCatalogue = new PublicCatalogueService(wired.service);
+
+    const { providers } = await publicCatalogue.listProviders();
+    const detail = await publicCatalogue.getProvider(OPEN);
+
+    for (const row of [...providers, detail, ...detail.tools]) {
+      expect(Object.keys(row)).not.toContain('servesYou');
+      expect(Object.keys(row)).not.toContain('chains');
+    }
+  });
+});
+
+/** B16 fix round 1: unknown stays unknown; one snapshot per window; withdrawals. */
+describe('the catalogue, servesYou fix round 1', () => {
+  const BUYER = 'buyer-1';
+  const P1 = '0a6f3c1e-7d8b-4e2a-9c5f-1b3d5e7f9a11';
+  const P2 = '1b7a4d2f-8e9c-4f3b-a0d6-2c4e6a8b0c22';
+
+  function routedOn(wired: ReturnType<typeof build>, servesOn: Record<string, readonly ChainId[]>) {
+    (wired.router.snapshotCandidates as jest.Mock).mockImplementation(async () =>
+      Object.keys(servesOn).map((providerId) => ({ binding: { providerId } })),
+    );
+    (wired.router.quoteFromCandidates as jest.Mock).mockImplementation(
+      (
+        tool: Tool,
+        candidates: readonly { binding: { providerId: string } }[],
+        context: { payerChains: readonly ChainId[] },
+      ) =>
+        quote({
+          tool,
+          routableBindings: candidates.filter((candidate) =>
+            (servesOn[candidate.binding.providerId] ?? []).includes(context.payerChains[0]),
+          ).length,
+        }),
+    );
+  }
+
+  const market = (overrides: Wiring = {}) =>
+    build({
+      bindings: [binding({ organizationId: P1 }), binding({ organizationId: P2 })],
+      providers: [
+        provider({ organizationId: P1, legalName: 'One BV' }),
+        provider({ organizationId: P2, legalName: 'Two BV' }),
+      ],
+      agents: [{ organizationId: BUYER, chainId: CHAIN, primaryAccountId: 'wallet-1' }],
+      ...overrides,
+    });
+
+  const servesYouById = async (wired: ReturnType<typeof build>) =>
+    Object.fromEntries(
+      (await wired.service.listProvidersFor(BUYER)).providers.map((row) => [
+        row.providerId,
+        row.servesYou,
+      ]),
+    );
+
+  it('a failed snapshot leaves the CARD unknown too: chains null, servesYou null', async () => {
+    const wired = market();
+    (wired.router.snapshotCandidates as jest.Mock).mockRejectedValue(new Error('rpc down'));
+
+    const { providers } = await wired.service.listProvidersFor(BUYER);
+
+    expect(providers).toHaveLength(2);
+    for (const row of providers) expect(row).toMatchObject({ chains: null, servesYou: null });
+  });
+
+  it('a tool catalogue read that fails for the served chains degrades to unknown, never fails the list', async () => {
+    const wired = market();
+    routedOn(wired, { [P1]: [CHAIN] });
+    // The market read succeeds; the served-chains read of the same catalogue fails.
+    (wired.catalogue.listTools as jest.Mock)
+      .mockImplementationOnce(async () => [WEATHER, RATE])
+      .mockImplementation(async () => {
+        throw new Error('catalogue down');
+      });
+
+    const { providers } = await wired.service.listProvidersFor(BUYER);
+
+    expect(providers).toHaveLength(2);
+    for (const row of providers) expect(row).toMatchObject({ chains: null, servesYou: null });
+  });
+
+  it('gathers each tool once per window, shared by the per-chain prices and the served chains', async () => {
+    const wired = market();
+    routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+    (wired.router.quote as jest.Mock).mockImplementation(async () =>
+      quote({ settlementChains: [CHAIN, OTHER_CHAIN] }),
+    );
+
+    await Promise.all([wired.service.listTools(), wired.service.listProvidersFor(BUYER)]);
+    await wired.service.getProviderFor(P1, BUYER);
+
+    expect(wired.router.snapshotCandidates).toHaveBeenCalledTimes(1);
+  });
+
+  it('a chain the buyer is withdrawing on does not count as serving them', async () => {
+    const wired = market({ withdrawing: ['wallet-1'] });
+    routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+
+    expect(await servesYouById(wired)).toEqual({ [P1]: false, [P2]: false });
+    expect(wired.escrow.readMany).toHaveBeenCalledWith(['wallet-1'], expect.any(String));
+  });
+
+  it('only the withdrawing agent’s chain drops out; an unreadable escrow keeps the chain', async () => {
+    const two = market({
+      agents: [
+        { organizationId: BUYER, chainId: CHAIN, primaryAccountId: 'wallet-1' },
+        { organizationId: BUYER, chainId: OTHER_CHAIN, primaryAccountId: 'wallet-2' },
+      ],
+      withdrawing: ['wallet-1'],
+    });
+    routedOn(two, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+    expect(await servesYouById(two)).toEqual({ [P1]: false, [P2]: true });
+
+    const unreadable = market({ escrowThrows: true });
+    routedOn(unreadable, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+    expect(await servesYouById(unreadable)).toEqual({ [P1]: true, [P2]: false });
+  });
+
+  it('every agent withdrawing: the reason is the withdrawal, not the chain', async () => {
+    const wired = market({ withdrawing: ['wallet-1'] });
+    routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+
+    const { providers } = await wired.service.listProvidersFor(BUYER);
+    expect(providers.map((row) => [row.servesYou, row.notServedReason])).toEqual([
+      [false, 'WITHDRAWING'],
+      [false, 'WITHDRAWING'],
+    ]);
+    const detail = await wired.service.getProviderFor(P1, BUYER);
+    expect(detail.notServedReason).toBe('WITHDRAWING');
+    expect(detail.tools[0].notServedReason).toBe('WITHDRAWING');
+
+    // A plain chain mismatch carries no reason of the caller's own.
+    const plain = market();
+    routedOn(plain, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+    const rows = (await plain.service.listProvidersFor(BUYER)).providers;
+    expect(rows.map((row) => row.notServedReason)).toEqual([null, null]);
+  });
+
+  describe('the withdrawal reading is reused briefly (m7)', () => {
+    afterEach(() => jest.restoreAllMocks());
+
+    it('reads each escrow at most once per window, then again after it', async () => {
+      let now = 1_000_000;
+      jest.spyOn(Date, 'now').mockImplementation(() => now);
+      const wired = market();
+      routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+
+      await wired.service.listProvidersFor(BUYER);
+      await wired.service.getProviderFor(P1, BUYER);
+      now += WITHDRAWAL_FLAG_CACHE_MS - 1;
+      await wired.service.listProvidersFor(BUYER);
+      expect(wired.escrow.readMany).toHaveBeenCalledTimes(1);
+
+      now += 2;
+      await wired.service.listProvidersFor(BUYER);
+      expect(wired.escrow.readMany).toHaveBeenCalledTimes(2);
+    });
+
+    it('a failed read is not cached, and the chain still counts (fail-open for display)', async () => {
+      const wired = market({ escrowThrows: true });
+      routedOn(wired, { [P1]: [CHAIN], [P2]: [OTHER_CHAIN] });
+
+      expect(await servesYouById(wired)).toEqual({ [P1]: true, [P2]: false });
+      await wired.service.listProvidersFor(BUYER);
+      expect(wired.escrow.readMany).toHaveBeenCalledTimes(2);
+    });
   });
 });

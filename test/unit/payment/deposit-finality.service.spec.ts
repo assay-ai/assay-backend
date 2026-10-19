@@ -27,7 +27,7 @@ const money = MoneyUtil.of('25000000', ASSET_IDS.USDG_ROBINHOOD_TESTNET, 6);
 
 function build(
   observe: (commitment: string | undefined) => unknown,
-  options: { appendFails?: boolean } = {},
+  options: { appendFails?: boolean; notify?: jest.Mock } = {},
 ) {
   const deposits = {
     findSettledAwaitingFinality: jest
@@ -62,7 +62,7 @@ function build(
       }),
     } as unknown as EscrowBalanceReaderPort,
     ledger as unknown as LedgerService,
-    undefined,
+    options.notify ? ({ notify: options.notify } as never) : undefined,
     audit as never,
   );
   return { service, deposits, ledger, adapter, audit };
@@ -158,5 +158,21 @@ describe('DepositFinalityService audit rows (B7)', () => {
 
     await expect(service.promotePendingDeposits(10)).resolves.toMatchObject({ skipped: 1 });
     expect(audit.recordAfterCommit).not.toHaveBeenCalled();
+  });
+});
+
+describe('DepositFinalityService notices (B8)', () => {
+  it('writes the credited and failed bodies in dollars', async () => {
+    const credited = jest.fn().mockResolvedValue(undefined);
+    await build(() => LANDED, { notify: credited }).service.promotePendingDeposits(10);
+    expect(credited.mock.calls[0][0].body).toBe(
+      'Your deposit of $25.00 has been credited and is now spendable.',
+    );
+
+    const failed = jest.fn().mockResolvedValue(undefined);
+    await build(() => null, { notify: failed }).service.promotePendingDeposits(10);
+    expect(failed.mock.calls[0][0].body).toBe(
+      'Your deposit of $25.00 could not be finalized on chain. No balance was affected.',
+    );
   });
 });

@@ -2913,8 +2913,16 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
 
   /**
    * Of {@link sumEscrowPaid}, what the chain has not taken from the escrow yet:
-   * charged rail-B calls neither redeemed nor redeemed into the hold. Atomic
-   * units. Read by the statement's check against the escrow balance (B7).
+   * charged rail-B calls whose hold is still open ({@link AWAITING_REDEMPTION_SQL}:
+   * the redemption has not landed) and that were not redeemed into the dispute
+   * hold either. Atomic units. Read by the statement's check against the escrow
+   * balance (B7).
+   *
+   * Not `redemption_tx_refs`: a ref is written before its broadcast (so it does
+   * not prove the chain took anything), and calls redeemed before refs were
+   * recorded have none. Counting those as unsettled made the statement say
+   * money was "still being collected" that Funding's chain counters showed
+   * collected (V1-5).
    */
   async sumEscrowChargedNotRedeemed(
     organizationId: string,
@@ -2928,7 +2936,7 @@ export class PaymentIntentRepository extends OrganizationScopedRepository<Paymen
       .andWhere('intent.assetId = :assetId', { assetId })
       .andWhere('intent.rail = :rail', { rail: 'RAIL_B_VOUCHER' })
       .andWhere(SUMMARY_CHARGED_SQL)
-      .andWhere(`cardinality(intent.redemption_tx_refs) = 0`)
+      .andWhere(AWAITING_REDEMPTION_SQL)
       .andWhere('intent.heldStatus IS NULL')
       .getRawOne<{ total: string }>();
     return BigInt(row?.total ?? '0');

@@ -23,9 +23,15 @@ describe('SpendPolicyEnforcementService.withAgentSpendLock', () => {
   beforeEach(() => {
     redis = new FakeRedis();
     const velocity = new SpendPolicyVelocityService(redis as unknown as Redis);
-    service = new SpendPolicyEnforcementService({} as never, {} as never, velocity, {
-      emit: jest.fn(),
-    } as never);
+    service = new SpendPolicyEnforcementService(
+      {} as never,
+      {} as never,
+      velocity,
+      {
+        emit: jest.fn(),
+      } as never,
+      {} as never,
+    );
   });
 
   afterEach(() => {
