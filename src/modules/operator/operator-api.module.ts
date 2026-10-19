@@ -23,7 +23,7 @@ import { OperatorOverrideLogController } from './controllers/operator-override-l
 import { OperatorProvidersController } from './controllers/operator-providers.controller';
 import { OperatorSignInController } from './controllers/operator-sign-in.controller';
 import { OperatorModule } from './operator.module';
-import { AdjudicationQueueService } from './services/adjudication-queue.service';
+import { OperatorCaseBriefService } from './services/operator-case-brief.service';
 import { OperatorAccountBlockService } from './services/operator-account-block.service';
 import { OperatorApprovalService } from './services/operator-approval.service';
 import { OperatorArbiterService } from './services/operator-arbiter.service';
@@ -98,7 +98,7 @@ import { OperatorReferenceService } from './services/operator-reference.service'
     OperatorReferenceController,
   ],
   providers: [
-    AdjudicationQueueService,
+    OperatorCaseBriefService,
     OperatorAccountBlockService,
     OperatorApprovalService,
     OperatorArbiterService,

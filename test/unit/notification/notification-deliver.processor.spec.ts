@@ -7,10 +7,9 @@ import { NotificationChannel } from '@modules/notification/ports/notification.po
  * The deliver processor tells the delivery observer, and only when a
  * channel actually delivered.
  *
- * This is the link that makes `respond_by_at` reachable at all: until it
- * existed, `SlashProposalService.markDelivered` had no caller in `src/`, so no
- * slash proposal could ever satisfy `findUndisputedPast`'s
- * `respond_by_at IS NOT NULL` and none could be promoted to `UPHELD`.
+ * This is the link that records a slash proposal's delivery on a queued
+ * channel: `SlashProposalService.markDelivered` sets `notified_at`, which the
+ * propose sweep waits for before it reserves any stake on chain.
  *
  * The processor runs in the **worker** process, which is why the hook lives
  * here and not in `NotificationService` — that class only writes the rows and

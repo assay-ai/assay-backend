@@ -7,24 +7,12 @@ import { AssertDomainErrorCodes, createDomainErrorFactory } from '@shared/errors
  */
 export enum SlashErrorCode {
   SLASH_PROPOSAL_NOT_FOUND = 'SLASH_PROPOSAL_NOT_FOUND',
-  SLASH_PROPOSAL_ALREADY_EXISTS = 'SLASH_PROPOSAL_ALREADY_EXISTS',
   SLASH_PROPOSAL_NOT_DISPUTABLE = 'SLASH_PROPOSAL_NOT_DISPUTABLE',
-  SLASH_PROPOSAL_RESPONSE_WINDOW_CLOSED = 'SLASH_PROPOSAL_RESPONSE_WINDOW_CLOSED',
   SLASH_PROPOSAL_ALREADY_DISPUTED = 'SLASH_PROPOSAL_ALREADY_DISPUTED',
   SLASH_INVALID_TRANSITION = 'SLASH_INVALID_TRANSITION',
-  SLASH_INVALID_REASON_CODE = 'SLASH_INVALID_REASON_CODE',
-  SLASH_SECOND_SIGNATURE_REQUIRED = 'SLASH_SECOND_SIGNATURE_REQUIRED',
-  SLASH_SECOND_SIGNATURE_NOT_PENDING = 'SLASH_SECOND_SIGNATURE_NOT_PENDING',
-  SLASH_SECOND_READER_MUST_DIFFER = 'SLASH_SECOND_READER_MUST_DIFFER',
-  SLASH_RECALCULATION_EXCEEDS_ORIGINAL = 'SLASH_RECALCULATION_EXCEEDS_ORIGINAL',
-  SLASH_RECALCULATED_AMOUNT_INVALID = 'SLASH_RECALCULATED_AMOUNT_INVALID',
-  SLASH_TIMELOCK_NOT_ELAPSED = 'SLASH_TIMELOCK_NOT_ELAPSED',
-  SLASH_EXTENSION_EXCEEDS_CHAIN_TIMELOCK = 'SLASH_EXTENSION_EXCEEDS_CHAIN_TIMELOCK',
-  SLASH_EXTENSION_WHILE_PROPOSING = 'SLASH_EXTENSION_WHILE_PROPOSING',
   SLASH_ALREADY_REVERSED = 'SLASH_ALREADY_REVERSED',
   SLASH_NOT_EXECUTED = 'SLASH_NOT_EXECUTED',
   SLASH_NO_BENEFICIARY = 'SLASH_NO_BENEFICIARY',
-  SLASH_SWEEP_OUTCOME_NOT_SWEEPABLE = 'SLASH_SWEEP_OUTCOME_NOT_SWEEPABLE',
   SLASH_BENEFICIARY_IS_TREASURY = 'SLASH_BENEFICIARY_IS_TREASURY',
   /** A route needed the settlement program and this deployment has none. */
   SLASH_CHAIN_UNAVAILABLE = 'SLASH_CHAIN_UNAVAILABLE',
@@ -32,19 +20,13 @@ export enum SlashErrorCode {
   SLASH_COMPENSATION_NOT_CONFIRMED = 'SLASH_COMPENSATION_NOT_CONFIRMED',
   SLASH_COMPENSATION_ALREADY_USED = 'SLASH_COMPENSATION_ALREADY_USED',
   SLASH_PLAN_EVIDENCE_MISMATCH = 'SLASH_PLAN_EVIDENCE_MISMATCH',
-  SLASH_SWEEP_DEFECT_KEY_MISMATCH = 'SLASH_SWEEP_DEFECT_KEY_MISMATCH',
   /** A pro-rata window case found no agent with a priced DATA_FAIL call to compensate. */
   SLASH_NO_HARMED_AGENTS = 'SLASH_NO_HARMED_AGENTS',
   /** A case whose beneficiary cannot be named on this chain (e.g. the EVM vault). */
   SLASH_BENEFICIARY_UNSUPPORTED = 'SLASH_BENEFICIARY_UNSUPPORTED',
   /** A dispute-upgrade batch (D-19) the chain would revert: one entry per refused id. */
   SLASH_CHAIN_BATCH_REFUSED = 'SLASH_CHAIN_BATCH_REFUSED',
-  SLASH_DISPUTE_WON_ON_CHAIN = 'SLASH_DISPUTE_WON_ON_CHAIN',
   SLASH_BENEFICIARY_EVIDENCE_REFUSED = 'SLASH_BENEFICIARY_EVIDENCE_REFUSED',
-  /** An EVM case: the provider disputes on chain, there is no in-app objection. */
-  SLASH_DISPUTE_ON_CHAIN_ONLY = 'SLASH_DISPUTE_ON_CHAIN_ONLY',
-  /** An EVM case: the arbiter rules on chain, there is no off-chain decision. */
-  SLASH_ARBITER_RULES_ON_CHAIN = 'SLASH_ARBITER_RULES_ON_CHAIN',
   /** Review R2-6: the superseded-record cancel was asked for a record that is not one. */
   SLASH_RECORD_NOT_SUPERSEDED = 'SLASH_RECORD_NOT_SUPERSEDED',
   /** A cancel was asked for a case with nothing Pending or Disputed on chain. */
@@ -63,19 +45,6 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     message: (context?: Record<string, any>) =>
       `Slash proposal not found${context?.proposalId ? ` with id: ${context.proposalId}` : ''}`,
   },
-  /**
-   * One proposal per finding, forever — `uq_slash_proposals_strike` and
-   * `uq_slash_proposals_verdict`. A second one is a double penalty for a single
-   * finding, and it is the shape a retried opener takes.
-   */
-  proposalAlreadyExists: {
-    code: SlashErrorCode.SLASH_PROPOSAL_ALREADY_EXISTS,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `A slash proposal already exists for this finding` +
-      `${context?.verdictId ? ` (verdict ${context.verdictId})` : ''}` +
-      `${context?.strikeId ? ` (strike ${context.strikeId})` : ''}`,
-  },
   /** The case has moved past the point where an objection can be filed. */
   notDisputable: {
     code: SlashErrorCode.SLASH_PROPOSAL_NOT_DISPUTABLE,
@@ -83,22 +52,6 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     message: (context?: Record<string, any>) =>
       `This proposal cannot be disputed from its current state` +
       `${context?.status ? `: ${context.status}` : ''}`,
-  },
-  /**
-   * The provider's window elapsed.
-   *
-   * Distinct from `notDisputable` because it is the one refusal a provider can
-   * do something about next time, and telling them "wrong state" when the truth
-   * is "you were three hours late" is the kind of message that produces a
-   * support ticket instead of an understanding.
-   */
-  responseWindowClosed: {
-    code: SlashErrorCode.SLASH_PROPOSAL_RESPONSE_WINDOW_CLOSED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `The window to object closed` +
-      `${context?.respondByAt ? ` at ${context.respondByAt}` : ''}` +
-      `. Contact support if you believe the notification never reached you.`,
   },
   alreadyDisputed: {
     code: SlashErrorCode.SLASH_PROPOSAL_ALREADY_DISPUTED,
@@ -138,137 +91,6 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
       `Cannot ${context?.action ?? 'do this'} while the case is ` +
       `${context?.status ?? 'in its current status'}` +
       `${context?.allowed ? `; only while it is ${context.allowed}` : ''}`,
-  },
-  /** A reason code that is not in the closed list for the chosen outcome. */
-  invalidReasonCode: {
-    code: SlashErrorCode.SLASH_INVALID_REASON_CODE,
-    statusCode: 422,
-    message: (context?: Record<string, any>) =>
-      `Reason code${context?.code ? ` ${context.code}` : ''} is not valid for outcome ` +
-      `${context?.outcome ?? 'the chosen outcome'}`,
-  },
-  secondSignatureRequired: {
-    code: SlashErrorCode.SLASH_SECOND_SIGNATURE_REQUIRED,
-    statusCode: 409,
-    message: () => 'This decision needs a second signature before it binds',
-  },
-  /**
-   * One person cannot hold both seats of a two-person case. Refused up front so
-   * `chk_slash_proposals_second_is_a_different_person` never has to.
-   */
-  secondReaderMustDiffer: {
-    code: SlashErrorCode.SLASH_SECOND_READER_MUST_DIFFER,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      context?.role === 'objector'
-        ? 'You objected to the earlier decision on this case, so you cannot decide it yourself; ' +
-          'it needs a different reader'
-        : 'You made this decision, so you cannot countersign it; a different operator must sign or object',
-  },
-  secondSignatureNotPending: {
-    code: SlashErrorCode.SLASH_SECOND_SIGNATURE_NOT_PENDING,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `No decision is awaiting a second signature on this case` +
-      `${context?.status ? ` (${context.status})` : ''}`,
-  },
-  /**
-   * An adjudicator may **reduce** a penalty and may never raise one.
-   *
-   * The provider was told a number and given a window to object to it. Raising
-   * it on review would mean the thing they had a chance to answer was not the
-   * thing that happens to them — which is the definition of the process this
-   * goal exists to replace.
-   */
-  recalculationExceedsOriginal: {
-    code: SlashErrorCode.SLASH_RECALCULATION_EXCEEDS_ORIGINAL,
-    statusCode: 422,
-    message: (context?: Record<string, any>) =>
-      `A recalculated penalty may not exceed the proposed one` +
-      `${context?.original ? ` (${context.original})` : ''}`,
-  },
-  /**
-   * `UPHELD_RECALCULATED` with no amount, or one that is not a positive whole
-   * number of minor units.
-   *
-   * The request DTO refuses the same thing first with a `400`; this is the
-   * service's own refusal, raised before `BigInt()` sees the value and before
-   * anything is written, so a second caller cannot record a penalty of `''`.
-   */
-  recalculatedAmountInvalid: {
-    code: SlashErrorCode.SLASH_RECALCULATED_AMOUNT_INVALID,
-    statusCode: 422,
-    message: (context?: Record<string, any>) =>
-      `UPHELD_RECALCULATED needs a recalculated penalty: a positive whole number of minor units` +
-      `${context?.original ? `, no more than the proposed ${context.original}` : ''}`,
-  },
-  /** The case screen promises nothing executes before the deadline. This enforces it. */
-  timelockNotElapsed: {
-    code: SlashErrorCode.SLASH_TIMELOCK_NOT_ELAPSED,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Nothing executes before ${context?.earliestExecutionAt ?? 'the stated deadline'}`,
-  },
-  /**
-   * The requested extension would put the provider's deadline **after** the
-   * moment the chain lets anybody take their money.
-   *
-   * `execute_slash` takes one signer, `payer`, and consults it about nothing.
-   * So once `SlashRecord.executable_at` passes, any stranger on the internet
-   * may spend a standing judgement — no backend guard reaches them. That
-   * deadline is frozen at `chain_proposed_at + slash_delay_seconds` when the
-   * record is written, and nothing this process does moves it.
-   *
-   * The off-chain windows are sized so the dispute always closes first, but an
-   * `S-8` extension is the one operator action that can push the case screen's
-   * promise past the chain's door. Refused rather than clamped: an operator who
-   * asked for five days and silently got three has been told the promise holds when
-   * it does not, and would go on to tell the provider the same thing.
-   *
-   * The way out is `S-1` (suspend) then a fresh proposal, which restarts the
-   * on-chain clock — the extension itself cannot be made safe.
-   */
-  extensionExceedsChainTimelock: {
-    code: SlashErrorCode.SLASH_EXTENSION_EXCEEDS_CHAIN_TIMELOCK,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `This case already has a live on-chain proposal, and its penalty becomes executable by ` +
-      `anyone at ${context?.chainExecutableAt ?? 'a fixed moment'} — a deadline frozen on chain ` +
-      `that no extension here can move. The requested extension would run to ` +
-      `${context?.requestedExecutionAt ?? 'a later moment'}, so the provider would be promised ` +
-      `time they do not have. Suspend the case (S-1) and re-propose instead, which restarts the ` +
-      `on-chain clock.`,
-  },
-  /**
-   * A proposal is being sent to the chain **right now**, so the deadline the
-   * extension has to respect is not knowable yet.
-   *
-   * `PROPOSING` is not a millisecond of transit. `proposeDue`'s non-void catch
-   * deliberately leaves the row claimed and `PROPOSING` on any failure the
-   * program did not name — an RPC error, an expired blockhash, a confirmation
-   * timeout — precisely because the transaction may already have landed. So the
-   * record's `executable_at` may exist while `chain_executable_at` is still
-   * null, and the stale-claim sweep only reaps the claim after
-   * `CHAIN_CLAIM_STALE_MS` (ten minutes), longer if the RPC outage persists.
-   *
-   * Granting an extension against an unknown deadline is the same defect as
-   * granting one past a known deadline, minus the ability to name the number.
-   * Refused, and retryable: once the send settles the row learns the chain's
-   * clock and {@link extensionExceedsChainTimelock} can give a real answer.
-   *
-   * Distinct from that error because the remedy is different — this one says
-   * "try again shortly", that one says "this can never be granted".
-   */
-  extensionWhileProposing: {
-    code: SlashErrorCode.SLASH_EXTENSION_WHILE_PROPOSING,
-    statusCode: 409,
-    // Takes the context it will never interpolate, so the proposal id lands in
-    // the error for the log line rather than only in the operator's message.
-    message: (_context?: Record<string, any>) =>
-      'A proposal for this case is being sent to the chain right now, so the moment its ' +
-      'penalty becomes executable by anyone is not known yet and an extension cannot be ' +
-      'checked against it. Try again once the send settles; if it stays in this state, the ' +
-      'send is failing and needs looking at.',
   },
   /**
    * Reversing the same case twice.
@@ -359,34 +181,6 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
       'has not been decided.',
   },
   /**
-   * Only the two outcomes that are findings about **us** may open a sweep.
-   *
-   * Refused at the database too (`chk_fleet_sweeps_outcome`). Sweeping a
-   * griefing or insufficient-evidence finding would cancel penalties on
-   * providers whose facts were never in question — the same defect as levying
-   * them, pointed the other way.
-   */
-  /**
-   * A sweep matches cases by `root_cause_key`, so the key it uses must be the
-   * source case's own (review M-2). Before, any free-text key was accepted and
-   * the source case only had to have a sweepable outcome.
-   */
-  sweepDefectKeyMismatch: {
-    code: SlashErrorCode.SLASH_SWEEP_DEFECT_KEY_MISMATCH,
-    statusCode: 422,
-    message: (context?: Record<string, any>) =>
-      context?.rootCauseKey
-        ? `The sweep's defect key must be the source case's root cause (${String(context.rootCauseKey)}), not ${String(context?.defectKey ?? '')}.`
-        : `The source case has no root cause key, so it cannot open a fleet sweep.`,
-  },
-  outcomeNotSweepable: {
-    code: SlashErrorCode.SLASH_SWEEP_OUTCOME_NOT_SWEEPABLE,
-    statusCode: 422,
-    message: (context?: Record<string, any>) =>
-      `${context?.outcome ?? 'This outcome'} is a finding about one provider, one agent or one ` +
-      `window. Only a platform or policy defect generalises to bindings that never complained.`,
-  },
-  /**
    * The resolved collection account is the settlement treasury.
    *
    * `slash` cannot execute such a judgement: `beneficiary_token_account` and
@@ -455,19 +249,6 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
    * `DuplicateId`).
    */
   /**
-   * Follow-up B7: the provider won an on-chain dispute over these calls, so
-   * the incident is never proposed again — not under a new request id, and not
-   * as a new case over the same window.
-   */
-  disputeWonOnChain: {
-    code: SlashErrorCode.SLASH_DISPUTE_WON_ON_CHAIN,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `The provider won the on-chain dispute of case ${context?.proposalId ?? ''}` +
-      `${context?.windowId ? ` (window ${context.windowId})` : ''}; these calls cannot be ` +
-      'proposed again',
-  },
-  /**
    * Follow-up C5: a part's beneficiary is not a payer of the window's failed
    * calls, or the part is more than that payer's pro-rata share of the formula
    * penalty (one minor unit of rounding allowed). Nothing was signed; the case stays PROPOSING and
@@ -479,37 +260,6 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
     message: (context?: Record<string, any>) =>
       `Slash case ${context?.proposalId ?? ''}: refused before signing — ` +
       `${context?.reason ?? 'a beneficiary does not match the paid vouchers'}`,
-  },
-  /**
-   * The in-app objection on an EVM case. The provider's dispute is
-   * `disputeSlash` / `disputeSlashBatch`, sent from its own stake wallet
-   * (`POST /providers/me/slash-requests/dispute-intent` builds it): only that
-   * freezes the record, and it must land before the record's `executableAt`.
-   */
-  disputeOnChainOnly: {
-    code: SlashErrorCode.SLASH_DISPUTE_ON_CHAIN_ONLY,
-    statusCode: 409,
-    publicContext: ['executableAt'],
-    message: (context?: Record<string, any>) =>
-      'This penalty is disputed on chain, not in the app: send disputeSlash from your stake ' +
-      'wallet (the penalties on chain page builds it). Disputing freezes the penalty on chain ' +
-      'until the arbiter decides' +
-      (context?.executableAt
-        ? `; you must dispute before ${context.executableAt}`
-        : '; you can dispute once its record is on chain'),
-  },
-  /**
-   * An off-chain decision (claim, decide, second, extension, S-1 suspension)
-   * on an EVM case. Its records are decided only on chain: the arbiter's
-   * ruling on a dispute, or execution after `executableAt`.
-   */
-  arbiterRulesOnChain: {
-    code: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
-    statusCode: 409,
-    message: (context?: Record<string, any>) =>
-      `Cannot ${context?.action ?? 'decide'} this case off chain: an EVM penalty is decided ` +
-      'only on chain. The arbiter rules there (upholdSlash), and only the arbiter can stop it, ' +
-      'by cancelling its record on chain (cancelSlash, from the arbiter page)',
   },
   /**
    * Review R2-6: the guarded cancel of a superseded earlier-epoch record was

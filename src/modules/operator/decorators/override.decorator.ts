@@ -5,8 +5,8 @@ export const OVERRIDE_CODE_METADATA = 'operator:override-code';
 /**
  * Declares which row of the override register this handler exercises.
  *
- * `@Override('S-3')` on the decide endpoint, `@Override('S-1')` on suspend, and
- * so on. The code decides three things the handler does not get to choose —
+ * `@Override('S-5')` on the compensation record, `@Override('S-13')` on the
+ * arbiter's ruling, and so on. The code decides three things the handler does not get to choose —
  * which roles may call it, whether a second identity is required, and whether
  * it is reversible — because those belong to the *action*, and an endpoint that
  * carried its own approval requirement could quietly lower it.

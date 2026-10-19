@@ -1,7 +1,5 @@
-import { Body, Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
-import { ArrayMaxSize, IsArray, IsEnum, IsString, Length, MaxLength } from 'class-validator';
-import { ApiProperty, ApiPropertyOptional } from '@nestjs/swagger';
+import { Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
+import { ApiBearerAuth, ApiOperation, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import {
   AllowedWhileBlocked,
@@ -11,53 +9,14 @@ import {
 } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
-import { DisputeClaimType } from '../domain/arbitration';
 import {
   RestorationRowDto,
   SlashProposalCaseDto,
   SlashProposalEventDto,
   SlashProposalIdParamsDto,
 } from '../dto/slash-proposal.dto';
-import { ArbitrationService } from '../services/arbitration.service';
 import { SlashCaseService } from '../services/slash-case.service';
 import { SlashProposalService } from '../services/slash-proposal.service';
-
-/**
- * The dispute filing form, as a body.
- *
- * The clearest transferable lesson from other dispute systems: *"Structure the
- * input, not just the output."* Every dispute system with tolerable review
- * consistency constrains what the accused party may submit. `POST /disputes`
- * takes `{ reason, evidence }` as free text, and that single choice is what
- * guarantees inconsistent review — two adjudicators reading two essays
- * about the same situation do not extract the same facts.
- *
- * So `claimType` is a closed enum and the free text is the *supplement*, not
- * the submission.
- */
-export class FileSlashDisputeBodyDto {
-  @ApiProperty({ enum: DisputeClaimType })
-  @IsEnum(DisputeClaimType)
-  claimType: DisputeClaimType;
-
-  @ApiProperty({
-    description: 'Anything to add. Optional in the UI, required to be non-empty here.',
-  })
-  @IsString()
-  @Length(1, 2048)
-  reason: string;
-
-  @ApiPropertyOptional({
-    isArray: true,
-    type: String,
-    description: 'Ids of the calls the provider selected as supporting the claim',
-  })
-  @IsArray()
-  @ArrayMaxSize(500)
-  @IsString({ each: true })
-  @MaxLength(128, { each: true })
-  selectedCallIds: string[] = [];
-}
 
 export class SlashProposalTimelineDto {
   @ApiProperty({ type: [SlashProposalEventDto] })
@@ -69,7 +28,8 @@ export class SlashProposalTimelineDto {
 
 /**
  * The provider's own view of a penalty proposed against them: the case
- * screen, the dispute filing form and the dispute case state.
+ * screen and its timeline. The dispute itself is `disputeSlash` on chain
+ * (`POST /providers/me/slash-requests/dispute-intent` builds it).
  *
  * Organization-scoped in the ordinary way — a proposal belongs to the provider
  * whose stake it threatens, so `session.organizationId` is the query's own
@@ -84,7 +44,6 @@ export class ProviderSlashProposalsController {
   constructor(
     private readonly cases: SlashCaseService,
     private readonly lifecycle: SlashProposalService,
-    private readonly arbitration: ArbitrationService,
   ) {}
 
   @Get(':proposalId')
@@ -115,13 +74,12 @@ export class ProviderSlashProposalsController {
   /**
    * Opening the case.
    *
-   * Recorded, and it moves no clock. The provider's window runs from
-   * *delivery* (Solana) or to the record's `executableAt` (EVM), never from
-   * reading — a provider who never opens the dashboard has exactly as long to
-   * object as one who opens it immediately.
+   * Recorded, and it moves no clock. The provider's window runs to the
+   * record's `executableAt`, never from reading — a provider who never opens
+   * the dashboard has exactly as long to dispute as one who opens it
+   * immediately.
    *
-   * Allowed while blocked, like the objection below: it records a reading and
-   * grants nothing.
+   * Allowed while blocked: it records a reading and grants nothing.
    */
   @Post(':proposalId/acknowledge')
   @UseGuards(HumanSessionGuard)
@@ -133,49 +91,6 @@ export class ProviderSlashProposalsController {
     @Param() params: SlashProposalIdParamsDto,
   ): Promise<SlashProposalCaseDto> {
     await this.lifecycle.acknowledge(session.organizationId, params.proposalId, session.agentId);
-    return this.cases.buildCase(session.organizationId, params.proposalId);
-  }
-
-  /**
-   * File the objection — Solana cases only.
-   *
-   * An EVM case is refused (409 `SLASH_DISPUTE_ON_CHAIN_ONLY`, with the
-   * record's `executableAt`): its dispute is `disputeSlash` from the
-   * provider's own stake wallet (`POST /providers/me/slash-requests/
-   * dispute-intent` builds it), which freezes the record on chain until the
-   * arbiter decides. An in-app objection would not.
-   *
-   * Filing is free and does not affect routing or tier — stated on the screen,
-   * and true: nothing in this path touches either. It is worth saying out loud
-   * because the fear that disputing will cost them traffic is the reason
-   * providers in every comparable system under-dispute.
-   *
-   * Allowed while blocked (review S-8): an objection only takes authority
-   * away from the platform, and without it a blocked provider's open cases
-   * would auto-uphold when the response window closes.
-   */
-  @Post(':proposalId/dispute')
-  @UseGuards(HumanSessionGuard)
-  @AllowedWhileBlocked()
-  @ApiOperation({ summary: 'Object to a proposed penalty' })
-  @ApiResponse({ status: 201, type: SlashProposalCaseDto })
-  @ApiResponse({
-    status: 409,
-    description:
-      'The window to object has closed, one is on file, or the case is on EVM and is disputed ' +
-      'on chain only (SLASH_DISPUTE_ON_CHAIN_ONLY)',
-  })
-  async dispute(
-    @CurrentSession() session: McpSession,
-    @Param() params: SlashProposalIdParamsDto,
-    @Body() body: FileSlashDisputeBodyDto,
-  ): Promise<SlashProposalCaseDto> {
-    await this.arbitration.fileDispute(session.organizationId, params.proposalId, {
-      claimType: body.claimType,
-      reason: body.reason,
-      evidence: body.selectedCallIds,
-      openedBy: session.agentId,
-    });
     return this.cases.buildCase(session.organizationId, params.proposalId);
   }
 }

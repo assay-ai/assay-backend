@@ -2,10 +2,7 @@ import {
   ARBITRATION_STATE_MAP,
   ArbitrationOutcome,
   DisputeResolutionState,
-  isOverturn,
   OUTCOME_CONSEQUENCE,
-  REASON_CODES,
-  reasonCodesAreValid,
 } from '@modules/slash/domain/arbitration';
 import { DisputeState } from '@modules/dispute/dto/dispute.dto';
 
@@ -24,7 +21,6 @@ describe('arbitration vocabulary', () => {
     for (const outcome of outcomes) {
       expect(OUTCOME_CONSEQUENCE[outcome]).toBeDefined();
       expect(ARBITRATION_STATE_MAP[outcome]).toBeDefined();
-      expect(REASON_CODES[outcome].length).toBeGreaterThan(0);
     }
   });
 
@@ -43,7 +39,9 @@ describe('arbitration vocabulary', () => {
       DisputeResolutionState.PARTIALLY_UPHELD,
     );
 
-    const overturns = Object.values(ArbitrationOutcome).filter(isOverturn);
+    const overturns = Object.values(ArbitrationOutcome).filter(
+      (outcome) => !OUTCOME_CONSEQUENCE[outcome].penaltyStands,
+    );
     expect(overturns).toHaveLength(4);
     for (const outcome of overturns) {
       expect(ARBITRATION_STATE_MAP[outcome]).toBe(DisputeResolutionState.UPHELD);
@@ -112,16 +110,9 @@ describe('arbitration vocabulary', () => {
    */
   it('is the only overturn that leaves strikes standing', () => {
     const standing = Object.values(ArbitrationOutcome).filter(
-      (outcome) => isOverturn(outcome) && OUTCOME_CONSEQUENCE[outcome].strikesStand,
+      (outcome) =>
+        !OUTCOME_CONSEQUENCE[outcome].penaltyStands && OUTCOME_CONSEQUENCE[outcome].strikesStand,
     );
     expect(standing).toEqual([ArbitrationOutcome.OVERTURNED_INSUFFICIENT_EVIDENCE]);
-  });
-
-  it('refuses an empty reason-code list and a code from another outcome', () => {
-    expect(reasonCodesAreValid(ArbitrationOutcome.UPHELD, [])).toBe(false);
-    expect(reasonCodesAreValid(ArbitrationOutcome.UPHELD, ['MAPPING_REGRESSION'])).toBe(false);
-    expect(
-      reasonCodesAreValid(ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT, ['MAPPING_REGRESSION']),
-    ).toBe(true);
   });
 });

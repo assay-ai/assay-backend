@@ -28,9 +28,8 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 /**
  * Every penalty, for the console's Penalties list (`GET /operator/cases`).
  *
- * The adjudication queue lists only the retired off-chain objection process;
- * this lists every slash proposal by where it stands now, so Support and
- * on-call can browse rather than arrive with a link. Read-only, and each row is
+ * Every slash proposal by where it stands now, so Support and on-call can
+ * browse rather than arrive with a link. Read-only, and each row is
  * built field by field into {@link OperatorCaseListRowDto} — the allowlist is
  * the point, see the DTO.
  */

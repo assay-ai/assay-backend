@@ -366,9 +366,8 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
    *   `ArbitrationService.reopenForChainDispute`).
    * - **A part stands pending** (never disputed, or upheld): it executes at its
    *   door. A `PROPOSED` case with no disputed part is upheld there by the
-   *   undisputed sweep. An open
-   *   `DISPUTED` / `UNDER_REVIEW` / `AWAITING_SECOND` case (an older in-app
-   *   objection, or a straggler re-adopted) is upheld so the executor sends
+   *   undisputed sweep. An open `DISPUTED` case (its disputed sibling ruled
+   *   or lapsed, or a straggler re-adopted) is upheld so the executor sends
    *   it: as the arbiter's uphold (`CHAIN_ARBITER`) when a pending part was
    *   disputed before (review R2-10), else as `AUTO_UNDISPUTED` — and that
    *   only once every pending undisputed part is past its door by
@@ -644,9 +643,8 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
   }
 
   /**
-   * Review N-3: EVM cases left open by the in-app objection era (`DISPUTED`,
-   * `UNDER_REVIEW`, `AWAITING_SECOND`) that no queue, sweep or action reaches
-   * any more. Each case's records are re-read from the chain onto its parts,
+   * Review N-3: open `DISPUTED` cases, re-read after the scheduler starts so
+   * one whose event was missed while it was down still moves. Each case's records are re-read from the chain onto its parts,
    * and the case then follows them ({@link followRecords}): a record standing
    * undisputed makes it `UPHELD` for the executor, a case with nothing
    * standing closes, and one whose every record is disputed on chain stays for
@@ -704,8 +702,7 @@ export class SlashChainRulingService implements SlashChainRulingsPort {
   }
 
   /**
-   * Review R2-2: open EVM cases (`DISPUTED`, `UNDER_REVIEW`, `AWAITING_SECOND`)
-   * a record of which stands pending past its door by
+   * Review R2-2: open `DISPUTED` cases a record of which stands pending past its door by
    * `CHAIN_DISPUTE_SETTLE_MS`. {@link followRecords} leaves such a case open
    * until every undisputed record has settled, and no event comes back for
    * it; every tick follows them again. No chain read: the parts are mirrored

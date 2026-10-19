@@ -1,9 +1,4 @@
-import { ResolutionKind } from '@modules/slash/domain/arbitration';
-import {
-  AUTOMATIC_RESOLUTION_KINDS,
-  canTransition,
-  SlashProposalStatus,
-} from '@modules/slash/domain/slash-proposal-state';
+import { canTransition, SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
 
 describe('the slash case state machine', () => {
   it('lets an EXECUTING case be cancelled when the chain says the judgement is void', () => {
@@ -41,12 +36,9 @@ describe('the slash case state machine', () => {
     }
   });
 
-  it('lists a chain-voided closure among the kinds that resolve a case without a human', () => {
-    // Nobody adjudicated this one — the chain did — so it belongs with the
-    // other three automatic kinds. Nothing consumes AUTOMATIC_RESOLUTION_KINDS
-    // today, so this asserts membership of the list and nothing about
-    // behaviour; the list has to be complete before the check that reads it is
-    // written.
-    expect(AUTOMATIC_RESOLUTION_KINDS).toContain(ResolutionKind.AUTO_CHAIN_VOIDED);
+  it('lets a DISPUTED case go only where the arbiter sends it', () => {
+    expect(canTransition(SlashProposalStatus.DISPUTED, SlashProposalStatus.UPHELD)).toBe(true);
+    expect(canTransition(SlashProposalStatus.DISPUTED, SlashProposalStatus.CANCELLED)).toBe(true);
+    expect(canTransition(SlashProposalStatus.DISPUTED, SlashProposalStatus.OVERTURNED)).toBe(false);
   });
 });

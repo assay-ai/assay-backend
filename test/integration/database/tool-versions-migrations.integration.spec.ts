@@ -76,6 +76,7 @@ describe('tool version migrations: up, down, up', () => {
 
   /** Migrations after the T3 ones, newest first. */
   const LATER = [
+    'DropOffChainSlashObjection1762400000001',
     'DropLegacyPaymentSchema1762400000000',
     'EscrowWithdrawalEvents1762300000000',
     'ModerationCutoffPublicReason1762200000000',

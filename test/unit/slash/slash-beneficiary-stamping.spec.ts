@@ -78,7 +78,6 @@ function build() {
   const beneficiaries = { resolve: jest.fn().mockResolvedValue(VAULT) };
   const lifecycle = { appendEventDirect: jest.fn().mockResolvedValue(undefined) };
   const notifications = { notify: jest.fn().mockResolvedValue(undefined) };
-  const sweeps = { findOneBy: jest.fn(), update: jest.fn() };
   const overrides = { record: jest.fn().mockResolvedValue(undefined) };
 
   // The stake authority is a column on the per-chain ENROLMENT, looked
@@ -106,7 +105,6 @@ function build() {
   const service = new SlashExecutionService(
     proposals as never,
     enrolments as never,
-    sweeps as never,
     lifecycle as never,
     overrides as never,
     notifications as never,

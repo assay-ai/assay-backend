@@ -4,22 +4,13 @@ import { toHex } from 'viem';
 import { privateKeyToAccount } from 'viem/accounts';
 import { DataSource } from 'typeorm';
 
-import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
-import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
-import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
-import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
 import { EvmSlashExecutor } from '@modules/chains/evm/evm-slash-executor.service';
 import {
   NamespaceSlashCapsReader,
   NamespaceSlashExecutor,
 } from '@modules/chains/multiplex/namespace-slash-executor';
 import { ChainNamespace } from '@modules/chains/ports/caip.types';
-import { OperatorRole } from '@modules/operator/domain/override-register';
-import { OperatorSession } from '@modules/operator/ports/operator-session.port';
-import { OverrideLogService } from '@modules/operator/services/override-log.service';
 import { SlashErrorCode } from '@modules/slash/errors/slash.errors';
-import { ArbitrationService } from '@modules/slash/services/arbitration.service';
-import { SlashExecutionService } from '@modules/slash/services/slash-execution.service';
 import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp256k1-env.signer';
 
 import {
@@ -33,7 +24,6 @@ import {
   buildProRataSlashServices,
   freshMigratedDatabase,
   ProRataSlashServices,
-  TEST_SLASH_CONFIG,
 } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
 
@@ -65,25 +55,9 @@ describe('a closed case with a record standing on chain, against a real database
   let chain: FakeStakeChain;
   let evm: EvmSlashExecutor;
   let services: ProRataSlashServices;
-  let arbitration: ArbitrationService;
-  let adjudicator: OperatorSession;
 
   beforeAll(async () => {
     dataSource = await freshMigratedDatabase(DATABASE);
-    const id = randomUUID();
-    await dataSource.query(
-      `INSERT INTO operators (id, subject, display_name, email, roles, status)
-       VALUES ($1, 'ops-adj', 'ops-adj', 'ops-adj@example.test', $2::jsonb, 'ACTIVE')`,
-      [id, JSON.stringify([OperatorRole.ADJ])],
-    );
-    adjudicator = {
-      operatorId: id,
-      subject: 'ops-adj',
-      displayName: 'ops-adj',
-      email: 'ops-adj@example.test',
-      roles: [OperatorRole.ADJ],
-      authorityLimitMinor: null,
-    };
   }, 300_000);
 
   afterAll(async () => {
@@ -132,37 +106,17 @@ describe('a closed case with a record standing on chain, against a real database
       new NamespaceSlashExecutor(new Map([[ChainNamespace.EIP155, evm]])),
       new NamespaceSlashCapsReader(new Map([[ChainNamespace.EIP155, evm]])),
     );
-    arbitration = arbitrationOver(services.execution);
   });
-
-  function arbitrationOver(execution: SlashExecutionService | null): ArbitrationService {
-    const notifications = { notify: async () => ({ deliveredNow: false }) } as never;
-    return new ArbitrationService(
-      services.proposals,
-      new DisputeRepository(dataSource),
-      new SlaStrikeRepository(dataSource),
-      services.lifecycle,
-      new OverrideLogService(
-        dataSource,
-        new OverrideLogEntryRepository(dataSource),
-        new OperatorApprovalRepository(dataSource),
-      ),
-      notifications,
-      TEST_SLASH_CONFIG,
-      execution,
-    );
-  }
 
   const nowOf = () => new Date(Number(chain.now) * 1000);
 
-  async function seed(options: { provider?: string; respondByAt?: Date } = {}) {
+  async function seed(options: { provider?: string } = {}) {
     return seedProRataCase(dataSource, {
       providerOrg: randomUUID(),
       stakeAuthority: `${CHAIN}:${options.provider ?? PROVIDER}`,
       assetId: USDG,
       penalty: PENALTY,
       proposedAt: new Date(nowOf().getTime() - 60_000),
-      respondByAt: options.respondByAt,
       agents: [
         { account: A, failed: [100_000n] },
         { account: B, failed: [100_000n] },
@@ -202,21 +156,10 @@ describe('a closed case with a record standing on chain, against a real database
       [proposalId],
     )) as { kind: string; detail: Record<string, unknown> }[];
 
-  const suspend = (seeded: { organizationId: string; proposalId: string }) =>
-    arbitration.suspend(
-      adjudicator,
-      seeded.organizationId,
-      seeded.proposalId,
-      'OPERATOR_HOLD',
-      'held while the mapping is checked',
-    );
-
   /**
-   * A case this platform closed while its record stood on chain, before
-   * review N-2 refused EVM suspensions: what `S-1` wrote (`CANCELLED`, no
-   * outcome, no resolution), and no cancel request — the request that was lost.
-   * Such cases are still in the database, and the repair tick is what asks for
-   * their on-chain cancel.
+   * A case closed in the app while its record stood on chain (`CANCELLED`, no
+   * outcome, no resolution), with no cancel request — the request that was
+   * lost. The repair tick is what asks for its on-chain cancel.
    */
   const closeInApp = (seeded: { proposalId: string }) =>
     dataSource.query(
@@ -226,38 +169,13 @@ describe('a closed case with a record standing on chain, against a real database
       [seeded.proposalId],
     );
 
-  it('refuses to suspend an EVM case off chain, and writes nothing (review N-2)', async () => {
+  it('refuses to build a cancel for a case nobody decided to withdraw', async () => {
     const seeded = await standing();
-    const before = await row(seeded.proposalId);
-    const timeline = await events(seeded.proposalId);
-    const sends = chain.sent.length;
 
-    await expect(suspend(seeded)).rejects.toMatchObject({
-      errorCode: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
-    });
-
-    expect(await row(seeded.proposalId)).toEqual(before);
-    expect(await events(seeded.proposalId)).toEqual(timeline);
-    expect(chain.sent).toHaveLength(sends);
-    // Nothing was asked of the arbiter: the record stands and is executed as usual.
     await expect(
       services.execution.buildCancelIntent(seeded.organizationId, seeded.proposalId),
     ).rejects.toMatchObject({ errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION });
     expect(await services.execution.requestCancelsForClosedCases()).toBe(0);
-  });
-
-  it('refuses to suspend an EVM case with nothing on chain yet, and still proposes it', async () => {
-    const seeded = await seed();
-
-    await expect(suspend(seeded)).rejects.toMatchObject({
-      errorCode: SlashErrorCode.SLASH_ARBITER_RULES_ON_CHAIN,
-    });
-
-    expect(await row(seeded.proposalId)).toMatchObject({
-      status: 'PROPOSED',
-      chain_status: 'NONE',
-    });
-    expect(await services.execution.proposeDue(nowOf())).toMatchObject({ proposed: 1 });
     expect((await row(seeded.proposalId)).chain_status).toBe('PENDING');
   });
 

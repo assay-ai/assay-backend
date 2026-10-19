@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto';
 
 import { DataSource } from 'typeorm';
 
-import { FleetSweepRepository } from '@database/postgres/repositories/fleet-sweep.repository';
 import { OperatorApprovalRepository } from '@database/postgres/repositories/operator-approval.repository';
 import { OperatorRepository } from '@database/postgres/repositories/operator.repository';
 import { OverrideLogEntryRepository } from '@database/postgres/repositories/override-log-entry.repository';
@@ -67,7 +66,6 @@ describe('recording a compensation, against a real database', () => {
     execution = new SlashExecutionService(
       proposals,
       new ProviderChainEnrolmentRepository(dataSource),
-      new FleetSweepRepository(dataSource),
       lifecycle,
       new OverrideLogService(
         dataSource,
@@ -91,7 +89,6 @@ describe('recording a compensation, against a real database', () => {
     );
     cases = new OperatorCaseService(
       proposals,
-      null as never,
       null as never,
       execution,
       approvals,

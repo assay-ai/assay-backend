@@ -124,7 +124,6 @@ import { AgentRepository } from './repositories/agent.repository';
 import { SlashProposalEventRepository } from './repositories/slash-proposal-event.repository';
 import { SlashProposalPartRepository } from './repositories/slash-proposal-part.repository';
 import { OverrideLogEntryRepository } from './repositories/override-log-entry.repository';
-import { FleetSweepRepository } from './repositories/fleet-sweep.repository';
 // The case brief's cross-entity reads; no entity of its own.
 import { SlashCaseReadRepository } from './repositories/slash-case-read.repository';
 import { PlatformMetricsRepository } from './repositories/platform-metrics.repository';
@@ -241,7 +240,6 @@ export const repositories = [
   SlashProposalEventRepository,
   SlashProposalPartRepository,
   OverrideLogEntryRepository,
-  FleetSweepRepository,
   OperatorRepository,
   OperatorApprovalRepository,
   OrganizationRepository,

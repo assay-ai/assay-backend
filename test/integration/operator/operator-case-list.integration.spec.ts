@@ -14,7 +14,6 @@ import { DISPUTE_TIMEOUT_MS } from '@modules/slash/constants/slash.constants';
 import { CHAIN } from '../../unit/chains/evm/helpers/fake-stake-chain';
 import { freshMigratedDatabase } from '../helpers/slash-prorata-context';
 import { seedProRataCase } from '../helpers/slash-prorata-seed';
-import { USDC_ASSET } from '../helpers/test-database';
 
 /**
  * The operator Penalties list's SQL (`findOperatorCasePage`) against a real
@@ -37,7 +36,6 @@ const RESOLVED_AT = new Date('2026-10-03T00:00:00Z');
 interface Scenario {
   readonly name: string;
   readonly expected: OperatorCaseStatus;
-  readonly asset?: string;
   readonly patch: Readonly<Record<string, unknown>>;
 }
 
@@ -45,7 +43,7 @@ const closed = { resolved_at: RESOLVED_AT };
 
 const SCENARIOS: readonly Scenario[] = [
   {
-    name: 'D1: EVM, DISPUTED, its only disputed part gone, a part pending',
+    name: 'D1: DISPUTED, its only disputed part gone, a part pending',
     expected: OperatorCaseStatus.PROPOSED,
     patch: {
       status: 'DISPUTED',
@@ -53,14 +51,7 @@ const SCENARIOS: readonly Scenario[] = [
       chain_disputed_at: DISPUTED_AT,
       chain_disputed_parts: 0,
       chain_executable_at: CHAIN_DOOR,
-      platform_decision_due_at: null,
     },
-  },
-  {
-    name: 'non-EVM, DISPUTED off chain',
-    expected: OperatorCaseStatus.DISPUTED,
-    asset: USDC_ASSET,
-    patch: { status: 'DISPUTED' },
   },
   {
     name: 'D2: PROPOSED on chain, door before the floor',
@@ -183,7 +174,6 @@ describe('the operator case list SQL, against a real database', () => {
         proposedAt: PROPOSED_AT,
       });
       const patch: Record<string, unknown> = { ...scenario.patch };
-      if (scenario.asset) patch.asset_id = scenario.asset;
       // `chk_slash_proposals_chain_pending_is_whole`: a record on chain was proposed.
       if (patch.chain_status) patch.chain_proposed_at = PROPOSED_AT;
       const columns = Object.keys(patch);
@@ -206,16 +196,14 @@ describe('the operator case list SQL, against a real database', () => {
     expect(rows).toHaveLength(SCENARIOS.length);
 
     const stored: Array<Record<string, unknown>> = await dataSource.query(
-      `SELECT id, asset_id, status, chain_status, resolution_kind, chain_disputed_at,
-              chain_disputed_parts, chain_executable_at, earliest_execution_at,
-              platform_decision_due_at
+      `SELECT id, status, chain_status, resolution_kind, chain_disputed_at,
+              chain_disputed_parts, chain_executable_at, earliest_execution_at
          FROM slash_proposals`,
     );
     const factsById = new Map<string, OperatorCaseFacts>(
       stored.map((row) => [
         row.id as string,
         {
-          assetId: row.asset_id as string,
           status: row.status as string,
           chainStatus: (row.chain_status as string | null) ?? 'NONE',
           resolutionKind: row.resolution_kind as string | null,
@@ -223,7 +211,6 @@ describe('the operator case list SQL, against a real database', () => {
           chainDisputedParts: Number(row.chain_disputed_parts ?? 0),
           chainExecutableAt: row.chain_executable_at as Date | null,
           earliestExecutionAt: row.earliest_execution_at as Date | null,
-          platformDecisionDueAt: row.platform_decision_due_at as Date | null,
         },
       ]),
     );
@@ -256,13 +243,7 @@ describe('the operator case list SQL, against a real database', () => {
     }
   });
 
-  it('D1: the EVM case left DISPUTED sorts with the open cases, at its door', async () => {
-    const rows = await repository.findOperatorCasePage({
-      statuses: [OperatorCaseStatus.DISPUTED],
-      limit: 100,
-    });
-    expect(rows.map((row) => ids.get(row.id)!.name)).toEqual(['non-EVM, DISPUTED off chain']);
-
+  it('D1: the case left DISPUTED sorts with the open cases, at its door', async () => {
     const d1 = (await repository.findOperatorCasePage({ limit: 100 })).find((row) =>
       ids.get(row.id)!.name.startsWith('D1'),
     )!;
