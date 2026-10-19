@@ -320,7 +320,7 @@ export function slashPartRequestId(
     throw new Error(`case request id must be 32 bytes of lower-case hex, got "${caseRequestId}"`);
   }
   return createHash('sha256')
-    .update('x402:slash-part:v1')
+    .update('assay:slash-part:v1')
     .update(`|${windowId}|${caseRequestId}|${normalizeAgentAccount(agentAccount)}`)
     .digest('hex');
 }

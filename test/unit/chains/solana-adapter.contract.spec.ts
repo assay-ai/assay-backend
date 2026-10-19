@@ -35,7 +35,7 @@ import { ChainAdapterFixtures, describeChainAdapterContract } from './chain-adap
  * ## What belongs here and what does not
  *
  * Only the fixture. Every assertion lives in `chain-adapter.contract.ts` and is
- * chain-agnostic; anything that names base58, 239 bytes, an ATA derivation or a
+ * chain-agnostic; anything that names base58, 240 bytes, an ATA derivation or a
  * memo instruction belongs in `solana-chain.adapter.spec.ts`, which keeps those
  * and is not replaced by this file. The two are complementary: that spec pins
  * Solana's behaviour, this one pins the port's properties.

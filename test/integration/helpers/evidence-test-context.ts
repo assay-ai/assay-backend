@@ -144,7 +144,7 @@ export async function createEvidenceTestContext(): Promise<EvidenceTestContext> 
           input.verdictId,
           randomUUID(),
           input.seq,
-          JSON.stringify({ schema: 'x402/evidence-pack/v1', seq: input.seq }),
+          JSON.stringify({ schema: 'assay/evidence-pack/v1', seq: input.seq }),
           `sha256:${hashFromLabel('body')}`,
           input.contentHash ?? hashFromLabel(`pack-${input.seq}`),
           input.prevHash,

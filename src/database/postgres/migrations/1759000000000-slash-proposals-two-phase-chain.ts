@@ -16,7 +16,7 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  *   waits on the later of the two, so a chain configured with a longer
  *   `slash_delay_seconds` cannot be executed early by us.
  * - `chain_epoch` is why the replay lock survives a recalculation. The chain's
- *   `request_id` is `sha256('x402:slash-request:v1' || id || ':' || epoch)`, and
+ *   `request_id` is `sha256('assay:slash-request:v1' || id || ':' || epoch)`, and
  *   `UPHELD_RECALCULATED` lowers a penalty that is already frozen on chain —
  *   the only correct sequence is cancel, bump, re-propose. Epoch 0 reproduces
  *   the pre-existing derivation byte for byte, so no live row's id moves.

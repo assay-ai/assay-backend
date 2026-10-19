@@ -13,11 +13,11 @@ import { renderProofMessage } from '@modules/provider/domain/proof-message';
  */
 describe('renderProofMessage', () => {
   it('keeps a Solana message as its text, and its version as the first line', () => {
-    const text = 'x402-payout-proof/v1\nsolana:abc:Xyz\norg\nnonce\n1800000000';
+    const text = 'assay-payout-proof/v1\nsolana:abc:Xyz\norg\nnonce\n1800000000';
 
     expect(renderProofMessage(new TextEncoder().encode(text), null)).toEqual({
       message: text,
-      messageVersion: 'x402-payout-proof/v1',
+      messageVersion: 'assay-payout-proof/v1',
     });
   });
 

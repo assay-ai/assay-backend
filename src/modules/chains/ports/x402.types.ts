@@ -159,8 +159,8 @@ export interface SettlementReceipt {
  *    enforces `expires_at - issued_at <= MAX_VOUCHER_LIFETIME_SECONDS` because
  *    the backend that used to enforce that is assumed compromised.
  *
- * **An old signature is refused, never misread.** `b"x402:voucher:v2"` leads
- * the 239 bytes, so a v1 signature does not verify as a v2 voucher with the
+ * **An old signature is refused, never misread.** `b"assay:voucher:v2"` leads
+ * the 240 bytes, so a v1 signature does not verify as a v2 voucher with the
  * fields meaning something else — it simply fails. That is the property that
  * made replacing the layout safe rather than merely necessary.
  *

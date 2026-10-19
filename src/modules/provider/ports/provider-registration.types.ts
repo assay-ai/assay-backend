@@ -113,8 +113,8 @@ export interface PayoutProof {
   /**
    * Version tag that led the signed message, so an old proof stays checkable —
    * and what distinguishes a payout proof
-   * (`x402-payout-proof/v1`) from a stake-authority proof
-   * (`x402-stake-authority/v1`).
+   * (`assay-payout-proof/v1`) from a stake-authority proof
+   * (`assay-stake-authority/v1`).
    */
   readonly messageVersion: string;
   /** ISO-8601, UTC. */

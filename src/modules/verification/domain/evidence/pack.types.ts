@@ -112,7 +112,7 @@ export interface EvidenceVerdict {
  * core that cannot be canonicalised cannot be hashed.
  */
 export interface EvidenceCore {
-  readonly schema: 'x402/evidence-pack/v1';
+  readonly schema: 'assay/evidence-pack/v1';
   readonly verdictId: string;
   readonly intentId: string;
   readonly toolId: string;

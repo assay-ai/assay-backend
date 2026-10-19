@@ -23,7 +23,7 @@
  *   two built messages are equal exactly when their tags are; the two
  *   directions are therefore logically equivalent, and a prefix is invisible
  *   to both. This was measured, not reasoned: with
- *   `STAKE_AUTHORITY_MESSAGE_VERSION` set to `'x402-payout-proof/v1X'` the
+ *   `STAKE_AUTHORITY_MESSAGE_VERSION` set to `'assay-payout-proof/v1X'` the
  *   whole unit suite fails in exactly one place — the `not.toContain`
  *   assertion in `leads the message with the version tag` below.
  *
@@ -115,18 +115,18 @@ describe('SolanaChainAdapter — stake authority proof', () => {
 
   it('leads the message with the version tag', () => {
     const text = new TextDecoder().decode(adapter.buildStakeAuthorityMessage(challenge));
-    expect(text.startsWith('x402-stake-authority/v1\n')).toBe(true);
+    expect(text.startsWith('assay-stake-authority/v1\n')).toBe(true);
     expect(text.startsWith(STAKE_AUTHORITY_MESSAGE_VERSION)).toBe(true);
     // Load-bearing, and the reason to leave it alone: this is the ONLY
     // assertion in the suite that catches a tag which is a prefix of another
     // one. The two cross-verification tests below cannot — equal messages
     // require equal tags, so both directions stay green while
-    // STAKE_AUTHORITY_MESSAGE_VERSION is 'x402-payout-proof/v1X'. This line
+    // STAKE_AUTHORITY_MESSAGE_VERSION is 'assay-payout-proof/v1X'. This line
     // is the one that goes red.
     expect(text).not.toContain(PAYOUT_PROOF_MESSAGE_VERSION);
     // Voucher v2 carries its domain tag in the client's `voucherMessage`, not
-    // here — 239 fixed-width bytes under `b"x402:voucher:v2"`.
-    expect(text).not.toContain('x402:voucher:v2');
+    // here — 240 fixed-width bytes under `b"assay:voucher:v2"`.
+    expect(text).not.toContain('assay:voucher:v2');
   });
 
   it('verifies a genuine stake-authority signature', () => {

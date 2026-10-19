@@ -66,7 +66,7 @@ function requirements(extra?: Record<string, unknown>): PaymentRequirements {
     amount: '5000000',
     asset: MINT,
     payTo: VAULT_ATA,
-    resource: `x402:deposit:${DEPOSIT_ID}`,
+    resource: `assay:deposit:${DEPOSIT_ID}`,
     maxTimeoutSeconds: 60,
     description: 'Deposit to platform balance',
     extra: extra ?? { feePayer: FEE_PAYER, memo: DEPOSIT_ID },

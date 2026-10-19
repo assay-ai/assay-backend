@@ -373,7 +373,7 @@ export class SolanaChainAdapter implements ChainAdapter {
   // ── Vouchers ─────────────────────────────────────────────────────────────
 
   /**
-   * The 239 bytes of voucher v2, produced by the one encoder in this repository
+   * The 240 bytes of voucher v2, produced by the one encoder in this repository
    * (`@x402/settlement-client`'s `voucherMessage`) so that the bytes a buyer
    * signs and the bytes `redeem_voucher` recomputes cannot drift apart.
    *
@@ -393,7 +393,7 @@ export class SolanaChainAdapter implements ChainAdapter {
   buildVoucherMessage(voucher: Voucher): Uint8Array {
     if (!this.programId) {
       throw ChainErrors.programNotConfigured({
-        what: 'the settlement program id a voucher signs at offset 15',
+        what: 'the settlement program id a voucher signs at offset 16',
         variable: SETTLEMENT_PROGRAM_ID_ENV,
       });
     }
@@ -413,7 +413,7 @@ export class SolanaChainAdapter implements ChainAdapter {
   }
 
   voucherResourceHash(resource: string): string {
-    // The same value `buildVoucherMessage` decodes into the 239 bytes.
+    // The same value `buildVoucherMessage` decodes into the 240 bytes.
     return computeResourceHash(resource);
   }
 
@@ -480,7 +480,7 @@ export class SolanaChainAdapter implements ChainAdapter {
    * cannot: the tag leads the message and is newline-delimited, so the bytes
    * built here are equal exactly when the tags are, which makes the two
    * directions logically equivalent. Mutating the stake tag to
-   * `'x402-payout-proof/v1X'` leaves both of them passing. The single
+   * `'assay-payout-proof/v1X'` leaves both of them passing. The single
    * assertion that fails is `not.toContain(PAYOUT_PROOF_MESSAGE_VERSION)` in
    * that spec's `leads the message with the version tag` — the only prefix
    * cover in the suite.

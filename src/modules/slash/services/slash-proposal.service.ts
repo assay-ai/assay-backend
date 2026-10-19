@@ -427,8 +427,8 @@ export class SlashProposalService {
 /**
  * The chain's replay lock, derived rather than drawn.
  *
- * `sha256('x402:slash-request:v1' || id)` at epoch 0, and
- * `sha256('x402:slash-request:v1' || id || ':' || epoch)` above it. 32 bytes,
+ * `sha256('assay:slash-request:v1' || id)` at epoch 0, and
+ * `sha256('assay:slash-request:v1' || id || ':' || epoch)` above it. 32 bytes,
  * lower-case hex.
  *
  * Deterministic on purpose. `propose_slash` burns a `request_id` permanently
@@ -449,7 +449,7 @@ export class SlashProposalService {
 export function deriveChainRequestId(
   proposal: Pick<SlashProposalEntity, 'id' | 'chainEpoch'>,
 ): string {
-  const digest = createHash('sha256').update('x402:slash-request:v1').update(proposal.id);
+  const digest = createHash('sha256').update('assay:slash-request:v1').update(proposal.id);
   if (proposal.chainEpoch > 0) {
     digest.update(`:${proposal.chainEpoch}`);
   }

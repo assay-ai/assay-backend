@@ -262,7 +262,7 @@ describe('deriveChainRequestId', () => {
     // is UNIQUE. If the epoch changed the digest at 0, every existing row's
     // replay lock would move and the migration would have to rewrite them —
     // which for any row already proposed on chain is impossible.
-    const legacy = createHash('sha256').update('x402:slash-request:v1').update(ID).digest('hex');
+    const legacy = createHash('sha256').update('assay:slash-request:v1').update(ID).digest('hex');
 
     expect(deriveChainRequestId({ id: ID, chainEpoch: 0 })).toBe(legacy);
   });

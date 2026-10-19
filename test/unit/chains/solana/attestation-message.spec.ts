@@ -20,7 +20,7 @@
  *
  * Lean v3 leaves **one** verifier-signed message. The cancel attestation went
  * with `cancel_slash` becoming the admin's instruction, and the reversal one
- * with `reverse_slash` being deleted outright; the voucher (239 bytes,
+ * with `reverse_slash` being deleted outright; the voucher (240 bytes,
  * `voucher-message.spec.ts`) is the other signed message and the buyer signs
  * that one.
  */
@@ -66,7 +66,7 @@ describe('attestation signed messages', () => {
   describe('lengths', () => {
     it('matches the length attestation.rs asserts', () => {
       expect(slash()).toHaveLength(SLASH_MESSAGE_LENGTH);
-      expect(SLASH_MESSAGE_LENGTH).toBe(210);
+      expect(SLASH_MESSAGE_LENGTH).toBe(211);
     });
 
     it('stays distinct from the voucher message', () => {
@@ -76,17 +76,17 @@ describe('attestation signed messages', () => {
       // comparison happens — so the domain tags are the second lock rather than
       // the only one.
       expect(SLASH_MESSAGE_LENGTH).not.toBe(VOUCHER_MESSAGE_LENGTH);
-      expect([SLASH_MESSAGE_LENGTH, VOUCHER_MESSAGE_LENGTH]).toEqual([210, 239]);
+      expect([SLASH_MESSAGE_LENGTH, VOUCHER_MESSAGE_LENGTH]).toEqual([211, 240]);
     });
   });
 
   describe('domain separation', () => {
     it('prefixes the message with its own tag', () => {
-      expect(text(slash().subarray(0, 25))).toBe('x402:slash-attestation:v1');
+      expect(text(slash().subarray(0, 26))).toBe('assay:slash-attestation:v1');
     });
 
     it('exports the same tag it writes', () => {
-      expect(Array.from(ATTESTATION_DOMAINS.slash)).toEqual(Array.from(slash().subarray(0, 25)));
+      expect(Array.from(ATTESTATION_DOMAINS.slash)).toEqual(Array.from(slash().subarray(0, 26)));
     });
 
     it('carries exactly one domain, since the contract has one signed attestation', () => {
@@ -96,7 +96,7 @@ describe('attestation signed messages', () => {
     it('binds the message to the program id', () => {
       // Without this, a signature produced for a devnet deployment would be
       // valid against a mainnet one at the same seeds.
-      const programBytes = Array.from(slash().subarray(25, 57));
+      const programBytes = Array.from(slash().subarray(26, 58));
 
       const other = address('11111111111111111111111111111111');
       const elsewhere = slashAttestationMessage({
@@ -110,11 +110,11 @@ describe('attestation signed messages', () => {
         expiresAt: EXPIRES_AT,
         programAddress: other,
       });
-      expect(Array.from(elsewhere.subarray(25, 57))).not.toEqual(programBytes);
+      expect(Array.from(elsewhere.subarray(26, 58))).not.toEqual(programBytes);
     });
 
     it('defaults to the program the client was generated for', () => {
-      expect(Array.from(slash().subarray(25, 57))).toEqual(
+      expect(Array.from(slash().subarray(26, 58))).toEqual(
         Array.from(getAddressEncoder().encode(SETTLEMENT_PROGRAM_ADDRESS)),
       );
     });
@@ -123,29 +123,29 @@ describe('attestation signed messages', () => {
   describe('field offsets', () => {
     it('writes the slash message at attestation.rs’s offsets', () => {
       const message = slash();
-      expect(Array.from(message.subarray(57, 89))).toEqual(Array.from(REQUEST_ID));
-      expect(message[153]).toBe(SIGNED_RESPONSE_CLASS.dataFail);
-      expect(u64At(message, 154)).toBe(2_000_000n);
-      expect(Array.from(message.subarray(162, 194))).toEqual(Array.from(POLICY));
-      expect(u64At(message, 194)).toBe(ISSUED_AT);
-      expect(u64At(message, 202)).toBe(EXPIRES_AT);
+      expect(Array.from(message.subarray(58, 90))).toEqual(Array.from(REQUEST_ID));
+      expect(message[154]).toBe(SIGNED_RESPONSE_CLASS.dataFail);
+      expect(u64At(message, 155)).toBe(2_000_000n);
+      expect(Array.from(message.subarray(163, 195))).toEqual(Array.from(POLICY));
+      expect(u64At(message, 195)).toBe(ISSUED_AT);
+      expect(u64At(message, 203)).toBe(EXPIRES_AT);
     });
 
     it('writes the provider and beneficiary where attestation.rs reads them', () => {
       const message = slash();
-      expect(Array.from(message.subarray(25, 57))).toEqual(
+      expect(Array.from(message.subarray(26, 58))).toEqual(
         Array.from(getAddressEncoder().encode(SETTLEMENT_PROGRAM_ADDRESS)),
       );
-      expect(Array.from(message.subarray(89, 121))).toEqual(
+      expect(Array.from(message.subarray(90, 122))).toEqual(
         Array.from(getAddressEncoder().encode(PROVIDER)),
       );
-      expect(Array.from(message.subarray(121, 153))).toEqual(
+      expect(Array.from(message.subarray(122, 154))).toEqual(
         Array.from(getAddressEncoder().encode(BENEFICIARY)),
       );
     });
 
     it('is the sum of its own field widths', () => {
-      expect(SLASH_MESSAGE_LENGTH).toBe(25 + 32 + 32 + 32 + 32 + 1 + 8 + 32 + 8 + 8);
+      expect(SLASH_MESSAGE_LENGTH).toBe(26 + 32 + 32 + 32 + 32 + 1 + 8 + 32 + 8 + 8);
     });
   });
 
@@ -175,7 +175,7 @@ describe('attestation signed messages', () => {
 
       // One byte, inside the signature. The platform cannot relabel a judgement
       // to move it between rows of the verdict table.
-      expect(dataFail[153]).not.toBe(asPass[153]);
+      expect(dataFail[154]).not.toBe(asPass[154]);
       expect(Buffer.compare(Buffer.from(dataFail), Buffer.from(asPass))).not.toBe(0);
     });
   });
