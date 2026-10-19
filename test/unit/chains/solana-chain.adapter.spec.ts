@@ -459,15 +459,15 @@ describe('SolanaChainAdapter — voucher v2', () => {
   it('puts the payer, the escrow and the provider at the offsets the program reads', () => {
     const message = adapter.buildVoucherMessage(voucher);
 
-    expect(Array.from(message.subarray(47, 79))).toEqual(addressBytes(signerAddress));
-    expect(Array.from(message.subarray(79, 111))).toEqual(addressBytes(PAYER_ADDRESS));
-    expect(Array.from(message.subarray(111, 143))).toEqual(addressBytes(PROVIDER_ADDRESS));
+    expect(Array.from(message.subarray(48, 80))).toEqual(addressBytes(signerAddress));
+    expect(Array.from(message.subarray(80, 112))).toEqual(addressBytes(PAYER_ADDRESS));
+    expect(Array.from(message.subarray(112, 144))).toEqual(addressBytes(PROVIDER_ADDRESS));
   });
 
   it('signs sha256(resource) rather than the resource string', () => {
     const message = adapter.buildVoucherMessage(voucher);
 
-    expect(Array.from(message.subarray(151, 183))).toEqual(
+    expect(Array.from(message.subarray(152, 184))).toEqual(
       Array.from(hashHexToBytes(computeResourceHash(intent.resource))),
     );
     // The whole message is fixed-width, so the string itself is nowhere in it.
