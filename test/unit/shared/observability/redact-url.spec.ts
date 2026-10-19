@@ -41,6 +41,8 @@ describe('redactOAuthUrl', () => {
     'token',
     'client_secret',
     'rid',
+    'state',
+    'assay_replaces',
   ])('replaces a %s query value defensively', (key) => {
     expect(redactOAuthUrl(`/oauth/token?${key}=s3cr3t-value&grant_type=refresh_token`)).toBe(
       `/oauth/token?${key}=${REDACTED}&grant_type=refresh_token`,
@@ -62,7 +64,7 @@ describe('redactOAuthUrl', () => {
     for (const url of [
       '/api/v1/payments/abc-123',
       '/oauth/authorize',
-      '/api/v1/payments?state=s&client_id=x',
+      '/api/v1/payments?status=s&client_id=x',
       '/oauth/requests',
       '/',
       '',

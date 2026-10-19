@@ -245,12 +245,23 @@ describe('AllExceptionsFilter', () => {
       }
     });
 
-    it('redacts a URIError param-decode message', () => {
-      const { body } = captureWithLog(
-        new BadRequestException(`Failed to decode param '${SECRET}%FF'`),
-        '/x',
+    it('replaces an Express param-decode message with a fixed text, no echo of the param', () => {
+      // A rid-shaped value, so only the fixed text (not the token backstop) can hide it.
+      const hexRid = 'a1b2c3d4'.repeat(8);
+      const url = `/api/v1/oauth/requests/${hexRid}%E0`;
+      // What Nest's `mapExternalException` makes of Express's URIError.
+      const { body, logged } = captureWithLog(
+        new BadRequestException(`Failed to decode param '${hexRid}%E0'`),
+        url,
       );
-      expect(body.error.message).not.toContain(SECRET);
+      expectTheOneShape(body);
+      expect(body.error.statusCode).toBe(400);
+      expect(body.error.message).toBe('Malformed request path');
+      expect(body.error.path).toBe('/api/v1/oauth/requests/[REDACTED]');
+      for (const text of [JSON.stringify(body), logged]) {
+        expect(text).not.toContain(hexRid);
+      }
+      expect(logged).toContain('Malformed request path');
     });
 
     it('redacts a token in a query string of error.path', () => {

@@ -32,6 +32,11 @@ const SECRET_QUERY_KEYS = new Set([
   'refresh_token',
   'token',
   'client_secret',
+  // The client's CSRF state and the replaced credential id: dropped with the
+  // whole query on `/oauth/authorize*`, but a client may send them elsewhere
+  // (a root `/authorize` fallback answers 404 and is logged).
+  'state',
+  'assay_replaces',
 ]);
 
 function decodedKey(raw: string): string {
