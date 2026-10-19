@@ -5,8 +5,8 @@ import { PAYMENT_KEY_DAILY_SUMMARY_CRON } from '../constants/payment-key-daily-s
 import { PaymentKeyDailySummaryService } from '../services/payment-key-daily-summary.service';
 
 /**
- * The cron wrapper around `PaymentKeyDailySummaryService.run`, daily at
- * 00:20 UTC for the UTC day before.
+ * The cron wrapper around `PaymentKeyDailySummaryService.run`, hourly from
+ * 00:20 to 05:20 UTC, for the UTC day before (the later runs catch up).
  *
  * Registered only in `AccountSchedulerModule`, which only the scheduler
  * process imports. The service's Redis lock keeps a second scheduler replica
@@ -23,7 +23,7 @@ export class PaymentKeyDailySummaryJob {
     try {
       const result = await this.summary.run();
       if (!('day' in result)) {
-        this.logger.log('Payment-key daily summary: skipped, another run holds the lock');
+        this.logger.log('Payment-key daily summary: skipped, no lock (another run, or no Redis)');
         return;
       }
       this.logger.log(

@@ -385,6 +385,33 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
       expect(handed).toHaveLength(0);
     });
 
+    const withFirstSpend = (afterAdmitted: (intent: unknown) => unknown): VoucherService =>
+      new VoucherService(
+        intents as unknown as PaymentIntentService,
+        new ChainAdapterRegistry([adapter], [CHAIN]),
+        seqs as unknown as EscrowSeqService,
+        noBlocks(),
+        { afterAdmitted } as unknown as PaymentKeyFirstSpendService,
+      );
+
+    it('a notice that throws does not escape redeem and does not undo the voucher', async () => {
+      chain.grant(payer.address, delegate.address);
+      const throwing = withFirstSpend(() => {
+        throw new Error('notification store down');
+      });
+      const intent = await throwing.redeem(input(delegate));
+      expect(intent.status).toBe(PaymentIntentStatus.FUNDS_SECURED);
+      expect(intents.created).toHaveLength(1);
+      expect(intents.created[0].voucherDelegate).toBe(delegate.account);
+    });
+
+    it('a notice that never settles does not hold redeem up', async () => {
+      chain.grant(payer.address, delegate.address);
+      const hanging = withFirstSpend(() => new Promise(() => undefined));
+      const intent = await hanging.redeem(input(delegate));
+      expect(intent.status).toBe(PaymentIntentStatus.FUNDS_SECURED);
+    });
+
     it('a refused delegate voucher → none', async () => {
       await expect(service.redeem(input(delegate))).rejects.toBeDefined();
       expect(handed).toHaveLength(0);

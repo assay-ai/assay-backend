@@ -11,7 +11,7 @@ import {
 } from '@database/postgres/repositories/payment-intent.repository';
 import {
   PAYMENT_KEY_DAILY_SUMMARY_CRON,
-  PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY,
+  PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY_PREFIX,
 } from '@modules/account/constants/payment-key-daily-summary.constants';
 import { PaymentKeyDailySummaryJob } from '@modules/account/jobs/payment-key-daily-summary.job';
 import { PaymentKeyDailySummaryService } from '@modules/account/services/payment-key-daily-summary.service';
@@ -165,20 +165,26 @@ describe('PaymentKeyDailySummaryService (payment_key.daily_summary)', () => {
     });
   });
 
+  it('says that calls still in progress are counted', async () => {
+    const { service, sent } = harness([row({})]);
+    await service.run();
+    expect(sent[0].body).toContain('Calls still in progress are included.');
+  });
+
   it('an organization with no spend gets nothing', async () => {
     const { service, sent } = harness([]);
     await service.run();
     expect(sent).toHaveLength(0);
   });
 
-  it('a second replica, or a retry inside the hour, does nothing (the lock)', async () => {
+  it('a second replica running at the same time does nothing (the per-day lock)', async () => {
     const { service, sent, intents, redis } = harness([row({})], null);
     await expect(service.run()).resolves.toEqual({ skipped: true });
     expect(redis.set).toHaveBeenCalledWith(
-      PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY,
+      `${PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY_PREFIX}2026-10-18`,
       '1',
       'EX',
-      3600,
+      900,
       'NX',
     );
     expect(intents.sumDelegateSpendByKey).not.toHaveBeenCalled();
@@ -199,8 +205,8 @@ describe('PaymentKeyDailySummaryService (payment_key.daily_summary)', () => {
     expect(first.sent[0].dedupeKey).toBe(second.sent[0].dedupeKey);
   });
 
-  it('runs daily at 00:20 UTC, one pass at a time', () => {
-    expect(PAYMENT_KEY_DAILY_SUMMARY_CRON).toBe('0 20 0 * * *');
+  it('runs hourly from 00:20 to 05:20 UTC, one pass at a time', () => {
+    expect(PAYMENT_KEY_DAILY_SUMMARY_CRON).toBe('0 20 0-5 * * *');
     const options = Reflect.getMetadata(
       SCHEDULE_CRON_OPTIONS,
       PaymentKeyDailySummaryJob.prototype.handlePaymentKeyDailySummary,

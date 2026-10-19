@@ -2,17 +2,23 @@
  * The payment-key daily summary's schedule and lock (spec §7.10 item 6).
  */
 
-/** Daily at 00:20 UTC: yesterday (UTC) is closed by then. */
-export const PAYMENT_KEY_DAILY_SUMMARY_CRON = '0 20 0 * * *';
+/**
+ * Hourly from 00:20 to 05:20 UTC: yesterday (UTC) is closed by the first run,
+ * and the later runs catch up an organization a scheduler outage or a crash
+ * part-way through left unsent. `ONCE_PER_UTC_DAY` per organization makes
+ * every later run send only what is missing.
+ */
+export const PAYMENT_KEY_DAILY_SUMMARY_CRON = '0 20 0-5 * * *';
 
 /**
- * One run per window across every scheduler replica: `SET … NX EX`, not
- * released at the end of a run, so a second run inside the hour is a no-op.
- * The summary itself is also `ONCE_PER_UTC_DAY` per organization, so a run
- * the lock did not stop still sends nothing twice.
+ * One run at a time across every scheduler replica: `SET …:{day} NX EX`, not
+ * released at the end of a run. Per day and short, so it stops a second
+ * replica's concurrent run without stopping the next hour's catch-up. The
+ * summary itself is `ONCE_PER_UTC_DAY` per organization, so a run the lock
+ * did not stop still sends nothing twice.
  */
-export const PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY = 'payment-key:daily-summary:lock';
-export const PAYMENT_KEY_DAILY_SUMMARY_LOCK_TTL_SECONDS = 3600;
+export const PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY_PREFIX = 'payment-key:daily-summary:lock:';
+export const PAYMENT_KEY_DAILY_SUMMARY_LOCK_TTL_SECONDS = 15 * 60;
 
 /** Keys named in one notice body; the payload lists them all. */
 export const PAYMENT_KEY_DAILY_SUMMARY_MAX_KEYS_IN_BODY = 10;

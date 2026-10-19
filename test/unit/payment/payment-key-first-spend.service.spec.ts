@@ -1,3 +1,12 @@
+import { Logger } from '@nestjs/common';
+import type { Redis } from 'ioredis';
+
+import { NotificationChannelRepository } from '@database/postgres/repositories/notification-channel.repository';
+import { NotificationDeliveryRepository } from '@database/postgres/repositories/notification-delivery.repository';
+import { NotificationPreferenceRepository } from '@database/postgres/repositories/notification-preference.repository';
+import { NotificationRepository } from '@database/postgres/repositories/notification.repository';
+import { NotificationDeliverPublisher } from '@modules/notification/publishers/notification-deliver.publisher';
+import { NotificationService } from '@modules/notification/services/notification.service';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { AgentRepository } from '@database/postgres/repositories/agent.repository';
 import { PaymentIntentRepository } from '@database/postgres/repositories/payment-intent.repository';
@@ -22,6 +31,8 @@ import {
   paymentKeyFirstSpendDedupeKey,
 } from '@modules/payment/services/payment-key-first-spend.service';
 import { MoneyUtil } from '@shared/utils/money.util';
+
+import { FakeRedis } from '../notification/helpers/fake-redis';
 
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET as ChainId;
 const USDG = ASSET_IDS.USDG_ROBINHOOD_TESTNET as AssetId;
@@ -94,7 +105,7 @@ describe('PaymentKeyFirstSpendService (payment_key.first_spend)', () => {
       event: NotificationEvent.PAYMENT_KEY_FIRST_SPEND,
       subjectType: 'credential',
       subjectId: '00000000-0000-4000-8000-0000000000e1',
-      dedupeKey: `payment-key-first-spend:${CHAIN}:${ADDRESS.toLowerCase()}`,
+      dedupeKey: paymentKeyFirstSpendDedupeKey(CHAIN, DELEGATE),
     });
     expect(first.intents.hasEarlierDelegateSpend).toHaveBeenCalledWith(ORG, DELEGATE, {
       id: '00000000-0000-4000-8000-0000000000a1',
@@ -116,9 +127,7 @@ describe('PaymentKeyFirstSpendService (payment_key.first_spend)', () => {
     expect(request.body).toContain('"Laptop"');
     expect(request.body).toContain('"research-bot"');
     expect(request.body).toContain('"get_weather"');
-    // What is stored and shown: title, body, payload. (The dedupe key names the
-    // key in full, as the brief fixes it, but only as a Redis suppression key.)
-    const text = JSON.stringify([request.title, request.body, request.payload]).toLowerCase();
+    const text = JSON.stringify(request).toLowerCase();
     expect(text).not.toContain(ADDRESS.toLowerCase().slice(2));
     expect(request.payload).toMatchObject({
       keyEnding: 'EF1BEAED',
@@ -151,6 +160,44 @@ describe('PaymentKeyFirstSpendService (payment_key.first_spend)', () => {
     expect(new Set(sent.map((request) => request.dedupeKey)).size).toBe(1);
   });
 
+  it('once a key is known to have spent, later vouchers skip the table (the Redis marker)', async () => {
+    const store = new Map<string, string>();
+    const redis = {
+      exists: jest.fn(async (key: string) => (store.has(key) ? 1 : 0)),
+      set: jest.fn(async (key: string, value: string) => {
+        store.set(key, value);
+        return 'OK';
+      }),
+    };
+    const sent: NotificationRequest[] = [];
+    const table = { hasEarlierDelegateSpend: jest.fn(async () => false) };
+    const service = new PaymentKeyFirstSpendService(
+      table as unknown as PaymentIntentRepository,
+      {
+        notify: async (request: NotificationRequest) => (
+          sent.push(request),
+          { deliveredNow: true }
+        ),
+      },
+      { findOne: jest.fn(async () => null) } as unknown as AgentCredentialRepository,
+      { findOne: jest.fn(async () => null) } as unknown as AgentRepository,
+      { findOne: jest.fn(async () => null) } as unknown as ToolRepository,
+      redis as unknown as Redis,
+    );
+
+    await expect(service.notifyIfFirst(intent({ id: 'a' }))).resolves.toBe(true);
+    await expect(service.notifyIfFirst(intent({ id: 'b' }))).resolves.toBe(false);
+    expect(table.hasEarlierDelegateSpend).toHaveBeenCalledTimes(1);
+    expect(sent).toHaveLength(1);
+    expect([...store.keys()].join()).not.toContain(ADDRESS.toLowerCase().slice(2));
+
+    // An unreadable marker is a miss: the table decides.
+    redis.exists.mockRejectedValueOnce(new Error('redis down'));
+    table.hasEarlierDelegateSpend.mockResolvedValueOnce(true);
+    await expect(service.notifyIfFirst(intent({ id: 'c' }))).resolves.toBe(false);
+    expect(sent).toHaveLength(1);
+  });
+
   it('the dedupe key does not depend on the address case', () => {
     expect(paymentKeyFirstSpendDedupeKey(CHAIN, DELEGATE)).toBe(
       paymentKeyFirstSpendDedupeKey(CHAIN, `${CHAIN}:${ADDRESS.toLowerCase()}`),
@@ -162,5 +209,59 @@ describe('PaymentKeyFirstSpendService (payment_key.first_spend)', () => {
     expect(() => service.afterAdmitted(intent())).not.toThrow();
     await new Promise((resolve) => setImmediate(resolve));
     expect(sent).toHaveLength(0);
+  });
+
+  /**
+   * Through the real `NotificationService` (Redis faked): two concurrent first
+   * vouchers make one inbox row, and the full key address reaches no log line
+   * and no Redis key, on the sent path or the suppressed one.
+   */
+  it('through the real notification service: one row, and no full address in any log or Redis key', async () => {
+    const lines: string[] = [];
+    const methods = ['log', 'error', 'warn', 'debug', 'verbose', 'fatal'] as const;
+    const spies = methods.map((method) =>
+      jest.spyOn(Logger.prototype, method).mockImplementation((...args: unknown[]) => {
+        lines.push(args.map((arg) => String(arg)).join(' '));
+      }),
+    );
+    try {
+      const redis = new FakeRedis();
+      const inserted: unknown[] = [];
+      const notifications = new NotificationService(
+        {
+          insert: jest.fn(async (row: unknown) => inserted.push(row)),
+        } as unknown as NotificationRepository,
+        {
+          findForOrganization: jest.fn(async () => []),
+        } as unknown as NotificationChannelRepository,
+        { findForEvent: jest.fn(async () => []) } as unknown as NotificationPreferenceRepository,
+        { insert: jest.fn(async () => undefined) } as unknown as NotificationDeliveryRepository,
+        {
+          publishDeliver: jest.fn(async () => undefined),
+        } as unknown as NotificationDeliverPublisher,
+        redis as unknown as Redis,
+      );
+      const service = new PaymentKeyFirstSpendService(
+        {
+          hasEarlierDelegateSpend: jest.fn(async () => false),
+        } as unknown as PaymentIntentRepository,
+        notifications,
+        { findOne: jest.fn(async () => null) } as unknown as AgentCredentialRepository,
+        { findOne: jest.fn(async () => null) } as unknown as AgentRepository,
+        { findOne: jest.fn(async () => null) } as unknown as ToolRepository,
+      );
+
+      await Promise.all([
+        service.notifyIfFirst(intent({ id: 'a' })),
+        service.notifyIfFirst(intent({ id: 'b' })),
+      ]);
+
+      expect(inserted).toHaveLength(1);
+      expect(lines.some((line) => line.includes('suppressed'))).toBe(true);
+      const seen = [...lines, ...redis.commands, JSON.stringify(inserted)].join('\n').toLowerCase();
+      expect(seen).not.toContain(ADDRESS.toLowerCase().slice(2));
+    } finally {
+      spies.forEach((spy) => spy.mockRestore());
+    }
   });
 });
