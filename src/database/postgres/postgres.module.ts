@@ -3,6 +3,7 @@ import { TypeOrmModule } from '@nestjs/typeorm';
 import { ConfigModule, ConfigService } from '@nestjs/config';
 import { TypeOrmModuleOptions } from '@nestjs/typeorm';
 import { TYPEORM_MODULE_OPTIONS } from '@database/constants/typeorm-module-options';
+import { ParameterlessQueryLogger } from '@database/postgres/parameterless-query.logger';
 import { AccountBalanceEntity } from './entities/account-balance.entity';
 import { BuyerEscrowEntity } from './entities/buyer-escrow.entity';
 import { DepositIntentEntity } from './entities/deposit-intent.entity';
@@ -309,7 +310,9 @@ export const repositories = [
           synchronize: false,
           logging: isLogging,
           ...(isLogging && {
-            logger: TYPEORM_MODULE_OPTIONS.logger,
+            // Never TypeORM's own console loggers: they print the bound
+            // parameters (R-OA-27).
+            logger: new ParameterlessQueryLogger(),
             maxQueryExecutionTime: TYPEORM_MODULE_OPTIONS.maxQueryExecutionTime,
           }),
         };
