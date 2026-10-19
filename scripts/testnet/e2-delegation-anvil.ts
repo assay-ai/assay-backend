@@ -67,8 +67,12 @@ const RPC = process.env.E2_RPC_URL ?? 'http://127.0.0.1:8547';
 const EVIDENCE =
   process.env.E2_EVIDENCE ??
   resolve(__dirname, '../../../e2e/apps/evidence/delegation-anvil-proof.json');
-const CLI_LIB =
-  process.env.E2_AGENT_CLI_LIB ?? resolve(__dirname, '../../../e2e/apps/agent-cli/lib.mjs');
+// assay-mcp's own signer, bundled from its source with esbuild:
+//   (assay-mcp/node) npx esbuild src/signer/voucher.ts --bundle --platform=node --format=esm \
+//       --outfile=dist/signer/voucher.mjs
+const MCP_SIGNER =
+  process.env.E2_ASSAY_MCP_SIGNER ??
+  resolve(__dirname, '../../../assay-mcp/node/dist/signer/voucher.mjs');
 
 const CHAIN: ChainId = 'eip155:46630' as ChainId;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11';
@@ -335,12 +339,12 @@ async function main(): Promise<void> {
   step('2. GET /escrow/delegates equivalent (from chain)', listed);
 
   // 3. The agent CLI builds and signs the voucher with the DELEGATE key.
-  const cli = (await new Function('p', 'return import(p)')(CLI_LIB)) as {
+  const signer = (await new Function('p', 'return import(p)')(MCP_SIGNER)) as {
     buildVoucher: (
       r: unknown,
       now: number,
-    ) => { voucher: Voucher; typedData: Record<string, unknown> };
-    assertDelegateMaySign: (r: unknown, a: string) => void;
+      env: 'production' | 'staging' | 'e2e' | 'anvil',
+    ) => { wire: Voucher; typedData: Record<string, unknown> };
   };
   const requirementFor = (seq: string, amount: bigint) => ({
     rail: 'B',
@@ -358,11 +362,10 @@ async function main(): Promise<void> {
     signers: ['payer', 'delegate'],
     delegate: delegateAccount,
   });
-  const voucherFor = async (signer: typeof delegate, seq: string, amount: bigint) => {
+  const voucherFor = async (who: typeof delegate, seq: string, amount: bigint) => {
     const requirement = requirementFor(seq, amount);
-    if (signer === delegate) cli.assertDelegateMaySign(requirement, delegate.address);
-    const { voucher, typedData } = cli.buildVoucher(requirement, await chainNow());
-    const signature = await signer.signTypedData(typedData as never);
+    const { wire: voucher, typedData } = signer.buildVoucher(requirement, await chainNow(), 'anvil');
+    const signature = await who.signTypedData(typedData as never);
     return {
       voucher: {
         ...voucher,
