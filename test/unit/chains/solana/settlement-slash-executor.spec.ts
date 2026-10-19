@@ -450,7 +450,7 @@ describe('SolanaSlashExecutor', () => {
       // The policy field is a sha256 of the port's `policy: string` — checked
       // independently, since it is the one field this service computes rather
       // than passes through.
-      const policyDigest = attestationCall.payload.slice(162, 194);
+      const policyDigest = attestationCall.payload.slice(163, 195);
       expect(Buffer.from(policyDigest)).toEqual(
         createHash('sha256').update(PROPOSE_REQUEST.policy, 'utf8').digest(),
       );
@@ -465,8 +465,8 @@ describe('SolanaSlashExecutor', () => {
         status: SIGNED_RESPONSE_CLASS.dataFail,
         penalty: 1_000n,
         policy: policyDigest,
-        issuedAt: readI64(attestationCall.payload, 194),
-        expiresAt: readI64(attestationCall.payload, 202),
+        issuedAt: readI64(attestationCall.payload, 195),
+        expiresAt: readI64(attestationCall.payload, 203),
         programAddress: PROGRAM_ADDRESS,
       });
       expect(Buffer.from(attestationCall.payload)).toEqual(Buffer.from(expected));
