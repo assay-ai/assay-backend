@@ -18,8 +18,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `down` recreates what was dropped, empty, and puts back the nonce-or-seq
  * rule as `1759100000000` left it.
  */
-export class DropLegacyPaymentSchema1762300000000 implements MigrationInterface {
-  name = 'DropLegacyPaymentSchema1762300000000';
+export class DropLegacyPaymentSchema1762400000000 implements MigrationInterface {
+  name = 'DropLegacyPaymentSchema1762400000000';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(`DROP TABLE "provider_payouts"`);
