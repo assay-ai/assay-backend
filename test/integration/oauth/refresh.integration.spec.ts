@@ -930,7 +930,11 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expect(revoked[0].actorType).toBe('agent');
     expect(revoked[0].actorId).toBe(agentId);
     expect(revoked[0].after).toEqual(
-      expect.objectContaining({ reason: 'client_logout', clientId: client.clientId }),
+      expect.objectContaining({
+        reason: 'client_logout',
+        issuedVia: 'OAUTH',
+        clientId: client.clientId,
+      }),
     );
     expect(bumps).toEqual([ORGANIZATION]);
     expect(await refresh(pair.refresh_token)).toEqual({ error: 'invalid_grant' });
