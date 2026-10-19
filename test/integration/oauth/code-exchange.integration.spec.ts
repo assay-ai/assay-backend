@@ -561,6 +561,9 @@ describe('OAuth code exchange — real migrations', () => {
     expect(created[0].after).toEqual({
       agentId: minted.agentId,
       name: 'Example app',
+      scopes: [],
+      // The rolling refresh expiry at creation (R-OA-13).
+      expiresAt: credential.expiresAt!.toISOString(),
       issuedVia: 'OAUTH',
       clientId: client.clientId,
       replaces: null,
@@ -618,6 +621,8 @@ describe('OAuth code exchange — real migrations', () => {
     expect(revoked[0].after).toEqual({
       revokedAt: replaced.revokedAt!.toISOString(),
       name: old.name,
+      issuedVia: 'OAUTH',
+      clientId: builtin.clientId,
       reason: 'replaced',
       replacedBy: fresh.id,
     });
