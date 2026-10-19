@@ -52,6 +52,9 @@ export class PolicyFailRateRowDto {
   failRate: number;
 }
 
+/** Which dashboard table a reading belongs to. */
+export type SignalSection = 'money' | 'traffic' | 'oauth' | 'other';
+
 export class SignalReadingDto {
   @ApiProperty({
     description: 'ObservabilitySignal member, or a bonus reading name — see the service.',
@@ -61,8 +64,8 @@ export class SignalReadingDto {
   @ApiProperty()
   label: string;
 
-  @ApiProperty({ enum: ['money', 'traffic', 'other'] })
-  section: 'money' | 'traffic' | 'other';
+  @ApiProperty({ enum: ['money', 'traffic', 'oauth', 'other'] })
+  section: SignalSection;
 
   @ApiProperty({ enum: SignalAvailability })
   availability: SignalAvailability;

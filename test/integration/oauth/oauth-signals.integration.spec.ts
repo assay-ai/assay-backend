@@ -7,23 +7,29 @@ import { DataSource } from 'typeorm';
 import { AgentCredentialEntity } from '@database/postgres/entities/agent-credential.entity';
 import { OAuthClientEntity } from '@database/postgres/entities/oauth-client.entity';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
+import {
+  OAUTH_REVOKED_BY_CODE_REUSED,
+  OAUTH_REVOKED_BY_REFRESH_REUSE,
+} from '@modules/oauth/constants/oauth.constants';
+import { OAuthSignalsReader } from '@modules/observability/services/oauth-signals.reader';
+import { CacheService } from '@shared/cache/redis-cache/cache.service';
 
 import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-database';
 
 /**
- * `AgentCredentialRepository.maxLiveOAuthPerAgent`, behind the
- * `assay_oauth_live_grants_per_agent` gauge (spec §6.7), on the real
- * migrations: the same "live" as `countLiveOAuthForAgent`, maximised over
- * agents.
+ * The database facts behind the operator dashboard's OAuth signals (spec
+ * §6.7), `OAuthSignalsReader.databaseFacts`, on the real migrations. Live
+ * grants use the same "live" as `countLiveOAuthForAgent`.
  */
-describe('maxLiveOAuthPerAgent — real migrations', () => {
-  const DATABASE = 'assay_oauth_live_grants_test';
+describe('OAuth dashboard signals, database facts — real migrations', () => {
+  const DATABASE = 'assay_oauth_signals_test';
   const ORGANIZATION = '11111111-1111-4111-8111-111111111111';
   const OTHER_ORGANIZATION = '22222222-2222-4222-8222-222222222222';
   const DAY = 24 * 3_600_000;
 
   let dataSource: DataSource;
   let credentials: AgentCredentialRepository;
+  let reader: OAuthSignalsReader;
   let clientId: string;
 
   beforeAll(async () => {
@@ -41,6 +47,7 @@ describe('maxLiveOAuthPerAgent — real migrations', () => {
     await dataSource.initialize();
     await dataSource.runMigrations({ transaction: 'each' });
     credentials = new AgentCredentialRepository(dataSource);
+    reader = new OAuthSignalsReader(dataSource, {} as CacheService);
     const [client] = (await dataSource.query(
       `INSERT INTO "oauth_clients" ("client_id", "kind", "client_name", "redirect_uris", "metadata")
        VALUES ('dcr_abcdefghijklmnopqrstuv', 'DCR', 'Example client',
@@ -60,6 +67,7 @@ describe('maxLiveOAuthPerAgent — real migrations', () => {
       agentId?: string;
       expiresAt?: Date | null;
       revokedAt?: Date | null;
+      revokedBy?: string;
       deletedAt?: Date | null;
     } = {},
   ): Promise<void> {
@@ -74,15 +82,17 @@ describe('maxLiveOAuthPerAgent — real migrations', () => {
         clientId,
         row.expiresAt === undefined ? new Date(Date.now() + 30 * DAY) : row.expiresAt,
         row.revokedAt ?? null,
-        row.revokedAt ? 'test' : null,
+        row.revokedAt ? (row.revokedBy ?? 'test') : null,
         row.deletedAt ?? null,
       ],
     );
   }
 
+  const facts = () => reader.databaseFacts(new Date(Date.now() - DAY));
+
   it('is 0 with no live grant', async () => {
     await insertGrant({ revokedAt: new Date(Date.now() - DAY) });
-    await expect(credentials.maxLiveOAuthPerAgent()).resolves.toBe(0);
+    await expect(facts()).resolves.toMatchObject({ liveGrants: 0, maxLiveGrantsPerAgent: 0 });
   });
 
   it('is the largest live count of one agent; revoked, expired and soft-deleted do not count', async () => {
@@ -103,8 +113,66 @@ describe('maxLiveOAuthPerAgent — real migrations', () => {
       [ORGANIZATION, busy, randomUUID().replace(/-/g, '')],
     );
 
-    await expect(credentials.maxLiveOAuthPerAgent()).resolves.toBe(4);
+    await expect(facts()).resolves.toMatchObject({ liveGrants: 8, maxLiveGrantsPerAgent: 4 });
     await expect(credentials.countLiveOAuthForAgent(ORGANIZATION, busy)).resolves.toBe(4);
+  });
+
+  it('counts grants stopped for reuse in the window, by revoked_by', async () => {
+    const recent = new Date(Date.now() - 60_000);
+    await insertGrant({ revokedAt: recent, revokedBy: OAUTH_REVOKED_BY_REFRESH_REUSE });
+    await insertGrant({ revokedAt: recent, revokedBy: OAUTH_REVOKED_BY_REFRESH_REUSE });
+    await insertGrant({ revokedAt: recent, revokedBy: OAUTH_REVOKED_BY_CODE_REUSED });
+    // Outside the 24 h window, and a revocation for another reason.
+    await insertGrant({
+      revokedAt: new Date(Date.now() - 2 * DAY),
+      revokedBy: OAUTH_REVOKED_BY_CODE_REUSED,
+    });
+    await insertGrant({ revokedAt: recent, revokedBy: 'user:someone' });
+
+    await expect(facts()).resolves.toMatchObject({
+      stoppedForRefreshReuse: 2,
+      stoppedForCodeReuse: 1,
+    });
+  });
+
+  it('counts the grace uses and stale reuses audited in the window', async () => {
+    const audit = (action: string, at: Date) =>
+      dataSource.query(
+        `INSERT INTO "audit_log_entries"
+           ("organization_id", "actor_type", "actor_id", "action", "resource_type", "created_at")
+         VALUES ($1, 'system', 'oauth', $2, 'agent_credential', $3)`,
+        [ORGANIZATION, action, at],
+      );
+    const now = new Date();
+    await audit('oauth.refresh_grace_used', now);
+    await audit('oauth.refresh_grace_used', now);
+    await audit('oauth.refresh_grace_used', new Date(Date.now() - 2 * DAY));
+    await audit('oauth.refresh_stale_reuse', now);
+    await audit('credential.revoked', now);
+
+    await expect(facts()).resolves.toMatchObject({ refreshGraceUses: 2, refreshStaleReuse: 1 });
+  });
+
+  it('counts DCR registrations in the window, the most under one name, and CIMD clients', async () => {
+    const client = (kind: string, name: string, createdAt = new Date()) =>
+      dataSource.query(
+        `INSERT INTO "oauth_clients"
+           ("client_id", "kind", "client_name", "redirect_uris", "metadata", "created_at")
+         VALUES ($1, $2, $3, ARRAY['http://127.0.0.1/callback'], '{}', $4)`,
+        [`${kind.toLowerCase()}_${randomUUID()}`, kind, name, createdAt],
+      );
+    const before = await facts();
+    await client('DCR', 'Flood client');
+    await client('DCR', 'Flood client');
+    await client('DCR', 'Flood client');
+    await client('DCR', 'Other client');
+    await client('DCR', 'Flood client', new Date(Date.now() - 2 * DAY));
+    await client('CIMD', 'Hosted client');
+
+    const after = await facts();
+    expect(after.dcrRegistrations - before.dcrRegistrations).toBe(4);
+    expect(after.dcrMaxPerClientName).toBe(3);
+    expect(after.cimdClients - before.cimdClients).toBe(1);
   });
 });
 

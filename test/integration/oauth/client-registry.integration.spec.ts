@@ -94,7 +94,7 @@ describe('OAuth client registry — real Postgres', () => {
       clock.now,
     );
     const registry = new OAuthClientRegistry(clients, fetcher, config);
-    const dcr = new DcrService(clients, limiter, metrics, config, clock.now);
+    const dcr = new DcrService(clients, limiter, config, clock.now);
     return { registry, dcr, clock, egress };
   }
 

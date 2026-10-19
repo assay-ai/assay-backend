@@ -8,6 +8,7 @@ import {
 } from '@database/postgres/entities/oauth-client.entity';
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 import {
   EgressFailureKind,
   EgressHttpClient,
@@ -131,12 +132,12 @@ export class CimdFetcher {
     if (await this.failedRecently(url)) return { ok: false, reason: 'invalid' };
 
     if (!this.isVerified(url) && !(await this.withinBudgets(url, ipKey))) {
-      this.metrics.incCimdFetch('budget');
+      await this.metrics.incCimdFetch('budget');
       return { ok: false, reason: 'budget' };
     }
 
     const outcome = await this.fetchDocument(url);
-    this.metrics.incCimdFetch(outcome.result);
+    await this.metrics.incCimdFetch(outcome.result);
     if (outcome.result !== 'ok') {
       await this.rememberFailure(url);
       return { ok: false, reason: 'invalid' };
@@ -221,7 +222,9 @@ export class CimdFetcher {
 
   private async failedRecently(url: string): Promise<boolean> {
     try {
-      return (await this.cache.getRedisClient().get(failureKey(url))) !== null;
+      return (
+        (await withRedisTimeout(() => this.cache.getRedisClient().get(failureKey(url)))) !== null
+      );
     } catch {
       // Unreadable: the budgets (which fail closed) still bound the fetches.
       return false;
@@ -230,9 +233,11 @@ export class CimdFetcher {
 
   private async rememberFailure(url: string): Promise<void> {
     try {
-      await this.cache
-        .getRedisClient()
-        .set(failureKey(url), '1', 'EX', OAUTH_CIMD_FAILURE_CACHE_SECONDS);
+      await withRedisTimeout(() =>
+        this.cache
+          .getRedisClient()
+          .set(failureKey(url), '1', 'EX', OAUTH_CIMD_FAILURE_CACHE_SECONDS),
+      );
     } catch (error) {
       this.logger.warn(
         `could not remember a CIMD failure: ${error instanceof Error ? error.message : String(error)}`,

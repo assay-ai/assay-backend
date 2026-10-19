@@ -56,7 +56,7 @@ const INVALID_REQUEST: OAuthError = { error: 'invalid_request' };
  * ```
  *
  * Every answer is `Cache-Control: no-store`, `Pragma: no-cache`, and counted
- * in `assay_oauth_token_total{grant_type, result}`. The body is never logged
+ * in the `token` counter as `{grant_type}.{result}` (§6.7). The body is never logged
  * (R-OA-27): an unexpected error is logged by its class name only.
  *
  * CORS `*` without credentials (`mcp-cors.ts`): a browser client may call it.
@@ -82,21 +82,21 @@ export class OAuthTokenController {
     try {
       const outcome = await this.handle(req, body, rawGrantType);
       if (outcome === 'rate_limited') {
-        this.metrics.incToken(grantType, 'rate_limited');
+        await this.metrics.incToken(grantType, 'rate_limited');
         res.setHeader('Retry-After', String(retryAfterSeconds(OAUTH_MINUTE_SECONDS)));
         sendOAuthError(res, 429, 'temporarily_unavailable', 'Too many token requests; retry later');
         return;
       }
       if (isOAuthError(outcome)) {
-        this.metrics.incToken(grantType, outcome.error);
+        await this.metrics.incToken(grantType, outcome.error);
         sendOAuthError(res, ERROR_STATUS[outcome.error], outcome.error, outcome.error_description);
         return;
       }
-      this.metrics.incToken(grantType, 'ok');
+      await this.metrics.incToken(grantType, 'ok');
       sendJson(res, 200, outcome);
     } catch (error) {
       this.logger.error(`oauth.token failed: ${errorName(error)}`);
-      this.metrics.incToken(grantType, 'server_error');
+      await this.metrics.incToken(grantType, 'server_error');
       if (!res.headersSent) sendOAuthError(res, 500, 'server_error');
     }
   }

@@ -21,6 +21,7 @@ import {
   OAUTH_ACCESS_TOKEN_TTL_SECONDS,
   OAUTH_MAX_LIVE_GRANTS_PER_AGENT,
   OAUTH_REFRESH_TOKEN_TTL_SECONDS,
+  OAUTH_REVOKED_BY_REFRESH_REUSE,
 } from '../constants/oauth.constants';
 import { hashOpaqueToken, mint } from '../domain/opaque-token';
 
@@ -56,9 +57,6 @@ export type CreateGrantResult =
        */
       readonly reason: 'grant_limit_reached' | 'code_reused' | 'agent_not_active';
     };
-
-/** `revoked_by` of a grant whose rotated refresh token came back after a descendant was used. */
-export const OAUTH_REVOKED_BY_REFRESH_REUSE = 'system:oauth-refresh-reuse';
 
 export interface RotateRefreshInput {
   /** The presented refresh token's row, as read before the rotation. */

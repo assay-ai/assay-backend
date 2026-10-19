@@ -1,6 +1,6 @@
 import { randomBytes, randomUUID } from 'node:crypto';
 
-import { INestApplication } from '@nestjs/common';
+import { INestApplication, Logger } from '@nestjs/common';
 import { Test } from '@nestjs/testing';
 import request from 'supertest';
 
@@ -30,7 +30,6 @@ import {
   OAuthRequestStore,
 } from '@modules/oauth/services/oauth-request.store';
 import { OAuthTokenService } from '@modules/oauth/services/oauth-token.service';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 
 import {
@@ -38,8 +37,10 @@ import {
   FakeOAuthRedis,
   MCP,
   counterValue,
+  fakeCache,
   oauthConfig,
   rateLimiter,
+  timed,
 } from './helpers/oauth-fakes';
 
 const WEB = 'https://app.assay.ai';
@@ -119,7 +120,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
   let store: FakeStore;
   let redis: FakeOAuthRedis;
   let clock: Clock;
-  let registry: MetricsRegistryService;
+  let counters: FakeOAuthRedis;
   let tokens: {
     mintCode: jest.Mock;
     exchangeCode: jest.Mock;
@@ -136,7 +137,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
     store = new FakeStore();
     redis = new FakeOAuthRedis();
     clock = new Clock();
-    registry = new MetricsRegistryService();
+    counters = new FakeOAuthRedis();
     touched = [];
     tokens = {
       mintCode: jest.fn().mockResolvedValue('assay_ac_code'),
@@ -167,7 +168,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
         { provide: OAuthRequestStore, useValue: store },
         { provide: OAuthTokenService, useValue: tokens },
         { provide: OAuthRateLimiter, useValue: rateLimiter(redis, clock) },
-        { provide: OAuthMetrics, useValue: new OAuthMetrics(registry) },
+        { provide: OAuthMetrics, useValue: new OAuthMetrics(fakeCache(counters)) },
         {
           provide: OAuthClientRepository,
           useValue: {
@@ -258,9 +259,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       expect(pair.startsWith(`${name}=`)).toBe(true);
       expect(requestCookieMatches(secret, rid, pair.slice(name.length + 1))).toBe(true);
       expect(cookies[0]).not.toContain(rid);
-      expect(
-        await counterValue(registry, 'assay_oauth_authorize_total', { outcome: 'stored' }),
-      ).toBe(1);
+      expect(await counterValue(counters, 'authorize', 'stored')).toBe(1);
     });
 
     it('stamps the client last_used_at', async () => {
@@ -316,9 +315,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
         expect(response.status).toBe(302);
         expect(response.headers.location).toBe(`${WEB}/connect/authorize-error?reason=${reason}`);
         expect(store.requests.size).toBe(0);
-        expect(
-          await counterValue(registry, 'assay_oauth_authorize_total', { outcome: reason }),
-        ).toBe(1);
+        expect(await counterValue(counters, 'authorize', reason)).toBe(1);
       },
     );
 
@@ -383,9 +380,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       expect(response.status).toBe(429);
       expect(response.headers['retry-after']).toMatch(/^\d+$/);
       expect(response.headers['content-type']).toMatch(/text\/html/);
-      expect(
-        await counterValue(registry, 'assay_oauth_authorize_total', { outcome: 'rate_limited' }),
-      ).toBe(1);
+      expect(await counterValue(counters, 'authorize', 'rate_limited')).toBe(1);
     });
 
     it('with Redis down the limiter fails closed: nothing is stored', async () => {
@@ -441,11 +436,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       // Not even the browser that started it can finish it now.
       expect((await resume(rid, cookie)).status).toBe(404);
       expect(tokens.mintCode).not.toHaveBeenCalled();
-      expect(
-        await counterValue(registry, 'assay_oauth_consent_total', {
-          step: 'continue_cookie_missing',
-        }),
-      ).toBe(1);
+      expect(await counterValue(counters, 'consent', 'continue_cookie_missing')).toBe(1);
     });
 
     it('without the cookie, before any decision: the error page, and the request stays', async () => {
@@ -628,12 +619,30 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
         codeVerifier: VERIFIER,
         resource: undefined,
       });
-      expect(
-        await counterValue(registry, 'assay_oauth_token_total', {
-          grant_type: 'authorization_code',
-          result: 'ok',
-        }),
-      ).toBe(1);
+      expect(await counterValue(counters, 'token', 'authorization_code.ok')).toBe(1);
+    });
+
+    it('answers the pair when the counter store is down: a counter never fails the request', async () => {
+      tokens.exchangeCode.mockResolvedValue(pair);
+      counters.down = true;
+      const debug = jest.spyOn(Logger.prototype, 'debug').mockImplementation(() => undefined);
+
+      const response = await exchange();
+
+      expect(response.status).toBe(200);
+      expect(response.body).toEqual(pair);
+      expect(debug).toHaveBeenCalledWith(expect.stringContaining('OAuth counter token'));
+      debug.mockRestore();
+      counters.down = false;
+      expect(await counterValue(counters, 'token', 'authorization_code.ok')).toBe(0);
+    });
+
+    it('answers an error unchanged when the counter store is down', async () => {
+      counters.down = true;
+      const response = await exchange({ code_verifier: 'short' });
+      expect(response.status).toBe(400);
+      expect(response.body).toEqual({ error: 'invalid_request' });
+      counters.down = false;
     });
 
     it('a malformed verifier is invalid_request, checked before the code is burned', async () => {
@@ -641,12 +650,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       expect(response.status).toBe(400);
       expect(response.body).toEqual({ error: 'invalid_request' });
       expect(tokens.exchangeCode).not.toHaveBeenCalled();
-      expect(
-        await counterValue(registry, 'assay_oauth_token_total', {
-          grant_type: 'authorization_code',
-          result: 'invalid_request',
-        }),
-      ).toBe(1);
+      expect(await counterValue(counters, 'token', 'authorization_code.invalid_request')).toBe(1);
     });
 
     it.each([
@@ -685,12 +689,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       const response = await token({ grant_type: 'password', client_id: BUILTIN_ID });
       expect(response.status).toBe(400);
       expect(response.body).toEqual({ error: 'unsupported_grant_type' });
-      expect(
-        await counterValue(registry, 'assay_oauth_token_total', {
-          grant_type: 'other',
-          result: 'unsupported_grant_type',
-        }),
-      ).toBe(1);
+      expect(await counterValue(counters, 'token', 'other.unsupported_grant_type')).toBe(1);
     });
 
     it('the service errors keep their RFC shape and status', async () => {
@@ -718,12 +717,9 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
         clientId: BUILTIN_ID,
         scope: undefined,
       });
-      expect(
-        await counterValue(registry, 'assay_oauth_token_total', {
-          grant_type: 'refresh_token',
-          result: 'temporarily_unavailable',
-        }),
-      ).toBe(1);
+      expect(await counterValue(counters, 'token', 'refresh_token.temporarily_unavailable')).toBe(
+        1,
+      );
     });
 
     it('refresh without the token is invalid_request', async () => {
@@ -746,12 +742,7 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       const response = await exchange();
       expect(response.status).toBe(429);
       expect(response.headers['retry-after']).toMatch(/^\d+$/);
-      expect(
-        await counterValue(registry, 'assay_oauth_token_total', {
-          grant_type: 'authorization_code',
-          result: 'rate_limited',
-        }),
-      ).toBe(1);
+      expect(await counterValue(counters, 'token', 'authorization_code.rate_limited')).toBe(1);
       // Another client from the same address has its own budget.
       expect((await exchange({ client_id: CIMD_ID })).status).toBe(400);
     });
@@ -854,6 +845,69 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       const response = await revoke({ token: 'assay_rt_x', client_id: BUILTIN_ID });
       expect(response.status).toBe(200);
       expect(tokens.revoke).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a Redis that accepts commands and never answers (GATE I-1)', () => {
+    beforeEach(() => build());
+
+    const BOUND_MS = 1500;
+    const never = () => new Promise<never>(() => undefined);
+    const tokenForm = {
+      grant_type: 'authorization_code',
+      code: 'assay_ac_x',
+      redirect_uri: LOOPBACK,
+      client_id: BUILTIN_ID,
+      code_verifier: VERIFIER,
+    };
+
+    it('token: the limiter gives up within its bound and answers 503 temporarily_unavailable', async () => {
+      jest.spyOn(redis, 'incr').mockImplementation(never);
+      const { value: response, ms } = await timed(
+        request(app.getHttpServer()).post('/oauth/token').type('form').send(tokenForm),
+      );
+      expect(response.status).toBe(503);
+      expect(response.body).toEqual({ error: 'temporarily_unavailable' });
+      expect(tokens.exchangeCode).not.toHaveBeenCalled();
+      expect(ms).toBeLessThan(BOUND_MS);
+    });
+
+    it('token: a counter that never answers does not hold the pair', async () => {
+      tokens.exchangeCode.mockResolvedValue({
+        access_token: 'assay_at_a',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token: 'assay_rt_r',
+        scope: 'assay:agent',
+      });
+      jest.spyOn(counters, 'incr').mockImplementation(never);
+      const { value: response, ms } = await timed(
+        request(app.getHttpServer()).post('/oauth/token').type('form').send(tokenForm),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.access_token).toBe('assay_at_a');
+      expect(ms).toBeLessThan(BOUND_MS);
+    });
+
+    it('authorize: 503 within the bound, nothing stored', async () => {
+      jest.spyOn(redis, 'incr').mockImplementation(never);
+      const { value: response, ms } = await timed(authorize());
+      expect(response.status).toBe(503);
+      expect(store.requests.size).toBe(0);
+      expect(ms).toBeLessThan(BOUND_MS);
+    });
+
+    it('revoke: the buckets fail open within the bound, and the token is revoked', async () => {
+      jest.spyOn(redis, 'incr').mockImplementation(never);
+      const { value: response, ms } = await timed(
+        request(app.getHttpServer())
+          .post('/oauth/revoke')
+          .type('form')
+          .send({ token: 'assay_rt_x', client_id: BUILTIN_ID }),
+      );
+      expect(response.status).toBe(200);
+      expect(tokens.revoke).toHaveBeenCalledTimes(1);
+      expect(ms).toBeLessThan(BOUND_MS);
     });
   });
 });

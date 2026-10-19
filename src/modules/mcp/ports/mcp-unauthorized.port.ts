@@ -1,7 +1,7 @@
 import { AppError } from '@shared/errors/app-errors';
 
 /**
- * Why the MCP catch-all answered 401 (`assay_mcp_unauthorized_total{reason}`,
+ * Why the MCP catch-all answered 401 (the `mcp_unauthorized{reason}` counter,
  * spec §6.7).
  *
  * ```text

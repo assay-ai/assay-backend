@@ -8,7 +8,6 @@ import * as tls from 'node:tls';
 
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { CimdFetcher } from '@modules/oauth/services/cimd.fetcher';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { EgressConnectOverride, EgressHttpClient, EgressTarget } from '@shared/network/egress';
 
 import {
@@ -145,7 +144,7 @@ function handle(req: import('node:http').IncomingMessage, res: import('node:http
 }
 
 function setup() {
-  const { metrics, registry } = oauthMetrics();
+  const { metrics, counters } = oauthMetrics();
   const redis = new FakeOAuthRedis();
   const clock = new Clock();
   const repo = new FakeOAuthClientRepository();
@@ -157,11 +156,11 @@ function setup() {
     metrics,
     oauthConfig(),
   );
-  return { fetcher, registry, repo };
+  return { fetcher, counters, repo };
 }
 
-const fetched = (registry: MetricsRegistryService, result: string) =>
-  counterValue(registry, 'assay_oauth_cimd_fetch_total', { result });
+const fetched = (counters: FakeOAuthRedis, result: string) =>
+  counterValue(counters, 'cimd_fetch', result);
 
 beforeAll(async () => {
   // A throwaway key and certificate for this run only; nothing is committed.
@@ -239,11 +238,11 @@ beforeEach(() => {
 
 describe('CIMD fetch SSRF (T7) — real EgressHttpClient', () => {
   it('fetches a public document (the harness works)', async () => {
-    const { fetcher, registry } = setup();
+    const { fetcher, counters } = setup();
     const outcome = await fetcher.fetch('https://good.example.com/client.json', IP_KEY);
     expect(outcome.ok).toBe(true);
     expect(dialled).toEqual([PUBLIC_ADDRESS]);
-    expect(await fetched(registry, 'ok')).toBe(1);
+    expect(await fetched(counters, 'ok')).toBe(1);
   });
 
   it.each([
@@ -262,18 +261,18 @@ describe('CIMD fetch SSRF (T7) — real EgressHttpClient', () => {
     ['::ffff:0:7f00:1 (IPv4-translated loopback)', 'translated.example.com'],
     ['one public and one private answer', 'mixed.example.com'],
   ])('%s → blocked_address, never dialled', async (_label, host) => {
-    const { fetcher, registry } = setup();
+    const { fetcher, counters } = setup();
     const outcome = await fetcher.fetch(`https://${host}/client.json`, IP_KEY);
     expect(outcome).toEqual({ ok: false, reason: 'invalid' });
     expect(lookup).toHaveBeenCalledWith(host);
     expect(dialled).toEqual([]);
     expect(hits).toEqual([]);
-    expect(await fetched(registry, 'blocked_address')).toBe(1);
+    expect(await fetched(counters, 'blocked_address')).toBe(1);
   });
 
   it('DNS rebinding: one lookup per fetch, the socket goes to the checked address, the next answer is refused', async () => {
     rebindLookups = 0;
-    const { fetcher, registry } = setup();
+    const { fetcher, counters } = setup();
 
     // First answer public: resolved once and pinned. No second lookup happens
     // between the check and the connect for a private answer to slip into.
@@ -287,61 +286,61 @@ describe('CIMD fetch SSRF (T7) — real EgressHttpClient', () => {
     expect(second).toEqual({ ok: false, reason: 'invalid' });
     expect(rebindLookups).toBe(2);
     expect(dialled).toEqual([OTHER_PUBLIC_ADDRESS]);
-    expect(await fetched(registry, 'blocked_address')).toBe(1);
+    expect(await fetched(counters, 'blocked_address')).toBe(1);
   });
 
   it('302 to an internal address → refused; the Location is never resolved or dialled', async () => {
-    const { fetcher, registry } = setup();
+    const { fetcher, counters } = setup();
     const outcome = await fetcher.fetch('https://redirect.example.com/client.json', IP_KEY);
     expect(outcome).toEqual({ ok: false, reason: 'invalid' });
     expect(lookup).not.toHaveBeenCalledWith('metadata.example.com');
     expect(dialled).toEqual([PUBLIC_ADDRESS]);
     expect(hits).toEqual(['redirect.example.com']);
-    expect(await fetched(registry, 'status')).toBe(1);
+    expect(await fetched(counters, 'status')).toBe(1);
   });
 
   it('more than 16 KB → too_large', async () => {
-    const { fetcher, registry } = setup();
+    const { fetcher, counters } = setup();
     const outcome = await fetcher.fetch('https://big.example.com/client.json', IP_KEY);
     expect(outcome).toEqual({ ok: false, reason: 'invalid' });
-    expect(await fetched(registry, 'too_large')).toBe(1);
+    expect(await fetched(counters, 'too_large')).toBe(1);
   });
 
   it('a chunked body over 16 KB with no Content-Length → too_large on arrival', async () => {
-    const { fetcher, registry } = setup();
+    const { fetcher, counters } = setup();
     const outcome = await fetcher.fetch('https://chunked.example.com/client.json', IP_KEY);
     expect(outcome).toEqual({ ok: false, reason: 'invalid' });
-    expect(await fetched(registry, 'too_large')).toBe(1);
+    expect(await fetched(counters, 'too_large')).toBe(1);
   });
 
   it('a certificate for another name → refused, counted as status, nothing stored', async () => {
-    const { fetcher, registry, repo } = setup();
+    const { fetcher, counters, repo } = setup();
     const outcome = await fetcher.fetch('https://wrong-name.example.org/client.json', IP_KEY);
     expect(outcome).toEqual({ ok: false, reason: 'invalid' });
     expect(hits).toEqual([]);
     expect(repo.rows.size).toBe(0);
-    expect(await fetched(registry, 'status')).toBe(1);
+    expect(await fetched(counters, 'status')).toBe(1);
   });
 
   it('a certificate from an untrusted issuer → refused, counted as status, nothing stored', async () => {
-    const { fetcher, registry, repo } = setup();
+    const { fetcher, counters, repo } = setup();
     const outcome = await fetcher.fetch('https://untrusted.example.com/client.json', IP_KEY);
     expect(outcome).toEqual({ ok: false, reason: 'invalid' });
     expect(dialled).toEqual([PUBLIC_ADDRESS]);
     expect(hits).toEqual([]);
     expect(repo.rows.size).toBe(0);
-    expect(await fetched(registry, 'status')).toBe(1);
+    expect(await fetched(counters, 'status')).toBe(1);
   });
 
   it('a slow drip past 5 s → timeout, within the 5 s budget', async () => {
-    const { fetcher, registry } = setup();
+    const { fetcher, counters } = setup();
     const started = Date.now();
     const outcome = await fetcher.fetch('https://slow.example.com/client.json', IP_KEY);
     const elapsed = Date.now() - started;
     expect(outcome).toEqual({ ok: false, reason: 'invalid' });
     expect(elapsed).toBeGreaterThanOrEqual(4900);
     expect(elapsed).toBeLessThan(6500);
-    expect(await fetched(registry, 'timeout')).toBe(1);
+    expect(await fetched(counters, 'timeout')).toBe(1);
   });
 
   it('an IP-literal client_id is refused before any lookup or socket', async () => {

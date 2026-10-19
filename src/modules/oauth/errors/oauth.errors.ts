@@ -15,6 +15,7 @@ export enum OAuthErrorCode {
   OAUTH_AGENT_NOT_ACTIVE = 'OAUTH_AGENT_NOT_ACTIVE',
   OAUTH_GRANT_LIMIT_REACHED = 'OAUTH_GRANT_LIMIT_REACHED',
   OAUTH_CREDENTIAL_NAME_INVALID = 'OAUTH_CREDENTIAL_NAME_INVALID',
+  OAUTH_REQUEST_STORE_UNAVAILABLE = 'OAUTH_REQUEST_STORE_UNAVAILABLE',
 }
 
 export type OAuthErrorCodesArePrefixed = AssertDomainErrorCodes<'OAUTH', `${OAuthErrorCode}`>;
@@ -48,6 +49,12 @@ export const OAuthErrors = createDomainErrorFactory('OAUTH', {
     message: (context?: Record<string, any>) =>
       `This agent already has ${context?.limit ?? 'the maximum number of'} connected apps; ` +
       'disconnect one before adding another',
+  },
+  /** The pending-request store (Redis) failed or did not answer in time. */
+  requestStoreUnavailable: {
+    code: OAuthErrorCode.OAUTH_REQUEST_STORE_UNAVAILABLE,
+    statusCode: 503,
+    message: () => 'Sign-in is temporarily unavailable; try again in a moment',
   },
   /**
    * The connection's name is empty, or nothing but control, format or

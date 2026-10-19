@@ -20,7 +20,6 @@ import { HealthcheckController } from '@shared/controllers/healthcheck.controlle
 import { NetworkModule } from '@shared/network/network.module';
 
 import { McpHttpModule } from '@modules/mcp/mcp-http.module';
-import { MetricsRegistryModule } from '@modules/observability/metrics-registry.module';
 import { OAuthMcpModule } from '@modules/oauth/oauth-mcp.module';
 import { ToolEgressModule } from '@modules/tool/tool-egress.module';
 
@@ -66,10 +65,6 @@ import { ToolEgressModule } from '@modules/tool/tool-egress.module';
     DatabaseModule,
     RedisCacheModule,
     AlertingModule,
-    // This container's one metrics registry (the OAuth counters of spec §6.7).
-    // Imported here so the app owns it; `OAuthCoreModule` imports the same
-    // module class, which Nest resolves to the same instance.
-    MetricsRegistryModule,
     // `tools/call` dials providers: the invoker, the request signer and the
     // credential vault. The scheduler does not import this, so it needs neither
     // `PROVIDER_REQUEST_SIGNING_KEYS` nor `CREDENTIAL_VAULT_KEKS`.

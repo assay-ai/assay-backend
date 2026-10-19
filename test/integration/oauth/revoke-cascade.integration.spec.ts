@@ -25,8 +25,6 @@ import {
   NotificationPort,
   NotificationRequest,
 } from '@modules/notification/ports/notification.port';
-import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { AgentCredentialsService } from '@modules/account/services/agent-credentials.service';
 import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
@@ -53,7 +51,7 @@ import { ensureTestDatabase, testConnectionOptions } from '../helpers/test-datab
  * revokes the credential row and every one of its tokens in one transaction,
  * audits `credential.revoked`, and invalidates cached access after commit;
  * then the post-commit sweep revokes any token a rotation held. The token
- * service, its cache (Redis), metrics and the access epoch are the real ones.
+ * service, its cache (Redis) and the access epoch are the real ones.
  */
 describe('OAuth grant revocation cascade — real migrations', () => {
   const DATABASE = 'assay_oauth_revoke_cascade_test';
@@ -142,7 +140,6 @@ describe('OAuth grant revocation cascade — real migrations', () => {
       new OAuthAccessTokenRepository(dataSource),
       credentialRepository,
       cache,
-      new OAuthMetrics(new MetricsRegistryService()),
       notifier,
     );
     // The agent lookup is not under test: every agent id belongs to the organization.

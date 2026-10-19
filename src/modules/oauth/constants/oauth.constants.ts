@@ -34,3 +34,9 @@ export const OAUTH_CIMD_FAILURE_CACHE_SECONDS = 60;
 export const OAUTH_MAX_LIVE_GRANTS_PER_AGENT = 50;
 /** The consent page warns from this many live grants on (R-OA-31). */
 export const OAUTH_LIVE_GRANTS_WARN_AT = 45;
+
+/** `revoked_by` of a grant whose rotated refresh token came back after a descendant was used. */
+export const OAUTH_REVOKED_BY_REFRESH_REUSE = 'system:oauth-refresh-reuse';
+
+/** `revoked_by` of a grant whose code was presented a second time (R-OA-6). */
+export const OAUTH_REVOKED_BY_CODE_REUSED = 'system:oauth-code-reused';

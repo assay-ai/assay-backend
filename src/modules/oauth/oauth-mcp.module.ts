@@ -35,9 +35,9 @@ import { OAuthRequestStore } from './services/oauth-request.store';
  *
  * `@Global()` for one export only: `MCP_UNAUTHORIZED_RECORDER`, which the MCP
  * catch-all (`McpHttpModule`, a sibling) uses to count its 401s by reason
- * (`assay_mcp_unauthorized_total`, §6.7) on this container's `OAuthMetrics`.
+ * (the `mcp_unauthorized` counter, §6.7) through `OAuthMetrics`.
  * The API app and the scheduler never import this module, so they have no
- * recorder and no OAuth metrics.
+ * recorder.
  */
 @Global()
 @Module({
@@ -53,7 +53,7 @@ import { OAuthRequestStore } from './services/oauth-request.store';
     {
       provide: MCP_UNAUTHORIZED_RECORDER,
       useFactory: (metrics: OAuthMetrics): McpUnauthorizedRecorder => ({
-        record: (reason) => metrics.incMcpUnauthorized(reason),
+        record: (reason) => void metrics.incMcpUnauthorized(reason),
       }),
       inject: [OAuthMetrics],
     },

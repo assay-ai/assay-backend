@@ -21,7 +21,6 @@ import { OAuthAuthorizationCodeRepository } from '@database/postgres/repositorie
 import { OAuthClientRepository } from '@database/postgres/repositories/oauth-client.repository';
 import { OAuthRefreshTokenRepository } from '@database/postgres/repositories/oauth-refresh-token.repository';
 import { NotificationPort } from '@modules/notification/ports/notification.port';
-import { OAuthMetrics } from '@modules/oauth/services/oauth-metrics.service';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
 import { CredentialSessionResolver } from '@modules/auth/services/credential-session.resolver';
 import { DbCredentialMcpSessionSource } from '@modules/auth/services/db-credential-mcp-session.source';
@@ -107,7 +106,6 @@ describe('OAuthAccessTokenMcpSessionSource — real migrations', () => {
       credentials,
       // Only the code exchange is used here: these collaborators are never called.
       {} as unknown as CacheService,
-      {} as unknown as OAuthMetrics,
       {} as unknown as NotificationPort,
     );
 

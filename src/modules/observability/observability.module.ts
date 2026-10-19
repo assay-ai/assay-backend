@@ -2,15 +2,15 @@ import { Module } from '@nestjs/common';
 
 import { OperatorIdentityModule } from '@modules/operator/operator-identity.module';
 
-import { MetricsRegistryModule } from './metrics-registry.module';
 import { ObservabilityDashboardController } from './controllers/observability-dashboard.controller';
 import { ObservabilityMetricsRepository } from './repositories/observability-metrics.repository';
 import { MetricsCollectorService } from './services/metrics-collector.service';
+import { OAuthSignalsReader } from './services/oauth-signals.reader';
 
 /**
- * `GET /operator/dashboard` (+ its JSON twin), and the in-process instruments
- * (`MetricsRegistryService`, from `MetricsRegistryModule`, re-exported) other
- * modules record into.
+ * `GET /operator/dashboard` (+ its JSON twin). The OAuth signals read the
+ * OAuth tables and the request-path counters `OAuthMetrics` writes to Redis
+ * (`OAuthSignalsReader`); nothing here records metrics in process.
  *
  * `ReconciliationRunRepository`, `PlatformMetricsRepository` and
  * `SlashProposalRepository` (all injected by `MetricsCollectorService`) come
@@ -21,9 +21,8 @@ import { MetricsCollectorService } from './services/metrics-collector.service';
  * `OperatorApiModule` in the same process.
  */
 @Module({
-  imports: [OperatorIdentityModule, MetricsRegistryModule],
-  providers: [MetricsCollectorService, ObservabilityMetricsRepository],
+  imports: [OperatorIdentityModule],
+  providers: [MetricsCollectorService, ObservabilityMetricsRepository, OAuthSignalsReader],
   controllers: [ObservabilityDashboardController],
-  exports: [MetricsRegistryModule],
 })
 export class ObservabilityModule {}
