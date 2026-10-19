@@ -151,8 +151,14 @@ export class FakeLedger {
     return Promise.resolve({ applied: true });
   }
 
-  getBalance(): Promise<{ available: Money }> {
-    return Promise.resolve({ available: this.available });
+  /** A deposit the chain has not finalised yet; a test sets it to see the "still confirming" text. */
+  pending: Money | null = null;
+
+  getBalance(): Promise<{ available: Money; pending?: Money }> {
+    return Promise.resolve({
+      available: this.available,
+      ...(this.pending ? { pending: this.pending } : {}),
+    });
   }
 
   get kinds(): string[] {
@@ -780,6 +786,8 @@ export interface McpHarnessOptions {
   readonly stakes?: Readonly<Record<string, Money>>;
   readonly invoker: BindingInvokerPort;
   readonly balance?: Money;
+  /** A not-yet-final deposit `getBalance` reports beside the balance. */
+  readonly pending?: Money;
   readonly platformFeeBps?: number;
   readonly random?: () => number;
   /** What `FakeSettlement.enqueue` does after recording the call. Defaults to succeeding. */
@@ -849,6 +857,7 @@ export function buildMcpHarness(options: McpHarnessOptions): McpHarness {
   );
 
   const ledger = new FakeLedger(options.balance ?? usdc(100));
+  ledger.pending = options.pending ?? null;
   const intents = new FakeIntents(ledger);
   const settlement = new FakeSettlement(options.settlementBehaviour);
   const bindingCalls = new FakeBindingCallCounter();

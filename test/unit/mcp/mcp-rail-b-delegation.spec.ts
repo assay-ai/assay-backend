@@ -8,8 +8,11 @@ import {
   checksummedRequirement,
   delegationHint,
   delegationTerms,
+  escrowNotOpenNotice,
   paymentKeyNotice,
 } from '@modules/mcp/services/mcp-tool-call.service';
+import { PaymentErrorCode, PaymentErrors } from '@modules/payment/errors/payment.errors';
+import { AppError } from '@shared/errors/app-errors';
 import { EscrowDelegationService } from '@modules/settlement/services/escrow-delegation.service';
 
 const EVM = CHAIN_IDS.ROBINHOOD_TESTNET;
@@ -157,6 +160,44 @@ describe('rail-B PAYMENT_REQUIRED — the enable-paid fixUrl', () => {
  * Every eip155 address an agent is asked to sign is EIP-55: `assay-mcp`'s
  * signer accepts no other spelling (Task 2.3, M5).
  */
+/**
+ * A buyer who never deposited has no escrow row, so no seq and no offer: the
+ * refusal says where to open the escrow instead of leaving a dead end.
+ */
+describe('rail-B offer with no escrow — where to fund it', () => {
+  const notOpen = () => PaymentErrors.escrowNotOpen({ account: PAYER });
+
+  it('payment client → {WEB}/funding as fixUrl and in the text', () => {
+    const error = escrowNotOpenNotice(notOpen(), session(), WEB) as AppError;
+    expect(error.errorCode).toBe(PaymentErrorCode.PAYMENT_ESCROW_NOT_OPEN);
+    expect(error.message).toBe(
+      `No escrow is open for this account: ${PAYER}. Add funds to open it, then call again: ${WEB}/funding`,
+    );
+    expect(error.context).toMatchObject({ fixUrl: `${WEB}/funding` });
+  });
+
+  it('third-party grant or no WEB_APP_URL → the Assay app sentence and no fixUrl', () => {
+    for (const [s, web] of [
+      [session({ paymentsAllowed: false }), WEB],
+      [session({ paymentsAllowed: undefined }), WEB],
+      [session(), undefined],
+    ] as const) {
+      const error = escrowNotOpenNotice(notOpen(), s, web) as AppError;
+      expect(error.message).toBe(
+        `No escrow is open for this account: ${PAYER}. Paid tools need the Assay app on your computer.`,
+      );
+      expect(error.context?.fixUrl).toBeUndefined();
+    }
+  });
+
+  it('any other error, or one carrying a reason, passes through unchanged', () => {
+    const other = new Error('boom');
+    expect(escrowNotOpenNotice(other, session(), WEB)).toBe(other);
+    const withReason = PaymentErrors.escrowNotOpen({ account: PAYER, reason: 'chain unreachable' });
+    expect(escrowNotOpenNotice(withReason, session(), WEB)).toBe(withReason);
+  });
+});
+
 describe('rail-B PAYMENT_REQUIRED — EIP-55 addresses', () => {
   const lower = (account: string) => account.toLowerCase();
   const ASSET = `${EVM}/erc20:0x915e5d10c1b03b4f4c7e1f1d3b2a8c6f7e9d0a1b`;
