@@ -351,8 +351,9 @@ describe('MCP OAuth endpoints — AppMcpModule and AppApiModule, real database a
   it('T8: a request an attacker started and a victim approved yields no code to anyone', async () => {
     // Remaining window: a code is minted only if the attacker's own continue
     // lands between the victim's approve and the victim's continue (about one
-    // round trip, blind); the consent page's Cross-Origin-Opener-Policy keeps
-    // an opener from stretching it by holding the window open or closing it.
+    // round trip, blind); the consent page's Cross-Origin-Opener-Policy
+    // (same-origin-allow-popups) keeps an opener from stretching it by holding
+    // the window open or closing it.
     // The attacker starts a sign-in in their own browser and keeps its cookie.
     const { challenge } = pkce();
     const attacker = await start(challenge);
