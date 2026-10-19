@@ -29,6 +29,7 @@ import {
   McpSession,
   McpSessionPort,
 } from '@modules/mcp/ports/mcp-session.port';
+import { CimdFetcher } from '@modules/oauth/services/cimd.fetcher';
 import {
   OAUTH_CLEANUP_LOCK_KEY,
   OAuthCleanupService,
@@ -39,9 +40,12 @@ import {
   RATE_LIMITED_PAGE,
   UNAVAILABLE_PAGE,
 } from '@modules/oauth/views/oauth-pages';
+import { digestToken } from '@shared/crypto/token-digest';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
+import { LoggingInterceptor } from '@shared/interceptors/logging.interceptor';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
 import { EgressConnectOverride, EgressHttpClient, EgressTarget } from '@shared/network/egress';
+import { StructuredLogger } from '@shared/observability';
 
 import { freshMigratedDatabase, runDatabaseName } from '../helpers/slash-prorata-context';
 import { testConnectionOptions } from '../helpers/test-database';
@@ -136,7 +140,8 @@ jest.mock('../../../src/bull-board/bull-board.module', () => {
  *   eTLD+1, punycode display     unit/oauth/registrable-domain.spec › "a.b.claude.ai → claude.ai", "an xn-- IDN stays punycode"; [here] "punycode display"
  * DCR
  *   secret methods refused       unit/oauth/dcr.service.spec › "client_secret_post refused", "any client_secret* member refused"; [here] "DCR over HTTP: secret methods refused"
- *   bad redirect                 unit/oauth/dcr.service.spec › "bad redirect refused"; integration/oauth/oauth-endpoints › "register has no CORS headers, …"
+ *   bad redirect                 unit/oauth/dcr.service.spec › "bad redirect refused";
+ *                                [here] "redirect allowlist over HTTP: …" (DCR → 400 invalid_redirect_uri for each review:true entry)
  *   /64 rate key                 unit/oauth/dcr.service.spec › "21st per /64 in an hour refused"; [here] "DCR over HTTP: /64 rate key"
  *   no CORS                      integration/oauth/oauth-endpoints › "register has no CORS headers, and registers a public loopback client (R-OA-10)"
  *   prune respects FK            integration/oauth/oauth-cleanup › "referenced DCR client survives", "a soft-deleted grant still holds its client"
@@ -157,7 +162,14 @@ jest.mock('../../../src/bull-board/bull-board.module', () => {
  *                                  "pre-warms only on the MCP app: …"; unit/oauth/cimd-fetcher.spec › "verified client exempt";
  *                                [here] "verified pre-warm at boot"
  * Logs
- *   log, APM, body capture       integration/oauth/oauth-log-canary › "F1 → F2 → refusals → revoke leaves no secret in any log line or error body"
+ *   log and body capture         integration/oauth/oauth-log-canary › "F1 → F2 → refusals → revoke leaves no secret in any log line or error body"
+ *                                [here] this whole suite runs under the real StructuredLogger and LoggingInterceptor with every
+ *                                  process write captured: "logs: authorize, consent, continue, token, refresh and revoke, …" drives
+ *                                  the secret-bearing flows and their error paths, and "logs: nothing the suite captured holds …"
+ *                                  scans every line and error body of every test in this file
+ *   APM                          No APM agent is installed (no dd-trace, elastic-apm-node, newrelic, @opentelemetry or @sentry
+ *                                  in package.json or src; asserted [here]). There are no spans to scrub; log and error-body
+ *                                  capture is the whole surface.
  * Revocation endpoint
  *   refresh → grant revoked      integration/oauth/refresh › "revoke refresh → credential revoked_at set; revoke unknown → no error"
  *                                integration/oauth/oauth-endpoints › "token response has Cache-Control no-store; refresh rotates; revoke is 200 empty; …"
@@ -171,20 +183,55 @@ jest.mock('../../../src/bull-board/bull-board.module', () => {
  *                                [here] "the pages the MCP host serves itself carry no referrer, no script and no link"
  * ```
  *
- * §11 rows tagged Part 1 that GATE 1 also checks, beyond the bullets above:
- * T3/T15 integration/oauth/oauth-session-source › "third-party grant: the MCP host gets paymentsAllowed false, the API host 403",
- * "a token issued for another audience is refused (T15)"; T16 unit/auth/oauth-access-token-mcp-session.source.spec ›
- * "a suspended agent is refused as suspended, not as invalid (T16)", integration/oauth/refresh › "suspended agent: refresh succeeds";
- * T1 integration/oauth/code-exchange › "no raw secret in any column, …", integration/oauth/refresh › "no raw token in any column, …";
- * R-OA-23 integration/oauth/revoke-cascade (whole file). The §12.1 equivalence suite is Task 1.17
- * (`integration/oauth/equivalence*`, on its own branch).
+ * §11 rows tagged Part 1 (GATE 1 item 2): a test per row, or OPEN with the task that closes it.
+ *
+ * ```text
+ * T1  no signing key; hashed     integration/oauth/code-exchange › "no raw secret in any column, and no hash outside the hash columns …";
+ *                                integration/oauth/refresh › "no raw token in any column, and no hash outside the hash columns"
+ * T3  1 h, revocable, MCP host   integration/oauth/code-exchange › "mints assay_ac_ codes …"; integration/oauth/oauth-endpoints ›
+ *                                  "approve then continue → 302 with code, …" (expires_in 3600); integration/oauth/oauth-session-source ›
+ *                                  "revoking the credential refuses the very next request (R-OA-19)",
+ *                                  "third-party grant: the MCP host gets paymentsAllowed false, the API host 403"
+ * T4  refresh theft              integration/oauth/refresh › "wrong client → invalid_grant", "reuse at 31 s after a child access token
+ *                                  was used → grant revoked + …", "reuse at 31 s after the child refresh token was used → grant revoked",
+ *                                  "30-day expiry → credential not live (countLive excludes it)", "revoke refresh → credential revoked_at set; …"
+ * T5  malicious approved app     "Verified" bullets above; integration/account/agent-delegate-binding › "third-party OAuth session →
+ *                                  challenge and bind refused ACCOUNT_DELEGATE_CLIENT_NOT_ALLOWED"; integration/oauth/oauth-session-source ›
+ *                                  "third-party grant: the MCP host gets paymentsAllowed false, the API host 403" (API host refused).
+ *                                OPEN: "PAYMENT_REQUIRED without fixUrl for a non-payment client" has no test yet; it is an it.todo in
+ *                                  the 1.17 equivalence suite, deferred to Task 2.13. The enable-paid page refusal is Part 2.
+ * T6  open redirect              Redirect bullets above (pre-redirect errors never redirect; review:true refused; attacks [here])
+ * T7  CIMD SSRF                  CIMD SSRF bullets above; unit/oauth/cimd-fetcher.spec › "per-host budget: the 31st fetch to one host
+ *                                  in a minute → budget", "global budget: the 601st fetch in a minute → budget"
+ * T8  consent phishing           Browser-binding and consent bullets above (T8 attack test, first-reader binding); rid redaction in the
+ *                                  log canary and [here] logs tests; frame bullets above (real-browser iframe load: GATE 1 item 6)
+ * T9  replay                     Code bullets above; unit/account/agent-delegate.service.spec › "consumes a challenge on its first use"
+ *                                  (binding challenge GETDEL)
+ * T14 cross-process race         integration/oauth/refresh › "two refreshes within 30 s → identical pair, …", "parallel refreshes of one
+ *                                  token: …", "reuse at 31 s with no used descendant → invalid_grant, credential live, …",
+ *                                  "Redis flushed inside grace → invalid_grant, no revoke"
+ * T15 audience confusion         integration/oauth/oauth-session-source › "a token issued for another audience is refused (T15)",
+ *                                  "third-party grant: the MCP host gets paymentsAllowed false, the API host 403"
+ * T16 suspension                 unit/auth/oauth-access-token-mcp-session.source.spec › "a suspended agent is refused as suspended, not as
+ *                                  invalid (T16)"; integration/oauth/refresh › "suspended agent: refresh succeeds"
+ * R-OA-23 revoke cascade         integration/oauth/revoke-cascade (whole file)
+ * ```
+ *
+ * The §12.1 equivalence suite is Task 1.17 (`integration/oauth/equivalence*`, on its own branch).
  *
  * What runs here: the real `AppMcpModule` and `AppApiModule` over HTTP,
  * against a migrated test database and a real Redis, as the endpoints suite
  * does. `EgressHttpClient` is the real class with only its resolver and its
  * socket destination replaced (as in the CIMD SSRF suite): every name gets a
  * scripted DNS answer, and sockets to public answers land on a local HTTPS
- * server with a certificate made for this run. Nothing leaves the machine.
+ * server with a certificate made for this run.
+ *
+ * Every other socket is fenced too: `net.Socket.prototype.connect` is wrapped
+ * for the suite so that any TCP connection to a host other than this machine
+ * (the test database and Redis included only by their configured host) is
+ * refused and recorded, and the last test asserts none was attempted. The
+ * process-wide egress lockdown cannot be used here: it is irreversible and
+ * would also block supertest in the files that run after this one.
  */
 
 const PUBLIC_ADDRESS = '93.184.216.34';
@@ -220,6 +267,86 @@ const connectOverride: EgressConnectOverride = (target: EgressTarget) => {
   return { address: '127.0.0.1', family: 4, port: serverPort };
 };
 
+/** Destinations off this machine that any socket in the process tried to reach. */
+const blockedConnections: string[] = [];
+const originalConnect = Socket.prototype.connect;
+
+/** Refuse (and record) every TCP connection to a host not in `allowed` or loopback. */
+function installNetworkFence(allowed: readonly string[]): void {
+  const hosts = new Set(['localhost', '127.0.0.1', '::1', '::ffff:127.0.0.1', ...allowed]);
+  const connect = originalConnect as unknown as (this: Socket, ...args: unknown[]) => Socket;
+  Socket.prototype.connect = function fenced(this: Socket, ...args: unknown[]): Socket {
+    // `net.connect` passes its normalised [options, callback] as one array.
+    const first = Array.isArray(args[0]) ? (args[0] as unknown[])[0] : args[0];
+    let host: string;
+    let port: unknown;
+    if (typeof first === 'object' && first !== null) {
+      const options = first as {
+        host?: string;
+        port?: unknown;
+        path?: string;
+        lookup?: (...a: unknown[]) => void;
+      };
+      if (options.path) return connect.apply(this, args); // a local socket file
+      host = options.host ?? 'localhost';
+      port = options.port;
+      const resolve = options.lookup;
+      if (!hosts.has(host) && typeof resolve === 'function') {
+        // A pinned resolver (the egress client's): judge the address it
+        // answers, which is where the socket really goes.
+        const name = host;
+        options.lookup = (hostname: unknown, opts: unknown, callback: unknown) =>
+          resolve(hostname, opts, (error: unknown, address: unknown, family: unknown) => {
+            const answers = Array.isArray(address)
+              ? (address as Array<{ address: string }>).map((entry) => entry.address)
+              : [String(address)];
+            const off = answers.filter((answer) => !hosts.has(answer));
+            if (!error && off.length > 0) {
+              blockedConnections.push(`${name}->${off.join(',')}:${String(port)}`);
+              (callback as (e: Error) => void)(
+                new Error('conformance suite: off-machine socket refused'),
+              );
+              return;
+            }
+            (callback as (e: unknown, a: unknown, f: unknown) => void)(error, address, family);
+          });
+        return connect.apply(this, args);
+      }
+    } else if (typeof first === 'number' || (typeof first === 'string' && /^\d+$/.test(first))) {
+      port = first;
+      host = typeof args[1] === 'string' ? args[1] : 'localhost';
+    } else {
+      return connect.apply(this, args); // a local socket path
+    }
+    if (hosts.has(host)) return connect.apply(this, args);
+    blockedConnections.push(`${host}:${String(port)}`);
+    process.nextTick(() =>
+      this.destroy(new Error('conformance suite: off-machine socket refused')),
+    );
+    return this;
+  } as typeof Socket.prototype.connect;
+}
+
+/** Everything the process writes while the suite runs: logs, warnings, error stacks. */
+const captured: string[] = [];
+
+function captureOutput(): () => void {
+  const capture = (chunk: unknown) => {
+    captured.push(String(chunk));
+    return true;
+  };
+  const spies = [
+    jest.spyOn(process.stdout, 'write').mockImplementation(capture),
+    jest.spyOn(process.stderr, 'write').mockImplementation(capture),
+    jest.spyOn(console, 'log').mockImplementation((...a) => capture(a.join(' '))),
+    jest.spyOn(console, 'info').mockImplementation((...a) => capture(a.join(' '))),
+    jest.spyOn(console, 'warn').mockImplementation((...a) => capture(a.join(' '))),
+    jest.spyOn(console, 'error').mockImplementation((...a) => capture(a.join(' '))),
+    jest.spyOn(console, 'debug').mockImplementation((...a) => capture(a.join(' '))),
+  ];
+  return () => spies.forEach((spy) => spy.mockRestore());
+}
+
 describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and AppApiModule, real database and Redis', () => {
   const DATABASE = 'assay_oauth_conformance_test';
   const MCP = 'https://mcp.example.test';
@@ -231,7 +358,8 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
     '9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM',
     'HN7cABqLq46Es1jh92dQQisAq662SmxELLLsHHe4YWrH',
   ];
-  const HUMAN = 'conformance-test-human';
+  const HUMAN = `conformance-human-${randomBytes(12).toString('hex')}`;
+  const STATE = `st-${randomBytes(12).toString('hex')}`;
 
   const VENDOR = 'https://vendor.example.com/oauth/client.json';
   const VENDOR_CALLBACK = 'https://vendor.example.com/oauth/callback';
@@ -289,6 +417,21 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
   const sockets = new Set<Socket>();
   /** Lookups of the verified client's host made while only the API app was up. */
   let vendorLookupsAfterApiBoot = -1;
+  /** The API app's own CimdFetcher: the API app must never fetch a client document. */
+  let apiCimdFetch: jest.SpyInstance;
+  let restoreOutput: () => void = () => undefined;
+
+  /** Every secret the suite makes or receives; none may reach a log line or an error body. */
+  const secrets = new Set<string>([HUMAN, STATE]);
+  const keep = (...values: Array<string | null | undefined>) => {
+    for (const value of values) if (value) secrets.add(value);
+  };
+  /** Error bodies the suite received. */
+  const bodies: string[] = [];
+  const keepBody = <T extends { status: number; text: string }>(response: T): T => {
+    if (response.status >= 400) bodies.push(response.text ?? '');
+    return response;
+  };
 
   const humanSession = {
     credentialId: 'user-conformance',
@@ -397,6 +540,11 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
 
   beforeAll(async () => {
     saved = { ...process.env };
+    installNetworkFence([
+      testConnectionOptions().host ?? 'localhost',
+      process.env.REDIS_HOST || 'localhost',
+    ]);
+    restoreOutput = captureOutput();
 
     certDir = mkdtempSync(join(tmpdir(), 'oauth-conformance-'));
     const { cert, key } = makeCertificate();
@@ -455,32 +603,35 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
       .overrideProvider(EgressHttpClient)
       .useValue(egress())
       .compile();
-    api = apiRef.createNestApplication({ logger: false });
+    apiCimdFetch = jest.spyOn(apiRef.get(CimdFetcher, { strict: false }), 'fetch');
+    api = apiRef.createNestApplication({ logger: new StructuredLogger() });
     api.setGlobalPrefix('api');
     api.enableVersioning({ type: VersioningType.URI, defaultVersion: '1' });
     api.useGlobalPipes(
       new ValidationPipe({ whitelist: true, transform: true, forbidNonWhitelisted: true }),
     );
     api.useGlobalFilters(new AllExceptionsFilter());
-    api.useGlobalInterceptors(new TransformInterceptor());
+    api.useGlobalInterceptors(new LoggingInterceptor(), new TransformInterceptor());
     await api.init();
-    // Give a stray pre-warm the time it would need to start.
-    await new Promise((resolve) => setTimeout(resolve, 200));
     vendorLookupsAfterApiBoot = vendorLookups();
 
     const mcpRef = await Test.createTestingModule({ imports: [AppMcpModule] })
       .overrideProvider(EgressHttpClient)
       .useValue(egress())
       .compile();
-    const mcpApp = mcpRef.createNestApplication<NestExpressApplication>({ logger: false });
+    const mcpApp = mcpRef.createNestApplication<NestExpressApplication>({
+      logger: new StructuredLogger(),
+    });
     mcpApp.set('trust proxy', 1);
     mcpApp.enableCors(mcpCorsOptions);
     mcpApp.useGlobalFilters(new McpExceptionsFilter());
+    mcpApp.useGlobalInterceptors(new LoggingInterceptor());
     await mcpApp.init();
     mcp = mcpApp;
   }, 300_000);
 
   afterAll(async () => {
+    restoreOutput();
     for (const app of [api, mcp]) {
       if (!app) continue;
       const appData = app.get<DataSource>(getDataSourceToken('postgres'), { strict: false });
@@ -501,6 +652,7 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
     for (const socket of sockets) socket.destroy();
     if (server) await new Promise<void>((resolve) => server.close(() => resolve()));
     if (certDir) rmSync(certDir, { recursive: true, force: true });
+    Socket.prototype.connect = originalConnect;
     process.env = saved;
   });
 
@@ -512,7 +664,9 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
 
   function pkce(): { verifier: string; challenge: string } {
     const verifier = randomBytes(32).toString('base64url');
-    return { verifier, challenge: createHash('sha256').update(verifier).digest('base64url') };
+    const challenge = createHash('sha256').update(verifier).digest('base64url');
+    keep(verifier, challenge);
+    return { verifier, challenge };
   }
 
   function authorize(params: Record<string, string | undefined>, ip = newIp()): request.Test {
@@ -531,7 +685,7 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
       redirect_uri: 'http://127.0.0.1:61234/callback',
       code_challenge: challenge,
       code_challenge_method: 'S256',
-      state: 'client-state',
+      state: STATE,
       ...over,
     };
   }
@@ -544,7 +698,9 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
     expect(response.status).toBe(302);
     const rid = /#request=([A-Za-z0-9_-]{43})$/.exec(response.headers.location)![1];
     const setCookie = (response.headers['set-cookie'] as unknown as string[])[0];
-    return { rid, cookie: setCookie.split(';')[0] };
+    const cookie = setCookie.split(';')[0];
+    keep(rid, cookie.slice(cookie.indexOf('=') + 1));
+    return { rid, cookie };
   }
 
   const auth = { Authorization: `Bearer ${HUMAN}` };
@@ -565,15 +721,27 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
       .get(`/oauth/authorize/continue?request=${encodeURIComponent(rid)}`)
       .set('Cookie', cookie);
     expect(resumed.status).toBe(302);
-    return new URL(resumed.headers.location).searchParams.get('code')!;
+    const issued = new URL(resumed.headers.location).searchParams.get('code')!;
+    keep(issued);
+    return issued;
   }
 
-  const token = (form: Record<string, string>, ip = newIp()) =>
-    request(mcp.getHttpServer())
+  const resume = (rid: string, cookie?: string) => {
+    const call = request(mcp.getHttpServer()).get(
+      `/oauth/authorize/continue?request=${encodeURIComponent(rid)}`,
+    );
+    return cookie ? call.set('Cookie', cookie) : call;
+  };
+
+  async function token(form: Record<string, string>, ip = newIp()) {
+    const response = await request(mcp.getHttpServer())
       .post('/oauth/token')
       .set('X-Forwarded-For', ip)
       .type('form')
       .send(form);
+    keep(response.body?.access_token, response.body?.refresh_token);
+    return keepBody(response);
+  }
 
   const register = (body: Record<string, unknown>, ip = newIp()) =>
     request(mcp.getHttpServer()).post('/oauth/register').set('X-Forwarded-For', ip).send(body);
@@ -591,6 +759,7 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
   it('verified pre-warm at boot', async () => {
     // The API app booted alone first and looked nothing up.
     expect(vendorLookupsAfterApiBoot).toBe(0);
+    expect(apiCimdFetch).not.toHaveBeenCalled();
     // The MCP app fetched the verified client's document at boot, unasked.
     const deadline = Date.now() + 10_000;
     while (!(await clientRow(VENDOR)) && Date.now() < deadline) {
@@ -834,6 +1003,7 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
       const location = new URL(response.headers.location);
       expect(`${location.origin}${location.pathname}`).toBe('http://127.0.0.1:61234/callback');
       expect(location.searchParams.get('error')).toBe('invalid_request');
+      expect(location.searchParams.get('state')).toBe(STATE);
       expect(location.searchParams.get('iss')).toBe(MCP);
     }
 
@@ -841,6 +1011,7 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
     const verifier = randomBytes(96).toString('base64url');
     expect(verifier).toHaveLength(128);
     const challenge = createHash('sha256').update(verifier).digest('base64url');
+    keep(verifier, challenge, verifier.slice(0, 42), `${verifier}A`);
     const issued = await code(challenge);
     const form = {
       grant_type: 'authorization_code',
@@ -872,7 +1043,7 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
         resource,
         error: 'invalid_target',
       });
-      expect(location.searchParams.get('state')).toBe('client-state');
+      expect(location.searchParams.get('state')).toBe(STATE);
       expect(location.searchParams.get('iss')).toBe(MCP);
     }
     for (const resource of [undefined, MCP, `${MCP}/`, `${MCP}/c/weather`, `${MCP}/@h/slug`]) {
@@ -901,6 +1072,11 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
         error: 'invalid_client_metadata',
       });
     }
+    // Refused before anything is stored.
+    const [{ stored }] = (await dataSource.query(
+      `SELECT count(*)::int AS "stored" FROM "oauth_clients" WHERE "client_name" = 'Secret Probe'`,
+    )) as { stored: number }[];
+    expect(stored).toBe(0);
   });
 
   it('DCR over HTTP: /64 rate key', async () => {
@@ -954,6 +1130,10 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
         [ORG, AGENT, client.id],
       );
 
+      const [{ pid: writerPid }] = (await writer.query('SELECT pg_backend_pid() AS "pid"')) as {
+        pid: number;
+      }[];
+
       await redis.del(OAUTH_CLEANUP_LOCK_KEY);
       const cleanup = new OAuthCleanupService(dataSource, redis, {
         now: () => Date.now(),
@@ -961,12 +1141,16 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
       });
       const run = cleanup.run();
 
-      // Wait until the client delete is parked on the writer's key-share lock.
+      // Wait until this run's client delete, in this database, is parked on
+      // the writer's key-share lock (not some other run's delete elsewhere).
       const deadline = Date.now() + 10_000;
       for (;;) {
         const waiting = (await dataSource.query(
           `SELECT 1 FROM pg_stat_activity
-            WHERE wait_event_type = 'Lock' AND query LIKE 'DELETE FROM "oauth_clients"%'`,
+            WHERE datname = current_database()
+              AND $1 = ANY(pg_blocking_pids(pid))
+              AND query LIKE 'DELETE FROM "oauth_clients"%'`,
+          [writerPid],
         )) as unknown[];
         if (waiting.length > 0) break;
         if (Date.now() > deadline) throw new Error('the client delete never waited on the lock');
@@ -1009,5 +1193,150 @@ describe('OAuth §12.2 conformance and security (Task 1.18) — AppMcpModule and
     expect(response.text).toBe(CONTINUE_WRONG_BROWSER_PAGE);
     expect(response.headers['cache-control']).toBe('no-store');
     expect(response.text).not.toContain(rid);
+  });
+  // ── logs (R-OA-27) and the network fence ────────────────────────────────────
+
+  it('logs: authorize, consent, continue, token, refresh and revoke, with their error paths, under the real logger', async () => {
+    const human = (call: request.Test) => call.set(auth);
+    const decide = (rid: string, verb: 'approve' | 'deny') =>
+      human(request(api.getHttpServer()).post(`/api/v1/oauth/requests/${rid}/${verb}`)).send(
+        verb === 'approve' ? { agentId: AGENT, name: 'Conformance logs' } : {},
+      );
+
+    // authorize: refused before the redirect check, and after it.
+    keepBody(
+      await authorize(baseParams(pkce().challenge, { client_id: 'dcr_AAAAAAAAAAAAAAAAAAAAAA' })),
+    );
+    expect((await authorize(baseParams('short'))).status).toBe(302);
+    expect(
+      (await authorize(baseParams(pkce().challenge, { resource: 'https://evil.example' }))).status,
+    ).toBe(302);
+
+    // consent and continue: deny, a late approve (409), continue → access_denied.
+    const denied = await start(pkce().challenge);
+    keepBody(await readRequest(denied.rid));
+    keepBody(await decide(denied.rid, 'deny'));
+    expect(keepBody(await decide(denied.rid, 'approve')).status).toBe(409);
+    expect((await resume(denied.rid, denied.cookie)).status).toBe(302);
+
+    // continue: no cookie, another request's cookie, a malformed and an unknown rid.
+    const stray = await start(pkce().challenge);
+    const other = await start(pkce().challenge);
+    expect(keepBody(await resume(stray.rid)).status).toBe(403);
+    expect(keepBody(await resume(stray.rid, other.cookie)).status).toBe(403);
+    expect(keepBody(await resume(`${stray.rid.slice(0, 40)}%`)).status).toBe(404);
+    const unknownRid = randomBytes(32).toString('base64url');
+    keep(unknownRid);
+    expect(keepBody(await readRequest(unknownRid)).status).toBe(404);
+    expect(keepBody(await decide(unknownRid, 'approve')).status).toBe(404);
+
+    // token: a code burned by a wrong verifier, then a good exchange.
+    const burnedPkce = pkce();
+    const burned = await code(burnedPkce.challenge);
+    const exchange = (issued: string, verifier: string) =>
+      token({
+        grant_type: 'authorization_code',
+        code: issued,
+        redirect_uri: 'http://127.0.0.1:61234/callback',
+        client_id: BUILTIN,
+        code_verifier: verifier,
+      });
+    expect((await exchange(burned, pkce().verifier)).status).toBe(400);
+    expect((await exchange(burned, burnedPkce.verifier)).status).toBe(400);
+    const goodPkce = pkce();
+    const issued = await code(goodPkce.challenge);
+    const pair = await exchange(issued, goodPkce.verifier);
+    expect(pair.status).toBe(200);
+    const malformedCode = `assay_ac_${randomBytes(32).toString('base64url')}`;
+    keep(malformedCode);
+    expect((await exchange(malformedCode, goodPkce.verifier)).status).toBe(400);
+
+    // refresh: rotate, the grace answer, a wrong client, an unknown token.
+    const refresh = (refreshToken: string, clientId = BUILTIN) =>
+      token({ grant_type: 'refresh_token', refresh_token: refreshToken, client_id: clientId });
+    const rotated = await refresh(pair.body.refresh_token);
+    expect(rotated.status).toBe(200);
+    expect((await refresh(pair.body.refresh_token)).body.refresh_token).toBe(
+      rotated.body.refresh_token,
+    );
+    expect((await refresh(rotated.body.refresh_token, 'dcr_AAAAAAAAAAAAAAAAAAAAAA')).status).toBe(
+      400,
+    );
+    const unknownRefresh = `assay_rt_${randomBytes(32).toString('base64url')}`;
+    keep(unknownRefresh);
+    expect((await refresh(unknownRefresh)).status).toBe(400);
+
+    // The access token on the MCP endpoint, its revocation, then a 401.
+    const call = (accessToken: string) =>
+      request(mcp.getHttpServer())
+        .post('/')
+        .set('Authorization', `Bearer ${accessToken}`)
+        .set('Accept', 'application/json, text/event-stream')
+        .send({ jsonrpc: '2.0', id: 1, method: 'tools/list' });
+    keepBody(await call(rotated.body.access_token));
+    const revoke = (value: string) =>
+      request(mcp.getHttpServer())
+        .post('/oauth/revoke')
+        .set('X-Forwarded-For', newIp())
+        .type('form')
+        .send({ token: value, client_id: BUILTIN });
+    expect((await revoke(rotated.body.access_token)).status).toBe(200);
+    expect(keepBody(await call(rotated.body.access_token)).status).toBe(401);
+    expect((await revoke(rotated.body.refresh_token)).status).toBe(200);
+    expect((await revoke(unknownRefresh)).status).toBe(200);
+    expect((await refresh(rotated.body.refresh_token)).status).toBe(400);
+    // A replayed code, last: it revokes what it issued.
+    expect((await exchange(issued, goodPkce.verifier)).status).toBe(400);
+  });
+
+  it('logs: nothing the suite captured holds a token, code, verifier, rid, state or cookie value', () => {
+    const output = captured.join('');
+    // Not vacuous: the real logger and the interceptor were on for every test.
+    expect(output).toContain('"url":"/oauth/authorize"');
+    expect(output).toContain('"url":"/oauth/authorize/continue"');
+    expect(output).toContain('"url":"/oauth/token"');
+    expect(output).toContain('"url":"/oauth/revoke"');
+    expect(output).toContain('"url":"/oauth/register"');
+    expect(output).toContain('/api/v1/oauth/requests/[REDACTED]');
+    expect(bodies.length).toBeGreaterThan(10);
+    expect(secrets.size).toBeGreaterThan(50);
+
+    const errorBodies = bodies.join('\n');
+    for (const secret of secrets) {
+      const forms = [
+        secret,
+        digestToken(secret),
+        createHash('sha256').update(secret).digest('base64url'),
+      ];
+      for (const form of forms) {
+        if (output.includes(form)) throw new Error(`a secret reached the logs: …${form.slice(-6)}`);
+        if (errorBodies.includes(form)) {
+          throw new Error(`a secret reached an error body: …${form.slice(-6)}`);
+        }
+      }
+    }
+    for (const text of [output, errorBodies]) {
+      expect(text).not.toMatch(/assay_(?:at|rt|ac)_[A-Za-z0-9_-]{8,}/);
+      expect(text).not.toMatch(/code_verifier=/);
+    }
+
+    // No APM agent: nothing records spans that would need scrubbing.
+    const manifest = JSON.parse(
+      readFileSync(join(__dirname, '../../../package.json'), 'utf8'),
+    ) as Record<string, Record<string, string> | undefined>;
+    const installed = Object.keys({
+      ...manifest.dependencies,
+      ...manifest.devDependencies,
+      ...manifest.optionalDependencies,
+    });
+    expect(
+      installed.filter((name) =>
+        /^(dd-trace|elastic-apm-node|newrelic|@opentelemetry\/|@sentry\/|@appsignal\/)/.test(name),
+      ),
+    ).toEqual([]);
+  });
+
+  it('no socket left this machine during the suite (the network fence)', () => {
+    expect(blockedConnections).toEqual([]);
   });
 });
