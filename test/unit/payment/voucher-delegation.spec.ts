@@ -424,6 +424,108 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
         PaymentErrorCode.PAYMENT_VOUCHER_BINDING_MISMATCH,
       );
     });
+
+    /**
+     * Review I1: every party binding compares the parsed 20 bytes, so a value
+     * that is not `0x` and 40 hex digits never matches by case, and one nibble
+     * apart is another account. Presented under the original signature: the
+     * binding is checked before it.
+     */
+    const PARTIES = ['payer', 'payTo', 'provider'] as const;
+    const address = (account: string) => account.split(':')[2];
+    const malformed: [string, (account: string) => string][] = [
+      ['a 0X prefix', (a) => `${CHAIN}:0X${address(a).slice(2)}`],
+      ['a short address', (a) => `${CHAIN}:${address(a).slice(0, -2)}`],
+      ['a long address', (a) => `${CHAIN}:${address(a)}00`],
+      ['non-hex digits', () => `${CHAIN}:0x${'g'.repeat(40)}`],
+      [
+        'an address one nibble apart',
+        (a) => {
+          const hex = address(a);
+          const last = hex.at(-1)!.toLowerCase();
+          return `${CHAIN}:${hex.slice(0, -1)}${last === '0' ? '1' : '0'}`;
+        },
+      ],
+    ];
+    for (const field of PARTIES) {
+      it.each(malformed)(`refuses a ${field} with %s, by name`, async (_label, mutate) => {
+        const call = spelled(payer);
+        const voucher = { ...call.signed.voucher, [field]: mutate(call.signed.voucher[field]) };
+        await expect(
+          service.redeem({ ...call, signed: { voucher, signature: call.signed.signature } }),
+        ).rejects.toMatchObject({
+          errorCode: PaymentErrorCode.PAYMENT_VOUCHER_BINDING_MISMATCH,
+          context: { field },
+        });
+        expect(intents.created).toHaveLength(0);
+      });
+    }
+
+    it('refuses an asset with a 0X prefix or an upper-case namespace', async () => {
+      for (const asset of [
+        USDG.replace('/erc20:0x', '/erc20:0X'),
+        USDG.replace('/erc20:', '/ERC20:'),
+      ]) {
+        const call = spelled(payer);
+        const voucher = {
+          ...call.signed.voucher,
+          amount: { ...call.signed.voucher.amount, asset: asset as typeof USDG },
+        };
+        await expect(
+          service.redeem({ ...call, signed: { voucher, signature: call.signed.signature } }),
+        ).rejects.toMatchObject({
+          // The money constructor refuses the shape first; either way, by name.
+          errorCode: expect.stringMatching(/^PAYMENT_VOUCHER_(MALFORMED|BINDING_MISMATCH)$/),
+        });
+      }
+      expect(intents.created).toHaveLength(0);
+    });
+
+    it('one seq in two spellings is one payment: the second is already used', async () => {
+      const checksummed = spelled(payer);
+      await service.redeem(checksummed);
+
+      // The same seq, signed again over the lower-case spelling of every party.
+      const lower: Voucher = {
+        ...checksummed.signed.voucher,
+        payer: lowerAccount(payer.account),
+        payTo: lowerAccount(ESCROW),
+        provider: lowerAccount(PROVIDER),
+        amount: { ...checksummed.signed.voucher.amount, asset: lowerAsset(USDG) },
+      };
+      await rejects(
+        service.redeem({
+          ...checksummed,
+          signed: { voucher: lower, signature: payer.sign(adapter.buildVoucherMessage(lower)) },
+        }),
+        PaymentErrorCode.PAYMENT_VOUCHER_SEQ_ALREADY_USED,
+      );
+      expect(intents.created).toHaveLength(1);
+      expect(intents.created[0].agentAccount).toBe(checksummed.agentAccount);
+    });
+
+    it('the window counts both spellings as one payer: no split totals', async () => {
+      chain.grant(payer.address, delegate.address, { maxPerWindow: 150_000n });
+      await service.redeem(spelled(delegate));
+
+      // The next call signed over the lower-case spelling, against the same stored payer.
+      const next = spelled(delegate);
+      const lower: Voucher = {
+        ...next.signed.voucher,
+        payer: lowerAccount(payer.account),
+        payTo: lowerAccount(ESCROW),
+        provider: lowerAccount(PROVIDER),
+        amount: { ...next.signed.voucher.amount, asset: lowerAsset(USDG) },
+      };
+      await rejects(
+        service.redeem({
+          ...next,
+          signed: { voucher: lower, signature: delegate.sign(adapter.buildVoucherMessage(lower)) },
+        }),
+        PaymentErrorCode.PAYMENT_VOUCHER_DELEGATE_LIMIT_EXCEEDED,
+      );
+      expect(intents.created).toHaveLength(1);
+    });
   });
 
   describe('(b) an authorised delegate', () => {

@@ -39,4 +39,55 @@ describe('EIP-55 spellings of eip155 identifiers', () => {
     const a = `${SOLANA}:Agent1111111111111111111111111111111111111`;
     expect(sameAccountSpelling(a, a.toLowerCase())).toBe(false);
   });
+
+  /** Review I1: only two well-formed eip155 addresses compare by their bytes. */
+  describe('malformed values compare exactly, never by case', () => {
+    const pairs: [string, string, string][] = [
+      ['short', `${EVM}:0xABC`, `${EVM}:0xabc`],
+      ['long', `${EVM}:0x${'AB'.repeat(21)}`, `${EVM}:0x${'ab'.repeat(21)}`],
+      ['non-hex, 40 characters', `${EVM}:0x${'GZ'.repeat(20)}`, `${EVM}:0x${'gz'.repeat(20)}`],
+      ['0X prefix', `${EVM}:0X${ADDRESS.slice(2)}`, `${EVM}:${ADDRESS}`],
+      [
+        '0X prefix on both',
+        `${EVM}:0X${ADDRESS.slice(2).toUpperCase()}`,
+        `${EVM}:0X${ADDRESS.slice(2)}`,
+      ],
+      ['upper-case namespace', `EIP155:46630:${ADDRESS}`, `eip155:46630:${ADDRESS}`],
+    ];
+    it.each(pairs)('%s: not the same account', (_label, a, b) => {
+      expect(sameAccountSpelling(a, b)).toBe(false);
+      expect(sameAccountSpelling(b, a)).toBe(false);
+    });
+
+    it('a near miss: one nibble apart is another account', () => {
+      const near = `0x${ADDRESS.slice(2, -1)}${ADDRESS.endsWith('2') ? '3' : '2'}`;
+      expect(sameAccountSpelling(`${EVM}:${ADDRESS}`, `${EVM}:${getAddress(near)}`)).toBe(false);
+      expect(sameAssetSpelling(`${EVM}/erc20:${ADDRESS}`, `${EVM}/erc20:${near}`)).toBe(false);
+    });
+
+    it('a mixed-case spelling matches the stored lower-case value', () => {
+      expect(sameAccountSpelling(`${EVM}:${getAddress(ADDRESS)}`, `${EVM}:${ADDRESS}`)).toBe(true);
+      expect(
+        sameAccountSpelling(
+          `${EVM}:${ADDRESS.toUpperCase().replace('0X', '0x')}`,
+          `${EVM}:${ADDRESS}`,
+        ),
+      ).toBe(true);
+    });
+
+    it('assets: the namespace is exact and the reference must be an address', () => {
+      expect(sameAssetSpelling(`${EVM}/ERC20:${ADDRESS}`, `${EVM}/erc20:${ADDRESS}`)).toBe(false);
+      expect(sameAssetSpelling(`${EVM}/erc20:0XABC`, `${EVM}/erc20:0xabc`)).toBe(false);
+      expect(
+        sameAssetSpelling(`${EVM}/erc20:0X${ADDRESS.slice(2)}`, `${EVM}/erc20:${ADDRESS}`),
+      ).toBe(false);
+      expect(sameAssetSpelling(`${EVM}/erc20:${ADDRESS}`, `eip155:1/erc20:${ADDRESS}`)).toBe(false);
+    });
+
+    it('checksumming leaves a malformed address as it was', () => {
+      expect(checksummedAccount(`${EVM}:0X${ADDRESS.slice(2)}`)).toBe(
+        `${EVM}:0X${ADDRESS.slice(2)}`,
+      );
+    });
+  });
 });

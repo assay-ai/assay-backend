@@ -159,6 +159,37 @@ describe('VoucherService', () => {
     });
   });
 
+  /**
+   * Review I1/M3: Solana base58 is case-sensitive. An eip155 address may be
+   * matched in another spelling of its 20 bytes; a Solana one never is.
+   */
+  describe('Solana parties compare exactly, never by case', () => {
+    const swapCase = (id: string) =>
+      id.replace(/[^:]+$/, (address) =>
+        [...address]
+          .map((c) => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase()))
+          .join(''),
+      );
+
+    it.each(['payer', 'payTo', 'provider'] as const)(
+      'refuses a %s that differs from the session only in case',
+      async (field) => {
+        const { input } = harness.voucherFor();
+        const variant = swapCase(input.signed.voucher[field]) as AccountId;
+        expect(variant).not.toBe(input.signed.voucher[field]);
+        expect(variant.toLowerCase()).toBe(input.signed.voucher[field].toLowerCase());
+
+        await expect(
+          harness.service.redeem(presentUnsigned(input, { [field]: variant })),
+        ).rejects.toMatchObject({
+          errorCode: PaymentErrorCode.PAYMENT_VOUCHER_BINDING_MISMATCH,
+          context: { field },
+        });
+        expect(harness.intents.created).toHaveLength(0);
+      },
+    );
+  });
+
   // ── Case 2 ───────────────────────────────────────────────────────────────
 
   describe("case 2 — resource A's voucher presented for resource B", () => {
