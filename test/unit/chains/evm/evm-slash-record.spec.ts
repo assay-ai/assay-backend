@@ -7,8 +7,8 @@ import { decodeSlashRecord, readSlashRecord } from '@modules/chains/evm/evm-slas
 import { cancelReasonFromEvm, slashStatusFromEvm } from '@modules/chains/evm/evm-slash-status';
 import { createSanctionedEvmClient } from '@modules/chains/evm/sanctioned-evm-rpc';
 
-const STAKE = '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c' as const;
-const CONFIG = '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43' as const;
+const STAKE = '0x7242F853db478A28Ae76Ace808212d4B68aa73e7' as const;
+const CONFIG = '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5' as const;
 const ID = `0x${'ab'.repeat(32)}` as const;
 
 const RECORD = {

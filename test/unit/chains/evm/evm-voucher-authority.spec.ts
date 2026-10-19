@@ -14,7 +14,7 @@ import {
 } from '@modules/chains/ports/voucher-authority.types';
 
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
-const ESCROW = '0x1D2625efD87c2fc10b8563f3F0890072845Fcf41' as const;
+const ESCROW = '0x1eDb0E45747cfEf778bDB4f4418319efc0DD814f' as const;
 const NOW = 1_790_000_000;
 
 const payerKey = privateKeyToAccount(`0x${'a1'.repeat(32)}`);
