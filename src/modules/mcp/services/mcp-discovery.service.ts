@@ -75,6 +75,13 @@ export interface SearchResult {
   readonly version?: string;
   readonly kind?: string;
   readonly price?: string | null;
+  /**
+   * The whole `assay/price` object (`{amount, maxAmount, asset, display}`),
+   * the same one `get_tool` returns as `price` and `tools/list` carries in
+   * `_meta`, so a client can take its G3 quote (`maxAmount` with its `asset`)
+   * from a search. `null` when unpriced.
+   */
+  readonly assayPrice?: McpPriceAnnotation | null;
   readonly freeCallsLeftToday?: number | null;
   readonly score: number;
   readonly inputSchema?: Record<string, unknown>;
@@ -318,6 +325,7 @@ export class McpDiscoveryService {
       version: versionOf(entry.tool).semver,
       kind: kindOf(entry.tool),
       price: priceText(entry.descriptor),
+      assayPrice: assayPriceOf(entry.descriptor),
       freeCallsLeftToday: await this.freeCallsLeft(viewer, entry.tool, entry.descriptor),
       score,
     };
@@ -371,6 +379,11 @@ function categoriesOf(tools: readonly Tool[]): string[] {
 
 function kindOf(tool: Tool): string {
   return (tool as Tool & { kind?: ToolKind }).kind ?? ToolKind.STANDARD;
+}
+
+function assayPriceOf(descriptor: McpToolDescriptor): McpPriceAnnotation | null {
+  const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation | undefined;
+  return price ? { ...price } : null;
 }
 
 function priceText(descriptor: McpToolDescriptor): string | null {

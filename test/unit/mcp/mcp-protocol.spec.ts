@@ -66,6 +66,7 @@ describe('MCP protocol surface, through the reference client', () => {
     // is a closed schema and the SDK strips unknown keys out of it.
     expect(tool._meta?.[ASSAY_PRICE]).toEqual({
       amount: usdc('0.05').amount,
+      maxAmount: usdc('0.05').amount,
       asset: usdc('0.05').asset,
       display: '$0.05',
     });

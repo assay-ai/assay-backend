@@ -73,16 +73,25 @@ const CATALOGUE: Tool[] = [
   tool('search_wikipedia', 'knowledge', ['encyclopedia'], 'Search Wikipedia articles.'),
 ];
 const FREEMIUM = 'get_usd_eur_rate';
+/**
+ * Served by two providers, $0.01 and $0.05, with a third at $0.10 that was at
+ * its ceiling when the listing was priced: the listed price is the dearest that
+ * can serve now, `maxAmount` the dearest a live call could be offered. A
+ * `maxAmount` taken from the cheapest, or from the listed price, fails here.
+ */
+const MULTI = 'get_forecast';
 
 function quoteOf(t: Tool): ToolQuote {
   const freemium = t.name === FREEMIUM;
+  const multi = t.name === MULTI;
   return {
     tool: t,
-    price: usdc('0.01'),
+    price: multi ? usdc('0.05') : usdc('0.01'),
     cheapestPrice: usdc('0.01'),
+    maxPrice: multi ? usdc('0.10') : usdc('0.01'),
     pricingMode: freemium ? PricingMode.FREEMIUM : PricingMode.PAID,
-    routableBindings: 1,
-    paidBindings: 1,
+    routableBindings: multi ? 2 : 1,
+    paidBindings: multi ? 2 : 1,
     freeBindings: [],
     settlementChains: [CHAIN_ID],
     p95LatencyMs: null,
@@ -338,6 +347,37 @@ describe('search_tools', () => {
     expect(byTag.results[0].name).toBe('search_wikipedia');
     const byCategory = output(await call(client, 'search_tools', { query: 'maps' }));
     expect(byCategory.results[0].name).toBe('geocode_place');
+  });
+
+  it('carries the whole assay/price object beside the display price, as get_tool does (G3)', async () => {
+    const { client } = await connect(scopeOf(view('/')));
+    const found = output(await call(client, 'search_tools', { query: 'token price' }));
+    expect(found.results[0]).toMatchObject({
+      name: 'get_token_market',
+      price: '$0.01',
+      assayPrice: {
+        amount: '10000',
+        maxAmount: '10000',
+        asset: usdc('0.01').asset,
+        display: '$0.01',
+      },
+    });
+    const described = output(await call(client, 'get_tool', { name: 'get_token_market' }));
+    expect(found.results[0].assayPrice).toEqual(described.price);
+  });
+
+  it('a multi-provider tool: maxAmount is the dearest a call could be offered, not the cheapest', async () => {
+    const { client } = await connect(scopeOf(view('/')));
+    for (const detail of ['summary', 'full']) {
+      const found = output(await call(client, 'search_tools', { query: 'rain', detail }));
+      expect(found.results[0]).toMatchObject({
+        name: MULTI,
+        price: 'up to $0.05',
+        assayPrice: { amount: '50000', maxAmount: '100000', asset: usdc('0.01').asset },
+      });
+    }
+    const names = output(await call(client, 'search_tools', { query: 'rain', detail: 'names' }));
+    expect(names.results[0].assayPrice).toBeUndefined();
   });
 
   it('reports this agent’s free calls left on a FREEMIUM tool', async () => {
@@ -614,6 +654,26 @@ describe('get_tool', () => {
       freeCallsLeftToday: null,
     });
     expect(described.annotations[ASSAY_PRICE]).toBeDefined();
+  });
+
+  it('get_tool returns maxAmount: the most a call can be charged, in atomic units (G3)', async () => {
+    const { client } = await connect(scopeOf(view('/')));
+    const described = output(await call(client, 'get_tool', { name: 'get_weather' }));
+    expect(described.price).toEqual({
+      amount: '10000',
+      maxAmount: '10000',
+      asset: usdc('0.01').asset,
+      display: '$0.01',
+    });
+    expect(described.annotations[ASSAY_PRICE]).toEqual(described.price);
+
+    const multi = output(await call(client, 'get_tool', { name: MULTI }));
+    expect(multi.price).toEqual({
+      amount: '50000',
+      maxAmount: '100000',
+      asset: usdc('0.01').asset,
+      display: 'up to $0.05',
+    });
   });
 
   it('answers TOOL_NOT_IN_TOOLSET alike for an unknown name, one outside access and one outside the view', async () => {
