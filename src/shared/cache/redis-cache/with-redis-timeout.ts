@@ -11,7 +11,7 @@
  * deadline. Callers must treat a timeout as "outcome unknown", the same as a
  * dropped connection.
  */
-export const REDIS_REQUEST_TIMEOUT_MS = 300;
+export const REDIS_REQUEST_TIMEOUT_MS = 500;
 
 export class RedisTimeoutError extends Error {
   constructor(readonly timeoutMs: number) {
