@@ -5,8 +5,7 @@ import { join } from 'node:path';
  * The platform never pays or owes a provider (no-platform-debt design, step
  * 11's grep test). A provider is credited only by `commitHoldAndCredit`, out
  * of the buyer's own committed hold; nothing in `src/` may write a
- * `platform_absorbed:` credit any more. Its literal survives only in the SQL
- * that labels the historical rows and in the constant's own declaration.
+ * `platform_absorbed:` credit any more.
  */
 const SRC = join(__dirname, '../../../src');
 

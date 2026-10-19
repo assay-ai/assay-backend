@@ -1,8 +1,7 @@
 import { Injectable } from '@nestjs/common';
 
 import { LedgerEntryRepository } from '@database/postgres/repositories/ledger-entry.repository';
-import { LEGACY_POOLED_VAULT_TX_REF, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
-import { PLATFORM_ABSORBED_TX_REF_PREFIX } from '@modules/payment/services/voucher-redemption.service';
+import { RAIL_A_BOOK_CREDIT_TX_REF, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import {
   ApiErrors,
   CursorPageDto,
@@ -24,8 +23,7 @@ import {
 /**
  * The one sort this list offers: when the money was sent. Resolved through
  * `resolveSort` so an unknown `?sort=` is refused like on every other list.
- * Positions are `(exact instant, id)`, compared as `(timestamptz, text)` in both
- * queries so a batch and a redemption order against each other.
+ * Positions are `(exact instant, id)`, compared as `(timestamptz, text)`.
  */
 const PROVIDER_PAYOUT_LIST: ListSpec = {
   alias: 'entry',
@@ -44,13 +42,12 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
 
 /**
  * A `PROVIDER_CREDIT` that a redemption transaction paid: it carries the
- * transaction's ref. Not one of the book-only refs — a legacy platform absorb
- * (nobody paid it) or a rail-A credit (paid later, in a `PAYOUT` batch).
- * `starts_with`, not `LIKE`: the `_` in the prefix is not a wildcard.
+ * transaction's ref. Not a rail-A credit, whose book-only ref names no
+ * transaction of its own.
  */
 const REDEMPTION_CREDIT_SQL =
   `entry.entryType = :creditType AND entry.chainTxRef IS NOT NULL ` +
-  `AND NOT starts_with(entry.chainTxRef, :absorbedPrefix) AND entry.chainTxRef <> :legacyRef`;
+  `AND entry.chainTxRef <> :railARef`;
 
 /**
  * Refs the redemption paths write when no transaction signature was observed:
@@ -73,7 +70,6 @@ const PAYMENT_KEY_SQL = `CASE WHEN ${SYNTHETIC_REF_SQL} THEN entry.id::text ELSE
 interface PaymentRow {
   readonly id: string;
   readonly kind: ProviderPaymentKind;
-  readonly batchId: string | null;
   readonly amount: string;
   readonly asset: string;
   readonly decimals: string | number;
@@ -85,23 +81,16 @@ interface PaymentRow {
 }
 
 /**
- * `GET /providers/me/payouts`: every payment sent to the provider's wallet.
+ * `GET /providers/me/payouts`: every payment sent to the provider's wallet —
+ * each a rail-B redemption, newest first (D18). The buyer's escrow paid the
+ * provider on chain when a voucher was redeemed; its `PROVIDER_CREDIT` entries
+ * are grouped by transaction, so a transaction that redeemed several calls is
+ * one payment with its call count.
  *
- * Two kinds, newest first in one list (D18):
+ * **Not** cross-organization: the entries are on the provider's own ledger,
+ * under its own `organization_id`.
  *
- * - **BATCH** — a `PAYOUT` ledger entry of a payout run (rail A).
- * - **REDEMPTION** — a rail-B redemption: the buyer's escrow paid the provider
- *   on chain when a voucher was redeemed. Its `PROVIDER_CREDIT` entries are
- *   grouped by transaction, so a transaction that redeemed several calls is
- *   one payment with its call count. Before this, a rail-B provider with money
- *   in its wallet read "No payments yet" (UX review 2026-10-18, D-P0-2).
- *
- * **Not** cross-organization: both kinds are entries on the provider's own
- * ledger, under its own `organization_id`.
- *
- * Paged by keyset over `(createdAt, id)`: each kind is read from its own
- * position with `limit + 1` rows, and the two are merged here, so a page never
- * returns more than twice its size.
+ * Paged by keyset over `(createdAt, id)` with `limit + 1` rows.
  *
  * A redemption is positioned (and windowed by `from`/`to`) at its FIRST
  * credit, `(MIN(created_at), MIN(id))`. A transaction that redeemed several
@@ -136,45 +125,14 @@ export class ProviderPayoutsService {
       });
     }
 
-    const batches = this.ledgerEntries
-      .createQueryBuilder('entry')
-      .select('entry.id::text', 'id')
-      .addSelect(`'${ProviderPaymentKind.BATCH}'`, 'kind')
-      .addSelect('entry.batchId', 'batchId')
-      .addSelect('entry.amount', 'amount')
-      .addSelect('entry.assetId', 'asset')
-      .addSelect('entry.decimals', 'decimals')
-      .addSelect('entry.chainTxRef', 'chainTxRef')
-      .addSelect(
-        '(SELECT payout.call_count FROM provider_payouts payout ' +
-          'WHERE payout.ledger_entry_id = entry.id ' +
-          'AND payout.organization_id = entry.organization_id LIMIT 1)',
-        'calls',
-      )
-      .addSelect('entry.createdAt', 'createdAt')
-      .addSelect(exactInstantSql('entry.created_at'), 'at')
-      .where('entry.organizationId = :organizationId', { organizationId })
-      .andWhere('entry.entryType = :entryType', { entryType: LedgerEntryType.PAYOUT })
-      .andWhere('entry.batchId IS NOT NULL');
-    if (query.from) batches.andWhere('entry.createdAt >= :from', { from: query.from });
-    if (query.to) batches.andWhere('entry.createdAt < :to', { to: query.to });
-    if (after) {
-      batches.andWhere(
-        `(entry.createdAt, entry.id::text) ${comparator} (:afterAt::timestamptz, :afterId)`,
-        { afterAt: after.at, afterId: after.id },
-      );
-    }
-    batches.orderBy('entry.createdAt', order).addOrderBy('entry.id::text', order).limit(take);
-
     // One row per transaction. Its id is the lowest entry id in it: stable,
-    // and a uuid like a batch's, so the two kinds share one cursor.
+    // and a uuid, so it can carry the cursor.
     const groupAt = 'MIN(entry.createdAt)';
     const groupId = 'MIN(entry.id::text)';
     const redemptions = this.ledgerEntries
       .createQueryBuilder('entry')
       .select(groupId, 'id')
       .addSelect(`'${ProviderPaymentKind.REDEMPTION}'`, 'kind')
-      .addSelect('NULL', 'batchId')
       .addSelect('SUM(entry.amount)', 'amount')
       .addSelect('entry.assetId', 'asset')
       .addSelect('entry.decimals', 'decimals')
@@ -189,8 +147,7 @@ export class ProviderPayoutsService {
       .where('entry.organizationId = :organizationId', { organizationId })
       .andWhere(REDEMPTION_CREDIT_SQL, {
         creditType: LedgerEntryType.PROVIDER_CREDIT,
-        absorbedPrefix: PLATFORM_ABSORBED_TX_REF_PREFIX,
-        legacyRef: LEGACY_POOLED_VAULT_TX_REF,
+        railARef: RAIL_A_BOOK_CREDIT_TX_REF,
       })
       .setParameters(SYNTHETIC_REF_PARAMS)
       .groupBy(PAYMENT_KEY_SQL)
@@ -213,29 +170,15 @@ export class ProviderPayoutsService {
     if (having.length > 0) redemptions.having(having.join(' AND '), havingParams);
     redemptions.orderBy(groupAt, order).addOrderBy(groupId, order).limit(take);
 
-    const [batchRows, redemptionRows] = await Promise.all([
-      batches.getRawMany<PaymentRow>(),
-      redemptions.getRawMany<PaymentRow>(),
-    ]);
+    const rows = await redemptions.getRawMany<PaymentRow>();
 
-    const merged = [...batchRows, ...redemptionRows]
-      .sort((a, b) => comparePosition(a, b) * (descending ? -1 : 1))
-      .slice(0, take);
-
-    const hasMore = merged.length > query.limit;
-    const items = hasMore ? merged.slice(0, query.limit) : merged;
+    const hasMore = rows.length > query.limit;
+    const items = hasMore ? rows.slice(0, query.limit) : rows;
     const last = items[items.length - 1];
     const nextCursor =
       hasMore && last ? encodeCompositeCursor([last.at], last.id, sort.spec) : null;
     return new CursorPageDto(items.map(toPayoutDto), nextCursor);
   }
-}
-
-/** Ascending `(at, id)`: the in-memory twin of both queries' `ORDER BY`. */
-function comparePosition(a: PaymentRow, b: PaymentRow): number {
-  if (a.at !== b.at) return a.at < b.at ? -1 : 1;
-  if (a.id !== b.id) return a.id < b.id ? -1 : 1;
-  return 0;
 }
 
 /** A cursor back into `(at, id)`, each part checked: Postgres casts them, so a bad one is a 400 here. */
@@ -254,7 +197,6 @@ function toPayoutDto(row: PaymentRow): ProviderPayoutDto {
   return {
     id: row.id,
     kind: row.kind,
-    batchId: row.batchId,
     amount: { amount: String(row.amount), asset: row.asset, decimals: Number(row.decimals) },
     chainTxRef: row.chainTxRef,
     calls: row.calls === null || row.calls === undefined ? null : Number(row.calls),

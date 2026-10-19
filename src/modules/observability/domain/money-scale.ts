@@ -1,11 +1,10 @@
 /**
- * Atomic-integer money, rendered down to a `number` for a Prometheus gauge.
+ * Atomic-integer money, rendered down to a `number` for a dashboard reading.
  *
  * Every ledger amount in this codebase is a `bigint`/numeric-string atomic
  * integer, on purpose — see `MoneyUtil`'s own docstring on why float money is
- * a bug generator. A metrics gauge is the one place that rule is deliberately
- * relaxed: Prometheus's wire format has no integer type, every sample is an
- * IEEE-754 double, and a dashboard tile reading "$128,403.55" is more useful
+ * a bug generator. A metrics reading is the one place that rule is deliberately
+ * relaxed: a dashboard tile reading "$128,403.55" is more useful
  * to an on-call human than one more decimal of precision they cannot act on.
  *
  * `Number.MAX_SAFE_INTEGER` is `2^53 - 1` — about 9.4 * 10^15 atomic USDC

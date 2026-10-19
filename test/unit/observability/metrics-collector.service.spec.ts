@@ -25,7 +25,6 @@ function build(
     verificationBacklog?: { count: number; p95AgeSeconds: number | null };
   } = {},
 ) {
-  const registry = new MetricsRegistryService();
   const collector = new MetricsCollectorService(
     fakeReconciliationRunRepository(options.runs ?? []),
     fakeMetricsRepository({
@@ -34,9 +33,9 @@ function build(
     }),
     fakeSlashProposalRepository(options.falsePositive),
     fakeObservabilityMetricsRepository(options.observability),
-    registry,
+    new MetricsRegistryService(),
   );
-  return { collector, registry };
+  return { collector };
 }
 
 function findSignal(snapshotSignals: SignalReadingDto[], signal: string): SignalReadingDto {
@@ -83,17 +82,17 @@ describe('MetricsCollectorService', () => {
     expect(payoutLag.value).toBeNull();
   });
 
-  it('marks the two in-process signals AWAITING_INSTRUMENTATION with a null value', async () => {
+  it('marks the two uninstrumented signals NONE with a null value', async () => {
     const { collector } = build();
 
     const snapshot = await collector.snapshot();
 
     const latency = findSignal(snapshot.signals, 'PLATFORM_LATENCY_P95_BY_BINDING');
-    expect(latency.availability).toBe(SignalAvailability.AWAITING_INSTRUMENTATION);
+    expect(latency.availability).toBe(SignalAvailability.NONE);
     expect(latency.value).toBeNull();
 
     const egress = findSignal(snapshot.signals, 'EGRESS_BLOCKS');
-    expect(egress.availability).toBe(SignalAvailability.AWAITING_INSTRUMENTATION);
+    expect(egress.availability).toBe(SignalAvailability.NONE);
     expect(egress.value).toBeNull();
   });
 
@@ -217,18 +216,6 @@ describe('MetricsCollectorService', () => {
     }
   });
 
-  it('sets the Prometheus gauges the JSON snapshot agrees with', async () => {
-    const { collector, registry } = build({
-      observability: { attestationsSigned: 12, slashesExecuted: 2 },
-    });
-
-    await collector.snapshot();
-    const text = await registry.metricsText();
-
-    expect(text).toContain('assay_attestations_signed{window="24h"} 12');
-    expect(text).toContain('assay_slashes_executed{window="30d"} 2');
-  });
-
   describe('assay_oauth_live_grants_per_agent', () => {
     function buildWithCredentials(maxLiveOAuthPerAgent: jest.Mock) {
       const registry = new MetricsRegistryService();
@@ -238,7 +225,6 @@ describe('MetricsCollectorService', () => {
         fakeSlashProposalRepository(),
         fakeObservabilityMetricsRepository(),
         registry,
-        null,
         { maxLiveOAuthPerAgent } as unknown as AgentCredentialRepository,
       );
       return { collector, registry };
@@ -254,7 +240,7 @@ describe('MetricsCollectorService', () => {
       expect(await registry.metricsText()).toContain('assay_oauth_live_grants_per_agent 47');
     });
 
-    it('a failed read keeps the scrape and the previous value', async () => {
+    it('a failed read keeps the refresh and the previous value', async () => {
       const max = jest.fn().mockResolvedValueOnce(12).mockRejectedValueOnce(new Error('db down'));
       const { collector, registry } = buildWithCredentials(max);
       const ttl = process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS;

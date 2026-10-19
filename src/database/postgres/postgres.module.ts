@@ -11,7 +11,6 @@ import { EvmGasGrantEntity } from './entities/evm-gas-grant.entity';
 import { LedgerEntryEntity } from './entities/ledger-entry.entity';
 import { LedgerHoldEntity } from './entities/ledger-hold.entity';
 import { PaymentIntentEntity } from './entities/payment-intent.entity';
-import { PostEntity } from './entities/post.entity';
 import { ReconciliationRunEntity } from './entities/reconciliation-run.entity';
 import { StakeSnapshotEntity } from './entities/stake-snapshot.entity';
 import { VerificationPolicyEntity } from './entities/verification-policy.entity';
@@ -28,7 +27,6 @@ import { VerifierSigningLogEntryEntity } from './entities/verifier-signing-log-e
 import { ProviderEntity } from './entities/provider.entity';
 import { ProviderPayoutChallengeEntity } from './entities/provider-payout-challenge.entity';
 import { ProviderConnectivityCheckEntity } from './entities/provider-connectivity-check.entity';
-import { ProviderPayoutEntity } from './entities/provider-payout.entity';
 import { AccountBalanceRepository } from './repositories/account-balance.repository';
 import { BuyerEscrowRepository } from './repositories/buyer-escrow.repository';
 import { DepositIntentRepository } from './repositories/deposit-intent.repository';
@@ -36,7 +34,6 @@ import { EvmGasGrantRepository } from './repositories/evm-gas-grant.repository';
 import { LedgerEntryRepository } from './repositories/ledger-entry.repository';
 import { LedgerHoldRepository } from './repositories/ledger-hold.repository';
 import { PaymentIntentRepository } from './repositories/payment-intent.repository';
-import { PostRepository } from './repositories/post.repository';
 import { ReconciliationRunRepository } from './repositories/reconciliation-run.repository';
 import { StakeSnapshotRepository } from './repositories/stake-snapshot.repository';
 import { VerificationPolicyRepository } from './repositories/verification-policy.repository';
@@ -53,7 +50,6 @@ import { VerifierSigningLogEntryRepository } from './repositories/verifier-signi
 import { ProviderRepository } from './repositories/provider.repository';
 import { ProviderPayoutChallengeRepository } from './repositories/provider-payout-challenge.repository';
 import { ProviderConnectivityCheckRepository } from './repositories/provider-connectivity-check.repository';
-import { ProviderPayoutRepository } from './repositories/provider-payout.repository';
 import { BindingCredentialEntity } from './entities/binding-credential.entity';
 import { VaultKekCheckEntity } from './entities/vault-kek-check.entity';
 import { ToolBindingEntity } from './entities/tool-binding.entity';
@@ -144,7 +140,6 @@ import { PlatformMetricsRepository } from './repositories/platform-metrics.repos
 
 /** Exported for the per-process boot tests, which stub every repository. */
 export const entities = [
-  PostEntity,
   LedgerEntryEntity,
   LedgerHoldEntity,
   AccountBalanceEntity,
@@ -168,7 +163,6 @@ export const entities = [
   ProviderEntity,
   ProviderPayoutChallengeEntity,
   ProviderConnectivityCheckEntity,
-  ProviderPayoutEntity,
   ToolEntity,
   ToolVersionEntity,
   ToolPromotionInviteEntity,
@@ -213,7 +207,6 @@ export const entities = [
   ...TOOLSET_SHARING_ENTITIES,
 ];
 export const repositories = [
-  PostRepository,
   LedgerEntryRepository,
   LedgerHoldRepository,
   AccountBalanceRepository,
@@ -237,7 +230,6 @@ export const repositories = [
   ProviderRepository,
   ProviderPayoutChallengeRepository,
   ProviderConnectivityCheckRepository,
-  ProviderPayoutRepository,
   ToolRepository,
   ToolVersionRepository,
   ToolsetRepository,

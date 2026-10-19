@@ -91,7 +91,6 @@
     "migration:show:prod": "typeorm migration:show -d dist/database/postgres/postgres.data-source.js",
     "prepare": "[ \"$NODE_ENV\" = \"production\" ] && exit 0; husky ",
     "client:build": "yarn workspace @x402/settlement-client run build",
-    "deploy:check:examples": "node scripts/deploy/check-examples-disabled.mjs",
     "settlement:exercise": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/settlement/exercise-all.ts",
     "mcp:call": "node scripts/mcp/call-tool.mjs",
     "demo:broken-binding": "ts-node -r dotenv/config -r tsconfig-paths/register scripts/mcp/seed/demo-broken-binding.ts",

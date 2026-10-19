@@ -135,9 +135,9 @@ export function evaluateStakeGate(
   // against another chain's collateral. Refused, with the reason that already
   // means "we could not work out whether to admit this".
   //
-  // **Be honest about what this currently buys.** All three production sources
-  // set `ProviderStake.chainId` from the same map key they file the reading
-  // under, so for every one of them this check is a tautology and cannot fire.
+  // **Be honest about what this currently buys.** The production source sets
+  // `ProviderStake.chainId` from the same map key it files the reading under,
+  // so for it this check is a tautology and cannot fire.
   // It is not dead weight — it is the guard for a source that does not yet
   // exist and for a caller that hand-builds the map (the publish gate and the
   // devnet integration suite both do) — but it is not, today, a second opinion.
@@ -145,13 +145,9 @@ export function evaluateStakeGate(
   // Making it one is one expression and belongs in the sources, not here:
   // `chainId: chainIdOf(reading.staked.asset)`. A `Money.asset` is CAIP-19 and
   // names its own chain, so that derives the field from the READING rather than
-  // from the key, and the two become independent — and it works for **all
-  // three** sources. (`chainIdOf(account)` would fix only the on-chain one;
-  // `ConfigProviderStakeSource` has no account at all, its snapshot key is its
-  // only input, so two of three would still be tautological.) The config
-  // source's asset/chain pairing is validated at load by `provider-seed.ts`,
-  // and the on-chain source's asset is itself built from the account, so the
-  // asset is a genuinely separate witness in both.
+  // from the key, and the two become independent. The on-chain source's asset
+  // is itself built from the account, so the asset is a genuinely separate
+  // witness.
   //
   // The database half is already covered by
   // `chk_provider_chain_enrolments_stake_on_chain` — but only in production:

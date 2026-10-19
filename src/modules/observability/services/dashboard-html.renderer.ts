@@ -130,7 +130,7 @@ function reconciliationRow(row: MetricsSnapshotDto['reconciliation'][number]): s
 function signalRow(signal: SignalReadingDto): string {
   const value =
     signal.availability !== SignalAvailability.SOURCED || signal.value === null
-      ? `<span class="badge badge-absent">${badgeLabel(signal.availability)}</span>`
+      ? `<span class="badge badge-absent">no data source</span>`
       : `${formatValue(signal.value, signal.unit)} <span class="reason">${escapeHtml(signal.unit)}</span>`;
 
   const extra =
@@ -159,12 +159,6 @@ function gateCell(gate: MetricsSnapshotDto['reconciliation'][number]['gate']): s
         ? 'badge-warn'
         : 'badge-ok';
   return `<span class="badge ${cls}">${gate.status}</span><div class="gate reason">${escapeHtml(gate.summary)}</div>`;
-}
-
-function badgeLabel(availability: SignalAvailability): string {
-  return availability === SignalAvailability.AWAITING_INSTRUMENTATION
-    ? 'awaiting instrumentation'
-    : 'no data source';
 }
 
 function formatValue(value: number, unit: string): string {
