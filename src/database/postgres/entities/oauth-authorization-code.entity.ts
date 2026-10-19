@@ -62,7 +62,7 @@ export class OAuthAuthorizationCodeEntity extends AbstractEntityWithoutSoftDelet
 
   /**
    * Set when a used code is presented again. The exchange that burned it
-   * creates no grant once this is set; see migration 1762400000003.
+   * creates no grant once this is set; see migration 1762400000013.
    */
   @Column({ name: 'reuse_detected_at', type: 'timestamptz', nullable: true })
   reuseDetectedAt: Date | null;

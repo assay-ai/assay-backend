@@ -6,8 +6,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * Without them each delete is a sequential scan, and `oauth_access_tokens` is
  * the high-volume table (one row per hour per active grant).
  */
-export class OAuthExpiryIndexes1762400000002 implements MigrationInterface {
-  name = 'OAuthExpiryIndexes1762400000002';
+export class OAuthExpiryIndexes1762400000012 implements MigrationInterface {
+  name = 'OAuthExpiryIndexes1762400000012';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(

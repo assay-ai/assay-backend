@@ -76,6 +76,9 @@ describe('tool version migrations: up, down, up', () => {
 
   /** Migrations after the T3 ones, newest first. */
   const LATER = [
+    'OAuthCodeReuseDetected1762400000013',
+    'OAuthExpiryIndexes1762400000012',
+    'OAuth1762400000010',
     'DropLegacyPaymentSchema1762400000000',
     'EscrowWithdrawalEvents1762300000000',
     'ModerationCutoffPublicReason1762200000000',
