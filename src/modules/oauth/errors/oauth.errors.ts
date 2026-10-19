@@ -50,16 +50,16 @@ export const OAuthErrors = createDomainErrorFactory('OAUTH', {
       `This agent already has ${context?.limit ?? 'the maximum number of'} connected apps; ` +
       'disconnect one before adding another',
   },
-  /**
-   * The connection's name is empty, or nothing but control, format or
-   * invisible characters, once those are stripped.
-   */
   /** The pending-request store (Redis) failed or did not answer in time. */
   requestStoreUnavailable: {
     code: OAuthErrorCode.OAUTH_REQUEST_STORE_UNAVAILABLE,
     statusCode: 503,
     message: () => 'Sign-in is temporarily unavailable; try again in a moment',
   },
+  /**
+   * The connection's name is empty, or nothing but control, format or
+   * invisible characters, once those are stripped.
+   */
   credentialNameInvalid: {
     code: OAuthErrorCode.OAUTH_CREDENTIAL_NAME_INVALID,
     statusCode: 400,

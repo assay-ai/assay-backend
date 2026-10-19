@@ -46,8 +46,8 @@ describe('withRedisTimeout', () => {
     ).rejects.toThrow('no client');
   });
 
-  it('rejects with RedisTimeoutError after 300 ms by default when Redis never answers', async () => {
-    expect(REDIS_REQUEST_TIMEOUT_MS).toBe(300);
+  it('rejects with RedisTimeoutError after 500 ms by default when Redis never answers', async () => {
+    expect(REDIS_REQUEST_TIMEOUT_MS).toBe(500);
     const started = Date.now();
     await expect(withRedisTimeout(() => new Promise(() => undefined))).rejects.toBeInstanceOf(
       RedisTimeoutError,
