@@ -47,9 +47,8 @@ import { DepositService } from '../services/deposit.service';
  *   (the ledger is credited for what the chain was OBSERVED to move)
  * ```
  *
- * `DepositService` already implements every step of that and is proved on
- * devnet by `scripts/devnet/deposit.ts`. These two routes are the HTTP surface
- * it never had; they add no engine of their own.
+ * `DepositService` already implements every step of that. These two routes
+ * are its HTTP surface; they add no engine of their own.
  *
  * ## `POST` on something that writes nothing (the first route)
  *
