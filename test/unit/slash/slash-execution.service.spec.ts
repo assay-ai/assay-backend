@@ -1,7 +1,5 @@
 import { Logger } from '@nestjs/common';
 
-import { DisputeEntity } from '@database/postgres/entities/dispute.entity';
-
 import { ChainErrors } from '@modules/chains/errors/chains.errors';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
@@ -252,7 +250,6 @@ function build(
   const notifications = new FakeNotifications();
   const executor = new FakeExecutor();
   const overrides = new FakeOverrideLog();
-  const sweeps = { complete: jest.fn(), fail: jest.fn() };
   /**
    * `StakeIntentBuilderPort` — the treasury's compensating `deposit_stake`.
    * `buildIntent` returns wire bytes nobody signs; `confirmedDeposit` is the
@@ -291,7 +288,6 @@ function build(
   const service = new SlashExecutionService(
     proposals as never,
     enrolmentsRepo as never,
-    sweeps as never,
     lifecycle,
     overrides as never,
     notifications as never,
@@ -806,7 +802,6 @@ describe("the propose sweep's selection contract", () => {
         id: 'undelivered',
         status: 'PROPOSED',
         notifiedAt: null,
-        respondByAt: null,
         chainStatus: 'NONE',
       }),
     );
@@ -814,7 +809,6 @@ describe("the propose sweep's selection contract", () => {
       row({
         id: 'delivered',
         status: 'PROPOSED',
-        respondByAt: hoursFromNow(48),
         chainStatus: 'NONE',
       }),
     );
@@ -830,16 +824,11 @@ describe("the propose sweep's selection contract", () => {
       row({
         id: 'overturned',
         status: 'OVERTURNED',
-        respondByAt: hoursFromNow(-1),
         chainStatus: 'NONE',
       }),
     );
-    proposals.seed(
-      row({ id: 'waived', status: 'WAIVED', respondByAt: hoursFromNow(-1), chainStatus: 'NONE' }),
-    );
-    proposals.seed(
-      row({ id: 'upheld', status: 'UPHELD', respondByAt: hoursFromNow(-1), chainStatus: 'NONE' }),
-    );
+    proposals.seed(row({ id: 'waived', status: 'WAIVED', chainStatus: 'NONE' }));
+    proposals.seed(row({ id: 'upheld', status: 'UPHELD', chainStatus: 'NONE' }));
 
     const picked = await proposals.findAwaitingChainProposal(NOW, TEN_MINUTES_AGO, 100);
 
@@ -854,7 +843,6 @@ describe("the propose sweep's selection contract", () => {
       row({
         id: 'fresh',
         status: 'PROPOSED',
-        respondByAt: hoursFromNow(48),
         chainStatus: 'PROPOSING',
         chainClaimedAt: NOW,
       }),
@@ -863,7 +851,6 @@ describe("the propose sweep's selection contract", () => {
       row({
         id: 'stale',
         status: 'PROPOSED',
-        respondByAt: hoursFromNow(48),
         chainStatus: 'PROPOSING',
         chainClaimedAt: new Date(0),
       }),
@@ -880,7 +867,6 @@ describe("the propose sweep's selection contract", () => {
       row({
         id: 'newer',
         status: 'PROPOSED',
-        respondByAt: hoursFromNow(48),
         chainStatus: 'NONE',
         proposedAt: new Date('2026-08-11T00:00:00Z'),
       }),
@@ -889,7 +875,6 @@ describe("the propose sweep's selection contract", () => {
       row({
         id: 'older',
         status: 'PROPOSED',
-        respondByAt: hoursFromNow(48),
         chainStatus: 'NONE',
         proposedAt: new Date('2026-08-10T00:00:00Z'),
       }),
@@ -1147,7 +1132,6 @@ function proposable(
 ) {
   return row({
     status: 'PROPOSED',
-    respondByAt: hoursFromNow(48),
     chainStatus: 'NONE',
     // Distinct per row, and derived rather than typed, so a case that
     // discriminates on the request id is discriminating on the real one.
@@ -1550,7 +1534,6 @@ describe('proposeDue', () => {
     const service = new SlashExecutionService(
       new FakeSlashProposals() as never,
       { findOne: jest.fn() } as never,
-      {} as never,
       {} as never,
       {} as never,
       new FakeNotifications() as never,
@@ -2318,7 +2301,6 @@ describe('executeDue', () => {
       { findOne: jest.fn() } as never,
       {} as never,
       {} as never,
-      {} as never,
       new FakeNotifications() as never,
       TEST_SLASH_CONFIG,
       null,
@@ -2577,7 +2559,6 @@ describe('reconcileExecuting', () => {
     const service = new SlashExecutionService(
       new FakeSlashProposals() as never,
       { findOne: jest.fn() } as never,
-      {} as never,
       {} as never,
       {} as never,
       new FakeNotifications() as never,
@@ -3655,263 +3636,6 @@ describe('executeDue — a penalty an adjudicator lowered after the chain froze 
   });
 });
 
-describe('the fleet sweep asks for the chain reservation to be released too', () => {
-  // `openSweep` measures its lookback from the real clock, so the candidates
-  // have to be proposed against it rather than against this suite's frozen NOW.
-  const RECENTLY = new Date(Date.now() - 60 * 60 * 1000);
-
-  /**
-   * The fourth of the four places a case stops standing, and the one that most
-   * needs the cancel: `findSweepCandidates` carries **no clock at all** and
-   * reaches cases from `UPHELD`, so it routinely overturns a case whose
-   * on-chain record has been executable for days. `execute_slash` is
-   * permissionless, so a provider swept clear of a defect that was never theirs
-   * would otherwise keep a `Pending` record any stranger can spend.
-   *
-   * This only *records* the request — which is also why it now
-   * works identically in the API pod, where no signing capability exists.
-   */
-  it('requests a cancel for every case it overturns, and not for the source case', async () => {
-    const { service, proposals, events } = build();
-    proposals.seed(
-      standing({
-        id: 'source',
-        status: 'OVERTURNED',
-        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
-        rootCauseKey: 'mapping/v3',
-        proposedAt: RECENTLY,
-        chainStatus: 'CANCELLED',
-      }),
-    );
-    proposals.seed(
-      standing({
-        id: 'swept',
-        status: 'UPHELD',
-        rootCauseKey: 'mapping/v3',
-        proposedAt: RECENTLY,
-      }),
-    );
-
-    await service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
-      defectKey: 'mapping/v3',
-      lookbackHours: 72,
-      reasonCode: 'S11_PLATFORM_DEFECT',
-      note: 'the v3 binding dropped a field on every tool it touched',
-    });
-
-    expect(proposals.rows.get('swept')!.status).toBe(SlashProposalStatus.OVERTURNED);
-    expect(proposals.rows.get('swept')!.chainStatus).toBe('CANCEL_REQUESTED');
-    // The source case is skipped by `applySweep`, and its own reservation was
-    // dealt with when it was decided.
-    expect(proposals.rows.get('source')!.chainStatus).toBe('CANCELLED');
-    expect(events.kinds().filter((kind) => kind === 'CHAIN_CANCEL_REQUESTED')).toHaveLength(1);
-  });
-
-  it('N-2: never reaches an EVM case, whose records are decided only on chain', async () => {
-    const { service, proposals } = build();
-    proposals.seed(
-      standing({
-        id: 'source',
-        status: 'OVERTURNED',
-        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
-        rootCauseKey: 'mapping/v3',
-        proposedAt: RECENTLY,
-        chainStatus: 'CANCELLED',
-      }),
-    );
-    proposals.seed(
-      standing({
-        id: 'evm',
-        status: 'UPHELD',
-        assetId: 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3',
-        rootCauseKey: 'mapping/v3',
-        proposedAt: RECENTLY,
-      }),
-    );
-
-    await service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
-      defectKey: 'mapping/v3',
-      lookbackHours: 72,
-      reasonCode: 'S11_PLATFORM_DEFECT',
-      note: 'the v3 binding dropped a field on every tool it touched',
-    });
-
-    expect(proposals.rows.get('evm')!).toMatchObject({ status: 'UPHELD', chainStatus: 'PENDING' });
-  });
-
-  /**
-   * A sweep carries a decision to other cases, so a case with no decision has
-   * nothing to carry. That is a wrong-status refusal, and it used to be
-   * reported as an outcome called "no decision" that "is a finding about one
-   * provider".
-   */
-  it.each(['PROPOSED', 'DISPUTED', 'UNDER_REVIEW', 'AWAITING_SECOND', 'UPHELD', 'CANCELLED'])(
-    'refuses to sweep from an undecided %s case',
-    async (status) => {
-      const { service, proposals } = build();
-      proposals.seed(standing({ id: 'source', status, outcome: null, rootCauseKey: 'mapping/v3' }));
-
-      await expect(
-        service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
-          defectKey: 'mapping/v3',
-          lookbackHours: 72,
-          reasonCode: 'S11_PLATFORM_DEFECT',
-          note: 'the v3 binding dropped a field on every tool it touched',
-        }),
-      ).rejects.toMatchObject({
-        errorCode: SlashErrorCode.SLASH_INVALID_TRANSITION,
-        statusCode: 409,
-        message:
-          `Cannot open a fleet sweep while the case is ${status}; only while it is decided as ` +
-          `a platform or policy defect`,
-      });
-    },
-  );
-
-  it('names the outcome when the decision is one that does not generalise', async () => {
-    const { service, proposals } = build();
-    proposals.seed(
-      standing({
-        id: 'source',
-        status: 'OVERTURNED',
-        outcome: ArbitrationOutcome.OVERTURNED_GRIEFING,
-        rootCauseKey: 'mapping/v3',
-      }),
-    );
-
-    await expect(
-      service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
-        defectKey: 'mapping/v3',
-        lookbackHours: 72,
-        reasonCode: 'S11_PLATFORM_DEFECT',
-        note: 'the v3 binding dropped a field on every tool it touched',
-      }),
-    ).rejects.toMatchObject({
-      errorCode: SlashErrorCode.SLASH_SWEEP_OUTCOME_NOT_SWEEPABLE,
-      statusCode: 422,
-      message: expect.stringContaining('OVERTURNED_GRIEFING is a finding about one provider'),
-    });
-  });
-
-  it('marks every swept case, not just the first', async () => {
-    const { service, proposals } = build();
-    proposals.seed(
-      standing({
-        id: 'source',
-        status: 'OVERTURNED',
-        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
-        rootCauseKey: 'mapping/v3',
-        proposedAt: RECENTLY,
-        chainStatus: 'CANCELLED',
-      }),
-    );
-    proposals.seed(
-      standing({ id: 'a', status: 'UPHELD', rootCauseKey: 'mapping/v3', proposedAt: RECENTLY }),
-    );
-    proposals.seed(
-      standing({ id: 'b', status: 'UPHELD', rootCauseKey: 'mapping/v3', proposedAt: RECENTLY }),
-    );
-
-    await service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
-      defectKey: 'mapping/v3',
-      lookbackHours: 72,
-      reasonCode: 'S11_PLATFORM_DEFECT',
-      note: 'the v3 binding dropped a field on every tool it touched',
-    });
-
-    for (const id of ['a', 'b']) {
-      expect(proposals.rows.get(id)!.status).toBe(SlashProposalStatus.OVERTURNED);
-      expect(proposals.rows.get(id)!.chainStatus).toBe('CANCEL_REQUESTED');
-    }
-  });
-
-  /**
-   * BUG-R11-O1-02: the route built its 201 body from the row as first saved,
-   * `OPEN` with zero counts, while the stored row was already `COMPLETED`.
-   */
-  it('returns the sweep as stored: completed, with its matched and applied counts', async () => {
-    const { service, proposals } = build();
-    proposals.seed(
-      standing({
-        id: 'source',
-        status: 'OVERTURNED',
-        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
-        rootCauseKey: 'mapping/v3',
-        proposedAt: RECENTLY,
-        chainStatus: 'CANCELLED',
-      }),
-    );
-    proposals.seed(
-      standing({ id: 'a', status: 'UPHELD', rootCauseKey: 'mapping/v3', proposedAt: RECENTLY }),
-    );
-    proposals.seed(
-      standing({ id: 'b', status: 'UPHELD', rootCauseKey: 'mapping/v3', proposedAt: RECENTLY }),
-    );
-
-    const sweep = await service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
-      defectKey: 'mapping/v3',
-      lookbackHours: 72,
-      reasonCode: 'S11_PLATFORM_DEFECT',
-      note: 'the v3 binding dropped a field on every tool it touched',
-    });
-
-    expect(sweep).toMatchObject({ status: 'COMPLETED', matchedCount: 2, appliedCount: 2 });
-    expect(sweep.completedAt).toBeInstanceOf(Date);
-  });
-
-  /**
-   * BUG-R11-O1-03: a swept case kept its dispute `UNDER_REVIEW` with the
-   * outcome it was overturned from. The sweep closes it as a decision does.
-   */
-  it('closes the dispute of a swept case with the sweep outcome', async () => {
-    const { service, proposals, overrides } = build();
-    proposals.seed(
-      standing({
-        id: 'source',
-        status: 'OVERTURNED',
-        outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
-        rootCauseKey: 'mapping/v3',
-        proposedAt: RECENTLY,
-        chainStatus: 'CANCELLED',
-      }),
-    );
-    proposals.seed(
-      standing({
-        id: 'disputed',
-        organizationId: 'org_2',
-        status: 'AWAITING_SECOND',
-        rootCauseKey: 'mapping/v3',
-        proposedAt: RECENTLY,
-        disputeId: 'dispute_1',
-      }),
-    );
-    proposals.seed(
-      standing({ id: 'plain', status: 'UPHELD', rootCauseKey: 'mapping/v3', proposedAt: RECENTLY }),
-    );
-
-    await service.openSweep(OPERATOR as never, APPROVER as never, 'org_1', 'source', {
-      defectKey: 'mapping/v3',
-      lookbackHours: 72,
-      reasonCode: 'S11_PLATFORM_DEFECT',
-      note: 'the v3 binding dropped a field on every tool it touched',
-    });
-
-    const disputeWrites = overrides.updates.filter(({ entity }) => entity === DisputeEntity);
-    expect(disputeWrites).toHaveLength(1);
-    expect(disputeWrites[0].criteria).toEqual({ organizationId: 'org_2', id: 'dispute_1' });
-    expect(disputeWrites[0].patch).toMatchObject({
-      state: 'UPHELD',
-      outcome: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
-      resolutionKind: ResolutionKind.ADJUDICATOR,
-      resolvedBy: OPERATOR.subject,
-      secondedByOperatorId: null,
-      secondedAt: null,
-      secondKind: null,
-    });
-    expect(disputeWrites[0].patch.resolvedAt).toBeInstanceOf(Date);
-  });
-});
-
 describe('review fix S2-3 — no single-beneficiary slash on EVM', () => {
   const EVM_USDG = 'eip155:46630/erc20:0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3';
 
@@ -4093,7 +3817,6 @@ describe('SlashExecutionService.refoldLatePart (review R2-4)', () => {
     const service = new SlashExecutionService(
       ctx.proposals as never,
       ctx.enrolments as never,
-      { complete: jest.fn(), fail: jest.fn() } as never,
       new SlashProposalService(
         ctx.proposals as never,
         ctx.events as never,

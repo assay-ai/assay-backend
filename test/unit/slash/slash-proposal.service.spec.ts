@@ -7,6 +7,7 @@ import {
   TEST_SLASH_CONFIG,
 } from './helpers/fake-slash-repositories';
 import { SlaStrikeEntity } from '@database/postgres/entities/sla-strike.entity';
+import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { NotificationEvent } from '@modules/notification/ports/notification.port';
 import { ResolutionKind } from '@modules/slash/domain/arbitration';
 import { SlashProposalStatus } from '@modules/slash/domain/slash-proposal-state';
@@ -47,7 +48,7 @@ function strike(overrides: Partial<SlaStrikeEntity> = {}): SlaStrikeEntity {
     windowId: 'win_1',
     status: 'RECORDED',
     penaltyAmount: '10270000',
-    assetId: 'usdc',
+    assetId: EVM_ASSET,
     observedRate: 0.1503,
     effectiveThreshold: 0.0727,
     computation: [],
@@ -60,7 +61,7 @@ describe('SlashProposalService', () => {
     it('opens one PROPOSED case and notifies the provider', async () => {
       const { service, proposals, notifications, events } = build();
 
-      const proposal = await service.openFromStrike(strike());
+      const proposal = (await service.openFromStrike(strike()))!;
 
       expect(proposal.status).toBe(SlashProposalStatus.PROPOSED);
       expect(proposal.penaltyAmount).toBe('10270000');
@@ -84,8 +85,8 @@ describe('SlashProposalService', () => {
      */
     it('is idempotent — a second call returns the same case and sends nothing', async () => {
       const { service, proposals, notifications } = build();
-      const first = await service.openFromStrike(strike());
-      const second = await service.openFromStrike(strike());
+      const first = (await service.openFromStrike(strike()))!;
+      const second = (await service.openFromStrike(strike()))!;
 
       expect(second.id).toBe(first.id);
       expect(proposals.rows.size).toBe(1);
@@ -94,38 +95,38 @@ describe('SlashProposalService', () => {
 
     /**
      * The timelock is set at creation and is the promise the slash case screen
-     * makes in its largest type.
+     * makes in its largest type. `IN_APP` is delivered at insert, so delivery is
+     * recorded in the same call; no response clock starts from it.
      */
-    /**
-     * `respondByAt` used to stay null after opening a case, because
-     * `markDelivered` had no caller anywhere in `src/` — which meant no
-     * proposal could ever reach `UPHELD`, since `findUndisputedPast` requires
-     * `respond_by_at IS NOT NULL`.
-     *
-     * It is set at creation now, and that is not a shortcut: `IN_APP` is the one
-     * channel that is real, and `NotificationService` marks it `DELIVERED` at
-     * insert because the inbox row *is* the delivery. The clock therefore starts
-     * on a delivery that has genuinely happened.
-     */
-    it('sets the timelock at creation, and the response clock on delivery', async () => {
+    it('sets the timelock at creation and records the delivery', async () => {
       const { service } = build();
-      const proposal = await service.openFromStrike(strike());
+      const proposal = (await service.openFromStrike(strike()))!;
 
       expect(proposal.earliestExecutionAt.getTime() - proposal.proposedAt.getTime()).toBe(
         TEST_SLASH_CONFIG.timelockMs,
       );
-
-      // Delivered synchronously, so the response window is already running.
-      expect(proposal.respondByAt).not.toBeNull();
       expect(proposal.notifiedAt).not.toBeNull();
-      expect(
-        (proposal.respondByAt as Date).getTime() - (proposal.notifiedAt as Date).getTime(),
-      ).toBe(TEST_SLASH_CONFIG.responseWindowMs);
+    });
+
+    /**
+     * Solana has no slash path: no paid rail, no dispute, and its single-record
+     * judgement named the retired pooled vault as beneficiary.
+     */
+    it('opens no case for a Solana strike, and tells nobody', async () => {
+      const { service, proposals, notifications } = build();
+
+      const proposal = await service.openFromStrike(
+        strike({ assetId: ASSET_IDS.USDC_SOLANA_DEVNET }),
+      );
+
+      expect(proposal).toBeNull();
+      expect(proposals.rows.size).toBe(0);
+      expect(notifications.sent).toHaveLength(0);
     });
 
     it('derives the chain request id deterministically from the proposal id', async () => {
       const { service } = build();
-      const proposal = await service.openFromStrike(strike());
+      const proposal = (await service.openFromStrike(strike()))!;
 
       expect(proposal.chainRequestId).toHaveLength(64);
       expect(proposal.chainRequestId).toBe(
@@ -147,7 +148,7 @@ describe('SlashProposalService', () => {
         deMinimisMinor: '25000000',
       });
 
-      const proposal = await service.openFromStrike(strike({ penaltyAmount: '5000000' }));
+      const proposal = (await service.openFromStrike(strike({ penaltyAmount: '5000000' })))!;
 
       expect(proposal.status).toBe(SlashProposalStatus.WAIVED);
       expect(proposal.resolutionKind).toBe(ResolutionKind.AUTO_DE_MINIMIS);
@@ -156,77 +157,31 @@ describe('SlashProposalService', () => {
     });
   });
 
-  describe('delivery starts the provider’s clock', () => {
+  describe('delivery', () => {
     /**
-     * The deadline is `deliveredAt + responseWindow`, never
-     * `proposedAt + responseWindow`. The first delivery happens
-     * inside `openFromStrike` — `IN_APP` is synchronous — so this asserts the
-     * derivation on a proposal delivered explicitly, which is the path a queued
-     * channel still takes.
-     */
-    it('derives respondByAt from delivery, not from proposal', async () => {
-      const { service, proposals } = build();
-      const proposal = await service.openFromStrike(strike());
-
-      const row = proposals.rows.get(proposal.id)!;
-      expect(row.notifiedAt).not.toBeNull();
-      expect(row.respondByAt!.getTime()).toBe(
-        row.notifiedAt!.getTime() + TEST_SLASH_CONFIG.responseWindowMs,
-      );
-      // And not from the proposal, which is the failure this guards.
-      expect(row.respondByAt!.getTime()).not.toBe(
-        proposal.proposedAt.getTime() + TEST_SLASH_CONFIG.timelockMs,
-      );
-    });
-
-    /**
-     * The guard, from the angle that matters now: the case is already delivered
-     * when it is opened, so a channel confirming later must not restart the
-     * clock. `markNotifiedIfUnnotified` is guarded on `notified_at IS NULL`.
-     */
-    it('a later confirmation does not move a deadline that is already running', async () => {
-      const { service, proposals } = build();
-      const proposal = await service.openFromStrike(strike());
-      const first = proposals.rows.get(proposal.id)!.respondByAt!.getTime();
-
-      const muchLater = new Date(proposal.proposedAt.getTime() + 6 * 60 * 60 * 1000);
-      await service.markDelivered('org_1', proposal.id, muchLater);
-
-      expect(proposals.rows.get(proposal.id)!.respondByAt!.getTime()).toBe(first);
-    });
-
-    /**
-     * A webhook retried three times must not move the deadline three times —
-     * and the direction it would move is *later*, which looks generous and is
-     * really the platform choosing when its own timelock expires.
-     */
-    /**
-     * One `NOTIFIED` event, however many channels confirm. Superseding the old
-     * "ignores a repeated delivery confirmation" case, whose premise — a case
-     * still undelivered after `openFromStrike` — no longer exists.
+     * One `NOTIFIED` event, however many channels confirm:
+     * `markNotifiedIfUnnotified` is guarded on `notified_at IS NULL`.
      */
     it('records the delivery once, however many confirmations arrive', async () => {
       const { service, proposals, events } = build();
-      const proposal = await service.openFromStrike(strike());
+      const proposal = (await service.openFromStrike(strike()))!;
+      const first = proposals.rows.get(proposal.id)!.notifiedAt!.getTime();
 
       await service.markDelivered('org_1', proposal.id, new Date('2026-08-11T10:00:00Z'));
       await service.markDelivered('org_1', proposal.id, new Date('2026-08-12T10:00:00Z'));
 
-      expect(proposals.rows.get(proposal.id)!.notifiedAt).not.toBeNull();
+      expect(proposals.rows.get(proposal.id)!.notifiedAt!.getTime()).toBe(first);
       expect(events.kinds().filter((k) => k === 'NOTIFIED')).toHaveLength(1);
     });
 
     /**
-     * Business review 5: no clock starts from a delivery on EVM. The record's
-     * on-chain `executableAt` is the only deadline there.
+     * Business review 5: no clock starts from a delivery. The record's
+     * on-chain `executableAt` is the only deadline.
      */
-    it('starts no clock on an EVM case: the record’s executableAt is the deadline', async () => {
-      const { service, proposals, notifications } = build();
-      const proposal = await service.openFromStrike(strike({ assetId: EVM_ASSET }));
+    it('tells the provider the dispute is on chain', async () => {
+      const { service, notifications } = build();
+      await service.openFromStrike(strike());
 
-      const row = proposals.rows.get(proposal.id)!;
-      expect(row.notifiedAt).not.toBeNull();
-      expect(row.respondByAt).toBeNull();
       expect(notifications.sent[0].body).toContain(
         'Disputing freezes the penalty on chain until the arbiter decides',
       );
@@ -237,71 +192,13 @@ describe('SlashProposalService', () => {
    * Self-check #2 — *"Test: once the objection deadline passes, the proposal finalises itself."*
    */
   describe('the undisputed sweeper', () => {
-    it('upholds a case whose window elapsed with no objection', async () => {
+    it('upholds an undisputed case at its record’s executableAt, with no outcome', async () => {
       const { service, proposals, events } = build();
       proposals.seed({
         id: 'p1',
         organizationId: 'org_1',
         status: SlashProposalStatus.PROPOSED,
-        respondByAt: new Date('2026-08-12T09:14:00Z'),
-      });
-
-      const closed = await service.sweepUndisputed(new Date('2026-08-12T09:15:00Z'));
-
-      expect(closed).toBe(1);
-      const row = proposals.rows.get('p1')!;
-      expect(row.status).toBe(SlashProposalStatus.UPHELD);
-      expect(row.resolutionKind).toBe(ResolutionKind.AUTO_UNDISPUTED);
-      // Nobody adjudicated it, so it carries no adjudicator's outcome. Writing
-      // one would put a judgement nobody made into the false-positive taxonomy.
-      expect(row.outcome).toBeNull();
-      expect(row.countsAsFalsePositive).toBe(false);
-      expect(events.kinds()).toContain('AUTO_CLOSED');
-    });
-
-    it('leaves a case whose window has not elapsed alone', async () => {
-      const { service, proposals } = build();
-      proposals.seed({
-        id: 'p1',
-        organizationId: 'org_1',
-        status: SlashProposalStatus.PROPOSED,
-        respondByAt: new Date('2026-08-12T09:14:00Z'),
-      });
-
-      const closed = await service.sweepUndisputed(new Date('2026-08-12T09:13:00Z'));
-
-      expect(closed).toBe(0);
-      expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.PROPOSED);
-    });
-
-    /**
-     * A case nobody could have heard about is not one they declined to answer.
-     * `respondByAt` is null until delivery is confirmed, and the sweeper must
-     * skip those rather than treating an undelivered webhook as silence.
-     */
-    it('never closes a case that was never delivered', async () => {
-      const { service, proposals } = build();
-      proposals.seed({
-        id: 'p1',
-        organizationId: 'org_1',
-        status: SlashProposalStatus.PROPOSED,
-        notifiedAt: null,
-        respondByAt: null,
-      });
-
-      expect(await service.sweepUndisputed(new Date('2030-01-01T00:00:00Z'))).toBe(0);
-      expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.PROPOSED);
-    });
-
-    it('upholds an undisputed EVM case at its record’s executableAt, not at respondByAt', async () => {
-      const { service, proposals } = build();
-      proposals.seed({
-        id: 'p1',
-        organizationId: 'org_1',
-        status: SlashProposalStatus.PROPOSED,
         assetId: EVM_ASSET,
-        // A stale in-app deadline long gone: it no longer counts.
-        respondByAt: new Date('2026-08-10T00:00:00Z'),
         chainStatus: 'PENDING',
         chainExecutableAt: new Date('2026-08-12T09:14:00Z'),
       });
@@ -314,7 +211,11 @@ describe('SlashProposalService', () => {
       expect(proposals.rows.get('p1')!).toMatchObject({
         status: SlashProposalStatus.UPHELD,
         resolutionKind: ResolutionKind.AUTO_UNDISPUTED,
+        // Nobody adjudicated it, so it carries no adjudicator's outcome.
+        outcome: null,
+        countsAsFalsePositive: false,
       });
+      expect(events.kinds()).toContain('AUTO_CLOSED');
     });
 
     it('R2-10: labels the uphold CHAIN_ARBITER when the arbiter already upheld a record of it', async () => {
@@ -349,66 +250,6 @@ describe('SlashProposalService', () => {
       });
 
       expect(await service.sweepUndisputed(new Date('2030-01-01T00:00:00Z'))).toBe(0);
-    });
-  });
-
-  /**
-   * The one symmetric rule: if we miss our own deadline, the case is
-   * overturned and it counts against us.
-   */
-  describe('the platform-miss sweeper', () => {
-    it('overturns an overdue case and records it against us', async () => {
-      const { service, proposals, notifications, events } = build();
-      proposals.seed({
-        id: 'p1',
-        organizationId: 'org_1',
-        status: SlashProposalStatus.UNDER_REVIEW,
-        platformDecisionDueAt: new Date('2026-08-13T09:14:00Z'),
-      });
-
-      const overturned = await service.sweepPlatformMisses(new Date('2026-08-13T09:15:00Z'));
-
-      // The rows, not a count: `SlashLifecycleJob` has to release each one's
-      // on-chain reservation, and it cannot re-derive the set afterwards —
-      // the sweep's own predicate no longer matches a row it just overturned.
-      expect(overturned).toEqual([{ organizationId: 'org_1', id: 'p1' }]);
-      const row = proposals.rows.get('p1')!;
-      expect(row.status).toBe(SlashProposalStatus.OVERTURNED);
-      expect(row.resolutionKind).toBe(ResolutionKind.AUTO_PLATFORM_MISS);
-      expect(row.outcome).toBeNull();
-      expect(row.countsAsFalsePositive).toBe(true);
-      expect(events.kinds()).toContain('AUTO_OVERTURNED_PLATFORM_MISS');
-      expect(notifications.sent.map((n) => n.event)).toContain(
-        NotificationEvent.PROVIDER_SLASH_DECIDED,
-      );
-    });
-
-    it('does not touch a case that is still inside our window', async () => {
-      const { service, proposals } = build();
-      proposals.seed({
-        id: 'p1',
-        organizationId: 'org_1',
-        status: SlashProposalStatus.DISPUTED,
-        platformDecisionDueAt: new Date('2026-08-13T09:14:00Z'),
-      });
-
-      expect(await service.sweepPlatformMisses(new Date('2026-08-13T09:13:00Z'))).toEqual([]);
-      expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.DISPUTED);
-    });
-
-    /** Business review 4: a missed platform deadline never acquits an EVM case. */
-    it('never overturns an EVM case: the arbiter rules on chain', async () => {
-      const { service, proposals } = build();
-      proposals.seed({
-        id: 'p1',
-        organizationId: 'org_1',
-        status: SlashProposalStatus.DISPUTED,
-        assetId: EVM_ASSET,
-        platformDecisionDueAt: new Date('2026-08-13T09:14:00Z'),
-      });
-
-      expect(await service.sweepPlatformMisses(new Date('2030-01-01T00:00:00Z'))).toEqual([]);
-      expect(proposals.rows.get('p1')!.status).toBe(SlashProposalStatus.DISPUTED);
     });
   });
 });
@@ -447,29 +288,5 @@ describe('deriveChainRequestId', () => {
     expect(deriveChainRequestId({ id: 'a', chainEpoch: 11 })).not.toBe(
       deriveChainRequestId({ id: 'a1', chainEpoch: 1 }),
     );
-  });
-});
-
-describe('openFromVerdict — B7', () => {
-  it('refuses a new case over the calls of a window whose on-chain dispute the provider won', async () => {
-    const { proposals, service } = build();
-    proposals.seed({
-      id: 'won',
-      organizationId: 'org_1',
-      windowId: 'window-1',
-      chainDisputeWonAt: new Date('2026-10-01T00:00:00Z'),
-    } as never);
-    await expect(
-      service.openFromVerdict({
-        organizationId: 'org_1',
-        providerId: 'provider-1',
-        bindingId: 'binding-1',
-        toolId: 'tool-1',
-        verdictId: 'verdict-new',
-        windowId: 'window-1',
-        penaltyAmount: '1000000',
-        assetId: 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3',
-      }),
-    ).rejects.toMatchObject({ errorCode: 'SLASH_DISPUTE_WON_ON_CHAIN' });
   });
 });

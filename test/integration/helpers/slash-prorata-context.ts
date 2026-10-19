@@ -3,7 +3,6 @@ import { join } from 'node:path';
 import { Client } from 'pg';
 import { DataSource } from 'typeorm';
 
-import { FleetSweepRepository } from '@database/postgres/repositories/fleet-sweep.repository';
 import { ProviderChainEnrolmentRepository } from '@database/postgres/repositories/provider-chain-enrolment.repository';
 import { SlaWindowCallRepository } from '@database/postgres/repositories/sla-window-call.repository';
 import { SlashProposalEventRepository } from '@database/postgres/repositories/slash-proposal-event.repository';
@@ -105,11 +104,7 @@ export async function openDatabase(database: string, migrate = false): Promise<D
 
 export const TEST_SLASH_CONFIG: SlashConfig = {
   timelockMs: 72 * HOUR,
-  responseWindowMs: 48 * HOUR,
-  platformDecisionWindowMs: 23 * HOUR,
-  executionGuardMs: 1 * HOUR,
   deMinimisMinor: '0',
-  secondSignatureThresholdMinor: '2500000',
   sweepBatchSize: 100,
   assetDecimals: 6,
 };
@@ -158,7 +153,6 @@ export function buildProRataSlashServices(
   const execution = new SlashExecutionService(
     proposals,
     new ProviderChainEnrolmentRepository(dataSource),
-    new FleetSweepRepository(dataSource),
     lifecycle,
     {} as never,
     notifications,

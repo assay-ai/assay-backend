@@ -191,11 +191,6 @@ export const OUTCOME_CONSEQUENCE: Readonly<Record<ArbitrationOutcome, OutcomeCon
     },
   });
 
-/** True for the four outcomes that cancel the penalty. */
-export function isOverturn(outcome: ArbitrationOutcome): boolean {
-  return !OUTCOME_CONSEQUENCE[outcome].penaltyStands;
-}
-
 /**
  * The states `disputes.state` may hold, unchanged from the dispute module.
  *
@@ -238,18 +233,9 @@ export const ARBITRATION_STATE_MAP: Readonly<Record<ArbitrationOutcome, DisputeR
   });
 
 /**
- * What the provider is claiming, from the dispute form's radio list.
- *
- * The clearest lesson from other dispute systems, and the reason this is an
- * enum rather than a string: *"Structure the input, not just the output."*
- * Every dispute system with tolerable review consistency constrains what the
- * accused party may submit — a reason code, a form, a per-item review request.
- * Two adjudicators reading two essays about the same underlying situation will
- * not extract the same facts.
- *
- * Each member is pre-populated from evidence we already hold, which is the
- * other half of the dispute form's promise: *"we would rather find our own
- * defect than win a dispute about it."*
+ * What a dispute claims. A dispute raised on chain (`disputeSlash`) carries no
+ * claim of its own and is recorded as `OTHER`; the other members name the
+ * claims a dispute row may hold.
  */
 export enum DisputeClaimType {
   /** "The failures were caused by a platform mapping change." */
@@ -265,90 +251,4 @@ export enum DisputeClaimType {
   /** "We had a declared incident during this window." */
   DECLARED_INCIDENT = 'DECLARED_INCIDENT',
   OTHER = 'OTHER',
-}
-
-/**
- * The claim each outcome most directly answers, used to seed the case brief's
- * ordering — not to decide anything.
- *
- * An adjudicator may reach any outcome from any claim; the provider does not
- * get to pick their own verdict by picking a radio button. What this buys is
- * that the evidence panel a reviewer sees first is the one that settles the
- * claim actually made.
- */
-export const CLAIM_SUGGESTS_OUTCOME: Readonly<Record<DisputeClaimType, ArbitrationOutcome | null>> =
-  Object.freeze({
-    [DisputeClaimType.PLATFORM_MAPPING_CHANGE]: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
-    [DisputeClaimType.AGENT_GRIEFING]: ArbitrationOutcome.OVERTURNED_GRIEFING,
-    [DisputeClaimType.POLICY_DEFECT]: ArbitrationOutcome.OVERTURNED_POLICY_DEFECT,
-    [DisputeClaimType.INSUFFICIENT_SAMPLE]: ArbitrationOutcome.OVERTURNED_INSUFFICIENT_EVIDENCE,
-    [DisputeClaimType.UPSTREAM_INDUCED]: ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT,
-    [DisputeClaimType.DECLARED_INCIDENT]: null,
-    [DisputeClaimType.OTHER]: null,
-  });
-
-/**
- * Reason codes, per outcome: *"A closed set of reason codes, not free text."*
- *
- * Deliberately short. This list is meant to grow from weekly
- * calibration on real disagreements, not from an upfront taxonomy — an
- * enumeration invented before the first hundred cases is one nobody uses, and
- * `OTHER` then absorbs everything, which is free text with extra steps. What
- * matters at this stage is that the *shape* is closed and versioned, so
- * additions are visible.
- */
-export const REASON_CODES: Readonly<Record<ArbitrationOutcome, readonly string[]>> = Object.freeze({
-  [ArbitrationOutcome.UPHELD]: [
-    'RATE_GENUINELY_EXCEEDED',
-    'UPSTREAM_QUALITY_DEGRADED',
-    'PROVIDER_CONFIRMED',
-  ],
-  [ArbitrationOutcome.UPHELD_RECALCULATED]: [
-    'EXCLUDED_CALLS_MISCOUNTED',
-    'PRICE_BASIS_WRONG',
-    'MULTIPLIER_MISAPPLIED',
-  ],
-  [ArbitrationOutcome.OVERTURNED_PLATFORM_DEFECT]: [
-    'MAPPING_REGRESSION',
-    'ROUTING_MISDIRECTED',
-    'CLASSIFIER_MISLABELLED',
-    'EGRESS_OR_TIMEOUT_OURS',
-  ],
-  [ArbitrationOutcome.OVERTURNED_POLICY_DEFECT]: [
-    'RULE_TOO_STRICT_FOR_INPUT_CLASS',
-    'SCHEMA_STALE',
-    'SEMANTIC_PROMPT_REGRESSION',
-  ],
-  [ArbitrationOutcome.OVERTURNED_GRIEFING]: [
-    'SINGLE_AGENT_CONCENTRATION',
-    'ADVERSARIAL_QUERY_PATTERN',
-  ],
-  [ArbitrationOutcome.OVERTURNED_INSUFFICIENT_EVIDENCE]: [
-    'SAMPLE_BELOW_GATE',
-    'CONFIDENCE_INTERVAL_STRADDLES_THRESHOLD',
-  ],
-});
-
-/** The minimum hand-written explanation on a decision, in characters. */
-export const DECISION_NOTE_MIN_LENGTH = 120;
-
-/**
- * The rubric a decision made today is recorded against.
- *
- * A constant, because a versioned, authored, approved rubric object does
- * not exist yet and pretending otherwise would put a version number on every
- * decision that points at nothing. What this does buy is that when the rubric
- * table ships, every case already carries the version it was decided under and
- * none has to be back-filled with a guess.
- */
-export const CURRENT_RUBRIC_VERSION = 'v1';
-
-/** True when `codes` are all valid for `outcome` and there is at least one. */
-export function reasonCodesAreValid(
-  outcome: ArbitrationOutcome,
-  codes: readonly string[],
-): boolean {
-  if (codes.length === 0) return false;
-  const allowed = new Set(REASON_CODES[outcome]);
-  return codes.every((code) => allowed.has(code));
 }

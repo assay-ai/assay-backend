@@ -47,8 +47,9 @@ describe('SlashProposalRepository.countUpheldViolationsByProvider', () => {
     // platform failed to execute in time expires in the provider's favour.
     expect(sql).not.toContain('cancel_reason');
     expect(sql).not.toContain("'CANCELLED'");
-    // An EVM case the platform only labelled upheld (AUTO_UNDISPUTED) does not
-    // count until a record of it executes.
-    expect(sql).toContain('proposal.asset_id NOT LIKE :onChain');
+    // A case the platform only labelled upheld (AUTO_UNDISPUTED) does not
+    // count until a record of it executes; the arbiter's uphold counts.
+    expect(sql).toContain("proposal.resolution_kind = 'CHAIN_ARBITER'");
+    expect(sql).not.toContain('asset_id');
   });
 });

@@ -19,7 +19,7 @@ import { OperatorApprover, OperatorSession } from '../ports/operator-session.por
 
 /** Everything an entry needs that the caller knows and the register does not. */
 export interface OverrideContext {
-  /** The register code being exercised, e.g. `S-3`. */
+  /** The register code being exercised, e.g. `S-5`. */
   readonly code: string;
   readonly actor: OperatorSession;
   /**
@@ -39,9 +39,9 @@ export interface OverrideContext {
   /**
    * Raise an action to two-person for this occurrence only.
    *
-   * `S-3`'s register floor is `SINGLE`, and `requiresSecondSignature` raises an
-   * individual case on blast radius or materiality. The register cannot express
-   * that, because it is a property of the case rather than of the action.
+   * A row whose register floor is `SINGLE` may need a second person for one
+   * occurrence. The register cannot express that, because it is a property of
+   * the case rather than of the action.
    */
   readonly escalateToTwoPerson?: boolean;
   /** Emergency single-actor execution. Recorded, reviewed, never silent. */

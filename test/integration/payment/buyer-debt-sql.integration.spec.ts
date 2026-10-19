@@ -521,6 +521,7 @@ describe('buyer debt migrations, down and up again', () => {
     // The migrations after these sit on top of them and touch none of their
     // objects: undo those first, newest first.
     const later = [
+      'DropOffChainSlashObjection1762400000001',
       'DropLegacyPaymentSchema1762400000000',
       'EscrowWithdrawalEvents1762300000000',
       'ModerationCutoffPublicReason1762200000000',

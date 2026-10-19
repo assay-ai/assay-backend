@@ -27,17 +27,11 @@ import { TOOL_CATALOGUE, ToolCataloguePort } from '@modules/tool/ports/tool-cata
 import { Tool } from '@modules/tool/ports/tool.types';
 import { MoneyUtil } from '@shared/utils/money.util';
 
-import {
-  ArbitrationOutcome,
-  DisputeClaimType,
-  OUTCOME_CONSEQUENCE,
-  ResolutionKind,
-} from '../domain/arbitration';
+import { ArbitrationOutcome, OUTCOME_CONSEQUENCE, ResolutionKind } from '../domain/arbitration';
 import { DISPUTE_TIMEOUT_MS } from '../constants/slash.constants';
 import { ChainProposalStatus } from '../domain/chain-slash-outcome';
 import {
   disputeByOf,
-  disputesOnChain,
   OnChainDisputeState,
   onChainDisputeState,
   OnChainRecordMirror,
@@ -59,11 +53,10 @@ import {
 import { SlashProposalService } from './slash-proposal.service';
 
 /**
- * The read side of one slash case — the case screen for the provider, the
- * case brief for an adjudicator, and the queue's one-line `caseLabel` /
- * `coFailureCount`. One object, three renderings, because serving different
- * shapes to the two audiences is how they come to disagree about what the
- * penalty was.
+ * The read side of one slash case — the case screen for the provider and the
+ * case brief for an operator. One object, two renderings, because serving
+ * different shapes to the two audiences is how they come to disagree about
+ * what the penalty was.
  *
  * `sla_strikes.computation` already froze the arithmetic at the moment the
  * window closed. This class renders that freeze — and the strike's own
@@ -146,22 +139,20 @@ export class SlashCaseService {
 
     // Review N-4: an EVM case reads its state per record, not from one
     // case-level timestamp.
-    const records =
-      this.parts && disputesOnChain(proposal.assetId)
-        ? (
-            await this.parts.findForEpoch(organizationId, proposal.id, proposal.chainEpoch ?? 0)
-          ).map((part) => ({
+    const records = this.parts
+      ? (await this.parts.findForEpoch(organizationId, proposal.id, proposal.chainEpoch ?? 0)).map(
+          (part) => ({
             chainStatus: part.chainStatus,
             chainDisputedAt: part.chainDisputedAt,
             chainExecutableAt: part.chainExecutableAt,
             cancelReason: part.cancelReason ?? null,
-          }))
-        : undefined;
+          }),
+        )
+      : undefined;
     const clocks = computeClocks(proposal, new Date(), records);
     const proposalDto = buildProposalDto(proposal, binding, tool, window, clocks);
     const arithmetic = buildArithmeticRows(strike, proposal, calls);
     const inaction = await this.buildInaction(proposal);
-    const suggestedClaim = deriveSuggestedClaim(changeOverlay, agentGroups, strike);
 
     return {
       proposal: proposalDto,
@@ -172,7 +163,6 @@ export class SlashCaseService {
       failuresByRule: toAttributionRows(reasonGroups),
       failuresByAgent: toAttributionRows(agentGroups),
       evidenceVerdictCount,
-      suggestedClaim,
     };
   }
 
@@ -190,67 +180,6 @@ export class SlashCaseService {
       ? await this.windowLabelFor(organizationId, proposal.windowId)
       : null;
     return buildRestorationRows(proposal, windowLabel);
-  }
-
-  /**
-   * The adjudication queue's `Case` column — `w_<sequence> · bnd_<label>`, or
-   * the binding label alone when there is no window to name.
-   *
-   * Added for `adjudication-queue.service.ts`, which calls this
-   * once per queue row. It costs one indexed primary-key lookup on
-   * `sla_windows` when `windowId` is set, on top of the proposal read every
-   * method here does — an N+1 across a 25-row queue page in the strict sense,
-   * but each lookup is a point read on the table's primary key, not a scan.
-   * If that turns out to matter at the queue's actual page size, the fix is a
-   * batch method here keyed on a list of window ids, not a change to what
-   * this one returns.
-   */
-  async caseLabel(organizationId: string, proposalId: string): Promise<string> {
-    const proposal = await this.lifecycle.require(organizationId, proposalId);
-    const bindingLabel = renderBindingLabel(proposal.bindingId);
-
-    if (!proposal.windowId) {
-      // `DATA_FAIL` proposals carry a window only when the operator who opened
-      // them supplied one. Falling back to the binding label alone is honest;
-      // a fabricated `w_0` would not be.
-      return bindingLabel;
-    }
-
-    const window = await this.windows.findOneBy({ organizationId, id: proposal.windowId });
-    return window ? `${renderWindowLabel(window.sequence)} · ${bindingLabel}` : bindingLabel;
-  }
-
-  /**
-   * How many OTHER bindings on the same tool had their own observed rate move
-   * materially away from their own declared rate, in a window overlapping the
-   * subject window's time range. The co-failure signal.
-   *
-   * Returns `0`, honestly, whenever there is no window to align peers
-   * against — a `DATA_FAIL` proposal the operator opened without one. That is
-   * the one case the caller explicitly asked to be told about rather than
-   * guessed at: a non-zero count here can push an adjudicator toward
-   * `OVERTURNED_PLATFORM_DEFECT`, which opens a fleet sweep, so an invented
-   * number would be the single most expensive wrong answer in the taxonomy.
-   *
-   * One query beyond the proposal + window reads every other method here
-   * pays (`SlashCaseReadRepository.countPeerBindingsWithMaterialDeviation`) —
-   * not an N+1, since the peer comparison itself is a single aggregate over
-   * every sibling binding at once.
-   */
-  async coFailureCount(organizationId: string, proposalId: string): Promise<number> {
-    const proposal = await this.lifecycle.require(organizationId, proposalId);
-    if (!proposal.windowId) return 0;
-
-    const window = await this.windows.findOneBy({ organizationId, id: proposal.windowId });
-    if (!window) return 0;
-
-    return this.caseRead.countPeerBindingsWithMaterialDeviation(
-      window.toolId,
-      proposal.bindingId,
-      window.openedAt,
-      window.closedAt ?? new Date(),
-      MATERIAL_FAILURE_RATE_DELTA,
-    );
   }
 
   // ── Internals ─────────────────────────────────────────────────────────────
@@ -411,38 +340,6 @@ const PRIOR_WINDOWS_LIMIT = 6;
 const TOP_ATTRIBUTION_ROWS = 3;
 
 /**
- * Share of a window's failures a single agent must account for before this
- * service suggests `AGENT_GRIEFING`. A heuristic, not a documented rule —
- * agent concentration is a signal with no agreed threshold.
- */
-const GRIEFING_AGENT_SHARE_THRESHOLD = 0.5;
-/**
- * How close to the sample gate counts as "barely enough" for
- * `INSUFFICIENT_SAMPLE` — `verifiedCalls < gate × this`. A heuristic, not a
- * documented rule.
- */
-const INSUFFICIENT_SAMPLE_GATE_MULTIPLE = 1.1;
-/**
- * Share of a window's failures that must fall after a published edit before
- * this service suggests `PLATFORM_MAPPING_CHANGE`. A heuristic, not a
- * documented rule.
- */
-const CHANGE_OVERLAY_MAJORITY_SHARE = 0.5;
-/**
- * How far a peer binding's observed rate must sit from its OWN declared rate,
- * in the subject window's time range, to count as a co-failure. A heuristic,
- * not a documented rule — the co-failure panel is the highest-value query on
- * the operator surface, but no threshold for it is agreed.
- */
-const MATERIAL_FAILURE_RATE_DELTA = 0.03;
-
-const PLATFORM_CLOCK_STATUSES: ReadonlySet<SlashProposalStatus> = new Set([
-  SlashProposalStatus.DISPUTED,
-  SlashProposalStatus.UNDER_REVIEW,
-  SlashProposalStatus.AWAITING_SECOND,
-]);
-
-/**
  * `bnd_<label>` — the provider-facing rendering the case screen and case
  * brief show for a binding, the same way `w_<sequence>` renders a window.
  *
@@ -492,15 +389,13 @@ function computeClocks(
   now: Date,
   records?: readonly OnChainRecordMirror[],
 ): SlashProposalClocksDto {
-  let runningClock: 'PROVIDER' | 'PLATFORM' | 'NONE' = 'NONE';
+  let runningClock: 'PROVIDER' | 'NONE' = 'NONE';
   let deadline: Date | null = null;
 
-  // EVM: the record's executableAt is the provider's only deadline, and no
+  // The record's executableAt is the provider's only deadline, and no
   // platform clock runs (the arbiter rules on chain).
-  const onChain = disputesOnChain(proposal.assetId);
   const chainState = onChainDisputeState(
     {
-      assetId: proposal.assetId,
       chainStatus: proposal.chainStatus ?? ChainProposalStatus.NONE,
       chainDisputedAt: proposal.chainDisputedAt ?? null,
       chainDisputeWonAt: proposal.chainDisputeWonAt ?? null,
@@ -511,33 +406,17 @@ function computeClocks(
   );
   // Per record when the records are at hand (review N-4): a part disputed, or
   // a case moved on, does not close the window of a sibling still pending.
-  const disputeBy = !onChain
-    ? null
-    : records && records.length > 0
+  const disputeBy =
+    records && records.length > 0
       ? disputeByOf(records)
       : proposal.status === SlashProposalStatus.PROPOSED &&
           chainState === OnChainDisputeState.PENDING
         ? (proposal.chainExecutableAt ?? null)
         : null;
 
-  if (onChain) {
-    if (disputeBy && disputeBy.getTime() > now.getTime()) {
-      runningClock = 'PROVIDER';
-      deadline = disputeBy;
-    }
-  } else if (
-    proposal.status === SlashProposalStatus.PROPOSED &&
-    proposal.respondByAt &&
-    proposal.respondByAt.getTime() > now.getTime()
-  ) {
+  if (disputeBy && disputeBy.getTime() > now.getTime()) {
     runningClock = 'PROVIDER';
-    deadline = proposal.respondByAt;
-  } else if (
-    PLATFORM_CLOCK_STATUSES.has(proposal.status as SlashProposalStatus) &&
-    proposal.platformDecisionDueAt
-  ) {
-    runningClock = 'PLATFORM';
-    deadline = proposal.platformDecisionDueAt;
+    deadline = disputeBy;
   }
 
   const secondsRemaining =
@@ -547,8 +426,6 @@ function computeClocks(
     proposedAt: proposal.proposedAt,
     notifiedAt: proposal.notifiedAt,
     acknowledgedAt: proposal.acknowledgedAt,
-    respondByAt: onChain ? null : proposal.respondByAt,
-    platformDecisionDueAt: onChain ? null : proposal.platformDecisionDueAt,
     earliestExecutionAt: proposal.earliestExecutionAt,
     secondsRemaining,
     runningClock,
@@ -558,7 +435,6 @@ function computeClocks(
     chainExecutableAt: proposal.chainExecutableAt ?? null,
     chainDisputedAt: proposal.chainDisputedAt ?? null,
     chainDisputedParts: proposal.chainDisputedParts ?? 0,
-    disputeOnChain: onChain,
     chainState,
     disputeBy,
     chainRecords: records?.length ?? 0,
@@ -750,44 +626,6 @@ function toAttributionRows(groups: readonly SlaWindowFailureGroup[]): SlashAttri
   }
 
   return rows;
-}
-
-/**
- * The claim the dispute form should pre-select, derived from the evidence
- * rather than from the provider. Checked in this order: a change overlay
- * that explains most failures, then agent concentration, then a thin sample —
- * the first that fits wins, and `null` when none does.
- */
-function deriveSuggestedClaim(
-  changeOverlay: ChangeOverlayDto | null,
-  agentGroups: readonly SlaWindowFailureGroup[],
-  strike: SlaStrikeEntity | null,
-): DisputeClaimType | null {
-  if (changeOverlay) {
-    const total = changeOverlay.failuresBefore + changeOverlay.failuresAfter;
-    if (total > 0 && changeOverlay.failuresAfter / total > CHANGE_OVERLAY_MAJORITY_SHARE) {
-      return DisputeClaimType.PLATFORM_MAPPING_CHANGE;
-    }
-  }
-
-  const totalFailures = agentGroups.reduce((sum, group) => sum + Number(group.count), 0);
-  const topAgent = agentGroups[0];
-  if (
-    topAgent &&
-    totalFailures > 0 &&
-    Number(topAgent.count) / totalFailures >= GRIEFING_AGENT_SHARE_THRESHOLD
-  ) {
-    return DisputeClaimType.AGENT_GRIEFING;
-  }
-
-  if (
-    strike &&
-    strike.verifiedCalls < strike.minVerifiedCalls * INSUFFICIENT_SAMPLE_GATE_MULTIPLE
-  ) {
-    return DisputeClaimType.INSUFFICIENT_SAMPLE;
-  }
-
-  return null;
 }
 
 interface RestorationBasis {

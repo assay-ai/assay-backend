@@ -2,21 +2,16 @@ import { DISPUTE_TIMEOUT_MS } from '@modules/slash/constants/slash.constants';
 import {
   cancelledByArbiter,
   disputeByOf,
-  disputesOnChain,
   OnChainDisputeMirror,
   OnChainRecordMirror,
   OnChainDisputeState,
   onChainDisputeState,
 } from '@modules/slash/domain/on-chain-dispute';
 
-const EVM = 'eip155:46630/erc20:0xdbbc156dd414f43f2c952c1be0f16a0b9a826cd3';
-const SOLANA =
-  'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1/spl:4zMMC9srt5Ri5X14GAgXhaHii3GnPAEERYPJgZJDncDU';
 const DISPUTED_AT = new Date('2026-10-01T00:00:00Z');
 
 function mirror(patch: Partial<OnChainDisputeMirror>): OnChainDisputeMirror {
   return {
-    assetId: EVM,
     chainStatus: 'PENDING',
     chainDisputedAt: null,
     chainDisputeWonAt: null,
@@ -29,14 +24,8 @@ const state = (patch: Partial<OnChainDisputeMirror>) =>
   onChainDisputeState(mirror(patch), DISPUTE_TIMEOUT_MS);
 
 describe('the on-chain dispute', () => {
-  it('is the dispute on EVM only', () => {
-    expect(disputesOnChain(EVM)).toBe(true);
-    expect(disputesOnChain(SOLANA)).toBe(false);
-  });
-
   describe('the record state, from the mirror', () => {
-    it('is null off EVM and before a record stands', () => {
-      expect(state({ assetId: SOLANA })).toBeNull();
+    it('is null before a record stands', () => {
       expect(state({ chainStatus: 'NONE' })).toBeNull();
       expect(state({ chainStatus: 'PROPOSING' })).toBeNull();
     });
