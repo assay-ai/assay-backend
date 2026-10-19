@@ -1,4 +1,5 @@
 import request, { Response } from 'supertest';
+import { getAddress } from 'viem';
 
 import { AgentDelegateService } from '@modules/account/services/agent-delegate.service';
 import { BlockSubjectKind, subjectKey } from '@modules/blocklist/domain/account-block';
@@ -30,6 +31,7 @@ import {
   TOOLS,
   USDG,
   Via,
+  WEB,
   World,
   bootEquivalenceApps,
   credentialOf,
@@ -149,6 +151,50 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
   const seen = (response: Response) => {
     const view = observed(response) as { body?: Record<string, unknown> };
     if (view.body && typeof view.body === 'object') delete view.body.id;
+    return view;
+  };
+
+  /**
+   * A response without the enable-paid notice of a PAYMENT_REQUIRED (§7.10
+   * item 2, H2), once that notice is checked to be the one `via` must get:
+   * the API key gets `fixUrl` to its own credential and the payment-key
+   * sentence; the third-party grant gets no `fixUrl` and the Assay app
+   * sentence. Then both are taken out, so the rest compares equal.
+   */
+  const withoutKeyNotice = (
+    view: ReturnType<typeof seen>,
+    via: Via,
+    credentialId: string,
+    count: { notices: number },
+  ) => {
+    const result = (view.body as { result?: Record<string, unknown> } | undefined)?.result as
+      | {
+          _meta?: Record<string, Record<string, unknown>>;
+          content?: { text?: string }[];
+        }
+      | undefined;
+    const error = result?._meta?.['assay/error'];
+    if (error?.code !== 'PAYMENT_REQUIRED') return view;
+    count.notices += 1;
+    const text = result?.content?.[0]?.text ?? '';
+    if (via === 'key') {
+      const fixUrl = `${WEB}/agents/enable-paid?credential=${credentialId}`;
+      expect(error.fixUrl).toBe(fixUrl);
+      expect(text.endsWith(` Paid calls need a payment key on your computer: ${fixUrl}`)).toBe(
+        true,
+      );
+    } else {
+      expect(error).not.toHaveProperty('fixUrl');
+      expect(text.endsWith(' Paid tools need the Assay app on your computer.')).toBe(true);
+      expect(text).not.toContain('/agents/enable-paid');
+    }
+    delete error.fixUrl;
+    for (const item of result?.content ?? []) {
+      if (typeof item.text !== 'string') continue;
+      item.text = item.text
+        .replace(/ Paid calls need a payment key on your computer: \S+$/, '')
+        .replace(/ Paid tools need the Assay app on your computer\.$/, '');
+    }
     return view;
   };
 
@@ -902,7 +948,12 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       );
       expect((twins.key as { result: unknown }).result).toMatchObject({
         bound: { challenge: { status: 201 }, bind: { status: 201 } },
-        after: { status: 200, body: { data: { delegate: 'eip155:46630:<delegate>' } } },
+        before: { status: 200, body: { data: { delegate: null, paidCalls: null } } },
+        // Bound, and not yet authorised by the payer on chain (R-PAY-3).
+        after: {
+          status: 200,
+          body: { data: { delegate: 'eip155:46630:<delegate>', paidCalls: { status: 'NONE' } } },
+        },
       });
       expect(apps.market.chain.writes).toEqual([]);
     });
@@ -1151,14 +1202,88 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       });
     });
 
-    it.todo(
-      'PAYMENT_REQUIRED has no fixUrl and ends with " Paid tools need the Assay app on your computer." (Task 2.13)',
-    );
+    it('PAYMENT_REQUIRED has no fixUrl and ends with " Paid tools need the Assay app on your computer." (Task 2.13)', async () => {
+      const world = await apps.world({ client: 'third-party' });
+      const errorOf = (response: Response) =>
+        response.body?.result?._meta?.['assay/error'] as Record<string, unknown>;
+      const textOf = (response: Response) =>
+        String(response.body?.result?.content?.[0]?.text ?? '');
+      // R-PAY-4: the link is read off the session; no chain read is added.
+      const reads = jest.spyOn(apps.market.chain, 'readContract');
+      try {
+        const viaGrant = await call(world.grant.bearer, '/', TOOLS.paid.name);
+        const viaKey = await call(world.key.bearer, '/', TOOLS.paid.name);
+        expect(reads).not.toHaveBeenCalled();
+
+        expect(errorOf(viaGrant)).toMatchObject({ code: 'PAYMENT_REQUIRED' });
+        expect(errorOf(viaGrant)).not.toHaveProperty('fixUrl');
+        expect(textOf(viaGrant).endsWith(' Paid tools need the Assay app on your computer.')).toBe(
+          true,
+        );
+        expect(textOf(viaGrant)).not.toContain('/agents/enable-paid');
+
+        // The API key of the same agent gets the link, to its own credential.
+        const fixUrl = `${WEB}/agents/enable-paid?credential=${world.key.id}`;
+        expect(errorOf(viaKey)).toMatchObject({ code: 'PAYMENT_REQUIRED', fixUrl });
+        expect(
+          textOf(viaKey).endsWith(` Paid calls need a payment key on your computer: ${fixUrl}`),
+        ).toBe(true);
+
+        // Otherwise one requirement: the same parties, all EIP-55 (Task 2.3 M5).
+        const grantRequirement = requirementOf(viaGrant)!;
+        const keyRequirement = requirementOf(viaKey)!;
+        expect({ ...grantRequirement, seq: '<seq>' }).toStrictEqual({
+          ...keyRequirement,
+          seq: '<seq>',
+        });
+        const addressOf = (id: string) => /0x[0-9a-fA-F]{40}$/.exec(id)![0];
+        for (const id of [
+          keyRequirement.payer,
+          keyRequirement.payTo,
+          keyRequirement.provider,
+          keyRequirement.amount.asset,
+        ]) {
+          expect(addressOf(id)).toBe(getAddress(addressOf(id)));
+        }
+      } finally {
+        reads.mockRestore();
+      }
+    });
+
+    it('the assay-mcp grant gets the enable-paid fixUrl to its own credential; none once a key is bound', async () => {
+      const world = await apps.world();
+      const errorOf = (response: Response) =>
+        response.body?.result?._meta?.['assay/error'] as Record<string, unknown>;
+      const unbound = await call(world.grant.bearer, '/', TOOLS.paid.name);
+      expect(errorOf(unbound)).toMatchObject({
+        code: 'PAYMENT_REQUIRED',
+        fixUrl: `${WEB}/agents/enable-paid?credential=${world.grant.id}`,
+      });
+
+      const key = newDelegateKey();
+      await bindDelegate(world.grant.bearer, key);
+      const bound = await call(world.grant.bearer, '/', TOOLS.paid.name);
+      expect(errorOf(bound)).toMatchObject({ code: 'PAYMENT_REQUIRED' });
+      expect(errorOf(bound)).not.toHaveProperty('fixUrl');
+      expect(String(bound.body?.result?.content?.[0]?.text)).not.toContain('Paid ');
+      // The delegate is named in its EIP-55 spelling.
+      expect(requirementOf(bound)).toMatchObject({ delegate: key.account });
+      expect(key.account.split(':')[2]).toBe(getAddress(key.account.split(':')[2]));
+    });
 
     it('every free MCP case equals the key, on every URL kind', async () => {
+      // A paid step differs by design only in the payment-key notice (H2):
+      // each side's notice is asserted, then taken out, and the rest is equal.
+      const notices: Record<Via, { notices: number }> = {
+        key: { notices: 0 },
+        grant: { notices: 0 },
+      };
+      const seenRaw = seen;
       await equivalent(
         await apps.pair({ client: 'third-party' }),
-        async ({ world, bearer }) => {
+        async ({ world, via, bearer, credentialId }) => {
+          const seen = (response: Response) =>
+            withoutKeyNotice(seenRaw(response), via, credentialId, notices[via]);
           await apps.toolsetFor(world, 'kit', 'PRIVATE');
           const steps: Record<string, unknown> = {};
           for (const kind of KINDS) {
@@ -1189,13 +1314,15 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
               arguments: { query: 'moon landing' },
             }),
           );
-          // Paid step 1 with no key bound on either side: equal until Task 2.13
-          // adds the third-party fixUrl rule and sentence (review M9).
+          // Paid step 1 with no key bound on either side.
           steps.paidRequirement = seen(await call(bearer, '/', TOOLS.paid.name));
           return steps;
         },
         { dataSource: apps.dataSource },
       );
+      // The notice was checked on both sides, at least on the paid step.
+      expect(notices.key.notices).toBeGreaterThanOrEqual(1);
+      expect(notices.grant.notices).toBe(notices.key.notices);
     });
   });
 });

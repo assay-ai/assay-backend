@@ -6,8 +6,11 @@ import Redis from 'ioredis';
 import { UNIQUE_VIOLATION_CODE } from '@database/postgres/repositories/abstract.repository';
 import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
+import { sameAccountSpelling } from '@modules/chains/evm/eip55';
 import { AccountId } from '@modules/chains/ports/caip.types';
 import { DelegateBindingChallenge } from '@modules/chains/ports/delegate-binding.types';
+import { EscrowDelegationStatus } from '@modules/settlement/ports/escrow-delegation.port';
+import { EscrowDelegationService } from '@modules/settlement/services/escrow-delegation.service';
 import {
   McpCallerKind,
   McpSession,
@@ -15,7 +18,13 @@ import {
 } from '@modules/mcp/ports/mcp-session.port';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 
-import { AgentDelegateBindingDto, DelegateChallengeResponseDto } from '../dto/agent-delegate.dto';
+import {
+  AgentDelegateBindingDto,
+  AgentDelegateStatusDto,
+  DelegateChallengeResponseDto,
+  PaidCallsDto,
+  PaidCallsStatus,
+} from '../dto/agent-delegate.dto';
 import { AccountErrors } from '../errors/account.errors';
 
 /** How long an agent has to sign the challenge it asked for. */
@@ -64,18 +73,53 @@ export class AgentDelegateService {
     private readonly credentials: AgentCredentialRepository,
     private readonly chains: ChainAdapterRegistry,
     @Inject(REDIS_CACHE_CLIENT) private readonly redis: Redis,
+    private readonly delegations: EscrowDelegationService,
   ) {}
 
-  async current(session: McpSession): Promise<AgentDelegateBindingDto> {
+  /**
+   * The binding, the agent's label, and `paidCalls`: where the bound key
+   * stands on chain (spec §7.10 item 1, R-PAY-3). Read through the payer's
+   * standing delegations, filtered to this credential's own key, so a
+   * credential sees its own delegate and no other. No key bound, no chain read.
+   */
+  async current(session: McpSession): Promise<AgentDelegateStatusDto> {
     this.assertAgent(session);
     const row = await this.credentials.findOneBy({
       organizationId: session.organizationId,
       id: session.credentialId,
     });
+    const delegate = (row?.delegateAccount as AccountId | null | undefined) ?? null;
     return {
       credentialId: session.credentialId,
-      delegate: row?.delegateAccount ?? null,
+      agentLabel: session.label ?? null,
+      delegate,
       boundAt: row?.delegateBoundAt ? row.delegateBoundAt.toISOString() : null,
+      paidCalls: delegate ? await this.paidCalls(session.agentAccount, delegate) : null,
+    };
+  }
+
+  private async paidCalls(payer: AccountId, delegate: AccountId): Promise<PaidCallsDto> {
+    const standing = (await this.delegations.list(payer)).find((d) =>
+      sameAccountSpelling(d.delegate, delegate),
+    );
+    if (!standing) {
+      return {
+        status: PaidCallsStatus.NONE,
+        maxVoucherAmount: null,
+        maxPerWindow: null,
+        spentInWindow: null,
+        validUntil: null,
+      };
+    }
+    return {
+      status:
+        standing.status === EscrowDelegationStatus.ACTIVE
+          ? PaidCallsStatus.ACTIVE
+          : PaidCallsStatus.EXPIRED,
+      maxVoucherAmount: standing.maxVoucherAmount.toString(),
+      maxPerWindow: standing.maxPerWindow.toString(),
+      spentInWindow: standing.spentInWindow.toString(),
+      validUntil: new Date(Number(standing.validUntil) * 1000).toISOString(),
     };
   }
 
@@ -178,6 +222,7 @@ export class AgentDelegateService {
     }
     return {
       credentialId: session.credentialId,
+      agentLabel: session.label ?? null,
       delegate: stored.delegate,
       boundAt: boundAt.toISOString(),
     };

@@ -291,7 +291,19 @@ export class FakeEvmChain {
         }
       );
     }
+    if (args.functionName === 'delegatesOf') {
+      // Authorised and not revoked, an expired one included (the escrow's list).
+      const [payer] = args.args as string[];
+      return [...this.delegations.entries()]
+        .filter(([key, record]) => key.startsWith(`${payer.toLowerCase()}:`) && !record.revoked)
+        .map(([key]) => key.split(':')[1]);
+    }
     throw new Error(`unexpected chain read ${args.functionName}`);
+  }
+
+  /** The chain's clock, for the window decay of a delegation read. */
+  async getBlock(): Promise<{ timestamp: bigint }> {
+    return { timestamp: BigInt(Math.floor(Date.now() / 1000)) };
   }
 
   async writeContract(args: { functionName: string }): Promise<never> {
@@ -666,6 +678,9 @@ export async function bootEquivalenceApps(options: BootOptions): Promise<Equival
   const apiRef = await Test.createTestingModule({ imports: [AppApiModule] })
     .overrideProvider(PrivyMcpSessionSource)
     .useValue(personSource)
+    // `GET /agents/me/delegate` reads the payer's delegations (`paidCalls`).
+    .overrideProvider(EVM_RPC_CLIENTS)
+    .useValue(new Map([[CHAIN, market.chain]]))
     .compile();
   const api = apiRef.createNestApplication({ logger: false });
   api.setGlobalPrefix('api');

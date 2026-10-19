@@ -21,6 +21,11 @@ import { ChainAdapterRegistry } from '@modules/chains/chain-adapter.registry';
 import { EvmChainAdapter } from '@modules/chains/evm/evm-chain.adapter';
 import { AccountId, CHAIN_IDS } from '@modules/chains/ports/caip.types';
 import { McpCallerKind, McpSession } from '@modules/mcp/ports/mcp-session.port';
+import { EscrowDelegationStatus } from '@modules/settlement/ports/escrow-delegation.port';
+import {
+  EscrowDelegationService,
+  EscrowDelegationWithUnsettled,
+} from '@modules/settlement/services/escrow-delegation.service';
 import { hashOpaqueToken, mint } from '@modules/oauth/domain/opaque-token';
 
 import { deployment } from '../../unit/chains/evm/evm-fixtures';
@@ -31,6 +36,34 @@ import {
 } from '../helpers/test-database';
 
 const CHAIN = CHAIN_IDS.ROBINHOOD_TESTNET;
+
+/**
+ * The payer's standing delegations as `EscrowDelegationService.list` reads
+ * them from the escrow (`delegatesOf` + `delegationOf`); `authorize` stands for
+ * the payer's own `AuthorizeDelegate`, which the server can never sign.
+ */
+class AuthorizedDelegations {
+  private readonly standing = new Map<AccountId, EscrowDelegationWithUnsettled[]>();
+  readonly reads: AccountId[] = [];
+
+  authorize(payer: AccountId, delegate: AccountId, validUntil: bigint): void {
+    const list = this.standing.get(payer) ?? [];
+    list.push({
+      delegate,
+      maxVoucherAmount: 500_000n,
+      maxPerWindow: 5_000_000n,
+      spentInWindow: 0n,
+      validUntil,
+      status: EscrowDelegationStatus.ACTIVE,
+    } as EscrowDelegationWithUnsettled);
+    this.standing.set(payer, list);
+  }
+
+  async list(payer: AccountId): Promise<readonly EscrowDelegationWithUnsettled[]> {
+    this.reads.push(payer);
+    return this.standing.get(payer) ?? [];
+  }
+}
 
 /**
  * Binding an agent credential to its delegate key, against the real migrations
@@ -45,6 +78,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
   let redis: Redis;
   let service: AgentDelegateService;
   let credentials: AgentCredentialRepository;
+  const chain = new AuthorizedDelegations();
   const organizationId = randomUUID();
   const agentId = randomUUID();
   // A fresh key per test: the database outlives a run, and a key is bound to one
@@ -85,6 +119,7 @@ describe('agent_credentials.delegate_account — binding a credential to its del
       credentials,
       new ChainAdapterRegistry([adapter], [CHAIN]),
       redis,
+      chain as unknown as EscrowDelegationService,
     );
   }, 300_000);
 
@@ -160,6 +195,45 @@ describe('agent_credentials.delegate_account — binding a credential to its del
         errorCode: 'ACCOUNT_DELEGATE_CHALLENGE_INVALID',
       },
     );
+  });
+
+  /** §7.10 item 1, R-PAY-3: the delegate status, with the agent's label beside the credential. */
+  it('paidCalls ACTIVE with the caps after an authorize fixture; null without a bound delegate', async () => {
+    const id = await credential();
+    const labelled = { ...session(id), label: 'research bot' };
+    const before = chain.reads.length;
+    expect(await service.current(labelled)).toEqual({
+      credentialId: id,
+      agentLabel: 'research bot',
+      delegate: null,
+      boundAt: null,
+      paidCalls: null,
+    });
+    // No key bound, no chain read.
+    expect(chain.reads).toHaveLength(before);
+
+    const challenge = await service.challenge(labelled, delegateKey.address);
+    await service.bind(labelled, challenge.challengeId, await sign(challenge.typedData));
+    const delegate = `${CHAIN}:${delegateKey.address}` as AccountId;
+    expect((await service.current(labelled)).paidCalls).toMatchObject({ status: 'NONE' });
+
+    const validUntil = BigInt(Math.floor(Date.now() / 1000) + 30 * 86_400);
+    chain.authorize(labelled.agentAccount, delegate, validUntil);
+    const status = await service.current(labelled);
+    expect(status).toMatchObject({
+      credentialId: id,
+      agentLabel: 'research bot',
+      delegate,
+      paidCalls: {
+        status: 'ACTIVE',
+        maxVoucherAmount: '500000',
+        maxPerWindow: '5000000',
+        spentInWindow: '0',
+        validUntil: new Date(Number(validUntil) * 1000).toISOString(),
+      },
+    });
+    expect(status.boundAt).not.toBeNull();
+    expect(chain.reads.at(-1)).toBe(labelled.agentAccount);
   });
 
   /** D1-S03: one key, one live credential, across organizations. */

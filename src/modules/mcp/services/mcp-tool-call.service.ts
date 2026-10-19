@@ -4,6 +4,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 import { VerificationRecordRepository } from '@database/postgres/repositories/verification-record.repository';
 import { ENABLED_CHAINS } from '@modules/chains/enabled-chains';
 import { assertRailOffered, chainMetadata, offersRail } from '@modules/chains/chain-metadata';
+import { checksummedAccount, checksummedAsset } from '@modules/chains/evm/eip55';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
 import { Money } from '@modules/chains/ports/money.types';
 import { LedgerErrorCode } from '@modules/ledger/errors/ledger.errors';
@@ -39,6 +40,7 @@ import {
 } from '@modules/tool/domain/classification';
 import { RoutingContext, RoutingRules } from '@modules/tool/domain/routing';
 import { ToolAccessErrorCode, ToolAccessErrors } from '@modules/tool/errors/tool-access.errors';
+import { MCP_HOST_CONFIG, McpHostConfig } from '@modules/toolset/config/mcp-host.config';
 import { CallAttribution } from '@modules/toolset/domain/attribution';
 import {
   JsonObject,
@@ -184,6 +186,9 @@ export class McpToolCallService {
     // Stamps which MCP URL a paid call came through on its intent. Optional so
     // a hand-built harness needs none.
     @Optional() private readonly attribution?: CallAttributionWriter,
+    // `WEB_APP_URL`, the base of the enable-paid `fixUrl` (§7.10 item 2).
+    // Optional so a hand-built harness needs none; absent, no link is given.
+    @Optional() @Inject(MCP_HOST_CONFIG) private readonly host?: McpHostConfig,
   ) {}
 
   /**
@@ -873,7 +878,7 @@ export class McpToolCallService {
         session.agentAccount,
         reading ? reading.seqHigh : null,
       );
-      const requirement: VoucherRequirement = {
+      const requirement: VoucherRequirement = checksummedRequirement({
         rail: 'B',
         scheme: 'voucher',
         network: session.chainId,
@@ -888,7 +893,10 @@ export class McpToolCallService {
         seq,
         maxTimeoutSeconds: VOUCHER_MAX_TTL_SECONDS,
         ...delegationTerms(session),
-      };
+      });
+      // No payment key bound yet: where to get one (§7.10 item 2). Read off
+      // the session alone — no chain read is added to this path (R-PAY-4).
+      const keyNotice = paymentKeyNotice(session, this.host?.webAppUrl);
       return {
         kind: 'ERROR',
         code: McpFailureCode.PAYMENT_REQUIRED,
@@ -897,10 +905,12 @@ export class McpToolCallService {
           `${tool.name} is paid on rail B: sign the voucher in x402/paymentRequired and ` +
           `call again with it in _meta["assay/voucher"]` +
           delegationHint(session) +
-          (isNotReviewed(tool) ? ' This maker’s tool is not reviewed.' : ''),
+          (isNotReviewed(tool) ? ' This maker’s tool is not reviewed.' : '') +
+          keyNotice.sentence,
         intentId: null,
         // Beside the voucher, never inside it: the requirement is what is signed.
         detail: {
+          ...(keyNotice.fixUrl ? { fixUrl: keyNotice.fixUrl } : {}),
           paymentRequired: requirement,
           ...(isNotReviewed(tool) ? { notReviewed: true } : {}),
         },
@@ -2394,12 +2404,86 @@ export function delegationTerms(
 
 export function delegationHint(session: McpSession): string {
   if (namespaceOf(session.chainId) !== 'eip155') return '';
+  // EIP-55, like the requirement beside it: an agent may copy an address from here.
+  const payer = checksummedAccount(session.agentAccount);
   return session.delegateAccount
-    ? `. The payer (${session.agentAccount}) or the delegate key bound to this credential ` +
-        `(${session.delegateAccount}) may sign; a delegate signs within the caps the payer ` +
-        `authorised on chain`
-    : `. The payer (${session.agentAccount}) may sign, or a delegate key the payer authorised ` +
-        `on chain once it is bound to this credential (POST /agents/me/delegate)`;
+    ? `. The payer (${payer}) or the delegate key bound to this credential ` +
+        `(${checksummedAccount(session.delegateAccount)}) may sign; a delegate signs within ` +
+        `the caps the payer authorised on chain.`
+    : `. The payer (${payer}) may sign, or a delegate key the payer authorised ` +
+        `on chain once it is bound to this credential (POST /agents/me/delegate).`;
+}
+
+/** The sentence a PAYMENT_REQUIRED for a payment client ends with, before its link. */
+export const PAYMENT_KEY_SENTENCE = ' Paid calls need a payment key on your computer: ';
+
+/** The sentence a PAYMENT_REQUIRED for any other caller ends with (H2: no link). */
+export const ASSAY_APP_SENTENCE = ' Paid tools need the Assay app on your computer.';
+
+/** `{WEB}/agents/enable-paid?credential={credentialId}` (R-PAY-1, R-PAY-4). */
+export function enablePaidUrl(webAppUrl: string, credentialId: string): string {
+  return `${webAppUrl}/agents/enable-paid?credential=${encodeURIComponent(credentialId)}`;
+}
+
+/** What a rail-B PAYMENT_REQUIRED adds about the payment key: a sentence, and maybe a link. */
+export interface PaymentKeyNotice {
+  readonly sentence: string;
+  /** `_meta["assay/error"].fixUrl`; only ever for a payment client. */
+  readonly fixUrl: string | null;
+}
+
+/**
+ * The enable-paid link and its sentence (spec §7.10 item 2, R-PAY-4, H2).
+ *
+ * Only on eip155 and only when no delegate key is bound to the credential —
+ * the one trigger, read off the session, so no chain read is added to the
+ * call path. Then:
+ *
+ * - a payment client — an API key or an `assay-mcp` grant
+ *   (`paymentsAllowed === true`, exactly, so a session without the field gets
+ *   no link) with a stored credential the page can name — gets
+ *   `{WEB}/agents/enable-paid?credential={credentialId}` and the sentence
+ *   that carries it;
+ * - anyone else (a third-party grant, a person's or a config session, or no
+ *   `WEB_APP_URL`) gets " Paid tools need the Assay app on your computer."
+ *   and no link: a hosted connector is free only and can never bind a key.
+ */
+export function paymentKeyNotice(
+  session: McpSession,
+  webAppUrl: string | undefined,
+): PaymentKeyNotice {
+  if (namespaceOf(session.chainId) !== 'eip155' || session.delegateAccount) {
+    return { sentence: '', fixUrl: null };
+  }
+  const credentialId = storedCredentialIdOf(session);
+  if (session.paymentsAllowed === true && credentialId && webAppUrl) {
+    const fixUrl = enablePaidUrl(webAppUrl, credentialId);
+    return { sentence: `${PAYMENT_KEY_SENTENCE}${fixUrl}`, fixUrl };
+  }
+  return { sentence: ASSAY_APP_SENTENCE, fixUrl: null };
+}
+
+/**
+ * The requirement with every eip155 address in its EIP-55 spelling: `payer`,
+ * `payTo`, `provider`, `delegate` and the asset. `assay-mcp`'s signer accepts
+ * checksummed addresses only; `VoucherService` compares the signed voucher on
+ * the checksummed spelling of both sides, so the retry is unaffected by how a
+ * stored account happens to be spelled. Solana values are unchanged.
+ */
+export function checksummedRequirement(requirement: VoucherRequirement): VoucherRequirement {
+  if (namespaceOf(requirement.network) !== 'eip155') return requirement;
+  return {
+    ...requirement,
+    payer: checksummedAccount(requirement.payer),
+    payTo: checksummedAccount(requirement.payTo),
+    provider: checksummedAccount(requirement.provider),
+    amount: { ...requirement.amount, asset: checksummedAsset(requirement.amount.asset) },
+    ...(requirement.delegate !== undefined
+      ? {
+          delegate: requirement.delegate === null ? null : checksummedAccount(requirement.delegate),
+        }
+      : {}),
+  };
 }
 
 /** Whether `chainId` offers any paid rail (`chain-metadata.ts`'s `rails`). */
