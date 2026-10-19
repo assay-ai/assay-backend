@@ -42,9 +42,12 @@ export class RecordConnectUrlBodyDto {
   @MaxLength(2048)
   url: string;
 
-  @ApiPropertyOptional({ description: 'The suggested server name, at most 9 characters' })
+  @ApiPropertyOptional({
+    description:
+      'The server name the client uses: a lowercase letter, then lowercase letters, digits or dashes, at most 56 characters. The per-URL length rule is checked by the Connect UI',
+  })
   @IsOptional()
-  @Matches(/^[a-z][a-z0-9_-]{0,8}$/)
+  @Matches(/^[a-z][a-z0-9-]{0,55}$/)
   serverName?: string;
 
   @ApiPropertyOptional({

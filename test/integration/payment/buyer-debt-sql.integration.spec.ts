@@ -521,6 +521,7 @@ describe('buyer debt migrations, down and up again', () => {
     // The migrations after these sit on top of them and touch none of their
     // objects: undo those first, newest first.
     const later = [
+      'ConnectUrlServerName1762400000030',
       'PaymentKeySpendIndexes1762400000020',
       'OAuthAuditSignalIndex1762400000014',
       'OAuthCodeReuseDetected1762400000013',
