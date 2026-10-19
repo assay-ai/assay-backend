@@ -10,8 +10,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * grant transaction holds the row, a replay's update waits for its commit and
  * then sees `credential_id`, which it revokes.
  */
-export class OAuthCodeReuseDetected1762400000003 implements MigrationInterface {
-  name = 'OAuthCodeReuseDetected1762400000003';
+export class OAuthCodeReuseDetected1762400000013 implements MigrationInterface {
+  name = 'OAuthCodeReuseDetected1762400000013';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     await queryRunner.query(

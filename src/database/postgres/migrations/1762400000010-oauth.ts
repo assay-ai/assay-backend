@@ -22,8 +22,8 @@ import { MigrationInterface, QueryRunner } from 'typeorm';
  * `MCP_PUBLIC_URL`, so the server upserts it at boot. No backfill: existing
  * credentials take `issued_via = 'API_KEY'` from the column default.
  */
-export class OAuth1762400000000 implements MigrationInterface {
-  name = 'OAuth1762400000000';
+export class OAuth1762400000010 implements MigrationInterface {
+  name = 'OAuth1762400000010';
 
   public async up(queryRunner: QueryRunner): Promise<void> {
     // ── oauth_clients ────────────────────────────────────────────────────────
@@ -191,7 +191,7 @@ export class OAuth1762400000000 implements MigrationInterface {
     )) as { count: number }[];
     if (count > 0) {
       throw new Error(
-        `Cannot revert OAuth1762400000000: ${count} OAuth credential row(s) exist. ` +
+        `Cannot revert OAuth1762400000010: ${count} OAuth credential row(s) exist. ` +
           `Revoke and remove them deliberately first.`,
       );
     }
