@@ -877,11 +877,13 @@ export class McpToolCallService {
     const { escrowPda } = await this.escrow.escrowAddresses(session.agentAccount, asset);
 
     if (!payment) {
-      const { seq } = await this.seqs.allocate(
-        session.organizationId,
-        session.agentAccount,
-        reading ? reading.seqHigh : null,
-      );
+      const { seq } = await this.seqs
+        .allocate(session.organizationId, session.agentAccount, reading ? reading.seqHigh : null)
+        .catch((error: unknown) => {
+          // A buyer who never deposited has no escrow row to draw a seq from:
+          // say where to open one, or the agent is left at a dead end.
+          throw escrowNotOpenNotice(error, session, this.host?.webAppUrl);
+        });
       const requirement: VoucherRequirement = checksummedRequirement({
         rail: 'B',
         scheme: 'voucher',
@@ -1182,16 +1184,26 @@ export class McpToolCallService {
         `${price.amount} of ${price.asset}`,
     );
 
+    // A deposit the chain has not finalised yet is credited later, not lost:
+    // say so, or a buyer who just funded the escrow is told it is empty.
+    const pending =
+      balance?.pending && BigInt(balance.pending.amount) > 0n ? balance.pending.amount : null;
     return {
       kind: 'ERROR',
       code: McpFailureCode.PAYMENT_INSUFFICIENT_FUNDS,
       retryable: false,
-      message: `Insufficient balance: this call costs ${price.amount} of ${price.asset}`,
+      message:
+        `Insufficient balance: this call costs ${price.amount} of ${price.asset}` +
+        (pending
+          ? `. A deposit of ${pending} is still confirming on chain; it becomes spendable once ` +
+            'the chain finalises it, usually within 30 minutes'
+          : ''),
       intentId,
       detail: {
         price: price.amount,
         asset: price.asset,
         available: balance ? balance.available.amount : null,
+        ...(pending ? { pending } : {}),
       },
     };
   }
@@ -2433,6 +2445,44 @@ export const ASSAY_APP_SENTENCE = ' Paid tools need the Assay app on your comput
 /** `{WEB}/agents/enable-paid?credential={credentialId}` (R-PAY-1, R-PAY-4). */
 export function enablePaidUrl(webAppUrl: string, credentialId: string): string {
   return `${webAppUrl}/agents/enable-paid?credential=${encodeURIComponent(credentialId)}`;
+}
+
+/** The sentence a payment client's PAYMENT_ESCROW_NOT_OPEN ends with, before its link. */
+export const FUND_ESCROW_SENTENCE = ' Add funds to open it, then call again: ';
+
+/** `{WEB}/funding`, where a first deposit opens the escrow. */
+export function fundingUrl(webAppUrl: string): string {
+  return `${webAppUrl}/funding`;
+}
+
+/**
+ * `PAYMENT_ESCROW_NOT_OPEN` on a rail-B offer, with where to go next: a
+ * payment client gets `{WEB}/funding` (as `fixUrl` and in the text), anyone
+ * else the same "Assay app" sentence as a PAYMENT_REQUIRED (H2: no link).
+ * Any other error, or one already carrying a reason, is returned unchanged.
+ */
+export function escrowNotOpenNotice(
+  error: unknown,
+  session: McpSession,
+  webAppUrl: string | undefined,
+): unknown {
+  if (
+    !(error instanceof AppError) ||
+    error.errorCode !== PaymentErrorCode.PAYMENT_ESCROW_NOT_OPEN ||
+    error.context?.reason
+  ) {
+    return error;
+  }
+  const account = session.agentAccount;
+  if (session.paymentsAllowed === true && webAppUrl) {
+    const fixUrl = fundingUrl(webAppUrl);
+    return PaymentErrors.escrowNotOpen({
+      account,
+      fixUrl,
+      hint: `${FUND_ESCROW_SENTENCE}${fixUrl}`,
+    });
+  }
+  return PaymentErrors.escrowNotOpen({ account, hint: ASSAY_APP_SENTENCE });
 }
 
 /** What a rail-B PAYMENT_REQUIRED adds about the payment key: a sentence, and maybe a link. */

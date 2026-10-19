@@ -606,7 +606,11 @@ export const PaymentErrors = createDomainErrorFactory('PAYMENT', {
     statusCode: 409,
     message: (context?: Record<string, any>) =>
       `No escrow is open for this account${context?.account ? `: ${context.account}` : ''}` +
-      `${context?.reason ? ` (${context.reason})` : '; fund a deposit to open one'}`,
+      (context?.reason
+        ? ` (${context.reason})`
+        : context?.hint
+          ? `.${context.hint}`
+          : '; fund a deposit to open one'),
   },
 
   /**

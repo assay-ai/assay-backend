@@ -59,7 +59,13 @@ const TOOL_NAME = 'Search the web';
 const RESOURCE = `/mcp/tools/${TOOL_NAME}`;
 const PRICE = usdc('0.05');
 
-function harness(options: { balance?: ReturnType<typeof usdc>; twoProviders?: boolean } = {}) {
+function harness(
+  options: {
+    balance?: ReturnType<typeof usdc>;
+    pending?: ReturnType<typeof usdc>;
+    twoProviders?: boolean;
+  } = {},
+) {
   const ids = options.twoProviders ? ['provider-a', 'provider-b'] : ['provider-a'];
   const invoker = new ScriptedInvoker(
     Object.fromEntries(ids.map((id) => [`binding-${id}`, async () => ok('forty-two')])),
@@ -69,6 +75,7 @@ function harness(options: { balance?: ReturnType<typeof usdc>; twoProviders?: bo
     providers: ids.map((id) => buildProvider(id)),
     invoker,
     balance: options.balance,
+    pending: options.pending,
   });
   return { ...built, invoker };
 }
@@ -483,6 +490,22 @@ describe('rail B over MCP', () => {
         code: McpFailureCode.PAYMENT_INSUFFICIENT_FUNDS,
       });
       expect(h.invoker.invocations).toHaveLength(0);
+    });
+
+    it('says a deposit is still confirming when one is pending', async () => {
+      const h = harness({ balance: usdc('0.01'), pending: usdc('20') });
+      const requirement = await requirementOf(h);
+
+      const outcome = await h.calls.call(RAIL_B_SESSION, TOOL_NAME, ARGS, paying(requirement));
+
+      expect(outcome).toMatchObject({
+        kind: 'ERROR',
+        code: McpFailureCode.PAYMENT_INSUFFICIENT_FUNDS,
+        detail: { pending: usdc('20').amount },
+      });
+      expect((outcome as { message: string }).message).toContain(
+        `A deposit of ${usdc('20').amount} is still confirming on chain`,
+      );
     });
   });
 
