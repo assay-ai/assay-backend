@@ -261,15 +261,19 @@ export class MetricsCollectorService {
     const day = counters?.last24h ?? null;
     const sum = (values: Record<string, number> | undefined): number | null =>
       values ? Object.values(values).reduce((total, value) => total + value, 0) : null;
+    // Absent, not `{}`, when the source failed: an empty object would read as
+    // "nothing happened" next to the null value.
     const nonZero = (values: Record<string, number> | undefined) =>
-      values ? Object.fromEntries(Object.entries(values).filter(([, value]) => value > 0)) : {};
+      values
+        ? Object.fromEntries(Object.entries(values).filter(([, value]) => value > 0))
+        : undefined;
     const gate = <T>(input: T | null | undefined, evaluate: (value: T) => GateInput) =>
       input === null || input === undefined ? null : toGate(evaluate(input));
 
     const stopped = db ? db.stoppedForRefreshReuse + db.stoppedForCodeReuse : null;
     const missing = counters?.lastHour.continueCookieMissing ?? null;
 
-    return [
+    const readings = [
       this.reading(
         ObservabilitySignal.OAUTH_LIVE_GRANTS,
         'oauth',
@@ -381,6 +385,16 @@ export class MetricsCollectorService {
         nonZero(day?.mcp_unauthorized),
       ),
     ];
+
+    // A source that failed or timed out: say so, rather than the catalogue's
+    // description of where the number would have come from.
+    const unavailable = new Set<string>([
+      ...(db ? [] : OAUTH_DATABASE_SIGNALS),
+      ...(counters ? [] : OAUTH_COUNTER_SIGNALS),
+    ]);
+    return readings.map((reading) =>
+      unavailable.has(reading.signal) ? { ...reading, reason: OAUTH_SOURCE_UNAVAILABLE } : reading,
+    );
   }
 
   private reconciliationRow(run: {
@@ -440,6 +454,28 @@ export class MetricsCollectorService {
     };
   }
 }
+
+const OAUTH_SOURCE_UNAVAILABLE =
+  'Source unavailable: the read failed or did not answer within 1 s. Not zero.';
+
+const OAUTH_DATABASE_SIGNALS: readonly string[] = [
+  ObservabilitySignal.OAUTH_LIVE_GRANTS,
+  ObservabilitySignal.OAUTH_LIVE_GRANTS_PER_AGENT_MAX,
+  ObservabilitySignal.OAUTH_GRANTS_STOPPED_FOR_REUSE,
+  ObservabilitySignal.OAUTH_REFRESH_STALE_REUSE,
+  ObservabilitySignal.OAUTH_REFRESH_GRACE_USES,
+  ObservabilitySignal.OAUTH_DCR_REGISTRATIONS,
+  ObservabilitySignal.OAUTH_CIMD_CLIENTS,
+];
+
+const OAUTH_COUNTER_SIGNALS: readonly string[] = [
+  ObservabilitySignal.OAUTH_TOKEN_RESULTS,
+  ObservabilitySignal.OAUTH_CONSENT_STEPS,
+  ObservabilitySignal.OAUTH_CONTINUE_COOKIE_MISSING,
+  ObservabilitySignal.OAUTH_AUTHORIZE_OUTCOMES,
+  ObservabilitySignal.OAUTH_CIMD_FETCHES,
+  ObservabilitySignal.MCP_UNAUTHORIZED,
+];
 
 type GateInput = { severity: AlertSeverity; summary: string } | null;
 

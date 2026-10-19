@@ -428,6 +428,99 @@ describe('toolsets and access, against a real database and Redis', () => {
         404,
       );
     });
+
+    it('a revoked or expired key is not narrowed: 404, nothing written', async () => {
+      const s = services();
+      for (const dead of [
+        { revoked_at: new Date(Date.now() - 60_000), expires_at: null },
+        { revoked_at: null, expires_at: new Date(Date.now() - 60_000) },
+      ]) {
+        const credentialId = randomUUID();
+        await dataSource.query(
+          `INSERT INTO agent_credentials
+             (id, organization_id, agent_id, name, prefix, token_hash, revoked_at, revoked_by,
+              expires_at)
+           VALUES ($1, $2, $3, 'ci', 'assay_sk_li', $4, $5, $6, $7)`,
+          [
+            credentialId,
+            orgA,
+            agentA,
+            `hash-${credentialId}`,
+            dead.revoked_at,
+            dead.revoked_at ? 'user:example' : null,
+            dead.expires_at,
+          ],
+        );
+        const patch = s.access.patchCredential(
+          orgA,
+          credentialId,
+          { accessMode: AccessMode.RESTRICTED, allowedToolIds: [GEOCODE.id] },
+          ACTOR,
+        );
+        expect((await errorOf(patch))?.status).toBe(404);
+        const [row] = (await dataSource.query(
+          `SELECT access_mode FROM agent_credentials WHERE id = $1`,
+          [credentialId],
+        )) as { access_mode: string | null }[];
+        expect(row.access_mode).toBeNull();
+      }
+    });
+
+    it('a PATCH waiting on a grant that is being replaced fails once the replacement commits', async () => {
+      const s = services();
+      const credentialId = randomUUID();
+      await dataSource.query(
+        `INSERT INTO agent_credentials (id, organization_id, agent_id, name, prefix, token_hash)
+         VALUES ($1, $2, $3, 'ci', 'assay_sk_li', $4)`,
+        [credentialId, orgA, agentA, `hash-${credentialId}`],
+      );
+
+      // The replacement exchange: it locks the old row, copies its narrowing
+      // and revokes it in one transaction (OAuthGrantWriter.createGrant).
+      const exchange = dataSource.createQueryRunner();
+      await exchange.connect();
+      await exchange.startTransaction();
+      let settled = false;
+      try {
+        await exchange.query(`SELECT id FROM agent_credentials WHERE id = $1 FOR UPDATE`, [
+          credentialId,
+        ]);
+
+        const patch = s.access
+          .patchCredential(
+            orgA,
+            credentialId,
+            { accessMode: AccessMode.RESTRICTED, allowedToolIds: [GEOCODE.id] },
+            ACTOR,
+          )
+          .finally(() => {
+            settled = true;
+          });
+        const outcome = errorOf(patch);
+
+        // The PATCH is blocked on the row lock, not finished.
+        await new Promise((resolve) => setTimeout(resolve, 300));
+        expect(settled).toBe(false);
+
+        await exchange.query(
+          `UPDATE agent_credentials SET revoked_at = now(), revoked_by = 'system:oauth-replaced'
+            WHERE id = $1`,
+          [credentialId],
+        );
+        await exchange.commitTransaction();
+
+        expect((await outcome)?.status).toBe(404);
+      } finally {
+        if (exchange.isTransactionActive) await exchange.rollbackTransaction();
+        await exchange.release();
+      }
+
+      const [row] = (await dataSource.query(
+        `SELECT access_mode, allowed_tool_ids FROM agent_credentials WHERE id = $1`,
+        [credentialId],
+      )) as { access_mode: string | null; allowed_tool_ids: string[] | null }[];
+      expect(row).toEqual({ access_mode: null, allowed_tool_ids: null });
+    });
   });
 
   describe('refused calls and Servers in use', () => {

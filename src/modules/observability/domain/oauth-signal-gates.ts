@@ -18,7 +18,12 @@ export const OAUTH_LIVE_GRANTS_PER_AGENT_WARN = OAUTH_MAX_LIVE_GRANTS_PER_AGENT 
 /** §6.7: `continue_cookie_missing` above 5 % of `approved`, over the trailing hour. */
 export const OAUTH_CONTINUE_COOKIE_MISSING_WARN_RATIO = 0.05;
 
-/** §6.3.8: DCR registrations per UTC day, all clients (also the default global cap). */
+/**
+ * §6.3.8: DCR registrations, all clients. Warn at 1000, not above it: 1000 is
+ * also the default per-UTC-day cap, and reaching it is itself the event to
+ * see, because DCR is then closed for everyone until 00:00 UTC. (The window
+ * is the trailing 24 h, so up to about 2000 can show across a day boundary.)
+ */
 export const OAUTH_DCR_PER_DAY_WARN = 1000;
 
 /** §6.3.8: DCR registrations per day under one `client_name`. */

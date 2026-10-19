@@ -19,6 +19,7 @@ import {
 import { AccessEpochService } from '@modules/toolset/services/access-epoch.service';
 import { AuditLogWriter } from '@shared/audit';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 
 import { OAUTH_CONFIG, OAuthConfig } from '../config/oauth.config';
 import {
@@ -440,28 +441,22 @@ export class OAuthTokenService {
     parentHash: string,
     payload: GracePayload,
   ): Promise<void> {
-    let timer: NodeJS.Timeout | undefined;
     try {
-      const write = this.cache
-        .getRedisClient()
-        .set(
-          refreshGraceKey(parentHash),
-          sealGrace(parentToken, parentHash, payload),
-          'EX',
-          OAUTH_REFRESH_GRACE_SECONDS,
-        );
-      const timeout = new Promise<never>((_, reject) => {
-        timer = setTimeout(
-          () => reject(new Error('timeout')),
-          OAUTH_REFRESH_GRACE_WRITE_TIMEOUT_MS,
-        );
-      });
-      await Promise.race([write, timeout]);
+      await withRedisTimeout(
+        () =>
+          this.cache
+            .getRedisClient()
+            .set(
+              refreshGraceKey(parentHash),
+              sealGrace(parentToken, parentHash, payload),
+              'EX',
+              OAUTH_REFRESH_GRACE_SECONDS,
+            ),
+        OAUTH_REFRESH_GRACE_WRITE_TIMEOUT_MS,
+      );
     } catch {
       this.logger.warn('refresh grace entry not stored; the rotation is rolled back');
       throw new GraceStoreFailed();
-    } finally {
-      if (timer) clearTimeout(timer);
     }
   }
 
@@ -484,8 +479,11 @@ export class OAuthTokenService {
   ): Promise<TokenPair | OAuthError> {
     let sealed: string | null = null;
     try {
-      sealed = await this.cache.getRedisClient().get(refreshGraceKey(parentHash));
+      sealed = await withRedisTimeout(() =>
+        this.cache.getRedisClient().get(refreshGraceKey(parentHash)),
+      );
     } catch {
+      // Failed or timed out: no entry can be read, so `invalid_grant`, no revoke.
       sealed = null;
     }
     const payload = sealed === null ? null : openGrace(parentToken, parentHash, sealed);
@@ -635,7 +633,10 @@ export class OAuthTokenService {
    */
   private async bumpAccessEpoch(organizationId: string): Promise<void> {
     try {
-      await this.accessEpoch.bump(organizationId);
+      // Bounded: a stalled Redis must not hold the answer of a committed
+      // exchange (the client would retry the code, which is a replay). The
+      // post-commit sweep and the cleanup are the backstop.
+      await withRedisTimeout(() => this.accessEpoch.bump(organizationId));
     } catch {
       this.logger.warn(
         `org ${organizationId}: access epoch not bumped after an OAuth grant change; ` +

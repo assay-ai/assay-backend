@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger, Optional } from '@nestjs/common';
 
 import type { McpUnauthorizedReason } from '@modules/mcp/ports/mcp-unauthorized.port';
 import { CacheService } from '@shared/cache/redis-cache/cache.service';
+import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 
 import {
   isAllowedOAuthCounterLabel,
@@ -30,8 +31,9 @@ export type { McpUnauthorizedReason };
  * operator dashboard reads (`OAuthSignalsReader`); see `oauth-counters.ts` for
  * the keys and the label allow-lists.
  *
- * Every method resolves, never rejects: a Redis failure is logged at debug and
- * the request goes on. A label outside its allow-list is not counted. Counts
+ * Every method resolves, never rejects, within `REDIS_REQUEST_TIMEOUT_MS`: a
+ * Redis that fails or does not answer is logged at debug and the request goes
+ * on. A label outside its allow-list is not counted. Counts
  * the database already holds (grace uses, reuse, DCR registrations, live
  * grants) are not counted here; the dashboard reads them from their tables.
  *
@@ -69,10 +71,14 @@ export class OAuthMetrics {
   private async count(name: OAuthCounterName, label: string): Promise<void> {
     if (!this.cache || !isAllowedOAuthCounterLabel(name, label)) return;
     const key = oauthCounterKey(name, label, this.now());
+    const cache = this.cache;
     try {
-      const redis = this.cache.getRedisClient();
-      const count = await redis.incr(key);
-      if (count === 1) await redis.pexpire(key, OAUTH_COUNTER_TTL_MS);
+      // Bounded: a Redis that fails or hangs skips the count, never the request.
+      await withRedisTimeout(async () => {
+        const redis = cache.getRedisClient();
+        const count = await redis.incr(key);
+        if (count === 1) await redis.pexpire(key, OAUTH_COUNTER_TTL_MS);
+      });
     } catch (error) {
       this.logger.debug(
         `OAuth counter ${name} not recorded: ${error instanceof Error ? error.message : String(error)}`,

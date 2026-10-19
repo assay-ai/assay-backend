@@ -433,6 +433,22 @@ describe('OAuth refresh rotation — real database and Redis', () => {
     expectPair(await refresh(next.refresh_token));
   });
 
+  it('a grace read that never answers → invalid_grant within its bound, no revoke', async () => {
+    const { credentialId, pair } = await grant();
+    expectPair(await refresh(pair.refresh_token));
+    const hung = makeService({
+      getRedisClient: () => ({ get: () => new Promise(() => undefined) }),
+    } as unknown as CacheService);
+
+    const started = Date.now();
+    expect(
+      await hung.refresh({ refreshToken: pair.refresh_token, clientId: client.clientId }),
+    ).toEqual({ error: 'invalid_grant' });
+    expect(Date.now() - started).toBeLessThan(2000);
+    expect((await credential(credentialId)).revokedAt).toBeNull();
+    expect(notifications).toHaveLength(0);
+  });
+
   it('a grace entry whose child never committed → invalid_grant, no revoke', async () => {
     const { credentialId, pair } = await grant();
     const next = expectPair(await refresh(pair.refresh_token));

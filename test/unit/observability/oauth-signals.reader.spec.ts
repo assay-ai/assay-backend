@@ -2,9 +2,12 @@ import { Logger } from '@nestjs/common';
 import { DataSource } from 'typeorm';
 
 import { OAUTH_COUNTERS, oauthCounterKey } from '@modules/oauth/domain/oauth-counters';
-import { OAuthSignalsReader } from '@modules/observability/services/oauth-signals.reader';
+import {
+  OAUTH_SIGNAL_SOURCE_TIMEOUT_MS,
+  OAuthSignalsReader,
+} from '@modules/observability/services/oauth-signals.reader';
 
-import { FakeOAuthRedis, fakeCache } from '../oauth/helpers/oauth-fakes';
+import { FakeOAuthRedis, fakeCache, hungCache, timed } from '../oauth/helpers/oauth-fakes';
 
 const HOUR = 3_600_000;
 // 12:15 UTC: a quarter of the current hour has passed.
@@ -88,6 +91,29 @@ describe('OAuthSignalsReader', () => {
     const bothDown = await reader.read(NOW);
     expect(bothDown).toEqual({ database: null, counters: null });
     expect(warn).toHaveBeenCalled();
+    warn.mockRestore();
+  });
+
+  it('a source that never answers reads as null after 1 s; the other is unaffected', async () => {
+    expect(OAUTH_SIGNAL_SOURCE_TIMEOUT_MS).toBe(1000);
+    const warn = jest.spyOn(Logger.prototype, 'warn').mockImplementation(() => undefined);
+    const never = jest.fn(() => new Promise(() => undefined));
+
+    const hungDb = new OAuthSignalsReader(
+      { query: never } as unknown as DataSource,
+      fakeCache(new FakeOAuthRedis()),
+    );
+    const one = await timed(hungDb.read(NOW));
+    expect(one.value.database).toBeNull();
+    expect(one.value.counters).not.toBeNull();
+    expect(one.ms).toBeGreaterThanOrEqual(OAUTH_SIGNAL_SOURCE_TIMEOUT_MS - 20);
+    expect(one.ms).toBeLessThan(OAUTH_SIGNAL_SOURCE_TIMEOUT_MS + 1000);
+
+    const bothHung = new OAuthSignalsReader({ query: never } as unknown as DataSource, hungCache());
+    const two = await timed(bothHung.read(NOW));
+    expect(two.value).toEqual({ database: null, counters: null });
+    // The two sources wait side by side, not one after the other.
+    expect(two.ms).toBeLessThan(OAUTH_SIGNAL_SOURCE_TIMEOUT_MS + 1000);
     warn.mockRestore();
   });
 });
