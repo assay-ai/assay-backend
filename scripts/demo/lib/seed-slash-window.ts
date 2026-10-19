@@ -85,7 +85,13 @@ import { SlashProposalEntity } from '@database/postgres/entities/slash-proposal.
 import { SlaStrikeRepository } from '@database/postgres/repositories/sla-strike.repository';
 import { SlaWindowRepository } from '@database/postgres/repositories/sla-window.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
-import { AssetId, chainIdOf } from '@modules/chains/ports/caip.types';
+import {
+  AssetId,
+  ChainId,
+  ChainNamespace,
+  chainIdOf,
+  namespaceOf,
+} from '@modules/chains/ports/caip.types';
 import { SlaWindowService } from '@modules/provider/services/sla-window.service';
 
 /** One call to post, already decided by the caller — which agent made it,
@@ -315,9 +321,10 @@ async function writeIntent(
   // the seeded calls are" in the file header.
   const agentOrg =
     input.payer?.organizationId ?? uuidFromLabel(`sla-window-seed:org:${input.agentId}`);
-  const agentAccount =
-    input.payer?.agentAccount ??
-    `solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1:${input.agentId.replace(/-/g, '').slice(0, 32)}`;
+  // On the chain the asset settles on, never a fixed one: a Solana account on
+  // an `eip155` intent is a row no balance read can resolve.
+  const chainId = chainIdOf(input.assetId as AssetId);
+  const agentAccount = input.payer?.agentAccount ?? derivedAgentAccount(chainId, input.agentId);
   // The `6` inlined into the VALUES list below is `decimals` — hardcoded, NOT
   // derived from `input.assetId`. Harmless today (the devnet catalogue has
   // exactly one asset, and it is 6-decimal), but a future caller seeding
@@ -344,7 +351,7 @@ async function writeIntent(
       input.priceAmount,
       '0',
       `sha256:${uuidFromLabel(`sla-window-seed:hash:${input.intentId}`).replace(/-/g, '')}`,
-      'solana:EtWTRABZaYq6iMfeYKouRu166VU2xqa1',
+      chainId,
       uuidFromLabel(`sla-window-seed:call:${input.intentId}`),
       input.providerAccount,
     ],
@@ -399,6 +406,19 @@ async function readPayoutAccount(
     );
   }
   return account;
+}
+
+/**
+ * A deterministic CAIP-10 account for an invented agent, in the shape its chain
+ * accepts: a 20-byte address on `eip155` (lower-case hex, which EIP-55 treats
+ * as unchecksummed and valid), a 32-character base58-safe string elsewhere.
+ */
+function derivedAgentAccount(chainId: ChainId, agentId: string): string {
+  if (namespaceOf(chainId) === ChainNamespace.EIP155) {
+    const address = createHash('sha1').update(`sla-window-seed:account:${agentId}`).digest('hex');
+    return `${chainId}:0x${address}`;
+  }
+  return `${chainId}:${agentId.replace(/-/g, '').slice(0, 32)}`;
 }
 
 /** A stable, deterministic v4-shaped UUID derived from a label — the same

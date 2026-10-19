@@ -81,7 +81,7 @@ import {
   ToolBindingRepository,
   VerificationRecordRepository,
 } from '@database/postgres';
-import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
+import { ASSET_IDS, ROBINHOOD_TESTNET_USDG_ENV } from '@modules/chains/ports/asset-registry';
 import { AccountId, AssetId, CHAIN_IDS, ChainId } from '@modules/chains/ports/caip.types';
 import { LedgerAccountId, LedgerEntryType } from '@modules/ledger/ports/ledger.types';
 import { LedgerService } from '@modules/ledger/services/ledger.service';
@@ -115,20 +115,26 @@ const PROVIDER_ORG = 'a965eec3-ad93-4257-bf9b-e172361ee56c';
  */
 const UNREGISTERED_ORG = '2f6b1c84-9e07-4a3d-8b52-71d0c6f4ae19';
 
-const ASSET: AssetId = ASSET_IDS.USDC_SOLANA_DEVNET;
+/**
+ * The chain every seeded binding, enrolment and call lives on: Robinhood
+ * testnet, the e2e EVM chain. Not Solana — a slash case opens only on an
+ * `eip155` chain, so a Solana binding leaves `yarn demo:slash-case` nothing to
+ * open a case against.
+ */
+const CHAIN: ChainId = CHAIN_IDS.ROBINHOOD_TESTNET;
+const ASSET: AssetId = requireSettlementAsset();
 const DECIMALS = 6;
-const CHAIN: ChainId = CHAIN_IDS.SOLANA_DEVNET;
 
 /** `PLATFORM_FEE_BPS` from the env, falling back to the platform default, so the seeded split matches what live calls charge. */
 const PLATFORM_FEE_BPS = BigInt(process.env.PLATFORM_FEE_BPS || DEFAULT_PLATFORM_FEE_BPS);
 
-/** What every buyer agent is topped up to before the calls run. 500 USDC. */
+/** What every buyer agent is topped up to before the calls run. 500 USDG. */
 const BUYER_TARGET_BALANCE = 500_000_000n;
 
 /** The provider's own wallet — where `PROVIDER_CREDIT` lands and `PAYOUT` leaves from. */
-const PROVIDER_ACCOUNT = `${CHAIN}:ProviderDemoWalletAddress4444444` as AccountId;
+const PROVIDER_ACCOUNT = `${CHAIN}:0x4444444444444444444444444444444444444444` as AccountId;
 /** A different wallet: what a payout is *sent to*, proved separately from the credit account. */
-const PROVIDER_PAYOUT_ACCOUNT = `${CHAIN}:ProviderDemoPayoutWallet66666666`;
+const PROVIDER_PAYOUT_ACCOUNT = `${CHAIN}:0x6666666666666666666666666666666666666666`;
 
 const DAY_MS = 24 * 60 * 60 * 1000;
 /** How far back the seeded traffic reaches. Must be ≥ 10 — reconciliation reads a window. */
@@ -315,7 +321,7 @@ async function main(): Promise<void> {
   );
 
   // 4. Buyers. Topped up to a target rather than deposited blindly, so a
-  //    re-run does not mint another 500 USDC per agent.
+  //    re-run does not mint another 500 USDG per agent.
   const buyers = fundableBuyers();
   for (const buyer of buyers) {
     await topUp(ledger, buyer);
@@ -351,6 +357,23 @@ async function main(): Promise<void> {
 
 // ── Guards ─────────────────────────────────────────────────────────────────
 
+/**
+ * The USDG asset on {@link CHAIN}, from `ROBINHOOD_TESTNET_USDG_ADDRESS`. The
+ * registry leaves it unregistered when that variable is unset, and a seed that
+ * fell back to another chain would hand the slash-case seed a binding it
+ * cannot open a case on.
+ */
+function requireSettlementAsset(): AssetId {
+  const asset = ASSET_IDS.USDG_ROBINHOOD_TESTNET;
+  if (!asset) {
+    throw new Error(
+      `${ROBINHOOD_TESTNET_USDG_ENV} is unset, so ${CHAIN} has no settlement asset to seed ` +
+        'the demo bindings in. Load the API environment first.',
+    );
+  }
+  return asset;
+}
+
 function readCatalogueTools(): ReadonlyMap<string, CataloguedTool> {
   const path = process.env.TOOL_CATALOGUE_SEED_FILE ?? join(SEED_DIR, 'catalogue.json');
   const catalogue = JSON.parse(readFileSync(path, 'utf8')) as { tools: CataloguedTool[] };
@@ -365,7 +388,7 @@ function readCatalogueTools(): ReadonlyMap<string, CataloguedTool> {
  *
  * The enrolment's `stake_authority_account_id` is left null on purpose
  * (`providers.stake_authority` before multichain support). Setting it makes
- * `ProviderStakeService.readChain` issue a devnet RPC call on every load of the
+ * `ProviderStakeService.readChain` issue an RPC call on every load of the
  * Capital screen; with no authority the screen answers out of Postgres alone
  * and reports `chainReadable: true` with the chain-derived fields absent, which
  * is the honest state for a provider who has never signed the challenge.
@@ -411,7 +434,7 @@ async function seedProvider(providers: ProviderRepository, dataSource: DataSourc
       PROVIDER_PAYOUT_ACCOUNT,
       JSON.stringify({
         challengeId: uuidFromLabel('demo:payout-challenge'),
-        signature: 'demo-seed-signature-not-a-real-ed25519-signature',
+        signature: 'demo-seed-signature-not-a-real-signature',
         messageVersion: 'assay-payout-proof/v1',
         provedAt: provedAt.toISOString(),
       }),
@@ -629,9 +652,9 @@ function fundableBuyers(): readonly Buyer[] {
   return DEMO_CREDENTIALS.filter(
     (credential) =>
       credential.fundable &&
-      // The seed's money is one Solana asset. Crediting it to an eip155
-      // account writes a ledger row for an asset that chain does not hold,
-      // and every balance read for that account then fails.
+      // The seed's money is one asset on one chain. Crediting it to an
+      // account on another chain writes a ledger row for an asset that chain
+      // does not hold, and every balance read for that account then fails.
       credential.agentAccount.startsWith(`${CHAIN}:`) &&
       credential.organizationId !== PROVIDER_ORG &&
       credential.organizationId !== UNREGISTERED_ORG,
@@ -787,7 +810,7 @@ async function seedOneCall(
     agentId: buyer.agentId,
     agentAccount: buyer.agentAccount,
     toolId: plan.binding.toolId,
-    // Rail A: the demo buyers' Solana accounts are placeholders with no
+    // Rail A: the demo buyers' balances are seeded ledger deposits with no
     // escrow behind them, and a rail-B hold only credits the provider once a
     // voucher is redeemed on chain — which never happens here. Rail A commits
     // at SETTLED, which is what the payout step below needs in the ledger.
