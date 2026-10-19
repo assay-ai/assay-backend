@@ -1,5 +1,5 @@
 import { randomUUID } from 'node:crypto';
-import { Injectable, Logger } from '@nestjs/common';
+import { Injectable, Logger, Optional } from '@nestjs/common';
 
 import { BlockedRole, BlockSubjectKind } from '@modules/blocklist/domain/account-block';
 import { AccountBlocklistService } from '@modules/blocklist/services/account-blocklist.service';
@@ -44,6 +44,7 @@ import { RedeemVoucherInput, SignedVoucher } from '../ports/voucher.types';
 import { decayVoucherWindow } from '../domain/voucher-window';
 import { EscrowSeqService, assertWithinSeqGap } from './escrow-seq.service';
 import { PaymentIntentService, VoucherAdmission } from './payment-intent.service';
+import { PaymentKeyFirstSpendService } from './payment-key-first-spend.service';
 
 /**
  * C0 and C1 control characters — anything that would break the line-separated
@@ -124,6 +125,9 @@ export class VoucherService {
     private readonly chains: ChainAdapterRegistry,
     private readonly seqs: EscrowSeqService,
     private readonly blocklist: AccountBlocklistService,
+    // `payment_key.first_spend` (spec §7.10 item 6). Optional so a harness
+    // that does not test notices need not build one.
+    @Optional() private readonly firstSpend?: PaymentKeyFirstSpendService,
   ) {}
 
   /**
@@ -161,7 +165,15 @@ export class VoucherService {
     await this.assertIssuedSeq(voucher, input);
     await input.beforeHold?.();
 
-    return this.record(voucher, input, delegation);
+    const intent = await this.record(voucher, input, delegation);
+    // A delegate-signed voucher that now holds money: the payment key's first
+    // spend is worth telling the account holder about. Not on a replay, whose
+    // intent is an earlier attempt's and holds nothing for this voucher. Never
+    // awaited: the notice must not slow or fail the call.
+    if (delegation !== null && intent.voucherSeq === voucher.seq) {
+      this.firstSpend?.afterAdmitted(intent);
+    }
+    return intent;
   }
 
   // ── Buyer debt ───────────────────────────────────────────────────────────

@@ -14,6 +14,7 @@ import { RedeemVoucherInput } from '@modules/payment/ports/voucher.types';
 import { VOUCHER_MAX_SEQ_GAP } from '@modules/payment/constants/escrow-seq.constants';
 import { EscrowSeqService } from '@modules/payment/services/escrow-seq.service';
 import { PaymentIntentService } from '@modules/payment/services/payment-intent.service';
+import { PaymentKeyFirstSpendService } from '@modules/payment/services/payment-key-first-spend.service';
 import { VoucherService } from '@modules/payment/services/voucher.service';
 import { MoneyUtil } from '@shared/utils/money.util';
 
@@ -344,6 +345,49 @@ describe('VoucherService — agent payment delegation (eip155)', () => {
       await service.redeem(higher);
       await rejects(service.redeem(lower), PaymentErrorCode.PAYMENT_VOUCHER_SEQ_STALE);
       expect(intents.created).toHaveLength(1);
+    });
+  });
+
+  /**
+   * `payment_key.first_spend` (spec §7.10 item 6): every admitted voucher a
+   * delegate signed is handed to the first-spend check, which decides
+   * "first"; one the payer's own key signed never is.
+   */
+  describe('the first-spend hand-off', () => {
+    let handed: unknown[];
+
+    beforeEach(() => {
+      handed = [];
+      const firstSpend = {
+        afterAdmitted: (intent: unknown) => {
+          handed.push(intent);
+        },
+      };
+      service = new VoucherService(
+        intents as unknown as PaymentIntentService,
+        new ChainAdapterRegistry([adapter], [CHAIN]),
+        seqs as unknown as EscrowSeqService,
+        noBlocks(),
+        firstSpend as unknown as PaymentKeyFirstSpendService,
+      );
+    });
+
+    it('hands every admitted delegate-signed voucher to the check, after its funds are secured', async () => {
+      chain.grant(payer.address, delegate.address);
+      const first = await service.redeem(input(delegate));
+      const second = await service.redeem(input(delegate));
+      expect(handed).toEqual([first, second]);
+      expect(first.status).toBe(PaymentIntentStatus.FUNDS_SECURED);
+    });
+
+    it('payer-signed voucher → none', async () => {
+      await service.redeem(input(payer));
+      expect(handed).toHaveLength(0);
+    });
+
+    it('a refused delegate voucher → none', async () => {
+      await expect(service.redeem(input(delegate))).rejects.toBeDefined();
+      expect(handed).toHaveLength(0);
     });
   });
 
