@@ -603,7 +603,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       });
     });
 
-    it('the revoke audit entry differs only in naming how the credential was issued (R-OA-26)', async () => {
+    it('the revoke audit entry: one shape, differing only in how the credential was issued (R-OA-26)', async () => {
       const world = await apps.world();
       for (const via of BOTH) {
         const credential = credentialOf(world, via);
@@ -624,8 +624,7 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
         return normaliser(world, via)(row) as { after: Record<string, unknown> };
       };
       const [key, grant] = [of('key'), of('grant')];
-      expect(key.after).toMatchObject({ issuedVia: 'API_KEY' });
-      expect(key.after).not.toHaveProperty('clientId');
+      expect(key.after).toMatchObject({ issuedVia: 'API_KEY', clientId: null });
       expect(grant.after).toMatchObject({ issuedVia: 'OAUTH', clientId: BUILTIN });
       const strip = (entry: { after: Record<string, unknown> }) => {
         const after = { ...entry.after };
@@ -858,28 +857,41 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
   // ── Audit ──────────────────────────────────────────────────────────────────
 
   describe('Audit', () => {
-    // Fails today, and is reported (Task 1.17): an API key's entry carries
-    // `scopes` and `expiresAt` in `after`, a grant's carries `replaces` instead.
-    it.failing(
-      'credential.created: equal but for after.issuedVia and after.clientId (§12.1)',
-      async () => {
-        const world = await apps.world();
-        const rows = (await apps.dataSource.query(
-          `SELECT "resource_id", "resource_type", "actor_type", "actor_id", "before", "after"
-             FROM "audit_log_entries"
-            WHERE "organization_id" = $1 AND "action" = 'credential.created'`,
-          [world.organizationId],
-        )) as { resource_id: string; after: Record<string, unknown> }[];
-        const of = (via: Via) => {
-          const row = rows.find((entry) => entry.resource_id === credentialOf(world, via).id)!;
-          const after = { ...row.after };
-          delete after.issuedVia;
-          delete after.clientId;
-          return normaliser(world, via)({ ...row, after });
-        };
-        expect(of('grant')).toStrictEqual(of('key'));
-      },
-    );
+    it('credential.created: one shape for both; values differ only in how it was issued (§12.1)', async () => {
+      const world = await apps.world();
+      const rows = (await apps.dataSource.query(
+        `SELECT "resource_id", "resource_type", "actor_type", "actor_id", "before", "after"
+           FROM "audit_log_entries"
+          WHERE "organization_id" = $1 AND "action" = 'credential.created'`,
+        [world.organizationId],
+      )) as { resource_id: string; after: Record<string, unknown> }[];
+      const entry = (via: Via) =>
+        rows.find((row) => row.resource_id === credentialOf(world, via).id)!;
+      const [key, grant] = [entry('key'), entry('grant')];
+      const shape = ['agentId', 'name', 'scopes', 'expiresAt', 'issuedVia', 'clientId', 'replaces'];
+      expect(Object.keys(key.after).sort()).toEqual([...shape].sort());
+      expect(Object.keys(grant.after).sort()).toEqual([...shape].sort());
+      expect(key.after).toMatchObject({ issuedVia: 'API_KEY', clientId: null, replaces: null });
+      // A grant's expiry is its rolling refresh expiry at creation (R-OA-13).
+      const [credential] = (await apps.dataSource.query(
+        `SELECT "expires_at" FROM "agent_credentials" WHERE "id" = $1`,
+        [world.grant.id],
+      )) as { expires_at: Date }[];
+      expect(grant.after).toMatchObject({
+        issuedVia: 'OAUTH',
+        clientId: BUILTIN,
+        replaces: null,
+        expiresAt: credential.expires_at.toISOString(),
+      });
+      const issuance = (via: Via, row: { after: Record<string, unknown> }) => {
+        const after = { ...row.after };
+        delete after.issuedVia;
+        delete after.clientId;
+        delete after.expiresAt;
+        return normaliser(world, via)({ ...row, after });
+      };
+      expect(issuance('grant', grant)).toStrictEqual(issuance('key', key));
+    });
   });
 
   // ── Exceptions: a third-party grant (H2, §6.3.13) ──────────────────────────

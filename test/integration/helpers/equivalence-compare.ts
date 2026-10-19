@@ -25,9 +25,10 @@ import { BOTH, Via, World, credentialOf } from './equivalence-fixtures';
  *   rolling `expires_at` (R-OA-13) and its `oauth_*` token rows
  *   ({@link ISSUANCE_COLUMNS}, {@link ISSUANCE_TABLES});
  * - `credential.revoked`'s `after.issuedVia` and `after.clientId` (R-OA-26),
- *   which the revoke case asserts explicitly first;
+ *   the same members as on `credential.created`, asserted by the revoke case;
  * - every `credential.created` entry: how a world obtained its credentials,
- *   not what a case did; the audit case compares them on their own;
+ *   not what a case did (and its `expiresAt` is a grant's rolling expiry); the
+ *   audit case compares them on their own;
  * - values that are facts about the moment, not the call
  *   ({@link VOLATILE_COLUMNS}, {@link VOLATILE_KEYS}, timestamps, signatures
  *   by each world's own key, fresh ids).
@@ -53,10 +54,10 @@ export const ISSUANCE_TABLES = [
 ] as const;
 
 /**
- * Audit `after` members that name how a credential was issued: allowed on
- * `credential.created` (§12.1). `credential.revoked` carries the same two
- * (R-OA-26: OAuth audit entries name the client id); §12.1 does not list it,
- * so the revoke case asserts that difference explicitly before this drops it.
+ * Audit `after` members whose VALUES name how a credential was issued. Both
+ * kinds emit them, in one shape, on `credential.created` and
+ * `credential.revoked` (§12.1, R-OA-26); the audit and revoke cases assert
+ * the values explicitly before this drops them.
  */
 export const ISSUANCE_AUDIT_FIELDS = ['issuedVia', 'clientId'] as const;
 export const ISSUANCE_AUDIT_ACTIONS = ['credential.created', 'credential.revoked'] as const;
