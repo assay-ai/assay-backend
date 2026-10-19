@@ -22,6 +22,13 @@ export const OAUTH_RATE_LIMITS = Object.freeze({
   authorizePerIpPerMinute: 30,
   /** `POST /oauth/token` per minute per `client_id` and client IP key (§6.3.10). */
   tokenPerClientAndIpPerMinute: 60,
+  /**
+   * `POST /oauth/revoke` per minute from one client IP key, whatever the
+   * `client_id`: twice the token endpoint's per-client limit, so one
+   * address can still sign out of two apps at full speed, while rotating
+   * `client_id` no longer buys more token lookups.
+   */
+  revokePerIpPerMinute: 120,
 });
 
 export const OAUTH_MINUTE_SECONDS = 60;

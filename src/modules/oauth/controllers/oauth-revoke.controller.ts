@@ -11,6 +11,7 @@ import { OAuthTokenService } from '../services/oauth-token.service';
 import {
   clientAndIpKey,
   errorName,
+  ipKeyOf,
   isFormEncoded,
   retryAfterSeconds,
   sendOAuthError,
@@ -28,8 +29,10 @@ import {
  * here. The answer never tells a caller whether a token existed. The hint is
  * not needed: the token's prefix says what it is.
  *
- * The one exception is the rate limit: the token endpoint's, per `client_id`
- * and IP key, 60 a minute, on its own counter. Past it the answer is 503 with
+ * The one exception is the rate limit, on counters of its own: the token
+ * endpoint's, per `client_id` and IP key, 60 a minute; and, as revocation
+ * looks a token up whatever client it names, 120 a minute per IP key alone,
+ * so a caller rotating `client_id` is bounded too. Past either the answer is 503 with
  * `Retry-After`, which RFC 7009 §2.2.1 tells a client to retry. With Redis
  * unreachable the revocation still runs: refusing a logout would only keep a
  * token alive.
@@ -54,12 +57,16 @@ export class OAuthRevokeController {
       const body: unknown = isFormEncoded(req) ? req.body : undefined;
       const token = single(body, 'token');
       const clientId = single(body, 'client_id');
+      const perIp = await this.limiter.count('revoke-ip', ipKeyOf(req), OAUTH_MINUTE_SECONDS);
       const count = await this.limiter.count(
         'revoke',
         clientAndIpKey(clientId, req),
         OAUTH_MINUTE_SECONDS,
       );
-      if (count !== null && count > OAUTH_RATE_LIMITS.tokenPerClientAndIpPerMinute) {
+      if (
+        (perIp !== null && perIp > OAUTH_RATE_LIMITS.revokePerIpPerMinute) ||
+        (count !== null && count > OAUTH_RATE_LIMITS.tokenPerClientAndIpPerMinute)
+      ) {
         res.setHeader('Retry-After', String(retryAfterSeconds(OAUTH_MINUTE_SECONDS)));
         sendOAuthError(res, 503, 'temporarily_unavailable', 'Too many revocations; retry later');
         return;
