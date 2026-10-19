@@ -5,9 +5,9 @@ import {
   toFunctionSelector,
 } from 'viem';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 
-import { X402_ESCROW_HOLD_ABI } from '@modules/chains/evm/abi/x402-hold.abi';
+import { ASSAY_ESCROW_HOLD_ABI } from '@modules/chains/evm/abi/assay-hold.abi';
 import { EvmHeldPayments } from '@modules/chains/evm/evm-held-payments.service';
 import { EvmDeployment } from '@modules/chains/evm/evm.constants';
 import { AccountId, AssetId, ChainId } from '@modules/chains/ports/caip.types';
@@ -65,7 +65,7 @@ function build(
 }
 
 function log(eventName: string, args: Record<string, unknown>, address: string = ESCROW) {
-  const abi = [...X402_ESCROW_HOLD_ABI, ...X402_ESCROW_ABI];
+  const abi = [...ASSAY_ESCROW_HOLD_ABI, ...ASSAY_ESCROW_ABI];
   const data = encodeEventTopics({ abi, eventName: eventName as never, args: args as never });
   const event = abi.find((item) => item.type === 'event' && item.name === eventName)!;
   const nonIndexed = (
@@ -81,7 +81,7 @@ function log(eventName: string, args: Record<string, unknown>, address: string =
 describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
   it('pins the selectors the contract upgrade must match', () => {
     const selectors = Object.fromEntries(
-      X402_ESCROW_HOLD_ABI.filter((item) => item.type === 'function').map((item) => [
+      ASSAY_ESCROW_HOLD_ABI.filter((item) => item.type === 'function').map((item) => [
         item.name + (item.inputs.length === 2 && item.inputs[0].type === 'address[]' ? '[]' : ''),
         toFunctionSelector(item),
       ]),
@@ -134,7 +134,7 @@ describe('EvmHeldPayments — the "redeem into hold" ABI (G3.B1)', () => {
 
     expect(sent.every((call) => call.boundQueueWait === true)).toBe(true);
     const decoded = sent.map((call) =>
-      decodeFunctionData({ abi: X402_ESCROW_HOLD_ABI, data: call.data }),
+      decodeFunctionData({ abi: ASSAY_ESCROW_HOLD_ABI, data: call.data }),
     );
     expect(decoded.map((call) => call.functionName)).toEqual([
       'collectHeld',

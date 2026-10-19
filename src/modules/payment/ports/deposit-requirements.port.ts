@@ -61,7 +61,7 @@ export type SolanaDepositRequirements = {
  *
  * ## There is deliberately no `payTo`
  *
- * A plain ERC-20 `transfer` into `X402Escrow` moves the tokens and
+ * A plain ERC-20 `transfer` into `AssayEscrow` moves the tokens and
  * credits **nobody** — the contract's per-buyer accounting only moves inside
  * `depositFor`, and there is no contract-level remedy afterwards. A field named
  * `payTo` carrying the escrow address would be an invitation to do exactly

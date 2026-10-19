@@ -51,7 +51,7 @@ import { privateKeyToAccount } from 'viem/accounts';
 import { evmDomain } from '@modules/chains/evm/eip712/domain';
 import { voucherTypedData } from '@modules/chains/evm/eip712/voucher';
 import { EvmVoucherRedeemer } from '@modules/chains/evm/evm-voucher-redeemer.service';
-import { X402_CONFIG_ABI, X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_CONFIG_ABI, ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { ChainId, toAccountId, toAssetId } from '@modules/chains/ports/caip.types';
 import { RedeemOutcomeKind } from '@modules/payment/ports/voucher-redeemer.port';
 import { MoneyUtil } from '@shared/utils/money.util';
@@ -126,7 +126,7 @@ async function run(): Promise<E2Result> {
   const readEscrow = async () =>
     (await pub.readContract({
       address: escrow,
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'escrowOf',
       args: [buyer.address],
     })) as {
@@ -167,7 +167,7 @@ async function run(): Promise<E2Result> {
     }
     await send('deposit', {
       address: escrow,
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'deposit',
       args: [AMOUNT],
     } as never);
@@ -178,7 +178,7 @@ async function run(): Promise<E2Result> {
   if (state.maxVoucherAmount < AMOUNT || state.maxPerWindow < AMOUNT * 10n) {
     await send('setLimits', {
       address: escrow,
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'setLimits',
       args: [AMOUNT * 2n, AMOUNT * 20n],
     } as never);
@@ -229,7 +229,7 @@ async function run(): Promise<E2Result> {
   const hash = outcome.signature as `0x${string}`;
   const receipt = await pub.getTransactionReceipt({ hash });
   const [redeemed] = parseEventLogs({
-    abi: X402_ESCROW_ABI,
+    abi: ASSAY_ESCROW_ABI,
     eventName: 'VoucherRedeemed',
     logs: receipt.logs.filter((log) => getAddress(log.address) === escrow),
   });
@@ -247,7 +247,7 @@ async function run(): Promise<E2Result> {
   const [before, after, params] = await Promise.all([
     balanceAt(receipt.blockNumber - 1n),
     balanceAt(receipt.blockNumber),
-    pub.readContract({ address: config, abi: X402_CONFIG_ABI, functionName: 'params' }),
+    pub.readContract({ address: config, abi: ASSAY_CONFIG_ABI, functionName: 'params' }),
   ]);
   const { amount, fee, payer, seq } = redeemed.args;
   const delta = after - before;

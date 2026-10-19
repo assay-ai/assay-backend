@@ -6,7 +6,7 @@ import {
   EvmEscrowIntentClient,
 } from '@modules/chains/evm/evm-escrow-intent-builder.service';
 import { EvmRpcError } from '@modules/chains/evm/sanctioned-evm-rpc';
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 import { ASSET_IDS } from '@modules/chains/ports/asset-registry';
 import { AccountId, CHAIN_IDS, ChainId, toAccountId } from '@modules/chains/ports/caip.types';
@@ -314,7 +314,7 @@ describe('EvmEscrowIntentBuilder', () => {
   /*
     The deadline is a CHAIN quantity, and this is the test that says so.
 
-    `X402Escrow._consumeAuth` refuses on `block.timestamp > deadline` — the
+    `AssayEscrow._consumeAuth` refuses on `block.timestamp > deadline` — the
     chain's clock, exactly as `withdraw()` decides maturity on the chain's
     clock. A deadline stamped from `Date.now()` is therefore this process's
     opinion measured against somebody else's ruler, and the failure is not a
@@ -500,7 +500,7 @@ describe('EvmEscrowIntentBuilder', () => {
     expect(intent.to).toBe(DEPLOYMENT.escrow);
     // Decoded through a different path than the one that built it.
     expect(
-      decodeFunctionData({ abi: X402_ESCROW_ABI, data: intent.data as `0x${string}` }),
+      decodeFunctionData({ abi: ASSAY_ESCROW_ABI, data: intent.data as `0x${string}` }),
     ).toEqual({ functionName: 'withdraw', args: undefined });
   });
 
@@ -570,7 +570,7 @@ describe('EvmEscrowIntentBuilder', () => {
   /**
    * The maturity boundary, where the server's clock and the chain's disagree.
    *
-   * `X402Escrow.withdraw()` is `if (block.timestamp < e.withdrawAvailableAt)
+   * `AssayEscrow.withdraw()` is `if (block.timestamp < e.withdrawAvailableAt)
    * revert WithdrawNotYetAvailable()` — the CHAIN's clock, and nothing else. A
    * check written against `Date.now()` is systematically ahead of it (the latest
    * block's timestamp stops advancing the moment it is sealed), so for about one

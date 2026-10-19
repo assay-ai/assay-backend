@@ -22,7 +22,7 @@ import { StakeAuthorityChallenge } from '../ports/stake-authority.types';
  *
  * ## Neither type is on chain, deliberately
  *
- * `X402Escrow` and `X402Stake` verify vouchers and the two `*BySig` doors and
+ * `AssayEscrow` and `AssayStake` verify vouchers and the two `*BySig` doors and
  * nothing else. These two structs are proofs of key control that authorise no
  * movement of value, so they have no on-chain verifier to agree with — which is
  * why they may be defined here rather than copied out of `Types.sol`. What they

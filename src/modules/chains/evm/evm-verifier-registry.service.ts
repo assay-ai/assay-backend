@@ -8,11 +8,11 @@ import {
 
 import { ChainErrors } from '../errors/chains.errors';
 import { ChainId, ChainNamespace, namespaceOf } from '../ports/caip.types';
-import { X402_CONFIG_ABI } from './abi/x402.abi';
+import { ASSAY_CONFIG_ABI } from './abi/assay.abi';
 import { EvmReadClient } from './evm-chain.adapter';
 import { EvmDeployment } from './evm.constants';
 
-/** The five fields `X402Config.verifierKey` returns. Names pinned by the ABI. */
+/** The five fields `AssayConfig.verifierKey` returns. Names pinned by the ABI. */
 interface OnChainVerifierKey {
   readonly registeredAt: bigint;
   readonly expiresAt: bigint;
@@ -22,13 +22,13 @@ interface OnChainVerifierKey {
 }
 
 /**
- * `X402Config`'s verifier allowlist, read-only.
+ * `AssayConfig`'s verifier allowlist, read-only.
  *
  * The eip155 half of `VerifierRegistryPort`. Everything that port's own comment
  * says about being read-only holds here and for the same reason:
- * `registerVerifier` and `revokeVerifier` are `X402Config`'s admin doors, run
+ * `registerVerifier` and `revokeVerifier` are `AssayConfig`'s admin doors, run
  * by a human under the admin Ledger, and are deliberately absent from
- * `X402_CONFIG_ABI` so that no call site in this codebase can reach one. If the
+ * `ASSAY_CONFIG_ABI` so that no call site in this codebase can reach one. If the
  * process that holds the *signing* key could also enrol keys, compromising it
  * would be enough to mint a verifier and slash every provider.
  *
@@ -81,7 +81,7 @@ export class EvmVerifierRegistryService implements VerifierRegistryPort {
 
     const key = (await this.clientFor(chainId).readContract({
       address: deployment.config,
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'verifierKey',
       args: [address],
     })) as OnChainVerifierKey;
@@ -93,7 +93,7 @@ export class EvmVerifierRegistryService implements VerifierRegistryPort {
     return {
       address,
       status: key.revoked ? RegisteredVerifierStatus.REVOKED : RegisteredVerifierStatus.ACTIVE,
-      // `X402Config` stores no label. Empty rather than invented: the caller's
+      // `AssayConfig` stores no label. Empty rather than invented: the caller's
       // own `keyId` is the name it already has, and a label derived here would
       // read like something the chain said.
       label: '',
@@ -127,7 +127,7 @@ export class EvmVerifierRegistryService implements VerifierRegistryPort {
     const deployment = this.deployments.get(chainId);
     if (!deployment) {
       throw ChainErrors.programNotConfigured({
-        what: `the X402Config deployment on ${chainId}`,
+        what: `the AssayConfig deployment on ${chainId}`,
         variable: 'EVM_DEPLOYMENTS',
       });
     }

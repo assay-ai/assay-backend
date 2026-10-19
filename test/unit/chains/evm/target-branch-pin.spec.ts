@@ -6,11 +6,11 @@ import { toEventSignature, toFunctionSelector } from 'viem';
 
 import { EVM_ERROR_BY_SELECTOR } from '@modules/chains/evm/abi/error-selectors';
 import {
-  X402_CONFIG_EVENTS_ABI,
-  X402_PROXY_EVENTS_ABI,
-  X402_SLASH_WATCH_EVENTS_ABI,
-  X402_STAKE_SLASH_ABI,
-} from '@modules/chains/evm/abi/x402.abi';
+  ASSAY_CONFIG_EVENTS_ABI,
+  ASSAY_PROXY_EVENTS_ABI,
+  ASSAY_SLASH_WATCH_EVENTS_ABI,
+  ASSAY_STAKE_SLASH_ABI,
+} from '@modules/chains/evm/abi/assay.abi';
 import { EVM_CONSTANTS } from '@modules/chains/evm/evm.constants';
 
 /**
@@ -96,20 +96,20 @@ function eventsOf(source: string, structs: Map<string, string>): Map<string, str
 
   it('watches events whose signatures the branch declares', () => {
     const structs = structsOf(show('src/Types.sol'));
-    const config = eventsOf(show('src/X402Config.sol'), structs);
-    const stake = eventsOf(show('src/X402Stake.sol'), structs);
-    for (const entry of X402_CONFIG_EVENTS_ABI) {
+    const config = eventsOf(show('src/AssayConfig.sol'), structs);
+    const stake = eventsOf(show('src/AssayStake.sol'), structs);
+    for (const entry of ASSAY_CONFIG_EVENTS_ABI) {
       expect([entry.name, toEventSignature(entry)]).toEqual([entry.name, config.get(entry.name)]);
     }
     for (const entry of [
-      ...X402_SLASH_WATCH_EVENTS_ABI,
-      ...X402_STAKE_SLASH_ABI.filter((item) => item.type === 'event'),
+      ...ASSAY_SLASH_WATCH_EVENTS_ABI,
+      ...ASSAY_STAKE_SLASH_ABI.filter((item) => item.type === 'event'),
     ]) {
       if (entry.type !== 'event') continue;
       expect([entry.name, toEventSignature(entry)]).toEqual([entry.name, stake.get(entry.name)]);
     }
     // ERC-1967, from OpenZeppelin rather than the branch.
-    expect(X402_PROXY_EVENTS_ABI.map((entry) => toEventSignature(entry))).toEqual([
+    expect(ASSAY_PROXY_EVENTS_ABI.map((entry) => toEventSignature(entry))).toEqual([
       'Upgraded(address)',
     ]);
   });

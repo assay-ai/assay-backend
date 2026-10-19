@@ -1,6 +1,6 @@
 import { ContractFunctionRevertedError, zeroAddress } from 'viem';
 
-import { X402_ESCROW_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from '@modules/chains/evm/abi/assay.abi';
 import { EvmReaderClient } from '@modules/chains/evm/evm-escrow-balance-reader.service';
 import {
   EVM_TIGHTEN_DELAY_REPROBE_MS,
@@ -16,7 +16,7 @@ const PAYER = toAccountId(TESTNET, '0x5B38Da6a701c568545dCfcB03FcB875f56beddC4')
 /** What viem throws for a call the old implementation has no selector for (measured on 46630). */
 function unknownSelectorRevert(): Error {
   const cause = new ContractFunctionRevertedError({
-    abi: X402_ESCROW_ABI,
+    abi: ASSAY_ESCROW_ABI,
     functionName: 'effectiveCapsOf',
     data: '0x',
   });

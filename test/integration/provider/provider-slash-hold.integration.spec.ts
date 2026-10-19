@@ -84,7 +84,7 @@ describe('provider slash hold, against a real database', () => {
         ],
       ]) as never,
       new Map([
-        [CHAIN, { config: '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43', stake: '0x0aF4' }],
+        [CHAIN, { config: '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5', stake: '0x0aF4' }],
       ]) as never,
       [CHAIN as never],
       new ProviderChainEnrolmentRepository(dataSource),

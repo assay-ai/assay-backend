@@ -5,7 +5,7 @@ const STAKE_AUTHORITY = '0xA271A3407D3302f4b4Fbe469b9188487cedd7d45';
 const ID = 'a'.repeat(64);
 const CALL = {
   chainId: CHAIN,
-  to: '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c',
+  to: '0x7242F853db478A28Ae76Ace808212d4B68aa73e7',
   data: '0x',
   value: '0' as const,
   signer: STAKE_AUTHORITY,

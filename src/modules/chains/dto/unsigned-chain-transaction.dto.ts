@@ -51,7 +51,7 @@ export class Eip712FieldDto implements Eip712Field {
 }
 
 export class Eip712DomainDto implements Eip712Domain {
-  @ApiProperty({ example: 'X402Escrow' })
+  @ApiProperty({ example: 'AssayEscrow' })
   name!: string;
 
   @ApiProperty({ example: '1' })
@@ -316,7 +316,7 @@ export function toUnsignedChainTransactionDto(
  *
  * `Eip155TypedDataRequest.message` is `Record<string, unknown>` and the builder
  * fills it with **`bigint`s** — `amount`, `nonce`, `deadline` are all `uint64`
- * on `X402Escrow`, and they stay `bigint` in the port so that viem's own
+ * on `AssayEscrow`, and they stay `bigint` in the port so that viem's own
  * `hashTypedData` can take the value unchanged (which is what
  * `evm-escrow-intent-builder.spec.ts` pins them against). `JSON.stringify`
  * throws `TypeError: Do not know how to serialize a BigInt` on exactly that,

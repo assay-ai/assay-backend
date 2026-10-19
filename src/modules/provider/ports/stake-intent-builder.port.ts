@@ -211,7 +211,7 @@ export interface StakeIntentBuilderPort {
    * before anything else.
    *
    * `true` on Solana, where the stake is a PDA that `open_stake` has to create
-   * and the provider pays rent for. `false` on eip155, where `X402Stake` keys a
+   * and the provider pays rent for. `false` on eip155, where `AssayStake` keys a
    * mapping on the provider's address and the first `depositStake` writes the
    * row — there is no account to open and no transaction that could open one.
    *

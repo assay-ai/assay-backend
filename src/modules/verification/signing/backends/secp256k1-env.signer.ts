@@ -40,7 +40,7 @@ const DIGEST_LENGTH = 32;
  * ## Why a leak of it still does not lose user money
  *
  * The verifier key does not move funds. Every money-moving path in
- * `X402Escrow` is authorised by `msg.sender == buyer`, by a buyer's EIP-712
+ * `AssayEscrow` is authorised by `msg.sender == buyer`, by a buyer's EIP-712
  * signature, or by a registered verifier's attestation **plus a 72-hour
  * timelock and `MAX_SLASH_CAP_BPS`** — and enrolling a verifier is the admin
  * Ledger's, a key this codebase never sees. A stolen verifier key buys a
