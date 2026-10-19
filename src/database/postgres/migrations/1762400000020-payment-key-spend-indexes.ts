@@ -48,9 +48,17 @@ export class PaymentKeySpendIndexes1762400000020 implements MigrationInterface {
     }
   }
 
+  /**
+   * `CONCURRENTLY` when no transaction is open. TypeORM's `undoLastMigration`
+   * ignores `transaction = false` and wraps the revert in one under `'each'`
+   * (so does `migration:revert`), where Postgres refuses `CONCURRENTLY`; there
+   * a plain drop is used. Dropping an index takes its lock only for the
+   * catalogue change, not for a build.
+   */
   public async down(queryRunner: QueryRunner): Promise<void> {
+    const concurrently = queryRunner.isTransactionActive ? '' : 'CONCURRENTLY ';
     for (const index of [...INDEXES].reverse()) {
-      await queryRunner.query(`DROP INDEX CONCURRENTLY IF EXISTS "${index.name}"`);
+      await queryRunner.query(`DROP INDEX ${concurrently}IF EXISTS "${index.name}"`);
     }
   }
 }
