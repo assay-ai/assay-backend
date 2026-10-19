@@ -185,6 +185,50 @@ const EXECUTE_MUST_READ_THE_RECORD: ReadonlySet<string> = new Set(['SlashNotPend
  */
 const EXECUTED_BEYOND_DECISION = 'ExecutedBeyondDecision';
 
+/**
+ * B18 `S-16`: the operator's override transaction an execution is recorded
+ * in, and the work (the provider's notice) that waits for its commit.
+ */
+export interface ExecutionTx {
+  readonly queryRunner: QueryRunner;
+  readonly afterCommit: (() => Promise<void>)[];
+}
+
+/**
+ * The patch that moves a case to a fresh epoch whose record is not yet
+ * proposed: the second half of a downward recalculation, once the old record
+ * is off the chain. Shared by {@link SlashExecutionService} and the B18
+ * operator re-proposal, so both write exactly the same row.
+ *
+ * One statement. `chk_slash_proposals_chain_pending_is_whole` refuses a
+ * `PENDING`/`EXECUTED` mirror without both chain clocks, so nulling the clocks
+ * and returning the status to `NONE` separately would be rejected by the
+ * database rather than merely be untidy. `NONE` with both clocks nulled is
+ * exactly what `findAwaitingChainProposal` selects, so the propose sweep picks
+ * it up under the fresh id.
+ */
+export function reproposalEpochPatch(
+  proposal: Pick<SlashProposalEntity, 'id' | 'chainEpoch'>,
+): Partial<SlashProposalEntity> & { chainEpoch: number; chainRequestId: string } {
+  const chainEpoch = proposal.chainEpoch + 1;
+  return {
+    chainEpoch,
+    // Derived from the BUMPED epoch. Deriving from the row as it stands would
+    // reproduce the id that was just cancelled, and `propose_slash`'s `init`
+    // would refuse it forever.
+    chainRequestId: deriveChainRequestId({ id: proposal.id, chainEpoch }),
+    chainStatus: ChainProposalStatus.NONE,
+    chainProposedAt: null,
+    chainExecutableAt: null,
+    chainReserved: null,
+    chainProposalSignature: null,
+    // The previous epoch's claim. Left standing it would misdate work that
+    // belongs to a request id that no longer exists.
+    chainClaimedAt: null,
+    chainLastError: null,
+  };
+}
+
 /** "2026-10-20 17:14 UTC": a time in a provider's notice, without the ISO noise. */
 function utcMinute(at: Date): string {
   return `${at.toISOString().slice(0, 16).replace('T', ' ')} UTC`;
@@ -2255,7 +2299,14 @@ export class SlashExecutionService {
         // Unreachable: neither `cancel_slash` nor `expire_slash` closes the
         // account, so a record that refused the cancel is still readable. An
         // anomaly, and not one to write a status from.
-        await this.proposals.update(scope, { chainLastError: 'SlashNotPending' });
+        //
+        // B18: only onto the mirror this pass read. An operator may have
+        // closed (or re-proposed) the case since, and the note would then sit
+        // on a row it no longer describes.
+        await this.proposals.update(
+          { ...scope, chainStatus: proposal.chainStatus, chainEpoch: proposal.chainEpoch },
+          { chainLastError: 'SlashNotPending' },
+        );
         return false;
       }
 
@@ -2298,6 +2349,49 @@ export class SlashExecutionService {
   }
 
   /**
+   * B18 (`S-16`): an operator records an execution the chain made while the
+   * case's cancel waited — the case shape the admin-cancel sweep cannot read
+   * (a window case with no parts; `slash/domain/stuck-case.ts`). Nothing new:
+   * the same {@link recordAnExecutionNobodyAskedFor} the sweep runs, with the
+   * record the operator's fresh read returned, written **in the caller's
+   * override transaction** (`queryRunner`), so the recorded execution, the
+   * approval and the register row commit together or not at all. The
+   * provider's notice is returned as `afterCommit` work, never sent from
+   * inside the transaction. The caller has checked the guard on that read
+   * and holds the case's manual-action lock.
+   *
+   * Only for a case whose agents were paid on chain by the contract
+   * (`SlashPartsService.appliesTo`): its compensation books nothing, so no
+   * ledger write can run here. Any other shape is refused.
+   */
+  async recordExecutionWhileCancelWaited(
+    proposal: SlashProposalEntity,
+    record: SlashRecordSnapshot,
+    queryRunner: QueryRunner,
+  ): Promise<{ afterCommit: () => Promise<void> }> {
+    if (!this.parts?.appliesTo(proposal)) {
+      throw SlashErrors.manualActionRefused({
+        proposalId: proposal.id,
+        action: 'RECORD_EXECUTION',
+        reason: 'SWEEP_SETTLES',
+        chainRecord: 'EXECUTED',
+      });
+    }
+    const deferred: (() => Promise<void>)[] = [];
+    await this.recordAnExecutionNobodyAskedFor(
+      proposal,
+      record,
+      'recorded by an operator: executed on chain while the cancel waited',
+      { queryRunner, afterCommit: deferred },
+    );
+    return {
+      afterCommit: async () => {
+        for (const work of deferred) await work();
+      },
+    };
+  }
+
+  /**
    * The chain took a penalty for a case this platform had already closed.
    *
    * A real, nameable situation rather than a fault to swallow: `execute_slash`
@@ -2329,6 +2423,9 @@ export class SlashExecutionService {
     proposal: SlashProposalEntity,
     record: SlashRecordSnapshot,
     reason: string,
+    // B18 `S-16` only: write in this transaction and defer the notice. Every
+    // other caller passes nothing and keeps its own connections.
+    tx?: ExecutionTx,
   ): Promise<void> {
     const asExecuted = {
       // Null, and it must stay null: this process never submitted anything, and
@@ -2346,6 +2443,16 @@ export class SlashExecutionService {
     };
 
     if (BigInt(record.appliedMinor) > BigInt(proposal.penaltyAmount)) {
+      // B18 `S-16` refuses this up front (`EXECUTED_BEYOND_DECISION`); never
+      // written from an operator's transaction.
+      if (tx) {
+        throw SlashErrors.manualActionRefused({
+          proposalId: proposal.id,
+          action: 'RECORD_EXECUTION',
+          reason: 'EXECUTED_BEYOND_DECISION',
+          chainRecord: 'EXECUTED',
+        });
+      }
       await this.proposals.update(
         { organizationId: proposal.organizationId, id: proposal.id },
         { chainLastError: EXECUTED_BEYOND_DECISION },
@@ -2379,7 +2486,7 @@ export class SlashExecutionService {
     // below writes the same columns, which is what made the overturned case
     // reversible too.)
     if ((CHAIN_PROPOSABLE_STATUSES as readonly string[]).includes(proposal.status)) {
-      await this.completeExecution(proposal, asExecuted, CHAIN_PROPOSABLE_STATUSES);
+      await this.completeExecution(proposal, asExecuted, CHAIN_PROPOSABLE_STATUSES, undefined, tx);
       this.logger.error(
         `slash proposal ${proposal.id} was executed on chain by somebody else while this ` +
           `platform was trying to cancel it (${reason}); the row records the penalty the chain ` +
@@ -2414,18 +2521,21 @@ export class SlashExecutionService {
     // is what keeps the row out of the park predicate's *second* disjunct
     // (`chain_status = 'EXECUTED' AND executed_at IS NULL`) — see this method's
     // caller for why being picked up there would be endless rather than help.
-    await this.proposals.update(
-      { organizationId: proposal.organizationId, id: proposal.id },
-      {
-        chainStatus: ChainProposalStatus.EXECUTED,
-        chainLastError: 'SlashNotPending',
-        executedAt: asExecuted.executedAt,
-        executionSignature: null,
-        appliedAmount: asExecuted.appliedMinor,
-        platformAmount: asExecuted.platformAmountMinor,
-        chainClaimedAt: null,
-      },
-    );
+    const closedScope = { organizationId: proposal.organizationId, id: proposal.id };
+    const closedPatch = {
+      chainStatus: ChainProposalStatus.EXECUTED,
+      chainLastError: 'SlashNotPending',
+      executedAt: asExecuted.executedAt,
+      executionSignature: null,
+      appliedAmount: asExecuted.appliedMinor,
+      platformAmount: asExecuted.platformAmountMinor,
+      chainClaimedAt: null,
+    };
+    if (tx) {
+      await tx.queryRunner.manager.update(SlashProposalEntity, closedScope, closedPatch);
+    } else {
+      await this.proposals.update(closedScope, closedPatch);
+    }
 
     this.logger.error(
       `slash proposal ${proposal.id} was CLOSED (${proposal.status}) and the chain executed it ` +
@@ -2433,30 +2543,37 @@ export class SlashExecutionService {
         `decision. Reason for the cancel attempt: ${reason}. This is a candidate for reversal.`,
     );
 
-    try {
-      await this.lifecycle.appendEventDirect({
-        organizationId: proposal.organizationId,
-        proposalId: proposal.id,
-        occurredAt: asExecuted.executedAt,
-        kind: 'EXECUTED_AFTER_CLOSURE',
-        actorType: 'system',
-        actorId: null,
-        summary:
-          `${record.appliedMinor} was taken from stake on chain after this case was already ` +
-          `closed. The decision on the case stands and this is being reviewed.`,
-        detail: {
-          applied: record.appliedMinor,
-          caseStatus: proposal.status,
-          requestId: proposal.chainRequestId,
-          reason,
-        },
-      });
-    } catch (error) {
-      this.logger.error(
-        `slash proposal ${proposal.id} recorded a post-closure execution but its timeline entry ` +
-          `failed`,
-        error instanceof Error ? error.stack : String(error),
-      );
+    const closureEvent = {
+      organizationId: proposal.organizationId,
+      proposalId: proposal.id,
+      occurredAt: asExecuted.executedAt,
+      kind: 'EXECUTED_AFTER_CLOSURE',
+      actorType: 'system' as const,
+      actorId: null,
+      summary:
+        `${record.appliedMinor} was taken from stake on chain after this case was already ` +
+        `closed. The decision on the case stands and this is being reviewed.`,
+      detail: {
+        applied: record.appliedMinor,
+        caseStatus: proposal.status,
+        requestId: proposal.chainRequestId,
+        reason,
+      },
+    };
+    // In the caller's transaction a failed append must fail the whole act
+    // (a swallowed error would leave the transaction aborted anyway).
+    if (tx) {
+      await this.lifecycle.appendEvent(tx.queryRunner, closureEvent);
+    } else {
+      try {
+        await this.lifecycle.appendEventDirect(closureEvent);
+      } catch (error) {
+        this.logger.error(
+          `slash proposal ${proposal.id} recorded a post-closure execution but its timeline entry ` +
+            `failed`,
+          error instanceof Error ? error.stack : String(error),
+        );
+      }
     }
 
     // The idempotency key for the ledger's unique index, which is what makes a
@@ -2585,17 +2702,9 @@ export class SlashExecutionService {
           .catch(() => undefined);
         return;
       }
-      const chainEpoch = proposal.chainEpoch + 1;
-      // Derived from the BUMPED epoch. Deriving from the row as it stands would
-      // reproduce the id that was just cancelled, and `propose_slash`'s `init`
-      // would refuse it forever.
-      const chainRequestId = deriveChainRequestId({ id: proposal.id, chainEpoch });
+      const patch = reproposalEpochPatch(proposal);
+      const chainEpoch = patch.chainEpoch;
 
-      // One statement. `chk_slash_proposals_chain_pending_is_whole` refuses a
-      // `PENDING`/`EXECUTED` mirror without both chain clocks, so nulling the
-      // clocks and returning the status to `NONE` separately would be rejected
-      // by the database rather than merely be untidy.
-      //
       // `NONE` is also the recovery: if the propose below throws, the row is
       // exactly what `findAwaitingChainProposal` selects, and the next sweep
       // re-proposes it under this same fresh id.
@@ -2604,19 +2713,7 @@ export class SlashExecutionService {
       // scheduler holding the same row loses here instead of bumping again.
       const bumped = await this.proposals.update(
         { organizationId, id: proposalId, chainEpoch: proposal.chainEpoch },
-        {
-          chainEpoch,
-          chainRequestId,
-          chainStatus: ChainProposalStatus.NONE,
-          chainProposedAt: null,
-          chainExecutableAt: null,
-          chainReserved: null,
-          chainProposalSignature: null,
-          // The previous epoch's claim. Left standing it would misdate work
-          // that belongs to a request id that no longer exists.
-          chainClaimedAt: null,
-          chainLastError: null,
-        },
+        patch,
       );
       if (!bumped.affected) {
         // Review R2-9: the other side of the compare-and-set bumped first and
@@ -2982,6 +3079,9 @@ export class SlashExecutionService {
     // Written in the SAME transaction as the case's move to EXECUTED, and only
     // when that move took (e.g. closing the open dispute row).
     alongside?: (manager: EntityManager) => Promise<void>,
+    // B18 `S-16` only: the caller's transaction (the move, `alongside` and the
+    // timeline row go in it) and where the notice is deferred to, after commit.
+    tx?: ExecutionTx,
   ): Promise<number> {
     const transition = (manager?: EntityManager) =>
       this.proposals.transitionIfIn(
@@ -2991,13 +3091,19 @@ export class SlashExecutionService {
         this.executedPatch(result),
         manager,
       );
-    const affected = alongside
-      ? await this.proposals.manager.transaction(async (manager) => {
-          const moved = await transition(manager);
-          if (moved > 0) await alongside(manager);
+    const affected = tx
+      ? await (async () => {
+          const moved = await transition(tx.queryRunner.manager);
+          if (moved > 0 && alongside) await alongside(tx.queryRunner.manager);
           return moved;
-        })
-      : await transition();
+        })()
+      : alongside
+        ? await this.proposals.manager.transaction(async (manager) => {
+            const moved = await transition(manager);
+            if (moved > 0) await alongside(manager);
+            return moved;
+          })
+        : await transition();
 
     if (affected === 0) {
       this.logger.error(
@@ -3007,28 +3113,21 @@ export class SlashExecutionService {
       return 0;
     }
 
-    // Past this line the case is `EXECUTED` and nothing may throw. An exception
-    // here would reach `executeDue`'s catch, which would stamp
-    // `chain_last_error` — and, for a failure the program never named, leave a
-    // settled case sitting in `EXECUTING` for the reconciler to re-read. Both
-    // are worse than a lost annotation, and both are recoverable by a human
-    // reading the line below.
-    try {
-      await this.lifecycle.appendEventDirect({
-        organizationId: proposal.organizationId,
-        proposalId: proposal.id,
-        occurredAt: result.executedAt,
-        kind: 'EXECUTED',
-        actorType: 'system',
-        actorId: null,
-        summary: `Penalty of ${result.appliedMinor} taken from stake`,
-        detail: {
-          signature: result.signature,
-          requested: proposal.penaltyAmount,
-          applied: result.appliedMinor,
-        },
-      });
-
+    const executedEvent = {
+      organizationId: proposal.organizationId,
+      proposalId: proposal.id,
+      occurredAt: result.executedAt,
+      kind: 'EXECUTED',
+      actorType: 'system' as const,
+      actorId: null,
+      summary: `Penalty of ${result.appliedMinor} taken from stake`,
+      detail: {
+        signature: result.signature,
+        requested: proposal.penaltyAmount,
+        applied: result.appliedMinor,
+      },
+    };
+    const announce = async () => {
       // Dollars and the tool's name, never minor units: "40000 was taken"
       // reads as forty thousand. The figure is the penalty as the chain applied
       // it, the same one the penalty page leads with; how much of it actually
@@ -3062,11 +3161,32 @@ export class SlashExecutionService {
           signature: result.signature,
         },
       });
-    } catch (error) {
+    };
+    const announceFailed = (error: unknown) =>
       this.logger.error(
         `slash proposal ${proposal.id} is recorded EXECUTED but announcing it failed`,
         error instanceof Error ? error.stack : String(error),
       );
+
+    if (tx) {
+      // B18 `S-16`: the timeline row commits with the move (a failure fails the
+      // whole act), and the provider hears of it only after the commit.
+      await this.lifecycle.appendEvent(tx.queryRunner, executedEvent);
+      tx.afterCommit.push(() => announce().catch(announceFailed));
+      return affected;
+    }
+
+    // Past this line the case is `EXECUTED` and nothing may throw. An exception
+    // here would reach `executeDue`'s catch, which would stamp
+    // `chain_last_error` — and, for a failure the program never named, leave a
+    // settled case sitting in `EXECUTING` for the reconciler to re-read. Both
+    // are worse than a lost annotation, and both are recoverable by a human
+    // reading the line below.
+    try {
+      await this.lifecycle.appendEventDirect(executedEvent);
+      await announce();
+    } catch (error) {
+      announceFailed(error);
     }
 
     return affected;

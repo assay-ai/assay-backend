@@ -185,6 +185,47 @@ export class CatalogueProviderDto {
       'null until a call has been checked in the last 30 days. Not measured is not the same as perfect.',
   })
   quality: CatalogueQualityDto | null;
+
+  /**
+   * The chains a call to this provider can settle on right now: the union of
+   * the known {@link CatalogueProviderToolDto.chains} over its tools. Empty
+   * when the router would take no call to it on any chain (paused at the
+   * circuit, at its ceiling, short of stake, on a slash hold); `null` when no
+   * tool's chains could be read — unknown, never "takes no call".
+   */
+  @ApiProperty({
+    type: [String],
+    nullable: true,
+    description:
+      'CAIP-2 chains a call to this provider can settle on now, by the router’s own gates. ' +
+      'Empty when it takes no call on any chain right now; null when that could not be read.',
+  })
+  chains: string[] | null;
+
+  /**
+   * Whether this provider takes a call from the **caller's** agents now: one of
+   * {@link chains} is a chain one of the caller's agents pays on. Only the
+   * signed-in routes fill it, from the caller's own agents; `null` when nobody
+   * is asking, or when the provider's chains could not be read.
+   */
+  @ApiProperty({
+    type: Boolean,
+    nullable: true,
+    description:
+      'Per caller: a call from one of your agents can settle with this provider now (on your ' +
+      'agents’ chains, less a chain with a standing withdrawal). null when unknown.',
+  })
+  servesYou: boolean | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['WITHDRAWING'],
+    description:
+      'Per caller, when servesYou is false for a reason of your own: WITHDRAWING (every agent ' +
+      'has a standing withdrawal, so no chain is left to pay on). null otherwise.',
+  })
+  notServedReason: 'WITHDRAWING' | null;
 }
 
 export class CatalogueProviderListDto {
@@ -504,6 +545,41 @@ export class CatalogueProviderToolDto {
       'the platform default when it set none. null for a PAID binding.',
   })
   freeCallsPerAgentPerDay: number | null;
+
+  /**
+   * The chains a call to this listing can settle on now. Each enabled chain is
+   * asked of the router on its own, as a call from an agent on that chain
+   * would be routed (`payerChains: [chain]`), over this provider's candidates
+   * only, so the stake, slash-hold, ceiling and circuit gates are the router's
+   * own. `null` when the router could not be asked; `[]` when it takes no call
+   * on any chain right now.
+   */
+  @ApiProperty({
+    type: [String],
+    nullable: true,
+    description:
+      'CAIP-2 chains a call to this listing can settle on now; [] when it takes no call; ' +
+      'null when that could not be read.',
+  })
+  chains: string[] | null;
+
+  @ApiProperty({
+    type: Boolean,
+    nullable: true,
+    description:
+      'Per caller: one of your agents’ chains is in `chains`. null when unknown or unasked.',
+  })
+  servesYou: boolean | null;
+
+  @ApiProperty({
+    type: String,
+    nullable: true,
+    enum: ['WITHDRAWING'],
+    description:
+      'Per caller, when servesYou is false for a reason of your own: WITHDRAWING (every agent ' +
+      'has a standing withdrawal, so no chain is left to pay on). null otherwise.',
+  })
+  notServedReason: 'WITHDRAWING' | null;
 }
 
 export class CatalogueProviderDetailDto extends CatalogueProviderDto {

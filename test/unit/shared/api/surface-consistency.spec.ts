@@ -184,7 +184,8 @@ const PUBLIC_SURFACE = new Map<string, number>([
   ['bootstrap/api/public-features.controller.ts', 1],
   // The public Explorer's catalogue. The same derivation as the guarded
   // `catalogue.controller.ts`, whose own comment records that the answer is
-  // identical for every caller and holds nothing about the caller — but
+  // identical for every caller except one per-caller field (`servesYou`, from
+  // the caller's own agents), which the public DTOs do not carry — and
   // copied through its OWN allowlisted DTOs (`public-catalogue.dto.ts`, key
   // sets pinned in the catalogue spec), so a field added to the signed-in
   // catalogue does not reach anonymous readers. The detail route answers only
