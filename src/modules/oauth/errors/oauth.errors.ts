@@ -15,6 +15,7 @@ export enum OAuthErrorCode {
   OAUTH_AGENT_NOT_ACTIVE = 'OAUTH_AGENT_NOT_ACTIVE',
   OAUTH_GRANT_LIMIT_REACHED = 'OAUTH_GRANT_LIMIT_REACHED',
   OAUTH_CREDENTIAL_NAME_INVALID = 'OAUTH_CREDENTIAL_NAME_INVALID',
+  OAUTH_REQUEST_STORE_UNAVAILABLE = 'OAUTH_REQUEST_STORE_UNAVAILABLE',
 }
 
 export type OAuthErrorCodesArePrefixed = AssertDomainErrorCodes<'OAUTH', `${OAuthErrorCode}`>;
@@ -53,6 +54,12 @@ export const OAuthErrors = createDomainErrorFactory('OAUTH', {
    * The connection's name is empty, or nothing but control, format or
    * invisible characters, once those are stripped.
    */
+  /** The pending-request store (Redis) failed or did not answer in time. */
+  requestStoreUnavailable: {
+    code: OAuthErrorCode.OAUTH_REQUEST_STORE_UNAVAILABLE,
+    statusCode: 503,
+    message: () => 'Sign-in is temporarily unavailable; try again in a moment',
+  },
   credentialNameInvalid: {
     code: OAuthErrorCode.OAUTH_CREDENTIAL_NAME_INVALID,
     statusCode: 400,

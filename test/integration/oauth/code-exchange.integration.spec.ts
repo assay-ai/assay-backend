@@ -49,6 +49,7 @@ describe('OAuth code exchange — real migrations', () => {
   let service: OAuthTokenService;
   let bumps: string[];
   let failBump = false;
+  let hangBump = false;
   let client: OAuthClientEntity;
   let builtin: OAuthClientEntity;
 
@@ -80,6 +81,7 @@ describe('OAuth code exchange — real migrations', () => {
     bumps = [];
     const epoch = {
       bump: async (organizationId: string) => {
+        if (hangBump) return new Promise<never>(() => undefined);
         if (failBump) throw new Error('redis down');
         bumps.push(organizationId);
       },
@@ -115,6 +117,7 @@ describe('OAuth code exchange — real migrations', () => {
   beforeEach(() => {
     bumps.length = 0;
     failBump = false;
+    hangBump = false;
   });
 
   // ── helpers ────────────────────────────────────────────────────────────────
@@ -725,6 +728,24 @@ describe('OAuth code exchange — real migrations', () => {
         builtin,
       ),
     );
+    expect(await liveCredentials(first.agentId)).toBe(1);
+  });
+
+  it('a post-commit epoch bump that never answers is bounded: the pair still comes back', async () => {
+    const first = await mint({ oauthClient: builtin });
+    expectPair(await exchange(first, {}, builtin));
+    const [old] = await credentialsOf(first.agentId);
+
+    hangBump = true;
+    const started = Date.now();
+    expectPair(
+      await exchange(
+        await mint({ agentId: first.agentId, replaces: old.id, oauthClient: builtin }),
+        {},
+        builtin,
+      ),
+    );
+    expect(Date.now() - started).toBeLessThan(2000);
     expect(await liveCredentials(first.agentId)).toBe(1);
   });
 

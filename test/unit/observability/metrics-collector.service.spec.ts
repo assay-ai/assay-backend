@@ -11,6 +11,9 @@ import {
 } from './helpers/fake-observability-repositories';
 
 import { MetricsCollectorService } from '@modules/observability/services/metrics-collector.service';
+import { OAuthSignalsReader } from '@modules/observability/services/oauth-signals.reader';
+import { DataSource } from 'typeorm';
+import { hungCache } from '../oauth/helpers/oauth-fakes';
 import { SignalAvailability } from '@modules/observability/domain/signal-catalog';
 import { ReconciliationSeverity } from '@modules/settlement/ports/reconciliation.types';
 import { ReconciliationRunEntity } from '@database/postgres/entities/reconciliation-run.entity';
@@ -425,8 +428,10 @@ describe('MetricsCollectorService', () => {
         'OAUTH_CIMD_CLIENTS',
       ]) {
         expect(signal(name)).toMatchObject({ value: null, gate: null });
+        expect(signal(name).reason).toContain('Source unavailable');
       }
       expect(signal('OAUTH_TOKEN_RESULTS').value).toBe(2);
+      expect(signal('OAUTH_TOKEN_RESULTS').reason).not.toContain('Source unavailable');
     });
 
     it('unreachable counters show the counter signals absent and keep the database ones', async () => {
@@ -439,8 +444,34 @@ describe('MetricsCollectorService', () => {
         'MCP_UNAUTHORIZED',
       ]) {
         expect(signal(name)).toMatchObject({ value: null, gate: null });
+        expect(signal(name).extra).toBeUndefined();
+        expect(signal(name).reason).toContain('Source unavailable');
       }
       expect(signal('OAUTH_LIVE_GRANTS').value).toBe(3);
     });
+  });
+
+  it('a hung OAuth source never holds the money and traffic rows (M1-I2)', async () => {
+    const hung = new OAuthSignalsReader(
+      { query: () => new Promise(() => undefined) } as unknown as DataSource,
+      hungCache(),
+    );
+    const collector = new MetricsCollectorService(
+      fakeReconciliationRunRepository([]),
+      fakeMetricsRepository({}),
+      fakeSlashProposalRepository(),
+      fakeObservabilityMetricsRepository({
+        toolCallSuccessRate: { total: 10, nonSystemError: 10 },
+      }),
+      hung,
+    );
+
+    const started = Date.now();
+    const snapshot = await collector.snapshot();
+    expect(Date.now() - started).toBeLessThan(2500);
+
+    expect(findSignal(snapshot.signals, 'TOOL_CALL_SUCCESS_RATE').value).toBe(1);
+    expect(findSignal(snapshot.signals, 'OAUTH_LIVE_GRANTS').value).toBeNull();
+    expect(findSignal(snapshot.signals, 'OAUTH_TOKEN_RESULTS').value).toBeNull();
   });
 });

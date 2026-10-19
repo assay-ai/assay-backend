@@ -59,6 +59,14 @@ export interface OAuthSignalFigures {
 export const OAUTH_SIGNAL_WINDOW_MS = 24 * OAUTH_COUNTER_HOUR_MS;
 
 /**
+ * Each source's deadline. The collector's refresh is single-flight and shared
+ * by every dashboard request, so a source that hangs (a stalled Redis or
+ * Postgres) must give up and read as absent rather than hold the money and
+ * traffic rows with it.
+ */
+export const OAUTH_SIGNAL_SOURCE_TIMEOUT_MS = 1000;
+
+/**
  * Reads the OAuth signals behind the operator dashboard: database facts where
  * a fact is stored, Redis hourly counters for counts that exist only on the
  * request path. A failed source reads as `null`, so the dashboard shows the
@@ -78,16 +86,32 @@ export class OAuthSignalsReader {
 
   async read(nowMs: number): Promise<OAuthSignalFigures> {
     const [database, counters] = await Promise.all([
-      this.databaseFacts(new Date(nowMs - OAUTH_SIGNAL_WINDOW_MS)).catch((error: unknown) => {
-        this.logger.warn(`OAuth signals: database read failed: ${describe(error)}`);
-        return null;
-      }),
-      this.counterFigures(nowMs).catch((error: unknown) => {
-        this.logger.warn(`OAuth signals: counter read failed: ${describe(error)}`);
-        return null;
-      }),
+      this.bounded('database', () => this.databaseFacts(new Date(nowMs - OAUTH_SIGNAL_WINDOW_MS))),
+      this.bounded('counter', () => this.counterFigures(nowMs)),
     ]);
     return { database, counters };
+  }
+
+  /** `op`'s result, or `null` when it fails or does not settle within its deadline. */
+  private async bounded<T>(source: string, op: () => Promise<T>): Promise<T | null> {
+    let timer: NodeJS.Timeout | undefined;
+    const deadline = new Promise<never>((_, reject) => {
+      timer = setTimeout(
+        () => reject(new Error(`no answer within ${OAUTH_SIGNAL_SOURCE_TIMEOUT_MS} ms`)),
+        OAUTH_SIGNAL_SOURCE_TIMEOUT_MS,
+      );
+      timer.unref?.();
+    });
+    try {
+      const pending = Promise.resolve().then(op);
+      pending.catch(() => undefined);
+      return await Promise.race([pending, deadline]);
+    } catch (error) {
+      this.logger.warn(`OAuth signals: ${source} read failed: ${describe(error)}`);
+      return null;
+    } finally {
+      clearTimeout(timer);
+    }
   }
 
   async databaseFacts(since: Date): Promise<OAuthDatabaseFacts> {
@@ -103,19 +127,26 @@ export class OAuthSignalsReader {
            WHERE "revoked_by" = $3 AND "revoked_at" >= $2)::int AS "stoppedForRefreshReuse",
          (SELECT count(*) FROM "agent_credentials"
            WHERE "revoked_by" = $4 AND "revoked_at" >= $2)::int AS "stoppedForCodeReuse",
-         (SELECT count(*) FROM "audit_log_entries"
-           WHERE "action" = 'oauth.refresh_stale_reuse' AND "created_at" >= $2)::int
-           AS "refreshStaleReuse",
-         (SELECT count(*) FROM "audit_log_entries"
-           WHERE "action" = 'oauth.refresh_grace_used' AND "created_at" >= $2)::int
-           AS "refreshGraceUses",
+         a."refreshStaleReuse",
+         a."refreshGraceUses",
          (SELECT count(*) FROM "oauth_clients"
            WHERE "kind" = $5 AND "created_at" >= $2)::int AS "dcrRegistrations",
          (SELECT COALESCE(MAX(n."count"), 0) FROM
             (SELECT count(*) AS "count" FROM "oauth_clients"
               WHERE "kind" = $5 AND "created_at" >= $2 GROUP BY "client_name") n)::int
            AS "dcrMaxPerClientName",
-         (SELECT count(*) FROM "oauth_clients" WHERE "kind" = $6)::int AS "cimdClients"`,
+         (SELECT count(*) FROM "oauth_clients" WHERE "kind" = $6)::int AS "cimdClients"
+       FROM (
+         -- One pass over the audit log, on idx_audit_log_entries_oauth_signals.
+         SELECT
+           (count(*) FILTER (WHERE "action" = 'oauth.refresh_stale_reuse'))::int
+             AS "refreshStaleReuse",
+           (count(*) FILTER (WHERE "action" = 'oauth.refresh_grace_used'))::int
+             AS "refreshGraceUses"
+           FROM "audit_log_entries"
+          WHERE "action" IN ('oauth.refresh_grace_used', 'oauth.refresh_stale_reuse')
+            AND "created_at" >= $2
+       ) a`,
       [
         CredentialIssuedVia.OAUTH,
         since,

@@ -1,3 +1,5 @@
+import type { McpUnauthorizedReason } from '@modules/mcp/ports/mcp-unauthorized.port';
+
 /**
  * The OAuth request-path counters (spec §6.7) and their Redis keys.
  *
@@ -87,7 +89,13 @@ export const MCP_UNAUTHORIZED_REASONS = [
   'expired',
   'revoked',
   'audience',
-] as const;
+] as const satisfies readonly McpUnauthorizedReason[];
+
+// Every reason the port can carry is counted: adding one there without
+// adding it here fails to compile.
+type UncountedMcpReason = Exclude<McpUnauthorizedReason, (typeof MCP_UNAUTHORIZED_REASONS)[number]>;
+const everyMcpReasonCounted: [UncountedMcpReason] extends [never] ? true : never = true;
+void everyMcpReasonCounted;
 
 /** The token counter's one label: `{grant_type}.{result}`. */
 export const OAUTH_TOKEN_LABELS: readonly string[] = OAUTH_TOKEN_GRANT_TYPES.flatMap((grantType) =>

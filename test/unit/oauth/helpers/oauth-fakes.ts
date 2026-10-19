@@ -177,3 +177,27 @@ export class Clock {
 export function rateLimiter(redis: FakeOAuthRedis, clock: Clock): OAuthRateLimiter {
   return new OAuthRateLimiter(fakeCache(redis), clock.now);
 }
+
+/**
+ * A Redis that accepts every command and never answers, as a stalled server
+ * does: each call returns a promise that never settles.
+ */
+export function hungRedis(): Record<string, (...args: unknown[]) => Promise<never>> {
+  const never = (): Promise<never> => new Promise<never>(() => undefined);
+  return new Proxy({} as Record<string, (...args: unknown[]) => Promise<never>>, {
+    get: (_target, property) => (property === 'then' ? undefined : never),
+  });
+}
+
+/** A `CacheService` over {@link hungRedis}. */
+export function hungCache(): CacheService {
+  const redis = hungRedis();
+  return { getRedisClient: () => redis } as unknown as CacheService;
+}
+
+/** Resolves `promise` and how long it took, in milliseconds. */
+export async function timed<T>(promise: Promise<T>): Promise<{ value: T; ms: number }> {
+  const started = Date.now();
+  const value = await promise;
+  return { value, ms: Date.now() - started };
+}

@@ -4,8 +4,10 @@ import { Inject, Injectable } from '@nestjs/common';
 import type { Redis } from 'ioredis';
 
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
+import { withRedisTimeout } from '@shared/cache/redis-cache/with-redis-timeout';
 
 import { OAUTH_PENDING_REQUEST_TTL_SECONDS } from '../constants/oauth.constants';
+import { OAuthErrors } from '../errors/oauth.errors';
 import {
   BIND_SCRIPT,
   DECIDE_SCRIPT,
@@ -100,12 +102,14 @@ export class OAuthRequestStore {
       approval: null,
       denied: false,
     };
-    const stored = await this.redis.set(
-      requestKey(rid),
-      JSON.stringify(request),
-      'EX',
-      OAUTH_PENDING_REQUEST_TTL_SECONDS,
-      'NX',
+    const stored = await this.call(() =>
+      this.redis.set(
+        requestKey(rid),
+        JSON.stringify(request),
+        'EX',
+        OAUTH_PENDING_REQUEST_TTL_SECONDS,
+        'NX',
+      ),
     );
     // 256 random bits do not collide; if they ever did, fail rather than overwrite.
     if (stored !== 'OK') throw new Error('pending OAuth request not stored');
@@ -115,12 +119,8 @@ export class OAuthRequestStore {
   /** Binds the request to `organizationId` if it is unbound, and returns it. */
   async bind(rid: string, organizationId: string): Promise<BindResult> {
     if (!isWellFormedRid(rid)) return { status: 'not_found' };
-    const result = (await this.redis.eval(
-      BIND_SCRIPT,
-      2,
-      requestKey(rid),
-      doneKey(rid),
-      organizationId,
+    const result = (await this.call(() =>
+      this.redis.eval(BIND_SCRIPT, 2, requestKey(rid), doneKey(rid), organizationId),
     )) as [string, string?];
     if (result[0] === 'ok' && typeof result[1] === 'string') {
       return { status: 'ok', request: parse(result[1]) };
@@ -147,14 +147,16 @@ export class OAuthRequestStore {
             approvedBy: decision.approvedBy,
             replaces: decision.replaces,
           } satisfies OAuthCodeApproval);
-    const result = (await this.redis.eval(
-      DECIDE_SCRIPT,
-      2,
-      requestKey(rid),
-      doneKey(rid),
-      organizationId,
-      approval,
-      String(OAUTH_PENDING_REQUEST_TTL_SECONDS),
+    const result = (await this.call(() =>
+      this.redis.eval(
+        DECIDE_SCRIPT,
+        2,
+        requestKey(rid),
+        doneKey(rid),
+        organizationId,
+        approval,
+        String(OAUTH_PENDING_REQUEST_TTL_SECONDS),
+      ),
     )) as string;
     return result === 'ok' || result === 'already_decided' ? result : 'not_found';
   }
@@ -166,10 +168,8 @@ export class OAuthRequestStore {
    */
   async discardIfDecided(rid: string): Promise<boolean> {
     if (!isWellFormedRid(rid)) return false;
-    const deleted = (await this.redis.eval(
-      DISCARD_IF_DECIDED_SCRIPT,
-      1,
-      requestKey(rid),
+    const deleted = (await this.call(() =>
+      this.redis.eval(DISCARD_IF_DECIDED_SCRIPT, 1, requestKey(rid)),
     )) as number;
     return deleted === 1;
   }
@@ -177,8 +177,24 @@ export class OAuthRequestStore {
   /** Reads and deletes the request in one step. `null` if it is gone or was never there. */
   async take(rid: string): Promise<OAuthPendingRequest | null> {
     if (!isWellFormedRid(rid)) return null;
-    const raw = (await this.redis.eval(TAKE_SCRIPT, 1, requestKey(rid))) as string | null;
+    const raw = (await this.call(() => this.redis.eval(TAKE_SCRIPT, 1, requestKey(rid)))) as
+      | string
+      | null;
     return raw === null ? null : parse(raw);
+  }
+
+  /**
+   * One bounded Redis call. A failure or a timeout is
+   * `OAUTH_REQUEST_STORE_UNAVAILABLE` (503): the consent API answers 503, and
+   * the MCP routes show their unavailable page. A timed-out script may still
+   * have run, so the request's state is unknown; the person starts again.
+   */
+  private async call<T>(op: () => Promise<T>): Promise<T> {
+    try {
+      return await withRedisTimeout(op);
+    } catch {
+      throw OAuthErrors.requestStoreUnavailable();
+    }
   }
 }
 

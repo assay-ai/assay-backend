@@ -40,6 +40,7 @@ import {
   fakeCache,
   oauthConfig,
   rateLimiter,
+  timed,
 } from './helpers/oauth-fakes';
 
 const WEB = 'https://app.assay.ai';
@@ -844,6 +845,69 @@ describe('OAuth endpoints on the MCP host (controllers)', () => {
       const response = await revoke({ token: 'assay_rt_x', client_id: BUILTIN_ID });
       expect(response.status).toBe(200);
       expect(tokens.revoke).toHaveBeenCalledTimes(1);
+    });
+  });
+
+  describe('a Redis that accepts commands and never answers (GATE I-1)', () => {
+    beforeEach(() => build());
+
+    const BOUND_MS = 1500;
+    const never = () => new Promise<never>(() => undefined);
+    const tokenForm = {
+      grant_type: 'authorization_code',
+      code: 'assay_ac_x',
+      redirect_uri: LOOPBACK,
+      client_id: BUILTIN_ID,
+      code_verifier: VERIFIER,
+    };
+
+    it('token: the limiter gives up within its bound and answers 503 temporarily_unavailable', async () => {
+      jest.spyOn(redis, 'incr').mockImplementation(never);
+      const { value: response, ms } = await timed(
+        request(app.getHttpServer()).post('/oauth/token').type('form').send(tokenForm),
+      );
+      expect(response.status).toBe(503);
+      expect(response.body).toEqual({ error: 'temporarily_unavailable' });
+      expect(tokens.exchangeCode).not.toHaveBeenCalled();
+      expect(ms).toBeLessThan(BOUND_MS);
+    });
+
+    it('token: a counter that never answers does not hold the pair', async () => {
+      tokens.exchangeCode.mockResolvedValue({
+        access_token: 'assay_at_a',
+        token_type: 'Bearer',
+        expires_in: 3600,
+        refresh_token: 'assay_rt_r',
+        scope: 'assay:agent',
+      });
+      jest.spyOn(counters, 'incr').mockImplementation(never);
+      const { value: response, ms } = await timed(
+        request(app.getHttpServer()).post('/oauth/token').type('form').send(tokenForm),
+      );
+      expect(response.status).toBe(200);
+      expect(response.body.access_token).toBe('assay_at_a');
+      expect(ms).toBeLessThan(BOUND_MS);
+    });
+
+    it('authorize: 503 within the bound, nothing stored', async () => {
+      jest.spyOn(redis, 'incr').mockImplementation(never);
+      const { value: response, ms } = await timed(authorize());
+      expect(response.status).toBe(503);
+      expect(store.requests.size).toBe(0);
+      expect(ms).toBeLessThan(BOUND_MS);
+    });
+
+    it('revoke: the buckets fail open within the bound, and the token is revoked', async () => {
+      jest.spyOn(redis, 'incr').mockImplementation(never);
+      const { value: response, ms } = await timed(
+        request(app.getHttpServer())
+          .post('/oauth/revoke')
+          .type('form')
+          .send({ token: 'assay_rt_x', client_id: BUILTIN_ID }),
+      );
+      expect(response.status).toBe(200);
+      expect(tokens.revoke).toHaveBeenCalledTimes(1);
+      expect(ms).toBeLessThan(BOUND_MS);
     });
   });
 });
