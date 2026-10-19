@@ -76,6 +76,7 @@ describe('tool version migrations: up, down, up', () => {
 
   /** Migrations after the T3 ones, newest first. */
   const LATER = [
+    'ConnectUrlServerName1762400000030',
     'PaymentKeySpendIndexes1762400000020',
     'OAuthAuditSignalIndex1762400000014',
     'OAuthCodeReuseDetected1762400000013',
