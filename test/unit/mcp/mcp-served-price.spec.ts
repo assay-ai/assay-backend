@@ -519,6 +519,54 @@ describe('maxAmount across contract versions and chains (review I1)', () => {
   });
 });
 
+describe('maxAmount is taken on the buyer’s settlement chain only (re-review R1-1)', () => {
+  offerSolanaRailsInThisSuite('A', 'B');
+
+  // `dear` is priced in X's USDC but settles only on Y, where its provider is
+  // staked under a negotiated floor (which skips the asset check). An X buyer
+  // can never be offered it, so it must not raise the X buyer's bound.
+  const X = PAYOUT_CHAIN;
+  const Y = CHAIN_IDS.SOLANA_MAINNET;
+  const Y_USDC = ASSET_IDS.USDC_SOLANA_MAINNET as AssetId;
+  const Y_PAYOUT = `${Y}:9WzDXwBbmkg8ZTbNMqUxvQRAyrZzDsGYdLVL9zYtAWWM` as AccountId;
+  const yUsdc = (amount: string) => MoneyUtil.of(amount, Y_USDC, 6);
+
+  it('an X buyer’s maxAmount is 100000, not the Y-only binding’s 500000', async () => {
+    const bindings = [
+      buildBinding('on-x', { priceAmount: usdc('0.10').amount }),
+      buildBinding('dear', { priceAmount: usdc('0.50').amount, settlementChains: [Y] }),
+    ];
+    const h = listingAndRouter({
+      bindings,
+      providers: [
+        buildProvider('on-x'),
+        buildProvider('dear', {
+          payoutAccountByChain: new Map([[Y, Y_PAYOUT]]),
+          minimumStakeOverride: yUsdc('100000000'),
+        }),
+      ],
+      stakes: { 'on-x': usdc(1000) },
+      stakesByChain: { [`dear|${Y}`]: yUsdc('1000000000') },
+      config: {
+        minimumStakeByChain: new Map([
+          [X, MINIMUM_STAKE],
+          [Y, { floor: yUsdc('50000000'), priceMultiple: 1000 }],
+        ]),
+      },
+      enabledChains: [X, Y],
+      random: () => 0.999,
+    });
+
+    const listed = await listedPrice(h.catalogue, X);
+    expect(listed.amount).toBe('100000');
+    expect(listed.maxAmount).toBe('100000');
+
+    const offer = await h.router.offer(TOOL_ID, offerContext(X, [X, Y]));
+    expect(offer.providerId).toBe('on-x');
+    expect(BigInt(offer.price.amount)).toBeLessThanOrEqual(BigInt(listed.maxAmount));
+  });
+});
+
 describe('maxAmount with a dearer binding at its ceiling when the listing is priced (review I2)', () => {
   offerSolanaRailsInThisSuite('A', 'B');
 

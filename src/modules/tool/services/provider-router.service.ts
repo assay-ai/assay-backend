@@ -537,7 +537,20 @@ export class ProviderRouterService {
     }
 
     const quote = this.priceEligible(versionTool, ruled.eligible, context, ruled.fellBack);
-    return { ...quote, maxPrice: this.chargeableBound(tool, pool, context, now, quote.price) };
+    // The bound is taken on the chain the quote is priced on — the buyer's own
+    // when it is in `settlementChains` — and nowhere else: a binding priced in
+    // this chain's asset but settling only on another one can never be offered
+    // to this buyer, so it must not raise the bound (re-review R1-1).
+    const chain =
+      quote.settlementChains.length > 0
+        ? chooseSettlementChain(
+            quote.settlementChains,
+            context.defaultChainId,
+            context.enabledChains,
+          )
+        : null;
+    const onChain: RoutingContext = chain ? { ...context, payerChains: [chain] } : context;
+    return { ...quote, maxPrice: this.chargeableBound(tool, pool, onChain, now, quote.price) };
   }
 
   /**
@@ -1409,8 +1422,9 @@ export interface ToolQuote {
   readonly cheapestPrice?: Money | null;
   /**
    * The most a paid call under this quote's context can be charged, in
-   * `price`'s asset: the dearest chargeable binding, priced in that asset,
-   * that a live call could choose. That means every contract version the
+   * `price`'s asset: the dearest chargeable binding, priced in that asset and
+   * settling on the chain the quote is priced on, that a live call could
+   * choose. That means every contract version the
    * call may use, the rules and (when the entry asks for it) FALLBACK_BEST,
    * and every gate except the provider's declared rate and daily ceilings,
    * which are relaxed.

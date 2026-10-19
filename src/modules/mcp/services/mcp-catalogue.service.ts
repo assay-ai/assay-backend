@@ -423,10 +423,13 @@ export interface McpPriceAnnotation {
    * refuses to sign above `maxAmount` (spec §7.8 G3, §7.10 item 3); the
    * buyer's own per-call cap (G7) still bounds what it signs.
    *
-   * No rail B offer exceeds it while the listing is fresh (the quote index is
-   * at most a minute old, `QUOTE_INDEX_MAX_AGE_MS`, and every binding,
-   * provider and stake write bumps its epoch). Rail A is held at the live
-   * quote, not at this figure.
+   * No rail B offer exceeds it while the listing is fresh. Binding, provider,
+   * enrolment, slash-hold, grace and stake-monitor writes bump the quote
+   * index's epoch at once; an on-chain stake change made between two
+   * stake-monitor passes is covered only by the index's age limit (at most a
+   * minute, `QUOTE_INDEX_MAX_AGE_MS`), so for up to that long an offer can
+   * exceed it and the proxy refuses until it re-reads the quote. Rail A is
+   * held at the live quote, not at this figure.
    *
    * `"0"` on a `FREE` tool with no chargeable binding, and on a `?free=1`
    * URL, which never takes a paid path.
