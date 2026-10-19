@@ -128,6 +128,13 @@ export class OAuthConsentReplacesDto {
 
   @ApiProperty({ description: 'It has its own tool narrowing, which the new connection keeps' })
   narrowed: boolean;
+
+  @ApiProperty({
+    description:
+      'It is still live (not revoked, not expired). A dead one is still shown (spec F5: its tool ' +
+      'limits are kept) but does not free a place under the 50-grant cap',
+  })
+  live: boolean;
 }
 
 export class OAuthConsentRequestDto {

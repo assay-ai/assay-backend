@@ -694,6 +694,7 @@ describe('OAuth consent API — real database and Redis', () => {
       name: 'Assay app on this Mac',
       agentId: PERSON_A,
       narrowed: true,
+      live: true,
     });
 
     await approve(rid, { agentId: PERSON_A, name: 'Assay app on this Mac' });
@@ -731,12 +732,14 @@ describe('OAuth consent API — real database and Redis', () => {
     expect((await store.take(rid))?.approval?.replaces).toBeNull();
   });
 
-  it('replaces naming a dead grant is not shown, though approve still carries it', async () => {
+  it('replaces naming a dead grant is shown as not live (spec F5), and approve carries it', async () => {
     const revoked = await insertGrant(PERSON_A, { client: builtin, revoked: true });
     const expired = await insertGrant(PERSON_A, { client: builtin, expiresIn: '-1 minute' });
     for (const old of [revoked, expired]) {
       const rid = await newRequest({ oauthClientId: builtin.id, replaces: old });
-      expect((await read(rid)).body.data).not.toHaveProperty('replaces');
+      expect((await read(rid)).body.data.replaces).toEqual(
+        expect.objectContaining({ id: old, agentId: PERSON_A, live: false }),
+      );
       // The exchange still copies its narrowing; it has nothing left to revoke.
       await approve(rid, { agentId: PERSON_A, name: 'Assay app' });
       expect((await store.take(rid))?.approval?.replaces).toBe(old);

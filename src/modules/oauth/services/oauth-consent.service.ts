@@ -118,8 +118,9 @@ export class OAuthConsentService {
       returnTo: { kind: display.returnTo.kind, display: display.returnTo.display },
       scope: request.scope.split(' ').filter((scope) => scope !== ''),
       agents,
-      // Only a live grant is shown as replaced: a dead one has nothing left to stop.
-      ...(replaced && isLive(replaced) ? { replaces: replacesDto(replaced) } : {}),
+      // A dead grant is shown too (spec F5 step 2: after an idle expiry the exchange still
+      // copies its tool limits); `live` says whether it also frees a place under the cap.
+      ...(replaced ? { replaces: replacesDto(replaced) } : {}),
       suggestedName: builtin
         ? `Assay app on ${sanitise(request.device, DEVICE_LABEL_MAX) ?? DEFAULT_DEVICE}`
         : `${display.name} · ${createdAt.toISOString().slice(0, 10)}`,
@@ -278,6 +279,7 @@ function replacesDto(credential: AgentCredentialEntity): OAuthConsentReplacesDto
       credential.accessMode !== null ||
       credential.allowedToolsets !== null ||
       credential.allowedToolIds !== null,
+    live: isLive(credential),
   };
 }
 
