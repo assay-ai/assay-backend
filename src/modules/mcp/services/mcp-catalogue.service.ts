@@ -395,6 +395,16 @@ export interface McpToolDescriptor {
 /** The `assay/price` value: atomic units, the asset that scales them, and a display form. */
 export interface McpPriceAnnotation {
   readonly amount: string;
+  /**
+   * The most a call of this tool through this URL can be charged, in the same
+   * atomic units of `asset` as `amount` — an integer string, never a decimal
+   * or a float. The highest price among the providers the merged rules
+   * (the URL's entry ∧ the agent's) leave, from the same quote `amount` is.
+   * No rail B offer, rail A hold or charge for the call exceeds it, so the
+   * local proxy can refuse anything above it (spec §7.8 G3, §7.10 item 3).
+   * `"0"` on a `FREE` tool, which has no paid path.
+   */
+  readonly maxAmount: string;
   readonly asset: string;
   readonly display: string;
 }
@@ -599,8 +609,13 @@ function priceAnnotation(
   paidOnThisChain = true,
 ): McpPriceAnnotation {
   if (mode === PricingMode.FREE) {
-    return { amount: price.amount, asset: price.asset, display: 'free' };
+    return { amount: price.amount, maxAmount: '0', asset: price.asset, display: 'free' };
   }
+  // The quote is already taken under the call's rules and is already the
+  // dearest binding they leave (`ToolQuote.price`), so the bound IS the quote:
+  // recomputing it over the bindings here could only drift from what a call
+  // is held for.
+  const maxAmount = price.amount;
 
   const shown = displayPrice(price);
   const paid = paidBindings > 1 ? `up to ${shown}` : shown;
@@ -610,6 +625,7 @@ function priceAnnotation(
     // cannot pay (review #2, L6). `amount` is still the quote, for reference.
     return {
       amount: price.amount,
+      maxAmount,
       asset: price.asset,
       display:
         mode === PricingMode.FREEMIUM
@@ -619,6 +635,7 @@ function priceAnnotation(
   }
   return {
     amount: price.amount,
+    maxAmount,
     asset: price.asset,
     display: mode === PricingMode.FREEMIUM ? `${free}, then ${paid}` : paid,
   };

@@ -75,6 +75,11 @@ export interface SearchResult {
   readonly version?: string;
   readonly kind?: string;
   readonly price?: string | null;
+  /**
+   * `assay/price.maxAmount`: the most a call can be charged, in atomic units
+   * of the tool's asset (G3). `null` when unpriced.
+   */
+  readonly maxAmount?: string | null;
   readonly freeCallsLeftToday?: number | null;
   readonly score: number;
   readonly inputSchema?: Record<string, unknown>;
@@ -318,6 +323,7 @@ export class McpDiscoveryService {
       version: versionOf(entry.tool).semver,
       kind: kindOf(entry.tool),
       price: priceText(entry.descriptor),
+      maxAmount: maxAmountOf(entry.descriptor),
       freeCallsLeftToday: await this.freeCallsLeft(viewer, entry.tool, entry.descriptor),
       score,
     };
@@ -371,6 +377,11 @@ function categoriesOf(tools: readonly Tool[]): string[] {
 
 function kindOf(tool: Tool): string {
   return (tool as Tool & { kind?: ToolKind }).kind ?? ToolKind.STANDARD;
+}
+
+function maxAmountOf(descriptor: McpToolDescriptor): string | null {
+  const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation | undefined;
+  return price?.maxAmount ?? null;
 }
 
 function priceText(descriptor: McpToolDescriptor): string | null {
