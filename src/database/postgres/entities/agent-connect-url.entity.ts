@@ -20,7 +20,7 @@ export class AgentConnectUrlEntity {
   organizationId: string;
 
   /** The server name the sheet suggested, at most 9 characters. */
-  @Column({ name: 'server_name', type: 'varchar', length: 9, nullable: true })
+  @Column({ name: 'server_name', type: 'varchar', length: 56, nullable: true })
   serverName: string | null;
 
   /** The client tab: one of `CONNECT_CLIENTS` (`mcp-urls.dto.ts`). */
