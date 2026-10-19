@@ -50,7 +50,6 @@ export class FakeSlashProposals {
         toolId: 'tool_1',
         source: 'SLA_STRIKE',
         strikeId: 'strike_1',
-        verdictId: null,
         windowId: 'win_1',
         status: 'PROPOSED',
         chainRequestId: 'a'.repeat(64),
@@ -90,15 +89,11 @@ export class FakeSlashProposals {
         outcome: null,
         resolvedAt: null,
         decidedByOperatorId: null,
-        secondedByOperatorId: null,
-        secondedAt: null,
-        secondKind: null,
         executedAt: null,
         executionSignature: null,
         reversedAt: null,
         reversalSignature: null,
         rootCauseKey: null,
-        sweepId: null,
         countsAsFalsePositive: false,
         createdAt: new Date('2026-08-10T09:14:00Z'),
         updatedAt: new Date('2026-08-10T09:14:00Z'),
@@ -114,7 +109,6 @@ export class FakeSlashProposals {
     organizationId: string;
     id?: string;
     strikeId?: string;
-    verdictId?: string;
     windowId?: string;
     /** Any value here stands for TypeORM's `Not(IsNull())`, the only use. */
     chainDisputeWonAt?: unknown;
@@ -123,7 +117,6 @@ export class FakeSlashProposals {
       if (row.organizationId !== where.organizationId) continue;
       if (where.id !== undefined && row.id !== where.id) continue;
       if (where.strikeId !== undefined && row.strikeId !== where.strikeId) continue;
-      if (where.verdictId !== undefined && row.verdictId !== where.verdictId) continue;
       if (where.windowId !== undefined && row.windowId !== where.windowId) continue;
       if (where.chainDisputeWonAt !== undefined && !row.chainDisputeWonAt) continue;
       return row;

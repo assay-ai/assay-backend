@@ -483,7 +483,6 @@ function buildProposalDto(
     executionSignature: proposal.executionSignature,
     reversedAt: proposal.reversedAt,
     reversalSignature: proposal.reversalSignature,
-    sweepId: proposal.sweepId,
     createdAt: proposal.createdAt,
     updatedAt: proposal.updatedAt,
   };

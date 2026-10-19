@@ -254,15 +254,14 @@ describe('SlashCaseService.buildCase — arithmetic', () => {
     expect(capRow.value).toBe('enforced on chain — not computed here');
   });
 
-  it('returns no arithmetic rows at all when the proposal has no strike (`DATA_FAIL`)', async () => {
+  it('returns no arithmetic rows at all when the strike cannot be read', async () => {
     const { service, proposals, bindings } = build();
 
     proposals.seed(
       buildProposal({
         id: 'p1',
         organizationId: ORG,
-        source: 'DATA_FAIL',
-        strikeId: null,
+        strikeId: '00000000-0000-4000-8000-00000000dead',
         windowId: null,
       }),
     );

@@ -80,24 +80,19 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   @Column({ name: 'tool_id', type: 'uuid' })
   toolId: string;
 
-  /** `SLA_STRIKE` | `DATA_FAIL` — the two doors a slash proposal can come from. */
+  /** `SLA_STRIKE` — the one door a slash proposal comes from. */
   @Column({ name: 'source', type: 'varchar', length: 16 })
   source: string;
 
-  /** Set exactly when `source = 'SLA_STRIKE'`. Unique: one proposal per strike. */
+  /** The strike the proposal was opened from. Unique: one proposal per strike. */
   @Column({ name: 'strike_id', type: 'uuid', nullable: true })
   strikeId: string | null;
-
-  /** Set exactly when `source = 'DATA_FAIL'`. Unique: one proposal per verdict. */
-  @Column({ name: 'verdict_id', type: 'uuid', nullable: true })
-  verdictId: string | null;
 
   /**
    * The window the finding came from, when there is one.
    *
-   * Denormalised off the strike rather than joined, because a `DATA_FAIL`
-   * proposal has a window too (the call belonged to one) and the queue renders
-   * the label on every row.
+   * Denormalised off the strike rather than joined, because the case list
+   * renders the label on every row.
    */
   @Column({ name: 'window_id', type: 'uuid', nullable: true })
   windowId: string | null;
@@ -339,17 +334,6 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
   @Column({ name: 'decided_by_operator_id', type: 'uuid', nullable: true })
   decidedByOperatorId: string | null;
 
-  /** The second signature. Constrained at the database to be a different person. */
-  @Column({ name: 'seconded_by_operator_id', type: 'uuid', nullable: true })
-  secondedByOperatorId: string | null;
-
-  @Column({ name: 'seconded_at', type: 'timestamptz', nullable: true })
-  secondedAt: Date | null;
-
-  /** `SIGNED` | `OBJECTED`. An objection carries a reason too. */
-  @Column({ name: 'second_kind', type: 'varchar', length: 16, nullable: true })
-  secondKind: string | null;
-
   @Column({ name: 'executed_at', type: 'timestamptz', nullable: true })
   executedAt: Date | null;
 
@@ -370,10 +354,6 @@ export class SlashProposalEntity extends OrganizationScopedEntityWithoutSoftDele
    */
   @Column({ name: 'root_cause_key', type: 'varchar', length: 128, nullable: true })
   rootCauseKey: string | null;
-
-  /** Set on every proposal a fleet sweep reached, including uncomplained ones. */
-  @Column({ name: 'sweep_id', type: 'uuid', nullable: true })
-  sweepId: string | null;
 
   /**
    * Read by the false-positive metric. Stored rather than derived, because the
