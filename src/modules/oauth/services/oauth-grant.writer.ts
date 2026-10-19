@@ -211,6 +211,7 @@ export class OAuthGrantWriter {
         sweep = replaced.id;
       }
 
+      const scopes: string[] = [];
       const credentialId = await insertReturningId(manager, AgentCredentialEntity, {
         organizationId,
         agentId,
@@ -219,7 +220,7 @@ export class OAuthGrantWriter {
         oauthClientId: client.id,
         prefix: null,
         tokenHash: null,
-        scopes: [],
+        scopes,
         expiresAt: refreshExpiresAt,
         accessMode: replaced?.accessMode ?? null,
         allowedToolsets: replaced?.allowedToolsets ?? null,
@@ -270,6 +271,8 @@ export class OAuthGrantWriter {
           after: {
             revokedAt: now.toISOString(),
             name: replaced.name,
+            issuedVia: CredentialIssuedVia.OAUTH,
+            clientId: client.clientId,
             reason: 'replaced',
             replacedBy: credentialId,
           },
@@ -283,9 +286,12 @@ export class OAuthGrantWriter {
         resourceType: 'agent_credential',
         resourceId: credentialId,
         before: null,
+        // One shape with an API key's entry (owner rule: same audit).
         after: {
           agentId,
           name: code.credentialName,
+          scopes,
+          expiresAt: refreshExpiresAt.toISOString(),
           issuedVia: CredentialIssuedVia.OAUTH,
           clientId: client.clientId,
           replaces: replaced?.id ?? null,

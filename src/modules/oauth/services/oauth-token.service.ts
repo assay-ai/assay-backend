@@ -2,6 +2,7 @@ import { Inject, Injectable, Logger } from '@nestjs/common';
 import { InjectDataSource } from '@nestjs/typeorm';
 import { DataSource } from 'typeorm';
 
+import { CredentialIssuedVia } from '@database/postgres/entities/agent-credential.entity';
 import { OAuthAccessTokenEntity } from '@database/postgres/entities/oauth-access-token.entity';
 import { OAuthAuthorizationCodeEntity } from '@database/postgres/entities/oauth-authorization-code.entity';
 import { OAuthClientEntity } from '@database/postgres/entities/oauth-client.entity';
@@ -403,7 +404,12 @@ export class OAuthTokenService {
         audit: {
           actor: { type: 'agent', id: credential.agentId },
           action: 'credential.revoked',
-          after: { name: credential.name, reason: 'client_logout', clientId: input.clientId },
+          after: {
+            name: credential.name,
+            issuedVia: CredentialIssuedVia.OAUTH,
+            clientId: input.clientId,
+            reason: 'client_logout',
+          },
         },
       });
       if (revoked) await this.bumpAccessEpoch(token.organizationId);

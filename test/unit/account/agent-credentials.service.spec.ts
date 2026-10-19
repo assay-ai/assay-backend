@@ -684,7 +684,15 @@ describe('AgentCredentialsService — audit log (BUG-R2-B4-01)', () => {
       resourceType: 'agent_credential',
       resourceId: CREDENTIAL_ID,
       before: null,
-      after: { agentId: AGENT_ID, name: 'CI deploy', scopes: ['tools:call'], expiresAt: null },
+      after: {
+        agentId: AGENT_ID,
+        name: 'CI deploy',
+        scopes: ['tools:call'],
+        expiresAt: null,
+        issuedVia: 'API_KEY',
+        clientId: null,
+        replaces: null,
+      },
     });
 
     // Neither the token, its stored prefix nor its hash is in the entry.
@@ -717,7 +725,12 @@ describe('AgentCredentialsService — audit log (BUG-R2-B4-01)', () => {
       resourceType: 'agent_credential',
       resourceId: CREDENTIAL_ID,
       before: { revokedAt: null },
-      after: { revokedAt: revokedAt.toISOString(), name: 'CI deploy', issuedVia: 'API_KEY' },
+      after: {
+        revokedAt: revokedAt.toISOString(),
+        name: 'CI deploy',
+        issuedVia: 'API_KEY',
+        clientId: null,
+      },
     });
     expect(JSON.stringify(audit.record.mock.calls[0][1])).not.toContain('deadbeef');
   });

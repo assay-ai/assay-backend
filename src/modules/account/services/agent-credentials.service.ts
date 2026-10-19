@@ -149,6 +149,10 @@ export class AgentCredentialsService {
           name: row.name,
           scopes: row.scopes,
           expiresAt: row.expiresAt ? new Date(row.expiresAt).toISOString() : null,
+          // One shape with a grant's entry (owner rule: same audit).
+          issuedVia: CredentialIssuedVia.API_KEY,
+          clientId: null,
+          replaces: null,
         },
       });
       return row;
@@ -253,7 +257,7 @@ export class AgentCredentialsService {
           revokedAt: revokedAt.toISOString(),
           name: credential.name,
           issuedVia: credential.issuedVia,
-          ...(isGrant ? { clientId: client?.clientId ?? null } : {}),
+          clientId: isGrant ? (client?.clientId ?? null) : null,
         },
       });
       return true;
