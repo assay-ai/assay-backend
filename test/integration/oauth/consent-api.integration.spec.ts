@@ -39,7 +39,6 @@ import {
   OAUTH_REQUEST_KEY_PREFIX,
   OAuthRequestStore,
 } from '@modules/oauth/services/oauth-request.store';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provider';
 import { AllExceptionsFilter } from '@shared/filters/all-exceptions.filter';
 import { TransformInterceptor } from '@shared/interceptors/transform.interceptor';
@@ -171,7 +170,7 @@ describe('OAuth consent API — real database and Redis', () => {
         OAuthClientRegistry,
         { provide: CimdFetcher, useValue: {} },
         { provide: OAUTH_CONFIG, useValue: config },
-        { provide: OAuthMetrics, useValue: new OAuthMetrics(new MetricsRegistryService()) },
+        { provide: OAuthMetrics, useValue: new OAuthMetrics() },
         { provide: FREE_QUOTA_CONFIG, useValue: DEFAULT_FREE_QUOTA_CONFIG },
         { provide: REDIS_CACHE_CLIENT, useValue: redis },
         { provide: MCP_SESSION_SOURCE, useValue: sessionSource },

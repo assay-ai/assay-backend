@@ -23,6 +23,7 @@ export function renderDashboardHtml(
 ): string {
   const money = snapshot.signals.filter((s) => s.section === 'money');
   const traffic = snapshot.signals.filter((s) => s.section === 'traffic');
+  const oauth = snapshot.signals.filter((s) => s.section === 'oauth');
 
   return `<!doctype html>
 <html lang="en">
@@ -77,6 +78,14 @@ export function renderDashboardHtml(
     </tbody>
   </table>
 
+  <h2>OAuth</h2>
+  <table>
+    <thead><tr><th>Signal</th><th>Value</th><th>Gate</th></tr></thead>
+    <tbody>
+      ${oauth.map(signalRow).join('\n')}
+    </tbody>
+  </table>
+
   <h2>FAIL rate by policy</h2>
   <table>
     <thead><tr><th>Policy</th><th>Version</th><th>Verdicts (1h)</th><th>FAIL rate</th></tr></thead>
@@ -99,7 +108,7 @@ export function renderDashboardHtml(
   </table>
 
   <footer>
-    Money and Traffic are the two dashboards served here. Quality, Providers, and both
+    Money, Traffic and OAuth are the dashboards served here. Quality, Providers, and both
     self-serve dashboards are not built yet. A "no data source" badge
     means this codebase has no table or in-process counter for that signal today, not that the value
     is zero.

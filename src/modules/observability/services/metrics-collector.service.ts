@@ -1,5 +1,4 @@
-import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
-import { Injectable, Logger, Optional } from '@nestjs/common';
+import { Injectable, Logger } from '@nestjs/common';
 
 import { ReconciliationRunRepository } from '@database/postgres/repositories/reconciliation-run.repository';
 import { PlatformMetricsRepository } from '@database/postgres/repositories/platform-metrics.repository';
@@ -14,13 +13,21 @@ import {
 import { atomicToDisplayNumber } from '../domain/money-scale';
 import { ObservabilitySignal, SIGNAL_CATALOG, SignalAvailability } from '../domain/signal-catalog';
 import { ObservabilityMetricsRepository } from '../repositories/observability-metrics.repository';
-import { MetricsRegistryService } from './metrics-registry.service';
+import {
+  gateCimdBlockedAddress,
+  gateContinueCookieMissing,
+  gateDcrRegistrations,
+  gateGrantsStoppedForReuse,
+  gateLiveGrantsPerAgent,
+} from '../domain/oauth-signal-gates';
+import { OAuthSignalFigures, OAuthSignalsReader } from './oauth-signals.reader';
 import {
   MetricsSnapshotDto,
   PolicyFailRateRowDto,
   ReconciliationAssetRowDto,
   SignalGateDto,
   SignalReadingDto,
+  SignalSection,
 } from '../dto/metrics-snapshot.dto';
 
 /**
@@ -72,10 +79,7 @@ export class MetricsCollectorService {
     private readonly platformMetrics: PlatformMetricsRepository,
     private readonly slashProposals: SlashProposalRepository,
     private readonly observability: ObservabilityMetricsRepository,
-    private readonly registry: MetricsRegistryService,
-    // The OAuth live-grants gauge (spec §6.7). Optional so a composition
-    // without it still refreshes.
-    @Optional() private readonly credentials: AgentCredentialRepository | null = null,
+    private readonly oauthSignals: OAuthSignalsReader,
   ) {}
 
   /** The JSON snapshot behind `GET /operator/dashboard` and its data endpoint. */
@@ -108,6 +112,7 @@ export class MetricsCollectorService {
       queue,
       intentRates,
       disputeOverturn,
+      oauth,
     ] = await Promise.all([
       this.reconciliationRuns.findLatestPerAsset(),
       this.slashProposals.falsePositiveCounts(new Date(now - OVERTURN_WINDOW_MS)),
@@ -120,6 +125,8 @@ export class MetricsCollectorService {
       this.platformMetrics.verificationBacklog(nowDate),
       this.platformMetrics.intentRateCounts(nowDate),
       this.observability.disputeOverturnCounts(new Date(now - OVERTURN_WINDOW_MS)),
+      // Never rejects: a failed OAuth source reads as absent (see the reader).
+      this.oauthSignals.read(now),
     ]).catch((error: unknown) => {
       // Log and rethrow: the caller falls back to the last good snapshot (or
       // an all-absent one on a cold start).
@@ -136,15 +143,6 @@ export class MetricsCollectorService {
       falsePositive.resolved > 0 ? falsePositive.falsePositives / falsePositive.resolved : null;
     const disputeOverturnRate =
       disputeOverturn.raised > 0 ? disputeOverturn.overturned / disputeOverturn.raised : null;
-
-    // A failed read leaves the last value rather than failing the refresh.
-    const maxLiveOAuth = await this.credentials?.maxLiveOAuthPerAgent().catch((error: unknown) => {
-      this.logger.warn(`OAuth live-grants gauge not refreshed: ${describe(error)}`);
-      return null;
-    });
-    if (maxLiveOAuth !== null && maxLiveOAuth !== undefined) {
-      this.registry.oauthLiveGrantsPerAgent.set(maxLiveOAuth);
-    }
 
     const signals: SignalReadingDto[] = [
       this.reading(
@@ -248,11 +246,141 @@ export class MetricsCollectorService {
       cacheTtlMs: cacheTtlMs(),
       reconciliation,
       failRateByPolicy,
-      signals: [...signals, ...bonus],
+      signals: [...signals, ...bonus, ...this.oauthReadings(oauth)],
     };
 
     this.cached = { snapshot: generatedSnapshot, refreshedAt: now };
     return generatedSnapshot;
+  }
+
+  /**
+   * The OAuth signals (spec §6.7). A source that could not be read leaves its
+   * rows with a null value and no gate, never a zero.
+   */
+  private oauthReadings({ database: db, counters }: OAuthSignalFigures): SignalReadingDto[] {
+    const day = counters?.last24h ?? null;
+    const sum = (values: Record<string, number> | undefined): number | null =>
+      values ? Object.values(values).reduce((total, value) => total + value, 0) : null;
+    const nonZero = (values: Record<string, number> | undefined) =>
+      values ? Object.fromEntries(Object.entries(values).filter(([, value]) => value > 0)) : {};
+    const gate = <T>(input: T | null | undefined, evaluate: (value: T) => GateInput) =>
+      input === null || input === undefined ? null : toGate(evaluate(input));
+
+    const stopped = db ? db.stoppedForRefreshReuse + db.stoppedForCodeReuse : null;
+    const missing = counters?.lastHour.continueCookieMissing ?? null;
+
+    return [
+      this.reading(
+        ObservabilitySignal.OAUTH_LIVE_GRANTS,
+        'oauth',
+        db?.liveGrants ?? null,
+        'grants',
+        null,
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_LIVE_GRANTS_PER_AGENT_MAX,
+        'oauth',
+        db?.maxLiveGrantsPerAgent ?? null,
+        'grants',
+        gate(db?.maxLiveGrantsPerAgent, gateLiveGrantsPerAgent),
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_GRANTS_STOPPED_FOR_REUSE,
+        'oauth',
+        stopped,
+        'count / 24h',
+        gate(stopped, gateGrantsStoppedForReuse),
+        db
+          ? { refreshReuse: db.stoppedForRefreshReuse, codeReuse: db.stoppedForCodeReuse }
+          : undefined,
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_REFRESH_STALE_REUSE,
+        'oauth',
+        db?.refreshStaleReuse ?? null,
+        'count / 24h',
+        null,
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_REFRESH_GRACE_USES,
+        'oauth',
+        db?.refreshGraceUses ?? null,
+        'count / 24h',
+        null,
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_DCR_REGISTRATIONS,
+        'oauth',
+        db?.dcrRegistrations ?? null,
+        'count / 24h',
+        gate(db, (facts) =>
+          gateDcrRegistrations(facts.dcrRegistrations, facts.dcrMaxPerClientName),
+        ),
+        db ? { maxPerClientName: db.dcrMaxPerClientName } : undefined,
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_CIMD_CLIENTS,
+        'oauth',
+        db?.cimdClients ?? null,
+        'clients',
+        null,
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_TOKEN_RESULTS,
+        'oauth',
+        sum(day?.token),
+        'count / 24h',
+        null,
+        nonZero(day?.token),
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_CONSENT_STEPS,
+        'oauth',
+        day?.consent.approved ?? null,
+        'count / 24h',
+        null,
+        nonZero(day?.consent),
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_CONTINUE_COOKIE_MISSING,
+        'oauth',
+        missing,
+        'count / 1h',
+        gate(counters?.lastHour, (hour) =>
+          gateContinueCookieMissing(hour.continueCookieMissing, hour.consentApproved),
+        ),
+        counters
+          ? {
+              approvedLastHour: counters.lastHour.consentApproved,
+              missingLast24h: counters.last24h.consent.continue_cookie_missing,
+            }
+          : undefined,
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_AUTHORIZE_OUTCOMES,
+        'oauth',
+        day?.authorize.stored ?? null,
+        'count / 24h',
+        null,
+        nonZero(day?.authorize),
+      ),
+      this.reading(
+        ObservabilitySignal.OAUTH_CIMD_FETCHES,
+        'oauth',
+        sum(day?.cimd_fetch),
+        'count / 24h',
+        gate(day?.cimd_fetch.blocked_address, gateCimdBlockedAddress),
+        nonZero(day?.cimd_fetch),
+      ),
+      this.reading(
+        ObservabilitySignal.MCP_UNAUTHORIZED,
+        'oauth',
+        sum(day?.mcp_unauthorized),
+        'count / 24h',
+        null,
+        nonZero(day?.mcp_unauthorized),
+      ),
+    ];
   }
 
   private reconciliationRow(run: {
@@ -292,7 +420,7 @@ export class MetricsCollectorService {
 
   private reading(
     signal: ObservabilitySignal,
-    section: 'money' | 'traffic' | 'other',
+    section: SignalSection,
     value: number | null,
     unit: string,
     gate: SignalGateDto | null,
@@ -313,7 +441,9 @@ export class MetricsCollectorService {
   }
 }
 
-function toGate(alert: { severity: AlertSeverity; summary: string } | null): SignalGateDto {
+type GateInput = { severity: AlertSeverity; summary: string } | null;
+
+function toGate(alert: GateInput): SignalGateDto {
   if (!alert) {
     return { status: 'OK', summary: 'Within the configured threshold.' };
   }

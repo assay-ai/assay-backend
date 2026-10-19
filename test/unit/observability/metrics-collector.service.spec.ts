@@ -3,14 +3,14 @@ import {
   fakeSlashProposalRepository,
 } from '../operator/helpers/fake-metrics';
 import {
+  fakeOAuthSignalsReader,
   fakeObservabilityMetricsRepository,
   fakeReconciliationRunRepository,
+  FakeOAuthSignals,
   FakeObservabilityOverrides,
 } from './helpers/fake-observability-repositories';
 
-import { AgentCredentialRepository } from '@database/postgres/repositories/agent-credential.repository';
 import { MetricsCollectorService } from '@modules/observability/services/metrics-collector.service';
-import { MetricsRegistryService } from '@modules/observability/services/metrics-registry.service';
 import { SignalAvailability } from '@modules/observability/domain/signal-catalog';
 import { ReconciliationSeverity } from '@modules/settlement/ports/reconciliation.types';
 import { ReconciliationRunEntity } from '@database/postgres/entities/reconciliation-run.entity';
@@ -23,6 +23,7 @@ function build(
     falsePositive?: { resolved: number; falsePositives: number };
     intentRateCounts?: { lastMinute: number; hourAgoMinute: number };
     verificationBacklog?: { count: number; p95AgeSeconds: number | null };
+    oauth?: FakeOAuthSignals;
   } = {},
 ) {
   const collector = new MetricsCollectorService(
@@ -33,7 +34,7 @@ function build(
     }),
     fakeSlashProposalRepository(options.falsePositive),
     fakeObservabilityMetricsRepository(options.observability),
-    new MetricsRegistryService(),
+    fakeOAuthSignalsReader(options.oauth),
   );
   return { collector };
 }
@@ -216,46 +217,230 @@ describe('MetricsCollectorService', () => {
     }
   });
 
-  describe('assay_oauth_live_grants_per_agent', () => {
-    function buildWithCredentials(maxLiveOAuthPerAgent: jest.Mock) {
-      const registry = new MetricsRegistryService();
-      const collector = new MetricsCollectorService(
-        fakeReconciliationRunRepository([]),
-        fakeMetricsRepository({}),
-        fakeSlashProposalRepository(),
-        fakeObservabilityMetricsRepository(),
-        registry,
-        { maxLiveOAuthPerAgent } as unknown as AgentCredentialRepository,
-      );
-      return { collector, registry };
+  describe('OAuth signals (spec §6.7)', () => {
+    const OAUTH_SIGNALS = [
+      'OAUTH_LIVE_GRANTS',
+      'OAUTH_LIVE_GRANTS_PER_AGENT_MAX',
+      'OAUTH_GRANTS_STOPPED_FOR_REUSE',
+      'OAUTH_REFRESH_STALE_REUSE',
+      'OAUTH_REFRESH_GRACE_USES',
+      'OAUTH_DCR_REGISTRATIONS',
+      'OAUTH_CIMD_CLIENTS',
+      'OAUTH_TOKEN_RESULTS',
+      'OAUTH_CONSENT_STEPS',
+      'OAUTH_CONTINUE_COOKIE_MISSING',
+      'OAUTH_AUTHORIZE_OUTCOMES',
+      'OAUTH_CIMD_FETCHES',
+      'MCP_UNAUTHORIZED',
+    ];
+
+    async function oauthSnapshot(oauth: FakeOAuthSignals) {
+      const { collector } = build({ oauth });
+      const snapshot = await collector.snapshot();
+      return (name: string) => findSignal(snapshot.signals, name);
     }
 
-    it('is set from the repository on each refresh', async () => {
-      const max = jest.fn().mockResolvedValue(47);
-      const { collector, registry } = buildWithCredentials(max);
-
-      await collector.snapshot();
-
-      expect(max).toHaveBeenCalledTimes(1);
-      expect(await registry.metricsText()).toContain('assay_oauth_live_grants_per_agent 47');
+    it('reports every OAuth signal in the oauth section, sourced, zero against empty sources', async () => {
+      const signal = await oauthSnapshot({});
+      for (const name of OAUTH_SIGNALS) {
+        const row = signal(name);
+        expect(row.section).toBe('oauth');
+        expect(row.availability).toBe(SignalAvailability.SOURCED);
+        expect(row.value).toBe(0);
+        expect(row.gate?.status ?? 'OK').toBe('OK');
+      }
     });
 
-    it('a failed read keeps the refresh and the previous value', async () => {
-      const max = jest.fn().mockResolvedValueOnce(12).mockRejectedValueOnce(new Error('db down'));
-      const { collector, registry } = buildWithCredentials(max);
-      const ttl = process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS;
-      process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS = '1';
-      try {
-        await collector.snapshot();
-        await new Promise((resolve) => setTimeout(resolve, 5));
-        await expect(collector.snapshot()).resolves.toBeDefined();
-      } finally {
-        if (ttl === undefined) delete process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS;
-        else process.env.OBSERVABILITY_METRICS_CACHE_TTL_MS = ttl;
-      }
+    it('OAUTH_LIVE_GRANTS: the live grant count, no gate', async () => {
+      const signal = await oauthSnapshot({ database: { liveGrants: 312 } });
+      expect(signal('OAUTH_LIVE_GRANTS')).toMatchObject({ value: 312, unit: 'grants', gate: null });
+    });
 
-      expect(max).toHaveBeenCalledTimes(2);
-      expect(await registry.metricsText()).toContain('assay_oauth_live_grants_per_agent 12');
+    it('OAUTH_LIVE_GRANTS_PER_AGENT_MAX: warns at 45, OK at 44', async () => {
+      const at44 = await oauthSnapshot({ database: { maxLiveGrantsPerAgent: 44 } });
+      expect(at44('OAUTH_LIVE_GRANTS_PER_AGENT_MAX').gate?.status).toBe('OK');
+
+      const at45 = await oauthSnapshot({ database: { maxLiveGrantsPerAgent: 45 } });
+      const row = at45('OAUTH_LIVE_GRANTS_PER_AGENT_MAX');
+      expect(row.value).toBe(45);
+      expect(row.gate?.status).toBe('WARN');
+      expect(row.gate?.summary).toContain('45');
+    });
+
+    it('OAUTH_GRANTS_STOPPED_FOR_REUSE: refresh plus code reuse; any one is critical', async () => {
+      const none = await oauthSnapshot({});
+      expect(none('OAUTH_GRANTS_STOPPED_FOR_REUSE').gate?.status).toBe('OK');
+
+      const signal = await oauthSnapshot({
+        database: { stoppedForRefreshReuse: 1, stoppedForCodeReuse: 2 },
+      });
+      const row = signal('OAUTH_GRANTS_STOPPED_FOR_REUSE');
+      expect(row.value).toBe(3);
+      expect(row.extra).toEqual({ refreshReuse: 1, codeReuse: 2 });
+      expect(row.gate?.status).toBe('CRITICAL');
+    });
+
+    it('OAUTH_REFRESH_STALE_REUSE and OAUTH_REFRESH_GRACE_USES: audit counts, no gate', async () => {
+      const signal = await oauthSnapshot({
+        database: { refreshStaleReuse: 4, refreshGraceUses: 9 },
+      });
+      expect(signal('OAUTH_REFRESH_STALE_REUSE')).toMatchObject({ value: 4, gate: null });
+      expect(signal('OAUTH_REFRESH_GRACE_USES')).toMatchObject({
+        value: 9,
+        unit: 'count / 24h',
+        gate: null,
+      });
+    });
+
+    it('OAUTH_DCR_REGISTRATIONS: warns at 1000 a day, or above 100 under one client_name', async () => {
+      const ok = await oauthSnapshot({
+        database: { dcrRegistrations: 999, dcrMaxPerClientName: 100 },
+      });
+      expect(ok('OAUTH_DCR_REGISTRATIONS')).toMatchObject({
+        value: 999,
+        extra: { maxPerClientName: 100 },
+        gate: { status: 'OK' },
+      });
+
+      const total = await oauthSnapshot({ database: { dcrRegistrations: 1000 } });
+      expect(total('OAUTH_DCR_REGISTRATIONS').gate?.status).toBe('WARN');
+
+      const oneName = await oauthSnapshot({
+        database: { dcrRegistrations: 120, dcrMaxPerClientName: 101 },
+      });
+      const row = oneName('OAUTH_DCR_REGISTRATIONS');
+      expect(row.gate?.status).toBe('WARN');
+      expect(row.gate?.summary).toContain('client_name');
+    });
+
+    it('OAUTH_CIMD_CLIENTS: the CIMD client rows, no gate', async () => {
+      const signal = await oauthSnapshot({ database: { cimdClients: 17 } });
+      expect(signal('OAUTH_CIMD_CLIENTS')).toMatchObject({ value: 17, gate: null });
+    });
+
+    it('OAUTH_TOKEN_RESULTS: the total, with each non-zero grant_type.result', async () => {
+      const signal = await oauthSnapshot({
+        counters: {
+          last24h: {
+            token: {
+              'authorization_code.ok': 5,
+              'refresh_token.ok': 20,
+              'refresh_token.invalid_grant': 2,
+            },
+          },
+        },
+      });
+      expect(signal('OAUTH_TOKEN_RESULTS')).toMatchObject({
+        value: 27,
+        gate: null,
+        extra: {
+          'authorization_code.ok': 5,
+          'refresh_token.ok': 20,
+          'refresh_token.invalid_grant': 2,
+        },
+      });
+    });
+
+    it('OAUTH_CONSENT_STEPS: approved as the value, every step in extra', async () => {
+      const signal = await oauthSnapshot({
+        counters: { last24h: { consent: { shown: 12, approved: 10, denied: 1 } } },
+      });
+      expect(signal('OAUTH_CONSENT_STEPS')).toMatchObject({
+        value: 10,
+        extra: { shown: 12, approved: 10, denied: 1 },
+      });
+    });
+
+    it('OAUTH_CONTINUE_COOKIE_MISSING: warns above 5% of approved in the last hour', async () => {
+      const within = await oauthSnapshot({
+        counters: { lastHour: { consentApproved: 40, continueCookieMissing: 2 } },
+      });
+      expect(within('OAUTH_CONTINUE_COOKIE_MISSING')).toMatchObject({
+        value: 2,
+        unit: 'count / 1h',
+        gate: { status: 'OK' },
+      });
+
+      const above = await oauthSnapshot({
+        counters: {
+          last24h: { consent: { continue_cookie_missing: 6 } },
+          lastHour: { consentApproved: 40, continueCookieMissing: 3 },
+        },
+      });
+      const row = above('OAUTH_CONTINUE_COOKIE_MISSING');
+      expect(row.gate?.status).toBe('WARN');
+      expect(row.extra).toEqual({ approvedLastHour: 40, missingLast24h: 6 });
+
+      const noApprovals = await oauthSnapshot({
+        counters: { lastHour: { consentApproved: 0, continueCookieMissing: 1 } },
+      });
+      expect(noApprovals('OAUTH_CONTINUE_COOKIE_MISSING').gate?.status).toBe('WARN');
+    });
+
+    it('OAUTH_AUTHORIZE_OUTCOMES: stored as the value, every outcome in extra', async () => {
+      const signal = await oauthSnapshot({
+        counters: { last24h: { authorize: { stored: 30, rate_limited: 2 } } },
+      });
+      expect(signal('OAUTH_AUTHORIZE_OUTCOMES')).toMatchObject({
+        value: 30,
+        extra: { stored: 30, rate_limited: 2 },
+        gate: null,
+      });
+    });
+
+    it('OAUTH_CIMD_FETCHES: warns on any blocked_address', async () => {
+      const ok = await oauthSnapshot({ counters: { last24h: { cimd_fetch: { ok: 8 } } } });
+      expect(ok('OAUTH_CIMD_FETCHES')).toMatchObject({ value: 8, gate: { status: 'OK' } });
+
+      const blocked = await oauthSnapshot({
+        counters: { last24h: { cimd_fetch: { ok: 8, blocked_address: 1 } } },
+      });
+      const row = blocked('OAUTH_CIMD_FETCHES');
+      expect(row.value).toBe(9);
+      expect(row.gate?.status).toBe('WARN');
+      expect(row.extra).toEqual({ ok: 8, blocked_address: 1 });
+    });
+
+    it('MCP_UNAUTHORIZED: the 401s by reason', async () => {
+      const signal = await oauthSnapshot({
+        counters: { last24h: { mcp_unauthorized: { missing: 50, revoked: 3 } } },
+      });
+      expect(signal('MCP_UNAUTHORIZED')).toMatchObject({
+        value: 53,
+        extra: { missing: 50, revoked: 3 },
+        gate: null,
+      });
+    });
+
+    it('a failed database read shows the database signals absent, never zero, and keeps the counters', async () => {
+      const signal = await oauthSnapshot({
+        database: null,
+        counters: { last24h: { token: { 'refresh_token.ok': 2 } } },
+      });
+      for (const name of [
+        'OAUTH_LIVE_GRANTS',
+        'OAUTH_LIVE_GRANTS_PER_AGENT_MAX',
+        'OAUTH_GRANTS_STOPPED_FOR_REUSE',
+        'OAUTH_DCR_REGISTRATIONS',
+        'OAUTH_CIMD_CLIENTS',
+      ]) {
+        expect(signal(name)).toMatchObject({ value: null, gate: null });
+      }
+      expect(signal('OAUTH_TOKEN_RESULTS').value).toBe(2);
+    });
+
+    it('unreachable counters show the counter signals absent and keep the database ones', async () => {
+      const signal = await oauthSnapshot({ database: { liveGrants: 3 }, counters: null });
+      for (const name of [
+        'OAUTH_TOKEN_RESULTS',
+        'OAUTH_CONSENT_STEPS',
+        'OAUTH_CONTINUE_COOKIE_MISSING',
+        'OAUTH_CIMD_FETCHES',
+        'MCP_UNAUTHORIZED',
+      ]) {
+        expect(signal(name)).toMatchObject({ value: null, gate: null });
+      }
+      expect(signal('OAUTH_LIVE_GRANTS').value).toBe(3);
     });
   });
 });
