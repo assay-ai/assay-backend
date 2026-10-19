@@ -10,7 +10,7 @@
  *      payer signs; `EvmRelayedEscrowIntentSubmitter` relays it
  *      (`authorizeDelegateBySig`) — the payer pays no gas;
  *   2. `list` reads the delegation back from the chain;
- *   3. a voucher built by the agent CLI and signed by the DELEGATE key is
+ *   3. a voucher built by the assay-mcp signer and signed by the DELEGATE key is
  *      accepted by `EvmChainAdapter.authorizeVoucherSigner` (the off-chain
  *      mirror) and redeemed on chain by `EvmVoucherRedeemer`; the provider is
  *      paid and the delegate's own window counts it;
@@ -27,7 +27,7 @@
  *   (assay-backend) E2_RPC_URL=http://127.0.0.1:8547 \
  *       npx ts-node -r tsconfig-paths/register scripts/testnet/e2-delegation-anvil.ts
  */
-import { writeFileSync } from 'node:fs';
+import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import {
@@ -76,12 +76,22 @@ const MCP_SIGNER =
 
 const CHAIN: ChainId = 'eip155:46630' as ChainId;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11';
+/** The escrow and asset come from assay-mcp's deployments.json (anvil entry), never a literal here. */
+const MCP_DEPLOYMENTS =
+  process.env.E2_ASSAY_MCP_DEPLOYMENTS ?? resolve(__dirname, '../../../assay-mcp/deployments.json');
+const ANVIL_NET = (
+  JSON.parse(readFileSync(MCP_DEPLOYMENTS, 'utf8')) as {
+    anvil: { networks: Record<string, { escrow: string; asset: string }> };
+  }
+).anvil.networks[CHAIN];
+if (!ANVIL_NET) throw new Error(`no anvil entry for ${CHAIN} in ${MCP_DEPLOYMENTS}`);
+const caipAddress = (caip: string): string => caip.slice(caip.lastIndexOf(':') + 1);
 const DEPLOYMENT: EvmDeployment = {
   chainId: CHAIN,
   config: '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5',
   stake: '0x7242F853db478A28Ae76Ace808212d4B68aa73e7',
-  escrow: '0x1eDb0E45747cfEf778bDB4f4418319efc0DD814f',
-  asset: '0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3',
+  escrow: caipAddress(ANVIL_NET.escrow),
+  asset: caipAddress(ANVIL_NET.asset),
   escrowImplementation: '0x2d3568a0a37A86A961B7970446e78620Bc93cFc0',
   admin: '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32',
   // Not read here: nothing in this script runs the vault-control check.
@@ -338,7 +348,7 @@ async function main(): Promise<void> {
   );
   step('2. GET /escrow/delegates equivalent (from chain)', listed);
 
-  // 3. The agent CLI builds and signs the voucher with the DELEGATE key.
+  // 3. The assay-mcp signer builds and signs the voucher with the DELEGATE key.
   const signer = (await new Function('p', 'return import(p)')(MCP_SIGNER)) as {
     buildVoucher: (
       r: unknown,
