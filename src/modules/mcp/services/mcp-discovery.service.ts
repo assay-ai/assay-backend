@@ -17,7 +17,7 @@ import {
   McpDiscoveryConfig,
   loadMcpDiscoveryConfig,
 } from '../config/mcp-discovery.config';
-import { X402_PRICE } from '../constants/mcp.constants';
+import { ASSAY_PRICE } from '../constants/mcp.constants';
 import { SearchDocument, rankBm25 } from '../domain/bm25';
 import {
   GET_TOOL,
@@ -238,7 +238,7 @@ export class McpDiscoveryService {
     // The tool at the contract version a call through this URL would use now.
     const { tool, descriptor } = entry;
     const version = versionOf(tool);
-    const price = (descriptor.annotations[X402_PRICE] as McpPriceAnnotation | undefined) ?? null;
+    const price = (descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation | undefined) ?? null;
     return {
       name: tool.name,
       kind: kindOf(tool),
@@ -331,7 +331,7 @@ export class McpDiscoveryService {
     tool: Tool,
     descriptor: McpToolDescriptor,
   ): Promise<number | null> {
-    const mode = descriptor.annotations['x402/pricingMode'];
+    const mode = descriptor.annotations['assay/pricingMode'];
     if (mode !== 'FREE' && mode !== 'FREEMIUM') return null;
     return this.catalogue.freeCallsLeft(viewer, tool.id);
   }
@@ -376,7 +376,7 @@ function kindOf(tool: Tool): string {
 function priceText(descriptor: McpToolDescriptor): string | null {
   if (descriptor.annotations[ASSAY_NO_PROVIDER_FITS] === true)
     return 'No provider fits your limits';
-  const price = descriptor.annotations[X402_PRICE] as McpPriceAnnotation | undefined;
+  const price = descriptor.annotations[ASSAY_PRICE] as McpPriceAnnotation | undefined;
   return price?.display ?? null;
 }
 

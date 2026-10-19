@@ -5,10 +5,10 @@ import { CallToolResult } from '@modelcontextprotocol/sdk/types.js';
 import { AccountId } from '@modules/chains/ports/caip.types';
 import { Voucher } from '@modules/chains/ports/x402.types';
 import {
-  X402_ERROR,
-  X402_IDEMPOTENCY_KEY,
-  X402_RECEIPT,
-  X402_REPLAYED,
+  ASSAY_ERROR,
+  ASSAY_IDEMPOTENCY_KEY,
+  ASSAY_RECEIPT,
+  ASSAY_REPLAYED,
 } from '@modules/mcp/constants/mcp.constants';
 import { McpErrorCode } from '@modules/mcp/errors/mcp.errors';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
@@ -45,7 +45,7 @@ import {
 } from './helpers/mcp-harness';
 
 /**
- * `_meta["x402/idempotency-key"]` on `tools/call` (G2.1): a client that
+ * `_meta["assay/idempotency-key"]` on `tools/call` (G2.1): a client that
  * retries the same logical call is never charged twice, and gets the first
  * call's result back.
  *
@@ -740,11 +740,11 @@ describe('McpToolCallService — idempotency keys', () => {
         const result = (await client.callTool({
           name: TOOL_NAME,
           arguments: ARGS,
-          _meta: { [X402_IDEMPOTENCY_KEY]: key },
+          _meta: { [ASSAY_IDEMPOTENCY_KEY]: key },
         })) as CallToolResult;
 
         expect(result.isError).toBe(true);
-        expect(result._meta?.[X402_ERROR]).toMatchObject({
+        expect(result._meta?.[ASSAY_ERROR]).toMatchObject({
           code: McpErrorCode.MCP_IDEMPOTENCY_KEY_INVALID,
           retryable: false,
         });
@@ -754,7 +754,7 @@ describe('McpToolCallService — idempotency keys', () => {
       },
     );
 
-    it('accepts a 128-character printable key and marks only the replay with x402/replayed', async () => {
+    it('accepts a 128-character printable key and marks only the replay with assay/replayed', async () => {
       const h = harness();
       const client = await connected(h);
       const key = '~ '.repeat(64);
@@ -763,17 +763,17 @@ describe('McpToolCallService — idempotency keys', () => {
         (await client.callTool({
           name: TOOL_NAME,
           arguments: ARGS,
-          _meta: { [X402_IDEMPOTENCY_KEY]: key },
+          _meta: { [ASSAY_IDEMPOTENCY_KEY]: key },
         })) as CallToolResult;
       const first = await call();
       const replay = await call();
 
       expect(first.isError).toBeFalsy();
-      expect(first._meta?.[X402_REPLAYED]).toBeUndefined();
-      expect(replay._meta?.[X402_REPLAYED]).toBe(true);
+      expect(first._meta?.[ASSAY_REPLAYED]).toBeUndefined();
+      expect(replay._meta?.[ASSAY_REPLAYED]).toBe(true);
       expect(replay.structuredContent).toEqual(first.structuredContent);
-      expect((replay._meta?.[X402_RECEIPT] as { intentId: string }).intentId).toBe(
-        (first._meta?.[X402_RECEIPT] as { intentId: string }).intentId,
+      expect((replay._meta?.[ASSAY_RECEIPT] as { intentId: string }).intentId).toBe(
+        (first._meta?.[ASSAY_RECEIPT] as { intentId: string }).intentId,
       );
       expect(h.invoker.invocations).toHaveLength(1);
     });
@@ -784,17 +784,17 @@ describe('McpToolCallService — idempotency keys', () => {
       await client.callTool({
         name: TOOL_NAME,
         arguments: ARGS,
-        _meta: { [X402_IDEMPOTENCY_KEY]: KEY },
+        _meta: { [ASSAY_IDEMPOTENCY_KEY]: KEY },
       });
 
       const reused = (await client.callTool({
         name: TOOL_NAME,
         arguments: { query: 'other' },
-        _meta: { [X402_IDEMPOTENCY_KEY]: KEY },
+        _meta: { [ASSAY_IDEMPOTENCY_KEY]: KEY },
       })) as CallToolResult;
 
       expect(reused.isError).toBe(true);
-      expect(reused._meta?.[X402_ERROR]).toMatchObject({
+      expect(reused._meta?.[ASSAY_ERROR]).toMatchObject({
         code: McpFailureCode.IDEMPOTENCY_KEY_REUSED,
         retryable: false,
       });

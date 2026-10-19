@@ -168,7 +168,7 @@ export class McpToolCallService {
     private readonly spendPolicy: SpendPolicyEnforcementService,
     private readonly freeQuota: FreeQuotaService,
     private readonly records: ToolCallRecordWriter,
-    // Rail B (`x402/voucher`). The voucher is verified, bound and recorded by
+    // Rail B (`assay/voucher`). The voucher is verified, bound and recorded by
     // `VoucherService` — the same class, and the only one, that decides whether
     // a signed voucher pays for a call.
     private readonly vouchers: VoucherService,
@@ -176,7 +176,7 @@ export class McpToolCallService {
     @Inject(ESCROW_BALANCE_READER) private readonly escrow: EscrowBalanceReaderPort,
     @Inject(MCP_PRICING) private readonly pricing: McpPricingConfig,
     @Inject(ENABLED_CHAINS) private readonly enabledChains: readonly ChainId[],
-    // `_meta["x402/idempotency-key"]`: the replay record of a keyed call.
+    // `_meta["assay/idempotency-key"]`: the replay record of a keyed call.
     private readonly idempotency: McpIdempotencyStore,
     @Inject(MCP_IDEMPOTENCY_CONFIG) private readonly idempotencyConfig: McpIdempotencyConfig,
     // A served keyed call's mapped response, when the replay record is gone.
@@ -188,7 +188,7 @@ export class McpToolCallService {
 
   /**
    * One `tools/call`. `idempotencyKey` is the validated
-   * `_meta["x402/idempotency-key"]`, or `null` — and `null` runs the call
+   * `_meta["assay/idempotency-key"]`, or `null` — and `null` runs the call
    * exactly as it ran before keys existed.
    *
    * `scope` is the URL's view and the caller's access (`McpScope`): the tool
@@ -237,7 +237,7 @@ export class McpToolCallService {
    * guarantee against a second CHARGE is the payment record's partial unique
    * index on the same key (see {@link replayedIntent}), which still holds when
    * the record is gone. A free call has no payment record, so it has no such
-   * backstop: see `X402_IDEMPOTENCY_KEY`.
+   * backstop: see `ASSAY_IDEMPOTENCY_KEY`.
    */
   private async callKeyed(
     session: McpSession,
@@ -498,7 +498,7 @@ export class McpToolCallService {
     // chain, and each phase below — the free relay, the paid route, the rail-B
     // offer — chooses its version among the bindings of its own class and the
     // buyer's chain, under the same hard constraints. A rail-B retry is held
-    // to the version its offer named (`x402/voucher.contractVersion`).
+    // to the version its offer named (`assay/voucher.contractVersion`).
     const plan: CallPlan = asked;
 
     this.requireValidArguments(quote.tool, args);
@@ -743,7 +743,7 @@ export class McpToolCallService {
         // The receipt's link to the policy that governed this call.
         spendPolicyVersion,
         chainId: session.chainId,
-        // The agent's `x402/idempotency-key`, or null. The unique index on it
+        // The agent's `assay/idempotency-key`, or null. The unique index on it
         // is what keeps one live intent per key — see `replayedIntent`.
         idempotencyKey,
       });
@@ -781,7 +781,7 @@ export class McpToolCallService {
   // ── Rail B ────────────────────────────────────────────────────────────────
 
   /**
-   * A paid call settled by a voucher the buyer signed (`x402/voucher`).
+   * A paid call settled by a voucher the buyer signed (`assay/voucher`).
    *
    * Two requests, x402's 402 handshake carried in MCP `_meta`:
    *
@@ -895,7 +895,7 @@ export class McpToolCallService {
         retryable: true,
         message:
           `${tool.name} is paid on rail B: sign the voucher in x402/paymentRequired and ` +
-          `call again with it in _meta["x402/voucher"]` +
+          `call again with it in _meta["assay/voucher"]` +
           delegationHint(session) +
           (isNotReviewed(tool) ? ' This maker’s tool is not reviewed.' : ''),
         intentId: null,
@@ -1900,7 +1900,7 @@ function lastAttemptOf(error: unknown): RouterLastAttempt | null {
 /**
  * The router's `TOOL_ALL_BINDINGS_FAILED` as the agent should see it: with the
  * intent id, so it can open the receipt, and without `lastAttempt`. The MCP
- * server spreads an error's context onto `x402/error`, and which binding was
+ * server spreads an error's context onto `assay/error`, and which binding was
  * tried is routing detail the receipt deliberately leaves out (see
  * `McpReceipt.providerId`). Any other error passes through untouched.
  */
@@ -2027,7 +2027,7 @@ export enum McpFailureCode {
   PAYMENT_INSUFFICIENT_FUNDS = 'PAYMENT_INSUFFICIENT_FUNDS',
   /**
    * Rail B: this call is paid by a voucher and none was presented. Retryable —
-   * sign `x402/paymentRequired` and call again with `x402/voucher`.
+   * sign `x402/paymentRequired` and call again with `assay/voucher`.
    */
   PAYMENT_REQUIRED = 'PAYMENT_REQUIRED',
   /**
@@ -2045,13 +2045,13 @@ export enum McpFailureCode {
    */
   PROVIDER_CONTRACT_VIOLATION = 'PROVIDER_CONTRACT_VIOLATION',
   /**
-   * `x402/idempotency-key` already names a different call of this agent —
+   * `assay/idempotency-key` already names a different call of this agent —
    * another tool, other arguments, or (once its replay record is gone) another
    * price. Nothing ran and nothing was charged; not retryable with this key.
    */
   IDEMPOTENCY_KEY_REUSED = 'IDEMPOTENCY_KEY_REUSED',
   /**
-   * An earlier attempt with this `x402/idempotency-key` is still running.
+   * An earlier attempt with this `assay/idempotency-key` is still running.
    * Nothing was charged for this one; retry after `retryAfter` seconds to get
    * the first attempt's result.
    */
@@ -2074,9 +2074,9 @@ export enum McpFailureCode {
 
 /** What the agent said about paying, read off the request's `_meta`. */
 export interface McpPayment {
-  /** `x402/rail` — the rail asked for, or `null` to let the chain decide. */
+  /** `assay/rail` — the rail asked for, or `null` to let the chain decide. */
   readonly rail: PaymentRail | null;
-  /** `x402/voucher` — present only on the paid retry of rail B. */
+  /** `assay/voucher` — present only on the paid retry of rail B. */
   readonly voucher: McpVoucherPayment | null;
 }
 
@@ -2114,7 +2114,7 @@ export interface VoucherRequirement {
   readonly amount: Money;
   /**
    * The contract version (`tool_versions.version`) the offer was drawn at
-   * (T3). Echo it in `x402/voucher.contractVersion`: the retry is served at
+   * (T3). Echo it in `assay/voucher.contractVersion`: the retry is served at
    * this version or refused, never at another.
    */
   readonly contractVersion?: number;
@@ -2143,7 +2143,7 @@ export type VoucherSigner = 'payer' | 'delegate';
 /**
  * Which rail a paid call takes.
  *
- * A presented voucher is rail B by definition, and an explicit `x402/rail`
+ * A presented voucher is rail B by definition, and an explicit `assay/rail`
  * wins next (a rail the chain does not offer is refused downstream by
  * `assertRailOffered`, naming the rails it does). With neither, rail A where
  * the chain offers it, and rail B otherwise — which on a chain with no paid
@@ -2232,7 +2232,7 @@ export type McpCallOutcome =
       readonly receipt: McpReceipt;
       /**
        * `true` when this is an earlier attempt's stored result, answered for a
-       * retry with the same `x402/idempotency-key` (`_meta["x402/replayed"]`).
+       * retry with the same `assay/idempotency-key` (`_meta["assay/replayed"]`).
        */
       readonly replayed?: boolean;
     }

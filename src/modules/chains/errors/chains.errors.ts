@@ -350,7 +350,7 @@ export const ChainErrors = createDomainErrorFactory('CHAIN', {
    * more than a declaration.
    *
    * **4xx, not 500.** The rail is the caller's choice: an agent sends
-   * `x402/rail` or a voucher, or it calls a paid tool on a chain whose list is
+   * `assay/rail` or a voucher, or it calls a paid tool on a chain whose list is
    * empty (Solana today: free calls only). Every site that asserts this runs
    * before an intent exists, so nothing is left to clean up and the caller
    * can act on the answer — pay on a chain in `offered`, or call free tools.

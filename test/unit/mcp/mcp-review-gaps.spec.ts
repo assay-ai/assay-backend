@@ -8,7 +8,7 @@ import {
   isLocalDeployment,
   loadMcpDiscoveryConfig,
 } from '@modules/mcp/config/mcp-discovery.config';
-import { X402_ERROR } from '@modules/mcp/constants/mcp.constants';
+import { ASSAY_ERROR } from '@modules/mcp/constants/mcp.constants';
 import { SearchCursorCodec } from '@modules/mcp/domain/search-cursor';
 import { McpScope } from '@modules/mcp/ports/mcp-scope';
 import { McpCallRecorder } from '@modules/mcp/services/mcp-call-recorder.service';
@@ -114,7 +114,7 @@ async function connect(scope: McpScope) {
 
 const callTool = (client: Client, args: Record<string, unknown>) =>
   client.callTool({ name: 'call_tool', arguments: args }) as Promise<CallToolResult>;
-const codeOf = (result: CallToolResult) => (result._meta?.[X402_ERROR] as { code: string }).code;
+const codeOf = (result: CallToolResult) => (result._meta?.[ASSAY_ERROR] as { code: string }).code;
 
 describe('call_tool refusals go through the refused-call pipeline', () => {
   offerSolanaRailsInThisSuite('A', 'B');

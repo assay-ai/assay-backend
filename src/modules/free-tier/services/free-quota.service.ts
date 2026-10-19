@@ -120,7 +120,7 @@ export interface FreeQuotaBindingReserveInput {
   readonly onFull?: (limit: FreeQuotaLimitKind) => void;
 }
 
-/** `{ remaining, limit, resetsAt }` — the shape `tools/list` publishes as `x402/freeQuota`. */
+/** `{ remaining, limit, resetsAt }` — the shape `tools/list` publishes as `assay/freeQuota`. */
 export interface FreeQuotaRemaining {
   readonly remaining: number;
   readonly limit: number;
@@ -245,7 +245,7 @@ export class FreeQuotaService {
   }
 
   /**
-   * What `tools/list` publishes as `x402/freeQuota` — the most generous honest
+   * What `tools/list` publishes as `assay/freeQuota` — the most generous honest
    * answer, across whichever free/freemium binding behind this tool has the
    * most headroom.
    *

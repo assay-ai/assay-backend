@@ -4,12 +4,12 @@ import { displayPrice } from '@modules/mcp/services/mcp-catalogue.service';
 import { FreeQuotaRefused } from './free-quota.service';
 
 /**
- * The `x402/error` + `x402/paymentRequired` `_meta` shape a free-quota
+ * The `assay/error` + `x402/paymentRequired` `_meta` shape a free-quota
  * exhaustion carries, built from a {@link FreeQuotaRefused} decision.
  *
  * ```jsonc
  * "_meta": {
- *   "x402/error": { "code": "FREE_QUOTA_EXHAUSTED", "retryable": true, "resetsAt": "…" },
+ *   "assay/error": { "code": "FREE_QUOTA_EXHAUSTED", "retryable": true, "resetsAt": "…" },
  *   "x402/paymentRequired": { "toolId": "…", "price": { … } }   // present only on FREEMIUM
  * }
  * ```
@@ -54,7 +54,7 @@ export interface FreeQuotaErrorContext {
  * (`src/modules/chains/facilitator/**`, and not needed here — the agent funding
  * this call already has a balance; it simply has not been charged for this tool
  * before). This is the tool's own paid price, exactly what `tools/list` already
- * quoted as `x402/price` for the same tool once it stops being free.
+ * quoted as `assay/price` for the same tool once it stops being free.
  */
 export interface FreeQuotaPaymentRequired {
   readonly toolId: string;

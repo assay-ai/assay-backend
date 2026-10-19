@@ -144,7 +144,7 @@ describe('discovery end to end over HTTP', () => {
     });
     expect(called.isError).toBeFalsy();
     expect(called.structuredContent).toEqual({ answer: 'forty-two' });
-    expect(called._meta?.['x402/receipt']).toMatchObject({ providerId: 'p1' });
+    expect(called._meta?.['assay/receipt']).toMatchObject({ providerId: 'p1' });
     await client.close();
   });
 

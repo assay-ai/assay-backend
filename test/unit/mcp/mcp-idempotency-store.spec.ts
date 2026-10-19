@@ -14,7 +14,7 @@ import {
 
 import { FakeIdempotencyRedis } from './helpers/fake-idempotency-redis';
 
-describe('x402/idempotency-key — the key and its record', () => {
+describe('assay/idempotency-key — the key and its record', () => {
   describe('parseIdempotencyKey', () => {
     it('reads an absent or null key as no key', () => {
       expect(parseIdempotencyKey(undefined)).toBeNull();

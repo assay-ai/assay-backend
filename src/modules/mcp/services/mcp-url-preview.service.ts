@@ -263,7 +263,7 @@ export function noFitReasonOf(quote: ToolQuote | null, agentChain: ChainId): NoF
 }
 
 function displayOf(meta: Record<string, unknown> | undefined): string | null {
-  const price = meta?.['x402/price'] as { display?: string } | undefined;
+  const price = meta?.['assay/price'] as { display?: string } | undefined;
   return price?.display ?? null;
 }
 
