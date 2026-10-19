@@ -1,7 +1,7 @@
 /**
  * Agent payment delegation, end to end against a REAL EVM — an anvil fork of
- * Robinhood Chain testnet (eip155:46630) whose X402Escrow proxy has been
- * upgraded with `assay-evm/script/UpgradeEscrow.s.sol`.
+ * Robinhood Chain testnet (eip155:46630) that carries the Assay* deployment
+ * (`AssayConfig`, `AssayStake`, `AssayEscrow`) named in `EVM_DEPLOYMENTS`.
  *
  * It drives the backend's own production classes against that chain, with no
  * Nest and no database, so what it proves is the chain/backend contract:
@@ -24,8 +24,6 @@
  * payer. Nothing here sends a transaction to a real network.
  *
  *   anvil --fork-url https://rpc.testnet.chain.robinhood.com --port 8547
- *   (assay-evm) forge script script/UpgradeEscrow.s.sol --rpc-url http://127.0.0.1:8547 \
- *       --sender <admin> --unlocked --broadcast
  *   (assay-backend) E2_RPC_URL=http://127.0.0.1:8547 \
  *       npx ts-node -r tsconfig-paths/register scripts/testnet/e2-delegation-anvil.ts
  */
@@ -76,17 +74,17 @@ const CHAIN: ChainId = 'eip155:46630' as ChainId;
 const MULTICALL3 = '0xcA11bde05977b3631167028862bE2a173976CA11';
 const DEPLOYMENT: EvmDeployment = {
   chainId: CHAIN,
-  config: '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43',
-  stake: '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c',
-  escrow: '0x1D2625efD87c2fc10b8563f3F0890072845Fcf41',
+  config: '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5',
+  stake: '0x7242F853db478A28Ae76Ace808212d4B68aa73e7',
+  escrow: '0x1eDb0E45747cfEf778bDB4f4418319efc0DD814f',
   asset: '0xDbbC156dD414f43f2c952C1Be0f16A0B9a826Cd3',
-  escrowImplementation: '0x0000000000000000000000000000000000000000',
+  escrowImplementation: '0x2d3568a0a37A86A961B7970446e78620Bc93cFc0',
   admin: '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32',
   // Not read here: nothing in this script runs the vault-control check.
-  owner: '0x0000000000000000000000000000000000000000',
+  owner: '0xaf14F26171De147eC3dA786Abe345093c270A7D9',
   multicall3: MULTICALL3,
 } as EvmDeployment;
-/** The real testnet provider, already bonded above the stake floor. */
+/** The testnet provider. It must bond above the stake floor on the current stake contract first. */
 const PROVIDER = getAddress('0xfB18f483E985F21c58fD97F69DE225aECA5Fc1c4');
 const USDG = `${CHAIN}/erc20:${DEPLOYMENT.asset}`;
 /**
@@ -108,7 +106,7 @@ const chain = defineChain({
 const CONFIG_ABI = parseAbi([
   'struct ParamSet { address treasury; address redeemer; uint64 unbondingPeriodSeconds; uint64 minimumStake; uint64 penaltyAmount; uint64 verifierDailyCap; uint16 takeRateBps; uint16 slashAgentBps; uint16 slashPlatformBps; uint16 slashCapBps; }',
   'function params() view returns (ParamSet)',
-  'function updateConfig(ParamSet p, address newAdmin)',
+  'function updateConfig(ParamSet p)',
 ]);
 const ERC20_ABI = parseAbi([
   'function mint(address to, uint256 amount)',
@@ -188,7 +186,7 @@ async function main(): Promise<void> {
       address: DEPLOYMENT.config as `0x${string}`,
       abi: CONFIG_ABI,
       functionName: 'updateConfig',
-      args: [{ ...params, redeemer: relayer.address }, DEPLOYMENT.admin as `0x${string}`],
+      args: [{ ...params, redeemer: relayer.address }],
       chain,
     } as never),
   });

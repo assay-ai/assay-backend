@@ -29,7 +29,7 @@ import { EscrowLimits } from '../ports/escrow.types';
 import { Eip712Domain, UnsignedChainTransaction } from '../ports/unsigned-chain-transaction';
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import { ChainDoor, ChainStateGatePort } from '../ports/chain-state-gate.port';
-import { X402_ESCROW_ABI } from './abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { evmDomain } from './eip712/domain';
 import { authorizeDelegateTypedData, revokeDelegateTypedData } from './eip712/delegation';
 import { requestWithdrawTypedData, setLimitsTypedData } from './eip712/escrow-control';
@@ -73,17 +73,17 @@ export interface EvmEscrowIntentClient {
     value: bigint;
   }): Promise<bigint>;
   /**
-   * The chain's own clock. `X402Escrow.withdraw()` compares
+   * The chain's own clock. `AssayEscrow.withdraw()` compares
    * `block.timestamp` — not this process's — against `withdrawAvailableAt`,
    * so the maturity decision has to be made against the same reading.
    */
   getBlock(args: { blockTag: 'latest' }): Promise<{ timestamp: bigint }>;
 }
 
-/** Every amount argument on `X402Escrow` is a `uint64`. */
+/** Every amount argument on `AssayEscrow` is a `uint64`. */
 const MAX_UINT64 = 2n ** 64n - 1n;
 
-/** `X402Escrow.Delegation`, as `delegationOf` returns it. */
+/** `AssayEscrow.Delegation`, as `delegationOf` returns it. */
 interface EvmDelegationRead {
   readonly maxVoucherAmount: bigint;
   readonly maxPerWindow: bigint;
@@ -228,7 +228,7 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
 
   /**
    * `Constants.WITHDRAW_DELAY_SECONDS` — a compile-time constant on
-   * `X402Escrow`, not a `Config` field.
+   * `AssayEscrow`, not a `Config` field.
    *
    * There is nothing to read and nothing an `updateConfig` could move under a
    * cached copy: the value is baked into the deployed bytecode, and
@@ -300,7 +300,7 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
    * The `AuthorizeDelegate` the payer signs, at the escrow's `authNonce` and a
    * chain-clock deadline, exactly like `SetLimits`.
    *
-   * Every rule `X402Escrow._authorizeDelegate` will apply is checked here first
+   * Every rule `AssayEscrow._authorizeDelegate` will apply is checked here first
    * so a payer is never asked to sign something the chain refuses: the
    * delegate is an address on the payer's chain and not the payer, both caps
    * are non-zero with the per-call cap inside the window cap, neither cap
@@ -434,7 +434,7 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
     const [delegates, chainSeconds] = await Promise.all([
       client.readContract({
         address: getAddress(deployment.escrow),
-        abi: X402_ESCROW_ABI,
+        abi: ASSAY_ESCROW_ABI,
         functionName: 'delegatesOf',
         args: [payer],
       }) as Promise<readonly `0x${string}`[]>,
@@ -501,7 +501,7 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
   ): Promise<EvmDelegationRead> {
     return (await this.client(chainId).readContract({
       address: getAddress(deployment.escrow),
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'delegationOf',
       args: [payer, delegate],
     })) as EvmDelegationRead;
@@ -559,7 +559,7 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
    * this side can extend it after the fact.
    *
    * **The 300 is a width; the instant it is added to is the chain's.**
-   * `X402Escrow._consumeAuth` refuses on `block.timestamp > deadline`, so a
+   * `AssayEscrow._consumeAuth` refuses on `block.timestamp > deadline`, so a
    * deadline stamped from `Date.now()` measures this process's clock against
    * the chain's ruler. That is not a boundary-second problem like the maturity
    * gate's was: a chain running 300 s ahead of this server makes EVERY relayed
@@ -654,13 +654,13 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
       }
     }
 
-    const data = encodeFunctionData({ abi: X402_ESCROW_ABI, functionName: 'withdraw' });
+    const data = encodeFunctionData({ abi: ASSAY_ESCROW_ABI, functionName: 'withdraw' });
     const client = this.client(chainId);
     const to = getAddress(deployment.escrow);
 
     // The contract's own two refusals, made here so the buyer does not pay a
     // network fee to be told. `NoWithdrawRequested` first, then
-    // `WithdrawNotYetAvailable` — `X402Escrow.withdraw()`'s order.
+    // `WithdrawNotYetAvailable` — `AssayEscrow.withdraw()`'s order.
     if (escrow.withdrawRequested === 0n) {
       throw SettlementErrors.withdrawalNotYetAvailable({});
     }
@@ -668,7 +668,7 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
     /*
       Maturity, against the CHAIN's clock and not this process's.
 
-      `X402Escrow.withdraw()` reads `if (block.timestamp < e.withdrawAvailableAt)
+      `AssayEscrow.withdraw()` reads `if (block.timestamp < e.withdrawAvailableAt)
       revert WithdrawNotYetAvailable()` — so the authority on whether the money
       may move is a value the chain publishes, and `Date.now()` is a proxy for
       it that is systematically ahead: the latest block's timestamp was stamped
@@ -830,7 +830,7 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
   ): Promise<EvmEscrowRead> {
     return (await this.client(chainId).readContract({
       address: getAddress(deployment.escrow),
-      abi: X402_ESCROW_ABI,
+      abi: ASSAY_ESCROW_ABI,
       functionName: 'escrowOf',
       args: [buyer],
     })) as EvmEscrowRead;
@@ -872,7 +872,7 @@ export class EvmEscrowIntentBuilder implements EscrowIntentBuilderPort, EscrowDe
   }
 
   /**
-   * Every amount argument on `X402Escrow` is a `uint64`.
+   * Every amount argument on `AssayEscrow` is a `uint64`.
    *
    * `Money` is already bounded at `2^64 - 1` by `MONEY_MAX_ATOMIC_UNITS`, so
    * that half is belt-and-braces; `EscrowLimits` carries raw `bigint`s and is

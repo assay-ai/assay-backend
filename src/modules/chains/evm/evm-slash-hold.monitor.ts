@@ -16,7 +16,7 @@ import {
 
 import { ENABLED_CHAINS } from '../enabled-chains';
 import { ChainId, ChainNamespace, namespaceOf, parseAccountId } from '../ports/caip.types';
-import { X402_CONFIG_ABI, X402_STAKE_ABI } from './abi/x402.abi';
+import { ASSAY_CONFIG_ABI, ASSAY_STAKE_ABI } from './abi/assay.abi';
 import { EVM_DEPLOYMENTS, EVM_RPC_CLIENTS, EvmDeployment } from './evm.constants';
 
 /** Every minute, at second 30 (off the other sweeps' second 0). */
@@ -105,7 +105,7 @@ export class EvmSlashHoldMonitor {
     const [params, waiting, disputed] = await Promise.all([
       client.readContract({
         address: deployment.config,
-        abi: X402_CONFIG_ABI,
+        abi: ASSAY_CONFIG_ABI,
         functionName: 'params',
         args: [],
       }) as Promise<{ penaltyAmount: bigint; minimumStake: bigint }>,
@@ -117,7 +117,7 @@ export class EvmSlashHoldMonitor {
       try {
         const stake = (await client.readContract({
           address: deployment.stake,
-          abi: X402_STAKE_ABI,
+          abi: ASSAY_STAKE_ABI,
           functionName: 'stakeOf',
           args: [addressOf(stakeAuthority)],
         })) as { bonded: bigint; unbonding: bigint; pendingSlash: bigint };

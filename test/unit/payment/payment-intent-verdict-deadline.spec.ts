@@ -212,7 +212,7 @@ describe('PaymentIntentExpiryService — the deadline on verdicts', () => {
 
   it('leaves the redemption job time to collect before the chain refuses the voucher', () => {
     // The EVM contract redeems until expiresAt + grace with NO skew
-    // (X402Escrow.sol:784); the sweep settles at expiresAt + deadline, and the
+    // (AssayEscrow.sol:784); the sweep settles at expiresAt + deadline, and the
     // redemption cron runs every minute.
     const redeemableFor = REDEEM_GRACE_SECONDS - PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS;
     expect(PAYMENT_INTENT_VERDICT_DEADLINE_SECONDS).toBe(900);

@@ -2135,7 +2135,7 @@ export interface VoucherRequirement {
   /**
    * eip155 only (agent payment delegation, x402-aligned): who may sign the
    * voucher. `payer` — the payer's own key; `delegate` — a key the payer
-   * authorised on chain, within its own caps (`X402Escrow.authorizeDelegate`).
+   * authorised on chain, within its own caps (`AssayEscrow.authorizeDelegate`).
    * Absent on Solana, where only the payer's key signs. There is no third
    * signer kind: the contract has no EIP-1271 branch (assay-evm D-18).
    */

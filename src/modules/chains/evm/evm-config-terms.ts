@@ -1,9 +1,9 @@
 import { getAddress } from 'viem';
 
-import { X402_CONFIG_ABI } from './abi/x402.abi';
+import { ASSAY_CONFIG_ABI } from './abi/assay.abi';
 
 /**
- * What `X402Config` says about disputes, the pause and the slash delay
+ * What `AssayConfig` says about disputes, the pause and the slash delay
  * (assay-evm D-19), read live.
  *
  * The backend assumes the upgraded contracts (owner decision): there is no
@@ -14,7 +14,7 @@ import { X402_CONFIG_ABI } from './abi/x402.abi';
  */
 export interface EvmConfigTerms {
   readonly paused: boolean;
-  /** `X402Config.arbiter()`, or `null` when it reads as the zero address. */
+  /** `AssayConfig.arbiter()`, or `null` when it reads as the zero address. */
   readonly arbiter: `0x${string}` | null;
   /** The delay a proposal made NOW freezes into its `executableAt`, in seconds. */
   readonly slashDelaySeconds: number;
@@ -34,7 +34,7 @@ export async function readConfigTerms(
   config: `0x${string}`,
 ): Promise<EvmConfigTerms> {
   const read = (functionName: string) =>
-    client.readContract({ address: config, abi: X402_CONFIG_ABI, functionName, args: [] });
+    client.readContract({ address: config, abi: ASSAY_CONFIG_ABI, functionName, args: [] });
 
   const [paused, delay, arbiter] = await Promise.all([
     read('paused') as Promise<boolean>,
@@ -63,14 +63,14 @@ export async function checkConfigUpgraded(
   try {
     await client.readContract({
       address: config,
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'arbiter',
       args: [],
     });
     return true;
   } catch (error) {
     log.error(
-      `contracts not upgraded: X402Config ${config} on ${chainId} does not answer arbiter(); ` +
+      `contracts not upgraded: AssayConfig ${config} on ${chainId} does not answer arbiter(); ` +
         `the backend requires the dispute upgrade (assay-evm D-19) ` +
         `(${error instanceof Error ? error.message : String(error)})`,
     );

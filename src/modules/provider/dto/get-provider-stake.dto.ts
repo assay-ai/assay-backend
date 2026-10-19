@@ -141,7 +141,7 @@ export class ProviderStakeGraceSummaryDto {
  * ## Why this is a list and not a figure
  *
  * A call is slashed in the settlement contract of the chain it was paid on, so
- * collateral on Solana is invisible and unreachable to `X402Stake` on an EVM
+ * collateral on Solana is invisible and unreachable to `AssayStake` on an EVM
  * chain — a provider who serves two chains must stake on both. And a sum across
  * chains is the one number that is never true, because no single call is
  * backed by it. Both rules land on the same shape, and it is the shape

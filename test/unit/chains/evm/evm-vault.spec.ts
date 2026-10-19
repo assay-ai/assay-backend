@@ -1,7 +1,7 @@
 import { Logger } from '@nestjs/common';
 import { encodeFunctionResult, pad, toFunctionSelector, toHex, zeroAddress } from 'viem';
 
-import { X402_CONFIG_ABI } from '@modules/chains/evm/abi/x402.abi';
+import { ASSAY_CONFIG_ABI } from '@modules/chains/evm/abi/assay.abi';
 
 import { createSanctionedEvmClient } from '@modules/chains/evm/sanctioned-evm-rpc';
 import { EvmVaultClient, EvmVaultService } from '@modules/chains/evm/evm-vault.service';
@@ -134,7 +134,7 @@ function chain(overrides: Partial<ChainState> = {}): {
       }
       if (selector === SELECTOR.params) {
         return encodeFunctionResult({
-          abi: X402_CONFIG_ABI,
+          abi: ASSAY_CONFIG_ABI,
           functionName: 'params',
           result: {
             treasury: zeroAddress,
@@ -205,7 +205,7 @@ function vaultWith(
 describe('EvmVaultService', () => {
   it('names the escrow PROXY as the vault, for both the owner and the account', async () => {
     // On EVM the pool and its owner are the same address. There is no ATA, no
-    // authority PDA and no multisig — `X402Escrow` holds the USDG and is
+    // authority PDA and no multisig — `AssayEscrow` holds the USDG and is
     // authorised by its own code.
     const { vault, calls } = vaultWith();
     const escrow = toAccountId(TESTNET, DEPLOYMENT.escrow);

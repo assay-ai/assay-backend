@@ -205,7 +205,7 @@ export const SlashErrors = createDomainErrorFactory('SLASH', {
       `${context?.reason ? `: ${context.reason}` : ''}`,
   },
   /**
-   * On EVM the "vault" is the `X402Escrow` contract, and an ERC-20 transfer
+   * On EVM the "vault" is the `AssayEscrow` contract, and an ERC-20 transfer
    * into it credits nobody — naming it as a beneficiary would burn the agent
    * share. EVM window cases are paid pro rata to the agents instead; a case
    * with no window (call-level) has no EVM beneficiary rule yet.

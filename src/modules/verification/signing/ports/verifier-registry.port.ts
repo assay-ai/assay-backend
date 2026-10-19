@@ -41,7 +41,7 @@ import { ChainId } from '@modules/chains/ports/caip.types';
  *
  * Both methods gained a leading `chainId`, and it is not decoration. Each chain
  * keeps its **own** verifier allowlist — the Solana settlement program's
- * `VerifierKey` PDA and `X402Config.verifierKey` on eip155 are different
+ * `VerifierKey` PDA and `AssayConfig.verifierKey` on eip155 are different
  * registries holding different keys — so "is this key enrolled" is not a
  * question with one answer. Without the argument, `ChainVerifierRegistry` could
  * not dispatch and every lookup would silently be answered by whichever

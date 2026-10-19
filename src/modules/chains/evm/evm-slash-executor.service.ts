@@ -50,12 +50,12 @@ import { SigningRequesterType } from '@modules/verification/signing/domain/signi
 import { evmErrorName, revertDataOf } from './abi/error-selectors';
 import {
   MULTICALL3_ABI,
-  X402_CONFIG_ABI,
-  X402_CONFIG_ARBITER_ABI,
-  X402_STAKE_ABI,
-  X402_SLASH_WATCH_EVENTS_ABI,
-  X402_STAKE_SLASH_ABI,
-} from './abi/x402.abi';
+  ASSAY_CONFIG_ABI,
+  ASSAY_CONFIG_ARBITER_ABI,
+  ASSAY_STAKE_ABI,
+  ASSAY_SLASH_WATCH_EVENTS_ABI,
+  ASSAY_STAKE_SLASH_ABI,
+} from './abi/assay.abi';
 import { evmDomain } from './eip712/domain';
 import {
   EVM_RESPONSE_CLASS_DATA_FAIL,
@@ -97,7 +97,7 @@ export interface EvmSlashClient {
   getBlockNumber?(args?: { cacheTime?: number }): Promise<bigint>;
   getContractEvents?(args: {
     address: `0x${string}`;
-    abi: typeof X402_SLASH_WATCH_EVENTS_ABI;
+    abi: typeof ASSAY_SLASH_WATCH_EVENTS_ABI;
     eventName: 'SlashCancelled';
     args: { requestId: `0x${string}` };
     fromBlock: bigint;
@@ -190,7 +190,7 @@ const CANCEL_LOOKUP_CHUNK = 2_000n;
 const CANCEL_LOOKUP_CHUNKS = 5;
 
 /**
- * `SlashExecutorPort` for `eip155` — `X402Stake`'s two-phase slash.
+ * `SlashExecutorPort` for `eip155` — `AssayStake`'s two-phase slash.
  *
  * ## The authority is the verifier's signature, never this process
  *
@@ -263,13 +263,13 @@ export class EvmSlashExecutor
       this.params(chainId),
       this.client(chainId).readContract({
         address: this.deployment(chainId).stake,
-        abi: X402_STAKE_ABI,
+        abi: ASSAY_STAKE_ABI,
         functionName: 'stakeOf',
         args: [provider],
       }) as Promise<{ bonded: bigint; unbonding: bigint; pendingSlash: bigint }>,
     ]);
     // `_atRisk` = bonded + unbonding; `capAllowance` and `free` exactly as
-    // `proposeSlash` computes them (X402Stake.sol, `proposeSlash`).
+    // `proposeSlash` computes them (AssayStake.sol, `proposeSlash`).
     const atRisk = BigInt(stake.bonded) + BigInt(stake.unbonding);
     const pending = BigInt(stake.pendingSlash);
     return {
@@ -350,7 +350,7 @@ export class EvmSlashExecutor
         const fromBlock = toBlock >= CANCEL_LOOKUP_CHUNK ? toBlock - CANCEL_LOOKUP_CHUNK + 1n : 0n;
         const logs = await client.getContractEvents({
           address: this.deployment(chainId).stake,
-          abi: X402_SLASH_WATCH_EVENTS_ABI,
+          abi: ASSAY_SLASH_WATCH_EVENTS_ABI,
           eventName: 'SlashCancelled',
           args: { requestId: bytes32(requestId) },
           fromBlock,
@@ -389,7 +389,7 @@ export class EvmSlashExecutor
   ): Promise<{ verifierCanSign: boolean; verifierAccepted: boolean }> {
     const verifierCanSign = (await this.client(chainId).readContract({
       address: this.deployment(chainId).config,
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'canSign',
       args: [getAddress(verifier)],
     })) as boolean;
@@ -480,7 +480,7 @@ export class EvmSlashExecutor
 
     const stake = this.deployment(chainId).stake;
     const data = encodeFunctionData({
-      abi: X402_STAKE_SLASH_ABI,
+      abi: ASSAY_STAKE_SLASH_ABI,
       functionName: 'expireSlash',
       args: [bytes32(request.requestId)],
     });
@@ -518,7 +518,7 @@ export class EvmSlashExecutor
 
     return {
       transaction: encodeFunctionData({
-        abi: X402_STAKE_SLASH_ABI,
+        abi: ASSAY_STAKE_SLASH_ABI,
         functionName: 'cancelSlash',
         args: [bytes32(request.requestId)],
       }),
@@ -542,13 +542,13 @@ export class EvmSlashExecutor
       readConfigTerms(client, deployment.config),
       client.readContract({
         address: deployment.config,
-        abi: X402_CONFIG_ABI,
+        abi: ASSAY_CONFIG_ABI,
         functionName: 'admin',
         args: [],
       }) as Promise<`0x${string}`>,
       client.readContract({
         address: deployment.config,
-        abi: X402_CONFIG_ABI,
+        abi: ASSAY_CONFIG_ABI,
         functionName: 'params',
         args: [],
       }) as Promise<{ slashAgentBps: number | bigint }>,
@@ -569,7 +569,7 @@ export class EvmSlashExecutor
   async slashDelaySeconds(chainId: ChainId): Promise<number> {
     const delay = (await this.client(chainId).readContract({
       address: this.deployment(chainId).config,
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'slashDelaySeconds',
       args: [],
     })) as bigint;
@@ -714,7 +714,7 @@ export class EvmSlashExecutor
     await this.assertNotPlatformAddress(chainId, account, terms);
     const already = (await this.client(chainId).readContract({
       address: config,
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'blocked',
       args: [account],
     })) as boolean;
@@ -723,7 +723,7 @@ export class EvmSlashExecutor
       chainId,
       to: getAddress(config),
       data: encodeFunctionData({
-        abi: X402_CONFIG_ARBITER_ABI,
+        abi: ASSAY_CONFIG_ARBITER_ABI,
         functionName: 'setBlocked',
         args: [account, true],
       }),
@@ -749,7 +749,12 @@ export class EvmSlashExecutor
     const deployment = this.deployment(chainId);
     const client = this.client(chainId);
     const read = (functionName: string, args: readonly unknown[] = []) =>
-      client.readContract({ address: deployment.config, abi: X402_CONFIG_ABI, functionName, args });
+      client.readContract({
+        address: deployment.config,
+        abi: ASSAY_CONFIG_ABI,
+        functionName,
+        args,
+      });
     const [params, owner, isVerifier] = await Promise.all([
       read('params') as Promise<{ treasury: `0x${string}`; redeemer: `0x${string}` }>,
       read('owner') as Promise<`0x${string}`>,
@@ -825,7 +830,7 @@ export class EvmSlashExecutor
     return {
       chainId,
       to: getAddress(this.deployment(chainId).stake),
-      data: encodeFunctionData({ abi: X402_STAKE_SLASH_ABI, functionName, args: [ids] }),
+      data: encodeFunctionData({ abi: ASSAY_STAKE_SLASH_ABI, functionName, args: [ids] }),
       value: '0',
       signer: getAddress(signer),
       signerRole,
@@ -1221,7 +1226,7 @@ export class EvmSlashExecutor
 
     return {
       callData: encodeFunctionData({
-        abi: X402_STAKE_SLASH_ABI,
+        abi: ASSAY_STAKE_SLASH_ABI,
         functionName: 'proposeSlash',
         args: [attestation, toHex(signed.signature)],
       }),
@@ -1244,7 +1249,7 @@ export class EvmSlashExecutor
     ]);
     const key = (await this.client(chainId).readContract({
       address: this.deployment(chainId).config,
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'verifierKey',
       args: [verifier],
     })) as { expiresAt: bigint | number };
@@ -1368,7 +1373,7 @@ export class EvmSlashExecutor
 
   private executeCallData(requestId: string): `0x${string}` {
     return encodeFunctionData({
-      abi: X402_STAKE_SLASH_ABI,
+      abi: ASSAY_STAKE_SLASH_ABI,
       functionName: 'executeSlash',
       args: [bytes32(requestId)],
     });
@@ -1444,7 +1449,7 @@ export class EvmSlashExecutor
   private async params(chainId: ChainId) {
     return (await this.client(chainId).readContract({
       address: this.deployment(chainId).config,
-      abi: X402_CONFIG_ABI,
+      abi: ASSAY_CONFIG_ABI,
       functionName: 'params',
       args: [],
     })) as {
@@ -1522,7 +1527,7 @@ function findEvent(
     if (log.address.toLowerCase() !== stake.toLowerCase()) continue;
     try {
       const decoded = decodeEventLog({
-        abi: X402_STAKE_SLASH_ABI,
+        abi: ASSAY_STAKE_SLASH_ABI,
         data: log.data,
         topics: log.topics as [`0x${string}`, ...`0x${string}`[]],
       }) as unknown as { eventName: string; args: Record<string, unknown> };

@@ -23,7 +23,7 @@ import { Secp256k1EnvSigner } from '@modules/verification/signing/backends/secp2
  * cast keccak $(cast concat-hex 0x1901 $DOMAIN_SEPARATOR $STRUCT_HASH)
  * ```
  *
- * The domain separator also equals `X402Stake.DOMAIN_SEPARATOR()` read live
+ * The domain separator also equals `AssayStake.DOMAIN_SEPARATOR()` read live
  * from eip155:46630 on the same day.
  */
 const STAKE = '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c' as const;

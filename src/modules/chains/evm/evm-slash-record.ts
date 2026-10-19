@@ -1,9 +1,9 @@
 import { decodeFunctionResult } from 'viem';
 
-import { X402_STAKE_ABI } from './abi/x402.abi';
+import { ASSAY_STAKE_ABI } from './abi/assay.abi';
 
 /**
- * `X402Stake.slashRecordOf`, decoded (the upgraded, fifteen-word record of
+ * `AssayStake.slashRecordOf`, decoded (the upgraded, fifteen-word record of
  * assay-evm D-19). The backend assumes the upgraded Stake; there is no
  * fallback to the pre-upgrade shape.
  */
@@ -43,7 +43,7 @@ export interface EvmSlashRecordClient {
 export function decodeSlashRecord(data: `0x${string}`): EvmSlashRecord {
   return normaliseSlashRecord(
     decodeFunctionResult({
-      abi: X402_STAKE_ABI,
+      abi: ASSAY_STAKE_ABI,
       functionName: 'slashRecordOf',
       data,
     }) as RawSlashRecord,
@@ -61,7 +61,7 @@ export async function readSlashRecord(
   return normaliseSlashRecord(
     (await client.readContract({
       address: stake,
-      abi: X402_STAKE_ABI,
+      abi: ASSAY_STAKE_ABI,
       functionName: 'slashRecordOf',
       args: [requestId],
       ...(blockTag ? { blockTag } : {}),

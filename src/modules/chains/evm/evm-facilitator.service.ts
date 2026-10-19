@@ -18,7 +18,7 @@ import {
   TxRef,
   VerifyResponse,
 } from '../ports/x402.types';
-import { X402_ESCROW_ABI } from './abi/x402.abi';
+import { ASSAY_ESCROW_ABI } from './abi/assay.abi';
 import { EVM_PAYMENT_SCHEME } from './evm-chain.adapter';
 import { EvmDeployment } from './evm.constants';
 
@@ -228,7 +228,7 @@ export class EvmFacilitator implements FacilitatorPort {
     let credited: string;
     let amount: bigint;
     try {
-      const call = decodeFunctionData({ abi: X402_ESCROW_ABI, data: tx.data });
+      const call = decodeFunctionData({ abi: ASSAY_ESCROW_ABI, data: tx.data });
       if (call.functionName !== 'depositFor') {
         return { reason: X402_INVALID_REASON.INVALID_EXACT_EVM_PAYLOAD_TRANSACTION };
       }
