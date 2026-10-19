@@ -10,7 +10,7 @@ import { ChainDoor } from '@modules/chains/ports/chain-state-gate.port';
 import { Alert, AlertSeverity } from '@shared/alerting';
 
 const CHAIN = 'eip155:46630';
-const CONFIG = '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43';
+const CONFIG = '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5';
 const BUYER = '0x1111111111111111111111111111111111111111';
 const BLOCKED = '0x2222222222222222222222222222222222222222';
 
@@ -135,8 +135,8 @@ describe('EvmChainStateService — refuse early what the chain would refuse', ()
 });
 
 describe('EvmChainStateService — the EIP-712 domain guard (reviews R1, R-3)', () => {
-  const ESCROW = '0x1D2625efD87c2fc10b8563f3F0890072845Fcf41' as const;
-  const STAKE = '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c' as const;
+  const ESCROW = '0x1eDb0E45747cfEf778bDB4f4418319efc0DD814f' as const;
+  const STAKE = '0x7242F853db478A28Ae76Ace808212d4B68aa73e7' as const;
   const separator = (name: string, address: `0x${string}`) =>
     domainSeparator({ domain: { name, version: '2', chainId: 46630, verifyingContract: address } });
 
@@ -221,15 +221,15 @@ describe('readDomainMismatches', () => {
   it('flags the abandoned testnet proxies, which sign under "x402 Settlement"', async () => {
     // `DOMAIN_SEPARATOR()` as read from eip155:46630 on 2026-10-15.
     const live: Record<string, `0x${string}`> = {
-      '0x1D2625efD87c2fc10b8563f3F0890072845Fcf41':
+      '0x1eDb0E45747cfEf778bDB4f4418319efc0DD814f':
         '0x756591eb445d7b077d4f43aad09de3c4d087ef3af51f0292c34f5bddaba91c46',
-      '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c':
+      '0x7242F853db478A28Ae76Ace808212d4B68aa73e7':
         '0x39fa67988faa6ece2c823902be159c7cf175e083ddfe81176c17bb2709557ae1',
     };
     const client = { readContract: async ({ address }: { address: string }) => live[address] };
     const mismatches = await readDomainMismatches(client, CHAIN as never, {
-      escrow: '0x1D2625efD87c2fc10b8563f3F0890072845Fcf41',
-      stake: '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c',
+      escrow: '0x1eDb0E45747cfEf778bDB4f4418319efc0DD814f',
+      stake: '0x7242F853db478A28Ae76Ace808212d4B68aa73e7',
     });
     expect(mismatches.map((row) => row.contract)).toEqual(['AssayEscrow', 'AssayStake']);
   });

@@ -43,8 +43,8 @@ import { AccountId, ChainId, parseAccountId, toAccountId } from '@modules/chains
  * the shape `revertDataOf` reads off `EvmRpcError`.
  */
 export const CHAIN: ChainId = 'eip155:46630' as ChainId;
-export const STAKE = '0x0aF4D08f97B4FA8Ba3E47Cb025aE8CaD509bc73c' as const;
-export const CONFIG = '0xCf6592A3a053d9714D16d176A86fA039Fe7B6a43' as const;
+export const STAKE = '0x7242F853db478A28Ae76Ace808212d4B68aa73e7' as const;
+export const CONFIG = '0xBF2DE8e24254Cf6f2313Ab4B5CeBE8066bBdb0e5' as const;
 export const MULTICALL = '0xcA11bde05977b3631167028862bE2a173976CA11' as const;
 export const TREASURY = '0x4246bee428758e8215bA587717d48B8Ef0130388' as const;
 export const ADMIN = '0xD9a229c2847929ecAEfc83C17519FCA53Fd20D32' as const;
