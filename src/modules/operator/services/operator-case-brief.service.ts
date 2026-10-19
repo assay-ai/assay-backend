@@ -1,20 +1,18 @@
 import { Injectable } from '@nestjs/common';
 
-import { DisputeRepository } from '@database/postgres/repositories/dispute.repository';
 import { SlashProposalRepository } from '@database/postgres/repositories/slash-proposal.repository';
 import { ChainProposalStatus } from '@modules/slash/domain/chain-slash-outcome';
 import { SlashCaseService } from '@modules/slash/services/slash-case.service';
 
 /**
- * The operator's case brief: the provider's own case object, its dispute
- * row, timeline and restoration record, and the on-chain mirror the console
+ * The operator's case brief: the provider's own case object, its timeline
+ * and restoration record, and the on-chain mirror the console
  * acts on. Read-only.
  */
 @Injectable()
 export class OperatorCaseBriefService {
   constructor(
     private readonly proposals: SlashProposalRepository,
-    private readonly disputes: DisputeRepository,
     private readonly cases: SlashCaseService,
   ) {}
 
@@ -26,13 +24,8 @@ export class OperatorCaseBriefService {
       this.proposals.findOneScoped(organizationId, proposalId),
     ]);
 
-    const dispute = caseDto.proposal.disputeId
-      ? await this.disputes.findOneBy({ organizationId, id: caseDto.proposal.disputeId })
-      : null;
-
     return {
       case: caseDto,
-      dispute,
       timeline,
       restoration,
       // Read-only, and for the operator alone: `cancel-intent` is guarded on

@@ -26,11 +26,7 @@ describe('OperatorCaseBriefService.brief', () => {
       timeline: jest.fn().mockResolvedValue([]),
       restoration: jest.fn().mockResolvedValue(null),
     };
-    const service = new OperatorCaseBriefService(
-      proposals as never,
-      { findOneBy: jest.fn() } as never,
-      cases as never,
-    );
+    const service = new OperatorCaseBriefService(proposals as never, cases as never);
     return { service, proposals };
   }
 

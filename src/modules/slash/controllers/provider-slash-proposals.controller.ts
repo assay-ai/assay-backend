@@ -1,5 +1,5 @@
 import { Controller, Get, Param, Post, UseGuards } from '@nestjs/common';
-import { ApiBearerAuth, ApiOperation, ApiProperty, ApiResponse, ApiTags } from '@nestjs/swagger';
+import { ApiBearerAuth, ApiOperation, ApiResponse, ApiTags } from '@nestjs/swagger';
 
 import {
   AllowedWhileBlocked,
@@ -9,26 +9,13 @@ import {
 } from '@shared/auth';
 import { McpSession } from '@modules/mcp/ports/mcp-session.port';
 
-import {
-  RestorationRowDto,
-  SlashProposalCaseDto,
-  SlashProposalEventDto,
-  SlashProposalIdParamsDto,
-} from '../dto/slash-proposal.dto';
+import { SlashProposalCaseDto, SlashProposalIdParamsDto } from '../dto/slash-proposal.dto';
 import { SlashCaseService } from '../services/slash-case.service';
 import { SlashProposalService } from '../services/slash-proposal.service';
 
-export class SlashProposalTimelineDto {
-  @ApiProperty({ type: [SlashProposalEventDto] })
-  events: SlashProposalEventDto[];
-
-  @ApiProperty({ type: [RestorationRowDto] })
-  restoration: RestorationRowDto[];
-}
-
 /**
  * The provider's own view of a penalty proposed against them: the case
- * screen and its timeline. The dispute itself is `disputeSlash` on chain
+ * screen. The dispute itself is `disputeSlash` on chain
  * (`POST /providers/me/slash-requests/dispute-intent` builds it).
  *
  * Organization-scoped in the ordinary way — a proposal belongs to the provider
@@ -55,20 +42,6 @@ export class ProviderSlashProposalsController {
     @Param() params: SlashProposalIdParamsDto,
   ): Promise<SlashProposalCaseDto> {
     return this.cases.buildCase(session.organizationId, params.proposalId);
-  }
-
-  @Get(':proposalId/timeline')
-  @ApiOperation({ summary: 'The case timeline and the restoration record' })
-  @ApiResponse({ status: 200, type: SlashProposalTimelineDto })
-  async getTimeline(
-    @CurrentSession() session: McpSession,
-    @Param() params: SlashProposalIdParamsDto,
-  ): Promise<SlashProposalTimelineDto> {
-    const [events, restoration] = await Promise.all([
-      this.cases.timeline(session.organizationId, params.proposalId),
-      this.cases.restoration(session.organizationId, params.proposalId),
-    ]);
-    return { events, restoration };
   }
 
   /**

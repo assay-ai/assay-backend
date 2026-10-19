@@ -23,9 +23,7 @@ import { ProviderController } from '@modules/provider/controllers/provider.contr
 import { ProviderCallsExportService } from '@modules/provider/services/provider-calls-export.service';
 import { ProviderEarningsService } from '@modules/provider/services/provider-earnings.service';
 import { ProviderProfileService } from '@modules/provider/services/provider-profile.service';
-import { ProviderQualityService } from '@modules/provider/services/provider-quality.service';
 import { ProviderStakeService } from '@modules/provider/services/provider-stake.service';
-import { ProviderTrafficService } from '@modules/provider/services/provider-traffic.service';
 
 import { PaymentTestContext, createPaymentTestContext } from '../helpers/payment-test-context';
 
@@ -68,14 +66,12 @@ describe('GET /providers/me/calls/export — real HTTP', () => {
           provide: ProviderCallsExportService,
           useValue: new ProviderCallsExportService(context.repository),
         },
-        // The other five dependencies of `ProviderController` are irrelevant
+        // The other dependencies of `ProviderController` are irrelevant
         // to this endpoint and are never called — stand-ins rather than the
         // real services, so this test does not have to wire the whole
         // provider module's DI graph (registry, stake source, egress...) to
         // exercise one route.
         { provide: ProviderProfileService, useValue: {} },
-        { provide: ProviderTrafficService, useValue: {} },
-        { provide: ProviderQualityService, useValue: {} },
         { provide: ProviderEarningsService, useValue: {} },
         { provide: ProviderStakeService, useValue: {} },
       ],

@@ -19,10 +19,7 @@ import { ProviderPayoutsController } from './controllers/provider-payouts.contro
 import { ProviderPolicyChangesController } from './controllers/provider-policy-changes.controller';
 import { ProviderReconciliationController } from './controllers/provider-reconciliation.controller';
 import { ProviderRegistrationController } from './controllers/provider-registration.controller';
-import {
-  ProviderBindingSlaController,
-  ProviderSlaWindowsController,
-} from './controllers/provider-sla-windows.controller';
+import { ProviderSlaWindowsController } from './controllers/provider-sla-windows.controller';
 import { ProviderStakeAuthorityController } from './controllers/provider-stake-authority.controller';
 import { ProviderStakeIntentController } from './controllers/provider-stake-intent.controller';
 import { ProviderToolBindingsController } from './controllers/provider-tool-bindings.controller';
@@ -44,7 +41,6 @@ import { ProviderStakeAuthorityService } from './services/provider-stake-authori
 import { ProviderStakeIntentService } from './services/provider-stake-intent.service';
 import { ProviderVerificationService } from './services/provider-verification.service';
 import { PROVIDER_TERMS, loadProviderTerms } from './services/provider-terms';
-import { ProviderQualityService } from './services/provider-quality.service';
 import {
   PROVIDER_MINIMUM_STAKE_BY_CHAIN,
   PROVIDER_MINIMUM_STAKE_PARAMETERS,
@@ -58,7 +54,6 @@ import { BindingMappingTesterService } from './services/binding-mapping-tester.s
 import { BindingPauseService } from './services/binding-pause.service';
 import { BindingPublishService } from './services/binding-publish.service';
 import { ProviderToolBindingsService } from './services/provider-tool-bindings.service';
-import { ProviderTrafficService } from './services/provider-traffic.service';
 import { ProviderVerdictService } from './services/provider-verdict.service';
 
 /**
@@ -136,7 +131,6 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderReconciliationController,
     ProviderPolicyChangesController,
     ProviderSlaWindowsController,
-    ProviderBindingSlaController,
     ProviderStakeAuthorityController,
     ProviderStakeIntentController,
   ],
@@ -150,8 +144,6 @@ import { ProviderVerdictService } from './services/provider-verdict.service';
     ProviderEgressLimiter,
     ProviderVerificationService,
     ProviderProfileService,
-    ProviderTrafficService,
-    ProviderQualityService,
     ProviderEarningsService,
     ProviderCallsExportService,
     ProviderPayoutsService,
