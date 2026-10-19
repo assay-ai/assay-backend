@@ -18,7 +18,7 @@ import { REDIS_CACHE_CLIENT } from '@shared/cache/redis-cache/redis-cache.provid
 
 import {
   PAYMENT_KEY_DAILY_SUMMARY_CONFIG,
-  PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY,
+  PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY_PREFIX,
   PAYMENT_KEY_DAILY_SUMMARY_LOCK_TTL_SECONDS,
   PAYMENT_KEY_DAILY_SUMMARY_MAX_KEYS_IN_BODY,
   PaymentKeyDailySummaryConfig,
@@ -61,12 +61,20 @@ export interface PaymentKeySpend {
  * ## The window and idempotency
  *
  * The window is the previous UTC calendar day, `[00:00, 24:00)`, so every run
- * on a given day computes the same summary. Sending is idempotent per
- * organization per day twice over: the catalogue's `ONCE_PER_UTC_DAY` rule,
- * keyed by the day summarised, suppresses a second notice from a retry or
- * another replica, and the job lock (`SET … NX EX`) keeps a second replica
- * from doing the work at all. Without Redis the run is skipped rather than
- * risk sending twice; the next day's run summarises the next day.
+ * on a given day computes the same summary. The job runs hourly from 00:20 to
+ * 05:20 UTC so a missed or interrupted run is caught up. Sending is idempotent
+ * per organization per day twice over: the catalogue's `ONCE_PER_UTC_DAY`
+ * rule, keyed by the day summarised, suppresses a second notice from a later
+ * run, a retry or another replica, and a short per-day job lock
+ * (`SET … NX EX`) keeps two replicas from working at once. Without Redis the
+ * run is skipped rather than risk sending twice.
+ *
+ * ## What counts
+ *
+ * Every delegate-signed voucher whose funds were secured and that is not
+ * refunded, voided or expired — so a call still in flight at the run counts,
+ * and a later refund is not taken back. The body says so. A detection signal
+ * errs towards showing spend; the settled ledger is the receipts page.
  *
  * ## What it says
  *
@@ -92,12 +100,11 @@ export class PaymentKeyDailySummaryService {
   ) {}
 
   async run(): Promise<PaymentKeyDailySummaryResult> {
-    if (!(await this.takeLock())) return { skipped: true };
-
     const now = new Date(this.config.now());
     const to = new Date(Date.UTC(now.getUTCFullYear(), now.getUTCMonth(), now.getUTCDate()));
     const from = new Date(to.getTime() - DAY_MS);
     const day = from.toISOString().slice(0, 10);
+    if (!(await this.takeLock(day))) return { skipped: true };
 
     const rows = await this.intents.sumDelegateSpendByKey(from, to);
     const byOrganization = new Map<string, DelegateSpendRow[]>();
@@ -140,6 +147,7 @@ export class PaymentKeyDailySummaryService {
       body:
         `Your payment keys made paid calls on ${dayLabel} (UTC). ${lines.join('; ')}` +
         `${more > 0 ? `; and ${more} more ${more === 1 ? 'key' : 'keys'}` : ''}. ` +
+        `Calls still in progress are included. ` +
         `If you do not recognise a key or its spend, revoke it.`,
       payload: {
         day: window.day,
@@ -179,14 +187,14 @@ export class PaymentKeyDailySummaryService {
     }
   }
 
-  private async takeLock(): Promise<boolean> {
+  private async takeLock(day: string): Promise<boolean> {
     if (!this.redis) {
       this.logger.warn('Payment-key daily summary skipped: no Redis for the job lock');
       return false;
     }
     try {
       const taken = await this.redis.set(
-        PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY,
+        `${PAYMENT_KEY_DAILY_SUMMARY_LOCK_KEY_PREFIX}${day}`,
         '1',
         'EX',
         PAYMENT_KEY_DAILY_SUMMARY_LOCK_TTL_SECONDS,

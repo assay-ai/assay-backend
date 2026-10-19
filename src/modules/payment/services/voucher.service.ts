@@ -171,7 +171,12 @@ export class VoucherService {
     // intent is an earlier attempt's and holds nothing for this voucher. Never
     // awaited: the notice must not slow or fail the call.
     if (delegation !== null && intent.voucherSeq === voucher.seq) {
-      this.firstSpend?.afterAdmitted(intent);
+      try {
+        this.firstSpend?.afterAdmitted(intent);
+      } catch (error) {
+        // The hold is taken: a notice that failed must not fail the call.
+        this.logger.warn(`First-spend notice for intent ${intent.id} failed: ${describe(error)}`);
+      }
     }
     return intent;
   }
