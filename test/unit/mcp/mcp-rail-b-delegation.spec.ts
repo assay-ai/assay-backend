@@ -47,6 +47,18 @@ describe('rail-B PAYMENT_REQUIRED — agent payment delegation', () => {
     expect(delegationHint(session({ delegateAccount: DELEGATE }))).toContain(PAYER);
   });
 
+  it('prints the payer and the delegate in EIP-55, as the requirement names them', () => {
+    const lower = session({
+      agentAccount: PAYER.toLowerCase() as AccountId,
+      delegateAccount: DELEGATE.toLowerCase() as AccountId,
+    });
+    expect(delegationHint(lower)).toContain(PAYER);
+    expect(delegationHint(lower)).not.toContain(PAYER.toLowerCase());
+    expect(delegationHint(session({ agentAccount: PAYER.toLowerCase() as AccountId }))).toContain(
+      PAYER,
+    );
+  });
+
   it('says how to bind a delegate when none is bound', () => {
     expect(delegationTerms(session())).toEqual({
       signers: ['payer', 'delegate'],
@@ -124,6 +136,11 @@ describe('rail-B PAYMENT_REQUIRED — the enable-paid fixUrl', () => {
     expect(paymentKeyNotice(solana, WEB)).toEqual({ fixUrl: null, sentence: '' });
   });
 
+  /**
+   * `paymentKeyNotice` is pure: it reads the session and the web origin only.
+   * The evidence for the whole paid path is the integration spy on the
+   * chain's `readContract` in the equivalence suite (third-party T5 case).
+   */
   it('no chain adapter call on this path (spy)', () => {
     const list = jest.spyOn(EscrowDelegationService.prototype, 'list');
     try {

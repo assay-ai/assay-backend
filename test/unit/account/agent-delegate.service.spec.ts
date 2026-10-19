@@ -244,6 +244,11 @@ describe('AgentDelegateService — binding a credential to its delegate key', ()
       });
     });
 
+    it('returns the stored label exactly: the server does not escape it (the proxy sanitises on print)', async () => {
+      const label = 'bot <b>"x"</b> \u00e9';
+      expect((await service.current(session({ label }))).agentLabel).toBe(label);
+    });
+
     it('bind answers with the agent label too', async () => {
       const { challenge, signature } = await signChallenge();
       const answer = await service.bind(

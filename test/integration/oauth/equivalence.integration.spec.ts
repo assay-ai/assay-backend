@@ -154,14 +154,19 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     return view;
   };
 
-  const seenResponse = seen;
-
   /**
-   * A response without the enable-paid notice of a PAYMENT_REQUIRED: the
-   * `fixUrl` and the sentence a payment client or any other caller gets
-   * (§7.10 item 2). Everything else is left as it was.
+   * A response without the enable-paid notice of a PAYMENT_REQUIRED (§7.10
+   * item 2, H2), once that notice is checked to be the one `via` must get:
+   * the API key gets `fixUrl` to its own credential and the payment-key
+   * sentence; the third-party grant gets no `fixUrl` and the Assay app
+   * sentence. Then both are taken out, so the rest compares equal.
    */
-  const withoutKeyNotice = (view: ReturnType<typeof seen>) => {
+  const withoutKeyNotice = (
+    view: ReturnType<typeof seen>,
+    via: Via,
+    credentialId: string,
+    count: { notices: number },
+  ) => {
     const result = (view.body as { result?: Record<string, unknown> } | undefined)?.result as
       | {
           _meta?: Record<string, Record<string, unknown>>;
@@ -170,6 +175,19 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
       | undefined;
     const error = result?._meta?.['assay/error'];
     if (error?.code !== 'PAYMENT_REQUIRED') return view;
+    count.notices += 1;
+    const text = result?.content?.[0]?.text ?? '';
+    if (via === 'key') {
+      const fixUrl = `${WEB}/agents/enable-paid?credential=${credentialId}`;
+      expect(error.fixUrl).toBe(fixUrl);
+      expect(text.endsWith(` Paid calls need a payment key on your computer: ${fixUrl}`)).toBe(
+        true,
+      );
+    } else {
+      expect(error).not.toHaveProperty('fixUrl');
+      expect(text.endsWith(' Paid tools need the Assay app on your computer.')).toBe(true);
+      expect(text).not.toContain('/agents/enable-paid');
+    }
     delete error.fixUrl;
     for (const item of result?.content ?? []) {
       if (typeof item.text !== 'string') continue;
@@ -1254,13 +1272,18 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
     });
 
     it('every free MCP case equals the key, on every URL kind', async () => {
-      // A freemium call over its quota is paid: its PAYMENT_REQUIRED differs by
-      // design only in the payment-key notice (H2), which the cases above
-      // assert; here it is taken out on both sides, and everything else equal.
-      const seen = (response: Response) => withoutKeyNotice(seenResponse(response));
+      // A paid step differs by design only in the payment-key notice (H2):
+      // each side's notice is asserted, then taken out, and the rest is equal.
+      const notices: Record<Via, { notices: number }> = {
+        key: { notices: 0 },
+        grant: { notices: 0 },
+      };
+      const seenRaw = seen;
       await equivalent(
         await apps.pair({ client: 'third-party' }),
-        async ({ world, bearer }) => {
+        async ({ world, via, bearer, credentialId }) => {
+          const seen = (response: Response) =>
+            withoutKeyNotice(seenRaw(response), via, credentialId, notices[via]);
           await apps.toolsetFor(world, 'kit', 'PRIVATE');
           const steps: Record<string, unknown> = {};
           for (const kind of KINDS) {
@@ -1291,11 +1314,15 @@ describe('OAuth = API key: the equivalence suite (§12.1)', () => {
               arguments: { query: 'moon landing' },
             }),
           );
-          // The paid step differs by design (H2): the case above asserts it.
+          // Paid step 1 with no key bound on either side.
+          steps.paidRequirement = seen(await call(bearer, '/', TOOLS.paid.name));
           return steps;
         },
         { dataSource: apps.dataSource },
       );
+      // The notice was checked on both sides, at least on the paid step.
+      expect(notices.key.notices).toBeGreaterThanOrEqual(1);
+      expect(notices.grant.notices).toBe(notices.key.notices);
     });
   });
 });

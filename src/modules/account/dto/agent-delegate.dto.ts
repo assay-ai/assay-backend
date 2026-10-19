@@ -74,15 +74,21 @@ export enum PaidCallsStatus {
   /** Past `validUntil`; renewable on the enable-paid page. */
   EXPIRED = 'EXPIRED',
   /**
-   * Revoked by the payer. Not told apart from `NONE` today: the escrow's
-   * `delegatesOf` lists neither, and the status is read through it alone.
+   * Reserved by the spec; not emitted. A revoked key leaves the escrow's
+   * `delegatesOf`, through which the status is read, so it reads as `NONE` —
+   * and the user's next step (run enable-paid) is the same for both.
    */
   REVOKED = 'REVOKED',
 }
 
 /** The bound delegate's on-chain authorisation: public chain data, for UX only. */
 export class PaidCallsDto {
-  @ApiProperty({ enum: PaidCallsStatus })
+  @ApiProperty({
+    enum: PaidCallsStatus,
+    description:
+      '`NONE` when the bound key has no standing authorisation on chain — never authorised, ' +
+      'or revoked: a revoked key reads as `NONE`, and `REVOKED` is not emitted today.',
+  })
   status: PaidCallsStatus;
 
   @ApiPropertyOptional({
